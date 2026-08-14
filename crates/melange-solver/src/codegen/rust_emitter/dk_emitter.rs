@@ -510,6 +510,21 @@ impl RustEmitter {
             ctx.insert("dc_op_values", &dc_op_values);
         }
 
+        // IC=-bearing capacitors: initial-state seed for `v_prev` (see
+        // `docs/aidocs/DC_OP.md` "IC= initial condition"). Independent of
+        // `has_dc_op` — a circuit with no DC sources but an IC= cap still
+        // needs this constant.
+        let has_cap_ic = ir.v_prev_ic_seed.is_some();
+        ctx.insert("has_cap_ic", &has_cap_ic);
+        if let Some(v_prev_ic) = &ir.v_prev_ic_seed {
+            let v_prev_ic_values = v_prev_ic
+                .iter()
+                .map(|v| fmt_f64(*v))
+                .collect::<Vec<_>>()
+                .join(", ");
+            ctx.insert("v_prev_ic_values", &v_prev_ic_values);
+        }
+
         // DC nonlinear currents: emit DC_NL_I constant if M > 0 and any i_nl is nonzero
         let has_dc_nl = ir.topology.m > 0
             && !ir.dc_nl_currents.is_empty()

@@ -2453,6 +2453,37 @@ pub fn behavioral_dc_op_warning(mna: &MnaSystem) -> Option<String> {
 /// 4. If source stepping fails, try Gmin stepping
 /// 5. If Gmin fails, try AOL continuation (precision rectifier multi-equilibrium)
 /// 6. Fallback: return linear DC OP with converged=false
+/// Solve the initial-state operating point used to seed `v_prev` for
+/// circuits containing one or more `IC=`-bearing capacitors (SPICE
+/// `.IC`/UIC semantics).
+///
+/// Each IC-bearing capacitor is temporarily replaced by an ideal DC voltage
+/// source (`v(n+) - v(n-) = IC`) on a throwaway clone of `mna`, and the
+/// resulting augmented system is solved with the exact same NR machinery as
+/// [`solve_dc_operating_point`] (Direct NR → source stepping → Gmin
+/// stepping → fallback). Every other element in the circuit — resistors,
+/// nonlinear devices, other (non-IC) capacitors opened at DC, other voltage
+/// sources — is unchanged, so the result is fully KCL-consistent given the
+/// prescribed cap voltages: "IC wins for that cap's initial voltage,
+/// everything else stays DC-OP consistent."
+///
+/// Returns `None` when the circuit has no `IC=`-bearing capacitors, so
+/// callers can cheaply skip the extra solve (and the codegen IR can leave
+/// the corresponding field `None`, keeping IC-free circuits byte-identical
+/// to before this feature existed).
+pub fn solve_ic_seeded_operating_point(
+    mna: &MnaSystem,
+    device_slots: &[DeviceSlot],
+    config: &DcOpConfig,
+) -> Option<DcOpResult> {
+    if mna.capacitor_ics.is_empty() {
+        return None;
+    }
+    let mut mna_ic = mna.clone();
+    mna_ic.append_ic_voltage_sources();
+    Some(solve_dc_operating_point(&mna_ic, device_slots, config))
+}
+
 pub fn solve_dc_operating_point(
     mna: &MnaSystem,
     device_slots: &[DeviceSlot],
@@ -3164,6 +3195,91 @@ pub fn solve_dc_operating_point(
 mod tests {
     use super::*;
     use crate::device_types::{BjtParams, DiodeParams};
+    use crate::parser::Netlist;
+
+    // ── IC= initial-state solve ──────────────────────────────────────
+
+    #[test]
+    fn ic_seeded_op_returns_none_without_ic_caps() {
+        let spice = "RC no IC\nV1 in 0 DC 0\nR1 in out 1k\nC1 out 0 10u\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let config = DcOpConfig::default();
+        let result = solve_ic_seeded_operating_point(&mna, &[], &config);
+        assert!(
+            result.is_none(),
+            "circuit with no IC= capacitors must skip the extra solve"
+        );
+    }
+
+    #[test]
+    fn ic_seeded_op_cap_to_ground_forces_exact_node_voltage() {
+        // Cap between a real node and ground: the IC constraint alone fully
+        // determines that node's voltage (v(out) - v(gnd) = 5 => v(out) = 5),
+        // independent of the surrounding resistor network.
+        let spice = "RC discharge IC\nV1 in 0 DC 0\nR1 in out 1k\nC1 out 0 10u IC=5\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        assert_eq!(mna.capacitor_ics.len(), 1);
+        let config = DcOpConfig::default();
+        let result = solve_ic_seeded_operating_point(&mna, &[], &config)
+            .expect("circuit has an IC= capacitor");
+        assert!(result.converged, "linear IC-seeded solve must converge");
+        let out_idx = mna.node_map["out"] - 1;
+        assert!(
+            (result.v_node[out_idx] - 5.0).abs() < 1e-9,
+            "v(out) = {}, expected exactly 5.0",
+            result.v_node[out_idx]
+        );
+    }
+
+    #[test]
+    fn ic_seeded_op_cap_between_two_nonground_nodes() {
+        // Cap between two non-ground nodes (c3, b4) in a resistive divider
+        // network. The IC constraint (v(c3) - v(b4) = -4) must hold exactly,
+        // and the rest of the node voltages must be fully KCL-consistent
+        // with it — pinned against an independently hand-derived solve of
+        // the same augmented linear system (see the corresponding review
+        // notes / task description for the derivation).
+        let spice = "Two-node IC test\n\
+V1 in 0 DC 0\n\
+R1 in c3 1k\n\
+R2 c3 0 10k\n\
+R3 c3 b4 5k\n\
+R4 b4 0 10k\n\
+Cx c3 b4 6n IC=-4\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        assert_eq!(mna.capacitor_ics.len(), 1);
+        let config = DcOpConfig::default();
+        let result = solve_ic_seeded_operating_point(&mna, &[], &config)
+            .expect("circuit has an IC= capacitor");
+        assert!(result.converged, "linear IC-seeded solve must converge");
+
+        let c3 = mna.node_map["c3"] - 1;
+        let b4 = mna.node_map["b4"] - 1;
+        let v_c3 = result.v_node[c3];
+        let v_b4 = result.v_node[b4];
+
+        assert!(
+            (v_c3 - v_b4 - (-4.0)).abs() < 1e-9,
+            "v(c3) - v(b4) = {}, expected -4.0 exactly",
+            v_c3 - v_b4
+        );
+        // Independently hand-solved (numpy) augmented linear system for the
+        // same topology — see task notes. V1 pins v(in) to exactly 0 V (an
+        // augmented algebraic constraint, not a resistor), so R1 effectively
+        // becomes a 1k leg from c3 to ground: v(c3) = -1/3, v(b4) = 11/3.
+        // Pins the exact node voltages, not just the IC constraint itself.
+        assert!(
+            (v_c3 - (-1.0 / 3.0)).abs() < 1e-6,
+            "v(c3) = {v_c3}, expected -1/3"
+        );
+        assert!(
+            (v_b4 - (11.0 / 3.0)).abs() < 1e-6,
+            "v(b4) = {v_b4}, expected 11/3"
+        );
+    }
 
     // ── LU decomposition unit tests ──────────────────────────────────
 

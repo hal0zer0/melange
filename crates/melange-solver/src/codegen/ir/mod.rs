@@ -62,6 +62,17 @@ pub struct CircuitIR {
     pub solver_config: SolverConfig,
     pub matrices: Matrices,
     pub dc_operating_point: Vec<f64>,
+    /// Initial-state seed for `v_prev` when the circuit has one or more
+    /// `IC=`-bearing capacitors (SPICE `.IC`/UIC semantics). Computed by
+    /// temporarily replacing each such capacitor with an ideal DC voltage
+    /// source of the specified value and re-solving the (otherwise
+    /// unchanged) DC operating point system. `None` when no capacitor in
+    /// the netlist declares `IC=` — this keeps IC-free circuits on the
+    /// exact same codegen path as before (byte-identical output).
+    /// `dc_operating_point`/`DC_OP` above is unaffected and continues to
+    /// represent the pure IC-free DC bias point.
+    #[serde(default)]
+    pub v_prev_ic_seed: Option<Vec<f64>>,
     pub device_slots: Vec<DeviceSlot>,
     pub has_dc_sources: bool,
     pub has_dc_op: bool,
@@ -2194,19 +2205,19 @@ impl CircuitIR {
 
         let has_dc_sources = kernel.rhs_const.iter().any(|&v| v != 0.0);
 
+        let dc_op_config = DcOpConfig {
+            tolerance: config.dc_op_tolerance,
+            max_iterations: config.dc_op_max_iterations,
+            input_node: config.input_node,
+            input_resistance: config.input_resistance,
+            ..DcOpConfig::default()
+        };
         // Use pre-computed DC OP if available, otherwise run solver.
         // Pre-computed DC OP is used when the MNA has been expanded with internal
         // nodes — the solver converges better on the original (unexpanded) system.
         let dc_result = if let Some(pre) = dc_op_result {
             pre
         } else {
-            let dc_op_config = DcOpConfig {
-                tolerance: config.dc_op_tolerance,
-                max_iterations: config.dc_op_max_iterations,
-                input_node: config.input_node,
-                input_resistance: config.input_resistance,
-                ..DcOpConfig::default()
-            };
             dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config)
         };
         // Check DC OP significance on the truncated vector (n_aug), not the full
@@ -2218,6 +2229,24 @@ impl CircuitIR {
         let dc_op_method = format!("{:?}", dc_result.method);
         let dc_op_iterations = dc_result.iterations;
         let dc_nl_currents = dc_result.i_nl.clone();
+
+        // IC=-bearing capacitors: solve a second, independent initial-state
+        // operating point (each such cap temporarily replaced by an ideal
+        // voltage source of its IC value) used only to seed `v_prev`. `None`
+        // when the netlist has no `IC=` caps — see `mna.capacitor_ics`.
+        let v_prev_ic_seed = dc_op::solve_ic_seeded_operating_point(mna, &device_slots, &dc_op_config)
+            .map(|ic_result| {
+                if !ic_result.converged {
+                    log::warn!(
+                        "IC= initial-state solve did not converge (method: {:?}); v_prev seed uses best estimate",
+                        ic_result.method
+                    );
+                }
+                let mut v = ic_result.v_node;
+                v.resize(kernel.n, 0.0);
+                v.truncate(kernel.n);
+                v
+            });
 
         if !dc_result.converged && m > 0 {
             log::warn!(
@@ -2308,6 +2337,7 @@ impl CircuitIR {
                 // the transient from a beyond-rail DC seed.
                 dc
             },
+            v_prev_ic_seed,
             device_slots,
             has_dc_sources,
             has_dc_op,
@@ -2944,6 +2974,24 @@ impl CircuitIR {
         let dc_nl_currents = dc_result.i_nl.clone();
         let has_dc_sources = !mna.voltage_sources.is_empty() || !mna.current_sources.is_empty();
 
+        // IC=-bearing capacitors: solve a second, independent initial-state
+        // operating point (each such cap temporarily replaced by an ideal
+        // voltage source of its IC value) used only to seed `v_prev`. `None`
+        // when the netlist has no `IC=` caps — see `mna.capacitor_ics`.
+        let v_prev_ic_seed = dc_op::solve_ic_seeded_operating_point(mna, &device_slots, &dc_op_config)
+            .map(|ic_result| {
+                if !ic_result.converged {
+                    log::warn!(
+                        "IC= initial-state solve did not converge (method: {:?}); v_prev seed uses best estimate",
+                        ic_result.method
+                    );
+                }
+                let mut v = ic_result.v_node;
+                v.resize(n, 0.0);
+                v.truncate(n);
+                v
+            });
+
         // Resize DC OP to n_nodal dimension. Do NOT clamp op-amp outputs
         // to supply rails here — the emitted per-sample active-set resolve
         // already handles rail violations at runtime, and pre-clamping the
@@ -3077,6 +3125,7 @@ impl CircuitIR {
             solver_config,
             matrices,
             dc_operating_point,
+            v_prev_ic_seed,
             device_slots,
             has_dc_sources,
             has_dc_op,

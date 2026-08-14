@@ -481,9 +481,36 @@ fn emit_sparse_ni_matvec_add(
 /// audible click. Matches the DK template's reseed.
 ///
 /// `recv` is the receiver expression (`"self"` or `"state"`).
-fn emit_dc_block_history_reseed(code: &mut String, ir: &CircuitIR, indent: &str, recv: &str) {
+///
+/// `use_ic_seed`: when true and the circuit has `IC=`-bearing capacitors,
+/// seeds from the compile-time `V_PREV_IC_SEED` constant instead of the
+/// live `dc_operating_point` field. Only `reset()` passes `true` — "factory
+/// state" restores the same t=0 IC-seeded state as `Default`. The
+/// mid-session NaN-recovery and `set_sample_rate` call sites pass `false`
+/// deliberately: those are "return to the designed nominal bias" recoveries,
+/// not "replay the historical startup charge."
+fn emit_dc_block_history_reseed(
+    code: &mut String,
+    ir: &CircuitIR,
+    indent: &str,
+    recv: &str,
+    use_ic_seed: bool,
+) {
     let has_dc_op = ir.has_dc_op;
+    let ic_seed = if use_ic_seed {
+        &ir.v_prev_ic_seed
+    } else {
+        &None
+    };
     for (oi, &node) in ir.solver_config.output_nodes.iter().enumerate() {
+        if let Some(v_prev_ic) = ic_seed {
+            if node < v_prev_ic.len() {
+                code.push_str(&format!(
+                    "{indent}{recv}.dc_block_x_prev[{oi}] = V_PREV_IC_SEED[{node}];\n"
+                ));
+                continue;
+            }
+        }
         if has_dc_op && node < ir.dc_operating_point.len() {
             code.push_str(&format!(
                 "{indent}{recv}.dc_block_x_prev[{oi}] = {recv}.dc_operating_point[{node}];\n"
@@ -561,7 +588,7 @@ fn emit_nodal_nan_reset(
     // post-recovery sample see the full output DC bias as a step through the
     // differentiator — a second click right after the NaN event.
     if ir.dc_block {
-        emit_dc_block_history_reseed(code, ir, &body, "state");
+        emit_dc_block_history_reseed(code, ir, &body, "state", false);
     }
 
     // Device self-heating thermal state (BJT, diode, and triode)
@@ -1607,6 +1634,28 @@ impl RustEmitter {
             ));
         }
 
+        // IC=-bearing capacitors: initial-state seed for `v_prev`. Independent
+        // of `has_dc_op` — a circuit with no DC sources but an IC= cap still
+        // needs this constant. See `docs/aidocs/DC_OP.md` "IC= initial condition".
+        let has_cap_ic = ir.v_prev_ic_seed.is_some();
+        if let Some(v_prev_ic) = &ir.v_prev_ic_seed {
+            let v_prev_ic_values = v_prev_ic
+                .iter()
+                .map(|v| fmt_f64(*v))
+                .collect::<Vec<_>>()
+                .join(", ");
+            code.push_str(&format!(
+                "/// Initial-state seed for `v_prev`: node voltages after solving the DC\n\
+                 /// system with each `IC=`-bearing capacitor temporarily replaced by an\n\
+                 /// ideal DC voltage source of that value (SPICE `.IC`/UIC semantics).\n\
+                 /// Affects only capacitors carrying an explicit `IC=`; used solely to seed\n\
+                 /// the transient's `v_prev`. `DC_OP` above (when present) remains the pure\n\
+                 /// IC-free DC bias point.\n\
+                 pub const V_PREV_IC_SEED: [f64; N] = [{}];\n\n",
+                v_prev_ic_values
+            ));
+        }
+
         // DC NL currents
         let has_dc_nl = m > 0
             && !ir.dc_nl_currents.is_empty()
@@ -2104,7 +2153,9 @@ impl RustEmitter {
             code.push_str(&noise.default_stmts);
         }
         code.push_str("        let mut state = Self {\n");
-        if has_dc_op {
+        if has_cap_ic {
+            code.push_str("            v_prev: V_PREV_IC_SEED,\n");
+        } else if has_dc_op {
             code.push_str("            v_prev: DC_OP,\n");
         } else {
             code.push_str("            v_prev: [0.0; N],\n");
@@ -2144,12 +2195,19 @@ impl RustEmitter {
                 code.push_str("            settled_i_nl: [0.0; M],\n");
             }
         }
-        // Initialize DC blocking filter from DC OP so first sample sees zero delta
+        // Initialize DC blocking filter from the true t=0 output value so the
+        // first sample sees zero delta: V_PREV_IC_SEED (matches v_prev) when
+        // the circuit has IC=-bearing caps, else the plain DC operating point.
         if ir.dc_block {
             let output_nodes = &ir.solver_config.output_nodes;
             let dc_x: Vec<String> = output_nodes
                 .iter()
                 .map(|&node| {
+                    if let Some(v_prev_ic) = &ir.v_prev_ic_seed {
+                        if node < v_prev_ic.len() {
+                            return fmt_f64(v_prev_ic[node]);
+                        }
+                    }
                     if has_dc_op && node < ir.dc_operating_point.len() {
                         fmt_f64(ir.dc_operating_point[node])
                     } else {
@@ -2385,7 +2443,11 @@ impl RustEmitter {
         // reset()
         code.push_str("    /// Reset to DC operating point\n");
         code.push_str("    pub fn reset(&mut self) {\n");
-        code.push_str("        self.v_prev = self.dc_operating_point;\n");
+        if has_cap_ic {
+            code.push_str("        self.v_prev = V_PREV_IC_SEED;\n");
+        } else {
+            code.push_str("        self.v_prev = self.dc_operating_point;\n");
+        }
         if !ir.dc_op_converged && m > 0 {
             code.push_str("        if self.dc_settled {\n");
             code.push_str("            self.i_nl_prev = self.settled_i_nl;\n");
@@ -2416,9 +2478,10 @@ impl RustEmitter {
         if m > 0 {
             code.push_str("        self.chord_valid = false;\n");
         }
-        // Re-init DC blocker from DC OP (prevents transient on reset)
+        // Re-init DC blocker from the same t=0 state as v_prev above
+        // (prevents transient on reset)
         if ir.dc_block {
-            emit_dc_block_history_reseed(&mut code, ir, "        ", "self");
+            emit_dc_block_history_reseed(&mut code, ir, "        ", "self", has_cap_ic);
         }
         code.push_str("        self.diag_peak_output = 0.0;\n");
         code.push_str("        self.diag_clamp_count = 0;\n");
@@ -2894,7 +2957,7 @@ impl RustEmitter {
         if ir.dc_block {
             code.push_str("        // Recompute DC blocking coefficient\n\
                  \x20       self.dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;\n");
-            emit_dc_block_history_reseed(&mut code, ir, "        ", "self");
+            emit_dc_block_history_reseed(&mut code, ir, "        ", "self", false);
         }
 
         if os_factor > 1 {

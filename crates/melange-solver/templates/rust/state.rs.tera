@@ -5,6 +5,14 @@
 {% if has_dc_op %}/// DC operating point: steady-state node voltages
 pub const DC_OP: [f64; N] = [{{ dc_op_values }}];
 
+{% endif %}{% if has_cap_ic %}/// Initial-state seed for `v_prev`: node voltages after solving the DC
+/// system with each `IC=`-bearing capacitor temporarily replaced by an
+/// ideal DC voltage source of that value (SPICE `.IC`/UIC semantics).
+/// Affects only capacitors carrying an explicit `IC=`; used solely to seed
+/// the transient's `v_prev`. `DC_OP` above (when present) remains the pure
+/// IC-free DC bias point.
+pub const V_PREV_IC_SEED: [f64; N] = [{{ v_prev_ic_values }}];
+
 {% endif %}{% if has_dc_nl %}/// DC operating point: nonlinear device currents at bias point
 pub const DC_NL_I: [f64; M] = [{{ dc_nl_i_values }}];
 
@@ -207,21 +215,28 @@ static OPAMP_RAIL_DEGRADE_WARN_ONCE: std::sync::Once = std::sync::Once::new();
 {% if opamp_rail_degrade_warn is defined %}        OPAMP_RAIL_DEGRADE_WARN_ONCE.call_once(|| {
             eprintln!("{{ opamp_rail_degrade_warn }}");
         });
-{% endif %}{% if noise_enabled_emit %}{{ noise_default_stmts }}{% endif %}{% if dc_block and has_dc_op %}        // Seed the DC blocker's x[n-1] with the output-node DC operating point.
+{% endif %}{% if noise_enabled_emit %}{{ noise_default_stmts }}{% endif %}{% if dc_block and (has_dc_op or has_cap_ic) %}{% if has_cap_ic %}        // Seed the DC blocker's x[n-1] with the true t=0 output value, so the
+        // first processed sample doesn't see a spurious startup thump from the
+        // blocker's own history mismatch. V_PREV_IC_SEED when the circuit has
+        // IC=-bearing caps (their prescribed initial voltage IS the t=0 state),
+        // else the plain DC operating point. Mirrors Phase E's
+        // recompute_dc_op() reseed contract.
+{% else %}        // Seed the DC blocker's x[n-1] with the output-node DC operating point.
         // Starting from 0 while v_prev = DC_OP injects a deterministic startup
         // thump of ~DC_OP[out]*SCALE decaying at the 5 Hz blocker pole
         // (tau ~ 32 ms). Mirrors Phase E's recompute_dc_op() reseed contract.
-        let mut dc_block_x_seed = [0.0f64; NUM_OUTPUTS];
-        for k in 0..NUM_OUTPUTS { dc_block_x_seed[k] = DC_OP[OUTPUT_NODES[k]]; }
-{% endif %}        Self {
-{% if has_dc_op %}            v_prev: DC_OP,
+{% endif %}        let mut dc_block_x_seed = [0.0f64; NUM_OUTPUTS];
+{% if has_cap_ic %}        for k in 0..NUM_OUTPUTS { dc_block_x_seed[k] = V_PREV_IC_SEED[OUTPUT_NODES[k]]; }
+{% else %}        for k in 0..NUM_OUTPUTS { dc_block_x_seed[k] = DC_OP[OUTPUT_NODES[k]]; }
+{% endif %}{% endif %}        Self {
+{% if has_dc_op %}            v_prev: {% if has_cap_ic %}V_PREV_IC_SEED{% else %}DC_OP{% endif %},
 {% if has_dc_nl %}            i_nl_prev: DC_NL_I,
             i_nl_prev_prev: DC_NL_I,
 {% else %}            i_nl_prev: [0.0; M],
             i_nl_prev_prev: [0.0; M],
 {% endif %}            dc_operating_point: DC_OP,
             damp_thresh: {{ damp_thresh_init }},
-{% else %}            v_prev: [0.0; N],
+{% else %}            v_prev: {% if has_cap_ic %}V_PREV_IC_SEED{% else %}[0.0; N]{% endif %},
 {% if has_dc_nl %}            i_nl_prev: DC_NL_I,
             i_nl_prev_prev: DC_NL_I,
 {% else %}            i_nl_prev: [0.0; M],
@@ -230,7 +245,7 @@ static OPAMP_RAIL_DEGRADE_WARN_ONCE: std::sync::Once = std::sync::Once::new();
             damp_thresh: 2.0,
 {% endif %}            input_prev: 0.0,
             last_nr_iterations: 0,
-{% if dc_block %}            dc_block_x_prev: {% if has_dc_op %}dc_block_x_seed{% else %}[0.0; NUM_OUTPUTS]{% endif %},
+{% if dc_block %}            dc_block_x_prev: {% if has_dc_op or has_cap_ic %}dc_block_x_seed{% else %}[0.0; NUM_OUTPUTS]{% endif %},
             dc_block_y_prev: [0.0; NUM_OUTPUTS],
             dc_block_r: DC_BLOCK_R,
 {% endif %}            diag_peak_output: 0.0,
@@ -332,14 +347,18 @@ impl CircuitState {
         self.damp_thresh = {{ damp_thresh_init }};
 {% else %}        self.dc_operating_point = [0.0; N];
         self.damp_thresh = 2.0;
-{% endif %}        self.v_prev = self.dc_operating_point;
+{% endif %}        self.v_prev = {% if has_cap_ic %}V_PREV_IC_SEED{% else %}self.dc_operating_point{% endif %};
 {% if has_dc_nl %}        self.i_nl_prev = DC_NL_I;
         self.i_nl_prev_prev = DC_NL_I;
 {% else %}        self.i_nl_prev = [0.0; M];
         self.i_nl_prev_prev = [0.0; M];
 {% endif %}        self.input_prev = 0.0;
         self.last_nr_iterations = 0;
-{% if dc_block %}        // Seed the DC blocker's x[n-1] from the output-node DC OP (see Default)
+{% if dc_block and has_cap_ic %}        // Seed the DC blocker's x[n-1] from the same t=0 state as v_prev (see
+        // Default) so reset() doesn't re-inject the startup thump.
+        for k in 0..NUM_OUTPUTS { self.dc_block_x_prev[k] = V_PREV_IC_SEED[OUTPUT_NODES[k]]; }
+        self.dc_block_y_prev = [0.0; NUM_OUTPUTS];
+{% elif dc_block %}        // Seed the DC blocker's x[n-1] from the output-node DC OP (see Default)
         // so reset() doesn't re-inject the startup thump.
         for k in 0..NUM_OUTPUTS { self.dc_block_x_prev[k] = self.dc_operating_point[OUTPUT_NODES[k]]; }
         self.dc_block_y_prev = [0.0; NUM_OUTPUTS];

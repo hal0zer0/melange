@@ -79,6 +79,10 @@ pub struct MnaSystem {
     pub vcvs_sources: Vec<VcvsAugInfo>,
     /// Current source contributions to RHS
     pub current_sources: Vec<CurrentSourceInfo>,
+    /// Capacitors carrying an explicit `IC=` initial condition. Empty for
+    /// circuits that don't use `IC=` (the common case — keeps those
+    /// circuits byte-identical downstream).
+    pub capacitor_ics: Vec<CapacitorIcInfo>,
     /// Inductor elements for companion model (uncoupled only)
     pub inductors: Vec<InductorElement>,
     /// Coupled inductor pairs for transformer companion model (2-winding only)
@@ -167,6 +171,20 @@ pub struct IdealTransformerCoupling {
 const IDEAL_XFMR_L_THRESHOLD: f64 = 1e30;
 /// Threshold: transformer groups with max(k) above this use ideal decomposition.
 const IDEAL_XFMR_K_THRESHOLD: f64 = 0.8;
+
+/// Capacitor with an explicit `IC=` initial condition (SPICE `.IC`/UIC
+/// semantics). Used only to build the one-off initial-state solve that
+/// seeds `v_prev` — the capacitor itself is stamped into `C` normally and
+/// participates in the transient exactly like any other capacitor.
+#[derive(Debug, Clone)]
+pub struct CapacitorIcInfo {
+    pub name: String,
+    /// 1-indexed node (0 = ground), matches `InductorElement` convention.
+    pub node_i: usize,
+    pub node_j: usize,
+    /// Prescribed initial voltage: v(node_i) - v(node_j) at t=0.
+    pub ic: f64,
+}
 
 /// Inductor element info for companion model.
 #[derive(Debug, Clone)]
@@ -840,6 +858,7 @@ impl MnaSystem {
             behavioral_sources: Vec::new(),
             vcvs_sources: Vec::new(),
             current_sources: Vec::new(),
+            capacitor_ics: Vec::new(),
             inductors: Vec::new(),
             coupled_inductors: Vec::new(),
             transformer_groups: Vec::new(),
@@ -2292,6 +2311,73 @@ impl MnaSystem {
         }
     }
 
+    /// Append one augmented voltage-source row/column per `IC=`-bearing
+    /// capacitor, enforcing `v(node_i) - v(node_j) = ic` as an algebraic
+    /// constraint (same augmented-MNA mechanism as a real voltage source —
+    /// see `docs/aidocs/MNA.md` "Voltage Source (Augmented MNA)").
+    ///
+    /// Intended for use on a throwaway clone of the real `MnaSystem` used
+    /// only to build the initial-state solve that seeds `v_prev`: it grows
+    /// `n_aug`/`g`/`n_v`/`n_i` and appends to `voltage_sources`, which would
+    /// be wrong to do on the `MnaSystem` that drives the actual transient
+    /// kernel (that one must keep the IC capacitor as an ordinary capacitor
+    /// in `C`, not as a permanent extra voltage-source unknown). No-op when
+    /// `capacitor_ics` is empty.
+    pub fn append_ic_voltage_sources(&mut self) {
+        if self.capacitor_ics.is_empty() {
+            return;
+        }
+        let n = self.n;
+        let old_n_aug = self.n_aug;
+        let num_new = self.capacitor_ics.len();
+        let new_n_aug = old_n_aug + num_new;
+
+        // Grow G to new_n_aug x new_n_aug.
+        for row in self.g.iter_mut() {
+            row.resize(new_n_aug, 0.0);
+        }
+        for _ in 0..num_new {
+            self.g.push(vec![0.0; new_n_aug]);
+        }
+        // Grow N_v (M x n_aug) columns and N_i (n_aug x M) rows to match.
+        for row in self.n_v.iter_mut() {
+            row.resize(new_n_aug, 0.0);
+        }
+        for _ in 0..num_new {
+            self.n_i.push(vec![0.0; self.m]);
+        }
+
+        for (i, cap_ic) in self.capacitor_ics.clone().iter().enumerate() {
+            let k = old_n_aug + i;
+            let np = cap_ic.node_i;
+            let nm = cap_ic.node_j;
+            // Current injection (column k):
+            if np > 0 {
+                self.g[np - 1][k] += 1.0;
+            }
+            if nm > 0 {
+                self.g[nm - 1][k] -= 1.0;
+            }
+            // KVL constraint (row k): V(np) - V(nm) = ic
+            if np > 0 {
+                self.g[k][np - 1] += 1.0;
+            }
+            if nm > 0 {
+                self.g[k][nm - 1] -= 1.0;
+            }
+            self.voltage_sources.push(VoltageSourceInfo {
+                name: format!("__ic_{}", cap_ic.name),
+                n_plus: String::new(),
+                n_minus: String::new(),
+                n_plus_idx: np,
+                n_minus_idx: nm,
+                dc_value: cap_ic.ic,
+                ext_idx: k - n,
+            });
+        }
+        self.n_aug = new_n_aug;
+    }
+
     /// Build augmented G and C matrices with inductor branch variables.
     ///
     /// Copies `self.g` / `self.c` into `n_nodal x n_nodal` matrices, then stamps
@@ -2708,6 +2794,7 @@ struct MnaBuilder {
     /// all behavioral sources.
     behavioral_state_slots: usize,
     current_sources: Vec<CurrentSourceInfo>,
+    capacitor_ics: Vec<CapacitorIcInfo>,
     inductors: Vec<InductorElement>,
     opamps: Vec<OpampInfo>,
     vcas: Vec<VcaInfo>,
@@ -2762,6 +2849,7 @@ impl MnaBuilder {
             behavioral_sources: Vec::new(),
             behavioral_state_slots: 0,
             current_sources: Vec::new(),
+            capacitor_ics: Vec::new(),
             inductors: Vec::new(),
             opamps: Vec::new(),
             vcas: Vec::new(),
@@ -3627,6 +3715,7 @@ impl MnaBuilder {
         mna.voltage_sources = self.voltage_sources;
         mna.behavioral_sources = self.behavioral_sources;
         mna.current_sources = self.current_sources;
+        mna.capacitor_ics = self.capacitor_ics;
         mna.inductors = self.inductors;
         mna.opamps = self.opamps;
         mna.vcas = self.vcas;
@@ -4757,14 +4846,24 @@ impl MnaBuilder {
                 n_plus,
                 n_minus,
                 value,
-                ..
+                ic,
             } => {
+                let node_i = self.node_map[n_plus];
+                let node_j = self.node_map[n_minus];
                 self.elements.push(ElementInfo {
                     element_type: ElementType::Capacitor,
-                    nodes: vec![self.node_map[n_plus], self.node_map[n_minus]],
+                    nodes: vec![node_i, node_j],
                     value: *value,
                     name: name.clone(),
                 });
+                if let Some(ic_val) = ic {
+                    self.capacitor_ics.push(CapacitorIcInfo {
+                        name: name.clone(),
+                        node_i,
+                        node_j,
+                        ic: *ic_val,
+                    });
+                }
             }
             Element::Inductor {
                 name,
@@ -5268,6 +5367,73 @@ impl MnaBuilder {
 mod tests {
     use super::*;
     use crate::parser::{BSourceKind, Element, Netlist};
+
+    // ── IC= capacitor plumbing ────────────────────────────────────────
+
+    #[test]
+    fn capacitor_ic_is_parsed_and_populates_mna() {
+        let spice = "IC test\nV1 in 0 DC 0\nR1 in out 1k\nC1 out 0 10u IC=5\nC2 out 0 1u\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        // Only C1 (with IC=) should appear; C2 (no IC=) must not.
+        assert_eq!(mna.capacitor_ics.len(), 1);
+        let ic = &mna.capacitor_ics[0];
+        assert_eq!(ic.name, "C1");
+        assert_eq!(ic.ic, 5.0);
+        let out_idx = mna.node_map["out"];
+        assert_eq!(ic.node_i, out_idx);
+        assert_eq!(ic.node_j, 0); // ground
+    }
+
+    #[test]
+    fn append_ic_voltage_sources_is_noop_without_ic_caps() {
+        let spice = "No IC\nV1 in 0 DC 0\nR1 in out 1k\nC1 out 0 10u\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let n_aug_before = mna.n_aug;
+        let g_before = mna.g.clone();
+        let vs_before = mna.voltage_sources.len();
+        mna.append_ic_voltage_sources();
+        assert_eq!(mna.n_aug, n_aug_before);
+        assert_eq!(mna.g, g_before);
+        assert_eq!(mna.voltage_sources.len(), vs_before);
+    }
+
+    #[test]
+    fn append_ic_voltage_sources_stamps_augmented_kvl_kcl() {
+        let spice = "IC test\nV1 in 0 DC 0\nR1 in out 1k\nC1 out 0 10u IC=5\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let n = mna.n;
+        let n_aug_before = mna.n_aug;
+        let num_vs_before = mna.voltage_sources.len();
+
+        mna.append_ic_voltage_sources();
+
+        assert_eq!(mna.n_aug, n_aug_before + 1);
+        assert_eq!(mna.voltage_sources.len(), num_vs_before + 1);
+        let new_vs = mna.voltage_sources.last().unwrap();
+        assert_eq!(new_vs.dc_value, 5.0);
+        assert_eq!(new_vs.ext_idx, n_aug_before - n);
+
+        // KVL row / KCL column at the new augmented index k enforce
+        // V(out) - V(gnd) = 5 exactly as the voltage-source stamping
+        // convention in docs/aidocs/MNA.md.
+        let k = n_aug_before;
+        let out_idx = mna.node_map["out"] - 1;
+        assert_eq!(mna.g[k][out_idx], 1.0);
+        assert_eq!(mna.g[out_idx][k], 1.0);
+        // Matrix must have grown to n_aug x n_aug (square).
+        assert_eq!(mna.g.len(), mna.n_aug);
+        for row in &mna.g {
+            assert_eq!(row.len(), mna.n_aug);
+        }
+        // N_v/N_i must be padded to the new dimension too.
+        for row in &mna.n_v {
+            assert_eq!(row.len(), mna.n_aug);
+        }
+        assert_eq!(mna.n_i.len(), mna.n_aug);
+    }
 
     #[test]
     fn bsource_parses_v_and_i_forms() {
