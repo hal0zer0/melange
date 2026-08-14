@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use melange_solver::parser::{Model, Netlist};
+use melange_solver::parser::{Element, Model, Netlist};
 
 use crate::spice_runner::SpiceError;
 
@@ -84,7 +84,15 @@ impl TriodeParams {
     /// Emit the `.subckt` for this triode model. Port order `g p k` mirrors the
     /// `T` element's node order (grid-plate-cathode), so the `X` call binds
     /// `n_grid n_plate n_cathode` positionally.
-    fn subckt(&self, model_name: &str) -> String {
+    ///
+    /// `add_parasitics` mirrors `DkKernel::from_mna`, which auto-inserts 10 pF
+    /// junction caps ONLY when the circuit's C matrix is all zeros (a purely
+    /// resistive nonlinear circuit that needs regularization). For any circuit
+    /// carrying a real cap or inductor, melange inserts nothing, so the twin
+    /// must not either — an unconditional 10 pF was a spurious mismatch,
+    /// negligible on low-Z resistive plate loads (triode_cc: 0.10% → 0.0035%
+    /// once removed) but material on high-Z cap-loaded nodes.
+    fn subckt(&self, model_name: &str, add_parasitics: bool) -> String {
         // Vpk floored at 1e-3 (mirrors tube.rs `plate_current`).
         let vpk = "max(V(p,k),1e-3)";
         // inner = KP*(1/MU + Vgk/sqrt(KVB + Vpk^2))
@@ -118,14 +126,19 @@ impl TriodeParams {
             ig = self.ig_max,
             vo = self.vgk_onset,
         );
+        // Only mirror from_mna's 10 pF junction parasitics for purely resistive
+        // nonlinear circuits (see `add_parasitics` doc).
+        let parasitics = if add_parasitics {
+            "Cgk g k 10p\nCpk p k 10p\n"
+        } else {
+            ""
+        };
         format!(
             "* Koren B-source twin of `.model {name} (TRIODE|VT|TUBE)` — self-consistent with melange/tube.rs.\n\
              .subckt MELANGE_TRIODE_{name} g p k\n\
              BP p k I={plate}\n\
              BG g k I={grid}\n\
-             Cgk g k 10p\n\
-             Cpk p k 10p\n\
-             .ends\n",
+             {parasitics}.ends\n",
             name = model_name,
         )
     }
@@ -169,6 +182,16 @@ pub(crate) fn translate_tubes_for_ngspice(content: &str) -> Result<String, Spice
         }
     }
 
+    // Mirror from_mna's parasitic-cap rule: melange auto-inserts 10 pF junction
+    // caps ONLY when the C matrix is all zeros (no reactive element). A cap or
+    // inductor anywhere in the deck means melange inserts none, so the twin
+    // must not either.
+    let has_reactive = netlist
+        .elements
+        .iter()
+        .any(|e| matches!(e, Element::Capacitor { .. } | Element::Inductor { .. }));
+    let add_parasitics = !has_reactive;
+
     let mut out = String::with_capacity(content.len() + 256);
     let mut used: BTreeSet<String> = BTreeSet::new(); // deterministic subckt order
 
@@ -209,7 +232,7 @@ pub(crate) fn translate_tubes_for_ngspice(content: &str) -> Result<String, Spice
 
     // Append one subckt per distinct triode model actually used.
     for model_uc in &used {
-        out.push_str(&tube_models[model_uc].subckt(model_uc));
+        out.push_str(&tube_models[model_uc].subckt(model_uc, add_parasitics));
     }
 
     Ok(out)
@@ -266,12 +289,32 @@ mod tests {
         assert!(out.contains(".subckt MELANGE_TRIODE_12AX7 g p k"));
         assert!(out.contains("BP p k I="));
         assert!(out.contains("BG g k I="));
-        assert!(out.contains("Cgk g k 10p"));
-        assert!(out.contains("Cpk p k 10p"));
+        // DECK has a real cap (Cin) → melange inserts no parasitics, so the twin
+        // must not either (matches from_mna's C-all-zeros rule).
+        assert!(!out.contains("Cgk g k 10p"));
+        assert!(!out.contains("Cpk p k 10p"));
         assert!(out.contains(".ends"));
         // Baked Koren params appear in the plate expression.
         assert!(out.contains("/1060")); // KG1
         assert!(out.contains("1/100")); // 1/MU
+    }
+
+    #[test]
+    fn resistive_only_tube_deck_gets_parasitics() {
+        // No cap/inductor → melange's C matrix is all zeros → from_mna auto-inserts
+        // 10 pF junction caps → the twin must mirror them.
+        let deck = "resistive tube\n\
+            VIN in 0 DC 0\n\
+            Rg in grid 1Meg\n\
+            T1 grid plate cathode 12AX7\n\
+            Rk cathode 0 1.5k\n\
+            Rp vcc plate 100k\n\
+            Vcc vcc 0 DC 250\n\
+            .model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)\n\
+            .end\n";
+        let out = translate_tubes_for_ngspice(deck).unwrap();
+        assert!(out.contains("Cgk g k 10p"));
+        assert!(out.contains("Cpk p k 10p"));
     }
 
     #[test]

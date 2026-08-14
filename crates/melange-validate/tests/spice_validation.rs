@@ -2112,7 +2112,12 @@ fn test_triode_cc_vs_spice() {
     let netlist_path = test_data_dir().join("triode_cc").join("circuit.cir");
 
     let config = ComparisonConfig {
-        rms_error_tolerance: 0.02, // golden measured 0.105% RMS
+        // Measured 0.0035% RMS / corr 1.0 after the conditional-parasitic fix
+        // (the twin no longer adds 10 pF caps this cap-loaded circuit doesn't
+        // have; was 0.1025% with them). 0.05% gate ~14x over measured, and low
+        // enough to catch a regression that re-adds unconditional parasitics
+        // (which pushed this back to ~0.10%).
+        rms_error_tolerance: 5e-4,
         peak_error_tolerance: 0.05,
         max_relative_tolerance: 0.05,
         correlation_min: 0.999,
@@ -2183,13 +2188,13 @@ fn test_triode_cc_overdrive_vs_spice() {
 
     let netlist_path = test_data_dir().join("triode_cc").join("circuit.cir");
 
-    // Gates measured 2026-08 after the output_clamp_v auto-scale fix: RMS
-    // 0.0935%, peak err 6.06e-2 V, max rel err 1.01e-3, corr 0.99999957 —
-    // matching the small-signal test's precision (0.1025% / 0.99999948).
-    // Tolerances sit ~5x over measured, same headroom convention as the
-    // small-signal test above.
+    // Gates measured 2026-08 after the output_clamp_v auto-scale fix AND the
+    // conditional-parasitic fix: RMS 0.0164%, peak err 1.58e-2 V, max rel err
+    // 2.63e-4, corr 0.99999999 (was 0.0935% before the parasitic fix). 0.1%
+    // gate ~6x over measured, and catches a regression re-adding unconditional
+    // parasitics.
     let config = ComparisonConfig {
-        rms_error_tolerance: 0.005,
+        rms_error_tolerance: 0.001,
         peak_error_tolerance: 0.15,
         max_relative_tolerance: 0.02,
         correlation_min: 0.999,
