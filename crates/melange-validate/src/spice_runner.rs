@@ -140,6 +140,8 @@ pub fn run_transient(
     // Create modified netlist with updated .TRAN and .PRINT statements
     let mut modified_content = String::new();
     let mut first_line = true;
+    let mut has_tran = false;
+    let mut has_print = false;
 
     for line in original_content.lines() {
         let trimmed_upper = line.trim().to_uppercase();
@@ -168,6 +170,7 @@ pub fn run_transient(
         } else if trimmed_upper.starts_with(".TRAN") {
             // Replace with uniform timestep for sample-accurate comparison
             // Use the specified tstep and tstop instead of netlist values
+            has_tran = true;
             modified_content.push_str(&format!(
                 ".TRAN {} {}\n",
                 format_scientific(tstep),
@@ -183,6 +186,7 @@ pub fn run_transient(
             modified_content.push('\n');
         } else if trimmed_upper.starts_with(".PRINT") {
             // Update .PRINT to capture at our timestep
+            has_print = true;
             modified_content.push_str(&format!(
                 ".PRINT TRAN {}\n",
                 nodes_to_capture
@@ -197,6 +201,33 @@ pub fn run_transient(
             modified_content.push('\n');
         }
     }
+    // Inject analysis cards the source deck never declared. Most
+    // melange-circuits netlists carry no .TRAN/.PRINT (they exist to be
+    // *compiled*, not ngspice-run); without this the deck reaches ngspice with
+    // no transient analysis and no print, and parse_printed_output fails with
+    // "No simulation data found in ngspice output". validate owns
+    // tstep/tstop/nodes_to_capture, so we can supply a complete card. Flags are
+    // independent, so a deck declaring only one of the two still gets the other
+    // supplied. The rewrite branches above take precedence when the deck *does*
+    // declare its own.
+    if !has_tran {
+        modified_content.push_str(&format!(
+            ".TRAN {} {}\n",
+            format_scientific(tstep),
+            format_scientific(tstop)
+        ));
+    }
+    if !has_print {
+        modified_content.push_str(&format!(
+            ".PRINT TRAN {}\n",
+            nodes_to_capture
+                .iter()
+                .map(|n| format!("V({})", n))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+    }
+
     // Ensure .END is present
     modified_content.push_str(".END\n");
 
