@@ -195,8 +195,10 @@ pub fn run_transient(
                     .collect::<Vec<_>>()
                     .join(" ")
             ));
-        } else if !trimmed_upper.starts_with(".END") {
-            // Copy all lines except .END (we'll add it at the end)
+        } else if trimmed_upper != ".END" {
+            // Copy every line except the final `.END` (re-added at the end).
+            // Exact match, NOT starts_with(".END"): a generated triode subckt's
+            // `.ends` terminator also starts with ".END" and must survive.
             modified_content.push_str(line);
             modified_content.push('\n');
         }
@@ -535,7 +537,11 @@ pub fn run_transient_with_thevenin_pwl(
     series_resistance: f64,
     nodes_to_capture: &[String],
 ) -> Result<SpiceData, SpiceError> {
-    let modified = inject_thevenin_pwl(netlist_content, input_node, pwl_data, series_resistance)?;
+    // Translate any melange triode (`T`) elements into Koren B-source subckts
+    // before the deck reaches ngspice (which would parse `T` as a transmission
+    // line). No-op when the deck has no triode. See tube_translate.rs.
+    let translated = crate::tube_translate::translate_tubes_for_ngspice(netlist_content)?;
+    let modified = inject_thevenin_pwl(&translated, input_node, pwl_data, series_resistance)?;
     run_transient(
         modified.netlist_path.as_path(),
         tstep,

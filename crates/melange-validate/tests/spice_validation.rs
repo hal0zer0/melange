@@ -2057,3 +2057,63 @@ fn main() {
 // never reached a working SPICE-validated state) and its test-data dir
 // (data/klon_centaur/) no longer exists, so the test only ever panicked on the
 // missing netlist. Restore both the data and the test together if klon is revived.
+
+/// Test: 12AX7 common-cathode triode gain stage vs ngspice.
+///
+/// Proves the tube-translation path (melange-validate `tube_translate`): the
+/// ngspice reference deck's `T` element is auto-rewritten into a Koren B-source
+/// `.subckt` that reproduces melange's own triode equation, so this is a
+/// self-consistent cross-check of melange's transient SOLVER on a tube circuit
+/// (NR + integration + timestep), not an independent tube-physics test. Before
+/// this path existed, ngspice parsed `T` as a transmission line and the deck
+/// could not run at all.
+#[test]
+#[ignore] // requires ngspice
+fn test_triode_cc_vs_spice() {
+    assert!(is_ngspice_available(), "ngspice not found");
+
+    println!("\n=== 12AX7 Common-Cathode Triode Validation ===");
+
+    // 500 Hz, 40 mV small-signal drive (grid stays below cutoff → linear-ish
+    // plate operation, matching the golden reference conditions). input[0] = 0
+    // so both engines settle from the same DC operating point at onset.
+    let n = (SAMPLE_RATE * 0.1) as usize;
+    let input: Vec<f64> = (0..n)
+        .map(|i| 0.04 * (2.0 * std::f64::consts::PI * 500.0 * i as f64 / SAMPLE_RATE).sin())
+        .collect();
+
+    let netlist_path = test_data_dir().join("triode_cc").join("circuit.cir");
+
+    let config = ComparisonConfig {
+        rms_error_tolerance: 0.02, // golden measured 0.105% RMS
+        peak_error_tolerance: 0.05,
+        max_relative_tolerance: 0.05,
+        correlation_min: 0.999,
+        thd_error_tolerance_db: 5.0,
+        full_scale: 1.0,
+        skip_thd: true, // small-signal triode: solver-parity test, not distortion
+        settle_time_s: 0.02,
+    };
+
+    let result = validate_circuit(&netlist_path, &input, SAMPLE_RATE, "out", &config)
+        .expect("triode CC validation failed to run");
+
+    println!("  Samples:     {}", result.report.sample_count);
+    println!(
+        "  RMS Error:   {:.6e} ({:.4}%)",
+        result.report.rms_error,
+        result.report.normalized_rms_error * 100.0
+    );
+    println!("  Peak Error:  {:.6e}", result.report.peak_error);
+    println!("  Max Rel Err: {:.6e}", result.report.max_relative_error);
+    println!(
+        "  Correlation: {:.8}",
+        result.report.correlation_coefficient
+    );
+
+    assert!(
+        result.report.passed,
+        "Triode CC validation failed:\n{}",
+        result.report.summary()
+    );
+}

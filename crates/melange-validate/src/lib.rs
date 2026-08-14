@@ -47,6 +47,7 @@ use thiserror::Error;
 
 pub mod comparison;
 pub mod spice_runner;
+pub(crate) mod tube_translate;
 pub mod visualizer;
 
 pub use comparison::{batch_compare, compare_signals, ComparisonConfig, ComparisonReport, Signal};

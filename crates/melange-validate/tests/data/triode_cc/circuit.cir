@@ -1,0 +1,18 @@
+12AX7 common-cathode gain stage
+* Small-signal triode CC stage, topology matched to the solver-crate golden
+* deck (triode_cc_small_ref). The ngspice side gets its `T` translated to a
+* Koren B-source subckt by melange-validate's tube_translate; melange runs the
+* real triode. Validates transient solver parity on a tube circuit.
+VIN in 0 DC 0
+Rin in 0 1Meg
+Cin in grid 100n
+Rg grid 0 1Meg
+T1 grid plate cathode 12AX7
+Rk cathode 0 1.5k
+Ck cathode 0 25u
+Rp vcc plate 100k
+Cout plate out 100n
+Rout out 0 1Meg
+Vcc vcc 0 DC 250
+.model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
+.end
