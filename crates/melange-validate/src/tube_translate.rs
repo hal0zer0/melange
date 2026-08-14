@@ -220,7 +220,12 @@ pub(crate) fn translate_tubes_for_ngspice(content: &str) -> Result<String, Spice
 /// the translator is replacing.
 fn is_tube_model_line(line: &str, tube_models: &HashMap<String, TriodeParams>) -> bool {
     let t = line.trim();
-    if !t.len().ge(&6) || !t[..6].eq_ignore_ascii_case(".model") {
+    // `.get(..6)` (not `t[..6]`) — a byte slice panics when byte 6 falls inside
+    // a multibyte char (e.g. an em-dash in a comment/header, common in real
+    // decks). `.get` returns None on a non-char-boundary, and a line whose
+    // first 6 bytes span a multibyte char cannot be ".model" anyway, so the
+    // semantics are exactly preserved.
+    if !t.get(..6).is_some_and(|p| p.eq_ignore_ascii_case(".model")) {
         return false;
     }
     // `.model <name> <type>...` — the name is token 1.
@@ -287,5 +292,26 @@ mod tests {
         let deck = "bad\nT1 g p k M\n.model M TRIODE(MU=100 EX=1.4 KG1=1060)\n.end\n";
         let err = translate_tubes_for_ngspice(deck).unwrap_err();
         assert!(format!("{err}").contains("KP"));
+    }
+
+    #[test]
+    fn multibyte_comment_does_not_panic() {
+        // Regression: is_tube_model_line used a byte slice `t[..6]` that panicked
+        // when byte 6 fell inside a multibyte char. "* a — b" puts an em-dash
+        // (3 bytes) at bytes 4..7, so byte 6 is a non-char-boundary — exactly the
+        // real-deck header case that fired on every melange-circuits tube netlist.
+        let deck = "12AX7 CC stage\n\
+            * a — b\n\
+            VIN in 0 DC 0\n\
+            Cin in grid 100n\n\
+            T1 grid plate cathode 12AX7\n\
+            Rk cathode 0 1.5k\n\
+            Rp vcc plate 100k\n\
+            Vcc vcc 0 DC 250\n\
+            .model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)\n\
+            .end\n";
+        let out = translate_tubes_for_ngspice(deck).unwrap();
+        assert!(out.contains("XT1 grid plate cathode MELANGE_TRIODE_12AX7"));
+        assert!(out.contains("* a — b")); // the multibyte comment survives verbatim
     }
 }
