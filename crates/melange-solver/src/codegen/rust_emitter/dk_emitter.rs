@@ -540,6 +540,24 @@ impl RustEmitter {
             ctx.insert("dc_nl_i_values", &dc_nl_i_values);
         }
 
+        // DC nonlinear currents at the IC-seeded operating point — paired
+        // ONLY with V_PREV_IC_SEED (never with the plain DC_OP/DC_NL_I pair
+        // used by the reset fallback). See the pairing comment on
+        // `dc_nl_currents_ic_seed` in `codegen/ir/mod.rs`.
+        let has_dc_nl_ic_seed = ir.topology.m > 0 && ir.dc_nl_currents_ic_seed.is_some();
+        ctx.insert("has_dc_nl_ic_seed", &has_dc_nl_ic_seed);
+        if has_dc_nl_ic_seed {
+            let dc_nl_i_ic_seed_values = ir
+                .dc_nl_currents_ic_seed
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|v| fmt_f64(*v))
+                .collect::<Vec<_>>()
+                .join(", ");
+            ctx.insert("dc_nl_i_ic_seed_values", &dc_nl_i_ic_seed_values);
+        }
+
         // Switch data
         let num_switches = ir.switches.len();
         ctx.insert("num_switches", &num_switches);

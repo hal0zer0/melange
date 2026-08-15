@@ -16,6 +16,15 @@ pub const V_PREV_IC_SEED: [f64; N] = [{{ v_prev_ic_values }}];
 {% endif %}{% if has_dc_nl %}/// DC operating point: nonlinear device currents at bias point
 pub const DC_NL_I: [f64; M] = [{{ dc_nl_i_values }}];
 
+{% endif %}{% if has_dc_nl_ic_seed %}/// Nonlinear device currents at the same IC-seeded operating point as
+/// `V_PREV_IC_SEED`. MUST be used together with `V_PREV_IC_SEED` to seed
+/// `i_nl_prev`/`i_nl_prev_prev` — never with the plain `DC_OP`/`DC_NL_I`
+/// pair, which the per-sample magnitude/NaN-reset fallback resets state to.
+/// Pairing `V_PREV_IC_SEED` with `DC_NL_I` (device currents at the
+/// *unperturbed* bias point) would feed a KCL-inconsistent state into the
+/// first trapezoidal step and diverge a few hundred samples in.
+pub const DC_NL_I_IC_SEED: [f64; M] = [{{ dc_nl_i_ic_seed_values }}];
+
 {% endif %}/// Circuit state for one processing channel.
 ///
 /// Contains both per-sample state (v_prev, i_nl_prev) and sample-rate-dependent
@@ -238,14 +247,18 @@ static OPAMP_RAIL_DEGRADE_WARN_ONCE: std::sync::Once = std::sync::Once::new();
 {% else %}        for k in 0..NUM_OUTPUTS { dc_block_x_seed[k] = DC_OP[OUTPUT_NODES[k]]; }
 {% endif %}{% endif %}        Self {
 {% if has_dc_op %}            v_prev: {% if has_cap_ic %}V_PREV_IC_SEED{% else %}DC_OP{% endif %},
-{% if has_dc_nl %}            i_nl_prev: DC_NL_I,
+{% if has_dc_nl_ic_seed %}            i_nl_prev: DC_NL_I_IC_SEED,
+            i_nl_prev_prev: DC_NL_I_IC_SEED,
+{% elif has_dc_nl %}            i_nl_prev: DC_NL_I,
             i_nl_prev_prev: DC_NL_I,
 {% else %}            i_nl_prev: [0.0; M],
             i_nl_prev_prev: [0.0; M],
 {% endif %}            dc_operating_point: DC_OP,
             damp_thresh: {{ damp_thresh_init }},
 {% else %}            v_prev: {% if has_cap_ic %}V_PREV_IC_SEED{% else %}[0.0; N]{% endif %},
-{% if has_dc_nl %}            i_nl_prev: DC_NL_I,
+{% if has_dc_nl_ic_seed %}            i_nl_prev: DC_NL_I_IC_SEED,
+            i_nl_prev_prev: DC_NL_I_IC_SEED,
+{% elif has_dc_nl %}            i_nl_prev: DC_NL_I,
             i_nl_prev_prev: DC_NL_I,
 {% else %}            i_nl_prev: [0.0; M],
             i_nl_prev_prev: [0.0; M],
@@ -357,7 +370,9 @@ impl CircuitState {
 {% else %}        self.dc_operating_point = [0.0; N];
         self.damp_thresh = 2.0;
 {% endif %}        self.v_prev = {% if has_cap_ic %}V_PREV_IC_SEED{% else %}self.dc_operating_point{% endif %};
-{% if has_dc_nl %}        self.i_nl_prev = DC_NL_I;
+{% if has_dc_nl_ic_seed %}        self.i_nl_prev = DC_NL_I_IC_SEED;
+        self.i_nl_prev_prev = DC_NL_I_IC_SEED;
+{% elif has_dc_nl %}        self.i_nl_prev = DC_NL_I;
         self.i_nl_prev_prev = DC_NL_I;
 {% else %}        self.i_nl_prev = [0.0; M];
         self.i_nl_prev_prev = [0.0; M];

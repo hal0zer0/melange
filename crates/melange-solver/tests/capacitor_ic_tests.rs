@@ -340,3 +340,316 @@ fn compiled_ic_circuit_compiles_dk_and_nodal() {
     assert!(code_dk.contains("V_PREV_IC_SEED"));
     assert!(code_nodal.contains("V_PREV_IC_SEED"));
 }
+
+// ---------------------------------------------------------------------------
+// 5. IC= combined with a VCVS (`E`) element — regression for the reported
+//    blowup: `i_nl_prev` (DC_NL_I) was seeded from the plain (non-IC)
+//    quiescent operating point regardless of `has_cap_ic`, while `v_prev`
+//    was seeded from the IC-perturbed point. That KCL-inconsistent pair fed
+//    into the first trapezoidal step and NR quietly diverged tens to
+//    hundreds of samples later — reproduced on a cross-coupled-BJT astable
+//    (the "G10 divider" circuit) with peaks up to ~57,000 V on an 8 V rail.
+//    The mismatch is not VCVS-specific — any circuit where the IC-seeded
+//    operating point differs materially from the plain one (which is the
+//    entire purpose of IC=) can trigger it once nonlinear devices are
+//    present; a VCVS control node happened to be the reporter's circuit.
+// ---------------------------------------------------------------------------
+
+/// Diode biased through a VCVS (E1, gain 2), with an IC=-bearing cap (Ca)
+/// pinning node `a`'s companion node `b` 2V away from the diode's actual
+/// operating voltage. Small, fast, deterministic — exercises exactly the
+/// v_prev/i_nl_prev pairing mechanism without needing the full multi-BJT
+/// astable topology that originally surfaced the bug.
+const DIODE_E_IC: &str = "\
+Diode E IC pairing test
+V1 in 0 DC 5
+E1 drv 0 in 0 2
+R1 drv a 1k
+D1 a 0 DMOD
+Ca a b 1u IC=2
+Rb b 0 10k
+.model DMOD D(IS=1e-14)
+";
+
+const DIODE_E_NO_IC: &str = "\
+Diode E no IC (control)
+V1 in 0 DC 5
+E1 drv 0 in 0 2
+R1 drv a 1k
+D1 a 0 DMOD
+Ca a b 1u
+Rb b 0 10k
+.model DMOD D(IS=1e-14)
+";
+
+#[test]
+fn ir_dc_nl_currents_ic_seed_present_and_differs_from_plain() {
+    let (netlist, mna, kernel) = build_pipeline(DIODE_E_IC);
+    let a = mna.node_map["a"] - 1;
+    let config = ic_config(a);
+    let ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config).unwrap();
+
+    let seed = ir
+        .dc_nl_currents_ic_seed
+        .as_ref()
+        .expect("IC= circuit with a nonlinear device must populate dc_nl_currents_ic_seed");
+    assert_eq!(seed.len(), 1, "single diode -> M=1");
+
+    // The two solves must disagree (Ca's IC=2 moves the diode-adjacent
+    // network away from the plain quiescent point) — otherwise this test
+    // can't distinguish the fix from the pre-fix behavior.
+    assert!(
+        (seed[0] - ir.dc_nl_currents[0]).abs() > 1e-6,
+        "dc_nl_currents_ic_seed[0]={} must differ from the plain \
+         dc_nl_currents[0]={} for this circuit (IC= perturbs the diode's \
+         effective bias network)",
+        seed[0],
+        ir.dc_nl_currents[0]
+    );
+
+    // `dc_nl_currents` (paired with `dc_operating_point`) must stay exactly
+    // the plain, non-IC quiescent solve — independently recomputed here.
+    let device_slots = CircuitIR::build_device_info_with_mna(&netlist, Some(&mna)).unwrap();
+    let dc_op_config = melange_solver::dc_op::DcOpConfig {
+        input_node: config.input_node,
+        input_resistance: config.input_resistance,
+        ..melange_solver::dc_op::DcOpConfig::default()
+    };
+    let plain = melange_solver::dc_op::solve_dc_operating_point(&mna, &device_slots, &dc_op_config);
+    assert!(
+        (ir.dc_nl_currents[0] - plain.i_nl[0]).abs() < 1e-12,
+        "dc_nl_currents must remain the plain (non-IC) DC OP current, got {} vs {}",
+        ir.dc_nl_currents[0],
+        plain.i_nl[0]
+    );
+
+    // And the IC-seeded seed must match solve_ic_seeded_operating_point's
+    // own i_nl exactly (same solve, just re-derived independently here).
+    let ic_result =
+        melange_solver::dc_op::solve_ic_seeded_operating_point(&mna, &device_slots, &dc_op_config)
+            .expect("has IC caps");
+    assert!(
+        (seed[0] - ic_result.i_nl[0]).abs() < 1e-12,
+        "dc_nl_currents_ic_seed must equal solve_ic_seeded_operating_point's i_nl exactly"
+    );
+}
+
+#[test]
+fn ir_dc_nl_currents_ic_seed_absent_without_ic() {
+    let (ir, _mna) = build_ir(DIODE_E_NO_IC, &ic_config(1));
+    assert!(
+        ir.dc_nl_currents_ic_seed.is_none(),
+        "circuit without IC= caps must not populate dc_nl_currents_ic_seed"
+    );
+}
+
+#[test]
+fn codegen_dk_pairs_dc_nl_i_ic_seed_with_v_prev_ic_seed() {
+    let a_idx = {
+        let netlist = Netlist::parse(DIODE_E_IC).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        mna.node_map["a"] - 1
+    };
+    let (code, _n, _m) = support::generate_circuit_code(DIODE_E_IC, &ic_config(a_idx));
+
+    // Both constants must be present — the plain quiescent DC_NL_I and the
+    // IC-seeded twin — since this circuit has a nonzero plain-DC diode
+    // current AND an IC seed.
+    assert!(
+        code.contains("pub const DC_NL_I: [f64; M]"),
+        "plain DC_NL_I must still be emitted (paired with dc_operating_point)"
+    );
+    assert!(
+        code.contains("pub const DC_NL_I_IC_SEED: [f64; M]"),
+        "DC_NL_I_IC_SEED must be emitted for an IC= circuit with M>0"
+    );
+
+    // Construction (Default) and reset() must seed i_nl_prev from the
+    // IC-seeded constant, paired with V_PREV_IC_SEED for v_prev.
+    assert!(
+        code.contains("i_nl_prev: DC_NL_I_IC_SEED"),
+        "Default impl must seed i_nl_prev from DC_NL_I_IC_SEED, not DC_NL_I"
+    );
+    assert!(
+        code.contains("self.i_nl_prev = DC_NL_I_IC_SEED;"),
+        "reset() must restore i_nl_prev from DC_NL_I_IC_SEED, not DC_NL_I"
+    );
+
+    // The plain DC_NL_I must still be used by the per-sample magnitude/NaN
+    // reset fallback, paired with dc_operating_point (NOT the IC seed) —
+    // this is the pairing that broke when an earlier fix attempt simply
+    // repointed DC_NL_I at the IC-seeded solve.
+    assert!(
+        code.contains("state.v_prev = state.dc_operating_point;")
+            && code.contains("state.i_nl_prev = DC_NL_I;"),
+        "the magnitude/NaN-reset fallback must reset to the plain \
+         (dc_operating_point, DC_NL_I) pair, independent of has_cap_ic"
+    );
+}
+
+#[test]
+fn codegen_nodal_pairs_dc_nl_i_ic_seed_with_v_prev_ic_seed() {
+    let a_idx = {
+        let netlist = Netlist::parse(DIODE_E_IC).unwrap();
+        let mna = MnaSystem::from_netlist(&netlist).unwrap();
+        mna.node_map["a"] - 1
+    };
+    let (code, _n, _m) = support::generate_circuit_code_nodal(DIODE_E_IC, &ic_config(a_idx));
+    assert!(code.contains("pub const DC_NL_I_IC_SEED: [f64; M]"));
+    assert!(code.contains("i_nl_prev: DC_NL_I_IC_SEED"));
+    assert!(code.contains("self.i_nl_prev = DC_NL_I_IC_SEED;"));
+}
+
+#[test]
+fn codegen_dk_no_ic_omits_dc_nl_i_ic_seed() {
+    let (code, _n, _m) = support::generate_circuit_code(DIODE_E_NO_IC, &ic_config(1));
+    assert!(
+        !code.contains("DC_NL_I_IC_SEED"),
+        "circuit without IC= must not emit DC_NL_I_IC_SEED anywhere"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 6. End-to-end: the reported blowup circuit stays bounded.
+//
+// A cross-coupled-BJT astable ("G10 divider") kicked off its degenerate
+// symmetric fixed point by an IC=-bearing capacitor, with a VCVS driving
+// the trigger input. Before the fix: peak ~5053 V (this exact netlist) /
+// ~48000 V (VCVS-free variant) on an 8 V rail. After the fix: bounded,
+// matching the plain (non-IC) quiescent peak.
+// ---------------------------------------------------------------------------
+
+/// Reported repro (melange-circuits): two cross-coupled PNP stages, a VCVS
+/// driving the trigger network, IC=-4 on the cross-coupling cap C_x1.
+const ASTABLE_IC_AND_E: &str = "\
+G10 divider lab v3 (internal PULSE drive)
+Vrail rail 0 DC 8
+R_green green 0 2.7k
+E_amp drvsrc 0 in 0 8
+R_trig drvsrc trigmid 10k
+C_trig trigmid b4 1n
+Q_D1A c3 b3 rail SFT352
+Q_D1B c4 b4 rail SFT352
+R_b3 b3 green 150k
+R_b4 b4 green 150k
+R_c4 c4 green 56k
+R_c3 c3 ntap 2.7k
+R_ntap ntap green 27k
+C_x1 c3 b4 6n IC=-4
+C_x2 c4 b3 6.8n
+C_out ntap out 1u
+R_bleed out green 100k
+
+.model SFT352 PNP(IS=3e-7 BF=90 VAF=50 RB=40 RC=4 RE=1 CJE=80p CJC=30p TF=1n)
+";
+
+/// Same topology, VCVS replaced by a direct wire from `in` (keeps the `in`
+/// node name for `config_for_spice` auto-detection) — isolates the IC=
+/// effect from the VCVS.
+const ASTABLE_IC_ONLY: &str = "\
+G10 divider lab v3 (no VCVS)
+Vrail rail 0 DC 8
+R_green green 0 2.7k
+R_trig in trigmid 10k
+C_trig trigmid b4 1n
+Q_D1A c3 b3 rail SFT352
+Q_D1B c4 b4 rail SFT352
+R_b3 b3 green 150k
+R_b4 b4 green 150k
+R_c4 c4 green 56k
+R_c3 c3 ntap 2.7k
+R_ntap ntap green 27k
+C_x1 c3 b4 6n IC=-4
+C_x2 c4 b3 6.8n
+C_out ntap out 1u
+R_bleed out green 100k
+
+.model SFT352 PNP(IS=3e-7 BF=90 VAF=50 RB=40 RC=4 RE=1 CJE=80p CJC=30p TF=1n)
+";
+
+/// Same topology with the VCVS, no IC= — the plain quiescent circuit
+/// (control for "does the VCVS alone cause the blowup").
+const ASTABLE_E_ONLY: &str = "\
+G10 divider lab v3 (no IC)
+Vrail rail 0 DC 8
+R_green green 0 2.7k
+E_amp drvsrc 0 in 0 8
+R_trig drvsrc trigmid 10k
+C_trig trigmid b4 1n
+Q_D1A c3 b3 rail SFT352
+Q_D1B c4 b4 rail SFT352
+R_b3 b3 green 150k
+R_b4 b4 green 150k
+R_c4 c4 green 56k
+R_c3 c3 ntap 2.7k
+R_ntap ntap green 27k
+C_x1 c3 b4 6n
+C_x2 c4 b3 6.8n
+C_out ntap out 1u
+R_bleed out green 100k
+
+.model SFT352 PNP(IS=3e-7 BF=90 VAF=50 RB=40 RC=4 RE=1 CJE=80p CJC=30p TF=1n)
+";
+
+/// Neither VCVS nor IC= — plain control.
+const ASTABLE_NEITHER: &str = "\
+G10 divider lab v3 (neither)
+Vrail rail 0 DC 8
+R_green green 0 2.7k
+R_trig in trigmid 10k
+C_trig trigmid b4 1n
+Q_D1A c3 b3 rail SFT352
+Q_D1B c4 b4 rail SFT352
+R_b3 b3 green 150k
+R_b4 b4 green 150k
+R_c4 c4 green 56k
+R_c3 c3 ntap 2.7k
+R_ntap ntap green 27k
+C_x1 c3 b4 6n
+C_x2 c4 b3 6.8n
+C_out ntap out 1u
+R_bleed out green 100k
+
+.model SFT352 PNP(IS=3e-7 BF=90 VAF=50 RB=40 RC=4 RE=1 CJE=80p CJC=30p TF=1n)
+";
+
+/// The rail is 8 V; the largest legitimate transient (the IC-forced -4 V
+/// jump on a network whose nodes otherwise sit near the rail) peaks under
+/// 15 V. Pre-fix, the IC+E case reached thousands of volts. 20 V is a loose
+/// bound that pins "did not blow up" without over-fitting to exact decimals.
+const ASTABLE_BOUND: f64 = 20.0;
+
+fn run_astable(spice: &str, tag: &str) -> Vec<f64> {
+    let config = support::config_for_spice(spice, 48000.0);
+    let circuit = support::build_circuit(spice, &config, tag);
+    let input = vec![0.0; 960];
+    support::run_signal(&circuit, &input, 48000.0)
+}
+
+#[test]
+fn astable_ic_and_e_stays_bounded() {
+    let out = run_astable(ASTABLE_IC_AND_E, "astable_ic_and_e");
+    support::assert_finite(&out);
+    support::assert_bounded(&out, -ASTABLE_BOUND, ASTABLE_BOUND);
+}
+
+#[test]
+fn astable_ic_only_stays_bounded() {
+    let out = run_astable(ASTABLE_IC_ONLY, "astable_ic_only");
+    support::assert_finite(&out);
+    support::assert_bounded(&out, -ASTABLE_BOUND, ASTABLE_BOUND);
+}
+
+#[test]
+fn astable_e_only_stays_bounded() {
+    let out = run_astable(ASTABLE_E_ONLY, "astable_e_only");
+    support::assert_finite(&out);
+    support::assert_bounded(&out, -ASTABLE_BOUND, ASTABLE_BOUND);
+}
+
+#[test]
+fn astable_neither_stays_bounded() {
+    let out = run_astable(ASTABLE_NEITHER, "astable_neither");
+    support::assert_finite(&out);
+    support::assert_bounded(&out, -ASTABLE_BOUND, ASTABLE_BOUND);
+}

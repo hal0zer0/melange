@@ -1692,6 +1692,30 @@ impl RustEmitter {
             ));
         }
 
+        // DC NL currents at the IC-seeded operating point — paired ONLY
+        // with V_PREV_IC_SEED (never with the plain DC_OP/DC_NL_I pair used
+        // by the reset fallback). See the pairing comment on
+        // `dc_nl_currents_ic_seed` in `codegen/ir/mod.rs`.
+        let has_dc_nl_ic_seed = m > 0 && ir.dc_nl_currents_ic_seed.is_some();
+        if has_dc_nl_ic_seed {
+            let dc_nl_i_ic_seed_values = ir
+                .dc_nl_currents_ic_seed
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|v| fmt_f64(*v))
+                .collect::<Vec<_>>()
+                .join(", ");
+            code.push_str(&format!(
+                "/// Nonlinear device currents at the same IC-seeded operating point as\n\
+                 /// `V_PREV_IC_SEED`. MUST be used together with `V_PREV_IC_SEED` to seed\n\
+                 /// `i_nl_prev`/`i_nl_prev_prev` — never with the plain `DC_OP`/`DC_NL_I`\n\
+                 /// pair, which the per-sample magnitude/NaN-reset fallback resets state to.\n\
+                 pub const DC_NL_I_IC_SEED: [f64; M] = [{}];\n\n",
+                dc_nl_i_ic_seed_values
+            ));
+        }
+
         // State struct
         code.push_str("/// Circuit state for one processing channel (nodal solver).\n");
         code.push_str("///\n");
@@ -2186,7 +2210,10 @@ impl RustEmitter {
         } else {
             code.push_str("            v_prev: [0.0; N],\n");
         }
-        if has_dc_nl {
+        if has_dc_nl_ic_seed {
+            code.push_str("            i_nl_prev: DC_NL_I_IC_SEED,\n");
+            code.push_str("            i_nl_prev_prev: DC_NL_I_IC_SEED,\n");
+        } else if has_dc_nl {
             code.push_str("            i_nl_prev: DC_NL_I,\n");
             code.push_str("            i_nl_prev_prev: DC_NL_I,\n");
         } else {
@@ -2475,7 +2502,15 @@ impl RustEmitter {
         } else {
             code.push_str("        self.v_prev = self.dc_operating_point;\n");
         }
-        if !ir.dc_op_converged && m > 0 {
+        if has_dc_nl_ic_seed {
+            // has_cap_ic already forced `self.v_prev = V_PREV_IC_SEED` above,
+            // overriding the dc_settled/quiescent warmup machinery below for
+            // v_prev — i_nl_prev must follow the same override so the pair
+            // stays KCL-consistent (see the pairing comment on
+            // `dc_nl_currents_ic_seed` in `codegen/ir/mod.rs`).
+            code.push_str("        self.i_nl_prev = DC_NL_I_IC_SEED;\n");
+            code.push_str("        self.i_nl_prev_prev = DC_NL_I_IC_SEED;\n");
+        } else if !ir.dc_op_converged && m > 0 {
             code.push_str("        if self.dc_settled {\n");
             code.push_str("            self.i_nl_prev = self.settled_i_nl;\n");
             code.push_str("            self.i_nl_prev_prev = self.settled_i_nl;\n");
@@ -2664,7 +2699,16 @@ impl RustEmitter {
         code.push_str("    ///\n");
         code.push_str("    /// The default `CircuitState::default()` calls this automatically.\n");
         code.push_str("    pub fn warmup(&mut self) {\n");
-        if !ir.dc_op_converged && m > 0 {
+        // `has_cap_ic` skips the low-rate destructive DC settle below: an
+        // IC=-bearing capacitor's prescribed initial voltage is the whole
+        // point of the feature (SPICE `.IC`/UIC semantics) — silently
+        // fast-forwarding 1000 samples of silence at 200 Hz toward the
+        // plain (non-IC) quiescent point before any real audio is
+        // processed would erase it before the caller ever sees the IC
+        // state. v_prev/i_nl_prev were already seeded consistently from
+        // V_PREV_IC_SEED/DC_NL_I_IC_SEED at construction/reset(); only the
+        // standard 50-sample warmup below applies.
+        if !ir.dc_op_converged && m > 0 && !has_cap_ic {
             let target_rate =
                 ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
             code.push_str("        if !self.dc_settled {\n");

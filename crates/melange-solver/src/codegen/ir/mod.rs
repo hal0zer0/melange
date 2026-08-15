@@ -79,6 +79,16 @@ pub struct CircuitIR {
     /// M-vector: nonlinear device currents at DC operating point
     #[serde(default)]
     pub dc_nl_currents: Vec<f64>,
+    /// M-vector: nonlinear device currents at the IC-seeded operating point
+    /// (see `v_prev_ic_seed`) — used ONLY to seed `i_nl_prev` at
+    /// construction/reset() time, paired with `v_prev_ic_seed`. Must stay
+    /// paired with `v_prev_ic_seed` (never with the plain
+    /// `dc_operating_point`/`dc_nl_currents`), or the per-sample state pair
+    /// fed into the first trapezoidal step is KCL-inconsistent and NR
+    /// diverges a few hundred samples in. `None` iff `v_prev_ic_seed` is
+    /// `None`.
+    #[serde(default)]
+    pub dc_nl_currents_ic_seed: Option<Vec<f64>>,
     /// Whether the nonlinear DC OP solver converged
     #[serde(default)]
     pub dc_op_converged: bool,
@@ -2228,12 +2238,35 @@ impl CircuitIR {
         let dc_op_converged = dc_result.converged;
         let dc_op_method = format!("{:?}", dc_result.method);
         let dc_op_iterations = dc_result.iterations;
+        // Paired with `dc_operating_point` (plain, non-IC quiescent point) —
+        // see the pairing note on `dc_operating_point` below, and the
+        // per-sample magnitude/NaN-reset fallback (`process_sample.rs.tera`)
+        // which resets `v_prev`/`i_nl_prev` back to this exact pair. Do NOT
+        // repoint this at the IC-seeded solve — that was tried and created a
+        // *different* v_prev/i_nl_prev mismatch at the reset fallback (which
+        // always uses the plain `dc_operating_point`), producing the same
+        // failure class it was meant to fix. See `dc_nl_currents_ic_seed`
+        // below for the seed actually paired with `v_prev_ic_seed`.
         let dc_nl_currents = dc_result.i_nl.clone();
 
         // IC=-bearing capacitors: solve a second, independent initial-state
         // operating point (each such cap temporarily replaced by an ideal
-        // voltage source of its IC value) used only to seed `v_prev`. `None`
+        // voltage source of its IC value) used to seed `v_prev`. `None`
         // when the netlist has no `IC=` caps — see `mna.capacitor_ics`.
+        //
+        // `dc_nl_currents_ic_seed` (i_nl at that same IC-consistent point)
+        // is captured alongside it and used ONLY to seed `i_nl_prev` at
+        // construction/reset() time (paired with `v_prev_ic_seed`, NEVER
+        // with the plain `dc_operating_point`). The IC constraint can move
+        // node voltages far from the quiescent bias point (that's the whole
+        // purpose of IC=), so `dc_result.i_nl` — device currents evaluated
+        // at the *unperturbed* operating point — would be inconsistent with
+        // an IC-seeded `v_prev`. Feeding mismatched (v_prev, i_nl_prev) into
+        // the first trapezoidal step is the same class of bug documented
+        // below at the nodal DC_OP resize comment ("pre-clamping... creates
+        // a v_prev / i_nl_prev inconsistency... that slowly drifts the
+        // state... before NR blows up").
+        let mut dc_nl_currents_ic_seed: Option<Vec<f64>> = None;
         let v_prev_ic_seed = dc_op::solve_ic_seeded_operating_point(mna, &device_slots, &dc_op_config)
             .map(|ic_result| {
                 if !ic_result.converged {
@@ -2242,6 +2275,7 @@ impl CircuitIR {
                         ic_result.method
                     );
                 }
+                dc_nl_currents_ic_seed = Some(ic_result.i_nl.clone());
                 let mut v = ic_result.v_node;
                 v.resize(kernel.n, 0.0);
                 v.truncate(kernel.n);
@@ -2342,6 +2376,7 @@ impl CircuitIR {
             has_dc_sources,
             has_dc_op,
             dc_nl_currents,
+            dc_nl_currents_ic_seed,
             dc_op_converged,
             dc_op_method,
             dc_op_iterations,
@@ -2971,13 +3006,28 @@ impl CircuitIR {
         let dc_op_converged = dc_result.converged;
         let dc_op_method = format!("{:?}", dc_result.method);
         let dc_op_iterations = dc_result.iterations;
+        // Paired with `dc_operating_point` (plain, non-IC quiescent point).
+        // Do NOT repoint this at the IC-seeded solve — see
+        // `dc_nl_currents_ic_seed` below and its DK-path twin comment for
+        // why: the plain (dc_operating_point, dc_nl_currents) pair is what
+        // the per-sample magnitude/NaN-reset fallback resets state to, and
+        // it must stay self-consistent independent of any IC= seed.
         let dc_nl_currents = dc_result.i_nl.clone();
         let has_dc_sources = !mna.voltage_sources.is_empty() || !mna.current_sources.is_empty();
 
         // IC=-bearing capacitors: solve a second, independent initial-state
         // operating point (each such cap temporarily replaced by an ideal
-        // voltage source of its IC value) used only to seed `v_prev`. `None`
-        // when the netlist has no `IC=` caps — see `mna.capacitor_ics`.
+        // voltage source of its IC value) used to seed `v_prev`. `None` when
+        // the netlist has no `IC=` caps — see `mna.capacitor_ics`.
+        //
+        // `dc_nl_currents_ic_seed` (i_nl at that same IC-consistent point) is
+        // captured alongside it and used ONLY to seed `i_nl_prev` at
+        // construction/reset() time, paired with `v_prev_ic_seed` — see the
+        // identical reasoning in the DK-path twin of this block. It must
+        // NEVER be paired with the plain `dc_operating_point`/`dc_nl_currents`
+        // (that pairing belongs to the reset fallback, see the
+        // "v_prev / i_nl_prev inconsistency" comment a few lines below).
+        let mut dc_nl_currents_ic_seed: Option<Vec<f64>> = None;
         let v_prev_ic_seed = dc_op::solve_ic_seeded_operating_point(mna, &device_slots, &dc_op_config)
             .map(|ic_result| {
                 if !ic_result.converged {
@@ -2986,6 +3036,7 @@ impl CircuitIR {
                         ic_result.method
                     );
                 }
+                dc_nl_currents_ic_seed = Some(ic_result.i_nl.clone());
                 let mut v = ic_result.v_node;
                 v.resize(n, 0.0);
                 v.truncate(n);
@@ -3130,6 +3181,7 @@ impl CircuitIR {
             has_dc_sources,
             has_dc_op,
             dc_nl_currents,
+            dc_nl_currents_ic_seed,
             dc_op_converged,
             dc_op_method,
             dc_op_iterations,
