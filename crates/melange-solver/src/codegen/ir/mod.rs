@@ -970,6 +970,10 @@ pub struct SwitchMutualEntry {
 pub struct SwitchIR {
     /// Switch index (0-based)
     pub index: usize,
+    /// Human-readable label: the `.switch` directive's label if given, else the
+    /// controlled component names joined with `+`. Emitted as `SWITCH_LABELS`.
+    #[serde(default)]
+    pub label: String,
     /// Components controlled by this switch
     pub components: Vec<SwitchComponentIR>,
     /// Position values: positions[pos][comp] = value
@@ -2205,6 +2209,13 @@ impl CircuitIR {
                     .collect();
                 SwitchIR {
                     index: idx,
+                    label: sw.label.clone().unwrap_or_else(|| {
+                        sw.components
+                            .iter()
+                            .map(|c| c.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join("+")
+                    }),
                     components,
                     positions: sw.positions.clone(),
                     num_positions: sw.positions.len(),
@@ -3319,6 +3330,13 @@ impl CircuitIR {
 
                         SwitchIR {
                             index: idx,
+                            label: sw.label.clone().unwrap_or_else(|| {
+                                sw.components
+                                    .iter()
+                                    .map(|c| c.name.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("+")
+                            }),
                             components: sw
                                 .components
                                 .iter()

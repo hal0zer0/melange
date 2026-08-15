@@ -316,6 +316,7 @@ impl RustEmitter {
                         .collect();
                     SwitchTemplateData {
                         index: sw.index,
+                        label: sw.label.clone(),
                         num_positions: sw.num_positions,
                         num_components: sw.components.len(),
                         components,

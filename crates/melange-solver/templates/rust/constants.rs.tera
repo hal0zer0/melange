@@ -193,6 +193,11 @@ const XFMR_{{ g.index }}_Y_DEFAULT: [f64; {{ g.num_windings * g.num_windings }}]
 // =============================================================================
 // SWITCH CONSTANTS
 // =============================================================================
+/// Human-readable label per switch (the `.switch` directive's label, else its
+/// joined component names), in `.switch` DIRECTIVE ORDER — index matches
+/// `set_switch_0..N`. Assert your own tab/position enum against these so an
+/// upstream netlist reorder becomes a build/test failure, not a silent remap.
+pub const SWITCH_LABELS: [&str; {{ num_switches }}] = [{% for sw in switches %}"{{ sw.label }}"{% if not loop.last %}, {% endif %}{% endfor %}];
 {% for sw in switches %}
 /// Number of positions for switch {{ sw.index }}
 pub const SWITCH_{{ sw.index }}_NUM_POSITIONS: usize = {{ sw.num_positions }};

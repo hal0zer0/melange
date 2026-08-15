@@ -127,6 +127,7 @@ pub(super) struct SwitchCompTemplateData {
 #[derive(Serialize)]
 pub(super) struct SwitchTemplateData {
     pub(super) index: usize,
+    pub(super) label: String,
     pub(super) num_positions: usize,
     pub(super) num_components: usize,
     pub(super) components: Vec<SwitchCompTemplateData>,

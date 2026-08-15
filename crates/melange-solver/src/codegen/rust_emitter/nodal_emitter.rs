@@ -1515,6 +1515,22 @@ impl RustEmitter {
         }
 
         // Switch constants (position values)
+        if !ir.switches.is_empty() {
+            let labels: Vec<String> = ir
+                .switches
+                .iter()
+                .map(|sw| format!("{:?}", sw.label))
+                .collect();
+            code.push_str(&format!(
+                "/// Human-readable label per switch (the `.switch` directive's label, else its\n\
+                 /// joined component names), in `.switch` directive order — index matches\n\
+                 /// set_switch_0..N. Assert your own tab/position enum against these so an\n\
+                 /// upstream netlist reorder becomes a build/test failure, not a silent remap.\n\
+                 pub const SWITCH_LABELS: [&str; {}] = [{}];\n",
+                ir.switches.len(),
+                labels.join(", ")
+            ));
+        }
         for (idx, sw) in ir.switches.iter().enumerate() {
             code.push_str(&format!(
                 "pub const SWITCH_{}_NUM_POSITIONS: usize = {};\n",

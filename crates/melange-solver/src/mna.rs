@@ -751,6 +751,10 @@ pub struct SwitchInfo {
     pub components: Vec<SwitchComponentInfo>,
     /// Position values: positions[pos][comp] = value for that position
     pub positions: Vec<Vec<f64>>,
+    /// Optional human-readable label from the `.switch` directive (e.g. "Oboe 8").
+    /// Emitted as `SWITCH_LABELS` so consumers can assert their own enum against
+    /// directive order instead of relying on a silent positional mapping.
+    pub label: Option<String>,
 }
 
 /// Potentiometer information resolved from .pot directive.
@@ -3277,6 +3281,7 @@ impl MnaBuilder {
             mna.switches.push(SwitchInfo {
                 components,
                 positions: sw_dir.positions.clone(),
+                label: sw_dir.label.clone(),
             });
         }
 

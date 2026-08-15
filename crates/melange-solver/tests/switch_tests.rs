@@ -410,6 +410,35 @@ C1 out 0 100n
 }
 
 #[test]
+fn test_codegen_switch_labels_emitted() {
+    // A labeled switch uses its `.switch` directive label; an unlabeled one
+    // falls back to the controlled component name. Emitted in directive order
+    // (matching set_switch_0..N) so a consumer can assert its own enum.
+    let code = generate(
+        "\
+Switch Labels Test
+R1 in out 1k
+C1 out 0 100n
+C2 out 0 10n
+.switch C1 100n 220n \"Bright\"
+.switch C2 10n 22n
+",
+    );
+    assert!(
+        code.contains("pub const SWITCH_LABELS: [&str; 2]"),
+        "Should emit a SWITCH_LABELS array of length 2"
+    );
+    assert!(
+        code.contains("\"Bright\""),
+        "labeled switch should use its directive label"
+    );
+    assert!(
+        code.contains("\"C2\""),
+        "unlabeled switch should fall back to the component name"
+    );
+}
+
+#[test]
 fn test_codegen_switch_state_fields() {
     let code = generate(
         "\
