@@ -394,6 +394,13 @@ enum Commands {
         /// (ignored when no `--probe` is given).
         #[arg(long = "probe-csv", value_name = "PATH")]
         probe_csv: Option<PathBuf>,
+
+        /// Set switch position: "Label=pos" or index=pos (0-indexed, e.g.
+        /// "Voice=3"). May be repeated. Applied at runtime via
+        /// `state.set_switch_N(pos)` before the run — mirrors the generated
+        /// plugin, so `simulate` reaches non-rest positions the plugin uses.
+        #[arg(long = "switch", value_name = "NAME=POS")]
+        switch_overrides: Vec<String>,
     },
 
     /// Analyze circuit frequency response
@@ -843,6 +850,7 @@ fn main() -> Result<()> {
             max_iter,
             probes,
             probe_csv,
+            switch_overrides,
         } => {
             // Match parse-time node normalization (lowercase, gnd→0).
             let input_node = melange_solver::parser::normalize_node_name(&input_node);
@@ -917,6 +925,7 @@ fn main() -> Result<()> {
                     max_iter,
                     probes: &probes,
                     probe_csv: probe_csv_path.as_deref(),
+                    switch_overrides: &switch_overrides,
                 },
             )
         }
@@ -2356,6 +2365,9 @@ struct SimulateOptions<'a> {
     max_iter: Option<usize>,
     probes: &'a [String],
     probe_csv: Option<&'a std::path::Path>,
+    /// `--switch NAME=POS` specs; resolved and applied at runtime via
+    /// `state.set_switch_N(pos)` before the run (mirrors the plugin).
+    switch_overrides: &'a [String],
 }
 
 /// Options bundle for `melange analyze` — mirrors [`SimulateOptions`].
@@ -2441,6 +2453,91 @@ fn auto_tune_max_iter(
         0
     };
     base + stiffness_bonus
+}
+
+/// Resolve `--switch NAME=POS` specs into `(switch_idx, position)` pairs.
+///
+/// `NAME` matches a switch label (case-insensitive) or a 0-based index; `POS`
+/// is a 0-based position validated against the switch's `positions`. Shared by
+/// `analyze` and `simulate`: both keep the netlist at position-0 element values
+/// and apply the override at runtime via `state.set_switch_N(position)`, so the
+/// emitted G/C constants stay consistent with `SwitchComponentIR.nominal_value`
+/// (mutating `netlist.elements` up front would double-apply the delta).
+fn resolve_switch_overrides(
+    netlist: &melange_solver::parser::Netlist,
+    switch_overrides: &[String],
+) -> Result<Vec<(usize, usize)>> {
+    let mut resolved = Vec::with_capacity(switch_overrides.len());
+    for spec in switch_overrides {
+        let (name, pos_str) = spec.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("Invalid --switch format '{}', expected NAME=POS", spec)
+        })?;
+        let position: usize = pos_str.parse().map_err(|_| {
+            anyhow::anyhow!("Invalid switch position '{}' in --switch {}", pos_str, spec)
+        })?;
+
+        // Match by label, by any controlled component name, or by index. Many
+        // `.switch` directives carry no label (e.g. `.switch Rbyp30 1e9 1.0`),
+        // so component-name matching is what makes those reachable by name
+        // rather than forcing the caller to count indices.
+        let switch_idx = if let Ok(idx) = name.parse::<usize>() {
+            if idx >= netlist.switches.len() {
+                anyhow::bail!(
+                    "Switch index {} out of range (0..{})",
+                    idx,
+                    netlist.switches.len()
+                );
+            }
+            idx
+        } else {
+            netlist
+                .switches
+                .iter()
+                .position(|s| {
+                    s.label
+                        .as_deref()
+                        .map(|l| l.eq_ignore_ascii_case(name))
+                        .unwrap_or(false)
+                        || s.component_names
+                            .iter()
+                            .any(|c| c.eq_ignore_ascii_case(name))
+                })
+                .ok_or_else(|| {
+                    let available: Vec<String> = netlist
+                        .switches
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| match s.label.as_deref() {
+                            Some(l) => format!("{}: {} ({})", i, l, s.component_names.join("+")),
+                            None => format!("{}: {}", i, s.component_names.join("+")),
+                        })
+                        .collect();
+                    anyhow::anyhow!(
+                        "Switch '{}' not found. Available: {}",
+                        name,
+                        available.join(", ")
+                    )
+                })?
+        };
+
+        let sw = &netlist.switches[switch_idx];
+        if position >= sw.positions.len() {
+            anyhow::bail!(
+                "Switch '{}' position {} out of range (0..{})",
+                name,
+                position,
+                sw.positions.len()
+            );
+        }
+
+        resolved.push((switch_idx, position));
+        eprintln!(
+            "  Switch override: {} = position {}",
+            sw.label.as_deref().unwrap_or(name),
+            position
+        );
+    }
+    Ok(resolved)
 }
 
 fn simulate_circuit_source(
@@ -2850,10 +2947,19 @@ fn simulate_circuit_source(
     // them for the CSV header; the runtime argv[3] supplies the CSV path.
     println!("Step 5: Compiling and running...");
     let probe_names: Vec<&str> = opts.probes.iter().map(|s| s.as_str()).collect();
+    // Resolve --switch NAME=POS and apply at runtime via set_switch_N (same as
+    // the generated plugin / `analyze`): keeps the netlist at position-0 values
+    // so the emitted G/C constants stay consistent with the delta-from-nominal
+    // stamp in set_switch_N.
+    let switch_runtime_overrides = resolve_switch_overrides(&netlist, opts.switch_overrides)?;
+    let switch_calls: Vec<String> = switch_runtime_overrides
+        .iter()
+        .map(|(idx, pos)| format!("state.set_switch_{idx}({pos})"))
+        .collect();
     let simulate_main = codegen_runner::generate_simulate_main(
         opts.sample_rate,
         &[], // pot overrides (future)
-        &[], // switch overrides (future)
+        &switch_calls,
         if opts.input_audio.is_none() {
             Some(opts.amplitude)
         } else {
@@ -3698,79 +3804,9 @@ fn analyze_freq_response(
         }
     }
 
-    // Resolve switch overrides into (switch_idx, position) pairs. We keep the
-    // netlist at position-0 element values here and apply the override at
-    // runtime via `state.set_switch_N(position)` — see `switch_calls` passed
-    // to `generate_analyze_main` below. Mutating `netlist.elements` up front
-    // would desync the emitted G/C constants from `SwitchComponentIR.nominal_value`
-    // (always pos-0), producing a double-application when set_switch_N runs
-    // its delta-from-nominal stamp.
-    let switch_runtime_overrides: Vec<(usize, usize)> = {
-        let mut resolved = Vec::with_capacity(switch_overrides.len());
-        for spec in switch_overrides {
-            let (name, pos_str) = spec.split_once('=').ok_or_else(|| {
-                anyhow::anyhow!("Invalid --switch format '{}', expected NAME=POS", spec)
-            })?;
-            let position: usize = pos_str.parse().map_err(|_| {
-                anyhow::anyhow!("Invalid switch position '{}' in --switch {}", pos_str, spec)
-            })?;
-
-            // Match by label or index
-            let switch_idx = if let Ok(idx) = name.parse::<usize>() {
-                if idx >= netlist.switches.len() {
-                    anyhow::bail!(
-                        "Switch index {} out of range (0..{})",
-                        idx,
-                        netlist.switches.len()
-                    );
-                }
-                idx
-            } else {
-                netlist
-                    .switches
-                    .iter()
-                    .position(|s| {
-                        s.label
-                            .as_deref()
-                            .map(|l| l.eq_ignore_ascii_case(name))
-                            .unwrap_or(false)
-                    })
-                    .ok_or_else(|| {
-                        let available: Vec<String> = netlist
-                            .switches
-                            .iter()
-                            .enumerate()
-                            .map(|(i, s)| {
-                                format!("{}: {}", i, s.label.as_deref().unwrap_or("no label"))
-                            })
-                            .collect();
-                        anyhow::anyhow!(
-                            "Switch '{}' not found. Available: {}",
-                            name,
-                            available.join(", ")
-                        )
-                    })?
-            };
-
-            let sw = &netlist.switches[switch_idx];
-            if position >= sw.positions.len() {
-                anyhow::bail!(
-                    "Switch '{}' position {} out of range (0..{})",
-                    name,
-                    position,
-                    sw.positions.len()
-                );
-            }
-
-            resolved.push((switch_idx, position));
-            eprintln!(
-                "  Switch override: {} = position {}",
-                sw.label.as_deref().unwrap_or(name),
-                position
-            );
-        }
-        resolved
-    };
+    // Keep the netlist at position-0 element values and apply overrides at
+    // runtime via `state.set_switch_N(position)` (see `switch_calls` below).
+    let switch_runtime_overrides = resolve_switch_overrides(&netlist, switch_overrides)?;
 
     // Build MNA
     let mut mna =

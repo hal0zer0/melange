@@ -207,6 +207,22 @@ impl IntegratorSelection {
             Self::BeCliFlag | Self::BeDirective | Self::BeBehavioral | Self::BeAuto
         )
     }
+
+    /// Human-readable label with the reason — used in the generated file's
+    /// provenance header so a consumer can tell (e.g.) a `--force-trap` build
+    /// from an auto-promoted-BE one without inferring it from `MAX_ITER`.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::TrapDefault => "trapezoidal",
+            Self::TrapCliFlag => "trapezoidal (--force-trap)",
+            Self::TrapDirective => "trapezoidal (.integrator trap)",
+            Self::BeCliFlag => "backward-euler (--backward-euler)",
+            Self::BeDirective => "backward-euler (.integrator be)",
+            Self::BeBehavioral => "backward-euler (behavioral-source forced)",
+            Self::BeAuto => "backward-euler (auto-promoted)",
+        }
+    }
 }
 
 /// A plugin-driven scalar param in IR form (mirrors
@@ -386,6 +402,36 @@ pub struct SolverConfig {
     /// Only the nodal codegen path emits it today.
     #[serde(default)]
     pub runtime_be_latch: bool,
+    /// Emit event-triggered *breakpoint backward-Euler* on a trapezoidal build
+    /// with `.switch`/`.pot` parameters.
+    ///
+    /// A mid-run conductance swap (a `.switch` toggle or a `.pot` step) stamps
+    /// `Δg` into both the forward matrix `A` and the trapezoidal history matrix
+    /// `A_neg = (2/T)C − G`. On the swap sample the history term still carries the
+    /// pre-swap `v_prev`, so `Δg` is effectively counted twice — the output is
+    /// `2×` the physical value — and the kick excites trap's marginal `z=−1`
+    /// eigenmode, which never decays on a capless (algebraic) node.
+    ///
+    /// When `true`, `set_switch_*`/`set_pot_*` arm a one-sample countdown
+    /// (`BREAKPOINT_BE_SAMPLES = 1`) that routes the swap sample through the
+    /// L-stable backward-Euler matrices. BE's `A_neg = (1/T)C` has no `G` term,
+    /// so there is no double-count (fixes the 2×) and BE damps `z=−1` at the
+    /// source (fixes the ring / the persistent capless residual). Exactly one
+    /// sample: a second BE sample over-damps and can knock a marginal
+    /// self-oscillator (Farfisa G10 divider under `--force-trap`) into the wrong
+    /// equilibrium. Byte-neutral for runs that never call a setter (e.g. golden
+    /// fixtures at their default position).
+    ///
+    /// Independent of `--force-trap`: this corrects a definite discretization
+    /// bug at an explicit event, not the heuristic Nyquist-latch net that
+    /// force-trap opts out of. Gated off for backward-Euler builds (nothing to
+    /// fix) and for saturating-inductor circuits (the BE matrices don't receive
+    /// the per-sample Sherman-Morrison rank-1 update — same landmine as
+    /// [`Self::runtime_be_latch`]). `.runtime R` (audio-rate, continuous) does
+    /// NOT arm it — arming every sample would pin BE permanently, and its tiny
+    /// per-sample Δg self-corrects.
+    #[serde(default)]
+    pub breakpoint_be: bool,
     /// Resolved op-amp supply rail saturation strategy.
     ///
     /// If the user's [`CodegenConfig::opamp_rail_mode`] was [`OpampRailMode::Auto`],
@@ -1695,6 +1741,7 @@ impl CircuitIR {
             backward_euler: be,
             // DK codegen path does not emit the runtime BE-latch net yet.
             runtime_be_latch: false,
+            breakpoint_be: false,
             opamp_rail_mode: rail_mode.mode,
             emit_dc_op_recompute: config.emit_dc_op_recompute,
         };
@@ -2691,6 +2738,7 @@ impl CircuitIR {
             // Resolved after the auto-BE promotion block below (needs the
             // final `solver_config.backward_euler`).
             runtime_be_latch: false,
+            breakpoint_be: false,
             opamp_rail_mode: rail_mode.mode,
             emit_dc_op_recompute: config.emit_dc_op_recompute,
         };
@@ -2978,6 +3026,25 @@ impl CircuitIR {
                 .any(|g| g.winding_isats.iter().any(|isat| isat.is_some()));
         solver_config.runtime_be_latch =
             !solver_config.backward_euler && !cfg_force_trap && m > 0 && !has_saturating;
+
+        // Event-triggered breakpoint backward-Euler for `.switch`/`.pot` swaps.
+        // Independent of `cfg_force_trap` (a targeted correctness fix at an
+        // explicit event, not the Nyquist-latch heuristic that force-trap
+        // disables). Emitted only when the circuit actually has a discrete
+        // conductance-swap parameter and runs on trap; the machinery is
+        // byte-inert until a `set_switch_*`/`set_pot_*` call arms it, so golden
+        // fixtures (which never toggle) are unaffected. Gated off for BE builds
+        // (nothing to fix) and saturating-inductor circuits (BE matrices miss
+        // the per-sample SM saturation update — see `runtime_be_latch`).
+        // Armed only by discrete swaps (set_switch_*/set_pot_*), never by the
+        // per-sample `.runtime R` setter — so a `.runtime R`-only circuit would
+        // emit machinery nothing ever arms. Gate the flag on switches or a
+        // *knob* pot (runtime_field == None), so runtime-R-only circuits stay
+        // byte-identical.
+        let has_knob_pot = mna.pots.iter().any(|p| p.runtime_field.is_none());
+        solver_config.breakpoint_be = !solver_config.backward_euler
+            && !has_saturating
+            && (!mna.switches.is_empty() || has_knob_pot);
 
         let matrices = Matrices {
             s: s_flat,

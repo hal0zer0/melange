@@ -1038,6 +1038,27 @@ impl RustEmitter {
             "pub const MAX_ITER: usize = {};\n\n",
             ir.solver_config.max_iterations
         ));
+        if ir.solver_config.breakpoint_be {
+            code.push_str(
+                "/// Breakpoint-BE: number of samples solved on the backward-Euler matrices\n\
+                 /// after a .switch/.pot swap. Exactly ONE: a single BE sample removes both\n\
+                 /// the swap-sample 2× (BE's a_neg has no G term) and the excited z=-1 mode\n\
+                 /// (BE is L-stable), then trap resumes. Do NOT raise this — a second BE\n\
+                 /// sample over-damps and can knock a marginal self-oscillator (e.g. the\n\
+                 /// Farfisa G10 divider under --force-trap) into the wrong equilibrium.\n",
+            );
+            code.push_str("pub const BREAKPOINT_BE_SAMPLES: u32 = 1;\n\n");
+            code.push_str(
+                "/// Breakpoint-BE: NR iteration budget for the forced-BE samples. Kept well\n\
+                 /// above MAX_ITER so a forced-BE sample never hits the trap per-sample wall\n\
+                 /// (a maxed-out BE sample would reinject the very latch it removes, at the\n\
+                 /// swap sample we care about).\n",
+            );
+            code.push_str(&format!(
+                "pub const BREAKPOINT_BE_MAX_ITER: usize = {};\n\n",
+                ir.solver_config.max_iterations.max(200)
+            ));
+        }
         code.push_str(
             "/// Chord method: re-factor Jacobian every N iterations (full LU path only).\n",
         );
@@ -1920,6 +1941,19 @@ impl RustEmitter {
             code.push_str("    pub be_latched: bool,\n\n");
         }
 
+        // Breakpoint-BE countdown (trapezoidal builds with .switch/.pot). Armed
+        // by set_switch_*/set_pot_* to a small const; while > 0 the sample is
+        // solved with the L-stable BE matrices (kills the swap-sample 2× and the
+        // excited z=-1 mode), then decremented. Zero at rest → byte-inert.
+        if ir.solver_config.breakpoint_be {
+            code.push_str(
+                "    /// Breakpoint-BE: samples remaining to solve on the backward-Euler\n\
+                 \x20   /// matrices after a .switch/.pot conductance swap (armed by\n\
+                 \x20   /// set_switch_*/set_pot_*, decremented per sample, cleared by reset()).\n",
+            );
+            code.push_str("    pub breakpoint_be: u32,\n\n");
+        }
+
         // DC settling state: when DC OP didn't converge at codegen time, the warmup
         // fast-forwards at low sample rate to charge coupling caps. The settled state
         // is cached for subsequent resets to avoid repeating the expensive warmup.
@@ -2314,6 +2348,9 @@ impl RustEmitter {
             code.push_str("            be_in_pow: 0.0,\n");
             code.push_str("            be_latched: false,\n");
         }
+        if ir.solver_config.breakpoint_be {
+            code.push_str("            breakpoint_be: 0,\n");
+        }
         if m > 0 || !ir.behavioral_sources.is_empty() {
             code.push_str("            chord_lu: [[0.0; N]; N],\n");
             code.push_str("            chord_dr: [1.0; N],\n");
@@ -2580,6 +2617,9 @@ impl RustEmitter {
             code.push_str("        self.be_in_r1_num = 0.0;\n");
             code.push_str("        self.be_in_pow = 0.0;\n");
             code.push_str("        self.be_latched = false;\n");
+        }
+        if ir.solver_config.breakpoint_be {
+            code.push_str("        self.breakpoint_be = 0;\n");
         }
         // Reset Schur complement matrices to defaults
         let cp = if use_full_nodal {
@@ -3410,6 +3450,13 @@ impl RustEmitter {
 
             code.push_str(&format!("        self.pot_{}_resistance = r;\n", idx));
             code.push_str("        self.matrices_dirty = true;\n");
+            // Arm breakpoint-BE for a discrete pot step (a knob move is a
+            // conductance swap that can excite z=-1 on a capless node). NOT for
+            // `.runtime R` (audio-rate, continuous): arming every sample would
+            // pin BE permanently, and its tiny per-sample Δg self-corrects.
+            if ir.solver_config.breakpoint_be && pot.runtime_field.is_none() {
+                code.push_str("        self.breakpoint_be = BREAKPOINT_BE_SAMPLES;\n");
+            }
 
             // Authentic-noise coefficient refresh (Step 2 / Phase 1.5).
             // Keeps `state.noise_thermal_sqrt_inv_r[k]` in sync with the
@@ -3573,6 +3620,12 @@ impl RustEmitter {
                 idx
             ));
             code.push_str("        self.matrices_dirty = true;\n");
+            // A switch flip is a discrete conductance swap — arm breakpoint-BE
+            // so the swap sample is solved on the L-stable BE matrices (removes
+            // the 2× first sample and the excited z=-1 mode).
+            if ir.solver_config.breakpoint_be {
+                code.push_str("        self.breakpoint_be = BREAKPOINT_BE_SAMPLES;\n");
+            }
 
             // Authentic-noise coefficient refresh for any R-type components
             // in this switch that back a thermal noise source. Keeps the
@@ -3784,13 +3837,21 @@ impl RustEmitter {
         let m = ir.topology.m;
         let os_factor = ir.solver_config.oversampling_factor;
         let has_pots = !ir.pots.is_empty();
-        // Runtime BE-latch: when the Nyquist-cycle detector has latched, force
-        // the L-stable BE fallback path (skip both the trap-accept and the
-        // ActiveSetBe sub-step accept). Empty string on non-latch builds.
-        let be_latch_and = if ir.solver_config.runtime_be_latch {
-            " && !state.be_latched"
-        } else {
-            ""
+        // "Force BE this sample" guard appended to the trap-accept `converged`
+        // expression: trap is accepted only when NO mechanism is forcing BE.
+        //  - runtime BE-latch (Nyquist limit cycle detected → sticky BE)
+        //  - breakpoint-BE (a .switch/.pot swap armed a short BE countdown)
+        // Either forces the L-stable BE fallback (which for breakpoint kills the
+        // swap-sample 2× and the excited z=-1 mode). Empty on builds with
+        // neither, so those stay byte-identical.
+        let be_latch_and = match (
+            ir.solver_config.runtime_be_latch,
+            ir.solver_config.breakpoint_be,
+        ) {
+            (true, true) => " && !state.be_latched && state.breakpoint_be == 0",
+            (true, false) => " && !state.be_latched",
+            (false, true) => " && state.breakpoint_be == 0",
+            (false, false) => "",
         };
 
         let mut code = section_banner(
@@ -4185,10 +4246,55 @@ impl RustEmitter {
         // emitted in any mode — see emit_nodal_m0_rail_handling).
         if m == 0 {
             code.push_str("    // Linear circuit: v = v_pred (no NR needed)\n");
-            if Self::m0_rail_handling_mutates_v(ir) {
+            if Self::m0_rail_handling_mutates_v(ir) || ir.solver_config.breakpoint_be {
                 code.push_str("    let mut v = v_pred;\n\n");
             } else {
                 code.push_str("    let v = v_pred;\n\n");
+            }
+            // Breakpoint-BE (linear path): on the sample(s) right after a
+            // .switch/.pot conductance swap, re-solve on the L-stable BE
+            // matrices. a_neg_be = (1/T)C has no G term, so the swapped Δg is
+            // not double-counted (kills the 2× first sample), and BE damps
+            // trap's marginal z=-1 eigenmode at the source (kills the ring and
+            // the persistent capless-node residual). Reverts to trap after the
+            // countdown. Byte-inert until set_switch_*/set_pot_* arms it.
+            if ir.solver_config.breakpoint_be {
+                code.push_str("    if state.breakpoint_be > 0 {\n");
+                if ir.has_dc_sources && !ir.matrices.rhs_const_be.is_empty() {
+                    code.push_str("        let mut rhs_be = RHS_CONST_BE;\n");
+                } else {
+                    code.push_str("        let mut rhs_be = [0.0f64; N];\n");
+                }
+                // BE history: a_neg_be * v_prev (a_neg sparsity is a superset of
+                // a_neg_be's — a_neg_be = alpha_be*C, a_neg = alpha*C - G).
+                for i in 0..n {
+                    for &j in &ir.sparsity.a_neg.nz_by_row[i] {
+                        code.push_str(&format!(
+                            "        rhs_be[{i}] += state.a_neg_be[{i}][{j}] * state.v_prev[{j}];\n",
+                        ));
+                    }
+                }
+                // BE input stamp: V_in * G_in (no trapezoidal average).
+                code.push_str(
+                    "        rhs_be[INPUT_NODE] += input * input_conductance;\n",
+                );
+                // Runtime voltage sources (same rows as the trap stamp).
+                for rt in &ir.runtime_sources {
+                    code.push_str(&format!(
+                        "        rhs_be[{}] += state.{};\n",
+                        rt.vs_row, rt.field_name
+                    ));
+                }
+                code.push_str(
+                    "        for i in 0..N {\n\
+                     \x20           let mut sum = 0.0;\n\
+                     \x20           for j in 0..N { sum += state.s_be[i][j] * rhs_be[j]; }\n\
+                     \x20           v[i] = sum;\n\
+                     \x20       }\n",
+                );
+                // Decrement happens once per sample at the common state-update
+                // block (shared with the m>0 path), not here.
+                code.push_str("    }\n\n");
             }
             Self::emit_nodal_m0_rail_handling(&mut code, ir, "    ");
         } else {
@@ -4680,7 +4786,19 @@ impl RustEmitter {
             );
             code.push_str("        }\n\n");
 
-            code.push_str("        for _iter in 0..MAX_ITER {\n");
+            // Breakpoint-BE samples get a larger NR budget: the swap sample can
+            // be a stiff step off a biased operating point, and a BE sample that
+            // hits the trap per-sample wall would reinject the very latch it is
+            // meant to remove (openfarf, g10 Key event). Byte-identical to the
+            // old `0..MAX_ITER` on non-breakpoint builds.
+            if ir.solver_config.breakpoint_be {
+                code.push_str(
+                    "        let be_iter_budget = if state.breakpoint_be > 0 { BREAKPOINT_BE_MAX_ITER } else { MAX_ITER };\n",
+                );
+                code.push_str("        for _iter in 0..be_iter_budget {\n");
+            } else {
+                code.push_str("        for _iter in 0..MAX_ITER {\n");
+            }
 
             // v_d = p_be + K_be * i_nl
             for i in 0..m {
@@ -4895,6 +5013,14 @@ impl RustEmitter {
         // State update
         code.push_str("    // State update\n");
         code.push_str("    state.v_prev = v;\n");
+        // Breakpoint-BE countdown: this sample was solved on the BE matrices
+        // (both the m=0 override above and the m>0 BE fallback, forced via the
+        // `converged` guard). One decrement per sample, after the solve.
+        if ir.solver_config.breakpoint_be {
+            code.push_str(
+                "    if state.breakpoint_be > 0 { state.breakpoint_be -= 1; }\n",
+            );
+        }
         // Commit input_prev here (NOT at the RHS build) so the sub-step input
         // interpolation earlier in the sample still sees last sample's value.
         code.push_str("    state.input_prev = input;\n");
@@ -5735,17 +5861,28 @@ impl RustEmitter {
         let os_factor = ir.solver_config.oversampling_factor;
         let has_behavioral = !ir.behavioral_sources.is_empty();
         let has_bsrc_time = ir.behavioral_sources.iter().any(|b| b.time_dependent);
-        // Runtime BE-latch: skip sub-step recovery and force the BE fallback
-        // once the Nyquist-cycle detector has latched. Empty on non-latch builds.
-        let be_latch_and = if ir.solver_config.runtime_be_latch {
-            " && !state.be_latched"
-        } else {
-            ""
+        // "Force BE this sample" guards. Trap is accepted only when nothing is
+        // forcing BE: the runtime Nyquist BE-latch OR the breakpoint-BE countdown
+        // armed by a .switch/.pot swap (which routes the swap sample through the
+        // L-stable BE fallback to kill the 2× / z=-1 artifact). Empty on builds
+        // with neither → byte-identical.
+        let be_latch_and = match (
+            ir.solver_config.runtime_be_latch,
+            ir.solver_config.breakpoint_be,
+        ) {
+            (true, true) => " && !state.be_latched && state.breakpoint_be == 0",
+            (true, false) => " && !state.be_latched",
+            (false, true) => " && state.breakpoint_be == 0",
+            (false, false) => "",
         };
-        let be_latch_or = if ir.solver_config.runtime_be_latch {
-            " || state.be_latched"
-        } else {
-            ""
+        let be_latch_or = match (
+            ir.solver_config.runtime_be_latch,
+            ir.solver_config.breakpoint_be,
+        ) {
+            (true, true) => " || state.be_latched || state.breakpoint_be > 0",
+            (true, false) => " || state.be_latched",
+            (false, true) => " || state.breakpoint_be > 0",
+            (false, false) => "",
         };
 
         let mut code = section_banner("PROCESS SAMPLE (Full-nodal NR with LU solve)");
@@ -6717,8 +6854,17 @@ impl RustEmitter {
             }
             code.push('\n');
 
-            // BE NR loop
-            code.push_str("        for _iter in 0..MAX_ITER {\n");
+            // BE NR loop. Breakpoint-BE samples get the larger budget so a stiff
+            // swap-sample solve never hits the trap wall and reinjects the latch
+            // (openfarf). Byte-identical to `0..MAX_ITER` on non-breakpoint builds.
+            if ir.solver_config.breakpoint_be {
+                code.push_str(
+                    "        let be_iter_budget = if state.breakpoint_be > 0 { BREAKPOINT_BE_MAX_ITER } else { MAX_ITER };\n",
+                );
+                code.push_str("        for _iter in 0..be_iter_budget {\n");
+            } else {
+                code.push_str("        for _iter in 0..MAX_ITER {\n");
+            }
 
             // Extract v_nl (sparse N_V)
             code.push_str("            let mut v_nl = [0.0f64; M];\n");
@@ -6980,6 +7126,13 @@ impl RustEmitter {
             emit_behavioral_time_update(&mut code, ir, "    ");
         }
         code.push_str("    state.v_prev = v;\n");
+        // Breakpoint-BE countdown: this sample was solved on the BE matrices via
+        // the forced BE fallback. One decrement per sample, after the solve.
+        if ir.solver_config.breakpoint_be {
+            code.push_str(
+                "    if state.breakpoint_be > 0 { state.breakpoint_be -= 1; }\n",
+            );
+        }
         // Commit input_prev here (NOT at the RHS build) so the sub-step input
         // interpolation earlier in the sample still sees last sample's value.
         code.push_str("    state.input_prev = input;\n");

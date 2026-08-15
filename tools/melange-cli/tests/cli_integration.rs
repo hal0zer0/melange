@@ -23,6 +23,18 @@ C1 out 0 100n
 .model 1N4148 D(IS=2.52e-9 N=1.752 BV=100 IBV=100u)
 ";
 
+/// Resistive divider whose lower leg is a `.switch` — pos0 and pos1 give
+/// clearly different divider ratios, so `simulate --switch` selecting a
+/// non-rest position must change the output. The switch has both a label
+/// ("Load") and a controlled component name ("Rsw") for name-resolution tests.
+const TEST_SWITCH_DIVIDER: &str = "\
+Switch Divider Test Fixture
+R1 in out 10k
+Rsw out 0 10k
+C1 out 0 1n
+.switch Rsw 10k 100k \"Load\"
+";
+
 /// Write a test circuit to a temp file and return the path.
 fn write_test_circuit(content: &str, name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("melange_cli_test_{}.cir", name));
@@ -234,6 +246,81 @@ fn test_simulate_sine_tone() {
     );
 
     let _ = std::fs::remove_file(&tmp_wav);
+    let _ = std::fs::remove_file(&cir);
+}
+
+#[test]
+fn test_simulate_switch_selects_position() {
+    // `simulate --switch NAME=POS` reaches non-rest switch positions at runtime
+    // via `state.set_switch_N(pos)` (mirrors the generated plugin). Before this
+    // feature `simulate` was pinned at position 0, forcing compile-and-run
+    // harness gymnastics to observe any other position (openfarf, 2026-08-15).
+    // Assert: (a) label resolution, (b) component-name resolution, (c) both
+    // reach the same position -> byte-identical, and (d) that position differs
+    // from the position-0 default (the switch actually restamps).
+    let cir = write_test_circuit(TEST_SWITCH_DIVIDER, "switch_sel");
+    let sim = |tag: &str, extra: &[&str]| -> PathBuf {
+        let wav = std::env::temp_dir().join(format!("melange_cli_test_switch_{tag}.wav"));
+        let mut args = vec![
+            "simulate",
+            cir.to_str().unwrap(),
+            "--input-node",
+            "in",
+            "--output-node",
+            "out",
+            "--amplitude",
+            "0.5",
+            "--duration",
+            "0.02",
+            "--output",
+            wav.to_str().unwrap(),
+        ];
+        args.extend_from_slice(extra);
+        run_melange(&args);
+        wav
+    };
+
+    let pos0 = sim("pos0", &[]);
+    let pos1_label = sim("pos1_label", &["--switch", "Load=1"]);
+    let pos1_name = sim("pos1_name", &["--switch", "Rsw=1"]);
+
+    let b0 = wav_pcm_bytes(&pos0);
+    let b1l = wav_pcm_bytes(&pos1_label);
+    let b1n = wav_pcm_bytes(&pos1_name);
+
+    assert_ne!(
+        b0, b1l,
+        "position 1 output must differ from the position-0 default"
+    );
+    assert_eq!(
+        b1l, b1n,
+        "label (Load) and component-name (Rsw) resolution must select the same switch/position"
+    );
+
+    // Unknown switch name is a hard error with a helpful available-list.
+    let stderr = run_melange_fail(&[
+        "simulate",
+        cir.to_str().unwrap(),
+        "--input-node",
+        "in",
+        "--output-node",
+        "out",
+        "--output",
+        std::env::temp_dir()
+            .join("melange_cli_test_switch_err.wav")
+            .to_str()
+            .unwrap(),
+        "--switch",
+        "NoSuch=1",
+    ]);
+    assert!(
+        stderr.contains("not found") && stderr.contains("Load"),
+        "error should name the missing switch and list available ones, got: {stderr}"
+    );
+
+    for p in [&pos0, &pos1_label, &pos1_name] {
+        let _ = std::fs::remove_file(p);
+    }
     let _ = std::fs::remove_file(&cir);
 }
 

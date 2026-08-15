@@ -65,6 +65,21 @@ impl RustEmitter {
             .map(|c| if c.is_control() { ' ' } else { c })
             .collect();
         ctx.insert("title", &sanitized_title);
+        // Provenance line: integration/iteration flags so a consumer can tell how
+        // a checked-in generated file was built (openfarf request 2026-08-15).
+        let mut build = format!(
+            "integration={}, max_iter={}, oversampling={}x",
+            ir.integrator_selection.label(),
+            ir.solver_config.max_iterations,
+            ir.solver_config.oversampling_factor
+        );
+        if ir.solver_config.breakpoint_be {
+            build.push_str(", breakpoint-be");
+        }
+        if ir.solver_config.runtime_be_latch {
+            build.push_str(", runtime-be-latch");
+        }
+        ctx.insert("build", &build);
         self.render("header", &ctx)
     }
 
