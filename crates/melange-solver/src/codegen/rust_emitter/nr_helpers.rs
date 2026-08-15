@@ -409,8 +409,22 @@ pub(super) fn emit_nr_limit_and_converge(
                     code.push_str(&format!("{indent}    let v_lim = v_d{i} + dv{i};\n"));
                 }
             }
+            // Clamp to [0, 1], not `.max(0.01)`: a floored ratio still lets a
+            // fixed fraction (>=1%) of an arbitrarily large raw `dv{i}`
+            // through — pnjlim/fetlim compress a huge step to a small
+            // absolute delta (e.g. pnjlim grows only logarithmically with
+            // the raw jump), so `ratio` legitimately goes far below 1% for a
+            // pathological raw step, and flooring it re-admits a step orders
+            // of magnitude larger than the limiter intended. `.clamp(0.0,
+            // 1.0)` keeps a backward step (opposite-sign ratio, when the
+            // limiter reverses direction) at exactly 0 instead of forcing a
+            // small forward nudge, and otherwise respects the limiter's
+            // ratio uncapped. Same anti-pattern/fix as the nodal full-LU
+            // node-step damping floor (`e6d5db8`) and the DK/nodal shared
+            // Schur backstop — see docs/aidocs/VOLTAGE_LIMITING.md "Global
+            // Node-Step Damping". Do NOT reintroduce a floor here.
             code.push_str(&format!(
-                "{indent}    let ratio = ((v_lim - v_d{i}) / dv{i}).max(0.01);\n"
+                "{indent}    let ratio = ((v_lim - v_d{i}) / dv{i}).clamp(0.0, 1.0);\n"
             ));
             code.push_str(&format!(
                 "{indent}    if ratio < alpha[{i}] {{ alpha[{i}] = ratio; if ratio < 1.0 {{ any_limited = true; }} }}\n"
@@ -449,8 +463,13 @@ pub(super) fn emit_nr_limit_and_converge(
         }
     }
     code.push_str(";\n");
+    // Uncapped division, no `.max(0.01)` floor here either — `max_di > 0` is
+    // guaranteed by this branch's guard (`max_di * alpha_scalar > 0.1` with
+    // `alpha_scalar >= 0`), so `0.1 / max_di` is always strictly positive; a
+    // floor only re-admits a fraction of a pathologically large raw current
+    // step, the same anti-pattern removed from the per-device ratio above.
     code.push_str(&format!(
-        "{indent}let alpha_scalar = if max_di * alpha_scalar > 0.1 {{ (0.1 / max_di).max(0.01).min(alpha_scalar) }} else {{ alpha_scalar }};\n"
+        "{indent}let alpha_scalar = if max_di * alpha_scalar > 0.1 {{ (0.1 / max_di).min(alpha_scalar) }} else {{ alpha_scalar }};\n"
     ));
 
     // Apply scalar-damped step
@@ -597,8 +616,24 @@ pub(super) fn emit_schur_nr_limit_and_converge(
             code.push_str(&format!("(dv_trial{i} * global_alpha).abs()"));
         }
     }
+    // Uncapped division — bound every iteration's worst-case node step at
+    // exactly `dv_limit`, regardless of how large the raw `max_dv` is. A
+    // `.max(0.1)` floor lived here until this fix: it caps how much the raw
+    // step is shrunk BY, not what the damped step actually IS, so a
+    // pathological raw delta (observed: hundreds to thousands of volts on
+    // this 8V-rail circuit's first post-IC-seed NR iteration at a 4x
+    // oversampled internal rate) still let a 10%-of-raw jump through instead
+    // of the intended `dv_limit` (3.5V here), stalling convergence for
+    // hundreds of iterations while the trajectory wandered through
+    // nonphysical states before MAX_ITER exhausted and the un-converged
+    // iterate got baked into state. Same anti-pattern (and same fix) as the
+    // nodal full-LU node-step damping floor removed in `e6d5db8` — see
+    // docs/aidocs/VOLTAGE_LIMITING.md "Global Node-Step Damping". Since
+    // `dv_limit` and `max_dv` are both >= 0, the ratio is always strictly
+    // positive (a backward/zero step is impossible), so the floor served no
+    // anti-stall purpose here either — do NOT reintroduce it.
     code.push_str(&format!(
-        "; if max_dv > {dv_limit:.6} {{ global_alpha *= ({dv_limit:.6} / max_dv).max(0.1); any_limited = true; }} }}\n"
+        "; if max_dv > {dv_limit:.6} {{ global_alpha *= {dv_limit:.6} / max_dv; any_limited = true; }} }}\n"
     ));
 
     // Apply globally damped step

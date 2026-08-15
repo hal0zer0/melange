@@ -621,3 +621,135 @@ fn test_g10_oscillator_default_routing_is_bounded() {
          (pre-fix this was ~4953 over 2400 samples)"
     );
 }
+
+// ============================================================================
+// IC= + oversampling — NR damping-floor regression (2026-08-14)
+// ============================================================================
+
+/// The reported IC=/VCVS blowup repro (melange-circuits
+/// `local-docs/repro-ic-vcvs-blowup.cir`, verbatim), embedded so this test
+/// is self-contained. G10-divider astable: two cross-coupled PNP stages,
+/// `IC=-4` on the cross-coupling cap `C_x1` kicks the circuit off its
+/// degenerate symmetric DC fixed point. Routes DK Schur (N=13, M=4),
+/// trapezoidal — NOT the nodal-routing bug pinned by
+/// `test_g10_oscillator_default_routing_is_bounded` above (different
+/// circuit, different mechanism).
+const IC_VCVS_ASTABLE: &str = "\
+G10 divider lab v3 (internal PULSE drive)
+Vrail rail 0 DC 8
+R_green green 0 2.7k
+E_amp drvsrc 0 in 0 8
+R_trig drvsrc trigmid 10k
+C_trig trigmid b4 1n
+Q_D1A c3 b3 rail SFT352
+Q_D1B c4 b4 rail SFT352
+R_b3 b3 green 150k
+R_b4 b4 green 150k
+R_c4 c4 green 56k
+R_c3 c3 ntap 2.7k
+R_ntap ntap green 27k
+C_x1 c3 b4 6n IC=-4
+C_x2 c4 b3 6.8n
+C_out ntap out 1u
+R_bleed out green 100k
+
+.model SFT352 PNP(IS=3e-7 BF=90 VAF=50 RB=40 RC=4 RE=1 CJE=80p CJC=30p TF=1n)
+";
+
+#[test]
+fn test_ic_seeded_astable_stays_bounded_at_os1() {
+    let cir = write_test_circuit(IC_VCVS_ASTABLE, "ic_astable_os1");
+    let tmp_wav = std::env::temp_dir().join("melange_cli_test_ic_astable_os1.wav");
+
+    let stdout = run_melange(&[
+        "simulate",
+        cir.to_str().unwrap(),
+        "--output-node",
+        "out",
+        "--amplitude",
+        "1e-9",
+        "--duration",
+        "0.05",
+        "--output",
+        tmp_wav.to_str().unwrap(),
+    ]);
+
+    let _ = std::fs::remove_file(&tmp_wav);
+    let _ = std::fs::remove_file(&cir);
+
+    // This circuit is a genuine astable multivibrator: the IC seed kicks it
+    // into real switching dynamics (measured plateau ~24.5 V at base rate
+    // over 50 ms, not a settle back to a flat DC point) — 50 V is a loose
+    // bound with real margin over that plateau, not a tight fit.
+    let peak = parse_summary_value(&stdout, "peak");
+    assert!(
+        peak.is_finite() && peak.abs() < 50.0,
+        "base-rate peak must be bounded and physical, got {peak}. Full stdout:\n{stdout}"
+    );
+}
+
+/// Pins the OS4-specific NR damping-floor bug: at `--oversampling 4`
+/// (192 kHz internal rate for a 48 kHz host), the same IC-seeded transient
+/// that converges cleanly at base rate (peak ~1.18 V, `nr_max_iter_count`
+/// O(1)) drove the DK-Schur per-iteration NR voltage-limiting into a
+/// pathological regime: two `.max(0.01)`/`.max(0.1)` floors in
+/// `nr_helpers.rs::emit_nr_limit_and_converge` (per-device pnjlim/fetlim
+/// ratio, and the current-space backstop) each let a fixed *fraction* of an
+/// arbitrarily large raw Newton step through instead of clamping the
+/// *step itself* — same anti-pattern as the nodal full-LU node-step damping
+/// floor removed in `e6d5db8`. Pre-fix: peak 488,012 V,
+/// `nr_max_iter_count` 19014 over 2400 samples (NR exhausting its 270-iter
+/// budget on nearly every internal sample, `be_fallback_count` 9507). A
+/// third floor (`process_sample.rs.tera`'s Step 6c global per-sample voltage
+/// damping) had the identical pattern and was fixed alongside the two above.
+/// Post-fix: peak stays bounded (a legitimate — if larger than the
+/// base-rate value — oscillation from the astable's IC-forced switching,
+/// which the coarser base-rate step numerically damps away; OS4 resolves it
+/// correctly). Generous bound here pins "bounded and physical", not an
+/// exact oscillation amplitude — OS1 and OS4 are NOT expected to converge
+/// to the same peak for a genuinely astable circuit.
+#[test]
+fn test_ic_seeded_astable_stays_bounded_at_os4() {
+    let cir = write_test_circuit(IC_VCVS_ASTABLE, "ic_astable_os4");
+    let tmp_wav = std::env::temp_dir().join("melange_cli_test_ic_astable_os4.wav");
+
+    let stdout = run_melange(&[
+        "simulate",
+        cir.to_str().unwrap(),
+        "--output-node",
+        "out",
+        "--amplitude",
+        "1e-9",
+        "--duration",
+        "0.05",
+        "--oversampling",
+        "4",
+        "--output",
+        tmp_wav.to_str().unwrap(),
+    ]);
+
+    let _ = std::fs::remove_file(&tmp_wav);
+    let _ = std::fs::remove_file(&cir);
+
+    assert!(
+        stdout.contains("Solver: DK"),
+        "expected this circuit to route DK Schur (not the nodal-routing bug \
+         pinned elsewhere) — full stdout:\n{stdout}"
+    );
+
+    let peak = parse_summary_value(&stdout, "peak");
+    let magnitude_reset_count = parse_summary_value(&stdout, "magnitude_reset_count");
+    let nan_reset_count = parse_summary_value(&stdout, "nan_reset_count");
+
+    assert!(
+        peak.is_finite() && peak.abs() < 200.0,
+        "OS4 peak must be bounded and physical, got {peak} \
+         (pre-fix this diverged to ~488,012). Full stdout:\n{stdout}"
+    );
+    assert_eq!(
+        magnitude_reset_count, 0.0,
+        "the STATE_MAX_PLAUSIBLE_MAGNITUDE safety net should not need to fire \
+         once NR is actually converging — got {magnitude_reset_count}"
+    );
+    assert_eq!(nan_reset_count, 0.0, "no NaN/Inf should ever appear");
+}

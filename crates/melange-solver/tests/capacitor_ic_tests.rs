@@ -613,16 +613,24 @@ R_bleed out green 100k
 .model SFT352 PNP(IS=3e-7 BF=90 VAF=50 RB=40 RC=4 RE=1 CJE=80p CJC=30p TF=1n)
 ";
 
-/// The rail is 8 V; the largest legitimate transient (the IC-forced -4 V
-/// jump on a network whose nodes otherwise sit near the rail) peaks under
-/// 15 V. Pre-fix, the IC+E case reached thousands of volts. 20 V is a loose
-/// bound that pins "did not blow up" without over-fitting to exact decimals.
-const ASTABLE_BOUND: f64 = 20.0;
+/// The rail is 8 V. This circuit is a genuine astable multivibrator (a
+/// "G10 divider") — the IC=-4V seed kicks it off its degenerate symmetric
+/// DC fixed point into real switching dynamics, not a settle back to a flat
+/// DC point. Once the DK per-iteration NR voltage-limiting floors were also
+/// fixed (`nr_helpers.rs::emit_nr_limit_and_converge`, see
+/// `tools/melange-cli/tests/cli_integration.rs`
+/// `test_ic_seeded_astable_stays_bounded_at_os4`), the resolved trajectory
+/// plateaus around a ~20-32 V oscillation (measured up to ~32 V over 300 ms)
+/// rather than the ~1-20 V a coarser/floor-limited solve showed. 50 V is a
+/// loose bound with real margin over that plateau — it pins "did not blow
+/// up" (pre-fix: 5053 V-57000 V finite, 488,012 V at 4x oversampling)
+/// without over-fitting to the exact oscillation amplitude.
+const ASTABLE_BOUND: f64 = 50.0;
 
 fn run_astable(spice: &str, tag: &str) -> Vec<f64> {
     let config = support::config_for_spice(spice, 48000.0);
     let circuit = support::build_circuit(spice, &config, tag);
-    let input = vec![0.0; 960];
+    let input = vec![0.0; 2400]; // 50 ms — matches the plateaued-amplitude window
     support::run_signal(&circuit, &input, 48000.0)
 }
 

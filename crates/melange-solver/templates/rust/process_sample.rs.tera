@@ -152,7 +152,16 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
             // (per CLAUDE.md: "never use output attenuation to mask simulation
             // errors"). Surfaced via state.diag_voltage_damp_count.
             state.diag_voltage_damp_count = state.diag_voltage_damp_count.saturating_add(1);
-            let damp = (damp_thresh / max_delta).max(0.01);
+            // Uncapped division — `damp_thresh` and `max_delta` are both
+            // strictly positive here (max_delta > damp_thresh > 0), so
+            // `damp` is always strictly positive; a `.max(0.01)` floor would
+            // re-admit at least 1% of an arbitrarily large `max_delta`
+            // instead of clamping the step to `damp_thresh` as intended.
+            // Same anti-pattern/fix as the NR per-iteration voltage-limiting
+            // floors in `nr_helpers.rs` and the nodal node-step damping
+            // floor removed in `e6d5db8` — see docs/aidocs/VOLTAGE_LIMITING.md
+            // "Global Node-Step Damping". Do NOT reintroduce a floor here.
+            let damp = damp_thresh / max_delta;
             let mut v_d = v;
             for i in 0..N {
                 v_d[i] = state.v_prev[i] + damp * (v[i] - state.v_prev[i]);
