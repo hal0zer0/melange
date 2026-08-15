@@ -283,6 +283,8 @@ and compilation are necessary but not sufficient).
 
 ## Pending Work
 
+- **`melange simulate --switch "Label=pos"`** (requested by openfarf 2026-08-15, low priority): `compile` already has `--switch`; `simulate` cannot reach any non-rest switch position, which forced compile-and-run harnesses all through the switch-swap investigation. Plumbing is ready — `generate_simulate_main` already takes a `switch_calls` param (wired to `&[]` "future"); implement by adding the flag to the Simulate command and resolving label→`set_switch_N(pos)` like compile does. Small.
+- **Switch/pot z=−1 intrinsic to hard-switching (not just `.switch`):** beyond the `.switch` G-swap fix (Deferred), the trap z=−1 mode on capless subspaces is re-excited by ANY hard-switching edge (BJT edges in the g10 divider re-excite it every ~160 samples → openfarf's residual wanders 0.9–4.9% with no decay). Existing nodal auto-BE gates on ρ>1.002; a marginal z=−1 (ρ=1) may slip it — likely gap. Grader for this case: CLI == codegen window-for-window on the g10 chain keyed closed (not a 1e-7 target).
 - **Neve 1073**: EQ section (Stage 3), integration (Stage 4), plugin (Stage 5). Stages 1 & 2 BA283 amps SPICE-validated.
 - **Oomox plugin roadmap**: `.runtime` VS, named constants, DC op accessor, warmup constant, runtime DC OP recompute
 - **Performance**: DK parasitic BJTs (power amp 0.41×, K_eff approach planned); hot/cold state split; fast_powf for Koren tube model
