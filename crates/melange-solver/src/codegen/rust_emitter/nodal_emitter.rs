@@ -1059,6 +1059,21 @@ impl RustEmitter {
                 ir.solver_config.max_iterations.max(200)
             ));
         }
+        if ir.solver_config.gmin_continuation {
+            code.push_str(
+                "/// Gmin-continuation homotopy schedule for stiff hard-switching NR.\n\
+                 /// Level 0 is the ordinary regularization (1e-12, byte-identical to a\n\
+                 /// non-continuation build); on failure the solve escalates through a\n\
+                 /// Gmin ramp (1e-2 → 1e-12), warm-starting each level, to walk a\n\
+                 /// pinned junction back into its true operating point.\n",
+            );
+            code.push_str(
+                "pub const GMIN_CONT_SCHEDULE: [f64; 12] = [\n\
+                 \x20   1e-12, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10, 1e-11, 1e-12,\n\
+                 ];\n",
+            );
+            code.push_str("pub const GMIN_CONT_LEVELS: usize = GMIN_CONT_SCHEDULE.len();\n\n");
+        }
         code.push_str(
             "/// Chord method: re-factor Jacobian every N iterations (full LU path only).\n",
         );
@@ -1872,6 +1887,10 @@ impl RustEmitter {
         code.push_str("    pub diag_nr_max_iter_count: u64,\n");
         code.push_str("    /// Diagnostic: number of backward Euler fallback activations\n");
         code.push_str("    pub diag_be_fallback_count: u64,\n");
+        if ir.solver_config.gmin_continuation {
+            code.push_str("    /// Diagnostic: samples that needed Gmin-continuation (escalated past level 0)\n");
+            code.push_str("    pub diag_gmin_continuation_count: u64,\n");
+        }
         code.push_str(
             "    /// Diagnostic: number of times the runtime BE-latch engaged (rising\n\
              \x20   /// edges). Nonzero means the solver detected a self-sustaining Nyquist\n\
@@ -2332,6 +2351,9 @@ impl RustEmitter {
         code.push_str("            diag_clamp_count: 0,\n");
         code.push_str("            diag_nr_max_iter_count: 0,\n");
         code.push_str("            diag_be_fallback_count: 0,\n");
+        if ir.solver_config.gmin_continuation {
+            code.push_str("            diag_gmin_continuation_count: 0,\n");
+        }
         code.push_str("            diag_be_latch_count: 0,\n");
         code.push_str("            diag_active_set_pin_count: 0,\n");
         code.push_str("            diag_nan_reset_count: 0,\n");
@@ -2602,6 +2624,9 @@ impl RustEmitter {
         code.push_str("        self.diag_clamp_count = 0;\n");
         code.push_str("        self.diag_nr_max_iter_count = 0;\n");
         code.push_str("        self.diag_be_fallback_count = 0;\n");
+        if ir.solver_config.gmin_continuation {
+            code.push_str("        self.diag_gmin_continuation_count = 0;\n");
+        }
         code.push_str("        self.diag_be_latch_count = 0;\n");
         code.push_str("        self.diag_active_set_pin_count = 0;\n");
         code.push_str("        self.diag_nan_reset_count = 0;\n");
@@ -6082,6 +6107,30 @@ impl RustEmitter {
             }
             code.push('\n');
 
+            // Trapezoidal NR loop. When gmin-continuation is enabled it is
+            // wrapped in a Gmin homotopy: level 0 is the ordinary solve
+            // (nr_gmin = 1e-12, byte-identical — a converging sample breaks out
+            // immediately), and only if that fails do successive levels add a
+            // larger Gmin (ramped 1e-2 → 1e-12) to the device-node diagonals to
+            // regularize a stuck, ill-conditioned switching junction, warm-
+            // starting from the predictor. Mirrors the DC-OP Gmin stepping.
+            let gmin_cont = ir.solver_config.gmin_continuation && m > 0;
+            if gmin_cont {
+                code.push_str("    'gmin_cont: for gmin_level in 0..GMIN_CONT_LEVELS {\n");
+                code.push_str("        let nr_gmin = GMIN_CONT_SCHEDULE[gmin_level];\n");
+                // Level 0 = ordinary attempt (v starts from state.v_prev, the
+                // pre-loop guess, with the cross-sample chord). Level 1 restarts
+                // the homotopy from that same guess (level 0 may have left v
+                // diverged); every homotopy level refactors (Gmin changed the Jacobian).
+                code.push_str("        if gmin_level == 1 { v = state.v_prev; }\n");
+                code.push_str("        if gmin_level > 0 {\n");
+                code.push_str("            chord_valid = false;\n");
+                code.push_str("            converged = false;\n");
+                code.push_str("            state.last_nr_iterations = MAX_ITER as u32;\n");
+                code.push_str("            if gmin_level == 1 { state.diag_gmin_continuation_count += 1; }\n");
+                code.push_str("        }\n");
+            }
+
             // Trapezoidal NR loop
             code.push_str("    for iter in 0..MAX_ITER {\n");
 
@@ -6176,7 +6225,15 @@ impl RustEmitter {
             code.push_str("            chord_j_dev = j_dev;\n");
             code.push_str("            chord_lu = state.a;\n");
             code.push_str("            // Gmin regularization\n");
-            code.push_str("            for i in 0..N_NODES { chord_lu[i][i] += 1e-12; }\n");
+            if gmin_cont {
+                // Homotopy Gmin (nr_gmin): 1e-12 at level 0 (identical to the
+                // fixed regularization), larger on escalated levels.
+                code.push_str(
+                    "            for i in 0..N_NODES { chord_lu[i][i] += nr_gmin; }\n",
+                );
+            } else {
+                code.push_str("            for i in 0..N_NODES { chord_lu[i][i] += 1e-12; }\n");
+            }
             {
                 // Build transpose of N_i sparsity: for each device dim i, which nodes a are nonzero
                 emit_nodal_jacobian_stamp(&mut code, ir, m, "chord_lu", "            ");
@@ -6589,6 +6646,17 @@ impl RustEmitter {
             code.push_str("            break;\n");
             code.push_str("        }\n");
             code.push_str("    }\n\n"); // end trapezoidal NR loop
+
+            // Close the Gmin-continuation homotopy. Break ONLY when the ordinary
+            // level 0 converged (byte-identical fast path). A converged
+            // *intermediate* level holds a Gmin-REGULARIZED solution — accepting
+            // it yields a non-physical (railed) result — so the homotopy must run
+            // through to the final level (nr_gmin back at 1e-12), warm-starting
+            // each level, and only that final solve's `converged` is the true one.
+            if gmin_cont {
+                code.push_str("        if converged && gmin_level == 0 { break 'gmin_cont; }\n");
+                code.push_str("    }\n\n"); // end gmin-continuation homotopy
+            }
 
             // Adaptive sub-stepping: when trapezoidal NR fails, subdivide the timestep
             // and retry with tighter capacitor conductances. This is how ngspice handles
