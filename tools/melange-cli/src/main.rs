@@ -2903,12 +2903,54 @@ fn simulate_circuit_source(
 
     // Parse diagnostics from stderr
     let stderr = String::from_utf8_lossy(&result.stderr);
+    let mut nr_max_iter_count: Option<u64> = None;
+    let mut diag_samples: Option<u64> = None;
     for line in stderr.lines() {
         if let Some(diag) = line.strip_prefix("DIAG:") {
             let parts: Vec<&str> = diag.splitn(2, '=').collect();
             if parts.len() == 2 {
                 println!("  {}: {}", parts[0], parts[1]);
+                match parts[0] {
+                    "nr_max_iter_count" => nr_max_iter_count = parts[1].trim().parse().ok(),
+                    "samples" => diag_samples = parts[1].trim().parse().ok(),
+                    _ => {}
+                }
             }
+        }
+    }
+
+    // Validity warning: if Newton-Raphson hit its iteration ceiling on a large
+    // fraction of (internal-rate) samples, the solver never actually converged
+    // there. A starved solve can latch every node at a DC-ish value that looks
+    // exactly like a physical steady state while being numerically meaningless
+    // — and nothing else in the normal output flags it as fatal-to-validity.
+    // Surface it loudly. (Raised by melange-circuits 2026-08-15: a Ge astable
+    // cascade starved at --max-iter 70 latched every node and read as real
+    // physics for half a day; --max-iter 1000 converged.)
+    //
+    // Threshold is 20%, not the originally-suggested 5%: a healthy run of that
+    // same circuit still shows ~5% onset-only max-iter samples (BE fallback
+    // rescues them), so 5% would cry wolf. 20% cleanly separates onset
+    // transients from a systematic latch (~100% in the failing case).
+    if let (Some(nr_fail), Some(samples)) = (nr_max_iter_count, diag_samples) {
+        let internal_samples = samples.saturating_mul(opts.oversampling as u64).max(1);
+        let frac = nr_fail as f64 / internal_samples as f64;
+        if frac > 0.20 {
+            let max_iter_disp = opts
+                .max_iter
+                .map_or_else(|| "default".to_string(), |m| m.to_string());
+            eprintln!(
+                "WARNING: Newton-Raphson hit its iteration ceiling {} times across {} internal \
+                 samples ({:.0}%; a sample can fail both its trapezoidal and BE-fallback solve, so \
+                 this can exceed 100%). The solver is failing to converge on a large fraction of \
+                 samples — the output can latch at a DC-ish value that looks like a physical steady \
+                 state while being numerically meaningless. Verify the result; if it looks wrong, \
+                 re-run with a larger --max-iter (current {}; try 1000).",
+                nr_fail,
+                internal_samples,
+                frac * 100.0,
+                max_iter_disp,
+            );
         }
     }
 

@@ -753,3 +753,74 @@ fn test_ic_seeded_astable_stays_bounded_at_os4() {
     );
     assert_eq!(nan_reset_count, 0.0, "no NaN/Inf should ever appear");
 }
+
+/// NR-starvation validity warning. A too-low `--max-iter` can leave the solver
+/// non-converged on most/all samples, latching every node at a DC-ish value
+/// that reads as a physical steady state while being numerically meaningless —
+/// with nothing in the normal output flagging it. `simulate` must emit a WARNING
+/// to stderr in that case. (Requested by melange-circuits 2026-08-15 after an
+/// NR-starved Ge astable cascade silently latched and cost a half-day.)
+#[test]
+fn test_simulate_warns_on_nr_starvation() {
+    let cir = write_test_circuit(TEST_DIODE_CLIPPER, "nr_starve");
+    let tmp_wav = std::env::temp_dir().join("melange_cli_test_nr_starve.wav");
+
+    // --max-iter 1 cannot converge a driven diode clipper: expect the warning.
+    let starved = Command::new(melange_bin())
+        .args([
+            "simulate",
+            cir.to_str().unwrap(),
+            "-n",
+            "out",
+            "--amplitude",
+            "0.9",
+            "-d",
+            "0.01",
+            "--max-iter",
+            "1",
+            "--output",
+            tmp_wav.to_str().unwrap(),
+        ])
+        .current_dir(project_root())
+        .output()
+        .expect("failed to run melange");
+    let starved_err = String::from_utf8_lossy(&starved.stderr).to_string();
+    assert!(
+        starved.status.success(),
+        "simulate should still succeed (warning is advisory), stderr:\n{starved_err}"
+    );
+    assert!(
+        starved_err.contains("WARNING") && starved_err.contains("Newton-Raphson"),
+        "expected an NR-starvation WARNING on stderr at --max-iter 1, got:\nstdout:{}\nstderr:{starved_err}",
+        String::from_utf8_lossy(&starved.stdout)
+    );
+
+    // Same circuit with an adequate ceiling must NOT warn (no false positive).
+    let clean = Command::new(melange_bin())
+        .args([
+            "simulate",
+            cir.to_str().unwrap(),
+            "-n",
+            "out",
+            "--amplitude",
+            "0.9",
+            "-d",
+            "0.01",
+            "--max-iter",
+            "100",
+            "--output",
+            tmp_wav.to_str().unwrap(),
+        ])
+        .current_dir(project_root())
+        .output()
+        .expect("failed to run melange");
+    let clean_err = String::from_utf8_lossy(&clean.stderr).to_string();
+
+    let _ = std::fs::remove_file(&tmp_wav);
+    let _ = std::fs::remove_file(&cir);
+
+    assert!(
+        !clean_err.contains("WARNING"),
+        "a converging run must not emit the NR-starvation warning, got stderr:\n{clean_err}"
+    );
+}
