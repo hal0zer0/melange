@@ -79,9 +79,6 @@ impl RustEmitter {
         if ir.solver_config.runtime_be_latch {
             build.push_str(", runtime-be-latch");
         }
-        if ir.solver_config.gmin_continuation {
-            build.push_str(", gmin-continuation");
-        }
         ctx.insert("build", &build);
         self.render("header", &ctx)
     }

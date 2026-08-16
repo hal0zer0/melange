@@ -543,6 +543,49 @@ hit this — no known circuit triggers both conditions simultaneously.
 - Iterative refinement in the chord back-solve (one extra O(N²) pass)
 - Schur-complement-within-full-LU hybrid (M-dim correction inside N-dim NR)
 
+## Hard-Switching NR Starvation on Marginal Astables — do NOT force convergence (gmin-continuation, tried + reverted 2026-08-15)
+
+On a stiff hard-switching sample a positive-feedback junction can pin to v/vt≈300
+with `i_dev` at the `safe_exp` ceiling, leaving the trap Jacobian ill-conditioned
+and the NR residual stuck flat → the sample hits `MAX_ITER` and falls to the BE
+fallback ("NR starvation", e.g. ~2–3% of samples on the Farfisa G10 divider).
+
+It is tempting to fix this by porting the DC-OP solver's **Gmin stepping**
+(DC_OP.md) into the per-sample solve — add `gmin` to the node diagonals, ramp
+1e-2→1e-12 warm-started, accept the final gmin≈0 solve. This was built as an
+opt-in `--gmin-continuation` flag (trap, BE-fallback, and hybrid trap+breakpoint-BE
+variants) and **REVERTED**: on a **marginal self-oscillator it is net-negative in
+every form.** Certified with an interval-histogram deglitch rig
+(`openfarf tools/divider_intervals.py` on a `simulate --probe` CSV — a raw
+crossing detector reads trap G10 as chaos and must not be used), term_2d
+spurious-transition rate (lower = better):
+
+| config | term_2d spurious |
+|---|---|
+| plain BE fallback ("starved", no flag) | **8.9%** (optimal; hardware-faithful) |
+| gmin in BE fallback | 12.2% |
+| gmin in trap loop | 32.9% |
+| hybrid (trap gmin + breakpoint-BE tick) | 62.3% (amplitude inflated ~7 V vs 4.4) |
+
+**Why forcing convergence loses on an astable:** trap-converging the stiff sample
+excites trap's marginal `z=-1` mode on capless nodes (the intrinsic
+g-in-both-A-and-A_neg ring) → glitches + amplitude drift; and even BE-converging
+is *slightly worse* than the plain (non-converged) BE fallback, because the
+BE-fallback state sits more consistently on the astable's limit cycle than a
+gmin-converged one. **More solver effort = worse output here.** The right tool
+for a marginal astable is the BE fallback / auto-BE / `--backward-euler` / the
+"starved" recipe — accept the trap `nr_max_iter_count` and let BE catch it.
+
+**When Gmin-continuation WOULD be the right fix (resurrect from git `041ac79`
+/ `aa2c7ce` for this):** a **non-oscillating, convergence-limited** stiff circuit
+— a hard clipper / heavy-clip stage / rectifier that genuinely fails per-sample
+NR at a switching edge but has NO marginal limit cycle, so the CONVERGED trap
+solution is exactly what you want (accuracy-limited, not stability-limited).
+Profile first to confirm convergence-limited vs marginal, and certify with the
+interval-histogram rig before shipping. Implementation note: warm-start the
+homotopy (reset `v` to `v_prev` at level 1 only), gate off BE and
+saturating-inductor builds.
+
 ## Codegen Emission Footguns
 
 Rules for writing code that emits Rust. Surfaced across Phase E.5 of the

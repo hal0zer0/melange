@@ -281,23 +281,6 @@ pub struct CodegenConfig {
     /// is the correct default on circuits where trap is unstable.
     /// Ignored when `backward_euler` is already `true`.
     pub force_trap: bool,
-    /// Per-sample gmin-stepping continuation for stiff hard-switching NR
-    /// (full-LU path). When the trapezoidal Newton solve fails to converge at a
-    /// switching transition — a positive-feedback junction pinned deep into
-    /// saturation (v/vt≈300, i_dev at the safe_exp ceiling) leaves the Jacobian
-    /// catastrophically ill-conditioned and the residual stuck flat — this
-    /// retries with a Gmin homotopy (add `gmin·|N_v|` to the device-node
-    /// diagonals, ramp 1e-2→1e-12, warm-starting each level) before the BE
-    /// fallback, mirroring the DC-OP solver's Gmin stepping (DC_OP.md).
-    ///
-    /// Off by default: it only changes behaviour on samples that fail plain
-    /// trap-NR (rare; byte-identical otherwise), but for those it converges the
-    /// TRAP solution instead of the BE fallback and costs up to N_levels×MAX_ITER
-    /// iterations on that sample — a robustness/latency trade best opted into for
-    /// offline references (e.g. the Farfisa G10 calibration reference, where
-    /// non-converged samples integrate into oscillator PITCH error). Full-LU
-    /// nodal path only.
-    pub gmin_continuation: bool,
     /// Disable adaptive backward Euler fallback for the DK codegen path.
     /// When false (default), the generated code includes pre-computed BE matrices
     /// and can fall back to BE for individual samples where trapezoidal NR diverges.
@@ -435,7 +418,6 @@ impl Default for CodegenConfig {
             pot_settle_samples: 64,
             backward_euler: false,
             force_trap: false,
-            gmin_continuation: false,
             disable_be_fallback: false,
             opamp_rail_mode: OpampRailMode::Auto,
             noise_mode: NoiseMode::Off,

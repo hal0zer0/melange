@@ -126,16 +126,6 @@ enum Commands {
         #[arg(long)]
         force_trap: bool,
 
-        /// Per-sample gmin-stepping continuation for stiff hard-switching NR
-        /// (full-LU path). On samples where trapezoidal Newton fails at a
-        /// switching transition, retry with a gmin homotopy before the BE
-        /// fallback, converging the trap solution instead of falling to BE.
-        /// Off by default (byte-identical otherwise). Opt in for offline
-        /// references where non-converged samples corrupt the result (e.g. the
-        /// Farfisa G10 calibration reference — pitch integrates NR error).
-        #[arg(long)]
-        gmin_continuation: bool,
-
         /// Pentode grid-off dimension reduction mode.
         ///
         /// When a pentode's grid is biased well below cutoff at DC-OP, the
@@ -388,10 +378,6 @@ enum Commands {
         #[arg(long)]
         force_trap: bool,
 
-        /// Per-sample gmin-stepping continuation for stiff hard-switching NR.
-        /// Mirrors `compile --gmin-continuation`. Off by default.
-        #[arg(long)]
-        gmin_continuation: bool,
 
         /// Maximum NR iterations per sample. Defaults to the same auto-tuned
         /// budget `compile` uses (scales with M, solver route, and trap
@@ -680,7 +666,6 @@ fn main() -> Result<()> {
             solver,
             backward_euler,
             force_trap,
-            gmin_continuation,
             tube_grid_fa,
             opamp_rail_mode,
             noise,
@@ -783,7 +768,6 @@ fn main() -> Result<()> {
                 &solver,
                 backward_euler,
                 force_trap,
-                gmin_continuation,
                 &tube_grid_fa,
                 rail_mode,
                 noise_mode,
@@ -864,7 +848,6 @@ fn main() -> Result<()> {
             noise_seed,
             backward_euler,
             force_trap,
-            gmin_continuation,
             max_iter,
             probes,
             probe_csv,
@@ -940,7 +923,6 @@ fn main() -> Result<()> {
                     noise_seed,
                     backward_euler,
                     force_trap,
-                    gmin_continuation,
                     max_iter,
                     probes: &probes,
                     probe_csv: probe_csv_path.as_deref(),
@@ -1197,7 +1179,6 @@ fn compile_circuit_source(
     solver_override: &str,
     backward_euler: bool,
     force_trap: bool,
-    gmin_continuation: bool,
     tube_grid_fa: &str,
     opamp_rail_mode: melange_solver::codegen::OpampRailMode,
     noise_mode: melange_solver::codegen::NoiseMode,
@@ -1737,7 +1718,6 @@ fn compile_circuit_source(
         dc_block: !no_dc_block,
         backward_euler,
         force_trap,
-        gmin_continuation,
         opamp_rail_mode,
         noise_mode,
         noise_master_seed: noise_seed,
@@ -2382,7 +2362,6 @@ struct SimulateOptions<'a> {
     noise_seed: u64,
     backward_euler: bool,
     force_trap: bool,
-    gmin_continuation: bool,
     /// Explicit `--max-iter` override; `None` → auto-tuned (see [`auto_tune_max_iter`]).
     max_iter: Option<usize>,
     probes: &'a [String],
@@ -2944,7 +2923,6 @@ fn simulate_circuit_source(
         pot_settle_samples: 64,
         backward_euler: opts.backward_euler,
         force_trap: opts.force_trap,
-        gmin_continuation: opts.gmin_continuation,
         disable_be_fallback: false,
         opamp_rail_mode: opts.opamp_rail_mode,
         noise_mode: opts.noise_mode,
@@ -4108,7 +4086,6 @@ fn analyze_freq_response(
         pot_settle_samples: 64,
         backward_euler,
         force_trap,
-        gmin_continuation: false,
         disable_be_fallback: false,
         opamp_rail_mode,
         noise_mode,

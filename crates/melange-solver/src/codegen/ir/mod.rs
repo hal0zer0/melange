@@ -432,11 +432,6 @@ pub struct SolverConfig {
     /// per-sample Δg self-corrects.
     #[serde(default)]
     pub breakpoint_be: bool,
-    /// Per-sample Gmin-stepping continuation on the full-LU path for stiff
-    /// hard-switching NR failures (see [`crate::codegen::CodegenConfig::gmin_continuation`]).
-    /// Opt-in; off by default. Emitted only on the full-LU nodal path with m>0.
-    #[serde(default)]
-    pub gmin_continuation: bool,
     /// Resolved op-amp supply rail saturation strategy.
     ///
     /// If the user's [`CodegenConfig::opamp_rail_mode`] was [`OpampRailMode::Auto`],
@@ -1747,7 +1742,6 @@ impl CircuitIR {
             // DK codegen path does not emit the runtime BE-latch net yet.
             runtime_be_latch: false,
             breakpoint_be: false,
-            gmin_continuation: false,
             opamp_rail_mode: rail_mode.mode,
             emit_dc_op_recompute: config.emit_dc_op_recompute,
         };
@@ -2745,7 +2739,6 @@ impl CircuitIR {
             // final `solver_config.backward_euler`).
             runtime_be_latch: false,
             breakpoint_be: false,
-            gmin_continuation: false,
             opamp_rail_mode: rail_mode.mode,
             emit_dc_op_recompute: config.emit_dc_op_recompute,
         };
@@ -3052,10 +3045,6 @@ impl CircuitIR {
         solver_config.breakpoint_be = !solver_config.backward_euler
             && !has_saturating
             && (!mna.switches.is_empty() || has_knob_pot);
-
-        // Opt-in per-sample Gmin continuation (full-LU path gates emission on m>0
-        // + use_full_nodal in the emitter). Off unless the caller asked for it.
-        solver_config.gmin_continuation = config.gmin_continuation && !solver_config.backward_euler;
 
         let matrices = Matrices {
             s: s_flat,
