@@ -746,3 +746,95 @@ L1 out 0 50m
         lh3 / lh1
     );
 }
+
+/// Coupled SATURATING TRANSFORMER via the shared-core T-model (Phase 2, 2026-08-16).
+///
+/// Two guards:
+///  - **T-model == exact [L]** (the ideal-transformer sign fix): a saturating
+///    group routes through the T-model (leakage + ideal couplings + one {ref}_mag
+///    magnetizing inductor); a non-saturating group uses the exact CoupledInductor
+///    path. Driven identically (near-linear via huge ISAT), their transfer must
+///    match to <0.5% — otherwise the ideal-transformer stamp is mis-realizing the
+///    mutual (the +5% frequency-growing bug this pins against).
+///  - **Shared-core saturation** is odd-symmetric on the secondary: H2/H1 ≈ 0,
+///    H3 present, and a linear control shows no H3.
+#[test]
+fn test_saturating_transformer_tmodel() {
+    // "H1 H2 H3 peak" over a steady-state window; secondary is `out`.
+    const MAIN: &str = r#"
+fn main() {
+    let mut state = CircuitState::default();
+    let sr = 48000.0_f64; let f = 1000.0_f64;
+    let n = 5280usize; let skip = 1440usize;
+    let mut samp: Vec<f64> = Vec::new();
+    for i in 0..n {
+        let t = i as f64 / sr;
+        let input = 0.9 * (2.0 * std::f64::consts::PI * f * t).sin();
+        let out = process_sample(input, &mut state);
+        if i >= skip { samp.push(out[0]); }
+    }
+    let bin = |fr: f64| -> f64 {
+        let (mut re, mut im) = (0.0f64, 0.0f64);
+        for (k, &v) in samp.iter().enumerate() {
+            let ph = 2.0 * std::f64::consts::PI * fr * ((skip + k) as f64) / sr;
+            re += v * ph.cos(); im += v * ph.sin();
+        }
+        2.0 * (re * re + im * im).sqrt() / samp.len() as f64
+    };
+    let peak = samp.iter().fold(0.0f64, |a, &x| a.max(x.abs()));
+    println!("{:.9} {:.9} {:.9} {:.9}", bin(1000.0), bin(2000.0), bin(3000.0), peak);
+}
+"#;
+    let parse = |out: &str| -> (f64, f64, f64, f64) {
+        let v: Vec<f64> = out.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+        assert_eq!(v.len(), 4, "expected 'H1 H2 H3 peak', got {out:?}");
+        (v[0], v[1], v[2], v[3])
+    };
+    // Near-linear T-model (huge ISAT fires the decomposition but never saturates).
+    const TM: &str = "\
+Tmodel near-linear transformer
+L_pri in 0 100m ISAT=1e6
+L_sec out 0 25m
+K1 L_pri L_sec 0.99
+R_load out 0 1k
+.END";
+    // Exact path: same transformer, no ISAT (CoupledInductorInfo).
+    const EX: &str = "\
+Exact coupled transformer
+L_pri in 0 100m
+L_sec out 0 25m
+K1 L_pri L_sec 0.99
+R_load out 0 1k
+.END";
+    let (tm_h1, _, _, _) = parse(&compile_and_run(&generate_nodal_code(TM, 48000.0), MAIN, "xfmr_tm"));
+    let (ex_h1, _, _, _) = parse(&compile_and_run(&generate_nodal_code(EX, 48000.0), MAIN, "xfmr_ex"));
+    let transfer_err = (tm_h1 - ex_h1).abs() / ex_h1;
+    assert!(
+        transfer_err < 0.005,
+        "T-model transfer must match the exact [L] path (ideal-xfmr sign): \
+         T-model H1={tm_h1:.6}, exact H1={ex_h1:.6}, err={:.4}",
+        transfer_err
+    );
+
+    // Saturating transformer: shared-core odd-symmetric saturation on the secondary.
+    const SAT: &str = "\
+Saturating transformer
+L_pri in 0 100m ISAT=1m
+L_sec out 0 25m
+K1 L_pri L_sec 0.99
+R_load out 0 1k
+.END";
+    let (sh1, sh2, sh3, speak) = parse(&compile_and_run(&generate_nodal_code(SAT, 48000.0), MAIN, "xfmr_sat"));
+    assert!(sh1.is_finite() && speak.is_finite() && speak < 1.0, "unbounded/NaN: H1={sh1} peak={speak}");
+    assert!(sh1 > 0.05, "secondary carries no signal: H1={sh1:.4}");
+    assert!(
+        sh2 / sh1 < 0.01,
+        "even-harmonic leak — shared-core saturation must be symmetric: H2/H1={:.4}",
+        sh2 / sh1
+    );
+    assert!(
+        sh3 / sh1 > 0.03,
+        "no saturation on the secondary — core not saturating: H3/H1={:.4}",
+        sh3 / sh1
+    );
+}
