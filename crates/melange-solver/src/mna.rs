@@ -3436,7 +3436,22 @@ impl MnaBuilder {
                 .map(|c| c.coupling)
                 .fold(0.0_f64, f64::max);
 
-            if max_l > IDEAL_XFMR_L_THRESHOLD && max_k > IDEAL_XFMR_K_THRESHOLD {
+            // Phase 2 (saturating transformers): a group carrying ISAT on any
+            // winding is a shared-core SATURATING transformer. Route it through the
+            // T-model so saturation attaches to the single {ref}_mag magnetizing
+            // inductor (whose branch current IS the net magnetizing current), not
+            // the physically-wrong per-winding winding_isats path. This is
+            // ADDITIVE: non-saturating groups are unaffected (still gated by the
+            // 1e30 L threshold, i.e. currently never). Saturating groups force the
+            // full-LU nodal path (Phase 1 routing), where the ideal-coupling
+            // algebraic constraint is resolved by direct LU each sample — the
+            // reactive-delay requirement that motivated the 1e30 disable is a
+            // DK/Schur limitation, not a full-LU one. Still requires tight coupling
+            // (max_k > 0.8) for the leakage/magnetizing split to be well-posed.
+            let group_saturating = members.iter().any(|m| inductor_refs[m].isat.is_some());
+            if (max_l > IDEAL_XFMR_L_THRESHOLD || group_saturating)
+                && max_k > IDEAL_XFMR_K_THRESHOLD
+            {
                 // Decompose into: leakage inductors + ideal transformer couplings + magnetizing inductance.
                 //
                 // Standard T-model equivalent circuit per winding:
@@ -3499,7 +3514,14 @@ impl MnaBuilder {
                 for (i, m) in members.iter().enumerate() {
                     let ind = &inductor_refs[m];
                     let k_i = k_avg[i];
-                    let l_leak = (1.0 - k_i * k_i) * ind.value;
+                    // Exact primary-referred T-model leakage split: L_leak = (1−k)·L,
+                    // magnetizing = k·L_ref (added below). The earlier (1−k²) form
+                    // realized k_eff = 1/(2−k²) ≈ 0.98 for a specified k=0.99 (~0.8%
+                    // transfer error, growing with frequency) — verified against an
+                    // ngspice coupled-inductor twin built from the realized [L] matrix.
+                    // Exact for 2-winding; a natural (approximate) generalization for
+                    // W>2 with per-winding average coupling.
+                    let l_leak = (1.0 - k_i) * ind.value;
                     // Minimum leakage: ensure non-zero reactive element for numerical stability
                     let l_leak = l_leak.max(ind.value * 1e-4);
 
@@ -3520,14 +3542,33 @@ impl MnaBuilder {
                 }
 
                 // Add magnetizing inductance between reference winding's internal nodes.
+                // Shared-core saturation attaches HERE and nowhere else: {ref}_mag's
+                // branch current is the net magnetizing current by construction (the
+                // ideal couplings reflect winding load current out), so a single
+                // saturating flux law on this one inductor is physically correct
+                // shared-core saturation. Leakage inductors stay strictly linear
+                // (air path). The saturation current is taken from the reference
+                // (largest-L, i.e. primary) winding's ISAT — the authoring contract
+                // (Phase 3) is ISAT on the reference winding; fall back to any
+                // winding carrying it so a mis-authored deck still saturates rather
+                // than silently going linear.
+                let core_isat = inductor_refs[&members[ref_idx]]
+                    .isat
+                    .or_else(|| members.iter().find_map(|m| inductor_refs[m].isat));
                 let ref_internal_p = internal_nodes_p[ref_idx];
                 let ref_neg = inductor_refs[&members[ref_idx]].node_j;
+                // Exact magnetizing inductance is k·L_ref (primary-referred), not
+                // L_ref — pairs with the (1−k)·L leakage above to realize the
+                // specified coupling exactly. ISAT (core saturation current, from the
+                // reference winding) applies to this branch's net magnetizing current;
+                // the flux law Φ(i)=L_mag·Isat·tanh(i/Isat) uses L_mag=k·L_ref.
+                let l_mag = k_avg[ref_idx] * l_ref;
                 self.inductors.push(InductorElement {
                     name: format!("{}_mag", ref_ind.name),
                     node_i: ref_internal_p,
                     node_j: ref_neg,
-                    value: l_ref,
-                    isat: None,
+                    value: l_mag,
+                    isat: core_isat,
                 });
 
                 // For each non-reference winding: add ideal transformer coupling
@@ -3891,12 +3932,21 @@ impl MnaBuilder {
 
         // Stamp ideal transformer couplings with augmented MNA.
         // For ideal transformer with turns ratio n:
-        //   V_sec = n * V_pri  (voltage coupling)
-        //   I_pri = n * I_sec  (current coupling, power conservation)
+        //   V_sec = n * V_pri   (voltage coupling)
+        //   I_pri = -n * I_sec  (current coupling — power-conserving dot convention:
+        //                        power flows THROUGH, so V_pri·I_pri + V_sec·I_sec = 0)
         //
         // Extra unknown j (secondary current) at row/col k = n + num_vs + num_vcvs + xfmr_idx.
+        // The current-injection COLUMN must be the TRANSPOSE of the KVL constraint ROW
+        // (standard symmetric MNA constraint stamp). The primary entries below were
+        // previously NEGATED relative to the row, realizing I_pri = +n·I_sec — a
+        // non-power-conserving, non-symmetric [L] that made the T-model's transfer
+        // ~5% high (growing with frequency), verified against the exact [L]-matrix
+        // solve and ngspice. This was latent while the T-model was disabled
+        // (IDEAL_XFMR_L_THRESHOLD=1e30); enabling it for saturating transformers
+        // exposed it.
         // KVL row k: G[k][sec+]=+1, G[k][sec-]=-1, G[k][pri+]=-n, G[k][pri-]=+n
-        // Current col k: G[sec+][k]=+1, G[sec-][k]=-1, G[pri+][k]=+n, G[pri-][k]=-n
+        // Current col k: G[sec+][k]=+1, G[sec-][k]=-1, G[pri+][k]=-n, G[pri-][k]=+n
         for (xi, xfmr) in mna.ideal_transformers.iter().enumerate() {
             let k = n_base + num_vs + num_vcvs + xi;
             let sp = xfmr.sec_node_p;
@@ -3919,7 +3969,8 @@ impl MnaBuilder {
                 mna.g[k][pn - 1] += nr;
             }
 
-            // Current injection column: j enters sec+, exits sec-; n*j enters pri+, exits pri-
+            // Current injection column = transpose of the KVL constraint row above.
+            // j enters sec+, exits sec-; -n*j at pri+, +n*j at pri- (I_pri = -n*I_sec).
             if sp > 0 {
                 mna.g[sp - 1][k] += 1.0;
             }
@@ -3927,10 +3978,10 @@ impl MnaBuilder {
                 mna.g[sn - 1][k] -= 1.0;
             }
             if pp > 0 {
-                mna.g[pp - 1][k] += nr;
+                mna.g[pp - 1][k] -= nr;
             }
             if pn > 0 {
-                mna.g[pn - 1][k] -= nr;
+                mna.g[pn - 1][k] += nr;
             }
         }
 
