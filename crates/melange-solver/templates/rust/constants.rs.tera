@@ -60,6 +60,13 @@ pub const STATE_MAX_PLAUSIBLE_MAGNITUDE: f64 = 1e6;
 /// times to reach the jittered equilibrium. See Oomox plugin roadmap P5.
 pub const WARMUP_SAMPLES_RECOMMENDED: usize = {{ warmup_samples_recommended }};
 
+/// True if WARMUP_SAMPLES_RECOMMENDED hit the sanity cap: the per-node settle
+/// heuristic produced an implausibly large estimate (a moderate switch-OFF
+/// static, or a slow output-UNOBSERVABLE node) and the value above is an UPPER
+/// BOUND, not a measured settle — the true settle is likely much shorter;
+/// measure if it matters. When false the estimate is the ordinary 5τ heuristic.
+pub const WARMUP_ESTIMATE_CAPPED: bool = {{ warmup_estimate_capped }};
+
 /// G matrix: conductance matrix (sample-rate independent)
 /// Includes input conductance and voltage source Norton equivalents.
 const G: [[f64; N]; N] = [

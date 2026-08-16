@@ -10,7 +10,7 @@ use tera::Context;
 use super::helpers::{
     coupled_inductor_template_data, device_param_template_data, emit_device_const, fmt_f64,
     format_matrix_rows, inductor_template_data, named_const_entries, oversampling_info,
-    recommended_warmup_samples, section_banner, self_heating_device_data,
+    recommended_warmup_samples, section_banner, self_heating_device_data, warmup_estimate_capped,
     transformer_group_template_data, SwitchCompTemplateData, SwitchTemplateData,
 };
 use super::RustEmitter;
@@ -194,6 +194,10 @@ impl RustEmitter {
             "warmup_samples_recommended",
             &recommended_warmup_samples(ir),
         );
+        // Companion flag: true when the value above hit the sanity cap (upper
+        // bound, not a measured settle). Never launder a capped estimate into a
+        // plausible number silently (oomox 2026-08-15).
+        ctx.insert("warmup_estimate_capped", &warmup_estimate_capped(ir));
 
         // G and C matrices (sample-rate independent)
         ctx.insert("g_rows", &format_matrix_rows(n, n, |i, j| ir.g(i, j)));

@@ -83,12 +83,24 @@ pub(super) fn named_const_entries(pairs: &[(String, usize)]) -> Vec<NamedConstEn
 /// [oomox_missing_functionality_roadmap.md] — but adequate for the common
 /// "one dominant pole somewhere" case that covers most audio circuits.
 pub(super) fn estimate_settle_time_seconds(ir: &CircuitIR) -> f64 {
+    // Effectively-floating node floor. A node whose total conductance to the
+    // rest of the circuit is below this is high-impedance to the point of being
+    // disconnected for audio purposes (>100 MΩ), so its RC time is not audible
+    // settling and must not gate warmup. The canonical trigger is a `.switch`
+    // OFF position encoded as a huge static (e.g. `1e9`): that leg stamps
+    // `G[i][i] ≈ 1e-9 S` into an otherwise-capacitive node with no real path to
+    // the output, and `C[i][i]/1e-9` blows τ up by ~11 orders (oomox 2026-08-15:
+    // steve-1073-eq reported a 28.9-DAY warmup for a circuit that settles in
+    // 0.25 s). Real audio node impedances sit far below 100 MΩ (a 22 MΩ grid
+    // leak is 4.5e-8 S, an order above this floor), so no real node is excluded
+    // — byte-identical warmup for circuits without such a dead leg.
+    const G_SETTLE_FLOOR: f64 = 1e-8;
     let n = ir.topology.n;
     let mut tau_max: f64 = 0.0;
     for i in 0..n {
         let g_ii = ir.g(i, i);
         let c_ii = ir.c(i, i);
-        if c_ii > 0.0 && g_ii > 0.0 {
+        if c_ii > 0.0 && g_ii > G_SETTLE_FLOOR {
             let tau = c_ii / g_ii;
             if tau > tau_max {
                 tau_max = tau;
@@ -107,10 +119,35 @@ pub(super) fn estimate_settle_time_seconds(ir: &CircuitIR) -> f64 {
 /// seconds of circuit time, so τ converts at the host rate. Multiplying by
 /// the oversampling factor here (the pre-2026-07 behavior) made oversampled
 /// warmup loops `factor`× longer than the physics requires.
+/// Sanity backstop ceiling on the warmup recommendation, in seconds of circuit
+/// time. No audio circuit needs more than this to settle (even a slow PSU
+/// electrolytic is well inside it); a raw estimate past it is a heuristic
+/// blow-up, not a real answer.
+const WARMUP_CAP_SECONDS: f64 = 30.0;
+
 pub(super) fn recommended_warmup_samples(ir: &CircuitIR) -> usize {
+    let raw = raw_warmup_samples(ir);
+    let cap = (WARMUP_CAP_SECONDS * ir.solver_config.sample_rate).ceil() as i64;
+    raw.clamp(1, cap.max(1)) as usize
+}
+
+/// Uncapped 5τ estimate (may be absurd for a pathological RC). Split out so
+/// [`warmup_estimate_capped`] can tell whether the backstop actually fired.
+fn raw_warmup_samples(ir: &CircuitIR) -> i64 {
     let tau = estimate_settle_time_seconds(ir);
-    let samples = (5.0 * tau * ir.solver_config.sample_rate).ceil() as i64;
-    samples.max(1) as usize
+    (5.0 * tau * ir.solver_config.sample_rate).ceil() as i64
+}
+
+/// True when [`recommended_warmup_samples`] hit the sanity cap — i.e. the raw
+/// per-node heuristic produced an implausibly large estimate (a moderate
+/// switch-OFF static, or a slow node the O(n) estimate can't discount as
+/// output-unobservable) and the recommendation is an UPPER BOUND, not a real
+/// settle time. Emitted as a companion const so this is never laundered into a
+/// plausible-looking number (oomox 2026-08-15: an absurd 28.9-day value
+/// announces itself and gets caught; a plausible 30 s value does not).
+pub(super) fn warmup_estimate_capped(ir: &CircuitIR) -> bool {
+    let cap = (WARMUP_CAP_SECONDS * ir.solver_config.sample_rate).ceil() as i64;
+    raw_warmup_samples(ir) > cap.max(1)
 }
 
 /// Switch component data passed to Tera templates.

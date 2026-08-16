@@ -8,7 +8,7 @@
 use super::dk_emitter::NoiseEmission;
 use super::helpers::{
     device_param_template_data, emit_pentode_nr_dk_stamp, fmt_f64, format_matrix_rows,
-    oversampling_info, pentode_dispatch, recommended_warmup_samples, section_banner,
+    oversampling_info, pentode_dispatch, recommended_warmup_samples, section_banner, warmup_estimate_capped,
     self_heating_device_data,
 };
 use super::nr_helpers::{emit_nr_singular_fallback, emit_schur_nr_limit_and_converge};
@@ -1192,6 +1192,18 @@ impl RustEmitter {
         code.push_str(&format!(
             "pub const WARMUP_SAMPLES_RECOMMENDED: usize = {};\n\n",
             recommended_warmup_samples(ir)
+        ));
+        code.push_str(
+            "/// True if WARMUP_SAMPLES_RECOMMENDED hit the sanity cap: the per-node\n\
+             /// settle heuristic produced an implausibly large estimate (a moderate\n\
+             /// switch-OFF static, or a slow output-UNOBSERVABLE node) and the value\n\
+             /// above is an UPPER BOUND, not a measured settle — the true settle is\n\
+             /// likely much shorter; measure if it matters. When false the estimate\n\
+             /// is the ordinary 5τ heuristic.\n",
+        );
+        code.push_str(&format!(
+            "pub const WARMUP_ESTIMATE_CAPPED: bool = {};\n\n",
+            warmup_estimate_capped(ir)
         ));
 
         // Op-amp slew-rate constants (V/s). Emitted for every op-amp in
