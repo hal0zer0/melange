@@ -32,6 +32,7 @@ AI agent consumption: dense equations, code patterns, cross-references, no narra
 | Changing generated code structure | [CODEGEN.md](CODEGEN.md) |
 | Changing trapezoidal integration or companions | [COMPANION_MODELS.md](COMPANION_MODELS.md) |
 | Changing augmented MNA inductor handling | [MNA.md](MNA.md) (augmented MNA section) |
+| Saturating inductors (uncoupled: Phase 1 SHIPPED — NR flux device, §3.4) / transformers (design plan) | [SATURATING_TRANSFORMERS.md](SATURATING_TRANSFORMERS.md) |
 | Debugging solver output issues | [DEBUGGING.md](DEBUGGING.md) |
 | Changing signal levels or DC blocking | [SIGNAL_LEVELS.md](SIGNAL_LEVELS.md) |
 | Running SPICE validation tests | [SPICE_VALIDATION.md](SPICE_VALIDATION.md) |

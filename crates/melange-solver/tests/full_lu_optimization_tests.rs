@@ -576,16 +576,18 @@ fn test_gain_sanity_two_tube() {
     assert!(nr_fail == 0, "No NR failures expected, got {nr_fail}");
 }
 
-/// Saturating-inductor SM update: the emitted rank-1 Sherman-Morrison block
-/// must guard its denominator (|1 + delta*S[k][k]| > 1e-15, the
-/// LINEAR_ALGEBRA.md "SM denominator" convention) and fall back to a full
-/// rebuild when singular. This test pins the emitted structure (guard present)
-/// and proves the generated code still compiles and runs — there was
-/// previously no end-to-end coverage of this emission path.
+/// Saturating (uncoupled) inductor as an in-NR-loop nonlinear device
+/// (SATURATING_TRANSFORMERS.md §3.4). Since 2026-08-15 the uncoupled saturating
+/// inductor is no longer a lagged/decimated Sherman-Morrison patch on the trap
+/// matrices; it is a genuine device on its augmented branch row, stamped inside
+/// the full-LU Newton loop: residual uses the flux integral
+/// `Φ(i) = L0·Isat·tanh(i/Isat)`, Jacobian uses the differential
+/// `L_diff = L0/cosh²(i/Isat)`. This test pins the new emitted structure (the
+/// old SM block is gone) and proves the generated code still compiles and runs.
 #[test]
-fn test_saturating_inductor_sm_denominator_guard() {
+fn test_saturating_inductor_nr_flux_stamp() {
     const SAT_IND: &str = "\
-Saturating inductor SM guard
+Saturating inductor NR flux stamp
 R1 in a 100
 L1 a b 100m ISAT=20m
 Rb b 0 1k
@@ -597,17 +599,25 @@ Cout out 0 100n
 Rterm out 0 10k
 .END";
     let code = generate_nodal_code(SAT_IND, 48000.0);
+    // The retired decimated Sherman-Morrison block must NOT be emitted.
     assert!(
-        code.contains("SM for inductor"),
-        "expected the saturating-inductor SM block to be emitted"
+        !code.contains("SM for inductor"),
+        "legacy decimated SM inductor block should no longer be emitted"
     );
+    // Flux-integral residual term Φ(i) (the history / companion use tanh).
     assert!(
-        code.contains("let sm_denom = 1.0 + delta_a * state.s[k][k];"),
-        "SM denominator must be bound and guarded"
+        code.contains("SAT_IND_0_L0 * SAT_IND_0_ISAT * (i0 / SAT_IND_0_ISAT).tanh()"),
+        "expected the flux integral Φ(i)=L0·Isat·tanh(i/Isat) in the companion stamp"
     );
+    // Differential-inductance Jacobian L_diff = L0/cosh²(i/Isat).
     assert!(
-        code.contains("if sm_denom.abs() > 1e-15"),
-        "SM denominator guard (1e-15) missing"
+        code.contains("(i0 / SAT_IND_0_ISAT).clamp(-40.0, 40.0).cosh()"),
+        "expected the differential L_diff = L0/cosh²(i/Isat) Jacobian stamp"
+    );
+    // Stamp targets the augmented branch row of the inductor.
+    assert!(
+        code.contains("chord_lu[SAT_IND_0_AUG_ROW][SAT_IND_0_AUG_ROW] +="),
+        "expected the L_diff correction on the inductor's augmented Jacobian diagonal"
     );
 
     let main_code = r#"

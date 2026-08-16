@@ -77,6 +77,59 @@ fn ni_nonzeros_by_dev(ir: &CircuitIR, m: usize) -> Vec<Vec<usize>> {
     out
 }
 
+/// Saturating (iron-core) UNCOUPLED inductor — in-NR-loop companion stamps.
+///
+/// The augmented branch row `k = aug_row` holds branch current `i_k`. A linear
+/// inductor bakes `alpha·L0` into the base matrix at `[k][k]` and `alpha·L0·i_prev`
+/// into the history (`A_neg·v_prev`). A saturating inductor replaces the linear
+/// flux `L0·i` with `Φ(i) = L0·Isat·tanh(i/Isat)`; the Jacobian uses the
+/// differential `L_diff(i) = L0/cosh²(i/Isat)`. See `SATURATING_TRANSFORMERS.md`
+/// §3.4 for the derivation and sign convention (verified against
+/// `mna.rs::build_augmented_matrices`).
+///
+/// `alpha` is the site-local integrator scalar expression (`2·rate·OS` trap,
+/// `1·rate·OS` BE, `alpha_sub` sub-step) — this is what makes BE composition free.
+
+/// History correction (once per sample, after the base `A_neg·v_prev` RHS build):
+/// swaps the baked-in `alpha·L0·i_prev` for `alpha·Φ(i_prev)`.
+fn emit_sat_ind_history(code: &mut String, ir: &CircuitIR, rhs: &str, vprev: &str, alpha: &str, indent: &str) {
+    for (idx, _si) in ir.saturating_inductors.iter().enumerate() {
+        code.push_str(&format!(
+            "{indent}{{ let ip = {vprev}[SAT_IND_{idx}_AUG_ROW]; \
+             let phi = SAT_IND_{idx}_L0 * SAT_IND_{idx}_ISAT * (ip / SAT_IND_{idx}_ISAT).tanh(); \
+             {rhs}[SAT_IND_{idx}_AUG_ROW] += {alpha} * (phi - SAT_IND_{idx}_L0 * ip); }}\n"
+        ));
+    }
+}
+
+/// Jacobian correction (at each factor): base matrix has `alpha·L0` at `[k][k]`;
+/// correct it to `alpha·L_diff(i0)`. `iterate` is the current NR iterate vector.
+fn emit_sat_ind_jacobian(code: &mut String, ir: &CircuitIR, mat: &str, iterate: &str, alpha: &str, indent: &str) {
+    for (idx, _si) in ir.saturating_inductors.iter().enumerate() {
+        code.push_str(&format!(
+            "{indent}{{ let i0 = {iterate}[SAT_IND_{idx}_AUG_ROW]; \
+             let cx = (i0 / SAT_IND_{idx}_ISAT).clamp(-40.0, 40.0).cosh(); \
+             let ld = (SAT_IND_{idx}_L0 / (cx * cx)).max(SAT_IND_{idx}_L0 * 1e-6); \
+             {mat}[SAT_IND_{idx}_AUG_ROW][SAT_IND_{idx}_AUG_ROW] += {alpha} * (ld - SAT_IND_{idx}_L0); }}\n"
+        ));
+    }
+}
+
+/// Companion-RHS correction (consistent with the factored Jacobian, same
+/// `iterate`): moves the linearization constant `alpha·(L_diff(i0)·i0 − Φ(i0))`
+/// to the RHS so the back-solve yields the Newton step.
+fn emit_sat_ind_companion(code: &mut String, ir: &CircuitIR, rhs: &str, iterate: &str, alpha: &str, indent: &str) {
+    for (idx, _si) in ir.saturating_inductors.iter().enumerate() {
+        code.push_str(&format!(
+            "{indent}{{ let i0 = {iterate}[SAT_IND_{idx}_AUG_ROW]; \
+             let cx = (i0 / SAT_IND_{idx}_ISAT).clamp(-40.0, 40.0).cosh(); \
+             let ld = (SAT_IND_{idx}_L0 / (cx * cx)).max(SAT_IND_{idx}_L0 * 1e-6); \
+             let phi = SAT_IND_{idx}_L0 * SAT_IND_{idx}_ISAT * (i0 / SAT_IND_{idx}_ISAT).tanh(); \
+             {rhs}[SAT_IND_{idx}_AUG_ROW] += {alpha} * (ld * i0 - phi); }}\n"
+        ));
+    }
+}
+
 /// Emit the block-diagonal NR Jacobian stamp `MAT[a][b] -= N_I[a][i]·j_dev[i,j]
 /// ·N_V[j][b]` over every device slot's nonzero N_i/N_v entries. Shared by the
 /// trap (chord_lu), sub-step (g_s) and BE (g_aug) paths — they differ only in
@@ -881,7 +934,18 @@ impl RustEmitter {
             && m >= 10
             && ir.matrices.spectral_radius_s_aneg > 0.995;
 
-        let use_full_nodal = if !ir.behavioral_sources.is_empty() {
+        // Uncoupled saturating inductors are genuine nonlinear devices on their
+        // augmented branch row, stamped inside the full-LU NR loop (flux integral
+        // Φ(i) residual, differential L_diff Jacobian — SATURATING_TRANSFORMERS.md
+        // §3.4). They therefore force the full-LU path unconditionally, even at
+        // M=0: a linear-plus-saturating-inductor circuit has no M-devices and
+        // would otherwise route to Schur / the M==0 direct-LU fast-path, neither
+        // of which iterates on the inductor nonlinearity. (Coupled/xfmr saturating
+        // groups still use the legacy decimated Schur patch until Phase 2; no
+        // shipping deck mixes uncoupled + coupled saturation.)
+        let force_full_lu_sat = !ir.saturating_inductors.is_empty();
+        let use_full_nodal = force_full_lu_sat
+            || if !ir.behavioral_sources.is_empty() {
             // Behavioral B-sources are stamped in node space only on the full-LU
             // path (the Schur reduction can't express their rectangular control).
             true
@@ -1664,7 +1728,8 @@ impl RustEmitter {
         // codegen rate), so the field is emitted for every nonlinear /
         // behavioral full-LU circuit as well.
         let has_opamp_slew = ir.opamps.iter().any(|oa| oa.sr.is_finite());
-        let has_full_lu_substep = use_full_nodal && (m > 0 || !ir.behavioral_sources.is_empty());
+        let has_full_lu_substep = use_full_nodal
+            && (m > 0 || !ir.behavioral_sources.is_empty() || !ir.saturating_inductors.is_empty());
         // Device self-heating reads `state.current_sample_rate` for its
         // thermal dt (emit_self_heating_thermal_updates, DK parity) — the
         // field must exist even for a Schur-routed thermal circuit with no
@@ -1980,7 +2045,7 @@ impl RustEmitter {
 
         // Cross-timestep chord state (persisted LU for full LU path). Behavioral
         // B-sources force the full-LU path even at M=0, so they need it too.
-        if m > 0 || !ir.behavioral_sources.is_empty() {
+        if m > 0 || !ir.behavioral_sources.is_empty() || !ir.saturating_inductors.is_empty() {
             code.push_str(
                 "    // --- Cross-timestep chord method state (persisted LU factors) ---\n",
             );
@@ -2141,7 +2206,13 @@ impl RustEmitter {
             code.push_str("    pub sat_resync_counter: u32,\n\n");
         }
 
-        // Saturating inductor state fields
+        // Saturating inductor state fields.
+        // NOTE: on the full-LU NR path (which every uncoupled saturating-inductor
+        // circuit now takes), the uncoupled inductor is a flux device stamped inside
+        // the Newton loop and this `l_eff` field is unused (write-once, never read —
+        // a harmless dead pub field). It is retained only so the legacy decimated
+        // Schur/SM machinery below stays self-consistent; the whole decimated path
+        // (this field + the SM block) is slated for wholesale removal in Phase 2.
         for (idx, si) in ir.saturating_inductors.iter().enumerate() {
             code.push_str(&format!(
                 "    /// Saturating inductor {idx} ({}): current effective inductance\n\
@@ -2363,7 +2434,7 @@ impl RustEmitter {
         if ir.solver_config.breakpoint_be {
             code.push_str("            breakpoint_be: 0,\n");
         }
-        if m > 0 || !ir.behavioral_sources.is_empty() {
+        if m > 0 || !ir.behavioral_sources.is_empty() || !ir.saturating_inductors.is_empty() {
             code.push_str("            chord_lu: [[0.0; N]; N],\n");
             code.push_str("            chord_dr: [1.0; N],\n");
             code.push_str("            chord_dc: [1.0; N],\n");
@@ -2442,7 +2513,8 @@ impl RustEmitter {
             code.push_str("            sat_update_counter: 0,\n");
             code.push_str("            sat_resync_counter: 0,\n");
         }
-        // Saturating inductor state: start at nominal L
+        // Saturating inductor state: start at nominal L (legacy decimated field; unused
+        // on the full-LU NR path — see the field declaration note).
         for (idx, _) in ir.saturating_inductors.iter().enumerate() {
             code.push_str(&format!(
                 "            sat_ind_{}_l_eff: SAT_IND_{}_L0,\n",
@@ -2666,7 +2738,8 @@ impl RustEmitter {
             code.push_str("        self.sat_update_counter = 0;\n");
             code.push_str("        self.sat_resync_counter = 0;\n");
         }
-        // Reset saturating inductor L_eff to nominal
+        // Reset saturating inductor L_eff to nominal (legacy decimated field; unused
+        // on the full-LU NR path).
         for (idx, _) in ir.saturating_inductors.iter().enumerate() {
             code.push_str(&format!(
                 "        self.sat_ind_{}_l_eff = SAT_IND_{}_L0;\n",
@@ -5872,6 +5945,18 @@ impl RustEmitter {
         };
         let os_factor = ir.solver_config.oversampling_factor;
         let has_behavioral = !ir.behavioral_sources.is_empty();
+        let has_sat_ind = !ir.saturating_inductors.is_empty();
+        // Site-local integrator scalar for the saturating-inductor flux stamps.
+        // Matches the base matrix each NR site is built from: `state.a`/`a_be`
+        // are rebuilt at `internal_rate = current_sample_rate * OS` (2×trap,
+        // 1×BE — see rebuild_matrices), so we recompute the same product here.
+        let sat_int_rate = "state.current_sample_rate * OVERSAMPLING_FACTOR as f64";
+        let sat_alpha_main = if ir.solver_config.backward_euler {
+            format!("({sat_int_rate})")
+        } else {
+            format!("(2.0 * {sat_int_rate})")
+        };
+        let sat_alpha_be = format!("({sat_int_rate})");
         let has_bsrc_time = ir.behavioral_sources.iter().any(|b| b.time_dependent);
         // "Force BE this sample" guards. Trap is accepted only when nothing is
         // forcing BE: the runtime Nyquist BE-latch OR the breakpoint-BE countdown
@@ -6027,10 +6112,22 @@ impl RustEmitter {
             code.push('\n');
         }
 
+        // Saturating-inductor history: swap the baked-in linear flux
+        // `alpha·L0·i_prev` (already in rhs via A_neg·v_prev) for `alpha·Φ(i_prev)`.
+        if has_sat_ind {
+            code.push_str(
+                "    // Saturating inductor flux history (Φ(i_prev) replaces L0·i_prev)\n",
+            );
+            emit_sat_ind_history(&mut code, ir, "rhs", "state.v_prev", &sat_alpha_main, "    ");
+            code.push('\n');
+        }
+
         // Handle linear circuits (M=0): direct LU solve, no NR iteration.
         // Behavioral B-sources are nonlinear even when M=0, so they take the NR
-        // path below.
-        if m == 0 && !has_behavioral {
+        // path below. Uncoupled saturating inductors are also nonlinear (flux
+        // stamp on their augmented branch row), so an M=0 circuit with any
+        // saturating inductor must iterate too.
+        if m == 0 && !has_behavioral && !has_sat_ind {
             code.push_str("    // Linear circuit: direct LU solve (no NR needed)\n");
             code.push_str("    let mut g_aug = state.a;\n");
             code.push_str(
@@ -6164,11 +6261,14 @@ impl RustEmitter {
             // spurious refactors that trap pnjlim's step damping in a
             // different slow-oscillation regime; higher (e.g. 80 %)
             // misses the diode-knee transition.
-            if has_behavioral {
-                // Behavioral B-source Jacobian entries change every iteration
-                // (nonlinear in arbitrary nodes) and are not part of the frozen
-                // chord device block, so refactor each iteration. Correctness
-                // over the chord's per-sample speedup.
+            if has_behavioral || has_sat_ind {
+                // Behavioral B-source and saturating-inductor Jacobian entries
+                // change every iteration (nonlinear, not part of the frozen chord
+                // device block `chord_j_dev`), so refactor each iteration — this
+                // keeps the inductor Jacobian (stamped below) consistent with the
+                // companion RHS, both evaluated at the current iterate `v`.
+                // Correctness over the chord's per-sample speedup (perf: Phase 1
+                // deferred an L_diff-drift refactor trigger, §3.4).
                 code.push_str("        let need_refactor = true;\n");
             } else {
                 code.push_str("        let mut need_refactor = !chord_valid || (iter > 0 && iter % CHORD_REFACTOR == 0) || iter >= 10;\n");
@@ -6192,6 +6292,10 @@ impl RustEmitter {
             {
                 // Build transpose of N_i sparsity: for each device dim i, which nodes a are nonzero
                 emit_nodal_jacobian_stamp(&mut code, ir, m, "chord_lu", "            ");
+            }
+            // Saturating-inductor Jacobian: alpha·L0 → alpha·L_diff(v[k]) at [k][k].
+            if has_sat_ind {
+                emit_sat_ind_jacobian(&mut code, ir, "chord_lu", "v", &sat_alpha_main, "            ");
             }
             // Behavioral B-source Jacobian: stamp ∂f/∂V directly into G_aug.
             if has_behavioral {
@@ -6241,6 +6345,11 @@ impl RustEmitter {
             );
             code.push_str("        let mut rhs_work = rhs;\n");
             emit_nodal_companion_rhs(&mut code, ir, m, "rhs_work", "chord_j_dev", "        ");
+            // Saturating-inductor companion current (consistent with the Jacobian
+            // stamp above — same iterate `v`, re-factored every iteration).
+            if has_sat_ind {
+                emit_sat_ind_companion(&mut code, ir, "rhs_work", "v", &sat_alpha_main, "        ");
+            }
             // Behavioral B-source companion current: f(v) - Σ (∂f/∂V)·v.
             if has_behavioral {
                 emit_behavioral_rhs(&mut code, ir, "        ");
@@ -6392,6 +6501,13 @@ impl RustEmitter {
                 // Behavioral B-sources are often M=0 (no N_v rows); include their
                 // terminal + referenced nodes so the check isn't vacuously true.
                 device_nodes.extend(behavioral_convergence_nodes(ir));
+                // Saturating inductors: check the augmented branch-current row so
+                // NR actually iterates on the flux nonlinearity. Essential at M=0,
+                // where the N_v/behavioral node set is empty and the step check
+                // would otherwise be vacuously "converged" on iteration 0.
+                for si in &ir.saturating_inductors {
+                    device_nodes.push(si.aug_row);
+                }
                 device_nodes.sort();
                 device_nodes.dedup();
                 for &node in &device_nodes {
@@ -6667,6 +6783,10 @@ impl RustEmitter {
                     "                ",
                 ));
             }
+            // Saturating-inductor flux history (sub-step: base v_sub, alpha_sub)
+            if has_sat_ind {
+                emit_sat_ind_history(&mut code, ir, "rhs_s", "v_sub", "alpha_sub", "                ");
+            }
             code.push_str("                rhs_s[INPUT_NODE] += (inp_s + inp_prev_s) * (1.0 / INPUT_RESISTANCE);\n");
             // Runtime voltage sources: integration-scheme-independent; every
             // from-scratch RHS rebuild must re-stamp them.
@@ -6697,9 +6817,15 @@ impl RustEmitter {
             // Build G_aug from a_sub
             code.push_str("                    let mut g_s = a_sub;\n");
             emit_nodal_jacobian_stamp(&mut code, ir, m, "g_s", "                    ");
+            if has_sat_ind {
+                emit_sat_ind_jacobian(&mut code, ir, "g_s", "v_sub", "alpha_sub", "                    ");
+            }
             // Build companion RHS
             code.push_str("                    let mut rhs_w = rhs_s;\n");
             emit_nodal_companion_rhs(&mut code, ir, m, "rhs_w", "j_dev", "                    ");
+            if has_sat_ind {
+                emit_sat_ind_companion(&mut code, ir, "rhs_w", "v_sub", "alpha_sub", "                    ");
+            }
             // LU solve
             code.push_str("                    let mut v_new_s = rhs_w;\n");
             code.push_str("                    if !lu_solve(&mut g_s, &mut v_new_s) { break; }\n");
@@ -6846,6 +6972,11 @@ impl RustEmitter {
             }
             code.push_str("            rhs_be[i] = sum;\n");
             code.push_str("        }\n");
+            // Saturating-inductor flux history (BE: base v_prev, alpha = 1·rate·OS;
+            // BE A_neg drops the G term, so only the L0·i_prev → Φ(i_prev) swap applies)
+            if has_sat_ind {
+                emit_sat_ind_history(&mut code, ir, "rhs_be", "state.v_prev", &sat_alpha_be, "        ");
+            }
             code.push_str("        // BE input: just input[n+1] * G_in (no trapezoidal average)\n");
             code.push_str("        rhs_be[INPUT_NODE] += input * input_conductance;\n");
             // Runtime voltage sources: integration-scheme-independent; every
@@ -6894,11 +7025,17 @@ impl RustEmitter {
             code.push_str("            // Gmin regularization\n");
             code.push_str("            for i in 0..N_NODES { g_aug[i][i] += 1e-12; }\n");
             emit_nodal_jacobian_stamp(&mut code, ir, m, "g_aug", "            ");
+            if has_sat_ind {
+                emit_sat_ind_jacobian(&mut code, ir, "g_aug", "v", &sat_alpha_be, "            ");
+            }
             code.push('\n');
 
             // Companion RHS for BE (sparse)
             code.push_str("            let mut rhs_work = rhs_be;\n");
             emit_nodal_companion_rhs(&mut code, ir, m, "rhs_work", "j_dev", "            ");
+            if has_sat_ind {
+                emit_sat_ind_companion(&mut code, ir, "rhs_work", "v", &sat_alpha_be, "            ");
+            }
             code.push('\n');
 
             // LU solve for BE
@@ -6970,6 +7107,13 @@ impl RustEmitter {
                 // Behavioral B-sources are often M=0 (no N_v rows); include their
                 // terminal + referenced nodes so the check isn't vacuously true.
                 device_nodes.extend(behavioral_convergence_nodes(ir));
+                // Saturating inductors: check the augmented branch-current row so
+                // NR actually iterates on the flux nonlinearity. Essential at M=0,
+                // where the N_v/behavioral node set is empty and the step check
+                // would otherwise be vacuously "converged" on iteration 0.
+                for si in &ir.saturating_inductors {
+                    device_nodes.push(si.aug_row);
+                }
                 device_nodes.sort();
                 device_nodes.dedup();
                 for &node in &device_nodes {
