@@ -300,14 +300,43 @@ This alone fixes blockers (2) and (3) for the *already-shipped* feature.
 inductors) stable on silence **and** under `--backward-euler`, plus a
 single-inductor XSPICE-core validation (§6).
 
-**Phase 2 — Route coupled transformers through the T-model.**
-Replace the `1e30` disable (`mna.rs:171`) with a real gate that fires
-**only for NFB-free saturating groups**. Propagate the core saturation
-param onto `{ref}_mag` (`mna.rs:3525-3530`, currently `isat: None`).
-Ensure saturating groups actually reach the T-model branch, not the
-deprecated `winding_isats` path. *Milestone:* blocker (1) dissolved —
-mag current = net magnetizing current by construction; harmonic behavior
-validated on at least one SE and one PP output-transformer deck.
+**Phase 2 — Route coupled transformers through the T-model. [IMPLEMENTED
+2026-08-16, commit `ba64ddb`.]**
+The gate is ADDITIVE: `(max_l > 1e30 || group_saturating) && max_k > 0.8`
+(`mna.rs` ~3439) — any tight-coupled group carrying ISAT routes through the
+T-model; non-saturating groups stay byte-identical. Core saturation is
+propagated onto `{ref}_mag` (reference/primary winding's ISAT).
+
+**Correction to the original scoping above:** the gate does NOT need to be
+limited to *NFB-free* groups. The `1e30` disable was a **DK/Schur**
+limitation (algebraic loop needs a reactive-delay per feedback loop); the
+full-LU nodal path that saturating transformers force resolves the
+ideal-coupling algebraic constraint by direct LU each sample. An impartial
+arbiter confirmed the full-LU NFB-through-iron solve matches ngspice to
+4–5 significant figures, so Option A (fire for ALL saturating groups,
+subsuming the deferred Phase 4) is solver-sound. NFB-free detection was
+dropped as unnecessary complexity.
+
+**Two correctness fixes to the T-model realization** (both were latent
+while it was disabled):
+1. **Exact element values:** `L_leak = (1−k)·L`, `L_mag = k·L_ref` (were
+   `(1−k²)·L`, `L_ref`, realizing `k_eff = 1/(2−k²) ≈ 0.98`).
+2. **Ideal-transformer sign bug** (`mna.rs` ~3963): the current-injection
+   column's *primary* entries were negated relative to the voltage-
+   constraint row, when they must be its **transpose**. That gave
+   `I_pri = +n·I_sec` (non-power-conserving) and a non-symmetric `[L]` with
+   the mutual wrong-signed — a ~5% frequency-growing transfer error. Fixed
+   to `I_pri = −n·I_sec`. **The fixed T-model matches the exact
+   CoupledInductor `[L]` path and ngspice to +0.011%, flat across k and
+   frequency** — 6-nines, same as the exact path.
+
+*Milestone:* blocker (1) dissolved — mag current = net magnetizing current
+by construction; SE saturation odd-symmetric (H2=0, H3≈27%); saturating
+transformer validated by composition (6-nines linear T-model + the
+Phase-1-validated `{ref}_mag` flux device) plus independent ngspice
+shared-core twins. Still OPEN: delete the `winding_isats` path (loose-
+coupling k≤0.8 saturating groups still fall to it); a PP output-transformer
+deck with authored core data.
 
 **Phase 3 — Netlist authoring contract** (decide early, spans Phases
 1-2). `ISAT=` on the primary/reference winding (matches shipped inductor
