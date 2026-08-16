@@ -643,3 +643,106 @@ fn main() {
         "saturating-inductor circuit should pass signal, peak={peak:.3e}"
     );
 }
+
+/// End-to-end HARMONIC correctness of the NR-integrated saturating inductor.
+///
+/// Pins the physics validated 2026-08-16 against an independent RK4 integration
+/// of the exact flux ODE `Vin − R·i = d/dt[L0·Isat·tanh(i/Isat)]` and two ngspice
+/// twins (idt flux-state + XSPICE core+lcouple), which all agreed to <0.5% on the
+/// harmonic content. A simple R–L divider driven by a 1 kHz sine; the saturating
+/// inductor soft-clips symmetrically.
+///
+/// Two guards a regression would trip:
+///  - **Symmetry**: Φ(i)=L0·Isat·tanh(i/Isat) is ODD, so a symmetric drive must
+///    produce NO even harmonics. H2/H1 ≈ 0. A sign error, DC-history bug, or the
+///    switch-gswap "2×-first-sample" class of artifact would break this.
+///  - **Saturation present & correct magnitude**: H3/H1 lands near the RK4 value
+///    (≈21% at this drive; test-harness INPUT_RESISTANCE is 1Ω so R1=146 gives the
+///    validated R≈147). A linear inductor (control, no ISAT) must show H3/H1 ≈ 0,
+///    proving the 3rd harmonic is saturation, not numerical noise.
+#[test]
+fn test_saturating_inductor_harmonics() {
+    // Single-bin DFT harmonic extractor over a steady-state window. Prints
+    // "H1 H2 H3 peak". INPUT_RESISTANCE is 1Ω in the test harness, so R1=146
+    // gives R≈147 — the drive depth the RK4/ngspice references were taken at.
+    const MAIN: &str = r#"
+fn main() {
+    let mut state = CircuitState::default();
+    let sr = 48000.0_f64;
+    let f = 1000.0_f64;
+    let n = 5280usize;    // 0.11 s
+    let skip = 1440usize; // drop 0.03 s of onset transient
+    let mut samp: Vec<f64> = Vec::new();
+    for i in 0..n {
+        let t = i as f64 / sr;
+        let input = 0.9 * (2.0 * std::f64::consts::PI * f * t).sin();
+        let out = process_sample(input, &mut state);
+        if i >= skip { samp.push(out[0]); }
+    }
+    let bin = |fr: f64| -> f64 {
+        let (mut re, mut im) = (0.0f64, 0.0f64);
+        for (k, &v) in samp.iter().enumerate() {
+            let ph = 2.0 * std::f64::consts::PI * fr * ((skip + k) as f64) / sr;
+            re += v * ph.cos();
+            im += v * ph.sin();
+        }
+        2.0 * (re * re + im * im).sqrt() / samp.len() as f64
+    };
+    let peak = samp.iter().fold(0.0f64, |a, &x| a.max(x.abs()));
+    println!("{:.9} {:.9} {:.9} {:.9}", bin(1000.0), bin(2000.0), bin(3000.0), peak);
+}
+"#;
+
+    let parse = |out: &str| -> (f64, f64, f64, f64) {
+        let v: Vec<f64> = out
+            .split_whitespace()
+            .filter_map(|s| s.parse::<f64>().ok())
+            .collect();
+        assert_eq!(v.len(), 4, "expected 'H1 H2 H3 peak', got {out:?}");
+        (v[0], v[1], v[2], v[3])
+    };
+
+    // Saturating case.
+    const SAT: &str = "\
+Saturating inductor harmonic check
+R1 in out 146
+L1 out 0 50m ISAT=2m
+.END";
+    let sat_code = generate_nodal_code(SAT, 48000.0);
+    let (h1, h2, h3, peak) = parse(&compile_and_run(&sat_code, MAIN, "sat_ind_harm"));
+    assert!(
+        h1.is_finite() && h2.is_finite() && h3.is_finite() && peak.is_finite(),
+        "non-finite harmonics: H1={h1} H2={h2} H3={h3} peak={peak}"
+    );
+    assert!(h1 > 0.3, "fundamental too small, signal not passing: H1={h1:.4}");
+    assert!(peak < 0.9, "output should stay below the 0.9 V drive: peak={peak:.4}");
+    // Symmetry: odd tanh ⇒ no even harmonics.
+    assert!(
+        h2 / h1 < 0.01,
+        "even-harmonic leak — saturation should be symmetric: H2/H1={:.4}",
+        h2 / h1
+    );
+    // Saturation present and near the RK4/ngspice reference (~0.21). Wide band
+    // to absorb 48 kHz trapezoidal discretization without being vacuous.
+    let h3_ratio = h3 / h1;
+    assert!(
+        (0.15..0.28).contains(&h3_ratio),
+        "H3/H1={h3_ratio:.4} outside validated saturating band [0.15, 0.28] \
+         (RK4/ngspice reference ≈ 0.21)"
+    );
+
+    // Linear control: same divider, no ISAT ⇒ 3rd harmonic must vanish.
+    const LIN: &str = "\
+Linear inductor control
+R1 in out 146
+L1 out 0 50m
+.END";
+    let lin_code = generate_nodal_code(LIN, 48000.0);
+    let (lh1, _lh2, lh3, _lpk) = parse(&compile_and_run(&lin_code, MAIN, "lin_ind_harm"));
+    assert!(
+        lh3 / lh1 < 0.005,
+        "linear inductor produced a 3rd harmonic ({:.4}) — H3 must come from \
+         saturation, not the solver",
+        lh3 / lh1
+    );
+}
