@@ -3585,7 +3585,13 @@ impl RustEmitter {
                  \x20   ///\n\
                  \x20   /// A switch flip is a topology step — follow with `recompute_dc_op()`\n\
                  \x20   /// on DK circuits to refresh the NR seed. On nodal (stub recompute)\n\
-                 \x20   /// NR catches up over WARMUP_SAMPLES_RECOMMENDED samples.\n",
+                 \x20   /// NR re-converges essentially immediately (typically the next\n\
+                 \x20   /// sample, even across a real topology change). Any residual DC\n\
+                 \x20   /// settle is bounded ABOVE by WARMUP_SAMPLES_RECOMMENDED, but that\n\
+                 \x20   /// is a worst-case FULL-DC-settle bound (max node RC, including\n\
+                 \x20   /// high-impedance nodes off the audio path) — the AUDIBLE settle is\n\
+                 \x20   /// usually far shorter (often ~0 ms). Measure the transient on the\n\
+                 \x20   /// output; do NOT mute or size a fade for the full WARMUP bound.\n",
                 idx, sw.num_positions
             ));
             code.push_str(&format!(
