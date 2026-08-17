@@ -151,6 +151,242 @@ fn emit_sat_ind_companion(
     }
 }
 
+/// Remove one balanced enclosing paren pair from an emitted expression, so it
+/// can be bound with `let` without tripping `unused_parens` in generated code
+/// compiled under `-D warnings`. Returns the input unchanged unless the first
+/// character's paren closes exactly at the last character.
+fn strip_outer_parens(expr: &str) -> &str {
+    let t = expr.trim();
+    if !t.starts_with('(') || !t.ends_with(')') {
+        return t;
+    }
+    let mut depth = 0usize;
+    for (i, ch) in t.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                // The opening paren closed before the end: not an enclosing pair
+                // (e.g. `(a) * (b)`), so the parens are not removable.
+                if depth == 0 && i + ch.len_utf8() != t.len() {
+                    return t;
+                }
+            }
+            _ => {}
+        }
+    }
+    &t[1..t.len() - 1]
+}
+
+/// Emit the post-step consistency check for the saturating-inductor augmented
+/// rows: the exact analogue, for the flux rows, of the device residual check
+/// that `emit_nodal_process_sample` already emits for `i_nl`.
+///
+/// ## The check
+///
+/// For saturating inductor `s` on augmented row `k`, the converged row equation
+/// (see `SATURATING_TRANSFORMERS.md` §3.4 for the augmented-row sign
+/// convention) is
+///
+/// ```text
+/// R_k = Σ_{j≠k} A[k][j]·v[j]        incidence / ideal-transformer couplings
+///     + (A[k][k] − alpha·L0)·v[k]   the alpha·L0 self term cancels; see below
+///     − Σ_i N_I[k][i]·i_nl(v)[i]    structurally empty on augmented rows
+///     + ( alpha·Φ(v[k]) − rhs[k] )  the flux-change term; see "pairing" below
+///     == 0
+/// ```
+///
+/// The `alpha·L_diff(i0)` Jacobian stamp and the `alpha·(L_diff(i0)·i0 − Φ(i0))`
+/// companion stamp cancel identically at any fixed point, so `R_k` is
+/// independent of *which* iterate the linearization was frozen at. That is
+/// precisely what makes it a usable residual: it is built from the row's
+/// EQUATION, not from the iteration, so it can see a Jacobian/companion
+/// inconsistency as well as a stale chord.
+///
+/// ## Why the obvious cheaper check (Φ-vs-Φ) does NOT work
+///
+/// The tempting analogue is to hold the `Φ(i0)` that fed the companion and
+/// compare it against `Φ(v_post[k])` after the step — mirroring
+/// `i_nl` vs `i_nl_chord`. **That test can never fire, and it is worth
+/// recording why so it is not re-proposed.**
+///
+/// 1. The augmented row `k` is ALREADY in the emitted voltage-step convergence
+///    list, so on the accepting iteration `|Δi_k| ≤ RELTOL·max|i_k| + 1e-6`
+///    already holds.
+/// 2. `Φ(i) = L0·Isat·tanh(i/Isat)` is Lipschitz with constant `L0`, because
+///    `L_diff(i) = L0/cosh²(i/Isat) ≤ L0`. Hence
+///    `|Φ(i_post) − Φ(i_pre)| ≤ L0·(RELTOL·max|i_k| + 1e-6)`.
+/// 3. Any tolerance for that comparison that is dimensionally consistent with
+///    the row's own step check — `RELTOL·max|Φ| + L0·1e-6` — equals that bound
+///    in the small-signal limit (`Φ → L0·i`), and in saturation the local slope
+///    `1/cosh²(x)` shrinks faster than `|Φ|/(L0·|i|) = tanh(x)/x`. The fire
+///    condition reduces to `2x/sinh(2x) > 1`, which is false for every `x > 0`.
+///
+/// So the drift test is inert at every operating point and gets MORE inert the
+/// deeper the knee. Measured on all five shipping `ISAT=` circuits: zero fires
+/// across silence / 1 kHz / log sweep / step and a forced knee at `i/Isat` =
+/// 14.8. Picking a tighter floor to make it fire only produces spurious fires
+/// at flux zero crossings (up to 93 % of samples, +47 % NR iterations) and
+/// still catches nothing, because a self-consistency test cannot see an
+/// equation that is wrong at its own fixed point.
+///
+/// ## Three numerical choices, all load-bearing
+///
+/// * **The `alpha·L0·v[k]` self term is removed analytically, not by
+///   subtraction.** `alpha·L0` reaches ~2.6e5 on a 1073 output transformer
+///   while the row's actual content is volts; folding `A[k][k]·v[k]` into the
+///   sum and relying on the later terms to cancel it would discard ~11
+///   significant digits. `A[k][k] = g[k][k] + alpha·C[k][k]` and
+///   `C[k][k] = L0`, so the residue is exactly `g[k][k]` — a codegen-time
+///   constant (structurally **zero** on every shipping circuit, since
+///   `build_augmented_matrices` stamps only the ±1 incidence entries into row
+///   `k`). When a `.switch L` can rewrite `C[k][k]` at runtime the constant is
+///   not known, and the emitted fallback `(A[k][k] − alpha·L0)·v[k]` is still
+///   exact: the two operands are within a factor of two, so the subtraction is
+///   exact by Sterbenz.
+/// * **`alpha·Φ(v[k])` and `rhs[k]` are summed as a pair BEFORE either reaches
+///   the denominator.** `rhs[k]` carries `alpha·Φ(i_prev)`; individually both
+///   are ~1e4 while their difference is the ~10 V the row is actually about.
+///   Letting the stiff magnitude set the tolerance would make the check
+///   unfireable — the same stiff-denominator trap the Φ-vs-Φ form falls into.
+/// * **The absolute floor is `1e-6` V**, read off this row's own emitted
+///   voltage-step check rather than introduced as a new constant. The row is
+///   dimensionally volts (it is a KVL row: `v_j − v_i + alpha·ΔΦ`), so this
+///   makes the residual test a strict refinement of the existing criterion.
+///
+/// The predicate is written negated (`!(x <= tol)`) so a NaN residual reads as
+/// NOT converged, matching the device check.
+///
+/// ## Scope
+///
+/// Main trapezoidal/BE NR loop only, matching the device residual check. The
+/// adaptive sub-step loop and the backward-Euler fallback loop carry no
+/// residual check of any kind today (device or flux); closing that is a
+/// separate change with its own blast radius.
+fn emit_sat_ind_row_residual(
+    code: &mut String,
+    ir: &CircuitIR,
+    setter_stamps: &std::collections::BTreeSet<(usize, usize)>,
+    rhs: &str,
+    alpha: &str,
+    i_nl: Option<&str>,
+    indent: &str,
+) {
+    if ir.saturating_inductors.is_empty() {
+        return;
+    }
+    let n = ir.topology.n;
+    let m = ir.topology.m;
+    let g = &ir.matrices.g_matrix;
+    let c = &ir.matrices.c_matrix;
+    // Guard: the row enumeration below reads G/C directly, so bail to no check
+    // at all rather than emit a residual over a matrix we cannot address.
+    if g.len() != n * n || c.len() != n * n {
+        log::warn!(
+            "sat-inductor row residual: unexpected G/C dimensions, check not emitted"
+        );
+        return;
+    }
+
+    code.push_str(&format!(
+        "{indent}// Saturating-inductor augmented-row residual: the flux-row analogue\n\
+         {indent}// of the device residual check above. See `emit_sat_ind_row_residual`.\n"
+    ));
+    // `alpha` arrives fully parenthesised because every other consumer splices
+    // it into a larger expression. Binding it verbatim would trip
+    // `unused_parens` in generated code compiled under `-D warnings`, so strip
+    // one balanced outer pair (and only when it really is balanced).
+    let sat_al_expr = strip_outer_parens(alpha);
+    code.push_str(&format!("{indent}if !max_step_exceeded {{\n"));
+    code.push_str(&format!("{indent}    let sat_al = {sat_al_expr};\n"));
+
+    for (idx, si) in ir.saturating_inductors.iter().enumerate() {
+        let k = si.aug_row;
+        if k >= n {
+            log::warn!(
+                "sat-inductor {} aug_row {} out of range, row residual not emitted",
+                si.name,
+                k
+            );
+            continue;
+        }
+        // Structural nonzeros of row k of A = G + alpha*C, plus every position
+        // a dynamic-parameter setter can write into that row. Exact equality
+        // against 0.0 (not SPARSITY_THRESHOLD) so no small-but-real coupling is
+        // ever dropped from the residual.
+        let mut cols: Vec<usize> = (0..n)
+            .filter(|&j| j != k && (g[k * n + j] != 0.0 || c[k * n + j] != 0.0))
+            .collect();
+        for &(a, b) in setter_stamps.iter() {
+            if a == k && b != k && !cols.contains(&b) {
+                cols.push(b);
+            }
+        }
+        cols.sort_unstable();
+
+        code.push_str(&format!(
+            "{indent}    {{ // saturating inductor {idx} ({name})\n",
+            name = si.name
+        ));
+        code.push_str(&format!(
+            "{indent}        let k = SAT_IND_{idx}_AUG_ROW;\n\
+             {indent}        let mut acc = 0.0f64;\n\
+             {indent}        let mut den = 0.0f64;\n"
+        ));
+        for j in cols {
+            code.push_str(&format!(
+                "{indent}        {{ let t = state.a[k][{j}] * v[{j}]; acc += t; \
+                 let a = t.abs(); if a > den {{ den = a; }} }}\n"
+            ));
+        }
+        // Diagonal: A[k][k]*v[k] minus the alpha*L0*v[k] that the flux term
+        // below reintroduces. See the doc comment.
+        let diag_is_static = c[k * n + k] == si.l0 && !setter_stamps.contains(&(k, k));
+        if diag_is_static {
+            let g_kk = g[k * n + k];
+            if g_kk != 0.0 {
+                code.push_str(&format!(
+                    "{indent}        {{ let t = {g_kk:.17e} * v[k]; acc += t; \
+                     let a = t.abs(); if a > den {{ den = a; }} }}\n"
+                ));
+            }
+            // g[k][k] == 0.0: the whole self term vanishes, nothing to emit.
+        } else {
+            code.push_str(&format!(
+                "{indent}        {{ let t = (state.a[k][k] - sat_al * SAT_IND_{idx}_L0) * v[k]; \
+                 acc += t; let a = t.abs(); if a > den {{ den = a; }} }}\n"
+            ));
+        }
+        // Device currents injected into this row (structurally empty for an
+        // inductor branch row, emitted only if N_I says otherwise).
+        if let Some(i_nl) = i_nl {
+            if m > 0 && ir.matrices.n_i.len() == n * m {
+                for i in 0..m {
+                    if ir.matrices.n_i[k * m + i] != 0.0 {
+                        code.push_str(&format!(
+                            "{indent}        {{ let t = -N_I[k][{i}] * {i_nl}[{i}]; acc += t; \
+                             let a = t.abs(); if a > den {{ den = a; }} }}\n"
+                        ));
+                    }
+                }
+            }
+        }
+        // Flux-change term, kept paired so the stiff alpha*Phi magnitude never
+        // reaches `den`.
+        code.push_str(&format!(
+            "{indent}        {{ let phi = SAT_IND_{idx}_L0 * SAT_IND_{idx}_ISAT \
+             * (v[k] / SAT_IND_{idx}_ISAT).tanh(); \
+             let t = sat_al * phi - {rhs}[k]; acc += t; \
+             let a = t.abs(); if a > den {{ den = a; }} }}\n"
+        ));
+        code.push_str(&format!(
+            "{indent}        if !(acc.abs() <= 1e-3 * den + 1e-6) {{ max_step_exceeded = true; }}\n"
+        ));
+        code.push_str(&format!("{indent}    }}\n"));
+    }
+    code.push_str(&format!("{indent}}}\n\n"));
+}
+
 /// Emit the block-diagonal NR Jacobian stamp `MAT[a][b] -= N_I[a][i]·j_dev[i,j]
 /// ·N_V[j][b]` over every device slot's nonzero N_i/N_v entries. Shared by the
 /// trap (chord_lu), sub-step (g_s) and BE (g_aug) paths — they differ only in
@@ -1411,7 +1647,7 @@ impl RustEmitter {
                 code.push_str(&Self::emit_sparse_lu_factor(ir, equil_pat.as_ref()));
                 code.push_str(&Self::emit_sparse_lu_back_solve(ir));
             }
-            code.push_str(&Self::emit_nodal_process_sample(ir, &noise));
+            code.push_str(&Self::emit_nodal_process_sample(ir, &noise, &setter_stamps));
         } else {
             if linearized_bypass {
                 log::warn!(
@@ -6308,7 +6544,16 @@ impl RustEmitter {
     /// Used when the Schur path is unstable: K ≈ 0 (device Jacobian provides
     /// essential damping not captured by Schur), positive K diagonal, or
     /// ill-conditioned K. Matches the runtime NodalSolver's solve_equilibrated().
-    pub(super) fn emit_nodal_process_sample(ir: &CircuitIR, noise: &NoiseEmission) -> String {
+    /// `setter_stamps` carries the literal `(row, col)` positions the emitted
+    /// dynamic-parameter setters can write into `g_work`/`c_work` (see
+    /// `EquilPattern`). The saturating-inductor row residual needs it for the
+    /// same reason the equilibration pattern does: to know which entries of an
+    /// augmented row are codegen-time constants and which can move at runtime.
+    pub(super) fn emit_nodal_process_sample(
+        ir: &CircuitIR,
+        noise: &NoiseEmission,
+        setter_stamps: &std::collections::BTreeSet<(usize, usize)>,
+    ) -> String {
         let n = ir.topology.n;
         let m = ir.topology.m;
         let n_nodes = if ir.topology.n_nodes > 0 {
@@ -7066,6 +7311,19 @@ impl RustEmitter {
                 code.push_str("            }\n");
                 code.push_str("        }\n\n");
             }
+
+            // Flux-row analogue of the device residual check above. Emitted
+            // whether or not `m > 0`: a circuit can carry a saturating
+            // inductor with no nonlinear devices at all.
+            emit_sat_ind_row_residual(
+                &mut code,
+                ir,
+                setter_stamps,
+                "rhs",
+                &sat_alpha_main,
+                if m > 0 { Some("i_nl_resid") } else { None },
+                "        ",
+            );
 
             code.push_str("        let converged_check = !max_step_exceeded;\n\n");
 
