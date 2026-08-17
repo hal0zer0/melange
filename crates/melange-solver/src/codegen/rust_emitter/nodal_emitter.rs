@@ -783,6 +783,66 @@ pub(super) fn build_equil_pattern(
     }
 }
 
+/// Possibly-nonzero positions of the factored matrix at the point `sparse_lu_factor`
+/// runs its growth-factor check, in row-major sorted order.
+///
+/// The check computes `max |a[i][j]|` (and an `is_finite` test) over the whole
+/// N×N matrix, purely to reject a static-pivot factorization whose elements blew
+/// up. Every position outside this set holds an exact `0.0` at that point, so
+/// including it in the `max` cannot change the result and `0.0` is finite — the
+/// sparse sweep is therefore byte-identical to the dense one.
+///
+/// ## Why it is a superset (load-bearing, mirrors `EquilPattern`)
+///
+/// `sparse_lu_factor` does exactly three things to the matrix: equilibration
+/// (scales `EQUIL_PAT` entries in place — no new nonzeros), the static row swaps,
+/// then the straight-line elimination. So the only positions that can be nonzero
+/// at the growth check are:
+///   1. the input nonzeros, which `EquilPattern` is already a proven superset of
+///      (see its doc — runtime-verified 0 violations across the sparse corpus),
+///      carried through the row swaps that reorder them; plus
+///   2. every position the elimination writes (`DivPivot` L factors and `SubMul`
+///      updates / fill-in), which are exactly the op LHS targets.
+/// Any position touched by neither started at `0.0` and is never written, so it
+/// stays `0.0`. The union of (1) and (2) is that superset.
+fn build_growth_pattern(
+    pat: &EquilPattern,
+    row_swaps: &[(usize, usize)],
+    ops: &[LuOp],
+) -> Vec<(usize, usize)> {
+    use std::collections::BTreeSet;
+    // (1) input pattern, carried through the static row swaps (which the emitted
+    //     elimination applies before it runs, so op indices are in swapped space).
+    let mut set: BTreeSet<(usize, usize)> = pat.entries.iter().copied().collect();
+    for &(r1, r2) in row_swaps {
+        set = set
+            .into_iter()
+            .map(|(i, j)| {
+                let ni = if i == r1 {
+                    r2
+                } else if i == r2 {
+                    r1
+                } else {
+                    i
+                };
+                (ni, j)
+            })
+            .collect();
+    }
+    // (2) every position the straight-line elimination writes.
+    for op in ops {
+        match op {
+            LuOp::DivPivot { row, col } => {
+                set.insert((*row, *col));
+            }
+            LuOp::SubMul { row, j, .. } => {
+                set.insert((*row, *j));
+            }
+        }
+    }
+    set.into_iter().collect()
+}
+
 /// Emit the equilibration prologue shared by `lu_solve`, `lu_factor` and
 /// `sparse_lu_factor`: row max / row scale / column max / column scale.
 ///
@@ -6126,12 +6186,40 @@ impl RustEmitter {
         // Jacobian can make a symbolically-fine pivot numerically tiny and blow
         // the factors up. Reject so the caller re-factors densely.
         code.push_str("\n    // Growth-factor check (pre-factor matrix has unit max-norm)\n");
-        code.push_str("    let mut growth = 0.0f64;\n");
-        code.push_str("    for i in 0..N {\n");
-        code.push_str(
-            "        for j in 0..N { let v = a[i][j].abs(); if v > growth { growth = v; } }\n",
-        );
-        code.push_str("    }\n");
+        match pat {
+            // Sparse sweep over the factored possibly-nonzero set. Byte-identical
+            // to the dense N×N sweep: excluded positions are structural zeros.
+            // Gated on the same `EquilPattern` that guards the sparse
+            // equilibration, so the two stay consistent (and small/dense circuits
+            // that keep the dense equilibration keep the dense growth sweep, which
+            // vectorizes and wins there).
+            Some(p) => {
+                let growth_pat = build_growth_pattern(p, &lu.row_swaps, &lu.ops);
+                let entries = growth_pat
+                    .iter()
+                    .map(|(i, j)| format!("({i},{j})"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                code.push_str(&format!(
+                    "    const GROWTH_PAT: [(u16, u16); {}] = [{}];\n",
+                    growth_pat.len(),
+                    entries
+                ));
+                code.push_str("    let mut growth = 0.0f64;\n");
+                code.push_str("    for &(i, j) in GROWTH_PAT.iter() {\n");
+                code.push_str("        let v = a[i as usize][j as usize].abs();\n");
+                code.push_str("        if v > growth { growth = v; }\n");
+                code.push_str("    }\n");
+            }
+            None => {
+                code.push_str("    let mut growth = 0.0f64;\n");
+                code.push_str("    for i in 0..N {\n");
+                code.push_str(
+                    "        for j in 0..N { let v = a[i][j].abs(); if v > growth { growth = v; } }\n",
+                );
+                code.push_str("    }\n");
+            }
+        }
         code.push_str("    if !growth.is_finite() || growth > 1e8 { return false; }\n");
 
         code.push_str("\n    true\n");
