@@ -862,3 +862,67 @@ R_load out 0 1k
         sh3 / sh1
     );
 }
+
+/// ISAT turns-referral for STEP-UP transformers (bug fix 2026-08-16).
+///
+/// The T-model refers the magnetizing element to the largest-L winding. For a
+/// step-UP transformer (L_sec > L_pri) that is the SECONDARY, so a
+/// primary-authored ISAT must be referred to the secondary side
+/// (`Isat_ref = Isat · sqrt(L_authored / L_ref)`) or the core saturates by the
+/// turns ratio too late. This was an actual bug (a 1:1.68 output transformer
+/// under-saturated 1.68×). Pin both directions:
+///  - step-UP: emitted ISAT = raw · sqrt(L_pri/L_sec), NOT the raw value.
+///  - step-DOWN (ISAT on the reference/largest winding): referral is a no-op.
+#[test]
+fn test_saturating_transformer_isat_turns_referral() {
+    // Extract the emitted `pub const SAT_IND_0_ISAT: f64 = <v>;` from codegen.
+    fn emitted_isat(spice: &str) -> f64 {
+        let code = generate_nodal_code(spice, 48000.0);
+        let line = code
+            .lines()
+            .find(|l| l.contains("SAT_IND_0_ISAT"))
+            .unwrap_or_else(|| panic!("no SAT_IND_0_ISAT in generated code"));
+        let rhs = line.split('=').nth(1).expect("const rhs");
+        rhs.trim()
+            .trim_end_matches(';')
+            .trim()
+            .parse()
+            .expect("parse isat")
+    }
+
+    // Step-UP: L_pri=50m (ISAT=20m) < L_sec=141m. Reference = secondary.
+    // Referred: 20m * sqrt(50/141) = 20m * 0.5955 = 11.91m.
+    const UP: &str = "\
+Step-up saturating transformer
+L_pri in 0 50m ISAT=20m
+L_sec out 0 141m
+K1 L_pri L_sec 0.99
+R_load out 0 1k
+.END";
+    let up = emitted_isat(UP);
+    let expected = 20e-3 * (50.0f64 / 141.0).sqrt();
+    assert!(
+        (up - expected).abs() / expected < 1e-6,
+        "step-up ISAT not turns-referred: emitted {up:.6e}, expected {expected:.6e} \
+         (raw 20m unreferred would be the bug)"
+    );
+    assert!(
+        (up - 20e-3).abs() / 20e-3 > 0.1,
+        "step-up ISAT still at raw 20m — referral not applied: {up:.6e}"
+    );
+
+    // Step-DOWN: L_pri=100m (ISAT=20m) > L_sec=25m. Reference = primary =
+    // the ISAT-authored winding, so referral is a no-op (unchanged 20m).
+    const DOWN: &str = "\
+Step-down saturating transformer
+L_pri in 0 100m ISAT=20m
+L_sec out 0 25m
+K1 L_pri L_sec 0.99
+R_load out 0 1k
+.END";
+    let dn = emitted_isat(DOWN);
+    assert!(
+        (dn - 20e-3).abs() / 20e-3 < 1e-6,
+        "step-down ISAT should be unchanged (referral no-op): emitted {dn:.6e}"
+    );
+}

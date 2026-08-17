@@ -3547,14 +3547,24 @@ impl MnaBuilder {
                 // ideal couplings reflect winding load current out), so a single
                 // saturating flux law on this one inductor is physically correct
                 // shared-core saturation. Leakage inductors stay strictly linear
-                // (air path). The saturation current is taken from the reference
-                // (largest-L, i.e. primary) winding's ISAT — the authoring contract
-                // (Phase 3) is ISAT on the reference winding; fall back to any
-                // winding carrying it so a mis-authored deck still saturates rather
-                // than silently going linear.
-                let core_isat = inductor_refs[&members[ref_idx]]
-                    .isat
-                    .or_else(|| members.iter().find_map(|m| inductor_refs[m].isat));
+                // (air path). ISAT is a PER-WINDING saturation current — the
+                // current at which the winding it is authored on drives the core
+                // into saturation. The magnetizing element is referred to the
+                // reference (largest-L) winding, so ISAT MUST be referred to the
+                // same side, or the core saturates by the turns ratio too late/
+                // early. Note the reference winding is NOT necessarily the primary:
+                // for a step-UP transformer (L_sec > L_pri, e.g. 1073 LO1166 at
+                // 1:1.68) the SECONDARY is the reference, and a primary-authored
+                // ISAT left unreferred makes the core saturate n× too late.
+                // Current refers inversely to turns, N ∝ √L:
+                //   Isat_ref = Isat_authored · √(L_authored / L_ref)
+                // ISAT-on-reference is the common case and referral is then a no-op
+                // (√1 = 1). Take the first winding carrying ISAT (one shared core =
+                // one authored ISAT) so a mis-authored deck still saturates.
+                let core_isat = members.iter().find_map(|m| {
+                    let ind = &inductor_refs[m];
+                    ind.isat.map(|isat| isat * (ind.value / l_ref).sqrt())
+                });
                 let ref_internal_p = internal_nodes_p[ref_idx];
                 let ref_neg = inductor_refs[&members[ref_idx]].node_j;
                 // Exact magnetizing inductance is k·L_ref (primary-referred), not
