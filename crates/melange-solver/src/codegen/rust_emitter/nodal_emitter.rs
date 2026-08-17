@@ -7611,7 +7611,20 @@ impl RustEmitter {
             // increment here would also count ActiveSetBe rail-engagement
             // entries with a fully converged trap solve as NR failures.
             code.push_str("        state.diag_be_fallback_count += 1;\n");
-            code.push_str("        chord_valid = false;\n\n");
+            code.push_str("        chord_valid = false;\n");
+            // Reset `converged` at fallback ENTRY. In ActiveSetBe mode the
+            // fallback can be entered with a converged trap/substep primary
+            // (`active_set_engaged`), in which case `converged` is still true
+            // from that primary solve. If the BE NR loop below then fails, it
+            // never clears the flag, so the death-spiral guard
+            // (`if !converged { v = state.v_prev; ... }`) is skipped and the
+            // diverged BE iterate is committed over the valid primary root and
+            // reported clean (nr_max_iter_count stays 0). Entering the fallback
+            // means we are re-deriving the solution on BE matrices; until the BE
+            // loop proves convergence we do NOT hold a trustworthy result. The
+            // BE loop sets `converged = true` again on success, so samples whose
+            // BE fallback converges are byte-identical.
+            code.push_str("        converged = false;\n\n");
 
             // Rebuild RHS with BE matrices
             code.push_str("        // Rebuild RHS with backward Euler matrices\n");
