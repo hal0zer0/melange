@@ -77,18 +77,18 @@ fn ni_nonzeros_by_dev(ir: &CircuitIR, m: usize) -> Vec<Vec<usize>> {
     out
 }
 
-/// Saturating (iron-core) UNCOUPLED inductor — in-NR-loop companion stamps.
-///
-/// The augmented branch row `k = aug_row` holds branch current `i_k`. A linear
-/// inductor bakes `alpha·L0` into the base matrix at `[k][k]` and `alpha·L0·i_prev`
-/// into the history (`A_neg·v_prev`). A saturating inductor replaces the linear
-/// flux `L0·i` with `Φ(i) = L0·Isat·tanh(i/Isat)`; the Jacobian uses the
-/// differential `L_diff(i) = L0/cosh²(i/Isat)`. See `SATURATING_TRANSFORMERS.md`
-/// §3.4 for the derivation and sign convention (verified against
-/// `mna.rs::build_augmented_matrices`).
-///
-/// `alpha` is the site-local integrator scalar expression (`2·rate·OS` trap,
-/// `1·rate·OS` BE, `alpha_sub` sub-step) — this is what makes BE composition free.
+// Saturating (iron-core) UNCOUPLED inductor — in-NR-loop companion stamps.
+//
+// The augmented branch row `k = aug_row` holds branch current `i_k`. A linear
+// inductor bakes `alpha·L0` into the base matrix at `[k][k]` and `alpha·L0·i_prev`
+// into the history (`A_neg·v_prev`). A saturating inductor replaces the linear
+// flux `L0·i` with `Φ(i) = L0·Isat·tanh(i/Isat)`; the Jacobian uses the
+// differential `L_diff(i) = L0/cosh²(i/Isat)`. See `SATURATING_TRANSFORMERS.md`
+// §3.4 for the derivation and sign convention (verified against
+// `mna.rs::build_augmented_matrices`).
+//
+// `alpha` is the site-local integrator scalar expression (`2·rate·OS` trap,
+// `1·rate·OS` BE, `alpha_sub` sub-step) — this is what makes BE composition free.
 
 /// History correction (once per sample, after the base `A_neg·v_prev` RHS build):
 /// swaps the baked-in `alpha·L0·i_prev` for `alpha·Φ(i_prev)`.
