@@ -10,8 +10,9 @@ use tera::Context;
 use super::helpers::{
     coupled_inductor_template_data, device_param_template_data, emit_device_const, fmt_f64,
     format_matrix_rows, inductor_template_data, named_const_entries, oversampling_info,
-    recommended_warmup_samples, section_banner, self_heating_device_data, warmup_estimate_capped,
-    transformer_group_template_data, SwitchCompTemplateData, SwitchTemplateData,
+    recommended_warmup_samples, section_banner, self_heating_device_data,
+    transformer_group_template_data, warmup_estimate_capped, SwitchCompTemplateData,
+    SwitchTemplateData,
 };
 use super::RustEmitter;
 use crate::codegen::ir::{CircuitIR, DeviceParams, DeviceType};

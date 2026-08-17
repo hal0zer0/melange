@@ -714,8 +714,14 @@ L1 out 0 50m ISAT=2m
         h1.is_finite() && h2.is_finite() && h3.is_finite() && peak.is_finite(),
         "non-finite harmonics: H1={h1} H2={h2} H3={h3} peak={peak}"
     );
-    assert!(h1 > 0.3, "fundamental too small, signal not passing: H1={h1:.4}");
-    assert!(peak < 0.9, "output should stay below the 0.9 V drive: peak={peak:.4}");
+    assert!(
+        h1 > 0.3,
+        "fundamental too small, signal not passing: H1={h1:.4}"
+    );
+    assert!(
+        peak < 0.9,
+        "output should stay below the 0.9 V drive: peak={peak:.4}"
+    );
     // Symmetry: odd tanh ⇒ no even harmonics.
     assert!(
         h2 / h1 < 0.01,
@@ -786,7 +792,10 @@ fn main() {
 }
 "#;
     let parse = |out: &str| -> (f64, f64, f64, f64) {
-        let v: Vec<f64> = out.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+        let v: Vec<f64> = out
+            .split_whitespace()
+            .filter_map(|s| s.parse().ok())
+            .collect();
         assert_eq!(v.len(), 4, "expected 'H1 H2 H3 peak', got {out:?}");
         (v[0], v[1], v[2], v[3])
     };
@@ -806,8 +815,16 @@ L_sec out 0 25m
 K1 L_pri L_sec 0.99
 R_load out 0 1k
 .END";
-    let (tm_h1, _, _, _) = parse(&compile_and_run(&generate_nodal_code(TM, 48000.0), MAIN, "xfmr_tm"));
-    let (ex_h1, _, _, _) = parse(&compile_and_run(&generate_nodal_code(EX, 48000.0), MAIN, "xfmr_ex"));
+    let (tm_h1, _, _, _) = parse(&compile_and_run(
+        &generate_nodal_code(TM, 48000.0),
+        MAIN,
+        "xfmr_tm",
+    ));
+    let (ex_h1, _, _, _) = parse(&compile_and_run(
+        &generate_nodal_code(EX, 48000.0),
+        MAIN,
+        "xfmr_ex",
+    ));
     let transfer_err = (tm_h1 - ex_h1).abs() / ex_h1;
     assert!(
         transfer_err < 0.005,
@@ -824,8 +841,15 @@ L_sec out 0 25m
 K1 L_pri L_sec 0.99
 R_load out 0 1k
 .END";
-    let (sh1, sh2, sh3, speak) = parse(&compile_and_run(&generate_nodal_code(SAT, 48000.0), MAIN, "xfmr_sat"));
-    assert!(sh1.is_finite() && speak.is_finite() && speak < 1.0, "unbounded/NaN: H1={sh1} peak={speak}");
+    let (sh1, sh2, sh3, speak) = parse(&compile_and_run(
+        &generate_nodal_code(SAT, 48000.0),
+        MAIN,
+        "xfmr_sat",
+    ));
+    assert!(
+        sh1.is_finite() && speak.is_finite() && speak < 1.0,
+        "unbounded/NaN: H1={sh1} peak={speak}"
+    );
     assert!(sh1 > 0.05, "secondary carries no signal: H1={sh1:.4}");
     assert!(
         sh2 / sh1 < 0.01,

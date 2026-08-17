@@ -378,7 +378,6 @@ enum Commands {
         #[arg(long)]
         force_trap: bool,
 
-
         /// Maximum NR iterations per sample. Defaults to the same auto-tuned
         /// budget `compile` uses (scales with M, solver route, and trap
         /// spectral radius).

@@ -8,8 +8,8 @@
 use super::dk_emitter::NoiseEmission;
 use super::helpers::{
     device_param_template_data, emit_pentode_nr_dk_stamp, fmt_f64, format_matrix_rows,
-    oversampling_info, pentode_dispatch, recommended_warmup_samples, section_banner, warmup_estimate_capped,
-    self_heating_device_data,
+    oversampling_info, pentode_dispatch, recommended_warmup_samples, section_banner,
+    self_heating_device_data, warmup_estimate_capped,
 };
 use super::nr_helpers::{emit_nr_singular_fallback, emit_schur_nr_limit_and_converge};
 use super::RustEmitter;
@@ -92,7 +92,14 @@ fn ni_nonzeros_by_dev(ir: &CircuitIR, m: usize) -> Vec<Vec<usize>> {
 
 /// History correction (once per sample, after the base `A_neg·v_prev` RHS build):
 /// swaps the baked-in `alpha·L0·i_prev` for `alpha·Φ(i_prev)`.
-fn emit_sat_ind_history(code: &mut String, ir: &CircuitIR, rhs: &str, vprev: &str, alpha: &str, indent: &str) {
+fn emit_sat_ind_history(
+    code: &mut String,
+    ir: &CircuitIR,
+    rhs: &str,
+    vprev: &str,
+    alpha: &str,
+    indent: &str,
+) {
     for (idx, _si) in ir.saturating_inductors.iter().enumerate() {
         code.push_str(&format!(
             "{indent}{{ let ip = {vprev}[SAT_IND_{idx}_AUG_ROW]; \
@@ -104,7 +111,14 @@ fn emit_sat_ind_history(code: &mut String, ir: &CircuitIR, rhs: &str, vprev: &st
 
 /// Jacobian correction (at each factor): base matrix has `alpha·L0` at `[k][k]`;
 /// correct it to `alpha·L_diff(i0)`. `iterate` is the current NR iterate vector.
-fn emit_sat_ind_jacobian(code: &mut String, ir: &CircuitIR, mat: &str, iterate: &str, alpha: &str, indent: &str) {
+fn emit_sat_ind_jacobian(
+    code: &mut String,
+    ir: &CircuitIR,
+    mat: &str,
+    iterate: &str,
+    alpha: &str,
+    indent: &str,
+) {
     for (idx, _si) in ir.saturating_inductors.iter().enumerate() {
         code.push_str(&format!(
             "{indent}{{ let i0 = {iterate}[SAT_IND_{idx}_AUG_ROW]; \
@@ -118,7 +132,14 @@ fn emit_sat_ind_jacobian(code: &mut String, ir: &CircuitIR, mat: &str, iterate: 
 /// Companion-RHS correction (consistent with the factored Jacobian, same
 /// `iterate`): moves the linearization constant `alpha·(L_diff(i0)·i0 − Φ(i0))`
 /// to the RHS so the back-solve yields the Newton step.
-fn emit_sat_ind_companion(code: &mut String, ir: &CircuitIR, rhs: &str, iterate: &str, alpha: &str, indent: &str) {
+fn emit_sat_ind_companion(
+    code: &mut String,
+    ir: &CircuitIR,
+    rhs: &str,
+    iterate: &str,
+    alpha: &str,
+    indent: &str,
+) {
     for (idx, _si) in ir.saturating_inductors.iter().enumerate() {
         code.push_str(&format!(
             "{indent}{{ let i0 = {iterate}[SAT_IND_{idx}_AUG_ROW]; \
@@ -946,20 +967,20 @@ impl RustEmitter {
         let force_full_lu_sat = !ir.saturating_inductors.is_empty();
         let use_full_nodal = force_full_lu_sat
             || if !ir.behavioral_sources.is_empty() {
-            // Behavioral B-sources are stamped in node space only on the full-LU
-            // path (the Schur reduction can't express their rectangular control).
-            true
-        } else if linearized_bypass {
-            // Only k_degenerate, spectral radius, or large-|K| can block Schur
-            k_degenerate || schur_unstable || k_large_magnitude_with_linearization
-        } else {
-            has_positive_k_with_current
-                || k_diag_min < -1e12
-                || k_degenerate
-                || k_ill_conditioned
-                || s_ill_conditioned
-                || schur_unstable
-        };
+                // Behavioral B-sources are stamped in node space only on the full-LU
+                // path (the Schur reduction can't express their rectangular control).
+                true
+            } else if linearized_bypass {
+                // Only k_degenerate, spectral radius, or large-|K| can block Schur
+                k_degenerate || schur_unstable || k_large_magnitude_with_linearization
+            } else {
+                has_positive_k_with_current
+                    || k_diag_min < -1e12
+                    || k_degenerate
+                    || k_ill_conditioned
+                    || s_ill_conditioned
+                    || schur_unstable
+            };
         // The dense `lu_solve` helper is emitted whenever any generated code
         // path needs it. The full-LU nodal path always needs it. The Schur
         // path also needs it when op-amp rail handling is in `ActiveSet` mode,
@@ -4366,9 +4387,7 @@ impl RustEmitter {
                     }
                 }
                 // BE input stamp: V_in * G_in (no trapezoidal average).
-                code.push_str(
-                    "        rhs_be[INPUT_NODE] += input * input_conductance;\n",
-                );
+                code.push_str("        rhs_be[INPUT_NODE] += input * input_conductance;\n");
                 // Runtime voltage sources (same rows as the trap stamp).
                 for rt in &ir.runtime_sources {
                     code.push_str(&format!(
@@ -5108,9 +5127,7 @@ impl RustEmitter {
         // (both the m=0 override above and the m>0 BE fallback, forced via the
         // `converged` guard). One decrement per sample, after the solve.
         if ir.solver_config.breakpoint_be {
-            code.push_str(
-                "    if state.breakpoint_be > 0 { state.breakpoint_be -= 1; }\n",
-            );
+            code.push_str("    if state.breakpoint_be > 0 { state.breakpoint_be -= 1; }\n");
         }
         // Commit input_prev here (NOT at the RHS build) so the sub-step input
         // interpolation earlier in the sample still sees last sample's value.
@@ -6124,7 +6141,14 @@ impl RustEmitter {
             code.push_str(
                 "    // Saturating inductor flux history (Φ(i_prev) replaces L0·i_prev)\n",
             );
-            emit_sat_ind_history(&mut code, ir, "rhs", "state.v_prev", &sat_alpha_main, "    ");
+            emit_sat_ind_history(
+                &mut code,
+                ir,
+                "rhs",
+                "state.v_prev",
+                &sat_alpha_main,
+                "    ",
+            );
             code.push('\n');
         }
 
@@ -6301,7 +6325,14 @@ impl RustEmitter {
             }
             // Saturating-inductor Jacobian: alpha·L0 → alpha·L_diff(v[k]) at [k][k].
             if has_sat_ind {
-                emit_sat_ind_jacobian(&mut code, ir, "chord_lu", "v", &sat_alpha_main, "            ");
+                emit_sat_ind_jacobian(
+                    &mut code,
+                    ir,
+                    "chord_lu",
+                    "v",
+                    &sat_alpha_main,
+                    "            ",
+                );
             }
             // Behavioral B-source Jacobian: stamp ∂f/∂V directly into G_aug.
             if has_behavioral {
@@ -6791,7 +6822,14 @@ impl RustEmitter {
             }
             // Saturating-inductor flux history (sub-step: base v_sub, alpha_sub)
             if has_sat_ind {
-                emit_sat_ind_history(&mut code, ir, "rhs_s", "v_sub", "alpha_sub", "                ");
+                emit_sat_ind_history(
+                    &mut code,
+                    ir,
+                    "rhs_s",
+                    "v_sub",
+                    "alpha_sub",
+                    "                ",
+                );
             }
             code.push_str("                rhs_s[INPUT_NODE] += (inp_s + inp_prev_s) * (1.0 / INPUT_RESISTANCE);\n");
             // Runtime voltage sources: integration-scheme-independent; every
@@ -6824,13 +6862,27 @@ impl RustEmitter {
             code.push_str("                    let mut g_s = a_sub;\n");
             emit_nodal_jacobian_stamp(&mut code, ir, m, "g_s", "                    ");
             if has_sat_ind {
-                emit_sat_ind_jacobian(&mut code, ir, "g_s", "v_sub", "alpha_sub", "                    ");
+                emit_sat_ind_jacobian(
+                    &mut code,
+                    ir,
+                    "g_s",
+                    "v_sub",
+                    "alpha_sub",
+                    "                    ",
+                );
             }
             // Build companion RHS
             code.push_str("                    let mut rhs_w = rhs_s;\n");
             emit_nodal_companion_rhs(&mut code, ir, m, "rhs_w", "j_dev", "                    ");
             if has_sat_ind {
-                emit_sat_ind_companion(&mut code, ir, "rhs_w", "v_sub", "alpha_sub", "                    ");
+                emit_sat_ind_companion(
+                    &mut code,
+                    ir,
+                    "rhs_w",
+                    "v_sub",
+                    "alpha_sub",
+                    "                    ",
+                );
             }
             // LU solve
             code.push_str("                    let mut v_new_s = rhs_w;\n");
@@ -6981,7 +7033,14 @@ impl RustEmitter {
             // Saturating-inductor flux history (BE: base v_prev, alpha = 1·rate·OS;
             // BE A_neg drops the G term, so only the L0·i_prev → Φ(i_prev) swap applies)
             if has_sat_ind {
-                emit_sat_ind_history(&mut code, ir, "rhs_be", "state.v_prev", &sat_alpha_be, "        ");
+                emit_sat_ind_history(
+                    &mut code,
+                    ir,
+                    "rhs_be",
+                    "state.v_prev",
+                    &sat_alpha_be,
+                    "        ",
+                );
             }
             code.push_str("        // BE input: just input[n+1] * G_in (no trapezoidal average)\n");
             code.push_str("        rhs_be[INPUT_NODE] += input * input_conductance;\n");
@@ -7040,7 +7099,14 @@ impl RustEmitter {
             code.push_str("            let mut rhs_work = rhs_be;\n");
             emit_nodal_companion_rhs(&mut code, ir, m, "rhs_work", "j_dev", "            ");
             if has_sat_ind {
-                emit_sat_ind_companion(&mut code, ir, "rhs_work", "v", &sat_alpha_be, "            ");
+                emit_sat_ind_companion(
+                    &mut code,
+                    ir,
+                    "rhs_work",
+                    "v",
+                    &sat_alpha_be,
+                    "            ",
+                );
             }
             code.push('\n');
 
@@ -7291,9 +7357,7 @@ impl RustEmitter {
         // Breakpoint-BE countdown: this sample was solved on the BE matrices via
         // the forced BE fallback. One decrement per sample, after the solve.
         if ir.solver_config.breakpoint_be {
-            code.push_str(
-                "    if state.breakpoint_be > 0 { state.breakpoint_be -= 1; }\n",
-            );
+            code.push_str("    if state.breakpoint_be > 0 { state.breakpoint_be -= 1; }\n");
         }
         // Commit input_prev here (NOT at the RHS build) so the sub-step input
         // interpolation earlier in the sample still sees last sample's value.
