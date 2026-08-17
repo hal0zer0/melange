@@ -1006,7 +1006,13 @@ impl RustEmitter {
         }
         code.push_str(&self.emit_device_models(ir)?);
         code.push_str(&self.emit_nodal_state(ir, use_full_nodal, &noise));
-        code.push_str(&Self::emit_nodal_invert_n(ir));
+        // `invert_n` exists solely to build the Schur matrices (S, S_be, S_sub)
+        // in `rebuild_matrices`. The full-LU path never reads those matrices —
+        // it solves against A / A_be / chord_lu directly — so on that path
+        // `rebuild_matrices` skips the inversions and `invert_n` has no callers.
+        if !use_full_nodal {
+            code.push_str(&Self::emit_nodal_invert_n(ir));
+        }
 
         if use_full_nodal {
             if has_positive_k_with_current {
@@ -3232,10 +3238,40 @@ impl RustEmitter {
             "C"
         };
 
-        code.push_str("    /// Recompute A, A_neg, A_be, A_neg_be, S, K, S_NI (and BE variants) from G and C.\n");
+        // Which Schur matrices does the generated per-sample code actually read?
+        //
+        // * S / K / S_NI and their BE twins are read only by the nodal-Schur
+        //   per-sample path. The full-LU path solves against A / A_be /
+        //   chord_lu and never touches them, so building them there is dead
+        //   work — three N×N inversions plus three Schur products per pot,
+        //   switch, or sample-rate change.
+        // * S_sub / K_sub / S_NI_sub are read only by the nodal-Schur
+        //   ActiveSetBe sub-step block. The full-LU sub-step builds its own
+        //   `a_neg_sub` locally at the runtime rate, and every other circuit
+        //   never enters a sub-step at all.
+        //
+        // `a_neg_sub` itself is still rebuilt unconditionally: it is an O(N²)
+        // store, and the Schur sub-step reads the persisted copy.
+        let schur_matrices_live = !use_full_nodal;
+        let sub_matrices_live = !use_full_nodal
+            && matches!(
+                ir.solver_config.opamp_rail_mode,
+                crate::codegen::OpampRailMode::ActiveSetBe
+            );
+        code.push_str("    /// Recompute A, A_neg, A_be, A_neg_be from G and C.\n");
         code.push_str("    ///\n");
         code.push_str("    /// Called by set_sample_rate, set_pot, and set_switch.\n");
-        code.push_str("    /// Includes O(N^3) matrix inversion for Schur complement NR.\n");
+        if schur_matrices_live {
+            code.push_str(
+                "    /// Also recomputes the Schur matrices S, K, S_NI (and BE variants),\n",
+            );
+            code.push_str("    /// which includes O(N^3) matrix inversion.\n");
+        } else {
+            code.push_str(
+                "    /// The Schur matrices (S/K/S_NI) are not rebuilt: the full-LU path\n",
+            );
+            code.push_str("    /// never reads them.\n");
+        }
         code.push_str("    pub fn rebuild_matrices(&mut self, internal_rate: f64) {\n");
         if ir.solver_config.backward_euler {
             code.push_str("        let alpha = internal_rate; // backward Euler: alpha = 1/T\n");
@@ -3301,73 +3337,65 @@ impl RustEmitter {
             }
         }
 
-        // Recompute Schur complement matrices: S = A^{-1}, K = N_v*S*N_i, S_NI = S*N_i
-        code.push_str("\n        // Recompute S = A^{-1} (trapezoidal)\n");
-        code.push_str("        if let Some(inv) = invert_n(&self.a) {\n");
-        code.push_str(&format!("            {}s = inv;\n", cp));
-        if m > 0 {
-            code.push_str("            // K = N_v * S * N_i\n");
-            code.push_str("            for i in 0..M {\n");
-            code.push_str("                for j in 0..M {\n");
-            code.push_str("                    let mut sum = 0.0;\n");
-            code.push_str("                    for a in 0..N {\n");
-            code.push_str("                        let mut s_ni_aj = 0.0;\n");
-            code.push_str(&format!(
-                "                        for b in 0..N {{ s_ni_aj += {}s[a][b] * N_I[b][j]; }}\n",
-                cp
-            ));
-            code.push_str("                        sum += N_V[i][a] * s_ni_aj;\n");
-            code.push_str("                    }\n");
-            code.push_str(&format!("                    {}k[i][j] = sum;\n", cp));
-            code.push_str("                }\n");
-            code.push_str("            }\n");
+        // Emit `S_NI = S · N_i` (N×M) followed by `K = N_v · S_NI` (M×M) for one
+        // Schur triple.
+        //
+        // K was previously formed directly as `K[i][j] = Σ_a N_v[i][a] · (Σ_b
+        // S[a][b] · N_i[b][j])`, recomputing the inner `Σ_b` — which depends
+        // only on (a, j), not on i — for every one of the M² outputs. That is
+        // O(M²N²) where the factored form is O(N²M + M²N): 135 424 multiply-adds
+        // instead of 19 872 at N=46, M=8, and it runs three times per rebuild.
+        //
+        // The factored form is bit-for-bit identical, not merely equivalent:
+        // `s_ni[a][j]` is accumulated over `a` in the same ascending order the
+        // inner loop used, so every partial sum — and therefore every rounding —
+        // matches the old code exactly. Only the redundant recomputation is gone.
+        let emit_schur_products = |code: &mut String, s_mat: &str, s_ni_mat: &str, k_mat: &str| {
+            if m == 0 {
+                return;
+            }
             code.push_str("            // S_NI = S * N_i\n");
             code.push_str("            for i in 0..N {\n");
             code.push_str("                for j in 0..M {\n");
             code.push_str("                    let mut sum = 0.0;\n");
             code.push_str(&format!(
-                "                    for a in 0..N {{ sum += {}s[i][a] * N_I[a][j]; }}\n",
-                cp
+                "                    for a in 0..N {{ sum += {cp}{s_mat}[i][a] * N_I[a][j]; }}\n"
             ));
-            code.push_str(&format!("                    {}s_ni[i][j] = sum;\n", cp));
+            code.push_str(&format!(
+                "                    {cp}{s_ni_mat}[i][j] = sum;\n"
+            ));
             code.push_str("                }\n");
             code.push_str("            }\n");
-        }
-        code.push_str("        }\n");
-
-        // Recompute S_be = A_be^{-1}
-        code.push_str("        // Recompute S_be = A_be^{-1} (backward Euler)\n");
-        code.push_str("        if let Some(inv) = invert_n(&self.a_be) {\n");
-        code.push_str(&format!("            {}s_be = inv;\n", cp));
-        if m > 0 {
+            code.push_str("            // K = N_v * S_NI\n");
             code.push_str("            for i in 0..M {\n");
             code.push_str("                for j in 0..M {\n");
             code.push_str("                    let mut sum = 0.0;\n");
-            code.push_str("                    for a in 0..N {\n");
-            code.push_str("                        let mut s_ni_aj = 0.0;\n");
             code.push_str(&format!(
-                "                        for b in 0..N {{ s_ni_aj += {}s_be[a][b] * N_I[b][j]; }}\n", cp
+                "                    for a in 0..N {{ sum += N_V[i][a] * {cp}{s_ni_mat}[a][j]; }}\n"
             ));
-            code.push_str("                        sum += N_V[i][a] * s_ni_aj;\n");
-            code.push_str("                    }\n");
-            code.push_str(&format!("                    {}k_be[i][j] = sum;\n", cp));
+            code.push_str(&format!("                    {cp}{k_mat}[i][j] = sum;\n"));
             code.push_str("                }\n");
             code.push_str("            }\n");
-            code.push_str("            for i in 0..N {\n");
-            code.push_str("                for j in 0..M {\n");
-            code.push_str("                    let mut sum = 0.0;\n");
-            code.push_str(&format!(
-                "                    for a in 0..N {{ sum += {}s_be[i][a] * N_I[a][j]; }}\n",
-                cp
-            ));
-            code.push_str(&format!("                    {}s_ni_be[i][j] = sum;\n", cp));
-            code.push_str("                }\n");
-            code.push_str("            }\n");
+        };
+
+        // Recompute Schur complement matrices: S = A^{-1}, S_NI = S*N_i, K = N_v*S_NI
+        if schur_matrices_live {
+            code.push_str("\n        // Recompute S = A^{-1} (trapezoidal)\n");
+            code.push_str("        if let Some(inv) = invert_n(&self.a) {\n");
+            code.push_str(&format!("            {}s = inv;\n", cp));
+            emit_schur_products(&mut code, "s", "s_ni", "k");
+            code.push_str("        }\n");
+
+            // Recompute S_be = A_be^{-1}
+            code.push_str("        // Recompute S_be = A_be^{-1} (backward Euler)\n");
+            code.push_str("        if let Some(inv) = invert_n(&self.a_be) {\n");
+            code.push_str(&format!("            {}s_be = inv;\n", cp));
+            emit_schur_products(&mut code, "s_be", "s_ni_be", "k_be");
+            code.push_str("        }\n");
         }
-        code.push_str("        }\n");
 
         // Recompute S_sub = (G + alpha_sub*C)^{-1} (trap at 2× rate)
-        if !ir.matrices.s_sub.is_empty() {
+        if !ir.matrices.s_sub.is_empty() && sub_matrices_live {
             code.push_str(
                 "        // Recompute S_sub = (G + alpha_sub*C)^{-1} (trap at 2× rate)\n",
             );
@@ -3378,34 +3406,7 @@ impl RustEmitter {
             ));
             code.push_str("        if let Some(inv) = invert_n(&a_sub) {\n");
             code.push_str(&format!("            {}s_sub = inv;\n", cp));
-            if m > 0 {
-                code.push_str("            for i in 0..M {\n");
-                code.push_str("                for j in 0..M {\n");
-                code.push_str("                    let mut sum = 0.0;\n");
-                code.push_str("                    for a in 0..N {\n");
-                code.push_str("                        let mut s_ni_aj = 0.0;\n");
-                code.push_str(&format!(
-                    "                        for b in 0..N {{ s_ni_aj += {}s_sub[a][b] * N_I[b][j]; }}\n", cp
-                ));
-                code.push_str("                        sum += N_V[i][a] * s_ni_aj;\n");
-                code.push_str("                    }\n");
-                code.push_str(&format!("                    {}k_sub[i][j] = sum;\n", cp));
-                code.push_str("                }\n");
-                code.push_str("            }\n");
-                code.push_str("            for i in 0..N {\n");
-                code.push_str("                for j in 0..M {\n");
-                code.push_str("                    let mut sum = 0.0;\n");
-                code.push_str(&format!(
-                    "                    for a in 0..N {{ sum += {}s_sub[i][a] * N_I[a][j]; }}\n",
-                    cp
-                ));
-                code.push_str(&format!(
-                    "                    {}s_ni_sub[i][j] = sum;\n",
-                    cp
-                ));
-                code.push_str("                }\n");
-                code.push_str("            }\n");
-            }
+            emit_schur_products(&mut code, "s_sub", "s_ni_sub", "k_sub");
             code.push_str("        }\n");
         }
 
