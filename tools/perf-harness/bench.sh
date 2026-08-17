@@ -11,7 +11,8 @@
 #   MELANGE       compile command (default: cargo run -q -p melange-cli --release --)
 #   PERF_SAMPLES  timed samples per rep (default 2000000)
 #   PERF_REPS     repetitions, min taken (default 7)
-#   RUSTFLAGS_EXTRA  appended to rustc (default: -C target-cpu=native -C codegen-units=1)
+#   RUSTFLAGS_EXTRA  appended to rustc
+#                    (default: -C target-cpu=x86-64-v3 -C codegen-units=1)
 set -euo pipefail
 
 HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,7 +25,13 @@ shift 2
 EXTRA_FLAGS=("$@")
 
 MELANGE="${MELANGE:-cargo run -q -p melange-cli --release --}"
-RUSTFLAGS_EXTRA="${RUSTFLAGS_EXTRA:--C target-cpu=native -C codegen-units=1}"
+# Match the SHIPPING instruction-set baseline, not this build host. Generated
+# plugins pin `x86-64-v3` per target in `.cargo/config.toml`
+# (`plugin_template.rs::generate_cargo_config`); benchmarking under
+# `target-cpu=native` measured a machine nobody ships to, and on Zen 4 it was
+# actually SLOWER than the shipping baseline (AVX-512 codegen): passive-eq1a
+# 1392 ns native vs 1219 ns at plain x86-64 vs 1076 ns at x86-64-v3.
+RUSTFLAGS_EXTRA="${RUSTFLAGS_EXTRA:--C target-cpu=x86-64-v3 -C codegen-units=1}"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
