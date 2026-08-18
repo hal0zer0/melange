@@ -84,7 +84,7 @@ fn dissipative_circuit_achieves_rho_below_one_under_be() {
         &ir.matrices.s,
         &ir.matrices.a_neg,
         ir.topology.n,
-        input_node,
+        &[input_node],
     );
     assert!(
         stability.rho < 1.0,

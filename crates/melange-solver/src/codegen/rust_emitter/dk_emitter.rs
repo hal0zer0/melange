@@ -18,6 +18,36 @@ use super::RustEmitter;
 use crate::codegen::ir::{CircuitIR, DeviceParams, DeviceType};
 use crate::codegen::{CodegenError, NoiseMode};
 
+/// Insert the multi-input-port Tera variables (`multi_input`, `num_inputs`,
+/// `input_nodes_values`, `input_resistances_values`) into a template context.
+///
+/// `multi_input` gates every input-related emission divergence; when it is
+/// false (the single-input case) the templates emit the historical single-input
+/// code byte-for-byte. Called for every local context whose template references
+/// these variables (constants, state, build_rhs, process_sample). See
+/// `local-docs/multi-input-ports-plan.md`.
+fn insert_multi_input_ctx(ctx: &mut Context, ir: &CircuitIR) {
+    let num_inputs = ir.solver_config.num_inputs();
+    ctx.insert("multi_input", &(num_inputs > 1));
+    ctx.insert("num_inputs", &num_inputs);
+    let input_nodes_values = ir
+        .solver_config
+        .input_node_indices()
+        .iter()
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    ctx.insert("input_nodes_values", &input_nodes_values);
+    let input_resistances_values = ir
+        .solver_config
+        .input_resistance_values()
+        .iter()
+        .map(|r| fmt_f64(*r))
+        .collect::<Vec<_>>()
+        .join(", ");
+    ctx.insert("input_resistances_values", &input_resistances_values);
+}
+
 impl RustEmitter {
     /// Emit DK-method generated code (original path).
     pub(super) fn emit_dk(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
@@ -168,6 +198,8 @@ impl RustEmitter {
             "input_resistance",
             &fmt_f64(ir.solver_config.input_resistance),
         );
+        // Multi-input ports (M=0 only): see `insert_multi_input_ctx`.
+        insert_multi_input_ctx(&mut ctx, ir);
         ctx.insert("has_dc_sources", &ir.has_dc_sources);
 
         // Named topology constants (Oomox P2 + P3). Always inserted so the
@@ -381,6 +413,7 @@ impl RustEmitter {
 
     fn emit_state(&self, ir: &CircuitIR, noise: &NoiseEmission) -> Result<String, CodegenError> {
         let mut ctx = Context::new();
+        insert_multi_input_ctx(&mut ctx, ir);
         // Noise fragments (empty strings when noise is off → template blocks become no-ops)
         ctx.insert("noise_enabled_emit", &noise.enabled);
         ctx.insert("noise_state_fields", &noise.state_fields);
@@ -2012,6 +2045,7 @@ impl RustEmitter {
         let mut ctx = Context::new();
 
         ctx.insert("has_dc_sources", &ir.has_dc_sources);
+        insert_multi_input_ctx(&mut ctx, ir);
         ctx.insert("augmented_inductors", &ir.topology.augmented_inductors);
         ctx.insert("backward_euler", &ir.solver_config.backward_euler);
         // Runtime voltage sources: emit `rhs[row] += state.<field>` per entry
@@ -2196,6 +2230,7 @@ impl RustEmitter {
         // — build_noise_emission resolves every noise source and assembles ~500
         // lines of strings, so re-deriving it here doubled that codegen work.
         let mut ctx = Context::new();
+        insert_multi_input_ctx(&mut ctx, ir);
         ctx.insert("noise_enabled_emit", &noise.enabled);
         ctx.insert("noise_rhs_stamp", &noise.rhs_stamp);
         ctx.insert("noise_rhs_stamp_be", &noise.rhs_stamp_be);

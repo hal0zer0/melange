@@ -1195,7 +1195,20 @@ fn compile_circuit_source(
 ) -> Result<()> {
     // Netlist node names are normalized (lowercase, gnd→0) at parse time;
     // fold the CLI-provided names the same way so lookups match.
-    let input_node_owned = melange_solver::parser::normalize_node_name(input_node);
+    // Parse comma-separated input nodes (multi-input ports), mirroring the
+    // comma-separated output-node handling below. Port 0 (the first name) is the
+    // "primary" input; any extras drive additional ports for M=0 (linear)
+    // circuits. A single input name collapses to the historical single-input
+    // path (byte-identical generated code). See `local-docs/multi-input-ports-plan.md`.
+    let input_node_names_owned: Vec<String> = input_node
+        .split(',')
+        .map(|s| melange_solver::parser::normalize_node_name(s.trim()))
+        .filter(|s| !s.is_empty())
+        .collect();
+    if input_node_names_owned.is_empty() {
+        anyhow::bail!("no input node specified");
+    }
+    let input_node_owned = input_node_names_owned[0].clone();
     let input_node = input_node_owned.as_str();
     let output_node_owned = melange_solver::parser::normalize_node_name(output_node);
     let output_node = output_node_owned.as_str();
@@ -1290,6 +1303,79 @@ fn compile_circuit_source(
     let input_conductance = 1.0 / input_resistance;
     if input_node_idx < mna.n {
         mna.g[input_node_idx][input_node_idx] += input_conductance;
+    }
+
+    // Resolve any EXTRA input ports (multi-input). Each shares the single
+    // `--input-resistance` value for now (per-port resistance is a later CLI
+    // follow-up; the field shape is already a Vec). Stamp each extra port's
+    // Thevenin conductance into G before the DK kernel is built — exactly like
+    // the primary above — so S = A^{-1} bakes in every input port.
+    let mut extra_input_nodes: Vec<usize> = Vec::new();
+    let mut extra_input_resistances: Vec<f64> = Vec::new();
+    for name in input_node_names_owned.iter().skip(1) {
+        let raw = mna.node_map.get(name.as_str()).copied().ok_or_else(|| {
+            let suggestions = suggest_node_names(name, mna.node_map.keys());
+            let hint = if suggestions.is_empty() {
+                format!("Available: {:?}", mna.node_map.keys().collect::<Vec<_>>())
+            } else {
+                format!("Did you mean: {}?", suggestions.join(", "))
+            };
+            anyhow::anyhow!("Input node '{}' not found in circuit. {}", name, hint)
+        })?;
+        if raw == 0 {
+            anyhow::bail!("Input node cannot be ground (0). Please specify a non-ground node.");
+        }
+        let idx = raw - 1;
+        if idx == input_node_idx || extra_input_nodes.contains(&idx) {
+            eprintln!(
+                "  WARNING: input node '{}' listed more than once; ignoring the duplicate.",
+                name
+            );
+            continue;
+        }
+        if idx < mna.n {
+            mna.g[idx][idx] += input_conductance;
+        }
+        extra_input_nodes.push(idx);
+        extra_input_resistances.push(input_resistance);
+    }
+    let num_input_ports = 1 + extra_input_nodes.len();
+    if num_input_ports > 1 {
+        println!("  Input ports: {} (multi-input)", num_input_ports);
+        // GUARDRAIL: multi-input superposition is only exact for linear (M=0)
+        // circuits. A nonlinear device makes the combined solve non-additive, so
+        // reject rather than silently emit a wrong plugin. `mna.m` is the number
+        // of nonlinear device dimensions of the ORIGINAL (un-reduced) system.
+        if mna.m > 0 {
+            anyhow::bail!(
+                "multi-input decks are supported for linear (M=0) circuits only; \
+                 found {} nonlinear device dimension(s) ({} nonlinear device(s)). \
+                 Multi-input superposition is exact only when nothing multiplicative \
+                 or nonlinear touches the inputs. Compile with a single --input-node, \
+                 or remove the nonlinear devices.",
+                mna.m,
+                mna.nonlinear_devices.len()
+            );
+        }
+        if format != OutputFormat::Code {
+            anyhow::bail!(
+                "multi-input decks are supported for `--format code` only; the \
+                 nih-plug plugin wrapper does not yet route multiple input channels."
+            );
+        }
+        if oversampling > 1 {
+            anyhow::bail!(
+                "multi-input decks do not yet support oversampling (--oversampling {}). \
+                 Linear (M=0) circuits do not alias, so oversampling is not needed. \
+                 Recompile with --oversampling 1.",
+                oversampling
+            );
+        }
+        if emit_dc_op_recompute {
+            anyhow::bail!(
+                "multi-input decks do not yet support --emit-dc-op-recompute."
+            );
+        }
     }
 
     // Warn if passive EQ topology detected with low source impedance
@@ -1705,6 +1791,8 @@ fn compile_circuit_source(
     let config = CodegenConfig {
         circuit_name,
         input_node: input_node_idx,
+        extra_input_nodes: extra_input_nodes.clone(),
+        extra_input_resistances: extra_input_resistances.clone(),
         output_nodes: output_node_indices.clone(),
         sample_rate,
         max_iterations: max_iter,
@@ -2442,7 +2530,7 @@ fn auto_tune_max_iter(
                     &kernel.s,
                     &kernel.a_neg,
                     kernel.n,
-                    input_node_idx,
+                    &[input_node_idx],
                 ),
             ));
     let stiffness_bonus = if routing.spectral_radius > 0.999 && stays_trap {
@@ -2911,6 +2999,8 @@ fn simulate_circuit_source(
         tolerance: 1e-9,
         input_resistance,
         input_node: input_node_idx,
+        extra_input_nodes: Vec::new(),
+        extra_input_resistances: Vec::new(),
         output_nodes,
         oversampling_factor: opts.oversampling,
         output_scales,
@@ -4074,6 +4164,8 @@ fn analyze_freq_response(
         tolerance: 1e-9,
         input_resistance,
         input_node: input_node_idx,
+        extra_input_nodes: Vec::new(),
+        extra_input_resistances: Vec::new(),
         output_nodes: vec![output_node_idx],
         oversampling_factor: oversampling,
         output_scales: vec![1.0],

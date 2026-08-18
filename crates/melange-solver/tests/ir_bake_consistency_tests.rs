@@ -263,7 +263,7 @@ fn dk_discriminator_evaluates_internal_rate_pair_under_oversampling() {
     );
     let n = ir.topology.n;
     let shipped =
-        analyze_trap_stability_deflated(&ir.matrices.s, &ir.matrices.a_neg, n, config.input_node);
+        analyze_trap_stability_deflated(&ir.matrices.s, &ir.matrices.a_neg, n, &[config.input_node]);
     assert!(
         (ir.trap_discriminator_rho - shipped.rho).abs() < 1e-12,
         "discriminator rho {} must equal rho of the shipped internal-rate pair {}",
@@ -273,7 +273,7 @@ fn dk_discriminator_evaluates_internal_rate_pair_under_oversampling() {
 
     // ...and must NOT be the base-rate kernel rho (rho is rate-dependent;
     // if these coincide the discriminator is evaluating the wrong pair).
-    let base = analyze_trap_stability_deflated(&kernel.s, &kernel.a_neg, n, config.input_node);
+    let base = analyze_trap_stability_deflated(&kernel.s, &kernel.a_neg, n, &[config.input_node]);
     assert!(
         (base.rho - shipped.rho).abs() > 1e-8,
         "test premise: base-rate rho ({}) must differ measurably from internal-rate rho ({})",

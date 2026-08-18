@@ -134,7 +134,7 @@ fn power_iterate_rho_sign(
     a_neg: &[f64],
     n: usize,
     x: &mut [f64],
-    deflate: Option<usize>,
+    deflate: &[usize],
 ) -> (f64, f64) {
     let mut rho = 0.0_f64;
     let mut rho_prev = f64::NAN;
@@ -143,7 +143,7 @@ fn power_iterate_rho_sign(
 
     for _ in 0..POWER_ITER_MAX {
         let mut y = apply_s_a_neg(s, a_neg, n, x);
-        if let Some(d) = deflate {
+        for &d in deflate {
             y[d] = 0.0;
         }
         let x_norm: f64 = x.iter().map(|v| v * v).sum::<f64>().sqrt();
@@ -199,7 +199,7 @@ pub fn analyze_trap_stability(s: &[f64], a_neg: &[f64], n: usize) -> TrapStabili
 
     let max_abs_s = s.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
     let mut x = vec![1.0 / (n as f64).sqrt(); n];
-    let (rho, dominant_sign) = power_iterate_rho_sign(s, a_neg, n, &mut x, None);
+    let (rho, dominant_sign) = power_iterate_rho_sign(s, a_neg, n, &mut x, &[]);
 
     TrapStability {
         rho,
@@ -229,20 +229,25 @@ pub fn analyze_trap_stability_deflated(
     s: &[f64],
     a_neg: &[f64],
     n: usize,
-    input_node: usize,
+    input_nodes: &[usize],
 ) -> TrapStability {
-    if n == 0 || s.is_empty() || a_neg.is_empty() || input_node >= n {
+    // Keep only in-range input nodes; if none, fall back to the undeflated
+    // analyzer (matches the historical single-node `input_node >= n` guard).
+    let deflate: Vec<usize> = input_nodes.iter().copied().filter(|&d| d < n).collect();
+    if n == 0 || s.is_empty() || a_neg.is_empty() || deflate.is_empty() {
         return analyze_trap_stability(s, a_neg, n);
     }
 
     let max_abs_s = s.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
     let mut x = vec![1.0 / (n as f64).sqrt(); n];
-    x[input_node] = 0.0;
+    for &d in &deflate {
+        x[d] = 0.0;
+    }
     let init_norm: f64 = x.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-30);
     for v in &mut x {
         *v /= init_norm;
     }
-    let (rho, dominant_sign) = power_iterate_rho_sign(s, a_neg, n, &mut x, Some(input_node));
+    let (rho, dominant_sign) = power_iterate_rho_sign(s, a_neg, n, &mut x, &deflate);
 
     TrapStability {
         rho,
@@ -332,12 +337,12 @@ pub fn log_be_post_promotion_check(
     s: &[f64],
     a_neg: &[f64],
     n: usize,
-    input_node: usize,
+    input_nodes: &[usize],
 ) {
     if n == 0 || s.is_empty() || a_neg.is_empty() {
         return;
     }
-    let stability = analyze_trap_stability_deflated(s, a_neg, n, input_node);
+    let stability = analyze_trap_stability_deflated(s, a_neg, n, input_nodes);
     if stability.rho <= BE_POST_PROMOTION_LIMIT {
         return;
     }

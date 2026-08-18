@@ -1230,7 +1230,11 @@ fn emit_nodal_nan_reset(
         code.push_str(&format!("{body}state.i_nl_prev = [0.0; M];\n"));
         code.push_str(&format!("{body}state.i_nl_prev_prev = [0.0; M];\n"));
     }
-    code.push_str(&format!("{body}state.input_prev = 0.0;\n"));
+    if ir.solver_config.num_inputs() > 1 {
+        code.push_str(&format!("{body}state.inputs_prev = [0.0; NUM_INPUTS];\n"));
+    } else {
+        code.push_str(&format!("{body}state.input_prev = 0.0;\n"));
+    }
 
     // DC blocker history: reseed x_prev from the DC operating point (matches
     // reset() and the DK template). Zeroing x_prev would make the first
@@ -1860,6 +1864,35 @@ impl RustEmitter {
             "/// Input resistance (Thevenin equivalent)\npub const INPUT_RESISTANCE: f64 = {};\n\n",
             fmt_f64(ir.solver_config.input_resistance)
         ));
+        // Multi-input ports (M=0 only). Emitted only when there is more than one
+        // input port so single-input output stays byte-identical. See
+        // `local-docs/multi-input-ports-plan.md`.
+        if ir.solver_config.num_inputs() > 1 {
+            let input_nodes_values = ir
+                .solver_config
+                .input_node_indices()
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let input_resistances_values = ir
+                .solver_config
+                .input_resistance_values()
+                .iter()
+                .map(|r| fmt_f64(*r))
+                .collect::<Vec<_>>()
+                .join(", ");
+            code.push_str(&format!(
+                "/// Number of input ports (multi-input, M=0 only)\npub const NUM_INPUTS: usize = {};\n\n",
+                ir.solver_config.num_inputs()
+            ));
+            code.push_str(&format!(
+                "/// Input node indices (one per input port). Port 0 is the primary input.\npub const INPUT_NODES: [usize; NUM_INPUTS] = [{input_nodes_values}];\n\n"
+            ));
+            code.push_str(&format!(
+                "/// Per-port input resistance (Thevenin equivalent), parallel to INPUT_NODES.\npub const INPUT_RESISTANCES: [f64; NUM_INPUTS] = [{input_resistances_values}];\n\n"
+            ));
+        }
 
         // WARMUP_SAMPLES_RECOMMENDED (Oomox P5) — see constants.rs.tera doc.
         code.push_str(
@@ -2328,6 +2361,9 @@ impl RustEmitter {
     ) -> String {
         let n = ir.topology.n;
         let m = ir.topology.m;
+        // Multi-input ports (M=0 only): the input-history state field becomes a
+        // per-port array. See multi-input-ports-plan.md.
+        let multi_input = ir.solver_config.num_inputs() > 1;
         let n_nodes = if ir.topology.n_nodes > 0 {
             ir.topology.n_nodes
         } else {
@@ -2507,7 +2543,11 @@ impl RustEmitter {
         code.push_str("    /// DC operating point (for reset/sleep/wake)\n");
         code.push_str("    pub dc_operating_point: [f64; N],\n\n");
         code.push_str("    /// Previous input sample for trapezoidal integration\n");
-        code.push_str("    pub input_prev: f64,\n\n");
+        if multi_input {
+            code.push_str("    pub inputs_prev: [f64; NUM_INPUTS],\n\n");
+        } else {
+            code.push_str("    pub input_prev: f64,\n\n");
+        }
         code.push_str("    /// NR convergence diagnostic from the last sample's solve.\n");
         code.push_str("    ///\n");
         code.push_str("    /// Semantics:\n");
@@ -2978,7 +3018,11 @@ impl RustEmitter {
         } else {
             code.push_str("            dc_operating_point: [0.0; N],\n");
         }
-        code.push_str("            input_prev: 0.0,\n");
+        if multi_input {
+            code.push_str("            inputs_prev: [0.0; NUM_INPUTS],\n");
+        } else {
+            code.push_str("            input_prev: 0.0,\n");
+        }
         code.push_str("            last_nr_iterations: 0,\n");
         if ir.behavioral_sources.iter().any(|b| b.time_dependent) {
             code.push_str("            sim_time: 0.0,\n");
@@ -3287,7 +3331,11 @@ impl RustEmitter {
             code.push_str("        self.i_nl_prev = [0.0; M];\n");
             code.push_str("        self.i_nl_prev_prev = [0.0; M];\n");
         }
-        code.push_str("        self.input_prev = 0.0;\n");
+        if multi_input {
+            code.push_str("        self.inputs_prev = [0.0; NUM_INPUTS];\n");
+        } else {
+            code.push_str("        self.input_prev = 0.0;\n");
+        }
         code.push_str("        self.last_nr_iterations = 0;\n");
         if ir.behavioral_sources.iter().any(|b| b.time_dependent) {
             code.push_str("        self.sim_time = 0.0;\n");
@@ -3482,7 +3530,11 @@ impl RustEmitter {
             );
             code.push_str("            self.rebuild_matrices(200.0);\n");
             code.push_str("            for _ in 0..1000 {\n");
-            code.push_str("                process_sample(0.0, self);\n");
+            if multi_input {
+                code.push_str("                process_sample([0.0; NUM_INPUTS], self);\n");
+            } else {
+                code.push_str("                process_sample(0.0, self);\n");
+            }
             code.push_str("            }\n");
             code.push_str(&format!(
                 "            self.rebuild_matrices({:.17e});\n",
@@ -3495,7 +3547,11 @@ impl RustEmitter {
             code.push_str("        }\n");
         }
         code.push_str("        for _ in 0..50 {\n");
-        code.push_str("            process_sample(0.0, self);\n");
+        if multi_input {
+            code.push_str("            process_sample([0.0; NUM_INPUTS], self);\n");
+        } else {
+            code.push_str("            process_sample(0.0, self);\n");
+        }
         code.push_str("        }\n");
         code.push_str("    }\n\n");
 
@@ -4568,6 +4624,12 @@ impl RustEmitter {
         let m = ir.topology.m;
         let os_factor = ir.solver_config.oversampling_factor;
         let has_pots = !ir.pots.is_empty();
+        // Multi-input ports (M=0 only): gates every input-related emission
+        // divergence so single-input output stays byte-identical. Multi-input is
+        // rejected at the CLI unless M==0 and oversampling==1, so the sub-step /
+        // BE-fallback blocks below (all M>0) never coexist with `multi_input`,
+        // but they are still gated defensively. See multi-input-ports-plan.md.
+        let multi_input = ir.solver_config.num_inputs() > 1;
         // "Force BE this sample" guard appended to the trap-accept `converged`
         // expression: trap is accepted only when NO mechanism is forcing BE.
         //  - runtime BE-latch (Nyquist limit cycle detected → sticky BE)
@@ -4604,13 +4666,23 @@ impl RustEmitter {
             );
             code.push_str("/// Cost: O(N^2) linear prediction + O(M^3) per NR iteration.\n");
             code.push_str("#[inline]\n");
-            code.push_str("pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {\n");
+            if multi_input {
+                code.push_str("pub fn process_sample(inputs: [f64; NUM_INPUTS], state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {\n");
+            } else {
+                code.push_str("pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {\n");
+            }
         }
 
         // Input sanitization
-        code.push_str(
-            "    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };\n\n",
-        );
+        if multi_input {
+            code.push_str(
+                "    let mut inputs = inputs;\n    for v in inputs.iter_mut() { *v = if v.is_finite() { v.clamp(-100.0, 100.0) } else { 0.0 }; }\n\n",
+            );
+        } else {
+            code.push_str(
+                "    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };\n\n",
+            );
+        }
 
         // Lazy rebuild: process all pot/switch changes in one batch
         let has_any_saturation = !ir.saturating_inductors.is_empty()
@@ -4915,15 +4987,25 @@ impl RustEmitter {
         // so the Schur path matches the emitter's integrator choice —
         // same gate used by `emit_nodal_process_sample` for the full-LU
         // NR (see the `if ir.solver_config.backward_euler` block there).
-        code.push_str("    let input_conductance = 1.0 / INPUT_RESISTANCE;\n");
-        if ir.solver_config.backward_euler {
-            code.push_str("    // Input source (backward Euler: V_in * G_in)\n");
-            code.push_str("    rhs[INPUT_NODE] += input * input_conductance;\n");
+        if multi_input {
+            if ir.solver_config.backward_euler {
+                code.push_str("    // Input sources (backward Euler: per-port V_in * G_in)\n");
+                code.push_str("    for k in 0..NUM_INPUTS {\n        rhs[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k];\n    }\n");
+            } else {
+                code.push_str("    // Input sources (trapezoidal: per-port (V_in + V_in_prev) * G_in)\n");
+                code.push_str("    for k in 0..NUM_INPUTS {\n        rhs[INPUT_NODES[k]] += (inputs[k] + state.inputs_prev[k]) / INPUT_RESISTANCES[k];\n    }\n");
+            }
         } else {
-            code.push_str("    // Input source (trapezoidal: (V_in + V_in_prev) * G_in)\n");
-            code.push_str(
-                "    rhs[INPUT_NODE] += (input + state.input_prev) * input_conductance;\n",
-            );
+            code.push_str("    let input_conductance = 1.0 / INPUT_RESISTANCE;\n");
+            if ir.solver_config.backward_euler {
+                code.push_str("    // Input source (backward Euler: V_in * G_in)\n");
+                code.push_str("    rhs[INPUT_NODE] += input * input_conductance;\n");
+            } else {
+                code.push_str("    // Input source (trapezoidal: (V_in + V_in_prev) * G_in)\n");
+                code.push_str(
+                    "    rhs[INPUT_NODE] += (input + state.input_prev) * input_conductance;\n",
+                );
+            }
         }
         // NOTE: `state.input_prev` is deliberately NOT committed here. The
         // ActiveSetBe sub-step machinery below interpolates the input ramp as
@@ -5006,7 +5088,15 @@ impl RustEmitter {
                     }
                 }
                 // BE input stamp: V_in * G_in (no trapezoidal average).
+                if multi_input {
+                    code.push_str("        for k in 0..NUM_INPUTS { rhs_be[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k]; }\n");
+                } else {
+                    if multi_input {
+                code.push_str("        for k in 0..NUM_INPUTS { rhs_be[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k]; }\n");
+            } else {
                 code.push_str("        rhs_be[INPUT_NODE] += input * input_conductance;\n");
+            }
+                }
                 // Runtime voltage sources (same rows as the trap stamp).
                 for rt in &ir.runtime_sources {
                     code.push_str(&format!(
@@ -5330,16 +5420,20 @@ impl RustEmitter {
                 code.push_str("        let mut v_sub = state.v_prev;\n");
                 code.push_str("        let mut i_nl_sub = state.i_nl_prev;\n");
                 code.push_str("        let mut sub_ok = true;\n");
-                code.push_str(
-                    "        let input_step = (input - state.input_prev) / N_SUB as f64;\n",
-                );
+                if !multi_input {
+                    code.push_str(
+                        "        let input_step = (input - state.input_prev) / N_SUB as f64;\n",
+                    );
+                }
                 code.push_str("        for step in 0..N_SUB {\n");
-                code.push_str(
-                    "            let inp_s = state.input_prev + input_step * (step + 1) as f64;\n",
-                );
-                code.push_str(
-                    "            let inp_prev_s = state.input_prev + input_step * step as f64;\n",
-                );
+                if !multi_input {
+                    code.push_str(
+                        "            let inp_s = state.input_prev + input_step * (step + 1) as f64;\n",
+                    );
+                    code.push_str(
+                        "            let inp_prev_s = state.input_prev + input_step * step as f64;\n",
+                    );
+                }
                 // Build RHS: A_neg_sub * v_sub + N_i * i_nl_sub + input + rhs_const
                 code.push_str("            let mut rhs_s = [0.0f64; N];\n");
                 if ir.has_dc_sources {
@@ -5352,9 +5446,20 @@ impl RustEmitter {
                     "i_nl_sub",
                     "            ",
                 ));
-                code.push_str(
-                    "            rhs_s[INPUT_NODE] += (inp_s + inp_prev_s) * input_conductance;\n",
-                );
+                if multi_input {
+                    code.push_str(
+                        "            for k in 0..NUM_INPUTS {\n\
+                         \x20               let step_k = (inputs[k] - state.inputs_prev[k]) / N_SUB as f64;\n\
+                         \x20               let inp_s = state.inputs_prev[k] + step_k * (step + 1) as f64;\n\
+                         \x20               let inp_prev_s = state.inputs_prev[k] + step_k * step as f64;\n\
+                         \x20               rhs_s[INPUT_NODES[k]] += (inp_s + inp_prev_s) / INPUT_RESISTANCES[k];\n\
+                         \x20           }\n",
+                    );
+                } else {
+                    code.push_str(
+                        "            rhs_s[INPUT_NODE] += (inp_s + inp_prev_s) * input_conductance;\n",
+                    );
+                }
                 // Runtime voltage sources: the algebraic constraint value is
                 // integration-scheme-independent, so every from-scratch RHS
                 // rebuild must re-stamp it or the source reads as 0 V.
@@ -5467,7 +5572,11 @@ impl RustEmitter {
             }
             code.push_str("            rhs_be[i] = sum;\n");
             code.push_str("        }\n");
-            code.push_str("        rhs_be[INPUT_NODE] += input * input_conductance;\n");
+            if multi_input {
+                code.push_str("        for k in 0..NUM_INPUTS { rhs_be[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k]; }\n");
+            } else {
+                code.push_str("        rhs_be[INPUT_NODE] += input * input_conductance;\n");
+            }
             // Runtime voltage sources: integration-scheme-independent; every
             // from-scratch RHS rebuild must re-stamp them.
             if !ir.runtime_sources.is_empty() {
@@ -5750,7 +5859,11 @@ impl RustEmitter {
         }
         // Commit input_prev here (NOT at the RHS build) so the sub-step input
         // interpolation earlier in the sample still sees last sample's value.
-        code.push_str("    state.input_prev = input;\n");
+        if multi_input {
+            code.push_str("    state.inputs_prev = inputs;\n");
+        } else {
+            code.push_str("    state.input_prev = input;\n");
+        }
         if m > 0 {
             code.push_str("    state.i_nl_prev_prev = state.i_nl_prev;\n");
             code.push_str("    state.i_nl_prev = i_nl;\n");
@@ -6560,6 +6673,11 @@ impl RustEmitter {
             n
         };
         let os_factor = ir.solver_config.oversampling_factor;
+        // Multi-input ports (M=0 only): see emit_nodal_schur_process_sample.
+        // Multi-input is CLI-restricted to M==0 && OS==1, so the sub-step /
+        // BE-fallback blocks (all M>0) never coexist with `multi_input`; still
+        // gated defensively.
+        let multi_input = ir.solver_config.num_inputs() > 1;
         let has_behavioral = !ir.behavioral_sources.is_empty();
         let has_sat_ind = !ir.saturating_inductors.is_empty();
         // Site-local integrator scalar for the saturating-inductor flux stamps.
@@ -6615,13 +6733,23 @@ impl RustEmitter {
             );
             code.push_str("/// Includes backward Euler fallback for unconditional stability.\n");
             code.push_str("#[inline]\n");
-            code.push_str("pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {\n");
+            if multi_input {
+                code.push_str("pub fn process_sample(inputs: [f64; NUM_INPUTS], state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {\n");
+            } else {
+                code.push_str("pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {\n");
+            }
         }
 
         // Input sanitization
-        code.push_str(
-            "    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };\n\n",
-        );
+        if multi_input {
+            code.push_str(
+                "    let mut inputs = inputs;\n    for v in inputs.iter_mut() { *v = if v.is_finite() { v.clamp(-100.0, 100.0) } else { 0.0 }; }\n\n",
+            );
+        } else {
+            code.push_str(
+                "    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };\n\n",
+            );
+        }
 
         // Behavioral ddt/idt scaling locals (referenced by the resolver).
         if has_bsrc_time {
@@ -6689,15 +6817,25 @@ impl RustEmitter {
         code.push('\n');
 
         // Input source (Thevenin)
-        code.push_str("    let input_conductance = 1.0 / INPUT_RESISTANCE;\n");
-        if ir.solver_config.backward_euler {
-            code.push_str("    // Input source (backward Euler: V_in * G_in)\n");
-            code.push_str("    rhs[INPUT_NODE] += input * input_conductance;\n");
+        if multi_input {
+            if ir.solver_config.backward_euler {
+                code.push_str("    // Input sources (backward Euler: per-port V_in * G_in)\n");
+                code.push_str("    for k in 0..NUM_INPUTS {\n        rhs[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k];\n    }\n");
+            } else {
+                code.push_str("    // Input sources (trapezoidal: per-port (V_in + V_in_prev) * G_in)\n");
+                code.push_str("    for k in 0..NUM_INPUTS {\n        rhs[INPUT_NODES[k]] += (inputs[k] + state.inputs_prev[k]) / INPUT_RESISTANCES[k];\n    }\n");
+            }
         } else {
-            code.push_str("    // Input source (trapezoidal: (V_in + V_in_prev) * G_in)\n");
-            code.push_str(
-                "    rhs[INPUT_NODE] += (input + state.input_prev) * input_conductance;\n",
-            );
+            code.push_str("    let input_conductance = 1.0 / INPUT_RESISTANCE;\n");
+            if ir.solver_config.backward_euler {
+                code.push_str("    // Input source (backward Euler: V_in * G_in)\n");
+                code.push_str("    rhs[INPUT_NODE] += input * input_conductance;\n");
+            } else {
+                code.push_str("    // Input source (trapezoidal: (V_in + V_in_prev) * G_in)\n");
+                code.push_str(
+                    "    rhs[INPUT_NODE] += (input + state.input_prev) * input_conductance;\n",
+                );
+            }
         }
         // NOTE: `state.input_prev` is deliberately NOT committed here. The
         // adaptive sub-stepping below interpolates the input ramp as
@@ -7399,17 +7537,21 @@ impl RustEmitter {
             code.push_str("            // Run subdivided sub-steps\n");
             code.push_str("            let mut v_sub = state.v_prev;\n");
             code.push_str("            let mut i_nl_sub = state.i_nl_prev;\n");
-            code.push_str(
-                "            let input_step = (input - state.input_prev) / subdiv as f64;\n",
-            );
+            if !multi_input {
+                code.push_str(
+                    "            let input_step = (input - state.input_prev) / subdiv as f64;\n",
+                );
+            }
             code.push_str("            let mut all_sub_converged = true;\n");
             code.push_str("            for step in 0..subdiv {\n");
-            code.push_str(
-                "                let inp_s = state.input_prev + input_step * (step + 1) as f64;\n",
-            );
-            code.push_str(
-                "                let inp_prev_s = state.input_prev + input_step * step as f64;\n",
-            );
+            if !multi_input {
+                code.push_str(
+                    "                let inp_s = state.input_prev + input_step * (step + 1) as f64;\n",
+                );
+                code.push_str(
+                    "                let inp_prev_s = state.input_prev + input_step * step as f64;\n",
+                );
+            }
             // Build sub-step RHS
             code.push_str("                // Sub-step RHS\n");
             if ir.has_dc_sources {
@@ -7437,7 +7579,18 @@ impl RustEmitter {
                     "                ",
                 );
             }
-            code.push_str("                rhs_s[INPUT_NODE] += (inp_s + inp_prev_s) * (1.0 / INPUT_RESISTANCE);\n");
+            if multi_input {
+                code.push_str(
+                    "                for k in 0..NUM_INPUTS {\n\
+                     \x20                   let step_k = (inputs[k] - state.inputs_prev[k]) / subdiv as f64;\n\
+                     \x20                   let inp_s = state.inputs_prev[k] + step_k * (step + 1) as f64;\n\
+                     \x20                   let inp_prev_s = state.inputs_prev[k] + step_k * step as f64;\n\
+                     \x20                   rhs_s[INPUT_NODES[k]] += (inp_s + inp_prev_s) / INPUT_RESISTANCES[k];\n\
+                     \x20               }\n",
+                );
+            } else {
+                code.push_str("                rhs_s[INPUT_NODE] += (inp_s + inp_prev_s) * (1.0 / INPUT_RESISTANCE);\n");
+            }
             // Runtime voltage sources: integration-scheme-independent; every
             // from-scratch RHS rebuild must re-stamp them.
             if !ir.runtime_sources.is_empty() {
@@ -7662,7 +7815,11 @@ impl RustEmitter {
                 );
             }
             code.push_str("        // BE input: just input[n+1] * G_in (no trapezoidal average)\n");
-            code.push_str("        rhs_be[INPUT_NODE] += input * input_conductance;\n");
+            if multi_input {
+                code.push_str("        for k in 0..NUM_INPUTS { rhs_be[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k]; }\n");
+            } else {
+                code.push_str("        rhs_be[INPUT_NODE] += input * input_conductance;\n");
+            }
             // Runtime voltage sources: integration-scheme-independent; every
             // from-scratch RHS rebuild must re-stamp them.
             if !ir.runtime_sources.is_empty() {
@@ -7980,7 +8137,11 @@ impl RustEmitter {
         }
         // Commit input_prev here (NOT at the RHS build) so the sub-step input
         // interpolation earlier in the sample still sees last sample's value.
-        code.push_str("    state.input_prev = input;\n");
+        if multi_input {
+            code.push_str("    state.inputs_prev = inputs;\n");
+        } else {
+            code.push_str("    state.input_prev = input;\n");
+        }
         if m > 0 {
             code.push_str("    state.i_nl_prev_prev = state.i_nl_prev;\n");
             code.push_str("    state.i_nl_prev = i_nl;\n");

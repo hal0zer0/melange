@@ -234,10 +234,20 @@ pub struct CodegenConfig {
     pub max_iterations: usize,
     /// Convergence tolerance
     pub tolerance: f64,
-    /// Input resistance (Thevenin equivalent)
+    /// Input resistance (Thevenin equivalent) of the primary input port (port 0).
     pub input_resistance: f64,
-    /// Input node index
+    /// Input node index of the primary input port (port 0).
     pub input_node: usize,
+    /// Additional input node indices for multi-input (M=0) circuits, one per
+    /// extra port beyond the primary (port 0). Empty for the single-input case,
+    /// in which the generated code is byte-identical to the pre-multi-input
+    /// emitter. Parallel to [`Self::extra_input_resistances`]. See
+    /// `local-docs/multi-input-ports-plan.md`. Multi-input is only valid for
+    /// linear (M=0) circuits; M>0 is rejected before codegen.
+    pub extra_input_nodes: Vec<usize>,
+    /// Per-port Thevenin resistance for each entry in [`Self::extra_input_nodes`]
+    /// (same length, same order). The primary port uses [`Self::input_resistance`].
+    pub extra_input_resistances: Vec<f64>,
     /// Output node indices (one per output channel)
     pub output_nodes: Vec<usize>,
     /// Oversampling factor (1, 2, or 4). Default 1 (no oversampling).
@@ -344,6 +354,25 @@ pub struct CodegenConfig {
 
 #[cfg(feature = "codegen")]
 impl CodegenConfig {
+    /// Number of input ports (1 for the single-input case).
+    pub fn num_inputs(&self) -> usize {
+        1 + self.extra_input_nodes.len()
+    }
+
+    /// All input node indices, port 0 first, then the extra ports in order.
+    pub fn input_node_indices(&self) -> Vec<usize> {
+        std::iter::once(self.input_node)
+            .chain(self.extra_input_nodes.iter().copied())
+            .collect()
+    }
+
+    /// All input port resistances, parallel to [`Self::input_node_indices`].
+    pub fn input_resistance_values(&self) -> Vec<f64> {
+        std::iter::once(self.input_resistance)
+            .chain(self.extra_input_resistances.iter().copied())
+            .collect()
+    }
+
     /// Validate configuration parameters.
     pub fn validate(&self) -> Result<(), CodegenError> {
         if !(self.sample_rate > 0.0 && self.sample_rate.is_finite()) {
@@ -367,6 +396,21 @@ impl CodegenConfig {
             return Err(CodegenError::InvalidConfig(format!(
                 "input_resistance must be positive and finite, got {}",
                 self.input_resistance
+            )));
+        }
+        for (i, &r) in self.extra_input_resistances.iter().enumerate() {
+            if !(r > 0.0 && r.is_finite()) {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "extra_input_resistances[{}] must be positive and finite, got {}",
+                    i, r
+                )));
+            }
+        }
+        if self.extra_input_nodes.len() != self.extra_input_resistances.len() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "extra_input_nodes length ({}) must match extra_input_resistances length ({})",
+                self.extra_input_nodes.len(),
+                self.extra_input_resistances.len()
             )));
         }
         for (i, &scale) in self.output_scales.iter().enumerate() {
@@ -407,6 +451,8 @@ impl Default for CodegenConfig {
             tolerance: 1e-9,
             input_resistance: 1.0, // 1Ω default (near-ideal voltage source)
             input_node: 0,
+            extra_input_nodes: Vec::new(),
+            extra_input_resistances: Vec::new(),
             output_nodes: vec![0],
             oversampling_factor: 1,
             output_scales: vec![1.0],
@@ -660,12 +706,14 @@ impl CodeGenerator {
         // inductor branch currents). An input_node pointing at an aug row
         // would pass a `< kernel.n` check but stamp the input current into
         // an algebraic constraint row — same rule as output nodes below.
-        if self.config.input_node >= kernel.n_nodes {
-            return Err(CodegenError::InvalidConfig(format!(
-                "input_node {} >= n_nodes={} (original circuit node count; \
-                 augmented rows are not valid input nodes)",
-                self.config.input_node, kernel.n_nodes
-            )));
+        for &in_node in &self.config.input_node_indices() {
+            if in_node >= kernel.n_nodes {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "input_node {} >= n_nodes={} (original circuit node count; \
+                     augmented rows are not valid input nodes)",
+                    in_node, kernel.n_nodes
+                )));
+            }
         }
         if self.config.output_nodes.is_empty() {
             return Err(CodegenError::InvalidConfig(
@@ -770,11 +818,13 @@ impl CodeGenerator {
                 )));
             }
         }
-        if self.config.input_node >= mna.n {
-            return Err(CodegenError::InvalidConfig(format!(
-                "input_node {} >= n_nodes={}",
-                self.config.input_node, mna.n
-            )));
+        for &in_node in &self.config.input_node_indices() {
+            if in_node >= mna.n {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "input_node {} >= n_nodes={}",
+                    in_node, mna.n
+                )));
+            }
         }
         if self.config.output_nodes.is_empty() {
             return Err(CodegenError::InvalidConfig(
@@ -876,9 +926,14 @@ impl CodeGenerator {
             //    series cap conductance (~1e-4), the LU treats it as
             //    nearly singular, and the linear prediction blows up
             //    on the first non-zero input sample.
-            if self.config.input_node < rebuilt.n {
-                let g_in = 1.0 / self.config.input_resistance;
-                rebuilt.g[self.config.input_node][self.config.input_node] += g_in;
+            {
+                let in_nodes = self.config.input_node_indices();
+                let in_res = self.config.input_resistance_values();
+                for (&in_node, &r) in in_nodes.iter().zip(in_res.iter()) {
+                    if in_node < rebuilt.n {
+                        rebuilt.g[in_node][in_node] += 1.0 / r;
+                    }
+                }
             }
 
             // 2) Device junction caps: the CLI stamps these into the

@@ -51,8 +51,10 @@ pub struct CircuitState {
     /// sample in the process_sample safety net.
     pub damp_thresh: f64,
 
-    /// Previous input sample for trapezoidal integration
-    pub input_prev: f64,
+    /// Previous input sample(s) for trapezoidal integration
+{% if multi_input %}    pub inputs_prev: [f64; NUM_INPUTS],
+{% else %}    pub input_prev: f64,
+{% endif %}
 
     /// Iteration count from last solve (for diagnostics)
     pub last_nr_iterations: u32,
@@ -264,8 +266,9 @@ static OPAMP_RAIL_DEGRADE_WARN_ONCE: std::sync::Once = std::sync::Once::new();
             i_nl_prev_prev: [0.0; M],
 {% endif %}            dc_operating_point: [0.0; N],
             damp_thresh: 2.0,
-{% endif %}            input_prev: 0.0,
-            last_nr_iterations: 0,
+{% endif %}{% if multi_input %}            inputs_prev: [0.0; NUM_INPUTS],
+{% else %}            input_prev: 0.0,
+{% endif %}            last_nr_iterations: 0,
 {% if dc_block %}            dc_block_x_prev: {% if has_dc_op or has_cap_ic %}dc_block_x_seed{% else %}[0.0; NUM_OUTPUTS]{% endif %},
             dc_block_y_prev: [0.0; NUM_OUTPUTS],
             dc_block_r: DC_BLOCK_R,
@@ -376,8 +379,9 @@ impl CircuitState {
         self.i_nl_prev_prev = DC_NL_I;
 {% else %}        self.i_nl_prev = [0.0; M];
         self.i_nl_prev_prev = [0.0; M];
-{% endif %}        self.input_prev = 0.0;
-        self.last_nr_iterations = 0;
+{% endif %}{% if multi_input %}        self.inputs_prev = [0.0; NUM_INPUTS];
+{% else %}        self.input_prev = 0.0;
+{% endif %}        self.last_nr_iterations = 0;
 {% if dc_block and has_cap_ic %}        // Seed the DC blocker's x[n-1] from the same t=0 state as v_prev (see
         // Default) so reset() doesn't re-inject the startup thump.
         for k in 0..NUM_OUTPUTS { self.dc_block_x_prev[k] = V_PREV_IC_SEED[OUTPUT_NODES[k]]; }

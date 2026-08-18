@@ -3,7 +3,9 @@
 /// The A_neg * v_prev term captures capacitor history contribution
 /// via alpha*C*v_prev (implicit in the matrix formulation).
 #[inline(always)]
-fn build_rhs(input: f64, input_prev: f64, state: &CircuitState) -> [f64; N] {
+{% if multi_input %}fn build_rhs(inputs: &[f64; NUM_INPUTS], inputs_prev: &[f64; NUM_INPUTS], state: &CircuitState) -> [f64; N] {
+{% else %}fn build_rhs(input: f64, input_prev: f64, state: &CircuitState) -> [f64; N] {
+{% endif %}
 {% if has_dc_sources %}    let mut rhs = RHS_CONST;
 {% else %}    let mut rhs = [0.0; N];
 {% endif %}
@@ -24,11 +26,19 @@ fn build_rhs(input: f64, input_prev: f64, state: &CircuitState) -> [f64; N] {
 {% endif %}{% if ci.l2_node_j > 0 %}    rhs[{{ ci.l2_node_j - 1 }}] += state.ci_i2_hist[{{ loop.index0 }}];
 {% endif %}{% endfor %}
 {% endif %}{% if num_transformer_groups > 0 %}    // Add transformer group history current contribution
-{{ xfmr_rhs_lines }}{% endif %}{% if backward_euler %}    // Add input contribution (backward Euler: V_in * G_in)
+{{ xfmr_rhs_lines }}{% endif %}{% if multi_input %}{% if backward_euler %}    // Add per-port input contributions (backward Euler: V_in * G_in)
+    for k in 0..NUM_INPUTS {
+        rhs[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k];
+    }
+{% else %}    // Add per-port input contributions (Thevenin: (V_in + V_in_prev) * G_in)
+    for k in 0..NUM_INPUTS {
+        rhs[INPUT_NODES[k]] += (inputs[k] + inputs_prev[k]) / INPUT_RESISTANCES[k];
+    }
+{% endif %}{% else %}{% if backward_euler %}    // Add input contribution (backward Euler: V_in * G_in)
     rhs[INPUT_NODE] += input / INPUT_RESISTANCE;
 {% else %}    // Add input contribution (Thevenin: (V_in + V_in_prev) * G_in)
     rhs[INPUT_NODE] += (input + input_prev) / INPUT_RESISTANCE;
-{% endif %}{% if runtime_sources | length > 0 %}    // Runtime voltage sources (.runtime directive): host-driven per-sample values.
+{% endif %}{% endif %}{% if runtime_sources | length > 0 %}    // Runtime voltage sources (.runtime directive): host-driven per-sample values.
 {% for rt in runtime_sources %}    rhs[{{ rt.vs_row }}] += state.{{ rt.field_name }};
 {% endfor %}{% endif %}
     rhs

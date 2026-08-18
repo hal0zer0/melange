@@ -10,16 +10,24 @@ fn process_sample_inner(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPU
 {% else %}/// Process a single audio sample through the circuit
 ///
 /// # Arguments
-/// * `input` - Input voltage at INPUT_NODE
-/// * `state` - Mutable circuit state (preserved across calls)
+{% if multi_input %}/// * `inputs` - Input voltages, one per port at INPUT_NODES
+{% else %}/// * `input` - Input voltage at INPUT_NODE
+{% endif %}/// * `state` - Mutable circuit state (preserved across calls)
 ///
 /// # Returns
 /// Output voltages at OUTPUT_NODES (one per output channel)
 #[inline]
-pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {
-{% endif %}
-    // Validate input — handle NaN, inf, and extreme values
+{% if multi_input %}pub fn process_sample(inputs: [f64; NUM_INPUTS], state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {
+{% else %}pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {
+{% endif %}{% endif %}
+{% if multi_input %}    // Validate inputs — handle NaN, inf, and extreme values (per port)
+    let mut inputs = inputs;
+    for v in inputs.iter_mut() {
+        *v = if v.is_finite() { v.clamp(-100.0, 100.0) } else { 0.0 };
+    }
+{% else %}    // Validate input — handle NaN, inf, and extreme values
     let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };
+{% endif %}
 {% if num_switches > 0 or num_pots > 0 %}
     // Lazy rebuild: process all pot/switch changes in one batch
     if state.matrices_dirty {
@@ -38,7 +46,7 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
     if state.be_cooldown > 0 { state.be_cooldown -= 1; }
 {% endif %}
     // Step 1: Build RHS vector from history and input
-    let {% if noise_enabled_emit %}mut {% endif %}rhs = build_rhs(input, state.input_prev, state);
+    let {% if noise_enabled_emit %}mut {% endif %}rhs = {% if multi_input %}build_rhs(&inputs, &state.inputs_prev, state){% else %}build_rhs(input, state.input_prev, state){% endif %};
 {% if noise_enabled_emit %}{{ noise_rhs_stamp }}{% endif %}
     // Step 2: Linear prediction: v_pred = S * rhs
     let v_pred = mat_vec_mul_s(&rhs, state);
@@ -95,7 +103,11 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
         // sources present). Generated per-row from the A_neg_be / N_i patterns.
         let mut rhs_be = [0.0f64; N];
 {{ be_rhs_lines }}
-        rhs_be[INPUT_NODE] += input / INPUT_RESISTANCE;
+{% if multi_input %}        for k in 0..NUM_INPUTS {
+            rhs_be[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k];
+        }
+{% else %}        rhs_be[INPUT_NODE] += input / INPUT_RESISTANCE;
+{% endif %}
 {% if runtime_sources | length > 0 %}        // Runtime voltage sources (.runtime directive): same rows/values as
         // build_rhs — VS algebraic rows are integration-scheme-independent
         // (×1 for both trap and BE), so a fallback sample must not drop them.
@@ -213,8 +225,9 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
 {% else %}        state.i_nl_prev = [0.0; M];
         state.i_nl_prev_prev = [0.0; M];
 {% endif %}
-        state.input_prev = 0.0;
-{% if num_inductors > 0 %}        state.ind_i_prev = [0.0; {{ num_inductors }}];
+{% if multi_input %}        state.inputs_prev = [0.0; NUM_INPUTS];
+{% else %}        state.input_prev = 0.0;
+{% endif %}{% if num_inductors > 0 %}        state.ind_i_prev = [0.0; {{ num_inductors }}];
         state.ind_v_prev = [0.0; {{ num_inductors }}];
         state.ind_i_hist = [0.0; {{ num_inductors }}];
 {% endif %}{% if num_coupled_inductors > 0 %}        state.ci_i1_prev = [0.0; {{ num_coupled_inductors }}];
@@ -249,7 +262,9 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS
     state.v_prev = v;
     state.i_nl_prev_prev = state.i_nl_prev;
     state.i_nl_prev = i_nl;
-    state.input_prev = input;
+{% if multi_input %}    state.inputs_prev = inputs;
+{% else %}    state.input_prev = input;
+{% endif %}
 {% if num_inductors > 0 %}
 
     // Step 7b: Update inductor companion model state

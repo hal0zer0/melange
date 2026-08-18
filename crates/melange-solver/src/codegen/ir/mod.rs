@@ -372,6 +372,15 @@ pub struct SolverConfig {
     #[serde(default = "default_output_nodes")]
     pub output_nodes: Vec<usize>,
     pub input_resistance: f64,
+    /// Extra input node indices for multi-input (M=0) circuits, beyond the
+    /// primary port ([`Self::input_node`]). Empty for single-input, in which
+    /// case the emitted code is byte-identical to the pre-multi-input path.
+    #[serde(default)]
+    pub extra_input_nodes: Vec<usize>,
+    /// Per-port resistance parallel to [`Self::extra_input_nodes`]. The primary
+    /// port uses [`Self::input_resistance`].
+    #[serde(default)]
+    pub extra_input_resistances: Vec<f64>,
     /// Oversampling factor (1, 2, or 4). Default 1 (no oversampling).
     #[serde(default = "default_oversampling_factor")]
     pub oversampling_factor: usize,
@@ -460,6 +469,27 @@ fn default_pot_settle_samples() -> usize {
 
 fn default_output_nodes() -> Vec<usize> {
     vec![0]
+}
+
+impl SolverConfig {
+    /// Number of input ports (1 for the single-input case).
+    pub fn num_inputs(&self) -> usize {
+        1 + self.extra_input_nodes.len()
+    }
+
+    /// All input node indices, port 0 first then the extra ports in order.
+    pub fn input_node_indices(&self) -> Vec<usize> {
+        std::iter::once(self.input_node)
+            .chain(self.extra_input_nodes.iter().copied())
+            .collect()
+    }
+
+    /// All input port resistances, parallel to [`Self::input_node_indices`].
+    pub fn input_resistance_values(&self) -> Vec<f64> {
+        std::iter::once(self.input_resistance)
+            .chain(self.extra_input_resistances.iter().copied())
+            .collect()
+    }
 }
 
 fn default_oversampling_factor() -> usize {
@@ -1671,7 +1701,7 @@ impl CircuitIR {
                 s_ref,
                 a_neg_ref,
                 n,
-                config.input_node,
+                &config.input_node_indices(),
             );
             trap_discriminator_rho = stability.rho;
             if crate::codegen::stability::trap_needs_be(stability) {
@@ -1734,6 +1764,8 @@ impl CircuitIR {
             input_node: config.input_node,
             output_nodes: config.output_nodes.clone(),
             input_resistance: config.input_resistance,
+            extra_input_nodes: config.extra_input_nodes.clone(),
+            extra_input_resistances: config.extra_input_resistances.clone(),
             oversampling_factor: os_factor,
             output_scales: config.output_scales.clone(),
             output_clamp_v: config.output_clamp_v,
@@ -1815,7 +1847,7 @@ impl CircuitIR {
                 &s,
                 &a_neg_flat,
                 n,
-                config.input_node,
+                &config.input_node_indices(),
             );
             let k = compute_k_from_s(&s, &kernel.n_v, &kernel.n_i, n, m);
             Matrices {
@@ -1936,7 +1968,7 @@ impl CircuitIR {
                 &s_flat,
                 &a_neg_flat,
                 n,
-                config.input_node,
+                &config.input_node_indices(),
             );
             Matrices {
                 s: s_flat,
@@ -2278,6 +2310,12 @@ impl CircuitIR {
             max_iterations: config.dc_op_max_iterations,
             input_node: config.input_node,
             input_resistance: config.input_resistance,
+            extra_inputs: config
+                .extra_input_nodes
+                .iter()
+                .copied()
+                .zip(config.extra_input_resistances.iter().copied())
+                .collect(),
             ..DcOpConfig::default()
         };
         // Use pre-computed DC OP if available, otherwise run solver.
@@ -2730,6 +2768,8 @@ impl CircuitIR {
             input_node: config.input_node,
             output_nodes: config.output_nodes.clone(),
             input_resistance: config.input_resistance,
+            extra_input_nodes: config.extra_input_nodes.clone(),
+            extra_input_resistances: config.extra_input_resistances.clone(),
             oversampling_factor: config.oversampling_factor,
             output_scales: config.output_scales.clone(),
             output_clamp_v: config.output_clamp_v,
@@ -2810,7 +2850,7 @@ impl CircuitIR {
             &s_flat,
             &a_neg_flat,
             n,
-            config.input_node,
+            &config.input_node_indices(),
         );
         let mut spectral_radius_s_aneg = trap_stability.rho;
         // Diagnostic copy of the trap-side rho: `spectral_radius_s_aneg` is
@@ -2990,7 +3030,7 @@ impl CircuitIR {
                     &s_flat,
                     &a_neg_flat,
                     n,
-                    config.input_node,
+                    &config.input_node_indices(),
                 );
             }
             spectral_radius_s_aneg = new_rho;
@@ -3073,6 +3113,12 @@ impl CircuitIR {
         let dc_op_config = DcOpConfig {
             input_node: config.input_node,
             input_resistance: config.input_resistance,
+            extra_inputs: config
+                .extra_input_nodes
+                .iter()
+                .copied()
+                .zip(config.extra_input_resistances.iter().copied())
+                .collect(),
             ..DcOpConfig::default()
         };
         // Build device info with MNA so FA reductions are reflected in dimensions
@@ -3576,6 +3622,12 @@ impl CircuitIR {
             max_iterations: config.dc_op_max_iterations,
             input_node: config.input_node,
             input_resistance: config.input_resistance,
+            extra_inputs: config
+                .extra_input_nodes
+                .iter()
+                .copied()
+                .zip(config.extra_input_resistances.iter().copied())
+                .collect(),
             ..DcOpConfig::default()
         };
         let dc_result = dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config);
@@ -3713,6 +3765,12 @@ impl CircuitIR {
             max_iterations: config.dc_op_max_iterations,
             input_node: config.input_node,
             input_resistance: config.input_resistance,
+            extra_inputs: config
+                .extra_input_nodes
+                .iter()
+                .copied()
+                .zip(config.extra_input_resistances.iter().copied())
+                .collect(),
             ..DcOpConfig::default()
         };
         let dc_result = dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config);

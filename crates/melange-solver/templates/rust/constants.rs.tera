@@ -35,6 +35,16 @@ pub const OUTPUT_NODES: [usize; NUM_OUTPUTS] = [{{ output_nodes_values }}];
 
 /// Input resistance (Thevenin equivalent)
 pub const INPUT_RESISTANCE: f64 = {{ input_resistance }};
+{% if multi_input %}
+/// Number of input ports (multi-input, M=0 only)
+pub const NUM_INPUTS: usize = {{ num_inputs }};
+
+/// Input node indices (one per input port). Port 0 is the primary input.
+pub const INPUT_NODES: [usize; NUM_INPUTS] = [{{ input_nodes_values }}];
+
+/// Per-port input resistance (Thevenin equivalent), parallel to INPUT_NODES.
+pub const INPUT_RESISTANCES: [f64; NUM_INPUTS] = [{{ input_resistances_values }}];
+{% endif %}
 
 /// Implausibility bound for a *finite* per-sample NR state (Step 7 in
 /// process_sample). A NaN/Inf iterate is caught unconditionally; this

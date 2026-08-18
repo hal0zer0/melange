@@ -109,11 +109,13 @@ impl Emitter for RustEmitter {
         };
 
         // Validate node indices against original circuit nodes (not augmented dimension)
-        if ir.solver_config.input_node >= n_nodes {
-            return Err(CodegenError::InvalidConfig(format!(
-                "input_node {} >= n_nodes={}",
-                ir.solver_config.input_node, n_nodes
-            )));
+        for &in_node in &ir.solver_config.input_node_indices() {
+            if in_node >= n_nodes {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "input_node {} >= n_nodes={}",
+                    in_node, n_nodes
+                )));
+            }
         }
         for (i, &node) in ir.solver_config.output_nodes.iter().enumerate() {
             if node >= n_nodes {

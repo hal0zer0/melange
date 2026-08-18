@@ -38,10 +38,16 @@ pub struct DcOpConfig {
     pub gmin_end: f64,
     /// Number of Gmin stepping stages
     pub gmin_steps: usize,
-    /// Input node index (0-indexed into N-vector)
+    /// Input node index (0-indexed into N-vector) of the primary input port.
     pub input_node: usize,
-    /// Input resistance (ohms)
+    /// Input resistance (ohms) of the primary input port.
     pub input_resistance: f64,
+    /// Extra input ports for multi-input (M=0) circuits: `(node_index,
+    /// resistance)` for each port beyond the primary. Empty for single-input.
+    /// Each is stamped with its own `1/R` Thevenin conductance in the DC-OP
+    /// G matrix, matching the per-sample input stamping. See
+    /// `local-docs/multi-input-ports-plan.md`.
+    pub extra_inputs: Vec<(usize, f64)>,
 }
 
 impl Default for DcOpConfig {
@@ -56,6 +62,7 @@ impl Default for DcOpConfig {
             gmin_steps: 10,
             input_node: 0,
             input_resistance: 1.0,
+            extra_inputs: Vec::new(),
         }
     }
 }
@@ -832,6 +839,11 @@ fn build_dc_system(
     }
 
     // Stamp input conductance
+    for &(in_node, r) in &config.extra_inputs {
+        if in_node < n && r > 0.0 {
+            g_dc[in_node][in_node] += 1.0 / r;
+        }
+    }
     if config.input_node < n && config.input_resistance > 0.0 {
         g_dc[config.input_node][config.input_node] += 1.0 / config.input_resistance;
     }
