@@ -99,6 +99,25 @@ fn diode_conductance_with_rs(v_d: f64, is: f64, n_vt: f64, rs: f64) -> f64 {
     g_j / (1.0 + g_j * rs)
 }
 
+/// Diode with series resistance, fused: solve V_j once and return both the
+/// current and the total conductance.
+///
+/// Exactly equivalent to calling `diode_current_with_rs` and
+/// `diode_conductance_with_rs` with the same arguments — same `diode_solve_vj`
+/// on the same inputs, same subsequent arithmetic in the same order — but the
+/// inner scalar NR (up to 32 iterations) runs once instead of twice. The two
+/// separate functions are kept for callers that need only one of the outputs.
+///
+/// `#[inline(always)]` on the split pair is not sufficient to get this for
+/// free: `diode_solve_vj` has a data-dependent early `break`, and LLVM does not
+/// CSE the duplicate call in practice (measured).
+#[inline(always)]
+fn diode_eval_with_rs(v_d: f64, is: f64, n_vt: f64, rs: f64) -> (f64, f64) {
+    let v_j = diode_solve_vj(v_d, is, n_vt, rs);
+    let g_j = diode_conductance(v_j, is, n_vt);
+    (diode_current(v_j, is, n_vt), g_j / (1.0 + g_j * rs))
+}
+
 /// Reverse breakdown current: I_bv = -IBV * exp(-(v_d + BV) / n_vt)
 /// Added to diode current when v_d < -BV.
 #[inline(always)]

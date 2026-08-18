@@ -5952,13 +5952,13 @@ impl RustEmitter {
             (DeviceType::Diode, DeviceParams::Diode(dp)) => {
                 if dp.has_rs() && dp.has_bv() {
                     code.push_str(&format!(
-                        "{indent}let i_dev{s} = diode_current_with_rs(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt, DEVICE_{d}_RS) + diode_breakdown_current(v_d{s}, state.device_{d}_n_vt, DEVICE_{d}_BV, DEVICE_{d}_IBV);\n\
-                         {indent}let jdev_{s}_{s} = diode_conductance_with_rs(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt, DEVICE_{d}_RS) + diode_breakdown_conductance(v_d{s}, state.device_{d}_n_vt, DEVICE_{d}_BV, DEVICE_{d}_IBV);\n"
+                        "{indent}let (i_rs{s}, g_rs{s}) = diode_eval_with_rs(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt, DEVICE_{d}_RS);\n\
+                         {indent}let i_dev{s} = i_rs{s} + diode_breakdown_current(v_d{s}, state.device_{d}_n_vt, DEVICE_{d}_BV, DEVICE_{d}_IBV);\n\
+                         {indent}let jdev_{s}_{s} = g_rs{s} + diode_breakdown_conductance(v_d{s}, state.device_{d}_n_vt, DEVICE_{d}_BV, DEVICE_{d}_IBV);\n"
                     ));
                 } else if dp.has_rs() {
                     code.push_str(&format!(
-                        "{indent}let i_dev{s} = diode_current_with_rs(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt, DEVICE_{d}_RS);\n\
-                         {indent}let jdev_{s}_{s} = diode_conductance_with_rs(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt, DEVICE_{d}_RS);\n"
+                        "{indent}let (i_dev{s}, jdev_{s}_{s}) = diode_eval_with_rs(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt, DEVICE_{d}_RS);\n"
                     ));
                 } else if dp.has_bv() {
                     code.push_str(&format!(
@@ -8889,8 +8889,9 @@ impl RustEmitter {
                         };
                         code.push_str(&format!(
                             "{indent}{{ // Diode {dev_num} (RS={has_rs}, BV={has_bv})\n\
-                             {indent}    i_nl[{s}] = diode_current_with_rs(v_nl[{s}], state.device_{dev_num}_is, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_RS){bv_i};\n\
-                             {indent}    j_dev[{jd_ss}] = diode_conductance_with_rs(v_nl[{s}], state.device_{dev_num}_is, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_RS){bv_g};\n\
+                             {indent}    let (i_rs, g_rs) = diode_eval_with_rs(v_nl[{s}], state.device_{dev_num}_is, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_RS);\n\
+                             {indent}    i_nl[{s}] = i_rs{bv_i};\n\
+                             {indent}    j_dev[{jd_ss}] = g_rs{bv_g};\n\
                              {indent}}}\n",
                             has_rs = dp.has_rs(), has_bv = dp.has_bv(),
                         ));

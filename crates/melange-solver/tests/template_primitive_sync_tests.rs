@@ -118,6 +118,9 @@ mod tpl {
     pub fn diode_conductance_with_rs_tpl(v_d: f64, is: f64, n_vt: f64, rs: f64) -> f64 {
         diode_conductance_with_rs(v_d, is, n_vt, rs)
     }
+    pub fn diode_eval_with_rs_tpl(v_d: f64, is: f64, n_vt: f64, rs: f64) -> (f64, f64) {
+        diode_eval_with_rs(v_d, is, n_vt, rs)
+    }
     #[allow(clippy::too_many_arguments)]
     pub fn bjt_evaluate_tpl(
         vbe: f64,
@@ -510,6 +513,58 @@ fn template_diode_rs_solve_matches_devices_crate() {
         conducting > 100,
         "RS-diode grid barely conducts ({} points) — solve loop untested",
         conducting
+    );
+}
+
+/// `diode_eval_with_rs` must be BITWISE identical to the split
+/// `diode_current_with_rs` / `diode_conductance_with_rs` pair.
+///
+/// The fused form exists so the inner scalar NR in `diode_solve_vj` runs once
+/// per device per NR iteration instead of twice (the emitters previously called
+/// both split helpers with identical arguments and discarded one solve). That
+/// is only a legitimate optimisation if it is *exactly* the same arithmetic, so
+/// this asserts `to_bits()` equality, not approximate closeness. A tolerance
+/// here would defeat the point of the test.
+#[test]
+fn template_diode_eval_with_rs_is_bitwise_identical_to_split_pair() {
+    let cases: &[(f64, f64, f64)] = &[
+        (2.52e-9, 1.752, 7.0),   // 1N4148-class with typical RS
+        (1e-12, 1.5, 100.0),     // large RS: heavy g_d*RS product
+        (2.68e-14, 1.07, 0.5),   // small RS
+        (1e-30, 2.0, 10.0),      // wide-bandgap: knee above the ±40 clamp
+        (1e-6, 1.0, 20.0),       // germanium-class: large IS, large RS
+    ];
+    let mut conducting = 0u32;
+    for &(is, n, rs) in cases {
+        let n_vt = n * VT_ROOM;
+        let mut v = -10.0;
+        while v <= 8.0 {
+            let (i_f, g_f) = tpl::diode_eval_with_rs_tpl(v, is, n_vt, rs);
+            let i_s = tpl::diode_current_with_rs_tpl(v, is, n_vt, rs);
+            let g_s = tpl::diode_conductance_with_rs_tpl(v, is, n_vt, rs);
+            assert_eq!(
+                i_f.to_bits(),
+                i_s.to_bits(),
+                "fused current differs from split at v={v} (is={is:.0e}, n={n}, rs={rs}): \
+                 fused={i_f:?} split={i_s:?}"
+            );
+            assert_eq!(
+                g_f.to_bits(),
+                g_s.to_bits(),
+                "fused conductance differs from split at v={v} (is={is:.0e}, n={n}, rs={rs}): \
+                 fused={g_f:?} split={g_s:?}"
+            );
+            if i_s > 1e-6 {
+                conducting += 1;
+            }
+            v += 0.093;
+        }
+    }
+    // Same grid-honesty guard as the split test: the fused path must actually
+    // exercise the forward-conduction region where the inner NR iterates.
+    assert!(
+        conducting > 100,
+        "fused RS-diode grid barely conducts ({conducting} points) — solve loop untested"
     );
 }
 

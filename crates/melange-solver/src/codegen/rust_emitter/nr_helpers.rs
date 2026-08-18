@@ -54,18 +54,18 @@ pub(super) fn emit_dk_device_evaluation(
                 if dp.has_rs() && dp.has_bv() {
                     // RS + BV: solve inner NR for junction voltage, then add breakdown
                     code.push_str(&format!(
-                        "{indent}let i_dev{s} = diode_current_with_rs(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt, DEVICE_{d}_RS) + diode_breakdown_current(v_d{s}, state.device_{d}_n_vt, DEVICE_{d}_BV, DEVICE_{d}_IBV);\n"
+                        "{indent}let (i_rs{s}, g_rs{s}) = diode_eval_with_rs(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt, DEVICE_{d}_RS);\n"
                     ));
                     code.push_str(&format!(
-                        "{indent}let jdev_{s}_{s} = diode_conductance_with_rs(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt, DEVICE_{d}_RS) + diode_breakdown_conductance(v_d{s}, state.device_{d}_n_vt, DEVICE_{d}_BV, DEVICE_{d}_IBV);\n"
+                        "{indent}let i_dev{s} = i_rs{s} + diode_breakdown_current(v_d{s}, state.device_{d}_n_vt, DEVICE_{d}_BV, DEVICE_{d}_IBV);\n"
+                    ));
+                    code.push_str(&format!(
+                        "{indent}let jdev_{s}_{s} = g_rs{s} + diode_breakdown_conductance(v_d{s}, state.device_{d}_n_vt, DEVICE_{d}_BV, DEVICE_{d}_IBV);\n"
                     ));
                 } else if dp.has_rs() {
                     // RS only: solve inner NR for junction voltage
                     code.push_str(&format!(
-                        "{indent}let i_dev{s} = diode_current_with_rs(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt, DEVICE_{d}_RS);\n"
-                    ));
-                    code.push_str(&format!(
-                        "{indent}let jdev_{s}_{s} = diode_conductance_with_rs(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt, DEVICE_{d}_RS);\n"
+                        "{indent}let (i_dev{s}, jdev_{s}_{s}) = diode_eval_with_rs(v_d{s}, state.device_{d}_is, state.device_{d}_n_vt, DEVICE_{d}_RS);\n"
                     ));
                 } else if dp.has_bv() {
                     // BV only: add breakdown to standard diode
