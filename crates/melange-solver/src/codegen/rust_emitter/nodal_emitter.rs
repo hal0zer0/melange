@@ -282,9 +282,7 @@ fn emit_sat_ind_row_residual(
     // Guard: the row enumeration below reads G/C directly, so bail to no check
     // at all rather than emit a residual over a matrix we cannot address.
     if g.len() != n * n || c.len() != n * n {
-        log::warn!(
-            "sat-inductor row residual: unexpected G/C dimensions, check not emitted"
-        );
+        log::warn!("sat-inductor row residual: unexpected G/C dimensions, check not emitted");
         return;
     }
 

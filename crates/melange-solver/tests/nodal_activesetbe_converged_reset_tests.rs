@@ -92,7 +92,10 @@ fn active_set_be_code() -> (String, usize, usize) {
 #[test]
 fn test_activesetbe_full_lu_be_fallback_resets_converged_at_entry() {
     let (code, n, m) = active_set_be_code();
-    assert!(n > 0 && m > 0, "expected a nontrivial nodal circuit (n={n}, m={m})");
+    assert!(
+        n > 0 && m > 0,
+        "expected a nontrivial nodal circuit (n={n}, m={m})"
+    );
 
     // Confirm this is the full-LU ActiveSetBe path (the entry condition that
     // can bring in a converged primary via rail engagement).
