@@ -275,7 +275,10 @@ pub fn run_transient(
             "source stepping failed",
             "iteration limit reached",
         ];
-        if let Some(sig) = DC_FAIL_SIGNATURES.iter().find(|s| combined_lc.contains(**s)) {
+        if let Some(sig) = DC_FAIL_SIGNATURES
+            .iter()
+            .find(|s| combined_lc.contains(**s))
+        {
             let combined = format!("{stdout}\n{stderr}");
             let detail: String = combined
                 .lines()
