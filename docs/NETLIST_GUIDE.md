@@ -28,6 +28,23 @@ Every component connects to **nodes** — named connection points in the circuit
 - Use descriptive names: `vcc`, `base`, `plate`, `cathode`, `mid`
 - No spaces or special characters — letters, digits, and underscores only
 
+### Multiple input ports (linear decks)
+
+For a linear (M=0) deck that mixes several inputs *inside* the circuit, list the
+input nodes comma-separated: `-i in16,in,in4`. The generated `process_sample`
+then takes one value per port — `process_sample(inputs: [f64; NUM_INPUTS])` — and
+melange solves them in a single pass (exact by superposition, and ~N× faster than
+compiling N single-input builds and summing).
+
+**Termination differs from single-input — a migration footgun.** *Every* listed
+port becomes a Thevenin source with its own series `INPUT_RESISTANCE` (default
+1 Ω). An undriven port is therefore held at 0 V through ~1 Ω to ground — a light
+shunt, **not** the open that an unlisted node keeps. A deck written for the old
+"compile N times and sum" pattern usually carries hand-added terminations on the
+other ports; those now **double up** with the per-port 1 Ω, so remove them when
+you switch to `-i a,b,c`. Multi-input is `--format code` only and rejects
+nonlinear (M>0) decks (superposition is invalid there).
+
 ## From Schematic to Netlist
 
 ### Step 1: Label every node
