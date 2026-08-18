@@ -262,8 +262,12 @@ fn dk_discriminator_evaluates_internal_rate_pair_under_oversampling() {
         "test circuit must stay trapezoidal for this check"
     );
     let n = ir.topology.n;
-    let shipped =
-        analyze_trap_stability_deflated(&ir.matrices.s, &ir.matrices.a_neg, n, &[config.input_node]);
+    let shipped = analyze_trap_stability_deflated(
+        &ir.matrices.s,
+        &ir.matrices.a_neg,
+        n,
+        &[config.input_node],
+    );
     assert!(
         (ir.trap_discriminator_rho - shipped.rho).abs() < 1e-12,
         "discriminator rho {} must equal rho of the shipped internal-rate pair {}",

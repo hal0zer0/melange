@@ -4992,7 +4992,9 @@ impl RustEmitter {
                 code.push_str("    // Input sources (backward Euler: per-port V_in * G_in)\n");
                 code.push_str("    for k in 0..NUM_INPUTS {\n        rhs[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k];\n    }\n");
             } else {
-                code.push_str("    // Input sources (trapezoidal: per-port (V_in + V_in_prev) * G_in)\n");
+                code.push_str(
+                    "    // Input sources (trapezoidal: per-port (V_in + V_in_prev) * G_in)\n",
+                );
                 code.push_str("    for k in 0..NUM_INPUTS {\n        rhs[INPUT_NODES[k]] += (inputs[k] + state.inputs_prev[k]) / INPUT_RESISTANCES[k];\n    }\n");
             }
         } else {
@@ -5092,10 +5094,10 @@ impl RustEmitter {
                     code.push_str("        for k in 0..NUM_INPUTS { rhs_be[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k]; }\n");
                 } else {
                     if multi_input {
-                code.push_str("        for k in 0..NUM_INPUTS { rhs_be[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k]; }\n");
-            } else {
-                code.push_str("        rhs_be[INPUT_NODE] += input * input_conductance;\n");
-            }
+                        code.push_str("        for k in 0..NUM_INPUTS { rhs_be[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k]; }\n");
+                    } else {
+                        code.push_str("        rhs_be[INPUT_NODE] += input * input_conductance;\n");
+                    }
                 }
                 // Runtime voltage sources (same rows as the trap stamp).
                 for rt in &ir.runtime_sources {
@@ -6822,7 +6824,9 @@ impl RustEmitter {
                 code.push_str("    // Input sources (backward Euler: per-port V_in * G_in)\n");
                 code.push_str("    for k in 0..NUM_INPUTS {\n        rhs[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k];\n    }\n");
             } else {
-                code.push_str("    // Input sources (trapezoidal: per-port (V_in + V_in_prev) * G_in)\n");
+                code.push_str(
+                    "    // Input sources (trapezoidal: per-port (V_in + V_in_prev) * G_in)\n",
+                );
                 code.push_str("    for k in 0..NUM_INPUTS {\n        rhs[INPUT_NODES[k]] += (inputs[k] + state.inputs_prev[k]) / INPUT_RESISTANCES[k];\n    }\n");
             }
         } else {

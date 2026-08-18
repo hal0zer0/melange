@@ -1372,9 +1372,7 @@ fn compile_circuit_source(
             );
         }
         if emit_dc_op_recompute {
-            anyhow::bail!(
-                "multi-input decks do not yet support --emit-dc-op-recompute."
-            );
+            anyhow::bail!("multi-input decks do not yet support --emit-dc-op-recompute.");
         }
     }
 
