@@ -350,6 +350,15 @@ pub struct CodegenConfig {
     /// factor (the nodal-local estimate alone did not cross the promotion
     /// threshold).
     pub router_dk_spectral_radius: f64,
+    /// Runtime feedback-injection sources (`.inject`), resolved by the caller
+    /// (CLI) from node names to 0-indexed node rows. The caller must ALSO
+    /// stamp each source's conductance (`1/resistance`) into
+    /// `mna.g[node][node]` before building the kernel. Empty for decks without
+    /// `.inject` → generated code is byte-identical to the pre-inject emitter.
+    /// See `local-docs/inject-directive-plan.md`.
+    pub injections: Vec<crate::codegen::ir::InjectionSpec>,
+    /// Raw inner-rate tap probes (`.tap`). Empty when no `.tap` directive.
+    pub taps: Vec<crate::codegen::ir::TapSpec>,
 }
 
 #[cfg(feature = "codegen")]
@@ -471,6 +480,8 @@ impl Default for CodegenConfig {
             emit_dc_op_recompute: false,
             router_dk_unstable: false,
             router_dk_spectral_radius: 0.0,
+            injections: Vec::new(),
+            taps: Vec::new(),
         }
     }
 }

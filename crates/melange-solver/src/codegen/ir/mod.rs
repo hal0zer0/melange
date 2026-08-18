@@ -358,6 +358,42 @@ pub struct Topology {
     pub num_linearized_devices: usize,
 }
 
+/// A resolved `.inject` runtime feedback source.
+///
+/// Node index is 0-indexed into the MNA node vector (matches
+/// [`SolverConfig::input_node`]). The source conductance `1/resistance` is
+/// stamped into `g[node][node]` before the kernel is built (so it is baked
+/// into `S` and present at the DC operating point), exactly like an input
+/// port. See `local-docs/inject-directive-plan.md`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InjectionSpec {
+    /// 0-indexed MNA node row where the source is stamped.
+    pub node: usize,
+    /// Rust identifier naming this injection (emitted in `INJECT_NAMES`).
+    pub name: String,
+    /// Source impedance in ohms (series `R` for Thevenin, shunt `RSHUNT`
+    /// for Norton). Conductance `1/resistance` is stamped into the diagonal.
+    pub resistance: f64,
+    /// `true` = Norton (runtime value is a CURRENT: `rhs[node] += val`).
+    /// `false` = Thevenin (runtime value is a VOLTAGE:
+    /// `rhs[node] += (val + val_prev) * G` for trap, `val * G` for BE).
+    pub norton: bool,
+}
+
+/// A resolved `.tap` raw inner-rate probe.
+///
+/// Emitted SEPARATELY from output nodes even when a node coincides: taps are
+/// raw, pre-decimation inner-rate values (read after Step-6c damping, before
+/// the Step-9 output pipeline), whereas outputs are DC-blocked / scaled /
+/// decimated.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TapSpec {
+    /// 0-indexed MNA node row to read raw each inner sample.
+    pub node: usize,
+    /// Human-readable label emitted in `TAP_NAMES`.
+    pub name: String,
+}
+
 /// Solver configuration baked into the generated code.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -461,6 +497,13 @@ pub struct SolverConfig {
     /// [`CodegenConfig::emit_dc_op_recompute`]: crate::codegen::CodegenConfig::emit_dc_op_recompute
     #[serde(default)]
     pub emit_dc_op_recompute: bool,
+    /// Runtime feedback-injection sources (`.inject`). Empty for decks without
+    /// `.inject`, in which case emission is byte-identical to today's path.
+    #[serde(default)]
+    pub injections: Vec<InjectionSpec>,
+    /// Raw inner-rate tap probes (`.tap`). Empty when no `.tap` directive.
+    #[serde(default)]
+    pub taps: Vec<TapSpec>,
 }
 
 fn default_pot_settle_samples() -> usize {
@@ -489,6 +532,23 @@ impl SolverConfig {
         std::iter::once(self.input_resistance)
             .chain(self.extra_input_resistances.iter().copied())
             .collect()
+    }
+
+    /// Number of `.inject` runtime feedback sources.
+    pub fn num_inject(&self) -> usize {
+        self.injections.len()
+    }
+
+    /// Number of `.tap` raw inner-rate probes.
+    pub fn num_tap(&self) -> usize {
+        self.taps.len()
+    }
+
+    /// Whether the generated `process_sample` API differs from the classic
+    /// `process_sample(input, state)` shape (i.e. any `.inject` or `.tap`).
+    /// When false, emission MUST be byte-identical to the pre-inject path.
+    pub fn has_inject_or_tap(&self) -> bool {
+        !self.injections.is_empty() || !self.taps.is_empty()
     }
 }
 
@@ -1776,6 +1836,8 @@ impl CircuitIR {
             breakpoint_be: false,
             opamp_rail_mode: rail_mode.mode,
             emit_dc_op_recompute: config.emit_dc_op_recompute,
+            injections: config.injections.clone(),
+            taps: config.taps.clone(),
         };
 
         let metadata = CircuitMetadata {
@@ -2781,6 +2843,8 @@ impl CircuitIR {
             breakpoint_be: false,
             opamp_rail_mode: rail_mode.mode,
             emit_dc_op_recompute: config.emit_dc_op_recompute,
+            injections: config.injections.clone(),
+            taps: config.taps.clone(),
         };
 
         // Compute S = A^{-1} for Schur complement NR (O(M³) instead of O(N³) per iteration)

@@ -100,6 +100,15 @@ pub struct Netlist {
     /// Bare plugin-driven scalar params (`.runtime <name> <min> <max> as
     /// <field>`), referenced by name in behavioral `B`-source expressions.
     pub runtime_scalars: Vec<RuntimeScalarDirective>,
+    /// Runtime feedback-injection sources (`.inject <node> <field>
+    /// R=/RSHUNT=`). Each stamps a Thevenin/Norton source at a circuit node,
+    /// driven per (inner) sample by a `process_sample` argument. See
+    /// `local-docs/inject-directive-plan.md`.
+    pub injections: Vec<InjectDirective>,
+    /// Raw inner-rate tap probes (`.tap <node> [name]`). `process_sample`
+    /// returns per-inner-sample tap values so a feedback caller can run its
+    /// inner-rate model.
+    pub taps: Vec<TapDirective>,
     /// Per-device parameter mismatch directives (.mismatch D IS=0.02 ...).
     /// Applied at codegen time: each device of the listed type gets its
     /// nominal model parameter jittered by `nominal · (1 + tol · u)` with
@@ -250,6 +259,57 @@ pub struct RuntimeScalarDirective {
     pub field_name: String,
 }
 
+/// Source impedance for a `.inject` runtime feedback source.
+///
+/// Impedance is MANDATORY on `.inject` (rejected at parse if absent): an ideal
+/// source with no series/shunt conductance would clamp the injection node and
+/// destroy the dry signal path. See `local-docs/inject-directive-plan.md`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum InjectImpedance {
+    /// `R=<ohms>` — Thevenin source: the runtime value is a VOLTAGE behind
+    /// series resistance `R`. Stamp `G = 1/R` into `g[node][node]` before the
+    /// kernel; `rhs[node] += (val + val_prev) * G` (trap) / `val * G` (BE).
+    Thevenin(f64),
+    /// `RSHUNT=<ohms>` — Norton source: the runtime value is a CURRENT injected
+    /// at the node with shunt resistance `RSHUNT`. Stamp `G = 1/RSHUNT` into the
+    /// diagonal; `rhs[node] += val` (integration-scheme-independent, like a
+    /// current source).
+    Norton(f64),
+}
+
+/// A `.inject <node> <field> R=<ohms>` / `RSHUNT=<ohms>` directive.
+///
+/// Declares a runtime feedback source the plugin host drives per (inner)
+/// sample. The source value is known at sample start, so it enters the
+/// per-sample RHS as an ordinary constant — the NR loop never sees it. Reuses
+/// the multi-input RHS-stamp machinery. Single-ended (node-to-ground) only.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InjectDirective {
+    /// Injection node (normalized name). Must be a non-ground circuit node.
+    pub node: String,
+    /// Rust identifier naming this injection (emitted in `INJECT_NAMES`, gives
+    /// the injection a stable order/identity). Not a `CircuitState` field — the
+    /// value is supplied as a `process_sample` argument, not a setter.
+    pub field_name: String,
+    /// Mandatory source impedance (Thevenin `R=` or Norton `RSHUNT=`).
+    pub impedance: InjectImpedance,
+}
+
+/// A `.tap <node> [name]` directive.
+///
+/// Declares a RAW, pre-decimation inner-rate probe of `node`. `process_sample`
+/// returns per-inner-sample tap values (`taps_inner: [[f64; NUM_TAP]; OS]`) so
+/// a feedback caller's inner-rate model can run on the un-band-limited node
+/// signal. Emitted SEPARATELY from output nodes even when a node coincides
+/// (different semantics: raw inner-rate vs DC-blocked/scaled/decimated output).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TapDirective {
+    /// Tapped node (normalized name). Must be a non-ground circuit node.
+    pub node: String,
+    /// Human-readable label emitted in `TAP_NAMES`. Defaults to the node name.
+    pub name: String,
+}
+
 /// A potentiometer directive (.pot Rname min max).
 ///
 /// Marks a resistor as runtime-variable with a min/max range.
@@ -365,6 +425,8 @@ impl Netlist {
             runtime_sources: Vec::new(),
             runtime_resistors: Vec::new(),
             runtime_scalars: Vec::new(),
+            injections: Vec::new(),
+            taps: Vec::new(),
             mismatch_specs: Vec::new(),
             seed: None,
             tolerance_r: 0.0,
@@ -1942,6 +2004,34 @@ impl Parser {
             }
         }
 
+        // Verify `.inject` field names are unique (they name INJECT_NAMES
+        // entries and give each injection a stable order), and `.tap` names
+        // are unique. Node existence is validated later against `node_map` at
+        // MNA/CLI resolution. Impedance-mandatory is enforced at parse time.
+        {
+            let mut seen_inject_fields = std::collections::HashSet::new();
+            for inj in &netlist.injections {
+                if !seen_inject_fields.insert(inj.field_name.clone()) {
+                    return Err(ParseError {
+                        line: 0,
+                        message: format!(
+                            ".inject declares field name '{}' more than once",
+                            inj.field_name
+                        ),
+                    });
+                }
+            }
+            let mut seen_tap_names = std::collections::HashSet::new();
+            for tap in &netlist.taps {
+                if !seen_tap_names.insert(tap.name.clone()) {
+                    return Err(ParseError {
+                        line: 0,
+                        message: format!(".tap declares name '{}' more than once", tap.name),
+                    });
+                }
+            }
+        }
+
         // Verify all coupling (K) directives: no duplicate names, reference existing inductors.
         // An inductor MAY appear in multiple K directives (multi-winding transformers).
         {
@@ -2525,6 +2615,14 @@ impl Parser {
                         netlist.runtime_scalars.push(rs);
                     }
                 }
+            }
+            ".inject" => {
+                let inj = self.parse_inject_directive(&parts)?;
+                netlist.injections.push(inj);
+            }
+            ".tap" => {
+                let tap = self.parse_tap_directive(&parts)?;
+                netlist.taps.push(tap);
             }
             ".input_impedance" => {
                 self.parse_input_impedance_directive(&parts, netlist)?;
@@ -3377,6 +3475,84 @@ impl Parser {
             max_value,
             field_name,
         })
+    }
+
+    /// Parse `.inject <node> <field> R=<ohms>` (Thevenin) or
+    /// `.inject <node> <field> RSHUNT=<ohms>` (Norton).
+    ///
+    /// Impedance is MANDATORY — a directive with neither `R=` nor `RSHUNT=`
+    /// is rejected (an ideal source would clamp the injection node and destroy
+    /// the dry path; this is the single most important guardrail). Node
+    /// existence is validated later against `node_map` at MNA/CLI resolution.
+    fn parse_inject_directive(&self, parts: &[&str]) -> Result<InjectDirective, ParseError> {
+        // .inject <node> <field> R=<ohms>|RSHUNT=<ohms>
+        self.require_parts(
+            parts,
+            4,
+            "<node> <field> and a mandatory impedance R=<ohms>|RSHUNT=<ohms>",
+        )?;
+        let node = normalize_node_name(parts[1]);
+        if node == "0" {
+            return Err(self.error(
+                ".inject node cannot be ground (0) — injection is single-ended (node-to-ground)",
+            ));
+        }
+        let field_name = parts[2].to_string();
+        if !is_valid_rust_ident(&field_name) {
+            return Err(self.error(format!(
+                ".inject field name '{}' is not a valid Rust identifier \
+                 (must start with letter or _, contain only ASCII letters/digits/_)",
+                field_name
+            )));
+        }
+        // Impedance token: exactly one of R=<ohms> / RSHUNT=<ohms>. MANDATORY.
+        let imp_tok = parts[3];
+        let (key, val_str) = imp_tok.split_once('=').ok_or_else(|| {
+            self.error(format!(
+                ".inject requires a mandatory source impedance 'R=<ohms>' (Thevenin) or \
+                 'RSHUNT=<ohms>' (Norton); got '{}'. An ideal source with no impedance \
+                 would clamp the node and destroy the dry path.",
+                imp_tok
+            ))
+        })?;
+        let ohms = self.parse_positive_value(val_str, ".inject impedance")?;
+        let impedance = match key.to_ascii_uppercase().as_str() {
+            "R" => InjectImpedance::Thevenin(ohms),
+            "RSHUNT" => InjectImpedance::Norton(ohms),
+            other => {
+                return Err(self.error(format!(
+                    ".inject impedance key '{}' must be 'R' (Thevenin) or 'RSHUNT' (Norton)",
+                    other
+                )));
+            }
+        };
+        Ok(InjectDirective {
+            node,
+            field_name,
+            impedance,
+        })
+    }
+
+    /// Parse `.tap <node> [name]` — declare a raw inner-rate probe node.
+    fn parse_tap_directive(&self, parts: &[&str]) -> Result<TapDirective, ParseError> {
+        // .tap <node> [name]
+        self.require_parts(parts, 2, ".tap <node> [name]")?;
+        let node = normalize_node_name(parts[1]);
+        if node == "0" {
+            return Err(self.error(".tap node cannot be ground (0)"));
+        }
+        let name = match parts.get(2) {
+            Some(n) => {
+                if !is_valid_rust_ident(n) {
+                    return Err(
+                        self.error(format!(".tap name '{}' is not a valid Rust identifier", n))
+                    );
+                }
+                n.to_string()
+            }
+            None => node.clone(),
+        };
+        Ok(TapDirective { node, name })
     }
 
     fn parse_input_impedance_directive(
@@ -6595,5 +6771,106 @@ U1 0 inv out opamp
                 assert_eq!(*value, 1000.0);
             }
         }
+    }
+
+    // ---- .inject / .tap directive parsing (Gate 1: mandatory impedance) ----
+
+    #[test]
+    fn test_inject_thevenin_parses() {
+        let spice = "Inj\nR1 a 0 1k\n.inject a fb R=47k\n.end\n";
+        let n = Netlist::parse(spice).expect("parse");
+        assert_eq!(n.injections.len(), 1);
+        let inj = &n.injections[0];
+        assert_eq!(inj.node, "a");
+        assert_eq!(inj.field_name, "fb");
+        assert_eq!(inj.impedance, InjectImpedance::Thevenin(47_000.0));
+    }
+
+    #[test]
+    fn test_inject_norton_parses() {
+        let spice = "Inj\nR1 a 0 1k\n.inject a fb RSHUNT=10k\n.end\n";
+        let n = Netlist::parse(spice).expect("parse");
+        assert_eq!(n.injections.len(), 1);
+        assert_eq!(n.injections[0].impedance, InjectImpedance::Norton(10_000.0));
+    }
+
+    #[test]
+    fn test_inject_missing_impedance_rejected() {
+        // GATE 1: an ideal source (no R=/RSHUNT=) must be rejected at parse.
+        let spice = "Inj\nR1 a 0 1k\n.inject a fb\n.end\n";
+        let err = Netlist::parse(spice).expect_err("must reject missing impedance");
+        assert!(
+            err.message.contains("impedance"),
+            "error should mention mandatory impedance, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_inject_bareword_impedance_rejected() {
+        // A trailing token that isn't R=/RSHUNT= is not an impedance.
+        let spice = "Inj\nR1 a 0 1k\n.inject a fb 47k\n.end\n";
+        assert!(Netlist::parse(spice).is_err());
+    }
+
+    #[test]
+    fn test_inject_bad_impedance_key_rejected() {
+        let spice = "Inj\nR1 a 0 1k\n.inject a fb Z=47k\n.end\n";
+        assert!(Netlist::parse(spice).is_err());
+    }
+
+    #[test]
+    fn test_inject_ground_node_rejected() {
+        let spice = "Inj\nR1 a 0 1k\n.inject 0 fb R=1k\n.end\n";
+        assert!(Netlist::parse(spice).is_err());
+    }
+
+    #[test]
+    fn test_inject_bad_field_name_rejected() {
+        let spice = "Inj\nR1 a 0 1k\n.inject a 9bad R=1k\n.end\n";
+        assert!(Netlist::parse(spice).is_err());
+    }
+
+    #[test]
+    fn test_inject_duplicate_field_rejected() {
+        let spice = "Inj\nR1 a 0 1k\nR2 b 0 1k\n.inject a fb R=1k\n.inject b fb R=1k\n.end\n";
+        assert!(Netlist::parse(spice).is_err());
+    }
+
+    #[test]
+    fn test_inject_zero_impedance_rejected() {
+        let spice = "Inj\nR1 a 0 1k\n.inject a fb R=0\n.end\n";
+        assert!(Netlist::parse(spice).is_err());
+    }
+
+    #[test]
+    fn test_tap_parses_with_and_without_name() {
+        let spice = "T\nR1 a 0 1k\nR2 b 0 1k\n.tap a\n.tap b tankdrive\n.end\n";
+        let n = Netlist::parse(spice).expect("parse");
+        assert_eq!(n.taps.len(), 2);
+        assert_eq!(n.taps[0].node, "a");
+        assert_eq!(n.taps[0].name, "a"); // defaults to node name
+        assert_eq!(n.taps[1].node, "b");
+        assert_eq!(n.taps[1].name, "tankdrive");
+    }
+
+    #[test]
+    fn test_tap_ground_rejected() {
+        let spice = "T\nR1 a 0 1k\n.tap 0\n.end\n";
+        assert!(Netlist::parse(spice).is_err());
+    }
+
+    #[test]
+    fn test_tap_duplicate_name_rejected() {
+        let spice = "T\nR1 a 0 1k\nR2 b 0 1k\n.tap a x\n.tap b x\n.end\n";
+        assert!(Netlist::parse(spice).is_err());
+    }
+
+    #[test]
+    fn test_no_inject_tap_by_default() {
+        let spice = "Plain\nR1 a 0 1k\n.end\n";
+        let n = Netlist::parse(spice).expect("parse");
+        assert!(n.injections.is_empty());
+        assert!(n.taps.is_empty());
     }
 }

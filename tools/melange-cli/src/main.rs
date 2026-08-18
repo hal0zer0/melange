@@ -1376,6 +1376,113 @@ fn compile_circuit_source(
         }
     }
 
+    // Resolve `.inject` runtime feedback sources and `.tap` raw probes.
+    //
+    // Each `.inject` stamps its Thevenin/Norton conductance (1/impedance) into
+    // `mna.g[node][node]` BEFORE the kernel builds — exactly like an input port
+    // — so the source is baked into S and present at the DC operating point
+    // (Gate 5). The runtime value enters the per-sample RHS as an ordinary
+    // constant; the NR loop never sees it (see inject-directive-plan.md).
+    // `.tap` is a read-only probe: node resolution only, no stamp.
+    let mut injection_specs: Vec<melange_solver::codegen::ir::InjectionSpec> = Vec::new();
+    let mut tap_specs: Vec<melange_solver::codegen::ir::TapSpec> = Vec::new();
+    if !netlist.injections.is_empty() || !netlist.taps.is_empty() {
+        // Scope guardrails (Stage-1). The plan's scope is a single audio `-i`
+        // input + N injections, `--format code`.
+        if num_input_ports > 1 {
+            anyhow::bail!(
+                "`.inject`/`.tap` decks use a single --input-node (plus N injections); \
+                 multi-input ports (multiple --input-node entries) are out of scope. \
+                 Found {} input ports.",
+                num_input_ports
+            );
+        }
+        if format != OutputFormat::Code {
+            anyhow::bail!(
+                "`.inject`/`.tap` decks are supported for `--format code` only; the \
+                 nih-plug plugin wrapper does not route runtime injections or raw taps."
+            );
+        }
+        for inj in &netlist.injections {
+            let raw = mna
+                .node_map
+                .get(inj.node.as_str())
+                .copied()
+                .ok_or_else(|| {
+                    let suggestions = suggest_node_names(&inj.node, mna.node_map.keys());
+                    let hint = if suggestions.is_empty() {
+                        format!("Available: {:?}", mna.node_map.keys().collect::<Vec<_>>())
+                    } else {
+                        format!("Did you mean: {}?", suggestions.join(", "))
+                    };
+                    anyhow::anyhow!(".inject node '{}' not found in circuit. {}", inj.node, hint)
+                })?;
+            if raw == 0 {
+                anyhow::bail!(
+                    ".inject node '{}' resolves to ground; injection is single-ended \
+                     (node-to-ground) and must target a non-ground node.",
+                    inj.node
+                );
+            }
+            let idx = raw - 1;
+            let (resistance, norton) = match inj.impedance {
+                melange_solver::parser::InjectImpedance::Thevenin(r) => (r, false),
+                melange_solver::parser::InjectImpedance::Norton(r) => (r, true),
+            };
+            if !(resistance > 0.0 && resistance.is_finite()) {
+                anyhow::bail!(
+                    ".inject '{}' impedance must be positive and finite, got {}",
+                    inj.field_name,
+                    resistance
+                );
+            }
+            if idx < mna.n {
+                mna.g[idx][idx] += 1.0 / resistance;
+            }
+            let kind = if norton {
+                "Norton RSHUNT"
+            } else {
+                "Thevenin R"
+            };
+            println!(
+                "  Injection '{}' at node '{}' ({}={} ohm)",
+                inj.field_name, inj.node, kind, resistance
+            );
+            injection_specs.push(melange_solver::codegen::ir::InjectionSpec {
+                node: idx,
+                name: inj.field_name.clone(),
+                resistance,
+                norton,
+            });
+        }
+        for tap in &netlist.taps {
+            let raw = mna
+                .node_map
+                .get(tap.node.as_str())
+                .copied()
+                .ok_or_else(|| {
+                    let suggestions = suggest_node_names(&tap.node, mna.node_map.keys());
+                    let hint = if suggestions.is_empty() {
+                        format!("Available: {:?}", mna.node_map.keys().collect::<Vec<_>>())
+                    } else {
+                        format!("Did you mean: {}?", suggestions.join(", "))
+                    };
+                    anyhow::anyhow!(".tap node '{}' not found in circuit. {}", tap.node, hint)
+                })?;
+            if raw == 0 {
+                anyhow::bail!(".tap node '{}' resolves to ground.", tap.node);
+            }
+            println!(
+                "  Tap '{}' at node '{}' (raw inner-rate)",
+                tap.name, tap.node
+            );
+            tap_specs.push(melange_solver::codegen::ir::TapSpec {
+                node: raw - 1,
+                name: tap.name.clone(),
+            });
+        }
+    }
+
     // Warn if passive EQ topology detected with low source impedance
     if input_resistance < 10.0 && !mna.pots.is_empty() {
         // Check if any pot is connected to the input node
@@ -1809,6 +1916,8 @@ fn compile_circuit_source(
         emit_dc_op_recompute,
         router_dk_unstable: routing.dk_unstable,
         router_dk_spectral_radius: routing.spectral_radius,
+        injections: injection_specs.clone(),
+        taps: tap_specs.clone(),
         ..CodegenConfig::default()
     };
 
@@ -3017,6 +3126,8 @@ fn simulate_circuit_source(
         emit_dc_op_recompute: false,
         router_dk_unstable: decision.dk_unstable,
         router_dk_spectral_radius: decision.spectral_radius,
+        injections: Vec::new(),
+        taps: Vec::new(),
     };
     let generator = CodeGenerator::new(config);
     let generated = if use_nodal {
@@ -4182,6 +4293,8 @@ fn analyze_freq_response(
         emit_dc_op_recompute: false,
         router_dk_unstable: decision.dk_unstable,
         router_dk_spectral_radius: decision.spectral_radius,
+        injections: Vec::new(),
+        taps: Vec::new(),
     };
     let generator = CodeGenerator::new(config);
     let generated = if use_nodal {
