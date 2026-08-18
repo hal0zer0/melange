@@ -887,6 +887,103 @@ impl Element {
         }
     }
 
+    /// Every circuit node this element physically connects to.
+    ///
+    /// Returns one entry per terminal, in the element's canonical node order,
+    /// for **all** element variants. Ground appears as `"0"` (node names are
+    /// normalized at parse time, so `gnd`/`ground` are already folded to `"0"`).
+    ///
+    /// Only physical *terminals* are returned. For [`Element::BSource`] that is
+    /// `n_plus`/`n_minus`; nodes referenced inside its expression are controlling
+    /// inputs, not terminals, and are intentionally excluded. For
+    /// [`Element::Vcvs`]/[`Element::Vccs`] the control-input node pair *is* a
+    /// physical connection (the controlling voltage is sensed there), so it is
+    /// included alongside the output pair.
+    ///
+    /// The node list must stay in lockstep with [`normalize_element_nodes`] —
+    /// any variant that carries a node there must yield it here.
+    pub fn nodes(&self) -> Vec<&str> {
+        match self {
+            Element::Resistor {
+                n_plus, n_minus, ..
+            }
+            | Element::Capacitor {
+                n_plus, n_minus, ..
+            }
+            | Element::Inductor {
+                n_plus, n_minus, ..
+            }
+            | Element::VoltageSource {
+                n_plus, n_minus, ..
+            }
+            | Element::CurrentSource {
+                n_plus, n_minus, ..
+            }
+            | Element::Diode {
+                n_plus, n_minus, ..
+            }
+            | Element::BSource {
+                n_plus, n_minus, ..
+            } => vec![n_plus, n_minus],
+            Element::Bjt { nc, nb, ne, .. } => vec![nc, nb, ne],
+            Element::Jfet { nd, ng, ns, .. } => vec![nd, ng, ns],
+            Element::Mosfet { nd, ng, ns, nb, .. } => vec![nd, ng, ns, nb],
+            Element::Opamp {
+                n_plus,
+                n_minus,
+                n_out,
+                ..
+            } => vec![n_plus, n_minus, n_out],
+            Element::Triode {
+                n_grid,
+                n_plate,
+                n_cathode,
+                ..
+            } => vec![n_grid, n_plate, n_cathode],
+            Element::Pentode {
+                n_plate,
+                n_grid,
+                n_cathode,
+                n_screen,
+                n_suppressor,
+                ..
+            } => {
+                let mut v = vec![
+                    n_plate.as_str(),
+                    n_grid.as_str(),
+                    n_cathode.as_str(),
+                    n_screen.as_str(),
+                ];
+                if let Some(ns) = n_suppressor {
+                    v.push(ns);
+                }
+                v
+            }
+            Element::Vca {
+                n_sig_p,
+                n_sig_n,
+                n_ctrl_p,
+                n_ctrl_n,
+                ..
+            } => vec![n_sig_p, n_sig_n, n_ctrl_p, n_ctrl_n],
+            Element::Vcvs {
+                out_p,
+                out_n,
+                ctrl_p,
+                ctrl_n,
+                ..
+            }
+            | Element::Vccs {
+                out_p,
+                out_n,
+                ctrl_p,
+                ctrl_n,
+                ..
+            } => vec![out_p, out_n, ctrl_p, ctrl_n],
+            Element::SubcktInstance { nodes, .. } => nodes.iter().map(String::as_str).collect(),
+        }
+    }
+
     /// Clone this element with remapped nodes and prefixed name for subcircuit expansion.
     ///
     /// - Component name is prefixed: `{prefix}.{name}`
@@ -4643,6 +4740,73 @@ impl std::error::Error for ParseFloatError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_element_nodes_enumeration() {
+        // Two-terminal element: both terminals, in order.
+        let r = Element::Resistor {
+            name: "R1".into(),
+            n_plus: "a".into(),
+            n_minus: "0".into(),
+            value: 1e3,
+            kf: None,
+            af: None,
+        };
+        assert_eq!(r.nodes(), vec!["a", "0"]);
+
+        // Three-terminal device reads its own node fields (nc, nb, ne).
+        let q = Element::Bjt {
+            name: "Q1".into(),
+            nc: "c".into(),
+            nb: "b".into(),
+            ne: "e".into(),
+            model: "MOD".into(),
+        };
+        assert_eq!(q.nodes(), vec!["c", "b", "e"]);
+
+        // Pentode without a suppressor: four nodes.
+        let p4 = Element::Pentode {
+            name: "P1".into(),
+            n_plate: "pl".into(),
+            n_grid: "g".into(),
+            n_cathode: "k".into(),
+            n_screen: "sg".into(),
+            n_suppressor: None,
+            model: "VP".into(),
+        };
+        assert_eq!(p4.nodes(), vec!["pl", "g", "k", "sg"]);
+
+        // Pentode WITH a suppressor: the optional fifth node appears.
+        let p5 = Element::Pentode {
+            name: "P2".into(),
+            n_plate: "pl".into(),
+            n_grid: "g".into(),
+            n_cathode: "k".into(),
+            n_screen: "sg".into(),
+            n_suppressor: Some("sup".into()),
+            model: "VP".into(),
+        };
+        assert_eq!(p5.nodes(), vec!["pl", "g", "k", "sg", "sup"]);
+
+        // Vccs: control input pair AND output pair are both physical connections.
+        let g = Element::Vccs {
+            name: "G1".into(),
+            out_p: "op".into(),
+            out_n: "on".into(),
+            ctrl_p: "cp".into(),
+            ctrl_n: "cn".into(),
+            gm: 1e-3,
+        };
+        assert_eq!(g.nodes(), vec!["op", "on", "cp", "cn"]);
+
+        // SubcktInstance: the full node vector, in order.
+        let x = Element::SubcktInstance {
+            name: "X1".into(),
+            nodes: vec!["n1".into(), "n2".into(), "n3".into()],
+            subckt: "SUB".into(),
+        };
+        assert_eq!(x.nodes(), vec!["n1", "n2", "n3"]);
+    }
 
     #[test]
     fn test_parse_resistor() {

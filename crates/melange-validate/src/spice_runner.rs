@@ -121,6 +121,111 @@ impl SpiceData {
 ///
 /// println!("Captured {} samples at {} Hz", data.len(), data.sample_rate);
 /// ```
+/// Scan a deck for floating cap-only DC islands and emit a loud warning naming
+/// each one's nodes.
+///
+/// A *floating cap-only DC island* is a set of nodes connected to the rest of
+/// the circuit and to ground ONLY through capacitors (open at DC). ngspice's DC
+/// operating-point solve is singular over such an island; the `rshunt=1e12`
+/// option injected into the reference deck regularizes it (matching melange's
+/// own per-node gmin) so the deck now converges and validates. That silently
+/// turns what used to be a hard DC-non-convergence abort into a quiet pass — so
+/// a genuine wiring defect (a node that lost its only real resistor and is now
+/// accidentally cap-only) would regularize and pass unnoticed. Naming the
+/// islands lets the author confirm the intended coupling-cap islands and catch
+/// the accidental ones.
+///
+/// Method: union-find over the nodes of every **non-capacitor** element
+/// (resistors, inductors, DC sources, and all active devices are DC-connective;
+/// only capacitors are open at DC). Every node seen anywhere is registered, so a
+/// node touched exclusively by capacitors forms its own singleton island. Any
+/// connected component that does not contain the ground node `"0"` is a floating
+/// cap-only DC island.
+///
+/// Best-effort: if the deck cannot be parsed, the scan is skipped silently — its
+/// job is to add a warning, never to fail a validation that would otherwise run.
+fn warn_floating_cap_only_islands(deck_content: &str) {
+    use melange_solver::parser::{Element, Netlist};
+
+    let netlist = match Netlist::parse(deck_content) {
+        Ok(n) => n,
+        Err(_) => return,
+    };
+
+    // Minimal union-find keyed by node name.
+    let mut index: HashMap<String, usize> = HashMap::new();
+    let mut parent: Vec<usize> = Vec::new();
+
+    let intern = |name: &str, index: &mut HashMap<String, usize>, parent: &mut Vec<usize>| {
+        if let Some(&i) = index.get(name) {
+            i
+        } else {
+            let i = parent.len();
+            parent.push(i);
+            index.insert(name.to_string(), i);
+            i
+        }
+    };
+
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]]; // path halving
+            x = parent[x];
+        }
+        x
+    }
+
+    for elem in &netlist.elements {
+        let elem_nodes = elem.nodes();
+        // Register every node so cap-only nodes exist as singletons.
+        let ids: Vec<usize> = elem_nodes
+            .iter()
+            .map(|n| intern(n, &mut index, &mut parent))
+            .collect();
+        // Capacitors are open at DC: they do NOT connect their nodes here.
+        if matches!(elem, Element::Capacitor { .. }) {
+            continue;
+        }
+        // Union all terminals of this DC-connective element together.
+        for pair in ids.windows(2) {
+            let a = find(&mut parent, pair[0]);
+            let b = find(&mut parent, pair[1]);
+            if a != b {
+                parent[a] = b;
+            }
+        }
+    }
+
+    // Nothing to check if the deck has no nodes (or no ground reference at all).
+    let ground_root = match index.get("0") {
+        Some(&g) => find(&mut parent, g),
+        // No ground node in the deck: every node is technically floating, but
+        // that is a different (and rarer) pathology; do not spam. Skip.
+        None => return,
+    };
+
+    // Group nodes by their component root, excluding the ground component.
+    let mut components: std::collections::BTreeMap<usize, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (name, &id) in &index {
+        let root = find(&mut parent, id);
+        if root == ground_root {
+            continue;
+        }
+        components.entry(root).or_default().push(name.clone());
+    }
+
+    for (_root, mut nodes) in components {
+        nodes.sort();
+        log::warn!(
+            "validate: auto-regularized floating cap-only DC island {{{}}} — \
+             ngspice would go singular here; rshunt covers it. Confirm this is an \
+             intended coupling-cap island, not a wiring defect.",
+            nodes.join(", ")
+        );
+    }
+}
+
 pub fn run_transient(
     netlist_path: &Path,
     tstep: f64,
@@ -160,6 +265,16 @@ pub fn run_transient(
             modified_content.push_str(line);
             modified_content.push('\n');
             modified_content.push_str(".OPTIONS INTERP reltol=1e-4\n");
+            // Mirror melange's global gmin regularization in the ngspice
+            // reference: melange stamps GMIN_REGULARISATION = 1e-12 S on every
+            // node diagonal (codegen/ir/mod.rs), and rshunt=1e12 adds the
+            // identical 1e-12 S to ground on every analog node. This
+            // de-singularizes floating cap-only DC islands (a coupling-cap pot
+            // island / a two-cap node has no DC path) EXACTLY as melange does,
+            // node-for-node, so the two engines regularize the same nodes the
+            // same way. Switch-state-safe by construction (applies to whatever
+            // nodes the elaborated deck has, no per-deck topology analysis).
+            modified_content.push_str(".options rshunt=1e12\n");
             first_line = false;
             continue;
         }
@@ -578,6 +693,17 @@ pub fn run_transient_with_thevenin_pwl(
     series_resistance: f64,
     nodes_to_capture: &[String],
 ) -> Result<SpiceData, SpiceError> {
+    // Masking-risk guardrail: rshunt=1e12 (injected into the reference deck)
+    // silently regularizes floating cap-only DC islands so ngspice's DC solve no
+    // longer goes singular. That is the intended behavior for genuine
+    // coupling-cap islands, but it also masks a wiring defect — a node that lost
+    // its only real resistor and became accidentally cap-only would now
+    // regularize and pass unnoticed. Scan the melange deck (as-authored, before
+    // the Thevenin/PWL injection that melange's own parser rejects; this
+    // reflects the current switch state that produced this reference) and name
+    // any such island so intended ones are confirmed and accidental ones caught.
+    warn_floating_cap_only_islands(netlist_content);
+
     // Translate any melange triode (`T`) elements into Koren B-source subckts
     // before the deck reaches ngspice (which would parse `T` as a transmission
     // line). No-op when the deck has no triode. See tube_translate.rs.
