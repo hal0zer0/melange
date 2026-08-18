@@ -265,6 +265,26 @@ Kg1 = 1060 is Norman Koren's published card and is only valid together with
 the `2·E1^ex/Kg1` plate equation above (see `catalog/tubes.rs` for the
 history of the Kg1=3000 compensating misfit).
 
+### Overriding via `.model` (all triode params are deck-specifiable)
+
+Every parameter above — including the **grid-current** coefficients `IG_MAX`
+and `VGK_ONSET` — is overridable per tube on the `.model TRIODE(...)` line, not
+just the plate params. The resolver (`CircuitIR::resolve_tube_params`) reads
+each key with the fallback chain **`.model` value → `catalog/tubes.rs` entry →
+built-in default**. So `.model ECC83 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600
+KVB=300 IG_MAX=5e-3 VGK_ONSET=0.75)` emits `DEVICE_n_IG_MAX = 5e-3` /
+`VGK_ONSET = 0.75`; a deck that omits them gets the `2e-3` / `0.5` defaults.
+
+Overridable keys: `MU EX KG1 KP KVB LAMBDA IG_MAX VGK_ONSET` (sharp triode);
+`MU_B SVAR EX_B` (Reefman variable-μ, off by default); `CCG CGP CCP` (inter-
+electrode caps); `RGI` (grid internal resistance). All are validated
+positive-finite (LAMBDA/caps non-negative) at resolve time.
+
+Caveat: the grid-current **form** is Leach `x^1.5` (Child-Langmuir), which is
+melange's own — not a canonical published grid model — so `IG_MAX`/`VGK_ONSET`
+let you fit the magnitude/onset, but validating the *shape* against a real tube
+needs measured grid-conduction data (no standard SPICE grid model to defer to).
+
 ## Pentode / Beam Tetrode (Reefman "Derk" §4.4)
 
 M-dimension: **3 per pentode** (Vgk → Ip, Vpk → Ig2, Vg2k → Ig1)
