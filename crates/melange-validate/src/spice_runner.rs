@@ -261,6 +261,40 @@ pub fn run_transient(
         return Err(SpiceError::SimulationFailed(stderr.to_string()));
     }
 
+    // Fail early if ngspice's DC solve did not converge. These print as
+    // warnings (not a non-zero exit, not "error"), so the transient runs on from
+    // a garbage operating point and the comparison would silently report nonsense
+    // (e.g. a floating cap-only DC island with no DC path to ground → singular
+    // matrix → corr ~0.14 reported as if it were a real result). Name the root
+    // cause instead of comparing garbage.
+    {
+        let combined_lc = format!("{stdout}\n{stderr}").to_lowercase();
+        const DC_FAIL_SIGNATURES: &[&str] = &[
+            "singular matrix",
+            "gmin stepping failed",
+            "source stepping failed",
+            "iteration limit reached",
+        ];
+        if let Some(sig) = DC_FAIL_SIGNATURES.iter().find(|s| combined_lc.contains(**s)) {
+            let combined = format!("{stdout}\n{stderr}");
+            let detail: String = combined
+                .lines()
+                .filter(|l| {
+                    let ll = l.to_lowercase();
+                    ll.contains(sig) || ll.contains("check node")
+                })
+                .map(str::trim)
+                .take(4)
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(SpiceError::SimulationFailed(format!(
+                "ngspice DC did not converge ({sig}) — the transient would run from a garbage \
+                 operating point (common cause: a floating cap-only DC island with no DC path to \
+                 ground). ngspice said: {detail}"
+            )));
+        }
+    }
+
     // Parse the printed output (not raw file - the .PRINT output goes to stdout)
     let spice_data = parse_printed_output(&stdout, nodes_to_capture)?;
 
