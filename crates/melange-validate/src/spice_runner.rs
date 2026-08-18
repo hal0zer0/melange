@@ -427,6 +427,10 @@ fn is_melange_directive(line: &str) -> bool {
         || trimmed.starts_with(".MISMATCH ")
         || trimmed.starts_with(".TOLERANCE ")
         || trimmed.starts_with(".SEED ")
+        // `.linearize <dev>` collapses a triode to its small-signal stamp on the
+        // melange side; the ngspice reference runs the full nonlinear device
+        // (the stricter check). Strip it so ngspice parses the deck.
+        || trimmed.starts_with(".LINEARIZE ")
 }
 
 /// Inject a Thevenin-equivalent PWL source into a netlist string
