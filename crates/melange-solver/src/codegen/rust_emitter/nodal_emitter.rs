@@ -5,7 +5,10 @@
 //! Schur and full-LU process_sample, active-set resolve, device evaluation,
 //! and voltage limiting.
 
-use super::dk_emitter::NoiseEmission;
+use super::dk_emitter::{
+    emit_inject_rhs_stamp, emit_inject_substep_stamp, emit_inject_tap_constants, emit_warmup_call,
+    NoiseEmission,
+};
 use super::helpers::{
     device_param_template_data, emit_pentode_nr_dk_stamp, fmt_f64, format_matrix_rows,
     oversampling_info, pentode_dispatch, recommended_warmup_samples, section_banner,
@@ -1235,6 +1238,11 @@ fn emit_nodal_nan_reset(
     } else {
         code.push_str(&format!("{body}state.input_prev = 0.0;\n"));
     }
+    if ir.solver_config.has_inject_or_tap() {
+        code.push_str(&format!(
+            "{body}state.injections_prev = [0.0; NUM_INJECT];\n"
+        ));
+    }
 
     // DC blocker history: reseed x_prev from the DC operating point (matches
     // reset() and the DK template). Zeroing x_prev would make the first
@@ -1339,7 +1347,17 @@ fn emit_nodal_nan_reset(
             code.push_str(&format!("{body}nan_out[{oi}] = {out_val:.17e};\n"));
         }
     }
-    code.push_str(&format!("{body}return nan_out;\n"));
+    if ir.solver_config.has_inject_or_tap() {
+        // Raw taps fall back to the DC operating point (v is invalid here).
+        code.push_str(&format!("{body}let mut nan_taps = [0.0f64; NUM_TAP];\n"));
+        for (ti, tap) in ir.solver_config.taps.iter().enumerate() {
+            let dc_val = ir.dc_operating_point.get(tap.node).copied().unwrap_or(0.0);
+            code.push_str(&format!("{body}nan_taps[{ti}] = {dc_val:.17e};\n"));
+        }
+        code.push_str(&format!("{body}return (nan_out, nan_taps);\n"));
+    } else {
+        code.push_str(&format!("{body}return nan_out;\n"));
+    }
     code.push_str(&format!("{indent}}}\n\n"));
 }
 
@@ -1670,6 +1688,10 @@ impl RustEmitter {
 
         if ir.solver_config.oversampling_factor > 1 {
             code.push_str(&Self::emit_oversampler(ir));
+        } else if ir.solver_config.has_inject_or_tap() {
+            // No oversampling, but `.inject`/`.tap` still emit a private
+            // process_sample_inner; wrap it in the array-API public entry.
+            code.push_str(&Self::emit_inject_wrapper_1x(ir));
         }
 
         Ok(code)
@@ -1893,6 +1915,10 @@ impl RustEmitter {
                 "/// Per-port input resistance (Thevenin equivalent), parallel to INPUT_NODES.\npub const INPUT_RESISTANCES: [f64; NUM_INPUTS] = [{input_resistances_values}];\n\n"
             ));
         }
+        // Runtime feedback injection (`.inject`) + raw taps (`.tap`). Emitted
+        // only when present so no-inject output stays byte-identical. Shared
+        // text with constants.rs.tera via emit_inject_tap_constants.
+        code.push_str(&emit_inject_tap_constants(ir));
 
         // WARMUP_SAMPLES_RECOMMENDED (Oomox P5) — see constants.rs.tera doc.
         code.push_str(
@@ -2548,6 +2574,14 @@ impl RustEmitter {
         } else {
             code.push_str("    pub input_prev: f64,\n\n");
         }
+        if ir.solver_config.has_inject_or_tap() {
+            code.push_str(
+                "    /// Previous `.inject` values (per inner sample), for the trapezoidal\n\
+                 \x20   /// history term of Thevenin injections. Advanced once per inner call\n\
+                 \x20   /// alongside `input_prev`.\n\
+                 \x20   pub injections_prev: [f64; NUM_INJECT],\n\n",
+            );
+        }
         code.push_str("    /// NR convergence diagnostic from the last sample's solve.\n");
         code.push_str("    ///\n");
         code.push_str("    /// Semantics:\n");
@@ -3023,6 +3057,9 @@ impl RustEmitter {
         } else {
             code.push_str("            input_prev: 0.0,\n");
         }
+        if ir.solver_config.has_inject_or_tap() {
+            code.push_str("            injections_prev: [0.0; NUM_INJECT],\n");
+        }
         code.push_str("            last_nr_iterations: 0,\n");
         if ir.behavioral_sources.iter().any(|b| b.time_dependent) {
             code.push_str("            sim_time: 0.0,\n");
@@ -3336,6 +3373,9 @@ impl RustEmitter {
         } else {
             code.push_str("        self.input_prev = 0.0;\n");
         }
+        if ir.solver_config.has_inject_or_tap() {
+            code.push_str("        self.injections_prev = [0.0; NUM_INJECT];\n");
+        }
         code.push_str("        self.last_nr_iterations = 0;\n");
         if ir.behavioral_sources.iter().any(|b| b.time_dependent) {
             code.push_str("        self.sim_time = 0.0;\n");
@@ -3530,11 +3570,7 @@ impl RustEmitter {
             );
             code.push_str("            self.rebuild_matrices(200.0);\n");
             code.push_str("            for _ in 0..1000 {\n");
-            if multi_input {
-                code.push_str("                process_sample([0.0; NUM_INPUTS], self);\n");
-            } else {
-                code.push_str("                process_sample(0.0, self);\n");
-            }
+            code.push_str(&emit_warmup_call(ir, "                ", false));
             code.push_str("            }\n");
             code.push_str(&format!(
                 "            self.rebuild_matrices({:.17e});\n",
@@ -3547,11 +3583,7 @@ impl RustEmitter {
             code.push_str("        }\n");
         }
         code.push_str("        for _ in 0..50 {\n");
-        if multi_input {
-            code.push_str("            process_sample([0.0; NUM_INPUTS], self);\n");
-        } else {
-            code.push_str("            process_sample(0.0, self);\n");
-        }
+        code.push_str(&emit_warmup_call(ir, "            ", false));
         code.push_str("        }\n");
         code.push_str("    }\n\n");
 
@@ -3648,7 +3680,7 @@ impl RustEmitter {
                  \x20   /// parameter-change callbacks.\n\
                  \x20   pub fn settle_dc_op(&mut self) {\n",
             );
-            code.push_str(&super::dc_op_emitter::emit_settle_dc_op_body());
+            code.push_str(&super::dc_op_emitter::emit_settle_dc_op_body(ir));
             code.push_str("    }\n\n");
         }
 
@@ -4647,17 +4679,35 @@ impl RustEmitter {
             (false, false) => "",
         };
 
+        // `.inject`/`.tap`: when present, the inner solve gains an `injections`
+        // param and returns raw `.tap` node voltages; the public entry becomes
+        // the per-inner-sample array API (emit_oversampler / emit_inject_wrapper_1x).
+        // inject_or_tap and multi_input are mutually exclusive (CLI-rejected).
+        let inject_or_tap = ir.solver_config.has_inject_or_tap();
+        let inner_sig = if inject_or_tap {
+            ", injections: [f64; NUM_INJECT]"
+        } else {
+            ""
+        };
+        let inner_ret = if inject_or_tap {
+            "([f64; NUM_OUTPUTS], [f64; NUM_TAP])"
+        } else {
+            "[f64; NUM_OUTPUTS]"
+        };
+
         let mut code = section_banner(
             "PROCESS SAMPLE (Schur complement: M-dim NR via precomputed S = A^{-1})",
         );
 
         // Function signature
-        if os_factor > 1 {
+        if os_factor > 1 || inject_or_tap {
             code.push_str("/// Process a single sample at the internal (oversampled) rate.\n");
             code.push_str("///\n");
             code.push_str("/// Called by `process_sample()` through the oversampling chain.\n");
             code.push_str("#[inline(always)]\n");
-            code.push_str("fn process_sample_inner(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {\n");
+            code.push_str(&format!(
+                "fn process_sample_inner(input: f64{inner_sig}, state: &mut CircuitState) -> {inner_ret} {{\n"
+            ));
         } else {
             code.push_str("/// Process a single audio sample through the circuit.\n");
             code.push_str("///\n");
@@ -4681,6 +4731,14 @@ impl RustEmitter {
         } else {
             code.push_str(
                 "    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };\n\n",
+            );
+        }
+        if inject_or_tap {
+            code.push_str(
+                "    // Sanitize injections (NaN/Inf → 0). No magnitude clamp: a feedback value\n\
+                 \x20   // is arbitrary and the plausibility guard catches any runaway.\n\
+                 \x20   let mut injections = injections;\n\
+                 \x20   for v in injections.iter_mut() { *v = if v.is_finite() { *v } else { 0.0 }; }\n\n",
             );
         }
 
@@ -5009,6 +5067,14 @@ impl RustEmitter {
                 );
             }
         }
+        if inject_or_tap {
+            code.push_str(&emit_inject_rhs_stamp(
+                ir,
+                "rhs",
+                "    ",
+                ir.solver_config.backward_euler,
+            ));
+        }
         // NOTE: `state.input_prev` is deliberately NOT committed here. The
         // ActiveSetBe sub-step machinery below interpolates the input ramp as
         // `(input - state.input_prev) / N_SUB`, so committing before the
@@ -5098,6 +5164,9 @@ impl RustEmitter {
                     } else {
                         code.push_str("        rhs_be[INPUT_NODE] += input * input_conductance;\n");
                     }
+                }
+                if inject_or_tap {
+                    code.push_str(&emit_inject_rhs_stamp(ir, "rhs_be", "        ", true));
                 }
                 // Runtime voltage sources (same rows as the trap stamp).
                 for rt in &ir.runtime_sources {
@@ -5462,6 +5531,14 @@ impl RustEmitter {
                         "            rhs_s[INPUT_NODE] += (inp_s + inp_prev_s) * input_conductance;\n",
                     );
                 }
+                if inject_or_tap {
+                    code.push_str(&emit_inject_substep_stamp(
+                        ir,
+                        "rhs_s",
+                        "            ",
+                        "N_SUB",
+                    ));
+                }
                 // Runtime voltage sources: the algebraic constraint value is
                 // integration-scheme-independent, so every from-scratch RHS
                 // rebuild must re-stamp it or the source reads as 0 V.
@@ -5578,6 +5655,9 @@ impl RustEmitter {
                 code.push_str("        for k in 0..NUM_INPUTS { rhs_be[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k]; }\n");
             } else {
                 code.push_str("        rhs_be[INPUT_NODE] += input * input_conductance;\n");
+            }
+            if inject_or_tap {
+                code.push_str(&emit_inject_rhs_stamp(ir, "rhs_be", "        ", true));
             }
             // Runtime voltage sources: integration-scheme-independent; every
             // from-scratch RHS rebuild must re-stamp them.
@@ -5866,6 +5946,9 @@ impl RustEmitter {
         } else {
             code.push_str("    state.input_prev = input;\n");
         }
+        if inject_or_tap {
+            code.push_str("    state.injections_prev = injections;\n");
+        }
         if m > 0 {
             code.push_str("    state.i_nl_prev_prev = state.i_nl_prev;\n");
             code.push_str("    state.i_nl_prev = i_nl;\n");
@@ -5919,7 +6002,21 @@ impl RustEmitter {
             );
         }
         code.push_str("    }\n");
-        code.push_str("    output\n");
+        if inject_or_tap {
+            // Raw inner-rate taps: the finalized node voltages, WITHOUT the
+            // output pipeline (no DC-block, scale, clamp, decimation). Same
+            // `v` the outputs are read from, before the wrapper decimates.
+            code.push_str(
+                "    let mut taps = [0.0f64; NUM_TAP];\n\
+                 \x20   for t in 0..NUM_TAP {\n\
+                 \x20       let raw = v[TAP_NODES[t]];\n\
+                 \x20       taps[t] = if raw.is_finite() { raw } else { 0.0 };\n\
+                 \x20   }\n\
+                 \x20   (output, taps)\n",
+            );
+        } else {
+            code.push_str("    output\n");
+        }
         code.push_str("}\n\n");
 
         Ok(code)
@@ -6718,15 +6815,31 @@ impl RustEmitter {
             (false, false) => "",
         };
 
+        // `.inject`/`.tap`: see emit_nodal_schur_process_sample. Mutually
+        // exclusive with multi_input (CLI-rejected).
+        let inject_or_tap = ir.solver_config.has_inject_or_tap();
+        let inner_sig = if inject_or_tap {
+            ", injections: [f64; NUM_INJECT]"
+        } else {
+            ""
+        };
+        let inner_ret = if inject_or_tap {
+            "([f64; NUM_OUTPUTS], [f64; NUM_TAP])"
+        } else {
+            "[f64; NUM_OUTPUTS]"
+        };
+
         let mut code = section_banner("PROCESS SAMPLE (Full-nodal NR with LU solve)");
 
         // Function signature
-        if os_factor > 1 {
+        if os_factor > 1 || inject_or_tap {
             code.push_str("/// Process a single sample at the internal (oversampled) rate.\n");
             code.push_str("///\n");
             code.push_str("/// Called by `process_sample()` through the oversampling chain.\n");
             code.push_str("#[inline(always)]\n");
-            code.push_str("fn process_sample_inner(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {\n");
+            code.push_str(&format!(
+                "fn process_sample_inner(input: f64{inner_sig}, state: &mut CircuitState) -> {inner_ret} {{\n"
+            ));
         } else {
             code.push_str("/// Process a single audio sample through the circuit.\n");
             code.push_str("///\n");
@@ -6750,6 +6863,14 @@ impl RustEmitter {
         } else {
             code.push_str(
                 "    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };\n\n",
+            );
+        }
+        if inject_or_tap {
+            code.push_str(
+                "    // Sanitize injections (NaN/Inf → 0). No magnitude clamp: a feedback value\n\
+                 \x20   // is arbitrary and the plausibility guard catches any runaway.\n\
+                 \x20   let mut injections = injections;\n\
+                 \x20   for v in injections.iter_mut() { *v = if v.is_finite() { *v } else { 0.0 }; }\n\n",
             );
         }
 
@@ -6840,6 +6961,14 @@ impl RustEmitter {
                     "    rhs[INPUT_NODE] += (input + state.input_prev) * input_conductance;\n",
                 );
             }
+        }
+        if inject_or_tap {
+            code.push_str(&emit_inject_rhs_stamp(
+                ir,
+                "rhs",
+                "    ",
+                ir.solver_config.backward_euler,
+            ));
         }
         // NOTE: `state.input_prev` is deliberately NOT committed here. The
         // adaptive sub-stepping below interpolates the input ramp as
@@ -7595,6 +7724,14 @@ impl RustEmitter {
             } else {
                 code.push_str("                rhs_s[INPUT_NODE] += (inp_s + inp_prev_s) * (1.0 / INPUT_RESISTANCE);\n");
             }
+            if inject_or_tap {
+                code.push_str(&emit_inject_substep_stamp(
+                    ir,
+                    "rhs_s",
+                    "                ",
+                    "subdiv",
+                ));
+            }
             // Runtime voltage sources: integration-scheme-independent; every
             // from-scratch RHS rebuild must re-stamp them.
             if !ir.runtime_sources.is_empty() {
@@ -7823,6 +7960,9 @@ impl RustEmitter {
                 code.push_str("        for k in 0..NUM_INPUTS { rhs_be[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k]; }\n");
             } else {
                 code.push_str("        rhs_be[INPUT_NODE] += input * input_conductance;\n");
+            }
+            if inject_or_tap {
+                code.push_str(&emit_inject_rhs_stamp(ir, "rhs_be", "        ", true));
             }
             // Runtime voltage sources: integration-scheme-independent; every
             // from-scratch RHS rebuild must re-stamp them.
@@ -8146,6 +8286,9 @@ impl RustEmitter {
         } else {
             code.push_str("    state.input_prev = input;\n");
         }
+        if inject_or_tap {
+            code.push_str("    state.injections_prev = injections;\n");
+        }
         if m > 0 {
             code.push_str("    state.i_nl_prev_prev = state.i_nl_prev;\n");
             code.push_str("    state.i_nl_prev = i_nl;\n");
@@ -8220,7 +8363,21 @@ impl RustEmitter {
             );
         }
         code.push_str("    }\n");
-        code.push_str("    output\n");
+        if inject_or_tap {
+            // Raw inner-rate taps: the finalized node voltages, WITHOUT the
+            // output pipeline (no DC-block, scale, clamp, decimation). Same
+            // `v` the outputs are read from, before the wrapper decimates.
+            code.push_str(
+                "    let mut taps = [0.0f64; NUM_TAP];\n\
+                 \x20   for t in 0..NUM_TAP {\n\
+                 \x20       let raw = v[TAP_NODES[t]];\n\
+                 \x20       taps[t] = if raw.is_finite() { raw } else { 0.0 };\n\
+                 \x20   }\n\
+                 \x20   (output, taps)\n",
+            );
+        } else {
+            code.push_str("    output\n");
+        }
         code.push_str("}\n\n");
 
         code

@@ -48,6 +48,234 @@ fn insert_multi_input_ctx(ctx: &mut Context, ir: &CircuitIR) {
     ctx.insert("input_resistances_values", &input_resistances_values);
 }
 
+/// Insert the `.inject` / `.tap` Tera variables (shared by both DK and nodal
+/// template consumers: constants, state, build_rhs, process_sample).
+///
+/// `inject_or_tap` gates every API-shape divergence: when it is false (no
+/// `.inject` and no `.tap`), the emitted `process_sample(input, state)` and
+/// every related fragment are byte-identical to the pre-inject path. `.inject`
+/// and multi-input are mutually exclusive (rejected at the CLI), so the two
+/// context helpers never both activate their divergent branches.
+pub(super) fn insert_inject_ctx(ctx: &mut Context, ir: &CircuitIR) {
+    let inj = &ir.solver_config.injections;
+    let taps = &ir.solver_config.taps;
+    let has_inject = !inj.is_empty();
+    let has_tap = !taps.is_empty();
+    ctx.insert("has_inject", &has_inject);
+    ctx.insert("has_tap", &has_tap);
+    ctx.insert("inject_or_tap", &(has_inject || has_tap));
+    ctx.insert("num_inject", &inj.len());
+    ctx.insert("num_tap", &taps.len());
+    ctx.insert(
+        "inject_nodes_values",
+        &inj.iter()
+            .map(|i| i.node.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    ctx.insert(
+        "inject_names_values",
+        &inj.iter()
+            .map(|i| format!("{:?}", i.name))
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    ctx.insert(
+        "inject_resistances_values",
+        &inj.iter()
+            .map(|i| fmt_f64(i.resistance))
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    ctx.insert(
+        "inject_is_norton_values",
+        &inj.iter()
+            .map(|i| i.norton.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    ctx.insert(
+        "tap_nodes_values",
+        &taps
+            .iter()
+            .map(|t| t.node.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    ctx.insert(
+        "tap_names_values",
+        &taps
+            .iter()
+            .map(|t| format!("{:?}", t.name))
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+}
+
+/// Emit the `.inject` / `.tap` constant block for the NODAL path (which builds
+/// constants inline rather than via `constants.rs.tera`). Byte-for-byte the
+/// same text the template emits under `{% if inject_or_tap %}`, so the two
+/// paths stay in lockstep. Empty when there is no `.inject`/`.tap`.
+pub(super) fn emit_inject_tap_constants(ir: &CircuitIR) -> String {
+    let inj = &ir.solver_config.injections;
+    let taps = &ir.solver_config.taps;
+    if inj.is_empty() && taps.is_empty() {
+        return String::new();
+    }
+    let inject_nodes = inj
+        .iter()
+        .map(|i| i.node.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let inject_names = inj
+        .iter()
+        .map(|i| format!("{:?}", i.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let inject_res = inj
+        .iter()
+        .map(|i| fmt_f64(i.resistance))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let inject_norton = inj
+        .iter()
+        .map(|i| i.norton.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let tap_nodes = taps
+        .iter()
+        .map(|t| t.node.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let tap_names = taps
+        .iter()
+        .map(|t| format!("{:?}", t.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "\n// -----------------------------------------------------------------------------\n\
+         // Runtime feedback injection (`.inject`) + raw inner-rate taps (`.tap`).\n\
+         //\n\
+         // When either directive is present `process_sample` takes per-inner-sample\n\
+         // injection arrays and returns per-inner-sample raw taps (see its doc-comment).\n\
+         // Both counts are always emitted so the API shape is uniform; one may be 0.\n\
+         // -----------------------------------------------------------------------------\n\n\
+         /// Number of runtime feedback-injection sources (`.inject`). May be 0.\n\
+         pub const NUM_INJECT: usize = {num_inject};\n\n\
+         /// Injection node indices (0-indexed), one per `.inject` source, in directive\n\
+         /// order — the SAME order as the `injections` argument to `process_sample`.\n\
+         pub const INJECT_NODES: [usize; NUM_INJECT] = [{inject_nodes}];\n\n\
+         /// Injection source names (INJECT order), for the caller's index mapping.\n\
+         pub const INJECT_NAMES: [&str; NUM_INJECT] = [{inject_names}];\n\n\
+         /// Injection source impedances in ohms (series R for Thevenin, shunt R for\n\
+         /// Norton). The conductance `1/INJECT_RESISTANCES[k]` is already baked into\n\
+         /// the G matrix (stamped before the kernel), so it never enters the NR loop.\n\
+         pub const INJECT_RESISTANCES: [f64; NUM_INJECT] = [{inject_res}];\n\n\
+         /// Per-injection Norton flag: `true` = the runtime value is a CURRENT\n\
+         /// (`rhs[node] += val`); `false` = a VOLTAGE behind R\n\
+         /// (`rhs[node] += (val + val_prev) / R` for trap, `val / R` for BE).\n\
+         pub const INJECT_IS_NORTON: [bool; NUM_INJECT] = [{inject_norton}];\n\n\
+         /// Number of raw inner-rate taps (`.tap`). May be 0.\n\
+         pub const NUM_TAP: usize = {num_tap};\n\n\
+         /// Tap node indices (0-indexed), read RAW (pre-decimation, pre-DC-block,\n\
+         /// pre-scale) each inner sample — see the `taps_inner` return of\n\
+         /// `process_sample`. Emitted separately from OUTPUT_NODES even when a node\n\
+         /// coincides (different semantics).\n\
+         pub const TAP_NODES: [usize; NUM_TAP] = [{tap_nodes}];\n\n\
+         /// Tap names (TAP order), for the caller's index mapping.\n\
+         pub const TAP_NAMES: [&str; NUM_TAP] = [{tap_names}];\n",
+        num_inject = inj.len(),
+        num_tap = taps.len(),
+    )
+}
+
+/// Emit the `.inject` RHS stamp loop for the NODAL path (inline RHS builders).
+///
+/// `rhs_var` is the target RHS array (`rhs`, `rhs_be`, `rhs_s`, …); `indent`
+/// is the leading whitespace; `be` selects the backward-Euler form (no
+/// trapezoidal history term). Empty when there is no `.inject`. Mirrors the
+/// audio-input stamp: the source value is known at sample start, so it enters
+/// the RHS as a constant and the NR loop never sees it.
+pub(super) fn emit_inject_rhs_stamp(
+    ir: &CircuitIR,
+    rhs_var: &str,
+    indent: &str,
+    be: bool,
+) -> String {
+    if ir.solver_config.injections.is_empty() {
+        return String::new();
+    }
+    let thevenin = if be {
+        format!("{rhs_var}[INJECT_NODES[k]] += injections[k] / INJECT_RESISTANCES[k];")
+    } else {
+        format!(
+            "{rhs_var}[INJECT_NODES[k]] += (injections[k] + state.injections_prev[k]) / INJECT_RESISTANCES[k];"
+        )
+    };
+    format!(
+        "{indent}// Runtime feedback injections (.inject): source value known at sample\n\
+         {indent}// start enters the RHS as a constant (NR never sees it).\n\
+         {indent}for k in 0..NUM_INJECT {{\n\
+         {indent}    if INJECT_IS_NORTON[k] {{\n\
+         {indent}        {rhs_var}[INJECT_NODES[k]] += injections[k];\n\
+         {indent}    }} else {{\n\
+         {indent}        {thevenin}\n\
+         {indent}    }}\n\
+         {indent}}}\n"
+    )
+}
+
+/// Emit an INTERNAL zero-input `process_sample(...)` call line (warmup /
+/// DC-OP fast-forward loops), matching the public signature: multi-input
+/// takes `[0.0; NUM_INPUTS]`; `.inject`/`.tap` decks take the extra
+/// all-zero per-inner-sample injection array and return a tuple (discarded in
+/// statement position). `indent` is the emitted-code leading whitespace.
+pub(super) fn emit_warmup_call(ir: &CircuitIR, indent: &str, let_bind: bool) -> String {
+    // `let_bind` reproduces the exact pre-inject statement form at each call
+    // site (the DC-OP settle loop used `let _ = …`; the nodal warmup loops a
+    // bare call) so no-inject decks stay byte-identical.
+    let lhs = if let_bind { "let _ = " } else { "" };
+    if ir.solver_config.has_inject_or_tap() {
+        format!(
+            "{indent}{lhs}process_sample(0.0, &[[0.0; NUM_INJECT]; OVERSAMPLING_FACTOR], self);\n"
+        )
+    } else if ir.solver_config.num_inputs() > 1 {
+        format!("{indent}{lhs}process_sample([0.0; NUM_INPUTS], self);\n")
+    } else {
+        format!("{indent}{lhs}process_sample(0.0, self);\n")
+    }
+}
+
+/// Emit the `.inject` RHS stamp for a nodal micro-SUB-STEP (ActiveSetBe /
+/// stiff-sample recovery), interpolating the Thevenin injection across the
+/// sub-step ramp exactly like the audio input (`inp_s`/`inp_prev_s`). `ndiv`
+/// is the sub-division count variable in scope (`N_SUB` on the Schur path,
+/// `subdiv` on the full-LU path); `step` is the loop index in scope. Norton
+/// injections are held constant across sub-steps (they are an independent
+/// current, not integrated). Empty when there is no `.inject`.
+pub(super) fn emit_inject_substep_stamp(
+    ir: &CircuitIR,
+    rhs_var: &str,
+    indent: &str,
+    ndiv: &str,
+) -> String {
+    if ir.solver_config.injections.is_empty() {
+        return String::new();
+    }
+    format!(
+        "{indent}for k in 0..NUM_INJECT {{\n\
+         {indent}    if INJECT_IS_NORTON[k] {{\n\
+         {indent}        {rhs_var}[INJECT_NODES[k]] += injections[k];\n\
+         {indent}    }} else {{\n\
+         {indent}        let inj_step_k = (injections[k] - state.injections_prev[k]) / {ndiv} as f64;\n\
+         {indent}        let inj_s = state.injections_prev[k] + inj_step_k * (step + 1) as f64;\n\
+         {indent}        let inj_prev_s = state.injections_prev[k] + inj_step_k * step as f64;\n\
+         {indent}        {rhs_var}[INJECT_NODES[k]] += (inj_s + inj_prev_s) / INJECT_RESISTANCES[k];\n\
+         {indent}    }}\n\
+         {indent}}}\n"
+    )
+}
+
 impl RustEmitter {
     /// Emit DK-method generated code (original path).
     pub(super) fn emit_dk(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
@@ -74,6 +302,10 @@ impl RustEmitter {
 
         if ir.solver_config.oversampling_factor > 1 {
             code.push_str(&Self::emit_oversampler(ir));
+        } else if ir.solver_config.has_inject_or_tap() {
+            // No oversampling, but `.inject`/`.tap` still emit a private
+            // process_sample_inner; wrap it in the array-API public entry.
+            code.push_str(&Self::emit_inject_wrapper_1x(ir));
         }
 
         Ok(code)
@@ -200,6 +432,7 @@ impl RustEmitter {
         );
         // Multi-input ports (M=0 only): see `insert_multi_input_ctx`.
         insert_multi_input_ctx(&mut ctx, ir);
+        insert_inject_ctx(&mut ctx, ir);
         ctx.insert("has_dc_sources", &ir.has_dc_sources);
 
         // Named topology constants (Oomox P2 + P3). Always inserted so the
@@ -414,6 +647,7 @@ impl RustEmitter {
     fn emit_state(&self, ir: &CircuitIR, noise: &NoiseEmission) -> Result<String, CodegenError> {
         let mut ctx = Context::new();
         insert_multi_input_ctx(&mut ctx, ir);
+        insert_inject_ctx(&mut ctx, ir);
         // Noise fragments (empty strings when noise is off → template blocks become no-ops)
         ctx.insert("noise_enabled_emit", &noise.enabled);
         ctx.insert("noise_state_fields", &noise.state_fields);
@@ -737,7 +971,7 @@ impl RustEmitter {
             ctx.insert("recompute_dc_op_body", &body);
             ctx.insert(
                 "settle_dc_op_body",
-                &super::dc_op_emitter::emit_settle_dc_op_body(),
+                &super::dc_op_emitter::emit_settle_dc_op_body(ir),
             );
         }
 
@@ -2046,6 +2280,7 @@ impl RustEmitter {
 
         ctx.insert("has_dc_sources", &ir.has_dc_sources);
         insert_multi_input_ctx(&mut ctx, ir);
+        insert_inject_ctx(&mut ctx, ir);
         ctx.insert("augmented_inductors", &ir.topology.augmented_inductors);
         ctx.insert("backward_euler", &ir.solver_config.backward_euler);
         // Runtime voltage sources: emit `rhs[row] += state.<field>` per entry
@@ -2231,6 +2466,7 @@ impl RustEmitter {
         // lines of strings, so re-deriving it here doubled that codegen work.
         let mut ctx = Context::new();
         insert_multi_input_ctx(&mut ctx, ir);
+        insert_inject_ctx(&mut ctx, ir);
         ctx.insert("noise_enabled_emit", &noise.enabled);
         ctx.insert("noise_rhs_stamp", &noise.rhs_stamp);
         ctx.insert("noise_rhs_stamp_be", &noise.rhs_stamp_be);
@@ -2740,6 +2976,7 @@ impl RustEmitter {
         }
 
         let num_outputs = ir.solver_config.output_nodes.len();
+        let inject_or_tap = ir.solver_config.has_inject_or_tap();
 
         // Emit the public process_sample wrapper
         code.push_str("/// Process a single audio sample through the circuit with oversampling.\n");
@@ -2748,10 +2985,28 @@ impl RustEmitter {
             "/// Runs the circuit at {}x the host sample rate to reduce aliasing.\n",
             factor
         ));
+        if inject_or_tap {
+            code.push_str(
+                "///\n\
+                 /// `injections_inner[k]` supplies the `.inject` values for internal sample `k`\n\
+                 /// (already at the internal rate — routed straight to the inner solve, NOT\n\
+                 /// through the anti-alias up-filter). Returns the decimated outputs plus the\n\
+                 /// RAW per-inner-sample `.tap` node voltages `taps_inner` (un-decimated). In a\n\
+                 /// feedback loop, `injections_inner` must be derived from a PRIOR sample's tap —\n\
+                 /// this is >=1 sample of delay by construction. Inner-sample order: 2x [even,\n\
+                 /// odd]; 4x [e0, o0, e1, o1].\n",
+            );
+        }
         code.push_str("#[inline]\n");
-        code.push_str(
-            "pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {\n",
-        );
+        if inject_or_tap {
+            code.push_str(
+                "pub fn process_sample(input: f64, injections_inner: &[[f64; NUM_INJECT]; OVERSAMPLING_FACTOR], state: &mut CircuitState) -> ([f64; NUM_OUTPUTS], [[f64; NUM_TAP]; OVERSAMPLING_FACTOR]) {\n",
+            );
+        } else {
+            code.push_str(
+                "pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {\n",
+            );
+        }
         code.push_str(
             "    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };\n\n",
         );
@@ -2762,6 +3017,7 @@ impl RustEmitter {
                 num_outputs,
                 ir.dc_block,
                 ir.solver_config.output_clamp_v,
+                inject_or_tap,
             );
         } else if factor == 4 {
             Self::emit_4x_wrapper(
@@ -2769,9 +3025,40 @@ impl RustEmitter {
                 num_outputs,
                 ir.dc_block,
                 ir.solver_config.output_clamp_v,
+                inject_or_tap,
             );
         }
 
+        code.push_str("}\n\n");
+        code
+    }
+
+    /// Emit the 1x public `process_sample` wrapper for a circuit with `.inject`
+    /// / `.tap` but no oversampling. The inner body is emitted as a private
+    /// `process_sample_inner` (the template does this whenever `inject_or_tap`),
+    /// so this thin wrapper adapts the per-inner-sample array API (arity 1).
+    pub(super) fn emit_inject_wrapper_1x(ir: &CircuitIR) -> String {
+        debug_assert_eq!(ir.solver_config.oversampling_factor, 1);
+        let mut code = String::new();
+        code.push_str("/// Process a single audio sample through the circuit.\n");
+        code.push_str(
+            "///\n\
+             /// `injections_inner[0]` supplies the `.inject` values for this sample. Returns\n\
+             /// the outputs plus the RAW `.tap` node voltages `taps_inner[0]`. In a feedback\n\
+             /// loop, `injections_inner` must be derived from a PRIOR sample's tap — this is\n\
+             /// >=1 sample of delay by construction.\n",
+        );
+        code.push_str("#[inline]\n");
+        code.push_str(
+            "pub fn process_sample(input: f64, injections_inner: &[[f64; NUM_INJECT]; OVERSAMPLING_FACTOR], state: &mut CircuitState) -> ([f64; NUM_OUTPUTS], [[f64; NUM_TAP]; OVERSAMPLING_FACTOR]) {\n",
+        );
+        code.push_str(
+            "    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };\n",
+        );
+        code.push_str(
+            "    let (output, tap) = process_sample_inner(input, injections_inner[0], state);\n",
+        );
+        code.push_str("    (output, [tap])\n");
         code.push_str("}\n\n");
         code
     }
@@ -2881,6 +3168,7 @@ impl RustEmitter {
         _num_outputs: usize,
         dc_block: bool,
         clamp_v: f64,
+        inject_or_tap: bool,
     ) {
         // Upsample: polyphase interpolator, 1 input → 2 internal-rate samples
         code.push_str(
@@ -2888,12 +3176,21 @@ impl RustEmitter {
              \x20   let (up_even, up_odd) = os_halfband(input, &OS_COEFFS, &mut state.os_up_state);\n\n",
         );
 
-        // Process both at 2x rate — returns [f64; NUM_OUTPUTS]
-        code.push_str(
-            "    // Process both samples at 2x rate (up_even is the earlier sample)\n\
-             \x20   let out_even = process_sample_inner(up_even, state);\n\
-             \x20   let out_odd = process_sample_inner(up_odd, state);\n\n",
-        );
+        // Process both at 2x rate. Injections BYPASS the up-filter (already
+        // inner-rate): injections_inner[0]=even, [1]=odd. Taps are raw.
+        if inject_or_tap {
+            code.push_str(
+                "    // Process both samples at 2x rate (up_even is the earlier sample)\n\
+                 \x20   let (out_even, tap_even) = process_sample_inner(up_even, injections_inner[0], state);\n\
+                 \x20   let (out_odd, tap_odd) = process_sample_inner(up_odd, injections_inner[1], state);\n\n",
+            );
+        } else {
+            code.push_str(
+                "    // Process both samples at 2x rate (up_even is the earlier sample)\n\
+                 \x20   let out_even = process_sample_inner(up_even, state);\n\
+                 \x20   let out_odd = process_sample_inner(up_odd, state);\n\n",
+            );
+        }
 
         // Downsample per-output: ONE decimator step per output sample
         code.push_str("    // Downsample: per-output polyphase decimator, 2 samples → 1\n");
@@ -2908,7 +3205,12 @@ impl RustEmitter {
             code.push_str("        result[out_idx] = if v.is_finite() { v } else { 0.0 };\n");
         }
         code.push_str("    }\n");
-        code.push_str("    result\n");
+        if inject_or_tap {
+            // Taps are RAW / un-decimated — one array per internal sample.
+            code.push_str("    (result, [tap_even, tap_odd])\n");
+        } else {
+            code.push_str("    result\n");
+        }
     }
 
     /// Emit the 4x oversampling wrapper body (cascaded 2x stages).
@@ -2917,6 +3219,7 @@ impl RustEmitter {
         _num_outputs: usize,
         dc_block: bool,
         clamp_v: f64,
+        inject_or_tap: bool,
     ) {
         // Outer upsample: 1 → 2 at 2x rate (steep base-Nyquist filter)
         code.push_str(
@@ -2926,13 +3229,23 @@ impl RustEmitter {
              \x20   );\n\n",
         );
 
-        // Inner upsample + process for each outer sample — returns [f64; NUM_OUTPUTS]
-        code.push_str(
-            "    // Inner upsample + process: each 2x sample → 2 samples at 4x rate\n\
-             \x20   let (inner_e0, inner_o0) = os_halfband(outer_even, &OS_COEFFS, &mut state.os_up_state);\n\
-             \x20   let proc_e0 = process_sample_inner(inner_e0, state);\n\
-             \x20   let proc_o0 = process_sample_inner(inner_o0, state);\n\n",
-        );
+        // Inner upsample + process for each outer sample. Injections BYPASS
+        // both up-filters (already inner-rate): order [e0, o0, e1, o1]. Taps raw.
+        if inject_or_tap {
+            code.push_str(
+                "    // Inner upsample + process: each 2x sample → 2 samples at 4x rate\n\
+                 \x20   let (inner_e0, inner_o0) = os_halfband(outer_even, &OS_COEFFS, &mut state.os_up_state);\n\
+                 \x20   let (proc_e0, tap_e0) = process_sample_inner(inner_e0, injections_inner[0], state);\n\
+                 \x20   let (proc_o0, tap_o0) = process_sample_inner(inner_o0, injections_inner[1], state);\n\n",
+            );
+        } else {
+            code.push_str(
+                "    // Inner upsample + process: each 2x sample → 2 samples at 4x rate\n\
+                 \x20   let (inner_e0, inner_o0) = os_halfband(outer_even, &OS_COEFFS, &mut state.os_up_state);\n\
+                 \x20   let proc_e0 = process_sample_inner(inner_e0, state);\n\
+                 \x20   let proc_o0 = process_sample_inner(inner_o0, state);\n\n",
+            );
+        }
 
         // Inner decimator per-output for first 2x pair (one step per pair)
         code.push_str("    let mut inner_out0 = [0.0f64; NUM_OUTPUTS];\n");
@@ -2941,11 +3254,19 @@ impl RustEmitter {
         code.push_str("    }\n\n");
 
         // Second inner upsample + process pair
-        code.push_str(
-            "    let (inner_e1, inner_o1) = os_halfband(outer_odd, &OS_COEFFS, &mut state.os_up_state);\n\
-             \x20   let proc_e1 = process_sample_inner(inner_e1, state);\n\
-             \x20   let proc_o1 = process_sample_inner(inner_o1, state);\n\n",
-        );
+        if inject_or_tap {
+            code.push_str(
+                "    let (inner_e1, inner_o1) = os_halfband(outer_odd, &OS_COEFFS, &mut state.os_up_state);\n\
+                 \x20   let (proc_e1, tap_e1) = process_sample_inner(inner_e1, injections_inner[2], state);\n\
+                 \x20   let (proc_o1, tap_o1) = process_sample_inner(inner_o1, injections_inner[3], state);\n\n",
+            );
+        } else {
+            code.push_str(
+                "    let (inner_e1, inner_o1) = os_halfband(outer_odd, &OS_COEFFS, &mut state.os_up_state);\n\
+                 \x20   let proc_e1 = process_sample_inner(inner_e1, state);\n\
+                 \x20   let proc_o1 = process_sample_inner(inner_o1, state);\n\n",
+            );
+        }
 
         // Inner decimator per-output for second 2x pair
         code.push_str("    let mut inner_out1 = [0.0f64; NUM_OUTPUTS];\n");
@@ -2968,7 +3289,13 @@ impl RustEmitter {
             code.push_str("        result[out_idx] = if v.is_finite() { v } else { 0.0 };\n");
         }
         code.push_str("    }\n");
-        code.push_str("    result\n");
+        if inject_or_tap {
+            // Taps are RAW / un-decimated — one array per internal sample,
+            // in the same [e0, o0, e1, o1] order as injections_inner.
+            code.push_str("    (result, [tap_e0, tap_o0, tap_e1, tap_o1])\n");
+        } else {
+            code.push_str("    result\n");
+        }
     }
 }
 

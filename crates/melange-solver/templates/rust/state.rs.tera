@@ -54,6 +54,10 @@ pub struct CircuitState {
     /// Previous input sample(s) for trapezoidal integration
 {% if multi_input %}    pub inputs_prev: [f64; NUM_INPUTS],
 {% else %}    pub input_prev: f64,
+{% endif %}{% if inject_or_tap %}    /// Previous `.inject` values (per inner sample), for the trapezoidal
+    /// history term of Thevenin injections. Advanced once per inner call
+    /// alongside `input_prev`.
+    pub injections_prev: [f64; NUM_INJECT],
 {% endif %}
 
     /// Iteration count from last solve (for diagnostics)
@@ -268,6 +272,7 @@ static OPAMP_RAIL_DEGRADE_WARN_ONCE: std::sync::Once = std::sync::Once::new();
             damp_thresh: 2.0,
 {% endif %}{% if multi_input %}            inputs_prev: [0.0; NUM_INPUTS],
 {% else %}            input_prev: 0.0,
+{% endif %}{% if inject_or_tap %}            injections_prev: [0.0; NUM_INJECT],
 {% endif %}            last_nr_iterations: 0,
 {% if dc_block %}            dc_block_x_prev: {% if has_dc_op or has_cap_ic %}dc_block_x_seed{% else %}[0.0; NUM_OUTPUTS]{% endif %},
             dc_block_y_prev: [0.0; NUM_OUTPUTS],
@@ -381,6 +386,7 @@ impl CircuitState {
         self.i_nl_prev_prev = [0.0; M];
 {% endif %}{% if multi_input %}        self.inputs_prev = [0.0; NUM_INPUTS];
 {% else %}        self.input_prev = 0.0;
+{% endif %}{% if inject_or_tap %}        self.injections_prev = [0.0; NUM_INJECT];
 {% endif %}        self.last_nr_iterations = 0;
 {% if dc_block and has_cap_ic %}        // Seed the DC blocker's x[n-1] from the same t=0 state as v_prev (see
         // Default) so reset() doesn't re-inject the startup thump.

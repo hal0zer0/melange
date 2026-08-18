@@ -2,11 +2,16 @@
 // MAIN PROCESS FUNCTION
 // =============================================================================
 
-{% if oversampling_factor > 1 %}/// Process a single sample at the internal (oversampled) rate.
+{% if oversampling_factor > 1 or inject_or_tap %}/// Process a single sample at the internal (oversampled) rate{% if inject_or_tap %}, with
+/// per-inner-sample `.inject` values and returning raw `.tap` node voltages{% endif %}.
 ///
-/// Called by `process_sample()` through the oversampling chain.
-#[inline(always)]
-fn process_sample_inner(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {
+/// Called by `process_sample()`{% if oversampling_factor > 1 %} through the oversampling chain{% endif %}.
+{% if inject_or_tap %}/// `injections` are already at the internal rate (the wrapper does NOT run them
+/// through the up-filter). Taps are the finalized inner-rate node voltages read
+/// after Step-6c damping, before the Step-9 output pipeline (no DC-block / scale
+/// / clamp / decimation).
+{% endif %}#[inline(always)]
+fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_INJECT]{% endif %}, state: &mut CircuitState) -> {% if inject_or_tap %}([f64; NUM_OUTPUTS], [f64; NUM_TAP]){% else %}[f64; NUM_OUTPUTS]{% endif %} {
 {% else %}/// Process a single audio sample through the circuit
 ///
 /// # Arguments
@@ -27,6 +32,10 @@ fn process_sample_inner(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPU
     }
 {% else %}    // Validate input — handle NaN, inf, and extreme values
     let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };
+{% endif %}{% if inject_or_tap %}    // Sanitize injections (NaN/Inf → 0). No magnitude clamp: a feedback value
+    // is arbitrary and the Step-7 plausibility guard catches any runaway.
+    let mut injections = injections;
+    for v in injections.iter_mut() { *v = if v.is_finite() { *v } else { 0.0 }; }
 {% endif %}
 {% if num_switches > 0 or num_pots > 0 %}
     // Lazy rebuild: process all pot/switch changes in one batch
@@ -46,7 +55,7 @@ fn process_sample_inner(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPU
     if state.be_cooldown > 0 { state.be_cooldown -= 1; }
 {% endif %}
     // Step 1: Build RHS vector from history and input
-    let {% if noise_enabled_emit %}mut {% endif %}rhs = {% if multi_input %}build_rhs(&inputs, &state.inputs_prev, state){% else %}build_rhs(input, state.input_prev, state){% endif %};
+    let {% if noise_enabled_emit %}mut {% endif %}rhs = {% if multi_input %}build_rhs(&inputs, &state.inputs_prev, state){% else %}build_rhs(input, state.input_prev, {% if inject_or_tap %}&injections, {% endif %}state){% endif %};
 {% if noise_enabled_emit %}{{ noise_rhs_stamp }}{% endif %}
     // Step 2: Linear prediction: v_pred = S * rhs
     let v_pred = mat_vec_mul_s(&rhs, state);
@@ -107,6 +116,16 @@ fn process_sample_inner(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPU
             rhs_be[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k];
         }
 {% else %}        rhs_be[INPUT_NODE] += input / INPUT_RESISTANCE;
+{% endif %}{% if inject_or_tap %}        // Injections in the BE-fallback RHS: same rows as build_rhs. BE drops
+        // the trapezoidal history term (Thevenin uses val/R; Norton is a
+        // current source, integration-scheme-independent).
+        for k in 0..NUM_INJECT {
+            if INJECT_IS_NORTON[k] {
+                rhs_be[INJECT_NODES[k]] += injections[k];
+            } else {
+                rhs_be[INJECT_NODES[k]] += injections[k] / INJECT_RESISTANCES[k];
+            }
+        }
 {% endif %}
 {% if runtime_sources | length > 0 %}        // Runtime voltage sources (.runtime directive): same rows/values as
         // build_rhs — VS algebraic rows are integration-scheme-independent
@@ -227,6 +246,7 @@ fn process_sample_inner(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPU
 {% endif %}
 {% if multi_input %}        state.inputs_prev = [0.0; NUM_INPUTS];
 {% else %}        state.input_prev = 0.0;
+{% endif %}{% if inject_or_tap %}        state.injections_prev = [0.0; NUM_INJECT];
 {% endif %}{% if num_inductors > 0 %}        state.ind_i_prev = [0.0; {{ num_inductors }}];
         state.ind_v_prev = [0.0; {{ num_inductors }}];
         state.ind_i_hist = [0.0; {{ num_inductors }}];
@@ -255,8 +275,12 @@ fn process_sample_inner(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPU
             let raw = state.dc_operating_point[OUTPUT_NODES[out_idx]];
             dc_output[out_idx] = (raw * OUTPUT_SCALES[out_idx]).clamp(-{{ output_clamp_v }}, {{ output_clamp_v }});
         }
-        return dc_output;
-    }
+{% if inject_or_tap %}        // Raw taps fall back to the DC operating point (v is invalid here).
+        let mut dc_taps = [0.0f64; NUM_TAP];
+        for t in 0..NUM_TAP { dc_taps[t] = state.dc_operating_point[TAP_NODES[t]]; }
+        return (dc_output, dc_taps);
+{% else %}        return dc_output;
+{% endif %}    }
 
     // Update state for next iteration
     state.v_prev = v;
@@ -264,6 +288,7 @@ fn process_sample_inner(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPU
     state.i_nl_prev = i_nl;
 {% if multi_input %}    state.inputs_prev = inputs;
 {% else %}    state.input_prev = input;
+{% endif %}{% if inject_or_tap %}    state.injections_prev = injections;
 {% endif %}
 {% if num_inductors > 0 %}
 
@@ -346,5 +371,14 @@ fn process_sample_inner(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPU
 {% else %}        output[out_idx] = if scaled.is_finite() { scaled } else { 0.0 };
 {% endif %}
     }
-    output
-}
+{% if inject_or_tap %}    // Raw inner-rate taps: the finalized node voltages after Step-6c damping,
+    // WITHOUT the Step-9 output pipeline (no DC-block, scale, clamp, or
+    // decimation). The wrapper passes these through untouched.
+    let mut taps = [0.0f64; NUM_TAP];
+    for t in 0..NUM_TAP {
+        let raw = v[TAP_NODES[t]];
+        taps[t] = if raw.is_finite() { raw } else { 0.0 };
+    }
+    (output, taps)
+{% else %}    output
+{% endif %}}

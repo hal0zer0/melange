@@ -4,7 +4,7 @@
 /// via alpha*C*v_prev (implicit in the matrix formulation).
 #[inline(always)]
 {% if multi_input %}fn build_rhs(inputs: &[f64; NUM_INPUTS], inputs_prev: &[f64; NUM_INPUTS], state: &CircuitState) -> [f64; N] {
-{% else %}fn build_rhs(input: f64, input_prev: f64, state: &CircuitState) -> [f64; N] {
+{% else %}fn build_rhs(input: f64, input_prev: f64, {% if inject_or_tap %}injections: &[f64; NUM_INJECT], {% endif %}state: &CircuitState) -> [f64; N] {
 {% endif %}
 {% if has_dc_sources %}    let mut rhs = RHS_CONST;
 {% else %}    let mut rhs = [0.0; N];
@@ -38,7 +38,20 @@
     rhs[INPUT_NODE] += input / INPUT_RESISTANCE;
 {% else %}    // Add input contribution (Thevenin: (V_in + V_in_prev) * G_in)
     rhs[INPUT_NODE] += (input + input_prev) / INPUT_RESISTANCE;
-{% endif %}{% endif %}{% if runtime_sources | length > 0 %}    // Runtime voltage sources (.runtime directive): host-driven per-sample values.
+{% endif %}{% endif %}{% if inject_or_tap %}    // Runtime feedback injections (.inject): the source value is known at
+    // sample start, so it enters the RHS as an ordinary constant (the NR loop
+    // never sees it). Same stamp shape as the audio input port. Thevenin:
+    // value is a voltage behind R; Norton: value is a current.
+    for k in 0..NUM_INJECT {
+        if INJECT_IS_NORTON[k] {
+            rhs[INJECT_NODES[k]] += injections[k];
+        } else {
+{% if backward_euler %}            rhs[INJECT_NODES[k]] += injections[k] / INJECT_RESISTANCES[k];
+{% else %}            rhs[INJECT_NODES[k]] +=
+                (injections[k] + state.injections_prev[k]) / INJECT_RESISTANCES[k];
+{% endif %}        }
+    }
+{% endif %}{% if runtime_sources | length > 0 %}    // Runtime voltage sources (.runtime directive): host-driven per-sample values.
 {% for rt in runtime_sources %}    rhs[{{ rt.vs_row }}] += state.{{ rt.field_name }};
 {% endfor %}{% endif %}
     rhs

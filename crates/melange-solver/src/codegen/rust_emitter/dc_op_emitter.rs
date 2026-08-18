@@ -972,8 +972,8 @@ pub(super) fn emit_recompute_dc_op_body_nodal(_ir: &CircuitIR) -> Result<String,
 ///
 /// Emitted as a `pub fn settle_dc_op(&mut self)` on `CircuitState`, gated
 /// behind the same `emit_dc_op_recompute` flag as `recompute_dc_op`.
-pub(super) fn emit_settle_dc_op_body() -> String {
-    "        // Settle to the DC operating point at the current pot / switch /\n\
+pub(super) fn emit_settle_dc_op_body(ir: &crate::codegen::ir::CircuitIR) -> String {
+    let mut s = "        // Settle to the DC operating point at the current pot / switch /\n\
      \x20       // device values. Tries the fast runtime NR first; on failure\n\
      \x20       // (DK-path NR divergence or nodal-path permanent stub) runs the\n\
      \x20       // `WARMUP_SAMPLES_RECOMMENDED` silence loop as fallback.\n\
@@ -989,9 +989,15 @@ pub(super) fn emit_settle_dc_op_body() -> String {
      \x20       let before = self.diag_nr_max_iter_count;\n\
      \x20       self.recompute_dc_op();\n\
      \x20       if self.diag_nr_max_iter_count > before {\n\
-     \x20           for _ in 0..WARMUP_SAMPLES_RECOMMENDED {\n\
-     \x20               let _ = process_sample(0.0, self);\n\
-     \x20           }\n\
-     \x20       }\n"
-        .to_string()
+     \x20           for _ in 0..WARMUP_SAMPLES_RECOMMENDED {\n"
+        .to_string();
+    // Warmup call matches the public signature (adds the all-zero injections
+    // array + tuple return for `.inject`/`.tap` decks).
+    s.push_str(&super::dk_emitter::emit_warmup_call(
+        ir,
+        "                ",
+        true,
+    ));
+    s.push_str("            }\n        }\n");
+    s
 }
