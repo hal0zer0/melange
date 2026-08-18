@@ -17,6 +17,10 @@
 //!   * (a) a constant injection behind `R` == a literal DC source behind the
 //!     same `R` (the Thevenin stamp is the exact same machinery as the
 //!     ngspice-validated audio input port).
+//!   * (b, Norton) a VARYING Norton (`RSHUNT=`) injection == a real time-varying
+//!     current source behind the same shunt `R` (expressed as its exact Thevenin
+//!     equivalent, the validated input port). Locks in the Norton trapezoidal
+//!     `(val+val_prev)` discretization — instantaneous `val` is half-amplitude.
 //!   * (c) a synthetic near-unity closed loop tracks the analytic steady state
 //!     `H·c/(1 − k·H)` with `H = Rload/(Rload + R_inj)` across loop gain — a
 //!     stamp with a flipped SIGN or wrong `R` changes `H` and is CAUGHT,
@@ -43,8 +47,11 @@ struct Inj<'a> {
 /// Mirrors the CLI compile path: stamps `G_in` at `in` and `1/ohms` at each
 /// injection node BEFORE building the kernel, routes DK/nodal automatically,
 /// and threads the resolved `InjectionSpec`/`TapSpec` into `CodegenConfig`.
+#[allow(clippy::too_many_arguments)]
 fn gen_and_run(
     netlist_str: &str,
+    input_name: &str,
+    input_resistance: f64,
     output_node: &str,
     injects: &[Inj],
     taps: &[&str],
@@ -68,10 +75,10 @@ fn gen_and_run(
             .unwrap_or_else(|| panic!("node '{name}' not found"))
     };
 
-    let input_node = resolve("in").saturating_sub(1);
+    let input_node = resolve(input_name).saturating_sub(1);
     let out_idx = resolve(output_node).saturating_sub(1);
     if input_node < mna.n {
-        mna.g[input_node][input_node] += 1.0; // G_in = 1 S (Thevenin input)
+        mna.g[input_node][input_node] += 1.0 / input_resistance; // G_in = 1/R_in
     }
 
     // Stamp each injection conductance BEFORE the kernel (baked into S / DC-OP).
@@ -127,7 +134,7 @@ fn gen_and_run(
         sample_rate: 48000.0,
         input_node,
         output_nodes: vec![out_idx],
-        input_resistance: 1.0,
+        input_resistance,
         dc_block: false, // raw DC comparison — no 5 Hz HPF on the output
         oversampling_factor: oversampling,
         injections: inj_specs,
@@ -194,6 +201,8 @@ fn main() {
 }";
     let a = gen_and_run(
         &deck_a,
+        "in",
+        1.0,
         "nx",
         &[Inj {
             node: "nx",
@@ -224,7 +233,7 @@ fn main() {
     for _ in 0..300_000 { let (_o, t) = process_sample(0.0, &inj, &mut state); tap = t[0][0]; }
     println!(\"{tap:.6}\");
 }";
-    let b = gen_and_run(deck_b, "nx", &[], &["nx"], 1, main_b);
+    let b = gen_and_run(deck_b, "in", 1.0, "nx", &[], &["nx"], 1, main_b);
 
     let va: f64 = a.trim().parse().expect("parse A");
     let vb: f64 = b.trim().parse().expect("parse B");
@@ -261,6 +270,8 @@ fn main() {
 }";
     let out = gen_and_run(
         RC_NODE,
+        "in",
+        1.0,
         "nx",
         &[Inj {
             node: "nx",
@@ -292,52 +303,164 @@ fn main() {
 /// (5) An inner-rate injection tone (±I alternating per internal sample at 2×
 /// oversampling) appears at the tap UN-band-limited: the injection bypasses the
 /// anti-alias up-filter and the tap bypasses the decimator. Through the filter
-/// this inner-Nyquist content would collapse toward zero.
+/// this above-host-Nyquist content would collapse toward zero.
 ///
-/// Uses a NORTON injection (`rhs += val`, no history term) into a purely
-/// resistive node so the inner-Nyquist tone is not confounded by (a) the
-/// trapezoidal `(val + val_prev)` average, which by construction nulls a pure
-/// Nyquist alternation for a *Thevenin* source, nor (b) a stiff parasitic cap's
-/// trap z≈−1 mode. Norton current alternation drives the node directly.
+/// At 4× oversampling, a period-4 inner pattern `[+A,+A,−A,−A]` is a 48 kHz
+/// tone (host rate 48 kHz → host Nyquist 24 kHz → this sits deep in the up-
+/// filter's STOPBAND) and — critically — is NOT the trapezoidal null: the
+/// proper-trap `(val+val_prev)` history turns it into `[0,2A,0,−2A]`, still a
+/// 48 kHz tone, not zero (unlike a pure inner-Nyquist alternation, which trap
+/// nulls for BOTH source kinds). The `Cpar` pole (~80 kHz) sits above the tone
+/// but below the 96 kHz inner-Nyquist, so the tone passes and there is no stiff-
+/// cap z≈−1 artifact. If the injection went through the up-filter this stopband
+/// tone would be ~−60 dB; the raw tap shows it at full amplitude.
 #[test]
 #[ignore]
 fn inject_inner_rate_tone_reaches_tap_unfiltered() {
-    // Purely resistive node: nx = I_norton · (Rload ∥ RSHUNT). No cap → no
-    // trap z≈−1 artifact; the alternation seen at the tap is the injection.
-    const RESISTIVE_NODE: &str = "\
-* purely resistive node (no cap): nx = I_inj * (Rload || RSHUNT)
+    const TONE_NODE: &str = "\
+* node whose RC pole (~80 kHz) passes 48 kHz but is below 96 kHz inner-Nyquist
 Rin in nx 100meg
 Rload nx 0 1k
+Cpar nx 0 4n
 .end
 ";
     let main = "
 fn main() {
     let mut state = CircuitState::default();
-    // OVERSAMPLING_FACTOR == 2: [even, odd] currents = [+0.01, -0.01] A →
-    // inner-Nyquist tone. Node = ±0.01·(1k∥100) ≈ ±0.909 V.
-    let inj: [[f64; NUM_INJECT]; OVERSAMPLING_FACTOR] = [[0.01], [-0.01]];
-    let (mut te, mut to) = (0.0, 0.0);
-    for _ in 0..20_000 { let (_o, t) = process_sample(0.0, &inj, &mut state); te = t[0][0]; to = t[1][0]; }
-    println!(\"{:.6}\", (te - to).abs());
+    // OVERSAMPLING_FACTOR == 4: period-4 inner tone at 48 kHz (up-filter stopband).
+    let inj: [[f64; NUM_INJECT]; OVERSAMPLING_FACTOR] = [[1.0],[1.0],[-1.0],[-1.0]];
+    let (mut mn, mut mx) = (f64::MAX, f64::MIN);
+    for n in 0..40_000 {
+        let (_o, t) = process_sample(0.0, &inj, &mut state);
+        if n > 30_000 { for k in 0..OVERSAMPLING_FACTOR { let v = t[k][0]; mn = mn.min(v); mx = mx.max(v); } }
+    }
+    println!(\"{:.6}\", mx - mn);
 }";
     let out = gen_and_run(
-        RESISTIVE_NODE,
+        TONE_NODE,
+        "in",
+        1.0,
         "nx",
         &[Inj {
             node: "nx",
             field: "fb",
-            ohms: 100.0,
+            ohms: 1000.0,
+            norton: false,
+        }],
+        &["nx"],
+        4,
+        main,
+    );
+    let spread: f64 = out.trim().parse().expect("parse");
+    // Bypass ⇒ the 48 kHz tone reaches the tap (spread ~1.1 V). Through the
+    // up-filter this stopband tone would be crushed toward 0.
+    assert!(
+        spread > 0.5,
+        "inner-rate tone spread {spread} too small — injection is being band-limited?"
+    );
+}
+
+/// (b, Norton) The direct analog of the Thevenin equivalence test, for the
+/// Norton (`RSHUNT=`) source kind, driven by a NON-trivial VARYING sequence.
+///
+/// Reference = melange's own audio input port, the canonical ngspice-validated
+/// `(V+V_prev)·G` Thevenin source. A Norton current source `I(t)` with shunt
+/// `R0` is *exactly* a Thevenin `V(t)=I(t)·R0` behind `R0` (identical topology:
+/// `1/R0` to ground + the source), so the two decks must produce the same node
+/// voltage sample-for-sample. This locks in the Norton discretization:
+/// instantaneous `rhs += val` produces HALF the correct amplitude (empirically
+/// 0.2524 vs 0.4955); the trapezoidal `rhs += val + val_prev` matches exactly.
+#[test]
+#[ignore]
+fn inject_norton_varying_equals_current_source_behind_shunt() {
+    // Deck N: Norton current inject I(t) at nx, shunt R0 = 1 kΩ.
+    const NORTON_DECK: &str = "\
+* Norton current inject at nx, shunt 1k
+Rin in nx 1g
+Rload nx 0 1k
+Cpar nx 0 10n
+.end
+";
+    // Reference deck: nx IS the input node; R_in = R0 = 1 kΩ supplied via the
+    // harness. Same load + cap, so identical topology. Drive V(t) = I(t)·R0.
+    const REF_DECK: &str = "\
+* input-port Thevenin reference at nx (R_in = R0 = 1k)
+Rload nx 0 1k
+Cpar nx 0 10n
+.end
+";
+    // A 3 kHz sine at 48 kHz — a decent fraction of fs where instantaneous `val`
+    // and averaged `(val+val_prev)` differ substantially. Print the settled tap.
+    const NSAMP: usize = 48_000;
+    const AMP: f64 = 1e-3; // 1 mA
+    const R0: f64 = 1000.0;
+    let n_main = format!(
+        "
+fn main() {{
+    let mut state = CircuitState::default();
+    let mut out = String::new();
+    for n in 0..{NSAMP} {{
+        let i = {AMP} * (2.0*std::f64::consts::PI*3000.0*(n as f64)/48000.0).sin();
+        let inj = [[i; NUM_INJECT]; OVERSAMPLING_FACTOR];
+        let (_o, t) = process_sample(0.0, &inj, &mut state);
+        if n >= {NSAMP} - 400 {{ out.push_str(&format!(\"{{:.9}} \", t[0][0])); }}
+    }}
+    println!(\"{{}}\", out.trim());
+}}"
+    );
+    let ref_main = format!(
+        "
+fn main() {{
+    let mut state = CircuitState::default();
+    let mut out = String::new();
+    for n in 0..{NSAMP} {{
+        let v = {AMP} * {R0}_f64 * (2.0*std::f64::consts::PI*3000.0*(n as f64)/48000.0).sin();
+        let inj = [[0.0; NUM_INJECT]; OVERSAMPLING_FACTOR];
+        let (_o, t) = process_sample(v, &inj, &mut state);
+        if n >= {NSAMP} - 400 {{ out.push_str(&format!(\"{{:.9}} \", t[0][0])); }}
+    }}
+    println!(\"{{}}\", out.trim());
+}}"
+    );
+    let n_out = gen_and_run(
+        NORTON_DECK,
+        "in",
+        1.0,
+        "nx",
+        &[Inj {
+            node: "nx",
+            field: "fb",
+            ohms: R0,
             norton: true,
         }],
         &["nx"],
-        2,
-        main,
+        1,
+        &n_main,
     );
-    let alternation: f64 = out.trim().parse().expect("parse");
-    // Full swing is ~2·0.909 ≈ 1.8 V; anti-alias filtering would crush the
-    // inner-Nyquist content toward 0. Assert it survives well above that floor.
+    let ref_out = gen_and_run(REF_DECK, "nx", R0, "nx", &[], &["nx"], 1, &ref_main);
+
+    let nv: Vec<f64> = n_out
+        .split_whitespace()
+        .map(|s| s.parse().unwrap())
+        .collect();
+    let rv: Vec<f64> = ref_out
+        .split_whitespace()
+        .map(|s| s.parse().unwrap())
+        .collect();
+    assert_eq!(nv.len(), rv.len(), "sample count mismatch");
+    assert!(nv.len() >= 300, "not enough settled samples");
+    let max_abs_diff = nv
+        .iter()
+        .zip(&rv)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0_f64, f64::max);
+    let peak = rv.iter().fold(0.0_f64, |m, &x| m.max(x.abs()));
+    assert!(peak > 0.1, "reference produced no signal (peak {peak})");
+    // Same tolerance class as the Thevenin equivalence test: a factor-of-2
+    // discretization error would show max_abs_diff ~= peak/2 ~= 0.25 V.
     assert!(
-        alternation > 1.0,
-        "inner-rate tone alternation {alternation} too small — injection is being band-limited?"
+        max_abs_diff < 1e-4,
+        "Norton varying inject deviates from current-source-behind-shunt reference: \
+         max_abs_diff={max_abs_diff} (peak {peak}) — Norton trap form wrong?"
     );
 }

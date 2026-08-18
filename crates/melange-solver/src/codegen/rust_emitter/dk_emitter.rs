@@ -196,6 +196,14 @@ pub(super) fn emit_inject_tap_constants(ir: &CircuitIR) -> String {
 /// trapezoidal history term). Empty when there is no `.inject`. Mirrors the
 /// audio-input stamp: the source value is known at sample start, so it enters
 /// the RHS as a constant and the NR loop never sees it.
+///
+/// Both source kinds carry the trapezoidal `+ prev` history under trap and drop
+/// it under BE, matching melange's proper-trap convention (`(V+V_prev)*G`, NOT
+/// `2*V*G`). A Norton current source `I` is the exact equivalent of a Thevenin
+/// `V=I/G_sh` behind `R=1/G_sh`, so its RHS is `(I+I_prev)` under trap — the
+/// SAME `(val+val_prev)` as Thevenin, just without the `/R` (the value is
+/// already a current). Empirically confirmed: instantaneous `val` produces
+/// exactly half the correct node voltage (Norton oracle, `inject_oracle.rs`).
 pub(super) fn emit_inject_rhs_stamp(
     ir: &CircuitIR,
     rhs_var: &str,
@@ -205,19 +213,26 @@ pub(super) fn emit_inject_rhs_stamp(
     if ir.solver_config.injections.is_empty() {
         return String::new();
     }
-    let thevenin = if be {
-        format!("{rhs_var}[INJECT_NODES[k]] += injections[k] / INJECT_RESISTANCES[k];")
+    let (norton, thevenin) = if be {
+        (
+            format!("{rhs_var}[INJECT_NODES[k]] += injections[k];"),
+            format!("{rhs_var}[INJECT_NODES[k]] += injections[k] / INJECT_RESISTANCES[k];"),
+        )
     } else {
-        format!(
-            "{rhs_var}[INJECT_NODES[k]] += (injections[k] + state.injections_prev[k]) / INJECT_RESISTANCES[k];"
+        (
+            format!("{rhs_var}[INJECT_NODES[k]] += injections[k] + state.injections_prev[k];"),
+            format!(
+                "{rhs_var}[INJECT_NODES[k]] += (injections[k] + state.injections_prev[k]) / INJECT_RESISTANCES[k];"
+            ),
         )
     };
     format!(
         "{indent}// Runtime feedback injections (.inject): source value known at sample\n\
-         {indent}// start enters the RHS as a constant (NR never sees it).\n\
+         {indent}// start enters the RHS as a constant (NR never sees it). Trap carries\n\
+         {indent}// the (val + val_prev) history (Norton current or Thevenin V/R alike).\n\
          {indent}for k in 0..NUM_INJECT {{\n\
          {indent}    if INJECT_IS_NORTON[k] {{\n\
-         {indent}        {rhs_var}[INJECT_NODES[k]] += injections[k];\n\
+         {indent}        {norton}\n\
          {indent}    }} else {{\n\
          {indent}        {thevenin}\n\
          {indent}    }}\n\
@@ -247,12 +262,13 @@ pub(super) fn emit_warmup_call(ir: &CircuitIR, indent: &str, let_bind: bool) -> 
 }
 
 /// Emit the `.inject` RHS stamp for a nodal micro-SUB-STEP (ActiveSetBe /
-/// stiff-sample recovery), interpolating the Thevenin injection across the
-/// sub-step ramp exactly like the audio input (`inp_s`/`inp_prev_s`). `ndiv`
-/// is the sub-division count variable in scope (`N_SUB` on the Schur path,
-/// `subdiv` on the full-LU path); `step` is the loop index in scope. Norton
-/// injections are held constant across sub-steps (they are an independent
-/// current, not integrated). Empty when there is no `.inject`.
+/// stiff-sample recovery). The sub-step matrices are TRAPEZOIDAL (`alpha =
+/// 2·rate·subdiv`), so BOTH source kinds interpolate their injection across the
+/// sub-step ramp exactly like the audio input (`inp_s`/`inp_prev_s`) and carry
+/// the trap `(inj_s + inj_prev_s)` history — Norton without the `/R` (its value
+/// is already a current), Thevenin with it. `ndiv` is the sub-division count
+/// variable in scope (`N_SUB` on the Schur path, `subdiv` on the full-LU path);
+/// `step` is the loop index in scope. Empty when there is no `.inject`.
 pub(super) fn emit_inject_substep_stamp(
     ir: &CircuitIR,
     rhs_var: &str,
@@ -264,12 +280,12 @@ pub(super) fn emit_inject_substep_stamp(
     }
     format!(
         "{indent}for k in 0..NUM_INJECT {{\n\
+         {indent}    let inj_step_k = (injections[k] - state.injections_prev[k]) / {ndiv} as f64;\n\
+         {indent}    let inj_s = state.injections_prev[k] + inj_step_k * (step + 1) as f64;\n\
+         {indent}    let inj_prev_s = state.injections_prev[k] + inj_step_k * step as f64;\n\
          {indent}    if INJECT_IS_NORTON[k] {{\n\
-         {indent}        {rhs_var}[INJECT_NODES[k]] += injections[k];\n\
+         {indent}        {rhs_var}[INJECT_NODES[k]] += inj_s + inj_prev_s;\n\
          {indent}    }} else {{\n\
-         {indent}        let inj_step_k = (injections[k] - state.injections_prev[k]) / {ndiv} as f64;\n\
-         {indent}        let inj_s = state.injections_prev[k] + inj_step_k * (step + 1) as f64;\n\
-         {indent}        let inj_prev_s = state.injections_prev[k] + inj_step_k * step as f64;\n\
          {indent}        {rhs_var}[INJECT_NODES[k]] += (inj_s + inj_prev_s) / INJECT_RESISTANCES[k];\n\
          {indent}    }}\n\
          {indent}}}\n"

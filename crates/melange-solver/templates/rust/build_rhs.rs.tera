@@ -40,12 +40,16 @@
     rhs[INPUT_NODE] += (input + input_prev) / INPUT_RESISTANCE;
 {% endif %}{% endif %}{% if inject_or_tap %}    // Runtime feedback injections (.inject): the source value is known at
     // sample start, so it enters the RHS as an ordinary constant (the NR loop
-    // never sees it). Same stamp shape as the audio input port. Thevenin:
-    // value is a voltage behind R; Norton: value is a current.
+    // never sees it). Same stamp shape as the audio input port. Both kinds carry
+    // the trapezoidal (val + val_prev) history (dropped under BE): a Norton
+    // current source I is the exact equivalent of a Thevenin V=I/G behind R=1/G,
+    // so its trap RHS is (I + I_prev) — the SAME averaging as Thevenin, just
+    // without the /R (the value is already a current).
     for k in 0..NUM_INJECT {
         if INJECT_IS_NORTON[k] {
-            rhs[INJECT_NODES[k]] += injections[k];
-        } else {
+{% if backward_euler %}            rhs[INJECT_NODES[k]] += injections[k];
+{% else %}            rhs[INJECT_NODES[k]] += injections[k] + state.injections_prev[k];
+{% endif %}        } else {
 {% if backward_euler %}            rhs[INJECT_NODES[k]] += injections[k] / INJECT_RESISTANCES[k];
 {% else %}            rhs[INJECT_NODES[k]] +=
                 (injections[k] + state.injections_prev[k]) / INJECT_RESISTANCES[k];
