@@ -528,11 +528,11 @@ fn template_diode_rs_solve_matches_devices_crate() {
 #[test]
 fn template_diode_eval_with_rs_is_bitwise_identical_to_split_pair() {
     let cases: &[(f64, f64, f64)] = &[
-        (2.52e-9, 1.752, 7.0),   // 1N4148-class with typical RS
-        (1e-12, 1.5, 100.0),     // large RS: heavy g_d*RS product
-        (2.68e-14, 1.07, 0.5),   // small RS
-        (1e-30, 2.0, 10.0),      // wide-bandgap: knee above the ±40 clamp
-        (1e-6, 1.0, 20.0),       // germanium-class: large IS, large RS
+        (2.52e-9, 1.752, 7.0), // 1N4148-class with typical RS
+        (1e-12, 1.5, 100.0),   // large RS: heavy g_d*RS product
+        (2.68e-14, 1.07, 0.5), // small RS
+        (1e-30, 2.0, 10.0),    // wide-bandgap: knee above the ±40 clamp
+        (1e-6, 1.0, 20.0),     // germanium-class: large IS, large RS
     ];
     let mut conducting = 0u32;
     for &(is, n, rs) in cases {
