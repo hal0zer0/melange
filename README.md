@@ -283,7 +283,7 @@ cargo test -p melange-validate --test spice_validation -- --include-ignored
 ## Known Limitations
 
 - No resistor temperature coefficients (TC1/TC2) or global temperature sweep; base device models run at a fixed nominal 27 °C. Opt-in device self-heating (RTH/CTH) is available for diodes, BJTs, and triodes
-- Transformers assume constant coupling (no core saturation or hysteresis)
+- Transformers use a constant coupling coefficient; core saturation is available opt-in via `ISAT=` on windings/inductors (anhysteretic tanh magnetizing curve), but magnetic hysteresis is not modeled
 - Tube models: no space-charge or transit-time effects
 - Op-amps: Boyle macromodel (adequate for audio, not a full transistor-level sim)
 - See [`docs/aidocs/STATUS.md`](docs/aidocs/STATUS.md) for the complete list
