@@ -25,4 +25,14 @@
 // not hand-edited, so silence the lint to keep downstream `clippy -D warnings`
 // green.
 #![allow(non_snake_case)]
+// Generated code trips these too: `eq_op` on algebraically-identical operands
+// that differ in intent; `reversed_empty_ranges` on loop bounds computed from
+// topology that can legitimately be empty; `large_const_arrays` on big const
+// matrices; `unused_variables` structurally on M=0 decks where the nonlinear
+// solve path is emitted but dead. Emitting the allows here keeps them
+// self-maintaining across regeneration (an externally-added attribute rots).
+#![allow(clippy::eq_op)]
+#![allow(clippy::reversed_empty_ranges)]
+#![allow(clippy::large_const_arrays)]
+#![allow(unused_variables)]
 
