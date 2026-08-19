@@ -9,10 +9,12 @@ use tera::Context;
 
 use super::helpers::{
     coupled_inductor_template_data, device_param_template_data, emit_device_const,
+    emit_stateful_default_fields, emit_stateful_set_sample_rate_body, emit_stateful_state_fields,
+    emit_stateful_state_restore, emit_stateful_update, emit_stateful_update_fns,
     emit_thermal_tj_advance, fmt_f64, format_matrix_rows, inductor_template_data,
     named_const_entries, oversampling_info, recommended_warmup_samples, section_banner,
-    self_heating_device_data, transformer_group_template_data, warmup_estimate_capped,
-    SwitchCompTemplateData, SwitchTemplateData,
+    self_heating_device_data, stateful_device_data, transformer_group_template_data,
+    warmup_estimate_capped, SwitchCompTemplateData, SwitchTemplateData,
 };
 use super::RustEmitter;
 use crate::codegen::ir::{CircuitIR, DeviceParams, DeviceType};
@@ -307,6 +309,8 @@ impl RustEmitter {
         code.push_str(&self.emit_state(ir, &noise)?);
         code.push_str(&Self::emit_transformer_group_helpers(ir));
         code.push_str(&self.emit_device_models(ir)?);
+        // (Stateful-device update() hooks are emitted inside emit_device_models,
+        //  which both the DK and nodal generate paths call — single source.)
         // SM pot helpers (sm_scale_N) removed — per-block rebuild replaces SM
         code.push_str(&self.emit_build_rhs(ir, &noise)?);
         code.push_str(&self.emit_mat_vec_mul_s(ir)?);
@@ -672,6 +676,29 @@ impl RustEmitter {
         ctx.insert("noise_reset_body", &noise.reset_body);
         ctx.insert("noise_set_sample_rate_body", &noise.set_sample_rate_body);
         ctx.insert("noise_methods", &noise.methods);
+        // Stateful-device opaque state block (Phase 0c). Empty strings when no
+        // device is stateful → template blocks are no-ops and the deck is
+        // byte-identical. NaN-recovery + after-solve update live in
+        // process_sample.rs.tera (emit_process_sample), not here.
+        let stateful_devs = stateful_device_data(ir);
+        let has_stateful = !stateful_devs.is_empty();
+        ctx.insert("has_stateful", &has_stateful);
+        ctx.insert(
+            "stateful_state_fields",
+            &emit_stateful_state_fields(&stateful_devs),
+        );
+        ctx.insert(
+            "stateful_default_fields",
+            &emit_stateful_default_fields(&stateful_devs),
+        );
+        ctx.insert(
+            "stateful_reset_body",
+            &emit_stateful_state_restore(&stateful_devs, "self."),
+        );
+        ctx.insert(
+            "stateful_set_sample_rate_body",
+            &emit_stateful_set_sample_rate_body(ir, &stateful_devs),
+        );
         ctx.insert("has_dc_op", &ir.has_dc_op);
         ctx.insert("augmented_inductors", &ir.topology.augmented_inductors);
         ctx.insert("n_aug", &ir.topology.n_aug);
@@ -902,7 +929,8 @@ impl RustEmitter {
         let needs_current_sr = num_pots > 0
             || num_switches > 0
             || ir.opamps.iter().any(|oa| oa.sr.is_finite())
-            || num_thermal_devices > 0;
+            || num_thermal_devices > 0
+            || has_stateful;
         ctx.insert("needs_current_sr", &needs_current_sr);
 
         // DK rail-mode consumption: the DK path implements only the Hard
@@ -1340,6 +1368,15 @@ impl RustEmitter {
         if has_vca {
             code.push_str(&self.render("device_vca", &Context::new())?);
         }
+
+        // Stateful-device (Phase 0c) update() hooks. Shared by BOTH emitters —
+        // `emit_device_models` is called from the DK and nodal generate paths —
+        // so the update signature and body can never drift. Empty when no
+        // device is stateful (byte-identical to before this machinery existed).
+        code.push_str(&emit_stateful_update_fns(
+            &stateful_device_data(ir),
+            &ir.device_slots,
+        ));
 
         Ok(code)
     }
@@ -2849,6 +2886,20 @@ impl RustEmitter {
             ctx.insert("thermal_devices", &thermal_devices);
         } else {
             ctx.insert("num_thermal_devices", &0usize);
+        }
+
+        // Stateful-device (Phase 0c) after-solve update + NaN-recovery restore.
+        // Both come from the shared helpers so DK and nodal cannot drift. Only
+        // inserted when non-empty; the template guards on `is defined and != ""`
+        // so a non-stateful deck is byte-identical.
+        let stateful_devs = stateful_device_data(ir);
+        let stateful_update = emit_stateful_update(&stateful_devs);
+        if !stateful_update.is_empty() {
+            ctx.insert("stateful_update", &stateful_update);
+        }
+        let stateful_nan_recovery = emit_stateful_state_restore(&stateful_devs, "state.");
+        if !stateful_nan_recovery.is_empty() {
+            ctx.insert("stateful_nan_recovery", &stateful_nan_recovery);
         }
 
         ctx.insert("dc_block", &ir.dc_block);

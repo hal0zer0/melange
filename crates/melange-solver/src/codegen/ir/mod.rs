@@ -4004,6 +4004,7 @@ impl CircuitIR {
                         params: DeviceParams::Diode(params),
                         has_internal_mna_nodes: false,
                         vg2k_frozen: 0.0,
+                        stateful: None,
                     });
                     dim_offset += 1;
                     nl_dev_idx += 1;
@@ -4045,6 +4046,7 @@ impl CircuitIR {
                         params: DeviceParams::Bjt(params),
                         has_internal_mna_nodes: false,
                         vg2k_frozen: 0.0,
+                        stateful: None,
                     });
                     dim_offset += dim;
                     nl_dev_idx += 1;
@@ -4058,6 +4060,7 @@ impl CircuitIR {
                         params: DeviceParams::Jfet(params),
                         has_internal_mna_nodes: false,
                         vg2k_frozen: 0.0,
+                        stateful: None,
                     });
                     dim_offset += 2;
                     nl_dev_idx += 1;
@@ -4080,6 +4083,7 @@ impl CircuitIR {
                         params: DeviceParams::Tube(params),
                         has_internal_mna_nodes: false,
                         vg2k_frozen: 0.0,
+                        stateful: None,
                     });
                     dim_offset += 2;
                     nl_dev_idx += 1;
@@ -4127,6 +4131,7 @@ impl CircuitIR {
                         params: DeviceParams::Tube(params),
                         has_internal_mna_nodes: false,
                         vg2k_frozen,
+                        stateful: None,
                     });
                     dim_offset += dim;
                     nl_dev_idx += 1;
@@ -4140,6 +4145,7 @@ impl CircuitIR {
                         params: DeviceParams::Mosfet(params),
                         has_internal_mna_nodes: false,
                         vg2k_frozen: 0.0,
+                        stateful: None,
                     });
                     dim_offset += 2;
                     nl_dev_idx += 1;
@@ -4153,6 +4159,7 @@ impl CircuitIR {
                         params: DeviceParams::Vca(params),
                         has_internal_mna_nodes: false,
                         vg2k_frozen: 0.0,
+                        stateful: None,
                     });
                     dim_offset += 2;
                     nl_dev_idx += 1;

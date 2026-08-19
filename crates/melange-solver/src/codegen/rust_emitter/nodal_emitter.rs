@@ -10,9 +10,11 @@ use super::dk_emitter::{
     NoiseEmission,
 };
 use super::helpers::{
-    device_param_template_data, emit_pentode_nr_dk_stamp, emit_thermal_tj_advance, fmt_f64,
-    format_matrix_rows, oversampling_info, pentode_dispatch, recommended_warmup_samples,
-    section_banner, self_heating_device_data, warmup_estimate_capped,
+    device_param_template_data, emit_pentode_nr_dk_stamp, emit_stateful_default_fields,
+    emit_stateful_set_sample_rate_body, emit_stateful_state_fields, emit_stateful_state_restore,
+    emit_stateful_update, emit_thermal_tj_advance, fmt_f64, format_matrix_rows, oversampling_info,
+    pentode_dispatch, recommended_warmup_samples, section_banner, self_heating_device_data,
+    stateful_device_data, warmup_estimate_capped,
 };
 use super::nr_helpers::{emit_nr_singular_fallback, emit_schur_nr_limit_and_converge};
 use super::RustEmitter;
@@ -1280,6 +1282,14 @@ fn emit_nodal_nan_reset(
         }
     }
 
+    // Stateful-device opaque state blocks: restore to seed. `body` here is
+    // 8-space (indent="    " + 4), matching the shared helper's 8-space `state.`
+    // lines, so this block is byte-identical to the DK NaN-recovery path.
+    code.push_str(&emit_stateful_state_restore(
+        &stateful_device_data(ir),
+        "state.",
+    ));
+
     // Pots are deliberately NOT reset here. The matrices already reflect the
     // current pot fields; snapping the fields to nominal without setting
     // matrices_dirty would leave fields and matrices disagreeing until the
@@ -2423,12 +2433,16 @@ impl RustEmitter {
             _ => false,
         });
         let needs_rebuild_state = has_pots || has_switches || has_sat_ind || has_sat_coupled;
+        // Stateful devices (Phase 0c) read `state.current_sample_rate` for the
+        // after-solve update() dt (DK parity), so the field must exist.
+        let has_stateful = !stateful_device_data(ir).is_empty();
         // The runtime BE-latch detector derives its EMA coefficient from the
         // live sample rate (fs-invariant time constant), so it needs the field.
         let needs_current_sr = needs_rebuild_state
             || has_opamp_slew
             || has_full_lu_substep
             || has_thermal_sr_consumer
+            || has_stateful
             || ir.solver_config.runtime_be_latch;
         let has_any_saturation = has_sat_ind || has_sat_coupled;
 
@@ -2979,6 +2993,16 @@ impl RustEmitter {
             }
         }
 
+        // Stateful-device opaque state blocks (Phase 0c). Shared field emitter
+        // with the DK path; empty when no device is stateful.
+        {
+            let sdevs = stateful_device_data(ir);
+            if !sdevs.is_empty() {
+                code.push('\n');
+                code.push_str(&emit_stateful_state_fields(&sdevs));
+            }
+        }
+
         // Oversampling state
         let os_factor = ir.solver_config.oversampling_factor;
         if os_factor > 1 {
@@ -3280,6 +3304,9 @@ impl RustEmitter {
             ));
         }
 
+        // Stateful-device state blocks: seed via the shared Default emitter.
+        code.push_str(&emit_stateful_default_fields(&stateful_device_data(ir)));
+
         if os_factor > 1 {
             let os_info = oversampling_info(os_factor);
             code.push_str(&format!(
@@ -3506,6 +3533,11 @@ impl RustEmitter {
                 td.dev_num, td.dev_num
             ));
         }
+        // Stateful-device state blocks: restore to seed (shared emitter, `self`).
+        code.push_str(&emit_stateful_state_restore(
+            &stateful_device_data(ir),
+            "self.",
+        ));
         if os_factor > 1 {
             let os_info = oversampling_info(os_factor);
             code.push_str(&format!(
@@ -3737,6 +3769,12 @@ impl RustEmitter {
         if needs_current_sr {
             code.push_str("        self.current_sample_rate = sample_rate;\n\n");
         }
+        // Stateful-device rate-baked coefficients (Phase 0c). Empty in 1a
+        // (CdsLdr recomputes its coefficient live from current_sample_rate).
+        code.push_str(&emit_stateful_set_sample_rate_body(
+            ir,
+            &stateful_device_data(ir),
+        ));
         code.push_str("        // If same as codegen sample rate, reset to defaults\n");
         code.push_str("        if (sample_rate - SAMPLE_RATE).abs() < 0.5 {\n");
         // The *_DEFAULT matrices bake NOMINAL pot resistances and switch
@@ -5929,6 +5967,10 @@ impl RustEmitter {
 
         // Runtime BE-latch detector (updates state.be_latched for next sample).
         Self::emit_be_latch_detector(&mut code, ir, "    ");
+
+        // Stateful-device (Phase 0c) after-solve update — BEFORE state.v_prev = v
+        // so v_prev holds the prior sample. Shared with the DK path.
+        code.push_str(&emit_stateful_update(&stateful_device_data(ir)));
 
         // State update
         code.push_str("    // State update\n");
@@ -8273,6 +8315,9 @@ impl RustEmitter {
             code.push_str("    // Behavioral ddt/idt companion-state update (at converged v)\n");
             emit_behavioral_time_update(&mut code, ir, "    ");
         }
+        // Stateful-device (Phase 0c) after-solve update — BEFORE state.v_prev = v
+        // so v_prev holds the prior sample. Shared with the DK path.
+        code.push_str(&emit_stateful_update(&stateful_device_data(ir)));
         code.push_str("    state.v_prev = v;\n");
         // Breakpoint-BE countdown: this sample was solved on the BE matrices via
         // the forced BE fallback. One decrement per sample, after the solve.

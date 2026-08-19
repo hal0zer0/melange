@@ -216,7 +216,7 @@ pub struct CircuitState {
     pub device_{{ td.dev_num }}_tj: f64,
 {% endfor %}
 {% endif %}
-{% if noise_enabled_emit %}
+{% if has_stateful %}{{ stateful_state_fields }}{% endif %}{% if noise_enabled_emit %}
     // --- Authentic circuit noise (Phase 1: thermal) ---
 {{ noise_state_fields }}{% endif %}
 {% if runtime_sources | length > 0 %}
@@ -354,7 +354,7 @@ static OPAMP_RAIL_DEGRADE_WARN_ONCE: std::sync::Once = std::sync::Once::new();
             device_{{ td.dev_num }}_tj: DEVICE_{{ td.dev_num }}_TAMB,
 {% endfor %}
 {% endif %}
-{% if noise_enabled_emit %}{{ noise_default_fields }}{% endif %}{% if runtime_sources | length > 0 %}{% for rt in runtime_sources %}            {{ rt.field_name }}: 0.0,
+{% if has_stateful %}{{ stateful_default_fields }}{% endif %}{% if noise_enabled_emit %}{{ noise_default_fields }}{% endif %}{% if runtime_sources | length > 0 %}{% for rt in runtime_sources %}            {{ rt.field_name }}: 0.0,
 {% endfor %}{% endif %}        }
     }
 }
@@ -464,7 +464,7 @@ impl CircuitState {
         self.device_{{ td.dev_num }}_tj = DEVICE_{{ td.dev_num }}_TAMB;
 {% endfor %}
 {% endif %}
-{% if noise_enabled_emit %}{{ noise_reset_body }}{% endif %}{% if runtime_sources | length > 0 %}{% for rt in runtime_sources %}        self.{{ rt.field_name }} = 0.0;
+{% if has_stateful %}{{ stateful_reset_body }}{% endif %}{% if noise_enabled_emit %}{{ noise_reset_body }}{% endif %}{% if runtime_sources | length > 0 %}{% for rt in runtime_sources %}        self.{{ rt.field_name }} = 0.0;
 {% endfor %}{% endif %}
     }
 
@@ -586,7 +586,7 @@ impl CircuitState {
         }
 {% if noise_enabled_emit %}{{ noise_set_sample_rate_body }}{% endif %}
 {% if needs_current_sr %}        self.current_sample_rate = sample_rate;
-{% endif %}
+{% endif %}{% if has_stateful %}{{ stateful_set_sample_rate_body }}{% endif %}
 {% if num_switches > 0 or num_pots > 0 %}
         // Same-rate call: restore rate-dependent defaults where possible.
         if (sample_rate - SAMPLE_RATE).abs() < 0.5 {

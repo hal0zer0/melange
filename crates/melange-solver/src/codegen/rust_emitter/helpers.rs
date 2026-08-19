@@ -567,6 +567,232 @@ pub(super) fn emit_thermal_tj_advance(dev_num: usize, cth: f64) -> String {
     }
 }
 
+// ============================================================================
+// Stateful-device interface (Phase 0c) — device-agnostic opaque state block
+// ============================================================================
+//
+// A stateful device carries an opaque `[f64; N]` state block that is FROZEN
+// during the NR solve and advanced AFTER it, on the converged driving-node
+// voltage(s) — the same "Step 7e" ordering the thermal self-heating advance
+// uses. Every string below is authored ONCE here and spliced verbatim by BOTH
+// the DK (Tera-injected) and nodal (procedural) emitters, exactly like
+// `emit_thermal_tj_advance`. That is what makes the two paths unable to drift.
+//
+// The framework is device-agnostic by construction: `state_size`,
+// `driving_nodes.len()`, and `terminal_nodes.len()` are all read from the
+// per-device `StatefulSpec` — nothing here assumes N == 1, two terminals, or a
+// single driving node. A future 4-terminal / 2-threshold / 2-rail glow tube is
+// a new leaf (a new `DeviceParams` arm supplying its own eval + `update` body),
+// not a change to any of these functions.
+//
+// The device-SPECIFIC math — the NR current/Jacobian contribution that reads
+// the frozen state, and the body of the per-device `update()` hook — is
+// dispatched on `DeviceParams` in [`stateful_update_body`] and in the two
+// device-evaluation emitters. In Phase 1a no `DeviceParams` variant is stateful
+// yet, so [`stateful_device_data`] is empty for every real circuit and all of
+// these emitters return `""` — a deck with no stateful device is byte-identical
+// to before this machinery existed.
+
+/// One resolved stateful device: its index + its opaque spec.
+pub(super) struct StatefulDeviceData<'a> {
+    pub(super) dev_num: usize,
+    pub(super) spec: &'a crate::device_types::StatefulSpec,
+}
+
+/// Collect every device slot carrying an opaque stateful state block.
+///
+/// Empty for the overwhelming majority of circuits. All the `emit_stateful_*`
+/// helpers short-circuit to `""` on an empty slice, so this being empty is the
+/// byte-identity guarantee for non-stateful decks.
+pub(super) fn stateful_device_data(ir: &CircuitIR) -> Vec<StatefulDeviceData<'_>> {
+    ir.device_slots
+        .iter()
+        .enumerate()
+        .filter_map(|(dev_num, slot)| {
+            slot.stateful
+                .as_ref()
+                .map(|spec| StatefulDeviceData { dev_num, spec })
+        })
+        .collect()
+}
+
+/// Format a state-block seed as a Rust array literal, e.g. `[1.0e7, 7.5e1]`.
+///
+/// Length is `state_size`; if `state_seed` is short it is padded with `0.0`
+/// (defensive — construction should always supply exactly `state_size`).
+fn stateful_seed_literal(spec: &crate::device_types::StatefulSpec) -> String {
+    let mut vals: Vec<String> = spec.state_seed.iter().map(|v| fmt_f64(*v)).collect();
+    while vals.len() < spec.state_size {
+        vals.push("0.0".to_string());
+    }
+    vals.truncate(spec.state_size);
+    format!("[{}]", vals.join(", "))
+}
+
+/// Node-voltage expression for a 1-based node index (`0` = ground → `0.0`).
+/// `base` is `"v"` (this sample's converged voltages) or `"state.v_prev"`
+/// (the previous sample's).
+fn node_volt_expr(base: &str, node: usize) -> String {
+    if node == 0 {
+        "0.0".to_string()
+    } else {
+        format!("{base}[{}]", node - 1)
+    }
+}
+
+/// Struct-field declarations for every stateful device's opaque state block.
+/// 4-space indent (struct body). Shared by DK and nodal.
+pub(super) fn emit_stateful_state_fields(devs: &[StatefulDeviceData]) -> String {
+    if devs.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("    // --- Stateful-device opaque state blocks (Phase 0c) ---\n");
+    for d in devs {
+        let n = d.dev_num;
+        let sz = d.spec.state_size;
+        s.push_str(&format!(
+            "    /// Device {n} opaque stateful state block. Device-agnostic\n\
+             \x20   /// `[f64; {sz}]` — size is device-declared, never a bool. Frozen\n\
+             \x20   /// during the NR solve, advanced after it on the driving node(s).\n\
+             \x20   pub device_{n}_state: [f64; {sz}],\n"
+        ));
+    }
+    s
+}
+
+/// `Default`-impl struct-literal entries for each state block (12-space indent).
+pub(super) fn emit_stateful_default_fields(devs: &[StatefulDeviceData]) -> String {
+    let mut s = String::new();
+    for d in devs {
+        let n = d.dev_num;
+        s.push_str(&format!(
+            "            device_{n}_state: {},\n",
+            stateful_seed_literal(d.spec)
+        ));
+    }
+    s
+}
+
+/// Assignment statements restoring each state block to its seed (8-space
+/// indent). Used for BOTH `reset()` (`receiver = "self."`) and the NaN-recovery
+/// path (`receiver = "state."`) — the only difference between those two sites.
+pub(super) fn emit_stateful_state_restore(devs: &[StatefulDeviceData], receiver: &str) -> String {
+    let mut s = String::new();
+    for d in devs {
+        let n = d.dev_num;
+        s.push_str(&format!(
+            "        {receiver}device_{n}_state = {};\n",
+            stateful_seed_literal(d.spec)
+        ));
+    }
+    s
+}
+
+/// `set_sample_rate` body fragment: re-bake any rate-dependent coefficient a
+/// stateful device stashes in its state block. Dispatched on `DeviceParams`;
+/// empty in Phase 1a (no stateful variant yet). The splice point exists so a
+/// device that bakes coefficients at `set_sample_rate` time (rather than
+/// recomputing them live from `current_sample_rate` inside `update`, as CdsLdr
+/// does) needs no new wiring.
+pub(super) fn emit_stateful_set_sample_rate_body(
+    _ir: &CircuitIR,
+    _devs: &[StatefulDeviceData],
+) -> String {
+    // Phase 1b will dispatch on `DeviceParams` here for any device with a
+    // rate-baked coefficient. No stateful DeviceParams variant exists yet.
+    String::new()
+}
+
+/// The after-solve `update()` CALL block for every stateful device.
+///
+/// Spliced BEFORE `state.v_prev = v` on all three process_sample paths (DK
+/// template + nodal Schur + nodal full-LU), so `v` holds this sample's
+/// converged node voltages and `state.v_prev` still holds the previous
+/// sample's — the two the hook needs. The call passes the driving-node
+/// voltages as fixed-size arrays, so the reserved `v_prev` argument (v1 devices
+/// ignore it) is threaded WITHOUT any call-site change when sub-sample crossing
+/// interpolation is added later.
+pub(super) fn emit_stateful_update(devs: &[StatefulDeviceData]) -> String {
+    let mut s = String::new();
+    for d in devs {
+        let n = d.dev_num;
+        let dn = &d.spec.driving_nodes;
+        let dcount = dn.len();
+        let prev = dn
+            .iter()
+            .map(|&node| node_volt_expr("state.v_prev", node))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let conv = dn
+            .iter()
+            .map(|&node| node_volt_expr("v", node))
+            .collect::<Vec<_>>()
+            .join(", ");
+        s.push_str(&format!(
+            "    {{ // Device {n} stateful update — after solve, on converged driving-node voltage(s)\n\
+             \x20       let dt = 1.0 / (state.current_sample_rate * OVERSAMPLING_FACTOR as f64);\n\
+             \x20       let v_prev_drive: [f64; {dcount}] = [{prev}];\n\
+             \x20       let v_conv_drive: [f64; {dcount}] = [{conv}];\n\
+             \x20       stateful_update_dev{n}(&mut state.device_{n}_state, &v_prev_drive, &v_conv_drive, dt);\n\
+             \x20   }}\n"
+        ));
+    }
+    s
+}
+
+/// The per-device `update()` FUNCTIONS, with the fixed, device-agnostic
+/// signature `update(&mut state_block, v_prev, v_converged, dt)`. `v_prev` is
+/// RESERVED — v1 devices ignore it, but it is in the signature so sub-sample
+/// crossing interpolation is addable later without touching the call site (the
+/// cheapest anti-rebuild point).
+///
+/// The body is dispatched on `DeviceParams` via [`stateful_update_body`]. Phase
+/// 1a supplies a scaffold no-op body (which still consumes every argument, so
+/// the exact signature compiles); Phase 1b replaces it per device with the real
+/// state advance.
+pub(super) fn emit_stateful_update_fns(
+    devs: &[StatefulDeviceData],
+    slots: &[crate::device_types::DeviceSlot],
+) -> String {
+    let mut s = String::new();
+    for d in devs {
+        let n = d.dev_num;
+        let sz = d.spec.state_size;
+        let dcount = d.spec.driving_nodes.len();
+        let slot = &slots[d.dev_num];
+        let body = stateful_update_body(slot, d.spec);
+        s.push_str(&format!(
+            "/// Stateful update hook for device {n}. `v_prev` is RESERVED (v1\n\
+             /// ignores it; present so sub-sample crossing interpolation is\n\
+             /// addable without touching the call site). Advances the opaque\n\
+             /// `[f64; {sz}]` state on the converged driving-node voltage(s).\n\
+             #[inline]\n\
+             fn stateful_update_dev{n}(state: &mut [f64; {sz}], v_prev: &[f64; {dcount}], v_converged: &[f64; {dcount}], dt: f64) {{\n\
+             {body}\
+             }}\n\n"
+        ));
+    }
+    s
+}
+
+/// Device-specific body of `stateful_update_dev{n}`. Dispatched on
+/// `DeviceParams`. Phase 1a: no stateful variant exists, so this returns a
+/// scaffold no-op that consumes all four arguments (keeping the exact signature
+/// warning-clean). Phase 1b adds the `DeviceParams::Ldr` arm with the real
+/// attack/release advance from `ldr.rs`.
+fn stateful_update_body(
+    _slot: &crate::device_types::DeviceSlot,
+    _spec: &crate::device_types::StatefulSpec,
+) -> String {
+    // Phase 1a scaffold — no device math yet. Consume every argument so the
+    // fixed signature compiles without unused-variable warnings; Phase 1b
+    // replaces this with a `match &slot.params { DeviceParams::Ldr(..) => .. }`.
+    "    // Phase 1a scaffold: no device-specific state advance yet.\n\
+     \x20   let _ = (v_prev, v_converged, dt);\n\
+     \x20   let _ = &mut *state;\n"
+        .to_string()
+}
+
 /// Collapse 3+ consecutive blank lines down to 2.
 ///
 /// Post-processing pass applied to generated code for cleaner output.
@@ -866,6 +1092,122 @@ pub(super) struct OversamplingInfo {
     pub(super) coeffs_outer: Vec<f64>,
     /// For 4x: number of sections in outer stage
     pub(super) num_sections_outer: usize,
+}
+
+#[cfg(test)]
+mod stateful_interface_tests {
+    //! Phase 0c Stage 1a — device-agnostic stateful-device interface.
+    //!
+    //! These tests exercise the shared emission scaffolding on a HYPOTHETICAL
+    //! glow-discharge–shaped device WITHOUT any netlist device existing: a
+    //! `state_size = 2` block (two thresholds), a 4-terminal node list, and TWO
+    //! foreign driving nodes spanning two rails. Nothing in the emitters is
+    //! specialized to CdsLdr (N=1, 2 terminals, 1 driving node) — the glow shape
+    //! goes through the identical code, which is the concrete, in-code proof
+    //! that the interface "survives GlowDischarge without a rebuild".
+    //!
+    //! The DK-vs-nodal *generated-code* byte-identity of these blocks is
+    //! guaranteed by construction (both emitters splice the SAME functions
+    //! below); the end-to-end netlist-reachable string-identity test lands in
+    //! Stage 1c once CdsLdr makes a stateful device reachable from a `.cir`.
+    use super::*;
+    use crate::device_types::{DeviceSlot, DeviceType, DiodeParams, StatefulSpec};
+
+    /// A glow-shaped spec: 2 state slots, 4 terminals, 2 driving nodes (one of
+    /// which is ground, to exercise the `0 → 0.0` path).
+    fn glow_spec() -> StatefulSpec {
+        StatefulSpec {
+            state_size: 2,
+            state_seed: vec![1.0, 2.0],
+            terminal_nodes: vec![1, 2, 3, 4],
+            driving_nodes: vec![5, 0], // node 5 and ground
+        }
+    }
+
+    #[test]
+    fn empty_slice_emits_nothing() {
+        // Byte-identity guarantee for non-stateful decks: every emitter is "".
+        let devs: Vec<StatefulDeviceData> = Vec::new();
+        assert_eq!(emit_stateful_state_fields(&devs), "");
+        assert_eq!(emit_stateful_default_fields(&devs), "");
+        assert_eq!(emit_stateful_state_restore(&devs, "self."), "");
+        assert_eq!(emit_stateful_state_restore(&devs, "state."), "");
+        assert_eq!(emit_stateful_update(&devs), "");
+        assert_eq!(emit_stateful_update_fns(&devs, &[]), "");
+    }
+
+    #[test]
+    fn glow_shape_state_block_is_opaque_n() {
+        let spec = glow_spec();
+        let devs = vec![StatefulDeviceData {
+            dev_num: 0,
+            spec: &spec,
+        }];
+        // Opaque [f64; N], N device-declared — never a bool.
+        assert!(emit_stateful_state_fields(&devs).contains("pub device_0_state: [f64; 2],"));
+        // Default / reset / NaN-recovery all restore the full 2-slot seed.
+        assert!(emit_stateful_default_fields(&devs).contains("device_0_state: [1"));
+        let reset = emit_stateful_state_restore(&devs, "self.");
+        assert!(reset.starts_with("        self.device_0_state = ["));
+        let nan = emit_stateful_state_restore(&devs, "state.");
+        assert!(nan.starts_with("        state.device_0_state = ["));
+    }
+
+    #[test]
+    fn glow_shape_update_call_threads_two_driving_nodes_and_reserved_v_prev() {
+        let spec = glow_spec();
+        let devs = vec![StatefulDeviceData {
+            dev_num: 0,
+            spec: &spec,
+        }];
+        let call = emit_stateful_update(&devs);
+        // Two driving nodes → [f64; 2] arrays; node 5 → index 4, ground → 0.0.
+        assert!(call.contains("let v_prev_drive: [f64; 2] = [state.v_prev[4], 0.0];"));
+        assert!(call.contains("let v_conv_drive: [f64; 2] = [v[4], 0.0];"));
+        // Reserved v_prev is threaded through the fixed signature.
+        assert!(call.contains(
+            "stateful_update_dev0(&mut state.device_0_state, &v_prev_drive, &v_conv_drive, dt);"
+        ));
+        // dt is the internal (oversampled) period from the LIVE rate.
+        assert!(call.contains("state.current_sample_rate * OVERSAMPLING_FACTOR as f64"));
+    }
+
+    #[test]
+    fn glow_shape_update_fn_signature_is_device_agnostic() {
+        let spec = glow_spec();
+        let devs = vec![StatefulDeviceData {
+            dev_num: 0,
+            spec: &spec,
+        }];
+        // A throwaway slot to satisfy the body dispatch (params irrelevant to
+        // the Phase-1a scaffold body).
+        let slot = DeviceSlot {
+            device_type: DeviceType::Diode,
+            start_idx: 0,
+            dimension: 1,
+            params: crate::device_types::DeviceParams::Diode(DiodeParams {
+                is: 1e-14,
+                n_vt: 0.026,
+                cjo: 0.0,
+                rs: 0.0,
+                bv: f64::INFINITY,
+                ibv: 1e-3,
+                rth: f64::INFINITY,
+                cth: 1e-3,
+                xti: 3.0,
+                eg: 1.11,
+                tamb: 300.15,
+            }),
+            has_internal_mna_nodes: false,
+            vg2k_frozen: 0.0,
+            stateful: Some(spec.clone()),
+        };
+        let fns = emit_stateful_update_fns(&devs, std::slice::from_ref(&slot));
+        // The exact reserved-v_prev signature, generic over N and D.
+        assert!(fns.contains(
+            "fn stateful_update_dev0(state: &mut [f64; 2], v_prev: &[f64; 2], v_converged: &[f64; 2], dt: f64)"
+        ));
+    }
 }
 
 /// Get oversampling configuration for a given factor.

@@ -627,6 +627,7 @@ fn build_device_slots(netlist: &Netlist, _mna: &MnaSystem) -> Vec<DeviceSlot> {
                     }),
                     has_internal_mna_nodes: false,
                     vg2k_frozen: 0.0,
+                    stateful: None,
                 });
                 dim_offset += 1;
             }
@@ -684,6 +685,7 @@ fn build_device_slots(netlist: &Netlist, _mna: &MnaSystem) -> Vec<DeviceSlot> {
                     }),
                     has_internal_mna_nodes: false,
                     vg2k_frozen: 0.0,
+                    stateful: None,
                 });
                 dim_offset += 2;
             }
@@ -890,6 +892,7 @@ fn test_parasitic_bjt_internal_newton_converges() {
         }),
         has_internal_mna_nodes: false,
         vg2k_frozen: 0.0,
+        stateful: None,
     };
 
     let m = 2;
@@ -1052,6 +1055,7 @@ fn test_dc_op_mosfet_body_effect_parity() {
         }),
         has_internal_mna_nodes: false,
         vg2k_frozen: 0.0,
+        stateful: None,
     };
 
     let m = 2;
@@ -1139,6 +1143,7 @@ fn test_dc_op_vca_thd_parity() {
         params: DeviceParams::Vca(VcaParams { vscale, g0, thd }),
         has_internal_mna_nodes: false,
         vg2k_frozen: 0.0,
+        stateful: None,
     };
 
     let m = 2;
@@ -1553,6 +1558,7 @@ C1 in gate 10u
         }),
         has_internal_mna_nodes: false,
         vg2k_frozen: 0.0,
+        stateful: None,
     }];
 
     let config = DcOpConfig {

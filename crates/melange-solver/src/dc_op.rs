@@ -3660,6 +3660,7 @@ Cx c3 b4 6n IC=-4\n";
             }),
             has_internal_mna_nodes: false,
             vg2k_frozen: 0.0,
+            stateful: None,
         };
 
         let m = 1;
@@ -3734,6 +3735,7 @@ Cx c3 b4 6n IC=-4\n";
             }),
             has_internal_mna_nodes: false,
             vg2k_frozen: 0.0,
+            stateful: None,
         };
 
         let m = 2;
@@ -3786,6 +3788,7 @@ Cx c3 b4 6n IC=-4\n";
             }),
             has_internal_mna_nodes: false,
             vg2k_frozen: 0.0,
+            stateful: None,
         };
 
         let m = 1;
@@ -3828,6 +3831,7 @@ Cx c3 b4 6n IC=-4\n";
                 }),
                 has_internal_mna_nodes: false,
                 vg2k_frozen: 0.0,
+                stateful: None,
             },
             DeviceSlot {
                 device_type: DeviceType::Diode,
@@ -3848,6 +3852,7 @@ Cx c3 b4 6n IC=-4\n";
                 }),
                 has_internal_mna_nodes: false,
                 vg2k_frozen: 0.0,
+                stateful: None,
             },
             DeviceSlot {
                 device_type: DeviceType::Diode,
@@ -3868,6 +3873,7 @@ Cx c3 b4 6n IC=-4\n";
                 }),
                 has_internal_mna_nodes: false,
                 vg2k_frozen: 0.0,
+                stateful: None,
             },
         ];
 

@@ -268,7 +268,7 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
         state.os_dn_state = [[0.0; {{ os_state_size }}]; NUM_OUTPUTS];
 {% endif %}{% if oversampling_4x %}        state.os_up_state_outer = [0.0; {{ os_state_size_outer }}];
         state.os_dn_state_outer = [[0.0; {{ os_state_size_outer }}]; NUM_OUTPUTS];
-{% endif %}{% if noise_enabled_emit %}{{ noise_nan_recovery }}{% endif %}        if v_is_finite { state.diag_magnitude_reset_count += 1; } else { state.diag_nan_reset_count += 1; }
+{% endif %}{% if noise_enabled_emit %}{{ noise_nan_recovery }}{% endif %}{% if stateful_nan_recovery is defined and stateful_nan_recovery != "" %}{{ stateful_nan_recovery }}{% endif %}        if v_is_finite { state.diag_magnitude_reset_count += 1; } else { state.diag_nan_reset_count += 1; }
         // Return DC operating point output instead of zero to avoid discontinuity
         let mut dc_output = [0.0f64; NUM_OUTPUTS];
         for out_idx in 0..NUM_OUTPUTS {
@@ -282,7 +282,9 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
 {% else %}        return dc_output;
 {% endif %}    }
 
-    // Update state for next iteration
+{% if stateful_update is defined and stateful_update != "" %}    // Step 6z: stateful-device update (after solve, on converged driving-node
+    // voltage(s), BEFORE state.v_prev = v so v_prev is still the prior sample)
+{{ stateful_update }}{% endif %}    // Update state for next iteration
     state.v_prev = v;
     state.i_nl_prev_prev = state.i_nl_prev;
     state.i_nl_prev = i_nl;

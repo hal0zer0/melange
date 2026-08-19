@@ -446,6 +446,7 @@ mod tests {
             }),
             has_internal_mna_nodes: false,
             vg2k_frozen: 0.0,
+            stateful: None,
         }];
 
         let pattern = compute_g_aug_pattern(&a_flat, &n_i_flat, &n_v_flat, n, m, &slots, &[]);

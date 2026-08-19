@@ -315,6 +315,7 @@ fn bjt_slots_with_parasitics(netlist: &Netlist) -> Vec<DeviceSlot> {
                 }),
                 has_internal_mna_nodes: false,
                 vg2k_frozen: 0.0,
+                stateful: None,
             });
             dim_offset += 2;
         }

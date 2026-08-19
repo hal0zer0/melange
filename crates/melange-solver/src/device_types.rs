@@ -344,6 +344,62 @@ pub struct DeviceSlot {
     /// field is unused and stays at its default of 0.0.
     #[serde(default)]
     pub vg2k_frozen: f64,
+    /// Device-agnostic opaque stateful-device spec (Phase 0c).
+    ///
+    /// `None` for the vast majority of devices (diode/BJT/JFET/… are
+    /// memoryless within a sample). `Some` for a *stateful* device — one
+    /// carrying an opaque `[f64; N]` state block that is FROZEN during the NR
+    /// solve and advanced AFTER it, on the converged driving-node voltage
+    /// (the thermal "Step 7e" ordering). See [`StatefulSpec`]. The spec is
+    /// device-agnostic on purpose: it fixes no terminal count, no state-block
+    /// size, and no bias direction, so a future 4-terminal / 2-threshold /
+    /// 2-rail glow-discharge tube is expressible without changing this type.
+    #[serde(default)]
+    pub stateful: Option<StatefulSpec>,
+}
+
+/// Device-agnostic opaque state-block specification for a stateful device.
+///
+/// Attached to a [`DeviceSlot`] via [`DeviceSlot::stateful`]. This is the
+/// load-bearing interface of Phase 0c: it carries everything the codegen
+/// machinery needs to emit a per-device `[f64; N]` state block — its seed,
+/// its `reset()` / NaN-recovery restoration, and the after-solve `update()`
+/// hook — WITHOUT the framework knowing what device it is.
+///
+/// The device-specific math (the NR current/Jacobian contribution that reads
+/// the frozen state, and the body of the `update()` hook that advances it) is
+/// dispatched separately on [`DeviceParams`], so adding a new stateful device
+/// is a new *leaf*: it sets `state_size`, lists its `terminal_nodes` and
+/// `driving_nodes`, and adds its math. Nothing in this struct or in the
+/// emission scaffolding changes. That is what "survives GlowDischarge without
+/// a rebuild" means concretely — glow is `state_size` ≥ 1 (its own N),
+/// `terminal_nodes.len() == 4`, `driving_nodes.len() == 2` (two thresholds
+/// referenced across two supply rails), all of which this shape already
+/// admits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatefulSpec {
+    /// Size `N` of the opaque `device_{n}_state: [f64; N]` block. NEVER a
+    /// `bool` — a bare on/off flag cannot express a 2-threshold hysteretic
+    /// device, which is exactly the anti-pattern this interface forbids.
+    /// CdsLdr v1: `N = 1` (the single resistance state).
+    pub state_size: usize,
+    /// Seed values written by `Default`, `reset()`, and NaN-recovery.
+    /// `len() == state_size`. The device chooses the physically-correct cold
+    /// state (CdsLdr: `[r_max]`, i.e. dark).
+    pub state_seed: Vec<f64>,
+    /// Every node index this device electrically connects to (1-based;
+    /// `0` = ground). NOT fixed at 2 — a glow tube lists 4. Informational at
+    /// the state-machinery layer (the MNA stamp owns the actual electrical
+    /// connection); carried here so the terminal count is a device-declared
+    /// property rather than a hard-coded assumption.
+    pub terminal_nodes: Vec<usize>,
+    /// Node index/indices whose converged voltages drive the `update()` hook
+    /// (1-based; `0` = ground). MAY be foreign to the NR terminals — CdsLdr's
+    /// resistance is driven by the LED control node, not by the resistor's
+    /// own two terminals. `len() == D`; the update hook receives `v_prev` and
+    /// `v_converged` as `[f64; D]`, so a 2-threshold glow device
+    /// (`D == 2`) needs no signature change.
+    pub driving_nodes: Vec<usize>,
 }
 
 /// JFET model parameters (resolved from `.model` directive or defaults).
