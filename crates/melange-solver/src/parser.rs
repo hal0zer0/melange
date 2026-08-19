@@ -829,6 +829,29 @@ pub enum Element {
         /// Model name (references `.model` with VP/VPENTODE type)
         model: String,
     },
+    /// Opto/LDR photoresistor: Oname r+ r- ctrl+ ctrl- modelname
+    ///
+    /// `r+ r-` are the photoresistor terminals (the NR-controlled resistance
+    /// path; 1 NR dimension, `I = (V(r+)−V(r-)) / r_state`). `ctrl+ ctrl-` are
+    /// the foreign brightness-control node pair that drives the after-solve
+    /// state update — `V(ctrl+) − V(ctrl-)` is the normalized brightness in
+    /// [0,1] (0 = dark → RMAX, 1 = bright → RMIN), clamped inside `update()`.
+    /// The LED is NOT modeled inside the device (a physically-driven
+    /// optocoupler is future composition: a `D` + behavioral B-source feeding
+    /// the brightness node). References a `.model` of type `LDR`.
+    Ldr {
+        name: String,
+        /// Photoresistor terminal + (resistance path)
+        n_plus: String,
+        /// Photoresistor terminal − (resistance path)
+        n_minus: String,
+        /// Brightness-control node + (foreign; drives update())
+        n_ctrl_p: String,
+        /// Brightness-control node − (foreign; drives update())
+        n_ctrl_n: String,
+        /// Model name (references .model with LDR type)
+        model: String,
+    },
     /// VCA: Yname sig+ sig- ctrl+ ctrl- modelname
     ///
     /// M=2 per VCA: signal current (I_sig) and control current (I_ctrl=0).
@@ -927,6 +950,7 @@ impl Element {
             | Element::Triode { name, .. }
             | Element::Pentode { name, .. }
             | Element::Vca { name, .. }
+            | Element::Ldr { name, .. }
             | Element::Vcvs { name, .. }
             | Element::Vccs { name, .. }
             | Element::SubcktInstance { name, .. }
@@ -944,7 +968,8 @@ impl Element {
             | Element::Opamp { model, .. }
             | Element::Triode { model, .. }
             | Element::Pentode { model, .. }
-            | Element::Vca { model, .. } => Some(model),
+            | Element::Vca { model, .. }
+            | Element::Ldr { model, .. } => Some(model),
             _ => None,
         }
     }
@@ -1028,6 +1053,17 @@ impl Element {
                 n_ctrl_n,
                 ..
             } => vec![n_sig_p, n_sig_n, n_ctrl_p, n_ctrl_n],
+            // Resistance path (r+, r-) FIRST — the N_v/N_i reduction reads the
+            // first two node_indices for the 1-D resistance dimension; the
+            // control pair follows and is a physical connection (its voltage is
+            // sensed to drive the state update).
+            Element::Ldr {
+                n_plus,
+                n_minus,
+                n_ctrl_p,
+                n_ctrl_n,
+                ..
+            } => vec![n_plus, n_minus, n_ctrl_p, n_ctrl_n],
             Element::Vcvs {
                 out_p,
                 out_n,
@@ -1241,6 +1277,21 @@ impl Element {
                 name: prefixed(name),
                 n_sig_p: remap(n_sig_p),
                 n_sig_n: remap(n_sig_n),
+                n_ctrl_p: remap(n_ctrl_p),
+                n_ctrl_n: remap(n_ctrl_n),
+                model: model.clone(),
+            },
+            Element::Ldr {
+                name,
+                n_plus,
+                n_minus,
+                n_ctrl_p,
+                n_ctrl_n,
+                model,
+            } => Element::Ldr {
+                name: prefixed(name),
+                n_plus: remap(n_plus),
+                n_minus: remap(n_minus),
                 n_ctrl_p: remap(n_ctrl_p),
                 n_ctrl_n: remap(n_ctrl_n),
                 model: model.clone(),
@@ -1654,6 +1705,7 @@ impl Parser {
                 | 'P'
                 | 'U'
                 | 'Y'
+                | 'O'
                 | 'E'
                 | 'G'
                 | 'X'
@@ -1744,6 +1796,7 @@ impl Parser {
                     }
                     Element::Opamp { .. } => Some((TypeRule::Exact(&["OA"]), "op-amp")),
                     Element::Vca { .. } => Some((TypeRule::Exact(&["VCA"]), "VCA")),
+                    Element::Ldr { .. } => Some((TypeRule::Exact(&["LDR"]), "LDR")),
                     _ => None,
                 };
                 if let Some((rule, kind)) = expected {
@@ -3638,6 +3691,7 @@ impl Parser {
             'P' => self.parse_pentode(&parts),
             'U' => self.parse_opamp(&parts),
             'Y' => self.parse_vca(&parts),
+            'O' => self.parse_ldr(&parts),
             'E' => self.parse_vcvs(&parts),
             'G' => self.parse_vccs(&parts),
             'X' => self.parse_subckt_instance(&parts),
@@ -4260,6 +4314,30 @@ impl Parser {
         })
     }
 
+    fn parse_ldr(&self, parts: &[&str]) -> Result<Element, ParseError> {
+        // Oname r+ r- ctrl+ ctrl- modelname
+        self.require_parts(parts, 6, "Oname r+ r- ctrl+ ctrl- modelname")?;
+        // The resistance path must not be self-connected (both terminals same
+        // net → zero-length short with no defined current).
+        self.check_self_connection(parts[1], parts[2], parts[0])?;
+        if parts.len() > 6 {
+            return Err(self.error(format!(
+                "LDR '{}': unexpected trailing token(s): '{}' — expected \
+                 'Oname r+ r- ctrl+ ctrl- modelname'",
+                parts[0],
+                parts[6..].join(" ")
+            )));
+        }
+        Ok(Element::Ldr {
+            name: parts[0].to_string(),
+            n_plus: parts[1].to_string(),
+            n_minus: parts[2].to_string(),
+            n_ctrl_p: parts[3].to_string(),
+            n_ctrl_n: parts[4].to_string(),
+            model: parts[5].to_string(),
+        })
+    }
+
     fn parse_vcvs(&self, parts: &[&str]) -> Result<Element, ParseError> {
         // Ename out+ out- ctrl+ ctrl- gain
         self.require_parts(parts, 6, "Ename out+ out- ctrl+ ctrl- gain")?;
@@ -4455,6 +4533,18 @@ fn validate_element_node_lengths(elem: &Element) -> Result<(), String> {
             check(n_ctrl_p)?;
             check(n_ctrl_n)?;
         }
+        Element::Ldr {
+            n_plus,
+            n_minus,
+            n_ctrl_p,
+            n_ctrl_n,
+            ..
+        } => {
+            check(n_plus)?;
+            check(n_minus)?;
+            check(n_ctrl_p)?;
+            check(n_ctrl_n)?;
+        }
         Element::Vcvs {
             out_p,
             out_n,
@@ -4607,6 +4697,18 @@ fn normalize_element_nodes(elem: &mut Element) {
         } => {
             norm(n_sig_p);
             norm(n_sig_n);
+            norm(n_ctrl_p);
+            norm(n_ctrl_n);
+        }
+        Element::Ldr {
+            n_plus,
+            n_minus,
+            n_ctrl_p,
+            n_ctrl_n,
+            ..
+        } => {
+            norm(n_plus);
+            norm(n_minus);
             norm(n_ctrl_p);
             norm(n_ctrl_n);
         }

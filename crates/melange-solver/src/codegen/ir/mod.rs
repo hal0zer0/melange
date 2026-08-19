@@ -4164,6 +4164,43 @@ impl CircuitIR {
                     dim_offset += 2;
                     nl_dev_idx += 1;
                 }
+                Element::Ldr { model, .. } => {
+                    let params = Self::resolve_ldr_params(netlist, model)?;
+                    // The opaque state-block spec needs node indices (1-based,
+                    // 0 = ground), which come from the MNA's built node map via
+                    // this device's `nonlinear_devices` entry (node_indices =
+                    // [r+, r-, ctrl+, ctrl-]). Present for every codegen path
+                    // (all pass `Some(mna)`); `None` only in mna-less helper
+                    // paths that never emit the stateful device.
+                    let stateful = mna.and_then(|m| {
+                        m.nonlinear_devices.get(nl_dev_idx).and_then(|d| {
+                            if d.device_type == crate::mna::NonlinearDeviceType::Ldr
+                                && d.node_indices.len() >= 4
+                            {
+                                let ni = &d.node_indices;
+                                Some(crate::device_types::StatefulSpec {
+                                    state_size: 1,
+                                    state_seed: vec![params.r_max],
+                                    terminal_nodes: ni.clone(),
+                                    driving_nodes: vec![ni[2], ni[3]],
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                    });
+                    slots.push(DeviceSlot {
+                        device_type: DeviceType::Ldr,
+                        start_idx: dim_offset,
+                        dimension: 1,
+                        params: DeviceParams::Ldr(params),
+                        has_internal_mna_nodes: false,
+                        vg2k_frozen: 0.0,
+                        stateful,
+                    });
+                    dim_offset += 1;
+                    nl_dev_idx += 1;
+                }
                 _ => {}
             }
         }
@@ -5326,6 +5363,56 @@ impl CircuitIR {
         Self::warn_unrecognized_params(netlist, model, &["VSCALE", "G0", "THD", "MODE"]);
 
         Ok(VcaParams { vscale, g0, thd })
+    }
+
+    /// Resolve opto/LDR model params. Resolution order per param: explicit
+    /// `.model … LDR(RMIN=… …)` value → catalog entry (by model name, e.g.
+    /// `.model VTL5C3 LDR()`) → generic default. Mirrors `ldr.rs` semantics.
+    fn resolve_ldr_params(
+        netlist: &Netlist,
+        model: &str,
+    ) -> Result<crate::device_types::LdrParams, CodegenError> {
+        let cat = melange_devices::catalog::ldr::lookup(model);
+        let r_min = Self::lookup_model_param(netlist, model, "RMIN")
+            .or_else(|| cat.map(|c| c.r_min))
+            .unwrap_or(75.0);
+        let r_max = Self::lookup_model_param(netlist, model, "RMAX")
+            .or_else(|| cat.map(|c| c.r_max))
+            .unwrap_or(10e6);
+        let gamma = Self::lookup_model_param(netlist, model, "GAMMA")
+            .or_else(|| cat.map(|c| c.gamma))
+            .unwrap_or(0.7);
+        let attack_tau = Self::lookup_model_param(netlist, model, "TAU_A")
+            .or_else(|| cat.map(|c| c.attack_tau))
+            .unwrap_or(0.005);
+        let release_tau = Self::lookup_model_param(netlist, model, "TAU_R")
+            .or_else(|| cat.map(|c| c.release_tau))
+            .unwrap_or(0.2);
+
+        validate_positive_finite(r_min, "LDR model RMIN")?;
+        validate_positive_finite(r_max, "LDR model RMAX")?;
+        validate_positive_finite(gamma, "LDR model GAMMA")?;
+        validate_positive_finite(attack_tau, "LDR model TAU_A")?;
+        validate_positive_finite(release_tau, "LDR model TAU_R")?;
+        if r_max <= r_min {
+            return Err(CodegenError::InvalidConfig(format!(
+                "LDR model '{model}': RMAX ({r_max}) must be greater than RMIN ({r_min})"
+            )));
+        }
+
+        Self::warn_unrecognized_params(
+            netlist,
+            model,
+            &["RMIN", "RMAX", "GAMMA", "TAU_A", "TAU_R"],
+        );
+
+        Ok(crate::device_types::LdrParams {
+            r_min,
+            r_max,
+            gamma,
+            attack_tau,
+            release_tau,
+        })
     }
 
     /// Warn on unrecognized .model parameters (typo protection).

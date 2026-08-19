@@ -377,6 +377,11 @@ pub enum NonlinearDeviceType {
     Mosfet,
     Tube,
     Vca,
+    /// Opto/LDR photoresistor (1D). `node_indices = [r+, r-, ctrl+, ctrl-]`;
+    /// only the first pair forms the NR resistance dimension (`I = v_d / R`,
+    /// R frozen during the solve). The control pair drives the after-solve
+    /// state advance and is otherwise electrically inert (draws no current).
+    Ldr,
 }
 
 /// Internal node indices for a parasitic BJT in the transient MNA system.
@@ -1408,6 +1413,9 @@ impl MnaSystem {
                 DeviceParams::Vca(_) => {
                     // VCA has no junction capacitances
                 }
+                DeviceParams::Ldr(_) => {
+                    // LDR is a pure (variable) resistor — no junction cap.
+                }
             }
         }
 
@@ -2298,6 +2306,12 @@ impl MnaSystem {
                 NonlinearDeviceType::Vca => {
                     // node_indices: [sig_p, sig_n, ctrl_p, ctrl_n]
                     // Signal path junction (sig+ to sig-)
+                    junctions.push((dev.name.clone(), dev.node_indices[0], dev.node_indices[1]));
+                }
+                NonlinearDeviceType::Ldr => {
+                    // node_indices: [r+, r-, ctrl+, ctrl-]. Resistance path
+                    // (r+ to r-) — mirrors the VCA signal-path parasitic so an
+                    // otherwise cap-free resistive LDR deck stays DK-conditioned.
                     junctions.push((dev.name.clone(), dev.node_indices[0], dev.node_indices[1]));
                 }
             }
@@ -4295,7 +4309,12 @@ impl MnaBuilder {
 
         for (dev_type, dim, start_idx, node_indices, dev_name) in device_info {
             match dev_type {
-                NonlinearDeviceType::Diode => {
+                // The LDR resistance path is electrically a 2-terminal nonlinear
+                // element identical in N_v/N_i structure to a diode: v_d =
+                // V(r+)−V(r-) is the sole controlling voltage and the current
+                // flows r+→r-. Only the eval differs (i = v_d/R vs the diode
+                // exponential); the reduction stamp is shared verbatim.
+                NonlinearDeviceType::Diode | NonlinearDeviceType::Ldr => {
                     if node_indices.len() >= 2 {
                         let node_i = node_indices[0];
                         let node_j = node_indices[1];
@@ -4861,6 +4880,13 @@ impl MnaBuilder {
                 n_ctrl_n,
                 ..
             } => vec![n_sig_p, n_sig_n, n_ctrl_p, n_ctrl_n],
+            Element::Ldr {
+                n_plus,
+                n_minus,
+                n_ctrl_p,
+                n_ctrl_n,
+                ..
+            } => vec![n_plus, n_minus, n_ctrl_p, n_ctrl_n],
             Element::BSource {
                 n_plus,
                 n_minus,
@@ -5016,6 +5042,45 @@ impl MnaBuilder {
                     dimension: 1,
                     start_idx,
                     nodes: vec![n_plus.clone(), n_minus.clone()],
+                    node_indices,
+                    vg2k_frozen: 0.0,
+                });
+            }
+            Element::Ldr {
+                name,
+                n_plus,
+                n_minus,
+                n_ctrl_p,
+                n_ctrl_n,
+                ..
+            } => {
+                // node_indices = [r+, r-, ctrl+, ctrl-]. Only the resistance
+                // pair (first two) forms the NR dimension; the control pair is
+                // carried so codegen can read its converged voltage to drive the
+                // after-solve state advance (it draws no current, like a VCA
+                // control port). The resistance path must not be fully grounded.
+                let rp = self.node_map[n_plus];
+                let rn = self.node_map[n_minus];
+                if rp == 0 && rn == 0 {
+                    return Err(MnaError::TopologyError(format!(
+                        "LDR '{}' has both resistance terminals grounded",
+                        name
+                    )));
+                }
+                let node_indices = vec![rp, rn, self.node_map[n_ctrl_p], self.node_map[n_ctrl_n]];
+                let start_idx = self.total_dimension;
+                self.total_dimension += 1; // LDR resistance path is 1-dimensional
+                self.nonlinear_devices.push(NonlinearDeviceInfo {
+                    name: name.clone(),
+                    device_type: NonlinearDeviceType::Ldr,
+                    dimension: 1,
+                    start_idx,
+                    nodes: vec![
+                        n_plus.clone(),
+                        n_minus.clone(),
+                        n_ctrl_p.clone(),
+                        n_ctrl_n.clone(),
+                    ],
                     node_indices,
                     vg2k_frozen: 0.0,
                 });

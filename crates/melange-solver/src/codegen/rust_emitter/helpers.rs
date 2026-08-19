@@ -396,6 +396,10 @@ pub(super) fn device_param_template_data(ir: &CircuitIR) -> Vec<DeviceParamTempl
                         },
                     ],
                 ),
+                // LDR carries no runtime-adjustable scalar CircuitState fields —
+                // its live state is the opaque `device_{n}_state` block; RMIN/…/
+                // TAU_R stay compile-time consts read directly by update().
+                DeviceParams::Ldr(_) => ("Ldr".to_string(), vec![]),
             };
             DeviceParamTemplateData {
                 dev_num,
@@ -733,41 +737,83 @@ pub(super) fn emit_stateful_update(devs: &[StatefulDeviceData]) -> String {
              \x20       let dt = 1.0 / (state.current_sample_rate * OVERSAMPLING_FACTOR as f64);\n\
              \x20       let v_prev_drive: [f64; {dcount}] = [{prev}];\n\
              \x20       let v_conv_drive: [f64; {dcount}] = [{conv}];\n\
-             \x20       stateful_update_dev{n}(&mut state.device_{n}_state, &v_prev_drive, &v_conv_drive, dt);\n\
+             \x20       // The returned StatefulUpdate is RESERVED (sub-sample fractional-fire\n\
+             \x20       // signal for a future within-sample-firing device). No v1 device sets\n\
+             \x20       // it and the caller-side correction is not applied yet (Stage 3), so\n\
+             \x20       // it is discarded here — reserving the slot without a signature rebuild.\n\
+             \x20       let _ = stateful_update_dev{n}(&mut state.device_{n}_state, &v_prev_drive, &v_conv_drive, dt);\n\
              \x20   }}\n"
         ));
     }
     s
 }
 
+/// The `StatefulUpdate` return type, emitted ONCE (only when at least one
+/// stateful device exists, so a non-stateful deck never sees it → byte-identical).
+///
+/// This is the reserved return slot of every `update()` hook. Phase-1 devices
+/// return `StatefulUpdate::default()` — no sub-sample firing. The slot exists so
+/// a future within-sample-firing device (e.g. a glow-discharge tube) can report
+/// a fractional-fire signal — a BLEP-style crossing fraction `alpha ∈ [0,1)` and
+/// a `fired` flag — that the caller applies to the in-flight sample `n+1` output
+/// WITHOUT a signature rebuild. Rationale (device owner): a strike between
+/// samples `n` and `n+1` has `alpha = (Vo − V_n)/(V_{n+1} − V_n)`, not computable
+/// until after solve `n+1`; only a RETURN lets the caller correct `n+1` in-flight
+/// (a global one-sample output latency is rejected — it taxes every plugin).
+/// Stage 1 only RESERVES the slot; the caller-side correction lands in Stage 3.
+fn stateful_update_return_type() -> &'static str {
+    "/// Reserved return of a stateful device's `update()` hook (Phase 0c).\n\
+     ///\n\
+     /// v1 devices return `StatefulUpdate::default()` (no sub-sample firing).\n\
+     /// Reserved so a within-sample-firing device (glow-discharge) can later\n\
+     /// report a BLEP-style fractional-fire signal (`alpha` + `fired`) that the\n\
+     /// caller applies to sample n+1 in-flight, with no signature rebuild. The\n\
+     /// caller-side correction is NOT applied yet (Stage 3).\n\
+     #[derive(Clone, Copy, Default)]\n\
+     #[allow(dead_code)]\n\
+     struct StatefulUpdate {\n\
+     \x20   /// True when the device fired within this sample interval. Reserved.\n\
+     \x20   fired: bool,\n\
+     \x20   /// Sub-sample crossing fraction in [0, 1). Reserved.\n\
+     \x20   alpha: f64,\n\
+     }\n\n"
+}
+
 /// The per-device `update()` FUNCTIONS, with the fixed, device-agnostic
-/// signature `update(&mut state_block, v_prev, v_converged, dt)`. `v_prev` is
-/// RESERVED — v1 devices ignore it, but it is in the signature so sub-sample
-/// crossing interpolation is addable later without touching the call site (the
-/// cheapest anti-rebuild point).
+/// signature `update(&mut state_block, v_prev, v_converged, dt) -> StatefulUpdate`.
+///
+/// Two reservations keep the interface glow-survivable without a later rebuild:
+/// * `v_prev` is RESERVED — v1 devices ignore it, but it is in the signature so
+///   sub-sample crossing interpolation is addable without touching the call site.
+/// * the `-> StatefulUpdate` RETURN is RESERVED — v1 devices return the default;
+///   a future within-sample-firing device populates it (see
+///   [`stateful_update_return_type`]).
 ///
 /// The body is dispatched on `DeviceParams` via [`stateful_update_body`]. Phase
-/// 1a supplies a scaffold no-op body (which still consumes every argument, so
-/// the exact signature compiles); Phase 1b replaces it per device with the real
-/// state advance.
+/// 1a supplies a scaffold no-op body; Phase 1b replaces it per device with the
+/// real state advance. Every body ends by returning a `StatefulUpdate`.
 pub(super) fn emit_stateful_update_fns(
     devs: &[StatefulDeviceData],
     slots: &[crate::device_types::DeviceSlot],
 ) -> String {
-    let mut s = String::new();
+    if devs.is_empty() {
+        return String::new();
+    }
+    // The return type is emitted once, ahead of the per-device hooks.
+    let mut s = String::from(stateful_update_return_type());
     for d in devs {
         let n = d.dev_num;
         let sz = d.spec.state_size;
         let dcount = d.spec.driving_nodes.len();
         let slot = &slots[d.dev_num];
-        let body = stateful_update_body(slot, d.spec);
+        let body = stateful_update_body(n, slot, d.spec);
         s.push_str(&format!(
-            "/// Stateful update hook for device {n}. `v_prev` is RESERVED (v1\n\
-             /// ignores it; present so sub-sample crossing interpolation is\n\
-             /// addable without touching the call site). Advances the opaque\n\
-             /// `[f64; {sz}]` state on the converged driving-node voltage(s).\n\
+            "/// Stateful update hook for device {n}. `v_prev` and the returned\n\
+             /// `StatefulUpdate` are RESERVED (sub-sample interpolation / fractional-\n\
+             /// fire, unused in v1) so glow drops in without a signature rebuild.\n\
+             /// Advances the opaque `[f64; {sz}]` state on the driving-node voltage(s).\n\
              #[inline]\n\
-             fn stateful_update_dev{n}(state: &mut [f64; {sz}], v_prev: &[f64; {dcount}], v_converged: &[f64; {dcount}], dt: f64) {{\n\
+             fn stateful_update_dev{n}(state: &mut [f64; {sz}], v_prev: &[f64; {dcount}], v_converged: &[f64; {dcount}], dt: f64) -> StatefulUpdate {{\n\
              {body}\
              }}\n\n"
         ));
@@ -776,21 +822,44 @@ pub(super) fn emit_stateful_update_fns(
 }
 
 /// Device-specific body of `stateful_update_dev{n}`. Dispatched on
-/// `DeviceParams`. Phase 1a: no stateful variant exists, so this returns a
-/// scaffold no-op that consumes all four arguments (keeping the exact signature
-/// warning-clean). Phase 1b adds the `DeviceParams::Ldr` arm with the real
-/// attack/release advance from `ldr.rs`.
+/// `DeviceParams`. Every arm ends by returning a `StatefulUpdate`; v1 devices
+/// return the no-op default (no sub-sample firing).
 fn stateful_update_body(
-    _slot: &crate::device_types::DeviceSlot,
+    dev_num: usize,
+    slot: &crate::device_types::DeviceSlot,
     _spec: &crate::device_types::StatefulSpec,
 ) -> String {
-    // Phase 1a scaffold — no device math yet. Consume every argument so the
-    // fixed signature compiles without unused-variable warnings; Phase 1b
-    // replaces this with a `match &slot.params { DeviceParams::Ldr(..) => .. }`.
-    "    // Phase 1a scaffold: no device-specific state advance yet.\n\
-     \x20   let _ = (v_prev, v_converged, dt);\n\
-     \x20   let _ = &mut *state;\n"
-        .to_string()
+    use crate::device_types::DeviceParams;
+    let d = dev_num;
+    match &slot.params {
+        // CdsLdr — mirrors `melange-devices/src/ldr.rs::update` (lines 82-97).
+        // The control signal V(ctrl+)−V(ctrl-) is the normalized brightness in
+        // [0,1] (clamped INSIDE here so an out-of-range control node degrades
+        // gracefully, never errors); resistance chases the power-law target
+        // with asymmetric attack/release. Coefficients are computed LIVE from
+        // `dt` (the internal sample period) so a host-rate change is tracked
+        // exactly — no baked-rate constant. State-mutation only; the returned
+        // StatefulUpdate is the no-op default (CdsLdr has no sub-sample firing).
+        DeviceParams::Ldr(_) => format!(
+            "    let _ = v_prev; // reserved (sub-sample interpolation; unused in v1)\n\
+             \x20   let cv = (v_converged[0] - v_converged[1]).clamp(0.0, 1.0);\n\
+             \x20   let target_r = DEVICE_{d}_RMIN\n\
+             \x20       + (DEVICE_{d}_RMAX - DEVICE_{d}_RMIN) * (1.0 - cv).powf(DEVICE_{d}_GAMMA);\n\
+             \x20   let r = state[0];\n\
+             \x20   // Asymmetric envelope: attack (target below current, getting\n\
+             \x20   // brighter) is faster than release (getting darker).\n\
+             \x20   let tau = if target_r < r {{ DEVICE_{d}_TAU_A }} else {{ DEVICE_{d}_TAU_R }};\n\
+             \x20   let coef = (-dt / tau).exp();\n\
+             \x20   state[0] = target_r + (r - target_r) * coef;\n\
+             \x20   StatefulUpdate::default()\n"
+        ),
+        // No stateful math for other device kinds (none are stateful yet).
+        _ => "    // No device-specific state advance for this DeviceParams.\n\
+              \x20   let _ = (v_prev, v_converged, dt);\n\
+              \x20   let _ = &mut *state;\n\
+              \x20   StatefulUpdate::default()\n"
+            .to_string(),
+    }
 }
 
 /// Collapse 3+ consecutive blank lines down to 2.
@@ -1164,9 +1233,10 @@ mod stateful_interface_tests {
         // Two driving nodes → [f64; 2] arrays; node 5 → index 4, ground → 0.0.
         assert!(call.contains("let v_prev_drive: [f64; 2] = [state.v_prev[4], 0.0];"));
         assert!(call.contains("let v_conv_drive: [f64; 2] = [v[4], 0.0];"));
-        // Reserved v_prev is threaded through the fixed signature.
+        // Reserved v_prev is threaded through the fixed signature, and the
+        // reserved return is discarded at the call site (Stage 3 will apply it).
         assert!(call.contains(
-            "stateful_update_dev0(&mut state.device_0_state, &v_prev_drive, &v_conv_drive, dt);"
+            "let _ = stateful_update_dev0(&mut state.device_0_state, &v_prev_drive, &v_conv_drive, dt);"
         ));
         // dt is the internal (oversampled) period from the LIVE rate.
         assert!(call.contains("state.current_sample_rate * OVERSAMPLING_FACTOR as f64"));
@@ -1203,10 +1273,21 @@ mod stateful_interface_tests {
             stateful: Some(spec.clone()),
         };
         let fns = emit_stateful_update_fns(&devs, std::slice::from_ref(&slot));
-        // The exact reserved-v_prev signature, generic over N and D.
+        // The exact reserved-v_prev + reserved-return signature, generic over N/D.
         assert!(fns.contains(
-            "fn stateful_update_dev0(state: &mut [f64; 2], v_prev: &[f64; 2], v_converged: &[f64; 2], dt: f64)"
+            "fn stateful_update_dev0(state: &mut [f64; 2], v_prev: &[f64; 2], v_converged: &[f64; 2], dt: f64) -> StatefulUpdate"
         ));
+        // The reserved return type is emitted exactly once, ahead of the hooks.
+        assert!(fns.contains("struct StatefulUpdate {"));
+        assert_eq!(fns.matches("struct StatefulUpdate {").count(), 1);
+        // Scaffold body yields the no-op default return.
+        assert!(fns.contains("StatefulUpdate::default()"));
+    }
+
+    #[test]
+    fn reserved_return_type_dormant_for_non_stateful() {
+        // No stateful device → no StatefulUpdate type, no hooks: byte-identical.
+        assert_eq!(emit_stateful_update_fns(&[], &[]), "");
     }
 }
 

@@ -23,6 +23,7 @@
 pub mod bjts;
 pub mod diodes;
 pub mod jfets;
+pub mod ldr;
 pub mod mosfets;
 pub mod tubes;
 

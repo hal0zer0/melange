@@ -566,6 +566,18 @@ fn evaluate_devices_inner(
                 j_dev[(s + 1) * m + s] = 0.0; // dI_ctrl/dV_sig = 0
                 j_dev[(s + 1) * m + (s + 1)] = 0.0; // dI_ctrl/dV_ctrl = 0
             }
+            (DeviceType::Ldr, DeviceParams::Ldr(lp)) => {
+                // At the DC operating point the LDR state is its dark seed
+                // (r_max) — the state block only advances during transient
+                // process_sample, after the solve. So the DC bias sees a plain
+                // resistor of value RMAX: i = v / r_max, g = 1/r_max. This
+                // matches the generated code's seed (`device_{n}_state = [RMAX]`)
+                // so the baked DC_NL_I agrees with the first transient sample.
+                let r = lp.r_max.max(1e-12);
+                let v = v_nl[s];
+                i_nl[s] = v / r;
+                j_dev[s * m + s] = 1.0 / r;
+            }
             _ => {
                 // Mismatched type/params — warn instead of silently skipping
                 log::warn!(

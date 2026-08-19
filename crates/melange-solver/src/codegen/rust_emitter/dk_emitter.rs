@@ -1233,6 +1233,18 @@ impl RustEmitter {
                     emit_device_const(&mut code, dev_num, "THD", vp.thd);
                     code.push('\n');
                 }
+                DeviceParams::Ldr(lp) => {
+                    // Opto/LDR: model params consumed by the after-solve update()
+                    // hook (target-R power law + attack/release taus). The live
+                    // resistance is the opaque `device_{n}_state` block, not a
+                    // const. The NR eval reads `1/state[0]` — no const needed there.
+                    emit_device_const(&mut code, dev_num, "RMIN", lp.r_min);
+                    emit_device_const(&mut code, dev_num, "RMAX", lp.r_max);
+                    emit_device_const(&mut code, dev_num, "GAMMA", lp.gamma);
+                    emit_device_const(&mut code, dev_num, "TAU_A", lp.attack_tau);
+                    emit_device_const(&mut code, dev_num, "TAU_R", lp.release_tau);
+                    code.push('\n');
+                }
             }
         }
 

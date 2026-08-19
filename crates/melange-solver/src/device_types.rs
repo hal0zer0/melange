@@ -14,6 +14,10 @@ pub enum DeviceParams {
     Mosfet(MosfetParams),
     Tube(TubeParams),
     Vca(VcaParams),
+    /// Opto/LDR photoresistor (Phase 0c). The first customer of the
+    /// device-agnostic stateful-device interface — its resistance is an opaque
+    /// `[f64; 1]` state block advanced after the solve on the control node.
+    Ldr(LdrParams),
 }
 
 impl DeviceParams {}
@@ -952,6 +956,27 @@ pub enum DeviceType {
     Mosfet,
     Tube,
     Vca,
+    /// Opto/LDR photoresistor: 1D (resistance path V(r+)−V(r-) → I). Linear
+    /// in-solve (frozen conductance `1/state[0]`); the state advances after the
+    /// solve on the control node. See [`DeviceParams::Ldr`] / [`StatefulSpec`].
+    Ldr,
+}
+
+/// Opto/LDR (CdS photoresistor) model parameters, mirroring
+/// `melange-devices/src/ldr.rs` `CdsLdr`. Resolved from a `.model … LDR(...)`
+/// card (explicit params or an empty-parens catalog lookup on the model name).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LdrParams {
+    /// Minimum resistance (brightest light) [Ω].
+    pub r_min: f64,
+    /// Maximum (dark) resistance [Ω]. Also the state-block seed (cold = dark).
+    pub r_max: f64,
+    /// Power-law exponent shaping brightness → resistance (typically 0.5–1.0).
+    pub gamma: f64,
+    /// Attack time constant [s] — resistance decreasing (getting brighter).
+    pub attack_tau: f64,
+    /// Release time constant [s] — resistance increasing (getting darker).
+    pub release_tau: f64,
 }
 
 // --- Serde helper functions ---

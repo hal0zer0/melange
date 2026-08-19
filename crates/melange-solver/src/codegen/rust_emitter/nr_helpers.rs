@@ -85,6 +85,18 @@ pub(super) fn emit_dk_device_evaluation(
                     ));
                 }
             }
+            DeviceType::Ldr => {
+                // Opto/LDR resistance path: linear in-solve with the state block
+                // frozen. i = v_d / r_state, jac = 1/r_state (constant this
+                // solve). `.max(1e-12)` mirrors ldr.rs's division guard.
+                let s = slot.start_idx;
+                let d = dev_num;
+                code.push_str(&format!(
+                    "{indent}let ldr_r{d} = state.device_{d}_state[0].max(1e-12);\n\
+                     {indent}let i_dev{s} = v_d{s} / ldr_r{d};\n\
+                     {indent}let jdev_{s}_{s} = 1.0 / ldr_r{d};\n"
+                ));
+            }
             DeviceType::Bjt => {
                 let s = slot.start_idx;
                 let s1 = s + 1;
@@ -408,6 +420,10 @@ pub(super) fn emit_nr_limit_and_converge(
                     // VCA: no junction limiting needed — fast_exp already clamps
                     code.push_str(&format!("{indent}    let v_lim = v_d{i} + dv{i};\n"));
                 }
+                (DeviceType::Ldr, _) => {
+                    // LDR: linear resistance path, no junction — no limiting.
+                    code.push_str(&format!("{indent}    let v_lim = v_d{i} + dv{i};\n"));
+                }
             }
             // Clamp to [0, 1], not `.max(0.01)`: a floored ratio still lets a
             // fixed fraction (>=1%) of an arbitrarily large raw `dv{i}`
@@ -576,6 +592,8 @@ pub(super) fn emit_schur_nr_limit_and_converge(
                 ),
                 (DeviceType::Tube, _) => format!("fetlim(v_trial{i}, v_d{i}, 0.0)"),
                 (DeviceType::Vca, _) => format!("v_trial{i}"),
+                // LDR: linear resistance path — no limiting.
+                (DeviceType::Ldr, _) => format!("v_trial{i}"),
             };
             code.push_str(&format!("{indent}let dv_trial{i} = v_trial{i} - v_d{i};\n"));
             code.push_str(&format!(

@@ -6229,6 +6229,16 @@ impl RustEmitter {
                      {indent}let jdev_{s1}_{s1} = vca{d}_jac[3];\n"
                 ));
             }
+            (DeviceType::Ldr, DeviceParams::Ldr(_)) => {
+                // Opto/LDR resistance path: linear in-solve, frozen state block.
+                // i = v_d / r_state, jac = 1/r_state. `.max(1e-12)` guards the
+                // division (mirrors ldr.rs).
+                code.push_str(&format!(
+                    "{indent}let ldr_r{d} = state.device_{d}_state[0].max(1e-12);\n\
+                     {indent}let i_dev{s} = v_d{s} / ldr_r{d};\n\
+                     {indent}let jdev_{s}_{s} = 1.0 / ldr_r{d};\n"
+                ));
+            }
             _ => {}
         }
         Ok(())
@@ -6305,6 +6315,10 @@ impl RustEmitter {
                     }
                     (crate::codegen::ir::DeviceType::Vca, _) => {
                         // VCA: no junction limiting needed — fast_exp already clamps
+                        code.push_str(&format!("{indent}    let v_lim = v_d{i} + dv{i};\n"));
+                    }
+                    (crate::codegen::ir::DeviceType::Ldr, _) => {
+                        // LDR: linear resistance path, no junction — no limiting.
                         code.push_str(&format!("{indent}    let v_lim = v_d{i} + dv{i};\n"));
                     }
                 }
@@ -9366,6 +9380,17 @@ impl RustEmitter {
                          {indent}}}\n"
                     ));
                 }
+                (DeviceType::Ldr, DeviceParams::Ldr(_)) => {
+                    // Opto/LDR: linear resistance path, frozen state block.
+                    // i_nl = v_nl / r_state, j_dev diagonal = 1/r_state.
+                    code.push_str(&format!(
+                        "{indent}{{ // LDR {dev_num}\n\
+                         {indent}    let ldr_r = state.device_{dev_num}_state[0].max(1e-12);\n\
+                         {indent}    i_nl[{s}] = v_nl[{s}] / ldr_r;\n\
+                         {indent}    j_dev[{jd_ss}] = 1.0 / ldr_r;\n\
+                         {indent}}}\n"
+                    ));
+                }
                 _ => {} // Mismatched type/params — skip
             }
         }
@@ -9508,6 +9533,12 @@ impl RustEmitter {
                          {indent}i_nl[{s1}] = 0.0;\n"
                     ));
                 }
+                (DeviceType::Ldr, DeviceParams::Ldr(_)) => {
+                    // Opto/LDR: i_nl = v / r_state at the converged voltage.
+                    code.push_str(&format!(
+                        "{indent}i_nl[{s}] = v_nl_final[{s}] / state.device_{dev_num}_state[0].max(1e-12);\n"
+                    ));
+                }
                 _ => {}
             }
         }
@@ -9598,6 +9629,10 @@ impl RustEmitter {
                     }
                     (DeviceType::Vca, _) => {
                         // VCA: no junction limiting needed — fast_exp already clamps
+                        code.push_str(&format!("{indent}        let v_lim = v_nl_proposed;\n"));
+                    }
+                    (DeviceType::Ldr, _) => {
+                        // LDR: linear resistance path — no limiting.
                         code.push_str(&format!("{indent}        let v_lim = v_nl_proposed;\n"));
                     }
                 }
