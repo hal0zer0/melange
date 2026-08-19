@@ -1245,6 +1245,21 @@ impl RustEmitter {
                     emit_device_const(&mut code, dev_num, "TAU_R", lp.release_tau);
                     code.push('\n');
                 }
+                DeviceParams::Glow(gp) => {
+                    // Glow / neon lamp (EXPERIMENTAL). VO = strike threshold
+                    // (dark→lit, after-solve update()). VD = maintaining voltage:
+                    // the lit in-NR eval is a Thévenin source i=(v−VD)/RON so the
+                    // reservoir discharges toward VD, and update() extinguishes on
+                    // holding current (v−VD)/RON ≤ IHOLD. RON/ROFF are the lit /
+                    // dark resistances (selected by the frozen latch). The live
+                    // latch is the opaque `device_{n}_state` block, not a const.
+                    emit_device_const(&mut code, dev_num, "VO", gp.vo);
+                    emit_device_const(&mut code, dev_num, "VD", gp.vd);
+                    emit_device_const(&mut code, dev_num, "RON", gp.ron);
+                    emit_device_const(&mut code, dev_num, "ROFF", gp.roff);
+                    emit_device_const(&mut code, dev_num, "IHOLD", gp.ihold);
+                    code.push('\n');
+                }
             }
         }
 

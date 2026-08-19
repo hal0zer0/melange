@@ -382,6 +382,12 @@ pub enum NonlinearDeviceType {
     /// R frozen during the solve). The control pair drives the after-solve
     /// state advance and is otherwise electrically inert (draws no current).
     Ldr,
+    /// Glow-discharge / neon lamp (1D, EXPERIMENTAL). `node_indices = [a, k]`.
+    /// The resistance path is a plain 2-terminal monotone resistor whose value
+    /// is selected by the FROZEN latch state block during the solve; the latch
+    /// flips after the solve on the VO/VD thresholds. N_v/N_i structure is
+    /// identical to a diode/LDR resistance path.
+    Glow,
 }
 
 /// Internal node indices for a parasitic BJT in the transient MNA system.
@@ -1416,6 +1422,9 @@ impl MnaSystem {
                 DeviceParams::Ldr(_) => {
                     // LDR is a pure (variable) resistor — no junction cap.
                 }
+                DeviceParams::Glow(_) => {
+                    // Glow lamp is a pure (latched) resistor — no junction cap.
+                }
             }
         }
 
@@ -2312,6 +2321,12 @@ impl MnaSystem {
                     // node_indices: [r+, r-, ctrl+, ctrl-]. Resistance path
                     // (r+ to r-) — mirrors the VCA signal-path parasitic so an
                     // otherwise cap-free resistive LDR deck stays DK-conditioned.
+                    junctions.push((dev.name.clone(), dev.node_indices[0], dev.node_indices[1]));
+                }
+                NonlinearDeviceType::Glow => {
+                    // node_indices: [a, k]. Resistance path (a to k) — same
+                    // parasitic as the LDR so a cap-free glow deck stays
+                    // DK-conditioned.
                     junctions.push((dev.name.clone(), dev.node_indices[0], dev.node_indices[1]));
                 }
             }
@@ -4314,7 +4329,9 @@ impl MnaBuilder {
                 // V(r+)−V(r-) is the sole controlling voltage and the current
                 // flows r+→r-. Only the eval differs (i = v_d/R vs the diode
                 // exponential); the reduction stamp is shared verbatim.
-                NonlinearDeviceType::Diode | NonlinearDeviceType::Ldr => {
+                NonlinearDeviceType::Diode
+                | NonlinearDeviceType::Ldr
+                | NonlinearDeviceType::Glow => {
                     if node_indices.len() >= 2 {
                         let node_i = node_indices[0];
                         let node_j = node_indices[1];
@@ -4887,6 +4904,11 @@ impl MnaBuilder {
                 n_ctrl_n,
                 ..
             } => vec![n_plus, n_minus, n_ctrl_p, n_ctrl_n],
+            Element::Glow {
+                n_anode,
+                n_cathode,
+                ..
+            } => vec![n_anode, n_cathode],
             Element::BSource {
                 n_plus,
                 n_minus,
@@ -5081,6 +5103,36 @@ impl MnaBuilder {
                         n_ctrl_p.clone(),
                         n_ctrl_n.clone(),
                     ],
+                    node_indices,
+                    vg2k_frozen: 0.0,
+                });
+            }
+            Element::Glow {
+                name,
+                n_anode,
+                n_cathode,
+                ..
+            } => {
+                // node_indices = [a, k]. 2-terminal resistance path forming one
+                // NR dimension (the monotone resistor selected by the frozen
+                // latch). Must not be fully grounded.
+                let na = self.node_map[n_anode];
+                let nk = self.node_map[n_cathode];
+                if na == 0 && nk == 0 {
+                    return Err(MnaError::TopologyError(format!(
+                        "glow lamp '{}' has both terminals grounded",
+                        name
+                    )));
+                }
+                let node_indices = vec![na, nk];
+                let start_idx = self.total_dimension;
+                self.total_dimension += 1; // glow resistance path is 1-dimensional
+                self.nonlinear_devices.push(NonlinearDeviceInfo {
+                    name: name.clone(),
+                    device_type: NonlinearDeviceType::Glow,
+                    dimension: 1,
+                    start_idx,
+                    nodes: vec![n_anode.clone(), n_cathode.clone()],
                     node_indices,
                     vg2k_frozen: 0.0,
                 });

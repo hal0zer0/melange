@@ -852,6 +852,19 @@ pub enum Element {
         /// Model name (references .model with LDR type)
         model: String,
     },
+    /// Glow-discharge / neon lamp: Nname a k modelname (EXPERIMENTAL, Phase 0c
+    /// Stage 2a). A 2-terminal gas-discharge relaxation element; references a
+    /// `.model … NEON(VO VD RON ROFF)` card. Throwaway experimental syntax —
+    /// the `N` letter and `NEON` model type are provisional.
+    Glow {
+        name: String,
+        /// Anode node
+        n_anode: String,
+        /// Cathode node
+        n_cathode: String,
+        /// Model name (references .model with NEON type)
+        model: String,
+    },
     /// VCA: Yname sig+ sig- ctrl+ ctrl- modelname
     ///
     /// M=2 per VCA: signal current (I_sig) and control current (I_ctrl=0).
@@ -951,6 +964,7 @@ impl Element {
             | Element::Pentode { name, .. }
             | Element::Vca { name, .. }
             | Element::Ldr { name, .. }
+            | Element::Glow { name, .. }
             | Element::Vcvs { name, .. }
             | Element::Vccs { name, .. }
             | Element::SubcktInstance { name, .. }
@@ -969,7 +983,8 @@ impl Element {
             | Element::Triode { model, .. }
             | Element::Pentode { model, .. }
             | Element::Vca { model, .. }
-            | Element::Ldr { model, .. } => Some(model),
+            | Element::Ldr { model, .. }
+            | Element::Glow { model, .. } => Some(model),
             _ => None,
         }
     }
@@ -1078,6 +1093,11 @@ impl Element {
                 ctrl_n,
                 ..
             } => vec![out_p, out_n, ctrl_p, ctrl_n],
+            Element::Glow {
+                n_anode,
+                n_cathode,
+                ..
+            } => vec![n_anode, n_cathode],
             Element::SubcktInstance { nodes, .. } => nodes.iter().map(String::as_str).collect(),
         }
     }
@@ -1294,6 +1314,17 @@ impl Element {
                 n_minus: remap(n_minus),
                 n_ctrl_p: remap(n_ctrl_p),
                 n_ctrl_n: remap(n_ctrl_n),
+                model: model.clone(),
+            },
+            Element::Glow {
+                name,
+                n_anode,
+                n_cathode,
+                model,
+            } => Element::Glow {
+                name: prefixed(name),
+                n_anode: remap(n_anode),
+                n_cathode: remap(n_cathode),
                 model: model.clone(),
             },
             Element::Vcvs {
@@ -1797,6 +1828,7 @@ impl Parser {
                     Element::Opamp { .. } => Some((TypeRule::Exact(&["OA"]), "op-amp")),
                     Element::Vca { .. } => Some((TypeRule::Exact(&["VCA"]), "VCA")),
                     Element::Ldr { .. } => Some((TypeRule::Exact(&["LDR"]), "LDR")),
+                    Element::Glow { .. } => Some((TypeRule::Exact(&["NEON"]), "NEON")),
                     _ => None,
                 };
                 if let Some((rule, kind)) = expected {
@@ -3691,6 +3723,7 @@ impl Parser {
             'P' => self.parse_pentode(&parts),
             'U' => self.parse_opamp(&parts),
             'Y' => self.parse_vca(&parts),
+            'N' => self.parse_glow(&parts),
             'O' => self.parse_ldr(&parts),
             'E' => self.parse_vcvs(&parts),
             'G' => self.parse_vccs(&parts),
@@ -4314,6 +4347,26 @@ impl Parser {
         })
     }
 
+    fn parse_glow(&self, parts: &[&str]) -> Result<Element, ParseError> {
+        // Nname a k modelname (EXPERIMENTAL glow-discharge / neon lamp)
+        self.require_parts(parts, 4, "Nname a k modelname")?;
+        self.check_self_connection(parts[1], parts[2], parts[0])?;
+        if parts.len() > 4 {
+            return Err(self.error(format!(
+                "NEON glow '{}': unexpected trailing token(s): '{}' — expected \
+                 'Nname a k modelname'",
+                parts[0],
+                parts[4..].join(" ")
+            )));
+        }
+        Ok(Element::Glow {
+            name: parts[0].to_string(),
+            n_anode: parts[1].to_string(),
+            n_cathode: parts[2].to_string(),
+            model: parts[3].to_string(),
+        })
+    }
+
     fn parse_ldr(&self, parts: &[&str]) -> Result<Element, ParseError> {
         // Oname r+ r- ctrl+ ctrl- modelname
         self.require_parts(parts, 6, "Oname r+ r- ctrl+ ctrl- modelname")?;
@@ -4545,6 +4598,14 @@ fn validate_element_node_lengths(elem: &Element) -> Result<(), String> {
             check(n_ctrl_p)?;
             check(n_ctrl_n)?;
         }
+        Element::Glow {
+            n_anode,
+            n_cathode,
+            ..
+        } => {
+            check(n_anode)?;
+            check(n_cathode)?;
+        }
         Element::Vcvs {
             out_p,
             out_n,
@@ -4711,6 +4772,14 @@ fn normalize_element_nodes(elem: &mut Element) {
             norm(n_minus);
             norm(n_ctrl_p);
             norm(n_ctrl_n);
+        }
+        Element::Glow {
+            n_anode,
+            n_cathode,
+            ..
+        } => {
+            norm(n_anode);
+            norm(n_cathode);
         }
         Element::Vcvs {
             out_p,

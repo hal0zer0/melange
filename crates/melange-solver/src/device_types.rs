@@ -18,6 +18,15 @@ pub enum DeviceParams {
     /// device-agnostic stateful-device interface — its resistance is an opaque
     /// `[f64; 1]` state block advanced after the solve on the control node.
     Ldr(LdrParams),
+    /// Glow-discharge / neon lamp (Phase 0c Stage 2a — EXPERIMENTAL). A
+    /// gas-discharge relaxation element on the SAME stateful interface as
+    /// `Ldr`. Its opaque `[f64; 1]` state is a frozen latch (`0.0` = dark,
+    /// `1.0` = lit); the NR solve reads the FROZEN latch and emits a monotone
+    /// resistor (`ROFF` dark / `RON` lit — positive conductance either way, no
+    /// negative resistance in the solve), and the after-solve `update()` flips
+    /// the latch on the boolean strike/extinguish thresholds `VO`/`VD`. THROWAWAY
+    /// experimental leaf — measure-first, not a finished device model.
+    Glow(GlowParams),
 }
 
 impl DeviceParams {}
@@ -960,6 +969,11 @@ pub enum DeviceType {
     /// in-solve (frozen conductance `1/state[0]`); the state advances after the
     /// solve on the control node. See [`DeviceParams::Ldr`] / [`StatefulSpec`].
     Ldr,
+    /// Glow-discharge / neon lamp (1D, EXPERIMENTAL). In-solve it is a plain
+    /// monotone resistor whose value is picked by the FROZEN latch state block
+    /// (dark → ROFF, lit → RON); the after-solve `update()` flips the latch on
+    /// the VO/VD thresholds. See [`DeviceParams::Glow`] / [`StatefulSpec`].
+    Glow,
 }
 
 /// Opto/LDR (CdS photoresistor) model parameters, mirroring
@@ -977,6 +991,36 @@ pub struct LdrParams {
     pub attack_tau: f64,
     /// Release time constant [s] — resistance increasing (getting darker).
     pub release_tau: f64,
+}
+
+/// Glow-discharge / neon lamp model parameters (Phase 0c Stage 2a —
+/// EXPERIMENTAL, throwaway). Two thresholds and two resistances; the in-solve
+/// element is a plain resistor selected by the FROZEN latch (dark → `roff`,
+/// lit → `ron`), and the after-solve `update()` flips the latch when the
+/// terminal voltage crosses `vo` (strike, dark → lit) or falls to `vd`
+/// (extinguish, lit → dark).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GlowParams {
+    /// Strike / breakdown (ignition) voltage [V] — dark→lit when `V(a)−V(k) ≥ vo`.
+    pub vo: f64,
+    /// Maintaining voltage [V]. While lit the tube is a Thévenin/Norton source
+    /// `i = (V(a)−V(k) − vd) / ron`, so the conducting reservoir discharges
+    /// toward `vd` (NOT toward ground) — this is what fixes the extinction
+    /// flank at audio sample rates. Also the strike floor: extinction is on
+    /// holding current (`ihold`), not a bare `V ≤ vd` threshold.
+    pub vd: f64,
+    /// Conducting (lit) dynamic resistance [Ω] — low; sets the discharge slope
+    /// toward `vd`.
+    pub ron: f64,
+    /// Dark (extinguished) resistance [Ω] — very high, effectively open.
+    pub roff: f64,
+    /// Holding / maintaining current [A]. The lit→dark transition fires when the
+    /// conduction current `(V(a)−V(k) − vd)/ron` falls below this. Physically the
+    /// gas de-ionizes when it can no longer sustain the discharge; a starved
+    /// oscillator (charging current < ihold) extinguishes, while a rail with
+    /// enough sustaining current stays lit (regulator behaviour) — one model
+    /// covers both. Small-neon default ≈ 2e-4 A.
+    pub ihold: f64,
 }
 
 // --- Serde helper functions ---

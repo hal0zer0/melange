@@ -4201,6 +4201,42 @@ impl CircuitIR {
                     dim_offset += 1;
                     nl_dev_idx += 1;
                 }
+                Element::Glow { model, .. } => {
+                    let params = Self::resolve_glow_params(netlist, model)?;
+                    // Frozen-latch stateful spec: 1-element opaque state block
+                    // (0.0 = dark, 1.0 = lit), seeded dark. terminal_nodes and
+                    // driving_nodes are both the device's own [a, k] pair — the
+                    // strike/extinguish thresholds are evaluated on the terminal
+                    // voltage each sample. node_indices = [a, k] from the MNA.
+                    let stateful = mna.and_then(|m| {
+                        m.nonlinear_devices.get(nl_dev_idx).and_then(|d| {
+                            if d.device_type == crate::mna::NonlinearDeviceType::Glow
+                                && d.node_indices.len() >= 2
+                            {
+                                let ni = &d.node_indices;
+                                Some(crate::device_types::StatefulSpec {
+                                    state_size: 1,
+                                    state_seed: vec![0.0],
+                                    terminal_nodes: ni.clone(),
+                                    driving_nodes: vec![ni[0], ni[1]],
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                    });
+                    slots.push(DeviceSlot {
+                        device_type: DeviceType::Glow,
+                        start_idx: dim_offset,
+                        dimension: 1,
+                        params: DeviceParams::Glow(params),
+                        has_internal_mna_nodes: false,
+                        vg2k_frozen: 0.0,
+                        stateful,
+                    });
+                    dim_offset += 1;
+                    nl_dev_idx += 1;
+                }
                 _ => {}
             }
         }
@@ -5413,6 +5449,45 @@ impl CircuitIR {
             attack_tau,
             release_tau,
         })
+    }
+
+    /// Resolve glow-discharge / neon lamp model params (EXPERIMENTAL Phase 0c
+    /// Stage 2a). Resolution per param: explicit `.model … NEON(VO=… …)` value
+    /// → generic default. No catalog (throwaway experimental device).
+    fn resolve_glow_params(
+        netlist: &Netlist,
+        model: &str,
+    ) -> Result<crate::device_types::GlowParams, CodegenError> {
+        let vo = Self::lookup_model_param(netlist, model, "VO").unwrap_or(135.0);
+        let vd = Self::lookup_model_param(netlist, model, "VD").unwrap_or(93.0);
+        let ron = Self::lookup_model_param(netlist, model, "RON").unwrap_or(1000.0);
+        let roff = Self::lookup_model_param(netlist, model, "ROFF").unwrap_or(1e9);
+        // Holding current: the lit→dark extinction threshold on conduction
+        // current. Default 2e-4 A (small-neon regime). Must exceed the lit
+        // equilibrium sustaining current (Vb−VD)/(Rc+RON) for a relaxation
+        // oscillator to extinguish; a physical small-neon value does.
+        let ihold = Self::lookup_model_param(netlist, model, "IHOLD").unwrap_or(2e-4);
+
+        validate_positive_finite(vo, "NEON model VO")?;
+        validate_positive_finite(vd, "NEON model VD")?;
+        validate_positive_finite(ron, "NEON model RON")?;
+        validate_positive_finite(roff, "NEON model ROFF")?;
+        validate_positive_finite(ihold, "NEON model IHOLD")?;
+        if vo <= vd {
+            return Err(CodegenError::InvalidConfig(format!(
+                "NEON model '{model}': VO ({vo}) must be greater than VD ({vd}) \
+                 (strike voltage above maintaining voltage)"
+            )));
+        }
+        if roff <= ron {
+            return Err(CodegenError::InvalidConfig(format!(
+                "NEON model '{model}': ROFF ({roff}) must be greater than RON ({ron})"
+            )));
+        }
+
+        Self::warn_unrecognized_params(netlist, model, &["VO", "VD", "RON", "ROFF", "IHOLD"]);
+
+        Ok(crate::device_types::GlowParams { vo, vd, ron, roff, ihold })
     }
 
     /// Warn on unrecognized .model parameters (typo protection).

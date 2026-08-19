@@ -97,6 +97,25 @@ pub(super) fn emit_dk_device_evaluation(
                      {indent}let jdev_{s}_{s} = 1.0 / ldr_r{d};\n"
                 ));
             }
+            DeviceType::Glow => {
+                // Glow / neon lamp: FROZEN latch selects RON (lit) or ROFF
+                // (dark). Lit is a maintaining-voltage source i=(v_d−VD)/RON so
+                // the reservoir discharges toward VD (not ground) — fixes the
+                // extinction flank/period dt-independently; dark is a resistor
+                // through the origin. jac = 1/R either way (the VD term is
+                // affine): positive conductance, no negative resistance. The
+                // latch is frozen this solve; update() flips it on holding
+                // current. (DK-Schur route eval — mirror of the nodal sites.)
+                let s = slot.start_idx;
+                let d = dev_num;
+                code.push_str(&format!(
+                    "{indent}let glow_lit{d} = state.device_{d}_state[0] >= 0.5;\n\
+                     {indent}let glow_r{d} = if glow_lit{d} {{ DEVICE_{d}_RON }} else {{ DEVICE_{d}_ROFF }};\n\
+                     {indent}let glow_emf{d} = if glow_lit{d} {{ DEVICE_{d}_VD }} else {{ 0.0 }};\n\
+                     {indent}let i_dev{s} = (v_d{s} - glow_emf{d}) / glow_r{d};\n\
+                     {indent}let jdev_{s}_{s} = 1.0 / glow_r{d};\n"
+                ));
+            }
             DeviceType::Bjt => {
                 let s = slot.start_idx;
                 let s1 = s + 1;
@@ -424,6 +443,10 @@ pub(super) fn emit_nr_limit_and_converge(
                     // LDR: linear resistance path, no junction — no limiting.
                     code.push_str(&format!("{indent}    let v_lim = v_d{i} + dv{i};\n"));
                 }
+                (DeviceType::Glow, _) => {
+                    // Glow: monotone resistance path, no junction — no limiting.
+                    code.push_str(&format!("{indent}    let v_lim = v_d{i} + dv{i};\n"));
+                }
             }
             // Clamp to [0, 1], not `.max(0.01)`: a floored ratio still lets a
             // fixed fraction (>=1%) of an arbitrarily large raw `dv{i}`
@@ -594,6 +617,8 @@ pub(super) fn emit_schur_nr_limit_and_converge(
                 (DeviceType::Vca, _) => format!("v_trial{i}"),
                 // LDR: linear resistance path — no limiting.
                 (DeviceType::Ldr, _) => format!("v_trial{i}"),
+                // Glow: monotone resistance path — no limiting.
+                (DeviceType::Glow, _) => format!("v_trial{i}"),
             };
             code.push_str(&format!("{indent}let dv_trial{i} = v_trial{i} - v_d{i};\n"));
             code.push_str(&format!(

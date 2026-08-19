@@ -6239,6 +6239,22 @@ impl RustEmitter {
                      {indent}let jdev_{s}_{s} = 1.0 / ldr_r{d};\n"
                 ));
             }
+            (DeviceType::Glow, DeviceParams::Glow(_)) => {
+                // Glow / neon lamp: FROZEN latch (dark < 0.5 → ROFF, lit → RON).
+                // Lit is a Thévenin/maintaining-voltage source i=(v−VD)/RON so
+                // the reservoir discharges toward VD (not ground) — extinction
+                // lands at ~VD regardless of RON·C vs sample period. Dark is a
+                // plain resistor through the origin. Jacobian 1/glow_r either
+                // way (the VD term is affine → invisible to j_dev): positive
+                // conductance, no negative resistance in the solve.
+                code.push_str(&format!(
+                    "{indent}let glow_lit{d} = state.device_{d}_state[0] >= 0.5;\n\
+                     {indent}let glow_r{d} = if glow_lit{d} {{ DEVICE_{d}_RON }} else {{ DEVICE_{d}_ROFF }};\n\
+                     {indent}let glow_emf{d} = if glow_lit{d} {{ DEVICE_{d}_VD }} else {{ 0.0 }};\n\
+                     {indent}let i_dev{s} = (v_d{s} - glow_emf{d}) / glow_r{d};\n\
+                     {indent}let jdev_{s}_{s} = 1.0 / glow_r{d};\n"
+                ));
+            }
             _ => {}
         }
         Ok(())
@@ -6319,6 +6335,10 @@ impl RustEmitter {
                     }
                     (crate::codegen::ir::DeviceType::Ldr, _) => {
                         // LDR: linear resistance path, no junction — no limiting.
+                        code.push_str(&format!("{indent}    let v_lim = v_d{i} + dv{i};\n"));
+                    }
+                    (crate::codegen::ir::DeviceType::Glow, _) => {
+                        // Glow: monotone resistance path, no junction — no limiting.
                         code.push_str(&format!("{indent}    let v_lim = v_d{i} + dv{i};\n"));
                     }
                 }
@@ -9391,6 +9411,22 @@ impl RustEmitter {
                          {indent}}}\n"
                     ));
                 }
+                (DeviceType::Glow, DeviceParams::Glow(_)) => {
+                    // Glow / neon lamp: FROZEN latch selects RON (lit) or ROFF
+                    // (dark). Lit is a maintaining-voltage source i=(v−VD)/RON
+                    // (discharges toward VD, not ground); dark is a resistor
+                    // through the origin. j_dev diagonal = 1/R (the VD term is
+                    // affine).
+                    code.push_str(&format!(
+                        "{indent}{{ // GLOW {dev_num}\n\
+                         {indent}    let glow_lit = state.device_{dev_num}_state[0] >= 0.5;\n\
+                         {indent}    let glow_r = if glow_lit {{ DEVICE_{dev_num}_RON }} else {{ DEVICE_{dev_num}_ROFF }};\n\
+                         {indent}    let glow_emf = if glow_lit {{ DEVICE_{dev_num}_VD }} else {{ 0.0 }};\n\
+                         {indent}    i_nl[{s}] = (v_nl[{s}] - glow_emf) / glow_r;\n\
+                         {indent}    j_dev[{jd_ss}] = 1.0 / glow_r;\n\
+                         {indent}}}\n"
+                    ));
+                }
                 _ => {} // Mismatched type/params — skip
             }
         }
@@ -9539,6 +9575,16 @@ impl RustEmitter {
                         "{indent}i_nl[{s}] = v_nl_final[{s}] / state.device_{dev_num}_state[0].max(1e-12);\n"
                     ));
                 }
+                (DeviceType::Glow, DeviceParams::Glow(_)) => {
+                    // Glow: i_nl at the converged voltage. Lit is the
+                    // maintaining-voltage source i=(v−VD)/RON; dark is v/ROFF.
+                    code.push_str(&format!(
+                        "{indent}{{ let glow_lit = state.device_{dev_num}_state[0] >= 0.5;\n\
+                         {indent}  let glow_r = if glow_lit {{ DEVICE_{dev_num}_RON }} else {{ DEVICE_{dev_num}_ROFF }};\n\
+                         {indent}  let glow_emf = if glow_lit {{ DEVICE_{dev_num}_VD }} else {{ 0.0 }};\n\
+                         {indent}  i_nl[{s}] = (v_nl_final[{s}] - glow_emf) / glow_r; }}\n"
+                    ));
+                }
                 _ => {}
             }
         }
@@ -9633,6 +9679,10 @@ impl RustEmitter {
                     }
                     (DeviceType::Ldr, _) => {
                         // LDR: linear resistance path — no limiting.
+                        code.push_str(&format!("{indent}        let v_lim = v_nl_proposed;\n"));
+                    }
+                    (DeviceType::Glow, _) => {
+                        // Glow: monotone resistance path — no limiting.
                         code.push_str(&format!("{indent}        let v_lim = v_nl_proposed;\n"));
                     }
                 }

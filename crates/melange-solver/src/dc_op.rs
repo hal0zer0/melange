@@ -578,6 +578,16 @@ fn evaluate_devices_inner(
                 i_nl[s] = v / r;
                 j_dev[s * m + s] = 1.0 / r;
             }
+            (DeviceType::Glow, DeviceParams::Glow(gp)) => {
+                // At the DC operating point the glow latch is its dark seed
+                // (0.0), so the DC bias sees the dark resistance ROFF: i = v/ROFF,
+                // g = 1/ROFF. Matches the generated code's dark-latch eval so the
+                // baked DC_NL_I agrees with the first transient sample.
+                let r = gp.roff.max(1e-12);
+                let v = v_nl[s];
+                i_nl[s] = v / r;
+                j_dev[s * m + s] = 1.0 / r;
+            }
             _ => {
                 // Mismatched type/params — warn instead of silently skipping
                 log::warn!(

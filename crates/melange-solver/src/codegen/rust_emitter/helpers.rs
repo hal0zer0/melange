@@ -400,6 +400,9 @@ pub(super) fn device_param_template_data(ir: &CircuitIR) -> Vec<DeviceParamTempl
                 // its live state is the opaque `device_{n}_state` block; RMIN/…/
                 // TAU_R stay compile-time consts read directly by update().
                 DeviceParams::Ldr(_) => ("Ldr".to_string(), vec![]),
+                // Glow lamp: VO/VD/RON/ROFF are compile-time consts; the live
+                // latch is the opaque state block. No CircuitState scalar fields.
+                DeviceParams::Glow(_) => ("Glow".to_string(), vec![]),
             };
             DeviceParamTemplateData {
                 dev_num,
@@ -851,6 +854,45 @@ fn stateful_update_body(
              \x20   let tau = if target_r < r {{ DEVICE_{d}_TAU_A }} else {{ DEVICE_{d}_TAU_R }};\n\
              \x20   let coef = (-dt / tau).exp();\n\
              \x20   state[0] = target_r + (r - target_r) * coef;\n\
+             \x20   StatefulUpdate::default()\n"
+        ),
+        // Glow-discharge / neon lamp (EXPERIMENTAL, Phase 0c Stage 2a). The
+        // FROZEN latch (state[0]: 0.0 = dark, 1.0 = lit) is flipped here on the
+        // boolean strike/extinguish thresholds evaluated against the converged
+        // terminal voltage cv = V(a)−V(k). On a dark→lit strike the returned
+        // StatefulUpdate carries the sub-sample crossing fraction `alpha`
+        // (BLEP-style, RESERVED — the caller discards it in Stage 2a; measured,
+        // not yet applied). `dt` is unused (the boolean-strike model has no
+        // firing time constant of its own — the conduction/de-ion time constant
+        // is the external RON·C).
+        DeviceParams::Glow(_) => format!(
+            "    let _ = dt; // no firing time constant in the boolean-strike model\n\
+             \x20   let cv = v_converged[0] - v_converged[1];\n\
+             \x20   let vp = v_prev[0] - v_prev[1];\n\
+             \x20   let lit = state[0] >= 0.5;\n\
+             \x20   if !lit {{\n\
+             \x20       if cv >= DEVICE_{d}_VO {{\n\
+             \x20           // Strike (dark → lit). Sub-sample crossing fraction of VO\n\
+             \x20           // between the previous and converged terminal voltage.\n\
+             \x20           let denom = cv - vp;\n\
+             \x20           let alpha = if denom.abs() > 1e-30 {{\n\
+             \x20               ((DEVICE_{d}_VO - vp) / denom).clamp(0.0, 1.0)\n\
+             \x20           }} else {{ 0.0 }};\n\
+             \x20           state[0] = 1.0;\n\
+             \x20           return StatefulUpdate {{ fired: true, alpha }};\n\
+             \x20       }}\n\
+             \x20   }} else {{\n\
+             \x20       // Extinguish (lit → dark) on HOLDING CURRENT, not a bare\n\
+             \x20       // cv<=VD test: the maintaining-voltage lit model parks the\n\
+             \x20       // node near VD (i.e. cv>VD by the small sustaining drop), so\n\
+             \x20       // a voltage threshold would latch the tube lit forever. The\n\
+             \x20       // gas de-ionizes when it can no longer sustain conduction —\n\
+             \x20       // i.e. when (cv-VD)/RON drops below the holding current.\n\
+             \x20       let i_cond = (cv - DEVICE_{d}_VD) / DEVICE_{d}_RON;\n\
+             \x20       if i_cond <= DEVICE_{d}_IHOLD {{\n\
+             \x20           state[0] = 0.0;\n\
+             \x20       }}\n\
+             \x20   }}\n\
              \x20   StatefulUpdate::default()\n"
         ),
         // No stateful math for other device kinds (none are stateful yet).
