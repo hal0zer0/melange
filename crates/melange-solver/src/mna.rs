@@ -4824,6 +4824,57 @@ impl MnaBuilder {
             }
         }
 
+        // --- Voltage-mode VCA washout diagnostic (compile-time WARN only) ---
+        //
+        // A voltage-mode VCA (MODE=0, the default) models I_sig = G(Vc)·V_sig
+        // with G(Vc) in siemens. When its signal-input node is driven through a
+        // series/source resistance R_drive such that R_drive·G0 ≫ 1, the very
+        // high transconductance clamps V_sig ≈ 0 (near-virtual-ground) and the
+        // stage degenerates into a fixed passive network (e.g. a −Rfb/Rdrive
+        // inverter) whose gain is INDEPENDENT of the control voltage — the CV
+        // silently washes out. The correct model for a current-drive Blackmer
+        // topology is MODE=1 (current-mode). This warning surfaces the footgun;
+        // it changes no generated code.
+        //
+        // R_drive estimate: the Thévenin resistance looking out of a signal
+        // terminal into the rest of the linear network = 1 / G[node][node]
+        // (the diagonal conductance sums every resistor tied to that node). A
+        // voltage-mode VCA stamps NOTHING into G at its signal nodes (only the
+        // current-mode path adds a dummy conductance at an internal node), so
+        // the diagonal is exactly the source conductance the transconductance
+        // competes against. We take the larger Thévenin R over the two
+        // non-ground signal terminals (the weakest-driven terminal governs the
+        // washout). Nodes with zero resistive diagonal (purely cap/inductor
+        // coupled at DC) are skipped — the DC G-matrix estimator does not apply.
+        for vca in &mna.vcas {
+            if vca.current_mode {
+                continue;
+            }
+            let mut r_drive: Option<f64> = None;
+            for node_1idx in [vca.n_sig_p_idx, vca.n_sig_n_idx] {
+                if node_1idx == 0 {
+                    continue; // ground terminal
+                }
+                let diag = mna.g[node_1idx - 1][node_1idx - 1];
+                if diag > 0.0 {
+                    let r_thev = 1.0 / diag;
+                    r_drive = Some(r_drive.map_or(r_thev, |prev| prev.max(r_thev)));
+                }
+            }
+            if let Some(r_drive) = r_drive {
+                let metric = r_drive * vca.g0;
+                if metric >= 10.0 {
+                    log::warn!(
+                        "VCA {} voltage-mode with R_drive·G0 ≈ {:.1} ≫ 1: \
+                         control-voltage response is suppressed by the source \
+                         resistance — did you mean MODE=1 (current-mode)?",
+                        vca.name,
+                        metric
+                    );
+                }
+            }
+        }
+
         Ok(mna)
     }
 
