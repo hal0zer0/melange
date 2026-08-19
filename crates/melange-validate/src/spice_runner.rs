@@ -279,8 +279,13 @@ pub fn run_transient(
             continue;
         }
 
-        if is_melange_directive(line) {
-            // Strip melange-specific directives that ngspice doesn't understand
+        if let Some(action) = translate_melange_directive(line) {
+            // melange-only directive: either strip it (ngspice can't parse it)
+            // or substitute an ngspice-equivalent element line.
+            if let Some(replacement) = action {
+                modified_content.push_str(&replacement);
+                modified_content.push('\n');
+            }
             continue;
         } else if trimmed_upper.starts_with(".TRAN") {
             // Replace with uniform timestep for sample-accurate comparison
@@ -583,6 +588,46 @@ fn is_melange_directive(line: &str) -> bool {
         // melange side; the ngspice reference runs the full nonlinear device
         // (the stricter check). Strip it so ngspice parses the deck.
         || trimmed.starts_with(".LINEARIZE ")
+        // `.tap <node> [name]` is a pure readout (names an output), no circuit
+        // element. Strip it so ngspice parses the deck.
+        || trimmed.starts_with(".TAP ")
+}
+
+/// Translate a melange-only directive line for the ngspice reference deck.
+///
+/// Returns:
+/// - `None` — not a melange directive; the caller keeps the line unchanged.
+/// - `Some(None)` — strip the line (ngspice can't parse it, no element behind it).
+/// - `Some(Some(repl))` — substitute `repl` (an ngspice-equivalent element line).
+///
+/// `.inject <node> <field> R=<ohms>|RSHUNT=<ohms>` declares an audio-rate
+/// injection port. melange stamps a conductance G=1/R from `<node>` to ground as
+/// the at-rest injection impedance — present in its DC-OP and every solve — with
+/// the injection source held at 0 at rest. The faithful ngspice equivalent is
+/// therefore a real resistor of value R from `<node>` to ground. Both `R=`
+/// (Thevenin-series) and `RSHUNT=` (Norton-shunt) collapse to the identical
+/// at-rest topology (source off), so both map to the same node-to-ground
+/// resistor `R_minj_<field> <node> 0 <R-token>`. Bare-stripping would drop a
+/// real element melange solves with, comparing two different circuits. Field
+/// names are unique per deck, so `R_minj_<field>` is collision-safe. The raw
+/// value token is preserved verbatim (ngspice understands SPICE suffixes).
+fn translate_melange_directive(line: &str) -> Option<Option<String>> {
+    if is_melange_directive(line) {
+        return Some(None);
+    }
+    if line.trim().to_uppercase().starts_with(".INJECT ") {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 4 {
+            let node = parts[1];
+            let field = parts[2];
+            // Value token follows the '=' in the R=/RSHUNT= parameter.
+            let r_token = parts[3].split_once('=').map_or(parts[3], |x| x.1);
+            return Some(Some(format!("R_minj_{} {} 0 {}", field, node, r_token)));
+        }
+        // Malformed `.inject` — strip so ngspice still parses the deck.
+        return Some(None);
+    }
+    None
 }
 
 /// Inject a Thevenin-equivalent PWL source into a netlist string
@@ -882,5 +927,42 @@ mod tests {
         assert_eq!(volts, &[0.0, 0.5, 1.0]);
 
         assert!(data.get_node_voltage("nonexistent").is_err());
+    }
+
+    #[test]
+    fn test_translate_tap_and_inject_directives() {
+        // `.tap` is a pure readout: stripped from the ngspice deck.
+        assert_eq!(translate_melange_directive(".tap n1"), Some(None));
+        assert_eq!(translate_melange_directive(".tap n1 my_out"), Some(None));
+
+        // `.inject ... R=` converts to a node-to-ground resistor (Thevenin).
+        assert_eq!(
+            translate_melange_directive(".inject n2 f2 R=1k"),
+            Some(Some("R_minj_f2 n2 0 1k".to_string()))
+        );
+        // `.inject ... RSHUNT=` maps to the SAME node-to-ground resistor (Norton).
+        assert_eq!(
+            translate_melange_directive(".inject tank_ret wet_return RSHUNT=470k"),
+            Some(Some("R_minj_wet_return tank_ret 0 470k".to_string()))
+        );
+
+        // Simulate the deck-translation line filter on a small deck and confirm
+        // `.tap`/`.inject` do not survive and the R line is present.
+        let deck = "* title\nR1 a b 10k\n.tap n1\n.inject n2 f2 R=1k\n.END\n";
+        let mut out = String::new();
+        for line in deck.lines() {
+            if let Some(action) = translate_melange_directive(line) {
+                if let Some(replacement) = action {
+                    out.push_str(&replacement);
+                    out.push('\n');
+                }
+                continue;
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        assert!(!out.to_uppercase().contains(".TAP"), "deck: {out}");
+        assert!(!out.to_uppercase().contains(".INJECT"), "deck: {out}");
+        assert!(out.contains("R_minj_f2 n2 0 1k"), "deck: {out}");
     }
 }
