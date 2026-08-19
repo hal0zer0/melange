@@ -70,12 +70,16 @@ linearly in T, so we don't need to decompose the stored `n_vt` product.
 
 The exact-exponential step is unconditionally stable for any `dt/tau`
 (it replaced a forward-Euler integrator that overshot whenever
-`dt > tau`). `dt` is the internal sample period; the DK emitter reads it
-from the live rate (`1 / (state.current_sample_rate ·
-OVERSAMPLING_FACTOR)`, `dk_emitter.rs::emit_thermal_tj_advance`) so
-`set_sample_rate` keeps the thermal time constant correct. (Known twin
-divergence: the nodal emitter currently bakes dt from the codegen-time
-rate consts — no shipped nodal circuit uses RTH.) When `CTH ≤ 0` the
+`dt > tau`). `dt` is the internal sample period, read from the live rate
+(`1 / (state.current_sample_rate · OVERSAMPLING_FACTOR)`) so
+`set_sample_rate` keeps the thermal time constant correct. The whole
+Tj-advance inner block is emitted by ONE twin-shared helper,
+`rust_emitter::helpers::emit_thermal_tj_advance`, spliced verbatim by
+BOTH the DK and nodal emitters — byte-identity is locked by the
+`thermal_tj_advance_dk_nodal_string_identity` codegen test. (Historical
+note: the nodal emitter once baked dt from codegen-time rate consts; the
+value was fixed in 746bdb8 and the two paths were unified onto the shared
+helper in Phase 0c Stage 0.) When `CTH ≤ 0` the
 thermal pole is instantaneous and the emitted form is quasi-static
 `Tj = clamp(Tss)`. Default `RTH=∞` makes the whole block codegen
 dead-code (guarded by `DiodeParams::has_self_heating()`).

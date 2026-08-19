@@ -8,11 +8,11 @@
 use tera::Context;
 
 use super::helpers::{
-    coupled_inductor_template_data, device_param_template_data, emit_device_const, fmt_f64,
-    format_matrix_rows, inductor_template_data, named_const_entries, oversampling_info,
-    recommended_warmup_samples, section_banner, self_heating_device_data,
-    transformer_group_template_data, warmup_estimate_capped, SwitchCompTemplateData,
-    SwitchTemplateData,
+    coupled_inductor_template_data, device_param_template_data, emit_device_const,
+    emit_thermal_tj_advance, fmt_f64, format_matrix_rows, inductor_template_data,
+    named_const_entries, oversampling_info, recommended_warmup_samples, section_banner,
+    self_heating_device_data, transformer_group_template_data, warmup_estimate_capped,
+    SwitchCompTemplateData, SwitchTemplateData,
 };
 use super::RustEmitter;
 use crate::codegen::ir::{CircuitIR, DeviceParams, DeviceType};
@@ -5888,43 +5888,7 @@ fn k_eff_adjust_stmts(ir: &CircuitIR, var: &str, indent: &str) -> String {
     out
 }
 
-/// Emit the junction-temperature advance for a self-heating device.
-///
-/// Exact solution of the first-order RC thermal ODE over one internal sample:
-///   Tss = TAMB + P·RTH,   τ = RTH·CTH,   Tj += (Tss − Tj)·(1 − e^(−dt/τ))
-///
-/// This replaces the forward-Euler step `Tj += (P − (Tj−TAMB)/RTH)/CTH·dt`,
-/// which overshoots (and can oscillate or blow through the clamp) whenever
-/// dt > τ. The exponential form is unconditionally stable for any dt/τ and
-/// converges to the same trajectory as Euler in the dt ≪ τ limit.
-///
-/// `dt` is the INTERNAL (oversampled) sample period: this block lives inside
-/// the templated `process_sample`, which the oversampling wrapper calls once
-/// per internal sample — so a host-rate dt would heat oversampled circuits
-/// `factor`× too fast. The rate is read from `state.current_sample_rate`
-/// (host-rate semantics on the DK path, kept live by `set_sample_rate`) ×
-/// OVERSAMPLING_FACTOR, NOT the baked SAMPLE_RATE/INTERNAL_SAMPLE_RATE
-/// consts — a 96 kHz host running a 44.1k-compiled circuit would otherwise
-/// integrate the thermal ODE ~2.2× too fast per second of audio. The
-/// `needs_current_sr` gate in emit_state includes thermal devices so the
-/// field always exists here.
-///
-/// When CTH ≤ 0 the thermal pole is instantaneous — emit the quasi-static
-/// form `Tj = Tss` directly. Both forms keep the [200, 500] K runaway clamp.
-fn emit_thermal_tj_advance(dev_num: usize, cth: f64) -> String {
-    if cth > 0.0 {
-        let dt_expr = "1.0 / (state.current_sample_rate * OVERSAMPLING_FACTOR as f64)";
-        format!(
-            "        let dt = {dt_expr};\n\
-             \x20       let tss = DEVICE_{dev_num}_TAMB + p * DEVICE_{dev_num}_RTH;\n\
-             \x20       let tau = DEVICE_{dev_num}_RTH * DEVICE_{dev_num}_CTH;\n\
-             \x20       state.device_{dev_num}_tj += (tss - state.device_{dev_num}_tj) * (1.0 - (-dt / tau).exp());\n\
-             \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n"
-        )
-    } else {
-        format!(
-            "        let tss = DEVICE_{dev_num}_TAMB + p * DEVICE_{dev_num}_RTH;\n\
-             \x20       state.device_{dev_num}_tj = tss.clamp(200.0, 500.0);\n"
-        )
-    }
-}
+// The junction-temperature advance for a self-heating device now lives in
+// `super::helpers::emit_thermal_tj_advance` — a single source of truth shared
+// verbatim by the DK and nodal emitters (imported above). See that helper and
+// the `thermal_tj_advance_dk_nodal_string_identity` codegen test.

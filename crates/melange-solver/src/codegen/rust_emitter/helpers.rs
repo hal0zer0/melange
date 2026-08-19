@@ -516,6 +516,57 @@ pub(super) fn section_banner(title: &str) -> String {
     )
 }
 
+/// Emit the per-sample junction-temperature advance for a self-heating device.
+///
+/// **Single source of truth for the thermal state-advance inner block, shared
+/// verbatim by BOTH the DK (`dk_emitter`) and nodal (`nodal_emitter`) emitters.**
+/// The two emitters author independent scaffolding (Tera loop + hot
+/// `CircuitState` on DK; procedural `push_str` + `Box<CircuitStateCold>` on
+/// nodal), which makes every per-device state fragment a twin-divergence
+/// hazard. This helper collapses the thermal advance to one function so the
+/// emitted inner expression can never drift between paths — enforced by the
+/// `thermal_tj_advance_dk_nodal_string_identity` codegen test. The block is
+/// spliced in at 8-space indent after the caller has computed the dissipated
+/// power `p` (W) into scope; it leaves the `[200, 500] K` clamped junction
+/// temperature in `state.device_{dev_num}_tj`.
+///
+/// Exact solution of the first-order RC thermal ODE over one internal sample:
+///   Tss = TAMB + P·RTH,   τ = RTH·CTH,   Tj += (Tss − Tj)·(1 − e^(−dt/τ))
+///
+/// This replaces the forward-Euler step `Tj += (P − (Tj−TAMB)/RTH)/CTH·dt`,
+/// which overshoots (and can oscillate or blow through the clamp) whenever
+/// dt > τ. The exponential form is unconditionally stable for any dt/τ and
+/// converges to the same trajectory as Euler in the dt ≪ τ limit.
+///
+/// `dt` is the INTERNAL (oversampled) sample period. The rate is read from
+/// `state.current_sample_rate` (host-rate semantics, kept live by
+/// `set_sample_rate`) × OVERSAMPLING_FACTOR, NOT the baked
+/// SAMPLE_RATE/INTERNAL_SAMPLE_RATE consts — a 96 kHz host running a
+/// 44.1k-compiled circuit would otherwise integrate the thermal ODE ~2.2× too
+/// fast per second of audio. Both emitters gate the `state.current_sample_rate`
+/// field on via `needs_current_sr` (DK: `emit_state`; nodal:
+/// `has_thermal_sr_consumer`) so the field always exists here.
+///
+/// When CTH ≤ 0 the thermal pole is instantaneous — emit the quasi-static
+/// form `Tj = Tss` directly. Both forms keep the [200, 500] K runaway clamp.
+pub(super) fn emit_thermal_tj_advance(dev_num: usize, cth: f64) -> String {
+    if cth > 0.0 {
+        let dt_expr = "1.0 / (state.current_sample_rate * OVERSAMPLING_FACTOR as f64)";
+        format!(
+            "        let dt = {dt_expr};\n\
+             \x20       let tss = DEVICE_{dev_num}_TAMB + p * DEVICE_{dev_num}_RTH;\n\
+             \x20       let tau = DEVICE_{dev_num}_RTH * DEVICE_{dev_num}_CTH;\n\
+             \x20       state.device_{dev_num}_tj += (tss - state.device_{dev_num}_tj) * (1.0 - (-dt / tau).exp());\n\
+             \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n"
+        )
+    } else {
+        format!(
+            "        let tss = DEVICE_{dev_num}_TAMB + p * DEVICE_{dev_num}_RTH;\n\
+             \x20       state.device_{dev_num}_tj = tss.clamp(200.0, 500.0);\n"
+        )
+    }
+}
+
 /// Collapse 3+ consecutive blank lines down to 2.
 ///
 /// Post-processing pass applied to generated code for cleaner output.

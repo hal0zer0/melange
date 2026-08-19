@@ -379,12 +379,15 @@ fn test_self_heating_cth_zero_quasi_static() {
     let config = support::config_for_spice(SELF_HEATING_DIODE_CTH0_SPICE, SR);
     let (code, _n, _m) =
         support::generate_circuit_code_nodal(SELF_HEATING_DIODE_CTH0_SPICE, &config);
+    // The Tj advance now comes from the shared `helpers::emit_thermal_tj_advance`
+    // (twin-identical to the DK path). Its CTH<=0 branch emits the quasi-static
+    // `Tj = clamp(Tss)` form directly, with no dt/tau/exp step.
     assert!(
-        code.contains("quasi-static thermal"),
-        "CTH=0 must emit the quasi-static Tj = Tss form"
+        code.contains("state.device_0_tj = tss.clamp(200.0, 500.0);"),
+        "CTH=0 must emit the quasi-static Tj = clamp(Tss) form"
     );
     assert!(
-        !code.contains("(-dt / tau).exp()"),
+        !code.contains("(-dt / tau).exp()") && !code.contains("let tau ="),
         "CTH=0 must not emit the exponential step (tau would be zero)"
     );
     let circuit =

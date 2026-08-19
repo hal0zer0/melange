@@ -10,9 +10,9 @@ use super::dk_emitter::{
     NoiseEmission,
 };
 use super::helpers::{
-    device_param_template_data, emit_pentode_nr_dk_stamp, fmt_f64, format_matrix_rows,
-    oversampling_info, pentode_dispatch, recommended_warmup_samples, section_banner,
-    self_heating_device_data, warmup_estimate_capped,
+    device_param_template_data, emit_pentode_nr_dk_stamp, emit_thermal_tj_advance, fmt_f64,
+    format_matrix_rows, oversampling_info, pentode_dispatch, recommended_warmup_samples,
+    section_banner, self_heating_device_data, warmup_estimate_capped,
 };
 use super::nr_helpers::{emit_nr_singular_fallback, emit_schur_nr_limit_and_converge};
 use super::RustEmitter;
@@ -8911,26 +8911,12 @@ impl RustEmitter {
     /// - Triode: Tj only — the Koren coefficients are untouched; the drift
     ///   rides the `VBIAS_ALPHA·(Tj-TAMB)` Vgk shift at the NR call sites.
     fn emit_self_heating_thermal_updates(code: &mut String, ir: &CircuitIR) {
-        let dt_expr = "1.0 / (state.current_sample_rate * OVERSAMPLING_FACTOR as f64)";
-        // Exact exponential Tj step (or quasi-static form when CTH ≤ 0).
-        // Expects `p` (dissipated power, W) in scope; leaves the [200,500] K
-        // clamped Tj in `state.device_{dev_num}_tj`.
-        let tj_step = |dev_num: usize, cth: f64| -> String {
-            if cth > 0.0 {
-                format!(
-                    "\x20       let tss = DEVICE_{dev_num}_TAMB + p * DEVICE_{dev_num}_RTH;\n\
-                     \x20       let tau = DEVICE_{dev_num}_RTH * DEVICE_{dev_num}_CTH;\n\
-                     \x20       let dt = {dt_expr};\n\
-                     \x20       state.device_{dev_num}_tj += (tss - state.device_{dev_num}_tj) * (1.0 - (-dt / tau).exp());\n\
-                     \x20       state.device_{dev_num}_tj = state.device_{dev_num}_tj.clamp(200.0, 500.0);\n"
-                )
-            } else {
-                format!(
-                    "\x20       // CTH <= 0: quasi-static thermal (instant settling)\n\
-                     \x20       state.device_{dev_num}_tj = (DEVICE_{dev_num}_TAMB + p * DEVICE_{dev_num}_RTH).clamp(200.0, 500.0);\n"
-                )
-            }
-        };
+        // The Tj advance inner block is the twin-shared source of truth in
+        // `super::helpers::emit_thermal_tj_advance` (byte-identical to the DK
+        // path, enforced by `thermal_tj_advance_dk_nodal_string_identity`).
+        // It expects `p` (dissipated power, W) in scope and leaves the
+        // [200,500] K clamped Tj in `state.device_{dev_num}_tj`.
+        let tj_step = emit_thermal_tj_advance;
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
             match &slot.params {
                 // The `device_type == Bjt` guard (not BjtForwardActive) is
