@@ -3674,6 +3674,7 @@ impl CircuitIR {
         netlist: &Netlist,
         config: &CodegenConfig,
     ) -> std::collections::HashSet<String> {
+        use crate::codegen::BjtFaMode;
         use crate::dc_op::{self, DcOpConfig};
 
         let device_slots = Self::build_device_info(netlist).unwrap_or_default();
@@ -3740,34 +3741,73 @@ impl CircuitIR {
                 // (typical stage Vce margin is 0.85V in cascaded topologies).
                 if vbc_eff < -0.5 {
                     let name = dev.name.to_ascii_uppercase();
-                    if bp.is_gummel_poon()
-                        || bp.has_ise()
-                        || bp.has_self_heating()
-                        || bp.has_parasitics()
-                    {
-                        let mechanism = if bp.is_gummel_poon() {
-                            "Gummel-Poon params present (VAF/VAR/IKF/IKR) — 1D FA emission has no qb"
-                        } else if bp.has_ise() {
-                            "ISE leakage present — 1D FA emission uses Ib=Ic/BF"
-                        } else if bp.has_self_heating() {
-                            "self-heating present (RTH finite) — thermal update needs the 2D (Ic,Ib) slot pair; a 1D slot would alias the next device's slot"
-                        } else {
-                            "ohmic parasitics present (RB/RC/RE) — 1D FA emission drops them; gm·RE reaches O(1) on power BJTs"
-                        };
+
+                    // `--bjt-fa off`: never reduce — every BJT stays full-2D.
+                    if config.bjt_fa_mode == BjtFaMode::Off {
                         log::info!(
-                            "BJT '{}' is forward-active (Vbc={:.3}V) but NOT 1D-reduced: {}. Routing full-2D.",
+                            "BJT '{}' forward-active (Vbc={:.3}V) but --bjt-fa=off — routing full-2D.",
                             name,
-                            vbc_eff,
-                            mechanism
+                            vbc_eff
                         );
                         continue;
                     }
-                    log::info!(
-                        "BJT '{}' forward-active (Vbc={:.3}V). Using 1D model.",
-                        name,
-                        vbc_eff
-                    );
-                    forward_active.insert(name);
+
+                    // Self-heating is a STRUCTURAL exclusion, not an accuracy
+                    // one: the thermal update reads the 2D (Ic,Ib) slot pair at
+                    // (s, s+1); a 1D slot would alias the NEXT device's slot (or
+                    // run out of bounds). It is NEVER reduced — not even under
+                    // `--bjt-fa=force`.
+                    if bp.has_self_heating() {
+                        log::info!(
+                            "BJT '{}' forward-active (Vbc={:.3}V) but self-heating (RTH finite) — the thermal update needs the 2D (Ic,Ib) slot pair; NOT 1D-reduced even under --bjt-fa=force. Routing full-2D.",
+                            name,
+                            vbc_eff
+                        );
+                        continue;
+                    }
+
+                    // GP / ISE / ohmic-parasitic devices are ACCURACY-excluded:
+                    // the 1D FA emission is structurally valid (uses IS/NF/Vt,
+                    // Ib=Ic/BF) but drops qb / leakage / RB-RC-RE. Exact only for
+                    // pure Ebers-Moll.
+                    if bp.is_gummel_poon() || bp.has_ise() || bp.has_parasitics() {
+                        let mechanism = if bp.is_gummel_poon() {
+                            "Gummel-Poon params present (VAF/VAR/IKF/IKR) — 1D FA emission has no qb (drops Early effect + high-level injection)"
+                        } else if bp.has_ise() {
+                            "ISE leakage present — 1D FA emission uses Ib=Ic/BF"
+                        } else {
+                            "ohmic parasitics present (RB/RC/RE) — 1D FA emission drops them; gm·RE reaches O(1) on power BJTs"
+                        };
+                        if config.bjt_fa_mode == BjtFaMode::Force {
+                            // Explicit user opt-in. The reduction is accuracy-
+                            // lossy and NOT safe under signal: the collector
+                            // swing modulates qb, which this compile-time
+                            // decision cannot see. Warn loudly, per device.
+                            log::warn!(
+                                "BJT '{}' FORCE-reduced to 1D by --bjt-fa=force despite: {}. Accuracy is NOT guaranteed under signal (~1-2 dB deviation under hard drive for GP/ISE, larger for parasitics). You requested this — remove --bjt-fa=force for the accuracy-exact full-2D model.",
+                                name,
+                                mechanism
+                            );
+                            forward_active.insert(name);
+                        } else {
+                            // Auto (default): leave full-2D — exact.
+                            log::info!(
+                                "BJT '{}' is forward-active (Vbc={:.3}V) but NOT 1D-reduced: {}. Routing full-2D (use --bjt-fa=force to override).",
+                                name,
+                                vbc_eff,
+                                mechanism
+                            );
+                            continue;
+                        }
+                    } else {
+                        // Pure Ebers-Moll: 1D reduction is EXACT (auto + force).
+                        log::info!(
+                            "BJT '{}' forward-active (Vbc={:.3}V). Using 1D model (exact).",
+                            name,
+                            vbc_eff
+                        );
+                        forward_active.insert(name);
+                    }
                 }
             }
         }

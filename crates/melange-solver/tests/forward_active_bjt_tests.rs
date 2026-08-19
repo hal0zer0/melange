@@ -456,6 +456,65 @@ fn test_detect_forward_active_with_gummel_poon() {
     );
 }
 
+/// `--bjt-fa` modes (Off / Auto / Force) at the detection layer.
+/// Off never reduces; Auto reduces only pure-Ebers-Moll (exact); Force
+/// additionally reduces the accuracy-excluded GP case (opt-in, warned).
+#[test]
+fn test_bjt_fa_mode_off_auto_force() {
+    use melange_solver::codegen::BjtFaMode;
+
+    let with_mode = |spice: &str, mode: BjtFaMode| {
+        let (netlist, mut mna) = build_mna_with_gin(spice);
+        let device_slots = CircuitIR::build_device_info(&netlist).unwrap_or_default();
+        if !device_slots.is_empty() {
+            mna.stamp_device_junction_caps(&device_slots);
+        }
+        let mut config = make_config(0, 0);
+        config.bjt_fa_mode = mode;
+        CircuitIR::detect_forward_active_bjts(&mna, &netlist, &config)
+    };
+
+    // Pure Ebers-Moll, forward-active: Auto + Force reduce (exact); Off does not.
+    assert!(
+        with_mode(CE_FORWARD_ACTIVE, BjtFaMode::Off).is_empty(),
+        "Off must never reduce, even pure-EM"
+    );
+    assert!(
+        with_mode(CE_FORWARD_ACTIVE, BjtFaMode::Auto).contains("Q1"),
+        "Auto reduces pure-EM (exact)"
+    );
+    assert!(
+        with_mode(CE_FORWARD_ACTIVE, BjtFaMode::Force).contains("Q1"),
+        "Force reduces pure-EM"
+    );
+
+    // Gummel-Poon, forward-active: Auto keeps 2D (exact); Force reduces
+    // (opt-in, accuracy-lossy); Off keeps 2D.
+    assert!(
+        with_mode(BJT_WITH_GP, BjtFaMode::Auto).is_empty(),
+        "Auto must NOT reduce GP (would drop qb)"
+    );
+    assert!(
+        with_mode(BJT_WITH_GP, BjtFaMode::Force).contains("Q1"),
+        "Force reduces GP by explicit opt-in"
+    );
+    assert!(
+        with_mode(BJT_WITH_GP, BjtFaMode::Off).is_empty(),
+        "Off never reduces, GP included"
+    );
+
+    // Self-heating is a STRUCTURAL exclusion (the thermal update reads the 2D
+    // (Ic,Ib) slot pair): NEVER reduced, not even under Force.
+    assert!(
+        with_mode(BJT_SELF_HEATING_FA, BjtFaMode::Force).is_empty(),
+        "Force must NOT reduce self-heating BJTs (would alias the thermal slot pair)"
+    );
+    assert!(
+        with_mode(BJT_SELF_HEATING_FA, BjtFaMode::Auto).is_empty(),
+        "Auto does not reduce self-heating BJTs"
+    );
+}
+
 /// BJT with ISE leakage must NOT be FA-reduced: the 1D FA emission uses
 /// Ib = Ic/BF, which ignores the ISE leakage term.
 #[test]

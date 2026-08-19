@@ -125,6 +125,32 @@ the 8 BJTs start at 16 nominal NR dimensions, but 7 of them are detected as
 forward-active and drop to 1D each (`16 - 7 = 9`). Linearized BJTs would drop
 the count further to 0 per device.
 
+#### `--bjt-fa` reduction mode (compile flag)
+
+Forward-active 1D reduction is **exact only for pure Ebers-Moll** BJTs (with
+`Vbc ≪ 0`, `Ic` genuinely does not depend on `Vbc`). For Gummel-Poon / ISE /
+parasitic-carded devices the 1D emission drops `qb` (Early effect + high-level
+injection), leakage, and `RB/RC/RE` — so they route **full-2D** by default.
+The `--bjt-fa off|auto|force` flag (mirrors `--tube-grid-fa`) controls this:
+
+| Mode | Behavior |
+|------|----------|
+| `auto` (default) | Reduce only pure-Ebers-Moll forward-active BJTs (exact). GP/ISE/self-heating/parasitic stay full-2D. Byte-identical to pre-flag codegen. |
+| `force` | Additionally reduce GP/ISE/parasitic forward-active BJTs to 1D, each with a per-device compile **warning**. Self-heating BJTs are **never** reduced (see below). |
+| `off` | No reduction — every BJT stays full-2D (parity / bisecting escape hatch). |
+
+**Known limitation (`--bjt-fa force`):** the reduction is **not accuracy-safe
+under signal**. A GP BJT's `qb` is modulated by the collector swing (`Vbc/VAF`
+Early term), and `Vbc` is exactly the dimension the 1D reduction discards — so
+whether freezing it is safe depends on the runtime drive amplitude, which a
+compile-time decision cannot see. Expect up to ~1–2 dB deviation under hard
+drive for GP/ISE (larger for parasitic-carded devices), concentrated in the
+harmonics. This is why `force` is an explicit, warned opt-in and never
+auto-selected. (See `memory/fa_reduction_gp_bjt_verdict.md` for the full
+analysis.) **Self-heating BJTs are excluded even under `force`** — that is a
+*structural* limit, not an accuracy one: the thermal update reads the 2D
+`(Ic, Ib)` slot pair, and a 1D slot would alias the next device's slot.
+
 ### Collector Current
 ```
 Ic = IS * (exp(Vbe/VT) - exp(Vbc/VT)) - IS/beta_R * (exp(Vbc/VT) - 1)

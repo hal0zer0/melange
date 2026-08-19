@@ -222,6 +222,35 @@ impl std::fmt::Display for NoiseMode {
     }
 }
 
+/// Forward-active (frozen-analysis) BJT reduction mode. Controls the 1-D
+/// reduction applied to deep-forward-active BJTs (see
+/// [`crate::codegen::ir::CircuitIR::detect_forward_active_bjts`]).
+///
+/// - [`Auto`](Self::Auto) (default): reduce only pure-Ebers-Moll BJTs, for
+///   which the 1-D emission is EXACT. Gummel-Poon / ISE / self-heating /
+///   parasitic-carded BJTs stay full-2-D. Historical behavior — byte-identical.
+/// - [`Off`](Self::Off): no reduction — every BJT stays full-2-D (parity
+///   escape hatch / bisecting).
+/// - [`Force`](Self::Force): additionally reduce accuracy-excluded BJTs
+///   (Gummel-Poon, ISE, parasitic) to 1-D with a per-device WARNING. This
+///   DROPS the qb base-charge term (Early effect + high-level injection) and is
+///   NOT accuracy-safe under signal — the collector swing modulates qb, which a
+///   compile-time reduction cannot see (expect up to ~1-2 dB deviation under
+///   hard drive, larger for parasitic-carded devices). Self-heating BJTs are
+///   NEVER force-reduced (structural: a 1-D slot would alias the thermal
+///   update's (Ic,Ib) slot pair).
+#[cfg(feature = "codegen")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BjtFaMode {
+    /// No FA reduction — all BJTs full-2-D.
+    Off,
+    /// Reduce only pure-Ebers-Moll BJTs (exact). Default.
+    #[default]
+    Auto,
+    /// Also force-reduce GP/ISE/parasitic BJTs (warned, accuracy-lossy).
+    Force,
+}
+
 /// Configuration for code generation
 #[cfg(feature = "codegen")]
 #[derive(Debug, Clone)]
@@ -359,6 +388,10 @@ pub struct CodegenConfig {
     pub injections: Vec<crate::codegen::ir::InjectionSpec>,
     /// Raw inner-rate tap probes (`.tap`). Empty when no `.tap` directive.
     pub taps: Vec<crate::codegen::ir::TapSpec>,
+    /// Forward-active BJT reduction mode. Default [`BjtFaMode::Auto`] (reduce
+    /// pure-Ebers-Moll only — byte-identical to pre-flag codegen). See
+    /// [`BjtFaMode`] and the `--bjt-fa` CLI flag.
+    pub bjt_fa_mode: BjtFaMode,
 }
 
 #[cfg(feature = "codegen")]
@@ -482,6 +515,7 @@ impl Default for CodegenConfig {
             router_dk_spectral_radius: 0.0,
             injections: Vec::new(),
             taps: Vec::new(),
+            bjt_fa_mode: BjtFaMode::Auto,
         }
     }
 }

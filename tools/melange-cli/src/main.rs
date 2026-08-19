@@ -142,6 +142,21 @@ enum Commands {
         #[arg(long, default_value = "auto")]
         tube_grid_fa: String,
 
+        /// BJT forward-active (frozen-analysis) reduction mode.
+        ///
+        /// * auto — reduce only pure-Ebers-Moll BJTs, for which the 1-D
+        ///   forward-active model is EXACT; Gummel-Poon / ISE / self-heating /
+        ///   parasitic BJTs stay full-2-D. Default; byte-identical to prior
+        ///   codegen.{n}{n}
+        /// * force — also 1-D-reduce Gummel-Poon / ISE / parasitic BJTs, each
+        ///   with a per-device WARNING. Drops the qb base-charge term (Early +
+        ///   high-level injection); NOT accuracy-safe under signal (~1-2 dB
+        ///   under hard drive, larger for parasitics). Self-heating BJTs are
+        ///   never force-reduced (structural).{n}{n}
+        /// * off — never reduce; all BJTs keep their full 2-D NR block.
+        #[arg(long, default_value = "auto")]
+        bjt_fa: String,
+
         /// Op-amp supply rail saturation strategy.
         ///
         /// Controls how the generated solver models an op-amp's output hitting
@@ -666,6 +681,7 @@ fn main() -> Result<()> {
             backward_euler,
             force_trap,
             tube_grid_fa,
+            bjt_fa,
             opamp_rail_mode,
             noise,
             noise_seed,
@@ -748,6 +764,13 @@ fn main() -> Result<()> {
                     tube_grid_fa
                 );
             }
+            // Validate bjt-fa mode.
+            if !matches!(bjt_fa.as_str(), "auto" | "off" | "force") {
+                anyhow::bail!(
+                    "Unknown --bjt-fa '{}'. Valid values: auto, off, force",
+                    bjt_fa
+                );
+            }
 
             compile_circuit_source(
                 &circuit_source,
@@ -768,6 +791,7 @@ fn main() -> Result<()> {
                 backward_euler,
                 force_trap,
                 &tube_grid_fa,
+                &bjt_fa,
                 rail_mode,
                 noise_mode,
                 noise_seed,
@@ -1160,6 +1184,17 @@ fn suggest_node_names<'a>(query: &str, available: impl Iterator<Item = &'a Strin
     suggestions.into_iter().map(|(_, name)| name).collect()
 }
 
+/// Parse the `--bjt-fa` string into a [`melange_solver::codegen::BjtFaMode`].
+/// Assumes the value was already validated (`auto` | `off` | `force`); an
+/// unrecognized value falls back to `Auto`.
+fn parse_bjt_fa_mode(s: &str) -> melange_solver::codegen::BjtFaMode {
+    match s {
+        "off" => melange_solver::codegen::BjtFaMode::Off,
+        "force" => melange_solver::codegen::BjtFaMode::Force,
+        _ => melange_solver::codegen::BjtFaMode::Auto,
+    }
+}
+
 fn compile_circuit_source(
     circuit_source: &circuits::CircuitSource,
     output: &PathBuf,
@@ -1179,6 +1214,7 @@ fn compile_circuit_source(
     backward_euler: bool,
     force_trap: bool,
     tube_grid_fa: &str,
+    bjt_fa: &str,
     opamp_rail_mode: melange_solver::codegen::OpampRailMode,
     noise_mode: melange_solver::codegen::NoiseMode,
     noise_seed: u64,
@@ -1589,6 +1625,7 @@ fn compile_circuit_source(
     let fa_config = melange_solver::codegen::CodegenConfig {
         input_node: input_node_idx,
         input_resistance,
+        bjt_fa_mode: parse_bjt_fa_mode(bjt_fa),
         ..melange_solver::codegen::CodegenConfig::default()
     };
     // Skip FA detection when the final solver will be Nodal:
@@ -3128,6 +3165,7 @@ fn simulate_circuit_source(
         router_dk_spectral_radius: decision.spectral_radius,
         injections: Vec::new(),
         taps: Vec::new(),
+        bjt_fa_mode: melange_solver::codegen::BjtFaMode::Auto,
     };
     let generator = CodeGenerator::new(config);
     let generated = if use_nodal {
@@ -4295,6 +4333,7 @@ fn analyze_freq_response(
         router_dk_spectral_radius: decision.spectral_radius,
         injections: Vec::new(),
         taps: Vec::new(),
+        bjt_fa_mode: melange_solver::codegen::BjtFaMode::Auto,
     };
     let generator = CodeGenerator::new(config);
     let generated = if use_nodal {
