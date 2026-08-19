@@ -262,6 +262,7 @@ Source: Sowter DWG E-72,658-2 + Peerless/Triad winding data.
 - `MAX_M=24` — bound on NR dimension; iterative/sparse NR for M>24 deferred. Bumped from 16 on 2026-04-19 to admit Uniquorn v2 (M=20) and leave headroom for split-band saturation designs.
 - Full-LU NR + ill-conditioned A (cond(A) > ~1000): Schur preferred when K well-conditioned. No known circuit needs both pathological K and ill-conditioned A. See DEBUGGING.md "Known Full-LU NR Limitations"
 - Ideal transformer decomposition (dependent sources + explicit leakage/magnetizing L): deferred, current coupled-inductor approach sufficient for Pultec at +1.8 dB
+- **Glow/neon relaxation-oscillator edge aliasing** (`N … NEON(…)`, Phase 0c Stage 2a). The strike/extinguish edge is quantized to the sample grid, so a bare oscillator node aliases at base rate. **Anti-alias = whole-circuit oversampling** (arbiter ruling on sub-sample edge handling: output BLEP was REJECTED — ill-posed for a mixed multi-oscillator output, and a cosmetic output filter forbidden by the accuracy-over-output-mapping rule; the sub-sample breakpoint re-solve is Deferred, below). Measured (`glow_relaxation_tests.rs`): for RC-loaded dividers the reservoir cap already band-limits the discharge (τ=RON·C≈one sample → a fast ramp, not an ideal step), so base-rate aliasing is modest (ASR ≈ −39 dB on a 126 Hz divider) and 4× OS nudges it only ~1 dB; OS=4 preserves the oscillator physics exactly. Recommend OS≥4 for glow-bearing decks. A trustworthy cross-divider ASR study (a naive FFT ASR on a few-sample-period self-oscillator is artifact-dominated) + a listening pass are the gate on ever building the breakpoint fix.
 
 ## Validated Circuits
 
@@ -302,6 +303,7 @@ and compilation are necessary but not sufficient).
 - Phase 7 crate split (extract melange-parser, melange-codegen)
 - M>24 iterative/sparse NR
 - BoyleDiodes heavy-clip Anderson acceleration / BoyleDiodes→ActiveSetBe hybrid (low priority)
+- **Sub-sample breakpoint re-solve for glow/oscillator edges** (arbiter option B for sub-sample edge handling; gated on listening tests proving oversampling insufficient). Split the firing sample at the strike/extinguish crossing fraction `alpha` — already computed but LATENT (`StatefulUpdate.alpha`, discarded at the `let _ = stateful_update_dev{n}` sites in `rust_emitter/helpers.rs`) — and integrate the two fractional-dt sub-steps. Physically correct, but a variable-dt refactor: nodal-route only (the DK route bakes `S = A⁻¹` at compile time, so it cannot vary dt per fire), with a worst-case-breakpoints-per-sample cap needed for RT. This is SEPARATE from the switch/pot breakpoint-BE above: that is a stability fix for events landing ON a sample boundary; this is sub-sample timing for events landing BETWEEN samples (and the glow is NR-device-stamped, so it does not hit the switch/pot trap 2×/Nyquist matrix path).
 
 ## Cross-Compilation (macOS from Linux)
 

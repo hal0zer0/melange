@@ -1,17 +1,15 @@
 //! Glow-discharge / neon relaxation-oscillator tests (Phase 0c Stage 2a).
 //!
-//! The `N<name> a k NEON(VO VD RON ROFF)` element has ZERO test coverage — it
-//! builds, but nothing proves it actually oscillates. The ZA1001 relaxation
-//! divider is the heart of the Philicorda AG7500 (70× of them), so "does the
-//! reservoir cap strike at VO and extinguish at VD, producing a sawtooth at
-//! T ≈ RC·ln((Vb−Vd)/(Vb−Vo))?" is the gating question for that whole circuit.
-//!
-//! This first test is OBSERVATIONAL: it drives the classic RC relaxation
-//! topology (rail → Rc → cap+neon to ground) and prints the steady-state
-//! min/max node voltage, cycle count, and period so we can compare against the
-//! analytic prediction and check the discharge flank (does it extinguish near
-//! VD, or overshoot toward ground because the once-per-sample latch keeps RON
-//! engaged for a whole sample?).
+//! The `N<name> a k NEON(VO VD RON ROFF IHOLD)` element is the ZA1001 relaxation
+//! divider — the heart of the Philicorda AG7500 (70× of them). Coverage here:
+//!  - free-running relaxation: strikes at VO, extinguishes at ~VD (maintaining-
+//!    voltage lit model), analytic T ≈ RC·ln((Vb−Vd)/(Vb−Vo)) period, on BOTH
+//!    the nodal and DK-Schur routes (`assert_relax_fixed`);
+//!  - supply-sensitivity (the ZA1001 divider-frequency dependence Philips
+//!    regulated for — schemer's falsification criterion);
+//!  - oversampling: preserves the oscillator physics, plus base-rate aliasing /
+//!    anti-alias validation (arbiter ruling on sub-sample edges — OS is the
+//!    anti-alias; output BLEP rejected; breakpoint re-solve deferred).
 
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -55,6 +53,34 @@ fn generate_nodal_code(spice: &str, sample_rate: f64) -> String {
         input_node,
         output_nodes: vec![output_node],
         input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    CodeGenerator::new(config)
+        .generate_nodal(&mna, &netlist)
+        .expect("nodal codegen")
+        .code
+}
+
+/// Generate with a given whole-circuit oversampling factor and NO output clamp,
+/// so the raw reservoir swing reaches the output for spectral analysis. Used to
+/// measure whether oversampling band-limits the glow strike/extinguish edge
+/// (the arbiter-ruled anti-alias for this Stage-2a device — output BLEP was
+/// rejected as ill-posed/cosmetic; OS is the physics-faithful mitigation).
+fn generate_glow_code_os(spice: &str, sample_rate: f64, os: usize) -> String {
+    let netlist = Netlist::parse(spice).expect("parse");
+    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
+    let input_node = mna.node_map["in"] - 1;
+    let output_node = mna.node_map["osc"] - 1;
+    mna.g[input_node][input_node] += 1.0;
+
+    let config = CodegenConfig {
+        circuit_name: "glow_os_test".to_string(),
+        sample_rate,
+        input_node,
+        output_nodes: vec![output_node],
+        input_resistance: 1.0,
+        oversampling_factor: os,
+        output_clamp_v: 1.0e9, // don't clip the ~40 V reservoir AC swing
         ..CodegenConfig::default()
     };
     CodeGenerator::new(config)
@@ -323,4 +349,154 @@ fn test_glow_period_is_supply_sensitive() {
     // And each should track its own analytic prediction (±6%).
     assert!((t_hi - 7.885).abs() / 7.885 < 0.06, "T(170V)={t_hi} vs analytic 7.885 ms");
     assert!((t_lo - 13.35).abs() / 13.35 < 0.06, "T(150V)={t_lo} vs analytic 13.35 ms");
+}
+
+// ── Oversampling anti-alias validation (arbiter ruling on sub-sample edge
+// handling: OS is the physics-faithful anti-alias for the sharp glow strike/
+// extinguish edge; output BLEP was REJECTED as ill-posed for the mixed
+// multi-oscillator target and doctrinally a cosmetic output filter per
+// CLAUDE.md; the sub-sample breakpoint re-solve (option B) is deferred, gated on
+// these numbers + a listening pass). A naive relaxation oscillator's edge
+// (τ_discharge ≈ 10 µs at RON=1k/C=10n, well under the 20.8 µs base sample
+// period) aliases at 48 kHz: its ultra-harmonics fold DOWN to inharmonic bins.
+// Whole-circuit OS runs the solver at the internal rate and the half-band
+// decimator removes the foldover before dropping to 48 kHz.
+//
+// Metric: aliasing-to-signal ratio (ASR) = energy in bins that are NOT
+// harmonics of f_osc (below Nyquist), relative to harmonic energy. Hann window +
+// harmonic-cluster attribution around the measured f0 (a bare near-Nyquist
+// proxy is INVALID here — foldover lands at low freqs, and OS4 legitimately puts
+// MORE real energy near Nyquist by resolving the edge). Lower ASR = less
+// aliasing. This is spectral evidence only; the final D-vs-B call also needs a
+// listening pass (SPICE/spectral necessary-but-not-sufficient).
+
+/// Measurement main: free-run the oscillator, capture the decimated 48 kHz
+/// output, Hann-window + radix-2 FFT, and report ASR = inharmonic/harmonic
+/// energy (dB). Route-agnostic; no warmup().
+const ASR_MAIN: &str = r#"
+fn fft(re: &mut [f64], im: &mut [f64]) {
+    let n = re.len();
+    let mut j = 0usize;
+    for i in 1..n {
+        let mut bit = n >> 1;
+        while j & bit != 0 { j ^= bit; bit >>= 1; }
+        j ^= bit;
+        if i < j { re.swap(i, j); im.swap(i, j); }
+    }
+    let mut len = 2usize;
+    while len <= n {
+        let ang = -2.0 * std::f64::consts::PI / len as f64;
+        let (wr, wi) = (ang.cos(), ang.sin());
+        let mut i = 0usize;
+        while i < n {
+            let (mut cr, mut ci) = (1.0f64, 0.0f64);
+            for k in 0..len / 2 {
+                let a = i + k; let b = i + k + len / 2;
+                let tr = cr * re[b] - ci * im[b];
+                let ti = cr * im[b] + ci * re[b];
+                re[b] = re[a] - tr; im[b] = im[a] - ti;
+                re[a] += tr; im[a] += ti;
+                let ncr = cr * wr - ci * wi;
+                ci = cr * wi + ci * wr; cr = ncr;
+            }
+            i += len;
+        }
+        len <<= 1;
+    }
+}
+fn main() {
+    let mut state = CircuitState::default();
+    let sr = 48000.0f64;
+    let settle = (sr * 0.05) as usize;
+    let n = 16384usize; // 2^14
+    for _ in 0..settle { let _ = process_sample(0.0, &mut state); }
+    let mut buf = Vec::with_capacity(n);
+    let mut strikes = 0u32; let mut prev_lit = false;
+    let mut first = -1i64; let mut last = -1i64;
+    for i in 0..n {
+        let y = process_sample(0.0, &mut state)[0];
+        buf.push(y);
+        let lit = state.device_0_state[0] >= 0.5;
+        if !prev_lit && lit { strikes += 1; if first < 0 { first = i as i64; } last = i as i64; }
+        prev_lit = lit;
+    }
+    let period = if strikes >= 2 { (last - first) as f64 / (strikes - 1) as f64 } else { -1.0 };
+    let f0 = sr / period;
+    let mean = buf.iter().sum::<f64>() / n as f64;
+    let mut re = vec![0.0f64; n];
+    let mut im = vec![0.0f64; n];
+    for i in 0..n {
+        let w = 0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / (n as f64 - 1.0)).cos();
+        re[i] = (buf[i] - mean) * w;
+    }
+    fft(&mut re, &mut im);
+    let half = n / 2;
+    let bin_hz = sr / n as f64;
+    let mut is_harm = vec![false; half];
+    let kmax = (sr / 2.0 / f0) as usize;
+    for k in 1..=kmax {
+        let center = (k as f64 * f0 / bin_hz).round() as i64;
+        for d in -2i64..=2 {
+            let b = center + d;
+            if b >= 4 && (b as usize) < half { is_harm[b as usize] = true; }
+        }
+    }
+    let (mut e_harm, mut e_inharm) = (0.0f64, 0.0f64);
+    for b in 4..half {
+        let p = re[b] * re[b] + im[b] * im[b];
+        if is_harm[b] { e_harm += p; } else { e_inharm += p; }
+    }
+    let asr_db = 10.0 * (e_inharm / e_harm.max(1e-300)).max(1e-300).log10();
+    println!("f0_hz={:.3}", f0);
+    println!("asr_db={:.3}", asr_db);
+    println!("strikes={}", strikes);
+}
+"#;
+
+fn measure_asr_db(spice: &str, os: usize, tag: &str) -> (f64, f64) {
+    let code = generate_glow_code_os(spice, 48000.0, os);
+    let out = compile_and_run(&code, ASR_MAIN, &format!("asr_{tag}_os{os}"));
+    assert!(parse_kv(&out, "strikes") as u32 >= 5, "{tag} OS={os}: oscillator didn't run");
+    (parse_kv(&out, "asr_db"), parse_kv(&out, "f0_hz"))
+}
+
+/// Quantifies the arbiter's option-D claim on a LOW divider (f0≈126 Hz), where
+/// the period is many samples so the ASR estimate is stable.
+///
+/// FINDING (recorded): base-rate aliasing is already modest (ASR ≈ −39 dB) and
+/// 4× oversampling only nudges it ~1 dB — the reservoir cap band-limits the
+/// discharge (τ=RON·C=10 µs ≈ one sample → a fast ramp, not an ideal step), so
+/// there is little foldover to remove. This is evidence that the expensive
+/// sub-sample breakpoint re-solve (option B) is NOT justified for this regime.
+///
+/// NOTE ON HIGH DIVIDERS: a naive FFT ASR on a self-oscillator whose period is
+/// only a handful of samples is dominated by f0-vs-fs bin alignment and period
+/// jitter, not aliasing — measured ASR there swings ±20 dB with tiny f0 shifts
+/// (e.g. f0≈fs/8 folds foldover exactly onto harmonics). A trustworthy
+/// cross-divider aliasing study needs non-coherent analysis + f0 chosen well off
+/// fs sub-multiples, and ultimately a listening pass — both DEFERRED (they are
+/// the gate on ever building option B). So this test asserts only the stable
+/// low-divider facts; see `test_glow_oversampling_preserves_physics` for the OS
+/// correctness guard that DOES generalize.
+#[test]
+fn test_glow_oversampling_low_divider_aliasing_modest() {
+    let (lo1, flo) = measure_asr_db(&relax_deck(170.0), 1, "lo");
+    let (lo2, _) = measure_asr_db(&relax_deck(170.0), 2, "lo");
+    let (lo4, _) = measure_asr_db(&relax_deck(170.0), 4, "lo");
+    eprintln!(
+        "GLOW ASR low divider f0≈{flo:.0} Hz: OS1={lo1:.2} dB OS2={lo2:.2} dB OS4={lo4:.2} dB \
+         (inharmonic/harmonic; lower = less aliasing)"
+    );
+    assert!(lo1 < -25.0, "base-rate aliasing should be modest (cap band-limits), ASR={lo1} dB");
+    assert!(lo4 <= lo1 + 1.0, "OS must not worsen aliasing: OS1={lo1} dB OS4={lo4} dB");
+}
+
+/// Oversampling must PRESERVE the oscillator physics (this generalizes across
+/// dividers, unlike the spectral ASR). At OS=4 the solver runs at 192 kHz; the
+/// glow must still strike at VO, extinguish at ~VD, and hold the analytic period.
+#[test]
+fn test_glow_oversampling_preserves_physics() {
+    let code = generate_glow_code_os(&relax_deck(170.0), 48000.0, 4);
+    let out = compile_and_run(&code, OBSERVE_MAIN, "os4_physics");
+    assert_relax_fixed("nodal OS=4", &out);
 }
