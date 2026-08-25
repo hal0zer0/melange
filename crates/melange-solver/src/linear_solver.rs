@@ -79,15 +79,9 @@ fn reset_coupled_inductors(coupled: &mut [crate::dk::CoupledInductorState]) {
 /// Reset all transformer group companion model state to zero.
 fn reset_transformer_groups(groups: &mut [crate::dk::TransformerGroupState]) {
     for g in groups {
-        for v in &mut g.i_hist {
-            *v = 0.0;
-        }
-        for v in &mut g.i_prev {
-            *v = 0.0;
-        }
-        for v in &mut g.v_prev {
-            *v = 0.0;
-        }
+        g.i_hist.fill(0.0);
+        g.i_prev.fill(0.0);
+        g.v_prev.fill(0.0);
     }
 }
 

@@ -128,46 +128,57 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
     };
 
     // Routing decision (first match wins)
-    let route;
-    let reason;
-    if !mna.behavioral_sources.is_empty() {
+
+    let (route, reason) = if !mna.behavioral_sources.is_empty() {
         // Behavioral B-sources reference arbitrary nodes (rectangular control),
         // which the DK N_v/N_i reduction can't express. They are stamped
         // directly in node space by the nodal emitter.
-        route = SolverRoute::Nodal;
-        reason =
-            "behavioral B-source present (node-space stamping requires nodal path)".to_string();
+        (
+            SolverRoute::Nodal,
+            "behavioral B-source present (node-space stamping requires nodal path)".to_string(),
+        )
     } else if dk_failed {
-        route = SolverRoute::Nodal;
-        reason = "DK kernel build failed (positive feedback or oscillator circuit)".to_string();
+        (
+            SolverRoute::Nodal,
+            "DK kernel build failed (positive feedback or oscillator circuit)".to_string(),
+        )
     } else if dk_unstable {
-        route = SolverRoute::Nodal;
-        reason = format!(
-            "trapezoidal unstable (spectral radius {:.4} > 1.002)",
-            spectral_radius
-        );
+        (
+            SolverRoute::Nodal,
+            format!(
+                "trapezoidal unstable (spectral radius {:.4} > 1.002)",
+                spectral_radius
+            ),
+        )
     } else if k_diag_unsafe {
-        route = SolverRoute::Nodal;
-        reason = "non-negative K diagonal with live N_i column (positive feedback in DK Schur NR, e.g. transformer-coupled NFB)".to_string();
+        (SolverRoute::Nodal, "non-negative K diagonal with live N_i column (positive feedback in DK Schur NR, e.g. transformer-coupled NFB)".to_string())
     } else if multi_transformer {
-        route = SolverRoute::Nodal;
-        reason = format!(
-            "multi-transformer circuit ({} groups, DK K matrix unstable)",
-            n_xfmr_groups
-        );
+        (
+            SolverRoute::Nodal,
+            format!(
+                "multi-transformer circuit ({} groups, DK K matrix unstable)",
+                n_xfmr_groups
+            ),
+        )
     } else if large_m {
-        route = SolverRoute::Nodal;
-        reason = format!(
-            "large nonlinear dimension (M={}, M×M elimination expensive)",
-            m
-        );
+        (
+            SolverRoute::Nodal,
+            format!(
+                "large nonlinear dimension (M={}, M×M elimination expensive)",
+                m
+            ),
+        )
     } else if k_ill_conditioned {
-        route = SolverRoute::Nodal;
-        reason = "K matrix ill-conditioned (max|K| > 1e8, nodal full-LU avoids K)".to_string();
+        (
+            SolverRoute::Nodal,
+            "K matrix ill-conditioned (max|K| > 1e8, nodal full-LU avoids K)".to_string(),
+        )
     } else if s_ill_conditioned {
-        route = SolverRoute::Nodal;
-        reason = "S matrix ill-conditioned (max|S| > 1e6, cap-only nodes lack resistive paths)"
-            .to_string();
+        (
+            SolverRoute::Nodal,
+            "S matrix ill-conditioned (max|S| > 1e6, cap-only nodes lack resistive paths)"
+                .to_string(),
+        )
     } else if mna.inductors.iter().any(|ind| ind.isat.is_some())
         || mna
             .coupled_inductors
@@ -178,12 +189,13 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
             .iter()
             .any(|g| g.winding_isats.iter().any(|i| i.is_some()))
     {
-        route = SolverRoute::Nodal;
-        reason = "saturating inductors require augmented MNA (per-sample L update)".to_string();
+        (
+            SolverRoute::Nodal,
+            "saturating inductors require augmented MNA (per-sample L update)".to_string(),
+        )
     } else {
-        route = SolverRoute::DkSchur;
-        reason = format!("DK Schur (N={}, M={})", n, m);
-    }
+        (SolverRoute::DkSchur, format!("DK Schur (N={}, M={})", n, m))
+    };
 
     RoutingDecision {
         route,
