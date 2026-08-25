@@ -40,3 +40,6 @@ golden-baselines/
 
 # Local, machine-specific melange context (ecosystem, inter-agent mail) — not public
 CLAUDE.local.md
+
+# Local, untracked working docs (design notes, briefs, research) — not public
+local-docs/
