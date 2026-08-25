@@ -1,0 +1,63 @@
+name: Release
+
+# Publishes a GitHub Release when a version tag is pushed (e.g. v0.1.0).
+# Builds the Linux x86_64 CLI in a clean environment against the committed,
+# MSRV-pinned Cargo.lock, and attaches the binary + checksums + lockfile.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Build & publish Linux x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+
+      # --locked: build the exact pinned deps that hold MSRV 1.85.
+      # No target-cpu override => baseline x86-64 (runs on any x86-64 CPU).
+      - name: Build CLI
+        run: cargo build --release --locked -p melange-cli
+
+      - name: Stage release assets
+        run: |
+          mkdir -p dist
+          cp target/release/melange dist/melange-linux-x86_64
+          cp Cargo.lock dist/Cargo.lock
+          ( cd dist && sha256sum melange-linux-x86_64 Cargo.lock > SHA256SUMS )
+
+      - name: Extract this version's notes from CHANGELOG
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v ver="$version" '
+            $0 ~ "^## \\[" ver "\\]" { flag=1; print; next }
+            /^## \[/ && flag { exit }
+            flag { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          {
+            echo ""
+            echo "---"
+            echo "Linux x86_64, baseline \`x86-64\`. Built on stable rustc; MSRV 1.85."
+            echo "Runtime deps: \`simulate\`/\`analyze\` need \`rustc\`/\`cargo\` on PATH; \`validate\` needs \`ngspice\`."
+          } >> RELEASE_NOTES.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          prerelease: true
+          name: melange ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
+          files: |
+            dist/melange-linux-x86_64
+            dist/SHA256SUMS
+            dist/Cargo.lock
