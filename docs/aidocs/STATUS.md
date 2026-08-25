@@ -127,7 +127,7 @@ K≈0 detection: max|K| < 1e-6 with M > 0.
 
 ## Circuit Library Status
 
-Circuits have been migrated to the [melange-audio/circuits](https://github.com/melange-audio/circuits) repo.
+Circuits live in a separate repository (locally `../melange-circuits`; public repo going to GitLab, unpublished as of 2026-08-25).
 All circuits are in `unstable/` until the user manually tests and approves promotion.
 
 The compiler validation status of circuits known to exercise specific solver paths:
@@ -137,7 +137,7 @@ The compiler validation status of circuits known to exercise specific solver pat
 | Linear RC | 2 | 0 | Linear | trivial | Smoke test |
 | 2-stage BJT preamp | 11 | 3-5 | DK | fast | FA detection, 2N5089 Ebers-Moll |
 | 2-stage triode preamp | 13 | 4 | DK | fast | 2× 12AX7, pot + switch |
-| 4-tube passive EQ + 2 xfmrs | 41 | 8 | Nodal full LU | ~11× | Chord + cross-timestep + sparse LU |
+| 4-tube passive EQ + 2 xfmrs | 46 | 8 | Nodal full LU | ~28× | Chord + cross-timestep + sparse LU |
 | 8-BJT Class AB power amp | 20 | 9-16 | DK/Nodal | 0.4× / 0.04× | Parasitic R, FA detection |
 | 4-opamp + diode clipper | 44 | 10 | Nodal full LU (auto) | — | ActiveSetBe auto for clean clipping; BoyleDiodes diverges at heavy clip |
 | Op-amp overdrive + diodes | — | — | DK | — | TS808-class clipping |
@@ -248,10 +248,12 @@ Source: Sowter DWG E-72,658-2 + Peerless/Triad winding data.
 
 ## Performance
 
-- DK circuits: 100–600× realtime (Schur path)
-- Nodal full LU (Pultec, N=41, M=8, 2 transformers): ~11× realtime with all stacked optimizations
-- VCA compressor (N=21, M=3, nodal full LU): ~42× realtime
-- 8-BJT Class AB power amp (DK M=9): 0.4× realtime (parasitic-R limited; K_eff approach planned)
+**Re-measured 2026-08-25** on an AMD Ryzen 9 7950X (single core, noiseless, `-C target-cpu=x86-64-v3`, via `tools/perf-harness/bench.sh`); host-dependent. The earlier figures below were largely fabricated/stale — see `memory/perf_numbers_measured_2026_08_25.md`. Measured: nonlinear audio circuits ≈9–65× RT; light stages hundreds× (single 12AX7 ~230×); trivial linear ~2700×.
+
+- Pultec passive EQ (N=46, M=8, 2 xfmrs, nodal full LU): **~28×** realtime (was mislabeled ~11×/N=41)
+- Wurlitzer preamp (2 BJT, full GP): ~56× · Tweed 5F1 amp: ~29× · overdrive pedal: ~64× · SSL bus comp (full): ~9×
+- VCA compressor (N=21, M=3, nodal full LU): ~42× realtime *(not re-measured 2026-08-25)*
+- 8-BJT Class AB power amp (DK M=9): 0.4× realtime *(not re-measured; parasitic-R limited; K_eff approach planned)*
 
 ## Known Limitations
 
@@ -265,12 +267,12 @@ Source: Sowter DWG E-72,658-2 + Peerless/Triad winding data.
 
 ## Validated Circuits
 
-Circuit netlists live in the [melange-audio/circuits](https://github.com/melange-audio/circuits) repo
+Circuit netlists live in a separate repository (public repo going to GitLab; unpublished as of 2026-08-25)
 (locally `../melange-circuits`). Circuit-specific tests use `.test.toml` sidecars. All circuits
 start in `unstable/`; promotion to `stable/` requires user DAW sign-off (SPICE correlation
 and compilation are necessary but not sufficient).
 
-- **Passive tube EQ** (passive-eq1a): 4 tubes, 2 transformers, 7 pots, 3 switches, global NFB. Sowter DWG E-72,658-2. ~11× RT on nodal full LU. Flat ±1 dB 20Hz–15kHz, 21 dB differential NFB.
+- **Passive tube EQ** (passive-eq1a): 4 tubes, 2 transformers, 7 pots, 3 switches, global NFB. Sowter DWG E-72,658-2. N=46, M=8; ~28× RT on nodal full LU (measured 2026-08-25). Flat ±1 dB 20Hz–15kHz, 21 dB differential NFB.
 - **Wurlitzer 200A preamp** (wurli-preamp): N=11, M=3–5 FA, 2N5089 Ebers-Moll. SPICE-validated 6-nines, 3.2% RMS.
 - **Wurlitzer 200A power amp** (wurli-power-amp): N=20, M=9–16 FA, quasi-complementary class AB. DK codegen 0.4× RT, nodal 0.04×.
 - **Tweed-style 2-stage 12AX7 preamp** (twas-preamp): N=13, M=4. 50 mV → 549 mV (+20.8 dB). Zero NR divergence.
