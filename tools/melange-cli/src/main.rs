@@ -230,12 +230,12 @@ enum Commands {
         vendor: Option<String>,
 
         /// Plugin vendor homepage URL (must start with http:// or https://).
-        /// Defaults to "https://github.com/melange". Applies to `--format plugin`.
+        /// Defaults to "https://github.com/hal0zer0/melange". Applies to `--format plugin`.
         #[arg(long, value_name = "URL")]
         vendor_url: Option<String>,
 
         /// Plugin vendor contact email (e.g., "support@acme.example").
-        /// Defaults to "dev@melange.audio". Applies to `--format plugin`.
+        /// Defaults to "josh@nobledarkgames.com". Applies to `--format plugin`.
         #[arg(long, value_name = "ADDR")]
         email: Option<String>,
 

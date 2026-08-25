@@ -100,9 +100,9 @@ pub struct PluginOptions<'a> {
     pub ear_protection: bool,
     /// Plugin vendor name. If `None`, defaults to "Melange".
     pub vendor: Option<&'a str>,
-    /// Plugin URL. If `None`, defaults to "https://github.com/melange".
+    /// Plugin URL. If `None`, defaults to "https://github.com/hal0zer0/melange".
     pub url: Option<&'a str>,
-    /// Plugin contact email. If `None`, defaults to "dev@melange.audio".
+    /// Plugin contact email. If `None`, defaults to "josh@nobledarkgames.com".
     pub email: Option<&'a str>,
     /// Override VST3 class ID. Must be exactly 16 printable ASCII bytes.
     /// If `None`, a deterministic ID is derived from the circuit name.
@@ -1153,8 +1153,8 @@ fn generate_lib_rs(
         compute_vst3_id(circuit_name)
     };
     let vendor = options.vendor.unwrap_or("Melange");
-    let url = options.url.unwrap_or("https://github.com/melange");
-    let email = options.email.unwrap_or("dev@melange.audio");
+    let url = options.url.unwrap_or("https://github.com/hal0zer0/melange");
+    let email = options.email.unwrap_or("josh@nobledarkgames.com");
     let params_struct = generate_params_struct(
         with_level_params,
         pots,
@@ -2331,8 +2331,8 @@ mod tests {
         let opts = PluginOptions::default();
         let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, 1, &opts);
         assert!(lib.contains("const VENDOR: &'static str = \"Melange\""));
-        assert!(lib.contains("const URL: &'static str = \"https://github.com/melange\""));
-        assert!(lib.contains("const EMAIL: &'static str = \"dev@melange.audio\""));
+        assert!(lib.contains("const URL: &'static str = \"https://github.com/hal0zer0/melange\""));
+        assert!(lib.contains("const EMAIL: &'static str = \"josh@nobledarkgames.com\""));
     }
 
     #[test]

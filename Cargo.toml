@@ -18,8 +18,9 @@ exclude = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/melange-audio/melange"
+repository = "https://github.com/hal0zer0/melange"
 description = "Circuit simulation toolkit for real-time audio DSP"
 keywords = ["audio", "dsp", "circuit", "simulation", "codegen"]
 categories = ["multimedia::audio", "science", "development-tools"]

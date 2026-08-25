@@ -16,7 +16,7 @@ Optional:
 
 ## Quick Start: Circuit to Plugin
 
-Compile a circuit from the [melange-audio/circuits](https://github.com/melange-audio/circuits) library, or use a local `.cir` file:
+Compile a circuit from the melange circuit library (published as a separate repository), or use a local `.cir` file:
 
 ```bash
 melange compile melange:unstable/pedals/peaches --format plugin -o my-fuzz

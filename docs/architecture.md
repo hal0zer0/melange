@@ -1,5 +1,9 @@
 # Melange Architecture
 
+This document describes *what* the system is. For *why* it is shaped this way —
+the load-bearing tradeoffs and the alternatives they beat — see the companion
+[**Design Decisions**](DESIGN_DECISIONS.md) log.
+
 ## The Five Translation Boundaries
 
 Every circuit modeling project crosses these boundaries. Melange automates boundaries 2-4.
@@ -40,7 +44,7 @@ Handled by nih-plug for the plugin shell. melange-plugin provides helpers for vo
 ## Crate Architecture
 
 ### melange-primitives (Layer 1)
-Zero dependencies. `no_std`. The foundation everything else builds on.
+Zero external dependencies. The foundation everything else builds on.
 
 **Filters:**
 - `OnePoleHpf` / `OnePoleLpf` — simple 6 dB/oct filters
@@ -49,7 +53,7 @@ Zero dependencies. `no_std`. The foundation everything else builds on.
 - `Biquad` — DFII-transposed, bandpass/lowpass/highpass/peaking/shelf
 
 **Oversampling:**
-- `Oversampler<const FACTOR: usize>` — polyphase IIR half-band
+- `Oversampler2x` / `Oversampler4x` — polyphase IIR half-band
 - Configurable rejection (3/4/5 allpass sections per branch)
 - `process_block()` for batch operation
 
@@ -78,14 +82,14 @@ pub trait NonlinearDevice<const N: usize> {
 **Implementations:**
 - `DiodeShockley { is, n, vt }` — junction diode (N=1)
 - `DiodeWithRs` — diode with series resistance (inner NR)
-- `BjtEbersMoll { is, vt, beta_f, beta_r }` — NPN/PNP BJT (N=2)
-- `BjtGummelPoon { ... }` — extended BJT model (Early effect, high injection, N=2)
-- `Jfet { idss, vp, lambda }` — N/P-channel JFET (N=2)
-- `Mosfet { kp, vt, lambda }` — Level 1 MOSFET (N=2)
-- `KorenTriode { mu, ex, kg1, kp, kvb }` — vacuum triode (N=2)
-- `KorenPentode { ... }` — vacuum pentode / beam tetrode (N=3)
-- `Vca { g0, vscale, thd }` — VCA (THAT 2180 style, N=2)
-- `CdsLdr { r_min, r_max, gamma, attack_tau, release_tau }` — photoresistor (N=1, device model only, not in codegen pipeline)
+- `BjtEbersMoll { is, vt, beta_f, beta_r, … }` — NPN/PNP BJT (N=2)
+- `BjtGummelPoon { … }` — extended BJT model (Early effect, high injection, N=2)
+- `Jfet { idss, vp, lambda, … }` — N/P-channel JFET (N=2)
+- `Mosfet { kp, vt, lambda, … }` — Level 1 MOSFET (N=2)
+- `KorenTriode { mu, ex, kp, kvb, … }` — vacuum triode (N=2)
+- `KorenPentode { … }` — vacuum pentode / beam tetrode (N=3)
+- `Vca { vscale, thd, … }` — VCA (THAT 2180 style, N=2)
+- `CdsLdr { r_min, r_max, gamma, attack_tau, release_tau }` — photoresistor (N=1; placed in a netlist via the `O` element on the stateful-device codegen path)
 - `BoyleOpamp` / `SimpleOpamp` — operational amplifier models (linear, no NR dimension)
 
 **SPICE Model Card Import:**
@@ -98,7 +102,7 @@ The core. Depends on primitives and devices.
 
 **Netlist Parser:**
 - Parse a subset of SPICE sufficient for audio circuits
-- Components: R, C, L (including ISAT= saturation), V (DC), I, D (diode), Q (BJT), J (JFET), M (MOSFET), T (triode), P (pentode), U (op-amp), Y (VCA), X (subcircuit), E (VCVS), G (VCCS), K (coupled inductors)
+- Components: R, C, L (including ISAT= saturation), V (DC), I, D (diode), Q (BJT), J (JFET), M (MOSFET), T (triode), P (pentode), U (op-amp), Y (VCA), O (opto/LDR), X (subcircuit), E (VCVS), G (VCCS), B (behavioral source). Coupled inductors / transformers are declared with the `K` coupling directive.
 - Directives: `.model`, `.subckt`, `.pot`, `.wiper`, `.switch`, `.gang`, `.linearize`, `.runtime`, `.input_impedance`
 - Output: `Netlist` struct with elements, models, and directives
 
@@ -144,7 +148,9 @@ Depends on solver. Requires ngspice installed on the system.
 - Three-tier methodology: circuit-only, voice-model, full-plugin
 
 ### melange-plugin (Layer 5)
-Depends on solver. Stub for future nih-plug integration helpers.
+Depends on solver. nih-plug integration helpers — `ParamMapping` from physical
+component values to user-facing controls, plus re-exports of primitives/solver
+for the generated plugin to build against.
 
 ### melange-cli
 The command-line interface for working with circuits.
@@ -155,13 +161,13 @@ The command-line interface for working with circuits.
 - `melange analyze <netlist>` — AC frequency response analysis
 - `melange validate <netlist>` — compare against ngspice, report deltas
 - `melange nodes <netlist>` — show circuit nodes and devices
-- `melange sources list|add|remove|update` — manage circuit source repositories
+- `melange sources list|add|remove|show` — manage circuit source repositories
 - `melange import <kicad_netlist>` — import KiCad netlist to .cir format
 - `melange builtins` — list built-in example circuits
 
 ## The Generality vs. Performance Problem
 
-The central engineering challenge. A hand-written 8x8 DK solver (like OpenWurli's) fits entirely in CPU registers and runs at ~4 ns/sample. A generic solver with dynamic matrix sizes would require heap allocation and lose cache locality.
+The central engineering challenge. A hand-written 8x8 DK solver (like OpenWurli's) fits entirely in CPU registers and runs at a few ns/sample. A generic solver with dynamic matrix sizes would require heap allocation and lose cache locality.
 
 **Solution: Compile-time specialization.**
 
@@ -180,4 +186,4 @@ The generated `circuit.rs` contains:
 - `set_sample_rate()` for runtime matrix recomputation from G+C
 - `#[inline(always)]` on the hot path
 
-Performance: DK codegen circuits run 100-600x realtime. Nodal full-LU with chord + sparse optimizations: ~11x realtime for the most complex validated circuit (Pultec EQP-1A, N=41, M=8).
+Performance (measured on an AMD Ryzen 9 7950X, single core, noiseless, `-C target-cpu=x86-64-v3`, via `tools/perf-harness/bench.sh`; host-dependent): light nonlinear circuits run into the hundreds of × realtime (a single 12AX7 stage ~230×), typical multi-device audio circuits ~30–65× (Wurlitzer preamp ~56×, tweed amp ~29×), and the heaviest validated circuits ~9–28× — the Pultec EQP-1A (nodal full-LU with chord + sparse LU, N=41, M=8) at ~28×, an SSL-class bus compressor at ~9×.

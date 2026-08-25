@@ -2,6 +2,7 @@
 
 *The SPICE must flow.*
 
+[![CI](https://github.com/hal0zer0/melange/actions/workflows/ci.yml/badge.svg)](https://github.com/hal0zer0/melange/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2021%20edition-orange.svg)](https://www.rust-lang.org)
 
@@ -58,7 +59,7 @@ cd my-plugin && cargo build --release
 
 ### 3. From a circuit library
 
-Circuits live in separate repos. The official library is [melange-audio/circuits](https://github.com/melange-audio/circuits):
+Circuits live in their own repositories, registered as named sources. The official melange circuit library is published separately; once it (or any git repo of netlists) is added as the `melange` source, you compile from it by name:
 
 ```bash
 melange compile melange:stable/filters/passive-eq1a --format plugin -o my-eq
@@ -127,7 +128,7 @@ See the [Plugin Development Guide](docs/PLUGIN_GUIDE.md) for details.
 | Vacuum Pentode | 5 equation families, 29 models | EL84, EL34, EF86, 6L6, 6V6, KT88, 6550, and 22 more. Auto grid-off optimization for cutoff |
 | Op-Amp | Boyle VCCS macromodel | GBW pole, slew-rate limiting, asymmetric VCC/VEE rails, 4 clamping strategies |
 | VCA | THAT 2180 exponential | Current-mode with gain-dependent THD |
-| CdS LDR | VTL5C3/4, NSL-32 | Device-model primitive only — **not yet wired into the netlist parser/codegen**, so it cannot be placed in a `.cir` today |
+| CdS LDR (opto) | VTL5C3/4, NSL-32 | Placed with the `O` element (`O1 rphoto+ rphoto- led+ led- MODEL`); attack/release photocell dynamics on the stateful-device codegen path. No ngspice twin (no SPICE LDR model to compare against) |
 | Potentiometer | `.pot` / `.wiper` / `.gang` directives | Per-sample smoothing; `recompute_dc_op()` available for preset-recall NR-seed refresh |
 | Switch | `.switch` directive | Ganged R/C/L component switching |
 
@@ -135,22 +136,25 @@ All device parameters use standard SPICE `.model` syntax. Base device models run
 
 ## Circuits
 
-Circuit netlists live in the [melange-audio/circuits](https://github.com/melange-audio/circuits) repo, organized into `stable/`, `testing/`, and `unstable/` tiers. Promotion requires a DAW listening test, not just SPICE correlation numbers.
+Circuit netlists live in a separate repository, organized into `stable/`, `testing/`, and `unstable/` tiers. Promotion requires a DAW listening test, not just SPICE correlation numbers.
 
 Melange auto-selects the optimal solver for each circuit (DK, Nodal Schur, or Nodal Full LU). Override with `--solver dk` or `--solver nodal` if needed.
 
-Here's a sample of what melange handles:
+Here's a sample of what melange handles, with **measured** single-core throughput:
 
-| Circuit | What it is | Devices | Performance |
-|---------|-----------|---------|-------------|
-| Passive tube EQ (Pultec-class) | 7 pots, 3 switches, global NFB | 4 tubes, 2 transformers | ~11× RT |
-| Wurlitzer 200A preamp | 2-stage BJT preamp | 2 BJTs + 1 diode | ~500× RT |
-| Tweed preamp (Fender-class) | 2× 12AX7 with volume pot + bright switch | 2 triodes | ~400× RT |
-| Full power amps (AC15/Tweed Deluxe/Plexi-class) | Push-pull pentode output stages + OT | 3-7 tubes | varies |
-| Pedal circuits (overdrive, fuzz, distortion) | Op-amp and transistor-based clipping | 1-4 NL devices | ~400× RT |
-| Bus compressor (SSL-class) | VCA + op-amp sidechain | 4 op-amps + 1 VCA | ~42× RT |
+| Circuit | What it is | Devices | Throughput\* |
+|---------|-----------|---------|--------------|
+| Bus compressor (SSL-class) | VCA + op-amp sidechain | 4 op-amps + 1 VCA | 9× |
+| Germanium diode network | 6-diode germanium clipping | 6 Ge diodes | 18× |
+| Passive tube EQ (Pultec-class) | 7 pots, 3 switches, global NFB (N=41, M=8) | 4 tubes, 2 transformers | 28× |
+| Tweed guitar amp (5F1 Champ-class) | preamp + power stage + output transformer | 12AX7 (2 triodes) + 6V6 pentode | 29× |
+| Wurlitzer 200A preamp | 2-stage BJT preamp (full Gummel-Poon) | 2 BJTs + 1 diode | 56× |
+| Overdrive pedal | op-amp gain + diode clipper | op-amp + 2 diodes | 64× |
+| 12AX7 gain stage | single triode stage | 1 triode | 230× |
 
-See the [circuits repo](https://github.com/melange-audio/circuits) for the full catalog with per-circuit status.
+\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), median of 7 × 2M samples. Measured on an AMD Ryzen 9 7950X with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh) — regenerate on your own hardware; throughput is host-dependent. A trivial linear circuit (RC low-pass) tops out near 2700×.
+
+The circuits repository (published separately) holds the full catalog with per-circuit status.
 
 ## Spotlight: Passive Tube EQ
 
@@ -159,7 +163,7 @@ The hardest topology melange solves end-to-end — a demonstration of the *solve
 - **4 vacuum tubes** (2× 12AX7, 2× 12AU7), **2 transformers** (input step-up, output with tertiary feedback winding)
 - **21 dB of global negative feedback** via differential cathode injection
 - **41 circuit nodes, 8 nonlinear dimensions**
-- **All 7 EQ bands function** (including the simultaneous boost + cut trick), with **zero NR failures** at 1V input, ~11× realtime
+- **All 7 EQ bands function** (including the simultaneous boost + cut trick), with **zero NR failures** at 1V input, ~28× realtime (single core; see the [circuits table](#circuits) note)
 
 > **What this does and doesn't show.** It proves melange *solves* a genuinely hard topology. It does **not** prove fidelity to a real Pultec: the amp section follows the verified Sowter E-72,658-2 drawing, but the **EQ network is a community reconstruction** — the original drawing has no EQ section — so its curves reproduce that reconstruction, not measured hardware. See [Validation & Verification](docs/VALIDATION.md).
 
@@ -172,7 +176,7 @@ melange analyze melange:stable/filters/passive-eq1a --pot "LF Boost=10" --switch
 
 A germanium transistor is just a BJT with different `.model` parameters -- higher leakage current, lower forward voltage (~0.2V vs 0.6V), lower gain. Melange doesn't care. Change `IS`, `BF`, and `NF` in your netlist and you have a germanium device. No special codepath, no approximation.
 
-This matters because NOS germanium transistors are a dwindling supply. Nobody manufactures them anymore. The stockpiles from the 1960s are finite, and matched pairs command collector prices. Building a single Fuzz Face or Tone Bender with hand-selected germanium transistors is hard enough. Building a 16-stage germanium cascade -- which melange runs at 3.4x realtime -- is not practically possible in hardware. You would need 16+ matched devices from a pool that no longer exists, and germanium's temperature drift would compound across stages into thermal instability that no amount of bias trimming can tame.
+This matters because NOS germanium transistors are a dwindling supply. Nobody manufactures them anymore. The stockpiles from the 1960s are finite, and matched pairs command collector prices. Building a single Fuzz Face or Tone Bender with hand-selected germanium transistors is hard enough. Building a long germanium cascade -- a dozen-plus matched stages -- is not practically possible in hardware. You would need that many matched devices from a pool that no longer exists, and germanium's temperature drift would compound across stages into thermal instability that no amount of bias trimming can tame.
 
 In simulation, none of that applies. Every device holds its parameters permanently. You can sweep `IS` from silicon to germanium to see exactly where the character changes, lock in the values you like, and ship a plugin built on transistors that left the factory sixty years ago. The same principle extends to every device melange supports: vintage tube types with known-good plate curves, op-amps at specific supply rails, transformers with exact winding ratios. If you can write the `.model` line, you can build the circuit.
 
@@ -240,11 +244,13 @@ crates/
   melange-devices/      Component models (diode, BJT, JFET, MOSFET, tube, opamp, VCA, LDR)
   melange-solver/       MNA/DK engine + codegen — the core
   melange-validate/     SPICE validation pipeline (ngspice comparison)
-  melange-plugin/       nih-plug integration
+  melange-plugin/       nih-plug helpers (parameter mapping)
 
 tools/
   melange-cli/          Command-line front-end
 ```
+
+For the reasoning behind the architecture — why ahead-of-time codegen instead of a runtime solver, the three auto-selected solver paths, the flag-per-tradeoff policy, accuracy-over-usability — see [**Design Decisions**](docs/DESIGN_DECISIONS.md).
 
 For the math internals (MNA stamping, DK method, Newton-Raphson, Gummel-Poon BJT, tube models, convergence strategies, codegen templates), see [`docs/aidocs/INDEX.md`](docs/aidocs/INDEX.md).
 
@@ -261,7 +267,7 @@ Requires zig 0.13+ and cargo-zigbuild. See [docs](docs/PLUGIN_GUIDE.md) for deta
 
 ## Requirements
 
-- Rust 1.85+ (2021 edition)
+- Rust 1.85+ (2021 edition) — declared via `rust-version` and checked in CI
 - No external dependencies for core library or generated code
 - Optional: ngspice for SPICE validation
 - Optional: zig + cargo-zigbuild for macOS cross-compilation
@@ -273,7 +279,7 @@ cargo install --path tools/melange-cli
 
 # Or build from repo
 cargo build --workspace
-cargo test --workspace        # ~1100 fast tests (no SPICE truth-comparison)
+cargo test --workspace        # ~1900 fast tests (SPICE truth-comparison gated below)
 
 # SPICE truth-comparison suite — gated behind --include-ignored
 # because it needs ngspice on PATH. CI runs this on every PR.

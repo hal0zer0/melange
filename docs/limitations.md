@@ -111,8 +111,9 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
 - No ngspice validation yet
 
 ### LDR (Photoresistor)
-- `CdsLdr` device model exists in `melange-devices` (VTL5C3/4, NSL-32 presets)
-- Not yet available via the netlist parser or codegen pipeline
+- `CdsLdr` device model (VTL5C3/4, NSL-32 presets) with attack/release photocell dynamics
+- Placed in a netlist via the `O` element (`O1 rphoto+ rphoto- led+ led- MODEL` + `.model MODEL LDR()`), on the stateful-device codegen path (both DK and nodal)
+- No ngspice twin (SPICE has no equivalent LDR model to validate against)
 
 ## Dynamic Parameter Controls
 
@@ -188,9 +189,11 @@ For typical circuits (N<=41 validated), pot rebuild takes ~250us at N=37 -- well
 
 ### Performance Benchmarks
 
-- DK codegen circuits: 100-600x realtime
-- Nodal full-LU with chord + cross-timestep + sparse LU: ~11x realtime (Pultec EQP-1A, N=41, M=8)
-- 16-stage cascade (Uniquorn, N=64, M=12): ~3x realtime mono
+Measured on an AMD Ryzen 9 7950X, single core, noiseless, `-C target-cpu=x86-64-v3` (median of 7 × 2M samples via `tools/perf-harness/bench.sh`); throughput is host-dependent.
+
+- Light nonlinear circuits: 12AX7 gain stage ~230×, overdrive pedal ~64× realtime
+- Typical multi-device circuits: Wurlitzer preamp ~56×, tweed guitar amp ~29× realtime
+- Heaviest validated: Pultec EQP-1A (nodal full-LU, chord + sparse LU, N=41, M=8) ~28×, SSL-class bus compressor ~9× realtime
 
 ## Circuit Noise [PARTIAL]
 

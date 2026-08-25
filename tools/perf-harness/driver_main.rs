@@ -2,9 +2,13 @@
 // Appended to a generated `circuit.rs` (which is standalone, no crate deps) and
 // compiled with the SAME rustc flags the golden-harness uses. Measures pure
 // `process_sample` throughput: the input signal is precomputed OUTSIDE the timed
-// loop so only the solver's per-sample work is timed (no sin(), no I/O). Noise
-// is enabled with a fixed seed to match the shipped plugin configuration and to
-// exercise the noise emission path (thermal/shot/flicker).
+// loop so only the solver's per-sample work is timed (no sin(), no I/O).
+//
+// This times the DEFAULT (noiseless) configuration — what a plugin ships with
+// unless `--noise` is passed — so it does not touch the noise setters (which are
+// only emitted when the circuit is compiled with `--noise`). To time the noise
+// path instead, compile the circuit with `--noise full` and add
+// `state.set_noise_enabled(true); state.set_seed(0xC0FFEE);` after construction.
 //
 // Output: one JSON line on stdout. All other prose goes to stderr.
 fn main() {
@@ -36,8 +40,6 @@ fn main() {
         .collect();
 
     let mut state = CircuitState::default();
-    state.set_noise_enabled(true);
-    state.set_seed(0xC0FFEE);
 
     // Warmup: settle DC/smoothing, warm the branch predictor & i-cache.
     for i in 0..warmup {
