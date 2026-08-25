@@ -193,7 +193,7 @@ Measured on an AMD Ryzen 9 7950X, single core, noiseless, `-C target-cpu=x86-64-
 
 - Light nonlinear circuits: 12AX7 gain stage ~230×, overdrive pedal ~64× realtime
 - Typical multi-device circuits: Wurlitzer preamp ~56×, tweed guitar amp ~29× realtime
-- Heaviest validated: Pultec EQP-1A (nodal full-LU, chord + sparse LU, N=41, M=8) ~28×, SSL-class bus compressor ~9× realtime
+- Heaviest validated: Pultec EQP-1A (nodal full-LU, chord + sparse LU, N=46, M=8) ~28×, SSL-class bus compressor ~9× realtime
 
 ## Circuit Noise [PARTIAL]
 
