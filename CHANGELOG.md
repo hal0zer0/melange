@@ -147,6 +147,12 @@ measured real hardware. Everything else is unproven against hardware. See
   operating point has finite source-stepping and Gmin-stepping fallbacks.
 - **Real-time safety** — generated audio callbacks perform no heap allocation, locking,
   or syscalls; all buffers are pre-allocated at construction.
+- **Known advisories (waived for 0.1.0).** The KiCad import path (`melange import`, via
+  `quick-xml` 0.37) carries two upstream denial-of-service advisories —
+  RUSTSEC-2026-0194 (quadratic parse on duplicate attributes) and RUSTSEC-2026-0195
+  (unbounded namespace allocation). Reachable only by importing a maliciously-crafted
+  KiCad file; no effect on netlist compilation, generated code, or shipped plugins. The
+  fix (`quick-xml >= 0.41`) is tracked for 0.1.1.
 
 [Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/hal0zer0/melange/releases/tag/v0.1.0

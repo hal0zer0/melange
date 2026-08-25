@@ -1,5 +1,8 @@
 /target
-Cargo.lock
+# Cargo.lock IS tracked: melange-cli ships a binary, so the lockfile is committed
+# for reproducible builds and a stable MSRV floor. (A library would gitignore it.)
+# The nightly-only fuzz crate is workspace-excluded; its separate lock stays local.
+crates/melange-solver/fuzz/Cargo.lock
 *.swp
 *.swo
 *~
