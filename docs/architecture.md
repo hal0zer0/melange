@@ -186,4 +186,4 @@ The generated `circuit.rs` contains:
 - `set_sample_rate()` for runtime matrix recomputation from G+C
 - `#[inline(always)]` on the hot path
 
-Performance (measured on an AMD Ryzen 9 7950X, single core, noiseless, `-C target-cpu=x86-64-v3`, via `tools/perf-harness/bench.sh`; host-dependent): light nonlinear circuits run into the hundreds of × realtime (a single 12AX7 stage ~230×), typical multi-device audio circuits ~30–65× (Wurlitzer preamp ~56×, tweed amp ~29×), and the heaviest validated circuits ~9–28× — a Pultec-style passive EQ (nodal full-LU with chord + sparse LU, N=46, M=8) at ~28×, an SSL-class bus compressor at ~9×.
+Performance (measured on an AMD Ryzen 9 7950X, single core, noiseless, `-C target-cpu=x86-64-v3`, via `tools/perf-harness/bench.sh`; host-dependent): light nonlinear circuits run into the hundreds of × realtime (a single 12AX7 stage ~230×), typical multi-device audio circuits ~30–65× (Wurlitzer preamp ~56×, tweed amp ~29×), and the heaviest validated circuits ~9–28× — a Pultec-style passive EQ (nodal full-LU with chord + sparse LU, N=52, M=8) at ~24×, an SSL-class bus compressor at ~9×.
