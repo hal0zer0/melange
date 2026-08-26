@@ -1,6 +1,6 @@
-Pultec EQP-1A Passive Equalizer
+Passive-EQ1A Program Equalizer
 * author: melange-audio
-* description: passive EQ with 3 transformers and a 12AX7/12AU7 push-pull makeup amplifier
+* description: Pultec-style passive program EQ — 3 transformers, 12AX7/12AU7 push-pull makeup amp; attempts to match the signal flow of the famous 1950s unit, not a literal recreation
 * Copyright (c) 2026 Melange Contributors
 * License: MIT OR Apache-2.0
 *
@@ -85,7 +85,7 @@ Pultec EQP-1A Passive Equalizer
 * nothing. Removed from schemer 2026-07-26.
 * =====================================================================
 *
-* Pot values from original Pultec EQP-1A service manual.
+* Pot values from the original service manual (see dossier source registry).
 * Transformer specs from CineMag CM-S217D datasheet and Sowter 1475 data.
 * 12AU7 Koren parameters from Sylvania Technical Manual fit.
 * Amplifier + PSU topology: Sowter DWG E-72,658-2 via schemer crops.
@@ -253,7 +253,7 @@ R_lfb rrail 0 10k
 * Each secondary half: 3600 turns (1:1 with full primary = 1:2 step-up).
 * L_pri ≈ 37H (Sowter 9330 spec). BW: 5Hz-100kHz (-3dB).
 *
-* Pultec wiring (confirmed abbey road d enfer / GroupDIY + schemer):
+* Original-unit wiring (confirmed abbey road d enfer / GroupDIY + schemer):
 *   Pin 4 = hot input (EQ output), Pin 1 = ground (reverse winding for HF)
 *   Pin 5 → grid1, Pin 8 → grid2 (true push-pull anti-phase drive)
 *   Pins 6,7 = center tap → GROUNDED DIRECTLY (hs29_12ax7grid.png crop)
@@ -432,7 +432,7 @@ K_sec_fb5 L_opt_sec L_fb_b 0.9999
 K_fb35 L_fb_a L_fb_b 0.9999
 
 * Output load — S-217-D spec: "OUTPUT TO 600Ω LOAD"
-* The Pultec was designed for 600Ω terminated operation.
+* The original unit was designed for 600Ω terminated operation.
 Rload out 0 600
 
 * Output Zobel across the secondary: .003µF in series with 620Ω

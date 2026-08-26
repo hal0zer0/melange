@@ -32,7 +32,7 @@ unchanged (1.85).
   `dc_op_by_name(name) -> Option<f64>` lookup, emitted by **both** the DK and
   nodal paths. Reading one node's baked operating point is now a lookup instead
   of recompiling the netlist per node.
-- **Bundled example.** The passive tube EQ ships in-tree at
+- **Bundled example.** The Pultec-style passive tube EQ ships in-tree at
   [`examples/passive-eq1a.cir`](examples/passive-eq1a.cir) (a byte-identical
   mirror of the canonical melange-circuits netlist) so a real circuit can be
   compiled without first wiring up a circuit source.

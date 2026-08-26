@@ -3,7 +3,7 @@
 A small set of netlists that ship in-tree so you can compile something real
 without first wiring up a circuit source. Point `melange` straight at the file.
 
-## `passive-eq1a.cir` — passive tube EQ *(primary example)*
+## `passive-eq1a.cir` — Pultec-style passive tube EQ *(primary example)*
 
 The flagship example. A passive bridge-T EQ network bracketed by transformers,
 with a tube makeup amplifier: HS-56 input transformer → passive EQ → HS-29
