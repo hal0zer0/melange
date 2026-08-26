@@ -189,6 +189,153 @@ V1 vcc 0 DC 9
     );
 }
 
+#[test]
+fn node_names_array_parallels_dc_op() {
+    // NODE_NAMES is the string-name parallel of DC_OP (openfarf thread 218).
+    let spice = "\
+Node Names Array
+R1 in out 10k
+C1 out 0 100n
+V1 vcc 0 DC 9
+R2 vcc out 100k
+";
+    let code = generate_dk(spice);
+    assert!(
+        code.contains("pub const NODE_NAMES: [&str;"),
+        "missing NODE_NAMES array:\n{}",
+        excerpt(&code, "NODE_NAMES")
+    );
+    let names = code
+        .lines()
+        .find(|l| l.contains("pub const NODE_NAMES"))
+        .unwrap_or("");
+    for n in ["\"in\"", "\"out\"", "\"vcc\""] {
+        assert!(names.contains(n), "NODE_NAMES missing {n}:\n{names}");
+    }
+}
+
+#[test]
+fn dc_op_by_name_resolves_to_dc_op_index() {
+    // dc_op_by_name(name) returns DC_OP[NODE_<NAME>] for a named node, None otherwise.
+    let spice = "\
+DC Op By Name
+R1 in out 10k
+C1 out 0 100n
+V1 vcc 0 DC 9
+R2 vcc out 100k
+";
+    let code = generate_dk(spice);
+    assert!(
+        code.contains("pub fn dc_op_by_name"),
+        "dc_op_by_name not emitted (has_dc_op?):\n{}",
+        excerpt(&code, "DC_OP")
+    );
+    // Roundtrip: compile + run, assert the lookup agrees with the DC_OP array.
+    use std::io::Write;
+    let main = "\n\nfn main() {\n\
+        assert_eq!(dc_op_by_name(\"out\"), Some(DC_OP[NODE_OUT]));\n\
+        assert_eq!(dc_op_by_name(\"vcc\"), Some(DC_OP[NODE_VCC]));\n\
+        assert_eq!(dc_op_by_name(\"no_such_node\"), None);\n\
+        let _ = NODE_NAMES;\n\
+    }\n";
+    let full = format!("{}{}", code, main);
+    let tmp = std::env::temp_dir();
+    let src = tmp.join("melange_dc_op_by_name_roundtrip.rs");
+    let bin = tmp.join("melange_dc_op_by_name_roundtrip");
+    std::fs::File::create(&src)
+        .unwrap()
+        .write_all(full.as_bytes())
+        .unwrap();
+    let out = std::process::Command::new("rustc")
+        .args([
+            src.to_str().unwrap(),
+            "-o",
+            bin.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
+        .output()
+        .expect("rustc");
+    let _ = std::fs::remove_file(&src);
+    if !out.status.success() {
+        let _ = std::fs::remove_file(&bin);
+        panic!(
+            "generated code failed to compile:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let run = std::process::Command::new(&bin).output().expect("run");
+    let _ = std::fs::remove_file(&bin);
+    assert!(
+        run.status.success(),
+        "dc_op_by_name roundtrip failed:\nstderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn provenance_and_build_lines_emitted() {
+    let spice = "\
+Provenance Header
+R1 in out 10k
+C1 out 0 100n
+";
+    let code = generate_dk(spice);
+    assert!(
+        code.contains("// melange:"),
+        "missing `// melange:` version line:\n{}",
+        excerpt(&code, "// melange")
+    );
+    assert!(
+        code.contains("// provenance:"),
+        "missing `// provenance:` json line:\n{}",
+        excerpt(&code, "// provenance")
+    );
+    let build = code.lines().find(|l| l.contains("// Build:")).unwrap_or("");
+    assert!(
+        build.contains("integration="),
+        "Build: missing integration=: {build}"
+    );
+    // dc-block and noise are otherwise-invisible flags that must be disclosed.
+    assert!(
+        build.contains("dc-block="),
+        "Build: missing dc-block=: {build}"
+    );
+    assert!(build.contains("noise="), "Build: missing noise=: {build}");
+}
+
+#[test]
+fn build_line_bjt_fa_present_only_with_bjts() {
+    // The resolved bjt-fa token appears for BJT circuits (the FOLLOWUPS gap where
+    // force/auto/off used to emit an identical Build: line) and is omitted
+    // otherwise so the Build: line stays signal.
+    let no_bjt = generate_dk("No BJT\nR1 in out 10k\nC1 out 0 100n\n");
+    let no_bjt_build = no_bjt
+        .lines()
+        .find(|l| l.contains("// Build:"))
+        .unwrap_or("");
+    assert!(
+        !no_bjt_build.contains("bjt-fa="),
+        "bjt-fa should be absent without BJTs: {no_bjt_build}"
+    );
+
+    let bjt = generate_dk(
+        "BJT Stage
+Q1 col base 0 QNPN
+R1 vcc col 1k
+Rb vcc base 220k
+V1 vcc 0 DC 9
+Rin in base 1k
+.model QNPN NPN(IS=1e-14 BF=100)
+",
+    );
+    let bjt_build = bjt.lines().find(|l| l.contains("// Build:")).unwrap_or("");
+    assert!(
+        bjt_build.contains("bjt-fa="),
+        "bjt-fa should appear for a BJT circuit: {bjt_build}"
+    );
+}
+
 /// Grab lines from `code` containing `needle`, for readable failure output.
 fn excerpt(code: &str, needle: &str) -> String {
     code.lines()

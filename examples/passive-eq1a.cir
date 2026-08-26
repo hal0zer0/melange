@@ -1,0 +1,471 @@
+Pultec EQP-1A Passive Equalizer
+* author: melange-audio
+* description: passive EQ with 3 transformers and a 12AX7/12AU7 push-pull makeup amplifier
+* Copyright (c) 2026 Melange Contributors
+* License: MIT OR Apache-2.0
+*
+* Passive bridge-T EQ network bracketed by transformers, with tube makeup:
+*   in → HS-56 input transformer (620Ω shunt term) → passive EQ →
+*   HS-29 coupling/phase splitter → 12AX7 (both sections, anti-phase) →
+*   .25µF coupling → 12AU7 push-pull → S-217-D output transformer (+ NFB
+*   tertiary back to the 12AX7 cathodes)
+*
+* =====================================================================
+* PROVENANCE RECORD — read before editing
+* =====================================================================
+* 2026-07-26 provenance sweep: the old "direct readings from Sowter DWG
+* E-72,658-2" claim was struck. That sheet contains the AMPLIFIER + PSU
+* only; the EQ is an empty rectangle on it. Schemer confirmed eight real
+* amplifier-section errors against the sheet, plus two fabricated 360Ω
+* stoppers and workaround 220pF grid caps.
+*
+* 2026-08-25: ALL EIGHT CONFIRMED CORRECTIONS APPLIED in one pass, each
+* verified against schemer's crops (../schemer/benchmarks/pultec/crops/):
+*   #1 620Ω is a SHUNT across the HS-56 secondary, not series  [hs56_input]
+*   #2 HS-56 input transformer added (was omitted entirely)    [hs56_input]
+*   #3 HS-29 CT grounded directly; 43K+270p in series bridges
+*      grid-to-grid                                        [hs29_12ax7grid]
+*   #4 12AX7 plate loads 200K feed from +250V rail (gives the
+*      annotated +140V plates exactly)                         [ax7_plates]
+*   #5 B+ chain: 355 -470R- 345 -1000R- 325, then 2200R to OPT CT
+*      (+290) and 47K to +250; three 40u caps        [bplus_chain/dist,rect]
+*   #6 12AU7 cathodes SEPARATE, own 4.7k+50u each            [au7_cathodes]
+*   #7 output .003u+620 Zobel across secondary; secondary FLOATS
+*      (one end grounded in-model as measurement ref only)    [s217_output]
+*   #8 exactly TWO 360Ω (tertiary feedback); fabricated stoppers
+*      deleted; tertiary CENTER TAP carries the 1k to ground  [s217_tert2]
+*   Also deleted: C_stab_a/b 220p (DIY workaround, not on any drawing).
+*
+* EQ SECTION provenance (2026-08-25, schemer TRACE-manual.md rev.2,
+* thread 227): NO factory drawing of the EQ exists. The located EQP-1A
+* manual (35pp scan, ../schemer/benchmarks/pultec/manual/) is genuine
+* EXCEPT p.6, which schemer identified as a machine re-render of a
+* signed 1997 recproaudio.com reconstruction (glyph-duplicate proof;
+* one affine maps every element; direction of derivation unsettled,
+* common lineage settled). The EQ below is ADOPTED FROM THAT LINEAGE —
+* a reconstruction, chosen over the prior ABSounds/SIMetrix mix on
+* measured evidence (see the EQ section comment; the prior network's LF
+* Atten was electrically dead and its Bandwidth nearly so). NOTE the
+* prior reconstructions may DESCEND from this same 1997 lineage, so
+* they are not independent votes. The one independent architectural
+* witness is manual p.7 — a hand-drawn (0% glyph duplicates), period-
+* notation EQP-1R schematic by a different author showing the SAME
+* machine element-for-element: 620 shunt, series LC off the boost-pot
+* wiper, bare 2.5K bandwidth rheostat (no 390Ω in either drawing), 1M
+* bridged by the EQ in/out switch, 1K->R->switched-caps HF cut,
+* open-ended rheostat LF pots, series R to the LF-boost node. Every EQ
+* value remains src=EXTERNAL: the binding verification is frequency
+* response against the factory curve charts (pp.8-34, genuine scans) —
+* see docs/circuits/passive-eq1a/factory-charts/.
+*
+* NOT MODELED (deliberate): 6X4 rectifier (chain starts at +355 DC),
+* heaters and hum (heater-elevation divider off +345 is modeled as its
+* 332K DC shunt only — schemer confirmed no audio on it), the EQ in/out
+* bypass switch (SW2 modeled in IN position; plugin owns bypass). HS-56
+* electrical parameters ASSUMED (see input section): the strap table
+* gives impedance options only — no turns/inductance data exists on
+* either sheet (schemer NEGATIVE finding).
+*
+* KNOWN DEVIATION — distortion character (settled thread 229,
+* 2026-08-25, arbiter-adjudicated): this model measures ~0.002% THD,
+* odd-dominant, vs the hardware's 0.15% spec with H2-dominant
+* level-progressive distortion (SoS AP bench). Cause: identical-model
+* push-pull halves cancel even harmonics exactly, and all transformer
+* iron is LINEAR (no ISAT on any winding). This is a model-COMPLETENESS
+* gap, not an error: real even harmonics live in the single-ended
+* HS-56/HS-29 cores, tube curve detail, and unit imbalance. Do NOT
+* paper over it: .mismatch is inert on tubes (codegen), hand-written
+* tube asymmetry is fabricated data, and seeded passive .tolerance
+* dialed to hit 0.15% is tuning-to-target. The correct future fix is
+* core saturation with REAL sourced ISAT data + a dedicated validation
+* campaign (S-217-D is NFB-through-iron, the riskiest T-model case).
+*
+* Note: ../schemer/benchmarks/pultec/pultec-eq.cir was a broken symlink
+* to a byte-identical copy of this file — same transcription, corroborates
+* nothing. Removed from schemer 2026-07-26.
+* =====================================================================
+*
+* Pot values from original Pultec EQP-1A service manual.
+* Transformer specs from CineMag CM-S217D datasheet and Sowter 1475 data.
+* 12AU7 Koren parameters from Sylvania Technical Manual fit.
+* Amplifier + PSU topology: Sowter DWG E-72,658-2 via schemer crops.
+*
+* Signal flow (p6 net names; passive EQ is a mesh, NOT a series chain):
+*
+*   in ─ HS-56 ─ eq_in(620Ω shunt) ─[TB pot 10k]─ main ─[TC pot 1k]─ rrail
+*                                      │wiper w_tb        │wiper w_tc
+*                                      C_hfb·L_hfb·R_bw   75Ω·C_hfc
+*                                      └──────► main      └──────► rrail
+*   main ─[Bass Cut 100k rheo]─ x ─[1k]─ out_tap ─[10k]─ rrail
+*   main ─────────[C_lfa atten caps]────► out_tap   (bypasses BassCut+1k)
+*   rrail ─[C_lfb boost caps]─ gnd ; rrail ─[Bass Boost 10k rheo]─ gnd
+*   out_tap ► HS-29 primary
+*
+* Amplifier stage:
+*   out_tap → HS-29 primary (input coupling transformer) →
+*   HS-29 CT secondary: pin 5 → grid1, pin 8 → grid2 (true push-pull anti-phase)
+*   HS-29 CT (pins 6,7) grounded; 43K+270p series Zobel bridges grid-to-grid
+*   plate1/plate2 → .25µF → 12AU7 push-pull grids → plates →
+*   S-217-D output xfmr (plates direct to primary) → out (+ Zobel .003µ+620)
+*
+* Feedback: S-217-D tertiary (pins 3-CT-5, 1kΩ from CT to ground) →
+*   pin 3 → 360Ω → cathode1 (12AX7 pin 3)
+*   pin 5 → 360Ω → cathode2 (12AX7 pin 8)
+*   Cathodes separated (820Ω between). Differential NFB → ~0dB overall gain
+*
+* Controls (8 total — but 7 pots due to 3-terminal pot modeling):
+*   3 switches: HF Boost Freq (7-pos), LF Freq (4-pos), HF Cut Freq (3-pos)
+*   7 pots: HF Boost upper/lower (linked), Bandwidth, LF Boost, LF Atten,
+*           HF Cut upper/lower (linked)
+*
+* 3-terminal pot note: HF Boost and HF Cut use voltage-divider pots where
+* R_upper + R_lower = R_total. The plugin must link these inversely:
+*   R_upper = R_total * (1 - param), R_lower = R_total * param
+*
+* Component values:
+*   Pots: values AND tapers factory-confirmed (manual p.4, genuine scan)
+*   EQ network topology + L/C/R values: p.6 redraw (see provenance above;
+*     no 390Ω bandwidth offset — no draughtsman puts one there)
+*   HS-29: L calibrated 45H within conflicting replacement citations
+*     (Sowter 9330 37H / Sowter 1475 130H) against factory LF families
+*   S-217-D: CineMag CM-S217D datasheet (38.1H@1kHz, 4.474:1)
+*   12AU7: Koren fit to Sylvania Technical Manual curves
+
+* 12AX7 params fitted to Sylvania datasheet operating points:
+*   Vp=250V Vg=-2V → Ip=1.2mA, Vp=250V Vg=-4V → Ip=0.3mA,
+*   Vp=100V Vg=-1V → Ip=0.55mA
+* Koren REFIT (2026-08-25): MU=100 fixed, KP/KVB/KG1/EX via differential
+* evolution with the CORRECTED OP constraint (annotated +140V plate /
+* +1.3V cathode on the 200K load from the +250V rail; the 2026-04-09 fit
+* had constrained against the wrong pre-rework supply node at 287V and
+* landed the plates at 114V under the corrected topology).
+* Errors: -9.8%/-1.2%/-19.7% at datasheet points; OP +4.3% (self-
+* consistent solution: plate 138.8V, Vk 1.32V vs annotated 140/1.3).
+* The OP is weighted over datasheet typicals: the annotated real-unit
+* tube runs weaker than Sylvania typical at (100V,-1V), and in a deep
+* NFB makeup stage the OP carries the character (headroom, clip onset).
+*
+.model 12AX7 TRIODE(MU=100 EX=1.061 KG1=2171 KP=220.6 KVB=11462 CCG=1.6p CGP=1.7p CCP=0.46p)
+* 12AU7 params fitted to Sylvania datasheet operating points:
+*   Vp=250V Vg=-8.5V → Ip=10.5mA, Vp=250V Vg=-9.0V → Ip=8.5mA,
+*   Vp=100V Vg=-4.0V → Ip=3.8mA (all within 0.2%)
+.model 12AU7 TRIODE(MU=21.91 EX=1.612 KG1=798.3 KP=16579 KVB=14135 CCG=2.3p CGP=2.2p CCP=0.5p)
+.input_impedance 600
+
+* B+ power supply — DWG E-72,658-2, corrected chain (crops bplus_chain.png,
+* bplus_dist.png, rect_6x4.png, verified 2026-08-25):
+*   6X4 rectifier +355V → 470Ω → +345V (40µ) → 1000Ω/1W → +325V (40µ)
+*   +325V → 2200Ω/1W → +290V at S-217-D primary center tap (no cap at CT)
+*   +325V → 47kΩ → +250V (40µ) → 12AX7 plate loads + 12AU7 grid bias divider
+* The old model fed the OPT CT straight from a stiff +290 source and hung the
+* 12AX7 plates on an intermediate "node G" — both confirmed wrong 2026-07-26.
+* DC self-check (annotated vs computed): I_OPT ≈ 16 mA → 2200Ω drop 35 V:
+* 325-290 exact. I_250 ≈ 1.6 mA → 47k drop 75 V: 325-250 exact.
+* Voltage annotations (11MΩ meter, no signal): +345, +325, +290 CT, +250,
+* +140 plates, +40 12AU7 cathodes, +31 grid bias, +1.3 12AX7 cathodes.
+* NOT MODELED: an additional branch off +345 (partially legible, ~"K"Ω down
+* to ~+60V with R‖0.3µF below — likely heater elevation or pilot; schemer
+* read pending, thread 227). Add if it proves to load the audio-path rails.
+VCC vcc 0 DC 355
+R_psu1 vcc v345 470
+C_f345 v345 0 40u
+* Heater-elevation divider off +345 (schemer TRACE-manual.md §1.1,
+* thread 227): 270K -> +60V heater reference -> 62K||0.3u -> gnd. Carries
+* no audio; modeled as its 332K DC shunt so the rail current is complete.
+R_heat_elev v345 0 332k
+R_psu2 v345 v325 1000
+C_f325 v325 0 40u
+R_opt_feed v325 opt_ct 2200
+R_bias_feed v325 v250 47k
+C_f250 v250 0 40u
+
+* === INPUT: TRIAD HS-56 TRANSFORMER + 620R SHUNT ===
+* From DWG E-72,658-2 (hs56_input.png crop, verified 2026-08-25):
+*   INPUT (600Ω line) → HS-56 primary (two coils in series, pins 1-2/3-4
+*   strapped 3-4) → secondary (two coils in series, pins 7-9/10-12 strapped
+*   9-10) → 620Ω SHUNT across secondary → EQ box. Secondary low side (pin 12)
+*   grounded. The 620 is a shunt termination, NOT a series element — the old
+*   series R_in_series was the confirmed 2026-07-26 discrepancy #1.
+* HS-56 electrical parameters: NOT on the drawing. src=ASSUMED pending data:
+*   1:1 ratio (symmetric series/series strapping; 600:600 line duty),
+*   L=37H per side (same order as the measured HS-29 replacement; LF corner
+*   with 600Ω source ‖ 620Ω term = ~305Ω/(2π·37H) ≈ 1.3 Hz — sub-audio for
+*   any plausible L), K=0.99999 DELIBERATE: leakage 2L(1-K²) ≈ 1.5 mH keeps
+*   the HF corner (into ~980Ω loop) ≈ 106 kHz, consistent with the factory
+*   "+0/-1 dB to 20 kc" spec. Real leakage unmeasured — revisit against
+*   factory curve charts (manual pp.8-34) during curve verification.
+L_hs56_p in 0 37
+L_hs56_s eq_in 0 37
+K_hs56 L_hs56_p L_hs56_s 0.99999
+R_in_shunt eq_in 0 620
+*
+* === PASSIVE EQ NETWORK — PAGE-6 REDRAW VARIANT ===
+* ADOPTED 2026-08-25 from the p.6 redraw (schemer TRACE-manual.md SS2,
+* thread 227). p.6 is NOT a factory drawing (synthetic insert — see
+* provenance record); it was adopted on measured evidence against the
+* prior ABSounds/SIMetrix reconstruction, with factory curves + hardware
+* measurements as arbiter:
+*   - prior LF Atten control was electrically DEAD (max = flat, bit-
+*     identical); p6 gives the documented ~-17..19 dB shelf
+*   - prior Bandwidth control was nearly dead (sharp-broad delta 1.4 dB);
+*     p6 gives 7.3 dB vs 9 dB measured on hardware (SoS reissue)
+*   - flat tilt: p6 0.5 dB total (spec +0/-1); prior drooped 1.8 dB
+*   - HF boost 8k sharp peak +17.9 dB rel vs factory chart 18.3; prior 17.1
+*   - the low-end trick EMERGES untuned: 30 Hz boost+atten max -> bump
+*     +4 dB @40 Hz, dip @252 Hz = 3.1 octaves above setting (BendingBus/
+*     SoS pre-registered window 240-480 Hz)
+*   - p6 internal checks: 7 LC pairs within 6% of marked f0, 3 cap banks
+*     matching marked ratios; 10k position computes 9675 Hz, matching the
+*     independent GroupDIY figure
+* NOTE the LF Atten pot SENSE inverted vs the pre-2026-08-25 model:
+* rheostat IN SERIES, flat = 0 ohm (default 100), max atten = 100k.
+* Nets: eq_in = p6 "in" (HS-56 pin 7), main, w_tb, lrail, w_tc, p,
+* x, out_tap = p6 "out" (HS-29 pin 4), rrail. SW2 (EQ in/out) modeled IN:
+* bandwidth rheostat returns directly to main (1M bypass R shorted).
+
+* Treble Boost 10K linear, 3-terminal: eq_in (+16dB end) - w_tb - main (0dB)
+R_tb_u eq_in w_tb 10k
+R_tb_l w_tb main 10k
+* HF boost: series C - L - bandwidth rheostat from wiper to main
+C_hfb w_tb c_hfb 18n
+L_hfb c_hfb lrail 150m
+R_bw lrail main 2.5k
+* Treble Cut 1K linear, 3-terminal shunt main - w_tc - rrail; wiper - 75R - caps - rrail
+R_tc_u main w_tc 1k
+R_tc_l w_tc rrail 1k
+R_hfc_ser w_tc p 75
+C_hfc p rrail 288n
+* Bass Cut 100K rheostat (audio) in SERIES: main - x, then 1K to out_tap
+R_lfc main x 100k
+R_x_out x out_tap 1k
+* LF atten caps bypass the whole (BassCut + 1K) path: main -> out_tap
+C_lfa main out_tap 68n
+* output tap load: 10K to rrail; rrail = LF boost node
+R_out_rrail out_tap rrail 10k
+* LF boost: cap bank rrail->gnd, Bass Boost 10K rheostat (audio) rrail->gnd
+C_lfb rrail 0 1.83u
+R_lfb rrail 0 10k
+
+* === INPUT COUPLING: TRIAD HS-29 TRANSFORMER ===
+* 1:2 step-up phase splitter with center-tapped secondary.
+* Construction: sec-pri-pri-sec (3600-1800-1800-3600 turns of #44 wire).
+* Primary halves in series (pins 2-3 strapped): total 3600 turns.
+* Each secondary half: 3600 turns (1:1 with full primary = 1:2 step-up).
+* L_pri ≈ 37H (Sowter 9330 spec). BW: 5Hz-100kHz (-3dB).
+*
+* Pultec wiring (confirmed abbey road d enfer / GroupDIY + schemer):
+*   Pin 4 = hot input (EQ output), Pin 1 = ground (reverse winding for HF)
+*   Pin 5 → grid1, Pin 8 → grid2 (true push-pull anti-phase drive)
+*   Pins 6,7 = center tap → GROUNDED DIRECTLY (hs29_12ax7grid.png crop)
+*   43K + 270pF in SERIES bridge grid1-to-grid2 (damping Zobel across the
+*   full secondary) — the old CT-to-ground 43K/270p was confirmed
+*   discrepancy #3 (2026-07-26; crop-verified 2026-08-25)
+*   Pin 9 = electrostatic shield (ground)
+*
+* Primary (series, 3600 turns total).
+* L CALIBRATED 2026-08-25 (arbiter-adjudicated): the two replacement-part
+* citations conflict (Sowter 9330: 37H; Sowter 1475: 130H) and the
+* magnetizing L forms a SETTING-DEPENDENT LF corner (EQ output impedance
+* rises at max LF settings), visible against the factory LF curve
+* families. Grid calibration 37..130H minimizes total family deviation
+* at ~45H (boost deep-end sag halves; atten 20 Hz endpoints land).
+* ASSUMED grade, calibrated-within-cited-range against FACTORY charts.
+L_int_pri out_tap 0 45
+
+* Secondary halves (each 3600 turns = full primary): L scales with the
+* primary calibration above (same core, same turns).
+* Differential grid drive = 2 × V_pri = +6dB voltage gain before tubes.
+L_int_a grid1 0 45
+L_int_b 0 grid2 45
+
+* Coupling between primary and each secondary half, plus inter-secondary.
+* All windings on same core — k_ab specified for NxN matrix positive definite.
+* K=0.9999 (2026-08-25): the old 0.99/0.98 left ~0.74H leakage per winding,
+* which resonated with the corrected 270p grid-to-grid Zobel at ~8 kHz and
+* collapsed the top octave. 0.9999 → ~7.4mH leakage → resonance ~80 kHz,
+* consistent with the quoted 5Hz-100kHz (-3dB) winding spec.
+K_inta L_int_pri L_int_a 0.9999
+K_intb L_int_pri L_int_b 0.9999
+K_intab L_int_a L_int_b 0.9999
+
+* Grid-to-grid damping Zobel: 270pF in series with 43K across the full
+* secondary (pin 5 line to pin 8 line). Grid DC reference is through the
+* winding halves to the grounded center tap.
+C_zob_g grid1 zob_g 270p
+R_zob_g zob_g grid2 43k
+
+* === 12AX7 DUAL TRIODE (both sections, anti-phase) ===
+* HS-29 CT secondary drives both grids directly in anti-phase.
+* True push-pull: grid1 and grid2 receive equal and opposite signals.
+
+* 12AX7 section 1 (pins 1,2,3)
+T1a grid1 plate1 cathode1 12AX7
+* 12AX7 section 2 (pins 6,7,8)
+T1b grid2 plate2 cathode2 12AX7
+
+* Plate load resistors: 200K from the +250V rail (ax7_plates.png crop shows
+* both loads rising to the annotated +250v line). Confirmed discrepancy #4:
+* the old "node G" feed produced +177V plates vs the annotated +140V;
+* 250 - 200k × 0.55mA = +140V exactly.
+Ra1 v250 plate1 200k
+Ra2 v250 plate2 200k
+
+* 20pF anti-oscillation cap bridging the two 12AX7 plates.
+* ".00002" on schematic = 0.00002µF = 20pF (same convention as ".00027" = 270pF).
+* Previous 20nF was a 1000x error — 20nF with 200K plates gives f_c=80Hz, killing treble.
+C_plate_bridge plate1 plate2 20p
+
+* Cathode bias (820Ω BETWEEN cathodes, not to ground).
+* Cathodes separated: 820Ω between pin 3 (cathode1) and pin 8 (cathode2).
+* S-217-D feedback tertiary connects to cathode through both 360Ω resistors.
+* No cathode bypass cap — confirmed by schemer on both EQP-1A and EQP-1R.
+Rk cathode1 cathode2 820
+
+* === INTERSTAGE COUPLING: 12AX7 plates → 12AU7 grids ===
+* .25µF caps provide direct AC coupling from 12AX7 plates to 12AU7 grids.
+* f_c = 1/(2π × 1MΩ × 0.25µF) = 0.64 Hz — passes all audio.
+C_coup2a plate1 grid2a 250n
+C_coup2b plate2 grid2b 250n
+
+* 12AU7 grid bias network — from Sowter schematic.
+* +250V → 470kΩ → +31V bias node → 62kΩ → ground.
+* Voltage divider: 250 × 62k/(470k+62k) = 29.1V ≈ +31V measured.
+R_bias_hi v250 bias_31v 470k
+R_bias_lo bias_31v 0 62k
+
+* Grid return resistors (1MΩ each to +31V bias node).
+* Sets grid DC at +31V; with cathode at +40V → Vgk ≈ -9V.
+Rg2a grid2a bias_31v 1Meg
+Rg2b grid2b bias_31v 1Meg
+* (Removed 2026-08-25: C_stab_a/b 220pF grid caps — a DIY-build workaround
+* not on any drawing; repo rule forbids workaround components. If the model
+* self-oscillates without them that is a finding to report, not to patch.)
+
+* === PUSH-PULL OUTPUT STAGE: 12AU7 (ECC82) ===
+* Two triode sections driven in anti-phase by 12AX7 plates.
+* Cathodes SEPARATE (confirmed discrepancy #6; au7_cathodes.png crop): each
+* section has its own 4700Ω/1W to ground ("* = RESISTORS SELECTED ALIKE")
+* with its own 50µF/50V bypass. Both annotated +40v.
+T2a grid2a plate2a cath2a 12AU7
+T2b grid2b plate2b cath2b 12AU7
+
+Rk2a cath2a 0 4.7k
+Ck2a cath2a 0 50u
+Rk2b cath2b 0 4.7k
+Ck2b cath2b 0 50u
+
+* (Removed 2026-08-25: R_stop2a/b 360Ω "plate stoppers" — the drawing has
+* exactly TWO 360Ω resistors, both in the tertiary feedback path; the
+* stopper pair was a double-count. 12AU7 plates connect directly to the
+* S-217-D primary. Confirmed discrepancy #8; res_360s/bplus_dist crops.)
+
+* === OUTPUT TRANSFORMER: PEERLESS S-217-D ===
+* Push-pull center-tapped primary, balanced secondary, feedback tertiary.
+* Confirmed specs (CineMag CM-S217D reproduction):
+*   Turns: 1575 (pri) : 71 (tert) : 352 (sec) per coil
+*   Turns ratio: pri:sec = 4.474:1, pri:tert = 22.18:1, sec:tert = 4.96:1
+*   Impedance: 12,000:600 ohm
+*   L_pri = 38.1H at 1kHz (CineMag), ~220H at 30Hz (frequency-dependent permeability)
+*   L_leak = 19mH → k = 0.9995
+*
+* Using 220H at 30Hz for LF accuracy (phase margin for NFB loop below 50Hz).
+* Push-pull primary halves: L_each = 220/4 = 55H
+* Secondary: L = L_pri_half × (N_sec/N_pri)² = 55 × (352/1575)² = 2.75H
+* Tertiary: L = L_pri_half × (142/1575)² = 55 × 0.00813 = 0.447H
+*
+* B+ connects to center tap of primary (serves as plate load for 12AU7s).
+
+* Center tap: fed from +325 through R_opt_feed 2200Ω (see B+ section);
+* annotated +290V at the CT. Transformer primary IS the plate load.
+
+* Push-pull primary halves (through winding DCR)
+* DCR: 190Ω per primary half (CJ measurements, GroupDIY thread 51046)
+R_dcr_a plate2a opt_a_w 190
+R_dcr_b plate2b opt_b_w 190
+L_opt_a opt_a_w opt_ct 55
+L_opt_b opt_ct opt_b_w 55
+
+* Secondary (through winding DCR)
+* DCR: 18Ω (CJ measurements)
+* Drawing (s217_output.png crop): secondary FLOATS — both output terminals
+* are free (balanced out, confirmed discrepancy #7). MNA needs a DC
+* reference on every island, so one terminal is grounded here as the
+* measurement reference. This is a modeling choice, not a claim about the
+* unit; the single-ended transfer function is unaffected.
+R_dcr_sec out_w out 18
+L_opt_sec out_w 0 11
+
+* Coupling between primary halves and secondary.
+* K = sqrt(1 - L_leak/L_pri) = sqrt(1 - 0.019/38.1) = 0.99975
+* (from CineMag CM-S217D L_leak=19mH, L_pri=38.1H at 1kHz).
+* Previous K=0.95 created 195× too much leakage, causing -3dB at 89Hz.
+* Augmented MNA solver handles K>0.95 (old companion model limitation removed).
+K_opta L_opt_a L_opt_sec 0.9999
+K_optb L_opt_b L_opt_sec 0.9999
+K_optab L_opt_a L_opt_b 0.9999
+
+* === FEEDBACK: S-217-D TERTIARY WINDING (pins 3-CT-5) ===
+* Peerless winding data: 71 turns/coil × 2 coils = 142 turns total.
+* Drawing (s217_tert2.png crop, verified 2026-08-25): the tertiary has a
+* CENTER TAP, and the 1000Ω 1W runs from the CT to ground — not from pin 5.
+* This was the "feedback tertiary centre tap" discrepancy: with the 1k at
+* the CT the differential feedback is symmetric (one half-winding per
+* cathode). DC proof: both cathode currents (≈2×0.55 mA) return through the
+* 1k → +1.1V, exactly the annotation AT the CT/1k node.
+*   pin 3 → 360Ω → cathode1, pin 5 → 360Ω → cathode2 (the only two 360Ω)
+* Per-half inductance: L = 220H × (71/3150)² = 0.112H. DCR 17Ω total
+* (CJ measurements), split 8.5Ω per end.
+R_dcr_fb3 fb_s3 fb_w3 8.5
+L_fb_a fb_w3 fb_ct 112m
+L_fb_b fb_ct fb_w5 112m
+R_dcr_fb5 fb_w5 fb_s5 8.5
+R_fb_ct fb_ct 0 1000
+R_fb_a fb_s3 cathode1 360
+R_fb_b fb_s5 cathode2 360
+* Coupling: tertiary is bifilar with primary (K ≥ 0.999, CineMag spec).
+K_fba3 L_opt_a L_fb_a 0.9999
+K_fba5 L_opt_a L_fb_b 0.9999
+K_fbb3 L_opt_b L_fb_a 0.9999
+K_fbb5 L_opt_b L_fb_b 0.9999
+K_sec_fb3 L_opt_sec L_fb_a 0.9999
+K_sec_fb5 L_opt_sec L_fb_b 0.9999
+K_fb35 L_fb_a L_fb_b 0.9999
+
+* Output load — S-217-D spec: "OUTPUT TO 600Ω LOAD"
+* The Pultec was designed for 600Ω terminated operation.
+Rload out 0 600
+
+* Output Zobel across the secondary: .003µF in series with 620Ω
+* (s217_output.png crop; confirmed discrepancy #7).
+C_zob_o out zob_o 3n
+R_zob_o zob_o 0 620
+
+* === SWITCH DIRECTIVES (p6 values) ===
+* HF Boost: 7 positions (ganged C+L), totals per p6 table
+.switch C_hfb,L_hfb 18n/150m 18n/82m 15n/68m 8n2/47m 8n2/33m 5n6/33m 3n3/27m "HF Boost Freq"
+* LF Freq: 4 positions, boost/atten cap TOTALS (permanent + switched)
+.switch C_lfb,C_lfa 1.83u/68n 1.15u/39n 550n/20.2n 330n/12n "LF Freq"
+* HF Cut: 3 positions, totals (68n permanent + switched)
+.switch C_hfc 288n 136n 68n "HF Cut Freq"
+
+* === POTENTIOMETER DIRECTIVES (p6 semantics) ===
+.pot R_tb_u 100 10k 10k "HF Boost (upper)"
+.pot R_tb_l 100 10k 100 "HF Boost (lower)"
+* Bandwidth rheostat: 0R at Sharp (no 390R offset on p6). Default broad.
+* Min 30R = ~1% of track end-stop residual (ASSUMED, uncited; arbiter-
+* conditioned 2026-08-25): with 30R the sharp-peak family lands on the
+* factory chart (+18.4 rel); the old 100R convention cost ~0.6 dB.
+.pot R_bw 30 2.5k 2.5k "Bandwidth"
+* Bass Boost rheostat rrail->gnd: flat = 0R
+.pot R_lfb 100 10k 100 "LF Boost"
+* Bass Cut rheostat IN SERIES main->x: flat = 0R (NOTE: sense inverted vs canonical)
+.pot R_lfc 100 100k 100 "LF Atten"
+* HF Cut mins 15R = ~1.5% of track (ASSUMED, arbiter-conditioned): the
+* old 100R floor limited full-rotation cut to the dial-10 depth
+* (-12.6 dB); 15R reaches the factory chart's full-rotation curve
+* (-19.5 rel @20k vs chart -19.25). 10k/100k pots keep min=100 (already
+* <=1%; raising the LF Atten min measurably hurts flat for zero gain).
+.pot R_tc_u 15 1k 1k "HF Cut (upper)"
+.pot R_tc_l 15 1k 15 "HF Cut (lower)"
+
+.END

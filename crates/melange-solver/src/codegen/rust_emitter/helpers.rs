@@ -1330,3 +1330,62 @@ pub(super) fn oversampling_info(factor: usize) -> OversamplingInfo {
         },
     }
 }
+
+/// Build the `NODE_NAMES: [&str; N]` array body — a parallel of `DC_OP`, one
+/// entry per solver row in index order. User/internal node names come from
+/// `ir.named_constants.node_names` (ORIGINAL, un-sanitized, in DC_OP index
+/// space); rows with no node name (augmented VS / inductor branch-current rows)
+/// are `""`. Length is `topology.n` (= `N`). Shared by the DK and nodal paths so
+/// the two carry byte-identical maps (openfarf thread 218).
+pub(super) fn node_names_array_body(ir: &CircuitIR) -> String {
+    let n = ir.topology.n;
+    let mut names: Vec<String> = vec![String::new(); n];
+    for (name, idx) in &ir.named_constants.node_names {
+        if *idx < n {
+            names[*idx] = escape_rust_str(name);
+        }
+    }
+    names
+        .iter()
+        .map(|s| format!("\"{s}\""))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Escape a netlist node name for a Rust string literal. Node names are almost
+/// always `[A-Za-z0-9_]`, but escape defensively so a stray `"`/`\` can never
+/// break the emitted array.
+fn escape_rust_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// The `dc_op_by_name` accessor — name → baked DC operating-point voltage via a
+/// scan of the `NODE_NAMES` parallel array. Emitted (identically) by both paths
+/// only when `DC_OP` exists (`has_dc_op`). Returns `None` for an unknown or
+/// unnamed (augmented) row.
+pub(super) const DC_OP_BY_NAME_FN: &str = "\
+/// Look up a node's baked DC operating-point voltage by its netlist name.
+///
+/// `dc_op_by_name(\"plate1\")` returns `Some(DC_OP[NODE_PLATE1])` — the index in
+/// `NODE_NAMES` is the SAME index used in `DC_OP`. `None` for an unknown name or
+/// an unnamed (augmented VS / inductor branch) row. Linear scan over `N`; call
+/// it off the audio thread.
+pub fn dc_op_by_name(name: &str) -> Option<f64> {
+    let mut i = 0;
+    while i < N {
+        if !NODE_NAMES[i].is_empty() && NODE_NAMES[i] == name {
+            return Some(DC_OP[i]);
+        }
+        i += 1;
+    }
+    None
+}
+";

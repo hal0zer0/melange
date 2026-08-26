@@ -32,6 +32,12 @@ pub const NUM_OUTPUTS: usize = {{ num_outputs }};
 /// Output node indices (one per output channel)
 pub const OUTPUT_NODES: [usize; NUM_OUTPUTS] = [{{ output_nodes_values }}];
 
+/// Node names in DC_OP index order — `NODE_NAMES[i]` is the netlist name of the
+/// node whose baked operating point is `DC_OP[i]` (openfarf thread 218). Rows
+/// with no node name (augmented voltage-source / inductor branch-current rows)
+/// are `""`. Use `dc_op_by_name` for a name→voltage lookup.
+pub const NODE_NAMES: [&str; N] = [{{ node_names_values }}];
+
 
 /// Input resistance (Thevenin equivalent)
 pub const INPUT_RESISTANCE: f64 = {{ input_resistance }};
@@ -279,6 +285,8 @@ pub const OUTPUT_SCALES: [f64; NUM_OUTPUTS] = [{{ output_scales_values }}];
 
 /// Whether the nonlinear DC OP solver converged at codegen time
 pub const DC_OP_CONVERGED: bool = {{ dc_op_converged }};
+{% if has_dc_op %}
+{{ dc_op_by_name_fn }}{% endif %}
 
 {% if opamp_slew is defined and opamp_slew | length > 0 %}// =============================================================================
 // OP-AMP SLEW-RATE CONSTANTS

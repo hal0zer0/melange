@@ -9,6 +9,55 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-26 — Mace
+
+A hardening and provenance patch. No change to generated DSP: the compiled
+audio path is byte-identical to 0.1.0 (verified at the source level — every
+codegen change is an added comment header or a never-called `pub` item).
+Downstream consumers (OpenWurli/oomox) do **not** need to regenerate. MSRV is
+unchanged (1.85).
+
+### Added
+
+- **Self-describing generated code.** Emitted circuits now carry a provenance
+  header — a `// melange: <version> (<commit>)` line, an extended `Build:` line
+  covering the fully *resolved* DSP-affecting flags (integration, `dc-block`,
+  `noise`, `opamp-rail`, `bjt-fa`, oversampling, `max_iter`), and a
+  machine-readable `// provenance: {…}` JSON line a consumer can assert against
+  at compile time. This makes a silent DSP-contract difference (e.g. `--bjt-fa
+  force` vs `auto`, or an unexpected output DC-block) visible in the artifact
+  itself.
+- **Node-name → DC-OP map in generated code.** A `pub const NODE_NAMES: [&str; N]`
+  array (parallel to `DC_OP`, unnamed augmented rows are `""`) plus a
+  `dc_op_by_name(name) -> Option<f64>` lookup, emitted by **both** the DK and
+  nodal paths. Reading one node's baked operating point is now a lookup instead
+  of recompiling the netlist per node.
+- **Bundled example.** The Pultec EQP-1A passive tube EQ ships in-tree at
+  [`examples/passive-eq1a.cir`](examples/passive-eq1a.cir) (a byte-identical
+  mirror of the canonical melange-circuits netlist) so a real circuit can be
+  compiled without first wiring up a circuit source.
+
+### Fixed
+
+- **SPICE validation now compares the same circuit on both sides.** The ngspice
+  reference deck previously kept each `.pot` / `.switch` element at its netlist
+  *nominal* value while melange used the element's compiled *default*; when the
+  two differed, `melange validate` was correlating two different circuits. The
+  reference deck now substitutes each element's melange default (`.gang` is
+  intentionally excluded — it is a UI grouping, not baked state). Example:
+  passive-eq1a correlation rose from 0.808 to 0.99999728.
+
+### Security
+
+- **`quick-xml` 0.37 → 0.41.0**, clearing the two waived KiCad-import advisories
+  RUSTSEC-2026-0194 (quadratic parse on duplicate attributes) and
+  RUSTSEC-2026-0195 (unbounded namespace allocation). `cargo audit` is clean.
+  MSRV 1.85 is held (0.42 was excluded — its MSRV 1.86 exceeds ours; 0.41.0's is
+  1.79). The reader-API migration also fixed a latent entity-drop bug in
+  `melange import` (0.41 emits `Event::GeneralRef` separately), covered by two
+  new regression tests. Closes the 0.1.1 follow-up tracked in the 0.1.0
+  `Security` note.
+
 ## [0.1.0] - 2026-08-25 — Saffron
 
 First tagged release. Melange compiles SPICE netlists to standalone, real-time-safe
@@ -154,5 +203,6 @@ measured real hardware. Everything else is unproven against hardware. See
   KiCad file; no effect on netlist compilation, generated code, or shipped plugins. The
   fix (`quick-xml >= 0.41`) is tracked for 0.1.1.
 
-[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/hal0zer0/melange/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/hal0zer0/melange/releases/tag/v0.1.0

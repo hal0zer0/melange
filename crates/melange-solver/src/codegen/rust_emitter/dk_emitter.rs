@@ -294,6 +294,117 @@ pub(super) fn emit_inject_substep_stamp(
     )
 }
 
+/// Resolved forward-active BJT reduction, read off the device slots (which
+/// reflect the outcome of `detect_forward_active_bjts` — i.e. `--bjt-fa` AFTER
+/// resolution, not the requested flag). Returns `(forward_active, full_2d)`.
+/// `--bjt-fa force` reduces GP/ISE BJTs that `auto`/`off` leave full-2D, so the
+/// counts differ and the provenance line differentiates the builds (the
+/// previously-identical `Build:` line was the FOLLOWUPS gap).
+fn bjt_fa_resolution(ir: &CircuitIR) -> (usize, usize) {
+    let mut fa = 0usize;
+    let mut full = 0usize;
+    for slot in &ir.device_slots {
+        match slot.device_type {
+            DeviceType::BjtForwardActive => fa += 1,
+            DeviceType::Bjt => full += 1,
+            _ => {}
+        }
+    }
+    (fa, full)
+}
+
+/// Full RESOLVED DSP-affecting flag set for the human-readable `Build:` line.
+///
+/// Every entry reflects the value AFTER netlist directives + auto-promotion.
+/// Flags whose value cannot change a circuit's DSP are omitted for that circuit
+/// (e.g. `opamp-rail` only when clamped op-amps exist, `bjt-fa` only with BJTs)
+/// so the line stays signal, not boilerplate.
+fn resolved_build_flags(ir: &CircuitIR) -> String {
+    let mut build = format!(
+        "integration={}, max_iter={}, oversampling={}x",
+        ir.integrator_selection.label(),
+        ir.solver_config.max_iterations,
+        ir.solver_config.oversampling_factor
+    );
+    // DC blocking is a fourth (5 Hz) output highpass that is otherwise invisible
+    // in the header — always disclose it.
+    build.push_str(&format!(
+        ", dc-block={}",
+        if ir.dc_block { "on" } else { "off" }
+    ));
+    // Noise mode (off/thermal/shot/full) — resolved from --noise + per-device KF.
+    build.push_str(&format!(", noise={}", ir.noise.mode.as_str()));
+    // Op-amp rail saturation strategy — only meaningful when a clamped op-amp is
+    // present (ir.opamps is populated only for finite-VSAT op-amps).
+    if !ir.opamps.is_empty() {
+        build.push_str(&format!(
+            ", opamp-rail={}",
+            ir.solver_config.opamp_rail_mode.as_str()
+        ));
+    }
+    // Forward-active BJT reduction, resolved (see bjt_fa_resolution).
+    let (fa, full) = bjt_fa_resolution(ir);
+    if fa + full > 0 {
+        build.push_str(&format!(", bjt-fa={fa}fa/{full}full"));
+    }
+    if ir.solver_config.breakpoint_be {
+        build.push_str(", breakpoint-be");
+    }
+    if ir.solver_config.runtime_be_latch {
+        build.push_str(", runtime-be-latch");
+    }
+    build
+}
+
+/// One-line machine-readable JSON (embedded in a comment) mirroring the
+/// resolved `Build:` flags plus build identity. Hand-formatted — melange-solver
+/// has no non-dev `serde_json`, and every value here is controlled (semver,
+/// hex/`unknown`, enum tokens, numbers, bools), so no user text is interpolated
+/// and no escaping is required.
+fn provenance_json(ir: &CircuitIR, version: &str, commit: &str) -> String {
+    let scheme = if ir.integrator_selection.is_backward_euler() {
+        "backward-euler"
+    } else {
+        "trapezoidal"
+    };
+    let mut s = String::from("{");
+    s.push_str(&format!("\"melange\":\"{version}\","));
+    s.push_str(&format!("\"commit\":\"{commit}\","));
+    s.push_str(&format!("\"integration\":\"{scheme}\","));
+    s.push_str(&format!(
+        "\"backward_euler\":{},",
+        ir.integrator_selection.is_backward_euler()
+    ));
+    s.push_str(&format!(
+        "\"max_iter\":{},",
+        ir.solver_config.max_iterations
+    ));
+    s.push_str(&format!(
+        "\"oversampling\":{},",
+        ir.solver_config.oversampling_factor
+    ));
+    s.push_str(&format!("\"dc_block\":{},", ir.dc_block));
+    s.push_str(&format!("\"noise\":\"{}\"", ir.noise.mode.as_str()));
+    if !ir.opamps.is_empty() {
+        s.push_str(&format!(
+            ",\"opamp_rail\":\"{}\"",
+            ir.solver_config.opamp_rail_mode.as_str()
+        ));
+    }
+    let (fa, full) = bjt_fa_resolution(ir);
+    if fa + full > 0 {
+        s.push_str(&format!(",\"bjt_fa_reduced\":{fa},\"bjt_full\":{full}"));
+    }
+    if ir.solver_config.breakpoint_be {
+        s.push_str(",\"breakpoint_be\":true");
+    }
+    if ir.solver_config.runtime_be_latch {
+        s.push_str(",\"runtime_be_latch\":true");
+    }
+    s.push('}');
+    s
+}
+
 impl RustEmitter {
     /// Emit DK-method generated code (original path).
     pub(super) fn emit_dk(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
@@ -348,21 +459,29 @@ impl RustEmitter {
             .map(|c| if c.is_control() { ' ' } else { c })
             .collect();
         ctx.insert("title", &sanitized_title);
-        // Provenance line: integration/iteration flags so a consumer can tell how
-        // a checked-in generated file was built (openfarf request 2026-08-15).
-        let mut build = format!(
-            "integration={}, max_iter={}, oversampling={}x",
-            ir.integrator_selection.label(),
-            ir.solver_config.max_iterations,
-            ir.solver_config.oversampling_factor
-        );
-        if ir.solver_config.breakpoint_be {
-            build.push_str(", breakpoint-be");
-        }
-        if ir.solver_config.runtime_be_latch {
-            build.push_str(", runtime-be-latch");
-        }
+
+        // Build-provenance identity (oomox thread 214). Version is the melange
+        // crate version at *melange* build time; commit is captured by build.rs
+        // (falls back to "unknown" for a packaged crate / no git). Local builds
+        // between tags are normal, so both are recorded.
+        let melange_version = env!("CARGO_PKG_VERSION");
+        let melange_commit = option_env!("MELANGE_GIT_COMMIT").unwrap_or("unknown");
+        ctx.insert("melange_version", melange_version);
+        ctx.insert("melange_commit", melange_commit);
+
+        // Provenance line: the FULL RESOLVED flag set — every flag that changes
+        // emitted DSP, AFTER netlist-directive application + auto-promotion (not
+        // the user-requested subset). The `(auto-promoted)` style is carried by
+        // `IntegratorSelection::label()`.
+        let build = resolved_build_flags(ir);
         ctx.insert("build", &build);
+
+        // Machine-readable one-line JSON so a consumer can assert the build
+        // contract at compile time (replaces oomox's hand-written
+        // `oversampling_contract_is_2x` / `dc_block_contract_is_disabled` guards).
+        let provenance_json = provenance_json(ir, melange_version, melange_commit);
+        ctx.insert("provenance_json", &provenance_json);
+
         self.render("header", &ctx)
     }
 
@@ -467,6 +586,16 @@ impl RustEmitter {
             &named_const_entries(&ir.named_constants.vsources),
         );
         ctx.insert("named_pots", &named_const_entries(&ir.named_constants.pots));
+
+        // NODE_NAMES parallel array + dc_op_by_name lookup (openfarf thread 218).
+        // `node_names_values` is the `[&str; N]` body; `has_dc_op` gates the
+        // lookup fn (needs the DC_OP const, emitted in state.rs.tera).
+        ctx.insert(
+            "node_names_values",
+            &super::helpers::node_names_array_body(ir),
+        );
+        ctx.insert("dc_op_by_name_fn", super::helpers::DC_OP_BY_NAME_FN);
+        ctx.insert("has_dc_op", &ir.has_dc_op);
 
         // Runtime voltage sources (.runtime directive). Always insert the list
         // (possibly empty) so state.rs.tera and build_rhs.rs.tera can use

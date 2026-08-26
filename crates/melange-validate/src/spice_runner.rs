@@ -630,6 +630,108 @@ fn translate_melange_directive(line: &str) -> Option<Option<String>> {
     None
 }
 
+/// Substitute each dynamic element's melange-DEFAULT value into its element line
+/// so the ngspice reference deck solves the SAME circuit melange simulates at its
+/// default parameter state.
+///
+/// melange stamps a `.pot`/`.wiper` resistor at `default_value.unwrap_or(nominal)`
+/// and a `.switch` component at its position-0 value (a switch's initial state is
+/// always position 0). See `mna.rs` (`MnaSystem::from_netlist`). The reference-deck
+/// builder strips those melange-only directive lines but historically left the
+/// element at its NETLIST NOMINAL — so any element whose default differs from its
+/// nominal made the two engines solve different circuits. Proven on passive-eq1a:
+/// `.pot R_lfc 100 100k 100` (default 100 Ω) on the `R_lfc eq h 100k` element
+/// (nominal 100 kΩ) → correlation 0.808 instead of ~1.0; matching the nominal to
+/// the default restores corr 0.99999.
+///
+/// This rewrites each such element's value token to melange's default:
+/// - `.pot Rname min max [default]`: if `default_value` is Some, the element gets
+///   that value; if None, melange uses the nominal too, so the line is left as-is.
+/// - `.wiper` legs are covered automatically — the parser's `expand_wipers` pushes
+///   two `PotDirective`s into `netlist.pots` with concrete per-leg `default_value`s
+///   (the leg resistances at the default position), so they flow through the pot
+///   branch above with no special handling here.
+/// - `.switch`: each `component_names[i]` element gets `positions[0][i]`.
+///
+/// `.gang` default positions are deliberately NOT applied. A `.gang` is a
+/// plugin-UI construct (one nih-plug FloatParam, see parser.rs): its
+/// `default_position` is forwarded to codegen as the UI parameter default but is
+/// never baked into melange's default *stamped* state — the member pots keep their
+/// own `default_value` / `g_nominal`, and the validate path runs `process_sample`
+/// from `CircuitState::default()` with no setter calls. Substituting a gang
+/// position would therefore make the reference diverge from what melange actually
+/// simulates at default. (Grep confirms `gang` appears only in the codegen IR, in
+/// no emitter.)
+///
+/// Best-effort: a deck that melange's parser cannot read (e.g. one already
+/// tube-translated to ngspice subckts, or Thevenin-injected) is returned
+/// unchanged. Callers MUST therefore run this on the pristine melange deck BEFORE
+/// any ngspice-specific rewrite.
+pub(crate) fn substitute_dynamic_element_defaults(deck: &str) -> String {
+    use melange_solver::parser::Netlist;
+
+    let netlist = match Netlist::parse(deck) {
+        Ok(n) => n,
+        Err(_) => return deck.to_string(),
+    };
+
+    // element name (uppercase) -> substituted value token (plain SPICE numeric).
+    let mut overrides: HashMap<String, String> = HashMap::new();
+
+    // `.pot` (and expanded `.wiper` legs): stamp at `default_value` when present.
+    // `default_value = None` means melange uses the nominal, so we leave it alone.
+    for pot in &netlist.pots {
+        if let Some(dv) = pot.default_value {
+            overrides.insert(
+                pot.resistor_name.to_ascii_uppercase(),
+                format_scientific(dv),
+            );
+        }
+    }
+
+    // `.switch`: melange's initial state is always position 0.
+    for sw in &netlist.switches {
+        if let Some(pos0) = sw.positions.first() {
+            for (i, comp) in sw.component_names.iter().enumerate() {
+                if let Some(&val) = pos0.get(i) {
+                    overrides.insert(comp.to_ascii_uppercase(), format_scientific(val));
+                }
+            }
+        }
+    }
+
+    if overrides.is_empty() {
+        return deck.to_string();
+    }
+
+    let mut out = String::with_capacity(deck.len() + 32);
+    for line in deck.lines() {
+        let trimmed = line.trim_start();
+        // Only rewrite two-terminal passive element lines: `<R|C|L>name n+ n- value`.
+        // Comments, directives, sources and everything else are copied verbatim.
+        let first = trimmed.chars().next().unwrap_or(' ').to_ascii_uppercase();
+        if matches!(first, 'R' | 'C' | 'L') {
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if parts.len() >= 4 {
+                if let Some(newval) = overrides.get(&parts[0].to_ascii_uppercase()) {
+                    // Rebuild `name n+ n- <default>`, preserving any trailing tokens.
+                    let mut rebuilt = format!("{} {} {} {}", parts[0], parts[1], parts[2], newval);
+                    for extra in &parts[4..] {
+                        rebuilt.push(' ');
+                        rebuilt.push_str(extra);
+                    }
+                    out.push_str(&rebuilt);
+                    out.push('\n');
+                    continue;
+                }
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 /// Inject a Thevenin-equivalent PWL source into a netlist string
 ///
 /// Creates a modified netlist with a voltage source + series resistance matching
@@ -748,6 +850,16 @@ pub fn run_transient_with_thevenin_pwl(
     // reflects the current switch state that produced this reference) and name
     // any such island so intended ones are confirmed and accidental ones caught.
     warn_floating_cap_only_islands(netlist_content);
+
+    // Substitute each dynamic (`.pot`/`.wiper`/`.switch`) element's melange-DEFAULT
+    // value into its element line so ngspice solves the SAME circuit melange does at
+    // its default parameter state. The directive lines themselves are still stripped
+    // downstream in `run_transient`; this only rewrites the element VALUES they
+    // govern. Must run on the pristine deck BEFORE the tube/Thevenin rewrites below,
+    // which melange's parser cannot read back. See
+    // `substitute_dynamic_element_defaults` for the exact melange mapping matched.
+    let netlist_content = substitute_dynamic_element_defaults(netlist_content);
+    let netlist_content = netlist_content.as_str();
 
     // Translate any melange triode (`T`) elements into Koren B-source subckts
     // before the deck reaches ngspice (which would parse `T` as a transmission
@@ -964,5 +1076,83 @@ mod tests {
         assert!(!out.to_uppercase().contains(".TAP"), "deck: {out}");
         assert!(!out.to_uppercase().contains(".INJECT"), "deck: {out}");
         assert!(out.contains("R_minj_f2 n2 0 1k"), "deck: {out}");
+    }
+
+    /// Helper: find the value token (parts[3]) of the element line named `name`.
+    fn element_value(deck: &str, name: &str) -> Option<f64> {
+        deck.lines().find_map(|l| {
+            let p: Vec<&str> = l.split_whitespace().collect();
+            if p.first().map(|s| s.eq_ignore_ascii_case(name)) == Some(true) && p.len() >= 4 {
+                p[3].parse::<f64>().ok()
+            } else {
+                None
+            }
+        })
+    }
+
+    #[test]
+    fn test_pot_default_substituted_into_deck() {
+        // `.pot` default (100) differs from the element nominal (100k): the ngspice
+        // reference element line must be rewritten to melange's default value.
+        let deck = "test deck\nR_lfc eq h 100k\nR_gnd h 0 1k\n.pot R_lfc 100 100k 100\n.end\n";
+        let out = substitute_dynamic_element_defaults(deck);
+        assert_eq!(
+            element_value(&out, "R_lfc"),
+            Some(100.0),
+            "pot default not substituted; deck:\n{out}"
+        );
+        // The directive line itself is still present (stripped later, not here).
+        assert!(
+            out.to_uppercase().contains(".POT R_LFC"),
+            "directive line should survive this pass; deck:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_pot_no_default_keeps_nominal() {
+        // `.pot` with no explicit default: melange uses the nominal, so the element
+        // line must be left untouched (keeps its original suffix token, `4700`).
+        let deck = "test deck\nR1 a b 4700\nR2 b 0 1k\n.pot R1 100 10k\n.end\n";
+        let out = substitute_dynamic_element_defaults(deck);
+        assert!(
+            out.lines()
+                .any(|l| l.split_whitespace().collect::<Vec<_>>() == ["R1", "a", "b", "4700"]),
+            "nominal element line should be unchanged; deck:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_switch_position0_substituted() {
+        // A switch's initial state is always position 0. The pos-0 value (270n)
+        // differs from the element nominal (999n) and must land in the deck.
+        let deck = "test deck\nC_hfc a b 999n\nR_gnd a 0 1k\n.switch C_hfc 270n 135n 68n\n.end\n";
+        let out = substitute_dynamic_element_defaults(deck);
+        let v = element_value(&out, "C_hfc").expect("C_hfc line missing");
+        assert!(
+            (v - 2.7e-7).abs() < 1e-15,
+            "switch pos-0 not substituted (got {v}); deck:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_wiper_legs_substituted_at_default_position() {
+        // `.wiper` expands (in the parser) into two `.pot`s whose default leg
+        // resistances at the default position are what melange stamps. With
+        // total=100k, pos=0.85, MIN_LEG_R=10: r_cw = 0.15*(100000-20)+10 = 15007,
+        // r_ccw = 0.85*(100000-20)+10 = 84993. Both element lines must be rewritten.
+        let deck = "test deck\nR_cw n1 w 1k\nR_ccw w 0 1k\n.wiper R_cw R_ccw 100k 0.85\n.end\n";
+        let out = substitute_dynamic_element_defaults(deck);
+        let cw = element_value(&out, "R_cw").expect("R_cw line missing");
+        let ccw = element_value(&out, "R_ccw").expect("R_ccw line missing");
+        assert!((cw - 15007.0).abs() < 1e-6, "R_cw={cw}; deck:\n{out}");
+        assert!((ccw - 84993.0).abs() < 1e-6, "R_ccw={ccw}; deck:\n{out}");
+    }
+
+    #[test]
+    fn test_no_dynamic_directives_is_byte_identical_noop() {
+        // A deck with no `.pot`/`.wiper`/`.switch` must be returned unchanged, so
+        // every existing non-dynamic golden deck is unaffected.
+        let deck = "RC lowpass\nVIN in 0 DC 0 AC 1\nR1 in out 10k\nC1 out 0 10n\n.end\n";
+        assert_eq!(substitute_dynamic_element_defaults(deck), deck);
     }
 }

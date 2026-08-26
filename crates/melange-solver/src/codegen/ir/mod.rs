@@ -309,6 +309,16 @@ pub struct NamedConstantsIR {
     /// User-named circuit nodes: (sanitized const suffix, 0-based node index).
     /// Ground is implicit (index 0) and not emitted.
     pub nodes: Vec<(String, usize)>,
+    /// Every non-ground node's ORIGINAL (un-sanitized) name paired with its
+    /// 0-based index — the SAME index space as `DC_OP`/`dc_operating_point`.
+    /// Emitted as the `NODE_NAMES: [&str; N]` parallel array + `dc_op_by_name`
+    /// lookup so reading a node's operating point is a lookup, not N recompiles
+    /// (openfarf thread 218). Unlike `nodes`, this includes solver-internal
+    /// nodes (BJT `basePrime`, transformer branches) so the array is a complete
+    /// parallel of `DC_OP`; rows with no node name (augmented VS/inductor
+    /// branch-current rows) are left `""`.
+    #[serde(default)]
+    pub node_names: Vec<(String, usize)>,
     /// Voltage sources: (sanitized const suffix, RHS row = n_nodes + vs.ext_idx).
     /// The row index is the aug-MNA row where the VS's KVL constraint lives,
     /// i.e. where a `.runtime` voltage source (P1) stamps its per-sample value.
@@ -649,10 +659,25 @@ pub(crate) fn build_named_constants(
         dedupe_in_order(raw)
     };
 
+    // ORIGINAL node names in DC_OP index space (idx - 1, ground excluded).
+    // Includes solver-internal nodes so `NODE_NAMES` is a complete parallel of
+    // `DC_OP`. `node_map` keys are unique, so no dedupe is needed.
+    let node_names: Vec<(String, usize)> = {
+        let mut v: Vec<(String, usize)> = mna
+            .node_map
+            .iter()
+            .filter(|(name, idx)| **idx != 0 && name.as_str() != "0")
+            .map(|(name, idx)| (name.clone(), *idx - 1))
+            .collect();
+        v.sort_by_key(|(_, idx)| *idx);
+        v
+    };
+
     NamedConstantsIR {
         nodes: nodes_raw,
         vsources,
         pots,
+        node_names,
     }
 }
 

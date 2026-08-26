@@ -192,7 +192,33 @@ fn import_xml(content: &str) -> Result<String> {
                 current_text.clear();
             }
             Ok(Event::Text(ref e)) => {
-                current_text = e.unescape().unwrap_or_default().to_string();
+                // quick-xml >= 0.41 no longer unescapes entities inside text and,
+                // with its reference-splitting tokenizer, delivers a text run in
+                // multiple pieces: plain spans arrive as `Text`, while each
+                // `&ref;` / `&#NN;` arrives as a separate `GeneralRef` event
+                // (handled below). Text spans carry no unresolved entities, so
+                // decode() alone is the faithful replacement for the old
+                // `BytesText::unescape()`. Accumulate; `current_text` is reset at
+                // each element Start/Empty (see the `current_text.clear()` below).
+                if let Ok(s) = e.decode() {
+                    current_text.push_str(&s);
+                }
+            }
+            Ok(Event::GeneralRef(ref e)) => {
+                // A character/entity reference the tokenizer split out of the
+                // surrounding text. Reconstruct `&name;` and run it through
+                // escape::unescape so predefined entities (amp/lt/gt/quot/apos)
+                // and numeric char refs (`&#107;` / `&#x6B;`) resolve uniformly —
+                // together with the Text arm this reproduces the old
+                // `BytesText::unescape()` result. An unresolvable custom entity is
+                // preserved in raw `&name;` form rather than silently dropped.
+                if let Ok(name) = e.decode() {
+                    let raw = format!("&{name};");
+                    match quick_xml::escape::unescape(&raw) {
+                        Ok(resolved) => current_text.push_str(&resolved),
+                        Err(_) => current_text.push_str(&raw),
+                    }
+                }
             }
             Ok(Event::End(ref e)) => {
                 let local_name = e.local_name();
@@ -828,6 +854,69 @@ fn format_value(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Regression guard for the quick-xml 0.41 migration (0.1.1). Its
+    // reference-splitting tokenizer no longer keeps `&#NN;` / `&amp;` inside
+    // `Event::Text`; each reference is emitted as a separate `Event::GeneralRef`.
+    // A naive port that only handles `Text` silently DROPS every entity — e.g.
+    // a value written `10&#107;` collapsed to `10`. These decks exercise both a
+    // numeric char reference and a named predefined entity end-to-end through
+    // `import_xml`, so a future regression fails loudly instead of mangling a
+    // netlist.
+    #[test]
+    fn import_xml_resolves_numeric_char_reference_in_value() {
+        // `&#107;` is 'k'; `&#48;` is '0'. Correct resolution yields "10k".
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<export version="E">
+  <design><source>/tmp/entity-test.kicad_sch</source></design>
+  <components>
+    <comp ref="R1"><value>1&#48;&#107;</value>
+      <libsource lib="Device" part="R"/></comp>
+  </components>
+  <nets>
+    <net code="1" name="in"><node ref="R1" pin="1"/></net>
+    <net code="2" name="out"><node ref="R1" pin="2"/></net>
+  </nets>
+</export>"#;
+        let cir = import_xml(xml).expect("import_xml should succeed");
+        assert!(
+            cir.contains("R1 in out 10k"),
+            "numeric char reference not resolved; got:\n{cir}"
+        );
+        // The pre-fix bug produced "R1 in out 10" (references dropped).
+        assert!(
+            !cir.contains("R1 in out 10\n"),
+            "reference silently dropped:\n{cir}"
+        );
+    }
+
+    #[test]
+    fn import_xml_resolves_named_entity_in_text() {
+        // Named predefined entity in text content (the title, derived from the
+        // <source> element's text). `&amp;` must resolve to '&': the file stem of
+        // "hi&lo.kicad_sch" is "hi&lo", so the title line is "hi&lo". A dropped
+        // reference would fuse the spans to "hilo"; a raw one would read
+        // "hi&amp;lo" — both distinct from the correct "hi&lo".
+        // (Note: entity resolution here applies to TEXT nodes only; attribute
+        // values such as net `name="..."` are read raw in both 0.37 and 0.41.)
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<export version="E">
+  <design><source>/tmp/hi&amp;lo.kicad_sch</source></design>
+  <components>
+    <comp ref="R1"><value>1k</value><libsource lib="Device" part="R"/></comp>
+  </components>
+  <nets>
+    <net code="1" name="in"><node ref="R1" pin="1"/></net>
+    <net code="2" name="out"><node ref="R1" pin="2"/></net>
+  </nets>
+</export>"#;
+        let cir = import_xml(xml).expect("import_xml should succeed");
+        let title = cir.lines().next().unwrap_or_default();
+        assert_eq!(
+            title, "hi&lo",
+            "named entity in text not resolved to '&'; got title {title:?}\nfull:\n{cir}"
+        );
+    }
 
     #[test]
     fn format_value_keeps_digit_preceded_femto_and_atto() {

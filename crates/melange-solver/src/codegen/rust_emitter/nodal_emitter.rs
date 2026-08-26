@@ -2378,6 +2378,25 @@ impl RustEmitter {
             code.push('\n');
         }
 
+        // NODE_NAMES parallel array + dc_op_by_name lookup (openfarf thread 218).
+        // Carried by the nodal path identically to the DK path. NODE_NAMES is a
+        // complete parallel of DC_OP (one entry per row, "" for unnamed rows);
+        // dc_op_by_name is emitted only when DC_OP exists.
+        code.push_str(
+            "/// Node names in DC_OP index order — `NODE_NAMES[i]` is the netlist name of the\n\
+             /// node whose baked operating point is `DC_OP[i]` (openfarf thread 218). Rows\n\
+             /// with no node name (augmented voltage-source / inductor branch-current rows)\n\
+             /// are `\"\"`. Use `dc_op_by_name` for a name\u{2192}voltage lookup.\n",
+        );
+        code.push_str(&format!(
+            "pub const NODE_NAMES: [&str; N] = [{}];\n\n",
+            super::helpers::node_names_array_body(ir)
+        ));
+        if ir.has_dc_op {
+            code.push_str(super::helpers::DC_OP_BY_NAME_FN);
+            code.push('\n');
+        }
+
         code
     }
 

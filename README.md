@@ -64,11 +64,15 @@ Standard parts (R, C, L, D, BJT, JFET, MOSFET) use KiCad's own `Simulation_SPICE
 
 ### 2. From a SPICE netlist
 
-Write one by hand, or take one from a circuit repository and stop pretending you were going to write it by hand:
+Write one by hand, or take one from a circuit repository and stop pretending you were going to write it by hand. A complete worked example ships in [`examples/`](examples/) — the Pultec EQP-1A passive tube EQ — one of the hardest topologies melange solves: coupled transformers with global feedback wrapped around four nonlinear tubes (see [Spotlight](#spotlight-passive-tube-eq)):
 
 ```bash
+# Compile the bundled Pultec EQP-1A example (4 tubes, 3 transformers, global NFB)
+melange compile examples/passive-eq1a.cir --format plugin -o pultec-eq
+cd pultec-eq && cargo build --release
+
+# ...or point it at your own netlist
 melange compile my-circuit.cir --format plugin -o my-plugin
-cd my-plugin && cargo build --release
 ```
 
 ### 3. From a circuit library
@@ -166,7 +170,7 @@ A sample of what it handles, with **measured** single-core throughput:
 |---------|-----------|---------|--------------|
 | Bus compressor (SSL-class) | VCA + op-amp sidechain | 4 op-amps + 1 VCA | 9× |
 | Germanium diode network | 6-diode germanium clipping | 6 Ge diodes | 18× |
-| Passive tube EQ (Pultec-class) | 7 pots, 3 switches, global NFB (N=46, M=8) | 4 tubes, 2 transformers | 28× |
+| Passive tube EQ (Pultec-class) | 7 pots, 3 switches, global NFB (N=52, M=8) | 4 tubes, 3 transformers | 24× |
 | Tweed guitar amp (5F1 Champ-class) | preamp + power stage + output transformer | 12AX7 (2 triodes) + 6V6 pentode | 29× |
 | Wurlitzer 200A preamp | 2-stage BJT preamp (full Gummel-Poon) | 2 BJTs + 1 diode | 56× |
 | Overdrive pedal | op-amp gain + diode clipper | op-amp + 2 diodes | 64× |
@@ -178,14 +182,14 @@ The circuits repository holds the full catalog with per-circuit status.
 
 ## Spotlight: Passive Tube EQ
 
-The hardest topology melange currently solves end to end. Read this as a demonstration of the *solver*, not as a fidelity claim — the distinction matters and I'll get to it in a second:
+One of the hardest topologies melange solves end to end — coupled transformers with global feedback wrapped around four nonlinear tubes. Read this as a demonstration of the *solver*, not as a fidelity claim — the distinction matters and I'll get to it in a second:
 
-- **4 vacuum tubes** (2× 12AX7, 2× 12AU7), **2 transformers** (input step-up, output with a tertiary feedback winding)
+- **4 vacuum tubes** (2× 12AX7, 2× 12AU7), **3 transformers** (HS-56 input, HS-29 coupling/phase-splitter, S-217-D output with a tertiary feedback winding)
 - **21 dB of global negative feedback** via differential cathode injection
-- **37 circuit nodes (N=46 MNA unknowns), 8 nonlinear dimensions**
-- **All 7 EQ bands function**, including the simultaneous boost + cut trick, with **zero NR failures** at 1V input, at roughly 28× realtime on one core
+- **40 circuit nodes (N=52 MNA unknowns), 8 nonlinear dimensions**
+- **All 7 EQ bands function**, including the simultaneous boost + cut trick, with **zero NR failures** at 1V input, at roughly 24× realtime on one core
 
-Global feedback wrapped around four tubes and two transformers is the configuration where naive solvers give up, oscillate, or quietly return garbage. This one converges every sample.
+Global feedback wrapped around four tubes and three transformers is the configuration where naive solvers give up, oscillate, or quietly return garbage. This one converges every sample.
 
 > **Now the part that isn't a fidelity claim.** This proves melange *solves* a genuinely hard topology. It does **not** prove fidelity to a real Pultec. The amp section follows the verified Sowter E-72,658-2 drawing. The **EQ network is a community reconstruction** — the original drawing has no EQ section at all — so what those curves faithfully reproduce is the reconstruction. Which is a real and useful thing to reproduce, and is not the same sentence as "sounds like a Pultec." [Validation & Verification](docs/VALIDATION.md) has the full accounting.
 
