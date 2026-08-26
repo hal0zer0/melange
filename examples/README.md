@@ -3,7 +3,7 @@
 A small set of netlists that ship in-tree so you can compile something real
 without first wiring up a circuit source. Point `melange` straight at the file.
 
-## `passive-eq1a.cir` — Pultec EQP-1A passive tube EQ *(primary example)*
+## `passive-eq1a.cir` — passive tube EQ *(primary example)*
 
 The flagship example. A passive bridge-T EQ network bracketed by transformers,
 with a tube makeup amplifier: HS-56 input transformer → passive EQ → HS-29
@@ -30,17 +30,17 @@ melange analyze examples/passive-eq1a.cir --pot "LF Boost=10" --switch "LF Freq=
 melange simulate examples/passive-eq1a.cir --input-audio guitar.wav -o out.wav
 
 # Compile to a plugin project
-melange compile examples/passive-eq1a.cir --format plugin -o pultec-eq
-cd pultec-eq && cargo build --release
+melange compile examples/passive-eq1a.cir --format plugin -o passive-eq
+cd passive-eq && cargo build --release
 ```
 
 **Provenance, honestly.** This proves melange *solves* a genuinely hard
-topology. It does **not** prove fidelity to a real Pultec. The amplifier section
+topology. It does **not** prove fidelity to the original hardware. The amplifier section
 now follows the verified Sowter E-72,658-2 drawing (eight schematic corrections
 applied 2026-08-25); the **EQ network is a reconstruction** — no factory drawing
 of the EQ exists at all. The file's own header carries the full accounting. What
 the curves faithfully reproduce is the reconstruction, which is a real and useful
-thing and is not the same sentence as "sounds like a Pultec."
+thing and is not the same sentence as "sounds like the real box."
 
 ---
 

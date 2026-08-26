@@ -20,7 +20,7 @@ That's not a missing feature. That's the whole design.
 
 > **Status: early alpha.** "Netlist goes in, plugin comes out" is exactly the kind of claim that should make you narrow your eyes, so here is precisely how far it actually goes today:
 >
-> - **Compiles + agrees with ngspice** — several classic circuits (Pultec-class EQ, Wurlitzer 200A, tweed preamp, Tube Screamer) compile, run, and track ngspice at the SPICE level.
+> - **Compiles + agrees with ngspice** — several classic circuits (a passive tube EQ, Wurlitzer 200A, tweed preamp, Tube Screamer) compile, run, and track ngspice at the SPICE level.
 > - **Checked against real hardware** — the Wurlitzer 200A preamp, against measured hardware. One circuit. Exactly one.
 > - **Proven oracle-free** — the solver's numerics and the device models are verified to machine precision *without* another simulator (Tellegen power-balance, convergence-order, canonical device equations).
 >
@@ -64,12 +64,12 @@ Standard parts (R, C, L, D, BJT, JFET, MOSFET) use KiCad's own `Simulation_SPICE
 
 ### 2. From a SPICE netlist
 
-Write one by hand, or take one from a circuit repository and stop pretending you were going to write it by hand. A complete worked example ships in [`examples/`](examples/) — the Pultec EQP-1A passive tube EQ — one of the hardest topologies melange solves: coupled transformers with global feedback wrapped around four nonlinear tubes (see [Spotlight](#spotlight-passive-tube-eq)):
+Write one by hand, or take one from a circuit repository and stop pretending you were going to write it by hand. A complete worked example ships in [`examples/`](examples/) — the passive tube EQ — one of the hardest topologies melange solves: coupled transformers with global feedback wrapped around four nonlinear tubes (see [Spotlight](#spotlight-passive-tube-eq)):
 
 ```bash
-# Compile the bundled Pultec EQP-1A example (4 tubes, 3 transformers, global NFB)
-melange compile examples/passive-eq1a.cir --format plugin -o pultec-eq
-cd pultec-eq && cargo build --release
+# Compile the bundled passive tube EQ example (4 tubes, 3 transformers, global NFB)
+melange compile examples/passive-eq1a.cir --format plugin -o passive-eq
+cd passive-eq && cargo build --release
 
 # ...or point it at your own netlist
 melange compile my-circuit.cir --format plugin -o my-plugin
@@ -170,7 +170,7 @@ A sample of what it handles, with **measured** single-core throughput:
 |---------|-----------|---------|--------------|
 | Bus compressor (SSL-class) | VCA + op-amp sidechain | 4 op-amps + 1 VCA | 9× |
 | Germanium diode network | 6-diode germanium clipping | 6 Ge diodes | 18× |
-| Passive tube EQ (Pultec-class) | 7 pots, 3 switches, global NFB (N=52, M=8) | 4 tubes, 3 transformers | 24× |
+| Passive tube EQ | 7 pots, 3 switches, global NFB (N=52, M=8) | 4 tubes, 3 transformers | 24× |
 | Tweed guitar amp (5F1 Champ-class) | preamp + power stage + output transformer | 12AX7 (2 triodes) + 6V6 pentode | 29× |
 | Wurlitzer 200A preamp | 2-stage BJT preamp (full Gummel-Poon) | 2 BJTs + 1 diode | 56× |
 | Overdrive pedal | op-amp gain + diode clipper | op-amp + 2 diodes | 64× |
@@ -191,7 +191,7 @@ One of the hardest topologies melange solves end to end — coupled transformers
 
 Global feedback wrapped around four tubes and three transformers is the configuration where naive solvers give up, oscillate, or quietly return garbage. This one converges every sample.
 
-> **Now the part that isn't a fidelity claim.** This proves melange *solves* a genuinely hard topology. It does **not** prove fidelity to a real Pultec. The amp section follows the verified Sowter E-72,658-2 drawing. The **EQ network is a community reconstruction** — the original drawing has no EQ section at all — so what those curves faithfully reproduce is the reconstruction. Which is a real and useful thing to reproduce, and is not the same sentence as "sounds like a Pultec." [Validation & Verification](docs/VALIDATION.md) has the full accounting.
+> **Now the part that isn't a fidelity claim.** This proves melange *solves* a genuinely hard topology. It does **not** prove fidelity to the original hardware. The amp section follows the verified Sowter E-72,658-2 drawing. The **EQ network is a community reconstruction** — the original drawing has no EQ section at all — so what those curves faithfully reproduce is the reconstruction. Which is a real and useful thing to reproduce, and is not the same sentence as "sounds like the real box." [Validation & Verification](docs/VALIDATION.md) has the full accounting.
 
 ```bash
 melange compile melange:unstable/filters/passive-eq1a --format plugin -o my-eq
