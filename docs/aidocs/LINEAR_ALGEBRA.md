@@ -176,7 +176,7 @@ Three optimizations stack to keep this real-time:
 3. **Compile-time sparse LU** — AMD ordering and symbolic factorization run
    at codegen time. The emitter writes `sparse_lu_factor(a, d)` /
    `sparse_lu_back_solve(a_lu, d, b)` as straight-line code on the original
-   indices (no runtime permutation). Pultec example: 536 factor FLOPs vs
+   indices (no runtime permutation). Passive-EQ example: 536 factor FLOPs vs
    ~22973 dense (43× reduction). See `chord_method.md` in memory.
 
 Source: `crates/melange-solver/src/lu.rs` and the emit sites in

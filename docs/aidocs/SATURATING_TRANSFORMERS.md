@@ -29,7 +29,7 @@ Marquee targets are guitar output transformers (SE and push-pull) and
 1:1 character-pedal iron. Tape-head / iron-clip stages already go through
 the uncoupled path.
 
-**Explicitly deferred:** NFB-through-iron transformers (Pultec, Neve
+**Explicitly deferred:** NFB-through-iron transformers (the passive EQ, Neve
 1073), hysteresis / core loss / remanence, and multi-limb cores.
 
 ### Why the current independent-winding code is wrong
@@ -77,7 +77,7 @@ along for free.
 **The catch:** the T-model is deliberately disabled —
 `IDEAL_XFMR_L_THRESHOLD = 1e30` (`mna.rs:171`) — because the ideal
 couplings form **algebraic loops in circuits with global NFB through the
-iron** (Pultec tertiary NFB, Neve 1073). Enabling it must be **gated to
+iron** (the passive EQ tertiary NFB, Neve 1073). Enabling it must be **gated to
 NFB-free groups**, or it regresses validated circuits. Loosely-coupled /
 small transformers currently also fall through to the (wrong)
 `winding_isats` path, so routing must be re-verified.
@@ -345,7 +345,7 @@ the broadest-safety option. Document how the leakage/magnetizing split
 and turns vector derive from existing `L` + coupling `k`. *Milestone:*
 documented, tested parser path; ISAT authored into marquee decks.
 
-**Phase 4 — DEFERRED: NFB-through-iron.** For Pultec / 1073, compute net
+**Phase 4 — DEFERRED: NFB-through-iron.** For the passive EQ / 1073, compute net
 MMF `Σ Nᵢ·Iᵢ` directly from the augmented branch currents already
 present in the coupled-Y path and apply one shared saturation term,
 sidestepping the algebraic loop. Open feasibility question.
@@ -413,7 +413,7 @@ Concrete gates:
 3. One SE + one PP output-transformer deck: harmonic (H2/H3) trend
    matches the authored B-H curve; no `k_eff ≥ 1` / loss of
    positive-definiteness; no Nyquist ring per `nyquist_dbc`.
-4. Zero regression on validated NFB-through-iron decks (Pultec, 1073):
+4. Zero regression on validated NFB-through-iron decks (the passive EQ, 1073):
    they must keep routing away from the T-model.
 
 ---
@@ -428,7 +428,7 @@ Concrete gates:
   saturating-inductor decks. Golden-audio gate mandatory.
 - **Phase 2 (T-model routing):** low-medium *additional* effort once
   Phase 1 lands (no new coupled math), but the `1e30`→gated-enable change
-  is high-risk near Pultec/1073. Must prove NFB-free gating before merge.
+  is high-risk near the passive EQ/1073. Must prove NFB-free gating before merge.
 - **Phase 3 (syntax):** low effort, low risk; mostly a contract decision.
 - **Continuation for the knee (§4):** high effort, high risk, but shared
   with the G10/diode-switching class — cost is amortized.

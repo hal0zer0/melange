@@ -916,7 +916,7 @@ fn emit_dc_op_writeback_dk(ir: &CircuitIR, nonlinear: bool) -> String {
 /// `emit_dc_op_build_g_aug_dk` / `_build_b_dc_dk` / `_nr_loop_dk`.
 ///
 /// That nodal body is **deferred indefinitely**. Shipping nodal-routed
-/// plugins (pultec, 4kbuscomp, VCR Audio ALC, wurli power amp) continue
+/// plugins (passive-eq, 4kbuscomp, VCR Audio ALC, wurli power amp) continue
 /// using the `WARMUP_SAMPLES_RECOMMENDED` silence loop, which is the
 /// documented path for nodal circuits — not a temporary workaround. The
 /// warmup loop runs the full per-sample NR and is guaranteed to converge

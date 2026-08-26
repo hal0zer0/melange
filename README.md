@@ -20,7 +20,7 @@ That's not a missing feature. That's the whole design.
 
 > **Status: early alpha.** "Netlist goes in, plugin comes out" is exactly the kind of claim that should make you narrow your eyes, so here is precisely how far it actually goes today:
 >
-> - **Compiles + agrees with ngspice** — several classic circuits (a Pultec-style passive EQ, Wurlitzer 200A, tweed preamp, Tube Screamer) compile, run, and track ngspice at the SPICE level.
+> - **Compiles + agrees with ngspice** — several classic circuits (a Pultec-style passive EQ, Wurlitzer 200A, tweed preamp, a Tube-Screamer-style overdrive) compile, run, and track ngspice at the SPICE level.
 > - **Checked against real hardware** — the Wurlitzer 200A preamp, against measured hardware. One circuit. Exactly one.
 > - **Proven oracle-free** — the solver's numerics and the device models are verified to machine precision *without* another simulator (Tellegen power-balance, convergence-order, canonical device equations).
 >

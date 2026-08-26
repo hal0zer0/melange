@@ -5,7 +5,7 @@ Quick-reference for AI agents. For math details see other aidocs. For architectu
 > **2026-07-18 accuracy campaign (commits `3e246cb`, `5159b8c`, `fde289a`, `b421358`, `8056f95` — all six review chunks complete):** a
 > full-codebase accuracy review fixed, among others: op-amp VCCS polarity (was
 > inverted — clipping/comparator behavior changed), Koren triode ×2 factor (triode
-> stages now run at datasheet current/gm — Pultec/SeriesOfTubes gain staging
+> stages now run at datasheet current/gm — passive-EQ/SeriesOfTubes gain staging
 > shifted), oversampling decimator + half-band tables (2x/4x plugins gain flat HF
 > passband and real (−87 dB) alias rejection), vendor-verbatim BJT/diode catalog
 > cards, FET reverse quadrant/depletion NMOS, DC-OP device parity + pnjlim
@@ -153,7 +153,7 @@ against ngspice. Circuits with melange-extended models (OA, VCA, VP, triode) use
 Promotion to `stable/` requires user sign-off after a DAW listening test.
 SPICE correlation and successful compilation are necessary but not sufficient.
 
-## Pultec Schematic Data (Verified 2026-03-16)
+## Passive-EQ Schematic Data (Verified 2026-03-16)
 
 Source: Sowter DWG E-72,658-2 + Peerless/Triad winding data.
 
@@ -250,7 +250,7 @@ Source: Sowter DWG E-72,658-2 + Peerless/Triad winding data.
 
 **Re-measured 2026-08-25** on an AMD Ryzen 9 7950X (single core, noiseless, `-C target-cpu=x86-64-v3`, via `tools/perf-harness/bench.sh`); host-dependent. The earlier figures below were largely fabricated/stale — see `memory/perf_numbers_measured_2026_08_25.md`. Measured: nonlinear audio circuits ≈9–65× RT; light stages hundreds× (single 12AX7 ~230×); trivial linear ~2700×.
 
-- Pultec passive EQ (N=46, M=8, 2 xfmrs, nodal full LU): **~28×** realtime (was mislabeled ~11×/N=41)
+- Passive EQ (N=46, M=8, 2 xfmrs, nodal full LU): **~28×** realtime (was mislabeled ~11×/N=41)
 - Wurlitzer preamp (2 BJT, full GP): ~56× · Tweed 5F1 amp: ~29× · overdrive pedal: ~64× · SSL bus comp (full): ~9×
 - VCA compressor (N=21, M=3, nodal full LU): ~42× realtime *(not re-measured 2026-08-25)*
 - 8-BJT Class AB power amp (DK M=9): 0.4× realtime *(not re-measured; parasitic-R limited; K_eff approach planned)*
@@ -263,7 +263,7 @@ Source: Sowter DWG E-72,658-2 + Peerless/Triad winding data.
 - All device models fixed at room temperature (27°C); no TNOM/TC1/TC2/XTI
 - `MAX_M=24` — bound on NR dimension; iterative/sparse NR for M>24 deferred. Bumped from 16 on 2026-04-19 to admit Uniquorn v2 (M=20) and leave headroom for split-band saturation designs.
 - Full-LU NR + ill-conditioned A (cond(A) > ~1000): Schur preferred when K well-conditioned. No known circuit needs both pathological K and ill-conditioned A. See DEBUGGING.md "Known Full-LU NR Limitations"
-- Ideal transformer decomposition (dependent sources + explicit leakage/magnetizing L): deferred, current coupled-inductor approach sufficient for Pultec at +1.8 dB
+- Ideal transformer decomposition (dependent sources + explicit leakage/magnetizing L): deferred, current coupled-inductor approach sufficient for the passive EQ at +1.8 dB
 
 ## Validated Circuits
 
@@ -299,7 +299,7 @@ and compilation are necessary but not sufficient).
 ### Deferred
 - **`.switch`/`.pot`/`.runtime R` G-swap first-sample 2× artifact** (root-caused 2026-08-15, raised by melange-circuits/openfarf; user-gated fix). A conductance changed mid-run produces an output at the *swap sample* exactly 2.000× the physical value (drive-independent, deterministic), correct one sample later. Mechanism: trapezoidal puts every conductance in BOTH `A = g+(2/T)C` and `a_neg = (2/T)C−g`, so a switch of Δg adds +Δg to the forward matrix and −Δg to the history matrix; on the swap sample `v[n] = v_prev − 2·A_new⁻¹·Δg·v_prev` — Δg counted twice (`rebuild_matrices` correctly rebuilds `a_neg`; this is inherent to the trap formulation, not staleness). It is a **bug, not a contract** — a resistive divider responds instantly, so the swap sample should be physical; do NOT document it as "undefined." Fix: use the pre-switch conductance in the history term for the one transition sample (one-sample old-g lag on the switched conductance in `a_neg`) — a core-solver change touching every `.switch`/`.pot`/`.runtime R` circuit, needs full golden/SPICE validation. Repro: any `.switch` onto a resistive path, toggle mid-run, compare first-sample deflection to settled ratio. **Second artifact (same event):** the swap also excites a trapezoidal z=−1 Nyquist marginal-stability mode that rings for ~1000 samples (damped by circuit RC; parity-split-into-two-smooth-sequences signature; verified undamped in a no-cap repro, and gone under `--backward-euler`). The old-g lag does NOT kill this mode — it only shrinks the exciting impulse. **Complete fix is two parts:** (a) the one-sample old-g history lag (kills the 2×); (b) breakpoint-style force-BE for 1–2 samples after any `.switch`/`.pot`/`.runtime R` event (damps the Nyquist mode at the source — commercial-SPICE breakpoint practice; the switch-triggered analog of the existing nodal auto-BE). **Third manifestation (reproduced 2026-08-15): PERSISTENT residual on capless switched nodes.** On a purely-resistive (algebraic, no-cap) node the z=−1 mode is *undamped*, so the swap excitation never decays — the two-node residual stays non-zero for as long as you rest in the non-default position (openfarf's g10-ref busbar: 1.44% held-pos1, RC-damped by the chain's 1µF; a no-cap minimal repro shows ±0.32 undamped). Confirmed the trap-marginal mode, not a rebuilt-matrix error: `--backward-euler` held-pos1 residual = −3.5e-13 (consistent), null Δg=0 exact. **Breakpoint-BE is load-bearing** — it fixes both the decaying ring (capped nodes) and this persistent residual (capless nodes); the old-g lag alone does not fix the capless case. Regression oracle: a purely resistive node obeys `node − ratio·other ≈ 0` at all times — grade the two-node residual of a CAPLESS node held in a non-default position (must read ~1e-7), NOT node-vs-DC (a damping cap hides the bug). Workaround (openfarf): fit transients from closure+1; measurements while resting in a non-default position on a capless node are contaminated under trap. See memory `switch_gswap_trap_2x_first_sample_2026_08_15`.
 - **G10 divider hard-switching NR overshoot** (root-caused 2026-08-14, user-deferred as non-blocking). Germanium-PNP astable divider (`melange-circuits/local-docs/repro-ic-vcvs-blowup.cir` / `repro-wav-input-blowup.cir`) overshoots to ~80 V on an 8 V rail under a full-strength switching trigger (ground truth from melange-circuits: real full chain swings inside 0–8 V, duty 79.6%). Signature: BE-fallback storm (~88 % of samples vs ~1 % when physical). Root cause: at a switching edge the astable's positive-feedback K coupling pins a junction at v/vt ≈ 300 (v_d ≈ 7.8 V), `i_dev` saturates at `IS·exp(40)` ≈ 7e10 A, the Jacobian goes catastrophically ill-conditioned, and per-sample direct Newton stalls (‖f‖ flat at 7e10, exhausts MAX_ITER=90); the BE fallback inherits the same pinned state. Decisively ruled out by experiment: warm-start predictor, **line-search** (flat region, no descent direction), pnjlim sub-threshold-skip removal, and absolute v_d clamping. **Fix = port the DC-OP continuation (gmin/source stepping, `dc_op.rs`) into the per-sample `solve_nonlinear`** — substantial, higher-risk; validate against 24 SPICE + solver tests + oomox plugin-render golden gate. NOT blocking the working full G10 chain (which converges to rail). Prior "true Newton / Anderson" guess for this class is superseded by the gmin/source-stepping direction. **Acceptance criteria when this lands (from melange-circuits 2026-08-15):** (1) the ~80 V overshoot case stays bounded/physical; (2) NEW — *converged-vs-starved pitch agreement*: on the free-running G10 astable cascade, `--max-iter 70` (~11% NR starvation, which does NOT latch and looks healthy) leaves the master oscillator **3.8% flat** (a third of a semitone) with duty drifting ~3 points vs `--max-iter 1000`, because every non-converged sample leaves a slightly-wrong state that *integrates into pitch* on an oscillator. A failure-fraction warning (see the NR-starvation warning, `fe5c12a`) fundamentally cannot catch this sub-threshold detune class — the continuation is the real fix. See memory `g10_divider_hard_switching_overshoot_2026_08_14`.
-- Ideal transformer formulation (Pultec at +1.8 dB with current approach, not blocking)
+- Ideal transformer formulation (the passive EQ at +1.8 dB with current approach, not blocking)
 - Phase 6a/6b type safety (NodeIdx newtype, field visibility)
 - Phase 7 crate split (extract melange-parser, melange-codegen)
 - M>24 iterative/sparse NR

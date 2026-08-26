@@ -98,7 +98,7 @@ R. Without the gate, those cases fall on the caller. Phase E shipped
 state.set_pot_0(r_new);
 state.recompute_dc_op();   // resolves NR to the new operating point
 
-// On nodal circuits (Pultec, 4kbuscomp, VCR-ALC, wurli power amp):
+// On nodal circuits (passive-eq, 4kbuscomp, VCR-ALC, wurli power amp):
 state.set_pot_0(r_new);
 // recompute_dc_op() is a stub body — NR catches up on its own
 // over ~WARMUP_SAMPLES_RECOMMENDED samples.

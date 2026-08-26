@@ -3686,7 +3686,7 @@ impl RustEmitter {
                  \x20   /// # Nodal full-LU path: stub only\n\
                  \x20   ///\n\
                  \x20   /// The runtime DC OP solve is shipped on the DK path only. Nodal\n\
-                 \x20   /// circuits (pultec, 4kbuscomp, VCR ALC, wurli power amp) continue\n\
+                 \x20   /// circuits (passive-eq, 4kbuscomp, VCR ALC, wurli power amp) continue\n\
                  \x20   /// using the `WARMUP_SAMPLES_RECOMMENDED` silence loop — this is\n\
                  \x20   /// the documented path for nodal circuits, not a placeholder. The\n\
                  \x20   /// warmup loop runs the full per-sample NR and is guaranteed to\n\
