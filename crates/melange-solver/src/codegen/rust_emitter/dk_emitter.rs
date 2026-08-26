@@ -372,6 +372,10 @@ fn provenance_json(ir: &CircuitIR, version: &str, commit: &str) -> String {
     s.push_str(&format!("\"commit\":\"{commit}\","));
     s.push_str(&format!("\"integration\":\"{scheme}\","));
     s.push_str(&format!(
+        "\"integration_source\":\"{}\",",
+        ir.integrator_selection.integration_source()
+    ));
+    s.push_str(&format!(
         "\"backward_euler\":{},",
         ir.integrator_selection.is_backward_euler()
     ));

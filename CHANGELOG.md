@@ -9,6 +9,28 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+### Added
+
+- **`integration_source` in the generated `// provenance:` JSON** — `"explicit"`
+  (`.integrator be` / `--backward-euler`), `"auto-promoted"` (the trap-stability
+  discriminator), `"behavioral"` (behavioral-`B`-source forced), or `"trap"`. The
+  human `Build:` line already carried this distinction; the JSON now does too, so
+  a consumer can assert *why* the integration scheme is in effect without
+  string-matching the label.
+
+### Changed
+
+- **Circuits are referred to by function/topology, not brand** across the
+  examples and docs (e.g. "passive tube EQ", not "Pultec EQP-1A"); brand names
+  appear only as style references ("Pultec-style").
+
+### Fixed
+
+- **Generated-code provenance commit no longer goes stale on local branch
+  builds** — `build.rs` now watches `.git/logs/HEAD` (updated on every commit),
+  not only `.git/HEAD` (unchanged on a branch), so `// melange: <ver> (<commit>)`
+  tracks the actual HEAD.
+
 ## [0.1.1] - 2026-08-26 — Mace
 
 A hardening and provenance patch. No change to generated DSP: the compiled

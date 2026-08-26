@@ -18,10 +18,15 @@ fn main() {
     // The workspace `.git` lives two levels up from this crate root.
     let git_dir = Path::new("../../.git");
     if git_dir.exists() {
-        // Re-capture the commit when HEAD moves or the tree is re-checked-out.
-        // (Guarded on `.git` existing so a packaged crate — where these paths
-        // are absent — does not get treated as perpetually dirty by cargo.)
+        // Re-capture the commit when HEAD moves. On a branch, committing updates
+        // the reflog (`.git/logs/HEAD`), NOT `.git/HEAD` (which just holds
+        // `ref: refs/heads/<branch>`); a detached/tag checkout updates
+        // `.git/HEAD` directly. Watch both so the stamp stays current for local
+        // branch builds AND CI tag builds. (Guarded on `.git` existing so a
+        // packaged crate — where these paths are absent — does not rebuild
+        // spuriously.)
         println!("cargo:rerun-if-changed=../../.git/HEAD");
+        println!("cargo:rerun-if-changed=../../.git/logs/HEAD");
     }
 
     if let Some(commit) = short_commit() {

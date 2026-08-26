@@ -223,6 +223,23 @@ impl IntegratorSelection {
             Self::BeAuto => "backward-euler (auto-promoted)",
         }
     }
+
+    /// Machine-readable reason the integration scheme was chosen, for the
+    /// generated `// provenance:` JSON. Coarser than `label()` on purpose: a
+    /// consumer can assert *why* BE is in effect (an intended contract vs a
+    /// solver decision) without string-matching the human label.
+    /// `explicit` = user asked (`.integrator be` / `--backward-euler`);
+    /// `auto-promoted` = the trap-stability discriminator promoted it;
+    /// `behavioral` = forced by behavioral `B` sources; `trap` = trapezoidal.
+    #[must_use]
+    pub fn integration_source(self) -> &'static str {
+        match self {
+            Self::TrapDefault | Self::TrapCliFlag | Self::TrapDirective => "trap",
+            Self::BeCliFlag | Self::BeDirective => "explicit",
+            Self::BeBehavioral => "behavioral",
+            Self::BeAuto => "auto-promoted",
+        }
+    }
 }
 
 /// A plugin-driven scalar param in IR form (mirrors

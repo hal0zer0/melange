@@ -336,6 +336,43 @@ Rin in base 1k
     );
 }
 
+#[test]
+fn integration_source_maps_reason_not_just_scheme() {
+    use melange_solver::codegen::ir::IntegratorSelection as IS;
+    assert_eq!(IS::BeDirective.integration_source(), "explicit");
+    assert_eq!(IS::BeCliFlag.integration_source(), "explicit");
+    assert_eq!(IS::BeAuto.integration_source(), "auto-promoted");
+    assert_eq!(IS::BeBehavioral.integration_source(), "behavioral");
+    assert_eq!(IS::TrapDefault.integration_source(), "trap");
+    assert_eq!(IS::TrapCliFlag.integration_source(), "trap");
+    assert_eq!(IS::TrapDirective.integration_source(), "trap");
+    // The whole point of the field (oomox thread 234): explicit BE and
+    // auto-promoted BE, which collapse to the same `integration`/`backward_euler`
+    // JSON, are distinguishable here.
+    assert_ne!(
+        IS::BeDirective.integration_source(),
+        IS::BeAuto.integration_source()
+    );
+}
+
+#[test]
+fn provenance_json_carries_integration_source() {
+    // Default RC path resolves to trapezoidal.
+    let trap = generate_dk("Trap\nR1 in out 10k\nC1 out 0 100n\n");
+    assert!(
+        trap.contains("\"integration_source\":\"trap\""),
+        "expected trap integration_source:\n{}",
+        excerpt(&trap, "provenance")
+    );
+    // `.integrator be` is an explicit user request.
+    let be = generate_dk("Explicit BE\nR1 in out 10k\nC1 out 0 100n\n.integrator be\n");
+    assert!(
+        be.contains("\"integration_source\":\"explicit\""),
+        "expected explicit integration_source:\n{}",
+        excerpt(&be, "provenance")
+    );
+}
+
 /// Grab lines from `code` containing `needle`, for readable failure output.
 fn excerpt(code: &str, needle: &str) -> String {
     code.lines()
