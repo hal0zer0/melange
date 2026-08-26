@@ -43,8 +43,8 @@ per-metric gates were all tightened in the same pass.
 | BJT common-emitter | 0.99964880 | 4.26% | 0.164 V | BC547, gain ratio 1.024, 3 ms settle |
 | JFET common-source | 0.99940687 | 3.47% | 4.6e-6 V | THD err 4.70 dB |
 | MOSFET common-source | 0.99999997 | 0.029% | 2.7e-6 V | Level 1, small-signal |
-| Tube Screamer (TS808) | 0.99999032 | 0.442% | 9.9e-3 V | Op-amp + 1N4148, THD err 0.04 dB |
-| Tube Screamer (wiper, pos=0.85) | 0.99838696 | 5.71% | — | Volume divider + simplified tone; THD err 0.11 dB |
+| Tube-Screamer-style overdrive (TS808) | 0.99999032 | 0.442% | 9.9e-3 V | Op-amp + 1N4148, THD err 0.04 dB |
+| Tube-Screamer-style overdrive (wiper, pos=0.85) | 0.99838696 | 5.71% | — | Volume divider + simplified tone; THD err 0.11 dB |
 | Wurli preamp | 0.99999734 | 0.235% | 1.28e-3 V | 2× 2N5089, M=5, gain ratio 1.0006, 10 ms settle |
 | Neve 1073 output (BA283 AM) | 0.99999952 | 0.107% | 1.06e-4 V | 3 BJT + LO1166 xfmr, gain 6.7×, ratio 1.0000, 10 ms settle |
 | Neve 1073 preamp (BA283 AV) | 1.00000000 | 0.0346% | 1.12e-4 V | 3× BC184C, gain 26.0×, ratio 0.9996, 64 ms settle |
@@ -279,7 +279,7 @@ and compilation are necessary but not sufficient).
 - **SSL bus compressor** (4kbuscomp): 12 op-amps, 2 VCAs, 6 diodes, 2 pots, 2 switches. DC OP basin trap FIXED 2026-04-17 (`b771512`, post-fallback refinement NR). Transient chord-NR false convergence PARTIAL FIX 2026-04-17 (`c3d3eae`, residual check on ActiveSetBe/ActiveSet) — stable at `d ≤ 2 s` all amps on the original netlist. `d = 5 s` closes only with the netlist-side `.model OA_TL074 VSAT=11 → 13.5` fix (TL07x on ±15 V swings to ±13.5 V per TI datasheet); that diff is currently uncommitted in `melange-circuits/unstable/dynamics/4kbuscomp.cir`. See DEBUGGING.md "ActiveSetBe Chord-NR False Convergence" and "Precision Rectifier DC OP Convergence".
 - **VCR audio ALC compressor**: N=21, M=3, nodal full-LU ~42× RT. Key: 100Ω Rdecouple between VCA sig- and I-V converter fixes positive K diagonal.
 - **Klon Centaur**: ActiveSetBe auto-route (verified amp=[0.01..0.50]). BoyleDiodes opt-in only (heavy-clip divergence at amp ≥ 0.05 unsolved — not a blocker, see DEBUGGING.md).
-- **Tube Screamer** / guitar pedals: stable.
+- **Tube-Screamer-style overdrive** / guitar pedals: stable.
 - **Pentode stages**: EL84 single stage, Tweed Deluxe (6V6GT beam tetrode), 6K7 varimu, Plexi (4×EL34 grid-off FA M=18→14). DC-OP validated, end-to-end compile-and-run verified.
 - **Uniquorn v2**: 16-stage cascade (N=64, M=12, ~3× RT mono) + push-pull power (N=23, M=6, ~15× RT).
 
