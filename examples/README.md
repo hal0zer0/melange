@@ -47,7 +47,7 @@ thing and is not the same sentence as "sounds like the real box."
 ### Sync note (maintainers)
 
 `passive-eq1a.cir` is a **verbatim copy** of
-`unstable/filters/passive-eq1a.cir` in the **melange-circuits** repo, which is
+`testing/filters/passive-eq1a.cir` in the **melange-circuits** repo, which is
 the canonical source of truth for the netlist. It lives here only so the flagship
 repo has a working example in-tree.
 
@@ -56,7 +56,7 @@ the two are byte-identical:
 
 ```bash
 diff melange/examples/passive-eq1a.cir \
-     melange-circuits/unstable/filters/passive-eq1a.cir
+     melange-circuits/testing/filters/passive-eq1a.cir
 ```
 
 **Byte-identical mirror of canonical HEAD** — verify with the `diff` above. The

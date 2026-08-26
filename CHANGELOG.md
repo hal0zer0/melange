@@ -9,6 +9,8 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-26 — Sumac
+
 ### Added
 
 - **`integration_source` in the generated `// provenance:` JSON** — `"explicit"`
@@ -23,6 +25,12 @@ codegen output, CLI flags, and netlist semantics may all change.
 - **Circuits are referred to by function/topology, not brand** across the
   examples and docs (e.g. "passive tube EQ", not "Pultec EQP-1A"); brand names
   appear only as style references ("Pultec-style").
+- **Bundled passive-EQ example reframed to its `testing/`-tier status.** The
+  canonical circuit was promoted `unstable/` → `testing/` in the circuits
+  library; docs now compile it by the `testing/filters/passive-eq1a` path and
+  describe it honestly — measured-verified against the factory curve charts,
+  **never auditioned**, with **idealized (linear-iron) distortion** (it EQs like
+  the original, it does not yet color like it).
 
 ### Fixed
 
@@ -225,6 +233,7 @@ measured real hardware. Everything else is unproven against hardware. See
   KiCad file; no effect on netlist compilation, generated code, or shipped plugins. The
   fix (`quick-xml >= 0.41`) is tracked for 0.1.1.
 
-[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/hal0zer0/melange/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/hal0zer0/melange/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/hal0zer0/melange/releases/tag/v0.1.0

@@ -1,4 +1,6 @@
 Passive-EQ1A Program Equalizer
+* status: active
+* auditioned: never
 * author: melange-audio
 * description: Pultec-style passive program EQ — 3 transformers, 12AX7/12AU7 push-pull makeup amp; attempts to match the signal flow of the famous 1950s unit, not a literal recreation
 * Copyright (c) 2026 Melange Contributors

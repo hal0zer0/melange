@@ -80,7 +80,7 @@ melange compile my-circuit.cir --format plugin -o my-plugin
 Circuits live in their own repositories, registered as named sources. The official melange circuit library is published separately; once it — or any git repo full of netlists — is added as the `melange` source, you compile by name:
 
 ```bash
-melange compile melange:unstable/filters/passive-eq1a --format plugin -o my-eq
+melange compile melange:testing/filters/passive-eq1a --format plugin -o my-eq
 cd my-eq && cargo build --release
 ```
 
@@ -182,7 +182,7 @@ The circuits repository holds the full catalog with per-circuit status.
 
 ## Spotlight: Passive Tube EQ
 
-One of the hardest topologies melange solves end to end — coupled transformers with global feedback wrapped around four nonlinear tubes. Read this as a demonstration of the *solver*, not as a fidelity claim — the distinction matters and I'll get to it in a second:
+A **Pultec-style passive program EQ**, and one of the hardest topologies melange solves end to end — coupled transformers with global feedback wrapped around four nonlinear tubes. Read this as a demonstration of the *solver*, not as a fidelity claim — the distinction matters and I'll get to it in a second:
 
 - **4 vacuum tubes** (2× 12AX7, 2× 12AU7), **3 transformers** (HS-56 input, HS-29 coupling/phase-splitter, S-217-D output with a tertiary feedback winding)
 - **21 dB of global negative feedback** via differential cathode injection
@@ -191,11 +191,11 @@ One of the hardest topologies melange solves end to end — coupled transformers
 
 Global feedback wrapped around four tubes and three transformers is the configuration where naive solvers give up, oscillate, or quietly return garbage. This one converges every sample.
 
-> **Now the part that isn't a fidelity claim.** This proves melange *solves* a genuinely hard topology. It does **not** prove fidelity to the original hardware. The amp section follows the verified Sowter E-72,658-2 drawing. The **EQ network is a community reconstruction** — the original drawing has no EQ section at all — so what those curves faithfully reproduce is the reconstruction. Which is a real and useful thing to reproduce, and is not the same sentence as "sounds like the real box." [Validation & Verification](docs/VALIDATION.md) has the full accounting.
+> **Now the part that isn't a fidelity claim.** This proves melange *solves* a genuinely hard topology. It does **not** prove fidelity to the original hardware. The amp section follows the verified Sowter E-72,658-2 drawing; the **EQ network is a reconstruction** — the original drawing has no EQ section at all. It is a `testing/`-tier circuit: its frequency response is **measured-verified against the factory curve charts**, but it has been **auditioned: never** — validated by numbers, not yet by ears. And its distortion character is **idealized** (linear iron): it EQs like the original, it does not yet *color* like it. [Validation & Verification](docs/VALIDATION.md) has the full accounting.
 
 ```bash
-melange compile melange:unstable/filters/passive-eq1a --format plugin -o my-eq
-melange analyze melange:unstable/filters/passive-eq1a --pot "LF Boost=10" --switch "LF Freq=1"
+melange compile melange:testing/filters/passive-eq1a --format plugin -o my-eq
+melange analyze melange:testing/filters/passive-eq1a --pot "LF Boost=10" --switch "LF Freq=1"
 ```
 
 ## Impossible Circuits
