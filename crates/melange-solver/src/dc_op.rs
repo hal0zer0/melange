@@ -2189,7 +2189,15 @@ fn solution_has_active_junction(
                     }
                 }
             }
-            // Non-junction devices: trust the converged result.
+            // Non-junction devices (JFET/MOSFET/tube/VCA): trust the converged
+            // result — "any device validates". NOTE: this `return`s on the FIRST
+            // non-junction slot, so e.g. a MOSFET+BJT circuit accepts as soon as it
+            // hits the MOSFET and never examines the BJT. That is INTENTIONAL (the
+            // any-device-validates semantics above), not a loop bug — do not
+            // "fix" it into `continue`, which would change behaviour for
+            // multi-stage circuits with a legitimately-off stage. It is also
+            // low-stakes now that candidate retention makes this gate advisory
+            // rather than a discard filter.
             _ => return true,
         }
     }
@@ -2702,6 +2710,25 @@ pub fn solve_dc_operating_point(
     // solution IS the true operating point; skip the degeneracy check.
     let has_dc_excitation = dc_sys.b_dc.iter().any(|x| x.abs() > 0.0);
 
+    // Candidate RETENTION (arbiter thread 247). `solution_has_active_junction`
+    // is a leaky heuristic — its `0.5·vcrit` cutoff provably bisects a continuous
+    // forward-active regime, flagging genuine low-bias solutions (Ge/Schottky
+    // junctions below the cutoff; ngspice-verified on the Ge PNP R_E sweep) as
+    // "degenerate". The defect is not the threshold value (any voltage OR current
+    // cutoff bisects the same monotone Vbe→Ic curve — see the Gmin comment); it
+    // is that a converged-but-degenerate-reading solution is DISCARDED and the
+    // strategy falls through, losing it if the next strategy diverges. Instead,
+    // RETAIN the earliest such solution and fall back to it only if no strategy
+    // finds a non-degenerate one. This makes the discriminator's precision
+    // non-load-bearing: a false "degenerate" costs a strategy attempt, never the
+    // answer. Behaviour is unchanged whenever the gate reads correctly (a
+    // non-degenerate solution still returns immediately). Because retention
+    // supplies a fallback, Gmin (Strategy 3) can now safely re-gate on the
+    // predicate too — closing the original "Gmin silently returns a degenerate
+    // OP" gap without the total-non-convergence failure that a bare Gmin gate
+    // caused (L3 F1).
+    let mut retained_degenerate: Option<DcOpResult> = None;
+
     // Strategy 1: Direct NR from junction-clamped linear guess
     let (converged, iters) = nr_dc_solve(&circuit, &mut v, &mut v_nl, &mut i_nl, 1.0, 0.0, false);
     // Sanity check: verify the solution isn't degenerate (all nodes at supply rails).
@@ -2725,6 +2752,19 @@ pub fn solve_dc_operating_point(
             method: DcOpMethod::DirectNr,
             iterations: iters,
         };
+    } else if converged {
+        // Converged but read as degenerate — retain as a fallback (see the
+        // retention note above) and keep searching for a non-degenerate solution.
+        let mut v_node = v.clone();
+        v_node.truncate(n_dc);
+        retained_degenerate = Some(DcOpResult {
+            v_node,
+            v_nl: v_nl.clone(),
+            i_nl: i_nl.clone(),
+            converged: true,
+            method: DcOpMethod::DirectNr,
+            iterations: iters,
+        });
     }
 
     // Strategy 2: Source stepping (two attempts)
@@ -2778,6 +2818,20 @@ pub fn solve_dc_operating_point(
                 "DC OP Strategy 2 attempt {}: converged but degenerate",
                 attempt
             );
+            // Retain this converged-but-degenerate solution as a fallback (only
+            // the earliest is kept). See the retention note above Strategy 1.
+            if retained_degenerate.is_none() {
+                let mut v_node = v.clone();
+                v_node.truncate(n_dc);
+                retained_degenerate = Some(DcOpResult {
+                    v_node,
+                    v_nl: v_nl.clone(),
+                    i_nl: i_nl.clone(),
+                    converged: true,
+                    method: DcOpMethod::SourceStepping,
+                    iterations: total_iters,
+                });
+            }
         }
     }
 
@@ -2910,33 +2964,29 @@ pub fn solve_dc_operating_point(
         let (converged, iters) =
             nr_dc_solve(&circuit, &mut v, &mut v_nl, &mut i_nl, 1.0, 0.0, false);
         total_iters += iters;
-        // NOTE: unlike Strategies 1 & 2, Gmin stepping intentionally does NOT
-        // apply the `solution_has_active_junction` degeneracy gate. Gmin is the
-        // last general-purpose strategy (Strategy 4 is a narrow op-amp-continuation
-        // special case), so a rejected Gmin solution has no further fallback. More
-        // importantly the gate's `0.5·vcrit` "active junction" threshold is a leaky
-        // proxy: it BISECTS a continuous forward-active regime. Oracle-checked on
-        // GE_PNP_STAGE (OC74, IS=3e-7) across R_E, with 0.5·vcrit = 0.1424 V:
-        //     R_E   strategy       |Veb|     Ic       (Ic smooth & monotonic,
-        //     1500  DirectNr       0.1860   447 µA     endpoints ngspice-confirmed:
-        //     8000  DirectNr       0.1443    91 µA     R_E=10k -> ngspice v(e1)=7.262,
-        //     9000  GminStepping   0.1414    82 µA     Ic=73 µA; melange 7.263, 74 µA)
-        //     10000 GminStepping   0.1388    74 µA
-        // The DirectNr->Gmin transition lands EXACTLY on the 0.1424 V threshold
-        // (~2.5% margin), not on any physical change — every row is a genuine
-        // forward-active point. So Strategies 1 & 2 wrongly reject the low-Ic tail
-        // as degenerate and Gmin (ungated) rescues it to the ngspice-correct answer;
-        // gating Gmin too would leave that tail with no strategy that accepts it
-        // (see nonlinear_dc_op_tests::test_ge_pnp_common_emitter_re_sweep_converges).
-        // A CURRENT-based degeneracy check would have decades of margin instead of
-        // 2.5% (degenerate Ic ≈ 0 vs active 74 µA), but replacing the discriminator
-        // is a solver-heuristic change with cross-circuit blast radius, and nudging
-        // the 0.5 factor is parameter tuning — both out of scope here. This path is
-        // benign (output is ngspice-correct via Gmin); the theoretical
-        // all-junctions-off acceptance risk (L3 F1) is left ungated deliberately —
-        // revisit only with a concrete circuit where Gmin converges to a degenerate
-        // fixed point AND ngspice disagrees with it.
-        if converged {
+        // Gmin applies the SAME degeneracy gate as Strategies 1 & 2 — safe now
+        // ONLY because candidate retention (above) supplies a fallback. A bare
+        // Gmin gate previously caused total non-convergence (L3 F1): Gmin is the
+        // last general-purpose strategy, so a rejected Gmin solution had nothing
+        // to fall back to. Retention removes that precondition.
+        //
+        // The gate is a leaky proxy — its `0.5·vcrit` cutoff bisects a continuous
+        // forward-active regime. ngspice-checked on GE_PNP_STAGE (OC74, IS=3e-7;
+        // 0.5·vcrit = 0.1424 V) across R_E:
+        //     R_E    |Veb|     Ic       (pre-retention: accepted by DirectNr above
+        //     8000   0.1443    91 µA     0.1424 V, fell to Gmin below it — yet Ic is
+        //     9000   0.1414    82 µA     smooth & monotonic, every row genuinely
+        //     10000  0.1388    74 µA     forward-active. R_E=10k: ngspice v(e1)=7.262
+        //                                V, Ic=73 µA; melange matches.)
+        // The accept/reject boundary lands exactly on the threshold (~2.5% margin),
+        // not on any physical change. A current-based cutoff would NOT help — Ic is
+        // monotone in Vbe, so it is the same bisection reparameterized — and nudging
+        // 0.5 is parameter tuning. Retention is the actual fix: the low-Ic tail's
+        // solution is found and retained by Strategy 1 and returned, so the gate's
+        // imprecision no longer costs the answer (only a strategy attempt).
+        let has_active =
+            converged && solution_has_active_junction(device_slots, &v_nl, has_dc_excitation);
+        if converged && has_active {
             return DcOpResult {
                 v_node: v,
                 v_nl,
@@ -2945,6 +2995,17 @@ pub fn solve_dc_operating_point(
                 method: DcOpMethod::GminStepping,
                 iterations: total_iters,
             };
+        } else if converged && retained_degenerate.is_none() {
+            let mut v_node = v.clone();
+            v_node.truncate(n_dc);
+            retained_degenerate = Some(DcOpResult {
+                v_node,
+                v_nl: v_nl.clone(),
+                i_nl: i_nl.clone(),
+                converged: true,
+                method: DcOpMethod::GminStepping,
+                iterations: total_iters,
+            });
         }
     }
 
@@ -3089,6 +3150,22 @@ pub fn solve_dc_operating_point(
                 }
             }
         }
+    }
+
+    // No strategy found a NON-degenerate solution. If any strategy (1/2/3) DID
+    // converge to a real NR solution that merely READ as degenerate under the
+    // leaky gate, return the earliest such retained candidate — it is strictly
+    // better than the synthesized linear fallback below (a genuine converged
+    // solution vs a clamped guess). This is what recovers the correct low-bias
+    // operating point when `solution_has_active_junction` false-rejects it (Ge/
+    // Schottky low-Ic tail; ngspice-verified). Whenever the gate reads correctly,
+    // there is no retained candidate and this is a no-op — behaviour unchanged.
+    if let Some(retained) = retained_degenerate.take() {
+        log::info!(
+            "DC OP: no non-degenerate solution; returning retained {:?} candidate",
+            retained.method
+        );
+        return retained;
     }
 
     // All strategies failed — return linear fallback with op-amp rail clamping.

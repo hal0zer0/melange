@@ -1862,3 +1862,37 @@ fn test_ge_pnp_common_emitter_re_sweep_converges() {
         "R_E=1980: I_E={i_e:.3e} A, expected ~0.345 mA (textbook ~0.3-0.4 mA)"
     );
 }
+
+/// Candidate-retention regression (arbiter thread 247). At R_E=10k this germanium
+/// PNP has a genuine forward-active operating point — ngspice-42: v(e1)=7.262 V,
+/// Ic=73 µA — but |Veb|=0.139 V sits just below the 0.5·vcrit≈0.142 V
+/// active-junction threshold, so ALL three general strategies (Direct NR, source
+/// stepping, Gmin) flag it "degenerate". Candidate retention is what returns
+/// Strategy 1's real solution instead of failing: with Gmin now re-gated on the
+/// same predicate, WITHOUT retention this circuit would be non-convergent. This
+/// pins the ngspice-matching result so a refactor that drops retention (or the
+/// re-gate that makes it load-bearing) regresses loudly, distinctly from the
+/// broader sweep test.
+#[test]
+fn test_ge_pnp_low_bias_recovered_by_retention() {
+    let (mna, result) = solve_ge_pnp_stage(10_000.0);
+    assert!(
+        result.converged,
+        "retention must recover the low-bias OP (method={:?}, iters={})",
+        result.method,
+        result.iterations
+    );
+    let v_e1 = result.v_node[mna.node_map["e1"] - 1];
+    // ngspice-42: v(e1)=7.262 V. A value near the 8 V rail would mean a degenerate
+    // all-off solution (transistor electrically absent) was returned instead.
+    assert!(
+        (v_e1 - 7.262).abs() < 0.02,
+        "v(e1) must match ngspice (7.262 V), got {v_e1:.4} — near 8 V would be the \
+         degenerate all-off solution"
+    );
+    let i_e = (8.0 - v_e1) / 10_000.0;
+    assert!(
+        (i_e - 73e-6).abs() < 10e-6,
+        "I_E must be ~73 µA forward-active (ngspice), got {i_e:.3e} A"
+    );
+}
