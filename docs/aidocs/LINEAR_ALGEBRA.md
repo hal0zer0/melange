@@ -18,7 +18,7 @@ codegen-emitted templates.
 ```
 SINGULARITY_THRESHOLD = 1e-15  (dk.rs, solver.rs, codegen)
 LU singularity pivot  = 1e-30  (dc_op.rs, mna.rs, state.rs.tera)
-Condition warning     = 1e12   (dk.rs)
+Condition warning     = 1e13   (dk.rs)
 ```
 
 ## Algorithms by Location
@@ -84,7 +84,7 @@ M-dimensional NR Jacobian. The shape of the emitted code depends on the routing
 mode:
 
 - **DK Schur path** — `generate_gauss_elim` emits a fully-unrolled M×M solver
-  (M ≤ 16). Used when the kernel has small M and the K matrix is well-conditioned.
+  (M ≤ 24, MAX_M). Used when the kernel has small M and the K matrix is well-conditioned.
 - **Nodal Schur path** — `generate_schur_gauss_elim` emits a slightly different
   structure that consumes the precomputed `S = A^{-1}` and solves the M×M system
   via the same Gaussian elimination shape.
@@ -189,7 +189,7 @@ cond(A) ~= ||A||_inf * ||A^{-1}||_inf
 
 ||M||_inf = max_i (sum_j |M[i][j]|)   (infinity norm = max absolute row sum)
 
-Warning threshold: cond > 1e12
+Warning threshold: cond > 1e13
 ```
 
 Used in `dk.rs` after computing S = A^{-1}. Not a hard error; diagnostic only.

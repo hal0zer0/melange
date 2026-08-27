@@ -113,7 +113,7 @@ remains in the solver crate as a fallback for purely linear circuits.
 | VCA | 2D (Vsig, Vctrl) | THAT 2180 exponential |
 | Op-amp | Linear (no NR dim) | Boyle VCCS + GBW pole + rail clamp |
 
-M=1 direct, M=2 Cramer's, M=3..16 Gaussian elimination with partial pivoting.
+M=1 direct, M=2 Cramer's, M=3..24 Gaussian elimination with partial pivoting.
 
 ## Codegen Solver Routing (Updated 2026-03-23)
 
@@ -168,8 +168,8 @@ Source: Sowter DWG E-72,658-2 (amp §) + Peerless/Triad winding data.
 
 ### Core Pipeline
 - MNA stamping: R, C, L, V/I sources, diodes, BJTs, JFETs, MOSFETs, tubes, op-amps, VCAs
-- DK kernel with proper trapezoidal discretization; NR solver 1D / 2D / M-dimensional (M≤16)
-- Codegen for diode, BJT, JFET, MOSFET, tube/triode/pentode (Gaussian elimination M=3..16)
+- DK kernel with proper trapezoidal discretization; NR solver 1D / 2D / M-dimensional (M≤24)
+- Codegen for diode, BJT, JFET, MOSFET, tube/triode/pentode (Gaussian elimination M=3..24)
 - Per-device `.model` params (heterogeneous models supported per device)
 - Parasitic cap auto-insertion (10pF junction caps) when nonlinear circuit has no caps
 - Sparsity-aware emission (systematic zero-skipping in A_neg, N_v, K, S*N_i)

@@ -35,12 +35,15 @@ Where:
 - `Vt` = device thermal voltage (n * kT/q for diodes, vt for BJTs)
 - `IS` = saturation current
 
-Example values:
+Example values (Vt = VT_ROOM = 0.025852 V = kT/q at 300 K; n applied for diodes,
+BJT junctions use vt directly):
 ```
-1N4148 (IS=2.68e-14, n=1.07):  vcrit = 0.615V
-Generic silicon (IS=1e-12, n=1.5):  vcrit = 0.529V
-BJT 2N2222A (IS=1.26e-14):  vcrit = 0.640V
+1N4148 (IS=2.52e-9, n=1.752):  vcrit = 0.741V
+Generic silicon (IS=1e-12, n=1.5):  vcrit = 0.932V
+BJT 2N2222A (IS=1.26e-14):  vcrit = 0.724V
 ```
+(1N4148 and 2N2222A params are the shipping melange catalog cards; see
+`crates/melange-devices/src/catalog/`.)
 
 Emitted as `DEVICE_{n}_VCRIT` constant in generated code.
 

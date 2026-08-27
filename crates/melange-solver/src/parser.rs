@@ -4777,9 +4777,13 @@ fn collapse_ws_around_eq(s: &str) -> String {
 
 /// Try to parse infix notation where a scale character replaces the decimal point.
 ///
-/// Examples: "6n8" → 6.8e-9, "3n3" → 3.3e-9, "4k7" → 4.7e3, "1m5" → 1.5e-3
+/// Examples: "6n8" → 6.8e-9, "3n3" → 3.3e-9, "4k7" → 4.7e3, "2M2" → 2.2e6
 ///
 /// Pattern: `<digits><scale_char><digits>` where scale_char is one of T,G,K,M,U,N,P.
+///
+/// NOTE: the scale char is upper-cased before lookup, so infix `m` means MEGA
+/// (1e6), NOT milli — `1m5` parses to 1.5e6, not 1.5e-3. There is no infix milli;
+/// use an explicit exponent (e.g. `1.5e-3`) or the suffix form for milli values.
 fn try_parse_infix(s: &str) -> Option<f64> {
     // Need at least 3 chars: digit, scale, digit
     if s.len() < 3 {

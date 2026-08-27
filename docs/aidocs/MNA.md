@@ -242,11 +242,12 @@ KVL constraint (row k):
   G[k, pri_p - 1]  -= turns_ratio
   G[k, pri_n - 1]  += turns_ratio
 
-Current injection (column k, power conservation):
+Current injection (column k) = transpose of the KVL row above
+(symmetric, power-conserving: I_pri = -turns_ratio * I_sec):
   G[sec_p - 1, k]  += 1.0
   G[sec_n - 1, k]  -= 1.0
-  G[pri_p - 1, k]  += turns_ratio
-  G[pri_n - 1, k]  -= turns_ratio
+  G[pri_p - 1, k]  -= turns_ratio
+  G[pri_n - 1, k]  += turns_ratio
 ```
 
 ## Nonlinear Device Matrices (N_v, N_i)
