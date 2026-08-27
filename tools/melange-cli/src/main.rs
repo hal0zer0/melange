@@ -651,6 +651,24 @@ enum ImportFormat {
 mod kicad_import;
 
 fn main() -> Result<()> {
+    // Exit quietly when the output pipe is closed early (e.g. `melange … | head`).
+    // Rust ignores SIGPIPE by default, so a write to a closed stdout makes the
+    // print machinery panic with "failed printing to stdout: Broken pipe"
+    // (exit 101), which looks like a crash. Swallow exactly that panic and exit
+    // cleanly; any other panic falls through to the default handler. A panic
+    // hook is the std-only way to do this without pulling in a libc dependency.
+    let default_panic_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let broken_pipe = info
+            .payload()
+            .downcast_ref::<String>()
+            .is_some_and(|s| s.contains("Broken pipe"));
+        if broken_pipe {
+            std::process::exit(0);
+        }
+        default_panic_hook(info);
+    }));
+
     // Initialize logger so log::info!/warn! from melange-solver are visible.
     // Default: only warnings. RUST_LOG=info or RUST_LOG=melange_solver=debug for more.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
@@ -2349,21 +2367,17 @@ fn compile_circuit_source(
             println!();
             println!("Generated plugin project at: {}", project_dir.display());
             println!();
-            println!("To build the plugin (CLAP + VST3):");
-            println!(
-                "  cd {}",
-                project_dir
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("<project-dir>")
-            );
-            println!("  bash build.sh");
+            let dir_name = project_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("<project-dir>");
+            println!("Build the DSP library (works immediately):");
+            println!("  cd {dir_name}");
+            println!("  cargo build --release          # → raw plugin lib in target/release/");
             println!();
-            println!("One-time setup (clone nih-plug if you haven't):");
+            println!("For a DAW-loadable CLAP + VST3 bundle (one-time nih-plug setup):");
             println!("  git clone https://github.com/robbert-vdh/nih-plug.git ~/src/nih-plug");
-            println!();
-            println!("The compiled plugin (CLAP + VST3) will be in:");
-            println!("  target/bundled/");
+            println!("  bash build.sh                  # → CLAP + VST3 in target/bundled/");
             println!();
             println!("See the generated README.md for full details.");
         }

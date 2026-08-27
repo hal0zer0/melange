@@ -109,7 +109,8 @@ melange simulate passive-eq1a --amplitude 0.1 -o drive.wav
 # Process a WAV file through your own circuit
 melange simulate my-circuit.cir --input-audio guitar.wav -o output.wav
 
-# Frequency response sweep
+# Frequency response sweep. Control names are per-circuit — "Drive"/"Mode" here
+# are placeholders; run `melange nodes <circuit>` to list a circuit's actual pots/switches.
 melange analyze my-circuit.cir --pot "Drive=100k" --switch "Mode=2"
 ```
 
@@ -315,7 +316,7 @@ Requires zig 0.13+ and cargo-zigbuild. Details in the [docs](docs/PLUGIN_GUIDE.m
 ## Requirements
 
 - Rust 1.85+ (2021 edition) — declared via `rust-version` and enforced in CI
-- No external dependencies for the core library or the generated code
+- No external dependencies for the core library or the standalone generated DSP (`--format code` / `circuit.rs`). The full nih-plug plugin project (`--format plugin`) pulls `nih_plug` as a pinned git dependency, so building *that* needs network access on first build.
 - Optional: ngspice for SPICE validation
 - Optional: zig + cargo-zigbuild for macOS cross-compilation
 - Optional: KiCad 8+ for the schematic workflow
