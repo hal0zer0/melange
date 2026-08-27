@@ -443,8 +443,17 @@ pub fn strip_vin_source(netlist: &str, input_node: &str) -> (String, Option<f64>
     let mut dc_value = None;
     let mut stripped = false;
 
-    for line in netlist.lines() {
+    for (i, line) in netlist.lines().enumerate() {
         let trimmed = line.trim();
+
+        // Line 0 is ALWAYS the free-text SPICE title, never an element. A title
+        // whose 2nd token happens to equal the input node (e.g. "Valve in
+        // preamp", "Voltage in stage") would otherwise be mistaken for VIN and
+        // stripped, corrupting the deck. tube_translate.rs guards this same class.
+        if i == 0 {
+            lines.push(line.to_string());
+            continue;
+        }
 
         // Keep commented lines
         if trimmed.starts_with('*') {
@@ -928,5 +937,23 @@ mod tests {
         let config = ComparisonConfig::default();
         assert!(config.rms_error_tolerance > 0.0);
         assert!(config.correlation_min > 0.99);
+    }
+
+    #[test]
+    fn test_strip_vin_ignores_title_matching_input_node() {
+        // The title's 2nd token is "in" (the input node). Before the line-0
+        // guard, strip_vin_source mistook the title for VIN and removed it,
+        // corrupting the deck. The title must survive; the real VIN on a later
+        // line must still be stripped.
+        let deck = "Valve in preamp\nVIN in 0 DC 0\nRin in n1 1k\nR1 n1 0 10k\n";
+        let (stripped, _dc) = strip_vin_source(deck, "in");
+        assert!(
+            stripped.contains("Valve in preamp"),
+            "title line must be preserved, got:\n{stripped}"
+        );
+        assert!(
+            !stripped.lines().any(|l| l.trim_start().starts_with("VIN ")),
+            "the real VIN element must still be stripped, got:\n{stripped}"
+        );
     }
 }

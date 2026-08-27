@@ -757,8 +757,17 @@ pub(crate) fn inject_thevenin_pwl(
     let mut modified_lines = Vec::new();
     let mut source_replaced = false;
 
-    for line in original_content.lines() {
+    for (i, line) in original_content.lines().enumerate() {
         let trimmed = line.trim();
+
+        // Line 0 is ALWAYS the free-text SPICE title, never an element. Pass it
+        // through verbatim so a title whose 2nd token equals the input node
+        // (e.g. "Valve in preamp") is not mistaken for VIN and rewritten as a
+        // Thevenin pair — which would drop the title and mangle the deck.
+        if i == 0 {
+            modified_lines.push(line.to_string());
+            continue;
+        }
 
         // Skip commented lines
         if trimmed.starts_with('*') {
