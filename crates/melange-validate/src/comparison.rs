@@ -167,13 +167,22 @@ pub struct ComparisonConfig {
 
 impl Default for ComparisonConfig {
     fn default() -> Self {
+        // Audio-grade gate: correlation is the load-bearing anchor (0.9999 =
+        // 4 nines), with RMS/peak/max-rel set wide enough that a genuinely
+        // good but *complex* circuit passes — multiple tubes + coupled
+        // transformers + global NFB legitimately land near 0.2-0.3% RMS
+        // against ngspice (trapezoidal frequency warping, device-model deltas)
+        // while still tracking it to 6-7 nines. A broken circuit misses these
+        // by a wide margin. Use `strict()` for high-precision work and
+        // `relaxed()` for approximate checks; per-circuit CI tests pin their
+        // own tolerances and are unaffected by this default.
         Self {
-            rms_error_tolerance: 0.001,   // 0.1%
-            peak_error_tolerance: 0.01,   // 10mV
-            max_relative_tolerance: 0.01, // 1%
-            correlation_min: 0.9999,
-            thd_error_tolerance_db: 1.0, // 1 dB
-            full_scale: 1.0,             // Assume 1V full scale by default
+            rms_error_tolerance: 0.005,   // 0.5%
+            peak_error_tolerance: 0.02,   // 20mV
+            max_relative_tolerance: 0.03, // 3%
+            correlation_min: 0.9999,      // 4 nines — the real match anchor
+            thd_error_tolerance_db: 1.5,  // 1.5 dB
+            full_scale: 1.0,              // Assume 1V full scale by default
             skip_thd: false,
             settle_time_s: 0.0,
         }

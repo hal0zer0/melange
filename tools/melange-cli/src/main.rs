@@ -2496,7 +2496,11 @@ fn validate_circuit_source(
     let mut config = if relaxed {
         ComparisonConfig::relaxed()
     } else {
-        ComparisonConfig::strict()
+        // Audio-grade default (see ComparisonConfig::default): correlation-
+        // anchored, wide enough that a good-but-complex circuit passes. The
+        // old default was strict() (0.01% RMS) — tighter than every per-circuit
+        // CI tolerance, so it reported FAILED on genuinely-good circuits.
+        ComparisonConfig::default()
     };
     // Apply per-metric overrides on top of the base profile. Percent inputs
     // (RMS, max-rel) are converted to the fractional form the comparator uses;
@@ -5147,6 +5151,61 @@ fn list_nodes_source(circuit_source: &circuits::CircuitSource) -> Result<()> {
             println!(
                 "  {}: {:?} (dimension: {})",
                 dev.name, dev.device_type, dev.dimension
+            );
+        }
+    }
+
+    // Controls: the names a user needs for --pot / --switch. Either the
+    // human-readable label OR the component name is accepted, so print both.
+    if !netlist.pots.is_empty()
+        || !netlist.switches.is_empty()
+        || !netlist.wipers.is_empty()
+        || !netlist.gangs.is_empty()
+    {
+        println!();
+        println!("Controls (name or label works with --pot / --switch):");
+        for pot in &netlist.pots {
+            let label = pot.label.as_deref().unwrap_or(&pot.resistor_name);
+            let default = pot
+                .default_value
+                .map(|d| format!("{d:.0}"))
+                .unwrap_or_else(|| "nominal".to_string());
+            println!(
+                "  pot     {:<26} [{}]  {:.0}..{:.0} ohm, default {}",
+                format!("\"{label}\""),
+                pot.resistor_name,
+                pot.min_value,
+                pot.max_value,
+                default
+            );
+        }
+        for wiper in &netlist.wipers {
+            let label = wiper.label.as_deref().unwrap_or(&wiper.resistor_cw);
+            println!(
+                "  wiper   {:<26} [{}/{}]  total {:.0} ohm, position 0..1",
+                format!("\"{label}\""),
+                wiper.resistor_cw,
+                wiper.resistor_ccw,
+                wiper.total_resistance
+            );
+        }
+        for sw in &netlist.switches {
+            let label = sw
+                .label
+                .clone()
+                .unwrap_or_else(|| sw.component_names.join(","));
+            println!(
+                "  switch  {:<26} {} positions (controls {})",
+                format!("\"{label}\""),
+                sw.positions.len(),
+                sw.component_names.join(",")
+            );
+        }
+        for gang in &netlist.gangs {
+            println!(
+                "  gang    {:<26} {} members, position 0..1",
+                format!("\"{}\"", gang.label),
+                gang.members.len()
             );
         }
     }

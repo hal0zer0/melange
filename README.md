@@ -202,7 +202,7 @@ Global feedback wrapped around four tubes and three transformers is the configur
 
 ```bash
 melange compile passive-eq1a --format plugin -o my-eq
-melange analyze passive-eq1a --pot "LF Boost=10" --switch "LF Freq=1"
+melange analyze passive-eq1a --pot "LF Boost=10k" --switch "LF Freq=1"   # ~+10 dB shelf at 20 Hz
 ```
 
 ## Impossible Circuits
