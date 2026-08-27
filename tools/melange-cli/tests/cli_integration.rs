@@ -110,10 +110,14 @@ fn run_melange_fail(args: &[&str]) -> String {
 #[test]
 fn test_builtins_lists_circuits() {
     let stdout = run_melange(&["builtins"]);
-    // Builtins migrated to melange-audio/circuits repo — list is now empty
+    // The passive-eq demo ships as the one builtin so melange can demo itself.
     assert!(
-        stdout.contains("Available builtin circuits") || stdout.contains("No builtin"),
-        "Should have header or empty message"
+        stdout.contains("Available builtin circuits"),
+        "Should print the builtins header, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("passive-eq1a"),
+        "Should list the passive-eq1a builtin demo, got: {stdout}"
     );
 }
 
