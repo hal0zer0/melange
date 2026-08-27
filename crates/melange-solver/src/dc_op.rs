@@ -2914,22 +2914,28 @@ pub fn solve_dc_operating_point(
         // apply the `solution_has_active_junction` degeneracy gate. Gmin is the
         // last general-purpose strategy (Strategy 4 is a narrow op-amp-continuation
         // special case), so a rejected Gmin solution has no further fallback. More
-        // importantly the gate's `0.5·vcrit` "active junction" threshold can reject
-        // a *legitimate* low-bias solution. Oracle-verified against ngspice-42 on
-        // the GE_PNP_STAGE (OC74, IS=3e-7) at R_E = 10 kΩ:
-        //     ngspice:  v(e1)=7.262 V, v(c1)=73.3 mV, Vbe=0.139 V, Ic=73 µA
-        //     melange:  v(e1)=7.263 V, v(c1)=73.0 mV  (Gmin, converged)
-        // i.e. a real forward-active operating point — but Vbe=0.139 V sits just
-        // BELOW 0.5·vcrit (≈0.143 V for this device), so `solution_has_active_junction`
-        // misclassifies it as degenerate. Strategies 1 & 2 already fall through on
-        // it; gating Gmin too would leave the correct, ngspice-matching solution
-        // with no strategy that accepts it (see
-        // nonlinear_dc_op_tests::test_ge_pnp_common_emitter_re_sweep_converges).
-        // The threshold is a heuristic, not tuned here (that would be parameter
-        // tuning); Gmin ungated is what keeps this low-bias class correct. The
-        // theoretical all-junctions-off acceptance risk (L3 F1) is left ungated
-        // deliberately — revisit only with a concrete circuit where Gmin actually
-        // converges to the degenerate fixed point AND ngspice disagrees with it.
+        // importantly the gate's `0.5·vcrit` "active junction" threshold is a leaky
+        // proxy: it BISECTS a continuous forward-active regime. Oracle-checked on
+        // GE_PNP_STAGE (OC74, IS=3e-7) across R_E, with 0.5·vcrit = 0.1424 V:
+        //     R_E   strategy       |Veb|     Ic       (Ic smooth & monotonic,
+        //     1500  DirectNr       0.1860   447 µA     endpoints ngspice-confirmed:
+        //     8000  DirectNr       0.1443    91 µA     R_E=10k -> ngspice v(e1)=7.262,
+        //     9000  GminStepping   0.1414    82 µA     Ic=73 µA; melange 7.263, 74 µA)
+        //     10000 GminStepping   0.1388    74 µA
+        // The DirectNr->Gmin transition lands EXACTLY on the 0.1424 V threshold
+        // (~2.5% margin), not on any physical change — every row is a genuine
+        // forward-active point. So Strategies 1 & 2 wrongly reject the low-Ic tail
+        // as degenerate and Gmin (ungated) rescues it to the ngspice-correct answer;
+        // gating Gmin too would leave that tail with no strategy that accepts it
+        // (see nonlinear_dc_op_tests::test_ge_pnp_common_emitter_re_sweep_converges).
+        // A CURRENT-based degeneracy check would have decades of margin instead of
+        // 2.5% (degenerate Ic ≈ 0 vs active 74 µA), but replacing the discriminator
+        // is a solver-heuristic change with cross-circuit blast radius, and nudging
+        // the 0.5 factor is parameter tuning — both out of scope here. This path is
+        // benign (output is ngspice-correct via Gmin); the theoretical
+        // all-junctions-off acceptance risk (L3 F1) is left ungated deliberately —
+        // revisit only with a concrete circuit where Gmin converges to a degenerate
+        // fixed point AND ngspice disagrees with it.
         if converged {
             return DcOpResult {
                 v_node: v,
