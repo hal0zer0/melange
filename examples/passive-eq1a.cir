@@ -76,11 +76,16 @@ Passive-EQ1A Program Equalizer
 * iron is LINEAR (no ISAT on any winding). This is a model-COMPLETENESS
 * gap, not an error: real even harmonics live in the single-ended
 * HS-56/HS-29 cores, tube curve detail, and unit imbalance. Do NOT
-* paper over it: .mismatch is inert on tubes (codegen), hand-written
-* tube asymmetry is fabricated data, and seeded passive .tolerance
-* dialed to hit 0.15% is tuning-to-target. The correct future fix is
-* core saturation with REAL sourced ISAT data + a dedicated validation
-* campaign (S-217-D is NFB-through-iron, the riskiest T-model case).
+* paper over it: hand-written tube asymmetry is fabricated data, and
+* seeded passive .tolerance dialed to hit 0.15% is tuning-to-target.
+* ROADMAP (corrected 2026-08-26, thread 229, melange-measured): core
+* saturation CANNOT produce H2 here — melange's core-sat law is
+* symmetric tanh (odd-only) and none of these cores carries DC bias.
+* The honest H2 path is `.mismatch T` per-tube spread (breaks the
+* even-harmonic cancellation, H2 rises with level as on hardware) —
+* pending melange's codegen wiring landing on main, and requiring a
+* SOURCED 12AX7/12AU7 section-to-section tolerance + fixed .seed,
+* never a spread dialed to a THD target.
 *
 * Note: ../schemer/benchmarks/pultec/pultec-eq.cir was a broken symlink
 * to a byte-identical copy of this file — same transcription, corroborates
