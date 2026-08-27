@@ -5443,9 +5443,12 @@ fn list_builtins() -> Result<()> {
 
     println!();
     println!("Usage examples:");
-    println!("  melange compile tube-screamer --output ts9.rs");
-    println!("  melange compile rc-lowpass --output filter.rs");
-    println!("  melange nodes big-muff");
+    println!("  melange compile passive-eq1a --format plugin -o passive-eq");
+    println!("  melange simulate passive-eq1a --amplitude 0.1 -o drive.wav");
+    println!("  melange nodes passive-eq1a");
+    println!();
+    println!("The full circuit library lives in a separate repo; add it with");
+    println!("`melange sources add` and browse with `melange sources list`.");
 
     Ok(())
 }

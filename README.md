@@ -54,10 +54,11 @@ Draw the circuit, export it, compile it. Melange ships a [KiCad symbol library a
 kicad-cli sch export python-bom -o circuit.xml my-circuit.kicad_sch
 melange import circuit.xml -o circuit.cir
 
-# Compile to plugin
+# Compile to a plugin project, then build the DSP library
 melange compile circuit.cir --format plugin -o my-plugin
 cd my-plugin && cargo build --release
-# → VST3/CLAP plugin ready to load in your DAW
+# → raw library in target/release/. To get a DAW-loadable VST3/CLAP bundle,
+#   follow the generated project's README (one nih-plug clone + `xtask bundle`).
 ```
 
 Standard parts (R, C, L, D, BJT, JFET, MOSFET) use KiCad's own `Simulation_SPICE` symbols — no reinvention, no melange-flavored resistor. The melange-specific parts (triodes, pentodes, VCAs, pots, wipers, I/O markers) live in the included `melange.kicad_sym` library, because KiCad does not ship a symbol for "the thing that makes a Wurlitzer sound like that." Setup lives in the [KiCad integration guide](kicad/README.md).
@@ -69,22 +70,28 @@ Write one by hand, or take one from a circuit repository and stop pretending you
 ```bash
 # Compile the bundled passive tube EQ example — Pultec-style (4 tubes, 3 transformers, global NFB)
 melange compile examples/passive-eq1a.cir --format plugin -o passive-eq
-cd passive-eq && cargo build --release
+cd passive-eq && cargo build --release   # builds the DSP library (target/release/)
 
 # ...or point it at your own netlist
 melange compile my-circuit.cir --format plugin -o my-plugin
 ```
 
-### 3. From a circuit library
+`cargo build --release` produces the raw plugin library; the generated
+project's `README.md` has the one extra step (a `nih-plug` clone + `xtask
+bundle`) that turns it into a DAW-loadable VST3/CLAP in `target/bundled/`.
+The generated project is its own standalone workspace, so it builds fine even
+though `-o passive-eq` lands it inside this repo.
 
-Circuits live in their own repositories, registered as named sources. The official melange circuit library is published separately; once it — or any git repo full of netlists — is added as the `melange` source, you compile by name:
+### 3. From the built-in demo, or a circuit library
+
+The Pultec-style passive EQ ships **built in**, so melange can compile and demo itself with no downloads and no external repo — just name it:
 
 ```bash
-melange compile melange:testing/filters/passive-eq1a --format plugin -o my-eq
+melange compile passive-eq1a --format plugin -o my-eq   # built-in demo circuit
 cd my-eq && cargo build --release
 ```
 
-Any git repo works as a source. Point it wherever you like:
+The full circuit library lives in its own repository (being published). Once it — or any git repo full of netlists — is added as a named source, you compile by `source:circuit`:
 
 ```bash
 melange sources add pedalboards https://github.com/someone/spice-pedals
@@ -96,11 +103,11 @@ melange compile pedalboards:rat-distortion --format plugin -o rat
 Not ready to commit to a whole plugin? Reasonable. Shove some audio through the circuit and see how you feel:
 
 ```bash
-# Process a WAV file through the circuit
-melange simulate my-circuit.cir --input-audio guitar.wav -o output.wav
+# Quick test tone through the built-in demo circuit (no files needed)
+melange simulate passive-eq1a --amplitude 0.1 -o drive.wav
 
-# Quick test tone
-melange simulate my-circuit.cir --amplitude 0.1 -o drive.wav
+# Process a WAV file through your own circuit
+melange simulate my-circuit.cir --input-audio guitar.wav -o output.wav
 
 # Frequency response sweep
 melange analyze my-circuit.cir --pot "Drive=100k" --switch "Mode=2"
@@ -191,11 +198,11 @@ A **Pultec-style passive program EQ**, and one of the hardest topologies melange
 
 Global feedback wrapped around four tubes and three transformers is the configuration where naive solvers give up, oscillate, or quietly return garbage. This one converges every sample.
 
-> **Now the part that isn't a fidelity claim.** This proves melange *solves* a genuinely hard topology. It does **not** prove fidelity to the original hardware. The amp section follows the verified Sowter E-72,658-2 drawing; the **EQ network is a reconstruction** — the original drawing has no EQ section at all. It is a `testing/`-tier circuit: its frequency response is **measured-verified against the factory curve charts**, but it has been **auditioned: never** — validated by numbers, not yet by ears. And its distortion character is **idealized** (linear iron): it EQs like the original, it does not yet *color* like it. [Validation & Verification](docs/VALIDATION.md) has the full accounting.
+> **Now the part that isn't a fidelity claim.** This proves melange *solves* a genuinely hard topology. It does **not** prove fidelity to the original hardware. The amp section follows the verified Sowter E-72,658-2 drawing; the **EQ network is a reconstruction** — the original drawing has no EQ section at all. It is a `testing/`-tier circuit: its frequency response is **measured-verified against the factory curve charts**, but it has been **auditioned: never** — validated by numbers, not yet by ears. Its distortion character now comes from **sourced push-pull tube mismatch** (published 12AX7/12AU7 acceptance limits, deterministic seed), giving the **H2-dominant, level-progressive** coloration the real unit shows — but the transformer **iron is still linear** (no core saturation), the effect stays short of the hardware's full distortion magnitude, and none of it is **ear-auditioned** yet. [Validation & Verification](docs/VALIDATION.md) has the full accounting.
 
 ```bash
-melange compile melange:testing/filters/passive-eq1a --format plugin -o my-eq
-melange analyze melange:testing/filters/passive-eq1a --pot "LF Boost=10" --switch "LF Freq=1"
+melange compile passive-eq1a --format plugin -o my-eq
+melange analyze passive-eq1a --pot "LF Boost=10" --switch "LF Freq=1"
 ```
 
 ## Impossible Circuits
@@ -247,7 +254,7 @@ melange analyze <circuit>                 Frequency response sweep
 melange validate <circuit>                Compare against ngspice
 melange nodes <circuit>                   List nodes and devices
 melange import <file.xml> -o <file.cir>   Import KiCad XML to Melange format
-melange builtins                          List embedded circuits (deprecated — use sources)
+melange builtins                          List embedded demo circuits (ships with passive-eq1a)
 melange sources add|list|remove           Manage circuit source repos
 ```
 

@@ -159,12 +159,25 @@ pub fn resolve(circuit_ref: &str) -> Result<CircuitSource> {
     )
 }
 
-/// Get builtin circuit content
+/// The one builtin demo circuit: a Pultec-style passive tube EQ. Embedded at
+/// compile time (`include_str!` from `examples/`, so the builtin and the
+/// bundled example are the same bytes — one source of truth). This gives
+/// melange a way to compile/simulate/demo itself with zero network and no
+/// external circuit repo. The full circuit library lives in a separate repo
+/// (being published); once it is reachable, add it with `melange sources add`
+/// and browse with `melange sources list`.
+const BUILTIN_PASSIVE_EQ: &str = include_str!("../../../examples/passive-eq1a.cir");
+
+/// Get builtin circuit content.
 ///
-/// Builtins have been migrated to the melange-audio/circuits repo.
-/// Use friendly source syntax instead: `melange:pipe-shouter`, `melange:rc-lowpass`, etc.
-fn get_builtin(_name: &str) -> Option<String> {
-    None
+/// Only the passive-eq demo is embedded (see [`BUILTIN_PASSIVE_EQ`]); every
+/// other circuit resolves through configured sources. `passive-eq` is accepted
+/// as a friendly alias for `passive-eq1a`.
+fn get_builtin(name: &str) -> Option<String> {
+    match name {
+        "passive-eq1a" | "passive-eq" => Some(BUILTIN_PASSIVE_EQ.to_string()),
+        _ => None,
+    }
 }
 
 /// A bare circuit name: no source prefix, no path separators, non-empty.
@@ -197,12 +210,15 @@ fn parse_friendly_ref(circuit_ref: &str) -> Option<(String, String)> {
     None
 }
 
-/// List all available builtin circuits
+/// List all available builtin circuits.
 ///
-/// Builtins have been migrated to the melange-audio/circuits repo.
-/// Use `melange sources list` to browse available circuits.
+/// Just the one demo circuit for now — the full catalog lives in the separate
+/// circuit-library repo (browse with `melange sources list` once it is added).
 pub fn list_builtins() -> Vec<(&'static str, &'static str)> {
-    vec![]
+    vec![(
+        "passive-eq1a",
+        "Pultec-style passive tube EQ — 4 tubes, 3 transformers, global NFB (demo)",
+    )]
 }
 
 /// Fetch circuit content synchronously using blocking HTTP client
@@ -290,14 +306,30 @@ mod tests {
 
     #[test]
     fn test_get_builtin() {
-        // Builtins migrated to melange-audio/circuits repo
+        // The passive-eq demo is the one embedded builtin (+ its alias);
+        // everything else resolves through configured sources.
+        assert!(get_builtin("passive-eq1a").is_some());
+        assert!(get_builtin("passive-eq").is_some());
         assert!(get_builtin("tube-screamer").is_none());
         assert!(get_builtin("nonexistent").is_none());
     }
 
     #[test]
+    fn test_builtin_content_is_the_passive_eq_deck() {
+        // Sanity: the embedded content is actually the passive-eq netlist,
+        // and resolve() picks it up as a Builtin for a bare name.
+        let content = get_builtin("passive-eq1a").unwrap();
+        assert!(content.contains("Passive-EQ1A"));
+        match resolve("passive-eq1a").unwrap() {
+            CircuitSource::Builtin { name, .. } => assert_eq!(name, "passive-eq1a"),
+            other => panic!("expected Builtin, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_list_builtins() {
         let builtins = list_builtins();
-        assert!(builtins.is_empty());
+        assert_eq!(builtins.len(), 1);
+        assert_eq!(builtins[0].0, "passive-eq1a");
     }
 }

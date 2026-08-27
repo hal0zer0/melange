@@ -16,10 +16,10 @@ Optional:
 
 ## Quick Start: Circuit to Plugin
 
-Compile a circuit from the melange circuit library (published as a separate repository), or use a local `.cir` file:
+Compile the built-in demo circuit (ships with melange, no downloads), or use a local `.cir` file:
 
 ```bash
-melange compile melange:unstable/pedals/peaches --format plugin -o my-fuzz
+melange compile passive-eq1a --format plugin -o my-eq
 # or from a local file:
 melange compile my-circuit.cir --format plugin -o my-fuzz
 ```
