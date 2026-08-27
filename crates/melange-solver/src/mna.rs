@@ -5014,11 +5014,21 @@ impl MnaBuilder {
                 n_minus,
                 dc,
             } => {
+                // SPICE convention: `I n+ n- val` drives `val` amps from n+ to n-
+                // *through the source*, i.e. current is extracted from n+ and injected
+                // into n- (ngspice: `I1 n1 0 1m` with R to ground gives V(n1) = -1 V).
+                // The internal CurrentSourceInfo convention is the opposite — dc_value
+                // is injected at n_plus_idx and extracted at n_minus_idx (see the
+                // dk.rs/dc_op.rs consumers and the BJT/tube/op-amp companion sources
+                // above, all authored to that convention). Bridge SPICE -> internal by
+                // negating: extracting `val` from n+ == injecting `-val` at n_plus_idx.
+                // Without this negation an independent current source produces output of
+                // the opposite sign to ngspice.
                 self.current_sources.push(CurrentSourceInfo {
                     name: name.clone(),
                     n_plus_idx: self.node_map[n_plus],
                     n_minus_idx: self.node_map[n_minus],
-                    dc_value: dc.unwrap_or(0.0),
+                    dc_value: -dc.unwrap_or(0.0),
                 });
             }
             Element::Diode {

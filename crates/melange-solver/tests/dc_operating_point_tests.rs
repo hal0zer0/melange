@@ -820,3 +820,52 @@ fn test_lu_decompose_floating_node_with_inductor_short() {
     assert!(v[0].abs() < 1e-10, "v[0] should be 0V, got {}", v[0]);
     assert!(v[1].abs() < 1e-10, "v[1] should be 0V, got {}", v[1]);
 }
+
+// ---------------------------------------------------------------------------
+// Independent current source sign (regression for the mna.rs sign fix)
+// ---------------------------------------------------------------------------
+
+/// SPICE `I n+ n- val` drives `val` amps from n+ through the source to n-,
+/// extracting current from n+ and injecting it into n-. For `I1 out 0 1m`
+/// with a 1k load to ground, current is drawn OUT of `out`, so the node
+/// sits at a NEGATIVE voltage: V(out) = -1mA * 1k = -1V.
+///
+/// ngspice-verified (ngspice-42): this exact deck gives V(out) = -1.00000e+00.
+/// Before the fix at mna.rs (`Element::CurrentSource` stamped `+dc_value` into
+/// the internal "inject at n_plus_idx" convention instead of negating), melange
+/// produced +1V — an independent current source of the opposite sign to every
+/// other SPICE simulator. No shipped circuit used an explicit `I` element, so
+/// the inversion was latent and untested; this test pins the correct sign.
+const CURRENT_SOURCE_SIGN_SPICE: &str = "\
+Current source sign
+I1 out 0 DC 1m
+R1 out 0 1k
+";
+
+#[test]
+fn test_dc_op_independent_current_source_sign() {
+    let config = CodegenConfig {
+        circuit_name: "isrc_sign".to_string(),
+        sample_rate: 44100.0,
+        input_node: 0,
+        output_nodes: vec![0], // circuit has a single non-ground node ("out")
+        input_resistance: 1e6, // high so the input Thevenin doesn't perturb DC OP
+        ..CodegenConfig::default()
+    };
+
+    let ir = build_ir(CURRENT_SOURCE_SIGN_SPICE, &config);
+    assert!(
+        ir.has_dc_op,
+        "current source into a resistor should produce a non-zero DC OP"
+    );
+
+    let (_netlist, mna, _kernel) = build_pipeline(CURRENT_SOURCE_SIGN_SPICE);
+    let out_idx = *mna.node_map.get("out").expect("out node") - 1;
+
+    // Must match ngspice: V(out) = -1 V (current extracted from n+ = `out`).
+    assert!(
+        (ir.dc_operating_point[out_idx] - (-1.0)).abs() < 1e-3,
+        "independent current source sign: V(out) should be -1V to match ngspice, got {:.6}",
+        ir.dc_operating_point[out_idx]
+    );
+}
