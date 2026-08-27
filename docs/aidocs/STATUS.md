@@ -194,7 +194,7 @@ Source: Sowter DWG E-72,658-2 (amp §) + Peerless/Triad winding data.
 
 ### Unit Variation (2026-04-21)
 - `.seed <u64>`: sets master RNG seed (default 0). Shared by `.mismatch` and `.tolerance`.
-- `.mismatch D IS=tol N=tol RS=tol` / `.mismatch Q IS=tol BF=tol BR=tol`: per-device parameter jitter, baked at codegen. Two diodes on the same `.model` land at distinct `DEVICE_N_IS` constants — the thing that makes antiparallel clippers and push-pull pairs audibly asymmetric. `J` / `M` / `T` parse but aren't yet IR-wired.
+- `.mismatch D IS=tol N=tol RS=tol` / `.mismatch Q IS=tol BF=tol BR=tol`: per-device parameter jitter, baked at codegen. Two diodes on the same `.model` land at distinct `DEVICE_N_IS` constants — the thing that makes antiparallel clippers and push-pull pairs audibly asymmetric. **`T` / `J` / `M` are now IR-wired too (v0.1.3):** `T` (triode+pentode) jitters MU/EX/KG1/KP/KVB (+KG2 pentode), `J` IDSS/VP/LAMBDA, `M` KP/VT/LAMBDA. Byte-identical when the directive is absent; `analyze` applies it. Per-device tube mismatch is the physically-honest H2 source in a balanced push-pull stage (identical halves cancel evens exactly) — see `UNIT_VARIATION.md` and `SATURATING_TRANSFORMERS.md` §8-Q1.
 - `.tolerance R=0.01 C=0.02 L=0.005`: fixed-passive value jitter, applied at end of `Netlist::parse()`. Skips components under `.pot`/`.wiper`/`.switch`/`.runtime R` control so UI-driven mappings stay intact.
 - Deterministic: `FNV(seed, class_tag, name) → SplitMix64 → [-1, 1]`. Same seed always produces the same unit personality. Absent directives ⇒ byte-identical output (regression-guarded).
 - Full reference: [UNIT_VARIATION.md](UNIT_VARIATION.md).
