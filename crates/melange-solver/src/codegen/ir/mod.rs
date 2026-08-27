@@ -4067,11 +4067,7 @@ impl CircuitIR {
     /// where identical-model halves cancel even harmonics exactly. Shared by
     /// the `Triode` and `Pentode` arms (both carry `TubeParams`). Bit-identical
     /// pass-through when no `.mismatch T` directive lists the param (tol == 0).
-    fn apply_tube_mismatch(
-        netlist: &Netlist,
-        name: &str,
-        p: &mut crate::device_types::TubeParams,
-    ) {
+    fn apply_tube_mismatch(netlist: &Netlist, name: &str, p: &mut crate::device_types::TubeParams) {
         p.mu = Self::apply_mismatch(netlist, name, "MU", 'T', p.mu);
         p.ex = Self::apply_mismatch(netlist, name, "EX", 'T', p.ex);
         p.kg1 = Self::apply_mismatch(netlist, name, "KG1", 'T', p.kg1);
@@ -4164,7 +4160,8 @@ impl CircuitIR {
                     // parameters. No-op when the directive is absent.
                     params.idss = Self::apply_mismatch(netlist, name, "IDSS", 'J', params.idss);
                     params.vp = Self::apply_mismatch(netlist, name, "VP", 'J', params.vp);
-                    params.lambda = Self::apply_mismatch(netlist, name, "LAMBDA", 'J', params.lambda);
+                    params.lambda =
+                        Self::apply_mismatch(netlist, name, "LAMBDA", 'J', params.lambda);
                     slots.push(DeviceSlot {
                         device_type: DeviceType::Jfet,
                         start_idx: dim_offset,
@@ -4259,7 +4256,8 @@ impl CircuitIR {
                     // parameters. No-op when the directive is absent.
                     params.kp = Self::apply_mismatch(netlist, name, "KP", 'M', params.kp);
                     params.vt = Self::apply_mismatch(netlist, name, "VT", 'M', params.vt);
-                    params.lambda = Self::apply_mismatch(netlist, name, "LAMBDA", 'M', params.lambda);
+                    params.lambda =
+                        Self::apply_mismatch(netlist, name, "LAMBDA", 'M', params.lambda);
                     slots.push(DeviceSlot {
                         device_type: DeviceType::Mosfet,
                         start_idx: dim_offset,

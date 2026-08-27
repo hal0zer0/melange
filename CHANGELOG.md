@@ -9,6 +9,97 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-26
+
+The "melange demos itself" release: a self-contained built-in demo circuit,
+per-device mismatch reaching tubes/FETs, and a pass of onboarding fixes from
+cold "follow the README" runs.
+
+**Generated DSP output is not byte-identical to 0.1.2.** Two deliberate changes
+move the compiled audio path: the bundled passive-EQ example now *colors* (see
+Changed), and `.mismatch` on tubes/JFETs/MOSFETs now reaches the IR (see Added).
+Both are intentional, more-correct changes, not regressions. `.mismatch` remains
+**byte-identical when the directive is absent**, so any circuit that does not use
+tubes, JFET/MOSFET mismatch, or the bundled passive-EQ is unaffected and does not
+need to regenerate. MSRV is unchanged (1.85).
+
+### Added
+
+- **`.mismatch` now reaches tubes, JFETs, and MOSFETs.** Per-device `.model`
+  parameter jitter (`.mismatch T|J|M P=tol …`) was parser-accepted but a no-op in
+  the IR for these classes (only diodes `D` and BJTs `Q` were wired). It now
+  applies to vacuum triodes/pentodes (Koren `MU`/`EX`/`KG1`/`KP`/`KVB`, plus
+  pentode `KG2` when present), JFETs (`IDSS`/`VP`/`LAMBDA`), and MOSFETs
+  (`KP`/`VT`/`LAMBDA`). This closes the 0.1.0 note that "`.mismatch` on `J`/`M`/`T`
+  parses but is not yet wired into the IR." Byte-identical when the directive is
+  absent (tolerance 0 returns the nominal parameter); `analyze` applies it via the
+  same IR path. The motivating case: a balanced push-pull tube stage with
+  identical model halves cancels even harmonics exactly, so per-device tube
+  mismatch is the physically-honest path to the H2 real imperfectly-matched gear
+  produces.
+- **Built-in demo circuit — `melange {compile,simulate,analyze} passive-eq1a`**
+  runs with **no external circuit source**. The passive-EQ netlist is embedded
+  (`include_str!` from [`examples/passive-eq1a.cir`](examples/passive-eq1a.cir),
+  so the builtin and the bundled example are the same bytes) and resolves ahead of
+  any configured source, so a bare name never 404s. `melange builtins` lists it.
+  melange can now compile, simulate, analyze, and demo itself offline with zero
+  external dependencies.
+- **`melange nodes` now lists Controls.** Pots, wipers, switches, and gangs are
+  shown with their labels, component names, ranges, and defaults — previously the
+  only way to learn a valid `--pot`/`--switch` name was to guess wrong and read
+  the error.
+
+### Changed
+
+- **The bundled passive-EQ example now colors.** Re-synced to the canonical
+  melange-circuits deck, it carries sourced push-pull tube mismatch (`.seed` +
+  `.mismatch T` from published tube acceptance limits), producing H2-dominant,
+  level-progressive distortion like the real unit rather than the previous
+  idealized linear-iron behavior. **This changes the example's generated DSP
+  output** (it EQ'd like the original before; it now colors like it too).
+- **`melange validate` default gate retuned to audio-grade.** The default was
+  `strict()` (0.01% RMS) — tighter than every per-circuit CI tolerance, so it
+  reported FAILED on genuinely-good complex circuits (e.g. the passive-EQ at
+  0.23% RMS with 7-nines correlation). The default is now audio-grade (0.5% RMS /
+  3% max-rel / 0.9999 correlation anchor / 1.5 dB THD). `strict()`/`relaxed()` are
+  unchanged and the CI validation tests pin their own tolerances, so they are
+  unaffected.
+- **Condition-number warning calmed.** It fired at κ≈1e12 and read as "results may
+  be inaccurate," spamming near-unity-coupling transformer circuits whose iron
+  legitimately sits ~7e12. Reworded to a calm explanatory note and raised to 1e13;
+  genuinely extreme conditioning still warns. Diagnostic only — no solver output
+  change.
+
+### Fixed
+
+- **Generated plugin projects now declare their own `[workspace]`.** Generating a
+  plugin *inside* the melange repo — the README's own instruction — previously
+  errored ("believes it's in a workspace when it's not"). The generated
+  `Cargo.toml` now carries an empty `[workspace]` so it builds standalone.
+- **Generated README link 404 fixed** (`github.com/melange` →
+  `github.com/hal0zer0/melange`).
+- **README quick-start accuracy.** `cargo build --release` yields a raw library,
+  not a DAW bundle (bundling is a separate xtask step); the quick-start and
+  Spotlight now use the built-in demo instead of an unreachable `melange:` source;
+  the analyze example uses `--pot "LF Boost=10k"` (the prior `=10` read as 10 Ω —
+  pot at minimum, boost off — so the headline example looked flat); "no external
+  dependencies" is clarified (true for the standalone generated `circuit.rs`, but
+  the nih-plug plugin project pulls `nih_plug` as a git dep and needs network on
+  first build); the post-compile hint leads with `cargo build --release`; control
+  names are per-circuit and point to `melange nodes <circuit>`.
+- **SIGPIPE no longer panics.** `melange <cmd> | head` panicked (exit 101, "Broken
+  pipe") on large output; a std-only panic hook now swallows the broken-pipe
+  stdout/stderr panic and exits 0. Other panics fall through. No new dependency.
+
+### Removed
+
+- **Pre-seeded dead circuit sources.** The hardcoded default source config pointed
+  at `melange-audio/circuits` and `tonestack/tonestack` — both 404 (neither repo
+  exists), so a fresh install shipped a dead default source and advertised links
+  that don't resolve. A fresh install now ships **no** external sources (the
+  passive-eq1a builtin still lets melange demo itself); add your own with
+  `melange sources add <name> <url>`.
+
 ## [0.1.2] - 2026-08-26 — Sumac
 
 ### Added
@@ -233,7 +324,8 @@ measured real hardware. Everything else is unproven against hardware. See
   KiCad file; no effect on netlist compilation, generated code, or shipped plugins. The
   fix (`quick-xml >= 0.41`) is tracked for 0.1.1.
 
-[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/hal0zer0/melange/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/hal0zer0/melange/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/hal0zer0/melange/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/hal0zer0/melange/releases/tag/v0.1.0
