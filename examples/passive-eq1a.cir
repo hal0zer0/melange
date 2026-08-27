@@ -159,6 +159,31 @@ Passive-EQ1A Program Equalizer
 .model 12AU7 TRIODE(MU=21.91 EX=1.612 KG1=798.3 KP=16579 KVB=14135 CCG=2.3p CGP=2.2p CCP=0.5p)
 .input_impedance 600
 
+* === UNIT VARIATION (added 2026-08-26, thread 229 roadmap) ===
+* Per-tube parameter jitter breaks the exact even-harmonic cancellation
+* of the matched push-pull halves — the physically-honest H2 mechanism
+* for this topology (melange .mismatch, deterministic via .seed).
+* SOURCED tolerances only (dossier source registry, tubes section):
+*   MU 0.09  = 12AU7-family INDIVIDUAL acceptance limits, mu 15.5-18.5
+*              on 17 nominal (Tung-Sol 6189 1957 + RCA 5814-A 1956,
+*              MIL-E-1-linked "Characteristics Range Values")
+*   KG1 0.20 = gm individual limits +-20% (Tung-Sol 6189: 1750-2650 on
+*              2200; Telefunken ECC803S corroborates the 12AX7 family
+*              at S +22/-19%). KG1 scales Ip inversely ~ gm spread.
+*   KP/EX/KVB: NOT jittered — no sourced tolerance exists for them.
+* Caveats, documented honestly: plain consumer 12AX7/12AU7 sheets
+* publish typicals only (agent negative finding) — these premium/military
+* limits are the nearest published bounds and are if anything TIGHTER
+* than commercial spread; .mismatch granularity is per-class, so both
+* tube types share one tolerance set (the tighter medium-mu figures =
+* conservative choice). Seed 4142 (the source manual's serial) was fixed
+* BEFORE any measurement and is never rerolled; dialing seed or spread
+* to hit a THD figure is forbidden (arbiter, thread 229).
+* SPICE validation runs on a mismatch-stripped copy by design
+* (UNIT_VARIATION.md: ngspice has no per-build randomness).
+.seed 4142
+.mismatch T MU=0.09 KG1=0.20
+
 * B+ power supply — DWG E-72,658-2, corrected chain (crops bplus_chain.png,
 * bplus_dist.png, rect_6x4.png, verified 2026-08-25):
 *   6X4 rectifier +355V → 470Ω → +345V (40µ) → 1000Ω/1W → +325V (40µ)
