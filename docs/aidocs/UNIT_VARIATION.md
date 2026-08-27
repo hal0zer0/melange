@@ -40,10 +40,23 @@ byte-identical generated code on every run.
 ```spice
 .mismatch D IS=0.05 N=0.02           ; every diode: IS ±5%, N·VT ±2%
 .mismatch Q IS=0.02 BF=0.05 BR=0.05  ; every BJT: IS ±2%, BF/BR ±5%
+.mismatch T MU=0.03 KG1=0.05 KP=0.02 ; every tube: MU ±3%, KG1 ±5%, KP ±2%
+.mismatch J IDSS=0.05 VP=0.03        ; every JFET: IDSS ±5%, VP ±3%
+.mismatch M KP=0.05 VT=0.03          ; every MOSFET: KP ±5%, VT ±3%
 ```
 
-Device classes: `D` (diode), `Q` (BJT). `J`/`M`/`T` are accepted by the
-parser but not yet wired to the IR — those devices are pass-through.
+Device classes: `D` (diode), `Q` (BJT), `T` (triode + pentode/beam-tetrode),
+`J` (JFET), `M` (MOSFET) — all wired to the IR. The class letter matches the
+`.mismatch` directive, not the element prefix; `T` covers every tube (both the
+`Triode` and `Pentode`/beam-tetrode elements, which share `TubeParams`).
+
+**Why tube mismatch matters:** a balanced push-pull tube stage with
+identical-model halves cancels even harmonics *exactly* — the source of the
+"~60× too clean, odd-dominant" character measured on `passive-eq1a`. Jittering
+the two halves' Koren parameters per device breaks that cancellation, so H2
+survives and rises ∝ V with level (the physically-correct even-harmonic
+signature of real, imperfectly-matched push-pull gear). Applies to `analyze`
+as well as `compile` (both go through the same IR build path).
 
 Tolerances are dimensionless fractions in `[0, 1)`. The jitter is
 `nominal · (1 + tol · u)` with `u ∈ [-1, 1]` drawn from
@@ -65,10 +78,28 @@ Wired parameters:
 |-------|-----------|--------------------------|
 | `D`   | `IS`      | `DiodeParams.is`         |
 | `D`   | `N`       | `DiodeParams.n_vt`       |
-| `D`   | `RS`      | `DiodeParams.rs`         |
+| `D`   | `RS`      | `DiodeParams.rs` (skipped when 0) |
 | `Q`   | `IS`      | `BjtParams.is`           |
 | `Q`   | `BF`      | `BjtParams.beta_f`       |
 | `Q`   | `BR`      | `BjtParams.beta_r`       |
+| `T`   | `MU`      | `TubeParams.mu`          |
+| `T`   | `EX`      | `TubeParams.ex`          |
+| `T`   | `KG1`     | `TubeParams.kg1`         |
+| `T`   | `KP`      | `TubeParams.kp`          |
+| `T`   | `KVB`     | `TubeParams.kvb`         |
+| `T`   | `KG2`     | `TubeParams.kg2` (pentode; skipped when 0) |
+| `J`   | `IDSS`    | `JfetParams.idss`        |
+| `J`   | `VP`      | `JfetParams.vp`          |
+| `J`   | `LAMBDA`  | `JfetParams.lambda`      |
+| `M`   | `KP`      | `MosfetParams.kp`        |
+| `M`   | `VT`      | `MosfetParams.vt`        |
+| `M`   | `LAMBDA`  | `MosfetParams.lambda`    |
+
+The wired set is the core transfer parameters per device — the ones that
+drive audible unit-to-unit character. Parasitic fields (junction caps, ohmic
+`RD`/`RS` on FETs) are intentionally not jittered; add them here if a target
+needs it. Tube jitter is shared by the `Triode` and `Pentode` arms via
+`apply_tube_mismatch`; `KG2` is a no-op on triodes (guarded on `kg2 > 0`).
 
 Multiple `.mismatch` directives for the same class are merged; the last
 tolerance wins per-param. Unknown params on a supported class are

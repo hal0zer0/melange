@@ -4059,6 +4059,31 @@ impl CircuitIR {
         nominal * (1.0 + tol * u)
     }
 
+    /// Apply per-device `.mismatch T …` jitter to a tube's Koren parameters.
+    ///
+    /// Pushing mismatch to the *device* params (not the shared `.model` card)
+    /// is what makes a push-pull tube pair audibly asymmetric — the dominant
+    /// even-harmonic ("H2") source in an otherwise-balanced push-pull stage,
+    /// where identical-model halves cancel even harmonics exactly. Shared by
+    /// the `Triode` and `Pentode` arms (both carry `TubeParams`). Bit-identical
+    /// pass-through when no `.mismatch T` directive lists the param (tol == 0).
+    fn apply_tube_mismatch(
+        netlist: &Netlist,
+        name: &str,
+        p: &mut crate::device_types::TubeParams,
+    ) {
+        p.mu = Self::apply_mismatch(netlist, name, "MU", 'T', p.mu);
+        p.ex = Self::apply_mismatch(netlist, name, "EX", 'T', p.ex);
+        p.kg1 = Self::apply_mismatch(netlist, name, "KG1", 'T', p.kg1);
+        p.kp = Self::apply_mismatch(netlist, name, "KP", 'T', p.kp);
+        p.kvb = Self::apply_mismatch(netlist, name, "KVB", 'T', p.kvb);
+        // Pentode-only screen-current sensitivity; 0.0 on triodes → skip like
+        // the DiodeParams.rs guard so triodes stay pure pass-through.
+        if p.kg2 > 0.0 {
+            p.kg2 = Self::apply_mismatch(netlist, name, "KG2", 'T', p.kg2);
+        }
+    }
+
     /// Build device info, optionally using MNA device dimensions (for forward-active BJTs).
     pub fn build_device_info_with_mna(
         netlist: &Netlist,
@@ -4133,8 +4158,13 @@ impl CircuitIR {
                     dim_offset += dim;
                     nl_dev_idx += 1;
                 }
-                Element::Jfet { model, .. } => {
-                    let params = Self::resolve_jfet_params(netlist, model)?;
+                Element::Jfet { name, model, .. } => {
+                    let mut params = Self::resolve_jfet_params(netlist, model)?;
+                    // Per-JFET `.mismatch J …` jitter on the core transfer
+                    // parameters. No-op when the directive is absent.
+                    params.idss = Self::apply_mismatch(netlist, name, "IDSS", 'J', params.idss);
+                    params.vp = Self::apply_mismatch(netlist, name, "VP", 'J', params.vp);
+                    params.lambda = Self::apply_mismatch(netlist, name, "LAMBDA", 'J', params.lambda);
                     slots.push(DeviceSlot {
                         device_type: DeviceType::Jfet,
                         start_idx: dim_offset,
@@ -4157,7 +4187,9 @@ impl CircuitIR {
                     if is_linearized {
                         continue; // Don't create a DeviceSlot, don't increment nl_dev_idx
                     }
-                    let params = Self::resolve_tube_params(netlist, model)?;
+                    let mut params = Self::resolve_tube_params(netlist, model)?;
+                    // Per-triode `.mismatch T …` jitter (see `apply_tube_mismatch`).
+                    Self::apply_tube_mismatch(netlist, name, &mut params);
                     slots.push(DeviceSlot {
                         device_type: DeviceType::Tube,
                         start_idx: dim_offset,
@@ -4170,8 +4202,11 @@ impl CircuitIR {
                     dim_offset += 2;
                     nl_dev_idx += 1;
                 }
-                Element::Pentode { model, .. } => {
+                Element::Pentode { name, model, .. } => {
                     let mut params = Self::resolve_pentode_params(netlist, model)?;
+                    // Per-pentode `.mismatch T …` jitter (see `apply_tube_mismatch`).
+                    // Includes KG2 (screen-current sensitivity) for pentodes.
+                    Self::apply_tube_mismatch(netlist, name, &mut params);
                     // Check if MNA has this pentode as grid-off (2D reduced).
                     // Phase 1b: after DC-OP detects Vgk < cutoff, the MNA is
                     // rebuilt via `from_netlist_with_grid_off` which stamps
@@ -4218,8 +4253,13 @@ impl CircuitIR {
                     dim_offset += dim;
                     nl_dev_idx += 1;
                 }
-                Element::Mosfet { model, .. } => {
-                    let params = Self::resolve_mosfet_params(netlist, model)?;
+                Element::Mosfet { name, model, .. } => {
+                    let mut params = Self::resolve_mosfet_params(netlist, model)?;
+                    // Per-MOSFET `.mismatch M …` jitter on the core transfer
+                    // parameters. No-op when the directive is absent.
+                    params.kp = Self::apply_mismatch(netlist, name, "KP", 'M', params.kp);
+                    params.vt = Self::apply_mismatch(netlist, name, "VT", 'M', params.vt);
+                    params.lambda = Self::apply_mismatch(netlist, name, "LAMBDA", 'M', params.lambda);
                     slots.push(DeviceSlot {
                         device_type: DeviceType::Mosfet,
                         start_idx: dim_offset,
