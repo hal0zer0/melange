@@ -2914,16 +2914,22 @@ pub fn solve_dc_operating_point(
         // apply the `solution_has_active_junction` degeneracy gate. Gmin is the
         // last general-purpose strategy (Strategy 4 is a narrow op-amp-continuation
         // special case), so a rejected Gmin solution has no further fallback. More
-        // importantly the gate's `0.5·vcrit` "active junction" threshold rejects
-        // *legitimate* low-bias solutions: a germanium PNP common-emitter at high
-        // R_E (e.g. 10 kΩ) settles at Vbe ≈ 0.12–0.15 V — its correct, textbook,
-        // monotonic operating point — which is below the threshold. Gating Gmin on
-        // the predicate regresses exactly that circuit (see
-        // nonlinear_dc_op_tests::test_ge_pnp_common_emitter_re_sweep_converges,
-        // which fails to converge at R_E = 10 kΩ with the gate applied). The
-        // theoretical all-junctions-off acceptance risk is left ungated here
-        // deliberately; revisit only with a concrete circuit that actually
-        // exhibits Gmin converging to the degenerate fixed point.
+        // importantly the gate's `0.5·vcrit` "active junction" threshold can reject
+        // a *legitimate* low-bias solution. Oracle-verified against ngspice-42 on
+        // the GE_PNP_STAGE (OC74, IS=3e-7) at R_E = 10 kΩ:
+        //     ngspice:  v(e1)=7.262 V, v(c1)=73.3 mV, Vbe=0.139 V, Ic=73 µA
+        //     melange:  v(e1)=7.263 V, v(c1)=73.0 mV  (Gmin, converged)
+        // i.e. a real forward-active operating point — but Vbe=0.139 V sits just
+        // BELOW 0.5·vcrit (≈0.143 V for this device), so `solution_has_active_junction`
+        // misclassifies it as degenerate. Strategies 1 & 2 already fall through on
+        // it; gating Gmin too would leave the correct, ngspice-matching solution
+        // with no strategy that accepts it (see
+        // nonlinear_dc_op_tests::test_ge_pnp_common_emitter_re_sweep_converges).
+        // The threshold is a heuristic, not tuned here (that would be parameter
+        // tuning); Gmin ungated is what keeps this low-bias class correct. The
+        // theoretical all-junctions-off acceptance risk (L3 F1) is left ungated
+        // deliberately — revisit only with a concrete circuit where Gmin actually
+        // converges to the degenerate fixed point AND ngspice disagrees with it.
         if converged {
             return DcOpResult {
                 v_node: v,
