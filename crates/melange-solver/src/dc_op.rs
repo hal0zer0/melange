@@ -2910,6 +2910,20 @@ pub fn solve_dc_operating_point(
         let (converged, iters) =
             nr_dc_solve(&circuit, &mut v, &mut v_nl, &mut i_nl, 1.0, 0.0, false);
         total_iters += iters;
+        // NOTE: unlike Strategies 1 & 2, Gmin stepping intentionally does NOT
+        // apply the `solution_has_active_junction` degeneracy gate. Gmin is the
+        // last general-purpose strategy (Strategy 4 is a narrow op-amp-continuation
+        // special case), so a rejected Gmin solution has no further fallback. More
+        // importantly the gate's `0.5·vcrit` "active junction" threshold rejects
+        // *legitimate* low-bias solutions: a germanium PNP common-emitter at high
+        // R_E (e.g. 10 kΩ) settles at Vbe ≈ 0.12–0.15 V — its correct, textbook,
+        // monotonic operating point — which is below the threshold. Gating Gmin on
+        // the predicate regresses exactly that circuit (see
+        // nonlinear_dc_op_tests::test_ge_pnp_common_emitter_re_sweep_converges,
+        // which fails to converge at R_E = 10 kΩ with the gate applied). The
+        // theoretical all-junctions-off acceptance risk is left ungated here
+        // deliberately; revisit only with a concrete circuit that actually
+        // exhibits Gmin converging to the degenerate fixed point.
         if converged {
             return DcOpResult {
                 v_node: v,
