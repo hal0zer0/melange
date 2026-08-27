@@ -55,10 +55,11 @@ const SR: f64 = 48000.0;
 
 /// Op-amp gain stage with finite (±9 V) rails, cap-coupled ("audio-path")
 /// output, and a diode to ground so the nonlinear NR dimension is non-empty
-/// (M > 0). The trailing behavioral B-source across its own grounded resistor
-/// forces the full-LU nodal path (`emit_nodal` routes `use_full_nodal = true`
-/// whenever `ir.behavioral_sources` is non-empty) — mirrors the FULL_LU_FORCE
-/// trick in `nodal_emitter_regression_tests.rs`.
+/// (M > 0). The nodal full-LU path is forced explicitly via
+/// `CodegenConfig::force_full_lu` (see `active_set_be_code`) — deliberately
+/// NON-behavioral, so it exercises the ActiveSetBe BE-reset on a genuine
+/// full-LU circuit without tripping the behavioral+ActiveSetBe hard-error
+/// (that combination is covered by its own test at the bottom of this file).
 const ACTIVE_SET_BE_SPICE: &str = "\
 ActiveSetBe full-LU fixture
 Rin in ninv 10k
@@ -134,4 +135,54 @@ fn test_activesetbe_full_lu_death_spiral_guard_present() {
          i_nl = state.i_nl_prev; }}` death-spiral guard that the entry reset \
          re-enables for failed BE fallbacks"
     );
+}
+
+/// A behavioral B-source combined with an ActiveSetBe op-amp rail mode must be
+/// REJECTED at codegen. ActiveSetBe resolves op-amp rails through the BE
+/// fallback, but that fallback is gated off for behavioral circuits (it rebuilds
+/// from the base G/C matrices and would drop the behavioral source and falsely
+/// converge). The two are therefore incompatible until behavioral sources are
+/// stamped inside the fallback loops (tracked follow-up in BEHAVIORAL_SOURCES.md).
+/// This combination does not occur in the shipped corpus; this fixture exists
+/// solely to prove the guard fires — a guard with no test silently stops working.
+const BEHAVIORAL_ACTIVESETBE_SPICE: &str = "\
+Behavioral source into an ActiveSetBe op-amp
+Rin in ninv 10k
+Rf ninv oap 100k
+U1 0 ninv oap OA9
+Cout oap out 1u
+Rload out 0 100k
+B1 out 0 I={tanh(5.0*V(in)) * 1.0e-3}
+.model OA9 OA(AOL=200000 ROUT=50 GBW=3MEG VCC=9 VEE=-9)
+";
+
+#[test]
+fn test_behavioral_plus_activesetbe_is_rejected() {
+    use melange_solver::codegen::{CodeGenerator, CodegenConfig, CodegenError};
+    use melange_solver::mna::MnaSystem;
+    use melange_solver::parser::Netlist;
+
+    let netlist = Netlist::parse(BEHAVIORAL_ACTIVESETBE_SPICE).expect("parse");
+    let mna = MnaSystem::from_netlist(&netlist).expect("mna");
+    let config = CodegenConfig {
+        circuit_name: "behavioral_activesetbe_reject".to_string(),
+        sample_rate: SR,
+        // Behavioral already forces full-LU; force the audio-path rail mode.
+        opamp_rail_mode: OpampRailMode::ActiveSetBe,
+        ..support::config_for_spice(BEHAVIORAL_ACTIVESETBE_SPICE, SR)
+    };
+    match CodeGenerator::new(config).generate_nodal(&mna, &netlist) {
+        Err(CodegenError::UnsupportedTopology(msg)) => {
+            assert!(
+                msg.contains("ActiveSetBe") && msg.contains("behavioral"),
+                "error must name the behavioral/ActiveSetBe incompatibility, got: {msg}"
+            );
+        }
+        Err(e) => panic!("expected UnsupportedTopology, got: {e:?}"),
+        Ok(_) => panic!(
+            "behavioral + ActiveSetBe must be rejected at codegen (the BE fallback that \
+             resolves ActiveSetBe rails is gated off for behavioral circuits and would \
+             drop the source)"
+        ),
+    }
 }

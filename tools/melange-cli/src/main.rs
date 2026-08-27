@@ -3174,6 +3174,7 @@ fn simulate_circuit_source(
         pot_settle_samples: 64,
         backward_euler: opts.backward_euler,
         force_trap: opts.force_trap,
+        force_full_lu: false, // test/debug only; never set by the CLI
         disable_be_fallback: false,
         opamp_rail_mode: opts.opamp_rail_mode,
         noise_mode: opts.noise_mode,
@@ -4342,6 +4343,7 @@ fn analyze_freq_response(
         pot_settle_samples: 64,
         backward_euler,
         force_trap,
+        force_full_lu: false, // test/debug only; never set by the CLI
         disable_be_fallback: false,
         opamp_rail_mode,
         noise_mode,
