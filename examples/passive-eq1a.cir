@@ -17,12 +17,13 @@ Passive-EQ1A Program Equalizer
 * =====================================================================
 * 2026-07-26 provenance sweep: the old "direct readings from Sowter DWG
 * E-72,658-2" claim was struck. That sheet contains the AMPLIFIER + PSU
-* only; the EQ is an empty rectangle on it. Schemer confirmed eight real
-* amplifier-section errors against the sheet, plus two fabricated 360Ω
-* stoppers and workaround 220pF grid caps.
+* only; the EQ is an empty rectangle on it. A crop-level re-read of the
+* drawing confirmed eight real amplifier-section errors against the
+* sheet, plus two fabricated 360Ω stoppers and workaround 220pF caps.
 *
 * 2026-08-25: ALL EIGHT CONFIRMED CORRECTIONS APPLIED in one pass, each
-* verified against schemer's crops (../schemer/benchmarks/pultec/crops/):
+* verified against drawing crops (verification archive: see the dossier,
+* docs/circuits/passive-eq1a/ in the circuits repo):
 *   #1 620Ω is a SHUNT across the HS-56 secondary, not series  [hs56_input]
 *   #2 HS-56 input transformer added (was omitted entirely)    [hs56_input]
 *   #3 HS-29 CT grounded directly; 43K+270p in series bridges
@@ -38,13 +39,13 @@ Passive-EQ1A Program Equalizer
 *      deleted; tertiary CENTER TAP carries the 1k to ground  [s217_tert2]
 *   Also deleted: C_stab_a/b 220p (DIY workaround, not on any drawing).
 *
-* EQ SECTION provenance (2026-08-25, schemer TRACE-manual.md rev.2,
-* thread 227): NO factory drawing of the EQ exists. The located EQP-1A
-* manual (35pp scan, ../schemer/benchmarks/pultec/manual/) is genuine
-* EXCEPT p.6, which schemer identified as a machine re-render of a
-* signed 1997 recproaudio.com reconstruction (glyph-duplicate proof;
-* one affine maps every element; direction of derivation unsettled,
-* common lineage settled). The EQ below is ADOPTED FROM THAT LINEAGE —
+* EQ SECTION provenance (2026-08-25): NO factory drawing of the EQ
+* exists. The located EQP-1A manual (35pp scan; local verification
+* archive) is genuine EXCEPT p.6, which scan forensics (grey-level
+* statistics, glyph-duplicate analysis) identified as a machine
+* re-render of a signed 1997 recproaudio.com reconstruction (one global
+* affine maps every element; direction of derivation unsettled, common
+* lineage settled). The EQ below is ADOPTED FROM THAT LINEAGE —
 * a reconstruction, chosen over the prior ABSounds/SIMetrix mix on
 * measured evidence (see the EQ section comment; the prior network's LF
 * Atten was electrically dead and its Bandwidth nearly so). NOTE the
@@ -62,40 +63,40 @@ Passive-EQ1A Program Equalizer
 *
 * NOT MODELED (deliberate): 6X4 rectifier (chain starts at +355 DC),
 * heaters and hum (heater-elevation divider off +345 is modeled as its
-* 332K DC shunt only — schemer confirmed no audio on it), the EQ in/out
+* 332K DC shunt only — the drawing shows no audio on it), the EQ in/out
 * bypass switch (SW2 modeled in IN position; plugin owns bypass). HS-56
 * electrical parameters ASSUMED (see input section): the strap table
 * gives impedance options only — no turns/inductance data exists on
-* either sheet (schemer NEGATIVE finding).
+* either sheet (verified negative finding, both drawings read in full).
 *
-* KNOWN DEVIATION — distortion character (settled thread 229,
-* 2026-08-25, arbiter-adjudicated): this model measures ~0.002% THD,
-* odd-dominant, vs the hardware's 0.15% spec with H2-dominant
-* level-progressive distortion (SoS AP bench). Cause: identical-model
-* push-pull halves cancel even harmonics exactly, and all transformer
-* iron is LINEAR (no ISAT on any winding). This is a model-COMPLETENESS
-* gap, not an error: real even harmonics live in the single-ended
-* HS-56/HS-29 cores, tube curve detail, and unit imbalance. Do NOT
-* paper over it: hand-written tube asymmetry is fabricated data, and
-* seeded passive .tolerance dialed to hit 0.15% is tuning-to-target.
-* ROADMAP (corrected 2026-08-26, thread 229, melange-measured): core
-* saturation CANNOT produce H2 here — melange's core-sat law is
-* symmetric tanh (odd-only) and none of these cores carries DC bias.
-* The honest H2 path is `.mismatch T` per-tube spread (breaks the
-* even-harmonic cancellation, H2 rises with level as on hardware) —
-* pending melange's codegen wiring landing on main, and requiring a
-* SOURCED 12AX7/12AU7 section-to-section tolerance + fixed .seed,
-* never a spread dialed to a THD target.
+* DISTORTION CHARACTER (settled 2026-08-26 after adversarial review;
+* measurement record: dossier measurements/character-thd-imd.md):
+* per-tube spread from SOURCED acceptance limits is authored below
+* (see UNIT VARIATION section), breaking the exact even-harmonic
+* cancellation of matched push-pull halves. The model now shows the
+* hardware's SHAPE — H2-dominant, level-progressive distortion
+* (H2 -84.7 dBc at 5 V drive, rising ~6 dB per level doubling) —
+* while MAGNITUDE stays ~21 dB below the hardware 0.15% spec through
+* this circuit's NFB — the H2 character is solved; the loudness gap
+* remains. Kept distinct: core HYSTERESIS (could add H2) is not in the
+* engine, and plain core SATURATION is PROVEN unable to supply H2 here
+* (symmetric odd-only law; no DC bias on any core) — do not chase H2
+* through iron. Core saturation COULD add the odd/LF component (engine
+* support incl. NFB-through-iron routing exists upstream) but is
+* unauthored pending SOURCED core data (candidate: CineMag CM-S217D
+* max-level spec). Do not paper over the gap: dialing the seed or spread to
+* hit a THD figure is forbidden; the shipped tolerances are published
+* acceptance limits, the seed was fixed before measurement.
 *
-* Note: ../schemer/benchmarks/pultec/pultec-eq.cir was a broken symlink
+* Note: an earlier sibling copy of this netlist was a broken symlink
 * to a byte-identical copy of this file — same transcription, corroborates
-* nothing. Removed from schemer 2026-07-26.
+* nothing. Removed 2026-07-26.
 * =====================================================================
 *
 * Pot values from the original service manual (see dossier source registry).
 * Transformer specs from CineMag CM-S217D datasheet and Sowter 1475 data.
 * 12AU7 Koren parameters from Sylvania Technical Manual fit.
-* Amplifier + PSU topology: Sowter DWG E-72,658-2 via schemer crops.
+* Amplifier + PSU topology: Sowter DWG E-72,658-2 (crop-level read).
 *
 * Signal flow (p6 net names; passive EQ is a mesh, NOT a series chain):
 *
@@ -159,7 +160,7 @@ Passive-EQ1A Program Equalizer
 .model 12AU7 TRIODE(MU=21.91 EX=1.612 KG1=798.3 KP=16579 KVB=14135 CCG=2.3p CGP=2.2p CCP=0.5p)
 .input_impedance 600
 
-* === UNIT VARIATION (added 2026-08-26, thread 229 roadmap) ===
+* === UNIT VARIATION (added 2026-08-26) ===
 * Per-tube parameter jitter breaks the exact even-harmonic cancellation
 * of the matched push-pull halves — the physically-honest H2 mechanism
 * for this topology (melange .mismatch, deterministic via .seed).
@@ -178,7 +179,7 @@ Passive-EQ1A Program Equalizer
 * tube types share one tolerance set (the tighter medium-mu figures =
 * conservative choice). Seed 4142 (the source manual's serial) was fixed
 * BEFORE any measurement and is never rerolled; dialing seed or spread
-* to hit a THD figure is forbidden (arbiter, thread 229).
+* to hit a THD figure is forbidden (adversarial-review ruling).
 * SPICE validation runs on a mismatch-stripped copy by design
 * (UNIT_VARIATION.md: ngspice has no per-build randomness).
 .seed 4142
@@ -195,14 +196,13 @@ Passive-EQ1A Program Equalizer
 * 325-290 exact. I_250 ≈ 1.6 mA → 47k drop 75 V: 325-250 exact.
 * Voltage annotations (11MΩ meter, no signal): +345, +325, +290 CT, +250,
 * +140 plates, +40 12AU7 cathodes, +31 grid bias, +1.3 12AX7 cathodes.
-* NOT MODELED: an additional branch off +345 (partially legible, ~"K"Ω down
-* to ~+60V with R‖0.3µF below — likely heater elevation or pilot; schemer
-* read pending, thread 227). Add if it proves to load the audio-path rails.
+* (The +345 side branch was identified as heater elevation and is
+* modeled as its DC shunt below — see R_heat_elev.)
 VCC vcc 0 DC 355
 R_psu1 vcc v345 470
 C_f345 v345 0 40u
-* Heater-elevation divider off +345 (schemer TRACE-manual.md §1.1,
-* thread 227): 270K -> +60V heater reference -> 62K||0.3u -> gnd. Carries
+* Heater-elevation divider off +345 (read from the drawing, 2026-08-25):
+* 270K -> +60V heater reference -> 62K||0.3u -> gnd. Carries
 * no audio; modeled as its 332K DC shunt so the rail current is complete.
 R_heat_elev v345 0 332k
 R_psu2 v345 v325 1000
@@ -232,8 +232,8 @@ K_hs56 L_hs56_p L_hs56_s 0.99999
 R_in_shunt eq_in 0 620
 *
 * === PASSIVE EQ NETWORK — PAGE-6 REDRAW VARIANT ===
-* ADOPTED 2026-08-25 from the p.6 redraw (schemer TRACE-manual.md SS2,
-* thread 227). p.6 is NOT a factory drawing (synthetic insert — see
+* ADOPTED 2026-08-25 from the p.6 redraw. p.6 is NOT a factory drawing
+* (later third-party addition — see
 * provenance record); it was adopted on measured evidence against the
 * prior ABSounds/SIMetrix reconstruction, with factory curves + hardware
 * measurements as arbiter:
@@ -285,7 +285,7 @@ R_lfb rrail 0 10k
 * Each secondary half: 3600 turns (1:1 with full primary = 1:2 step-up).
 * L_pri ≈ 37H (Sowter 9330 spec). BW: 5Hz-100kHz (-3dB).
 *
-* Original-unit wiring (confirmed abbey road d enfer / GroupDIY + schemer):
+* Original-unit wiring (abbey road d enfer / GroupDIY, crop-confirmed):
 *   Pin 4 = hot input (EQ output), Pin 1 = ground (reverse winding for HF)
 *   Pin 5 → grid1, Pin 8 → grid2 (true push-pull anti-phase drive)
 *   Pins 6,7 = center tap → GROUNDED DIRECTLY (hs29_12ax7grid.png crop)
@@ -295,7 +295,7 @@ R_lfb rrail 0 10k
 *   Pin 9 = electrostatic shield (ground)
 *
 * Primary (series, 3600 turns total).
-* L CALIBRATED 2026-08-25 (arbiter-adjudicated): the two replacement-part
+* L CALIBRATED 2025-08-25, adversarially reviewed: the two replacement-part
 * citations conflict (Sowter 9330: 37H; Sowter 1475: 130H) and the
 * magnetizing L forms a SETTING-DEPENDENT LF corner (EQ output impedance
 * rises at max LF settings), visible against the factory LF curve
@@ -350,7 +350,7 @@ C_plate_bridge plate1 plate2 20p
 * Cathode bias (820Ω BETWEEN cathodes, not to ground).
 * Cathodes separated: 820Ω between pin 3 (cathode1) and pin 8 (cathode2).
 * S-217-D feedback tertiary connects to cathode through both 360Ω resistors.
-* No cathode bypass cap — confirmed by schemer on both EQP-1A and EQP-1R.
+* No cathode bypass cap — confirmed on both the EQP-1A and EQP-1R drawings.
 Rk cathode1 cathode2 820
 
 * === INTERSTAGE COUPLING: 12AX7 plates → 12AU7 grids ===
@@ -484,7 +484,7 @@ R_zob_o zob_o 0 620
 .pot R_tb_u 100 10k 10k "HF Boost (upper)"
 .pot R_tb_l 100 10k 100 "HF Boost (lower)"
 * Bandwidth rheostat: 0R at Sharp (no 390R offset on p6). Default broad.
-* Min 30R = ~1% of track end-stop residual (ASSUMED, uncited; arbiter-
+* Min 30R = ~1% of track end-stop residual (ASSUMED, uncited; review-
 * conditioned 2026-08-25): with 30R the sharp-peak family lands on the
 * factory chart (+18.4 rel); the old 100R convention cost ~0.6 dB.
 .pot R_bw 30 2.5k 2.5k "Bandwidth"
@@ -492,7 +492,7 @@ R_zob_o zob_o 0 620
 .pot R_lfb 100 10k 100 "LF Boost"
 * Bass Cut rheostat IN SERIES main->x: flat = 0R (NOTE: sense inverted vs canonical)
 .pot R_lfc 100 100k 100 "LF Atten"
-* HF Cut mins 15R = ~1.5% of track (ASSUMED, arbiter-conditioned): the
+* HF Cut mins 15R = ~1.5% of track (ASSUMED, review-conditioned): the
 * old 100R floor limited full-rotation cut to the dial-10 depth
 * (-12.6 dB); 15R reaches the factory chart's full-rotation curve
 * (-19.5 rel @20k vs chart -19.25). 10k/100k pots keep min=100 (already
