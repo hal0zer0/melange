@@ -148,6 +148,17 @@ pub fn validate_vst3_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Escape a user-supplied string for safe embedding inside a Rust `"..."` string
+/// literal in generated code. `--vendor`, `--vendor-url`, `--email`, and
+/// `--clap-id` are interpolated into `const X: &str = "{...}"` lines; a stray
+/// `"`, `\`, or newline would otherwise emit code that does not compile.
+/// `char::escape_default` produces a valid Rust string-literal body (escapes
+/// `"`, `\`, control chars, and non-ASCII). Default values contain no special
+/// characters and pass through unchanged.
+fn escape_rust_string_literal(s: &str) -> String {
+    s.chars().flat_map(|c| c.escape_default()).collect()
+}
+
 /// Generate a complete plugin project
 pub fn generate_plugin_project(
     output_dir: &Path,
@@ -1144,10 +1155,12 @@ fn generate_lib_rs(
             .collect::<Vec<_>>()
             .join(" ")
     };
-    let clap_id = options
-        .clap_id
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| format!("com.melange.{circuit_name}"));
+    let clap_id = escape_rust_string_literal(
+        &options
+            .clap_id
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("com.melange.{circuit_name}")),
+    );
     // VST3 override has already been validated upstream (see validate_vst3_id).
     // We still assert in debug builds so template-level misuse surfaces loudly.
     let vst3_id_str = if let Some(id) = options.vst3_id {
@@ -1159,9 +1172,9 @@ fn generate_lib_rs(
     } else {
         compute_vst3_id(circuit_name)
     };
-    let vendor = options.vendor.unwrap_or("Melange");
-    let url = options.url.unwrap_or("https://github.com/hal0zer0/melange");
-    let email = options.email.unwrap_or("josh@nobledarkgames.com");
+    let vendor = escape_rust_string_literal(options.vendor.unwrap_or("Melange"));
+    let url = escape_rust_string_literal(options.url.unwrap_or("https://github.com/hal0zer0/melange"));
+    let email = escape_rust_string_literal(options.email.unwrap_or("josh@nobledarkgames.com"));
     let params_struct = generate_params_struct(
         with_level_params,
         pots,
@@ -1679,6 +1692,34 @@ mod tests {
     fn clap_id_format() {
         let lib = test_generate_lib_rs("my-plugin", false, &[]);
         assert!(lib.contains("const CLAP_ID: &'static str = \"com.melange.my-plugin\""));
+    }
+
+    #[test]
+    fn escape_rust_string_literal_handles_quotes_and_backslashes() {
+        // Default-style values pass through unchanged.
+        assert_eq!(escape_rust_string_literal("Melange"), "Melange");
+        assert_eq!(
+            escape_rust_string_literal("https://example.com/x"),
+            "https://example.com/x"
+        );
+        // A double-quote must be escaped so `const V: &str = "..."` stays valid.
+        assert_eq!(
+            escape_rust_string_literal("Acme \"Best\" Co"),
+            "Acme \\\"Best\\\" Co"
+        );
+        // Backslash and newline too.
+        assert_eq!(escape_rust_string_literal("a\\b"), "a\\\\b");
+        assert_eq!(escape_rust_string_literal("a\nb"), "a\\nb");
+        // Invariant: every double-quote in the output is backslash-escaped.
+        let out = escape_rust_string_literal("x\"y\"z");
+        for (i, c) in out.char_indices() {
+            if c == '"' {
+                assert!(
+                    i > 0 && out.as_bytes()[i - 1] == b'\\',
+                    "unescaped quote at {i} in {out:?}"
+                );
+            }
+        }
     }
 
     // === VST3 ID tests ===
