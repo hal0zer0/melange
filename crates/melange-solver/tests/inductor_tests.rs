@@ -422,6 +422,56 @@ fn test_inductor_ir() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 6b: backward-Euler + companion inductor must be REJECTED, not shipped wrong
+// ---------------------------------------------------------------------------
+
+/// The DK backward-Euler matrix build cannot correctly discretize a
+/// companion-modeled inductor: `stamp_dk_companion_inductors` stamps the
+/// trapezoidal companion value `g_eq = T/(2L)` (BE needs `T/L`, with
+/// `A_neg = alpha*C` and no `-g_eq` history term), and the os=1 primary-BE
+/// branch never stamps it at all (open circuit). Rather than silently ship
+/// wrong magnetics, `from_kernel` rejects BE + non-augmented inductors at the
+/// API boundary. This path is reachable through the public `DkKernel::from_mna`
+/// entry point (the documented example), so it must fail in RELEASE builds too
+/// — a hard `CodegenError`, not a `debug_assert`. Inductor circuits should use
+/// `DkKernel::from_mna_augmented`, which is exact under backward Euler.
+#[test]
+fn test_backward_euler_companion_inductor_rejected() {
+    let (netlist, mna, kernel) = build_pipeline(RL_LOWPASS_SPICE);
+    // Precondition: the non-augmented kernel carries the inductor as a companion.
+    assert!(
+        !kernel.inductors.is_empty(),
+        "expected a companion-modeled inductor in the non-augmented kernel"
+    );
+
+    let be_config = CodegenConfig {
+        backward_euler: true,
+        ..default_config()
+    };
+    match CircuitIR::from_kernel(&kernel, &mna, &netlist, &be_config) {
+        Err(melange_solver::codegen::CodegenError::UnsupportedTopology(msg)) => {
+            assert!(
+                msg.contains("backward-Euler") && msg.contains("from_mna_augmented"),
+                "error must name the BE/inductor limitation and the augmented remedy, got: {msg}"
+            );
+        }
+        Err(e) => panic!("expected UnsupportedTopology, got a different error: {e:?}"),
+        Ok(_) => panic!(
+            "BE + companion inductor must be rejected, but from_kernel returned Ok \
+             (that build would ship g_eq = T/2L instead of T/L — wrong magnetics)"
+        ),
+    }
+
+    // Trapezoidal with the SAME companion inductor must still succeed — only the
+    // BE discretization is broken, and the trap companion stamp is correct.
+    let trap_config = default_config();
+    assert!(
+        CircuitIR::from_kernel(&kernel, &mna, &netlist, &trap_config).is_ok(),
+        "trapezoidal companion-inductor build must still succeed"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Test 7: RLC circuit behavior — output should show oscillation/resonance
 // ---------------------------------------------------------------------------
 

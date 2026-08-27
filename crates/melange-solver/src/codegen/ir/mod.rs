@@ -1828,6 +1828,31 @@ impl CircuitIR {
             false
         };
         let be = cfg_backward_euler || auto_be;
+
+        // The DK backward-Euler matrix build cannot correctly discretize
+        // companion-modeled inductors. `stamp_dk_companion_inductors` stamps the
+        // TRAPEZOIDAL companion value g_eq = T/(2L) unconditionally (the correct
+        // BE value is T/L, with A_neg = alpha*C and no -g_eq history term), and
+        // the os=1 primary-BE branch never calls the stamp at all — treating each
+        // companion inductor as an open circuit. The augmented-MNA inductor path
+        // (from_mna_augmented: L as branch rows in the C matrix, so
+        // augmented_inductors == true) IS exact under BE and is what the CLI uses
+        // for every inductor circuit. Only a library consumer building a kernel
+        // via the non-augmented DkKernel::from_mna with inductors present
+        // (kernel.inductors non-empty => augmented_inductors false) and requesting
+        // BE reaches the broken path. Fail loud at this API boundary rather than
+        // silently ship wrong magnetics. (This is NOT a debug_assert: release
+        // builds — how a consumer crate builds — must reject it too.)
+        if be && !augmented_inductors && !kernel.inductors.is_empty() {
+            return Err(CodegenError::UnsupportedTopology(format!(
+                "backward-Euler integration with {} companion-modeled inductor(s) is not \
+                 supported on the DK path: the companion stamp uses the trapezoidal value \
+                 g_eq = T/(2L), but BE needs g_eq = T/L with A_neg = alpha*C (history x1). \
+                 Build the kernel with DkKernel::from_mna_augmented — augmented-MNA inductor \
+                 branch rows are exact under backward Euler — or use trapezoidal integration.",
+                kernel.inductors.len()
+            )));
+        }
         if auto_be {
             integrator_selection = IntegratorSelection::BeAuto;
         }
