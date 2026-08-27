@@ -504,6 +504,9 @@ pub struct SolverConfig {
     /// per-sample Δg self-corrects.
     #[serde(default)]
     pub breakpoint_be: bool,
+    /// Test/debug only: force the nodal full-LU path (see
+    /// [`crate::codegen::CodegenConfig::force_full_lu`]). Not set by the CLI.
+    pub force_full_lu: bool,
     /// Resolved op-amp supply rail saturation strategy.
     ///
     /// If the user's [`CodegenConfig::opamp_rail_mode`] was [`OpampRailMode::Auto`],
@@ -1903,6 +1906,7 @@ impl CircuitIR {
             breakpoint_be: false,
             opamp_rail_mode: rail_mode.mode,
             emit_dc_op_recompute: config.emit_dc_op_recompute,
+            force_full_lu: config.force_full_lu,
             injections: config.injections.clone(),
             taps: config.taps.clone(),
         };
@@ -2910,6 +2914,7 @@ impl CircuitIR {
             breakpoint_be: false,
             opamp_rail_mode: rail_mode.mode,
             emit_dc_op_recompute: config.emit_dc_op_recompute,
+            force_full_lu: config.force_full_lu,
             injections: config.injections.clone(),
             taps: config.taps.clone(),
         };

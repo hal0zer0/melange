@@ -516,15 +516,14 @@ D_f clip_out sic_m D_SIC
 D_r sic_m clip_out D_SIC
 C_out clip_out out 1u
 R_out out 0 100k
-B_frc frc 0 V={0}
-R_frc frc 0 1k
 .model D_SIC D(IS=1e-30 N=2.0)
 .model OA_PP OA(AOL=200000 ROUT=50 GBW=3Meg VSAT=13 SR=13)
 ";
 
 #[test]
 fn test_wide_bandgap_clipper_no_rs_nodal_full_lu() {
-    let config = support::config_for_spice(WIDE_BANDGAP_CLIPPER_NO_RS_SPICE, 48000.0);
+    let mut config = support::config_for_spice(WIDE_BANDGAP_CLIPPER_NO_RS_SPICE, 48000.0);
+    config.force_full_lu = true; // was a behavioral-dummy full-LU routing lever
     let circuit = support::build_circuit_nodal(
         WIDE_BANDGAP_CLIPPER_NO_RS_SPICE,
         &config,

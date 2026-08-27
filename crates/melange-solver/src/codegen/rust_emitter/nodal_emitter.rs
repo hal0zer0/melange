@@ -1567,6 +1567,7 @@ impl RustEmitter {
         // shipping deck mixes uncoupled + coupled saturation.)
         let force_full_lu_sat = !ir.saturating_inductors.is_empty();
         let use_full_nodal = force_full_lu_sat
+            || ir.solver_config.force_full_lu
             || if !ir.behavioral_sources.is_empty() {
                 // Behavioral B-sources are stamped in node space only on the full-LU
                 // path (the Schur reduction can't express their rectangular control).

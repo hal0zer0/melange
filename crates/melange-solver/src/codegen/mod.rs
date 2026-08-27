@@ -320,6 +320,16 @@ pub struct CodegenConfig {
     /// is the correct default on circuits where trap is unstable.
     /// Ignored when `backward_euler` is already `true`.
     pub force_trap: bool,
+    /// Test/debug only: force the nodal full-LU solver path even when the
+    /// circuit would otherwise route to the Schur reduction. There is no
+    /// production trigger for full-LU short of a genuine structural reason
+    /// (saturating inductor, behavioral source, ill-conditioning), so tests that
+    /// need to exercise the full-LU emitter historically abused a dummy
+    /// behavioral source (`B_frc frc 0 V={0}`) as a routing lever. This knob
+    /// replaces that idiom with an explicit, semantics-free switch, so that the
+    /// presence of a behavioral source means exactly one thing. Not set by the
+    /// CLI. Default false.
+    pub force_full_lu: bool,
     /// Disable adaptive backward Euler fallback for the DK codegen path.
     /// When false (default), the generated code includes pre-computed BE matrices
     /// and can fall back to BE for individual samples where trapezoidal NR diverges.
@@ -506,6 +516,7 @@ impl Default for CodegenConfig {
             pot_settle_samples: 64,
             backward_euler: false,
             force_trap: false,
+            force_full_lu: false,
             disable_be_fallback: false,
             opamp_rail_mode: OpampRailMode::Auto,
             noise_mode: NoiseMode::Off,

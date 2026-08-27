@@ -101,15 +101,6 @@ Cout coll out 1u
 Rload out 0 100k
 Vcc vcc 0 DC 12
 .model Q2N3904 NPN(IS=6.734e-15 BF=416.4 VAF=74.03 NF=1)
-
-* Inert full-LU forcing branch (mirrors nodal_emitter_regression_tests.rs
-* FULL_LU_FORCE): behavioral B-sources are only representable on the nodal
-* full-LU path (`emit_nodal` routes `use_full_nodal = true` whenever
-* `ir.behavioral_sources` is non-empty), so a 0 V B-source across its own
-* grounded resistor deterministically forces full LU without coupling to
-* the rest of the circuit.
-B_frc frc 0 V={0}
-R_frc frc 0 1k
 ";
 
 /// Code-string pin: the `.max(0.01)` ratio floor must not reappear in
@@ -120,6 +111,8 @@ fn test_nodal_full_lu_node_damping_has_no_ratio_floor() {
         circuit_name: "nodal_full_lu_damping_test".to_string(),
         sample_rate: SR,
         backward_euler: true,
+        // Force full-LU explicitly (was a behavioral-dummy routing lever).
+        force_full_lu: true,
         ..support::config_for_spice(BJT_CE_SPICE, SR)
     };
     let (code, n, m) = support::generate_circuit_code_nodal(BJT_CE_SPICE, &config);

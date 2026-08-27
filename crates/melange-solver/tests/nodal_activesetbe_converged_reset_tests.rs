@@ -71,8 +71,6 @@ Vee vee 0 DC -9
 Vcc vcc 0 DC 9
 .model OA9 OA(AOL=200000 ROUT=50 GBW=3MEG VCC=9 VEE=-9)
 .model D1N4148 D(IS=2.52e-9 N=1.752)
-B_frc frc 0 V={0}
-R_frc frc 0 1k
 ";
 
 fn active_set_be_code() -> (String, usize, usize) {
@@ -80,6 +78,9 @@ fn active_set_be_code() -> (String, usize, usize) {
     let config = melange_solver::codegen::CodegenConfig {
         circuit_name: "activesetbe_converged_reset_test".to_string(),
         sample_rate: SR,
+        // Force full-LU explicitly instead of the old behavioral-dummy routing
+        // lever (`B_frc frc 0 V={0}`), which now carries fallback-gating semantics.
+        force_full_lu: true,
         // Force the mode so the test does not depend on the auto-detector's
         // audio-path heuristic; ActiveSetBe is what a cap-coupled op-amp
         // output resolves to in production anyway.

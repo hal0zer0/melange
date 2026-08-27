@@ -20,17 +20,8 @@ mod support;
 
 const SR: f64 = 48000.0;
 
-/// Inert full-LU forcing branch. Behavioral B-sources are only representable
-/// on the nodal full-LU path (`emit_nodal` routes `use_full_nodal = true`
-/// whenever `ir.behavioral_sources` is non-empty), so a 0 V B-source across
-/// its own grounded resistor deterministically forces full LU without
-/// coupling to the rest of the circuit (the augmented row pins v[frc] = 0).
-const FULL_LU_FORCE: &str = "B_frc frc 0 V={0}\nR_frc frc 0 1k\n";
-
-fn jfet_cs_spice(force_full_lu: bool) -> String {
-    let force = if force_full_lu { FULL_LU_FORCE } else { "" };
-    format!(
-        "\
+fn jfet_cs_spice() -> String {
+    "\
 JFET Common Source
 Cin in gate 10u
 Rg gate 0 1Meg
@@ -41,15 +32,13 @@ Cs source 0 100u
 Cout drain out 10u
 Rload out 0 100k
 Vdd vdd 0 DC 12
-{force}.model J2N5457 NJ(VTO=-2.0 IDSS=5e-3 LAMBDA=0.001)
+.model J2N5457 NJ(VTO=-2.0 IDSS=5e-3 LAMBDA=0.001)
 "
-    )
+    .to_string()
 }
 
-fn mosfet_cs_spice(force_full_lu: bool) -> String {
-    let force = if force_full_lu { FULL_LU_FORCE } else { "" };
-    format!(
-        "\
+fn mosfet_cs_spice() -> String {
+    "\
 MOSFET Common Source
 Cin in gate 10u
 R1 vdd gate 47k
@@ -61,9 +50,9 @@ Cs source 0 100u
 Cout drain out 10u
 Rload out 0 100k
 Vdd vdd 0 DC 5
-{force}.model NMOD NM(VTO=2.0 KP=0.1 LAMBDA=0.01)
+.model NMOD NM(VTO=2.0 KP=0.1 LAMBDA=0.01)
 "
-    )
+    .to_string()
 }
 
 /// Compare a FET circuit on the DK path against the same circuit forced onto
@@ -71,17 +60,21 @@ Vdd vdd 0 DC 5
 /// fixed point is identical on both paths — with the transposed Jacobian the
 /// full-LU NR walked wrong step directions, diverging or exhausting MAX_ITER
 /// under drive.
-fn assert_full_lu_fet_matches_dk(base: &str, forced: &str, tag: &str, amp: f64) {
-    let mut cb = support::config_for_spice(base, SR);
-    let mut cf = support::config_for_spice(forced, SR);
+fn assert_full_lu_fet_matches_dk(spice: &str, tag: &str, amp: f64) {
+    let mut cb = support::config_for_spice(spice, SR);
+    let mut cf = support::config_for_spice(spice, SR);
     // Pin BOTH paths to backward Euler. The forced nodal build sits at
     // spectral radius ≈ 1.0 and auto-promotes to BE while the DK build stays
     // trapezoidal — a legitimate integration-scheme difference that would
     // mask the Jacobian comparison this test is about.
     cb.backward_euler = true;
     cf.backward_euler = true;
-    let dk = support::build_circuit(base, &cb, &format!("{tag}_dk"));
-    let lu = support::build_circuit_nodal(forced, &cf, &format!("{tag}_lu"));
+    // Force the nodal path to full-LU explicitly (was an inert behavioral-dummy
+    // routing lever appended to the SPICE). Both paths now run the IDENTICAL
+    // circuit — the only difference is DK-Schur vs nodal-full-LU.
+    cf.force_full_lu = true;
+    let dk = support::build_circuit(spice, &cb, &format!("{tag}_dk"));
+    let lu = support::build_circuit_nodal(spice, &cf, &format!("{tag}_lu"));
     assert!(
         lu.code.contains("g_aug"),
         "{tag}: forcing branch must route the nodal build to full-LU NR"
@@ -110,22 +103,12 @@ fn assert_full_lu_fet_matches_dk(base: &str, forced: &str, tag: &str, amp: f64) 
 
 #[test]
 fn test_full_lu_jfet_jacobian_matches_dk() {
-    assert_full_lu_fet_matches_dk(
-        &jfet_cs_spice(false),
-        &jfet_cs_spice(true),
-        "jfet_full_lu_jac",
-        0.5,
-    );
+    assert_full_lu_fet_matches_dk(&jfet_cs_spice(), "jfet_full_lu_jac", 0.5);
 }
 
 #[test]
 fn test_full_lu_mosfet_jacobian_matches_dk() {
-    assert_full_lu_fet_matches_dk(
-        &mosfet_cs_spice(false),
-        &mosfet_cs_spice(true),
-        "mosfet_full_lu_jac",
-        0.5,
-    );
+    assert_full_lu_fet_matches_dk(&mosfet_cs_spice(), "mosfet_full_lu_jac", 0.5);
 }
 
 // ============================================================================
