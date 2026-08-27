@@ -2012,6 +2012,11 @@ impl Parser {
                     ]
                 })
                 .collect();
+            let switch_claimed: std::collections::HashSet<String> = netlist
+                .switches
+                .iter()
+                .flat_map(|sw| sw.component_names.iter().map(|n| n.to_ascii_uppercase()))
+                .collect();
             for rr in &netlist.runtime_resistors {
                 let exists = netlist.elements.iter().any(|e| {
                     matches!(e, Element::Resistor { name, .. }
@@ -2032,6 +2037,17 @@ impl Parser {
                         line: 0,
                         message: format!(
                             ".runtime R resistor '{}' is already claimed by a .pot or .wiper directive",
+                            rr.resistor_name
+                        ),
+                    });
+                }
+                if switch_claimed.contains(&rkey) {
+                    return Err(ParseError {
+                        line: 0,
+                        message: format!(
+                            ".runtime R resistor '{}' is already claimed by a .switch directive — \
+                             a component can only have one runtime-update mechanism (both would \
+                             stamp the same conductance)",
                             rr.resistor_name
                         ),
                     });
