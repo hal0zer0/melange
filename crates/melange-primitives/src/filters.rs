@@ -114,8 +114,9 @@ impl Default for OnePoleHpf {
 /// This is essentially a ZDF (Zero Delay Feedback) integrator wrapped as a one-pole.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TptLpf {
-    s: f64, // integrator state
-    g: f64, // tan(ω/2) coefficient
+    s: f64,     // integrator state
+    g: f64,     // prewarped integrator gain, tan(π fc / fs)
+    big_g: f64, // zero-delay-feedback-resolved one-pole gain, g / (1 + g)
 }
 
 impl TptLpf {
@@ -124,22 +125,32 @@ impl TptLpf {
         // Clamp below Nyquist to prevent tan() blowup
         let fc_safe = fc.min(fs * 0.499);
         let g = (core::f64::consts::PI * fc_safe / fs).tan();
-        Self { s: 0.0, g }
+        Self {
+            s: 0.0,
+            g,
+            big_g: g / (1.0 + g),
+        }
     }
 
     /// Set the cutoff frequency.
     pub fn set_cutoff(&mut self, fc: f64, fs: f64) {
         let fc_safe = fc.min(fs * 0.499);
         self.g = (core::f64::consts::PI * fc_safe / fs).tan();
+        self.big_g = self.g / (1.0 + self.g);
     }
 
     /// Process a single sample (linear, no saturation).
     #[inline(always)]
     pub fn process(&mut self, input: f64) -> f64 {
-        // TPT structure: v = (input - s) * g
-        //                y = v + s
-        //                s = y + v (state update)
-        let v = (input - self.s) * self.g;
+        // TPT / ZDF one-pole lowpass (Zavalishin, "The Art of VA Filter Design").
+        // The instantaneous (zero-delay) feedback is resolved in closed form via
+        // big_g = g / (1 + g); using the raw prewarp gain g here would warp the
+        // cutoff and go unstable for fc > fs/4. With big_g in (0, 1) the filter is
+        // unconditionally stable.
+        //   v = (input - s) * big_g
+        //   y = v + s
+        //   s = y + v   (state update)
+        let v = (input - self.s) * self.big_g;
         let y = v + self.s;
         self.s = y + v;
         y
@@ -548,5 +559,30 @@ mod tests {
         let mut tpt = TptLpf::new(1000.0, 44100.0);
         let output = tpt.process(1.0);
         assert!(output > 0.0 && output <= 1.0);
+
+        // DC (constant input) steady-state gain of a lowpass must be exactly 1.
+        let mut tpt = TptLpf::new(1000.0, 44100.0);
+        let mut y = 0.0;
+        for _ in 0..2000 {
+            y = tpt.process(1.0);
+        }
+        assert!(
+            (y - 1.0).abs() < 1e-9,
+            "TptLpf DC gain must converge to 1.0, got {y}"
+        );
+
+        // Stability above fs/4: the ZDF-resolved one-pole is unconditionally
+        // stable, so a cutoff well past fs/4 must NOT diverge (the raw-g form
+        // blew up to ~1e12 here). Verify it stays bounded and settles to unity.
+        let mut hot = TptLpf::new(15_000.0, 44100.0); // > fs/4 = 11025 Hz
+        let mut yh = 0.0;
+        for _ in 0..2000 {
+            yh = hot.process(1.0);
+            assert!(yh.abs() < 10.0, "TptLpf must stay bounded above fs/4, got {yh}");
+        }
+        assert!(
+            (yh - 1.0).abs() < 1e-6,
+            "TptLpf above fs/4 must still settle to unity DC gain, got {yh}"
+        );
     }
 }
