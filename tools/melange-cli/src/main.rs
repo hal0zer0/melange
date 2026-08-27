@@ -1213,6 +1213,31 @@ fn parse_bjt_fa_mode(s: &str) -> melange_solver::codegen::BjtFaMode {
     }
 }
 
+/// If `--solver dk` is forced on a circuit that STRUCTURALLY requires the nodal
+/// path, DK codegen builds without error but emits a silently-wrong solver
+/// (behavioral source dropped → linear passthrough; saturating inductor
+/// linearized; multi-transformer DC-OP singular; transformer-NFB K-diagonal
+/// divergence). Return the blocker description for those cases so the caller can
+/// fail loud. Soft router preferences (trapezoidal instability, large M, K/S
+/// conditioning) are NOT blockers — DK can still represent those circuits, so a
+/// forced override stays valid for them. `dk_failed` is already hard-errored at
+/// kernel construction, so it is not repeated here.
+fn forced_dk_hard_blocker(
+    routing: &melange_solver::codegen::routing::RoutingDecision,
+) -> Option<&'static str> {
+    if routing.behavioral {
+        Some("a behavioral B-source is present — DK cannot stamp it, so it is dropped (linear passthrough)")
+    } else if routing.saturating_inductor {
+        Some("a saturating inductor is present — DK cannot do the per-sample L update, so it is linearized (no saturation)")
+    } else if routing.multi_transformer {
+        Some("multiple transformer groups are present — the DK K matrix is singular (the build ships converged=false)")
+    } else if routing.k_diag_unsafe {
+        Some("a non-negative K diagonal with live current injection (e.g. transformer-coupled negative feedback) — the DK Schur Newton iteration diverges")
+    } else {
+        None
+    }
+}
+
 fn compile_circuit_source(
     circuit_source: &circuits::CircuitSource,
     output: &PathBuf,
@@ -1977,6 +2002,15 @@ fn compile_circuit_source(
     };
 
     let generator = CodeGenerator::new(config);
+    if solver_override == "dk" {
+        if let Some(blocker) = forced_dk_hard_blocker(&routing) {
+            anyhow::bail!(
+                "--solver dk cannot be forced on this circuit: {blocker}.\n\
+                 The DK solver structurally cannot represent it and would emit a \
+                 silently-wrong solver. Use --solver auto (recommended) or --solver nodal."
+            );
+        }
+    }
     let use_nodal_codegen = match solver_override {
         "nodal" => true,
         "dk" => false,
@@ -3088,6 +3122,15 @@ fn simulate_circuit_source(
 
     // Route: DK or nodal
     let decision = routing::auto_route(&kernel, &mna, dk_failed);
+    if opts.solver == "dk" {
+        if let Some(blocker) = forced_dk_hard_blocker(&decision) {
+            anyhow::bail!(
+                "--solver dk cannot be forced on this circuit: {blocker}.\n\
+                 The DK solver structurally cannot represent it and would produce \
+                 silently-wrong results. Use --solver auto (recommended) or --solver nodal."
+            );
+        }
+    }
     let use_nodal = match opts.solver {
         "nodal" => true,
         "dk" => false,
@@ -4285,6 +4328,15 @@ fn analyze_freq_response(
     };
 
     let decision = routing::auto_route(&kernel, &mna, dk_failed);
+    if solver == "dk" {
+        if let Some(blocker) = forced_dk_hard_blocker(&decision) {
+            anyhow::bail!(
+                "--solver dk cannot be forced on this circuit: {blocker}.\n\
+                 The DK solver structurally cannot represent it and would produce \
+                 silently-wrong results. Use --solver auto (recommended) or --solver nodal."
+            );
+        }
+    }
     let use_nodal = match solver {
         "nodal" => true,
         "dk" => false,

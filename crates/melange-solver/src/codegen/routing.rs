@@ -54,6 +54,13 @@ pub struct RoutingDecision {
     pub k_diag_unsafe: bool,
     /// Whether S matrix is ill-conditioned (max|S| > 1e6).
     pub s_ill_conditioned: bool,
+    /// Whether a behavioral B-source is present. DK's N_v/N_i reduction cannot
+    /// express node-space stamping — a HARD structural requirement for nodal.
+    pub behavioral: bool,
+    /// Whether any inductor / coupled-inductor / transformer winding saturates
+    /// (`isat` set), needing a per-sample L update that DK's precomputed
+    /// S=A⁻¹ cannot provide — a HARD structural requirement for nodal.
+    pub saturating_inductor: bool,
     /// Human-readable reason for the routing decision.
     pub reason: String,
 }
@@ -81,6 +88,19 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
         || !mna.transformer_groups.is_empty();
     let multi_transformer = has_inductors && n_xfmr_groups > 1;
     let large_m = m >= 10;
+
+    // Structural nodal requirements DK cannot represent — used both for the
+    // routing decision below and to reject a forced `--solver dk` override.
+    let has_behavioral = !mna.behavioral_sources.is_empty();
+    let saturating_inductor = mna.inductors.iter().any(|ind| ind.isat.is_some())
+        || mna
+            .coupled_inductors
+            .iter()
+            .any(|ci| ci.l1_isat.is_some() || ci.l2_isat.is_some())
+        || mna
+            .transformer_groups
+            .iter()
+            .any(|g| g.winding_isats.iter().any(|i| i.is_some()));
 
     // Check trapezoidal stability via power iteration on S*A_neg
     let (dk_unstable, spectral_radius) = if !dk_failed && m > 0 && n > 0 {
@@ -129,7 +149,7 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
 
     // Routing decision (first match wins)
 
-    let (route, reason) = if !mna.behavioral_sources.is_empty() {
+    let (route, reason) = if has_behavioral {
         // Behavioral B-sources reference arbitrary nodes (rectangular control),
         // which the DK N_v/N_i reduction can't express. They are stamped
         // directly in node space by the nodal emitter.
@@ -179,16 +199,7 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
             "S matrix ill-conditioned (max|S| > 1e6, cap-only nodes lack resistive paths)"
                 .to_string(),
         )
-    } else if mna.inductors.iter().any(|ind| ind.isat.is_some())
-        || mna
-            .coupled_inductors
-            .iter()
-            .any(|ci| ci.l1_isat.is_some() || ci.l2_isat.is_some())
-        || mna
-            .transformer_groups
-            .iter()
-            .any(|g| g.winding_isats.iter().any(|i| i.is_some()))
-    {
+    } else if saturating_inductor {
         (
             SolverRoute::Nodal,
             "saturating inductors require augmented MNA (per-sample L update)".to_string(),
@@ -207,6 +218,8 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
         k_ill_conditioned,
         k_diag_unsafe,
         s_ill_conditioned,
+        behavioral: has_behavioral,
+        saturating_inductor,
         reason,
     }
 }
