@@ -313,6 +313,23 @@ fn bjt_fa_resolution(ir: &CircuitIR) -> (usize, usize) {
     (fa, full)
 }
 
+/// The `MAX_ITER` value the emitted code ACTUALLY uses, so provenance never
+/// disagrees with the const it describes.
+///
+/// The nodal path (full-LU + Schur) floors the auto-tuned budget at 100 — a
+/// ceiling, not a target: a sample converging in 8 iterations still exits at 8,
+/// so converging samples pay nothing, while the Armijo line search gets enough
+/// headroom to crawl a full-scale transient's operating-point move through the
+/// saturation knee within one sample. The DK path is deliberately NOT floored.
+/// Mirror of the `MAX_ITER` const emission in `nodal_emitter.rs` — keep the two
+/// in lockstep.
+pub(super) fn effective_max_iter(ir: &CircuitIR) -> usize {
+    match ir.solver_mode {
+        crate::codegen::ir::SolverMode::Nodal => ir.solver_config.max_iterations.max(100),
+        crate::codegen::ir::SolverMode::Dk => ir.solver_config.max_iterations,
+    }
+}
+
 /// Full RESOLVED DSP-affecting flag set for the human-readable `Build:` line.
 ///
 /// Every entry reflects the value AFTER netlist directives + auto-promotion.
@@ -323,7 +340,7 @@ fn resolved_build_flags(ir: &CircuitIR) -> String {
     let mut build = format!(
         "integration={}, max_iter={}, oversampling={}x",
         ir.integrator_selection.label(),
-        ir.solver_config.max_iterations,
+        effective_max_iter(ir),
         ir.solver_config.oversampling_factor
     );
     // DC blocking is a fourth (5 Hz) output highpass that is otherwise invisible
@@ -379,10 +396,7 @@ fn provenance_json(ir: &CircuitIR, version: &str, commit: &str) -> String {
         "\"backward_euler\":{},",
         ir.integrator_selection.is_backward_euler()
     ));
-    s.push_str(&format!(
-        "\"max_iter\":{},",
-        ir.solver_config.max_iterations
-    ));
+    s.push_str(&format!("\"max_iter\":{},", effective_max_iter(ir)));
     s.push_str(&format!(
         "\"oversampling\":{},",
         ir.solver_config.oversampling_factor

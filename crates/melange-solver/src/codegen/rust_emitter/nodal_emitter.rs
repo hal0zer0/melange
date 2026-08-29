@@ -6,8 +6,8 @@
 //! and voltage limiting.
 
 use super::dk_emitter::{
-    emit_inject_rhs_stamp, emit_inject_substep_stamp, emit_inject_tap_constants, emit_warmup_call,
-    NoiseEmission,
+    effective_max_iter, emit_inject_rhs_stamp, emit_inject_substep_stamp, emit_inject_tap_constants,
+    emit_warmup_call, NoiseEmission,
 };
 use super::helpers::{
     device_param_template_data, emit_pentode_nr_dk_stamp, emit_stateful_default_fields,
@@ -779,6 +779,137 @@ fn emit_sparse_ni_matvec_add(
         }
     }
     code
+}
+
+/// Emit the node-space KCL-residual `A·v` matvec, sparsified over the structural
+/// nonzero columns of the raw forward `amat` (state.a / a_sub / state.a_be).
+///
+/// BYTE-IDENTICAL to the dense `for j in 0..N` loop it replaces: the skipped
+/// columns are STRUCTURAL zeros of the raw A matrix, so their term
+/// `amat[i][j]*v[j]` is exactly `0.0`, which changes neither the ascending-order
+/// running sum `acc` (`x + 0.0 == x`) nor the running max `den` (`0.0` never
+/// exceeds a non-negative `den`). Columns are emitted in ascending order so the
+/// float summation order of the surviving nonzeros is preserved exactly.
+///
+/// The column set per node row is the structural superset of the raw A pattern:
+///   - `nz(a_matrix) ∪ nz(a_matrix_be)` — every position live at the codegen
+///     config, at full augmented dimension (transformer/inductor incidence,
+///     mutual coupling, voltage-source rows all included). These two forward
+///     matrices are `G + β·C` for β ∈ {2/T, 1/T}; a position is absent from BOTH
+///     only if `G = C = 0` there, so their union equals the value-independent
+///     `nz(G) ∪ nz(C)` and also covers the sub-step matrix `G + (4/T)·C`.
+///   - `setter_stamps` — every `(row,col)` a `.pot`/`.switch`/`.wiper`/`.runtime`
+///     setter writes, so a switch entry that is open (≈0, below threshold) at the
+///     codegen position but closed (large) at another position is still summed.
+///   - the diagonal `(i,i)` — gmin regularization and the saturating-inductor
+///     augmented-row term.
+/// This mirrors `build_equil_pattern` parts (1)-(3), which ship byte-identical on
+/// these decks (incl. the sat-inductor `steve-1073-output`). Part (4), the device
+/// Jacobian envelope, is intentionally omitted: the raw `amat` carries no device
+/// stamps (those go into `chord_lu`), so those columns are structurally `0.0`.
+///
+/// Returns `None` (caller keeps the dense loop) when the forward matrices are not
+/// available at the expected dimension.
+fn emit_sparse_a_residual_matvec(
+    ir: &CircuitIR,
+    setter_stamps: &std::collections::BTreeSet<(usize, usize)>,
+    n_nodes: usize,
+    indent: &str,
+) -> Option<String> {
+    use crate::lu::SPARSITY_THRESHOLD;
+    use std::collections::BTreeSet;
+    let n = ir.topology.n;
+    let a = &ir.matrices.a_matrix;
+    let a_be = &ir.matrices.a_matrix_be;
+    if a.len() != n * n || a_be.len() != n * n {
+        return None;
+    }
+    let mut code = String::new();
+    for i in 0..n_nodes {
+        let mut cols: BTreeSet<usize> = BTreeSet::new();
+        for j in 0..n {
+            if a[i * n + j].abs() >= SPARSITY_THRESHOLD
+                || a_be[i * n + j].abs() >= SPARSITY_THRESHOLD
+            {
+                cols.insert(j);
+            }
+        }
+        for &(r, c) in setter_stamps {
+            if r == i {
+                cols.insert(c);
+            }
+        }
+        cols.insert(i);
+        code.push_str(&format!("{indent}{{\n"));
+        code.push_str(&format!("{indent}    let mut acc = -rhs[{i}] - q[{i}];\n"));
+        code.push_str(&format!(
+            "{indent}    let mut den = rhs[{i}].abs().max(q[{i}].abs());\n"
+        ));
+        for j in cols {
+            code.push_str(&format!(
+                "{indent}    {{ let t = amat[{i}][{j}] * v[{j}]; acc += t; let a = t.abs(); if a > den {{ den = a; }} }}\n"
+            ));
+        }
+        code.push_str(&format!("{indent}    norm_sq += acc * acc;\n"));
+        code.push_str(&format!(
+            "{indent}    if !(acc.abs() <= 1e-3 * den + 1e-9) {{ ok = false; }}\n"
+        ));
+        code.push_str(&format!("{indent}}}\n"));
+    }
+    Some(code)
+}
+
+/// Emit an Armijo backtracking line search on the node-space KCL residual for
+/// one full-LU NR site.
+///
+/// The pnjlim/node-damping limiting has already been applied ONCE to produce the
+/// step direction `{new} - {v}` scaled by `{alpha}`. This searches along that
+/// single ray (no per-backtrack re-limiting): it scales the fraction `s` down
+/// from 1 by halves, floored at 2^-10, and accepts the first `s` satisfying the
+/// Armijo sufficient-decrease `||F(v + s·alpha·d)|| <= (1 - c·s)·||F(v)||`
+/// (c = 1e-4). On acceptance `{alpha}` is multiplied by `s` (a no-op when
+/// `s == 1`, so a sample that already takes the full limited step is unaffected).
+/// If no `s` down to the floor satisfies Armijo — a non-descent / near-singular
+/// direction — `{ls_ok}` is set false; the caller must NOT accept the step
+/// (breaking to the next fallback) so the loop cannot silently commit a
+/// non-root iterate.
+///
+/// This is the globalization that turns the limit-cycle divergence on stiff
+/// high-gain feedback amplifiers into monotone convergence. It is paired with
+/// the always-checked `||F||` residual gate at each site: a backtracking search
+/// can drive `s·alpha -> 0` at a stagnation point, so convergence must be
+/// decided by the true equation residual, never by the (now arbitrarily small)
+/// damped step alone.
+#[allow(clippy::too_many_arguments)]
+fn emit_armijo_line_search(
+    code: &mut String,
+    indent: &str,
+    v: &str,
+    new: &str,
+    alpha: &str,
+    amat: &str,
+    rhs: &str,
+    ls_ok: &str,
+) {
+    code.push_str(&format!(
+        "{indent}// Armijo backtracking line search on ||F|| along the limited Newton ray.\n\
+         {indent}let mut {ls_ok} = true;\n\
+         {indent}{{\n\
+         {indent}    let (r0, _) = kcl_residual(&{v}, &{rhs}, &{amat}, state);\n\
+         {indent}    if r0.is_finite() && r0 > 1e-9 {{\n\
+         {indent}        let mut s = 1.0_f64;\n\
+         {indent}        let mut accepted = false;\n\
+         {indent}        while s >= (1.0 / 1024.0) {{\n\
+         {indent}            let mut vc = {v};\n\
+         {indent}            for i in 0..N {{ vc[i] += ({alpha} * s) * ({new}[i] - {v}[i]); }}\n\
+         {indent}            let (rc, _) = kcl_residual(&vc, &{rhs}, &{amat}, state);\n\
+         {indent}            if rc <= (1.0 - 1e-4 * s) * r0 {{ accepted = true; break; }}\n\
+         {indent}            s *= 0.5;\n\
+         {indent}        }}\n\
+         {indent}        if accepted {{ {alpha} *= s; }} else {{ {ls_ok} = false; }}\n\
+         {indent}    }}\n\
+         {indent}}}\n"
+    ));
 }
 
 /// Emit the DC-blocker history reseed shared by `reset()`, `set_sample_rate`
@@ -1773,9 +1904,19 @@ impl RustEmitter {
         );
         code.push_str("pub const STATE_MAX_PLAUSIBLE_MAGNITUDE: f64 = 1e6;\n\n");
         code.push_str("/// Maximum NR iterations per sample\n");
+        // Budget CEILING, not a target: a sample that converges in 8 iterations
+        // still exits at 8, so raising the ceiling costs nothing on converging
+        // samples. The floor of 100 gives the Armijo line search on stiff
+        // high-gain feedback amplifiers enough iterations to crawl a full-scale
+        // transient's operating-point move through the saturation knee within a
+        // single sample (measured: a 0->10 V step on the 1073 output stage needs
+        // ~230 iterations, but realistic bandlimited drive converges well under
+        // 100). Auto-tuned budgets already above 100 are left untouched. The
+        // floor lives in `effective_max_iter` so the provenance `Build:` line and
+        // JSON report the same value this const emits.
         code.push_str(&format!(
             "pub const MAX_ITER: usize = {};\n\n",
-            ir.solver_config.max_iterations
+            effective_max_iter(ir)
         ));
         if ir.solver_config.breakpoint_be {
             code.push_str(
@@ -6930,7 +7071,71 @@ impl RustEmitter {
             "[f64; NUM_OUTPUTS]"
         };
 
-        let mut code = section_banner("PROCESS SAMPLE (Full-nodal NR with LU solve)");
+        // Nonlinear-device circuits get the Armijo line search + node-KCL
+        // residual convergence gate in all three NR loops (trap / sub-step / BE).
+        // Emitted only for m > 0: with no devices there is no exponential
+        // stiffness to limit-cycle on, and the linear LU solve is already exact,
+        // so m == 0 circuits stay byte-identical.
+        let use_line_search = m > 0;
+
+        let mut code = String::new();
+        if use_line_search {
+            // Shared node-space KCL residual helper, generic over the A matrix +
+            // rhs so the trap (state.a/rhs), sub-step (a_sub/rhs_s) and BE
+            // (state.a_be/rhs_be) sites share one implementation. Returns
+            // (||F||_2, all-node-rows-within-tolerance) for F = A·v - rhs -
+            // N_i·i_nl(N_v·v) over node rows 0..N_NODES. The ||.||_2 drives the
+            // Armijo ratio test; the bool is the always-checked convergence gate.
+            code.push_str(
+                "/// Node-space KCL residual for the full-LU NR convergence gate and\n\
+                 /// Armijo line search. `F = A·v - rhs - N_i·i_nl(N_v·v)` over node rows\n\
+                 /// 0..N_NODES. Returns `(||F||_2, all_rows_within_tol)`. Generic over the\n\
+                 /// A matrix + rhs so the trap / sub-step / BE sites share one body.\n",
+            );
+            code.push_str("#[inline]\n");
+            code.push_str(
+                "fn kcl_residual(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], state: &CircuitState) -> (f64, bool) {\n",
+            );
+            code.push_str("    let mut v_nl_final = [0.0f64; M];\n");
+            code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_final", "v", "    "));
+            code.push_str("    let mut i_nl = [0.0f64; M];\n");
+            Self::emit_nodal_device_evaluation_final(&mut code, ir, "    ");
+            code.push_str("    let mut q = [0.0f64; N];\n");
+            code.push_str(&emit_sparse_ni_matvec_add(ir, "q", "i_nl", "    "));
+            code.push_str("    let mut norm_sq = 0.0f64;\n");
+            code.push_str("    let mut ok = true;\n");
+            // The `A·v` term over node rows dominates this residual (it runs
+            // >=2x per NR iteration via the convergence gate + Armijo r0). Emit it
+            // sparsely over the structural nonzeros of the raw forward A — a
+            // byte-identical transform (skipped columns are structural zeros).
+            // Fall back to the dense sweep only when the forward matrices are
+            // unavailable.
+            match emit_sparse_a_residual_matvec(ir, setter_stamps, n_nodes, "    ") {
+                Some(sparse) => code.push_str(&sparse),
+                None => {
+                    code.push_str(&format!("    for i in 0..{n_nodes} {{\n"));
+                    code.push_str("        let mut acc = -rhs[i] - q[i];\n");
+                    code.push_str("        let mut den = rhs[i].abs().max(q[i].abs());\n");
+                    code.push_str("        for j in 0..N {\n");
+                    code.push_str("            let t = amat[i][j] * v[j];\n");
+                    code.push_str("            acc += t;\n");
+                    code.push_str("            let a = t.abs(); if a > den { den = a; }\n");
+                    code.push_str("        }\n");
+                    code.push_str("        norm_sq += acc * acc;\n");
+                    // Per-node relative KCL tolerance: same RELTOL=1e-3 as the
+                    // device and sat-inductor residual checks, with a 1e-9 A
+                    // absolute floor so a node carrying ~zero net current does not
+                    // demand an unreachable tolerance.
+                    code.push_str("        if !(acc.abs() <= 1e-3 * den + 1e-9) { ok = false; }\n");
+                    code.push_str("    }\n");
+                }
+            }
+            code.push_str("    (norm_sq.sqrt(), ok)\n");
+            code.push_str("}\n\n");
+        }
+        code.push_str(&section_banner(
+            "PROCESS SAMPLE (Full-nodal NR with LU solve)",
+        ));
 
         // Function signature
         if os_factor > 1 || inject_or_tap {
@@ -7482,6 +7687,22 @@ impl RustEmitter {
             code.push_str("            }\n");
             code.push_str("        }\n\n");
 
+            // Armijo backtracking line search (trap site): scales the already-
+            // limited step along the ray v -> v + alpha*(v_new-v) to enforce a
+            // monotone node-KCL residual decrease. On a non-descent direction the
+            // search fails and we abandon the trap solve so the sub-step / BE
+            // fallback runs. `limited` records whether any limiting (pnjlim,
+            // node-damping, or the search) shrank alpha below 1, which gates the
+            // voltage-step convergence check below (a limited step's small size is
+            // not evidence of convergence — only the residual gate is).
+            if use_line_search {
+                emit_armijo_line_search(
+                    &mut code, "        ", "v", "v_new", "alpha", "state.a", "rhs", "ls_ok",
+                );
+                code.push_str("        if !ls_ok { break; }\n");
+                code.push_str("        let limited = alpha < 1.0;\n");
+            }
+
             // Apply damped Newton step and check convergence
             // Compute step BEFORE updating v, so convergence check sees the actual delta
             // (the check runs every iteration, including iter 0 — a zero-step
@@ -7492,6 +7713,13 @@ impl RustEmitter {
             // ripple from nonlinear stages hasn't settled to sub-µV precision.
             code.push_str("        // Compute damped step, check convergence, then apply\n");
             code.push_str("        let mut max_step_exceeded = false;\n");
+            // DK/Schur convergence contract: the voltage-step check is only
+            // meaningful when the step was NOT limited this iteration. When it
+            // was, the step's small size is an artifact of damping, not
+            // convergence — the always-checked ||F|| residual gate decides.
+            if use_line_search {
+                code.push_str("        if !limited {\n");
+            }
             {
                 let mut device_nodes: Vec<usize> = ir
                     .sparsity
@@ -7512,11 +7740,15 @@ impl RustEmitter {
                 }
                 device_nodes.sort();
                 device_nodes.dedup();
+                let extra = if use_line_search { "    " } else { "" };
                 for &node in &device_nodes {
                     code.push_str(&format!(
-                        "        {{ let step = alpha * (v_new[{node}] - v[{node}]); let threshold = 1e-3 * v[{node}].abs().max((v[{node}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ max_step_exceeded = true; }} }}\n"
+                        "        {extra}{{ let step = alpha * (v_new[{node}] - v[{node}]); let threshold = 1e-3 * v[{node}].abs().max((v[{node}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ max_step_exceeded = true; }} }}\n"
                     ));
                 }
+            }
+            if use_line_search {
+                code.push_str("        }\n");
             }
             code.push_str("        for i in 0..N { v[i] += alpha * (v_new[i] - v[i]); }\n");
 
@@ -7695,7 +7927,20 @@ impl RustEmitter {
                 "        ",
             );
 
-            code.push_str("        let converged_check = !max_step_exceeded;\n\n");
+            // Node-KCL residual gate (ALWAYS, precondition of the line search):
+            // a backtracking search can shrink the damped step toward zero at a
+            // stagnation point, so convergence must require the true equation
+            // residual ||F|| = ||A·v - rhs - N_i·i_nl|| within tolerance — never
+            // the (possibly line-search-damped) step size alone. The device-chord
+            // consistency check above is a linearization test, not an equation
+            // residual, so it cannot substitute for this.
+            if use_line_search {
+                code.push_str(
+                    "        let converged_check = !max_step_exceeded && kcl_residual(&v, &rhs, &state.a, state).1;\n\n",
+                );
+            } else {
+                code.push_str("        let converged_check = !max_step_exceeded;\n\n");
+            }
 
             code.push_str("        if converged_check {\n");
             code.push_str("            converged = true;\n");
@@ -7935,17 +8180,53 @@ impl RustEmitter {
                     );
                 }
                 // Convergence check + update
-                code.push_str("                    let mut max_step = 0.0f64;\n");
-                code.push_str("                    for i in 0..N_NODES {\n");
-                code.push_str("                        let step = v_new_s[i] - v_sub[i];\n");
-                code.push_str(
-                    "                        if step.abs() > max_step { max_step = step.abs(); }\n",
-                );
-                code.push_str("                    }\n");
-                code.push_str("                    v_sub = v_new_s;\n");
-                // Re-evaluate devices at the converged v_sub so i_nl_sub is consistent.
+                if use_line_search {
+                    // pnjlim + node damping (parity with the trap/BE loops): the
+                    // sub-step inner NR was previously RAW undamped Newton. On a
+                    // stiff junction the raw step overshoots past the fast_exp
+                    // clamp where the device Jacobian flattens to ~0, making the
+                    // Newton direction non-descent and defeating the line search.
+                    // Limiting keeps the iterate where the Jacobian is valid.
+                    code.push_str("                    let v_new = v_new_s;\n");
+                    code.push_str("                    let mut alpha = 1.0_f64;\n");
+                    Self::emit_nodal_voltage_limiting_indented(&mut code, ir, "                    ");
+                    code.push_str(&format!(
+                        "                    {{\n\
+                         \x20                       let mut max_node_dv = 0.0_f64;\n\
+                         \x20                       for i in 0..{n_nodes} {{ let dv = alpha * (v_new_s[i] - v_sub[i]); max_node_dv = max_node_dv.max(dv.abs()); }}\n\
+                         \x20                       let mut max_v = 0.0_f64;\n\
+                         \x20                       for i in 0..{n_nodes} {{ max_v = max_v.max(v_sub[i].abs()); }}\n\
+                         \x20                       let damp_thresh = 10.0_f64.max(max_v * 0.05);\n\
+                         \x20                       if max_node_dv > damp_thresh {{ alpha *= damp_thresh / max_node_dv; }}\n\
+                         \x20                   }}\n"
+                    ));
+                    emit_armijo_line_search(
+                        &mut code,
+                        "                    ",
+                        "v_sub",
+                        "v_new_s",
+                        "alpha",
+                        "a_sub",
+                        "rhs_s",
+                        "ls_ok",
+                    );
+                    code.push_str("                    if !ls_ok { break; }\n");
+                    code.push_str("                    let mut max_step = 0.0f64;\n");
+                    code.push_str("                    for i in 0..N_NODES { let step = v_new_s[i] - v_sub[i]; if step.abs() > max_step { max_step = step.abs(); } }\n");
+                    code.push_str("                    for i in 0..N { v_sub[i] += alpha * (v_new_s[i] - v_sub[i]); }\n");
+                } else {
+                    code.push_str("                    let mut max_step = 0.0f64;\n");
+                    code.push_str("                    for i in 0..N_NODES {\n");
+                    code.push_str("                        let step = v_new_s[i] - v_sub[i];\n");
+                    code.push_str(
+                        "                        if step.abs() > max_step { max_step = step.abs(); }\n",
+                    );
+                    code.push_str("                    }\n");
+                    code.push_str("                    v_sub = v_new_s;\n");
+                }
+                // Re-evaluate devices at the updated v_sub so i_nl_sub is consistent.
                 // Uses `_final` variant: reads v_nl_final, writes i_nl (no j_dev update).
-                code.push_str("                    // Re-extract i_nl at converged v\n");
+                code.push_str("                    // Re-extract i_nl at updated v\n");
                 code.push_str("                    let mut v_nl_final = [0.0f64; M];\n");
                 code.push_str(&emit_sparse_nv_matvec(
                     ir,
@@ -7955,7 +8236,15 @@ impl RustEmitter {
                 ));
                 Self::emit_nodal_device_evaluation_final(&mut code, ir, "                    ");
                 code.push_str("                    i_nl_sub = i_nl;\n");
-                code.push_str("                    if max_step < TOL + 1e-3 {\n");
+                // Convergence: raw (undamped) Newton step small AND — the always-
+                // checked precondition of the line search — the true node-KCL
+                // residual within tolerance, so a line-search-shrunk step can
+                // never report a non-root as converged.
+                if use_line_search {
+                    code.push_str("                    if max_step < TOL + 1e-3 && kcl_residual(&v_sub, &rhs_s, &a_sub, state).1 {\n");
+                } else {
+                    code.push_str("                    if max_step < TOL + 1e-3 {\n");
+                }
                 code.push_str("                        sub_converged = true;\n");
                 code.push_str("                        break;\n");
                 code.push_str("                    }\n");
@@ -8224,12 +8513,26 @@ impl RustEmitter {
                 );
                 code.push_str("            }\n\n");
 
+                // Armijo backtracking line search (BE site), on the BE matrices.
+                // Same globalization + `limited` gating as the trap loop.
+                if use_line_search {
+                    emit_armijo_line_search(
+                        &mut code, "            ", "v", "v_new", "alpha", "state.a_be", "rhs_be",
+                        "ls_ok",
+                    );
+                    code.push_str("            if !ls_ok { break; }\n");
+                    code.push_str("            let limited = alpha < 1.0;\n");
+                }
+
                 // Apply damped step and check convergence (compute delta before updating).
                 // Convergence check on nonlinear device nodes only (N_V nonzero columns),
                 // matching the trapezoidal NR path. Checking all N nodes includes VCCS rows
                 // for op-amps which may never satisfy the step criterion when op-amp outputs
                 // are railed — causing BE to loop to MAX_ITER perpetually.
                 code.push_str("            let mut be_step_exceeded = false;\n");
+                if use_line_search {
+                    code.push_str("            if !limited {\n");
+                }
                 {
                     let mut device_nodes: Vec<usize> = ir
                         .sparsity
@@ -8250,11 +8553,15 @@ impl RustEmitter {
                     }
                     device_nodes.sort();
                     device_nodes.dedup();
+                    let extra = if use_line_search { "    " } else { "" };
                     for &node in &device_nodes {
                         code.push_str(&format!(
-                        "            {{ let step = alpha * (v_new[{node}] - v[{node}]); let threshold = 1e-3 * v[{node}].abs().max((v[{node}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ be_step_exceeded = true; }} }}\n"
+                        "            {extra}{{ let step = alpha * (v_new[{node}] - v[{node}]); let threshold = 1e-3 * v[{node}].abs().max((v[{node}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ be_step_exceeded = true; }} }}\n"
                     ));
                     }
+                }
+                if use_line_search {
+                    code.push_str("            }\n");
                 }
                 code.push_str("            for i in 0..N { v[i] += alpha * (v_new[i] - v[i]); }\n");
 
@@ -8315,7 +8622,15 @@ impl RustEmitter {
                 code.push_str("                }\n");
                 code.push_str("            }\n\n");
 
-                code.push_str("            let be_converged = !be_step_exceeded;\n\n");
+                // Node-KCL residual gate (ALWAYS) — precondition of the BE line
+                // search, same rationale as the trap loop.
+                if use_line_search {
+                    code.push_str(
+                        "            let be_converged = !be_step_exceeded && kcl_residual(&v, &rhs_be, &state.a_be, state).1;\n\n",
+                    );
+                } else {
+                    code.push_str("            let be_converged = !be_step_exceeded;\n\n");
+                }
 
                 code.push_str("            if be_converged {\n");
                 code.push_str("                converged = true;\n");
