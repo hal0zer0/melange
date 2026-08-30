@@ -890,12 +890,16 @@ fn emit_armijo_line_search(
     amat: &str,
     rhs: &str,
     ls_ok: &str,
+    inl: &str,
 ) {
     code.push_str(&format!(
         "{indent}// Armijo backtracking line search on ||F|| along the limited Newton ray.\n\
          {indent}let mut {ls_ok} = true;\n\
          {indent}{{\n\
-         {indent}    let (r0, _) = kcl_residual(&{v}, &{rhs}, &{amat}, state);\n\
+         {indent}    // r0 = ||F({v})||: reuses the device currents `{inl}` the NR body\n\
+         {indent}    // already evaluated at this exact {v} (bit-identical to a fresh\n\
+         {indent}    // kcl_residual — same N_v·v, same device fn, no pnjlim on the eval).\n\
+         {indent}    let (r0, _) = kcl_residual_inl(&{v}, &{rhs}, &{amat}, &{inl});\n\
          {indent}    if r0.is_finite() && r0 > 1e-9 {{\n\
          {indent}        let mut s = 1.0_f64;\n\
          {indent}        let mut accepted = false;\n\
@@ -7096,42 +7100,70 @@ impl RustEmitter {
             code.push_str(
                 "fn kcl_residual(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], state: &CircuitState) -> (f64, bool) {\n",
             );
-            code.push_str("    let mut v_nl_final = [0.0f64; M];\n");
-            code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_final", "v", "    "));
-            code.push_str("    let mut i_nl = [0.0f64; M];\n");
-            Self::emit_nodal_device_evaluation_final(&mut code, ir, "    ");
-            code.push_str("    let mut q = [0.0f64; N];\n");
-            code.push_str(&emit_sparse_ni_matvec_add(ir, "q", "i_nl", "    "));
-            code.push_str("    let mut norm_sq = 0.0f64;\n");
-            code.push_str("    let mut ok = true;\n");
-            // The `A·v` term over node rows dominates this residual (it runs
-            // >=2x per NR iteration via the convergence gate + Armijo r0). Emit it
-            // sparsely over the structural nonzeros of the raw forward A — a
-            // byte-identical transform (skipped columns are structural zeros).
-            // Fall back to the dense sweep only when the forward matrices are
-            // unavailable.
+            // Shared residual tail: `q = N_i·i_nl`, then `||F||_2` over node rows
+            // with the sparse `A·v` matvec. Emitted verbatim into BOTH residual
+            // functions below, so `kcl_residual` (device-evaluating) and
+            // `kcl_residual_inl` (`i_nl` reused) are bit-for-bit identical past the
+            // point i_nl is available — the guarantee the r0 CSE rests on.
+            //
+            // The `A·v` term dominates this residual (it runs >=2x per NR iteration
+            // via the convergence gate + Armijo r0). Emit it sparsely over the
+            // structural nonzeros of the raw forward A — a byte-identical transform
+            // (skipped columns are structural zeros). Fall back to the dense sweep
+            // only when the forward matrices are unavailable.
+            let mut tail = String::new();
+            tail.push_str("    let mut q = [0.0f64; N];\n");
+            tail.push_str(&emit_sparse_ni_matvec_add(ir, "q", "i_nl", "    "));
+            tail.push_str("    let mut norm_sq = 0.0f64;\n");
+            tail.push_str("    let mut ok = true;\n");
             match emit_sparse_a_residual_matvec(ir, setter_stamps, n_nodes, "    ") {
-                Some(sparse) => code.push_str(&sparse),
+                Some(sparse) => tail.push_str(&sparse),
                 None => {
-                    code.push_str(&format!("    for i in 0..{n_nodes} {{\n"));
-                    code.push_str("        let mut acc = -rhs[i] - q[i];\n");
-                    code.push_str("        let mut den = rhs[i].abs().max(q[i].abs());\n");
-                    code.push_str("        for j in 0..N {\n");
-                    code.push_str("            let t = amat[i][j] * v[j];\n");
-                    code.push_str("            acc += t;\n");
-                    code.push_str("            let a = t.abs(); if a > den { den = a; }\n");
-                    code.push_str("        }\n");
-                    code.push_str("        norm_sq += acc * acc;\n");
+                    tail.push_str(&format!("    for i in 0..{n_nodes} {{\n"));
+                    tail.push_str("        let mut acc = -rhs[i] - q[i];\n");
+                    tail.push_str("        let mut den = rhs[i].abs().max(q[i].abs());\n");
+                    tail.push_str("        for j in 0..N {\n");
+                    tail.push_str("            let t = amat[i][j] * v[j];\n");
+                    tail.push_str("            acc += t;\n");
+                    tail.push_str("            let a = t.abs(); if a > den { den = a; }\n");
+                    tail.push_str("        }\n");
+                    tail.push_str("        norm_sq += acc * acc;\n");
                     // Per-node relative KCL tolerance: same RELTOL=1e-3 as the
                     // device and sat-inductor residual checks, with a 1e-9 A
                     // absolute floor so a node carrying ~zero net current does not
                     // demand an unreachable tolerance.
-                    code.push_str("        if !(acc.abs() <= 1e-3 * den + 1e-9) { ok = false; }\n");
-                    code.push_str("    }\n");
+                    tail.push_str("        if !(acc.abs() <= 1e-3 * den + 1e-9) { ok = false; }\n");
+                    tail.push_str("    }\n");
                 }
             }
-            code.push_str("    (norm_sq.sqrt(), ok)\n");
-            code.push_str("}\n\n");
+            tail.push_str("    (norm_sq.sqrt(), ok)\n");
+            tail.push_str("}\n\n");
+
+            // (1) Device-evaluating residual — used by the always-checked
+            // convergence gate (at v_new) and the Armijo backtrack trials (at
+            // v + s·alpha·d). Evaluates i_nl at N_v·v via the device model.
+            code.push_str("    let mut v_nl_final = [0.0f64; M];\n");
+            code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_final", "v", "    "));
+            code.push_str("    let mut i_nl = [0.0f64; M];\n");
+            Self::emit_nodal_device_evaluation_final(&mut code, ir, "    ");
+            code.push_str(&tail);
+
+            // (2) i_nl-reusing residual for the Armijo r0 only. The main NR body
+            // already evaluated i_nl at this exact v (same N_v·v — no pnjlim on the
+            // eval voltage, limiting is applied to the *step* — and the same
+            // #[inline(always)] device fn as `_final`), so F(v) is bit-identical to
+            // (1) without re-running the per-device parasitic inner-NR. Only r0
+            // qualifies: the convergence gate is at v_new and the backtrack trials
+            // are at v + s·alpha·d, both different v, and keep (1).
+            code.push_str(
+                "/// KCL residual reusing an already-computed `i_nl` (Armijo r0 CSE);\n\
+                 /// bit-identical to `kcl_residual` when `i_nl == i_nl(N_v·v)`.\n",
+            );
+            code.push_str("#[inline]\n");
+            code.push_str(
+                "fn kcl_residual_inl(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], i_nl: &[f64; M]) -> (f64, bool) {\n",
+            );
+            code.push_str(&tail);
         }
         code.push_str(&section_banner(
             "PROCESS SAMPLE (Full-nodal NR with LU solve)",
@@ -7698,6 +7730,7 @@ impl RustEmitter {
             if use_line_search {
                 emit_armijo_line_search(
                     &mut code, "        ", "v", "v_new", "alpha", "state.a", "rhs", "ls_ok",
+                    "i_nl",
                 );
                 code.push_str("        if !ls_ok { break; }\n");
                 code.push_str("        let limited = alpha < 1.0;\n");
@@ -7935,9 +7968,23 @@ impl RustEmitter {
             // consistency check above is a linearization test, not an equation
             // residual, so it cannot substitute for this.
             if use_line_search {
-                code.push_str(
-                    "        let converged_check = !max_step_exceeded && kcl_residual(&v, &rhs, &state.a, state).1;\n\n",
-                );
+                // Saving 1: the gate residual is at the committed `v`, where the
+                // device-chord check (guarded by the same `!max_step_exceeded`)
+                // already evaluated `i_nl_resid = i_nl(N_v·v)`. The mid-NR op-amp
+                // clamp (Hard) mutates `v` BEFORE that check, so `i_nl_resid` and
+                // this gate see the SAME post-clamp `v` — no eval between them.
+                // Reuse it via `kcl_residual_inl` (bit-identical to re-evaluating).
+                // `&&` short-circuits, so `i_nl_resid` is only read when it was
+                // populated (the `if !max_step_exceeded` branch ran).
+                if m > 0 {
+                    code.push_str(
+                        "        let converged_check = !max_step_exceeded && kcl_residual_inl(&v, &rhs, &state.a, &i_nl_resid).1;\n\n",
+                    );
+                } else {
+                    code.push_str(
+                        "        let converged_check = !max_step_exceeded && kcl_residual(&v, &rhs, &state.a, state).1;\n\n",
+                    );
+                }
             } else {
                 code.push_str("        let converged_check = !max_step_exceeded;\n\n");
             }
@@ -8209,6 +8256,7 @@ impl RustEmitter {
                         "a_sub",
                         "rhs_s",
                         "ls_ok",
+                        "i_nl",
                     );
                     code.push_str("                    if !ls_ok { break; }\n");
                     code.push_str("                    let mut max_step = 0.0f64;\n");
@@ -8518,7 +8566,7 @@ impl RustEmitter {
                 if use_line_search {
                     emit_armijo_line_search(
                         &mut code, "            ", "v", "v_new", "alpha", "state.a_be", "rhs_be",
-                        "ls_ok",
+                        "ls_ok", "i_nl",
                     );
                     code.push_str("            if !ls_ok { break; }\n");
                     code.push_str("            let limited = alpha < 1.0;\n");
