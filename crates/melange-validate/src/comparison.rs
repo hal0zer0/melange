@@ -136,7 +136,9 @@ impl Signal {
 pub struct ComparisonConfig {
     /// RMS error tolerance (e.g., 0.001 = 0.1% of full scale)
     pub rms_error_tolerance: f64,
-    /// Peak error tolerance (e.g., 0.01 = 10mV for 1V signal)
+    /// Peak error tolerance as an absolute bound in volts (e.g., 0.01 = 10mV).
+    /// Each test pins this to its own signal scale — a wider-swinging circuit
+    /// sets a proportionally larger bound.
     pub peak_error_tolerance: f64,
     /// Maximum relative error tolerance (e.g., 0.01 = 1%)
     pub max_relative_tolerance: f64,
@@ -144,8 +146,6 @@ pub struct ComparisonConfig {
     pub correlation_min: f64,
     /// THD error tolerance in dB (e.g., 1.0 dB)
     pub thd_error_tolerance_db: f64,
-    /// Full scale reference for relative error calculations
-    pub full_scale: f64,
     /// Skip THD computation (faster for large signals)
     pub skip_thd: bool,
     /// Settle window in seconds: this many seconds are excluded from the
@@ -182,7 +182,6 @@ impl Default for ComparisonConfig {
             max_relative_tolerance: 0.03, // 3%
             correlation_min: 0.9999,      // 4 nines — the real match anchor
             thd_error_tolerance_db: 1.5,  // 1.5 dB
-            full_scale: 1.0,              // Assume 1V full scale by default
             skip_thd: false,
             settle_time_s: 0.0,
         }
@@ -198,7 +197,6 @@ impl ComparisonConfig {
             max_relative_tolerance: 0.001, // 0.1%
             correlation_min: 0.99999,
             thd_error_tolerance_db: 0.1, // 0.1 dB
-            full_scale: 1.0,
             skip_thd: false,
             settle_time_s: 0.0,
         }
@@ -212,7 +210,6 @@ impl ComparisonConfig {
             max_relative_tolerance: 0.05, // 5%
             correlation_min: 0.999,
             thd_error_tolerance_db: 3.0, // 3 dB
-            full_scale: 1.0,
             skip_thd: false,
             settle_time_s: 0.0,
         }
@@ -417,19 +414,31 @@ pub fn compare_signals(
         actual.clone()
     };
 
-    // Use the shorter length, warn if mismatch
+    // Compare over the shorter length, but a real length mismatch is a FAILURE,
+    // not a warning: a melange run that exits early (or emits a truncated
+    // buffer) produces a short signal whose overlap can still match the
+    // reference perfectly, so comparing only the overlap would pass a circuit
+    // that never finished. We still compute every metric on the overlap (useful
+    // diagnostics) and fold the mismatch into `failures` below so it fails
+    // loudly. Tolerance: resampling to a different rate rounds the sample count
+    // by at most a sample, so allow a couple samples plus 0.1% slack; anything
+    // beyond that is a content-length defect, not rounding.
     let len = reference.len().min(resampled_actual.len());
-    if reference.len() != resampled_actual.len() {
+    let length_failure: Option<String> = {
         let diff = (reference.len() as isize - resampled_actual.len() as isize).unsigned_abs();
-        if diff > 1 {
-            log::warn!(
-                "Signal length mismatch: reference={} vs actual={} (diff={})",
+        let allowed = 2 + reference.len() / 1000;
+        if diff > allowed {
+            Some(format!(
+                "Signal length mismatch: reference={} vs actual={} (diff={}, allowed={})",
                 reference.len(),
                 resampled_actual.len(),
-                diff
-            );
+                diff,
+                allowed
+            ))
+        } else {
+            None
         }
-    }
+    };
 
     // Settle-window exclusion: skip the first `settle_time_s` seconds of
     // BOTH signals symmetrically before computing any metric. A window
@@ -540,6 +549,7 @@ pub fn compare_signals(
     // 5. Normalized RMS Error (relative to reference RMS over the same
     //    settled window the error was measured on)
     let ref_rms = (ref_slice.iter().map(|&s| s * s).sum::<f64>() / len as f64).sqrt();
+    let act_rms = (act_slice.iter().map(|&s| s * s).sum::<f64>() / len as f64).sqrt();
     let normalized_rms_error = if ref_rms > 1e-12 {
         rms_error / ref_rms
     } else {
@@ -562,10 +572,26 @@ pub fn compare_signals(
         act_denom += act_diff * act_diff;
     }
 
-    let correlation_coefficient = if ref_denom > 0.0 && act_denom > 0.0 {
+    // A constant signal has zero sum-of-squared-deviations, but subtracting a
+    // mean that isn't exactly representable leaves a tiny fp residue, so test
+    // against a floor rather than exact zero. The floor (1e-20 V²) sits far
+    // below any real audio signal's deviation energy (a 10 pV sine already
+    // clears it) yet far above mean-subtraction rounding.
+    const CORR_CONST_FLOOR: f64 = 1e-20;
+    let ref_constant = ref_denom <= CORR_CONST_FLOOR;
+    let act_constant = act_denom <= CORR_CONST_FLOOR;
+    let correlation_coefficient = if !ref_constant && !act_constant {
         num / (ref_denom.sqrt() * act_denom.sqrt())
+    } else if ref_constant && act_constant {
+        // Both signals are constant — trivially correlated. Whether their
+        // constant values agree is an amplitude question, caught by peak_error.
+        1.0
     } else {
-        1.0 // Both signals are constant
+        // Exactly one signal is constant while the other varies: a live
+        // reference against a dead/stuck melange output (or vice versa). There
+        // is no linear relationship — scoring this 1.0 masked a flatlined
+        // output. Report zero so the correlation gate fails it.
+        0.0
     };
 
     // 7. SNR in dB (remove DC offset before computing power for proper AC SNR)
@@ -593,6 +619,27 @@ pub fn compare_signals(
 
     // Determine pass/fail
     let mut failures = Vec::new();
+
+    // A truncated / early-exit actual signal (captured before the overlap
+    // metrics above) fails regardless of how well the overlap matched.
+    if let Some(msg) = length_failure {
+        failures.push(msg);
+    }
+
+    // Silent-reference consistency: when the reference carries essentially no
+    // signal, the relative metrics (max_relative_error, normalized_rms_error)
+    // fall back to their "undefined → 0" sentinels and pass everything, so a
+    // spurious melange output below the absolute peak tolerance would slip
+    // through. Require the actual to be equally silent. The floor is absolute
+    // (1 µV RMS): a reference below it is numerically DC, and any real melange
+    // output against it is signal-from-nothing.
+    const SILENCE_RMS_FLOOR: f64 = 1e-6;
+    if ref_rms <= SILENCE_RMS_FLOOR && act_rms > SILENCE_RMS_FLOOR {
+        failures.push(format!(
+            "Reference is silent (RMS {:.3e} V) but actual is not (RMS {:.3e} V exceeds {:.0e} V floor)",
+            ref_rms, act_rms, SILENCE_RMS_FLOOR
+        ));
+    }
 
     if normalized_rms_error > config.rms_error_tolerance {
         failures.push(format!(
@@ -969,5 +1016,86 @@ mod tests {
         assert!(strict.rms_error_tolerance < default.rms_error_tolerance);
         assert!(default.rms_error_tolerance < relaxed.rms_error_tolerance);
         assert!(strict.correlation_min > default.correlation_min);
+    }
+
+    #[test]
+    fn length_mismatch_fails_even_when_overlap_matches() {
+        // A truncated actual whose overlap matches the reference perfectly used
+        // to pass (only the shorter length was compared). It must now FAIL: a
+        // short signal is an early-exit / truncated-buffer defect.
+        let fs = 44100.0;
+        let full: Vec<f64> = (0..1000)
+            .map(|i| (2.0 * PI * 1000.0 * i as f64 / fs).sin())
+            .collect();
+        let reference = Signal::new(full.clone(), fs, "reference");
+        let actual = Signal::new(full[..500].to_vec(), fs, "actual"); // half length
+        let config = ComparisonConfig {
+            skip_thd: true,
+            ..ComparisonConfig::strict()
+        };
+        let report = compare_signals(&reference, &actual, &config);
+        assert!(!report.passed, "half-length actual must fail");
+        assert!(
+            report.failures.iter().any(|f| f.contains("length mismatch")),
+            "expected a length-mismatch failure, got {:?}",
+            report.failures
+        );
+        // Overlap really did match — the failure is length, not content.
+        assert!(
+            report.correlation_coefficient > 0.9999,
+            "overlap should correlate: {}",
+            report.correlation_coefficient
+        );
+    }
+
+    #[test]
+    fn silent_reference_with_nonsilent_actual_fails() {
+        // Reference numerically DC (0 V), actual a tiny CONSTANT offset that is
+        // below the peak tolerance and leaves both signals constant (so the
+        // correlation sentinel is a passing 1.0 and RMS/max-rel hit their
+        // silent-reference 0 sentinels). Without the silent-reference gate this
+        // signal-from-nothing slips through; with it, it fails.
+        let n = 1000;
+        let reference = Signal::new(vec![0.0; n], 44100.0, "reference");
+        let actual = Signal::new(vec![5e-6; n], 44100.0, "actual"); // 5 µV DC
+        let config = ComparisonConfig {
+            skip_thd: true,
+            ..ComparisonConfig::default()
+        };
+        let report = compare_signals(&reference, &actual, &config);
+        // Isolate the gate: peak passes (5µV << 20mV) and correlation passes
+        // (both constant → 1.0), so only the silence gate can fail it.
+        assert!(report.peak_error < config.peak_error_tolerance);
+        assert!((report.correlation_coefficient - 1.0).abs() < 1e-12);
+        assert!(!report.passed, "silent ref vs live actual must fail");
+        assert!(
+            report.failures.iter().any(|f| f.contains("silent")),
+            "expected a silent-reference failure, got {:?}",
+            report.failures
+        );
+    }
+
+    #[test]
+    fn constant_actual_against_live_reference_scores_zero_correlation() {
+        // A dead/stuck (constant) melange output against a live reference used
+        // to score correlation 1.0 (the "both constant" sentinel fired on the
+        // one-sided case). It must now score 0.0 so the correlation gate fails.
+        let fs = 44100.0;
+        let reference: Vec<f64> = (0..1000)
+            .map(|i| (2.0 * PI * 1000.0 * i as f64 / fs).sin())
+            .collect();
+        let r = Signal::new(reference, fs, "reference");
+        let a = Signal::new(vec![0.5; 1000], fs, "actual"); // flatlined
+        let config = ComparisonConfig {
+            skip_thd: true,
+            ..ComparisonConfig::default()
+        };
+        let report = compare_signals(&r, &a, &config);
+        assert!(
+            report.correlation_coefficient.abs() < 1e-12,
+            "one-sided constant must score zero correlation, got {}",
+            report.correlation_coefficient
+        );
+        assert!(!report.passed, "flatlined actual must fail");
     }
 }

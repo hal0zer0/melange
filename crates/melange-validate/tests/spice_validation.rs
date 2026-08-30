@@ -94,7 +94,6 @@ fn strict_linear_config() -> ComparisonConfig {
         max_relative_tolerance: 0.5, // 50% — relative error is large near zero-crossings
         correlation_min: 0.99999,  // Five 9s
         thd_error_tolerance_db: 0.1, // 0.1 dB
-        full_scale: 1.0,
         skip_thd: false,
         settle_time_s: 0.0,
     }
@@ -123,7 +122,6 @@ fn nonlinear_config() -> ComparisonConfig {
         max_relative_tolerance: 5.0, // 500% — near zero-crossings, large relative error expected
         correlation_min: 0.9999,   // was 0.99; worst measured 1-corr = 9.7e-6 → 10.3x headroom
         thd_error_tolerance_db: 1.0, // was 3.0; worst measured 0.04 dB → 25x headroom
-        full_scale: 5.0,           // Diode clippers can hit 5V
         skip_thd: false,
         settle_time_s: 0.0,
     }
@@ -149,7 +147,6 @@ fn bjt_config() -> ComparisonConfig {
         max_relative_tolerance: 100.0, // near zero-crossings
         correlation_min: 0.995,        // was 0.99; measured 1-corr = 3.5e-4 → 14x headroom
         thd_error_tolerance_db: 5.0,   // model differences in distortion
-        full_scale: 10.0,              // BJT CE output can swing wider
         skip_thd: true,                // THD comparison not meaningful for nonlinear BJT
         // 3 ms settle on the 10 ms signal: excludes the DC-blocker/DC-OP
         // startup region while keeping 70% of the window. (The 5 Hz blocker
@@ -173,7 +170,6 @@ fn wurli_config() -> ComparisonConfig {
         max_relative_tolerance: 100.0, // near zero-crossings
         correlation_min: 0.9999,       // was 0.99; measured 1-corr = 2.7e-6 → 37x headroom
         thd_error_tolerance_db: 5.0,
-        full_scale: 10.0,
         skip_thd: true,
         // 10 ms settle on a 50 ms signal: comfortably excludes the residual
         // startup region while keeping 80% of the window.
@@ -203,7 +199,6 @@ fn neve_output_config() -> ComparisonConfig {
         max_relative_tolerance: 100.0, // near zero-crossings
         correlation_min: 0.9999,       // measured 1-corr = 4.8e-7 → 208x headroom
         thd_error_tolerance_db: 5.0,
-        full_scale: 10.0,
         skip_thd: true,
         settle_time_s: 0.010,
     }
@@ -229,7 +224,6 @@ fn neve_preamp_config() -> ComparisonConfig {
         max_relative_tolerance: 100.0, // near zero-crossings
         correlation_min: 0.99999,      // measured 1-corr < 5e-9 → >2000x headroom
         thd_error_tolerance_db: 5.0,
-        full_scale: 10.0,
         skip_thd: true,
         settle_time_s: 0.064,
     }
@@ -995,7 +989,6 @@ fn test_jfet_common_source_vs_spice() {
         max_relative_tolerance: 5.0,
         correlation_min: 0.999,
         thd_error_tolerance_db: 5.0, // DK method produces different harmonics than SPICE
-        full_scale: 5.0,
         skip_thd: false,
         settle_time_s: 0.0,
     };
@@ -1036,7 +1029,6 @@ fn test_mosfet_common_source_vs_spice() {
         max_relative_tolerance: 5.0,
         correlation_min: 0.9999,
         thd_error_tolerance_db: 5.0,
-        full_scale: 5.0,
         skip_thd: true, // small-signal linear region: THD too low to measure reliably
         settle_time_s: 0.0,
     };
@@ -1587,7 +1579,6 @@ fn test_rc_lowpass_step_response() {
         max_relative_tolerance: 1e4, // near zero-crossings
         correlation_min: 0.9999,     // was 0.999; measured 1-corr = 7.6e-7 → 131x headroom
         thd_error_tolerance_db: 5.0,
-        full_scale: 1.0,
         skip_thd: true, // square wave THD is not meaningful
         settle_time_s: 0.0,
     };
@@ -1653,7 +1644,6 @@ fn test_rc_lowpass_chirp() {
         max_relative_tolerance: 1e4, // near zero-crossings, relative error is huge
         correlation_min: 0.9999,     // waveform shape should still match well
         thd_error_tolerance_db: 5.0,
-        full_scale: 1.0,
         skip_thd: true, // chirp has no meaningful THD
         settle_time_s: 0.0,
     };
@@ -2057,7 +2047,6 @@ fn main() {
         max_relative_tolerance: 50.0, // near zero-crossings under modulation
         correlation_min: 0.999,       // measured 1-corr = 8.2e-5 → 12x headroom
         thd_error_tolerance_db: 5.0,
-        full_scale: 1.0,
         skip_thd: true, // modulation sidebands, not harmonics — THD is meaningless
         settle_time_s: 0.0,
     };
@@ -2122,7 +2111,6 @@ fn test_triode_cc_vs_spice() {
         max_relative_tolerance: 0.05,
         correlation_min: 0.999,
         thd_error_tolerance_db: 5.0,
-        full_scale: 1.0,
         skip_thd: true, // small-signal triode: solver-parity test, not distortion
         settle_time_s: 0.02,
     };
@@ -2199,7 +2187,6 @@ fn test_triode_cc_overdrive_vs_spice() {
         max_relative_tolerance: 0.02,
         correlation_min: 0.999,
         thd_error_tolerance_db: 5.0,
-        full_scale: 1.0,
         skip_thd: true, // overdriven triode: solver-parity test, not distortion
         settle_time_s: 0.1,
     };
