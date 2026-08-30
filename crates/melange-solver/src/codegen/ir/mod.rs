@@ -1784,11 +1784,21 @@ impl CircuitIR {
         // Measured 2026-08-30 across the 42-circuit golden corpus: the DK-routed
         // auto-BE population is 5 promotions (gold-press @192k os=4; noyce ×4),
         // ALL of them the Nyquist sign-flip case (rho ≈ 1.0000..1.0002,
-        // dominant_sign < 0) — high-gain cap-coupled tube cascades with an fs/2
-        // limit cycle, NOT trap-unstable (rho > TRAP_BE_PROMOTION_RHO). The
-        // router's non-deflated rho-only power method cannot see a rho≈1 negative
-        // mode, so it correctly keeps these on DK; BE-on-DK damps the limit cycle.
-        // All 5 are golden-verified. No reroute is warranted for this population.
+        // dominant_sign < 0), NOT trap-unstable (rho > TRAP_BE_PROMOTION_RHO). The
+        // router's power method measures the eigenvalue MAGNITUDE fine (|lambda| ≈
+        // 1.0) — what it lacks is a dominant-sign discriminator, and its only test
+        // is rho > 1.002, so a mode at z ≈ -0.9999 reads as a magnitude safely
+        // under threshold and correctly does NOT trip a trap-instability reroute.
+        // Magnitude alone is the wrong question for the Nyquist case; the router
+        // is not asking the sign question at all. These 5 promotions are not mere
+        // threshold-straddlers: the sign-flip clause of `trap_needs_be` also gates
+        // on max|S| > NYQUIST_GATE_MAX_ABS_S, calibrated to fire only where the
+        // fs/2 limit cycle is AUDIBLE (a 2-stage BJT preamp at max|S| ≈ 3e4 stays
+        // on trap with a µV cycle; a 3× triode cascade at ≈5e5 needs BE). BE works
+        // because the DK BE RHS drops the `N_i·i_nl_prev` stamp that seeds the
+        // mode. All 5 are golden-verified. No reroute is warranted: wiring this
+        // analyzer into the router's `dk_unstable` would move 5 working circuits
+        // onto the costlier nodal full-LU path for zero correctness benefit.
         //
         // Gated on `m > 0`: passive linear circuits (M=0) are inherently stable
         // under trap-rule discretization — the bilinear transform preserves
