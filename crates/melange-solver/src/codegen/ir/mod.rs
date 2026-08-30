@@ -1762,10 +1762,33 @@ impl CircuitIR {
         };
 
         // Auto-detect stiffness: if the trapezoidal time-stepping operator S*A_neg
-        // has spectral radius > 1.001 (above stability boundary), the circuit
-        // is too stiff for trapezoidal and needs backward Euler.
-        // Note: for DK codegen, auto_be=true means the circuit should be routed
-        // to the nodal solver instead (BE on DK still diverges for high-S circuits).
+        // has spectral radius > TRAP_BE_PROMOTION_RHO (above the stability
+        // boundary), or is Nyquist-marginal (rho > TRAP_BE_SIGN_FLIP_RHO with a
+        // negative dominant eigenvalue), the circuit is too stiff for trapezoidal
+        // and needs backward Euler. See `trap_needs_be` for the exact predicate.
+        //
+        // Reaching this on a DK build is the estimator-disagreement case, not the
+        // normal one. `routing::auto_route` already sends trap-unstable circuits
+        // (`dk_unstable`) and high-|S| circuits (`s_ill_conditioned`) to the nodal
+        // path (see routing.rs) — the reroute is the primary mechanism and it
+        // happens upstream. But the router measures with a fixed-iteration power
+        // method and no input deflation, while this block uses the converged,
+        // input-deflated analyzer (`analyze_trap_stability_deflated`); the two
+        // straddle the threshold in both directions (cf. the router-hint
+        // discussion at the nodal auto-BE site). So a DK build lands here only
+        // when the router's cruder estimate said DK was safe and the better one
+        // disagrees, or when DK was forced. BE-on-DK is the rescue for that
+        // residual population; it is not the intended handling for a circuit the
+        // router would have rerouted.
+        //
+        // Measured 2026-08-30 across the 42-circuit golden corpus: the DK-routed
+        // auto-BE population is 5 promotions (gold-press @192k os=4; noyce ×4),
+        // ALL of them the Nyquist sign-flip case (rho ≈ 1.0000..1.0002,
+        // dominant_sign < 0) — high-gain cap-coupled tube cascades with an fs/2
+        // limit cycle, NOT trap-unstable (rho > TRAP_BE_PROMOTION_RHO). The
+        // router's non-deflated rho-only power method cannot see a rho≈1 negative
+        // mode, so it correctly keeps these on DK; BE-on-DK damps the limit cycle.
+        // All 5 are golden-verified. No reroute is warranted for this population.
         //
         // Gated on `m > 0`: passive linear circuits (M=0) are inherently stable
         // under trap-rule discretization — the bilinear transform preserves
