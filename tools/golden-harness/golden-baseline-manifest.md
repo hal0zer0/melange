@@ -1,6 +1,6 @@
 # Golden Baseline Manifest — melange-generated circuits shipped in oomox
 
-Generated 2026-07-21. Verified against melange **8945b67** (installed `melange` binary built from HEAD).
+Generated 2026-07-21. Refreshed 2026-08-30 against melange **e53573c** (correctness-sweep HEAD, melange 0.1.3). Superseded interim baseline **83bf48d** (carried the tungsten-thunder-horse line-search regression, fixed by e53573c). Prior baseline: **8945b67**.
 
 Machine-readable twin: `tools/golden-harness/golden-baseline-manifest.json`.
 
@@ -20,13 +20,14 @@ auto-tuner, not from `--max-iter`.
 
 ## Verification protocol
 
-Each compile_cmd was executed into scratch space and diffed byte-for-byte against the checked-in oomox file. EXACT = byte-identical. DRIFT-EXPLAINED = every diff hunk attributable to known post-regen melange commits (146d51b emitted clippy-allow header; a472807 two-draw shot noise; 49ecaa4 deterministic coupled-inductor augmented-row ordering) AND anchors (N, M, OVERSAMPLING_FACTOR, INPUT_NODE, OUTPUT_NODES, OUTPUT_SCALES, INPUT_RESISTANCE, SAMPLE_RATE, full setter list, noise fns) verified identical. No hand-edited generated files were found.
+Each compile_cmd was executed into scratch space and diffed byte-for-byte against the checked-in oomox file. EXACT = byte-identical. DRIFT-EXPLAINED = every diff hunk attributable to known post-regen melange commits (146d51b clippy-allow header; a472807 two-draw shot noise; 49ecaa4 coupled-inductor augmented-row ordering; **correctness-sweep 0c70d44 + 83bf48d + e53573c nodal-NR globalization**) AND anchors (N, M, OVERSAMPLING_FACTOR, INPUT_NODE, OUTPUT_NODES, OUTPUT_SCALES, INPUT_RESISTANCE, SAMPLE_RATE, full setter list, noise fns) verified identical. No hand-edited generated files were found.
 
 Status legend:
 - **EXACT** — byte-identical regen at melange HEAD.
 - **DRIFT (header)** — differs only by the 4 clippy-allow header lines added in melange `146d51b` (post-regen).
 - **DRIFT (hdr+shot)** — header plus the `a472807` two-draw shot-noise change (`noise_shot_w_prev` state + draw-loop restructure).
 - **DRIFT (hdr+shot+rows)** — additionally the `49ecaa4` deterministic coupled-inductor augmented-row ordering (row permutation + FP last-digit wiggle).
+- **DRIFT (+nr-global)** — additionally the correctness-sweep NR globalization (`0c70d44` + `83bf48d` + `e53573c`): new `kcl_residual`/`kcl_residual_inl` + Armijo line search, old adaptive sub-step fallback removed, `MAX_ITER`→100, and (`e53573c`) line-search failure falls through instead of bailing. Emitted on every deck carrying an inner nodal/behavioral NR loop; see the Correctness sweep section for the three sub-forms and audio result.
 - **UNRESOLVED** — cannot be reproduced from any available netlist (see Gaps).
 
 ## Manifest
@@ -47,10 +48,10 @@ Status legend:
 | noyce | `plugins/noyce/src/sources/carbon_comp_bank/circuit.rs` | `unstable/gimmicks/noyce-carbon-comp-bank.cir` | `--noise full --emit-dc-op-recompute` | EXACT | dk | 11 | 0 | 0 | 0 | 0 | full |
 | noyce | `plugins/noyce/src/sources/clean_rc/circuit.rs` | `unstable/gimmicks/noyce-clean-rc.cir` | `--noise full --emit-dc-op-recompute` | EXACT | dk | 2 | 0 | 0 | 0 | 0 | full |
 | noyce | `plugins/noyce/src/sources/ef86/circuit.rs` | `unstable/gimmicks/noyce-ef86.cir` | `--noise full --emit-dc-op-recompute` | EXACT | dk | 8 | 2 | 0 | 0 | 0 | full |
-| noyce | `plugins/noyce/src/sources/germanium_cluster/circuit.rs` | `unstable/gimmicks/noyce-germanium-cluster.cir` | `--noise full` | EXACT | nodal | 10 | 6 | 0 | 0 | 0 | full |
+| noyce | `plugins/noyce/src/sources/germanium_cluster/circuit.rs` | `unstable/gimmicks/noyce-germanium-cluster.cir` | `--noise full` | DRIFT (+nr-global) | nodal | 10 | 6 | 0 | 0 | 0 | full |
 | noyce | `plugins/noyce/src/sources/jrc4558/circuit.rs` | `unstable/gimmicks/noyce-4558.cir` | `--noise full --emit-dc-op-recompute` | EXACT | dk | 5 | 0 | 0 | 0 | 0 | full |
 | noyce | `plugins/noyce/src/sources/smps_ripple/circuit.rs` | `unstable/gimmicks/noyce-smps-ripple.cir` | `--noise full --emit-dc-op-recompute` | EXACT | dk | 10 | 2 | 0 | 0 | 0 | full |
-| noyce | `plugins/noyce/src/sources/tape_head/circuit.rs` | `unstable/gimmicks/noyce-tape-head.cir` | `--noise full` | EXACT | nodal | 11 | 2 | 0 | 0 | 0 | full |
+| noyce | `plugins/noyce/src/sources/tape_head/circuit.rs` | `unstable/gimmicks/noyce-tape-head.cir` | `--noise full` | DRIFT (max-iter) | nodal | 11 | 2 | 0 | 0 | 0 | full |
 | noyce | `plugins/noyce/src/sources/transformer_triode/circuit.rs` | `unstable/gimmicks/noyce-transformer-triode.cir` | `--noise full` | DRIFT (hdr+shot+rows) | nodal | 18 | 2 | 0 | 0 | 0 | full |
 | noyce | `plugins/noyce/src/sources/triode_12ax7/circuit.rs` | `unstable/gimmicks/noyce-triode-12ax7.cir` | `--noise full --emit-dc-op-recompute` | EXACT | dk | 7 | 2 | 0 | 0 | 0 | full |
 | noyce | `plugins/noyce/src/sources/zener_junction/circuit.rs` | `unstable/gimmicks/noyce-zener-junction.cir` | `--noise full --emit-dc-op-recompute` | EXACT | dk | 5 | 1 | 0 | 0 | 0 | full |
@@ -76,7 +77,63 @@ Status legend:
 | vurli | `plugins/vurli/src/comp/circuit.rs` | `unstable/dynamics/vurli-leveler.cir` | `--emit-dc-op-recompute` | DRIFT (header) | dk | 10 | 2 | 1 | 0 | 0 | — |
 | warpony | `plugins/warpony/src/circuit.rs` | `unstable/pedals/warpony.cir` | `--noise shot` | DRIFT (hdr+shot) | nodal | 30 | 14 | 6 | 0 | 0 | shot |
 
-Counts: 42 generated files across 22 plugin trees — 11 EXACT, 30 DRIFT-EXPLAINED, 1 UNRESOLVED.
+Counts: 42 generated files across 22 plugin trees — 9 EXACT, 32 DRIFT-EXPLAINED, 1 UNRESOLVED (at e53573c; germanium-cluster and tape-head flipped EXACT→DRIFT under the NR globalization).
+
+## Correctness sweep (2026-08-30) — refresh main (ee8841e) → correctness-sweep HEAD (e53573c)
+
+Full golden-harness audio capture+compare (level-0.1 V programs) plus per-circuit
+generated-code diff. **Every generated-output change across the corpus is attributable
+to the nodal-NR globalization (`0c70d44` + `83bf48d` + `e53573c`); zero unattributable
+changes.**
+
+> **Regression + fix note.** The interim `83bf48d` baseline carried a
+> tungsten-thunder-horse line-search regression (idle output collapsed to 0.0). `e53573c`
+> (arbiter-endorsed) makes a line-search **failure** fall through instead of bailing to the
+> removed fallback, and tungsten re-converges to main. The `83bf48d`→`e53573c` compare is
+> **surgical**: only tungsten changed (181 identical, 0 other circuits affected), inverting
+> the regression almost exactly (step −10.465 dB, silence −5.851 dB).
+
+**Audio compare (main vs fixed HEAD e53573c):** 171 identical, 11 negligible, 4 CHANGED,
+1 missing (qapla-1a, unresolvable — see Gaps). **No DK deck changed audibly** — the fix
+is nodal-only for audio, as designed.
+
+- **tungsten-thunder-horse** (`unstable/pedals/tungsten-thunder-horse.cir`, nodal N=37 M=14) —
+  **RESOLVED / re-converged to main.** vs main: silence −0.012 dB (corr 0.9978), step
+  −0.004 dB (corr 0.9992), sweep +0.017 dB (corr 0.9926); sine1k + potsweep negligible
+  (corr 1.0). Idle noise floor and levels restored. Not bit-identical, so silence/step/sweep
+  still trip the strict CHANGED classifier at tiny magnitude; the residual is **benign** —
+  signal-dependent idle shot-noise realization (idle output is pure amplified shot noise, so
+  an FP-level operating-point difference reshuffles the noise samples) + HF-clip phase wiggle
+  on the near-Nyquist sweep tail. (dr-debuggenshmirtz measured step Δ≈6e-4 vs main on the
+  **deterministic** no-noise signal; the harness runs `--noise shot`, hence the larger captured
+  idle residual.) Codegen still carries the NR globalization, so the deck stays DRIFT-EXPLAINED.
+- **uniquorn** (`unstable/pedals/uniquorn.cir`, nodal N=46 M=12) — **TRIVIAL**: potsweep only,
+  +0.002 dB, corr 0.999748, sub-mV tail drift on the harder-converging pot positions
+  (unchanged from the 83bf48d compare). Benign.
+
+**Codegen-drift classes** (from per-circuit `circuit.rs` diff at e53573c; membership identical at the interim 83bf48d):
+
+- **nr_globalization_full** (residual+Armijo fns added, MAX_ITER→100): funkyinduct, moonladder,
+  noyce-germanium-cluster, noyce-transformer-triode, periodic-pedal, pretty-baby, sad-bastard,
+  sus-bus, the-kicker, tungsten-thunder-horse, uniquorn, uniquorn-power (12).
+- **nr_globalization_substep_removed** (old adaptive sub-step fallback deleted, MAX_ITER→100,
+  no residual fn): subspace/radio-am, subspace/radio-fm (2).
+- **max_iter_const_only** (only the MAX_ITER 50|70→100 const + its provenance echo):
+  basic-bitch, five-watt-freddie, noyce-tape-head, pipe-shouter, tungsten-glow, velvet-elvis,
+  warpony (7).
+- **identical** (no correctness-sweep drift): gold-press ×5, noyce ×9 (4558, amp-at-idle,
+  boiler-room, carbon-comp-bank, clean-rc, ef86, smps-ripple, triode-12ax7, zener-junction),
+  series-of-tubes ×2, tungsten-thunder-horse cascade/edge (orphan modules), vcr-audio, vurli (20).
+
+**Other sweep commits produced NO drift here** (verified by content diff at e53573c):
+`63cee6e` (DC-OP candidate retention) changed zero DC_OP/DC_NL_I constants — no corpus circuit
+hit the leaky-gate degenerate case; `be7be88` (independent current-source sign) is inert — no
+corpus deck has an explicit `I` element.
+
+**Caveat:** MAX_ITER→100 is not strictly nodal-only at the codegen level — it also reached
+velvet-elvis and radio-fm (manifest-labelled dk). Both are audio-identical (raising an
+already-satisfied iteration cap changes no converged output), so the audio-level nodal-only
+claim holds.
 
 ## Regen provenance
 
