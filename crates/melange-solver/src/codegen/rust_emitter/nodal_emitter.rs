@@ -870,9 +870,22 @@ fn emit_sparse_a_residual_matvec(
 /// (c = 1e-4). On acceptance `{alpha}` is multiplied by `s` (a no-op when
 /// `s == 1`, so a sample that already takes the full limited step is unaffected).
 /// If no `s` down to the floor satisfies Armijo — a non-descent / near-singular
-/// direction — `{ls_ok}` is set false; the caller must NOT accept the step
-/// (breaking to the next fallback) so the loop cannot silently commit a
-/// non-root iterate.
+/// direction — `{ls_ok}` is set false. The caller then takes the un-line-searched
+/// step (`{alpha}` keeps its pnjlim/node-damping limiter value, since `{alpha} *= s`
+/// runs only on acceptance) and CONTINUES the loop. It is the always-checked
+/// `||F||` residual gate — NOT the line search — that prevents committing a
+/// non-root iterate: the gate rejects any iterate whose true equation residual is
+/// not within tolerance, so a failed search can never smuggle a bad state through.
+/// The prior behavior (break to the sub-step / BE fallback on failure) was strictly
+/// worse: the residual gate already closed the false-convergence hole, and the bail
+/// routed an otherwise-recoverable iterate into the least-protected fallback, where
+/// it could limit-cycle. Contract (arbiter thread 252): a line search may only
+/// HELP; its failure must be no worse than not having it.
+///
+/// The guard `if r0.is_finite() && r0 > 1e-9` means a non-finite or already-tiny
+/// r0 SKIPS the search, leaving `{ls_ok}` true. So `{ls_ok} == false` is
+/// specifically "searched and failed" — exactly what `diag_ls_fail_count` counts;
+/// it is a surfaced expected event on stiff circuits, not a masked hole.
 ///
 /// This is the globalization that turns the limit-cycle divergence on stiff
 /// high-gain feedback amplifiers into monotone convergence. It is paired with
@@ -2872,6 +2885,18 @@ impl RustEmitter {
         code.push_str("    pub diag_substep_count: u64,\n");
         code.push_str("    /// Diagnostic: number of LU refactorizations performed\n");
         code.push_str("    pub diag_refactor_count: u64,\n");
+        code.push_str(
+            "    /// Diagnostic: number of NR iterations whose Armijo line search was\n\
+             \x20   /// searched and failed (no `s` down to the 2^-10 floor met the\n\
+             \x20   /// sufficient-decrease test on a finite r0 > 1e-9). On such an\n\
+             \x20   /// iteration the loop takes the un-line-searched pnjlim/damp-limited\n\
+             \x20   /// step and continues; the always-checked residual gate still decides\n\
+             \x20   /// convergence. This is an expected event on stiff high-gain circuits,\n\
+             \x20   /// not an error — it is surfaced (not silenced) so the fall-through is\n\
+             \x20   /// observable. A non-finite or <=1e-9 r0 skips the search entirely and\n\
+             \x20   /// does NOT count here (ls_ok stays true).\n",
+        );
+        code.push_str("    pub diag_ls_fail_count: u64,\n");
         code.push_str("    /// Diagnostic: number of samples hit by the global voltage-damping\n");
         code.push_str("    /// safety net. This is a legacy safeguard that scales v_new toward\n");
         code.push_str("    /// v_prev when any node moves more than ~2V (or 5% of max DC OP) in\n");
@@ -3336,6 +3361,7 @@ impl RustEmitter {
         code.push_str("            diag_magnitude_reset_count: 0,\n");
         code.push_str("            diag_substep_count: 0,\n");
         code.push_str("            diag_refactor_count: 0,\n");
+        code.push_str("            diag_ls_fail_count: 0,\n");
         code.push_str("            diag_voltage_damp_count: 0,\n");
         if ir.solver_config.runtime_be_latch {
             code.push_str("            be_x_prev: 0.0,\n");
@@ -3618,6 +3644,7 @@ impl RustEmitter {
         code.push_str("        self.diag_voltage_damp_count = 0;\n");
         code.push_str("        self.diag_substep_count = 0;\n");
         code.push_str("        self.diag_refactor_count = 0;\n");
+        code.push_str("        self.diag_ls_fail_count = 0;\n");
         if ir.solver_config.runtime_be_latch {
             code.push_str("        self.be_x_prev = 0.0;\n");
             code.push_str("        self.be_r1_num = 0.0;\n");
@@ -7722,17 +7749,23 @@ impl RustEmitter {
             // Armijo backtracking line search (trap site): scales the already-
             // limited step along the ray v -> v + alpha*(v_new-v) to enforce a
             // monotone node-KCL residual decrease. On a non-descent direction the
-            // search fails and we abandon the trap solve so the sub-step / BE
-            // fallback runs. `limited` records whether any limiting (pnjlim,
-            // node-damping, or the search) shrank alpha below 1, which gates the
-            // voltage-step convergence check below (a limited step's small size is
-            // not evidence of convergence — only the residual gate is).
+            // search fails (ls_ok=false); the loop then takes the un-line-searched
+            // pnjlim/node-damping-limited step (alpha keeps its limiter value; the
+            // `alpha *= s` scaling only runs on acceptance) and CONTINUES — the
+            // always-checked residual gate below, not a bail, decides convergence.
+            // A line search may only help; its failure must be no worse than not
+            // having it (arbiter thread 252). `limited` records whether pnjlim or
+            // node-damping shrank alpha below 1, gating the voltage-step check (a
+            // limited step's small size is not evidence of convergence — only the
+            // residual gate is). Left as `alpha < 1.0` so a fall-through's natural
+            // value is used unchanged (do NOT force it true — that would SKIP the
+            // step check and be more permissive, the opposite of intended).
             if use_line_search {
                 emit_armijo_line_search(
                     &mut code, "        ", "v", "v_new", "alpha", "state.a", "rhs", "ls_ok",
                     "i_nl",
                 );
-                code.push_str("        if !ls_ok { break; }\n");
+                code.push_str("        if !ls_ok { state.diag_ls_fail_count += 1; }\n");
                 code.push_str("        let limited = alpha < 1.0;\n");
             }
 
@@ -8258,7 +8291,10 @@ impl RustEmitter {
                         "ls_ok",
                         "i_nl",
                     );
-                    code.push_str("                    if !ls_ok { break; }\n");
+                    // Fall-through on Armijo failure (see trap site): take the
+                    // un-line-searched limited step and continue; the residual gate
+                    // decides convergence. A line search may only help.
+                    code.push_str("                    if !ls_ok { state.diag_ls_fail_count += 1; }\n");
                     code.push_str("                    let mut max_step = 0.0f64;\n");
                     code.push_str("                    for i in 0..N_NODES { let step = v_new_s[i] - v_sub[i]; if step.abs() > max_step { max_step = step.abs(); } }\n");
                     code.push_str("                    for i in 0..N { v_sub[i] += alpha * (v_new_s[i] - v_sub[i]); }\n");
@@ -8562,13 +8598,15 @@ impl RustEmitter {
                 code.push_str("            }\n\n");
 
                 // Armijo backtracking line search (BE site), on the BE matrices.
-                // Same globalization + `limited` gating as the trap loop.
+                // Same globalization + `limited` gating + fall-through as the trap
+                // loop: on Armijo failure take the un-line-searched limited step and
+                // continue; the residual gate decides convergence.
                 if use_line_search {
                     emit_armijo_line_search(
                         &mut code, "            ", "v", "v_new", "alpha", "state.a_be", "rhs_be",
                         "ls_ok", "i_nl",
                     );
-                    code.push_str("            if !ls_ok { break; }\n");
+                    code.push_str("            if !ls_ok { state.diag_ls_fail_count += 1; }\n");
                     code.push_str("            let limited = alpha < 1.0;\n");
                 }
 
