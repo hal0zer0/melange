@@ -1173,7 +1173,8 @@ fn generate_lib_rs(
         compute_vst3_id(circuit_name)
     };
     let vendor = escape_rust_string_literal(options.vendor.unwrap_or("Melange"));
-    let url = escape_rust_string_literal(options.url.unwrap_or("https://github.com/hal0zer0/melange"));
+    let url =
+        escape_rust_string_literal(options.url.unwrap_or("https://github.com/hal0zer0/melange"));
     let email = escape_rust_string_literal(options.email.unwrap_or("josh@nobledarkgames.com"));
     let params_struct = generate_params_struct(
         with_level_params,

@@ -41,7 +41,10 @@ fn behavioral_source_sets_behavioral_blocker() {
          B1 n1 0 I={tanh(5.0*V(in)) * 1.0e-3}\n\
          R1 n1 0 1k\n",
     );
-    assert!(d.behavioral, "behavioral B-source must set routing.behavioral");
+    assert!(
+        d.behavioral,
+        "behavioral B-source must set routing.behavioral"
+    );
     assert_eq!(d.route, SolverRoute::Nodal);
 }
 

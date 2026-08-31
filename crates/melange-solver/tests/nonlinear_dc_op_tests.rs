@@ -1879,8 +1879,7 @@ fn test_ge_pnp_low_bias_recovered_by_retention() {
     assert!(
         result.converged,
         "retention must recover the low-bias OP (method={:?}, iters={})",
-        result.method,
-        result.iterations
+        result.method, result.iterations
     );
     let v_e1 = result.v_node[mna.node_map["e1"] - 1];
     // ngspice-42: v(e1)=7.262 V. A value near the 8 V rail would mean a degenerate

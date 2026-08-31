@@ -1036,7 +1036,10 @@ mod tests {
         let report = compare_signals(&reference, &actual, &config);
         assert!(!report.passed, "half-length actual must fail");
         assert!(
-            report.failures.iter().any(|f| f.contains("length mismatch")),
+            report
+                .failures
+                .iter()
+                .any(|f| f.contains("length mismatch")),
             "expected a length-mismatch failure, got {:?}",
             report.failures
         );

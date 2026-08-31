@@ -6,8 +6,8 @@
 //! and voltage limiting.
 
 use super::dk_emitter::{
-    effective_max_iter, emit_inject_rhs_stamp, emit_inject_substep_stamp, emit_inject_tap_constants,
-    emit_warmup_call, NoiseEmission,
+    effective_max_iter, emit_inject_rhs_stamp, emit_inject_substep_stamp,
+    emit_inject_tap_constants, emit_warmup_call, NoiseEmission,
 };
 use super::helpers::{
     device_param_template_data, emit_pentode_nr_dk_stamp, emit_stateful_default_fields,
@@ -7762,8 +7762,7 @@ impl RustEmitter {
             // step check and be more permissive, the opposite of intended).
             if use_line_search {
                 emit_armijo_line_search(
-                    &mut code, "        ", "v", "v_new", "alpha", "state.a", "rhs", "ls_ok",
-                    "i_nl",
+                    &mut code, "        ", "v", "v_new", "alpha", "state.a", "rhs", "ls_ok", "i_nl",
                 );
                 code.push_str("        if !ls_ok { state.diag_ls_fail_count += 1; }\n");
                 code.push_str("        let limited = alpha < 1.0;\n");
@@ -8269,7 +8268,11 @@ impl RustEmitter {
                     // Limiting keeps the iterate where the Jacobian is valid.
                     code.push_str("                    let v_new = v_new_s;\n");
                     code.push_str("                    let mut alpha = 1.0_f64;\n");
-                    Self::emit_nodal_voltage_limiting_indented(&mut code, ir, "                    ");
+                    Self::emit_nodal_voltage_limiting_indented(
+                        &mut code,
+                        ir,
+                        "                    ",
+                    );
                     code.push_str(&format!(
                         "                    {{\n\
                          \x20                       let mut max_node_dv = 0.0_f64;\n\
@@ -8294,7 +8297,9 @@ impl RustEmitter {
                     // Fall-through on Armijo failure (see trap site): take the
                     // un-line-searched limited step and continue; the residual gate
                     // decides convergence. A line search may only help.
-                    code.push_str("                    if !ls_ok { state.diag_ls_fail_count += 1; }\n");
+                    code.push_str(
+                        "                    if !ls_ok { state.diag_ls_fail_count += 1; }\n",
+                    );
                     code.push_str("                    let mut max_step = 0.0f64;\n");
                     code.push_str("                    for i in 0..N_NODES { let step = v_new_s[i] - v_sub[i]; if step.abs() > max_step { max_step = step.abs(); } }\n");
                     code.push_str("                    for i in 0..N { v_sub[i] += alpha * (v_new_s[i] - v_sub[i]); }\n");
@@ -8603,8 +8608,15 @@ impl RustEmitter {
                 // continue; the residual gate decides convergence.
                 if use_line_search {
                     emit_armijo_line_search(
-                        &mut code, "            ", "v", "v_new", "alpha", "state.a_be", "rhs_be",
-                        "ls_ok", "i_nl",
+                        &mut code,
+                        "            ",
+                        "v",
+                        "v_new",
+                        "alpha",
+                        "state.a_be",
+                        "rhs_be",
+                        "ls_ok",
+                        "i_nl",
                     );
                     code.push_str("            if !ls_ok { state.diag_ls_fail_count += 1; }\n");
                     code.push_str("            let limited = alpha < 1.0;\n");

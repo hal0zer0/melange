@@ -9,6 +9,94 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-08-30
+
+A correctness-sweep release: solver-accuracy and codegen-honesty fixes, no new
+features. The headline is a globalized nodal Newton-Raphson (residual-gated
+convergence + Armijo line search) that fixes a real MIC-drive limit cycle, plus
+a batch of narrower correctness fixes across MNA stamping, DC-OP retention,
+routing guards, and the parser. The validate harness also got its grading
+tightened.
+
+**Generated DSP output is not byte-identical to 0.1.3.** The change that moves
+the compiled audio path is the **nodal NR globalization** (see Changed): it
+alters the generated code for circuits routed to the **full-nodal solver with
+`M > 0`** (the nodal full-LU path). Concretely, across melange's own golden
+corpus every generated-output change this cycle is attributable to that one
+change — there are zero unattributable diffs — and the corpus audio impact is
+tiny and benign (only two decks move audibly at all: a sub-mV pot-position tail
+on `uniquorn`, and an idle shot-noise reshuffle on `tungsten-thunder-horse`;
+both re-converge to the pre-sweep result, neither is a regression).
+
+**Who needs to regenerate.** Anything routed to the **DK method is unaffected**
+and regenerates byte-identically. Anything routed to the **nodal solver with
+`M > 0`** changes (more correctly). For the one shipped downstream, OpenWurli:
+`gen_preamp.rs` is **DK-routed and unaffected**; `gen_power_amp.rs` (nodal,
+N=20 M=14) and `gen_tremolo.rs` (nodal, N=7 M=4) **will change if regenerated
+against 0.1.4** — the change adds the residual gate + line search and is
+more-correct, but any downstream that pins generated code should regenerate
+deliberately and re-audition. MSRV is unchanged (1.85).
+
+### Changed
+
+- **Nodal Newton-Raphson is now globalized: residual-gated convergence with an
+  Armijo line search.** The nodal full-LU path previously accepted a step on a
+  bare step-size check, which allowed a limit cycle on hard-driving inputs (the
+  motivating case: a MIC-drive stage that never settled). Convergence is now
+  gated on the actual residual, and each step is backtracked with an Armijo line
+  search; on line-search failure the solver **falls through** to the
+  un-line-searched limited step (the residual gate still decides convergence)
+  rather than bailing to a removed fallback. This changes generated output for
+  nodal `M > 0` circuits and is the reason this release is not byte-identical to
+  0.1.3. Device evaluations inside the residual gate are reused (no extra
+  per-iteration cost from the gate itself); measured throughput of the bundled
+  passive-EQ demo (nodal N=52 M=8) is ~25x realtime at 48 kHz on a Ryzen 9
+  7950X, unchanged from 0.1.3 within rounding.
+- **`melange validate` grading hardened.** The comparison harness now fails on a
+  reference/actual **length mismatch** (previously silently truncated), rejects a
+  **silent reference** (a near-zero reference can no longer manufacture a passing
+  correlation), and closes a **one-sided-constant correlation** hole where a flat
+  actual signal could correlate spuriously. A dead `full_scale` config field was
+  removed. Validation-only — no effect on generated DSP.
+
+### Fixed
+
+- **Independent current-source sign corrected to match SPICE/ngspice.** MNA
+  stamping of independent current sources used the wrong sign; it now matches the
+  SPICE/ngspice convention. Changes output only for circuits that use an
+  independent current source (none in the OpenWurli signal path or the golden
+  corpus at the captured settings).
+- **Zero-delay feedback resolved in `TptLpf` (ZDF one-pole).** The topology-
+  preserving one-pole had an unresolved zero-delay feedback path; it is now
+  solved directly. Affects circuits whose generated code uses this primitive
+  (e.g. oversampling filter paths).
+- **DC operating point retains converged candidates instead of discarding them
+  on a leaky gate.** A too-eager gate could throw away a genuinely-converged
+  low-bias operating point; converged candidates are now retained, improving DC
+  bias correctness on marginal circuits.
+- **Coupled-inductor determinant division is guarded, and 0-ohm switch/pot
+  overrides are handled.** A coupled-inductor block with a near-singular
+  determinant, and a switch/pot override that drives a resistor to 0 ohm, no
+  longer produce a divide/degenerate result.
+- **Routing guards, so a mis-routed compile errors instead of emitting wrong
+  code:** DK backward-Euler is rejected when the circuit has companion-modeled
+  inductors; a forced `--solver dk` on a structurally-nodal circuit is rejected
+  with a clear error; source-dropping fallbacks no longer run on behavioral
+  circuits.
+- **Parser rejects a `.runtime R` and a `.switch` claiming the same resistor**
+  (previously accepted, with undefined precedence).
+- **CLI escapes `--vendor` / `--vendor-url` / `--email` / `--clap-id`** when
+  interpolating them into generated code, so a value containing quotes or
+  backslashes can no longer break (or inject into) the generated project.
+- **`validate` no longer mistakes the SPICE title line for a VIN source** when
+  stripping the input for the ngspice twin.
+
+### Documentation
+
+- Corrected several aidoc/code mismatches found during the sweep, and grounded
+  the DC-OP Gmin-gate rationale in ngspice behavior rather than a single fixture.
+  Doc-only.
+
 ## [0.1.3] - 2026-08-26
 
 The "melange demos itself" release: a self-contained built-in demo circuit,
@@ -324,7 +412,8 @@ measured real hardware. Everything else is unproven against hardware. See
   KiCad file; no effect on netlist compilation, generated code, or shipped plugins. The
   fix (`quick-xml >= 0.41`) is tracked for 0.1.1.
 
-[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/hal0zer0/melange/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/hal0zer0/melange/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/hal0zer0/melange/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/hal0zer0/melange/compare/v0.1.0...v0.1.1

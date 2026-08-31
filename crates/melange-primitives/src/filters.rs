@@ -578,7 +578,10 @@ mod tests {
         let mut yh = 0.0;
         for _ in 0..2000 {
             yh = hot.process(1.0);
-            assert!(yh.abs() < 10.0, "TptLpf must stay bounded above fs/4, got {yh}");
+            assert!(
+                yh.abs() < 10.0,
+                "TptLpf must stay bounded above fs/4, got {yh}"
+            );
         }
         assert!(
             (yh - 1.0).abs() < 1e-6,
