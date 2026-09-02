@@ -128,6 +128,23 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
     // NFB circuit could otherwise sail through to DkSchur and diverge.
     // Dimensions with an all-zero N_i column (MOSFET insulated gate, VCA
     // control port) have K[i][i] = 0 by construction and are benign.
+    // ⚠ DO NOT harmonise this `>= 0.0` with nodal_emitter.rs's `> 0.0`, and do
+    // not collapse the two predicates into one shared value. They read
+    // DIFFERENT matrices — this one sees the DK kernel and the pre-expansion
+    // `MnaSystem`, the emitter's sees the IR built after
+    // `expand_bjt_internal_nodes` — and they feed different decisions
+    // (DK-vs-nodal here, Schur-vs-full-LU there).
+    //
+    // MEASURED 2026-09-02 across the whole netlist library
+    // (`tests/f7_routing_predicate_reachability_tests.rs`, run with
+    // `--include-ignored`): the sign difference is REACHABLE, contrary to the
+    // prediction that it was measure-zero. 20 dimensions across 8 circuits
+    // carry `K[i][i]` bit-exactly `0.0` on a LIVE `N_i` column — including
+    // wurli-power-amp, which belongs to the only shipped product. Adopting this
+    // `>= 0.0` in the emitter would newly flag all 20 and move the
+    // Schur-vs-full-LU decision on those circuits. (The sibling
+    // `1e-30`/`1e-20` magnitude difference IS unreachable: zero hits anywhere.)
+    // The test pins both counts; if either moves, redo the reasoning first.
     let k_diag_unsafe = if !dk_failed && m > 0 {
         (0..m).any(|i| {
             kernel.k[i * m + i] >= 0.0 && mna.n_i.iter().any(|ni_row| ni_row[i].abs() >= 1e-30)

@@ -1543,6 +1543,13 @@ impl RustEmitter {
 
         // Compute use_full_nodal flag FIRST — needed by emit_nodal_state for hot/cold split.
         let m = ir.topology.m;
+        // ⚠ `> 0.0` here is NOT a typo for routing.rs's `>= 0.0`. See the
+        // matching note at `codegen/routing.rs` (k_diag_unsafe) and
+        // `tests/f7_routing_predicate_reachability_tests.rs`. The two sites read
+        // different matrices and feed different decisions, and the sign
+        // difference is MEASURED reachable: 20 dimensions across 8 circuits have
+        // `K[i][i] == 0.0` with a live `N_i` column, so harmonising the spellings
+        // would move the Schur-vs-full-LU decision on real, shipped circuits.
         let has_positive_k_with_current = if m > 0 {
             (0..m).any(|i| {
                 let k_ii = ir.matrices.k[i * m + i];
