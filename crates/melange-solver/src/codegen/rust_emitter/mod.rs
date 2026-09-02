@@ -98,17 +98,23 @@ impl Emitter for RustEmitter {
     }
 
     fn emit(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
-        use super::ir::SolverMode;
+        self.validate(ir)?;
+        let (code, _sub_path) = self.emit_inner(ir)?;
+        Ok(collapse_blank_lines(&code))
+    }
+}
 
+impl RustEmitter {
+    /// Reject node indices that fall outside the original circuit nodes.
+    fn validate(&self, ir: &CircuitIR) -> Result<(), CodegenError> {
         let n = ir.topology.n;
-        // n_nodes: original circuit node count. Fallback to n for backward compat (n_nodes=0 in old data).
+        // n_nodes: original circuit node count. Fallback to n for backward
+        // compat (n_nodes=0 in old data).
         let n_nodes = if ir.topology.n_nodes > 0 {
             ir.topology.n_nodes
         } else {
             n
         };
-
-        // Validate node indices against original circuit nodes (not augmented dimension)
         for &in_node in &ir.solver_config.input_node_indices() {
             if in_node >= n_nodes {
                 return Err(CodegenError::InvalidConfig(format!(
@@ -125,12 +131,36 @@ impl Emitter for RustEmitter {
                 )));
             }
         }
+        Ok(())
+    }
 
-        let code = match ir.solver_mode {
-            SolverMode::Dk => self.emit_dk(ir)?,
-            SolverMode::Nodal => self.emit_nodal(ir)?,
-        };
+    /// Emit, additionally reporting which nodal sub-path was taken.
+    ///
+    /// `Emitter::emit` returns only the source, so this inherent method exists
+    /// for callers that need the decision as well. The pipeline uses it to fill
+    /// `CodegenMeta::nodal_sub_path`, which keeps the emitter the single source
+    /// of truth: it reports what it generated rather than the pipeline
+    /// re-deriving what it thinks the emitter should have generated.
+    pub fn emit_with_meta(
+        &self,
+        ir: &CircuitIR,
+    ) -> Result<(String, Option<super::NodalSubPath>), CodegenError> {
+        self.validate(ir)?;
+        let (code, sub_path) = self.emit_inner(ir)?;
+        Ok((collapse_blank_lines(&code), sub_path))
+    }
 
-        Ok(collapse_blank_lines(&code))
+    fn emit_inner(
+        &self,
+        ir: &CircuitIR,
+    ) -> Result<(String, Option<super::NodalSubPath>), CodegenError> {
+        use super::ir::SolverMode;
+        match ir.solver_mode {
+            SolverMode::Dk => Ok((self.emit_dk(ir)?, None)),
+            SolverMode::Nodal => {
+                let (code, sp) = self.emit_nodal(ir)?;
+                Ok((code, Some(sp)))
+            }
+        }
     }
 }

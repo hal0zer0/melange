@@ -33,7 +33,6 @@ use crate::mna::MnaSystem;
 use crate::parser::Netlist;
 
 #[cfg(feature = "codegen")]
-use emitter::Emitter;
 #[cfg(feature = "codegen")]
 use ir::CircuitIR;
 #[cfg(feature = "codegen")]
@@ -147,6 +146,42 @@ impl OpampRailMode {
 
 #[cfg(feature = "codegen")]
 impl std::fmt::Display for OpampRailMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Which nodal sub-path the emitter actually generated.
+///
+/// The DK-vs-nodal route is decided in [`routing::auto_route`], but the choice
+/// *within* the nodal path is made by the emitter from the finished IR. It was
+/// previously not reported anywhere, which made it unobservable: a netlist
+/// author could not confirm a circuit reached full-LU, and neither could a
+/// golden baseline. Returned from the emitter (rather than recomputed in the
+/// pipeline) so there is exactly one source of truth — the emitter reports what
+/// it did rather than the pipeline predicting what it should have done.
+#[cfg(feature = "codegen")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NodalSubPath {
+    /// Schur-complement reduction: the M-dimensional nonlinear solve.
+    Schur,
+    /// Dense N x N LU over the full augmented system.
+    FullLu,
+}
+
+#[cfg(feature = "codegen")]
+impl NodalSubPath {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NodalSubPath::Schur => "schur",
+            NodalSubPath::FullLu => "full-lu",
+        }
+    }
+}
+
+#[cfg(feature = "codegen")]
+impl std::fmt::Display for NodalSubPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -617,11 +652,11 @@ pub struct GeneratedCode {
 ///
 /// Every field here is actually populated by the codegen pipeline (the CLI
 /// consumes a subset today; the rest are available for diagnostics without
-/// `RUST_LOG=info`). The Schur-vs-full-LU sub-path decision is NOT surfaced
-/// here: it is made inside the nodal emitter from the finished IR, and
-/// duplicating that gate in the pipeline would create a second source of
-/// truth that could silently diverge from what the emitter actually did.
-/// Surfacing it honestly means returning it from the emitter — future work.
+/// `RUST_LOG=info`). The Schur-vs-full-LU sub-path decision IS now surfaced,
+/// in `nodal_sub_path` — and it is surfaced the way this comment used to
+/// prescribe: **returned from the emitter**, not recomputed here. Recomputing
+/// it in the pipeline would create a second source of truth that could silently
+/// diverge from what the emitter actually did.
 #[cfg(feature = "codegen")]
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
@@ -656,12 +691,24 @@ pub struct CodegenMeta {
     pub sparse_lu_density: f64,
     /// Whether parasitic caps were auto-inserted.
     pub parasitic_caps_inserted: bool,
+    /// Which nodal sub-path the emitter actually generated, reported BY the
+    /// emitter. `None` on the DK path (no sub-path applies).
+    ///
+    /// This used to be unreported, which made it unobservable: a netlist author
+    /// could not confirm a circuit reached full-LU, and no golden baseline could
+    /// pin it, so a change that silently moved a circuit between sub-paths was
+    /// undetectable.
+    pub nodal_sub_path: Option<NodalSubPath>,
 }
 
 /// Build the codegen metadata block from the finished IR. Shared by the
 /// DK-with-DC-OP and nodal generate paths, which built it identically.
 #[cfg(feature = "codegen")]
-fn build_codegen_meta(ir: &CircuitIR, parasitic_caps_inserted: bool) -> CodegenMeta {
+fn build_codegen_meta(
+    ir: &CircuitIR,
+    parasitic_caps_inserted: bool,
+    nodal_sub_path: Option<NodalSubPath>,
+) -> CodegenMeta {
     let backward_euler_auto = ir.integrator_selection == ir::IntegratorSelection::BeAuto;
     CodegenMeta {
         backward_euler_auto,
@@ -679,6 +726,7 @@ fn build_codegen_meta(ir: &CircuitIR, parasitic_caps_inserted: bool) -> CodegenM
         sparse_lu_enabled: ir.sparsity.lu.is_some(),
         sparse_lu_density: ir.sparsity.g_aug_density,
         parasitic_caps_inserted,
+        nodal_sub_path,
     }
 }
 
@@ -840,13 +888,13 @@ impl CodeGenerator {
             maybe_insert_parasitic_caps(mna, &mut patched_mna, "Codegen");
 
         let ir = CircuitIR::from_kernel_with_dc_op(kernel, mna, netlist, &self.config, dc_op)?;
-        let code = RustEmitter::new()?.emit(&ir)?;
+        let (code, nodal_sub_path) = RustEmitter::new()?.emit_with_meta(&ir)?;
 
         Ok(GeneratedCode {
             code,
             n: ir.topology.n,
             m: ir.topology.m,
-            meta: build_codegen_meta(&ir, parasitic_caps_inserted),
+            meta: build_codegen_meta(&ir, parasitic_caps_inserted, nodal_sub_path),
         })
     }
 
@@ -1019,13 +1067,13 @@ impl CodeGenerator {
             maybe_insert_parasitic_caps(mna, &mut patched_mna, "Codegen nodal");
 
         let ir = CircuitIR::from_mna(mna, netlist, &self.config)?;
-        let code = RustEmitter::new()?.emit(&ir)?;
+        let (code, nodal_sub_path) = RustEmitter::new()?.emit_with_meta(&ir)?;
 
         Ok(GeneratedCode {
             code,
             n: ir.topology.n,
             m: ir.topology.m,
-            meta: build_codegen_meta(&ir, parasitic_caps_inserted),
+            meta: build_codegen_meta(&ir, parasitic_caps_inserted, nodal_sub_path),
         })
     }
 }

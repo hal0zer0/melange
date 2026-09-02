@@ -2081,6 +2081,12 @@ fn compile_circuit_source(
         generated.n, generated.m
     );
     println!("    Solver: {} ({})", solver_label, solver_reason);
+    // Which nodal sub-path the emitter actually took. Reported by the emitter,
+    // not re-derived here. Without this a deck authored to reach full-LU could
+    // silently sit on Schur with nothing to reveal it.
+    if let Some(sp) = generated.meta.nodal_sub_path {
+        println!("    Nodal sub-path: {sp}");
+    }
     if routing.spectral_radius > 0.0 {
         println!("    Spectral radius: {:.4}", routing.spectral_radius);
     }

@@ -1532,7 +1532,13 @@ impl RustEmitter {
     ///
     /// Shared with DK: header, device models, SPICE limiting, safe_exp.
     /// Nodal-specific: constants, state, process_sample, LU solve, set_sample_rate.
-    pub(super) fn emit_nodal(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
+    /// Emit the nodal solver. Returns the code and the sub-path actually taken,
+    /// so the choice is observable instead of being an unreported internal
+    /// decision (see [`crate::codegen::NodalSubPath`]).
+    pub(super) fn emit_nodal(
+        &self,
+        ir: &CircuitIR,
+    ) -> Result<(String, crate::codegen::NodalSubPath), CodegenError> {
         let mut code = String::new();
 
         // Compute use_full_nodal flag FIRST — needed by emit_nodal_state for hot/cold split.
@@ -1878,7 +1884,12 @@ impl RustEmitter {
             code.push_str(&Self::emit_inject_wrapper_1x(ir));
         }
 
-        Ok(code)
+        let sub_path = if use_full_nodal {
+            crate::codegen::NodalSubPath::FullLu
+        } else {
+            crate::codegen::NodalSubPath::Schur
+        };
+        Ok((code, sub_path))
     }
 
     /// Emit constants section for nodal solver.
