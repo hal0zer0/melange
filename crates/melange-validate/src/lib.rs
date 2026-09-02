@@ -46,6 +46,7 @@ use std::path::Path;
 use thiserror::Error;
 
 pub mod comparison;
+pub(crate) mod pentode_translate;
 pub mod spice_runner;
 pub(crate) mod tube_translate;
 pub mod visualizer;
