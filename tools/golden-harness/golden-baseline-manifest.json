@@ -1118,6 +1118,75 @@
       "noise_mode": "off",
       "emit_dc_op_recompute": false,
       "notes": "COVERAGE-ONLY entry \u2014 no oomox plugin counterpart, so no circuit_rs and no byte-diff protocol applies. Added 2026-09-02 because this is the ONLY deck anywhere with SVAR>0, i.e. the only circuit exercising the variable-mu pentode path. melange 5b2451c fixed resolve_pentode_params silently discarding MU_B/SVAR/EX_B (a var-mu pentode compiled sharp); verified DEVICE_0_SVAR=0.083 now emits where it was previously absent. Without this entry that fix ships with zero golden coverage. Anchors measured at 5b2451c with a freshly built binary. Deck is committed in melange-circuits (4def5f6), so the reference is reproducible."
+    },
+    {
+      "plugin": "mosfet-source-follower",
+      "cir": "unstable/modules/mosfet-source-follower.cir",
+      "compile_cmd": "melange compile ../melange-circuits/unstable/modules/mosfet-source-follower.cir --format code -o /dev/null",
+      "verify_status": "COVERAGE-ONLY",
+      "anchors": {
+        "n": 7,
+        "m": 2,
+        "oversampling": 1,
+        "solver": "dk",
+        "sample_rate": 48000
+      },
+      "has_pots": false,
+      "num_pots": 0,
+      "has_switches": false,
+      "num_switches": 0,
+      "has_runtime_r": false,
+      "runtime_r_setters": [],
+      "has_noise": false,
+      "noise_mode": "off",
+      "emit_dc_op_recompute": false,
+      "notes": "COVERAGE-ONLY entry \u2014 no oomox plugin counterpart, so no circuit_rs and no byte-diff protocol applies. Added 2026-09-02. Authored by melange-circuits (2a92742, branch publish-prep) to close the MOSFET/JFET corpus hole: both device models were implemented and SPICE-validated but used by ZERO circuits anywhere, so the codegen refactor's flagship 'do not collapse' hazard had no circuit-level coverage at all. DK Schur. Bulk tied to GROUND (M1 vcc gate src 0), not to source, so Vsb is live and the body-effect term is genuinely exercised \u2014 a discrete BS170/2N7000 straps bulk to source internally and has NO body effect, so do not 'fix' the netlist to bulk-to-source: that silently deletes this coverage. This deck pins the DK evaluation point: vsb is computed ONCE PER SAMPLE from v_pred (1 site). Pair with mosfet-choke-load, which pins the nodal one."
+    },
+    {
+      "plugin": "mosfet-choke-load",
+      "cir": "unstable/amp/mosfet-choke-load.cir",
+      "compile_cmd": "melange compile ../melange-circuits/unstable/amp/mosfet-choke-load.cir --format code -o /dev/null",
+      "verify_status": "COVERAGE-ONLY",
+      "anchors": {
+        "n": 10,
+        "m": 2,
+        "oversampling": 1,
+        "solver": "nodal",
+        "sample_rate": 48000
+      },
+      "has_pots": false,
+      "num_pots": 0,
+      "has_switches": false,
+      "num_switches": 0,
+      "has_runtime_r": false,
+      "runtime_r_setters": [],
+      "has_noise": false,
+      "noise_mode": "off",
+      "emit_dc_op_recompute": false,
+      "notes": "COVERAGE-ONLY entry \u2014 no oomox plugin counterpart, so no circuit_rs and no byte-diff protocol applies. Added 2026-09-02. Authored by melange-circuits (2a92742, branch publish-prep) to close the MOSFET/JFET corpus hole: both device models were implemented and SPICE-validated but used by ZERO circuits anywhere, so the codegen refactor's flagship 'do not collapse' hazard had no circuit-level coverage at all. Nodal, sub-path FULL-LU \u2014 earned, not arranged: the choke saturates because chokes saturate (ISAT is a property of the part), no dummy B-source. This deck pins the nodal evaluation point: vsb is recomputed FROM THE LIVE NR ITERATE at THREE sites (main NR loop, sub-step, BE fallback), versus DK's single once-per-sample-from-v_pred site. That difference is the exact collapse an over-abstracted device-eval IR would make, and it is now detectable. \u26a0 PIN THE SUB-PATH, NOT THE ROUTING REASON: this deck first routed full-lu via 'trapezoidal unstable (spectral radius 1.0027 > 1.002)' and now routes via 'saturating inductors require augmented MNA' after winding self-capacitance was added for physical accuracy. Same sub-path, different first-match arm."
+    },
+    {
+      "plugin": "jfet-booster",
+      "cir": "unstable/pedals/jfet-booster.cir",
+      "compile_cmd": "melange compile ../melange-circuits/unstable/pedals/jfet-booster.cir --format code -o /dev/null",
+      "verify_status": "COVERAGE-ONLY",
+      "anchors": {
+        "n": 8,
+        "m": 2,
+        "oversampling": 1,
+        "solver": "dk",
+        "sample_rate": 48000
+      },
+      "has_pots": true,
+      "num_pots": 2,
+      "has_switches": false,
+      "num_switches": 0,
+      "has_runtime_r": false,
+      "runtime_r_setters": [],
+      "has_noise": false,
+      "noise_mode": "off",
+      "emit_dc_op_recompute": false,
+      "notes": "COVERAGE-ONLY entry \u2014 no oomox plugin counterpart, so no circuit_rs and no byte-diff protocol applies. Added 2026-09-02. Authored by melange-circuits (2a92742, branch publish-prep) to close the MOSFET/JFET corpus hole: both device models were implemented and SPICE-validated but used by ZERO circuits anywhere, so the codegen refactor's flagship 'do not collapse' hazard had no circuit-level coverage at all. DK Schur. Single-stage clean boost, +21.2 dB inverting, Id 171 uA. Closes the JFET half of the hole. NOTE from the author: melange REJECTS 'VP' on a JFET .model card (VTO is the key) \u2014 the deck still biases correctly only because the model name resolves in the built-in catalogue, which supplies the pinch-off. A card with a silently dropped parameter and a correct card therefore produce identical results for different reasons."
     }
   ]
 }
