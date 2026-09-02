@@ -284,7 +284,7 @@ SPICE Netlist ─┐
 KiCad XML ─────┘
 ```
 
-`CircuitIR` is language-agnostic and serializable. The current emitter targets Rust; C++ and FAUST are planned. The `Emitter` trait is public, so if you need a target that isn't on that list, the door is open and nobody is stopping you.
+`CircuitIR` is language-agnostic and serializable. The current emitter targets Rust; a C++ backend is in progress. FAUST was explored and ruled out: FAUST's generated code is deliberately not Turing-complete, so it cannot express a Newton-Raphson solve with a data-dependent iteration count — which is melange's inner loop. The `Emitter` trait is public, so if you need a target that isn't on that list, the door is open and nobody is stopping you — though be aware the Rust emitter is ~20k lines, so it is a real project rather than an afternoon.
 
 ```
 crates/

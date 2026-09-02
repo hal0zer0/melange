@@ -223,7 +223,12 @@ Noise limitations:
 
 - **LFO/Modulation**: no time-varying sources for tremolo/vibrato (use `.runtime R`/`.runtime V` host-driven modulation instead)
 - **Temperature sweep**: no `.temp` directive or global temperature sweep (device self-heating is available per-device, see Temperature Dependencies above)
-- **Multi-language codegen**: C++, FAUST, Python/NumPy, MATLAB targets planned
+- **Multi-language codegen**: C++ in progress; Python/NumPy and MATLAB targets
+  planned. **FAUST was explored and determined impractical** — its generated code
+  is intentionally not Turing-complete (it computes each sample in a fixed number
+  of operations), so a Newton-Raphson solve whose iteration count depends on the
+  data cannot be expressed. Only strictly linear circuits would be emittable,
+  which is a small enough subset to not be worth a backend.
 - **M > 24**: iterative/sparse NR for very large nonlinear systems (MAX_M=24)
 - **Ideal transformer formulation**: dependent sources + explicit leakage/magnetizing L
 

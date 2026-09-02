@@ -229,7 +229,8 @@ over that IR. The `Emitter` trait is public, so a different target is an
 additive backend rather than a fork of the solver.
 
 **Consequences.** The hard part (MNA → kernel → IR) is written once and shared;
-C++ and FAUST backends are planned as emitters, not rewrites. The cost is the
+A C++ backend is planned as an emitter, not a rewrite. (FAUST was explored and
+ruled out as impractical — see `docs/limitations.md`.) The cost is the
 indirection of an explicit IR instead of printing code straight from the kernel —
 worth it the first time a second target is needed, and structurally honest even
 before that.
