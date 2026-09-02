@@ -288,8 +288,13 @@ These are informational and don't affect audio output.
 
 ```bash
 cd my-plugin
-cargo nih-plug-xtask bundle my_plugin --release
+bash build.sh   # bundles CLAP+VST3 via nih_plug_xtask
 ```
+
+The generated `README.md` documents the one-time nih-plug clone and the
+`NIH_PLUG_PATH` you set in `build.sh` before the first run. (There is no
+`cargo nih-plug-xtask` subcommand — the bundler runs via `build.sh` or
+`cargo run --manifest-path <nih-plug>/nih_plug_xtask/Cargo.toml -- bundle`.)
 
 Output: `target/bundled/my_plugin.clap` and `target/bundled/my_plugin.vst3`
 

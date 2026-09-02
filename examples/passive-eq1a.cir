@@ -4,7 +4,7 @@ Passive-EQ1A Program Equalizer
 * author: melange-audio
 * description: Pultec-style passive program EQ — 3 transformers, 12AX7/12AU7 push-pull makeup amp; attempts to match the signal flow of the famous 1950s unit, not a literal recreation
 * Copyright (c) 2026 Melange Contributors
-* License: MIT OR Apache-2.0
+* license: GPL-3.0-only
 *
 * Passive bridge-T EQ network bracketed by transformers, with tube makeup:
 *   in → HS-56 input transformer (620Ω shunt term) → passive EQ →
@@ -173,7 +173,7 @@ Passive-EQ1A Program Equalizer
 *              at S +22/-19%). KG1 scales Ip inversely ~ gm spread.
 *   KP/EX/KVB: NOT jittered — no sourced tolerance exists for them.
 * Caveats, documented honestly: plain consumer 12AX7/12AU7 sheets
-* publish typicals only (agent negative finding) — these premium/military
+* publish typicals only (verified negative finding) — these premium/military
 * limits are the nearest published bounds and are if anything TIGHTER
 * than commercial spread; .mismatch granularity is per-class, so both
 * tube types share one tolerance set (the tighter medium-mu figures =

@@ -270,24 +270,12 @@ Ebuffer out 0 in+ in- 1.0 ; Unity-gain buffer
 
 ### F — CCCS (Current-Controlled Current Source)
 
-**Syntax:**
-```
-Fname n+ n- vname gain
-```
-
-**Parameters:**
-| Parameter | Description |
-|-----------|-------------|
-| `n+` | Positive output terminal |
-| `n-` | Negative output terminal |
-| `vname` | Name of voltage source through which control current flows |
-| `gain` | Current gain (A/A) |
-
-**Examples:**
-```spice
-Vsense 1 2 0              ; Zero-volt source to sense current
-F1 3 0 Vsense 0.99        ; Current source mirroring Isense
-```
+> **Not supported.** Current-controlled sources (`F`/CCCS, `H`/CCVS) are **not
+> implemented** by the parser — an `F` line raises `Failed to parse SPICE
+> netlist` (`Unknown element type: F`). There is no controlling-branch-current
+> mechanism today. If the control quantity can be expressed as a *node voltage*,
+> reformulate as a `G` (VCCS) or `E` (VCVS). This section is retained so the
+> element is discoverable; it documents an unsupported form.
 
 ---
 
@@ -317,24 +305,10 @@ Gm 2 3 pos neg 1e-3
 
 ### H — CCVS (Current-Controlled Voltage Source)
 
-**Syntax:**
-```
-Hname n+ n- vname transresistance
-```
-
-**Parameters:**
-| Parameter | Description |
-|-----------|-------------|
-| `n+` | Positive output terminal |
-| `n-` | Negative output terminal |
-| `vname` | Name of voltage source through which control current flows |
-| `transresistance` | Transresistance in ohms (V/A) |
-
-**Examples:**
-```spice
-Vmonitor 1 0 0            ; Zero-volt source to sense current
-H1 2 0 Vmonitor 1000      ; 1 kΩ transresistance
-```
+> **Not supported.** See the `F` note above — current-controlled sources are
+> not implemented. An `H` line raises `Failed to parse SPICE netlist`
+> (`Unknown element type: H`). Reformulate as `E` (VCVS) or `G` (VCCS) if the
+> control quantity is available as a node voltage.
 
 ---
 
@@ -738,11 +712,11 @@ Level 1 SPICE model with triode + saturation regions. When `GAMMA` > 0, body eff
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `MU` | — (required) | Amplification factor (mu) |
-| `EX` | — (required) | Koren equation exponent |
-| `KG1` | — (required) | Koren Kg1 coefficient |
-| `KP` | — (required) | Koren Kp coefficient |
-| `KVB` | — (required) | Koren Kvb knee shaping coefficient |
+| `MU` | 100 | Amplification factor (mu) |
+| `EX` | 1.4 | Koren equation exponent |
+| `KG1` | 1060 | Koren Kg1 coefficient |
+| `KP` | 600 | Koren Kp coefficient |
+| `KVB` | 300 | Koren Kvb knee shaping coefficient |
 | `LAMBDA` | 0.0 V⁻¹ | Plate resistance modulation (Early effect) |
 | `IG_MAX` | 2e-3 A | Maximum grid current |
 | `VGK_ONSET` | 0.5 V | Grid current onset voltage |
@@ -751,7 +725,19 @@ Level 1 SPICE model with triode + saturation regions. When `GAMMA` > 0, body eff
 | `CCP` | 0 F | Cathode-plate capacitance |
 | `RGI` | 0 Ω | Grid internal resistance |
 
-Uses the Koren plate current model (soft-knee saturation) with Leach power-law grid current. The five core parameters (MU, EX, KG1, KP, KVB) are required and tube-specific — look up values for your specific tube type (12AX7, 12AU7, etc.).
+Uses the Koren plate current model (soft-knee saturation) with Leach power-law grid current. The five core parameters (MU, EX, KG1, KP, KVB) are tube-specific — look up values for your specific tube type (12AX7, 12AU7, etc.).
+
+> **Resolution order and a silent-default caveat.** For each parameter the
+> resolver takes, in order: (1) an explicit value on the `.model` card,
+> (2) the built-in catalog entry matched by the model *name* (e.g. `12AX7`,
+> `ECC83`, `EL84`), (3) the hardcoded default in the column above (a
+> 12AX7-class triode). Consequently a `.model` name that matches **no** catalog
+> part and carries **no** parameters — including a typo like
+> `.model 12AX8 TRIODE()` — resolves entirely to the defaults and compiles
+> **silently** as a 12AX7. Always spell the five core parameters explicitly, or
+> use an exact catalog name, so an unresolved name is not mistaken for a real
+> tube. (An unresolved-model warning is planned; until it lands the failure is
+> silent.)
 
 **Example:**
 ```spice
@@ -869,6 +855,14 @@ C1 in base {CIN}
 
 ### .option — Simulator Options
 
+> **Ignored by the melange compiler.** `.option` is **not** parsed by
+> melange-solver — it emits `[WARN] Unknown directive: .option` and has no
+> effect on code generation. The options below are honored **only** by the
+> ngspice reference deck inside `melange-validate`, which reads them from the
+> raw deck text independently of the parser. Do not rely on `.option` to change
+> melange's own solve (tolerances, temperature, integration method are set via
+> CLI flags / `.model` params, not here).
+
 **Syntax:**
 ```
 .option optname=value
@@ -894,6 +888,13 @@ C1 in base {CIN}
 ```
 
 ### .include — Include Files
+
+> **Not supported — silently ignored.** `.include` is **not** parsed by
+> melange-solver: it emits `[WARN] Unknown directive: .include` and the
+> referenced file is **not read**. Any models or elements you expect it to pull
+> in will be **absent**, and the compile may then fail elsewhere (missing
+> `.model`) or, worse, resolve to silent defaults. Inline the needed content
+> into a single deck instead of relying on `.include`.
 
 Include another netlist file.
 
@@ -1203,9 +1204,16 @@ See [DYNAMIC_PARAMS.md](aidocs/DYNAMIC_PARAMS.md#runtime-v--host-driven-voltage-
 
 ---
 
-## 6. Analysis Directives (for validation only)
+## 6. Analysis Directives (validation deck only — NOT parsed by melange)
 
-These directives are parsed but only used by the validation layer (melange-validate) for comparison against ngspice. They do not affect code generation.
+> **These directives are NOT parsed by melange-solver.** `.op`, `.ac`, `.tran`,
+> `.print` (and `.option`, `.include` above) each emit
+> `[WARN] Unknown directive: <name>` and are ignored by the compiler — they do
+> **not** affect code generation and are **not** stored in the parsed netlist.
+> `melange-validate` builds its ngspice analysis cards from the raw deck text
+> **independently** of the parser, which is why these still "work" for
+> validation. They are documented here for authors writing decks that double as
+> ngspice references; in a melange-only netlist they are inert noise-with-a-warning.
 
 ### .op — DC Operating Point
 
