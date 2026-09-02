@@ -128,7 +128,7 @@
       "circuit_rs": "plugins/funkyinduct/src/circuit.rs",
       "cir": "unstable/filters/funkyinduct.cir",
       "compile_cmd": "melange compile ../melange-circuits/unstable/filters/funkyinduct.cir --format code --noise shot -o plugins/funkyinduct/src/circuit.rs",
-      "verify_status": "DRIFT-EXPLAINED",
+      "verify_status": "DRIFT-SUBPATH-MOVED",
       "anchors": {
         "n": 73,
         "m": 2,
@@ -145,7 +145,7 @@
       "has_noise": true,
       "noise_mode": "shot",
       "emit_dc_op_recompute": false,
-      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical."
+      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical. \u26a0 SUB-PATH DRIFT, measured 2026-09-02 \u2014 THE ABOVE UNDER-DESCRIBES THE DRIFT. The checked-in file is nodal-SCHUR; a fresh compile at HEAD with this compile_cmd is nodal-FULL-LU. That is a solver sub-path change, not just a header plus a noise block. CAUSE IS MELANGE-SIDE AND IS A FIX, NOT A REGRESSION: melange-circuits proved the netlists for funkyinduct/pretty-baby/uniquorn are functionally IDENTICAL since 2026-06-12 (post-July edits comment-only), and the routing predicates themselves are April-vintage and unchanged \u2014 only their INPUTS moved. The mover is b0dcb27 (2026-07-25), 'honor router's trap-instability finding on nodal auto-BE, corroborated', which landed 7 days after the 2026-07-18 regen: before it the nodal build ran TRAPEZOIDAL on circuits routing::auto_route had already called unstable (wurli-power-amp: >60s per 0.5s of audio, peak >2700V under --force-trap). BE promotion changes A/A_neg/K, tripping the K_diag_min / max|S| ill-conditioning guard, so Schur becomes full-LU. Alternative 90e54dc (routing at the oversampled internal rate) is ELIMINATED \u2014 it only bites when OS>1 and all five movers are OS=1. Strongly evidenced, NOT bisect-proven (a bisect needs a checkout in a shared worktree). Consequence: this shipped binary was built with the PRE-FIX routing."
     },
     {
       "plugin": "gold-press",
@@ -632,7 +632,7 @@
       "circuit_rs": "plugins/pretty-baby/src/circuit.rs",
       "cir": "unstable/pedals/pretty-baby.cir",
       "compile_cmd": "melange compile ../melange-circuits/unstable/pedals/pretty-baby.cir --format code --noise shot -o plugins/pretty-baby/src/circuit.rs",
-      "verify_status": "DRIFT-EXPLAINED",
+      "verify_status": "DRIFT-SUBPATH-MOVED",
       "anchors": {
         "n": 41,
         "m": 8,
@@ -649,7 +649,7 @@
       "has_noise": true,
       "noise_mode": "shot",
       "emit_dc_op_recompute": false,
-      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical."
+      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical. \u26a0 SUB-PATH DRIFT, measured 2026-09-02 \u2014 THE ABOVE UNDER-DESCRIBES THE DRIFT. The checked-in file is nodal-SCHUR; a fresh compile at HEAD with this compile_cmd is nodal-FULL-LU. That is a solver sub-path change, not just a header plus a noise block. CAUSE IS MELANGE-SIDE AND IS A FIX, NOT A REGRESSION: melange-circuits proved the netlists for funkyinduct/pretty-baby/uniquorn are functionally IDENTICAL since 2026-06-12 (post-July edits comment-only), and the routing predicates themselves are April-vintage and unchanged \u2014 only their INPUTS moved. The mover is b0dcb27 (2026-07-25), 'honor router's trap-instability finding on nodal auto-BE, corroborated', which landed 7 days after the 2026-07-18 regen: before it the nodal build ran TRAPEZOIDAL on circuits routing::auto_route had already called unstable (wurli-power-amp: >60s per 0.5s of audio, peak >2700V under --force-trap). BE promotion changes A/A_neg/K, tripping the K_diag_min / max|S| ill-conditioning guard, so Schur becomes full-LU. Alternative 90e54dc (routing at the oversampled internal rate) is ELIMINATED \u2014 it only bites when OS>1 and all five movers are OS=1. Strongly evidenced, NOT bisect-proven (a bisect needs a checkout in a shared worktree). Consequence: this shipped binary was built with the PRE-FIX routing."
     },
     {
       "plugin": "qapla-1a",
@@ -835,7 +835,7 @@
       "circuit_rs": "plugins/the-kicker/src/circuit.rs",
       "cir": "unstable/drums/the-kicker.cir",
       "compile_cmd": "melange compile ../melange-circuits/unstable/drums/the-kicker.cir --format code --noise shot -o plugins/the-kicker/src/circuit.rs",
-      "verify_status": "DRIFT-EXPLAINED",
+      "verify_status": "DRIFT-SUBPATH-MOVED",
       "anchors": {
         "n": 35,
         "m": 6,
@@ -852,7 +852,7 @@
       "has_noise": true,
       "noise_mode": "shot",
       "emit_dc_op_recompute": false,
-      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical."
+      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical. \u26a0 SUB-PATH DRIFT, measured 2026-09-02 \u2014 THE ABOVE UNDER-DESCRIBES THE DRIFT. The checked-in file is nodal-SCHUR; a fresh compile at HEAD with this compile_cmd is nodal-FULL-LU. That is a solver sub-path change, not just a header plus a noise block. CAUSE IS MELANGE-SIDE AND IS A FIX, NOT A REGRESSION: melange-circuits proved the netlists for funkyinduct/pretty-baby/uniquorn are functionally IDENTICAL since 2026-06-12 (post-July edits comment-only), and the routing predicates themselves are April-vintage and unchanged \u2014 only their INPUTS moved. The mover is b0dcb27 (2026-07-25), 'honor router's trap-instability finding on nodal auto-BE, corroborated', which landed 7 days after the 2026-07-18 regen: before it the nodal build ran TRAPEZOIDAL on circuits routing::auto_route had already called unstable (wurli-power-amp: >60s per 0.5s of audio, peak >2700V under --force-trap). BE promotion changes A/A_neg/K, tripping the K_diag_min / max|S| ill-conditioning guard, so Schur becomes full-LU. Alternative 90e54dc (routing at the oversampled internal rate) is ELIMINATED \u2014 it only bites when OS>1 and all five movers are OS=1. Strongly evidenced, NOT bisect-proven (a bisect needs a checkout in a shared worktree). Consequence: this shipped binary was built with the PRE-FIX routing."
     },
     {
       "plugin": "tungsten-glow",
@@ -907,7 +907,7 @@
       "circuit_rs": "plugins/tungsten-thunder-horse/src/circuit.rs",
       "cir": "unstable/pedals/tungsten-thunder-horse.cir",
       "compile_cmd": "melange compile ../melange-circuits/unstable/pedals/tungsten-thunder-horse.cir --format code --noise shot -o plugins/tungsten-thunder-horse/src/circuit.rs",
-      "verify_status": "DRIFT-EXPLAINED",
+      "verify_status": "DRIFT-SUBPATH-MOVED",
       "anchors": {
         "n": 37,
         "m": 14,
@@ -924,7 +924,7 @@
       "has_noise": true,
       "noise_mode": "shot",
       "emit_dc_op_recompute": false,
-      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical. CORRECTNESS-SWEEP e53573c: nr_globalization_full codegen drift; RE-CONVERGED to main after the e53573c line-search-failure fix (the interim 83bf48d baseline had an idle-collapse regression, now resolved). vs main: silence -0.012 dB / step -0.004 dB / sweep +0.017 dB, corr >=0.9926; sine1k+potsweep negligible. Not bit-identical (benign residual = signal-dependent idle shot-noise realization + HF-clip phase on the sweep tail); no longer an audible regression. See correctness_sweep_2026_08_30.audio_changed."
+      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical. CORRECTNESS-SWEEP e53573c: nr_globalization_full codegen drift; RE-CONVERGED to main after the e53573c line-search-failure fix (the interim 83bf48d baseline had an idle-collapse regression, now resolved). vs main: silence -0.012 dB / step -0.004 dB / sweep +0.017 dB, corr >=0.9926; sine1k+potsweep negligible. Not bit-identical (benign residual = signal-dependent idle shot-noise realization + HF-clip phase on the sweep tail); no longer an audible regression. See correctness_sweep_2026_08_30.audio_changed. \u26a0 SUB-PATH DRIFT, measured 2026-09-02 \u2014 THE ABOVE UNDER-DESCRIBES THE DRIFT. The checked-in file is nodal-SCHUR; a fresh compile at HEAD with this compile_cmd is nodal-FULL-LU. That is a solver sub-path change, not just a header plus a noise block. CAUSE IS MELANGE-SIDE AND IS A FIX, NOT A REGRESSION: melange-circuits proved the netlists for funkyinduct/pretty-baby/uniquorn are functionally IDENTICAL since 2026-06-12 (post-July edits comment-only), and the routing predicates themselves are April-vintage and unchanged \u2014 only their INPUTS moved. The mover is b0dcb27 (2026-07-25), 'honor router's trap-instability finding on nodal auto-BE, corroborated', which landed 7 days after the 2026-07-18 regen: before it the nodal build ran TRAPEZOIDAL on circuits routing::auto_route had already called unstable (wurli-power-amp: >60s per 0.5s of audio, peak >2700V under --force-trap). BE promotion changes A/A_neg/K, tripping the K_diag_min / max|S| ill-conditioning guard, so Schur becomes full-LU. Alternative 90e54dc (routing at the oversampled internal rate) is ELIMINATED \u2014 it only bites when OS>1 and all five movers are OS=1. Strongly evidenced, NOT bisect-proven (a bisect needs a checkout in a shared worktree). Consequence: this shipped binary was built with the PRE-FIX routing."
     },
     {
       "plugin": "tungsten-thunder-horse",
@@ -955,7 +955,7 @@
       "circuit_rs": "plugins/uniquorn/src/circuit.rs",
       "cir": "unstable/pedals/uniquorn.cir",
       "compile_cmd": "melange compile ../melange-circuits/unstable/pedals/uniquorn.cir --format code --noise shot -o plugins/uniquorn/src/circuit.rs",
-      "verify_status": "DRIFT-EXPLAINED",
+      "verify_status": "DRIFT-SUBPATH-MOVED",
       "anchors": {
         "n": 46,
         "m": 12,
@@ -972,7 +972,7 @@
       "has_noise": true,
       "noise_mode": "shot",
       "emit_dc_op_recompute": false,
-      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical. CORRECTNESS-SWEEP e53573c: nr_globalization_full codegen drift; audio TRIVIALLY changed on potsweep only (+0.002 dB, corr 0.999748, sub-mV tail drift on harder-converging pot positions), all other programs identical \u2014 benign NR-globalization drift."
+      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical. CORRECTNESS-SWEEP e53573c: nr_globalization_full codegen drift; audio TRIVIALLY changed on potsweep only (+0.002 dB, corr 0.999748, sub-mV tail drift on harder-converging pot positions), all other programs identical \u2014 benign NR-globalization drift. \u26a0 SUB-PATH DRIFT, measured 2026-09-02 \u2014 THE ABOVE UNDER-DESCRIBES THE DRIFT. The checked-in file is nodal-SCHUR; a fresh compile at HEAD with this compile_cmd is nodal-FULL-LU. That is a solver sub-path change, not just a header plus a noise block. CAUSE IS MELANGE-SIDE AND IS A FIX, NOT A REGRESSION: melange-circuits proved the netlists for funkyinduct/pretty-baby/uniquorn are functionally IDENTICAL since 2026-06-12 (post-July edits comment-only), and the routing predicates themselves are April-vintage and unchanged \u2014 only their INPUTS moved. The mover is b0dcb27 (2026-07-25), 'honor router's trap-instability finding on nodal auto-BE, corroborated', which landed 7 days after the 2026-07-18 regen: before it the nodal build ran TRAPEZOIDAL on circuits routing::auto_route had already called unstable (wurli-power-amp: >60s per 0.5s of audio, peak >2700V under --force-trap). BE promotion changes A/A_neg/K, tripping the K_diag_min / max|S| ill-conditioning guard, so Schur becomes full-LU. Alternative 90e54dc (routing at the oversampled internal rate) is ELIMINATED \u2014 it only bites when OS>1 and all five movers are OS=1. Strongly evidenced, NOT bisect-proven (a bisect needs a checkout in a shared worktree). Consequence: this shipped binary was built with the PRE-FIX routing."
     },
     {
       "plugin": "uniquorn",
