@@ -4537,6 +4537,10 @@ impl CircuitIR {
                 "IS", "N", "CJO", "RS", "BV", "IBV", "KF", "AF", "RTH", "CTH", "XTI", "EG", "TAMB",
             ],
         );
+        // NOTE: no warn_unresolved_model() here — the diode resolver already
+        // emits its own dedicated fallback warning in the IS-resolution arm
+        // above ("not in catalog and no IS given — falling back to the SPICE
+        // default diode"). Adding the general warning would double-warn.
 
         Ok(DiodeParams {
             is,
@@ -4793,6 +4797,17 @@ impl CircuitIR {
                 "ISC", "NC", "RB", "RC", "RE", "RTH", "CTH", "XTI", "EG", "TAMB", "KF", "AF",
             ],
         );
+        Self::warn_unresolved_model(
+            netlist,
+            model,
+            cat.is_some(),
+            &[
+                "IS", "VT", "BF", "BR", "VAF", "VA", "VAR", "VB", "IKF", "JBF", "IKR", "JBR",
+                "CJE", "CJC", "VJE", "MJE", "VJC", "MJC", "FC", "TF", "NF", "NR", "ISE", "NE",
+                "ISC", "NC", "RB", "RC", "RE",
+            ],
+            "the built-in default BJT",
+        );
 
         Ok(BjtParams {
             is,
@@ -4933,6 +4948,13 @@ impl CircuitIR {
                 "VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "RD", "RS", "KF", "AF",
             ],
         );
+        Self::warn_unresolved_model(
+            netlist,
+            model,
+            cat.is_some(),
+            &["VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "RD", "RS"],
+            "the built-in default JFET",
+        );
 
         Ok(JfetParams {
             idss,
@@ -5040,6 +5062,15 @@ impl CircuitIR {
             &[
                 "KP", "VTO", "VT", "LAMBDA", "CGS", "CGD", "RD", "RS", "GAMMA", "PHI", "KF", "AF",
             ],
+        );
+        Self::warn_unresolved_model(
+            netlist,
+            model,
+            cat.is_some(),
+            &[
+                "KP", "VTO", "VT", "LAMBDA", "CGS", "CGD", "RD", "RS", "GAMMA", "PHI",
+            ],
+            "the built-in default MOSFET",
         );
 
         // source_node and bulk_node will be resolved later from the MNA system
@@ -5230,6 +5261,29 @@ impl CircuitIR {
                 "VBIAS_ALPHA",
                 "TAMB",
             ],
+        );
+        Self::warn_unresolved_model(
+            netlist,
+            model,
+            cat.is_some(),
+            &[
+                "MU",
+                "EX",
+                "KG1",
+                "KP",
+                "KVB",
+                "IG_MAX",
+                "VGK_ONSET",
+                "LAMBDA",
+                "CCG",
+                "CGP",
+                "CCP",
+                "RGI",
+                "MU_B",
+                "SVAR",
+                "EX_B",
+            ],
+            "a default 12AX7-class triode",
         );
 
         Ok(TubeParams {
@@ -5489,6 +5543,35 @@ impl CircuitIR {
                 "AF",
             ],
         );
+        Self::warn_unresolved_model(
+            netlist,
+            model,
+            cat.is_some(),
+            &[
+                "MU",
+                "EX",
+                "KG1",
+                "KG2",
+                "KP",
+                "KVB",
+                "ALPHA_S",
+                "A_FACTOR",
+                "BETA_FACTOR",
+                "PARTITION_F",
+                "SCREEN_FORM",
+                "IG_MAX",
+                "VGK_ONSET",
+                "LAMBDA",
+                "CCG",
+                "CGP",
+                "CCP",
+                "RGI",
+                "MU_B",
+                "SVAR",
+                "EX_B",
+            ],
+            "a default EL84-class pentode",
+        );
 
         let params = TubeParams {
             kind: crate::device_types::TubeKind::SharpPentode,
@@ -5510,12 +5593,17 @@ impl CircuitIR {
             beta_factor,
             partition_f,
             screen_form,
-            // Phase 1c: variable-mu §5 params. Defaults to sharp (svar=0).
-            // Resolved by a follow-up (task P1c-03) which reads MU_B / SVAR /
-            // EX_B from the .model directive with catalog fallback.
-            mu_b: 0.0,
-            svar: 0.0,
-            ex_b: 0.0,
+            // Phase 1c variable-mu §5 params, resolved above from the `.model`
+            // directive (explicit > catalog > default 0.0) and already
+            // validated. Previously these were hardcoded to 0.0, which silently
+            // discarded a variable-mu pentode card AFTER it passed validation —
+            // the deck compiled as a sharp pentode with no diagnostic. For a
+            // sharp card svar/mu_b/ex_b resolve to 0.0, so this is byte-identical
+            // for every non-variable-mu pentode; it only changes svar>0 decks
+            // (e.g. the 6K7 remote-cutoff stage).
+            mu_b,
+            svar,
+            ex_b,
             // Pentode self-heating not wired yet — screen dissipation needs a
             // separate term (Ip·Vpk + Ig2·Vg2k). Triode path is live.
             rth: f64::INFINITY,
@@ -5588,6 +5676,13 @@ impl CircuitIR {
             model,
             &["RMIN", "RMAX", "GAMMA", "TAU_A", "TAU_R"],
         );
+        Self::warn_unresolved_model(
+            netlist,
+            model,
+            cat.is_some(),
+            &["RMIN", "RMAX", "GAMMA", "TAU_A", "TAU_R"],
+            "the built-in default LDR",
+        );
 
         Ok(crate::device_types::LdrParams {
             r_min,
@@ -5615,6 +5710,57 @@ impl CircuitIR {
                     );
                 }
             }
+        }
+    }
+
+    /// Warn when a `.model` card resolves entirely to the hardcoded default
+    /// device because its name matches no built-in catalog part **and** it
+    /// supplies none of its device-defining parameters.
+    ///
+    /// This is the "plausible numbers, wrong circuit" trap: a typo'd model name
+    /// (`.model 12AX8 TRIODE()`) compiles silently as the default device (a
+    /// 12AX7 triode, EL84 pentode, SPICE-default diode, …) with no diagnostic.
+    ///
+    /// It only fires for a *declared-but-underspecified* card. A device that
+    /// references a **never-declared** model already hard-errors in the parser
+    /// (`references model '…' which is not defined`), so that case never reaches
+    /// here. Stays silent on a catalog hit and on any card that specifies a
+    /// defining parameter — a fully custom off-catalog part is legitimate and
+    /// common, so specifying even one defining key suppresses the warning.
+    ///
+    /// `defining_keys` is the class's electrical-identity parameter set (the
+    /// recognized keys minus universal add-ons like KF/AF/RTH/CTH/TAMB, which do
+    /// not define which device this is).
+    fn warn_unresolved_model(
+        netlist: &Netlist,
+        model_name: &str,
+        catalog_hit: bool,
+        defining_keys: &[&str],
+        default_desc: &str,
+    ) {
+        if catalog_hit {
+            return;
+        }
+        let Some(card) = netlist
+            .models
+            .iter()
+            .find(|m| m.name.eq_ignore_ascii_case(model_name))
+        else {
+            return;
+        };
+        let supplied_defining = card.params.iter().any(|(key, _)| {
+            let upper = key.to_ascii_uppercase();
+            defining_keys.iter().any(|k| k.eq_ignore_ascii_case(&upper))
+        });
+        if !supplied_defining {
+            log::warn!(
+                ".model {}: name matches no built-in catalog part and no \
+                 device-defining parameter was supplied — compiling as {}. A \
+                 typo'd model name silently becomes the default device; use an \
+                 exact catalog name or specify the device parameters.",
+                model_name,
+                default_desc,
+            );
         }
     }
 
