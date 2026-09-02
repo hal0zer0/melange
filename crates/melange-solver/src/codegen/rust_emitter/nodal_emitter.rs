@@ -7,7 +7,7 @@
 
 use super::dk_emitter::{
     effective_max_iter, emit_inject_rhs_stamp, emit_inject_substep_stamp,
-    emit_inject_tap_constants, emit_warmup_call, NoiseEmission,
+    emit_inject_tap_constants, emit_noise_replay_body, emit_warmup_call, NoiseEmission,
 };
 use super::helpers::{
     device_param_template_data, emit_pentode_nr_dk_stamp, emit_stateful_default_fields,
@@ -5483,6 +5483,22 @@ impl RustEmitter {
                         rt.vs_row, rt.field_name
                     ));
                 }
+                // Noise replay: this is a from-scratch RHS rebuild, so it must
+                // re-stamp the per-source currents the primary `rhs_stamp`
+                // already drew and cached this sample. Omitting it dropped the
+                // noise for the whole sample while the RNG stream stayed
+                // aligned, making the loss invisible to every determinism
+                // check (F10). Drawing fresh values here instead would break
+                // determinism outright: breakpoint-BE arming is signal-dependent, so the
+                // stream position would become a function of the audio.
+                if noise.enabled {
+                    code.push_str("        // Noise replay (cached i_n; consumes no RNG draws).\n");
+                    code.push_str(&emit_noise_replay_body(
+                        noise.replay_counts,
+                        "rhs_be",
+                        "        ",
+                    ));
+                }
                 code.push_str(
                     "        for i in 0..N {\n\
                      \x20           let mut sum = 0.0;\n\
@@ -5858,6 +5874,24 @@ impl RustEmitter {
                             rt.vs_row, rt.field_name
                         ));
                     }
+                }
+                // Noise replay: this is a from-scratch RHS rebuild, so it must
+                // re-stamp the per-source currents the primary `rhs_stamp`
+                // already drew and cached this sample. Omitting it dropped the
+                // noise for the whole sample while the RNG stream stayed
+                // aligned, making the loss invisible to every determinism
+                // check (F10). Drawing fresh values here instead would break
+                // determinism outright: sub-stepping is signal-dependent, so the
+                // stream position would become a function of the audio.
+                if noise.enabled {
+                    code.push_str(
+                        "            // Noise replay (cached i_n; consumes no RNG draws).\n",
+                    );
+                    code.push_str(&emit_noise_replay_body(
+                        noise.replay_counts,
+                        "rhs_s",
+                        "            ",
+                    ));
                 }
                 // Linear prediction: v_pred_s = S_sub * rhs_s (O(N²))
                 code.push_str("            let mut v_pred_s = [0.0f64; N];\n");
@@ -8238,6 +8272,24 @@ impl RustEmitter {
                             rt.vs_row, rt.field_name
                         ));
                     }
+                }
+                // Noise replay: this is a from-scratch RHS rebuild, so it must
+                // re-stamp the per-source currents the primary `rhs_stamp`
+                // already drew and cached this sample. Omitting it dropped the
+                // noise for the whole sample while the RNG stream stayed
+                // aligned, making the loss invisible to every determinism
+                // check (F10). Drawing fresh values here instead would break
+                // determinism outright: sub-stepping is signal-dependent, so the
+                // stream position would become a function of the audio.
+                if noise.enabled {
+                    code.push_str(
+                        "                // Noise replay (cached i_n; consumes no RNG draws).\n",
+                    );
+                    code.push_str(&emit_noise_replay_body(
+                        noise.replay_counts,
+                        "rhs_s",
+                        "                ",
+                    ));
                 }
                 // Sub-step NR loop
                 code.push_str("                let mut sub_converged = false;\n");

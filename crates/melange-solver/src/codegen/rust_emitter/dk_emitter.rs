@@ -3529,6 +3529,87 @@ impl RustEmitter {
 // Noise emission (Phase 1: Johnson-Nyquist thermal)
 // ============================================================================
 
+/// Per-family noise source counts, kept so the replay can be re-emitted at any
+/// RHS-rebuild site instead of only at the BE fallback.
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct NoiseReplayCounts {
+    pub shot: usize,
+    pub flicker: usize,
+    pub r_flicker: usize,
+    pub partition: usize,
+    pub opamp: usize,
+}
+
+/// Emit the noise *replay*: re-stamp every source's cached `i_n` into `target`
+/// without touching the RNG.
+///
+/// **Every from-scratch RHS rebuild inside a sample must emit this.** The draws
+/// for the sample were already consumed by `rhs_stamp` when the primary RHS was
+/// built, and the resulting per-source currents cached in `noise_*_last_i_n`. A
+/// rebuild that omits the replay drops the sample's noise while the RNG stream
+/// stays aligned — so the loss is inaudible to any determinism check and shows
+/// up only as a noise-floor stutter correlated with whatever triggered the
+/// rebuild. Drawing fresh values here instead would break determinism outright:
+/// the same seed would give different audio depending on how many samples
+/// happened to sub-step.
+///
+/// `base` is the indent of the `if state.noise_enabled {` line; the body is
+/// indented 4 and 8 further.
+pub(super) fn emit_noise_replay_body(
+    counts: NoiseReplayCounts,
+    target: &str,
+    base: &str,
+) -> String {
+    let mut s = String::new();
+    let i1 = format!("{base}    ");
+    let i2 = format!("{base}        ");
+    s.push_str(&format!("{base}if state.noise_enabled {{\n"));
+    let two_terminal = |s: &mut String, present: bool, upper: &str, field: &str| {
+        if !present {
+            return;
+        }
+        s.push_str(&format!("{i1}for k in 0..NOISE_{upper}_N {{\n"));
+        s.push_str(&format!("{i2}let i_n = state.noise_{field}_last_i_n[k];\n"));
+        s.push_str(&format!("{i2}let ni = NOISE_{upper}_NODE_I[k];\n"));
+        s.push_str(&format!("{i2}let nj = NOISE_{upper}_NODE_J[k];\n"));
+        s.push_str(&format!("{i2}if ni > 0 {{ {target}[ni - 1] += i_n; }}\n"));
+        s.push_str(&format!("{i2}if nj > 0 {{ {target}[nj - 1] -= i_n; }}\n"));
+        s.push_str(&format!("{i1}}}\n"));
+    };
+    two_terminal(&mut s, true, "THERMAL", "thermal");
+    two_terminal(&mut s, counts.shot > 0, "SHOT", "shot");
+    two_terminal(&mut s, counts.flicker > 0, "FLICKER", "flicker");
+    two_terminal(&mut s, counts.r_flicker > 0, "R_FLICKER", "r_flicker");
+    two_terminal(&mut s, counts.partition > 0, "PARTITION", "partition");
+    if counts.opamp > 0 {
+        // Op-amp en/in replay: stamp each cached current at its single input
+        // node (single-sided — en is voltage-source-to-ground, in is
+        // current-source-to-ground). No counter-stamp needed because the
+        // "other terminal" of each source is ground, not a circuit node.
+        s.push_str(&format!("{i1}for k in 0..NOISE_OPAMP_N {{\n"));
+        s.push_str(&format!("{i2}let np = NOISE_OPAMP_NODE_PLUS[k];\n"));
+        s.push_str(&format!("{i2}let nm = NOISE_OPAMP_NODE_MINUS[k];\n"));
+        s.push_str(&format!(
+            "{i2}let i_en = state.noise_opamp_en_last_i_n[k];\n"
+        ));
+        s.push_str(&format!(
+            "{i2}let i_in_p = state.noise_opamp_in_last_i_n[2 * k];\n"
+        ));
+        s.push_str(&format!(
+            "{i2}let i_in_m = state.noise_opamp_in_last_i_n[2 * k + 1];\n"
+        ));
+        s.push_str(&format!(
+            "{i2}if np > 0 {{ {target}[np - 1] += i_en + i_in_p; }}\n"
+        ));
+        s.push_str(&format!(
+            "{i2}if nm > 0 {{ {target}[nm - 1] += i_in_m; }}\n"
+        ));
+        s.push_str(&format!("{i1}}}\n"));
+    }
+    s.push_str(&format!("{base}}}\n"));
+    s
+}
+
 /// All code fragments produced for authentic circuit noise.
 ///
 /// When the IR's noise mode is `Off` or no eligible sources are present,
@@ -3579,6 +3660,9 @@ pub(super) struct NoiseEmission {
     /// Count of thermal sources. Kept for debug logging.
     #[allow(dead_code)]
     pub thermal_n: usize,
+    /// Per-family source counts, so a consumer outside this module can emit the
+    /// replay into its own RHS buffer (see `emit_noise_replay_body`).
+    pub replay_counts: NoiseReplayCounts,
     /// Reverse lookup: `pot_index → noise source index` for dynamic
     /// sources (`.pot` / `.wiper` / `.runtime R` members). Empty vec of
     /// length `mna.pots.len()` when noise is off. A `Some(k)` entry means
@@ -5794,72 +5878,16 @@ impl RustEmitter {
         // below the dominating signal that triggered BE; preferable to
         // noise dropouts during BE windows. See NOISE.md "BE-fallback
         // noise calibration" for the math.
+        let replay_counts = NoiseReplayCounts {
+            shot: shot_n,
+            flicker: flicker_n,
+            r_flicker: r_flicker_n,
+            partition: partition_n,
+            opamp: opamp_n,
+        };
         let mut rhs_stamp_be = String::new();
         rhs_stamp_be.push_str("\n        // BE-fallback noise replay (re-stamps cached trap-stamp i_n into rhs_be).\n");
-        rhs_stamp_be.push_str("        if state.noise_enabled {\n");
-        rhs_stamp_be.push_str("            for k in 0..NOISE_THERMAL_N {\n");
-        rhs_stamp_be.push_str("                let i_n = state.noise_thermal_last_i_n[k];\n");
-        rhs_stamp_be.push_str("                let ni = NOISE_THERMAL_NODE_I[k];\n");
-        rhs_stamp_be.push_str("                let nj = NOISE_THERMAL_NODE_J[k];\n");
-        rhs_stamp_be.push_str("                if ni > 0 { rhs_be[ni - 1] += i_n; }\n");
-        rhs_stamp_be.push_str("                if nj > 0 { rhs_be[nj - 1] -= i_n; }\n");
-        rhs_stamp_be.push_str("            }\n");
-        if shot_n > 0 {
-            rhs_stamp_be.push_str("            for k in 0..NOISE_SHOT_N {\n");
-            rhs_stamp_be.push_str("                let i_n = state.noise_shot_last_i_n[k];\n");
-            rhs_stamp_be.push_str("                let ni = NOISE_SHOT_NODE_I[k];\n");
-            rhs_stamp_be.push_str("                let nj = NOISE_SHOT_NODE_J[k];\n");
-            rhs_stamp_be.push_str("                if ni > 0 { rhs_be[ni - 1] += i_n; }\n");
-            rhs_stamp_be.push_str("                if nj > 0 { rhs_be[nj - 1] -= i_n; }\n");
-            rhs_stamp_be.push_str("            }\n");
-        }
-        if flicker_n > 0 {
-            rhs_stamp_be.push_str("            for k in 0..NOISE_FLICKER_N {\n");
-            rhs_stamp_be.push_str("                let i_n = state.noise_flicker_last_i_n[k];\n");
-            rhs_stamp_be.push_str("                let ni = NOISE_FLICKER_NODE_I[k];\n");
-            rhs_stamp_be.push_str("                let nj = NOISE_FLICKER_NODE_J[k];\n");
-            rhs_stamp_be.push_str("                if ni > 0 { rhs_be[ni - 1] += i_n; }\n");
-            rhs_stamp_be.push_str("                if nj > 0 { rhs_be[nj - 1] -= i_n; }\n");
-            rhs_stamp_be.push_str("            }\n");
-        }
-        if r_flicker_n > 0 {
-            rhs_stamp_be.push_str("            for k in 0..NOISE_R_FLICKER_N {\n");
-            rhs_stamp_be.push_str("                let i_n = state.noise_r_flicker_last_i_n[k];\n");
-            rhs_stamp_be.push_str("                let ni = NOISE_R_FLICKER_NODE_I[k];\n");
-            rhs_stamp_be.push_str("                let nj = NOISE_R_FLICKER_NODE_J[k];\n");
-            rhs_stamp_be.push_str("                if ni > 0 { rhs_be[ni - 1] += i_n; }\n");
-            rhs_stamp_be.push_str("                if nj > 0 { rhs_be[nj - 1] -= i_n; }\n");
-            rhs_stamp_be.push_str("            }\n");
-        }
-        if partition_n > 0 {
-            rhs_stamp_be.push_str("            for k in 0..NOISE_PARTITION_N {\n");
-            rhs_stamp_be.push_str("                let i_n = state.noise_partition_last_i_n[k];\n");
-            rhs_stamp_be.push_str("                let ni = NOISE_PARTITION_NODE_I[k];\n");
-            rhs_stamp_be.push_str("                let nj = NOISE_PARTITION_NODE_J[k];\n");
-            rhs_stamp_be.push_str("                if ni > 0 { rhs_be[ni - 1] += i_n; }\n");
-            rhs_stamp_be.push_str("                if nj > 0 { rhs_be[nj - 1] -= i_n; }\n");
-            rhs_stamp_be.push_str("            }\n");
-        }
-        if opamp_n > 0 {
-            // Op-amp en/in BE replay: stamp each cached current at its single
-            // input node (single-sided — en is voltage-source-to-ground, in is
-            // current-source-to-ground). No counter-stamp needed because the
-            // "other terminal" of each source is ground (not a circuit node).
-            rhs_stamp_be.push_str("            for k in 0..NOISE_OPAMP_N {\n");
-            rhs_stamp_be.push_str("                let np = NOISE_OPAMP_NODE_PLUS[k];\n");
-            rhs_stamp_be.push_str("                let nm = NOISE_OPAMP_NODE_MINUS[k];\n");
-            rhs_stamp_be.push_str("                let i_en = state.noise_opamp_en_last_i_n[k];\n");
-            rhs_stamp_be
-                .push_str("                let i_in_p = state.noise_opamp_in_last_i_n[2 * k];\n");
-            rhs_stamp_be.push_str(
-                "                let i_in_m = state.noise_opamp_in_last_i_n[2 * k + 1];\n",
-            );
-            rhs_stamp_be
-                .push_str("                if np > 0 { rhs_be[np - 1] += i_en + i_in_p; }\n");
-            rhs_stamp_be.push_str("                if nm > 0 { rhs_be[nm - 1] += i_in_m; }\n");
-            rhs_stamp_be.push_str("            }\n");
-        }
-        rhs_stamp_be.push_str("        }\n");
+        rhs_stamp_be.push_str(&emit_noise_replay_body(replay_counts, "rhs_be", "        "));
 
         // NaN-recovery noise reset: clear the two-draw lag buffer and the
         // BE-replay caches so a NaN-induced state.v_prev = DC_OP recovery
@@ -6020,6 +6048,7 @@ impl RustEmitter {
             methods,
             enabled: true,
             thermal_n,
+            replay_counts,
             pot_to_noise_slot,
             switch_comp_to_noise_slot,
             pot_to_r_flicker_slot,
