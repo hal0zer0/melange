@@ -580,30 +580,6 @@
       "notes": "Byte-identical when regenerated at melange HEAD 8945b67. Last regen: oomox a8c47f3 (2026-07-19) against melange a472807."
     },
     {
-      "plugin": "periodic-pedal",
-      "circuit_rs": "plugins/periodic-pedal/src/circuit.rs",
-      "cir": "unstable/pedals/periodic-pedal.cir",
-      "compile_cmd": "melange compile ../melange-circuits/unstable/pedals/periodic-pedal.cir --format code --noise shot --emit-dc-op-recompute -o plugins/periodic-pedal/src/circuit.rs",
-      "verify_status": "DRIFT-EXPLAINED",
-      "anchors": {
-        "n": 31,
-        "m": 14,
-        "oversampling": 1,
-        "solver": "nodal",
-        "sample_rate": 48000
-      },
-      "has_pots": true,
-      "num_pots": 5,
-      "has_switches": true,
-      "num_switches": 7,
-      "has_runtime_r": false,
-      "runtime_r_setters": [],
-      "has_noise": true,
-      "noise_mode": "shot",
-      "emit_dc_op_recompute": true,
-      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical. WARNING: netlist has UNCOMMITTED modifications in melange-circuits (working tree, verified against it, is the shipped source; HEAD b655adf is stale)."
-    },
-    {
       "plugin": "pipe-shouter",
       "circuit_rs": "plugins/pipe-shouter/src/circuit.rs",
       "cir": "unstable/pedals/pipe-shouter.cir",
@@ -626,30 +602,6 @@
       "noise_mode": "shot",
       "emit_dc_op_recompute": false,
       "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical."
-    },
-    {
-      "plugin": "pretty-baby",
-      "circuit_rs": "plugins/pretty-baby/src/circuit.rs",
-      "cir": "unstable/pedals/pretty-baby.cir",
-      "compile_cmd": "melange compile ../melange-circuits/unstable/pedals/pretty-baby.cir --format code --noise shot -o plugins/pretty-baby/src/circuit.rs",
-      "verify_status": "DRIFT-SUBPATH-MOVED",
-      "anchors": {
-        "n": 41,
-        "m": 8,
-        "oversampling": 1,
-        "solver": "nodal",
-        "sample_rate": 48000
-      },
-      "has_pots": true,
-      "num_pots": 10,
-      "has_switches": false,
-      "num_switches": 0,
-      "has_runtime_r": false,
-      "runtime_r_setters": [],
-      "has_noise": true,
-      "noise_mode": "shot",
-      "emit_dc_op_recompute": false,
-      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical. \u26a0 SUB-PATH DRIFT, measured 2026-09-02 \u2014 THE ORIGINAL NOTE ABOVE UNDER-DESCRIBES THE DRIFT. The checked-in file is nodal-SCHUR; a fresh compile at HEAD with this compile_cmd is nodal-FULL-LU. That is a solver sub-path change, not just a header plus a noise block. \u26a0\u26a0 CORRECTED 2026-09-02, SECOND PASS: an earlier revision of this note attributed ALL FIVE movers to b0dcb27. That was WRONG and was over-generalized from funkyinduct's warning text without checking each deck. Verified per-deck by comparing the emitted `let alpha =` line between the shipped file and a HEAD compile. Per-deck finding: CAUSE NOT ESTABLISHED. Integrator did NOT change \u2014 shipped and HEAD are both backward Euler \u2014 so b0dcb27 cannot explain this one. Netlist functionally IDENTICAL since 2026-06-12 (melange-circuits, comment-only edits). The sub-path predicate itself is unchanged in this range. So the Schur->full-LU move came from the predicate's INPUTS (S/K) moving via some other solver-core change; HEAD cites 'max|S|=7.27e6, cap-only nodes lack resistive paths'. 96 commits touch melange-solver/src in the range; isolating it needs a bisect."
     },
     {
       "plugin": "qapla-1a",
@@ -704,54 +656,6 @@
       "noise_mode": "thermal",
       "emit_dc_op_recompute": false,
       "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs ONLY by the 4-line clippy-allow header added in melange 146d51b (post-regen). Anchors verified identical."
-    },
-    {
-      "plugin": "series-of-tubes",
-      "circuit_rs": "plugins/series-of-tubes/src/circuit.rs",
-      "cir": "unstable/dynamics/series-of-tubes-stage.cir",
-      "compile_cmd": "melange compile ../melange-circuits/unstable/dynamics/series-of-tubes-stage.cir --format code --noise shot --emit-dc-op-recompute -o plugins/series-of-tubes/src/circuit.rs",
-      "verify_status": "DRIFT-EXPLAINED",
-      "anchors": {
-        "n": 13,
-        "m": 2,
-        "oversampling": 1,
-        "solver": "dk",
-        "sample_rate": 48000
-      },
-      "has_pots": true,
-      "num_pots": 3,
-      "has_switches": false,
-      "num_switches": 0,
-      "has_runtime_r": false,
-      "runtime_r_setters": [],
-      "has_noise": true,
-      "noise_mode": "shot",
-      "emit_dc_op_recompute": true,
-      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical. WARNING: netlist has UNCOMMITTED modifications in melange-circuits (working tree, verified against it, is the shipped source; HEAD b655adf is stale)."
-    },
-    {
-      "plugin": "series-of-tubes",
-      "circuit_rs": "plugins/series-of-tubes/src/warmth.rs",
-      "cir": "unstable/dynamics/series-of-tubes-warmth.cir",
-      "compile_cmd": "melange compile ../melange-circuits/unstable/dynamics/series-of-tubes-warmth.cir --format code --noise shot --emit-dc-op-recompute -o plugins/series-of-tubes/src/warmth.rs",
-      "verify_status": "DRIFT-EXPLAINED",
-      "anchors": {
-        "n": 8,
-        "m": 2,
-        "oversampling": 1,
-        "solver": "dk",
-        "sample_rate": 48000
-      },
-      "has_pots": false,
-      "num_pots": 0,
-      "has_switches": false,
-      "num_switches": 0,
-      "has_runtime_r": false,
-      "runtime_r_setters": [],
-      "has_noise": true,
-      "noise_mode": "shot",
-      "emit_dc_op_recompute": true,
-      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical."
     },
     {
       "plugin": "subspace",
@@ -831,30 +735,6 @@
       "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs ONLY by the 4-line clippy-allow header added in melange 146d51b (post-regen). Anchors verified identical. WARNING: netlist has UNCOMMITTED modifications in melange-circuits (working tree, verified against it, is the shipped source; HEAD b655adf is stale)."
     },
     {
-      "plugin": "the-kicker",
-      "circuit_rs": "plugins/the-kicker/src/circuit.rs",
-      "cir": "unstable/drums/the-kicker.cir",
-      "compile_cmd": "melange compile ../melange-circuits/unstable/drums/the-kicker.cir --format code --noise shot -o plugins/the-kicker/src/circuit.rs",
-      "verify_status": "DRIFT-SUBPATH-MOVED",
-      "anchors": {
-        "n": 35,
-        "m": 6,
-        "oversampling": 1,
-        "solver": "nodal",
-        "sample_rate": 48000
-      },
-      "has_pots": true,
-      "num_pots": 9,
-      "has_switches": false,
-      "num_switches": 0,
-      "has_runtime_r": false,
-      "runtime_r_setters": [],
-      "has_noise": true,
-      "noise_mode": "shot",
-      "emit_dc_op_recompute": false,
-      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical. \u26a0 SUB-PATH DRIFT, measured 2026-09-02 \u2014 THE ORIGINAL NOTE ABOVE UNDER-DESCRIBES THE DRIFT. The checked-in file is nodal-SCHUR; a fresh compile at HEAD with this compile_cmd is nodal-FULL-LU. That is a solver sub-path change, not just a header plus a noise block. \u26a0\u26a0 CORRECTED 2026-09-02, SECOND PASS: an earlier revision of this note attributed ALL FIVE movers to b0dcb27. That was WRONG and was over-generalized from funkyinduct's warning text without checking each deck. Verified per-deck by comparing the emitted `let alpha =` line between the shipped file and a HEAD compile. Per-deck finding: CAUSE NOT ESTABLISHED. Integrator unchanged (TRAPEZOIDAL both sides), so b0dcb27 cannot explain it. Its only functional netlist edit is `.pot R_f` max 1990->1960 (2026-08-16), and the nominal 1.95k lies inside BOTH ranges, so the baked stamped conductance \u2014 and therefore A/S/K \u2014 is unchanged by it. Needs a bisect."
-    },
-    {
       "plugin": "tungsten-glow",
       "circuit_rs": "plugins/tungsten-glow/src/circuit.rs",
       "cir": "unstable/dynamics/tungsten-glow.cir",
@@ -877,150 +757,6 @@
       "noise_mode": "shot",
       "emit_dc_op_recompute": true,
       "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical."
-    },
-    {
-      "plugin": "tungsten-thunder-horse",
-      "circuit_rs": "plugins/tungsten-thunder-horse/src/cascade.rs",
-      "cir": "unstable/pedals/tungsten-thunder-horse-cascade.cir",
-      "compile_cmd": "melange compile ../melange-circuits/unstable/pedals/tungsten-thunder-horse-cascade.cir --format code --noise shot --emit-dc-op-recompute -o plugins/tungsten-thunder-horse/src/cascade.rs",
-      "verify_status": "DRIFT-EXPLAINED",
-      "anchors": {
-        "n": 25,
-        "m": 8,
-        "oversampling": 1,
-        "solver": "dk",
-        "sample_rate": 48000
-      },
-      "has_pots": true,
-      "num_pots": 4,
-      "has_switches": false,
-      "num_switches": 0,
-      "has_runtime_r": false,
-      "runtime_r_setters": [],
-      "has_noise": true,
-      "noise_mode": "shot",
-      "emit_dc_op_recompute": true,
-      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical. Compiled into the crate (pub mod) but unused by the audio path \u2014 the monolithic circuit.rs is live (per oomox noise-regen-spec)."
-    },
-    {
-      "plugin": "tungsten-thunder-horse",
-      "circuit_rs": "plugins/tungsten-thunder-horse/src/circuit.rs",
-      "cir": "unstable/pedals/tungsten-thunder-horse.cir",
-      "compile_cmd": "melange compile ../melange-circuits/unstable/pedals/tungsten-thunder-horse.cir --format code --noise shot -o plugins/tungsten-thunder-horse/src/circuit.rs",
-      "verify_status": "DRIFT-SUBPATH-MOVED",
-      "anchors": {
-        "n": 37,
-        "m": 14,
-        "oversampling": 1,
-        "solver": "nodal",
-        "sample_rate": 48000
-      },
-      "has_pots": true,
-      "num_pots": 11,
-      "has_switches": false,
-      "num_switches": 0,
-      "has_runtime_r": false,
-      "runtime_r_setters": [],
-      "has_noise": true,
-      "noise_mode": "shot",
-      "emit_dc_op_recompute": false,
-      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical. CORRECTNESS-SWEEP e53573c: nr_globalization_full codegen drift; RE-CONVERGED to main after the e53573c line-search-failure fix (the interim 83bf48d baseline had an idle-collapse regression, now resolved). vs main: silence -0.012 dB / step -0.004 dB / sweep +0.017 dB, corr >=0.9926; sine1k+potsweep negligible. Not bit-identical (benign residual = signal-dependent idle shot-noise realization + HF-clip phase on the sweep tail); no longer an audible regression. See correctness_sweep_2026_08_30.audio_changed. \u26a0 SUB-PATH DRIFT, measured 2026-09-02 \u2014 THE ORIGINAL NOTE ABOVE UNDER-DESCRIBES THE DRIFT. The checked-in file is nodal-SCHUR; a fresh compile at HEAD with this compile_cmd is nodal-FULL-LU. That is a solver sub-path change, not just a header plus a noise block. \u26a0\u26a0 CORRECTED 2026-09-02, SECOND PASS: an earlier revision of this note attributed ALL FIVE movers to b0dcb27. That was WRONG and was over-generalized from funkyinduct's warning text without checking each deck. Verified per-deck by comparing the emitted `let alpha =` line between the shipped file and a HEAD compile. Per-deck finding: CAUSE ESTABLISHED, NETLIST-SIDE: the deck GAINED `.integrator be` (melange-circuits 34a2c5c, 2026-08-20; now at tungsten-thunder-horse.cir:278), which pins BE via IntegratorSource::BeDirective. Integrator flipped trap->BE accordingly and the sub-path followed. NOT a melange change."
-    },
-    {
-      "plugin": "tungsten-thunder-horse",
-      "circuit_rs": "plugins/tungsten-thunder-horse/src/edge.rs",
-      "cir": "unstable/pedals/tungsten-thunder-horse-edge.cir",
-      "compile_cmd": "melange compile ../melange-circuits/unstable/pedals/tungsten-thunder-horse-edge.cir --format code --noise shot --emit-dc-op-recompute -o plugins/tungsten-thunder-horse/src/edge.rs",
-      "verify_status": "DRIFT-EXPLAINED",
-      "anchors": {
-        "n": 11,
-        "m": 4,
-        "oversampling": 1,
-        "solver": "dk",
-        "sample_rate": 48000
-      },
-      "has_pots": true,
-      "num_pots": 2,
-      "has_switches": false,
-      "num_switches": 0,
-      "has_runtime_r": false,
-      "runtime_r_setters": [],
-      "has_noise": true,
-      "noise_mode": "shot",
-      "emit_dc_op_recompute": true,
-      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical. Compiled into the crate (pub mod) but unused by the audio path \u2014 the monolithic circuit.rs is live (per oomox noise-regen-spec)."
-    },
-    {
-      "plugin": "uniquorn",
-      "circuit_rs": "plugins/uniquorn/src/circuit.rs",
-      "cir": "unstable/pedals/uniquorn.cir",
-      "compile_cmd": "melange compile ../melange-circuits/unstable/pedals/uniquorn.cir --format code --noise shot -o plugins/uniquorn/src/circuit.rs",
-      "verify_status": "DRIFT-SUBPATH-MOVED",
-      "anchors": {
-        "n": 46,
-        "m": 12,
-        "oversampling": 1,
-        "solver": "nodal",
-        "sample_rate": 48000
-      },
-      "has_pots": true,
-      "num_pots": 11,
-      "has_switches": false,
-      "num_switches": 0,
-      "has_runtime_r": false,
-      "runtime_r_setters": [],
-      "has_noise": true,
-      "noise_mode": "shot",
-      "emit_dc_op_recompute": false,
-      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical. CORRECTNESS-SWEEP e53573c: nr_globalization_full codegen drift; audio TRIVIALLY changed on potsweep only (+0.002 dB, corr 0.999748, sub-mV tail drift on harder-converging pot positions), all other programs identical \u2014 benign NR-globalization drift. \u26a0 SUB-PATH DRIFT, measured 2026-09-02 \u2014 THE ORIGINAL NOTE ABOVE UNDER-DESCRIBES THE DRIFT. The checked-in file is nodal-SCHUR; a fresh compile at HEAD with this compile_cmd is nodal-FULL-LU. That is a solver sub-path change, not just a header plus a noise block. \u26a0\u26a0 CORRECTED 2026-09-02, SECOND PASS: an earlier revision of this note attributed ALL FIVE movers to b0dcb27. That was WRONG and was over-generalized from funkyinduct's warning text without checking each deck. Verified per-deck by comparing the emitted `let alpha =` line between the shipped file and a HEAD compile. Per-deck finding: CAUSE NOT ESTABLISHED. Same shape as pretty-baby: integrator unchanged (BE both sides), netlist functionally IDENTICAL since 2026-06-12, predicate unchanged. HEAD cites 'K_diag_min=-5689.6, ill-conditioned'. Needs a bisect."
-    },
-    {
-      "plugin": "uniquorn",
-      "circuit_rs": "plugins/uniquorn/src/power.rs",
-      "cir": "unstable/pedals/uniquorn-power.cir",
-      "compile_cmd": "melange compile ../melange-circuits/unstable/pedals/uniquorn-power.cir --format code --noise shot --emit-dc-op-recompute -o plugins/uniquorn/src/power.rs",
-      "verify_status": "DRIFT-EXPLAINED",
-      "anchors": {
-        "n": 23,
-        "m": 6,
-        "oversampling": 1,
-        "solver": "nodal",
-        "sample_rate": 48000
-      },
-      "has_pots": true,
-      "num_pots": 3,
-      "has_switches": false,
-      "num_switches": 0,
-      "has_runtime_r": false,
-      "runtime_r_setters": [],
-      "has_noise": true,
-      "noise_mode": "shot",
-      "emit_dc_op_recompute": true,
-      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical."
-    },
-    {
-      "plugin": "vcr-audio",
-      "circuit_rs": "plugins/vcr-audio/src/circuit.rs",
-      "cir": "unstable/dynamics/vcr-audio-alc.cir",
-      "compile_cmd": "melange compile ../melange-circuits/unstable/dynamics/vcr-audio-alc.cir --format code --noise shot --emit-dc-op-recompute -o plugins/vcr-audio/src/circuit.rs",
-      "verify_status": "DRIFT-EXPLAINED",
-      "anchors": {
-        "n": 18,
-        "m": 3,
-        "oversampling": 1,
-        "solver": "dk",
-        "sample_rate": 48000
-      },
-      "has_pots": true,
-      "num_pots": 1,
-      "has_switches": true,
-      "num_switches": 2,
-      "has_runtime_r": false,
-      "runtime_r_setters": [],
-      "has_noise": true,
-      "noise_mode": "shot",
-      "emit_dc_op_recompute": true,
-      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical. Orphan: no crate references it (per ab21b67: 'vcr-audio/src/circuit.rs refreshed too (orphan, no crate)')."
     },
     {
       "plugin": "velvet-elvis",
@@ -1188,5 +924,26 @@
       "emit_dc_op_recompute": false,
       "notes": "COVERAGE-ONLY entry \u2014 no oomox plugin counterpart, so no circuit_rs and no byte-diff protocol applies. Added 2026-09-02. Authored by melange-circuits (2a92742, branch publish-prep) to close the MOSFET/JFET corpus hole: both device models were implemented and SPICE-validated but used by ZERO circuits anywhere, so the codegen refactor's flagship 'do not collapse' hazard had no circuit-level coverage at all. DK Schur. Single-stage clean boost, +21.2 dB inverting, Id 171 uA. Closes the JFET half of the hole. NOTE from the author: melange REJECTS 'VP' on a JFET .model card (VTO is the key) \u2014 the deck still biases correctly only because the model name resolves in the built-in catalogue, which supplies the pinch-off. A card with a silently dropped parameter and a correct card therefore produce identical results for different reasons."
     }
-  ]
+  ],
+  "corpus_role": "WHAT THIS CORPUS IS, AND IS NOT (recorded 2026-09-02 after getting it wrong twice in one day). It is a CHANGE DETECTOR: it compares melange against melange, so a deck's circuit quality is irrelevant to catching a refactor that moves output. It is NOT an ACCURACY ORACLE. 44 of the pre-prune 46 decks were unstable/ tier and stable/ is empty, so almost every deck is an in-progress or abandoned circuit. NEVER cite a render from these decks as evidence about a circuit, about which solver path is more correct, or about audible behaviour \u2014 'rigour applied to a broken ruler produces confident wrong conclusions, not safe ones' (oomox user, 2026-08-16). Note the asymmetry that makes the corpus still useful: AGREEMENT is robust to deck quality (a bad circuit cannot manufacture agreement between two implementations), DISAGREEMENT is not (it cannot separate 'the code differs' from 'this circuit is pathological'). A broken deck may DETECT a defect; it can never BE the evidence for one. Adjudicating accuracy requires ngspice, on a completed deck.",
+  "prune_2026_09_02": {
+    "what": "Dropped 11 decks whose netlists were removed by melange-circuits cf8a04c (branch publish-prep, archive tag archive/pre-prune-2026-09-02). Maintainer confirms every one is an in-progress or presumably abandoned circuit.",
+    "dropped": [
+      "periodic-pedal | unstable/pedals/periodic-pedal.cir",
+      "pretty-baby | unstable/pedals/pretty-baby.cir",
+      "series-of-tubes | unstable/dynamics/series-of-tubes-stage.cir",
+      "series-of-tubes | unstable/dynamics/series-of-tubes-warmth.cir",
+      "the-kicker | unstable/drums/the-kicker.cir",
+      "tungsten-thunder-horse | unstable/pedals/tungsten-thunder-horse-cascade.cir",
+      "tungsten-thunder-horse | unstable/pedals/tungsten-thunder-horse.cir",
+      "tungsten-thunder-horse | unstable/pedals/tungsten-thunder-horse-edge.cir",
+      "uniquorn | unstable/pedals/uniquorn.cir",
+      "uniquorn | unstable/pedals/uniquorn-power.cir",
+      "vcr-audio | unstable/dynamics/vcr-audio-alc.cir"
+    ],
+    "corpus_size": "46 -> 35",
+    "feature_coverage_lost": "NONE at manifest granularity \u2014 pots, switches, runtime_r, noise modes, oversampling, dc_op_recompute and both solver families remain covered by surviving decks.",
+    "REAL_COVERAGE_LOST": "\u26a0 ALL decks exercising diag_substep_count (adaptive sub-step) and diag_ls_fail_count (NR line-search failure) were in the dropped set \u2014 they were tungsten-thunder-horse and uniquorn. The adaptive sub-step path is where F10's noise-replay fix (commit 1dc8bad) landed, so that fix now ships with ZERO golden coverage. Also thinned: diag_be_fallback_count 2->1, diag_voltage_damp_count 5->3.",
+    "fix": "Commission small purpose-built decks that provably enter the sub-step and line-search ladders, the same way the MOSFET/JFET hole was closed (COVERAGE-ONLY entries, authored by melange-circuits). Do NOT re-import the abandoned decks to restore the number: gating on an abandoned circuit freezes its pathology as the specification and makes legitimate solver fixes read as regressions."
+  }
 }
