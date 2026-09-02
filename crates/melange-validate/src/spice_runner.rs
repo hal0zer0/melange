@@ -874,6 +874,15 @@ pub fn run_transient_with_thevenin_pwl(
     // before the deck reaches ngspice (which would parse `T` as a transmission
     // line). No-op when the deck has no triode. See tube_translate.rs.
     let translated = crate::tube_translate::translate_tubes_for_ngspice(netlist_content)?;
+    // Translate any melange pentode (`P`) elements into Reefman/Koren B-source
+    // subckts too (ngspice has no native pentode). No-op when the deck has no
+    // pentode. A deck may carry both T and P, so this runs after the triode
+    // pass. See pentode_translate.rs.
+    // Parse the PRISTINE original (netlist_content) for pentode model params —
+    // the triode pass may have injected ngspice `.subckt`/`X` that melange's own
+    // parser cannot re-parse — while rewriting the (triode-)translated string.
+    let translated =
+        crate::pentode_translate::translate_pentodes_for_ngspice(&translated, netlist_content)?;
     let modified = inject_thevenin_pwl(&translated, input_node, pwl_data, series_resistance)?;
     run_transient(
         modified.netlist_path.as_path(),
