@@ -113,15 +113,14 @@ fn band_levels(ch0: &[f64], fs: f64) -> BTreeMap<String, f64> {
     out
 }
 
-pub fn compute(interleaved: &[f32], channels: usize, frames: usize, fs: f64) -> Stats {
+pub fn compute(interleaved: &[f64], channels: usize, frames: usize, fs: f64) -> Stats {
     let mut peak = 0.0f64;
     let mut sum_sq = 0.0f64;
     let mut sum = 0.0f64;
     let mut nan_count = 0u64;
     let mut inf_count = 0u64;
     let mut finite_n = 0u64;
-    for &s in interleaved {
-        let x = s as f64;
+    for &x in interleaved {
         if x.is_nan() {
             nan_count += 1;
             continue;
@@ -139,7 +138,7 @@ pub fn compute(interleaved: &[f32], channels: usize, frames: usize, fs: f64) -> 
     let ch0: Vec<f64> = interleaved
         .iter()
         .step_by(channels.max(1))
-        .map(|&x| x as f64)
+        .copied()
         .collect();
     Stats {
         channels,

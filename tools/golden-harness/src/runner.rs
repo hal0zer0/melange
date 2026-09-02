@@ -148,7 +148,13 @@ pub fn rustc(src: &Path, bin: &Path) -> Result<(), String> {
 pub struct RenderOutput {
     pub channels: usize,
     /// Interleaved samples, frames * channels.
-    pub interleaved: Vec<f32>,
+    ///
+    /// Held at f64. The driver prints full `{:.17e}` f64 text and this used to
+    /// be downcast to f32 on the way in, which put a ~6e-8 relative floor under
+    /// every comparison — far above the ~1-ulp-of-f64 differences that FMA
+    /// contraction and libm divergence produce. A cross-language or refactor
+    /// gate built on that floor cannot see the defects it exists to catch.
+    pub interleaved: Vec<f64>,
     pub frames: usize,
 }
 
@@ -219,7 +225,7 @@ pub fn run_render(bin: &Path, input: &[f64], timeout: Duration) -> Result<Render
 
     let text = String::from_utf8_lossy(&stdout_buf);
     let mut channels = 0usize;
-    let mut interleaved: Vec<f32> = Vec::new();
+    let mut interleaved: Vec<f64> = Vec::new();
     let mut frames = 0usize;
     for line in text.lines() {
         let line = line.trim();
@@ -243,7 +249,7 @@ pub fn run_render(bin: &Path, input: &[f64], timeout: Duration) -> Result<Render
             ));
         }
         for v in &vals {
-            interleaved.push(*v as f32);
+            interleaved.push(*v);
         }
         frames += 1;
     }

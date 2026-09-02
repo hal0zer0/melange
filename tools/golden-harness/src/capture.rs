@@ -347,8 +347,16 @@ fn write_outputs(
     out: &runner::RenderOutput,
     fs: f64,
 ) -> Result<(), String> {
-    // Raw PCM: interleaved f32 little-endian.
-    let pcm_path = circuit_dir.join(format!("{prog_name}.f32le"));
+    // Raw PCM: interleaved f64 little-endian.
+    //
+    // f64, not f32. The renders are the substrate of every equivalence claim
+    // the project makes — refactor neutrality and (eventually) Rust-vs-C++
+    // parity. Storing them at f32 put a ~6e-8 relative floor under all of it,
+    // which is orders of magnitude coarser than the differences that actually
+    // matter here (FP contraction, libm divergence: ~1 ulp of f64). Baselines
+    // written before this change carry the `.f32le` extension and are readable
+    // by `compare`, but cannot support a bit-exactness claim.
+    let pcm_path = circuit_dir.join(format!("{prog_name}.f64le"));
     let f = std::fs::File::create(&pcm_path).map_err(|e| format!("create pcm: {e}"))?;
     let mut w = std::io::BufWriter::new(f);
     for v in &out.interleaved {
