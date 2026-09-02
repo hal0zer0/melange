@@ -33,10 +33,23 @@ use crate::mna::MnaSystem;
 use crate::parser::Netlist;
 
 #[cfg(feature = "codegen")]
+use emitter::{EmitOutput, Emitter};
+#[cfg(feature = "codegen")]
 #[cfg(feature = "codegen")]
 use ir::CircuitIR;
-#[cfg(feature = "codegen")]
 use rust_emitter::RustEmitter;
+
+/// The single place a language backend is chosen.
+///
+/// `generate` goes through `dyn Emitter` rather than naming a concrete emitter,
+/// so adding a target is a change here and nowhere else. Previously both
+/// generate paths called `RustEmitter` directly, which meant nothing in melange
+/// could be pointed at another backend no matter how language-agnostic the IR
+/// was — the trait existed but carried no traffic.
+#[cfg(feature = "codegen")]
+fn select_emitter() -> Result<Box<dyn Emitter>, CodegenError> {
+    Ok(Box::new(RustEmitter::new()?))
+}
 
 /// Strategy for modeling op-amp output saturation at the supply rails.
 ///
@@ -888,7 +901,9 @@ impl CodeGenerator {
             maybe_insert_parasitic_caps(mna, &mut patched_mna, "Codegen");
 
         let ir = CircuitIR::from_kernel_with_dc_op(kernel, mna, netlist, &self.config, dc_op)?;
-        let (code, nodal_sub_path) = RustEmitter::new()?.emit_with_meta(&ir)?;
+        let emitted: EmitOutput = select_emitter()?.emit(&ir)?;
+        let nodal_sub_path = emitted.nodal_sub_path;
+        let code = emitted.primary().to_string();
 
         Ok(GeneratedCode {
             code,
@@ -1067,7 +1082,9 @@ impl CodeGenerator {
             maybe_insert_parasitic_caps(mna, &mut patched_mna, "Codegen nodal");
 
         let ir = CircuitIR::from_mna(mna, netlist, &self.config)?;
-        let (code, nodal_sub_path) = RustEmitter::new()?.emit_with_meta(&ir)?;
+        let emitted: EmitOutput = select_emitter()?.emit(&ir)?;
+        let nodal_sub_path = emitted.nodal_sub_path;
+        let code = emitted.primary().to_string();
 
         Ok(GeneratedCode {
             code,

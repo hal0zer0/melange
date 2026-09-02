@@ -97,10 +97,13 @@ impl Emitter for RustEmitter {
         "rust"
     }
 
-    fn emit(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
+    fn emit(&self, ir: &CircuitIR) -> Result<super::emitter::EmitOutput, CodegenError> {
         self.validate(ir)?;
-        let (code, _sub_path) = self.emit_inner(ir)?;
-        Ok(collapse_blank_lines(&code))
+        let (code, sub_path) = self.emit_inner(ir)?;
+        Ok(
+            super::emitter::EmitOutput::single("circuit.rs", collapse_blank_lines(&code))
+                .with_nodal_sub_path(sub_path),
+        )
     }
 }
 
@@ -132,22 +135,6 @@ impl RustEmitter {
             }
         }
         Ok(())
-    }
-
-    /// Emit, additionally reporting which nodal sub-path was taken.
-    ///
-    /// `Emitter::emit` returns only the source, so this inherent method exists
-    /// for callers that need the decision as well. The pipeline uses it to fill
-    /// `CodegenMeta::nodal_sub_path`, which keeps the emitter the single source
-    /// of truth: it reports what it generated rather than the pipeline
-    /// re-deriving what it thinks the emitter should have generated.
-    pub fn emit_with_meta(
-        &self,
-        ir: &CircuitIR,
-    ) -> Result<(String, Option<super::NodalSubPath>), CodegenError> {
-        self.validate(ir)?;
-        let (code, sub_path) = self.emit_inner(ir)?;
-        Ok((collapse_blank_lines(&code), sub_path))
     }
 
     fn emit_inner(
