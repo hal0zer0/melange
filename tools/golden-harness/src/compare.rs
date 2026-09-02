@@ -92,6 +92,28 @@ fn bytes_to_samples(bytes: &[u8], fmt: PcmFormat) -> Vec<f64> {
     }
 }
 
+/// Nodal sub-path per circuit, from a baseline's capture_report.json.
+fn load_sub_paths(dir: &Path) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let Ok(txt) = std::fs::read_to_string(dir.join("capture_report.json")) else {
+        return out;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else {
+        return out;
+    };
+    if let Some(arr) = v.get("circuits").and_then(|x| x.as_array()) {
+        for c in arr {
+            if let (Some(p), Some(sp)) = (
+                c.get("plugin").and_then(|x| x.as_str()),
+                c.get("nodal_sub_path").and_then(|x| x.as_str()),
+            ) {
+                out.insert(p.to_string(), sp.to_string());
+            }
+        }
+    }
+    out
+}
+
 /// Compare the generated `circuit.rs` stored alongside each capture.
 ///
 /// The audio renders alone cannot gate a refactor: identical audio is a
@@ -604,6 +626,31 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<
             );
         }
     }
+    // ---- nodal sub-path (diagnosis, not detection) ----
+    // A sub-path move necessarily changes circuit.rs wholesale, so the source
+    // diff below already CATCHES it. Naming it turns a 3000-line unexplained
+    // diff into one line that says what happened.
+    let sp_a = load_sub_paths(dir_a);
+    let sp_b = load_sub_paths(dir_b);
+    let mut sub_path_moved: Vec<(String, String, String)> = Vec::new();
+    for (plugin, a) in &sp_a {
+        if let Some(b) = sp_b.get(plugin) {
+            if a != b {
+                sub_path_moved.push((plugin.clone(), a.clone(), b.clone()));
+            }
+        }
+    }
+    if !sub_path_moved.is_empty() {
+        println!("\nNODAL SUB-PATH MOVED ({}):", sub_path_moved.len());
+        for (p, a, b) in &sub_path_moved {
+            println!("  {p}: {a} -> {b}");
+        }
+        println!(
+            "  (the emitter chose a different nodal solve for these circuits; \
+             expect a wholesale circuit.rs diff)"
+        );
+    }
+
     // ---- generated-source diff (strict gate) ----
     // Audio equality does not imply codegen equality: the five programs never
     // enter most of the recovery ladders, so a refactor can alter emitted code
@@ -680,6 +727,10 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<
         "generated_source_differs": source_differs,
         "generated_source_unavailable": source_missing,
         "diagnostics_differ_count": n_diag_differ,
+        "nodal_sub_path_moved": sub_path_moved
+            .iter()
+            .map(|(p, a, b)| serde_json::json!({"plugin": p, "from": a, "to": b}))
+            .collect::<Vec<_>>(),
         "results": results,
     });
     std::fs::write(json_out, serde_json::to_string_pretty(&json).unwrap())

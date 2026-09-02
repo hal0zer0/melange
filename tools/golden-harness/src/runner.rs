@@ -38,11 +38,19 @@ pub fn sh(cmd: &str) -> Result<std::process::Output, String> {
 ///
 /// Returns the path of the generated Rust module (searching inside `out`
 /// if the command produced a directory, e.g. a plugin project).
+/// Result of invoking `melange compile` for one circuit.
+pub struct CompileOutcome {
+    pub generated: PathBuf,
+    /// Nodal sub-path reported by the compiler ("schur" / "full-lu"), or None
+    /// on the DK path where no sub-path applies.
+    pub nodal_sub_path: Option<String>,
+}
+
 pub fn compile_circuit(
     compile_cmd: Option<&str>,
     cir_abs: &str,
     out_rs: &Path,
-) -> Result<PathBuf, String> {
+) -> Result<CompileOutcome, String> {
     let out_str = out_rs.to_string_lossy().to_string();
     let raw = compile_cmd
         .unwrap_or("melange compile {cir} -o {out} -f code")
@@ -82,13 +90,29 @@ pub fn compile_circuit(
         ));
     }
 
+    // Which nodal sub-path the emitter took, straight from the compiler's own
+    // summary. Recorded so a sub-path move is named explicitly rather than
+    // showing up only as a large unexplained circuit.rs diff.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let nodal_sub_path = stdout.lines().find_map(|l| {
+        l.trim()
+            .strip_prefix("Nodal sub-path:")
+            .map(|v| v.trim().to_string())
+    });
+
     // Locate the generated module.
     if out_rs.is_file() {
-        return Ok(out_rs.to_path_buf());
+        return Ok(CompileOutcome {
+            generated: out_rs.to_path_buf(),
+            nodal_sub_path,
+        });
     }
     if out_rs.is_dir() {
         if let Some(p) = find_circuit_rs(out_rs, 3) {
-            return Ok(p);
+            return Ok(CompileOutcome {
+                generated: p,
+                nodal_sub_path,
+            });
         }
     }
     Err(format!(

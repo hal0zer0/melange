@@ -42,6 +42,11 @@ struct CircuitCapture {
     /// changed" from "the compiler changed".
     cir_sha256: String,
     compile_ok: bool,
+    /// Nodal sub-path the emitter took ("schur" / "full-lu"); absent on DK.
+    /// Pinned so a circuit silently moving between sub-paths is NAMED rather
+    /// than surfacing only as a large unexplained circuit.rs diff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    nodal_sub_path: Option<String>,
     /// Commit the `melange` BINARY was built from, read out of the generated
     /// provenance header. Compared against the source-tree rev in metadata:
     /// the harness shells out to whatever `melange` is on PATH, which can be an
@@ -196,6 +201,7 @@ fn capture_circuit(
         cir_resolved: String::new(),
         cir_sha256: String::new(),
         compile_ok: false,
+        nodal_sub_path: None,
         binary_commit: None,
         noise_api_detected: false,
         seed_api_detected: false,
@@ -230,14 +236,16 @@ fn capture_circuit(
 
     // 1. melange CLI compile (the same path oomox uses).
     let gen_rs = work.join(format!("{id}.rs"));
-    let rs_path =
+    let outcome =
         match runner::compile_circuit(entry.compile_cmd.as_deref(), &rep.cir_resolved, &gen_rs) {
-            Ok(p) => p,
+            Ok(o) => o,
             Err(e) => {
                 rep.error = Some(e);
                 return rep;
             }
         };
+    let rs_path = outcome.generated;
+    rep.nodal_sub_path = outcome.nodal_sub_path;
     let code = match std::fs::read_to_string(&rs_path) {
         Ok(c) => c,
         Err(e) => {
