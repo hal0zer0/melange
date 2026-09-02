@@ -42,6 +42,14 @@ struct CircuitCapture {
     /// changed" from "the compiler changed".
     cir_sha256: String,
     compile_ok: bool,
+    /// Commit the `melange` BINARY was built from, read out of the generated
+    /// provenance header. Compared against the source-tree rev in metadata:
+    /// the harness shells out to whatever `melange` is on PATH, which can be an
+    /// older install than the checkout, and silently capturing with a stale
+    /// compiler while labelling the baseline with the current source rev makes
+    /// the whole baseline a lie.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    binary_commit: Option<String>,
     noise_api_detected: bool,
     seed_api_detected: bool,
     pot_setters_detected: Vec<usize>,
@@ -125,7 +133,10 @@ pub fn run(
         reports.push(rep);
     }
 
-    write_metadata(manifest_path, out_dir, fs)?;
+    // Provenance of the compiler we actually ran, from the first circuit that
+    // compiled (all circuits use the same binary).
+    let binary_commit = reports.iter().find_map(|r| r.binary_commit.clone());
+    write_metadata(manifest_path, out_dir, fs, binary_commit)?;
     let report_json = serde_json::json!({ "circuits": reports });
     std::fs::write(
         out_dir.join("capture_report.json"),
@@ -185,6 +196,7 @@ fn capture_circuit(
         cir_resolved: String::new(),
         cir_sha256: String::new(),
         compile_ok: false,
+        binary_commit: None,
         noise_api_detected: false,
         seed_api_detected: false,
         pot_setters_detected: Vec::new(),
@@ -234,6 +246,11 @@ fn capture_circuit(
         }
     };
     rep.compile_ok = true;
+    rep.binary_commit = code
+        .lines()
+        .find_map(|l| l.trim_start().strip_prefix("// melange:"))
+        .and_then(|r| r.split_once('(').map(|(_, c)| c))
+        .and_then(|c| c.split_once(')').map(|(c, _)| c.trim().to_string()));
 
     // Provenance copy: lets a compare-time delta be traced to a codegen diff.
     // The `// melange: <version> (<commit>)` + `// provenance:` JSON header lines
@@ -598,7 +615,12 @@ fn sh_line(cmd: &str) -> String {
         .unwrap_or_default()
 }
 
-fn write_metadata(manifest_path: &Path, out_dir: &Path, fs: f64) -> Result<(), String> {
+fn write_metadata(
+    manifest_path: &Path,
+    out_dir: &Path,
+    fs: f64,
+    binary_commit: Option<String>,
+) -> Result<(), String> {
     // Melange repo root: this tool lives at <root>/tools/golden-harness.
     let melange_root: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -606,7 +628,36 @@ fn write_metadata(manifest_path: &Path, out_dir: &Path, fs: f64) -> Result<(), S
         .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."));
     let root = melange_root.display();
     let rev = sh_line(&format!("git -C {root} rev-parse HEAD"));
-    let dirty = !sh_line(&format!("git -C {root} status --porcelain")).is_empty();
+    // Distinguish tracked modifications (which change what is compiled) from
+    // untracked files (which generally do not). A single boolean over
+    // `git status --porcelain` calls a tree dirty because an unrelated scratch
+    // file exists, which trains readers to ignore the flag — the opposite of
+    // what it is for.
+    let tracked_dirty = !sh_line(&format!(
+        "git -C {root} status --porcelain --untracked-files=no"
+    ))
+    .is_empty();
+    let untracked = !sh_line(&format!(
+        "git -C {root} ls-files --others --exclude-standard"
+    ))
+    .is_empty();
+
+    // Does the binary we actually ran match the source tree we labelled it with?
+    let short_rev = rev.chars().take(7).collect::<String>();
+    let binary_matches_source = binary_commit
+        .as_deref()
+        .map(|c| !c.is_empty() && c != "unknown" && rev.starts_with(c));
+    if binary_matches_source == Some(false) {
+        eprintln!(
+            "\n*** PROVENANCE MISMATCH ***\n\
+             The `melange` binary on PATH was built from commit {}, but this baseline is \n\
+             labelled with source rev {}. The capture used a DIFFERENT compiler than the \n\
+             checkout it claims to represent. Run `cargo install --path tools/melange-cli` \n\
+             and re-capture, or this baseline is not evidence about this source tree.\n",
+            binary_commit.as_deref().unwrap_or("?"),
+            short_rev
+        );
+    }
     let manifest_sha = sh_line(&format!(
         "sha256sum {} | cut -d' ' -f1",
         manifest_path.display()
@@ -614,7 +665,10 @@ fn write_metadata(manifest_path: &Path, out_dir: &Path, fs: f64) -> Result<(), S
 
     let meta = serde_json::json!({
         "melange_rev": rev,
-        "melange_worktree_dirty": dirty,
+        "melange_worktree_dirty": tracked_dirty,
+        "melange_untracked_files_present": untracked,
+        "melange_binary_commit": binary_commit,
+        "melange_binary_matches_source": binary_matches_source,
         "melange_version": sh_line("melange --version"),
         "melange_bin": sh_line("command -v melange"),
         "rustc_version": sh_line("rustc --version"),
