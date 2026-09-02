@@ -4211,6 +4211,7 @@ fn test_ir_bjt_params_gp_serde_roundtrip() {
         rth: f64::INFINITY,
         cth: 1e-3,
         xti: 3.0,
+        xtb: 0.0,
         eg: 1.11,
         tamb: 300.15,
     };

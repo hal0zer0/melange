@@ -9694,6 +9694,11 @@ impl RustEmitter {
                          \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
                          \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
                          \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
+                         \x20       // Beta temperature dependence (SPICE XTB) — MUST stay in step with\n\
+                         \x20       // the DK twin in dk_emitter.rs. XTB defaults to 0.0, so `powf`\n\
+                         \x20       // returns exactly 1.0 and this is inert on cards that omit it.\n\
+                         \x20       state.device_{dev_num}_bf = DEVICE_{dev_num}_BETA_F * t_ratio.powf(DEVICE_{dev_num}_XTB);\n\
+                         \x20       state.device_{dev_num}_br = DEVICE_{dev_num}_BETA_R * t_ratio.powf(DEVICE_{dev_num}_XTB);\n\
                          \x20   }}\n"
                     ));
                 }

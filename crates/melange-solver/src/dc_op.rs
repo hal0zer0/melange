@@ -3845,6 +3845,7 @@ Cx c3 b4 6n IC=-4\n";
                 rth: f64::INFINITY,
                 cth: 1e-3,
                 xti: 3.0,
+                xtb: 0.0,
                 eg: 1.11,
                 tamb: 300.15,
             }),

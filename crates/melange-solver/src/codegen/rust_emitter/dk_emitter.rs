@@ -1271,6 +1271,7 @@ impl RustEmitter {
                         emit_device_const(&mut code, dev_num, "RTH", bp.rth);
                         emit_device_const(&mut code, dev_num, "CTH", bp.cth);
                         emit_device_const(&mut code, dev_num, "XTI", bp.xti);
+                        emit_device_const(&mut code, dev_num, "XTB", bp.xtb);
                         emit_device_const(&mut code, dev_num, "EG", bp.eg);
                         emit_device_const(&mut code, dev_num, "TAMB", bp.tamb);
                         emit_device_const(&mut code, dev_num, "IS_NOM", bp.is);
@@ -2986,6 +2987,12 @@ impl RustEmitter {
                              \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
                              \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
                              \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
+                             \x20       // Beta temperature dependence (SPICE XTB). XTB defaults to 0.0,\n\
+                             \x20       // so `powf` returns exactly 1.0 and this is inert on cards that\n\
+                             \x20       // omit it — but a self-heating device whose beta never moved was\n\
+                             \x20       // physically wrong, not merely incomplete.\n\
+                             \x20       state.device_{dev_num}_bf = DEVICE_{dev_num}_BETA_F * t_ratio.powf(DEVICE_{dev_num}_XTB);\n\
+                             \x20       state.device_{dev_num}_br = DEVICE_{dev_num}_BETA_R * t_ratio.powf(DEVICE_{dev_num}_XTB);\n\
                              \x20   }}\n"
                         ));
                 }

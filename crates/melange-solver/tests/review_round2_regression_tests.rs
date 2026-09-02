@@ -310,6 +310,7 @@ fn bjt_slots_with_parasitics(netlist: &Netlist) -> Vec<DeviceSlot> {
                     rth: f64::INFINITY,
                     cth: 1e-3,
                     xti: 3.0,
+                    xtb: 0.0,
                     eg: 1.11,
                     tamb: 300.15,
                 }),

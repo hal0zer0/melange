@@ -4769,6 +4769,17 @@ impl CircuitIR {
             );
         }
 
+        // SPICE `XTB`: forward/reverse beta temperature exponent, used by the
+        // self-heating block as `BF(T) = BF·(Tj/Tnom)^XTB` (likewise `BR`).
+        // Default 0.0 is SPICE's own, and makes the power term exactly 1.0 —
+        // so a card without `XTB`, and any card at all when `Tj == Tnom`,
+        // leaves beta untouched and the emitted DSP byte-identical.
+        let xtb = Self::lookup_model_param(netlist, model, "XTB").unwrap_or(0.0);
+        if !xtb.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "BJT model XTB must be finite, got {xtb}"
+            )));
+        }
         let xti = Self::lookup_model_param(netlist, model, "XTI").unwrap_or(3.0);
         if !xti.is_finite() {
             return Err(CodegenError::InvalidConfig(format!(
@@ -4796,7 +4807,8 @@ impl CircuitIR {
             &[
                 "IS", "VT", "BF", "BR", "VAF", "VA", "VAR", "VB", "IKF", "JBF", "IKR", "JBR",
                 "CJE", "CJC", "VJE", "MJE", "VJC", "MJC", "FC", "TF", "NF", "NR", "ISE", "NE",
-                "ISC", "NC", "RB", "RC", "RE", "RTH", "CTH", "XTI", "EG", "TAMB", "KF", "AF",
+                "ISC", "NC", "RB", "RC", "RE", "RTH", "CTH", "XTI", "XTB", "EG", "TAMB", "KF",
+                "AF",
             ],
         );
         Self::warn_unresolved_model(
@@ -4806,7 +4818,7 @@ impl CircuitIR {
             &[
                 "IS", "VT", "BF", "BR", "VAF", "VA", "VAR", "VB", "IKF", "JBF", "IKR", "JBR",
                 "CJE", "CJC", "VJE", "MJE", "VJC", "MJC", "FC", "TF", "NF", "NR", "ISE", "NE",
-                "ISC", "NC", "RB", "RC", "RE",
+                "ISC", "NC", "RB", "RC", "RE", "XTB",
             ],
             "the built-in default BJT",
         );
@@ -4841,6 +4853,7 @@ impl CircuitIR {
             rth,
             cth,
             xti,
+            xtb,
             eg,
             tamb,
         })

@@ -204,6 +204,21 @@ pub struct BjtParams {
     /// IS temperature exponent (default 3.0)
     #[serde(default = "default_xti")]
     pub xti: f64,
+    /// Forward/reverse beta temperature exponent (SPICE `XTB`, default 0.0).
+    ///
+    /// `BF(T) = BF · (Tj/Tnom)^XTB`, likewise `BR`. SPICE's default of 0.0
+    /// makes the power term exactly 1.0, so a card without `XTB` — and any
+    /// card at all when self-heating is disabled and `Tj == Tnom` — leaves
+    /// beta untouched and the emitted DSP byte-identical.
+    ///
+    /// Why this exists: melange models self-heating (`RTH`/`CTH`/`TAMB`) and
+    /// drifts `IS` with junction temperature via `XTI`, but current gain was
+    /// temperature-invariant — a transistor could heat up while its beta did
+    /// not move. Real vendor cards carry `XTB` (it appears on the TIP35C/TIP36C
+    /// output pair in the Wurlitzer power amp, among others) and it was being
+    /// silently discarded as an unrecognized parameter.
+    #[serde(default)]
+    pub xtb: f64,
     /// Bandgap energy [eV] (default 1.11, silicon)
     #[serde(default = "default_eg")]
     pub eg: f64,
@@ -1079,6 +1094,7 @@ mod bjt_charge_storage_tests {
             rth: f64::INFINITY,
             cth: 1.0e-3,
             xti: 3.0,
+            xtb: 0.0,
             eg: 1.11,
             tamb: 300.15,
         }
