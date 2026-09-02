@@ -923,6 +923,75 @@
       "noise_mode": "off",
       "emit_dc_op_recompute": false,
       "notes": "COVERAGE-ONLY entry \u2014 no oomox plugin counterpart, so no circuit_rs and no byte-diff protocol applies. Added 2026-09-02. Authored by melange-circuits (2a92742, branch publish-prep) to close the MOSFET/JFET corpus hole: both device models were implemented and SPICE-validated but used by ZERO circuits anywhere, so the codegen refactor's flagship 'do not collapse' hazard had no circuit-level coverage at all. DK Schur. Single-stage clean boost, +21.2 dB inverting, Id 171 uA. Closes the JFET half of the hole. NOTE from the author: melange REJECTS 'VP' on a JFET .model card (VTO is the key) \u2014 the deck still biases correctly only because the model name resolves in the built-in catalogue, which supplies the pinch-off. A card with a silently dropped parameter and a correct card therefore produce identical results for different reasons."
+    },
+    {
+      "plugin": "steve-1073-preamp",
+      "cir": "unstable/preamp/steve-1073-preamp.cir",
+      "compile_cmd": "melange compile ../melange-circuits/unstable/preamp/steve-1073-preamp.cir --format code -o /dev/null",
+      "verify_status": "COVERAGE-ONLY",
+      "anchors": {
+        "n": 54,
+        "m": 12,
+        "oversampling": 1,
+        "solver": "nodal",
+        "sample_rate": 48000
+      },
+      "has_pots": false,
+      "num_pots": 0,
+      "has_switches": true,
+      "num_switches": 2,
+      "has_runtime_r": false,
+      "runtime_r_setters": [],
+      "has_noise": false,
+      "noise_mode": "off",
+      "emit_dc_op_recompute": false,
+      "notes": "COVERAGE-ONLY entry added 2026-09-02 to restore the recovery-ladder coverage lost when the 11 abandoned decks were dropped (see prune_2026_09_02). Chosen by MEASUREMENT, not by reputation: compiled, driven with a hot 20Hz-20kHz sweep, and the diag_* counters read off the run. Nodal full-LU. MEASURED substep=490, ls_fail=12412, be_fallback=896, nr_max=1386 \u2014 it enters FOUR ladders hard, and is by a wide margin the strongest ladder exerciser in the library (the dropped tungsten-thunder-horse managed substep=53, ls_fail=5627). Independently significant: this deck is the recorded tripwire for the v0.1.4 nodal NR globalization, and oomox's records name it as the ONE sound repro for the auto-BE detector gap. It restores coverage for the adaptive sub-step path where F10's noise-replay fix (1dc8bad) landed."
+    },
+    {
+      "plugin": "wurli-power-amp",
+      "cir": "unstable/amp/wurli-power-amp.cir",
+      "compile_cmd": "melange compile ../melange-circuits/unstable/amp/wurli-power-amp.cir --format code -o /dev/null",
+      "verify_status": "COVERAGE-ONLY",
+      "anchors": {
+        "n": 20,
+        "m": 14,
+        "oversampling": 1,
+        "solver": "nodal",
+        "sample_rate": 48000
+      },
+      "has_pots": false,
+      "num_pots": 0,
+      "has_switches": false,
+      "num_switches": 0,
+      "has_runtime_r": false,
+      "runtime_r_setters": [],
+      "has_noise": false,
+      "noise_mode": "off",
+      "emit_dc_op_recompute": false,
+      "notes": "COVERAGE-ONLY entry added 2026-09-02 to restore the recovery-ladder coverage lost when the 11 abandoned decks were dropped (see prune_2026_09_02). Chosen by MEASUREMENT, not by reputation: compiled, driven with a hot 20Hz-20kHz sweep, and the diag_* counters read off the run. Nodal full-LU. MEASURED substep=427, ls_fail=8603, nr_max=427. Second sub-step/line-search witness, and the most defensible deck in the library on provenance grounds: openwurli is the only SHIPPED product. This is also the circuit whose divergence motivated b0dcb27 (router-vs-nodal auto-BE corroboration) \u2014 >60s per 0.5s of audio, peak >2700V under --force-trap before that fix."
+    },
+    {
+      "plugin": "gravity",
+      "cir": "unstable/dynamics/gravity.cir",
+      "compile_cmd": "melange compile ../melange-circuits/unstable/dynamics/gravity.cir --format code -o /dev/null",
+      "verify_status": "COVERAGE-ONLY",
+      "anchors": {
+        "n": 34,
+        "m": 9,
+        "oversampling": 1,
+        "solver": "nodal",
+        "sample_rate": 48000
+      },
+      "has_pots": true,
+      "num_pots": 8,
+      "has_switches": true,
+      "num_switches": 2,
+      "has_runtime_r": false,
+      "runtime_r_setters": [],
+      "has_noise": false,
+      "noise_mode": "off",
+      "emit_dc_op_recompute": false,
+      "notes": "COVERAGE-ONLY entry added 2026-09-02 to restore the recovery-ladder coverage lost when the 11 abandoned decks were dropped (see prune_2026_09_02). Chosen by MEASUREMENT, not by reputation: compiled, driven with a hot 20Hz-20kHz sweep, and the diag_* counters read off the run. Nodal full-LU. MEASURED ls_fail=926 (no sub-step). Adds a third line-search witness plus op-amp + VCA + gang + wiper coverage in one deck, which melange-circuits flagged as the efficient anchor for that feature cluster. Its oomox counterpart is one of only 6 plugins carrying a provenance header, i.e. regenerated recently rather than left stale."
     }
   ],
   "corpus_role": "WHAT THIS CORPUS IS, AND IS NOT (recorded 2026-09-02 after getting it wrong twice in one day). It is a CHANGE DETECTOR: it compares melange against melange, so a deck's circuit quality is irrelevant to catching a refactor that moves output. It is NOT an ACCURACY ORACLE. 44 of the pre-prune 46 decks were unstable/ tier and stable/ is empty, so almost every deck is an in-progress or abandoned circuit. NEVER cite a render from these decks as evidence about a circuit, about which solver path is more correct, or about audible behaviour \u2014 'rigour applied to a broken ruler produces confident wrong conclusions, not safe ones' (oomox user, 2026-08-16). Note the asymmetry that makes the corpus still useful: AGREEMENT is robust to deck quality (a bad circuit cannot manufacture agreement between two implementations), DISAGREEMENT is not (it cannot separate 'the code differs' from 'this circuit is pathological'). A broken deck may DETECT a defect; it can never BE the evidence for one. Adjudicating accuracy requires ngspice, on a completed deck.",
