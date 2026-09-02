@@ -3668,30 +3668,14 @@ impl RustEmitter {
         if ir.solver_config.breakpoint_be {
             code.push_str("        self.breakpoint_be = 0;\n");
         }
-        // Reset Schur complement matrices to defaults
         let cp = if use_full_nodal {
             "self.cold."
         } else {
             "self."
         };
-        code.push_str(&format!("        {}s = S_DEFAULT;\n", cp));
-        if m > 0 {
-            code.push_str(&format!("        {}k = K_DEFAULT;\n", cp));
-            code.push_str(&format!("        {}s_ni = S_NI_DEFAULT;\n", cp));
-        }
-        code.push_str(&format!("        {}s_be = S_BE_DEFAULT;\n", cp));
-        if m > 0 {
-            code.push_str(&format!("        {}k_be = K_BE_DEFAULT;\n", cp));
-            code.push_str(&format!("        {}s_ni_be = S_NI_BE_DEFAULT;\n", cp));
-        }
-        if !ir.matrices.s_sub.is_empty() {
-            code.push_str(&format!("        {}s_sub = S_SUB_DEFAULT;\n", cp));
-            code.push_str(&format!("        {}a_neg_sub = A_NEG_SUB_DEFAULT;\n", cp));
-            if m > 0 {
-                code.push_str(&format!("        {}k_sub = K_SUB_DEFAULT;\n", cp));
-                code.push_str(&format!("        {}s_ni_sub = S_NI_SUB_DEFAULT;\n", cp));
-            }
-        }
+        // Working G/C snap back to nominal here; every rate-dependent matrix
+        // derived from them is restored at the END of reset(), once the pot,
+        // switch and saturation fields below have also been restored.
         if has_pots || has_switches || has_sat_ind || has_sat_coupled {
             code.push_str(&format!("        {}g_work = G;\n", cp));
             code.push_str(&format!("        {}c_work = C;\n", cp));
@@ -3789,6 +3773,64 @@ impl RustEmitter {
         // Noise: re-seed RNGs from stored master seed; user prefs untouched.
         if noise.enabled {
             code.push_str(&noise.reset_body);
+        }
+        // Restore the rate-dependent matrices so they agree with the pot,
+        // switch and saturation state restored above. Two defects fixed here
+        // (F9):
+        //
+        //  * `a`/`a_neg`/`a_be`/`a_neg_be` were never restored at all, and
+        //    `matrices_dirty` was never set — so a `reset()` after a pot move
+        //    left the working A matrices holding the moved-pot stamp while
+        //    `g_work` read nominal, with no rebuild scheduled. The DK path has
+        //    always set `matrices_dirty` at this point in `reset()`
+        //    (`templates/rust/state.rs.tera`); the nodal path never did.
+        //
+        //  * The `*_DEFAULT` constants bake `SAMPLE_RATE`, so reloading them
+        //    unconditionally installed codegen-rate Schur matrices whenever the
+        //    host ran at any other rate, while `a`/`a_neg` kept the live rate.
+        //
+        // The dispatch mirrors `set_sample_rate()`. Its fast path is gated on
+        // `all_default` as well as the rate; here that precondition holds by
+        // construction, because every pot and switch was just restored to
+        // nominal a few lines above.
+        let emit_matrix_defaults = |code: &mut String, ind: &str| {
+            code.push_str(&format!("{ind}self.a = A_DEFAULT;\n"));
+            code.push_str(&format!("{ind}self.a_neg = A_NEG_DEFAULT;\n"));
+            code.push_str(&format!("{ind}self.a_be = A_BE_DEFAULT;\n"));
+            code.push_str(&format!("{ind}self.a_neg_be = A_NEG_BE_DEFAULT;\n"));
+            code.push_str(&format!("{ind}{cp}s = S_DEFAULT;\n"));
+            if m > 0 {
+                code.push_str(&format!("{ind}{cp}k = K_DEFAULT;\n"));
+                code.push_str(&format!("{ind}{cp}s_ni = S_NI_DEFAULT;\n"));
+            }
+            code.push_str(&format!("{ind}{cp}s_be = S_BE_DEFAULT;\n"));
+            if m > 0 {
+                code.push_str(&format!("{ind}{cp}k_be = K_BE_DEFAULT;\n"));
+                code.push_str(&format!("{ind}{cp}s_ni_be = S_NI_BE_DEFAULT;\n"));
+            }
+            if !ir.matrices.s_sub.is_empty() {
+                code.push_str(&format!("{ind}{cp}s_sub = S_SUB_DEFAULT;\n"));
+                code.push_str(&format!("{ind}{cp}a_neg_sub = A_NEG_SUB_DEFAULT;\n"));
+                if m > 0 {
+                    code.push_str(&format!("{ind}{cp}k_sub = K_SUB_DEFAULT;\n"));
+                    code.push_str(&format!("{ind}{cp}s_ni_sub = S_NI_SUB_DEFAULT;\n"));
+                }
+            }
+        };
+        if needs_current_sr {
+            code.push_str("        if (self.current_sample_rate - SAMPLE_RATE).abs() < 0.5 {\n");
+            emit_matrix_defaults(&mut code, "            ");
+            code.push_str("        } else {\n");
+            code.push_str(&format!(
+                "            self.rebuild_matrices(self.current_sample_rate * {}.0);\n",
+                ir.solver_config.oversampling_factor
+            ));
+            code.push_str("        }\n");
+        } else {
+            emit_matrix_defaults(&mut code, "        ");
+        }
+        if needs_rebuild_state {
+            code.push_str("        self.matrices_dirty = false;\n");
         }
         code.push_str("        self.warmup();\n");
         code.push_str("    }\n\n");
