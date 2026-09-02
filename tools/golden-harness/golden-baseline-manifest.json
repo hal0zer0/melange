@@ -1,11 +1,11 @@
 {
   "generated": "2026-07-21",
   "generated_by": "melange golden-baseline manifest task",
-  "melange_verify_commit": "e53573c (correctness-sweep HEAD; melange 0.1.3 binary freshly built + installed from it). Prior baselines: 83bf48d (superseded — carried the tungsten-thunder-horse line-search regression, fixed by e53573c), 8945b67.",
+  "melange_verify_commit": "e53573c (correctness-sweep HEAD; melange 0.1.3 binary freshly built + installed from it). Prior baselines: 83bf48d (superseded \u2014 carried the tungsten-thunder-horse line-search regression, fixed by e53573c), 8945b67.",
   "compile_cmd_cwd": "~/dev/oomox (repo root); netlists referenced as ../melange-circuits/<cir>",
-  "verification_protocol": "Each compile_cmd was executed into scratch space and diffed byte-for-byte against the checked-in oomox file. EXACT = byte-identical. DRIFT-EXPLAINED = every diff hunk attributable to known post-regen melange commits AND anchors (N, M, OVERSAMPLING_FACTOR, INPUT_NODE, OUTPUT_NODES, OUTPUT_SCALES, INPUT_RESISTANCE, SAMPLE_RATE, full setter list, noise fns) verified identical. No hand-edited generated files were found. Known post-regen drift commits: 146d51b (emitted clippy-allow header); a472807 (two-draw shot noise); 49ecaa4 (deterministic coupled-inductor augmented-row ordering); AND correctness-sweep NR globalization 0c70d44 + 83bf48d + e53573c (nodal Newton globalized with a KCL residual gate + Armijo line search; emits new kcl_residual/kcl_residual_inl fns + v_nl_final block, replaces the old adaptive sub-stepping fallback, and raises the emitted MAX_ITER cap to 100 on every deck carrying an inner nodal/behavioral NR loop; e53573c makes a line-search FAILURE fall through instead of bailing to the removed fallback — this fixed the tungsten-thunder-horse idle-collapse regression that the 83bf48d baseline carried, re-converging it to main/ngspice). Two other correctness-sweep DSP-capable commits produced NO drift in THIS corpus, verified by content diff at e53573c: 63cee6e (DC-OP candidate retention) changed zero DC_OP/DC_NL_I constants here (no corpus circuit hit the leaky-gate degenerate case); be7be88 (independent current-source sign) is inert here (no corpus deck has an explicit `I` element).",
+  "verification_protocol": "Each compile_cmd was executed into scratch space and diffed byte-for-byte against the checked-in oomox file. EXACT = byte-identical. DRIFT-EXPLAINED = every diff hunk attributable to known post-regen melange commits AND anchors (N, M, OVERSAMPLING_FACTOR, INPUT_NODE, OUTPUT_NODES, OUTPUT_SCALES, INPUT_RESISTANCE, SAMPLE_RATE, full setter list, noise fns) verified identical. No hand-edited generated files were found. Known post-regen drift commits: 146d51b (emitted clippy-allow header); a472807 (two-draw shot noise); 49ecaa4 (deterministic coupled-inductor augmented-row ordering); AND correctness-sweep NR globalization 0c70d44 + 83bf48d + e53573c (nodal Newton globalized with a KCL residual gate + Armijo line search; emits new kcl_residual/kcl_residual_inl fns + v_nl_final block, replaces the old adaptive sub-stepping fallback, and raises the emitted MAX_ITER cap to 100 on every deck carrying an inner nodal/behavioral NR loop; e53573c makes a line-search FAILURE fall through instead of bailing to the removed fallback \u2014 this fixed the tungsten-thunder-horse idle-collapse regression that the 83bf48d baseline carried, re-converging it to main/ngspice). Two other correctness-sweep DSP-capable commits produced NO drift in THIS corpus, verified by content diff at e53573c: 63cee6e (DC-OP candidate retention) changed zero DC_OP/DC_NL_I constants here (no corpus circuit hit the leaky-gate degenerate case); be7be88 (independent current-source sign) is inert here (no corpus deck has an explicit `I` element).",
   "melange_circuits_repo_state": {
-    "head": "b655adf (2026-06-12) — STALE relative to shipped netlists",
+    "head": "b655adf (2026-06-12) \u2014 STALE relative to shipped netlists",
     "modified_uncommitted": [
       "testing/dynamics/4kbuscomp-audiopath.cir",
       "unstable/dynamics/series-of-tubes-stage.cir",
@@ -24,16 +24,47 @@
   },
   "correctness_sweep_2026_08_30": {
     "summary": "Golden baseline refreshed from main (ee8841e) to correctness-sweep HEAD (e53573c) via full audio capture+compare (golden-harness) and per-circuit generated-code diff. 41/42 circuits resolve (qapla-1a UNRESOLVED, see below). Every generated-output change across the corpus is attributable to the nodal-NR globalization (0c70d44 + 83bf48d + e53573c); zero unattributable changes. NOTE: the interim 83bf48d baseline carried a tungsten-thunder-horse line-search regression (idle output collapsed to 0.0); e53573c fixes it (line-search failure falls through instead of bailing to the removed fallback) and tungsten re-converges to main. The 83bf48d->e53573c compare is SURGICAL: only tungsten changed, 181 identical / 0 other circuits affected.",
-    "audio_compare": "level-0.1 V programs (silence/sine1k/sweep/step/potsweep), main (ee8841e) vs fixed HEAD (e53573c): 171 identical, 11 negligible, 4 CHANGED, 1 missing (qapla-1a, unresolvable). The 4 CHANGED are uniquorn/potsweep (trivial) + tungsten silence/step/sweep (tiny benign residual, see below). NO DK deck changed audibly — the fix is nodal-only for audio, as designed.",
+    "audio_compare": "level-0.1 V programs (silence/sine1k/sweep/step/potsweep), main (ee8841e) vs fixed HEAD (e53573c): 171 identical, 11 negligible, 4 CHANGED, 1 missing (qapla-1a, unresolvable). The 4 CHANGED are uniquorn/potsweep (trivial) + tungsten silence/step/sweep (tiny benign residual, see below). NO DK deck changed audibly \u2014 the fix is nodal-only for audio, as designed.",
     "audio_changed": {
-      "tungsten-thunder-horse (unstable/pedals/tungsten-thunder-horse.cir, nodal N=37 M=14)": "RESOLVED at e53573c — RE-CONVERGED to main. The 83bf48d idle-collapse regression (silence +5.8 dB corr -0.002 / step +10.5 dB corr -0.12) is gone; the e53573c line-search-failure fix (arbiter-endorsed) restores the idle noise floor and levels. vs main now: silence -0.012 dB (corr 0.9978), step -0.004 dB (corr 0.9992), sweep +0.017 dB (corr 0.9926); sine1k + potsweep NEGLIGIBLE (corr 1.0). NOT bit-identical to main, so silence/step/sweep still trip the strict CHANGED classifier at tiny magnitude; the residual is BENIGN and attributable to the retained NR-globalization line-search path: signal-dependent shot-noise realization at idle (idle output = pure amplified shot noise, so an FP-level operating-point difference reshuffles the noise samples) + HF-clip phase wiggle on the near-Nyquist sweep tail (worst deltas localized to idx ~178k-181k of 192k). dr-debuggenshmirtz measured step delta ~6e-4 vs main on the DETERMINISTIC (no-noise) signal; the harness runs --noise shot, which is why the captured idle residual is larger. Codegen still carries the NR globalization (line search + counter), so this deck stays DRIFT-EXPLAINED (nr_globalization_full).",
+      "tungsten-thunder-horse (unstable/pedals/tungsten-thunder-horse.cir, nodal N=37 M=14)": "RESOLVED at e53573c \u2014 RE-CONVERGED to main. The 83bf48d idle-collapse regression (silence +5.8 dB corr -0.002 / step +10.5 dB corr -0.12) is gone; the e53573c line-search-failure fix (arbiter-endorsed) restores the idle noise floor and levels. vs main now: silence -0.012 dB (corr 0.9978), step -0.004 dB (corr 0.9992), sweep +0.017 dB (corr 0.9926); sine1k + potsweep NEGLIGIBLE (corr 1.0). NOT bit-identical to main, so silence/step/sweep still trip the strict CHANGED classifier at tiny magnitude; the residual is BENIGN and attributable to the retained NR-globalization line-search path: signal-dependent shot-noise realization at idle (idle output = pure amplified shot noise, so an FP-level operating-point difference reshuffles the noise samples) + HF-clip phase wiggle on the near-Nyquist sweep tail (worst deltas localized to idx ~178k-181k of 192k). dr-debuggenshmirtz measured step delta ~6e-4 vs main on the DETERMINISTIC (no-noise) signal; the harness runs --noise shot, which is why the captured idle residual is larger. Codegen still carries the NR globalization (line search + counter), so this deck stays DRIFT-EXPLAINED (nr_globalization_full).",
       "uniquorn (unstable/pedals/uniquorn.cir, nodal N=46 M=12)": "TRIVIAL: potsweep only, +0.002 dB, corr 0.999748, max sample delta 8.6e-2 (sub-mV tail drift on the harder-converging pot positions). All other uniquorn programs identical. Benign NR-globalization drift."
     },
     "codegen_drift_classes": {
-      "nr_globalization_full (residual+Armijo fns added, MAX_ITER->100)": ["funkyinduct", "moonladder", "noyce-germanium-cluster", "noyce-transformer-triode", "periodic-pedal", "pretty-baby", "sad-bastard", "sus-bus", "the-kicker", "tungsten-thunder-horse", "uniquorn", "uniquorn-power"],
-      "nr_globalization_substep_removed (old adaptive sub-step fallback deleted, MAX_ITER->100, no residual fn)": ["subspace/radio-am", "subspace/radio-fm"],
-      "max_iter_const_only (only the MAX_ITER 50|70->100 const + its provenance echo)": ["basic-bitch", "five-watt-freddie", "noyce-tape-head", "pipe-shouter", "tungsten-glow", "velvet-elvis", "warpony"],
-      "identical (no correctness-sweep codegen drift)": ["gold-press x5 (cab/cartridge/mastering/overdrive/riaa)", "noyce x9 (4558/amp-at-idle/boiler-room/carbon-comp-bank/clean-rc/ef86/smps-ripple/triode-12ax7/zener-junction)", "series-of-tubes x2 (stage/warmth)", "tungsten-thunder-horse cascade/edge (orphan modules)", "vcr-audio", "vurli"]
+      "nr_globalization_full (residual+Armijo fns added, MAX_ITER->100)": [
+        "funkyinduct",
+        "moonladder",
+        "noyce-germanium-cluster",
+        "noyce-transformer-triode",
+        "periodic-pedal",
+        "pretty-baby",
+        "sad-bastard",
+        "sus-bus",
+        "the-kicker",
+        "tungsten-thunder-horse",
+        "uniquorn",
+        "uniquorn-power"
+      ],
+      "nr_globalization_substep_removed (old adaptive sub-step fallback deleted, MAX_ITER->100, no residual fn)": [
+        "subspace/radio-am",
+        "subspace/radio-fm"
+      ],
+      "max_iter_const_only (only the MAX_ITER 50|70->100 const + its provenance echo)": [
+        "basic-bitch",
+        "five-watt-freddie",
+        "noyce-tape-head",
+        "pipe-shouter",
+        "tungsten-glow",
+        "velvet-elvis",
+        "warpony"
+      ],
+      "identical (no correctness-sweep codegen drift)": [
+        "gold-press x5 (cab/cartridge/mastering/overdrive/riaa)",
+        "noyce x9 (4558/amp-at-idle/boiler-room/carbon-comp-bank/clean-rc/ef86/smps-ripple/triode-12ax7/zener-junction)",
+        "series-of-tubes x2 (stage/warmth)",
+        "tungsten-thunder-horse cascade/edge (orphan modules)",
+        "vcr-audio",
+        "vurli"
+      ]
     },
     "notes": [
       "MAX_ITER->100 is NOT strictly nodal-only at the codegen level: it also reached velvet-elvis and radio-fm (manifest-labelled dk). Both are audio-identical (raising an already-satisfied iteration cap changes no converged output), so the audio-level 'nodal-only' claim holds.",
@@ -306,7 +337,7 @@
       "has_noise": true,
       "noise_mode": "full",
       "emit_dc_op_recompute": true,
-      "notes": "Byte-identical when regenerated at melange HEAD 8945b67. Last regen: oomox a8c47f3 (2026-07-19) against melange a472807. WARNING: netlist is UNTRACKED in melange-circuits — exists only as a working-tree file, no git history at all."
+      "notes": "Byte-identical when regenerated at melange HEAD 8945b67. Last regen: oomox a8c47f3 (2026-07-19) against melange a472807. WARNING: netlist is UNTRACKED in melange-circuits \u2014 exists only as a working-tree file, no git history at all."
     },
     {
       "plugin": "noyce",
@@ -623,11 +654,11 @@
     {
       "plugin": "qapla-1a",
       "circuit_rs": "plugins/qapla-1a/src/circuit.rs",
-      "cir": "unstable/filters/passive-eq1a.cir",
-      "compile_cmd": "melange compile ../melange-circuits/unstable/filters/passive-eq1a.cir --format code --noise shot --emit-dc-op-recompute -o plugins/qapla-1a/src/circuit.rs",
+      "cir": "testing/filters/passive-eq1a.cir",
+      "compile_cmd": "melange compile ../melange-circuits/testing/filters/passive-eq1a.cir --format code --noise shot --emit-dc-op-recompute -o plugins/qapla-1a/src/circuit.rs",
       "verify_status": "DRIFT-EXPLAINED",
       "anchors": {
-        "n": 46,
+        "n": 52,
         "m": 8,
         "oversampling": 1,
         "solver": "nodal",
@@ -642,7 +673,7 @@
       "has_noise": true,
       "noise_mode": "shot",
       "emit_dc_op_recompute": true,
-      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header, a472807 two-draw shot block, and 49ecaa4 deterministic augmented-row ordering (coupled-inductor row permutation; correctness-neutral, with FP last-digit wiggle in DC_OP/DC_NL_I/NOISE_SHOT_GAMMA_AMP from the changed LU elimination order). Anchors verified identical."
+      "notes": "PATH+ANCHOR CORRECTED 2026-09-02. The deck was promoted unstable/ -> testing/ (circuits cf2a70c) and reworked; the manifest still pointed at the old path, so this circuit FAILED to capture in every baseline to date (v013-prep capture_report: compile_ok=false, 'netlist not found'). Anchor n was also stale at 46; measured 52 at melange 5b2451c with a freshly built binary (N=52, N_NODES=40, M=8, nodal, 3 transformer groups). NOTE: its first successful capture is a NEW baseline, not a restored one \u2014 there is no prior capture of the reworked deck to diff against, so it contributes no regression signal until the second capture. Previous notes about oomox regen drift predate the rework and no longer apply."
     },
     {
       "plugin": "sad-bastard",
@@ -747,7 +778,7 @@
       "has_noise": true,
       "noise_mode": "full",
       "emit_dc_op_recompute": false,
-      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs ONLY by the 4-line clippy-allow header added in melange 146d51b (post-regen). Anchors verified identical. WARNING: netlist is UNTRACKED in melange-circuits — exists only as a working-tree file, no git history at all."
+      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs ONLY by the 4-line clippy-allow header added in melange 146d51b (post-regen). Anchors verified identical. WARNING: netlist is UNTRACKED in melange-circuits \u2014 exists only as a working-tree file, no git history at all."
     },
     {
       "plugin": "subspace",
@@ -773,7 +804,7 @@
       "has_noise": true,
       "noise_mode": "full",
       "emit_dc_op_recompute": false,
-      "notes": "STALE BY DESIGN: checked-in file was generated from a pre-rework radio-fm.cir (title 'Radio — FM mode (pre-detection-noise interim…', N=16); the current netlist is the reworked behavioral FM receiver (N=23) and was deliberately held back in oomox ab21b67 ('topology upgrade, plugin not wired for it'). The old netlist is unrecoverable: radio-fm.cir has never been committed to melange-circuits (untracked). Compile cmd shown reproduces the NEW topology, not the checked-in file. Flag guesses (--noise full) mirror radio_am. WARNING: netlist is UNTRACKED in melange-circuits — exists only as a working-tree file, no git history at all."
+      "notes": "STALE BY DESIGN: checked-in file was generated from a pre-rework radio-fm.cir (title 'Radio \u2014 FM mode (pre-detection-noise interim\u2026', N=16); the current netlist is the reworked behavioral FM receiver (N=23) and was deliberately held back in oomox ab21b67 ('topology upgrade, plugin not wired for it'). The old netlist is unrecoverable: radio-fm.cir has never been committed to melange-circuits (untracked). Compile cmd shown reproduces the NEW topology, not the checked-in file. Flag guesses (--noise full) mirror radio_am. WARNING: netlist is UNTRACKED in melange-circuits \u2014 exists only as a working-tree file, no git history at all."
     },
     {
       "plugin": "sus-bus",
@@ -869,7 +900,7 @@
       "has_noise": true,
       "noise_mode": "shot",
       "emit_dc_op_recompute": true,
-      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical. Compiled into the crate (pub mod) but unused by the audio path — the monolithic circuit.rs is live (per oomox noise-regen-spec)."
+      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical. Compiled into the crate (pub mod) but unused by the audio path \u2014 the monolithic circuit.rs is live (per oomox noise-regen-spec)."
     },
     {
       "plugin": "tungsten-thunder-horse",
@@ -917,7 +948,7 @@
       "has_noise": true,
       "noise_mode": "shot",
       "emit_dc_op_recompute": true,
-      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical. Compiled into the crate (pub mod) but unused by the audio path — the monolithic circuit.rs is live (per oomox noise-regen-spec)."
+      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical. Compiled into the crate (pub mod) but unused by the audio path \u2014 the monolithic circuit.rs is live (per oomox noise-regen-spec)."
     },
     {
       "plugin": "uniquorn",
@@ -941,7 +972,7 @@
       "has_noise": true,
       "noise_mode": "shot",
       "emit_dc_op_recompute": false,
-      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical. CORRECTNESS-SWEEP e53573c: nr_globalization_full codegen drift; audio TRIVIALLY changed on potsweep only (+0.002 dB, corr 0.999748, sub-mV tail drift on harder-converging pot positions), all other programs identical — benign NR-globalization drift."
+      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical. CORRECTNESS-SWEEP e53573c: nr_globalization_full codegen drift; audio TRIVIALLY changed on potsweep only (+0.002 dB, corr 0.999748, sub-mV tail drift on harder-converging pot positions), all other programs identical \u2014 benign NR-globalization drift."
     },
     {
       "plugin": "uniquorn",
@@ -1037,7 +1068,7 @@
       "has_noise": false,
       "noise_mode": null,
       "emit_dc_op_recompute": true,
-      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs ONLY by the 4-line clippy-allow header added in melange 146d51b (post-regen). Anchors verified identical. WARNING: netlist is UNTRACKED in melange-circuits — exists only as a working-tree file, no git history at all. Only shipped circuit compiled WITHOUT --noise."
+      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs ONLY by the 4-line clippy-allow header added in melange 146d51b (post-regen). Anchors verified identical. WARNING: netlist is UNTRACKED in melange-circuits \u2014 exists only as a working-tree file, no git history at all. Only shipped circuit compiled WITHOUT --noise."
     },
     {
       "plugin": "warpony",
@@ -1062,6 +1093,31 @@
       "noise_mode": "shot",
       "emit_dc_op_recompute": false,
       "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical."
+    },
+    {
+      "plugin": "6k7-varimu-stage",
+      "cir": "unstable/amp/6k7-varimu-stage.cir",
+      "compile_cmd": "melange compile ../melange-circuits/unstable/amp/6k7-varimu-stage.cir --format code -o /dev/null",
+      "verify_status": "COVERAGE-ONLY",
+      "anchors": {
+        "n": 8,
+        "m": 3,
+        "oversampling": 1,
+        "solver": "dk",
+        "sample_rate": 48000
+      },
+      "has_pots": true,
+      "num_pots": 1,
+      "has_switches": false,
+      "num_switches": 0,
+      "has_runtime_r": true,
+      "runtime_r_setters": [
+        "(1 setter; name not pinned)"
+      ],
+      "has_noise": false,
+      "noise_mode": "off",
+      "emit_dc_op_recompute": false,
+      "notes": "COVERAGE-ONLY entry \u2014 no oomox plugin counterpart, so no circuit_rs and no byte-diff protocol applies. Added 2026-09-02 because this is the ONLY deck anywhere with SVAR>0, i.e. the only circuit exercising the variable-mu pentode path. melange 5b2451c fixed resolve_pentode_params silently discarding MU_B/SVAR/EX_B (a var-mu pentode compiled sharp); verified DEVICE_0_SVAR=0.083 now emits where it was previously absent. Without this entry that fix ships with zero golden coverage. Anchors measured at 5b2451c with a freshly built binary. Deck is committed in melange-circuits (4def5f6), so the reference is reproducible."
     }
   ]
 }
