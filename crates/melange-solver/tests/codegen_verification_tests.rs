@@ -1189,7 +1189,11 @@ fn assert_ir_roundtrip(spice: &str) {
     let emitter = RustEmitter::new().unwrap();
 
     // Direct emission must succeed
-    let direct_code = emitter.emit(&ir).expect("direct emit failed").primary().to_string();
+    let direct_code = emitter
+        .emit(&ir)
+        .expect("direct emit failed")
+        .primary()
+        .to_string();
 
     // JSON round-trip
     let json = serde_json::to_string_pretty(&ir).expect("serialize failed");
@@ -1206,7 +1210,11 @@ fn assert_ir_roundtrip(spice: &str) {
     assert_ir_matrices_close(&ir, &ir2);
 
     // Deserialized IR must also emit valid code
-    let roundtrip_code = emitter.emit(&ir2).expect("roundtrip emit failed").primary().to_string();
+    let roundtrip_code = emitter
+        .emit(&ir2)
+        .expect("roundtrip emit failed")
+        .primary()
+        .to_string();
 
     // Both should contain all required functions
     for func in &[
@@ -5096,7 +5104,11 @@ fn build_ir_force_exponential(spice: &str) -> (String, CircuitIR) {
     }
 
     let emitter = RustEmitter::new().expect("create RustEmitter");
-    let code = emitter.emit(&ir).expect("emit beam tetrode code").primary().to_string();
+    let code = emitter
+        .emit(&ir)
+        .expect("emit beam tetrode code")
+        .primary()
+        .to_string();
     (code, ir)
 }
 
@@ -5277,7 +5289,11 @@ fn test_codegen_mixed_pentode_beam_tetrode() {
     );
 
     let emitter = RustEmitter::new().expect("create RustEmitter");
-    let code = emitter.emit(&ir).expect("emit mixed circuit code").primary().to_string();
+    let code = emitter
+        .emit(&ir)
+        .expect("emit mixed circuit code")
+        .primary()
+        .to_string();
 
     // Both helper families must be emitted.
     assert!(
@@ -5395,7 +5411,11 @@ fn test_codegen_classical_pentode_emits_helpers() {
     force_classical_kt88(&mut ir);
 
     let emitter = RustEmitter::new().expect("create RustEmitter");
-    let code = emitter.emit(&ir).expect("emit Classical pentode code").primary().to_string();
+    let code = emitter
+        .emit(&ir)
+        .expect("emit Classical pentode code")
+        .primary()
+        .to_string();
 
     // Classical helpers must be emitted (any_classical_pentode == true).
     assert!(
@@ -5453,7 +5473,11 @@ fn test_codegen_classical_pentode_compiles() {
     force_classical_kt88(&mut ir);
 
     let emitter = RustEmitter::new().expect("create RustEmitter");
-    let code = emitter.emit(&ir).expect("emit Classical pentode code").primary().to_string();
+    let code = emitter
+        .emit(&ir)
+        .expect("emit Classical pentode code")
+        .primary()
+        .to_string();
 
     let tmp_dir = std::env::temp_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_classical_pentode.rs");
@@ -5602,7 +5626,11 @@ V1 vcc 0 DC 300
     assert_eq!(num_classical, 1, "should flip one slot to Classical KT88");
 
     let emitter = RustEmitter::new().expect("create RustEmitter");
-    let code = emitter.emit(&ir).expect("emit mixed circuit code").primary().to_string();
+    let code = emitter
+        .emit(&ir)
+        .expect("emit mixed circuit code")
+        .primary()
+        .to_string();
 
     // Both helper families must be emitted.
     assert!(
@@ -5712,7 +5740,11 @@ fn emit_grid_off_code(spice: &str, grid_off_names: &[&str], vg2k: f64) -> (Strin
     }
 
     let emitter = RustEmitter::new().expect("create RustEmitter");
-    let code = emitter.emit(&ir).expect("emit grid-off code").primary().to_string();
+    let code = emitter
+        .emit(&ir)
+        .expect("emit grid-off code")
+        .primary()
+        .to_string();
     (code, ir)
 }
 
@@ -6086,7 +6118,11 @@ fn test_codegen_classical_vp_independent_screen() {
     force_classical_kt88(&mut ir);
 
     let emitter = RustEmitter::new().expect("create RustEmitter");
-    let code = emitter.emit(&ir).expect("emit Classical pentode code").primary().to_string();
+    let code = emitter
+        .emit(&ir)
+        .expect("emit Classical pentode code")
+        .primary()
+        .to_string();
 
     // Extract the body of `tube_is_pentode_classical`. We grep for the
     // function signature and then scan until the matching closing brace.
@@ -9740,4 +9776,50 @@ M1 drain gate source 0 NMOD_BE
         code.contains("DEVICE_0_VT + (1.0) * DEVICE_0_GAMMA"),
         "NMOS body-effect GAMMA term must carry the channel sign (+1.0)"
     );
+}
+
+/// The emitted `fast_exp`/`fast_ln` coefficients must be exactly the canonical
+/// ones in `codegen::fast_math`.
+///
+/// These are melange's OWN implementations, not libm, so every backend has to
+/// use bit-identical coefficients or the backends compute different functions.
+/// The canonical constants exist so a second backend does not have to
+/// transcribe digits out of a Rust string literal by hand; this test is what
+/// stops the emitter and the constants from drifting apart, which would
+/// otherwise be invisible — the outputs would merely disagree in the last
+/// places.
+#[test]
+fn emitted_fast_math_coefficients_are_canonical() {
+    use melange_solver::codegen::fast_math::FAST_MATH_COEFFICIENTS;
+
+    // A diode pulls in fast_exp (and the tube softplus path pulls fast_ln;
+    // both helpers are emitted together).
+    let (code, _, _, _) = generate_code(
+        "Fast math coefficient check\n\
+         V1 in 0 DC 0\n\
+         R1 in out 1k\n\
+         D1 out 0 DMOD\n\
+         C1 out 0 10n\n\
+         .model DMOD D(IS=1e-14 N=1.0)\n\
+         .end\n",
+    );
+
+    assert!(
+        code.contains("fn fast_exp("),
+        "expected fast_exp in emitted code for a diode circuit"
+    );
+
+    for (name, value, text) in FAST_MATH_COEFFICIENTS {
+        assert!(
+            code.contains(text),
+            "emitted code is missing the canonical {name} literal {text:?}"
+        );
+        // And the literal still denotes the constant, so a same-value-different-
+        // text edit cannot slip through either.
+        assert_eq!(
+            text.parse::<f64>().unwrap().to_bits(),
+            value.to_bits(),
+            "{name}: literal {text:?} no longer denotes the canonical value"
+        );
+    }
 }
