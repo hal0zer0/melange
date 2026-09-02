@@ -94,6 +94,74 @@ fn select_emitter() -> Result<Box<dyn Emitter>, CodegenError> {
 ///   of real op-amp output stages. Most accurate for distortion circuits
 ///   (Klon, Tube Screamer, etc.). Cost: +2 N and +2 M per op-amp, plus the
 ///   synthesized voltage sources' augmented rows.
+/// A *request* for which nodal sub-path to emit — the user's override knob.
+///
+/// Distinct from [`NodalSubPath`], which reports what the emitter actually
+/// generated. The report deliberately has no `Auto` variant: a finished build
+/// is Schur or full-LU, never "auto". This type is the input, that one is the
+/// outcome, and collapsing them would let an outcome claim to be undecided.
+///
+/// The nodal solver has two Newton implementations of the same circuit: the
+///
+/// **Schur** path predicts through `S = A⁻¹` and iterates only on the M coupled
+/// device dimensions; the **full-LU** path factors the whole augmented N×N
+/// system every iteration. Full-LU is slower and more robust; Schur is cheaper
+/// and needs the reduction to be well conditioned.
+///
+/// [`Auto`](NodalSubPathOverride::Auto) is the shipping behaviour and is what every
+/// production build should use: the emitter picks from measured conditioning
+/// (`K` degeneracy, `max|S|`, `max|K|`, `ρ(S·A_neg)`) plus structural facts.
+///
+/// The two forcing modes are **diagnostic escape hatches**, in the same spirit
+/// as `--force-trap`: they exist so the sub-path can be isolated as a variable
+/// — A/B-ing the two implementations on one netlist, or reproducing a build
+/// from before a routing decision moved. Neither is a production setting.
+///
+/// **Forcing is refused, not warned about, when the choice is structural rather
+/// than heuristic.** Uncoupled saturating inductors are stamped as nonlinear
+/// devices on their augmented branch row inside the full-LU Newton loop, and
+/// behavioral B-sources are stamped in node space only on the full-LU path — the
+/// Schur reduction cannot express either. Asking for `Schur` on such a circuit
+/// would emit code that silently drops the nonlinearity, so it is an error
+/// instead. Where the auto choice was merely a conditioning *heuristic*,
+/// forcing is allowed and warns.
+#[cfg(feature = "codegen")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NodalSubPathOverride {
+    /// Pick from measured conditioning and structure. The shipping default.
+    #[default]
+    Auto,
+    /// Force the Schur reduction. Refused when the circuit structurally
+    /// requires full-LU. Diagnostic only.
+    Schur,
+    /// Force the full N×N LU Newton loop. Always structurally valid — full-LU
+    /// is the general path — but slower. Diagnostic only.
+    FullLu,
+}
+
+#[cfg(feature = "codegen")]
+impl NodalSubPathOverride {
+    /// Parse a mode name (case-insensitive) from a CLI flag or config string.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "schur" => Some(Self::Schur),
+            "full-lu" | "full_lu" | "fulllu" | "lu" => Some(Self::FullLu),
+            _ => None,
+        }
+    }
+
+    /// Human-readable name for logging and the provenance header.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Schur => "schur",
+            Self::FullLu => "full-lu",
+        }
+    }
+}
+
 #[cfg(feature = "codegen")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -371,15 +439,14 @@ pub struct CodegenConfig {
     /// Ignored when `backward_euler` is already `true`.
     pub force_trap: bool,
     /// Test/debug only: force the nodal full-LU solver path even when the
-    /// circuit would otherwise route to the Schur reduction. There is no
-    /// production trigger for full-LU short of a genuine structural reason
-    /// (saturating inductor, behavioral source, ill-conditioning), so tests that
-    /// need to exercise the full-LU emitter historically abused a dummy
-    /// behavioral source (`B_frc frc 0 V={0}`) as a routing lever. This knob
-    /// replaces that idiom with an explicit, semantics-free switch, so that the
-    /// presence of a behavioral source means exactly one thing. Not set by the
-    /// CLI. Default false.
-    pub force_full_lu: bool,
+    /// Which nodal sub-path to emit — see [`NodalSubPath`]. Default
+    /// [`NodalSubPath::Auto`], which is the shipping behaviour.
+    ///
+    /// Tests that need to exercise the full-LU emitter historically abused a
+    /// dummy behavioral source (`B_frc frc 0 V={0}`) as a routing lever; this
+    /// replaces that idiom with an explicit, semantics-free switch, so the
+    /// presence of a behavioral source means exactly one thing.
+    pub nodal_sub_path_override: NodalSubPathOverride,
     /// Disable adaptive backward Euler fallback for the DK codegen path.
     /// When false (default), the generated code includes pre-computed BE matrices
     /// and can fall back to BE for individual samples where trapezoidal NR diverges.
@@ -566,7 +633,7 @@ impl Default for CodegenConfig {
             pot_settle_samples: 64,
             backward_euler: false,
             force_trap: false,
-            force_full_lu: false,
+            nodal_sub_path_override: NodalSubPathOverride::Auto,
             disable_be_fallback: false,
             opamp_rail_mode: OpampRailMode::Auto,
             noise_mode: NoiseMode::Off,

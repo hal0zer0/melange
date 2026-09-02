@@ -523,7 +523,7 @@ R_out out 0 100k
 #[test]
 fn test_wide_bandgap_clipper_no_rs_nodal_full_lu() {
     let mut config = support::config_for_spice(WIDE_BANDGAP_CLIPPER_NO_RS_SPICE, 48000.0);
-    config.force_full_lu = true; // was a behavioral-dummy full-LU routing lever
+    config.nodal_sub_path_override = melange_solver::codegen::NodalSubPathOverride::FullLu; // was a behavioral-dummy full-LU routing lever
     let circuit = support::build_circuit_nodal(
         WIDE_BANDGAP_CLIPPER_NO_RS_SPICE,
         &config,

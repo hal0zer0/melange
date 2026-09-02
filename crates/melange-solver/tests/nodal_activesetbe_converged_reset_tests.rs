@@ -56,7 +56,7 @@ const SR: f64 = 48000.0;
 /// Op-amp gain stage with finite (±9 V) rails, cap-coupled ("audio-path")
 /// output, and a diode to ground so the nonlinear NR dimension is non-empty
 /// (M > 0). The nodal full-LU path is forced explicitly via
-/// `CodegenConfig::force_full_lu` (see `active_set_be_code`) — deliberately
+/// `CodegenConfig::nodal_sub_path_override` (see `active_set_be_code`) — deliberately
 /// NON-behavioral, so it exercises the ActiveSetBe BE-reset on a genuine
 /// full-LU circuit without tripping the behavioral+ActiveSetBe hard-error
 /// (that combination is covered by its own test at the bottom of this file).
@@ -81,7 +81,7 @@ fn active_set_be_code() -> (String, usize, usize) {
         sample_rate: SR,
         // Force full-LU explicitly instead of the old behavioral-dummy routing
         // lever (`B_frc frc 0 V={0}`), which now carries fallback-gating semantics.
-        force_full_lu: true,
+        nodal_sub_path_override: melange_solver::codegen::NodalSubPathOverride::FullLu,
         // Force the mode so the test does not depend on the auto-detector's
         // audio-path heuristic; ActiveSetBe is what a cap-coupled op-amp
         // output resolves to in production anyway.

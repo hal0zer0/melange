@@ -72,7 +72,7 @@ fn assert_full_lu_fet_matches_dk(spice: &str, tag: &str, amp: f64) {
     // Force the nodal path to full-LU explicitly (was an inert behavioral-dummy
     // routing lever appended to the SPICE). Both paths now run the IDENTICAL
     // circuit — the only difference is DK-Schur vs nodal-full-LU.
-    cf.force_full_lu = true;
+    cf.nodal_sub_path_override = melange_solver::codegen::NodalSubPathOverride::FullLu;
     let dk = support::build_circuit(spice, &cb, &format!("{tag}_dk"));
     let lu = support::build_circuit_nodal(spice, &cf, &format!("{tag}_lu"));
     assert!(

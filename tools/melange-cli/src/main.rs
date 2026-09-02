@@ -182,6 +182,25 @@ enum Commands {
         #[arg(long, value_name = "MODE", default_value = "auto")]
         opamp_rail_mode: String,
 
+        /// Which nodal sub-path to emit: auto (default), schur, full-lu.
+        ///
+        /// The nodal solver has TWO Newton implementations of the same circuit:
+        /// `schur` predicts through S = A^-1 and iterates only the M coupled
+        /// device dimensions; `full-lu` factors the whole augmented N x N system
+        /// every iteration. `auto` picks from measured conditioning and is the
+        /// shipping behaviour — leave it alone for production builds.
+        ///
+        /// The forcing modes are DIAGNOSTIC escape hatches, like --force-trap:
+        /// they exist so the sub-path can be isolated as a variable (A/B the two
+        /// implementations on one netlist, or reproduce a build from before a
+        /// routing decision moved). They warn when they contradict the auto
+        /// choice. `schur` is REFUSED outright on circuits that structurally
+        /// require full-LU — uncoupled saturating inductors and behavioral
+        /// B-sources cannot be expressed by the Schur reduction, and forcing it
+        /// would silently drop the nonlinearity. Ignored for DK-routed circuits.
+        #[arg(long, value_name = "MODE", default_value = "auto")]
+        nodal_subpath: String,
+
         /// Authentic circuit noise mode: off (default), thermal, shot, full.
         /// `thermal` emits Johnson-Nyquist noise on every resistor; `shot` adds
         /// junction shot; `full` adds 1/f flicker, pentode partition, and op-amp
@@ -495,6 +514,25 @@ enum Commands {
         #[arg(long, value_name = "MODE", default_value = "auto")]
         opamp_rail_mode: String,
 
+        /// Which nodal sub-path to emit: auto (default), schur, full-lu.
+        ///
+        /// The nodal solver has TWO Newton implementations of the same circuit:
+        /// `schur` predicts through S = A^-1 and iterates only the M coupled
+        /// device dimensions; `full-lu` factors the whole augmented N x N system
+        /// every iteration. `auto` picks from measured conditioning and is the
+        /// shipping behaviour — leave it alone for production builds.
+        ///
+        /// The forcing modes are DIAGNOSTIC escape hatches, like --force-trap:
+        /// they exist so the sub-path can be isolated as a variable (A/B the two
+        /// implementations on one netlist, or reproduce a build from before a
+        /// routing decision moved). They warn when they contradict the auto
+        /// choice. `schur` is REFUSED outright on circuits that structurally
+        /// require full-LU — uncoupled saturating inductors and behavioral
+        /// B-sources cannot be expressed by the Schur reduction, and forcing it
+        /// would silently drop the nonlinearity. Ignored for DK-routed circuits.
+        #[arg(long, value_name = "MODE", default_value = "auto")]
+        nodal_subpath: String,
+
         /// Authentic circuit noise mode: off (default), thermal, shot, full.
         /// Mirrors `compile --noise`.
         #[arg(long, value_name = "MODE", default_value = "off")]
@@ -701,6 +739,7 @@ fn main() -> Result<()> {
             tube_grid_fa,
             bjt_fa,
             opamp_rail_mode,
+            nodal_subpath,
             noise,
             noise_seed,
             emit_dc_op_recompute,
@@ -745,6 +784,17 @@ fn main() -> Result<()> {
                         opamp_rail_mode
                     )
                 })?;
+
+            // Parse the nodal sub-path override. Unknown values are user errors.
+            let nodal_sub_path_override = melange_solver::codegen::NodalSubPathOverride::parse(
+                &nodal_subpath,
+            )
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unknown --nodal-subpath '{}'. Valid values: auto, schur, full-lu",
+                    nodal_subpath
+                )
+            })?;
 
             let noise_mode =
                 melange_solver::codegen::NoiseMode::parse(&noise).ok_or_else(|| {
@@ -811,6 +861,7 @@ fn main() -> Result<()> {
                 &tube_grid_fa,
                 &bjt_fa,
                 rail_mode,
+                nodal_sub_path_override,
                 noise_mode,
                 noise_seed,
                 emit_dc_op_recompute,
@@ -948,6 +999,7 @@ fn main() -> Result<()> {
             simulate_circuit_source(
                 &circuit_source,
                 &SimulateOptions {
+                    nodal_sub_path_override: melange_solver::codegen::NodalSubPathOverride::Auto,
                     input_audio: input_audio.as_deref(),
                     output: &output,
                     sample_rate,
@@ -989,6 +1041,7 @@ fn main() -> Result<()> {
             solver,
             oversampling,
             opamp_rail_mode,
+            nodal_subpath,
             noise,
             noise_seed,
             backward_euler,
@@ -1028,6 +1081,17 @@ fn main() -> Result<()> {
                         opamp_rail_mode
                     )
                 })?;
+            // Parse the nodal sub-path override. Unknown values are user errors.
+            let nodal_sub_path_override = melange_solver::codegen::NodalSubPathOverride::parse(
+                &nodal_subpath,
+            )
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unknown --nodal-subpath '{}'. Valid values: auto, schur, full-lu",
+                    nodal_subpath
+                )
+            })?;
+
             let noise_mode =
                 melange_solver::codegen::NoiseMode::parse(&noise).ok_or_else(|| {
                     anyhow::anyhow!(
@@ -1040,6 +1104,7 @@ fn main() -> Result<()> {
             analyze_freq_response(
                 &circuit_source,
                 &AnalyzeOptions {
+                    nodal_sub_path_override,
                     input_node: &input_node,
                     output_node: &output_node,
                     start_freq,
@@ -1259,6 +1324,7 @@ fn compile_circuit_source(
     tube_grid_fa: &str,
     bjt_fa: &str,
     opamp_rail_mode: melange_solver::codegen::OpampRailMode,
+    nodal_sub_path_override: melange_solver::codegen::NodalSubPathOverride,
     noise_mode: melange_solver::codegen::NoiseMode,
     noise_seed: u64,
     emit_dc_op_recompute: bool,
@@ -1991,6 +2057,7 @@ fn compile_circuit_source(
         backward_euler,
         force_trap,
         opamp_rail_mode,
+        nodal_sub_path_override,
         noise_mode,
         noise_master_seed: noise_seed,
         emit_dc_op_recompute,
@@ -2651,6 +2718,9 @@ struct SimulateOptions<'a> {
     noise_seed: u64,
     backward_euler: bool,
     force_trap: bool,
+    /// Nodal sub-path override (`--nodal-subpath`). `Auto` for `simulate`,
+    /// which does not expose the flag.
+    nodal_sub_path_override: melange_solver::codegen::NodalSubPathOverride,
     /// Explicit `--max-iter` override; `None` → auto-tuned (see [`auto_tune_max_iter`]).
     max_iter: Option<usize>,
     probes: &'a [String],
@@ -2682,6 +2752,8 @@ struct AnalyzeOptions<'a> {
     noise_seed: u64,
     backward_euler: bool,
     force_trap: bool,
+    /// Nodal sub-path override (`--nodal-subpath`).
+    nodal_sub_path_override: melange_solver::codegen::NodalSubPathOverride,
     /// Explicit `--max-iter` override; `None` → auto-tuned (see [`auto_tune_max_iter`]).
     max_iter: Option<usize>,
 }
@@ -3223,7 +3295,7 @@ fn simulate_circuit_source(
         pot_settle_samples: 64,
         backward_euler: opts.backward_euler,
         force_trap: opts.force_trap,
-        force_full_lu: false, // test/debug only; never set by the CLI
+        nodal_sub_path_override: opts.nodal_sub_path_override,
         disable_be_fallback: false,
         opamp_rail_mode: opts.opamp_rail_mode,
         noise_mode: opts.noise_mode,
@@ -3870,6 +3942,7 @@ fn analyze_freq_response(
     opts: &AnalyzeOptions<'_>,
 ) -> Result<()> {
     let AnalyzeOptions {
+        nodal_sub_path_override,
         input_node: input_node_name,
         output_node: output_node_name,
         start_freq,
@@ -4401,7 +4474,7 @@ fn analyze_freq_response(
         pot_settle_samples: 64,
         backward_euler,
         force_trap,
-        force_full_lu: false, // test/debug only; never set by the CLI
+        nodal_sub_path_override,
         disable_be_fallback: false,
         opamp_rail_mode,
         noise_mode,

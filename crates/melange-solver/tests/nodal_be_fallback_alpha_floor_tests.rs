@@ -112,7 +112,7 @@ fn test_nodal_full_lu_node_damping_has_no_ratio_floor() {
         sample_rate: SR,
         backward_euler: true,
         // Force full-LU explicitly (was a behavioral-dummy routing lever).
-        force_full_lu: true,
+        nodal_sub_path_override: melange_solver::codegen::NodalSubPathOverride::FullLu,
         ..support::config_for_spice(BJT_CE_SPICE, SR)
     };
     let (code, n, m) = support::generate_circuit_code_nodal(BJT_CE_SPICE, &config);

@@ -504,9 +504,11 @@ pub struct SolverConfig {
     /// per-sample Δg self-corrects.
     #[serde(default)]
     pub breakpoint_be: bool,
-    /// Test/debug only: force the nodal full-LU path (see
-    /// [`crate::codegen::CodegenConfig::force_full_lu`]). Not set by the CLI.
-    pub force_full_lu: bool,
+    /// Requested nodal sub-path override (see
+    /// [`crate::codegen::NodalSubPathOverride`]). `Auto` is the shipping
+    /// behaviour; the forcing modes are diagnostic escape hatches.
+    #[serde(default)]
+    pub nodal_sub_path_override: crate::codegen::NodalSubPathOverride,
     /// Resolved op-amp supply rail saturation strategy.
     ///
     /// If the user's [`CodegenConfig::opamp_rail_mode`] was [`OpampRailMode::Auto`],
@@ -1939,7 +1941,7 @@ impl CircuitIR {
             breakpoint_be: false,
             opamp_rail_mode: rail_mode.mode,
             emit_dc_op_recompute: config.emit_dc_op_recompute,
-            force_full_lu: config.force_full_lu,
+            nodal_sub_path_override: config.nodal_sub_path_override,
             injections: config.injections.clone(),
             taps: config.taps.clone(),
         };
@@ -2947,7 +2949,7 @@ impl CircuitIR {
             breakpoint_be: false,
             opamp_rail_mode: rail_mode.mode,
             emit_dc_op_recompute: config.emit_dc_op_recompute,
-            force_full_lu: config.force_full_lu,
+            nodal_sub_path_override: config.nodal_sub_path_override,
             injections: config.injections.clone(),
             taps: config.taps.clone(),
         };

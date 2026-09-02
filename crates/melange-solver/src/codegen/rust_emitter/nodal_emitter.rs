@@ -1720,8 +1720,16 @@ impl RustEmitter {
         // groups still use the legacy decimated Schur patch until Phase 2; no
         // shipping deck mixes uncoupled + coupled saturation.)
         let force_full_lu_sat = !ir.saturating_inductors.is_empty();
-        let use_full_nodal = force_full_lu_sat
-            || ir.solver_config.force_full_lu
+        // Structural requirements for full-LU, as opposed to conditioning
+        // heuristics. Uncoupled saturating inductors are stamped as nonlinear
+        // devices on their augmented branch row INSIDE the full-LU NR loop, and
+        // behavioral B-sources are stamped in node space only on the full-LU
+        // path. The Schur reduction cannot express either, so these are not
+        // overridable — forcing Schur here would emit code that silently drops
+        // the nonlinearity rather than code that is merely slower or less well
+        // conditioned.
+        let structurally_needs_full_lu = force_full_lu_sat || !ir.behavioral_sources.is_empty();
+        let auto_use_full_nodal = structurally_needs_full_lu
             || if !ir.behavioral_sources.is_empty() {
                 // Behavioral B-sources are stamped in node space only on the full-LU
                 // path (the Schur reduction can't express their rectangular control).
@@ -1737,6 +1745,59 @@ impl RustEmitter {
                     || s_ill_conditioned
                     || schur_unstable
             };
+
+        // Apply the `--nodal-subpath` override. `Auto` is the shipping path and
+        // is byte-identical to the pre-flag emitter. The forcing modes are
+        // diagnostic escape hatches in the spirit of `--force-trap`: they let
+        // the sub-path be isolated as a variable, which is otherwise impossible
+        // because the emitter chooses it for you.
+        use crate::codegen::NodalSubPathOverride;
+        let use_full_nodal = match ir.solver_config.nodal_sub_path_override {
+            NodalSubPathOverride::Auto => auto_use_full_nodal,
+            NodalSubPathOverride::FullLu => {
+                if !auto_use_full_nodal {
+                    log::warn!(
+                        "Nodal: --nodal-subpath full-lu overrides the auto choice \
+                         (auto selected Schur for this circuit). Full-LU is always \
+                         structurally valid but slower; this is a diagnostic mode, \
+                         not a production setting."
+                    );
+                }
+                true
+            }
+            NodalSubPathOverride::Schur => {
+                if structurally_needs_full_lu {
+                    let reason = if force_full_lu_sat {
+                        "uncoupled saturating inductors are stamped as nonlinear devices \
+                         inside the full-LU NR loop"
+                    } else {
+                        "behavioral B-sources are stamped in node space only on the \
+                         full-LU path"
+                    };
+                    return Err(CodegenError::InvalidConfig(format!(
+                        "--nodal-subpath schur refused: this circuit STRUCTURALLY requires \
+                         full-LU ({reason}); the Schur reduction cannot express it, so \
+                         forcing Schur would emit a solver that silently drops the \
+                         nonlinearity. This is not a conditioning heuristic and is not \
+                         overridable."
+                    )));
+                }
+                if auto_use_full_nodal {
+                    log::warn!(
+                        "Nodal: --nodal-subpath schur overrides the auto choice (auto \
+                         selected full-LU on conditioning grounds: k_degenerate={}, \
+                         k_ill_conditioned={}, s_ill_conditioned={}, schur_unstable={}). \
+                         The Schur reduction may be inaccurate or diverge on this \
+                         circuit. Diagnostic mode — do not ship.",
+                        k_degenerate,
+                        k_ill_conditioned,
+                        s_ill_conditioned,
+                        schur_unstable
+                    );
+                }
+                false
+            }
+        };
         // The dense `lu_solve` helper is emitted whenever any generated code
         // path needs it. The full-LU nodal path always needs it. The Schur
         // path also needs it when op-amp rail handling is in `ActiveSet` mode,
