@@ -45,6 +45,10 @@ struct CircuitCapture {
     noise_api_detected: bool,
     seed_api_detected: bool,
     pot_setters_detected: Vec<usize>,
+    /// Diagnostic counters found on `CircuitState` and wired into the driver.
+    /// Path-dependent: nodal and DK declare overlapping-but-different sets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    diag_fields_detected: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -184,6 +188,7 @@ fn capture_circuit(
         noise_api_detected: false,
         seed_api_detected: false,
         pot_setters_detected: Vec::new(),
+        diag_fields_detected: Vec::new(),
         warnings: Vec::new(),
         error: None,
         programs: Vec::new(),
@@ -248,6 +253,9 @@ fn capture_circuit(
     rep.noise_api_detected = code.contains("pub fn set_noise_enabled");
     rep.seed_api_detected = code.contains("pub fn set_seed");
     rep.pot_setters_detected = detect_pot_setters(&code);
+    let diag_fields = detect_diag_fields(&code);
+    rep.diag_fields_detected = diag_fields.clone();
+    let diag = diag_block(&diag_fields);
     if entry.has_noise && !rep.noise_api_detected {
         rep.warnings.push(
             "manifest says has_noise but generated code has no noise API \
@@ -269,7 +277,7 @@ fn capture_circuit(
     let std_bin = work.join(format!("{id}_std"));
     if let Err(e) = build_driver(
         &code,
-        &std_main(rep.noise_api_detected && rep.seed_api_detected),
+        &std_main(rep.noise_api_detected && rep.seed_api_detected, &diag),
         work,
         &format!("{id}_std"),
         &std_bin,
@@ -287,6 +295,7 @@ fn capture_circuit(
                 rep.noise_api_detected && rep.seed_api_detected,
                 &rep.pot_setters_detected,
                 total,
+                &diag,
             ),
             work,
             &format!("{id}_pot"),
@@ -365,7 +374,13 @@ fn write_outputs(
     }
     w.flush().map_err(|e| format!("flush pcm: {e}"))?;
 
-    let st = stats::compute(&out.interleaved, out.channels, out.frames, fs);
+    let st = stats::compute(
+        &out.interleaved,
+        out.channels,
+        out.frames,
+        fs,
+        out.diagnostics.clone(),
+    );
     std::fs::write(
         circuit_dir.join(format!("{prog_name}.stats.json")),
         serde_json::to_string_pretty(&st).unwrap(),
@@ -407,6 +422,57 @@ fn detect_pot_setters(code: &str) -> Vec<usize> {
     out
 }
 
+/// Detect the `pub diag_*` / `last_nr_iterations` counters the generated module
+/// actually declares.
+///
+/// The set is path-dependent and must not be hardcoded: the nodal emitter
+/// declares `diag_active_set_pin_count`, `diag_be_latch_count` and
+/// `diag_refactor_count`, while DK declares `diag_singular_matrix_count`
+/// instead. Emitting a fixed list would fail to compile on one path or the
+/// other.
+fn detect_diag_fields(code: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in code.lines() {
+        let t = line.trim();
+        let Some(rest) = t.strip_prefix("pub ") else {
+            continue;
+        };
+        let Some((name, _ty)) = rest.split_once(':') else {
+            continue;
+        };
+        let name = name.trim();
+        if (name.starts_with("diag_") || name == "last_nr_iterations")
+            && !out.iter().any(|n| n == name)
+        {
+            out.push(name.to_string());
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Driver tail that prints the counters to stderr as one
+/// `MELANGE_DIAG k=v k=v ...` line.
+///
+/// stdout carries samples, so diagnostics go to stderr — which the runner
+/// already captures and, until now, discarded on success. Without this the
+/// recovery ladders are invisible to the gate: measured across the corpus,
+/// only 7 of 41 circuits enter any ladder at all, and a change could delete
+/// the BE latch, NaN reset or active-set resolve outright with every render
+/// still bit-identical.
+fn diag_block(fields: &[String]) -> String {
+    if fields.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("    eprint!(\"MELANGE_DIAG\");\n");
+    for f in fields {
+        // `{{}}` so the emitted Rust contains a literal `{}` placeholder.
+        s.push_str(&format!("    eprint!(\" {f}={{}}\", state.{f});\n"));
+    }
+    s.push_str("    eprintln!();\n");
+    s
+}
+
 fn seed_block(pin_noise: bool) -> &'static str {
     if pin_noise {
         "    state.set_noise_enabled(true);\n    state.set_seed(GOLDEN_SEED);\n"
@@ -418,7 +484,7 @@ fn seed_block(pin_noise: bool) -> &'static str {
 /// Standard driver: one f64 sample per stdin line, all output channels per
 /// stdout line. Mirrors melange-validate's driver (buffered IO added for
 /// throughput; formatting `{:.17e}` is an exact f64 round-trip).
-fn std_main(pin_noise: bool) -> String {
+fn std_main(pin_noise: bool, diag: &str) -> String {
     format!(
         r#"
 #[allow(dead_code)]
@@ -444,9 +510,10 @@ fn main() {{
         }}
     }}
     w.flush().unwrap();
-}}
+{diag}}}
 "#,
         seed = seed_block(pin_noise),
+        diag = diag,
     )
 }
 
@@ -455,7 +522,7 @@ fn main() {{
 /// triangle 0 -> 1 -> 0 position profile over the whole render, mapped
 /// linearly into each pot's [MIN_R, MAX_R]. Exercises the setter /
 /// matrices_dirty / rebuild lifecycle the way a host automation pass does.
-fn pot_main(pin_noise: bool, pots: &[usize], total_frames: usize) -> String {
+fn pot_main(pin_noise: bool, pots: &[usize], total_frames: usize, diag: &str) -> String {
     let interval = programs::POT_UPDATE_INTERVAL;
     let mut setters = String::new();
     for idx in pots {
@@ -496,9 +563,10 @@ fn main() {{
         }}
     }}
     w.flush().unwrap();
-}}
+{diag}}}
 "#,
         seed = seed_block(pin_noise),
+        diag = diag,
     )
 }
 

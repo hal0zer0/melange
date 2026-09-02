@@ -156,6 +156,34 @@ pub struct RenderOutput {
     /// gate built on that floor cannot see the defects it exists to catch.
     pub interleaved: Vec<f64>,
     pub frames: usize,
+    /// Diagnostic counters reported by the driver on stderr as a single
+    /// `MELANGE_DIAG k=v ...` line. Empty when the generated module declares
+    /// none.
+    ///
+    /// These are the only visibility the gate has into the NR recovery
+    /// ladders. The renders cannot see them: measured across the corpus, only
+    /// 7 of 41 circuits enter any ladder, and several ladders never fire on any
+    /// deck — so emitted recovery code can change with every sample unchanged.
+    pub diagnostics: std::collections::BTreeMap<String, f64>,
+}
+
+/// Parse the driver's `MELANGE_DIAG k=v k=v ...` stderr line.
+fn parse_diagnostics(stderr: &[u8]) -> std::collections::BTreeMap<String, f64> {
+    let mut out = std::collections::BTreeMap::new();
+    let text = String::from_utf8_lossy(stderr);
+    for line in text.lines() {
+        let Some(rest) = line.trim().strip_prefix("MELANGE_DIAG") else {
+            continue;
+        };
+        for tok in rest.split_whitespace() {
+            if let Some((k, v)) = tok.split_once('=') {
+                if let Ok(n) = v.parse::<f64>() {
+                    out.insert(k.to_string(), n);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Pipe `input` (one `{:.17e}` f64 per line) through the compiled driver
@@ -260,5 +288,6 @@ pub fn run_render(bin: &Path, input: &[f64], timeout: Duration) -> Result<Render
         channels,
         interleaved,
         frames,
+        diagnostics: parse_diagnostics(&stderr_buf),
     })
 }

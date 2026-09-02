@@ -24,6 +24,8 @@ struct PairResult {
     class: String,
     severity: f64,
     bit_identical: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    diagnostics_differ: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     level_delta_db: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,6 +103,29 @@ fn generated_source_differs(dir_a: &Path, dir_b: &Path, plugin: &str) -> Option<
     let a = std::fs::read_to_string(dir_a.join(plugin).join("circuit.rs")).ok()?;
     let b = std::fs::read_to_string(dir_b.join(plugin).join("circuit.rs")).ok()?;
     Some(a != b)
+}
+
+/// Compare the solver diagnostic counters recorded with each render.
+///
+/// Deliberately checked even when the PCM is byte-identical: a change that
+/// alters how often the BE fallback, NaN reset or line search fires without
+/// altering the output samples is exactly the class of regression the audio
+/// gate cannot see, and exactly what a codegen refactor is most likely to do.
+/// Returns the differing keys as `(name, a, b)`.
+fn diagnostic_deltas(a: &Option<Stats>, b: &Option<Stats>) -> Vec<(String, f64, f64)> {
+    let (Some(a), Some(b)) = (a, b) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let keys: BTreeSet<&String> = a.diagnostics.keys().chain(b.diagnostics.keys()).collect();
+    for k in keys {
+        let va = a.diagnostics.get(k).copied().unwrap_or(0.0);
+        let vb = b.diagnostics.get(k).copied().unwrap_or(0.0);
+        if va != vb {
+            out.push((k.clone(), va, vb));
+        }
+    }
+    out
 }
 
 fn read_stats(dir: &Path, plugin: &str, program: &str) -> Option<Stats> {
@@ -227,6 +252,7 @@ fn compare_pair(dir_a: &Path, dir_b: &Path, plugin: &str, program: &str) -> Pair
         class: "CHANGED".into(),
         severity: 0.0,
         bit_identical: false,
+        diagnostics_differ: false,
         level_delta_db: None,
         max_sample_delta: None,
         correlation: None,
@@ -265,6 +291,20 @@ fn compare_pair(dir_a: &Path, dir_b: &Path, plugin: &str, program: &str) -> Pair
             if a == b {
                 res.class = "IDENTICAL".into();
                 res.bit_identical = true;
+                // Byte-identical audio does NOT imply identical execution.
+                let sa = read_stats(dir_a, plugin, program);
+                let sb = read_stats(dir_b, plugin, program);
+                let dd = diagnostic_deltas(&sa, &sb);
+                if !dd.is_empty() {
+                    res.diagnostics_differ = true;
+                    res.notes.push(format!(
+                        "renders byte-identical but solver diagnostics differ: {}",
+                        dd.iter()
+                            .map(|(k, x, y)| format!("{k} {x}->{y}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
                 // An f32-vs-f32 byte match is NOT evidence of bit-exactness at
                 // f64: the stored values were rounded before they were written.
                 // Say so, so a green run is not over-read.
@@ -301,6 +341,18 @@ fn compare_pair(dir_a: &Path, dir_b: &Path, plugin: &str, program: &str) -> Pair
             "length mismatch: {} vs {} samples",
             a.len(),
             b.len()
+        ));
+    }
+
+    let dd = diagnostic_deltas(&sa, &sb);
+    if !dd.is_empty() {
+        res.diagnostics_differ = true;
+        res.notes.push(format!(
+            "solver diagnostics differ: {}",
+            dd.iter()
+                .map(|(k, x, y)| format!("{k} {x}->{y}"))
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
 
@@ -428,6 +480,7 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<
                 class: "MISSING".into(),
                 severity: 1e9,
                 bit_identical: false,
+                diagnostics_differ: false,
                 level_delta_db: None,
                 max_sample_delta: None,
                 correlation: None,
@@ -585,9 +638,23 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<
         "\nSUMMARY: {n_identical} identical, {n_negligible} negligible, {n_changed} changed, \
          {n_input_changed} input-changed, {n_missing} missing"
     );
+    let n_diag_differ = results.iter().filter(|r| r.diagnostics_differ).count();
+    if n_diag_differ > 0 {
+        println!(
+            "\nSOLVER DIAGNOSTICS DIFFER ({n_diag_differ} render(s)) — recovery-ladder \
+             behaviour changed even where audio did not"
+        );
+        for r in results.iter().filter(|r| r.diagnostics_differ) {
+            for n in &r.notes {
+                if n.contains("diagnostics differ") {
+                    println!("  {}/{}: {n}", r.plugin, r.program);
+                }
+            }
+        }
+    }
     if strict {
         println!(
-            "STRICT: {} source-differs, {} source-unavailable",
+            "STRICT: {} source-differs, {} source-unavailable, {n_diag_differ} diagnostics-differ",
             source_differs.len(),
             source_missing.len()
         );
@@ -612,6 +679,7 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<
         "strict": strict,
         "generated_source_differs": source_differs,
         "generated_source_unavailable": source_missing,
+        "diagnostics_differ_count": n_diag_differ,
         "results": results,
     });
     std::fs::write(json_out, serde_json::to_string_pretty(&json).unwrap())
@@ -626,7 +694,8 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<
             + n_input_changed
             + n_negligible
             + source_differs.len()
-            + source_missing.len());
+            + source_missing.len()
+            + n_diag_differ);
     }
     Ok(n_changed + n_missing + n_input_changed)
 }

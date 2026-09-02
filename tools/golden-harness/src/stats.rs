@@ -30,6 +30,15 @@ pub struct Stats {
     /// for stable ordering: a_sub20 (<20 Hz), b_20_200, c_200_2k,
     /// d_2k_20k, e_20k_nyq (>20 kHz up to fs/2).
     pub bands_dbfs: BTreeMap<String, f64>,
+    /// Solver diagnostic counters at end of render (BE fallbacks, NaN resets,
+    /// line-search failures, ...). Empty for baselines captured before these
+    /// were recorded, and for modules that declare none.
+    ///
+    /// Recorded because the audio renders cannot see the recovery ladders:
+    /// only 7 of 41 corpus circuits enter any ladder, and several never fire on
+    /// any deck, so a change to that code is invisible to a render diff.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub diagnostics: BTreeMap<String, f64>,
 }
 
 /// In-place iterative radix-2 Cooley-Tukey FFT. `re`/`im` length must be a
@@ -113,7 +122,13 @@ fn band_levels(ch0: &[f64], fs: f64) -> BTreeMap<String, f64> {
     out
 }
 
-pub fn compute(interleaved: &[f64], channels: usize, frames: usize, fs: f64) -> Stats {
+pub fn compute(
+    interleaved: &[f64],
+    channels: usize,
+    frames: usize,
+    fs: f64,
+    diagnostics: BTreeMap<String, f64>,
+) -> Stats {
     let mut peak = 0.0f64;
     let mut sum_sq = 0.0f64;
     let mut sum = 0.0f64;
@@ -150,5 +165,6 @@ pub fn compute(interleaved: &[f64], channels: usize, frames: usize, fs: f64) -> 
         nan_count,
         inf_count,
         bands_dbfs: band_levels(&ch0, fs),
+        diagnostics,
     }
 }
