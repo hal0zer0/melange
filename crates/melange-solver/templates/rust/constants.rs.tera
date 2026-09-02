@@ -159,8 +159,8 @@ pub const N_V: [[f64; N]; M] = [
 {% for row in n_v_rows %}    [{{ row }}],
 {% endfor %}];
 
-/// N_i matrix (transposed): Maps nonlinear currents to node injections
-pub const N_I: [[f64; N]; M] = [
+/// N_i matrix: maps nonlinear currents to node injections (N x M)
+pub const N_I: [[f64; M]; N] = [
 {% for row in n_i_rows %}    [{{ row }}],
 {% endfor %}];
 

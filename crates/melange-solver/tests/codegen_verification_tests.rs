@@ -178,8 +178,12 @@ fn test_generated_ni_matrix_matches_kernel() {
 
     // Also verify N_I is declared with the correct dimensions
     assert!(
-        code.contains("pub const N_I: [[f64; N]; M]"),
-        "N_I should be declared as [[f64; N]; M] (M rows of N columns)."
+        code.contains("pub const N_I: [[f64; M]; N]"),
+        "N_I must be declared as [[f64; M]; N] (N rows of M columns) on EVERY \
+         solver path. It was stored transposed on DK and non-transposed on \
+         nodal under this one public symbol until the layout was normalized; \
+         a shared matvec lowering to a single index order was silently wrong \
+         on half the corpus, and at N == M wrong with no crash."
     );
 }
 
@@ -329,10 +333,10 @@ fn test_codegen_bjt_2d_matrices_correct_size() {
         "N_V should be declared as [[f64; N]; M]."
     );
 
-    // N_I is [[f64; N]; M] = 2xN (transposed from kernel's NxM)
+    // N_I is [[f64; M]; N] — N rows of M columns, the operator's own shape.
     assert!(
-        code.contains("pub const N_I: [[f64; N]; M]"),
-        "N_I should be declared as [[f64; N]; M]."
+        code.contains("pub const N_I: [[f64; M]; N]"),
+        "N_I should be declared as [[f64; M]; N]."
     );
 
     // Verify all four K matrix values appear in the generated code
@@ -465,7 +469,7 @@ fn test_generated_code_contains_all_constants() {
         "Missing N_V matrix"
     );
     assert!(
-        code.contains("pub const N_I: [[f64; N]; M]"),
+        code.contains("pub const N_I: [[f64; M]; N]"),
         "Missing N_I matrix"
     );
 

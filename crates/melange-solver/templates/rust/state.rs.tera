@@ -805,7 +805,7 @@ impl CircuitState {
             for j in 0..M {
                 let mut sum = 0.0;
                 for kk in 0..N {
-                    sum += s[i][kk] * N_I[j][kk]; // N_I is transposed: [M][N]
+                    sum += s[i][kk] * N_I[kk][j];
                 }
                 s_ni[i][j] = sum;
             }
@@ -863,7 +863,7 @@ impl CircuitState {
             for j in 0..M {
                 let mut sum = 0.0;
                 for kk in 0..N {
-                    sum += s_be[i][kk] * N_I[j][kk];
+                    sum += s_be[i][kk] * N_I[kk][j];
                 }
                 s_ni_be[i][j] = sum;
             }

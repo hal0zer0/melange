@@ -564,7 +564,7 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
     // Build G_aug_nr = g_aug − N_i · J_dev · N_v.
     // We use the N_I / N_V consts directly (dense scan). At typical M ≤ 6
     // the inner loop is trivially small; optimizer unrolls it. `N_I` is
-    // stored transposed as [M][N], so `N_i[a][i] = N_I[i][a]`.
+    // stored in operator shape [N][M], so `N_i[a][i] = N_I[a][i]`.
     out.push_str(&format!(
         "{inner}// Apply companion linearization: g_aug_nr = g_aug − N_i · J · N_v.\n\
          {inner}let mut g_aug_nr = g_aug;\n\
@@ -572,7 +572,7 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
          {inner}    for b in 0..N {{\n\
          {inner}        let mut corr = 0.0;\n\
          {inner}        for i in 0..M {{\n\
-         {inner}            let ni_ai = N_I[i][a];\n\
+         {inner}            let ni_ai = N_I[a][i];\n\
          {inner}            if ni_ai == 0.0 {{ continue; }}\n\
          {inner}            for j in 0..M {{\n\
          {inner}                corr += ni_ai * j_dev[i][j] * N_V[j][b];\n\
@@ -595,7 +595,7 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
          {inner}    let i_comp = i_nl[i] - jv;\n\
          {inner}    if i_comp == 0.0 {{ continue; }}\n\
          {inner}    for a in 0..N {{\n\
-         {inner}        rhs_nr[a] += N_I[i][a] * i_comp;\n\
+         {inner}        rhs_nr[a] += N_I[a][i] * i_comp;\n\
          {inner}    }}\n\
          {inner}}}\n\n"
     ));

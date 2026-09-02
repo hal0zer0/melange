@@ -250,6 +250,21 @@ fn test_nodal_codegen_structure() {
     assert!(code.contains("const C:"), "missing C matrix");
     assert!(code.contains("N_V:"), "missing N_V matrix");
     assert!(code.contains("N_I:"), "missing N_I matrix");
+    // Shape, not just presence. N_I is ONE public symbol and must carry ONE
+    // layout on every solver path: DK stored it transposed and nodal did not,
+    // under this same name, until the layout was normalized. Without a shape
+    // assertion on BOTH paths the split can silently come back — and a shared
+    // matvec lowering to a single index order is then wrong on half the
+    // corpus, with no crash at all when N == M. The DK-side twin of this
+    // assertion lives in codegen_verification_tests.rs.
+    assert!(
+        code.contains("pub const N_I: [[f64; M]; N]"),
+        "nodal N_I must be declared as [[f64; M]; N] (N rows of M columns)"
+    );
+    assert!(
+        code.contains("pub const N_V: [[f64; N]; M]"),
+        "nodal N_V must be declared as [[f64; N]; M] (M rows of N columns)"
+    );
 
     // State struct with NR working buffers
     assert!(

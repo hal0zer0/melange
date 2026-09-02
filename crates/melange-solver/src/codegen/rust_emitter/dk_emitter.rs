@@ -659,8 +659,10 @@ impl RustEmitter {
             &format_matrix_rows(m, m, |i, j| ir.k(i, j) - parasitic_r_p_dk(ir, i, j)),
         );
         ctx.insert("n_v_rows", &format_matrix_rows(m, n, |i, j| ir.n_v(i, j)));
-        // N_i transposed: N_I[device][node] = n_i[node][device]
-        ctx.insert("n_i_rows", &format_matrix_rows(m, n, |i, j| ir.n_i(j, i)));
+        // N_i in operator shape: N_I[node][device] = n_i[node][device].
+        // Normalized to N x M to match the nodal emitter — one layout for one
+        // public symbol (see the `N_I` doc comment in constants.rs.tera).
+        ctx.insert("n_i_rows", &format_matrix_rows(n, m, |i, j| ir.n_i(i, j)));
 
         // S*N_i product: precomputed for final voltage correction
         // S_NI[node][device] = sum_k S[node][k] * N_i[k][device]
@@ -2210,7 +2212,7 @@ impl RustEmitter {
              \x20           for j in 0..M {{\n\
              \x20               let mut sum = 0.0;\n\
              \x20               for kk in 0..N {{\n\
-             \x20                   sum += s[i][kk] * N_I[j][kk];\n\
+             \x20                   sum += s[i][kk] * N_I[kk][j];\n\
              \x20               }}\n\
              \x20               s_ni[i][j] = sum;\n\
              \x20           }}\n\
@@ -2298,7 +2300,7 @@ impl RustEmitter {
                  \x20           for j in 0..M {\n\
                  \x20               let mut sum = 0.0;\n\
                  \x20               for kk in 0..N {\n\
-                 \x20                   sum += s_be[i][kk] * N_I[j][kk];\n\
+                 \x20                   sum += s_be[i][kk] * N_I[kk][j];\n\
                  \x20               }\n\
                  \x20               s_ni_be[i][j] = sum;\n\
                  \x20           }\n\
@@ -2601,7 +2603,7 @@ impl RustEmitter {
                 for &j in &ir.sparsity.n_i.nz_by_row[i] {
                     nl_prev_lines.push_str(&format!(
                         "    rhs[{}] += N_I[{}][{}] * state.i_nl_prev[{}];\n",
-                        i, j, i, j
+                        i, i, j, j
                     ));
                 }
             }
@@ -2712,7 +2714,7 @@ impl RustEmitter {
                     terms.push(format!("state.a_neg_be[{i}][{j}] * state.v_prev[{j}]"));
                 }
                 for &j in &ir.sparsity.n_i.nz_by_row[i] {
-                    terms.push(format!("N_I[{j}][{i}] * state.i_nl_prev[{j}]"));
+                    terms.push(format!("N_I[{i}][{j}] * state.i_nl_prev[{j}]"));
                 }
                 if terms.is_empty() {
                     rhs.push_str(&format!("        rhs_be[{i}] = 0.0;\n"));
