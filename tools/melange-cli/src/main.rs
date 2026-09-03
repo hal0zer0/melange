@@ -2116,30 +2116,14 @@ fn compile_circuit_source(
 
     let generated = if use_nodal_codegen {
         println!("  Using nodal solver codegen");
-        // Expand MNA with internal nodes for parasitic BJTs.
-        // Skip expansion if K will be ill-conditioned (K_diag < -100), which triggers
-        // the full N×N LU path instead of Schur. The LU path handles parasitics via
-        // bjt_with_parasitics() — internal nodes would increase N without benefit.
-        let k_diag_min = if kernel.m > 0 {
-            (0..kernel.m)
-                .map(|i| kernel.k[i * kernel.m + i])
-                .fold(0.0_f64, f64::min)
-        } else {
-            0.0
-        };
-        let skip_expansion = k_diag_min < -100.0;
-        if !skip_expansion {
-            let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-                &netlist,
-                Some(&mna),
-            )
-            .unwrap_or_default();
-            if !device_slots.is_empty() {
-                mna.expand_bjt_internal_nodes(&device_slots);
-            }
-        } else {
-            println!("  Skipping internal node expansion (K ill-conditioned, using full LU)");
-        }
+        // Expand MNA with internal nodes for parasitic BJTs, gated on K
+        // conditioning — shared with simulate/analyze/validate.
+        melange_solver::pipeline::expand_internal_nodes_if_conditioned(
+            &mut mna,
+            &netlist,
+            &kernel,
+            &|a| println!("{a}"),
+        );
         generator
             .generate_nodal(&mna, &netlist)
             .with_context(|| "Nodal code generation failed")?
@@ -3263,26 +3247,12 @@ fn simulate_circuit_source(
     // `--solver nodal` skipped expansion entirely and ran stably. Now both
     // paths take the same expansion decision.
     if use_nodal {
-        let k_diag_min = if kernel.m > 0 {
-            (0..kernel.m)
-                .map(|i| kernel.k[i * kernel.m + i])
-                .fold(0.0_f64, f64::min)
-        } else {
-            0.0
-        };
-        let skip_expansion = k_diag_min < -100.0;
-        if !skip_expansion {
-            let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-                &netlist,
-                Some(&mna),
-            )
-            .unwrap_or_default();
-            if !device_slots.is_empty() {
-                mna.expand_bjt_internal_nodes(&device_slots);
-            }
-        } else {
-            println!("  Skipping internal node expansion (K ill-conditioned, using full LU)");
-        }
+        melange_solver::pipeline::expand_internal_nodes_if_conditioned(
+            &mut mna,
+            &netlist,
+            &kernel,
+            &|a| println!("{a}"),
+        );
     }
 
     // Step 5: Generate circuit code.
@@ -3954,14 +3924,20 @@ fn analyze_freq_response(
     );
 
     if use_nodal {
-        let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
+        // BEHAVIOUR FIX 2026-09-03: this was the last UNCONDITIONAL expansion.
+        // compile, simulate and validate all gate it on K conditioning; analyze
+        // did not, so `melange analyze` reported the frequency response of a
+        // DIFFERENT circuit than compile ships for any deck with
+        // k_diag_min < -100 (measured on wurli-power-amp: compile skips
+        // expansion, analyze expanded). Same family as the unconditional
+        // expansion in the validate harness that `6bc3ef1` removed.
+        // Analyze writes CSV to stdout, so the notice goes to stderr.
+        melange_solver::pipeline::expand_internal_nodes_if_conditioned(
+            &mut mna,
             &netlist,
-            Some(&mna),
-        )
-        .unwrap_or_default();
-        if !device_slots.is_empty() {
-            mna.expand_bjt_internal_nodes(&device_slots);
-        }
+            &kernel,
+            &|a| eprintln!("{a}"),
+        );
     }
 
     // Generate circuit code

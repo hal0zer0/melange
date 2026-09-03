@@ -12,6 +12,27 @@
 //! | [`expand_internal_nodes_if_conditioned`] | yes | yes | **unconditional** | **unconditional** |
 //! | [`auto_tune_max_iter`] | yes | yes | yes | **no** |
 //!
+//! **That table is the 2026-09-02 state and every cell is now closed**, but two
+//! of them outlived the commit that is usually credited with closing them, so
+//! read it as history and not as a status board:
+//!
+//! * `6bc3ef1` fixed the **validate** column. It did not touch
+//!   `crates/melange-validate/tests/spice_validation.rs` — the harness the CI
+//!   "SPICE validation" gate actually runs — which had its own `from_netlist`
+//!   build and ran none of these steps. Closed 2026-09-03; that harness now
+//!   delegates to `melange_validate::run_melange_solver_from_str`.
+//! * The **analyze** cell above stayed literally true until 2026-09-03. Analyze
+//!   expanded internal nodes unconditionally long after the same defect was
+//!   removed from validate, so `melange analyze` reported the response of a
+//!   different circuit than compile ships for any deck with
+//!   `k_diag_min < -100` (measured on wurli-power-amp: compile skipped
+//!   expansion, analyze expanded). All four consumers now call
+//!   [`expand_internal_nodes_if_conditioned`]; nobody hand-rolls the −100 gate.
+//!
+//! Forward-active and grid-off reduction were never in this table and were
+//! private to `melange-cli` until 2026-09-03. They are now
+//! [`apply_forward_active_reduction`] and [`apply_grid_off_reduction`].
+//!
 //! On `wurli-power-amp` — the shipped OpenWurli power stage — the CLI built an
 //! N=20, M=14 system while `melange validate` built N=44, M=16: more than twice
 //! the nodes, and a different solver sub-path. Validation reported 1319% RMS
