@@ -192,8 +192,9 @@ For typical circuits (N<=41 validated), pot rebuild takes ~250us at N=37 -- well
 Measured on an AMD Ryzen 9 7950X, single core, noiseless, `-C target-cpu=x86-64-v3` (median of 7 × 2M samples via `tools/perf-harness/bench.sh`); throughput is host-dependent.
 
 - Light nonlinear circuits: 12AX7 gain stage ~230×, overdrive pedal ~64× realtime
+- Germanium diode network (6 Ge diodes) ~12× realtime
 - Typical multi-device circuits: Wurlitzer preamp ~56×, tweed guitar amp ~29× realtime
-- Heaviest validated: a Pultec-style passive EQ (nodal full-LU, chord + sparse LU, N=52, M=8) ~24×, SSL-class bus compressor ~9× realtime
+- Heaviest validated: a Pultec-style passive EQ (nodal full-LU, chord + sparse LU, N=52, M=8) ~24×, SSL-class bus compressor (12 op-amps + 2 VCAs) ~7.1× realtime
 
 ## Circuit Noise [PARTIAL]
 

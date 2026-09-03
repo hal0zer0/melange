@@ -9,6 +9,146 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-09-03
+
+A verification-and-correctness release. Two silent-wrong-output bugs in the
+nodal emitter are fixed, `melange validate` stops verifying a circuit the
+compiler never builds, and `.model` cards that name a parameter melange does
+not know are now rejected instead of quietly ignored.
+
+It also resolves a version-reporting gap: `main` was advanced past the `v0.1.4`
+tag without a version bump, so a build from `main` between those commits
+reported `melange 0.1.4` while not being the tagged 0.1.4. Anything built from
+`main` since 2026-08-30 should be rebuilt from this tag.
+
+**Generated DSP output is not byte-identical to 0.1.4**, but the audible change
+is confined to one class of circuit. What moves, and what does not:
+
+- **Generated source changes for essentially every circuit.** Nodal circuits get
+  a rewritten `reset()` body (F9); DK circuits get the new `N_I` layout. Both
+  are emitted together with the code that reads them, so a regenerated file is
+  self-consistent.
+- **Rendered audio is unchanged except on noise-enabled circuits that hit one of
+  three RHS rebuild paths** (F10). Measured on the 43-circuit / 196-render
+  golden corpus in place when the fixes landed: 194 renders identical, 1
+  negligible, 1 changed. The one changed render is a noise-enabled tube circuit
+  whose broadband level moves +0.001 dB with every octave band inside 0.002 dB;
+  its per-sample waveform differs because noise that was previously dropped on
+  sub-step samples is now stamped.
+- **F9 cannot change `melange simulate` or `melange analyze` output.** Neither
+  command calls the generated `reset()`. F9 changes what a *generated plugin*
+  does after its host resets it — transport stop, `initialize()` — which is
+  where the bug lived.
+- **Who should regenerate.** Any generated plugin, for F9: a host reset after a
+  pot move previously left the solver running the moved value while every getter
+  reported nominal. For OpenWurli specifically: `gen_preamp.rs` is DK-routed and
+  its rendered output is unchanged (its source changes for the `N_I` layout);
+  `gen_power_amp.rs` and `gen_tremolo.rs` are nodal and pick up the `reset()`
+  fix.
+
+MSRV is unchanged (1.85). No dependency changed in this release.
+
+### Added
+
+- **`--nodal-subpath {auto|schur|full-lu}`** on `compile` and `analyze` — pins
+  the nodal solver's sub-path instead of letting the router choose. A
+  diagnostic control for isolating Schur-versus-full-LU behaviour on a circuit;
+  `auto` is the default and the previous behaviour.
+- **SPICE `XTB` is honored** on self-heating BJTs — forward and reverse beta now
+  carry their temperature dependence instead of being held at the nominal-
+  temperature value. Affects only `.model` cards that supply `XTB` on a device
+  with `RTH`/`CTH`.
+- **`melange validate` can translate pentode (`P`) elements to ngspice**, in all
+  three screen-current forms. Ten decks in the circuit library previously had no
+  reference oracle at all.
+- **Golden harness verification depth.** Renders are captured at f64 rather than
+  f32; `compare --strict` adds a refactor gate that passes only on bit-identical
+  renders *and* identical generated source; generated `circuit.rs` is diffed;
+  solver diagnostic counters (`diag_*`) are recorded and gated; and a capture
+  now detects when the `melange` binary used does not match the checked-out
+  source.
+
+### Changed
+
+- **Unknown `.model` parameters are now a hard error.** A `.model` key is sorted
+  into three tiers: *honored* (silent), *recognized but unimplemented* (warns,
+  naming what the omission costs), and *unknown for this device type* (hard
+  error, listing the accepted keys plus an alias hint — `VP=` on a JFET card now
+  points at `VTO` and warns that the sign convention differs). Previously all
+  three warned and continued, so a typo'd key could still produce a plausible
+  result for the wrong reason. Blast radius was measured, not assumed: of the 85
+  netlists in the circuit library, zero now fail to compile. `TR` and `XCJC`
+  stay in the middle tier — they are real SPICE keys that arrive on authentic
+  vendor model cards, and erroring on them would mean refusing genuine SPICE
+  decks over a gap of melange's own. The change immediately found a real defect:
+  `SHOT_GAMMA2` is read by the noise layer but was missing from the tube
+  resolver's honored list, so melange had been emitting a false "ignored"
+  warning for a parameter it actually uses.
+- **`N_I` is emitted in one layout, `[[f64; M]; N]`, on every solver path.** It
+  was stored transposed depending on the solver — `[[f64; N]; M]` on DK,
+  `[[f64; M]; N]` on both nodal paths — under a single public symbol, while
+  `N_V` was uniform. On a circuit where `N == M` that is wrong with no crash and
+  no shape error. Generated code and its uses move together, so regenerating is
+  sufficient; any code that reads `N_I` from *outside* a generated file must
+  swap its index order.
+
+### Fixed
+
+- **Nodal `reset()` left the working matrices stale and rate-blind.** `reset()`
+  restored `g_work`/`c_work` and every pot and switch field to nominal but never
+  restored `a`/`a_neg`/`a_be`/`a_neg_be`, and never set `matrices_dirty`. After
+  `set_pot(x)` → `process_sample()` → `reset()`, the working A matrices still
+  carried `x` with no rebuild scheduled, so every getter reported nominal while
+  the solver ran the moved value; it healed only on a later
+  `set_pot_*`/`set_switch_*`/`set_sample_rate`. Separately, the `*_DEFAULT`
+  constants bake the codegen sample rate, and `reset()` reloaded them regardless
+  of the live rate, so the two halves of the restore disagreed whenever the host
+  ran at another rate. The matrix restore now happens at the end of `reset()`
+  and dispatches on the live rate exactly as `set_sample_rate()` does. The DK
+  path always set `matrices_dirty` here; only the nodal emitter did not.
+- **Noise was silently dropped on three from-scratch RHS rebuilds.** A sample's
+  noise draws are consumed once when the primary RHS is built and cached so
+  later rebuilds within the same sample can re-stamp them without touching the
+  RNG. Three rebuild paths did not re-stamp: Schur breakpoint-BE with `M == 0`,
+  the Schur ActiveSetBe sub-step, and the full-LU adaptive sub-step. On any
+  sample routed through one of those the noise vanished — while its draws had
+  already been consumed, so the RNG stream stayed aligned and the loss was
+  invisible to a determinism check.
+- **Pentode variable-mu parameters were parsed, validated, and then discarded.**
+  `MU_B`, `SVAR` and `EX_B` were read off the `.model` card and checked, and the
+  resolver then hardcoded all three to zero, so a variable-mu pentode passed
+  validation and silently compiled as a sharp-cutoff device. Byte-identical for
+  every sharp pentode (`SVAR = 0` is the unchanged path); changes emitted DSP
+  only for `SVAR > 0` decks.
+- **`melange validate` was verifying a different circuit than `compile` ships.**
+  Four consumers — compile, simulate, analyze, validate — had each grown a copy
+  of the front-end pipeline and drifted three ways, the consequential one being
+  that validate skipped `.linearize` reductions. On the shipped Wurlitzer power
+  amp, validate built an N=44, M=16 system where compile builds N=20, M=14, took
+  a different solver sub-path, and reported 1319% RMS error against ngspice —
+  which read as a catastrophic solver defect and was a harness artifact. All
+  four now share one front end (`melange_solver::pipeline`). The same deck now
+  validates at 0.2461% RMS error, correlation 0.99999964, SNR +52.18 dB.
+- **A `.model` card that resolved to no catalogue part and supplied no
+  device-defining parameter silently fell back to the built-in default device.**
+  A typo'd tube name compiled as a 12AX7 with no diagnostic. The
+  BJT/JFET/MOSFET/triode/pentode/LDR resolvers now warn on exactly that case.
+  Log-only; DSP is byte-identical.
+- **The KiCad reference netlist declared `MIT OR Apache-2.0`.** Every crate is
+  GPL-3.0-or-later via the workspace and the project is GPL throughout; that
+  line was never intended. Comment-only, DSP byte-identical.
+
+### Documentation
+
+- **FAUST is retracted as a planned codegen backend.** It was published as
+  planned in four places and does not work: FAUST's generated code is
+  deliberately not Turing-complete — each sample costs a fixed number of
+  operations — so a Newton-Raphson solve with a data-dependent iteration count
+  cannot be expressed, and GRAME's own FAQ names the diode-model Newton
+  approximation as the blocking case. Only circuits emitting no NR loop at all
+  would be expressible: 6 of 41 in the golden corpus. All four sites now say
+  explored-and-impractical.
+
 ## [0.1.4] - 2026-08-30
 
 A correctness-sweep release: solver-accuracy and codegen-honesty fixes, no new
@@ -412,7 +552,8 @@ measured real hardware. Everything else is unproven against hardware. See
   KiCad file; no effect on netlist compilation, generated code, or shipped plugins. The
   fix (`quick-xml >= 0.41`) is tracked for 0.1.1.
 
-[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/hal0zer0/melange/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/hal0zer0/melange/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/hal0zer0/melange/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/hal0zer0/melange/compare/v0.1.1...v0.1.2

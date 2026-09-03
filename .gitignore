@@ -46,3 +46,13 @@ CLAUDE.local.md
 
 # Local, untracked working docs (design notes, briefs, research) — not public
 local-docs/
+
+# Agent scratch that must NOT reach a public repo.
+# AGENTS.md is DERIVED from the maintainer's account-level ~/.claude/CLAUDE.md —
+# personal working preferences, not project documentation. It was untracked but
+# un-ignored, so a single `git add -A` during release prep would have published
+# it. If a public agent guide is ever wanted, write one deliberately rather than
+# committing this file.
+AGENTS.md
+# Chart/scratch output from another agent session.
+tools/viz/

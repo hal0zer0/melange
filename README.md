@@ -176,15 +176,27 @@ A sample of what it handles, with **measured** single-core throughput:
 
 | Circuit | What it is | Devices | Throughput\* |
 |---------|-----------|---------|--------------|
-| Bus compressor (SSL-class) | VCA + op-amp sidechain | 4 op-amps + 1 VCA | 9× |
-| Germanium diode network | 6-diode germanium clipping | 6 Ge diodes | 18× |
+| Bus compressor (SSL-class) | VCA + op-amp sidechain | 12 op-amps + 2 VCAs | 7.1× |
+| Germanium diode network | 6-diode germanium clipping | 6 Ge diodes | 12.1× |
 | Passive tube EQ (Pultec-style) | 7 pots, 3 switches, global NFB (N=52, M=8) | 4 tubes, 3 transformers | 24× |
 | Tweed guitar amp (5F1 Champ-class) | preamp + power stage + output transformer | 12AX7 (2 triodes) + 6V6 pentode | 29× |
 | Wurlitzer 200A preamp | 2-stage BJT preamp (full Gummel-Poon) | 2 BJTs + 1 diode | 56× |
 | Overdrive pedal | op-amp gain + diode clipper | op-amp + 2 diodes | 64× |
 | 12AX7 gain stage | single triode stage | 1 triode | 230× |
 
-\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), median of 7 × 2M samples. Measured on an AMD Ryzen 9 7950X with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh). Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass tops out near 2700×.
+\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), median of 7 × 2M samples. Measured on an AMD Ryzen 9 7950X with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh). Re-measured 2026-09-02. Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass tops out near 2700×.
+
+Each row names a real deck in the circuits repository, so you can reproduce it rather than take it on faith — `bench.sh <label> <path-to.cir>`:
+
+| Row | Deck |
+|---|---|
+| Bus compressor | `unstable/dynamics/4kbuscomp.cir` |
+| Germanium diode network | `unstable/gimmicks/noyce-germanium-cluster.cir` |
+| Passive tube EQ | `testing/filters/passive-eq1a.cir` |
+| Tweed guitar amp | `unstable/amp/champ-5f1.cir` |
+| Wurlitzer 200A preamp | `unstable/preamp/wurli-preamp.cir` |
+| Overdrive pedal | `unstable/filters/gold-press-overdrive.cir` |
+| 12AX7 gain stage | `unstable/gimmicks/noyce-triode-12ax7.cir` |
 
 The circuits repository holds the full catalog with per-circuit status.
 
