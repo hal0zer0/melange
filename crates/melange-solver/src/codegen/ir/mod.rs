@@ -4532,13 +4532,14 @@ impl CircuitIR {
             )));
         }
 
-        Self::warn_unrecognized_params(
+        Self::check_model_params(
             netlist,
             model,
             &[
                 "IS", "N", "CJO", "RS", "BV", "IBV", "KF", "AF", "RTH", "CTH", "XTI", "EG", "TAMB",
             ],
-        );
+            &[],
+        )?;
         // NOTE: no warn_unresolved_model() here — the diode resolver already
         // emits its own dedicated fallback warning in the IS-resolution arm
         // above ("not in catalog and no IS given — falling back to the SPICE
@@ -4801,7 +4802,7 @@ impl CircuitIR {
             )));
         }
 
-        Self::warn_unrecognized_params(
+        Self::check_model_params(
             netlist,
             model,
             &[
@@ -4810,7 +4811,23 @@ impl CircuitIR {
                 "ISC", "NC", "RB", "RC", "RE", "RTH", "CTH", "XTI", "XTB", "EG", "TAMB", "KF",
                 "AF",
             ],
-        );
+            &[
+                (
+                    "TR",
+                    "reverse transit time — melange's junction charge is linearized \
+                     at the DC operating point, so the time-varying BC diffusion \
+                     charge TR describes cannot be represented (measured: honoring \
+                     it moves melange AWAY from ngspice). Blocked on per-timestep \
+                     charge re-linearization.",
+                ),
+                (
+                    "XCJC",
+                    "base-collector depletion capacitance split across the internal \
+                     base node — melange places all of CJC at the internal base, \
+                     which is XCJC=1.0 (the SPICE default). Only XCJC<1 is affected.",
+                ),
+            ],
+        )?;
         Self::warn_unresolved_model(
             netlist,
             model,
@@ -4956,13 +4973,14 @@ impl CircuitIR {
             )));
         }
 
-        Self::warn_unrecognized_params(
+        Self::check_model_params(
             netlist,
             model,
             &[
                 "VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "RD", "RS", "KF", "AF",
             ],
-        );
+            &[],
+        )?;
         Self::warn_unresolved_model(
             netlist,
             model,
@@ -5071,13 +5089,14 @@ impl CircuitIR {
             )));
         }
 
-        Self::warn_unrecognized_params(
+        Self::check_model_params(
             netlist,
             model,
             &[
                 "KP", "VTO", "VT", "LAMBDA", "CGS", "CGD", "RD", "RS", "GAMMA", "PHI", "KF", "AF",
             ],
-        );
+            &[],
+        )?;
         Self::warn_unresolved_model(
             netlist,
             model,
@@ -5250,7 +5269,7 @@ impl CircuitIR {
             )));
         }
 
-        Self::warn_unrecognized_params(
+        Self::check_model_params(
             netlist,
             model,
             &[
@@ -5275,8 +5294,14 @@ impl CircuitIR {
                 "CTH",
                 "VBIAS_ALPHA",
                 "TAMB",
+                // Consumed by `codegen::ir::noise` (shot-noise Gamma-squared
+                // override), NOT by this resolver — which is precisely why it
+                // was missing from this list until the unknown-key check
+                // became a hard error and a test caught it.
+                "SHOT_GAMMA2",
             ],
-        );
+            &[],
+        )?;
         Self::warn_unresolved_model(
             netlist,
             model,
@@ -5529,7 +5554,7 @@ impl CircuitIR {
             )));
         }
 
-        Self::warn_unrecognized_params(
+        Self::check_model_params(
             netlist,
             model,
             &[
@@ -5557,7 +5582,8 @@ impl CircuitIR {
                 "KF",
                 "AF",
             ],
-        );
+            &[],
+        )?;
         Self::warn_unresolved_model(
             netlist,
             model,
@@ -5646,7 +5672,7 @@ impl CircuitIR {
             )));
         }
 
-        Self::warn_unrecognized_params(netlist, model, &["VSCALE", "G0", "THD", "MODE"]);
+        Self::check_model_params(netlist, model, &["VSCALE", "G0", "THD", "MODE"], &[])?;
 
         Ok(VcaParams { vscale, g0, thd })
     }
@@ -5686,11 +5712,12 @@ impl CircuitIR {
             )));
         }
 
-        Self::warn_unrecognized_params(
+        Self::check_model_params(
             netlist,
             model,
             &["RMIN", "RMAX", "GAMMA", "TAU_A", "TAU_R"],
-        );
+            &[],
+        )?;
         Self::warn_unresolved_model(
             netlist,
             model,
@@ -5709,22 +5736,75 @@ impl CircuitIR {
     }
 
     /// Warn on unrecognized .model parameters (typo protection).
-    fn warn_unrecognized_params(netlist: &Netlist, model_name: &str, known: &[&str]) {
-        if let Some(m) = netlist
+    /// Check every `.model` parameter against what melange does with it.
+    ///
+    /// Three outcomes, because a `.model` key can be wrong in two very different
+    /// ways and collapsing them serves neither:
+    ///
+    /// * **Honored** — melange reads it. Silent.
+    /// * **Recognized but unimplemented** — a real SPICE parameter melange does
+    ///   not model yet (`unimplemented`). Warns, naming what the omission costs.
+    ///   NOT an error: these arrive on authentic vendor model cards, and
+    ///   refusing them would mean melange rejects genuine SPICE decks over a gap
+    ///   of its own. The warning is the honest report of that gap.
+    /// * **Unknown** — not a valid parameter for this device type at all. **Hard
+    ///   error**, with the accepted keys and an alias hint where one is known.
+    ///
+    /// The third case used to warn and continue, which is how `VP=` on a JFET
+    /// card (the datasheet spelling; SPICE uses `VTO`, and the sign convention
+    /// differs) could be silently discarded while the deck still biased
+    /// correctly off the built-in catalog — producing a right answer for the
+    /// wrong reason, which is worse than a wrong answer.
+    fn check_model_params(
+        netlist: &Netlist,
+        model_name: &str,
+        honored: &[&str],
+        unimplemented: &[(&str, &str)],
+    ) -> Result<(), CodegenError> {
+        let Some(m) = netlist
             .models
             .iter()
             .find(|m| m.name.eq_ignore_ascii_case(model_name))
-        {
-            for (key, _) in &m.params {
-                let upper = key.to_ascii_uppercase();
-                if !known.iter().any(|k| k.eq_ignore_ascii_case(&upper)) {
-                    log::warn!(
-                        ".model {}: unrecognized parameter '{}' (ignored)",
-                        model_name,
-                        key,
-                    );
-                }
+        else {
+            return Ok(());
+        };
+        for (key, _) in &m.params {
+            let upper = key.to_ascii_uppercase();
+            if honored.iter().any(|k| k.eq_ignore_ascii_case(&upper)) {
+                continue;
             }
+            if let Some((_, effect)) = unimplemented
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(&upper))
+            {
+                log::warn!(
+                    ".model {}: '{}' is a recognized SPICE parameter that melange \
+                     does not model yet, so it is IGNORED — {}",
+                    model_name,
+                    key,
+                    effect,
+                );
+                continue;
+            }
+            let hint = Self::model_param_alias_hint(&upper);
+            return Err(CodegenError::InvalidConfig(format!(
+                ".model {model_name}: unknown parameter '{key}'.{hint} Accepted \
+                 for this device: {}",
+                honored.join(", ")
+            )));
+        }
+        Ok(())
+    }
+
+    /// A pointed hint for keys that are a plausible confusion rather than a typo.
+    fn model_param_alias_hint(upper: &str) -> String {
+        match upper {
+            "VP" => " Did you mean VTO? `VP` is the datasheet symbol for \
+                     pinch-off; SPICE spells it VTO, and note the sign \
+                     convention differs (VTO is negative for an N-channel JFET)."
+                .to_string(),
+            "BETA" if false => String::new(),
+            _ => String::new(),
         }
     }
 
