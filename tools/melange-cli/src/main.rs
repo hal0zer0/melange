@@ -1803,7 +1803,7 @@ fn compile_circuit_source(
     // MNA with FA + linearized + grid-off reductions fused via
     // `from_netlist_with_all_reductions`, then re-stamp junction caps.
     // Shared with simulate/analyze — see `apply_linearize_reductions`.
-    let linearize_outcome = apply_linearize_reductions(
+    let linearize_outcome = melange_solver::pipeline::apply_linearize_reductions(
         &mut mna,
         &netlist,
         &forward_active,
@@ -1811,6 +1811,7 @@ fn compile_circuit_source(
         input_node_idx,
         input_conductance,
         input_resistance,
+        &|a| println!("{a}"),
     )?;
 
     // NOTE: Internal node expansion for parasitic BJTs is deferred until after
@@ -2027,7 +2028,7 @@ fn compile_circuit_source(
             force_trap,
             netlist.integrator,
         );
-    let max_iter = auto_tune_max_iter(
+    let max_iter = melange_solver::pipeline::auto_tune_max_iter(
         if max_iter == 50 { None } else { Some(max_iter) },
         &kernel,
         &routing,
@@ -2758,65 +2759,6 @@ struct AnalyzeOptions<'a> {
     max_iter: Option<usize>,
 }
 
-/// Auto-tune the NR iteration budget from routing + trap stability (Tier 3b).
-///
-/// Shared by `compile`, `simulate`, and `analyze` so every command runs the
-/// same budget — simulate/analyze previously hardcoded 100 while compile
-/// auto-tuned up to 50 + 5·M + 200, meaning a circuit could converge in the
-/// shipped plugin but falsely "diverge" under `melange simulate`.
-///
-/// `user_max_iter = Some(n)` (an explicit `--max-iter`) always wins.
-///
-/// Rationale for the numbers (kept verbatim from the original compile-path
-/// implementation): nodal full-LU is O(N³) per iteration — expensive iters
-/// that converge reliably, so a flat 50; DK Schur is O(M³) — cheap iters
-/// that may need more, so 50 + 5·M. A marginal-Nyquist circuit kept on TRAP
-/// has damped-NR convergence that slows sharply as ρ→1 (e.g. wurli-preamp,
-/// ρ≈1.0000, needs ~186 iters/sample), hence the +200 bonus when ρ > 0.999
-/// and the circuit actually stays on trapezoidal; a BE-promoted circuit
-/// converges in a few iters and must NOT inherit that worst-case bound.
-fn auto_tune_max_iter(
-    user_max_iter: Option<usize>,
-    kernel: &melange_solver::dk::DkKernel,
-    routing: &melange_solver::codegen::routing::RoutingDecision,
-    backward_euler: bool,
-    force_trap: bool,
-    input_node_idx: usize,
-) -> usize {
-    if let Some(n) = user_max_iter {
-        return n;
-    }
-    if kernel.m == 0 {
-        return 50;
-    }
-    let base = if routing.route == melange_solver::codegen::routing::SolverRoute::Nodal {
-        50
-    } else {
-        50 + kernel.m * 5 // DK: scale with M (M=8 → 90 iters)
-    };
-    // Will this circuit actually run on trapezoidal? Replicate the codegen
-    // auto-BE decision (ir.rs `auto_be`) so the iteration budget matches the
-    // integrator that ships.
-    let stays_trap = !backward_euler
-        && (force_trap
-            || !melange_solver::codegen::stability::trap_needs_be(
-                melange_solver::codegen::stability::analyze_trap_stability_deflated(
-                    &kernel.s,
-                    &kernel.a_neg,
-                    kernel.n,
-                    &[input_node_idx],
-                ),
-            ));
-    let stiffness_bonus = if routing.spectral_radius > 0.999 && stays_trap {
-        200
-    } else if routing.spectral_radius > 0.95 {
-        20
-    } else {
-        0
-    };
-    base + stiffness_bonus
-}
-
 /// Resolve `--switch NAME=POS` specs into `(switch_idx, position)` pairs.
 ///
 /// `NAME` matches a switch label (case-insensitive) or a 0-based index; `POS`
@@ -3094,7 +3036,7 @@ fn simulate_circuit_source(
     }
 
     // Apply `.linearize` directives — shared helper documented at its definition.
-    apply_linearize_reductions(
+    melange_solver::pipeline::apply_linearize_reductions(
         &mut mna,
         &netlist,
         &forward_active,
@@ -3102,6 +3044,7 @@ fn simulate_circuit_source(
         input_node_idx,
         input_conductance,
         input_resistance,
+        &|a| println!("{a}"),
     )?;
 
     // BJT junction-cap preflight — see compile path for rationale. Keeping
@@ -3264,7 +3207,7 @@ fn simulate_circuit_source(
     let mut output_nodes = vec![output_node_idx];
     output_nodes.extend(probe_indices.iter().copied());
     let output_scales = vec![1.0; output_nodes.len()];
-    let max_iterations = auto_tune_max_iter(
+    let max_iterations = melange_solver::pipeline::auto_tune_max_iter(
         opts.max_iter,
         &kernel,
         &decision,
@@ -3445,89 +3388,10 @@ fn simulate_circuit_source(
     Ok(())
 }
 
-/// Counts of devices actually linearized after the helper validated them
-/// — see [`apply_linearize_reductions`]. Callers use these for post-
-/// routing summary lines. Triode counts exclude entries that were skipped
-/// because the grid was conducting at the DC bias.
-#[derive(Default, Debug, Clone, Copy)]
-struct LinearizeOutcome {
-    bjts_linearized: usize,
-    triodes_linearized: usize,
-}
-
-/// Apply `.linearize` directives to `mna` in-place.
-///
-/// Computes a DC OP on the current MNA to extract small-signal g-parameters
-/// for flagged BJTs and triodes, then rebuilds the MNA via
-/// `from_netlist_with_all_reductions` with those devices collapsed from
-/// active-NR (2D per device) to linear stamps (0D). Re-stamps junction caps
-/// against the reduced dimension and restamps the input conductance.
-///
-/// The rebuild also re-applies `forward_active` and `grid_off_pentodes`
-/// reductions — the caller may have already rebuilt for those, but
-/// `from_netlist_with_all_reductions` composes all three uniformly from the
-/// raw netlist, so passing them through here keeps the final MNA consistent.
-///
-/// No-op when the netlist has no `.linearize` directives. In that case any
-/// FA / grid-off rebuilds the caller did remain in place and this returns
-/// `LinearizeOutcome::default()` without modifying `mna`.
-///
-/// Writes status to stdout: one line per linearized device with its DC-OP
-/// small-signal parameters, plus a summary line per device class.
-///
-/// Single source of truth for the `.linearize` reduction pipeline —
-/// `compile`, `simulate`, and `analyze` all call this. Previously the block
-/// was pasted three times; the `analyze` copy was missing entirely, which
-/// is why `melange analyze` reported the pre-linearize M value (Uniquorn v2
-/// reported M=38 rather than M=20).
-/// Detect grid-off pentodes at DC-OP and reduce the MNA accordingly.
-///
-/// When a pentode's grid is biased well below cutoff (`Vgk < -(vgk_onset + 0.5)`
-/// and `Vg2k > 1.0`), the Ig1 NR dimension collapses and we freeze Vg2k into
-/// the stamp. This turns a 3D pentode block into a 2D one, shrinking the DK M
-/// by 1 per tube. See `crates/melange-solver/src/codegen/ir.rs:detect_grid_off_pentodes`.
-///
-/// When rebuild fires, the MNA is replaced with the reduced version, input
-/// conductance is re-stamped (the rebuild zeroes G[in][in]), and junction caps
-/// are re-stamped against the new device slot layout.
-///
-/// `tube_grid_fa`:
-///   - "auto" — inspect DC-OP bias, reduce where below cutoff.
-///   - "on"   — force grid-off on every non-variable-mu pentode regardless of bias.
-///   - "off"  — never reduce; returns an empty map without touching `mna`.
-/// `solver_override == "nodal"` is also treated as "off" because nodal doesn't
-/// benefit from M-reduction at the solver level.
-///
-/// Single source of truth for the grid-off reduction pipeline — `compile`,
-/// `simulate`, and `analyze` all call this. Previously the block lived only in
-/// `compile`; `simulate` / `analyze` passed an empty map, which is why the 5F1
-/// Champ single-ended 6V6 didn't get its free 3D→2D reduction in those paths.
-/// Pre-route check: would the current (un-reduced) MNA route to the nodal
-/// solver?
-///
-/// When the answer is yes, `detect_forward_active_bjts` must be skipped.
-/// Two independent reasons:
-///
-/// 1. FA is unnecessary when the final solver is Nodal — Nodal handles
-///    full-dimension BJT blocks natively via N×N NR, so collapsing BJTs
-///    to 1D saves nothing at the solver level.
-/// 2. FA reduction can *destabilize* the trapezoidal propagation operator.
-///    On wurli-power-amp the un-reduced spectral radius(S·A_neg) is 1.0018
-///    (stable) but FA collapses 7 of 8 BJTs to 1D and drives it to 1.0145.
-///    The router then flips back to Nodal post-FA, but the DC-OP solver
-///    has already converged on a parasitic equilibrium in the FA-reduced
-///    MNA (many internal nodes pinned to rails). Runtime NR never
-///    recovers. See memory/wurli_power_amp_phase2_recheck.md.
-///
-/// Uses the full `auto_route` decision (`route == Nodal`), not just the
-/// `dk_unstable` flag — `large_m`, ill-conditioning, and multi-transformer
-/// also imply "don't bother with FA". Circuits currently relying on
-/// FA+DK *under* the `large_m` threshold are unaffected because their
-/// un-reduced route is DK in the first place.
-/// `sample_rate` is the host rate; `oversampling` is the codegen
-/// oversampling factor. The pre-route kernel is built at the internal
-/// (oversampled) rate — see the routing-rate fix below `should_skip_fa_for_nodal_reroute`'s
-/// caller for why this matters.
+// `LinearizeOutcome`, `apply_linearize_reductions` and `auto_tune_max_iter`
+// moved to `melange_solver::pipeline` so `melange compile`, `simulate`,
+// `analyze` and `melange-validate` share one front-end pipeline instead of
+// four copies that drifted. See that module's docs for what the drift cost.
 fn should_skip_fa_for_nodal_reroute(
     mna: &melange_solver::mna::MnaSystem,
     sample_rate: f64,
@@ -3641,300 +3505,6 @@ fn format_grid_off_log(
         pretty_str,
         grid_off_pentodes.len()
     ))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn apply_linearize_reductions(
-    mna: &mut melange_solver::mna::MnaSystem,
-    netlist: &melange_solver::parser::Netlist,
-    forward_active: &std::collections::HashSet<String>,
-    grid_off_pentodes: &std::collections::HashMap<String, f64>,
-    input_node_idx: usize,
-    input_conductance: f64,
-    input_resistance: f64,
-) -> Result<LinearizeOutcome> {
-    use melange_solver::parser::Element;
-
-    // Partition .linearize names into BJT vs triode sets by matching against
-    // element types. Warn on names that are neither.
-    let linearize_names: std::collections::HashSet<String> =
-        netlist.linearize_devices.iter().cloned().collect();
-    let mut linearized_bjts_set: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
-    let mut linearized_triodes_set: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
-    if !linearize_names.is_empty() {
-        for elem in &netlist.elements {
-            match elem {
-                Element::Bjt { name, .. }
-                    if linearize_names.contains(&name.to_ascii_uppercase()) =>
-                {
-                    linearized_bjts_set.insert(name.to_ascii_uppercase());
-                }
-                Element::Triode { name, .. }
-                    if linearize_names.contains(&name.to_ascii_uppercase()) =>
-                {
-                    linearized_triodes_set.insert(name.to_ascii_uppercase());
-                }
-                _ => {}
-            }
-        }
-        for name in &linearize_names {
-            let upper = name.to_ascii_uppercase();
-            if !linearized_bjts_set.contains(&upper) && !linearized_triodes_set.contains(&upper) {
-                println!(
-                    "  Warning: .linearize device '{}' is not a BJT or triode (ignored)",
-                    name
-                );
-            }
-        }
-    }
-
-    let has_linearized = !linearized_bjts_set.is_empty() || !linearized_triodes_set.is_empty();
-    if !has_linearized {
-        return Ok(LinearizeOutcome::default());
-    }
-
-    // DC OP on the current (post-FA, pre-linearize) MNA to get the bias
-    // point for small-signal g-parameter extraction.
-    let device_slots =
-        melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(netlist, Some(mna))
-            .unwrap_or_default();
-    let dc_op_config = melange_solver::dc_op::DcOpConfig {
-        input_node: input_node_idx,
-        input_resistance,
-        ..melange_solver::dc_op::DcOpConfig::default()
-    };
-    let dc_result =
-        melange_solver::dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config);
-
-    // Extract BJT small-signal g-params (gm, gpi, gmu, go) at DC bias.
-    let mut bjt_lin_infos = Vec::new();
-    for slot in &device_slots {
-        if let melange_solver::codegen::ir::DeviceParams::Bjt(bp) = &slot.params {
-            let dev = mna
-                .nonlinear_devices
-                .iter()
-                .find(|d| d.start_idx == slot.start_idx);
-            if let Some(dev) = dev {
-                if linearized_bjts_set.contains(&dev.name.to_ascii_uppercase()) {
-                    let s = slot.start_idx;
-                    let (nc, nb, ne) = (
-                        dev.node_indices[0],
-                        dev.node_indices[1],
-                        dev.node_indices[2],
-                    );
-                    // Node-voltage lookup (1-indexed device nodes, 0 = ground).
-                    let v_at = |idx: usize| -> f64 {
-                        if idx > 0 {
-                            dc_result.v_node.get(idx - 1).copied().unwrap_or(0.0)
-                        } else {
-                            0.0
-                        }
-                    };
-                    let vbe = dc_result.v_nl.get(s).copied().unwrap_or(0.0);
-                    let ic = dc_result.i_nl.get(s).copied().unwrap_or(0.0);
-                    // Guard on slot.dimension: for an FA-reduced (1D) BJT,
-                    // v_nl[s+1]/i_nl[s+1] belong to the NEXT device's slot.
-                    // FA contract: Vbc from node voltages, Ib = Ic / BF.
-                    let (vbc, ib) = if slot.dimension == 2 {
-                        (
-                            dc_result.v_nl.get(s + 1).copied().unwrap_or(0.0),
-                            dc_result.i_nl.get(s + 1).copied().unwrap_or(0.0),
-                        )
-                    } else {
-                        (v_at(nb) - v_at(nc), ic / bp.beta_f)
-                    };
-
-                    let sign = if bp.is_pnp { -1.0 } else { 1.0 };
-                    let vbe_eff = sign * vbe;
-                    let vbc_eff = sign * vbc;
-                    let nf_vt = bp.nf * bp.vt;
-                    let exp_be = (vbe_eff / nf_vt).clamp(-40.0, 40.0).exp();
-                    let exp_bc = (vbc_eff / bp.vt).clamp(-40.0, 40.0).exp();
-
-                    let gm = bp.is / nf_vt * exp_be;
-                    let gmu = (bp.is / bp.vt * exp_bc + bp.is / (bp.beta_r * bp.vt) * exp_bc).abs();
-                    let gpi = bp.is / (bp.beta_f * nf_vt) * exp_be;
-                    let go = bp.is / (bp.beta_r * bp.vt) * exp_bc;
-
-                    // Norton operating-point voltages in EXTERNAL node space
-                    // (the linearized conductances are stamped between the
-                    // external terminals, so the I0 - g·v0 constant must use
-                    // external node differences — see LinearizedBjtInfo docs).
-                    let vbe0 = v_at(nb) - v_at(ne);
-                    let vbc0 = v_at(nb) - v_at(nc);
-                    println!(
-                        "  Linearized {}: gm={:.4e} gpi={:.4e} gmu={:.4e} Ic_dc={:.4e} Ib_dc={:.4e}",
-                        dev.name, gm, gpi, gmu, ic, ib
-                    );
-                    bjt_lin_infos.push(melange_solver::mna::LinearizedBjtInfo {
-                        name: dev.name.clone(),
-                        nc,
-                        nb,
-                        ne,
-                        gm,
-                        gpi,
-                        gmu,
-                        go,
-                        ic_dc: ic,
-                        ib_dc: ib,
-                        vbe0,
-                        vbc0,
-                    });
-                }
-            }
-        }
-    }
-
-    // Extract triode small-signal params (gm, rp=1/gp) at DC bias. Skip
-    // (and drop from the linearize set) when the grid is conducting or
-    // Vgk is near the onset — the small-signal linearization is invalid
-    // in the grid-current regime.
-    let mut triode_lin_infos = Vec::new();
-    for slot in &device_slots {
-        if let melange_solver::codegen::ir::DeviceParams::Tube(tp) = &slot.params {
-            if tp.is_pentode() {
-                continue;
-            }
-            let dev = mna
-                .nonlinear_devices
-                .iter()
-                .find(|d| d.start_idx == slot.start_idx);
-            if let Some(dev) = dev {
-                if linearized_triodes_set.contains(&dev.name.to_ascii_uppercase()) {
-                    let s = slot.start_idx;
-                    let vgk = dc_result.v_nl.get(s).copied().unwrap_or(0.0);
-                    let vpk = dc_result.v_nl.get(s + 1).copied().unwrap_or(0.0);
-                    let ip_dc = dc_result.i_nl.get(s).copied().unwrap_or(0.0);
-                    let ig_dc = dc_result.i_nl.get(s + 1).copied().unwrap_or(0.0);
-
-                    if ig_dc.abs() > 1e-9 {
-                        println!(
-                            "  Warning: triode '{}' has Ig={:.4e} at DC OP (grid conducting), skipping linearization",
-                            dev.name, ig_dc
-                        );
-                        linearized_triodes_set.remove(&dev.name.to_ascii_uppercase());
-                        continue;
-                    }
-                    if vgk > -(tp.vgk_onset + 0.5) {
-                        println!(
-                            "  Warning: triode '{}' has Vgk={:.2}V (near grid conduction onset {:.2}V), skipping linearization",
-                            dev.name, vgk, tp.vgk_onset
-                        );
-                        linearized_triodes_set.remove(&dev.name.to_ascii_uppercase());
-                        continue;
-                    }
-
-                    use melange_devices::NonlinearDevice;
-                    let triode = melange_devices::KorenTriode {
-                        mu: tp.mu,
-                        ex: tp.ex,
-                        kg1: tp.kg1,
-                        kp: tp.kp,
-                        kvb: tp.kvb,
-                        ig_max: tp.ig_max,
-                        vgk_onset: tp.vgk_onset,
-                        lambda: tp.lambda,
-                        mu_b: tp.mu_b,
-                        svar: tp.svar,
-                        ex_b: tp.ex_b,
-                    };
-                    let jac = triode.jacobian(&[vgk, vpk]);
-                    let gm = jac[0]; // dIp/dVgk
-                    let gp = jac[1]; // dIp/dVpk = 1/rp
-
-                    let (ng, np, nk) = (
-                        dev.node_indices[0], // grid
-                        dev.node_indices[1], // plate
-                        dev.node_indices[2], // cathode
-                    );
-                    // Norton operating-point voltages in EXTERNAL node space
-                    // (see LinearizedTriodeInfo docs). For triodes without
-                    // internal nodes these equal v_nl[s]/v_nl[s+1].
-                    let v_at = |idx: usize| -> f64 {
-                        if idx > 0 {
-                            dc_result.v_node.get(idx - 1).copied().unwrap_or(0.0)
-                        } else {
-                            0.0
-                        }
-                    };
-                    let vgk0 = v_at(ng) - v_at(nk);
-                    let vpk0 = v_at(np) - v_at(nk);
-                    let rp = if gp.abs() > 1e-30 {
-                        1.0 / gp
-                    } else {
-                        f64::INFINITY
-                    };
-                    println!(
-                        "  Linearized {}: gm={:.4e} rp={:.0} Ip_dc={:.4e} Vgk={:.2}V Vpk={:.1}V",
-                        dev.name, gm, rp, ip_dc, vgk, vpk
-                    );
-                    triode_lin_infos.push(melange_solver::mna::LinearizedTriodeInfo {
-                        name: dev.name.clone(),
-                        ng,
-                        np,
-                        nk,
-                        gm,
-                        gp,
-                        ip_dc,
-                        ig_dc,
-                        vgk0,
-                        vpk0,
-                    });
-                }
-            }
-        }
-    }
-
-    // Rebuild MNA with all three reduction classes combined (FA +
-    // linearized + grid-off). This supersedes any prior FA-only or
-    // grid-off-only rebuild the caller performed.
-    *mna = melange_solver::mna::MnaSystem::from_netlist_with_all_reductions(
-        netlist,
-        forward_active,
-        &linearized_bjts_set,
-        &linearized_triodes_set,
-        grid_off_pentodes,
-    )
-    .with_context(|| "Failed to rebuild MNA with linearized devices")?;
-    if input_node_idx < mna.n {
-        mna.g[input_node_idx][input_node_idx] += input_conductance;
-    }
-
-    // Stamp linearized g-parameters into G. Must precede the junction-cap
-    // re-stamp so `build_device_info_with_mna` can skip linearized devices
-    // (it checks `mna.linearized_bjts` / `mna.linearized_triodes`).
-    if !bjt_lin_infos.is_empty() {
-        mna.linearized_bjts = bjt_lin_infos;
-        mna.stamp_linearized_bjts();
-        println!(
-            "  Linearized {} BJTs (M reduced by {})",
-            linearized_bjts_set.len(),
-            linearized_bjts_set.len() * 2
-        );
-    }
-    if !triode_lin_infos.is_empty() {
-        mna.linearized_triodes = triode_lin_infos;
-        mna.stamp_linearized_triodes();
-        println!(
-            "  Linearized {} triodes (M reduced by {})",
-            linearized_triodes_set.len(),
-            linearized_triodes_set.len() * 2
-        );
-    }
-
-    // Re-stamp junction caps against the reduced-dimension MNA.
-    let ds = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(netlist, Some(mna))
-        .unwrap_or_default();
-    if !ds.is_empty() {
-        mna.stamp_device_junction_caps(&ds);
-    }
-
-    Ok(LinearizeOutcome {
-        bjts_linearized: linearized_bjts_set.len(),
-        triodes_linearized: linearized_triodes_set.len(),
-    })
 }
 
 fn analyze_freq_response(
@@ -4309,7 +3879,7 @@ fn analyze_freq_response(
     // Apply `.linearize` directives — shared helper with compile/simulate.
     // Previously missing here, which is why `melange analyze` reported the
     // pre-linearize M on circuits like Uniquorn v2 (M=38 instead of M=20).
-    apply_linearize_reductions(
+    melange_solver::pipeline::apply_linearize_reductions(
         &mut mna,
         &netlist,
         &forward_active,
@@ -4317,6 +3887,7 @@ fn analyze_freq_response(
         input_node_idx,
         input_conductance,
         input_resistance,
+        &|a| println!("{a}"),
     )?;
 
     // BJT junction-cap preflight — see compile path for rationale. Analyze
@@ -4443,7 +4014,7 @@ fn analyze_freq_response(
     }
 
     // Generate circuit code
-    let max_iterations = auto_tune_max_iter(
+    let max_iterations = melange_solver::pipeline::auto_tune_max_iter(
         max_iter,
         &kernel,
         &decision,
