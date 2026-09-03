@@ -119,7 +119,9 @@ impl LinearSolver {
     /// Create a new linear solver.
     pub fn new(kernel: DkKernel, input_node: usize, output_node: usize) -> Self {
         let n = kernel.n;
-        let dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / kernel.sample_rate;
+        let dc_block_r = 1.0
+            - 2.0 * std::f64::consts::PI * crate::codegen::policy::DC_BLOCK_CUTOFF_HZ
+                / kernel.sample_rate;
         Self {
             kernel,
             v_prev: vec![0.0; n],

@@ -650,7 +650,7 @@ impl CircuitState {
         // blocker are re-seeded here — same contract as the no-pot variant.
         self.rebuild_matrices();
 {% if dc_block %}        let internal_rate = sample_rate * OVERSAMPLING_FACTOR as f64;
-        self.dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;
+        self.dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * {{ dc_block_cutoff_hz }} / internal_rate;
         for k in 0..NUM_OUTPUTS { self.dc_block_x_prev[k] = self.dc_operating_point[OUTPUT_NODES[k]]; }
         self.dc_block_y_prev = [0.0; NUM_OUTPUTS];
 {% endif %}
@@ -899,7 +899,7 @@ impl CircuitState {
         {% else %}
         let internal_rate = sample_rate;
         {% endif %}
-{% if dc_block %}        self.dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;
+{% if dc_block %}        self.dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * {{ dc_block_cutoff_hz }} / internal_rate;
         for k in 0..NUM_OUTPUTS { self.dc_block_x_prev[k] = self.dc_operating_point[OUTPUT_NODES[k]]; }
         self.dc_block_y_prev = [0.0; NUM_OUTPUTS];
 {% endif %}

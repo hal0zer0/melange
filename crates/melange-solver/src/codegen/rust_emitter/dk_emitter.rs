@@ -784,7 +784,9 @@ impl RustEmitter {
         // DC block coefficient: R = 1 - 2*pi*5/sr
         let internal_rate =
             ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
-        let dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;
+        let dc_block_r = 1.0
+            - 2.0 * std::f64::consts::PI * crate::codegen::policy::DC_BLOCK_CUTOFF_HZ
+                / internal_rate;
         ctx.insert("dc_block_r", &format!("{:.17e}", dc_block_r));
         ctx.insert("dc_block", &ir.dc_block);
         ctx.insert("dc_op_converged", &ir.dc_op_converged);
@@ -1066,6 +1068,12 @@ impl RustEmitter {
             ctx.insert("thermal_devices", &thermal_devices);
         }
 
+        // The DC-block cutoff as an emitted literal, so state.rs.tera spells the
+        // formula from the same source of truth the codegen-time coefficient uses.
+        ctx.insert(
+            "dc_block_cutoff_hz",
+            &crate::codegen::policy::dc_block_cutoff_hz_literal(),
+        );
         ctx.insert("dc_block", &ir.dc_block);
 
         // `current_sample_rate` is read by rebuild_matrices (pots/switches),

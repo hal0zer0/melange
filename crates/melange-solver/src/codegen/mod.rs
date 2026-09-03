@@ -21,6 +21,7 @@ pub mod fast_math;
 #[cfg(feature = "codegen")]
 pub mod ir;
 #[cfg(feature = "codegen")]
+pub mod policy;
 pub mod routing;
 #[cfg(feature = "codegen")]
 pub mod rust_emitter;

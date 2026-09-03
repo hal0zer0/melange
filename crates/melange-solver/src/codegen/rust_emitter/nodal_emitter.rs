@@ -2424,7 +2424,9 @@ impl RustEmitter {
         if ir.dc_block {
             let internal_rate =
                 ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
-            let dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;
+            let dc_block_r = 1.0
+                - 2.0 * std::f64::consts::PI * crate::codegen::policy::DC_BLOCK_CUTOFF_HZ
+                    / internal_rate;
             code.push_str(&format!(
                 "/// DC blocking filter coefficient: R = 1 - 2*pi*fc/sr (5Hz cutoff at internal rate)\npub const DC_BLOCK_R: f64 = {:.17e};\n\n",
                 dc_block_r
@@ -4252,8 +4254,14 @@ impl RustEmitter {
 
         // DC block recomputation
         if ir.dc_block {
-            code.push_str("        // Recompute DC blocking coefficient\n\
-                 \x20       self.dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;\n");
+            // The cutoff is interpolated as a literal (`5.0`) so the EMITTED
+            // expression is unchanged; generated code has no path to
+            // `crate::codegen::policy`.
+            code.push_str(&format!(
+                "        // Recompute DC blocking coefficient\n\
+                 \x20       self.dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * {} / internal_rate;\n",
+                crate::codegen::policy::dc_block_cutoff_hz_literal()
+            ));
             emit_dc_block_history_reseed(&mut code, ir, "        ", "self", false);
         }
 
