@@ -15,7 +15,11 @@ const INTERNAL_SAMPLE_RATE: f64 = 96000.0;  // Only when factor > 1
 const G: [[f64; N]; N] = [...];        // Conductance matrix
 const C: [[f64; N]; N] = [...];        // Capacitance matrix
 const N_V: [[f64; N]; M] = [...];      // Voltage extraction (constant)
-const N_I: [[f64; N]; M] = [...];      // Current injection (constant)
+const N_I: [[f64; M]; N] = [...];      // Current injection (constant)
+                                       // N rows x M cols on EVERY solver path.
+                                       // Was stored TRANSPOSED on DK vs nodal
+                                       // under this one symbol until 14ee88f;
+                                       // N_V has always been [[f64; N]; M].
 
 // Per-device constants
 const DEVICE_0_IS: f64 = 1e-12;
@@ -630,3 +634,71 @@ in `crates/melange-solver/src/linear_solver.rs`.
 | Multi-output | Stereo / multi-output supported via multiple output nodes |
 | Potentiometers | Per-block matrix rebuild on `set_pot` (Sherman-Morrison removed) |
 | Switches | Per-position matrix rebuild on `set_switch` |
+
+---
+
+# The shared front-end pipeline (`melange_solver::pipeline`)
+
+Everything a consumer must do between parsing a netlist and generating code:
+
+* `apply_linearize_reductions` — applies `.linearize`
+* `expand_internal_nodes_if_conditioned` — parasitic-BJT internal nodes, skipped
+  when `min(diag(K)) < -100` (that routes to full-LU, which handles parasitics
+  through `bjt_with_parasitics()` directly)
+* `auto_tune_max_iter` — the NR iteration budget
+
+**Every consumer must call these.** They lived in `tools/melange-cli/src/main.rs`
+until `6bc3ef1`, and `melange validate` — which had its own copy — did none of
+the three. See `SPICE_VALIDATION.md` for what that cost.
+
+Diagnostics route through a `Reporter` callback rather than `println!`: the CLI
+passes `&|a| println!("{a}")`, library callers pass `pipeline::silent`.
+
+**Skipping `apply_linearize_reductions` changes which solver sub-path you get.**
+The `linearized_bypass` gate in `nodal_emitter.rs` is the only thing routing some
+circuits to full-LU; without a linearized device they get Schur NR instead.
+
+# Numerical-policy constants (`melange_solver::codegen::policy`)
+
+Values that were *chosen*, not derived — nothing in the circuit or the math
+determines them, and changing one changes the sound of every emitted plugin.
+
+Two reasons they live in one module:
+
+1. **One source of truth.** `DC_BLOCK_CUTOFF_HZ` was spelled out at **six**
+   sites (two emitters, two template positions, one nodal reset emission, and
+   `linear_solver.rs` — the *runtime* solver's own copy, which every survey
+   missed because they were all looking at codegen). The implementation plan
+   recorded it as one site; the arbiter corrected that to five; it was six.
+2. **They are a published contract.** A second-language backend cannot
+   recompute these from the IR. A C++ emitter that picks its own 5 Hz-equivalent
+   ships a plugin that measurably differs while every structural test passes.
+
+Sites that *emit* the value as source text must interpolate it as a literal —
+generated code has no path to `crate::codegen::policy`. Use
+`dc_block_cutoff_hz_literal()`, which uses `Debug` formatting because that keeps
+the decimal point (`5.0`, not `5`).
+
+Still to enumerate: Armijo `c=1e-4`, `CHORD_REFACTOR=5`, the BE-latch thresholds,
+xoshiro salts, `STATE_MAX_PLAUSIBLE_MAGNITUDE=1e6`, and ~35 others.
+
+# `--nodal-subpath {auto|schur|full-lu}`
+
+The nodal solver has two Newton implementations of the same circuit. `auto` is
+the shipping behaviour and picks from measured conditioning.
+
+The forcing modes are **diagnostic escape hatches**, in the documented spirit of
+`--force-trap`: they exist so the sub-path can be isolated as a variable, which
+is otherwise impossible because the emitter chooses it for you.
+
+`schur` is **refused** — not warned about — when the circuit structurally
+requires full-LU (uncoupled saturating inductors, behavioral B-sources). The
+Schur reduction cannot express either, so forcing it would emit a solver that
+silently drops the nonlinearity. Where the auto choice was a conditioning
+*heuristic*, forcing is allowed and warns with the predicates that fired.
+
+**First result** (16 paired same-netlist comparisons): 12 decks agree to
+-60..-196 dBc — the two paths are numerically equivalent implementations. Three
+high-gain decks disagree at -12 to -35 dBc, but all are junk-pile circuits, so
+"does the sub-path change the sound?" is **undetermined**, not answered. A
+completed, non-clamping, ngspice-validatable deck is what would settle it.

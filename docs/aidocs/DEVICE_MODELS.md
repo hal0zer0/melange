@@ -1033,3 +1033,64 @@ Codegen entry points:
 - `K_DEFAULT` / `K_BE_DEFAULT` constants pre-subtract R_p at codegen time
 - `rebuild_matrices()` emits inline `k[s][s] -= RE; k[s][s+1] -= (RB+RE); …` after K is computed
 - `emit_dk_device_evaluation(use_k_eff: bool)` selects intrinsic vs inner-NR call
+
+---
+
+# `.model` parameter handling (2026-09-02)
+
+Three outcomes, because a key can be wrong in two very different ways:
+
+| class | behaviour |
+|---|---|
+| **Honored** | melange reads it. Silent. |
+| **Recognized but unimplemented** | real SPICE parameter melange does not model. **Warns**, naming what the omission costs. |
+| **Unknown** | not valid for this device type. **Hard error**, with accepted keys and an alias hint. |
+
+The middle tier is not a dodge: `TR` and `XCJC` arrive on authentic vendor cards
+(2N5087, MPSA06, TIP35C/TIP36C in the shipped Wurlitzer power amp). Erroring on
+them would mean melange refuses genuine SPICE decks over a gap of its own.
+
+⚠ **The honored list lives with the resolver, but `.model` params are also read
+elsewhere.** `codegen/ir/noise.rs` reads `SHOT_GAMMA2` and `PARTITION_F`. A list
+maintained by reading the resolver alone cannot be correct — `SHOT_GAMMA2` was
+missing from the tube list, so melange was emitting "unrecognized (ignored)" for
+a parameter it actually uses. Caught only when the check became a hard error.
+
+## BJT temperature dependence
+
+| param | status |
+|---|---|
+| `XTI` | honored — `IS(T) = IS·(Tj/Tnom)^XTI·exp(...)` |
+| `XTB` | **honored as of `df25e7f`** — `BF(T) = BF·(Tj/Tnom)^XTB`, likewise `BR` |
+| `TR` | **not implemented** — see below |
+| `XCJC` | **not implemented** — melange places all of `CJC` at the internal base, which *is* `XCJC = 1.0` (the SPICE default); only `XCJC < 1` is affected |
+
+Before `XTB`, melange modelled self-heating and drifted `IS` with junction
+temperature while current gain stayed **fixed** — a transistor could heat up and
+its β would not move. SPICE's default `XTB = 0.0` makes the power term exactly
+1.0, so cards without it are unaffected.
+
+⚠ **No self-heating BJT exists in the netlist library.** All four models
+anywhere carrying `RTH` are diodes, so the BJT thermal block has no
+circuit-level coverage; `tests/bjt_xtb_beta_temperature_tests.rs` is its only
+guard.
+
+## Why `TR` is blocked (measured, not assumed)
+
+melange linearizes junction caps **at the DC operating point** — fixed companion
+caps stamped into `C`, which `rebuild_matrices` builds per sample-*rate*, not per
+sample. `TR`'s BC diffusion charge is ~0 unless the BC junction is forward-biased
+at idle, so `TR` is inert on every normally-biased deck. Where it *does*
+activate, a fixed cap cannot represent the time-varying charge ngspice
+recomputes each timestep.
+
+Measured under an ngspice both-ways gate on a saturated-at-idle probe:
+**correlation 0.99255 without `TR` → 0.98700 with it.** Honoring it moves
+melange *away* from ngspice. Verdict was DO-NOT-SHIP; nothing landed.
+
+**The prerequisite is per-timestep junction-charge re-linearization**, which is a
+bigger accuracy win than `TR` — it would also make the existing `TF` term exact
+rather than frozen at the quiescent `Ic`. Build it **charge-first**: integrate
+`Q` and differentiate for the companion, as SPICE does. Computing `C(v)` per
+iteration and applying `C·dv/dt` gives charge non-conservation, whose artifacts
+on a large-signal stage can exceed the frozen-cap error it set out to fix.

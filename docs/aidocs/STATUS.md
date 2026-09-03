@@ -311,3 +311,71 @@ and compilation are necessary but not sufficient).
 Zig 0.13 + cargo-zigbuild + macOS SDK 13.3 + rcodesign (ad-hoc signing).
 `cargo zigbuild --release --target universal2-apple-darwin` produces universal Mac binaries.
 melange-cli does NOT cross-compile (ureq/dirs need CoreFoundation), but generated plugins do.
+
+---
+
+# 2026-09-02 — verification-instrument repairs, and what they cost
+
+Three of melange's verification instruments were found to have integrity defects
+in one day. **None was found by the instruments themselves.** Each measured
+something real and was *believed* to be measuring something else.
+
+| instrument | defect | fixed |
+|---|---|---|
+| golden gate | renders were **f32** (hiding the entire `-ffp-contract` class the C++ numerics contract exists to prevent); `compare` never diffed `circuit.rs`; **zero** `diag_*` counters recorded | `847d91f`, `867fd18`, `671a575` |
+| SPICE validate | built a **different circuit** than compile ships — N=44/M=16 vs N=20/M=14 on the shipped power amp | `6bc3ef1` |
+| `DC_BLOCK_CUTOFF_HZ` | one tuned constant duplicated at **six** sites (plan said one, review said five) | `ddd29c1` |
+
+A refactor could have deleted the BE latch, NaN reset and active-set resolve and
+kept the golden gate green.
+
+## Golden corpus
+
+**46 → 35 → 38 decks.** Eleven were dropped when melange-circuits pruned their
+netlists (`cf8a04c`); the maintainer confirmed all eleven were in-progress or
+abandoned. They were **not** vendored back in: gating on an abandoned circuit
+freezes its pathology as the specification, so a legitimate solver fix later
+reads as a regression.
+
+Three replacements chosen **by measurement**, not reputation — compiled, driven
+with a hot sweep, `diag_*` counters read off the run:
+
+| deck | substep | ls_fail | be_fallback | nr_max |
+|---|---|---|---|---|
+| steve-1073-preamp | 490 | 12412 | 896 | 1386 |
+| wurli-power-amp | 427 | 8603 | 0 | 427 |
+| gravity | 0 | 926 | 0 | 0 |
+| *(dropped tungsten-thunder-horse, for scale)* | 53 | 5627 | — | — |
+
+**38 decks now exercise more recovery ladders than 46 did.** Only
+`diag_voltage_damp_count` is still thinned (7 → 5).
+
+⚠ **What this corpus is:** a CHANGE DETECTOR — it compares melange against
+melange, so deck quality is irrelevant to catching a refactor that moves output.
+It is **not** an accuracy oracle. Note the asymmetry: *agreement* is robust to
+deck quality (a bad circuit cannot manufacture agreement between two
+implementations); *disagreement* is not. A broken deck may **detect** a defect;
+it can never **be** the evidence for one.
+
+## Coverage closed
+
+* **MOSFET / JFET** — were implemented and SPICE-validated with **zero** circuits
+  anywhere. Three decks added (`150bda6`). The MOSFET pair is the point: DK
+  evaluates body effect **once per sample from `v_pred`**, nodal **three times
+  from the live NR iterate**. Both legitimate; collapsing them is what an
+  over-abstracted device-eval IR would do.
+* **Pentode ngspice validation** (`a62ddad`) — 10 library decks / 4 corpus decks
+  had no oracle at all.
+
+## Still open
+
+* Validate applies **no forward-active reduction** (residual 0.246% on
+  wurli-power-amp is a candidate).
+* **Per-timestep junction-charge re-linearization** — blocks `TR`, would make
+  `TF` exact. Build charge-first; see `DEVICE_MODELS.md`.
+* **Multi-input** is CLI-restricted to linear (`M=0`) circuits, which is exactly
+  the case superposition already covers — so the nonlinear-mixing case it exists
+  for is unreachable, and no deck uses it.
+* Schur NR diverges on expanded parasitic internal nodes where the same circuit
+  converges unexpanded (or expanded on full-LU). **Latent** — the CLI's K-gate
+  never constructs that combination; measured **0** corpus decks in that state.
