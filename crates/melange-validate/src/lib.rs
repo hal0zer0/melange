@@ -546,6 +546,31 @@ fn run_melange_solver_from_str(
         mna.g[input_node][input_node] += 1.0;
     }
 
+    // Apply `.linearize` — the SAME shared pipeline step `melange compile` runs.
+    //
+    // This harness used to skip it entirely, which is how `wurli-power-amp` came
+    // to "fail" validation at 1319% RMS and correlation 0.0002: without a
+    // linearized device the emitter's `linearized_bypass` gate never fires, so
+    // it chose Schur NR instead of full-LU and diverged on the first non-zero
+    // sample. The shipped build validates at 0.228% RMS, correlation 1.000000.
+    // A validator that builds a different circuit than the one it validates is
+    // worse than no validator, because it is believed.
+    //
+    // Empty FA / grid-off sets preserve this harness's existing behaviour on
+    // those two reductions; closing that remaining gap is tracked separately
+    // (see memory `validation_harness_no_fa_reduction`).
+    melange_solver::pipeline::apply_linearize_reductions(
+        &mut mna,
+        &netlist,
+        &std::collections::HashSet::new(),
+        &std::collections::HashMap::new(),
+        input_node,
+        1.0,
+        1.0,
+        &melange_solver::pipeline::silent,
+    )
+    .map_err(|e| ValidationError::Solver(format!("linearize: {e}")))?;
+
     // Stamp junction caps + pre-solve DC OP so BJT charge-storage caps are
     // linearized at the true operating point. When all BJTs use the default
     // CJE/CJC/TF parameters this is byte-identical to the zero-bias stamp;
@@ -600,14 +625,15 @@ fn run_melange_solver_from_str(
     let use_nodal = decision.route == routing::SolverRoute::Nodal;
 
     if use_nodal {
-        let slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
+        // K-gated, exactly as the CLI does it. Expanding unconditionally is what
+        // pushed this harness onto Schur-with-expanded-parasitics, which
+        // diverges where the shipped full-LU build converges.
+        melange_solver::pipeline::expand_internal_nodes_if_conditioned(
+            &mut mna,
             &netlist,
-            Some(&mna),
-        )
-        .unwrap_or_default();
-        if !slots.is_empty() {
-            mna.expand_bjt_internal_nodes(&slots);
-        }
+            &kernel,
+            &melange_solver::pipeline::silent,
+        );
     }
 
     // Post-DC-block output ceiling (default 10 V, see docs/aidocs/SIGNAL_LEVELS.md
@@ -645,6 +671,10 @@ fn run_melange_solver_from_str(
         router_dk_unstable: decision.dk_unstable,
         router_dk_spectral_radius: decision.spectral_radius,
         output_clamp_v: auto_clamp_v,
+        // Same budget the shipped build gets; the default 100 is not what ships.
+        max_iterations: melange_solver::pipeline::auto_tune_max_iter(
+            None, &kernel, &decision, false, false, input_node,
+        ),
         ..CodegenConfig::default()
     };
     let generator = CodeGenerator::new(config);
