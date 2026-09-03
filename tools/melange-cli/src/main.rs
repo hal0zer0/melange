@@ -449,6 +449,13 @@ enum Commands {
         /// plugin, so `simulate` reaches non-rest positions the plugin uses.
         #[arg(long = "switch", value_name = "NAME=POS")]
         switch_overrides: Vec<String>,
+
+        /// Drive a `.inject` field: `--inject FIELD=sine:<freq_hz>:<amp_volts>`
+        /// or `FIELD=dc:<volts>`. The value is CIRCUIT VOLTS injected at the
+        /// `.inject` node through its declared impedance. May be repeated;
+        /// `.inject` fields with no `--inject` default to 0 (undriven).
+        #[arg(long = "inject", value_name = "FIELD=SPEC")]
+        inject_drives: Vec<String>,
     },
 
     /// Analyze circuit frequency response
@@ -976,6 +983,7 @@ fn main() -> Result<()> {
             probes,
             probe_csv,
             switch_overrides,
+            inject_drives,
         } => {
             // Match parse-time node normalization (lowercase, gnd→0).
             let input_node = melange_solver::parser::normalize_node_name(&input_node);
@@ -1052,6 +1060,7 @@ fn main() -> Result<()> {
                     probes: &probes,
                     probe_csv: probe_csv_path.as_deref(),
                     switch_overrides: &switch_overrides,
+                    inject_drives: &inject_drives,
                 },
             )
         }
@@ -2749,6 +2758,8 @@ struct SimulateOptions<'a> {
     /// `--switch NAME=POS` specs; resolved and applied at runtime via
     /// `state.set_switch_N(pos)` before the run (mirrors the plugin).
     switch_overrides: &'a [String],
+    /// `--inject FIELD=SPEC` specs; drive `.inject` fields from the CLI.
+    inject_drives: &'a [String],
 }
 
 /// Options bundle for `melange analyze` — mirrors [`SimulateOptions`].
@@ -2908,6 +2919,84 @@ fn simulate_circuit_source(
     println!("Step 2: Building MNA system...");
     let mut mna =
         MnaSystem::from_netlist(&netlist).with_context(|| "Failed to build MNA system")?;
+
+    // Resolve `.inject` runtime sources so `simulate` can DRIVE them from the
+    // CLI (`--inject FIELD=SPEC`). The compile path resolves these too;
+    // `simulate` previously built the IR with `injections: Vec::new()` and
+    // dropped the drive. Each Thevenin/Norton conductance MUST be stamped into
+    // `mna.g` BEFORE the DK kernel is built (the source is baked into S = A⁻¹).
+    let mut injection_specs: Vec<melange_solver::codegen::ir::InjectionSpec> = Vec::new();
+    for inj in &netlist.injections {
+        let raw = mna
+            .node_map
+            .get(inj.node.as_str())
+            .copied()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    ".inject node '{}' not found. Available: {:?}",
+                    inj.node,
+                    mna.node_map.keys().collect::<Vec<_>>()
+                )
+            })?;
+        if raw == 0 {
+            anyhow::bail!(
+                ".inject node '{}' resolves to ground; injection is single-ended \
+                 (node-to-ground) and must target a non-ground node.",
+                inj.node
+            );
+        }
+        let idx = raw - 1;
+        let (resistance, norton) = match inj.impedance {
+            melange_solver::parser::InjectImpedance::Thevenin(r) => (r, false),
+            melange_solver::parser::InjectImpedance::Norton(r) => (r, true),
+        };
+        if !(resistance > 0.0 && resistance.is_finite()) {
+            anyhow::bail!(
+                ".inject '{}' impedance must be positive and finite, got {}",
+                inj.field_name,
+                resistance
+            );
+        }
+        if idx < mna.n {
+            mna.g[idx][idx] += 1.0 / resistance;
+        }
+        injection_specs.push(melange_solver::codegen::ir::InjectionSpec {
+            node: idx,
+            name: inj.field_name.clone(),
+            resistance,
+            norton,
+        });
+    }
+
+    // Map `--inject FIELD=SPEC` to injection indices (by field name).
+    let mut inject_driven: Vec<(usize, codegen_runner::InjectSource)> = Vec::new();
+    for drive in opts.inject_drives {
+        let (field, source) = codegen_runner::parse_inject_drive(drive)?;
+        let idx = injection_specs
+            .iter()
+            .position(|s| s.name.eq_ignore_ascii_case(&field))
+            .ok_or_else(|| {
+                let names: Vec<&str> = injection_specs.iter().map(|s| s.name.as_str()).collect();
+                anyhow::anyhow!(
+                    "--inject field '{}' is not a `.inject` field in this deck. Available: {:?}",
+                    field,
+                    names
+                )
+            })?;
+        inject_driven.push((idx, source));
+    }
+    // Warn on any `.inject` field left undriven (it injects 0 V) — only once the
+    // user has supplied at least one `--inject`, so an unrelated run stays quiet.
+    if !opts.inject_drives.is_empty() {
+        for (si, spec) in injection_specs.iter().enumerate() {
+            if !inject_driven.iter().any(|(i, _)| *i == si) {
+                println!(
+                    "warning: `.inject` field '{}' has no --inject drive; it will inject 0 V",
+                    spec.name
+                );
+            }
+        }
+    }
 
     let input_node_raw = mna.node_map.get(opts.input_node).copied().ok_or_else(|| {
         anyhow::anyhow!(
@@ -3243,7 +3332,7 @@ fn simulate_circuit_source(
         emit_dc_op_recompute: false,
         router_dk_unstable: decision.dk_unstable,
         router_dk_spectral_radius: decision.spectral_radius,
-        injections: Vec::new(),
+        injections: injection_specs.clone(),
         taps: Vec::new(),
         bjt_fa_mode: melange_solver::codegen::BjtFaMode::Auto,
     };
@@ -3286,6 +3375,8 @@ fn simulate_circuit_source(
         opts.duration,
         &probe_names,
         opts.noise_mode != melange_solver::codegen::NoiseMode::Off,
+        &inject_driven,
+        injection_specs.len(),
     );
     let full_source = format!("{}\n{}", generated.code, simulate_main);
 

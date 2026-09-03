@@ -12,6 +12,57 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
+/// A CLI-supplied drive source for a `.inject` field (`--inject FIELD=SPEC`).
+/// The value produced is CIRCUIT VOLTS injected at the `.inject` node through
+/// its declared impedance.
+#[derive(Debug, Clone, Copy)]
+pub enum InjectSource {
+    /// `sine:<freq_hz>:<amp_volts>` — a sine at circuit volts.
+    Sine { freq: f64, amp: f64 },
+    /// `dc:<volts>` — a constant voltage.
+    Dc { v: f64 },
+}
+
+/// Parse one `--inject FIELD=SPEC` value into `(field_name, source)`.
+/// SPEC is `sine:<freq>:<amp>` or `dc:<v>`.
+pub fn parse_inject_drive(s: &str) -> Result<(String, InjectSource)> {
+    let (field, spec) = s.split_once('=').ok_or_else(|| {
+        anyhow::anyhow!("--inject '{s}' must be FIELD=SPEC, e.g. FIELD=sine:1000:5 or FIELD=dc:2.5")
+    })?;
+    let field = field.trim();
+    if field.is_empty() {
+        anyhow::bail!("--inject '{s}': empty field name before '='");
+    }
+    let parts: Vec<&str> = spec.split(':').collect();
+    let source = match parts.as_slice() {
+        ["sine", f, a] => {
+            let freq: f64 = f
+                .parse()
+                .map_err(|_| anyhow::anyhow!("--inject '{s}': invalid sine frequency '{f}'"))?;
+            let amp: f64 = a
+                .parse()
+                .map_err(|_| anyhow::anyhow!("--inject '{s}': invalid sine amplitude '{a}'"))?;
+            if !(freq > 0.0 && freq.is_finite()) || !amp.is_finite() {
+                anyhow::bail!("--inject '{s}': sine freq must be > 0 and amp finite");
+            }
+            InjectSource::Sine { freq, amp }
+        }
+        ["dc", v] => {
+            let v: f64 = v
+                .parse()
+                .map_err(|_| anyhow::anyhow!("--inject '{s}': invalid dc value '{v}'"))?;
+            if !v.is_finite() {
+                anyhow::bail!("--inject '{s}': dc value must be finite");
+            }
+            InjectSource::Dc { v }
+        }
+        _ => anyhow::bail!(
+            "--inject '{s}': SPEC must be sine:<freq>:<amp> or dc:<volts>, got '{spec}'"
+        ),
+    };
+    Ok((field.to_string(), source))
+}
+
 /// A compiled circuit binary ready to run.
 pub struct CompiledBinary {
     /// Path to the compiled binary.
@@ -183,6 +234,8 @@ pub fn generate_simulate_main(
     duration_secs: f64,
     probe_names: &[&str],
     noise_enabled: bool,
+    inject_driven: &[(usize, InjectSource)],
+    num_inject: usize,
 ) -> String {
     let pot_lines: String = pot_calls.iter().map(|c| format!("    {c};\n")).collect();
     let switch_lines: String = switch_calls.iter().map(|c| format!("    {c};\n")).collect();
@@ -264,6 +317,41 @@ pub fn generate_simulate_main(
         String::new()
     };
 
+    // `.inject` drive: when the deck has injections (NUM_INJECT>0), every
+    // process_sample call takes an injection array. Fill it per inner
+    // (oversampled) sample from the `--inject` sources; undriven fields stay 0.
+    let driven_lines: String = inject_driven
+        .iter()
+        .map(|(idx, src)| match src {
+            InjectSource::Sine { freq, amp } => format!(
+                "            melange_inj[j][{idx}] = {amp:.17e} * (2.0 * std::f64::consts::PI * {freq:.17e} * ti).sin();\n"
+            ),
+            InjectSource::Dc { v } => format!("            melange_inj[j][{idx}] = {v:.17e};\n"),
+        })
+        .collect();
+    let uses_ti = inject_driven
+        .iter()
+        .any(|(_, s)| matches!(s, InjectSource::Sine { .. }));
+    let inject_fill: String = if num_inject > 0 {
+        let ti = if uses_ti { "ti" } else { "_ti" };
+        format!(
+            "        let mut melange_inj = [[0.0f64; NUM_INJECT]; OVERSAMPLING_FACTOR];\n\
+             \x20       for j in 0..OVERSAMPLING_FACTOR {{\n\
+             \x20           let {ti} = (i as f64) / sr + (j as f64) / (sr * OVERSAMPLING_FACTOR as f64);\n\
+             {driven_lines}        }}\n"
+        )
+    } else {
+        String::new()
+    };
+    // An `.inject`/`.tap` deck's process_sample takes the injection array and
+    // returns `(outputs, taps)`; a plain deck takes only the input and returns
+    // the outputs array. Bind `out` to the outputs either way.
+    let process_stmt: &str = if num_inject > 0 {
+        "let (out, _melange_taps) = process_sample(s, &melange_inj, &mut state);"
+    } else {
+        "let out = process_sample(s, &mut state);"
+    };
+
     format!(
         r#"{wav_code}
 
@@ -313,7 +401,7 @@ fn main() {{
         .collect();
     let trace_every: usize = std::env::var("MELANGE_TRACE_EVERY").ok().and_then(|s| s.parse().ok()).unwrap_or(500);
     for (i, &s) in samples.iter().enumerate() {{
-        let out = process_sample(s, &mut state);
+{inject_fill}        {process_stmt}
         output.push(out[0]);
 {probe_emit}        for &v in &state.v_prev {{
             if v.abs() > max_abs_v_prev {{ max_abs_v_prev = v.abs(); }}
