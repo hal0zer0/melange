@@ -666,10 +666,26 @@ Ip/Ig2). The frozen Vg2k is stored as a per-slot constant on
 `DeviceSlot.vg2k_frozen`.
 
 This is the BJT-FA analog for pentodes with one important difference:
-BJT forward-active reduction is an **exact** physics simplification (Vbc
-really doesn't drive Ic in FA mode), while pentode grid-off is an
-**approximation** — Vg2k really does drive Ip/Ig2 but varies by <1%
-under signal with a properly bypassed screen.
+BJT forward-active reduction is an **exact** physics simplification
+*within its region* (Vbc really doesn't drive Ic in FA mode), while
+pentode grid-off is an **approximation** — Vg2k really does drive
+Ip/Ig2 but varies by <1% under signal with a properly bypassed screen.
+
+**The FA region is assumed, not enforced.** `detect_forward_active_bjts`
+(`ir/mod.rs`) solves a DC operating point and classifies each BJT from the
+quiescent bias; nothing rechecks it per sample. The dropped term is
+`exp(Vbc/Vt)` — about 2e-17 at Vbc = −1 V, so "exact" is fair while Vbc
+stays reverse, and cutoff is equally safe. **Saturation is where it stops
+being true**: Vbc goes forward, `exp(Vbc/Vt)` is no longer negligible, and
+the reduced 1D model is the wrong model — silently, with no shape error and
+no crash. The reachable case is a pure-Ebers-Moll BJT on the DK path,
+forward-active at DC, driven hard enough in a render to saturate.
+`--bjt-fa auto` narrows this a lot (GP/ISE/parasitic/self-heating devices
+stay 2D, and nodal-routed circuits skip FA entirely), and **no corpus deck is
+known to hit it** — this has not been measured, only bounded. To settle it,
+count render samples where an FA-reduced device's Vbc goes forward: zero
+across the corpus closes it, non-zero names the deck. Worth reaching for if a
+DK-routed transistor stage ever shows an unexplained distortion result.
 
 **Triode grid-off is structurally impossible**: Koren `Ip(Vgk, Vpk)`
 needs both voltages, and dropping Vpk would destroy the plate-swing

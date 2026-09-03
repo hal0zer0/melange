@@ -239,13 +239,42 @@ and routing all four consumers through it. See that module's docs.
 * Decks with no linearized devices and no parasitic BJTs were unaffected —
   `wurli-preamp`'s numbers are identical before and after the fix.
 
-## Still divergent (tracked)
+## Closed 2026-09-03: forward-active / grid-off, and a fourth pipeline
 
-Validate applies **no forward-active reduction**; empty FA/grid-off sets are
-passed deliberately. The residual 0.246% on wurli-power-amp is a plausible
-candidate for it. Closing it is a behavioural change and belongs in its own
-commit — `6bc3ef1`'s credibility rested on all 38 corpus decks regenerating
-byte-identically.
+Validate used to apply **no forward-active or grid-off reduction** — empty sets
+were passed deliberately. Both are now applied, through the same shared
+functions the CLI uses (`pipeline::apply_forward_active_reduction`,
+`pipeline::apply_grid_off_reduction`, `pipeline::should_skip_fa_for_nodal_reroute`,
+all moved out of `melange-cli`). `melange validate` accepts `--bjt-fa` and
+`--tube-grid-fa`, the same mechanism flags `melange compile` takes; no new flag
+name was introduced.
+
+**The `.cir` that motivated this was the wrong one.** The residual 0.246% on
+wurli-power-amp was floated here as "a plausible candidate" for the FA gap. It
+is not, and cannot be: wurli-power-amp routes **nodal** (trap-unstable, DK
+kernel rho 1.0040), and FA detection is skipped entirely on a nodal reroute. The
+shipped FA set for that deck is empty and validate passed an empty set, so the
+two already agreed. Do not expect that number to move.
+
+**The deck that actually exercised the gap is `wurli_preamp`** — shipped M=3,
+un-reduced M=5. Closing the gap changed its reported numbers **not at all**
+(RMS 0.1634%, correlation 0.99999962, identical to every printed digit under
+`--bjt-fa auto` and `--bjt-fa off`). That is the expected result: `auto` reduces
+only pure-Ebers-Moll devices, and the reduction is exact **while the device
+remains forward-active** — a region established from the DC operating point at
+compile time and never rechecked during a render (see `DEVICE_MODELS.md`). The harness was
+building a different circuit without getting a different answer.
+
+**The larger gap was the test harness.** `tests/spice_validation.rs` — what CI's
+"SPICE validation" gate runs — carried its own MNA build that `6bc3ef1` never
+touched: no `.linearize`, no FA, no grid-off, unconditional internal-node
+expansion, and `MAX_ITER` 100 instead of `auto_tune_max_iter`. That last one is
+**bidirectional**: `auto_tune_max_iter` has no floor of 100, so stiff decks got
+a stricter harness (harmless) but middle decks (auto-tuned budget 50-70) got a
+harness *more permissive* than the shipped build — green on iterations the
+product never gets. The harness now delegates to
+`melange_validate::run_melange_solver_from_str`, so there is one implementation.
+**Do not add a local MNA build to a validation path.**
 
 # Device coverage: what the ngspice oracle can and cannot check
 

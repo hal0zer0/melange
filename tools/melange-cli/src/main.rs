@@ -329,6 +329,20 @@ enum Commands {
         /// Override THD-error tolerance, in dB.
         #[arg(long, value_name = "DB")]
         thd_tolerance: Option<f64>,
+
+        /// Forward-active BJT reduction: auto (default), off, force.
+        ///
+        /// Same mechanism as `melange compile --bjt-fa`. `off` keeps every BJT
+        /// full-2D, which is what this harness did unconditionally before
+        /// 2026-09-03 — use it to attribute a residual to the reduction.
+        #[arg(long, default_value = "auto")]
+        bjt_fa: String,
+
+        /// Grid-off pentode reduction: auto (default), on, off.
+        ///
+        /// Same mechanism as `melange compile --tube-grid-fa`.
+        #[arg(long, default_value = "auto")]
+        tube_grid_fa: String,
     },
 
     /// Simulate circuit with input signal
@@ -890,10 +904,24 @@ fn main() -> Result<()> {
             max_rel_tolerance,
             corr_min,
             thd_tolerance,
+            bjt_fa,
+            tube_grid_fa,
         } => {
             // Validate numeric CLI parameters
             if sample_rate <= 0.0 || !sample_rate.is_finite() {
                 anyhow::bail!("sample-rate must be positive and finite");
+            }
+            if !matches!(bjt_fa.as_str(), "auto" | "off" | "force") {
+                anyhow::bail!(
+                    "--bjt-fa must be one of: auto, off, force (got '{}')",
+                    bjt_fa
+                );
+            }
+            if !matches!(tube_grid_fa.as_str(), "auto" | "on" | "off") {
+                anyhow::bail!(
+                    "--tube-grid-fa must be one of: auto, on, off (got '{}')",
+                    tube_grid_fa
+                );
             }
             if duration <= 0.0 || !duration.is_finite() {
                 anyhow::bail!("duration must be positive and finite");
@@ -919,6 +947,10 @@ fn main() -> Result<()> {
                     max_rel_pct: max_rel_tolerance,
                     corr_min,
                     thd_db: thd_tolerance,
+                },
+                ReductionModes {
+                    bjt_fa: &bjt_fa,
+                    tube_grid_fa: &tube_grid_fa,
                 },
             )
         }
@@ -1744,48 +1776,24 @@ fn compile_circuit_source(
     // Motivation: the FA-reduced DC-OP can converge to a parasitic
     // equilibrium on push-pull topologies (see memory/wurli_power_amp_...).
     // Since Nodal handles full-dim BJTs natively, FA is unnecessary there.
-    let forward_active = if solver_override == "nodal"
-        || (solver_override == "auto"
-            && should_skip_fa_for_nodal_reroute(&mna, sample_rate, oversampling))
-    {
-        std::collections::HashSet::new()
-    } else {
-        melange_solver::codegen::ir::CircuitIR::detect_forward_active_bjts(
-            &mna, &netlist, &fa_config,
-        )
-    };
-    if !forward_active.is_empty() {
-        println!(
-            "  Forward-active BJTs: {:?} (M reduces by {})",
-            forward_active,
-            forward_active.len()
-        );
-        // Rebuild MNA with reduced dimensions
-        mna = MnaSystem::from_netlist_forward_active(&netlist, &forward_active)
-            .with_context(|| "Failed to rebuild MNA for forward-active BJTs")?;
-        // Re-stamp input conductance
-        if input_node_idx < mna.n {
-            mna.g[input_node_idx][input_node_idx] += input_conductance;
-        }
-        // Re-stamp junction capacitances on rebuilt MNA
-        {
-            let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-                &netlist,
-                Some(&mna),
-            )
-            .unwrap_or_default();
-            if !device_slots.is_empty() {
-                mna.stamp_device_junction_caps(&device_slots);
-            }
-        }
-    }
+    let forward_active = melange_solver::pipeline::apply_forward_active_reduction(
+        &mut mna,
+        &netlist,
+        &fa_config,
+        solver_override,
+        sample_rate,
+        oversampling,
+        input_node_idx,
+        input_conductance,
+        &|a| println!("{a}"),
+    )?;
 
     // Phase 1b: detect grid-off pentodes (Vgk < -(vgk_onset + 0.5) →
     // pentode drops to 2D NR block with Vg2k frozen). Rebuilds MNA with
     // the reduced dimension. Only runs on DK solver — nodal doesn't
     // benefit from M-reduction at the solver level.
     // `--tube-grid-fa off` skips entirely; `on` forces all pentodes.
-    let grid_off_pentodes = apply_grid_off_reduction(
+    let grid_off_pentodes = melange_solver::pipeline::apply_grid_off_reduction(
         &mut mna,
         &netlist,
         &fa_config,
@@ -1795,7 +1803,7 @@ fn compile_circuit_source(
         input_node_idx,
         input_conductance,
     )?;
-    if let Some(msg) = format_grid_off_log(&grid_off_pentodes) {
+    if let Some(msg) = melange_solver::pipeline::format_grid_off_log(&grid_off_pentodes) {
         println!("{msg}");
     }
 
@@ -2510,6 +2518,15 @@ struct ToleranceOverrides {
     thd_db: Option<f64>,
 }
 
+/// Dimension-reduction modes for the validation front end. Mirrors the
+/// `melange compile` flags of the same names so that `validate` builds the
+/// circuit the CLI ships — and so `--bjt-fa off` can attribute a residual to
+/// the reduction.
+struct ReductionModes<'a> {
+    bjt_fa: &'a str,
+    tube_grid_fa: &'a str,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn validate_circuit_source(
     circuit_source: &circuits::CircuitSource,
@@ -2521,6 +2538,7 @@ fn validate_circuit_source(
     csv_output: Option<&PathBuf>,
     relaxed: bool,
     tol: ToleranceOverrides,
+    reductions: ReductionModes<'_>,
 ) -> Result<()> {
     // Match parse-time node normalization (lowercase, gnd→0).
     let input_node_owned = melange_solver::parser::normalize_node_name(input_node);
@@ -2650,6 +2668,8 @@ fn validate_circuit_source(
         output_dir: csv_output.and_then(|p| p.parent().map(|d| d.to_path_buf())),
         circuit_name: Some(circuit_source.name()),
         input_node: input_node.to_string(),
+        bjt_fa_mode: parse_bjt_fa_mode(reductions.bjt_fa),
+        tube_grid_fa: reductions.tube_grid_fa.to_string(),
         ..Default::default()
     };
 
@@ -2983,45 +3003,22 @@ fn simulate_circuit_source(
         ..CodegenConfig::default()
     };
     // See compile path for rationale — mirrors the same gate.
-    let forward_active = if opts.solver == "nodal"
-        || (opts.solver == "auto"
-            && should_skip_fa_for_nodal_reroute(&mna, opts.sample_rate, opts.oversampling))
-    {
-        std::collections::HashSet::new()
-    } else {
-        melange_solver::codegen::ir::CircuitIR::detect_forward_active_bjts(
-            &mna,
-            &netlist,
-            &config_for_fa,
-        )
-    };
-    if !forward_active.is_empty() {
-        println!(
-            "  Forward-active BJTs: {:?} (M reduces by {})",
-            forward_active,
-            forward_active.len()
-        );
-        mna = MnaSystem::from_netlist_forward_active(&netlist, &forward_active)
-            .with_context(|| "Failed to rebuild MNA for forward-active BJTs")?;
-        if input_node_idx < mna.n {
-            mna.g[input_node_idx][input_node_idx] += input_conductance;
-        }
-        // Use build_device_info_with_mna so FA-reduced BJT dims are reflected,
-        // giving correct start_idx for junction cap stamping.
-        let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-            &netlist,
-            Some(&mna),
-        )
-        .unwrap_or_default();
-        if !device_slots.is_empty() {
-            mna.stamp_device_junction_caps(&device_slots);
-        }
-    }
+    let forward_active = melange_solver::pipeline::apply_forward_active_reduction(
+        &mut mna,
+        &netlist,
+        &config_for_fa,
+        opts.solver,
+        opts.sample_rate,
+        opts.oversampling,
+        input_node_idx,
+        input_conductance,
+        &|a| println!("{a}"),
+    )?;
 
     // Detect grid-off pentodes (shared helper with compile/analyze). For
     // `--solver nodal` this is a no-op — nodal doesn't benefit from M-reduction
     // at the solver level.
-    let grid_off_pentodes = apply_grid_off_reduction(
+    let grid_off_pentodes = melange_solver::pipeline::apply_grid_off_reduction(
         &mut mna,
         &netlist,
         &config_for_fa,
@@ -3031,7 +3028,7 @@ fn simulate_circuit_source(
         input_node_idx,
         input_conductance,
     )?;
-    if let Some(msg) = format_grid_off_log(&grid_off_pentodes) {
+    if let Some(msg) = melange_solver::pipeline::format_grid_off_log(&grid_off_pentodes) {
         println!("{msg}");
     }
 
@@ -3392,121 +3389,6 @@ fn simulate_circuit_source(
 // moved to `melange_solver::pipeline` so `melange compile`, `simulate`,
 // `analyze` and `melange-validate` share one front-end pipeline instead of
 // four copies that drifted. See that module's docs for what the drift cost.
-fn should_skip_fa_for_nodal_reroute(
-    mna: &melange_solver::mna::MnaSystem,
-    sample_rate: f64,
-    oversampling: usize,
-) -> bool {
-    use melange_solver::codegen::routing::{self, SolverRoute};
-    use melange_solver::dk::DkKernel;
-
-    let has_inductors = !mna.inductors.is_empty()
-        || !mna.coupled_inductors.is_empty()
-        || !mna.transformer_groups.is_empty();
-    // Route at the INTERNAL (oversampled) rate, matching what codegen ships
-    // via `internal_rate = sample_rate * oversampling_factor`. Routing at
-    // the base host rate can miss trap/BE instability that only appears at
-    // the oversampled rate the generated solver actually runs (see
-    // memory/dk_backward_euler_ignored_trap_unstable.md: a circuit measured
-    // rho=1.315 at 192 kHz but the un-oversampled 48 kHz kernel used for
-    // routing read comfortably stable, so the router never rerouted a
-    // genuinely DK-Schur-unstable circuit to nodal).
-    let routing_rate = sample_rate * oversampling.max(1) as f64;
-    let kernel_result = if has_inductors {
-        DkKernel::from_mna_augmented(mna, routing_rate)
-    } else {
-        DkKernel::from_mna(mna, routing_rate)
-    };
-    let (kernel, dk_failed) = match kernel_result {
-        Ok(k) => (k, false),
-        Err(_) => {
-            log::info!("Pre-route: DK kernel failed on un-reduced MNA → skip FA");
-            return true;
-        }
-    };
-    let decision = routing::auto_route(&kernel, mna, dk_failed);
-    log::info!(
-        "Pre-route (un-reduced MNA, N={}, M={}): route={:?}, reason={}",
-        kernel.n,
-        kernel.m,
-        decision.route,
-        decision.reason
-    );
-    decision.route == SolverRoute::Nodal
-}
-
-#[allow(clippy::too_many_arguments)]
-fn apply_grid_off_reduction(
-    mna: &mut melange_solver::mna::MnaSystem,
-    netlist: &melange_solver::parser::Netlist,
-    fa_config: &melange_solver::codegen::CodegenConfig,
-    forward_active: &std::collections::HashSet<String>,
-    tube_grid_fa: &str,
-    solver_override: &str,
-    input_node_idx: usize,
-    input_conductance: f64,
-) -> Result<std::collections::HashMap<String, f64>> {
-    use melange_solver::{codegen::ir::CircuitIR, mna::MnaSystem};
-
-    let grid_off_pentodes = if tube_grid_fa == "off" || solver_override == "nodal" {
-        std::collections::HashMap::new()
-    } else {
-        let force_all = tube_grid_fa == "on";
-        CircuitIR::detect_grid_off_pentodes(mna, netlist, fa_config, force_all)
-    };
-
-    if !grid_off_pentodes.is_empty() {
-        // Compose grid-off WITH the forward-active BJT reduction the caller
-        // already applied. Rebuilding from the netlist with only the
-        // grid-off map would silently discard the FA reduction (the compile
-        // summary would still print the FA line while the shipped MNA had
-        // full-dimension BJT blocks) — plexi-class circuits need both.
-        *mna = MnaSystem::from_netlist_with_grid_off_and_fa(
-            netlist,
-            forward_active,
-            &grid_off_pentodes,
-        )
-        .with_context(|| "Failed to rebuild MNA for grid-off pentodes (+ FA BJTs)")?;
-        if input_node_idx < mna.n {
-            mna.g[input_node_idx][input_node_idx] += input_conductance;
-        }
-        let device_slots =
-            CircuitIR::build_device_info_with_mna(netlist, Some(&*mna)).unwrap_or_default();
-        if !device_slots.is_empty() {
-            mna.stamp_device_junction_caps(&device_slots);
-        }
-    }
-
-    Ok(grid_off_pentodes)
-}
-
-/// Format the grid-off detection result for user output. Returns `None` when
-/// nothing was reduced — the caller decides whether to log at all and on which
-/// stream (`println!` for compile/simulate progress, `eprintln!` for analyze,
-/// which writes CSV to stdout).
-fn format_grid_off_log(
-    grid_off_pentodes: &std::collections::HashMap<String, f64>,
-) -> Option<String> {
-    if grid_off_pentodes.is_empty() {
-        return None;
-    }
-    let mut pretty: Vec<(String, f64)> = grid_off_pentodes
-        .iter()
-        .map(|(k, v)| (k.clone(), *v))
-        .collect();
-    pretty.sort_by(|a, b| a.0.cmp(&b.0));
-    let pretty_str: String = pretty
-        .iter()
-        .map(|(n, v)| format!("{n}(Vg2k={v:.1}V)"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some(format!(
-        "  Grid-off pentodes: [{}] (M reduces by {})",
-        pretty_str,
-        grid_off_pentodes.len()
-    ))
-}
-
 fn analyze_freq_response(
     circuit_source: &circuits::CircuitSource,
     opts: &AnalyzeOptions<'_>,
@@ -3825,44 +3707,22 @@ fn analyze_freq_response(
         output_nodes: vec![output_node_idx],
         ..CodegenConfig::default()
     };
-    // See compile path for rationale — mirrors the same gate.
-    let forward_active = if solver == "nodal"
-        || (solver == "auto" && should_skip_fa_for_nodal_reroute(&mna, sample_rate, oversampling))
-    {
-        std::collections::HashSet::new()
-    } else {
-        melange_solver::codegen::ir::CircuitIR::detect_forward_active_bjts(
-            &mna,
-            &netlist,
-            &config_for_fa,
-        )
-    };
-    if !forward_active.is_empty() {
-        eprintln!(
-            "  Forward-active BJTs: {:?} (M reduces by {})",
-            forward_active,
-            forward_active.len()
-        );
-        mna = MnaSystem::from_netlist_forward_active(&netlist, &forward_active)
-            .with_context(|| "Failed to rebuild MNA for forward-active BJTs")?;
-        if input_node_idx < mna.n {
-            mna.g[input_node_idx][input_node_idx] += input_conductance;
-        }
-        // Use build_device_info_with_mna so FA-reduced BJT dims are reflected,
-        // giving correct start_idx for junction cap stamping.
-        let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-            &netlist,
-            Some(&mna),
-        )
-        .unwrap_or_default();
-        if !device_slots.is_empty() {
-            mna.stamp_device_junction_caps(&device_slots);
-        }
-    }
+    // Analyze writes CSV to stdout, so progress messages go to stderr.
+    let forward_active = melange_solver::pipeline::apply_forward_active_reduction(
+        &mut mna,
+        &netlist,
+        &config_for_fa,
+        solver,
+        sample_rate,
+        oversampling,
+        input_node_idx,
+        input_conductance,
+        &|a| eprintln!("{a}"),
+    )?;
 
     // Detect grid-off pentodes (shared helper with compile/simulate). Analyze
     // writes CSV to stdout, so progress messages go to stderr.
-    let grid_off_pentodes = apply_grid_off_reduction(
+    let grid_off_pentodes = melange_solver::pipeline::apply_grid_off_reduction(
         &mut mna,
         &netlist,
         &config_for_fa,
@@ -3872,7 +3732,7 @@ fn analyze_freq_response(
         input_node_idx,
         input_conductance,
     )?;
-    if let Some(msg) = format_grid_off_log(&grid_off_pentodes) {
+    if let Some(msg) = melange_solver::pipeline::format_grid_off_log(&grid_off_pentodes) {
         eprintln!("{msg}");
     }
 
@@ -5332,7 +5192,7 @@ RK cath 0 130
         let fa_config = melange_solver::codegen::CodegenConfig::default();
         // `--tube-grid-fa on` forces grid-off on every non-variable-mu
         // pentode regardless of DC bias, so detection is deterministic here.
-        let grid_off = apply_grid_off_reduction(
+        let grid_off = melange_solver::pipeline::apply_grid_off_reduction(
             &mut mna,
             &netlist,
             &fa_config,

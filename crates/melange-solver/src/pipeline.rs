@@ -46,12 +46,16 @@ pub fn silent(_: std::fmt::Arguments<'_>) {}
 pub enum PipelineError {
     /// The DC operating point needed for `.linearize` could not be solved.
     DcOp(String),
+    /// An MNA rebuild for a dimension reduction (forward-active / grid-off)
+    /// failed.
+    Mna(String),
 }
 
 impl std::fmt::Display for PipelineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DcOp(m) => write!(f, "linearize: DC operating point failed: {m}"),
+            Self::Mna(m) => write!(f, "{m}"),
         }
     }
 }
@@ -483,4 +487,204 @@ pub fn expand_internal_nodes_if_conditioned(
         return true;
     }
     false
+}
+
+/// Would the un-reduced circuit route to the nodal solver?
+///
+/// Forward-active reduction is skipped when the answer is yes, for two
+/// reasons: the FA-reduced DC OP can converge to a parasitic equilibrium on
+/// push-pull topologies, and nodal handles full-dimension BJTs natively, so
+/// the reduction buys nothing there.
+///
+/// Routes at the **internal (oversampled) rate**, matching what codegen ships
+/// via `internal_rate = sample_rate * oversampling_factor`. Routing at the base
+/// host rate can miss trap/BE instability that only appears at the oversampled
+/// rate the generated solver actually runs (a circuit measured rho=1.315 at
+/// 192 kHz read comfortably stable through the un-oversampled 48 kHz kernel,
+/// so the router never rerouted a genuinely DK-Schur-unstable circuit).
+pub fn should_skip_fa_for_nodal_reroute(
+    mna: &crate::mna::MnaSystem,
+    sample_rate: f64,
+    oversampling: usize,
+) -> bool {
+    use crate::codegen::routing::{self, SolverRoute};
+    use crate::dk::DkKernel;
+
+    let has_inductors = !mna.inductors.is_empty()
+        || !mna.coupled_inductors.is_empty()
+        || !mna.transformer_groups.is_empty();
+    let routing_rate = sample_rate * oversampling.max(1) as f64;
+    let kernel_result = if has_inductors {
+        DkKernel::from_mna_augmented(mna, routing_rate)
+    } else {
+        DkKernel::from_mna(mna, routing_rate)
+    };
+    let (kernel, dk_failed) = match kernel_result {
+        Ok(k) => (k, false),
+        Err(_) => {
+            log::info!("Pre-route: DK kernel failed on un-reduced MNA → skip FA");
+            return true;
+        }
+    };
+    let decision = routing::auto_route(&kernel, mna, dk_failed);
+    log::info!(
+        "Pre-route (un-reduced MNA, N={}, M={}): route={:?}, reason={}",
+        kernel.n,
+        kernel.m,
+        decision.route,
+        decision.reason
+    );
+    decision.route == SolverRoute::Nodal
+}
+
+/// Detect forward-active BJTs and rebuild `mna` with them reduced to 1D.
+///
+/// Returns the set of reduced device names — which callers must thread into
+/// [`apply_grid_off_reduction`] and [`apply_linearize_reductions`], since both
+/// rebuild the MNA from the netlist and would otherwise silently discard this
+/// reduction.
+///
+/// Skipped (returning an empty set, `mna` untouched) when the circuit will end
+/// up on the nodal solver — either because the caller forced it with
+/// `--solver nodal` or because [`should_skip_fa_for_nodal_reroute`] says
+/// auto-routing will send it there.
+///
+/// **This step was private to `melange-cli` until 2026-09-03**, so
+/// `melange validate` and the SPICE test harness built full-2D systems for
+/// circuits the shipped build reduces. Measured on the `wurli_preamp`
+/// validation deck: shipped M=3, harness M=5. See `SPICE_VALIDATION.md`.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_forward_active_reduction(
+    mna: &mut crate::mna::MnaSystem,
+    netlist: &crate::parser::Netlist,
+    fa_config: &crate::codegen::CodegenConfig,
+    solver_override: &str,
+    sample_rate: f64,
+    oversampling: usize,
+    input_node_idx: usize,
+    input_conductance: f64,
+    rep: Reporter<'_>,
+) -> Result<std::collections::HashSet<String>, PipelineError> {
+    use crate::codegen::ir::CircuitIR;
+    use crate::mna::MnaSystem;
+
+    let forward_active = if solver_override == "nodal"
+        || (solver_override == "auto"
+            && should_skip_fa_for_nodal_reroute(mna, sample_rate, oversampling))
+    {
+        std::collections::HashSet::new()
+    } else {
+        CircuitIR::detect_forward_active_bjts(mna, netlist, fa_config)
+    };
+
+    if !forward_active.is_empty() {
+        report!(
+            rep,
+            "  Forward-active BJTs: {:?} (M reduces by {})",
+            forward_active,
+            forward_active.len()
+        );
+        *mna = MnaSystem::from_netlist_forward_active(netlist, &forward_active).map_err(|e| {
+            PipelineError::Mna(format!(
+                "Failed to rebuild MNA for forward-active BJTs: {e}"
+            ))
+        })?;
+        if input_node_idx < mna.n {
+            mna.g[input_node_idx][input_node_idx] += input_conductance;
+        }
+        // `build_device_info_with_mna` (not the bare netlist builder) so the
+        // FA-reduced BJT dimensions are reflected, giving the correct
+        // `start_idx` for junction-cap stamping.
+        let device_slots =
+            CircuitIR::build_device_info_with_mna(netlist, Some(&*mna)).unwrap_or_default();
+        if !device_slots.is_empty() {
+            mna.stamp_device_junction_caps(&device_slots);
+        }
+    }
+
+    Ok(forward_active)
+}
+
+/// Detect grid-off pentodes (`Vgk < -(vgk_onset + 0.5)` → the pentode drops to
+/// a 2D NR block with `Vg2k` frozen) and rebuild `mna` with the reduction.
+///
+/// `tube_grid_fa` is the `--tube-grid-fa` mode: `off` skips entirely, `on`
+/// forces all pentodes, anything else auto-detects. Skipped on the nodal
+/// solver, which does not benefit from M-reduction.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_grid_off_reduction(
+    mna: &mut crate::mna::MnaSystem,
+    netlist: &crate::parser::Netlist,
+    fa_config: &crate::codegen::CodegenConfig,
+    forward_active: &std::collections::HashSet<String>,
+    tube_grid_fa: &str,
+    solver_override: &str,
+    input_node_idx: usize,
+    input_conductance: f64,
+) -> Result<std::collections::HashMap<String, f64>, PipelineError> {
+    use crate::codegen::ir::CircuitIR;
+    use crate::mna::MnaSystem;
+
+    let grid_off_pentodes = if tube_grid_fa == "off" || solver_override == "nodal" {
+        std::collections::HashMap::new()
+    } else {
+        let force_all = tube_grid_fa == "on";
+        CircuitIR::detect_grid_off_pentodes(mna, netlist, fa_config, force_all)
+    };
+
+    if !grid_off_pentodes.is_empty() {
+        // Compose grid-off WITH the forward-active reduction the caller
+        // already applied. Rebuilding from the netlist with only the grid-off
+        // map would silently discard FA (the compile summary would still print
+        // the FA line while the shipped MNA had full-dimension BJT blocks) —
+        // plexi-class circuits need both.
+        *mna = MnaSystem::from_netlist_with_grid_off_and_fa(
+            netlist,
+            forward_active,
+            &grid_off_pentodes,
+        )
+        .map_err(|e| {
+            PipelineError::Mna(format!(
+                "Failed to rebuild MNA for grid-off pentodes (+ FA BJTs): {e}"
+            ))
+        })?;
+        if input_node_idx < mna.n {
+            mna.g[input_node_idx][input_node_idx] += input_conductance;
+        }
+        let device_slots =
+            CircuitIR::build_device_info_with_mna(netlist, Some(&*mna)).unwrap_or_default();
+        if !device_slots.is_empty() {
+            mna.stamp_device_junction_caps(&device_slots);
+        }
+    }
+
+    Ok(grid_off_pentodes)
+}
+
+/// Format the grid-off detection result for user output.
+///
+/// `None` when nothing was reduced — the caller decides whether to log at all
+/// and on which stream (`println!` for compile/simulate progress, `eprintln!`
+/// for analyze, which writes CSV to stdout).
+pub fn format_grid_off_log(
+    grid_off_pentodes: &std::collections::HashMap<String, f64>,
+) -> Option<String> {
+    if grid_off_pentodes.is_empty() {
+        return None;
+    }
+    let mut pretty: Vec<(String, f64)> = grid_off_pentodes
+        .iter()
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    pretty.sort_by(|a, b| a.0.cmp(&b.0));
+    let pretty_str: String = pretty
+        .iter()
+        .map(|(n, v)| format!("{n}(Vg2k={v:.1}V)"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "  Grid-off pentodes: [{}] (M reduces by {})",
+        pretty_str,
+        grid_off_pentodes.len()
+    ))
 }

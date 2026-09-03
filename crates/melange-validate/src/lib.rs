@@ -140,6 +140,16 @@ pub struct ValidationOptions {
     pub additional_nodes: Vec<String>,
     /// Input node name (default: "in")
     pub input_node: String,
+    /// Forward-active BJT reduction mode — mirrors `melange compile --bjt-fa`.
+    ///
+    /// Defaults to `Auto`, matching the shipped build. Until 2026-09-03 this
+    /// harness applied NO forward-active reduction, so it validated a
+    /// full-2D system for circuits the CLI ships reduced (measured on
+    /// `wurli_preamp`: shipped M=3, harness M=5).
+    pub bjt_fa_mode: melange_solver::codegen::BjtFaMode,
+    /// Grid-off pentode reduction mode — mirrors `melange compile
+    /// --tube-grid-fa` (`auto` | `on` | `off`). Defaults to `auto`.
+    pub tube_grid_fa: String,
 }
 
 impl Default for ValidationOptions {
@@ -154,6 +164,8 @@ impl Default for ValidationOptions {
             circuit_name: None,
             additional_nodes: Vec::new(),
             input_node: "in".to_string(),
+            bjt_fa_mode: melange_solver::codegen::BjtFaMode::Auto,
+            tube_grid_fa: "auto".to_string(),
         }
     }
 }
@@ -321,6 +333,9 @@ pub fn validate_circuit_with_options(
         sample_rate,
         output_node,
         input_node,
+        options.bjt_fa_mode,
+        &options.tube_grid_fa,
+        None,
     )?;
 
     // Apply DC blocking to SPICE output to match melange's internal DC blocker (5 Hz HPF)
@@ -500,12 +515,30 @@ pub fn strip_vin_source(netlist: &str, input_node: &str) -> (String, Option<f64>
 ///
 /// Accepts a netlist string (e.g., after VIN stripping) and an explicit input node name.
 /// Handles both linear and nonlinear circuits (with DC OP initialization for the latter).
-fn run_melange_solver_from_str(
+/// Run the melange solver on a netlist string, through the SAME front-end the
+/// shipped CLI uses.
+///
+/// `main_code` overrides the default stdin-samples-in / stdout-samples-out
+/// driver; pass `None` for it. The SPICE test harness passes its own so it can
+/// drive `set_pot_0(..)` per sample.
+///
+/// **This is the single implementation on purpose.** Until 2026-09-03 the
+/// integration tests in `tests/spice_validation.rs` carried a second, silently
+/// divergent copy of this routine — no `.linearize`, no forward-active or
+/// grid-off reduction, unconditional internal-node expansion and the default
+/// `MAX_ITER` of 100 rather than `auto_tune_max_iter`. That copy is what the
+/// CI "SPICE validation" gate actually ran, so the gate was not measuring the
+/// shipped build. Route new callers here rather than growing a third.
+#[allow(clippy::too_many_arguments)]
+pub fn run_melange_solver_from_str(
     netlist_str: &str,
     input_signal: &[f64],
     sample_rate: f64,
     output_node_name: &str,
     input_node_name: &str,
+    bjt_fa_mode: melange_solver::codegen::BjtFaMode,
+    tube_grid_fa: &str,
+    main_code: Option<&str>,
 ) -> Result<Vec<f64>, ValidationError> {
     use melange_solver::codegen::{routing, CodeGenerator, CodegenConfig};
     use std::io::Write;
@@ -556,14 +589,54 @@ fn run_melange_solver_from_str(
     // A validator that builds a different circuit than the one it validates is
     // worse than no validator, because it is believed.
     //
-    // Empty FA / grid-off sets preserve this harness's existing behaviour on
-    // those two reductions; closing that remaining gap is tracked separately
-    // (see memory `validation_harness_no_fa_reduction`).
+    // Forward-active + grid-off reductions, then `.linearize` — the SAME three
+    // shared pipeline steps, in the same order, that `melange compile` runs.
+    //
+    // Until 2026-09-03 this harness passed EMPTY forward-active and grid-off
+    // sets, so it validated a full-2D system for any circuit the shipped build
+    // reduces. Measured on the `wurli_preamp` validation deck: shipped M=3,
+    // harness M=5 — a different circuit, and therefore not a statement about
+    // what ships. `--bjt-fa` / `--tube-grid-fa` still select the mode, so
+    // `off` remains available to attribute a residual to the reduction.
+    let fa_config = melange_solver::codegen::CodegenConfig {
+        circuit_name: "fa_detect".to_string(),
+        sample_rate,
+        input_resistance: 1.0,
+        input_node,
+        output_nodes: vec![output_node],
+        bjt_fa_mode,
+        ..melange_solver::codegen::CodegenConfig::default()
+    };
+    let forward_active = melange_solver::pipeline::apply_forward_active_reduction(
+        &mut mna,
+        &netlist,
+        &fa_config,
+        "auto",
+        sample_rate,
+        1,
+        input_node,
+        1.0,
+        &melange_solver::pipeline::silent,
+    )
+    .map_err(|e| ValidationError::Solver(format!("forward-active: {e}")))?;
+
+    let grid_off_pentodes = melange_solver::pipeline::apply_grid_off_reduction(
+        &mut mna,
+        &netlist,
+        &fa_config,
+        &forward_active,
+        tube_grid_fa,
+        "auto",
+        input_node,
+        1.0,
+    )
+    .map_err(|e| ValidationError::Solver(format!("grid-off: {e}")))?;
+
     melange_solver::pipeline::apply_linearize_reductions(
         &mut mna,
         &netlist,
-        &std::collections::HashSet::new(),
-        &std::collections::HashMap::new(),
+        &forward_active,
+        &grid_off_pentodes,
         input_node,
         1.0,
         1.0,
@@ -685,8 +758,8 @@ fn run_melange_solver_from_str(
     }
     .map_err(|e| ValidationError::Solver(format!("Codegen: {}", e)))?;
 
-    // Append stdin/stdout main
-    let main_code = "fn main() {\n\
+    // Append the driver main — caller-supplied, else stdin/stdout.
+    let default_main = "fn main() {\n\
         let mut state = CircuitState::default();\n\
         let stdin = std::io::stdin();\n\
         let mut line = String::new();\n\
@@ -699,7 +772,7 @@ fn run_melange_solver_from_str(
             }\n\
         }\n\
     }\n";
-    let full_source = format!("{}\n{}", generated.code, main_code);
+    let full_source = format!("{}\n{}", generated.code, main_code.unwrap_or(default_main));
 
     // Compile
     static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
