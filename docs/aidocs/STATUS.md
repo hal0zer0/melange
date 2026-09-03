@@ -314,6 +314,20 @@ melange-cli does NOT cross-compile (ureq/dirs need CoreFoundation), but generate
 
 ---
 
+# v0.1.5 SHIPPED 2026-09-03 (tag `v0.1.5` -> `d641457`)
+
+Everything in this section shipped in v0.1.5. Not DSP-byte-identical to 0.1.4:
+generated source moves for essentially every deck (F9 rewrites the nodal
+`reset()` body; DK decks get the new `N_I` layout), but rendered audio moves
+only on noise-enabled decks hitting a sub-step path (194 of 196 golden renders
+identical). **F9 cannot move `simulate`/`analyze` output** — neither calls the
+generated `reset()`. Downstream re-verify is ~2 decks by output, all nodal decks
+by generated source.
+
+v0.1.5 also closed a version-reporting gap: `main` had been advanced past the
+`v0.1.4` tag without a bump, so builds from `main` reported a 0.1.4 they were
+not.
+
 # 2026-09-02 — verification-instrument repairs, and what they cost
 
 Three of melange's verification instruments were found to have integrity defects
