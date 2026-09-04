@@ -1,26 +1,12 @@
 {
   "generated": "2026-07-21",
   "generated_by": "melange golden-baseline manifest task",
-  "melange_verify_commit": "e53573c (correctness-sweep HEAD; melange 0.1.3 binary freshly built + installed from it). Prior baselines: 83bf48d (superseded \u2014 carried the tungsten-thunder-horse line-search regression, fixed by e53573c), 8945b67.",
+  "melange_verify_commit": "cd133c6 (pentode grid-off reduction defaults to full 3D; melange 0.1.5 binary built + installed from it). Baseline golden-baselines/cd133c6 supersedes 91aaa48. Movement vs 91aaa48: noyce-ef86 audio changed (frozen-Vg2k reduction now off by default, full 3D, +2.18% gain error removed, peak 0.673 to 0.659); five-watt-freddie (champ-5f1) and noyce-amp-at-idle are INPUT-CHANGED (committed netlist drift, not the compiler); diag_region_exit_count added to all generated code (source differs on all 38, diagnostics on 21). Prior baselines: 91aaa48, e53573c (melange 0.1.3), 83bf48d (superseded), 8945b67.",
   "compile_cmd_cwd": "~/dev/oomox (repo root); netlists referenced as ../melange-circuits/<cir>",
   "verification_protocol": "Each compile_cmd was executed into scratch space and diffed byte-for-byte against the checked-in oomox file. EXACT = byte-identical. DRIFT-EXPLAINED = every diff hunk attributable to known post-regen melange commits AND anchors (N, M, OVERSAMPLING_FACTOR, INPUT_NODE, OUTPUT_NODES, OUTPUT_SCALES, INPUT_RESISTANCE, SAMPLE_RATE, full setter list, noise fns) verified identical. No hand-edited generated files were found. Known post-regen drift commits: 146d51b (emitted clippy-allow header); a472807 (two-draw shot noise); 49ecaa4 (deterministic coupled-inductor augmented-row ordering); AND correctness-sweep NR globalization 0c70d44 + 83bf48d + e53573c (nodal Newton globalized with a KCL residual gate + Armijo line search; emits new kcl_residual/kcl_residual_inl fns + v_nl_final block, replaces the old adaptive sub-stepping fallback, and raises the emitted MAX_ITER cap to 100 on every deck carrying an inner nodal/behavioral NR loop; e53573c makes a line-search FAILURE fall through instead of bailing to the removed fallback \u2014 this fixed the tungsten-thunder-horse idle-collapse regression that the 83bf48d baseline carried, re-converging it to main/ngspice). Two other correctness-sweep DSP-capable commits produced NO drift in THIS corpus, verified by content diff at e53573c: 63cee6e (DC-OP candidate retention) changed zero DC_OP/DC_NL_I constants here (no corpus circuit hit the leaky-gate degenerate case); be7be88 (independent current-source sign) is inert here (no corpus deck has an explicit `I` element).",
   "melange_circuits_repo_state": {
-    "head": "b655adf (2026-06-12) \u2014 STALE relative to shipped netlists",
-    "modified_uncommitted": [
-      "testing/dynamics/4kbuscomp-audiopath.cir",
-      "unstable/dynamics/series-of-tubes-stage.cir",
-      "unstable/dynamics/velvet-elvis.cir",
-      "unstable/gimmicks/noyce-amp-at-idle.cir",
-      "unstable/gimmicks/noyce-carbon-comp-bank.cir",
-      "unstable/pedals/periodic-pedal.cir"
-    ],
-    "untracked": [
-      "unstable/dynamics/vurli-leveler.cir",
-      "unstable/gimmicks/noyce-boiler-room.cir",
-      "unstable/gimmicks/radio-am.cir",
-      "unstable/gimmicks/radio-fm.cir"
-    ],
-    "warning": "The melange-circuits working tree, not its git HEAD, is the authoritative source for several shipped circuits. The golden harness cannot pin these netlists to a commit until they are committed."
+    "head": "5270e67 (2026-09-04, branch publish-prep): clean working tree; the previously-uncommitted and untracked netlists are now committed, so all shipped netlists are pinnable to this commit.",
+    "note": "Re-baselined at melange cd133c6 against this circuits state. The earlier b655adf STALE/dirty record (uncommitted and untracked netlist lists) is superseded and removed."
   },
   "correctness_sweep_2026_08_30": {
     "summary": "Golden baseline refreshed from main (ee8841e) to correctness-sweep HEAD (e53573c) via full audio capture+compare (golden-harness) and per-circuit generated-code diff. 41/42 circuits resolve (qapla-1a UNRESOLVED, see below). Every generated-output change across the corpus is attributable to the nodal-NR globalization (0c70d44 + 83bf48d + e53573c); zero unattributable changes. NOTE: the interim 83bf48d baseline carried a tungsten-thunder-horse line-search regression (idle output collapsed to 0.0); e53573c fixes it (line-search failure falls through instead of bailing to the removed fallback) and tungsten re-converges to main. The 83bf48d->e53573c compare is SURGICAL: only tungsten changed, 181 identical / 0 other circuits affected.",

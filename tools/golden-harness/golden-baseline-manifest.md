@@ -2,6 +2,8 @@
 
 Generated 2026-07-21. Refreshed 2026-08-30 against melange **e53573c** (correctness-sweep HEAD, melange 0.1.3). Superseded interim baseline **83bf48d** (carried the tungsten-thunder-horse line-search regression, fixed by e53573c). Prior baseline: **8945b67**.
 
+**Re-baselined 2026-09-04 against melange `cd133c6`** (pentode grid-off reduction defaults to full 3D). `golden-baselines/cd133c6` supersedes `91aaa48`. Movement vs 91aaa48: **noyce-ef86** audio changed — its frozen-`Vg2k` reduction is now off by default → full 3D, removing the +2.18% small-signal gain error (peak 0.673→0.659, toward ngspice); **five-watt-freddie** (`champ-5f1`) and **noyce-amp-at-idle** are INPUT-CHANGED (committed netlist drift since 91aaa48, not the compiler); `diag_region_exit_count` was added to all generated code, so generated source differs on all 38 circuits and solver diagnostics on 21 renders (e.g. steve-1073-preamp renders byte-identical but now reports region-exits). Circuits repo now clean at `5270e67` (branch `publish-prep`) — all shipped netlists pinnable to a commit. **Downstream:** three *corpus* oomox plugins (five-watt-freddie, noyce-amp-at-idle, noyce-ef86) render from decks that were reducing; their checked-in `circuit.rs` is now stale vs the full-3D default and should be regenerated (corpus, not openwurli/shipped). The per-circuit DRIFT-status table below predates this re-baseline and its own 2026-08-30 refresh; it warrants a separate re-audit and is not reconciled here.
+
 Machine-readable twin: `tools/golden-harness/golden-baseline-manifest.json`.
 
 ## Compile recipe
