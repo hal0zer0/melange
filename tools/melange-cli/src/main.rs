@@ -30,7 +30,10 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "melange")]
 #[command(about = "Circuit modeling toolkit - from SPICE to real-time DSP")]
-#[command(version)]
+// Version carries the build commit (baked by build.rs into MELANGE_VERSION) so
+// `melange --version` disambiguates a released tag, an unreleased main, and a
+// local build that otherwise all print the same bare CARGO_PKG_VERSION.
+#[command(version = env!("MELANGE_VERSION"))]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
