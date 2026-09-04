@@ -9,6 +9,124 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-09-04
+
+A correctness-and-diagnostics patch. The headline is an accuracy fix: the
+default pentode grid-off reduction is retired because it was not
+accuracy-neutral. Two further fixes stop `melange validate` and `melange
+analyze` from measuring a circuit the compiler does not ship, `simulate` learns
+to drive `.inject` sources, and `melange --version` now carries the build
+commit.
+
+**Generated DSP output is not byte-identical to 0.1.5, but the audible change is
+confined to one class of circuit — a beam-tetrode/pentode stage that the default
+previously grid-off-reduced.** What moves, and what does not:
+
+- **Generated source changes for every circuit**, because every emitter now
+  carries a new `diag_region_exit_count` diagnostic counter (see Added). This is
+  a source-level diff on all decks; it does not by itself change rendered audio.
+- **Rendered audio changes only on pentode/beam-tetrode decks that the old
+  default reduced** (grid-off 3D→2D under `--tube-grid-fa auto`). Triode decks
+  are byte-identical; every non-pentode circuit is byte-identical. On the
+  golden corpus, only the reducing pentode decks move — toward ngspice (e.g.
+  `noyce-ef86` peak 0.673→0.659, removing a +2.18% small-signal gain error).
+- **Blast radius on shipped product is zero.** The `melange validate` false-pass
+  this release fixes existed only on unreleased `main` (it needed the shared
+  front end added the same cycle); no tagged release ever carried it. OpenWurli,
+  the only shipped product, is a pure-BJT signal path with no pentode and no
+  coupled inductor, so none of its generated audio changes. Any downstream that
+  pins generated code for a **pentode** circuit should regenerate deliberately
+  and re-audition; DK-routed and triode-only circuits regenerate byte-identical
+  audio (their source still changes for the new counter).
+
+MSRV is unchanged (1.85). No dependency changed in this release.
+
+**Known limitations carried forward (unfixed, disclosed):**
+
+- **DK routing is wrong on coupled-inductor circuits** — on a deck with a
+  coupled-inductor/transformer output stage that routes to the DK solver,
+  `--solver dk` produces a non-physical mean plate voltage *above* B+ (measured
+  on `twill-deluxe`: DK plate mean 323 V vs a 320 V rail, versus nodal 312.5 V).
+  It is latent: no released deck reaches it, and the pentode change below removes
+  the one path that used to trigger it (grid-off reduction pulling `M` under the
+  nodal threshold and flipping the router to DK). The DK defect itself is
+  deferred to a separate ticket. The population is "coupled inductors on a DK
+  route", not pentode- or product-bounded; OpenWurli has no coupled inductors.
+- **BJT forward-active auto-reduction is unchanged**, pending the counter data
+  the new `diag_region_exit_count` is there to collect. The shipped product
+  reduces and has no measured failure; the default decision is deferred, not
+  made.
+- **An exact (accuracy-safe) grid-off reduction that recovers the lost
+  performance is deferred.** The current fix keeps the full 3D model by default
+  rather than reducing.
+
+### Added
+
+- **`melange simulate --inject FIELD=SPEC`** drives `.inject` runtime sources.
+  `simulate` previously built its IR with an empty injection set, silently
+  dropping every `.inject` source — so a circuit whose signal path is an
+  internal circuit-volts injection (an oscillator/sync injection, a bias
+  modulation) could not be driven at all. Values are **circuit volts**, stamped
+  at the `.inject` node through its declared physical impedance; the flag is
+  repeatable. `SPEC` is `sine:<freq_hz>:<amp_volts>` or `dc:<volts>` (WAV
+  deferred). An unnamed field warns and injects 0; an unknown field errors with
+  the valid field list. The `NUM_INJECT == 0` path is byte-identical to before.
+  `analyze` still drops `.inject` — a flagged follow-up, not bundled here.
+- **`melange --version` now includes the build commit** — e.g. `0.1.6
+  (71709c7)` — so a released tag, an unreleased `main`, and a local build are
+  distinguishable. Three builds all printing a bare `0.1.5` previously caused a
+  cross-repo misdiagnosis (an unreleased-`main` regression read as a released
+  build). Degrades to `(unknown)` for a packaged crate with no `.git`.
+- **`diag_region_exit_count` diagnostic counter** in every generated circuit —
+  counts, on the full (unreduced) model, samples where a pentode's grid conducts
+  (`Vgk > 0`) or a BJT saturates (`Vbc` forward). It is the instrumentation that
+  produces attribution data under the new full-3D default and for the still-auto
+  BJT forward-active reduction. Diagnostic only; does not affect audio output.
+- **`melange validate` accepts `--bjt-fa {auto|off|force}` and `--tube-grid-fa
+  {auto|on|off}`** — the existing mechanism flags, plumbed through so the
+  validator can exercise the same reduction the shipped build uses. No new flag
+  name was invented for two mechanisms that already have one.
+
+### Changed
+
+- **Pentode grid-off reduction no longer runs by default; `--tube-grid-fa auto`
+  now keeps the full 3D model (`auto` == `off`).** The reduction froze `Vg2k =
+  V[screen] − V[cathode]` at its DC value, but `Vg2k` is cathode-referenced: an
+  unbypassed cathode resistor or screen-stop makes it move with signal, and
+  freezing it discards the local negative feedback through `dIp/dVg2k` — a
+  small-signal gain error present every sample (measured vs ngspice: EF86 +2.2%,
+  EL84 +3.0%, EL84 with a 1 kΩ screen-stop +12.3%). It also dropped grid current
+  `Ig1`, so a stage driven into grid conduction silently ran a model with no
+  grid current. Neither loss is boundable from a quiescent bias, so there is no
+  sound automatic selection. `on` remains available as a **warned, explicit
+  opt-in** (exact only for a fully-bypassed screen). A route-parity guard skips
+  the `on` reduction when the unreduced circuit routes nodal, so a reduction can
+  never lower `M` far enough to flip the router nodal→DK. Validated full-3D
+  against ngspice: `twill-deluxe` 0.063%, `el84-single-stage` 0.233%,
+  `noyce-6bq5` 0.060%, `noyce-ef86` 0.060%.
+
+### Fixed
+
+- **`melange validate` was verifying a model the compiler does not ship.** After
+  the 0.1.5 front-end unification, forward-active and grid-off reduction stayed
+  private to `melange-cli`, so `validate` (and the `spice_validation.rs` CI
+  harness, which built its own MNA and ran none of the shared steps) validated a
+  full-2D/full-3D system for circuits the shipped build reduces — a false pass.
+  `should_skip_fa_for_nodal_reroute`, `apply_forward_active_reduction`,
+  `apply_grid_off_reduction` and the grid-off log now live in
+  `melange_solver::pipeline`; all five consumers — compile, simulate, analyze,
+  `melange validate`, and the SPICE test harness — route through it. This bug
+  existed only on unreleased `main`; no tagged release carried it.
+- **`melange analyze` expanded parasitic-BJT internal nodes unconditionally**,
+  while compile, simulate and validate skip that expansion when `K` is
+  ill-conditioned (`k_diag_min < −100`, the full-`N` LU path handling parasitics
+  directly). So `analyze` reported the frequency response of a *different*
+  circuit than compile ships for every ill-conditioned-`K` deck (measured on the
+  OpenWurli power stage: compile skips the expansion, analyze did not). All four
+  consumers now call the shared conditioning gate; none hand-rolls the threshold.
+  compile and simulate output is unchanged (golden `--strict`: 168 identical, 0
+  changed).
+
 ## [0.1.5] - 2026-09-03
 
 A verification-and-correctness release. Two silent-wrong-output bugs in the
@@ -552,7 +670,8 @@ measured real hardware. Everything else is unproven against hardware. See
   KiCad file; no effect on netlist compilation, generated code, or shipped plugins. The
   fix (`quick-xml >= 0.41`) is tracked for 0.1.1.
 
-[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/hal0zer0/melange/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/hal0zer0/melange/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/hal0zer0/melange/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/hal0zer0/melange/compare/v0.1.2...v0.1.3

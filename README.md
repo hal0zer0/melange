@@ -179,7 +179,7 @@ A sample of what it handles, with **measured** single-core throughput:
 | Bus compressor (SSL-class) | VCA + op-amp sidechain | 12 op-amps + 2 VCAs | 7.1× |
 | Germanium diode network | 6-diode germanium clipping | 6 Ge diodes | 12.1× |
 | Passive tube EQ (Pultec-style) | 7 pots, 3 switches, global NFB (N=52, M=8) | 4 tubes, 3 transformers | 24× |
-| Tweed guitar amp (5F1 Champ-class) | preamp + power stage + output transformer | 12AX7 (2 triodes) + 6V6 pentode | 29× |
+| Tweed guitar amp (5F1 Champ-class) | preamp + power stage + output transformer | 12AX7 (2 triodes) + 6V6 pentode | 23× |
 | Wurlitzer 200A preamp | 2-stage BJT preamp (full Gummel-Poon) | 2 BJTs + 1 diode | 56× |
 | Overdrive pedal | op-amp gain + diode clipper | op-amp + 2 diodes | 64× |
 | 12AX7 gain stage | single triode stage | 1 triode | 230× |

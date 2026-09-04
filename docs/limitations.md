@@ -193,7 +193,7 @@ Measured on an AMD Ryzen 9 7950X, single core, noiseless, `-C target-cpu=x86-64-
 
 - Light nonlinear circuits: 12AX7 gain stage ~230×, overdrive pedal ~64× realtime
 - Germanium diode network (6 Ge diodes) ~12× realtime
-- Typical multi-device circuits: Wurlitzer preamp ~56×, tweed guitar amp ~29× realtime
+- Typical multi-device circuits: Wurlitzer preamp ~56×, tweed guitar amp ~23× realtime
 - Heaviest validated: a Pultec-style passive EQ (nodal full-LU, chord + sparse LU, N=52, M=8) ~24×, SSL-class bus compressor (12 op-amps + 2 VCAs) ~7.1× realtime
 
 ## Circuit Noise [PARTIAL]

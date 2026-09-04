@@ -252,7 +252,7 @@ Source: Sowter DWG E-72,658-2 (amp §) + Peerless/Triad winding data.
 **Re-measured 2026-08-25** on an AMD Ryzen 9 7950X (single core, noiseless, `-C target-cpu=x86-64-v3`, via `tools/perf-harness/bench.sh`); host-dependent. The earlier figures below were largely fabricated/stale — see `memory/perf_numbers_measured_2026_08_25.md`. Measured: nonlinear audio circuits ≈9–65× RT; light stages hundreds× (single 12AX7 ~230×); trivial linear ~2700×.
 
 - Passive EQ (N=52, M=8, 3 xfmrs, nodal full LU): **~24×** realtime
-- Wurlitzer preamp (2 BJT, full GP): ~56× · Tweed 5F1 amp: ~29× · overdrive pedal: ~64× · SSL bus comp (full): ~9×
+- Wurlitzer preamp (2 BJT, full GP): ~56× · Tweed 5F1 amp: ~23× · overdrive pedal: ~64× · SSL bus comp (full): ~9×
 - VCA compressor (N=21, M=3, nodal full LU): ~42× realtime *(not re-measured 2026-08-25)*
 - 8-BJT Class AB power amp (DK M=9): 0.4× realtime *(not re-measured; parasitic-R limited; K_eff approach planned)*
 
