@@ -627,6 +627,8 @@ pub fn run_melange_solver_from_str(
         &forward_active,
         tube_grid_fa,
         "auto",
+        sample_rate,
+        1,
         input_node,
         1.0,
     )
@@ -759,6 +761,8 @@ pub fn run_melange_solver_from_str(
     .map_err(|e| ValidationError::Solver(format!("Codegen: {}", e)))?;
 
     // Append the driver main — caller-supplied, else stdin/stdout.
+    // Diagnostics go to stderr as `DIAG:key=value` lines (same protocol as
+    // the CLI's simulate driver) and are echoed below.
     let default_main = "fn main() {\n\
         let mut state = CircuitState::default();\n\
         let stdin = std::io::stdin();\n\
@@ -771,6 +775,8 @@ pub fn run_melange_solver_from_str(
                 println!(\"{:.15e}\", out[0]);\n\
             }\n\
         }\n\
+        eprintln!(\"DIAG:nr_max_iter_count={}\", state.diag_nr_max_iter_count);\n\
+        eprintln!(\"DIAG:region_exit_count={}\", state.diag_region_exit_count);\n\
     }\n";
     let full_source = format!("{}\n{}", generated.code, main_code.unwrap_or(default_main));
 
@@ -844,6 +850,16 @@ pub fn run_melange_solver_from_str(
             "Binary failed:\n{}",
             String::from_utf8_lossy(&result.stderr)
         )));
+    }
+
+    // Echo the driver's `DIAG:` lines so `melange validate` reports the
+    // generated solver's counters (NR max-iter, region exits) next to the
+    // comparison — a validation number without them hides a starved or
+    // out-of-region solve.
+    for line in String::from_utf8_lossy(&result.stderr).lines() {
+        if let Some(diag) = line.strip_prefix("DIAG:") {
+            eprintln!("  melange {}", diag.replacen('=', ": ", 1));
+        }
     }
 
     Ok(String::from_utf8_lossy(&result.stdout)

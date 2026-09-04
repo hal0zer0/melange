@@ -2939,6 +2939,13 @@ impl RustEmitter {
         code.push_str("    pub diag_clamp_count: u64,\n");
         code.push_str("    /// Diagnostic: number of times NR hit max iterations\n");
         code.push_str("    pub diag_nr_max_iter_count: u64,\n");
+        code.push_str(
+            "    /// Diagnostic: device-samples where a pentode's grid conducts (Vgk > 0)\n\
+             \x20   /// or a BJT's base-collector junction is forward biased (saturation) —\n\
+             \x20   /// the regions the grid-off / forward-active reductions assume are never\n\
+             \x20   /// entered. Counted on the full models too (characterization, not a guard).\n",
+        );
+        code.push_str("    pub diag_region_exit_count: u64,\n");
         code.push_str("    /// Diagnostic: number of backward Euler fallback activations\n");
         code.push_str("    pub diag_be_fallback_count: u64,\n");
         code.push_str(
@@ -3435,6 +3442,7 @@ impl RustEmitter {
         code.push_str("            diag_peak_output: 0.0,\n");
         code.push_str("            diag_clamp_count: 0,\n");
         code.push_str("            diag_nr_max_iter_count: 0,\n");
+        code.push_str("            diag_region_exit_count: 0,\n");
         code.push_str("            diag_be_fallback_count: 0,\n");
         code.push_str("            diag_be_latch_count: 0,\n");
         code.push_str("            diag_active_set_pin_count: 0,\n");
@@ -3717,6 +3725,7 @@ impl RustEmitter {
         code.push_str("        self.diag_peak_output = 0.0;\n");
         code.push_str("        self.diag_clamp_count = 0;\n");
         code.push_str("        self.diag_nr_max_iter_count = 0;\n");
+        code.push_str("        self.diag_region_exit_count = 0;\n");
         code.push_str("        self.diag_be_fallback_count = 0;\n");
         code.push_str("        self.diag_be_latch_count = 0;\n");
         code.push_str("        self.diag_active_set_pin_count = 0;\n");
@@ -6388,6 +6397,8 @@ impl RustEmitter {
         Self::emit_self_heating_thermal_updates(&mut code, ir);
 
         // (NaN check already done before state update)
+
+        code.push_str(&super::helpers::emit_region_exit_lines(ir, "    "));
 
         // Output extraction
         code.push_str("    // Extract outputs, DC blocking, and scaling\n");
@@ -9078,6 +9089,7 @@ impl RustEmitter {
             code.push_str("        state.diag_nr_max_iter_count += 1;\n");
             code.push_str("    }\n\n");
         }
+        code.push_str(&super::helpers::emit_region_exit_lines(ir, "    "));
 
         // Step 4: Extract outputs, apply DC blocking and scaling
         code.push_str("    // Step 4: Extract outputs, DC blocking, and scaling\n");

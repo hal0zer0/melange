@@ -74,6 +74,16 @@ pub struct CircuitIR {
     #[serde(default)]
     pub v_prev_ic_seed: Option<Vec<f64>>,
     pub device_slots: Vec<DeviceSlot>,
+    /// Per-device MNA node indices, parallel to `device_slots` (same order,
+    /// same length). Each entry is the device's terminal list in the MNA's
+    /// 1-based index space (0 = ground), e.g. BJT `[collector, base,
+    /// emitter]`, pentode `[plate, grid, cathode, screen(, suppressor)]`.
+    /// Used by the emitters for the `diag_region_exit_count`
+    /// characterization (Vgk > 0 on any pentode, Vbc forward on any BJT),
+    /// which needs terminal voltages that are not all N_V rows of a
+    /// reduced slot. Empty when the IR was built without an MNA.
+    #[serde(default)]
+    pub device_node_indices: Vec<Vec<usize>>,
     pub has_dc_sources: bool,
     pub has_dc_op: bool,
     /// M-vector: nonlinear device currents at DC operating point
@@ -2208,6 +2218,7 @@ impl CircuitIR {
 
         let mut device_slots = Self::build_device_info_with_mna(netlist, Some(mna))?;
         Self::resolve_mosfet_nodes(&mut device_slots, mna);
+        let device_node_indices = Self::device_node_indices_for(&device_slots, mna);
 
         let inductors: Vec<InductorIR> = kernel
             .inductors
@@ -2637,6 +2648,7 @@ impl CircuitIR {
             },
             v_prev_ic_seed,
             device_slots,
+            device_node_indices,
             has_dc_sources,
             has_dc_op,
             dc_nl_currents,
@@ -3472,6 +3484,7 @@ impl CircuitIR {
             matrices,
             dc_operating_point,
             v_prev_ic_seed,
+            device_node_indices: Self::device_node_indices_for(&device_slots, mna),
             device_slots,
             has_dc_sources,
             has_dc_op,
@@ -3921,39 +3934,69 @@ impl CircuitIR {
         forward_active
     }
 
-    /// Phase 1b grid-off pentode detection.
+    /// Per-device MNA node indices, parallel to `slots`.
     ///
-    /// Runs DC-OP on the provided MNA system and inspects each pentode's
-    /// converged `Vgk` and `Vg2k`. Pentodes with `Vgk < -(vgk_onset + 0.5)`
-    /// across the operating point (i.e. well below grid cutoff) qualify
-    /// for grid-off reduction: `Ig1` is identically zero and `Vg2k` is
-    /// approximately held constant by external bypass caps, so the NR
-    /// block can drop from 3D to 2D.
+    /// `build_device_info_with_mna` creates exactly one slot per entry of
+    /// `mna.nonlinear_devices`, in the same order (linearized devices are
+    /// absent from both). That 1:1 correspondence is what the FA / grid-off /
+    /// LDR arms of that builder already rely on; this helper makes it
+    /// explicit for the emitters. Returns an empty list (and warns) if the
+    /// two ever disagree, so the region-exit characterization is simply
+    /// not emitted rather than emitted against the wrong terminals.
+    fn device_node_indices_for(
+        slots: &[DeviceSlot],
+        mna: &crate::mna::MnaSystem,
+    ) -> Vec<Vec<usize>> {
+        if slots.len() != mna.nonlinear_devices.len() {
+            log::warn!(
+                "device_slots ({}) and mna.nonlinear_devices ({}) differ in length; \
+                 diag_region_exit_count will not be emitted for this circuit",
+                slots.len(),
+                mna.nonlinear_devices.len()
+            );
+            return Vec::new();
+        }
+        mna.nonlinear_devices
+            .iter()
+            .map(|d| d.node_indices.clone())
+            .collect()
+    }
+
+    /// Phase 1b grid-off pentode reduction — selection.
     ///
     /// Returns a `HashMap<String, f64>` mapping pentode name (uppercased)
-    /// to the DC-OP-converged `Vg2k` value that should be frozen in the
-    /// reduced device. The caller uses the map to:
+    /// to the DC-OP-converged `Vg2k = V[screen] - V[cathode]` that the
+    /// reduced 2D device freezes. The caller passes the map to
+    /// [`MnaSystem::from_netlist_with_grid_off`] (rebuilds with
+    /// `dimension: 2` pentode slots); [`build_device_info_with_mna`] then
+    /// sets `TubeParams.kind = SharpPentodeGridOff` and `vg2k_frozen` from
+    /// the reduced MNA.
     ///
-    /// 1. Collect the set of names and pass them to
-    ///    [`MnaSystem::from_netlist_with_grid_off`] to rebuild MNA with
-    ///    `dimension: 2` pentode slots
-    /// 2. Build `device_slots` via [`build_device_info_with_mna`] — that
-    ///    function will detect the MNA's reduced dimension and set
-    ///    `TubeParams.kind = SharpPentodeGridOff` automatically
-    /// 3. Iterate the returned slots and write the per-slot
-    ///    `vg2k_frozen` value from this map
+    /// **`force_all == false` (`--tube-grid-fa auto`) never reduces.** The
+    /// reduction drops two things that the full 3D model carries:
+    ///
+    /// 1. `Vg2k` as a live NR dimension. It is frozen at its DC value, but
+    ///    `Vg2k = V[screen] - V[cathode]` is cathode-referenced: every
+    ///    cathode-biased stage without a bypass capacitor, and every stage
+    ///    with a finite screen impedance, has a signal-dependent `Vg2k`, and
+    ///    the local negative feedback through `dIp/dVg2k` is lost. Measured
+    ///    against ngspice as a small-signal gain error of +2.2% (EF86,
+    ///    Rk 4.7k unbypassed), +3.0% (EL84, Rk 150 unbypassed, screen
+    ///    bypassed) and +12.3% (EL84, Rk 130 and a 1k screen stop, both
+    ///    unbypassed); the linearized prediction from the DC-OP
+    ///    sensitivities reproduces all three to four digits. See
+    ///    `DEVICE_MODELS.md` "Grid-Off Reduction".
+    /// 2. `Ig1`. Exact only while `Vgk <= 0`; the region is classified once
+    ///    from the DC OP and never re-checked, so a stage driven into grid
+    ///    conduction silently runs a model with no grid current.
+    ///
+    /// Neither can be bounded at compile time from a quiescent bias point,
+    /// so there is no sound automatic selection; `auto` is reserved for a
+    /// reduction that is provably neutral (none exists yet) and keeps the
+    /// full 3D model. `force_all == true` (`--tube-grid-fa on`) reduces
+    /// every non-variable-mu pentode and warns per device.
     ///
     /// Mirrors [`detect_forward_active_bjts`] for the BJT case.
-    ///
-    /// **Auto-detection only.** The `--tube-grid-fa on/off` CLI overrides
-    /// bypass this detection (force-on creates a map with every pentode,
-    /// force-off returns an empty map regardless of bias).
-    /// Detect pentodes eligible for grid-off dimension reduction.
-    ///
-    /// When `force_all` is true, every non-variable-mu pentode is marked as
-    /// grid-off (the `--tube-grid-fa on` escape hatch), bypassing the normal
-    /// `Vgk < cutoff_threshold` check.  The DC-OP Vg2k value is still read
-    /// and used as the frozen screen voltage.
     pub fn detect_grid_off_pentodes(
         mna: &crate::mna::MnaSystem,
         netlist: &Netlist,
@@ -3971,6 +4014,49 @@ impl CircuitIR {
             return std::collections::HashMap::new();
         }
 
+        // Candidate pentodes: full-3D, sharp (non-variable-mu), with the
+        // four terminals the reduction needs. Variable-mu pentodes (6K7,
+        // EF89) are excluded outright — they exist for continuously varying
+        // bias under sidechain control, the opposite of a frozen screen.
+        // Schema `validate()` also rejects that combination.
+        let candidates: Vec<(usize, &crate::device_types::TubeParams)> = device_slots
+            .iter()
+            .enumerate()
+            .filter_map(|(slot_idx, slot)| {
+                if slot.device_type != DeviceType::Tube || slot.dimension != 3 {
+                    return None;
+                }
+                let tp = match &slot.params {
+                    DeviceParams::Tube(tp) if tp.is_pentode() && !tp.is_variable_mu() => tp,
+                    _ => return None,
+                };
+                let dev = mna.nonlinear_devices.get(slot_idx)?;
+                // Pentode node order (from `categorize_element` in mna.rs):
+                // [plate, grid, cathode, screen] with optional [, suppressor].
+                if dev.node_indices.len() < 4 {
+                    return None;
+                }
+                Some((slot_idx, tp))
+            })
+            .collect();
+        if candidates.is_empty() {
+            return std::collections::HashMap::new();
+        }
+
+        if !force_all {
+            for (slot_idx, _) in &candidates {
+                log::info!(
+                    "Pentode '{}' keeps the full 3D model under --tube-grid-fa auto: the \
+                     frozen-Vg2k reduction is not accuracy-neutral (it drops the \
+                     Vg2k = V(screen) - V(cathode) feedback through the cathode and \
+                     screen impedances, and the Ig1 grid current for Vgk > 0). \
+                     `--tube-grid-fa on` opts in.",
+                    mna.nonlinear_devices[*slot_idx].name.to_ascii_uppercase()
+                );
+            }
+            return std::collections::HashMap::new();
+        }
+
         let dc_op_config = DcOpConfig {
             tolerance: config.dc_op_tolerance,
             max_iterations: config.dc_op_max_iterations,
@@ -3985,72 +4071,54 @@ impl CircuitIR {
             ..DcOpConfig::default()
         };
         let dc_result = dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config);
+        let v_at = |n: usize| -> f64 {
+            if n > 0 && n - 1 < dc_result.v_node.len() {
+                dc_result.v_node[n - 1]
+            } else {
+                0.0
+            }
+        };
 
         let mut grid_off = std::collections::HashMap::new();
-        for (slot_idx, slot) in device_slots.iter().enumerate() {
-            // Grid-off only applies to pentodes in the full-3D state;
-            // skip non-tubes and slots already reduced to 2D.
-            if slot.device_type != DeviceType::Tube || slot.dimension != 3 {
-                continue;
-            }
-            let tp = match &slot.params {
-                DeviceParams::Tube(tp) if tp.is_pentode() => tp,
-                _ => continue,
-            };
-            // Variable-mu pentodes (6K7, EF89) are excluded from grid-off —
-            // they're designed specifically for continuous bias changes
-            // under sidechain control, and freezing Vg2k contradicts that
-            // usage pattern. Schema `validate()` also rejects this combo.
-            if tp.is_variable_mu() {
-                continue;
-            }
-            if slot_idx >= mna.nonlinear_devices.len() {
-                continue;
-            }
+        for (slot_idx, tp) in candidates {
             let dev = &mna.nonlinear_devices[slot_idx];
-            // Pentode node order (from `categorize_element` in mna.rs):
-            // [plate, grid, cathode, screen] with optional [, suppressor].
-            if dev.node_indices.len() < 4 {
-                continue;
-            }
             let n_plate = dev.node_indices[0];
             let n_grid = dev.node_indices[1];
             let n_cathode = dev.node_indices[2];
             let n_screen = dev.node_indices[3];
-            let v_at = |n: usize| -> f64 {
-                if n > 0 && n - 1 < dc_result.v_node.len() {
-                    dc_result.v_node[n - 1]
-                } else {
-                    0.0
-                }
-            };
-            let v_grid = v_at(n_grid);
             let v_cathode = v_at(n_cathode);
-            let v_screen = v_at(n_screen);
-            let vgk = v_grid - v_cathode;
-            let vg2k = v_screen - v_cathode;
-            // Grid-off threshold: Vgk must be below -(vgk_onset + 0.5) so
-            // there's a safety margin around the Leach grid-current onset.
-            // `vgk_onset` is the positive voltage at which grid conduction
-            // begins; grid-off requires Vgk to be well-negative.
-            let cutoff_threshold = -(tp.vgk_onset + 0.5);
-            // Additionally require a plausible positive Vg2k — a frozen
-            // value near zero would suggest DC-OP didn't actually solve
-            // for the screen supply.
-            let plate = v_at(n_plate);
-            let passes_threshold = force_all || (vgk < cutoff_threshold && vg2k > 1.0);
-            if passes_threshold {
-                let name = dev.name.to_ascii_uppercase();
-                log::info!(
-                    "Pentode '{}' grid-off{}(Vgk={:.3}V, Vg2k={:.3}V, Vpk={:.3}V). Using 2D model.",
+            let vgk = v_at(n_grid) - v_cathode;
+            let vg2k = v_at(n_screen) - v_cathode;
+            let vpk = v_at(n_plate) - v_cathode;
+            let name = dev.name.to_ascii_uppercase();
+            // Explicit user opt-in (`--tube-grid-fa on`). The reduction is
+            // accuracy-lossy and NOT safe under signal: warn loudly, per
+            // device, naming what is dropped. Mirrors `--bjt-fa force`.
+            log::warn!(
+                "Pentode '{}' FORCE-reduced to 2D by --tube-grid-fa on (Vgk={:.3}V, \
+                 Vg2k={:.3}V frozen, Vpk={:.3}V). Dropped: (1) the live Vg2k = \
+                 V(screen) - V(cathode) dimension — its feedback through the cathode \
+                 and screen impedances is lost (measured +2% to +12% small-signal gain \
+                 error on cathode-biased stages; exact only with an AC-grounded cathode \
+                 AND screen); (2) the Ig1 grid current — wrong whenever Vgk > 0 (grid \
+                 conduction; diag_region_exit_count counts those samples). Remove \
+                 --tube-grid-fa on for the full 3D model.",
+                name,
+                vgk,
+                vg2k,
+                vpk
+            );
+            if vgk >= -(tp.vgk_onset + 0.5) {
+                log::warn!(
+                    "Pentode '{}' is NOT biased below grid cutoff at the DC OP \
+                     (Vgk={:.3}V, onset {:.2}V): the forced grid-off model drops Ig1 \
+                     at a bias where the grid already conducts.",
                     name,
-                    if force_all { " (forced) " } else { " " },
                     vgk,
-                    vg2k,
-                    plate - v_cathode
+                    tp.vgk_onset
                 );
-                grid_off.insert(name, vg2k);
             }
+            grid_off.insert(name, vg2k);
         }
         grid_off
     }

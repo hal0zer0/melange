@@ -1115,6 +1115,77 @@ pub(super) fn emit_pentode_nr_dk_stamp(
     }
 }
 
+/// Emit the per-sample `diag_region_exit_count` characterization.
+///
+/// Counts, per device and per sample, the converged node voltages that put
+/// a device outside the region its dimension-reduced model would assume:
+///
+/// - any pentode (3D or grid-off 2D) with `Vgk = V[grid] - V[cathode] > 0`
+///   (grid conducts; the grid-off reduction drops `Ig1` and is wrong here);
+/// - any BJT (2D or forward-active 1D) with `vbc_eff = sign * (V[base] -
+///   V[collector]) > 0` (saturation; the FA reduction drops `exp(Vbc/Vt)`
+///   and is wrong here).
+///
+/// It is instrumented on the FULL models too, deliberately: with the
+/// reductions off by default this is the only way to measure how often a
+/// deck actually enters those regions. Terminal voltages come from
+/// `ir.device_node_indices` (MNA 1-based, 0 = ground) read against the
+/// finalized N-vector `v` of the sample; the caller places the block after
+/// the sample's node voltages are final. Empty when the IR carries no
+/// device node indices or no BJT/pentode is present.
+pub(super) fn emit_region_exit_lines(ir: &CircuitIR, indent: &str) -> String {
+    use crate::codegen::ir::DeviceType;
+
+    if ir.device_node_indices.len() != ir.device_slots.len() {
+        return String::new();
+    }
+    let vnode = |n: usize| -> String {
+        if n == 0 {
+            "0.0".to_string()
+        } else {
+            format!("v[{}]", n - 1)
+        }
+    };
+    let mut lines = String::new();
+    for (slot, nodes) in ir.device_slots.iter().zip(ir.device_node_indices.iter()) {
+        match (&slot.device_type, &slot.params) {
+            (DeviceType::Bjt | DeviceType::BjtForwardActive, DeviceParams::Bjt(bp))
+                if nodes.len() >= 3 =>
+            {
+                // Node order [collector, base, emitter]. vbc_eff = Vbc for
+                // NPN, -Vbc for PNP (same convention as
+                // `detect_forward_active_bjts`).
+                let (vc, vb) = (vnode(nodes[0]), vnode(nodes[1]));
+                let expr = if bp.is_pnp {
+                    format!("({vc} - {vb})")
+                } else {
+                    format!("({vb} - {vc})")
+                };
+                lines.push_str(&format!(
+                    "{indent}if {expr} > 0.0 {{ state.diag_region_exit_count += 1; }}\n"
+                ));
+            }
+            (DeviceType::Tube, DeviceParams::Tube(tp)) if tp.is_pentode() && nodes.len() >= 4 => {
+                // Node order [plate, grid, cathode, screen(, suppressor)].
+                let (vg, vk) = (vnode(nodes[1]), vnode(nodes[2]));
+                lines.push_str(&format!(
+                    "{indent}if ({vg} - {vk}) > 0.0 {{ state.diag_region_exit_count += 1; }}\n"
+                ));
+            }
+            _ => {}
+        }
+    }
+    if lines.is_empty() {
+        return lines;
+    }
+    format!(
+        "{indent}// Region-exit characterization: samples where a pentode's grid\n\
+         {indent}// conducts (Vgk > 0) or a BJT saturates (Vbc forward) — the regions\n\
+         {indent}// the grid-off / forward-active reductions assume are never entered.\n\
+         {lines}"
+    )
+}
+
 // ============================================================================
 // Oversampling configuration
 // ============================================================================

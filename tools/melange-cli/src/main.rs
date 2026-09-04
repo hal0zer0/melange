@@ -134,11 +134,15 @@ enum Commands {
         /// otherwise exceed the M=16 cap (e.g. 4×EL34 Plexi: M=18 → M=14).
         ///
         /// Valid values:{n}{n}
-        /// * auto — inspect DC-OP bias and reduce where Vgk < cutoff (default){n}{n}
-        /// * on — force grid-off on every non-variable-mu pentode regardless of
-        ///   bias. For testing / debugging only.{n}{n}
+        /// * auto (default) — reserved for reductions that are provably
+        ///   neutral; none exists today, so auto currently keeps the full 3D
+        ///   model (== off).{n}{n}
+        /// * on — reduce every non-variable-mu pentode to 2D (Vg2k frozen at
+        ///   its DC value, Ig1 dropped). NOT accuracy-neutral: drops the
+        ///   cathode/screen-referenced Vg2k feedback (measured +2% to +12%
+        ///   small-signal gain error on cathode-biased stages) and all grid
+        ///   current for Vgk > 0. Warns per device. Opt-in only.{n}{n}
         /// * off — never reduce; all pentodes keep their full 3D NR block.
-        ///   Use for regression parity with pre-1b codegen.
         #[arg(long, default_value = "auto")]
         tube_grid_fa: String,
 
@@ -340,7 +344,11 @@ enum Commands {
 
         /// Grid-off pentode reduction: auto (default), on, off.
         ///
-        /// Same mechanism as `melange compile --tube-grid-fa`.
+        /// Same mechanism as `melange compile --tube-grid-fa`. auto is
+        /// reserved for reductions that are provably neutral; none exists
+        /// today, so auto currently keeps the full 3D model (== off). `on`
+        /// is the warned opt-in — use it to attribute a residual to the
+        /// reduction.
         #[arg(long, default_value = "auto")]
         tube_grid_fa: String,
     },
@@ -393,10 +401,11 @@ enum Commands {
         opamp_rail_mode: String,
 
         /// Pentode grid-off dimension reduction mode: auto, on, off.
-        /// When a pentode is biased below cutoff at DC-OP, the Ig1 NR dimension
-        /// is dropped (3D→2D per tube). `auto` inspects bias and reduces where
-        /// applicable; `on` forces all non-variable-mu pentodes; `off` keeps
-        /// full 3D blocks. Mirrors `compile --tube-grid-fa`.
+        /// `on` reduces every non-variable-mu pentode 3D→2D (Vg2k frozen, Ig1
+        /// dropped; NOT accuracy-neutral, warned per device); `off` keeps full
+        /// 3D blocks. auto is reserved for reductions that are provably
+        /// neutral; none exists today, so auto currently keeps the full 3D
+        /// model (== off). Mirrors `compile --tube-grid-fa`.
         #[arg(long, default_value = "auto")]
         tube_grid_fa: String,
 
@@ -515,7 +524,9 @@ enum Commands {
 
         /// Pentode grid-off dimension reduction mode: auto, on, off.
         /// Mirrors `compile --tube-grid-fa`. See `simulate --tube-grid-fa` for
-        /// the auto/on/off semantics. Defaults to `auto`.
+        /// the auto/on/off semantics. Defaults to `auto`, which is reserved
+        /// for provably-neutral reductions and currently keeps the full 3D
+        /// model (== off).
         #[arg(long, default_value = "auto")]
         tube_grid_fa: String,
 
@@ -1797,11 +1808,11 @@ fn compile_circuit_source(
         &|a| println!("{a}"),
     )?;
 
-    // Phase 1b: detect grid-off pentodes (Vgk < -(vgk_onset + 0.5) →
-    // pentode drops to 2D NR block with Vg2k frozen). Rebuilds MNA with
-    // the reduced dimension. Only runs on DK solver — nodal doesn't
-    // benefit from M-reduction at the solver level.
-    // `--tube-grid-fa off` skips entirely; `on` forces all pentodes.
+    // Grid-off pentode reduction (3D → 2D NR block with Vg2k frozen and
+    // Ig1 dropped). Only `--tube-grid-fa on` reduces (warned per device);
+    // `auto` and `off` keep the full 3D model. Skipped on the nodal route,
+    // including the auto-router's pre-route verdict, so a reduction can
+    // never move a circuit from nodal to DK.
     let grid_off_pentodes = melange_solver::pipeline::apply_grid_off_reduction(
         &mut mna,
         &netlist,
@@ -1809,6 +1820,8 @@ fn compile_circuit_source(
         &forward_active,
         tube_grid_fa,
         solver_override,
+        sample_rate,
+        oversampling,
         input_node_idx,
         input_conductance,
     )?;
@@ -3098,6 +3111,8 @@ fn simulate_circuit_source(
         &forward_active,
         opts.tube_grid_fa,
         opts.solver,
+        opts.sample_rate,
+        opts.oversampling,
         input_node_idx,
         input_conductance,
     )?;
@@ -3790,6 +3805,8 @@ fn analyze_freq_response(
         &forward_active,
         tube_grid_fa,
         solver,
+        sample_rate,
+        oversampling,
         input_node_idx,
         input_conductance,
     )?;
@@ -5266,6 +5283,8 @@ RK cath 0 130
             &forward_active,
             "on",
             "",
+            48000.0,
+            1,
             0,
             1.0,
         )

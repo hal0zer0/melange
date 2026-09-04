@@ -96,6 +96,13 @@ pub struct CircuitState {
     /// Diagnostic: number of times sub-step NR was used (nodal full-LU only;
     /// always 0 on the DK path)
     pub diag_substep_count: u64,
+    /// Diagnostic: device-samples where a pentode's grid conducts (Vgk > 0)
+    /// or a BJT's base-collector junction is forward biased (saturation) —
+    /// the regions the grid-off and forward-active reductions assume are
+    /// never entered. Counted on the full models as well as the reduced
+    /// ones, so it characterizes the deck rather than guarding anything.
+    /// Summed over devices: a sample with two conducting grids adds 2.
+    pub diag_region_exit_count: u64,
 
     /// S = A^{-1} matrix, recomputed by set_sample_rate
     pub s: [[f64; N]; N],
@@ -285,6 +292,7 @@ static OPAMP_RAIL_DEGRADE_WARN_ONCE: std::sync::Once = std::sync::Once::new();
             diag_singular_matrix_count: 0,
             diag_voltage_damp_count: 0,
             diag_substep_count: 0,
+            diag_region_exit_count: 0,
             s: S_DEFAULT,
             a_neg: A_NEG_DEFAULT,
             k: K_DEFAULT,
@@ -404,6 +412,7 @@ impl CircuitState {
         self.diag_singular_matrix_count = 0;
         self.diag_voltage_damp_count = 0;
         self.diag_substep_count = 0;
+        self.diag_region_exit_count = 0;
         self.diag_be_fallback_count = 0;
 {% if has_be_fallback %}
         self.be_cooldown = 0;

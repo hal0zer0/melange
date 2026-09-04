@@ -430,6 +430,7 @@ fn main() {{
     eprintln!("DIAG:nan_reset_count={{}}", state.diag_nan_reset_count);
     eprintln!("DIAG:magnitude_reset_count={{}}", state.diag_magnitude_reset_count);
     eprintln!("DIAG:be_fallback_count={{}}", state.diag_be_fallback_count);
+    eprintln!("DIAG:region_exit_count={{}}", state.diag_region_exit_count);
     eprintln!("DIAG:max_abs_v_prev={{:.6}}", max_abs_v_prev);
 }}
 "#,

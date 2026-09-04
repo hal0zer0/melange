@@ -109,7 +109,7 @@ remains in the solver crate as a fallback for purely linear circuits.
 | MOSFET | 2D | Level 1 SPICE |
 | Tube (triode) | 2D (Vgk→Ip, Vpk→Ig) | Koren + Leach |
 | Tube (pentode) | 3D (Vgk→Ip, Vpk→Ig2, Vg2k→Ig1) | Reefman Derk §4.4 / DerkE §4.5 / Classical + Leach |
-| Tube (pentode, grid-off) | 2D (Vgk→Ip, Vpk→Ig2, Vg2k frozen) | Auto-detected at DC-OP when Vgk<cutoff; `--tube-grid-fa` override |
+| Tube (pentode, grid-off) | 2D (Vgk→Ip, Vpk→Ig2, Vg2k frozen) | Opt-in only (`--tube-grid-fa on`, warned); `auto` keeps full 3D since 2026-09-04 — the freeze is not accuracy-neutral (cathode-referenced Vg2k, +2–12% measured) |
 | VCA | 2D (Vsig, Vctrl) | THAT 2180 exponential |
 | Op-amp | Linear (no NR dim) | Boyle VCCS + GBW pole + rail clamp |
 
@@ -142,7 +142,7 @@ The compiler validation status of circuits known to exercise specific solver pat
 | 4-opamp + diode clipper | 44 | 10 | Nodal full LU (auto) | — | ActiveSetBe auto for clean clipping; BoyleDiodes diverges at heavy clip |
 | Op-amp overdrive + diodes | — | — | DK | — | TS808-class clipping |
 | VCA compressor + sidechain | 21 | 3 | Nodal full LU | ~42× | Current-mode VCA, K≈0 |
-| Pentode single stage | — | 2-3 | DK | fast | Grid-off reduces M=3→2 |
+| Pentode single stage | — | 3 | DK | fast | Full 3D by default; grid-off M=3→2 only with `--tube-grid-fa on` |
 | Push-pull pentode amp + OT | — | — | Nodal | — | Transformer forces nodal path |
 | Variable-mu pentode | — | 3 | DK | fast | M=3, no grid-off reduction |
 
@@ -188,7 +188,7 @@ Source: Sowter DWG E-72,658-2 (amp §) + Peerless/Triad winding data.
 - **JFET/MOSFET**: 2D Shichman-Hodges / Level 1; CGS/CGD junction caps; RD/RS parasitic R; MOSFET body effect (GAMMA/PHI)
 - **Diode**: Shockley + RS + CJO + BV/IBV Zener; optional self-heating (RTH/CTH/XTI/EG/TAMB) using the same quasi-static electrothermal model as BJT, with `IS(T) = IS_nom·(Tj/Tnom)^XTI·exp(EG/VT_nom·(1−Tnom/Tj))` and `N·VT(T) = (N·VT)_nom·(Tj/Tnom)`. Pipe-shouter (TS-808) uses RTH=500 CTH=2e-4 on the 1N4148 clippers; sad-bastard uses RTH=1200 CTH=1e-4 EG=0.67 on the 1N34A Ge clippers. Dead code when RTH=∞ (default).
 - **Tube (triode)**: Koren + Leach grid current, early-effect lambda, CCG/CGP/CCP junction caps, RGI grid-stop
-- **Tube (pentode)**: 3 screen-current equation families — Rational (Reefman §4.4), Exponential (DerkE §4.5), Classical Koren. `--tube-grid-fa {auto,on,off}` reduces 3D→2D when Vgk<cutoff
+- **Tube (pentode)**: 3 screen-current equation families — Rational (Reefman §4.4), Exponential (DerkE §4.5), Classical Koren. `--tube-grid-fa {auto,on,off}`: `on` reduces 3D→2D (warned, not accuracy-neutral); `auto` == `off` == full 3D (2026-09-04). `diag_region_exit_count` counts grid-conduction / BJT-saturation samples on every path
 - **Op-amp**: Boyle macromodel, VCC/VEE asymmetric rails, optional `SR=` slew-rate limiting (V/μs), rail modes `auto/none/hard/active-set/active-set-be/boyle-diodes`, `AOL_TRANSIENT_CAP` override
 - **VCA**: THAT 2180 / DBX 2150 current-mode exponential gain with gain-dependent THD
 
@@ -281,7 +281,7 @@ and compilation are necessary but not sufficient).
 - **VCR audio ALC compressor**: N=21, M=3, nodal full-LU ~42× RT. Key: 100Ω Rdecouple between VCA sig- and I-V converter fixes positive K diagonal.
 - **Klon Centaur**: ActiveSetBe auto-route (verified amp=[0.01..0.50]). BoyleDiodes opt-in only (heavy-clip divergence at amp ≥ 0.05 unsolved — not a blocker, see DEBUGGING.md).
 - **Tube-Screamer-style overdrive** / guitar pedals: stable.
-- **Pentode stages**: EL84 single stage, Tweed Deluxe (6V6GT beam tetrode), 6K7 varimu, Plexi (4×EL34 grid-off FA M=18→14). DC-OP validated, end-to-end compile-and-run verified.
+- **Pentode stages**: EL84 single stage, Tweed Deluxe (6V6GT beam tetrode), 6K7 varimu, Plexi (4×EL34; grid-off M=18→14 only under `--tube-grid-fa on` — full 3D by default routes it nodal). ngspice-validated full-3D (2026-09-04): twill-deluxe 0.063%, el84-single-stage 0.233%, noyce-6bq5 0.060%, noyce-ef86 0.060%.
 - **Uniquorn v2**: 16-stage cascade (N=64, M=12, ~3× RT mono) + push-pull power (N=23, M=6, ~15× RT).
 
 ## Pending Work

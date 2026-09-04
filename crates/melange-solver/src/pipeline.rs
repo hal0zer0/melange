@@ -626,12 +626,22 @@ pub fn apply_forward_active_reduction(
     Ok(forward_active)
 }
 
-/// Detect grid-off pentodes (`Vgk < -(vgk_onset + 0.5)` → the pentode drops to
-/// a 2D NR block with `Vg2k` frozen) and rebuild `mna` with the reduction.
+/// Apply the grid-off pentode reduction (3D → 2D NR block with `Vg2k`
+/// frozen and `Ig1` dropped) and rebuild `mna` with it.
 ///
-/// `tube_grid_fa` is the `--tube-grid-fa` mode: `off` skips entirely, `on`
-/// forces all pentodes, anything else auto-detects. Skipped on the nodal
-/// solver, which does not benefit from M-reduction.
+/// `tube_grid_fa` is the `--tube-grid-fa` mode: `on` reduces every
+/// non-variable-mu pentode (warned per device — the reduction is not
+/// accuracy-neutral, see [`CircuitIR::detect_grid_off_pentodes`]); `off`
+/// and `auto` both keep the full 3D model. `auto` is reserved for a
+/// reduction that is provably neutral; none exists today.
+///
+/// Route parity: skipped when the circuit will end up on the nodal solver,
+/// by the same pre-route check forward-active reduction uses
+/// ([`should_skip_fa_for_nodal_reroute`]). A reduction lowers M, and M is a
+/// routing input, so without this check reducing could move a circuit from
+/// nodal to DK Schur — which is how the twill-deluxe validation failure was
+/// reached (M 10 → 8 flipped the route onto a DK defect the reduction
+/// itself had nothing to do with; see `DEBUGGING.md`).
 #[allow(clippy::too_many_arguments)]
 pub fn apply_grid_off_reduction(
     mna: &mut crate::mna::MnaSystem,
@@ -640,6 +650,8 @@ pub fn apply_grid_off_reduction(
     forward_active: &std::collections::HashSet<String>,
     tube_grid_fa: &str,
     solver_override: &str,
+    sample_rate: f64,
+    oversampling: usize,
     input_node_idx: usize,
     input_conductance: f64,
 ) -> Result<std::collections::HashMap<String, f64>, PipelineError> {
@@ -648,9 +660,16 @@ pub fn apply_grid_off_reduction(
 
     let grid_off_pentodes = if tube_grid_fa == "off" || solver_override == "nodal" {
         std::collections::HashMap::new()
+    } else if tube_grid_fa != "on" {
+        // `auto`: never reduces today; the call only logs, per pentode, why
+        // the full 3D model is kept (no DC OP is solved on this path).
+        CircuitIR::detect_grid_off_pentodes(mna, netlist, fa_config, false)
+    } else if solver_override == "auto"
+        && should_skip_fa_for_nodal_reroute(mna, sample_rate, oversampling)
+    {
+        std::collections::HashMap::new()
     } else {
-        let force_all = tube_grid_fa == "on";
-        CircuitIR::detect_grid_off_pentodes(mna, netlist, fa_config, force_all)
+        CircuitIR::detect_grid_off_pentodes(mna, netlist, fa_config, true)
     };
 
     if !grid_off_pentodes.is_empty() {

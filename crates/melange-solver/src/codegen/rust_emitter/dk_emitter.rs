@@ -2890,6 +2890,10 @@ impl RustEmitter {
 
         ctx.insert("max_iter", &ir.solver_config.max_iterations);
         ctx.insert("m", &ir.topology.m);
+        ctx.insert(
+            "region_exit_lines",
+            &super::helpers::emit_region_exit_lines(ir, "    "),
+        );
 
         let num_pots = ir.pots.len();
         ctx.insert("num_pots", &num_pots);
