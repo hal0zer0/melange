@@ -571,26 +571,35 @@ impl Drop for ModifiedNetlist {
 
 /// Check if a line is a melange-specific directive that ngspice doesn't understand
 ///
-/// Must cover every directive melange's parser accepts that is not standard
-/// SPICE, otherwise a deck carrying one cannot be fed to ngspice unmodified.
+/// A deck carrying one cannot be fed to ngspice unmodified (ngspice errors
+/// `unimplemented dot command` and the whole run fails). The set is NOT
+/// maintained here: it is `melange_solver::parser::MELANGE_ONLY_DIRECTIVES`,
+/// which the parser's drift-guard test keeps in lockstep with
+/// `parse_directive` — so a new melange directive is stripped here the moment
+/// the parser learns it. (This list drifted twice when it was hand-kept:
+/// `.integrator` and `.inject` were both missed.)
+///
+/// Matching is on the whole first token, case-insensitive, so `.POTX ...`
+/// does not match `.pot`.
+///
+/// Notes on what stripping means per directive (none has an ngspice
+/// equivalent element; the reference simply does not carry the hint):
+/// - `.linearize <dev>` collapses a device to its small-signal stamp on the
+///   melange side; the ngspice reference runs the full nonlinear device.
+/// - `.tap <node> [name]` is a pure readout, no circuit element.
+/// - `.integrator <trap|be>` is a melange integrator hint; ngspice always
+///   integrates adaptive-trapezoidal. It is NOT an alignment lever.
+/// - `.inject` IS listed, but `translate_melange_directive` handles it FIRST
+///   (it substitutes a real resistor); this predicate only sees it as a
+///   fallback.
 fn is_melange_directive(line: &str) -> bool {
-    let trimmed = line.trim().to_uppercase();
-    trimmed.starts_with(".POT ")
-        || trimmed.starts_with(".SWITCH ")
-        || trimmed.starts_with(".INPUT_IMPEDANCE ")
-        || trimmed.starts_with(".WIPER ")
-        || trimmed.starts_with(".GANG ")
-        || trimmed.starts_with(".RUNTIME ")
-        || trimmed.starts_with(".MISMATCH ")
-        || trimmed.starts_with(".TOLERANCE ")
-        || trimmed.starts_with(".SEED ")
-        // `.linearize <dev>` collapses a triode to its small-signal stamp on the
-        // melange side; the ngspice reference runs the full nonlinear device
-        // (the stricter check). Strip it so ngspice parses the deck.
-        || trimmed.starts_with(".LINEARIZE ")
-        // `.tap <node> [name]` is a pure readout (names an output), no circuit
-        // element. Strip it so ngspice parses the deck.
-        || trimmed.starts_with(".TAP ")
+    let Some(first) = line.split_whitespace().next() else {
+        return false;
+    };
+    let first = first.to_ascii_lowercase();
+    melange_solver::parser::MELANGE_ONLY_DIRECTIVES
+        .iter()
+        .any(|d| *d == first)
 }
 
 /// Translate a melange-only directive line for the ngspice reference deck.
@@ -599,6 +608,10 @@ fn is_melange_directive(line: &str) -> bool {
 /// - `None` — not a melange directive; the caller keeps the line unchanged.
 /// - `Some(None)` — strip the line (ngspice can't parse it, no element behind it).
 /// - `Some(Some(repl))` — substitute `repl` (an ngspice-equivalent element line).
+///
+/// Order matters: `.inject` is checked BEFORE the generic strip because it
+/// carries a real element (see below); a bare strip would compare two
+/// different circuits.
 ///
 /// `.inject <node> <field> R=<ohms>|RSHUNT=<ohms>` declares an audio-rate
 /// injection port. melange stamps a conductance G=1/R from `<node>` to ground as
@@ -612,11 +625,8 @@ fn is_melange_directive(line: &str) -> bool {
 /// names are unique per deck, so `R_minj_<field>` is collision-safe. The raw
 /// value token is preserved verbatim (ngspice understands SPICE suffixes).
 fn translate_melange_directive(line: &str) -> Option<Option<String>> {
-    if is_melange_directive(line) {
-        return Some(None);
-    }
-    if line.trim().to_uppercase().starts_with(".INJECT ") {
-        let parts: Vec<&str> = line.split_whitespace().collect();
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.first().is_some_and(|t| t.eq_ignore_ascii_case(".inject")) {
         if parts.len() >= 4 {
             let node = parts[1];
             let field = parts[2];
@@ -625,6 +635,9 @@ fn translate_melange_directive(line: &str) -> Option<Option<String>> {
             return Some(Some(format!("R_minj_{} {} 0 {}", field, node, r_token)));
         }
         // Malformed `.inject` — strip so ngspice still parses the deck.
+        return Some(None);
+    }
+    if is_melange_directive(line) {
         return Some(None);
     }
     None
@@ -1094,6 +1107,47 @@ mod tests {
         assert!(!out.to_uppercase().contains(".TAP"), "deck: {out}");
         assert!(!out.to_uppercase().contains(".INJECT"), "deck: {out}");
         assert!(out.contains("R_minj_f2 n2 0 1k"), "deck: {out}");
+    }
+
+    #[test]
+    fn test_strip_set_derived_from_parser_directive_list() {
+        use melange_solver::parser::MELANGE_ONLY_DIRECTIVES;
+
+        // Every parser-declared melange-only directive leaves the ngspice deck,
+        // in any case and with tab or space separation.
+        for d in MELANGE_ONLY_DIRECTIVES {
+            let lower = format!("{d} x y");
+            let upper = format!("{} X Y", d.to_uppercase());
+            let tabbed = format!("  {d}\tx");
+            for line in [&lower, &upper, &tabbed] {
+                assert!(is_melange_directive(line), "{line:?} should be stripped");
+                assert!(
+                    translate_melange_directive(line).is_some(),
+                    "{line:?} must not reach ngspice"
+                );
+            }
+        }
+        // The list must cover the two directives that were historically missed.
+        assert!(MELANGE_ONLY_DIRECTIVES.contains(&".integrator"));
+        assert!(MELANGE_ONLY_DIRECTIVES.contains(&".inject"));
+
+        // Whole-token match: a longer token sharing a prefix is not a hit.
+        assert!(!is_melange_directive(".potx R1 1k 100k"));
+        assert!(!is_melange_directive(".POTX R1 1k 100k"));
+        // Standard SPICE directives and element lines pass through untouched.
+        for line in [
+            ".model D1N4148 D IS=2.5n",
+            ".param k=1",
+            ".subckt foo a b",
+            ".ends",
+            ".end",
+            ".tran 1u 1m",
+            "R1 a b 1k",
+            "",
+        ] {
+            assert!(!is_melange_directive(line), "{line:?} must pass through");
+            assert_eq!(translate_melange_directive(line), None, "{line:?}");
+        }
     }
 
     /// Helper: find the value token (parts[3]) of the element line named `name`.

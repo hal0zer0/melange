@@ -424,6 +424,8 @@ fn run_melange_codegen_with_main(
         "in",
         melange_solver::codegen::BjtFaMode::Auto,
         "auto",
+        false, // backward_euler (auto integrator)
+        false, // force_trap
         Some(main_code),
     )
 }

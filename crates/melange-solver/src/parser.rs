@@ -1528,6 +1528,35 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/// Every melange-only dot command `Parser::parse_directive` accepts that is NOT
+/// standard SPICE (lowercase, leading dot). Standard directives that ngspice
+/// parses itself (`.model`, `.param`, `.subckt`, `.ends`, `.end`) are
+/// deliberately absent.
+///
+/// This is the shared source of truth for anything that has to hand a melange
+/// deck to a real SPICE engine (the validate harness strips these lines before
+/// ngspice sees them, since ngspice hard-errors `unimplemented dot command`).
+/// INVARIANT: every non-standard-SPICE arm of `parse_directive` must appear
+/// here, and every entry here must be an arm of `parse_directive`. The test
+/// `test_melange_only_directives_matches_parse_directive` enforces both
+/// directions.
+pub const MELANGE_ONLY_DIRECTIVES: &[&str] = &[
+    ".pot",
+    ".switch",
+    ".wiper",
+    ".gang",
+    ".runtime",
+    ".mismatch",
+    ".tolerance",
+    ".seed",
+    ".linearize",
+    ".tap",
+    ".input_impedance",
+    ".integrator",
+    ".inject",
+    ".delay_feedback",
+];
+
 /// SPICE netlist parser.
 struct Parser {
     /// Pre-processed lines (after continuation joining and comment stripping)
@@ -2549,6 +2578,11 @@ impl Parser {
         }
     }
 
+    /// Dispatch one dot-command line.
+    ///
+    /// Adding a melange-only (non-standard-SPICE) arm here REQUIRES adding the
+    /// same name to `MELANGE_ONLY_DIRECTIVES`; the drift-guard test fails
+    /// otherwise.
     fn parse_directive(&mut self, line: &str, netlist: &mut Netlist) -> Result<(), ParseError> {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.is_empty() {
@@ -6994,5 +7028,135 @@ U1 0 inv out opamp
         let n = Netlist::parse(spice).expect("parse");
         assert!(n.injections.is_empty());
         assert!(n.taps.is_empty());
+    }
+
+    /// Standard SPICE dot commands that `parse_directive` dispatches on but
+    /// which ngspice parses natively, so they must NOT be in
+    /// `MELANGE_ONLY_DIRECTIVES`.
+    const STANDARD_SPICE_DIRECTIVES: &[&str] = &[".model", ".param", ".subckt", ".end", ".ends"];
+
+    /// Scrape the match arms of `Parser::parse_directive` out of this file's
+    /// source: every `".name"` string literal on the left of a `=>` inside the
+    /// function body. Nested `match` arms in the body never use dot-literals,
+    /// and error-message strings never sit on the left of `=>`, so this is
+    /// exactly the dispatch set.
+    fn parse_directive_arms() -> std::collections::BTreeSet<String> {
+        let src = include_str!("parser.rs");
+        let start = src
+            .find("fn parse_directive(&mut self")
+            .expect("parse_directive must exist");
+        let body = &src[start..];
+        // Function body ends at the next impl-level `fn` (4-space indent).
+        let end = body[1..].find("\n    fn ").map_or(body.len(), |i| i + 1);
+        let body = &body[..end];
+
+        let mut arms = std::collections::BTreeSet::new();
+        for line in body.lines() {
+            let Some((lhs, _)) = line.split_once("=>") else {
+                continue;
+            };
+            let mut rest = lhs;
+            while let Some(open) = rest.find('"') {
+                let after = &rest[open + 1..];
+                let Some(close) = after.find('"') else { break };
+                let lit = &after[..close];
+                if lit.starts_with('.')
+                    && lit.len() > 1
+                    && lit[1..].chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                {
+                    arms.insert(lit.to_string());
+                }
+                rest = &after[close + 1..];
+            }
+        }
+        arms
+    }
+
+    #[test]
+    fn test_melange_only_directives_matches_parse_directive() {
+        // Direction 1: every arm of parse_directive is either standard SPICE
+        // or listed in MELANGE_ONLY_DIRECTIVES (catches a new directive added
+        // to the parser but not the const).
+        let arms = parse_directive_arms();
+        assert!(
+            arms.len() >= 10,
+            "arm scrape looks broken (found only {:?})",
+            arms
+        );
+        let expected: std::collections::BTreeSet<String> = MELANGE_ONLY_DIRECTIVES
+            .iter()
+            .chain(STANDARD_SPICE_DIRECTIVES)
+            .map(|s| s.to_string())
+            .collect();
+        let missing_from_const: Vec<_> = arms.difference(&expected).collect();
+        assert!(
+            missing_from_const.is_empty(),
+            "parse_directive arms not in MELANGE_ONLY_DIRECTIVES (or the standard set): {:?}",
+            missing_from_const
+        );
+
+        // Direction 2: every const entry is an actual arm (catches a stale
+        // entry left behind after a directive is removed from the parser).
+        let stale: Vec<_> = MELANGE_ONLY_DIRECTIVES
+            .iter()
+            .filter(|d| !arms.contains(**d))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "MELANGE_ONLY_DIRECTIVES entries with no parse_directive arm: {:?}",
+            stale
+        );
+
+        // No entry may be standard SPICE, and the list must be lowercase with
+        // a leading dot (the consumer compares against the lowercased first
+        // token of a line).
+        for d in MELANGE_ONLY_DIRECTIVES {
+            assert!(
+                !STANDARD_SPICE_DIRECTIVES.contains(d),
+                "{d} is standard SPICE and must not be listed as melange-only"
+            );
+            assert!(d.starts_with('.') && *d == d.to_lowercase(), "bad entry {d}");
+        }
+    }
+
+    #[test]
+    fn test_every_melange_only_directive_parses() {
+        // One minimal well-formed deck per directive; each must parse with no
+        // error. If a directive is added to MELANGE_ONLY_DIRECTIVES without a
+        // row here, the coverage assertion at the bottom fails.
+        let decks: &[(&str, &str)] = &[
+            (".pot", "T\nR1 1 0 10k\n.pot R1 1k 100k\n.end\n"),
+            (".switch", "T\nC1 1 0 100n\n.switch C1 100n 220n\n.end\n"),
+            (".wiper", "T\nR1 1 2 50k\nR2 2 0 50k\n.wiper R1 R2 100k\n.end\n"),
+            (
+                ".gang",
+                "T\nR1 1 0 10k\nR2 2 0 10k\n.pot R1 1k 100k\n.pot R2 1k 100k\n.gang \"G\" R1 R2\n.end\n",
+            ),
+            (".runtime", "T\nV1 1 0 DC 5\nR1 1 0 1k\n.runtime V1 as bias\n.end\n"),
+            (".mismatch", "T\nR1 1 0 1k\n.mismatch D IS=0.02\n.end\n"),
+            (".tolerance", "T\nR1 1 0 1k\n.tolerance R=0.01\n.end\n"),
+            (".seed", "T\nR1 1 0 1k\n.seed 7\n.end\n"),
+            (".linearize", "T\nR1 1 0 1k\n.linearize Q9\n.end\n"),
+            (".tap", "T\nR1 a 0 1k\n.tap a\n.end\n"),
+            (".input_impedance", "T\nR1 1 0 1k\n.input_impedance 600\n.end\n"),
+            (".integrator", "T\nR1 1 0 1k\n.integrator trap\n.end\n"),
+            (".inject", "T\nR1 a 0 1k\n.inject a fb R=47k\n.end\n"),
+            (".delay_feedback", "T\nR1 a 0 1k\n.delay_feedback a\n.end\n"),
+        ];
+        for (directive, deck) in decks {
+            assert!(
+                MELANGE_ONLY_DIRECTIVES.contains(directive),
+                "{directive} row is not in MELANGE_ONLY_DIRECTIVES"
+            );
+            if let Err(e) = Netlist::parse(deck) {
+                panic!("{directive} deck failed to parse: {e}\n{deck}");
+            }
+        }
+        for d in MELANGE_ONLY_DIRECTIVES {
+            assert!(
+                decks.iter().any(|(name, _)| name == d),
+                "{d} has no parse-coverage deck in this test"
+            );
+        }
     }
 }

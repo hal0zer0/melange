@@ -150,6 +150,13 @@ pub struct ValidationOptions {
     /// Grid-off pentode reduction mode — mirrors `melange compile
     /// --tube-grid-fa` (`auto` | `on` | `off`). Defaults to `auto`.
     pub tube_grid_fa: String,
+    /// Force Backward Euler on the melange side — mirrors `melange compile
+    /// --backward-euler`. DIAGNOSTIC only (attribute integrator error, like
+    /// `--bjt-fa off`); default `false` keeps the shipped auto selection.
+    pub backward_euler: bool,
+    /// Force trapezoidal on the melange side — mirrors `melange compile
+    /// --force-trap`. DIAGNOSTIC only; ignored when `backward_euler` is true.
+    pub force_trap: bool,
 }
 
 impl Default for ValidationOptions {
@@ -166,6 +173,8 @@ impl Default for ValidationOptions {
             input_node: "in".to_string(),
             bjt_fa_mode: melange_solver::codegen::BjtFaMode::Auto,
             tube_grid_fa: "auto".to_string(),
+            backward_euler: false,
+            force_trap: false,
         }
     }
 }
@@ -335,6 +344,8 @@ pub fn validate_circuit_with_options(
         input_node,
         options.bjt_fa_mode,
         &options.tube_grid_fa,
+        options.backward_euler,
+        options.force_trap,
         None,
     )?;
 
@@ -538,6 +549,8 @@ pub fn run_melange_solver_from_str(
     input_node_name: &str,
     bjt_fa_mode: melange_solver::codegen::BjtFaMode,
     tube_grid_fa: &str,
+    backward_euler: bool,
+    force_trap: bool,
     main_code: Option<&str>,
 ) -> Result<Vec<f64>, ValidationError> {
     use melange_solver::codegen::{routing, CodeGenerator, CodegenConfig};
@@ -750,6 +763,11 @@ pub fn run_melange_solver_from_str(
         max_iterations: melange_solver::pipeline::auto_tune_max_iter(
             None, &kernel, &decision, false, false, input_node,
         ),
+        // Diagnostics (default: shipped behaviour — auto integrator). No
+        // oversampling knob here: the harness compares sample-aligned and the
+        // half-band IIR's group delay would read as error.
+        backward_euler,
+        force_trap,
         ..CodegenConfig::default()
     };
     let generator = CodeGenerator::new(config);

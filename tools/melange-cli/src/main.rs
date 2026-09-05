@@ -354,6 +354,17 @@ enum Commands {
         /// reduction.
         #[arg(long, default_value = "auto")]
         tube_grid_fa: String,
+
+        /// Force Backward Euler on the melange side (diagnostic; mirrors
+        /// `compile --backward-euler`). Attributes integrator error; the
+        /// default keeps the shipped auto selection.
+        #[arg(long)]
+        backward_euler: bool,
+
+        /// Force trapezoidal on the melange side (diagnostic; mirrors
+        /// `compile --force-trap`). Ignored when --backward-euler is set.
+        #[arg(long)]
+        force_trap: bool,
     },
 
     /// Simulate circuit with input signal
@@ -927,6 +938,8 @@ fn main() -> Result<()> {
             thd_tolerance,
             bjt_fa,
             tube_grid_fa,
+            backward_euler,
+            force_trap,
         } => {
             // Validate numeric CLI parameters
             if sample_rate <= 0.0 || !sample_rate.is_finite() {
@@ -972,6 +985,8 @@ fn main() -> Result<()> {
                 ReductionModes {
                     bjt_fa: &bjt_fa,
                     tube_grid_fa: &tube_grid_fa,
+                    backward_euler,
+                    force_trap,
                 },
             )
         }
@@ -2534,6 +2549,12 @@ struct ToleranceOverrides {
 struct ReductionModes<'a> {
     bjt_fa: &'a str,
     tube_grid_fa: &'a str,
+    // Diagnostics (not reductions): melange-side integrator override, for
+    // attributing integrator error against ngspice. No oversampling knob: the
+    // harness compares sample-aligned and the half-band IIR group delay would
+    // read as error.
+    backward_euler: bool,
+    force_trap: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2679,6 +2700,8 @@ fn validate_circuit_source(
         input_node: input_node.to_string(),
         bjt_fa_mode: parse_bjt_fa_mode(reductions.bjt_fa),
         tube_grid_fa: reductions.tube_grid_fa.to_string(),
+        backward_euler: reductions.backward_euler,
+        force_trap: reductions.force_trap,
         ..Default::default()
     };
 
