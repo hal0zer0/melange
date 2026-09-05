@@ -1204,6 +1204,45 @@ See [DYNAMIC_PARAMS.md](aidocs/DYNAMIC_PARAMS.md#runtime-v--host-driven-voltage-
 
 ---
 
+### .oversampling — Recommended Oversampling Factor
+
+Declares the oversampling factor a deck needs to keep aliasing from its nonlinear
+distortion products under control. This is an **accuracy minimum / recommendation,
+not a mandate** — oversampling costs CPU and adds anti-alias-filter latency, which
+is the downstream plugin author's product decision, so a build is free to override
+it downward.
+
+**Syntax:**
+```
+.oversampling N          ; N ∈ {1, 2, 4}
+```
+
+**Examples:**
+```spice
+.oversampling 4          ; deck recommends 4× for its hard-clipping stage
+.oversampling 2          ; deck recommends 2×
+```
+
+**Resolution (compile / simulate / analyze — the shipping path):**
+- An explicit `--oversampling` on the command line **always wins**, even when it
+  is **lower** than the deck value (a `log::warn!` is logged in that case:
+  "deck recommends .oversampling >= N for accuracy; building at M < N by request").
+- With no CLI flag, the deck's `.oversampling` value is used.
+- With neither, the factor is `1`.
+
+**Notes:**
+- Valid values are `1`, `2`, and `4` (matching the `--oversampling` cap). Any
+  other value is a hard parse error.
+- **`validate` ignores this directive entirely.** An oversampled comparison
+  against ngspice is confounded by anti-alias-filter group delay, so validation
+  always runs at the base sample rate regardless of the directive (the line is
+  stripped from the ngspice deck like every other melange-only directive).
+- It is a **directive, not a comment convention.** A `* recommended-flags:`
+  comment is unvalidatable and re-creates the hand-transcription drift that the
+  directive exists to remove.
+
+---
+
 ## 6. Analysis Directives (validation deck only — NOT parsed by melange)
 
 > **These directives are NOT parsed by melange-solver.** `.op`, `.ac`, `.tran`,

@@ -106,8 +106,10 @@ enum Commands {
         input_resistance: Option<f64>,
 
         /// Oversampling factor (1=none, 2=2x, 4=4x). Higher reduces aliasing and improves NR stability.
-        #[arg(long, default_value = "1")]
-        oversampling: usize,
+        /// Overrides the deck's `.oversampling` recommendation when set (even if lower); absent, the
+        /// deck value is used, else 1.
+        #[arg(long)]
+        oversampling: Option<usize>,
 
         /// Solver type: auto (default), dk, nodal.
         /// Auto selects DK for most circuits, nodal for multi-transformer.
@@ -425,8 +427,10 @@ enum Commands {
 
         /// Oversampling factor (1=none, 2=2x, 4=4x). Higher reduces aliasing
         /// and improves NR stability for circuits with diode switching.
-        #[arg(long, default_value = "1")]
-        oversampling: usize,
+        /// Overrides the deck's `.oversampling` recommendation when set (even
+        /// if lower); absent, the deck value is used, else 1.
+        #[arg(long)]
+        oversampling: Option<usize>,
 
         /// Authentic circuit noise mode: off (default), thermal, shot, full.
         #[arg(long, value_name = "MODE", default_value = "off")]
@@ -551,9 +555,11 @@ enum Commands {
 
         /// Oversampling factor (1=none, 2=2x, 4=4x). Mirrors
         /// `compile --oversampling` so the analyzed response matches the
-        /// generated plugin.
-        #[arg(long, default_value = "1")]
-        oversampling: usize,
+        /// generated plugin. Overrides the deck's `.oversampling`
+        /// recommendation when set (even if lower); absent, the deck value is
+        /// used, else 1.
+        #[arg(long)]
+        oversampling: Option<usize>,
 
         /// Op-amp rail saturation mode: auto, none, hard, active-set,
         /// active-set-be, boyle-diodes. Mirrors `compile --opamp-rail-mode`.
@@ -812,8 +818,10 @@ fn main() -> Result<()> {
             if max_iter == 0 {
                 anyhow::bail!("max-iter must be at least 1, got 0");
             }
-            if oversampling != 1 && oversampling != 2 && oversampling != 4 {
-                anyhow::bail!("oversampling must be 1, 2, or 4, got {}", oversampling);
+            if let Some(n) = oversampling {
+                if n != 1 && n != 2 && n != 4 {
+                    anyhow::bail!("oversampling must be 1, 2, or 4, got {}", n);
+                }
             }
             if output_clamp <= 0.0 || !output_clamp.is_finite() {
                 anyhow::bail!(
@@ -1023,8 +1031,10 @@ fn main() -> Result<()> {
                 .iter()
                 .map(|p| melange_solver::parser::normalize_node_name(p))
                 .collect();
-            if oversampling != 1 && oversampling != 2 && oversampling != 4 {
-                anyhow::bail!("oversampling must be 1, 2, or 4, got {}", oversampling);
+            if let Some(n) = oversampling {
+                if n != 1 && n != 2 && n != 4 {
+                    anyhow::bail!("oversampling must be 1, 2, or 4, got {}", n);
+                }
             }
             if !matches!(tube_grid_fa.as_str(), "auto" | "on" | "off") {
                 anyhow::bail!(
@@ -1140,8 +1150,10 @@ fn main() -> Result<()> {
                     tube_grid_fa
                 );
             }
-            if oversampling != 1 && oversampling != 2 && oversampling != 4 {
-                anyhow::bail!("oversampling must be 1, 2, or 4, got {}", oversampling);
+            if let Some(n) = oversampling {
+                if n != 1 && n != 2 && n != 4 {
+                    anyhow::bail!("oversampling must be 1, 2, or 4, got {}", n);
+                }
             }
             let rail_mode = melange_solver::codegen::OpampRailMode::parse(&opamp_rail_mode)
                 .ok_or_else(|| {
@@ -1373,6 +1385,34 @@ fn forced_dk_hard_blocker(
     }
 }
 
+/// Resolve the effective oversampling factor for the shipping path
+/// (`compile` / `simulate` / `analyze`).
+///
+/// `.oversampling N` in a deck is an accuracy MINIMUM / recommendation, not a
+/// mandate: rate costs CPU and latency, which is the downstream plugin author's
+/// product decision. So an explicit `--oversampling` on the command line always
+/// wins — even when it is LOWER than the deck value, in which case a warning is
+/// logged. Absent an explicit flag, the deck's `.oversampling` value is used;
+/// absent both, 1. `validate` never calls this — it stays at the base rate
+/// regardless of the directive (an oversampled comparison is confounded by
+/// anti-alias-filter group delay).
+fn resolve_oversampling(explicit_cli: Option<usize>, recommended: Option<usize>) -> usize {
+    match (explicit_cli, recommended) {
+        (Some(cli), Some(rec)) => {
+            if cli < rec {
+                log::warn!(
+                    "deck recommends .oversampling >= {rec} for accuracy; building at {cli} < {rec} \
+                     by request (--oversampling wins)"
+                );
+            }
+            cli
+        }
+        (Some(cli), None) => cli,
+        (None, Some(rec)) => rec,
+        (None, None) => 1,
+    }
+}
+
 fn compile_circuit_source(
     circuit_source: &circuits::CircuitSource,
     output: &PathBuf,
@@ -1386,7 +1426,7 @@ fn compile_circuit_source(
     format: OutputFormat,
     with_level_params: bool,
     input_resistance_flag: Option<f64>,
-    oversampling: usize,
+    oversampling_cli: Option<usize>,
     no_dc_block: bool,
     solver_override: &str,
     backward_euler: bool,
@@ -1459,6 +1499,10 @@ fn compile_circuit_source(
     println!("Step 1: Parsing SPICE netlist...");
     let mut netlist =
         Netlist::parse(&netlist_str).with_context(|| "Failed to parse SPICE netlist")?;
+
+    // Resolve the effective oversampling factor: explicit --oversampling wins,
+    // else the deck's `.oversampling` recommendation, else 1.
+    let oversampling = resolve_oversampling(oversampling_cli, netlist.recommended_oversampling);
 
     // Expand subcircuit instances (X elements) before MNA
     if !netlist.subcircuits.is_empty() {
@@ -2766,7 +2810,7 @@ struct SimulateOptions<'a> {
     solver: &'a str,
     opamp_rail_mode: melange_solver::codegen::OpampRailMode,
     tube_grid_fa: &'a str,
-    oversampling: usize,
+    oversampling: Option<usize>,
     noise_mode: melange_solver::codegen::NoiseMode,
     noise_seed: u64,
     backward_euler: bool,
@@ -2801,7 +2845,7 @@ struct AnalyzeOptions<'a> {
     harmonics: usize,
     tube_grid_fa: &'a str,
     solver: &'a str,
-    oversampling: usize,
+    oversampling: Option<usize>,
     opamp_rail_mode: melange_solver::codegen::OpampRailMode,
     noise_mode: melange_solver::codegen::NoiseMode,
     noise_seed: u64,
@@ -2931,6 +2975,9 @@ fn simulate_circuit_source(
     println!("Step 1: Parsing SPICE netlist...");
     let mut netlist =
         Netlist::parse(&netlist_str).with_context(|| "Failed to parse SPICE netlist")?;
+    // Resolve the effective oversampling factor: explicit --oversampling wins,
+    // else the deck's `.oversampling` recommendation, else 1.
+    let oversampling = resolve_oversampling(opts.oversampling, netlist.recommended_oversampling);
     if !netlist.subcircuits.is_empty() {
         netlist
             .expand_subcircuits()
@@ -3121,7 +3168,7 @@ fn simulate_circuit_source(
         &config_for_fa,
         opts.solver,
         opts.sample_rate,
-        opts.oversampling,
+        oversampling,
         input_node_idx,
         input_conductance,
         &|a| println!("{a}"),
@@ -3138,7 +3185,7 @@ fn simulate_circuit_source(
         opts.tube_grid_fa,
         opts.solver,
         opts.sample_rate,
-        opts.oversampling,
+        oversampling,
         input_node_idx,
         input_conductance,
     )?;
@@ -3174,7 +3221,7 @@ fn simulate_circuit_source(
     // Build at the INTERNAL (oversampled) rate so the routing decision below
     // sees the same S/A_neg the generated solver ships — see the compile
     // path's `routing_rate` comment. For os=1 this equals `opts.sample_rate`.
-    let routing_rate = opts.sample_rate * opts.oversampling as f64;
+    let routing_rate = opts.sample_rate * oversampling as f64;
     // Inductor circuits always use the augmented-MNA kernel — including under
     // `--solver dk`. The previous `opts.solver != "dk"` gate sent dk-forced
     // inductor circuits through the non-augmented companion-model path,
@@ -3325,7 +3372,7 @@ fn simulate_circuit_source(
         extra_input_nodes: Vec::new(),
         extra_input_resistances: Vec::new(),
         output_nodes,
-        oversampling_factor: opts.oversampling,
+        oversampling_factor: oversampling,
         output_scales,
         output_clamp_v: 10.0,
         include_dc_op: true,
@@ -3458,7 +3505,7 @@ fn simulate_circuit_source(
     // rescues them), so 5% would cry wolf. 20% cleanly separates onset
     // transients from a systematic latch (~100% in the failing case).
     if let (Some(nr_fail), Some(samples)) = (nr_max_iter_count, diag_samples) {
-        let internal_samples = samples.saturating_mul(opts.oversampling as u64).max(1);
+        let internal_samples = samples.saturating_mul(oversampling as u64).max(1);
         let frac = nr_fail as f64 / internal_samples as f64;
         if frac > 0.20 {
             let max_iter_disp = opts
@@ -3511,7 +3558,7 @@ fn analyze_freq_response(
         harmonics,
         tube_grid_fa,
         solver,
-        oversampling,
+        oversampling: oversampling_cli,
         opamp_rail_mode,
         noise_mode,
         noise_seed,
@@ -3548,6 +3595,9 @@ fn analyze_freq_response(
 
     let mut netlist =
         Netlist::parse(&netlist_str).with_context(|| "Failed to parse SPICE netlist")?;
+    // Resolve the effective oversampling factor: explicit --oversampling wins,
+    // else the deck's `.oversampling` recommendation, else 1.
+    let oversampling = resolve_oversampling(oversampling_cli, netlist.recommended_oversampling);
     if !netlist.subcircuits.is_empty() {
         netlist
             .expand_subcircuits()

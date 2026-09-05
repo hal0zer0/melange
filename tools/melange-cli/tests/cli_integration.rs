@@ -217,6 +217,80 @@ fn test_compile_produces_compilable_rust() {
     );
 }
 
+/// The `.oversampling` directive is honored on compile as an accuracy MINIMUM:
+/// with no `--oversampling` flag the deck value is baked in; an explicit flag
+/// wins (even when lower), and a lower explicit value warns; with neither the
+/// factor is 1.
+#[test]
+fn test_oversampling_directive_resolution() {
+    // Extract `pub const OVERSAMPLING_FACTOR: usize = N;` from generated code.
+    fn factor(code: &str) -> usize {
+        let anchor = "OVERSAMPLING_FACTOR: usize = ";
+        let start = code
+            .find(anchor)
+            .unwrap_or_else(|| panic!("no OVERSAMPLING_FACTOR const in generated code"))
+            + anchor.len();
+        let rest = &code[start..];
+        let end = rest.find(';').expect("no ; after OVERSAMPLING_FACTOR");
+        rest[..end].trim().parse().expect("factor is an integer")
+    }
+
+    // Run compile, returning (generated code, stderr).
+    fn compile(deck: &str, extra: &[&str], tag: &str) -> (String, String) {
+        let cir = write_test_circuit(deck, tag);
+        let out = std::env::temp_dir().join(format!("melange_cli_test_{}.rs", tag));
+        let mut args: Vec<&str> = vec![
+            "compile",
+            cir.to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+            "--input-node",
+            "in",
+            "--output-node",
+            "out",
+        ];
+        args.extend_from_slice(extra);
+        let output = Command::new(melange_bin())
+            .args(&args)
+            .current_dir(project_root())
+            .output()
+            .expect("run melange");
+        assert!(
+            output.status.success(),
+            "compile failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let code = std::fs::read_to_string(&out).expect("read generated");
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let _ = std::fs::remove_file(&cir);
+        let _ = std::fs::remove_file(&out);
+        (code, stderr)
+    }
+
+    let deck_os4 = format!("{}\n.oversampling 4\n", TEST_DIODE_CLIPPER);
+
+    // Deck-honored: `.oversampling 4`, no CLI flag → 4.
+    let (code, stderr) = compile(&deck_os4, &[], "os_deck");
+    assert_eq!(factor(&code), 4, "deck .oversampling 4 must be honored");
+    assert!(
+        !stderr.contains("deck recommends"),
+        "no downward-override warning expected: {stderr}"
+    );
+
+    // CLI overrides downward: `.oversampling 4` + `--oversampling 2` → 2, warn.
+    let (code, stderr) = compile(&deck_os4, &["--oversampling", "2"], "os_override");
+    assert_eq!(factor(&code), 2, "explicit --oversampling must win");
+    assert!(
+        stderr.contains("deck recommends .oversampling >= 4")
+            && stderr.contains("building at 2"),
+        "expected downward-override warning, got: {stderr}"
+    );
+
+    // No directive + no flag → 1.
+    let (code, _) = compile(TEST_DIODE_CLIPPER, &[], "os_none");
+    assert_eq!(factor(&code), 1, "default oversampling is 1");
+}
+
 // ============================================================================
 // simulate command
 // ============================================================================

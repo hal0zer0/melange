@@ -147,6 +147,20 @@ pub struct Netlist {
     /// circuit was validated with, so a routine fleet regen can't silently
     /// change it out from under a shipped plugin.
     pub integrator: Option<IntegratorPref>,
+    /// Recommended oversampling factor (`.oversampling 2` / `4`). This is an
+    /// accuracy MINIMUM / recommendation, NOT a mandate: oversampling controls
+    /// aliasing from nonlinear distortion products, but the rate costs CPU and
+    /// latency, which is the plugin author's (downstream) product decision.
+    ///
+    /// Resolution on the shipping path (compile / simulate / analyze):
+    /// `effective = explicit_cli.unwrap_or(recommended_oversampling).unwrap_or(1)`.
+    /// An explicit `--oversampling` on the command line always wins — even when
+    /// it is LOWER than the deck value (a warning is logged in that case). The
+    /// `validate` path IGNORES this field entirely: an oversampled comparison
+    /// is confounded by anti-alias-filter group delay, so validate stays at the
+    /// base rate regardless of the directive. Values are restricted to {1,2,4}
+    /// to match the `--oversampling` cap. `None` (default) means unspecified.
+    pub recommended_oversampling: Option<usize>,
 }
 
 /// Compile-time integration-scheme pin set by the `.integrator` directive.
@@ -433,6 +447,7 @@ impl Netlist {
             tolerance_c: 0.0,
             tolerance_l: 0.0,
             integrator: None,
+            recommended_oversampling: None,
         }
     }
 
@@ -1555,6 +1570,7 @@ pub const MELANGE_ONLY_DIRECTIVES: &[&str] = &[
     ".integrator",
     ".inject",
     ".delay_feedback",
+    ".oversampling",
 ];
 
 /// SPICE netlist parser.
@@ -2766,6 +2782,33 @@ impl Parser {
                     }
                 }
                 netlist.integrator = Some(pref);
+            }
+            ".oversampling" => {
+                // .oversampling N — declare a recommended (accuracy-minimum)
+                // oversampling factor, N in {1,2,4}. NOT a mandate: an explicit
+                // `--oversampling` CLI flag always wins (see CLI resolution),
+                // and validate ignores this entirely. See
+                // `Netlist::recommended_oversampling`.
+                self.require_parts(&parts, 2, "an oversampling factor (1, 2, or 4)")?;
+                let n: usize = parts[1].parse().map_err(|_| {
+                    self.error(format!(
+                        ".oversampling value '{}' is not a valid integer (must be 1, 2, or 4)",
+                        parts[1]
+                    ))
+                })?;
+                if !matches!(n, 1 | 2 | 4) {
+                    return Err(self.error(format!(
+                        ".oversampling must be 1, 2, or 4, got {n}"
+                    )));
+                }
+                if let Some(prev) = netlist.recommended_oversampling {
+                    if prev != n {
+                        return Err(self.error(format!(
+                            "conflicting .oversampling directives ({prev} and {n})"
+                        )));
+                    }
+                }
+                netlist.recommended_oversampling = Some(n);
             }
             ".end" | ".ends" => {
                 // End of netlist or subcircuit
@@ -6801,6 +6844,44 @@ U1 0 inv out opamp
     }
 
     #[test]
+    fn test_oversampling_directive_parses() {
+        for (deck, want) in [
+            ("T\nR1 1 0 1k\n.oversampling 1\n.end\n", 1usize),
+            ("T\nR1 1 0 1k\n.oversampling 2\n.end\n", 2),
+            ("T\nR1 1 0 1k\n.oversampling 4\n.end\n", 4),
+        ] {
+            let n = Netlist::parse(deck).expect("parse");
+            assert_eq!(n.recommended_oversampling, Some(want));
+        }
+    }
+
+    #[test]
+    fn test_oversampling_absent_is_none() {
+        let n = Netlist::parse("Noop\nR1 a b 1k\n.end\n").expect("parse");
+        assert_eq!(n.recommended_oversampling, None);
+    }
+
+    #[test]
+    fn test_oversampling_rejects_out_of_set() {
+        let err = Netlist::parse("Bad\n.oversampling 3\nR1 a b 1k\n.end\n").unwrap_err();
+        assert!(
+            err.message.contains("must be 1, 2, or 4"),
+            "expected valid-values error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_oversampling_rejects_non_numeric() {
+        let err = Netlist::parse("Bad\n.oversampling hi\nR1 a b 1k\n.end\n").unwrap_err();
+        assert!(
+            err.message.contains("not a valid integer"),
+            "expected integer parse error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
     fn test_mismatch_absent_is_no_op() {
         // No `.mismatch` directive — Netlist should default to empty specs
         // and None seed.
@@ -7142,6 +7223,7 @@ U1 0 inv out opamp
             (".integrator", "T\nR1 1 0 1k\n.integrator trap\n.end\n"),
             (".inject", "T\nR1 a 0 1k\n.inject a fb R=47k\n.end\n"),
             (".delay_feedback", "T\nR1 a 0 1k\n.delay_feedback a\n.end\n"),
+            (".oversampling", "T\nR1 1 0 1k\n.oversampling 2\n.end\n"),
         ];
         for (directive, deck) in decks {
             assert!(

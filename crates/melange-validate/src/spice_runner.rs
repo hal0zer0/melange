@@ -1130,6 +1130,10 @@ mod tests {
         // The list must cover the two directives that were historically missed.
         assert!(MELANGE_ONLY_DIRECTIVES.contains(&".integrator"));
         assert!(MELANGE_ONLY_DIRECTIVES.contains(&".inject"));
+        // `.oversampling` is honored on the shipping path but must be stripped
+        // for the (base-rate) ngspice comparison — validate ignores it.
+        assert!(MELANGE_ONLY_DIRECTIVES.contains(&".oversampling"));
+        assert!(is_melange_directive(".oversampling 4"));
 
         // Whole-token match: a longer token sharing a prefix is not a hit.
         assert!(!is_melange_directive(".potx R1 1k 100k"));
