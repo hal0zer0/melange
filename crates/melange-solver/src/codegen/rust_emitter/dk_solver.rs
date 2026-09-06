@@ -52,19 +52,20 @@ impl RustEmitter {
             "    // puts the initial guess much closer to the solution, reducing NR iterations.\n",
         );
         code.push_str("    let mut i_nl = [0.0; M];\n");
-        code.push_str("    for i in 0..M {\n");
         if has_latched_device(ir) {
-            // Glow present → ZERO-ORDER warm start (same as the nodal predictor).
+            // Glow present → ZERO-ORDER warm start (same as the nodal predictor):
+            // copy the previous i_nl (memcpy via copy_from_slice, clippy-clean).
             // The first-order predictor extrapolates the stiff lit-discharge
             // current into device breakdown; unconditional zero-order-when-glow is
             // the proven cure. This also un-masks the same issue DK's Step-6c
             // damping was papering over (its damp count should now fall toward 0).
             // Compile-time gated → byte-identical for non-glow circuits.
-            code.push_str("        i_nl[i] = state.i_nl_prev[i];\n");
+            code.push_str("    i_nl.copy_from_slice(&state.i_nl_prev);\n\n");
         } else {
+            code.push_str("    for i in 0..M {\n");
             code.push_str("        i_nl[i] = 2.0 * state.i_nl_prev[i] - state.i_nl_prev_prev[i];\n");
+            code.push_str("    }\n\n");
         }
-        code.push_str("    }\n\n");
 
         if m == 0 {
             code.push_str("    // No nonlinear devices\n");

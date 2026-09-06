@@ -5648,26 +5648,25 @@ impl RustEmitter {
             code.push_str("    // Step 4: M-dim Newton-Raphson (Schur complement)\n");
             code.push_str("    // First-order predictor warm start\n");
             code.push_str("    let mut i_nl = [0.0f64; M];\n");
-            code.push_str("    for i in 0..M {\n");
             if has_latched_device(ir) {
-                // Glow present → ZERO-ORDER warm start. The first-order predictor
-                // `2·i_prev − i_prev_prev` extrapolates the stiff lit-discharge
-                // current (RS↔ROFF is a ~1e5 conductance step) into the cathode
-                // diode's reverse breakdown, which the Schur convergence accepts
-                // (nodal Schur divergence to ~1e6 V). The overshoot is throughout
-                // the lit discharge, not just at the flip, so narrowing to
-                // flip-adjacent samples is insufficient (measured); unconditional
+                // Glow present → ZERO-ORDER warm start: copy the previous i_nl
+                // (a memcpy — `copy_from_slice` keeps clippy quiet). The
+                // first-order predictor `2·i_prev − i_prev_prev` extrapolates the
+                // stiff lit-discharge current (RS↔ROFF is a ~1e5 conductance step)
+                // into the cathode diode's reverse breakdown, which the Schur
+                // convergence accepts (nodal divergence to ~1e6 V). The overshoot
+                // spans the whole lit discharge, not just the flip, so
+                // flip-adjacent narrowing is insufficient (measured); unconditional
                 // zero-order-when-glow is clean and tighter. Compile-time gated on
                 // latched-device presence → byte-identical for every non-glow circuit.
-                code.push_str(
-                    "        i_nl[i] = state.i_nl_prev[i];\n",
-                );
+                code.push_str("    i_nl.copy_from_slice(&state.i_nl_prev);\n");
             } else {
+                code.push_str("    for i in 0..M {\n");
                 code.push_str(
                     "        i_nl[i] = 2.0 * state.i_nl_prev[i] - state.i_nl_prev_prev[i];\n",
                 );
+                code.push_str("    }\n");
             }
-            code.push_str("    }\n");
             // Convergence is determined post-loop by `state.last_nr_iterations
             // < MAX_ITER as u32` (see emission a few lines below). Earlier
             // versions of the emitter declared `let mut converged = false;`
@@ -6143,22 +6142,21 @@ impl RustEmitter {
 
             // BE NR loop (use k_be, s_ni_be)
             code.push_str("        // Reset i_nl to predictor for BE attempt\n");
-            code.push_str("        for i in 0..M {\n");
             if has_latched_device(ir) {
-                // Same zero-order-when-glow gate as the trap predictor. The BE
-                // retry inherited the same first-order warm start, so a reactive
-                // be_fallback could not recover across the glow discontinuity
-                // without this (the auto-detector fired but did not save the trap
-                // run). Compile-time gated → byte-identical for non-glow.
-                code.push_str(
-                    "            i_nl[i] = state.i_nl_prev[i];\n",
-                );
+                // Same zero-order-when-glow gate as the trap predictor (memcpy via
+                // copy_from_slice). The BE retry inherited the same first-order
+                // warm start, so a reactive be_fallback could not recover across
+                // the glow discontinuity without this (the auto-detector fired but
+                // did not save the trap run). Compile-time gated → byte-identical
+                // for non-glow.
+                code.push_str("        i_nl.copy_from_slice(&state.i_nl_prev);\n\n");
             } else {
+                code.push_str("        for i in 0..M {\n");
                 code.push_str(
                     "            i_nl[i] = 2.0 * state.i_nl_prev[i] - state.i_nl_prev_prev[i];\n",
                 );
+                code.push_str("        }\n\n");
             }
-            code.push_str("        }\n\n");
 
             // Breakpoint-BE samples get a larger NR budget: the swap sample can
             // be a stiff step off a biased operating point, and a BE sample that
