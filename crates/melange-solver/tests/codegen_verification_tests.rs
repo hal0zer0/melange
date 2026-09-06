@@ -178,8 +178,12 @@ fn test_generated_ni_matrix_matches_kernel() {
 
     // Also verify N_I is declared with the correct dimensions
     assert!(
-        code.contains("pub const N_I: [[f64; N]; M]"),
-        "N_I should be declared as [[f64; N]; M] (M rows of N columns)."
+        code.contains("pub const N_I: [[f64; M]; N]"),
+        "N_I must be declared as [[f64; M]; N] (N rows of M columns) on EVERY \
+         solver path. It was stored transposed on DK and non-transposed on \
+         nodal under this one public symbol until the layout was normalized; \
+         a shared matvec lowering to a single index order was silently wrong \
+         on half the corpus, and at N == M wrong with no crash."
     );
 }
 
@@ -329,10 +333,10 @@ fn test_codegen_bjt_2d_matrices_correct_size() {
         "N_V should be declared as [[f64; N]; M]."
     );
 
-    // N_I is [[f64; N]; M] = 2xN (transposed from kernel's NxM)
+    // N_I is [[f64; M]; N] — N rows of M columns, the operator's own shape.
     assert!(
-        code.contains("pub const N_I: [[f64; N]; M]"),
-        "N_I should be declared as [[f64; N]; M]."
+        code.contains("pub const N_I: [[f64; M]; N]"),
+        "N_I should be declared as [[f64; M]; N]."
     );
 
     // Verify all four K matrix values appear in the generated code
@@ -465,7 +469,7 @@ fn test_generated_code_contains_all_constants() {
         "Missing N_V matrix"
     );
     assert!(
-        code.contains("pub const N_I: [[f64; N]; M]"),
+        code.contains("pub const N_I: [[f64; M]; N]"),
         "Missing N_I matrix"
     );
 
@@ -1189,7 +1193,11 @@ fn assert_ir_roundtrip(spice: &str) {
     let emitter = RustEmitter::new().unwrap();
 
     // Direct emission must succeed
-    let direct_code = emitter.emit(&ir).expect("direct emit failed");
+    let direct_code = emitter
+        .emit(&ir)
+        .expect("direct emit failed")
+        .primary()
+        .to_string();
 
     // JSON round-trip
     let json = serde_json::to_string_pretty(&ir).expect("serialize failed");
@@ -1206,7 +1214,11 @@ fn assert_ir_roundtrip(spice: &str) {
     assert_ir_matrices_close(&ir, &ir2);
 
     // Deserialized IR must also emit valid code
-    let roundtrip_code = emitter.emit(&ir2).expect("roundtrip emit failed");
+    let roundtrip_code = emitter
+        .emit(&ir2)
+        .expect("roundtrip emit failed")
+        .primary()
+        .to_string();
 
     // Both should contain all required functions
     for func in &[
@@ -4199,6 +4211,7 @@ fn test_ir_bjt_params_gp_serde_roundtrip() {
         rth: f64::INFINITY,
         cth: 1e-3,
         xti: 3.0,
+        xtb: 0.0,
         eg: 1.11,
         tamb: 300.15,
     };
@@ -5096,7 +5109,11 @@ fn build_ir_force_exponential(spice: &str) -> (String, CircuitIR) {
     }
 
     let emitter = RustEmitter::new().expect("create RustEmitter");
-    let code = emitter.emit(&ir).expect("emit beam tetrode code");
+    let code = emitter
+        .emit(&ir)
+        .expect("emit beam tetrode code")
+        .primary()
+        .to_string();
     (code, ir)
 }
 
@@ -5277,7 +5294,11 @@ fn test_codegen_mixed_pentode_beam_tetrode() {
     );
 
     let emitter = RustEmitter::new().expect("create RustEmitter");
-    let code = emitter.emit(&ir).expect("emit mixed circuit code");
+    let code = emitter
+        .emit(&ir)
+        .expect("emit mixed circuit code")
+        .primary()
+        .to_string();
 
     // Both helper families must be emitted.
     assert!(
@@ -5395,7 +5416,11 @@ fn test_codegen_classical_pentode_emits_helpers() {
     force_classical_kt88(&mut ir);
 
     let emitter = RustEmitter::new().expect("create RustEmitter");
-    let code = emitter.emit(&ir).expect("emit Classical pentode code");
+    let code = emitter
+        .emit(&ir)
+        .expect("emit Classical pentode code")
+        .primary()
+        .to_string();
 
     // Classical helpers must be emitted (any_classical_pentode == true).
     assert!(
@@ -5453,7 +5478,11 @@ fn test_codegen_classical_pentode_compiles() {
     force_classical_kt88(&mut ir);
 
     let emitter = RustEmitter::new().expect("create RustEmitter");
-    let code = emitter.emit(&ir).expect("emit Classical pentode code");
+    let code = emitter
+        .emit(&ir)
+        .expect("emit Classical pentode code")
+        .primary()
+        .to_string();
 
     let tmp_dir = std::env::temp_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_classical_pentode.rs");
@@ -5602,7 +5631,11 @@ V1 vcc 0 DC 300
     assert_eq!(num_classical, 1, "should flip one slot to Classical KT88");
 
     let emitter = RustEmitter::new().expect("create RustEmitter");
-    let code = emitter.emit(&ir).expect("emit mixed circuit code");
+    let code = emitter
+        .emit(&ir)
+        .expect("emit mixed circuit code")
+        .primary()
+        .to_string();
 
     // Both helper families must be emitted.
     assert!(
@@ -5712,7 +5745,11 @@ fn emit_grid_off_code(spice: &str, grid_off_names: &[&str], vg2k: f64) -> (Strin
     }
 
     let emitter = RustEmitter::new().expect("create RustEmitter");
-    let code = emitter.emit(&ir).expect("emit grid-off code");
+    let code = emitter
+        .emit(&ir)
+        .expect("emit grid-off code")
+        .primary()
+        .to_string();
     (code, ir)
 }
 
@@ -6086,7 +6123,11 @@ fn test_codegen_classical_vp_independent_screen() {
     force_classical_kt88(&mut ir);
 
     let emitter = RustEmitter::new().expect("create RustEmitter");
-    let code = emitter.emit(&ir).expect("emit Classical pentode code");
+    let code = emitter
+        .emit(&ir)
+        .expect("emit Classical pentode code")
+        .primary()
+        .to_string();
 
     // Extract the body of `tube_is_pentode_classical`. We grep for the
     // function signature and then scan until the matching closing brace.
@@ -9109,6 +9150,121 @@ C1 out 0 1u
     );
 }
 
+#[test]
+fn test_mismatch_tube_class_t_jitters_per_device_within_tolerance() {
+    // Two 12AX7 triode sections sharing one `.model` card. Without
+    // `.mismatch` they get byte-identical Koren constants — the exact
+    // condition that makes a balanced push-pull tube stage cancel even
+    // harmonics perfectly (measured ~0.002% odd-dominant on passive-eq1a).
+    // `.mismatch T` (previously parser-accepted but a no-op in the IR) must
+    // now jitter MU/KG1/KP per device, breaking the symmetry so H2 survives.
+    const SPICE: &str = "\
+Two-Stage 12AX7 Preamp
+.seed 42
+.mismatch T MU=0.03 KG1=0.05 KP=0.02
+Rin in 0 1Meg
+Cin in grid1 100n
+Rg1 grid1 0 1Meg
+T1 grid1 plate1 cathode1 12AX7
+Rk1 cathode1 0 1.5k
+Ck1 cathode1 0 25u
+Rp1 vcc plate1 100k
+Cc plate1 grid2 22n
+Rg2 grid2 0 470k
+T2 grid2 plate2 cathode2 12AX7
+Rk2 cathode2 0 1.5k
+Ck2 cathode2 0 25u
+Rp2 vcc plate2 100k
+Cout plate2 out 100n
+Rout out 0 1Meg
+V1 vcc 0 DC 250
+.model 12AX7 TUBE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
+";
+    let (code, _, _, _) = generate_code(SPICE);
+
+    let mu0 = extract_const_f64(&code, "DEVICE_0_MU");
+    let mu1 = extract_const_f64(&code, "DEVICE_1_MU");
+    let kg1_0 = extract_const_f64(&code, "DEVICE_0_KG1");
+    let kg1_1 = extract_const_f64(&code, "DEVICE_1_KG1");
+
+    // The two sections must have diverged — this is what breaks the
+    // push-pull even-harmonic cancellation.
+    assert_ne!(mu0, mu1, "T1 and T2 MU must differ under .mismatch T");
+    assert_ne!(kg1_0, kg1_1, "T1 and T2 KG1 must differ under .mismatch T");
+
+    // Each device stays inside its declared tolerance band.
+    for (val, nom, tol, label) in [
+        (mu0, 100.0, 0.03, "DEVICE_0_MU"),
+        (mu1, 100.0, 0.03, "DEVICE_1_MU"),
+        (kg1_0, 1060.0, 0.05, "DEVICE_0_KG1"),
+        (kg1_1, 1060.0, 0.05, "DEVICE_1_KG1"),
+    ] {
+        let rel = (val - nom).abs() / nom;
+        assert!(
+            rel <= tol,
+            "{label} drift {rel:.4} exceeds declared tolerance {tol}"
+        );
+    }
+}
+
+#[test]
+fn test_mismatch_jfet_class_j_jitters_per_device() {
+    // Two JFETs sharing one `.model`. `.mismatch J` must jitter IDSS/VP per
+    // device (was parser-accepted but a no-op in the IR before Option A).
+    const SPICE: &str = "\
+JFET pair
+.seed 42
+.mismatch J IDSS=0.08 VP=0.05
+Vin in 0 DC 0
+Rin in g1 1k
+Rin2 in g2 1k
+J1 out g1 0 J2N5457
+J2 d2 g2 0 J2N5457
+Rd1 vdd out 4.7k
+Rd2 vdd d2 4.7k
+Vdd vdd 0 DC 12
+.model J2N5457 NJ(IDSS=1e-3 VTO=-1.5 LAMBDA=0.02)
+";
+    let (code, _, _, _) = generate_code(SPICE);
+    let idss0 = extract_const_f64(&code, "DEVICE_0_IDSS");
+    let idss1 = extract_const_f64(&code, "DEVICE_1_IDSS");
+    let vp0 = extract_const_f64(&code, "DEVICE_0_VP");
+    let vp1 = extract_const_f64(&code, "DEVICE_1_VP");
+    assert_ne!(idss0, idss1, "J1/J2 IDSS must differ under .mismatch J");
+    assert_ne!(vp0, vp1, "J1/J2 VP must differ under .mismatch J");
+    assert!((idss0 - 1e-3).abs() / 1e-3 <= 0.08, "IDSS within tol");
+    assert!((vp0 - (-1.5)).abs() / 1.5 <= 0.05, "VP within tol");
+}
+
+#[test]
+fn test_mismatch_mosfet_class_m_jitters_per_device() {
+    // Two MOSFETs sharing one `.model`. `.mismatch M` must jitter KP/VT per
+    // device (was a no-op in the IR before Option A).
+    const SPICE: &str = "\
+MOSFET pair
+.seed 42
+.mismatch M KP=0.08 VT=0.05
+Vin in 0 DC 0
+Rin in g1 1k
+Rin2 in g2 1k
+M1 out g1 0 0 NMOS1
+M2 d2 g2 0 0 NMOS1
+Rd1 vdd out 4.7k
+Rd2 vdd d2 4.7k
+Vdd vdd 0 DC 12
+.model NMOS1 NM(KP=2e-3 VTO=1.0 LAMBDA=0.02)
+";
+    let (code, _, _, _) = generate_code(SPICE);
+    let kp0 = extract_const_f64(&code, "DEVICE_0_KP");
+    let kp1 = extract_const_f64(&code, "DEVICE_1_KP");
+    let vt0 = extract_const_f64(&code, "DEVICE_0_VT");
+    let vt1 = extract_const_f64(&code, "DEVICE_1_VT");
+    assert_ne!(kp0, kp1, "M1/M2 KP must differ under .mismatch M");
+    assert_ne!(vt0, vt1, "M1/M2 VT must differ under .mismatch M");
+    assert!((kp0 - 2e-3).abs() / 2e-3 <= 0.08, "KP within tol");
+    assert!((vt0 - 1.0).abs() / 1.0 <= 0.05, "VT within tol");
+}
+
 /// Passive linear LC circuits (M=0) must NOT get auto-promoted to backward
 /// Euler, regardless of spectral radius measured on `S·A_neg`. Bilinear
 /// trap discretization preserves unit-circle poles for imaginary eigenvalues
@@ -9625,4 +9781,50 @@ M1 drain gate source 0 NMOD_BE
         code.contains("DEVICE_0_VT + (1.0) * DEVICE_0_GAMMA"),
         "NMOS body-effect GAMMA term must carry the channel sign (+1.0)"
     );
+}
+
+/// The emitted `fast_exp`/`fast_ln` coefficients must be exactly the canonical
+/// ones in `codegen::fast_math`.
+///
+/// These are melange's OWN implementations, not libm, so every backend has to
+/// use bit-identical coefficients or the backends compute different functions.
+/// The canonical constants exist so a second backend does not have to
+/// transcribe digits out of a Rust string literal by hand; this test is what
+/// stops the emitter and the constants from drifting apart, which would
+/// otherwise be invisible — the outputs would merely disagree in the last
+/// places.
+#[test]
+fn emitted_fast_math_coefficients_are_canonical() {
+    use melange_solver::codegen::fast_math::FAST_MATH_COEFFICIENTS;
+
+    // A diode pulls in fast_exp (and the tube softplus path pulls fast_ln;
+    // both helpers are emitted together).
+    let (code, _, _, _) = generate_code(
+        "Fast math coefficient check\n\
+         V1 in 0 DC 0\n\
+         R1 in out 1k\n\
+         D1 out 0 DMOD\n\
+         C1 out 0 10n\n\
+         .model DMOD D(IS=1e-14 N=1.0)\n\
+         .end\n",
+    );
+
+    assert!(
+        code.contains("fn fast_exp("),
+        "expected fast_exp in emitted code for a diode circuit"
+    );
+
+    for (name, value, text) in FAST_MATH_COEFFICIENTS {
+        assert!(
+            code.contains(text),
+            "emitted code is missing the canonical {name} literal {text:?}"
+        );
+        // And the literal still denotes the constant, so a same-value-different-
+        // text edit cannot slip through either.
+        assert_eq!(
+            text.parse::<f64>().unwrap().to_bits(),
+            value.to_bits(),
+            "{name}: literal {text:?} no longer denotes the canonical value"
+        );
+    }
 }

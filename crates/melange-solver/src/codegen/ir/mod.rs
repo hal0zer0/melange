@@ -74,6 +74,16 @@ pub struct CircuitIR {
     #[serde(default)]
     pub v_prev_ic_seed: Option<Vec<f64>>,
     pub device_slots: Vec<DeviceSlot>,
+    /// Per-device MNA node indices, parallel to `device_slots` (same order,
+    /// same length). Each entry is the device's terminal list in the MNA's
+    /// 1-based index space (0 = ground), e.g. BJT `[collector, base,
+    /// emitter]`, pentode `[plate, grid, cathode, screen(, suppressor)]`.
+    /// Used by the emitters for the `diag_region_exit_count`
+    /// characterization (Vgk > 0 on any pentode, Vbc forward on any BJT),
+    /// which needs terminal voltages that are not all N_V rows of a
+    /// reduced slot. Empty when the IR was built without an MNA.
+    #[serde(default)]
+    pub device_node_indices: Vec<Vec<usize>>,
     pub has_dc_sources: bool,
     pub has_dc_op: bool,
     /// M-vector: nonlinear device currents at DC operating point
@@ -223,6 +233,23 @@ impl IntegratorSelection {
             Self::BeAuto => "backward-euler (auto-promoted)",
         }
     }
+
+    /// Machine-readable reason the integration scheme was chosen, for the
+    /// generated `// provenance:` JSON. Coarser than `label()` on purpose: a
+    /// consumer can assert *why* BE is in effect (an intended contract vs a
+    /// solver decision) without string-matching the human label.
+    /// `explicit` = user asked (`.integrator be` / `--backward-euler`);
+    /// `auto-promoted` = the trap-stability discriminator promoted it;
+    /// `behavioral` = forced by behavioral `B` sources; `trap` = trapezoidal.
+    #[must_use]
+    pub fn integration_source(self) -> &'static str {
+        match self {
+            Self::TrapDefault | Self::TrapCliFlag | Self::TrapDirective => "trap",
+            Self::BeCliFlag | Self::BeDirective => "explicit",
+            Self::BeBehavioral => "behavioral",
+            Self::BeAuto => "auto-promoted",
+        }
+    }
 }
 
 /// A plugin-driven scalar param in IR form (mirrors
@@ -309,6 +336,16 @@ pub struct NamedConstantsIR {
     /// User-named circuit nodes: (sanitized const suffix, 0-based node index).
     /// Ground is implicit (index 0) and not emitted.
     pub nodes: Vec<(String, usize)>,
+    /// Every non-ground node's ORIGINAL (un-sanitized) name paired with its
+    /// 0-based index — the SAME index space as `DC_OP`/`dc_operating_point`.
+    /// Emitted as the `NODE_NAMES: [&str; N]` parallel array + `dc_op_by_name`
+    /// lookup so reading a node's operating point is a lookup, not N recompiles
+    /// (openfarf thread 218). Unlike `nodes`, this includes solver-internal
+    /// nodes (BJT `basePrime`, transformer branches) so the array is a complete
+    /// parallel of `DC_OP`; rows with no node name (augmented VS/inductor
+    /// branch-current rows) are left `""`.
+    #[serde(default)]
+    pub node_names: Vec<(String, usize)>,
     /// Voltage sources: (sanitized const suffix, RHS row = n_nodes + vs.ext_idx).
     /// The row index is the aug-MNA row where the VS's KVL constraint lives,
     /// i.e. where a `.runtime` voltage source (P1) stamps its per-sample value.
@@ -477,6 +514,11 @@ pub struct SolverConfig {
     /// per-sample Δg self-corrects.
     #[serde(default)]
     pub breakpoint_be: bool,
+    /// Requested nodal sub-path override (see
+    /// [`crate::codegen::NodalSubPathOverride`]). `Auto` is the shipping
+    /// behaviour; the forcing modes are diagnostic escape hatches.
+    #[serde(default)]
+    pub nodal_sub_path_override: crate::codegen::NodalSubPathOverride,
     /// Resolved op-amp supply rail saturation strategy.
     ///
     /// If the user's [`CodegenConfig::opamp_rail_mode`] was [`OpampRailMode::Auto`],
@@ -649,10 +691,25 @@ pub(crate) fn build_named_constants(
         dedupe_in_order(raw)
     };
 
+    // ORIGINAL node names in DC_OP index space (idx - 1, ground excluded).
+    // Includes solver-internal nodes so `NODE_NAMES` is a complete parallel of
+    // `DC_OP`. `node_map` keys are unique, so no dedupe is needed.
+    let node_names: Vec<(String, usize)> = {
+        let mut v: Vec<(String, usize)> = mna
+            .node_map
+            .iter()
+            .filter(|(name, idx)| **idx != 0 && name.as_str() != "0")
+            .map(|(name, idx)| (name.clone(), *idx - 1))
+            .collect();
+        v.sort_by_key(|(_, idx)| *idx);
+        v
+    };
+
     NamedConstantsIR {
         nodes: nodes_raw,
         vsources,
         pots,
+        node_names,
     }
 }
 
@@ -1717,10 +1774,43 @@ impl CircuitIR {
         };
 
         // Auto-detect stiffness: if the trapezoidal time-stepping operator S*A_neg
-        // has spectral radius > 1.001 (above stability boundary), the circuit
-        // is too stiff for trapezoidal and needs backward Euler.
-        // Note: for DK codegen, auto_be=true means the circuit should be routed
-        // to the nodal solver instead (BE on DK still diverges for high-S circuits).
+        // has spectral radius > TRAP_BE_PROMOTION_RHO (above the stability
+        // boundary), or is Nyquist-marginal (rho > TRAP_BE_SIGN_FLIP_RHO with a
+        // negative dominant eigenvalue), the circuit is too stiff for trapezoidal
+        // and needs backward Euler. See `trap_needs_be` for the exact predicate.
+        //
+        // Reaching this on a DK build is the estimator-disagreement case, not the
+        // normal one. `routing::auto_route` already sends trap-unstable circuits
+        // (`dk_unstable`) and high-|S| circuits (`s_ill_conditioned`) to the nodal
+        // path (see routing.rs) — the reroute is the primary mechanism and it
+        // happens upstream. But the router measures with a fixed-iteration power
+        // method and no input deflation, while this block uses the converged,
+        // input-deflated analyzer (`analyze_trap_stability_deflated`); the two
+        // straddle the threshold in both directions (cf. the router-hint
+        // discussion at the nodal auto-BE site). So a DK build lands here only
+        // when the router's cruder estimate said DK was safe and the better one
+        // disagrees, or when DK was forced. BE-on-DK is the rescue for that
+        // residual population; it is not the intended handling for a circuit the
+        // router would have rerouted.
+        //
+        // Measured 2026-08-30 across the 42-circuit golden corpus: the DK-routed
+        // auto-BE population is 5 promotions (gold-press @192k os=4; noyce ×4),
+        // ALL of them the Nyquist sign-flip case (rho ≈ 1.0000..1.0002,
+        // dominant_sign < 0), NOT trap-unstable (rho > TRAP_BE_PROMOTION_RHO). The
+        // router's power method measures the eigenvalue MAGNITUDE fine (|lambda| ≈
+        // 1.0) — what it lacks is a dominant-sign discriminator, and its only test
+        // is rho > 1.002, so a mode at z ≈ -0.9999 reads as a magnitude safely
+        // under threshold and correctly does NOT trip a trap-instability reroute.
+        // Magnitude alone is the wrong question for the Nyquist case; the router
+        // is not asking the sign question at all. These 5 promotions are not mere
+        // threshold-straddlers: the sign-flip clause of `trap_needs_be` also gates
+        // on max|S| > NYQUIST_GATE_MAX_ABS_S, calibrated to fire only where the
+        // fs/2 limit cycle is AUDIBLE (a 2-stage BJT preamp at max|S| ≈ 3e4 stays
+        // on trap with a µV cycle; a 3× triode cascade at ≈5e5 needs BE). BE works
+        // because the DK BE RHS drops the `N_i·i_nl_prev` stamp that seeds the
+        // mode. All 5 are golden-verified. No reroute is warranted: wiring this
+        // analyzer into the router's `dk_unstable` would move 5 working circuits
+        // onto the costlier nodal full-LU path for zero correctness benefit.
         //
         // Gated on `m > 0`: passive linear circuits (M=0) are inherently stable
         // under trap-rule discretization — the bilinear transform preserves
@@ -1786,6 +1876,31 @@ impl CircuitIR {
             false
         };
         let be = cfg_backward_euler || auto_be;
+
+        // The DK backward-Euler matrix build cannot correctly discretize
+        // companion-modeled inductors. `stamp_dk_companion_inductors` stamps the
+        // TRAPEZOIDAL companion value g_eq = T/(2L) unconditionally (the correct
+        // BE value is T/L, with A_neg = alpha*C and no -g_eq history term), and
+        // the os=1 primary-BE branch never calls the stamp at all — treating each
+        // companion inductor as an open circuit. The augmented-MNA inductor path
+        // (from_mna_augmented: L as branch rows in the C matrix, so
+        // augmented_inductors == true) IS exact under BE and is what the CLI uses
+        // for every inductor circuit. Only a library consumer building a kernel
+        // via the non-augmented DkKernel::from_mna with inductors present
+        // (kernel.inductors non-empty => augmented_inductors false) and requesting
+        // BE reaches the broken path. Fail loud at this API boundary rather than
+        // silently ship wrong magnetics. (This is NOT a debug_assert: release
+        // builds — how a consumer crate builds — must reject it too.)
+        if be && !augmented_inductors && !kernel.inductors.is_empty() {
+            return Err(CodegenError::UnsupportedTopology(format!(
+                "backward-Euler integration with {} companion-modeled inductor(s) is not \
+                 supported on the DK path: the companion stamp uses the trapezoidal value \
+                 g_eq = T/(2L), but BE needs g_eq = T/L with A_neg = alpha*C (history x1). \
+                 Build the kernel with DkKernel::from_mna_augmented — augmented-MNA inductor \
+                 branch rows are exact under backward Euler — or use trapezoidal integration.",
+                kernel.inductors.len()
+            )));
+        }
         if auto_be {
             integrator_selection = IntegratorSelection::BeAuto;
         }
@@ -1836,6 +1951,7 @@ impl CircuitIR {
             breakpoint_be: false,
             opamp_rail_mode: rail_mode.mode,
             emit_dc_op_recompute: config.emit_dc_op_recompute,
+            nodal_sub_path_override: config.nodal_sub_path_override,
             injections: config.injections.clone(),
             taps: config.taps.clone(),
         };
@@ -2102,6 +2218,7 @@ impl CircuitIR {
 
         let mut device_slots = Self::build_device_info_with_mna(netlist, Some(mna))?;
         Self::resolve_mosfet_nodes(&mut device_slots, mna);
+        let device_node_indices = Self::device_node_indices_for(&device_slots, mna);
 
         let inductors: Vec<InductorIR> = kernel
             .inductors
@@ -2531,6 +2648,7 @@ impl CircuitIR {
             },
             v_prev_ic_seed,
             device_slots,
+            device_node_indices,
             has_dc_sources,
             has_dc_op,
             dc_nl_currents,
@@ -2843,6 +2961,7 @@ impl CircuitIR {
             breakpoint_be: false,
             opamp_rail_mode: rail_mode.mode,
             emit_dc_op_recompute: config.emit_dc_op_recompute,
+            nodal_sub_path_override: config.nodal_sub_path_override,
             injections: config.injections.clone(),
             taps: config.taps.clone(),
         };
@@ -3365,6 +3484,7 @@ impl CircuitIR {
             matrices,
             dc_operating_point,
             v_prev_ic_seed,
+            device_node_indices: Self::device_node_indices_for(&device_slots, mna),
             device_slots,
             has_dc_sources,
             has_dc_op,
@@ -3674,6 +3794,7 @@ impl CircuitIR {
         netlist: &Netlist,
         config: &CodegenConfig,
     ) -> std::collections::HashSet<String> {
+        use crate::codegen::BjtFaMode;
         use crate::dc_op::{self, DcOpConfig};
 
         let device_slots = Self::build_device_info(netlist).unwrap_or_default();
@@ -3740,73 +3861,142 @@ impl CircuitIR {
                 // (typical stage Vce margin is 0.85V in cascaded topologies).
                 if vbc_eff < -0.5 {
                     let name = dev.name.to_ascii_uppercase();
-                    if bp.is_gummel_poon()
-                        || bp.has_ise()
-                        || bp.has_self_heating()
-                        || bp.has_parasitics()
-                    {
-                        let mechanism = if bp.is_gummel_poon() {
-                            "Gummel-Poon params present (VAF/VAR/IKF/IKR) — 1D FA emission has no qb"
-                        } else if bp.has_ise() {
-                            "ISE leakage present — 1D FA emission uses Ib=Ic/BF"
-                        } else if bp.has_self_heating() {
-                            "self-heating present (RTH finite) — thermal update needs the 2D (Ic,Ib) slot pair; a 1D slot would alias the next device's slot"
-                        } else {
-                            "ohmic parasitics present (RB/RC/RE) — 1D FA emission drops them; gm·RE reaches O(1) on power BJTs"
-                        };
+
+                    // `--bjt-fa off`: never reduce — every BJT stays full-2D.
+                    if config.bjt_fa_mode == BjtFaMode::Off {
                         log::info!(
-                            "BJT '{}' is forward-active (Vbc={:.3}V) but NOT 1D-reduced: {}. Routing full-2D.",
+                            "BJT '{}' forward-active (Vbc={:.3}V) but --bjt-fa=off — routing full-2D.",
                             name,
-                            vbc_eff,
-                            mechanism
+                            vbc_eff
                         );
                         continue;
                     }
-                    log::info!(
-                        "BJT '{}' forward-active (Vbc={:.3}V). Using 1D model.",
-                        name,
-                        vbc_eff
-                    );
-                    forward_active.insert(name);
+
+                    // Self-heating is a STRUCTURAL exclusion, not an accuracy
+                    // one: the thermal update reads the 2D (Ic,Ib) slot pair at
+                    // (s, s+1); a 1D slot would alias the NEXT device's slot (or
+                    // run out of bounds). It is NEVER reduced — not even under
+                    // `--bjt-fa=force`.
+                    if bp.has_self_heating() {
+                        log::info!(
+                            "BJT '{}' forward-active (Vbc={:.3}V) but self-heating (RTH finite) — the thermal update needs the 2D (Ic,Ib) slot pair; NOT 1D-reduced even under --bjt-fa=force. Routing full-2D.",
+                            name,
+                            vbc_eff
+                        );
+                        continue;
+                    }
+
+                    // GP / ISE / ohmic-parasitic devices are ACCURACY-excluded:
+                    // the 1D FA emission is structurally valid (uses IS/NF/Vt,
+                    // Ib=Ic/BF) but drops qb / leakage / RB-RC-RE. Exact only for
+                    // pure Ebers-Moll.
+                    if bp.is_gummel_poon() || bp.has_ise() || bp.has_parasitics() {
+                        let mechanism = if bp.is_gummel_poon() {
+                            "Gummel-Poon params present (VAF/VAR/IKF/IKR) — 1D FA emission has no qb (drops Early effect + high-level injection)"
+                        } else if bp.has_ise() {
+                            "ISE leakage present — 1D FA emission uses Ib=Ic/BF"
+                        } else {
+                            "ohmic parasitics present (RB/RC/RE) — 1D FA emission drops them; gm·RE reaches O(1) on power BJTs"
+                        };
+                        if config.bjt_fa_mode == BjtFaMode::Force {
+                            // Explicit user opt-in. The reduction is accuracy-
+                            // lossy and NOT safe under signal: the collector
+                            // swing modulates qb, which this compile-time
+                            // decision cannot see. Warn loudly, per device.
+                            log::warn!(
+                                "BJT '{}' FORCE-reduced to 1D by --bjt-fa=force despite: {}. Accuracy is NOT guaranteed under signal (~1-2 dB deviation under hard drive for GP/ISE, larger for parasitics). You requested this — remove --bjt-fa=force for the accuracy-exact full-2D model.",
+                                name,
+                                mechanism
+                            );
+                            forward_active.insert(name);
+                        } else {
+                            // Auto (default): leave full-2D — exact.
+                            log::info!(
+                                "BJT '{}' is forward-active (Vbc={:.3}V) but NOT 1D-reduced: {}. Routing full-2D (use --bjt-fa=force to override).",
+                                name,
+                                vbc_eff,
+                                mechanism
+                            );
+                            continue;
+                        }
+                    } else {
+                        // Pure Ebers-Moll: 1D reduction is EXACT (auto + force).
+                        log::info!(
+                            "BJT '{}' forward-active (Vbc={:.3}V). Using 1D model (exact).",
+                            name,
+                            vbc_eff
+                        );
+                        forward_active.insert(name);
+                    }
                 }
             }
         }
         forward_active
     }
 
-    /// Phase 1b grid-off pentode detection.
+    /// Per-device MNA node indices, parallel to `slots`.
     ///
-    /// Runs DC-OP on the provided MNA system and inspects each pentode's
-    /// converged `Vgk` and `Vg2k`. Pentodes with `Vgk < -(vgk_onset + 0.5)`
-    /// across the operating point (i.e. well below grid cutoff) qualify
-    /// for grid-off reduction: `Ig1` is identically zero and `Vg2k` is
-    /// approximately held constant by external bypass caps, so the NR
-    /// block can drop from 3D to 2D.
+    /// `build_device_info_with_mna` creates exactly one slot per entry of
+    /// `mna.nonlinear_devices`, in the same order (linearized devices are
+    /// absent from both). That 1:1 correspondence is what the FA / grid-off /
+    /// LDR arms of that builder already rely on; this helper makes it
+    /// explicit for the emitters. Returns an empty list (and warns) if the
+    /// two ever disagree, so the region-exit characterization is simply
+    /// not emitted rather than emitted against the wrong terminals.
+    fn device_node_indices_for(
+        slots: &[DeviceSlot],
+        mna: &crate::mna::MnaSystem,
+    ) -> Vec<Vec<usize>> {
+        if slots.len() != mna.nonlinear_devices.len() {
+            log::warn!(
+                "device_slots ({}) and mna.nonlinear_devices ({}) differ in length; \
+                 diag_region_exit_count will not be emitted for this circuit",
+                slots.len(),
+                mna.nonlinear_devices.len()
+            );
+            return Vec::new();
+        }
+        mna.nonlinear_devices
+            .iter()
+            .map(|d| d.node_indices.clone())
+            .collect()
+    }
+
+    /// Phase 1b grid-off pentode reduction — selection.
     ///
     /// Returns a `HashMap<String, f64>` mapping pentode name (uppercased)
-    /// to the DC-OP-converged `Vg2k` value that should be frozen in the
-    /// reduced device. The caller uses the map to:
+    /// to the DC-OP-converged `Vg2k = V[screen] - V[cathode]` that the
+    /// reduced 2D device freezes. The caller passes the map to
+    /// [`MnaSystem::from_netlist_with_grid_off`] (rebuilds with
+    /// `dimension: 2` pentode slots); [`build_device_info_with_mna`] then
+    /// sets `TubeParams.kind = SharpPentodeGridOff` and `vg2k_frozen` from
+    /// the reduced MNA.
     ///
-    /// 1. Collect the set of names and pass them to
-    ///    [`MnaSystem::from_netlist_with_grid_off`] to rebuild MNA with
-    ///    `dimension: 2` pentode slots
-    /// 2. Build `device_slots` via [`build_device_info_with_mna`] — that
-    ///    function will detect the MNA's reduced dimension and set
-    ///    `TubeParams.kind = SharpPentodeGridOff` automatically
-    /// 3. Iterate the returned slots and write the per-slot
-    ///    `vg2k_frozen` value from this map
+    /// **`force_all == false` (`--tube-grid-fa auto`) never reduces.** The
+    /// reduction drops two things that the full 3D model carries:
+    ///
+    /// 1. `Vg2k` as a live NR dimension. It is frozen at its DC value, but
+    ///    `Vg2k = V[screen] - V[cathode]` is cathode-referenced: every
+    ///    cathode-biased stage without a bypass capacitor, and every stage
+    ///    with a finite screen impedance, has a signal-dependent `Vg2k`, and
+    ///    the local negative feedback through `dIp/dVg2k` is lost. Measured
+    ///    against ngspice as a small-signal gain error of +2.2% (EF86,
+    ///    Rk 4.7k unbypassed), +3.0% (EL84, Rk 150 unbypassed, screen
+    ///    bypassed) and +12.3% (EL84, Rk 130 and a 1k screen stop, both
+    ///    unbypassed); the linearized prediction from the DC-OP
+    ///    sensitivities reproduces all three to four digits. See
+    ///    `DEVICE_MODELS.md` "Grid-Off Reduction".
+    /// 2. `Ig1`. Exact only while `Vgk <= 0`; the region is classified once
+    ///    from the DC OP and never re-checked, so a stage driven into grid
+    ///    conduction silently runs a model with no grid current.
+    ///
+    /// Neither can be bounded at compile time from a quiescent bias point,
+    /// so there is no sound automatic selection; `auto` is reserved for a
+    /// reduction that is provably neutral (none exists yet) and keeps the
+    /// full 3D model. `force_all == true` (`--tube-grid-fa on`) reduces
+    /// every non-variable-mu pentode and warns per device.
     ///
     /// Mirrors [`detect_forward_active_bjts`] for the BJT case.
-    ///
-    /// **Auto-detection only.** The `--tube-grid-fa on/off` CLI overrides
-    /// bypass this detection (force-on creates a map with every pentode,
-    /// force-off returns an empty map regardless of bias).
-    /// Detect pentodes eligible for grid-off dimension reduction.
-    ///
-    /// When `force_all` is true, every non-variable-mu pentode is marked as
-    /// grid-off (the `--tube-grid-fa on` escape hatch), bypassing the normal
-    /// `Vgk < cutoff_threshold` check.  The DC-OP Vg2k value is still read
-    /// and used as the frozen screen voltage.
     pub fn detect_grid_off_pentodes(
         mna: &crate::mna::MnaSystem,
         netlist: &Netlist,
@@ -3824,6 +4014,49 @@ impl CircuitIR {
             return std::collections::HashMap::new();
         }
 
+        // Candidate pentodes: full-3D, sharp (non-variable-mu), with the
+        // four terminals the reduction needs. Variable-mu pentodes (6K7,
+        // EF89) are excluded outright — they exist for continuously varying
+        // bias under sidechain control, the opposite of a frozen screen.
+        // Schema `validate()` also rejects that combination.
+        let candidates: Vec<(usize, &crate::device_types::TubeParams)> = device_slots
+            .iter()
+            .enumerate()
+            .filter_map(|(slot_idx, slot)| {
+                if slot.device_type != DeviceType::Tube || slot.dimension != 3 {
+                    return None;
+                }
+                let tp = match &slot.params {
+                    DeviceParams::Tube(tp) if tp.is_pentode() && !tp.is_variable_mu() => tp,
+                    _ => return None,
+                };
+                let dev = mna.nonlinear_devices.get(slot_idx)?;
+                // Pentode node order (from `categorize_element` in mna.rs):
+                // [plate, grid, cathode, screen] with optional [, suppressor].
+                if dev.node_indices.len() < 4 {
+                    return None;
+                }
+                Some((slot_idx, tp))
+            })
+            .collect();
+        if candidates.is_empty() {
+            return std::collections::HashMap::new();
+        }
+
+        if !force_all {
+            for (slot_idx, _) in &candidates {
+                log::info!(
+                    "Pentode '{}' keeps the full 3D model under --tube-grid-fa auto: the \
+                     frozen-Vg2k reduction is not accuracy-neutral (it drops the \
+                     Vg2k = V(screen) - V(cathode) feedback through the cathode and \
+                     screen impedances, and the Ig1 grid current for Vgk > 0). \
+                     `--tube-grid-fa on` opts in.",
+                    mna.nonlinear_devices[*slot_idx].name.to_ascii_uppercase()
+                );
+            }
+            return std::collections::HashMap::new();
+        }
+
         let dc_op_config = DcOpConfig {
             tolerance: config.dc_op_tolerance,
             max_iterations: config.dc_op_max_iterations,
@@ -3838,72 +4071,54 @@ impl CircuitIR {
             ..DcOpConfig::default()
         };
         let dc_result = dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config);
+        let v_at = |n: usize| -> f64 {
+            if n > 0 && n - 1 < dc_result.v_node.len() {
+                dc_result.v_node[n - 1]
+            } else {
+                0.0
+            }
+        };
 
         let mut grid_off = std::collections::HashMap::new();
-        for (slot_idx, slot) in device_slots.iter().enumerate() {
-            // Grid-off only applies to pentodes in the full-3D state;
-            // skip non-tubes and slots already reduced to 2D.
-            if slot.device_type != DeviceType::Tube || slot.dimension != 3 {
-                continue;
-            }
-            let tp = match &slot.params {
-                DeviceParams::Tube(tp) if tp.is_pentode() => tp,
-                _ => continue,
-            };
-            // Variable-mu pentodes (6K7, EF89) are excluded from grid-off —
-            // they're designed specifically for continuous bias changes
-            // under sidechain control, and freezing Vg2k contradicts that
-            // usage pattern. Schema `validate()` also rejects this combo.
-            if tp.is_variable_mu() {
-                continue;
-            }
-            if slot_idx >= mna.nonlinear_devices.len() {
-                continue;
-            }
+        for (slot_idx, tp) in candidates {
             let dev = &mna.nonlinear_devices[slot_idx];
-            // Pentode node order (from `categorize_element` in mna.rs):
-            // [plate, grid, cathode, screen] with optional [, suppressor].
-            if dev.node_indices.len() < 4 {
-                continue;
-            }
             let n_plate = dev.node_indices[0];
             let n_grid = dev.node_indices[1];
             let n_cathode = dev.node_indices[2];
             let n_screen = dev.node_indices[3];
-            let v_at = |n: usize| -> f64 {
-                if n > 0 && n - 1 < dc_result.v_node.len() {
-                    dc_result.v_node[n - 1]
-                } else {
-                    0.0
-                }
-            };
-            let v_grid = v_at(n_grid);
             let v_cathode = v_at(n_cathode);
-            let v_screen = v_at(n_screen);
-            let vgk = v_grid - v_cathode;
-            let vg2k = v_screen - v_cathode;
-            // Grid-off threshold: Vgk must be below -(vgk_onset + 0.5) so
-            // there's a safety margin around the Leach grid-current onset.
-            // `vgk_onset` is the positive voltage at which grid conduction
-            // begins; grid-off requires Vgk to be well-negative.
-            let cutoff_threshold = -(tp.vgk_onset + 0.5);
-            // Additionally require a plausible positive Vg2k — a frozen
-            // value near zero would suggest DC-OP didn't actually solve
-            // for the screen supply.
-            let plate = v_at(n_plate);
-            let passes_threshold = force_all || (vgk < cutoff_threshold && vg2k > 1.0);
-            if passes_threshold {
-                let name = dev.name.to_ascii_uppercase();
-                log::info!(
-                    "Pentode '{}' grid-off{}(Vgk={:.3}V, Vg2k={:.3}V, Vpk={:.3}V). Using 2D model.",
+            let vgk = v_at(n_grid) - v_cathode;
+            let vg2k = v_at(n_screen) - v_cathode;
+            let vpk = v_at(n_plate) - v_cathode;
+            let name = dev.name.to_ascii_uppercase();
+            // Explicit user opt-in (`--tube-grid-fa on`). The reduction is
+            // accuracy-lossy and NOT safe under signal: warn loudly, per
+            // device, naming what is dropped. Mirrors `--bjt-fa force`.
+            log::warn!(
+                "Pentode '{}' FORCE-reduced to 2D by --tube-grid-fa on (Vgk={:.3}V, \
+                 Vg2k={:.3}V frozen, Vpk={:.3}V). Dropped: (1) the live Vg2k = \
+                 V(screen) - V(cathode) dimension — its feedback through the cathode \
+                 and screen impedances is lost (measured +2% to +12% small-signal gain \
+                 error on cathode-biased stages; exact only with an AC-grounded cathode \
+                 AND screen); (2) the Ig1 grid current — wrong whenever Vgk > 0 (grid \
+                 conduction; diag_region_exit_count counts those samples). Remove \
+                 --tube-grid-fa on for the full 3D model.",
+                name,
+                vgk,
+                vg2k,
+                vpk
+            );
+            if vgk >= -(tp.vgk_onset + 0.5) {
+                log::warn!(
+                    "Pentode '{}' is NOT biased below grid cutoff at the DC OP \
+                     (Vgk={:.3}V, onset {:.2}V): the forced grid-off model drops Ig1 \
+                     at a bias where the grid already conducts.",
                     name,
-                    if force_all { " (forced) " } else { " " },
                     vgk,
-                    vg2k,
-                    plate - v_cathode
+                    tp.vgk_onset
                 );
-                grid_off.insert(name, vg2k);
             }
+            grid_off.insert(name, vg2k);
         }
         grid_off
     }
@@ -3975,6 +4190,27 @@ impl CircuitIR {
         let seed = netlist.seed.unwrap_or(0);
         let u = Self::mismatch_draw(seed, device_name, param_name);
         nominal * (1.0 + tol * u)
+    }
+
+    /// Apply per-device `.mismatch T …` jitter to a tube's Koren parameters.
+    ///
+    /// Pushing mismatch to the *device* params (not the shared `.model` card)
+    /// is what makes a push-pull tube pair audibly asymmetric — the dominant
+    /// even-harmonic ("H2") source in an otherwise-balanced push-pull stage,
+    /// where identical-model halves cancel even harmonics exactly. Shared by
+    /// the `Triode` and `Pentode` arms (both carry `TubeParams`). Bit-identical
+    /// pass-through when no `.mismatch T` directive lists the param (tol == 0).
+    fn apply_tube_mismatch(netlist: &Netlist, name: &str, p: &mut crate::device_types::TubeParams) {
+        p.mu = Self::apply_mismatch(netlist, name, "MU", 'T', p.mu);
+        p.ex = Self::apply_mismatch(netlist, name, "EX", 'T', p.ex);
+        p.kg1 = Self::apply_mismatch(netlist, name, "KG1", 'T', p.kg1);
+        p.kp = Self::apply_mismatch(netlist, name, "KP", 'T', p.kp);
+        p.kvb = Self::apply_mismatch(netlist, name, "KVB", 'T', p.kvb);
+        // Pentode-only screen-current sensitivity; 0.0 on triodes → skip like
+        // the DiodeParams.rs guard so triodes stay pure pass-through.
+        if p.kg2 > 0.0 {
+            p.kg2 = Self::apply_mismatch(netlist, name, "KG2", 'T', p.kg2);
+        }
     }
 
     /// Build device info, optionally using MNA device dimensions (for forward-active BJTs).
@@ -4051,8 +4287,14 @@ impl CircuitIR {
                     dim_offset += dim;
                     nl_dev_idx += 1;
                 }
-                Element::Jfet { model, .. } => {
-                    let params = Self::resolve_jfet_params(netlist, model)?;
+                Element::Jfet { name, model, .. } => {
+                    let mut params = Self::resolve_jfet_params(netlist, model)?;
+                    // Per-JFET `.mismatch J …` jitter on the core transfer
+                    // parameters. No-op when the directive is absent.
+                    params.idss = Self::apply_mismatch(netlist, name, "IDSS", 'J', params.idss);
+                    params.vp = Self::apply_mismatch(netlist, name, "VP", 'J', params.vp);
+                    params.lambda =
+                        Self::apply_mismatch(netlist, name, "LAMBDA", 'J', params.lambda);
                     slots.push(DeviceSlot {
                         device_type: DeviceType::Jfet,
                         start_idx: dim_offset,
@@ -4075,7 +4317,9 @@ impl CircuitIR {
                     if is_linearized {
                         continue; // Don't create a DeviceSlot, don't increment nl_dev_idx
                     }
-                    let params = Self::resolve_tube_params(netlist, model)?;
+                    let mut params = Self::resolve_tube_params(netlist, model)?;
+                    // Per-triode `.mismatch T …` jitter (see `apply_tube_mismatch`).
+                    Self::apply_tube_mismatch(netlist, name, &mut params);
                     slots.push(DeviceSlot {
                         device_type: DeviceType::Tube,
                         start_idx: dim_offset,
@@ -4088,8 +4332,11 @@ impl CircuitIR {
                     dim_offset += 2;
                     nl_dev_idx += 1;
                 }
-                Element::Pentode { model, .. } => {
+                Element::Pentode { name, model, .. } => {
                     let mut params = Self::resolve_pentode_params(netlist, model)?;
+                    // Per-pentode `.mismatch T …` jitter (see `apply_tube_mismatch`).
+                    // Includes KG2 (screen-current sensitivity) for pentodes.
+                    Self::apply_tube_mismatch(netlist, name, &mut params);
                     // Check if MNA has this pentode as grid-off (2D reduced).
                     // Phase 1b: after DC-OP detects Vgk < cutoff, the MNA is
                     // rebuilt via `from_netlist_with_grid_off` which stamps
@@ -4136,8 +4383,14 @@ impl CircuitIR {
                     dim_offset += dim;
                     nl_dev_idx += 1;
                 }
-                Element::Mosfet { model, .. } => {
-                    let params = Self::resolve_mosfet_params(netlist, model)?;
+                Element::Mosfet { name, model, .. } => {
+                    let mut params = Self::resolve_mosfet_params(netlist, model)?;
+                    // Per-MOSFET `.mismatch M …` jitter on the core transfer
+                    // parameters. No-op when the directive is absent.
+                    params.kp = Self::apply_mismatch(netlist, name, "KP", 'M', params.kp);
+                    params.vt = Self::apply_mismatch(netlist, name, "VT", 'M', params.vt);
+                    params.lambda =
+                        Self::apply_mismatch(netlist, name, "LAMBDA", 'M', params.lambda);
                     slots.push(DeviceSlot {
                         device_type: DeviceType::Mosfet,
                         start_idx: dim_offset,
@@ -4383,13 +4636,18 @@ impl CircuitIR {
             )));
         }
 
-        Self::warn_unrecognized_params(
+        Self::check_model_params(
             netlist,
             model,
             &[
                 "IS", "N", "CJO", "RS", "BV", "IBV", "KF", "AF", "RTH", "CTH", "XTI", "EG", "TAMB",
             ],
-        );
+            &[],
+        )?;
+        // NOTE: no warn_unresolved_model() here — the diode resolver already
+        // emits its own dedicated fallback warning in the IS-resolution arm
+        // above ("not in catalog and no IS given — falling back to the SPICE
+        // default diode"). Adding the general warning would double-warn.
 
         Ok(DiodeParams {
             is,
@@ -4616,6 +4874,17 @@ impl CircuitIR {
             );
         }
 
+        // SPICE `XTB`: forward/reverse beta temperature exponent, used by the
+        // self-heating block as `BF(T) = BF·(Tj/Tnom)^XTB` (likewise `BR`).
+        // Default 0.0 is SPICE's own, and makes the power term exactly 1.0 —
+        // so a card without `XTB`, and any card at all when `Tj == Tnom`,
+        // leaves beta untouched and the emitted DSP byte-identical.
+        let xtb = Self::lookup_model_param(netlist, model, "XTB").unwrap_or(0.0);
+        if !xtb.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "BJT model XTB must be finite, got {xtb}"
+            )));
+        }
         let xti = Self::lookup_model_param(netlist, model, "XTI").unwrap_or(3.0);
         if !xti.is_finite() {
             return Err(CodegenError::InvalidConfig(format!(
@@ -4637,14 +4906,42 @@ impl CircuitIR {
             )));
         }
 
-        Self::warn_unrecognized_params(
+        Self::check_model_params(
             netlist,
             model,
             &[
                 "IS", "VT", "BF", "BR", "VAF", "VA", "VAR", "VB", "IKF", "JBF", "IKR", "JBR",
                 "CJE", "CJC", "VJE", "MJE", "VJC", "MJC", "FC", "TF", "NF", "NR", "ISE", "NE",
-                "ISC", "NC", "RB", "RC", "RE", "RTH", "CTH", "XTI", "EG", "TAMB", "KF", "AF",
+                "ISC", "NC", "RB", "RC", "RE", "RTH", "CTH", "XTI", "XTB", "EG", "TAMB", "KF",
+                "AF",
             ],
+            &[
+                (
+                    "TR",
+                    "reverse transit time — melange's junction charge is linearized \
+                     at the DC operating point, so the time-varying BC diffusion \
+                     charge TR describes cannot be represented (measured: honoring \
+                     it moves melange AWAY from ngspice). Blocked on per-timestep \
+                     charge re-linearization.",
+                ),
+                (
+                    "XCJC",
+                    "base-collector depletion capacitance split across the internal \
+                     base node — melange places all of CJC at the internal base, \
+                     which is XCJC=1.0 (the SPICE default). Only XCJC<1 is affected.",
+                ),
+            ],
+        )?;
+        Self::warn_unresolved_model(
+            netlist,
+            model,
+            cat.is_some(),
+            &[
+                "IS", "VT", "BF", "BR", "VAF", "VA", "VAR", "VB", "IKF", "JBF", "IKR", "JBR",
+                "CJE", "CJC", "VJE", "MJE", "VJC", "MJC", "FC", "TF", "NF", "NR", "ISE", "NE",
+                "ISC", "NC", "RB", "RC", "RE", "XTB",
+            ],
+            "the built-in default BJT",
         );
 
         Ok(BjtParams {
@@ -4677,6 +4974,7 @@ impl CircuitIR {
             rth,
             cth,
             xti,
+            xtb,
             eg,
             tamb,
         })
@@ -4779,12 +5077,20 @@ impl CircuitIR {
             )));
         }
 
-        Self::warn_unrecognized_params(
+        Self::check_model_params(
             netlist,
             model,
             &[
                 "VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "RD", "RS", "KF", "AF",
             ],
+            &[],
+        )?;
+        Self::warn_unresolved_model(
+            netlist,
+            model,
+            cat.is_some(),
+            &["VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "RD", "RS"],
+            "the built-in default JFET",
         );
 
         Ok(JfetParams {
@@ -4887,12 +5193,22 @@ impl CircuitIR {
             )));
         }
 
-        Self::warn_unrecognized_params(
+        Self::check_model_params(
             netlist,
             model,
             &[
                 "KP", "VTO", "VT", "LAMBDA", "CGS", "CGD", "RD", "RS", "GAMMA", "PHI", "KF", "AF",
             ],
+            &[],
+        )?;
+        Self::warn_unresolved_model(
+            netlist,
+            model,
+            cat.is_some(),
+            &[
+                "KP", "VTO", "VT", "LAMBDA", "CGS", "CGD", "RD", "RS", "GAMMA", "PHI",
+            ],
+            "the built-in default MOSFET",
         );
 
         // source_node and bulk_node will be resolved later from the MNA system
@@ -5057,7 +5373,7 @@ impl CircuitIR {
             )));
         }
 
-        Self::warn_unrecognized_params(
+        Self::check_model_params(
             netlist,
             model,
             &[
@@ -5082,7 +5398,36 @@ impl CircuitIR {
                 "CTH",
                 "VBIAS_ALPHA",
                 "TAMB",
+                // Consumed by `codegen::ir::noise` (shot-noise Gamma-squared
+                // override), NOT by this resolver — which is precisely why it
+                // was missing from this list until the unknown-key check
+                // became a hard error and a test caught it.
+                "SHOT_GAMMA2",
             ],
+            &[],
+        )?;
+        Self::warn_unresolved_model(
+            netlist,
+            model,
+            cat.is_some(),
+            &[
+                "MU",
+                "EX",
+                "KG1",
+                "KP",
+                "KVB",
+                "IG_MAX",
+                "VGK_ONSET",
+                "LAMBDA",
+                "CCG",
+                "CGP",
+                "CCP",
+                "RGI",
+                "MU_B",
+                "SVAR",
+                "EX_B",
+            ],
+            "a default 12AX7-class triode",
         );
 
         Ok(TubeParams {
@@ -5313,7 +5658,7 @@ impl CircuitIR {
             )));
         }
 
-        Self::warn_unrecognized_params(
+        Self::check_model_params(
             netlist,
             model,
             &[
@@ -5341,6 +5686,36 @@ impl CircuitIR {
                 "KF",
                 "AF",
             ],
+            &[],
+        )?;
+        Self::warn_unresolved_model(
+            netlist,
+            model,
+            cat.is_some(),
+            &[
+                "MU",
+                "EX",
+                "KG1",
+                "KG2",
+                "KP",
+                "KVB",
+                "ALPHA_S",
+                "A_FACTOR",
+                "BETA_FACTOR",
+                "PARTITION_F",
+                "SCREEN_FORM",
+                "IG_MAX",
+                "VGK_ONSET",
+                "LAMBDA",
+                "CCG",
+                "CGP",
+                "CCP",
+                "RGI",
+                "MU_B",
+                "SVAR",
+                "EX_B",
+            ],
+            "a default EL84-class pentode",
         );
 
         let params = TubeParams {
@@ -5363,12 +5738,17 @@ impl CircuitIR {
             beta_factor,
             partition_f,
             screen_form,
-            // Phase 1c: variable-mu §5 params. Defaults to sharp (svar=0).
-            // Resolved by a follow-up (task P1c-03) which reads MU_B / SVAR /
-            // EX_B from the .model directive with catalog fallback.
-            mu_b: 0.0,
-            svar: 0.0,
-            ex_b: 0.0,
+            // Phase 1c variable-mu §5 params, resolved above from the `.model`
+            // directive (explicit > catalog > default 0.0) and already
+            // validated. Previously these were hardcoded to 0.0, which silently
+            // discarded a variable-mu pentode card AFTER it passed validation —
+            // the deck compiled as a sharp pentode with no diagnostic. For a
+            // sharp card svar/mu_b/ex_b resolve to 0.0, so this is byte-identical
+            // for every non-variable-mu pentode; it only changes svar>0 decks
+            // (e.g. the 6K7 remote-cutoff stage).
+            mu_b,
+            svar,
+            ex_b,
             // Pentode self-heating not wired yet — screen dissipation needs a
             // separate term (Ip·Vpk + Ig2·Vg2k). Triode path is live.
             rth: f64::INFINITY,
@@ -5396,7 +5776,7 @@ impl CircuitIR {
             )));
         }
 
-        Self::warn_unrecognized_params(netlist, model, &["VSCALE", "G0", "THD", "MODE"]);
+        Self::check_model_params(netlist, model, &["VSCALE", "G0", "THD", "MODE"], &[])?;
 
         Ok(VcaParams { vscale, g0, thd })
     }
@@ -5436,10 +5816,18 @@ impl CircuitIR {
             )));
         }
 
-        Self::warn_unrecognized_params(
+        Self::check_model_params(
             netlist,
             model,
             &["RMIN", "RMAX", "GAMMA", "TAU_A", "TAU_R"],
+            &[],
+        )?;
+        Self::warn_unresolved_model(
+            netlist,
+            model,
+            cat.is_some(),
+            &["RMIN", "RMAX", "GAMMA", "TAU_A", "TAU_R"],
+            "the built-in default LDR",
         );
 
         Ok(crate::device_types::LdrParams {
@@ -5512,22 +5900,126 @@ impl CircuitIR {
     }
 
     /// Warn on unrecognized .model parameters (typo protection).
-    fn warn_unrecognized_params(netlist: &Netlist, model_name: &str, known: &[&str]) {
-        if let Some(m) = netlist
+    /// Check every `.model` parameter against what melange does with it.
+    ///
+    /// Three outcomes, because a `.model` key can be wrong in two very different
+    /// ways and collapsing them serves neither:
+    ///
+    /// * **Honored** — melange reads it. Silent.
+    /// * **Recognized but unimplemented** — a real SPICE parameter melange does
+    ///   not model yet (`unimplemented`). Warns, naming what the omission costs.
+    ///   NOT an error: these arrive on authentic vendor model cards, and
+    ///   refusing them would mean melange rejects genuine SPICE decks over a gap
+    ///   of its own. The warning is the honest report of that gap.
+    /// * **Unknown** — not a valid parameter for this device type at all. **Hard
+    ///   error**, with the accepted keys and an alias hint where one is known.
+    ///
+    /// The third case used to warn and continue, which is how `VP=` on a JFET
+    /// card (the datasheet spelling; SPICE uses `VTO`, and the sign convention
+    /// differs) could be silently discarded while the deck still biased
+    /// correctly off the built-in catalog — producing a right answer for the
+    /// wrong reason, which is worse than a wrong answer.
+    fn check_model_params(
+        netlist: &Netlist,
+        model_name: &str,
+        honored: &[&str],
+        unimplemented: &[(&str, &str)],
+    ) -> Result<(), CodegenError> {
+        let Some(m) = netlist
             .models
             .iter()
             .find(|m| m.name.eq_ignore_ascii_case(model_name))
-        {
-            for (key, _) in &m.params {
-                let upper = key.to_ascii_uppercase();
-                if !known.iter().any(|k| k.eq_ignore_ascii_case(&upper)) {
-                    log::warn!(
-                        ".model {}: unrecognized parameter '{}' (ignored)",
-                        model_name,
-                        key,
-                    );
-                }
+        else {
+            return Ok(());
+        };
+        for (key, _) in &m.params {
+            let upper = key.to_ascii_uppercase();
+            if honored.iter().any(|k| k.eq_ignore_ascii_case(&upper)) {
+                continue;
             }
+            if let Some((_, effect)) = unimplemented
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(&upper))
+            {
+                log::warn!(
+                    ".model {}: '{}' is a recognized SPICE parameter that melange \
+                     does not model yet, so it is IGNORED — {}",
+                    model_name,
+                    key,
+                    effect,
+                );
+                continue;
+            }
+            let hint = Self::model_param_alias_hint(&upper);
+            return Err(CodegenError::InvalidConfig(format!(
+                ".model {model_name}: unknown parameter '{key}'.{hint} Accepted \
+                 for this device: {}",
+                honored.join(", ")
+            )));
+        }
+        Ok(())
+    }
+
+    /// A pointed hint for keys that are a plausible confusion rather than a typo.
+    fn model_param_alias_hint(upper: &str) -> String {
+        match upper {
+            "VP" => " Did you mean VTO? `VP` is the datasheet symbol for \
+                     pinch-off; SPICE spells it VTO, and note the sign \
+                     convention differs (VTO is negative for an N-channel JFET)."
+                .to_string(),
+            "BETA" if false => String::new(),
+            _ => String::new(),
+        }
+    }
+
+    /// Warn when a `.model` card resolves entirely to the hardcoded default
+    /// device because its name matches no built-in catalog part **and** it
+    /// supplies none of its device-defining parameters.
+    ///
+    /// This is the "plausible numbers, wrong circuit" trap: a typo'd model name
+    /// (`.model 12AX8 TRIODE()`) compiles silently as the default device (a
+    /// 12AX7 triode, EL84 pentode, SPICE-default diode, …) with no diagnostic.
+    ///
+    /// It only fires for a *declared-but-underspecified* card. A device that
+    /// references a **never-declared** model already hard-errors in the parser
+    /// (`references model '…' which is not defined`), so that case never reaches
+    /// here. Stays silent on a catalog hit and on any card that specifies a
+    /// defining parameter — a fully custom off-catalog part is legitimate and
+    /// common, so specifying even one defining key suppresses the warning.
+    ///
+    /// `defining_keys` is the class's electrical-identity parameter set (the
+    /// recognized keys minus universal add-ons like KF/AF/RTH/CTH/TAMB, which do
+    /// not define which device this is).
+    fn warn_unresolved_model(
+        netlist: &Netlist,
+        model_name: &str,
+        catalog_hit: bool,
+        defining_keys: &[&str],
+        default_desc: &str,
+    ) {
+        if catalog_hit {
+            return;
+        }
+        let Some(card) = netlist
+            .models
+            .iter()
+            .find(|m| m.name.eq_ignore_ascii_case(model_name))
+        else {
+            return;
+        };
+        let supplied_defining = card.params.iter().any(|(key, _)| {
+            let upper = key.to_ascii_uppercase();
+            defining_keys.iter().any(|k| k.eq_ignore_ascii_case(&upper))
+        });
+        if !supplied_defining {
+            log::warn!(
+                ".model {}: name matches no built-in catalog part and no \
+                 device-defining parameter was supplied — compiling as {}. A \
+                 typo'd model name silently becomes the default device; use an \
+                 exact catalog name or specify the device parameters.",
+                model_name,
+                default_desc,
+            );
         }
     }
 

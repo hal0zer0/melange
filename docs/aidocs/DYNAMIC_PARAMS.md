@@ -155,7 +155,7 @@ position (0.0–1.0) drives all members in lock-step.
 The `!` prefix on a member name **inverts** that member's response — when
 the gang position is at 1.0, the inverted member sees 0.0, and vice
 versa. This is how dual-gang pots with reverse-log tapers (Klon "Gain"
-control, Pultec dual-section EQ) are modeled: one section sweeps
+control, passive dual-section EQ) are modeled: one section sweeps
 clean→clipped while the gang-mate sweeps clipped→clean to crossfade
 between paths.
 
@@ -203,7 +203,7 @@ affected G/C/L entries are restamped and downstream matrices recomputed).
   frequency knobs).
 - **`.switch`** for discrete-position component selectors (impedance
   switches, EQ shape selectors, oscilloscope-style range switches,
-  Pultec frequency selectors, pedal bypass, channel select, clipping-diode
+  passive-EQ frequency selectors, pedal bypass, channel select, clipping-diode
   picker, bright switch). Switches change several component values at once,
   not just one conductance.
 

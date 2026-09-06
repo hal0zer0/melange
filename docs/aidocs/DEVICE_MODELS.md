@@ -125,6 +125,32 @@ the 8 BJTs start at 16 nominal NR dimensions, but 7 of them are detected as
 forward-active and drop to 1D each (`16 - 7 = 9`). Linearized BJTs would drop
 the count further to 0 per device.
 
+#### `--bjt-fa` reduction mode (compile flag)
+
+Forward-active 1D reduction is **exact only for pure Ebers-Moll** BJTs (with
+`Vbc ≪ 0`, `Ic` genuinely does not depend on `Vbc`). For Gummel-Poon / ISE /
+parasitic-carded devices the 1D emission drops `qb` (Early effect + high-level
+injection), leakage, and `RB/RC/RE` — so they route **full-2D** by default.
+The `--bjt-fa off|auto|force` flag (mirrors `--tube-grid-fa`) controls this:
+
+| Mode | Behavior |
+|------|----------|
+| `auto` (default) | Reduce only pure-Ebers-Moll forward-active BJTs (exact). GP/ISE/self-heating/parasitic stay full-2D. Byte-identical to pre-flag codegen. |
+| `force` | Additionally reduce GP/ISE/parasitic forward-active BJTs to 1D, each with a per-device compile **warning**. Self-heating BJTs are **never** reduced (see below). |
+| `off` | No reduction — every BJT stays full-2D (parity / bisecting escape hatch). |
+
+**Known limitation (`--bjt-fa force`):** the reduction is **not accuracy-safe
+under signal**. A GP BJT's `qb` is modulated by the collector swing (`Vbc/VAF`
+Early term), and `Vbc` is exactly the dimension the 1D reduction discards — so
+whether freezing it is safe depends on the runtime drive amplitude, which a
+compile-time decision cannot see. Expect up to ~1–2 dB deviation under hard
+drive for GP/ISE (larger for parasitic-carded devices), concentrated in the
+harmonics. This is why `force` is an explicit, warned opt-in and never
+auto-selected. (See `memory/fa_reduction_gp_bjt_verdict.md` for the full
+analysis.) **Self-heating BJTs are excluded even under `force`** — that is a
+*structural* limit, not an accuracy one: the thermal update reads the 2D
+`(Ic, Ib)` slot pair, and a 1D slot would alias the next device's slot.
+
 ### Collector Current
 ```
 Ic = IS * (exp(Vbe/VT) - exp(Vbc/VT)) - IS/beta_R * (exp(Vbc/VT) - 1)
@@ -622,55 +648,111 @@ or Sta-Level schematic requires either:
 - An author contribution (Reefman accepts pull-model fits via
   ExtractModel — see his uTracer website)
 
-### Grid-Off Reduction (Phase 1b)
+### Grid-Off Reduction (Phase 1b) — opt-in only since 2026-09-04
 
-Load-bearing for Plexi-class amps: without reduction, 4×EL34 + 3×12AX7 =
-18 nonlinear dimensions, which exceeds the M=16 DK Schur cap and forces
-the circuit onto the slower nodal full-LU path. Grid-off reduction
-brings this to 14 dimensions, back under the cap and onto DK Schur
-(Gaussian elimination branch).
+The reduction drops a pentode from 3D (Vgk/Vpk/Vg2k → Ip/Ig2/Ig1) to 2D
+(Vgk/Vpk → Ip/Ig2): the `Ig1` output is dropped and `Vg2k` is frozen at
+its DC-OP value, stored per slot on `DeviceSlot.vg2k_frozen`. It was
+built for Plexi-class amps (4×EL34 + 3×12AX7 = M 18 → 14, back under the
+DK Schur cap) and used to be selected automatically from the DC operating
+point (`Vgk < -(vgk_onset + 0.5)`).
 
-When DC-OP confirms a pentode is biased in grid-cutoff (`Vgk < -0.5 −
-vgk_onset`), two things are true: (1) Ig1 is identically zero (Leach
-power-law below onset), and (2) Vg2k is approximately constant in any
-amp with a well-bypassed screen (47 µF + 1 kΩ screen-stop is universal).
-Melange drops the Ig1 dimension entirely AND freezes Vg2k at the
-DC-OP-converged value, reducing the pentode from 3D to 2D (Vgk/Vpk →
-Ip/Ig2). The frozen Vg2k is stored as a per-slot constant on
-`DeviceSlot.vg2k_frozen`.
+**It is not accuracy-neutral, and no compile-time test can make it so.**
+Measured against ngspice on four corpus decks (validate default 0.1 V,
+`--tube-grid-fa on` vs the full 3D model, which passes at 0.06–0.23%):
 
-This is the BJT-FA analog for pentodes with one important difference:
-BJT forward-active reduction is an **exact** physics simplification (Vbc
-really doesn't drive Ic in FA mode), while pentode grid-off is an
-**approximation** — Vg2k really does drive Ip/Ig2 but varies by <1%
-under signal with a properly bypassed screen.
+| deck | Rk | screen | reduced-model error | mechanism |
+|---|---|---|---|---|
+| noyce-6bq5 (EL84) | 150 Ω unbypassed | 100 Ω + 100 nF | +3.0% gain | A |
+| noyce-ef86 (EF86) | 4.7 kΩ unbypassed | 1 MΩ + 100 nF | +2.2% gain | A |
+| el84-single-stage | 130 Ω unbypassed | 1 kΩ, no cap | +12.3% gain | A |
+| twill-deluxe (2×6V6GT PP) | 250 Ω + 100 µF | 1 kΩ + 47 µF | 22% + waveform change | route flip (see DEBUGGING.md) |
+
+**Mechanism A — the frozen Vg2k is cathode-referenced.** `Vg2k =
+V[screen] − V[cathode]`. The old rationale ("Vg2k varies by <1% under
+signal with a properly bypassed screen") is false for every
+cathode-biased stage without a bypass capacitor: the cathode moves with
+the cathode current, so Vg2k moves even when the screen node is a
+perfect AC ground, and freezing it discards the local negative feedback
+through `gs = dIp/dVg2k`. With an unbypassed screen the `Rg2` path adds
+to it. Linearized at the DC OP (`gm = dIp/dVgk`, `gs = dIp/dVg2k`,
+`r = dIs/dIp` along the loop), the 2D/3D gain ratio is
+
+```
+cathode only:    (1 + Rk·(gm + gs)) / (1 + Rk·gm)                        > 1
++ screen path:   (1 + Rk'·(gm + gs) + gs·|Zs|·r) / (1 + Rk'·gm),  Rk' = Rk·(1 + r)
+```
+
+and the full 2×2 small-signal solve (Ip and Is against Vgk/Vpk/Vg2k,
+with the cathode, screen and plate loads) reproduces the measurements to
+four digits: 1.0302 / 1.0218 / 1.1232 predicted vs 1.0300 / 1.0218 /
+1.1234 measured. el84 is 4× the others because its screen is unbypassed
+AND its plate sits in the knee (Vpk = 43 V), where `r = dIs/dIp` reaches
+1.09 — not a separate mechanism. The only stage where the freeze is
+exact is one whose cathode AND screen are both AC-grounded, which a DC
+operating point cannot tell you. (Verified directly: a scratch copy of
+noyce-6bq5 with a 10 mF screen bypass — screen node swing 0.000000 V —
+still measures the 2.8% error.)
+
+**Mechanism C — grid conduction.** The full 3D model carries the Leach
+grid current `Ig1` (`tube_ig` in `device_tube.rs.tera`;
+`KorenPentode::grid_current` in `melange-devices`), so grid conduction
+under hard drive IS modeled by default. The reduction drops it, exact
+only while `Vgk ≤ 0`; the region was classified once from the quiescent
+bias and never re-checked, so a reduced stage driven into grid
+conduction silently ran a model with no grid current. This is a third
+lossy aspect of the reduction, fixed by the full-3D default, not a blind
+spot shared with the 3D model. It is the same flaw class as BJT
+forward-active saturation (below).
+
+**Policy (`--tube-grid-fa`, `compile`/`simulate`/`analyze`/`validate`):**
+- `auto` (default) — reserved for reductions that are provably neutral;
+  none exists today, so `auto` keeps the full 3D model (== `off`) and
+  logs, per pentode, why. The candidate that would qualify is a
+  reduction that keeps all three voltage rows and drops only the `Ig1`
+  current column (exact within `Vgk ≤ 0`, rectangular N_v/N_i); deferred
+  with the 0.2.0 emitter refactor.
+- `on` — reduce every non-variable-mu pentode; `log::warn!` per device
+  naming what is dropped and the measured error class. Mirrors
+  `--bjt-fa force`.
+- `off` — never reduce (parity / bisecting).
+- Route parity: `apply_grid_off_reduction` runs the same
+  `should_skip_fa_for_nodal_reroute` pre-check as FA, so a reduction can
+  never move a circuit from nodal to DK.
+
+**`diag_region_exit_count`** (both emitters, `CircuitState`): per sample,
+per device, counts a pentode whose converged `Vgk > 0` (grid conducts)
+and a BJT whose converged `vbc_eff > 0` (saturation). It is instrumented
+on the FULL models as well as the reduced ones: under the full-3D default
+it characterizes how often a deck enters the regions the reductions
+assume are never entered — the data the old automatic selection never
+had. `simulate` and `validate` print it (`region_exit_count`). It is not
+a guard; nothing switches on it.
+
+**BJT forward-active: the region is assumed, not enforced (open).**
+`detect_forward_active_bjts` (`ir/mod.rs`) classifies each BJT from the
+quiescent bias; nothing rechecks it per sample. The dropped term is
+`exp(Vbc/Vt)` — about 2e-17 at Vbc = −1 V, so "exact" is fair while Vbc
+stays reverse. **Saturation is where it stops being true**: the reduced
+1D model is the wrong model, silently. Reachable case: a pure-Ebers-Moll
+BJT on the DK path, forward-active at DC, driven hard enough to saturate
+(`--bjt-fa auto` leaves GP/ISE/parasitic/self-heating devices 2D and
+nodal-routed circuits skip FA). `--bjt-fa auto` was deliberately NOT
+flipped alongside the pentode default: the shipped product reduces
+(wurli_preamp Q1/Q2, M 5 → 3), no failure has been measured, and
+`diag_region_exit_count` now measures it — decide with corpus data.
 
 **Triode grid-off is structurally impossible**: Koren `Ip(Vgk, Vpk)`
 needs both voltages, and dropping Vpk would destroy the plate-swing
-signal. Triodes stay 2D regardless of bias. Only pentodes reduce.
+signal. Triodes stay 2D regardless of bias and model grid current in
+that 2D block; the counter is not emitted for them.
 
-### Auto-detection and CLI flag
-
-Auto-detection runs after the first DC-OP converges. For every pentode
-slot, compute Vgk from node voltages; if below cutoff + margin, mark for
-grid-off. Then rebuild MNA via `from_netlist_with_grid_off` and re-run
-DC-OP on the reduced system (converges trivially since the dropped
-dimension was already at its correct value). Warm DC-OP re-init on
-pot/switch changes (commit `e8e18a7`) triggers re-detection.
-
-CLI flag `--tube-grid-fa` matches the existing BJT FA pattern:
-- `auto` (default) — detect at DC-OP, reduce when applicable
-- `on` — force grid-off for every pentode regardless of bias (testing)
-- `off` — never reduce, full 3D path (pre-phase-1b parity)
-
-### Known limitation
+### Known limitation of the reduced model (`on`)
 
 Under hard plate clipping the real tube's screen current rises as Vp
-falls and Vg2k sags slightly; the frozen model misses that motion.
-Audible error is 0.5–2 dB in the affected harmonics, similar in
-character to Classical Koren's Vp-independent screen limitation. For
-users who care about this fidelity, `--tube-grid-fa off` forces the full
-3D path with 5-10× slowdown on Plexi-class circuits.
+falls and Vg2k sags; the frozen model misses that motion on top of
+mechanism A. Expect 0.5–2 dB in the affected harmonics in addition to the
+small-signal gain error above.
 
 ### Compatibility matrix
 
@@ -1007,3 +1089,64 @@ Codegen entry points:
 - `K_DEFAULT` / `K_BE_DEFAULT` constants pre-subtract R_p at codegen time
 - `rebuild_matrices()` emits inline `k[s][s] -= RE; k[s][s+1] -= (RB+RE); …` after K is computed
 - `emit_dk_device_evaluation(use_k_eff: bool)` selects intrinsic vs inner-NR call
+
+---
+
+# `.model` parameter handling (2026-09-02)
+
+Three outcomes, because a key can be wrong in two very different ways:
+
+| class | behaviour |
+|---|---|
+| **Honored** | melange reads it. Silent. |
+| **Recognized but unimplemented** | real SPICE parameter melange does not model. **Warns**, naming what the omission costs. |
+| **Unknown** | not valid for this device type. **Hard error**, with accepted keys and an alias hint. |
+
+The middle tier is not a dodge: `TR` and `XCJC` arrive on authentic vendor cards
+(2N5087, MPSA06, TIP35C/TIP36C in the shipped Wurlitzer power amp). Erroring on
+them would mean melange refuses genuine SPICE decks over a gap of its own.
+
+⚠ **The honored list lives with the resolver, but `.model` params are also read
+elsewhere.** `codegen/ir/noise.rs` reads `SHOT_GAMMA2` and `PARTITION_F`. A list
+maintained by reading the resolver alone cannot be correct — `SHOT_GAMMA2` was
+missing from the tube list, so melange was emitting "unrecognized (ignored)" for
+a parameter it actually uses. Caught only when the check became a hard error.
+
+## BJT temperature dependence
+
+| param | status |
+|---|---|
+| `XTI` | honored — `IS(T) = IS·(Tj/Tnom)^XTI·exp(...)` |
+| `XTB` | **honored as of `df25e7f`** — `BF(T) = BF·(Tj/Tnom)^XTB`, likewise `BR` |
+| `TR` | **not implemented** — see below |
+| `XCJC` | **not implemented** — melange places all of `CJC` at the internal base, which *is* `XCJC = 1.0` (the SPICE default); only `XCJC < 1` is affected |
+
+Before `XTB`, melange modelled self-heating and drifted `IS` with junction
+temperature while current gain stayed **fixed** — a transistor could heat up and
+its β would not move. SPICE's default `XTB = 0.0` makes the power term exactly
+1.0, so cards without it are unaffected.
+
+⚠ **No self-heating BJT exists in the netlist library.** All four models
+anywhere carrying `RTH` are diodes, so the BJT thermal block has no
+circuit-level coverage; `tests/bjt_xtb_beta_temperature_tests.rs` is its only
+guard.
+
+## Why `TR` is blocked (measured, not assumed)
+
+melange linearizes junction caps **at the DC operating point** — fixed companion
+caps stamped into `C`, which `rebuild_matrices` builds per sample-*rate*, not per
+sample. `TR`'s BC diffusion charge is ~0 unless the BC junction is forward-biased
+at idle, so `TR` is inert on every normally-biased deck. Where it *does*
+activate, a fixed cap cannot represent the time-varying charge ngspice
+recomputes each timestep.
+
+Measured under an ngspice both-ways gate on a saturated-at-idle probe:
+**correlation 0.99255 without `TR` → 0.98700 with it.** Honoring it moves
+melange *away* from ngspice. Verdict was DO-NOT-SHIP; nothing landed.
+
+**The prerequisite is per-timestep junction-charge re-linearization**, which is a
+bigger accuracy win than `TR` — it would also make the existing `TF` term exact
+rather than frozen at the quiescent `Ic`. Build it **charge-first**: integrate
+`Q` and differentiate for the companion, as SPICE does. Computing `C(v)` per
+iteration and applying `C·dv/dt` gives charge non-conservation, whose artifacts
+on a large-signal stage can exceed the frozen-cap error it set out to fix.

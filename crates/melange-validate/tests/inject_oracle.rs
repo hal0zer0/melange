@@ -190,7 +190,7 @@ Cpar nx 0 1p
 #[ignore] // compiles + runs generated code (needs rustc); heavy
 fn inject_constant_equals_literal_source_behind_r() {
     // Deck A: `.inject nx fb R=1k`, driven at constant 1.0 V.
-    let deck_a = format!("{RC_NODE}");
+    let deck_a = RC_NODE.to_string();
     let main = "
 fn main() {
     let mut state = CircuitState::default();

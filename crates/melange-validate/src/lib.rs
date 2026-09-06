@@ -46,6 +46,7 @@ use std::path::Path;
 use thiserror::Error;
 
 pub mod comparison;
+pub(crate) mod pentode_translate;
 pub mod spice_runner;
 pub(crate) mod tube_translate;
 pub mod visualizer;
@@ -139,6 +140,23 @@ pub struct ValidationOptions {
     pub additional_nodes: Vec<String>,
     /// Input node name (default: "in")
     pub input_node: String,
+    /// Forward-active BJT reduction mode — mirrors `melange compile --bjt-fa`.
+    ///
+    /// Defaults to `Auto`, matching the shipped build. Until 2026-09-03 this
+    /// harness applied NO forward-active reduction, so it validated a
+    /// full-2D system for circuits the CLI ships reduced (measured on
+    /// `wurli_preamp`: shipped M=3, harness M=5).
+    pub bjt_fa_mode: melange_solver::codegen::BjtFaMode,
+    /// Grid-off pentode reduction mode — mirrors `melange compile
+    /// --tube-grid-fa` (`auto` | `on` | `off`). Defaults to `auto`.
+    pub tube_grid_fa: String,
+    /// Force Backward Euler on the melange side — mirrors `melange compile
+    /// --backward-euler`. DIAGNOSTIC only (attribute integrator error, like
+    /// `--bjt-fa off`); default `false` keeps the shipped auto selection.
+    pub backward_euler: bool,
+    /// Force trapezoidal on the melange side — mirrors `melange compile
+    /// --force-trap`. DIAGNOSTIC only; ignored when `backward_euler` is true.
+    pub force_trap: bool,
 }
 
 impl Default for ValidationOptions {
@@ -153,6 +171,10 @@ impl Default for ValidationOptions {
             circuit_name: None,
             additional_nodes: Vec::new(),
             input_node: "in".to_string(),
+            bjt_fa_mode: melange_solver::codegen::BjtFaMode::Auto,
+            tube_grid_fa: "auto".to_string(),
+            backward_euler: false,
+            force_trap: false,
         }
     }
 }
@@ -320,6 +342,11 @@ pub fn validate_circuit_with_options(
         sample_rate,
         output_node,
         input_node,
+        options.bjt_fa_mode,
+        &options.tube_grid_fa,
+        options.backward_euler,
+        options.force_trap,
+        None,
     )?;
 
     // Apply DC blocking to SPICE output to match melange's internal DC blocker (5 Hz HPF)
@@ -443,8 +470,17 @@ pub fn strip_vin_source(netlist: &str, input_node: &str) -> (String, Option<f64>
     let mut dc_value = None;
     let mut stripped = false;
 
-    for line in netlist.lines() {
+    for (i, line) in netlist.lines().enumerate() {
         let trimmed = line.trim();
+
+        // Line 0 is ALWAYS the free-text SPICE title, never an element. A title
+        // whose 2nd token happens to equal the input node (e.g. "Valve in
+        // preamp", "Voltage in stage") would otherwise be mistaken for VIN and
+        // stripped, corrupting the deck. tube_translate.rs guards this same class.
+        if i == 0 {
+            lines.push(line.to_string());
+            continue;
+        }
 
         // Keep commented lines
         if trimmed.starts_with('*') {
@@ -490,12 +526,32 @@ pub fn strip_vin_source(netlist: &str, input_node: &str) -> (String, Option<f64>
 ///
 /// Accepts a netlist string (e.g., after VIN stripping) and an explicit input node name.
 /// Handles both linear and nonlinear circuits (with DC OP initialization for the latter).
-fn run_melange_solver_from_str(
+/// Run the melange solver on a netlist string, through the SAME front-end the
+/// shipped CLI uses.
+///
+/// `main_code` overrides the default stdin-samples-in / stdout-samples-out
+/// driver; pass `None` for it. The SPICE test harness passes its own so it can
+/// drive `set_pot_0(..)` per sample.
+///
+/// **This is the single implementation on purpose.** Until 2026-09-03 the
+/// integration tests in `tests/spice_validation.rs` carried a second, silently
+/// divergent copy of this routine — no `.linearize`, no forward-active or
+/// grid-off reduction, unconditional internal-node expansion and the default
+/// `MAX_ITER` of 100 rather than `auto_tune_max_iter`. That copy is what the
+/// CI "SPICE validation" gate actually ran, so the gate was not measuring the
+/// shipped build. Route new callers here rather than growing a third.
+#[allow(clippy::too_many_arguments)]
+pub fn run_melange_solver_from_str(
     netlist_str: &str,
     input_signal: &[f64],
     sample_rate: f64,
     output_node_name: &str,
     input_node_name: &str,
+    bjt_fa_mode: melange_solver::codegen::BjtFaMode,
+    tube_grid_fa: &str,
+    backward_euler: bool,
+    force_trap: bool,
+    main_code: Option<&str>,
 ) -> Result<Vec<f64>, ValidationError> {
     use melange_solver::codegen::{routing, CodeGenerator, CodegenConfig};
     use std::io::Write;
@@ -535,6 +591,73 @@ fn run_melange_solver_from_str(
     if input_node < mna.n {
         mna.g[input_node][input_node] += 1.0;
     }
+
+    // Apply `.linearize` — the SAME shared pipeline step `melange compile` runs.
+    //
+    // This harness used to skip it entirely, which is how `wurli-power-amp` came
+    // to "fail" validation at 1319% RMS and correlation 0.0002: without a
+    // linearized device the emitter's `linearized_bypass` gate never fires, so
+    // it chose Schur NR instead of full-LU and diverged on the first non-zero
+    // sample. The shipped build validates at 0.228% RMS, correlation 1.000000.
+    // A validator that builds a different circuit than the one it validates is
+    // worse than no validator, because it is believed.
+    //
+    // Forward-active + grid-off reductions, then `.linearize` — the SAME three
+    // shared pipeline steps, in the same order, that `melange compile` runs.
+    //
+    // Until 2026-09-03 this harness passed EMPTY forward-active and grid-off
+    // sets, so it validated a full-2D system for any circuit the shipped build
+    // reduces. Measured on the `wurli_preamp` validation deck: shipped M=3,
+    // harness M=5 — a different circuit, and therefore not a statement about
+    // what ships. `--bjt-fa` / `--tube-grid-fa` still select the mode, so
+    // `off` remains available to attribute a residual to the reduction.
+    let fa_config = melange_solver::codegen::CodegenConfig {
+        circuit_name: "fa_detect".to_string(),
+        sample_rate,
+        input_resistance: 1.0,
+        input_node,
+        output_nodes: vec![output_node],
+        bjt_fa_mode,
+        ..melange_solver::codegen::CodegenConfig::default()
+    };
+    let forward_active = melange_solver::pipeline::apply_forward_active_reduction(
+        &mut mna,
+        &netlist,
+        &fa_config,
+        "auto",
+        sample_rate,
+        1,
+        input_node,
+        1.0,
+        &melange_solver::pipeline::silent,
+    )
+    .map_err(|e| ValidationError::Solver(format!("forward-active: {e}")))?;
+
+    let grid_off_pentodes = melange_solver::pipeline::apply_grid_off_reduction(
+        &mut mna,
+        &netlist,
+        &fa_config,
+        &forward_active,
+        tube_grid_fa,
+        "auto",
+        sample_rate,
+        1,
+        input_node,
+        1.0,
+    )
+    .map_err(|e| ValidationError::Solver(format!("grid-off: {e}")))?;
+
+    melange_solver::pipeline::apply_linearize_reductions(
+        &mut mna,
+        &netlist,
+        &forward_active,
+        &grid_off_pentodes,
+        input_node,
+        1.0,
+        1.0,
+        &melange_solver::pipeline::silent,
+    )
+    .map_err(|e| ValidationError::Solver(format!("linearize: {e}")))?;
 
     // Stamp junction caps + pre-solve DC OP so BJT charge-storage caps are
     // linearized at the true operating point. When all BJTs use the default
@@ -590,14 +713,15 @@ fn run_melange_solver_from_str(
     let use_nodal = decision.route == routing::SolverRoute::Nodal;
 
     if use_nodal {
-        let slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
+        // K-gated, exactly as the CLI does it. Expanding unconditionally is what
+        // pushed this harness onto Schur-with-expanded-parasitics, which
+        // diverges where the shipped full-LU build converges.
+        melange_solver::pipeline::expand_internal_nodes_if_conditioned(
+            &mut mna,
             &netlist,
-            Some(&mna),
-        )
-        .unwrap_or_default();
-        if !slots.is_empty() {
-            mna.expand_bjt_internal_nodes(&slots);
-        }
+            &kernel,
+            &melange_solver::pipeline::silent,
+        );
     }
 
     // Post-DC-block output ceiling (default 10 V, see docs/aidocs/SIGNAL_LEVELS.md
@@ -635,6 +759,15 @@ fn run_melange_solver_from_str(
         router_dk_unstable: decision.dk_unstable,
         router_dk_spectral_radius: decision.spectral_radius,
         output_clamp_v: auto_clamp_v,
+        // Same budget the shipped build gets; the default 100 is not what ships.
+        max_iterations: melange_solver::pipeline::auto_tune_max_iter(
+            None, &kernel, &decision, false, false, input_node,
+        ),
+        // Diagnostics (default: shipped behaviour — auto integrator). No
+        // oversampling knob here: the harness compares sample-aligned and the
+        // half-band IIR's group delay would read as error.
+        backward_euler,
+        force_trap,
         ..CodegenConfig::default()
     };
     let generator = CodeGenerator::new(config);
@@ -645,8 +778,10 @@ fn run_melange_solver_from_str(
     }
     .map_err(|e| ValidationError::Solver(format!("Codegen: {}", e)))?;
 
-    // Append stdin/stdout main
-    let main_code = "fn main() {\n\
+    // Append the driver main — caller-supplied, else stdin/stdout.
+    // Diagnostics go to stderr as `DIAG:key=value` lines (same protocol as
+    // the CLI's simulate driver) and are echoed below.
+    let default_main = "fn main() {\n\
         let mut state = CircuitState::default();\n\
         let stdin = std::io::stdin();\n\
         let mut line = String::new();\n\
@@ -658,8 +793,10 @@ fn run_melange_solver_from_str(
                 println!(\"{:.15e}\", out[0]);\n\
             }\n\
         }\n\
+        eprintln!(\"DIAG:nr_max_iter_count={}\", state.diag_nr_max_iter_count);\n\
+        eprintln!(\"DIAG:region_exit_count={}\", state.diag_region_exit_count);\n\
     }\n";
-    let full_source = format!("{}\n{}", generated.code, main_code);
+    let full_source = format!("{}\n{}", generated.code, main_code.unwrap_or(default_main));
 
     // Compile
     static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -731,6 +868,16 @@ fn run_melange_solver_from_str(
             "Binary failed:\n{}",
             String::from_utf8_lossy(&result.stderr)
         )));
+    }
+
+    // Echo the driver's `DIAG:` lines so `melange validate` reports the
+    // generated solver's counters (NR max-iter, region exits) next to the
+    // comparison — a validation number without them hides a starved or
+    // out-of-region solve.
+    for line in String::from_utf8_lossy(&result.stderr).lines() {
+        if let Some(diag) = line.strip_prefix("DIAG:") {
+            eprintln!("  melange {}", diag.replacen('=', ": ", 1));
+        }
     }
 
     Ok(String::from_utf8_lossy(&result.stdout)
@@ -928,5 +1075,23 @@ mod tests {
         let config = ComparisonConfig::default();
         assert!(config.rms_error_tolerance > 0.0);
         assert!(config.correlation_min > 0.99);
+    }
+
+    #[test]
+    fn test_strip_vin_ignores_title_matching_input_node() {
+        // The title's 2nd token is "in" (the input node). Before the line-0
+        // guard, strip_vin_source mistook the title for VIN and removed it,
+        // corrupting the deck. The title must survive; the real VIN on a later
+        // line must still be stripped.
+        let deck = "Valve in preamp\nVIN in 0 DC 0\nRin in n1 1k\nR1 n1 0 10k\n";
+        let (stripped, _dc) = strip_vin_source(deck, "in");
+        assert!(
+            stripped.contains("Valve in preamp"),
+            "title line must be preserved, got:\n{stripped}"
+        );
+        assert!(
+            !stripped.lines().any(|l| l.trim_start().starts_with("VIN ")),
+            "the real VIN element must still be stripped, got:\n{stripped}"
+        );
     }
 }

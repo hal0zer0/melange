@@ -42,9 +42,26 @@ struct CircuitCapture {
     /// changed" from "the compiler changed".
     cir_sha256: String,
     compile_ok: bool,
+    /// Nodal sub-path the emitter took ("schur" / "full-lu"); absent on DK.
+    /// Pinned so a circuit silently moving between sub-paths is NAMED rather
+    /// than surfacing only as a large unexplained circuit.rs diff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    nodal_sub_path: Option<String>,
+    /// Commit the `melange` BINARY was built from, read out of the generated
+    /// provenance header. Compared against the source-tree rev in metadata:
+    /// the harness shells out to whatever `melange` is on PATH, which can be an
+    /// older install than the checkout, and silently capturing with a stale
+    /// compiler while labelling the baseline with the current source rev makes
+    /// the whole baseline a lie.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    binary_commit: Option<String>,
     noise_api_detected: bool,
     seed_api_detected: bool,
     pot_setters_detected: Vec<usize>,
+    /// Diagnostic counters found on `CircuitState` and wired into the driver.
+    /// Path-dependent: nodal and DK declare overlapping-but-different sets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    diag_fields_detected: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -121,7 +138,10 @@ pub fn run(
         reports.push(rep);
     }
 
-    write_metadata(manifest_path, out_dir, fs)?;
+    // Provenance of the compiler we actually ran, from the first circuit that
+    // compiled (all circuits use the same binary).
+    let binary_commit = reports.iter().find_map(|r| r.binary_commit.clone());
+    write_metadata(manifest_path, out_dir, fs, binary_commit)?;
     let report_json = serde_json::json!({ "circuits": reports });
     std::fs::write(
         out_dir.join("capture_report.json"),
@@ -181,9 +201,12 @@ fn capture_circuit(
         cir_resolved: String::new(),
         cir_sha256: String::new(),
         compile_ok: false,
+        nodal_sub_path: None,
+        binary_commit: None,
         noise_api_detected: false,
         seed_api_detected: false,
         pot_setters_detected: Vec::new(),
+        diag_fields_detected: Vec::new(),
         warnings: Vec::new(),
         error: None,
         programs: Vec::new(),
@@ -213,14 +236,16 @@ fn capture_circuit(
 
     // 1. melange CLI compile (the same path oomox uses).
     let gen_rs = work.join(format!("{id}.rs"));
-    let rs_path =
+    let outcome =
         match runner::compile_circuit(entry.compile_cmd.as_deref(), &rep.cir_resolved, &gen_rs) {
-            Ok(p) => p,
+            Ok(o) => o,
             Err(e) => {
                 rep.error = Some(e);
                 return rep;
             }
         };
+    let rs_path = outcome.generated;
+    rep.nodal_sub_path = outcome.nodal_sub_path;
     let code = match std::fs::read_to_string(&rs_path) {
         Ok(c) => c,
         Err(e) => {
@@ -229,15 +254,33 @@ fn capture_circuit(
         }
     };
     rep.compile_ok = true;
+    rep.binary_commit = code
+        .lines()
+        .find_map(|l| l.trim_start().strip_prefix("// melange:"))
+        .and_then(|r| r.split_once('(').map(|(_, c)| c))
+        .and_then(|c| c.split_once(')').map(|(c, _)| c.trim().to_string()));
 
     // Provenance copy: lets a compare-time delta be traced to a codegen diff.
-    let _ = std::fs::write(circuit_dir.join("circuit.rs"), &code);
+    // The `// melange: <version> (<commit>)` + `// provenance:` JSON header lines
+    // carry the build's version/commit, which change every commit and would make
+    // a byte-diff of two revs' circuit.rs noisy. Mask ONLY those two identity
+    // fields (the resolved DSP-contract fields in the provenance JSON are
+    // deterministic and stay, so real codegen changes still show). Byte-neutrality
+    // is a verification tool, not a goal — nothing else is touched. `code` itself
+    // is left intact for the feature detection below.
+    let _ = std::fs::write(
+        circuit_dir.join("circuit.rs"),
+        normalize_provenance_header(&code),
+    );
 
     // 2. Feature detection on the generated module (authoritative — the
     //    manifest's has_noise/has_pots only set expectations).
     rep.noise_api_detected = code.contains("pub fn set_noise_enabled");
     rep.seed_api_detected = code.contains("pub fn set_seed");
     rep.pot_setters_detected = detect_pot_setters(&code);
+    let diag_fields = detect_diag_fields(&code);
+    rep.diag_fields_detected = diag_fields.clone();
+    let diag = diag_block(&diag_fields);
     if entry.has_noise && !rep.noise_api_detected {
         rep.warnings.push(
             "manifest says has_noise but generated code has no noise API \
@@ -259,7 +302,7 @@ fn capture_circuit(
     let std_bin = work.join(format!("{id}_std"));
     if let Err(e) = build_driver(
         &code,
-        &std_main(rep.noise_api_detected && rep.seed_api_detected),
+        &std_main(rep.noise_api_detected && rep.seed_api_detected, &diag),
         work,
         &format!("{id}_std"),
         &std_bin,
@@ -277,6 +320,7 @@ fn capture_circuit(
                 rep.noise_api_detected && rep.seed_api_detected,
                 &rep.pot_setters_detected,
                 total,
+                &diag,
             ),
             work,
             &format!("{id}_pot"),
@@ -337,8 +381,16 @@ fn write_outputs(
     out: &runner::RenderOutput,
     fs: f64,
 ) -> Result<(), String> {
-    // Raw PCM: interleaved f32 little-endian.
-    let pcm_path = circuit_dir.join(format!("{prog_name}.f32le"));
+    // Raw PCM: interleaved f64 little-endian.
+    //
+    // f64, not f32. The renders are the substrate of every equivalence claim
+    // the project makes — refactor neutrality and (eventually) Rust-vs-C++
+    // parity. Storing them at f32 put a ~6e-8 relative floor under all of it,
+    // which is orders of magnitude coarser than the differences that actually
+    // matter here (FP contraction, libm divergence: ~1 ulp of f64). Baselines
+    // written before this change carry the `.f32le` extension and are readable
+    // by `compare`, but cannot support a bit-exactness claim.
+    let pcm_path = circuit_dir.join(format!("{prog_name}.f64le"));
     let f = std::fs::File::create(&pcm_path).map_err(|e| format!("create pcm: {e}"))?;
     let mut w = std::io::BufWriter::new(f);
     for v in &out.interleaved {
@@ -347,7 +399,13 @@ fn write_outputs(
     }
     w.flush().map_err(|e| format!("flush pcm: {e}"))?;
 
-    let st = stats::compute(&out.interleaved, out.channels, out.frames, fs);
+    let st = stats::compute(
+        &out.interleaved,
+        out.channels,
+        out.frames,
+        fs,
+        out.diagnostics.clone(),
+    );
     std::fs::write(
         circuit_dir.join(format!("{prog_name}.stats.json")),
         serde_json::to_string_pretty(&st).unwrap(),
@@ -389,6 +447,57 @@ fn detect_pot_setters(code: &str) -> Vec<usize> {
     out
 }
 
+/// Detect the `pub diag_*` / `last_nr_iterations` counters the generated module
+/// actually declares.
+///
+/// The set is path-dependent and must not be hardcoded: the nodal emitter
+/// declares `diag_active_set_pin_count`, `diag_be_latch_count` and
+/// `diag_refactor_count`, while DK declares `diag_singular_matrix_count`
+/// instead. Emitting a fixed list would fail to compile on one path or the
+/// other.
+fn detect_diag_fields(code: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in code.lines() {
+        let t = line.trim();
+        let Some(rest) = t.strip_prefix("pub ") else {
+            continue;
+        };
+        let Some((name, _ty)) = rest.split_once(':') else {
+            continue;
+        };
+        let name = name.trim();
+        if (name.starts_with("diag_") || name == "last_nr_iterations")
+            && !out.iter().any(|n| n == name)
+        {
+            out.push(name.to_string());
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Driver tail that prints the counters to stderr as one
+/// `MELANGE_DIAG k=v k=v ...` line.
+///
+/// stdout carries samples, so diagnostics go to stderr — which the runner
+/// already captures and, until now, discarded on success. Without this the
+/// recovery ladders are invisible to the gate: measured across the corpus,
+/// only 7 of 41 circuits enter any ladder at all, and a change could delete
+/// the BE latch, NaN reset or active-set resolve outright with every render
+/// still bit-identical.
+fn diag_block(fields: &[String]) -> String {
+    if fields.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("    eprint!(\"MELANGE_DIAG\");\n");
+    for f in fields {
+        // `{{}}` so the emitted Rust contains a literal `{}` placeholder.
+        s.push_str(&format!("    eprint!(\" {f}={{}}\", state.{f});\n"));
+    }
+    s.push_str("    eprintln!();\n");
+    s
+}
+
 fn seed_block(pin_noise: bool) -> &'static str {
     if pin_noise {
         "    state.set_noise_enabled(true);\n    state.set_seed(GOLDEN_SEED);\n"
@@ -400,7 +509,7 @@ fn seed_block(pin_noise: bool) -> &'static str {
 /// Standard driver: one f64 sample per stdin line, all output channels per
 /// stdout line. Mirrors melange-validate's driver (buffered IO added for
 /// throughput; formatting `{:.17e}` is an exact f64 round-trip).
-fn std_main(pin_noise: bool) -> String {
+fn std_main(pin_noise: bool, diag: &str) -> String {
     format!(
         r#"
 #[allow(dead_code)]
@@ -426,9 +535,10 @@ fn main() {{
         }}
     }}
     w.flush().unwrap();
-}}
+{diag}}}
 "#,
         seed = seed_block(pin_noise),
+        diag = diag,
     )
 }
 
@@ -437,7 +547,7 @@ fn main() {{
 /// triangle 0 -> 1 -> 0 position profile over the whole render, mapped
 /// linearly into each pot's [MIN_R, MAX_R]. Exercises the setter /
 /// matrices_dirty / rebuild lifecycle the way a host automation pass does.
-fn pot_main(pin_noise: bool, pots: &[usize], total_frames: usize) -> String {
+fn pot_main(pin_noise: bool, pots: &[usize], total_frames: usize, diag: &str) -> String {
     let interval = programs::POT_UPDATE_INTERVAL;
     let mut setters = String::new();
     for idx in pots {
@@ -478,9 +588,10 @@ fn main() {{
         }}
     }}
     w.flush().unwrap();
-}}
+{diag}}}
 "#,
         seed = seed_block(pin_noise),
+        diag = diag,
     )
 }
 
@@ -512,7 +623,12 @@ fn sh_line(cmd: &str) -> String {
         .unwrap_or_default()
 }
 
-fn write_metadata(manifest_path: &Path, out_dir: &Path, fs: f64) -> Result<(), String> {
+fn write_metadata(
+    manifest_path: &Path,
+    out_dir: &Path,
+    fs: f64,
+    binary_commit: Option<String>,
+) -> Result<(), String> {
     // Melange repo root: this tool lives at <root>/tools/golden-harness.
     let melange_root: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -520,7 +636,36 @@ fn write_metadata(manifest_path: &Path, out_dir: &Path, fs: f64) -> Result<(), S
         .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."));
     let root = melange_root.display();
     let rev = sh_line(&format!("git -C {root} rev-parse HEAD"));
-    let dirty = !sh_line(&format!("git -C {root} status --porcelain")).is_empty();
+    // Distinguish tracked modifications (which change what is compiled) from
+    // untracked files (which generally do not). A single boolean over
+    // `git status --porcelain` calls a tree dirty because an unrelated scratch
+    // file exists, which trains readers to ignore the flag — the opposite of
+    // what it is for.
+    let tracked_dirty = !sh_line(&format!(
+        "git -C {root} status --porcelain --untracked-files=no"
+    ))
+    .is_empty();
+    let untracked = !sh_line(&format!(
+        "git -C {root} ls-files --others --exclude-standard"
+    ))
+    .is_empty();
+
+    // Does the binary we actually ran match the source tree we labelled it with?
+    let short_rev = rev.chars().take(7).collect::<String>();
+    let binary_matches_source = binary_commit
+        .as_deref()
+        .map(|c| !c.is_empty() && c != "unknown" && rev.starts_with(c));
+    if binary_matches_source == Some(false) {
+        eprintln!(
+            "\n*** PROVENANCE MISMATCH ***\n\
+             The `melange` binary on PATH was built from commit {}, but this baseline is \n\
+             labelled with source rev {}. The capture used a DIFFERENT compiler than the \n\
+             checkout it claims to represent. Run `cargo install --path tools/melange-cli` \n\
+             and re-capture, or this baseline is not evidence about this source tree.\n",
+            binary_commit.as_deref().unwrap_or("?"),
+            short_rev
+        );
+    }
     let manifest_sha = sh_line(&format!(
         "sha256sum {} | cut -d' ' -f1",
         manifest_path.display()
@@ -528,7 +673,10 @@ fn write_metadata(manifest_path: &Path, out_dir: &Path, fs: f64) -> Result<(), S
 
     let meta = serde_json::json!({
         "melange_rev": rev,
-        "melange_worktree_dirty": dirty,
+        "melange_worktree_dirty": tracked_dirty,
+        "melange_untracked_files_present": untracked,
+        "melange_binary_commit": binary_commit,
+        "melange_binary_matches_source": binary_matches_source,
         "melange_version": sh_line("melange --version"),
         "melange_bin": sh_line("command -v melange"),
         "rustc_version": sh_line("rustc --version"),
@@ -552,4 +700,80 @@ fn write_metadata(manifest_path: &Path, out_dir: &Path, fs: f64) -> Result<(), S
         serde_json::to_string_pretty(&meta).unwrap(),
     )
     .map_err(|e| format!("write metadata.json: {e}"))
+}
+
+/// Mask the per-commit build-identity fields in a generated module's provenance
+/// header so a byte-diff of two revs' `circuit.rs` reflects only real codegen
+/// changes, not the version/commit stamp.
+///
+/// Touches exactly two lines and nothing else:
+/// - `// melange: <v> (<c>)`  → `// melange: <version> (<commit>)`
+/// - the `// provenance: {...}` JSON: the `"melange"` and `"commit"` values are
+///   replaced with placeholders; every other (deterministic, DSP-contract)
+///   field is preserved verbatim.
+fn normalize_provenance_header(code: &str) -> String {
+    let mut out = String::with_capacity(code.len());
+    for line in code.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("// melange:") {
+            out.push_str("// melange: <version> (<commit>)");
+        } else if trimmed.starts_with("// provenance:") {
+            let masked = mask_json_field(line, "melange", "<version>");
+            let masked = mask_json_field(&masked, "commit", "<commit>");
+            out.push_str(&masked);
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Replace the string value of `"key":"..."` in `s` with `placeholder`, leaving
+/// the rest of the line untouched. No-op if the key is absent or malformed.
+fn mask_json_field(s: &str, key: &str, placeholder: &str) -> String {
+    let needle = format!("\"{key}\":\"");
+    let Some(start) = s.find(&needle) else {
+        return s.to_string();
+    };
+    let val_start = start + needle.len();
+    let Some(rel_end) = s[val_start..].find('"') else {
+        return s.to_string();
+    };
+    let end = val_start + rel_end;
+    let mut out = String::with_capacity(s.len());
+    out.push_str(&s[..val_start]);
+    out.push_str(placeholder);
+    out.push_str(&s[end..]);
+    out
+}
+
+#[cfg(test)]
+mod provenance_norm_tests {
+    use super::*;
+
+    #[test]
+    fn masks_melange_and_provenance_lines_only() {
+        let code = "// Generated by melange-solver\n\
+                    // melange: 0.1.0 (e2f6d62)\n\
+                    // Circuit: \"X\"\n\
+                    // Build: integration=trapezoidal, dc-block=on\n\
+                    // provenance: {\"melange\":\"0.1.0\",\"commit\":\"e2f6d62\",\"dc_block\":true}\n\
+                    pub const N: usize = 2;\n";
+        let out = normalize_provenance_header(code);
+        assert!(out.contains("// melange: <version> (<commit>)"));
+        assert!(out.contains("\"melange\":\"<version>\""));
+        assert!(out.contains("\"commit\":\"<commit>\""));
+        // Deterministic DSP-contract field preserved.
+        assert!(out.contains("\"dc_block\":true"));
+        // Untouched lines survive verbatim.
+        assert!(out.contains("// Circuit: \"X\""));
+        assert!(out.contains("pub const N: usize = 2;"));
+        // Two revs with different version/commit normalize identically.
+        let code2 = code.replace("0.1.0 (e2f6d62)", "0.2.0 (abc1234)").replace(
+            "\"melange\":\"0.1.0\",\"commit\":\"e2f6d62\"",
+            "\"melange\":\"0.2.0\",\"commit\":\"abc1234\"",
+        );
+        assert_eq!(out, normalize_provenance_header(&code2));
+    }
 }

@@ -297,17 +297,19 @@ impl DkKernel {
         let s_2d = invert_matrix(&a)
             .map_err(|e| DkError::SingularMatrix(format!("Failed to invert A matrix: {}", e)))?;
 
-        // Condition number estimate: cond(A) ~ ||A||_inf * ||S||_inf
-        // If cond > 1e12, emit a diagnostic warning (not a hard error).
+        // Condition number estimate: cond(A) ~ ||A||_inf * ||S||_inf. A high
+        // value is common and usually benign (tight component-value spreads,
+        // near-unity transformer coupling); only extreme conditioning
+        // genuinely erodes double-precision accuracy, so the note fires at
+        // 1e13, not the old twitchy 1e12.
         {
             let norm_a = infinity_norm(&a);
             let norm_s = infinity_norm(&s_2d);
             let cond = norm_a * norm_s;
-            if cond > 1e12 {
+            if cond > 1e13 {
                 log::warn!(
-                    "A matrix condition number estimate is {:.2e} (threshold 1e12). \
-                     Results may be numerically inaccurate.",
-                    cond
+                    "A matrix condition number is high ({cond:.2e}); usually benign \
+                     — a concern only if the output looks wrong."
                 );
             }
         }
@@ -691,10 +693,12 @@ impl DkKernel {
             let norm_a = infinity_norm(&a);
             let norm_s = infinity_norm(&s_2d);
             let cond = norm_a * norm_s;
-            if cond > 1e12 {
+            if cond > 1e13 {
                 log::warn!(
-                    "Augmented A matrix condition number estimate is {:.2e} (threshold 1e12).",
-                    cond
+                    "Augmented matrix condition number is high ({cond:.2e}). This is \
+                     expected for transformers with near-unity coupling (k→1 shrinks \
+                     leakage inductance) and is usually benign — a concern only if the \
+                     output looks wrong."
                 );
             }
         }

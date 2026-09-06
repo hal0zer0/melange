@@ -97,18 +97,27 @@ impl Emitter for RustEmitter {
         "rust"
     }
 
-    fn emit(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
-        use super::ir::SolverMode;
+    fn emit(&self, ir: &CircuitIR) -> Result<super::emitter::EmitOutput, CodegenError> {
+        self.validate(ir)?;
+        let (code, sub_path) = self.emit_inner(ir)?;
+        Ok(
+            super::emitter::EmitOutput::single("circuit.rs", collapse_blank_lines(&code))
+                .with_nodal_sub_path(sub_path),
+        )
+    }
+}
 
+impl RustEmitter {
+    /// Reject node indices that fall outside the original circuit nodes.
+    fn validate(&self, ir: &CircuitIR) -> Result<(), CodegenError> {
         let n = ir.topology.n;
-        // n_nodes: original circuit node count. Fallback to n for backward compat (n_nodes=0 in old data).
+        // n_nodes: original circuit node count. Fallback to n for backward
+        // compat (n_nodes=0 in old data).
         let n_nodes = if ir.topology.n_nodes > 0 {
             ir.topology.n_nodes
         } else {
             n
         };
-
-        // Validate node indices against original circuit nodes (not augmented dimension)
         for &in_node in &ir.solver_config.input_node_indices() {
             if in_node >= n_nodes {
                 return Err(CodegenError::InvalidConfig(format!(
@@ -125,12 +134,20 @@ impl Emitter for RustEmitter {
                 )));
             }
         }
+        Ok(())
+    }
 
-        let code = match ir.solver_mode {
-            SolverMode::Dk => self.emit_dk(ir)?,
-            SolverMode::Nodal => self.emit_nodal(ir)?,
-        };
-
-        Ok(collapse_blank_lines(&code))
+    fn emit_inner(
+        &self,
+        ir: &CircuitIR,
+    ) -> Result<(String, Option<super::NodalSubPath>), CodegenError> {
+        use super::ir::SolverMode;
+        match ir.solver_mode {
+            SolverMode::Dk => Ok((self.emit_dk(ir)?, None)),
+            SolverMode::Nodal => {
+                let (code, sp) = self.emit_nodal(ir)?;
+                Ok((code, Some(sp)))
+            }
+        }
     }
 }

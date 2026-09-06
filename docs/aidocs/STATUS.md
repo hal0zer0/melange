@@ -5,7 +5,7 @@ Quick-reference for AI agents. For math details see other aidocs. For architectu
 > **2026-07-18 accuracy campaign (commits `3e246cb`, `5159b8c`, `fde289a`, `b421358`, `8056f95` — all six review chunks complete):** a
 > full-codebase accuracy review fixed, among others: op-amp VCCS polarity (was
 > inverted — clipping/comparator behavior changed), Koren triode ×2 factor (triode
-> stages now run at datasheet current/gm — Pultec/SeriesOfTubes gain staging
+> stages now run at datasheet current/gm — passive-EQ/SeriesOfTubes gain staging
 > shifted), oversampling decimator + half-band tables (2x/4x plugins gain flat HF
 > passband and real (−87 dB) alias rejection), vendor-verbatim BJT/diode catalog
 > cards, FET reverse quadrant/depletion NMOS, DC-OP device parity + pnjlim
@@ -43,8 +43,8 @@ per-metric gates were all tightened in the same pass.
 | BJT common-emitter | 0.99964880 | 4.26% | 0.164 V | BC547, gain ratio 1.024, 3 ms settle |
 | JFET common-source | 0.99940687 | 3.47% | 4.6e-6 V | THD err 4.70 dB |
 | MOSFET common-source | 0.99999997 | 0.029% | 2.7e-6 V | Level 1, small-signal |
-| Tube Screamer (TS808) | 0.99999032 | 0.442% | 9.9e-3 V | Op-amp + 1N4148, THD err 0.04 dB |
-| Tube Screamer (wiper, pos=0.85) | 0.99838696 | 5.71% | — | Volume divider + simplified tone; THD err 0.11 dB |
+| Tube-Screamer-style overdrive (TS808) | 0.99999032 | 0.442% | 9.9e-3 V | Op-amp + 1N4148, THD err 0.04 dB |
+| Tube-Screamer-style overdrive (wiper, pos=0.85) | 0.99838696 | 5.71% | — | Volume divider + simplified tone; THD err 0.11 dB |
 | Wurli preamp | 0.99999734 | 0.235% | 1.28e-3 V | 2× 2N5089, M=5, gain ratio 1.0006, 10 ms settle |
 | Neve 1073 output (BA283 AM) | 0.99999952 | 0.107% | 1.06e-4 V | 3 BJT + LO1166 xfmr, gain 6.7×, ratio 1.0000, 10 ms settle |
 | Neve 1073 preamp (BA283 AV) | 1.00000000 | 0.0346% | 1.12e-4 V | 3× BC184C, gain 26.0×, ratio 0.9996, 64 ms settle |
@@ -109,11 +109,11 @@ remains in the solver crate as a fallback for purely linear circuits.
 | MOSFET | 2D | Level 1 SPICE |
 | Tube (triode) | 2D (Vgk→Ip, Vpk→Ig) | Koren + Leach |
 | Tube (pentode) | 3D (Vgk→Ip, Vpk→Ig2, Vg2k→Ig1) | Reefman Derk §4.4 / DerkE §4.5 / Classical + Leach |
-| Tube (pentode, grid-off) | 2D (Vgk→Ip, Vpk→Ig2, Vg2k frozen) | Auto-detected at DC-OP when Vgk<cutoff; `--tube-grid-fa` override |
+| Tube (pentode, grid-off) | 2D (Vgk→Ip, Vpk→Ig2, Vg2k frozen) | Opt-in only (`--tube-grid-fa on`, warned); `auto` keeps full 3D since 2026-09-04 — the freeze is not accuracy-neutral (cathode-referenced Vg2k, +2–12% measured) |
 | VCA | 2D (Vsig, Vctrl) | THAT 2180 exponential |
 | Op-amp | Linear (no NR dim) | Boyle VCCS + GBW pole + rail clamp |
 
-M=1 direct, M=2 Cramer's, M=3..16 Gaussian elimination with partial pivoting.
+M=1 direct, M=2 Cramer's, M=3..24 Gaussian elimination with partial pivoting.
 
 ## Codegen Solver Routing (Updated 2026-03-23)
 
@@ -127,7 +127,7 @@ K≈0 detection: max|K| < 1e-6 with M > 0.
 
 ## Circuit Library Status
 
-Circuits have been migrated to the [melange-audio/circuits](https://github.com/melange-audio/circuits) repo.
+Circuits live in a separate repository (locally `../melange-circuits`; public repo going to GitLab, unpublished as of 2026-08-25).
 All circuits are in `unstable/` until the user manually tests and approves promotion.
 
 The compiler validation status of circuits known to exercise specific solver paths:
@@ -137,12 +137,12 @@ The compiler validation status of circuits known to exercise specific solver pat
 | Linear RC | 2 | 0 | Linear | trivial | Smoke test |
 | 2-stage BJT preamp | 11 | 3-5 | DK | fast | FA detection, 2N5089 Ebers-Moll |
 | 2-stage triode preamp | 13 | 4 | DK | fast | 2× 12AX7, pot + switch |
-| 4-tube passive EQ + 2 xfmrs | 41 | 8 | Nodal full LU | ~11× | Chord + cross-timestep + sparse LU |
+| 4-tube passive EQ + 3 xfmrs | 52 | 8 | Nodal full LU | ~24× | Chord + cross-timestep + sparse LU |
 | 8-BJT Class AB power amp | 20 | 9-16 | DK/Nodal | 0.4× / 0.04× | Parasitic R, FA detection |
 | 4-opamp + diode clipper | 44 | 10 | Nodal full LU (auto) | — | ActiveSetBe auto for clean clipping; BoyleDiodes diverges at heavy clip |
 | Op-amp overdrive + diodes | — | — | DK | — | TS808-class clipping |
 | VCA compressor + sidechain | 21 | 3 | Nodal full LU | ~42× | Current-mode VCA, K≈0 |
-| Pentode single stage | — | 2-3 | DK | fast | Grid-off reduces M=3→2 |
+| Pentode single stage | — | 3 | DK | fast | Full 3D by default; grid-off M=3→2 only with `--tube-grid-fa on` |
 | Push-pull pentode amp + OT | — | — | Nodal | — | Transformer forces nodal path |
 | Variable-mu pentode | — | 3 | DK | fast | M=3, no grid-off reduction |
 
@@ -153,22 +153,23 @@ against ngspice. Circuits with melange-extended models (OA, VCA, VP, triode) use
 Promotion to `stable/` requires user sign-off after a DAW listening test.
 SPICE correlation and successful compilation are necessary but not sufficient.
 
-## Pultec Schematic Data (Verified 2026-03-16)
+## Passive-EQ Schematic Data
 
-Source: Sowter DWG E-72,658-2 + Peerless/Triad winding data.
+Source: Sowter DWG E-72,658-2 (amp §) + Peerless/Triad winding data.
 
-- **HS-29**: 1:2 step-up, 37H, true push-pull (pin 5→grid1, pin 8→grid2), CT→43K+270pF
-- **S-217-D**: 220H primary (30Hz), 71-turn tertiary (0.447H), 20pF plate cap
+- **HS-56**: input transformer (37H:37H), 620Ω shunt across the secondary
+- **HS-29**: 1:2 step-up, 45H, true push-pull (pin 5→grid1, pin 8→grid2); CT grounded, 43K+270pF bridges grid-to-grid
+- **S-217-D**: 220H primary (30Hz), 71-turn tertiary (0.447H), 20pF plate cap, .003µF+620Ω output Zobel (secondary floats)
 - **Feedback winding**: 12AX7 pin 3→360Ω→S-217-D pin 3; pin 8→360Ω→pin 5
-- **Cathode**: 820Ω to GROUND (not through transformer)
-- Gain budget: +25 dB amp - 23 dB EQ = +2 dB net
+- **Cathodes**: 12AX7 820Ω between cathodes (not to ground); 12AU7 separate, 4.7kΩ+50µF each
+- Gain budget: +25 dB amp − 23 dB EQ = +2 dB net
 
 ## Feature Inventory
 
 ### Core Pipeline
 - MNA stamping: R, C, L, V/I sources, diodes, BJTs, JFETs, MOSFETs, tubes, op-amps, VCAs
-- DK kernel with proper trapezoidal discretization; NR solver 1D / 2D / M-dimensional (M≤16)
-- Codegen for diode, BJT, JFET, MOSFET, tube/triode/pentode (Gaussian elimination M=3..16)
+- DK kernel with proper trapezoidal discretization; NR solver 1D / 2D / M-dimensional (M≤24)
+- Codegen for diode, BJT, JFET, MOSFET, tube/triode/pentode (Gaussian elimination M=3..24)
 - Per-device `.model` params (heterogeneous models supported per device)
 - Parasitic cap auto-insertion (10pF junction caps) when nonlinear circuit has no caps
 - Sparsity-aware emission (systematic zero-skipping in A_neg, N_v, K, S*N_i)
@@ -187,13 +188,13 @@ Source: Sowter DWG E-72,658-2 + Peerless/Triad winding data.
 - **JFET/MOSFET**: 2D Shichman-Hodges / Level 1; CGS/CGD junction caps; RD/RS parasitic R; MOSFET body effect (GAMMA/PHI)
 - **Diode**: Shockley + RS + CJO + BV/IBV Zener; optional self-heating (RTH/CTH/XTI/EG/TAMB) using the same quasi-static electrothermal model as BJT, with `IS(T) = IS_nom·(Tj/Tnom)^XTI·exp(EG/VT_nom·(1−Tnom/Tj))` and `N·VT(T) = (N·VT)_nom·(Tj/Tnom)`. Pipe-shouter (TS-808) uses RTH=500 CTH=2e-4 on the 1N4148 clippers; sad-bastard uses RTH=1200 CTH=1e-4 EG=0.67 on the 1N34A Ge clippers. Dead code when RTH=∞ (default).
 - **Tube (triode)**: Koren + Leach grid current, early-effect lambda, CCG/CGP/CCP junction caps, RGI grid-stop
-- **Tube (pentode)**: 3 screen-current equation families — Rational (Reefman §4.4), Exponential (DerkE §4.5), Classical Koren. `--tube-grid-fa {auto,on,off}` reduces 3D→2D when Vgk<cutoff
+- **Tube (pentode)**: 3 screen-current equation families — Rational (Reefman §4.4), Exponential (DerkE §4.5), Classical Koren. `--tube-grid-fa {auto,on,off}`: `on` reduces 3D→2D (warned, not accuracy-neutral); `auto` == `off` == full 3D (2026-09-04). `diag_region_exit_count` counts grid-conduction / BJT-saturation samples on every path
 - **Op-amp**: Boyle macromodel, VCC/VEE asymmetric rails, optional `SR=` slew-rate limiting (V/μs), rail modes `auto/none/hard/active-set/active-set-be/boyle-diodes`, `AOL_TRANSIENT_CAP` override
 - **VCA**: THAT 2180 / DBX 2150 current-mode exponential gain with gain-dependent THD
 
 ### Unit Variation (2026-04-21)
 - `.seed <u64>`: sets master RNG seed (default 0). Shared by `.mismatch` and `.tolerance`.
-- `.mismatch D IS=tol N=tol RS=tol` / `.mismatch Q IS=tol BF=tol BR=tol`: per-device parameter jitter, baked at codegen. Two diodes on the same `.model` land at distinct `DEVICE_N_IS` constants — the thing that makes antiparallel clippers and push-pull pairs audibly asymmetric. `J` / `M` / `T` parse but aren't yet IR-wired.
+- `.mismatch D IS=tol N=tol RS=tol` / `.mismatch Q IS=tol BF=tol BR=tol`: per-device parameter jitter, baked at codegen. Two diodes on the same `.model` land at distinct `DEVICE_N_IS` constants — the thing that makes antiparallel clippers and push-pull pairs audibly asymmetric. **`T` / `J` / `M` are now IR-wired too (v0.1.3):** `T` (triode+pentode) jitters MU/EX/KG1/KP/KVB (+KG2 pentode), `J` IDSS/VP/LAMBDA, `M` KP/VT/LAMBDA. Byte-identical when the directive is absent; `analyze` applies it. Per-device tube mismatch is the physically-honest H2 source in a balanced push-pull stage (identical halves cancel evens exactly) — see `UNIT_VARIATION.md` and `SATURATING_TRANSFORMERS.md` §8-Q1.
 - `.tolerance R=0.01 C=0.02 L=0.005`: fixed-passive value jitter, applied at end of `Netlist::parse()`. Skips components under `.pot`/`.wiper`/`.switch`/`.runtime R` control so UI-driven mappings stay intact.
 - Deterministic: `FNV(seed, class_tag, name) → SplitMix64 → [-1, 1]`. Same seed always produces the same unit personality. Absent directives ⇒ byte-identical output (regression-guarded).
 - Full reference: [UNIT_VARIATION.md](UNIT_VARIATION.md).
@@ -229,6 +230,7 @@ Source: Sowter DWG E-72,658-2 + Peerless/Triad winding data.
 - `--solver {auto|dk|nodal}`, `--backward-euler`, `--oversampling {1,2,4}`, `--opamp-rail-mode`
 - **Runtime BE-latch (2026-07-28)**: nodal trapezoidal builds carry a cheap input-aware lag-1 anti-correlation detector; if the solver falls into a self-sustaining Nyquist `(-1)^n` limit cycle at a large-signal operating point (which the compile-time quiescent-OP auto-BE promotion can't see — jeffreys-tube V2 class), it latches that instance to the L-stable BE path for the rest of the stream (cleared by `reset()`, exposed via `diag_be_latch_count`). Not emitted for BE/force-trap/passive/saturating-inductor builds. Golden-audio verified zero-change across all 42 shipped circuits.
 - **`.integrator {trap|be}` netlist directive (2026-07-28)**: deterministic compile-time integrator pin so a fleet regen can't silently change it. `be` ⇒ backward Euler; `trap` ⇒ trapezoidal + opt out of auto-promotion AND the runtime BE-latch net (same as `--force-trap`). Explicit CLI flags override the directive.
+- **`.oversampling {1|2|4}` netlist directive (2026-09-05)**: a deck declares its recommended oversampling factor to control aliasing from nonlinear distortion products. It is an accuracy **minimum/recommendation, not a mandate** — rate costs CPU/latency (the plugin author's call). Resolution on compile/simulate/analyze: an explicit `--oversampling` always wins (even when lower — logs a `log::warn!`), else the deck value, else 1. **`validate` ignores it** (base rate only; an oversampled comparison is confounded by anti-alias group delay). Stripped for ngspice via `MELANGE_ONLY_DIRECTIVES`.
 
 ### CLI
 - `melange compile` → Rust code or plugin project
@@ -248,10 +250,12 @@ Source: Sowter DWG E-72,658-2 + Peerless/Triad winding data.
 
 ## Performance
 
-- DK circuits: 100–600× realtime (Schur path)
-- Nodal full LU (Pultec, N=41, M=8, 2 transformers): ~11× realtime with all stacked optimizations
-- VCA compressor (N=21, M=3, nodal full LU): ~42× realtime
-- 8-BJT Class AB power amp (DK M=9): 0.4× realtime (parasitic-R limited; K_eff approach planned)
+**Re-measured 2026-08-25** on an AMD Ryzen 9 7950X (single core, noiseless, `-C target-cpu=x86-64-v3`, via `tools/perf-harness/bench.sh`); host-dependent. The earlier figures below were largely fabricated/stale — see `memory/perf_numbers_measured_2026_08_25.md`. Measured: nonlinear audio circuits ≈9–65× RT; light stages hundreds× (single 12AX7 ~230×); trivial linear ~2700×.
+
+- Passive EQ (N=52, M=8, 3 xfmrs, nodal full LU): **~24×** realtime
+- Wurlitzer preamp (2 BJT, full GP): ~56× · Tweed 5F1 amp: ~23× · overdrive pedal: ~64× · SSL bus comp (full): ~9×
+- VCA compressor (N=21, M=3, nodal full LU): ~42× realtime *(not re-measured 2026-08-25)*
+- 8-BJT Class AB power amp (DK M=9): 0.4× realtime *(not re-measured; parasitic-R limited; K_eff approach planned)*
 
 ## Known Limitations
 
@@ -261,25 +265,26 @@ Source: Sowter DWG E-72,658-2 + Peerless/Triad winding data.
 - All device models fixed at room temperature (27°C); no TNOM/TC1/TC2/XTI
 - `MAX_M=24` — bound on NR dimension; iterative/sparse NR for M>24 deferred. Bumped from 16 on 2026-04-19 to admit Uniquorn v2 (M=20) and leave headroom for split-band saturation designs.
 - Full-LU NR + ill-conditioned A (cond(A) > ~1000): Schur preferred when K well-conditioned. No known circuit needs both pathological K and ill-conditioned A. See DEBUGGING.md "Known Full-LU NR Limitations"
-- Ideal transformer decomposition (dependent sources + explicit leakage/magnetizing L): deferred, current coupled-inductor approach sufficient for Pultec at +1.8 dB
-- **Glow/neon relaxation-oscillator edge aliasing** (`N … NEON(…)`, Phase 0c Stage 2a). The strike/extinguish edge is quantized to the sample grid, so a bare oscillator node aliases at base rate. **Anti-alias = whole-circuit oversampling** (arbiter ruling on sub-sample edge handling: output BLEP was REJECTED — ill-posed for a mixed multi-oscillator output, and a cosmetic output filter forbidden by the accuracy-over-output-mapping rule; the sub-sample breakpoint re-solve is Deferred, below). Measured (`glow_relaxation_tests.rs`): for RC-loaded dividers the reservoir cap already band-limits the discharge (τ=RON·C≈one sample → a fast ramp, not an ideal step), so base-rate aliasing is modest (ASR ≈ −39 dB on a 126 Hz divider) and 4× OS nudges it only ~1 dB; OS=4 preserves the oscillator physics exactly. Recommend OS≥4 for glow-bearing decks. A trustworthy cross-divider ASR study (a naive FFT ASR on a few-sample-period self-oscillator is artifact-dominated) + a listening pass are the gate on ever building the breakpoint fix.
+- Ideal transformer decomposition (dependent sources + explicit leakage/magnetizing L): deferred, current coupled-inductor approach sufficient for the passive EQ at +1.8 dB
+- **Glow/neon relaxation-oscillator (`N … NEON(…)`, Phase 0c Stage 2a; EXPERIMENTAL, branch `phase-0c-glow`).** Reset model = **Option A maintaining LINE** `i=(v−V0)/RS`, intercept `V0=VM−RS·IK` DERIVED (`.model NEON(VO VM IK RS IHOLD ROFF)`) — the reservoir-cap reset floor emerges at ~89 V (measured 93→88.95 V, both routes) instead of the old fixed VD=93. Slope RS is `placeholder-pending-ZA1001` (ZA1004 form-transfer; the two-timescale deionisation layer that would reproduce sheet-B's non-monotonic minimum is DEFERRED — its τ's don't exist in any source). Chain re-centering gate is with openphilicorda.
+  - **Edge aliasing:** strike/extinguish edge quantized to the sample grid → a bare oscillator node aliases at base rate. **Anti-alias = whole-circuit oversampling** (arbiter ruling: output BLEP REJECTED — ill-posed for a mixed multi-oscillator output, and a cosmetic output filter is forbidden by the accuracy-over-output-mapping rule; the sub-sample breakpoint re-solve is Deferred, below). Measured (`glow_relaxation_tests.rs`): for RC-loaded dividers the reservoir cap band-limits the discharge (τ=RS·C≈30 µs → a fast ramp, not an ideal step), so base-rate aliasing is modest (ASR ≈ −35 dB on a ~115 Hz divider) and 4× OS does not worsen it; OS=4 preserves the oscillator physics exactly. Recommend OS≥4 for glow-bearing decks. A trustworthy cross-divider ASR study (a naive FFT ASR on a few-sample-period self-oscillator is artifact-dominated) + a listening pass are the gate on ever building the breakpoint fix.
 
 ## Validated Circuits
 
-Circuit netlists live in the [melange-audio/circuits](https://github.com/melange-audio/circuits) repo
+Circuit netlists live in a separate repository (public repo going to GitLab; unpublished as of 2026-08-25)
 (locally `../melange-circuits`). Circuit-specific tests use `.test.toml` sidecars. All circuits
 start in `unstable/`; promotion to `stable/` requires user DAW sign-off (SPICE correlation
 and compilation are necessary but not sufficient).
 
-- **Passive tube EQ** (passive-eq1a): 4 tubes, 2 transformers, 7 pots, 3 switches, global NFB. Sowter DWG E-72,658-2. ~11× RT on nodal full LU. Flat ±1 dB 20Hz–15kHz, 21 dB differential NFB.
+- **Passive tube EQ** (passive-eq1a): 4 tubes, 3 transformers, 7 pots, 3 switches, global NFB. Amp § from Sowter DWG E-72,658-2. N=52, M=8; ~24× RT on nodal full LU. Flat ±1 dB 20Hz–15kHz, 21 dB differential NFB.
 - **Wurlitzer 200A preamp** (wurli-preamp): N=11, M=3–5 FA, 2N5089 Ebers-Moll. SPICE-validated 6-nines, 3.2% RMS.
 - **Wurlitzer 200A power amp** (wurli-power-amp): N=20, M=9–16 FA, quasi-complementary class AB. DK codegen 0.4× RT, nodal 0.04×.
 - **Tweed-style 2-stage 12AX7 preamp** (twas-preamp): N=13, M=4. 50 mV → 549 mV (+20.8 dB). Zero NR divergence.
 - **SSL bus compressor** (4kbuscomp): 12 op-amps, 2 VCAs, 6 diodes, 2 pots, 2 switches. DC OP basin trap FIXED 2026-04-17 (`b771512`, post-fallback refinement NR). Transient chord-NR false convergence PARTIAL FIX 2026-04-17 (`c3d3eae`, residual check on ActiveSetBe/ActiveSet) — stable at `d ≤ 2 s` all amps on the original netlist. `d = 5 s` closes only with the netlist-side `.model OA_TL074 VSAT=11 → 13.5` fix (TL07x on ±15 V swings to ±13.5 V per TI datasheet); that diff is currently uncommitted in `melange-circuits/unstable/dynamics/4kbuscomp.cir`. See DEBUGGING.md "ActiveSetBe Chord-NR False Convergence" and "Precision Rectifier DC OP Convergence".
 - **VCR audio ALC compressor**: N=21, M=3, nodal full-LU ~42× RT. Key: 100Ω Rdecouple between VCA sig- and I-V converter fixes positive K diagonal.
 - **Klon Centaur**: ActiveSetBe auto-route (verified amp=[0.01..0.50]). BoyleDiodes opt-in only (heavy-clip divergence at amp ≥ 0.05 unsolved — not a blocker, see DEBUGGING.md).
-- **Tube Screamer** / guitar pedals: stable.
-- **Pentode stages**: EL84 single stage, Tweed Deluxe (6V6GT beam tetrode), 6K7 varimu, Plexi (4×EL34 grid-off FA M=18→14). DC-OP validated, end-to-end compile-and-run verified.
+- **Tube-Screamer-style overdrive** / guitar pedals: stable.
+- **Pentode stages**: EL84 single stage, Tweed Deluxe (6V6GT beam tetrode), 6K7 varimu, Plexi (4×EL34; grid-off M=18→14 only under `--tube-grid-fa on` — full 3D by default routes it nodal). ngspice-validated full-3D (2026-09-04): twill-deluxe 0.063%, el84-single-stage 0.233%, noyce-6bq5 0.060%, noyce-ef86 0.060%.
 - **Uniquorn v2**: 16-stage cascade (N=64, M=12, ~3× RT mono) + push-pull power (N=23, M=6, ~15× RT).
 
 ## Pending Work
@@ -290,7 +295,7 @@ and compilation are necessary but not sufficient).
 - **Oomox plugin roadmap**: `.runtime` VS, named constants, DC op accessor, warmup constant, runtime DC OP recompute
 - **Performance**: DK parasitic BJTs (power amp 0.41×, K_eff approach planned); hot/cold state split; fast_powf for Koren tube model
 - **Documentation**: user-facing docs, example circuits, getting-started guide
-- **Multi-language codegen**: `Emitter` trait + `CircuitIR` are language-agnostic by design. Planned: C++, FAUST, Python/NumPy, MATLAB/Octave.
+- **Multi-language codegen**: `Emitter` trait + `CircuitIR` are language-agnostic by design. In progress: C++. Planned: Python/NumPy, MATLAB/Octave. **FAUST: explored, ruled out (2026-09-02)** — FAUST's generated code is not Turing-complete by design, so a data-dependent NR iteration count is inexpressible; only circuits emitting no NR loop at all would work (6 of 41 corpus circuits). Note the predicate is "no NR loop emitted", NOT `M == 0`: behavioural B-sources route nodal and get Newton regardless of M.
 - **wurli-power-amp residual — FIXED 2026-08-03** (raised by melange-circuits 2026-07-25, after the auto-BE router-corroboration fix `b0dcb27` closed the timeout/explosion bug). Prior text here ("~10 dB past clipping, output still reaches 353 V") was itself stale — the raw internal-node blowup was far worse and erratic across amplitude (not monotonic with drive): amp 0.05 → 16,079 V, amp 1.00 → 27,977 V, amp 2.00 → 22,201 V internal, while amp 0.10/0.30/0.50 stayed physical (20–32 V) — convergence-path-dependent, not a clipping-level threshold. Root cause: `emit_nodal`'s per-iteration "global node voltage damping" (`nodal_emitter.rs`, both the primary NR loop and the Backward Euler fallback loop) capped the damping ratio with `.max(0.01)`, so a single NR iteration's LU solve producing a raw voltage delta many orders of magnitude beyond the intended cap (observed 3.8e7 V at a class-AB crossover device-state transition) still let a multi-kV single-iteration jump through (1% of 3.8e7 ≫ the ≤10 V ceiling). The BE-fallback's voltage-step-only convergence check then falsely accepted the resulting nonphysical fixed point (its relative tolerance scales with the already-diverged node voltage). Fixed by removing the `.max(0.01)` floor so the ratio divides uncapped, bounding every iteration's worst-case node step at exactly the intended threshold regardless of raw delta magnitude. All amplitudes now stay within 20–32 V internal; `nr_max_iter_count`/`be_fallback_count` also dropped 10–70× (bad state no longer cascades into subsequent samples). Regression: `nodal_be_fallback_alpha_floor_tests.rs::test_nodal_full_lu_node_damping_has_no_ratio_floor`.
 - **BJT forward-active (FA) reduction rule re-check** (raised by melange-circuits 2026-07-25): on wurli-power-amp, 7 of 8 BJTs clear the `Vbc < -0.5 V` FA threshold (`DEBUGGING.md` — device evaluated at Vbc ≈ -20 V) yet all 8 stay full 2D in the shipped codegen. Open question whether the FA rule is still being applied as documented for this circuit, or whether something else (e.g. `--tube-grid-fa`-style override, K-conditioning skip-expansion gate) is suppressing it. Gates a downstream CPU-budget decision in openwurli. Not yet investigated.
 - **BJT analogue of `--tube-grid-fa off`** (requested by melange-circuits 2026-07-25): a CLI flag letting a caller trade Gummel-Poon fidelity for CPU per-circuit on BJTs, mirroring the existing tube grid-cutoff override. Not designed or scoped yet — needs a decision on whether this is worth the new surface area before implementation.
@@ -298,7 +303,7 @@ and compilation are necessary but not sufficient).
 ### Deferred
 - **`.switch`/`.pot`/`.runtime R` G-swap first-sample 2× artifact** (root-caused 2026-08-15, raised by melange-circuits/openfarf; user-gated fix). A conductance changed mid-run produces an output at the *swap sample* exactly 2.000× the physical value (drive-independent, deterministic), correct one sample later. Mechanism: trapezoidal puts every conductance in BOTH `A = g+(2/T)C` and `a_neg = (2/T)C−g`, so a switch of Δg adds +Δg to the forward matrix and −Δg to the history matrix; on the swap sample `v[n] = v_prev − 2·A_new⁻¹·Δg·v_prev` — Δg counted twice (`rebuild_matrices` correctly rebuilds `a_neg`; this is inherent to the trap formulation, not staleness). It is a **bug, not a contract** — a resistive divider responds instantly, so the swap sample should be physical; do NOT document it as "undefined." Fix: use the pre-switch conductance in the history term for the one transition sample (one-sample old-g lag on the switched conductance in `a_neg`) — a core-solver change touching every `.switch`/`.pot`/`.runtime R` circuit, needs full golden/SPICE validation. Repro: any `.switch` onto a resistive path, toggle mid-run, compare first-sample deflection to settled ratio. **Second artifact (same event):** the swap also excites a trapezoidal z=−1 Nyquist marginal-stability mode that rings for ~1000 samples (damped by circuit RC; parity-split-into-two-smooth-sequences signature; verified undamped in a no-cap repro, and gone under `--backward-euler`). The old-g lag does NOT kill this mode — it only shrinks the exciting impulse. **Complete fix is two parts:** (a) the one-sample old-g history lag (kills the 2×); (b) breakpoint-style force-BE for 1–2 samples after any `.switch`/`.pot`/`.runtime R` event (damps the Nyquist mode at the source — commercial-SPICE breakpoint practice; the switch-triggered analog of the existing nodal auto-BE). **Third manifestation (reproduced 2026-08-15): PERSISTENT residual on capless switched nodes.** On a purely-resistive (algebraic, no-cap) node the z=−1 mode is *undamped*, so the swap excitation never decays — the two-node residual stays non-zero for as long as you rest in the non-default position (openfarf's g10-ref busbar: 1.44% held-pos1, RC-damped by the chain's 1µF; a no-cap minimal repro shows ±0.32 undamped). Confirmed the trap-marginal mode, not a rebuilt-matrix error: `--backward-euler` held-pos1 residual = −3.5e-13 (consistent), null Δg=0 exact. **Breakpoint-BE is load-bearing** — it fixes both the decaying ring (capped nodes) and this persistent residual (capless nodes); the old-g lag alone does not fix the capless case. Regression oracle: a purely resistive node obeys `node − ratio·other ≈ 0` at all times — grade the two-node residual of a CAPLESS node held in a non-default position (must read ~1e-7), NOT node-vs-DC (a damping cap hides the bug). Workaround (openfarf): fit transients from closure+1; measurements while resting in a non-default position on a capless node are contaminated under trap. See memory `switch_gswap_trap_2x_first_sample_2026_08_15`.
 - **G10 divider hard-switching NR overshoot** (root-caused 2026-08-14, user-deferred as non-blocking). Germanium-PNP astable divider (`melange-circuits/local-docs/repro-ic-vcvs-blowup.cir` / `repro-wav-input-blowup.cir`) overshoots to ~80 V on an 8 V rail under a full-strength switching trigger (ground truth from melange-circuits: real full chain swings inside 0–8 V, duty 79.6%). Signature: BE-fallback storm (~88 % of samples vs ~1 % when physical). Root cause: at a switching edge the astable's positive-feedback K coupling pins a junction at v/vt ≈ 300 (v_d ≈ 7.8 V), `i_dev` saturates at `IS·exp(40)` ≈ 7e10 A, the Jacobian goes catastrophically ill-conditioned, and per-sample direct Newton stalls (‖f‖ flat at 7e10, exhausts MAX_ITER=90); the BE fallback inherits the same pinned state. Decisively ruled out by experiment: warm-start predictor, **line-search** (flat region, no descent direction), pnjlim sub-threshold-skip removal, and absolute v_d clamping. **Fix = port the DC-OP continuation (gmin/source stepping, `dc_op.rs`) into the per-sample `solve_nonlinear`** — substantial, higher-risk; validate against 24 SPICE + solver tests + oomox plugin-render golden gate. NOT blocking the working full G10 chain (which converges to rail). Prior "true Newton / Anderson" guess for this class is superseded by the gmin/source-stepping direction. **Acceptance criteria when this lands (from melange-circuits 2026-08-15):** (1) the ~80 V overshoot case stays bounded/physical; (2) NEW — *converged-vs-starved pitch agreement*: on the free-running G10 astable cascade, `--max-iter 70` (~11% NR starvation, which does NOT latch and looks healthy) leaves the master oscillator **3.8% flat** (a third of a semitone) with duty drifting ~3 points vs `--max-iter 1000`, because every non-converged sample leaves a slightly-wrong state that *integrates into pitch* on an oscillator. A failure-fraction warning (see the NR-starvation warning, `fe5c12a`) fundamentally cannot catch this sub-threshold detune class — the continuation is the real fix. See memory `g10_divider_hard_switching_overshoot_2026_08_14`.
-- Ideal transformer formulation (Pultec at +1.8 dB with current approach, not blocking)
+- Ideal transformer formulation (the passive EQ at +1.8 dB with current approach, not blocking)
 - Phase 6a/6b type safety (NodeIdx newtype, field visibility)
 - Phase 7 crate split (extract melange-parser, melange-codegen)
 - M>24 iterative/sparse NR
@@ -310,3 +315,85 @@ and compilation are necessary but not sufficient).
 Zig 0.13 + cargo-zigbuild + macOS SDK 13.3 + rcodesign (ad-hoc signing).
 `cargo zigbuild --release --target universal2-apple-darwin` produces universal Mac binaries.
 melange-cli does NOT cross-compile (ureq/dirs need CoreFoundation), but generated plugins do.
+
+---
+
+# v0.1.5 SHIPPED 2026-09-03 (tag `v0.1.5` -> `d641457`)
+
+Everything in this section shipped in v0.1.5. Not DSP-byte-identical to 0.1.4:
+generated source moves for essentially every deck (F9 rewrites the nodal
+`reset()` body; DK decks get the new `N_I` layout), but rendered audio moves
+only on noise-enabled decks hitting a sub-step path (194 of 196 golden renders
+identical). **F9 cannot move `simulate`/`analyze` output** — neither calls the
+generated `reset()`. Downstream re-verify is ~2 decks by output, all nodal decks
+by generated source.
+
+v0.1.5 also closed a version-reporting gap: `main` had been advanced past the
+`v0.1.4` tag without a bump, so builds from `main` reported a 0.1.4 they were
+not.
+
+# 2026-09-02 — verification-instrument repairs, and what they cost
+
+Three of melange's verification instruments were found to have integrity defects
+in one day. **None was found by the instruments themselves.** Each measured
+something real and was *believed* to be measuring something else.
+
+| instrument | defect | fixed |
+|---|---|---|
+| golden gate | renders were **f32** (hiding the entire `-ffp-contract` class the C++ numerics contract exists to prevent); `compare` never diffed `circuit.rs`; **zero** `diag_*` counters recorded | `847d91f`, `867fd18`, `671a575` |
+| SPICE validate | built a **different circuit** than compile ships — N=44/M=16 vs N=20/M=14 on the shipped power amp | `6bc3ef1` |
+| `DC_BLOCK_CUTOFF_HZ` | one tuned constant duplicated at **six** sites (plan said one, review said five) | `ddd29c1` |
+
+A refactor could have deleted the BE latch, NaN reset and active-set resolve and
+kept the golden gate green.
+
+## Golden corpus
+
+**46 → 35 → 38 decks.** Eleven were dropped when melange-circuits pruned their
+netlists (`cf8a04c`); the maintainer confirmed all eleven were in-progress or
+abandoned. They were **not** vendored back in: gating on an abandoned circuit
+freezes its pathology as the specification, so a legitimate solver fix later
+reads as a regression.
+
+Three replacements chosen **by measurement**, not reputation — compiled, driven
+with a hot sweep, `diag_*` counters read off the run:
+
+| deck | substep | ls_fail | be_fallback | nr_max |
+|---|---|---|---|---|
+| steve-1073-preamp | 490 | 12412 | 896 | 1386 |
+| wurli-power-amp | 427 | 8603 | 0 | 427 |
+| gravity | 0 | 926 | 0 | 0 |
+| *(dropped tungsten-thunder-horse, for scale)* | 53 | 5627 | — | — |
+
+**38 decks now exercise more recovery ladders than 46 did.** Only
+`diag_voltage_damp_count` is still thinned (7 → 5).
+
+⚠ **What this corpus is:** a CHANGE DETECTOR — it compares melange against
+melange, so deck quality is irrelevant to catching a refactor that moves output.
+It is **not** an accuracy oracle. Note the asymmetry: *agreement* is robust to
+deck quality (a bad circuit cannot manufacture agreement between two
+implementations); *disagreement* is not. A broken deck may **detect** a defect;
+it can never **be** the evidence for one.
+
+## Coverage closed
+
+* **MOSFET / JFET** — were implemented and SPICE-validated with **zero** circuits
+  anywhere. Three decks added (`150bda6`). The MOSFET pair is the point: DK
+  evaluates body effect **once per sample from `v_pred`**, nodal **three times
+  from the live NR iterate**. Both legitimate; collapsing them is what an
+  over-abstracted device-eval IR would do.
+* **Pentode ngspice validation** (`a62ddad`) — 10 library decks / 4 corpus decks
+  had no oracle at all.
+
+## Still open
+
+* Validate applies **no forward-active reduction** (residual 0.246% on
+  wurli-power-amp is a candidate).
+* **Per-timestep junction-charge re-linearization** — blocks `TR`, would make
+  `TF` exact. Build charge-first; see `DEVICE_MODELS.md`.
+* **Multi-input** is CLI-restricted to linear (`M=0`) circuits, which is exactly
+  the case superposition already covers — so the nonlinear-mixing case it exists
+  for is unreachable, and no deck uses it.
+* Schur NR diverges on expanded parasitic internal nodes where the same circuit
+  converges unexpanded (or expanded on full-LU). **Latent** — the CLI's K-gate
+  never constructs that combination; measured **0** corpus decks in that state.

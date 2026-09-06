@@ -16,10 +16,10 @@ Optional:
 
 ## Quick Start: Circuit to Plugin
 
-Compile a circuit from the [melange-audio/circuits](https://github.com/melange-audio/circuits) library, or use a local `.cir` file:
+Compile the built-in demo circuit (ships with melange, no downloads), or use a local `.cir` file:
 
 ```bash
-melange compile melange:unstable/pedals/peaches --format plugin -o my-fuzz
+melange compile passive-eq1a --format plugin -o my-eq
 # or from a local file:
 melange compile my-circuit.cir --format plugin -o my-fuzz
 ```
@@ -34,7 +34,9 @@ Build the plugin:
 
 ```bash
 cd my-fuzz
-cargo nih-plug-xtask bundle my_fuzz --release
+# Bundle CLAP + VST3. The one-time nih-plug clone is documented in the
+# generated README.md; edit NIH_PLUG_PATH in build.sh, then run it:
+bash build.sh
 ```
 
 The compiled CLAP and VST3 plugins appear in `target/bundled/`.
@@ -69,7 +71,7 @@ melange simulate clipper.cir --amplitude 0.1 -o test.wav
 # Compile to a plugin
 melange compile clipper.cir --format plugin -o my-clipper
 cd my-clipper
-cargo nih-plug-xtask bundle my_clipper --release
+bash build.sh   # bundles CLAP+VST3; see generated README.md for nih-plug setup
 ```
 
 ## Adding Controls

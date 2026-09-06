@@ -79,6 +79,7 @@ pub mod linear_solver;
 pub(crate) mod lu;
 pub mod mna;
 pub mod parser;
+pub mod pipeline;
 
 // Keep the old solver module for backward compatibility during transition.
 // It re-exports LinearSolver and SolverError from linear_solver.

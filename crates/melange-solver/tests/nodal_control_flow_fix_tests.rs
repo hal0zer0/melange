@@ -304,11 +304,11 @@ fn runtime_v_source_stamped_in_all_rhs_rebuilds() {
          to 0 V on fallback samples before this fix)"
     );
 
-    // Full-LU route: trap RHS + sub-step RHS + BE fallback.
-    let full = {
-        let spice = format!("{}B_frc frc 0 V={{0}}\nR_frc frc 0 1k\n", CLIPPER_RUNTIME_V);
-        nodal_code(&spice)
-    };
+    // Full-LU route: trap RHS + sub-step RHS + BE fallback. Forced explicitly
+    // via nodal_sub_path_override = FullLu (was a behavioral-dummy `B_frc frc 0 V={0}` routing lever).
+    let full = nodal_code_with(CLIPPER_RUNTIME_V, |c| {
+        c.nodal_sub_path_override = melange_solver::codegen::NodalSubPathOverride::FullLu
+    });
     assert!(
         full.contains("// Cross-timestep chord"),
         "forcing branch must route full-LU"

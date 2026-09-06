@@ -111,8 +111,9 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
 - No ngspice validation yet
 
 ### LDR (Photoresistor)
-- `CdsLdr` device model exists in `melange-devices` (VTL5C3/4, NSL-32 presets)
-- Not yet available via the netlist parser or codegen pipeline
+- `CdsLdr` device model (VTL5C3/4, NSL-32 presets) with attack/release photocell dynamics
+- Placed in a netlist via the `O` element (`O1 rphoto+ rphoto- led+ led- MODEL` + `.model MODEL LDR()`), on the stateful-device codegen path (both DK and nodal)
+- No ngspice twin (SPICE has no equivalent LDR model to validate against)
 
 ## Dynamic Parameter Controls
 
@@ -188,9 +189,12 @@ For typical circuits (N<=41 validated), pot rebuild takes ~250us at N=37 -- well
 
 ### Performance Benchmarks
 
-- DK codegen circuits: 100-600x realtime
-- Nodal full-LU with chord + cross-timestep + sparse LU: ~11x realtime (Pultec EQP-1A, N=41, M=8)
-- 16-stage cascade (Uniquorn, N=64, M=12): ~3x realtime mono
+Measured on an AMD Ryzen 9 7950X, single core, noiseless, `-C target-cpu=x86-64-v3` (median of 7 × 2M samples via `tools/perf-harness/bench.sh`); throughput is host-dependent.
+
+- Light nonlinear circuits: 12AX7 gain stage ~230×, overdrive pedal ~64× realtime
+- Germanium diode network (6 Ge diodes) ~12× realtime
+- Typical multi-device circuits: Wurlitzer preamp ~56×, tweed guitar amp ~23× realtime
+- Heaviest validated: a Pultec-style passive EQ (nodal full-LU, chord + sparse LU, N=52, M=8) ~24×, SSL-class bus compressor (12 op-amps + 2 VCAs) ~7.1× realtime
 
 ## Circuit Noise [PARTIAL]
 
@@ -220,7 +224,12 @@ Noise limitations:
 
 - **LFO/Modulation**: no time-varying sources for tremolo/vibrato (use `.runtime R`/`.runtime V` host-driven modulation instead)
 - **Temperature sweep**: no `.temp` directive or global temperature sweep (device self-heating is available per-device, see Temperature Dependencies above)
-- **Multi-language codegen**: C++, FAUST, Python/NumPy, MATLAB targets planned
+- **Multi-language codegen**: C++ in progress; Python/NumPy and MATLAB targets
+  planned. **FAUST was explored and determined impractical** — its generated code
+  is intentionally not Turing-complete (it computes each sample in a fixed number
+  of operations), so a Newton-Raphson solve whose iteration count depends on the
+  data cannot be expressed. Only strictly linear circuits would be emittable,
+  which is a small enough subset to not be worth a backend.
 - **M > 24**: iterative/sparse NR for very large nonlinear systems (MAX_M=24)
 - **Ideal transformer formulation**: dependent sources + explicit leakage/magnetizing L
 

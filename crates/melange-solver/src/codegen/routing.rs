@@ -54,6 +54,13 @@ pub struct RoutingDecision {
     pub k_diag_unsafe: bool,
     /// Whether S matrix is ill-conditioned (max|S| > 1e6).
     pub s_ill_conditioned: bool,
+    /// Whether a behavioral B-source is present. DK's N_v/N_i reduction cannot
+    /// express node-space stamping — a HARD structural requirement for nodal.
+    pub behavioral: bool,
+    /// Whether any inductor / coupled-inductor / transformer winding saturates
+    /// (`isat` set), needing a per-sample L update that DK's precomputed
+    /// S=A⁻¹ cannot provide — a HARD structural requirement for nodal.
+    pub saturating_inductor: bool,
     /// Human-readable reason for the routing decision.
     pub reason: String,
 }
@@ -82,6 +89,19 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
     let multi_transformer = has_inductors && n_xfmr_groups > 1;
     let large_m = m >= 10;
 
+    // Structural nodal requirements DK cannot represent — used both for the
+    // routing decision below and to reject a forced `--solver dk` override.
+    let has_behavioral = !mna.behavioral_sources.is_empty();
+    let saturating_inductor = mna.inductors.iter().any(|ind| ind.isat.is_some())
+        || mna
+            .coupled_inductors
+            .iter()
+            .any(|ci| ci.l1_isat.is_some() || ci.l2_isat.is_some())
+        || mna
+            .transformer_groups
+            .iter()
+            .any(|g| g.winding_isats.iter().any(|i| i.is_some()));
+
     // Check trapezoidal stability via power iteration on S*A_neg
     let (dk_unstable, spectral_radius) = if !dk_failed && m > 0 && n > 0 {
         compute_spectral_radius(&kernel.s, &kernel.a_neg, n)
@@ -108,6 +128,23 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
     // NFB circuit could otherwise sail through to DkSchur and diverge.
     // Dimensions with an all-zero N_i column (MOSFET insulated gate, VCA
     // control port) have K[i][i] = 0 by construction and are benign.
+    // ⚠ DO NOT harmonise this `>= 0.0` with nodal_emitter.rs's `> 0.0`, and do
+    // not collapse the two predicates into one shared value. They read
+    // DIFFERENT matrices — this one sees the DK kernel and the pre-expansion
+    // `MnaSystem`, the emitter's sees the IR built after
+    // `expand_bjt_internal_nodes` — and they feed different decisions
+    // (DK-vs-nodal here, Schur-vs-full-LU there).
+    //
+    // MEASURED 2026-09-02 across the whole netlist library
+    // (`tests/f7_routing_predicate_reachability_tests.rs`, run with
+    // `--include-ignored`): the sign difference is REACHABLE, contrary to the
+    // prediction that it was measure-zero. 20 dimensions across 8 circuits
+    // carry `K[i][i]` bit-exactly `0.0` on a LIVE `N_i` column — including
+    // wurli-power-amp, which belongs to the only shipped product. Adopting this
+    // `>= 0.0` in the emitter would newly flag all 20 and move the
+    // Schur-vs-full-LU decision on those circuits. (The sibling
+    // `1e-30`/`1e-20` magnitude difference IS unreachable: zero hits anywhere.)
+    // The test pins both counts; if either moves, redo the reasoning first.
     let k_diag_unsafe = if !dk_failed && m > 0 {
         (0..m).any(|i| {
             kernel.k[i * m + i] >= 0.0 && mna.n_i.iter().any(|ni_row| ni_row[i].abs() >= 1e-30)
@@ -128,62 +165,65 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
     };
 
     // Routing decision (first match wins)
-    let route;
-    let reason;
-    if !mna.behavioral_sources.is_empty() {
+
+    let (route, reason) = if has_behavioral {
         // Behavioral B-sources reference arbitrary nodes (rectangular control),
         // which the DK N_v/N_i reduction can't express. They are stamped
         // directly in node space by the nodal emitter.
-        route = SolverRoute::Nodal;
-        reason =
-            "behavioral B-source present (node-space stamping requires nodal path)".to_string();
+        (
+            SolverRoute::Nodal,
+            "behavioral B-source present (node-space stamping requires nodal path)".to_string(),
+        )
     } else if dk_failed {
-        route = SolverRoute::Nodal;
-        reason = "DK kernel build failed (positive feedback or oscillator circuit)".to_string();
+        (
+            SolverRoute::Nodal,
+            "DK kernel build failed (positive feedback or oscillator circuit)".to_string(),
+        )
     } else if dk_unstable {
-        route = SolverRoute::Nodal;
-        reason = format!(
-            "trapezoidal unstable (spectral radius {:.4} > 1.002)",
-            spectral_radius
-        );
+        (
+            SolverRoute::Nodal,
+            format!(
+                "trapezoidal unstable (spectral radius {:.4} > 1.002)",
+                spectral_radius
+            ),
+        )
     } else if k_diag_unsafe {
-        route = SolverRoute::Nodal;
-        reason = "non-negative K diagonal with live N_i column (positive feedback in DK Schur NR, e.g. transformer-coupled NFB)".to_string();
+        (SolverRoute::Nodal, "non-negative K diagonal with live N_i column (positive feedback in DK Schur NR, e.g. transformer-coupled NFB)".to_string())
     } else if multi_transformer {
-        route = SolverRoute::Nodal;
-        reason = format!(
-            "multi-transformer circuit ({} groups, DK K matrix unstable)",
-            n_xfmr_groups
-        );
+        (
+            SolverRoute::Nodal,
+            format!(
+                "multi-transformer circuit ({} groups, DK K matrix unstable)",
+                n_xfmr_groups
+            ),
+        )
     } else if large_m {
-        route = SolverRoute::Nodal;
-        reason = format!(
-            "large nonlinear dimension (M={}, M×M elimination expensive)",
-            m
-        );
+        (
+            SolverRoute::Nodal,
+            format!(
+                "large nonlinear dimension (M={}, M×M elimination expensive)",
+                m
+            ),
+        )
     } else if k_ill_conditioned {
-        route = SolverRoute::Nodal;
-        reason = "K matrix ill-conditioned (max|K| > 1e8, nodal full-LU avoids K)".to_string();
+        (
+            SolverRoute::Nodal,
+            "K matrix ill-conditioned (max|K| > 1e8, nodal full-LU avoids K)".to_string(),
+        )
     } else if s_ill_conditioned {
-        route = SolverRoute::Nodal;
-        reason = "S matrix ill-conditioned (max|S| > 1e6, cap-only nodes lack resistive paths)"
-            .to_string();
-    } else if mna.inductors.iter().any(|ind| ind.isat.is_some())
-        || mna
-            .coupled_inductors
-            .iter()
-            .any(|ci| ci.l1_isat.is_some() || ci.l2_isat.is_some())
-        || mna
-            .transformer_groups
-            .iter()
-            .any(|g| g.winding_isats.iter().any(|i| i.is_some()))
-    {
-        route = SolverRoute::Nodal;
-        reason = "saturating inductors require augmented MNA (per-sample L update)".to_string();
+        (
+            SolverRoute::Nodal,
+            "S matrix ill-conditioned (max|S| > 1e6, cap-only nodes lack resistive paths)"
+                .to_string(),
+        )
+    } else if saturating_inductor {
+        (
+            SolverRoute::Nodal,
+            "saturating inductors require augmented MNA (per-sample L update)".to_string(),
+        )
     } else {
-        route = SolverRoute::DkSchur;
-        reason = format!("DK Schur (N={}, M={})", n, m);
-    }
+        (SolverRoute::DkSchur, format!("DK Schur (N={}, M={})", n, m))
+    };
 
     RoutingDecision {
         route,
@@ -195,6 +235,8 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
         k_ill_conditioned,
         k_diag_unsafe,
         s_ill_conditioned,
+        behavioral: has_behavioral,
+        saturating_inductor,
         reason,
     }
 }

@@ -1288,12 +1288,17 @@ K1 L1 L2 0.9\nK2 L1 L3 0.9\nK3 L2 L3 0.9\nR2 s1 0 1k\nR3 s2 0 2.2k\n";
         let mna = MnaSystem::from_netlist(&netlist).unwrap();
         let kernel = DkKernel::from_mna(&mna, 48000.0).unwrap();
 
-        // I1 0 a: node a is n_minus → injection is -I_dc, doubled by the
-        // trapezoidal source average to -2*I_dc.
+        // I1 0 a: SPICE `I n+ n- val` drives current from n+ (ground) through
+        // the source into n- (node a) — i.e. +I_dc is injected INTO node a.
+        // Verified against ngspice: this circuit settles at V(a) = 14.5 V
+        // (4.5 V divider + 2 mA into 10k||10k = +10 V), which requires a
+        // POSITIVE node-a RHS row. The trapezoidal source average doubles it
+        // to +2*I_dc. (Before the mna.rs current-source sign fix this asserted
+        // -2*I_dc, codifying an independent-source sign inverted vs ngspice.)
         let a_node = mna.node_map["a"] - 1;
         assert!(
-            (kernel.rhs_const[a_node] - (-2.0 * 2e-3)).abs() < 1e-15,
-            "current-source node row must be ±2*I_dc (trapezoidal doubling), got {}",
+            (kernel.rhs_const[a_node] - (2.0 * 2e-3)).abs() < 1e-15,
+            "current-source node row must be +2*I_dc (injected into n_minus=a, trapezoidal doubling), got {}",
             kernel.rhs_const[a_node]
         );
 

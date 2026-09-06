@@ -349,7 +349,8 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
         state.diag_nr_max_iter_count += 1;
     }
     {% endif %}
-
+{% if region_exit_lines is defined and region_exit_lines != "" %}
+{{ region_exit_lines }}{% endif %}
     // Step 9: Extract outputs{% if dc_block %}, apply per-output DC blocking filter{% endif %} and scale
     let mut output = [0.0f64; NUM_OUTPUTS];
     for out_idx in 0..NUM_OUTPUTS {

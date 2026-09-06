@@ -42,7 +42,6 @@ use melange_validate::{
 const SAMPLE_RATE: f64 = 48_000.0;
 
 /// Atomic counter for unique temp file names in codegen compilation
-static MELANGE_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// Get path to test data directory
 fn test_data_dir() -> PathBuf {
@@ -94,7 +93,6 @@ fn strict_linear_config() -> ComparisonConfig {
         max_relative_tolerance: 0.5, // 50% — relative error is large near zero-crossings
         correlation_min: 0.99999,  // Five 9s
         thd_error_tolerance_db: 0.1, // 0.1 dB
-        full_scale: 1.0,
         skip_thd: false,
         settle_time_s: 0.0,
     }
@@ -123,7 +121,6 @@ fn nonlinear_config() -> ComparisonConfig {
         max_relative_tolerance: 5.0, // 500% — near zero-crossings, large relative error expected
         correlation_min: 0.9999,   // was 0.99; worst measured 1-corr = 9.7e-6 → 10.3x headroom
         thd_error_tolerance_db: 1.0, // was 3.0; worst measured 0.04 dB → 25x headroom
-        full_scale: 5.0,           // Diode clippers can hit 5V
         skip_thd: false,
         settle_time_s: 0.0,
     }
@@ -149,7 +146,6 @@ fn bjt_config() -> ComparisonConfig {
         max_relative_tolerance: 100.0, // near zero-crossings
         correlation_min: 0.995,        // was 0.99; measured 1-corr = 3.5e-4 → 14x headroom
         thd_error_tolerance_db: 5.0,   // model differences in distortion
-        full_scale: 10.0,              // BJT CE output can swing wider
         skip_thd: true,                // THD comparison not meaningful for nonlinear BJT
         // 3 ms settle on the 10 ms signal: excludes the DC-blocker/DC-OP
         // startup region while keeping 70% of the window. (The 5 Hz blocker
@@ -173,7 +169,6 @@ fn wurli_config() -> ComparisonConfig {
         max_relative_tolerance: 100.0, // near zero-crossings
         correlation_min: 0.9999,       // was 0.99; measured 1-corr = 2.7e-6 → 37x headroom
         thd_error_tolerance_db: 5.0,
-        full_scale: 10.0,
         skip_thd: true,
         // 10 ms settle on a 50 ms signal: comfortably excludes the residual
         // startup region while keeping 80% of the window.
@@ -203,7 +198,6 @@ fn neve_output_config() -> ComparisonConfig {
         max_relative_tolerance: 100.0, // near zero-crossings
         correlation_min: 0.9999,       // measured 1-corr = 4.8e-7 → 208x headroom
         thd_error_tolerance_db: 5.0,
-        full_scale: 10.0,
         skip_thd: true,
         settle_time_s: 0.010,
     }
@@ -229,7 +223,6 @@ fn neve_preamp_config() -> ComparisonConfig {
         max_relative_tolerance: 100.0, // near zero-crossings
         correlation_min: 0.99999,      // measured 1-corr < 5e-9 → >2000x headroom
         thd_error_tolerance_db: 5.0,
-        full_scale: 10.0,
         skip_thd: true,
         settle_time_s: 0.064,
     }
@@ -416,235 +409,25 @@ fn run_melange_codegen_with_main(
     sample_rate: f64,
     main_code: &str,
 ) -> Result<Vec<f64>, ValidationError> {
-    use melange_solver::codegen::routing;
-    use melange_solver::codegen::{CodeGenerator, CodegenConfig};
-    use melange_solver::dk::DkKernel;
-    use std::io::Write;
-
-    let netlist = melange_solver::parser::Netlist::parse(netlist_str)
-        .map_err(|e| ValidationError::Solver(format!("Parse: {}", e.message)))?;
-
-    let mut mna = melange_solver::mna::MnaSystem::from_netlist(&netlist)
-        .map_err(|e| ValidationError::Solver(format!("MNA: {}", e)))?;
-
-    // Hard-error on missing nodes (like the library twin in src/lib.rs).
-    // The old `.unwrap_or(1)` / `.unwrap_or(2)` fallback silently compared
-    // against an arbitrary node when a deck renamed in/out — a wrong-node
-    // comparison must fail loudly, not produce plausible garbage.
-    let input_node = mna
-        .node_map
-        .get("in")
-        .copied()
-        .ok_or_else(|| {
-            ValidationError::Solver(format!(
-                "Input node 'in' not found. Available: {:?}",
-                mna.node_map.keys().collect::<Vec<_>>()
-            ))
-        })?
-        .saturating_sub(1);
-    let output_node = mna
-        .node_map
-        .get("out")
-        .copied()
-        .ok_or_else(|| {
-            ValidationError::Solver(format!(
-                "Output node 'out' not found. Available: {:?}",
-                mna.node_map.keys().collect::<Vec<_>>()
-            ))
-        })?
-        .saturating_sub(1);
-
-    if input_node < mna.n {
-        mna.g[input_node][input_node] += 1.0; // G_in = 1.0 S
-    }
-
-    // Stamp junction caps + pre-solve DC OP so BJT charge-storage caps are
-    // linearized at the real operating point. Uses the IR's
-    // `build_device_info_with_mna` rather than the harness's
-    // `build_device_slots_from_netlist` stub — the latter hardcoded
-    // CJE/CJC/TF to zero regardless of the `.model` card and would defeat
-    // the re-linearization. When all BJTs use the SPICE defaults this is
-    // byte-identical to the zero-bias stamp.
-    let dc_preflight = {
-        let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-            &netlist,
-            Some(&mna),
-        )
-        .unwrap_or_default();
-        if device_slots.is_empty() {
-            None
-        } else {
-            let dc_config = melange_solver::dc_op::DcOpConfig {
-                input_node,
-                input_resistance: 1.0,
-                ..melange_solver::dc_op::DcOpConfig::default()
-            };
-            Some(mna.stamp_caps_and_solve_dc_op(&device_slots, &dc_config))
-        }
-    };
-
-    // Build kernel and route
-    let has_inductors = !mna.inductors.is_empty()
-        || !mna.coupled_inductors.is_empty()
-        || !mna.transformer_groups.is_empty();
-
-    let mut dk_failed = false;
-    let kernel = if has_inductors {
-        DkKernel::from_mna_augmented(&mna, sample_rate)
-            .map_err(|e| ValidationError::Solver(format!("Augmented DK: {:?}", e)))?
-    } else {
-        match DkKernel::from_mna(&mna, sample_rate) {
-            Ok(k) => k,
-            Err(_) => {
-                dk_failed = true;
-                DkKernel::from_mna_augmented(&mna, sample_rate)
-                    .map_err(|e| ValidationError::Solver(format!("DK fallback: {:?}", e)))?
-            }
-        }
-    };
-
-    let decision = routing::auto_route(&kernel, &mna, dk_failed);
-    let use_nodal = decision.route == routing::SolverRoute::Nodal;
-
-    if use_nodal {
-        let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-            &netlist,
-            Some(&mna),
-        )
-        .unwrap_or_default();
-        if !device_slots.is_empty() {
-            mna.expand_bjt_internal_nodes(&device_slots);
-        }
-    }
-
-    // Post-DC-block output ceiling (CodegenConfig::output_clamp_v, default 10 V
-    // per docs/aidocs/SIGNAL_LEVELS.md's "Signal Level Contract"). The default
-    // is sized for line-level circuits; a circuit whose DC operating point
-    // carries a high-voltage rail (e.g. a 250 V tube B+) can legitimately swing
-    // its output node tens of volts under normal large-signal drive, and a
-    // fixed 10 V ceiling silently hard-clips that into a square wave — which
-    // then reads as a huge melange-vs-ngspice divergence that is actually a
-    // harness/config gap, not a solver bug (see triode_cc overdrive
-    // investigation). Auto-scale the ceiling from the DC operating point's
-    // node-voltage headroom (already computed above as `dc_preflight`) so any
-    // future high-rail circuit validated through this harness gets a ceiling
-    // that won't clip a legitimate large-signal swing; never lower it below
-    // the existing 10 V default so all line-level circuits keep their
-    // historical clamp behavior byte-for-byte.
-    let auto_clamp_v = dc_preflight
-        .as_ref()
-        .map(|dc| {
-            dc.v_node
-                .iter()
-                .cloned()
-                .fold(0.0_f64, |acc, v| acc.max(v.abs()))
-                * 3.0
-        })
-        .unwrap_or(0.0)
-        .max(CodegenConfig::default().output_clamp_v);
-
-    // Generate code — dc_block: true to match runtime solver's built-in DC blocker
-    let config = CodegenConfig {
-        circuit_name: "spice_val".to_string(),
+    // Delegates to the library runner. This harness used to carry its own copy
+    // of the solver front end, which drifted: no `.linearize`, no
+    // forward-active or grid-off reduction, unconditional internal-node
+    // expansion, and the default MAX_ITER of 100 instead of
+    // `auto_tune_max_iter`. Since this is what the CI SPICE gate runs, the gate
+    // was not measuring the shipped build. Unified 2026-09-03 — do not
+    // reintroduce a local MNA build here.
+    melange_validate::run_melange_solver_from_str(
+        netlist_str,
+        input_signal,
         sample_rate,
-        input_node,
-        output_nodes: vec![output_node],
-        input_resistance: 1.0,
-        dc_block: true,
-        output_clamp_v: auto_clamp_v,
-        ..CodegenConfig::default()
-    };
-    let generator = CodeGenerator::new(config);
-    let generated = if use_nodal {
-        generator.generate_nodal(&mna, &netlist)
-    } else {
-        generator.generate_with_dc_op(&kernel, &mna, &netlist, dc_preflight)
-    }
-    .map_err(|e| ValidationError::Solver(format!("Codegen: {}", e)))?;
-
-    // Append the caller-supplied main (stdin samples in, stdout samples out)
-    let full_source = format!("{}\n{}", generated.code, main_code);
-
-    // Compile
-    let tmp_dir = std::env::temp_dir();
-    let counter = MELANGE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let pid = std::process::id();
-    let src_path = tmp_dir.join(format!("melange_spval_{pid}_{counter}.rs"));
-    let bin_path = tmp_dir.join(format!("melange_spval_{pid}_{counter}"));
-
-    std::fs::write(&src_path, &full_source)
-        .map_err(|e| ValidationError::Solver(format!("Write source: {}", e)))?;
-
-    let compile = std::process::Command::new("rustc")
-        .arg(&src_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .arg("--edition=2024")
-        .arg("-O")
-        .output()
-        .map_err(|e| ValidationError::Solver(format!("rustc: {}", e)))?;
-
-    let _ = std::fs::remove_file(&src_path);
-
-    if !compile.status.success() {
-        let _ = std::fs::remove_file(&bin_path);
-        return Err(ValidationError::Solver(format!(
-            "Compilation failed:\n{}",
-            String::from_utf8_lossy(&compile.stderr)
-        )));
-    }
-
-    // Run: pipe input via stdin.
-    let stdin_data: Vec<u8> = input_signal
-        .iter()
-        .map(|s| format!("{s:.15e}\n"))
-        .collect::<String>()
-        .into_bytes();
-
-    let mut child = std::process::Command::new(&bin_path)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| ValidationError::Solver(format!("Spawn: {}", e)))?;
-
-    // Write stdin on a separate thread so `wait_with_output()` below drains
-    // stdout/stderr concurrently. Otherwise, when both the input AND the
-    // generated binary's output exceed the OS pipe buffer (~64 KB) and the
-    // child interleaves reading stdin with writing stdout, `write_all` and the
-    // child's stdout write deadlock against each other (the parent blocks
-    // writing stdin while the child blocks writing a full stdout pipe that no
-    // one is reading yet). Dropping the stdin handle at the end of the thread
-    // closes the pipe, signalling EOF. A broken-pipe error here means the child
-    // exited early — that surfaces via the exit-status check below, so it's
-    // intentionally ignored.
-    let stdin = child.stdin.take();
-    let writer = std::thread::spawn(move || {
-        if let Some(mut s) = stdin {
-            let _ = s.write_all(&stdin_data);
-        }
-    });
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| ValidationError::Solver(format!("Wait: {}", e)))?;
-    let _ = writer.join();
-
-    let _ = std::fs::remove_file(&bin_path);
-
-    if !output.status.success() {
-        return Err(ValidationError::Solver(format!(
-            "Binary failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-
-    let samples: Vec<f64> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|l| l.trim().parse().ok())
-        .collect();
-
-    Ok(samples)
+        "out",
+        "in",
+        melange_solver::codegen::BjtFaMode::Auto,
+        "auto",
+        false, // backward_euler (auto integrator)
+        false, // force_trap
+        Some(main_code),
+    )
 }
 
 /// Result of a validation run
@@ -995,7 +778,6 @@ fn test_jfet_common_source_vs_spice() {
         max_relative_tolerance: 5.0,
         correlation_min: 0.999,
         thd_error_tolerance_db: 5.0, // DK method produces different harmonics than SPICE
-        full_scale: 5.0,
         skip_thd: false,
         settle_time_s: 0.0,
     };
@@ -1036,7 +818,6 @@ fn test_mosfet_common_source_vs_spice() {
         max_relative_tolerance: 5.0,
         correlation_min: 0.9999,
         thd_error_tolerance_db: 5.0,
-        full_scale: 5.0,
         skip_thd: true, // small-signal linear region: THD too low to measure reliably
         settle_time_s: 0.0,
     };
@@ -1587,7 +1368,6 @@ fn test_rc_lowpass_step_response() {
         max_relative_tolerance: 1e4, // near zero-crossings
         correlation_min: 0.9999,     // was 0.999; measured 1-corr = 7.6e-7 → 131x headroom
         thd_error_tolerance_db: 5.0,
-        full_scale: 1.0,
         skip_thd: true, // square wave THD is not meaningful
         settle_time_s: 0.0,
     };
@@ -1653,7 +1433,6 @@ fn test_rc_lowpass_chirp() {
         max_relative_tolerance: 1e4, // near zero-crossings, relative error is huge
         correlation_min: 0.9999,     // waveform shape should still match well
         thd_error_tolerance_db: 5.0,
-        full_scale: 1.0,
         skip_thd: true, // chirp has no meaningful THD
         settle_time_s: 0.0,
     };
@@ -2057,7 +1836,6 @@ fn main() {
         max_relative_tolerance: 50.0, // near zero-crossings under modulation
         correlation_min: 0.999,       // measured 1-corr = 8.2e-5 → 12x headroom
         thd_error_tolerance_db: 5.0,
-        full_scale: 1.0,
         skip_thd: true, // modulation sidebands, not harmonics — THD is meaningless
         settle_time_s: 0.0,
     };
@@ -2122,7 +1900,6 @@ fn test_triode_cc_vs_spice() {
         max_relative_tolerance: 0.05,
         correlation_min: 0.999,
         thd_error_tolerance_db: 5.0,
-        full_scale: 1.0,
         skip_thd: true, // small-signal triode: solver-parity test, not distortion
         settle_time_s: 0.02,
     };
@@ -2199,7 +1976,6 @@ fn test_triode_cc_overdrive_vs_spice() {
         max_relative_tolerance: 0.02,
         correlation_min: 0.999,
         thd_error_tolerance_db: 5.0,
-        full_scale: 1.0,
         skip_thd: true, // overdriven triode: solver-parity test, not distortion
         settle_time_s: 0.1,
     };

@@ -1125,7 +1125,7 @@ Pick one. Each is independently shippable.
 
 ### 1. Nodal codegen path (tube-amp circuits)
 
-**Why**: Pultec, Plexi, 4kbuscomp, Neve 1073, etc. all route to the nodal
+**Why**: passive-eq, Plexi, 4kbuscomp, Neve 1073, etc. all route to the nodal
 codegen path (`emit_nodal` in `rust_emitter/nodal_emitter.rs`). Without this
 hook-up, `--noise thermal` on those circuits is a silent no-op.
 
@@ -1143,14 +1143,14 @@ emit the RNG helpers + state fields once (via the existing
 `noise.rhs_stamp` inline in each nodal process_sample variant. Expect
 30-60 LOC of template/emitter plumbing, not new math.
 
-**Test**: add a Pultec `--noise thermal` test that asserts NOISE_THERMAL_N
+**Test**: add a passive-eq `--noise thermal` test that asserts NOISE_THERMAL_N
 matches resistor count, same as the DK test.
 
 ### 2. Dynamic-resistor noise (`.pot` / `.switch`)
 
 **Why**: Phase 1 skips `.pot`-marked resistors because their R is runtime-
 variable and the coefficient `sqrt(1/R)` baked at codegen time is stale
-after a pot change. Users with potted circuits (tube screamer, Pultec)
+after a pot change. Users with potted circuits (tube-screamer-style overdrive, the passive EQ)
 currently get no noise contribution from their pots.
 
 **Where**: `collect_thermal_noise_sources` in `codegen/ir.rs`; the emitted
@@ -1213,5 +1213,5 @@ direction.
   `noise_enabled` / `*_gain` / `temperature_k` — those are user
   preferences, not transient state.
 - Noise ships on **DK path only in Phase 1**. Circuits that route to
-  nodal codegen (tube amps with transformers, Pultec, etc.) get no noise
+  nodal codegen (tube amps with transformers, the passive EQ, etc.) get no noise
   until Phase 1.5 Step 1.

@@ -17,8 +17,11 @@
 #[cfg(feature = "codegen")]
 pub mod emitter;
 #[cfg(feature = "codegen")]
+pub mod fast_math;
+#[cfg(feature = "codegen")]
 pub mod ir;
 #[cfg(feature = "codegen")]
+pub mod policy;
 pub mod routing;
 #[cfg(feature = "codegen")]
 pub mod rust_emitter;
@@ -33,11 +36,23 @@ use crate::mna::MnaSystem;
 use crate::parser::Netlist;
 
 #[cfg(feature = "codegen")]
-use emitter::Emitter;
+use emitter::{EmitOutput, Emitter};
+#[cfg(feature = "codegen")]
 #[cfg(feature = "codegen")]
 use ir::CircuitIR;
-#[cfg(feature = "codegen")]
 use rust_emitter::RustEmitter;
+
+/// The single place a language backend is chosen.
+///
+/// `generate` goes through `dyn Emitter` rather than naming a concrete emitter,
+/// so adding a target is a change here and nowhere else. Previously both
+/// generate paths called `RustEmitter` directly, which meant nothing in melange
+/// could be pointed at another backend no matter how language-agnostic the IR
+/// was — the trait existed but carried no traffic.
+#[cfg(feature = "codegen")]
+fn select_emitter() -> Result<Box<dyn Emitter>, CodegenError> {
+    Ok(Box::new(RustEmitter::new()?))
+}
 
 /// Strategy for modeling op-amp output saturation at the supply rails.
 ///
@@ -80,6 +95,74 @@ use rust_emitter::RustEmitter;
 ///   of real op-amp output stages. Most accurate for distortion circuits
 ///   (Klon, Tube Screamer, etc.). Cost: +2 N and +2 M per op-amp, plus the
 ///   synthesized voltage sources' augmented rows.
+/// A *request* for which nodal sub-path to emit — the user's override knob.
+///
+/// Distinct from [`NodalSubPath`], which reports what the emitter actually
+/// generated. The report deliberately has no `Auto` variant: a finished build
+/// is Schur or full-LU, never "auto". This type is the input, that one is the
+/// outcome, and collapsing them would let an outcome claim to be undecided.
+///
+/// The nodal solver has two Newton implementations of the same circuit: the
+///
+/// **Schur** path predicts through `S = A⁻¹` and iterates only on the M coupled
+/// device dimensions; the **full-LU** path factors the whole augmented N×N
+/// system every iteration. Full-LU is slower and more robust; Schur is cheaper
+/// and needs the reduction to be well conditioned.
+///
+/// [`Auto`](NodalSubPathOverride::Auto) is the shipping behaviour and is what every
+/// production build should use: the emitter picks from measured conditioning
+/// (`K` degeneracy, `max|S|`, `max|K|`, `ρ(S·A_neg)`) plus structural facts.
+///
+/// The two forcing modes are **diagnostic escape hatches**, in the same spirit
+/// as `--force-trap`: they exist so the sub-path can be isolated as a variable
+/// — A/B-ing the two implementations on one netlist, or reproducing a build
+/// from before a routing decision moved. Neither is a production setting.
+///
+/// **Forcing is refused, not warned about, when the choice is structural rather
+/// than heuristic.** Uncoupled saturating inductors are stamped as nonlinear
+/// devices on their augmented branch row inside the full-LU Newton loop, and
+/// behavioral B-sources are stamped in node space only on the full-LU path — the
+/// Schur reduction cannot express either. Asking for `Schur` on such a circuit
+/// would emit code that silently drops the nonlinearity, so it is an error
+/// instead. Where the auto choice was merely a conditioning *heuristic*,
+/// forcing is allowed and warns.
+#[cfg(feature = "codegen")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NodalSubPathOverride {
+    /// Pick from measured conditioning and structure. The shipping default.
+    #[default]
+    Auto,
+    /// Force the Schur reduction. Refused when the circuit structurally
+    /// requires full-LU. Diagnostic only.
+    Schur,
+    /// Force the full N×N LU Newton loop. Always structurally valid — full-LU
+    /// is the general path — but slower. Diagnostic only.
+    FullLu,
+}
+
+#[cfg(feature = "codegen")]
+impl NodalSubPathOverride {
+    /// Parse a mode name (case-insensitive) from a CLI flag or config string.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "schur" => Some(Self::Schur),
+            "full-lu" | "full_lu" | "fulllu" | "lu" => Some(Self::FullLu),
+            _ => None,
+        }
+    }
+
+    /// Human-readable name for logging and the provenance header.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Schur => "schur",
+            Self::FullLu => "full-lu",
+        }
+    }
+}
+
 #[cfg(feature = "codegen")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -147,6 +230,42 @@ impl OpampRailMode {
 
 #[cfg(feature = "codegen")]
 impl std::fmt::Display for OpampRailMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Which nodal sub-path the emitter actually generated.
+///
+/// The DK-vs-nodal route is decided in [`routing::auto_route`], but the choice
+/// *within* the nodal path is made by the emitter from the finished IR. It was
+/// previously not reported anywhere, which made it unobservable: a netlist
+/// author could not confirm a circuit reached full-LU, and neither could a
+/// golden baseline. Returned from the emitter (rather than recomputed in the
+/// pipeline) so there is exactly one source of truth — the emitter reports what
+/// it did rather than the pipeline predicting what it should have done.
+#[cfg(feature = "codegen")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NodalSubPath {
+    /// Schur-complement reduction: the M-dimensional nonlinear solve.
+    Schur,
+    /// Dense N x N LU over the full augmented system.
+    FullLu,
+}
+
+#[cfg(feature = "codegen")]
+impl NodalSubPath {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NodalSubPath::Schur => "schur",
+            NodalSubPath::FullLu => "full-lu",
+        }
+    }
+}
+
+#[cfg(feature = "codegen")]
+impl std::fmt::Display for NodalSubPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -222,6 +341,35 @@ impl std::fmt::Display for NoiseMode {
     }
 }
 
+/// Forward-active (frozen-analysis) BJT reduction mode. Controls the 1-D
+/// reduction applied to deep-forward-active BJTs (see
+/// [`crate::codegen::ir::CircuitIR::detect_forward_active_bjts`]).
+///
+/// - [`Auto`](Self::Auto) (default): reduce only pure-Ebers-Moll BJTs, for
+///   which the 1-D emission is EXACT. Gummel-Poon / ISE / self-heating /
+///   parasitic-carded BJTs stay full-2-D. Historical behavior — byte-identical.
+/// - [`Off`](Self::Off): no reduction — every BJT stays full-2-D (parity
+///   escape hatch / bisecting).
+/// - [`Force`](Self::Force): additionally reduce accuracy-excluded BJTs
+///   (Gummel-Poon, ISE, parasitic) to 1-D with a per-device WARNING. This
+///   DROPS the qb base-charge term (Early effect + high-level injection) and is
+///   NOT accuracy-safe under signal — the collector swing modulates qb, which a
+///   compile-time reduction cannot see (expect up to ~1-2 dB deviation under
+///   hard drive, larger for parasitic-carded devices). Self-heating BJTs are
+///   NEVER force-reduced (structural: a 1-D slot would alias the thermal
+///   update's (Ic,Ib) slot pair).
+#[cfg(feature = "codegen")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BjtFaMode {
+    /// No FA reduction — all BJTs full-2-D.
+    Off,
+    /// Reduce only pure-Ebers-Moll BJTs (exact). Default.
+    #[default]
+    Auto,
+    /// Also force-reduce GP/ISE/parasitic BJTs (warned, accuracy-lossy).
+    Force,
+}
+
 /// Configuration for code generation
 #[cfg(feature = "codegen")]
 #[derive(Debug, Clone)]
@@ -291,6 +439,15 @@ pub struct CodegenConfig {
     /// is the correct default on circuits where trap is unstable.
     /// Ignored when `backward_euler` is already `true`.
     pub force_trap: bool,
+    /// Test/debug only: force the nodal full-LU solver path even when the
+    /// Which nodal sub-path to emit — see [`NodalSubPath`]. Default
+    /// [`NodalSubPath::Auto`], which is the shipping behaviour.
+    ///
+    /// Tests that need to exercise the full-LU emitter historically abused a
+    /// dummy behavioral source (`B_frc frc 0 V={0}`) as a routing lever; this
+    /// replaces that idiom with an explicit, semantics-free switch, so the
+    /// presence of a behavioral source means exactly one thing.
+    pub nodal_sub_path_override: NodalSubPathOverride,
     /// Disable adaptive backward Euler fallback for the DK codegen path.
     /// When false (default), the generated code includes pre-computed BE matrices
     /// and can fall back to BE for individual samples where trapezoidal NR diverges.
@@ -359,6 +516,10 @@ pub struct CodegenConfig {
     pub injections: Vec<crate::codegen::ir::InjectionSpec>,
     /// Raw inner-rate tap probes (`.tap`). Empty when no `.tap` directive.
     pub taps: Vec<crate::codegen::ir::TapSpec>,
+    /// Forward-active BJT reduction mode. Default [`BjtFaMode::Auto`] (reduce
+    /// pure-Ebers-Moll only — byte-identical to pre-flag codegen). See
+    /// [`BjtFaMode`] and the `--bjt-fa` CLI flag.
+    pub bjt_fa_mode: BjtFaMode,
 }
 
 #[cfg(feature = "codegen")]
@@ -473,6 +634,7 @@ impl Default for CodegenConfig {
             pot_settle_samples: 64,
             backward_euler: false,
             force_trap: false,
+            nodal_sub_path_override: NodalSubPathOverride::Auto,
             disable_be_fallback: false,
             opamp_rail_mode: OpampRailMode::Auto,
             noise_mode: NoiseMode::Off,
@@ -482,6 +644,7 @@ impl Default for CodegenConfig {
             router_dk_spectral_radius: 0.0,
             injections: Vec::new(),
             taps: Vec::new(),
+            bjt_fa_mode: BjtFaMode::Auto,
         }
     }
 }
@@ -572,11 +735,11 @@ pub struct GeneratedCode {
 ///
 /// Every field here is actually populated by the codegen pipeline (the CLI
 /// consumes a subset today; the rest are available for diagnostics without
-/// `RUST_LOG=info`). The Schur-vs-full-LU sub-path decision is NOT surfaced
-/// here: it is made inside the nodal emitter from the finished IR, and
-/// duplicating that gate in the pipeline would create a second source of
-/// truth that could silently diverge from what the emitter actually did.
-/// Surfacing it honestly means returning it from the emitter — future work.
+/// `RUST_LOG=info`). The Schur-vs-full-LU sub-path decision IS now surfaced,
+/// in `nodal_sub_path` — and it is surfaced the way this comment used to
+/// prescribe: **returned from the emitter**, not recomputed here. Recomputing
+/// it in the pipeline would create a second source of truth that could silently
+/// diverge from what the emitter actually did.
 #[cfg(feature = "codegen")]
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
@@ -611,12 +774,24 @@ pub struct CodegenMeta {
     pub sparse_lu_density: f64,
     /// Whether parasitic caps were auto-inserted.
     pub parasitic_caps_inserted: bool,
+    /// Which nodal sub-path the emitter actually generated, reported BY the
+    /// emitter. `None` on the DK path (no sub-path applies).
+    ///
+    /// This used to be unreported, which made it unobservable: a netlist author
+    /// could not confirm a circuit reached full-LU, and no golden baseline could
+    /// pin it, so a change that silently moved a circuit between sub-paths was
+    /// undetectable.
+    pub nodal_sub_path: Option<NodalSubPath>,
 }
 
 /// Build the codegen metadata block from the finished IR. Shared by the
 /// DK-with-DC-OP and nodal generate paths, which built it identically.
 #[cfg(feature = "codegen")]
-fn build_codegen_meta(ir: &CircuitIR, parasitic_caps_inserted: bool) -> CodegenMeta {
+fn build_codegen_meta(
+    ir: &CircuitIR,
+    parasitic_caps_inserted: bool,
+    nodal_sub_path: Option<NodalSubPath>,
+) -> CodegenMeta {
     let backward_euler_auto = ir.integrator_selection == ir::IntegratorSelection::BeAuto;
     CodegenMeta {
         backward_euler_auto,
@@ -634,6 +809,7 @@ fn build_codegen_meta(ir: &CircuitIR, parasitic_caps_inserted: bool) -> CodegenM
         sparse_lu_enabled: ir.sparsity.lu.is_some(),
         sparse_lu_density: ir.sparsity.g_aug_density,
         parasitic_caps_inserted,
+        nodal_sub_path,
     }
 }
 
@@ -795,13 +971,15 @@ impl CodeGenerator {
             maybe_insert_parasitic_caps(mna, &mut patched_mna, "Codegen");
 
         let ir = CircuitIR::from_kernel_with_dc_op(kernel, mna, netlist, &self.config, dc_op)?;
-        let code = RustEmitter::new()?.emit(&ir)?;
+        let emitted: EmitOutput = select_emitter()?.emit(&ir)?;
+        let nodal_sub_path = emitted.nodal_sub_path;
+        let code = emitted.primary().to_string();
 
         Ok(GeneratedCode {
             code,
             n: ir.topology.n,
             m: ir.topology.m,
-            meta: build_codegen_meta(&ir, parasitic_caps_inserted),
+            meta: build_codegen_meta(&ir, parasitic_caps_inserted, nodal_sub_path),
         })
     }
 
@@ -974,13 +1152,15 @@ impl CodeGenerator {
             maybe_insert_parasitic_caps(mna, &mut patched_mna, "Codegen nodal");
 
         let ir = CircuitIR::from_mna(mna, netlist, &self.config)?;
-        let code = RustEmitter::new()?.emit(&ir)?;
+        let emitted: EmitOutput = select_emitter()?.emit(&ir)?;
+        let nodal_sub_path = emitted.nodal_sub_path;
+        let code = emitted.primary().to_string();
 
         Ok(GeneratedCode {
             code,
             n: ir.topology.n,
             m: ir.topology.m,
-            meta: build_codegen_meta(&ir, parasitic_caps_inserted),
+            meta: build_codegen_meta(&ir, parasitic_caps_inserted, nodal_sub_path),
         })
     }
 }

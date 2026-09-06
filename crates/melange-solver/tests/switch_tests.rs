@@ -809,3 +809,27 @@ C1 out 0 3n3
         assert!((value - 3.3e-9).abs() < 1e-15, "3n3 = {}", value);
     }
 }
+
+#[test]
+fn test_runtime_r_and_switch_on_same_resistor_rejected() {
+    // A resistor may not be claimed by BOTH a .switch and a .runtime R — the two
+    // runtime-update mechanisms would fight over the same stamped conductance.
+    // (.pot/.wiper vs .switch and .pot vs .runtime R were already rejected; this
+    // closes the .runtime R vs .switch gap.)
+    let spice = "\
+Runtime-R and switch conflict
+Rin in n1 1k
+R1 n1 0 10k
+Rout n1 out 1k
+Rload out 0 100k
+.switch R1 10k 22k 47k
+.runtime R1 5k 50k as knob
+";
+    let err = melange_solver::parser::Netlist::parse(spice)
+        .expect_err("must reject .runtime R + .switch on the same resistor");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("R1") && msg.to_lowercase().contains("switch"),
+        "error should name the resistor and the .switch conflict, got: {msg}"
+    );
+}

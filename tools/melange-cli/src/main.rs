@@ -30,7 +30,10 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "melange")]
 #[command(about = "Circuit modeling toolkit - from SPICE to real-time DSP")]
-#[command(version)]
+// Version carries the build commit (baked by build.rs into MELANGE_VERSION) so
+// `melange --version` disambiguates a released tag, an unreleased main, and a
+// local build that otherwise all print the same bare CARGO_PKG_VERSION.
+#[command(version = env!("MELANGE_VERSION"))]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -103,8 +106,10 @@ enum Commands {
         input_resistance: Option<f64>,
 
         /// Oversampling factor (1=none, 2=2x, 4=4x). Higher reduces aliasing and improves NR stability.
-        #[arg(long, default_value = "1")]
-        oversampling: usize,
+        /// Overrides the deck's `.oversampling` recommendation when set (even if lower); absent, the
+        /// deck value is used, else 1.
+        #[arg(long)]
+        oversampling: Option<usize>,
 
         /// Solver type: auto (default), dk, nodal.
         /// Auto selects DK for most circuits, nodal for multi-transformer.
@@ -134,13 +139,32 @@ enum Commands {
         /// otherwise exceed the M=16 cap (e.g. 4×EL34 Plexi: M=18 → M=14).
         ///
         /// Valid values:{n}{n}
-        /// * auto — inspect DC-OP bias and reduce where Vgk < cutoff (default){n}{n}
-        /// * on — force grid-off on every non-variable-mu pentode regardless of
-        ///   bias. For testing / debugging only.{n}{n}
+        /// * auto (default) — reserved for reductions that are provably
+        ///   neutral; none exists today, so auto currently keeps the full 3D
+        ///   model (== off).{n}{n}
+        /// * on — reduce every non-variable-mu pentode to 2D (Vg2k frozen at
+        ///   its DC value, Ig1 dropped). NOT accuracy-neutral: drops the
+        ///   cathode/screen-referenced Vg2k feedback (measured +2% to +12%
+        ///   small-signal gain error on cathode-biased stages) and all grid
+        ///   current for Vgk > 0. Warns per device. Opt-in only.{n}{n}
         /// * off — never reduce; all pentodes keep their full 3D NR block.
-        ///   Use for regression parity with pre-1b codegen.
         #[arg(long, default_value = "auto")]
         tube_grid_fa: String,
+
+        /// BJT forward-active (frozen-analysis) reduction mode.
+        ///
+        /// * auto — reduce only pure-Ebers-Moll BJTs, for which the 1-D
+        ///   forward-active model is EXACT; Gummel-Poon / ISE / self-heating /
+        ///   parasitic BJTs stay full-2-D. Default; byte-identical to prior
+        ///   codegen.{n}{n}
+        /// * force — also 1-D-reduce Gummel-Poon / ISE / parasitic BJTs, each
+        ///   with a per-device WARNING. Drops the qb base-charge term (Early +
+        ///   high-level injection); NOT accuracy-safe under signal (~1-2 dB
+        ///   under hard drive, larger for parasitics). Self-heating BJTs are
+        ///   never force-reduced (structural).{n}{n}
+        /// * off — never reduce; all BJTs keep their full 2-D NR block.
+        #[arg(long, default_value = "auto")]
+        bjt_fa: String,
 
         /// Op-amp supply rail saturation strategy.
         ///
@@ -166,6 +190,25 @@ enum Commands {
         ///   distortion pedals.
         #[arg(long, value_name = "MODE", default_value = "auto")]
         opamp_rail_mode: String,
+
+        /// Which nodal sub-path to emit: auto (default), schur, full-lu.
+        ///
+        /// The nodal solver has TWO Newton implementations of the same circuit:
+        /// `schur` predicts through S = A^-1 and iterates only the M coupled
+        /// device dimensions; `full-lu` factors the whole augmented N x N system
+        /// every iteration. `auto` picks from measured conditioning and is the
+        /// shipping behaviour — leave it alone for production builds.
+        ///
+        /// The forcing modes are DIAGNOSTIC escape hatches, like --force-trap:
+        /// they exist so the sub-path can be isolated as a variable (A/B the two
+        /// implementations on one netlist, or reproduce a build from before a
+        /// routing decision moved). They warn when they contradict the auto
+        /// choice. `schur` is REFUSED outright on circuits that structurally
+        /// require full-LU — uncoupled saturating inductors and behavioral
+        /// B-sources cannot be expressed by the Schur reduction, and forcing it
+        /// would silently drop the nonlinearity. Ignored for DK-routed circuits.
+        #[arg(long, value_name = "MODE", default_value = "auto")]
+        nodal_subpath: String,
 
         /// Authentic circuit noise mode: off (default), thermal, shot, full.
         /// `thermal` emits Johnson-Nyquist noise on every resistor; `shot` adds
@@ -215,12 +258,12 @@ enum Commands {
         vendor: Option<String>,
 
         /// Plugin vendor homepage URL (must start with http:// or https://).
-        /// Defaults to "https://github.com/melange". Applies to `--format plugin`.
+        /// Defaults to "https://github.com/hal0zer0/melange". Applies to `--format plugin`.
         #[arg(long, value_name = "URL")]
         vendor_url: Option<String>,
 
         /// Plugin vendor contact email (e.g., "support@acme.example").
-        /// Defaults to "dev@melange.audio". Applies to `--format plugin`.
+        /// Defaults to "josh@nobledarkgames.com". Applies to `--format plugin`.
         #[arg(long, value_name = "ADDR")]
         email: Option<String>,
 
@@ -295,6 +338,35 @@ enum Commands {
         /// Override THD-error tolerance, in dB.
         #[arg(long, value_name = "DB")]
         thd_tolerance: Option<f64>,
+
+        /// Forward-active BJT reduction: auto (default), off, force.
+        ///
+        /// Same mechanism as `melange compile --bjt-fa`. `off` keeps every BJT
+        /// full-2D, which is what this harness did unconditionally before
+        /// 2026-09-03 — use it to attribute a residual to the reduction.
+        #[arg(long, default_value = "auto")]
+        bjt_fa: String,
+
+        /// Grid-off pentode reduction: auto (default), on, off.
+        ///
+        /// Same mechanism as `melange compile --tube-grid-fa`. auto is
+        /// reserved for reductions that are provably neutral; none exists
+        /// today, so auto currently keeps the full 3D model (== off). `on`
+        /// is the warned opt-in — use it to attribute a residual to the
+        /// reduction.
+        #[arg(long, default_value = "auto")]
+        tube_grid_fa: String,
+
+        /// Force Backward Euler on the melange side (diagnostic; mirrors
+        /// `compile --backward-euler`). Attributes integrator error; the
+        /// default keeps the shipped auto selection.
+        #[arg(long)]
+        backward_euler: bool,
+
+        /// Force trapezoidal on the melange side (diagnostic; mirrors
+        /// `compile --force-trap`). Ignored when --backward-euler is set.
+        #[arg(long)]
+        force_trap: bool,
     },
 
     /// Simulate circuit with input signal
@@ -345,17 +417,20 @@ enum Commands {
         opamp_rail_mode: String,
 
         /// Pentode grid-off dimension reduction mode: auto, on, off.
-        /// When a pentode is biased below cutoff at DC-OP, the Ig1 NR dimension
-        /// is dropped (3D→2D per tube). `auto` inspects bias and reduces where
-        /// applicable; `on` forces all non-variable-mu pentodes; `off` keeps
-        /// full 3D blocks. Mirrors `compile --tube-grid-fa`.
+        /// `on` reduces every non-variable-mu pentode 3D→2D (Vg2k frozen, Ig1
+        /// dropped; NOT accuracy-neutral, warned per device); `off` keeps full
+        /// 3D blocks. auto is reserved for reductions that are provably
+        /// neutral; none exists today, so auto currently keeps the full 3D
+        /// model (== off). Mirrors `compile --tube-grid-fa`.
         #[arg(long, default_value = "auto")]
         tube_grid_fa: String,
 
         /// Oversampling factor (1=none, 2=2x, 4=4x). Higher reduces aliasing
         /// and improves NR stability for circuits with diode switching.
-        #[arg(long, default_value = "1")]
-        oversampling: usize,
+        /// Overrides the deck's `.oversampling` recommendation when set (even
+        /// if lower); absent, the deck value is used, else 1.
+        #[arg(long)]
+        oversampling: Option<usize>,
 
         /// Authentic circuit noise mode: off (default), thermal, shot, full.
         #[arg(long, value_name = "MODE", default_value = "off")]
@@ -401,6 +476,13 @@ enum Commands {
         /// plugin, so `simulate` reaches non-rest positions the plugin uses.
         #[arg(long = "switch", value_name = "NAME=POS")]
         switch_overrides: Vec<String>,
+
+        /// Drive a `.inject` field: `--inject FIELD=sine:<freq_hz>:<amp_volts>`
+        /// or `FIELD=dc:<volts>`. The value is CIRCUIT VOLTS injected at the
+        /// `.inject` node through its declared impedance. May be repeated;
+        /// `.inject` fields with no `--inject` default to 0 (undriven).
+        #[arg(long = "inject", value_name = "FIELD=SPEC")]
+        inject_drives: Vec<String>,
     },
 
     /// Analyze circuit frequency response
@@ -460,7 +542,9 @@ enum Commands {
 
         /// Pentode grid-off dimension reduction mode: auto, on, off.
         /// Mirrors `compile --tube-grid-fa`. See `simulate --tube-grid-fa` for
-        /// the auto/on/off semantics. Defaults to `auto`.
+        /// the auto/on/off semantics. Defaults to `auto`, which is reserved
+        /// for provably-neutral reductions and currently keeps the full 3D
+        /// model (== off).
         #[arg(long, default_value = "auto")]
         tube_grid_fa: String,
 
@@ -471,14 +555,35 @@ enum Commands {
 
         /// Oversampling factor (1=none, 2=2x, 4=4x). Mirrors
         /// `compile --oversampling` so the analyzed response matches the
-        /// generated plugin.
-        #[arg(long, default_value = "1")]
-        oversampling: usize,
+        /// generated plugin. Overrides the deck's `.oversampling`
+        /// recommendation when set (even if lower); absent, the deck value is
+        /// used, else 1.
+        #[arg(long)]
+        oversampling: Option<usize>,
 
         /// Op-amp rail saturation mode: auto, none, hard, active-set,
         /// active-set-be, boyle-diodes. Mirrors `compile --opamp-rail-mode`.
         #[arg(long, value_name = "MODE", default_value = "auto")]
         opamp_rail_mode: String,
+
+        /// Which nodal sub-path to emit: auto (default), schur, full-lu.
+        ///
+        /// The nodal solver has TWO Newton implementations of the same circuit:
+        /// `schur` predicts through S = A^-1 and iterates only the M coupled
+        /// device dimensions; `full-lu` factors the whole augmented N x N system
+        /// every iteration. `auto` picks from measured conditioning and is the
+        /// shipping behaviour — leave it alone for production builds.
+        ///
+        /// The forcing modes are DIAGNOSTIC escape hatches, like --force-trap:
+        /// they exist so the sub-path can be isolated as a variable (A/B the two
+        /// implementations on one netlist, or reproduce a build from before a
+        /// routing decision moved). They warn when they contradict the auto
+        /// choice. `schur` is REFUSED outright on circuits that structurally
+        /// require full-LU — uncoupled saturating inductors and behavioral
+        /// B-sources cannot be expressed by the Schur reduction, and forcing it
+        /// would silently drop the nonlinearity. Ignored for DK-routed circuits.
+        #[arg(long, value_name = "MODE", default_value = "auto")]
+        nodal_subpath: String,
 
         /// Authentic circuit noise mode: off (default), thermal, shot, full.
         /// Mirrors `compile --noise`.
@@ -636,6 +741,24 @@ enum ImportFormat {
 mod kicad_import;
 
 fn main() -> Result<()> {
+    // Exit quietly when the output pipe is closed early (e.g. `melange … | head`).
+    // Rust ignores SIGPIPE by default, so a write to a closed stdout makes the
+    // print machinery panic with "failed printing to stdout: Broken pipe"
+    // (exit 101), which looks like a crash. Swallow exactly that panic and exit
+    // cleanly; any other panic falls through to the default handler. A panic
+    // hook is the std-only way to do this without pulling in a libc dependency.
+    let default_panic_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let broken_pipe = info
+            .payload()
+            .downcast_ref::<String>()
+            .is_some_and(|s| s.contains("Broken pipe"));
+        if broken_pipe {
+            std::process::exit(0);
+        }
+        default_panic_hook(info);
+    }));
+
     // Initialize logger so log::info!/warn! from melange-solver are visible.
     // Default: only warnings. RUST_LOG=info or RUST_LOG=melange_solver=debug for more.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
@@ -666,7 +789,9 @@ fn main() -> Result<()> {
             backward_euler,
             force_trap,
             tube_grid_fa,
+            bjt_fa,
             opamp_rail_mode,
+            nodal_subpath,
             noise,
             noise_seed,
             emit_dc_op_recompute,
@@ -693,8 +818,10 @@ fn main() -> Result<()> {
             if max_iter == 0 {
                 anyhow::bail!("max-iter must be at least 1, got 0");
             }
-            if oversampling != 1 && oversampling != 2 && oversampling != 4 {
-                anyhow::bail!("oversampling must be 1, 2, or 4, got {}", oversampling);
+            if let Some(n) = oversampling {
+                if n != 1 && n != 2 && n != 4 {
+                    anyhow::bail!("oversampling must be 1, 2, or 4, got {}", n);
+                }
             }
             if output_clamp <= 0.0 || !output_clamp.is_finite() {
                 anyhow::bail!(
@@ -711,6 +838,17 @@ fn main() -> Result<()> {
                         opamp_rail_mode
                     )
                 })?;
+
+            // Parse the nodal sub-path override. Unknown values are user errors.
+            let nodal_sub_path_override = melange_solver::codegen::NodalSubPathOverride::parse(
+                &nodal_subpath,
+            )
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unknown --nodal-subpath '{}'. Valid values: auto, schur, full-lu",
+                    nodal_subpath
+                )
+            })?;
 
             let noise_mode =
                 melange_solver::codegen::NoiseMode::parse(&noise).ok_or_else(|| {
@@ -748,6 +886,13 @@ fn main() -> Result<()> {
                     tube_grid_fa
                 );
             }
+            // Validate bjt-fa mode.
+            if !matches!(bjt_fa.as_str(), "auto" | "off" | "force") {
+                anyhow::bail!(
+                    "Unknown --bjt-fa '{}'. Valid values: auto, off, force",
+                    bjt_fa
+                );
+            }
 
             compile_circuit_source(
                 &circuit_source,
@@ -768,7 +913,9 @@ fn main() -> Result<()> {
                 backward_euler,
                 force_trap,
                 &tube_grid_fa,
+                &bjt_fa,
                 rail_mode,
+                nodal_sub_path_override,
                 noise_mode,
                 noise_seed,
                 emit_dc_op_recompute,
@@ -797,10 +944,26 @@ fn main() -> Result<()> {
             max_rel_tolerance,
             corr_min,
             thd_tolerance,
+            bjt_fa,
+            tube_grid_fa,
+            backward_euler,
+            force_trap,
         } => {
             // Validate numeric CLI parameters
             if sample_rate <= 0.0 || !sample_rate.is_finite() {
                 anyhow::bail!("sample-rate must be positive and finite");
+            }
+            if !matches!(bjt_fa.as_str(), "auto" | "off" | "force") {
+                anyhow::bail!(
+                    "--bjt-fa must be one of: auto, off, force (got '{}')",
+                    bjt_fa
+                );
+            }
+            if !matches!(tube_grid_fa.as_str(), "auto" | "on" | "off") {
+                anyhow::bail!(
+                    "--tube-grid-fa must be one of: auto, on, off (got '{}')",
+                    tube_grid_fa
+                );
             }
             if duration <= 0.0 || !duration.is_finite() {
                 anyhow::bail!("duration must be positive and finite");
@@ -827,6 +990,12 @@ fn main() -> Result<()> {
                     corr_min,
                     thd_db: thd_tolerance,
                 },
+                ReductionModes {
+                    bjt_fa: &bjt_fa,
+                    tube_grid_fa: &tube_grid_fa,
+                    backward_euler,
+                    force_trap,
+                },
             )
         }
         Commands::Simulate {
@@ -851,6 +1020,7 @@ fn main() -> Result<()> {
             probes,
             probe_csv,
             switch_overrides,
+            inject_drives,
         } => {
             // Match parse-time node normalization (lowercase, gnd→0).
             let input_node = melange_solver::parser::normalize_node_name(&input_node);
@@ -861,8 +1031,10 @@ fn main() -> Result<()> {
                 .iter()
                 .map(|p| melange_solver::parser::normalize_node_name(p))
                 .collect();
-            if oversampling != 1 && oversampling != 2 && oversampling != 4 {
-                anyhow::bail!("oversampling must be 1, 2, or 4, got {}", oversampling);
+            if let Some(n) = oversampling {
+                if n != 1 && n != 2 && n != 4 {
+                    anyhow::bail!("oversampling must be 1, 2, or 4, got {}", n);
+                }
             }
             if !matches!(tube_grid_fa.as_str(), "auto" | "on" | "off") {
                 anyhow::bail!(
@@ -906,6 +1078,7 @@ fn main() -> Result<()> {
             simulate_circuit_source(
                 &circuit_source,
                 &SimulateOptions {
+                    nodal_sub_path_override: melange_solver::codegen::NodalSubPathOverride::Auto,
                     input_audio: input_audio.as_deref(),
                     output: &output,
                     sample_rate,
@@ -926,6 +1099,7 @@ fn main() -> Result<()> {
                     probes: &probes,
                     probe_csv: probe_csv_path.as_deref(),
                     switch_overrides: &switch_overrides,
+                    inject_drives: &inject_drives,
                 },
             )
         }
@@ -947,6 +1121,7 @@ fn main() -> Result<()> {
             solver,
             oversampling,
             opamp_rail_mode,
+            nodal_subpath,
             noise,
             noise_seed,
             backward_euler,
@@ -975,8 +1150,10 @@ fn main() -> Result<()> {
                     tube_grid_fa
                 );
             }
-            if oversampling != 1 && oversampling != 2 && oversampling != 4 {
-                anyhow::bail!("oversampling must be 1, 2, or 4, got {}", oversampling);
+            if let Some(n) = oversampling {
+                if n != 1 && n != 2 && n != 4 {
+                    anyhow::bail!("oversampling must be 1, 2, or 4, got {}", n);
+                }
             }
             let rail_mode = melange_solver::codegen::OpampRailMode::parse(&opamp_rail_mode)
                 .ok_or_else(|| {
@@ -986,6 +1163,17 @@ fn main() -> Result<()> {
                         opamp_rail_mode
                     )
                 })?;
+            // Parse the nodal sub-path override. Unknown values are user errors.
+            let nodal_sub_path_override = melange_solver::codegen::NodalSubPathOverride::parse(
+                &nodal_subpath,
+            )
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unknown --nodal-subpath '{}'. Valid values: auto, schur, full-lu",
+                    nodal_subpath
+                )
+            })?;
+
             let noise_mode =
                 melange_solver::codegen::NoiseMode::parse(&noise).ok_or_else(|| {
                     anyhow::anyhow!(
@@ -998,6 +1186,7 @@ fn main() -> Result<()> {
             analyze_freq_response(
                 &circuit_source,
                 &AnalyzeOptions {
+                    nodal_sub_path_override,
                     input_node: &input_node,
                     output_node: &output_node,
                     start_freq,
@@ -1160,6 +1349,70 @@ fn suggest_node_names<'a>(query: &str, available: impl Iterator<Item = &'a Strin
     suggestions.into_iter().map(|(_, name)| name).collect()
 }
 
+/// Parse the `--bjt-fa` string into a [`melange_solver::codegen::BjtFaMode`].
+/// Assumes the value was already validated (`auto` | `off` | `force`); an
+/// unrecognized value falls back to `Auto`.
+fn parse_bjt_fa_mode(s: &str) -> melange_solver::codegen::BjtFaMode {
+    match s {
+        "off" => melange_solver::codegen::BjtFaMode::Off,
+        "force" => melange_solver::codegen::BjtFaMode::Force,
+        _ => melange_solver::codegen::BjtFaMode::Auto,
+    }
+}
+
+/// If `--solver dk` is forced on a circuit that STRUCTURALLY requires the nodal
+/// path, DK codegen builds without error but emits a silently-wrong solver
+/// (behavioral source dropped → linear passthrough; saturating inductor
+/// linearized; multi-transformer DC-OP singular; transformer-NFB K-diagonal
+/// divergence). Return the blocker description for those cases so the caller can
+/// fail loud. Soft router preferences (trapezoidal instability, large M, K/S
+/// conditioning) are NOT blockers — DK can still represent those circuits, so a
+/// forced override stays valid for them. `dk_failed` is already hard-errored at
+/// kernel construction, so it is not repeated here.
+fn forced_dk_hard_blocker(
+    routing: &melange_solver::codegen::routing::RoutingDecision,
+) -> Option<&'static str> {
+    if routing.behavioral {
+        Some("a behavioral B-source is present — DK cannot stamp it, so it is dropped (linear passthrough)")
+    } else if routing.saturating_inductor {
+        Some("a saturating inductor is present — DK cannot do the per-sample L update, so it is linearized (no saturation)")
+    } else if routing.multi_transformer {
+        Some("multiple transformer groups are present — the DK K matrix is singular (the build ships converged=false)")
+    } else if routing.k_diag_unsafe {
+        Some("a non-negative K diagonal with live current injection (e.g. transformer-coupled negative feedback) — the DK Schur Newton iteration diverges")
+    } else {
+        None
+    }
+}
+
+/// Resolve the effective oversampling factor for the shipping path
+/// (`compile` / `simulate` / `analyze`).
+///
+/// `.oversampling N` in a deck is an accuracy MINIMUM / recommendation, not a
+/// mandate: rate costs CPU and latency, which is the downstream plugin author's
+/// product decision. So an explicit `--oversampling` on the command line always
+/// wins — even when it is LOWER than the deck value, in which case a warning is
+/// logged. Absent an explicit flag, the deck's `.oversampling` value is used;
+/// absent both, 1. `validate` never calls this — it stays at the base rate
+/// regardless of the directive (an oversampled comparison is confounded by
+/// anti-alias-filter group delay).
+fn resolve_oversampling(explicit_cli: Option<usize>, recommended: Option<usize>) -> usize {
+    match (explicit_cli, recommended) {
+        (Some(cli), Some(rec)) => {
+            if cli < rec {
+                log::warn!(
+                    "deck recommends .oversampling >= {rec} for accuracy; building at {cli} < {rec} \
+                     by request (--oversampling wins)"
+                );
+            }
+            cli
+        }
+        (Some(cli), None) => cli,
+        (None, Some(rec)) => rec,
+        (None, None) => 1,
+    }
+}
+
 fn compile_circuit_source(
     circuit_source: &circuits::CircuitSource,
     output: &PathBuf,
@@ -1173,13 +1426,15 @@ fn compile_circuit_source(
     format: OutputFormat,
     with_level_params: bool,
     input_resistance_flag: Option<f64>,
-    oversampling: usize,
+    oversampling_cli: Option<usize>,
     no_dc_block: bool,
     solver_override: &str,
     backward_euler: bool,
     force_trap: bool,
     tube_grid_fa: &str,
+    bjt_fa: &str,
     opamp_rail_mode: melange_solver::codegen::OpampRailMode,
+    nodal_sub_path_override: melange_solver::codegen::NodalSubPathOverride,
     noise_mode: melange_solver::codegen::NoiseMode,
     noise_seed: u64,
     emit_dc_op_recompute: bool,
@@ -1244,6 +1499,10 @@ fn compile_circuit_source(
     println!("Step 1: Parsing SPICE netlist...");
     let mut netlist =
         Netlist::parse(&netlist_str).with_context(|| "Failed to parse SPICE netlist")?;
+
+    // Resolve the effective oversampling factor: explicit --oversampling wins,
+    // else the deck's `.oversampling` recommendation, else 1.
+    let oversampling = resolve_oversampling(oversampling_cli, netlist.recommended_oversampling);
 
     // Expand subcircuit instances (X elements) before MNA
     if !netlist.subcircuits.is_empty() {
@@ -1589,6 +1848,7 @@ fn compile_circuit_source(
     let fa_config = melange_solver::codegen::CodegenConfig {
         input_node: input_node_idx,
         input_resistance,
+        bjt_fa_mode: parse_bjt_fa_mode(bjt_fa),
         ..melange_solver::codegen::CodegenConfig::default()
     };
     // Skip FA detection when the final solver will be Nodal:
@@ -1598,58 +1858,36 @@ fn compile_circuit_source(
     // Motivation: the FA-reduced DC-OP can converge to a parasitic
     // equilibrium on push-pull topologies (see memory/wurli_power_amp_...).
     // Since Nodal handles full-dim BJTs natively, FA is unnecessary there.
-    let forward_active = if solver_override == "nodal"
-        || (solver_override == "auto"
-            && should_skip_fa_for_nodal_reroute(&mna, sample_rate, oversampling))
-    {
-        std::collections::HashSet::new()
-    } else {
-        melange_solver::codegen::ir::CircuitIR::detect_forward_active_bjts(
-            &mna, &netlist, &fa_config,
-        )
-    };
-    if !forward_active.is_empty() {
-        println!(
-            "  Forward-active BJTs: {:?} (M reduces by {})",
-            forward_active,
-            forward_active.len()
-        );
-        // Rebuild MNA with reduced dimensions
-        mna = MnaSystem::from_netlist_forward_active(&netlist, &forward_active)
-            .with_context(|| "Failed to rebuild MNA for forward-active BJTs")?;
-        // Re-stamp input conductance
-        if input_node_idx < mna.n {
-            mna.g[input_node_idx][input_node_idx] += input_conductance;
-        }
-        // Re-stamp junction capacitances on rebuilt MNA
-        {
-            let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-                &netlist,
-                Some(&mna),
-            )
-            .unwrap_or_default();
-            if !device_slots.is_empty() {
-                mna.stamp_device_junction_caps(&device_slots);
-            }
-        }
-    }
+    let forward_active = melange_solver::pipeline::apply_forward_active_reduction(
+        &mut mna,
+        &netlist,
+        &fa_config,
+        solver_override,
+        sample_rate,
+        oversampling,
+        input_node_idx,
+        input_conductance,
+        &|a| println!("{a}"),
+    )?;
 
-    // Phase 1b: detect grid-off pentodes (Vgk < -(vgk_onset + 0.5) →
-    // pentode drops to 2D NR block with Vg2k frozen). Rebuilds MNA with
-    // the reduced dimension. Only runs on DK solver — nodal doesn't
-    // benefit from M-reduction at the solver level.
-    // `--tube-grid-fa off` skips entirely; `on` forces all pentodes.
-    let grid_off_pentodes = apply_grid_off_reduction(
+    // Grid-off pentode reduction (3D → 2D NR block with Vg2k frozen and
+    // Ig1 dropped). Only `--tube-grid-fa on` reduces (warned per device);
+    // `auto` and `off` keep the full 3D model. Skipped on the nodal route,
+    // including the auto-router's pre-route verdict, so a reduction can
+    // never move a circuit from nodal to DK.
+    let grid_off_pentodes = melange_solver::pipeline::apply_grid_off_reduction(
         &mut mna,
         &netlist,
         &fa_config,
         &forward_active,
         tube_grid_fa,
         solver_override,
+        sample_rate,
+        oversampling,
         input_node_idx,
         input_conductance,
     )?;
-    if let Some(msg) = format_grid_off_log(&grid_off_pentodes) {
+    if let Some(msg) = melange_solver::pipeline::format_grid_off_log(&grid_off_pentodes) {
         println!("{msg}");
     }
 
@@ -1657,7 +1895,7 @@ fn compile_circuit_source(
     // MNA with FA + linearized + grid-off reductions fused via
     // `from_netlist_with_all_reductions`, then re-stamp junction caps.
     // Shared with simulate/analyze — see `apply_linearize_reductions`.
-    let linearize_outcome = apply_linearize_reductions(
+    let linearize_outcome = melange_solver::pipeline::apply_linearize_reductions(
         &mut mna,
         &netlist,
         &forward_active,
@@ -1665,6 +1903,7 @@ fn compile_circuit_source(
         input_node_idx,
         input_conductance,
         input_resistance,
+        &|a| println!("{a}"),
     )?;
 
     // NOTE: Internal node expansion for parasitic BJTs is deferred until after
@@ -1881,7 +2120,7 @@ fn compile_circuit_source(
             force_trap,
             netlist.integrator,
         );
-    let max_iter = auto_tune_max_iter(
+    let max_iter = melange_solver::pipeline::auto_tune_max_iter(
         if max_iter == 50 { None } else { Some(max_iter) },
         &kernel,
         &routing,
@@ -1911,6 +2150,7 @@ fn compile_circuit_source(
         backward_euler,
         force_trap,
         opamp_rail_mode,
+        nodal_sub_path_override,
         noise_mode,
         noise_master_seed: noise_seed,
         emit_dc_op_recompute,
@@ -1922,6 +2162,15 @@ fn compile_circuit_source(
     };
 
     let generator = CodeGenerator::new(config);
+    if solver_override == "dk" {
+        if let Some(blocker) = forced_dk_hard_blocker(&routing) {
+            anyhow::bail!(
+                "--solver dk cannot be forced on this circuit: {blocker}.\n\
+                 The DK solver structurally cannot represent it and would emit a \
+                 silently-wrong solver. Use --solver auto (recommended) or --solver nodal."
+            );
+        }
+    }
     let use_nodal_codegen = match solver_override {
         "nodal" => true,
         "dk" => false,
@@ -1942,30 +2191,14 @@ fn compile_circuit_source(
 
     let generated = if use_nodal_codegen {
         println!("  Using nodal solver codegen");
-        // Expand MNA with internal nodes for parasitic BJTs.
-        // Skip expansion if K will be ill-conditioned (K_diag < -100), which triggers
-        // the full N×N LU path instead of Schur. The LU path handles parasitics via
-        // bjt_with_parasitics() — internal nodes would increase N without benefit.
-        let k_diag_min = if kernel.m > 0 {
-            (0..kernel.m)
-                .map(|i| kernel.k[i * kernel.m + i])
-                .fold(0.0_f64, f64::min)
-        } else {
-            0.0
-        };
-        let skip_expansion = k_diag_min < -100.0;
-        if !skip_expansion {
-            let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-                &netlist,
-                Some(&mna),
-            )
-            .unwrap_or_default();
-            if !device_slots.is_empty() {
-                mna.expand_bjt_internal_nodes(&device_slots);
-            }
-        } else {
-            println!("  Skipping internal node expansion (K ill-conditioned, using full LU)");
-        }
+        // Expand MNA with internal nodes for parasitic BJTs, gated on K
+        // conditioning — shared with simulate/analyze/validate.
+        melange_solver::pipeline::expand_internal_nodes_if_conditioned(
+            &mut mna,
+            &netlist,
+            &kernel,
+            &|a| println!("{a}"),
+        );
         generator
             .generate_nodal(&mna, &netlist)
             .with_context(|| "Nodal code generation failed")?
@@ -1992,6 +2225,12 @@ fn compile_circuit_source(
         generated.n, generated.m
     );
     println!("    Solver: {} ({})", solver_label, solver_reason);
+    // Which nodal sub-path the emitter actually took. Reported by the emitter,
+    // not re-derived here. Without this a deck authored to reach full-LU could
+    // silently sit on Schur with nothing to reveal it.
+    if let Some(sp) = generated.meta.nodal_sub_path {
+        println!("    Nodal sub-path: {sp}");
+    }
     if routing.spectral_radius > 0.0 {
         println!("    Spectral radius: {:.4}", routing.spectral_radius);
     }
@@ -2312,21 +2551,17 @@ fn compile_circuit_source(
             println!();
             println!("Generated plugin project at: {}", project_dir.display());
             println!();
-            println!("To build the plugin (CLAP + VST3):");
-            println!(
-                "  cd {}",
-                project_dir
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("<project-dir>")
-            );
-            println!("  bash build.sh");
+            let dir_name = project_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("<project-dir>");
+            println!("Build the DSP library (works immediately):");
+            println!("  cd {dir_name}");
+            println!("  cargo build --release          # → raw plugin lib in target/release/");
             println!();
-            println!("One-time setup (clone nih-plug if you haven't):");
+            println!("For a DAW-loadable CLAP + VST3 bundle (one-time nih-plug setup):");
             println!("  git clone https://github.com/robbert-vdh/nih-plug.git ~/src/nih-plug");
-            println!();
-            println!("The compiled plugin (CLAP + VST3) will be in:");
-            println!("  target/bundled/");
+            println!("  bash build.sh                  # → CLAP + VST3 in target/bundled/");
             println!();
             println!("See the generated README.md for full details.");
         }
@@ -2351,6 +2586,21 @@ struct ToleranceOverrides {
     thd_db: Option<f64>,
 }
 
+/// Dimension-reduction modes for the validation front end. Mirrors the
+/// `melange compile` flags of the same names so that `validate` builds the
+/// circuit the CLI ships — and so `--bjt-fa off` can attribute a residual to
+/// the reduction.
+struct ReductionModes<'a> {
+    bjt_fa: &'a str,
+    tube_grid_fa: &'a str,
+    // Diagnostics (not reductions): melange-side integrator override, for
+    // attributing integrator error against ngspice. No oversampling knob: the
+    // harness compares sample-aligned and the half-band IIR group delay would
+    // read as error.
+    backward_euler: bool,
+    force_trap: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn validate_circuit_source(
     circuit_source: &circuits::CircuitSource,
@@ -2362,6 +2612,7 @@ fn validate_circuit_source(
     csv_output: Option<&PathBuf>,
     relaxed: bool,
     tol: ToleranceOverrides,
+    reductions: ReductionModes<'_>,
 ) -> Result<()> {
     // Match parse-time node normalization (lowercase, gnd→0).
     let input_node_owned = melange_solver::parser::normalize_node_name(input_node);
@@ -2459,7 +2710,11 @@ fn validate_circuit_source(
     let mut config = if relaxed {
         ComparisonConfig::relaxed()
     } else {
-        ComparisonConfig::strict()
+        // Audio-grade default (see ComparisonConfig::default): correlation-
+        // anchored, wide enough that a good-but-complex circuit passes. The
+        // old default was strict() (0.01% RMS) — tighter than every per-circuit
+        // CI tolerance, so it reported FAILED on genuinely-good circuits.
+        ComparisonConfig::default()
     };
     // Apply per-metric overrides on top of the base profile. Percent inputs
     // (RMS, max-rel) are converted to the fractional form the comparator uses;
@@ -2487,6 +2742,10 @@ fn validate_circuit_source(
         output_dir: csv_output.and_then(|p| p.parent().map(|d| d.to_path_buf())),
         circuit_name: Some(circuit_source.name()),
         input_node: input_node.to_string(),
+        bjt_fa_mode: parse_bjt_fa_mode(reductions.bjt_fa),
+        tube_grid_fa: reductions.tube_grid_fa.to_string(),
+        backward_euler: reductions.backward_euler,
+        force_trap: reductions.force_trap,
         ..Default::default()
     };
 
@@ -2551,11 +2810,14 @@ struct SimulateOptions<'a> {
     solver: &'a str,
     opamp_rail_mode: melange_solver::codegen::OpampRailMode,
     tube_grid_fa: &'a str,
-    oversampling: usize,
+    oversampling: Option<usize>,
     noise_mode: melange_solver::codegen::NoiseMode,
     noise_seed: u64,
     backward_euler: bool,
     force_trap: bool,
+    /// Nodal sub-path override (`--nodal-subpath`). `Auto` for `simulate`,
+    /// which does not expose the flag.
+    nodal_sub_path_override: melange_solver::codegen::NodalSubPathOverride,
     /// Explicit `--max-iter` override; `None` → auto-tuned (see [`auto_tune_max_iter`]).
     max_iter: Option<usize>,
     probes: &'a [String],
@@ -2563,6 +2825,8 @@ struct SimulateOptions<'a> {
     /// `--switch NAME=POS` specs; resolved and applied at runtime via
     /// `state.set_switch_N(pos)` before the run (mirrors the plugin).
     switch_overrides: &'a [String],
+    /// `--inject FIELD=SPEC` specs; drive `.inject` fields from the CLI.
+    inject_drives: &'a [String],
 }
 
 /// Options bundle for `melange analyze` — mirrors [`SimulateOptions`].
@@ -2581,73 +2845,16 @@ struct AnalyzeOptions<'a> {
     harmonics: usize,
     tube_grid_fa: &'a str,
     solver: &'a str,
-    oversampling: usize,
+    oversampling: Option<usize>,
     opamp_rail_mode: melange_solver::codegen::OpampRailMode,
     noise_mode: melange_solver::codegen::NoiseMode,
     noise_seed: u64,
     backward_euler: bool,
     force_trap: bool,
+    /// Nodal sub-path override (`--nodal-subpath`).
+    nodal_sub_path_override: melange_solver::codegen::NodalSubPathOverride,
     /// Explicit `--max-iter` override; `None` → auto-tuned (see [`auto_tune_max_iter`]).
     max_iter: Option<usize>,
-}
-
-/// Auto-tune the NR iteration budget from routing + trap stability (Tier 3b).
-///
-/// Shared by `compile`, `simulate`, and `analyze` so every command runs the
-/// same budget — simulate/analyze previously hardcoded 100 while compile
-/// auto-tuned up to 50 + 5·M + 200, meaning a circuit could converge in the
-/// shipped plugin but falsely "diverge" under `melange simulate`.
-///
-/// `user_max_iter = Some(n)` (an explicit `--max-iter`) always wins.
-///
-/// Rationale for the numbers (kept verbatim from the original compile-path
-/// implementation): nodal full-LU is O(N³) per iteration — expensive iters
-/// that converge reliably, so a flat 50; DK Schur is O(M³) — cheap iters
-/// that may need more, so 50 + 5·M. A marginal-Nyquist circuit kept on TRAP
-/// has damped-NR convergence that slows sharply as ρ→1 (e.g. wurli-preamp,
-/// ρ≈1.0000, needs ~186 iters/sample), hence the +200 bonus when ρ > 0.999
-/// and the circuit actually stays on trapezoidal; a BE-promoted circuit
-/// converges in a few iters and must NOT inherit that worst-case bound.
-fn auto_tune_max_iter(
-    user_max_iter: Option<usize>,
-    kernel: &melange_solver::dk::DkKernel,
-    routing: &melange_solver::codegen::routing::RoutingDecision,
-    backward_euler: bool,
-    force_trap: bool,
-    input_node_idx: usize,
-) -> usize {
-    if let Some(n) = user_max_iter {
-        return n;
-    }
-    if kernel.m == 0 {
-        return 50;
-    }
-    let base = if routing.route == melange_solver::codegen::routing::SolverRoute::Nodal {
-        50
-    } else {
-        50 + kernel.m * 5 // DK: scale with M (M=8 → 90 iters)
-    };
-    // Will this circuit actually run on trapezoidal? Replicate the codegen
-    // auto-BE decision (ir.rs `auto_be`) so the iteration budget matches the
-    // integrator that ships.
-    let stays_trap = !backward_euler
-        && (force_trap
-            || !melange_solver::codegen::stability::trap_needs_be(
-                melange_solver::codegen::stability::analyze_trap_stability_deflated(
-                    &kernel.s,
-                    &kernel.a_neg,
-                    kernel.n,
-                    &[input_node_idx],
-                ),
-            ));
-    let stiffness_bonus = if routing.spectral_radius > 0.999 && stays_trap {
-        200
-    } else if routing.spectral_radius > 0.95 {
-        20
-    } else {
-        0
-    };
-    base + stiffness_bonus
 }
 
 /// Resolve `--switch NAME=POS` specs into `(switch_idx, position)` pairs.
@@ -2768,6 +2975,9 @@ fn simulate_circuit_source(
     println!("Step 1: Parsing SPICE netlist...");
     let mut netlist =
         Netlist::parse(&netlist_str).with_context(|| "Failed to parse SPICE netlist")?;
+    // Resolve the effective oversampling factor: explicit --oversampling wins,
+    // else the deck's `.oversampling` recommendation, else 1.
+    let oversampling = resolve_oversampling(opts.oversampling, netlist.recommended_oversampling);
     if !netlist.subcircuits.is_empty() {
         netlist
             .expand_subcircuits()
@@ -2779,6 +2989,84 @@ fn simulate_circuit_source(
     println!("Step 2: Building MNA system...");
     let mut mna =
         MnaSystem::from_netlist(&netlist).with_context(|| "Failed to build MNA system")?;
+
+    // Resolve `.inject` runtime sources so `simulate` can DRIVE them from the
+    // CLI (`--inject FIELD=SPEC`). The compile path resolves these too;
+    // `simulate` previously built the IR with `injections: Vec::new()` and
+    // dropped the drive. Each Thevenin/Norton conductance MUST be stamped into
+    // `mna.g` BEFORE the DK kernel is built (the source is baked into S = A⁻¹).
+    let mut injection_specs: Vec<melange_solver::codegen::ir::InjectionSpec> = Vec::new();
+    for inj in &netlist.injections {
+        let raw = mna
+            .node_map
+            .get(inj.node.as_str())
+            .copied()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    ".inject node '{}' not found. Available: {:?}",
+                    inj.node,
+                    mna.node_map.keys().collect::<Vec<_>>()
+                )
+            })?;
+        if raw == 0 {
+            anyhow::bail!(
+                ".inject node '{}' resolves to ground; injection is single-ended \
+                 (node-to-ground) and must target a non-ground node.",
+                inj.node
+            );
+        }
+        let idx = raw - 1;
+        let (resistance, norton) = match inj.impedance {
+            melange_solver::parser::InjectImpedance::Thevenin(r) => (r, false),
+            melange_solver::parser::InjectImpedance::Norton(r) => (r, true),
+        };
+        if !(resistance > 0.0 && resistance.is_finite()) {
+            anyhow::bail!(
+                ".inject '{}' impedance must be positive and finite, got {}",
+                inj.field_name,
+                resistance
+            );
+        }
+        if idx < mna.n {
+            mna.g[idx][idx] += 1.0 / resistance;
+        }
+        injection_specs.push(melange_solver::codegen::ir::InjectionSpec {
+            node: idx,
+            name: inj.field_name.clone(),
+            resistance,
+            norton,
+        });
+    }
+
+    // Map `--inject FIELD=SPEC` to injection indices (by field name).
+    let mut inject_driven: Vec<(usize, codegen_runner::InjectSource)> = Vec::new();
+    for drive in opts.inject_drives {
+        let (field, source) = codegen_runner::parse_inject_drive(drive)?;
+        let idx = injection_specs
+            .iter()
+            .position(|s| s.name.eq_ignore_ascii_case(&field))
+            .ok_or_else(|| {
+                let names: Vec<&str> = injection_specs.iter().map(|s| s.name.as_str()).collect();
+                anyhow::anyhow!(
+                    "--inject field '{}' is not a `.inject` field in this deck. Available: {:?}",
+                    field,
+                    names
+                )
+            })?;
+        inject_driven.push((idx, source));
+    }
+    // Warn on any `.inject` field left undriven (it injects 0 V) — only once the
+    // user has supplied at least one `--inject`, so an unrelated run stays quiet.
+    if !opts.inject_drives.is_empty() {
+        for (si, spec) in injection_specs.iter().enumerate() {
+            if !inject_driven.iter().any(|(i, _)| *i == si) {
+                println!(
+                    "warning: `.inject` field '{}' has no --inject drive; it will inject 0 V",
+                    spec.name
+                );
+            }
+        }
+    }
 
     let input_node_raw = mna.node_map.get(opts.input_node).copied().ok_or_else(|| {
         anyhow::anyhow!(
@@ -2874,60 +3162,39 @@ fn simulate_circuit_source(
         ..CodegenConfig::default()
     };
     // See compile path for rationale — mirrors the same gate.
-    let forward_active = if opts.solver == "nodal"
-        || (opts.solver == "auto"
-            && should_skip_fa_for_nodal_reroute(&mna, opts.sample_rate, opts.oversampling))
-    {
-        std::collections::HashSet::new()
-    } else {
-        melange_solver::codegen::ir::CircuitIR::detect_forward_active_bjts(
-            &mna,
-            &netlist,
-            &config_for_fa,
-        )
-    };
-    if !forward_active.is_empty() {
-        println!(
-            "  Forward-active BJTs: {:?} (M reduces by {})",
-            forward_active,
-            forward_active.len()
-        );
-        mna = MnaSystem::from_netlist_forward_active(&netlist, &forward_active)
-            .with_context(|| "Failed to rebuild MNA for forward-active BJTs")?;
-        if input_node_idx < mna.n {
-            mna.g[input_node_idx][input_node_idx] += input_conductance;
-        }
-        // Use build_device_info_with_mna so FA-reduced BJT dims are reflected,
-        // giving correct start_idx for junction cap stamping.
-        let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-            &netlist,
-            Some(&mna),
-        )
-        .unwrap_or_default();
-        if !device_slots.is_empty() {
-            mna.stamp_device_junction_caps(&device_slots);
-        }
-    }
+    let forward_active = melange_solver::pipeline::apply_forward_active_reduction(
+        &mut mna,
+        &netlist,
+        &config_for_fa,
+        opts.solver,
+        opts.sample_rate,
+        oversampling,
+        input_node_idx,
+        input_conductance,
+        &|a| println!("{a}"),
+    )?;
 
     // Detect grid-off pentodes (shared helper with compile/analyze). For
     // `--solver nodal` this is a no-op — nodal doesn't benefit from M-reduction
     // at the solver level.
-    let grid_off_pentodes = apply_grid_off_reduction(
+    let grid_off_pentodes = melange_solver::pipeline::apply_grid_off_reduction(
         &mut mna,
         &netlist,
         &config_for_fa,
         &forward_active,
         opts.tube_grid_fa,
         opts.solver,
+        opts.sample_rate,
+        oversampling,
         input_node_idx,
         input_conductance,
     )?;
-    if let Some(msg) = format_grid_off_log(&grid_off_pentodes) {
+    if let Some(msg) = melange_solver::pipeline::format_grid_off_log(&grid_off_pentodes) {
         println!("{msg}");
     }
 
     // Apply `.linearize` directives — shared helper documented at its definition.
-    apply_linearize_reductions(
+    melange_solver::pipeline::apply_linearize_reductions(
         &mut mna,
         &netlist,
         &forward_active,
@@ -2935,6 +3202,7 @@ fn simulate_circuit_source(
         input_node_idx,
         input_conductance,
         input_resistance,
+        &|a| println!("{a}"),
     )?;
 
     // BJT junction-cap preflight — see compile path for rationale. Keeping
@@ -2953,7 +3221,7 @@ fn simulate_circuit_source(
     // Build at the INTERNAL (oversampled) rate so the routing decision below
     // sees the same S/A_neg the generated solver ships — see the compile
     // path's `routing_rate` comment. For os=1 this equals `opts.sample_rate`.
-    let routing_rate = opts.sample_rate * opts.oversampling as f64;
+    let routing_rate = opts.sample_rate * oversampling as f64;
     // Inductor circuits always use the augmented-MNA kernel — including under
     // `--solver dk`. The previous `opts.solver != "dk"` gate sent dk-forced
     // inductor circuits through the non-augmented companion-model path,
@@ -3033,6 +3301,15 @@ fn simulate_circuit_source(
 
     // Route: DK or nodal
     let decision = routing::auto_route(&kernel, &mna, dk_failed);
+    if opts.solver == "dk" {
+        if let Some(blocker) = forced_dk_hard_blocker(&decision) {
+            anyhow::bail!(
+                "--solver dk cannot be forced on this circuit: {blocker}.\n\
+                 The DK solver structurally cannot represent it and would produce \
+                 silently-wrong results. Use --solver auto (recommended) or --solver nodal."
+            );
+        }
+    }
     let use_nodal = match opts.solver {
         "nodal" => true,
         "dk" => false,
@@ -3058,26 +3335,12 @@ fn simulate_circuit_source(
     // `--solver nodal` skipped expansion entirely and ran stably. Now both
     // paths take the same expansion decision.
     if use_nodal {
-        let k_diag_min = if kernel.m > 0 {
-            (0..kernel.m)
-                .map(|i| kernel.k[i * kernel.m + i])
-                .fold(0.0_f64, f64::min)
-        } else {
-            0.0
-        };
-        let skip_expansion = k_diag_min < -100.0;
-        if !skip_expansion {
-            let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-                &netlist,
-                Some(&mna),
-            )
-            .unwrap_or_default();
-            if !device_slots.is_empty() {
-                mna.expand_bjt_internal_nodes(&device_slots);
-            }
-        } else {
-            println!("  Skipping internal node expansion (K ill-conditioned, using full LU)");
-        }
+        melange_solver::pipeline::expand_internal_nodes_if_conditioned(
+            &mut mna,
+            &netlist,
+            &kernel,
+            &|a| println!("{a}"),
+        );
     }
 
     // Step 5: Generate circuit code.
@@ -3088,7 +3351,7 @@ fn simulate_circuit_source(
     let mut output_nodes = vec![output_node_idx];
     output_nodes.extend(probe_indices.iter().copied());
     let output_scales = vec![1.0; output_nodes.len()];
-    let max_iterations = auto_tune_max_iter(
+    let max_iterations = melange_solver::pipeline::auto_tune_max_iter(
         opts.max_iter,
         &kernel,
         &decision,
@@ -3109,7 +3372,7 @@ fn simulate_circuit_source(
         extra_input_nodes: Vec::new(),
         extra_input_resistances: Vec::new(),
         output_nodes,
-        oversampling_factor: opts.oversampling,
+        oversampling_factor: oversampling,
         output_scales,
         output_clamp_v: 10.0,
         include_dc_op: true,
@@ -3119,6 +3382,7 @@ fn simulate_circuit_source(
         pot_settle_samples: 64,
         backward_euler: opts.backward_euler,
         force_trap: opts.force_trap,
+        nodal_sub_path_override: opts.nodal_sub_path_override,
         disable_be_fallback: false,
         opamp_rail_mode: opts.opamp_rail_mode,
         noise_mode: opts.noise_mode,
@@ -3126,8 +3390,9 @@ fn simulate_circuit_source(
         emit_dc_op_recompute: false,
         router_dk_unstable: decision.dk_unstable,
         router_dk_spectral_radius: decision.spectral_radius,
-        injections: Vec::new(),
+        injections: injection_specs.clone(),
         taps: Vec::new(),
+        bjt_fa_mode: melange_solver::codegen::BjtFaMode::Auto,
     };
     let generator = CodeGenerator::new(config);
     let generated = if use_nodal {
@@ -3168,6 +3433,8 @@ fn simulate_circuit_source(
         opts.duration,
         &probe_names,
         opts.noise_mode != melange_solver::codegen::NoiseMode::Off,
+        &inject_driven,
+        injection_specs.len(),
     );
     let full_source = format!("{}\n{}", generated.code, simulate_main);
 
@@ -3238,7 +3505,7 @@ fn simulate_circuit_source(
     // rescues them), so 5% would cry wolf. 20% cleanly separates onset
     // transients from a systematic latch (~100% in the failing case).
     if let (Some(nr_fail), Some(samples)) = (nr_max_iter_count, diag_samples) {
-        let internal_samples = samples.saturating_mul(opts.oversampling as u64).max(1);
+        let internal_samples = samples.saturating_mul(oversampling as u64).max(1);
         let frac = nr_fail as f64 / internal_samples as f64;
         if frac > 0.20 {
             let max_iter_disp = opts
@@ -3267,503 +3534,16 @@ fn simulate_circuit_source(
     Ok(())
 }
 
-/// Counts of devices actually linearized after the helper validated them
-/// — see [`apply_linearize_reductions`]. Callers use these for post-
-/// routing summary lines. Triode counts exclude entries that were skipped
-/// because the grid was conducting at the DC bias.
-#[derive(Default, Debug, Clone, Copy)]
-struct LinearizeOutcome {
-    bjts_linearized: usize,
-    triodes_linearized: usize,
-}
-
-/// Apply `.linearize` directives to `mna` in-place.
-///
-/// Computes a DC OP on the current MNA to extract small-signal g-parameters
-/// for flagged BJTs and triodes, then rebuilds the MNA via
-/// `from_netlist_with_all_reductions` with those devices collapsed from
-/// active-NR (2D per device) to linear stamps (0D). Re-stamps junction caps
-/// against the reduced dimension and restamps the input conductance.
-///
-/// The rebuild also re-applies `forward_active` and `grid_off_pentodes`
-/// reductions — the caller may have already rebuilt for those, but
-/// `from_netlist_with_all_reductions` composes all three uniformly from the
-/// raw netlist, so passing them through here keeps the final MNA consistent.
-///
-/// No-op when the netlist has no `.linearize` directives. In that case any
-/// FA / grid-off rebuilds the caller did remain in place and this returns
-/// `LinearizeOutcome::default()` without modifying `mna`.
-///
-/// Writes status to stdout: one line per linearized device with its DC-OP
-/// small-signal parameters, plus a summary line per device class.
-///
-/// Single source of truth for the `.linearize` reduction pipeline —
-/// `compile`, `simulate`, and `analyze` all call this. Previously the block
-/// was pasted three times; the `analyze` copy was missing entirely, which
-/// is why `melange analyze` reported the pre-linearize M value (Uniquorn v2
-/// reported M=38 rather than M=20).
-/// Detect grid-off pentodes at DC-OP and reduce the MNA accordingly.
-///
-/// When a pentode's grid is biased well below cutoff (`Vgk < -(vgk_onset + 0.5)`
-/// and `Vg2k > 1.0`), the Ig1 NR dimension collapses and we freeze Vg2k into
-/// the stamp. This turns a 3D pentode block into a 2D one, shrinking the DK M
-/// by 1 per tube. See `crates/melange-solver/src/codegen/ir.rs:detect_grid_off_pentodes`.
-///
-/// When rebuild fires, the MNA is replaced with the reduced version, input
-/// conductance is re-stamped (the rebuild zeroes G[in][in]), and junction caps
-/// are re-stamped against the new device slot layout.
-///
-/// `tube_grid_fa`:
-///   - "auto" — inspect DC-OP bias, reduce where below cutoff.
-///   - "on"   — force grid-off on every non-variable-mu pentode regardless of bias.
-///   - "off"  — never reduce; returns an empty map without touching `mna`.
-/// `solver_override == "nodal"` is also treated as "off" because nodal doesn't
-/// benefit from M-reduction at the solver level.
-///
-/// Single source of truth for the grid-off reduction pipeline — `compile`,
-/// `simulate`, and `analyze` all call this. Previously the block lived only in
-/// `compile`; `simulate` / `analyze` passed an empty map, which is why the 5F1
-/// Champ single-ended 6V6 didn't get its free 3D→2D reduction in those paths.
-/// Pre-route check: would the current (un-reduced) MNA route to the nodal
-/// solver?
-///
-/// When the answer is yes, `detect_forward_active_bjts` must be skipped.
-/// Two independent reasons:
-///
-/// 1. FA is unnecessary when the final solver is Nodal — Nodal handles
-///    full-dimension BJT blocks natively via N×N NR, so collapsing BJTs
-///    to 1D saves nothing at the solver level.
-/// 2. FA reduction can *destabilize* the trapezoidal propagation operator.
-///    On wurli-power-amp the un-reduced spectral radius(S·A_neg) is 1.0018
-///    (stable) but FA collapses 7 of 8 BJTs to 1D and drives it to 1.0145.
-///    The router then flips back to Nodal post-FA, but the DC-OP solver
-///    has already converged on a parasitic equilibrium in the FA-reduced
-///    MNA (many internal nodes pinned to rails). Runtime NR never
-///    recovers. See memory/wurli_power_amp_phase2_recheck.md.
-///
-/// Uses the full `auto_route` decision (`route == Nodal`), not just the
-/// `dk_unstable` flag — `large_m`, ill-conditioning, and multi-transformer
-/// also imply "don't bother with FA". Circuits currently relying on
-/// FA+DK *under* the `large_m` threshold are unaffected because their
-/// un-reduced route is DK in the first place.
-/// `sample_rate` is the host rate; `oversampling` is the codegen
-/// oversampling factor. The pre-route kernel is built at the internal
-/// (oversampled) rate — see the routing-rate fix below `should_skip_fa_for_nodal_reroute`'s
-/// caller for why this matters.
-fn should_skip_fa_for_nodal_reroute(
-    mna: &melange_solver::mna::MnaSystem,
-    sample_rate: f64,
-    oversampling: usize,
-) -> bool {
-    use melange_solver::codegen::routing::{self, SolverRoute};
-    use melange_solver::dk::DkKernel;
-
-    let has_inductors = !mna.inductors.is_empty()
-        || !mna.coupled_inductors.is_empty()
-        || !mna.transformer_groups.is_empty();
-    // Route at the INTERNAL (oversampled) rate, matching what codegen ships
-    // via `internal_rate = sample_rate * oversampling_factor`. Routing at
-    // the base host rate can miss trap/BE instability that only appears at
-    // the oversampled rate the generated solver actually runs (see
-    // memory/dk_backward_euler_ignored_trap_unstable.md: a circuit measured
-    // rho=1.315 at 192 kHz but the un-oversampled 48 kHz kernel used for
-    // routing read comfortably stable, so the router never rerouted a
-    // genuinely DK-Schur-unstable circuit to nodal).
-    let routing_rate = sample_rate * oversampling.max(1) as f64;
-    let kernel_result = if has_inductors {
-        DkKernel::from_mna_augmented(mna, routing_rate)
-    } else {
-        DkKernel::from_mna(mna, routing_rate)
-    };
-    let (kernel, dk_failed) = match kernel_result {
-        Ok(k) => (k, false),
-        Err(_) => {
-            log::info!("Pre-route: DK kernel failed on un-reduced MNA → skip FA");
-            return true;
-        }
-    };
-    let decision = routing::auto_route(&kernel, mna, dk_failed);
-    log::info!(
-        "Pre-route (un-reduced MNA, N={}, M={}): route={:?}, reason={}",
-        kernel.n,
-        kernel.m,
-        decision.route,
-        decision.reason
-    );
-    decision.route == SolverRoute::Nodal
-}
-
-#[allow(clippy::too_many_arguments)]
-fn apply_grid_off_reduction(
-    mna: &mut melange_solver::mna::MnaSystem,
-    netlist: &melange_solver::parser::Netlist,
-    fa_config: &melange_solver::codegen::CodegenConfig,
-    forward_active: &std::collections::HashSet<String>,
-    tube_grid_fa: &str,
-    solver_override: &str,
-    input_node_idx: usize,
-    input_conductance: f64,
-) -> Result<std::collections::HashMap<String, f64>> {
-    use melange_solver::{codegen::ir::CircuitIR, mna::MnaSystem};
-
-    let grid_off_pentodes = if tube_grid_fa == "off" || solver_override == "nodal" {
-        std::collections::HashMap::new()
-    } else {
-        let force_all = tube_grid_fa == "on";
-        CircuitIR::detect_grid_off_pentodes(mna, netlist, fa_config, force_all)
-    };
-
-    if !grid_off_pentodes.is_empty() {
-        // Compose grid-off WITH the forward-active BJT reduction the caller
-        // already applied. Rebuilding from the netlist with only the
-        // grid-off map would silently discard the FA reduction (the compile
-        // summary would still print the FA line while the shipped MNA had
-        // full-dimension BJT blocks) — plexi-class circuits need both.
-        *mna = MnaSystem::from_netlist_with_grid_off_and_fa(
-            netlist,
-            forward_active,
-            &grid_off_pentodes,
-        )
-        .with_context(|| "Failed to rebuild MNA for grid-off pentodes (+ FA BJTs)")?;
-        if input_node_idx < mna.n {
-            mna.g[input_node_idx][input_node_idx] += input_conductance;
-        }
-        let device_slots =
-            CircuitIR::build_device_info_with_mna(netlist, Some(&*mna)).unwrap_or_default();
-        if !device_slots.is_empty() {
-            mna.stamp_device_junction_caps(&device_slots);
-        }
-    }
-
-    Ok(grid_off_pentodes)
-}
-
-/// Format the grid-off detection result for user output. Returns `None` when
-/// nothing was reduced — the caller decides whether to log at all and on which
-/// stream (`println!` for compile/simulate progress, `eprintln!` for analyze,
-/// which writes CSV to stdout).
-fn format_grid_off_log(
-    grid_off_pentodes: &std::collections::HashMap<String, f64>,
-) -> Option<String> {
-    if grid_off_pentodes.is_empty() {
-        return None;
-    }
-    let mut pretty: Vec<(String, f64)> = grid_off_pentodes
-        .iter()
-        .map(|(k, v)| (k.clone(), *v))
-        .collect();
-    pretty.sort_by(|a, b| a.0.cmp(&b.0));
-    let pretty_str: String = pretty
-        .iter()
-        .map(|(n, v)| format!("{n}(Vg2k={v:.1}V)"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some(format!(
-        "  Grid-off pentodes: [{}] (M reduces by {})",
-        pretty_str,
-        grid_off_pentodes.len()
-    ))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn apply_linearize_reductions(
-    mna: &mut melange_solver::mna::MnaSystem,
-    netlist: &melange_solver::parser::Netlist,
-    forward_active: &std::collections::HashSet<String>,
-    grid_off_pentodes: &std::collections::HashMap<String, f64>,
-    input_node_idx: usize,
-    input_conductance: f64,
-    input_resistance: f64,
-) -> Result<LinearizeOutcome> {
-    use melange_solver::parser::Element;
-
-    // Partition .linearize names into BJT vs triode sets by matching against
-    // element types. Warn on names that are neither.
-    let linearize_names: std::collections::HashSet<String> =
-        netlist.linearize_devices.iter().cloned().collect();
-    let mut linearized_bjts_set: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
-    let mut linearized_triodes_set: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
-    if !linearize_names.is_empty() {
-        for elem in &netlist.elements {
-            match elem {
-                Element::Bjt { name, .. }
-                    if linearize_names.contains(&name.to_ascii_uppercase()) =>
-                {
-                    linearized_bjts_set.insert(name.to_ascii_uppercase());
-                }
-                Element::Triode { name, .. }
-                    if linearize_names.contains(&name.to_ascii_uppercase()) =>
-                {
-                    linearized_triodes_set.insert(name.to_ascii_uppercase());
-                }
-                _ => {}
-            }
-        }
-        for name in &linearize_names {
-            let upper = name.to_ascii_uppercase();
-            if !linearized_bjts_set.contains(&upper) && !linearized_triodes_set.contains(&upper) {
-                println!(
-                    "  Warning: .linearize device '{}' is not a BJT or triode (ignored)",
-                    name
-                );
-            }
-        }
-    }
-
-    let has_linearized = !linearized_bjts_set.is_empty() || !linearized_triodes_set.is_empty();
-    if !has_linearized {
-        return Ok(LinearizeOutcome::default());
-    }
-
-    // DC OP on the current (post-FA, pre-linearize) MNA to get the bias
-    // point for small-signal g-parameter extraction.
-    let device_slots =
-        melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(netlist, Some(mna))
-            .unwrap_or_default();
-    let dc_op_config = melange_solver::dc_op::DcOpConfig {
-        input_node: input_node_idx,
-        input_resistance,
-        ..melange_solver::dc_op::DcOpConfig::default()
-    };
-    let dc_result =
-        melange_solver::dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config);
-
-    // Extract BJT small-signal g-params (gm, gpi, gmu, go) at DC bias.
-    let mut bjt_lin_infos = Vec::new();
-    for slot in &device_slots {
-        if let melange_solver::codegen::ir::DeviceParams::Bjt(bp) = &slot.params {
-            let dev = mna
-                .nonlinear_devices
-                .iter()
-                .find(|d| d.start_idx == slot.start_idx);
-            if let Some(dev) = dev {
-                if linearized_bjts_set.contains(&dev.name.to_ascii_uppercase()) {
-                    let s = slot.start_idx;
-                    let (nc, nb, ne) = (
-                        dev.node_indices[0],
-                        dev.node_indices[1],
-                        dev.node_indices[2],
-                    );
-                    // Node-voltage lookup (1-indexed device nodes, 0 = ground).
-                    let v_at = |idx: usize| -> f64 {
-                        if idx > 0 {
-                            dc_result.v_node.get(idx - 1).copied().unwrap_or(0.0)
-                        } else {
-                            0.0
-                        }
-                    };
-                    let vbe = dc_result.v_nl.get(s).copied().unwrap_or(0.0);
-                    let ic = dc_result.i_nl.get(s).copied().unwrap_or(0.0);
-                    // Guard on slot.dimension: for an FA-reduced (1D) BJT,
-                    // v_nl[s+1]/i_nl[s+1] belong to the NEXT device's slot.
-                    // FA contract: Vbc from node voltages, Ib = Ic / BF.
-                    let (vbc, ib) = if slot.dimension == 2 {
-                        (
-                            dc_result.v_nl.get(s + 1).copied().unwrap_or(0.0),
-                            dc_result.i_nl.get(s + 1).copied().unwrap_or(0.0),
-                        )
-                    } else {
-                        (v_at(nb) - v_at(nc), ic / bp.beta_f)
-                    };
-
-                    let sign = if bp.is_pnp { -1.0 } else { 1.0 };
-                    let vbe_eff = sign * vbe;
-                    let vbc_eff = sign * vbc;
-                    let nf_vt = bp.nf * bp.vt;
-                    let exp_be = (vbe_eff / nf_vt).clamp(-40.0, 40.0).exp();
-                    let exp_bc = (vbc_eff / bp.vt).clamp(-40.0, 40.0).exp();
-
-                    let gm = bp.is / nf_vt * exp_be;
-                    let gmu = (bp.is / bp.vt * exp_bc + bp.is / (bp.beta_r * bp.vt) * exp_bc).abs();
-                    let gpi = bp.is / (bp.beta_f * nf_vt) * exp_be;
-                    let go = bp.is / (bp.beta_r * bp.vt) * exp_bc;
-
-                    // Norton operating-point voltages in EXTERNAL node space
-                    // (the linearized conductances are stamped between the
-                    // external terminals, so the I0 - g·v0 constant must use
-                    // external node differences — see LinearizedBjtInfo docs).
-                    let vbe0 = v_at(nb) - v_at(ne);
-                    let vbc0 = v_at(nb) - v_at(nc);
-                    println!(
-                        "  Linearized {}: gm={:.4e} gpi={:.4e} gmu={:.4e} Ic_dc={:.4e} Ib_dc={:.4e}",
-                        dev.name, gm, gpi, gmu, ic, ib
-                    );
-                    bjt_lin_infos.push(melange_solver::mna::LinearizedBjtInfo {
-                        name: dev.name.clone(),
-                        nc,
-                        nb,
-                        ne,
-                        gm,
-                        gpi,
-                        gmu,
-                        go,
-                        ic_dc: ic,
-                        ib_dc: ib,
-                        vbe0,
-                        vbc0,
-                    });
-                }
-            }
-        }
-    }
-
-    // Extract triode small-signal params (gm, rp=1/gp) at DC bias. Skip
-    // (and drop from the linearize set) when the grid is conducting or
-    // Vgk is near the onset — the small-signal linearization is invalid
-    // in the grid-current regime.
-    let mut triode_lin_infos = Vec::new();
-    for slot in &device_slots {
-        if let melange_solver::codegen::ir::DeviceParams::Tube(tp) = &slot.params {
-            if tp.is_pentode() {
-                continue;
-            }
-            let dev = mna
-                .nonlinear_devices
-                .iter()
-                .find(|d| d.start_idx == slot.start_idx);
-            if let Some(dev) = dev {
-                if linearized_triodes_set.contains(&dev.name.to_ascii_uppercase()) {
-                    let s = slot.start_idx;
-                    let vgk = dc_result.v_nl.get(s).copied().unwrap_or(0.0);
-                    let vpk = dc_result.v_nl.get(s + 1).copied().unwrap_or(0.0);
-                    let ip_dc = dc_result.i_nl.get(s).copied().unwrap_or(0.0);
-                    let ig_dc = dc_result.i_nl.get(s + 1).copied().unwrap_or(0.0);
-
-                    if ig_dc.abs() > 1e-9 {
-                        println!(
-                            "  Warning: triode '{}' has Ig={:.4e} at DC OP (grid conducting), skipping linearization",
-                            dev.name, ig_dc
-                        );
-                        linearized_triodes_set.remove(&dev.name.to_ascii_uppercase());
-                        continue;
-                    }
-                    if vgk > -(tp.vgk_onset + 0.5) {
-                        println!(
-                            "  Warning: triode '{}' has Vgk={:.2}V (near grid conduction onset {:.2}V), skipping linearization",
-                            dev.name, vgk, tp.vgk_onset
-                        );
-                        linearized_triodes_set.remove(&dev.name.to_ascii_uppercase());
-                        continue;
-                    }
-
-                    use melange_devices::NonlinearDevice;
-                    let triode = melange_devices::KorenTriode {
-                        mu: tp.mu,
-                        ex: tp.ex,
-                        kg1: tp.kg1,
-                        kp: tp.kp,
-                        kvb: tp.kvb,
-                        ig_max: tp.ig_max,
-                        vgk_onset: tp.vgk_onset,
-                        lambda: tp.lambda,
-                        mu_b: tp.mu_b,
-                        svar: tp.svar,
-                        ex_b: tp.ex_b,
-                    };
-                    let jac = triode.jacobian(&[vgk, vpk]);
-                    let gm = jac[0]; // dIp/dVgk
-                    let gp = jac[1]; // dIp/dVpk = 1/rp
-
-                    let (ng, np, nk) = (
-                        dev.node_indices[0], // grid
-                        dev.node_indices[1], // plate
-                        dev.node_indices[2], // cathode
-                    );
-                    // Norton operating-point voltages in EXTERNAL node space
-                    // (see LinearizedTriodeInfo docs). For triodes without
-                    // internal nodes these equal v_nl[s]/v_nl[s+1].
-                    let v_at = |idx: usize| -> f64 {
-                        if idx > 0 {
-                            dc_result.v_node.get(idx - 1).copied().unwrap_or(0.0)
-                        } else {
-                            0.0
-                        }
-                    };
-                    let vgk0 = v_at(ng) - v_at(nk);
-                    let vpk0 = v_at(np) - v_at(nk);
-                    let rp = if gp.abs() > 1e-30 {
-                        1.0 / gp
-                    } else {
-                        f64::INFINITY
-                    };
-                    println!(
-                        "  Linearized {}: gm={:.4e} rp={:.0} Ip_dc={:.4e} Vgk={:.2}V Vpk={:.1}V",
-                        dev.name, gm, rp, ip_dc, vgk, vpk
-                    );
-                    triode_lin_infos.push(melange_solver::mna::LinearizedTriodeInfo {
-                        name: dev.name.clone(),
-                        ng,
-                        np,
-                        nk,
-                        gm,
-                        gp,
-                        ip_dc,
-                        ig_dc,
-                        vgk0,
-                        vpk0,
-                    });
-                }
-            }
-        }
-    }
-
-    // Rebuild MNA with all three reduction classes combined (FA +
-    // linearized + grid-off). This supersedes any prior FA-only or
-    // grid-off-only rebuild the caller performed.
-    *mna = melange_solver::mna::MnaSystem::from_netlist_with_all_reductions(
-        netlist,
-        forward_active,
-        &linearized_bjts_set,
-        &linearized_triodes_set,
-        grid_off_pentodes,
-    )
-    .with_context(|| "Failed to rebuild MNA with linearized devices")?;
-    if input_node_idx < mna.n {
-        mna.g[input_node_idx][input_node_idx] += input_conductance;
-    }
-
-    // Stamp linearized g-parameters into G. Must precede the junction-cap
-    // re-stamp so `build_device_info_with_mna` can skip linearized devices
-    // (it checks `mna.linearized_bjts` / `mna.linearized_triodes`).
-    if !bjt_lin_infos.is_empty() {
-        mna.linearized_bjts = bjt_lin_infos;
-        mna.stamp_linearized_bjts();
-        println!(
-            "  Linearized {} BJTs (M reduced by {})",
-            linearized_bjts_set.len(),
-            linearized_bjts_set.len() * 2
-        );
-    }
-    if !triode_lin_infos.is_empty() {
-        mna.linearized_triodes = triode_lin_infos;
-        mna.stamp_linearized_triodes();
-        println!(
-            "  Linearized {} triodes (M reduced by {})",
-            linearized_triodes_set.len(),
-            linearized_triodes_set.len() * 2
-        );
-    }
-
-    // Re-stamp junction caps against the reduced-dimension MNA.
-    let ds = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(netlist, Some(mna))
-        .unwrap_or_default();
-    if !ds.is_empty() {
-        mna.stamp_device_junction_caps(&ds);
-    }
-
-    Ok(LinearizeOutcome {
-        bjts_linearized: linearized_bjts_set.len(),
-        triodes_linearized: linearized_triodes_set.len(),
-    })
-}
-
+// `LinearizeOutcome`, `apply_linearize_reductions` and `auto_tune_max_iter`
+// moved to `melange_solver::pipeline` so `melange compile`, `simulate`,
+// `analyze` and `melange-validate` share one front-end pipeline instead of
+// four copies that drifted. See that module's docs for what the drift cost.
 fn analyze_freq_response(
     circuit_source: &circuits::CircuitSource,
     opts: &AnalyzeOptions<'_>,
 ) -> Result<()> {
     let AnalyzeOptions {
+        nodal_sub_path_override,
         input_node: input_node_name,
         output_node: output_node_name,
         start_freq,
@@ -3778,7 +3558,7 @@ fn analyze_freq_response(
         harmonics,
         tube_grid_fa,
         solver,
-        oversampling,
+        oversampling: oversampling_cli,
         opamp_rail_mode,
         noise_mode,
         noise_seed,
@@ -3815,6 +3595,9 @@ fn analyze_freq_response(
 
     let mut netlist =
         Netlist::parse(&netlist_str).with_context(|| "Failed to parse SPICE netlist")?;
+    // Resolve the effective oversampling factor: explicit --oversampling wins,
+    // else the deck's `.oversampling` recommendation, else 1.
+    let oversampling = resolve_oversampling(oversampling_cli, netlist.recommended_oversampling);
     if !netlist.subcircuits.is_empty() {
         netlist
             .expand_subcircuits()
@@ -4076,61 +3859,41 @@ fn analyze_freq_response(
         output_nodes: vec![output_node_idx],
         ..CodegenConfig::default()
     };
-    // See compile path for rationale — mirrors the same gate.
-    let forward_active = if solver == "nodal"
-        || (solver == "auto" && should_skip_fa_for_nodal_reroute(&mna, sample_rate, oversampling))
-    {
-        std::collections::HashSet::new()
-    } else {
-        melange_solver::codegen::ir::CircuitIR::detect_forward_active_bjts(
-            &mna,
-            &netlist,
-            &config_for_fa,
-        )
-    };
-    if !forward_active.is_empty() {
-        eprintln!(
-            "  Forward-active BJTs: {:?} (M reduces by {})",
-            forward_active,
-            forward_active.len()
-        );
-        mna = MnaSystem::from_netlist_forward_active(&netlist, &forward_active)
-            .with_context(|| "Failed to rebuild MNA for forward-active BJTs")?;
-        if input_node_idx < mna.n {
-            mna.g[input_node_idx][input_node_idx] += input_conductance;
-        }
-        // Use build_device_info_with_mna so FA-reduced BJT dims are reflected,
-        // giving correct start_idx for junction cap stamping.
-        let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-            &netlist,
-            Some(&mna),
-        )
-        .unwrap_or_default();
-        if !device_slots.is_empty() {
-            mna.stamp_device_junction_caps(&device_slots);
-        }
-    }
+    // Analyze writes CSV to stdout, so progress messages go to stderr.
+    let forward_active = melange_solver::pipeline::apply_forward_active_reduction(
+        &mut mna,
+        &netlist,
+        &config_for_fa,
+        solver,
+        sample_rate,
+        oversampling,
+        input_node_idx,
+        input_conductance,
+        &|a| eprintln!("{a}"),
+    )?;
 
     // Detect grid-off pentodes (shared helper with compile/simulate). Analyze
     // writes CSV to stdout, so progress messages go to stderr.
-    let grid_off_pentodes = apply_grid_off_reduction(
+    let grid_off_pentodes = melange_solver::pipeline::apply_grid_off_reduction(
         &mut mna,
         &netlist,
         &config_for_fa,
         &forward_active,
         tube_grid_fa,
         solver,
+        sample_rate,
+        oversampling,
         input_node_idx,
         input_conductance,
     )?;
-    if let Some(msg) = format_grid_off_log(&grid_off_pentodes) {
+    if let Some(msg) = melange_solver::pipeline::format_grid_off_log(&grid_off_pentodes) {
         eprintln!("{msg}");
     }
 
     // Apply `.linearize` directives — shared helper with compile/simulate.
     // Previously missing here, which is why `melange analyze` reported the
     // pre-linearize M on circuits like Uniquorn v2 (M=38 instead of M=20).
-    apply_linearize_reductions(
+    melange_solver::pipeline::apply_linearize_reductions(
         &mut mna,
         &netlist,
         &forward_active,
@@ -4138,6 +3901,7 @@ fn analyze_freq_response(
         input_node_idx,
         input_conductance,
         input_resistance,
+        &|a| println!("{a}"),
     )?;
 
     // BJT junction-cap preflight — see compile path for rationale. Analyze
@@ -4228,6 +3992,15 @@ fn analyze_freq_response(
     };
 
     let decision = routing::auto_route(&kernel, &mna, dk_failed);
+    if solver == "dk" {
+        if let Some(blocker) = forced_dk_hard_blocker(&decision) {
+            anyhow::bail!(
+                "--solver dk cannot be forced on this circuit: {blocker}.\n\
+                 The DK solver structurally cannot represent it and would produce \
+                 silently-wrong results. Use --solver auto (recommended) or --solver nodal."
+            );
+        }
+    }
     let use_nodal = match solver {
         "nodal" => true,
         "dk" => false,
@@ -4244,18 +4017,24 @@ fn analyze_freq_response(
     );
 
     if use_nodal {
-        let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
+        // BEHAVIOUR FIX 2026-09-03: this was the last UNCONDITIONAL expansion.
+        // compile, simulate and validate all gate it on K conditioning; analyze
+        // did not, so `melange analyze` reported the frequency response of a
+        // DIFFERENT circuit than compile ships for any deck with
+        // k_diag_min < -100 (measured on wurli-power-amp: compile skips
+        // expansion, analyze expanded). Same family as the unconditional
+        // expansion in the validate harness that `6bc3ef1` removed.
+        // Analyze writes CSV to stdout, so the notice goes to stderr.
+        melange_solver::pipeline::expand_internal_nodes_if_conditioned(
+            &mut mna,
             &netlist,
-            Some(&mna),
-        )
-        .unwrap_or_default();
-        if !device_slots.is_empty() {
-            mna.expand_bjt_internal_nodes(&device_slots);
-        }
+            &kernel,
+            &|a| eprintln!("{a}"),
+        );
     }
 
     // Generate circuit code
-    let max_iterations = auto_tune_max_iter(
+    let max_iterations = melange_solver::pipeline::auto_tune_max_iter(
         max_iter,
         &kernel,
         &decision,
@@ -4286,6 +4065,7 @@ fn analyze_freq_response(
         pot_settle_samples: 64,
         backward_euler,
         force_trap,
+        nodal_sub_path_override,
         disable_be_fallback: false,
         opamp_rail_mode,
         noise_mode,
@@ -4295,6 +4075,7 @@ fn analyze_freq_response(
         router_dk_spectral_radius: decision.spectral_radius,
         injections: Vec::new(),
         taps: Vec::new(),
+        bjt_fa_mode: melange_solver::codegen::BjtFaMode::Auto,
     };
     let generator = CodeGenerator::new(config);
     let generated = if use_nodal {
@@ -5112,6 +4893,61 @@ fn list_nodes_source(circuit_source: &circuits::CircuitSource) -> Result<()> {
         }
     }
 
+    // Controls: the names a user needs for --pot / --switch. Either the
+    // human-readable label OR the component name is accepted, so print both.
+    if !netlist.pots.is_empty()
+        || !netlist.switches.is_empty()
+        || !netlist.wipers.is_empty()
+        || !netlist.gangs.is_empty()
+    {
+        println!();
+        println!("Controls (name or label works with --pot / --switch):");
+        for pot in &netlist.pots {
+            let label = pot.label.as_deref().unwrap_or(&pot.resistor_name);
+            let default = pot
+                .default_value
+                .map(|d| format!("{d:.0}"))
+                .unwrap_or_else(|| "nominal".to_string());
+            println!(
+                "  pot     {:<26} [{}]  {:.0}..{:.0} ohm, default {}",
+                format!("\"{label}\""),
+                pot.resistor_name,
+                pot.min_value,
+                pot.max_value,
+                default
+            );
+        }
+        for wiper in &netlist.wipers {
+            let label = wiper.label.as_deref().unwrap_or(&wiper.resistor_cw);
+            println!(
+                "  wiper   {:<26} [{}/{}]  total {:.0} ohm, position 0..1",
+                format!("\"{label}\""),
+                wiper.resistor_cw,
+                wiper.resistor_ccw,
+                wiper.total_resistance
+            );
+        }
+        for sw in &netlist.switches {
+            let label = sw
+                .label
+                .clone()
+                .unwrap_or_else(|| sw.component_names.join(","));
+            println!(
+                "  switch  {:<26} {} positions (controls {})",
+                format!("\"{label}\""),
+                sw.positions.len(),
+                sw.component_names.join(",")
+            );
+        }
+        for gang in &netlist.gangs {
+            println!(
+                "  gang    {:<26} {} members, position 0..1",
+                format!("\"{}\"", gang.label),
+                gang.members.len()
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -5404,9 +5240,12 @@ fn list_builtins() -> Result<()> {
 
     println!();
     println!("Usage examples:");
-    println!("  melange compile tube-screamer --output ts9.rs");
-    println!("  melange compile rc-lowpass --output filter.rs");
-    println!("  melange nodes big-muff");
+    println!("  melange compile passive-eq1a --format plugin -o passive-eq");
+    println!("  melange simulate passive-eq1a --amplitude 0.1 -o drive.wav");
+    println!("  melange nodes passive-eq1a");
+    println!();
+    println!("The full circuit library lives in a separate repo; add it with");
+    println!("`melange sources add` and browse with `melange sources list`.");
 
     Ok(())
 }
@@ -5513,13 +5352,15 @@ RK cath 0 130
         let fa_config = melange_solver::codegen::CodegenConfig::default();
         // `--tube-grid-fa on` forces grid-off on every non-variable-mu
         // pentode regardless of DC bias, so detection is deterministic here.
-        let grid_off = apply_grid_off_reduction(
+        let grid_off = melange_solver::pipeline::apply_grid_off_reduction(
             &mut mna,
             &netlist,
             &fa_config,
             &forward_active,
             "on",
             "",
+            48000.0,
+            1,
             0,
             1.0,
         )

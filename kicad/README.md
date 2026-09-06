@@ -8,7 +8,7 @@ Use KiCad as a schematic editor for Melange circuits.
 2. **Draw your circuit** using `Simulation_SPICE` symbols for R/C/L/D/Q/J/M and `Melange` symbols for triodes, pentodes, op-amps, VCAs, pots, wipers, and I/O markers
 3. **Set `Melange.*` fields** on components that need special handling (pots, switches, gangs, models)
 4. **Export**: File → Export Netlist → Melange → Export (requires the [netlist exporter plugin](docs/import.md))
-5. **Compile**: `melange compile circuit.cir --output plugin_code`
+5. **Compile**: `melange compile circuit.cir --format plugin -o my-plugin`
 
 Or import directly from the CLI:
 

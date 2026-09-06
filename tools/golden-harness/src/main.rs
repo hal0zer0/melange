@@ -30,11 +30,19 @@ const USAGE: &str = "golden-harness — golden-audio regression harness for mela
 USAGE:
   golden-harness capture --manifest <manifest.json> --out <baseline-dir>
                          [--fs <hz>] [--timeout <secs>] [--keep-work] [--dry-run]
-  golden-harness compare <baseline-A> <baseline-B> [--json <report.json>]
+  golden-harness compare <baseline-A> <baseline-B> [--json <report.json>] [--strict]
+
+COMPARE MODES:
+  default   release gate — passes IDENTICAL and NEGLIGIBLE. Asks: did anything
+            audibly change?
+  --strict  refactor gate — passes ONLY IDENTICAL, and additionally requires
+            every generated circuit.rs to match. Asks: did anything change at
+            all? Use this for any change that is supposed to be behaviour-
+            preserving; NEGLIGIBLE is precisely the band a refactor bug hides in.
 
 EXIT CODES:
   capture: 0 = all circuits captured, 3 = some circuit failed (run completed)
-  compare: 0 = no audible change, 1 = CHANGED/MISSING found, 2 = usage error
+  compare: 0 = gate passed, 1 = gate failed, 2 = usage error
 ";
 
 fn main() -> ExitCode {
@@ -116,6 +124,7 @@ fn main() -> ExitCode {
         Some("compare") => {
             let mut positional: Vec<PathBuf> = Vec::new();
             let mut json_out: Option<PathBuf> = None;
+            let mut strict = false;
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
@@ -123,6 +132,7 @@ fn main() -> ExitCode {
                         i += 1;
                         json_out = args.get(i).map(PathBuf::from);
                     }
+                    "--strict" => strict = true,
                     other => positional.push(PathBuf::from(other)),
                 }
                 i += 1;
@@ -131,7 +141,7 @@ fn main() -> ExitCode {
                 return usage_err("compare requires exactly two baseline directories");
             }
             let json_out = json_out.unwrap_or_else(|| PathBuf::from("golden-compare-report.json"));
-            match compare::run(&positional[0], &positional[1], &json_out) {
+            match compare::run(&positional[0], &positional[1], &json_out, strict) {
                 Ok(changed) => {
                     if changed == 0 {
                         ExitCode::SUCCESS

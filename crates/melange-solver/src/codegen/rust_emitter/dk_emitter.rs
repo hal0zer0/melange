@@ -294,6 +294,135 @@ pub(super) fn emit_inject_substep_stamp(
     )
 }
 
+/// Resolved forward-active BJT reduction, read off the device slots (which
+/// reflect the outcome of `detect_forward_active_bjts` — i.e. `--bjt-fa` AFTER
+/// resolution, not the requested flag). Returns `(forward_active, full_2d)`.
+/// `--bjt-fa force` reduces GP/ISE BJTs that `auto`/`off` leave full-2D, so the
+/// counts differ and the provenance line differentiates the builds (the
+/// previously-identical `Build:` line was the FOLLOWUPS gap).
+fn bjt_fa_resolution(ir: &CircuitIR) -> (usize, usize) {
+    let mut fa = 0usize;
+    let mut full = 0usize;
+    for slot in &ir.device_slots {
+        match slot.device_type {
+            DeviceType::BjtForwardActive => fa += 1,
+            DeviceType::Bjt => full += 1,
+            _ => {}
+        }
+    }
+    (fa, full)
+}
+
+/// The `MAX_ITER` value the emitted code ACTUALLY uses, so provenance never
+/// disagrees with the const it describes.
+///
+/// The nodal path (full-LU + Schur) floors the auto-tuned budget at 100 — a
+/// ceiling, not a target: a sample converging in 8 iterations still exits at 8,
+/// so converging samples pay nothing, while the Armijo line search gets enough
+/// headroom to crawl a full-scale transient's operating-point move through the
+/// saturation knee within one sample. The DK path is deliberately NOT floored.
+/// Mirror of the `MAX_ITER` const emission in `nodal_emitter.rs` — keep the two
+/// in lockstep.
+pub(super) fn effective_max_iter(ir: &CircuitIR) -> usize {
+    match ir.solver_mode {
+        crate::codegen::ir::SolverMode::Nodal => ir.solver_config.max_iterations.max(100),
+        crate::codegen::ir::SolverMode::Dk => ir.solver_config.max_iterations,
+    }
+}
+
+/// Full RESOLVED DSP-affecting flag set for the human-readable `Build:` line.
+///
+/// Every entry reflects the value AFTER netlist directives + auto-promotion.
+/// Flags whose value cannot change a circuit's DSP are omitted for that circuit
+/// (e.g. `opamp-rail` only when clamped op-amps exist, `bjt-fa` only with BJTs)
+/// so the line stays signal, not boilerplate.
+fn resolved_build_flags(ir: &CircuitIR) -> String {
+    let mut build = format!(
+        "integration={}, max_iter={}, oversampling={}x",
+        ir.integrator_selection.label(),
+        effective_max_iter(ir),
+        ir.solver_config.oversampling_factor
+    );
+    // DC blocking is a fourth (5 Hz) output highpass that is otherwise invisible
+    // in the header — always disclose it.
+    build.push_str(&format!(
+        ", dc-block={}",
+        if ir.dc_block { "on" } else { "off" }
+    ));
+    // Noise mode (off/thermal/shot/full) — resolved from --noise + per-device KF.
+    build.push_str(&format!(", noise={}", ir.noise.mode.as_str()));
+    // Op-amp rail saturation strategy — only meaningful when a clamped op-amp is
+    // present (ir.opamps is populated only for finite-VSAT op-amps).
+    if !ir.opamps.is_empty() {
+        build.push_str(&format!(
+            ", opamp-rail={}",
+            ir.solver_config.opamp_rail_mode.as_str()
+        ));
+    }
+    // Forward-active BJT reduction, resolved (see bjt_fa_resolution).
+    let (fa, full) = bjt_fa_resolution(ir);
+    if fa + full > 0 {
+        build.push_str(&format!(", bjt-fa={fa}fa/{full}full"));
+    }
+    if ir.solver_config.breakpoint_be {
+        build.push_str(", breakpoint-be");
+    }
+    if ir.solver_config.runtime_be_latch {
+        build.push_str(", runtime-be-latch");
+    }
+    build
+}
+
+/// One-line machine-readable JSON (embedded in a comment) mirroring the
+/// resolved `Build:` flags plus build identity. Hand-formatted — melange-solver
+/// has no non-dev `serde_json`, and every value here is controlled (semver,
+/// hex/`unknown`, enum tokens, numbers, bools), so no user text is interpolated
+/// and no escaping is required.
+fn provenance_json(ir: &CircuitIR, version: &str, commit: &str) -> String {
+    let scheme = if ir.integrator_selection.is_backward_euler() {
+        "backward-euler"
+    } else {
+        "trapezoidal"
+    };
+    let mut s = String::from("{");
+    s.push_str(&format!("\"melange\":\"{version}\","));
+    s.push_str(&format!("\"commit\":\"{commit}\","));
+    s.push_str(&format!("\"integration\":\"{scheme}\","));
+    s.push_str(&format!(
+        "\"integration_source\":\"{}\",",
+        ir.integrator_selection.integration_source()
+    ));
+    s.push_str(&format!(
+        "\"backward_euler\":{},",
+        ir.integrator_selection.is_backward_euler()
+    ));
+    s.push_str(&format!("\"max_iter\":{},", effective_max_iter(ir)));
+    s.push_str(&format!(
+        "\"oversampling\":{},",
+        ir.solver_config.oversampling_factor
+    ));
+    s.push_str(&format!("\"dc_block\":{},", ir.dc_block));
+    s.push_str(&format!("\"noise\":\"{}\"", ir.noise.mode.as_str()));
+    if !ir.opamps.is_empty() {
+        s.push_str(&format!(
+            ",\"opamp_rail\":\"{}\"",
+            ir.solver_config.opamp_rail_mode.as_str()
+        ));
+    }
+    let (fa, full) = bjt_fa_resolution(ir);
+    if fa + full > 0 {
+        s.push_str(&format!(",\"bjt_fa_reduced\":{fa},\"bjt_full\":{full}"));
+    }
+    if ir.solver_config.breakpoint_be {
+        s.push_str(",\"breakpoint_be\":true");
+    }
+    if ir.solver_config.runtime_be_latch {
+        s.push_str(",\"runtime_be_latch\":true");
+    }
+    s.push('}');
+    s
+}
+
 impl RustEmitter {
     /// Emit DK-method generated code (original path).
     pub(super) fn emit_dk(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
@@ -348,21 +477,29 @@ impl RustEmitter {
             .map(|c| if c.is_control() { ' ' } else { c })
             .collect();
         ctx.insert("title", &sanitized_title);
-        // Provenance line: integration/iteration flags so a consumer can tell how
-        // a checked-in generated file was built (openfarf request 2026-08-15).
-        let mut build = format!(
-            "integration={}, max_iter={}, oversampling={}x",
-            ir.integrator_selection.label(),
-            ir.solver_config.max_iterations,
-            ir.solver_config.oversampling_factor
-        );
-        if ir.solver_config.breakpoint_be {
-            build.push_str(", breakpoint-be");
-        }
-        if ir.solver_config.runtime_be_latch {
-            build.push_str(", runtime-be-latch");
-        }
+
+        // Build-provenance identity (oomox thread 214). Version is the melange
+        // crate version at *melange* build time; commit is captured by build.rs
+        // (falls back to "unknown" for a packaged crate / no git). Local builds
+        // between tags are normal, so both are recorded.
+        let melange_version = env!("CARGO_PKG_VERSION");
+        let melange_commit = option_env!("MELANGE_GIT_COMMIT").unwrap_or("unknown");
+        ctx.insert("melange_version", melange_version);
+        ctx.insert("melange_commit", melange_commit);
+
+        // Provenance line: the FULL RESOLVED flag set — every flag that changes
+        // emitted DSP, AFTER netlist-directive application + auto-promotion (not
+        // the user-requested subset). The `(auto-promoted)` style is carried by
+        // `IntegratorSelection::label()`.
+        let build = resolved_build_flags(ir);
         ctx.insert("build", &build);
+
+        // Machine-readable one-line JSON so a consumer can assert the build
+        // contract at compile time (replaces oomox's hand-written
+        // `oversampling_contract_is_2x` / `dc_block_contract_is_disabled` guards).
+        let provenance_json = provenance_json(ir, melange_version, melange_commit);
+        ctx.insert("provenance_json", &provenance_json);
+
         self.render("header", &ctx)
     }
 
@@ -468,6 +605,16 @@ impl RustEmitter {
         );
         ctx.insert("named_pots", &named_const_entries(&ir.named_constants.pots));
 
+        // NODE_NAMES parallel array + dc_op_by_name lookup (openfarf thread 218).
+        // `node_names_values` is the `[&str; N]` body; `has_dc_op` gates the
+        // lookup fn (needs the DC_OP const, emitted in state.rs.tera).
+        ctx.insert(
+            "node_names_values",
+            &super::helpers::node_names_array_body(ir),
+        );
+        ctx.insert("dc_op_by_name_fn", super::helpers::DC_OP_BY_NAME_FN);
+        ctx.insert("has_dc_op", &ir.has_dc_op);
+
         // Runtime voltage sources (.runtime directive). Always insert the list
         // (possibly empty) so state.rs.tera and build_rhs.rs.tera can use
         // `runtime_sources | length > 0` guards unconditionally.
@@ -512,8 +659,10 @@ impl RustEmitter {
             &format_matrix_rows(m, m, |i, j| ir.k(i, j) - parasitic_r_p_dk(ir, i, j)),
         );
         ctx.insert("n_v_rows", &format_matrix_rows(m, n, |i, j| ir.n_v(i, j)));
-        // N_i transposed: N_I[device][node] = n_i[node][device]
-        ctx.insert("n_i_rows", &format_matrix_rows(m, n, |i, j| ir.n_i(j, i)));
+        // N_i in operator shape: N_I[node][device] = n_i[node][device].
+        // Normalized to N x M to match the nodal emitter — one layout for one
+        // public symbol (see the `N_I` doc comment in constants.rs.tera).
+        ctx.insert("n_i_rows", &format_matrix_rows(n, m, |i, j| ir.n_i(i, j)));
 
         // S*N_i product: precomputed for final voltage correction
         // S_NI[node][device] = sum_k S[node][k] * N_i[k][device]
@@ -635,7 +784,9 @@ impl RustEmitter {
         // DC block coefficient: R = 1 - 2*pi*5/sr
         let internal_rate =
             ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
-        let dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / internal_rate;
+        let dc_block_r = 1.0
+            - 2.0 * std::f64::consts::PI * crate::codegen::policy::DC_BLOCK_CUTOFF_HZ
+                / internal_rate;
         ctx.insert("dc_block_r", &format!("{:.17e}", dc_block_r));
         ctx.insert("dc_block", &ir.dc_block);
         ctx.insert("dc_op_converged", &ir.dc_op_converged);
@@ -917,6 +1068,12 @@ impl RustEmitter {
             ctx.insert("thermal_devices", &thermal_devices);
         }
 
+        // The DC-block cutoff as an emitted literal, so state.rs.tera spells the
+        // formula from the same source of truth the codegen-time coefficient uses.
+        ctx.insert(
+            "dc_block_cutoff_hz",
+            &crate::codegen::policy::dc_block_cutoff_hz_literal(),
+        );
         ctx.insert("dc_block", &ir.dc_block);
 
         // `current_sample_rate` is read by rebuild_matrices (pots/switches),
@@ -1122,6 +1279,7 @@ impl RustEmitter {
                         emit_device_const(&mut code, dev_num, "RTH", bp.rth);
                         emit_device_const(&mut code, dev_num, "CTH", bp.cth);
                         emit_device_const(&mut code, dev_num, "XTI", bp.xti);
+                        emit_device_const(&mut code, dev_num, "XTB", bp.xtb);
                         emit_device_const(&mut code, dev_num, "EG", bp.eg);
                         emit_device_const(&mut code, dev_num, "TAMB", bp.tamb);
                         emit_device_const(&mut code, dev_num, "IS_NOM", bp.is);
@@ -2081,7 +2239,7 @@ impl RustEmitter {
              \x20           for j in 0..M {{\n\
              \x20               let mut sum = 0.0;\n\
              \x20               for kk in 0..N {{\n\
-             \x20                   sum += s[i][kk] * N_I[j][kk];\n\
+             \x20                   sum += s[i][kk] * N_I[kk][j];\n\
              \x20               }}\n\
              \x20               s_ni[i][j] = sum;\n\
              \x20           }}\n\
@@ -2169,7 +2327,7 @@ impl RustEmitter {
                  \x20           for j in 0..M {\n\
                  \x20               let mut sum = 0.0;\n\
                  \x20               for kk in 0..N {\n\
-                 \x20                   sum += s_be[i][kk] * N_I[j][kk];\n\
+                 \x20                   sum += s_be[i][kk] * N_I[kk][j];\n\
                  \x20               }\n\
                  \x20               s_ni_be[i][j] = sum;\n\
                  \x20           }\n\
@@ -2472,7 +2630,7 @@ impl RustEmitter {
                 for &j in &ir.sparsity.n_i.nz_by_row[i] {
                     nl_prev_lines.push_str(&format!(
                         "    rhs[{}] += N_I[{}][{}] * state.i_nl_prev[{}];\n",
-                        i, j, i, j
+                        i, i, j, j
                     ));
                 }
             }
@@ -2583,7 +2741,7 @@ impl RustEmitter {
                     terms.push(format!("state.a_neg_be[{i}][{j}] * state.v_prev[{j}]"));
                 }
                 for &j in &ir.sparsity.n_i.nz_by_row[i] {
-                    terms.push(format!("N_I[{j}][{i}] * state.i_nl_prev[{j}]"));
+                    terms.push(format!("N_I[{i}][{j}] * state.i_nl_prev[{j}]"));
                 }
                 if terms.is_empty() {
                     rhs.push_str(&format!("        rhs_be[{i}] = 0.0;\n"));
@@ -2750,6 +2908,10 @@ impl RustEmitter {
 
         ctx.insert("max_iter", &ir.solver_config.max_iterations);
         ctx.insert("m", &ir.topology.m);
+        ctx.insert(
+            "region_exit_lines",
+            &super::helpers::emit_region_exit_lines(ir, "    "),
+        );
 
         let num_pots = ir.pots.len();
         ctx.insert("num_pots", &num_pots);
@@ -2855,6 +3017,12 @@ impl RustEmitter {
                              \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
                              \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
                              \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
+                             \x20       // Beta temperature dependence (SPICE XTB). XTB defaults to 0.0,\n\
+                             \x20       // so `powf` returns exactly 1.0 and this is inert on cards that\n\
+                             \x20       // omit it — but a self-heating device whose beta never moved was\n\
+                             \x20       // physically wrong, not merely incomplete.\n\
+                             \x20       state.device_{dev_num}_bf = DEVICE_{dev_num}_BETA_F * t_ratio.powf(DEVICE_{dev_num}_XTB);\n\
+                             \x20       state.device_{dev_num}_br = DEVICE_{dev_num}_BETA_R * t_ratio.powf(DEVICE_{dev_num}_XTB);\n\
                              \x20   }}\n"
                         ));
                 }
@@ -3400,6 +3568,87 @@ impl RustEmitter {
 // Noise emission (Phase 1: Johnson-Nyquist thermal)
 // ============================================================================
 
+/// Per-family noise source counts, kept so the replay can be re-emitted at any
+/// RHS-rebuild site instead of only at the BE fallback.
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct NoiseReplayCounts {
+    pub shot: usize,
+    pub flicker: usize,
+    pub r_flicker: usize,
+    pub partition: usize,
+    pub opamp: usize,
+}
+
+/// Emit the noise *replay*: re-stamp every source's cached `i_n` into `target`
+/// without touching the RNG.
+///
+/// **Every from-scratch RHS rebuild inside a sample must emit this.** The draws
+/// for the sample were already consumed by `rhs_stamp` when the primary RHS was
+/// built, and the resulting per-source currents cached in `noise_*_last_i_n`. A
+/// rebuild that omits the replay drops the sample's noise while the RNG stream
+/// stays aligned — so the loss is inaudible to any determinism check and shows
+/// up only as a noise-floor stutter correlated with whatever triggered the
+/// rebuild. Drawing fresh values here instead would break determinism outright:
+/// the same seed would give different audio depending on how many samples
+/// happened to sub-step.
+///
+/// `base` is the indent of the `if state.noise_enabled {` line; the body is
+/// indented 4 and 8 further.
+pub(super) fn emit_noise_replay_body(
+    counts: NoiseReplayCounts,
+    target: &str,
+    base: &str,
+) -> String {
+    let mut s = String::new();
+    let i1 = format!("{base}    ");
+    let i2 = format!("{base}        ");
+    s.push_str(&format!("{base}if state.noise_enabled {{\n"));
+    let two_terminal = |s: &mut String, present: bool, upper: &str, field: &str| {
+        if !present {
+            return;
+        }
+        s.push_str(&format!("{i1}for k in 0..NOISE_{upper}_N {{\n"));
+        s.push_str(&format!("{i2}let i_n = state.noise_{field}_last_i_n[k];\n"));
+        s.push_str(&format!("{i2}let ni = NOISE_{upper}_NODE_I[k];\n"));
+        s.push_str(&format!("{i2}let nj = NOISE_{upper}_NODE_J[k];\n"));
+        s.push_str(&format!("{i2}if ni > 0 {{ {target}[ni - 1] += i_n; }}\n"));
+        s.push_str(&format!("{i2}if nj > 0 {{ {target}[nj - 1] -= i_n; }}\n"));
+        s.push_str(&format!("{i1}}}\n"));
+    };
+    two_terminal(&mut s, true, "THERMAL", "thermal");
+    two_terminal(&mut s, counts.shot > 0, "SHOT", "shot");
+    two_terminal(&mut s, counts.flicker > 0, "FLICKER", "flicker");
+    two_terminal(&mut s, counts.r_flicker > 0, "R_FLICKER", "r_flicker");
+    two_terminal(&mut s, counts.partition > 0, "PARTITION", "partition");
+    if counts.opamp > 0 {
+        // Op-amp en/in replay: stamp each cached current at its single input
+        // node (single-sided — en is voltage-source-to-ground, in is
+        // current-source-to-ground). No counter-stamp needed because the
+        // "other terminal" of each source is ground, not a circuit node.
+        s.push_str(&format!("{i1}for k in 0..NOISE_OPAMP_N {{\n"));
+        s.push_str(&format!("{i2}let np = NOISE_OPAMP_NODE_PLUS[k];\n"));
+        s.push_str(&format!("{i2}let nm = NOISE_OPAMP_NODE_MINUS[k];\n"));
+        s.push_str(&format!(
+            "{i2}let i_en = state.noise_opamp_en_last_i_n[k];\n"
+        ));
+        s.push_str(&format!(
+            "{i2}let i_in_p = state.noise_opamp_in_last_i_n[2 * k];\n"
+        ));
+        s.push_str(&format!(
+            "{i2}let i_in_m = state.noise_opamp_in_last_i_n[2 * k + 1];\n"
+        ));
+        s.push_str(&format!(
+            "{i2}if np > 0 {{ {target}[np - 1] += i_en + i_in_p; }}\n"
+        ));
+        s.push_str(&format!(
+            "{i2}if nm > 0 {{ {target}[nm - 1] += i_in_m; }}\n"
+        ));
+        s.push_str(&format!("{i1}}}\n"));
+    }
+    s.push_str(&format!("{base}}}\n"));
+    s
+}
+
 /// All code fragments produced for authentic circuit noise.
 ///
 /// When the IR's noise mode is `Off` or no eligible sources are present,
@@ -3450,6 +3699,9 @@ pub(super) struct NoiseEmission {
     /// Count of thermal sources. Kept for debug logging.
     #[allow(dead_code)]
     pub thermal_n: usize,
+    /// Per-family source counts, so a consumer outside this module can emit the
+    /// replay into its own RHS buffer (see `emit_noise_replay_body`).
+    pub replay_counts: NoiseReplayCounts,
     /// Reverse lookup: `pot_index → noise source index` for dynamic
     /// sources (`.pot` / `.wiper` / `.runtime R` members). Empty vec of
     /// length `mna.pots.len()` when noise is off. A `Some(k)` entry means
@@ -5665,72 +5917,16 @@ impl RustEmitter {
         // below the dominating signal that triggered BE; preferable to
         // noise dropouts during BE windows. See NOISE.md "BE-fallback
         // noise calibration" for the math.
+        let replay_counts = NoiseReplayCounts {
+            shot: shot_n,
+            flicker: flicker_n,
+            r_flicker: r_flicker_n,
+            partition: partition_n,
+            opamp: opamp_n,
+        };
         let mut rhs_stamp_be = String::new();
         rhs_stamp_be.push_str("\n        // BE-fallback noise replay (re-stamps cached trap-stamp i_n into rhs_be).\n");
-        rhs_stamp_be.push_str("        if state.noise_enabled {\n");
-        rhs_stamp_be.push_str("            for k in 0..NOISE_THERMAL_N {\n");
-        rhs_stamp_be.push_str("                let i_n = state.noise_thermal_last_i_n[k];\n");
-        rhs_stamp_be.push_str("                let ni = NOISE_THERMAL_NODE_I[k];\n");
-        rhs_stamp_be.push_str("                let nj = NOISE_THERMAL_NODE_J[k];\n");
-        rhs_stamp_be.push_str("                if ni > 0 { rhs_be[ni - 1] += i_n; }\n");
-        rhs_stamp_be.push_str("                if nj > 0 { rhs_be[nj - 1] -= i_n; }\n");
-        rhs_stamp_be.push_str("            }\n");
-        if shot_n > 0 {
-            rhs_stamp_be.push_str("            for k in 0..NOISE_SHOT_N {\n");
-            rhs_stamp_be.push_str("                let i_n = state.noise_shot_last_i_n[k];\n");
-            rhs_stamp_be.push_str("                let ni = NOISE_SHOT_NODE_I[k];\n");
-            rhs_stamp_be.push_str("                let nj = NOISE_SHOT_NODE_J[k];\n");
-            rhs_stamp_be.push_str("                if ni > 0 { rhs_be[ni - 1] += i_n; }\n");
-            rhs_stamp_be.push_str("                if nj > 0 { rhs_be[nj - 1] -= i_n; }\n");
-            rhs_stamp_be.push_str("            }\n");
-        }
-        if flicker_n > 0 {
-            rhs_stamp_be.push_str("            for k in 0..NOISE_FLICKER_N {\n");
-            rhs_stamp_be.push_str("                let i_n = state.noise_flicker_last_i_n[k];\n");
-            rhs_stamp_be.push_str("                let ni = NOISE_FLICKER_NODE_I[k];\n");
-            rhs_stamp_be.push_str("                let nj = NOISE_FLICKER_NODE_J[k];\n");
-            rhs_stamp_be.push_str("                if ni > 0 { rhs_be[ni - 1] += i_n; }\n");
-            rhs_stamp_be.push_str("                if nj > 0 { rhs_be[nj - 1] -= i_n; }\n");
-            rhs_stamp_be.push_str("            }\n");
-        }
-        if r_flicker_n > 0 {
-            rhs_stamp_be.push_str("            for k in 0..NOISE_R_FLICKER_N {\n");
-            rhs_stamp_be.push_str("                let i_n = state.noise_r_flicker_last_i_n[k];\n");
-            rhs_stamp_be.push_str("                let ni = NOISE_R_FLICKER_NODE_I[k];\n");
-            rhs_stamp_be.push_str("                let nj = NOISE_R_FLICKER_NODE_J[k];\n");
-            rhs_stamp_be.push_str("                if ni > 0 { rhs_be[ni - 1] += i_n; }\n");
-            rhs_stamp_be.push_str("                if nj > 0 { rhs_be[nj - 1] -= i_n; }\n");
-            rhs_stamp_be.push_str("            }\n");
-        }
-        if partition_n > 0 {
-            rhs_stamp_be.push_str("            for k in 0..NOISE_PARTITION_N {\n");
-            rhs_stamp_be.push_str("                let i_n = state.noise_partition_last_i_n[k];\n");
-            rhs_stamp_be.push_str("                let ni = NOISE_PARTITION_NODE_I[k];\n");
-            rhs_stamp_be.push_str("                let nj = NOISE_PARTITION_NODE_J[k];\n");
-            rhs_stamp_be.push_str("                if ni > 0 { rhs_be[ni - 1] += i_n; }\n");
-            rhs_stamp_be.push_str("                if nj > 0 { rhs_be[nj - 1] -= i_n; }\n");
-            rhs_stamp_be.push_str("            }\n");
-        }
-        if opamp_n > 0 {
-            // Op-amp en/in BE replay: stamp each cached current at its single
-            // input node (single-sided — en is voltage-source-to-ground, in is
-            // current-source-to-ground). No counter-stamp needed because the
-            // "other terminal" of each source is ground (not a circuit node).
-            rhs_stamp_be.push_str("            for k in 0..NOISE_OPAMP_N {\n");
-            rhs_stamp_be.push_str("                let np = NOISE_OPAMP_NODE_PLUS[k];\n");
-            rhs_stamp_be.push_str("                let nm = NOISE_OPAMP_NODE_MINUS[k];\n");
-            rhs_stamp_be.push_str("                let i_en = state.noise_opamp_en_last_i_n[k];\n");
-            rhs_stamp_be
-                .push_str("                let i_in_p = state.noise_opamp_in_last_i_n[2 * k];\n");
-            rhs_stamp_be.push_str(
-                "                let i_in_m = state.noise_opamp_in_last_i_n[2 * k + 1];\n",
-            );
-            rhs_stamp_be
-                .push_str("                if np > 0 { rhs_be[np - 1] += i_en + i_in_p; }\n");
-            rhs_stamp_be.push_str("                if nm > 0 { rhs_be[nm - 1] += i_in_m; }\n");
-            rhs_stamp_be.push_str("            }\n");
-        }
-        rhs_stamp_be.push_str("        }\n");
+        rhs_stamp_be.push_str(&emit_noise_replay_body(replay_counts, "rhs_be", "        "));
 
         // NaN-recovery noise reset: clear the two-draw lag buffer and the
         // BE-replay caches so a NaN-induced state.v_prev = DC_OP recovery
@@ -5891,6 +6087,7 @@ impl RustEmitter {
             methods,
             enabled: true,
             thermal_n,
+            replay_counts,
             pot_to_noise_slot,
             switch_comp_to_noise_slot,
             pot_to_r_flicker_slot,

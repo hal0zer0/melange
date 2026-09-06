@@ -2,6 +2,7 @@
 name = "melange-validate"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "SPICE-to-Rust validation pipeline: automated comparison, tolerance testing, diagnostics"
 

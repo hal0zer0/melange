@@ -24,6 +24,8 @@ struct PairResult {
     class: String,
     severity: f64,
     bit_identical: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    diagnostics_differ: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     level_delta_db: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -44,11 +46,108 @@ fn read_pcm(path: &Path) -> Option<Vec<u8>> {
     std::fs::read(path).ok()
 }
 
-fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
+/// PCM sample width of a baseline render, inferred from the file extension.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PcmFormat {
+    /// `.f64le` — full f64. The only format that can support a bit-exactness claim.
+    F64,
+    /// `.f32le` — legacy. Carries a ~6e-8 relative floor; retained so pre-existing
+    /// baselines stay readable, but a byte-compare of two f32 renders proves much
+    /// less than it appears to.
+    F32,
+}
+
+impl PcmFormat {
+    fn ext(self) -> &'static str {
+        match self {
+            PcmFormat::F64 => "f64le",
+            PcmFormat::F32 => "f32le",
+        }
+    }
+}
+
+/// Locate a render for `plugin`/`program` in `dir`, preferring f64.
+fn find_pcm(dir: &Path, plugin: &str, program: &str) -> Option<(Vec<u8>, PcmFormat)> {
+    for fmt in [PcmFormat::F64, PcmFormat::F32] {
+        let p = dir.join(plugin).join(format!("{program}.{}", fmt.ext()));
+        if let Some(b) = read_pcm(&p) {
+            return Some((b, fmt));
+        }
+    }
+    None
+}
+
+/// Decode little-endian PCM to f64. f32 input widens exactly (every f32 is
+/// representable in f64), so downstream metrics are uniform across formats.
+fn bytes_to_samples(bytes: &[u8], fmt: PcmFormat) -> Vec<f64> {
+    match fmt {
+        PcmFormat::F64 => bytes
+            .chunks_exact(8)
+            .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+            .collect(),
+        PcmFormat::F32 => bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f64)
+            .collect(),
+    }
+}
+
+/// Nodal sub-path per circuit, from a baseline's capture_report.json.
+fn load_sub_paths(dir: &Path) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let Ok(txt) = std::fs::read_to_string(dir.join("capture_report.json")) else {
+        return out;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else {
+        return out;
+    };
+    if let Some(arr) = v.get("circuits").and_then(|x| x.as_array()) {
+        for c in arr {
+            if let (Some(p), Some(sp)) = (
+                c.get("plugin").and_then(|x| x.as_str()),
+                c.get("nodal_sub_path").and_then(|x| x.as_str()),
+            ) {
+                out.insert(p.to_string(), sp.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Compare the generated `circuit.rs` stored alongside each capture.
+///
+/// The audio renders alone cannot gate a refactor: identical audio is a
+/// necessary but not sufficient condition for identical codegen, and large
+/// swathes of emitted code (recovery ladders, diagnostics) are not exercised by
+/// the five programs at all. Diffing the source closes that hole cheaply.
+/// Returns `None` when either side is absent.
+fn generated_source_differs(dir_a: &Path, dir_b: &Path, plugin: &str) -> Option<bool> {
+    let a = std::fs::read_to_string(dir_a.join(plugin).join("circuit.rs")).ok()?;
+    let b = std::fs::read_to_string(dir_b.join(plugin).join("circuit.rs")).ok()?;
+    Some(a != b)
+}
+
+/// Compare the solver diagnostic counters recorded with each render.
+///
+/// Deliberately checked even when the PCM is byte-identical: a change that
+/// alters how often the BE fallback, NaN reset or line search fires without
+/// altering the output samples is exactly the class of regression the audio
+/// gate cannot see, and exactly what a codegen refactor is most likely to do.
+/// Returns the differing keys as `(name, a, b)`.
+fn diagnostic_deltas(a: &Option<Stats>, b: &Option<Stats>) -> Vec<(String, f64, f64)> {
+    let (Some(a), Some(b)) = (a, b) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let keys: BTreeSet<&String> = a.diagnostics.keys().chain(b.diagnostics.keys()).collect();
+    for k in keys {
+        let va = a.diagnostics.get(k).copied().unwrap_or(0.0);
+        let vb = b.diagnostics.get(k).copied().unwrap_or(0.0);
+        if va != vb {
+            out.push((k.clone(), va, vb));
+        }
+    }
+    out
 }
 
 fn read_stats(dir: &Path, plugin: &str, program: &str) -> Option<Stats> {
@@ -60,21 +159,21 @@ fn read_stats(dir: &Path, plugin: &str, program: &str) -> Option<Stats> {
 /// Pearson correlation over the common prefix, with a zero-variance guard:
 /// two signals with (near-)zero variance correlate 1.0 when their samples
 /// match closely, 0.0 otherwise.
-fn correlation(a: &[f32], b: &[f32]) -> f64 {
+fn correlation(a: &[f64], b: &[f64]) -> f64 {
     let n = a.len().min(b.len());
     if n == 0 {
         return 0.0;
     }
     let (mut sa, mut sb) = (0.0f64, 0.0f64);
     for i in 0..n {
-        sa += a[i] as f64;
-        sb += b[i] as f64;
+        sa += a[i];
+        sb += b[i];
     }
     let (ma, mb) = (sa / n as f64, sb / n as f64);
     let (mut num, mut va, mut vb) = (0.0f64, 0.0f64, 0.0f64);
     for i in 0..n {
-        let da = a[i] as f64 - ma;
-        let db_ = b[i] as f64 - mb;
+        let da = a[i] - ma;
+        let db_ = b[i] - mb;
         num += da * db_;
         va += da * da;
         vb += db_ * db_;
@@ -86,11 +185,11 @@ fn correlation(a: &[f32], b: &[f32]) -> f64 {
     num / (va.sqrt() * vb.sqrt())
 }
 
-fn max_sample_delta(a: &[f32], b: &[f32]) -> f64 {
+fn max_sample_delta(a: &[f64], b: &[f64]) -> f64 {
     let n = a.len().min(b.len());
     let mut m = 0.0f64;
     for i in 0..n {
-        let d = (a[i] as f64 - b[i] as f64).abs();
+        let d = (a[i] - b[i]).abs();
         if d.is_nan() {
             return f64::NAN;
         }
@@ -104,7 +203,7 @@ fn list_programs(dir: &Path, plugin: &str) -> BTreeSet<String> {
     if let Ok(entries) = std::fs::read_dir(dir.join(plugin)) {
         for e in entries.flatten() {
             let p = e.path();
-            if p.extension().is_some_and(|x| x == "f32le") {
+            if p.extension().is_some_and(|x| x == "f64le" || x == "f32le") {
                 if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
                     out.insert(stem.to_string());
                 }
@@ -175,6 +274,7 @@ fn compare_pair(dir_a: &Path, dir_b: &Path, plugin: &str, program: &str) -> Pair
         class: "CHANGED".into(),
         severity: 0.0,
         bit_identical: false,
+        diagnostics_differ: false,
         level_delta_db: None,
         max_sample_delta: None,
         correlation: None,
@@ -184,9 +284,10 @@ fn compare_pair(dir_a: &Path, dir_b: &Path, plugin: &str, program: &str) -> Pair
         notes: Vec::new(),
     };
 
-    let pa = dir_a.join(plugin).join(format!("{program}.f32le"));
-    let pb = dir_b.join(plugin).join(format!("{program}.f32le"));
-    let (ba, bb) = (read_pcm(&pa), read_pcm(&pb));
+    let fa = find_pcm(dir_a, plugin, program);
+    let fb = find_pcm(dir_b, plugin, program);
+    let ba = fa.as_ref().map(|(b, _)| b.clone());
+    let bb = fb.as_ref().map(|(b, _)| b.clone());
     match (&ba, &bb) {
         (None, None) => {
             res.class = "MISSING".into();
@@ -212,13 +313,45 @@ fn compare_pair(dir_a: &Path, dir_b: &Path, plugin: &str, program: &str) -> Pair
             if a == b {
                 res.class = "IDENTICAL".into();
                 res.bit_identical = true;
+                // Byte-identical audio does NOT imply identical execution.
+                let sa = read_stats(dir_a, plugin, program);
+                let sb = read_stats(dir_b, plugin, program);
+                let dd = diagnostic_deltas(&sa, &sb);
+                if !dd.is_empty() {
+                    res.diagnostics_differ = true;
+                    res.notes.push(format!(
+                        "renders byte-identical but solver diagnostics differ: {}",
+                        dd.iter()
+                            .map(|(k, x, y)| format!("{k} {x}->{y}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+                // An f32-vs-f32 byte match is NOT evidence of bit-exactness at
+                // f64: the stored values were rounded before they were written.
+                // Say so, so a green run is not over-read.
+                if fa.as_ref().map(|(_, f)| *f) == Some(PcmFormat::F32) {
+                    res.notes.push(
+                        "byte-equal at f32 precision — cannot support an f64                          bit-exactness claim; re-capture as .f64le"
+                            .into(),
+                    );
+                }
                 return res;
             }
         }
     }
 
-    let a = bytes_to_f32(ba.as_ref().unwrap());
-    let b = bytes_to_f32(bb.as_ref().unwrap());
+    let (raw_a, fmt_a) = fa.unwrap();
+    let (raw_b, fmt_b) = fb.unwrap();
+    if fmt_a != fmt_b {
+        res.notes.push(format!(
+            "PCM format differs between baselines: A={} B={} — comparison is              limited to the coarser precision",
+            fmt_a.ext(),
+            fmt_b.ext()
+        ));
+    }
+    let a = bytes_to_samples(&raw_a, fmt_a);
+    let b = bytes_to_samples(&raw_b, fmt_b);
     let sa = read_stats(dir_a, plugin, program);
     let sb = read_stats(dir_b, plugin, program);
 
@@ -230,6 +363,18 @@ fn compare_pair(dir_a: &Path, dir_b: &Path, plugin: &str, program: &str) -> Pair
             "length mismatch: {} vs {} samples",
             a.len(),
             b.len()
+        ));
+    }
+
+    let dd = diagnostic_deltas(&sa, &sb);
+    if !dd.is_empty() {
+        res.diagnostics_differ = true;
+        res.notes.push(format!(
+            "solver diagnostics differ: {}",
+            dd.iter()
+                .map(|(k, x, y)| format!("{k} {x}->{y}"))
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
 
@@ -304,7 +449,17 @@ fn delta_db(a: f64, b: f64) -> f64 {
     }
 }
 
-pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path) -> Result<usize, String> {
+/// Compare two baselines.
+///
+/// `strict` selects the gate semantics:
+/// - `false` (default) — a *release* comparison. NEGLIGIBLE passes: the question
+///   is "did anything audibly change?".
+/// - `true` — a *refactor* comparison. Only IDENTICAL passes, and every
+///   generated `circuit.rs` must match too. The question is "did anything
+///   change at all?", which is the only gate a behaviour-preserving refactor
+///   can be held to. These are different questions and must not share a
+///   threshold: NEGLIGIBLE is exactly the band in which a refactor bug hides.
+pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<usize, String> {
     if !dir_a.is_dir() {
         return Err(format!("{} is not a directory", dir_a.display()));
     }
@@ -347,6 +502,7 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path) -> Result<usize, String>
                 class: "MISSING".into(),
                 severity: 1e9,
                 bit_identical: false,
+                diagnostics_differ: false,
                 level_delta_db: None,
                 max_sample_delta: None,
                 correlation: None,
@@ -470,10 +626,86 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path) -> Result<usize, String>
             );
         }
     }
+    // ---- nodal sub-path (diagnosis, not detection) ----
+    // A sub-path move necessarily changes circuit.rs wholesale, so the source
+    // diff below already CATCHES it. Naming it turns a 3000-line unexplained
+    // diff into one line that says what happened.
+    let sp_a = load_sub_paths(dir_a);
+    let sp_b = load_sub_paths(dir_b);
+    let mut sub_path_moved: Vec<(String, String, String)> = Vec::new();
+    for (plugin, a) in &sp_a {
+        if let Some(b) = sp_b.get(plugin) {
+            if a != b {
+                sub_path_moved.push((plugin.clone(), a.clone(), b.clone()));
+            }
+        }
+    }
+    if !sub_path_moved.is_empty() {
+        println!("\nNODAL SUB-PATH MOVED ({}):", sub_path_moved.len());
+        for (p, a, b) in &sub_path_moved {
+            println!("  {p}: {a} -> {b}");
+        }
+        println!(
+            "  (the emitter chose a different nodal solve for these circuits; \
+             expect a wholesale circuit.rs diff)"
+        );
+    }
+
+    // ---- generated-source diff (strict gate) ----
+    // Audio equality does not imply codegen equality: the five programs never
+    // enter most of the recovery ladders, so a refactor can alter emitted code
+    // that the renders simply never execute.
+    let mut source_differs: Vec<String> = Vec::new();
+    let mut source_missing: Vec<String> = Vec::new();
+    for plugin in &plugins {
+        match generated_source_differs(dir_a, dir_b, plugin) {
+            Some(true) => source_differs.push(plugin.clone()),
+            Some(false) => {}
+            None => source_missing.push(plugin.clone()),
+        }
+    }
+    if !source_differs.is_empty() {
+        println!("\nGENERATED SOURCE DIFFERS ({}):", source_differs.len());
+        for p in &source_differs {
+            println!("  {p}/circuit.rs");
+        }
+        println!(
+            "  (provenance header lines are masked at capture time, so these are \
+             real codegen differences)"
+        );
+    }
+    if !source_missing.is_empty() {
+        println!(
+            "\nGENERATED SOURCE UNAVAILABLE for {} circuit(s) — cannot verify codegen equality",
+            source_missing.len()
+        );
+    }
+
     println!(
         "\nSUMMARY: {n_identical} identical, {n_negligible} negligible, {n_changed} changed, \
          {n_input_changed} input-changed, {n_missing} missing"
     );
+    let n_diag_differ = results.iter().filter(|r| r.diagnostics_differ).count();
+    if n_diag_differ > 0 {
+        println!(
+            "\nSOLVER DIAGNOSTICS DIFFER ({n_diag_differ} render(s)) — recovery-ladder \
+             behaviour changed even where audio did not"
+        );
+        for r in results.iter().filter(|r| r.diagnostics_differ) {
+            for n in &r.notes {
+                if n.contains("diagnostics differ") {
+                    println!("  {}/{}: {n}", r.plugin, r.program);
+                }
+            }
+        }
+    }
+    if strict {
+        println!(
+            "STRICT: {} source-differs, {} source-unavailable, {n_diag_differ} diagnostics-differ",
+            source_differs.len(),
+            source_missing.len()
+        );
+    }
 
     // ---- JSON report ----
     let json = serde_json::json!({
@@ -491,11 +723,30 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path) -> Result<usize, String>
         "netlist_input_changed": netlist_changed.iter().map(|(p, (a, b))| {
             serde_json::json!({"plugin": p, "sha256_a": a, "sha256_b": b})
         }).collect::<Vec<_>>(),
+        "strict": strict,
+        "generated_source_differs": source_differs,
+        "generated_source_unavailable": source_missing,
+        "diagnostics_differ_count": n_diag_differ,
+        "nodal_sub_path_moved": sub_path_moved
+            .iter()
+            .map(|(p, a, b)| serde_json::json!({"plugin": p, "from": a, "to": b}))
+            .collect::<Vec<_>>(),
         "results": results,
     });
     std::fs::write(json_out, serde_json::to_string_pretty(&json).unwrap())
         .map_err(|e| format!("write {}: {e}", json_out.display()))?;
     println!("JSON report: {}", json_out.display());
 
+    if strict {
+        // Only IDENTICAL passes, and codegen must match. NEGLIGIBLE is a
+        // failure here by design — see the doc comment on `run`.
+        return Ok(n_changed
+            + n_missing
+            + n_input_changed
+            + n_negligible
+            + source_differs.len()
+            + source_missing.len()
+            + n_diag_differ);
+    }
     Ok(n_changed + n_missing + n_input_changed)
 }

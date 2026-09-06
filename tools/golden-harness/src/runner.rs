@@ -38,11 +38,19 @@ pub fn sh(cmd: &str) -> Result<std::process::Output, String> {
 ///
 /// Returns the path of the generated Rust module (searching inside `out`
 /// if the command produced a directory, e.g. a plugin project).
+/// Result of invoking `melange compile` for one circuit.
+pub struct CompileOutcome {
+    pub generated: PathBuf,
+    /// Nodal sub-path reported by the compiler ("schur" / "full-lu"), or None
+    /// on the DK path where no sub-path applies.
+    pub nodal_sub_path: Option<String>,
+}
+
 pub fn compile_circuit(
     compile_cmd: Option<&str>,
     cir_abs: &str,
     out_rs: &Path,
-) -> Result<PathBuf, String> {
+) -> Result<CompileOutcome, String> {
     let out_str = out_rs.to_string_lossy().to_string();
     let raw = compile_cmd
         .unwrap_or("melange compile {cir} -o {out} -f code")
@@ -82,13 +90,29 @@ pub fn compile_circuit(
         ));
     }
 
+    // Which nodal sub-path the emitter took, straight from the compiler's own
+    // summary. Recorded so a sub-path move is named explicitly rather than
+    // showing up only as a large unexplained circuit.rs diff.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let nodal_sub_path = stdout.lines().find_map(|l| {
+        l.trim()
+            .strip_prefix("Nodal sub-path:")
+            .map(|v| v.trim().to_string())
+    });
+
     // Locate the generated module.
     if out_rs.is_file() {
-        return Ok(out_rs.to_path_buf());
+        return Ok(CompileOutcome {
+            generated: out_rs.to_path_buf(),
+            nodal_sub_path,
+        });
     }
     if out_rs.is_dir() {
         if let Some(p) = find_circuit_rs(out_rs, 3) {
-            return Ok(p);
+            return Ok(CompileOutcome {
+                generated: p,
+                nodal_sub_path,
+            });
         }
     }
     Err(format!(
@@ -148,8 +172,42 @@ pub fn rustc(src: &Path, bin: &Path) -> Result<(), String> {
 pub struct RenderOutput {
     pub channels: usize,
     /// Interleaved samples, frames * channels.
-    pub interleaved: Vec<f32>,
+    ///
+    /// Held at f64. The driver prints full `{:.17e}` f64 text and this used to
+    /// be downcast to f32 on the way in, which put a ~6e-8 relative floor under
+    /// every comparison — far above the ~1-ulp-of-f64 differences that FMA
+    /// contraction and libm divergence produce. A cross-language or refactor
+    /// gate built on that floor cannot see the defects it exists to catch.
+    pub interleaved: Vec<f64>,
     pub frames: usize,
+    /// Diagnostic counters reported by the driver on stderr as a single
+    /// `MELANGE_DIAG k=v ...` line. Empty when the generated module declares
+    /// none.
+    ///
+    /// These are the only visibility the gate has into the NR recovery
+    /// ladders. The renders cannot see them: measured across the corpus, only
+    /// 7 of 41 circuits enter any ladder, and several ladders never fire on any
+    /// deck — so emitted recovery code can change with every sample unchanged.
+    pub diagnostics: std::collections::BTreeMap<String, f64>,
+}
+
+/// Parse the driver's `MELANGE_DIAG k=v k=v ...` stderr line.
+fn parse_diagnostics(stderr: &[u8]) -> std::collections::BTreeMap<String, f64> {
+    let mut out = std::collections::BTreeMap::new();
+    let text = String::from_utf8_lossy(stderr);
+    for line in text.lines() {
+        let Some(rest) = line.trim().strip_prefix("MELANGE_DIAG") else {
+            continue;
+        };
+        for tok in rest.split_whitespace() {
+            if let Some((k, v)) = tok.split_once('=') {
+                if let Ok(n) = v.parse::<f64>() {
+                    out.insert(k.to_string(), n);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Pipe `input` (one `{:.17e}` f64 per line) through the compiled driver
@@ -219,7 +277,7 @@ pub fn run_render(bin: &Path, input: &[f64], timeout: Duration) -> Result<Render
 
     let text = String::from_utf8_lossy(&stdout_buf);
     let mut channels = 0usize;
-    let mut interleaved: Vec<f32> = Vec::new();
+    let mut interleaved: Vec<f64> = Vec::new();
     let mut frames = 0usize;
     for line in text.lines() {
         let line = line.trim();
@@ -243,7 +301,7 @@ pub fn run_render(bin: &Path, input: &[f64], timeout: Duration) -> Result<Render
             ));
         }
         for v in &vals {
-            interleaved.push(*v as f32);
+            interleaved.push(*v);
         }
         frames += 1;
     }
@@ -254,5 +312,6 @@ pub fn run_render(bin: &Path, input: &[f64], timeout: Duration) -> Result<Render
         channels,
         interleaved,
         frames,
+        diagnostics: parse_diagnostics(&stderr_buf),
     })
 }

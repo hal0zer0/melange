@@ -2095,6 +2095,20 @@ impl MnaSystem {
         for ci in &self.coupled_inductors {
             let m = ci.coupling * (ci.l1_value * ci.l2_value).sqrt();
             let det = ci.l1_value * ci.l2_value - m * m;
+            // Guard the companion-conductance division: for perfect coupling
+            // (k → 1) det = L1*L2 - M² → 0, giving NaN/inf conductances. The DK
+            // kernel path already rejects this (dk.rs), but this matrix is built
+            // via get_a_matrix BEFORE that check, so guard it here too. A
+            // perfectly-coupled pair is degenerate in the companion model and
+            // must use the ideal-transformer decomposition instead.
+            if det <= 0.0 {
+                return Err(MnaError::TopologyError(format!(
+                    "Coupled inductors '{}'-'{}': det = L1*L2 - M² = {:.6e} <= 0 \
+                     (coupling k={} too close to 1). Use the ideal-transformer \
+                     decomposition for perfectly-coupled windings.",
+                    ci.l1_name, ci.l2_name, det, ci.coupling
+                )));
+            }
             let gs1 = g_sign * g_eq_factor * ci.l2_value / det;
             let gs2 = g_sign * g_eq_factor * ci.l1_value / det;
             let gm = g_sign * (-g_eq_factor) * m / det;
@@ -4041,7 +4055,12 @@ impl MnaBuilder {
                             .map(|(_, v)| *v)
                             .or_else(|| mna.pot_default_overrides.get(&key).copied())
                             .unwrap_or(elem.value);
-                        let g = 1.0 / r;
+                        // Guard against a 0-Ω resolved override (closed-switch or
+                        // zero-pot position): the caller's zero-check covers only
+                        // the DECLARED value, not a resolved switch/pot default,
+                        // so a 0-Ω position would stamp an infinite conductance.
+                        // Floor R so a "short" becomes a finite near-short.
+                        let g = 1.0 / r.max(1e-9);
                         stamp_conductance_to_ground(&mut mna.g, elem.nodes[0], elem.nodes[1], g);
                     }
                 }
@@ -5087,11 +5106,21 @@ impl MnaBuilder {
                 n_minus,
                 dc,
             } => {
+                // SPICE convention: `I n+ n- val` drives `val` amps from n+ to n-
+                // *through the source*, i.e. current is extracted from n+ and injected
+                // into n- (ngspice: `I1 n1 0 1m` with R to ground gives V(n1) = -1 V).
+                // The internal CurrentSourceInfo convention is the opposite — dc_value
+                // is injected at n_plus_idx and extracted at n_minus_idx (see the
+                // dk.rs/dc_op.rs consumers and the BJT/tube/op-amp companion sources
+                // above, all authored to that convention). Bridge SPICE -> internal by
+                // negating: extracting `val` from n+ == injecting `-val` at n_plus_idx.
+                // Without this negation an independent current source produces output of
+                // the opposite sign to ngspice.
                 self.current_sources.push(CurrentSourceInfo {
                     name: name.clone(),
                     n_plus_idx: self.node_map[n_plus],
                     n_minus_idx: self.node_map[n_minus],
-                    dc_value: dc.unwrap_or(0.0),
+                    dc_value: -dc.unwrap_or(0.0),
                 });
             }
             Element::Diode {

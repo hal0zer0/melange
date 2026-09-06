@@ -78,35 +78,19 @@ impl SourcesConfig {
             .ok_or_else(|| anyhow::anyhow!("Cannot find config directory"))
     }
 
-    /// Create default configuration with known sources
+    /// Create the default configuration.
+    ///
+    /// No external circuit sources are pre-seeded. The repos this used to point
+    /// at (`melange-audio/circuits`, `tonestack/tonestack`) do not exist — they
+    /// 404'd — and shipping a dead link is worse than shipping none. The
+    /// passive-eq demo is available as a builtin (`melange compile
+    /// passive-eq1a`); add your own circuit repo with
+    /// `melange sources add <name> <url>`. A vetted external example may be
+    /// seeded here once one is published.
     fn default_config() -> Self {
-        let mut sources = HashMap::new();
-
-        // Tonestack - tone stack circuits
-        sources.insert(
-            "tonestack".to_string(),
-            SourceConfig {
-                url: "https://raw.githubusercontent.com/tonestack/tonestack/main".to_string(),
-                license: Some("MIT".to_string()),
-                attribution: Some("Tonestack Project".to_string()),
-                subdirectory: None,
-            },
-        );
-
-        // Melange community circuits
-        sources.insert(
-            "melange".to_string(),
-            SourceConfig {
-                url: "https://raw.githubusercontent.com/melange-audio/circuits/main".to_string(),
-                license: Some("MIT OR Apache-2.0".to_string()),
-                attribution: Some("Melange Community".to_string()),
-                subdirectory: None,
-            },
-        );
-
         Self {
-            sources,
-            default_source: Some("melange".to_string()),
+            sources: HashMap::new(),
+            default_source: None,
         }
     }
 
@@ -261,14 +245,23 @@ mod tests {
 
     #[test]
     fn test_default_config() {
+        // No external sources are pre-seeded (they 404'd); a fresh install
+        // relies on the builtin demo + user-added sources.
         let config = SourcesConfig::default_config();
-        assert!(!config.sources.is_empty());
-        assert!(config.sources.contains_key("tonestack"));
+        assert!(config.sources.is_empty());
+        assert!(config.default_source.is_none());
     }
 
     #[test]
     fn test_resolve_circuit() {
-        let config = SourcesConfig::default_config();
+        // Resolution mechanics, against a user-added source (nothing pre-seeded).
+        let mut config = SourcesConfig::default_config();
+        config.add_source(
+            "tonestack",
+            "https://raw.githubusercontent.com/tonestack/tonestack/main",
+            Some("MIT"),
+            None,
+        );
 
         // Without extension
         let url = config

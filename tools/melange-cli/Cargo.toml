@@ -2,6 +2,7 @@
 name = "melange-cli"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "CLI tool for circuit compilation, validation, and benchmarking"
 
@@ -23,7 +24,7 @@ serde = { workspace = true }
 toml = "0.8"
 dirs = "5.0"
 ureq = "2.9"
-quick-xml = "0.37"
+quick-xml = "0.41"
 tempfile = "3.10"
 
 [features]

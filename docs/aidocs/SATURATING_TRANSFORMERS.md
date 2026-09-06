@@ -29,7 +29,7 @@ Marquee targets are guitar output transformers (SE and push-pull) and
 1:1 character-pedal iron. Tape-head / iron-clip stages already go through
 the uncoupled path.
 
-**Explicitly deferred:** NFB-through-iron transformers (Pultec, Neve
+**Explicitly deferred:** NFB-through-iron transformers (the passive EQ, Neve
 1073), hysteresis / core loss / remanence, and multi-limb cores.
 
 ### Why the current independent-winding code is wrong
@@ -77,7 +77,7 @@ along for free.
 **The catch:** the T-model is deliberately disabled —
 `IDEAL_XFMR_L_THRESHOLD = 1e30` (`mna.rs:171`) — because the ideal
 couplings form **algebraic loops in circuits with global NFB through the
-iron** (Pultec tertiary NFB, Neve 1073). Enabling it must be **gated to
+iron** (the passive EQ tertiary NFB, Neve 1073). Enabling it must be **gated to
 NFB-free groups**, or it regresses validated circuits. Loosely-coupled /
 small transformers currently also fall through to the (wrong)
 `winding_isats` path, so routing must be re-verified.
@@ -345,7 +345,7 @@ the broadest-safety option. Document how the leakage/magnetizing split
 and turns vector derive from existing `L` + coupling `k`. *Milestone:*
 documented, tested parser path; ISAT authored into marquee decks.
 
-**Phase 4 — DEFERRED: NFB-through-iron.** For Pultec / 1073, compute net
+**Phase 4 — DEFERRED: NFB-through-iron.** For the passive EQ / 1073, compute net
 MMF `Σ Nᵢ·Iᵢ` directly from the augmented branch currents already
 present in the coupled-Y path and apply one shared saturation term,
 sidestepping the algebraic loop. Open feasibility question.
@@ -413,8 +413,15 @@ Concrete gates:
 3. One SE + one PP output-transformer deck: harmonic (H2/H3) trend
    matches the authored B-H curve; no `k_eff ≥ 1` / loss of
    positive-definiteness; no Nyquist ring per `nyquist_dbc`.
-4. Zero regression on validated NFB-through-iron decks (Pultec, 1073):
-   they must keep routing away from the T-model.
+4. NFB-through-iron saturating decks (the passive EQ, 1073) **route through the
+   T-model and must converge bounded/correct** — NOT "route away." This gate
+   was written before Phase 2's Option-A finding (§5) and is now corrected:
+   verified 2026-08-26 on the passive-EQ S-217-D (place a scratch ISAT on the
+   push-pull primary → group routes T-model, N 52→62, auto-BE, bounded, no
+   NaN/NR-starvation to amp 8V). The `1e30` "route away" was a DK/Schur
+   limitation; the full-LU nodal path that saturating transformers force
+   resolves the ideal-coupling algebraic loop directly. Any NON-saturating
+   deck (no ISAT) still stays byte-identical — the additive gate never fires.
 
 ---
 
@@ -428,7 +435,7 @@ Concrete gates:
   saturating-inductor decks. Golden-audio gate mandatory.
 - **Phase 2 (T-model routing):** low-medium *additional* effort once
   Phase 1 lands (no new coupled math), but the `1e30`→gated-enable change
-  is high-risk near Pultec/1073. Must prove NFB-free gating before merge.
+  is high-risk near the passive EQ/1073. Must prove NFB-free gating before merge.
 - **Phase 3 (syntax):** low effort, low risk; mostly a contract decision.
 - **Continuation for the knee (§4):** high effort, high risk, but shared
   with the G10/diode-switching class — cost is amortized.
@@ -450,6 +457,20 @@ sound (§6) — a process/discipline risk, not a code one.
    Uniquorn V2/V3 briefs already defer core hysteresis to a "melange
    Phase 2". Does any *target's* character actually require
    loss/remanence, or is anhysteretic enough?
+   **PARTIAL ANSWER (measured 2026-08-26, `analyze --harmonics`):** the shipped
+   anhysteretic **symmetric-tanh** law produces **ODD harmonics only** (H3/H5)
+   when driven symmetrically — H2 requires broken odd-symmetry, i.e. a **DC
+   magnetizing bias** (asymmetric excursion, as in the 1073's 68 mA Class-A SE
+   output core, which correctly gives H2) OR an **asymmetric/hysteretic** curve.
+   So for a core with ~zero net DC bias (the passive-EQ's HS-56 input & HS-29
+   interstage; a *balanced* push-pull output core), symmetric-tanh sat gives H3,
+   NOT the hardware's H2. Confirmed: adding scratch ISAT to the passive-EQ HS-56
+   gave H3=−22 dBc / H5=−24 dBc with H2 at the floor. **Consequence:** the
+   passive-EQ's H2 ships from sourced push-pull **tube `.mismatch`** (v0.1.3),
+   not iron. A biased-core target reaches H2 with anhysteretic tanh; an
+   *unbiased* target that needs H2 from the iron itself needs **Chan hysteresis**
+   (§8-Q1 tractable choice) — this is the concrete case for pulling hysteresis
+   forward (melange-circuits' 0.2.0 request, 2026-08-26).
 2. **Netlist authoring contract** (§3, Phase 3): `ISAT=` on the reference
    winding vs `.core Bsat/Ae/N` vs a volt-second/flux limit; how the
    leakage/magnetizing split and turns vector derive from `L` + `k`; how
@@ -459,9 +480,14 @@ sound (§6) — a process/discipline risk, not a code one.
 4. **Per-sample continuation** for the knee: port `dc_op` gmin/source
    stepping into `solve_nonlinear`, or flux-homotopy / line search? Same
    fix as the g10-astable / diode-switching class?
-5. **NFB-through-iron (Phase 4):** feasible via net-MMF from coupled-Y
-   branch currents, sidestepping the algebraic loop, without enabling the
-   T-model?
+5. **NFB-through-iron (Phase 4): RESOLVED — no separate mechanism needed.**
+   Saturating NFB-through-iron groups route through the ordinary T-model on the
+   full-LU nodal path, which resolves the ideal-coupling algebraic loop by
+   direct LU each sample (verified 2026-08-26 on the passive-EQ S-217-D: bounded,
+   converges, no blow-up; see §6 gate 4). The net-MMF-from-coupled-Y idea is
+   unnecessary. What remains for a real passive-EQ/1073 iron-coloration ship is
+   the curve law (Q1: anhysteretic gives odd-only on these unbiased cores → needs
+   Chan hysteresis for H2) + REAL sourced B-H data, not the routing.
 6. **Rank-1 core Jacobian routing:** can `(2/T)·L_diff·n·nᵀ` go through
    Sherman-Morrison *inside* the NR iteration, or does a saturating
    transformer force full-LU unconditionally?

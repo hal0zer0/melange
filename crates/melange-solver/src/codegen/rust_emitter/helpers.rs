@@ -1158,6 +1158,77 @@ pub(super) fn emit_pentode_nr_dk_stamp(
     }
 }
 
+/// Emit the per-sample `diag_region_exit_count` characterization.
+///
+/// Counts, per device and per sample, the converged node voltages that put
+/// a device outside the region its dimension-reduced model would assume:
+///
+/// - any pentode (3D or grid-off 2D) with `Vgk = V[grid] - V[cathode] > 0`
+///   (grid conducts; the grid-off reduction drops `Ig1` and is wrong here);
+/// - any BJT (2D or forward-active 1D) with `vbc_eff = sign * (V[base] -
+///   V[collector]) > 0` (saturation; the FA reduction drops `exp(Vbc/Vt)`
+///   and is wrong here).
+///
+/// It is instrumented on the FULL models too, deliberately: with the
+/// reductions off by default this is the only way to measure how often a
+/// deck actually enters those regions. Terminal voltages come from
+/// `ir.device_node_indices` (MNA 1-based, 0 = ground) read against the
+/// finalized N-vector `v` of the sample; the caller places the block after
+/// the sample's node voltages are final. Empty when the IR carries no
+/// device node indices or no BJT/pentode is present.
+pub(super) fn emit_region_exit_lines(ir: &CircuitIR, indent: &str) -> String {
+    use crate::codegen::ir::DeviceType;
+
+    if ir.device_node_indices.len() != ir.device_slots.len() {
+        return String::new();
+    }
+    let vnode = |n: usize| -> String {
+        if n == 0 {
+            "0.0".to_string()
+        } else {
+            format!("v[{}]", n - 1)
+        }
+    };
+    let mut lines = String::new();
+    for (slot, nodes) in ir.device_slots.iter().zip(ir.device_node_indices.iter()) {
+        match (&slot.device_type, &slot.params) {
+            (DeviceType::Bjt | DeviceType::BjtForwardActive, DeviceParams::Bjt(bp))
+                if nodes.len() >= 3 =>
+            {
+                // Node order [collector, base, emitter]. vbc_eff = Vbc for
+                // NPN, -Vbc for PNP (same convention as
+                // `detect_forward_active_bjts`).
+                let (vc, vb) = (vnode(nodes[0]), vnode(nodes[1]));
+                let expr = if bp.is_pnp {
+                    format!("({vc} - {vb})")
+                } else {
+                    format!("({vb} - {vc})")
+                };
+                lines.push_str(&format!(
+                    "{indent}if {expr} > 0.0 {{ state.diag_region_exit_count += 1; }}\n"
+                ));
+            }
+            (DeviceType::Tube, DeviceParams::Tube(tp)) if tp.is_pentode() && nodes.len() >= 4 => {
+                // Node order [plate, grid, cathode, screen(, suppressor)].
+                let (vg, vk) = (vnode(nodes[1]), vnode(nodes[2]));
+                lines.push_str(&format!(
+                    "{indent}if ({vg} - {vk}) > 0.0 {{ state.diag_region_exit_count += 1; }}\n"
+                ));
+            }
+            _ => {}
+        }
+    }
+    if lines.is_empty() {
+        return lines;
+    }
+    format!(
+        "{indent}// Region-exit characterization: samples where a pentode's grid\n\
+         {indent}// conducts (Vgk > 0) or a BJT saturates (Vbc forward) — the regions\n\
+         {indent}// the grid-off / forward-active reductions assume are never entered.\n\
+         {lines}"
+    )
+}
+
 // ============================================================================
 // Oversampling configuration
 // ============================================================================
@@ -1373,3 +1444,62 @@ pub(super) fn oversampling_info(factor: usize) -> OversamplingInfo {
         },
     }
 }
+
+/// Build the `NODE_NAMES: [&str; N]` array body — a parallel of `DC_OP`, one
+/// entry per solver row in index order. User/internal node names come from
+/// `ir.named_constants.node_names` (ORIGINAL, un-sanitized, in DC_OP index
+/// space); rows with no node name (augmented VS / inductor branch-current rows)
+/// are `""`. Length is `topology.n` (= `N`). Shared by the DK and nodal paths so
+/// the two carry byte-identical maps (openfarf thread 218).
+pub(super) fn node_names_array_body(ir: &CircuitIR) -> String {
+    let n = ir.topology.n;
+    let mut names: Vec<String> = vec![String::new(); n];
+    for (name, idx) in &ir.named_constants.node_names {
+        if *idx < n {
+            names[*idx] = escape_rust_str(name);
+        }
+    }
+    names
+        .iter()
+        .map(|s| format!("\"{s}\""))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Escape a netlist node name for a Rust string literal. Node names are almost
+/// always `[A-Za-z0-9_]`, but escape defensively so a stray `"`/`\` can never
+/// break the emitted array.
+fn escape_rust_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// The `dc_op_by_name` accessor — name → baked DC operating-point voltage via a
+/// scan of the `NODE_NAMES` parallel array. Emitted (identically) by both paths
+/// only when `DC_OP` exists (`has_dc_op`). Returns `None` for an unknown or
+/// unnamed (augmented) row.
+pub(super) const DC_OP_BY_NAME_FN: &str = "\
+/// Look up a node's baked DC operating-point voltage by its netlist name.
+///
+/// `dc_op_by_name(\"plate1\")` returns `Some(DC_OP[NODE_PLATE1])` — the index in
+/// `NODE_NAMES` is the SAME index used in `DC_OP`. `None` for an unknown name or
+/// an unnamed (augmented VS / inductor branch) row. Linear scan over `N`; call
+/// it off the audio thread.
+pub fn dc_op_by_name(name: &str) -> Option<f64> {
+    let mut i = 0;
+    while i < N {
+        if !NODE_NAMES[i].is_empty() && NODE_NAMES[i] == name {
+            return Some(DC_OP[i]);
+        }
+        i += 1;
+    }
+    None
+}
+";

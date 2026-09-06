@@ -194,3 +194,104 @@ When running validation tests concurrently:
 ## References
 - ngspice manual: https://ngspice.sourceforge.io/docs.html
 - SPICE format reference: https://bwrcs.eecs.berkeley.edu/Classes/IcBook/SPICE/
+
+---
+
+# 2026-09-02: validate was building a different circuit than compile ships
+
+**Read this before trusting any pre-2026-09-02 validate number.**
+
+`melange validate` did not simulate the system melange ships. Four consumers —
+`compile`, `simulate`, `analyze` and the validate harness — had each grown their
+own copy of the front-end pipeline, and they had drifted three ways:
+
+| step | compile | simulate | analyze | validate |
+|---|---|---|---|---|
+| `apply_linearize_reductions` | yes | yes | yes | **no** |
+| `k_diag_min`-gated internal-node expansion | yes | yes | **unconditional** | **unconditional** |
+| `auto_tune_max_iter` | yes | yes | yes | **no** |
+
+On `wurli-power-amp` (the shipped OpenWurli power stage) the CLI built an
+**N=20, M=14** system while validate built **N=44, M=16** — more than twice the
+nodes and a different solver sub-path.
+
+The consequential step is `.linearize`. The `linearized_bypass` gate in
+`nodal_emitter.rs` is the ONLY thing routing that circuit to full-LU; with no
+linearized device the emitter picks Schur NR, and Schur NR on an
+expanded-parasitic system diverges at the first non-zero input sample.
+
+Validation reported **1319% RMS error, correlation 0.0002**. That read as a
+catastrophic solver defect and was nothing of the kind — driven through the
+correct pipeline the same circuit validates at **0.246% RMS, correlation
+0.99999964**.
+
+**Fixed in `6bc3ef1`** by moving the three steps into `melange_solver::pipeline`
+and routing all four consumers through it. See that module's docs.
+
+## What this means for reading old results
+
+* A validate number from before `6bc3ef1` is not a statement about the shipped
+  build for any deck that uses `.linearize` or carries parasitic BJTs
+  (`RB`/`RC`/`RE`) with `k_diag_min < -100`. Affected decks measured at the
+  time: wurli-power-amp, pretty-baby, steve-1073-eqpres, farfisa-se15-preamp,
+  sad-bastard, basic-bitch, jeffreys-tube, pipe-shouter, steve-1073-preamp/
+  -output/-presence.
+* Decks with no linearized devices and no parasitic BJTs were unaffected —
+  `wurli-preamp`'s numbers are identical before and after the fix.
+
+## Closed 2026-09-03: forward-active / grid-off, and a fourth pipeline
+
+Validate used to apply **no forward-active or grid-off reduction** — empty sets
+were passed deliberately. Both are now applied, through the same shared
+functions the CLI uses (`pipeline::apply_forward_active_reduction`,
+`pipeline::apply_grid_off_reduction`, `pipeline::should_skip_fa_for_nodal_reroute`,
+all moved out of `melange-cli`). `melange validate` accepts `--bjt-fa` and
+`--tube-grid-fa`, the same mechanism flags `melange compile` takes; no new flag
+name was introduced.
+
+**The `.cir` that motivated this was the wrong one.** The residual 0.246% on
+wurli-power-amp was floated here as "a plausible candidate" for the FA gap. It
+is not, and cannot be: wurli-power-amp routes **nodal** (trap-unstable, DK
+kernel rho 1.0040), and FA detection is skipped entirely on a nodal reroute. The
+shipped FA set for that deck is empty and validate passed an empty set, so the
+two already agreed. Do not expect that number to move.
+
+**The deck that actually exercised the gap is `wurli_preamp`** — shipped M=3,
+un-reduced M=5. Closing the gap changed its reported numbers **not at all**
+(RMS 0.1634%, correlation 0.99999962, identical to every printed digit under
+`--bjt-fa auto` and `--bjt-fa off`). That is the expected result: `auto` reduces
+only pure-Ebers-Moll devices, and the reduction is exact **while the device
+remains forward-active** — a region established from the DC operating point at
+compile time and never rechecked during a render (see `DEVICE_MODELS.md`). The harness was
+building a different circuit without getting a different answer.
+
+**The larger gap was the test harness.** `tests/spice_validation.rs` — what CI's
+"SPICE validation" gate runs — carried its own MNA build that `6bc3ef1` never
+touched: no `.linearize`, no FA, no grid-off, unconditional internal-node
+expansion, and `MAX_ITER` 100 instead of `auto_tune_max_iter`. That last one is
+**bidirectional**: `auto_tune_max_iter` has no floor of 100, so stiff decks got
+a stricter harness (harmless) but middle decks (auto-tuned budget 50-70) got a
+harness *more permissive* than the shipped build — green on iterations the
+product never gets. The harness now delegates to
+`melange_validate::run_melange_solver_from_str`, so there is one implementation.
+**Do not add a local MNA build to a validation path.**
+
+# Device coverage: what the ngspice oracle can and cannot check
+
+ngspice has **no vacuum-tube primitive at all** — it parses a `T` card as a
+lossy transmission line. Tubes validate because melange *synthesizes* a Koren
+B-source `.subckt` twin for each one.
+
+| device | ngspice validation |
+|---|---|
+| diode, BJT, JFET, MOSFET | native SPICE elements — validate directly |
+| triode (`T`) | via `tube_translate.rs` (sharp only, `svar = 0`) |
+| pentode (`P`) | via `pentode_translate.rs` — **added 2026-09-02**, sharp only, all 3 screen forms |
+| op-amp (`U`), VCA (`Y`), LDR (`O`) | **cannot** — "model type mismatch" |
+| variable-mu tubes (`svar > 0`) | **cannot** — explicitly out of scope, errors |
+
+**The tube twin reproduces melange's OWN Koren equation.** It therefore
+cross-checks the SOLVER (NR + integration + timestep) against ngspice's given an
+identical device equation. It does **not** independently validate melange's tube
+physics. Do not cite a passing tube validation as evidence the device model is
+right; cite it as evidence the solver integrates it the same way ngspice does.

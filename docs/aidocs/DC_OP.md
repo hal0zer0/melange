@@ -370,7 +370,7 @@ VS/VCVS rows, adds `.runtime` voltage-source fields, then Newton-iterates
   "settled" state that would slew audibly. Callers then fall back to the
   `WARMUP_SAMPLES_RECOMMENDED` loop, which lets the true companion
   history build up over the warmup window.
-- **Nodal full-LU path** (pultec, 4kbuscomp, VCR ALC, wurli power amp)
+- **Nodal full-LU path** (passive-eq, 4kbuscomp, VCR ALC, wurli power amp)
   ships a stub body that bumps `diag_nr_max_iter_count` and returns —
   **this is the permanent path for nodal-routed circuits**, not a
   temporary placeholder. The method surface is uniform across DK and

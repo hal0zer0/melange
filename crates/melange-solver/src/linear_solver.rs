@@ -79,15 +79,9 @@ fn reset_coupled_inductors(coupled: &mut [crate::dk::CoupledInductorState]) {
 /// Reset all transformer group companion model state to zero.
 fn reset_transformer_groups(groups: &mut [crate::dk::TransformerGroupState]) {
     for g in groups {
-        for v in &mut g.i_hist {
-            *v = 0.0;
-        }
-        for v in &mut g.i_prev {
-            *v = 0.0;
-        }
-        for v in &mut g.v_prev {
-            *v = 0.0;
-        }
+        g.i_hist.fill(0.0);
+        g.i_prev.fill(0.0);
+        g.v_prev.fill(0.0);
     }
 }
 
@@ -125,7 +119,9 @@ impl LinearSolver {
     /// Create a new linear solver.
     pub fn new(kernel: DkKernel, input_node: usize, output_node: usize) -> Self {
         let n = kernel.n;
-        let dc_block_r = 1.0 - 2.0 * std::f64::consts::PI * 5.0 / kernel.sample_rate;
+        let dc_block_r = 1.0
+            - 2.0 * std::f64::consts::PI * crate::codegen::policy::DC_BLOCK_CUTOFF_HZ
+                / kernel.sample_rate;
         Self {
             kernel,
             v_prev: vec![0.0; n],
