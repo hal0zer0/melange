@@ -883,12 +883,13 @@ fn stateful_update_body(
              \x20       }}\n\
              \x20   }} else {{\n\
              \x20       // Extinguish (lit → dark) on HOLDING CURRENT, not a bare\n\
-             \x20       // cv<=VD test: the maintaining-voltage lit model parks the\n\
-             \x20       // node near VD (i.e. cv>VD by the small sustaining drop), so\n\
-             \x20       // a voltage threshold would latch the tube lit forever. The\n\
-             \x20       // gas de-ionizes when it can no longer sustain conduction —\n\
-             \x20       // i.e. when (cv-VD)/RON drops below the holding current.\n\
-             \x20       let i_cond = (cv - DEVICE_{d}_VD) / DEVICE_{d}_RON;\n\
+             \x20       // voltage test: the maintaining-line lit model parks the\n\
+             \x20       // node near the intercept V0 (cv>V0 by the small sustaining\n\
+             \x20       // drop rs·i), so a voltage threshold would latch the tube\n\
+             \x20       // lit forever. The gas de-ionizes when it can no longer\n\
+             \x20       // sustain conduction — i.e. when (cv-V0)/RS drops below the\n\
+             \x20       // holding current. The reset floor lands at v0 + rs·ihold.\n\
+             \x20       let i_cond = (cv - DEVICE_{d}_V0) / DEVICE_{d}_RS;\n\
              \x20       if i_cond <= DEVICE_{d}_IHOLD {{\n\
              \x20           state[0] = 0.0;\n\
              \x20       }}\n\

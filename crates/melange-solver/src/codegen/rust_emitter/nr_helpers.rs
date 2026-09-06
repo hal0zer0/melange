@@ -98,20 +98,21 @@ pub(super) fn emit_dk_device_evaluation(
                 ));
             }
             DeviceType::Glow => {
-                // Glow / neon lamp: FROZEN latch selects RON (lit) or ROFF
-                // (dark). Lit is a maintaining-voltage source i=(v_d−VD)/RON so
-                // the reservoir discharges toward VD (not ground) — fixes the
-                // extinction flank/period dt-independently; dark is a resistor
-                // through the origin. jac = 1/R either way (the VD term is
-                // affine): positive conductance, no negative resistance. The
-                // latch is frozen this solve; update() flips it on holding
-                // current. (DK-Schur route eval — mirror of the nodal sites.)
+                // Glow / neon lamp: FROZEN latch selects RS (lit) or ROFF
+                // (dark). Lit is the maintaining line i=(v_d−V0)/RS so the
+                // reservoir discharges toward the INTERCEPT V0 (not ground, not
+                // the static VM) — fixes the extinction flank/period
+                // dt-independently; dark is a resistor through the origin.
+                // jac = 1/R either way (the V0 term is affine): positive
+                // conductance, no negative resistance. The latch is frozen this
+                // solve; update() flips it on holding current. (DK-Schur route
+                // eval — mirror of the nodal sites.)
                 let s = slot.start_idx;
                 let d = dev_num;
                 code.push_str(&format!(
                     "{indent}let glow_lit{d} = state.device_{d}_state[0] >= 0.5;\n\
-                     {indent}let glow_r{d} = if glow_lit{d} {{ DEVICE_{d}_RON }} else {{ DEVICE_{d}_ROFF }};\n\
-                     {indent}let glow_emf{d} = if glow_lit{d} {{ DEVICE_{d}_VD }} else {{ 0.0 }};\n\
+                     {indent}let glow_r{d} = if glow_lit{d} {{ DEVICE_{d}_RS }} else {{ DEVICE_{d}_ROFF }};\n\
+                     {indent}let glow_emf{d} = if glow_lit{d} {{ DEVICE_{d}_V0 }} else {{ 0.0 }};\n\
                      {indent}let i_dev{s} = (v_d{s} - glow_emf{d}) / glow_r{d};\n\
                      {indent}let jdev_{s}_{s} = 1.0 / glow_r{d};\n"
                 ));

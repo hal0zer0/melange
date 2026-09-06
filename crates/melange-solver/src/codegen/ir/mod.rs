@@ -5458,36 +5458,57 @@ impl CircuitIR {
         netlist: &Netlist,
         model: &str,
     ) -> Result<crate::device_types::GlowParams, CodegenError> {
+        // Option-A maintaining-line parameterisation (datasheet-sourced). The
+        // lit branch is the affine maintaining line `V(a)−V(k) = v0 + rs·i`.
+        // Its intercept `v0` is NOT authored directly — it is derived from the
+        // datasheet static maintaining voltage `VM` (measured at the rated
+        // current `IK`) and the slope `RS`, so the deck carries datasheet
+        // numbers and melange computes the intercept:  v0 = VM − RS·IK.
+        // ZA1001 anchors: VM = 93 V @ IK = 1.5 mA; RS ≈ 2.5–4.25 kΩ (ZA1004
+        // form-transfer, mid 3 kΩ). The OLD model used VM directly as the
+        // intercept (fixed VD = 93), parking the reset floor ~4–6 V too high.
         let vo = Self::lookup_model_param(netlist, model, "VO").unwrap_or(135.0);
-        let vd = Self::lookup_model_param(netlist, model, "VD").unwrap_or(93.0);
-        let ron = Self::lookup_model_param(netlist, model, "RON").unwrap_or(1000.0);
-        let roff = Self::lookup_model_param(netlist, model, "ROFF").unwrap_or(1e9);
+        let vm = Self::lookup_model_param(netlist, model, "VM").unwrap_or(93.0);
+        let ik = Self::lookup_model_param(netlist, model, "IK").unwrap_or(1.5e-3);
+        let rs = Self::lookup_model_param(netlist, model, "RS").unwrap_or(3.0e3);
+        let roff = Self::lookup_model_param(netlist, model, "ROFF").unwrap_or(300e6);
         // Holding current: the lit→dark extinction threshold on conduction
-        // current. Default 2e-4 A (small-neon regime). Must exceed the lit
-        // equilibrium sustaining current (Vb−VD)/(Rc+RON) for a relaxation
+        // current. Default 2e-4 A (datasheet ZA1004 minimum-sustaining regime).
+        // The reset floor lands at v0 + rs·ihold. Must exceed the lit
+        // equilibrium sustaining current (Vb−v0)/(Rc+rs) for a relaxation
         // oscillator to extinguish; a physical small-neon value does.
         let ihold = Self::lookup_model_param(netlist, model, "IHOLD").unwrap_or(2e-4);
 
         validate_positive_finite(vo, "NEON model VO")?;
-        validate_positive_finite(vd, "NEON model VD")?;
-        validate_positive_finite(ron, "NEON model RON")?;
+        validate_positive_finite(vm, "NEON model VM")?;
+        validate_positive_finite(ik, "NEON model IK")?;
+        validate_positive_finite(rs, "NEON model RS")?;
         validate_positive_finite(roff, "NEON model ROFF")?;
         validate_positive_finite(ihold, "NEON model IHOLD")?;
-        if vo <= vd {
+
+        // Derived maintaining-line intercept.
+        let v0 = vm - rs * ik;
+        if v0 <= 0.0 {
             return Err(CodegenError::InvalidConfig(format!(
-                "NEON model '{model}': VO ({vo}) must be greater than VD ({vd}) \
-                 (strike voltage above maintaining voltage)"
+                "NEON model '{model}': derived maintaining-line intercept v0 = VM − RS·IK \
+                 = {vm} − {rs}·{ik} = {v0} is non-positive; check VM/RS/IK"
             )));
         }
-        if roff <= ron {
+        if vo <= vm {
             return Err(CodegenError::InvalidConfig(format!(
-                "NEON model '{model}': ROFF ({roff}) must be greater than RON ({ron})"
+                "NEON model '{model}': VO ({vo}) must be greater than VM ({vm}) \
+                 (ignition voltage above the maintaining voltage)"
+            )));
+        }
+        if roff <= rs {
+            return Err(CodegenError::InvalidConfig(format!(
+                "NEON model '{model}': ROFF ({roff}) must be greater than RS ({rs})"
             )));
         }
 
-        Self::warn_unrecognized_params(netlist, model, &["VO", "VD", "RON", "ROFF", "IHOLD"]);
+        Self::warn_unrecognized_params(netlist, model, &["VO", "VM", "IK", "RS", "IHOLD", "ROFF"]);
 
-        Ok(crate::device_types::GlowParams { vo, vd, ron, roff, ihold })
+        Ok(crate::device_types::GlowParams { vo, v0, rs, roff, ihold })
     }
 
     /// Warn on unrecognized .model parameters (typo protection).

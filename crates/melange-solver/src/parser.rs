@@ -854,8 +854,8 @@ pub enum Element {
     },
     /// Glow-discharge / neon lamp: Nname a k modelname (EXPERIMENTAL, Phase 0c
     /// Stage 2a). A 2-terminal gas-discharge relaxation element; references a
-    /// `.model … NEON(VO VD RON ROFF)` card. Throwaway experimental syntax —
-    /// the `N` letter and `NEON` model type are provisional.
+    /// `.model … NEON(VO VM IK RS IHOLD ROFF)` card. Throwaway experimental
+    /// syntax — the `N` letter and `NEON` model type are provisional.
     Glow {
         name: String,
         /// Anode node

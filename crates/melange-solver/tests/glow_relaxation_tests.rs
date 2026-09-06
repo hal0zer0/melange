@@ -1,10 +1,12 @@
 //! Glow-discharge / neon relaxation-oscillator tests (Phase 0c Stage 2a).
 //!
-//! The `N<name> a k NEON(VO VD RON ROFF IHOLD)` element is the ZA1001 relaxation
+//! The `N<name> a k NEON(VO VM IK RS IHOLD ROFF)` element is the ZA1001 relaxation
 //! divider — the heart of the Philicorda AG7500 (70× of them). Coverage here:
-//!  - free-running relaxation: strikes at VO, extinguishes at ~VD (maintaining-
-//!    voltage lit model), analytic T ≈ RC·ln((Vb−Vd)/(Vb−Vo)) period, on BOTH
-//!    the nodal and DK-Schur routes (`assert_relax_fixed`);
+//!  - free-running relaxation: strikes at VO, extinguishes at the emergent reset
+//!    floor v0+RS·IHOLD≈89 V (Option-A maintaining-LINE model, intercept
+//!    v0=VM−RS·IK decoupled from the static VM), analytic
+//!    T ≈ RC·ln((Vb−V_floor)/(Vb−Vo)) period, on BOTH the nodal and DK-Schur
+//!    routes (`assert_relax_fixed`);
 //!  - supply-sensitivity (the ZA1001 divider-frequency dependence Philips
 //!    regulated for — schemer's falsification criterion);
 //!  - oversampling: preserves the oscillator physics, plus base-rate aliasing /
@@ -19,15 +21,17 @@ use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
 
-// Rc = 1 MΩ, C = 10 nF → τ_charge = 10 ms. Vb = 170 V, VO = 135, VD = 93.
-// Analytic free-running period T = RC·ln((Vb−Vd)/(Vb−Vo))
-//                                = 0.01·ln(77/35) = 7.885 ms  (~126.8 Hz).
+// Rc = 1 MΩ, C = 10 nF → τ_charge = 10 ms. Vb = 170 V, VO = 135, VM = 93 @
+// IK = 1.5 mA, RS = 3 kΩ → derived intercept v0 = VM−RS·IK = 88.5 V, emergent
+// reset floor V_floor = v0+RS·IHOLD = 89.1 V.
+// Analytic free-running period T = RC·ln((Vb−V_floor)/(Vb−Vo))
+//                                = 0.01·ln(80.9/35) = 8.40 ms  (~119 Hz).
 // Rail voltage `vb` is parametrized so the supply-sensitivity test can vary it.
 fn relax_deck(vb: f64) -> String {
     format!(
         "\
 Neon Relaxation Oscillator
-.model NE1 NEON(VO=135 VD=93 RON=1000 ROFF=1e9)
+.model NE1 NEON(VO=135 VM=93 IK=1.5e-3 RS=3000 IHOLD=2e-4 ROFF=300e6)
 Vb rail 0 DC {vb}
 Rc rail osc 1MEG
 Cosc osc 0 10N
@@ -225,10 +229,19 @@ fn main() {
 }
 "#;
 
-/// Assert the maintaining-voltage lit model produces a correct relaxation
-/// oscillation: strikes at VO, extinguishes at ~VD (NOT the old deep-discharge
-/// to ~0 V), VO−VD swing, and the analytic RC·ln((Vb−Vd)/(Vb−Vo)) period.
-/// Shared by the nodal and DK route tests so the fix is proven on BOTH paths.
+/// Assert the Option-A maintaining-LINE lit model produces a correct relaxation
+/// oscillation: strikes at VO, extinguishes at the emergent reset floor
+/// v0+RS·IHOLD≈89 V (NOT the old fixed-VD=93 floor, and NOT the older
+/// deep-discharge-to-0 bug), VO−floor swing, and the analytic
+/// RC·ln((Vb−V_floor)/(Vb−Vo)) period. Shared by the nodal and DK route tests
+/// so the fix is proven on BOTH paths — and, per the arbiter's "measure the
+/// emergent floor" requirement, the reset floor is asserted directly.
+///
+/// Params: VO=135, VM=93@IK=1.5mA, RS=3000 → derived intercept v0=VM−RS·IK=88.5;
+/// reset floor = v0+RS·IHOLD = 88.5+3000·2e-4 = 89.1 V. Measured floor lands at
+/// ~88.95 (the whole-sample discharge steps just past the 89.1 extinction
+/// threshold toward v0). This is the Option-A reset-floor drop: 93 → ~88.95,
+/// −4 V, decoupling the intercept from the static maintaining point.
 fn assert_relax_fixed(route: &str, out: &str) {
     let vmin = parse_kv(out, "vmin");
     let vmax = parse_kv(out, "vmax");
@@ -238,8 +251,9 @@ fn assert_relax_fixed(route: &str, out: &str) {
     let mean_extinguish_v = parse_kv(out, "mean_extinguish_v");
     eprintln!(
         "GLOW RELAX [{route}]: vmin={vmin:.3} V, vmax={vmax:.3} V, swing={:.3} V, \
-         mean_extinguish_v={mean_extinguish_v:.2} V (target ~VD=93), strikes={strikes}, \
-         period={period_ms:.4} ms (analytic ~7.885 ms), nan_reset={nan_reset}",
+         mean_extinguish_v={mean_extinguish_v:.2} V (emergent floor, target ~89 V), \
+         strikes={strikes}, period={period_ms:.4} ms (analytic 8.40 ms + discretization), \
+         nan_reset={nan_reset}",
         vmax - vmin
     );
     assert_eq!(nan_reset, 0, "[{route}] NaN resets in glow oscillator");
@@ -248,21 +262,27 @@ fn assert_relax_fixed(route: &str, out: &str) {
         vmax >= 133.0 && vmax <= 137.0,
         "[{route}] peak should strike near VO=135, got vmax={vmax}"
     );
-    // Extinction lands at the maintaining voltage VD≈93, not overshooting to ~0.
-    // Regression guard vs the old fixed-RON bug (vmin≈-2.5 V, 137 V swing, 62 Hz).
+    // The emergent reset floor lands at the maintaining-line intercept region
+    // v0+RS·IHOLD≈89 V — the Option-A fix. Regression guards BOTH ways: vs the
+    // old fixed-VD=93 floor (too high, mis-centers the divider window) AND vs the
+    // ancient fixed-RON deep-discharge bug (vmin≈-2.5 V, 137 V swing).
     assert!(
-        (mean_extinguish_v - 93.0).abs() < 2.0 && vmin > 90.0,
-        "[{route}] extinction must land at VD≈93 V, not overshoot: \
-         mean_extinguish_v={mean_extinguish_v} V, vmin={vmin} V"
+        (mean_extinguish_v - 89.0).abs() < 1.5 && vmin > 87.0 && vmin < 90.5,
+        "[{route}] extinction must land at the emergent floor ≈89 V \
+         (v0+RS·IHOLD), not the old 93 V: mean_extinguish_v={mean_extinguish_v} V, vmin={vmin} V"
     );
     let swing = vmax - vmin;
     assert!(
-        (swing - 42.0).abs() < 4.0,
-        "[{route}] sawtooth p-p should be VO−VD≈42 V (not the ~137 V bug), got {swing} V"
+        (swing - 46.0).abs() < 3.0,
+        "[{route}] sawtooth p-p should be VO−floor≈46 V, got {swing} V"
     );
+    // Analytic (instantaneous-discharge) period is RC·ln((170−89.1)/(170−135))
+    // = 8.40 ms. Measured runs ~3% high (8.67 ms): the finite RS·C=30 µs
+    // discharge flank (~6 samples at 48k) plus whole-sample strike latency add
+    // real time the instantaneous formula omits. Tolerance covers that bias.
     assert!(
-        (period_ms - 7.885).abs() / 7.885 < 0.05,
-        "[{route}] relaxation period should match analytic 7.885 ms (±5%), got {period_ms} ms"
+        (period_ms - 8.40).abs() / 8.40 < 0.06,
+        "[{route}] relaxation period should match analytic 8.40 ms + discretization (±6%), got {period_ms} ms"
     );
 }
 
@@ -328,27 +348,30 @@ fn main() {
 /// rail specifically because "the correct oscillation frequency of the divider
 /// sections depends on the supply voltage." A model whose dividers are
 /// insensitive to Vb is wrong regardless of how well any single point locks.
-/// T = RC·ln((Vb−Vd)/(Vb−Vo)) predicts T(170 V)=7.885 ms, T(150 V)=13.35 ms
-/// (×1.69) — sensitivity rises sharply as Vo approaches Vb.
+/// T = RC·ln((Vb−V_floor)/(Vb−Vo)) with the emergent floor V_floor≈89.1 predicts
+/// T(170 V)=8.40 ms, T(150 V)=14.01 ms (×1.67) — sensitivity rises sharply as Vo
+/// approaches Vb. (Measured runs ~3% high on both from the finite-discharge/
+/// whole-sample overhead; the ratio is robust to it since the overhead is a
+/// near-constant absolute time.)
 #[test]
 fn test_glow_period_is_supply_sensitive() {
     let t_hi = measure_period_ms(170.0, "supply_170");
     let t_lo = measure_period_ms(150.0, "supply_150");
     eprintln!(
         "GLOW SUPPLY SENSITIVITY: T(170V)={t_hi:.4} ms, T(150V)={t_lo:.4} ms, \
-         ratio={:.3} (analytic 13.35/7.885 = 1.69)",
+         ratio={:.3} (analytic 14.01/8.40 = 1.67)",
         t_lo / t_hi
     );
     // Lowering the rail 170→150 V must lengthen the period substantially
-    // (analytic ×1.69). A supply-insensitive model would give ratio ≈ 1.
+    // (analytic ×1.67). A supply-insensitive model would give ratio ≈ 1.
     assert!(
         t_lo > t_hi * 1.4,
         "divider period must be supply-sensitive (schemer's ZA1001 falsification \
          test): T(150V)={t_lo} ms should be ≫ T(170V)={t_hi} ms"
     );
-    // And each should track its own analytic prediction (±6%).
-    assert!((t_hi - 7.885).abs() / 7.885 < 0.06, "T(170V)={t_hi} vs analytic 7.885 ms");
-    assert!((t_lo - 13.35).abs() / 13.35 < 0.06, "T(150V)={t_lo} vs analytic 13.35 ms");
+    // And each should track its own analytic prediction + discretization (±6%).
+    assert!((t_hi - 8.40).abs() / 8.40 < 0.06, "T(170V)={t_hi} vs analytic 8.40 ms");
+    assert!((t_lo - 14.01).abs() / 14.01 < 0.06, "T(150V)={t_lo} vs analytic 14.01 ms");
 }
 
 // ── Oversampling anti-alias validation (arbiter ruling on sub-sample edge

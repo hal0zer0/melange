@@ -1003,23 +1003,31 @@ pub struct LdrParams {
 pub struct GlowParams {
     /// Strike / breakdown (ignition) voltage [V] — dark→lit when `V(a)−V(k) ≥ vo`.
     pub vo: f64,
-    /// Maintaining voltage [V]. While lit the tube is a Thévenin/Norton source
-    /// `i = (V(a)−V(k) − vd) / ron`, so the conducting reservoir discharges
-    /// toward `vd` (NOT toward ground) — this is what fixes the extinction
-    /// flank at audio sample rates. Also the strike floor: extinction is on
-    /// holding current (`ihold`), not a bare `V ≤ vd` threshold.
-    pub vd: f64,
-    /// Conducting (lit) dynamic resistance [Ω] — low; sets the discharge slope
-    /// toward `vd`.
-    pub ron: f64,
-    /// Dark (extinguished) resistance [Ω] — very high, effectively open.
+    /// INTERCEPT of the lit maintaining line `V(a)−V(k) = v0 + rs·i` [V] — the
+    /// anode–cathode voltage the conducting tube extrapolates to at zero current.
+    /// DERIVED, not authored: `v0 = VM − RS·IK`, where `VM` is the datasheet
+    /// static maintaining voltage measured at rated current `IK`. Decoupling the
+    /// intercept from the static maintaining point is the Option-A reset-floor
+    /// fix — the old model used `VM` (≈93 V @ 1.5 mA) directly as the intercept,
+    /// which parks the reservoir-cap reset floor ~4–6 V too high. While lit the
+    /// tube is a Thévenin source `i = (V(a)−V(k) − v0) / rs`, so the reservoir
+    /// discharges toward `v0` (NOT toward ground). Extinction is on holding
+    /// current (`ihold`), not a bare voltage threshold.
+    pub v0: f64,
+    /// Maintaining-line slope [Ω] — the soft POSITIVE dynamic resistance of the
+    /// lit glow (a voltage source with a slope, not a resistor to ground).
+    /// Datasheet-sourced (ZA1004 form-transfer ≈ 2.5–4.25 kΩ over 0.2–3 mA).
+    /// Sets the reset floor via the derived intercept `v0 = VM − rs·IK`.
+    pub rs: f64,
+    /// Dark (extinguished) resistance [Ω] — very high, effectively open
+    /// (datasheet insulation ≥ 300 MΩ).
     pub roff: f64,
     /// Holding / maintaining current [A]. The lit→dark transition fires when the
-    /// conduction current `(V(a)−V(k) − vd)/ron` falls below this. Physically the
+    /// conduction current `(V(a)−V(k) − v0)/rs` falls below this. Physically the
     /// gas de-ionizes when it can no longer sustain the discharge; a starved
     /// oscillator (charging current < ihold) extinguishes, while a rail with
     /// enough sustaining current stays lit (regulator behaviour) — one model
-    /// covers both. Small-neon default ≈ 2e-4 A.
+    /// covers both. The reset floor lands at `v0 + rs·ihold`.
     pub ihold: f64,
 }
 

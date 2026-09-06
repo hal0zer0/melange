@@ -1247,15 +1247,18 @@ impl RustEmitter {
                 }
                 DeviceParams::Glow(gp) => {
                     // Glow / neon lamp (EXPERIMENTAL). VO = strike threshold
-                    // (dark→lit, after-solve update()). VD = maintaining voltage:
-                    // the lit in-NR eval is a Thévenin source i=(v−VD)/RON so the
-                    // reservoir discharges toward VD, and update() extinguishes on
-                    // holding current (v−VD)/RON ≤ IHOLD. RON/ROFF are the lit /
-                    // dark resistances (selected by the frozen latch). The live
-                    // latch is the opaque `device_{n}_state` block, not a const.
+                    // (dark→lit, after-solve update()). The lit maintaining line
+                    // is V0 + RS·i (a voltage source with a soft positive slope,
+                    // NOT a resistor to ground): the in-NR eval is a Thévenin
+                    // source i=(v−V0)/RS so the reservoir discharges toward the
+                    // INTERCEPT V0 (= datasheet VM − RS·IK, NOT the static VM),
+                    // and update() extinguishes on holding current
+                    // (v−V0)/RS ≤ IHOLD. RS/ROFF are the lit / dark resistances
+                    // (selected by the frozen latch). The live latch is the
+                    // opaque `device_{n}_state` block, not a const.
                     emit_device_const(&mut code, dev_num, "VO", gp.vo);
-                    emit_device_const(&mut code, dev_num, "VD", gp.vd);
-                    emit_device_const(&mut code, dev_num, "RON", gp.ron);
+                    emit_device_const(&mut code, dev_num, "V0", gp.v0);
+                    emit_device_const(&mut code, dev_num, "RS", gp.rs);
                     emit_device_const(&mut code, dev_num, "ROFF", gp.roff);
                     emit_device_const(&mut code, dev_num, "IHOLD", gp.ihold);
                     code.push('\n');
