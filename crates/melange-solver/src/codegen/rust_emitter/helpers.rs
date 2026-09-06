@@ -604,6 +604,16 @@ pub(super) fn emit_thermal_tj_advance(dev_num: usize, cth: f64) -> String {
 pub(super) struct StatefulDeviceData<'a> {
     pub(super) dev_num: usize,
     pub(super) spec: &'a crate::device_types::StatefulSpec,
+    /// True for a device that flips a discrete latch in `update()` (Glow today;
+    /// CdsLdr is a continuous resistance and is NOT latched). Gates the NR
+    /// warm-start predictor: a circuit with a latched device uses a zero-order
+    /// warm start (`i_nl = i_nl_prev`) instead of the first-order predictor
+    /// `2·i_prev − i_prev_prev`, which extrapolates the stiff lit-discharge
+    /// current into device breakdown and diverges (see the predictor sites). The
+    /// gate is compile-time (on latched-device presence), so a non-latched
+    /// circuit (incl. LDR-only) emits the first-order predictor verbatim →
+    /// byte-identical to pre-fix.
+    pub(super) is_latched: bool,
 }
 
 /// Collect every device slot carrying an opaque stateful state block.
@@ -616,11 +626,21 @@ pub(super) fn stateful_device_data(ir: &CircuitIR) -> Vec<StatefulDeviceData<'_>
         .iter()
         .enumerate()
         .filter_map(|(dev_num, slot)| {
-            slot.stateful
-                .as_ref()
-                .map(|spec| StatefulDeviceData { dev_num, spec })
+            slot.stateful.as_ref().map(|spec| StatefulDeviceData {
+                dev_num,
+                spec,
+                is_latched: matches!(slot.device_type, crate::codegen::ir::DeviceType::Glow),
+            })
         })
         .collect()
+}
+
+/// True if the circuit has any latched stateful device (Glow) — the compile-time
+/// gate for the warm-start-predictor reset. When false, every predictor site
+/// emits its original first-order warm start verbatim, so the generated source
+/// for any non-glow circuit is byte-identical to pre-fix.
+pub(super) fn has_latched_device(ir: &CircuitIR) -> bool {
+    stateful_device_data(ir).iter().any(|d| d.is_latched)
 }
 
 /// Format a state-block seed as a Rust array literal, e.g. `[1.0e7, 7.5e1]`.
@@ -1325,6 +1345,7 @@ mod stateful_interface_tests {
         let devs = vec![StatefulDeviceData {
             dev_num: 0,
             spec: &spec,
+            is_latched: true,
         }];
         // Opaque [f64; N], N device-declared — never a bool.
         assert!(emit_stateful_state_fields(&devs).contains("pub device_0_state: [f64; 2],"));
@@ -1342,6 +1363,7 @@ mod stateful_interface_tests {
         let devs = vec![StatefulDeviceData {
             dev_num: 0,
             spec: &spec,
+            is_latched: true,
         }];
         let call = emit_stateful_update(&devs);
         // Two driving nodes → [f64; 2] arrays; node 5 → index 4, ground → 0.0.
@@ -1362,6 +1384,7 @@ mod stateful_interface_tests {
         let devs = vec![StatefulDeviceData {
             dev_num: 0,
             spec: &spec,
+            is_latched: true,
         }];
         // A throwaway slot to satisfy the body dispatch (params irrelevant to
         // the Phase-1a scaffold body).

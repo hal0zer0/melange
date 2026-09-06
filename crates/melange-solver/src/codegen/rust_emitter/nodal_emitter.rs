@@ -12,7 +12,8 @@ use super::dk_emitter::{
 use super::helpers::{
     device_param_template_data, emit_pentode_nr_dk_stamp, emit_stateful_default_fields,
     emit_stateful_set_sample_rate_body, emit_stateful_state_fields, emit_stateful_state_restore,
-    emit_stateful_update, emit_thermal_tj_advance, fmt_f64, format_matrix_rows, oversampling_info,
+    emit_stateful_update, emit_thermal_tj_advance, fmt_f64, format_matrix_rows, has_latched_device,
+    oversampling_info,
     pentode_dispatch, recommended_warmup_samples, section_banner, self_heating_device_data,
     stateful_device_data, warmup_estimate_capped,
 };
@@ -5648,9 +5649,24 @@ impl RustEmitter {
             code.push_str("    // First-order predictor warm start\n");
             code.push_str("    let mut i_nl = [0.0f64; M];\n");
             code.push_str("    for i in 0..M {\n");
-            code.push_str(
-                "        i_nl[i] = 2.0 * state.i_nl_prev[i] - state.i_nl_prev_prev[i];\n",
-            );
+            if has_latched_device(ir) {
+                // Glow present → ZERO-ORDER warm start. The first-order predictor
+                // `2·i_prev − i_prev_prev` extrapolates the stiff lit-discharge
+                // current (RS↔ROFF is a ~1e5 conductance step) into the cathode
+                // diode's reverse breakdown, which the Schur convergence accepts
+                // (nodal Schur divergence to ~1e6 V). The overshoot is throughout
+                // the lit discharge, not just at the flip, so narrowing to
+                // flip-adjacent samples is insufficient (measured); unconditional
+                // zero-order-when-glow is clean and tighter. Compile-time gated on
+                // latched-device presence → byte-identical for every non-glow circuit.
+                code.push_str(
+                    "        i_nl[i] = state.i_nl_prev[i];\n",
+                );
+            } else {
+                code.push_str(
+                    "        i_nl[i] = 2.0 * state.i_nl_prev[i] - state.i_nl_prev_prev[i];\n",
+                );
+            }
             code.push_str("    }\n");
             // Convergence is determined post-loop by `state.last_nr_iterations
             // < MAX_ITER as u32` (see emission a few lines below). Earlier
@@ -6128,9 +6144,20 @@ impl RustEmitter {
             // BE NR loop (use k_be, s_ni_be)
             code.push_str("        // Reset i_nl to predictor for BE attempt\n");
             code.push_str("        for i in 0..M {\n");
-            code.push_str(
-                "            i_nl[i] = 2.0 * state.i_nl_prev[i] - state.i_nl_prev_prev[i];\n",
-            );
+            if has_latched_device(ir) {
+                // Same zero-order-when-glow gate as the trap predictor. The BE
+                // retry inherited the same first-order warm start, so a reactive
+                // be_fallback could not recover across the glow discontinuity
+                // without this (the auto-detector fired but did not save the trap
+                // run). Compile-time gated → byte-identical for non-glow.
+                code.push_str(
+                    "            i_nl[i] = state.i_nl_prev[i];\n",
+                );
+            } else {
+                code.push_str(
+                    "            i_nl[i] = 2.0 * state.i_nl_prev[i] - state.i_nl_prev_prev[i];\n",
+                );
+            }
             code.push_str("        }\n\n");
 
             // Breakpoint-BE samples get a larger NR budget: the swap sample can
