@@ -10,12 +10,12 @@ use super::dk_emitter::{
     emit_inject_tap_constants, emit_noise_replay_body, emit_warmup_call, NoiseEmission,
 };
 use super::helpers::{
-    device_param_template_data, emit_pentode_nr_dk_stamp, emit_stateful_default_fields,
-    emit_stateful_set_sample_rate_body, emit_stateful_state_fields, emit_stateful_state_restore,
-    emit_stateful_update, emit_thermal_tj_advance, fmt_f64, format_matrix_rows, has_latched_device,
-    oversampling_info,
-    pentode_dispatch, recommended_warmup_samples, section_banner, self_heating_device_data,
-    stateful_device_data, warmup_estimate_capped,
+    device_param_template_data, emit_glow_lit_be_hold, emit_pentode_nr_dk_stamp,
+    emit_stateful_default_fields, emit_stateful_set_sample_rate_body, emit_stateful_state_fields,
+    emit_stateful_state_restore, emit_stateful_update, emit_thermal_tj_advance, fmt_f64,
+    format_matrix_rows, has_latched_device, oversampling_info, pentode_dispatch,
+    recommended_warmup_samples, section_banner, self_heating_device_data, stateful_device_data,
+    warmup_estimate_capped,
 };
 use super::nr_helpers::{emit_nr_singular_fallback, emit_schur_nr_limit_and_converge};
 use super::RustEmitter;
@@ -2035,6 +2035,19 @@ impl RustEmitter {
                 "pub const BREAKPOINT_BE_MAX_ITER: usize = {};\n\n",
                 ir.solver_config.max_iterations.max(200)
             ));
+            if has_latched_device(ir) {
+                code.push_str(
+                    "/// Glow lit-hold BE: the breakpoint-BE countdown is held at this value\n\
+                     /// for every sample a glow device is lit, so the whole lit discharge\n\
+                     /// (tau = RS*C, on the order of the audio-rate sample period) is solved\n\
+                     /// on the L-stable BE matrices. Trap's damping factor on that stiff mode\n\
+                     /// tends to -1 and rings into the cathode diode's breakdown at\n\
+                     /// 44.1-96 kHz. 1 = lit samples only (measured sufficient: the sample\n\
+                     /// after extinguish is a plain ROFF trap step from a BE-settled v_prev);\n\
+                     /// 2 would also hold the first dark sample.\n",
+                );
+                code.push_str("pub const GLOW_LIT_BE_SAMPLES: u32 = 1;\n\n");
+            }
         }
         code.push_str(
             "/// Chord method: re-factor Jacobian every N iterations (full LU path only).\n",
@@ -6086,7 +6099,16 @@ impl RustEmitter {
             // re-add it — the primary RHS already skips it under BE (see the
             // gating comment at the Step 1 RHS build), and the fallback is
             // the same BE discretization.
-            if !ir.solver_config.backward_euler {
+            //
+            // Also omitted for glow circuits: there the fallback IS the
+            // integrator for every lit sample (glow lit-hold), and with the
+            // stamp a lit BE sample solves (G + C/T)v = (C/T)v_prev + u +
+            // N_I(i_prev + i) — the mA-scale maintaining-line current counted
+            // twice — instead of the BE step N_I·i that the clean
+            // `--backward-euler` build takes. Measured on the 5-stage divider
+            // at 44.1 kHz: lit-hold + stamped fallback rings to ~500 V;
+            // lit-hold + this omission is 175 V / 0 resets / exact ratios.
+            if !ir.solver_config.backward_euler && !has_latched_device(ir) {
                 code.push_str(
                     "            for j in 0..M { sum += N_I[i][j] * state.i_nl_prev[j]; }\n",
                 );
@@ -6395,6 +6417,8 @@ impl RustEmitter {
         if ir.solver_config.breakpoint_be {
             code.push_str("    if state.breakpoint_be > 0 { state.breakpoint_be -= 1; }\n");
         }
+        // Glow lit-hold re-arm (after the decrement; empty for non-glow).
+        code.push_str(&emit_glow_lit_be_hold(ir));
         // Commit input_prev here (NOT at the RHS build) so the sub-step input
         // interpolation earlier in the sample still sees last sample's value.
         if multi_input {
@@ -8683,8 +8707,9 @@ impl RustEmitter {
                 // (2026-05-28 restoration), but a BE-primary build must not
                 // re-add it — the primary RHS already skips it under BE (see the
                 // gating comment at the Step 1 RHS build), and the fallback is
-                // the same BE discretization.
-                if m > 0 && !ir.solver_config.backward_euler {
+                // the same BE discretization. Also omitted for glow circuits
+                // (lit-hold BE) — see the matching comment on the Schur path.
+                if m > 0 && !ir.solver_config.backward_euler && !has_latched_device(ir) {
                     code.push_str("            for j in 0..M {\n");
                     code.push_str("                sum += N_I[i][j] * state.i_nl_prev[j];\n");
                     code.push_str("            }\n");
@@ -9086,6 +9111,8 @@ impl RustEmitter {
         if ir.solver_config.breakpoint_be {
             code.push_str("    if state.breakpoint_be > 0 { state.breakpoint_be -= 1; }\n");
         }
+        // Glow lit-hold re-arm (after the decrement; empty for non-glow).
+        code.push_str(&emit_glow_lit_be_hold(ir));
         // Commit input_prev here (NOT at the RHS build) so the sub-step input
         // interpolation earlier in the sample still sees last sample's value.
         if multi_input {

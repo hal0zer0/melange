@@ -3265,9 +3265,20 @@ impl CircuitIR {
         // *knob* pot (runtime_field == None), so runtime-R-only circuits stay
         // byte-identical.
         let has_knob_pot = mna.pots.iter().any(|p| p.runtime_field.is_none());
+        // A glow-discharge device is a runtime conductance swap of the same
+        // kind (RS lit <-> ROFF dark, ~1e5 step) that fires on its own latch
+        // instead of on a setter. On the nodal route the lit phase is held on
+        // the BE matrices (trap is A- but not L-stable: its damping factor on
+        // the stiff lit mode tends to -1 and rings into the cathode diode's
+        // breakdown at 44.1-96 kHz), so the machinery must be emitted for
+        // glow decks too. DK is not re-armed by the glow (unchanged behaviour).
+        let has_glow = mna
+            .nonlinear_devices
+            .iter()
+            .any(|d| d.device_type == crate::mna::NonlinearDeviceType::Glow);
         solver_config.breakpoint_be = !solver_config.backward_euler
             && !has_saturating
-            && (!mna.switches.is_empty() || has_knob_pot);
+            && (!mna.switches.is_empty() || has_knob_pot || has_glow);
 
         let matrices = Matrices {
             s: s_flat,

@@ -643,6 +643,37 @@ pub(super) fn has_latched_device(ir: &CircuitIR) -> bool {
     stateful_device_data(ir).iter().any(|d| d.is_latched)
 }
 
+/// Glow lit-hold: re-arm the breakpoint-BE countdown while any glow device is
+/// lit (nodal route only). Spliced AFTER the per-sample `breakpoint_be`
+/// decrement, so the countdown is held at `GLOW_LIT_BE_SAMPLES` for as long as
+/// a latch reads lit and then runs down once it extinguishes (with the value
+/// 1 the first dark sample is already back on trap). Empty (byte-identical)
+/// for any circuit without a latched device or without the breakpoint-BE
+/// machinery.
+pub(super) fn emit_glow_lit_be_hold(ir: &CircuitIR) -> String {
+    if !ir.solver_config.breakpoint_be {
+        return String::new();
+    }
+    let lit: Vec<String> = stateful_device_data(ir)
+        .iter()
+        .filter(|d| d.is_latched)
+        .map(|d| format!("state.device_{}_state[0] >= 0.5", d.dev_num))
+        .collect();
+    if lit.is_empty() {
+        return String::new();
+    }
+    format!(
+        "    // Glow lit-hold: solve the next sample on the L-stable BE matrices while\n\
+         \x20   // any glow device is lit (trap rings on the stiff RS-lit mode at audio\n\
+         \x20   // rates). Re-armed after the decrement so the hold persists through the\n\
+         \x20   // lit phase and runs down GLOW_LIT_BE_SAMPLES samples after extinguish.\n\
+         \x20   if {} {{\n\
+         \x20       state.breakpoint_be = state.breakpoint_be.max(GLOW_LIT_BE_SAMPLES);\n\
+         \x20   }}\n",
+        lit.join(" || ")
+    )
+}
+
 /// Format a state-block seed as a Rust array literal, e.g. `[1.0e7, 7.5e1]`.
 ///
 /// Length is `state_size`; if `state_seed` is short it is padded with `0.0`

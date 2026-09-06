@@ -619,3 +619,134 @@ fn test_glow_chain_no_divergence_dk() {
     let out = compile_and_run(&code, CHAIN_MAIN, "chain_dk");
     assert_chain_no_divergence("DK Schur", &out);
 }
+
+/// The 5-stage divider chain (Philicorda B5..B9 topology, undriven). Two
+/// stages survive at audio rates on the zero-order warm start alone; five do
+/// not: pre-fix the nodal route reaches ~4e4 V at 44.1/48/96 kHz (clean only
+/// at 192 kHz), with no magnitude reset — a silent mis-divide.
+fn chain5_deck() -> String {
+    "\
+Glow 5-stage divider chain — audio-rate nodal lit-hold regression
+R35 ht a5 1.5meg
+R36 k5 0 47k
+N5 a5 k5 ZA1001
+C11 a5 m5 470p
+C12 m5 0 5.6n
+C36 a5 k6 22p
+C35 k6 0 15p
+R16 ht r16w 620k
+R22 r16w a6 1.5meg
+N6 a6 k6 ZA1001
+D_GR1 k6 0 BA100
+C13 a6 m6 1n
+C14 m6 0 10n
+C15 a6 k7 22p
+C16 k7 0 15p
+R17 ht r17w 1300k
+R23 r17w a7 1.8meg
+N7 a7 k7 ZA1001
+D_GR2 k7 0 BA100
+C17 a7 m7 1n
+C18 m7 0 18n
+C19 a7 k8 22p
+C20 k8 0 15p
+R18 ht r18w 1340k
+R24 r18w a8 1.8meg
+N8 a8 k8 ZA1001
+D_GR3 k8 0 BA100
+C21 a8 m8 2.2n
+C22 m8 0 68n
+C23 a8 k9 47p
+C24 k9 0 47p
+R19 ht r19w 1100k
+R25 r19w a9 1.8meg
+N9 a9 k9 ZA1001
+D_GR4 k9 0 BA100
+C25 a9 m9 4.7n
+C26 m9 0 150n
+R6 in k5 100k
+R_out m9 osc 1k
+R_load osc 0 1meg
+VHT ht 0 DC 175
+.model BA100 D(IS=2e-9 N=1.9 RS=8 CJO=1.5p BV=60)
+.model ZA1001 NEON(VO=135 VM=93 IK=1.5m RS=3000 IHOLD=2e-4 ROFF=1e9)
+.END
+"
+    .to_string()
+}
+
+/// 0.5 s at 44.1 kHz. Pre-fix the 5-stage chain leaves the 175 V rail within
+/// the first few ms; 0.5 s covers ~70 periods of the slowest (÷16) stage.
+const CHAIN5_MAIN_44K1: &str = r#"
+fn main() {
+    let mut state = CircuitState::default();
+    let n = 22050usize;
+    let mut maxabs = 0.0f64;
+    for _ in 0..n {
+        let _ = process_sample(0.0, &mut state);
+        for &v in state.v_prev.iter() {
+            let a = v.abs();
+            if a > maxabs { maxabs = a; }
+        }
+    }
+    println!("magnitude_reset={}", state.diag_magnitude_reset_count);
+    println!("nan_reset={}", state.diag_nan_reset_count);
+    println!("nr_max_iter={}", state.diag_nr_max_iter_count);
+    println!("maxabs={:.3}", maxabs);
+}
+"#;
+
+/// REGRESSION (nodal, 44.1 kHz — the lowest common DAW rate and the worst
+/// case: the trap ring on the glow's RS/ROFF conductance step grows with dt).
+/// The lit-hold BE (breakpoint-BE countdown re-armed while any glow is lit)
+/// plus a fallback RHS without the trap-midpoint `N_I * i_nl_prev` stamp must
+/// hold every node at the rail with zero resets and zero trap max-iter hits.
+#[test]
+fn test_glow_chain5_no_divergence_nodal_44k1() {
+    let code = generate_nodal_code(&chain5_deck(), 44100.0);
+    assert!(
+        code.contains("pub const GLOW_LIT_BE_SAMPLES: u32 = 1;"),
+        "glow nodal code must emit the lit-hold const"
+    );
+    assert!(
+        code.contains("state.breakpoint_be = state.breakpoint_be.max(GLOW_LIT_BE_SAMPLES);"),
+        "glow nodal code must re-arm breakpoint-BE while lit"
+    );
+    assert!(
+        !code.contains("N_I[i][j] * state.i_nl_prev[j]"),
+        "glow nodal BE fallback must not carry the trap-midpoint i_nl_prev stamp"
+    );
+    let out = compile_and_run(&code, CHAIN5_MAIN_44K1, "chain5_nodal_44k1");
+    assert_chain_no_divergence("nodal Schur/trap 44.1k 5-stage", &out);
+    let nr_max = parse_kv(&out, "nr_max_iter") as u64;
+    assert_eq!(
+        nr_max, 0,
+        "5-stage chain hit the trap NR wall {nr_max} times — lit samples must be solved on BE proactively"
+    );
+}
+
+/// Byte-neutrality guard for the lit-hold machinery: a circuit without a
+/// glow device (here a diode-only deck with the same cathode diode) must emit
+/// neither the lit-hold const/re-arm nor the breakpoint-BE state, and must
+/// keep the trap-midpoint `N_I * i_nl_prev` stamp in its BE fallback.
+#[test]
+fn test_glow_lit_hold_absent_without_glow() {
+    let deck = "\
+Diode clamp — no glow device
+Vb rail 0 DC 175
+Rc rail osc 1MEG
+Cosc osc 0 10N
+D1 osc k BA100
+Rk k 0 47k
+Rin in k 100k
+.model BA100 D(IS=2e-9 N=1.9 RS=8 CJO=1.5p BV=60)
+.END
+";
+    let code = generate_nodal_code(deck, 44100.0);
+    assert!(!code.contains("GLOW_LIT_BE_SAMPLES"));
+    assert!(!code.contains("breakpoint_be"));
+    assert!(
+        code.contains("N_I[i][j] * state.i_nl_prev[j]"),
+        "non-glow BE fallback must keep the trap-midpoint i_nl_prev stamp (unchanged behaviour)"
+    );
+}
