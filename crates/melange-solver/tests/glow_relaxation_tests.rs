@@ -523,3 +523,99 @@ fn test_glow_oversampling_preserves_physics() {
     let out = compile_and_run(&code, OBSERVE_MAIN, "os4_physics");
     assert_relax_fixed("nodal OS=4", &out);
 }
+
+// ---------------------------------------------------------------------------
+// Multi-stage chain divergence regression (nodal Schur NR false-convergence).
+//
+// A 2-stage ZA1001 divider (the minimal case that reproduces the failure).
+// Pre-fix, the first-order NR warm-start predictor `2·i_prev − i_prev_prev`
+// extrapolated the stiff lit-discharge current (the glow RS↔ROFF is a ~1e5
+// conductance step) into the BA100 cathode diode's reverse breakdown, and the
+// voltage-step-only Schur convergence test ACCEPTED the non-physical state
+// (residual ~2.35e14 A) → runaway to ~1e6 V (149 magnitude-resets on nodal-trap;
+// DK survived only via Step-6c damping masking the same overshoot). The fix is a
+// zero-order warm start for glow circuits. This deck is openphilicorda's minimal
+// repro (`nodal-trap-divergence.cir`), output node renamed `out`→`osc` for the
+// harness. Output node "osc", input node "in", undriven.
+fn chain_deck() -> String {
+    "\
+Glow 2-stage divider chain — nodal-trap divergence regression
+R35 ht a5 1.5meg
+R36 k5 0 47k
+N5 a5 k5 ZA1001
+C11 a5 m5 470p
+C12 m5 0 5.6n
+C36 a5 k6 22p
+C35 k6 0 15p
+R16 ht r16w 650k
+R22 r16w a6 1.5meg
+N6 a6 k6 ZA1001
+D_GR1 k6 0 BA100
+C13 a6 m6 1n
+C14 m6 0 10n
+R6 in k5 100k
+R_out m6 osc 1k
+R_load osc 0 1meg
+VHT ht 0 DC 175
+.model BA100 D(IS=2e-9 N=1.9 RS=8 CJO=1.5p BV=60)
+.model ZA1001 NEON(VO=135 VM=93 IK=1.5m RS=3000 IHOLD=2e-4 ROFF=1e9)
+.END
+"
+    .to_string()
+}
+
+const CHAIN_MAIN: &str = r#"
+fn main() {
+    let mut state = CircuitState::default();
+    // ~0.15 s at 192 kHz. The divergence manifests within ~60 samples pre-fix.
+    let n = 28800usize;
+    let mut maxabs = 0.0f64;
+    for _ in 0..n {
+        let _ = process_sample(0.0, &mut state);
+        for &v in state.v_prev.iter() {
+            let a = v.abs();
+            if a > maxabs { maxabs = a; }
+        }
+    }
+    println!("magnitude_reset={}", state.diag_magnitude_reset_count);
+    println!("nan_reset={}", state.diag_nan_reset_count);
+    println!("maxabs={:.3}", maxabs);
+}
+"#;
+
+fn assert_chain_no_divergence(route: &str, out: &str) {
+    let mr = parse_kv(out, "magnitude_reset") as u64;
+    let nr = parse_kv(out, "nan_reset") as u64;
+    let maxabs = parse_kv(out, "maxabs");
+    eprintln!("GLOW CHAIN [{route}]: magnitude_reset={mr}, nan_reset={nr}, maxabs={maxabs:.1} V (rail 175 V)");
+    // Pre-fix nodal-trap gave 149 magnitude-resets and ~1e6 V. The fix must hold
+    // every node within a few times the 175 V rail with zero resets, both routes.
+    assert_eq!(
+        mr, 0,
+        "[{route}] glow chain DIVERGED ({mr} magnitude-resets) — nodal-Schur NR false-convergence regression"
+    );
+    assert_eq!(nr, 0, "[{route}] glow chain produced {nr} NaN resets");
+    assert!(
+        maxabs < 250.0,
+        "[{route}] glow chain node voltage {maxabs} V >> 175 V rail — divergence"
+    );
+}
+
+/// REGRESSION: the multi-stage glow divider chain must not diverge on the nodal
+/// Schur route (the failure was SILENT — it looked like a collapsed single
+/// frequency, but was a numerical runaway masked by the magnitude-reset cadence).
+#[test]
+fn test_glow_chain_no_divergence_nodal() {
+    let code = generate_nodal_code(&chain_deck(), 192000.0);
+    let out = compile_and_run(&code, CHAIN_MAIN, "chain_nodal");
+    assert_chain_no_divergence("nodal Schur/trap", &out);
+}
+
+/// Same chain on the DK route. Pre-fix it survived only because Step-6c damping
+/// masked the same overshoot; the fix un-masks it and it must stay clean.
+#[test]
+fn test_glow_chain_no_divergence_dk() {
+    let code = generate_dk_code(&chain_deck(), 192000.0);
+    let out = compile_and_run(&code, CHAIN_MAIN, "chain_dk");
+    assert_chain_no_divergence("DK Schur", &out);
+}
