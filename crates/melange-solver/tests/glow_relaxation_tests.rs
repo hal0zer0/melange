@@ -16,7 +16,7 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+use melange_solver::codegen::{CodeGenerator, CodegenConfig, SubsampleFireMode};
 use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
@@ -51,12 +51,17 @@ fn generate_nodal_code(spice: &str, sample_rate: f64) -> String {
     let output_node = mna.node_map["osc"] - 1;
     mna.g[input_node][input_node] += 1.0;
 
+    // Pinned to the WHOLE-SAMPLE latch: these tests document the pre-feature
+    // glow behaviour (strike/extinguish on the grid, lit-hold BE, OS ASR). The
+    // sub-sample fire re-solve (default `auto` on nodal-Schur glow decks) is
+    // covered by `subsample_fire_tests.rs`.
     let config = CodegenConfig {
         circuit_name: "glow_relax_test".to_string(),
         sample_rate,
         input_node,
         output_nodes: vec![output_node],
         input_resistance: 1.0,
+        subsample_fire: SubsampleFireMode::Off,
         ..CodegenConfig::default()
     };
     CodeGenerator::new(config)
@@ -85,6 +90,7 @@ fn generate_glow_code_os(spice: &str, sample_rate: f64, os: usize) -> String {
         input_resistance: 1.0,
         oversampling_factor: os,
         output_clamp_v: 1.0e9, // don't clip the ~40 V reservoir AC swing
+        subsample_fire: SubsampleFireMode::Off, // whole-sample latch (see generate_nodal_code)
         ..CodegenConfig::default()
     };
     CodeGenerator::new(config)

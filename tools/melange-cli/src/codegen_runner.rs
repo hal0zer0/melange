@@ -236,7 +236,18 @@ pub fn generate_simulate_main(
     noise_enabled: bool,
     inject_driven: &[(usize, InjectSource)],
     num_inject: usize,
+    extra_diag_counters: &[&str],
 ) -> String {
+    // Optional `CircuitState` u64 diagnostic counters that exist only on some
+    // builds (e.g. `diag_subsample_fire_count` on glow nodal-Schur decks).
+    // Printed as `DIAG:<name without diag_>=<value>` after the fixed set.
+    let extra_diag_lines: String = extra_diag_counters
+        .iter()
+        .map(|f| {
+            let key = f.strip_prefix("diag_").unwrap_or(f);
+            format!("    eprintln!(\"DIAG:{key}={{}}\", state.{f});\n")
+        })
+        .collect();
     let pot_lines: String = pot_calls.iter().map(|c| format!("    {c};\n")).collect();
     let switch_lines: String = switch_calls.iter().map(|c| format!("    {c};\n")).collect();
     // `--noise <mode>` bakes the noise machinery into codegen (state fields,
@@ -432,7 +443,7 @@ fn main() {{
     eprintln!("DIAG:be_fallback_count={{}}", state.diag_be_fallback_count);
     eprintln!("DIAG:region_exit_count={{}}", state.diag_region_exit_count);
     eprintln!("DIAG:max_abs_v_prev={{:.6}}", max_abs_v_prev);
-}}
+{extra_diag_lines}}}
 "#,
         amp = amplitude.unwrap_or(0.5),
     )

@@ -370,6 +370,9 @@ fn resolved_build_flags(ir: &CircuitIR) -> String {
     if ir.solver_config.runtime_be_latch {
         build.push_str(", runtime-be-latch");
     }
+    if ir.solver_config.subsample_fire {
+        build.push_str(", subsample-fire");
+    }
     build
 }
 
@@ -384,9 +387,32 @@ fn provenance_json(ir: &CircuitIR, version: &str, commit: &str) -> String {
     } else {
         "trapezoidal"
     };
+    // Solver route (DK vs full-nodal). The commonest "wrong output" confusion
+    // is "compiled DK when I expected nodal" (or vice-versa); the route is
+    // announced at compile time but was NOT recorded in the artifact, so a
+    // `.rs`/plugin could not self-report which numerical path generated it.
+    // (The nodal Schur-vs-full-LU sub-path is resolved later inside emit_nodal
+    // and travels in the build meta `nodal_sub_path`, not here.)
+    let solver = match ir.solver_mode {
+        crate::codegen::ir::SolverMode::Dk => "dk",
+        crate::codegen::ir::SolverMode::Nodal => "nodal",
+    };
+    // Exact build identity: a runtime hash of the melange binary that emitted
+    // this code. version+commit are a source-side POINTER that cannot see a
+    // dirty tree or a different feature/profile build; the exe hash is computed
+    // from the artifact and is exact (robogogo thread 288, arbiter ruling). It
+    // is MASKED in the golden harness alongside melange/commit, so a clean
+    // rebuild at one commit does not churn codegen diffs.
+    let exe = crate::build_identity::current_exe_hash_or_unknown();
     let mut s = String::from("{");
     s.push_str(&format!("\"melange\":\"{version}\","));
     s.push_str(&format!("\"commit\":\"{commit}\","));
+    // Algorithm-qualified key: a digest's algorithm IS its unit, so it belongs
+    // in the name — a bare `exe` slot invites a consumer to fill it with a
+    // different digest of the same file and read a MATCH failure as two
+    // binaries (robogogo thread 184). Matches oomox's `..._fnv1a64` convention.
+    s.push_str(&format!("\"exe_fnv1a64\":\"{exe}\","));
+    s.push_str(&format!("\"solver\":\"{solver}\","));
     s.push_str(&format!("\"integration\":\"{scheme}\","));
     s.push_str(&format!(
         "\"integration_source\":\"{}\",",
@@ -418,6 +444,9 @@ fn provenance_json(ir: &CircuitIR, version: &str, commit: &str) -> String {
     }
     if ir.solver_config.runtime_be_latch {
         s.push_str(",\"runtime_be_latch\":true");
+    }
+    if ir.solver_config.subsample_fire {
+        s.push_str(",\"subsample_fire\":true");
     }
     s.push('}');
     s
@@ -486,6 +515,9 @@ impl RustEmitter {
         let melange_commit = option_env!("MELANGE_GIT_COMMIT").unwrap_or("unknown");
         ctx.insert("melange_version", melange_version);
         ctx.insert("melange_commit", melange_commit);
+        // Exact identity of the emitting binary (see provenance_json). Masked in
+        // the golden harness, so it never churns codegen diffs.
+        ctx.insert("melange_exe", crate::build_identity::current_exe_hash_or_unknown());
 
         // Provenance line: the FULL RESOLVED flag set — every flag that changes
         // emitted DSP, AFTER netlist-directive application + auto-promotion (not
@@ -1564,6 +1596,10 @@ impl RustEmitter {
         code.push_str(&emit_stateful_update_fns(
             &stateful_device_data(ir),
             &ir.device_slots,
+            // Sub-sample fire form (both latch flips report a crossing fraction)
+            // only where the nodal-Schur event loop consumes it; `false` on every
+            // other deck keeps the reserved-slot form byte-for-byte.
+            ir.solver_config.subsample_fire,
         ));
 
         Ok(code)

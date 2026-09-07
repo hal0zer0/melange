@@ -341,6 +341,57 @@ impl std::fmt::Display for NoiseMode {
     }
 }
 
+/// Sub-sample fire mode (`--subsample-fire`): variable-dt breakpoint re-solve
+/// for latched stateful devices (glow discharge) on the NODAL route.
+///
+/// A glow strike is detected AFTER the sample's solve, so conduction begins one
+/// full inner sample late and the firing instant is quantised to the sample
+/// grid. The re-solve splits the firing sample at the linear crossing fraction
+/// `alpha`: a dark sub-step over `alpha*dt`, the latch flip, then a lit
+/// (backward-Euler) sub-step over `(1-alpha)*dt`, each on matrices rebuilt at
+/// the sub-step rate. Nodal-Schur only: the DK route bakes `S = A^-1` at
+/// compile time and cannot carry a variable-dt step.
+///
+/// - [`Auto`](Self::Auto) (default): active when the circuit has a latched
+///   device AND routes to nodal-Schur; otherwise inert (byte-identical).
+/// - [`On`](Self::On): force; refused on the DK route and on the nodal full-LU
+///   sub-path (not implemented there). Inert (warned) without a latched device.
+/// - [`Off`](Self::Off): never emit the re-solve (today's whole-sample latch).
+#[cfg(feature = "codegen")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SubsampleFireMode {
+    /// Active on nodal-Schur with a latched device; inert otherwise. Default.
+    #[default]
+    Auto,
+    /// Force on (nodal-Schur only; refused elsewhere).
+    On,
+    /// Disable (whole-sample latch flip, as before the feature).
+    Off,
+}
+
+#[cfg(feature = "codegen")]
+impl SubsampleFireMode {
+    /// Parse a mode name (case-insensitive) from a CLI flag or config string.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "on" => Some(Self::On),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    /// Human-readable name for logging and the provenance header.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
 /// Forward-active (frozen-analysis) BJT reduction mode. Controls the 1-D
 /// reduction applied to deep-forward-active BJTs (see
 /// [`crate::codegen::ir::CircuitIR::detect_forward_active_bjts`]).
@@ -520,6 +571,11 @@ pub struct CodegenConfig {
     /// pure-Ebers-Moll only — byte-identical to pre-flag codegen). See
     /// [`BjtFaMode`] and the `--bjt-fa` CLI flag.
     pub bjt_fa_mode: BjtFaMode,
+    /// Sub-sample fire (variable-dt glow-strike breakpoint re-solve) mode.
+    /// Default [`SubsampleFireMode::Auto`] — active only on nodal-Schur decks
+    /// with a latched device, byte-identical everywhere else. See
+    /// [`SubsampleFireMode`] and the `--subsample-fire` CLI flag.
+    pub subsample_fire: SubsampleFireMode,
 }
 
 #[cfg(feature = "codegen")]
@@ -645,6 +701,7 @@ impl Default for CodegenConfig {
             injections: Vec::new(),
             taps: Vec::new(),
             bjt_fa_mode: BjtFaMode::Auto,
+            subsample_fire: SubsampleFireMode::Auto,
         }
     }
 }

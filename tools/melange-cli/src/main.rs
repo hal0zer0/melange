@@ -151,6 +151,26 @@ enum Commands {
         #[arg(long, default_value = "auto")]
         tube_grid_fa: String,
 
+        /// Sub-sample fire: variable-dt breakpoint re-solve at a glow-discharge
+        /// strike (nodal-Schur route only).
+        ///
+        /// A latched device flips AFTER the sample's solve, so conduction
+        /// starts one inner sample late and the strike instant is quantised to
+        /// the sample grid; on injection-locked neon divider chains that breaks
+        /// lock at plugin rates. The re-solve splits the firing sample at the
+        /// device's crossing fraction into a dark and a lit (BE) sub-step, each
+        /// on matrices rebuilt at the sub-step rate. Stage A prototype: not
+        /// real-time optimised (two O(N^3) inversions per firing sample).
+        ///
+        /// Valid values:{n}{n}
+        /// * auto (default) — on when the circuit has a glow device AND routes
+        ///   to nodal-Schur; otherwise inert (byte-identical output).{n}{n}
+        /// * on — force; refused on the DK route and on the nodal full-LU
+        ///   sub-path.{n}{n}
+        /// * off — whole-sample latch flip (pre-feature behaviour).
+        #[arg(long, default_value = "auto")]
+        subsample_fire: String,
+
         /// BJT forward-active (frozen-analysis) reduction mode.
         ///
         /// * auto — reduce only pure-Ebers-Moll BJTs, for which the 1-D
@@ -424,6 +444,12 @@ enum Commands {
         /// model (== off). Mirrors `compile --tube-grid-fa`.
         #[arg(long, default_value = "auto")]
         tube_grid_fa: String,
+
+        /// Sub-sample fire (glow-strike variable-dt re-solve): auto, on, off.
+        /// Mirrors `compile --subsample-fire`. auto = on for glow decks on
+        /// nodal-Schur, inert otherwise; on is refused on DK / full-LU.
+        #[arg(long, default_value = "auto")]
+        subsample_fire: String,
 
         /// Oversampling factor (1=none, 2=2x, 4=4x). Higher reduces aliasing
         /// and improves NR stability for circuits with diode switching.
@@ -740,6 +766,20 @@ enum ImportFormat {
 
 mod kicad_import;
 
+/// `--version` text: the clap static `<version> (<commit>[-dirty])` pointer plus
+/// the exact runtime exe hash (`exe <16-hex FNV-1a-64>`). Matches the digest a
+/// peer computes over the binary on disk, so a build can be identified from its
+/// own output alone.
+fn full_version_string() -> String {
+    let base = env!("MELANGE_VERSION");
+    match melange_solver::build_identity::current_exe_hash() {
+        // Algorithm-qualified: `fnv1a64:` states the digest so a reader cannot
+        // compare it against a different hash of the same file (thread 184).
+        Some(hash) => format!("melange {base} exe fnv1a64:{hash}"),
+        None => format!("melange {base}"),
+    }
+}
+
 fn main() -> Result<()> {
     // Exit quietly when the output pipe is closed early (e.g. `melange … | head`).
     // Rust ignores SIGPIPE by default, so a write to a closed stdout makes the
@@ -766,6 +806,23 @@ fn main() -> Result<()> {
         .format_target(false)
         .init();
 
+    // Handle a top-level `--version`/`-V` ourselves so we can append the EXACT
+    // build identity — a runtime hash of THIS executable — which clap's
+    // build-time-static version string cannot carry. A version+commit is a
+    // source-side pointer that cannot see a dirty tree or a different
+    // feature/profile build; two binaries at one commit printed the same string
+    // and a peer published from each (robogogo thread 288). We honour the flag
+    // the way clap would: only at the top level, before any subcommand.
+    for arg in std::env::args().skip(1) {
+        if arg == "-V" || arg == "--version" {
+            println!("{}", full_version_string());
+            return Ok(());
+        }
+        if !arg.starts_with('-') {
+            break; // reached the subcommand — its own flags are not ours
+        }
+    }
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -789,6 +846,7 @@ fn main() -> Result<()> {
             backward_euler,
             force_trap,
             tube_grid_fa,
+            subsample_fire,
             bjt_fa,
             opamp_rail_mode,
             nodal_subpath,
@@ -893,6 +951,7 @@ fn main() -> Result<()> {
                     bjt_fa
                 );
             }
+            let subsample_fire_mode = parse_subsample_fire_mode(&subsample_fire)?;
 
             compile_circuit_source(
                 &circuit_source,
@@ -913,6 +972,7 @@ fn main() -> Result<()> {
                 backward_euler,
                 force_trap,
                 &tube_grid_fa,
+                subsample_fire_mode,
                 &bjt_fa,
                 rail_mode,
                 nodal_sub_path_override,
@@ -1011,6 +1071,7 @@ fn main() -> Result<()> {
             solver,
             opamp_rail_mode,
             tube_grid_fa,
+            subsample_fire,
             oversampling,
             noise,
             noise_seed,
@@ -1042,6 +1103,7 @@ fn main() -> Result<()> {
                     tube_grid_fa
                 );
             }
+            let subsample_fire_mode = parse_subsample_fire_mode(&subsample_fire)?;
             let rail_mode = melange_solver::codegen::OpampRailMode::parse(&opamp_rail_mode)
                 .ok_or_else(|| {
                     anyhow::anyhow!(
@@ -1090,6 +1152,7 @@ fn main() -> Result<()> {
                     solver: &solver,
                     opamp_rail_mode: rail_mode,
                     tube_grid_fa: &tube_grid_fa,
+                    subsample_fire: subsample_fire_mode,
                     oversampling,
                     noise_mode,
                     noise_seed,
@@ -1432,6 +1495,7 @@ fn compile_circuit_source(
     backward_euler: bool,
     force_trap: bool,
     tube_grid_fa: &str,
+    subsample_fire: melange_solver::codegen::SubsampleFireMode,
     bjt_fa: &str,
     opamp_rail_mode: melange_solver::codegen::OpampRailMode,
     nodal_sub_path_override: melange_solver::codegen::NodalSubPathOverride,
@@ -2158,6 +2222,7 @@ fn compile_circuit_source(
         router_dk_spectral_radius: routing.spectral_radius,
         injections: injection_specs.clone(),
         taps: tap_specs.clone(),
+        subsample_fire,
         ..CodegenConfig::default()
     };
 
@@ -2225,6 +2290,17 @@ fn compile_circuit_source(
         generated.n, generated.m
     );
     println!("    Solver: {} ({})", solver_label, solver_reason);
+    // Non-negative K diagonal note, printed ONCE here (the low-level kernel
+    // builder logs it at debug only — it is rebuilt several times per compile).
+    // Informative when a transformer-coupled NFB circuit routes to nodal for a
+    // different primary reason (e.g. trap instability) but ALSO has a positive
+    // K diagonal the author may want to know about.
+    if routing.k_diag_unsafe {
+        println!(
+            "    Note: non-negative K diagonal (positive DK-Schur feedback, \
+             expected for transformer-coupled NFB) — handled by nodal full-NR."
+        );
+    }
     // Which nodal sub-path the emitter actually took. Reported by the emitter,
     // not re-derived here. Without this a deck authored to reach full-LU could
     // silently sit on Schur with nothing to reveal it.
@@ -2810,6 +2886,8 @@ struct SimulateOptions<'a> {
     solver: &'a str,
     opamp_rail_mode: melange_solver::codegen::OpampRailMode,
     tube_grid_fa: &'a str,
+    /// `--subsample-fire` mode (glow-strike variable-dt re-solve).
+    subsample_fire: melange_solver::codegen::SubsampleFireMode,
     oversampling: Option<usize>,
     noise_mode: melange_solver::codegen::NoiseMode,
     noise_seed: u64,
@@ -2855,6 +2933,26 @@ struct AnalyzeOptions<'a> {
     nodal_sub_path_override: melange_solver::codegen::NodalSubPathOverride,
     /// Explicit `--max-iter` override; `None` → auto-tuned (see [`auto_tune_max_iter`]).
     max_iter: Option<usize>,
+}
+
+/// `CircuitState` diagnostic counters emitted only when sub-sample fire is
+/// active; `simulate` prints them when the generated code declares them.
+const SUBSAMPLE_FIRE_DIAG_FIELDS: [&str; 5] = [
+    "diag_subsample_fire_count",
+    "diag_subsample_fire_abandon_count",
+    "diag_subsample_fire_detected",
+    "diag_subsample_fire_resolved",
+    "diag_subsample_fire_segments",
+];
+
+/// Parse `--subsample-fire {auto|on|off}`. Unknown values are user errors.
+fn parse_subsample_fire_mode(s: &str) -> Result<melange_solver::codegen::SubsampleFireMode> {
+    melange_solver::codegen::SubsampleFireMode::parse(s).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Unknown --subsample-fire '{}'. Valid values: auto, on, off",
+            s
+        )
+    })
 }
 
 /// Resolve `--switch NAME=POS` specs into `(switch_idx, position)` pairs.
@@ -3320,6 +3418,14 @@ fn simulate_circuit_source(
         if use_nodal { "nodal" } else { "DK" },
         decision.reason
     );
+    // Non-negative K diagonal note, printed ONCE (kernel builder logs it at
+    // debug only — it is rebuilt several times per run). See compile summary.
+    if decision.k_diag_unsafe {
+        println!(
+            "  Note: non-negative K diagonal (positive DK-Schur feedback, \
+             expected for transformer-coupled NFB) — handled by nodal full-NR."
+        );
+    }
 
     // When routing to nodal, expand BJT internal nodes so parasitic RB/RC/RE
     // are modeled at the MNA level (eliminates per-device inner NR). Gate on
@@ -3393,6 +3499,7 @@ fn simulate_circuit_source(
         injections: injection_specs.clone(),
         taps: Vec::new(),
         bjt_fa_mode: melange_solver::codegen::BjtFaMode::Auto,
+        subsample_fire: opts.subsample_fire,
     };
     let generator = CodeGenerator::new(config);
     let generated = if use_nodal {
@@ -3435,6 +3542,13 @@ fn simulate_circuit_source(
         opts.noise_mode != melange_solver::codegen::NoiseMode::Off,
         &inject_driven,
         injection_specs.len(),
+        // Build-conditional counters: only present in the generated state when
+        // the emitter resolved the feature active (auto = glow on nodal-Schur).
+        &SUBSAMPLE_FIRE_DIAG_FIELDS
+            .iter()
+            .copied()
+            .filter(|f| generated.code.contains(f))
+            .collect::<Vec<&str>>(),
     );
     let full_source = format!("{}\n{}", generated.code, simulate_main);
 
@@ -4076,6 +4190,9 @@ fn analyze_freq_response(
         injections: Vec::new(),
         taps: Vec::new(),
         bjt_fa_mode: melange_solver::codegen::BjtFaMode::Auto,
+        // `analyze` does not expose --subsample-fire; auto = active on glow
+        // nodal-Schur decks, inert everywhere else.
+        subsample_fire: melange_solver::codegen::SubsampleFireMode::Auto,
     };
     let generator = CodeGenerator::new(config);
     let generated = if use_nodal {

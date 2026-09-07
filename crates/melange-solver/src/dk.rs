@@ -746,7 +746,12 @@ impl DkKernel {
                 // Schur NR (J = I - J_dev*K) would see positive feedback and diverge.
                 // auto_route re-derives this condition from the kernel's K and the
                 // MNA N_i and forces the nodal route (see routing.rs k_diag_unsafe).
-                log::warn!(
+                // Per-diagonal detail at debug level only: this routine is built
+                // multiple times per compile (routing pre-check + real kernel),
+                // so a per-diagonal `warn` spammed the same line 4×. The
+                // user-facing summary is printed ONCE by the CLI routing report
+                // (gated on `RoutingDecision::k_diag_unsafe`).
+                log::debug!(
                     "K diagonal [{}][{}] = {} is non-negative. \
                      This is expected for circuits with transformer-coupled NFB. \
                      The nodal solver handles this correctly via full NR; \

@@ -14,6 +14,10 @@ use std::process::Command;
 fn main() {
     // Never force a spurious rebuild: only this script itself always re-runs.
     println!("cargo:rerun-if-changed=build.rs");
+    // Re-run when this crate's own sources change so the `-dirty` marker reflects
+    // local edits to it. Best-effort (cannot see edits in other crates that link
+    // in); the EXACT build identity is the runtime exe hash (`build_identity`).
+    println!("cargo:rerun-if-changed=src");
 
     // The workspace `.git` lives two levels up from this crate root.
     let git_dir = Path::new("../../.git");
@@ -30,10 +34,28 @@ fn main() {
     }
 
     if let Some(commit) = short_commit() {
-        println!("cargo:rustc-env=MELANGE_GIT_COMMIT={commit}");
+        // Append a best-effort `-dirty` marker (tracked changes vs HEAD) so the
+        // generated header's commit is not silently that of a clean tree when it
+        // was not. The exe hash in the provenance JSON is the exact identity.
+        let dirty = if git_dir.exists() { dirty_marker() } else { "" };
+        println!("cargo:rustc-env=MELANGE_GIT_COMMIT={commit}{dirty}");
     }
     // No `else`: leaving the var unset is the documented graceful-degradation
     // path (`option_env!("MELANGE_GIT_COMMIT")` → None → "unknown").
+}
+
+/// `"-dirty"` when the working tree has uncommitted TRACKED changes vs HEAD,
+/// else `""`. Uses `git diff --quiet HEAD` (exit 1 == differences), ignoring
+/// untracked files. Best-effort — the exact identity is the runtime exe hash.
+fn dirty_marker() -> &'static str {
+    match Command::new("git")
+        .args(["diff", "--quiet", "HEAD"])
+        .status()
+    {
+        Ok(s) if s.success() => "",
+        Ok(s) if s.code() == Some(1) => "-dirty",
+        _ => "",
+    }
 }
 
 /// `git rev-parse --short HEAD`, or `None` if git or the repo is unavailable.

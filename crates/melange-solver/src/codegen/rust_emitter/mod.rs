@@ -13,6 +13,7 @@
 //! - `dk_solver` — DK NR solver generation (solve_nonlinear, Gauss elimination)
 //! - `nr_helpers` — shared NR helper functions (voltage limiting, convergence)
 //! - `nodal_emitter` — nodal-path emit methods (Schur + full-LU)
+//! - `subsample_fire` — nodal-Schur variable-dt glow-strike breakpoint re-solve
 
 mod dc_op_emitter;
 mod dk_emitter;
@@ -20,6 +21,7 @@ mod dk_solver;
 mod helpers;
 mod nodal_emitter;
 mod nr_helpers;
+mod subsample_fire;
 
 use tera::{Context, Tera};
 

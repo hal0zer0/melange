@@ -758,7 +758,7 @@ fn emit_sparse_nv_matvec(ir: &CircuitIR, result_arr: &str, vec_var: &str, indent
 }
 
 /// Emit sparse `rhs[i] += sum_j N_I[i][j] * vec[j]` for all N rows.
-fn emit_sparse_ni_matvec_add(
+pub(super) fn emit_sparse_ni_matvec_add(
     ir: &CircuitIR,
     result_arr: &str,
     vec_var: &str,
@@ -1806,6 +1806,34 @@ impl RustEmitter {
                 false
             }
         };
+        // Sub-sample fire (variable-dt glow-strike re-solve) is implemented on
+        // the Schur sub-path only (Stage A). A forced `on` is refused here
+        // rather than silently ignored; `auto` falls back to the whole-sample
+        // latch on full-LU, and the IR flag is cleared on a local clone so the
+        // provenance header and every downstream emitter agree that the
+        // feature is inactive.
+        let ir_subsample_cleared: CircuitIR;
+        let ir: &CircuitIR = if use_full_nodal && ir.solver_config.subsample_fire {
+            if ir.solver_config.subsample_fire_mode == crate::codegen::SubsampleFireMode::On {
+                return Err(CodegenError::InvalidConfig(
+                    "--subsample-fire on: this circuit takes the nodal full-LU sub-path, \
+                     where the variable-dt glow-strike re-solve is not implemented \
+                     (Stage A covers nodal-Schur only). Use --nodal-subpath schur if the \
+                     circuit permits it, or --subsample-fire auto/off."
+                        .to_string(),
+                ));
+            }
+            log::warn!(
+                "Nodal: sub-sample fire is inactive on the full-LU sub-path (Stage A \
+                 implements nodal-Schur only); glow strikes stay whole-sample latched."
+            );
+            let mut cleared = ir.clone();
+            cleared.solver_config.subsample_fire = false;
+            ir_subsample_cleared = cleared;
+            &ir_subsample_cleared
+        } else {
+            ir
+        };
         // The dense `lu_solve` helper is emitted whenever any generated code
         // path needs it. The full-LU nodal path always needs it. The Schur
         // path also needs it when op-amp rail handling is in `ActiveSet` mode,
@@ -1879,6 +1907,8 @@ impl RustEmitter {
         // `rebuild_matrices` skips the inversions and `invert_n` has no callers.
         if !use_full_nodal {
             code.push_str(&Self::emit_nodal_invert_n(ir));
+            // Sub-sample fire scratch Schur triple + builder ("" when inactive).
+            code.push_str(&super::subsample_fire::emit_subsample_schur_builder(ir));
         }
 
         if use_full_nodal {
@@ -2049,6 +2079,8 @@ impl RustEmitter {
                 code.push_str("pub const GLOW_LIT_BE_SAMPLES: u32 = 1;\n\n");
             }
         }
+        // Sub-sample fire alpha guards ("" when inactive).
+        code.push_str(&super::subsample_fire::emit_subsample_fire_constants(ir));
         code.push_str(
             "/// Chord method: re-factor Jacobian every N iterations (full LU path only).\n",
         );
@@ -2985,6 +3017,7 @@ impl RustEmitter {
         code.push_str("    pub diag_magnitude_reset_count: u64,\n");
         code.push_str("    /// Diagnostic: number of samples that needed adaptive sub-stepping\n");
         code.push_str("    pub diag_substep_count: u64,\n");
+        code.push_str(&super::subsample_fire::emit_subsample_fire_state_fields(ir));
         code.push_str("    /// Diagnostic: number of LU refactorizations performed\n");
         code.push_str("    pub diag_refactor_count: u64,\n");
         code.push_str(
@@ -3463,6 +3496,7 @@ impl RustEmitter {
         code.push_str("            diag_nan_reset_count: 0,\n");
         code.push_str("            diag_magnitude_reset_count: 0,\n");
         code.push_str("            diag_substep_count: 0,\n");
+        code.push_str(&super::subsample_fire::emit_subsample_fire_default_fields(ir));
         code.push_str("            diag_refactor_count: 0,\n");
         code.push_str("            diag_ls_fail_count: 0,\n");
         code.push_str("            diag_voltage_damp_count: 0,\n");
@@ -3747,6 +3781,7 @@ impl RustEmitter {
         code.push_str("        self.diag_magnitude_reset_count = 0;\n");
         code.push_str("        self.diag_voltage_damp_count = 0;\n");
         code.push_str("        self.diag_substep_count = 0;\n");
+        code.push_str(&super::subsample_fire::emit_subsample_fire_reset(ir));
         code.push_str("        self.diag_refactor_count = 0;\n");
         code.push_str("        self.diag_ls_fail_count = 0;\n");
         if ir.solver_config.runtime_be_latch {
@@ -6406,7 +6441,15 @@ impl RustEmitter {
 
         // Stateful-device (Phase 0c) after-solve update — BEFORE state.v_prev = v
         // so v_prev holds the prior sample. Shared with the DK path.
-        code.push_str(&emit_stateful_update(&stateful_device_data(ir)));
+        //
+        // With sub-sample fire active (nodal-Schur, latched device, flag not
+        // off) the update is folded into the breakpoint re-solve block, which
+        // may replace `v`/`i_nl` with the end of the dark/lit sub-step pair.
+        if ir.solver_config.subsample_fire && m > 0 {
+            code.push_str(&super::subsample_fire::emit_subsample_fire_block(ir, noise)?);
+        } else {
+            code.push_str(&emit_stateful_update(&stateful_device_data(ir)));
+        }
 
         // State update
         code.push_str("    // State update\n");
@@ -6517,7 +6560,7 @@ impl RustEmitter {
     ///
     /// Declares `i_dev{s}` and `jdev_{i}_{j}` local variables matching the
     /// DK `solve_nonlinear` naming convention. Uses `v_d{s}` from the caller.
-    fn emit_dk_device_eval_for_nodal_schur_indented(
+    pub(super) fn emit_dk_device_eval_for_nodal_schur_indented(
         code: &mut String,
         dev_num: usize,
         slot: &crate::codegen::ir::DeviceSlot,

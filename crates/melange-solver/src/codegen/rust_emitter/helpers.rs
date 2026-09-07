@@ -802,6 +802,50 @@ pub(super) fn emit_stateful_update(devs: &[StatefulDeviceData]) -> String {
     s
 }
 
+/// Parameterised variant of [`emit_stateful_update`] for the sub-sample fire
+/// re-solve (nodal-Schur, `--subsample-fire`): the update hooks are evaluated
+/// over an arbitrary sub-step `(prev_base -> conv_base, dt_expr)` and the
+/// returned `StatefulUpdate` is handed to `result_stmt` (which may reference
+/// `upd` and the device index via `{n}`). `let _ = upd;` discards it.
+///
+/// NOT used on any pre-feature path: [`emit_stateful_update`] is left
+/// byte-for-byte unchanged so decks without the re-solve are unaffected.
+pub(super) fn emit_stateful_update_at(
+    devs: &[StatefulDeviceData],
+    indent: &str,
+    prev_base: &str,
+    conv_base: &str,
+    dt_expr: &str,
+    result_stmt: &str,
+) -> String {
+    let mut s = String::new();
+    for d in devs {
+        let n = d.dev_num;
+        let dn = &d.spec.driving_nodes;
+        let dcount = dn.len();
+        let prev = dn
+            .iter()
+            .map(|&node| node_volt_expr(prev_base, node))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let conv = dn
+            .iter()
+            .map(|&node| node_volt_expr(conv_base, node))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let stmt = result_stmt.replace("{n}", &n.to_string());
+        s.push_str(&format!(
+            "{indent}{{ // Device {n} stateful update over the sub-step\n\
+             {indent}    let v_prev_drive: [f64; {dcount}] = [{prev}];\n\
+             {indent}    let v_conv_drive: [f64; {dcount}] = [{conv}];\n\
+             {indent}    let upd = stateful_update_dev{n}(&mut state.device_{n}_state, &v_prev_drive, &v_conv_drive, {dt_expr});\n\
+             {indent}    {stmt}\n\
+             {indent}}}\n"
+        ));
+    }
+    s
+}
+
 /// The `StatefulUpdate` return type, emitted ONCE (only when at least one
 /// stateful device exists, so a non-stateful deck never sees it → byte-identical).
 ///
@@ -815,7 +859,27 @@ pub(super) fn emit_stateful_update(devs: &[StatefulDeviceData]) -> String {
 /// until after solve `n+1`; only a RETURN lets the caller correct `n+1` in-flight
 /// (a global one-sample output latency is rejected — it taxes every plugin).
 /// Stage 1 only RESERVES the slot; the caller-side correction lands in Stage 3.
-fn stateful_update_return_type() -> &'static str {
+fn stateful_update_return_type(subsample_fire: bool) -> &'static str {
+    if subsample_fire {
+        // Sub-sample fire active (nodal-Schur, latched device): the hook reports
+        // EITHER latch flip with its linear crossing fraction, and the caller's
+        // event loop splits the step there. Emitted only on such decks, so every
+        // other stateful deck keeps the reserved-slot form below byte-for-byte.
+        return "/// Return of a stateful device's `update()` hook (Phase 0c), sub-sample\n\
+                /// fire form: a latch flip inside the step it was evaluated over, with the\n\
+                /// linear crossing fraction `alpha` of the flip threshold. The caller\n\
+                /// (nodal-Schur sub-sample fire) re-solves the step at `alpha`.\n\
+                #[derive(Clone, Copy, Default)]\n\
+                #[allow(dead_code)]\n\
+                struct StatefulUpdate {\n\
+                \x20   /// True when the latch flipped dark -> lit (strike) inside the step.\n\
+                \x20   fired: bool,\n\
+                \x20   /// True when the latch flipped lit -> dark (extinction) inside the step.\n\
+                \x20   extinguished: bool,\n\
+                \x20   /// Crossing fraction of the flip threshold in [0, 1] (0 = step start).\n\
+                \x20   alpha: f64,\n\
+                }\n\n";
+    }
     "/// Reserved return of a stateful device's `update()` hook (Phase 0c).\n\
      ///\n\
      /// v1 devices return `StatefulUpdate::default()` (no sub-sample firing).\n\
@@ -849,18 +913,19 @@ fn stateful_update_return_type() -> &'static str {
 pub(super) fn emit_stateful_update_fns(
     devs: &[StatefulDeviceData],
     slots: &[crate::device_types::DeviceSlot],
+    subsample_fire: bool,
 ) -> String {
     if devs.is_empty() {
         return String::new();
     }
     // The return type is emitted once, ahead of the per-device hooks.
-    let mut s = String::from(stateful_update_return_type());
+    let mut s = String::from(stateful_update_return_type(subsample_fire));
     for d in devs {
         let n = d.dev_num;
         let sz = d.spec.state_size;
         let dcount = d.spec.driving_nodes.len();
         let slot = &slots[d.dev_num];
-        let body = stateful_update_body(n, slot, d.spec);
+        let body = stateful_update_body(n, slot, d.spec, subsample_fire);
         s.push_str(&format!(
             "/// Stateful update hook for device {n}. `v_prev` and the returned\n\
              /// `StatefulUpdate` are RESERVED (sub-sample interpolation / fractional-\n\
@@ -882,9 +947,50 @@ fn stateful_update_body(
     dev_num: usize,
     slot: &crate::device_types::DeviceSlot,
     _spec: &crate::device_types::StatefulSpec,
+    subsample_fire: bool,
 ) -> String {
     use crate::device_types::DeviceParams;
     let d = dev_num;
+    // Sub-sample fire form of the glow hook: BOTH latch flips report their
+    // linear crossing fraction. Extinction is a threshold on the maintaining-
+    // line current, affine in cv, so its crossing is the cv threshold
+    // `V0 + RS*IHOLD` between the step-start and step-end terminal voltages.
+    // Emitted only when the caller consumes it (nodal-Schur, flag active), so
+    // every other glow deck keeps the whole-sample form below byte-for-byte.
+    if subsample_fire {
+        if let DeviceParams::Glow(_) = &slot.params {
+            return format!(
+                "    let _ = dt; // no firing time constant in the boolean-strike model\n\
+                 \x20   let cv = v_converged[0] - v_converged[1];\n\
+                 \x20   let vp = v_prev[0] - v_prev[1];\n\
+                 \x20   let lit = state[0] >= 0.5;\n\
+                 \x20   let denom = cv - vp;\n\
+                 \x20   if !lit {{\n\
+                 \x20       if cv >= DEVICE_{d}_VO {{\n\
+                 \x20           // Strike (dark -> lit): crossing fraction of VO across the step.\n\
+                 \x20           let alpha = if denom.abs() > 1e-30 {{\n\
+                 \x20               ((DEVICE_{d}_VO - vp) / denom).clamp(0.0, 1.0)\n\
+                 \x20           }} else {{ 0.0 }};\n\
+                 \x20           state[0] = 1.0;\n\
+                 \x20           return StatefulUpdate {{ fired: true, extinguished: false, alpha }};\n\
+                 \x20       }}\n\
+                 \x20   }} else {{\n\
+                 \x20       // Extinguish (lit -> dark) on HOLDING CURRENT: i_cond = (cv-V0)/RS\n\
+                 \x20       // <= IHOLD, i.e. cv <= V0 + RS*IHOLD. Crossing fraction of that cv\n\
+                 \x20       // threshold across the step (linear chord of the discharge).\n\
+                 \x20       let cv_hold = DEVICE_{d}_V0 + DEVICE_{d}_RS * DEVICE_{d}_IHOLD;\n\
+                 \x20       if cv <= cv_hold {{\n\
+                 \x20           let alpha = if denom.abs() > 1e-30 {{\n\
+                 \x20               ((cv_hold - vp) / denom).clamp(0.0, 1.0)\n\
+                 \x20           }} else {{ 0.0 }};\n\
+                 \x20           state[0] = 0.0;\n\
+                 \x20           return StatefulUpdate {{ fired: false, extinguished: true, alpha }};\n\
+                 \x20       }}\n\
+                 \x20   }}\n\
+                 \x20   StatefulUpdate::default()\n"
+            );
+        }
+    }
     match &slot.params {
         // CdsLdr — mirrors `melange-devices/src/ldr.rs::update` (lines 82-97).
         // The control signal V(ctrl+)−V(ctrl-) is the normalized brightness in
@@ -1367,7 +1473,7 @@ mod stateful_interface_tests {
         assert_eq!(emit_stateful_state_restore(&devs, "self."), "");
         assert_eq!(emit_stateful_state_restore(&devs, "state."), "");
         assert_eq!(emit_stateful_update(&devs), "");
-        assert_eq!(emit_stateful_update_fns(&devs, &[]), "");
+        assert_eq!(emit_stateful_update_fns(&devs, &[], false), "");
     }
 
     #[test]
@@ -1440,7 +1546,7 @@ mod stateful_interface_tests {
             vg2k_frozen: 0.0,
             stateful: Some(spec.clone()),
         };
-        let fns = emit_stateful_update_fns(&devs, std::slice::from_ref(&slot));
+        let fns = emit_stateful_update_fns(&devs, std::slice::from_ref(&slot), false);
         // The exact reserved-v_prev + reserved-return signature, generic over N/D.
         assert!(fns.contains(
             "fn stateful_update_dev0(state: &mut [f64; 2], v_prev: &[f64; 2], v_converged: &[f64; 2], dt: f64) -> StatefulUpdate"
@@ -1455,7 +1561,7 @@ mod stateful_interface_tests {
     #[test]
     fn reserved_return_type_dormant_for_non_stateful() {
         // No stateful device → no StatefulUpdate type, no hooks: byte-identical.
-        assert_eq!(emit_stateful_update_fns(&[], &[]), "");
+        assert_eq!(emit_stateful_update_fns(&[], &[], false), "");
     }
 }
 

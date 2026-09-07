@@ -70,6 +70,7 @@
 //! - `codegen` (default) — enables code generation pipeline ([`CircuitIR`], [`CodeGenerator`],
 //!   [`Emitter`]). Adds `tera` template engine dependency. Disable for runtime-only usage.
 
+pub mod build_identity;
 pub mod codegen;
 pub mod dc_op;
 pub mod device_types;

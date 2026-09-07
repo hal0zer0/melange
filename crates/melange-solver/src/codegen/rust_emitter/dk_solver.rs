@@ -290,13 +290,26 @@ impl RustEmitter {
 
     /// Generate Gauss elimination for Schur NR (uses `break` not `return`).
     pub(super) fn generate_schur_gauss_elim(code: &mut String, ir: &CircuitIR, dim: usize) {
+        Self::generate_schur_gauss_elim_k(code, ir, dim, "state.k");
+    }
+
+    /// [`Self::generate_schur_gauss_elim`] against an arbitrary K matrix
+    /// expression (the sub-sample fire re-solve solves on a scratch Schur
+    /// triple, `ssf_sub.k`). The default `"state.k"` reproduces the original
+    /// emission byte-for-byte.
+    pub(super) fn generate_schur_gauss_elim_k(
+        code: &mut String,
+        ir: &CircuitIR,
+        dim: usize,
+        k_matrix_expr: &str,
+    ) {
         Self::emit_gauss_elim_body(code, dim, "1e-15", false);
 
         code.push_str("        if !singular {\n");
         for i in 0..dim {
             code.push_str(&format!("            let delta{i} = b[{i}];\n"));
         }
-        emit_schur_nr_limit_and_converge(code, ir, dim, "            ", "state.k");
+        emit_schur_nr_limit_and_converge(code, ir, dim, "            ", k_matrix_expr);
         code.push_str("        } else {\n");
         emit_nr_singular_fallback(code, dim, "            ");
         code.push_str("        }\n");

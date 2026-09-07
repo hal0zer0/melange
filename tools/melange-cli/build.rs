@@ -14,6 +14,13 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    // Re-run when this crate's own sources change so the `-dirty` marker below
+    // reflects local edits to it. This is best-effort: the marker cannot see
+    // edits in OTHER crates that link in (the build script does not re-run for
+    // them), which is exactly why the EXACT build identity is the runtime exe
+    // hash (`melange_solver::build_identity`), and the version+commit(+dirty)
+    // are only a labelled pointer to where to look.
+    println!("cargo:rerun-if-changed=src");
 
     // The workspace `.git` lives two levels up from this crate root
     // (tools/melange-cli), same as crates/melange-solver.
@@ -27,8 +34,31 @@ fn main() {
     }
 
     let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
-    let commit = short_commit().unwrap_or_else(|| "unknown".to_string());
-    println!("cargo:rustc-env=MELANGE_VERSION={version} ({commit})");
+    let (commit, dirty) = if git_dir.exists() {
+        (
+            short_commit().unwrap_or_else(|| "unknown".to_string()),
+            dirty_marker(),
+        )
+    } else {
+        ("unknown".to_string(), "")
+    };
+    println!("cargo:rustc-env=MELANGE_VERSION={version} ({commit}{dirty})");
+}
+
+/// `"-dirty"` when the working tree has uncommitted TRACKED changes vs HEAD,
+/// else `""`. Uses `git diff --quiet HEAD` (exit 1 == differences), which
+/// ignores untracked files so a stray scratch file does not read as dirty.
+/// Best-effort by nature — the exact identity is the runtime exe hash. Any git
+/// error degrades to `""`.
+fn dirty_marker() -> &'static str {
+    match Command::new("git")
+        .args(["diff", "--quiet", "HEAD"])
+        .status()
+    {
+        Ok(s) if s.success() => "",              // clean: no tracked diff vs HEAD
+        Ok(s) if s.code() == Some(1) => "-dirty", // tracked changes present
+        _ => "",                                  // git error / no HEAD → graceful
+    }
 }
 
 /// `git rev-parse --short HEAD`, or `None` if git or the repo is unavailable.

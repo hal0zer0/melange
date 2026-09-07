@@ -546,6 +546,18 @@ pub struct SolverConfig {
     /// Raw inner-rate tap probes (`.tap`). Empty when no `.tap` directive.
     #[serde(default)]
     pub taps: Vec<TapSpec>,
+    /// Requested sub-sample fire mode (`--subsample-fire`), kept so the emitter
+    /// can distinguish a forced `on` (refuse where unimplemented) from `auto`
+    /// (fall back silently). See [`crate::codegen::SubsampleFireMode`].
+    #[serde(default)]
+    pub subsample_fire_mode: crate::codegen::SubsampleFireMode,
+    /// Resolved: emit the variable-dt glow-strike breakpoint re-solve. `true`
+    /// only on the nodal route with a latched (glow) device and a mode other
+    /// than `off`; the emitter additionally clears it on the full-LU sub-path
+    /// (Stage A implements nodal-Schur only). `false` → byte-identical to the
+    /// pre-feature emitter.
+    #[serde(default)]
+    pub subsample_fire: bool,
 }
 
 fn default_pot_settle_samples() -> usize {
@@ -1708,6 +1720,20 @@ impl CircuitIR {
             )));
         }
 
+        // `--subsample-fire on` is nodal-only: the DK kernel bakes S = A^-1 at
+        // compile time, so a variable-dt sub-step (matrices at rate/alpha) has
+        // no home here. Refuse loudly rather than emit a solver that silently
+        // ignores the request. `auto` simply stays off on this route.
+        if config.subsample_fire == crate::codegen::SubsampleFireMode::On {
+            return Err(CodegenError::InvalidConfig(
+                "--subsample-fire on requires the nodal route: the DK kernel bakes \
+                 S = A^-1 at compile time and cannot carry the variable-dt glow-strike \
+                 sub-step. Use --solver nodal (or --subsample-fire auto, which is \
+                 inert on DK)."
+                    .to_string(),
+            ));
+        }
+
         // Detect augmented inductors: kernel.inductors is empty when from_mna_augmented
         // was used (companion vectors cleared), and kernel.n > mna.n_aug means extra
         // inductor branch variables were added.
@@ -1954,6 +1980,10 @@ impl CircuitIR {
             nodal_sub_path_override: config.nodal_sub_path_override,
             injections: config.injections.clone(),
             taps: config.taps.clone(),
+            subsample_fire_mode: config.subsample_fire,
+            // DK bakes S = A^-1 at compile time and cannot carry a variable-dt
+            // sub-step; `auto` is inert here, `on` is refused above.
+            subsample_fire: false,
         };
 
         let metadata = CircuitMetadata {
@@ -2964,6 +2994,9 @@ impl CircuitIR {
             nodal_sub_path_override: config.nodal_sub_path_override,
             injections: config.injections.clone(),
             taps: config.taps.clone(),
+            subsample_fire_mode: config.subsample_fire,
+            // Resolved below next to `breakpoint_be` (needs `has_glow`).
+            subsample_fire: false,
         };
 
         // Compute S = A^{-1} for Schur complement NR (O(M³) instead of O(N³) per iteration)
@@ -3279,6 +3312,20 @@ impl CircuitIR {
         solver_config.breakpoint_be = !solver_config.backward_euler
             && !has_saturating
             && (!mna.switches.is_empty() || has_knob_pot || has_glow);
+
+        // Sub-sample fire: variable-dt breakpoint re-solve at a glow strike.
+        // Nodal route only (this builder), latched device required; the
+        // emitter clears it again on the full-LU sub-path (Stage A = Schur).
+        // `off` → false; `auto`/`on` → gated on a glow device being present.
+        // Without a glow device nothing can fire, so the machinery is not
+        // emitted and the generated source is byte-identical to pre-feature.
+        solver_config.subsample_fire =
+            config.subsample_fire != crate::codegen::SubsampleFireMode::Off && has_glow;
+        if config.subsample_fire == crate::codegen::SubsampleFireMode::On && !has_glow {
+            log::warn!(
+                "--subsample-fire on: circuit has no latched (glow) device; the flag is inert."
+            );
+        }
 
         let matrices = Matrices {
             s: s_flat,
