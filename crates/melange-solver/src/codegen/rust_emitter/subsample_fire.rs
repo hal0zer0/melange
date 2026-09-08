@@ -90,6 +90,16 @@ pub(super) fn emit_subsample_fire_constants(ir: &CircuitIR) -> String {
     // Two flips (strike + extinction) per latched device per sample.
     let max_breaks = 2 * stateful_device_data(ir).iter().filter(|d| d.is_latched).count();
     let lit_tau = glow_lit_tau_min(ir);
+    // Diagnostic lit sub-step multiplier; 0/unset → the 1.0 (tau_min) shipping
+    // default (arbiter t303 — the last tested-safe point).
+    let lit_factor = {
+        let f = ir.solver_config.subsample_lit_factor;
+        if f > 0.0 {
+            f
+        } else {
+            1.0
+        }
+    };
     format!(
         "/// Sub-sample fire: minimum sub-step length as a fraction of the inner sample.\n\
          /// A dark segment shorter than this is skipped (strike taken at the segment\n\
@@ -98,7 +108,7 @@ pub(super) fn emit_subsample_fire_constants(ir: &CircuitIR) -> String {
          pub const SUBSAMPLE_FIRE_MIN_SEGMENT: f64 = {MIN_SEGMENT:e};\n\
          /// Sub-sample fire: per-sample breakpoint ceiling (a strike and an extinction\n\
          /// per latched device). Flips beyond it stay grid-quantised and are counted in\n\
-         /// `diag_subsample_fire_detected` without a matching `_resolved`.\n\
+         /// `diag_subsample_fire_detected` and `diag_subsample_fire_unresolved_ceiling`.\n\
          pub const SUBSAMPLE_FIRE_MAX_BREAKPOINTS: u32 = {max_breaks};\n\
          /// Sub-sample fire: fastest lit discharge time constant among the glow\n\
          /// devices, tau = RS * C(terminal node) [s]. While any lamp is lit, segments\n\
@@ -107,6 +117,10 @@ pub(super) fn emit_subsample_fire_constants(ir: &CircuitIR) -> String {
          /// exponentially, holding the lamp lit far too long). 0.0 = not derivable,\n\
          /// lit sub-stepping off.\n\
          pub const SUBSAMPLE_FIRE_LIT_TAU_S: f64 = {lit_tau:e};\n\
+         /// Sub-sample fire: diagnostic multiplier on the lit sub-step target\n\
+         /// length (`FACTOR * LIT_TAU_S`); default 0.5. Smaller = finer lit\n\
+         /// integration (fleet-arbiter thread 303 demand-3 sweep / lock-margin gate).\n\
+         pub const SUBSAMPLE_FIRE_LIT_FACTOR: f64 = {lit_factor:e};\n\
          /// Sub-sample fire: ceiling on lit sub-steps per inner sample.\n\
          pub const SUBSAMPLE_FIRE_LIT_SUBSTEPS_MAX: u32 = 32;\n\n"
     )
@@ -155,14 +169,33 @@ pub(super) fn emit_subsample_fire_state_fields(ir: &CircuitIR) -> String {
      \x20   /// whole-sample solution was kept for that sample.\n\
      \x20   pub diag_subsample_fire_abandon_count: u64,\n\
      \x20   /// Diagnostic: glow latch flips (strikes AND extinctions) that took effect,\n\
-     \x20   /// however they were timed. `detected - resolved` = flips left on the grid\n\
-     \x20   /// (grid-point alpha, breakpoint ceiling, or abandoned sample).\n\
+     \x20   /// however they were timed. Exact split: `detected = resolved +\n\
+     \x20   /// unresolved_ceiling + unresolved_gridpoint + unresolved_coincident`\n\
+     \x20   /// (an abandoned sample contributes to none of them).\n\
      \x20   pub diag_subsample_fire_detected: u64,\n\
      \x20   /// Diagnostic: latch flips resolved to a sub-sample breakpoint (committed).\n\
      \x20   pub diag_subsample_fire_resolved: u64,\n\
+     \x20   /// Diagnostic: flips left grid-quantised because the per-sample breakpoint\n\
+     \x20   /// budget (`SUBSAMPLE_FIRE_MAX_BREAKPOINTS`) was already spent. The crossing\n\
+     \x20   /// was interior to its segment (a real timing miss, up to the segment length).\n\
+     \x20   pub diag_subsample_fire_unresolved_ceiling: u64,\n\
+     \x20   /// Diagnostic: flips left on the segment end because the crossing lay within\n\
+     \x20   /// `SUBSAMPLE_FIRE_MIN_SEGMENT` of it (timing error below the guard; benign).\n\
+     \x20   /// Counted before the ceiling: a grid-point flip is never a ceiling miss.\n\
+     \x20   pub diag_subsample_fire_unresolved_gridpoint: u64,\n\
+     \x20   /// Diagnostic: a SECOND device flipping inside the re-solved pre-flip segment\n\
+     \x20   /// of a breakpoint; latched at that breakpoint `tc` rather than at its own\n\
+     \x20   /// crossing (timing error up to the pre-flip segment length).\n\
+     \x20   pub diag_subsample_fire_unresolved_coincident: u64,\n\
      \x20   /// Diagnostic: extra sub-step segments solved (pre-flip + rest + lit\n\
      \x20   /// sub-steps), i.e. the cost the feature added on top of one solve/sample.\n\
-     \x20   pub diag_subsample_fire_segments: u64,\n"
+     \x20   pub diag_subsample_fire_segments: u64,\n\
+     \x20   /// Diagnostic: Schur triples actually rebuilt (`subsample_schur_build`\n\
+     \x20   /// calls that missed the same-(rate,be) memo). O(N^3) each.\n\
+     \x20   pub diag_subsample_fire_schur_builds: u64,\n\
+     \x20   /// Diagnostic: Schur-triple rebuilds AVOIDED by the same-(rate,be) memo\n\
+     \x20   /// (bit-identical reuse of the cached triple).\n\
+     \x20   pub diag_subsample_fire_schur_reuses: u64,\n"
         .to_string()
 }
 
@@ -175,7 +208,12 @@ pub(super) fn emit_subsample_fire_default_fields(ir: &CircuitIR) -> String {
      \x20           diag_subsample_fire_abandon_count: 0,\n\
      \x20           diag_subsample_fire_detected: 0,\n\
      \x20           diag_subsample_fire_resolved: 0,\n\
-     \x20           diag_subsample_fire_segments: 0,\n"
+     \x20           diag_subsample_fire_unresolved_ceiling: 0,\n\
+     \x20           diag_subsample_fire_unresolved_gridpoint: 0,\n\
+     \x20           diag_subsample_fire_unresolved_coincident: 0,\n\
+     \x20           diag_subsample_fire_segments: 0,\n\
+     \x20           diag_subsample_fire_schur_builds: 0,\n\
+     \x20           diag_subsample_fire_schur_reuses: 0,\n"
         .to_string()
 }
 
@@ -188,7 +226,12 @@ pub(super) fn emit_subsample_fire_reset(ir: &CircuitIR) -> String {
      \x20       self.diag_subsample_fire_abandon_count = 0;\n\
      \x20       self.diag_subsample_fire_detected = 0;\n\
      \x20       self.diag_subsample_fire_resolved = 0;\n\
-     \x20       self.diag_subsample_fire_segments = 0;\n"
+     \x20       self.diag_subsample_fire_unresolved_ceiling = 0;\n\
+     \x20       self.diag_subsample_fire_unresolved_gridpoint = 0;\n\
+     \x20       self.diag_subsample_fire_unresolved_coincident = 0;\n\
+     \x20       self.diag_subsample_fire_segments = 0;\n\
+     \x20       self.diag_subsample_fire_schur_builds = 0;\n\
+     \x20       self.diag_subsample_fire_schur_reuses = 0;\n"
         .to_string()
 }
 
@@ -484,6 +527,41 @@ fn emit_segment_rhs(
     }
 }
 
+/// Emit a memoized `subsample_schur_build` call. Within a sample G/C are fixed,
+/// so the Schur triple is a pure function of `(rate, be)`; a segment whose exact
+/// rate bit-pattern and `be` flag match the currently-cached triple reuses it
+/// verbatim (bit-identical to a rebuild), otherwise it rebuilds and updates the
+/// cache. Expects `ssf_sub`, `ssf_sub_key`, `ssf_sub_key_be`, `ssf_sub_valid`,
+/// `ssf_builds`, `ssf_reuses`, `state` in scope. `fail_stmt` runs on a singular
+/// rebuild (e.g. `ssf_ok = false;` or `ssf_ok = false; break;`); a cache hit
+/// cannot fail (the identical build already succeeded this sample).
+fn emit_cached_build(
+    code: &mut String,
+    indent: &str,
+    rate_expr: &str,
+    be_expr: &str,
+    fail_stmt: &str,
+) {
+    let i1 = format!("{indent}    ");
+    code.push_str(&format!(
+        "{indent}{{\n\
+         {i1}let ssf_r = {rate_expr};\n\
+         {i1}let ssf_be = {be_expr};\n\
+         {i1}let ssf_kbits = ssf_r.to_bits();\n\
+         {i1}if ssf_sub_valid && ssf_sub_key == ssf_kbits && ssf_sub_key_be == ssf_be {{\n\
+         {i1}    ssf_reuses += 1;\n\
+         {i1}}} else if subsample_schur_build(state, ssf_r, ssf_be, &mut ssf_sub) {{\n\
+         {i1}    ssf_sub_key = ssf_kbits;\n\
+         {i1}    ssf_sub_key_be = ssf_be;\n\
+         {i1}    ssf_sub_valid = true;\n\
+         {i1}    ssf_builds += 1;\n\
+         {i1}}} else {{\n\
+         {i1}    {fail_stmt}\n\
+         {i1}}}\n\
+         {indent}}}\n"
+    ));
+}
+
 /// The per-sample block. Replaces the plain `emit_stateful_update` splice on
 /// the nodal-Schur path when the feature is active. Expects in scope: `input`,
 /// `input_conductance`, `injections` (if `.inject`), `converged`, `v` (mut),
@@ -544,7 +622,7 @@ pub(super) fn emit_subsample_fire_block(
          {i1}let ssf_dt = 1.0 / ssf_rate;\n\
          {i1}let ssf_saved_iters = state.last_nr_iterations;\n\
          {i1}let ssf_lit_seg = if SUBSAMPLE_FIRE_LIT_TAU_S > 0.0 {{\n\
-         {i2}let k = (ssf_dt / (0.5 * SUBSAMPLE_FIRE_LIT_TAU_S)).ceil().clamp(1.0, SUBSAMPLE_FIRE_LIT_SUBSTEPS_MAX as f64);\n\
+         {i2}let k = (ssf_dt / (SUBSAMPLE_FIRE_LIT_FACTOR * SUBSAMPLE_FIRE_LIT_TAU_S)).ceil().clamp(1.0, SUBSAMPLE_FIRE_LIT_SUBSTEPS_MAX as f64);\n\
          {i2}1.0 / k\n\
          {i1}}} else {{\n\
          {i2}1.0\n\
@@ -560,7 +638,20 @@ pub(super) fn emit_subsample_fire_block(
          {i1}let mut ssf_segs = 0u32;\n\
          {i1}let mut ssf_ok = true;\n\
          {i1}let mut ssf_detected = 0u64;\n\
-         {i1}let mut ssf_sub = SubsampleSchur::zeroed();\n",
+         {i1}let mut ssf_unres_ceiling = 0u64;\n\
+         {i1}let mut ssf_unres_gridpoint = 0u64;\n\
+         {i1}let mut ssf_unres_coincident = 0u64;\n\
+         {i1}let mut ssf_sub = SubsampleSchur::zeroed();\n\
+         {i1}// Byte-neutral Schur-triple memo: within a sample G/C are fixed, so the\n\
+         {i1}// triple depends only on (rate, be). Same-alpha segments (the repeated\n\
+         {i1}// lit sub-steps) reuse the last build verbatim; a distinct (rate, be)\n\
+         {i1}// rebuilds. Keyed on the exact rate bit-pattern -> the reused triple is\n\
+         {i1}// bit-identical to a rebuild, so the emitted audio is unchanged.\n\
+         {i1}let mut ssf_sub_key: u64 = 0u64;\n\
+         {i1}let mut ssf_sub_key_be: bool = false;\n\
+         {i1}let mut ssf_sub_valid: bool = false;\n\
+         {i1}let mut ssf_builds: u32 = 0;\n\
+         {i1}let mut ssf_reuses: u32 = 0;\n",
         seg_be = if be_primary { "true" } else { "!converged" }
     ));
     // Pre-sample latch snapshot: the abandon path replays the whole-sample hooks from it.
@@ -571,10 +662,10 @@ pub(super) fn emit_subsample_fire_block(
          {i2}// sub-steps instead of taking the whole-sample BE solve.\n\
          {i2}ssf_t1 = ssf_lit_seg;\n\
          {i2}ssf_seg_be = true;\n\
-         {i2}ssf_segs = 1;\n\
-         {i2}if !subsample_schur_build(state, ssf_rate / ssf_t1, true, &mut ssf_sub) {{ ssf_ok = false; }}\n\
-         {i2}if ssf_ok {{\n"
+         {i2}ssf_segs = 1;\n"
     ));
+    emit_cached_build(&mut code, i2, "ssf_rate / ssf_t1", "true", "ssf_ok = false;");
+    code.push_str(&format!("{i2}if ssf_ok {{\n"));
     emit_segment_rhs(
         &mut code, ir, noise, i3, "ssf_rhs", "ssf_v0", "ssf_i0", "ssf_t0", "ssf_t1", "ssf_seg_be",
     );
@@ -607,9 +698,18 @@ pub(super) fn emit_subsample_fire_block(
          {i3}&& ssf_breaks < SUBSAMPLE_FIRE_MAX_BREAKPOINTS\n\
          {i3}&& (ssf_t1 - ssf_tc) > SUBSAMPLE_FIRE_MIN_SEGMENT;\n\
          {i2}if !ssf_split {{\n\
-         {i3}// Commit the segment: the hooks' flips stand (a flip here is on the\n\
-         {i3}// segment end, exact by construction).\n\
+         {i3}// Commit the segment: the hooks' flips stand, left on the segment end.\n\
+         {i3}// Reason split (grid point first: a crossing within the guard of the end\n\
+         {i3}// is exact by construction and never a budget miss). `ssf_fired > 0`\n\
+         {i3}// implies `ssf_dev != usize::MAX` (every reported alpha is finite).\n\
          {i3}ssf_detected += ssf_fired;\n\
+         {i3}if ssf_fired > 0 {{\n\
+         {i3}    if (ssf_t1 - ssf_tc) <= SUBSAMPLE_FIRE_MIN_SEGMENT {{\n\
+         {i3}        ssf_unres_gridpoint += ssf_fired;\n\
+         {i3}    }} else {{\n\
+         {i3}        ssf_unres_ceiling += ssf_fired;\n\
+         {i3}    }}\n\
+         {i3}}}\n\
          {i3}ssf_t0 = ssf_t1;\n\
          {i3}ssf_v0 = ssf_v_end;\n\
          {i3}ssf_i0 = ssf_i_end;\n\
@@ -626,9 +726,15 @@ pub(super) fn emit_subsample_fire_block(
     ));
     let i4 = "                    ";
     code.push_str(&format!(
-        "{i4}// PRE-FLIP segment [t0, tc] on the segment's integrator.\n\
-         {i4}if !subsample_schur_build(state, ssf_rate / (ssf_tc - ssf_t0), ssf_seg_be, &mut ssf_sub) {{ ssf_ok = false; break; }}\n"
+        "{i4}// PRE-FLIP segment [t0, tc] on the segment's integrator.\n"
     ));
+    emit_cached_build(
+        &mut code,
+        i4,
+        "ssf_rate / (ssf_tc - ssf_t0)",
+        "ssf_seg_be",
+        "ssf_ok = false; break;",
+    );
     emit_segment_rhs(
         &mut code, ir, noise, i4, "ssf_rhs", "ssf_v0", "ssf_i0", "ssf_t0", "ssf_tc", "ssf_seg_be",
     );
@@ -646,7 +752,7 @@ pub(super) fn emit_subsample_fire_block(
         "ssf_v0",
         "ssf_vc",
         "ssf_pre_dt",
-        "if (upd.fired || upd.extinguished) && {n} != ssf_dev { ssf_detected += 1; }",
+        "if (upd.fired || upd.extinguished) && {n} != ssf_dev { ssf_detected += 1; ssf_unres_coincident += 1; }",
     ));
     code.push_str(&format!(
         "{i3}}}\n\
@@ -673,9 +779,15 @@ pub(super) fn emit_subsample_fire_block(
          {i2}ssf_t1 = if {any_lit} {{ (ssf_t0 + ssf_lit_seg).min(1.0) }} else {{ 1.0 }};\n\
          {i2}if 1.0 - ssf_t1 < SUBSAMPLE_FIRE_MIN_SEGMENT {{ ssf_t1 = 1.0; }}\n\
          {i2}ssf_segs += 1;\n\
-         {i2}if ssf_segs > SUBSAMPLE_FIRE_MAX_BREAKPOINTS + SUBSAMPLE_FIRE_LIT_SUBSTEPS_MAX + 2 {{ ssf_ok = false; break; }}\n\
-         {i2}if !subsample_schur_build(state, ssf_rate / (ssf_t1 - ssf_t0), true, &mut ssf_sub) {{ ssf_ok = false; break; }}\n"
+         {i2}if ssf_segs > SUBSAMPLE_FIRE_MAX_BREAKPOINTS + SUBSAMPLE_FIRE_LIT_SUBSTEPS_MAX + 2 {{ ssf_ok = false; break; }}\n"
     ));
+    emit_cached_build(
+        &mut code,
+        i2,
+        "ssf_rate / (ssf_t1 - ssf_t0)",
+        "true",
+        "ssf_ok = false; break;",
+    );
     emit_segment_rhs(
         &mut code, ir, noise, i2, "ssf_rhs", "ssf_v0", "ssf_i0", "ssf_t0", "ssf_t1", "ssf_seg_be",
     );
@@ -687,6 +799,9 @@ pub(super) fn emit_subsample_fire_block(
          {i2}i_nl = ssf_i_end;\n\
          {i2}state.diag_subsample_fire_detected += ssf_detected;\n\
          {i2}state.diag_subsample_fire_resolved += ssf_breaks as u64;\n\
+         {i2}state.diag_subsample_fire_unresolved_ceiling += ssf_unres_ceiling;\n\
+         {i2}state.diag_subsample_fire_unresolved_gridpoint += ssf_unres_gridpoint;\n\
+         {i2}state.diag_subsample_fire_unresolved_coincident += ssf_unres_coincident;\n\
          {i2}state.diag_subsample_fire_segments += ssf_segs as u64;\n\
          {i2}if ssf_breaks > 0 {{ state.diag_subsample_fire_count += 1; }}\n\
          {i1}}} else {{\n\
@@ -705,6 +820,8 @@ pub(super) fn emit_subsample_fire_block(
     code.push_str(&format!(
         "{i2}state.diag_subsample_fire_abandon_count += 1;\n\
          {i1}}}\n\
+         {i1}state.diag_subsample_fire_schur_builds += ssf_builds as u64;\n\
+         {i1}state.diag_subsample_fire_schur_reuses += ssf_reuses as u64;\n\
          {i1}state.last_nr_iterations = ssf_saved_iters;\n\
          {i0}}}\n"
     ));

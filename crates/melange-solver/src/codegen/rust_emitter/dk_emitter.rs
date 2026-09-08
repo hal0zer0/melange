@@ -330,13 +330,96 @@ pub(super) fn effective_max_iter(ir: &CircuitIR) -> usize {
     }
 }
 
+/// Glow sub-sample-fire provenance, emitted UNCONDITIONALLY for every
+/// glow-bearing deck (not by-presence) so an artifact self-reports WHY the
+/// variable-dt glow-strike re-solve is or isn't active — including `dk-route`
+/// (the shipped DK route bakes `S=A^-1` and cannot carry it) and
+/// `nodal-full-lu:<trigger>` (the Schur sub-path it needs was not taken).
+/// `tau_source`/`lit_integrator` are the lit-integration manifest axes, so a
+/// measurement can never be silently paired with the wrong build. Fleet-arbiter
+/// ruling, robogogo thread 303.
+pub(super) struct GlowProvenance {
+    /// The deck instantiates at least one glow (latched) device.
+    pub present: bool,
+    /// Requested mode: `auto` | `on` | `off`.
+    pub mode: &'static str,
+    /// Resolved: the re-solve is actually emitted (nodal-Schur only).
+    pub active: bool,
+    /// Why: `nodal-schur` | `nodal-full-lu:<trigger>` | `dk-route` | `off`.
+    pub reason: String,
+    /// Lit discharge tau source: `heuristic` (RS*C_diag lower bound) | `true`.
+    pub tau_source: &'static str,
+    /// Lit-segment integrator: `be` | `trap`.
+    pub lit_integrator: &'static str,
+    /// Lit sub-step multiplier (`factor * tau`); 0.5 shipping default.
+    pub lit_factor: f64,
+}
+
+/// True when the deck instantiates a glow (latched) device.
+pub(super) fn deck_has_glow(ir: &CircuitIR) -> bool {
+    ir.device_slots
+        .iter()
+        .any(|s| matches!(s.params, crate::codegen::ir::DeviceParams::Glow(_)))
+}
+
+impl GlowProvenance {
+    /// DK route: the kernel bakes `S=A^-1`, so a glow deck here is always
+    /// `active:false` with reason `dk-route` (or `off` when disabled).
+    pub(super) fn for_dk(ir: &CircuitIR) -> Self {
+        let present = deck_has_glow(ir);
+        let mode = ir.solver_config.subsample_fire_mode.as_str();
+        let reason = if present && mode != "off" {
+            "dk-route"
+        } else {
+            "off"
+        }
+        .to_string();
+        GlowProvenance {
+            present,
+            mode,
+            active: false,
+            reason,
+            tau_source: "heuristic",
+            lit_integrator: "be",
+            lit_factor: ir.solver_config.subsample_lit_factor,
+        }
+    }
+
+    /// Nodal route: `active` mirrors the resolved `subsample_fire` flag (already
+    /// cleared on the full-LU sub-path by the caller); `reason` names the taken
+    /// sub-path, and the trigger when full-LU displaced Schur.
+    pub(super) fn for_nodal(ir: &CircuitIR, use_full_nodal: bool, full_lu_trigger: &str) -> Self {
+        let present = deck_has_glow(ir);
+        let mode = ir.solver_config.subsample_fire_mode.as_str();
+        let active = ir.solver_config.subsample_fire;
+        let reason = if !present || mode == "off" {
+            "off".to_string()
+        } else if active {
+            "nodal-schur".to_string()
+        } else if use_full_nodal {
+            format!("nodal-full-lu:{full_lu_trigger}")
+        } else {
+            "off".to_string()
+        };
+        GlowProvenance {
+            present,
+            mode,
+            active,
+            reason,
+            tau_source: "heuristic",
+            lit_integrator: "be",
+            lit_factor: ir.solver_config.subsample_lit_factor,
+        }
+    }
+}
+
 /// Full RESOLVED DSP-affecting flag set for the human-readable `Build:` line.
 ///
 /// Every entry reflects the value AFTER netlist directives + auto-promotion.
 /// Flags whose value cannot change a circuit's DSP are omitted for that circuit
 /// (e.g. `opamp-rail` only when clamped op-amps exist, `bjt-fa` only with BJTs)
 /// so the line stays signal, not boilerplate.
-fn resolved_build_flags(ir: &CircuitIR) -> String {
+fn resolved_build_flags(ir: &CircuitIR, glow: &GlowProvenance) -> String {
     let mut build = format!(
         "integration={}, max_iter={}, oversampling={}x",
         ir.integrator_selection.label(),
@@ -370,8 +453,17 @@ fn resolved_build_flags(ir: &CircuitIR) -> String {
     if ir.solver_config.runtime_be_latch {
         build.push_str(", runtime-be-latch");
     }
-    if ir.solver_config.subsample_fire {
-        build.push_str(", subsample-fire");
+    // Glow sub-sample-fire: shown for every glow-bearing deck with its resolved
+    // reason (e.g. `subsample-fire=dk-route` = present but inert on this route),
+    // not only when active — so the Build: line and the JSON never disagree.
+    if glow.present {
+        if glow.active {
+            // Show the lit sub-step factor on the human line too (arbiter t303:
+            // a swept condition must be visible in the Build: line, not only JSON).
+            build.push_str(&format!(", subsample-fire={} (lit×{})", glow.reason, glow.lit_factor));
+        } else {
+            build.push_str(&format!(", subsample-fire={}", glow.reason));
+        }
     }
     build
 }
@@ -381,7 +473,7 @@ fn resolved_build_flags(ir: &CircuitIR) -> String {
 /// has no non-dev `serde_json`, and every value here is controlled (semver,
 /// hex/`unknown`, enum tokens, numbers, bools), so no user text is interpolated
 /// and no escaping is required.
-fn provenance_json(ir: &CircuitIR, version: &str, commit: &str) -> String {
+fn provenance_json(ir: &CircuitIR, version: &str, commit: &str, glow: &GlowProvenance) -> String {
     let scheme = if ir.integrator_selection.is_backward_euler() {
         "backward-euler"
     } else {
@@ -445,8 +537,15 @@ fn provenance_json(ir: &CircuitIR, version: &str, commit: &str) -> String {
     if ir.solver_config.runtime_be_latch {
         s.push_str(",\"runtime_be_latch\":true");
     }
-    if ir.solver_config.subsample_fire {
-        s.push_str(",\"subsample_fire\":true");
+    // Glow sub-sample-fire: an object, always present for a glow-bearing deck,
+    // carrying mode/active/reason plus the lit-integration manifest axes. A
+    // consumer reads `active:false, reason:"dk-route"` instead of inferring
+    // inertness from an absent key (fleet-arbiter thread 303, Q1b).
+    if glow.present {
+        s.push_str(&format!(
+            ",\"subsample_fire\":{{\"mode\":\"{}\",\"active\":{},\"reason\":\"{}\",\"tau_source\":\"{}\",\"lit_integrator\":\"{}\",\"lit_factor\":{}}}",
+            glow.mode, glow.active, glow.reason, glow.tau_source, glow.lit_integrator, glow.lit_factor
+        ));
     }
     s.push('}');
     s
@@ -458,7 +557,8 @@ impl RustEmitter {
         let mut code = String::new();
         let noise = self.build_noise_emission(ir);
 
-        code.push_str(&self.emit_header(ir)?);
+        let glow_prov = GlowProvenance::for_dk(ir);
+        code.push_str(&self.emit_header(ir, &glow_prov)?);
         code.push_str(&self.emit_constants(ir)?);
         code.push_str(&self.emit_pot_constants(ir));
         if noise.enabled {
@@ -495,7 +595,11 @@ impl RustEmitter {
 // ============================================================================
 
 impl RustEmitter {
-    pub(super) fn emit_header(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
+    pub(super) fn emit_header(
+        &self,
+        ir: &CircuitIR,
+        glow: &GlowProvenance,
+    ) -> Result<String, CodegenError> {
         let mut ctx = Context::new();
         // Sanitize title: replace newlines and control characters with spaces
         // to prevent template injection through a crafted SPICE netlist title line.
@@ -523,13 +627,13 @@ impl RustEmitter {
         // emitted DSP, AFTER netlist-directive application + auto-promotion (not
         // the user-requested subset). The `(auto-promoted)` style is carried by
         // `IntegratorSelection::label()`.
-        let build = resolved_build_flags(ir);
+        let build = resolved_build_flags(ir, glow);
         ctx.insert("build", &build);
 
         // Machine-readable one-line JSON so a consumer can assert the build
         // contract at compile time (replaces oomox's hand-written
         // `oversampling_contract_is_2x` / `dc_block_contract_is_disabled` guards).
-        let provenance_json = provenance_json(ir, melange_version, melange_commit);
+        let provenance_json = provenance_json(ir, melange_version, melange_commit, glow);
         ctx.insert("provenance_json", &provenance_json);
 
         self.render("header", &ctx)

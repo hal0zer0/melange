@@ -551,6 +551,11 @@ pub struct SolverConfig {
     /// (fall back silently). See [`crate::codegen::SubsampleFireMode`].
     #[serde(default)]
     pub subsample_fire_mode: crate::codegen::SubsampleFireMode,
+    /// Diagnostic lit sub-step multiplier (`factor * tau`); default 0.5 (= tau/2),
+    /// set from `CodegenConfig::subsample_lit_factor`. 0 / unset → treated as 0.5
+    /// by the emitter.
+    #[serde(default)]
+    pub subsample_lit_factor: f64,
     /// Resolved: emit the variable-dt glow-strike breakpoint re-solve. `true`
     /// only on the nodal route with a latched (glow) device and a mode other
     /// than `off`; the emitter additionally clears it on the full-LU sub-path
@@ -1981,6 +1986,7 @@ impl CircuitIR {
             injections: config.injections.clone(),
             taps: config.taps.clone(),
             subsample_fire_mode: config.subsample_fire,
+            subsample_lit_factor: config.subsample_lit_factor,
             // DK bakes S = A^-1 at compile time and cannot carry a variable-dt
             // sub-step; `auto` is inert here, `on` is refused above.
             subsample_fire: false,
@@ -2995,6 +3001,7 @@ impl CircuitIR {
             injections: config.injections.clone(),
             taps: config.taps.clone(),
             subsample_fire_mode: config.subsample_fire,
+            subsample_lit_factor: config.subsample_lit_factor,
             // Resolved below next to `breakpoint_be` (needs `has_glow`).
             subsample_fire: false,
         };

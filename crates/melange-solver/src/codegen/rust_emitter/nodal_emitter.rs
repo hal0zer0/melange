@@ -1806,6 +1806,39 @@ impl RustEmitter {
                 false
             }
         };
+        // Which condition placed this circuit on the full-LU sub-path — recorded
+        // in the glow provenance reason (`nodal-full-lu:<trigger>`) so a consumer
+        // reads WHY sub-sample-fire is inactive, not just that it is. Best-effort,
+        // following the sub-path decision's own precedence.
+        let full_lu_trigger: &str = if !use_full_nodal {
+            ""
+        } else if matches!(
+            ir.solver_config.nodal_sub_path_override,
+            crate::codegen::NodalSubPathOverride::FullLu
+        ) && !auto_use_full_nodal
+        {
+            "override"
+        } else if force_full_lu_sat {
+            "saturating-inductor"
+        } else if !ir.behavioral_sources.is_empty() {
+            "behavioral-source"
+        } else if has_positive_k_with_current {
+            "positive-k"
+        } else if k_diag_min < -1e12 {
+            "k-diag-negative"
+        } else if k_degenerate {
+            "k-degenerate"
+        } else if k_ill_conditioned {
+            "k-ill-conditioned"
+        } else if s_ill_conditioned {
+            "s-ill-conditioned"
+        } else if schur_unstable {
+            "schur-unstable"
+        } else if k_large_magnitude_with_linearization {
+            "k-large-linearized"
+        } else {
+            "unknown"
+        };
         // Sub-sample fire (variable-dt glow-strike re-solve) is implemented on
         // the Schur sub-path only (Stage A). A forced `on` is refused here
         // rather than silently ignored; `auto` falls back to the whole-sample
@@ -1873,7 +1906,9 @@ impl RustEmitter {
         }
 
         // Now emit header, constants, device models, state (needs use_full_nodal)
-        code.push_str(&self.emit_header(ir)?);
+        let glow_prov =
+            super::dk_emitter::GlowProvenance::for_nodal(ir, use_full_nodal, full_lu_trigger);
+        code.push_str(&self.emit_header(ir, &glow_prov)?);
         code.push_str(&self.emit_nodal_constants(ir));
         // Authentic circuit noise (Phase 1: thermal). Returns an empty
         // `NoiseEmission` when noise mode is Off — every fragment is "" and

@@ -496,7 +496,9 @@ pub fn expand_internal_nodes_if_conditioned(
     if k_diag_min < -100.0 {
         report!(
             rep,
-            "  Skipping internal node expansion (K ill-conditioned, using full LU)"
+            "  Skipping BJT internal-node expansion (K ill-conditioned); the DK \
+             kernel solves the unexpanded MNA with full LU. NB: this is the \
+             DK internal-node path — NOT the nodal Schur-vs-full-LU sub-path."
         );
         return false;
     }

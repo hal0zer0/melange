@@ -3,7 +3,8 @@
 //!
 //! Pins:
 //!  - byte-neutrality: a non-glow deck emits identical code for off/on/auto and
-//!    carries no sub-sample machinery; a glow deck with `off` carries none;
+//!    carries no sub-sample machinery; a glow deck with `off` carries no
+//!    machinery but still records its (inactive) glow provenance;
 //!  - routing contract: `on` is refused on the DK route and on the nodal
 //!    full-LU sub-path; `auto` is inert there;
 //!  - multi-breakpoint behaviour on a 2-stage glow divider cascade at 48 kHz:
@@ -99,6 +100,15 @@ fn nodal_code(spice: &str, sample_rate: f64, mode: SubsampleFireMode) -> String 
         .code
 }
 
+/// Sub-sample-fire MACHINERY is emitted only when the feature resolves active;
+/// the glow PROVENANCE object (`"subsample_fire":{...}`) is now emitted for
+/// every glow deck regardless (so inertness is never silent). Machinery presence
+/// must therefore be probed by a machinery-specific marker, not the bare
+/// substring "subsample".
+fn has_machinery(code: &str) -> bool {
+    code.contains("fn subsample_schur_build(") || code.contains("struct SubsampleSchur")
+}
+
 #[test]
 fn non_glow_deck_is_byte_identical_across_modes() {
     let off = nodal_code(clipper_deck(), 48000.0, SubsampleFireMode::Off);
@@ -113,12 +123,21 @@ fn non_glow_deck_is_byte_identical_across_modes() {
 }
 
 #[test]
-fn glow_deck_off_has_no_machinery_and_auto_equals_on() {
+fn glow_deck_off_has_no_machinery_and_auto_resolves_to_on() {
     let off = nodal_code(chain_deck(), 48000.0, SubsampleFireMode::Off);
     let on = nodal_code(chain_deck(), 48000.0, SubsampleFireMode::On);
     let auto = nodal_code(chain_deck(), 48000.0, SubsampleFireMode::Auto);
-    assert!(!off.contains("subsample"), "glow deck with off must carry no machinery");
-    assert_eq!(auto, on, "glow deck on nodal-Schur: auto must resolve to on");
+
+    // OFF: no machinery, but the glow provenance IS still emitted so a consumer
+    // can tell an off-glow deck from a non-glow deck (fleet-arbiter thread 303).
+    assert!(!has_machinery(&off), "glow deck with off must carry no machinery");
+    assert!(
+        off.contains("\"subsample_fire\":{\"mode\":\"off\",\"active\":false,\"reason\":\"off\"")
+            && off.contains(", subsample-fire=off"),
+        "off glow deck must still record its inactive glow provenance:\n{off}"
+    );
+
+    // AUTO resolves to ON on nodal-Schur: identical MACHINERY in both.
     for token in [
         "fn subsample_schur_build(",
         "struct SubsampleSchur",
@@ -130,11 +149,27 @@ fn glow_deck_off_has_no_machinery_and_auto_equals_on() {
         "diag_subsample_fire_abandon_count",
         "diag_subsample_fire_segments",
         "SUBSAMPLE_FIRE_LIT_TAU_S: f64 = 1.476",
-        ", subsample-fire",
-        "\"subsample_fire\":true",
     ] {
         assert!(on.contains(token), "glow deck with on is missing `{token}`");
+        assert!(auto.contains(token), "glow deck with auto is missing `{token}`");
     }
+    assert!(
+        on.contains("\"subsample_fire\":{\"mode\":\"on\",\"active\":true,\"reason\":\"nodal-schur\"")
+            && on.contains(", subsample-fire=nodal-schur"),
+        "on glow deck missing active nodal-schur provenance:\n{on}"
+    );
+    assert!(
+        auto.contains(
+            "\"subsample_fire\":{\"mode\":\"auto\",\"active\":true,\"reason\":\"nodal-schur\""
+        ),
+        "auto glow deck missing active nodal-schur provenance:\n{auto}"
+    );
+    // DSP is byte-identical between auto and on; only the recorded mode differs.
+    assert_eq!(
+        auto.replacen("\"mode\":\"auto\"", "\"mode\":\"on\"", 1),
+        on,
+        "auto and on must differ ONLY in the recorded requested mode"
+    );
 }
 
 #[test]
@@ -164,7 +199,18 @@ fn on_is_refused_on_dk_route_and_auto_is_inert_there() {
         .generate(&kernel, &mna, &netlist)
         .expect("DK auto")
         .code;
-    assert!(!code.contains("subsample"), "DK route must never emit sub-sample fire");
+    assert!(
+        !has_machinery(&code),
+        "DK route must never emit sub-sample fire machinery"
+    );
+    // ...but a glow deck on DK must NOT be silent about it: provenance records
+    // active:false, reason dk-route (fleet-arbiter thread 303, Q1b — this is the
+    // shipped-route hole that left openphilicorda characterising 3/12 blind).
+    assert!(
+        code.contains("\"subsample_fire\":{\"mode\":\"auto\",\"active\":false,\"reason\":\"dk-route\"")
+            && code.contains(", subsample-fire=dk-route"),
+        "DK glow deck must record active:false reason:dk-route, not stay silent:\n{code}"
+    );
 }
 
 #[test]
@@ -194,8 +240,14 @@ fn on_is_refused_on_full_lu_subpath_and_auto_is_inert_there() {
         .expect("full-LU auto")
         .code;
     assert!(
-        !code.contains("subsample"),
-        "full-LU sub-path with auto must not emit sub-sample fire (incl. provenance)"
+        !has_machinery(&code),
+        "full-LU sub-path must emit no sub-sample fire machinery"
+    );
+    // ...but the provenance records WHY it is inactive: reason nodal-full-lu:<trigger>.
+    assert!(
+        code.contains("\"subsample_fire\":{\"mode\":\"auto\",\"active\":false,\"reason\":\"nodal-full-lu:")
+            && code.contains(", subsample-fire=nodal-full-lu:"),
+        "full-LU glow deck must record active:false reason:nodal-full-lu:<trigger>:\n{code}"
     );
 }
 

@@ -171,6 +171,15 @@ enum Commands {
         #[arg(long, default_value = "auto")]
         subsample_fire: String,
 
+        /// Diagnostic: lit sub-step multiplier (`factor * tau`) for the glow
+        /// variable-dt re-solve. Unset → 1.0, the shipped last tested-safe point
+        /// (arbiter t303). A bisection tool in the family of `--force-trap` /
+        /// `--nodal-subpath` — NOT a per-deck tuning knob (a deck author cannot
+        /// honestly tune it without a lock-margin sweep). Recorded in the
+        /// provenance Build: line and JSON.
+        #[arg(long)]
+        subsample_lit_factor: Option<f64>,
+
         /// BJT forward-active (frozen-analysis) reduction mode.
         ///
         /// * auto — reduce only pure-Ebers-Moll BJTs, for which the 1-D
@@ -847,6 +856,7 @@ fn main() -> Result<()> {
             force_trap,
             tube_grid_fa,
             subsample_fire,
+            subsample_lit_factor,
             bjt_fa,
             opamp_rail_mode,
             nodal_subpath,
@@ -973,6 +983,7 @@ fn main() -> Result<()> {
                 force_trap,
                 &tube_grid_fa,
                 subsample_fire_mode,
+                subsample_lit_factor,
                 &bjt_fa,
                 rail_mode,
                 nodal_sub_path_override,
@@ -1476,6 +1487,19 @@ fn resolve_oversampling(explicit_cli: Option<usize>, recommended: Option<usize>)
     }
 }
 
+/// Diagnostic lit sub-step multiplier (`MELANGE_LIT_FACTOR` env var) for the
+/// fleet-arbiter demand-3 sweep / lock-margin gate (robogogo thread 303).
+/// Deliberately an env var, not a CLI flag — a throwaway diagnostic knob. The
+/// resolved value is recorded in the provenance manifest (`lit_factor`), so a
+/// swept measurement carries its own build identity. Default 0.5 (= tau/2).
+fn diag_lit_factor() -> f64 {
+    std::env::var("MELANGE_LIT_FACTOR")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|&f| f > 0.0)
+        .unwrap_or(1.0)
+}
+
 fn compile_circuit_source(
     circuit_source: &circuits::CircuitSource,
     output: &PathBuf,
@@ -1496,6 +1520,7 @@ fn compile_circuit_source(
     force_trap: bool,
     tube_grid_fa: &str,
     subsample_fire: melange_solver::codegen::SubsampleFireMode,
+    subsample_lit_factor: Option<f64>,
     bjt_fa: &str,
     opamp_rail_mode: melange_solver::codegen::OpampRailMode,
     nodal_sub_path_override: melange_solver::codegen::NodalSubPathOverride,
@@ -2196,6 +2221,8 @@ fn compile_circuit_source(
     // Broadcast single output_scale to all outputs
     let output_scales = vec![output_scale; output_node_indices.len()];
 
+    // Flag wins; else the MELANGE_LIT_FACTOR env var (diagnostic); else 1.0.
+    let subsample_lit_factor = subsample_lit_factor.unwrap_or_else(diag_lit_factor);
     let config = CodegenConfig {
         circuit_name,
         input_node: input_node_idx,
@@ -2223,6 +2250,7 @@ fn compile_circuit_source(
         injections: injection_specs.clone(),
         taps: tap_specs.clone(),
         subsample_fire,
+        subsample_lit_factor,
         ..CodegenConfig::default()
     };
 
@@ -2305,7 +2333,10 @@ fn compile_circuit_source(
     // not re-derived here. Without this a deck authored to reach full-LU could
     // silently sit on Schur with nothing to reveal it.
     if let Some(sp) = generated.meta.nodal_sub_path {
-        println!("    Nodal sub-path: {sp}");
+        // "Nodal NR sub-path" — explicitly the nodal Newton implementation
+        // (Schur reduction vs full-LU), distinct from the DK kernel's BJT
+        // internal-node expansion, which also says "full LU" (see pipeline.rs).
+        println!("    Nodal NR sub-path: {sp} (nodal Newton; not DK node-expansion)");
     }
     if routing.spectral_radius > 0.0 {
         println!("    Spectral radius: {:.4}", routing.spectral_radius);
@@ -2937,12 +2968,21 @@ struct AnalyzeOptions<'a> {
 
 /// `CircuitState` diagnostic counters emitted only when sub-sample fire is
 /// active; `simulate` prints them when the generated code declares them.
-const SUBSAMPLE_FIRE_DIAG_FIELDS: [&str; 5] = [
+const SUBSAMPLE_FIRE_DIAG_FIELDS: [&str; 10] = [
     "diag_subsample_fire_count",
     "diag_subsample_fire_abandon_count",
     "diag_subsample_fire_detected",
     "diag_subsample_fire_resolved",
+    // Reason-split of `detected - resolved` (must sum to it): a real miss is
+    // ceiling+coincident; gridpoint is a bounded (<=1e-3·dt) extinction-timing
+    // quantisation, expected to scale with the lit sub-step count.
+    "diag_subsample_fire_unresolved_ceiling",
+    "diag_subsample_fire_unresolved_gridpoint",
+    "diag_subsample_fire_unresolved_coincident",
     "diag_subsample_fire_segments",
+    // Memo effectiveness (a consumer's runtime check that the memo is active).
+    "diag_subsample_fire_schur_builds",
+    "diag_subsample_fire_schur_reuses",
 ];
 
 /// Parse `--subsample-fire {auto|on|off}`. Unknown values are user errors.
@@ -3500,6 +3540,7 @@ fn simulate_circuit_source(
         taps: Vec::new(),
         bjt_fa_mode: melange_solver::codegen::BjtFaMode::Auto,
         subsample_fire: opts.subsample_fire,
+        subsample_lit_factor: diag_lit_factor(),
     };
     let generator = CodeGenerator::new(config);
     let generated = if use_nodal {
@@ -4193,6 +4234,7 @@ fn analyze_freq_response(
         // `analyze` does not expose --subsample-fire; auto = active on glow
         // nodal-Schur decks, inert everywhere else.
         subsample_fire: melange_solver::codegen::SubsampleFireMode::Auto,
+        subsample_lit_factor: diag_lit_factor(),
     };
     let generator = CodeGenerator::new(config);
     let generated = if use_nodal {
