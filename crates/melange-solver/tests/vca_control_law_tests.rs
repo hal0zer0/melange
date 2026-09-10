@@ -163,7 +163,10 @@ fn measure_peak(mode: u32, vctrl: f64, tag: &str) -> f64 {
     assert_eq!(nr_fail, 0, "NR convergence failures for {tag}");
     assert_eq!(nan_reset, 0, "NaN resets for {tag}");
     let peak = parse_kv(&output, "peak");
-    assert!(peak.is_finite() && peak > 1e-6, "peak degenerate for {tag}: {peak}");
+    assert!(
+        peak.is_finite() && peak > 1e-6,
+        "peak degenerate for {tag}: {peak}"
+    );
     peak
 }
 

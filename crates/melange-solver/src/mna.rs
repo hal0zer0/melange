@@ -4975,9 +4975,7 @@ impl MnaBuilder {
                 ..
             } => vec![n_plus, n_minus, n_ctrl_p, n_ctrl_n],
             Element::Glow {
-                n_anode,
-                n_cathode,
-                ..
+                n_anode, n_cathode, ..
             } => vec![n_anode, n_cathode],
             Element::BSource {
                 n_plus,

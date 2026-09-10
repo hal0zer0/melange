@@ -626,7 +626,10 @@ fn is_melange_directive(line: &str) -> bool {
 /// value token is preserved verbatim (ngspice understands SPICE suffixes).
 fn translate_melange_directive(line: &str) -> Option<Option<String>> {
     let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.first().is_some_and(|t| t.eq_ignore_ascii_case(".inject")) {
+    if parts
+        .first()
+        .is_some_and(|t| t.eq_ignore_ascii_case(".inject"))
+    {
         if parts.len() >= 4 {
             let node = parts[1];
             let field = parts[2];

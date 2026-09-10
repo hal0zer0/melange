@@ -55,9 +55,9 @@ fn dirty_marker() -> &'static str {
         .args(["diff", "--quiet", "HEAD"])
         .status()
     {
-        Ok(s) if s.success() => "",              // clean: no tracked diff vs HEAD
+        Ok(s) if s.success() => "", // clean: no tracked diff vs HEAD
         Ok(s) if s.code() == Some(1) => "-dirty", // tracked changes present
-        _ => "",                                  // git error / no HEAD → graceful
+        _ => "",                    // git error / no HEAD → graceful
     }
 }
 

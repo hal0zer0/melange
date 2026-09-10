@@ -460,7 +460,10 @@ fn resolved_build_flags(ir: &CircuitIR, glow: &GlowProvenance) -> String {
         if glow.active {
             // Show the lit sub-step factor on the human line too (arbiter t303:
             // a swept condition must be visible in the Build: line, not only JSON).
-            build.push_str(&format!(", subsample-fire={} (lit×{})", glow.reason, glow.lit_factor));
+            build.push_str(&format!(
+                ", subsample-fire={} (lit×{})",
+                glow.reason, glow.lit_factor
+            ));
         } else {
             build.push_str(&format!(", subsample-fire={}", glow.reason));
         }
@@ -621,7 +624,10 @@ impl RustEmitter {
         ctx.insert("melange_commit", melange_commit);
         // Exact identity of the emitting binary (see provenance_json). Masked in
         // the golden harness, so it never churns codegen diffs.
-        ctx.insert("melange_exe", crate::build_identity::current_exe_hash_or_unknown());
+        ctx.insert(
+            "melange_exe",
+            crate::build_identity::current_exe_hash_or_unknown(),
+        );
 
         // Provenance line: the FULL RESOLVED flag set — every flag that changes
         // emitted DSP, AFTER netlist-directive application + auto-promotion (not

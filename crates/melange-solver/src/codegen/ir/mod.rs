@@ -5962,9 +5962,20 @@ impl CircuitIR {
         // main replaced warn_unrecognized_params with the stricter
         // check_model_params (unknown keys are a hard error; glow/NEON is a
         // melange-native device, so no recognized-but-unimplemented SPICE keys).
-        Self::check_model_params(netlist, model, &["VO", "VM", "IK", "RS", "IHOLD", "ROFF"], &[])?;
+        Self::check_model_params(
+            netlist,
+            model,
+            &["VO", "VM", "IK", "RS", "IHOLD", "ROFF"],
+            &[],
+        )?;
 
-        Ok(crate::device_types::GlowParams { vo, v0, rs, roff, ihold })
+        Ok(crate::device_types::GlowParams {
+            vo,
+            v0,
+            rs,
+            roff,
+            ihold,
+        })
     }
 
     /// Warn on unrecognized .model parameters (typo protection).

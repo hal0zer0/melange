@@ -114,8 +114,14 @@ fn non_glow_deck_is_byte_identical_across_modes() {
     let off = nodal_code(clipper_deck(), 48000.0, SubsampleFireMode::Off);
     let on = nodal_code(clipper_deck(), 48000.0, SubsampleFireMode::On);
     let auto = nodal_code(clipper_deck(), 48000.0, SubsampleFireMode::Auto);
-    assert_eq!(off, on, "non-glow deck: --subsample-fire on changed the emitted code");
-    assert_eq!(off, auto, "non-glow deck: --subsample-fire auto changed the emitted code");
+    assert_eq!(
+        off, on,
+        "non-glow deck: --subsample-fire on changed the emitted code"
+    );
+    assert_eq!(
+        off, auto,
+        "non-glow deck: --subsample-fire auto changed the emitted code"
+    );
     assert!(
         !off.contains("subsample"),
         "non-glow deck must carry no sub-sample fire machinery"
@@ -130,7 +136,10 @@ fn glow_deck_off_has_no_machinery_and_auto_resolves_to_on() {
 
     // OFF: no machinery, but the glow provenance IS still emitted so a consumer
     // can tell an off-glow deck from a non-glow deck (fleet-arbiter thread 303).
-    assert!(!has_machinery(&off), "glow deck with off must carry no machinery");
+    assert!(
+        !has_machinery(&off),
+        "glow deck with off must carry no machinery"
+    );
     assert!(
         off.contains("\"subsample_fire\":{\"mode\":\"off\",\"active\":false,\"reason\":\"off\"")
             && off.contains(", subsample-fire=off"),
@@ -151,11 +160,15 @@ fn glow_deck_off_has_no_machinery_and_auto_resolves_to_on() {
         "SUBSAMPLE_FIRE_LIT_TAU_S: f64 = 1.476",
     ] {
         assert!(on.contains(token), "glow deck with on is missing `{token}`");
-        assert!(auto.contains(token), "glow deck with auto is missing `{token}`");
+        assert!(
+            auto.contains(token),
+            "glow deck with auto is missing `{token}`"
+        );
     }
     assert!(
-        on.contains("\"subsample_fire\":{\"mode\":\"on\",\"active\":true,\"reason\":\"nodal-schur\"")
-            && on.contains(", subsample-fire=nodal-schur"),
+        on.contains(
+            "\"subsample_fire\":{\"mode\":\"on\",\"active\":true,\"reason\":\"nodal-schur\""
+        ) && on.contains(", subsample-fire=nodal-schur"),
         "on glow deck missing active nodal-schur provenance:\n{on}"
     );
     assert!(
@@ -207,8 +220,9 @@ fn on_is_refused_on_dk_route_and_auto_is_inert_there() {
     // active:false, reason dk-route (fleet-arbiter thread 303, Q1b — this is the
     // shipped-route hole that left openphilicorda characterising 3/12 blind).
     assert!(
-        code.contains("\"subsample_fire\":{\"mode\":\"auto\",\"active\":false,\"reason\":\"dk-route\"")
-            && code.contains(", subsample-fire=dk-route"),
+        code.contains(
+            "\"subsample_fire\":{\"mode\":\"auto\",\"active\":false,\"reason\":\"dk-route\""
+        ) && code.contains(", subsample-fire=dk-route"),
         "DK glow deck must record active:false reason:dk-route, not stay silent:\n{code}"
     );
 }
@@ -245,8 +259,9 @@ fn on_is_refused_on_full_lu_subpath_and_auto_is_inert_there() {
     );
     // ...but the provenance records WHY it is inactive: reason nodal-full-lu:<trigger>.
     assert!(
-        code.contains("\"subsample_fire\":{\"mode\":\"auto\",\"active\":false,\"reason\":\"nodal-full-lu:")
-            && code.contains(", subsample-fire=nodal-full-lu:"),
+        code.contains(
+            "\"subsample_fire\":{\"mode\":\"auto\",\"active\":false,\"reason\":\"nodal-full-lu:"
+        ) && code.contains(", subsample-fire=nodal-full-lu:"),
         "full-LU glow deck must record active:false reason:nodal-full-lu:<trigger>:\n{code}"
     );
 }
@@ -330,8 +345,16 @@ fn chain_multi_breakpoint_resolves_cascade_strikes_at_48k() {
     println!(\"resolved={}\", state.diag_subsample_fire_resolved);";
     let on_code = nodal_code(chain_deck(), 48000.0, SubsampleFireMode::On);
     let off_code = nodal_code(chain_deck(), 48000.0, SubsampleFireMode::Off);
-    let on = compile_and_run(&on_code, &CHAIN_MAIN.replace("DIAG_LINES", diag_on), "chain_on");
-    let off = compile_and_run(&off_code, &CHAIN_MAIN.replace("DIAG_LINES", ""), "chain_off");
+    let on = compile_and_run(
+        &on_code,
+        &CHAIN_MAIN.replace("DIAG_LINES", diag_on),
+        "chain_on",
+    );
+    let off = compile_and_run(
+        &off_code,
+        &CHAIN_MAIN.replace("DIAG_LINES", ""),
+        "chain_off",
+    );
     eprintln!("SUBSAMPLE FIRE chain on:\n{on}\noff:\n{off}");
 
     for out in [&on, &off] {
@@ -346,7 +369,10 @@ fn chain_multi_breakpoint_resolves_cascade_strikes_at_48k() {
     // Two lamps at ~120 Hz / ~60 Hz over 0.5 s: at least ~80 strikes.
     assert!(fire_count > 50.0, "too few split samples: {fire_count}");
     assert_eq!(abandon, 0.0, "sub-sample splits were abandoned");
-    assert!(detected >= resolved, "resolved ({resolved}) exceeds detected ({detected})");
+    assert!(
+        detected >= resolved,
+        "resolved ({resolved}) exceeds detected ({detected})"
+    );
     assert!(
         resolved >= 0.95 * detected,
         "fewer than 95% of strikes were sub-sample resolved: {resolved}/{detected}"

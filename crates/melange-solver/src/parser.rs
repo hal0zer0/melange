@@ -1109,9 +1109,7 @@ impl Element {
                 ..
             } => vec![out_p, out_n, ctrl_p, ctrl_n],
             Element::Glow {
-                n_anode,
-                n_cathode,
-                ..
+                n_anode, n_cathode, ..
             } => vec![n_anode, n_cathode],
             Element::SubcktInstance { nodes, .. } => nodes.iter().map(String::as_str).collect(),
         }
@@ -2829,9 +2827,7 @@ impl Parser {
                     ))
                 })?;
                 if !matches!(n, 1 | 2 | 4) {
-                    return Err(self.error(format!(
-                        ".oversampling must be 1, 2, or 4, got {n}"
-                    )));
+                    return Err(self.error(format!(".oversampling must be 1, 2, or 4, got {n}")));
                 }
                 if let Some(prev) = netlist.recommended_oversampling {
                     if prev != n {
@@ -4692,9 +4688,7 @@ fn validate_element_node_lengths(elem: &Element) -> Result<(), String> {
             check(n_ctrl_n)?;
         }
         Element::Glow {
-            n_anode,
-            n_cathode,
-            ..
+            n_anode, n_cathode, ..
         } => {
             check(n_anode)?;
             check(n_cathode)?;
@@ -4867,9 +4861,7 @@ fn normalize_element_nodes(elem: &mut Element) {
             norm(n_ctrl_n);
         }
         Element::Glow {
-            n_anode,
-            n_cathode,
-            ..
+            n_anode, n_cathode, ..
         } => {
             norm(n_anode);
             norm(n_cathode);
@@ -7265,7 +7257,10 @@ U1 0 inv out opamp
                 !STANDARD_SPICE_DIRECTIVES.contains(d),
                 "{d} is standard SPICE and must not be listed as melange-only"
             );
-            assert!(d.starts_with('.') && *d == d.to_lowercase(), "bad entry {d}");
+            assert!(
+                d.starts_with('.') && *d == d.to_lowercase(),
+                "bad entry {d}"
+            );
         }
     }
 

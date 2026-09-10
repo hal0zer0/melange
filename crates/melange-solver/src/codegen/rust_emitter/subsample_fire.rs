@@ -88,7 +88,10 @@ pub(super) fn emit_subsample_fire_constants(ir: &CircuitIR) -> String {
         return String::new();
     }
     // Two flips (strike + extinction) per latched device per sample.
-    let max_breaks = 2 * stateful_device_data(ir).iter().filter(|d| d.is_latched).count();
+    let max_breaks = 2 * stateful_device_data(ir)
+        .iter()
+        .filter(|d| d.is_latched)
+        .count();
     let lit_tau = glow_lit_tau_min(ir);
     // Diagnostic lit sub-step multiplier; 0/unset → the 1.0 (tau_min) shipping
     // default (arbiter t303 — the last tested-safe point).
@@ -406,7 +409,9 @@ fn emit_substep_solve(
                  {i2}if det.abs() < 1e-15 {{\n"
             ));
             emit_nr_singular_fallback(code, 1, &format!("{i2}    "));
-            code.push_str(&format!("{i2}    continue;\n{i2}}}\n{i2}let delta0 = f0 / det;\n"));
+            code.push_str(&format!(
+                "{i2}    continue;\n{i2}}}\n{i2}let delta0 = f0 / det;\n"
+            ));
             emit_schur_nr_limit_and_converge(code, ir, 1, &i2, "ssf_sub.k");
         }
         2 => {
@@ -473,8 +478,16 @@ fn emit_segment_rhs(
     be_var: &str,
 ) {
     let has_rhs_be = ir.has_dc_sources && !ir.matrices.rhs_const_be.is_empty();
-    let trap_const = if ir.has_dc_sources { "RHS_CONST" } else { "[0.0f64; N]" };
-    let be_const = if has_rhs_be { "RHS_CONST_BE" } else { "[0.0f64; N]" };
+    let trap_const = if ir.has_dc_sources {
+        "RHS_CONST"
+    } else {
+        "[0.0f64; N]"
+    };
+    let be_const = if has_rhs_be {
+        "RHS_CONST_BE"
+    } else {
+        "[0.0f64; N]"
+    };
     code.push_str(&format!(
         "{indent}let mut {rhs_var}: [f64; N] = if {be_var} {{ {be_const} }} else {{ {trap_const} }};\n\
          {indent}for i in 0..N {{ for j in 0..N {{ {rhs_var}[i] += ssf_sub.a_neg[i][j] * {v_start}[j]; }} }}\n"
@@ -523,7 +536,11 @@ fn emit_segment_rhs(
         code.push_str(&format!(
             "{indent}// Noise replay (cached i_n; consumes no RNG draws).\n"
         ));
-        code.push_str(&emit_noise_replay_body(noise.replay_counts, rhs_var, indent));
+        code.push_str(&emit_noise_replay_body(
+            noise.replay_counts,
+            rhs_var,
+            indent,
+        ));
     }
 }
 
@@ -664,12 +681,36 @@ pub(super) fn emit_subsample_fire_block(
          {i2}ssf_seg_be = true;\n\
          {i2}ssf_segs = 1;\n"
     ));
-    emit_cached_build(&mut code, i2, "ssf_rate / ssf_t1", "true", "ssf_ok = false;");
+    emit_cached_build(
+        &mut code,
+        i2,
+        "ssf_rate / ssf_t1",
+        "true",
+        "ssf_ok = false;",
+    );
     code.push_str(&format!("{i2}if ssf_ok {{\n"));
     emit_segment_rhs(
-        &mut code, ir, noise, i3, "ssf_rhs", "ssf_v0", "ssf_i0", "ssf_t0", "ssf_t1", "ssf_seg_be",
+        &mut code,
+        ir,
+        noise,
+        i3,
+        "ssf_rhs",
+        "ssf_v0",
+        "ssf_i0",
+        "ssf_t0",
+        "ssf_t1",
+        "ssf_seg_be",
     );
-    emit_substep_solve(&mut code, ir, i3, "ssf_rhs", "ssf_i0", "ssf_v_end", "ssf_i_end", "ssf_ok")?;
+    emit_substep_solve(
+        &mut code,
+        ir,
+        i3,
+        "ssf_rhs",
+        "ssf_i0",
+        "ssf_v_end",
+        "ssf_i_end",
+        "ssf_ok",
+    )?;
     code.push_str(&format!(
         "{i2}}}\n\
          {i1}}}\n\
@@ -736,9 +777,20 @@ pub(super) fn emit_subsample_fire_block(
         "ssf_ok = false; break;",
     );
     emit_segment_rhs(
-        &mut code, ir, noise, i4, "ssf_rhs", "ssf_v0", "ssf_i0", "ssf_t0", "ssf_tc", "ssf_seg_be",
+        &mut code,
+        ir,
+        noise,
+        i4,
+        "ssf_rhs",
+        "ssf_v0",
+        "ssf_i0",
+        "ssf_t0",
+        "ssf_tc",
+        "ssf_seg_be",
     );
-    emit_substep_solve(&mut code, ir, i4, "ssf_rhs", "ssf_i0", "ssf_vc", "ssf_ic", "ssf_ok")?;
+    emit_substep_solve(
+        &mut code, ir, i4, "ssf_rhs", "ssf_i0", "ssf_vc", "ssf_ic", "ssf_ok",
+    )?;
     code.push_str(&format!(
         "{i4}if !ssf_ok {{ break; }}\n\
          {i4}// Hooks over the pre-flip segment (another lamp flipping before tc lands on\n\
@@ -762,7 +814,9 @@ pub(super) fn emit_subsample_fire_block(
     ));
     for d in &latched {
         let n = d.dev_num;
-        code.push_str(&format!("{i4}{n} => state.device_{n}_state[0] = ssf_dir,\n"));
+        code.push_str(&format!(
+            "{i4}{n} => state.device_{n}_state[0] = ssf_dir,\n"
+        ));
     }
     code.push_str(&format!(
         "{i4}_ => {{}}\n\
@@ -789,9 +843,27 @@ pub(super) fn emit_subsample_fire_block(
         "ssf_ok = false; break;",
     );
     emit_segment_rhs(
-        &mut code, ir, noise, i2, "ssf_rhs", "ssf_v0", "ssf_i0", "ssf_t0", "ssf_t1", "ssf_seg_be",
+        &mut code,
+        ir,
+        noise,
+        i2,
+        "ssf_rhs",
+        "ssf_v0",
+        "ssf_i0",
+        "ssf_t0",
+        "ssf_t1",
+        "ssf_seg_be",
     );
-    emit_substep_solve(&mut code, ir, i2, "ssf_rhs", "ssf_i0", "ssf_v_end", "ssf_i_end", "ssf_ok")?;
+    emit_substep_solve(
+        &mut code,
+        ir,
+        i2,
+        "ssf_rhs",
+        "ssf_i0",
+        "ssf_v_end",
+        "ssf_i_end",
+        "ssf_ok",
+    )?;
     code.push_str(&format!(
         "{i1}}}\n\
          {i1}if ssf_ok {{\n\

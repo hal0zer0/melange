@@ -9,6 +9,81 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-09-10
+
+A device-and-diagnostics patch. It adds an experimental neon-lamp (glow-discharge)
+device and the numerical machinery to run glow relaxation-oscillator/divider
+circuits stably, plus build-identity provenance, a deck-declared oversampling
+directive, and validate diagnostics. The glow device is functional but
+experimental (pre-1.0).
+
+**Generated DSP audio is byte-identical to 0.1.6 for every existing circuit.** The
+only change to already-shipping circuits is two clippy-allow lines in the module
+header (behavior-neutral) plus inert glow state fields; on the golden corpus all
+168 rendered programs across 38 circuits are identical. MSRV is unchanged (1.85)
+and no dependency changed. The glow strike/extinction numerics are gated on the
+presence of a latched glow device, so no non-glow circuit's audio moves.
+
+### Added
+
+- **Glow-discharge / neon-lamp device** (`.model NEON(VO VM IK RS IHOLD ROFF)`) —
+  a latched relaxation device for neon relaxation oscillators and frequency
+  dividers. Experimental. The lit branch is the maintaining line `i = (v − V0)/RS`
+  with a derived intercept `V0 = VM − RS·IK`.
+- **`melange compile --subsample-fire {auto|on|off}`** — variable-dt breakpoint
+  re-solve that resolves each glow strike/extinction at its true sub-sample
+  crossing instead of at a grid point, curing rate-quantized divider
+  injection-lock (a divider that dropped pitch classes at the base grid). `auto`
+  enables it for a latched glow device on the nodal-Schur route; the DK and nodal
+  full-LU routes are inert and record why in the provenance manifest. Byte-neutral
+  for non-glow and for `off`.
+- **`melange compile --subsample-lit-factor <x>`** — diagnostic bisection knob for
+  the lit sub-step size (not a per-deck tuning control).
+- **`.oversampling N` netlist directive** (N ∈ {1,2,4}) — a deck can declare its
+  recommended oversampling minimum. CLI `--oversampling` still wins when set
+  (even lower, with a warning); honored on compile/simulate/analyze; `validate`
+  ignores it.
+- **Build identity in `melange --version` and generated provenance** — an
+  FNV-1a-64 hash of the running executable (`exe fnv1a64:<hash>`, JSON key
+  `exe_fnv1a64`), plus `"solver":"dk"|"nodal"` in the provenance JSON, so two
+  builds at the same commit (or a dirty tree) are distinguishable.
+- **`melange validate --backward-euler` / `--force-trap`** — integrator
+  diagnostics mirroring `compile`; diagnostic only, never the gate.
+- **`melange validate --bjt-fa` / `--tube-grid-fa`** — the existing mechanism
+  flags plumbed through the validator.
+- **Compile-time washout diagnostic for voltage-mode VCAs** driven through a high
+  series resistance (`R_drive·G0 ≥ 10`), where the control voltage silently washes
+  out; warns to use current-drive mode. Warning only; byte-neutral.
+
+### Changed
+
+- **Generated code emits `#![allow(unused_mut)]` and `#![allow(clippy::manual_memcpy)]`
+  in the module header** so a downstream `clippy -D warnings` build stays clean
+  across regeneration. This is a source-level diff on every generated file;
+  rendered audio is unchanged.
+- **`melange validate` derives its ngspice directive-strip set from the parser**
+  (`MELANGE_ONLY_DIRECTIVES`) instead of a hand-maintained list, with a two-way
+  drift-guard test.
+
+### Fixed
+
+- **Nodal-Schur Newton divergence on multi-stage glow-divider chains** — the
+  first-order NR warm-start predictor extrapolated the stiff lit-discharge current
+  into diode breakdown and the voltage-step convergence test accepted it, letting
+  the chain run away (~1e6 V) while a global magnitude-reset cadence disguised it
+  as a collapsed divider. A zero-order warm start for latched-device circuits fixes
+  it. Compile-time gated on latched-device presence — non-glow circuits are
+  byte-identical.
+- **Glow nodal divergence at plugin sample rates** — trapezoidal ringing on the
+  ~1e5 glow conductance step rang the stiff mode over the breakdown threshold at
+  larger timesteps. Lit-gated Backward Euler (L-stable) plus omitting a
+  double-counted trap-midpoint stamp in the BE fallback cure it. Glow-gated;
+  non-glow byte-identical.
+- **`melange validate` failed on decks carrying `.integrator` or `.delay_feedback`**
+  (an ngspice "unimplemented dot command") because those directives were missing
+  from the hand-maintained strip list; the parser-derived set fixes it. `.inject`
+  is translated to a resistor for ngspice rather than stripped.
+
 ## [0.1.6] - 2026-09-04
 
 A correctness-and-diagnostics patch. The headline is an accuracy fix: the
@@ -670,7 +745,8 @@ measured real hardware. Everything else is unproven against hardware. See
   KiCad file; no effect on netlist compilation, generated code, or shipped plugins. The
   fix (`quick-xml >= 0.41`) is tracked for 0.1.1.
 
-[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/hal0zer0/melange/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/hal0zer0/melange/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/hal0zer0/melange/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/hal0zer0/melange/compare/v0.1.3...v0.1.4

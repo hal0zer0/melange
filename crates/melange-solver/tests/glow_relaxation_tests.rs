@@ -263,7 +263,10 @@ fn assert_relax_fixed(route: &str, out: &str) {
         vmax - vmin
     );
     assert_eq!(nan_reset, 0, "[{route}] NaN resets in glow oscillator");
-    assert!(strikes >= 5, "[{route}] expected sustained oscillation, got {strikes} strikes");
+    assert!(
+        strikes >= 5,
+        "[{route}] expected sustained oscillation, got {strikes} strikes"
+    );
     assert!(
         vmax >= 133.0 && vmax <= 137.0,
         "[{route}] peak should strike near VO=135, got vmax={vmax}"
@@ -308,7 +311,11 @@ fn test_glow_relaxation_oscillates() {
 /// path still had the deep-discharge bug).
 #[test]
 fn test_glow_relaxation_oscillates_dk_route() {
-    let out = compile_and_run(&generate_dk_code(&relax_deck(170.0), 48000.0), OBSERVE_MAIN, "relax_dk");
+    let out = compile_and_run(
+        &generate_dk_code(&relax_deck(170.0), 48000.0),
+        OBSERVE_MAIN,
+        "relax_dk",
+    );
     assert_relax_fixed("DK Schur", &out);
 }
 
@@ -344,7 +351,10 @@ fn main() {
 }
 "#;
     let out = compile_and_run(&code, main_code, tag);
-    assert!(parse_kv(&out, "strikes") as u32 >= 3, "too few cycles at Vb={vb}");
+    assert!(
+        parse_kv(&out, "strikes") as u32 >= 3,
+        "too few cycles at Vb={vb}"
+    );
     parse_kv(&out, "period_ms")
 }
 
@@ -376,8 +386,14 @@ fn test_glow_period_is_supply_sensitive() {
          test): T(150V)={t_lo} ms should be ≫ T(170V)={t_hi} ms"
     );
     // And each should track its own analytic prediction + discretization (±6%).
-    assert!((t_hi - 8.40).abs() / 8.40 < 0.06, "T(170V)={t_hi} vs analytic 8.40 ms");
-    assert!((t_lo - 14.01).abs() / 14.01 < 0.06, "T(150V)={t_lo} vs analytic 14.01 ms");
+    assert!(
+        (t_hi - 8.40).abs() / 8.40 < 0.06,
+        "T(170V)={t_hi} vs analytic 8.40 ms"
+    );
+    assert!(
+        (t_lo - 14.01).abs() / 14.01 < 0.06,
+        "T(150V)={t_lo} vs analytic 14.01 ms"
+    );
 }
 
 // ── Oversampling anti-alias validation (arbiter ruling on sub-sample edge
@@ -485,7 +501,10 @@ fn main() {
 fn measure_asr_db(spice: &str, os: usize, tag: &str) -> (f64, f64) {
     let code = generate_glow_code_os(spice, 48000.0, os);
     let out = compile_and_run(&code, ASR_MAIN, &format!("asr_{tag}_os{os}"));
-    assert!(parse_kv(&out, "strikes") as u32 >= 5, "{tag} OS={os}: oscillator didn't run");
+    assert!(
+        parse_kv(&out, "strikes") as u32 >= 5,
+        "{tag} OS={os}: oscillator didn't run"
+    );
     (parse_kv(&out, "asr_db"), parse_kv(&out, "f0_hz"))
 }
 
@@ -516,8 +535,14 @@ fn test_glow_oversampling_low_divider_aliasing_modest() {
         "GLOW ASR low divider f0≈{flo:.0} Hz: OS1={lo1:.2} dB OS2={lo2:.2} dB OS4={lo4:.2} dB \
          (inharmonic/harmonic; lower = less aliasing)"
     );
-    assert!(lo1 < -25.0, "base-rate aliasing should be modest (cap band-limits), ASR={lo1} dB");
-    assert!(lo4 <= lo1 + 1.0, "OS must not worsen aliasing: OS1={lo1} dB OS4={lo4} dB");
+    assert!(
+        lo1 < -25.0,
+        "base-rate aliasing should be modest (cap band-limits), ASR={lo1} dB"
+    );
+    assert!(
+        lo4 <= lo1 + 1.0,
+        "OS must not worsen aliasing: OS1={lo1} dB OS4={lo4} dB"
+    );
 }
 
 /// Oversampling must PRESERVE the oscillator physics (this generalizes across

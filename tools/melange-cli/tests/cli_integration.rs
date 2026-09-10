@@ -281,8 +281,7 @@ fn test_oversampling_directive_resolution() {
     let (code, stderr) = compile(&deck_os4, &["--oversampling", "2"], "os_override");
     assert_eq!(factor(&code), 2, "explicit --oversampling must win");
     assert!(
-        stderr.contains("deck recommends .oversampling >= 4")
-            && stderr.contains("building at 2"),
+        stderr.contains("deck recommends .oversampling >= 4") && stderr.contains("building at 2"),
         "expected downward-override warning, got: {stderr}"
     );
 

@@ -4,11 +4,11 @@
 //! `generate_schur_gauss_elim` — the procedural NR solver code that is
 //! too deeply conditional for Tera templates.
 
+use super::helpers::has_latched_device;
 use super::nr_helpers::{
     emit_dk_device_evaluation, emit_nr_limit_and_converge, emit_nr_singular_fallback,
     emit_schur_nr_limit_and_converge,
 };
-use super::helpers::has_latched_device;
 use super::RustEmitter;
 use crate::codegen::ir::CircuitIR;
 use crate::codegen::CodegenError;
@@ -63,7 +63,9 @@ impl RustEmitter {
             code.push_str("    i_nl.copy_from_slice(&state.i_nl_prev);\n\n");
         } else {
             code.push_str("    for i in 0..M {\n");
-            code.push_str("        i_nl[i] = 2.0 * state.i_nl_prev[i] - state.i_nl_prev_prev[i];\n");
+            code.push_str(
+                "        i_nl[i] = 2.0 * state.i_nl_prev[i] - state.i_nl_prev_prev[i];\n",
+            );
             code.push_str("    }\n\n");
         }
 

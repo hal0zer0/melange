@@ -3531,7 +3531,9 @@ impl RustEmitter {
         code.push_str("            diag_nan_reset_count: 0,\n");
         code.push_str("            diag_magnitude_reset_count: 0,\n");
         code.push_str("            diag_substep_count: 0,\n");
-        code.push_str(&super::subsample_fire::emit_subsample_fire_default_fields(ir));
+        code.push_str(&super::subsample_fire::emit_subsample_fire_default_fields(
+            ir,
+        ));
         code.push_str("            diag_refactor_count: 0,\n");
         code.push_str("            diag_ls_fail_count: 0,\n");
         code.push_str("            diag_voltage_damp_count: 0,\n");
@@ -6481,7 +6483,9 @@ impl RustEmitter {
         // off) the update is folded into the breakpoint re-solve block, which
         // may replace `v`/`i_nl` with the end of the dark/lit sub-step pair.
         if ir.solver_config.subsample_fire && m > 0 {
-            code.push_str(&super::subsample_fire::emit_subsample_fire_block(ir, noise)?);
+            code.push_str(&super::subsample_fire::emit_subsample_fire_block(
+                ir, noise,
+            )?);
         } else {
             code.push_str(&emit_stateful_update(&stateful_device_data(ir)));
         }
