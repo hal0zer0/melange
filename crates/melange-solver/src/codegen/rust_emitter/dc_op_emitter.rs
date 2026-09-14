@@ -633,6 +633,16 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
          {inner}}}\n\n"
     ));
 
+    // KNOWN GAP: the convergence test emitted below is the per-variable STEP
+    // test only. The compile-time solver (`dc_op.rs::nr_dc_solve`) additionally
+    // gates acceptance on the per-node KCL residual
+    // (`DC_OP_KCL_ABSTOL_AMPS`), because a collapsed Newton step at a
+    // non-root passes the step test. This runtime `recompute_dc_op` does NOT
+    // yet carry that gate, so it can still accept a KCL-violating fixed point
+    // (e.g. parallel same-direction diodes). Mirroring the residual gate here
+    // is a scheduled follow-up; until then callers should treat a runtime
+    // recompute as unverified against KCL.
+    //
     // Global flat damping + per-element clamp. Matches the simple-form
     // damping used in `dc_op.rs::nr_dc_solve` (scale all deltas by
     // `DAMP_THRESHOLD / max_delta` when max exceeds threshold), including

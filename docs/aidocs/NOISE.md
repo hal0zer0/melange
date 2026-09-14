@@ -543,10 +543,31 @@ noise-index methodology constraint.
 guitar drives, RIAA stages), the resistors that *audibly* hiss are the
 ones carrying bias current — cathode resistors, plate loads, drive-stage
 input-bias networks. Coupling-network resistors with literal zero bias
-do not measurably hiss extra over metal-film equivalents. The Hooge form
-captures this exactly: loud passages drive more current through the bias
-network → louder 1/f, quiet passages let the resistors return to thermal
-floor. This is the "compresses and breathes" character of vintage gear.
+do not measurably hiss extra over metal-film equivalents. The Hooge
+`I_DC²` form captures *that* correctly: a resistor's excess 1/f floor is
+set by the DC current it carries.
+
+**What the DC-current dependence does NOT mean (correction, voltron
+analog-EE review 2026-09-13).** It does *not* follow that "loud passages
+get louder 1/f, quiet passages return to the thermal floor." In a
+**class-A** stage the DC bias current is fixed by the operating point and
+does **not** track program level. A biased resistor therefore sits at its
+bias-set excess-noise floor **at all times**, loud or quiet. A signal
+swing adds noise as **sidebands modulated at the signal rate** (the
+instantaneous `|I(t)|` in the stamp wiggles the amplitude), and the
+mean-square current only rises appreciably when the swing becomes
+comparable to the bias — not for small-signal program material riding on
+a fixed operating point. The genuinely *level-dependent* cases are stages
+whose **DC operating point itself shifts with level**: class-AB (bias
+current rises with drive), grid-current / grid-leak bias shift, and
+sagging supplies. The melange stamp reproduces whichever of these the
+*circuit* actually does, because `|i_R_prev|` is read live from the
+solved node voltages — it is not imposed by the noise model.
+
+The "compresses and breathes" character sometimes attributed to this is
+an **unmeasured hypothesis**, not established behavior: no measurement in
+this repo demonstrates program-dependent 1/f breathing from a class-A
+bias resistor. Treat it as a conjecture to test, not a claim to cite.
 
 **Per-element syntax** (Phase 3.5 chose per-element over `.model R(…)`
 because Hooge constants are per-resistor material properties, not shared
@@ -643,6 +664,26 @@ sweep up/down for material variants. Don't expect `KF = 1e-10` to
 correspond to any specific Hooge α_H value across all R values — it's
 an empirical knob that produces audible 1/f at the right scale when the
 bias is real.
+
+**Datasheet anchor: KF ↔ resistor noise index (voltron analog-EE review,
+2026-09-13).** Resistor 1/f is specified on datasheets as a **noise
+index** `NI` in µV/V — the RMS microvolts of 1/f noise across the
+resistor per volt of DC drop, integrated over one decade of frequency.
+Because a decade of a 1/f PSD integrates to `ln10` and melange's law is
+`S_i = KF·I^AF / f` with `AF = 2`, the two connect as:
+
+```
+KF = (NI[µV/V] × 1e-6)² / ln10
+```
+
+Check against the doc's running example: `KF = 1e-10` back-solves to
+`NI ≈ 15 µV/V` (≈ +23.6 dB in noise-index terms — the *noisy* end of the
+scale). Vishay carbon-composition parts spec `NI ≈ 2–6 µV/V`, i.e.
+`KF ≈ 2e-12 … 2e-11` — roughly one to two decades quieter than the
+`1e-10` example. Use a datasheet `NI` and this relation to seed the
+empirical knob, then trim by ear. (The relation is an anchor, not a
+guarantee: `KF` still absorbs the trap-rule scaling above, so treat the
+back-solved `NI` as a sanity band, not a calibrated equality.)
 
 ### Op-Amp Input-Referred — Phase 4
 

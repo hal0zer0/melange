@@ -316,7 +316,13 @@ pub(super) fn compute_dk_be_fallback(
     // which left stale trapezoidal history on those BE constraints. Shared with
     // the trap-path and os>1 builders via super::zero_augmented_history_rows.
     // Inductor branch rows (n_aug..n) keep their history and are untouched.
-    super::zero_augmented_history_rows(&mut a_neg_be, n, n_nodes, mna.n_aug);
+    super::zero_augmented_history_rows(
+        &mut a_neg_be,
+        n,
+        n_nodes,
+        mna.n_aug,
+        &mna.bjt_internal_nodes,
+    );
 
     // S_be = A_be^{-1}
     let s_be = invert_flat_matrix(&a_be, n)?;

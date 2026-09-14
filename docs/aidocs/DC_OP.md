@@ -74,6 +74,70 @@ This compresses large voltage steps (e.g. 300V → ~0.3V) while passing small
 steps (~26mV) nearly unchanged — much more effective than a flat clamp for
 circuits with both low-voltage junctions and high-voltage supply nodes.
 
+### Limiter back-projection: joint minimum-norm (lane 2, 2026-09-13)
+
+pnjlim/fetlim act in junction space; the node update must reproduce every
+limited junction's `v_lim`. `distribute_junction_correction()` is the exact
+single-row pseudo-inverse (normalizes by `||N_v row||^2`), but summing it per
+junction is exact ONLY when the limited rows are orthogonal. Identical rows
+(parallel same-direction diodes / paralleled transistors) sum to
+`v_post = 2*v_lim - v_raw` — a REVERSED step whenever `v_raw > 2*v_lim` —
+which is exactly how the deep-reverse false root above was reached in one
+iteration; overlapping rows (Vbe/Vbc share the base, differential pairs
+share the emitter) get half-amplitude cross-talk.
+
+`apply_junction_corrections()` now collects all limited `(row, correction)`
+pairs per iteration and solves the minimum-norm node update
+`delta = N_L^T (N_L N_L^T)^-1 c` jointly:
+
+1. rows identical up to sign are deduped, keeping the most restrictive
+   correction (junction closest to its pre-step value);
+2. Gram-Schmidt rank test (`JUNCTION_ROW_DEPENDENCE_TOL` = 1e-9 relative);
+3. full rank: EXACT Gram solve, every junction lands precisely on its
+   `v_lim`; rank-deficient (e.g. Vbe, Vbc plus a C-E diode): ridge
+   `JUNCTION_GRAM_RIDGE_REL` = 1e-9 x max Gram diagonal, ONLY in that case.
+
+Result: the parallel-diode repros converge by Direct NR (4-12 iterations)
+instead of exhausting 200 and falling to source stepping. Golden corpus +
+openwurli decks: 42/42 `dc-op` node vectors byte-identical; only iteration
+counts moved on noyce-germanium-cluster (8->9) and wurli-tremolo (122->125,
+Darlington Vbe/Vbc overlap).
+
+### Convergence: step test AND KCL residual gate
+
+Each NR iteration is accepted only if BOTH hold:
+
+1. Per-variable step test (SPICE-style): `|delta_i| < reltol*|v_i| + tolerance`
+   (`tolerance` = 1e-9 **volts**, `reltol` = 1e-6).
+2. Per-node KCL residual gate, evaluated at the post-damping, post-rail-clamp
+   iterate with freshly evaluated device currents:
+   `|F_i| <= reltol * scale_i + DC_OP_KCL_ABSTOL_AMPS` for every voltage row,
+   `F = G_dc*v - b_dc*scale - N_i*i_nl(N_v*v)`,
+   `scale_i = max(|b_i|, |(N_i*i_nl)_i|, max_j |G_ij*v_j|)`,
+   `DC_OP_KCL_ABSTOL_AMPS` = 1e-9 **amperes** (a separate constant — do not
+   alias it with the volts step floor). Written NaN-safe (`!(x <= tol)`).
+
+The step test alone is satisfied at any fixed point of the limit/damp map,
+root or not: two parallel same-direction diodes driven to deep reverse by
+summed pnjlim corrections "converge" in 3 iterations to a point violating
+KCL by kA (2026-09-13). The gate refuses such an iterate; the loop keeps
+going and, on iteration exhaustion, returns `converged = false` so the
+strategy ladder falls through (source stepping recovers the true root).
+
+Exemption: an op-amp output row is exempt from the gate ONLY on an iteration
+where the post-NR rail clamp actually pinned it (the clamp is an unmodeled
+constraint; the row carries the rail's source current) and never for
+BoyleDiodes op-amps (their rails are real catch diodes). Exempt rows still
+report. `DcOpResult::kcl_residual_max` / `kcl_worst_row` carry the residual of
+the RETURNED solution over all voltage rows with no exemptions; `melange dc-op`
+prints them (human and `--format json`).
+
+Measured before landing (golden corpus + openwurli decks, 41 nonlinear
+decks): 0 flips to non-converged, 0.0 V node-voltage change at reltol 1e-6.
+
+The emitted runtime `recompute_dc_op` (`dc_op_emitter.rs`) still uses the
+step test only — follow-up.
+
 ### Linear System Solve
 
 The DC OP solver uses LU decomposition with partial pivoting to solve

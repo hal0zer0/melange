@@ -9,6 +9,68 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-09-14
+
+A correctness-and-performance patch. It closes a class of silently-wrong DC
+operating points, removes a spurious-noise codegen bug on parasitic-base BJT
+circuits, refines when the solver auto-promotes to backward Euler, and adds a
+glow-only compile cache. No new shipped feature, no breaking change.
+
+**Generated DSP audio is byte-identical to 0.1.7 for every circuit in the golden
+corpus** (168/168 rendered programs across the corpus verified identical). The
+DC-op gate is corpus-neutral (0 of 42 golden node vectors change); the
+parasitic-BJT and backward-Euler fixes are keyed on conditions no golden deck
+reaches; and the glow cache is gated behind `--subsample-fire` (non-glow and
+non-ssf codegen is unchanged). MSRV is unchanged (1.85) and no dependency
+changed.
+
+### Fixed
+
+- **DC operating points that satisfy the Newton stopping test but violate KCL
+  are now rejected.** With two or more parallel junctions biased in the same
+  direction, the DC-op solver could report "converged" at a point whose node
+  currents do not balance, emitting a silently-wrong bias (and therefore
+  silently-wrong audio). A KCL-residual acceptance gate now rejects such points,
+  and a joint minimum-norm limiter back-projection corrects the false
+  convergence. Corpus-neutral: 0 of 42 golden node vectors flip.
+- **Spurious 63× noise on parasitic-base (parasitic-Rb) BJT circuits removed.**
+  The trapezoidal history matrix (`A_neg`) was being re-zeroed across a
+  parasitic BJT's internal nodes, injecting non-physical noise. Those internal
+  nodes are now excluded from the history zeroing. Separately, the
+  backward-Euler-latch detector is now mean-removed so it works correctly on
+  DC-biased outputs instead of only zero-mean ones.
+
+### Changed
+
+- **`+1` automatic backward-Euler promotion is now gated on whether backward
+  Euler actually stabilizes the mode (`rho_be`).** On physical growing poles —
+  master oscillators and relaxation oscillators — where backward Euler only
+  over-damps rather than stabilizes, the solver now keeps trapezoidal
+  integration. This also corrects the misleading warning text emitted when
+  backward Euler is forced onto an oscillator.
+
+### Performance
+
+- **Cross-sample LRU cache for the nodal-ssf Schur triple** — six-stage glow
+  divider decks (e.g. the Philicorda note boards) reuse the Schur factorization
+  across host samples instead of rebuilding it, measured at ~2.49× on a
+  six-stage deck. Bit-identical output; gated behind `--subsample-fire`, so
+  non-glow and non-ssf circuits emit byte-identical code.
+
+### Security
+
+- **Bumped `rustls` 0.23.43 → 0.23.45** to clear RUSTSEC-2026-0285 (TLS 1.3
+  handshake messages incorrectly accepted across encryption-level boundaries,
+  medium). `rustls` is a transitive dependency of `ureq`, reachable only from
+  the CLI's remote source-fetch path; it is not in the solver, codegen, or any
+  generated plugin. Lockfile-only change; MSRV unchanged.
+
+### Docs
+
+- **Analog-EE corrections to the internal device reference docs** (H2 distortion
+  is not produced by symmetric hysteresis, output-clamp levels, ageing
+  magnitudes, KF/noise-index), from a domain review. Documentation only.
+
 ## [0.1.7] - 2026-09-10
 
 A device-and-diagnostics patch. It adds an experimental neon-lamp (glow-discharge)
@@ -745,7 +807,8 @@ measured real hardware. Everything else is unproven against hardware. See
   KiCad file; no effect on netlist compilation, generated code, or shipped plugins. The
   fix (`quick-xml >= 0.41`) is tracked for 0.1.1.
 
-[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/hal0zer0/melange/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/hal0zer0/melange/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/hal0zer0/melange/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/hal0zer0/melange/compare/v0.1.4...v0.1.5

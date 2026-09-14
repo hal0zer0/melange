@@ -82,6 +82,18 @@ pub struct DcOpResult {
     pub method: DcOpMethod,
     /// Total NR iterations used
     pub iterations: usize,
+    /// Largest per-node KCL residual `|F_i|` (amperes) of the RETURNED
+    /// solution, `F = G_dc*v - b_dc - N_i*i_nl(N_v*v)`, over every voltage
+    /// row of the DC system with NO exemptions (rail-clamped op-amp rows are
+    /// exempt from the acceptance GATE inside `nr_dc_solve`, but they still
+    /// report here). Filled by `solve_dc_operating_point` for every method,
+    /// including `Linear` / `Failed` / `SingularLinear`. NaN only if the
+    /// solution itself is non-finite.
+    pub kcl_residual_max: f64,
+    /// DC-system row index of `kcl_residual_max` (a circuit node for
+    /// `row < mna.n`; a BJT internal node otherwise). `None` when the DC
+    /// system has no voltage rows.
+    pub kcl_worst_row: Option<usize>,
 }
 
 /// Which convergence method was used.
@@ -127,6 +139,30 @@ pub enum DcOpMethod {
 /// dk_backward_euler_ignored_trap_unstable.md memory notes).
 const DC_OP_MAX_PLAUSIBLE_VOLTAGE: f64 = 1e6;
 const DC_OP_MAX_PLAUSIBLE_CURRENT: f64 = 1e7;
+
+/// Absolute floor, in AMPERES, of the per-node KCL residual acceptance gate in
+/// `nr_dc_solve` (`|F_i| <= reltol * scale_i + DC_OP_KCL_ABSTOL_AMPS`).
+///
+/// This is deliberately NOT `DcOpConfig::tolerance`: that value is the VOLTS
+/// floor of the per-variable step test (`|delta_v| < reltol*|v| + tolerance`).
+/// The two happen to share the number 1e-9 but have different units and
+/// different jobs — the step test asks "did the iterate stop moving", the KCL
+/// gate asks "is the iterate a root of the circuit equations". A collapsed
+/// Newton step at a non-root (e.g. two parallel same-direction diodes driven
+/// into deep reverse by summed pnjlim corrections) passes the first and must
+/// fail the second. Same floor as the transient `kcl_residual` gate
+/// (`nodal_emitter.rs`), which is also 1e-9 A.
+pub const DC_OP_KCL_ABSTOL_AMPS: f64 = 1e-9;
+
+/// NaN-safe "x exceeds bound" for the KCL gate: `!(x <= bound)`, so a NaN
+/// residual FAILS the gate (a plain `x > bound` would let NaN pass). The
+/// negated partial-order comparison is the whole point, hence the scoped
+/// lint allow. Also used as the NaN-safe "worse than" for worst-row tracking.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
+#[inline]
+fn kcl_exceeds(x: f64, bound: f64) -> bool {
+    !(x <= bound)
+}
 
 /// Evaluate all nonlinear device currents and Jacobian entries.
 ///
@@ -1207,6 +1243,193 @@ fn distribute_junction_correction(n_v_row: &[f64], correction: f64, pn_correctio
     }
 }
 
+/// Relative threshold on the Gram-Schmidt residual below which a limited
+/// junction's N_v row is treated as linearly dependent on the rows already
+/// accepted. Rows are sparse +-1 vectors (norm^2 = 1 or 2), so an
+/// independent row's orthogonal residual has norm^2 of order 1/k or larger
+/// while a dependent row's residual is pure round-off (~1e-16). 1e-9 sits
+/// seven decades above round-off and seven below any real residual.
+const JUNCTION_ROW_DEPENDENCE_TOL: f64 = 1e-9;
+
+/// Ridge (lambda) added to the diagonal of the Gram matrix `N_L * N_L^T` —
+/// ONLY when the limited rows are linearly dependent (rank-deficient Gram,
+/// e.g. Vbe/Vbc of a BJT plus a diode strapped collector-emitter). Expressed
+/// relative to the largest Gram diagonal (row norm^2, 1 or 2). With the
+/// nonzero Gram spectrum of such small integer matrices of order 0.1..4, a
+/// 1e-9 ridge perturbs the consistent part of the solution by ~1e-8
+/// relative (nanovolts on volt-scale corrections) while making the solve
+/// well-posed; it approximates the Moore-Penrose least-squares compromise
+/// when the dependent rows demand inconsistent corrections. Full-rank Grams
+/// are solved EXACTLY (no ridge) so every limited junction lands precisely
+/// on its `v_lim`.
+const JUNCTION_GRAM_RIDGE_REL: f64 = 1e-9;
+
+/// Back-project ALL of this iteration's junction voltage-limiting corrections
+/// into node space at once: the minimum-norm node update `delta` satisfying
+/// `N_L * delta = c` for the limited rows `N_L` and their corrections `c`.
+///
+/// This is the proper generalization of [`distribute_junction_correction`]
+/// (the single-row pseudo-inverse from the 2026-07-18 fix). Applying that
+/// per junction and SUMMING is exact only when the limited rows are mutually
+/// orthogonal. When two junctions share the same N_v row (parallel
+/// same-direction diodes, paralleled output transistors) the summed
+/// corrections land the junction at `2*v_lim - v_raw` — a REVERSED step for
+/// any raw step larger than `2*v_lim`, which is how the 2026-09-13
+/// deep-reverse false root was reached in one iteration. Overlapping rows
+/// (a BJT's Vbe and Vbc share the base node; a differential pair shares the
+/// emitter) get half-amplitude cross-talk from the same mechanism.
+///
+/// Steps:
+/// 1. Dedupe rows that are identical up to sign, keeping the MOST
+///    RESTRICTIVE correction (the one leaving the junction closest to its
+///    previous value `v_old`). Two parallel diodes with different vcrit may
+///    ask for different `v_lim`; the smaller forward step is the one that
+///    keeps both exponentials safe.
+/// 2. Rank test by Gram-Schmidt on the deduped rows.
+/// 3. Full rank: solve the Gram system `(N_L N_L^T) y = c` EXACTLY and set
+///    `delta = N_L^T y`; every limited junction lands on its `v_lim`.
+///    Rank-deficient: same solve with the ridge [`JUNCTION_GRAM_RIDGE_REL`].
+///
+/// `v_old` / `v_raw` are the pre-step and raw-Newton junction voltages
+/// (M-vectors) used only for the restrictiveness ordering in step 1.
+fn apply_junction_corrections(
+    limited: &[(usize, f64)],
+    n_v: &[Vec<f64>],
+    v_old: &[f64],
+    v_raw: &[f64],
+    pn_corrections: &mut [f64],
+) {
+    if limited.is_empty() {
+        return;
+    }
+    if limited.len() == 1 {
+        let (idx, c) = limited[0];
+        distribute_junction_correction(&n_v[idx], c, pn_corrections);
+        return;
+    }
+
+    // 1. Dedupe rows identical up to sign. `groups[g] = (nl index of the
+    //    representative row, correction in that row's frame)`.
+    let rows_equal =
+        |a: &[f64], b: &[f64], sign: f64| a.iter().zip(b).all(|(x, y)| *x == sign * *y);
+    let mut groups: Vec<(usize, f64)> = Vec::with_capacity(limited.len());
+    for &(idx, c) in limited {
+        let row = &n_v[idx];
+        if row.iter().all(|x| *x == 0.0) {
+            continue; // tied terminals: no node update can move this junction
+        }
+        let mut merged = false;
+        for g in groups.iter_mut() {
+            let (rep, c_rep) = *g;
+            let sign = if rows_equal(row, &n_v[rep], 1.0) {
+                1.0
+            } else if rows_equal(row, &n_v[rep], -1.0) {
+                -1.0
+            } else {
+                continue;
+            };
+            // Express this correction in the representative's frame and keep
+            // whichever leaves the junction closer to v_old (most restrictive).
+            let c_in_rep = sign * c;
+            let step_new = (v_raw[rep] + c_in_rep - v_old[rep]).abs();
+            let step_cur = (v_raw[rep] + c_rep - v_old[rep]).abs();
+            if step_new < step_cur {
+                g.1 = c_in_rep;
+            }
+            merged = true;
+            break;
+        }
+        if !merged {
+            groups.push((idx, c));
+        }
+    }
+    if groups.is_empty() {
+        return;
+    }
+    if groups.len() == 1 {
+        let (idx, c) = groups[0];
+        distribute_junction_correction(&n_v[idx], c, pn_corrections);
+        return;
+    }
+
+    // 2. Rank test: Gram-Schmidt over the deduped rows.
+    let n = pn_corrections.len();
+    let mut basis: Vec<Vec<f64>> = Vec::with_capacity(groups.len());
+    let mut full_rank = true;
+    for &(idx, _) in &groups {
+        let row = &n_v[idx];
+        let mut resid: Vec<f64> = row.iter().take(n).copied().collect();
+        for b in &basis {
+            let dot: f64 = resid.iter().zip(b).map(|(x, y)| x * y).sum();
+            for (r, bv) in resid.iter_mut().zip(b) {
+                *r -= dot * bv;
+            }
+        }
+        let norm_sq: f64 = resid.iter().map(|x| x * x).sum();
+        let row_norm_sq: f64 = row.iter().map(|x| x * x).sum();
+        if norm_sq <= JUNCTION_ROW_DEPENDENCE_TOL * row_norm_sq {
+            full_rank = false;
+            break;
+        }
+        let inv = 1.0 / norm_sq.sqrt();
+        for r in resid.iter_mut() {
+            *r *= inv;
+        }
+        basis.push(resid);
+    }
+
+    // 3. Gram solve: (N_L N_L^T [+ lambda I]) y = c ; delta = N_L^T y.
+    let k = groups.len();
+    let mut gram = vec![vec![0.0; k]; k];
+    let mut max_diag: f64 = 0.0;
+    for i in 0..k {
+        for j in 0..k {
+            gram[i][j] = n_v[groups[i].0]
+                .iter()
+                .zip(&n_v[groups[j].0])
+                .map(|(a, b)| a * b)
+                .sum();
+        }
+        max_diag = max_diag.max(gram[i][i]);
+    }
+    if !full_rank {
+        let lambda = JUNCTION_GRAM_RIDGE_REL * max_diag;
+        for (i, g_row) in gram.iter_mut().enumerate() {
+            g_row[i] += lambda;
+        }
+        log::debug!(
+            "DC NR: {} limited junction rows are linearly dependent; joint back-projection \
+             using ridge lambda={:.1e}",
+            k,
+            lambda
+        );
+    }
+    let c: Vec<f64> = groups.iter().map(|g| g.1).collect();
+    let y = match solve_linear(&gram, &c) {
+        Some(y) if y.iter().all(|x| x.is_finite()) => y,
+        _ => {
+            // Cannot happen for a full-rank or ridged Gram; keep the legacy
+            // per-row behavior rather than dropping the limiting entirely.
+            log::warn!(
+                "DC NR: joint junction back-projection Gram solve failed (k={}); \
+                 falling back to per-row distribution",
+                k
+            );
+            for &(idx, cc) in &groups {
+                distribute_junction_correction(&n_v[idx], cc, pn_corrections);
+            }
+            return;
+        }
+    };
+    for (i, &(idx, _)) in groups.iter().enumerate() {
+        for (corr, &nv) in pn_corrections.iter_mut().zip(n_v[idx].iter()) {
+            if nv != 0.0 {
+                *corr += nv * y[i];
+            }
+        }
+    }
+}
+
 /// Compute v_nl = N_v · v (extract controlling voltages from node voltages).
 pub fn extract_nl_voltages(mna: &MnaSystem, v: &[f64], v_nl: &mut [f64]) {
     extract_nl_voltages_with(mna.m, &mna.n_v, v, v_nl);
@@ -1664,6 +1887,12 @@ fn nr_dc_solve(
 
     let internal_junctions = circuit.has_internal_nodes;
 
+    // Last KCL-gate rejection: (iteration, worst row, |F| in amperes). Only
+    // set when the step test passed but the residual gate refused the
+    // iterate; reported on iteration exhaustion so a false-root stall is
+    // distinguishable from ordinary non-convergence.
+    let mut gate_rejected: Option<(usize, usize, f64)> = None;
+
     for iter in 0..config.max_iterations {
         // 1. Extract controlling voltages: v_nl = dc_N_v · v  (dc_N_v is M × n_dc)
         extract_nl_voltages_with(m, dc_n_v, v, v_nl);
@@ -1842,6 +2071,9 @@ fn nr_dc_solve(
         // Apply pnjlim per PN junction dimension, accumulate corrections
         // into node voltages via dc_N_v^T (pseudo-inverse: just distribute back).
         let mut pn_corrections = vec![0.0; n_dc];
+        // Every limited junction dimension this iteration: (nl index, correction
+        // in that dimension's own N_v row frame). Back-projected jointly below.
+        let mut limited_junctions: Vec<(usize, f64)> = Vec::new();
         for slot in device_slots {
             match (&slot.device_type, &slot.params) {
                 (DeviceType::Diode, DeviceParams::Diode(dp)) => {
@@ -1852,11 +2084,7 @@ fn nr_dc_solve(
                     let v_raw = v_nl_new[idx];
                     let v_lim = pnjlim(v_raw, v_old, vt, vcrit);
                     if (v_lim - v_raw).abs() > 1e-15 {
-                        distribute_junction_correction(
-                            &dc_n_v[idx],
-                            v_lim - v_raw,
-                            &mut pn_corrections,
-                        );
+                        limited_junctions.push((idx, v_lim - v_raw));
                     }
                 }
                 (DeviceType::Bjt, DeviceParams::Bjt(bp))
@@ -1881,11 +2109,7 @@ fn nr_dc_solve(
                     let v_lim_be = pnjlim(v_raw_be, v_old_be, nf_vt, vcrit_be);
                     if (v_lim_be - v_raw_be).abs() > 1e-15 {
                         let correction = sign * (v_lim_be - v_raw_be);
-                        distribute_junction_correction(
-                            &dc_n_v[be_idx],
-                            correction,
-                            &mut pn_corrections,
-                        );
+                        limited_junctions.push((be_idx, correction));
                     }
                     // Vbc dimension (if 2D)
                     if slot.dimension > 1 {
@@ -1896,11 +2120,7 @@ fn nr_dc_solve(
                         let v_lim_bc = pnjlim(v_raw_bc, v_old_bc, nr_vt, vcrit_bc);
                         if (v_lim_bc - v_raw_bc).abs() > 1e-15 {
                             let correction = sign * (v_lim_bc - v_raw_bc);
-                            distribute_junction_correction(
-                                &dc_n_v[bc_idx],
-                                correction,
-                                &mut pn_corrections,
-                            );
+                            limited_junctions.push((bc_idx, correction));
                         }
                     }
                 }
@@ -1915,21 +2135,13 @@ fn nr_dc_solve(
                     let ds_idx = slot.start_idx;
                     let v_lim_ds = fetlim(v_nl_new[ds_idx], v_nl[ds_idx], 0.0);
                     if (v_lim_ds - v_nl_new[ds_idx]).abs() > 1e-15 {
-                        distribute_junction_correction(
-                            &dc_n_v[ds_idx],
-                            v_lim_ds - v_nl_new[ds_idx],
-                            &mut pn_corrections,
-                        );
+                        limited_junctions.push((ds_idx, v_lim_ds - v_nl_new[ds_idx]));
                     }
                     if slot.dimension > 1 {
                         let gs_idx = slot.start_idx + 1;
                         let v_lim_gs = fetlim(v_nl_new[gs_idx], v_nl[gs_idx], jp.vp);
                         if (v_lim_gs - v_nl_new[gs_idx]).abs() > 1e-15 {
-                            distribute_junction_correction(
-                                &dc_n_v[gs_idx],
-                                v_lim_gs - v_nl_new[gs_idx],
-                                &mut pn_corrections,
-                            );
+                            limited_junctions.push((gs_idx, v_lim_gs - v_nl_new[gs_idx]));
                         }
                     }
                 }
@@ -1937,21 +2149,13 @@ fn nr_dc_solve(
                     let ds_idx = slot.start_idx;
                     let v_lim_ds = fetlim(v_nl_new[ds_idx], v_nl[ds_idx], 0.0);
                     if (v_lim_ds - v_nl_new[ds_idx]).abs() > 1e-15 {
-                        distribute_junction_correction(
-                            &dc_n_v[ds_idx],
-                            v_lim_ds - v_nl_new[ds_idx],
-                            &mut pn_corrections,
-                        );
+                        limited_junctions.push((ds_idx, v_lim_ds - v_nl_new[ds_idx]));
                     }
                     if slot.dimension > 1 {
                         let gs_idx = slot.start_idx + 1;
                         let v_lim_gs = fetlim(v_nl_new[gs_idx], v_nl[gs_idx], mp.vt);
                         if (v_lim_gs - v_nl_new[gs_idx]).abs() > 1e-15 {
-                            distribute_junction_correction(
-                                &dc_n_v[gs_idx],
-                                v_lim_gs - v_nl_new[gs_idx],
-                                &mut pn_corrections,
-                            );
+                            limited_junctions.push((gs_idx, v_lim_gs - v_nl_new[gs_idx]));
                         }
                     }
                 }
@@ -1965,6 +2169,18 @@ fn nr_dc_solve(
                 _ => {}
             }
         }
+
+        // Back-project all limiting corrections into node space at once. A
+        // per-junction pseudo-inverse is exact for ONE row but SUMS when rows
+        // coincide or overlap (parallel diodes: v lands at 2*v_lim - v_raw,
+        // i.e. a reversed step and the 2026-09-13 deep-reverse false root).
+        apply_junction_corrections(
+            &limited_junctions,
+            dc_n_v,
+            v_nl,
+            &v_nl_new,
+            &mut pn_corrections,
+        );
 
         // Apply pnjlim corrections to v_new
         let v_limited: Vec<f64> = v_new
@@ -2032,6 +2248,16 @@ fn nr_dc_solve(
         // the actual n_plus supply node voltage minus one diode drop. This allows
         // the output to reach the physically correct equilibrium (e.g. n_plus=-12V
         // → output can reach -12.6V, below VSAT=-11V).
+        //
+        // Rows this clamp actually PINS on this iteration are recorded in
+        // `clamped_rows` and exempted from the KCL residual gate below — and
+        // only those rows, only on this iteration. The clamp is an unmodeled
+        // constraint (the DC op-amp is a linear VCCS with no rail), so a
+        // pinned output row legitimately carries the rail's source current
+        // as a residual. BoyleDiodes op-amps (`n_int_idx != 0`) are never
+        // exempted: there the rail is modeled by real catch diodes in the
+        // device set, so their residual must close like any other node.
+        let mut clamped_rows: Vec<usize> = Vec::new();
         for oa in &mna.opamps {
             let out = oa.n_out_idx; // 1-indexed
             if out > 0 {
@@ -2069,18 +2295,25 @@ fn nr_dc_solve(
                         } else {
                             (base_vcc, base_vee)
                         };
+                    let mut pinned = false;
                     if eff_vcc.is_finite() && v[o] > eff_vcc {
                         v[o] = eff_vcc;
+                        pinned = true;
                     }
                     if eff_vee.is_finite() && v[o] < eff_vee {
                         v[o] = eff_vee;
+                        pinned = true;
+                    }
+                    if pinned && oa.n_int_idx == 0 {
+                        clamped_rows.push(o);
                     }
                 }
             }
         }
 
         if all_within_tol {
-            // Final evaluation at converged point
+            // Final evaluation at the step-converged point (post damping AND
+            // post rail clamp — `v` is exactly what would be returned).
             extract_nl_voltages_with(m, dc_n_v, v, v_nl);
             evaluate_devices_inner(
                 v_nl,
@@ -2091,8 +2324,64 @@ fn nr_dc_solve(
                 internal_junctions,
                 Some(v),
             );
-            return (true, iter + 1);
+
+            // KCL residual acceptance gate. The step test above only says the
+            // iterate stopped moving; it is satisfied at any fixed point of the
+            // limit/damp map, root or not (two parallel same-direction diodes
+            // driven to deep reverse by summed pnjlim corrections converge in
+            // 3 iterations to a point violating KCL by kA). Accept only if
+            // every non-exempt voltage row satisfies
+            //     |F_i| <= reltol * scale_i + DC_OP_KCL_ABSTOL_AMPS
+            // with `scale_i = max(|b_i|, |(N_i*i_nl)_i|, max_j |G_ij*v_j|)`.
+            // Written as `!(x <= tol)` so a NaN residual FAILS. On failure keep
+            // iterating; if the loop exhausts, the caller sees `converged =
+            // false` and falls through to the next strategy.
+            let rows = kcl_row_residuals(circuit, v, i_nl, source_scale, gmin);
+            let mut gate_ok = true;
+            let mut worst: Option<(usize, f64)> = None;
+            for &(row, f_abs, scale) in &rows {
+                if clamped_rows.contains(&row) {
+                    continue;
+                }
+                let tol = config.reltol * scale + DC_OP_KCL_ABSTOL_AMPS;
+                if kcl_exceeds(f_abs, tol) {
+                    gate_ok = false;
+                    // NaN-safe max: a NaN residual wins the "worst" slot.
+                    if worst.is_none_or(|(_, w)| kcl_exceeds(f_abs, w)) {
+                        worst = Some((row, f_abs));
+                    }
+                }
+            }
+            if gate_ok {
+                return (true, iter + 1);
+            }
+            if let Some((row, f_abs)) = worst {
+                if gate_rejected.is_none() {
+                    log::info!(
+                        "DC NR iter {} (scale={:.2}, gmin={:.1e}): step test passed but KCL residual gate \
+                         rejected the iterate — row {} |F|={:.3e} A (limit/damp fixed point is not a root); \
+                         continuing",
+                        iter,
+                        source_scale,
+                        gmin,
+                        row,
+                        f_abs
+                    );
+                }
+                gate_rejected = Some((iter, row, f_abs));
+            }
         }
+    }
+
+    if let Some((iter, row, f_abs)) = gate_rejected {
+        log::info!(
+            "DC NR: {} iterations exhausted with the KCL residual gate still failing \
+             (last rejection at iter {}, worst row {}, |F|={:.3e} A) — returning not converged",
+            config.max_iterations,
+            iter,
+            row,
+            f_abs
+        );
     }
 
     // Final evaluation even on non-convergence
@@ -2131,6 +2420,77 @@ fn nr_dc_solve(
         );
     }
     (false, config.max_iterations)
+}
+
+/// Per-row KCL residual of the DC system at `(v, i_nl)`.
+///
+/// Returns `(row, |F_i|, scale_i)` for every VOLTAGE row (circuit nodes and
+/// BJT internal nodes — rows in amperes), where
+///
+/// ```text
+/// F_i     = sum_j G_dc[i][j]*v_j + gmin terms - b_i*source_scale - (N_i*i_nl)_i
+/// scale_i = max(|b_i*source_scale|, |(N_i*i_nl)_i|, max_j |G_dc[i][j]*v_j|, gmin terms)
+/// ```
+///
+/// `source_scale` / `gmin` must be the values the NR was solving with so the
+/// residual is of the equation actually being iterated (a source-stepping
+/// stage at scale 0.3 is a root of the 0.3-scaled system). Branch-current
+/// rows (VS / VCVS / inductor DC shorts) are KVL rows in volts; they are
+/// satisfied exactly by the LU solve and are not part of this residual.
+///
+/// `i_nl` must already be evaluated at `N_v * v` — callers pass the fresh
+/// device evaluation, this function does not re-evaluate.
+fn kcl_row_residuals(
+    circuit: &DcCircuit,
+    v: &[f64],
+    i_nl: &[f64],
+    source_scale: f64,
+    gmin: f64,
+) -> Vec<(usize, f64, f64)> {
+    let n_dc = circuit.n_dc;
+    let n_aug = circuit.mna.n_aug;
+    let m = circuit.mna.m;
+    let mut out = Vec::with_capacity(n_dc);
+    for i in 0..n_dc {
+        if !circuit.is_voltage_row[i] {
+            continue;
+        }
+        // Source scaling applies to the MNA rows only (mirrors the RHS build
+        // in `nr_dc_solve`); inductor / internal rows carry b = 0 anyway.
+        let b_i = if i < n_aug {
+            circuit.b_dc[i] * source_scale
+        } else {
+            circuit.b_dc[i]
+        };
+        let mut acc = -b_i;
+        let mut scale = b_i.abs();
+        let g_row = &circuit.g_dc[i];
+        for (j, &vj) in v.iter().enumerate().take(n_dc) {
+            let t = g_row[j] * vj;
+            acc += t;
+            scale = scale.max(t.abs());
+        }
+        if gmin > 0.0 {
+            for slot in circuit.device_slots {
+                for d in 0..slot.dimension {
+                    let nv = circuit.dc_n_v[slot.start_idx + d][i];
+                    if nv.abs() > 1e-15 {
+                        let t = gmin * nv.abs() * v[i];
+                        acc += t;
+                        scale = scale.max(t.abs());
+                    }
+                }
+            }
+        }
+        let mut q = 0.0;
+        for k in 0..m {
+            q += circuit.dc_n_i[i][k] * i_nl[k];
+        }
+        acc -= q;
+        scale = scale.max(q.abs());
+        out.push((i, acc.abs(), scale));
+    }
+    out
 }
 
 /// Degenerate-solution check shared by all convergence strategies.
@@ -2192,9 +2552,13 @@ fn solution_has_active_junction(
             }
             DeviceParams::Diode(dp) => {
                 if slot.start_idx < v_nl.len() {
-                    // Same device-scaled threshold as the BJT case above.
+                    // Same device-scaled threshold as the BJT case above, and
+                    // the same FORWARD-direction test (v_nl = V_anode -
+                    // V_cathode). This used to be `.abs()`, which read a
+                    // deep-REVERSE diode (e.g. -9.3 V at the parallel-diode
+                    // false root) as "active" and waved the solution through.
                     let vcrit = pn_vcrit(dp.n_vt, dp.is);
-                    if v_nl[slot.start_idx].abs() > 0.5 * vcrit {
+                    if v_nl[slot.start_idx] > 0.5 * vcrit {
                         return true;
                     }
                 }
@@ -2553,6 +2917,93 @@ pub fn solve_dc_operating_point(
     device_slots: &[DeviceSlot],
     config: &DcOpConfig,
 ) -> DcOpResult {
+    // Build DC system with internal nodes for parasitic BJTs.
+    // Dimension n_dc = n_aug + num_inductors + num_internal_nodes.
+    let dc_sys = build_dc_system(mna, device_slots, config);
+    let mut result = solve_dc_operating_point_core(mna, device_slots, config, &dc_sys);
+
+    // Report the KCL residual of whatever is being returned — every method,
+    // every fallback, NO exemptions (the rail-clamp exemption applies only to
+    // the acceptance gate inside `nr_dc_solve`; a pinned op-amp row still
+    // reports here). `i_nl` is re-evaluated at the returned `v` so the number
+    // is a property of the returned state, not of the last NR iterate.
+    let n_dc = dc_sys.n_dc;
+    let m = mna.m;
+    let circuit = DcCircuit {
+        g_dc: &dc_sys.g_dc,
+        b_dc: &dc_sys.b_dc,
+        mna,
+        device_slots,
+        config,
+        dc_n_v: &dc_sys.dc_n_v,
+        dc_n_i: &dc_sys.dc_n_i,
+        n_dc,
+        has_internal_nodes: !dc_sys.bjt_internal.is_empty() || !mna.bjt_internal_nodes.is_empty(),
+        is_voltage_row: &dc_sys.is_voltage_row,
+    };
+    let mut v = result.v_node.clone();
+    v.resize(n_dc, 0.0);
+    let mut v_nl = vec![0.0; m];
+    let mut i_nl = vec![0.0; m];
+    extract_nl_voltages_with(m, &dc_sys.dc_n_v, &v, &mut v_nl);
+    evaluate_devices_inner(
+        &v_nl,
+        device_slots,
+        &mut i_nl,
+        &mut vec![0.0; m * m],
+        m,
+        circuit.has_internal_nodes,
+        Some(&v),
+    );
+    let rows = kcl_row_residuals(&circuit, &v, &i_nl, 1.0, 0.0);
+    let mut worst: Option<(usize, f64)> = None;
+    let mut rows_over_tol = 0usize;
+    for &(row, f_abs, scale) in &rows {
+        // NaN-safe max (a NaN residual wins).
+        if worst.is_none_or(|(_, w)| kcl_exceeds(f_abs, w)) {
+            worst = Some((row, f_abs));
+        }
+        if kcl_exceeds(f_abs, config.reltol * scale + DC_OP_KCL_ABSTOL_AMPS) {
+            rows_over_tol += 1;
+        }
+    }
+    result.kcl_residual_max = worst.map_or(0.0, |(_, f)| f);
+    result.kcl_worst_row = worst.map(|(r, _)| r);
+    if let Some((row, f_abs)) = worst {
+        if !result.converged {
+            log::warn!(
+                "DC OP: returning NOT converged ({:?}); KCL residual max |F|={:.3e} A at row {} \
+                 ({} row(s) over tolerance)",
+                result.method,
+                f_abs,
+                row,
+                rows_over_tol
+            );
+        } else if rows_over_tol > 0 {
+            // Only rail-pinned op-amp output rows can get here (gate-exempt).
+            log::info!(
+                "DC OP: converged ({:?}) with {} gate-exempt row(s) over KCL tolerance; \
+                 max |F|={:.3e} A at row {} (rail-clamped op-amp output)",
+                result.method,
+                rows_over_tol,
+                f_abs,
+                row
+            );
+        }
+    }
+    result
+}
+
+/// Strategy ladder body of [`solve_dc_operating_point`]. `dc_sys` is the DC
+/// system built by the caller (shared with the final residual report). Every
+/// `DcOpResult` constructed here leaves `kcl_residual_max` / `kcl_worst_row`
+/// as placeholders (`NaN` / `None`); the public wrapper fills them.
+fn solve_dc_operating_point_core(
+    mna: &MnaSystem,
+    device_slots: &[DeviceSlot],
+    config: &DcOpConfig,
+    dc_sys: &DcSystemInfo,
+) -> DcOpResult {
     let m = mna.m;
 
     // Behavioral B-sources have no DC model yet (BEHAVIORAL_SOURCES.md §6
@@ -2561,9 +3012,6 @@ pub fn solve_dc_operating_point(
         log::warn!("{}", msg);
     }
 
-    // Build DC system with internal nodes for parasitic BJTs.
-    // Dimension n_dc = n_aug + num_inductors + num_internal_nodes.
-    let dc_sys = build_dc_system(mna, device_slots, config);
     let n_dc = dc_sys.n_dc;
 
     let has_mna_internal = !mna.bjt_internal_nodes.is_empty();
@@ -2596,6 +3044,8 @@ pub fn solve_dc_operating_point(
                 converged: false,
                 method: DcOpMethod::SingularLinear,
                 iterations: 0,
+                kcl_residual_max: f64::NAN,
+                kcl_worst_row: None,
             };
         }
     };
@@ -2609,6 +3059,8 @@ pub fn solve_dc_operating_point(
             converged: true,
             method: DcOpMethod::Linear,
             iterations: 0,
+            kcl_residual_max: f64::NAN,
+            kcl_worst_row: None,
         };
     }
 
@@ -2761,6 +3213,8 @@ pub fn solve_dc_operating_point(
             converged: true,
             method: DcOpMethod::DirectNr,
             iterations: iters,
+            kcl_residual_max: f64::NAN,
+            kcl_worst_row: None,
         };
     } else if converged {
         // Converged but read as degenerate — retain as a fallback (see the
@@ -2774,6 +3228,8 @@ pub fn solve_dc_operating_point(
             converged: true,
             method: DcOpMethod::DirectNr,
             iterations: iters,
+            kcl_residual_max: f64::NAN,
+            kcl_worst_row: None,
         });
     }
 
@@ -2840,6 +3296,8 @@ pub fn solve_dc_operating_point(
                     converged: true,
                     method: DcOpMethod::SourceStepping,
                     iterations: total_iters,
+                    kcl_residual_max: f64::NAN,
+                    kcl_worst_row: None,
                 });
             }
         }
@@ -2858,6 +3316,8 @@ pub fn solve_dc_operating_point(
             converged: true,
             method: DcOpMethod::SourceStepping,
             iterations: total_iters,
+            kcl_residual_max: f64::NAN,
+            kcl_worst_row: None,
         };
     }
 
@@ -3004,6 +3464,8 @@ pub fn solve_dc_operating_point(
                 converged: true,
                 method: DcOpMethod::GminStepping,
                 iterations: total_iters,
+                kcl_residual_max: f64::NAN,
+                kcl_worst_row: None,
             };
         } else if converged && retained_degenerate.is_none() {
             let mut v_node = v.clone();
@@ -3015,6 +3477,8 @@ pub fn solve_dc_operating_point(
                 converged: true,
                 method: DcOpMethod::GminStepping,
                 iterations: total_iters,
+                kcl_residual_max: f64::NAN,
+                kcl_worst_row: None,
             });
         }
     }
@@ -3156,6 +3620,8 @@ pub fn solve_dc_operating_point(
                         converged: true,
                         method: DcOpMethod::AolStepping,
                         iterations: total_iters,
+                        kcl_residual_max: f64::NAN,
+                        kcl_worst_row: None,
                     };
                 }
             }
@@ -3387,6 +3853,8 @@ pub fn solve_dc_operating_point(
             converged: false,
             method: DcOpMethod::Failed,
             iterations: total_iters,
+            kcl_residual_max: f64::NAN,
+            kcl_worst_row: None,
         };
     }
 
@@ -3397,6 +3865,8 @@ pub fn solve_dc_operating_point(
         converged: conv_flag,
         method: conv_method,
         iterations: total_iters,
+        kcl_residual_max: f64::NAN,
+        kcl_worst_row: None,
     }
 }
 
@@ -4153,6 +4623,140 @@ Cx c3 b4 6n IC=-4\n";
     }
 
     // =========================================================================
+    // solution_has_active_junction — diode branch must test the FORWARD
+    // direction (2026-09-13). A deep-reverse diode is OFF, not active.
+    // -------------------------------------------------------------------------
+
+    fn diode_slot(is: f64, n_vt: f64) -> DeviceSlot {
+        DeviceSlot {
+            device_type: DeviceType::Diode,
+            start_idx: 0,
+            dimension: 1,
+            params: DeviceParams::Diode(DiodeParams {
+                is,
+                n_vt,
+                cjo: 0.0,
+                rs: 0.0,
+                bv: f64::INFINITY,
+                ibv: 1e-10,
+                rth: f64::INFINITY,
+                cth: 1e-3,
+                xti: 3.0,
+                eg: 1.11,
+                tamb: 300.15,
+            }),
+            has_internal_mna_nodes: false,
+            vg2k_frozen: 0.0,
+            stateful: None,
+        }
+    }
+
+    #[test]
+    fn test_active_junction_deep_reverse_diode_is_not_active() {
+        // LEDL1 card from the parallel-diode false root: v_nl = -9.34 V.
+        let slots = [diode_slot(2.1044e-9, 4.018 * 0.025852)];
+        assert!(
+            !solution_has_active_junction(&slots, &[-9.3421], true),
+            "deep-reverse diode must not read as an active junction"
+        );
+        assert!(
+            solution_has_active_junction(&slots, &[1.4933], true),
+            "forward-biased diode above 0.5*vcrit must read as active"
+        );
+        // Below the forward threshold: off.
+        assert!(!solution_has_active_junction(&slots, &[0.05], true));
+        // No DC excitation: all-off is the true OP, always accepted.
+        assert!(solution_has_active_junction(&slots, &[-9.3421], false));
+    }
+
+    // Joint junction back-projection (2026-09-13, lane 2)
+    // -------------------------------------------------------------------------
+
+    /// Post-limit junction voltage `v_raw + row . delta` for row `idx`.
+    fn post_limit(n_v: &[Vec<f64>], idx: usize, v_raw: &[f64], delta: &[f64]) -> f64 {
+        v_raw[idx] + n_v[idx].iter().zip(delta).map(|(a, b)| a * b).sum::<f64>()
+    }
+
+    #[test]
+    fn test_joint_correction_identical_rows_land_on_v_lim_not_reversed() {
+        // Two parallel same-direction diodes on nodes (a2, k) — identical rows.
+        // Iter-0 numbers from the 2026-09-13 repro: v_old 0.6, raw 9.877,
+        // pnjlim targets 1.068 (N=4.018 card) and 0.782 (N=1.235 card).
+        let n_v = vec![vec![1.0, -1.0, 0.0], vec![1.0, -1.0, 0.0]];
+        let v_old = [0.6, 0.6];
+        let v_raw = [9.877, 9.877];
+        let (lim_a, lim_b) = (1.068, 0.782);
+        let limited = [(0, lim_a - v_raw[0]), (1, lim_b - v_raw[1])];
+        let mut delta = vec![0.0; 3];
+        apply_junction_corrections(&limited, &n_v, &v_old, &v_raw, &mut delta);
+        let post = post_limit(&n_v, 0, &v_raw, &delta);
+        // Legacy summed distribution would give 2*v_lim - v_raw = -8.03 V.
+        assert!(
+            (post - lim_b).abs() < 1e-12,
+            "parallel pair must land on the most restrictive v_lim ({lim_b}), got {post}"
+        );
+        assert!(
+            post > 0.0,
+            "step must not reverse into reverse bias: {post}"
+        );
+        // Minimum-norm: the update is split evenly across the two nodes.
+        assert!((delta[0] + delta[1]).abs() < 1e-12 && delta[2] == 0.0);
+    }
+
+    #[test]
+    fn test_joint_correction_overlapping_rows_have_no_cross_talk() {
+        // A BJT's Vbe = V(b) - V(e) and Vbc = V(b) - V(c) share the base node.
+        // Nodes: b=0, e=1, c=2. Both limited with different corrections.
+        let n_v = vec![vec![1.0, -1.0, 0.0], vec![1.0, 0.0, -1.0]];
+        let v_old = [0.6, -3.0];
+        let v_raw = [5.0, 2.0];
+        let limited = [(0, 0.75 - 5.0), (1, 0.2 - 2.0)];
+        let mut delta = vec![0.0; 3];
+        apply_junction_corrections(&limited, &n_v, &v_old, &v_raw, &mut delta);
+        // Per-row summed distribution would put each junction at its target
+        // PLUS half the other's correction. Joint solve: exactly on target.
+        assert!((post_limit(&n_v, 0, &v_raw, &delta) - 0.75).abs() < 1e-12);
+        assert!((post_limit(&n_v, 1, &v_raw, &delta) - 0.2).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_joint_correction_dependent_rows_use_ridge_and_stay_consistent() {
+        // Vbe (b-e), Vbc (b-c) and a collector-emitter diode (c-e): the third
+        // row equals the first minus the second — rank-deficient Gram. With
+        // CONSISTENT targets (c3 = c1 - c2) the ridge solve must still land
+        // every junction on its target to ~1e-8 relative.
+        let n_v = vec![
+            vec![1.0, -1.0, 0.0],
+            vec![1.0, 0.0, -1.0],
+            vec![0.0, -1.0, 1.0],
+        ];
+        let v_old = [0.6, -3.0, 0.0];
+        let v_raw = [5.0, 2.0, 3.0];
+        let (c1, c2) = (-4.25, -1.8);
+        let c3 = c1 - c2;
+        let limited = [(0, c1), (1, c2), (2, c3)];
+        let mut delta = vec![0.0; 3];
+        apply_junction_corrections(&limited, &n_v, &v_old, &v_raw, &mut delta);
+        for (i, target) in [(0, v_raw[0] + c1), (1, v_raw[1] + c2), (2, v_raw[2] + c3)] {
+            let post = post_limit(&n_v, i, &v_raw, &delta);
+            assert!(
+                (post - target).abs() < 1e-7,
+                "row {i}: got {post}, target {target}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_joint_correction_single_row_matches_pseudo_inverse() {
+        // One limited junction must reproduce distribute_junction_correction exactly.
+        let n_v = vec![vec![1.0, -1.0, 0.0]];
+        let mut joint = vec![0.0; 3];
+        let mut single = vec![0.0; 3];
+        apply_junction_corrections(&[(0, -4.366)], &n_v, &[0.5], &[5.0], &mut joint);
+        distribute_junction_correction(&n_v[0], -4.366, &mut single);
+        assert_eq!(joint, single);
+    }
+
     // pnjlim correction distribution — pseudo-inverse normalization (2026-07-18)
     // =========================================================================
 

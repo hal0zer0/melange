@@ -459,18 +459,35 @@ sound (§6) — a process/discipline risk, not a code one.
    loss/remanence, or is anhysteretic enough?
    **PARTIAL ANSWER (measured 2026-08-26, `analyze --harmonics`):** the shipped
    anhysteretic **symmetric-tanh** law produces **ODD harmonics only** (H3/H5)
-   when driven symmetrically — H2 requires broken odd-symmetry, i.e. a **DC
-   magnetizing bias** (asymmetric excursion, as in the 1073's 68 mA Class-A SE
-   output core, which correctly gives H2) OR an **asymmetric/hysteretic** curve.
-   So for a core with ~zero net DC bias (the passive-EQ's HS-56 input & HS-29
-   interstage; a *balanced* push-pull output core), symmetric-tanh sat gives H3,
-   NOT the hardware's H2. Confirmed: adding scratch ISAT to the passive-EQ HS-56
-   gave H3=−22 dBc / H5=−24 dBc with H2 at the floor. **Consequence:** the
-   passive-EQ's H2 ships from sourced push-pull **tube `.mismatch`** (v0.1.3),
-   not iron. A biased-core target reaches H2 with anhysteretic tanh; an
-   *unbiased* target that needs H2 from the iron itself needs **Chan hysteresis**
-   (§8-Q1 tractable choice) — this is the concrete case for pulling hysteresis
-   forward (melange-circuits' 0.2.0 request, 2026-08-26).
+   when driven symmetrically — H2 requires **broken odd-symmetry**, NOT
+   hysteresis. The distinguishing property is *symmetry*, not *memory*: any
+   point-symmetric B(H) law — anhysteretic tanh, or a **symmetric** Chan /
+   Jiles-Atherton hysteresis loop — has half-wave symmetry under symmetric AC
+   drive with no DC, so its steady-state flux contains **odd harmonics only**.
+   A symmetric hysteresis loop adds loss, phase lag, and level-/LF-dependent
+   distortion, but it does **not** by itself add H2. Odd-symmetry is broken by:
+   (a) **net DC magnetizing bias** — single-ended Class-A bias (as in the 1073's
+   68 mA SE output core, which correctly gives H2), or push-pull *imbalance*;
+   (b) an **asymmetric drive** delivered from upstream; (c) **transient
+   remanence** — the flux walking off-center under sustained AC above H_c before
+   it settles. So for a core with ~zero net DC bias (the passive-EQ's HS-56 input
+   & HS-29 interstage; a *balanced* push-pull output core), symmetric saturation
+   — anhysteretic OR hysteretic — gives H3, NOT the hardware's H2. Melange's own
+   result demonstrates the principle: adding scratch ISAT (a symmetric saturation
+   curve) to the passive-EQ HS-56 gave H3=−22 dBc / H5=−24 dBc with H2 at the
+   floor; a symmetric hysteresis loop does the same. **Consequence:** the
+   passive-EQ's H2 ships from sourced push-pull **tube `.mismatch`** (v0.1.3) —
+   i.e. from *broken push-pull symmetry*, not from the iron. A biased-core target
+   reaches H2 with anhysteretic tanh; an *unbiased* target that needs H2 must get
+   it from broken symmetry (net DC / imbalance / asymmetric drive), **not** from
+   adding hysteresis. Hysteresis remains justified — if a target needs it — by
+   **loss, phase lag, and low-frequency-/level-dependent distortion**, but it is
+   NOT the mechanism for H2 on an unbiased core. (Correction, voltron analog-EE
+   review 2026-09-13: earlier text here claimed an unbiased H2 target "needs Chan
+   hysteresis"; that conflated *hysteretic* with *asymmetric* and is physically
+   wrong — the H2 rationale for pulling transformer-hysteresis forward is
+   retired. See melange-circuits' 0.2.0 request, 2026-08-26, whose H2 premise
+   this supersedes.)
 2. **Netlist authoring contract** (§3, Phase 3): `ISAT=` on the reference
    winding vs `.core Bsat/Ae/N` vs a volt-second/flux limit; how the
    leakage/magnetizing split and turns vector derive from `L` + `k`; how
@@ -486,8 +503,10 @@ sound (§6) — a process/discipline risk, not a code one.
    direct LU each sample (verified 2026-08-26 on the passive-EQ S-217-D: bounded,
    converges, no blow-up; see §6 gate 4). The net-MMF-from-coupled-Y idea is
    unnecessary. What remains for a real passive-EQ/1073 iron-coloration ship is
-   the curve law (Q1: anhysteretic gives odd-only on these unbiased cores → needs
-   Chan hysteresis for H2) + REAL sourced B-H data, not the routing.
+   the curve law (Q1: symmetric saturation — anhysteretic OR symmetric-hysteretic
+   — gives odd-only on these unbiased cores; H2 needs broken odd-symmetry, i.e.
+   net DC / push-pull imbalance / asymmetric drive, NOT hysteresis) + REAL sourced
+   B-H data, not the routing.
 6. **Rank-1 core Jacobian routing:** can `(2/T)·L_diff·n·nᵀ` go through
    Sherman-Morrison *inside* the NR iteration, or does a saturating
    transformer force full-LU unconditionally?

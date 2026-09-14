@@ -591,6 +591,165 @@ fn test_codegen_dc_op_produces_stable_output() {
 }
 
 // =============================================================================
+// KCL residual acceptance gate (2026-09-13)
+// =============================================================================
+
+/// Two parallel same-direction diodes that both turn on in the same ~1.5 V
+/// region. Direct NR + summed pnjlim corrections drive the pair into deep
+/// reverse and the step test alone declared `converged: true` at
+/// v(a2)=0.3289 V, v(k)=9.6711 V (9.67 V across 1 mOhm = 9.67 kA of KCL
+/// violation). ngspice `.op`: v(a2) = 1.494064 V, v(k) = 4.2 uV.
+const PARALLEL_DIODES_KCL: &str = "Parallel same-direction diodes
+V1 s 0 DC 10
+R1 s a 2000
+R_LEDs a a2 2.75
+D_LEDa a2 k LEDL1
+D_LEDb a2 k LEDL2
+Rk k 0 1m
+R_dummy_in in 0 1G
+.model LEDL1 D(IS=2.1044e-09 N=4.018)
+.model LEDL2 D(IS=2.7290e-24 N=1.235)
+.END
+";
+
+/// Same topology with two IDENTICAL 1N-class silicon diodes — the trigger is
+/// not exotic LED cards, it is any same-direction parallel pair whose raw
+/// Newton step exceeds the sum of the pnjlim targets. ngspice: v(a2)=0.67697 V.
+const PARALLEL_DIODES_SI_SAME: &str = "Parallel identical silicon diodes
+V1 s 0 DC 10
+R1 s a 2000
+R_LEDs a a2 2.75
+D0 a2 k M0
+D1 a2 k M0
+Rk k 0 1m
+R_dummy_in in 0 1G
+.model M0 D(IS=1e-14 N=1.0)
+.END
+";
+
+fn solve_deck(spice: &str) -> (MnaSystem, melange_solver::dc_op::DcOpResult) {
+    let netlist = Netlist::parse(spice).expect("parse failed");
+    let mut mna = MnaSystem::from_netlist(&netlist).expect("MNA failed");
+    let input_node = mna
+        .node_map
+        .get("in")
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    mna.g[input_node][input_node] += 1.0;
+    let slots = build_device_slots(&netlist, &mna);
+    let config = DcOpConfig {
+        input_node,
+        input_resistance: 1.0,
+        ..DcOpConfig::default()
+    };
+    let result = solve_dc_operating_point(&mna, &slots, &config);
+    (mna, result)
+}
+
+fn node_v(mna: &MnaSystem, result: &melange_solver::dc_op::DcOpResult, name: &str) -> f64 {
+    let idx = mna.node_map.get(name).copied().expect("node") - 1;
+    result.v_node[idx]
+}
+
+#[test]
+fn test_parallel_diodes_false_root_is_not_accepted() {
+    use melange_solver::dc_op::DC_OP_KCL_ABSTOL_AMPS;
+    for (name, deck, v_a2_ngspice) in [
+        ("led-pair", PARALLEL_DIODES_KCL, 1.494064),
+        ("si-same", PARALLEL_DIODES_SI_SAME, 0.676974),
+    ] {
+        let (mna, result) = solve_deck(deck);
+        // Without the KCL gate the returned state is the deep-reverse fixed
+        // point: kcl_residual_max ~ 9.7e3 A and v(k) ~ 9.7 V. The gate must
+        // refuse it; the existing strategy ladder then finds the true root.
+        assert!(
+            result.kcl_residual_max.is_finite() && result.kcl_residual_max < DC_OP_KCL_ABSTOL_AMPS,
+            "{name}: returned solution violates KCL: max |F| = {:.3e} A at row {:?} (method {:?})",
+            result.kcl_residual_max,
+            result.kcl_worst_row,
+            result.method
+        );
+        assert!(
+            result.converged,
+            "{name}: expected the strategy ladder to reach the true root, got {:?}",
+            result.method
+        );
+        assert_ne!(result.method, DcOpMethod::Failed);
+        let v_a2 = node_v(&mna, &result, "a2");
+        let v_k = node_v(&mna, &result, "k");
+        assert!(
+            (v_a2 - v_a2_ngspice).abs() < 5e-3,
+            "{name}: v(a2) = {v_a2:.4} V, ngspice {v_a2_ngspice:.4} V"
+        );
+        assert!(
+            v_k.abs() < 1e-3,
+            "{name}: v(k) = {v_k:.4} V, expected ~0 (1 mOhm to ground)"
+        );
+        assert!(
+            result.i_nl.iter().all(|i| *i > 0.0),
+            "{name}: both diodes must conduct forward, got {:?}",
+            result.i_nl
+        );
+    }
+}
+
+/// Lane 2 (joint limiter back-projection): the parallel-junction repros must
+/// now be recovered by Direct NR itself, not by burning `max_iterations` and
+/// falling through to source stepping.
+#[test]
+fn test_parallel_diodes_recovered_by_direct_nr() {
+    use melange_solver::dc_op::DC_OP_KCL_ABSTOL_AMPS;
+    for (name, deck, v_a2_ngspice) in [
+        ("led-pair", PARALLEL_DIODES_KCL, 1.494064),
+        ("si-same", PARALLEL_DIODES_SI_SAME, 0.676974),
+    ] {
+        let (mna, result) = solve_deck(deck);
+        assert!(
+            result.converged,
+            "{name}: not converged ({:?})",
+            result.method
+        );
+        assert_eq!(
+            result.method,
+            DcOpMethod::DirectNr,
+            "{name}: expected Direct NR to recover the true root, got {:?} after {} iterations",
+            result.method,
+            result.iterations
+        );
+        assert!(
+            result.iterations < 50,
+            "{name}: Direct NR took {} iterations",
+            result.iterations
+        );
+        let v_a2 = node_v(&mna, &result, "a2");
+        assert!(
+            (v_a2 - v_a2_ngspice).abs() < 5e-3,
+            "{name}: v(a2) = {v_a2:.4} V, ngspice {v_a2_ngspice:.4} V"
+        );
+        assert!(
+            result.kcl_residual_max < DC_OP_KCL_ABSTOL_AMPS,
+            "{name}: KCL residual {:.3e} A",
+            result.kcl_residual_max
+        );
+    }
+}
+
+#[test]
+fn test_kcl_residual_is_reported_for_direct_nr_solution() {
+    use melange_solver::dc_op::DC_OP_KCL_ABSTOL_AMPS;
+    let (_, result) = solve_deck(SINGLE_DIODE_VCC);
+    assert!(result.converged);
+    assert_eq!(result.method, DcOpMethod::DirectNr);
+    assert!(result.kcl_worst_row.is_some(), "worst row must be named");
+    assert!(
+        result.kcl_residual_max.is_finite() && result.kcl_residual_max < DC_OP_KCL_ABSTOL_AMPS,
+        "single-diode DC OP must satisfy KCL: {:.3e} A",
+        result.kcl_residual_max
+    );
+}
+
+// =============================================================================
 // Helpers
 // =============================================================================
 

@@ -358,21 +358,19 @@ pub fn log_be_post_promotion_check(
         );
     } else {
         log::warn!(
-            "{label}: BE matrices have spectral_radius(S_be*A_neg_be) = {:.4} \
-             (dominant_sign {:+.0}) after promotion. This typically means the circuit \
-             is genuinely unstable at its DC operating point (e.g. a regenerative \
-             oscillator — a positive dominant sign is the expected signature of a real \
-             growing pole, not a matrix defect). No integrator can make a real growing \
-             pole read spectral_radius <= 1 without falsifying the circuit's physics; \
-             backward Euler remains the shipped default here because it does not \
-             meaningfully change this circuit's transient behavior relative to \
-             trapezoidal (verified on a regenerative-LC-oscillator repro: bounded, \
-             physical oscillation under both, peak/frequency within ~1%). If this \
-             circuit is INTENDED to free-run as an oscillator/latch and you want the \
-             legacy trapezoidal transient instead, use `--force-trap` (CLI) or \
-             `.integrator trap` (netlist directive) to opt out of this promotion. If \
-             this circuit is expected to be passively stable, investigate the BE \
-             matrix builder instead.",
+            "{label}: backward Euler does NOT stabilize this circuit — \
+             spectral_radius(S_be*A_neg_be) = {:.4} (dominant_sign {:+.0}) is still > 1 \
+             after promotion. A positive dominant sign is a real growing pole (a \
+             regenerative oscillator/latch on an unstable DC bias by design); no \
+             integrator can make it read spectral_radius <= 1 without falsifying the \
+             physics. Trapezoidal is the physical integrator here — it reproduces the \
+             growth the circuit's own nonlinearity then bounds (that is the \
+             oscillation). BE over-damps that limit cycle WITHOUT stabilising it \
+             (measured up to ~2.8x amplitude / ~6% frequency on a high-Q tank). The \
+             auto-detector therefore KEEPS such circuits on trapezoidal; you are \
+             seeing this only because BE was forced (`--backward-euler` / \
+             `.integrator be`). If this circuit is instead expected to be passively \
+             stable, investigate the BE matrix builder.",
             stability.rho,
             stability.dominant_sign
         );

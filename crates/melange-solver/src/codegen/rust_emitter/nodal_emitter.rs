@@ -3083,6 +3083,7 @@ impl RustEmitter {
         if ir.solver_config.runtime_be_latch {
             code.push_str("    /// Runtime BE-latch: previous primary-output sample (detector).\n");
             code.push_str("    pub be_x_prev: f64,\n");
+            code.push_str("    pub be_x_mean: f64,\n");
             code.push_str(
                 "    /// Runtime BE-latch: EMA of x·x₋₁ (output lag-1 autocovariance numerator).\n",
             );
@@ -3539,6 +3540,7 @@ impl RustEmitter {
         code.push_str("            diag_voltage_damp_count: 0,\n");
         if ir.solver_config.runtime_be_latch {
             code.push_str("            be_x_prev: 0.0,\n");
+            code.push_str("            be_x_mean: 0.0,\n");
             code.push_str("            be_r1_num: 0.0,\n");
             code.push_str("            be_pow: 0.0,\n");
             code.push_str("            be_in_x_prev: 0.0,\n");
@@ -3823,6 +3825,7 @@ impl RustEmitter {
         code.push_str("        self.diag_ls_fail_count = 0;\n");
         if ir.solver_config.runtime_be_latch {
             code.push_str("        self.be_x_prev = 0.0;\n");
+            code.push_str("        self.be_x_mean = 0.0;\n");
             code.push_str("        self.be_r1_num = 0.0;\n");
             code.push_str("        self.be_pow = 0.0;\n");
             code.push_str("        self.be_in_x_prev = 0.0;\n");
@@ -4576,6 +4579,17 @@ impl RustEmitter {
             code.push_str("        self.chord_valid = false;\n");
         }
 
+        // Invalidate the sub-sample-fire Schur-triple LRU — G/C changed, so every
+        // cached (rate, be) triple is stale. Covers pot/switch/runtime-R (via
+        // matrices_dirty), set_sample_rate, and the saturating-L resync rebuild.
+        if ir.solver_config.subsample_fire {
+            code.push_str(
+                "\n        // Drop all sub-sample-fire Schur-triple LRU entries (matrices changed)\n",
+            );
+            code.push_str("        self.ssf_lru_len = 0;\n");
+            code.push_str("        self.ssf_lru_evict = 0;\n");
+        }
+
         code.push_str("    }\n\n");
 
         // set_pot_N() / set_runtime_R_<field>() methods — O(1) delta stamping
@@ -5106,6 +5120,14 @@ impl RustEmitter {
              {indent}    let be_x = if be_x.is_finite() {{ be_x }} else {{ 0.0 }};\n\
              {indent}    let be_u = if input.is_finite() {{ input }} else {{ 0.0 }};\n\
              {indent}    let be_ema = (1.0 / (BE_LATCH_TAU_S * state.current_sample_rate)).clamp(1e-4, 0.5);\n\
+             {indent}    // Mean-remove the output before correlating: a DC-biased output node\n\
+             {indent}    // (e.g. a collector sitting at several volts) otherwise makes the lag-1\n\
+             {indent}    // products bias-dominated (r1 ~ +1), so a mV-scale (-1)^n ring riding on\n\
+             {indent}    // the bias never crosses the anti-correlation threshold and the latch is\n\
+             {indent}    // silently inert. Track the DC with an EMA (same coefficient) and\n\
+             {indent}    // correlate the AC residual.\n\
+             {indent}    state.be_x_mean += be_ema * (be_x - state.be_x_mean);\n\
+             {indent}    let be_x = be_x - state.be_x_mean;\n\
              {indent}    state.be_r1_num += be_ema * (be_x * state.be_x_prev - state.be_r1_num);\n\
              {indent}    state.be_pow += be_ema * (be_x * be_x - state.be_pow);\n\
              {indent}    state.be_x_prev = be_x;\n\
@@ -5349,6 +5371,16 @@ impl RustEmitter {
         // Every SAT_RESYNC_INTERVAL SM updates, do a full O(N³) rebuild from c_work.
         if has_any_saturation {
             code.push_str("        if sat_changed {\n");
+            // Saturating L(I) patched c_work in place (this path does NOT always
+            // call rebuild_matrices — the SM branch updates S/K/S_NI directly), so
+            // every sub-sample-fire Schur-triple built from c_work is now stale.
+            if ir.solver_config.subsample_fire {
+                code.push_str(
+                    "            // Sub-sample fire: c_work patched — drop all Schur-triple LRU entries\n",
+                );
+                code.push_str("            state.ssf_lru_len = 0;\n");
+                code.push_str("            state.ssf_lru_evict = 0;\n");
+            }
             code.push_str("            state.sat_resync_counter += 1;\n");
             code.push_str("            if state.sat_resync_counter >= SAT_RESYNC_INTERVAL {\n");
             code.push_str("                state.sat_resync_counter = 0;\n");

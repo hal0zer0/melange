@@ -5110,6 +5110,17 @@ fn list_nodes_source(circuit_source: &circuits::CircuitSource) -> Result<()> {
     Ok(())
 }
 
+/// Human-readable name for a DC-system row index reported by
+/// `DcOpResult::kcl_worst_row`: the node name for circuit nodes, otherwise
+/// the raw row (BJT internal nodes added by the DC solver).
+fn dc_op_row_name(row: usize, idx_to_name: &[String], n: usize) -> String {
+    if row < n && row + 1 < idx_to_name.len() {
+        format!("v({})", idx_to_name[row + 1])
+    } else {
+        format!("dc row {} (internal node)", row)
+    }
+}
+
 fn run_dc_op(
     circuit_source: &circuits::CircuitSource,
     input_node_name: &str,
@@ -5209,6 +5220,14 @@ fn run_dc_op(
         print!("\"converged\":{},", result.converged);
         print!("\"method\":\"{:?}\",", result.method);
         print!("\"iterations\":{},", result.iterations);
+        print!("\"kcl_residual_max\":{:.6e},", result.kcl_residual_max);
+        print!(
+            "\"kcl_worst_row\":{},",
+            match result.kcl_worst_row {
+                Some(row) => format!("\"{}\"", dc_op_row_name(row, &idx_to_name, mna.n)),
+                None => "null".to_string(),
+            }
+        );
         print!("\"n\":{},\"m\":{},", mna.n, mna.m);
 
         // Node voltages
@@ -5266,6 +5285,14 @@ fn run_dc_op(
             "  Converged: {} ({:?}, {} iterations)",
             result.converged, result.method, result.iterations
         );
+        match result.kcl_worst_row {
+            Some(row) => eprintln!(
+                "  KCL residual: max |F| = {:.3e} A at {}",
+                result.kcl_residual_max,
+                dc_op_row_name(row, &idx_to_name, mna.n)
+            ),
+            None => eprintln!("  KCL residual: n/a (no voltage rows)"),
+        }
         eprintln!();
 
         // Node voltages

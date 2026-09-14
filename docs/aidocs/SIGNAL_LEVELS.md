@@ -26,7 +26,18 @@ R = 1 - 2*pi*5/sr
 
 This removes DC bias voltages from tube, BJT, and op-amp circuits that would otherwise pass through as a constant offset (silence in audio, or speaker-damaging DC).
 
-The DC block is transparent for audio-frequency signals (>20Hz) and settles within ~200ms.
+The DC block is transparent in *level* for audio-frequency signals (>20Hz) and
+settles within ~200ms.
+
+**Phase caveat (voltron analog-EE review, 2026-09-13):** a first-order high-pass
+is level-transparent above its corner but is **not** phase-transparent there. A
+5 Hz corner still adds a measurable phase *lead* at the bottom of the audio band —
+about +14° at 20 Hz (arctan(5/20)) — falling toward 0° higher up. This does not
+matter for amplitude spectra, but it does matter when comparing low-frequency
+waveform **shapes** against a hardware capture (e.g. transformer-saturation
+curves, LF asymmetry): the DC-blocked waveform is phase-shifted relative to the
+raw node voltage. Compare with `--no-dc-block`, or apply the same 5 Hz HPF to the
+hardware reference, when the LF shape itself is under test.
 
 ## Output Scaling
 
@@ -47,15 +58,35 @@ scale.
 
 `--output-clamp <V>` raises (or lowers) the post-DC-block ceiling when a circuit's
 rails exceed ±10 V. The flag is ignored when DC blocking is disabled
-(`--no-dc-block`) since the clamp is only emitted on the DC-blocked path. Setting
-it below the natural rail voltage hard-clips the output — use only to match a real
-limiter, never to work around simulation errors. Typical values:
+(`--no-dc-block`) since the clamp is only emitted on the DC-blocked path. The
+clamp is a real `.clamp(-OUTPUT_CLAMP_V, OUTPUT_CLAMP_V)` — a hard limiter.
+Setting it below a circuit's natural peak swing **hard-clips the output**, which
+is a clip the hardware does not have. Use it only to match a real limiter, never
+to work around simulation errors.
 
-| Circuit class | `--output-clamp` |
-|---------------|------------------|
-| Line-level op-amp, tube preamp, distortion pedal | `10` (default) |
-| Class AB push-pull power amp at ±22 V rails | `30` |
-| High-voltage guitar amp at ±300 V rails | leave default and use `--output-scale 0.033` to map to ±10 V |
+**The default ±10 V is only safe for a circuit that physically cannot swing past
+±10 V.** Most line-level gear can: a TL07x-class op-amp on ±15 V rails swings to
+about ±13.5 V (VCC − 1.5 V; melange's own 4kbuscomp TL074 card uses `VSAT=13.5`,
+per the TI datasheet — see `STATUS.md` and `DEBUGGING.md`), and a 1073-class
+console output is specified above +26 dBu = ±21.8 V peak. For those circuits the
+default clamps *before* the hardware does (±10 V = 7.07 Vrms = +19.2 dBu, roughly
+2–3 dB below a ±15 V op-amp and ~7 dB below a 1073), introducing distortion that
+is not in the real device. A circuit with rails above ±10 V should set the clamp
+**at or above its real peak swing** (see the table) — or, if it needs no ceiling,
+`--no-dc-block` removes the clamp path entirely. (Note, voltron analog-EE review
+2026-09-13: the previous table recommended the ±10 V default for "line-level
+op-amp, tube preamp, distortion pedal", which contradicts the hard-clip rule
+above for any of those built on ±15 V or hotter rails.)
+
+Typical values:
+
+| Circuit class | Peak swing | `--output-clamp` |
+|---------------|------------|------------------|
+| Output cannot swing past ±10 V (e.g. ±9 V single-supply pedal, low-rail op-amp) | ≤ ±10 V | `10` (default) |
+| Line-level op-amp / tube preamp on ±15 V rails | ~±13.5 V | `14` (or higher) |
+| 1073-class console line output (+26 dBu spec) | ≥ ±21.8 V | `22` (or higher) |
+| Class AB push-pull power amp at ±22 V rails | ~±22 V | `30` |
+| High-voltage guitar amp at ±300 V rails | ~±300 V | leave default and use `--output-scale 0.033` to map to ±10 V |
 
 ## Plugin Level Controls
 

@@ -159,6 +159,62 @@ D2 at `IS = 2.572e-9` (+2.08%). Rin drops to 994.38 Ω (-0.56%). Run the
 same netlist again and get the same numbers — change `.seed 42` to
 `.seed 99` and get a completely different unit.
 
+## Choosing Magnitudes: Modern vs. Vintage Parts
+
+(Authoring guidance, voltron analog-EE review 2026-09-13.)
+
+The example magnitudes throughout this doc — `.tolerance R=0.01 C=0.02`,
+tube `MU ±3%`, BJT `BF ±5%` — describe **modern** precision parts. Period
+and vintage components are far wider, and modelling a vintage circuit with
+modern tolerances understates its unit-to-unit spread badly:
+
+| Part | Modern (examples above) | Vintage / period spread |
+|------|-------------------------|-------------------------|
+| Carbon-composition R | 1% | ±5 / 10 / 20% (marked band) |
+| Electrolytic C | 2% | ±20% or worse |
+| Film / mica C | 2% | ±5–10% |
+| Tubes (per parameter) | ~3% | ±5–20% common |
+| Small-signal BJT β | ~5% | wide datasheet window — e.g. 2N3904 `BF` spec is 100–300 |
+
+So a `.mismatch T MU=0.15` or a `.tolerance R=0.10` is a *more faithful*
+model of a 1960s circuit than the modern example values, and matched-pair
+devices (push-pull tubes, antiparallel clippers) should be jittered *at
+least* this wide unless the hardware was hand-selected.
+
+### Two limits `.tolerance`/`.mismatch` cannot capture
+
+1. **Ageing is directional and correlated, not uniform jitter.** The draw
+   here is a symmetric uniform `u ∈ [-1, 1]` (`deterministic_draw`), which
+   models *manufacturing spread* — a fresh unit off the line. Ageing is
+   different: it moves parts in a *consistent direction* and often in a
+   *correlated* way across a batch. Electrolytics lose capacitance and gain
+   ESR as they dry; humid carbon-composition resistors drift *upward* in
+   value. A symmetric `[-1, 1]` draw cannot represent that — it would need a
+   separate *drift* term (a directional bias, not a re-roll). Do not reach
+   for a wider `.tolerance` to fake ageing; you would get a random unit, not
+   an old one.
+
+2. **Some ageing is not a value change at all — it is a topology or model
+   change**, and `.tolerance` (which only scales existing R/C/L values)
+   cannot express it:
+   - A **leaky coupling cap** is a new **DC path** — a high-value resistor
+     appearing in parallel with the cap — that shifts the *next* stage's
+     bias point. That is a new element, not a jittered value.
+   - **ESR** on an aged electrolytic is a series resistance the ideal cap
+     model does not have.
+   - The **voltage coefficient** of a carbon-composition resistor (value
+     shifting with the voltage across it) is a nonlinear model, not a
+     tolerance.
+
+   These need topology edits or richer device models, not `.tolerance`.
+
+### Scale intuition
+
+A ±20% spread on both R and C moves a first-order corner frequency
+`f = 1/(2πRC)` by roughly **−31% to +56%** (`1/(1.2·1.2)` to `1/(0.8·0.8)`).
+Useful when judging whether a chosen tolerance is audible: a filter or
+tone-stack corner will wander by tens of percent, a bias divider far less.
+
 ## Interaction with Self-Heating
 
 `.mismatch` and `.tolerance` are **static** (baked once at codegen). The

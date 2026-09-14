@@ -1511,8 +1511,35 @@ fn build_noise_ir(config: &CodegenConfig, netlist: &Netlist, mna: &MnaSystem) ->
     }
 }
 
-fn zero_augmented_history_rows(a_neg_flat: &mut [f64], n: usize, n_nodes: usize, mna_n_aug: usize) {
+fn zero_augmented_history_rows(
+    a_neg_flat: &mut [f64],
+    n: usize,
+    n_nodes: usize,
+    mna_n_aug: usize,
+    bjt_internal: &[crate::mna::BjtTransientInternalNodes],
+) {
+    // Parasitic-BJT internal nodes are appended into [n_nodes, n_aug) by
+    // expand_bjt_internal_nodes but are PHYSICAL nodes (real G/C stamps), NOT
+    // algebraic VS/inductor constraint rows — they must KEEP their trapezoidal
+    // history (A_neg row = alpha*C - G). Zeroing them makes the DC OP not a trap
+    // fixed point, which kicks a z=-1 (-1)^n ring on the (capacitor-less) collector
+    // row. Exclude them, mirroring dk.rs's is_bjt_internal mask. (Arbiter t319,
+    // 2026-09-13; verified via the parasitic-RB trap ring / noise test.)
+    let mut is_bjt_internal = vec![false; mna_n_aug];
+    for bn in bjt_internal {
+        for idx in [bn.int_base, bn.int_collector, bn.int_emitter]
+            .into_iter()
+            .flatten()
+        {
+            if idx < mna_n_aug {
+                is_bjt_internal[idx] = true;
+            }
+        }
+    }
     for row in n_nodes..mna_n_aug.min(n) {
+        if is_bjt_internal[row] {
+            continue;
+        }
         for j in 0..n {
             a_neg_flat[row * n + j] = 0.0;
         }
@@ -1530,6 +1557,7 @@ fn build_dk_trap_matrices_at_rate(
     n: usize,
     n_nodes: usize,
     mna_n_aug: usize,
+    bjt_internal: &[crate::mna::BjtTransientInternalNodes],
     augmented_inductors: bool,
     kernel: &DkKernel,
     rate: f64,
@@ -1557,7 +1585,7 @@ fn build_dk_trap_matrices_at_rate(
         kernel,
         t,
     );
-    zero_augmented_history_rows(&mut a_neg_flat, n, n_nodes, mna_n_aug);
+    zero_augmented_history_rows(&mut a_neg_flat, n, n_nodes, mna_n_aug, bjt_internal);
 
     (a_flat, a_neg_flat)
 }
@@ -1607,7 +1635,13 @@ fn build_dk_be_matrices_at_rate(
     // BE A_neg = alpha·C is already zero on most algebraic rows, but
     // Boyle-internal / current-mode-VCA / behavioral-V rows can carry C
     // entries — blanket-zero to match the trap arm and the runtime rebuild.
-    zero_augmented_history_rows(&mut a_neg_flat, n, n_nodes, mna_n_aug);
+    zero_augmented_history_rows(
+        &mut a_neg_flat,
+        n,
+        n_nodes,
+        mna_n_aug,
+        &mna.bjt_internal_nodes,
+    );
 
     let s = invert_flat_matrix(&a_flat, n)?;
 
@@ -1794,6 +1828,7 @@ impl CircuitIR {
                 n,
                 n_nodes,
                 mna.n_aug,
+                &mna.bjt_internal_nodes,
                 augmented_inductors,
                 kernel,
                 internal_rate,
@@ -2156,7 +2191,13 @@ impl CircuitIR {
             // three constraints. Routed through the shared helper, matching the
             // os>1 build_dk_be_matrices_at_rate path. Inductor branch rows
             // (n_aug..n) keep their history and are untouched.
-            zero_augmented_history_rows(&mut a_neg_flat, n, mna.n, mna.n_aug);
+            zero_augmented_history_rows(
+                &mut a_neg_flat,
+                n,
+                mna.n,
+                mna.n_aug,
+                &mna.bjt_internal_nodes,
+            );
             let s_flat = invert_flat_matrix(&a_flat, n)?;
             let k_flat = if m > 0 {
                 compute_k_from_s(&s_flat, &kernel.n_v, &kernel.n_i, n, m)
@@ -2937,17 +2978,19 @@ impl CircuitIR {
                 a_neg_be_flat[i * n + j] = alpha_be * c;
             }
         }
-        // Re-zero augmented rows in A_neg and A_neg_be
-        if n_aug > n_nodes {
-            for i in n_nodes..n_aug {
-                if i < n {
-                    for j in 0..n {
-                        a_neg_flat[i * n + j] = 0.0;
-                        a_neg_be_flat[i * n + j] = 0.0;
-                    }
-                }
-            }
-        }
+        // Re-zero augmented (VS/VCVS/xfmr/VCA/behavioral) history rows in A_neg and
+        // A_neg_be — but EXCLUDE parasitic-BJT internal nodes, which are physical
+        // G/C nodes that must keep their trapezoidal history (zeroing them makes the
+        // DC OP not a trap fixed point → a z=-1 collector-row ring). The helper masks
+        // them out; this inline loop previously did not (arbiter t319 root fix).
+        zero_augmented_history_rows(&mut a_neg_flat, n, n_nodes, n_aug, &mna.bjt_internal_nodes);
+        zero_augmented_history_rows(
+            &mut a_neg_be_flat,
+            n,
+            n_nodes,
+            n_aug,
+            &mna.bjt_internal_nodes,
+        );
 
         // Flatten G and C (with the selective Rule-D' Gm cap applied) for codegen constants
         let g_matrix = dk::flatten_matrix(&aug.g, n, n);
@@ -3160,7 +3203,42 @@ impl CircuitIR {
         // circuit the nodal-local analysis reports as comfortably stable
         // (rho=0.8157, nowhere near the marginal window) no matter what the
         // less-accurate router number claims.
-        let local_needs_be = crate::codegen::stability::trap_needs_be(trap_stability);
+        let clauses_fire = crate::codegen::stability::trap_needs_be(trap_stability);
+        // Arbiter t319 (2026-09-13): on a POSITIVE dominant sign, clause 1 promotes
+        // to BE only if BE actually STABILIZES the mode (rho_be <= limit). This
+        // distinguishes a numerical marginal +1 mode BE removes (e.g. an expanded
+        // parasitic-RB common-emitter stage whose trap map holds a stationary +1
+        // offset — promote, for noise fidelity) from a real growing pole BE cannot
+        // fix (a regenerative oscillator: rho_be still > 1 under the L-stable BE
+        // companion — keep trap, so its physical limit cycle is not over-damped).
+        // rho_be is the same quantity `log_be_post_promotion_check` reports, on the
+        // BE matrices already built above (`s_be_flat`, `a_neg_be_flat`). A negative
+        // dominant sign (Nyquist mode) is unchanged — it always promotes.
+        let local_needs_be = if clauses_fire && trap_stability.dominant_sign > 0.0 {
+            let rho_be = crate::codegen::stability::analyze_trap_stability_deflated(
+                &s_be_flat,
+                &a_neg_be_flat,
+                n,
+                &config.input_node_indices(),
+            )
+            .rho;
+            let be_stabilizes = rho_be <= crate::codegen::stability::BE_POST_PROMOTION_LIMIT;
+            if !be_stabilizes {
+                log::info!(
+                    "Nodal: growing mode at the DC operating point (spectral_radius(S*A_neg) = \
+                     {:.4}, dominant_sign +1) SURVIVES backward Euler \
+                     (spectral_radius(S_be*A_neg_be) = {:.4} > 1) — a real growing pole, as an \
+                     oscillator or latch is expected to have. Trapezoidal kept (BE would only \
+                     over-damp the physical limit cycle without stabilising it). Use \
+                     `.integrator be` / `--backward-euler` to force BE anyway.",
+                    trap_stability.rho,
+                    rho_be
+                );
+            }
+            be_stabilizes
+        } else {
+            clauses_fire
+        };
         let router_corroborated_marginal =
             crate::codegen::stability::router_corroborates_marginal_instability(
                 config.router_dk_unstable,
