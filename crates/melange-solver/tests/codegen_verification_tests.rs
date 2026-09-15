@@ -9410,16 +9410,17 @@ VCC vcc 0 250
     );
 
     // BE fallback (inside trap codegen, lines starting with `let mut rhs_be`):
-    // MUST contain N_I * i_nl_prev. The fallback is a single-sample BE step
-    // embedded in a TRAP-primary solver, whose `i_nl_prev` follows the trap
-    // convention (consumed in every trap build_rhs). The fallback rebuilds the
-    // RHS from scratch, so it must consume i_nl_prev the same way or the prior
-    // sample's nonlinear charge is dropped — injecting a transient on every
-    // fallback (the wurli-preamp `.runtime R` pump regression). The
-    // "BE omits N_I*i_nl_prev" rule applies ONLY to BE-*primary* codegen
-    // (verified above), where every sample is BE and i_nl_prev is never
-    // trap-split. BE-primary circuits (noyce-cascaded-triodes, pipe-shouter)
-    // have no fallback block, so this does not affect them.
+    // must NOT contain N_I * i_nl_prev either. The fallback is a single-sample
+    // BE step; the same fixed-point argument as above applies (a BE step
+    // stamps only N_I * i_nl(n), via S_ni_be). Between 2026-05-28 and
+    // 2026-09-14 the fallback carried the stamp "for trap-convention history
+    // continuity" — that rationale was wrong: the stamped step double-counts
+    // every device's bias current, so a breakpoint-BE / max-iter / latch
+    // fallback taken at the DC operating point leaves it by S_BE * N_i *
+    // DC_NL_I, and the excursion lands in null(C), trap's exact z = -1
+    // eigenspace, where the resumed trap never damps it (46-57 V p-p anode
+    // ring on philicorda-voicing-coupled after a switch flip). See
+    // be_fallback_fixed_point_tests.rs for the end-to-end proof.
     let be_fallback_block: String = trap_code
         .split("let mut rhs_be = ")
         .nth(1)
@@ -9427,9 +9428,13 @@ VCC vcc 0 250
         .unwrap_or("")
         .to_string();
     assert!(
-        be_fallback_block.contains("N_I[") && be_fallback_block.contains("state.i_nl_prev"),
-        "trap-primary BE fallback must contain N_I * i_nl_prev (trap-convention history \
-         continuity — dropping it injects a per-fallback transient):\n{}",
+        !be_fallback_block.is_empty(),
+        "trap-primary codegen lost its BE fallback block"
+    );
+    assert!(
+        !(be_fallback_block.contains("N_I[") && be_fallback_block.contains("state.i_nl_prev")),
+        "trap-primary BE fallback still stamps N_I * i_nl_prev (double-counts the bias \
+         current; the fallback is not a fixed point of the DC OP):\n{}",
         be_fallback_block
     );
 }

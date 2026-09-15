@@ -98,18 +98,17 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
         // Rebuild RHS with backward Euler matrices.
         //
         // This is the per-sample BE *fallback* inside a trapezoidal-primary
-        // solver — NOT a BE-primary integrator. The surrounding solver keeps
-        // `i_nl_prev` on the trap convention: every trap `build_rhs` consumes
-        // `N_I * i_nl_prev` (baked into v_pred). A fallback sample rebuilds the
-        // RHS from scratch, so it must consume `i_nl_prev` the same way or the
-        // previous sample's nonlinear charge is dropped — injecting a transient
-        // on every fallback (e.g. ~3× hot output where the fallback is
-        // load-bearing, and the `.runtime R` modulation pump). The "BE omits
-        // N_I*i_nl_prev" rule applies only to BE-*primary* codegen (every sample
-        // BE, i_nl_prev never trap-split), gated separately in
-        // dk_emitter::emit_build_rhs.
-        // Sparse-pruned A_neg_be·v_prev + N_I·i_nl_prev (+ RHS_CONST_BE when DC
-        // sources present). Generated per-row from the A_neg_be / N_i patterns.
+        // solver. A BE step is (G + C/T)·v(n) = (C/T)·v_prev + u(n) + N_I·i(n):
+        // the ONLY nonlinear term is the current at the new sample, added via
+        // S_ni_be·i_nl after the NR loop. It must NOT also stamp N_I·i_nl_prev
+        // (the trap-midpoint half that trap `build_rhs` carries): that counts
+        // every device's bias current twice, so the fallback sample is not a
+        // fixed point of the DC operating point, and the excursion lands in
+        // null(C) — trap's exact z=-1 eigenspace — where the resumed trap
+        // never damps it. A clean BE step hands trap a consistent history
+        // (KCL at n reconstructs the capacitor currents correctly).
+        // Sparse-pruned A_neg_be·v_prev (+ RHS_CONST_BE when DC sources
+        // present). Generated per-row from the A_neg_be pattern.
         let mut rhs_be = [0.0f64; N];
 {{ be_rhs_lines }}
 {% if multi_input %}        for k in 0..NUM_INPUTS {

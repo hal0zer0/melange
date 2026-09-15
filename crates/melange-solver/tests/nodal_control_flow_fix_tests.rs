@@ -259,16 +259,25 @@ fn full_lu_substep_gmin_matches_other_stamps() {
 
 #[test]
 fn be_primary_fallback_skips_trap_midpoint_stamp() {
-    // The runtime-loop form of the stamp only appears in the BE-fallback RHS
-    // builds (the primary trap RHS uses unrolled sparse stamps).
+    // The runtime-loop form of the stamp only ever appeared in the BE-fallback
+    // RHS builds (the primary trap RHS uses unrolled sparse stamps). Since
+    // 2026-09-14 no build carries it: a BE step stamps only N_I*i_nl(n), and
+    // the stamped fallback double-counted the bias current (see
+    // be_fallback_fixed_point_tests.rs). Trap-primary builds must still
+    // stamp the midpoint half in their primary (unrolled) RHS.
     let midpoint_stamp = "sum += N_I[i][j] * state.i_nl_prev[j];";
 
     for (tag, spice) in [("schur", CLIPPER), ("full_lu", CLIPPER_FULL_LU)] {
         let trap_code = nodal_code(spice);
         assert!(
-            trap_code.contains(midpoint_stamp),
-            "{tag}: trap-primary build keeps the fallback midpoint stamp \
-             (2026-05-28 restoration)"
+            !trap_code.contains(midpoint_stamp),
+            "{tag}: trap-primary build must not stamp N_I*i_nl_prev in its BE \
+             fallback RHS (double-counts the bias current; the fallback sample \
+             is then not a fixed point of the DC OP)"
+        );
+        assert!(
+            trap_code.contains("* state.i_nl_prev["),
+            "{tag}: trap-primary build lost the midpoint half of its primary RHS"
         );
         let be_code = nodal_code_with(spice, |c| c.backward_euler = true);
         assert!(

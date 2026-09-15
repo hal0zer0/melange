@@ -6198,25 +6198,22 @@ impl RustEmitter {
             code.push_str(
                 "            for j in 0..N { sum += state.a_neg_be[i][j] * state.v_prev[j]; }\n",
             );
-            // Trap-midpoint N_I·i_nl_prev stamp: kept for trap-primary builds
-            // (2026-05-28 restoration), but a BE-primary build must not
-            // re-add it — the primary RHS already skips it under BE (see the
-            // gating comment at the Step 1 RHS build), and the fallback is
-            // the same BE discretization.
-            //
-            // Also omitted for glow circuits: there the fallback IS the
-            // integrator for every lit sample (glow lit-hold), and with the
-            // stamp a lit BE sample solves (G + C/T)v = (C/T)v_prev + u +
-            // N_I(i_prev + i) — the mA-scale maintaining-line current counted
-            // twice — instead of the BE step N_I·i that the clean
-            // `--backward-euler` build takes. Measured on the 5-stage divider
-            // at 44.1 kHz: lit-hold + stamped fallback rings to ~500 V;
-            // lit-hold + this omission is 175 V / 0 resets / exact ratios.
-            if !ir.solver_config.backward_euler && !has_latched_device(ir) {
-                code.push_str(
-                    "            for j in 0..M { sum += N_I[i][j] * state.i_nl_prev[j]; }\n",
-                );
-            }
+            // No trap-midpoint N_I·i_nl_prev stamp here. A BE step is
+            // (G + C/T)·v(n) = (C/T)·v_prev + u(n) + N_I·i(n): the only nonlinear
+            // term is the current at the NEW sample (added via S_ni_be below).
+            // Stamping i_nl_prev as well solves N_I·(i_prev + i(n)) — every
+            // device's bias current counted twice — so the fallback is not a
+            // fixed point of the DC operating point. From an exact DC OP on
+            // silence one such sample moved a triode anode by 24-30 V
+            // (philicorda-voicing-coupled, 2026-09-14), and because the kick
+            // lands in null(C) — the exact z=-1 eigenspace of the trap operator —
+            // trap then carried it as an undamped (-1)^n ring bounded only by
+            // the tube. Every user of this fallback (max-iter fallback,
+            // breakpoint-BE after a .switch/.pot event, the runtime BE-latch,
+            // the glow lit-hold) needs the clean step; the same omission was
+            // first landed glow-only in 7b39da7. The trap-primary Step 1 RHS
+            // keeps its N_I·i_nl_prev half (trap average split across Step 1
+            // and Step 5) — that is a different discretization.
             code.push_str("            rhs_be[i] = sum;\n");
             code.push_str("        }\n");
             if multi_input {
@@ -8817,17 +8814,9 @@ impl RustEmitter {
                 code.push_str("            for j in 0..N {\n");
                 code.push_str("                sum += state.a_neg_be[i][j] * state.v_prev[j];\n");
                 code.push_str("            }\n");
-                // Trap-midpoint N_I·i_nl_prev stamp: kept for trap-primary builds
-                // (2026-05-28 restoration), but a BE-primary build must not
-                // re-add it — the primary RHS already skips it under BE (see the
-                // gating comment at the Step 1 RHS build), and the fallback is
-                // the same BE discretization. Also omitted for glow circuits
-                // (lit-hold BE) — see the matching comment on the Schur path.
-                if m > 0 && !ir.solver_config.backward_euler && !has_latched_device(ir) {
-                    code.push_str("            for j in 0..M {\n");
-                    code.push_str("                sum += N_I[i][j] * state.i_nl_prev[j];\n");
-                    code.push_str("            }\n");
-                }
+                // No trap-midpoint N_I·i_nl_prev stamp: a BE step stamps only
+                // N_I·i(n) (added after the LU solve). See the matching comment
+                // on the Schur path for the double-count failure this removes.
                 code.push_str("            rhs_be[i] = sum;\n");
                 code.push_str("        }\n");
                 // Saturating-inductor flux history (BE: base v_prev, alpha = 1·rate·OS;

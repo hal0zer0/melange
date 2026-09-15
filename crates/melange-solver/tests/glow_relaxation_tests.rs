@@ -758,8 +758,10 @@ fn test_glow_chain5_no_divergence_nodal_44k1() {
 
 /// Byte-neutrality guard for the lit-hold machinery: a circuit without a
 /// glow device (here a diode-only deck with the same cathode diode) must emit
-/// neither the lit-hold const/re-arm nor the breakpoint-BE state, and must
-/// keep the trap-midpoint `N_I * i_nl_prev` stamp in its BE fallback.
+/// neither the lit-hold const/re-arm nor the breakpoint-BE state. Its BE
+/// fallback, like every other, carries no trap-midpoint `N_I * i_nl_prev`
+/// stamp (the glow-only omission of 7b39da7 became universal on 2026-09-14 —
+/// see be_fallback_fixed_point_tests.rs).
 #[test]
 fn test_glow_lit_hold_absent_without_glow() {
     let deck = "\
@@ -777,7 +779,7 @@ Rin in k 100k
     assert!(!code.contains("GLOW_LIT_BE_SAMPLES"));
     assert!(!code.contains("breakpoint_be"));
     assert!(
-        code.contains("N_I[i][j] * state.i_nl_prev[j]"),
-        "non-glow BE fallback must keep the trap-midpoint i_nl_prev stamp (unchanged behaviour)"
+        !code.contains("N_I[i][j] * state.i_nl_prev[j]"),
+        "non-glow BE fallback must not carry the trap-midpoint i_nl_prev stamp"
     );
 }

@@ -2871,11 +2871,21 @@ impl RustEmitter {
         let has_be_fallback =
             !ir.matrices.s_be.is_empty() && ir.topology.m > 0 && !ir.solver_config.backward_euler;
         ctx.insert("has_be_fallback", &has_be_fallback);
-        // #P1: sparse-prune the BE-fallback matvecs. rhs_be = A_neg_be·v_prev +
-        // N_I·i_nl_prev and p_be = N_V·v_pred_be are all structurally sparse;
-        // S_be / S_ni_be are dense inverses and stay looped in the template.
-        // Byte-identical — skipped entries are exactly zero (A_neg_be uses its
-        // OWN pattern, not a_neg's, to avoid the αC−G near-cancellation trap).
+        // #P1: sparse-prune the BE-fallback matvecs. rhs_be = A_neg_be·v_prev
+        // (+ RHS_CONST_BE) and p_be = N_V·v_pred_be are all structurally
+        // sparse; S_be / S_ni_be are dense inverses and stay looped in the
+        // template. Skipped entries are exactly zero (A_neg_be uses its OWN
+        // pattern, not a_neg's, to avoid the αC−G near-cancellation trap).
+        //
+        // No N_I·i_nl_prev term: a BE step stamps only the nonlinear current at
+        // the NEW sample (S_ni_be·i_nl in the template). Adding i_nl_prev too
+        // double-counts every device's bias current, so the fallback sample is
+        // not a fixed point of the DC operating point and the excursion lands
+        // in null(C) — trap's exact z=-1 eigenspace — where trap never damps
+        // it (philicorda-voicing-coupled, 2026-09-14; same defect as the nodal
+        // emitter's fallback, see its comment). The trap-primary build_rhs
+        // above keeps its N_I·i_nl_prev half — that is the trap average split
+        // across build_rhs and compute_final_voltages, a different scheme.
         let (be_rhs_lines, be_p_lines) = if has_be_fallback {
             let mut rhs = String::new();
             for i in 0..ir.topology.n {
@@ -2885,9 +2895,6 @@ impl RustEmitter {
                 }
                 for &j in &ir.sparsity.a_neg_be.nz_by_row[i] {
                     terms.push(format!("state.a_neg_be[{i}][{j}] * state.v_prev[{j}]"));
-                }
-                for &j in &ir.sparsity.n_i.nz_by_row[i] {
-                    terms.push(format!("N_I[{i}][{j}] * state.i_nl_prev[{j}]"));
                 }
                 if terms.is_empty() {
                     rhs.push_str(&format!("        rhs_be[{i}] = 0.0;\n"));
