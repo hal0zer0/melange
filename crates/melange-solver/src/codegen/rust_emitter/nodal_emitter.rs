@@ -6801,7 +6801,7 @@ impl RustEmitter {
                         "{indent}let glow_lit{d} = state.device_{d}_state[0] >= 0.5;\n\
                          {indent}let (i_dev{s}, jdev_{s}_{s}) = if glow_lit{d} {{\n\
                          {indent}    let glow_i_bar{d} = [state.device_{d}_state[1], state.device_{d}_state[2], state.device_{d}_state[3], state.device_{d}_state[4]];\n\
-                         {indent}    glow_lit_eval(v_d{s}, DEVICE_{d}_V0, DEVICE_{d}_RT, &[DEVICE_{d}_K1, DEVICE_{d}_K2, DEVICE_{d}_K3, DEVICE_{d}_K4], &glow_i_bar{d}, DEVICE_{d}_IFLOOR)\n\
+                         {indent}    glow_lit_eval(v_d{s}, DEVICE_{d}_V0, DEVICE_{d}_RT, &[DEVICE_{d}_K1, DEVICE_{d}_K2, DEVICE_{d}_K3, DEVICE_{d}_K4], &glow_i_bar{d}, DEVICE_{d}_IFLOOR, DEVICE_{d}_KSUB, DEVICE_{d}_I_N)\n\
                          {indent}}} else {{\n\
                          {indent}    let glow_g{d} = 1.0 / DEVICE_{d}_ROFF;\n\
                          {indent}    (v_d{s} * glow_g{d}, glow_g{d})\n\

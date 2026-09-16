@@ -1003,24 +1003,21 @@ fn emit_glow_update_body(
     b.push_str("            state[0] = 1.0;\n");
     if has_sec {
         b.push_str(
-            "            // Strike-bounded seed: Ī_i = I₀·exp(−margin/Σk); margin uses V_s,eff (=vth),\n\
-             \x20           // so the onset overvoltage shrinks after a short off-time (D coupling).\n\
+            "            // Balanced seed (voltron t422): Ī_i = I₀, the circuit-limited strike current,\n\
+             \x20           // so Σ k·ln(I/Ī) = 0 at the peak and the sections carry NO breakdown-side\n\
+             \x20           // overvoltage. The fall from V_s to the lit branch is FORMATION (the strike\n\
+             \x20           // event's job, µs), NOT a lagged-section state; the undershoot below V_m is\n\
+             \x20           // then purely the lag dynamics. Supersedes the earlier I₀·exp(−margin/Σk)\n\
+             \x20           // seed, which forced the sections to carry V_s−V_m as initial state and gave\n\
+             \x20           // a ±(V_s−V_m) transient on every strike — negligible in a divider's dump but\n\
+             \x20           // the WHOLE dump on a 1:1 converter (B5) that re-strikes every cycle.\n\
              \x20           // I₀ predicted from cv with provisional Ī=IFLOOR (dark solve ≠ lit current).\n",
         );
         b.push_str(&format!("            let glow_prov = [DEVICE_{d}_IFLOOR; 4];\n"));
         b.push_str(&format!(
-            "            let (i0, _) = glow_lit_eval(cv, DEVICE_{d}_V0, DEVICE_{d}_RT, {k_arr}, &glow_prov, DEVICE_{d}_IFLOOR);\n"
+            "            let (i0, _) = glow_lit_eval(cv, DEVICE_{d}_V0, DEVICE_{d}_RT, {k_arr}, &glow_prov, DEVICE_{d}_IFLOOR, DEVICE_{d}_KSUB, DEVICE_{d}_I_N);\n"
         ));
-        b.push_str(&format!(
-            "            let margin = vth - DEVICE_{d}_V0 - i0 * DEVICE_{d}_RT;\n"
-        ));
-        b.push_str(&format!(
-            "            let ksum = DEVICE_{d}_K1 + DEVICE_{d}_K2 + DEVICE_{d}_K3 + DEVICE_{d}_K4;\n"
-        ));
-        b.push_str(&format!(
-            "            let seed = (i0 * (-margin / ksum).exp()).max(DEVICE_{d}_IFLOOR);\n"
-        ));
-        b.push_str("            state[1] = seed; state[2] = seed; state[3] = seed; state[4] = seed;\n");
+        b.push_str("            state[1] = i0; state[2] = i0; state[3] = i0; state[4] = i0;\n");
         // Disarm extinction at strike: a still-forming discharge that has not yet
         // reached the sustaining current IHOLD must NOT be extinguished. Arming
         // happens below once i crosses IHOLD. Clear the robust-extinction history
@@ -1050,7 +1047,7 @@ fn emit_glow_update_body(
         // (the device is 1-D/2-terminal and cannot see the external C). Both i's
         // come from converged glow_lit_eval(cv). Otherwise relax each active section.
         b.push_str(&format!(
-            "        let (i_now, _) = glow_lit_eval(cv, DEVICE_{d}_V0, DEVICE_{d}_RT, {k_arr}, &glow_i_bar, DEVICE_{d}_IFLOOR);\n"
+            "        let (i_now, _) = glow_lit_eval(cv, DEVICE_{d}_V0, DEVICE_{d}_RT, {k_arr}, &glow_i_bar, DEVICE_{d}_IFLOOR, DEVICE_{d}_KSUB, DEVICE_{d}_I_N);\n"
         ));
         b.push_str(&format!(
             "        if i_now > DEVICE_{d}_IHOLD {{ state[{armed}] = 1.0; }}\n"
@@ -1074,7 +1071,7 @@ fn emit_glow_update_body(
             b.push_str("        if glow_confirm {\n");
             b.push_str(&format!(
                 "            // Confirmed extinction: crossing-fraction alpha on the confirmed sample (1-sample latency).\n\
-                 \x20           let (i_prev, _) = glow_lit_eval(vp, DEVICE_{d}_V0, DEVICE_{d}_RT, {k_arr}, &glow_i_bar, DEVICE_{d}_IFLOOR);\n"
+                 \x20           let (i_prev, _) = glow_lit_eval(vp, DEVICE_{d}_V0, DEVICE_{d}_RT, {k_arr}, &glow_i_bar, DEVICE_{d}_IFLOOR, DEVICE_{d}_KSUB, DEVICE_{d}_I_N);\n"
             ));
             b.push_str("            let di = i_now - i_prev;\n");
             b.push_str(&format!(

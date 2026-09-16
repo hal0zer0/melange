@@ -8,20 +8,32 @@
 // --- Relaxing lit branch (Benson & Bradshaw 1965; voltron/arbiter transfer) ---
 //
 // The lit branch is a maintaining line at DC asymptote R_T carrying a stack of
-// DELAYED overvoltages. The transferring form is the nonlinear lagged-current
-// overvoltage
-//     g(I) = V0 + I*R_T + Σ_i k_i * ln( I / Ī_i )
+// DELAYED overvoltages, plus an optional STATIC subnormal term. The transferring
+// form is the nonlinear lagged-current overvoltage
+//     g(I) = V0 + I*R_T − κ*ln( I / I_n ) + Σ_i k_i * ln( I / Ī_i )
 // where Ī_i is a first-order lag of the tube current (one state slot per
 // section), FROZEN within the NR solve and relaxed by the exact exponential
 // after it. Each section reduces to a small-signal R_i‖L_i (R_i = k_i/I,
 // L_i = R_i*τ_i); a zero k_i disables its section with no special case.
+//   κ (`ksub`, default 0) is the STATIC subnormal slope [V per e-fold of I]
+//   anchored at I_n (the rated current I_K, where g = V_m): as I falls, −κ·ln(I/I_n)
+//   RISES (subnormal negative dV/dI at DC). Voltron t422 / Meissner 1941: κ≈2.0.
+//   It is a STATIC term (not lagged), so at DC (Ī→I ⇒ sections vanish) it gives
+//   the whole gentle rise V_m→V_m+~10 V toward the extinction current; within a
+//   solve the FROZEN sections add +S/I, so the per-solve slope is (S−κ)/I.
 //
 // The device is voltage-implicit (I sits inside the log), so this helper
 // INVERTS g(I) = v_d for I. It solves in the LOG DOMAIN, x = ln(I):
-//     r(x) = v0 + R_T·e^x + S·x − Σ_i k_i·ln(Ī_i) − v_d = 0,   S = Σ_i k_i
-//     r'(x) = R_T·e^x + S > 0   (convex + monotone ⇒ globally convergent from
-//                                any start; I = e^x > 0 ALWAYS)
-// Returns (i_dev, jdev) with jdev = 1/g'(I) = 1/(R_T + S/I) > 0. This REPLACES
+//     r(x) = v0 + R_T·e^x + (S−κ)·x + κ·ln(I_n) − Σ_i k_i·ln(Ī_i) − v_d = 0,  S = Σ_i k_i
+//     r'(x) = R_T·e^x + (S−κ)   (single-signed ⇒ monotone ⇒ globally convergent
+//                                when R_T=0 (const) OR κ≤S; I = e^x > 0 ALWAYS.
+//                                The R_T>0 && κ>S corner is non-monotone and is
+//                                REJECTED at parse time. For voltron's sets κ≈2 ≪
+//                                S≈43–94, so S−κ>0 and this is convex as before.)
+// Returns (i_dev, jdev) with jdev = 1/g'(I) = 1/(R_T + (S−κ)/I). g'(I)<0 is
+// possible only in the R_T=0 & κ>S subnormal corner; jdev is then floored to a
+// small POSITIVE conductance (GLOW_GMIN) so the outer NR Jacobian stays passive
+// while i_dev keeps the true (negative-slope) current (SPICE gmin analog). This REPLACES
 // the earlier I-domain Newton, whose warm start (v_d−v0)/denom went NEGATIVE for
 // v_d < v0 and then froze (max(cur,eps) pinned g' ≈ S/eps ≈ 4e13, so Newton
 // could not move): it returned a spurious negative current that tripped
@@ -43,14 +55,29 @@
 /// with `k[i] == 0.0` contributes nothing (k·ln term vanishes; its `i_bar` is
 /// irrelevant). `_ifloor` is UNUSED (IFLOOR is the seed-only onset current, not
 /// a running clamp); it is retained in the signature so the two eval-site call
-/// shapes and the update-hook calls stay uniform.
+/// shapes and the update-hook calls stay uniform. `ksub` is the static subnormal
+/// slope κ [V per e-fold] (0 = off, then this reduces EXACTLY to the prior form);
+/// `i_n` is its anchor current (the rated I_K, where g = V_m).
 #[inline]
-fn glow_lit_eval(v_d: f64, v0: f64, r_t: f64, k: &[f64; 4], i_bar: &[f64; 4], _ifloor: f64) -> (f64, f64) {
+fn glow_lit_eval(
+    v_d: f64,
+    v0: f64,
+    r_t: f64,
+    k: &[f64; 4],
+    i_bar: &[f64; 4],
+    _ifloor: f64,
+    ksub: f64,
+    i_n: f64,
+) -> (f64, f64) {
     // Numerical guards only (never the physical IFLOOR): ln(Ī) floor, e^x overflow.
     const GLOW_LN_TINY: f64 = 1e-300;
     const X_MAX: f64 = 700.0; // e^700 ≈ 1e304 < f64::MAX; caps overflow
     const INNER_MAX_ITER: usize = 30;
     const INNER_TOL: f64 = 1e-13;
+    // Passive Jacobian floor for the subnormal NDR corner (g'(I) ≤ 0): keep jdev a
+    // small POSITIVE conductance so the outer NR stays diagonally dominant while
+    // i_dev carries the true negative-slope current (SPICE gmin analog).
+    const GLOW_GMIN: f64 = 1e-12;
 
     // S = Σ k_i ; sum_kln = Σ k_i·ln(Ī_i). Inactive sections (k_i = 0) drop out.
     let mut s = 0.0;
@@ -59,16 +86,21 @@ fn glow_lit_eval(v_d: f64, v0: f64, r_t: f64, k: &[f64; 4], i_bar: &[f64; 4], _i
         s += k[i];
         sum_kln += k[i] * i_bar[i].max(GLOW_LN_TINY).ln();
     }
-    // Warm start x0 = (v_d − v0 + Σ k_i·ln Ī_i)/S — EXACT when R_T = 0 (r linear
-    // in x). Guard the divisor for the degenerate S ≈ 0 (unphysical: all k_i = 0
-    // would not emit this helper; a k-sum near 0 needs only a finite start).
-    let s_div = if s.abs() > 1e-30 { s } else { 1e-30 };
-    let mut x = (v_d - v0 + sum_kln) / s_div;
+    // Fold the static subnormal term −κ·ln(I/i_n): it shifts the x-linear
+    // coefficient S → S−κ and adds the constant +κ·ln(i_n) into the (subtracted)
+    // constant c. κ=0 ⇒ s_eff=s, c=sum_kln (bit-for-bit the prior equation).
+    let ln_in = i_n.max(GLOW_LN_TINY).ln();
+    let s_eff = s - ksub;
+    let c = sum_kln - ksub * ln_in;
+    // Warm start x0 = (v_d − v0 + c)/(S−κ) — EXACT when R_T = 0 (r linear in x).
+    // Guard the divisor for the degenerate S−κ ≈ 0 (needs only a finite start).
+    let s_div = if s_eff.abs() > 1e-30 { s_eff } else { 1e-30 };
+    let mut x = (v_d - v0 + c) / s_div;
 
     for _ in 0..INNER_MAX_ITER {
         let ex = if x > X_MAX { X_MAX } else { x }.exp();
-        let r = v0 + r_t * ex + s * x - sum_kln - v_d;
-        let rp = r_t * ex + s; // r'(x) > 0 for physical (S>0) params
+        let r = v0 + r_t * ex + s_eff * x - c - v_d;
+        let rp = r_t * ex + s_eff; // r'(x); single-signed when R_T=0 or κ≤S
         if rp.abs() < 1e-300 {
             break;
         }
@@ -80,8 +112,8 @@ fn glow_lit_eval(v_d: f64, v0: f64, r_t: f64, k: &[f64; 4], i_bar: &[f64; 4], _i
     }
 
     let i = if x > X_MAX { X_MAX } else { x }.exp();
-    let gp = r_t + s / i; // g'(I) = R_T + S/I
-    let jdev = if gp > 1e-300 { 1.0 / gp } else { 0.0 };
+    let gp = r_t + s_eff / i; // g'(I) = R_T + (S−κ)/I
+    let jdev = if gp > 1e-300 { 1.0 / gp } else { GLOW_GMIN };
     (i, jdev)
 }
 {% endif %}

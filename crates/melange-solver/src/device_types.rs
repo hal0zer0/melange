@@ -1093,6 +1093,19 @@ pub struct GlowParams {
     /// lit branch.
     #[serde(default)]
     pub ifloor: f64,
+    /// Static subnormal-branch slope κ [volts per e-fold of current]. Parsed from
+    /// the `KSUB` key; default 0 → the term is absent and the lit branch reduces
+    /// EXACTLY to the prior `V0 + I·R_T + Σ k_i·ln(I/Ī_i)`. When non-zero it adds a
+    /// STATIC `−κ·ln(I/i_n)` to the maintaining line: as the current falls the lit
+    /// voltage RISES (the subnormal negative dV/dI at DC), anchored so `g = V_m` at
+    /// the rated current `i_n`. Requires ≥1 active section (validated). Voltron
+    /// t422 / Meissner 1941: κ ≈ 2.0 V/e-fold for the 0.1 % Ar class.
+    #[serde(default)]
+    pub ksub: f64,
+    /// Anchor current [A] for the subnormal term (`= I_K`, the rated current where
+    /// the lit branch passes through `V_m`). Only meaningful when `ksub ≠ 0`.
+    #[serde(default)]
+    pub i_n: f64,
     /// Ignition-depression amplitude `D_AMP` [volts]. Parsed from `D_AMP`;
     /// default 0 → the ignition-depression mechanism is OFF (`has_d()` false),
     /// and codegen emits the historical plain `cv ≥ VO` strike test. When

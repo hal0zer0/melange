@@ -1587,6 +1587,10 @@ impl RustEmitter {
                             );
                         }
                         emit_device_const(&mut code, dev_num, "IFLOOR", gp.ifloor);
+                        // Subnormal branch (part-a; default 0 = off). I_N anchors
+                        // the static −KSUB·ln(I/I_N) term at the rated current.
+                        emit_device_const(&mut code, dev_num, "KSUB", gp.ksub);
+                        emit_device_const(&mut code, dev_num, "I_N", gp.i_n);
                     }
                     // Ignition depression (Part B; defaults-off). Emitted ONLY
                     // for D-bearing devices → non-D glow decks stay byte-identical.

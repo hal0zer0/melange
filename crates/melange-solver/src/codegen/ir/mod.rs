@@ -6083,6 +6083,11 @@ impl CircuitIR {
         // Authored key; defaults to IHOLD for continuity but is a live edge knob.
         let ifloor = Self::lookup_model_param(netlist, model, "IFLOOR").unwrap_or(ihold);
 
+        // KSUB (part-a): static subnormal-branch slope κ [V per e-fold]; default
+        // 0 = off (lit branch bit-identical to the no-KSUB form). Anchored at the
+        // rated current IK (where g = VM). Only meaningful WITH sections.
+        let ksub = Self::lookup_model_param(netlist, model, "KSUB").unwrap_or(0.0);
+
         // Ignition depression D(t_off) (Part B; default-off). D_AMP=0 → OFF and
         // no state slot / plain VO strike test (byte-identical). Curve:
         // D = clamp(D_AMP·ln(D_TKNEE/max(t_off, D_THOLD)), 0, VO−VM).
@@ -6125,6 +6130,33 @@ impl CircuitIR {
             }
         }
         validate_positive_finite(ifloor, "NEON model IFLOOR")?;
+        // KSUB (subnormal slope) validation. Non-negative; requires sections (the
+        // static log term is folded into the section-branch g(I) — a KSUB-only
+        // deck would emit the static linear path and silently drop it). The
+        // R_T>0 && κ>ΣK corner makes the inner-Newton residual r'(x)=R_T·eˣ+(S−κ)
+        // change sign (two roots / none) — reject it; R_T=0 (voltron's authoring)
+        // or κ≤ΣK stays single-signed and globally convergent.
+        if !ksub.is_finite() || ksub < 0.0 {
+            return Err(CodegenError::InvalidConfig(format!(
+                "NEON model '{model}': KSUB ({ksub}) must be finite and non-negative"
+            )));
+        }
+        if ksub != 0.0 {
+            if !has_sections {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "NEON model '{model}': KSUB ({ksub}) requires ≥1 active section (K1..K4); the \
+                     subnormal term is folded into the relaxing-section lit branch, not the static path"
+                )));
+            }
+            let k_sum: f64 = k.iter().sum();
+            if r_t > 0.0 && ksub > k_sum {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "NEON model '{model}': KSUB ({ksub}) > ΣK ({k_sum}) with RT ({r_t}) > 0 is a \
+                     non-monotone lit branch (r'(x)=RT·eˣ+(ΣK−KSUB) changes sign → non-convergent); \
+                     author RT=0 for a subnormal branch, or keep KSUB ≤ ΣK"
+                )));
+            }
+        }
         // Ignition-depression validation (only meaningful when D_AMP ≠ 0).
         if !d_amp.is_finite() || d_amp < 0.0 {
             return Err(CodegenError::InvalidConfig(format!(
@@ -6181,7 +6213,7 @@ impl CircuitIR {
             model,
             &[
                 "VO", "VM", "IK", "RS", "IHOLD", "ROFF", "RT", "K1", "K2", "K3", "K4", "TAU1",
-                "TAU2", "TAU3", "TAU4", "IFLOOR", "D_AMP", "D_TKNEE", "D_THOLD",
+                "TAU2", "TAU3", "TAU4", "IFLOOR", "KSUB", "D_AMP", "D_TKNEE", "D_THOLD",
             ],
             &[],
         )?;
@@ -6196,6 +6228,9 @@ impl CircuitIR {
             k,
             tau,
             ifloor,
+            ksub,
+            // Subnormal anchor = rated current IK (g = VM there). Only used when ksub≠0.
+            i_n: ik,
             d_amp,
             d_tknee,
             d_thold,
