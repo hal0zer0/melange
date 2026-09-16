@@ -907,9 +907,44 @@ pub(super) fn emit_subsample_fire_block(
     ));
     for d in &latched {
         let n = d.dev_num;
-        code.push_str(&format!(
-            "{i4}{n} => state.device_{n}_state[0] = ssf_dir,\n"
-        ));
+        // The forced flip carries the latch. For a sectioned glow device it must
+        // ALSO carry the flip's per-device side effects that the pre-flip restore
+        // rewinds and that the forced flip would otherwise drop — specifically, on
+        // an EXTINCTION (ssf_dir < 0.5) reset the since-extinction timer t_off and
+        // clear the extinction-debounce pending flag. Without this the robust-
+        // extinction debounce (which makes the confirmed-extinction crossing land
+        // at the segment start, alpha≈0, so the pre-flip segment hook is skipped)
+        // leaves t_off pinned at its seed forever on the ssf path → glow_D(t_off)
+        // is stuck ≈ 0 → the D(t_off) ignition-depression mechanism is INERT.
+        let mut extinguish_reset = String::new();
+        if let Some(crate::codegen::ir::DeviceParams::Glow(gp)) =
+            ir.device_slots.get(n).map(|s| &s.params)
+        {
+            let has_sec = gp.has_sections();
+            let has_d = gp.has_d();
+            let nsec = if has_sec {
+                crate::device_types::GlowParams::MAX_SECTIONS
+            } else {
+                0
+            };
+            let toff = 1 + nsec; // t_off slot (has_d)
+            let pend = 1 + nsec + usize::from(has_d) + 2; // armed+2 (has_sec)
+            if has_d {
+                extinguish_reset.push_str(&format!(" state.device_{n}_state[{toff}] = 0.0;"));
+            }
+            if has_sec {
+                extinguish_reset.push_str(&format!(" state.device_{n}_state[{pend}] = 0.0;"));
+            }
+        }
+        if extinguish_reset.is_empty() {
+            code.push_str(&format!(
+                "{i4}{n} => state.device_{n}_state[0] = ssf_dir,\n"
+            ));
+        } else {
+            code.push_str(&format!(
+                "{i4}{n} => {{ state.device_{n}_state[0] = ssf_dir; if ssf_dir < 0.5 {{{extinguish_reset} }} }},\n"
+            ));
+        }
     }
     code.push_str(&format!(
         "{i4}_ => {{}}\n\

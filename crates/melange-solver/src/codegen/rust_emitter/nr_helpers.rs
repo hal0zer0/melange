@@ -98,24 +98,43 @@ pub(super) fn emit_dk_device_evaluation(
                 ));
             }
             DeviceType::Glow => {
-                // Glow / neon lamp: FROZEN latch selects RS (lit) or ROFF
-                // (dark). Lit is the maintaining line i=(v_d−V0)/RS so the
-                // reservoir discharges toward the INTERCEPT V0 (not ground, not
-                // the static VM) — fixes the extinction flank/period
-                // dt-independently; dark is a resistor through the origin.
-                // jac = 1/R either way (the V0 term is affine): positive
-                // conductance, no negative resistance. The latch is frozen this
-                // solve; update() flips it on holding current. (DK-Schur route
-                // eval — mirror of the nodal sites.)
+                // Glow / neon lamp: FROZEN latch selects the lit or dark (ROFF
+                // resistor through the origin) branch. The latch is frozen this
+                // solve; update() flips it. (DK-Schur route eval — MUST mirror
+                // the nodal site.)
                 let s = slot.start_idx;
                 let d = dev_num;
-                code.push_str(&format!(
-                    "{indent}let glow_lit{d} = state.device_{d}_state[0] >= 0.5;\n\
-                     {indent}let glow_r{d} = if glow_lit{d} {{ DEVICE_{d}_RS }} else {{ DEVICE_{d}_ROFF }};\n\
-                     {indent}let glow_emf{d} = if glow_lit{d} {{ DEVICE_{d}_V0 }} else {{ 0.0 }};\n\
-                     {indent}let i_dev{s} = (v_d{s} - glow_emf{d}) / glow_r{d};\n\
-                     {indent}let jdev_{s}_{s} = 1.0 / glow_r{d};\n"
-                ));
+                let has_sections = matches!(
+                    &slot.params,
+                    DeviceParams::Glow(gp) if gp.has_sections()
+                );
+                if has_sections {
+                    // Relaxing lit branch: invert g(I)=v_d via the inner Newton
+                    // helper, reading the frozen section current-lags Ī_i from
+                    // the state block. jdev>0 by construction (monotone g).
+                    code.push_str(&format!(
+                        "{indent}let glow_lit{d} = state.device_{d}_state[0] >= 0.5;\n\
+                         {indent}let (i_dev{s}, jdev_{s}_{s}) = if glow_lit{d} {{\n\
+                         {indent}    let glow_i_bar{d} = [state.device_{d}_state[1], state.device_{d}_state[2], state.device_{d}_state[3], state.device_{d}_state[4]];\n\
+                         {indent}    glow_lit_eval(v_d{s}, DEVICE_{d}_V0, DEVICE_{d}_RT, &[DEVICE_{d}_K1, DEVICE_{d}_K2, DEVICE_{d}_K3, DEVICE_{d}_K4], &glow_i_bar{d}, DEVICE_{d}_IFLOOR)\n\
+                         {indent}}} else {{\n\
+                         {indent}    let glow_g{d} = 1.0 / DEVICE_{d}_ROFF;\n\
+                         {indent}    (v_d{s} * glow_g{d}, glow_g{d})\n\
+                         {indent}}};\n"
+                    ));
+                } else {
+                    // Static maintaining line i=(v_d−V0)/RS (lit) or a resistor
+                    // through the origin (dark). jac = 1/R either way (the V0
+                    // term is affine): positive conductance, no negative
+                    // resistance. Byte-identical to the historical model.
+                    code.push_str(&format!(
+                        "{indent}let glow_lit{d} = state.device_{d}_state[0] >= 0.5;\n\
+                         {indent}let glow_r{d} = if glow_lit{d} {{ DEVICE_{d}_RS }} else {{ DEVICE_{d}_ROFF }};\n\
+                         {indent}let glow_emf{d} = if glow_lit{d} {{ DEVICE_{d}_V0 }} else {{ 0.0 }};\n\
+                         {indent}let i_dev{s} = (v_d{s} - glow_emf{d}) / glow_r{d};\n\
+                         {indent}let jdev_{s}_{s} = 1.0 / glow_r{d};\n"
+                    ));
+                }
             }
             DeviceType::Bjt => {
                 let s = slot.start_idx;

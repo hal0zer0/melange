@@ -4610,9 +4610,58 @@ impl CircuitIR {
                                 && d.node_indices.len() >= 2
                             {
                                 let ni = &d.node_indices;
+                                // Fixed state layout, gated by INDEPENDENT flags
+                                // so neither-on = today's 1-slot latch,
+                                // byte-identical. Trailing slots are appended in
+                                // a fixed order AFTER the Ī block so the eval-site
+                                // Ī indices ([1..1+N]) never shift:
+                                //   [0]              latch (0=dark, 1=lit) — always
+                                //   [1..1+N]         Ī_i current-lags      — has_sections
+                                //   [1+Nsec]         t_off since-extinction — has_d
+                                //   [1+Nsec+has_d]   extinction-armed flag  — has_sections
+                                //   [2+Nsec+has_d]   i_conv_prev (prev converged I) — has_sections
+                                //   [3+Nsec+has_d]   pending_extinction debounce    — has_sections
+                                // Ī_i seeded at IFLOOR (never 0 → no ln(i/0), eval
+                                // starts on the R_T line with zero extra drop);
+                                // t_off seeded LARGE so a cold device strikes at
+                                // full VO (D≈0) until it first extinguishes; the
+                                // armed flag seeds 0 (disarmed) — the strike
+                                // (re)sets it and the extinction test is gated on
+                                // it, so a still-forming discharge below IHOLD is
+                                // not extinguished before it has ever sustained.
+                                // i_conv_prev/pending seed 0: robust extinction
+                                // needs a monotone converged crossing confirmed
+                                // over a 1-sample debounce (rejects the near-V0
+                                // integrator ring), so a single-sample dip in the
+                                // through-current never extinguishes the tube.
+                                let has_sec = params.has_sections();
+                                let has_d = params.has_d();
+                                let nsec = if has_sec {
+                                    crate::device_types::GlowParams::MAX_SECTIONS
+                                } else {
+                                    0
+                                };
+                                // has_sections trailing slots: armed + i_conv_prev
+                                // + pending_extinction = 3.
+                                let n_sec_trailing = if has_sec { 3 } else { 0 };
+                                let mut seed = vec![
+                                    0.0f64;
+                                    1 + nsec + usize::from(has_d) + n_sec_trailing
+                                ];
+                                for s in seed.iter_mut().skip(1).take(nsec) {
+                                    *s = params.ifloor;
+                                }
+                                if has_d {
+                                    seed[1 + nsec] = crate::device_types::GlowParams::T_OFF_SEED;
+                                }
+                                // armed / i_conv_prev / pending (indices
+                                // 1+nsec+has_d .. +2) stay at 0.0 (disarmed, no
+                                // prior current, no pending crossing).
+                                let state_size = seed.len();
+                                let state_seed = seed;
                                 Some(crate::device_types::StatefulSpec {
-                                    state_size: 1,
-                                    state_seed: vec![0.0],
+                                    state_size,
+                                    state_seed,
                                     terminal_nodes: ni.clone(),
                                     driving_nodes: vec![ni[0], ni[1]],
                                 })
@@ -6010,19 +6059,106 @@ impl CircuitIR {
         // oscillator to extinguish; a physical small-neon value does.
         let ihold = Self::lookup_model_param(netlist, model, "IHOLD").unwrap_or(2e-4);
 
+        // Relaxing-section lit branch (Benson & Bradshaw 1965; defaults-off).
+        // RT = DC asymptote of the maintaining line (defaults to RS, so a deck
+        // that authors no sections reduces exactly to the static model). K1..K4
+        // = delayed-overvoltage coefficients [volts] (default 0 = section off),
+        // TAU1..TAU4 = current-lag time constants [seconds]. A section is
+        // "active" when its K is non-zero; a zero K disables the section with no
+        // special-casing (both the log term and its Jacobian contribution
+        // vanish). Never authored directly: the intercept v0 = VM − RS·IK below
+        // is unchanged (R3 reconciliation of RS vs RT is a later authoring
+        // concern, not this mechanism).
+        let r_t = Self::lookup_model_param(netlist, model, "RT").unwrap_or(rs);
+        let mut k = [0.0f64; 4];
+        let mut tau = [0.0f64; 4];
+        for i in 0..4 {
+            k[i] = Self::lookup_model_param(netlist, model, &format!("K{}", i + 1)).unwrap_or(0.0);
+            tau[i] =
+                Self::lookup_model_param(netlist, model, &format!("TAU{}", i + 1)).unwrap_or(0.0);
+        }
+        let has_sections = k.iter().any(|&x| x != 0.0);
+
+        // IFLOOR (A1): the log-domain current clamp / section-lag seed floor.
+        // Authored key; defaults to IHOLD for continuity but is a live edge knob.
+        let ifloor = Self::lookup_model_param(netlist, model, "IFLOOR").unwrap_or(ihold);
+
+        // Ignition depression D(t_off) (Part B; default-off). D_AMP=0 → OFF and
+        // no state slot / plain VO strike test (byte-identical). Curve:
+        // D = clamp(D_AMP·ln(D_TKNEE/max(t_off, D_THOLD)), 0, VO−VM).
+        let d_amp = Self::lookup_model_param(netlist, model, "D_AMP").unwrap_or(0.0);
+        let d_tknee = Self::lookup_model_param(netlist, model, "D_TKNEE").unwrap_or(0.0);
+        let d_thold = Self::lookup_model_param(netlist, model, "D_THOLD").unwrap_or(0.0);
+
         validate_positive_finite(vo, "NEON model VO")?;
         validate_positive_finite(vm, "NEON model VM")?;
         validate_positive_finite(ik, "NEON model IK")?;
         validate_positive_finite(rs, "NEON model RS")?;
         validate_positive_finite(roff, "NEON model ROFF")?;
         validate_positive_finite(ihold, "NEON model IHOLD")?;
-
-        // Derived maintaining-line intercept.
-        let v0 = vm - rs * ik;
-        if v0 <= 0.0 {
+        // r_t is a DC resistance that may be ~0 (normal glow) but never negative
+        // or non-finite. Sections need a positive time constant only where the
+        // coefficient is non-zero (an active section); a zero-K section is off
+        // and its TAU is ignored.
+        if !r_t.is_finite() || r_t < 0.0 {
             return Err(CodegenError::InvalidConfig(format!(
-                "NEON model '{model}': derived maintaining-line intercept v0 = VM − RS·IK \
-                 = {vm} − {rs}·{ik} = {v0} is non-positive; check VM/RS/IK"
+                "NEON model '{model}': RT ({r_t}) must be finite and non-negative"
+            )));
+        }
+        for i in 0..4 {
+            if !k[i].is_finite() || !tau[i].is_finite() {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "NEON model '{model}': K{}/TAU{} must be finite",
+                    i + 1,
+                    i + 1
+                )));
+            }
+            if k[i] != 0.0 && tau[i] <= 0.0 {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "NEON model '{model}': TAU{} ({}) must be > 0 when K{} ({}) is non-zero \
+                     (active relaxing section needs a positive current-lag time constant)",
+                    i + 1,
+                    tau[i],
+                    i + 1,
+                    k[i]
+                )));
+            }
+        }
+        validate_positive_finite(ifloor, "NEON model IFLOOR")?;
+        // Ignition-depression validation (only meaningful when D_AMP ≠ 0).
+        if !d_amp.is_finite() || d_amp < 0.0 {
+            return Err(CodegenError::InvalidConfig(format!(
+                "NEON model '{model}': D_AMP ({d_amp}) must be finite and non-negative"
+            )));
+        }
+        if d_amp != 0.0 {
+            if !(d_tknee > 0.0 && d_tknee.is_finite()) {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "NEON model '{model}': D_TKNEE ({d_tknee}) must be > 0 when D_AMP is non-zero"
+                )));
+            }
+            if !(d_thold > 0.0 && d_thold.is_finite()) {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "NEON model '{model}': D_THOLD ({d_thold}) must be > 0 when D_AMP is non-zero"
+                )));
+            }
+        }
+
+        // Derived maintaining-line intercept (A2). With relaxing sections the
+        // lower reset floor comes from the section TAIL (Ī lags falling I →
+        // negative overvoltage → cv_extinction < VM), so RS is retired from the
+        // intercept and v0 = VM − RT·IK (→ VM at RT≈0). Without sections the
+        // historical v0 = VM − RS·IK is kept EXACTLY (byte-identity).
+        let v0 = if has_sections {
+            vm - r_t * ik
+        } else {
+            vm - rs * ik
+        };
+        if v0 <= 0.0 {
+            let (slope_name, slope_val) = if has_sections { ("RT", r_t) } else { ("RS", rs) };
+            return Err(CodegenError::InvalidConfig(format!(
+                "NEON model '{model}': derived maintaining-line intercept v0 = VM − {slope_name}·IK \
+                 = {vm} − {slope_val}·{ik} = {v0} is non-positive; check VM/{slope_name}/IK"
             )));
         }
         if vo <= vm {
@@ -6043,7 +6179,10 @@ impl CircuitIR {
         Self::check_model_params(
             netlist,
             model,
-            &["VO", "VM", "IK", "RS", "IHOLD", "ROFF"],
+            &[
+                "VO", "VM", "IK", "RS", "IHOLD", "ROFF", "RT", "K1", "K2", "K3", "K4", "TAU1",
+                "TAU2", "TAU3", "TAU4", "IFLOOR", "D_AMP", "D_TKNEE", "D_THOLD",
+            ],
             &[],
         )?;
 
@@ -6053,6 +6192,15 @@ impl CircuitIR {
             rs,
             roff,
             ihold,
+            r_t,
+            k,
+            tau,
+            ifloor,
+            d_amp,
+            d_tknee,
+            d_thold,
+            // Hard cap on the ignition depression: V_s,eff never below VM.
+            d_cap: vo - vm,
         })
     }
 

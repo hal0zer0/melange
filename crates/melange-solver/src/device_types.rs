@@ -1008,12 +1008,34 @@ pub struct LdrParams {
     pub release_tau: f64,
 }
 
-/// Glow-discharge / neon lamp model parameters (Phase 0c Stage 2a —
-/// EXPERIMENTAL, throwaway). Two thresholds and two resistances; the in-solve
-/// element is a plain resistor selected by the FROZEN latch (dark → `roff`,
-/// lit → `ron`), and the after-solve `update()` flips the latch when the
-/// terminal voltage crosses `vo` (strike, dark → lit) or falls to `vd`
-/// (extinguish, lit → dark).
+/// Glow-discharge / neon lamp model parameters.
+///
+/// The FROZEN latch (opaque `device_{n}_state[0]`) selects the branch: dark →
+/// `roff` resistor through the origin; lit → the maintaining line. The
+/// after-solve `update()` flips the latch on strike (dark → lit when the
+/// terminal voltage reaches `vo`) and extinction (lit → dark when the
+/// through-current falls to `ihold`).
+///
+/// The lit branch has two forms, gated by [`GlowParams::has_sections`]:
+///
+/// * **No sections** (all `k` zero — the default / ship-safe path): the lit
+///   branch is the STATIC affine maintaining line `V(a)−V(k) = v0 + rs·i`, a
+///   Thévenin source with a soft positive slope `rs` (NOT a resistor to
+///   ground). The in-NR eval is `i = (v−v0)/rs`, `jdev = 1/rs`. Byte-for-byte
+///   the historical model.
+///
+/// * **Sections present** (≥1 non-zero `k`): the lit branch is the RELAXING
+///   maintaining line of Benson & Bradshaw (1965) — a DC asymptote `r_t`
+///   carrying a stack of DELAYED overvoltages. The transferring large-signal
+///   form (voltron, arbiter 2026-09-15) is the nonlinear lagged-current
+///   overvoltage
+///   `v_d = v0 + i·r_t + Σ_i k_i·ln( max(i,ifloor) / Ī_i )`,
+///   `dĪ_i/dt = (i − Ī_i)/τ_i`, where `Ī_i` is a first-order lag of the tube
+///   current (one state slot per section, relaxed by the EXACT exponential and
+///   FROZEN within the NR solve). Each section reduces to a small-signal
+///   `R_i‖L_i` (`R_i = k_i/I`, `L_i = R_i·τ_i`); a zero `k_i` disables its
+///   section. The device is voltage-implicit (`i` sits inside the log), so the
+///   in-NR eval inverts `g(i)=v_d` by a warm-started scalar inner Newton.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlowParams {
     /// Strike / breakdown (ignition) voltage [V] — dark→lit when `V(a)−V(k) ≥ vo`.
@@ -1044,6 +1066,78 @@ pub struct GlowParams {
     /// enough sustaining current stays lit (regulator behaviour) — one model
     /// covers both. The reset floor lands at `v0 + rs·ihold`.
     pub ihold: f64,
+    /// DC asymptote of the lit maintaining line [Ω] — the resistance the glow
+    /// relaxes toward at DC (Benson & Bradshaw `R_T`, ≈0 for normal glow).
+    /// Used ONLY by the relaxing-section lit branch (`has_sections()`); the
+    /// static no-section branch uses `rs`. Parsed from the `RT` key; defaults
+    /// to `rs`, so a deck that authors no `RT`/sections reduces exactly to the
+    /// historical static model.
+    #[serde(default)]
+    pub r_t: f64,
+    /// Per-section delayed-overvoltage coefficient `k_i` [volts]:
+    /// `V_i = k_i·ln(max(i,ifloor)/Ī_i)`. Parsed from `K1..K4`; default 0
+    /// (section disabled — the term and its Jacobian contribution both vanish
+    /// with no special-casing). At least one non-zero entry selects the
+    /// relaxing lit branch.
+    #[serde(default)]
+    pub k: [f64; 4],
+    /// Per-section current-lag time constant `τ_i` [seconds] for
+    /// `dĪ_i/dt = (i − Ī_i)/τ_i`. Parsed from `TAU1..TAU4`; must be > 0 when
+    /// the matching `k` is non-zero.
+    #[serde(default)]
+    pub tau: [f64; 4],
+    /// Log-domain current clamp / section current-lag seed floor [A]. Parsed
+    /// from the `IFLOOR` key; default = `ihold`. It is the analog of the diode
+    /// `safe_exp` clamp for the section `ln`/reciprocal, AND a live edge knob
+    /// (the 559A gate sweeps it 1 µA–200 µA). Used only by the relaxing-section
+    /// lit branch.
+    #[serde(default)]
+    pub ifloor: f64,
+    /// Ignition-depression amplitude `D_AMP` [volts]. Parsed from `D_AMP`;
+    /// default 0 → the ignition-depression mechanism is OFF (`has_d()` false),
+    /// and codegen emits the historical plain `cv ≥ VO` strike test. When
+    /// non-zero, the effective strike voltage is depressed by residual
+    /// ionisation for short off-times: `V_s,eff(t_off) = VO − D(t_off)`,
+    /// `D = clamp(D_AMP·ln(D_TKNEE/max(t_off, D_THOLD)), 0, VO−VM)`.
+    #[serde(default)]
+    pub d_amp: f64,
+    /// Ignition-depression knee time `D_TKNEE` [seconds] — the off-time at
+    /// which `D` reaches zero (`ln(D_TKNEE/D_TKNEE)=0`). Parsed from `D_TKNEE`.
+    #[serde(default)]
+    pub d_tknee: f64,
+    /// Ignition-depression hold time `D_THOLD` [seconds] — `D` is held at its
+    /// `t_off = D_THOLD` value for shorter off-times (the curve plateaus below
+    /// the measured floor). Parsed from `D_THOLD`.
+    #[serde(default)]
+    pub d_thold: f64,
+    /// Hard cap on the ignition depression [volts] = `VO − VM` (derived, not
+    /// authored). `V_s,eff` can never fall below the maintaining voltage `VM`.
+    #[serde(default)]
+    pub d_cap: f64,
+}
+
+impl GlowParams {
+    /// Maximum number of relaxing-overvoltage sections (τ1–τ4; τ5 ≈ 24 ns ion
+    /// transit is below any audio-rate sub-step and is dropped).
+    pub const MAX_SECTIONS: usize = 4;
+
+    /// Cold-start `t_off` seed [seconds] — a large value so a fresh device
+    /// strikes at the full `VO` (`D≈0`) until it has actually extinguished once.
+    pub const T_OFF_SEED: f64 = 1.0e9;
+
+    /// True when ≥1 relaxing section is active (any non-zero `k`). Selects the
+    /// relaxing lit branch in codegen; false → the historical static model
+    /// emitted byte-for-byte.
+    pub fn has_sections(&self) -> bool {
+        self.k.iter().any(|&k| k != 0.0)
+    }
+
+    /// True when the ignition-depression mechanism is active (`D_AMP ≠ 0`).
+    /// Independent of [`has_sections`]; a card may have sections, D, both, or
+    /// neither. Neither → state layout and emitted code are today's exactly.
+    pub fn has_d(&self) -> bool {
+        self.d_amp != 0.0
+    }
 }
 
 // --- Serde helper functions ---

@@ -6790,21 +6790,36 @@ impl RustEmitter {
                      {indent}let jdev_{s}_{s} = 1.0 / ldr_r{d};\n"
                 ));
             }
-            (DeviceType::Glow, DeviceParams::Glow(_)) => {
-                // Glow / neon lamp: FROZEN latch (dark < 0.5 → ROFF, lit → RS).
-                // Lit is the maintaining line i=(v−V0)/RS so the reservoir
-                // discharges toward the INTERCEPT V0 (not ground, not the static
-                // VM) — extinction lands near V0 regardless of RS·C vs sample
-                // period. Dark is a plain resistor through the origin. Jacobian
-                // 1/glow_r either way (the V0 term is affine → invisible to
-                // j_dev): positive conductance, no negative resistance in the solve.
-                code.push_str(&format!(
-                    "{indent}let glow_lit{d} = state.device_{d}_state[0] >= 0.5;\n\
-                     {indent}let glow_r{d} = if glow_lit{d} {{ DEVICE_{d}_RS }} else {{ DEVICE_{d}_ROFF }};\n\
-                     {indent}let glow_emf{d} = if glow_lit{d} {{ DEVICE_{d}_V0 }} else {{ 0.0 }};\n\
-                     {indent}let i_dev{s} = (v_d{s} - glow_emf{d}) / glow_r{d};\n\
-                     {indent}let jdev_{s}_{s} = 1.0 / glow_r{d};\n"
-                ));
+            (DeviceType::Glow, DeviceParams::Glow(gp)) => {
+                // Glow / neon lamp: FROZEN latch (dark < 0.5 → ROFF resistor
+                // through the origin, lit → maintaining line). Latch frozen this
+                // solve; update() flips it. MUST mirror the DK site (nr_helpers).
+                if gp.has_sections() {
+                    // Relaxing lit branch: invert g(I)=v_d via the inner Newton
+                    // helper, reading the frozen section current-lags Ī_i.
+                    code.push_str(&format!(
+                        "{indent}let glow_lit{d} = state.device_{d}_state[0] >= 0.5;\n\
+                         {indent}let (i_dev{s}, jdev_{s}_{s}) = if glow_lit{d} {{\n\
+                         {indent}    let glow_i_bar{d} = [state.device_{d}_state[1], state.device_{d}_state[2], state.device_{d}_state[3], state.device_{d}_state[4]];\n\
+                         {indent}    glow_lit_eval(v_d{s}, DEVICE_{d}_V0, DEVICE_{d}_RT, &[DEVICE_{d}_K1, DEVICE_{d}_K2, DEVICE_{d}_K3, DEVICE_{d}_K4], &glow_i_bar{d}, DEVICE_{d}_IFLOOR)\n\
+                         {indent}}} else {{\n\
+                         {indent}    let glow_g{d} = 1.0 / DEVICE_{d}_ROFF;\n\
+                         {indent}    (v_d{s} * glow_g{d}, glow_g{d})\n\
+                         {indent}}};\n"
+                    ));
+                } else {
+                    // Static maintaining line i=(v−V0)/RS (lit) / resistor
+                    // through the origin (dark). Jacobian 1/glow_r either way
+                    // (the V0 term is affine). Byte-identical to the historical
+                    // model.
+                    code.push_str(&format!(
+                        "{indent}let glow_lit{d} = state.device_{d}_state[0] >= 0.5;\n\
+                         {indent}let glow_r{d} = if glow_lit{d} {{ DEVICE_{d}_RS }} else {{ DEVICE_{d}_ROFF }};\n\
+                         {indent}let glow_emf{d} = if glow_lit{d} {{ DEVICE_{d}_V0 }} else {{ 0.0 }};\n\
+                         {indent}let i_dev{s} = (v_d{s} - glow_emf{d}) / glow_r{d};\n\
+                         {indent}let jdev_{s}_{s} = 1.0 / glow_r{d};\n"
+                    ));
+                }
             }
             _ => {}
         }

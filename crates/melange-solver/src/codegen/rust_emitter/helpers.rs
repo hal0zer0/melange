@@ -940,6 +940,211 @@ pub(super) fn emit_stateful_update_fns(
     s
 }
 
+/// Composable glow `update()` body for any deck that has relaxing SECTIONS
+/// and/or ignition DEPRESSION (the four gate combinations; the neither-on path
+/// stays the untouched byte-identical `format!` block in the caller). `is_ssf`
+/// selects the sub-sample-fire form (extinction reports a crossing fraction and
+/// the return carries `extinguished`); otherwise the whole-sample form (latch
+/// flips, `dt` used only where sections/D need it).
+///
+/// State layout (fixed, gated): `[0]` latch, `[1..1+N]` section current-lags
+/// Ī_i (has_sections), `[1+N]` since-extinction timer t_off (has_d). Strike
+/// tests `cv ≥ V_s,eff` where `V_s,eff = VO − D(t_off)` (D≡0 without depression).
+/// The strike-bounded section seed's margin uses `V_s,eff` (not VO) — the onset
+/// overvoltage shrinks after a short off-time (arbiter coupling). t_off advances
+/// by `dt` every dark non-strike sample (incl. ssf sub-steps) and resets to 0 at
+/// extinction.
+fn emit_glow_update_body(
+    d: usize,
+    gp: &crate::device_types::GlowParams,
+    is_ssf: bool,
+) -> String {
+    let has_sec = gp.has_sections();
+    let has_d = gp.has_d();
+    // Trailing-slot indices (fixed order after the Ī block; see StatefulSpec):
+    // t_off at 1+Nsec (has_d), extinction-armed at 1+Nsec+has_d (has_sections).
+    let nsec = if has_sec {
+        crate::device_types::GlowParams::MAX_SECTIONS
+    } else {
+        0
+    };
+    let toff = 1 + nsec;
+    let armed = 1 + nsec + usize::from(has_d);
+    // Robust-extinction slots (has_sections): previous converged through-current
+    // and the 1-sample confirmation debounce flag.
+    let iconv = armed + 1;
+    let pend = armed + 2;
+    let k_arr = format!("&[DEVICE_{d}_K1, DEVICE_{d}_K2, DEVICE_{d}_K3, DEVICE_{d}_K4]");
+    let ext_field = if is_ssf { ", extinguished: false" } else { "" };
+
+    let mut b = String::new();
+    b.push_str("    let cv = v_converged[0] - v_converged[1];\n");
+    b.push_str("    let vp = v_prev[0] - v_prev[1];\n");
+    b.push_str("    let lit = state[0] >= 0.5;\n");
+    if has_sec {
+        b.push_str("    let glow_i_bar = [state[1], state[2], state[3], state[4]];\n");
+    }
+    // Effective strike voltage V_s,eff = VO − D(t_off) (frozen this sample).
+    if has_d {
+        b.push_str(&format!(
+            "    // Ignition depression: V_s,eff = VO − D(t_off); t_off frozen this sample.\n\
+             \x20   let vth = DEVICE_{d}_VO - glow_D(state[{toff}], DEVICE_{d}_D_AMP, DEVICE_{d}_D_TKNEE, DEVICE_{d}_D_THOLD, DEVICE_{d}_D_CAP);\n"
+        ));
+    } else {
+        b.push_str(&format!("    let vth = DEVICE_{d}_VO;\n"));
+    }
+    b.push_str("    if !lit {\n");
+    b.push_str("        if cv >= vth {\n");
+    b.push_str("            // Strike (dark → lit): crossing fraction of V_s,eff across the step.\n");
+    b.push_str("            let denom = cv - vp;\n");
+    b.push_str(
+        "            let alpha = if denom.abs() > 1e-30 { ((vth - vp) / denom).clamp(0.0, 1.0) } else { 0.0 };\n",
+    );
+    b.push_str("            state[0] = 1.0;\n");
+    if has_sec {
+        b.push_str(
+            "            // Strike-bounded seed: Ī_i = I₀·exp(−margin/Σk); margin uses V_s,eff (=vth),\n\
+             \x20           // so the onset overvoltage shrinks after a short off-time (D coupling).\n\
+             \x20           // I₀ predicted from cv with provisional Ī=IFLOOR (dark solve ≠ lit current).\n",
+        );
+        b.push_str(&format!("            let glow_prov = [DEVICE_{d}_IFLOOR; 4];\n"));
+        b.push_str(&format!(
+            "            let (i0, _) = glow_lit_eval(cv, DEVICE_{d}_V0, DEVICE_{d}_RT, {k_arr}, &glow_prov, DEVICE_{d}_IFLOOR);\n"
+        ));
+        b.push_str(&format!(
+            "            let margin = vth - DEVICE_{d}_V0 - i0 * DEVICE_{d}_RT;\n"
+        ));
+        b.push_str(&format!(
+            "            let ksum = DEVICE_{d}_K1 + DEVICE_{d}_K2 + DEVICE_{d}_K3 + DEVICE_{d}_K4;\n"
+        ));
+        b.push_str(&format!(
+            "            let seed = (i0 * (-margin / ksum).exp()).max(DEVICE_{d}_IFLOOR);\n"
+        ));
+        b.push_str("            state[1] = seed; state[2] = seed; state[3] = seed; state[4] = seed;\n");
+        // Disarm extinction at strike: a still-forming discharge that has not yet
+        // reached the sustaining current IHOLD must NOT be extinguished. Arming
+        // happens below once i crosses IHOLD. Clear the robust-extinction history
+        // (no prior current, no pending crossing) so a fresh strike starts clean.
+        b.push_str(&format!(
+            "            state[{armed}] = 0.0; state[{iconv}] = 0.0; state[{pend}] = 0.0;\n"
+        ));
+    }
+    b.push_str(&format!(
+        "            return StatefulUpdate {{ fired: true{ext_field}, alpha }};\n"
+    ));
+    b.push_str("        }\n");
+    if has_d {
+        b.push_str(&format!(
+            "        state[{toff}] += dt; // accumulate off-time while dark (incl. ssf sub-step dt)\n"
+        ));
+    }
+    b.push_str("    } else {\n");
+    if has_sec {
+        // Recover the solved through-current. Extinction is ARMED only once the
+        // discharge has actually sustained (i > IHOLD), AND fires only on a
+        // MONOTONE converged crossing confirmed over a 1-sample debounce:
+        //   detection : armed && i_conv_prev > IHOLD && i_now <= IHOLD → set pending
+        //   confirm   : next sample still <= IHOLD → extinguish; else clear (ring rejected)
+        // This rejects the transient near-V0 integrator ring (e.g. 0.957→0→0.886 mA)
+        // using the glow's OWN converged current history — no cap/charge coupling
+        // (the device is 1-D/2-terminal and cannot see the external C). Both i's
+        // come from converged glow_lit_eval(cv). Otherwise relax each active section.
+        b.push_str(&format!(
+            "        let (i_now, _) = glow_lit_eval(cv, DEVICE_{d}_V0, DEVICE_{d}_RT, {k_arr}, &glow_i_bar, DEVICE_{d}_IFLOOR);\n"
+        ));
+        b.push_str(&format!(
+            "        if i_now > DEVICE_{d}_IHOLD {{ state[{armed}] = 1.0; }}\n"
+        ));
+        b.push_str(&format!(
+            "        let glow_below = i_now <= DEVICE_{d}_IHOLD;\n\
+             \x20       let glow_confirm = state[{armed}] >= 0.5 && state[{pend}] >= 0.5 && glow_below;\n"
+        ));
+        let mut relax = String::new();
+        for i in 0..4 {
+            if gp.k[i] != 0.0 {
+                relax.push_str(&format!(
+                    "            state[{}] = i_now + (state[{}] - i_now) * (-dt / DEVICE_{d}_TAU{}).exp();\n",
+                    i + 1,
+                    i + 1,
+                    i + 1
+                ));
+            }
+        }
+        if is_ssf {
+            b.push_str("        if glow_confirm {\n");
+            b.push_str(&format!(
+                "            // Confirmed extinction: crossing-fraction alpha on the confirmed sample (1-sample latency).\n\
+                 \x20           let (i_prev, _) = glow_lit_eval(vp, DEVICE_{d}_V0, DEVICE_{d}_RT, {k_arr}, &glow_i_bar, DEVICE_{d}_IFLOOR);\n"
+            ));
+            b.push_str("            let di = i_now - i_prev;\n");
+            b.push_str(&format!(
+                "            let alpha = if di.abs() > 1e-30 {{ ((DEVICE_{d}_IHOLD - i_prev) / di).clamp(0.0, 1.0) }} else {{ 0.0 }};\n"
+            ));
+            b.push_str("            state[0] = 0.0;\n");
+            if has_d {
+                b.push_str(&format!("            state[{toff}] = 0.0;\n"));
+            }
+            b.push_str(&format!(
+                "            state[{pend}] = 0.0; state[{iconv}] = i_now;\n"
+            ));
+            b.push_str("            return StatefulUpdate { fired: false, extinguished: true, alpha };\n");
+            b.push_str("        }\n");
+            b.push_str(&format!(
+                "        // Not confirmed: set pending on a first monotone crossing, else clear (ring rejected).\n\
+                 \x20       state[{pend}] = if state[{armed}] >= 0.5 && state[{iconv}] > DEVICE_{d}_IHOLD && glow_below {{ 1.0 }} else {{ 0.0 }};\n"
+            ));
+            b.push_str("        // Still lit: relax the sections toward I by the exact exponential.\n");
+            b.push_str(&relax);
+            b.push_str(&format!("        state[{iconv}] = i_now;\n"));
+        } else {
+            b.push_str("        if glow_confirm {\n");
+            b.push_str("            state[0] = 0.0;\n");
+            if has_d {
+                b.push_str(&format!("            state[{toff}] = 0.0;\n"));
+            }
+            b.push_str(&format!("            state[{pend}] = 0.0;\n"));
+            b.push_str("        } else {\n");
+            b.push_str(&format!(
+                "            state[{pend}] = if state[{armed}] >= 0.5 && state[{iconv}] > DEVICE_{d}_IHOLD && glow_below {{ 1.0 }} else {{ 0.0 }};\n"
+            ));
+            b.push_str(&relax);
+            b.push_str("        }\n");
+            b.push_str(&format!("        state[{iconv}] = i_now;\n"));
+        }
+    } else {
+        // No sections: the static maintaining-line extinction on holding current.
+        if is_ssf {
+            b.push_str(&format!(
+                "        let cv_hold = DEVICE_{d}_V0 + DEVICE_{d}_RS * DEVICE_{d}_IHOLD;\n"
+            ));
+            b.push_str("        if cv <= cv_hold {\n");
+            b.push_str("            let denom = cv - vp;\n");
+            b.push_str(
+                "            let alpha = if denom.abs() > 1e-30 { ((cv_hold - vp) / denom).clamp(0.0, 1.0) } else { 0.0 };\n",
+            );
+            b.push_str("            state[0] = 0.0;\n");
+            if has_d {
+                b.push_str(&format!("            state[{toff}] = 0.0;\n"));
+            }
+            b.push_str("            return StatefulUpdate { fired: false, extinguished: true, alpha };\n");
+            b.push_str("        }\n");
+        } else {
+            b.push_str(&format!(
+                "        let i_cond = (cv - DEVICE_{d}_V0) / DEVICE_{d}_RS;\n"
+            ));
+            b.push_str(&format!("        if i_cond <= DEVICE_{d}_IHOLD {{\n"));
+            b.push_str("            state[0] = 0.0;\n");
+            if has_d {
+                b.push_str(&format!("            state[{toff}] = 0.0;\n"));
+            }
+            b.push_str("        }\n");
+        }
+    }
+    b.push_str("    }\n");
+    b.push_str("    StatefulUpdate::default()\n");
+    b
+}
+
 /// Device-specific body of `stateful_update_dev{n}`. Dispatched on
 /// `DeviceParams`. Every arm ends by returning a `StatefulUpdate`; v1 devices
 /// return the no-op default (no sub-sample firing).
@@ -958,7 +1163,12 @@ fn stateful_update_body(
     // Emitted only when the caller consumes it (nodal-Schur, flag active), so
     // every other glow deck keeps the whole-sample form below byte-for-byte.
     if subsample_fire {
-        if let DeviceParams::Glow(_) = &slot.params {
+        if let DeviceParams::Glow(gp) = &slot.params {
+            // Sections and/or ignition depression → the composable body (any of
+            // the four gate combinations). Neither → today's byte-identical form.
+            if gp.has_sections() || gp.has_d() {
+                return emit_glow_update_body(d, gp, true);
+            }
             return format!(
                 "    let _ = dt; // no firing time constant in the boolean-strike model\n\
                  \x20   let cv = v_converged[0] - v_converged[1];\n\
@@ -1022,37 +1232,45 @@ fn stateful_update_body(
         // not yet applied). `dt` is unused (the boolean-strike model has no
         // firing time constant of its own — the conduction/de-ion time constant
         // is the external RON·C).
-        DeviceParams::Glow(_) => format!(
-            "    let _ = dt; // no firing time constant in the boolean-strike model\n\
-             \x20   let cv = v_converged[0] - v_converged[1];\n\
-             \x20   let vp = v_prev[0] - v_prev[1];\n\
-             \x20   let lit = state[0] >= 0.5;\n\
-             \x20   if !lit {{\n\
-             \x20       if cv >= DEVICE_{d}_VO {{\n\
-             \x20           // Strike (dark → lit). Sub-sample crossing fraction of VO\n\
-             \x20           // between the previous and converged terminal voltage.\n\
-             \x20           let denom = cv - vp;\n\
-             \x20           let alpha = if denom.abs() > 1e-30 {{\n\
-             \x20               ((DEVICE_{d}_VO - vp) / denom).clamp(0.0, 1.0)\n\
-             \x20           }} else {{ 0.0 }};\n\
-             \x20           state[0] = 1.0;\n\
-             \x20           return StatefulUpdate {{ fired: true, alpha }};\n\
-             \x20       }}\n\
-             \x20   }} else {{\n\
-             \x20       // Extinguish (lit → dark) on HOLDING CURRENT, not a bare\n\
-             \x20       // voltage test: the maintaining-line lit model parks the\n\
-             \x20       // node near the intercept V0 (cv>V0 by the small sustaining\n\
-             \x20       // drop rs·i), so a voltage threshold would latch the tube\n\
-             \x20       // lit forever. The gas de-ionizes when it can no longer\n\
-             \x20       // sustain conduction — i.e. when (cv-V0)/RS drops below the\n\
-             \x20       // holding current. The reset floor lands at v0 + rs·ihold.\n\
-             \x20       let i_cond = (cv - DEVICE_{d}_V0) / DEVICE_{d}_RS;\n\
-             \x20       if i_cond <= DEVICE_{d}_IHOLD {{\n\
-             \x20           state[0] = 0.0;\n\
-             \x20       }}\n\
-             \x20   }}\n\
-             \x20   StatefulUpdate::default()\n"
-        ),
+        DeviceParams::Glow(gp) => {
+            // Sections and/or ignition depression → the composable body (any of
+            // the four gate combinations). Neither → today's byte-identical form.
+            if gp.has_sections() || gp.has_d() {
+                emit_glow_update_body(d, gp, false)
+            } else {
+                format!(
+                    "    let _ = dt; // no firing time constant in the boolean-strike model\n\
+                     \x20   let cv = v_converged[0] - v_converged[1];\n\
+                     \x20   let vp = v_prev[0] - v_prev[1];\n\
+                     \x20   let lit = state[0] >= 0.5;\n\
+                     \x20   if !lit {{\n\
+                     \x20       if cv >= DEVICE_{d}_VO {{\n\
+                     \x20           // Strike (dark → lit). Sub-sample crossing fraction of VO\n\
+                     \x20           // between the previous and converged terminal voltage.\n\
+                     \x20           let denom = cv - vp;\n\
+                     \x20           let alpha = if denom.abs() > 1e-30 {{\n\
+                     \x20               ((DEVICE_{d}_VO - vp) / denom).clamp(0.0, 1.0)\n\
+                     \x20           }} else {{ 0.0 }};\n\
+                     \x20           state[0] = 1.0;\n\
+                     \x20           return StatefulUpdate {{ fired: true, alpha }};\n\
+                     \x20       }}\n\
+                     \x20   }} else {{\n\
+                     \x20       // Extinguish (lit → dark) on HOLDING CURRENT, not a bare\n\
+                     \x20       // voltage test: the maintaining-line lit model parks the\n\
+                     \x20       // node near the intercept V0 (cv>V0 by the small sustaining\n\
+                     \x20       // drop rs·i), so a voltage threshold would latch the tube\n\
+                     \x20       // lit forever. The gas de-ionizes when it can no longer\n\
+                     \x20       // sustain conduction — i.e. when (cv-V0)/RS drops below the\n\
+                     \x20       // holding current. The reset floor lands at v0 + rs·ihold.\n\
+                     \x20       let i_cond = (cv - DEVICE_{d}_V0) / DEVICE_{d}_RS;\n\
+                     \x20       if i_cond <= DEVICE_{d}_IHOLD {{\n\
+                     \x20           state[0] = 0.0;\n\
+                     \x20       }}\n\
+                     \x20   }}\n\
+                     \x20   StatefulUpdate::default()\n"
+                )
+            }
+        }
         // No stateful math for other device kinds (none are stateful yet).
         _ => "    // No device-specific state advance for this DeviceParams.\n\
               \x20   let _ = (v_prev, v_converged, dt);\n\

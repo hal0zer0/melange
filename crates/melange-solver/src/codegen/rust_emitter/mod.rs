@@ -41,6 +41,7 @@ const TMPL_DEVICE_JFET: &str = include_str!("../../../templates/rust/device_jfet
 const TMPL_DEVICE_MOSFET: &str = include_str!("../../../templates/rust/device_mosfet.rs.tera");
 const TMPL_DEVICE_TUBE: &str = include_str!("../../../templates/rust/device_tube.rs.tera");
 const TMPL_DEVICE_VCA: &str = include_str!("../../../templates/rust/device_vca.rs.tera");
+const TMPL_DEVICE_GLOW: &str = include_str!("../../../templates/rust/device_glow.rs.tera");
 const TMPL_BUILD_RHS: &str = include_str!("../../../templates/rust/build_rhs.rs.tera");
 const TMPL_MAT_VEC_MUL_S: &str = include_str!("../../../templates/rust/mat_vec_mul_s.rs.tera");
 const TMPL_EXTRACT_VOLTAGES: &str =
@@ -68,6 +69,7 @@ impl RustEmitter {
             ("device_mosfet", TMPL_DEVICE_MOSFET),
             ("device_tube", TMPL_DEVICE_TUBE),
             ("device_vca", TMPL_DEVICE_VCA),
+            ("device_glow", TMPL_DEVICE_GLOW),
             ("build_rhs", TMPL_BUILD_RHS),
             ("mat_vec_mul_s", TMPL_MAT_VEC_MUL_S),
             ("extract_voltages", TMPL_EXTRACT_VOLTAGES),

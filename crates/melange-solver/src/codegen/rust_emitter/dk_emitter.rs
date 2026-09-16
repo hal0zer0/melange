@@ -1349,6 +1349,13 @@ impl RustEmitter {
         let mut has_tube = false;
         let mut has_vca = false;
         let mut has_self_heating = false;
+        // True when ≥1 glow device carries active relaxing sections — gates the
+        // `device_glow` helper (inner-Newton lit eval) and the new consts. False
+        // for every no-section glow deck, keeping their emitted code byte-identical.
+        let mut has_glow_sections = false;
+        // True when ≥1 glow device carries ignition depression (D_AMP≠0) — gates
+        // the `glow_D` helper and D consts. Independent of sections.
+        let mut has_glow_d = false;
 
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
             match &slot.params {
@@ -1561,6 +1568,36 @@ impl RustEmitter {
                     emit_device_const(&mut code, dev_num, "RS", gp.rs);
                     emit_device_const(&mut code, dev_num, "ROFF", gp.roff);
                     emit_device_const(&mut code, dev_num, "IHOLD", gp.ihold);
+                    // Relaxing-section lit branch (defaults-off). Emitted ONLY
+                    // for section-bearing devices → the const block for every
+                    // no-section glow deck is byte-identical to before. RT = DC
+                    // asymptote; K{i}/TAU{i} = the delayed-overvoltage stack;
+                    // IFLOOR = the log-domain current clamp (= IHOLD, the
+                    // analog of safe_exp for ln), also the Ī_i seed floor.
+                    if gp.has_sections() {
+                        has_glow_sections = true;
+                        emit_device_const(&mut code, dev_num, "RT", gp.r_t);
+                        for i in 0..crate::device_types::GlowParams::MAX_SECTIONS {
+                            emit_device_const(&mut code, dev_num, &format!("K{}", i + 1), gp.k[i]);
+                            emit_device_const(
+                                &mut code,
+                                dev_num,
+                                &format!("TAU{}", i + 1),
+                                gp.tau[i],
+                            );
+                        }
+                        emit_device_const(&mut code, dev_num, "IFLOOR", gp.ifloor);
+                    }
+                    // Ignition depression (Part B; defaults-off). Emitted ONLY
+                    // for D-bearing devices → non-D glow decks stay byte-identical.
+                    // D_CAP = VO−VM is the hard cap (V_s,eff never below VM).
+                    if gp.has_d() {
+                        has_glow_d = true;
+                        emit_device_const(&mut code, dev_num, "D_AMP", gp.d_amp);
+                        emit_device_const(&mut code, dev_num, "D_TKNEE", gp.d_tknee);
+                        emit_device_const(&mut code, dev_num, "D_THOLD", gp.d_thold);
+                        emit_device_const(&mut code, dev_num, "D_CAP", gp.d_cap);
+                    }
                     code.push('\n');
                 }
             }
@@ -1697,6 +1734,17 @@ impl RustEmitter {
         }
         if has_vca {
             code.push_str(&self.render("device_vca", &Context::new())?);
+        }
+        // Glow helpers: the inner-Newton lit eval (`glow_lit_eval`, sections)
+        // and/or the ignition-depression curve (`glow_D`). Each fn is gated
+        // inside the template, and the template is rendered only when at least
+        // one is needed, so no-section-no-D glow decks (and every non-glow deck)
+        // never see either helper.
+        if has_glow_sections || has_glow_d {
+            let mut glow_ctx = Context::new();
+            glow_ctx.insert("emit_lit_eval", &has_glow_sections);
+            glow_ctx.insert("emit_d", &has_glow_d);
+            code.push_str(&self.render("device_glow", &glow_ctx)?);
         }
 
         // Stateful-device (Phase 0c) update() hooks. Shared by BOTH emitters —
