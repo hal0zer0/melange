@@ -239,6 +239,16 @@ enum Commands {
         #[arg(long, value_name = "MODE", default_value = "auto")]
         nodal_subpath: String,
 
+        /// Escape hatch (arbiter t467): allow a relaxing-section / delayed-
+        /// overvoltage / KSUB glow to compile on the nodal full-LU sub-path,
+        /// which otherwise REFUSES. On full-LU the lit branch is the static line
+        /// (v0+RS·i) while the strike seed/extinction read the section model — a
+        /// mixed, silently-wrong model. With this flag the section keys go INERT
+        /// on full-LU and provenance records `glow_sections: inert (full-lu)`.
+        /// Diagnostic only; the Schur route honors the section model.
+        #[arg(long, default_value_t = false)]
+        allow_static_glow_on_full_lu: bool,
+
         /// Authentic circuit noise mode: off (default), thermal, shot, full.
         /// `thermal` emits Johnson-Nyquist noise on every resistor; `shot` adds
         /// junction shot; `full` adds 1/f flicker, pentode partition, and op-amp
@@ -336,7 +346,7 @@ enum Commands {
         amplitude: f64,
 
         /// Input node name (for informational display)
-        #[arg(short = 'I', long, default_value = "in")]
+        #[arg(short = 'i', short_alias = 'I', long, default_value = "in")]
         input_node: String,
 
         /// Write comparison data to CSV file
@@ -416,7 +426,7 @@ enum Commands {
         sample_rate: f64,
 
         /// Input node name
-        #[arg(short = 'I', long, default_value = "in")]
+        #[arg(short = 'i', short_alias = 'I', long, default_value = "in")]
         input_node: String,
 
         /// Output node name
@@ -439,6 +449,13 @@ enum Commands {
         /// Auto selects nodal for nonlinear circuits with inductors, dk otherwise.
         #[arg(long, default_value = "auto")]
         solver: String,
+
+        /// Nodal Schur-vs-full-LU sub-path: auto, schur, full-lu. Mirrors
+        /// `compile --nodal-subpath`. A measuring verb must be able to pin its
+        /// route — the auto route is per (deck, sample rate), so a measurement
+        /// that cannot force the sub-path cannot reproduce or isolate it.
+        #[arg(long, value_name = "MODE", default_value = "auto")]
+        nodal_subpath: String,
 
         /// Op-amp rail saturation mode: auto, none, hard, active-set, active-set-be, boyle-diodes.
         /// Default 'auto' inspects the topology and picks the cheapest correct mode.
@@ -526,7 +543,7 @@ enum Commands {
         input: String,
 
         /// Input node name
-        #[arg(short = 'I', long, default_value = "in")]
+        #[arg(short = 'i', short_alias = 'I', long, default_value = "in")]
         input_node: String,
 
         /// Output node name
@@ -860,6 +877,7 @@ fn main() -> Result<()> {
             bjt_fa,
             opamp_rail_mode,
             nodal_subpath,
+            allow_static_glow_on_full_lu,
             noise,
             noise_seed,
             emit_dc_op_recompute,
@@ -987,6 +1005,7 @@ fn main() -> Result<()> {
                 &bjt_fa,
                 rail_mode,
                 nodal_sub_path_override,
+                allow_static_glow_on_full_lu,
                 noise_mode,
                 noise_seed,
                 emit_dc_op_recompute,
@@ -1080,6 +1099,7 @@ fn main() -> Result<()> {
             amplitude,
             input_resistance: input_resistance_flag,
             solver,
+            nodal_subpath,
             opamp_rail_mode,
             tube_grid_fa,
             subsample_fire,
@@ -1148,10 +1168,19 @@ fn main() -> Result<()> {
                 p.set_file_name(format!("{}.probes.csv", stem));
                 Some(p)
             };
+            let nodal_sub_path_override =
+                melange_solver::codegen::NodalSubPathOverride::parse(&nodal_subpath).ok_or_else(
+                    || {
+                        anyhow::anyhow!(
+                            "Unknown --nodal-subpath '{}'. Valid values: auto, schur, full-lu",
+                            nodal_subpath
+                        )
+                    },
+                )?;
             simulate_circuit_source(
                 &circuit_source,
                 &SimulateOptions {
-                    nodal_sub_path_override: melange_solver::codegen::NodalSubPathOverride::Auto,
+                    nodal_sub_path_override,
                     input_audio: input_audio.as_deref(),
                     output: &output,
                     sample_rate,
@@ -1524,6 +1553,7 @@ fn compile_circuit_source(
     bjt_fa: &str,
     opamp_rail_mode: melange_solver::codegen::OpampRailMode,
     nodal_sub_path_override: melange_solver::codegen::NodalSubPathOverride,
+    allow_static_glow_on_full_lu: bool,
     noise_mode: melange_solver::codegen::NoiseMode,
     noise_seed: u64,
     emit_dc_op_recompute: bool,
@@ -2251,6 +2281,7 @@ fn compile_circuit_source(
         taps: tap_specs.clone(),
         subsample_fire,
         subsample_lit_factor,
+        allow_static_glow_on_full_lu,
         ..CodegenConfig::default()
     };
 
@@ -2271,7 +2302,13 @@ fn compile_circuit_source(
     };
     let solver_label = if use_nodal_codegen { "nodal" } else { "DK" };
     let solver_reason = if solver_override == "nodal" || solver_override == "dk" {
-        format!("--solver {} (user override)", solver_override)
+        // Forced route: still surface what the auto-router decided so the pinned
+        // sub-path is visible, not masked by the override reason (melange-circuits
+        // t469 — a measuring verb must see the route it is actually on).
+        format!(
+            "--solver {} (user override; auto would pick: {})",
+            solver_override, routing.reason
+        )
     } else {
         routing.reason.clone()
     };
@@ -2336,10 +2373,23 @@ fn compile_circuit_source(
         // "Nodal NR sub-path" — explicitly the nodal Newton implementation
         // (Schur reduction vs full-LU), distinct from the DK kernel's BJT
         // internal-node expansion, which also says "full LU" (see pipeline.rs).
-        println!("    Nodal NR sub-path: {sp} (nodal Newton; not DK node-expansion)");
+        // Print the nodal trap spectral radius that GOVERNED this decision right
+        // next to the route. Without it, the only spectral radius shown is the
+        // DK-kernel one below, which does NOT drive the nodal sub-path — that
+        // mismatch misled a reader into thinking a route was wrong (arbiter t467).
+        println!(
+            "    Nodal NR sub-path: {sp} (nodal Newton; not DK node-expansion; \
+             route decided by nodal spectral radius {:.4})",
+            generated.meta.nodal_spectral_radius
+        );
     }
     if routing.spectral_radius > 0.0 {
-        println!("    Spectral radius: {:.4}", routing.spectral_radius);
+        // DK-kernel trap operator (routing::compute_spectral_radius) — this is
+        // NOT the value that chose a nodal sub-path (see the line above).
+        println!(
+            "    DK-kernel spectral radius: {:.4}",
+            routing.spectral_radius
+        );
     }
     // Integration line: printed from the codegen-recorded selection so the
     // stated reason is the actual one (a `.integrator be` pin is NOT
@@ -3529,6 +3579,7 @@ fn simulate_circuit_source(
         backward_euler: opts.backward_euler,
         force_trap: opts.force_trap,
         nodal_sub_path_override: opts.nodal_sub_path_override,
+        allow_static_glow_on_full_lu: false,
         disable_be_fallback: false,
         opamp_rail_mode: opts.opamp_rail_mode,
         noise_mode: opts.noise_mode,
@@ -4221,6 +4272,7 @@ fn analyze_freq_response(
         backward_euler,
         force_trap,
         nodal_sub_path_override,
+        allow_static_glow_on_full_lu: false,
         disable_be_fallback: false,
         opamp_rail_mode,
         noise_mode,

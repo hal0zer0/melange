@@ -499,6 +499,16 @@ pub struct CodegenConfig {
     /// replaces that idiom with an explicit, semantics-free switch, so the
     /// presence of a behavioral source means exactly one thing.
     pub nodal_sub_path_override: NodalSubPathOverride,
+    /// Escape hatch for the fail-loud refusal of a relaxing-section / delayed-
+    /// overvoltage / subnormal (KSUB) glow on the nodal full-LU sub-path
+    /// (arbiter ruling t467). By default `compile` REFUSES that combination: the
+    /// full-LU device eval runs the static maintaining line for the lit branch
+    /// while the strike seed and extinction test read the section model — a
+    /// mixed, silently-wrong model that has masqueraded as a circuit failure.
+    /// Set true to knowingly emit today's static line on full-LU (the section
+    /// keys go inert); provenance then carries `glow_sections: inert (full-lu)`.
+    /// Default **false**.
+    pub allow_static_glow_on_full_lu: bool,
     /// Disable adaptive backward Euler fallback for the DK codegen path.
     /// When false (default), the generated code includes pre-computed BE matrices
     /// and can fall back to BE for individual samples where trapezoidal NR diverges.
@@ -702,6 +712,7 @@ impl Default for CodegenConfig {
             backward_euler: false,
             force_trap: false,
             nodal_sub_path_override: NodalSubPathOverride::Auto,
+            allow_static_glow_on_full_lu: false,
             disable_be_fallback: false,
             opamp_rail_mode: OpampRailMode::Auto,
             noise_mode: NoiseMode::Off,
@@ -851,6 +862,13 @@ pub struct CodegenMeta {
     /// pin it, so a change that silently moved a circuit between sub-paths was
     /// undetectable.
     pub nodal_sub_path: Option<NodalSubPath>,
+    /// The nodal trap `spectral_radius_s_aneg` that GOVERNED the Schur/full-LU
+    /// decision (`Some` sub-path only; 0.0 on the DK path). Distinct from
+    /// [`Self::backward_euler_spectral_radius`] and from the DK-kernel
+    /// `routing.spectral_radius` printed elsewhere — on a nodal deck the latter
+    /// is NOT the value that chose the sub-path, which misled a reader (arbiter
+    /// t467 #4). Reported so the number sits next to the route it decided.
+    pub nodal_spectral_radius: f64,
 }
 
 /// Build the codegen metadata block from the finished IR. Shared by the
@@ -879,6 +897,11 @@ fn build_codegen_meta(
         sparse_lu_density: ir.sparsity.g_aug_density,
         parasitic_caps_inserted,
         nodal_sub_path,
+        nodal_spectral_radius: if nodal_sub_path.is_some() {
+            ir.matrices.spectral_radius_s_aneg
+        } else {
+            0.0
+        },
     }
 }
 

@@ -519,6 +519,11 @@ pub struct SolverConfig {
     /// behaviour; the forcing modes are diagnostic escape hatches.
     #[serde(default)]
     pub nodal_sub_path_override: crate::codegen::NodalSubPathOverride,
+    /// Escape hatch for the fail-loud refusal of a section/D/KSUB glow on the
+    /// nodal full-LU sub-path (arbiter t467). See
+    /// [`crate::codegen::CodegenConfig::allow_static_glow_on_full_lu`].
+    #[serde(default)]
+    pub allow_static_glow_on_full_lu: bool,
     /// Resolved op-amp supply rail saturation strategy.
     ///
     /// If the user's [`CodegenConfig::opamp_rail_mode`] was [`OpampRailMode::Auto`],
@@ -2018,6 +2023,7 @@ impl CircuitIR {
             opamp_rail_mode: rail_mode.mode,
             emit_dc_op_recompute: config.emit_dc_op_recompute,
             nodal_sub_path_override: config.nodal_sub_path_override,
+            allow_static_glow_on_full_lu: config.allow_static_glow_on_full_lu,
             injections: config.injections.clone(),
             taps: config.taps.clone(),
             subsample_fire_mode: config.subsample_fire,
@@ -3041,6 +3047,7 @@ impl CircuitIR {
             opamp_rail_mode: rail_mode.mode,
             emit_dc_op_recompute: config.emit_dc_op_recompute,
             nodal_sub_path_override: config.nodal_sub_path_override,
+            allow_static_glow_on_full_lu: config.allow_static_glow_on_full_lu,
             injections: config.injections.clone(),
             taps: config.taps.clone(),
             subsample_fire_mode: config.subsample_fire,

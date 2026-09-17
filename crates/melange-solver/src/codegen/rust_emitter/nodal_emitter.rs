@@ -1839,6 +1839,54 @@ impl RustEmitter {
         } else {
             "unknown"
         };
+        // Fail-loud refusal (arbiter t467): a relaxing-section / delayed-
+        // overvoltage / subnormal (KSUB) glow on the full-LU sub-path runs a
+        // MIXED, silently-wrong model — the full-LU device eval solves the static
+        // maintaining line `i=(v−V0)/RS` for the lit branch while the strike seed
+        // and extinction test read `glow_lit_eval`'s section current. This has
+        // masqueraded as a circuit failure (a dead divider) for days, invisible
+        // because the route line is only a stderr WARN. Refuse rather than emit
+        // it; the author picks a visible exit. Overridable ONLY with the explicit
+        // `allow_static_glow_on_full_lu` (which runs today's static line and marks
+        // the sections inert in provenance).
+        if use_full_nodal && !ir.solver_config.allow_static_glow_on_full_lu {
+            if let Some((dev_num, _)) =
+                ir.device_slots.iter().enumerate().find(|(_, slot)| {
+                    matches!(
+                        &slot.params,
+                        DeviceParams::Glow(gp)
+                            if gp.has_sections() || gp.has_d() || gp.ksub > 0.0
+                    )
+                })
+            {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "glow device #{dev_num} uses a relaxing-section / delayed-overvoltage \
+                     / subnormal (KSUB) lit branch, but this circuit routes the nodal \
+                     FULL-LU sub-path (trigger: {full_lu_trigger}, max|S|={s_max_abs:.2e}). \
+                     On full-LU the lit branch is evaluated as the STATIC maintaining line \
+                     (v0+RS·i) while the strike seed and extinction test read the section \
+                     model — a mixed model that silently produces wrong output (a dead \
+                     divider). Refusing to emit it (arbiter ruling t467). NB: the route is \
+                     per (deck, SAMPLE RATE) — this same deck may route Schur (which honors \
+                     the sections) at another rate, so read the sub-path from the actual \
+                     run, not from a compile at a different rate. Choose one:\n\
+                     \x20 (a) --nodal-subpath schur : force the Schur route, which honors \
+                     the section model. Allowed here (this is a conditioning heuristic, not \
+                     a structural requirement). BUT note the auto-router chose full-LU FOR \
+                     this circuit (trigger: {full_lu_trigger}) — forcing Schur runs the very \
+                     route it rejected as unreliable, so verify the printed spectral radius \
+                     and cross-check --backward-euler; the accuracy of the forced route is \
+                     then yours to own.\n\
+                     \x20 (b) remove the section / D / KSUB keys from the .model to run the \
+                     static card knowingly.\n\
+                     \x20 (c) --allow-static-glow-on-full-lu : run today's static line on \
+                     full-LU with the section keys INERT (stamped glow_sections: inert \
+                     (full-lu) in the Build line and provenance). Diagnostic use survives; \
+                     silence does not."
+                )));
+            }
+        }
+
         // Sub-sample fire (variable-dt glow-strike re-solve) is implemented on
         // the Schur sub-path only (Stage A). A forced `on` is refused here
         // rather than silently ignored; `auto` falls back to the whole-sample
@@ -1908,7 +1956,14 @@ impl RustEmitter {
         // Now emit header, constants, device models, state (needs use_full_nodal)
         let glow_prov =
             super::dk_emitter::GlowProvenance::for_nodal(ir, use_full_nodal, full_lu_trigger);
-        code.push_str(&self.emit_header(ir, &glow_prov)?);
+        // Record the resolved nodal sub-path in provenance so a deck can assert
+        // it (a silent Schur↔full-LU flip is otherwise only an unread WARN).
+        let resolved_sub_path = if use_full_nodal {
+            crate::codegen::NodalSubPath::FullLu
+        } else {
+            crate::codegen::NodalSubPath::Schur
+        };
+        code.push_str(&self.emit_header(ir, &glow_prov, Some(resolved_sub_path))?);
         code.push_str(&self.emit_nodal_constants(ir));
         // Authentic circuit noise (Phase 1: thermal). Returns an empty
         // `NoiseEmission` when noise mode is Off — every fragment is "" and

@@ -783,3 +783,159 @@ Rin in k 100k
         "non-glow BE fallback must not carry the trap-midpoint i_nl_prev stamp"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// KNOWN GAP (2026-09-16, arbiter ruling 467): the relaxing-section lit branch
+// (`has_sections()`) is ROUTE-DEPENDENT on the nodal path.
+//
+//   * nodal Schur (`emit_nodal_device_evaluation`): section-gated — lit eval
+//     uses `glow_lit_eval` (subnormal/KSUB branch).
+//   * nodal full-LU (`emit_nodal_device_evaluation_body`/`_final`): NOT
+//     section-gated — the NR solves the static maintaining line `i=(v−V0)/RS`
+//     while the strike-seed and extinction test (in `stateful_update`) DO read
+//     `glow_lit_eval`. So full-LU today runs a MIXED model within one sample.
+//     That inconsistency is the near-term hazard (same class as the 09-13
+//     TFORM-ignored WARN), independent of the convergence work below.
+//
+// DO NOT just gate the full-LU sites and call it fixed. Applying the plain gate
+// (glow_lit_eval in the full-LU NR) makes the SYNTHETIC deck below go dead
+// (strikes once, sticks lit) at 48k. Root cause is NOT a multi-valued device:
+// with RT=0 the device i(v) is single-valued (device_glow.rs.tera warm start).
+// The outer NR uses `glow_lit_eval` as a fixed point whose error gain is
+// ≈ I·R_thev/|s_eff| with R_thev ≈ h/C (s_eff = Σk − κ). This deck (K1=1,KSUB=2
+// → |s_eff|=1; C=10n; 48k) has gain > 1 and diverges from the conducting root;
+// it is a regime the real instrument never enters. VERIFIED (2026-09-16): with
+// the gate applied the deck OSCILLATES at ≥768k (gain < 1); K1=3 does NOT help
+// (|s_eff| still 1). Real ZA1001 key sets have Σk≈43.3 → |s_eff|≈41, so the gain
+// is tiny and full-LU would converge — but the real divider ROUTES SCHUR anyway
+// (arbiter measured: schur at 768k/1536k/6144k, even at R_total 4.6M).
+//
+// VERDICT: the full-LU CONVERGENCE fix is DEFERRED behind phili (arbiter 467).
+// Section glows stay Schur-only in the interim and a compiler WARN says so; do
+// NOT force section decks onto Schur (routing is a conditioning decision —
+// forcing Schur on a positive-k deck reproduces the thread-296 failure). When
+// scheduled, validate on the REAL rig at a real rate (read nr_max_iter_count +
+// the route line beside every number), NOT this synthetic deck.
+//
+// This test is #[ignore]d until that fix lands (it forces full-LU and expects
+// parity with Schur). Un-ignore it as the acceptance gate then.
+
+fn relax_deck_sections(vb: f64) -> String {
+    format!(
+        "\
+Neon Relaxation Oscillator (relaxing-section lit branch)
+.model NE1 NEON(VO=135 VM=93 IK=1.5e-3 RS=3000 IHOLD=2e-4 ROFF=300e6 RT=0 K1=1.0 TAU1=300e-6 KSUB=2.0)
+Vb rail 0 DC {vb}
+Rc rail osc 1MEG
+Cosc osc 0 10N
+N1 osc 0 NE1
+Rin in 0 1G
+.END
+"
+    )
+}
+
+fn generate_nodal_code_subpath(
+    spice: &str,
+    sample_rate: f64,
+    sub: melange_solver::codegen::NodalSubPathOverride,
+) -> String {
+    let netlist = Netlist::parse(spice).expect("parse");
+    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
+    let input_node = mna.node_map["in"] - 1;
+    let output_node = mna.node_map["osc"] - 1;
+    mna.g[input_node][input_node] += 1.0;
+    let config = CodegenConfig {
+        circuit_name: "glow_relax_sec".to_string(),
+        sample_rate,
+        input_node,
+        output_nodes: vec![output_node],
+        input_resistance: 1.0,
+        subsample_fire: SubsampleFireMode::Off,
+        nodal_sub_path_override: sub,
+        ..CodegenConfig::default()
+    };
+    CodeGenerator::new(config)
+        .generate_nodal(&mna, &netlist)
+        .expect("nodal codegen")
+        .code
+}
+
+#[test]
+#[ignore = "KNOWN GAP: full-LU section-glow NDR root-selection diverges from Schur; needs arbiter + real-rig validation (see comment above)"]
+fn test_glow_sections_route_portable_schur_vs_full_lu() {
+    use melange_solver::codegen::NodalSubPathOverride;
+    let deck = relax_deck_sections(170.0);
+    let schur = compile_and_run(
+        &generate_nodal_code_subpath(&deck, 48000.0, NodalSubPathOverride::Schur),
+        OBSERVE_MAIN,
+        "sec_schur",
+    );
+    let full_lu = compile_and_run(
+        &generate_nodal_code_subpath(&deck, 48000.0, NodalSubPathOverride::FullLu),
+        OBSERVE_MAIN,
+        "sec_full_lu",
+    );
+    for (route, out) in [("schur", &schur), ("full_lu", &full_lu)] {
+        let strikes = parse_kv(out, "strikes") as u32;
+        assert_eq!(parse_kv(out, "nan_reset") as u32, 0, "[{route}] NaN resets");
+        assert!(
+            strikes >= 2,
+            "[{route}] expected sustained oscillation, got {strikes} strikes"
+        );
+    }
+    let per_s = parse_kv(&schur, "period_ms");
+    let per_f = parse_kv(&full_lu, "period_ms");
+    assert!(
+        (per_s - per_f).abs() / per_s < 0.05,
+        "period route drift: schur={per_s}ms full_lu={per_f}ms"
+    );
+}
+
+/// Fail-loud guard (arbiter t467): a section/D/KSUB glow on the nodal full-LU
+/// sub-path is REFUSED at codegen, because full-LU runs a mixed model (static
+/// lit NR + section strike-seed/extinction) that silently produces a dead
+/// divider. The refusal must name the three exits; both overrides must compile.
+#[test]
+fn test_glow_sections_on_full_lu_is_refused() {
+    use melange_solver::codegen::NodalSubPathOverride;
+    let deck = relax_deck_sections(170.0);
+    let netlist = Netlist::parse(&deck).unwrap();
+    let build = |sub: NodalSubPathOverride, allow: bool| {
+        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let input_node = mna.node_map["in"] - 1;
+        let output_node = mna.node_map["osc"] - 1;
+        mna.g[input_node][input_node] += 1.0;
+        let config = CodegenConfig {
+            circuit_name: "glow_refuse_test".to_string(),
+            sample_rate: 48000.0,
+            input_node,
+            output_nodes: vec![output_node],
+            input_resistance: 1.0,
+            subsample_fire: SubsampleFireMode::Off,
+            nodal_sub_path_override: sub,
+            allow_static_glow_on_full_lu: allow,
+            ..CodegenConfig::default()
+        };
+        CodeGenerator::new(config).generate_nodal(&mna, &netlist)
+    };
+    // full-LU without the override → REFUSED, naming every exit.
+    let msg = format!("{}", build(NodalSubPathOverride::FullLu, false).unwrap_err());
+    assert!(
+        msg.contains("FULL-LU")
+            && msg.contains("--nodal-subpath schur")
+            && msg.contains("--allow-static-glow-on-full-lu")
+            && msg.contains("remove the section"),
+        "refusal must name all three exits; got: {msg}"
+    );
+    // full-LU WITH the explicit override → compiles (static line, sections inert).
+    assert!(
+        build(NodalSubPathOverride::FullLu, true).is_ok(),
+        "--allow-static-glow-on-full-lu must permit full-LU"
+    );
+    // Schur → compiles and honors the section model (no override needed).
+    assert!(
+        build(NodalSubPathOverride::Schur, false).is_ok(),
+        "Schur route must compile the section glow"
+    );
+}

@@ -476,7 +476,13 @@ fn resolved_build_flags(ir: &CircuitIR, glow: &GlowProvenance) -> String {
 /// has no non-dev `serde_json`, and every value here is controlled (semver,
 /// hex/`unknown`, enum tokens, numbers, bools), so no user text is interpolated
 /// and no escaping is required.
-fn provenance_json(ir: &CircuitIR, version: &str, commit: &str, glow: &GlowProvenance) -> String {
+fn provenance_json(
+    ir: &CircuitIR,
+    version: &str,
+    commit: &str,
+    glow: &GlowProvenance,
+    nodal_sub_path: Option<crate::codegen::NodalSubPath>,
+) -> String {
     let scheme = if ir.integrator_selection.is_backward_euler() {
         "backward-euler"
     } else {
@@ -508,6 +514,28 @@ fn provenance_json(ir: &CircuitIR, version: &str, commit: &str, glow: &GlowProve
     // binaries (robogogo thread 184). Matches oomox's `..._fnv1a64` convention.
     s.push_str(&format!("\"exe_fnv1a64\":\"{exe}\","));
     s.push_str(&format!("\"solver\":\"{solver}\","));
+    // Nodal Schur-vs-full-LU sub-path. Absent on the DK route (None). Recorded
+    // so a deck can ASSERT its numerical sub-path: a silent Schur↔full-LU flip
+    // (turned by conditioning — any resistor, inductor, or rate — not just a
+    // flag) otherwise reaches a consumer only as an unread stderr WARN and has
+    // been read as device behaviour (arbiter t467, melange-circuits t469).
+    if let Some(sp) = nodal_sub_path {
+        s.push_str(&format!("\"nodal_subpath\":\"{sp}\","));
+    }
+    // Fail-loud stamp (arbiter t467): when the operator overrode the full-LU
+    // section-glow refusal (`--allow-static-glow-on-full-lu`), the section keys
+    // ran INERT (the lit branch is the static maintaining line). Record it so a
+    // consumer never mistakes a static-line result for the relaxing-section model.
+    let glow_sections_inert = matches!(nodal_sub_path, Some(crate::codegen::NodalSubPath::FullLu))
+        && ir.solver_config.allow_static_glow_on_full_lu
+        && ir.device_slots.iter().any(|slot| {
+            matches!(&slot.params,
+                crate::codegen::ir::DeviceParams::Glow(gp)
+                    if gp.has_sections() || gp.has_d() || gp.ksub > 0.0)
+        });
+    if glow_sections_inert {
+        s.push_str("\"glow_sections\":\"inert (full-lu)\",");
+    }
     s.push_str(&format!("\"integration\":\"{scheme}\","));
     s.push_str(&format!(
         "\"integration_source\":\"{}\",",
@@ -561,7 +589,8 @@ impl RustEmitter {
         let noise = self.build_noise_emission(ir);
 
         let glow_prov = GlowProvenance::for_dk(ir);
-        code.push_str(&self.emit_header(ir, &glow_prov)?);
+        // DK route has no nodal Schur/full-LU sub-path.
+        code.push_str(&self.emit_header(ir, &glow_prov, None)?);
         code.push_str(&self.emit_constants(ir)?);
         code.push_str(&self.emit_pot_constants(ir));
         if noise.enabled {
@@ -602,6 +631,7 @@ impl RustEmitter {
         &self,
         ir: &CircuitIR,
         glow: &GlowProvenance,
+        nodal_sub_path: Option<crate::codegen::NodalSubPath>,
     ) -> Result<String, CodegenError> {
         let mut ctx = Context::new();
         // Sanitize title: replace newlines and control characters with spaces
@@ -639,7 +669,8 @@ impl RustEmitter {
         // Machine-readable one-line JSON so a consumer can assert the build
         // contract at compile time (replaces oomox's hand-written
         // `oversampling_contract_is_2x` / `dc_block_contract_is_disabled` guards).
-        let provenance_json = provenance_json(ir, melange_version, melange_commit, glow);
+        let provenance_json =
+            provenance_json(ir, melange_version, melange_commit, glow, nodal_sub_path);
         ctx.insert("provenance_json", &provenance_json);
 
         self.render("header", &ctx)
