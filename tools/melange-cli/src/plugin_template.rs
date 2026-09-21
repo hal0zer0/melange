@@ -199,8 +199,15 @@ pub fn generate_plugin_project_with_oversampling(
     oversampling_factor: usize,
     options: &PluginOptions<'_>,
 ) -> Result<()> {
+    // Fail-loud: nih_plug_xtask's bundler finds the "workspace root" by walking
+    // to the OUTERMOST ancestor Cargo.toml (ignoring this project's own
+    // [workspace] boundary). Generating INSIDE another Cargo workspace (e.g. the
+    // melange repo) means bundling later chdir's to that outer root and cannot
+    // find this package. `cargo build` is unaffected; DAW bundling is — so warn.
+    warn_if_nested_in_cargo_workspace(output_dir);
     std::fs::create_dir_all(output_dir.join("src"))?;
     std::fs::create_dir_all(output_dir.join(".cargo"))?;
+    std::fs::create_dir_all(output_dir.join("xtask/src"))?;
     std::fs::write(
         output_dir.join("Cargo.toml"),
         generate_cargo_toml(circuit_name),
@@ -244,7 +251,68 @@ pub fn generate_plugin_project_with_oversampling(
             let _ = std::fs::set_permissions(&build_sh_path, perms);
         }
     }
+    // xtask member crate: the runnable bundler bin that wraps nih_plug_xtask.
+    // `nih_plug_xtask` itself is a LIBRARY (no bin target), so running it via
+    // `cargo run --manifest-path .../nih_plug_xtask` fails with "a bin target
+    // must be available"; the canonical nih-plug pattern is a tiny xtask bin
+    // inside the plugin's own workspace, invoked via a `cargo xtask` alias.
+    std::fs::write(
+        output_dir.join("xtask/Cargo.toml"),
+        generate_xtask_cargo_toml(),
+    )?;
+    std::fs::write(
+        output_dir.join("xtask/src/main.rs"),
+        "fn main() -> nih_plug_xtask::Result<()> {\n    nih_plug_xtask::main()\n}\n",
+    )?;
     Ok(())
+}
+
+/// The `xtask` member crate's manifest: a runnable bin wrapping the
+/// `nih_plug_xtask` library, pinned to the same nih-plug rev as the plugin so
+/// the bundler and the plugin agree. No separate nih-plug checkout needed.
+fn generate_xtask_cargo_toml() -> String {
+    r#"[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Same nih-plug rev the plugin lib is pinned to, for a consistent bundler.
+nih_plug_xtask = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "28b149ec" }
+"#
+    .to_string()
+}
+
+/// Warn (loudly, to stderr) when the plugin is being generated INSIDE another
+/// Cargo workspace. `cargo build --release` still works (this project's own
+/// `[workspace]` table is a resolution boundary for cargo), but `nih_plug_xtask`
+/// bundling walks past that boundary to the outermost ancestor `Cargo.toml` and
+/// will fail to find this package. The fix is to generate outside the repo.
+fn warn_if_nested_in_cargo_workspace(output_dir: &Path) {
+    // The output dir may not exist yet, so canonicalize its parent chain via the
+    // CWD rather than the dir itself (canonicalize fails on a missing path).
+    let abs = std::fs::canonicalize(output_dir).unwrap_or_else(|_| {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(output_dir))
+            .unwrap_or_else(|_| output_dir.to_path_buf())
+    });
+    // Skip the project's own dir; check ancestors only.
+    for ancestor in abs.ancestors().skip(1) {
+        let manifest = ancestor.join("Cargo.toml");
+        if let Ok(contents) = std::fs::read_to_string(&manifest) {
+            if contents.contains("[workspace]") {
+                eprintln!(
+                    "  ⚠️  WARNING: generating inside a Cargo workspace ({}).\n\
+                     \x20     `cargo build --release` will work, but DAW bundling (build.sh /\n\
+                     \x20     `cargo xtask bundle`) will FAIL — nih_plug_xtask walks up to that\n\
+                     \x20     outer workspace root and cannot find this package.\n\
+                     \x20     Generate the plugin OUTSIDE the repo (e.g. `cd ~ && melange compile …`).",
+                    ancestor.display()
+                );
+                return;
+            }
+        }
+    }
 }
 
 /// Per-target `.cargo/config.toml` raising the x86-64 baseline to `x86-64-v3`.
@@ -316,6 +384,13 @@ rustflags = ["-C", "target-cpu=x86-64-v3"]
 
 [target.x86_64-pc-windows-gnu]
 rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+# Bundle CLAP + VST3 via the in-workspace xtask bin (no separate nih-plug
+# checkout needed):  cargo xtask bundle <plugin_name> --release
+# Release mode avoids recompiling serde twice when the plugin also builds
+# release, matching nih-plug's own alias.
+[alias]
+xtask = "run --package xtask --release --"
 "#
     .to_string()
 }
@@ -327,12 +402,12 @@ name = "{circuit_name}"
 version = "0.1.0"
 edition = "2021"
 
-# Declare this project as its own workspace root. Without this, generating a
-# plugin *inside* another Cargo workspace (e.g. the melange repo itself, which
-# the README's quick-start does) makes cargo believe this package belongs to
-# that outer workspace and refuse to build. An empty table keeps the generated
-# project standalone wherever it lands.
+# Declare this project as its own workspace root, with the `xtask` bundler as a
+# member. Without the [workspace] table, generating a plugin *inside* another
+# Cargo workspace makes cargo believe this package belongs to that outer
+# workspace and refuse to build. `members` adds the xtask bin used for bundling.
 [workspace]
+members = ["xtask"]
 
 [dependencies]
 # Pin nih-plug to a specific rev for reproducible builds
@@ -385,31 +460,28 @@ The raw library ends up in `target/release/`. Most DAWs won't load it in this fo
 
 ### Bundled CLAP + VST3 (for use in a DAW)
 
-`nih-plug` ships its bundling logic as a separate `xtask` crate. The cleanest
-workflow is to clone `nih-plug` once and run its bundler against this project:
+Run the bundler — no separate nih-plug checkout needed (the `xtask/` member
+crate pulls `nih_plug_xtask` in as a git dependency):
 
 ```bash
-# One-time setup (pick a directory outside this project):
-git clone https://github.com/robbert-vdh/nih-plug.git ~/src/nih-plug
-
-# From this project's directory:
-cargo run --release --manifest-path ~/src/nih-plug/nih_plug_xtask/Cargo.toml -- \
-    bundle {circuit_name} --release
+bash build.sh
+# equivalently: cargo xtask bundle {circuit_name} --release
 ```
 
 The compiled plugin (CLAP + VST3) will be in `target/bundled/`.
 
-Or run the convenience script that wraps the above (edit `NIH_PLUG_PATH` first):
-
-```bash
-bash build.sh
-```
+> **Bundle from OUTSIDE any enclosing Cargo workspace.** If this project was
+> generated inside another repo (e.g. the melange checkout), move it out first
+> (`mv this-dir ~/ && cd ~/this-dir`). `cargo build --release` works in place,
+> but the bundler walks up to the outermost `Cargo.toml` and will otherwise
+> fail to find this package.
 
 ## Files
 
 - `src/circuit.rs` — Generated circuit DSP code (do not edit by hand)
 - `src/lib.rs` — Plugin wrapper (customize parameters, GUI, presets here)
-- `build.sh` — Convenience script wrapping `nih_plug_xtask bundle`
+- `build.sh` — Bundles CLAP + VST3 via `cargo xtask bundle`
+- `xtask/` — The nih-plug bundler bin (do not edit)
 
 To regenerate `circuit.rs` after changing the circuit netlist:
 
@@ -423,22 +495,20 @@ melange compile your-circuit.cir --format code -o src/circuit.rs
 fn generate_build_sh(circuit_name: &str) -> String {
     format!(
         r#"#!/usr/bin/env bash
-# Convenience wrapper around nih_plug_xtask for bundling {circuit_name}.
-# Edit NIH_PLUG_PATH below to point at your local nih-plug checkout.
+# Bundle {circuit_name} into a DAW-loadable CLAP + VST3.
+#
+# Uses the in-workspace `xtask` bin (see xtask/), which pulls nih-plug in as a
+# git dependency — no separate nih-plug checkout required. Equivalent to:
+#     cargo xtask bundle {circuit_name} --release
+#
+# NOTE: bundling must run from OUTSIDE any enclosing Cargo workspace. If this
+# project was generated inside another repo's workspace (e.g. the melange repo),
+# move it out first — nih_plug_xtask walks up to the outermost Cargo.toml and
+# will otherwise fail to find this package. `cargo build --release` (the raw
+# library) works either way.
 set -euo pipefail
 
-NIH_PLUG_PATH="${{NIH_PLUG_PATH:-$HOME/src/nih-plug}}"
-
-if [[ ! -d "$NIH_PLUG_PATH" ]]; then
-    echo "error: nih-plug checkout not found at $NIH_PLUG_PATH" >&2
-    echo "set NIH_PLUG_PATH, or clone with:" >&2
-    echo "    git clone https://github.com/robbert-vdh/nih-plug.git \"$NIH_PLUG_PATH\"" >&2
-    exit 1
-fi
-
-cargo run --release \
-    --manifest-path "$NIH_PLUG_PATH/nih_plug_xtask/Cargo.toml" -- \
-    bundle {circuit_name} --release
+cargo xtask bundle {circuit_name} --release
 
 echo
 echo "Bundled plugins are in: target/bundled/"
@@ -2344,6 +2414,39 @@ mod tests {
         assert!(
             dir.join("build.sh").exists(),
             "Should create build.sh wrapper"
+        );
+        // build.sh must invoke the in-workspace xtask bin, NOT run the
+        // nih_plug_xtask *library* directly (which has no bin target and fails
+        // with "a bin target must be available"). Regression: melange#build-sh.
+        let build_sh = std::fs::read_to_string(dir.join("build.sh")).unwrap();
+        assert!(
+            build_sh.contains("cargo xtask bundle test-circuit --release"),
+            "build.sh must bundle via the xtask alias"
+        );
+        assert!(
+            !build_sh.contains("nih_plug_xtask/Cargo.toml"),
+            "build.sh must NOT run the nih_plug_xtask library (no bin target)"
+        );
+        // The xtask member crate (the runnable bundler bin) must be scaffolded.
+        assert!(
+            dir.join("xtask/Cargo.toml").exists(),
+            "Should create xtask/Cargo.toml"
+        );
+        let xtask_main = std::fs::read_to_string(dir.join("xtask/src/main.rs")).unwrap();
+        assert!(
+            xtask_main.contains("nih_plug_xtask::main()"),
+            "xtask bin must call nih_plug_xtask::main()"
+        );
+        // Cargo.toml lists the xtask member; .cargo/config.toml has the alias.
+        let root_toml = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap();
+        assert!(
+            root_toml.contains("members = [\"xtask\"]"),
+            "workspace must include the xtask member"
+        );
+        let cargo_config = std::fs::read_to_string(dir.join(".cargo/config.toml")).unwrap();
+        assert!(
+            cargo_config.contains("xtask = \"run --package xtask --release --\""),
+            ".cargo/config.toml must define the xtask alias"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

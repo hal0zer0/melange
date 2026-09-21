@@ -57,8 +57,9 @@ melange import circuit.xml -o circuit.cir
 # Compile to a plugin project, then build the DSP library
 melange compile circuit.cir --format plugin -o my-plugin
 cd my-plugin && cargo build --release
-# → raw library in target/release/. To get a DAW-loadable VST3/CLAP bundle,
-#   follow the generated project's README (one nih-plug clone + `xtask bundle`).
+# → raw library in target/release/. For a DAW-loadable VST3/CLAP bundle, run
+#   `bash build.sh` (bundles via the project's own xtask — no nih-plug clone).
+#   Generate the project OUTSIDE any Cargo workspace, or bundling will fail.
 ```
 
 Standard parts (R, C, L, D, BJT, JFET, MOSFET) use KiCad's own `Simulation_SPICE` symbols — no reinvention, no melange-flavored resistor. The melange-specific parts (triodes, pentodes, VCAs, pots, wipers, I/O markers) live in the included `melange.kicad_sym` library, because KiCad does not ship a symbol for "the thing that makes a Wurlitzer sound like that." Setup lives in the [KiCad integration guide](kicad/README.md).

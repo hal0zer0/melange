@@ -288,13 +288,16 @@ These are informational and don't affect audio output.
 
 ```bash
 cd my-plugin
-bash build.sh   # bundles CLAP+VST3 via nih_plug_xtask
+bash build.sh   # bundles CLAP+VST3 via the in-workspace xtask bin
 ```
 
-The generated `README.md` documents the one-time nih-plug clone and the
-`NIH_PLUG_PATH` you set in `build.sh` before the first run. (There is no
-`cargo nih-plug-xtask` subcommand — the bundler runs via `build.sh` or
-`cargo run --manifest-path <nih-plug>/nih_plug_xtask/Cargo.toml -- bundle`.)
+`build.sh` runs `cargo xtask bundle <name> --release`. The project ships its
+own `xtask/` member crate (a thin bin wrapping `nih_plug_xtask`), which pulls
+nih-plug in as a git dependency — **no separate nih-plug checkout is needed**.
+Bundle from OUTSIDE any enclosing Cargo workspace: `nih_plug_xtask` finds the
+workspace root by walking to the outermost `Cargo.toml`, so a project generated
+inside another repo must be moved out before it can be bundled (`cargo build
+--release` for the raw library works in place).
 
 Output: `target/bundled/my_plugin.clap` and `target/bundled/my_plugin.vst3`
 

@@ -16,30 +16,35 @@ Optional:
 
 ## Quick Start: Circuit to Plugin
 
-Compile the built-in demo circuit (ships with melange, no downloads), or use a local `.cir` file:
+Compile the built-in demo circuit (ships with melange, no downloads), or use a local `.cir` file. **Generate the project *outside* the melange repo** — pick any directory that is not inside a Cargo workspace (the DAW bundler walks up to the outermost `Cargo.toml`, so a project nested in the melange checkout cannot be bundled):
 
 ```bash
+cd ~                      # anywhere outside the melange repo
 melange compile passive-eq1a --format plugin -o my-eq
 # or from a local file:
 melange compile my-circuit.cir --format plugin -o my-fuzz
 ```
 
-This generates a complete nih-plug project in `my-fuzz/` with:
+This generates a complete nih-plug project in `my-eq/` with:
 - `src/circuit.rs` — generated DSP code (do not edit)
 - `src/lib.rs` — plugin wrapper (safe to customize)
 - `Cargo.toml` — ready to build
-- `README.md` — build instructions
+- `xtask/` — the nih-plug bundler bin (do not edit)
+- `build.sh` / `README.md` — build instructions
 
 Build the plugin:
 
 ```bash
-cd my-fuzz
-# Bundle CLAP + VST3. The one-time nih-plug clone is documented in the
-# generated README.md; edit NIH_PLUG_PATH in build.sh, then run it:
-bash build.sh
+cd my-eq
+bash build.sh            # bundles CLAP + VST3 (no separate nih-plug clone needed)
 ```
 
 The compiled CLAP and VST3 plugins appear in `target/bundled/`.
+
+> If you generated the project inside the melange repo, `melange` prints a
+> warning and the bundle step will fail — move the project out (`mv my-eq ~/`)
+> and re-run `bash build.sh`. The raw `cargo build --release` library works
+> either way.
 
 **Testing:** Always start with your monitor volume at zero and increase gradually — circuit simulations can produce unexpected levels.
 
