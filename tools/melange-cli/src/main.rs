@@ -2716,9 +2716,10 @@ fn compile_circuit_source(
             println!("  cd {dir_name}");
             println!("  cargo build --release          # → raw plugin lib in target/release/");
             println!();
-            println!("For a DAW-loadable CLAP + VST3 bundle (one-time nih-plug setup):");
-            println!("  git clone https://github.com/robbert-vdh/nih-plug.git ~/src/nih-plug");
+            println!("For a DAW-loadable CLAP + VST3 bundle (no nih-plug clone needed):");
+            println!("  cd {dir_name}");
             println!("  bash build.sh                  # → CLAP + VST3 in target/bundled/");
+            println!("  # (must be OUTSIDE any Cargo workspace — see the warning above if any)");
             println!();
             println!("See the generated README.md for full details.");
         }

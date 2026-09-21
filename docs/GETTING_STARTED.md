@@ -5,10 +5,15 @@ Melange compiles SPICE circuit netlists into real-time audio DSP code. This guid
 ## Prerequisites
 
 - **Rust 1.85+** — [rustup.rs](https://rustup.rs)
-- **melange CLI** — install from the repo:
+- **melange CLI** — install it from a checkout of this repository (the
+  `--path` below is relative, so you must run it from the repo root):
   ```bash
+  git clone https://github.com/hal0zer0/melange.git   # skip if you already have it
+  cd melange
   cargo install --path tools/melange-cli
   ```
+  This puts `melange` on your `PATH` (in `~/.cargo/bin`). Verify with
+  `melange --version`. The rest of this guide can then run from any directory.
 
 Optional:
 - **ngspice** — for validation against SPICE reference (`apt install ngspice` / `brew install ngspice`)
@@ -19,7 +24,7 @@ Optional:
 Compile the built-in demo circuit (ships with melange, no downloads), or use a local `.cir` file. **Generate the project *outside* the melange repo** — pick any directory that is not inside a Cargo workspace (the DAW bundler walks up to the outermost `Cargo.toml`, so a project nested in the melange checkout cannot be bundled):
 
 ```bash
-cd ~                      # anywhere outside the melange repo
+mkdir -p ~/melange-plugins && cd ~/melange-plugins   # any dir outside the melange repo
 melange compile passive-eq1a --format plugin -o my-eq
 # or from a local file:
 melange compile my-circuit.cir --format plugin -o my-fuzz
