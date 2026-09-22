@@ -1081,6 +1081,16 @@ pub struct GlowParams {
     /// relaxing lit branch.
     #[serde(default)]
     pub k: [f64; 4],
+    /// Per-section DECAY-side coefficient `k_i⁻` [volts]: the section weight used
+    /// while the tube current is falling (`i < Ī_i`), where [`Self::k`] is the
+    /// GROWTH-side weight (`i ≥ Ī_i`). Parsed from `K1M..K4M`; each defaults to
+    /// the matching `k[i]`, so a deck that authors no `…M` keys is symmetric and
+    /// bit-identical to the prior single-weight law. Asymmetry (k⁻ ≠ k⁺) makes the
+    /// section active — it sources net energy on the decay side (excess ionisation
+    /// sustaining conduction below the static line); same log form both sides so
+    /// the inner Newton stays monotone (voltron t422 / arbiter t481).
+    #[serde(default)]
+    pub k_minus: [f64; 4],
     /// Per-section current-lag time constant `τ_i` [seconds] for
     /// `dĪ_i/dt = (i − Ī_i)/τ_i`. Parsed from `TAU1..TAU4`; must be > 0 when
     /// the matching `k` is non-zero.

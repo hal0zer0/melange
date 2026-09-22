@@ -1610,6 +1610,14 @@ impl RustEmitter {
                         emit_device_const(&mut code, dev_num, "RT", gp.r_t);
                         for i in 0..crate::device_types::GlowParams::MAX_SECTIONS {
                             emit_device_const(&mut code, dev_num, &format!("K{}", i + 1), gp.k[i]);
+                            // Decay-side weight (defaults to K{i}, so symmetric decks
+                            // emit K{i}M == K{i} and stay bit-identical).
+                            emit_device_const(
+                                &mut code,
+                                dev_num,
+                                &format!("K{}M", i + 1),
+                                gp.k_minus[i],
+                            );
                             emit_device_const(
                                 &mut code,
                                 dev_num,

@@ -975,6 +975,7 @@ fn emit_glow_update_body(
     let iconv = armed + 1;
     let pend = armed + 2;
     let k_arr = format!("&[DEVICE_{d}_K1, DEVICE_{d}_K2, DEVICE_{d}_K3, DEVICE_{d}_K4]");
+    let km_arr = format!("&[DEVICE_{d}_K1M, DEVICE_{d}_K2M, DEVICE_{d}_K3M, DEVICE_{d}_K4M]");
     let ext_field = if is_ssf { ", extinguished: false" } else { "" };
 
     let mut b = String::new();
@@ -1015,7 +1016,7 @@ fn emit_glow_update_body(
         );
         b.push_str(&format!("            let glow_prov = [DEVICE_{d}_IFLOOR; 4];\n"));
         b.push_str(&format!(
-            "            let (i0, _) = glow_lit_eval(cv, DEVICE_{d}_V0, DEVICE_{d}_RT, {k_arr}, &glow_prov, DEVICE_{d}_IFLOOR, DEVICE_{d}_KSUB, DEVICE_{d}_I_N);\n"
+            "            let (i0, _) = glow_lit_eval(cv, DEVICE_{d}_V0, DEVICE_{d}_RT, {k_arr}, {km_arr}, &glow_prov, DEVICE_{d}_IFLOOR, DEVICE_{d}_KSUB, DEVICE_{d}_I_N);\n"
         ));
         b.push_str("            state[1] = i0; state[2] = i0; state[3] = i0; state[4] = i0;\n");
         // Disarm extinction at strike: a still-forming discharge that has not yet
@@ -1047,7 +1048,7 @@ fn emit_glow_update_body(
         // (the device is 1-D/2-terminal and cannot see the external C). Both i's
         // come from converged glow_lit_eval(cv). Otherwise relax each active section.
         b.push_str(&format!(
-            "        let (i_now, _) = glow_lit_eval(cv, DEVICE_{d}_V0, DEVICE_{d}_RT, {k_arr}, &glow_i_bar, DEVICE_{d}_IFLOOR, DEVICE_{d}_KSUB, DEVICE_{d}_I_N);\n"
+            "        let (i_now, _) = glow_lit_eval(cv, DEVICE_{d}_V0, DEVICE_{d}_RT, {k_arr}, {km_arr}, &glow_i_bar, DEVICE_{d}_IFLOOR, DEVICE_{d}_KSUB, DEVICE_{d}_I_N);\n"
         ));
         b.push_str(&format!(
             "        if i_now > DEVICE_{d}_IHOLD {{ state[{armed}] = 1.0; }}\n"
@@ -1071,7 +1072,7 @@ fn emit_glow_update_body(
             b.push_str("        if glow_confirm {\n");
             b.push_str(&format!(
                 "            // Confirmed extinction: crossing-fraction alpha on the confirmed sample (1-sample latency).\n\
-                 \x20           let (i_prev, _) = glow_lit_eval(vp, DEVICE_{d}_V0, DEVICE_{d}_RT, {k_arr}, &glow_i_bar, DEVICE_{d}_IFLOOR, DEVICE_{d}_KSUB, DEVICE_{d}_I_N);\n"
+                 \x20           let (i_prev, _) = glow_lit_eval(vp, DEVICE_{d}_V0, DEVICE_{d}_RT, {k_arr}, {km_arr}, &glow_i_bar, DEVICE_{d}_IFLOOR, DEVICE_{d}_KSUB, DEVICE_{d}_I_N);\n"
             ));
             b.push_str("            let di = i_now - i_prev;\n");
             b.push_str(&format!(
