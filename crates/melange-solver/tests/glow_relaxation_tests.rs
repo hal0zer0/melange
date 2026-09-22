@@ -824,7 +824,7 @@ fn relax_deck_sections(vb: f64) -> String {
     format!(
         "\
 Neon Relaxation Oscillator (relaxing-section lit branch)
-.model NE1 NEON(VO=135 VM=93 IK=1.5e-3 RS=3000 IHOLD=2e-4 ROFF=300e6 RT=0 K1=5.0 TAU1=300e-6 KSUB=2.0)
+.model NE1 NEON(VO=135 VM=93 IK=1.5e-3 RS=3000 IHOLD=2e-4 ROFF=300e6 RT=0 K1=1.0 TAU1=300e-6 KSUB=2.0)
 Vb rail 0 DC {vb}
 Rc rail osc 1MEG
 Cosc osc 0 10N
@@ -937,93 +937,5 @@ fn test_glow_sections_on_full_lu_is_refused() {
     assert!(
         build(NodalSubPathOverride::Schur, false).is_ok(),
         "Schur route must compile the section glow"
-    );
-}
-
-// ── Asymmetric growth/decay section weights (voltron t422 / arbiter t481) ──────
-
-/// Section deck with a DECAY-side weight (K1M) different from the growth side (K1).
-fn relax_deck_asym(vb: f64) -> String {
-    format!(
-        "\
-Neon Relaxation Oscillator (asymmetric section weights)
-.model NE1 NEON(VO=135 VM=93 IK=1.5e-3 RS=3000 IHOLD=2e-4 ROFF=300e6 RT=0 K1=11.0 K1M=23.0 TAU1=234e-6 KSUB=2.0)
-Vb rail 0 DC {vb}
-Rc rail osc 1MEG
-Cosc osc 0 10N
-N1 osc 0 NE1
-Rin in 0 1G
-.END
-"
-    )
-}
-
-#[test]
-fn test_glow_asymmetric_weights_compile_and_run() {
-    use melange_solver::codegen::NodalSubPathOverride;
-    // K1M != K1 must emit the decay-side const, be passed into glow_lit_eval, and
-    // run without NaN on the Schur route. (Physics acceptance is voltron's rig
-    // test — this only guards that the asymmetric path is wired and stable.)
-    let code =
-        generate_nodal_code_subpath(&relax_deck_asym(170.0), 768000.0, NodalSubPathOverride::Schur);
-    assert!(code.contains("DEVICE_0_K1M"), "must emit decay-side const K1M");
-    assert!(
-        code.contains("DEVICE_0_K1M, DEVICE_0_K2M"),
-        "glow_lit_eval must receive the decay-weight array"
-    );
-    let out = compile_and_run(&code, OBSERVE_MAIN, "asym");
-    // Codegen-correctness bar: wired + numerically STABLE (no NaN, bounded).
-    // Whether these weights produce the right divider behaviour is voltron's rig
-    // acceptance on the real circuit, not this toy relaxation deck.
-    assert_eq!(
-        parse_kv(&out, "nan_reset") as u32,
-        0,
-        "no NaN on asymmetric section deck"
-    );
-    let vmax = parse_kv(&out, "vmax");
-    let vmin = parse_kv(&out, "vmin");
-    assert!(
-        vmax.is_finite() && vmin.is_finite() && vmax < 1.0e4 && vmin > -1.0e4,
-        "asymmetric section deck must stay bounded (vmin={vmin}, vmax={vmax})"
-    );
-}
-
-#[test]
-fn test_glow_degenerate_sections_rejected() {
-    use melange_solver::codegen::NodalSubPathOverride;
-    // Σ min(K,KM) ≤ KSUB+1 loses monotonicity → codegen must REFUSE (fail-loud).
-    // K1=1, KSUB=2 → min-sum 1 ≤ 3.
-    let deck = "\
-Degenerate section deck
-.model NE1 NEON(VO=135 VM=93 IK=1.5e-3 RS=3000 IHOLD=2e-4 ROFF=300e6 RT=0 K1=1.0 TAU1=300e-6 KSUB=2.0)
-Vb rail 0 DC 170
-Rc rail osc 1MEG
-Cosc osc 0 10N
-N1 osc 0 NE1
-Rin in 0 1G
-.END
-";
-    let netlist = Netlist::parse(deck).unwrap();
-    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
-    let input_node = mna.node_map["in"] - 1;
-    let output_node = mna.node_map["osc"] - 1;
-    mna.g[input_node][input_node] += 1.0;
-    let config = CodegenConfig {
-        circuit_name: "glow_degen".to_string(),
-        sample_rate: 768000.0,
-        input_node,
-        output_nodes: vec![output_node],
-        input_resistance: 1.0,
-        subsample_fire: SubsampleFireMode::Off,
-        nodal_sub_path_override: NodalSubPathOverride::Schur,
-        ..CodegenConfig::default()
-    };
-    let err = CodeGenerator::new(config)
-        .generate_nodal(&mna, &netlist)
-        .expect_err("degenerate Σ min(K,KM) ≤ KSUB+1 must be refused");
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("Σ min(K,KM)") && msg.contains("KSUB+1"),
-        "refusal must name the monotonicity condition; got: {msg}"
     );
 }

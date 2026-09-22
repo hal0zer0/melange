@@ -64,7 +64,6 @@ fn glow_lit_eval(
     v0: f64,
     r_t: f64,
     k: &[f64; 4],
-    k_minus: &[f64; 4],
     i_bar: &[f64; 4],
     _ifloor: f64,
     ksub: f64,
@@ -75,61 +74,45 @@ fn glow_lit_eval(
     const X_MAX: f64 = 700.0; // e^700 ≈ 1e304 < f64::MAX; caps overflow
     const INNER_MAX_ITER: usize = 30;
     const INNER_TOL: f64 = 1e-13;
-    const INNER_RTOL: f64 = 1e-9; // residual exit (arbiter t481 guard c)
     // Passive Jacobian floor for the subnormal NDR corner (g'(I) ≤ 0): keep jdev a
     // small POSITIVE conductance so the outer NR stays diagonally dominant while
     // i_dev carries the true negative-slope current (SPICE gmin analog).
     const GLOW_GMIN: f64 = 1e-12;
 
-    let ln_in = i_n.max(GLOW_LN_TINY).ln();
-    // Per-section breakpoints ln(Ī_i). Each section uses its GROWTH weight k[i]
-    // when the iterate current I ≥ Ī_i and its DECAY weight k_minus[i] when
-    // I < Ī_i. Symmetric decks (k_minus == k) make this independent of x and the
-    // whole eval reduces bit-for-bit to the prior single-weight law.
-    let mut ln_bar = [0.0f64; 4];
+    // S = Σ k_i ; sum_kln = Σ k_i·ln(Ī_i). Inactive sections (k_i = 0) drop out.
+    let mut s = 0.0;
+    let mut sum_kln = 0.0;
     for i in 0..4 {
-        ln_bar[i] = i_bar[i].max(GLOW_LN_TINY).ln();
+        s += k[i];
+        sum_kln += k[i] * i_bar[i].max(GLOW_LN_TINY).ln();
     }
-    // s_eff = Σ k_side − κ and c = Σ k_side·ln(Ī) − κ·ln(i_n) at the iterate x=ln I.
-    // The side is chosen INSIDE this closure against the CURRENT x, so r and r'
-    // are always on the same piece (arbiter t481 guard a: selecting the side once
-    // from the warm start is what would let Newton cycle across a kink).
-    let coeffs = |x: f64| -> (f64, f64) {
-        let mut s = 0.0;
-        let mut kln = 0.0;
-        for i in 0..4 {
-            let ki = if x >= ln_bar[i] { k[i] } else { k_minus[i] };
-            s += ki;
-            kln += ki * ln_bar[i];
-        }
-        (s - ksub, kln - ksub * ln_in)
-    };
-    // Warm start on the growth side (the strike solve enters with I ≫ IFLOOR, all
-    // sections growth-side); the loop re-selects per iterate regardless.
-    let (s_g, c_g) = coeffs(f64::INFINITY);
-    let s_div = if s_g.abs() > 1e-30 { s_g } else { 1e-30 };
-    let mut x = (v_d - v0 + c_g) / s_div;
+    // Fold the static subnormal term −κ·ln(I/i_n): it shifts the x-linear
+    // coefficient S → S−κ and adds the constant +κ·ln(i_n) into the (subtracted)
+    // constant c. κ=0 ⇒ s_eff=s, c=sum_kln (bit-for-bit the prior equation).
+    let ln_in = i_n.max(GLOW_LN_TINY).ln();
+    let s_eff = s - ksub;
+    let c = sum_kln - ksub * ln_in;
+    // Warm start x0 = (v_d − v0 + c)/(S−κ) — EXACT when R_T = 0 (r linear in x).
+    // Guard the divisor for the degenerate S−κ ≈ 0 (needs only a finite start).
+    let s_div = if s_eff.abs() > 1e-30 { s_eff } else { 1e-30 };
+    let mut x = (v_d - v0 + c) / s_div;
 
     for _ in 0..INNER_MAX_ITER {
-        let (s_eff, c) = coeffs(x);
         let ex = if x > X_MAX { X_MAX } else { x }.exp();
         let r = v0 + r_t * ex + s_eff * x - c - v_d;
-        let rp = r_t * ex + s_eff; // r'(x); single-signed per side (Σ k_side ≥ κ+1)
+        let rp = r_t * ex + s_eff; // r'(x); single-signed when R_T=0 or κ≤S
         if rp.abs() < 1e-300 {
             break;
         }
         let dx = r / rp;
         x -= dx;
-        if dx.abs() < INNER_TOL && r.abs() < INNER_RTOL {
+        if dx.abs() < INNER_TOL {
             break;
         }
     }
 
     let i = if x > X_MAX { X_MAX } else { x }.exp();
-    // Jacobian from the CONVERGED root's side (arbiter t481 guard b): recompute
-    // s_eff at the final x so it reflects the piece the root actually landed on.
-    let (s_eff_final, _) = coeffs(x);
-    let gp = r_t + s_eff_final / i; // g'(I) = R_T + (Σ k_side − κ)/I
+    let gp = r_t + s_eff / i; // g'(I) = R_T + (S−κ)/I
     let jdev = if gp > 1e-300 { 1.0 / gp } else { GLOW_GMIN };
     (i, jdev)
 }

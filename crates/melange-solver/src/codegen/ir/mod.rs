@@ -6086,15 +6086,6 @@ impl CircuitIR {
         }
         let has_sections = k.iter().any(|&x| x != 0.0);
 
-        // K1M..K4M: DECAY-side section weights (used while i < Ī_i). Each defaults
-        // to the matching growth-side k[i], so a deck that authors no `…M` keys is
-        // symmetric and bit-identical to the prior single-weight law (arbiter t481).
-        let mut k_minus = k;
-        for i in 0..4 {
-            k_minus[i] =
-                Self::lookup_model_param(netlist, model, &format!("K{}M", i + 1)).unwrap_or(k[i]);
-        }
-
         // IFLOOR (A1): the log-domain current clamp / section-lag seed floor.
         // Authored key; defaults to IHOLD for continuity but is a live edge knob.
         let ifloor = Self::lookup_model_param(netlist, model, "IFLOOR").unwrap_or(ihold);
@@ -6127,10 +6118,9 @@ impl CircuitIR {
             )));
         }
         for i in 0..4 {
-            if !k[i].is_finite() || !k_minus[i].is_finite() || !tau[i].is_finite() {
+            if !k[i].is_finite() || !tau[i].is_finite() {
                 return Err(CodegenError::InvalidConfig(format!(
-                    "NEON model '{model}': K{}/K{}M/TAU{} must be finite",
-                    i + 1,
+                    "NEON model '{model}': K{}/TAU{} must be finite",
                     i + 1,
                     i + 1
                 )));
@@ -6171,26 +6161,6 @@ impl CircuitIR {
                     "NEON model '{model}': KSUB ({ksub}) > ΣK ({k_sum}) with RT ({r_t}) > 0 is a \
                      non-monotone lit branch (r'(x)=RT·eˣ+(ΣK−KSUB) changes sign → non-convergent); \
                      author RT=0 for a subnormal branch, or keep KSUB ≤ ΣK"
-                )));
-            }
-            // Asymmetric-weight monotonicity (arbiter t481): with per-section decay
-            // weights the branch stays single-valued only if the WORST side
-            // combination keeps r'(x) > 0. At R_T=0 that is
-            // Σ_active min(k⁺,k⁻) − κ > 0; require a ≥1 V margin so the strike
-            // predictor's root stays unambiguous and a reduced-section deck cannot
-            // land on the degenerate slope (a single active section with k ≈ κ,
-            // where the warm start divides by ~0).
-            let min_side_sum: f64 = (0..4)
-                .filter(|&i| k[i] != 0.0 || k_minus[i] != 0.0)
-                .map(|i| k[i].min(k_minus[i]))
-                .sum();
-            if min_side_sum <= ksub + 1.0 {
-                return Err(CodegenError::InvalidConfig(format!(
-                    "NEON model '{model}': Σ min(K,KM) over active sections ({min_side_sum:.3} V) \
-                     must exceed KSUB+1 V ({:.3} V) — otherwise the decay-side slope r'(x) can \
-                     reach or cross zero, making the lit branch multi-valued and the strike root \
-                     ambiguous. Raise the section weights (K/KM) or lower KSUB.",
-                    ksub + 1.0
                 )));
             }
         }
@@ -6249,9 +6219,8 @@ impl CircuitIR {
             netlist,
             model,
             &[
-                "VO", "VM", "IK", "RS", "IHOLD", "ROFF", "RT", "K1", "K2", "K3", "K4", "K1M",
-                "K2M", "K3M", "K4M", "TAU1", "TAU2", "TAU3", "TAU4", "IFLOOR", "KSUB", "D_AMP",
-                "D_TKNEE", "D_THOLD",
+                "VO", "VM", "IK", "RS", "IHOLD", "ROFF", "RT", "K1", "K2", "K3", "K4", "TAU1",
+                "TAU2", "TAU3", "TAU4", "IFLOOR", "KSUB", "D_AMP", "D_TKNEE", "D_THOLD",
             ],
             &[],
         )?;
@@ -6264,7 +6233,6 @@ impl CircuitIR {
             ihold,
             r_t,
             k,
-            k_minus,
             tau,
             ifloor,
             ksub,
