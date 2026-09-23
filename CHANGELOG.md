@@ -11,6 +11,48 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ### Added
 
+- **`melange validate` works on op-amp circuits again — the whole class.**
+  ngspice has no `U` element and no `OA` model type, so every deck containing an
+  op-amp was refused outright. That took the one command that answers "did I
+  write this netlist right?" away from the most common hobbyist circuit
+  class — a pedal with an op-amp gain stage — and made the README's own
+  "Overdrive pedal | op-amp gain + diode clipper" row un-validatable. It was a
+  **missing translator**, not a real limitation: melange's op-amp *is* a linear
+  Boyle-style VCCS macromodel, so
+  `melange-validate/src/opamp_translate.rs` now emits exactly the stamps
+  `mna.rs` makes — `GOA_<n> out 0 <in-> <in+> {AOL/ROUT}` (control pair swapped,
+  because ngspice's `G` draws current out of `n+` where melange injects it into
+  the output node), `ROA_<n> out 0 {ROUT}`, plus `RIN` shunts and `IB` sources
+  when the `.model` sets them, each with melange's own grounded-pin guards.
+  `GBW` is deliberately not translated: melange computes `iir_c_dom` from it but
+  no codegen path consumes it, so its only live effect is defaulting the rails.
+  - Native-`U` decks validate **exactly where the hand-expanded ones do**:
+    `opamp_inverting_u` returns RMS 1.919045e-7 / peak 4.706210e-7 / correlation
+    1.00000000 — digit-for-digit the shipped `opamp_inverting` numbers. The
+    overdrive pedal (`tube_screamer_u`: `U1` + `.model OA(AOL=200k ROUT=75)` +
+    antiparallel 1N4148 clipping) validates at correlation 0.99999031, RMS
+    0.4419%, THD error 0.04 dB, against 0.99999031 / 0.4420% for the
+    hand-expanded deck.
+  - **The scope limit is enforced, not documented.** The twin is linear: it has
+    no VCC/VEE/VSAT rail clamp and no `SR` slew clamp, and melange applies both
+    after each NR solve. So each clamped op-amp's output node is added to the
+    reference capture, and the run is **refused** if the reference shows the
+    clamp would have engaged — naming the op-amp, the rail, the sample time, the
+    observed voltage and three ways to proceed. Watching the reference is
+    sufficient because the two engines follow one trajectory up to melange's
+    first clamp. Measured on the shipped `opamp_railed` deck (gain-of-11 stage on
+    ±4.5 V, 0.5 V in): without the guard `validate` would have printed
+    **correlation 0.996288** for a melange output clipped at 4.54 V against an
+    unclamped 5.53 V reference — comfortably past the 0.99 gate, and a different
+    circuit. Rails that are merely *declared* still validate (`opamp_two_stage_rails`,
+    three stages on ±4.5 V: correlation 1.00000000).
+  - An explicit `.model OA(AOL_TRANSIENT_CAP=…)` is refused before ngspice runs:
+    it gives melange's transient G matrix a different Gm than its own DC stamp,
+    and one `G` card cannot be both.
+  - Op-amps come **off** `deck_guard`'s ngspice-unsupported list. LDR (`O`),
+    VCA (`Y`) and glow (`N`) stay on it — each carries device state no ngspice
+    primitive reproduces.
+
 - **Netlist topology checks: a mistyped node name is now refused, not
   simulated.** A cold first-user test typo'd `C3 n3 n4 220n` into
   `C3 n33 n4 220n`, which invents a node and floats the tone stage; melange
@@ -99,7 +141,51 @@ codegen output, CLI flags, and netlist semantics may all change.
   labels (`pot_tone`, not `pot_0`) while `#[id = "pot_N"]` is unchanged, being
   the persisted automation identity.
 
+- **The `--format code` API is documented** ([`docs/CODE_API.md`](docs/CODE_API.md)).
+  `--format code` is the DEFAULT output of `melange compile`, and until now
+  `grep 'CircuitState::' docs/*.md README.md` returned nothing: a cold first user
+  got through it only by opening his own generated `circuit.rs` and grepping
+  `pub fn`, after `CircuitState::new()` failed to exist. The page states the
+  shapes that actually surprise people — `CircuitState::default()` is the
+  constructor, and `process_sample(input: f64, state: &mut CircuitState) ->
+  [f64; NUM_OUTPUTS]` is a FREE FUNCTION, not a method — plus `set_sample_rate`,
+  `reset`, the `set_pot_<i>` / `set_switch_<i>` setters (netlist declaration
+  order, the order `melange nodes` prints), the constants a caller needs, the
+  two `process_sample` signature variants (multi-input, `.inject`/`.tap`), the
+  warmup loop, and the real-time rules. Every signature on the page was verified
+  by compiling it: the page's own ten-line example builds and runs against a
+  generated nodal `passive-eq1a` file (its output tracks `melange simulate` to
+  0.03%), and the same calls build against a DK-routed diode-clipper file. The
+  README's "zero runtime dependency" claim was checked the same way and is now
+  stated with its evidence (empty `[dependencies]`, one package in `Cargo.lock`).
+  Linked from the README reading list, the `--format code` paragraph and the CLI
+  section, from `PLUGIN_GUIDE.md` and `GETTING_STARTED.md`, and from `compile`'s
+  own success output, which now prints the three-line usage sketch where the
+  reader actually is.
+  - Corrects a README overclaim found while verifying: the soft ear-protection
+    limiter is emitted into the plugin wrapper `lib.rs`, NOT into `circuit.rs`.
+    On the `--format code` path the output carries a hard +/-10 V clamp and
+    nothing else (and with `--no-dc-block`, not even that) — the page says so,
+    because the difference is a speaker.
+
 ### Changed
+
+- **An exempted THD check now says so instead of printing a bare 40 dB
+  "error" under a green PASSED.** `melange validate examples/passive-eq1a.cir`
+  printed `THD (SPICE): -113.88 dB / THD (melange): -153.73 dB / THD Error:
+  39.85 dB` directly beneath `Status: PASSED`, which reads as either a bug in
+  melange or a bug in the report. It is neither: `compare_signals` exempts the
+  THD check when melange is at least as clean as the reference AND the reference
+  itself sits below the -60 dB no-meaningful-distortion floor, because that
+  delta is the gap between two numeric noise floors (ngspice's INTERP floor is
+  circuit-dependent; melange's generated code is frequently 40+ dB cleaner).
+  The line now reads `39.85 dB (not graded)` followed by an `info (normal):`
+  block naming both floors and stating that melange ADDING distortion the
+  reference lacks is still graded and still fails. The HTML report's THD row
+  shows `not graded` for the same reason, instead of a red mark contradicting
+  the run's own verdict. Presentation only: no tolerance, no exemption rule and
+  no pass/fail path changed, the number is never suppressed, and a graded THD
+  line is byte-for-byte what it was.
 
 - **The floating-island scan in `melange validate` was wrong in both
   directions, and is now a consumer of the shared pass.** It unioned every
@@ -160,6 +246,68 @@ across both solver routes are byte-identical.
   bound to the resolvers by mutation-tested drift guards.
 
 ### Fixed
+
+- **A circuit imported from KiCad had no ground.** `melange import` on the
+  bundled `kicad/examples/rc-lowpass` produced `C1 net__c1_pad1 net___pwr01_gnd`
+  — the ground symbol became an ordinary floating node, so the MNA system was
+  solving against a reference melange picked for itself, a DC operating point
+  would report convergence on an ungrounded circuit, and ngspice would reject the
+  deck outright. The root cause was in the example, not in KiCad: its embedded
+  `power:GND` definition was missing the `(power)` token, so KiCad never made it
+  a global net and fell back to the auto-generated name `Net-(#PWR01-GND)`. A
+  power symbol drawn from KiCad's stock library emits a net literally named
+  `GND`. The schematic is fixed and `rc-lowpass.xml` re-exported from Eeschema
+  10.0.6; the example now imports to `C1 net__c1_pad1 0 0.1u` and analyzes to the
+  159 Hz corner its reference deck documents. Guarded by
+  `shipped_kicad_example_imports_to_the_shipped_reference_circuit`, which imports
+  the committed XML (no KiCad needed) and checks it is the same circuit as
+  `rc-lowpass-reference.cir` — parts, values, topology and ground on node `0`.
+- **A dual supply imported from KiCad had its rails shorted together.**
+  `sanitize_node` rewrote every character SPICE cannot carry to `_` and then
+  prefixed a leading digit with `n`, so `+15V` and `-15V` both became the single
+  node `n15v`. Nothing in the output said so. A leading sign is now carried
+  across as the SPICE spelling (`p15v` / `n15v`); interior hyphens are untouched,
+  so KiCad's own auto-names (`Net-(C1-Pad1)`) import unchanged. Any residual
+  collision — two distinct KiCad nets folding onto one melange node — is now a
+  **refusal** naming both nets, because a silent rewire of the circuit is not
+  something to warn about and proceed.
+- **KiCad's ground spellings map to node `0`.** `GND` (what `power:GND` emits),
+  `/GND`, `0` and `ground` all become the reference node. `AGND`, `DGND`,
+  `GNDREF` and friends deliberately do **not** — a schematic that draws both
+  `GND` and `AGND` has drawn two nets on purpose, and folding them would rewire
+  it. Non-ground power symbols (`VCC`, `+15V`) import as ordinary named nodes:
+  they are nets the circuit still has to drive, so dropping them or tying them to
+  `0` would be wrong. A schematic with no ground symbol still gets no ground —
+  melange does not invent one, and the existing no-ground diagnostic is the right
+  answer there.
+- **A power symbol that KiCad did not treat as one is now named.** `melange
+  import` warns when it sees a `Net-(#REF-PIN)` net, explaining that the symbol's
+  library definition lacks `(power)` and so created no global net — the exact
+  failure melange's own example shipped with, previously visible only as a
+  mystery node name.
+- **`melange import` no longer claims its own KiCad files are broken.** The
+  too-old-`kicad-cli` error still said `melange.kicad_sym` and
+  `kicad/examples/rc-lowpass` do not load in KiCad 10.0.6. They were repaired in
+  the same batch and both load; the message now says so.
+- **`kicad/README.md` states what the KiCad path has and has not been run
+  through.** It now leads with the scope: one real end-to-end run, covering stock
+  `Simulation_SPICE` R/C parts, wire labels and a `power:GND` symbol. Every
+  melange-specific symbol (triode, pentode, op-amp, VCA, pot, wiper, VDC, I/O
+  markers) and every `Melange.*` field is untested in a real schematic and said
+  to be. It also documents the ground/rail mapping in full, notes that
+  `Failed to load schematic file` is KiCad's message for *any* load failure and
+  so does not identify whose fault it is, and points at the committed example XML
+  as something to run immediately without KiCad.
+
+- **`validate`'s ngspice output parser mis-read tables wider than three
+  columns.** ngspice prints at most three data columns per table and emits the
+  rest as further column *blocks*, each repeating the whole row range. The
+  parser treated every header as more of one table, so `time` came back
+  *blocks* × the true length while each voltage stayed correct — making
+  `SpiceData::sample_count()` report 3x on a wide capture. Blocks are now
+  aligned by row, and a header repeated with the *same* columns is still read as
+  ngspice paginating one block. Reachable before only via
+  `--additional-nodes`; the op-amp rail probes make wide captures ordinary.
 
 - **Parse errors reported "line 0".** Two defects: 52 error sites never carried a
   line, and the counter counted processed lines, so continuation (`+`) joining

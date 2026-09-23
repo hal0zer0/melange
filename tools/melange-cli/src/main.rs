@@ -1205,15 +1205,15 @@ fn main() -> Result<()> {
                 p.set_file_name(format!("{}.probes.csv", stem));
                 Some(p)
             };
-            let nodal_sub_path_override =
-                melange_solver::codegen::NodalSubPathOverride::parse(&nodal_subpath).ok_or_else(
-                    || {
-                        anyhow::anyhow!(
-                            "Unknown --nodal-subpath '{}'. Valid values: auto, schur, full-lu",
-                            nodal_subpath
-                        )
-                    },
-                )?;
+            let nodal_sub_path_override = melange_solver::codegen::NodalSubPathOverride::parse(
+                &nodal_subpath,
+            )
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unknown --nodal-subpath '{}'. Valid values: auto, schur, full-lu",
+                    nodal_subpath
+                )
+            })?;
             simulate_circuit_source(
                 &circuit_source,
                 &SimulateOptions {
@@ -2637,6 +2637,15 @@ fn compile_circuit_source(
             println!("This code can be used with:");
             println!("  - melange-plugin for VST/AU/CLAP plugins");
             println!("  - Standalone integration in your own projects");
+            println!();
+            // The emitted file is the default output of `compile`, and its
+            // caller-facing API (Default constructor, free `process_sample`,
+            // pot/switch setters, output units) is not guessable from the
+            // filename. Point at the doc here, where the reader actually is.
+            println!("Its API is documented in docs/CODE_API.md:");
+            println!("  let mut state = circuit::CircuitState::default();");
+            println!("  state.set_sample_rate(48_000.0);");
+            println!("  let out = circuit::process_sample(input, &mut state); // free fn -> [f64; NUM_OUTPUTS], volts");
             println!();
             // Suggest a DIRECTORY, not this file path. `--format plugin`
             // treats --output as the project root; echoing back

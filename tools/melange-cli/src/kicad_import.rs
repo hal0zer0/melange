@@ -1,7 +1,7 @@
 //! KiCad netlist import — converts KiCad XML or SPICE netlists to Melange .cir format.
 
 use anyhow::{bail, Context, Result};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 use crate::ImportFormat;
@@ -90,9 +90,14 @@ fn import_from_schematic(input: &Path, output: &Path, _format: &ImportFormat) ->
                         "kicad-cli {ver} is too old for melange's schematic import, which needs \
                          KiCad 8 or newer.\n\
                          \x20 Why: `.kicad_sch` files melange targets carry file format version \
-                         20231120 (KiCad 8). kicad-cli 7 cannot open them and reports only \
-                         \"Failed to load schematic file\" — the schematic is fine, the tool is \
-                         too old.\n\
+                         20231120 (KiCad 8). kicad-cli 7 cannot open them, and reports only \
+                         \"Failed to load schematic file\" whatever the cause — so that message \
+                         on its own does not tell you whether your schematic is at fault.\n\
+                         \x20 Note: \"Failed to load schematic file\" is also what a genuinely \
+                         malformed file gets, so if the same message persists after upgrading, \
+                         suspect the file. (melange's own bundled `melange.kicad_sym` and \
+                         `kicad/examples/rc-lowpass` were in that state until they were \
+                         repaired; both now load in KiCad 10.0.6.)\n\
                          \x20 Fix: install KiCad 8+, or, from a machine that has it, export the \
                          intermediate netlist and import that instead:\n    \
                          kicad-cli sch export python-bom -o circuit.xml circuit.kicad_sch\n    \
@@ -320,6 +325,13 @@ fn import_xml(content: &str) -> Result<String> {
         }
         buf.clear();
     }
+
+    // Two net-name checks before anything is emitted. Both guard against the
+    // generated deck being quietly wrong rather than obviously broken: a
+    // collision solders two schematic nets together, and an auto-named
+    // `Net-(#PWR..)` net means a power symbol never became a global net at all.
+    check_node_name_collisions(&nets)?;
+    warn_unmarked_power_symbol_nets(&nets);
 
     // Now generate the .cir file
     let mut lines = Vec::new();
@@ -819,13 +831,57 @@ fn ref_prefix(ref_des: &str) -> String {
         .collect()
 }
 
+/// Net names KiCad's *ground* power symbols carry, after the leading sheet-path
+/// separator is stripped and case is folded.
+///
+/// A KiCad power symbol drives a global net named after its Value field, so
+/// `power:GND` produces a net literally called `GND`. `0` and `ground` are here
+/// because melange's own parser aliases both to the reference node
+/// (`parser::normalize_node_name`), so a schematic labelled either way must land
+/// on `0` in the emitted deck rather than on a node named after the label.
+///
+/// Deliberately NOT included: `AGND`, `DGND`, `GNDA`, `GNDD`, `GNDPWR`,
+/// `GNDREF`, `VSS`, `EARTH`. KiCad ships power symbols for all of them and they
+/// are *separate nets* from `GND` in the schematic that uses them — a board with
+/// both `GND` and `AGND` has drawn two nets on purpose. Folding them together
+/// here would silently rewire the circuit, so they import as ordinary named
+/// nodes and the author ties them to `0` explicitly if that is what they meant.
+const GROUND_NET_NAMES: [&str; 3] = ["0", "gnd", "ground"];
+
+/// Convert a KiCad net name into a melange node name.
+///
+/// KiCad's ground power symbols map onto melange's reference node `0`; every
+/// other net — including non-ground power symbols such as `VCC`, `+15V` and
+/// `-15V` — becomes an ordinary named node, because that is what they are. A
+/// rail is a net the circuit still has to drive: importing `+15V` as a named
+/// node leaves the author a node to hang a `V` source on, whereas dropping it
+/// or folding it into `0` would short the rail to ground.
 fn sanitize_node(name: &str) -> String {
-    let low = name.trim().to_lowercase();
-    if low == "gnd" || low == "0" || low == "/gnd" {
+    // A root-sheet local label exports as `/in`; a global net (which is what a
+    // power symbol makes) exports bare. Strip one leading separator before the
+    // ground test so `/GND` and `GND` agree.
+    let trimmed = name.trim();
+    let unrooted = trimmed.strip_prefix('/').unwrap_or(trimmed);
+    if GROUND_NET_NAMES.contains(&unrooted.to_lowercase().as_str()) {
         return "0".into();
     }
-    let s = name.trim_start_matches('/');
-    let s: String = s
+
+    // A leading sign is part of a rail's identity, not punctuation: `+15V` and
+    // `-15V` both collapse to `15v` under the generic map below, which would
+    // short a dual supply into one node. Carry the sign across as the SPICE
+    // spelling (`p`/`n`) instead. Interior signs stay generic — `Net-(C1-Pad1)`
+    // is an auto-generated name, not a signed quantity — and anything that
+    // still collides is caught by `check_node_name_collisions`.
+    let (sign, rest) = match unrooted.strip_prefix('+') {
+        Some(r) => ("p", r),
+        None => match unrooted.strip_prefix('-') {
+            Some(r) => ("n", r),
+            None => ("", unrooted),
+        },
+    };
+
+    let s: String = rest
+        .trim_start_matches('/')
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '_' {
@@ -837,7 +893,14 @@ fn sanitize_node(name: &str) -> String {
         .collect();
     let s = s.trim_matches('_').to_lowercase();
     if s.is_empty() {
-        return "node".into();
+        return if sign.is_empty() {
+            "node".into()
+        } else {
+            sign.into()
+        };
+    }
+    if !sign.is_empty() {
+        return format!("{sign}{s}");
     }
     if s.chars()
         .next()
@@ -847,6 +910,83 @@ fn sanitize_node(name: &str) -> String {
         format!("n{s}")
     } else {
         s
+    }
+}
+
+/// Refuse to emit a deck in which two distinct KiCad nets sanitize to the same
+/// melange node name.
+///
+/// `sanitize_node` is lossy — it folds case and rewrites every character SPICE
+/// cannot carry — so distinct schematic nets can land on one node. That failure
+/// is invisible in the output: the deck parses, simulates, and quietly has two
+/// nets soldered together. `+15V` and `-15V` used to do exactly this (both
+/// became `n15v`, shorting a dual supply). Fold-to-ground is the one legitimate
+/// merge and is exempt: `GND`, `gnd`, `ground` and `0` genuinely are one node.
+fn check_node_name_collisions(nets: &[(String, Vec<(String, String)>)]) -> Result<()> {
+    let mut by_node: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (net_name, _) in nets {
+        let node = sanitize_node(net_name);
+        if node == "0" {
+            continue; // ground aliases are meant to merge
+        }
+        by_node.entry(node).or_default().insert(net_name.clone());
+    }
+    for (node, sources) in &by_node {
+        if sources.len() > 1 {
+            let list: Vec<&str> = sources.iter().map(|s| s.as_str()).collect();
+            bail!(
+                "KiCad nets {} all import as melange node '{}', which would short them \
+                 together in the generated deck.\n\
+                 \x20 Node names are folded to lower case and stripped of characters SPICE \
+                 cannot carry, so distinct schematic nets can collide.\n\
+                 \x20 Fix: rename the nets in the schematic so they stay distinct after that \
+                 folding, then re-export.",
+                list.iter()
+                    .map(|s| format!("'{s}'"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                node
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Warn about nets KiCad auto-named after a `#`-referenced symbol.
+///
+/// KiCad gives a symbol a `#` reference prefix when it is not a real part —
+/// power symbols (`#PWR`), ERC flags (`#FLG`), and melange's own I/O markers
+/// (`#AIN`, `#AOUT`). Such a symbol only creates a *global net* if its library
+/// definition is marked `(power)`. Without that token KiCad treats it as an
+/// ordinary symbol, gives it no net name of its own, and the net falls back to
+/// the auto-generated `Net-(#REF-PIN)` form.
+///
+/// For a ground symbol that is silent and fatal: the deck imports with no
+/// reference node at all. melange's bundled `rc-lowpass` example shipped in
+/// exactly that state — its embedded `power:GND` was missing `(power)`, so the
+/// import produced `net___pwr01_gnd` instead of `0`. Name the cause rather than
+/// leaving the author to work backwards from a mystery node.
+fn warn_unmarked_power_symbol_nets(nets: &[(String, Vec<(String, String)>)]) {
+    for (net_name, _) in nets {
+        let Some(inner) = net_name
+            .strip_prefix("Net-(#")
+            .and_then(|s| s.strip_suffix(')'))
+        else {
+            continue;
+        };
+        let (sym, pin) = match inner.split_once('-') {
+            Some((s, p)) => (s, p),
+            None => (inner, ""),
+        };
+        eprintln!(
+            "  Warning: net '{net_name}' is an auto-generated name, not a net the schematic \
+             names. KiCad only turns symbol #{sym} into a named global net if its library \
+             definition carries the `(power)` token; without it the symbol connects nothing \
+             beyond the wire it sits on. If #{sym} (pin {pin}) is a ground or supply symbol, \
+             replace it with one from KiCad's stock `power` library and re-export — otherwise \
+             this net imports as the ordinary node '{node}'.",
+            node = sanitize_node(net_name)
+        );
     }
 }
 
@@ -1010,5 +1150,323 @@ mod tests {
     #[test]
     fn format_value_empty_becomes_zero() {
         assert_eq!(format_value(""), "0");
+    }
+
+    // ─── Ground / power-symbol net mapping ──────────────────────────
+    //
+    // KiCad power symbols never appear in the exported `<components>` list —
+    // their references start with `#` and KiCad excludes those from the BOM —
+    // so the importer only ever sees them as net *names*. That makes
+    // `sanitize_node` the whole of melange's power-symbol handling, and these
+    // tests pin its contract.
+
+    #[test]
+    fn sanitize_node_maps_kicad_ground_symbols_to_reference_node() {
+        // `power:GND` drives a global net literally named "GND".
+        assert_eq!(sanitize_node("GND"), "0");
+        assert_eq!(sanitize_node("gnd"), "0");
+        // A root-sheet local label exports with the sheet-path separator.
+        assert_eq!(sanitize_node("/GND"), "0");
+        // melange's parser also aliases "ground"; the emitted deck should say 0.
+        assert_eq!(sanitize_node("GROUND"), "0");
+        assert_eq!(sanitize_node("0"), "0");
+        assert_eq!(sanitize_node("/0"), "0");
+    }
+
+    #[test]
+    fn sanitize_node_keeps_non_ground_power_symbols_as_named_nodes() {
+        // Supply rails are nets, not ground: they import as ordinary nodes the
+        // author can hang a source on.
+        assert_eq!(sanitize_node("VCC"), "vcc");
+        assert_eq!(sanitize_node("VDD"), "vdd");
+        // Analog/digital grounds are SEPARATE nets in a schematic that draws
+        // them, so they must NOT be folded into 0 behind the author's back.
+        assert_eq!(sanitize_node("AGND"), "agnd");
+        assert_eq!(sanitize_node("GNDREF"), "gndref");
+    }
+
+    #[test]
+    fn sanitize_node_keeps_dual_supply_rails_distinct() {
+        // Regression: the generic character map turned every non-alphanumeric
+        // into '_', so "+15V" and "-15V" both trimmed to "15v" and then took
+        // the digit-guard prefix to become "n15v" — one node. A dual supply
+        // imported with its rails shorted together and nothing said so.
+        assert_eq!(sanitize_node("+15V"), "p15v");
+        assert_eq!(sanitize_node("-15V"), "n15v");
+        assert_ne!(sanitize_node("+15V"), sanitize_node("-15V"));
+        assert_eq!(sanitize_node("+5V"), "p5v");
+        assert_eq!(sanitize_node("-12V"), "n12v");
+        assert_eq!(sanitize_node("+3V3"), "p3v3");
+    }
+
+    #[test]
+    fn sanitize_node_leaves_autogenerated_net_names_alone() {
+        // KiCad's auto-name for an unnamed net carries interior hyphens that
+        // are punctuation, not signs. Machine-generated but correct — leave it.
+        assert_eq!(sanitize_node("Net-(C1-Pad1)"), "net__c1_pad1");
+        assert_eq!(sanitize_node("Net-(#PWR01-GND)"), "net___pwr01_gnd");
+        assert_eq!(sanitize_node("/in"), "in");
+        assert_eq!(sanitize_node("/out"), "out");
+    }
+
+    #[test]
+    fn collision_check_refuses_nets_that_would_be_shorted() {
+        // Two distinct schematic nets landing on one node name is a silent
+        // rewire of the circuit, so it is a refusal, not a warning.
+        let nets = vec![("Vout+".to_string(), vec![]), ("Vout-".to_string(), vec![])];
+        let err =
+            check_node_name_collisions(&nets).expect_err("nets that fold together must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("Vout+") && msg.contains("Vout-"), "{msg}");
+        assert!(msg.contains("short"), "{msg}");
+    }
+
+    #[test]
+    fn collision_check_allows_ground_aliases_to_merge() {
+        // GND / gnd / ground / 0 really are one node; merging them is correct.
+        let nets = vec![
+            ("GND".to_string(), vec![]),
+            ("0".to_string(), vec![]),
+            ("ground".to_string(), vec![]),
+            ("in".to_string(), vec![]),
+        ];
+        check_node_name_collisions(&nets).expect("ground aliases must be allowed to merge");
+    }
+
+    #[test]
+    fn import_xml_puts_kicad_ground_on_node_zero() {
+        // End-to-end through the XML reader: a `power:GND` net becomes 0.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<export version="E">
+  <design><source>/tmp/gnd-test.kicad_sch</source></design>
+  <components>
+    <comp ref="C1"><value>0.1u</value><libsource lib="Device" part="C"/></comp>
+  </components>
+  <nets>
+    <net code="1" name="/in"><node ref="C1" pin="1"/></net>
+    <net code="2" name="GND"><node ref="C1" pin="2"/></net>
+  </nets>
+</export>"#;
+        let cir = import_xml(xml).expect("import_xml should succeed");
+        assert!(
+            cir.contains("C1 in 0 0.1u"),
+            "ground not mapped to 0:\n{cir}"
+        );
+    }
+
+    #[test]
+    fn import_xml_keeps_supply_rail_as_a_named_node() {
+        // A `power:VCC` symbol is a net, not ground and not something to drop.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<export version="E">
+  <design><source>/tmp/vcc-test.kicad_sch</source></design>
+  <components>
+    <comp ref="R1"><value>10k</value><libsource lib="Device" part="R"/></comp>
+  </components>
+  <nets>
+    <net code="1" name="VCC"><node ref="R1" pin="1"/></net>
+    <net code="2" name="GND"><node ref="R1" pin="2"/></net>
+  </nets>
+</export>"#;
+        let cir = import_xml(xml).expect("import_xml should succeed");
+        assert!(
+            cir.contains("R1 vcc 0 10k"),
+            "rail not kept as a node:\n{cir}"
+        );
+    }
+
+    #[test]
+    fn import_xml_does_not_invent_a_ground_for_an_unmarked_power_symbol() {
+        // This is the net name melange's own rc-lowpass example produced before
+        // its embedded `power:GND` was marked `(power)`: KiCad never made it a
+        // global net, so it is NOT a ground and must not be guessed into one.
+        // The same `Net-(#REF-PIN)` shape also comes from `#FLG` ERC flags and
+        // melange's own `#AIN`/`#AOUT` markers, which are not grounds either.
+        // The correct outcome is an ordinary node plus the existing no-ground
+        // diagnostic — see `warn_unmarked_power_symbol_nets`.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<export version="E">
+  <design><source>/tmp/unmarked.kicad_sch</source></design>
+  <components>
+    <comp ref="C1"><value>0.1u</value><libsource lib="Device" part="C"/></comp>
+  </components>
+  <nets>
+    <net code="1" name="/in"><node ref="C1" pin="1"/></net>
+    <net code="2" name="Net-(#PWR01-GND)"><node ref="C1" pin="2"/></net>
+  </nets>
+</export>"#;
+        let cir = import_xml(xml).expect("import_xml should succeed");
+        assert!(
+            cir.contains("C1 in net___pwr01_gnd 0.1u"),
+            "an unnamed net must import as itself, not as ground:\n{cir}"
+        );
+    }
+
+    // ─── End-to-end: the shipped example imports to the shipped reference ───
+
+    /// Repo-root path, derived from this crate's manifest dir (`tools/melange-cli`).
+    fn repo_path(rel: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(rel)
+    }
+
+    /// A deck reduced to what is electrically true about it: for every element,
+    /// its kind, its value, and the pair of nodes it bridges.
+    type Edge = (char, f64, [String; 2]);
+
+    fn edges(cir: &str, what: &str) -> Vec<Edge> {
+        let netlist = melange_solver::parser::Netlist::parse(cir)
+            .unwrap_or_else(|e| panic!("{what} must parse: {e}\n{cir}"));
+        use melange_solver::parser::Element;
+        netlist
+            .elements
+            .iter()
+            .map(|el| match el {
+                Element::Resistor {
+                    n_plus,
+                    n_minus,
+                    value,
+                    ..
+                } => ('R', *value, [n_plus.clone(), n_minus.clone()]),
+                Element::Capacitor {
+                    n_plus,
+                    n_minus,
+                    value,
+                    ..
+                } => ('C', *value, [n_plus.clone(), n_minus.clone()]),
+                Element::Inductor {
+                    n_plus,
+                    n_minus,
+                    value,
+                    ..
+                } => ('L', *value, [n_plus.clone(), n_minus.clone()]),
+                // Fail loud rather than quietly comparing a subset: if the
+                // fixture grows a transistor, this comparator has to grow too.
+                other => panic!(
+                    "{what} contains an element this topology comparator does not \
+                     model yet: {other:?}"
+                ),
+            })
+            .collect()
+    }
+
+    /// Canonical form of one element: kind, value, and its two endpoints sorted,
+    /// with free (schematic-internal) nodes replaced via `map`. R and C are
+    /// symmetric two-terminal parts, so endpoint order carries no information.
+    fn canon(e: &Edge, map: &BTreeMap<String, String>) -> (char, String, String, String) {
+        let mut ends: Vec<String> =
+            e.2.iter()
+                .map(|n| map.get(n).cloned().unwrap_or_else(|| n.clone()))
+                .collect();
+        ends.sort();
+        // Values come from identical source strings on both sides; format to a
+        // fixed precision so the comparison is on the number, not the bits.
+        (
+            e.0,
+            format!("{:.12e}", e.1),
+            ends[0].clone(),
+            ends[1].clone(),
+        )
+    }
+
+    /// True when the two decks are the same circuit. Ground and the named I/O
+    /// nodes are pinned by name; every other node is a schematic internal whose
+    /// name is free to differ, so they are matched by structure — any bijection
+    /// that makes the element multisets equal proves the topologies agree.
+    fn electrically_equivalent(a: &[Edge], b: &[Edge]) -> bool {
+        const PINNED: [&str; 3] = ["0", "in", "out"];
+        let free = |es: &[Edge]| -> Vec<String> {
+            let mut v: Vec<String> = es
+                .iter()
+                .flat_map(|e| e.2.iter().cloned())
+                .filter(|n| !PINNED.contains(&n.as_str()))
+                .collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        let (fa, fb) = (free(a), free(b));
+        if fa.len() != fb.len() || a.len() != b.len() {
+            return false;
+        }
+        assert!(
+            fa.len() <= 6,
+            "brute-force node matching is only for small fixtures ({} free nodes)",
+            fa.len()
+        );
+
+        let target: BTreeSet<_> = b.iter().map(|e| canon(e, &BTreeMap::new())).collect();
+        let mut perm: Vec<usize> = (0..fb.len()).collect();
+        loop {
+            let map: BTreeMap<String, String> = fa
+                .iter()
+                .cloned()
+                .zip(perm.iter().map(|&i| fb[i].clone()))
+                .collect();
+            let mapped: BTreeSet<_> = a.iter().map(|e| canon(e, &map)).collect();
+            if mapped == target && mapped.len() == a.len() {
+                return true;
+            }
+            if !next_permutation(&mut perm) {
+                return false;
+            }
+        }
+    }
+
+    fn next_permutation(v: &mut [usize]) -> bool {
+        if v.len() < 2 {
+            return false;
+        }
+        let Some(i) = (0..v.len() - 1).rev().find(|&i| v[i] < v[i + 1]) else {
+            return false;
+        };
+        let j = (i + 1..v.len()).rev().find(|&j| v[j] > v[i]).unwrap();
+        v.swap(i, j);
+        v[i + 1..].reverse();
+        true
+    }
+
+    /// The whole KiCad path, end to end, with no KiCad installed: the committed
+    /// `rc-lowpass.xml` (real Eeschema 10.0.6 output) must import to the same
+    /// circuit as the hand-written `rc-lowpass-reference.cir` that ships beside
+    /// it — same parts, same values, same topology, and ground on node 0.
+    ///
+    /// This is the regression guard for the ground defect. Before the example
+    /// schematic's `power:GND` was marked `(power)`, KiCad emitted the net as
+    /// `Net-(#PWR01-GND)`, the import produced `C1 net__c1_pad1 net___pwr01_gnd`,
+    /// and the deck had no reference node at all — the MNA system was solving
+    /// relative to a reference melange picked for itself and ngspice would have
+    /// rejected the deck outright.
+    #[test]
+    fn shipped_kicad_example_imports_to_the_shipped_reference_circuit() {
+        let xml_path = repo_path("kicad/examples/rc-lowpass/rc-lowpass.xml");
+        let ref_path = repo_path("kicad/examples/rc-lowpass/rc-lowpass-reference.cir");
+        let xml = std::fs::read_to_string(&xml_path)
+            .unwrap_or_else(|e| panic!("{}: {e}", xml_path.display()));
+        let reference = std::fs::read_to_string(&ref_path)
+            .unwrap_or_else(|e| panic!("{}: {e}", ref_path.display()));
+
+        let imported = import_xml(&xml).expect("the shipped example must import");
+
+        let imp = edges(&imported, "imported deck");
+        let rfr = edges(&reference, "reference deck");
+
+        // Ground first: this is the defect the test exists for, so report it on
+        // its own rather than as an opaque topology mismatch.
+        assert!(
+            imp.iter().any(|e| e.2.iter().any(|n| n == "0")),
+            "imported deck has no node 0 — KiCad's ground symbol did not map to \
+             melange's reference node. Nodes seen: {:?}\n{imported}",
+            imp.iter()
+                .flat_map(|e| e.2.clone())
+                .collect::<BTreeSet<_>>()
+        );
+
+        assert!(
+            electrically_equivalent(&imp, &rfr),
+            "imported deck is not the reference circuit.\n\
+             imported: {imp:?}\nreference: {rfr:?}\n\n{imported}"
+        );
     }
 }

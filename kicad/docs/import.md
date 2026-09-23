@@ -45,6 +45,20 @@ kicad-cli sch export python-bom -o circuit.xml circuit.kicad_sch
 melange import circuit.xml -o circuit.cir
 ```
 
+The XML is self-contained, so this is also the way to import on a machine with
+no KiCad at all. `examples/rc-lowpass/rc-lowpass.xml` is a committed example you
+can run immediately.
+
+## Ground, supply rails and net names
+
+KiCad power symbols are excluded from the exported component list (their
+references start with `#`), so the importer sees them only as net names.
+`power:GND` becomes melange's reference node `0`; `VCC`, `+15V` and `-15V` become
+ordinary named nodes (`vcc`, `p15v`, `n15v`) that your circuit still has to
+drive. Separate grounds such as `AGND` are left separate. Two KiCad nets that
+would fold onto the same melange node are a hard error, not a warning. Full
+table and rationale: [../README.md](../README.md#ground-and-power-symbols).
+
 ## SPICE Import (best-effort)
 
 `melange import` also accepts KiCad SPICE netlists. This strips simulation directives (`.tran`, `.ac`, etc.) and sanitizes `GND` → `0`. Melange-specific directives (`.pot`, `.switch`, `.gang`) must be added manually.

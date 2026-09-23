@@ -177,7 +177,7 @@
 				)
 			)
 		)
-		(symbol "power:GND"
+		(symbol "power:GND" (power)
 			(pin_names (offset 0))
 			(in_bom no)
 			(on_board no)
