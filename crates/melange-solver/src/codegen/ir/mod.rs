@@ -4661,10 +4661,8 @@ impl CircuitIR {
                                 // has_sections trailing slots: armed + i_conv_prev
                                 // + pending_extinction = 3.
                                 let n_sec_trailing = if has_sec { 3 } else { 0 };
-                                let mut seed = vec![
-                                    0.0f64;
-                                    1 + nsec + usize::from(has_d) + n_sec_trailing
-                                ];
+                                let mut seed =
+                                    vec![0.0f64; 1 + nsec + usize::from(has_d) + n_sec_trailing];
                                 for s in seed.iter_mut().skip(1).take(nsec) {
                                     *s = params.ifloor;
                                 }
@@ -6048,7 +6046,11 @@ impl CircuitIR {
             vm - rs * ik
         };
         if v0 <= 0.0 {
-            let (slope_name, slope_val) = if has_sections { ("RT", r_t) } else { ("RS", rs) };
+            let (slope_name, slope_val) = if has_sections {
+                ("RT", r_t)
+            } else {
+                ("RS", rs)
+            };
             return Err(CodegenError::InvalidConfig(format!(
                 "NEON model '{model}': derived maintaining-line intercept v0 = VM − {slope_name}·IK \
                  = {vm} − {slope_val}·{ik} = {v0} is non-positive; check VM/{slope_name}/IK"

@@ -1850,15 +1850,13 @@ impl RustEmitter {
         // `allow_static_glow_on_full_lu` (which runs today's static line and marks
         // the sections inert in provenance).
         if use_full_nodal && !ir.solver_config.allow_static_glow_on_full_lu {
-            if let Some((dev_num, _)) =
-                ir.device_slots.iter().enumerate().find(|(_, slot)| {
-                    matches!(
-                        &slot.params,
-                        DeviceParams::Glow(gp)
-                            if gp.has_sections() || gp.has_d() || gp.ksub > 0.0
-                    )
-                })
-            {
+            if let Some((dev_num, _)) = ir.device_slots.iter().enumerate().find(|(_, slot)| {
+                matches!(
+                    &slot.params,
+                    DeviceParams::Glow(gp)
+                        if gp.has_sections() || gp.has_d() || gp.ksub > 0.0
+                )
+            }) {
                 return Err(CodegenError::InvalidConfig(format!(
                     "glow device #{dev_num} uses a relaxing-section / delayed-overvoltage \
                      / subnormal (KSUB) lit branch, but this circuit routes the nodal \

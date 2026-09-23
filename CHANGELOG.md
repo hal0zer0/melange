@@ -35,6 +35,24 @@ codegen output, CLI flags, and netlist semantics may all change.
     commensurable; at 1x it lands within 0.005 samples of zero. Fitted and
     analytic delays are both printed on an `Aligned:` line. **No tolerance,
     preset or pass/fail rule moved.**
+  - **One comparison method, not two.** The alignment shipped wired into
+    `validate_circuit_with_options` only, so the `melange validate` CLI aligned
+    while most of the 29-deck CI SPICE gate
+    (`crates/melange-validate/tests/spice_validation.rs`), which builds its own
+    harness and calls `compare_signals` directly, did not — one release would
+    have carried two measurements whose numbers were not commensurable. The
+    whole method now lives behind one entry point,
+    `melange_validate::align_reference` (+ `AlignmentRequest`), and every path
+    that grades melange against ngspice calls it and nothing else. All 29 decks
+    still pass with every tolerance unchanged. Most 1x fits land within 0.005
+    samples of zero and the metrics barely move, but three decks did not, and
+    the movement is a measurement correction rather than an improvement:
+    `tube_screamer_wiper` fits **-0.4338 samples** (rms 5.73 % -> 1.09 %,
+    1-rho 1.6e-3 -> 1.7e-5), `bjt_common_emitter` -0.174 samples (peak error
+    0.164 V -> 0.138 V) and `jfet_common_source` +0.088 samples (nRMS 3.45 %
+    -> 2.99 %, but peak error 4.41e-6 -> 6.34e-6 V — the fit minimises RMS, not
+    peak). Those sub-sample offsets against ngspice are real and are not yet
+    explained; they were previously being billed to amplitude.
   - **The filters' phase stays in the number.** An oversampled build adds
     frequency-dependent phase from the IIR allpass half-bands, and `validate`
     shows it as lost correlation: on `tube_screamer_u` at 48 kHz / 0.3 V over

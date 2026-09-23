@@ -54,6 +54,11 @@
 //! - **Applied in every mode, 1x included**, so the 1x/2x/4x rows stay
 //!   commensurable. At 1x the analytic seed is zero and the fit lands near
 //!   zero.
+//! - **Applied by every path, through one entry point.** [`align_reference`]
+//!   is the whole method — the `melange validate` CLI and the CI SPICE gate in
+//!   `tests/spice_validation.rs` both call it and nothing else. A second way
+//!   of lining two signals up would put two incommensurable measurements in
+//!   one release, which is the same defect as an unaligned 1x row.
 //!
 //! # Where the error floor is
 //!
@@ -422,6 +427,105 @@ pub fn fit_constant_delay(
         // and this delay is a boundary value, not a fit.
         at_search_bound: (fitted - lo).abs() < 1e-3 || (fitted - hi).abs() < 1e-3,
     }
+}
+
+/// Everything the validation pipeline knows that the delay fit needs.
+///
+/// A struct rather than seven positional arguments: all but two fields are a
+/// rate or a signal, and swapping a pair of them would still produce a number
+/// that looks plausible.
+#[derive(Debug, Clone, Copy)]
+pub struct AlignmentRequest<'a> {
+    /// Reference samples, already DC-blocked, at `reference_rate`.
+    pub reference: &'a [f64],
+    /// The melange output the reference is being lined up with, at
+    /// `actual_rate`.
+    pub actual: &'a [f64],
+    /// The drive, at `actual_rate`. Its fundamental seeds the search bound;
+    /// the stimulus is read from the INPUT rather than the output so a
+    /// heavily-distorting circuit cannot move the bound.
+    pub input_signal: &'a [f64],
+    /// Sample rate of `reference`, Hz.
+    pub reference_rate: f64,
+    /// Sample rate of `actual` and `input_signal`, Hz.
+    pub actual_rate: f64,
+    /// Codegen oversampling factor the melange side was BUILT with (1, 2 or
+    /// 4). Sets the analytic seed; 1 seeds at zero.
+    pub oversampling: usize,
+    /// Settle window the metrics will be graded over, in seconds. The fit is
+    /// done on the graded window so it minimises the residual that is then
+    /// reported, rather than a different one.
+    pub settle_time_s: f64,
+}
+
+/// Align a reference to a melange output: THE single comparison method.
+///
+/// Every path that grades melange against ngspice — `melange validate` and the
+/// CI SPICE gate in `tests/spice_validation.rs` alike — goes through here, so
+/// their numbers mean the same thing and stay commensurable. Two paths that
+/// each did their own thing would ship one release with two measurements.
+///
+/// This lives beside the estimator rather than inside `compare_signals`
+/// because it needs two things the metric engine cannot see: the oversampling
+/// factor the melange side was BUILT with (which sets the analytic seed) and
+/// the stimulus that drove the run (which sets the search bound).
+/// `compare_signals` is handed two signals and would have to guess both — and
+/// it is also used on short synthetic pairs, where fitting a delay is
+/// meaningless.
+///
+/// Call it AFTER the DC blocker, so the blocker still sees the reference's own
+/// first sample as its seed.
+///
+/// Returns the delayed reference — at `reference_rate`, same length, ready for
+/// `compare_signals` — and the fit, whose [`DelayFit::note`] belongs on the
+/// report: a fitted delay far from the analytic one is a finding.
+pub fn align_reference(req: AlignmentRequest<'_>) -> (Vec<f64>, DelayFit) {
+    // The fit needs both signals on one clock. Resampling is done with the
+    // SAME resampler `compare_signals` applies before it grades anything, so
+    // the fit sees the samples the metrics will.
+    let actual_at_ref_rate: Vec<f64> =
+        if (req.reference_rate - req.actual_rate).abs() > f64::EPSILON {
+            crate::comparison::Signal::new(req.actual.to_vec(), req.actual_rate, "fit")
+                .resample(req.reference_rate)
+                .samples
+        } else {
+            req.actual.to_vec()
+        };
+
+    // The window the metrics will be graded over, so the fit minimises the
+    // residual that actually gets reported.
+    let graded_len = req.reference.len().min(actual_at_ref_rate.len());
+    let graded_start = if req.settle_time_s > 0.0 {
+        ((req.settle_time_s * req.reference_rate).round() as usize).min(graded_len)
+    } else {
+        0
+    };
+
+    // Seed: the analytic delay of the oversampling round trip at the stimulus
+    // frequency, from the filter design. Zero at 1x.
+    //
+    // The round trip is clocked at MELANGE's host rate, so it is measured
+    // there and then expressed in reference-rate samples — the units the fit
+    // works in. The two rates are equal on every deck with `.OPTIONS INTERP`,
+    // which is every shipped deck; the conversion is here so that stops being
+    // a silent assumption.
+    let stimulus_hz = dominant_frequency(req.input_signal, req.actual_rate).unwrap_or(1000.0);
+    let analytic = crate::oversampling_round_trip_group_delay_samples(
+        req.oversampling,
+        req.actual_rate,
+        stimulus_hz,
+    ) * (req.reference_rate / req.actual_rate);
+
+    let fit = fit_constant_delay(
+        req.reference,
+        &actual_at_ref_rate,
+        graded_start..graded_len,
+        analytic,
+        stimulus_hz,
+        req.reference_rate,
+    );
+    let aligned = apply_fractional_delay(req.reference, fit.delay_samples);
+    (aligned, fit)
 }
 
 #[cfg(test)]

@@ -209,7 +209,10 @@ fn bs1852_ohms_marker_rejection_explains_itself() {
             m.contains(&format!("'{intended}'")),
             "message does not suggest the value to write: {m}"
         );
-        assert!(m.contains("ngspice"), "message does not give the reason: {m}");
+        assert!(
+            m.contains("ngspice"),
+            "message does not give the reason: {m}"
+        );
     }
 }
 
@@ -242,10 +245,19 @@ fn accepted_forms_sentence_matches_the_parser() {
     let m = Netlist::parse(deck).expect_err("reject").message;
 
     // Ground truth, measured here rather than assumed.
-    assert_eq!(parse_value("10f").expect("10f parses"), 10.0, "10f is Farad");
+    assert_eq!(
+        parse_value("10f").expect("10f parses"),
+        10.0,
+        "10f is Farad"
+    );
     assert!((parse_value("10fF").expect("10fF parses") - 10e-15).abs() < 1e-20);
-    assert!(parse_value("10kohm").is_err(), "10kohm must still be an error");
-    for good in ["10pF", "4.7uF", "100nH", "10kHz", "9V", "4k7", "6n8", "1meg"] {
+    assert!(
+        parse_value("10kohm").is_err(),
+        "10kohm must still be an error"
+    );
+    for good in [
+        "10pF", "4.7uF", "100nH", "10kHz", "9V", "4k7", "6n8", "1meg",
+    ] {
         assert!(parse_value(good).is_ok(), "{good} must parse");
     }
 
@@ -437,7 +449,11 @@ C1 out 0 1n
         .filter(|w| w.contains("unrecognized parameter"))
         .collect();
     // TWO elements share the card; the key is reported once, not twice.
-    assert_eq!(warns.len(), 1, "expected exactly one warning, got {warns:?}");
+    assert_eq!(
+        warns.len(),
+        1,
+        "expected exactly one warning, got {warns:?}"
+    );
     assert!(
         warns[0].contains("DTEST") && warns[0].contains("RSS"),
         "{warns:?}"

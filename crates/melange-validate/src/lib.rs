@@ -55,7 +55,10 @@ pub mod spice_runner;
 pub(crate) mod tube_translate;
 pub mod visualizer;
 
-pub use alignment::{apply_fractional_delay, dominant_frequency, fit_constant_delay, DelayFit};
+pub use alignment::{
+    align_reference, apply_fractional_delay, dominant_frequency, fit_constant_delay,
+    AlignmentRequest, DelayFit,
+};
 pub use comparison::{batch_compare, compare_signals, ComparisonConfig, ComparisonReport, Signal};
 pub use deck_guard::{format_refusal, scan_deck, unit_variation_note, DeckHazard};
 pub use spice_runner::{
@@ -422,45 +425,20 @@ pub fn validate_circuit_with_options(
     // Order: after the DC blocker, so the blocker still sees the reference's
     // own first sample as its seed (the startup-transient fix documented on
     // `dc_block_signal`).
-    let melange_at_ref_rate: Vec<f64> =
-        if (spice_data.sample_rate - sample_rate).abs() > f64::EPSILON {
-            // Mirror what `compare_signals` does before it grades anything.
-            Signal::new(melange_output.clone(), sample_rate, "fit")
-                .resample(spice_data.sample_rate)
-                .samples
-        } else {
-            melange_output.clone()
-        };
-    // The window the metrics will be graded over, so the fit minimises the
-    // residual that actually gets reported.
-    let graded_len = spice_output_blocked.len().min(melange_at_ref_rate.len());
-    let graded_start = if config.settle_time_s > 0.0 {
-        ((config.settle_time_s * spice_data.sample_rate).round() as usize).min(graded_len)
-    } else {
-        0
-    };
-    // Seed: the analytic delay of the oversampling round trip at the stimulus
-    // frequency, from the filter design. Zero at 1x.
     //
-    // The round trip is clocked at MELANGE's host rate, so it is measured
-    // there and then expressed in reference-rate samples — the units the fit
-    // works in. The two rates are equal on every deck with `.OPTIONS INTERP`,
-    // which is every shipped deck; the conversion is here so that stops being
-    // a silent assumption.
-    let stimulus_hz = alignment::dominant_frequency(input_signal, sample_rate).unwrap_or(1000.0);
-    let analytic =
-        oversampling_round_trip_group_delay_samples(options.oversampling, sample_rate, stimulus_hz)
-            * (spice_data.sample_rate / sample_rate);
-    let delay_fit = alignment::fit_constant_delay(
-        &spice_output_blocked,
-        &melange_at_ref_rate,
-        graded_start..graded_len,
-        analytic,
-        stimulus_hz,
-        spice_data.sample_rate,
-    );
-    let spice_output_aligned =
-        alignment::apply_fractional_delay(&spice_output_blocked, delay_fit.delay_samples);
+    // `alignment::align_reference` is the ONE comparison method: the CI SPICE
+    // gate in `tests/spice_validation.rs` calls exactly this, so the CLI's
+    // numbers and CI's numbers are the same measurement.
+    let (spice_output_aligned, delay_fit) =
+        alignment::align_reference(alignment::AlignmentRequest {
+            reference: &spice_output_blocked,
+            actual: &melange_output,
+            input_signal,
+            reference_rate: spice_data.sample_rate,
+            actual_rate: sample_rate,
+            oversampling: options.oversampling,
+            settle_time_s: config.settle_time_s,
+        });
 
     // Create signal objects for comparison
     let spice_signal = Signal::new(

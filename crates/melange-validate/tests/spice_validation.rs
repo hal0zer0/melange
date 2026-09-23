@@ -30,12 +30,13 @@
 use std::path::PathBuf;
 
 use melange_validate::{
+    align_reference,
     comparison::{compare_signals, ComparisonConfig, Signal},
     dc_block_signal,
     spice_runner::{is_ngspice_available, run_transient_with_thevenin_pwl},
     strip_vin_source, validate_circuit,
     visualizer::generate_html_report,
-    ValidationError,
+    AlignmentRequest, DelayFit, ValidationError,
 };
 
 /// Sample rate used for all validation tests (48 kHz audio standard)
@@ -114,6 +115,15 @@ fn strict_linear_config() -> ComparisonConfig {
 /// Gates below sit ~3.5-10x above the worst measured user per metric
 /// (rms: tube_screamer; peak: silence→signal onset; corr: tube_screamer).
 /// tube_screamer_wiper overrides rms/corr with its own cited numbers.
+///
+/// Re-measured 2026-09-23, after this harness was put on the same best-fit
+/// delay alignment the `melange validate` CLI uses (it previously compared an
+/// unaligned reference, so its numbers were not commensurable with the CLI's):
+///   diode_clipper        rms 0.0687%  peak 1.61e-3 V  corr 0.99999991  fit +0.001 samp
+///   antiparallel_diodes  rms 0.0585%  peak 1.15e-3 V  corr 0.99999984  fit -0.002 samp
+///   tube_screamer        rms 0.3606%  peak 1.10e-2 V  corr 0.99999359  fit +0.023 samp
+///   diode silence->signal unchanged (that test already went through `validate_circuit`)
+/// Every gate below is UNCHANGED; headroom only grew.
 fn nonlinear_config() -> ComparisonConfig {
     ComparisonConfig {
         rms_error_tolerance: 0.02, // was 0.20; worst measured 0.442% → 4.5x headroom
@@ -139,6 +149,13 @@ fn nonlinear_config() -> ComparisonConfig {
 /// steady-state model mismatch (gain ratio 1.024 on a ~4.2 V p-p output),
 /// not startup — the settle window removes the startup contribution and
 /// the peak gate is tightened to 0.30 V (1.8x over the settled peak).
+///
+/// Re-measured 2026-09-23 under the shared delay alignment: rms 4.2513%,
+/// peak 0.1379 V, corr 0.99967043, at a fitted delay of -0.174 samples
+/// (-3.6 us). That fit is two orders above the ~0.002 samples the other 1x
+/// decks land at, so a real sub-sample timing difference against ngspice was
+/// being billed to amplitude here; most of the 26 mV the peak error dropped
+/// was it. Gates UNCHANGED.
 fn bjt_config() -> ComparisonConfig {
     ComparisonConfig {
         rms_error_tolerance: 0.10,     // was 0.15; measured 4.26% → 2.3x headroom
@@ -191,6 +208,10 @@ fn wurli_config() -> ComparisonConfig {
 /// Thevenin inject (n+ was "in_src", not "in"), leaving a second 1-ohm
 /// shunt at the input node on both sides. Removing it doubled the drive:
 /// measured gain went 3.4x → 6.7x (16.5 dB) at identical correlation.
+///
+/// Re-measured 2026-09-23 under the shared delay alignment: rms 0.0876%,
+/// peak 8.95e-5 V, corr 0.99999971, fitted delay +0.005 samples.
+/// Gates UNCHANGED.
 fn neve_output_config() -> ComparisonConfig {
     ComparisonConfig {
         rms_error_tolerance: 0.01,     // measured 0.107% → 9.3x headroom
@@ -232,6 +253,44 @@ fn neve_preamp_config() -> ComparisonConfig {
 // there is intentionally NO test-local copy. The library implementation
 // seeds `x_prev` from the signal's first sample (mirroring the generated
 // code's DC-OP-seeded blocker); see its doc comment in `src/lib.rs`.
+
+/// Line the reference up with the melange output, through the library's ONE
+/// alignment entry point — the same call `melange validate` makes.
+///
+/// This harness builds its own pipeline (per-test `fn main()` bodies, gain
+/// analysis on the raw signals), so it cannot simply call `validate_circuit`.
+/// What it must not do is GRADE differently. Until 2026-09-23 it handed
+/// `compare_signals` an unaligned reference while the CLI path aligned, so one
+/// release carried two comparison methods and the CI numbers were not
+/// commensurable with the CLI's. Every `compare_signals` call in this file now
+/// goes through here; none of them builds its own `Signal` pair.
+///
+/// `spice_output` must already be DC-blocked (the melange side is generated
+/// with `dc_block: true`). This harness always builds melange at 1x, so the
+/// analytic seed is zero and the fit is expected to land near zero — the
+/// returned [`DelayFit`] is put on the report so a fit that does not is
+/// visible rather than absorbed.
+fn aligned_signals(
+    spice_output: &[f64],
+    melange_output: &[f64],
+    input_signal: &[f64],
+    config: &ComparisonConfig,
+) -> (Signal, Signal, DelayFit) {
+    let (aligned, fit) = align_reference(AlignmentRequest {
+        reference: spice_output,
+        actual: melange_output,
+        input_signal,
+        reference_rate: SAMPLE_RATE,
+        actual_rate: SAMPLE_RATE,
+        oversampling: 1,
+        settle_time_s: config.settle_time_s,
+    });
+    (
+        Signal::new(aligned, SAMPLE_RATE, "SPICE"),
+        Signal::new(melange_output.to_vec(), SAMPLE_RATE, "Melange"),
+        fit,
+    )
+}
 
 /// Run validation for a circuit and return the result
 ///
@@ -295,14 +354,15 @@ fn run_validation(
     // output is already 5 Hz-blocked; the reference must get the same filter).
     dc_block_signal(&mut spice_output, SAMPLE_RATE);
 
-    // Create signals for comparison
-    let spice_signal = Signal::new(spice_output, SAMPLE_RATE, "SPICE");
-    let melange_signal = Signal::new(melange_output, SAMPLE_RATE, "Melange");
+    // Align the reference to the melange output, then compare — the single
+    // comparison method, shared with `melange validate`.
+    let (spice_signal, melange_signal, fit) =
+        aligned_signals(&spice_output, &melange_output, &input_signal, config);
 
-    // Compare signals
     let mut report = compare_signals(&spice_signal, &melange_signal, config);
     report.circuit_name = circuit_name.to_string();
     report.node_name = output_node.to_string();
+    report.alignment_note = Some(fit.note(SAMPLE_RATE));
 
     // Generate failure report if needed
     let report_path = if !report.passed {
@@ -458,6 +518,9 @@ fn print_validation_metrics(result: &ValidationResult) {
     println!("    Peak Error: {:.6e}", report.peak_error);
     println!("    Correlation: {:.8}", report.correlation_coefficient);
     println!("    SNR: {:.2} dB", report.snr_db);
+    if let Some(note) = &report.alignment_note {
+        println!("    Aligned: {}", note);
+    }
 
     if report.thd_spice.is_finite() && report.thd_melange.is_finite() {
         println!("    THD (SPICE): {:.2} dB", report.thd_spice);
@@ -619,11 +682,12 @@ fn test_bjt_common_emitter_vs_spice() {
         .expect("melange codegen failed");
 
     let config = bjt_config();
-    let spice_signal = Signal::new(spice_output.clone(), SAMPLE_RATE, "SPICE");
-    let melange_signal = Signal::new(melange_output.clone(), SAMPLE_RATE, "Melange");
+    let (spice_signal, melange_signal, fit) =
+        aligned_signals(&spice_output, &melange_output, &input_signal, &config);
     let mut report = compare_signals(&spice_signal, &melange_signal, &config);
     report.circuit_name = "bjt_common_emitter".to_string();
     report.node_name = "out".to_string();
+    report.alignment_note = Some(fit.note(SAMPLE_RATE));
 
     let result = ValidationResult {
         report,
@@ -823,6 +887,13 @@ fn test_jfet_common_source_vs_spice() {
     // rms margin is only 2.9x — left at 0.10 (tightening would leave <10x).
     // Peak tightened 0.5 → 1e-4 (measured 4.6e-6 → 22x headroom; the output
     // signal is micro-volt scale, so a 0.5 V peak gate was vacuous).
+    //
+    // Re-measured 2026-09-23 under the shared delay alignment (fitted delay
+    // +0.088 samples, 1.8 us): rms 2.9868%, corr 0.99956188, THD err 4.73 dB
+    // unchanged — but peak error ROSE 4.41e-6 → 6.34e-6 V (16x headroom, was
+    // 22x). The fit minimises the RMS residual, not the peak, so on a deck
+    // with a real sub-sample offset it can trade a little peak for a lot of
+    // RMS. Worth knowing before this gate is ever tightened. Gates UNCHANGED.
     let config = ComparisonConfig {
         rms_error_tolerance: 0.10,
         peak_error_tolerance: 1e-4,
@@ -943,11 +1014,12 @@ fn test_wurli_preamp_vs_spice() {
 
     // --- Compare ---
     let config = wurli_config();
-    let spice_signal = Signal::new(spice_output.clone(), SAMPLE_RATE, "SPICE");
-    let melange_signal = Signal::new(melange_output.clone(), SAMPLE_RATE, "Melange");
+    let (spice_signal, melange_signal, fit) =
+        aligned_signals(&spice_output, &melange_output, &input_signal, &config);
     let mut report = compare_signals(&spice_signal, &melange_signal, &config);
     report.circuit_name = "wurli_preamp".to_string();
     report.node_name = "out".to_string();
+    report.alignment_note = Some(fit.note(SAMPLE_RATE));
 
     let result = ValidationResult {
         report,
@@ -1057,11 +1129,12 @@ fn test_neve_1073_output_vs_spice() {
 
     // --- Compare ---
     let config = neve_output_config();
-    let spice_signal = Signal::new(spice_output.clone(), SAMPLE_RATE, "SPICE");
-    let melange_signal = Signal::new(melange_output.clone(), SAMPLE_RATE, "Melange");
+    let (spice_signal, melange_signal, fit) =
+        aligned_signals(&spice_output, &melange_output, &input_signal, &config);
     let mut report = compare_signals(&spice_signal, &melange_signal, &config);
     report.circuit_name = "neve_1073_output".to_string();
     report.node_name = "out".to_string();
+    report.alignment_note = Some(fit.note(SAMPLE_RATE));
 
     let result = ValidationResult {
         report,
@@ -1176,11 +1249,12 @@ fn test_neve_1073_preamp_vs_spice() {
 
     // --- Compare ---
     let config = neve_preamp_config();
-    let spice_signal = Signal::new(spice_output.clone(), SAMPLE_RATE, "SPICE");
-    let melange_signal = Signal::new(melange_output.clone(), SAMPLE_RATE, "Melange");
+    let (spice_signal, melange_signal, fit) =
+        aligned_signals(&spice_output, &melange_output, &input_signal, &config);
     let mut report = compare_signals(&spice_signal, &melange_signal, &config);
     report.circuit_name = "neve_1073_preamp".to_string();
     report.node_name = "out".to_string();
+    report.alignment_note = Some(fit.note(SAMPLE_RATE));
 
     let result = ValidationResult {
         report,
@@ -1699,6 +1773,18 @@ fn test_tube_screamer_wiper_vs_spice() {
     // sonically meaningful gate. rms 0.10 = 1.75x over measured (was
     // effectively 0.20 before the base config tightening — this is still a
     // tightening, not a widening).
+    //
+    // 2026-09-23, under the shared delay alignment: rms 5.71% → 1.0891%,
+    // corr 0.99838 → 0.99998267, peak 8.79e-3 → 4.39e-3 V, at a fitted delay
+    // of -0.4338 samples (-9.0 us) — by far the largest fit of any 1x deck
+    // here, and it means melange LEADS ngspice by nearly half a sample on
+    // this variant. The comment below diagnosed the low correlation as "the
+    // divider/tone offset"; the fit says it is literally a constant time
+    // offset, and removing it accounts for four fifths of the residual. The
+    // offset itself is NOT explained — a resistive divider should not delay
+    // anything, and the clipping-only `tube_screamer` fits only +0.023
+    // samples. Gates and the 0.997 assert below are UNCHANGED; the cited
+    // 5.71% / 0.99838696 figures are the pre-alignment measurement.
     let config = ComparisonConfig {
         max_relative_tolerance: 5000.0, // near-zero relative error from volume divider
         rms_error_tolerance: 0.10,      // measured 5.71% → 1.75x headroom
@@ -1834,11 +1920,12 @@ fn main() {
     // as tight as the nominal-position diode tests, so nonlinear_config
     // (rms 2%, peak 0.05 V, corr 0.9999, THD 1 dB) applies unchanged.
     let config = nonlinear_config();
-    let spice_signal = Signal::new(spice_output, SAMPLE_RATE, "SPICE");
-    let melange_signal = Signal::new(melange_output, SAMPLE_RATE, "Melange");
+    let (spice_signal, melange_signal, fit) =
+        aligned_signals(&spice_output, &melange_output, &input, &config);
     let mut report = compare_signals(&spice_signal, &melange_signal, &config);
     report.circuit_name = "pot_static_offnominal".to_string();
     report.node_name = "out".to_string();
+    report.alignment_note = Some(fit.note(SAMPLE_RATE));
 
     let result = ValidationResult {
         report,
@@ -1926,11 +2013,12 @@ fn main() {
         skip_thd: true, // modulation sidebands, not harmonics — THD is meaningless
         settle_time_s: 0.0,
     };
-    let spice_signal = Signal::new(spice_output, SAMPLE_RATE, "SPICE");
-    let melange_signal = Signal::new(melange_output, SAMPLE_RATE, "Melange");
+    let (spice_signal, melange_signal, fit) =
+        aligned_signals(&spice_output, &melange_output, &input, &config);
     let mut report = compare_signals(&spice_signal, &melange_signal, &config);
     report.circuit_name = "pot_modulation".to_string();
     report.node_name = "out".to_string();
+    report.alignment_note = Some(fit.note(SAMPLE_RATE));
 
     let result = ValidationResult {
         report,
@@ -2169,11 +2257,10 @@ fn test_railfree_version_of_the_railed_deck_validates() {
         run_melange_codegen(&stripped, &input_signal, SAMPLE_RATE).expect("melange run");
     dc_block_signal(&mut spice_output, SAMPLE_RATE);
 
-    let report = compare_signals(
-        &Signal::new(spice_output, SAMPLE_RATE, "SPICE"),
-        &Signal::new(melange_output, SAMPLE_RATE, "Melange"),
-        &strict_linear_config(),
-    );
+    let config = strict_linear_config();
+    let (spice_signal, melange_signal, _fit) =
+        aligned_signals(&spice_output, &melange_output, &input_signal, &config);
+    let report = compare_signals(&spice_signal, &melange_signal, &config);
     println!(
         "  rail-free gain-of-11 stage: corr {:.8}, rms {:.4}%",
         report.correlation_coefficient,

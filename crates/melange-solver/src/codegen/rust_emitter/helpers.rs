@@ -954,11 +954,7 @@ pub(super) fn emit_stateful_update_fns(
 /// overvoltage shrinks after a short off-time (arbiter coupling). t_off advances
 /// by `dt` every dark non-strike sample (incl. ssf sub-steps) and resets to 0 at
 /// extinction.
-fn emit_glow_update_body(
-    d: usize,
-    gp: &crate::device_types::GlowParams,
-    is_ssf: bool,
-) -> String {
+fn emit_glow_update_body(d: usize, gp: &crate::device_types::GlowParams, is_ssf: bool) -> String {
     let has_sec = gp.has_sections();
     let has_d = gp.has_d();
     // Trailing-slot indices (fixed order after the Ī block; see StatefulSpec):
@@ -995,7 +991,9 @@ fn emit_glow_update_body(
     }
     b.push_str("    if !lit {\n");
     b.push_str("        if cv >= vth {\n");
-    b.push_str("            // Strike (dark → lit): crossing fraction of V_s,eff across the step.\n");
+    b.push_str(
+        "            // Strike (dark → lit): crossing fraction of V_s,eff across the step.\n",
+    );
     b.push_str("            let denom = cv - vp;\n");
     b.push_str(
         "            let alpha = if denom.abs() > 1e-30 { ((vth - vp) / denom).clamp(0.0, 1.0) } else { 0.0 };\n",
@@ -1013,7 +1011,9 @@ fn emit_glow_update_body(
              \x20           // the WHOLE dump on a 1:1 converter (B5) that re-strikes every cycle.\n\
              \x20           // I₀ predicted from cv with provisional Ī=IFLOOR (dark solve ≠ lit current).\n",
         );
-        b.push_str(&format!("            let glow_prov = [DEVICE_{d}_IFLOOR; 4];\n"));
+        b.push_str(&format!(
+            "            let glow_prov = [DEVICE_{d}_IFLOOR; 4];\n"
+        ));
         b.push_str(&format!(
             "            let (i0, _) = glow_lit_eval(cv, DEVICE_{d}_V0, DEVICE_{d}_RT, {k_arr}, &glow_prov, DEVICE_{d}_IFLOOR, DEVICE_{d}_KSUB, DEVICE_{d}_I_N);\n"
         ));
@@ -1084,13 +1084,17 @@ fn emit_glow_update_body(
             b.push_str(&format!(
                 "            state[{pend}] = 0.0; state[{iconv}] = i_now;\n"
             ));
-            b.push_str("            return StatefulUpdate { fired: false, extinguished: true, alpha };\n");
+            b.push_str(
+                "            return StatefulUpdate { fired: false, extinguished: true, alpha };\n",
+            );
             b.push_str("        }\n");
             b.push_str(&format!(
                 "        // Not confirmed: set pending on a first monotone crossing, else clear (ring rejected).\n\
                  \x20       state[{pend}] = if state[{armed}] >= 0.5 && state[{iconv}] > DEVICE_{d}_IHOLD && glow_below {{ 1.0 }} else {{ 0.0 }};\n"
             ));
-            b.push_str("        // Still lit: relax the sections toward I by the exact exponential.\n");
+            b.push_str(
+                "        // Still lit: relax the sections toward I by the exact exponential.\n",
+            );
             b.push_str(&relax);
             b.push_str(&format!("        state[{iconv}] = i_now;\n"));
         } else {
@@ -1123,7 +1127,9 @@ fn emit_glow_update_body(
             if has_d {
                 b.push_str(&format!("            state[{toff}] = 0.0;\n"));
             }
-            b.push_str("            return StatefulUpdate { fired: false, extinguished: true, alpha };\n");
+            b.push_str(
+                "            return StatefulUpdate { fired: false, extinguished: true, alpha };\n",
+            );
             b.push_str("        }\n");
         } else {
             b.push_str(&format!(

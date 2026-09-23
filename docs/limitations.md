@@ -483,14 +483,17 @@ Noise limitations:
 
 ### SPICE Validation Scope
 
-- Only circuits built from standard SPICE models (`D`, `NPN`/`PNP`, `NJF`/`PJF`,
-  `NM`/`PM`) have an ngspice twin. Melange-extended models (`OA`, `VCA`, `VP`,
-  triode, `LDR`, `NEON`) have no oracle and are checked with
-  `compile`/`analyze`/`simulate` instead
-- `melange validate` applies **no forward-active reduction**, so for a circuit
-  where the shipped build reduces M, validate builds a different (higher-M)
-  system than `compile` ships. Measured on the Wurlitzer preamp deck: shipped
-  M=3, harness M=5
+- Circuits built from standard SPICE models (`D`, `NPN`/`PNP`, `NJF`/`PJF`,
+  `NM`/`PM`) have a direct ngspice twin. Three melange-extended devices are
+  *translated* into one: the triode and pentode (`VP`) become Koren B-source
+  subcircuits, and the op-amp (`OA`) becomes the VCCS macromodel it already is
+  internally — `G` for `AOL/ROUT` plus `R` for `ROUT`, with `RIN`/`IB` emitted
+  only when melange itself stamps them. An op-amp run is REFUSED if the
+  reference trace crosses a declared rail, because the linear stand-in cannot
+  clamp and the two engines would be running different circuits from that
+  sample on.
+- `VCA`, `LDR` and `NEON` still have no oracle and are refused by `validate`;
+  they are checked with `compile`/`analyze`/`simulate` instead.
 - `melange validate` does not read the deck's `.oversampling` recommendation;
   the factor must be given explicitly as `--oversampling {1|2|4}` (default 1).
   `compile`/`simulate`/`analyze` honour the directive, `validate` reports what it

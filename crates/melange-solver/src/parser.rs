@@ -2003,7 +2003,10 @@ impl Parser {
                 .any(|e| e.nodes().iter().any(|n| n.trim() == "0"))
         };
         if touches_ground(&netlist.elements)
-            || netlist.subcircuits.iter().any(|sc| touches_ground(&sc.elements))
+            || netlist
+                .subcircuits
+                .iter()
+                .any(|sc| touches_ground(&sc.elements))
         {
             return;
         }

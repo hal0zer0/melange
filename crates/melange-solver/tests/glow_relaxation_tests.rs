@@ -920,7 +920,10 @@ fn test_glow_sections_on_full_lu_is_refused() {
         CodeGenerator::new(config).generate_nodal(&mna, &netlist)
     };
     // full-LU without the override → REFUSED, naming every exit.
-    let msg = format!("{}", build(NodalSubPathOverride::FullLu, false).unwrap_err());
+    let msg = format!(
+        "{}",
+        build(NodalSubPathOverride::FullLu, false).unwrap_err()
+    );
     assert!(
         msg.contains("FULL-LU")
             && msg.contains("--nodal-subpath schur")
