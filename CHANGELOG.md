@@ -9,6 +9,74 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-09-23
+
+Melange was handed to a simulated first-time user — a competent Rust and DSP
+developer who had never seen it — twice, once before this work and once after.
+The first run produced one blocker, five walls and thirty papercuts. The second
+produced no blocker at all, and reached a loadable CLAP and VST3 of a
+hand-written overdrive pedal in about twelve minutes with no edits to any
+generated file. Most of what follows is the difference between those two runs.
+
+The through-line is fail-loud. A mistyped node name used to compile clean and
+render silence; a `.model` typo in the wrong command said nothing; `validate`
+would report a confident correlation between two circuits that were not the
+same circuit, in three separate ways. Those are the fixes that matter here —
+the rest is documentation and ergonomics.
+
+**Nothing in this release changes generated DSP.** Verified rather than
+asserted: across all 38 golden circuits, emitted code differs from the previous
+release only on comment lines, no circuit changed solver route or sub-path, and
+every A/B render is byte-identical.
+
+### Upgrading — two things to check
+
+- **A netlist with a dangling node is now REFUSED, on every build path.** A node
+  appearing on exactly one terminal of a two-terminal element is inert, so this
+  has no meaningful false positive — but a *multi-output board* compiled one pin
+  at a time will trip it, because its undeclared pins look the same. Declare them
+  with the new `.port` directive (below). There is deliberately no grandfather
+  clause: exempting un-annotated decks would put every newcomer's deck back into
+  the silence this check exists to end.
+- **`.port` is a melange-only directive, so a deck carrying it will not
+  `validate` on 0.1.8 or earlier** — the line reaches ngspice unstripped and
+  errors. If you pin melange by tag, move the pin and add the `.port` lines in
+  the same commit.
+
+### Experimental
+
+- **The glow-discharge / neon device (`N` element, `NEON` model) is
+  EXPERIMENTAL and its model is mid-investigation.** The letter, the model type
+  and the parameter set may all change. Work on it is parked with an open
+  question about the physical mechanism, and the parts that ship are the parts
+  that were measurably sound. It is inert for circuits that do not use it — no
+  golden circuit's output moves — but do not build on it expecting stability.
+
+### Known issues
+
+- **Newton-Raphson can hit its iteration cap and still print a healthy-looking
+  level.** When NR exhausts `max_iter` it emits the last iterate and continues.
+  That iterate is bounded and smooth, so peak, RMS and correlation all look
+  normal and nothing flags it. Two circuits in the golden corpus do this — one on
+  90% of its samples since v0.1.5, one on 0.436% since before that — and both
+  were read as "slow renders" for releases. `melange simulate` already prints
+  `nr_max_iter_count`; if it is a large fraction of your sample count, the solve
+  did not converge and the output should not be trusted whatever the level says.
+  See [Known Limitations](docs/limitations.md). Whether the capped iterate is
+  audibly wrong is not yet established; the investigation is open.
+- **`melange validate`'s default tolerance profile is internally inconsistent.**
+  Its RMS gate is roughly 8x tighter than the correlation anchor its own comment
+  calls load-bearing, so a circuit tracking honestly at 4.5 nines can fail on RMS
+  while passing correlation. A redesign of the metric set is specified and
+  deferred; no gate is wrong in a way that misleads, but the two do not agree.
+- **Oversampled builds lose some correlation to the half-band filters' phase.**
+  This is real and it ships: the decimator's dispersion accounts for ~98% of it,
+  measured by swapping each filter leg for a linear-phase equivalent. Harmonic
+  *amplitudes* improve with oversampling; the correlation metric is dominated by
+  the phase term, so it reads as a regression while accuracy improves. No
+  tolerance was widened to hide it.
+
+
 ### Added
 
 - **`melange validate --oversampling {1|2|4}` — validate the code that actually
