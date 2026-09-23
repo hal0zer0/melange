@@ -5504,17 +5504,20 @@ fn list_nodes_source(circuit_source: &circuits::CircuitSource) -> Result<()> {
     // name invents a node and floats whatever it was on, and every number
     // melange prints afterwards is correct for the circuit it was handed. One
     // implementation for every verb — `melange_solver::topology`.
-    // `nodes` takes no `-i`/`-o`, so the gate can only warn here, which is the
-    // point: this is the command a user reaches for to FIND the typo, so it
-    // has to stay usable on a deck that has one. `Ports::inferred` guesses the
-    // input port from a node named `in` — enough to keep the report free of
-    // input-coupling-cap islands the other verbs do not see, never enough to
-    // refuse.
-    melange_solver::pipeline::topology_gate(
+    // `nodes` REPORTS and never refuses, and says so by calling
+    // `topology_report` rather than the gate: this is the command a user
+    // reaches for to FIND the typo, so no finding at any severity may stop it
+    // (a `.port` naming a node the deck lacks refuses everywhere else).
+    // `Ports::inferred` guesses the input port from a node named `in` — enough
+    // to keep the report free of input-coupling-cap islands the other verbs do
+    // not see — and a `.port` declaration supersedes the guess about where the
+    // deck's edges are, which is what drops the "no port was declared for this
+    // run" hedge from the messages.
+    melange_solver::pipeline::topology_report(
         &netlist,
-        &melange_solver::topology::Ports::inferred(&netlist),
+        &melange_solver::topology::Ports::inferred(&netlist).with_deck_pins(&netlist),
         &|m| println!("{m}"),
-    )?;
+    );
 
     let mna = MnaSystem::from_netlist(&netlist).with_context(|| "Failed to build MNA system")?;
 
@@ -5664,14 +5667,21 @@ fn run_dc_op(
     // name invents a node and floats whatever it was on, and every number
     // melange prints afterwards is correct for the circuit it was handed. One
     // implementation for every verb — `melange_solver::topology`.
-    // `dc-op` has no `--output-node`, so the gate can only warn here — see
-    // `topology::Finding::severity`. It DOES know its input port (explicit
-    // `-i`, else the `in` fallback this verb already documents below), and the
-    // input conductance is stamped at that node, so it belongs in the graph.
+    // `dc-op` has no `--output-node`, so on a deck that says nothing about its
+    // own edges the gate can only warn here — see `topology::Finding::severity`.
+    // It DOES know its input port (explicit `-i`, else the `in` fallback this
+    // verb already documents below), and the input conductance is stamped at
+    // that node, so it belongs in the graph.
+    //
+    // A deck that declares its pins with `.port` has stated where its edges
+    // are, which is the knowledge the `-o` would have supplied, so `dc-op`
+    // refuses on it like every other verb (`with_deck_pins`). Decks with no
+    // declaration keep the guess and its warning.
     let gate_ports = match requested_input.clone() {
         Some(name) => melange_solver::topology::Ports::inputs_only([name]),
         None => melange_solver::topology::Ports::inferred(&netlist),
-    };
+    }
+    .with_deck_pins(&netlist);
     melange_solver::pipeline::topology_gate(&netlist, &gate_ports, &|m| println!("{m}"))?;
 
     // Resolve input resistance: CLI flag > .input_impedance directive > 1Ω

@@ -823,3 +823,24 @@ pub fn topology_gate(
         Err(TopologyRefusal { findings: refusals })
     }
 }
+
+/// Run [`crate::topology::check`] and REPORT every finding, at any severity,
+/// without ever refusing.
+///
+/// This is `melange nodes`, and the guarantee is structural: the verb a user
+/// reaches for to FIND a wiring defect cannot be stopped by one, so it does not
+/// call the gate at all rather than relying on the findings it happens to be
+/// able to produce. That distinction started to matter with `.port`: a
+/// declaration naming a node the deck does not have is
+/// [`crate::topology::Severity::Refuse`] no matter what the caller knows about
+/// its ports (see [`crate::topology::Finding::severity`]), so `nodes` would
+/// otherwise have died on exactly the deck it was needed for.
+pub fn topology_report(
+    netlist: &crate::parser::Netlist,
+    ports: &crate::topology::Ports,
+    rep: Reporter<'_>,
+) {
+    for f in crate::topology::check(netlist, ports) {
+        report!(rep, "  warning: {}", f.message());
+    }
+}

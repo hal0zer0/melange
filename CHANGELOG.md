@@ -32,6 +32,32 @@ codegen output, CLI flags, and netlist semantics may all change.
     to find the typo.
   - A declared input or output port counts as a connection, and `.tap` /
     `.inject` / a node sensed in a behavioral `B` expression do too.
+  - **`.port <node> ...` declares the board's pins**, so a multi-output board is
+    not read as a deck full of typos. A filter board with ten numbered pins is
+    compiled one output at a time, and every pin that build does not read is a
+    node named exactly once; which pin a build reads is a property of the
+    *invocation* (`-i`/`-n`), while which pins *exist* is a property of the
+    *circuit*, and only the second one belongs in the deck. The directive is
+    **direction-neutral** — an undriven INPUT pin needs the same cover as an
+    output tap — and repeatable. A declared pin counts as one connection for the
+    dangling check **and as nothing else**: it changes no generated code (a
+    deck's emitted source is byte-identical with and without its `.port` lines,
+    which is what distinguishes it from a `.tap`), it is not a DC path (an
+    undriven pin behind a coupling cap is still a floating island and still
+    warns), and it selects nothing (`-i`/`-n` stay free to name any node). A
+    `.port` naming a node the deck does not have is refused with the same
+    nearest-name suggestion, so the declaration cannot become the new place for
+    a typo to hide. There is no grandfather clause: a deck with no declaration
+    is refused for its dangling nodes exactly as before. The dangling refusal
+    now names the directive, so the fix is discoverable at the moment it is
+    needed.
+  - `melange dc-op` takes its port knowledge from a `.port` declaration when the
+    deck has one, instead of guessing from a node literally named `in` — so on
+    an annotated deck it refuses the defects every other verb refuses, and keeps
+    the old guess (and its warn-only behaviour) on a deck with no declaration.
+    `melange nodes` is now report-only by construction (`topology_report`, not
+    the gate) rather than by what it happens to know: it is the command you
+    reach for to FIND a defect, so no finding at any severity may stop it.
 
 - **`simulate` says so when it renders digital silence.** The peak was already
   computed and printed; it is now reacted to. Warns when the output peak is

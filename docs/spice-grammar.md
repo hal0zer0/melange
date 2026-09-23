@@ -1249,6 +1249,62 @@ See [DYNAMIC_PARAMS.md](aidocs/DYNAMIC_PARAMS.md#runtime-v--host-driven-voltage-
 
 ---
 
+### .port — Declare a Board Pin
+
+Declares a node as one of the circuit's **pins**: a place the outside world
+connects to. It is **direction-neutral** — an output tap, an input this
+particular build leaves undriven, or a pin that is both — because which pin a
+build drives or reads is a property of the *invocation* (`-i` / `-n`), while
+which pins *exist* is a property of the *circuit*.
+
+**Syntax:**
+```
+.port <node> [<node> ...]      ; repeatable; several lines accumulate
+```
+
+**Example** — a filter board with ten numbered pins, compiled one output at a
+time:
+```spice
+.port p2 p3 p4 p5 p6 p7        ; taps and branch pins
+.port p9 p10                   ; oboe out, strings 8'-4' out
+```
+
+**What it does:** a declared pin counts as **one connection** for the
+dangling-node check, and as nothing else. Without it, every pin this build does
+not read is a node the deck names exactly once, which is the signature of a
+typo'd node name and is refused:
+
+```
+Error: netlist topology: 3 defects that would silently produce the wrong circuit
+  - dangling node 'p9': the whole deck names it once, as the n- terminal of R808
+    (line 132). ... If 'p9' is a board pin — an output tap, or an input this
+    build leaves undriven — declare it with `.port p9` and it counts as a
+    connection.
+```
+
+**What it does NOT do** — the list is exhaustive and each entry is load-bearing:
+- **It changes no generated code.** A deck's emitted source is byte-identical
+  with and without its `.port` lines (enforced by
+  `test_port_declaration_has_zero_codegen_effect`). It is not `.tap`: no
+  `NUM_TAP`/`TAP_NAMES`, no inject/tap runtime API, no extra `process_sample`
+  return values. Use `.tap` when you want to *read* the node at inner rate;
+  use `.port` to state that the node is a pin.
+- **It is not a DC path.** Nothing is stamped. An undriven input pin sitting
+  behind a coupling cap is still a floating cap-only DC island and still
+  warns — declaring the pin says nothing about how it is biased.
+- **It does not select anything.** `-i` and `-n` stay free: naming an internal
+  node to probe it is legitimate debugging and needs no declaration.
+
+**Errors:**
+- A `.port` naming a node no element in the deck names is **refused**, with the
+  same nearest-name suggestion the dangling check gives — otherwise the
+  declaration is just a new place for a typo to hide.
+- `.port 0` (ground) and a pin declared twice are parse errors.
+- There is **no grandfather clause**: a deck with no `.port` lines is refused
+  for its dangling nodes exactly as before.
+
+---
+
 ### .oversampling — Recommended Oversampling Factor
 
 Declares the oversampling factor a deck needs to keep aliasing from its nonlinear

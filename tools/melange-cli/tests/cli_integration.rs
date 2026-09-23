@@ -1119,3 +1119,236 @@ fn test_output_coupling_cap_into_the_declared_port_is_not_dangling() {
     let _ = std::fs::remove_file(&cir);
     let _ = std::fs::remove_file(&out);
 }
+
+// ============================================================================
+// `.port` — board pin declarations
+// ============================================================================
+
+/// A two-output board compiled one output at a time, which is how a
+/// multi-output organ board is read. `outb` is a real pin; this build reads
+/// `outa`, so nothing else in the deck names `outb`.
+const TEST_BOARD_PINS: &str = "\
+Board pin fixture
+Rin in n1 10k
+Rb n1 0 100k
+R3 n1 outa 10k
+R4 n1 outb 22k
+Rla outa 0 100k
+";
+
+/// The same board with both pins loaded, so it compiles with AND without the
+/// declaration — the only shape that can prove `.port` changes no generated
+/// code. The title is identical in both variants because it names the emitted
+/// struct.
+const TEST_BOARD_LOADED: &str = "\
+Board codegen fixture
+Rin in n1 10k
+Rb n1 0 100k
+R3 n1 outa 10k
+R4 n1 outb 22k
+Rla outa 0 100k
+Rlb outb 0 100k
+";
+
+#[test]
+fn test_port_declaration_has_zero_codegen_effect() {
+    // The load-bearing property: `.port` is a statement about the CIRCUIT for
+    // the topology check, not a feature. It must not do what `.tap` does —
+    // one `.tap` line on a 6-element deck moves the generated code from 942 to
+    // 1033 lines and drags in the inject/tap runtime API. Byte-identical is
+    // the only claim that settles it, so this test compiles the same board
+    // twice and compares the emitted source in full, provenance included
+    // (the same binary emits both, so the provenance line is identical too).
+    let plain = write_test_circuit(TEST_BOARD_LOADED, "port_codegen_plain");
+    let declared = write_test_circuit(
+        &format!("{TEST_BOARD_LOADED}.port outa outb n1\n"),
+        "port_codegen_declared",
+    );
+    let out_plain = std::env::temp_dir().join("melange_cli_test_port_codegen_plain.rs");
+    let out_declared = std::env::temp_dir().join("melange_cli_test_port_codegen_declared.rs");
+    for (cir, out) in [(&plain, &out_plain), (&declared, &out_declared)] {
+        run_melange(&[
+            "compile",
+            cir.to_str().unwrap(),
+            "--format",
+            "code",
+            "-i",
+            "in",
+            "-n",
+            "outa",
+            "-o",
+            out.to_str().unwrap(),
+        ]);
+    }
+    let a = std::fs::read_to_string(&out_plain).expect("plain output");
+    let b = std::fs::read_to_string(&out_declared).expect("declared output");
+    assert!(
+        a.len() > 500,
+        "fixture should produce real code, got {} bytes",
+        a.len()
+    );
+    assert_eq!(
+        a,
+        b,
+        "`.port` must not change one byte of generated code (plain = {} bytes, \
+         declared = {} bytes)",
+        a.len(),
+        b.len()
+    );
+    // And specifically none of the loop-closure machinery a `.tap` would pull in.
+    for marker in ["NUM_TAP", "TAP_NAMES", "NUM_INJECT", "INJECT_NODES"] {
+        assert!(
+            !b.contains(marker),
+            "`.port` must not emit the tap/inject runtime API ({marker})"
+        );
+    }
+    for f in [&plain, &declared, &out_plain, &out_declared] {
+        let _ = std::fs::remove_file(f);
+    }
+}
+
+#[test]
+fn test_undeclared_board_pin_is_refused_and_the_message_names_the_directive() {
+    // No grandfather clause: a deck with no declaration is refused exactly as
+    // before — and learns from the refusal how to declare the pin.
+    let cir = write_test_circuit(TEST_BOARD_PINS, "port_undeclared");
+    let out = std::env::temp_dir().join("melange_cli_test_port_undeclared.rs");
+    let stderr = run_melange_fail(&[
+        "compile",
+        cir.to_str().unwrap(),
+        "--format",
+        "code",
+        "-i",
+        "in",
+        "-n",
+        "outa",
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(stderr.contains("'outb'"), "should name the pin: {stderr}");
+    assert!(
+        stderr.contains("`.port outb`"),
+        "should name the directive that fixes it: {stderr}"
+    );
+    let _ = std::fs::remove_file(&cir);
+}
+
+#[test]
+fn test_declared_board_pin_compiles() {
+    let cir = write_test_circuit(
+        &format!("{TEST_BOARD_PINS}.port outa outb\n"),
+        "port_declared",
+    );
+    let out = std::env::temp_dir().join("melange_cli_test_port_declared.rs");
+    let stdout = run_melange(&[
+        "compile",
+        cir.to_str().unwrap(),
+        "--format",
+        "code",
+        "-i",
+        "in",
+        "-n",
+        "outa",
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(
+        !stdout.contains("dangling"),
+        "a declared pin is a connection: {stdout}"
+    );
+    let _ = std::fs::remove_file(&cir);
+    let _ = std::fs::remove_file(&out);
+}
+
+#[test]
+fn test_port_naming_a_node_the_deck_lacks_is_refused() {
+    // The declaration must not become the new place for a typo to hide.
+    let cir = write_test_circuit(
+        &format!("{TEST_BOARD_PINS}.port outa outbb\n"),
+        "port_unknown",
+    );
+    let out = std::env::temp_dir().join("melange_cli_test_port_unknown.rs");
+    let stderr = run_melange_fail(&[
+        "compile",
+        cir.to_str().unwrap(),
+        "--format",
+        "code",
+        "-i",
+        "in",
+        "-n",
+        "outa",
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(stderr.contains("'outbb'"), "should name it: {stderr}");
+    assert!(
+        stderr.contains("Did you mean 'outb'?"),
+        "should suggest the real pin: {stderr}"
+    );
+    let _ = std::fs::remove_file(&cir);
+}
+
+#[test]
+fn test_declared_pin_behind_a_coupling_cap_still_warns_as_an_island() {
+    // A declared pin is one connection for the dangling check and NOTHING
+    // else. It is not a DC path, so an undriven input pin behind a coupling
+    // cap is still a floating island — the case the island check exists for.
+    let deck = "\
+Undriven input pin fixture
+Rin in n1 10k
+Rb n1 0 100k
+Ro n1 out 10k
+Rl out 0 100k
+Cin2 pin2 n1 100n
+.port pin2
+";
+    let cir = write_test_circuit(deck, "port_island");
+    let out = std::env::temp_dir().join("melange_cli_test_port_island.rs");
+    let stdout = run_melange(&[
+        "compile",
+        cir.to_str().unwrap(),
+        "--format",
+        "code",
+        "-i",
+        "in",
+        "-n",
+        "out",
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(
+        stdout.contains("floating cap-only DC island") && stdout.contains("pin2"),
+        "declaring a pin must not suppress the island warning: {stdout}"
+    );
+    let _ = std::fs::remove_file(&cir);
+    let _ = std::fs::remove_file(&out);
+}
+
+#[test]
+fn test_a_declaration_elsewhere_does_not_excuse_the_typo() {
+    // The original cold-first-user case, on a deck that DOES declare pins:
+    // `C3 n3 n4 220n` typed as `C3 n33 n4 220n` is still refused.
+    let cir = write_test_circuit(
+        &format!("{TEST_TYPOED_NODE}.port out\n"),
+        "port_typo_still_refused",
+    );
+    let out = std::env::temp_dir().join("melange_cli_test_port_typo.rs");
+    let stderr = run_melange_fail(&[
+        "compile",
+        cir.to_str().unwrap(),
+        "--format",
+        "code",
+        "-i",
+        "in",
+        "-n",
+        "out",
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(stderr.contains("'n33'"), "should still refuse: {stderr}");
+    assert!(
+        stderr.contains("Did you mean 'n3'?"),
+        "should still suggest: {stderr}"
+    );
+    let _ = std::fs::remove_file(&cir);
+}

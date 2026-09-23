@@ -45,6 +45,40 @@ other ports; those now **double up** with the per-port 1 Ω, so remove them when
 you switch to `-i a,b,c`. Multi-input is `--format code` only and rejects
 nonlinear (M>0) decks (superposition is invalid there).
 
+### Board pins (`.port`)
+
+A board with several outputs — an organ filter board with ten numbered pins, a
+divider board read one note at a time — is compiled one output at a time. Every
+pin the build does *not* read is then a node the deck names exactly once, which
+is the signature of a typo'd node name, and melange refuses it.
+
+Declare the board's pins and it stops:
+
+```spice
+.port p2 p3 p4 p5 p6 p7    ; repeatable — several lines accumulate
+.port p9 p10
+```
+
+`.port` is **direction-neutral**: it declares a pin, not an output. An input pin
+that this build leaves undriven needs the same declaration as an output tap, and
+gets it.
+
+A declared pin counts as one connection for the dangling-node check and as
+nothing else:
+
+- it changes **no generated code** — the emitted source is byte-identical with
+  and without the declaration, so a board's plugin carries no cost for it (this
+  is the difference from `.tap`, which exists to *read* a node and brings the
+  inject/tap runtime API with it);
+- it is **not a DC path** — an undriven input pin behind a coupling cap is still
+  a floating island and still warns;
+- it **selects nothing** — `-i` and `-n` remain free to name any node, declared
+  or not.
+
+A `.port` naming a node the deck does not have is refused, with the same "did
+you mean" suggestion, so the declaration cannot become a new hiding place for a
+typo.
+
 ## From Schematic to Netlist
 
 ### Step 1: Label every node
@@ -498,8 +532,14 @@ the check. Read the warning and confirm it is the one you meant.
 Two things that look floating are not, and melange knows it: the node behind
 your input coupling cap (the input port is a voltage source with a series
 resistance, which is a DC path), and a node named once because it *is* your
-declared `--output-node`. A node you want to probe without wiring anything to it
-can be declared with `.tap <node>`, which counts as a connection.
+declared `--output-node`.
+
+A node that is named once because it is a **board pin** — an output this build
+does not read, or an input it does not drive — is declared with
+`.port <node> ...`, which counts as a connection and changes nothing else (see
+[Board pins](#board-pins-port)). A node you want to *read* at inner rate can be
+declared with `.tap <node>`, which also counts as a connection but emits the
+tap runtime API.
 
 ### 2. Wrong terminal order
 

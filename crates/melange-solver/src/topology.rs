@@ -31,7 +31,33 @@
 //! another resistive path.
 //!
 //! A declared input or output PORT counts as a connection: `Cout vol out`
-//! feeding the output port is a complete circuit, not a dangling cap.
+//! feeding the output port is a complete circuit, not a dangling cap. So does a
+//! board pin the deck declares with `.port` — see "Board pins" below.
+//!
+//! ## Board pins (`.port`)
+//!
+//! A multi-output board — an organ filter board with ten numbered pins, a
+//! divider board read one note at a time — is compiled one output at a time,
+//! and its OTHER pins are then nodes named exactly once. They are not typos,
+//! and `-i`/`-n` cannot say so: which pin this build reads is a property of the
+//! invocation, while which pins EXIST is a property of the circuit. `.port`
+//! records the second one in the deck, where the check can see it.
+//!
+//! The directive is **direction-neutral on purpose**: `farfisa-voicing`'s
+//! undriven `in16`/`in4`/`fd_p11` are INPUT pins left unconnected in a build
+//! that drives a different one, and they need exactly the same cover as an
+//! output tap. It is a pin declaration, not an output list.
+//!
+//! A declared pin counts as **one connection for the dangling check and as
+//! nothing else**. In particular it is NOT a DC path: it stamps nothing (the
+//! input Thevenin conductance belongs to `-i`, not to a pin declaration), so an
+//! undriven input pin behind a coupling cap is still a floating island and
+//! still warns. Conflating the two would re-hide the typo'd op-amp bias
+//! resistor the island check exists to catch.
+//!
+//! A `.port` name that is not a node in the netlist is itself
+//! [`Severity::Refuse`], with the same nearest-name suggestion — otherwise the
+//! declaration is just a new place for a typo to hide.
 //!
 //! ## 2. True cap-only DC island
 //!
@@ -68,6 +94,7 @@
 //! | finding | severity |
 //! |---|---|
 //! | dangling node on a two-terminal element (R, C, L, D, V, I, B, N), ports declared | [`Severity::Refuse`] |
+//! | `.port` names a node the netlist does not have | [`Severity::Refuse`] |
 //! | dangling terminal on a multi-terminal element | [`Severity::Warn`] |
 //! | true cap-only DC island | [`Severity::Warn`] |
 //!
@@ -84,13 +111,20 @@
 //! and `validate` all run it through [`crate::pipeline::topology_gate`], and
 //! `melange-validate` reports the island findings it used to scan for itself.
 //!
-//! `melange nodes` and `melange dc-op` REPORT the findings and never refuse —
-//! `nodes` is the tool a user reaches for to find the typo, so it has to stay
-//! usable on a deck that has one. That exemption is structural rather than a
-//! list of verb names: neither takes an `-o`, so both pass [`Ports::unknown`],
-//! and without knowing where the output port is, a node named once
-//! (`Cout vol out`) cannot be distinguished from an orphan. See
-//! [`Finding::severity`].
+//! `melange nodes` REPORTS the findings and never refuses, whatever the deck
+//! says: it is the tool a user reaches for to FIND a defect, so it has to stay
+//! usable on a deck that has one. That is structural — it calls
+//! [`crate::pipeline::topology_report`] rather than the gate, so no finding at
+//! any severity can stop it, including one (`.port` naming a node that does not
+//! exist) whose confidence does not depend on port knowledge at all.
+//!
+//! `melange dc-op` takes no `-o`, so on a deck that says nothing about its own
+//! edges it passes [`Ports::unknown`]/[`Ports::inputs_only`]: without knowing
+//! where the output port is, a node named once (`Cout vol out`) cannot be
+//! distinguished from an orphan, and it can only warn (see
+//! [`Finding::severity`]). A deck that declares its pins HAS said where its
+//! edges are, so [`Ports::with_deck_pins`] hands `dc-op` that knowledge and it
+//! refuses like everything else.
 
 use crate::parser::{Element, Netlist};
 use std::collections::{BTreeMap, BTreeSet};
@@ -128,6 +162,16 @@ pub enum Finding {
         /// not, a port node legitimately looks dangling and the message says so.
         ports_known: bool,
     },
+    /// A `.port` declaration naming something that is not a node in the deck.
+    UnknownPort {
+        /// The declared name, as written (normalized).
+        node: String,
+        /// 1-based raw source line of the `.port` statement.
+        line: usize,
+        /// Existing node names closest to `node` by edit distance, nearest
+        /// first. Empty when nothing is close enough to be worth guessing.
+        suggestions: Vec<String>,
+    },
     /// A set of nodes with no DC path to ground.
     FloatingIsland {
         /// The island's nodes, sorted.
@@ -141,11 +185,18 @@ impl Finding {
     /// A dangling node refuses only when the caller **declared its ports**. A
     /// verb that does not know where the circuit's input and output are cannot
     /// tell an orphaned node from an output port — `Cout vol out` names `out`
-    /// exactly once — so it has no grounds to refuse. That is what makes
-    /// `melange nodes` (and `dc-op`, which takes no `-o`) report-only without
-    /// anyone maintaining a list of exempt verbs: they pass
+    /// exactly once — so it has no grounds to refuse. That is what keeps
+    /// `dc-op` (which takes no `-o`) warn-only on an unannotated deck without
+    /// anyone maintaining a list of exempt verbs: it passes
     /// [`Ports::unknown`], and the confidence the refusal rests on is simply
-    /// not there.
+    /// not there. A deck that declares its own pins supplies that confidence —
+    /// see [`Ports::with_deck_pins`].
+    ///
+    /// [`Finding::UnknownPort`] is the one finding that does NOT rest on port
+    /// knowledge — the deck declares a pin and the same deck has no such node,
+    /// a contradiction inside one file — so it refuses unconditionally. A verb
+    /// that must never refuse anything (`melange nodes`) takes
+    /// [`crate::pipeline::topology_report`] instead of the gate.
     pub fn severity(&self) -> Severity {
         match self {
             Finding::DanglingNode {
@@ -159,6 +210,7 @@ impl Finding {
                     Severity::Warn
                 }
             }
+            Finding::UnknownPort { .. } => Severity::Refuse,
             Finding::FloatingIsland { .. } => Severity::Warn,
         }
     }
@@ -195,13 +247,21 @@ impl Finding {
                     " No input/output port was declared for this run, so if this node is \
                      one, it is connected and this is not a defect."
                 };
+                // Name the remedy at the moment it is needed: on a
+                // multi-output board this finding IS the pin, and nothing else
+                // in the output says how to tell melange so.
+                let pin_hint = format!(
+                    " If '{node}' is a board pin — an output tap, or an input this build \
+                     leaves undriven — declare it with `.port {node}` and it counts as a \
+                     connection."
+                );
                 if *two_terminal {
                     format!(
                         "dangling node '{node}': the whole deck names it once, as the \
                          {terminal} terminal of {element}{at}. A two-terminal element with a \
                          dangling terminal carries no current, so {element} is inert and \
-                         whatever it was meant to reach is not connected.{guess} If {element} \
-                         is deliberately unconnected, delete it.{port_caveat}"
+                         whatever it was meant to reach is not connected.{guess}{pin_hint} If \
+                         {element} is deliberately unconnected, delete it.{port_caveat}"
                     )
                 } else {
                     format!(
@@ -209,9 +269,35 @@ impl Finding {
                          the whole deck, as its {terminal} terminal. An unconnected lug on a \
                          multi-terminal part is legitimate (an unused rheostat lug, a \
                          deliberately partial deck), so this is a warning — but if '{node}' \
-                         is a typo, nothing drives that terminal.{guess}{port_caveat}"
+                         is a typo, nothing drives that terminal.{guess}{pin_hint}{port_caveat}"
                     )
                 }
+            }
+            Finding::UnknownPort {
+                node,
+                line,
+                suggestions,
+            } => {
+                let at = if *line > 0 {
+                    format!(" (line {line})")
+                } else {
+                    String::new()
+                };
+                let guess = match suggestions.len() {
+                    0 => String::new(),
+                    1 => format!(" Did you mean '{}'?", suggestions[0]),
+                    _ => format!(
+                        " Did you mean '{}'? (also close: {})",
+                        suggestions[0],
+                        suggestions[1..].join(", ")
+                    ),
+                };
+                format!(
+                    "`.port` declares pin '{node}'{at}, but no element in the deck names that \
+                     node, so there is no such pin to declare.{guess} A `.port` line covers a \
+                     node the circuit already has; it does not create one. Fix the spelling, \
+                     or delete the declaration."
+                )
             }
             Finding::FloatingIsland { nodes } => format!(
                 "floating cap-only DC island {{{}}} — every path out of it is open at DC, so \
@@ -294,6 +380,26 @@ impl Ports {
         let has_in = netlist.elements.iter().any(|e| e.nodes().contains(&"in"));
         Self::inputs_only(has_in.then(|| "in".to_string()))
     }
+
+    /// Take port knowledge from the deck's own `.port` declaration, if it has
+    /// one.
+    ///
+    /// For a verb with no `-o` this is the difference between guessing and
+    /// knowing. [`Ports::inferred`]'s fallback — "if there is a node called
+    /// `in`, that is probably the input" — is a guess, and a guess cannot
+    /// support a refusal, so such a verb can only ever warn. A deck that
+    /// declares its pins has stated where its edges are; a node named exactly
+    /// once that is NOT one of them is dangling on the deck's own account, and
+    /// the finding stands on the same confidence every other verb's does.
+    ///
+    /// It only ever raises confidence. The pins themselves are read straight
+    /// off the netlist by [`check`] — they are not copied into `inputs`,
+    /// because a pin is not a DC path and must not stamp anything into the
+    /// island graph.
+    pub fn with_deck_pins(mut self, netlist: &Netlist) -> Self {
+        self.declared |= !netlist.ports.is_empty();
+        self
+    }
 }
 
 /// Run both topology checks over `netlist`.
@@ -304,7 +410,8 @@ impl Ports {
 /// ([`crate::pipeline::topology_gate`] refuses on [`Severity::Refuse`];
 /// `melange nodes` refuses on nothing).
 pub fn check(netlist: &Netlist, ports: &Ports) -> Vec<Finding> {
-    let mut findings = check_dangling(netlist, ports);
+    let mut findings = check_declared_ports(netlist);
+    findings.extend(check_dangling(netlist, ports));
     let dangling: BTreeSet<String> = findings
         .iter()
         .filter_map(|f| match f {
@@ -314,6 +421,39 @@ pub fn check(netlist: &Netlist, ports: &Ports) -> Vec<Finding> {
         .collect();
     findings.extend(check_islands(netlist, ports, &dangling));
     findings
+}
+
+// ---------------------------------------------------------------------------
+// Check 0 — `.port` declarations name real nodes
+// ---------------------------------------------------------------------------
+
+/// Every `.port` pin must be a node some element names.
+///
+/// Without this the declaration is simply a second place for a typo to hide,
+/// and a worse one than the first: a mistyped `.port` name silently fails to
+/// cover the pin it was written for, so the deck goes back to being refused
+/// for a reason that now looks wrong. Findings come back in declaration order.
+fn check_declared_ports(netlist: &Netlist) -> Vec<Finding> {
+    if netlist.ports.is_empty() {
+        return Vec::new();
+    }
+    let existing: BTreeSet<&str> = netlist
+        .elements
+        .iter()
+        .flat_map(|e| e.nodes())
+        .filter(|n| *n != "0")
+        .collect();
+    let all_names: Vec<&str> = existing.iter().copied().collect();
+    netlist
+        .ports
+        .iter()
+        .filter(|pin| !existing.contains(pin.node.as_str()))
+        .map(|pin| Finding::UnknownPort {
+            node: pin.node.clone(),
+            line: pin.line,
+            suggestions: nearest_names(&pin.node, &all_names),
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -334,8 +474,15 @@ fn check_dangling(netlist: &Netlist, ports: &Ports) -> Vec<Finding> {
     // Everything else that names a node without being a terminal. These do not
     // conduct, but they prove the author meant the node to exist, so they stop
     // it reading as an orphan: a `.tap`/`.inject`/`.delay_feedback` target, a
-    // node sensed inside a behavioral `B` expression, and the declared ports.
+    // node sensed inside a behavioral `B` expression, a `.port` board pin, and
+    // the ports this invocation declared.
+    //
+    // A `.port` pin lands HERE and nowhere else in this file: it is one
+    // connection for this check, and not a DC path for `check_islands`.
     let mut referenced: BTreeSet<String> = BTreeSet::new();
+    for pin in &netlist.ports {
+        referenced.insert(pin.node.clone());
+    }
     for inj in &netlist.injections {
         referenced.insert(inj.node.clone());
     }
@@ -797,6 +944,133 @@ mod tests {
         );
     }
 
+    /// A two-output board: `outb` is a real pin, but this build reads `outa`.
+    const BOARD: &str = "board\n\
+                         R1 in n1 10k\n\
+                         R2 n1 0 100k\n\
+                         R3 n1 outa 10k\n\
+                         R4 n1 outb 22k\n\
+                         Rl outa 0 100k\n";
+
+    #[test]
+    fn an_undeclared_board_pin_still_refuses() {
+        // No grandfather clause: a deck that declares nothing is exactly the
+        // deck the refusal was built for (the cold tester had no annotations).
+        let f = findings(
+            BOARD,
+            &Ports::declared(["in".to_string()], ["outa".to_string()]),
+        );
+        let d = f
+            .iter()
+            .find(|f| matches!(f, Finding::DanglingNode { node, .. } if node == "outb"))
+            .expect("outb reported");
+        assert_eq!(d.severity(), Severity::Refuse);
+    }
+
+    #[test]
+    fn the_dangling_refusal_names_the_port_directive() {
+        // The fix has to be discoverable at the moment it is needed: this
+        // message is the only place a board author is told `.port` exists.
+        let f = findings(
+            BOARD,
+            &Ports::declared(["in".to_string()], ["outa".to_string()]),
+        );
+        let d = f
+            .iter()
+            .find(|f| matches!(f, Finding::DanglingNode { node, .. } if node == "outb"))
+            .expect("outb reported");
+        assert!(d.message().contains("`.port outb`"), "{}", d.message());
+    }
+
+    #[test]
+    fn a_declared_board_pin_is_a_connection() {
+        let deck = format!("{BOARD}.port outb\n");
+        let f = findings(
+            &deck,
+            &Ports::declared(["in".to_string()], ["outa".to_string()]),
+        );
+        assert!(f.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn a_declared_pin_is_direction_neutral() {
+        // farfisa-voicing's `in16`/`in4`: INPUT pins this build leaves
+        // undriven. One directive has to cover them exactly as it covers an
+        // output tap — `.port` declares a pin, not an output.
+        let deck = "voicing\n\
+                    R_bar16 in16 bus 470k\n\
+                    R_bar8 in bus 470k\n\
+                    Rb bus 0 100k\n\
+                    Ro bus out 10k\n\
+                    Rl out 0 100k\n\
+                    .port in16\n";
+        let f = findings(deck, &ports_in_out());
+        assert!(f.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn a_declared_pin_is_not_a_dc_path_so_the_island_still_warns() {
+        // The one conflation that would re-hide the typo'd op-amp bias
+        // resistor: an undriven input pin behind a coupling cap has no DC path
+        // to ground, and declaring the pin says nothing about that.
+        let deck = "pin\n\
+                    R1 in n1 10k\n\
+                    R2 n1 0 100k\n\
+                    R3 n1 out 10k\n\
+                    Rl out 0 100k\n\
+                    C2 pin2 n1 100n\n\
+                    .port pin2\n";
+        let f = findings(deck, &ports_in_out());
+        assert!(
+            !f.iter()
+                .any(|f| matches!(f, Finding::DanglingNode { node, .. } if node == "pin2")),
+            "the pin is declared, so it is not dangling: {f:?}"
+        );
+        let island = f
+            .iter()
+            .find(|f| matches!(f, Finding::FloatingIsland { nodes } if nodes == &["pin2".to_string()]))
+            .expect("a declared pin is not a DC path — the island must still be reported");
+        assert_eq!(island.severity(), Severity::Warn);
+    }
+
+    #[test]
+    fn a_port_naming_a_node_the_deck_lacks_refuses_with_a_suggestion() {
+        // `.port outbb` for `outb` — a stray keystroke in the declaration is
+        // exactly the failure this check exists to stop hiding.
+        let deck = format!("{BOARD}.port outa outbb\n");
+        let f = findings(
+            &deck,
+            &Ports::declared(["in".to_string()], ["outa".to_string()]),
+        );
+        let u = f
+            .iter()
+            .find(|f| matches!(f, Finding::UnknownPort { node, .. } if node == "outbb"))
+            .expect("outbb reported");
+        assert_eq!(u.severity(), Severity::Refuse);
+        assert!(
+            u.message().contains("Did you mean 'outb'?"),
+            "{}",
+            u.message()
+        );
+        assert!(u.message().contains("line 7"), "{}", u.message());
+    }
+
+    #[test]
+    fn a_port_refuses_even_when_the_verb_knows_no_ports() {
+        // Unlike a dangling node, this finding does not rest on port
+        // knowledge: the deck contradicts itself. `melange nodes` stays usable
+        // by not calling the gate at all (`pipeline::topology_report`).
+        let deck = format!("{BOARD}.port outc\n");
+        let netlist = Netlist::parse(&deck).expect("parses");
+        let f = check(&netlist, &Ports::inferred(&netlist));
+        assert!(
+            f.iter()
+                .any(|f| matches!(f, Finding::UnknownPort { .. })
+                    && f.severity() == Severity::Refuse),
+            "{f:?}"
+        );
+    }
+
     #[test]
     fn pedal_input_behind_a_coupling_cap_is_not_an_island() {
         // The false positive that made the old scan useless on every pedal:
@@ -1009,6 +1283,47 @@ mod tests {
             .find(|f| matches!(f, Finding::DanglingNode { node, .. } if node == "out"))
             .expect("out reported");
         assert_eq!(out.severity(), Severity::Warn);
+    }
+
+    #[test]
+    fn a_deck_declaration_lets_a_verb_with_no_output_flag_refuse() {
+        // `dc-op` guesses its ports, so it can only warn — until the deck says
+        // where its edges are. Then a node named once that is not one of them
+        // is dangling on the deck's own account.
+        let deck = format!("{BOARD}.port outa\n");
+        let netlist = Netlist::parse(&deck).expect("parses");
+        let guessing = check(&netlist, &Ports::inferred(&netlist));
+        let knowing = check(
+            &netlist,
+            &Ports::inferred(&netlist).with_deck_pins(&netlist),
+        );
+        let sev = |fs: &[Finding]| {
+            fs.iter()
+                .find(|f| matches!(f, Finding::DanglingNode { node, .. } if node == "outb"))
+                .expect("outb reported")
+                .severity()
+        };
+        assert_eq!(sev(&guessing), Severity::Warn);
+        assert_eq!(sev(&knowing), Severity::Refuse);
+    }
+
+    #[test]
+    fn a_deck_with_no_declaration_keeps_the_guess_and_its_warning() {
+        let netlist = Netlist::parse(BOARD).expect("parses");
+        let f = check(
+            &netlist,
+            &Ports::inferred(&netlist).with_deck_pins(&netlist),
+        );
+        let d = f
+            .iter()
+            .find(|f| matches!(f, Finding::DanglingNode { node, .. } if node == "outb"))
+            .expect("outb reported");
+        assert_eq!(d.severity(), Severity::Warn);
+        assert!(
+            d.message().contains("No input/output port was declared"),
+            "{}",
+            d.message()
+        );
     }
 
     #[test]

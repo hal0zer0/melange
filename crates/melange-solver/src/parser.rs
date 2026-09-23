@@ -109,6 +109,16 @@ pub struct Netlist {
     /// returns per-inner-sample tap values so a feedback caller can run its
     /// inner-rate model.
     pub taps: Vec<TapDirective>,
+    /// Declared board pins (`.port <node> ...`). Direction-neutral: a pin is
+    /// a place the outside world connects to this board, whether it is driven
+    /// from outside, read from outside, or both.
+    ///
+    /// Consumed ONLY by [`crate::topology`]: a declared pin counts as one
+    /// connection for the dangling-node check and as nothing else. It is not a
+    /// DC path, stamps nothing, and never reaches the MNA, the DK kernel or
+    /// codegen — a deck's generated code is byte-identical with and without
+    /// its `.port` lines (`port_declaration_has_zero_codegen_effect`).
+    pub ports: Vec<PortDirective>,
     /// Per-device parameter mismatch directives (.mismatch D IS=0.02 ...).
     /// Applied at codegen time: each device of the listed type gets its
     /// nominal model parameter jittered by `nominal · (1 + tol · u)` with
@@ -381,6 +391,29 @@ pub struct TapDirective {
     pub name: String,
 }
 
+/// A `.port <node> ...` declaration — one of the board's pins.
+///
+/// **Direction-neutral by construction.** A board pin is a place the outside
+/// world connects to: an output tap read by whatever the board feeds, an input
+/// this particular build leaves undriven, or a pin that is both depending on
+/// how the board is wired into the instrument. Which one it is on any given
+/// compile is what `-i` / `-n` say; which pins EXIST is a property of the
+/// circuit, and that is what this records.
+///
+/// Its whole effect is on [`crate::topology`]: a declared pin counts as one
+/// connection for the dangling-node check, so a multi-output board compiled one
+/// output at a time is not read as five typos. It stamps nothing, is not a DC
+/// path (an undriven pin behind a coupling cap is still a floating island, and
+/// still warns), and never reaches codegen.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PortDirective {
+    /// The pin's node (normalized name). Must be a node some element names.
+    pub node: String,
+    /// 1-based raw source line of the `.port` statement that declared it, so a
+    /// declaration naming a node that does not exist can point at itself.
+    pub line: usize,
+}
+
 /// A potentiometer directive (.pot Rname min max).
 ///
 /// Marks a resistor as runtime-variable with a min/max range.
@@ -498,6 +531,7 @@ impl Netlist {
             runtime_scalars: Vec::new(),
             injections: Vec::new(),
             taps: Vec::new(),
+            ports: Vec::new(),
             mismatch_specs: Vec::new(),
             seed: None,
             tolerance_r: 0.0,
@@ -1689,6 +1723,7 @@ pub const MELANGE_ONLY_DIRECTIVES: &[&str] = &[
     ".seed",
     ".linearize",
     ".tap",
+    ".port",
     ".input_impedance",
     ".integrator",
     ".inject",
@@ -3102,6 +3137,9 @@ impl Parser {
                 let tap = self.parse_tap_directive(&parts)?;
                 netlist.taps.push(tap);
             }
+            ".port" => {
+                self.parse_port_directive(&parts, netlist)?;
+            }
             ".input_impedance" => {
                 self.parse_input_impedance_directive(&parts, netlist)?;
             }
@@ -4056,6 +4094,41 @@ impl Parser {
             None => node.clone(),
         };
         Ok(TapDirective { node, name })
+    }
+
+    /// `.port <node> [<node> ...]` — declare the board's pins.
+    ///
+    /// Direction-neutral (see [`PortDirective`]) and repeatable: several
+    /// `.port` lines accumulate, so a board can group its pins by branch the
+    /// way its schematic does. Ground is rejected — node `0` is connected by
+    /// definition and declaring it as a pin can only be a mistake — and so is
+    /// a pin declared twice, which is a copy-paste artifact with no meaning.
+    ///
+    /// Whether the named node EXISTS is deliberately not checked here: that
+    /// diagnostic wants the same nearest-name suggestion the dangling check
+    /// gives, so it lives with it in [`crate::topology`].
+    fn parse_port_directive(
+        &self,
+        parts: &[&str],
+        netlist: &mut Netlist,
+    ) -> Result<(), ParseError> {
+        self.require_parts(parts, 2, ".port <node> [<node> ...]")?;
+        for raw in &parts[1..] {
+            let node = normalize_node_name(raw);
+            if node == "0" {
+                return Err(self.error(
+                    ".port cannot declare ground (0): every element already connects to it",
+                ));
+            }
+            if netlist.ports.iter().any(|p| p.node == node) {
+                return Err(self.error(format!(".port declares node '{node}' more than once")));
+            }
+            netlist.ports.push(PortDirective {
+                node,
+                line: self.line_num,
+            });
+        }
+        Ok(())
     }
 
     fn parse_input_impedance_directive(
@@ -7729,6 +7802,42 @@ U1 0 inv out opamp
     }
 
     #[test]
+    fn test_port_accumulates_across_lines_and_records_its_line() {
+        let spice = "Board\nR1 a 0 1k\nR2 b 0 1k\nR3 c 0 1k\n.port a b\n.port c\n.end\n";
+        let n = Netlist::parse(spice).expect("parse");
+        assert_eq!(
+            n.ports.iter().map(|p| p.node.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
+        assert_eq!(n.ports[0].line, 5);
+        assert_eq!(n.ports[2].line, 6);
+    }
+
+    #[test]
+    fn test_port_ground_rejected() {
+        let spice = "Board\nR1 a 0 1k\n.port 0\n.end\n";
+        assert!(Netlist::parse(spice).is_err());
+    }
+
+    #[test]
+    fn test_port_duplicate_rejected() {
+        let spice = "Board\nR1 a 0 1k\nR2 b 0 1k\n.port a b\n.port a\n.end\n";
+        assert!(Netlist::parse(spice).is_err());
+    }
+
+    #[test]
+    fn test_port_requires_a_node() {
+        let spice = "Board\nR1 a 0 1k\n.port\n.end\n";
+        assert!(Netlist::parse(spice).is_err());
+    }
+
+    #[test]
+    fn test_no_ports_by_default() {
+        let spice = "Plain\nR1 a 0 1k\n.end\n";
+        assert!(Netlist::parse(spice).expect("parse").ports.is_empty());
+    }
+
+    #[test]
     fn test_no_inject_tap_by_default() {
         let spice = "Plain\nR1 a 0 1k\n.end\n";
         let n = Netlist::parse(spice).expect("parse");
@@ -7847,6 +7956,7 @@ U1 0 inv out opamp
             (".seed", "T\nR1 1 0 1k\n.seed 7\n.end\n"),
             (".linearize", "T\nR1 1 0 1k\n.linearize Q9\n.end\n"),
             (".tap", "T\nR1 a 0 1k\n.tap a\n.end\n"),
+            (".port", "T\nR1 a 0 1k\n.port a\n.end\n"),
             (".input_impedance", "T\nR1 1 0 1k\n.input_impedance 600\n.end\n"),
             (".integrator", "T\nR1 1 0 1k\n.integrator trap\n.end\n"),
             (".inject", "T\nR1 a 0 1k\n.inject a fb R=47k\n.end\n"),
