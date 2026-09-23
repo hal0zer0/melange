@@ -3131,6 +3131,97 @@ fn resolve_switch_overrides(
     Ok(resolved)
 }
 
+/// Output peak, in volts, below which `simulate` calls a rendered WAV silent.
+///
+/// Why a threshold rather than `peak == 0.0`: an output that lands on 1e-300 V
+/// is exactly as broken as one that lands on 0.0 — the float merely happened to
+/// underflow to a denormal instead of to zero — and an equality test would wave
+/// it through. A floated stage, a dead bias point and a mistyped output node all
+/// produce "some absurdly small number", not reliably a hard zero.
+///
+/// Why 1 uV specifically:
+///   * melange writes volts into the WAV (1.0 == 1.0 V), so 1e-6 V is -120 dBFS.
+///     Every real audio circuit's own thermal noise floor is orders of magnitude
+///     above that, and no converter can reproduce it — there is no legitimately
+///     quiet circuit sitting in this band, only broken ones.
+///   * It is also the finest distinction `simulate` can honestly draw: the
+///     generated binary reports `DIAG:peak` with `{:.6}`, so anything under
+///     5e-7 V arrives here already rounded to `0.000000`. A tighter rule would
+///     claim a precision this path does not have.
+///
+/// A circuit that is quiet but working (a deep attenuator, a fader near the
+/// bottom, a stage biased into cutoff) still lands far above this, so the
+/// warning does not nag correct circuits. Genuinely intentional silence — a
+/// zero-amplitude drive — is filtered out at the call site instead.
+const SILENT_OUTPUT_PEAK_V: f64 = 1e-6;
+
+/// True when a rendered output peak counts as digital silence.
+///
+/// NaN is deliberately NOT silence: a NaN peak means the solve blew up, which
+/// the NaN/magnitude-reset counters report, and it must not be described to the
+/// user as "nothing to hear".
+fn output_is_silent(peak: f64) -> bool {
+    peak.is_finite() && peak.abs() < SILENT_OUTPUT_PEAK_V
+}
+
+/// Build the warning shown when `simulate` renders digital silence.
+///
+/// `max_abs_node_v` is the run's largest internal node voltage (`DIAG:
+/// max_abs_v_prev`); it splits the two very different failures the user cannot
+/// otherwise tell apart — "the whole circuit is dead" versus "the circuit is
+/// alive but the output tap is not connected to it".
+fn silent_output_warning(
+    peak: f64,
+    output_node: &str,
+    samples: Option<u64>,
+    max_abs_node_v: Option<f64>,
+) -> String {
+    let sample_count = samples.map_or_else(|| "every".to_string(), |n| format!("all {n}"));
+    let mut msg = format!(
+        "WARNING: the rendered output is digital silence \u{2014} peak {peak:.6} V across \
+         {sample_count} samples of node '{output_node}', below the {SILENT_OUTPUT_PEAK_V:e} V \
+         floor melange treats as silence. The run completed and the WAV was written, but there \
+         is nothing in the file to hear.\n"
+    );
+    msg.push_str("  Nothing else in this report flags that, so check, roughly in order:\n");
+    msg.push_str(
+        "    1. A mistyped node name. A misspelled node is CREATED, not rejected: writing\n\
+         \x20      `C3 n33 n4 220n` instead of `C3 n3 n4 220n` quietly invents node `n33` and\n\
+         \x20      leaves that stage floating. Check every node name in the netlist against\n\
+         \x20      `melange nodes <circuit>`.\n",
+    );
+    msg.push_str(
+        "    2. A node with no DC path to ground (one reachable only through capacitors): that\n\
+         \x20      section cannot bias, so no signal crosses it.\n",
+    );
+    msg.push_str(&format!(
+        "    3. `--output-node {output_node}` is not where this circuit's signal actually comes\n\
+         \x20      out; `melange nodes <circuit>` lists the node names.\n"
+    ));
+    msg.push_str(
+        "    4. The input never reaches the output: a missing coupling cap, a pot or switch\n\
+         \x20      sitting at its zero position, or a supply rail that was never connected.\n",
+    );
+    match max_abs_node_v {
+        Some(v) if v.is_finite() && v.abs() < SILENT_OUTPUT_PEAK_V => msg.push_str(
+            "  Every internal node also stayed at 0 V for the whole run, so nothing in the\n\
+             \x20 circuit moved at all \u{2014} suspect the drive or the supply (check the input node\n\
+             \x20 and any DC sources) before the output tap.\n",
+        ),
+        Some(v) if v.is_finite() => msg.push_str(&format!(
+            "  Internal nodes did move (max |v| = {v:.3} V), so at least part of the circuit is\n\
+             \x20 live \u{2014} the break is between that live part and '{output_node}'. If the figure is\n\
+             \x20 just the drive amplitude, nothing past the input node is moving at all.\n"
+        )),
+        _ => {}
+    }
+    msg.push_str(
+        "  This is a warning, not an error: the file was written and the exit status is\n\
+         \x20 unchanged. If you meant to render a muted state, ignore it.",
+    );
+    msg
+}
+
 fn simulate_circuit_source(
     circuit_source: &circuits::CircuitSource,
     opts: &SimulateOptions,
@@ -3684,6 +3775,11 @@ fn simulate_circuit_source(
     let stderr = String::from_utf8_lossy(&result.stderr);
     let mut nr_max_iter_count: Option<u64> = None;
     let mut diag_samples: Option<u64> = None;
+    // Peak (V) and the largest node voltage seen anywhere in the circuit. Both
+    // are already computed by the generated binary; the silent-output check
+    // below reads them here rather than re-scanning the rendered buffer.
+    let mut diag_peak: Option<f64> = None;
+    let mut diag_max_abs_v_prev: Option<f64> = None;
     for line in stderr.lines() {
         if let Some(diag) = line.strip_prefix("DIAG:") {
             let parts: Vec<&str> = diag.splitn(2, '=').collect();
@@ -3692,6 +3788,8 @@ fn simulate_circuit_source(
                 match parts[0] {
                     "nr_max_iter_count" => nr_max_iter_count = parts[1].trim().parse().ok(),
                     "samples" => diag_samples = parts[1].trim().parse().ok(),
+                    "peak" => diag_peak = parts[1].trim().parse().ok(),
+                    "max_abs_v_prev" => diag_max_abs_v_prev = parts[1].trim().parse().ok(),
                     _ => {}
                 }
             }
@@ -3737,6 +3835,26 @@ fn simulate_circuit_source(
     println!("Output written to: {}", opts.output.display());
     if let Some(csv_path) = opts.probe_csv {
         println!("Probes written to: {}", csv_path.display());
+    }
+
+    // Silent-output check. melange already computed the peak; a run that
+    // renders digital silence must not slip out the door looking healthy just
+    // because every counter is clean and the exit code is 0. See
+    // `output_is_silent` for the threshold rationale.
+    //
+    // Deliberate silence is not a defect: a zero-amplitude test tone with noise
+    // off renders a silent file BY REQUEST, so that combination stays quiet.
+    let silence_requested = opts.input_audio.is_none()
+        && opts.amplitude == 0.0
+        && opts.noise_mode == melange_solver::codegen::NoiseMode::Off;
+    if let Some(peak) = diag_peak {
+        if output_is_silent(peak) && !silence_requested {
+            eprintln!();
+            eprintln!(
+                "{}",
+                silent_output_warning(peak, opts.output_node, diag_samples, diag_max_abs_v_prev)
+            );
+        }
     }
     Ok(())
 }
@@ -5531,6 +5649,91 @@ fn handle_cache(action: CacheAction) -> Result<()> {
             println!("  Size: {}", bin_stats.formatted_size());
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod silent_output_tests {
+    use super::*;
+
+    /// Exactly-zero is the case that shipped a 192 KB file of digital silence
+    /// with a clean report and exit 0.
+    #[test]
+    fn hard_zero_is_silent() {
+        assert!(output_is_silent(0.0));
+        assert!(output_is_silent(-0.0));
+    }
+
+    /// The reason the rule is a threshold and not `== 0.0`: a denormal output
+    /// is just as broken, and equality would wave it through.
+    #[test]
+    fn absurdly_small_is_silent() {
+        assert!(output_is_silent(1e-300));
+        assert!(output_is_silent(-1e-300));
+        assert!(output_is_silent(f64::MIN_POSITIVE));
+        // Anything the generated binary prints as `0.000000` must be caught.
+        assert!(output_is_silent(4.9e-7));
+    }
+
+    /// The other half of the rule: a quiet-but-working circuit must never be
+    /// nagged. 1e-6 V is -120 dBFS; real outputs live many decades above it.
+    #[test]
+    fn quiet_but_working_is_not_silent() {
+        assert!(!output_is_silent(SILENT_OUTPUT_PEAK_V));
+        assert!(!output_is_silent(1e-5)); // -100 dBFS, still absurdly quiet
+        assert!(!output_is_silent(1e-3)); // a heavily attenuated tap
+        assert!(!output_is_silent(0.5)); // ordinary line level
+        assert!(!output_is_silent(-0.5));
+    }
+
+    /// A blown-up solve is a different failure with its own counters; calling
+    /// it "nothing to hear" would be wrong.
+    #[test]
+    fn nan_and_inf_are_not_silence() {
+        assert!(!output_is_silent(f64::NAN));
+        assert!(!output_is_silent(f64::INFINITY));
+        assert!(!output_is_silent(f64::NEG_INFINITY));
+    }
+
+    /// The message has to name the causes a newcomer cannot tell apart, and
+    /// echo back the output node they actually passed.
+    #[test]
+    fn warning_names_the_actionable_causes() {
+        let msg = silent_output_warning(0.0, "out", Some(48000), Some(12.0));
+        for needle in [
+            "digital silence",
+            "mistyped node name",
+            "DC path to ground",
+            "--output-node out",
+            "melange nodes",
+            "warning, not an error",
+            "48000",
+        ] {
+            assert!(
+                msg.contains(needle),
+                "message must mention {needle:?}: {msg}"
+            );
+        }
+    }
+
+    /// Live-but-disconnected and stone-dead are different bugs; the internal
+    /// node peak is what separates them.
+    #[test]
+    fn warning_distinguishes_dead_circuit_from_dead_output_tap() {
+        let alive = silent_output_warning(0.0, "out", Some(100), Some(12.0));
+        assert!(alive.contains("Internal nodes did move"), "{alive}");
+        assert!(alive.contains("12.000"), "{alive}");
+
+        let dead = silent_output_warning(0.0, "out", Some(100), Some(0.0));
+        assert!(
+            dead.contains("nothing in the\n  circuit moved at all"),
+            "{dead}"
+        );
+
+        // No `max_abs_v_prev` in the diagnostics: say nothing rather than guess.
+        let unknown = silent_output_warning(0.0, "out", None, None);
+        assert!(!unknown.contains("Internal nodes did move"), "{unknown}");
+        assert!(!unknown.contains("moved at all"), "{unknown}");
     }
 }
 
