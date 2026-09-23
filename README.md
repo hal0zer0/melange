@@ -322,7 +322,7 @@ Every subcommand has `--help`. The flags worth knowing about up front:
 |------|----|------|
 | `--format plugin` | compile | Emit a full nih-plug project (default: raw code) |
 | `--solver auto\|dk\|nodal` | compile/simulate | Override solver selection |
-| `--oversampling 2\|4` | compile | 2× or 4× polyphase half-band IIR antialiasing |
+| `--oversampling 1\|2\|4` | compile/simulate/analyze/validate | 2× or 4× polyphase half-band IIR antialiasing. It is compile-time DSP, so `validate` takes it too — otherwise you would validate the 1× code and ship the 2× code |
 | `--backward-euler` | compile | L-stable integration for high-gain feedback circuits |
 | `--noise off\|thermal\|shot\|full` | compile/simulate/analyze | Inject authentic circuit noise (thermal → +shot → +1/f, op-amp en/in, pentode partition); off by default |
 | `--noise-seed <u64>` | compile/simulate/analyze | Master noise seed; `0` = entropy from the system clock, nonzero = deterministic |

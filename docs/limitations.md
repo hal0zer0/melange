@@ -491,8 +491,14 @@ Noise limitations:
   where the shipped build reduces M, validate builds a different (higher-M)
   system than `compile` ships. Measured on the Wurlitzer preamp deck: shipped
   M=3, harness M=5
-- `melange validate` ignores the `.oversampling` directive and compares at base
-  rate, because an oversampled comparison is confounded by anti-alias group delay
+- `melange validate` does not read the deck's `.oversampling` recommendation;
+  the factor must be given explicitly as `--oversampling {1|2|4}` (default 1).
+  `compile`/`simulate`/`analyze` honour the directive, `validate` reports what it
+  was asked to measure. An oversampled run compensates the ngspice reference
+  with the same half-band round trip the shipped build applies (magnitude-flat
+  allpass), so the filters' known response is inside the comparison; what it
+  cannot remove is the interpolator's phase dispersion carried through a
+  nonlinearity, which is real and ships. See `docs/aidocs/OVERSAMPLING.md`
 - Resistor `KF`/`AF` noise breaks ngspice parity (validate compiles with
   `NoiseMode::Off`, so it is simply absent from the comparison)
 - `.mismatch` / `.tolerance` jitter is **disabled automatically** on melange's

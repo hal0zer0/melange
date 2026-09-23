@@ -426,6 +426,7 @@ fn run_melange_codegen_with_main(
         "auto",
         false, // backward_euler (auto integrator)
         false, // force_trap
+        1,     // oversampling (1x; this harness compares the non-oversampled build)
         Some(main_code),
     )
 }

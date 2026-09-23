@@ -234,3 +234,91 @@ bugs — the old suite only tested DC settling):
     generated 2x code; measures the emitted decimator (alias −88.7 dB,
     passband 0.0 dB) and interpolator (image −88.7 dB) — pinning emitted
     code to the primitives' numbers.
+
+## Validating an oversampled build
+
+`--oversampling` is compile-time codegen, so a 2x build is different DSP from a
+1x build of the same deck. `melange validate` therefore takes the flag too:
+
+```
+melange validate circuit.cir --oversampling {1|2|4}      # default 1
+```
+
+Without it there is no way to validate what ships — you validate the 1x code and
+ship the 2x code. Plumbing: `ValidationOptions.oversampling` →
+`run_melange_solver_from_str` → `CodegenConfig.oversampling_factor`, with the DK
+kernel, the routing decision and the forward-active / grid-off gates all built at
+`sample_rate * factor`, exactly as `compile` and `simulate` do it. `validate`
+does NOT read a deck's `.oversampling` recommendation: it reports the build it
+was asked to measure.
+
+### What happens to the reference
+
+ngspice is untouched — it has its own timestep and knows nothing about melange's
+internal rate. Instead the **reference** is passed through the same half-band
+round trip the shipped build applies (`apply_oversampling_round_trip` in
+`melange-validate`, using `melange_primitives::oversampling::Oversampler`).
+
+With the circuit replaced by an identity, the 2x chain `up -> identity -> down`
+composes to `A0(z) * A1(z)` in the HOST-rate z — each branch cell is clocked
+exactly once per host sample, so the round trip is a cascade of first-order
+allpasses at the host rate. It is **magnitude-flat** (measured: < 0.01 dB across
+100 Hz – 18 kHz at both 2x and 4x) and all of its response is phase. The 4x
+chain is the same statement nested.
+
+This follows the project rule for a known effect: include the known filter
+response in the comparison, never widen an anchor around it. **No tolerance
+changes with the flag.** The term it removes is the round trip's group delay —
+2.65 host samples at 1 kHz for 2x, 3.47 for 4x. Uncompensated, that delay alone
+costs `1 - cos(2*pi*1000*2.65/48000) ~ 1.5e-2` of correlation against a 1 kHz
+tone, roughly a thousand times the whole 48 kHz solver residual, i.e. an
+uncompensated oversampled run measures the delay and nothing else.
+
+Reported on the result line as a `Build:` note naming the factor, the internal
+rate and the compensating filter's group delay, so an oversampled number is
+never mistaken for a 1x one.
+
+### What the compensation does NOT remove
+
+The round trip commutes with the circuit exactly only when the circuit is
+linear. For a nonlinear circuit the interpolator's **phase dispersion** survives:
+the up-filter delays the input tone by its phase delay at the FUNDAMENTAL, and
+every harmonic the nonlinearity then generates inherits that same time shift,
+while the compensated reference carries each harmonic's own phase delay. The
+difference grows with harmonic order because an allpass half-band's phase delay
+rises toward Nyquist.
+
+Measured on `tube_screamer_u` (48 kHz, 0.3 V, 1 kHz, steady-state window), phase
+error of melange against the compensated reference, per harmonic:
+
+| harmonic | 1x | 2x | 4x |
+|---|---|---|---|
+| 3rd (3 kHz) | 0.006° | 0.054° | 0.074° |
+| 7th (7 kHz) | 0.079° | 2.53° | 2.72° |
+| 11th (11 kHz) | 0.54° | 11.7° | 12.5° |
+| 15th (15 kHz) | 2.21° | 35.2° | 37.4° |
+
+and it matches the up-filter's measured phase-delay dispersion to ~10% at the
+7th–11th (e.g. 11th: predicted 11.8°, measured 11.7°). Harmonic *magnitudes*
+move the other way — the oversampled builds track the reference better (2x: 3rd
+−0.013 dB vs 1x −0.032 dB; 7th −0.030 dB vs −0.135 dB), which is the finer
+internal timestep doing its job.
+
+This is a real property of the shipped plugin, not a harness artifact: melange's
+oversampler is not linear-phase, so the harmonics it generates sit at different
+relative phases than the analog circuit's. It stays in the number.
+
+Also unremoved: residual imaging/aliasing (immaterial here — non-harmonic energy
+measured at −104.5 dBc in both engines at every factor), and the solver's own
+change of answer from running at a finer timestep, which is a genuine
+improvement, not an artifact.
+
+### Twin-drift guard
+
+The compensation uses `melange-primitives`; the shipped build uses the codegen
+emitter's own tables. `crates/melange-validate/tests/oversampling_reference.rs`
+pins them together: emitted `OS_COEFFS` / `OS_COEFFS_OUTER` must equal the
+primitives' tables bit for bit, and the compensation output must match the
+GENERATED, COMPILED oversampled code to < 1e-12 per sample on a pure-gain
+circuit (2x and 4x). If the twins drift, that test fails rather than the harness
+quietly subtracting the wrong filter from every oversampled number.

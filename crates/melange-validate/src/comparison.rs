@@ -295,6 +295,20 @@ pub struct ComparisonReport {
     /// run's product is a number presented as authoritative, and a footnote
     /// above a number does not retract it.
     pub unit_variation_note: Option<String>,
+
+    /// Set when the melange side was built with `--oversampling {2|4}`, naming
+    /// the factor, the internal rate, and the half-band round trip the
+    /// REFERENCE was put through so the filters' known response is inside the
+    /// comparison instead of charged to the solver.
+    ///
+    /// `None` for a 1x run, which is the default. Filled by
+    /// `validate_circuit_with_options`; `compare_signals` never sets it,
+    /// because it sees two signals and not the build they came from.
+    ///
+    /// It is reported, not graded: no tolerance moves with it. An oversampled
+    /// correlation is simply not the same measurement as a 1x one, and a
+    /// reader who is not told will assume it is.
+    pub oversampling_note: Option<String>,
 }
 
 impl ComparisonReport {
@@ -308,6 +322,13 @@ impl ComparisonReport {
             "Samples: {} at {:.0} Hz\n",
             self.sample_count, self.sample_rate
         ));
+        // An oversampled build is different DSP, and its number is not
+        // comparable to a 1x one. Say so above the metrics, where it qualifies
+        // how they were obtained — unlike the unit-variation note, this is not
+        // a retraction of the verdict, it is what was measured.
+        if let Some(note) = &self.oversampling_note {
+            summary.push_str(&format!("Build: {}\n", note));
+        }
         // The unit-variation qualifier rides ON the status line, not above it:
         // this line is the run's verdict, and a footnote elsewhere would not
         // retract it. Absent for every deck with no jitter directive.
@@ -517,6 +538,7 @@ pub fn compare_signals(
         passed: false,
         failures: vec![failure],
         config: *config,
+        oversampling_note: None,
         absolute_errors: None,
         relative_errors: None,
         unit_variation_note: None,
@@ -779,6 +801,8 @@ pub fn compare_signals(
         ),
         // Set by the caller, which is the only layer that has the deck.
         unit_variation_note: None,
+        // Set by the caller, which is the only layer that knows the build.
+        oversampling_note: None,
     }
 }
 

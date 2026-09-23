@@ -414,6 +414,25 @@ enum Commands {
         /// `compile --force-trap`). Ignored when --backward-euler is set.
         #[arg(long)]
         force_trap: bool,
+
+        /// Oversampling factor (1=none, 2=2x, 4=4x) for the melange side —
+        /// mirrors `melange compile --oversampling`.
+        ///
+        /// NOT a diagnostic. `--oversampling` is compile-time codegen: a build
+        /// at 2x is different DSP (interpolator, solver at the internal rate,
+        /// polyphase half-band decimator). Without this flag you would validate
+        /// the 1x code and ship the 2x code.
+        ///
+        /// ngspice is untouched — it has its own timestep and knows nothing
+        /// about melange's internal rate. Instead the REFERENCE is put through
+        /// the same half-band round trip the shipped build applies, which is
+        /// magnitude-flat (allpass) and carries the chain's group delay, so the
+        /// filters' known response is inside the comparison. No tolerance moves.
+        ///
+        /// Unlike `compile`, this does NOT read the deck's `.oversampling`
+        /// recommendation: validate reports what it was asked to measure.
+        #[arg(long, default_value = "1", value_name = "N")]
+        oversampling: usize,
     },
 
     /// Simulate circuit with input signal
@@ -1073,10 +1092,14 @@ fn main() -> Result<()> {
             tube_grid_fa,
             backward_euler,
             force_trap,
+            oversampling,
         } => {
             // Validate numeric CLI parameters
             if sample_rate <= 0.0 || !sample_rate.is_finite() {
                 anyhow::bail!("sample-rate must be positive and finite");
+            }
+            if !matches!(oversampling, 1 | 2 | 4) {
+                anyhow::bail!("oversampling must be 1, 2, or 4, got {}", oversampling);
             }
             if !matches!(bjt_fa.as_str(), "auto" | "off" | "force") {
                 anyhow::bail!(
@@ -1121,6 +1144,7 @@ fn main() -> Result<()> {
                     backward_euler,
                     force_trap,
                 },
+                oversampling,
             )
         }
         Commands::Simulate {
@@ -2887,9 +2911,9 @@ struct ReductionModes<'a> {
     bjt_fa: &'a str,
     tube_grid_fa: &'a str,
     // Diagnostics (not reductions): melange-side integrator override, for
-    // attributing integrator error against ngspice. No oversampling knob: the
-    // harness compares sample-aligned and the half-band IIR group delay would
-    // read as error.
+    // attributing integrator error against ngspice. Oversampling is NOT here —
+    // it is not a diagnostic but part of the shipped build, and it rides its
+    // own parameter on `validate_circuit_source`.
     backward_euler: bool,
     force_trap: bool,
 }
@@ -2906,6 +2930,7 @@ fn validate_circuit_source(
     relaxed: bool,
     tol: ToleranceOverrides,
     reductions: ReductionModes<'_>,
+    oversampling: usize,
 ) -> Result<()> {
     // Match parse-time node normalization (lowercase, gnd→0).
     let input_node_owned = melange_solver::parser::normalize_node_name(input_node);
@@ -2928,6 +2953,26 @@ fn validate_circuit_source(
         "  Tolerances: {}",
         if relaxed { "relaxed" } else { "strict" }
     );
+    if oversampling > 1 {
+        // Say what is being validated and what was done about the filters,
+        // BEFORE the number appears. This run measures different DSP from the
+        // 1x run above it in someone's scrollback.
+        println!(
+            "  Oversampling: {}\u{d7} (solver at {:.0} Hz internally)",
+            oversampling,
+            sample_rate * oversampling as f64
+        );
+        println!(
+            "    Reference passed through the same half-band round trip \
+             (allpass, group delay {:.2} samples at 1 kHz).",
+            melange_validate::oversampling_round_trip_group_delay_samples(
+                oversampling,
+                sample_rate,
+                1000.0
+            )
+        );
+        println!("    Tolerances are unchanged from the 1\u{d7} run.");
+    }
     println!();
 
     // Step 1: Check ngspice availability
@@ -3039,6 +3084,7 @@ fn validate_circuit_source(
         tube_grid_fa: reductions.tube_grid_fa.to_string(),
         backward_euler: reductions.backward_euler,
         force_trap: reductions.force_trap,
+        oversampling,
         ..Default::default()
     };
 

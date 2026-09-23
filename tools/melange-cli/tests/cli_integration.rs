@@ -290,6 +290,51 @@ fn test_oversampling_directive_resolution() {
     assert_eq!(factor(&code), 1, "default oversampling is 1");
 }
 
+/// `melange validate --oversampling` exists and is range-checked.
+///
+/// `--oversampling` is compile-time codegen: a build at 2x is different DSP
+/// from the 1x build, so without this flag on `validate` there is no way to
+/// validate what ships. The range check fires before ngspice is consulted, so
+/// this test runs on a machine with no ngspice.
+#[test]
+fn test_validate_oversampling_flag_is_range_checked() {
+    let cir = write_test_circuit(TEST_DIODE_CLIPPER, "val_os");
+
+    let bad = Command::new(melange_bin())
+        .args([
+            "validate",
+            cir.to_str().unwrap(),
+            "--oversampling",
+            "3",
+            "--duration",
+            "0.001",
+        ])
+        .current_dir(project_root())
+        .output()
+        .expect("run melange");
+    assert!(!bad.status.success(), "--oversampling 3 must be refused");
+    let stderr = String::from_utf8_lossy(&bad.stderr);
+    assert!(
+        stderr.contains("oversampling must be 1, 2, or 4"),
+        "expected the range message, got: {stderr}"
+    );
+
+    // And the flag is actually accepted for a legal value — `--help` lists it,
+    // which also pins the name against a rename.
+    let help = Command::new(melange_bin())
+        .args(["validate", "--help"])
+        .current_dir(project_root())
+        .output()
+        .expect("run melange");
+    let help_text = String::from_utf8_lossy(&help.stdout);
+    assert!(
+        help_text.contains("--oversampling"),
+        "validate --help must document --oversampling, got:\n{help_text}"
+    );
+
+    let _ = std::fs::remove_file(&cir);
+}
+
 // ============================================================================
 // simulate command
 // ============================================================================

@@ -183,6 +183,21 @@ pub struct ValidationOptions {
     /// Force trapezoidal on the melange side — mirrors `melange compile
     /// --force-trap`. DIAGNOSTIC only; ignored when `backward_euler` is true.
     pub force_trap: bool,
+    /// Oversampling factor for the melange side — mirrors `melange compile
+    /// --oversampling` (1 | 2 | 4). Default 1.
+    ///
+    /// This is NOT a diagnostic: `--oversampling` is a compile-time codegen
+    /// option, so a plugin built at 2x contains DIFFERENT DSP from the 1x
+    /// build (interpolator, solver at the internal rate, polyphase half-band
+    /// decimator). Without this knob the harness could only ever validate the
+    /// 1x code for a build that ships at 2x or 4x.
+    ///
+    /// The ngspice side is unchanged — ngspice has its own timestep and knows
+    /// nothing about melange's internal rate. Instead, the REFERENCE is passed
+    /// through the same half-band round trip the shipped build applies (see
+    /// [`apply_oversampling_round_trip`]), so the filters' known response is
+    /// included in the comparison rather than absorbed by a widened tolerance.
+    pub oversampling: usize,
 }
 
 impl Default for ValidationOptions {
@@ -201,6 +216,7 @@ impl Default for ValidationOptions {
             tube_grid_fa: "auto".to_string(),
             backward_euler: false,
             force_trap: false,
+            oversampling: 1,
         }
     }
 }
@@ -372,12 +388,28 @@ pub fn validate_circuit_with_options(
         &options.tube_grid_fa,
         options.backward_euler,
         options.force_trap,
+        options.oversampling,
         None,
     )?;
 
     // Apply DC blocking to SPICE output to match melange's internal DC blocker (5 Hz HPF)
     let mut spice_output_blocked = spice_output.to_vec();
     dc_block_signal(&mut spice_output_blocked, spice_data.sample_rate);
+
+    // Oversampled build: put the reference through the SAME half-band round
+    // trip the shipped code applies, so the filters' known (magnitude-flat,
+    // all-phase) response is part of the comparison. Not a tolerance change —
+    // see `apply_oversampling_round_trip` for what this does and does not
+    // cover. No-op at factor 1, which is every default run.
+    //
+    // Order: after the DC blocker, so the blocker still sees the reference's
+    // own first sample as its seed (the startup-transient fix documented on
+    // `dc_block_signal`). Both are LTI, so they commute up to boundary effects.
+    apply_oversampling_round_trip(
+        &mut spice_output_blocked,
+        options.oversampling,
+        spice_data.sample_rate,
+    );
 
     // Create signal objects for comparison
     let spice_signal = Signal::new(
@@ -407,6 +439,19 @@ pub fn validate_circuit_with_options(
     // seed that was therefore not exercised. `None` — and so no added output —
     // for every deck without them.
     report.unit_variation_note = deck_guard::unit_variation_note(&netlist_str);
+    // Say on the report which build was validated, and that the reference was
+    // put through the same filters. A correlation number for an oversampled
+    // build is not comparable to a 1x one, and a reader who is not told will
+    // assume it is.
+    report.oversampling_note = (options.oversampling > 1).then(|| {
+        format!(
+            "oversampling {}x (internal rate {:.0} Hz); reference passed through the same \
+             half-band round trip (allpass, group delay {:.2} samples at 1 kHz)",
+            options.oversampling,
+            sample_rate * options.oversampling as f64,
+            oversampling_round_trip_group_delay_samples(options.oversampling, sample_rate, 1000.0),
+        )
+    });
 
     // Generate output files if requested
     let mut html_report_path = None;
@@ -487,6 +532,115 @@ pub fn dc_block_signal(signal: &mut [f64], sample_rate: f64) {
         y_prev = y;
         *sample = y;
     }
+}
+
+/// Pass a reference signal through the SAME half-band round trip an
+/// oversampled melange build applies, so the filters' known response is part
+/// of the comparison instead of being charged to the solver.
+///
+/// # Why the reference is filtered and the tolerances are not
+///
+/// `--oversampling {2|4}` is a compile-time codegen option: the shipped build
+/// upsamples, solves at the internal rate, and decimates through polyphase
+/// half-band IIR allpass chains. Those filters have a real response, and it
+/// ships, so it is a true difference between melange's output and the circuit.
+/// The project's rule for it is to *include the known filter response in the
+/// comparison*, never to widen an anchor around an effect whose size is known
+/// analytically.
+///
+/// That is what this does. With the circuit replaced by an identity, the 2x
+/// chain `up -> identity -> down` composes to the pure allpass
+/// `A0(z) * A1(z)` in the HOST-rate `z` (each branch cell is clocked exactly
+/// once per host sample) — magnitude-flat to the last bit, all response in the
+/// phase. The 4x chain is the same statement nested. Applying it to the
+/// ngspice output puts both signals through the same known linear response, so
+/// what is left on the result line is the part that is not the filters.
+///
+/// The dominant term it removes is group delay. At 48 kHz the 2x round trip
+/// delays by order a host sample; against a 1 kHz tone that alone costs
+/// `1 - cos(2*pi*1000/48000) ~ 8.6e-3` of correlation, roughly four hundred
+/// times the whole 48 kHz solver residual. Comparing an oversampled build
+/// against an unfiltered reference measures that delay and almost nothing
+/// else.
+///
+/// # What it does NOT cover
+///
+/// The round trip commutes with the circuit exactly only when the circuit is
+/// linear. For a nonlinear circuit `D(C(U(x)))` is not `A(C(x))`, and the
+/// difference is real and stays in the number: the residual imaging/aliasing
+/// the oversampling exists to suppress, and the effect of the interpolator's
+/// phase on the waveform that reaches the nonlinearity. Neither is removed
+/// here, and neither should be — both ship.
+///
+/// Nor does it touch the other half of what `--oversampling` changes: the
+/// solver runs at `factor * sample_rate`, a finer timestep, which moves the
+/// answer on its own. That shows up as a genuine (small) improvement against
+/// the reference, not as an artifact.
+///
+/// # Twin-drift
+///
+/// The chain used here is `melange_primitives::oversampling::Oversampler`,
+/// the same implementation the codegen emitter mirrors. The coefficients the
+/// emitter actually bakes into generated code are pinned to the primitives'
+/// tables by `oversampling_reference_matches_emitted_coefficients`
+/// (`tests/oversampling_reference.rs`); if the twins ever drift, that test
+/// fails rather than this function quietly compensating with the wrong filter.
+///
+/// `factor == 1` is a no-op. Panics on an unsupported factor — the caller
+/// validates it first, and silently comparing against an uncompensated
+/// reference would be worse than stopping.
+pub fn apply_oversampling_round_trip(signal: &mut [f64], factor: usize, sample_rate: f64) {
+    if factor == 1 {
+        return;
+    }
+    let mut os = melange_primitives::oversampling::Oversampler::new(factor, sample_rate)
+        .unwrap_or_else(|e| panic!("oversampling reference filter: {e}"));
+    for sample in signal.iter_mut() {
+        *sample = os.process(*sample, |x| x);
+    }
+}
+
+/// Group delay of the oversampling round trip at `freq_hz`, in host samples.
+///
+/// Measured, not asserted: an impulse is pushed through the same chain
+/// [`apply_oversampling_round_trip`] uses and the phase of its response at
+/// `freq_hz` is read off. Reported on the result line so the number the
+/// harness compensated for is visible rather than implied.
+///
+/// Returns 0.0 for `factor == 1`.
+pub fn oversampling_round_trip_group_delay_samples(
+    factor: usize,
+    sample_rate: f64,
+    freq_hz: f64,
+) -> f64 {
+    if factor == 1 {
+        return 0.0;
+    }
+    // Impulse response, long enough for these allpass chains to decay.
+    let n = 4096;
+    let mut h = vec![0.0f64; n];
+    h[0] = 1.0;
+    apply_oversampling_round_trip(&mut h, factor, sample_rate);
+
+    // H(e^{jw}) at the test frequency; the round trip is allpass, so |H| = 1
+    // and -phase/w is the phase delay, which for a single tone is exactly the
+    // shift the comparison would otherwise have seen.
+    let w = 2.0 * std::f64::consts::PI * freq_hz / sample_rate;
+    let (mut re, mut im) = (0.0f64, 0.0f64);
+    for (k, &hk) in h.iter().enumerate() {
+        let a = w * k as f64;
+        re += hk * a.cos();
+        im -= hk * a.sin();
+    }
+    let phase = im.atan2(re); // in (-pi, pi]
+    let mut delay = -phase / w;
+    // Unwrap into the positive branch: these chains are causal and delay by
+    // more than a sample at 4x, so a phase that has wrapped reads negative.
+    let period_samples = sample_rate / freq_hz;
+    while delay < 0.0 {
+        delay += period_samples;
+    }
+    delay
 }
 
 /// Strip the input voltage source from a netlist string
@@ -583,10 +737,22 @@ pub fn run_melange_solver_from_str(
     tube_grid_fa: &str,
     backward_euler: bool,
     force_trap: bool,
+    oversampling: usize,
     main_code: Option<&str>,
 ) -> Result<Vec<f64>, ValidationError> {
     use melange_solver::codegen::{routing, CodeGenerator, CodegenConfig};
     use std::io::Write;
+
+    if !matches!(oversampling, 1 | 2 | 4) {
+        return Err(ValidationError::InvalidInput(format!(
+            "oversampling must be 1, 2, or 4, got {oversampling}"
+        )));
+    }
+    // The solver runs at the INTERNAL rate under oversampling, so every
+    // rate-dependent decision below — kernel build, routing, the reduction
+    // gates — is made at `routing_rate`, exactly as `melange compile` and
+    // `melange simulate` do it. Equals `sample_rate` when oversampling is off.
+    let routing_rate = sample_rate * oversampling as f64;
 
     // Unit variation OFF on the melange side, unconditionally.
     //
@@ -703,7 +869,7 @@ pub fn run_melange_solver_from_str(
         &fa_config,
         "auto",
         sample_rate,
-        1,
+        oversampling,
         input_node,
         1.0,
         &melange_solver::pipeline::silent,
@@ -718,7 +884,7 @@ pub fn run_melange_solver_from_str(
         tube_grid_fa,
         "auto",
         sample_rate,
-        1,
+        oversampling,
         input_node,
         1.0,
     )
@@ -773,14 +939,14 @@ pub fn run_melange_solver_from_str(
         || !mna.transformer_groups.is_empty();
     let mut dk_failed = false;
     let kernel = if has_inductors {
-        melange_solver::dk::DkKernel::from_mna_augmented(&mna, sample_rate)
+        melange_solver::dk::DkKernel::from_mna_augmented(&mna, routing_rate)
             .map_err(|e| ValidationError::Solver(format!("Augmented DK: {:?}", e)))?
     } else {
-        match melange_solver::dk::DkKernel::from_mna(&mna, sample_rate) {
+        match melange_solver::dk::DkKernel::from_mna(&mna, routing_rate) {
             Ok(k) => k,
             Err(_) => {
                 dk_failed = true;
-                melange_solver::dk::DkKernel::from_mna_augmented(&mna, sample_rate)
+                melange_solver::dk::DkKernel::from_mna_augmented(&mna, routing_rate)
                     .map_err(|e| ValidationError::Solver(format!("DK fallback: {:?}", e)))?
             }
         }
@@ -840,11 +1006,15 @@ pub fn run_melange_solver_from_str(
         max_iterations: melange_solver::pipeline::auto_tune_max_iter(
             None, &kernel, &decision, false, false, input_node,
         ),
-        // Diagnostics (default: shipped behaviour — auto integrator). No
-        // oversampling knob here: the harness compares sample-aligned and the
-        // half-band IIR's group delay would read as error.
+        // Diagnostics (default: shipped behaviour — auto integrator).
         backward_euler,
         force_trap,
+        // Compile-time DSP, NOT a diagnostic: at 2x/4x the emitted code
+        // upsamples, solves at `routing_rate`, and decimates. The reference is
+        // put through the same half-band round trip in
+        // `validate_circuit_with_options` so the filters' known response is
+        // included in the comparison rather than charged to the solver.
+        oversampling_factor: oversampling,
         ..CodegenConfig::default()
     };
     let generator = CodeGenerator::new(config);
@@ -1150,6 +1320,7 @@ Rl out 0 10k
                 "auto",
                 false,
                 false,
+                1,
                 None,
             )
             .expect_err("missing output node must fail");

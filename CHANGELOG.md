@@ -11,6 +11,53 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ### Added
 
+- **`melange validate --oversampling {1|2|4}` — validate the code that actually
+  ships.** `--oversampling` is a compile-time codegen option: a build at 2x
+  upsamples, runs the solver at the internal rate, and decimates through
+  polyphase half-band IIR allpass chains. `validate` had no such flag, so there
+  was no way to check what you ship — you validated the 1x code and shipped the
+  2x code. The flag plumbs through `ValidationOptions.oversampling` into
+  `CodegenConfig.oversampling_factor`, with the DK kernel, the routing decision
+  and the forward-active / grid-off gates built at `sample_rate * factor`,
+  exactly as `compile` and `simulate` do it. Default 1 — every existing run is
+  byte-for-byte unchanged (re-measured: `tube_screamer_u` at 48/96/192 kHz
+  reproduces the recorded rate sweep to the printed digit).
+  - **The filters' response is included in the comparison, not tolerated.**
+    ngspice is untouched — it has its own timestep and knows nothing about
+    melange's internal rate. Instead the REFERENCE is passed through the same
+    half-band round trip the shipped build applies. With the circuit replaced by
+    an identity that round trip composes to a cascade of first-order allpasses
+    at the HOST rate: magnitude-flat (measured < 0.01 dB, 100 Hz – 18 kHz, 2x
+    and 4x), all response in the phase. **No tolerance, preset or pass/fail rule
+    moved.** The term it removes is group delay — 2.65 host samples at 1 kHz for
+    2x — which uncompensated would cost ~1.5e-2 of correlation against the
+    harness's 1 kHz tone, about a thousand times the entire 48 kHz solver
+    residual. An uncompensated oversampled run measures the delay and nothing
+    else.
+  - **What it does not remove stays in the number.** The round trip commutes
+    with the circuit only when the circuit is linear. For a nonlinear one the
+    interpolator's phase dispersion survives: every harmonic the nonlinearity
+    generates inherits the fundamental's time shift, while the compensated
+    reference carries each harmonic's own. Measured on `tube_screamer_u`
+    (48 kHz, 0.3 V, steady state), melange-vs-reference phase error at the 7th
+    harmonic is 0.079° at 1x and 2.53° at 2x, matching the up-filter's measured
+    phase-delay dispersion. Harmonic magnitudes move the other way — 2x tracks
+    the reference better (7th: −0.030 dB vs −0.135 dB at 1x) — which is the
+    finer internal timestep. Both are in the shipped plugin, so both stay.
+  - Reported, so it cannot be misread: an oversampled run prints a `Build:` line
+    naming the factor, the internal rate and the compensating filter's group
+    delay at 1 kHz, above the metrics.
+  - `validate` does NOT read a deck's `.oversampling` recommendation, unlike
+    `compile`/`simulate`/`analyze`: it reports the build it was asked to
+    measure.
+  - Twin-drift guard (`crates/melange-validate/tests/oversampling_reference.rs`):
+    the emitted `OS_COEFFS`/`OS_COEFFS_OUTER` must equal the `melange-primitives`
+    tables bit for bit, and the compensation must reproduce the GENERATED,
+    COMPILED oversampled code to < 1e-12 per sample on a pure-gain circuit at
+    both 2x and 4x. Compensating with the wrong filter would make every
+    oversampled number silently wrong, which is the failure mode this project
+    treats as a showstopper.
+
 - **`melange validate` works on op-amp circuits again — the whole class.**
   ngspice has no `U` element and no `OA` model type, so every deck containing an
   op-amp was refused outright. That took the one command that answers "did I

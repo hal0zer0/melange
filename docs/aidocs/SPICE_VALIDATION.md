@@ -117,6 +117,23 @@ retired; the four remaining dead `circuit_no_vin.cir` files were deleted
 
 ## Melange Solver Setup
 
+### Oversampling (`--oversampling {1|2|4}`)
+
+`--oversampling` is compile-time codegen, not a runtime knob, so a 2x build is
+different DSP and `validate` takes the flag too — otherwise the 1x code is
+validated and the 2x code shipped. Default 1.
+
+ngspice is NOT changed: it has its own timestep. The reference is instead put
+through the same half-band round trip the shipped build applies, which with the
+circuit replaced by an identity is a host-rate allpass cascade — magnitude-flat,
+all response in the phase, group delay 2.65 host samples at 1 kHz (2x) / 3.47
+(4x). No tolerance moves; the compensated run prints a `Build:` line saying what
+was measured. What the compensation cannot remove — the interpolator's phase
+dispersion carried through a nonlinearity — is real and stays in the number.
+
+Full rationale, the measured per-harmonic decomposition and the twin-drift guard
+are in [OVERSAMPLING.md](OVERSAMPLING.md) § "Validating an oversampled build".
+
 ### DC Operating Point for Nonlinear Circuits
 
 For circuits with nonlinear devices (diodes, BJTs), the codegen pipeline
