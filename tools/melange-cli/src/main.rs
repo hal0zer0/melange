@@ -424,10 +424,11 @@ enum Commands {
         /// the 1x code and ship the 2x code.
         ///
         /// ngspice is untouched — it has its own timestep and knows nothing
-        /// about melange's internal rate. Instead the REFERENCE is put through
-        /// the same half-band round trip the shipped build applies, which is
-        /// magnitude-flat (allpass) and carries the chain's group delay, so the
-        /// filters' known response is inside the comparison. No tolerance moves.
+        /// about melange's internal rate — and it is NOT filtered. The
+        /// comparison is against the circuit: an unfiltered reference aligned
+        /// to the melange output by one best-fit constant delay, the same
+        /// alignment every mode gets. The half-bands' frequency-dependent phase
+        /// therefore stays inside the number. No tolerance moves.
         ///
         /// Unlike `compile`, this does NOT read the deck's `.oversampling`
         /// recommendation: validate reports what it was asked to measure.
@@ -2963,14 +2964,23 @@ fn validate_circuit_source(
             sample_rate * oversampling as f64
         );
         println!(
-            "    Reference passed through the same half-band round trip \
-             (allpass, group delay {:.2} samples at 1 kHz).",
+            "    The emitted code interpolates and decimates through polyphase IIR \
+             half-band allpass chains,"
+        );
+        println!(
+            "    whose frequency-dependent phase stays in the comparison. The reference is \
+             NOT filtered:"
+        );
+        println!(
+            "    it is aligned to the melange output by one best-fit constant delay \
+             (analytic seed {:.2} samples",
             melange_validate::oversampling_round_trip_group_delay_samples(
                 oversampling,
                 sample_rate,
                 1000.0
             )
         );
+        println!("    at 1 kHz), the same alignment the 1\u{d7} run gets.");
         println!("    Tolerances are unchanged from the 1\u{d7} run.");
     }
     println!();

@@ -309,6 +309,20 @@ pub struct ComparisonReport {
     /// correlation is simply not the same measurement as a 1x one, and a
     /// reader who is not told will assume it is.
     pub oversampling_note: Option<String>,
+
+    /// How the reference was aligned to the melange output before any metric
+    /// was computed: the fitted constant delay, the ANALYTIC delay the search
+    /// was seeded at, and the search bound.
+    ///
+    /// Every `melange validate` run aligns — 1x included — so the 1x/2x/4x
+    /// rows stay commensurable; at 1x the fit lands near zero. Filled by
+    /// `validate_circuit_with_options`; `compare_signals` never sets it,
+    /// because it sees two signals that have already been aligned.
+    ///
+    /// It is reported, not graded. The alignment removes a constant delay and
+    /// nothing else: no gain is fitted, so a scale error stays in the
+    /// residual where a gain gate can see it.
+    pub alignment_note: Option<String>,
 }
 
 impl ComparisonReport {
@@ -328,6 +342,13 @@ impl ComparisonReport {
         // a retraction of the verdict, it is what was measured.
         if let Some(note) = &self.oversampling_note {
             summary.push_str(&format!("Build: {}\n", note));
+        }
+        // How the two signals were lined up, before any metric below. A
+        // residual quoted "modulo a constant delay" is not the same number as
+        // one quoted without, so the alignment is stated where the metrics
+        // are, not in a footnote.
+        if let Some(note) = &self.alignment_note {
+            summary.push_str(&format!("Aligned: {}\n", note));
         }
         // The unit-variation qualifier rides ON the status line, not above it:
         // this line is the run's verdict, and a footnote elsewhere would not
@@ -539,6 +560,7 @@ pub fn compare_signals(
         failures: vec![failure],
         config: *config,
         oversampling_note: None,
+        alignment_note: None,
         absolute_errors: None,
         relative_errors: None,
         unit_variation_note: None,
@@ -803,6 +825,8 @@ pub fn compare_signals(
         unit_variation_note: None,
         // Set by the caller, which is the only layer that knows the build.
         oversampling_note: None,
+        // Set by the caller, which is the layer that does the alignment.
+        alignment_note: None,
     }
 }
 

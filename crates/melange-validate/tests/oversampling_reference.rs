@@ -1,31 +1,34 @@
-//! The oversampling reference compensation must BE the shipped filter.
+//! `melange-primitives`' oversampling round trip must BE the shipped filter.
 //!
-//! `melange validate --oversampling {2|4}` builds the melange side with the
-//! same codegen option the plugin ships with, and puts the ngspice reference
-//! through the same half-band round trip so the filters' known response sits
-//! inside the comparison instead of being charged to the solver (the arbiter's
-//! rule: include the known response, or gate in-band — never widen the anchor
-//! around an effect whose size is known).
-//!
-//! That only holds if the compensation filter really is the emitted one. The
-//! coefficient tables and the up/down topology exist TWICE — in
-//! `melange-primitives` (which the compensation uses) and in the codegen
-//! emitter (which ships) — and `docs/aidocs/OVERSAMPLING.md` flags the drift
-//! hazard explicitly. These tests pin the two together from the validate side:
+//! The half-band coefficient tables and the up/down topology exist TWICE — in
+//! `melange-primitives` and in the codegen emitter (which ships) — and
+//! `docs/aidocs/OVERSAMPLING.md` flags the drift hazard explicitly. These tests
+//! pin the two together from the validate side:
 //!
 //! 1. `emitted_coefficients_match_the_compensation_filter` — the constants the
 //!    emitter bakes into generated code equal the primitives' tables, bit for
 //!    bit.
 //! 2. `compensation_reproduces_the_emitted_round_trip_2x` / `_4x` — the
-//!    compensation output equals what the GENERATED, COMPILED oversampled code
-//!    does to the same input on a circuit whose response is a pure gain. Any
-//!    drift in coefficients, branch split, clocking or stage assignment shows
-//!    up here as a numeric difference.
+//!    primitives' round trip equals what the GENERATED, COMPILED oversampled
+//!    code does to the same input on a circuit whose response is a pure gain.
+//!    Any drift in coefficients, branch split, clocking or stage assignment
+//!    shows up here as a numeric difference.
 //!
-//! If either fails, the compensation is silently subtracting the wrong filter
-//! and every oversampled validate number is wrong. That is the "compiler
-//! silently doing the wrong thing" failure the project treats as a showstopper,
-//! so these assert exactly rather than within a comfortable band.
+//! # What these no longer guard
+//!
+//! Until 2026-09-23 `validate --oversampling` pushed the ngspice REFERENCE
+//! through this round trip so both sides carried the same filters. That
+//! comparison method is retired: on a single tone it cancels the down leg
+//! exactly and bills the up leg at harmonic frequencies it never saw, because
+//! the shipped harmonics are generated AFTER the up leg. Validate now compares
+//! against an unfiltered reference aligned by one best-fit constant delay
+//! (`melange_validate::alignment`).
+//!
+//! The twin-drift pin below still matters, and arguably matters more: the
+//! round trip is the source of the ANALYTIC delay the alignment search is
+//! seeded at, and `docs/aidocs/OVERSAMPLING.md` quotes its properties as
+//! established fact. A silent drift between the two copies would make both
+//! wrong, so these assert exactly rather than within a comfortable band.
 
 use melange_primitives::oversampling::coefficients::{HB_STEEP_7SECTION, HB_WIDE_3SECTION};
 use melange_solver::codegen::{routing, CodeGenerator, CodegenConfig};
@@ -196,7 +199,8 @@ fn emitted_coefficients_match_the_compensation_filter() {
         emitted_const_array(&src2, "OS_COEFFS"),
         HB_STEEP_7SECTION.to_vec(),
         "2x emitted OS_COEFFS drifted from melange-primitives' HB_STEEP_7SECTION, \
-         which is what `melange validate --oversampling` compensates the reference with"
+         which is the twin of the emitted chain and the source of the analytic \
+         delay `melange validate --oversampling` seeds its alignment with"
     );
 
     let src4 = generated_source(4);
@@ -233,8 +237,8 @@ fn assert_compensation_matches_emitted(factor: usize) {
 
     // The divider's response is a pure gain, so the 1x output IS the
     // "reference" and the only difference the oversampled build can introduce
-    // is the round trip. Compensate the reference exactly as
-    // `validate_circuit_with_options` does.
+    // is the round trip. Run the primitives' chain over it — the twin of the
+    // emitted one.
     let mut compensated = base.clone();
     apply_oversampling_round_trip(&mut compensated, factor, SAMPLE_RATE);
 
@@ -250,14 +254,14 @@ fn assert_compensation_matches_emitted(factor: usize) {
     );
     assert!(
         worst < 1e-12,
-        "compensation filter is not the emitted {factor}x round trip: worst \
+        "the primitives' chain is not the emitted {factor}x round trip: worst \
          sample difference {worst:e} on a pure-gain circuit (peak {peak:e}). \
          Coefficients, branch split, clocking or stage assignment have drifted \
          between melange-primitives and the codegen emitter."
     );
 
-    // And confirm the thing being compensated for is real: without it, the
-    // same comparison is dominated by the round trip's group delay.
+    // And confirm the effect is real at all: without the round trip, the same
+    // comparison is dominated by its delay.
     let raw_worst = base
         .iter()
         .zip(oversampled.iter())
@@ -265,7 +269,7 @@ fn assert_compensation_matches_emitted(factor: usize) {
         .fold(0.0f64, f64::max);
     assert!(
         raw_worst > 1e-3,
-        "uncompensated {factor}x difference is only {raw_worst:e}; this test is \
+        "un-round-tripped {factor}x difference is only {raw_worst:e}; this test is \
          no longer proving anything"
     );
 }

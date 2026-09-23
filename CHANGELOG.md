@@ -19,44 +19,52 @@ codegen output, CLI flags, and netlist semantics may all change.
   2x code. The flag plumbs through `ValidationOptions.oversampling` into
   `CodegenConfig.oversampling_factor`, with the DK kernel, the routing decision
   and the forward-active / grid-off gates built at `sample_rate * factor`,
-  exactly as `compile` and `simulate` do it. Default 1 — every existing run is
-  byte-for-byte unchanged (re-measured: `tube_screamer_u` at 48/96/192 kHz
-  reproduces the recorded rate sweep to the printed digit).
-  - **The filters' response is included in the comparison, not tolerated.**
-    ngspice is untouched — it has its own timestep and knows nothing about
-    melange's internal rate. Instead the REFERENCE is passed through the same
-    half-band round trip the shipped build applies. With the circuit replaced by
-    an identity that round trip composes to a cascade of first-order allpasses
-    at the HOST rate: magnitude-flat (measured < 0.01 dB, 100 Hz – 18 kHz, 2x
-    and 4x), all response in the phase. **No tolerance, preset or pass/fail rule
-    moved.** The term it removes is group delay — 2.65 host samples at 1 kHz for
-    2x — which uncompensated would cost ~1.5e-2 of correlation against the
-    harness's 1 kHz tone, about a thousand times the entire 48 kHz solver
-    residual. An uncompensated oversampled run measures the delay and nothing
-    else.
-  - **What it does not remove stays in the number.** The round trip commutes
-    with the circuit only when the circuit is linear. For a nonlinear one the
-    interpolator's phase dispersion survives: every harmonic the nonlinearity
-    generates inherits the fundamental's time shift, while the compensated
-    reference carries each harmonic's own. Measured on `tube_screamer_u`
-    (48 kHz, 0.3 V, steady state), melange-vs-reference phase error at the 7th
-    harmonic is 0.079° at 1x and 2.53° at 2x, matching the up-filter's measured
-    phase-delay dispersion. Harmonic magnitudes move the other way — 2x tracks
-    the reference better (7th: −0.030 dB vs −0.135 dB at 1x) — which is the
-    finer internal timestep. Both are in the shipped plugin, so both stay.
+  exactly as `compile` and `simulate` do it. Default 1 — the emitted 1x code is
+  unchanged. The 1x *numbers* do move slightly, because every mode including 1x
+  now gets the same best-fit delay alignment described below: on
+  `tube_screamer_u` at 48 kHz / 0.3 V / 500 ms the 1x fit is 0.0042 samples and
+  nRMS goes 0.1532 % -> 0.1423 %.
+  - **The comparison is against the circuit, delay-aligned.** ngspice is
+    untouched — it has its own timestep and knows nothing about melange's
+    internal rate — and it is NOT filtered. The reference is aligned to the
+    melange output by ONE best-fit constant delay: a least-squares fractional
+    delay over the graded window, fitting delay and never gain, seeded at the
+    analytic half-band round-trip delay from the filter design (2.6502 host
+    samples at 1 kHz for 2x, 3.4682 for 4x) and bounded to half a stimulus
+    period. The same alignment runs in EVERY mode including 1x, so the rows stay
+    commensurable; at 1x it lands within 0.005 samples of zero. Fitted and
+    analytic delays are both printed on an `Aligned:` line. **No tolerance,
+    preset or pass/fail rule moved.**
+  - **The filters' phase stays in the number.** An oversampled build adds
+    frequency-dependent phase from the IIR allpass half-bands, and `validate`
+    shows it as lost correlation: on `tube_screamer_u` at 48 kHz / 0.3 V over
+    500 ms, 1−ρ is 1.00e-6 at 1x, 5.64e-6 at 2x and 6.25e-6 at 4x — 5.6× and
+    6.3× the 1x figure. That loss is in the shipped plugin, so it is reported,
+    not absorbed. Harmonic magnitudes move the other way (the oversampled builds
+    track the reference better), which is the finer internal timestep doing its
+    job.
+  - **Which leg it comes from was measured, not reasoned.**
+    `cargo run -p melange-validate --release --example os_leg_attribution`
+    swaps one leg at a time for a linear-phase FIR half-band, so a swap removes
+    only that leg's dispersion. Of the 2x residual in excess of the 1x floor,
+    swapping the DECIMATOR removes 98.3 % and swapping the interpolator removes
+    1.3 %. The interpolator is not inert, it is invisible to a single tone: on a
+    two-tone drive it changes IMD products by ≤ 0.024 dB at 1 kHz + 1.1 kHz and
+    by 0.31–1.09 dB at 19 kHz + 20 kHz.
   - Reported, so it cannot be misread: an oversampled run prints a `Build:` line
-    naming the factor, the internal rate and the compensating filter's group
-    delay at 1 kHz, above the metrics.
+    naming the factor and the internal rate, and every run prints an `Aligned:`
+    line giving the fitted delay next to the analytic one, above the metrics.
   - `validate` does NOT read a deck's `.oversampling` recommendation, unlike
     `compile`/`simulate`/`analyze`: it reports the build it was asked to
     measure.
   - Twin-drift guard (`crates/melange-validate/tests/oversampling_reference.rs`):
     the emitted `OS_COEFFS`/`OS_COEFFS_OUTER` must equal the `melange-primitives`
-    tables bit for bit, and the compensation must reproduce the GENERATED,
-    COMPILED oversampled code to < 1e-12 per sample on a pure-gain circuit at
-    both 2x and 4x. Compensating with the wrong filter would make every
-    oversampled number silently wrong, which is the failure mode this project
-    treats as a showstopper.
+    tables bit for bit, and the primitives' round trip must reproduce the
+    GENERATED, COMPILED oversampled code to < 1e-12 per sample on a pure-gain
+    circuit at both 2x and 4x. That round trip is where the analytic alignment
+    seed comes from and what OVERSAMPLING.md quotes as established fact, so a
+    silent drift between the twins would make both wrong — the failure mode this
+    project treats as a showstopper.
 
 - **`melange validate` works on op-amp circuits again — the whole class.**
   ngspice has no `U` element and no `OA` model type, so every deck containing an

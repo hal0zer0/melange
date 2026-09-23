@@ -255,70 +255,167 @@ was asked to measure.
 ### What happens to the reference
 
 ngspice is untouched — it has its own timestep and knows nothing about melange's
-internal rate. Instead the **reference** is passed through the same half-band
-round trip the shipped build applies (`apply_oversampling_round_trip` in
-`melange-validate`, using `melange_primitives::oversampling::Oversampler`).
+internal rate — and it is **not filtered**. The comparison is against the
+circuit: an **unfiltered** reference, aligned to the melange output by ONE
+best-fit constant delay (`crates/melange-validate/src/alignment.rs`). The same
+alignment runs in **every mode, 1x included**, so the 1x/2x/4x rows stay
+commensurable; at 1x it lands within a few thousandths of a sample of zero.
 
-With the circuit replaced by an identity, the 2x chain `up -> identity -> down`
-composes to `A0(z) * A1(z)` in the HOST-rate z — each branch cell is clocked
-exactly once per host sample, so the round trip is a cascade of first-order
-allpasses at the host rate. It is **magnitude-flat** (measured: < 0.01 dB across
-100 Hz – 18 kHz at both 2x and 4x) and all of its response is phase. The 4x
-chain is the same statement nested.
+The estimator is standardised, and each constraint is load-bearing:
 
-This follows the project rule for a known effect: include the known filter
-response in the comparison, never widen an anchor around it. **No tolerance
-changes with the flag.** The term it removes is the round trip's group delay —
-2.65 host samples at 1 kHz for 2x, 3.47 for 4x. Uncompensated, that delay alone
-costs `1 - cos(2*pi*1000*2.65/48000) ~ 1.5e-2` of correlation against a 1 kHz
-tone, roughly a thousand times the whole 48 kHz solver residual, i.e. an
-uncompensated oversampled run measures the delay and nothing else.
+- **Least-squares fractional delay** over the graded window — the delay that
+  minimises the residual sum of squares, evaluated with the same band-limited
+  interpolator used to apply it. That is the definition of "error modulo a
+  constant delay"; any other estimator leaves delay error in the residual and
+  bills it as shape.
+- A band-limited cross-correlation peak is the **same** estimator when done
+  fractionally. Parabolic interpolation of the integer-lag peak is **biased**
+  and is not used: the integer scan only picks which cycle, and a continuous
+  minimisation refines inside it.
+- **Delay only, never gain.** Correlation is gain-blind and a gain-error gate is
+  the thing that catches scale; a fit that also scaled would absorb the very
+  quantity that gate measures. Pinned by
+  `fit_is_delay_only_and_leaves_gain_error_in_the_residual`.
+- **Seeded and bounded.** On a periodic tone the residual is nearly periodic in
+  the delay with period `1/f0` (48 samples at 1 kHz / 48 kHz) and window-edge
+  effects decide between neighbouring cycles. The search is seeded at the
+  ANALYTIC round-trip delay from the filter design
+  (`oversampling_round_trip_group_delay_samples`: 2.6502 host samples at 1 kHz
+  for 2x, 3.4682 for 4x; 0 at 1x) and bounded to ±half a stimulus period. A
+  blind wide scan really does land a cycle away — measured: 50.66 samples
+  instead of 2.66, exactly 48 out.
+- **Reported, not implied.** An `Aligned:` line gives the fitted delay next to
+  the analytic one, so a fit far from analytic is visible as the finding it is,
+  and says so loudly if the fit ends on its search bound.
 
-Reported on the result line as a `Build:` note naming the factor, the internal
-rate and the compensating filter's group delay, so an oversampled number is
-never mistaken for a 1x one.
+The interpolator is a 96-tap Kaiser (β = 9) windowed sinc, unity DC gain, exactly
+a delta at integer delay. Its own worst-case (half-sample) error against the
+analytic answer is 7.9e-7 at 100 Hz, 7.1e-9 at 1 kHz, 1.7e-6 at 15 kHz on a
+unit tone — three orders below the residuals being reported, and pinned by
+`interpolator_error_floor_is_far_below_the_measured_residual`.
 
-### What the compensation does NOT remove
+**No tolerance changes with the flag.** The half-bands' frequency-dependent
+phase is not compensated away; it stays in the number, because it ships.
 
-The round trip commutes with the circuit exactly only when the circuit is
-linear. For a nonlinear circuit the interpolator's **phase dispersion** survives:
-the up-filter delays the input tone by its phase delay at the FUNDAMENTAL, and
-every harmonic the nonlinearity then generates inherits that same time shift,
-while the compensated reference carries each harmonic's own phase delay. The
-difference grows with harmonic order because an allpass half-band's phase delay
-rises toward Nyquist.
+#### The compensation that was retired (2026-09-23), and why
 
-Measured on `tube_screamer_u` (48 kHz, 0.3 V, 1 kHz, steady-state window), phase
-error of melange against the compensated reference, per harmonic:
+The first version of `--oversampling` (commit `d270a79`, same day) instead
+pushed the ngspice reference through the same half-band round trip with the
+circuit replaced by an identity, so both sides carried the same filters. The
+flag, the magnitude-flat property and the twin-drift guard were all sound. The
+comparison method was not.
 
-| harmonic | 1x | 2x | 4x |
-|---|---|---|---|
-| 3rd (3 kHz) | 0.006° | 0.054° | 0.074° |
-| 7th (7 kHz) | 0.079° | 2.53° | 2.72° |
-| 11th (11 kHz) | 0.54° | 11.7° | 12.5° |
-| 15th (15 kHz) | 2.21° | 35.2° | 37.4° |
+The validate stimulus is a single 1 kHz sine. On a single tone an allpass is a
+pure time shift, and a time-invariant circuit maps a delayed input to an
+identically delayed output. So:
 
-and it matches the up-filter's measured phase-delay dispersion to ~10% at the
-7th–11th (e.g. 11th: predicted 11.8°, measured 11.7°). Harmonic *magnitudes*
-move the other way — the oversampled builds track the reference better (2x: 3rd
-−0.013 dB vs 1x −0.032 dB; 7th −0.030 dB vs −0.135 dB), which is the finer
-internal timestep doing its job.
+| | harmonic `k` carries |
+|---|---|
+| shipped output | `tau_up(f0) + tau_down(k*f0)` — harmonics are generated AFTER the up leg, so they never pass through it |
+| round-tripped reference | `tau_up(k*f0) + tau_down(k*f0)` — ngspice's harmonics already exist, then go through BOTH legs |
 
-This is a real property of the shipped plugin, not a harness artifact: melange's
-oversampler is not linear-phase, so the harmonics it generates sit at different
-relative phases than the analog circuit's. It stays in the number.
+The down leg cancels exactly; the up leg is billed at harmonic frequencies it
+never saw. What that comparison measured was `tau_up(f0) - tau_up(k*f0)`. The
+numbers were real; the attribution to the up leg was an artifact of the
+compensation. **Do not repeat it.** `apply_oversampling_round_trip` still exists,
+but only as the twin-drift guard's subject and the source of the analytic seed.
 
-Also unremoved: residual imaging/aliasing (immaterial here — non-harmonic energy
-measured at −104.5 dBc in both engines at every factor), and the solver's own
-change of answer from running at a finer timestep, which is a genuine
-improvement, not an artifact.
+### What an oversampled build costs, measured
+
+`tube_screamer_u`, 48 kHz, 0.3 V, 1 kHz tone, re-baselined 2026-09-23 against an
+unfiltered delay-aligned reference. The 20 ms window is transient-dominated
+(`C_out` 0.1 µF into 1 MΩ gives τ = 0.1 s; the DC blocker's τ is 32 ms), so the
+500 ms rows are the ones to read:
+
+| | 20 ms 1−ρ | 20 ms nRMS | 500 ms 1−ρ | 500 ms nRMS | fitted delay (sp) | analytic (sp) |
+|---|---|---|---|---|---|---|
+| 1x | 2.006e-5 | 0.6348 % | 1.00e-6 | 0.1423 % | 0.0019 / 0.0042 | 0 |
+| 2x | 2.817e-5 | 0.7524 % | 5.64e-6 | 0.3361 % | 2.6585 / 2.6606 | 2.6502 |
+| 4x | 1.765e-5 | 0.5971 % | 6.25e-6 | 0.3549 % | 3.4763 / 3.4782 | 3.4682 |
+
+An oversampled build loses correlation — **5.6× at 2x and 6.3× at 4x in 1−ρ over
+500 ms** — and the loss is in the shipped plugin, not in the harness. The fitted
+delays land within 0.01 samples of the analytic round trip in every oversampled
+mode, which is the alignment reporting exactly what the filter design predicts.
+
+Movement from the retired method is small (2x 500 ms: 6.43e-6 → 5.64e-6; 4x:
+7.17e-6 → 6.25e-6; 1x: 1.16e-6 → 1.00e-6), because the two methods happen to be
+comparable in SIZE. They are not comparable in MEANING: the old numbers were
+against a filtered reference and attributed to the wrong leg.
+
+Harmonic *magnitudes* still move the other way — the oversampled builds track the
+reference better, which is the finer internal timestep doing its job — while
+correlation is dominated by the phase term.
+
+### Which leg the phase comes from — measured, not reasoned
+
+`cargo run -p melange-validate --release --example os_leg_attribution` swaps one
+leg at a time for a **linear-phase FIR half-band** (Kaiser-windowed sinc, 129
+taps, constant 32-host-sample group delay), so the only thing a swap removes is
+that leg's *dispersion*. Its shipped/shipped variant reproduces the generated
+`process_sample` bit for bit (asserted) before any swap is measured.
+
+`tube_screamer_u`, 48 kHz, 0.3 V, 1 kHz, 2x, 500 ms, delay-aligned, 256-sample
+window skip:
+
+| build | nRMS | 1−ρ |
+|---|---|---|
+| 1x (floor) | 0.0599 % | 1.658e-7 |
+| 2x shipped up + shipped down | 0.3077 % | 4.724e-6 |
+| 2x **ideal** up + shipped down | 0.3058 % | 4.663e-6 |
+| 2x shipped up + **ideal** down | 0.0712 % | 2.439e-7 |
+| 2x ideal up + ideal down | 0.0629 % | 1.847e-7 |
+
+Of the 2x excess over the 1x floor, swapping the **decimator** removes **98.3 %**
+and swapping the **interpolator** removes **1.3 %**. On this stimulus the phase
+residual is the DOWN leg's. That is the opposite of what the retired
+compensation implied, and it is the direct consequence of the same fact that
+broke it: the harmonics are generated after the up leg, so on a single tone only
+the down leg ever filters them.
+
+The per-harmonic diagnostic (fundamental-phase aligned — the wrong frame for a
+gate, since it zeroes the fundamental by construction, but the right one for
+reading dispersion) shows the signature cleanly. Odd-harmonic phase error of
+melange against ngspice, 500 ms, integer-period window:
+
+| harmonic | 1x | 2x shipped |
+|---|---|---|
+| 3rd (3 kHz) | 0.055° | −0.194° |
+| 5th (5 kHz) | 0.113° | −0.954° |
+| 7th (7 kHz) | 0.223° | −2.691° |
+| 9th (9 kHz) | 0.421° | −5.937° |
+
+Phase error grows with harmonic order while magnitude error does not — dispersion,
+not amplitude. (Even harmonics are 1e-7-order here and their phases are noise.)
+
+**The up leg is not inert — it is invisible to a single tone.** Test B drives two
+tones and swaps only the up leg (melange against melange, no reference engine
+involved):
+
+| tone pair | change in IMD products from swapping the up leg |
+|---|---|
+| 1 kHz + 1.1 kHz | ≤ 0.024 dB on every product — nothing |
+| 19 kHz + 20 kHz | 0.31–1.09 dB; the `f2−f1` difference tone at 1 kHz moves 0.70 dB |
+
+At the top of the passband, where the allpass chain's phase varies fastest, the
+up leg genuinely reshapes the waveform that reaches the clipper and the
+intermodulation changes. A single tone cannot show this, which is why a
+single-tone residual must not be attributed to it. 19 kHz + 20 kHz is the
+conventional aliasing pair and the informative one here; 1 kHz + 1.1 kHz is the
+musically relevant control, and it shows the up leg doing nothing measurable
+where a Tube Screamer is actually played.
+
+Also unremoved: residual imaging/aliasing, and the solver's own change of answer
+from running at a finer timestep, which is a genuine improvement rather than an
+artifact.
 
 ### Twin-drift guard
 
-The compensation uses `melange-primitives`; the shipped build uses the codegen
-emitter's own tables. `crates/melange-validate/tests/oversampling_reference.rs`
+The primitives' round trip and the shipped build's emitted tables are twins. `crates/melange-validate/tests/oversampling_reference.rs`
 pins them together: emitted `OS_COEFFS` / `OS_COEFFS_OUTER` must equal the
-primitives' tables bit for bit, and the compensation output must match the
+primitives' tables bit for bit, and the primitives' round trip must match the
 GENERATED, COMPILED oversampled code to < 1e-12 per sample on a pure-gain
-circuit (2x and 4x). If the twins drift, that test fails rather than the harness
-quietly subtracting the wrong filter from every oversampled number.
+circuit (2x and 4x). The guard outlived the compensation it was written for: the
+round trip is now the source of the ANALYTIC delay the alignment is seeded at,
+and this document quotes its properties as established fact. A silent drift
+between the two copies would make both wrong.

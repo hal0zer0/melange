@@ -494,11 +494,12 @@ Noise limitations:
 - `melange validate` does not read the deck's `.oversampling` recommendation;
   the factor must be given explicitly as `--oversampling {1|2|4}` (default 1).
   `compile`/`simulate`/`analyze` honour the directive, `validate` reports what it
-  was asked to measure. An oversampled run compensates the ngspice reference
-  with the same half-band round trip the shipped build applies (magnitude-flat
-  allpass), so the filters' known response is inside the comparison; what it
-  cannot remove is the interpolator's phase dispersion carried through a
-  nonlinearity, which is real and ships. See `docs/aidocs/OVERSAMPLING.md`
+  was asked to measure. The ngspice reference is NOT filtered: it is aligned to
+  the melange output by one best-fit constant delay (the same alignment every
+  mode gets, 1x included), so the half-bands' frequency-dependent phase stays
+  inside the number — it ships, so it is reported rather than compensated away.
+  Measured on `tube_screamer_u` (48 kHz, 0.3 V, 500 ms): 1-rho 1.00e-6 at 1x,
+  5.64e-6 at 2x, 6.25e-6 at 4x. See `docs/aidocs/OVERSAMPLING.md`
 - Resistor `KF`/`AF` noise breaks ngspice parity (validate compiles with
   `NoiseMode::Off`, so it is simply absent from the comparison)
 - `.mismatch` / `.tolerance` jitter is **disabled automatically** on melange's

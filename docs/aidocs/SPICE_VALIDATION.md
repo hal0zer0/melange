@@ -123,16 +123,22 @@ retired; the four remaining dead `circuit_no_vin.cir` files were deleted
 different DSP and `validate` takes the flag too — otherwise the 1x code is
 validated and the 2x code shipped. Default 1.
 
-ngspice is NOT changed: it has its own timestep. The reference is instead put
-through the same half-band round trip the shipped build applies, which with the
-circuit replaced by an identity is a host-rate allpass cascade — magnitude-flat,
-all response in the phase, group delay 2.65 host samples at 1 kHz (2x) / 3.47
-(4x). No tolerance moves; the compensated run prints a `Build:` line saying what
-was measured. What the compensation cannot remove — the interpolator's phase
-dispersion carried through a nonlinearity — is real and stays in the number.
+ngspice is NOT changed: it has its own timestep, and its output is NOT filtered.
+The reference is aligned to the melange output by ONE best-fit constant delay —
+least-squares, fractional, delay only and never gain, seeded at the analytic
+half-band round-trip delay (2.6502 host samples at 1 kHz for 2x, 3.4682 for 4x;
+0 at 1x) and bounded to half a stimulus period. The same alignment runs in every
+mode including 1x, so the rows stay commensurable. No tolerance moves; every run
+prints an `Aligned:` line with the fitted delay next to the analytic one, and an
+oversampled run adds a `Build:` line.
 
-Full rationale, the measured per-harmonic decomposition and the twin-drift guard
-are in [OVERSAMPLING.md](OVERSAMPLING.md) § "Validating an oversampled build".
+The half-bands' frequency-dependent phase therefore stays in the number, because
+it ships: 1-rho on `tube_screamer_u` (48 kHz, 0.3 V, 500 ms) is 1.00e-6 at 1x,
+5.64e-6 at 2x, 6.25e-6 at 4x.
+
+Full rationale, the re-baselined table, the per-leg attribution measurement and
+the twin-drift guard are in [OVERSAMPLING.md](OVERSAMPLING.md) § "Validating an
+oversampled build".
 
 ### DC Operating Point for Nonlinear Circuits
 

@@ -7,6 +7,7 @@
 //! # Modules
 //!
 //! - [`spice_runner`] — invoke ngspice, parse output (raw/CSV), manage temp files
+//! - [`alignment`] — best-fit constant-delay alignment, applied before every comparison
 //! - [`comparison`] — signal comparison with configurable tolerances
 //! - [`visualizer`] — generate CSV, HTML, and JSON reports from comparison results
 //!
@@ -45,6 +46,7 @@
 use std::path::Path;
 use thiserror::Error;
 
+pub mod alignment;
 pub mod comparison;
 pub mod deck_guard;
 pub(crate) mod opamp_translate;
@@ -53,6 +55,7 @@ pub mod spice_runner;
 pub(crate) mod tube_translate;
 pub mod visualizer;
 
+pub use alignment::{apply_fractional_delay, dominant_frequency, fit_constant_delay, DelayFit};
 pub use comparison::{batch_compare, compare_signals, ComparisonConfig, ComparisonReport, Signal};
 pub use deck_guard::{format_refusal, scan_deck, unit_variation_note, DeckHazard};
 pub use spice_runner::{
@@ -193,10 +196,12 @@ pub struct ValidationOptions {
     /// 1x code for a build that ships at 2x or 4x.
     ///
     /// The ngspice side is unchanged — ngspice has its own timestep and knows
-    /// nothing about melange's internal rate. Instead, the REFERENCE is passed
-    /// through the same half-band round trip the shipped build applies (see
-    /// [`apply_oversampling_round_trip`]), so the filters' known response is
-    /// included in the comparison rather than absorbed by a widened tolerance.
+    /// nothing about melange's internal rate — and it is NOT filtered. The
+    /// comparison is against the circuit: an unfiltered reference aligned to
+    /// the melange output by one best-fit constant delay, the same alignment
+    /// every mode gets (see [`alignment`]). The half-bands' frequency-dependent
+    /// phase therefore stays inside the number, where it belongs; no tolerance
+    /// widens for it.
     pub oversampling: usize,
 }
 
@@ -396,24 +401,70 @@ pub fn validate_circuit_with_options(
     let mut spice_output_blocked = spice_output.to_vec();
     dc_block_signal(&mut spice_output_blocked, spice_data.sample_rate);
 
-    // Oversampled build: put the reference through the SAME half-band round
-    // trip the shipped code applies, so the filters' known (magnitude-flat,
-    // all-phase) response is part of the comparison. Not a tolerance change —
-    // see `apply_oversampling_round_trip` for what this does and does not
-    // cover. No-op at factor 1, which is every default run.
+    // Align the reference to the melange output by ONE best-fit constant
+    // delay, in EVERY mode including 1x, and compare against that unfiltered
+    // reference — i.e. against the circuit.
+    //
+    // Until 2026-09-23 an oversampled run instead pushed the reference through
+    // the same half-band round trip with the circuit replaced by an identity.
+    // The flag, the round trip's magnitude-flatness and the twin-drift guard
+    // were all sound; the COMPARISON was not. On the single-tone stimulus
+    // validate drives, an allpass is a pure time shift, so in the shipped
+    // build harmonic `k` carries `tau_up(f0) + tau_down(k*f0)` (its harmonics
+    // are generated after the up leg and never pass through it), while in a
+    // round-tripped reference it carries `tau_up(k*f0) + tau_down(k*f0)`. The
+    // down leg cancelled exactly and the up leg was billed at harmonic
+    // frequencies it never saw: the numbers were real, the attribution was an
+    // artifact. See `alignment` for the estimator and its constraints (delay
+    // only, never gain; seeded at the analytic round-trip delay; bounded to
+    // half a stimulus period).
     //
     // Order: after the DC blocker, so the blocker still sees the reference's
     // own first sample as its seed (the startup-transient fix documented on
-    // `dc_block_signal`). Both are LTI, so they commute up to boundary effects.
-    apply_oversampling_round_trip(
-        &mut spice_output_blocked,
-        options.oversampling,
+    // `dc_block_signal`).
+    let melange_at_ref_rate: Vec<f64> =
+        if (spice_data.sample_rate - sample_rate).abs() > f64::EPSILON {
+            // Mirror what `compare_signals` does before it grades anything.
+            Signal::new(melange_output.clone(), sample_rate, "fit")
+                .resample(spice_data.sample_rate)
+                .samples
+        } else {
+            melange_output.clone()
+        };
+    // The window the metrics will be graded over, so the fit minimises the
+    // residual that actually gets reported.
+    let graded_len = spice_output_blocked.len().min(melange_at_ref_rate.len());
+    let graded_start = if config.settle_time_s > 0.0 {
+        ((config.settle_time_s * spice_data.sample_rate).round() as usize).min(graded_len)
+    } else {
+        0
+    };
+    // Seed: the analytic delay of the oversampling round trip at the stimulus
+    // frequency, from the filter design. Zero at 1x.
+    //
+    // The round trip is clocked at MELANGE's host rate, so it is measured
+    // there and then expressed in reference-rate samples — the units the fit
+    // works in. The two rates are equal on every deck with `.OPTIONS INTERP`,
+    // which is every shipped deck; the conversion is here so that stops being
+    // a silent assumption.
+    let stimulus_hz = alignment::dominant_frequency(input_signal, sample_rate).unwrap_or(1000.0);
+    let analytic =
+        oversampling_round_trip_group_delay_samples(options.oversampling, sample_rate, stimulus_hz)
+            * (spice_data.sample_rate / sample_rate);
+    let delay_fit = alignment::fit_constant_delay(
+        &spice_output_blocked,
+        &melange_at_ref_rate,
+        graded_start..graded_len,
+        analytic,
+        stimulus_hz,
         spice_data.sample_rate,
     );
+    let spice_output_aligned =
+        alignment::apply_fractional_delay(&spice_output_blocked, delay_fit.delay_samples);
 
     // Create signal objects for comparison
     let spice_signal = Signal::new(
-        spice_output_blocked,
+        spice_output_aligned,
         spice_data.sample_rate,
         format!("spice_{}", output_node),
     );
@@ -439,19 +490,22 @@ pub fn validate_circuit_with_options(
     // seed that was therefore not exercised. `None` — and so no added output —
     // for every deck without them.
     report.unit_variation_note = deck_guard::unit_variation_note(&netlist_str);
-    // Say on the report which build was validated, and that the reference was
-    // put through the same filters. A correlation number for an oversampled
-    // build is not comparable to a 1x one, and a reader who is not told will
-    // assume it is.
+    // Say on the report which build was validated. A correlation number for an
+    // oversampled build is not comparable to a 1x one, and a reader who is not
+    // told will assume it is.
     report.oversampling_note = (options.oversampling > 1).then(|| {
         format!(
-            "oversampling {}x (internal rate {:.0} Hz); reference passed through the same \
-             half-band round trip (allpass, group delay {:.2} samples at 1 kHz)",
+            "oversampling {}x (internal rate {:.0} Hz); the emitted code interpolates and \
+             decimates through polyphase IIR half-band allpass chains, whose \
+             frequency-dependent phase stays in the comparison",
             options.oversampling,
             sample_rate * options.oversampling as f64,
-            oversampling_round_trip_group_delay_samples(options.oversampling, sample_rate, 1000.0),
         )
     });
+    // The alignment is part of how the number was obtained, in every mode, so
+    // it is reported next to the number and names the analytic delay it was
+    // seeded at — a fitted delay far from analytic is itself a finding.
+    report.alignment_note = Some(delay_fit.note(spice_data.sample_rate));
 
     // Generate output files if requested
     let mut html_report_path = None;
@@ -534,61 +588,44 @@ pub fn dc_block_signal(signal: &mut [f64], sample_rate: f64) {
     }
 }
 
-/// Pass a reference signal through the SAME half-band round trip an
-/// oversampled melange build applies, so the filters' known response is part
-/// of the comparison instead of being charged to the solver.
+/// Pass a signal through the SAME half-band round trip an oversampled melange
+/// build applies, with the circuit replaced by an identity.
 ///
-/// # Why the reference is filtered and the tolerances are not
+/// # This is NOT the comparison method any more
 ///
-/// `--oversampling {2|4}` is a compile-time codegen option: the shipped build
-/// upsamples, solves at the internal rate, and decimates through polyphase
-/// half-band IIR allpass chains. Those filters have a real response, and it
-/// ships, so it is a true difference between melange's output and the circuit.
-/// The project's rule for it is to *include the known filter response in the
-/// comparison*, never to widen an anchor around an effect whose size is known
-/// analytically.
+/// Until 2026-09-23 `validate_circuit_with_options` ran the ngspice reference
+/// through this so both sides carried the same filters. That compensation is
+/// retired. On the single-tone stimulus validate drives, an allpass is a pure
+/// time shift and a time-invariant circuit maps a delayed input to an
+/// identically delayed output, so:
 ///
-/// That is what this does. With the circuit replaced by an identity, the 2x
-/// chain `up -> identity -> down` composes to the pure allpass
-/// `A0(z) * A1(z)` in the HOST-rate `z` (each branch cell is clocked exactly
-/// once per host sample) — magnitude-flat to the last bit, all response in the
-/// phase. The 4x chain is the same statement nested. Applying it to the
-/// ngspice output puts both signals through the same known linear response, so
-/// what is left on the result line is the part that is not the filters.
+/// - shipped output: harmonic `k` carries `tau_up(f0) + tau_down(k*f0)` — the
+///   harmonics are generated by the nonlinearity AFTER the up leg, so they
+///   never pass through it;
+/// - round-tripped reference: harmonic `k` carries
+///   `tau_up(k*f0) + tau_down(k*f0)` — ngspice's harmonics already exist, then
+///   go through BOTH legs.
 ///
-/// The dominant term it removes is group delay. At 48 kHz the 2x round trip
-/// delays by order a host sample; against a 1 kHz tone that alone costs
-/// `1 - cos(2*pi*1000/48000) ~ 8.6e-3` of correlation, roughly four hundred
-/// times the whole 48 kHz solver residual. Comparing an oversampled build
-/// against an unfiltered reference measures that delay and almost nothing
-/// else.
+/// The down leg cancels exactly and the up leg is billed at harmonic
+/// frequencies it never saw, so the residual such a comparison reports is
+/// `tau_up(f0) - tau_up(k*f0)`: a real number, attributed to the wrong place.
+/// The comparison now runs against an UNFILTERED reference aligned by one
+/// best-fit constant delay — see [`alignment`], and `docs/aidocs/OVERSAMPLING.md`.
 ///
-/// # What it does NOT cover
+/// # What it is still for
 ///
-/// The round trip commutes with the circuit exactly only when the circuit is
-/// linear. For a nonlinear circuit `D(C(U(x)))` is not `A(C(x))`, and the
-/// difference is real and stays in the number: the residual imaging/aliasing
-/// the oversampling exists to suppress, and the effect of the interpolator's
-/// phase on the waveform that reaches the nonlinearity. Neither is removed
-/// here, and neither should be — both ship.
-///
-/// Nor does it touch the other half of what `--oversampling` changes: the
-/// solver runs at `factor * sample_rate`, a finer timestep, which moves the
-/// answer on its own. That shows up as a genuine (small) improvement against
-/// the reference, not as an artifact.
-///
-/// # Twin-drift
-///
-/// The chain used here is `melange_primitives::oversampling::Oversampler`,
-/// the same implementation the codegen emitter mirrors. The coefficients the
-/// emitter actually bakes into generated code are pinned to the primitives'
-/// tables by `oversampling_reference_matches_emitted_coefficients`
-/// (`tests/oversampling_reference.rs`); if the twins ever drift, that test
-/// fails rather than this function quietly compensating with the wrong filter.
+/// The twin-drift guard. The chain here is
+/// `melange_primitives::oversampling::Oversampler`, the same implementation the
+/// codegen emitter mirrors, and `tests/oversampling_reference.rs` pins the two
+/// together by running this against the GENERATED, COMPILED oversampled code on
+/// a pure-gain circuit. That test is the reason this function stays public: if
+/// the coefficient tables, the branch split, the clocking or the stage
+/// assignment ever drift apart, it fails. It is also how
+/// [`oversampling_round_trip_group_delay_samples`] measures the analytic delay
+/// the alignment search is seeded at.
 ///
 /// `factor == 1` is a no-op. Panics on an unsupported factor — the caller
-/// validates it first, and silently comparing against an uncompensated
-/// reference would be worse than stopping.
+/// validates it first.
 pub fn apply_oversampling_round_trip(signal: &mut [f64], factor: usize, sample_rate: f64) {
     if factor == 1 {
         return;
@@ -600,12 +637,17 @@ pub fn apply_oversampling_round_trip(signal: &mut [f64], factor: usize, sample_r
     }
 }
 
-/// Group delay of the oversampling round trip at `freq_hz`, in host samples.
+/// Delay of the oversampling round trip at `freq_hz`, in host samples.
+///
+/// PHASE delay, `-phase(w) / w`, despite the historical name — which is the
+/// right quantity here: on a single tone the phase delay IS the time shift the
+/// chain applies, and that is what the alignment search is seeded with.
 ///
 /// Measured, not asserted: an impulse is pushed through the same chain
 /// [`apply_oversampling_round_trip`] uses and the phase of its response at
-/// `freq_hz` is read off. Reported on the result line so the number the
-/// harness compensated for is visible rather than implied.
+/// `freq_hz` is read off. Printed next to the FITTED delay on the result line,
+/// so a fit that disagrees with the filter design is visible rather than
+/// silently accepted.
 ///
 /// Returns 0.0 for `factor == 1`.
 pub fn oversampling_round_trip_group_delay_samples(
