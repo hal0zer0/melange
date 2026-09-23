@@ -2,6 +2,25 @@
 
 Use KiCad as a schematic editor for Melange circuits.
 
+## Requirements
+
+**KiCad 8 or newer.** This is a hard gate, not a recommendation. Both
+`melange.kicad_sym` and the bundled example schematic are saved in the KiCad 8
+file format (`version 20231120`), which KiCad 7 cannot read. On KiCad 7.0.11,
+`melange import` on a `.kicad_sch` — and bare `kicad-cli sch export` on the same
+file — fails with:
+
+```
+Failed to load schematic file
+```
+
+That message names neither the tool nor the version, so it reads like a corrupt
+schematic when it is really a too-old KiCad. Check `kicad-cli --version` first.
+
+The CLI import path also needs `kicad-cli` on your `PATH`; it ships with KiCad 8.
+The XML path (`melange import circuit.xml`) has no KiCad requirement at all once
+you have the XML, so an `.xml` exported on a KiCad 8 machine imports anywhere.
+
 ## Quick Start
 
 1. **Install the symbol library**: KiCad → Preferences → Manage Symbol Libraries → add `melange.kicad_sym`
@@ -13,8 +32,8 @@ Use KiCad as a schematic editor for Melange circuits.
 Or import directly from the CLI:
 
 ```bash
-melange import circuit.kicad_sch -o circuit.cir    # requires kicad-cli
-melange import circuit.xml -o circuit.cir           # from exported XML
+melange import circuit.kicad_sch -o circuit.cir    # requires kicad-cli (KiCad 8+)
+melange import circuit.xml -o circuit.cir          # from exported XML, no KiCad needed
 ```
 
 ## Documentation

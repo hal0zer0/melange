@@ -752,15 +752,60 @@ Uses the Koren plate current model (soft-knee saturation) with Leach power-law g
 | `AOL` | 200000 | Open-loop voltage gain (V/V) |
 | `ROUT` | 1.0 Ω | Output resistance |
 | `GBW` | ∞ Hz | Gain-bandwidth product (single-pole rolloff) |
-| `VSAT` | ∞ V | Output saturation voltage (13.0V if GBW finite) |
+| `VSAT` | ∞ V | Symmetric output clamp: output is held to ±`VSAT` |
+| `VCC` | +∞ V | Positive supply rail — upper output clamp. Takes priority over `VSAT` |
+| `VEE` | −∞ V | Negative supply rail — lower output clamp. Takes priority over `VSAT` |
+| `SR` | ∞ V/µs | Slew rate, **in V/µs** (SPICE convention). Emitted as a per-sample output delta clamp |
+| `IB` | 0 A | Input bias current at each input pin (positive = current out of the pin) |
+| `RIN` | ∞ Ω | Input resistance from each input pin to ground |
+| `VOH_DROP` | 1.5 V | Drop from `VCC` to the highest drivable output. **Only read in `--opamp-rail-mode boyle-diodes`** |
+| `VOL_DROP` | 1.5 V | Drop from `VEE` to the lowest drivable output. Same mode restriction |
+| `AOL_TRANSIENT_CAP` | ∞ | Override for the transient-NR open-loop-gain cap (auto-detected otherwise) |
+| `EN` | 0 V/√Hz | Input-referred voltage-noise density. Emitted only under `--noise` |
+| `IN` | 0 A/√Hz | Input-referred current-noise density. Emitted only under `--noise` |
+| `EN_FC` | 0 Hz | Voltage-noise 1/f corner — **parsed but not yet wired** |
+| `IN_FC` | 0 Hz | Current-noise 1/f corner — **parsed but not yet wired** |
 
-Linear device — does not add nonlinear dimensions to the solver. Modeled as Boyle VCCS macromodel with output resistance. Input impedance is infinite.
+Linear device — does not add nonlinear dimensions to the solver. Modeled as Boyle VCCS macromodel with output resistance. Input impedance is infinite unless you set `RIN`.
 
-**Example:**
-```spice
-.model LM358 OA(AOL=200000 ROUT=75)
-.model TL072 OA(AOL=200000 ROUT=50 GBW=3e6 VSAT=13)
+An unrecognized parameter on an `OA` card produces a `.model <name>: unrecognized parameter '<key>' (ignored)` warning and is then ignored. This is looser than every other device class, where an unknown key is a **hard error** raised during code generation — `.model 1N4148: unknown parameter 'RSS'. Accepted for this device: IS, N, CJO, RS, …` — so `compile`, `simulate` and `analyze` all refuse the deck. Note that `melange nodes` stops short of codegen and so reports neither.
+
+#### Rail resolution order, and the op-amp that cannot clip
+
+The two output clamps are resolved independently, each taking the first source that is finite (`crates/melange-solver/src/mna.rs`, "Resolve op-amp output voltage clamps"):
+
 ```
+upper clamp:  VCC   >  +VSAT  >  +13.0 V if GBW is finite  >  none
+lower clamp:  VEE   >  −VSAT  >  −13.0 V if GBW is finite  >  none
+```
+
+Three consequences worth knowing before you write your first card:
+
+1. **A card with no `VCC`/`VEE`/`VSAT`/`GBW` has no output clamp at all.** `OA(AOL=1e5 ROUT=75)` is an op-amp with infinite headroom — drop it into a 9 V pedal and the output will sail past 9 V to wherever the closed-loop gain takes it, with no warning. If your circuit's character comes from the op-amp running out of rail, the model card has to say so.
+2. **Setting `GBW` alone also sets your rails**, to ±13 V, because a finite `GBW` implies you meant a real part. That is a deliberate default, but it is a side effect of a parameter about *bandwidth*.
+3. **Inverted rails are a hard error, not a warning.** `OA(VCC=-9 VEE=9)` fails at build time rather than reaching `clamp(min, max)` with `min > max` on the audio thread.
+
+Rail *behavior* — how the clamp interacts with Newton-Raphson — is selected by `--opamp-rail-mode {auto|none|hard|active-set|active-set-be|boyle-diodes}`, not by the model card. See [OPAMP_RAIL_MODES.md](aidocs/OPAMP_RAIL_MODES.md).
+
+**Examples:**
+```spice
+* Dual-supply line-level part, ±15 V rails, TL072 bandwidth and slew rate
+.model TL072 OA(AOL=200000 ROUT=50 GBW=3e6 SR=13 VCC=15 VEE=-15)
+
+* Single-supply 9 V pedal: output is held inside the 0–9 V window
+.model TL072_9V OA(AOL=200000 ROUT=50 GBW=3e6 VCC=9 VEE=0)
+
+* Symmetric shorthand — identical to VCC=13 VEE=-13
+.model NE5534 OA(AOL=100000 ROUT=75 VSAT=13)
+
+* No rails: infinite headroom. Legal, and almost never what a real circuit does.
+.model LM358 OA(AOL=200000 ROUT=75)
+```
+
+> Note on the single-supply card: `VCC=9 VEE=0` clamps the *output* to the
+> 0–9 V window, which is what a single-supply part does. It does not create
+> the mid-rail bias your signal path needs — that is still the job of the
+> divider and coupling caps in the netlist itself.
 
 ### VCA Parameters (Type: VCA)
 
@@ -1432,11 +1477,14 @@ The `+` must be the first non-whitespace character on the continuation line.
 
 ### Scale Suffixes
 
-Numerical values can include these suffixes (case-insensitive):
+A scale letter is recognized in two positions: trailing the digits (SPICE suffix
+notation) and between two digit runs (BS-1852 infix notation). Both are
+case-insensitive. The two positions disagree about `M`; see below.
+
+#### Suffix position
 
 | Suffix | Value | Example |
 |--------|-------|---------|
-| `f` | 10⁻¹⁵ | `10f` = 10 femto |
 | `p` | 10⁻¹² | `100p` = 100 pico |
 | `n` | 10⁻⁹ | `10n` = 10 nano |
 | `u` or `μ` | 10⁻⁶ | `10u` = 10 micro |
@@ -1446,13 +1494,56 @@ Numerical values can include these suffixes (case-insensitive):
 | `g` | 10⁹ | `1g` = 1 giga |
 | `t` | 10¹² | `1t` = 1 tera |
 
-**Note:** `M` alone means milli (10⁻³) in SPICE convention, not mega. Always use `meg` for 10⁶.
+There is no femto suffix in an **element-value** position. A trailing `f`
+immediately after a digit is treated as the Farad unit letter, so `C1 a b 10f`
+parses to 10, not 10e-15, and melange logs a warning saying so. Write `10e-15`
+or `10fF`. In a **`.model` parameter** position the token is dimensionless and
+`f` is femto: `.model DX D(IS=6.734f)` → 6.734e-15, matching ngspice.
+
+#### Infix position (BS-1852)
+
+`<digits><letter><digits>` places the decimal point where the letter sits. The
+letter must be one of `T G K M U N P`, and both sides must be digits only.
+
+| Written | Value |
+|---------|-------|
+| `4k7` | 4.7×10³ |
+| `6n8` | 6.8×10⁻⁹ |
+| `2u2` | 2.2×10⁻⁶ |
+| `1M0` | 1×10⁶ |
+| `2M2` | 2.2×10⁶ |
+| `1t0` | 1×10¹² |
+
+Values that do not fit the pattern fall through to the suffix rules, and may
+then fail to parse: `1.5M0` is a parse error (non-digit before the letter), and
+`4f7` is a parse error (`f` is not an infix scale letter).
+
+#### `M`: milli in suffix position, mega in infix position
+
+| Written | Parses as | Reason |
+|---------|-----------|--------|
+| `1M` | 1e-3 | suffix — SPICE `M` is milli |
+| `10M` | 1e-2 | suffix |
+| `1M0` | 1e6 | infix — BS-1852 `M` is mega |
+| `2M2` | 2.2e6 | infix |
+| `10M0` | 1e7 | infix |
+| `1m5` | 1.5e6 | infix (case-insensitive); there is no infix milli |
+| `1meg` | 1e6 | explicit `meg` |
+
+A trailing zero moves the value by 10⁹. Melange logs a warning whenever it
+reads an infix `M` as mega, quoting the token and the resulting magnitude, so
+an unintended `1M0` is visible in the compile log; the opposite typo (`1M`
+where `1M0` was meant) parses silently as milli.
 
 ```spice
-R1 in out 1meg     ; 1 MΩ (correct)
-R2 in out 1M       ; 1 mΩ (probably not what you want!)
-R3 in out 1MEG     ; 1 MΩ (also correct)
+R1 in out 1meg     ; 1 MΩ  — unambiguous
+R2 in out 1MEG     ; 1 MΩ  — also unambiguous
+R3 in out 1M0      ; 1 MΩ  — BS-1852 infix; logs a warning
+R4 in out 1e6      ; 1 MΩ  — unambiguous
+R5 in out 1M       ; 1 mΩ  — milli, parsed silently
+R6 in out 4k7      ; 4.7 kΩ
 C1 in out 10u      ; 10 μF
+C2 in out 6n8      ; 6.8 nF
 L1 in out 100n     ; 100 nH
 ```
 

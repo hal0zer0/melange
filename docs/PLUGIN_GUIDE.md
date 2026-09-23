@@ -309,6 +309,42 @@ Output: `target/bundled/my_plugin.clap` and `target/bundled/my_plugin.vst3`
 | Linux | `~/.clap/` | `~/.vst3/` |
 | Windows | `C:\Program Files\Common Files\CLAP\` | `C:\Program Files\Common Files\VST3\` |
 
+### CPU baseline — read this before you distribute
+
+The generated project ships a `.cargo/config.toml` that raises the x86-64
+instruction-set baseline to **`x86-64-v3`** (AVX2 + FMA + BMI) for every x86_64
+target it knows about:
+
+```toml
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+```
+
+…with identical sections for `x86_64-apple-darwin`, `x86_64-pc-windows-msvc`,
+and `x86_64-pc-windows-gnu`. `aarch64` gets no flag: ARMv8-A already mandates
+NEON and fused multiply-add, so there is no uplift to unlock and naming a
+specific CPU would only narrow the set of machines the bundle runs on.
+
+**What that means for a plugin you hand to someone else.** A bundle built at
+this baseline will fail with `SIGILL` / "Illegal instruction" on any x86_64 CPU
+older than Intel Haswell (2013) or AMD Excavator (2015). It does not degrade and
+it does not warn — it takes the host DAW down with it, on their machine, in a
+way that looks like your plugin is broken. Perfectly fine for a plugin you build
+for your own rig; a decision you should make deliberately for one you ship.
+
+To build for the wider baseline, delete the `[target.…]` section matching the
+target you are building. The generated DSP is **bit-for-bit identical** either
+way — Rust never contracts `a*b + c` into an FMA on its own, so the flag changes
+instruction selection, not results. What you give up is throughput: the uplift
+is documented at roughly 5–13% on matvec-heavy circuits in
+`tools/melange-cli/src/plugin_template.rs`.
+
+One further trap, which the emitted file calls out itself: a `RUSTFLAGS`
+environment variable **replaces** these `rustflags` rather than appending to
+them (documented Cargo behaviour). If you need extra flags, add them to the
+relevant `[target.…]` section rather than exporting `RUSTFLAGS`, or you will
+silently drop the baseline and not find out until you benchmark.
+
 ### Cross-compile for macOS from Linux
 
 ```bash

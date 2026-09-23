@@ -5,7 +5,11 @@
 Nothing described past §1 exists in the code today. What ships now is
 *uncoupled* saturating inductors (`L1 a b 100m ISAT=20m`, lagged
 `L(I)=L0/cosh²(I/Isat)`, Sherman-Morrison rank-1, 32-sample decimated,
-nodal-Schur path). The coupled/transformer saturation machinery that
+nodal **full-LU** sub-path — `force_full_lu_sat = !ir.saturating_inductors
+.is_empty()` feeds `structurally_needs_full_lu`, and `--nodal-subpath schur`
+is refused on such a circuit, `nodal_emitter.rs:1730-1790`; this preamble said
+"nodal-Schur path" until 2026-09-22, which was wrong). The coupled/transformer
+saturation machinery that
 exists in the tree (`SaturatingTransformerGroupIR`, `winding_isats`) is
 physically wrong, unvalidated, and unused — see §1.
 

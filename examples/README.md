@@ -23,15 +23,19 @@ claim that nothing else is harder.
 # Frequency response at the default (flat) knob settings
 melange analyze examples/passive-eq1a.cir
 
-# Sweep a control
-melange analyze examples/passive-eq1a.cir --pot "LF Boost=10" --switch "LF Freq=1"
+# Sweep a control. Pot values are in ohms and must sit inside the declared
+# range — `melange nodes` prints it (LF Boost is 100..10000 ohm); out-of-range
+# values are accepted silently today, so check the range rather than the output.
+melange analyze examples/passive-eq1a.cir --pot "LF Boost=10k" --switch "LF Freq=1"
 
 # Run audio through it
 melange simulate examples/passive-eq1a.cir --input-audio guitar.wav -o out.wav
 
-# Compile to a plugin project
-melange compile examples/passive-eq1a.cir --format plugin -o passive-eq
-cd passive-eq && cargo build --release
+# Compile to a plugin project. Generate it OUTSIDE this repo if you intend to
+# bundle a CLAP/VST3 — the bundler walks up to the outermost Cargo.toml, so a
+# project nested in the melange checkout builds but will not bundle.
+melange compile examples/passive-eq1a.cir --format plugin -o ~/passive-eq
+cd ~/passive-eq && cargo build --release
 ```
 
 **Provenance, honestly.** This proves melange *solves* a genuinely hard
@@ -41,26 +45,3 @@ applied 2026-08-25); the **EQ network is a reconstruction** — no factory drawi
 of the EQ exists at all. The file's own header carries the full accounting. What
 the curves faithfully reproduce is the reconstruction, which is a real and useful
 thing and is not the same sentence as "sounds like the real box."
-
----
-
-### Sync note (maintainers)
-
-`passive-eq1a.cir` is a **verbatim copy** of
-`testing/filters/passive-eq1a.cir` in the **melange-circuits** repo, which is
-the canonical source of truth for the netlist. It lives here only so the flagship
-repo has a working example in-tree.
-
-The melange-circuits agent owns the canonical file; melange mirrors it. Normally
-the two are byte-identical:
-
-```bash
-diff melange/examples/passive-eq1a.cir \
-     melange-circuits/testing/filters/passive-eq1a.cir
-```
-
-**Byte-identical mirror of canonical HEAD** — verify with the `diff` above. The
-deck is under active promotion calibration (2026-08-25): the melange-circuits
-agent re-copies this mirror on each change and signals refreshes on robogogo
-thread 226. Treat the canonical as the source of truth and re-sync whenever the
-`diff` is non-empty.

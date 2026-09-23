@@ -28,6 +28,31 @@ That's not a missing feature. That's the whole design.
 
 > **Ear safety.** Generated plugins ship with a default-on soft limiter. Start with your monitors at zero and come up slowly. You can turn the limiter off with `--no-ear-protection` when you need to measure something, and the flag is deliberately that long and that annoying to type.
 
+## Start here
+
+```bash
+# Build the CLI. Use --release: a debug build of the solver is slow, and this
+# repo's debug `target/` runs to well over a gigabyte.
+cargo build --release -p melange-cli        # -> target/release/melange
+
+# Or put it on your PATH for good:
+#   cargo install --path tools/melange-cli
+
+./target/release/melange builtins                   # circuits that ship in-tree
+./target/release/melange analyze passive-eq1a       # frequency response of the demo circuit
+```
+
+Every other example on this page writes bare `melange`, which assumes you did
+the `cargo install` (or put `target/release` on your `PATH`).
+
+Then read, in this order:
+
+- **[Getting Started](docs/GETTING_STARTED.md)** — zero to a loadable plugin, following one circuit the whole way.
+- **[Writing SPICE Netlists for Melange](docs/NETLIST_GUIDE.md)** — the netlist dialect: component syntax, `.model` cards, `.pot`/`.switch` controls, unit suffixes, and the six mistakes that bite first. This is the guide for Way In #2 below.
+- **[SPICE Grammar Reference](docs/spice-grammar.md)** — the complete syntax and per-device `.model` parameter tables, for when you need the exact default of something.
+
+Everything below this line is the argument for the tool rather than instructions for using it. [Requirements](#requirements) are near the bottom; the short version is Rust 1.85+, and everything else is optional until you need it (ngspice for `validate`, KiCad 8+ for the schematic path, network access the first time you build a `--format plugin` project).
+
 ## The Problem
 
 There is no open-source tool that takes a circuit schematic and produces optimized, real-time-safe DSP code.
@@ -41,6 +66,8 @@ That sentence should be stranger than it is. Analog circuit simulation is fifty 
 ### 1. From a KiCad schematic
 
 Draw the circuit, export it, compile it. Melange ships a [KiCad symbol library and netlist exporter](kicad/README.md) covering triodes, pentodes, op-amps, VCAs, pots, wipers, and audio I/O markers.
+
+**This path requires KiCad 8 or newer.** The bundled `melange.kicad_sym` library and the example schematic are saved in the KiCad 8 file format (`version 20231120`); KiCad 7's `kicad-cli` cannot read them and fails with `Failed to load schematic file`. Nothing else in melange needs KiCad — Ways In #2 and #3 have no such requirement.
 
 ```
 ┌──────────┐     Export      ┌──────────┐    melange     ┌──────────┐
@@ -77,11 +104,13 @@ cd passive-eq && cargo build --release   # builds the DSP library (target/releas
 melange compile my-circuit.cir --format plugin -o my-plugin
 ```
 
-`cargo build --release` produces the raw plugin library; the generated
-project's `README.md` has the one extra step (a `nih-plug` clone + `xtask
-bundle`) that turns it into a DAW-loadable VST3/CLAP in `target/bundled/`.
-The generated project is its own standalone workspace, so it builds fine even
-though `-o passive-eq` lands it inside this repo.
+`cargo build --release` produces the raw plugin library. `bash build.sh` in the
+generated project turns it into a DAW-loadable VST3/CLAP in `target/bundled/`;
+it bundles through the project's own `xtask/` member crate, so no separate
+nih-plug checkout is needed. Bundling must run from **outside** any enclosing
+Cargo workspace — the bundler walks up to the outermost `Cargo.toml` — so a
+project generated inside this repo (as `-o passive-eq` does) will `cargo build`
+in place but will not bundle until you move it out.
 
 ### 3. From the built-in demo, or a circuit library
 
@@ -187,7 +216,7 @@ A sample of what it handles, with **measured** single-core throughput:
 
 \* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), median of 7 × 2M samples. Measured on an AMD Ryzen 9 7950X with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh). Re-measured 2026-09-02. Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass tops out near 2700×.
 
-Each row names a real deck in the circuits repository, so you can reproduce it rather than take it on faith — `bench.sh <label> <path-to.cir>`:
+Each row names the deck it was measured on, so the numbers have an address. Reproducing them is another matter: **only the passive tube EQ row can be re-measured from a clean clone today** — it ships in-tree as `examples/passive-eq1a.cir`, so `bench.sh <label> <path-to.cir>` will re-run it on your hardware. The other six decks live in the circuits repository, which is not yet published. Naming them is provenance, not an invitation.
 
 | Row | Deck |
 |---|---|
@@ -199,7 +228,7 @@ Each row names a real deck in the circuits repository, so you can reproduce it r
 | Overdrive pedal | `unstable/filters/gold-press-overdrive.cir` |
 | 12AX7 gain stage | `unstable/gimmicks/noyce-triode-12ax7.cir` |
 
-The circuits repository holds the full catalog with per-circuit status.
+The circuits repository holds the full catalog with per-circuit status. It is not public yet; until it is, six of the seven rows above are numbers you have to take on my word, which is exactly the position I would rather not be in.
 
 ## Spotlight: Passive Tube EQ
 
@@ -266,10 +295,12 @@ melange compile <circuit> -o <dir>        Compile to Rust code or plugin project
 melange simulate <circuit> -o <file.wav>  Process audio through a circuit
 melange analyze <circuit>                 Frequency response sweep
 melange validate <circuit>                Compare against ngspice
-melange nodes <circuit>                   List nodes and devices
+melange nodes <circuit>                   List nodes and devices, pots, switches
+melange dc-op <circuit>                   DC operating point: node voltages + KCL residual
+melange cache list|clear|stats            Manage the circuit cache
 melange import <file.xml> -o <file.cir>   Import KiCad XML to Melange format
 melange builtins                          List embedded demo circuits (ships with passive-eq1a)
-melange sources add|list|remove           Manage circuit source repos
+melange sources list|add|remove|show      Manage circuit source repos
 ```
 
 Every subcommand has `--help`. The flags worth knowing about up front:
@@ -282,12 +313,12 @@ Every subcommand has `--help`. The flags worth knowing about up front:
 | `--backward-euler` | compile | L-stable integration for high-gain feedback circuits |
 | `--noise off\|thermal\|shot\|full` | compile/simulate/analyze | Inject authentic circuit noise (thermal → +shot → +1/f, op-amp en/in, pentode partition); off by default |
 | `--noise-seed <u64>` | compile/simulate/analyze | Master noise seed; `0` = entropy from the system clock, nonzero = deterministic |
-| `--pot "Name=Value"` | analyze | Set pot value for frequency sweep |
-| `--switch "Name=Pos"` | analyze | Set switch position for frequency sweep |
+| `--pot "Name=Value"` | analyze | Set pot value for the sweep. Value is in ohms and must sit inside the range `melange nodes` prints — out-of-range values are accepted silently today |
+| `--switch "Name=Pos"` | analyze/simulate | Set switch position (repeatable) |
 | `--input-audio file.wav` | simulate | Use a WAV file instead of a test tone |
 | `--no-ear-protection` | compile | Disable soft limiter (measurement only) |
 
-Full flag documentation: [`compile --help`](docs/PLUGIN_GUIDE.md), [`simulate --help`](docs/GETTING_STARTED.md), [`analyze --help`](docs/GETTING_STARTED.md).
+Each subcommand's own `--help` is authoritative for its flags. For the prose versions: the [Plugin Development Guide](docs/PLUGIN_GUIDE.md) covers `compile` and the generated project; [Getting Started](docs/GETTING_STARTED.md) covers `simulate`, `analyze`, and the compile-flag table.
 
 ## Architecture
 
@@ -332,15 +363,19 @@ Requires zig 0.13+ and cargo-zigbuild. Details in the [docs](docs/PLUGIN_GUIDE.m
 - No external dependencies for the core library or the standalone generated DSP (`--format code` / `circuit.rs`). The full nih-plug plugin project (`--format plugin`) pulls `nih_plug` as a pinned git dependency, so building *that* needs network access on first build.
 - Optional: ngspice for SPICE validation
 - Optional: zig + cargo-zigbuild for macOS cross-compilation
-- Optional: KiCad 8+ for the schematic workflow
+- **KiCad 8 or newer** — only if you use the schematic workflow, but for that path it is a hard requirement, not a nicety. The bundled symbol library and example schematic are in the KiCad 8 file format (`version 20231120`) and KiCad 7's `kicad-cli` fails to load them.
 
 ```bash
-# Install the CLI
+# Install the CLI (puts `melange` in ~/.cargo/bin)
 cargo install --path tools/melange-cli
 
-# Or build from repo
-cargo build --workspace
-cargo test --workspace        # ~1900 fast tests (SPICE truth-comparison gated below)
+# Or build from the repo. Use --release: the debug build of a circuit solver is
+# slow enough to change how you feel about the tool, and its `target/` is
+# several times the size.
+cargo build --release -p melange-cli    # -> target/release/melange
+
+# Test suite, for contributors — ~1900 fast tests (SPICE truth-comparison gated below)
+cargo test --workspace
 
 # SPICE truth-comparison suite — gated behind --include-ignored
 # because it needs ngspice on PATH. CI runs this on every PR.
@@ -352,10 +387,10 @@ cargo test -p melange-validate --test spice_validation -- --include-ignored
 The list I'd want to read before adopting somebody else's circuit compiler:
 
 - **No resistor temperature coefficients** (TC1/TC2) and no global temperature sweep. Base device models sit at a fixed nominal 27 °C. Opt-in device self-heating (RTH/CTH) exists for diodes, BJTs, and triodes.
-- **Transformers use a constant coupling coefficient.** Core saturation is available opt-in via `ISAT=` on windings and inductors (anhysteretic tanh magnetizing curve). Magnetic hysteresis is not modeled — so the part of transformer character that comes from the core remembering where it's been, melange does not have.
+- **Transformers use a constant coupling coefficient, and transformer cores do not saturate.** `ISAT=` gives an anhysteretic saturation curve on *uncoupled* inductors only; the per-winding machinery in the tree saturates each winding off its own branch current, which is wrong for a shared core, and is unvalidated and unused (`docs/aidocs/SATURATING_TRANSFORMERS.md` §1). Magnetic hysteresis is not modeled anywhere — so the part of transformer character that comes from the core remembering where it's been, melange does not have.
 - **Tube models: no space-charge or transit-time effects.**
 - **Op-amps: Boyle macromodel.** Adequate for audio, not a transistor-level simulation, and I would rather say so here than have you discover it at 2 a.m.
-- The complete list lives in [`docs/aidocs/STATUS.md`](docs/aidocs/STATUS.md).
+- Scope boundaries element by element and device by device are in [**Known Limitations**](docs/limitations.md), where `[DEFERRED]` marks the ones that are deliberate. [`docs/aidocs/STATUS.md`](docs/aidocs/STATUS.md) covers the same territory from the maintainer's side — feature inventory, solver routing, per-circuit validation state — and is the one kept current release by release, so it wins where the two disagree.
 
 ## Origin
 

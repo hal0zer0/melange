@@ -196,6 +196,69 @@ U1 in_p in_n out LM358              ; Op-amp: +in, -in, out, model
 Y1 sig_p sig_n ctrl_p ctrl_n VCA1   ; VCA: sig+, sig-, ctrl+, ctrl-, model
 ```
 
+#### The op-amp `.model` card, and why it needs rails
+
+A `U` element without a matching `.model` is a parse error
+(`Component 'U1' references model 'TL072' which is not defined`), so you will
+not forget the card. What you can forget is the **rails** — and a rail-less
+op-amp has no output clamp at all:
+
+```
+upper clamp:  VCC   >  +VSAT  >  +13 V if GBW is finite  >  none
+lower clamp:  VEE   >  −VSAT  >  −13 V if GBW is finite  >  none
+```
+
+`OA(AOL=1e5 ROUT=75)` therefore models an op-amp with infinite headroom. Drop it
+into a 9 V pedal and the output sails past 9 V to wherever the closed-loop gain
+takes it, without complaint. If any part of your circuit's character comes from
+the op-amp running out of supply, the model card has to say so.
+
+Here is the whole thing for a single-supply 9 V stage — mid-rail bias divider,
+coupling cap, non-inverting gain of 1 + 100k/10k = 11:
+
+```spice
+* 9V single-supply op-amp gain stage
+Vcc vcc 0 DC 9
+R_b1 vcc vbias 100k
+R_b2 vbias 0 100k
+C_b vbias 0 10u
+C_in in np 100n
+R_in np vbias 1meg
+U1 np nm out TL072
+R_f out nm 100k
+R_g nm ng 10k
+C_g ng 0 10u
+.model TL072 OA(AOL=200000 ROUT=50 GBW=3e6 VCC=9 VEE=0)
+.end
+```
+
+Save it as `pedal.cir` and check the bias before you check the sound:
+
+```bash
+melange dc-op pedal.cir        # v(vbias) = 4.5000 V, v(out) = 4.4955 V
+melange simulate pedal.cir --amplitude 0.9 -o pedal.wav   # peak: 9.000000
+```
+
+`peak: 9.000000` is the upper rail, exactly. Three variants of the same deck at
+the same 0.9 V drive, to show what each parameter is actually doing:
+
+| Model card | `peak:` |
+|---|---|
+| `OA(AOL=200000 ROUT=50 GBW=3e6 VCC=9 VEE=0)` | 9.000000 — clamped at `VCC` |
+| `OA(AOL=200000 ROUT=50 GBW=3e6)` | 13.000000 — `GBW` alone silently implies ±13 V |
+| `OA(AOL=200000 ROUT=50)` | 14.463231 — no ceiling; it goes wherever the gain takes it |
+
+Note what the rails do *not* do. Clamping the output to the 0–9 V window is not
+the same as biasing the signal path — that is the job of `R_b1`/`R_b2` and the
+coupling caps, which are ordinary components like any others. A single-supply
+op-amp card with no bias network around it gives you a clamped output and a
+circuit that still does not work.
+
+The full `OA` parameter set — `SR` (slew rate, in V/µs), `IB`, `RIN`, the noise
+densities `EN`/`IN`, and the Boyle-mode-only `VOH_DROP`/`VOL_DROP` — is
+tabulated in
+[spice-grammar.md](spice-grammar.md#op-amp-parameters-type-oa).
+
 ### Dependent Sources and Coupling
 
 ```spice
@@ -217,23 +280,83 @@ X1 input mid vcc GAIN_STAGE         ; Instance: nodes..., subckt name
 
 ## Unit Suffixes
 
+A scale letter can sit in two places: **after** the digits (SPICE suffix
+notation, `10k`) or **between** them (BS-1852 infix notation, `4k7`). Both are
+supported. They do not agree on what `M` means, so read both tables before
+typing a megohm.
+
+### Suffix position
+
 | Suffix | Multiplier | Example | Value |
 |--------|-----------|---------|-------|
-| `f` | 10^-15 | `10f` | 10 femto |
 | `p` | 10^-12 | `100p` | 100 pico |
 | `n` | 10^-9 | `10n` | 10 nano |
-| `u` | 10^-6 | `1u` | 1 micro |
+| `u` (or `µ`, `μ`) | 10^-6 | `1u` | 1 micro |
 | `m` | 10^-3 | `1m` | 1 milli |
 | `k` | 10^3 | `10k` | 10 kilo |
 | `meg` | 10^6 | `1meg` | 1 mega |
 | `g` | 10^9 | `1g` | 1 giga |
+| `t` | 10^12 | `1t` | 1 tera |
 
-**Warning:** `M` alone means **milli** (10^-3), not mega. Always use `meg` for megaohms.
+Suffixes are case-insensitive: `10K`, `1MEG`, and `1Meg` are all accepted.
+
+There is no femto *suffix* in an element-value position. A trailing `f` directly
+after a digit is read as the Farad unit letter, so `C1 a b 10f` is 10 farads,
+not 10 fF; melange logs a warning when it takes that reading. Write `10e-15` or
+`10fF` instead. Inside a `.model` card the same token *is* femto —
+`.model DX D(IS=6.734f)` gives 6.734e-15, matching ngspice.
+
+### Infix position (`4k7`, `2M2`)
+
+Datasheet-style values where the scale letter replaces the decimal point parse
+correctly:
+
+| Written | Value |
+|---------|-------|
+| `4k7` | 4.7 k |
+| `6n8` | 6.8 n |
+| `2u2` | 2.2 µ |
+| `1M0` | 1 M (10^6) |
+| `2M2` | 2.2 M (10^6) |
+
+The accepted pattern is exact: `<digits><letter><digits>`, digits only on both
+sides, letter drawn from `T G K M U N P` (case-insensitive). Anything else falls
+through to the suffix rules above, and may not parse at all:
+
+- `1.5M0` is a **parse error** — the part before the letter must be digits only.
+  Write `1.5meg` or `1.5e6`.
+- There is no infix femto. `4f7` is a **parse error**; write `4.7e-15` or
+  `4.7fF`.
+
+### `M` infix vs `M` suffix: 10^9 apart
+
+The position of the letter, not the letter itself, decides milli or mega. A
+trailing zero is the entire difference between 1 mΩ and 1 MΩ.
+
+| Written | Parses as | Why |
+|---------|-----------|-----|
+| `1M` | 1e-3 | suffix position — SPICE `M` is milli |
+| `10M` | 1e-2 | suffix position |
+| `1M0` | 1e6 | infix position — BS-1852 `M` is mega |
+| `2M2` | 2.2e6 | infix position |
+| `10M0` | 1e7 | infix position |
+| `1m5` | 1.5e6 | infix, case-insensitive — **not** 1.5 milli |
+| `1meg` | 1e6 | explicit `meg` |
+
+Melange logs a warning every time it reads an infix `M` as mega, naming the
+value and the magnitude it produced, so a stray `1M0` shows up in the compile
+log. The reverse typo — `1M` where `1M0` was meant — is **silent**, and turns a
+1 MΩ bias resistor into a 1 mΩ short.
 
 ```spice
-R1 in out 1meg    ; 1 MΩ (correct)
-R2 in out 1M      ; 1 mΩ (probably wrong!)
+R1 in out 1meg    ; 1 MΩ — unambiguous, no warning
+R2 in out 1M0     ; 1 MΩ — BS-1852 infix, correct, logs a warning
+R3 in out 1e6     ; 1 MΩ — unambiguous
+R4 in out 1M      ; 1 mΩ — milli. Silent. Almost certainly a typo.
 ```
+
+There is no infix milli, so `1m5` is 1.5 M, not 1.5 m. Write milli with an
+explicit exponent (`1.5e-3`) or the suffix form (`1.5m`).
 
 ## Circuit Noise (opt-in)
 
