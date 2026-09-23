@@ -306,6 +306,11 @@ fn format_html_report(
         thd_err = report.thd_error_db,
         thd_status = if report.config.skip_thd {
             "-".to_string()
+        } else if report.thd_exempt {
+            // Same rule as the text summary: an exempted delta is the gap
+            // between two noise floors, so marking it ✗ would contradict the
+            // run's own PASSED verdict.
+            "not graded".to_string()
         } else {
             format_pass(
                 report.thd_error_db.is_finite()

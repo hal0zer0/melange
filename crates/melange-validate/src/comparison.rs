@@ -6,6 +6,12 @@
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::f64::consts::PI;
 
+/// Reference-THD floor below which the THD check is exempted (see the exemption
+/// rule in [`compare_signals`]). A reference at or below this level (~0.1% THD)
+/// carries no meaningful distortion, so a "THD error" against it is the gap
+/// between two numeric noise floors rather than a modelling defect.
+const THD_CLEAN_FLOOR_DB: f64 = -60.0;
+
 /// A signal with associated sample rate for comparison
 #[derive(Debug, Clone)]
 pub struct Signal {
@@ -253,6 +259,12 @@ pub struct ComparisonReport {
     pub thd_melange: f64,
     /// Absolute THD difference in dB
     pub thd_error_db: f64,
+    /// Whether the THD check was exempted for this comparison: melange is at
+    /// least as clean as the reference and the reference itself sits below the
+    /// no-meaningful-distortion floor. When true, `thd_error_db` is the
+    /// difference between two noise floors and was NOT graded — it is reported
+    /// for information only. See the exemption rule in [`compare_signals`].
+    pub thd_exempt: bool,
 
     // Pass/fail
     /// Whether all tolerances were met
@@ -343,9 +355,25 @@ impl ComparisonReport {
             summary.push_str(&format!("  THD (SPICE):      {:.2} dB\n", self.thd_spice));
             summary.push_str(&format!("  THD (melange):    {:.2} dB\n", self.thd_melange));
             summary.push_str(&format!(
-                "  THD Error:        {:.2} dB\n",
-                self.thd_error_db
+                "  THD Error:        {:.2} dB{}\n",
+                self.thd_error_db,
+                if self.thd_exempt { " (not graded)" } else { "" }
             ));
+            // An exempted THD delta is routinely tens of dB and sits directly
+            // under a green PASSED, where a bare number reads as either a bug in
+            // melange or a bug in the report. It is neither, so say which on the
+            // line itself. The number stays visible; only its status is added.
+            if self.thd_exempt {
+                summary.push_str(&format!(
+                    "  info (normal): THD check exempt \u{2014} melange ({:.2} dB) is at least as clean as\n\
+                     \x20                the reference ({:.2} dB), and the reference is below the {:.0} dB\n\
+                     \x20                no-meaningful-distortion floor. Both engines are effectively\n\
+                     \x20                distortion-free here, so this difference is between two numeric\n\
+                     \x20                noise floors, not a modelling error, and it is not graded.\n\
+                     \x20                Melange ADDING distortion the reference lacks is still graded.\n",
+                    self.thd_melange, self.thd_spice, THD_CLEAN_FLOOR_DB
+                ));
+            }
         }
 
         if !self.failures.is_empty() {
@@ -485,6 +513,7 @@ pub fn compare_signals(
         thd_spice: f64::NAN,
         thd_melange: f64::NAN,
         thd_error_db: f64::NAN,
+        thd_exempt: false,
         passed: false,
         failures: vec![failure],
         config: *config,
@@ -703,7 +732,6 @@ pub fn compare_signals(
     // the reference lacks makes thd_melange > thd_spice, so the check still
     // fires. (A symmetric both-below-floor rule missed fa10, whose ngspice floor
     // is -88.5 dB, just above the old -90 dB gate.)
-    const THD_CLEAN_FLOOR_DB: f64 = -60.0;
     let thd_exempt = thd_spice.is_finite()
         && thd_melange.is_finite()
         && thd_melange <= thd_spice
@@ -737,6 +765,7 @@ pub fn compare_signals(
         thd_spice,
         thd_melange,
         thd_error_db,
+        thd_exempt,
         passed,
         failures,
         config: *config,
@@ -993,6 +1022,99 @@ mod tests {
             report.max_relative_error < 0.02,
             "time-tolerant max-rel should absorb the 1-sample shift: {}",
             report.max_relative_error
+        );
+    }
+
+    /// An exempted THD delta must SAY it is not graded. A 40 dB "THD Error"
+    /// printed bare under a green PASSED reads as a bug in melange or a bug in
+    /// the report; it is neither (both engines are distortion-free and the
+    /// delta is between two noise floors). The number itself stays visible.
+    #[test]
+    fn exempt_thd_line_is_labelled_not_graded() {
+        let fs = 48000.0;
+        let n = 8192;
+        // Reference: a sine with a whisper of 3rd harmonic, still far below the
+        // -60 dB no-meaningful-distortion floor. Actual: the pure sine, i.e.
+        // melange is the cleaner of the two — the passive-eq1a shape.
+        let reference: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = 2.0 * PI * 1000.0 * i as f64 / fs;
+                t.sin() + 3e-5 * (3.0 * t).sin()
+            })
+            .collect();
+        let actual: Vec<f64> = (0..n)
+            .map(|i| (2.0 * PI * 1000.0 * i as f64 / fs).sin())
+            .collect();
+        let r = Signal::new(reference, fs, "reference");
+        let a = Signal::new(actual, fs, "actual");
+        let report = compare_signals(&r, &a, &ComparisonConfig::strict());
+
+        assert!(
+            report.thd_exempt,
+            "melange cleaner than a sub-floor reference must be exempt (spice {:.2} dB, melange {:.2} dB)",
+            report.thd_spice, report.thd_melange
+        );
+        assert!(
+            report.thd_error_db > 10.0,
+            "expected a large ungraded delta, got {:.2} dB",
+            report.thd_error_db
+        );
+        let summary = report.summary();
+        assert!(
+            summary.contains("(not graded)"),
+            "exempt THD line must be labelled:\n{summary}"
+        );
+        assert!(
+            summary.contains("info (normal): THD check exempt"),
+            "exempt THD line must say why:\n{summary}"
+        );
+        // The number is annotated, never suppressed.
+        assert!(
+            summary.contains(&format!("{:.2} dB", report.thd_error_db)),
+            "the THD error value must stay visible:\n{summary}"
+        );
+        assert!(
+            report.failures.is_empty(),
+            "presentation only: exemption must not change pass/fail: {:?}",
+            report.failures
+        );
+    }
+
+    /// A graded THD line is untouched: no label, no info block.
+    #[test]
+    fn graded_thd_line_is_unchanged() {
+        let fs = 48000.0;
+        let n = 8192;
+        // Reference carries real distortion (1% 3rd harmonic, ~-40 dB), which is
+        // above the exemption floor, so the check is graded.
+        let reference: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = 2.0 * PI * 1000.0 * i as f64 / fs;
+                t.sin() + 0.01 * (3.0 * t).sin()
+            })
+            .collect();
+        let actual = reference.clone();
+        let r = Signal::new(reference, fs, "reference");
+        let a = Signal::new(actual, fs, "actual");
+        let report = compare_signals(&r, &a, &ComparisonConfig::strict());
+
+        assert!(
+            !report.thd_exempt,
+            "a reference above the floor must be graded (spice {:.2} dB)",
+            report.thd_spice
+        );
+        let summary = report.summary();
+        assert!(
+            !summary.contains("not graded"),
+            "graded THD line must carry no exemption label:\n{summary}"
+        );
+        assert!(
+            !summary.contains("info (normal)"),
+            "graded THD line must carry no info block:\n{summary}"
+        );
+        assert!(
+            summary.contains("  THD Error:        "),
+            "graded THD line must keep its original shape:\n{summary}"
         );
     }
 
