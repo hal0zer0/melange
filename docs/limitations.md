@@ -241,6 +241,38 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
   that re-init clicks at envelope-follower rates. No nih-plug knob is generated
 - `.runtime R` members are rejected inside `.gang` at parse time
 
+### Known Defect: NR can cap out and still report a healthy-looking output [OPEN]
+
+Newton-Raphson has a per-sample iteration cap (`max_iter`, 100 by default). When
+it reaches that cap it emits the last iterate and continues. That iterate is not
+a converged solve, and **nothing in the output makes it obvious** — the level can
+look entirely normal.
+
+A deck in the golden corpus does this on every sample after a step edge:
+
+```
+frames                    48000    (edge at sample 4800 -> 43200 samples after it)
+diag_nr_max_iter_count    43200    every post-edge sample hits the cap
+diag_be_fallback_count    43199
+diag_ls_fail_count      2246353    ~52 line-search failures per sample
+diag_refactor_count     4190402    ~97 full LU refactors per sample
+diag_peak_output         0.9439 V  peak -0.50 dBFS — nothing looks wrong
+```
+
+Whether the capped iterate differs audibly from a converged solve on that deck is
+**not yet established**; the investigation is open. What is established is that
+melange will not tell you when this happens.
+
+**How to check your own circuit.** `melange simulate` prints these counters. If
+`nr_max_iter_count` is a large fraction of your sample count, the solver did not
+converge on those samples and the output is not trustworthy, whatever the level
+looks like. A healthy circuit shows a count near zero — the same deck's sine
+program, over more samples, shows 31.
+
+Mitigations worth trying: raise the NR budget, soften the stimulus edge, or
+`--backward-euler`. If the counter stays pinned, the circuit is hitting a genuine
+conditioning problem and the number melange prints should not be trusted.
+
 ### Known Defect: conductance-swap transient [OPEN]
 
 Changing a conductance mid-run -- any `.switch`, `.pot`, or `.runtime R` setter --
