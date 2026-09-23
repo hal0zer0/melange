@@ -3056,14 +3056,26 @@ fn validate_circuit_source(
         }
     }
 
-    // Exit with error if validation failed
+    // Exit with error if validation failed.
+    //
+    // The unit-variation qualifier rides ON this line, both ways. The melange
+    // side is built with `.tolerance`/`.mismatch` disabled so it compares
+    // nominal against nominal (the ngspice deck has no other option); saying so
+    // in a preamble would leave this line reading as a verdict on the unit the
+    // deck describes, which it is not. Empty for a deck with no jitter
+    // directive, which is every shipped validation deck.
+    let qualifier = match &result.report.unit_variation_note {
+        Some(note) => format!(" ({note})"),
+        None => String::new(),
+    };
     if result.report.passed {
-        println!("Validation PASSED");
+        println!("Validation PASSED{}", qualifier);
         Ok(())
     } else {
         anyhow::bail!(
-            "Validation FAILED: {} tolerance check(s) exceeded.\n\
+            "Validation FAILED{}: {} tolerance check(s) exceeded.\n\
              Use --relaxed for less strict tolerances, or investigate the differences.",
+            qualifier,
             result.report.failures.len()
         );
     }
