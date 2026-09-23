@@ -5630,7 +5630,42 @@ fn parse_value_ctx(s: &str, model_param_ctx: bool) -> Result<f64, ParseFloatErro
             'T' if num_part.len() > 1 => (&num_part[..num_part.len() - 1], 1e12),
             'G' if num_part.len() > 1 => (&num_part[..num_part.len() - 1], 1e9),
             'K' if num_part.len() > 1 => (&num_part[..num_part.len() - 1], 1e3),
-            'M' if num_part.len() > 1 => (&num_part[..num_part.len() - 1], 1e-3), // M = milli
+            // M = milli. SPICE reads a bare 'M' suffix as milli and melange must
+            // keep doing so: ngspice reads it that way too, and `melange validate`
+            // hands the author's own deck straight to ngspice, so reinterpreting
+            // it here would make the two engines simulate different circuits —
+            // the exact hazard the infix-value guard in melange-validate exists
+            // to catch.
+            //
+            // But melange already warns when an infix 'M' resolves to MEGA
+            // ('1M0'), which left the *silent* reading as the catastrophic one:
+            // '1M' where '1meg' was meant is 10^9 out, and a first-time user lost
+            // 36 dB of signal to it with no diagnostic at all. So warn here too,
+            // and melange now warns on both readings of the ambiguous letter.
+            //
+            // Gated on an UPPERCASE 'M' because that is how a mega gets typed —
+            // milli is authored lowercase (39 values across the circuits corpus
+            // use a lowercase 'm' suffix, every one of them legitimate; zero use
+            // uppercase). The case carries the intent even though the parse
+            // cannot. It is a warning, never a reinterpretation.
+            'M' if num_part.len() > 1 => {
+                if num_part.as_bytes()[num_part.len() - 1] == b'M' {
+                    let mantissa = &num_part[..num_part.len() - 1];
+                    if let Ok(m) = mantissa.parse::<f64>() {
+                        log::warn!(
+                            "value '{}': a suffix 'M' is MILLI in SPICE, so this is {:.3e}, \
+                             not mega — a factor of 10^9 apart. Write '{}meg' (or '{}M0') \
+                             for mega; write '{}m' for milli and this warning goes away.",
+                            s,
+                            m * 1e-3,
+                            mantissa,
+                            mantissa,
+                            mantissa
+                        );
+                    }
+                }
+                (&num_part[..num_part.len() - 1], 1e-3)
+            }
             'U' | 'µ' if num_part.len() > 1 => (&num_part[..num_part.len() - 1], 1e-6),
             'N' if num_part.len() > 1 => (&num_part[..num_part.len() - 1], 1e-9),
             'P' if num_part.len() > 1 => (&num_part[..num_part.len() - 1], 1e-12),

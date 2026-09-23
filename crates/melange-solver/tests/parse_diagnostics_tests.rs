@@ -523,3 +523,90 @@ C1 out 0 10n
         "warning lacks the alias hint the hard error gives: {warns:?}"
     );
 }
+
+// ── Suffix 'M' is milli, and says so ────────────────────────────────────
+//
+// SPICE reads a bare `M` suffix as MILLI. melange must keep doing so — ngspice
+// reads it the same way, and `melange validate` hands the author's deck straight
+// to ngspice, so reinterpreting `1M` as mega would make the two engines simulate
+// different circuits. The defect was that melange warned on the *correct* form
+// (`1M0`, infix, mega) and was silent on the catastrophic one, which is 10^9 out.
+
+/// The value must NOT change: `1M` stays milli on every path.
+#[test]
+fn suffix_m_still_parses_as_milli_and_meg_is_unaffected() {
+    use melange_solver::parser::parse_value;
+    for (raw, expected) in [
+        ("1M", 1e-3),
+        ("1m", 1e-3),
+        ("4M", 4e-3),
+        ("1meg", 1e6),
+        ("1MEG", 1e6),
+        ("1M0", 1e6),
+        ("2M2", 2.2e6),
+    ] {
+        let got = parse_value(raw).unwrap_or_else(|_| panic!("'{raw}' must parse"));
+        assert!(
+            (got - expected).abs() <= expected.abs() * 1e-12,
+            "'{raw}' must parse as {expected:e}, got {got:e}"
+        );
+    }
+}
+
+/// An uppercase `M` suffix warns; lowercase `m` does not, because that is how
+/// milli is actually authored. `meg` and the infix forms must stay quiet on this
+/// particular warning.
+#[test]
+fn uppercase_m_suffix_warns_but_lowercase_m_does_not() {
+    use melange_solver::parser::parse_value;
+    // `start_capture` takes a non-reentrant global lock, so each phase gets its
+    // own scope and releases the guard before the next one asks for it.
+    {
+        let _guard = start_capture();
+        parse_value("1M").expect("'1M' parses");
+        let warned: Vec<String> = warnings();
+        assert!(
+            warned.iter().any(|w| w.contains("is MILLI in SPICE")),
+            "uppercase 'M' suffix must warn, got: {warned:?}"
+        );
+        assert!(
+            warned.iter().any(|w| w.contains("1meg")),
+            "the warning must name the unambiguous spelling, got: {warned:?}"
+        );
+    }
+
+    for quiet in ["1m", "10m", "1meg", "1MEG"] {
+        let _guard = start_capture();
+        parse_value(quiet).unwrap_or_else(|_| panic!("'{quiet}' parses"));
+        let warned: Vec<String> = warnings();
+        assert!(
+            !warned.iter().any(|w| w.contains("is MILLI in SPICE")),
+            "'{quiet}' must not raise the suffix-M warning, got: {warned:?}"
+        );
+    }
+}
+
+/// Both readings of the ambiguous letter are now reported. Before this, melange
+/// warned only on the reading that was correct.
+#[test]
+fn both_readings_of_m_are_reported() {
+    use melange_solver::parser::parse_value;
+    {
+        let _guard = start_capture();
+        parse_value("1M0").expect("'1M0' parses");
+        let warned: Vec<String> = warnings();
+        assert!(
+            warned.iter().any(|w| w.contains("MEGA")),
+            "infix M must still warn: {warned:?}"
+        );
+    }
+    {
+        let _guard = start_capture();
+        parse_value("1M").expect("'1M' parses");
+        let warned: Vec<String> = warnings();
+        assert!(
+            warned.iter().any(|w| w.contains("MILLI")),
+            "suffix M must warn too: {warned:?}"
+        );
+    }
+}
