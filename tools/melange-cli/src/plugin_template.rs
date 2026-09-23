@@ -476,10 +476,46 @@ The compiled plugin (CLAP + VST3) will be in `target/bundled/`.
 > but the bundler walks up to the outermost `Cargo.toml` and will otherwise
 > fail to find this package.
 
+## Before you distribute this
+
+### CPU baseline — this build will not run on pre-2013 machines
+
+`.cargo/config.toml` sets `target-cpu=x86-64-v3` for every x86_64 target.
+That is AVX2 + FMA + BMI: **Intel Haswell (2013) or AMD Excavator (2015) and
+newer**. On anything older the plugin does not degrade — it crashes with an
+illegal instruction the moment the DAW loads it.
+
+It is an instruction-selection change only (results are bit-identical to a
+baseline x86-64 build), so if you are shipping to other people and want the
+wider compatibility, delete the section for your target from
+`.cargo/config.toml` before building. The file explains the trade-off and the
+`RUSTFLAGS`-replaces-rather-than-appends trap in full.
+
+### Plugin identity — change these before anyone else installs it
+
+All of it lives in `src/lib.rs`:
+
+| What | Where | Why it matters |
+|---|---|---|
+| Plugin name | `const NAME` | What the DAW's plugin list shows. |
+| Vendor | `const VENDOR` (default `"Melange"`) | Groups your plugins in the browser. Also `const URL` / `const EMAIL`. |
+| CLAP id | `const CLAP_ID` (default `com.melange.<circuit>`) | The CLAP plugin's unique identity. |
+| **VST3 class id** | `const VST3_CLASS_ID` | **Two plugins sharing one class id collide in a DAW** — the host loads whichever it finds first. Melange derives it from the circuit name, so two plugins built from the same netlist name share it. |
+
+Two follow-on rules for the VST3 class id:
+
+- Change it **before release**, not after. The id is what a saved project uses
+  to find your plugin again; changing it later orphans every session that
+  loaded the old one.
+- Renaming the circuit file also changes the derived id. Pin it explicitly with
+  `melange compile ... --vst3-id <16 chars>` (or by editing the constant) once
+  the plugin is out in the world.
+
 ## Files
 
 - `src/circuit.rs` — Generated circuit DSP code (do not edit by hand)
-- `src/lib.rs` — Plugin wrapper (customize parameters, GUI, presets here)
+- `src/lib.rs` — Plugin wrapper (customize parameters, metadata, GUI, presets here)
+- `.cargo/config.toml` — CPU baseline for the build (see above)
 - `build.sh` — Bundles CLAP + VST3 via `cargo xtask bundle`
 - `xtask/` — The nih-plug bundler bin (do not edit)
 
@@ -597,14 +633,73 @@ fn compute_vst3_id(circuit_name: &str) -> String {
     String::from_utf8(id.to_vec()).unwrap()
 }
 
-fn generate_pot_field(pot: &PotParamInfo) -> String {
+/// Rust struct-field names for the generated `CircuitParams` pots, derived from
+/// each pot's `.pot` label.
+///
+/// Generated code used to declare `pot_0`, `pot_1`, … while the DAW showed
+/// "Tone" and "Volume", so editing `lib.rs` meant counting indices back to the
+/// netlist. The label is already in hand; spend it.
+///
+/// Rules, in order:
+///   * Always prefixed `pot_`, so a label can never collide with another
+///     generated field (`mix`, `switch_N`, `wiper_N`, `gang_N`, the level
+///     params) or shadow a Rust keyword.
+///   * The label is lowercased, every non `[a-z0-9_]` run becomes a single
+///     `_`, and leading/trailing `_` are trimmed.
+///   * A candidate that looks like `pot_<digits>` is only accepted when those
+///     digits ARE this pot's own index — otherwise a pot labelled "3" could
+///     take the name index-based fallback would later hand to pot #3.
+///   * An empty slug, or one already taken by an earlier pot, falls back to
+///     `pot_<index>`, which is unique by construction.
+///
+/// The nih-plug `#[id = "pot_N"]` is deliberately NOT derived from the label:
+/// the id is the persisted parameter identity in saved DAW sessions and in
+/// automation lanes, so renaming a knob must not move it.
+fn pot_field_names(pots: &[PotParamInfo]) -> Vec<String> {
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<String> = Vec::with_capacity(pots.len());
+    for pot in pots {
+        let fallback = format!("pot_{}", pot.index);
+        let mut slug = String::new();
+        let mut last_us = true; // trims leading separators
+        for ch in pot.name.chars() {
+            let c = ch.to_ascii_lowercase();
+            if c.is_ascii_alphanumeric() || c == '_' {
+                slug.push(c);
+                last_us = false;
+            } else if !last_us {
+                slug.push('_');
+                last_us = true;
+            }
+        }
+        let slug = slug.trim_matches('_').to_string();
+        let candidate = format!("pot_{slug}");
+        let looks_indexed = slug.chars().all(|c| c.is_ascii_digit()) && !slug.is_empty();
+        let name = if slug.is_empty()
+            || used.contains(&candidate)
+            || (looks_indexed && candidate != fallback)
+        {
+            fallback
+        } else {
+            candidate
+        };
+        used.insert(name.clone());
+        out.push(name);
+    }
+    out
+}
+
+fn generate_pot_field(pot: &PotParamInfo, field: &str) -> String {
+    // `#[id]` stays index-based on purpose — see `pot_field_names`. Only the
+    // Rust field name carries the knob's label.
     format!(
-        "    #[id = \"pot_{idx}\"]\n    pub pot_{idx}: FloatParam,\n",
+        "    #[id = \"pot_{idx}\"]\n    pub {field}: FloatParam,\n",
         idx = pot.index,
+        field = field,
     )
 }
 
-fn generate_pot_default(pot: &PotParamInfo) -> String {
+fn generate_pot_default(pot: &PotParamInfo, field: &str) -> String {
     let name = pot.name.replace('\\', "\\\\").replace('"', "\\\"");
     // Normalize default resistance to 0.0-1.0 position
     let range = pot.max_resistance - pot.min_resistance;
@@ -614,7 +709,7 @@ fn generate_pot_default(pot: &PotParamInfo) -> String {
         0.5
     };
     format!(
-        r#"            pot_{idx}: FloatParam::new(
+        r#"            {field}: FloatParam::new(
                 "{name}",
                 {default:.4},
                 FloatRange::Linear {{
@@ -627,7 +722,7 @@ fn generate_pot_default(pot: &PotParamInfo) -> String {
             .with_value_to_string(Arc::new(|v| format!("{{:.0}}", v * 100.0)))
             .with_string_to_value(Arc::new(|s| s.trim_end_matches('%').trim().parse::<f32>().ok().map(|v| v / 100.0))),
 "#,
-        idx = pot.index,
+        field = field,
         name = name,
         default = default_pos,
     )
@@ -724,9 +819,10 @@ fn generate_params_struct(
         defaults.push_str(EAR_PROTECTION_PARAM_DEFAULT);
     }
 
-    for pot in pots {
-        fields.push_str(&generate_pot_field(pot));
-        defaults.push_str(&generate_pot_default(pot));
+    let pot_fields = pot_field_names(pots);
+    for (pot, field) in pots.iter().zip(pot_fields.iter()) {
+        fields.push_str(&generate_pot_field(pot, field));
+        defaults.push_str(&generate_pot_default(pot, field));
     }
 
     for wiper in wipers {
@@ -868,17 +964,53 @@ fn generate_process_loop(
     // Per-sample pot reads: smoother advances once per sample (outside per-channel loop),
     // set_pot_N called per channel via pot_assignments. The skip-if-unchanged guard inside
     // set_pot_N means the O(N^3) rebuild only fires when the smoothed value actually changes.
+    let pot_field_idents = pot_field_names(pots);
+    // Emitted ONCE above the pot reads, into the file the plugin author will
+    // actually open. Melange's job is the circuit-true resistance; the feel of
+    // the knob is the plugin's, and a linear taper is the single most common
+    // reason a generated plugin "sounds like nothing happens for the first
+    // three quarters".
+    let pot_taper_note: String = if pots.is_empty() {
+        String::new()
+    } else {
+        [
+            "// POT TAPER: each parameter below maps 0..1 LINEARLY onto that pot's",
+            "// resistance range, straight from the `.pot` min/max in the netlist.",
+            "// That is the circuit-true mapping, but almost every real guitar",
+            "// Volume/Tone pot is log (audio) taper, so a linear knob does very",
+            "// little over its first ~80% of travel. To change the FEEL, reshape",
+            "// `t` right here before it is scaled -- e.g. `let t = t * t;` for a",
+            "// rough audio taper -- and leave the circuit alone.",
+        ]
+        .iter()
+        .map(|l| format!("            {l}\n"))
+        .collect::<String>()
+    };
     let pot_reads: String = pots
         .iter()
-        .map(|p| {
+        .zip(pot_field_idents.iter())
+        .map(|(p, field)| {
+            // TAPER: this maps the 0..1 parameter LINEARLY onto the pot's
+            // resistance range. That is melange emitting the circuit-true
+            // resistance, which is the correct thing for it to emit — but real
+            // guitar Volume and Tone pots are log/audio taper, so a linear knob
+            // does very little over its first ~80% of travel. Shape the curve
+            // HERE, by transforming `t` before it is scaled (e.g.
+            // `let t = t * t;` for a rough audio taper), not by changing the
+            // circuit. Nothing downstream of this line assumes linearity.
             format!(
-                "            let pot_{i}_val = {min:.17e}_f64 + self.params.pot_{i}.smoothed.next() as f64 * {range:.17e}_f64;\n",
+                "            let pot_{i}_val = {{\n\
+                 \x20               let t = self.params.{field}.smoothed.next() as f64; // 0..1, linear taper\n\
+                 \x20               {min:.17e}_f64 + t * {range:.17e}_f64\n\
+                 \x20           }};\n",
                 i = p.index,
+                field = field,
                 min = p.min_resistance,
                 range = p.max_resistance - p.min_resistance,
             )
         })
         .collect();
+    let pot_reads = format!("{pot_taper_note}{pot_reads}");
     // Per-sample wiper reads: same pattern — smoother advances once per sample.
     let wiper_reads: String = wipers
         .iter()
@@ -1287,10 +1419,10 @@ fn generate_lib_rs(
         if options.wet_dry_mix {
             out.push_str("        self.params.mix.smoothed.reset(self.params.mix.value());\n");
         }
-        for p in pots {
+        for field in pot_field_names(pots) {
             out.push_str(&format!(
-                "        self.params.pot_{i}.smoothed.reset(self.params.pot_{i}.value());\n",
-                i = p.index,
+                "        self.params.{field}.smoothed.reset(self.params.{field}.value());\n",
+                field = field,
             ));
         }
         for w in wipers {
@@ -2022,8 +2154,10 @@ mod tests {
             default_resistance: 25000.0,
         }];
         let lib = test_generate_lib_rs("test", false, &pots);
+        // The nih-plug id stays index-based (persisted in DAW sessions);
+        // only the Rust field name carries the label.
         assert!(lib.contains("#[id = \"pot_0\"]"));
-        assert!(lib.contains("pub pot_0: FloatParam"));
+        assert!(lib.contains("pub pot_r1_tone: FloatParam"));
         assert!(lib.contains("\"R1 (Tone)\""));
         // Pot params use normalized 0.0-1.0 range displayed as percentage
         assert!(lib.contains("min: 0.0"));
@@ -2063,8 +2197,8 @@ mod tests {
         }];
         let lib = test_generate_lib_rs("test", false, &pots);
         assert!(
-            lib.contains("self.params.pot_0.smoothed.reset(self.params.pot_0.value());"),
-            "initialize() must prime pot_0 smoother with its default; missing from:\n{lib}"
+            lib.contains("self.params.pot_r1.smoothed.reset(self.params.pot_r1.value());"),
+            "initialize() must prime the pot smoother with its default; missing from:\n{lib}"
         );
     }
 
@@ -2080,14 +2214,14 @@ mod tests {
         let lib = test_generate_lib_rs("test", false, &pots);
         // Position-to-resistance conversion: min + position * (max - min), per-sample smoothed
         assert!(
-            lib.contains("self.params.pot_0.smoothed.next()"),
+            lib.contains("self.params.pot_r1.smoothed.next()"),
             "should use smoothed.next() for per-sample pot update"
         );
         // `.value()` is legitimate in smoother-reset lines inside `initialize()` (those read
         // the param default to prime the smoother), but must never appear as a per-sample
         // consumer producing `pot_0_val`. Check for the per-sample shape, not a blanket ban.
         assert!(
-            !lib.contains("pot_0_val = ") || !lib.contains("self.params.pot_0.value() as f64"),
+            !lib.contains("pot_0_val = ") || !lib.contains("self.params.pot_r1.value() as f64"),
             "per-sample pot_0_val must be produced via .smoothed.next(), not .value()"
         );
         assert!(lib.contains("set_pot_0(pot_0_val)"));
@@ -2114,10 +2248,74 @@ mod tests {
         let lib = test_generate_lib_rs("test", false, &pots);
         assert!(lib.contains("#[id = \"pot_0\"]"));
         assert!(lib.contains("#[id = \"pot_1\"]"));
-        assert!(lib.contains("pub pot_0: FloatParam"));
-        assert!(lib.contains("pub pot_1: FloatParam"));
+        assert!(lib.contains("pub pot_r1_tone: FloatParam"));
+        assert!(lib.contains("pub pot_r5_volume: FloatParam"));
         assert!(lib.contains("set_pot_0(pot_0_val)"));
         assert!(lib.contains("set_pot_1(pot_1_val)"));
+    }
+
+    /// The field name comes from the label, but it must stay a valid, unique
+    /// Rust identifier no matter what a netlist author writes on a `.pot` line.
+    #[test]
+    fn pot_field_names_are_safe_and_unique() {
+        let mk = |index: usize, name: &str| PotParamInfo {
+            index,
+            name: name.to_string(),
+            min_resistance: 100.0,
+            max_resistance: 10000.0,
+            default_resistance: 5000.0,
+        };
+        let pots = vec![
+            mk(0, "Tone"),
+            mk(1, "LF Boost (upper)"),
+            mk(2, ""),           // no usable label -> index fallback
+            mk(3, "***"),        // nothing survives sanitising -> index fallback
+            mk(4, "Tone"),       // duplicate label -> index fallback
+            mk(5, "tone"),       // duplicate after lowercasing -> index fallback
+            mk(6, "7"),          // digits-only must not steal pot_7's name
+            mk(7, "Drive/Gain"), // separator run collapses to one underscore
+            mk(8, "  Mix  "),    // leading/trailing junk trimmed
+        ];
+        let names = pot_field_names(&pots);
+        assert_eq!(
+            names,
+            vec![
+                "pot_tone",
+                "pot_lf_boost_upper",
+                "pot_2",
+                "pot_3",
+                "pot_4",
+                "pot_5",
+                "pot_6",
+                "pot_drive_gain",
+                "pot_mix",
+            ]
+        );
+        // Unique, and every one a valid identifier.
+        let unique: std::collections::HashSet<&String> = names.iter().collect();
+        assert_eq!(unique.len(), names.len(), "{names:?}");
+        for n in &names {
+            assert!(n.starts_with("pot_"), "{n}");
+            assert!(
+                n.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                "{n}"
+            );
+        }
+    }
+
+    /// A pot labelled with its own index number may keep that name; the guard
+    /// only exists to stop it stealing a DIFFERENT pot's fallback.
+    #[test]
+    fn pot_field_name_digits_matching_own_index_are_kept() {
+        let pots = vec![PotParamInfo {
+            index: 4,
+            name: "4".to_string(),
+            min_resistance: 100.0,
+            max_resistance: 10000.0,
+            default_resistance: 5000.0,
+        }];
+        assert_eq!(pot_field_names(&pots), vec!["pot_4"]);
     }
 
     #[test]
@@ -2133,7 +2331,7 @@ mod tests {
         // Should have both level params and pot params
         assert!(lib.contains("pub input_level: FloatParam"));
         assert!(lib.contains("pub output_level: FloatParam"));
-        assert!(lib.contains("pub pot_0: FloatParam"));
+        assert!(lib.contains("pub pot_r1: FloatParam"));
         // Process should have both gains and pot values
         assert!(lib.contains("input_gain"));
         assert!(lib.contains("output_gain"));

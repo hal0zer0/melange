@@ -90,9 +90,20 @@ fn read_wav(path: &str) -> (Vec<f64>, f64) {
     (samples, sample_rate as f64)
 }
 
-fn write_wav(path: &str, sample_rate: u32, samples: &[f64]) {
+// `pcm16 = false` writes IEEE float32 (format 3) — melange's default, and the
+// only format that can carry the solver's full range, since melange writes
+// VOLTS into the WAV and a circuit node happily exceeds +/-1.
+//
+// `pcm16 = true` writes classic 16-bit signed PCM (format 1) instead. Format 3
+// is refused outright by several common readers — Python's stdlib `wave` raises
+// `Error: unknown format: 3` — so the escape hatch exists for tooling, not for
+// fidelity. Values outside +/-1 V CANNOT be represented and are CLAMPED, not
+// wrapped; the clamp count is reported so a silently squashed render is
+// impossible.
+fn write_wav(path: &str, sample_rate: u32, samples: &[f64], pcm16: bool) {
     let num_samples = samples.len();
-    let data_size = (num_samples * 4) as u32; // 32-bit float
+    let bytes_per_sample: u32 = if pcm16 { 2 } else { 4 };
+    let data_size = (num_samples as u32) * bytes_per_sample;
     let file_size = 36 + data_size;
 
     let mut buf = Vec::with_capacity(file_size as usize + 8);
@@ -102,21 +113,36 @@ fn write_wav(path: &str, sample_rate: u32, samples: &[f64]) {
     buf.extend_from_slice(&file_size.to_le_bytes());
     buf.extend_from_slice(b"WAVE");
 
-    // fmt chunk (IEEE float)
+    // fmt chunk
+    let (audio_format, bits) = if pcm16 { (1u16, 16u16) } else { (3u16, 32u16) };
     buf.extend_from_slice(b"fmt ");
     buf.extend_from_slice(&16u32.to_le_bytes()); // chunk size
-    buf.extend_from_slice(&3u16.to_le_bytes());  // audio format (3 = IEEE float)
+    buf.extend_from_slice(&audio_format.to_le_bytes()); // 1 = PCM, 3 = IEEE float
     buf.extend_from_slice(&1u16.to_le_bytes());  // num channels
     buf.extend_from_slice(&sample_rate.to_le_bytes());
-    buf.extend_from_slice(&(sample_rate * 4).to_le_bytes()); // byte rate
-    buf.extend_from_slice(&4u16.to_le_bytes());  // block align
-    buf.extend_from_slice(&32u16.to_le_bytes()); // bits per sample
+    buf.extend_from_slice(&(sample_rate * bytes_per_sample).to_le_bytes()); // byte rate
+    buf.extend_from_slice(&(bytes_per_sample as u16).to_le_bytes()); // block align
+    buf.extend_from_slice(&bits.to_le_bytes()); // bits per sample
 
     // data chunk
     buf.extend_from_slice(b"data");
     buf.extend_from_slice(&data_size.to_le_bytes());
-    for &s in samples {
-        buf.extend_from_slice(&(s as f32).to_le_bytes());
+    if pcm16 {
+        let mut clipped: u64 = 0;
+        for &s in samples {
+            let v = if s.is_finite() { s } else { 0.0 };
+            if v > 1.0 || v < -1.0 {
+                clipped += 1;
+            }
+            // Symmetric scaling by 32767 so +1.0 and -1.0 both land in range.
+            let q = (v.clamp(-1.0, 1.0) * 32767.0).round() as i16;
+            buf.extend_from_slice(&q.to_le_bytes());
+        }
+        eprintln!("DIAG:pcm16_clamped_samples={}", clipped);
+    } else {
+        for &s in samples {
+            buf.extend_from_slice(&(s as f32).to_le_bytes());
+        }
     }
 
     std::fs::write(path, &buf).unwrap_or_else(|e| {

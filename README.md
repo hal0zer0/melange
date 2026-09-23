@@ -313,7 +313,7 @@ Every subcommand has `--help`. The flags worth knowing about up front:
 | `--backward-euler` | compile | L-stable integration for high-gain feedback circuits |
 | `--noise off\|thermal\|shot\|full` | compile/simulate/analyze | Inject authentic circuit noise (thermal → +shot → +1/f, op-amp en/in, pentode partition); off by default |
 | `--noise-seed <u64>` | compile/simulate/analyze | Master noise seed; `0` = entropy from the system clock, nonzero = deterministic |
-| `--pot "Name=Value"` | analyze | Set pot value for the sweep. Value is in ohms and must sit inside the range `melange nodes` prints — out-of-range values are accepted silently today |
+| `--pot "Name=Value"` | analyze/simulate | Set pot value (repeatable). Value is in ohms and must sit inside the range `melange nodes` prints; out-of-range values are refused |
 | `--switch "Name=Pos"` | analyze/simulate | Set switch position (repeatable) |
 | `--input-audio file.wav` | simulate | Use a WAV file instead of a test tone |
 | `--no-ear-protection` | compile | Disable soft limiter (measurement only) |

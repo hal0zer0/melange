@@ -47,7 +47,11 @@ enum Commands {
         /// (builtin:circuit, source:circuit, URL, or local path)
         input: String,
 
-        /// Output Rust file or directory
+        /// Where to write the result. For `--format code` (the default) this is
+        /// a FILE, e.g. `src/circuit.rs`. For `--format plugin` it is the
+        /// DIRECTORY the generated Cargo project is created in, e.g.
+        /// `my-pedal-plugin` — passing a file path there builds a project named
+        /// after the file, nested wherever that file lives.
         #[arg(short, long)]
         output: PathBuf,
 
@@ -213,6 +217,10 @@ enum Commands {
         /// * active-set — post-NR constrained re-solve. KCL-consistent hard
         ///   clip. Fixes Klon-class cap-history corruption. Still produces
         ///   square-wave harmonics.{n}{n}
+        /// * active-set-be — active-set, plus a backward-Euler step on any
+        ///   sample where the clamp engages. L-stable across the clamp
+        ///   transition, so it does not ring the way trapezoidal does when a
+        ///   rail is hit. Aliases: active_set_be, activesetbe, be-on-clamp.{n}{n}
         /// * boyle-diodes — auto-inserted physical catch diodes anchored to
         ///   rail-offset voltage sources. Matches commercial SPICE Boyle
         ///   macromodels. Produces soft exponential knee — best for
@@ -522,6 +530,25 @@ enum Commands {
         #[arg(long = "probe-csv", value_name = "PATH")]
         probe_csv: Option<PathBuf>,
 
+        /// Write the output WAV as 16-bit signed PCM instead of the default
+        /// IEEE float32. Float32 (WAVE format 3) carries melange's full range
+        /// — the WAV holds VOLTS, which routinely exceed ±1 — but several
+        /// common readers refuse it outright (Python's stdlib `wave` raises
+        /// "unknown format: 3"). PCM16 cannot represent |v| > 1 V: those
+        /// samples are CLAMPED, and the clamped count is reported.
+        #[arg(long)]
+        pcm16: bool,
+
+        /// Set pot value: "Label=value" or "Rname=value" (e.g. "Drive=100k").
+        /// May be repeated. Mirrors `analyze --pot`: the value is a RESISTANCE
+        /// in ohms (engineering suffixes accepted) and is range-checked against
+        /// the pot's declared `.pot` min..max — an out-of-range setting is
+        /// refused, not clamped. For a `.wiper` label the value is a POSITION
+        /// in 0.0..=1.0 instead. `melange nodes <circuit>` lists every control,
+        /// its range and its default.
+        #[arg(long = "pot", value_name = "NAME=VALUE")]
+        pot_overrides: Vec<String>,
+
         /// Set switch position: "Label=pos" or index=pos (0-indexed, e.g.
         /// "Voice=3"). May be repeated. Applied at runtime via
         /// `state.set_switch_N(pos)` before the run — mirrors the generated
@@ -669,9 +696,16 @@ enum Commands {
         /// Input SPICE netlist file or circuit reference
         input: String,
 
-        /// Input node name
-        #[arg(short, long, default_value = "in")]
-        input_node: String,
+        /// Input node name. OPTIONAL for `dc-op`: a DC operating point is a
+        /// bias solve with the input at 0 V, so it does not need a signal
+        /// input. When given, the node's Thevenin source conductance is
+        /// stamped exactly as compile/simulate/analyze stamp it. When omitted,
+        /// `in` is used if the circuit has such a node (so decks that already
+        /// worked are unchanged), and otherwise no input port is stamped at
+        /// all. An explicitly-named node that does not exist is still an
+        /// error.
+        #[arg(short, long)]
+        input_node: Option<String>,
 
         /// Override input resistance (ohms). Default: 1Ω, or from
         /// .input_impedance directive. An explicit flag beats the directive,
@@ -920,7 +954,8 @@ fn main() -> Result<()> {
             let rail_mode = melange_solver::codegen::OpampRailMode::parse(&opamp_rail_mode)
                 .ok_or_else(|| {
                     anyhow::anyhow!(
-                        "Unknown --opamp-rail-mode '{}'. Valid values: auto, none, hard, active-set, boyle-diodes",
+                        "Unknown --opamp-rail-mode '{}'. Valid values: auto, none, hard, \
+                         active-set, active-set-be, boyle-diodes",
                         opamp_rail_mode
                     )
                 })?;
@@ -1111,6 +1146,8 @@ fn main() -> Result<()> {
             max_iter,
             probes,
             probe_csv,
+            pcm16,
+            pot_overrides,
             switch_overrides,
             inject_drives,
         } => {
@@ -1201,6 +1238,8 @@ fn main() -> Result<()> {
                     max_iter,
                     probes: &probes,
                     probe_csv: probe_csv_path.as_deref(),
+                    pcm16,
+                    pot_overrides: &pot_overrides,
                     switch_overrides: &switch_overrides,
                     inject_drives: &inject_drives,
                 },
@@ -1322,7 +1361,12 @@ fn main() -> Result<()> {
         } => {
             let circuit_source = circuits::resolve(&input)?;
             eprintln!("Resolved circuit: {}", circuit_source.name());
-            run_dc_op(&circuit_source, &input_node, input_resistance, &format)
+            run_dc_op(
+                &circuit_source,
+                input_node.as_deref(),
+                input_resistance,
+                &format,
+            )
         }
         Commands::Nodes { input } => {
             let circuit_source = circuits::resolve(&input)?;
@@ -1418,22 +1462,22 @@ fn count_nonlinear_devices(netlist: &melange_solver::parser::Netlist) -> (usize,
 #[allow(clippy::too_many_arguments)]
 /// Suggest similar node names when a lookup fails.
 /// Returns names that share a common prefix or contain the query as a substring.
-fn suggest_node_names<'a>(query: &str, available: impl Iterator<Item = &'a String>) -> Vec<String> {
+fn suggest_node_names<'a>(query: &str, available: impl Iterator<Item = &'a str>) -> Vec<String> {
     let q = query.to_ascii_lowercase();
     let mut suggestions: Vec<(usize, String)> = Vec::new();
     for name in available {
         let n = name.to_ascii_lowercase();
         // Exact case-insensitive match
         if n == q {
-            suggestions.push((0, name.clone()));
+            suggestions.push((0, name.to_string()));
         }
         // One is a prefix of the other
         else if n.starts_with(&q) || q.starts_with(&n) {
-            suggestions.push((1, name.clone()));
+            suggestions.push((1, name.to_string()));
         }
         // Substring match
         else if n.contains(&q) || q.contains(&n) {
-            suggestions.push((2, name.clone()));
+            suggestions.push((2, name.to_string()));
         }
         // Common audio I/O aliases
         else {
@@ -1444,12 +1488,59 @@ fn suggest_node_names<'a>(query: &str, available: impl Iterator<Item = &'a Strin
             let q_is_output = output_aliases.contains(&q.as_str());
             let n_is_output = output_aliases.contains(&n.as_str());
             if (q_is_input && n_is_input) || (q_is_output && n_is_output) {
-                suggestions.push((1, name.clone()));
+                suggestions.push((1, name.to_string()));
             }
         }
     }
     suggestions.sort_by_key(|(score, _)| *score);
     suggestions.into_iter().map(|(_, name)| name).collect()
+}
+
+/// One consistent rendering of the two system sizes every verb reports.
+///
+/// The same circuit legitimately has more than one "N", and printing them bare
+/// reads as a contradiction. On `examples/passive-eq1a.cir`:
+///   * `nodes`  lists 41 entries — ground plus 40 circuit nodes.
+///   * `dc-op`  reports N=40 — `MnaSystem::n`, circuit nodes with ground excluded.
+///   * `analyze` / `compile` / `simulate` report N=52 — `MnaSystem::n_aug`
+///     (== `DkKernel::n`): the 40 circuit nodes plus one augmented row per
+///     voltage source, VCVS, transformer coupling and inductor winding. That
+///     deck declares 1 voltage source and 11 inductors, so 40 + 12 = 52. Those
+///     rows carry algebraic constraints, not node voltages.
+/// M is the same number everywhere: the total nonlinear device dimension
+/// (1 per diode, 2 per BJT/JFET/MOSFET/triode/VCA, 3 per pentode).
+fn format_system_size(n_total: usize, n_circuit_nodes: usize, m: usize) -> String {
+    let extra = n_total.saturating_sub(n_circuit_nodes);
+    if extra == 0 {
+        format!("N={n_total} ({n_circuit_nodes} circuit nodes, ground excluded), M={m} (nonlinear device dimensions)")
+    } else {
+        format!(
+            "N={n_total} ({n_circuit_nodes} circuit nodes + {extra} constraint rows: voltage \
+             sources, inductor windings, transformer couplings), M={m} (nonlinear device dimensions)"
+        )
+    }
+}
+
+/// Frame the normal-path routing decision as information rather than a warning.
+///
+/// The router's own reason strings are written for maintainers and contain the
+/// words "unstable" and "ill-conditioned". A first-time user reading
+/// `solver: multi-transformer circuit (3 groups, DK K matrix unstable)` on the
+/// SHIPPED demo circuit reasonably concludes they broke something. They did
+/// not: melange builds the DK kernel on every route, measures it, and picks
+/// whichever of the two solvers can model that circuit correctly. Keep the
+/// maintainer detail verbatim — just say out loud that this line is normal.
+/// Mirrors the `info (normal):` prefix used in `melange_solver::pipeline`.
+fn format_route_info(route_label: &str, reason: &str) -> String {
+    format!(
+        "  info (normal): solver route = {route_label} \u{2014} {reason}\n\
+         \x20                (normal routing output, not a warning: melange measures the DK kernel \
+         it just built and\n\
+         \x20                 picks the solver that models this circuit correctly. \"unstable\" / \
+         \"ill-conditioned\" say\n\
+         \x20                 why the DK route was not the fit here \u{2014} nothing is wrong with \
+         the netlist.)"
+    )
 }
 
 /// Parse the `--bjt-fa` string into a [`melange_solver::codegen::BjtFaMode`].
@@ -1648,9 +1739,10 @@ fn compile_circuit_source(
     // Get input node index and add input conductance to G matrix
     // This models the source impedance of the input voltage source
     let input_node_raw = mna.node_map.get(input_node).copied().ok_or_else(|| {
-        let suggestions = suggest_node_names(input_node, mna.node_map.keys());
+        let suggestions =
+            suggest_node_names(input_node, mna.node_names_in_index_order().into_iter());
         let hint = if suggestions.is_empty() {
-            format!("Available: {:?}", mna.node_map.keys().collect::<Vec<_>>())
+            format!("Available: {:?}", mna.node_names_in_index_order())
         } else {
             format!("Did you mean: {}?", suggestions.join(", "))
         };
@@ -1692,9 +1784,9 @@ fn compile_circuit_source(
     let mut extra_input_resistances: Vec<f64> = Vec::new();
     for name in input_node_names_owned.iter().skip(1) {
         let raw = mna.node_map.get(name.as_str()).copied().ok_or_else(|| {
-            let suggestions = suggest_node_names(name, mna.node_map.keys());
+            let suggestions = suggest_node_names(name, mna.node_names_in_index_order().into_iter());
             let hint = if suggestions.is_empty() {
-                format!("Available: {:?}", mna.node_map.keys().collect::<Vec<_>>())
+                format!("Available: {:?}", mna.node_names_in_index_order())
             } else {
                 format!("Did you mean: {}?", suggestions.join(", "))
             };
@@ -1787,9 +1879,10 @@ fn compile_circuit_source(
                 .get(inj.node.as_str())
                 .copied()
                 .ok_or_else(|| {
-                    let suggestions = suggest_node_names(&inj.node, mna.node_map.keys());
+                    let suggestions =
+                        suggest_node_names(&inj.node, mna.node_names_in_index_order().into_iter());
                     let hint = if suggestions.is_empty() {
-                        format!("Available: {:?}", mna.node_map.keys().collect::<Vec<_>>())
+                        format!("Available: {:?}", mna.node_names_in_index_order())
                     } else {
                         format!("Did you mean: {}?", suggestions.join(", "))
                     };
@@ -1839,9 +1932,10 @@ fn compile_circuit_source(
                 .get(tap.node.as_str())
                 .copied()
                 .ok_or_else(|| {
-                    let suggestions = suggest_node_names(&tap.node, mna.node_map.keys());
+                    let suggestions =
+                        suggest_node_names(&tap.node, mna.node_names_in_index_order().into_iter());
                     let hint = if suggestions.is_empty() {
-                        format!("Available: {:?}", mna.node_map.keys().collect::<Vec<_>>())
+                        format!("Available: {:?}", mna.node_names_in_index_order())
                     } else {
                         format!("Did you mean: {}?", suggestions.join(", "))
                     };
@@ -2043,7 +2137,9 @@ fn compile_circuit_source(
     let has_inductors_compile = !mna.inductors.is_empty()
         || !mna.coupled_inductors.is_empty()
         || !mna.transformer_groups.is_empty();
-    println!("Step 3: Creating DK kernel...");
+    // Built on EVERY route, nodal included: the routing decision is read off
+    // this kernel. See the `simulate` path for the same note.
+    println!("Step 3: Creating DK kernel (routing analysis \u{2014} built on every route)...");
     // Build at the INTERNAL (oversampled) rate — the routing decision below
     // must see the same S/A_neg the generated solver will actually ship.
     // Building at the base host rate can miss trap/BE instability that only
@@ -2061,7 +2157,10 @@ fn compile_circuit_source(
     // auto-fall back to nodal solver which has no K diagonal constraint.
     let (kernel, dk_failed) = match kernel_result {
         Ok(k) => {
-            println!("  ✓ Matrix dimensions: N={}, M={}", k.n, k.m);
+            println!(
+                "  ✓ Matrix dimensions: {}",
+                format_system_size(k.n, k.n_nodes, k.m)
+            );
             (k, false)
         }
         Err(ref e) => {
@@ -2149,9 +2248,9 @@ fn compile_circuit_source(
     let mut output_node_indices = Vec::new();
     for name in &output_node_names {
         let raw = mna.node_map.get(*name).copied().ok_or_else(|| {
-            let suggestions = suggest_node_names(name, mna.node_map.keys());
+            let suggestions = suggest_node_names(name, mna.node_names_in_index_order().into_iter());
             let hint = if suggestions.is_empty() {
-                format!("Available: {:?}", mna.node_map.keys().collect::<Vec<_>>())
+                format!("Available: {:?}", mna.node_names_in_index_order())
             } else {
                 format!("Did you mean: {}?", suggestions.join(", "))
             };
@@ -2351,10 +2450,16 @@ fn compile_circuit_source(
     println!();
     println!("  Summary:");
     println!(
-        "    Circuit: {} nodes, {} nonlinear dimensions",
-        generated.n, generated.m
+        "    System: {}",
+        format_system_size(generated.n, mna.n, generated.m)
     );
-    println!("    Solver: {} ({})", solver_label, solver_reason);
+    // "(normal)" because the reason strings carry maintainer words like
+    // "unstable" / "ill-conditioned" that read as warnings — see
+    // `format_route_info`.
+    println!(
+        "    Solver: {} \u{2014} normal routing output, not a warning ({})",
+        solver_label, solver_reason
+    );
     // Non-negative K diagonal note, printed ONCE here (the low-level kernel
     // builder logs it at debug only — it is rebuilt several times per compile).
     // Informative when a transformer-coupled NFB circuit routes to nodal for a
@@ -2520,12 +2625,20 @@ fn compile_circuit_source(
             println!("  - melange-plugin for VST/AU/CLAP plugins");
             println!("  - Standalone integration in your own projects");
             println!();
+            // Suggest a DIRECTORY, not this file path. `--format plugin`
+            // treats --output as the project root; echoing back
+            // `.../src/circuit.rs` (which is what this hint used to do) sends
+            // the reader to `cargo new` a project inside another project's
+            // src/, named after a file. Derive a plain project name from the
+            // circuit instead.
+            let project_suggestion = suggest_plugin_project_dir(&circuit_source.name());
             println!("To generate a complete plugin project instead, use:");
             println!(
                 "  melange compile {} --output {} --format plugin",
                 circuit_source.name(),
-                output.display()
+                project_suggestion
             );
+            println!("  (with --format plugin, --output is the project DIRECTORY, not a file)");
         }
         OutputFormat::Plugin => {
             // Generate complete plugin project
@@ -2982,6 +3095,13 @@ struct SimulateOptions<'a> {
     max_iter: Option<usize>,
     probes: &'a [String],
     probe_csv: Option<&'a std::path::Path>,
+    /// `--pcm16`: write the output WAV as 16-bit PCM instead of float32.
+    /// File format only — the rendered samples and every reported figure are
+    /// computed in f64 before encoding.
+    pcm16: bool,
+    /// `--pot NAME=VALUE` specs; baked into the netlist's resistor values
+    /// before the MNA is built (same path `analyze` uses).
+    pot_overrides: &'a [String],
     /// `--switch NAME=POS` specs; resolved and applied at runtime via
     /// `state.set_switch_N(pos)` before the run (mirrors the plugin).
     switch_overrides: &'a [String],
@@ -3044,6 +3164,279 @@ fn parse_subsample_fire_mode(s: &str) -> Result<melange_solver::codegen::Subsamp
             s
         )
     })
+}
+
+/// A plausible project DIRECTORY name for the `--format plugin` hint.
+///
+/// Derived from the circuit, never from the `--format code` output path: that
+/// path is a `.rs` FILE (`.../src/circuit.rs` in the common regenerate loop),
+/// and `--format plugin` interprets `--output` as the project root. The old
+/// hint echoed the file path straight back, so following it verbatim tried to
+/// create a Cargo project inside another project's `src/`.
+///
+/// Falls back to `melange-plugin` when the source has no usable stem (a URL
+/// with a trailing slash, a builtin reference, …).
+fn suggest_plugin_project_dir(circuit_source_name: &str) -> String {
+    let stem = std::path::Path::new(circuit_source_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    // Builtin / source references look like "source:circuit" — take the tail.
+    let stem = stem.rsplit(':').next().unwrap_or(stem);
+    let cleaned: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches('-').to_string();
+    if cleaned.is_empty() {
+        "melange-plugin".to_string()
+    } else {
+        format!("{cleaned}-plugin")
+    }
+}
+
+/// Apply `--pot NAME=VALUE` overrides to a parsed netlist, then settle every
+/// pot that was NOT overridden onto its `.pot` default.
+///
+/// Shared by `analyze` and `simulate` so a knob position means the same thing
+/// in both. `simulate` gained `--pot` late: it had `--switch` but no `--pot`,
+/// so a distortion pedal's Drive control — which IS the circuit — could be
+/// characterised at any setting by `analyze` and heard at exactly one.
+///
+/// Name resolution for each SPEC:
+///   1. Try `.wiper` labels first. A wiper has two legs (cw/ccw) that co-vary
+///      with a position in 0.0..=1.0; the value is a POSITION and both legs are
+///      set accordingly.
+///   2. Fall back to `.pot` (by label or resistor name). The value is a
+///      RESISTANCE in ohms (engineering suffixes accepted, e.g. "200k"), and
+///      is range-checked against that pot's declared min..max.
+///
+/// `log` receives one line per applied override; callers route it to whichever
+/// stream carries their progress messages (`analyze` writes CSV on stdout, so
+/// it logs to stderr).
+///
+/// Minimum leg resistance (WIPER_MIN_LEG_R) must track the constant in
+/// `parser::expand_wipers`.
+fn apply_pot_overrides(
+    netlist: &mut melange_solver::parser::Netlist,
+    pot_overrides: &[String],
+    log: &dyn Fn(&str),
+) -> Result<()> {
+    const WIPER_MIN_LEG_R: f64 = 10.0;
+
+    let mut overridden_resistors: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
+    // First, apply explicit --pot overrides
+    for spec in pot_overrides {
+        let (name, val_str) = spec.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("Invalid --pot format '{}', expected NAME=VALUE", spec)
+        })?;
+
+        // Try wiper label first (the label on `.wiper` lives on the directive, not
+        // on the expanded PotDirective entries — those have label:None).
+        let wiper_match = netlist.wipers.iter().find(|w| {
+            w.label
+                .as_deref()
+                .map(|l| l.eq_ignore_ascii_case(name))
+                .unwrap_or(false)
+        });
+
+        if let Some(wiper) = wiper_match {
+            // Wiper: interpret value as position 0.0..=1.0
+            let pos = val_str.parse::<f64>().map_err(|_| {
+                anyhow::anyhow!(
+                    "Invalid wiper position '{}' in --pot {} (expected 0.0..=1.0)",
+                    val_str,
+                    spec
+                )
+            })?;
+            if !pos.is_finite() || !(0.0..=1.0).contains(&pos) {
+                anyhow::bail!(
+                    "Wiper position must be in 0.0..=1.0: {} (got {})",
+                    spec,
+                    pos
+                );
+            }
+            let r_total = wiper.total_resistance;
+            let range = r_total - 2.0 * WIPER_MIN_LEG_R;
+            // Matches parser::expand_wipers and plugin_template wiper_assignments.
+            let r_cw = (1.0 - pos) * range + WIPER_MIN_LEG_R;
+            let r_ccw = pos * range + WIPER_MIN_LEG_R;
+            let cw_name = wiper.resistor_cw.clone();
+            let ccw_name = wiper.resistor_ccw.clone();
+
+            for (resistor_name, r_val) in [(&cw_name, r_cw), (&ccw_name, r_ccw)] {
+                let found = netlist.elements.iter_mut().any(|e| {
+                    if let melange_solver::parser::Element::Resistor {
+                        name: n, value: v, ..
+                    } = e
+                    {
+                        if n.eq_ignore_ascii_case(resistor_name) {
+                            *v = r_val;
+                            return true;
+                        }
+                    }
+                    false
+                });
+                if !found {
+                    anyhow::bail!("Wiper resistor '{}' not found in netlist", resistor_name);
+                }
+                for p in netlist.pots.iter_mut() {
+                    if p.resistor_name.eq_ignore_ascii_case(resistor_name) {
+                        p.default_value = Some(r_val);
+                        break;
+                    }
+                }
+                overridden_resistors.insert(resistor_name.to_ascii_uppercase());
+            }
+            log(&format!(
+                "  Wiper override: {} pos={:.3} ({} = {:.1}Ω, {} = {:.1}Ω)",
+                name, pos, cw_name, r_cw, ccw_name, r_ccw,
+            ));
+            continue;
+        }
+
+        // Pot: interpret value as a resistance in ohms
+        let value = melange_solver::parser::parse_value(val_str).map_err(|_| {
+            anyhow::anyhow!("Invalid resistance value '{}' in --pot {}", val_str, spec)
+        })?;
+        if value <= 0.0 || !value.is_finite() {
+            anyhow::bail!("Pot value must be positive and finite: {}", spec);
+        }
+
+        // Match by pot label or resistor name
+        let matched = netlist
+            .pots
+            .iter()
+            .find(|p| {
+                p.label
+                    .as_deref()
+                    .map(|l| l.eq_ignore_ascii_case(name))
+                    .unwrap_or(false)
+                    || p.resistor_name.eq_ignore_ascii_case(name)
+            })
+            .ok_or_else(|| {
+                let mut available: Vec<String> = netlist
+                    .pots
+                    .iter()
+                    .map(|p| {
+                        format!(
+                            "{} ({})",
+                            p.resistor_name,
+                            p.label.as_deref().unwrap_or("no label")
+                        )
+                    })
+                    .collect();
+                for w in &netlist.wipers {
+                    if let Some(label) = &w.label {
+                        available.push(format!("[wiper] {} (pos 0.0..=1.0)", label));
+                    }
+                }
+                anyhow::anyhow!(
+                    "Pot '{}' not found. Available: {}",
+                    name,
+                    available.join(", ")
+                )
+            })?;
+        let resistor_name = matched.resistor_name.clone();
+        let (r_min, r_max) = (matched.min_value, matched.max_value);
+        let display_name = matched
+            .label
+            .clone()
+            .unwrap_or_else(|| matched.resistor_name.clone());
+
+        // REFUSE out of range — do not clamp. The `.pot` min..max IS the real
+        // knob's travel, and it is what the generated plugin's parameter maps
+        // onto. Accepting a value outside it silently characterises a position
+        // the plugin can never produce: on examples/passive-eq1a.cir,
+        // `--pot "LF Boost=1e9"` used to report +14.93 dB at 20 Hz, about 4 dB
+        // past anything the physical control can reach. Switch positions were
+        // already range-checked; pots were not. Refusing (rather than clamping)
+        // keeps the reported response and the requested setting the same thing.
+        if value < r_min || value > r_max {
+            anyhow::bail!(
+                "Pot '{}' value {} out of range ({}..{} ohm). \
+                 The range comes from the `.pot` directive for {} and is the travel of the \
+                 real control, so a value outside it describes a setting the generated plugin \
+                 cannot reach. Pick a value inside the range \
+                 (`melange nodes <circuit>` lists every pot's range and default).",
+                display_name,
+                format_ohms(value),
+                format_ohms(r_min),
+                format_ohms(r_max),
+                resistor_name,
+            );
+        }
+
+        // Update element value
+        let found = netlist.elements.iter_mut().any(|e| {
+            if let melange_solver::parser::Element::Resistor {
+                name: n, value: v, ..
+            } = e
+            {
+                if n.eq_ignore_ascii_case(&resistor_name) {
+                    *v = value;
+                    return true;
+                }
+            }
+            false
+        });
+        if !found {
+            anyhow::bail!(
+                "Resistor '{}' referenced by pot not found in netlist",
+                resistor_name
+            );
+        }
+        // Also update PotDirective.default_value so MNA pot_default_overrides
+        // doesn't override the element value we just set.
+        for p in netlist.pots.iter_mut() {
+            if p.resistor_name.eq_ignore_ascii_case(&resistor_name) {
+                p.default_value = Some(value);
+                break;
+            }
+        }
+        overridden_resistors.insert(resistor_name.to_ascii_uppercase());
+        log(&format!("  Pot override: {} = {:.1}", resistor_name, value));
+    }
+
+    // Apply .pot defaults for pots not explicitly overridden
+    for pot in &netlist.pots {
+        if overridden_resistors.contains(&pot.resistor_name.to_ascii_uppercase()) {
+            continue;
+        }
+        if let Some(default) = pot.default_value {
+            for e in netlist.elements.iter_mut() {
+                if let melange_solver::parser::Element::Resistor {
+                    name: n, value: v, ..
+                } = e
+                {
+                    if n.eq_ignore_ascii_case(&pot.resistor_name) {
+                        *v = default;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Render a resistance the way a netlist author writes it, so a range message
+/// reads like the `.pot` line it came from (`100..10000 ohm`, not `1e2..1e4`).
+fn format_ohms(r: f64) -> String {
+    if r >= 1.0 && r.fract() == 0.0 && r < 1e15 {
+        format!("{}", r as i64)
+    } else {
+        format!("{r}")
+    }
 }
 
 /// Resolve `--switch NAME=POS` specs into `(switch_idx, position)` pairs.
@@ -3144,10 +3537,11 @@ fn resolve_switch_overrides(
 ///     Every real audio circuit's own thermal noise floor is orders of magnitude
 ///     above that, and no converter can reproduce it — there is no legitimately
 ///     quiet circuit sitting in this band, only broken ones.
-///   * It is also the finest distinction `simulate` can honestly draw: the
-///     generated binary reports `DIAG:peak` with `{:.6}`, so anything under
-///     5e-7 V arrives here already rounded to `0.000000`. A tighter rule would
-///     claim a precision this path does not have.
+///   * The generated binary reports `DIAG:peak` in scientific notation
+///     (`{:.6e}`), so the real figure reaches this check however small it is —
+///     the old `{:.6}` fixed format flattened everything under 5e-7 V to
+///     `0.000000`, which made the threshold unmeasurable from here and the
+///     warning unable to quote anything but zero.
 ///
 /// A circuit that is quiet but working (a deep attenuator, a fader near the
 /// bottom, a stage biased into cutoff) still lands far above this, so the
@@ -3178,7 +3572,7 @@ fn silent_output_warning(
 ) -> String {
     let sample_count = samples.map_or_else(|| "every".to_string(), |n| format!("all {n}"));
     let mut msg = format!(
-        "WARNING: the rendered output is digital silence \u{2014} peak {peak:.6} V across \
+        "WARNING: the rendered output is digital silence \u{2014} peak {peak:.6e} V across \
          {sample_count} samples of node '{output_node}', below the {SILENT_OUTPUT_PEAK_V:e} V \
          floor melange treats as silence. The run completed and the WAV was written, but there \
          is nothing in the file to hear.\n"
@@ -3265,6 +3659,14 @@ fn simulate_circuit_source(
     }
     println!("  {} elements", netlist.elements.len());
 
+    // Apply `--pot NAME=VALUE` and settle un-overridden pots onto their `.pot`
+    // defaults, BEFORE the MNA is built — pot values are R values that flow
+    // into G at codegen time (unlike `--switch`, which is applied at runtime
+    // via `set_switch_N`). Exactly the path `analyze` uses, so a knob setting
+    // means the same thing whether you are looking at the response or
+    // listening to it.
+    apply_pot_overrides(&mut netlist, opts.pot_overrides, &|m| println!("{m}"))?;
+
     // Step 3: Build MNA
     println!("Step 2: Building MNA system...");
     let mut mna =
@@ -3285,7 +3687,7 @@ fn simulate_circuit_source(
                 anyhow::anyhow!(
                     ".inject node '{}' not found. Available: {:?}",
                     inj.node,
-                    mna.node_map.keys().collect::<Vec<_>>()
+                    mna.node_names_in_index_order()
                 )
             })?;
         if raw == 0 {
@@ -3352,7 +3754,7 @@ fn simulate_circuit_source(
         anyhow::anyhow!(
             "Input node '{}' not found. Available: {:?}",
             opts.input_node,
-            mna.node_map.keys().collect::<Vec<_>>()
+            mna.node_names_in_index_order()
         )
     })?;
     if input_node_raw == 0 {
@@ -3364,7 +3766,7 @@ fn simulate_circuit_source(
         anyhow::anyhow!(
             "Output node '{}' not found. Available: {:?}",
             opts.output_node,
-            mna.node_map.keys().collect::<Vec<_>>()
+            mna.node_names_in_index_order()
         )
     })?;
     if output_node_raw == 0 {
@@ -3385,7 +3787,7 @@ fn simulate_circuit_source(
                 anyhow::anyhow!(
                     "Probe node '{}' not found. Available: {:?}",
                     probe_name,
-                    mna.node_map.keys().collect::<Vec<_>>()
+                    mna.node_names_in_index_order()
                 )
             })?;
         if raw == 0 {
@@ -3496,7 +3898,11 @@ fn simulate_circuit_source(
         || !mna.coupled_inductors.is_empty()
         || !mna.transformer_groups.is_empty();
 
-    println!("Step 3: Building DK kernel...");
+    // The DK kernel is built on EVERY route, including nodal: the routing
+    // decision below is read off this kernel (S/A_neg spectral radius, K
+    // conditioning). Saying plain "Building DK kernel" and then "Solver: nodal"
+    // a few lines later reads as a contradiction; it is not one.
+    println!("Step 3: Building DK kernel (routing analysis \u{2014} built on every route)...");
     let mut dk_failed = false;
     // Build at the INTERNAL (oversampled) rate so the routing decision below
     // sees the same S/A_neg the generated solver ships — see the compile
@@ -3577,7 +3983,10 @@ fn simulate_circuit_source(
             }
         }
     };
-    println!("  N={}, M={}", kernel.n, kernel.m);
+    println!(
+        "  {}",
+        format_system_size(kernel.n, kernel.n_nodes, kernel.m)
+    );
 
     // Route: DK or nodal
     let decision = routing::auto_route(&kernel, &mna, dk_failed);
@@ -3596,9 +4005,8 @@ fn simulate_circuit_source(
         _ => decision.route == routing::SolverRoute::Nodal,
     };
     println!(
-        "  Solver: {} ({})",
-        if use_nodal { "nodal" } else { "DK" },
-        decision.reason
+        "{}",
+        format_route_info(if use_nodal { "nodal" } else { "DK" }, &decision.reason)
     );
     // Non-negative K diagonal note, printed ONCE (kernel builder logs it at
     // debug only — it is rebuilt several times per run). See compile summary.
@@ -3713,7 +4121,9 @@ fn simulate_circuit_source(
         .collect();
     let simulate_main = codegen_runner::generate_simulate_main(
         opts.sample_rate,
-        &[], // pot overrides (future)
+        // `--pot` is baked into the netlist's R values before the MNA is built
+        // (see `apply_pot_overrides`), so there is nothing to set at runtime.
+        &[],
         &switch_calls,
         if opts.input_audio.is_none() {
             Some(opts.amplitude)
@@ -3733,6 +4143,7 @@ fn simulate_circuit_source(
             .copied()
             .filter(|f| generated.code.contains(f))
             .collect::<Vec<&str>>(),
+        opts.pcm16,
     );
     let full_source = format!("{}\n{}", generated.code, simulate_main);
 
@@ -3929,187 +4340,10 @@ fn analyze_freq_response(
             .with_context(|| "Failed to expand subcircuits")?;
     }
 
-    // Apply pot overrides: modify element values in netlist before building MNA.
-    // Also apply .pot defaults for any pot NOT overridden (so analyze uses "flat" defaults).
-    //
-    // Name resolution for each --pot SPEC:
-    //   1. Try .wiper labels first. A wiper has two legs (cw/ccw) that co-vary with
-    //      a position in 0.0..=1.0; the value is interpreted as a position, and
-    //      both legs are set accordingly.
-    //   2. Fall back to .pot (by label or resistor name). Value is a resistance in
-    //      ohms (accepts engineering suffixes, e.g. "200k").
-    //
-    // Minimum leg resistance (MIN_LEG_R) must track the constant in parser::expand_wipers.
-    const WIPER_MIN_LEG_R: f64 = 10.0;
-    {
-        let mut overridden_resistors: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-
-        // First, apply explicit --pot overrides
-        for spec in pot_overrides {
-            let (name, val_str) = spec.split_once('=').ok_or_else(|| {
-                anyhow::anyhow!("Invalid --pot format '{}', expected NAME=VALUE", spec)
-            })?;
-
-            // Try wiper label first (the label on `.wiper` lives on the directive, not
-            // on the expanded PotDirective entries — those have label:None).
-            let wiper_match = netlist.wipers.iter().find(|w| {
-                w.label
-                    .as_deref()
-                    .map(|l| l.eq_ignore_ascii_case(name))
-                    .unwrap_or(false)
-            });
-
-            if let Some(wiper) = wiper_match {
-                // Wiper: interpret value as position 0.0..=1.0
-                let pos = val_str.parse::<f64>().map_err(|_| {
-                    anyhow::anyhow!(
-                        "Invalid wiper position '{}' in --pot {} (expected 0.0..=1.0)",
-                        val_str,
-                        spec
-                    )
-                })?;
-                if !pos.is_finite() || !(0.0..=1.0).contains(&pos) {
-                    anyhow::bail!(
-                        "Wiper position must be in 0.0..=1.0: {} (got {})",
-                        spec,
-                        pos
-                    );
-                }
-                let r_total = wiper.total_resistance;
-                let range = r_total - 2.0 * WIPER_MIN_LEG_R;
-                // Matches parser::expand_wipers and plugin_template wiper_assignments.
-                let r_cw = (1.0 - pos) * range + WIPER_MIN_LEG_R;
-                let r_ccw = pos * range + WIPER_MIN_LEG_R;
-                let cw_name = wiper.resistor_cw.clone();
-                let ccw_name = wiper.resistor_ccw.clone();
-
-                for (resistor_name, r_val) in [(&cw_name, r_cw), (&ccw_name, r_ccw)] {
-                    let found = netlist.elements.iter_mut().any(|e| {
-                        if let melange_solver::parser::Element::Resistor {
-                            name: n, value: v, ..
-                        } = e
-                        {
-                            if n.eq_ignore_ascii_case(resistor_name) {
-                                *v = r_val;
-                                return true;
-                            }
-                        }
-                        false
-                    });
-                    if !found {
-                        anyhow::bail!("Wiper resistor '{}' not found in netlist", resistor_name);
-                    }
-                    for p in netlist.pots.iter_mut() {
-                        if p.resistor_name.eq_ignore_ascii_case(resistor_name) {
-                            p.default_value = Some(r_val);
-                            break;
-                        }
-                    }
-                    overridden_resistors.insert(resistor_name.to_ascii_uppercase());
-                }
-                eprintln!(
-                    "  Wiper override: {} pos={:.3} ({} = {:.1}Ω, {} = {:.1}Ω)",
-                    name, pos, cw_name, r_cw, ccw_name, r_ccw,
-                );
-                continue;
-            }
-
-            // Pot: interpret value as a resistance in ohms
-            let value = melange_solver::parser::parse_value(val_str).map_err(|_| {
-                anyhow::anyhow!("Invalid resistance value '{}' in --pot {}", val_str, spec)
-            })?;
-            if value <= 0.0 || !value.is_finite() {
-                anyhow::bail!("Pot value must be positive and finite: {}", spec);
-            }
-
-            // Match by pot label or resistor name
-            let resistor_name = netlist
-                .pots
-                .iter()
-                .find(|p| {
-                    p.label
-                        .as_deref()
-                        .map(|l| l.eq_ignore_ascii_case(name))
-                        .unwrap_or(false)
-                        || p.resistor_name.eq_ignore_ascii_case(name)
-                })
-                .map(|p| p.resistor_name.clone())
-                .ok_or_else(|| {
-                    let mut available: Vec<String> = netlist
-                        .pots
-                        .iter()
-                        .map(|p| {
-                            format!(
-                                "{} ({})",
-                                p.resistor_name,
-                                p.label.as_deref().unwrap_or("no label")
-                            )
-                        })
-                        .collect();
-                    for w in &netlist.wipers {
-                        if let Some(label) = &w.label {
-                            available.push(format!("[wiper] {} (pos 0.0..=1.0)", label));
-                        }
-                    }
-                    anyhow::anyhow!(
-                        "Pot '{}' not found. Available: {}",
-                        name,
-                        available.join(", ")
-                    )
-                })?;
-
-            // Update element value
-            let found = netlist.elements.iter_mut().any(|e| {
-                if let melange_solver::parser::Element::Resistor {
-                    name: n, value: v, ..
-                } = e
-                {
-                    if n.eq_ignore_ascii_case(&resistor_name) {
-                        *v = value;
-                        return true;
-                    }
-                }
-                false
-            });
-            if !found {
-                anyhow::bail!(
-                    "Resistor '{}' referenced by pot not found in netlist",
-                    resistor_name
-                );
-            }
-            // Also update PotDirective.default_value so MNA pot_default_overrides
-            // doesn't override the element value we just set.
-            for p in netlist.pots.iter_mut() {
-                if p.resistor_name.eq_ignore_ascii_case(&resistor_name) {
-                    p.default_value = Some(value);
-                    break;
-                }
-            }
-            overridden_resistors.insert(resistor_name.to_ascii_uppercase());
-            eprintln!("  Pot override: {} = {:.1}", resistor_name, value);
-        }
-
-        // Apply .pot defaults for pots not explicitly overridden
-        for pot in &netlist.pots {
-            if overridden_resistors.contains(&pot.resistor_name.to_ascii_uppercase()) {
-                continue;
-            }
-            if let Some(default) = pot.default_value {
-                for e in netlist.elements.iter_mut() {
-                    if let melange_solver::parser::Element::Resistor {
-                        name: n, value: v, ..
-                    } = e
-                    {
-                        if n.eq_ignore_ascii_case(&pot.resistor_name) {
-                            *v = default;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // Apply pot overrides (and settle un-overridden pots onto their `.pot`
+    // defaults) before building the MNA. Shared with `simulate` so one knob
+    // setting means the same thing in both verbs — see `apply_pot_overrides`.
+    apply_pot_overrides(&mut netlist, pot_overrides, &|m| eprintln!("{m}"))?;
 
     // Keep the netlist at position-0 element values and apply overrides at
     // runtime via `state.set_switch_N(position)` (see `switch_calls` below).
@@ -4123,7 +4357,7 @@ fn analyze_freq_response(
         anyhow::anyhow!(
             "Input node '{}' not found. Available: {:?}",
             input_node_name,
-            mna.node_map.keys().collect::<Vec<_>>()
+            mna.node_names_in_index_order()
         )
     })?;
     if input_node_raw == 0 {
@@ -4135,7 +4369,7 @@ fn analyze_freq_response(
         anyhow::anyhow!(
             "Output node '{}' not found. Available: {:?}",
             output_node_name,
-            mna.node_map.keys().collect::<Vec<_>>()
+            mna.node_names_in_index_order()
         )
     })?;
     if output_node_raw == 0 {
@@ -4337,8 +4571,12 @@ fn analyze_freq_response(
         decision.reason.clone()
     };
     eprintln!(
-        "  N={}, M={}, solver: {}",
-        kernel.n, kernel.m, solver_reason
+        "  {}",
+        format_system_size(kernel.n, kernel.n_nodes, kernel.m)
+    );
+    eprintln!(
+        "{}",
+        format_route_info(if use_nodal { "nodal" } else { "DK" }, &solver_reason)
     );
 
     if use_nodal {
@@ -4478,12 +4716,24 @@ fn analyze_freq_response(
         eprintln!("{}", line);
     }
 
-    // Output CSV
+    // Output CSV.
+    //
+    // The two streams are already separated: every progress/diagnostic line
+    // above is stderr, and stdout carries nothing but the CSV, so
+    // `melange analyze ... > response.csv` yields a clean file with no
+    // hand-stripping. On a terminal both land in the same scrollback and it
+    // looks like one interleaved dump, which is what makes people reach for a
+    // separator flag — so say where the CSV went instead.
     if let Some(out_path) = output_file {
         std::fs::write(out_path, stdout.as_bytes())
             .with_context(|| format!("Failed to write: {}", out_path.display()))?;
         eprintln!("  Results written to: {}", out_path.display());
     } else {
+        eprintln!(
+            "  {} CSV rows follow on stdout (everything above is stderr). \
+             Capture them with `-o FILE`, or redirect: `melange analyze ... > response.csv`.",
+            stdout.lines().count().saturating_sub(1)
+        );
         print!("{}", stdout);
     }
 
@@ -5200,7 +5450,23 @@ fn list_nodes_source(circuit_source: &circuits::CircuitSource) -> Result<()> {
 
     let mna = MnaSystem::from_netlist(&netlist).with_context(|| "Failed to build MNA system")?;
 
-    println!("Nodes in circuit:");
+    // Unrecognized `.model` keys. `compile`/`simulate`/`analyze` hard-error on
+    // these; `nodes` was the one inspection command that stayed silent, so a
+    // deck could be read here, look clean, and then be refused downstream.
+    // Warn (never error) — `nodes` exists to show what a deck contains, and
+    // refusing to list a pot range because a diode card has a typo'd key would
+    // be the worse trade. See `model_params::warn_unknown_keys_on_referenced_models`.
+    melange_solver::model_params::warn_unknown_keys_on_referenced_models(&netlist);
+
+    // Say the count out loud AND say what it counts: `nodes` lists ground,
+    // `dc-op`'s N does not, and `analyze`/`compile`'s N adds the augmented
+    // constraint rows on top. Three legitimate numbers for one circuit —
+    // see `format_system_size`.
+    println!(
+        "Nodes in circuit: {} entries (ground + {} circuit nodes)",
+        mna.n + 1,
+        mna.n
+    );
     println!("  (0) GND - Ground reference");
 
     let mut nodes: Vec<_> = mna.node_map.iter().collect();
@@ -5294,13 +5560,13 @@ fn dc_op_row_name(row: usize, idx_to_name: &[String], n: usize) -> String {
 
 fn run_dc_op(
     circuit_source: &circuits::CircuitSource,
-    input_node_name: &str,
+    input_node_name: Option<&str>,
     input_resistance_flag: Option<f64>,
     format: &str,
 ) -> Result<()> {
     // Match parse-time node normalization (lowercase, gnd→0).
-    let input_node_owned = melange_solver::parser::normalize_node_name(input_node_name);
-    let input_node_name = input_node_owned.as_str();
+    let requested_input: Option<String> =
+        input_node_name.map(melange_solver::parser::normalize_node_name);
     use melange_solver::codegen::ir::CircuitIR;
     use melange_solver::dc_op::{solve_dc_operating_point, DcOpConfig};
     use melange_solver::mna::MnaSystem;
@@ -5340,26 +5606,45 @@ fn run_dc_op(
     let mut mna =
         MnaSystem::from_netlist(&netlist).with_context(|| "Failed to build MNA system")?;
 
-    let input_node_raw = mna
-        .node_map
-        .get(input_node_name)
-        .copied()
-        .with_context(|| {
-            let available: Vec<_> = mna.node_map.keys().collect();
-            format!(
-                "Input node '{}' not found. Available: {:?}",
-                input_node_name, available
-            )
-        })?;
-    if input_node_raw == 0 {
-        anyhow::bail!("Input node cannot be ground (0). Please specify a non-ground node.");
-    }
-    let input_node_idx = input_node_raw - 1;
+    // Resolve the input port. `-i` is OPTIONAL here: a DC operating point is a
+    // bias solve with the input held at 0 V, so it does not need a signal
+    // input at all. Refusing to report bias voltages because the deck has no
+    // node literally spelled `in` was the wrong shape of error.
+    //
+    //   * `-i NAME` given  -> must exist (hard error, listing the nodes)
+    //   * `-i` omitted     -> use `in` if the circuit has it (decks that
+    //                         already worked keep their exact numbers), else
+    //                         stamp no input port at all.
+    let mut input_port_absent = false;
+    let input_node_idx: Option<usize> = match requested_input.as_deref() {
+        Some(name) => {
+            let raw = mna.node_map.get(name).copied().with_context(|| {
+                let available = mna.node_names_in_index_order();
+                format!(
+                    "Input node '{}' not found. Available: {:?}",
+                    name, available
+                )
+            })?;
+            if raw == 0 {
+                anyhow::bail!("Input node cannot be ground (0). Please specify a non-ground node.");
+            }
+            Some(raw - 1)
+        }
+        None => match mna.node_map.get("in").copied() {
+            Some(0) | None => {
+                input_port_absent = true;
+                None
+            }
+            Some(raw) => Some(raw - 1),
+        },
+    };
 
     // Stamp input conductance
     let input_conductance = 1.0 / r_in;
-    if input_node_idx < mna.n {
-        mna.g[input_node_idx][input_node_idx] += input_conductance;
+    if let Some(idx) = input_node_idx {
+        if idx < mna.n {
+            mna.g[idx][idx] += input_conductance;
+        }
     }
 
     // Build device slots and stamp junction caps
@@ -5370,7 +5655,10 @@ fn run_dc_op(
     }
 
     let dc_config = DcOpConfig {
-        input_node: input_node_idx,
+        // `usize::MAX` is deliberately out of range: `solve_dc_operating_point`
+        // stamps the input conductance only when `input_node < n`, so an
+        // absent port stamps nothing — matching the `mna.g` stamp skipped above.
+        input_node: input_node_idx.unwrap_or(usize::MAX),
         input_resistance: r_in,
         ..DcOpConfig::default()
     };
@@ -5451,7 +5739,13 @@ fn run_dc_op(
     } else {
         // Human-readable output
         eprintln!("melange dc-op");
-        eprintln!("  N={}, M={}", mna.n, mna.m);
+        eprintln!("  {}", format_system_size(mna.n, mna.n, mna.m));
+        if input_port_absent {
+            eprintln!(
+                "  Input port: none (no -i given and this circuit has no node named 'in'); \
+                 solving the unforced bias point."
+            );
+        }
         eprintln!(
             "  Converged: {} ({:?}, {} iterations)",
             result.converged, result.method, result.iterations
@@ -5671,7 +5965,9 @@ mod silent_output_tests {
         assert!(output_is_silent(1e-300));
         assert!(output_is_silent(-1e-300));
         assert!(output_is_silent(f64::MIN_POSITIVE));
-        // Anything the generated binary prints as `0.000000` must be caught.
+        // Under the old `{:.6}` DIAG format everything here arrived as
+        // `0.000000`; with `{:.6e}` the real magnitude survives the round trip
+        // and the threshold is what decides, not the printf width.
         assert!(output_is_silent(4.9e-7));
     }
 
@@ -5699,6 +5995,15 @@ mod silent_output_tests {
     /// echo back the output node they actually passed.
     #[test]
     fn warning_names_the_actionable_causes() {
+        // A peak far below the old `{:.6}` print resolution must be REPORTED,
+        // not flattened to "0.000000" — that was the whole defect.
+        let tiny = silent_output_warning(3.7e-9, "out", Some(48000), Some(12.0));
+        assert!(
+            tiny.contains("3.700000e-9"),
+            "warning must quote the real peak: {tiny}"
+        );
+        assert!(!tiny.contains("0.000000 V"), "{tiny}");
+
         let msg = silent_output_warning(0.0, "out", Some(48000), Some(12.0));
         for needle in [
             "digital silence",
@@ -5740,6 +6045,28 @@ mod silent_output_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `--format plugin` hint must name a DIRECTORY derived from the
+    /// circuit, never echo back the `--format code` output FILE.
+    #[test]
+    fn plugin_project_suggestion_is_a_directory_name() {
+        assert_eq!(suggest_plugin_project_dir("od.cir"), "od-plugin");
+        assert_eq!(
+            suggest_plugin_project_dir("/home/u/decks/passive-eq1a.cir"),
+            "passive-eq1a-plugin"
+        );
+        assert_eq!(
+            suggest_plugin_project_dir("builtin:passive-eq1a"),
+            "passive-eq1a-plugin"
+        );
+        // Never a path, never an extension.
+        let s = suggest_plugin_project_dir("/tmp/proj/src/circuit.rs");
+        assert!(!s.contains('/'), "{s}");
+        assert!(!s.contains('.'), "{s}");
+        // Nothing usable -> a safe generic name rather than an empty --output.
+        assert_eq!(suggest_plugin_project_dir("/"), "melange-plugin");
+        assert_eq!(suggest_plugin_project_dir(""), "melange-plugin");
+    }
 
     #[test]
     fn test_cli_parse() {

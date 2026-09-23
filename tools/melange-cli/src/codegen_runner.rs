@@ -225,6 +225,7 @@ fn hash_source(source: &str) -> u64 {
 ///
 /// The binary reads input WAV from argv[1], writes output WAV to argv[2].
 /// Supports both WAV file input and sine test tone generation.
+#[allow(clippy::too_many_arguments)]
 pub fn generate_simulate_main(
     sample_rate: f64,
     pot_calls: &[String],
@@ -237,6 +238,10 @@ pub fn generate_simulate_main(
     inject_driven: &[(usize, InjectSource)],
     num_inject: usize,
     extra_diag_counters: &[&str],
+    // `--pcm16`: write 16-bit signed PCM instead of the default IEEE float32.
+    // Affects the FILE FORMAT only; the rendered samples are identical, and
+    // the DIAG figures are computed from the f64 buffer before encoding.
+    pcm16: bool,
 ) -> String {
     // Optional `CircuitState` u64 diagnostic counters that exist only on some
     // builds (e.g. `diag_subsample_fire_count` on glow nodal-Schur decks).
@@ -267,6 +272,10 @@ pub fn generate_simulate_main(
 
     // Embed minimal WAV reader/writer
     let wav_code = include_str!("wav_embed.rs.inc");
+    // Baked into the generated source (not passed at runtime) so the binary
+    // cache keys on it — a float32 build and a PCM16 build are different
+    // binaries, not one binary reused with the wrong writer.
+    let pcm16_literal = if pcm16 { "true" } else { "false" };
 
     // Probe plumbing. When probe_names is empty the generated body is
     // byte-identical to the pre-feature version (no CSV writer, no argv[3]).
@@ -430,12 +439,16 @@ fn main() {{
         }}
     }}
 
-    write_wav(output_path, sr as u32, &output);
+    write_wav(output_path, sr as u32, &output, {pcm16_literal});
 {probe_close}
     // Diagnostics
     let peak = output.iter().map(|s| s.abs()).fold(0.0f64, f64::max);
     eprintln!("DIAG:samples={{}}", output.len());
-    eprintln!("DIAG:peak={{:.6}}", peak);
+    // Scientific notation, not {{:.6}}: fixed 6 decimals cannot express a peak
+    // below ~5e-7 V, so every genuinely tiny output arrived at the parent as
+    // "0.000000" and the silence warning could only ever quote that. The real
+    // figure is what tells a broken-wiring zero apart from a very quiet stage.
+    eprintln!("DIAG:peak={{:.6e}}", peak);
     eprintln!("DIAG:nr_max_iter_count={{}}", state.diag_nr_max_iter_count);
     eprintln!("DIAG:substep_count={{}}", state.diag_substep_count);
     eprintln!("DIAG:nan_reset_count={{}}", state.diag_nan_reset_count);

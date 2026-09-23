@@ -759,7 +759,7 @@ fn test_g10_oscillator_default_routing_is_bounded() {
     let _ = std::fs::remove_file(&cir);
 
     assert!(
-        stdout.contains("Solver: nodal"),
+        stdout.contains("solver route = nodal"),
         "default routing must select nodal for this circuit (trap-unstable at the \
          192 kHz internal rate) — DK Schur has no full-LU NR rescue for the ensuing \
          divergence. Full stdout:\n{stdout}"
@@ -896,7 +896,7 @@ fn test_ic_seeded_astable_stays_bounded_at_os4() {
     let _ = std::fs::remove_file(&cir);
 
     assert!(
-        stdout.contains("Solver: DK"),
+        stdout.contains("solver route = DK"),
         "expected this circuit to route DK Schur (not the nodal-routing bug \
          pinned elsewhere) — full stdout:\n{stdout}"
     );

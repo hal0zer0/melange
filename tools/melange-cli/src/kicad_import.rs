@@ -49,6 +49,23 @@ pub fn import_kicad(
     Ok(())
 }
 
+/// Leading integer of a `kicad-cli --version` string, e.g. `"7.0.11"` -> 7,
+/// `"8.0.1-unknown-abc"` -> 8. `None` when the output does not start with a
+/// number, in which case the caller must NOT block: an unparseable banner from
+/// some future or patched build is not evidence that the tool is too old.
+fn kicad_cli_major_version(ver: &str) -> Option<u32> {
+    let digits: String = ver
+        .trim()
+        .trim_start_matches(|c: char| !c.is_ascii_digit())
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
+}
+
 /// Import directly from a .kicad_sch schematic file via kicad-cli.
 fn import_from_schematic(input: &Path, output: &Path, _format: &ImportFormat) -> Result<()> {
     // Check if kicad-cli is available
@@ -59,8 +76,30 @@ fn import_from_schematic(input: &Path, output: &Path, _format: &ImportFormat) ->
     match version_check {
         Ok(out) if out.status.success() => {
             let ver = String::from_utf8_lossy(&out.stdout);
+            let ver = ver.trim().to_string();
             println!("melange import (KiCad schematic → XML → Melange .cir)");
-            println!("  kicad-cli: {}", ver.trim());
+            println!("  kicad-cli: {}", ver);
+            // Gate on the version we just printed. kicad-cli 7 cannot open a
+            // KiCad 8 `.kicad_sch` (file format version 20231120) and reports
+            // only "Failed to load schematic file" — which a user reasonably
+            // reads as "my schematic is broken" and answers by redrawing it.
+            // We already know whose fault it is; say so.
+            if let Some(major) = kicad_cli_major_version(&ver) {
+                if major < 8 {
+                    bail!(
+                        "kicad-cli {ver} is too old for melange's schematic import, which needs \
+                         KiCad 8 or newer.\n\
+                         \x20 Why: `.kicad_sch` files melange targets carry file format version \
+                         20231120 (KiCad 8). kicad-cli 7 cannot open them and reports only \
+                         \"Failed to load schematic file\" — the schematic is fine, the tool is \
+                         too old.\n\
+                         \x20 Fix: install KiCad 8+, or, from a machine that has it, export the \
+                         intermediate netlist and import that instead:\n    \
+                         kicad-cli sch export python-bom -o circuit.xml circuit.kicad_sch\n    \
+                         melange import circuit.xml -o circuit.cir"
+                    );
+                }
+            }
         }
         _ => {
             bail!(
@@ -853,6 +892,21 @@ fn format_value(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn kicad_cli_major_version_parses_real_banners() {
+        use super::kicad_cli_major_version;
+        // The version actually installed on the machine that hit this wall.
+        assert_eq!(kicad_cli_major_version("7.0.11"), Some(7));
+        assert_eq!(kicad_cli_major_version("8.0.1"), Some(8));
+        assert_eq!(kicad_cli_major_version("  9.0.0-rc1  "), Some(9));
+        assert_eq!(kicad_cli_major_version("KiCad 8.0.4"), Some(8));
+        assert_eq!(kicad_cli_major_version("10.0.0"), Some(10));
+        // Unparseable must NOT be treated as old — the caller only blocks on a
+        // version it could actually read.
+        assert_eq!(kicad_cli_major_version(""), None);
+        assert_eq!(kicad_cli_major_version("unknown"), None);
+    }
+
     use super::*;
 
     // Regression guard for the quick-xml 0.41 migration (0.1.1). Its
