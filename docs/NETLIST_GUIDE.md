@@ -405,8 +405,11 @@ R1 vcc plate 100k KF=1e-10 AF=2.0
 
 `KF=0` (the default) means no flicker source is generated — a circuit whose
 models carry no noise parameters produces byte-identical code to a build without
-them. Note that resistor `KF`/`AF` and the `.mismatch`/`.tolerance` directives
-break ngspice parity; strip them before `melange validate`. See the
+them. Note that resistor `KF`/`AF` breaks ngspice parity; strip it before
+`melange validate`. The `.mismatch`/`.tolerance` directives do **not** need
+stripping — `melange validate` turns them off on melange's side automatically,
+compares nominal against nominal, and names the disabled directives and the
+unexercised seed on its PASSED/FAILED line. See the
 [Circuit Noise Guide](NOISE_GUIDE.md) for the full per-device coverage table,
 the runtime API, level calibration, and worked examples.
 

@@ -9598,6 +9598,104 @@ C1 out 0 1u
     assert_eq!(is1, 2.52e-9);
 }
 
+/// The `.mismatch` half of the jitter arithmetic — the codegen apply site, the
+/// twin of `parser::tests::tolerance_draw_matches_nominal_times_one_plus_tol_u`.
+///
+/// Before 2026-09-22 the only `.mismatch` coverage was the byte-identical guard
+/// above (the directive ABSENT) and per-device *inequality* checks (two diodes
+/// differ). Neither says the emitted constant is the RIGHT number. This does:
+/// `emitted = nominal · (1 + tol · u)`, with `u` derived independently from an
+/// FNV-64 + SplitMix64 reimplementation outside this crate rather than read out
+/// of a `mismatch_draw` run.
+///
+/// `melange validate` cannot cover this: it compiles the melange side with unit
+/// variation disabled so it compares nominal against nominal, and ngspice has
+/// no concept of the draw to grade it against.
+#[test]
+fn mismatch_draw_matches_nominal_times_one_plus_tol_u() {
+    // Independently derived: mismatch_draw(4142, "D1", "IS").
+    const U_D1_IS: f64 = -0.60386639704418;
+
+    const SPICE: &str = "\
+Mismatch Draw
+R1 in out 1k
+D1 out 0 D1N4148
+C1 out 0 1u
+.seed 4142
+.mismatch D IS=0.05
+.model D1N4148 D(IS=2.52e-9 N=1.752)
+";
+    let (code, _, _, _) = generate_code(SPICE);
+    let is0 = extract_const_f64(&code, "DEVICE_0_IS");
+    assert_eq!(is0, 2.52e-9 * (1.0 + 0.05 * U_D1_IS));
+    // Non-trivial: the constant MOVED. A silently-skipped jitter path, or a
+    // tolerance read as zero, cannot pass this.
+    assert!(
+        ((is0 - 2.52e-9) / 2.52e-9).abs() > 0.01,
+        "emitted IS barely moved: {is0:e}"
+    );
+    // `N` is not listed on the `.mismatch` card, so it is a pure pass-through:
+    // bit-identical to the same deck with no `.mismatch` at all.
+    const NOMINAL: &str = "\
+Mismatch Draw
+R1 in out 1k
+D1 out 0 D1N4148
+C1 out 0 1u
+.model D1N4148 D(IS=2.52e-9 N=1.752)
+";
+    let (nominal_code, _, _, _) = generate_code(NOMINAL);
+    assert_eq!(
+        extract_const_f64(&code, "DEVICE_0_N_VT"),
+        extract_const_f64(&nominal_code, "DEVICE_0_N_VT")
+    );
+    assert_eq!(extract_const_f64(&nominal_code, "DEVICE_0_IS"), 2.52e-9);
+}
+
+/// `ParseOptions::disable_unit_variation` reaches the CODEGEN apply site too —
+/// this is the `.mismatch` half of the switch `melange validate` sets, and the
+/// reason it lives on the `Netlist` (which carries the directives) rather than
+/// on `CodegenConfig`: the two apply sites cannot desynchronize.
+#[test]
+fn disable_unit_variation_makes_mismatch_a_pass_through() {
+    const SPICE: &str = "\
+Mismatch Disabled
+R1 in out 1k
+D1 out 0 D1N4148
+D2 0 out D1N4148
+C1 out 0 1u
+.seed 4142
+.mismatch D IS=0.05 N=0.02
+.model D1N4148 D(IS=2.52e-9 N=1.752)
+";
+    let netlist = Netlist::parse_with_options(
+        SPICE,
+        melange_solver::parser::ParseOptions {
+            disable_unit_variation: true,
+        },
+    )
+    .expect("failed to parse netlist");
+    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
+    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("failed to build DK kernel");
+    let mut config = default_config();
+    config.force_trap = true;
+    let code = CodeGenerator::new(config)
+        .generate(&kernel, &mna, &netlist)
+        .expect("code generation failed")
+        .code;
+
+    // Bit-identical to the model card, for every device and every param.
+    assert_eq!(extract_const_f64(&code, "DEVICE_0_IS"), 2.52e-9);
+    assert_eq!(extract_const_f64(&code, "DEVICE_1_IS"), 2.52e-9);
+    assert_eq!(
+        extract_const_f64(&code, "DEVICE_0_N_VT"),
+        extract_const_f64(&code, "DEVICE_1_N_VT")
+    );
+    // The directive is still on the netlist — validate has to name what it
+    // disabled on the result line.
+    assert_eq!(netlist.mismatch_specs.len(), 1);
+    assert_eq!(netlist.seed, Some(4142));
+}
+
 // ===========================================================================
 // Regression tests: DK emitter fixes (2026-07-18)
 //   1. Self-heating: exact-exponential Tj step at the INTERNAL sample rate,

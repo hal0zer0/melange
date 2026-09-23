@@ -53,7 +53,7 @@ pub(crate) mod tube_translate;
 pub mod visualizer;
 
 pub use comparison::{batch_compare, compare_signals, ComparisonConfig, ComparisonReport, Signal};
-pub use deck_guard::{format_refusal, scan_deck, DeckHazard};
+pub use deck_guard::{format_refusal, scan_deck, unit_variation_note, DeckHazard};
 pub use spice_runner::{
     run_transient, run_transient_with_pwl, run_transient_with_thevenin_pwl, SpiceData, SpiceError,
 };
@@ -400,6 +400,12 @@ pub fn validate_circuit_with_options(
             .to_string()
     });
     report.node_name = output_node.to_string();
+    // The melange side was built with unit variation off (see
+    // `run_melange_solver_from_str`). When the deck carries live `.tolerance` /
+    // `.mismatch`, say so ON the result line, naming the directives and the
+    // seed that was therefore not exercised. `None` — and so no added output —
+    // for every deck without them.
+    report.unit_variation_note = deck_guard::unit_variation_note(&netlist_str);
 
     // Generate output files if requested
     let mut html_report_path = None;
@@ -581,7 +587,37 @@ pub fn run_melange_solver_from_str(
     use melange_solver::codegen::{routing, CodeGenerator, CodegenConfig};
     use std::io::Write;
 
-    let netlist = melange_solver::parser::Netlist::parse(netlist_str).map_err(|e| {
+    // Unit variation OFF on the melange side, unconditionally.
+    //
+    // `.tolerance` jitters fixed R/C/L values in the parser and `.mismatch`
+    // jitters device model parameters in codegen — both on melange's side only.
+    // The reference deck handed to ngspice carries the values as written, so a
+    // jittered melange side puts a correlation between two DIFFERENT circuits
+    // on the result line and attributes the gap to the solver. Measured on
+    // `examples/passive-eq1a.cir` (`.seed 4142` / `.mismatch T MU=0.09
+    // KG1=0.20`): 16 emitted device constants differ, `DEVICE_0_MU` by -7.6%
+    // and `DEVICE_0_KG1` by -5.1%.
+    //
+    // This is what the docs already told authors to do by hand
+    // (`docs/aidocs/UNIT_VARIATION.md`, `docs/limitations.md`); only the
+    // automation was missing. It matches what validate measures: the solver
+    // against a reference engine at the SAME component values. Jitter changes
+    // values, not the solver, and whether the draw itself is correct is a
+    // unit-test question ngspice cannot answer — see
+    // `melange_solver::parser::tests::tolerance_draw_matches_nominal_times_one_plus_tol_u`.
+    //
+    // The caller names the disabled directives on the result line via
+    // `deck_guard::unit_variation_note`; it is not a preamble, because a
+    // footnote above a number does not retract the number.
+    //
+    // Unconditional here rather than an option on `ValidationOptions`: this
+    // function IS the melange side of every comparison, so there is no caller
+    // for whom the jittered answer would be the honest one.
+    let parse_options = melange_solver::parser::ParseOptions {
+        disable_unit_variation: true,
+    };
+    let netlist = melange_solver::parser::Netlist::parse_with_options(netlist_str, parse_options)
+        .map_err(|e| {
         ValidationError::Solver(format!("Parse error at line {}: {}", e.line, e.message))
     })?;
 

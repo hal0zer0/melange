@@ -439,7 +439,7 @@ Noise limitations:
 - Op-amp `EN_FC`/`IN_FC` (1/f corner) parameters parse but are **not yet wired** — Phase 4 is white-band only
 - On the **DK codegen path**, BJT parasitic RB/RC/RE thermal noise (rbb′) is skipped (logged as a `warn!`); route the circuit nodal to include it
 - Diode `RS` and tube `RGI` parasitic resistances are not yet thermal-noise sources
-- Setting `KF`/`AF` on resistors (or any `.mismatch`/`.tolerance` jitter) breaks ngspice parity — strip before SPICE-validating
+- Setting `KF`/`AF` on resistors breaks ngspice parity — strip before SPICE-validating. (`.mismatch`/`.tolerance` jitter does not need stripping: `melange validate` disables it on melange's side automatically and says so on the result line)
 - **Tube microphonics** (Phase 6) is research only, not implemented
 
 ## Not Implemented [DEFERRED]
@@ -493,8 +493,13 @@ Noise limitations:
   M=3, harness M=5
 - `melange validate` ignores the `.oversampling` directive and compares at base
   rate, because an oversampled comparison is confounded by anti-alias group delay
-- Resistor `KF`/`AF` and any `.mismatch` / `.tolerance` jitter break ngspice
-  parity -- strip them before validating
+- Resistor `KF`/`AF` noise breaks ngspice parity (validate compiles with
+  `NoiseMode::Off`, so it is simply absent from the comparison)
+- `.mismatch` / `.tolerance` jitter is **disabled automatically** on melange's
+  side for a validate run, which names the disabled directives and the
+  unexercised seed on its PASSED/FAILED line. Nominal is compared against
+  nominal; the draw itself is covered by unit tests, not by ngspice. No deck
+  edit is needed. See `docs/aidocs/UNIT_VARIATION.md`
 - SPICE correlation is **necessary but not sufficient** for promoting a circuit;
   a listening test is required on top
 

@@ -7,10 +7,10 @@ that makes "unit A" of a pedal sound subtly different from "unit B" and
 keeps distortion from sounding like a mathematically perfect limit
 cycle.
 
-Opt-in and deterministic. Zero runtime cost when absent. The SPICE
-validation suite is unaffected because it doesn't use these directives
-(and by design *shouldn't* — ngspice has no concept of per-build
-randomness).
+Opt-in and deterministic. Zero runtime cost when absent. `melange validate`
+turns all three OFF on melange's side and says so on its result line, so a
+deck that carries them is still validatable — see
+[Validation Implications](#validation-implications).
 
 ## Source Files
 
@@ -225,11 +225,59 @@ scales from there as `IS(T) = IS_nom_jittered · (Tj/Tamb)^XTI · ...`.
 
 ## Validation Implications
 
-The `.mismatch` and `.tolerance` directives intentionally break
-bit-for-bit ngspice parity — ngspice doesn't understand them and will
-see the netlist's nominal values. A circuit that needs SPICE correlation
-tests should either omit these directives entirely or use a variant
-`.cir` without them for the validation pipeline.
+ngspice doesn't understand these directives and sees the netlist's nominal
+values. **`melange validate` therefore disables unit variation on melange's
+side too, automatically** — it compares nominal against nominal and names the
+disabled directives on the PASSED/FAILED line:
+
+```
+Validation PASSED (nominal values: .mismatch T disabled for this comparison; seed 4142 not exercised)
+```
+
+A deck carrying `.mismatch` / `.tolerance` needs no edit and no variant `.cir`
+to be validatable. `compile`, `simulate` and `analyze` are unaffected and
+jitter exactly as documented above — only `validate` moves.
+
+**Mechanism.** One switch, two apply sites, because the two directives land on
+opposite sides of the pipeline:
+
+| Site | What the switch does |
+|------|----------------------|
+| `parser.rs::Netlist::apply_passive_tolerance` | early-returns, so `.tolerance` never scales an R/C/L |
+| `codegen/ir/mod.rs::CircuitIR::mismatch_tol_for` | returns `0.0`, which makes `apply_mismatch` a bit-identical pass-through |
+
+Both read `Netlist::unit_variation_disabled`, set by
+`Netlist::parse_with_options(deck, ParseOptions { disable_unit_variation: true })`.
+The flag rides on the *netlist* — the object that carries the directives —
+rather than on `CodegenConfig`, so the two sites cannot desynchronize. The
+directives stay recorded either way, because the result line has to be able to
+name what was turned off. `melange-validate` sets it in
+`run_melange_solver_from_str`, unconditionally; the ngspice-side helpers
+(`tube_translate`, `pentode_translate`, `substitute_dynamic_element_defaults`,
+`warn_floating_cap_only_islands`) keep the plain `Netlist::parse` and so keep
+seeing the deck exactly as written.
+
+**What this does and does not measure.** validate measures the solver against
+a reference engine *at the same component values*. Jitter changes values, not
+the solver. Whether the *draw itself* is right is a unit-test question ngspice
+cannot answer, and it is answered by:
+
+- `melange-solver/src/parser.rs::tests::tolerance_draw_matches_nominal_times_one_plus_tol_u`
+- `melange-solver/src/parser.rs::tests::deterministic_draw_matches_independent_reimplementation`
+- `melange-solver/tests/codegen_verification_tests.rs::mismatch_draw_matches_nominal_times_one_plus_tol_u`
+
+Each asserts `applied = nominal · (1 + tol · u)` against a `u` derived from an
+independent reimplementation of the FNV-64 → SplitMix64 chain, not read back
+out of melange.
+
+Substituting the *jittered* values into the ngspice deck was considered and
+rejected (arbiter, 2026-09-22): a correlation metric is dominated by the
+fundamental and cannot grade an error in a −40 dB H2 residual, so it would add
+a regime the score cannot see. The push-pull H2 that `.mismatch T` exists to
+create is exactly such a residual — on `passive-eq1a` the nominal comparison
+reports THD (SPICE) −113.9 dB against THD (melange) −153.7 dB and still passes,
+because the THD gate is (correctly) exempt when melange is the cleaner of two
+noise floors.
 
 The regression guard for "absent = byte-identical" is:
 

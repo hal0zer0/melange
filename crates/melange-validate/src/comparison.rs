@@ -270,6 +270,19 @@ pub struct ComparisonReport {
     pub absolute_errors: Option<Vec<f64>>,
     /// Per-sample relative errors
     pub relative_errors: Option<Vec<f64>>,
+
+    /// Qualifier for the PASSED/FAILED line when the deck carried live
+    /// `.tolerance` / `.mismatch` jitter that this comparison ran WITHOUT.
+    ///
+    /// `None` for a deck with no jitter directive, which is every shipped
+    /// validation deck. Filled by `validate_circuit_with_options` from
+    /// `deck_guard::unit_variation_note`; `compare_signals` itself never sets
+    /// it, because it sees two signals and not the deck they came from.
+    ///
+    /// It rides on the status line rather than a preamble on purpose: the
+    /// run's product is a number presented as authoritative, and a footnote
+    /// above a number does not retract it.
+    pub unit_variation_note: Option<String>,
 }
 
 impl ComparisonReport {
@@ -283,12 +296,19 @@ impl ComparisonReport {
             "Samples: {} at {:.0} Hz\n",
             self.sample_count, self.sample_rate
         ));
+        // The unit-variation qualifier rides ON the status line, not above it:
+        // this line is the run's verdict, and a footnote elsewhere would not
+        // retract it. Absent for every deck with no jitter directive.
         summary.push_str(&format!(
-            "Status: {}\n\n",
+            "Status: {}{}\n\n",
             if self.passed {
                 "PASSED ✓"
             } else {
                 "FAILED ✗"
+            },
+            match &self.unit_variation_note {
+                Some(note) => format!(" ({note})"),
+                None => String::new(),
             }
         ));
 
@@ -470,6 +490,7 @@ pub fn compare_signals(
         config: *config,
         absolute_errors: None,
         relative_errors: None,
+        unit_variation_note: None,
     };
 
     if len == 0 {
@@ -727,6 +748,8 @@ pub fn compare_signals(
                 .map(|(r, e)| if r.abs() > 1e-12 { (e / r).abs() } else { 0.0 })
                 .collect(),
         ),
+        // Set by the caller, which is the only layer that has the deck.
+        unit_variation_note: None,
     }
 }
 

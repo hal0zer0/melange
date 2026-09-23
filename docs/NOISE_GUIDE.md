@@ -291,8 +291,13 @@ ngspice has no equivalent:
 - **`.mismatch` / `.tolerance` / `.seed`** unit-variation directives — these
   jitter per-device parameters and are melange-only.
 
-If a circuit needs to pass `melange validate`, strip these before running the
-comparison. Junction `KF`/`AF` on `.model` cards *are* standard ngspice
+Only the first needs an edit. Strip resistor `KF`/`AF` before running the
+comparison. The unit-variation directives are handled for you: `melange
+validate` disables them on melange's side, compares nominal against nominal,
+and names the disabled directives and the unexercised seed on its
+PASSED/FAILED line (`docs/aidocs/UNIT_VARIATION.md`).
+
+Junction `KF`/`AF` on `.model` cards *are* standard ngspice
 parameters and do not break parity, though ngspice's `.NOISE` analysis is a
 small-signal frequency-domain linearization — it will never match melange's
 time-domain stochastic injection sample-for-sample, only in integrated PSD.

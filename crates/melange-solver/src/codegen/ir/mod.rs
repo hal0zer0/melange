@@ -4308,6 +4308,15 @@ impl CircuitIR {
     /// `.mismatch` specs in the netlist. Returns 0.0 when the directive is
     /// absent or the param isn't listed.
     fn mismatch_tol_for(netlist: &Netlist, device_class: char, param_name: &str) -> f64 {
+        // Unit-variation kill switch (`ParseOptions::disable_unit_variation`,
+        // set by `melange validate`). Reporting a zero tolerance here makes
+        // `apply_mismatch` a bit-identical pass-through for every device and
+        // every parameter, which is the `.mismatch` half of the same switch
+        // that skips `.tolerance` in the parser. The specs stay on the netlist
+        // so the caller can still name what it disabled.
+        if netlist.unit_variation_disabled {
+            return 0.0;
+        }
         let upper = param_name;
         let mut tol = 0.0f64;
         for spec in &netlist.mismatch_specs {

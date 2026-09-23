@@ -30,8 +30,15 @@
 //!    relays ngspice's complaint, which points at the author's (correct)
 //!    `.model` line.
 //!
-//! A third class is caught here too: `.tolerance` / `.mismatch` value jitter is
-//! applied on melange's side only, so the reference deck keeps nominal values.
+//! A third class used to be *refused* here: `.tolerance` / `.mismatch` value
+//! jitter, which is applied on melange's side only. That refusal is gone — it
+//! was an interim measure, and it made the README's flagship example
+//! un-validatable. Validate now compiles the melange side with unit variation
+//! disabled ([`melange_solver::parser::ParseOptions::disable_unit_variation`],
+//! set in `run_melange_solver_from_str`) and compares nominal against nominal,
+//! which is what the docs already told authors to do by hand. What remains here
+//! is [`unit_variation_note`], which names the disabled directives on the
+//! result line so the number is never read as a jittered one.
 //!
 //! ## Refuse, not warn
 //!
@@ -68,11 +75,6 @@ pub enum DeckHazard {
         kind: &'static str,
         /// Why ngspice cannot take it, and what to do instead.
         detail: &'static str,
-    },
-    /// Melange-side value jitter the reference deck does not receive.
-    OneSidedJitter {
-        /// The directive that introduces it (`.tolerance` / `.mismatch`).
-        directive: &'static str,
     },
 }
 
@@ -405,30 +407,63 @@ pub fn scan_deck(deck: &str) -> Vec<DeckHazard> {
                 });
             }
         }
-        // `.tolerance` jitters every fixed R/C/L in the parser itself and
-        // `.mismatch` jitters device parameters in codegen — both on melange's
-        // side only. The reference deck keeps the nominal values as written, so
-        // the two engines simulate different components by construction.
-        if netlist.tolerance_r != 0.0 || netlist.tolerance_c != 0.0 || netlist.tolerance_l != 0.0 {
-            hazards.push(DeckHazard::OneSidedJitter {
-                directive: ".tolerance",
-            });
-        }
-        // A `.mismatch` card whose tolerances are all zero is a documented
-        // no-op (`apply_mismatch` returns the nominal unchanged), so it is not
-        // a hazard — only a live, non-zero draw is.
-        let mismatch_is_live = netlist
-            .mismatch_specs
-            .iter()
-            .any(|spec| spec.params.iter().any(|(_, v)| *v != 0.0));
-        if mismatch_is_live {
-            hazards.push(DeckHazard::OneSidedJitter {
-                directive: ".mismatch",
-            });
-        }
     }
 
     hazards
+}
+
+/// The qualifier `validate` puts on its result line when the deck carries live
+/// `.tolerance` / `.mismatch` jitter that the comparison ran without.
+///
+/// Returns `None` for a deck with no live jitter directive — the 14 shipped
+/// validation decks are all in that set and their output must not grow noise.
+///
+/// The text goes ON the PASSED/FAILED line, not in a preamble above it. The
+/// same reasoning as the refusals in this module: the run's product is a
+/// number presented as authoritative, and a footnote does not retract a number.
+/// It names *which* directives were disabled and the seed that was therefore
+/// not exercised, so a reader can tell this correlation apart from one measured
+/// on the unit the deck actually describes.
+///
+/// A `.mismatch` card whose tolerances are all zero is a documented no-op
+/// (`apply_mismatch` returns the nominal unchanged), so it is not reported —
+/// only a live, non-zero draw is. Best-effort: a deck melange's own parser
+/// cannot read produces no note and fails later with its own parse error.
+pub fn unit_variation_note(deck: &str) -> Option<String> {
+    // Plain `Netlist::parse` is correct here: this netlist is read for its
+    // DIRECTIVES and thrown away, it never reaches the solver, and the draw
+    // does not touch `mismatch_specs` / `tolerance_*` / `seed`. The melange
+    // side's parse is the one in `run_melange_solver_from_str`.
+    let netlist = Netlist::parse(deck).ok()?;
+
+    let mut disabled: Vec<String> = Vec::new();
+    for spec in &netlist.mismatch_specs {
+        if spec.params.iter().any(|(_, v)| *v != 0.0) {
+            let entry = format!(".mismatch {}", spec.device_class);
+            if !disabled.contains(&entry) {
+                disabled.push(entry);
+            }
+        }
+    }
+    if netlist.tolerance_r != 0.0 || netlist.tolerance_c != 0.0 || netlist.tolerance_l != 0.0 {
+        disabled.push(".tolerance".to_string());
+    }
+    if disabled.is_empty() {
+        return None;
+    }
+
+    // `.seed` is the thing a reader would otherwise assume was exercised. Say
+    // which one, and say so even when the deck never wrote a `.seed` line —
+    // the draw would have used 0.
+    let seed = match netlist.seed {
+        Some(s) => format!("seed {s}"),
+        None => "the default seed 0".to_string(),
+    };
+    Some(format!(
+        "nominal values: {} disabled for this comparison; {} not exercised",
+        disabled.join(", "),
+        seed
+    ))
 }
 
 /// Render hazards as the refusal message `validate` prints instead of a
@@ -499,28 +534,6 @@ pub fn format_refusal(hazards: &[DeckHazard]) -> String {
                 names.join(", "),
                 detail
             ));
-        }
-    }
-
-    let jitter: Vec<&DeckHazard> = hazards
-        .iter()
-        .filter(|h| matches!(h, DeckHazard::OneSidedJitter { .. }))
-        .collect();
-    if !jitter.is_empty() {
-        out.push_str("\nOne-sided value jitter:\n");
-        for h in &jitter {
-            if let DeckHazard::OneSidedJitter { directive } = h {
-                out.push_str(&format!(
-                    "  {} perturbs component values on melange's side only; the ngspice \
-                     reference deck keeps the nominal values as written, so the two engines \
-                     simulate different components by construction. Measured on \
-                     examples/passive-eq1a.cir (`.mismatch T MU=0.09 KG1=0.20`): melange emits \
-                     DEVICE_0_MU = 92.36 against the model card's 100, and DEVICE_0_KG1 = 2059.6 \
-                     against 2171. Remove the directive (or set its tolerances to 0) for a \
-                     validation run.\n",
-                    directive
-                ));
-            }
         }
     }
 
@@ -752,16 +765,78 @@ Cl out 0 1p
         assert!(format_refusal(&hazards).contains("no op-amp element"));
     }
 
+    /// Jitter directives are no longer a refusal: validate disables them on the
+    /// melange side and says so on the result line. A deck carrying nothing but
+    /// `.tolerance` must now run.
     #[test]
-    fn tolerance_directive_is_reported() {
-        let deck = "title\nR1 a b 1k\nC1 b 0 10n\n.tolerance R=0.01\n";
-        let hazards = scan_deck(deck);
-        assert!(
-            hazards
-                .iter()
-                .any(|h| matches!(h, DeckHazard::OneSidedJitter { directive } if *directive == ".tolerance")),
-            "{hazards:?}"
+    fn jitter_directives_are_not_a_refusal() {
+        let deck = "title\nR1 a b 1k\nC1 b 0 10n\n.tolerance R=0.01\n.mismatch D IS=0.05\n";
+        assert!(scan_deck(deck).is_empty(), "{:?}", scan_deck(deck));
+    }
+
+    #[test]
+    fn note_names_both_directives_and_the_seed() {
+        let deck = "\
+title
+R1 a b 1k
+D1 b 0 DX
+T1 p g k 12AX7
+.model DX D(IS=2.52e-9)
+.model 12AX7 TRIODE(MU=100)
+.seed 4142
+.mismatch T MU=0.09 KG1=0.20
+.tolerance R=0.01
+";
+        let note = unit_variation_note(deck).expect("note");
+        assert_eq!(
+            note,
+            "nominal values: .mismatch T, .tolerance disabled for this comparison; \
+             seed 4142 not exercised"
         );
+    }
+
+    /// No `.seed` line still means a draw — seed 0 — so the note says which.
+    #[test]
+    fn note_names_the_default_seed_when_none_is_written() {
+        let deck = "title\nR1 a b 1k\n.tolerance R=0.01\n";
+        assert_eq!(
+            unit_variation_note(deck).as_deref(),
+            Some(
+                "nominal values: .tolerance disabled for this comparison; \
+                  the default seed 0 not exercised"
+            )
+        );
+    }
+
+    /// The 14 shipped validation decks carry no jitter, and their output must
+    /// not grow a qualifier. An all-zero `.mismatch` is a documented no-op, so
+    /// it is not reported either.
+    #[test]
+    fn no_note_without_live_jitter() {
+        assert_eq!(unit_variation_note("title\nR1 a b 1k\n"), None);
+        assert_eq!(
+            unit_variation_note(
+                "title\nR1 a b 1k\nD1 a 0 DX\n.model DX D(IS=1n)\n.mismatch D IS=0\n"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn shipped_validation_decks_carry_no_jitter_qualifier() {
+        let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+        let mut noisy = Vec::new();
+        for entry in std::fs::read_dir(&data).expect("tests/data") {
+            let cir = entry.expect("dir entry").path().join("circuit.cir");
+            if !cir.is_file() {
+                continue;
+            }
+            let deck = std::fs::read_to_string(&cir).expect("read deck");
+            if let Some(note) = unit_variation_note(&deck) {
+                noisy.push(format!("{}: {}", cir.display(), note));
+            }
+        }
+        assert!(noisy.is_empty(), "{}", noisy.join("\n"));
     }
 
     /// Every deck the validation suite ships must be comparable — if one is

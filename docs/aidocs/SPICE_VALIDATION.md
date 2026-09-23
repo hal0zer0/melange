@@ -52,6 +52,16 @@ recorded correlation/RMS values.
    `.pot`, `.switch`, `.input_impedance`, `.wiper`, `.gang`, `.runtime`,
    `.mismatch`, `.tolerance`, `.seed`.
 
+   For `.mismatch` / `.tolerance` / `.seed` the melange side is stripped to
+   match: `run_melange_solver_from_str` parses with
+   `ParseOptions { disable_unit_variation: true }`, so both engines see the
+   deck's nominal component values. A deck carrying live jitter gets a
+   qualifier naming the disabled directives and the unexercised seed on its
+   PASSED/FAILED line. Until 2026-09-22 the strip was one-sided and the
+   reported correlation was jittered-against-nominal; any PASS claim for such
+   a deck predating that needs re-running. See
+   `docs/aidocs/UNIT_VARIATION.md` "Validation Implications".
+
 ### Netlist Structure — SINGLE deck, strip-VIN protocol
 
 Each test data dir carries ONE `circuit.cir` used by BOTH engines:

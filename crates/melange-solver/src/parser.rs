@@ -136,6 +136,25 @@ pub struct Netlist {
     /// winding independently — which happens to match real transformer
     /// turn-count variation.
     pub tolerance_l: f64,
+    /// Unit-variation kill switch: when `true`, `.seed` / `.mismatch` /
+    /// `.tolerance` are still PARSED and recorded on this netlist, but the
+    /// draw is never applied — every value and device parameter stays at its
+    /// nominal, as-written magnitude.
+    ///
+    /// Set only by [`Netlist::parse_with_options`] via
+    /// [`ParseOptions::disable_unit_variation`]. It is carried on the netlist
+    /// rather than on a codegen config because the two apply sites are on
+    /// opposite sides of the pipeline — `.tolerance` lands in
+    /// [`Netlist::apply_passive_tolerance`] at the end of parse, `.mismatch`
+    /// in `CircuitIR::mismatch_tol_for` during codegen — and a single flag on
+    /// the object that carries the directives cannot desynchronize between
+    /// them. Both sites read it; nothing else does.
+    ///
+    /// The one consumer is `melange validate`: ngspice sees the deck's nominal
+    /// values, so a jittered melange side would correlate two different
+    /// circuits and blame the gap on the solver. `compile` / `simulate` /
+    /// `analyze` leave this `false` and jitter as documented.
+    pub unit_variation_disabled: bool,
     /// Integration-scheme preference (`.integrator trap` / `.integrator be`).
     /// `None` (default) leaves the choice to the CLI flags and the automatic
     /// spectral-radius promotion. `Some(Be)` pins backward Euler at compile
@@ -171,6 +190,31 @@ pub enum IntegratorPref {
     Trap,
     /// `.integrator be` — force backward Euler (equivalent to `--backward-euler`).
     Be,
+}
+
+/// Knobs that change what [`Netlist::parse_with_options`] *does* with what it
+/// reads. Every field defaults to the shipped `Netlist::parse` behavior.
+///
+/// This is not a place for circuit options — those belong in the netlist. It is
+/// for the handful of cases where the same deck must be read two ways by two
+/// parts of melange.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ParseOptions {
+    /// Read `.seed` / `.mismatch` / `.tolerance` but do not apply the draw:
+    /// every R/C/L value and every device model parameter stays nominal.
+    ///
+    /// `melange validate` sets this. The reference deck handed to ngspice
+    /// carries the values as written, so a jittered melange side would put a
+    /// correlation between two different circuits on the result line and
+    /// attribute the difference to the solver. Validate measures the solver
+    /// against a reference engine at the same component values; whether the
+    /// *draw* itself is right is a unit-test question (see
+    /// `tests::tolerance_draw_matches_nominal_times_one_plus_tol_u`), not one
+    /// ngspice can answer.
+    ///
+    /// The directives stay recorded on the returned [`Netlist`] so the caller
+    /// can name which ones it disabled.
+    pub disable_unit_variation: bool,
 }
 
 /// Deterministic uniform `[-1, 1]` draw from `(seed, class_tag, name)`.
@@ -446,6 +490,7 @@ impl Netlist {
             tolerance_r: 0.0,
             tolerance_c: 0.0,
             tolerance_l: 0.0,
+            unit_variation_disabled: false,
             integrator: None,
             recommended_oversampling: None,
         }
@@ -469,6 +514,14 @@ impl Netlist {
     /// different seeds produce different unit personalities and the R/C/L
     /// streams can't alias each other.
     pub fn apply_passive_tolerance(&mut self) {
+        // The unit-variation kill switch is checked HERE, not at the call site
+        // in `Parser::parse`, so it cannot be bypassed by any other caller of
+        // this method. `.tolerance` stays recorded on the netlist either way —
+        // callers still need to know the directive was present in order to say
+        // so. See `Netlist::unit_variation_disabled`.
+        if self.unit_variation_disabled {
+            return;
+        }
         if self.tolerance_r == 0.0 && self.tolerance_c == 0.0 && self.tolerance_l == 0.0 {
             return;
         }
@@ -532,6 +585,21 @@ impl Netlist {
     ///   or `MAX_MODEL_PARAMS` params per model are declared
     /// - a line fails syntactic validation
     pub fn parse(input: &str) -> Result<Self, ParseError> {
+        Self::parse_with_options(input, ParseOptions::default())
+    }
+
+    /// Parse a netlist with non-default parse behavior.
+    ///
+    /// [`Netlist::parse`] is this with [`ParseOptions::default()`], which is
+    /// the shipped behavior in every respect. The only option today is
+    /// [`ParseOptions::disable_unit_variation`], used by `melange validate` so
+    /// the melange side is built at the same nominal component values the
+    /// ngspice reference deck gets.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Netlist::parse`].
+    pub fn parse_with_options(input: &str, options: ParseOptions) -> Result<Self, ParseError> {
         // Defensive size cap: reject malicious/oversized input before any allocation.
         if input.len() > MAX_NETLIST_BYTES {
             return Err(ParseError {
@@ -543,7 +611,7 @@ impl Netlist {
                 ),
             });
         }
-        Parser::new(input).parse()
+        Parser::new(input).parse(options)
     }
 
     /// Expand all subcircuit instances (`X` elements) into their constituent elements.
@@ -1702,11 +1770,15 @@ impl Parser {
         }
     }
 
-    fn parse(mut self) -> Result<Netlist, ParseError> {
+    fn parse(mut self, options: ParseOptions) -> Result<Netlist, ParseError> {
         // First line is title
         let title = self.next_line().unwrap_or_default();
         Self::warn_if_title_looks_like_content(&title);
         let mut netlist = Netlist::new(title);
+        // Recorded before any directive is read, so both apply sites
+        // (`apply_passive_tolerance` below, `mismatch_tol_for` at codegen) see
+        // it no matter what the deck contains.
+        netlist.unit_variation_disabled = options.disable_unit_variation;
 
         while let Some(line) = self.next_line() {
             let line = line.trim().to_string();
@@ -1786,7 +1858,9 @@ impl Parser {
         Self::warn_if_no_ground(&netlist);
         // `.tolerance` jitter runs *after* validation so a bad netlist
         // fails with a clear schema error before we silently mutate
-        // values the user wrote. No-op when all tolerances are zero.
+        // values the user wrote. No-op when all tolerances are zero, and
+        // no-op when `ParseOptions::disable_unit_variation` was set (the
+        // check lives inside `apply_passive_tolerance`).
         netlist.apply_passive_tolerance();
         Ok(netlist)
     }
@@ -7392,6 +7466,150 @@ U1 0 inv out opamp
                 assert_eq!(*value, 1000.0);
             }
         }
+    }
+
+    // ---- the jitter ARITHMETIC itself -------------------------------------
+    //
+    // Until 2026-09-22 nothing tested this. `deterministic_draw` was referenced
+    // only from `parser.rs` and `codegen/ir/mod.rs` and by no test file at all,
+    // so the determinism and no-op guards above covered "the same wrong number
+    // twice" and "no number" — never "the right number". `melange validate`
+    // cannot close that gap either: it now compiles the melange side with unit
+    // variation OFF (`ParseOptions::disable_unit_variation`) so it compares
+    // nominal against nominal, and ngspice has no concept of the draw to grade
+    // it against even if it did not. Whether the draw is correct is this test's
+    // job and only this test's job.
+    //
+    // The `u` expectations below were derived INDEPENDENTLY — an FNV-64 +
+    // SplitMix64 reimplementation outside this crate, fed the same
+    // (seed, tag, name) triples — not copied out of a `deterministic_draw`
+    // run. That is what makes them evidence rather than a restatement of the
+    // code they check. Recomputing one by hand is the way to re-verify it.
+
+    /// `deterministic_draw` is the shared RNG for BOTH unit-variation
+    /// directives. Pin its output: a refactor that changes these numbers
+    /// silently re-rolls every shipped plugin's personality.
+    #[test]
+    fn deterministic_draw_matches_independent_reimplementation() {
+        assert_eq!(deterministic_draw(4142, "R", "R1"), 0.2643562609815917);
+        assert_eq!(deterministic_draw(4142, "C", "C1"), -0.04633172401026564);
+        assert_eq!(deterministic_draw(4142, "L", "L1"), 0.05235785305095719);
+        // The null-byte separator is what keeps the streams apart: without it
+        // ("R" + "C1") and ("RC" + "1") would hash identically.
+        assert_ne!(
+            deterministic_draw(4142, "R", "C1"),
+            deterministic_draw(4142, "RC", "1")
+        );
+        // Range contract: u ∈ [-1, 1].
+        for name in ["R1", "R2", "C7", "Lx", "R_feedback", ""] {
+            for seed in [0u64, 1, 42, 4142, u64::MAX] {
+                let u = deterministic_draw(seed, "R", name);
+                assert!((-1.0..=1.0).contains(&u), "seed {seed} {name}: {u}");
+            }
+        }
+    }
+
+    /// The `.tolerance` half of the ruling's "unit test for the draw itself":
+    /// an applied draw is exactly `nominal · (1 + tol · u)`.
+    #[test]
+    fn tolerance_draw_matches_nominal_times_one_plus_tol_u() {
+        // Independently derived (see the block comment above).
+        const U_R1: f64 = 0.2643562609815917;
+        const U_C1: f64 = -0.04633172401026564;
+        const U_L1: f64 = 0.05235785305095719;
+
+        let spice = "Draw\n\
+                     .seed 4142\n\
+                     .tolerance R=0.10 C=0.20 L=0.05\n\
+                     R1 a b 1k\n\
+                     C1 b 0 10n\n\
+                     L1 b c 1m\n\
+                     .end\n";
+        let n = Netlist::parse(spice).expect("parse");
+
+        let mut seen = 0;
+        for e in &n.elements {
+            match e {
+                Element::Resistor { name, value, .. } if name == "R1" => {
+                    assert_eq!(*value, 1000.0 * (1.0 + 0.10 * U_R1));
+                    // Non-trivial: the value MOVED. A no-op path cannot pass.
+                    assert!((*value - 1000.0).abs() > 1.0, "{value}");
+                    seen += 1;
+                }
+                Element::Capacitor { name, value, .. } if name == "C1" => {
+                    assert_eq!(*value, 10e-9 * (1.0 + 0.20 * U_C1));
+                    assert!((*value - 10e-9).abs() > 1e-11, "{value:e}");
+                    seen += 1;
+                }
+                Element::Inductor { name, value, .. } if name == "L1" => {
+                    assert_eq!(*value, 1e-3 * (1.0 + 0.05 * U_L1));
+                    assert!((*value - 1e-3).abs() > 1e-7, "{value:e}");
+                    seen += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(seen, 3, "all three classes must have been jittered");
+    }
+
+    /// `ParseOptions::disable_unit_variation` — the switch `melange validate`
+    /// sets. The directives are still READ (the caller has to be able to name
+    /// them on the result line); only the draw is skipped.
+    #[test]
+    fn disable_unit_variation_keeps_values_nominal_but_keeps_the_directives() {
+        let spice = "Draw\n\
+                     .seed 4142\n\
+                     .tolerance R=0.10 C=0.20 L=0.05\n\
+                     R1 a b 1k\n\
+                     C1 b 0 10n\n\
+                     L1 b c 1m\n\
+                     .end\n";
+        let n = Netlist::parse_with_options(
+            spice,
+            ParseOptions {
+                disable_unit_variation: true,
+            },
+        )
+        .expect("parse");
+
+        assert!(n.unit_variation_disabled);
+        // Still recorded, so `validate` can say WHAT it disabled.
+        assert_eq!(n.tolerance_r, 0.10);
+        assert_eq!(n.tolerance_c, 0.20);
+        assert_eq!(n.tolerance_l, 0.05);
+        assert_eq!(n.seed, Some(4142));
+
+        for e in &n.elements {
+            match e {
+                Element::Resistor { value, .. } => assert_eq!(*value, 1000.0),
+                Element::Capacitor { value, .. } => assert_eq!(*value, 10e-9),
+                Element::Inductor { value, .. } => assert_eq!(*value, 1e-3),
+                _ => {}
+            }
+        }
+
+        // And it cannot be bypassed by calling the apply site directly.
+        let mut n2 = n;
+        n2.apply_passive_tolerance();
+        for e in &n2.elements {
+            if let Element::Resistor { value, .. } = e {
+                assert_eq!(*value, 1000.0);
+            }
+        }
+    }
+
+    /// The default is unchanged: `Netlist::parse` still jitters.
+    #[test]
+    fn default_parse_options_still_jitter() {
+        let spice = "Draw\n.seed 4142\n.tolerance R=0.10\nR1 a b 1k\n.end\n";
+        let jittered = Netlist::parse(spice).expect("parse");
+        let nominal = Netlist::parse_with_options(spice, ParseOptions::default()).expect("parse");
+        let val = |n: &Netlist| match &n.elements[0] {
+            Element::Resistor { value, .. } => *value,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(val(&jittered), val(&nominal));
+        assert_ne!(val(&jittered), 1000.0);
     }
 
     // ---- .inject / .tap directive parsing (Gate 1: mandatory impedance) ----
