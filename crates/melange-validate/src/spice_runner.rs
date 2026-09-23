@@ -35,6 +35,15 @@ pub enum SpiceError {
     /// Specified node not found in output
     #[error("Node '{0}' not found in SPICE output")]
     NodeNotFound(String),
+
+    /// The deck would not describe the same circuit to both engines, so the
+    /// reference run was never started.
+    ///
+    /// See [`crate::deck_guard`]. This is deliberately raised *before* ngspice
+    /// is invoked: once a correlation number exists, a caveat next to it reads
+    /// as a footnote rather than a retraction.
+    #[error("{0}")]
+    DeckNotComparable(String),
 }
 
 impl From<std::io::Error> for SpiceError {
@@ -885,6 +894,29 @@ pub fn run_transient_with_thevenin_pwl(
     // `substitute_dynamic_element_defaults` for the exact melange mapping matched.
     let netlist_content = substitute_dynamic_element_defaults(netlist_content);
     let netlist_content = netlist_content.as_str();
+
+    // Refuse decks the two engines would not read as the same circuit, BEFORE
+    // ngspice is invoked. Two classes (see `deck_guard`):
+    //
+    //  * value tokens each engine reads as a different number — melange accepts
+    //    the SI-prefix infix form (`4k7` = 4.7k), ngspice reads the mantissa,
+    //    applies the scale letter and discards the rest of the token (`4k7` =
+    //    4k). Neither side errors, so a run would report a correlation between
+    //    a 4.7k circuit and a 4.0k one and attribute the gap to the solver;
+    //  * devices ngspice has no element or model for (op-amp, LDR, VCA, glow).
+    //    ngspice's own complaint names the author's `.model` card, which is
+    //    correct, so relaying it sends them to fix the wrong line.
+    //
+    // Scanned AFTER `substitute_dynamic_element_defaults` (pot/switch values are
+    // plain numerics by then, so an infix nominal on a pot resistor is correctly
+    // not a hazard) and BEFORE the tube/pentode/Thevenin rewrites, whose emitted
+    // text is generated, not author-written.
+    let hazards = crate::deck_guard::scan_deck(netlist_content);
+    if !hazards.is_empty() {
+        return Err(SpiceError::DeckNotComparable(
+            crate::deck_guard::format_refusal(&hazards),
+        ));
+    }
 
     // Translate any melange triode (`T`) elements into Koren B-source subckts
     // before the deck reaches ngspice (which would parse `T` as a transmission

@@ -46,12 +46,14 @@ use std::path::Path;
 use thiserror::Error;
 
 pub mod comparison;
+pub mod deck_guard;
 pub(crate) mod pentode_translate;
 pub mod spice_runner;
 pub(crate) mod tube_translate;
 pub mod visualizer;
 
 pub use comparison::{batch_compare, compare_signals, ComparisonConfig, ComparisonReport, Signal};
+pub use deck_guard::{format_refusal, scan_deck, DeckHazard};
 pub use spice_runner::{
     run_transient, run_transient_with_pwl, run_transient_with_thevenin_pwl, SpiceData, SpiceError,
 };
@@ -63,7 +65,17 @@ pub use visualizer::{generate_csv, generate_html_report, generate_json_report};
 pub enum ValidationError {
     /// SPICE simulation failed
     #[error("SPICE error: {0}")]
-    Spice(#[from] SpiceError),
+    Spice(#[source] SpiceError),
+
+    /// The deck does not describe the same circuit to melange and to ngspice,
+    /// so no comparison between them would mean anything.
+    ///
+    /// Raised before ngspice runs. Separate from [`ValidationError::Spice`]
+    /// because it is not ngspice reporting a problem — it is melange declining
+    /// to produce a number it could not stand behind. See
+    /// [`crate::deck_guard`].
+    #[error("{0}")]
+    DeckNotComparable(String),
 
     /// Solver error from melange-solver
     #[error("Solver error: {0}")]
@@ -80,6 +92,19 @@ pub enum ValidationError {
     /// Comparison failed (signals differ beyond tolerance)
     #[error("Comparison failed: {0}")]
     ComparisonFailed(String),
+}
+
+impl From<SpiceError> for ValidationError {
+    /// Keep the pre-flight refusal out of the `SPICE error:` bucket. The deck
+    /// guard rejects before ngspice is invoked, so labeling its message as
+    /// ngspice output would point the reader at the wrong engine — the same
+    /// misdirection the guard exists to remove.
+    fn from(e: SpiceError) -> Self {
+        match e {
+            SpiceError::DeckNotComparable(msg) => ValidationError::DeckNotComparable(msg),
+            other => ValidationError::Spice(other),
+        }
+    }
 }
 
 impl From<std::io::Error> for ValidationError {
@@ -333,7 +358,7 @@ pub fn validate_circuit_with_options(
     // Extract the output signal from SPICE results
     let spice_output = spice_data
         .get_node_voltage(output_node)
-        .map_err(ValidationError::Spice)?;
+        .map_err(ValidationError::from)?;
 
     // Run melange solver on stripped netlist (VIN removed)
     let melange_output = run_melange_solver_from_str(
@@ -571,7 +596,7 @@ pub fn run_melange_solver_from_str(
             ValidationError::Solver(format!(
                 "Input node '{}' not found. Available: {:?}",
                 input_node_name,
-                mna.node_map.keys().collect::<Vec<_>>()
+                mna.node_names_in_index_order()
             ))
         })?
         .saturating_sub(1);
@@ -583,7 +608,7 @@ pub fn run_melange_solver_from_str(
             ValidationError::Solver(format!(
                 "Output node '{}' not found. Available: {:?}",
                 output_node_name,
-                mna.node_map.keys().collect::<Vec<_>>()
+                mna.node_names_in_index_order()
             ))
         })?
         .saturating_sub(1);
@@ -1046,6 +1071,48 @@ impl ValidationBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The "node not found" diagnostic used to list the available nodes by
+    /// `HashMap` iteration, so the same failing run printed a different list
+    /// every time. Ordering anything by hash iteration is a standing no
+    /// (49ecaa4); `node_names_in_index_order()` gives the MNA index order,
+    /// which is also the order the rest of the tooling reports nodes in.
+    #[test]
+    fn node_not_found_lists_nodes_in_a_stable_order() {
+        let deck = "\
+title
+Rin in n1 1k
+C1 n1 mid 100n
+R2 mid out 4.7k
+Rl out 0 10k
+";
+        let mut seen: Option<String> = None;
+        for _ in 0..8 {
+            let err = run_melange_solver_from_str(
+                deck,
+                &[0.0; 8],
+                48000.0,
+                "nosuchnode",
+                "in",
+                melange_solver::codegen::BjtFaMode::Auto,
+                "auto",
+                false,
+                false,
+                None,
+            )
+            .expect_err("missing output node must fail");
+            let msg = err.to_string();
+            assert!(msg.contains("nosuchnode"), "{msg}");
+            match &seen {
+                None => seen = Some(msg),
+                Some(first) => assert_eq!(first, &msg, "node list order is not stable"),
+            }
+        }
+        // MNA index order (ground first, then declaration order), not hash
+        // order.
+        let msg = seen.unwrap();
+        assert!(msg.contains(r#"["0", "in", "n1", "mid", "out"]"#), "{msg}");
+    }
 
     #[test]
     fn test_validation_builder() {
