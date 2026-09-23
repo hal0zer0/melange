@@ -472,6 +472,35 @@ C2 mid out 100n
 Rbias mid 0 1meg   ; high value so it doesn't affect AC
 ```
 
+melange checks this for you, and says which of the two cases it found.
+
+A **mistyped node name** is refused outright, because it leaves an element
+connected at one end only, and an element connected at one end carries no
+current in any circuit. `C3 n3 n4 220n` typed as `C3 n33 n4 220n` gives:
+
+```
+Error: netlist topology: 2 defects that would silently produce the wrong circuit
+  - dangling node 'n33': the whole deck names it once, as the n+ terminal of C3
+    (line 7). ... Did you mean 'n3'? If C3 is deliberately unconnected, delete it.
+```
+
+Every verb that builds the circuit refuses it — `compile` in every output
+format, `simulate`, `analyze` and `validate` — because the defect is as real in
+a plugin, which never renders anything that could betray it, as it is in a
+render. `melange nodes` and `melange dc-op` report it and build anyway: they are
+the commands you reach for to *find* the typo.
+
+A genuinely floating node — the `mid` above, reached only through capacitors —
+is a **warning**, not a refusal, because back-to-back electrolytics wired as a
+non-polar pair and capacitive dividers are real circuits that look identical to
+the check. Read the warning and confirm it is the one you meant.
+
+Two things that look floating are not, and melange knows it: the node behind
+your input coupling cap (the input port is a voltage source with a series
+resistance, which is a DC path), and a node named once because it *is* your
+declared `--output-node`. A node you want to probe without wiring anything to it
+can be declared with `.tap <node>`, which counts as a connection.
+
 ### 2. Wrong terminal order
 
 Each device type has a specific terminal order. Getting it wrong flips the device behavior.

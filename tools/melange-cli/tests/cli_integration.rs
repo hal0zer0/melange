@@ -988,3 +988,134 @@ fn test_simulate_warns_on_nr_starvation() {
         "a converging run must not emit the NR-starvation warning, got stderr:\n{clean_err}"
     );
 }
+
+// ============================================================================
+// topology gate (dangling nodes / cap-only DC islands)
+// ============================================================================
+
+/// The cold-first-user case that prompted the check: `C3 n3 n4 220n` typed as
+/// `C3 n33 n4 220n`. Before the gate this compiled clean, rendered 480 samples
+/// of digital silence and exited 0.
+const TEST_TYPOED_NODE: &str = "\
+Typoed node fixture
+Rin in n1 10k
+C1 n1 n2 100n
+R2 n2 0 1meg
+R3 n2 n3 47k
+C3 n33 n4 220n
+R4 n4 0 22k
+Rout n4 out 1k
+Rload out 0 100k
+";
+
+/// An output coupling cap feeding the declared output port, and nothing else on
+/// `out`. Legitimate, and the shape of essentially every pedal — the gate must
+/// not touch it.
+const TEST_OUTPUT_COUPLING_CAP: &str = "\
+Output coupling cap fixture
+Rin in mid 10k
+Rmid mid 0 100k
+Cout mid out 100n
+";
+
+#[test]
+fn test_simulate_refuses_a_typoed_node_and_names_it() {
+    let cir = write_test_circuit(TEST_TYPOED_NODE, "topology_typo_sim");
+    let wav = std::env::temp_dir().join("melange_cli_test_topology_typo.wav");
+    let stderr = run_melange_fail(&[
+        "simulate",
+        cir.to_str().unwrap(),
+        "-i",
+        "in",
+        "-n",
+        "out",
+        "--duration",
+        "0.01",
+        "-o",
+        wav.to_str().unwrap(),
+    ]);
+    assert!(
+        stderr.contains("'n33'"),
+        "names the orphaned node: {stderr}"
+    );
+    assert!(stderr.contains("C3"), "names the element: {stderr}");
+    assert!(stderr.contains("line 6"), "names the source line: {stderr}");
+    assert!(
+        stderr.contains("Did you mean 'n3'?"),
+        "suggests the intended node: {stderr}"
+    );
+    assert!(
+        !wav.exists(),
+        "a refused deck must not leave a rendered WAV behind"
+    );
+    let _ = std::fs::remove_file(&cir);
+    let _ = std::fs::remove_file(&wav);
+}
+
+#[test]
+fn test_compile_refuses_a_typoed_node_in_every_format() {
+    // The defect is equally real in a plugin, which never renders anything that
+    // could betray it.
+    let cir = write_test_circuit(TEST_TYPOED_NODE, "topology_typo_compile");
+    for format in ["code", "plugin"] {
+        let out = std::env::temp_dir().join(format!("melange_cli_test_topology_{format}"));
+        let stderr = run_melange_fail(&[
+            "compile",
+            cir.to_str().unwrap(),
+            "--format",
+            format,
+            "-i",
+            "in",
+            "-n",
+            "out",
+            "-o",
+            out.to_str().unwrap(),
+        ]);
+        assert!(
+            stderr.contains("'n33'"),
+            "--format {format} must refuse too: {stderr}"
+        );
+    }
+    let _ = std::fs::remove_file(&cir);
+}
+
+#[test]
+fn test_nodes_reports_the_typo_without_refusing() {
+    // `nodes` is the command a user reaches for to FIND the typo, so it has to
+    // stay usable on a deck that has one.
+    let cir = write_test_circuit(TEST_TYPOED_NODE, "topology_typo_nodes");
+    let stdout = run_melange(&["nodes", cir.to_str().unwrap()]);
+    assert!(
+        stdout.contains("'n33'"),
+        "nodes should still report it: {stdout}"
+    );
+    assert!(
+        stdout.contains("Nodes in circuit"),
+        "nodes should still do its job: {stdout}"
+    );
+    let _ = std::fs::remove_file(&cir);
+}
+
+#[test]
+fn test_output_coupling_cap_into_the_declared_port_is_not_dangling() {
+    let cir = write_test_circuit(TEST_OUTPUT_COUPLING_CAP, "topology_coupling");
+    let out = std::env::temp_dir().join("melange_cli_test_topology_coupling.rs");
+    let stdout = run_melange(&[
+        "compile",
+        cir.to_str().unwrap(),
+        "--format",
+        "code",
+        "-i",
+        "in",
+        "-n",
+        "out",
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(
+        !stdout.contains("dangling"),
+        "a declared port is a connection: {stdout}"
+    );
+    let _ = std::fs::remove_file(&cir);
+    let _ = std::fs::remove_file(&out);
+}

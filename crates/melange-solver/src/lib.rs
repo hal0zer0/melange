@@ -87,6 +87,9 @@ pub mod pipeline;
 // It re-exports LinearSolver and SolverError from linear_solver.
 pub mod solver;
 
+/// Netlist topology checks (dangling nodes, cap-only DC islands).
+pub mod topology;
+
 #[cfg(test)]
 mod dk_math_verification;
 
@@ -107,3 +110,6 @@ pub use dk::{DkError, DkKernel, MAX_M};
 pub use linear_solver::{LinearSolver, SolverError};
 pub use mna::{MnaError, MnaSystem};
 pub use parser::{Netlist, ParseError};
+pub use topology::{
+    Finding as TopologyFinding, Ports as TopologyPorts, Severity as TopologySeverity,
+};

@@ -621,6 +621,21 @@ pub fn run_melange_solver_from_str(
         ValidationError::Solver(format!("Parse error at line {}: {}", e.line, e.message))
     })?;
 
+    // Topology gate — the same one `melange compile` runs, on the same shared
+    // implementation. A deck with an inert element validates a circuit the
+    // author did not write, and a correlation number printed for the wrong
+    // circuit is worse than no number. Warnings go to the log; refusals stop
+    // the run here, before ngspice's answer can be compared to anything.
+    melange_solver::pipeline::topology_gate(
+        &netlist,
+        &melange_solver::topology::Ports::declared(
+            [input_node_name.to_string()],
+            [output_node_name.to_string()],
+        ),
+        &|m| log::warn!("{m}"),
+    )
+    .map_err(|e| ValidationError::Solver(e.to_string()))?;
+
     let mut mna = melange_solver::mna::MnaSystem::from_netlist(&netlist)
         .map_err(|e| ValidationError::Solver(format!("MNA error: {}", e)))?;
 

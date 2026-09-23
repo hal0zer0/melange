@@ -180,6 +180,19 @@ pub struct Netlist {
     /// base rate regardless of the directive. Values are restricted to {1,2,4}
     /// to match the `--oversampling` cap. `None` (default) means unspecified.
     pub recommended_oversampling: Option<usize>,
+    /// 1-based RAW source line each element was declared on, keyed by the
+    /// lowercased element name.
+    ///
+    /// Recorded during parse so a post-parse diagnostic can point at the line
+    /// the author wrote rather than at the statement the parser happened to be
+    /// on. Elements created by [`Netlist::expand_subcircuits`] have no authored
+    /// line of their own and are absent from this map; a lookup that misses
+    /// yields no location at all rather than a wrong one.
+    ///
+    /// Only the FIRST declaration line is kept. Duplicate element names are a
+    /// parse error, so a second entry can only exist inside a deck that never
+    /// finishes parsing.
+    pub element_lines: std::collections::HashMap<String, usize>,
 }
 
 /// Compile-time integration-scheme pin set by the `.integrator` directive.
@@ -493,6 +506,7 @@ impl Netlist {
             unit_variation_disabled: false,
             integrator: None,
             recommended_oversampling: None,
+            element_lines: std::collections::HashMap::new(),
         }
     }
 
@@ -1862,6 +1876,15 @@ impl Parser {
         // no-op when `ParseOptions::disable_unit_variation` was set (the
         // check lives inside `apply_passive_tolerance`).
         netlist.apply_passive_tolerance();
+        // Hand the recorded element lines to the netlist so post-parse passes
+        // (topology checks, and anything else that runs after `parse` returns)
+        // can name the line an element was written on. Only the first
+        // declaration of each name survives — see `Netlist::element_lines`.
+        netlist.element_lines = self
+            .element_lines
+            .iter()
+            .filter_map(|(name, lines)| lines.first().map(|l| (name.clone(), *l)))
+            .collect();
         Ok(netlist)
     }
 

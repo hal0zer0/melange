@@ -754,3 +754,72 @@ pub fn format_grid_off_log(
         grid_off_pentodes.len()
     ))
 }
+
+// ---------------------------------------------------------------------------
+// Topology gate
+// ---------------------------------------------------------------------------
+
+/// A deck refused by the topology pass.
+///
+/// Carries every refusing finding, not just the first — a single typo usually
+/// orphans both sides of the edit, and fixing one at a time is a worse
+/// experience than being told both.
+#[derive(Debug, Clone)]
+pub struct TopologyRefusal {
+    /// The findings whose severity is [`crate::topology::Severity::Refuse`].
+    pub findings: Vec<crate::topology::Finding>,
+}
+
+impl std::fmt::Display for TopologyRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let n = self.findings.len();
+        write!(
+            f,
+            "netlist topology: {n} defect{} that would silently produce the wrong circuit",
+            if n == 1 { "" } else { "s" }
+        )?;
+        for finding in &self.findings {
+            write!(f, "\n  - {}", finding.message())?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for TopologyRefusal {}
+
+/// Run [`crate::topology::check`] and decide what its findings cost.
+///
+/// Warnings are reported through `rep` and the build continues; refusals stop
+/// it. Every verb that builds a netlist calls this — `compile` in every output
+/// format, `simulate`, `analyze` and `validate` — because a defect that is real
+/// in a plugin is equally real in a render, and a deck that simulates but
+/// refuses as a plugin teaches people the check is arbitrary.
+///
+/// `melange nodes` and `melange dc-op` call this too and are never refused by
+/// it, because neither takes an `-o` and so both pass
+/// [`crate::topology::Ports::unknown`] — a dangling finding cannot reach
+/// [`Severity::Refuse`] without port knowledge to rest on (see
+/// [`crate::topology::Finding::severity`]). The exemption is a property of what
+/// those verbs know, not a list of names to keep in sync.
+pub fn topology_gate(
+    netlist: &crate::parser::Netlist,
+    ports: &crate::topology::Ports,
+    rep: Reporter<'_>,
+) -> Result<(), TopologyRefusal> {
+    use crate::topology::Severity;
+
+    let findings = crate::topology::check(netlist, ports);
+    let (refusals, warnings): (Vec<_>, Vec<_>) = findings
+        .into_iter()
+        .partition(|f| f.severity() == Severity::Refuse);
+
+    for w in &warnings {
+        report!(rep, "  warning: {}", w.message());
+    }
+
+    if refusals.is_empty() {
+        Ok(())
+    } else {
+        Err(TopologyRefusal { findings: refusals })
+    }
+}

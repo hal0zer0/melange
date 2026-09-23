@@ -9,6 +9,52 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+### Added
+
+- **Netlist topology checks: a mistyped node name is now refused, not
+  simulated.** A cold first-user test typo'd `C3 n3 n4 220n` into
+  `C3 n33 n4 220n`, which invents a node and floats the tone stage; melange
+  printed "Compiled successfully", clean health counters, exit 0, and a 192 KB
+  WAV of digital silence. One shared pass
+  (`melange_solver::topology`) now runs before anything is built:
+  - A node that appears on exactly **one** element terminal in the whole deck is
+    **refused** when that element is two-terminal (R, C, L, D, V, I, B, N),
+    because such an element carries no current in any circuit. The message names
+    the node, the element, the source line and the nearest existing node name by
+    edit distance (`n33` → "Did you mean 'n3'?"). A dangling terminal on a
+    multi-terminal part (an unused rheostat lug) warns instead.
+  - A **cap-only DC island** — a node whose every path out is open at DC — warns,
+    with the hedge to confirm it is an intended coupling-cap island.
+  - Refusals apply on every build path: `compile` in every output format,
+    `simulate`, `analyze` and `validate`. `nodes` and `dc-op` report the findings
+    and build anyway: they take no `--output-node`, so they cannot tell an
+    orphaned node from an output port, and `nodes` is the command you reach for
+    to find the typo.
+  - A declared input or output port counts as a connection, and `.tap` /
+    `.inject` / a node sensed in a behavioral `B` expression do too.
+
+### Changed
+
+- **The floating-island scan in `melange validate` was wrong in both
+  directions, and is now a consumer of the shared pass.** It unioned every
+  terminal of every non-capacitor element and had no port stamps, so (a) the
+  node behind an input coupling cap read as an island — a false positive on
+  essentially every guitar pedal (39 decks in the corpus) — and (b) terminals
+  that do not conduct at DC held islands together, hiding real defects: an
+  op-amp input (`RIN` defaults to `+inf`), a MOSFET gate, a JFET gate and a tube
+  grid are all open at DC. A cap-coupled non-inverting op-amp input whose bias
+  resistor was typo'd away read as "connected to the output" and passed clean.
+  Both are corrections, not tuning. Across the 418-deck circuits corpus the
+  island count fell 50 → 11, and two previously silent cases surfaced
+  (`basic-bitch`, `sad-bastard`: a resistive band-sum feeding a cathode-follower
+  grid with no grid-leak resistor).
+
+Generated DSP is unaffected: the pass reads the netlist and never modifies it.
+`examples/passive-eq1a.cir` emits byte-identical code (bar the two provenance
+lines) and a byte-identical `simulate` WAV, and 10 corpus decks spot-checked
+across both solver routes are byte-identical.
+
+
 ## [0.1.8] - 2026-09-14
 
 A correctness-and-performance patch. It closes a class of silently-wrong DC

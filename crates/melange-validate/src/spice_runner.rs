@@ -134,98 +134,49 @@ impl SpiceData {
 /// each one's nodes.
 ///
 /// A *floating cap-only DC island* is a set of nodes connected to the rest of
-/// the circuit and to ground ONLY through capacitors (open at DC). ngspice's DC
-/// operating-point solve is singular over such an island; the `rshunt=1e12`
-/// option injected into the reference deck regularizes it (matching melange's
-/// own per-node gmin) so the deck now converges and validates. That silently
-/// turns what used to be a hard DC-non-convergence abort into a quiet pass — so
-/// a genuine wiring defect (a node that lost its only real resistor and is now
-/// accidentally cap-only) would regularize and pass unnoticed. Naming the
-/// islands lets the author confirm the intended coupling-cap islands and catch
-/// the accidental ones.
+/// the circuit and to ground ONLY through elements that are open at DC.
+/// ngspice's DC operating-point solve is singular over such an island; the
+/// `rshunt=1e12` option injected into the reference deck regularizes it
+/// (matching melange's own per-node gmin) so the deck now converges and
+/// validates. That silently turns what used to be a hard DC-non-convergence
+/// abort into a quiet pass — so a genuine wiring defect (a node that lost its
+/// only real resistor and is now accidentally cap-only) would regularize and
+/// pass unnoticed. Naming the islands lets the author confirm the intended
+/// coupling-cap islands and catch the accidental ones.
 ///
-/// Method: union-find over the nodes of every **non-capacitor** element
-/// (resistors, inductors, DC sources, and all active devices are DC-connective;
-/// only capacitors are open at DC). Every node seen anywhere is registered, so a
-/// node touched exclusively by capacitors forms its own singleton island. Any
-/// connected component that does not contain the ground node `"0"` is a floating
-/// cap-only DC island.
+/// **The analysis is not local any more.** This used to be a private union-find
+/// here that unioned every terminal of every non-capacitor element and knew
+/// nothing about the input port — which gave it a false positive on the input
+/// node of every cap-coupled deck (the whole guitar-pedal category) and false
+/// negatives wherever a terminal that does not conduct at DC held an island
+/// together (an op-amp input, a FET gate, a tube grid). It is now a consumer of
+/// `melange_solver::topology`, which models the DC graph melange actually
+/// stamps, port conductance included. Only the framing below is validate's own,
+/// because only validate knows about `rshunt`.
 ///
-/// Best-effort: if the deck cannot be parsed, the scan is skipped silently — its
-/// job is to add a warning, never to fail a validation that would otherwise run.
-fn warn_floating_cap_only_islands(deck_content: &str) {
-    use melange_solver::parser::{Element, Netlist};
+/// `input_node` is the node the harness attaches its Thevenin PWL drive to, and
+/// therefore a real DC path to ground on both sides of the comparison.
+///
+/// Best-effort: if the deck cannot be parsed, the scan is skipped silently —
+/// its job is to add a warning, never to fail a validation that would otherwise
+/// run.
+fn warn_floating_cap_only_islands(deck_content: &str, input_node: &str) {
+    use melange_solver::parser::Netlist;
+    use melange_solver::topology::{self, Finding, Ports};
 
     let netlist = match Netlist::parse(deck_content) {
         Ok(n) => n,
         Err(_) => return,
     };
 
-    // Minimal union-find keyed by node name.
-    let mut index: HashMap<String, usize> = HashMap::new();
-    let mut parent: Vec<usize> = Vec::new();
-
-    let intern = |name: &str, index: &mut HashMap<String, usize>, parent: &mut Vec<usize>| {
-        if let Some(&i) = index.get(name) {
-            i
-        } else {
-            let i = parent.len();
-            parent.push(i);
-            index.insert(name.to_string(), i);
-            i
-        }
-    };
-
-    fn find(parent: &mut [usize], mut x: usize) -> usize {
-        while parent[x] != x {
-            parent[x] = parent[parent[x]]; // path halving
-            x = parent[x];
-        }
-        x
-    }
-
-    for elem in &netlist.elements {
-        let elem_nodes = elem.nodes();
-        // Register every node so cap-only nodes exist as singletons.
-        let ids: Vec<usize> = elem_nodes
-            .iter()
-            .map(|n| intern(n, &mut index, &mut parent))
-            .collect();
-        // Capacitors are open at DC: they do NOT connect their nodes here.
-        if matches!(elem, Element::Capacitor { .. }) {
+    let ports = Ports::declared([input_node.to_string()], std::iter::empty());
+    for finding in topology::check(&netlist, &ports) {
+        let Finding::FloatingIsland { nodes } = finding else {
+            // Dangling terminals are refused on the melange side of the
+            // comparison (`run_melange_solver_from_str`), where the refusal
+            // can stop the run instead of footnoting it.
             continue;
-        }
-        // Union all terminals of this DC-connective element together.
-        for pair in ids.windows(2) {
-            let a = find(&mut parent, pair[0]);
-            let b = find(&mut parent, pair[1]);
-            if a != b {
-                parent[a] = b;
-            }
-        }
-    }
-
-    // Nothing to check if the deck has no nodes (or no ground reference at all).
-    let ground_root = match index.get("0") {
-        Some(&g) => find(&mut parent, g),
-        // No ground node in the deck: every node is technically floating, but
-        // that is a different (and rarer) pathology; do not spam. Skip.
-        None => return,
-    };
-
-    // Group nodes by their component root, excluding the ground component.
-    let mut components: std::collections::BTreeMap<usize, Vec<String>> =
-        std::collections::BTreeMap::new();
-    for (name, &id) in &index {
-        let root = find(&mut parent, id);
-        if root == ground_root {
-            continue;
-        }
-        components.entry(root).or_default().push(name.clone());
-    }
-
-    for (_root, mut nodes) in components {
-        nodes.sort();
+        };
         log::warn!(
             "validate: auto-regularized floating cap-only DC island {{{}}} — \
              ngspice would go singular here; rshunt covers it. Confirm this is an \
@@ -883,7 +834,7 @@ pub fn run_transient_with_thevenin_pwl(
     // the Thevenin/PWL injection that melange's own parser rejects; this
     // reflects the current switch state that produced this reference) and name
     // any such island so intended ones are confirmed and accidental ones caught.
-    warn_floating_cap_only_islands(netlist_content);
+    warn_floating_cap_only_islands(netlist_content, input_node);
 
     // Substitute each dynamic (`.pot`/`.wiper`/`.switch`) element's melange-DEFAULT
     // value into its element line so ngspice solves the SAME circuit melange does at

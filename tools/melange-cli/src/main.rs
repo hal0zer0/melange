@@ -1723,6 +1723,19 @@ fn compile_circuit_source(
         println!("  ✓ Expanded {} subcircuit definition(s)", num_subcircuits);
     }
 
+    // Topology gate: the wiring defects a solver cannot see. A typo'd node
+    // name invents a node and floats whatever it was on, and every number
+    // melange prints afterwards is correct for the circuit it was handed. One
+    // implementation for every verb — `melange_solver::topology`.
+    melange_solver::pipeline::topology_gate(
+        &netlist,
+        &melange_solver::topology::Ports::declared(
+            input_node_names_owned.clone(),
+            output_node.split(',').map(|s| s.trim().to_string()),
+        ),
+        &|m| println!("{m}"),
+    )?;
+
     println!("  ✓ Parsed {} elements", netlist.elements.len());
 
     // Step 2: Build MNA system
@@ -3669,6 +3682,20 @@ fn simulate_circuit_source(
             .expand_subcircuits()
             .with_context(|| "Failed to expand subcircuits")?;
     }
+
+    // Topology gate: the wiring defects a solver cannot see. A typo'd node
+    // name invents a node and floats whatever it was on, and every number
+    // melange prints afterwards is correct for the circuit it was handed. One
+    // implementation for every verb — `melange_solver::topology`.
+    melange_solver::pipeline::topology_gate(
+        &netlist,
+        &melange_solver::topology::Ports::declared(
+            opts.input_node.split(',').map(|s| s.trim().to_string()),
+            opts.output_node.split(',').map(|s| s.trim().to_string()),
+        ),
+        &|m| println!("{m}"),
+    )?;
+
     println!("  {} elements", netlist.elements.len());
 
     // Apply `--pot NAME=VALUE` and settle un-overridden pots onto their `.pot`
@@ -4351,6 +4378,19 @@ fn analyze_freq_response(
             .expand_subcircuits()
             .with_context(|| "Failed to expand subcircuits")?;
     }
+
+    // Topology gate: the wiring defects a solver cannot see. A typo'd node
+    // name invents a node and floats whatever it was on, and every number
+    // melange prints afterwards is correct for the circuit it was handed. One
+    // implementation for every verb — `melange_solver::topology`.
+    melange_solver::pipeline::topology_gate(
+        &netlist,
+        &melange_solver::topology::Ports::declared(
+            input_node_name.split(',').map(|s| s.trim().to_string()),
+            output_node_name.split(',').map(|s| s.trim().to_string()),
+        ),
+        &|m| eprintln!("{m}"),
+    )?;
 
     // Apply pot overrides (and settle un-overridden pots onto their `.pot`
     // defaults) before building the MNA. Shared with `simulate` so one knob
@@ -5460,6 +5500,22 @@ fn list_nodes_source(circuit_source: &circuits::CircuitSource) -> Result<()> {
             .with_context(|| "Failed to expand subcircuits")?;
     }
 
+    // Topology gate: the wiring defects a solver cannot see. A typo'd node
+    // name invents a node and floats whatever it was on, and every number
+    // melange prints afterwards is correct for the circuit it was handed. One
+    // implementation for every verb — `melange_solver::topology`.
+    // `nodes` takes no `-i`/`-o`, so the gate can only warn here, which is the
+    // point: this is the command a user reaches for to FIND the typo, so it
+    // has to stay usable on a deck that has one. `Ports::inferred` guesses the
+    // input port from a node named `in` — enough to keep the report free of
+    // input-coupling-cap islands the other verbs do not see, never enough to
+    // refuse.
+    melange_solver::pipeline::topology_gate(
+        &netlist,
+        &melange_solver::topology::Ports::inferred(&netlist),
+        &|m| println!("{m}"),
+    )?;
+
     let mna = MnaSystem::from_netlist(&netlist).with_context(|| "Failed to build MNA system")?;
 
     // Unrecognized `.model` keys. `compile`/`simulate`/`analyze` hard-error on
@@ -5603,6 +5659,20 @@ fn run_dc_op(
             .expand_subcircuits()
             .with_context(|| "Failed to expand subcircuits")?;
     }
+
+    // Topology gate: the wiring defects a solver cannot see. A typo'd node
+    // name invents a node and floats whatever it was on, and every number
+    // melange prints afterwards is correct for the circuit it was handed. One
+    // implementation for every verb — `melange_solver::topology`.
+    // `dc-op` has no `--output-node`, so the gate can only warn here — see
+    // `topology::Finding::severity`. It DOES know its input port (explicit
+    // `-i`, else the `in` fallback this verb already documents below), and the
+    // input conductance is stamped at that node, so it belongs in the graph.
+    let gate_ports = match requested_input.clone() {
+        Some(name) => melange_solver::topology::Ports::inputs_only([name]),
+        None => melange_solver::topology::Ports::inferred(&netlist),
+    };
+    melange_solver::pipeline::topology_gate(&netlist, &gate_ports, &|m| println!("{m}"))?;
 
     // Resolve input resistance: CLI flag > .input_impedance directive > 1Ω
     // default — matching compile/simulate/analyze. (The flag used to be
