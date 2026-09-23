@@ -60,3 +60,6 @@ local-docs/
 AGENTS.md
 # Chart/scratch output from another agent session.
 tools/viz/
+
+# KiCad per-user local settings — not project state
+*.kicad_prl
