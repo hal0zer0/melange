@@ -33,6 +33,46 @@ codegen output, CLI flags, and netlist semantics may all change.
   - A declared input or output port counts as a connection, and `.tap` /
     `.inject` / a node sensed in a behavioral `B` expression do too.
 
+- **`simulate` says so when it renders digital silence.** The peak was already
+  computed and printed; it is now reacted to. Warns when the output peak is
+  finite and below 1e-6 V (−120 dBFS) — a threshold rather than `== 0.0`,
+  because a floated stage can settle on a denormal. NaN/Inf are deliberately not
+  silence: a diverged solve is a different failure with its own counters. A
+  zero-amplitude drive is not reported. The message uses `max_abs_v_prev` to
+  separate "nothing in the circuit moved" from "the circuit is live but the
+  output tap is not connected to it".
+
+- **`melange validate` refuses decks the two engines would read differently.**
+  ngspice takes a value's mantissa, applies a scale letter only if one
+  immediately follows, and silently discards the rest of the token — so it reads
+  `4k7` as 4000 against melange's 4700, and `2M2` as 0.002 against 2.2e6. A
+  correlation between those two circuits is meaningless, and before this an RC
+  lowpass using `4k7` reported `Correlation: 0.99924891 … FAILED` and invited the
+  user to go investigate the solver. The guard computes both engines' actual
+  readings and flags only a genuine disagreement in value position, so the
+  corpus's `2N3904`, `1N4148` and `6K7` device names do not trip it (verified
+  across 437 decks). The same check catches a trailing `f`, which melange reads
+  as the Farad unit and ngspice as femto.
+
+- **`melange validate` refuses devices ngspice cannot simulate**, instead of
+  writing them into the reference deck and relaying ngspice's complaint — which
+  pointed at the user's own correct `.model` card. Covers op-amps (`U`/`OA`),
+  LDRs (`O`/`LDR`), VCAs (`Y`/`VCA`) and glow tubes (`N`/`NEON`), and explains
+  how to hand-expand an op-amp as the VCCS macromodel the shipped validation
+  decks already use. Triodes and pentodes are **not** listed: they translate to
+  Koren B-source subcircuits and do validate.
+
+- `simulate` gained `--pot` (previously `analyze`-only — for a distortion pedal
+  the Drive pot *is* the circuit), `--pcm16` for tools that cannot read float32
+  WAVs, and `dc-op` no longer requires a node named `in` to compute a bias point.
+
+- Generated plugin projects now document the `x86-64-v3` CPU baseline (a SIGILL
+  on pre-2013 hardware, not a graceful degradation) and where to change `NAME`,
+  `VENDOR`, `CLAP_ID` and `VST3_CLASS_ID` before release — two melange plugins
+  sharing a class id collide in a DAW. Pot struct fields are named from their
+  labels (`pot_tone`, not `pot_0`) while `#[id = "pot_N"]` is unchanged, being
+  the persisted automation identity.
+
 ### Changed
 
 - **The floating-island scan in `melange validate` was wrong in both
@@ -53,6 +93,86 @@ Generated DSP is unaffected: the pass reads the netlist and never modifies it.
 `examples/passive-eq1a.cir` emits byte-identical code (bar the two provenance
 lines) and a byte-identical `simulate` WAV, and 10 corpus decks spot-checked
 across both solver routes are byte-identical.
+
+- **`melange validate` compares at nominal values.** `.tolerance` jitters passive
+  values in the parser and `.mismatch` jitters device params in codegen, both on
+  melange's side only, while the ngspice reference deck kept the values as
+  written. Validate was correlating a jittered circuit against a nominal one and
+  reporting the number as authoritative — on `examples/passive-eq1a.cir`, 16
+  emitted device constants apart, with `MU` off by 7.6%. This was already the
+  documented contract; only the automation was missing. Unit variation is now
+  disabled on the melange side for the duration of a validate run, and the result
+  line says so: `PASSED ✓ (nominal values: .mismatch T disabled for this
+  comparison; seed 4142 not exercised)`. Decks with no jitter directives print
+  exactly as before. `compile`/`simulate`/`analyze` are unchanged — jitter still
+  applies there.
+
+- **Normal-path routing output no longer reads as a fault.** `N=52, M=8, solver:
+  multi-transformer circuit (3 groups, DK K matrix unstable)` on the flagship
+  example had a first-time user asking whether he had broken the demo. Routing is
+  now prefixed `info (normal):` and says why the DK route was not the fit, with
+  the maintainer detail kept verbatim. `Skipping BJT internal-node expansion` was
+  gated on the K diagonal alone and printed on decks with no BJT at all,
+  including that same four-tube example.
+
+- **The three different `N` now say what they count.** The same circuit reported
+  41 nodes (`nodes`), `N=40` (`dc-op`) and `N=52` (`analyze`/`compile`) with no
+  explanation; `compile`'s summary also contradicted its own output three lines
+  above. They are respectively ground plus circuit nodes, circuit nodes excluding
+  ground, and those plus one constraint row per voltage source and inductor
+  winding.
+
+- `--pot` refuses values outside the pot's declared range instead of accepting
+  them silently. `analyze` would previously characterise `LF Boost=1e9` — 100000×
+  over the declared `100..10000` — a knob position the generated plugin can never
+  reach. Switch positions were already range-checked.
+
+- Unknown `.model` parameters are now checked from one table rather than nine
+  inline lists, unreferenced `.model` cards are checked at all, `melange nodes`
+  reports unknown keys (it stops before codegen, where the hard error lives), and
+  the VCA arm no longer reported the honored `THD` as unrecognized. The tables are
+  bound to the resolvers by mutation-tested drift guards.
+
+### Fixed
+
+- **Parse errors reported "line 0".** Two defects: 52 error sites never carried a
+  line, and the counter counted processed lines, so continuation (`+`) joining
+  reported every later error N−1 lines early. Whole-file conditions that have no
+  single line now print `Parse error:` rather than claiming line 0.
+
+- **Value errors explain rather than restate.** `1R5`/`10R` remain rejected, and
+  the message now says why: ngspice reads `1R5` as 1 Ω, so honouring the BS 1852
+  ohms marker would make melange and the ngspice run behind `melange validate`
+  simulate different circuits. A test measures every form named in the message
+  against the parser so the two cannot drift apart.
+
+- A netlist referencing no ground node warns instead of silently converging
+  against a reference melange picked for itself.
+
+- `melange import` printed `kicad-cli: 7.0.11` and then failed with a bare
+  "Failed to load schematic file" — so a user concludes their *schematic* is
+  broken and redraws it. It now gates on the version it already detected and
+  explains that the `.kicad_sch` format melange targets needs KiCad 8+.
+
+- The post-compile hint echoed a `--format code` file path as the plugin project
+  *directory*; `--opamp-rail-mode` help and error text omitted `active-set-be`,
+  which the parser has always accepted; node lists in error output were
+  hash-ordered and differed between runs; and `DIAG:peak` was printed with `{:.6}`,
+  so the CLI could not see an output peak below ~5e-7 V.
+
+- **Docs.** The README never linked `NETLIST_GUIDE.md` (zero occurrences) and
+  linked `GETTING_STARTED.md` once, behind link text reading "`simulate --help`";
+  told you to build debug (1.3 GB vs 493 MB) with no mention of `--release`; and
+  buried the hard KiCad 8+ requirement 300 lines down under "Optional:". The
+  op-amp parameter table listed 4 of 17 accepted parameters, omitting the
+  `VCC`/`VEE` the front page advertises, and did not say that a default op-amp
+  cannot clip. Both guides labelled the infix value notation "BS-1852" while
+  implementing only the SI-prefix half of it, without saying the `R` marker is
+  rejected. `docs/limitations.md` was audited against the source: ~12 stale or
+  wrong claims corrected, an unattributed benchmark figure removed, and the open
+  conductance-swap transient documented for the first time. The README also
+  claimed core saturation via `ISAT=` on transformer windings, which the aidoc
+  calls physically wrong, unvalidated and unused.
 
 
 ## [0.1.8] - 2026-09-14
