@@ -1,0 +1,52 @@
+Overdrive pedal (op-amp gain stage + diode clipper) - native U element
+* Same TS808-topology circuit as ../tube_screamer, written in melange's own
+* `U` syntax instead of hand-expanding the op-amp macromodel. This is the
+* circuit class the README's performance table advertises ("Overdrive pedal |
+* op-amp gain + diode clipper") and the one a first-user actually writes.
+*
+* opamp_translate.rs emits the ngspice reference:
+*   GOA_U1 n_clip 0 n_inv n1 <AOL/ROUT>   +   ROA_U1 n_clip 0 <ROUT>
+* which is the same macromodel the hand-expanded deck spells out by hand as
+*   G1 0 n_clip n1 n_inv 2666.667         +   Rout n_clip 0 75
+*
+* No VCC/VEE/VSAT/GBW/SR: the clipping here is done by D1/D2 in the feedback
+* path, which BOTH engines model. Declaring supply rails would add a melange-
+* only post-NR clamp the linear reference has no equivalent for, and
+* opamp_translate::check_rail_probes would (correctly) refuse the run.
+
+* --- Input coupling ---
+Cin in n1 0.047u
+R_pull n1 0 1Meg
+
+* --- Non-inverting clipping amplifier ---
+* V+ = n1 (audio), V- = n_inv (feedback junction), output = n_clip
+U1 n1 n_inv n_clip OA_TS
+.model OA_TS OA(AOL=200000 ROUT=75)
+
+* --- Inverting input ground impedance ---
+R4 n_inv n_gnd 4.7k
+C3 n_gnd 0 0.047u
+
+* --- Feedback path ---
+R_drive n_clip n_inv 551k
+D1 n_clip n_inv D1N4148
+D2 n_inv n_clip D1N4148
+C4 n_clip n_inv 51p
+
+* --- Tone control ---
+R7 n_clip n_tone 1k
+C5 n_tone 0 0.22u
+
+* --- Output coupling ---
+C_out n_tone out 0.1u
+R_out out 0 1Meg
+
+* --- Models ---
+.model D1N4148 D(IS=2.52e-9 RS=0.568 N=1.752)
+
+* --- Simulation ---
+.OPTIONS INTERP
+.TRAN 0.208333u 10m
+.PRINT TRAN V(out) V(in)
+
+.END

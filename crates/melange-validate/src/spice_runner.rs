@@ -882,23 +882,87 @@ pub fn run_transient_with_thevenin_pwl(
     // parser cannot re-parse — while rewriting the (triode-)translated string.
     let translated =
         crate::pentode_translate::translate_pentodes_for_ngspice(&translated, netlist_content)?;
+
+    // An explicit `.model OA(AOL_TRANSIENT_CAP=…)` makes melange's TRANSIENT G
+    // matrix carry a different Gm than its own DC stamp (`codegen::ir::
+    // opamp_ir_from_info` subtracts `delta_Gm`). One ngspice `G` card has one
+    // transconductance, so whichever we emit is wrong for one of the two
+    // phases. Refuse before ngspice runs rather than pick.
+    let capped = crate::opamp_translate::transient_aol_cap_opamps(netlist_content);
+    if !capped.is_empty() {
+        let list = capped
+            .iter()
+            .map(|(name, model, cap)| format!("{name} (.model {model}, AOL_TRANSIENT_CAP={cap})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(SpiceError::DeckNotComparable(format!(
+            "op-amp {list} caps the open-loop gain for the transient solve only, so melange's \
+             transient G matrix uses a different Gm than its DC operating point. The ngspice \
+             reference has one transconductance for both, so no single reference deck matches \
+             melange in both phases. Remove `AOL_TRANSIENT_CAP=` for the validation run — it is a \
+             conditioning aid for precision-rectifier topologies, not part of the circuit."
+        )));
+    }
+
+    // Translate any melange op-amp (`U`) elements into the linear VCCS
+    // macromodel melange itself stamps (`G` + output `R`, plus RIN/IB when the
+    // `.model` sets them). No-op when the deck has no `U` card — including the
+    // shipped decks that hand-expanded their op-amps. See opamp_translate.rs.
+    let translated =
+        crate::opamp_translate::translate_opamps_for_ngspice(&translated, netlist_content)?;
+
+    // The VCCS twin is LINEAR: it has no VCC/VEE rail clamp and no SR slew
+    // clamp. Watch each such op-amp's output node on the reference trace so a
+    // correlation is never reported across a clamp event melange applied and
+    // ngspice did not. Parsed from the PRISTINE deck, for the same reason the
+    // pentode pass is.
+    let rail_probes = crate::opamp_translate::rail_probes(netlist_content);
+    let mut capture: Vec<String> = nodes_to_capture.to_vec();
+    for p in &rail_probes {
+        if !capture
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(p.node.as_str()))
+        {
+            capture.push(p.node.clone());
+        }
+    }
+
     let modified = inject_thevenin_pwl(&translated, input_node, pwl_data, series_resistance)?;
-    run_transient(
-        modified.netlist_path.as_path(),
-        tstep,
-        tstop,
-        nodes_to_capture,
-    )
+    let spice_data = run_transient(modified.netlist_path.as_path(), tstep, tstop, &capture)?;
+    crate::opamp_translate::check_rail_probes(&rail_probes, &spice_data.voltages, tstep)?;
+    Ok(spice_data)
 }
 
 /// Parse ngspice printed output format (from .PRINT TRAN statements)
 ///
 /// This handles the ASCII table output format that ngspice produces when
 /// running with .PRINT statements in the netlist.
+///
+/// ngspice prints **at most three data columns per table**. A `.PRINT` naming
+/// more vectors than that is emitted as consecutive *column blocks*, each one
+/// repeating the whole row range for its own subset of vectors (and each block
+/// repeating its own header every ~50 rows for pagination):
+///
+/// ```text
+/// Index   time   v(n1)  v(n2)  v(n3)      <- block 1, rows 0..N
+/// Index   time   v(n1)  v(n2)  v(n3)      <- same block, page 2
+/// Index   time   v(n4)  v(n5)  v(n6)      <- block 2, rows 0..N again
+/// ```
+///
+/// So a repeated header means "keep going" only when the column set is
+/// unchanged; a *different* column set restarts the row range, and its `time`
+/// column is a duplicate of one already collected. Appending it (as this
+/// function did before op-amp rail probes made >3-column captures reachable)
+/// left `time` a multiple of the trace length while each voltage stayed at the
+/// true length — a silent length mismatch downstream.
 fn parse_printed_output(output: &str, expected_nodes: &[String]) -> Result<SpiceData, SpiceError> {
     let mut spice_data = SpiceData::default();
     let mut column_names: Vec<String> = Vec::new();
     let mut in_data_section = false;
+    // Row index within the CURRENT column block. `time` is recorded only while
+    // this outruns what has already been collected, i.e. only for the first
+    // block (and for a later block that is somehow longer).
+    let mut row_idx = 0usize;
 
     for line in output.lines() {
         let trimmed = line.trim();
@@ -912,12 +976,13 @@ fn parse_printed_output(output: &str, expected_nodes: &[String]) -> Result<Spice
         if trimmed.starts_with("Index") && trimmed.contains("time") {
             // Parse header to get column names
             let parts: Vec<&str> = trimmed.split_whitespace().collect();
-            column_names.clear();
-            for (i, part) in parts.iter().enumerate() {
-                if i == 0 {
-                    continue; // Skip "Index"
-                }
-                column_names.push(part.to_string());
+            let new_names: Vec<String> = parts.iter().skip(1).map(|p| p.to_string()).collect();
+            // Same columns as the header before it: pagination inside one
+            // block, so the row counter carries on. Different columns: a new
+            // block, which restarts at row 0.
+            if new_names != column_names {
+                row_idx = 0;
+                column_names = new_names;
             }
             in_data_section = true;
             continue;
@@ -941,7 +1006,10 @@ fn parse_printed_output(output: &str, expected_nodes: &[String]) -> Result<Spice
             if parts.len() >= 2 {
                 // First column is index, second is time
                 if let Ok(time) = parts[1].parse::<f64>() {
-                    spice_data.time.push(time);
+                    if spice_data.time.len() <= row_idx {
+                        spice_data.time.push(time);
+                    }
+                    row_idx += 1;
 
                     // Remaining columns are voltages
                     for (i, col_name) in column_names.iter().enumerate().skip(1) {
@@ -1027,6 +1095,85 @@ pub fn get_ngspice_version() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verbatim ngspice-42 batch output for a `.PRINT TRAN` naming 8 vectors.
+    /// ngspice prints at most three data columns per table, so this is three
+    /// column BLOCKS, each repeating rows 0..4. Captured by running the deck,
+    /// not hand-written — the parser has to survive what ngspice really emits.
+    const MULTI_BLOCK: &str = "\
+No. of Data Rows : 5
+                               * many column test
+                               Transient Analysis  Wed Sep 23 09:00:41  2026
+--------------------------------------------------------------------------------
+Index   time            v(n1)           v(n2)           v(n3)
+--------------------------------------------------------------------------------
+0\t0.000000e+00\t0.000000e+00\t0.000000e+00\t0.000000e+00
+1\t1.000000e-05\t6.279038e-02\t5.494158e-02\t4.709279e-02
+2\t2.000000e-05\t1.253329e-01\t1.096663e-01\t9.399969e-02
+3\t3.000000e-05\t1.873809e-01\t1.639583e-01\t1.405357e-01
+4\t4.000000e-05\t2.486899e-01\t2.176037e-01\t1.865174e-01
+
+                               * many column test
+                               Transient Analysis  Wed Sep 23 09:00:41  2026
+--------------------------------------------------------------------------------
+Index   time            v(n4)           v(n5)           v(n6)
+--------------------------------------------------------------------------------
+0\t0.000000e+00\t0.000000e+00\t0.000000e+00\t0.000000e+00
+1\t1.000000e-05\t3.924399e-02\t3.139519e-02\t2.354639e-02
+2\t2.000000e-05\t7.833307e-02\t6.266646e-02\t4.699984e-02
+3\t3.000000e-05\t1.171131e-01\t9.369045e-02\t7.026784e-02
+4\t4.000000e-05\t1.554312e-01\t1.243449e-01\t9.325871e-02
+
+                               * many column test
+                               Transient Analysis  Wed Sep 23 09:00:41  2026
+--------------------------------------------------------------------------------
+Index   time            v(n7)           v(n8)
+--------------------------------------------------------------------------------
+0\t0.000000e+00\t0.000000e+00\t0.000000e+00
+1\t1.000000e-05\t1.569760e-02\t7.848798e-03
+2\t2.000000e-05\t3.133323e-02\t1.566661e-02
+3\t3.000000e-05\t4.684523e-02\t2.342261e-02
+4\t4.000000e-05\t6.217247e-02\t3.108624e-02
+";
+
+    /// Before op-amp rail probes there was never more than one column block, so
+    /// the extra blocks' duplicate `time` column was appended and `time` came
+    /// out 3x the length of every voltage. Watching a clamped op-amp's output
+    /// node makes >3 captured vectors ordinary, so the blocks have to line up.
+    #[test]
+    fn multi_column_block_output_is_one_aligned_table() {
+        let nodes: Vec<String> = (1..=8).map(|i| format!("n{i}")).collect();
+        let data = parse_printed_output(MULTI_BLOCK, &nodes).expect("parse");
+        assert_eq!(data.time.len(), 5, "time must not repeat per column block");
+        for n in &nodes {
+            assert_eq!(data.voltages[n].len(), 5, "node {n}");
+        }
+        // Values landed under the right names, not shifted by a block.
+        assert_eq!(data.voltages["n1"][1], 6.279038e-02);
+        assert_eq!(data.voltages["n4"][1], 3.924399e-02);
+        assert_eq!(data.voltages["n8"][4], 3.108624e-02);
+        // Sample rate still derived from the first two time points.
+        assert!((data.actual_tstep - 1.0e-5).abs() < 1e-18);
+    }
+
+    /// A header repeated with the SAME columns is ngspice paginating one block
+    /// (every ~50 rows), not starting a new one — the row counter must carry on.
+    #[test]
+    fn repeated_identical_header_is_pagination_not_a_new_block() {
+        let paginated = "\
+Index   time            v(out)
+--------------------------------------------------------------------------------
+0\t0.000000e+00\t1.0
+1\t1.000000e-05\t2.0
+Index   time            v(out)
+--------------------------------------------------------------------------------
+2\t2.000000e-05\t3.0
+3\t3.000000e-05\t4.0
+";
+        let data = parse_printed_output(paginated, &["out".to_string()]).expect("parse");
+        assert_eq!(data.time.len(), 4);
+        assert_eq!(data.voltages["out"], vec![1.0, 2.0, 3.0, 4.0]);
+    }
 
     #[test]
     fn test_normalize_node_name() {

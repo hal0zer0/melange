@@ -1,0 +1,27 @@
+* Op-Amp Inverting Amplifier (native U element)
+* Gain = -R2/R1 = -100k/10k = -10
+* Identical circuit to ../opamp_inverting, written in melange's own `U` syntax
+* instead of hand-expanding the macromodel. opamp_translate.rs emits the
+* `G` + `Rout` pair below for the ngspice reference, so the two decks must
+* validate to the same number.
+*
+* No VCC/VEE/VSAT/GBW/SR on the .model: those are melange's post-NR clamps,
+* which the linear reference twin has no equivalent for. Rail-free here means
+* melange's OpampRailMode::None, i.e. the pure linear VCCS both engines run.
+
+* Input coupling
+R1 in inv 10k
+R2 inv out 100k
+
+* Op-amp: AOL/ROUT gives Gm = 200000 S, 1/ROUT gives Go = 1 S
+U1 0 inv out OA_IDEAL
+.model OA_IDEAL OA(AOL=200000 ROUT=1)
+
+* Stabilization cap (needed for DK trapezoidal method)
+Cstab out 0 1p
+
+* Control statements
+.TRAN 1u 10m
+.PRINT TRAN V(out) V(in)
+
+.END

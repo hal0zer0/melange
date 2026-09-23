@@ -1,0 +1,39 @@
+Three op-amp stages with declared supply rails that no stage reaches
+* Two non-inverting gain-of-2 stages and a unity-gain output buffer, all
+* sharing one .model OA card, on the +/-4.5 V rails of a 9 V pedal supply.
+* 0.5 V in, 2 V out: the rails are declared but never engaged, which is the
+* ordinary case for a real pedal.
+*
+* Two jobs:
+*  1. Rails declared but not engaged must VALIDATE, not be refused. The guard is
+*     about the clamp firing, not about the `.model` mentioning a supply.
+*  2. Watching all three op-amp outputs makes this a 4-vector capture (the
+*     output node plus three probes). ngspice prints at most three data columns
+*     per table, so this deck is the one that actually makes the reference's
+*     printed table wrap into column blocks.
+
+Cin in n1 1u
+R_bias n1 0 1Meg
+
+U1 n1 n_f1 n_o1 OA9V
+R_g1 n_f1 0 10k
+R_f1 n_o1 n_f1 10k
+
+C_c n_o1 n2 1u
+R_bias2 n2 0 1Meg
+
+U2 n2 n_f2 n_o2 OA9V
+R_g2 n_f2 0 10k
+R_f2 n_o2 n_f2 10k
+
+U3 n_o2 n_o3 n_o3 OA9V
+
+C_out n_o3 out 1u
+R_out out 0 1Meg
+
+.model OA9V OA(AOL=200000 ROUT=75 VCC=4.5 VEE=-4.5)
+
+.TRAN 0.208333u 10m
+.PRINT TRAN V(out) V(in)
+
+.END

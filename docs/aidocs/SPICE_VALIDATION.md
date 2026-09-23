@@ -297,8 +297,25 @@ B-source `.subckt` twin for each one.
 | diode, BJT, JFET, MOSFET | native SPICE elements — validate directly |
 | triode (`T`) | via `tube_translate.rs` (sharp only, `svar = 0`) |
 | pentode (`P`) | via `pentode_translate.rs` — **added 2026-09-02**, sharp only, all 3 screen forms |
-| op-amp (`U`), VCA (`Y`), LDR (`O`) | **cannot** — "model type mismatch" |
+| op-amp (`U`) | via `opamp_translate.rs` — **added 2026-09-23**, linear VCCS twin; refuses per run if a rail or slew clamp engages |
+| VCA (`Y`), LDR (`O`), glow (`N`) | **cannot** — no ngspice model type, and each carries device state no primitive reproduces |
 | variable-mu tubes (`svar > 0`) | **cannot** — explicitly out of scope, errors |
+
+**The op-amp twin is melange's own macromodel, and it is linear.** melange's
+op-amp IS a VCCS (`Gm = AOL/ROUT` into the output node, `Go = 1/ROUT` to
+ground), so `opamp_translate.rs` emits exactly that as a `G` + `R` pair, plus
+`RIN`/`IB` when the `.model` sets them. What it does NOT emit is the post-NR
+rail clamp (VCC/VEE/VSAT, and the ±13 V default GBW triggers) or the `SR` slew
+clamp — no ngspice primitive reproduces `ActiveSetBe`'s pin-and-BE-resolve, and
+a clamp that does not match melange's *mode* exactly is worse than none. So the
+translator's scope limit is enforced per run rather than documented: each
+clamped op-amp's output node is added to the reference capture and
+`opamp_translate::check_rail_probes` refuses the comparison if the reference
+shows the clamp would have engaged. (Watching the reference suffices: the two
+engines follow one trajectory up to melange's first clamp, so the reference is
+also at the threshold on that sample.) `GBW` itself is deliberately not
+translated — melange computes `iir_c_dom` from it but no codegen path consumes
+it, so its only live effect is defaulting the rails.
 
 **The tube twin reproduces melange's OWN Koren equation.** It therefore
 cross-checks the SOLVER (NR + integration + timestep) against ngspice's given an

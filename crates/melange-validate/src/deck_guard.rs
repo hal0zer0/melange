@@ -24,11 +24,17 @@
 //!    validates a 4.7 kΩ circuit against a 4.0 kΩ circuit and blames the
 //!    difference on the solver.
 //!
-//! 2. **Devices ngspice has no element or model for** — melange's op-amp
-//!    (`U`/`OA`), LDR (`O`/`LDR`), VCA (`Y`/`VCA`) and glow-discharge
-//!    (`N`/`NEON`). melange writes them into the reference deck anyway and
-//!    relays ngspice's complaint, which points at the author's (correct)
-//!    `.model` line.
+//! 2. **Devices ngspice has no element or model for** — melange's LDR
+//!    (`O`/`LDR`), VCA (`Y`/`VCA`) and glow-discharge (`N`/`NEON`). melange
+//!    writes them into the reference deck anyway and relays ngspice's
+//!    complaint, which points at the author's (correct) `.model` line.
+//!
+//!    Op-amps (`U`/`OA`) used to be on this list and are not any more. That was
+//!    a missing translator, not a real limitation: melange's op-amp is a linear
+//!    VCCS macromodel, so `crate::opamp_translate` emits the same `G` + output
+//!    `R` pair melange stamps and the reference deck runs. Its scope limit —
+//!    the twin has no rail or slew clamp — is enforced per run by
+//!    `opamp_translate::check_rail_probes`, not by refusing the device class.
 //!
 //! A third class used to be *refused* here: `.tolerance` / `.mismatch` value
 //! jitter, which is applied on melange's side only. That refusal is gone — it
@@ -346,25 +352,24 @@ fn scan_ambiguous_values(deck: &str) -> Vec<DeckHazard> {
 /// Devices melange supports that ngspice has no element or model for.
 ///
 /// Verified by running each through `melange validate` against system ngspice
-/// 42 (see the module tests and the audit recorded there): `U`/`OA`, `O`/`LDR`,
-/// `Y`/`VCA` and `N`/`NEON` all abort the reference run. Triodes (`T`) and
-/// pentodes (`P`) are **not** listed: `tube_translate` / `pentode_translate`
-/// rewrite them into Koren/Reefman B-source subcircuits that ngspice accepts
-/// (`tests/data/triode_cc` validates at correlation 1.000000).
+/// 42 (see the module tests and the audit recorded there): `O`/`LDR`, `Y`/`VCA`
+/// and `N`/`NEON` all abort the reference run, and each carries device state
+/// (LDR attack/release, Blackmer log-antilog, glow ignition/extinction) no
+/// ngspice primitive reproduces.
+///
+/// Three melange devices are **not** listed because a translator gives ngspice
+/// an equivalent: triodes (`T`) and pentodes (`P`) via `tube_translate` /
+/// `pentode_translate` (Koren/Reefman B-source subcircuits;
+/// `tests/data/triode_cc` validates at correlation 1.000000), and op-amps
+/// (`U`/`OA`) via `opamp_translate` — melange's op-amp IS a linear VCCS
+/// macromodel, so `G` + output `R` reproduces its G-matrix stamp exactly. The
+/// one thing that stand-in cannot reproduce is melange's post-NR rail/slew
+/// clamping, and that is guarded dynamically rather than by refusing the whole
+/// device class: `opamp_translate::check_rail_probes` watches each clamped
+/// op-amp's output on the reference trace and refuses the comparison if the
+/// clamp would have engaged.
 fn classify_unsupported(elem: &Element) -> Option<(&str, &'static str, &'static str)> {
     match elem {
-        Element::Opamp { name, .. } => Some((
-            name,
-            "op-amp",
-            "ngspice has no op-amp element and no `OA` model type — it parses `U` as a \
-             uniform-RC line and then cannot find the model, so it blames your `.model` card, \
-             which is correct. To validate this circuit, hand-expand the op-amp on the ngspice \
-             side as its macromodel — a VCCS plus output resistance \
-             (`G<n> out 0 <in+> <in-> <AOL/ROUT>` + `R<n> out 0 <ROUT>`); see \
-             crates/melange-validate/tests/data/opamp_inverting/circuit.cir. That stand-in is \
-             linear: it does not reproduce melange's rail clamping, so keep the reference run \
-             inside the rails.",
-        )),
         Element::Ldr { name, .. } => Some((
             name,
             "LDR / photoresistor",
@@ -743,8 +748,12 @@ G1 o 0 a b 2666.667
         assert!(ambiguous_tokens(deck).is_empty(), "{:?}", scan_deck(deck));
     }
 
+    /// Op-amps came OFF the unsupported list once `crate::opamp_translate`
+    /// could emit melange's own VCCS macromodel for ngspice. A deck with a `U`
+    /// element must reach the reference run; the rail/slew scope limit is
+    /// enforced per run by `opamp_translate::check_rail_probes`, not here.
     #[test]
-    fn opamp_is_reported_unsupported() {
+    fn opamp_is_not_reported_unsupported() {
         let deck = "\
 title
 Rin in inv 10k
@@ -755,14 +764,11 @@ Cl out 0 1p
 ";
         let hazards = scan_deck(deck);
         assert!(
-            hazards.iter().any(|h| matches!(
-                h,
-                DeckHazard::UnsupportedDevice { name, kind, .. }
-                    if name == "U1" && *kind == "op-amp"
-            )),
+            !hazards
+                .iter()
+                .any(|h| matches!(h, DeckHazard::UnsupportedDevice { .. })),
             "{hazards:?}"
         );
-        assert!(format_refusal(&hazards).contains("no op-amp element"));
     }
 
     /// Jitter directives are no longer a refusal: validate disables them on the

@@ -1,0 +1,31 @@
+Op-amp gain stage driven into its supply rails
+* Non-inverting amplifier, gain = 1 + R_f/R_g = 1 + 10k/1k = 11, on the +/-4.5 V
+* rails an op-amp sees in a 9 V pedal, fed a 0.5 V sine. The wanted output is
+* ~5.5 V peak, so the op-amp spends part of every cycle pinned to a rail.
+*
+* Deliberately only just over the rail: the rail-free version of this same deck
+* has to stay inside the harness's 10 V output ceiling so it can be validated
+* as the escape hatch the refusal message points at.
+*
+* This deck exists to prove the SCOPE LIMIT of opamp_translate.rs is enforced,
+* not merely documented: melange clamps the output to VCC/VEE after each NR
+* solve, the ngspice reference twin is a linear VCCS with no clamp, and from the
+* first rail sample onward the two engines are running different circuits.
+* `validate` must refuse this deck, not report a correlation for it.
+
+Cin in n1 1u
+R_bias n1 0 1Meg
+
+U1 n1 n_inv n_out OA_RAILED
+.model OA_RAILED OA(AOL=200000 ROUT=75 VCC=4.5 VEE=-4.5)
+
+R_g n_inv 0 1k
+R_f n_out n_inv 10k
+
+C_out n_out out 1u
+R_out out 0 1Meg
+
+.TRAN 0.208333u 10m
+.PRINT TRAN V(out) V(in)
+
+.END

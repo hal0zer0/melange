@@ -755,6 +755,56 @@ fn test_opamp_inverting_vs_spice() {
     );
 }
 
+/// Test 5b: the SAME inverting amplifier written with a native `U` element.
+///
+/// `opamp_inverting` hand-expands the op-amp into `G` + `Rout` so that the ONE
+/// deck the harness gives both engines happens to be readable by ngspice. That
+/// is not how anyone writes a netlist, and until `opamp_translate` existed the
+/// native form was refused outright — which took `validate` away from the whole
+/// op-amp circuit class.
+///
+/// This deck is the native form. `opamp_translate` emits melange's own
+/// macromodel for the reference, so the two decks describe one circuit and must
+/// validate to the same number.
+#[test]
+#[ignore] // requires ngspice
+fn test_opamp_inverting_native_u_vs_spice() {
+    assert!(is_ngspice_available(), "ngspice not found");
+
+    println!("\n=== Op-Amp Inverting Amplifier (native U element) Validation ===");
+    println!("Circuit: Gain=-10, U1 + .model OA(AOL=200k ROUT=1)");
+
+    let result = run_validation("opamp_inverting_u", "out", &strict_linear_config())
+        .expect("Failed to run validation");
+
+    print_validation_metrics(&result);
+
+    assert!(
+        result.report.passed,
+        "Native-U op-amp validation failed:\n{}\nReport saved to: {:?}",
+        result.report.summary(),
+        result.html_report_path
+    );
+
+    // The translated deck has to land where the hand-expanded one does, not
+    // merely "pass": a translator that quietly emits a different circuit would
+    // still clear a 0.99 bar on a gain-of-10 inverter.
+    let hand = run_validation("opamp_inverting", "out", &strict_linear_config())
+        .expect("Failed to run hand-expanded validation");
+    assert!(
+        (result.report.correlation_coefficient - hand.report.correlation_coefficient).abs() < 1e-9,
+        "native-U correlation {:.10} != hand-expanded {:.10}",
+        result.report.correlation_coefficient,
+        hand.report.correlation_coefficient
+    );
+    assert!(
+        (result.report.normalized_rms_error - hand.report.normalized_rms_error).abs() < 1e-9,
+        "native-U normalized RMS {:.3e} != hand-expanded {:.3e}",
+        result.report.normalized_rms_error,
+        hand.report.normalized_rms_error
+    );
+}
+
 /// Test 6: JFET Common Source Amplifier
 ///
 /// N-channel JFET with self-bias. Tests the 2D Shichman-Hodges model.
@@ -1593,6 +1643,42 @@ fn test_tube_screamer_vs_spice() {
     );
 }
 
+/// The README's advertised overdrive pedal — op-amp gain stage + diode clipper
+/// — written the way a user writes it, with a `U` element and a `.model … OA`.
+///
+/// Same circuit as `tube_screamer`, which hand-expands the op-amp. The two are
+/// NOT expected to be bit-identical: with a real `U` element melange's DC
+/// operating-point solver caps the op-amp's open-loop gain at
+/// `AOL_DC_MAX = 1000` (`dc_op.rs`) for NR stability, which a hand-written
+/// `G`/`Rout` pair does not get. That is a melange-side DC-bias difference of
+/// order 1/AOL, not a translation error; the transient stamp is identical.
+#[test]
+#[ignore] // requires ngspice
+fn test_overdrive_pedal_native_u_vs_spice() {
+    assert!(is_ngspice_available(), "ngspice not found");
+
+    println!("\n=== Overdrive pedal (native U element) Validation ===");
+    println!("Circuit: U1 + .model OA(AOL=200k ROUT=75) + antiparallel diode clipping");
+
+    let result = run_validation("tube_screamer_u", "out", &nonlinear_config())
+        .expect("Failed to run validation");
+
+    print_validation_metrics(&result);
+
+    assert!(
+        result.report.passed,
+        "Native-U overdrive pedal validation failed:\n{}\nReport saved to: {:?}",
+        result.report.summary(),
+        result.html_report_path
+    );
+
+    assert!(
+        result.report.correlation_coefficient > 0.99,
+        "Correlation too low: {:.8}",
+        result.report.correlation_coefficient
+    );
+}
+
 #[test]
 #[ignore] // Requires ngspice
 fn test_tube_screamer_wiper_vs_spice() {
@@ -2000,5 +2086,130 @@ fn test_triode_cc_overdrive_vs_spice() {
         result.report.passed,
         "Triode CC overdrive validation failed:\n{}",
         result.report.summary()
+    );
+}
+
+/// The op-amp translator's scope limit, enforced rather than documented.
+///
+/// `opamp_translate` emits melange's op-amp as a LINEAR VCCS macromodel. That
+/// is exact right up until melange's post-NR rail clamp fires — after which the
+/// reference is running an unclamped circuit and any correlation between them
+/// measures the clamp, not the solver. `opamp_railed` is a gain-of-101 stage on
+/// ±9 V rails fed 0.5 V, so it sits on a rail for most of every cycle.
+///
+/// The run must fail, and the message must name the op-amp, the rail and the
+/// sample. A correlation number for this deck would be exactly the defect
+/// `deck_guard` was built to stop.
+#[test]
+#[ignore] // requires ngspice
+fn test_railed_opamp_is_refused_not_scored() {
+    assert!(is_ngspice_available(), "ngspice not found");
+
+    println!("\n=== Railed op-amp refusal ===");
+
+    let err = match run_validation("opamp_railed", "out", &nonlinear_config()) {
+        Err(e) => e,
+        Ok(r) => panic!(
+            "a deck whose op-amp rails must NOT produce a correlation, got {:.8}",
+            r.report.correlation_coefficient
+        ),
+    };
+    let msg = err.to_string();
+    println!("{msg}");
+
+    assert!(msg.contains("op-amp U1"), "{msg}");
+    assert!(msg.contains("rail"), "{msg}");
+    assert!(msg.contains("VCC") || msg.contains("VEE"), "{msg}");
+    // It has to say what to do about it, not just refuse.
+    assert!(msg.contains("OPAMP_RAIL_MODES.md"), "{msg}");
+}
+
+/// The same circuit with the rails taken off the `.model` card validates
+/// normally — the refusal above is about the CLAMP, not about op-amps.
+///
+/// This is the escape hatch the refusal message tells the author to use, so it
+/// has to actually work.
+#[test]
+#[ignore] // requires ngspice
+fn test_railfree_version_of_the_railed_deck_validates() {
+    assert!(is_ngspice_available(), "ngspice not found");
+
+    let deck = std::fs::read_to_string(test_data_dir().join("opamp_railed").join("circuit.cir"))
+        .expect("read railed deck");
+    let railfree = deck.replace(
+        ".model OA_RAILED OA(AOL=200000 ROUT=75 VCC=4.5 VEE=-4.5)",
+        ".model OA_RAILED OA(AOL=200000 ROUT=75)",
+    );
+    assert!(!railfree.contains("VCC=4.5"), "rail strip failed");
+
+    let pwl = load_pwl_file(&test_data_dir().join("opamp_railed").join("input_pwl.txt"))
+        .expect("read pwl");
+    let tstep = 1.0 / SAMPLE_RATE;
+    let duration = pwl.last().map(|(t, _)| *t).unwrap_or(0.01);
+
+    let spice_data = run_transient_with_thevenin_pwl(
+        &railfree,
+        tstep,
+        duration,
+        "in",
+        &pwl,
+        1.0,
+        &["out".to_string()],
+    )
+    .expect("rail-free deck must reach the reference run");
+
+    let mut spice_output = spice_data
+        .get_node_voltage("out")
+        .expect("out trace")
+        .to_vec();
+    let (stripped, _) = strip_vin_source(&railfree, "in");
+    let input_signal = resample_pwl_to_signal(&pwl, SAMPLE_RATE, spice_output.len());
+    let melange_output =
+        run_melange_codegen(&stripped, &input_signal, SAMPLE_RATE).expect("melange run");
+    dc_block_signal(&mut spice_output, SAMPLE_RATE);
+
+    let report = compare_signals(
+        &Signal::new(spice_output, SAMPLE_RATE, "SPICE"),
+        &Signal::new(melange_output, SAMPLE_RATE, "Melange"),
+        &strict_linear_config(),
+    );
+    println!(
+        "  rail-free gain-of-11 stage: corr {:.8}, rms {:.4}%",
+        report.correlation_coefficient,
+        report.normalized_rms_error * 100.0
+    );
+    assert!(
+        report.correlation_coefficient > 0.9999,
+        "rail-free op-amp should validate cleanly: corr {:.8}",
+        report.correlation_coefficient
+    );
+}
+
+/// Declared rails that are never reached must validate, and the four-vector
+/// capture that watching three op-amp outputs implies must survive ngspice's
+/// three-data-columns-per-table layout.
+///
+/// Refusing every deck whose `.model … OA` merely mentions a supply would take
+/// the op-amp class away again by the back door — a real pedal declares its
+/// rails and stays inside them. And a deck with two clamped op-amps is the
+/// first case where the reference's printed table wraps into column blocks, so
+/// this is the end-to-end cover for that path.
+#[test]
+#[ignore] // requires ngspice
+fn test_three_opamp_stages_with_unengaged_rails_validate() {
+    assert!(is_ngspice_available(), "ngspice not found");
+
+    println!("\n=== Three op-amp stages, rails declared but not engaged ===");
+
+    let result = run_validation("opamp_two_stage_rails", "out", &strict_linear_config())
+        .expect("rails that are never reached must not refuse the run");
+
+    print_validation_metrics(&result);
+
+    assert!(
+        result.report.passed,
+        "Three-stage op-amp validation failed:\n{}\nReport saved to: {:?}",
+        result.report.summary(),
+        result.html_report_path
     );
 }
