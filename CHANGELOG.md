@@ -24,10 +24,41 @@ would report a confident correlation between two circuits that were not the
 same circuit, in three separate ways. Those are the fixes that matter here —
 the rest is documentation and ergonomics.
 
-**Nothing in this release changes generated DSP.** Verified rather than
-asserted: across all 38 golden circuits, emitted code differs from the previous
-release only on comment lines, no circuit changed solver route or sub-path, and
-every A/B render is byte-identical.
+**One change in this release alters generated DSP**, and it is a fix you want:
+`8b5bd45` drops a double-counted `N_I . i_nl_prev` term from the backward-Euler
+fallback RHS. Emitted code changes wherever that path exists (the `rhs_be` lines
+and the `i_nl_prev` loop), but *rendered output* only changes on samples where
+the BE fallback actually fires — which is why it is invisible on most circuits.
+Where it does fire the difference is large and in the right direction: a
+`.switch`-kicked deck in the golden corpus went from a 260.18 V peak to 0.13 V,
+the `z = -1` ring that bug produced.
+
+Everything else is inert for generated code. Across all 38 golden circuits the
+remaining differences are comment lines only, no circuit changed solver route or
+sub-path, and every A/B render is byte-identical.
+
+> **Correction (2026-09-23, after tagging):** this section originally read
+> "Nothing in this release changes generated DSP", which was wrong. The
+> verification behind that sentence compared the release against the *start of
+> the work that produced it*, and `8b5bd45` predates that point — so it sat on
+> both sides of the comparison and was invisible to it. The comparison against
+> the previous *baseline* did catch its effect and attributed it correctly; the
+> summary sentence was simply scoped to the wrong interval. Reported by
+> melange-circuits, who saw the emitted diff on their own decks.
+
+### Also breaking, for anything that parses melange's output
+
+- **The compile/simulate summary line was reworded** (routing is now prefixed
+  `info (normal):` so it stops reading as a fault). Anything regexing that
+  output will break: `N`/`M`, the DK sub-path and the spectral radius moved. If
+  you scrape compile output, re-check your patterns.
+- **`simulate`'s `peak:` is now printed as `{:.6e}` instead of `{:.6}`.** This is
+  what lets the digital-silence warning report a real figure instead of
+  `0.000000`, but it also means any test gating on a tiny printed peak was
+  previously comparing against a rounded zero. melange-circuits found four of
+  their own silence locks had been vacuous since they were written — residuals
+  of 2.9e-12 to 1.9e-8 V all printed as `0.000000` on 0.1.8. The WAVs were
+  always correct; only the printed precision changed.
 
 ### Upgrading — two things to check
 
