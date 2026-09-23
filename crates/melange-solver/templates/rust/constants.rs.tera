@@ -33,7 +33,7 @@ pub const NUM_OUTPUTS: usize = {{ num_outputs }};
 pub const OUTPUT_NODES: [usize; NUM_OUTPUTS] = [{{ output_nodes_values }}];
 
 /// Node names in DC_OP index order — `NODE_NAMES[i]` is the netlist name of the
-/// node whose baked operating point is `DC_OP[i]` (openfarf thread 218). Rows
+/// node whose baked operating point is `DC_OP[i]`. Rows
 /// with no node name (augmented voltage-source / inductor branch-current rows)
 /// are `""`. Use `dc_op_by_name` for a name→voltage lookup.
 pub const NODE_NAMES: [&str; N] = [{{ node_names_values }}];
@@ -98,7 +98,7 @@ pub const TAP_NAMES: [&str; NUM_TAP] = [{{ tap_names_values }}];
 /// below, or a near-singular NR solve) and produces an astronomically
 /// large but technically finite value that would otherwise bypass every
 /// NaN guard and get written into `state.v_prev`/`i_nl_prev` for every
-/// subsequent sample. Justified against the melange-circuits corpus: the
+/// subsequent sample. Justified against real circuit decks: the
 /// highest real supply rail is 480 V (tube plate supplies); this is
 /// ~2000x above that, so no legitimate high-voltage circuit is at risk of
 /// being clipped. See docs/aidocs/DEBUGGING.md "finite runaway" entry.

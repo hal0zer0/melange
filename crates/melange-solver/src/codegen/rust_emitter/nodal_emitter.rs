@@ -2116,7 +2116,7 @@ impl RustEmitter {
              /// astronomically large but technically finite value that would\n\
              /// otherwise bypass every NaN guard and get written into `v_prev`/\n\
              /// `i_nl_prev` for every subsequent sample. ~2000x above the highest\n\
-             /// real supply rail in the melange-circuits corpus (480 V tube plate\n\
+             /// real supply rail seen in practice (480 V tube plate\n\
              /// supplies) — see docs/aidocs/DEBUGGING.md \"finite runaway\" entry.\n",
         );
         code.push_str("pub const STATE_MAX_PLAUSIBLE_MAGNITUDE: f64 = 1e6;\n\n");
@@ -2785,7 +2785,7 @@ impl RustEmitter {
         // dc_op_by_name is emitted only when DC_OP exists.
         code.push_str(
             "/// Node names in DC_OP index order — `NODE_NAMES[i]` is the netlist name of the\n\
-             /// node whose baked operating point is `DC_OP[i]` (openfarf thread 218). Rows\n\
+             /// node whose baked operating point is `DC_OP[i]`. Rows\n\
              /// with no node name (augmented voltage-source / inductor branch-current rows)\n\
              /// are `\"\"`. Use `dc_op_by_name` for a name\u{2192}voltage lookup.\n",
         );

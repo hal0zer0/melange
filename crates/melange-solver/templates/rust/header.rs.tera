@@ -37,7 +37,7 @@
 #![allow(clippy::reversed_empty_ranges)]
 #![allow(clippy::large_const_arrays)]
 #![allow(unused_variables)]
-// Multi-device decks also trip these (openphilicorda/openfarf, thread 184):
+// Multi-device decks also trip these:
 // `unused_mut` on emitter-declared scratch arrays only some device mix writes to
 // (e.g. nan_taps); `manual_memcpy` on index-copy loops the emitter produces.
 // Same self-maintaining rationale — an externally-added attribute rots.
