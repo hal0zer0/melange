@@ -1560,13 +1560,25 @@ pub struct Parameter {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ParseError {
+    /// 1-based line number in the **raw** netlist source (continuation lines
+    /// counted individually, so it matches what an editor shows).
+    ///
+    /// `0` means "no single source line is responsible" — a whole-file limit
+    /// (`MAX_NETLIST_BYTES`), or a post-expansion condition that no longer
+    /// belongs to one authored line. [`Display`](std::fmt::Display) omits the
+    /// line entirely in that case rather than printing a bogus "line 0", which
+    /// read as a real location and sent readers counting lines by hand.
     pub line: usize,
     pub message: String,
 }
 
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Parse error at line {}: {}", self.line, self.message)
+        if self.line == 0 {
+            write!(f, "Parse error: {}", self.message)
+        } else {
+            write!(f, "Parse error at line {}: {}", self.line, self.message)
+        }
     }
 }
 
@@ -1606,10 +1618,27 @@ pub const MELANGE_ONLY_DIRECTIVES: &[&str] = &[
 struct Parser {
     /// Pre-processed lines (after continuation joining and comment stripping)
     processed_lines: Vec<String>,
+    /// 1-based RAW source line each entry of `processed_lines` started on.
+    ///
+    /// Continuation joining (`+`) collapses several raw lines into one
+    /// processed line, so the processed index is NOT the source line number.
+    /// Counting processed lines put every error after the first `+` on the
+    /// wrong line.
+    source_lines: Vec<usize>,
     /// Current position in processed_lines
     pos: usize,
-    /// Line number tracking for error messages
+    /// Raw source line of the statement currently being parsed (0 = none yet).
     line_num: usize,
+    /// Raw source line(s) of each element, keyed by lowercased element name.
+    /// A `Vec` because duplicate-name diagnostics need the SECOND occurrence —
+    /// the offending one. Includes `K` coupling elements.
+    element_lines: std::collections::HashMap<String, Vec<usize>>,
+    /// Raw source line(s) of each `.model` card, keyed by lowercased name.
+    model_lines: std::collections::HashMap<String, Vec<usize>>,
+    /// Every dot-directive statement, as `(lowercased whitespace tokens, raw
+    /// source line)`, in source order. Post-parse validation resolves a
+    /// directive's line by matching its leading token and a named target.
+    directive_lines: Vec<(Vec<String>, usize)>,
 }
 
 /// Strip an inline comment (`;` or `$` to end of line) from a netlist line,
@@ -1632,9 +1661,13 @@ impl Parser {
         // Pre-process: join continuation lines and strip comments
         let raw_lines: Vec<&str> = input.lines().collect();
         let mut processed = Vec::new();
+        let mut source_lines = Vec::new();
         let mut i = 0;
 
         while i < raw_lines.len() {
+            // Raw source line this (possibly continuation-joined) statement
+            // starts on, 1-based to match every editor and `sed -n`.
+            let start_line = i + 1;
             // Strip inline comments (semicolon and $ delimiter), respecting
             // double-quoted regions (labels may legally contain ';' / '$').
             let line = strip_inline_comment(raw_lines[i]).trim();
@@ -1654,13 +1687,18 @@ impl Parser {
             }
 
             processed.push(accumulated);
+            source_lines.push(start_line);
             i += 1;
         }
 
         Self {
             processed_lines: processed,
+            source_lines,
             pos: 0,
             line_num: 0,
+            element_lines: std::collections::HashMap::new(),
+            model_lines: std::collections::HashMap::new(),
+            directive_lines: Vec::new(),
         }
     }
 
@@ -1710,15 +1748,21 @@ impl Parser {
                 break;
             }
 
+            // Raw source line of THIS statement, captured before parsing:
+            // `.subckt` consumes its whole body, leaving `line_num` on `.ends`.
+            let stmt_line = self.line_num;
+
             // Parse directive or element
             if line.starts_with('.') {
                 self.parse_directive(&line, &mut netlist)?;
+                self.record_statement(&line, stmt_line, &netlist);
             } else if line.starts_with('K') || line.starts_with('k') {
                 if netlist.couplings.len() >= 16 {
                     return Err(self.error("Maximum of 16 coupling (K) directives supported"));
                 }
                 let coupling = self.parse_coupling(&line)?;
                 netlist.couplings.push(coupling);
+                self.record_statement(&line, stmt_line, &netlist);
             } else {
                 // Pre-expansion element count cap. Subcircuit instances count
                 // as one element here; the post-expansion cap still applies
@@ -1733,11 +1777,13 @@ impl Parser {
                 let element = self.parse_element(&line)?;
                 validate_element_node_lengths(&element).map_err(|e| self.error(e))?;
                 netlist.elements.push(element);
+                self.record_statement(&line, stmt_line, &netlist);
             }
         }
 
         Self::expand_wipers(&mut netlist)?;
-        Self::validate_netlist(&netlist)?;
+        self.validate_netlist(&netlist)?;
+        Self::warn_if_no_ground(&netlist);
         // `.tolerance` jitter runs *after* validation so a bad netlist
         // fails with a clear schema error before we silently mutate
         // values the user wrote. No-op when all tolerances are zero.
@@ -1800,14 +1846,52 @@ impl Parser {
         }
     }
 
+    /// Warn when nothing in the deck references the ground node.
+    ///
+    /// MNA takes node 0 as the reference and deletes its row, so a deck that
+    /// never mentions `0` (or `gnd`/`ground`, which normalize to it) still
+    /// produces a square system — one whose solution is only defined up to an
+    /// arbitrary offset that melange picks silently. `dc-op` then reports
+    /// "Converged: true" and a KCL residual of ~1e-19, which reads as a
+    /// *verified* answer. ngspice refuses the same deck outright
+    /// ("no ground node found"); melange should at minimum say so.
+    ///
+    /// Warn rather than error: a fragment under test, a deck whose only ground
+    /// is inside a `.subckt` body, and a floating-supply topology are all
+    /// legitimate reasons to see no top-level `0`, and this runs before
+    /// subcircuit expansion. Subcircuit bodies are scanned too, so a ground
+    /// that lives only inside one does not trip the warning.
+    fn warn_if_no_ground(netlist: &Netlist) {
+        if netlist.elements.is_empty() {
+            return;
+        }
+        let touches_ground = |elems: &[Element]| {
+            elems
+                .iter()
+                .any(|e| e.nodes().iter().any(|n| n.trim() == "0"))
+        };
+        if touches_ground(&netlist.elements)
+            || netlist.subcircuits.iter().any(|sc| touches_ground(&sc.elements))
+        {
+            return;
+        }
+        log::warn!(
+            "no element references the ground node '0' — MNA is solving relative to a \
+             reference melange picked on its own, so node voltages are defined only up to \
+             an arbitrary offset and a DC operating point will report convergence on a \
+             circuit that has no ground. ngspice rejects this deck outright. Connect one \
+             node to '0' (or 'gnd'/'ground', which alias to it)."
+        );
+    }
+
     /// Post-parse validation: duplicate names, model references, pot targets.
-    fn validate_netlist(netlist: &Netlist) -> Result<(), ParseError> {
+    fn validate_netlist(&self, netlist: &Netlist) -> Result<(), ParseError> {
         // Check for duplicate component names (case-insensitive)
         let mut seen_names = std::collections::HashSet::new();
         for elem in &netlist.elements {
             if !seen_names.insert(elem.name().to_ascii_lowercase()) {
                 return Err(ParseError {
-                    line: 0,
+                    line: self.dup_line_of_element(elem.name()),
                     message: format!("Duplicate component name: '{}'", elem.name()),
                 });
             }
@@ -1820,7 +1904,7 @@ impl Parser {
         for model in &netlist.models {
             if !seen_model_names.insert(model.name.to_ascii_lowercase()) {
                 return Err(ParseError {
-                    line: 0,
+                    line: self.dup_line_of_model(&model.name),
                     message: format!(
                         "Duplicate .model name: '{}' is defined more than once",
                         model.name
@@ -1840,7 +1924,7 @@ impl Parser {
                     .find(|m| m.name.eq_ignore_ascii_case(model_ref));
                 let Some(model) = model else {
                     return Err(ParseError {
-                        line: 0,
+                        line: self.line_of_element(elem.name()),
                         message: format!(
                             "Component '{}' references model '{}' which is not defined",
                             elem.name(),
@@ -1888,7 +1972,7 @@ impl Parser {
                     };
                     if !ok {
                         return Err(ParseError {
-                            line: 0,
+                            line: self.line_of_element(elem.name()),
                             message: format!(
                                 "Component '{}' is a {} but references model '{}' of type '{}' \
                                  (expected one of: {})",
@@ -1917,7 +2001,7 @@ impl Parser {
             });
             if !exists {
                 return Err(ParseError {
-                    line: 0,
+                    line: self.line_of_directive(&[".pot", ".wiper"], &pot.resistor_name),
                     message: format!(
                         ".pot references resistor '{}' which was not found in the netlist",
                         pot.resistor_name
@@ -1962,7 +2046,7 @@ impl Parser {
                     .collect();
                 if shared.is_empty() {
                     return Err(ParseError {
-                        line: 0,
+                        line: self.line_of_directive(&[".wiper"], &wiper.resistor_cw),
                         message: format!(
                             ".wiper resistors '{}' and '{}' do not share a node (wiper terminal)",
                             wiper.resistor_cw, wiper.resistor_ccw
@@ -1989,7 +2073,7 @@ impl Parser {
                 });
                 if !exists {
                     return Err(ParseError {
-                        line: 0,
+                        line: self.line_of_directive(&[".switch"], comp_name),
                         message: format!(
                             ".switch references component '{}' which was not found in the netlist",
                             comp_name
@@ -2012,7 +2096,7 @@ impl Parser {
             });
             if claimed_by_switch {
                 return Err(ParseError {
-                    line: 0,
+                    line: self.line_of_element(&pot.resistor_name),
                     message: format!(
                         "Component '{}' is claimed by both a .pot/.wiper and a .switch directive — \
                          a component can only have one runtime-update mechanism",
@@ -2040,7 +2124,7 @@ impl Parser {
                 });
                 if !exists {
                     return Err(ParseError {
-                        line: 0,
+                        line: self.line_of_directive(&[".runtime"], &rt.vs_name),
                         message: format!(
                             ".runtime references voltage source '{}' which was not found in the netlist",
                             rt.vs_name
@@ -2050,7 +2134,7 @@ impl Parser {
                 let vs_key = rt.vs_name.to_ascii_uppercase();
                 if !seen_sources.insert(vs_key) {
                     return Err(ParseError {
-                        line: 0,
+                        line: self.line_of_directive(&[".runtime"], &rt.vs_name),
                         message: format!(
                             ".runtime declares voltage source '{}' more than once",
                             rt.vs_name
@@ -2059,7 +2143,7 @@ impl Parser {
                 }
                 if !seen_fields.insert(rt.field_name.clone()) {
                     return Err(ParseError {
-                        line: 0,
+                        line: self.line_of_directive(&[".runtime"], &rt.field_name),
                         message: format!(
                             ".runtime declares field name '{}' more than once",
                             rt.field_name
@@ -2099,7 +2183,7 @@ impl Parser {
                 });
                 if !exists {
                     return Err(ParseError {
-                        line: 0,
+                        line: self.line_of_directive(&[".runtime"], &rr.resistor_name),
                         message: format!(
                             ".runtime R references resistor '{}' which was not found in the netlist",
                             rr.resistor_name
@@ -2109,7 +2193,7 @@ impl Parser {
                 let rkey = rr.resistor_name.to_ascii_uppercase();
                 if pot_claimed.contains(&rkey) || wiper_claimed.contains(&rkey) {
                     return Err(ParseError {
-                        line: 0,
+                        line: self.line_of_directive(&[".runtime"], &rr.resistor_name),
                         message: format!(
                             ".runtime R resistor '{}' is already claimed by a .pot or .wiper directive",
                             rr.resistor_name
@@ -2118,7 +2202,7 @@ impl Parser {
                 }
                 if switch_claimed.contains(&rkey) {
                     return Err(ParseError {
-                        line: 0,
+                        line: self.line_of_directive(&[".runtime"], &rr.resistor_name),
                         message: format!(
                             ".runtime R resistor '{}' is already claimed by a .switch directive — \
                              a component can only have one runtime-update mechanism (both would \
@@ -2129,7 +2213,7 @@ impl Parser {
                 }
                 if !seen_resistors.insert(rkey) {
                     return Err(ParseError {
-                        line: 0,
+                        line: self.line_of_directive(&[".runtime"], &rr.resistor_name),
                         message: format!(
                             ".runtime R declares resistor '{}' more than once",
                             rr.resistor_name
@@ -2138,7 +2222,7 @@ impl Parser {
                 }
                 if !seen_fields.insert(rr.field_name.clone()) {
                     return Err(ParseError {
-                        line: 0,
+                        line: self.line_of_directive(&[".runtime"], &rr.field_name),
                         message: format!(
                             ".runtime declares field name '{}' more than once",
                             rr.field_name
@@ -2157,7 +2241,7 @@ impl Parser {
             for inj in &netlist.injections {
                 if !seen_inject_fields.insert(inj.field_name.clone()) {
                     return Err(ParseError {
-                        line: 0,
+                        line: self.line_of_directive(&[".inject"], &inj.field_name),
                         message: format!(
                             ".inject declares field name '{}' more than once",
                             inj.field_name
@@ -2169,7 +2253,7 @@ impl Parser {
             for tap in &netlist.taps {
                 if !seen_tap_names.insert(tap.name.clone()) {
                     return Err(ParseError {
-                        line: 0,
+                        line: self.line_of_directive(&[".tap"], &tap.name),
                         message: format!(".tap declares name '{}' more than once", tap.name),
                     });
                 }
@@ -2184,7 +2268,7 @@ impl Parser {
             for coupling in &netlist.couplings {
                 if !seen_coupling_names.insert(coupling.name.to_ascii_lowercase()) {
                     return Err(ParseError {
-                        line: 0,
+                        line: self.dup_line_of_element(&coupling.name),
                         message: format!("Duplicate coupling name: '{}'", coupling.name),
                     });
                 }
@@ -2193,7 +2277,7 @@ impl Parser {
                 });
                 if !l1_exists {
                     return Err(ParseError {
-                        line: 0,
+                        line: self.line_of_element(&coupling.name),
                         message: format!(
                             "Coupling '{}' references inductor '{}' which was not found in the netlist",
                             coupling.name, coupling.inductor1_name
@@ -2205,7 +2289,7 @@ impl Parser {
                 });
                 if !l2_exists {
                     return Err(ParseError {
-                        line: 0,
+                        line: self.line_of_element(&coupling.name),
                         message: format!(
                             "Coupling '{}' references inductor '{}' which was not found in the netlist",
                             coupling.name, coupling.inductor2_name
@@ -2222,7 +2306,7 @@ impl Parser {
                 };
                 if !seen_pairs.insert(pair) {
                     return Err(ParseError {
-                        line: 0,
+                        line: self.line_of_element(&coupling.name),
                         message: format!(
                             "Inductors '{}' and '{}' are coupled by multiple K directives",
                             coupling.inductor1_name, coupling.inductor2_name
@@ -2247,7 +2331,7 @@ impl Parser {
                 match sc {
                     None => {
                         return Err(ParseError {
-                            line: 0,
+                            line: self.line_of_element(name),
                             message: format!(
                                 "Subcircuit instance '{}' references undefined subcircuit '{}'",
                                 name, subckt
@@ -2256,7 +2340,7 @@ impl Parser {
                     }
                     Some(s) if nodes.len() != s.nodes.len() => {
                         return Err(ParseError {
-                            line: 0,
+                            line: self.line_of_element(name),
                             message: format!(
                                 "Subcircuit instance '{}' has {} nodes but '{}' expects {}",
                                 name,
@@ -2274,7 +2358,59 @@ impl Parser {
         // Validate .model parameter ranges for device models.
         // Catches obviously wrong values early instead of at solver runtime.
         for model in &netlist.models {
-            Self::validate_model_params(model)?;
+            self.validate_model_params(model)?;
+        }
+
+        // Unrecognized-parameter check for `.model` cards that no element
+        // references.
+        //
+        // A *referenced* card is checked where its device is resolved: the
+        // codegen resolvers hard-error on an unknown key (naming the accepted
+        // set), and op-amps/VCAs warn from the resolution loops in `mna.rs`. An
+        // **unreferenced** card reaches neither, so `.model 2N3904 NPN(ZORP=5)`
+        // sitting in a deck — a shared model library, a part swapped out
+        // mid-edit, a card whose device got commented out — was accepted in
+        // total silence while the identical typo one line down was a hard
+        // error. That inconsistency is worse than no check at all: seeing one
+        // card report teaches the author to trust the silence on the others.
+        //
+        // Warn, do not error: an unused card cannot affect the simulation, and
+        // a shared `.model` library legitimately carries parts this deck does
+        // not use. The accepted key set comes from `model_params`, so this pass
+        // cannot drift from the resolvers'.
+        {
+            let mut referenced: std::collections::HashSet<String> = netlist
+                .elements
+                .iter()
+                .filter_map(|e| e.model_name())
+                .map(|m| m.to_ascii_lowercase())
+                .collect();
+            // Subcircuit bodies are not expanded yet at validation time; a card
+            // used only inside a `.subckt` is referenced, not orphaned.
+            for sc in &netlist.subcircuits {
+                referenced.extend(
+                    sc.elements
+                        .iter()
+                        .filter_map(|e| e.model_name())
+                        .map(|m| m.to_ascii_lowercase()),
+                );
+            }
+            for model in &netlist.models {
+                if referenced.contains(&model.name.to_ascii_lowercase()) {
+                    continue;
+                }
+                // No table for this model type — stay silent rather than guess.
+                // A deck may legitimately carry cards for device types melange
+                // does not model at all.
+                let Some(class) =
+                    crate::model_params::ModelClass::from_model_type(&model.model_type)
+                else {
+                    continue;
+                };
+                for (key, _) in &model.params {
+                    crate::model_params::warn_if_unknown(&model.name, class, key);
+                }
+            }
         }
 
         // Validate .gang directives: each member must exist in .pot or .wiper,
@@ -2289,7 +2425,7 @@ impl Parser {
                     // Check if this member is already claimed by another gang
                     if !gang_claimed.insert(name_upper.clone()) {
                         return Err(ParseError {
-                            line: 0,
+                            line: self.line_of_directive(&[".gang"], &member.resistor_name),
                             message: format!(
                                 ".gang: resistor '{}' appears in multiple .gang directives",
                                 member.resistor_name
@@ -2318,7 +2454,7 @@ impl Parser {
                         // not compose. Drive multiple runtime-R fields from
                         // the same plugin-side envelope instead.
                         return Err(ParseError {
-                            line: 0,
+                            line: self.line_of_directive(&[".gang"], &member.resistor_name),
                             message: format!(
                                 ".gang member '{}' is a .runtime R target — .gang only accepts .pot and .wiper members. \
                                  Drive multiple .runtime R fields from the same plugin-side envelope/LFO by calling \
@@ -2329,7 +2465,7 @@ impl Parser {
                     }
                     if !in_pot && !in_wiper {
                         return Err(ParseError {
-                            line: 0,
+                            line: self.line_of_directive(&[".gang"], &member.resistor_name),
                             message: format!(
                                 ".gang: member '{}' not found in any .pot or .wiper directive",
                                 member.resistor_name
@@ -2344,14 +2480,14 @@ impl Parser {
     }
 
     /// Validate that .model parameters are physically reasonable.
-    fn validate_model_params(model: &Model) -> Result<(), ParseError> {
+    fn validate_model_params(&self, model: &Model) -> Result<(), ParseError> {
         for (key, value) in &model.params {
             let key_upper = key.to_ascii_uppercase();
 
             // Check for NaN/Inf in any parameter
             if !value.is_finite() {
                 return Err(ParseError {
-                    line: 0,
+                    line: self.line_of_model(&model.name),
                     message: format!(
                         ".model '{}': parameter {}={} is not finite",
                         model.name, key, value
@@ -2364,7 +2500,7 @@ impl Parser {
                 "IS" | "IDSS" | "G0" => {
                     if *value <= 0.0 {
                         return Err(ParseError {
-                            line: 0,
+                            line: self.line_of_model(&model.name),
                             message: format!(
                                 ".model '{}': {} must be > 0, got {}",
                                 model.name, key, value
@@ -2378,7 +2514,7 @@ impl Parser {
                 "ISE" | "ISC" => {
                     if *value < 0.0 {
                         return Err(ParseError {
-                            line: 0,
+                            line: self.line_of_model(&model.name),
                             message: format!(
                                 ".model '{}': {} must be >= 0, got {}",
                                 model.name, key, value
@@ -2390,7 +2526,7 @@ impl Parser {
                 "BF" | "BR" => {
                     if *value <= 0.0 {
                         return Err(ParseError {
-                            line: 0,
+                            line: self.line_of_model(&model.name),
                             message: format!(
                                 ".model '{}': {} must be > 0, got {}",
                                 model.name, key, value
@@ -2402,7 +2538,7 @@ impl Parser {
                 "N" | "NF" | "NR" | "NE" | "NC" | "EX" => {
                     if *value <= 0.0 {
                         return Err(ParseError {
-                            line: 0,
+                            line: self.line_of_model(&model.name),
                             message: format!(
                                 ".model '{}': {} must be > 0, got {}",
                                 model.name, key, value
@@ -2414,7 +2550,7 @@ impl Parser {
                 "RS" | "RB" | "RC" | "RE" | "RD" | "RGI" | "ROUT" => {
                     if *value < 0.0 {
                         return Err(ParseError {
-                            line: 0,
+                            line: self.line_of_model(&model.name),
                             message: format!(
                                 ".model '{}': {} must be >= 0, got {}",
                                 model.name, key, value
@@ -2426,7 +2562,7 @@ impl Parser {
                 "CJE" | "CJC" | "CGS" | "CGD" | "CJO" | "CCG" | "CGP" | "CCP" => {
                     if *value < 0.0 {
                         return Err(ParseError {
-                            line: 0,
+                            line: self.line_of_model(&model.name),
                             message: format!(
                                 ".model '{}': {} must be >= 0, got {}",
                                 model.name, key, value
@@ -2438,7 +2574,7 @@ impl Parser {
                 "KP" => {
                     if *value <= 0.0 {
                         return Err(ParseError {
-                            line: 0,
+                            line: self.line_of_model(&model.name),
                             message: format!(
                                 ".model '{}': {} must be > 0, got {}",
                                 model.name, key, value
@@ -2450,7 +2586,7 @@ impl Parser {
                 "VAF" | "VAR" | "IKF" | "IKR" => {
                     if *value <= 0.0 {
                         return Err(ParseError {
-                            line: 0,
+                            line: self.line_of_model(&model.name),
                             message: format!(
                                 ".model '{}': {} must be > 0, got {}",
                                 model.name, key, value
@@ -2462,7 +2598,7 @@ impl Parser {
                 "MU" | "KG1" | "KVB" => {
                     if *value <= 0.0 {
                         return Err(ParseError {
-                            line: 0,
+                            line: self.line_of_model(&model.name),
                             message: format!(
                                 ".model '{}': {} must be > 0, got {}",
                                 model.name, key, value
@@ -2474,7 +2610,7 @@ impl Parser {
                 "AOL" => {
                     if *value <= 0.0 {
                         return Err(ParseError {
-                            line: 0,
+                            line: self.line_of_model(&model.name),
                             message: format!(
                                 ".model '{}': {} must be > 0, got {}",
                                 model.name, key, value
@@ -2486,7 +2622,7 @@ impl Parser {
                 "LAMBDA" => {
                     if *value < 0.0 {
                         return Err(ParseError {
-                            line: 0,
+                            line: self.line_of_model(&model.name),
                             message: format!(
                                 ".model '{}': {} must be >= 0, got {}",
                                 model.name, key, value
@@ -2498,7 +2634,7 @@ impl Parser {
                 "THD" => {
                     if *value < 0.0 {
                         return Err(ParseError {
-                            line: 0,
+                            line: self.line_of_model(&model.name),
                             message: format!(
                                 ".model '{}': {} must be >= 0, got {}",
                                 model.name, key, value
@@ -2510,7 +2646,7 @@ impl Parser {
                 "VSCALE" => {
                     if *value <= 0.0 {
                         return Err(ParseError {
-                            line: 0,
+                            line: self.line_of_model(&model.name),
                             message: format!(
                                 ".model '{}': {} must be > 0, got {}",
                                 model.name, key, value
@@ -2522,7 +2658,7 @@ impl Parser {
                 "VSAT" => {
                     if *value <= 0.0 {
                         return Err(ParseError {
-                            line: 0,
+                            line: self.line_of_model(&model.name),
                             message: format!(
                                 ".model '{}': {} must be > 0, got {}",
                                 model.name, key, value
@@ -2534,7 +2670,7 @@ impl Parser {
                 "GBW" => {
                     if *value <= 0.0 {
                         return Err(ParseError {
-                            line: 0,
+                            line: self.line_of_model(&model.name),
                             message: format!(
                                 ".model '{}': {} must be > 0, got {}",
                                 model.name, key, value
@@ -2547,7 +2683,7 @@ impl Parser {
                 "SR" => {
                     if *value <= 0.0 {
                         return Err(ParseError {
-                            line: 0,
+                            line: self.line_of_model(&model.name),
                             message: format!(
                                 ".model '{}': {} must be > 0, got {}",
                                 model.name, key, value
@@ -2567,7 +2703,7 @@ impl Parser {
                 "RIN" => {
                     if *value <= 0.0 {
                         return Err(ParseError {
-                            line: 0,
+                            line: self.line_of_model(&model.name),
                             message: format!(
                                 ".model '{}': {} must be > 0, got {}",
                                 model.name, key, value
@@ -2581,7 +2717,7 @@ impl Parser {
                 "KF" => {
                     if *value < 0.0 {
                         return Err(ParseError {
-                            line: 0,
+                            line: self.line_of_model(&model.name),
                             message: format!(
                                 ".model '{}': {} must be >= 0, got {}",
                                 model.name, key, value
@@ -2593,7 +2729,7 @@ impl Parser {
                 // so `|I|^AF` is well-defined for nonzero currents.
                 "AF" if *value <= 0.0 => {
                     return Err(ParseError {
-                        line: 0,
+                        line: self.line_of_model(&model.name),
                         message: format!(
                             ".model '{}': {} must be > 0, got {}",
                             model.name, key, value
@@ -2609,8 +2745,8 @@ impl Parser {
     fn next_line(&mut self) -> Option<String> {
         if self.pos < self.processed_lines.len() {
             let line = self.processed_lines[self.pos].clone();
+            self.line_num = self.source_lines[self.pos];
             self.pos += 1;
-            self.line_num += 1;
             Some(line)
         } else {
             None
@@ -2621,6 +2757,102 @@ impl Parser {
         ParseError {
             line: self.line_num,
             message: message.into(),
+        }
+    }
+
+    // Post-parse validation runs after the whole deck has been read, so
+    // `self.line_num` points at `.end` and is useless there. These lookups
+    // resolve the raw source line of the *named* statement a diagnostic is
+    // about. All of them return 0 ("not recorded") rather than guess — 0
+    // prints as no location at all, never as a wrong one.
+
+    /// First raw source line an element with this name was declared on.
+    /// 0 when the name is unknown (e.g. an element created by subcircuit
+    /// expansion, which has no authored line of its own).
+    fn line_of_element(&self, name: &str) -> usize {
+        self.element_lines
+            .get(&name.to_ascii_lowercase())
+            .and_then(|v| v.first().copied())
+            .unwrap_or(0)
+    }
+
+    /// Line of the *second* declaration of `name` — the offending one in a
+    /// duplicate-name report. Falls back to the first, then to 0.
+    fn dup_line_of_element(&self, name: &str) -> usize {
+        self.element_lines
+            .get(&name.to_ascii_lowercase())
+            .and_then(|v| v.get(1).or_else(|| v.first()).copied())
+            .unwrap_or(0)
+    }
+
+    /// First raw source line a `.model` card with this name was declared on.
+    fn line_of_model(&self, name: &str) -> usize {
+        self.model_lines
+            .get(&name.to_ascii_lowercase())
+            .and_then(|v| v.first().copied())
+            .unwrap_or(0)
+    }
+
+    /// Line of the *second* `.model` card with this name.
+    fn dup_line_of_model(&self, name: &str) -> usize {
+        self.model_lines
+            .get(&name.to_ascii_lowercase())
+            .and_then(|v| v.get(1).or_else(|| v.first()).copied())
+            .unwrap_or(0)
+    }
+
+    /// Raw source line of the first directive whose leading token is one of
+    /// `directives` and which names `target` as one of its tokens.
+    ///
+    /// Exact, case-insensitive token matching — not a substring search — so a
+    /// target named `R1` never matches a line that only mentions `R10`.
+    /// Quotes and the `.gang` inversion prefix `!` are stripped from each token
+    /// first. Returns 0 when nothing matches, which prints as no location
+    /// rather than a wrong one.
+    fn line_of_directive(&self, directives: &[&str], target: &str) -> usize {
+        let target = target.trim_matches('"').to_ascii_lowercase();
+        for (tokens, line) in &self.directive_lines {
+            let Some(head) = tokens.first() else { continue };
+            if !directives.iter().any(|d| d.eq_ignore_ascii_case(head)) {
+                continue;
+            }
+            if tokens[1..]
+                .iter()
+                .any(|t| t.trim_matches('"').trim_start_matches('!') == target)
+            {
+                return *line;
+            }
+        }
+        0
+    }
+
+    /// Record the raw source line of a parsed statement for post-parse
+    /// validation. `line` is captured BEFORE the statement is parsed, because
+    /// a `.subckt` body advances `line_num` past its own header.
+    fn record_statement(&mut self, raw: &str, line: usize, netlist: &Netlist) {
+        let tokens: Vec<String> = raw
+            .split_whitespace()
+            .map(|t| t.to_ascii_lowercase())
+            .collect();
+        let Some(head) = tokens.first() else { return };
+        if head.starts_with('.') {
+            // `.model` also gets a name-keyed entry: model diagnostics are
+            // raised per card, long after the directive list is consulted.
+            if head == ".model" {
+                if let Some(m) = netlist.models.last() {
+                    self.model_lines
+                        .entry(m.name.to_ascii_lowercase())
+                        .or_default()
+                        .push(line);
+                }
+            }
+            self.directive_lines.push((tokens, line));
+        } else {
+            // Elements and `K` couplings are both named by their first token.
+            self.element_lines
+                .entry(head.clone())
+                .or_default()
+                .push(line);
         }
     }
 
@@ -3329,7 +3561,7 @@ impl Parser {
         // .gang "Label" member1 member2 ... [default_pos]
         if parts.len() < 4 {
             return Err(ParseError {
-                line: 0,
+                line: self.line_num,
                 message: ".gang requires at least a label and two member names".to_string(),
             });
         }
@@ -3339,7 +3571,7 @@ impl Parser {
         // unquote logic as .pot/.wiper/.switch labels).
         if !parts[1].starts_with('"') {
             return Err(ParseError {
-                line: 0,
+                line: self.line_num,
                 message: ".gang label must be a quoted string".to_string(),
             });
         }
@@ -3350,7 +3582,7 @@ impl Parser {
             let close = parts[2..].iter().position(|p| p.ends_with('"'));
             let Some(close) = close else {
                 return Err(ParseError {
-                    line: 0,
+                    line: self.line_num,
                     message: ".gang label has an unterminated quote".to_string(),
                 });
             };
@@ -3380,7 +3612,7 @@ impl Parser {
 
             if name.is_empty() {
                 return Err(ParseError {
-                    line: 0,
+                    line: self.line_num,
                     message: ".gang member name cannot be empty".to_string(),
                 });
             }
@@ -3393,7 +3625,7 @@ impl Parser {
 
         if members.len() < 2 {
             return Err(ParseError {
-                line: 0,
+                line: self.line_num,
                 message: ".gang requires at least two members".to_string(),
             });
         }
@@ -3778,8 +4010,14 @@ impl Parser {
     ///
     /// Used by R, C, L parsers which all require strictly positive values.
     fn parse_positive_value(&self, raw: &str, component_type: &str) -> Result<f64, ParseError> {
-        let value = parse_value(raw)
-            .map_err(|_| self.error(format!("Invalid {} value: {}", component_type, raw)))?;
+        let value = parse_value(raw).map_err(|_| {
+            self.error(format!(
+                "Invalid {} value '{}'.{}",
+                component_type,
+                raw,
+                explain_rejected_value(raw)
+            ))
+        })?;
         if value <= 0.0 || !value.is_finite() {
             return Err(self.error(format!(
                 "{} value must be positive and finite, got {}",
@@ -5016,6 +5254,91 @@ fn try_parse_infix(s: &str) -> Option<f64> {
 /// Parses a component value string with engineering notation (e.g. "10k", "4n7", "1Meg").
 pub fn parse_value(s: &str) -> Result<f64, ParseFloatError> {
     parse_value_ctx(s, false)
+}
+
+/// Explain *why* a value token was rejected, as a sentence appended to the
+/// caller's `Invalid <what> value '<raw>'` prefix (leading space included).
+///
+/// A bare "invalid value" was the one place melange's diagnostics went silent:
+/// every other parse error names the component, the directive or the accepted
+/// set, so a value error that said nothing taught readers that melange's error
+/// messages were unreliable rather than that this one input was.
+///
+/// ## Why `10R` / `1R5` are rejected rather than accepted
+///
+/// They are the same BS-1852 convention as `4k7` and `2M2`, which melange DOES
+/// accept, so the asymmetry needs a reason. The reason is ngspice. Measured
+/// (`print i(v)` across a 1 V source, system ngspice):
+///
+/// | token | ngspice | melange |
+/// |-------|---------|---------|
+/// | `10R` | 10 Ω    | *rejected* |
+/// | `1R5` | 1 Ω     | *rejected* |
+/// | `4k7` | 4000 Ω  | 4700 Ω |
+/// | `2M2` | 0.002 Ω | 2.2 MΩ |
+///
+/// ngspice reads the mantissa, applies a scale letter if the next character is
+/// one, and **discards the rest of the token**. `R` is not a scale letter, so
+/// `1R5` is 1 Ω and `10R` is 10 Ω — silently, with no diagnostic.
+/// `melange validate` hands the author's own `.cir` to ngspice, so accepting
+/// `1R5` as 1.5 Ω would have the two engines simulate different circuits and
+/// blame the difference on the solver. Refusing costs the author one edit;
+/// accepting cannot be made safe.
+///
+/// (The same table shows `4k7` and `2M2` already diverging that way. That is a
+/// real cross-engine hazard, but not this function's to fix: `2M2` warns from
+/// [`try_parse_infix`], and changing what those tokens mean would silently
+/// change existing decks' component values.)
+fn explain_rejected_value(raw: &str) -> String {
+    // Every claim here is measured against the parser, not inferred from it:
+    // `f` is deliberately absent from the scale list because a trailing `f` in
+    // an ELEMENT value is the Farad unit (`10f` = 10, with its own warning from
+    // `parse_value_ctx`) and only means femto inside a `.model` card. `ohm` is
+    // called out because it is the obvious thing to type and the unit-letter
+    // strip set is F/H/V/A/S/Z — `10kohm` is a hard error, not 10 kΩ.
+    const ACCEPTED: &str = " melange accepts: a plain number (1500, 1.5e3); a SPICE scale \
+         suffix — T G k meg m(=milli) u/µ n p — optionally followed by a unit letter \
+         (10pF, 4.7uF, 100nH, 10kHz, 9V); and the BS-1852 infix form, where the scale \
+         letter replaces the decimal point (4k7 = 4.7k, 6n8 = 6.8n). Note that \
+         'ohm'/'ohms' is NOT a recognized unit — write 10k, not 10kohm. In a component \
+         value a trailing 'f' is the Farad unit and NOT femto, so write 10e-15 or 10fF; \
+         inside a `.model` card, where values are dimensionless, 'f' does mean femto.";
+
+    let t = raw.trim();
+    if t.is_empty() {
+        return " The value field is empty.".to_string();
+    }
+    let upper = t.to_ascii_uppercase();
+    // BS-1852 ohms marker: `10R`, `1R5`, `4R7`. Distinctive enough to name.
+    let is_bs1852_ohms = upper.contains('R')
+        && upper
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == 'R' || c == '.')
+        && upper.starts_with(|c: char| c.is_ascii_digit());
+    if is_bs1852_ohms {
+        // What the author almost certainly meant: 'R' as the decimal point.
+        let intended = upper.replace('R', ".");
+        let intended = intended.trim_end_matches('.');
+        return format!(
+            " 'R' is the BS-1852 ohms marker and melange does not accept it — write \
+             '{}' instead. ngspice silently reads '{}' as {} (it applies a scale \
+             letter if one follows the number, then discards the rest of the token), \
+             so honouring 'R' here would make melange and the ngspice run behind \
+             `melange validate` simulate different circuits. The infix scale forms \
+             melange does accept — 4k7 = 4.7k, 6n8 = 6.8n — are unaffected.",
+            intended,
+            t,
+            t.split(['R', 'r']).next().unwrap_or(t),
+        );
+    }
+    if !t.is_ascii() {
+        return format!(
+            " It contains a non-ASCII character; only the micro sign (µ/μ) is accepted, \
+             as an alias for 'u'.{}",
+            ACCEPTED
+        );
+    }
+    format!(" Not a number melange recognizes.{}", ACCEPTED)
 }
 
 /// Parse a `.model` parameter value.

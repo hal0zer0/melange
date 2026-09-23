@@ -1587,6 +1587,56 @@ impl MnaSystem {
         dc
     }
 
+    /// Every node name, ordered by MNA index — which is netlist appearance
+    /// order, ground (`"0"`) first.
+    ///
+    /// **Use this for any node list a human or a diff will read.** `node_map`
+    /// is a `HashMap`, so iterating its keys gives a different order on every
+    /// run: three runs of one failing command produced `["0","a","b","out"]`,
+    /// `["b","out","a","0"]` and `["out","a","b","0"]`. An error message that
+    /// will not compare equal to itself cannot be diffed, pasted into a bug
+    /// report or asserted on in a test. Same defect class as the codegen
+    /// HashMap-ordering bug fixed in `49ecaa4`, which is why the rule is
+    /// "nothing user-visible is ordered by hash iteration".
+    pub fn node_names_in_index_order(&self) -> Vec<&str> {
+        let mut names: Vec<(usize, &str)> = self
+            .node_map
+            .iter()
+            .map(|(name, idx)| (*idx, name.as_str()))
+            .collect();
+        // Index first, name as a tiebreaker so the order is total even if two
+        // names ever share an index.
+        names.sort_unstable();
+        names.into_iter().map(|(_, name)| name).collect()
+    }
+
+    /// How many BJTs in this system have internal nodes to expand.
+    ///
+    /// Mirrors the collection loop in [`Self::expand_bjt_internal_nodes`]
+    /// exactly: a count of 0 means that function is a guaranteed no-op.
+    ///
+    /// Exists so callers can tell "expansion was declined" from "there was
+    /// nothing to expand" *before* narrating a decision. The K-conditioning
+    /// gate in [`crate::pipeline::expand_internal_nodes_if_conditioned`] used
+    /// to print "Skipping BJT internal-node expansion" on any deck whose K
+    /// diagonal tripped the threshold — including 4-tube and BJT-free ones,
+    /// where there was never anything to skip.
+    pub fn expandable_bjt_internal_node_count(
+        &self,
+        device_slots: &[crate::device_types::DeviceSlot],
+    ) -> usize {
+        use crate::device_types::{DeviceParams, DeviceType};
+        self.nonlinear_devices
+            .iter()
+            .zip(device_slots.iter())
+            .filter(|(dev_info, slot)| {
+                slot.device_type == DeviceType::Bjt
+                    && matches!(&slot.params, DeviceParams::Bjt(bp)
+                        if bp.has_parasitics() && dev_info.node_indices.len() >= 3)
+            })
+            .count()
+    }
+
     /// Expand MNA with internal nodes for parasitic BJTs (RB/RC/RE).
     ///
     /// For each non-forward-active BJT with non-zero parasitic resistances, creates
@@ -2963,10 +3013,16 @@ impl MnaBuilder {
                             "IN" => oa.in_amps = *val,
                             "EN_FC" => oa.en_fc = *val,
                             "IN_FC" => oa.in_fc = *val,
-                            _ => log::warn!(
-                                ".model {}: unrecognized parameter '{}' (ignored)",
-                                m.name,
-                                key
+                            // Accepted-key set lives in `model_params` so this
+                            // arm, the codegen resolvers and the orphan-card
+                            // pass in the parser cannot drift apart (they did:
+                            // this was the only `.model` typo report melange
+                            // ever emitted for an op-amp, and the VCA arm below
+                            // used to warn about `THD`, which is honored).
+                            _ => crate::model_params::warn_if_unknown(
+                                &m.name,
+                                crate::model_params::ModelClass::Opamp,
+                                key,
                             ),
                         }
                     }
@@ -3042,10 +3098,14 @@ impl MnaBuilder {
                             "VSCALE" => vca.vscale = *val,
                             "G0" => vca.g0 = *val,
                             "MODE" => vca.current_mode = *val != 0.0,
-                            _ => log::warn!(
-                                ".model {}: unrecognized VCA parameter '{}' (ignored)",
-                                m.name,
-                                key
+                            // `THD` is read by the codegen VCA resolver, not
+                            // here — warning against this match alone reported
+                            // an honored parameter as unrecognized. The key set
+                            // now comes from `model_params`.
+                            _ => crate::model_params::warn_if_unknown(
+                                &m.name,
+                                crate::model_params::ModelClass::Vca,
+                                key,
                             ),
                         }
                     }

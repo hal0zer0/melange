@@ -79,6 +79,7 @@ pub mod expr;
 pub mod linear_solver;
 pub(crate) mod lu;
 pub mod mna;
+pub mod model_params;
 pub mod parser;
 pub mod pipeline;
 

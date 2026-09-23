@@ -10,6 +10,7 @@ use crate::dk::{self, DkKernel};
 use crate::lu::{self, SPARSITY_THRESHOLD};
 pub use crate::lu::{LuOp, LuSparsity};
 use crate::mna::MnaSystem;
+use crate::model_params::ModelClass;
 use crate::parser::{Element, Netlist};
 
 use super::{CodegenConfig, CodegenError};
@@ -4835,14 +4836,7 @@ impl CircuitIR {
             )));
         }
 
-        Self::check_model_params(
-            netlist,
-            model,
-            &[
-                "IS", "N", "CJO", "RS", "BV", "IBV", "KF", "AF", "RTH", "CTH", "XTI", "EG", "TAMB",
-            ],
-            &[],
-        )?;
+        Self::check_model_params(netlist, model, ModelClass::Diode)?;
         // NOTE: no warn_unresolved_model() here — the diode resolver already
         // emits its own dedicated fallback warning in the IS-resolution arm
         // above ("not in catalog and no IS given — falling back to the SPICE
@@ -5105,41 +5099,12 @@ impl CircuitIR {
             )));
         }
 
-        Self::check_model_params(
-            netlist,
-            model,
-            &[
-                "IS", "VT", "BF", "BR", "VAF", "VA", "VAR", "VB", "IKF", "JBF", "IKR", "JBR",
-                "CJE", "CJC", "VJE", "MJE", "VJC", "MJC", "FC", "TF", "NF", "NR", "ISE", "NE",
-                "ISC", "NC", "RB", "RC", "RE", "RTH", "CTH", "XTI", "XTB", "EG", "TAMB", "KF",
-                "AF",
-            ],
-            &[
-                (
-                    "TR",
-                    "reverse transit time — melange's junction charge is linearized \
-                     at the DC operating point, so the time-varying BC diffusion \
-                     charge TR describes cannot be represented (measured: honoring \
-                     it moves melange AWAY from ngspice). Blocked on per-timestep \
-                     charge re-linearization.",
-                ),
-                (
-                    "XCJC",
-                    "base-collector depletion capacitance split across the internal \
-                     base node — melange places all of CJC at the internal base, \
-                     which is XCJC=1.0 (the SPICE default). Only XCJC<1 is affected.",
-                ),
-            ],
-        )?;
+        Self::check_model_params(netlist, model, ModelClass::Bjt)?;
         Self::warn_unresolved_model(
             netlist,
             model,
             cat.is_some(),
-            &[
-                "IS", "VT", "BF", "BR", "VAF", "VA", "VAR", "VB", "IKF", "JBF", "IKR", "JBR",
-                "CJE", "CJC", "VJE", "MJE", "VJC", "MJC", "FC", "TF", "NF", "NR", "ISE", "NE",
-                "ISC", "NC", "RB", "RC", "RE", "XTB",
-            ],
+            ModelClass::Bjt,
             "the built-in default BJT",
         );
 
@@ -5276,19 +5241,12 @@ impl CircuitIR {
             )));
         }
 
-        Self::check_model_params(
-            netlist,
-            model,
-            &[
-                "VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "RD", "RS", "KF", "AF",
-            ],
-            &[],
-        )?;
+        Self::check_model_params(netlist, model, ModelClass::Jfet)?;
         Self::warn_unresolved_model(
             netlist,
             model,
             cat.is_some(),
-            &["VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "RD", "RS"],
+            ModelClass::Jfet,
             "the built-in default JFET",
         );
 
@@ -5392,21 +5350,12 @@ impl CircuitIR {
             )));
         }
 
-        Self::check_model_params(
-            netlist,
-            model,
-            &[
-                "KP", "VTO", "VT", "LAMBDA", "CGS", "CGD", "RD", "RS", "GAMMA", "PHI", "KF", "AF",
-            ],
-            &[],
-        )?;
+        Self::check_model_params(netlist, model, ModelClass::Mosfet)?;
         Self::warn_unresolved_model(
             netlist,
             model,
             cat.is_some(),
-            &[
-                "KP", "VTO", "VT", "LAMBDA", "CGS", "CGD", "RD", "RS", "GAMMA", "PHI",
-            ],
+            ModelClass::Mosfet,
             "the built-in default MOSFET",
         );
 
@@ -5572,60 +5521,12 @@ impl CircuitIR {
             )));
         }
 
-        Self::check_model_params(
-            netlist,
-            model,
-            &[
-                "MU",
-                "EX",
-                "KG1",
-                "KP",
-                "KVB",
-                "IG_MAX",
-                "VGK_ONSET",
-                "LAMBDA",
-                "CCG",
-                "CGP",
-                "CCP",
-                "RGI",
-                "MU_B",
-                "SVAR",
-                "EX_B",
-                "KF",
-                "AF",
-                "RTH",
-                "CTH",
-                "VBIAS_ALPHA",
-                "TAMB",
-                // Consumed by `codegen::ir::noise` (shot-noise Gamma-squared
-                // override), NOT by this resolver — which is precisely why it
-                // was missing from this list until the unknown-key check
-                // became a hard error and a test caught it.
-                "SHOT_GAMMA2",
-            ],
-            &[],
-        )?;
+        Self::check_model_params(netlist, model, ModelClass::Triode)?;
         Self::warn_unresolved_model(
             netlist,
             model,
             cat.is_some(),
-            &[
-                "MU",
-                "EX",
-                "KG1",
-                "KP",
-                "KVB",
-                "IG_MAX",
-                "VGK_ONSET",
-                "LAMBDA",
-                "CCG",
-                "CGP",
-                "CCP",
-                "RGI",
-                "MU_B",
-                "SVAR",
-                "EX_B",
-            ],
+            ModelClass::Triode,
             "a default 12AX7-class triode",
         );
 
@@ -5857,63 +5758,12 @@ impl CircuitIR {
             )));
         }
 
-        Self::check_model_params(
-            netlist,
-            model,
-            &[
-                "MU",
-                "EX",
-                "KG1",
-                "KG2",
-                "KP",
-                "KVB",
-                "ALPHA_S",
-                "A_FACTOR",
-                "BETA_FACTOR",
-                "PARTITION_F",
-                "SCREEN_FORM",
-                "IG_MAX",
-                "VGK_ONSET",
-                "LAMBDA",
-                "CCG",
-                "CGP",
-                "CCP",
-                "RGI",
-                "MU_B",
-                "SVAR",
-                "EX_B",
-                "KF",
-                "AF",
-            ],
-            &[],
-        )?;
+        Self::check_model_params(netlist, model, ModelClass::Pentode)?;
         Self::warn_unresolved_model(
             netlist,
             model,
             cat.is_some(),
-            &[
-                "MU",
-                "EX",
-                "KG1",
-                "KG2",
-                "KP",
-                "KVB",
-                "ALPHA_S",
-                "A_FACTOR",
-                "BETA_FACTOR",
-                "PARTITION_F",
-                "SCREEN_FORM",
-                "IG_MAX",
-                "VGK_ONSET",
-                "LAMBDA",
-                "CCG",
-                "CGP",
-                "CCP",
-                "RGI",
-                "MU_B",
-                "SVAR",
-                "EX_B",
-            ],
+            ModelClass::Pentode,
             "a default EL84-class pentode",
         );
 
@@ -5975,7 +5825,7 @@ impl CircuitIR {
             )));
         }
 
-        Self::check_model_params(netlist, model, &["VSCALE", "G0", "THD", "MODE"], &[])?;
+        Self::check_model_params(netlist, model, ModelClass::Vca)?;
 
         Ok(VcaParams { vscale, g0, thd })
     }
@@ -6015,17 +5865,12 @@ impl CircuitIR {
             )));
         }
 
-        Self::check_model_params(
-            netlist,
-            model,
-            &["RMIN", "RMAX", "GAMMA", "TAU_A", "TAU_R"],
-            &[],
-        )?;
+        Self::check_model_params(netlist, model, ModelClass::Ldr)?;
         Self::warn_unresolved_model(
             netlist,
             model,
             cat.is_some(),
-            &["RMIN", "RMAX", "GAMMA", "TAU_A", "TAU_R"],
+            ModelClass::Ldr,
             "the built-in default LDR",
         );
 
@@ -6215,15 +6060,7 @@ impl CircuitIR {
         // main replaced warn_unrecognized_params with the stricter
         // check_model_params (unknown keys are a hard error; glow/NEON is a
         // melange-native device, so no recognized-but-unimplemented SPICE keys).
-        Self::check_model_params(
-            netlist,
-            model,
-            &[
-                "VO", "VM", "IK", "RS", "IHOLD", "ROFF", "RT", "K1", "K2", "K3", "K4", "TAU1",
-                "TAU2", "TAU3", "TAU4", "IFLOOR", "KSUB", "D_AMP", "D_TKNEE", "D_THOLD",
-            ],
-            &[],
-        )?;
+        Self::check_model_params(netlist, model, ModelClass::Glow)?;
 
         Ok(crate::device_types::GlowParams {
             vo,
@@ -6269,9 +6106,9 @@ impl CircuitIR {
     fn check_model_params(
         netlist: &Netlist,
         model_name: &str,
-        honored: &[&str],
-        unimplemented: &[(&str, &str)],
+        class: ModelClass,
     ) -> Result<(), CodegenError> {
+        let honored = class.honored();
         let Some(m) = netlist
             .models
             .iter()
@@ -6284,10 +6121,7 @@ impl CircuitIR {
             if honored.iter().any(|k| k.eq_ignore_ascii_case(&upper)) {
                 continue;
             }
-            if let Some((_, effect)) = unimplemented
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(&upper))
-            {
+            if let Some(effect) = class.unimplemented_note(&upper) {
                 log::warn!(
                     ".model {}: '{}' is a recognized SPICE parameter that melange \
                      does not model yet, so it is IGNORED — {}",
@@ -6297,7 +6131,7 @@ impl CircuitIR {
                 );
                 continue;
             }
-            let hint = Self::model_param_alias_hint(&upper);
+            let hint = crate::model_params::alias_hint(class, &upper);
             return Err(CodegenError::InvalidConfig(format!(
                 ".model {model_name}: unknown parameter '{key}'.{hint} Accepted \
                  for this device: {}",
@@ -6305,18 +6139,6 @@ impl CircuitIR {
             )));
         }
         Ok(())
-    }
-
-    /// A pointed hint for keys that are a plausible confusion rather than a typo.
-    fn model_param_alias_hint(upper: &str) -> String {
-        match upper {
-            "VP" => " Did you mean VTO? `VP` is the datasheet symbol for \
-                     pinch-off; SPICE spells it VTO, and note the sign \
-                     convention differs (VTO is negative for an N-channel JFET)."
-                .to_string(),
-            "BETA" if false => String::new(),
-            _ => String::new(),
-        }
     }
 
     /// Warn when a `.model` card resolves entirely to the hardcoded default
@@ -6334,17 +6156,19 @@ impl CircuitIR {
     /// defining parameter — a fully custom off-catalog part is legitimate and
     /// common, so specifying even one defining key suppresses the warning.
     ///
-    /// `defining_keys` is the class's electrical-identity parameter set (the
-    /// recognized keys minus universal add-ons like KF/AF/RTH/CTH/TAMB, which do
-    /// not define which device this is).
+    /// The class's electrical-identity parameter set (`ModelClass::defining()`
+    /// — the recognized keys minus universal add-ons like KF/AF/RTH/CTH/TAMB,
+    /// which do not define which device this is) decides "underspecified". A
+    /// class with no such set never warns.
     fn warn_unresolved_model(
         netlist: &Netlist,
         model_name: &str,
         catalog_hit: bool,
-        defining_keys: &[&str],
+        class: ModelClass,
         default_desc: &str,
     ) {
-        if catalog_hit {
+        let defining_keys = class.defining();
+        if defining_keys.is_empty() || catalog_hit {
             return;
         }
         let Some(card) = netlist

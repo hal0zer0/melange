@@ -479,7 +479,17 @@ pub fn auto_tune_max_iter(
 /// Schur + expanded parasitics blows up at the first non-zero input sample,
 /// while full-LU + expanded and Schur unexpanded are both clean).
 ///
-/// Returns `true` if expansion was applied.
+/// Returns `true` if expansion was actually applied.
+///
+/// # Diagnostics
+///
+/// Reports the declined case only when there was something to decline. Until
+/// 2026-09-22 the K gate was tested first and narrated unconditionally, so
+/// "Skipping BJT internal-node expansion (K ill-conditioned)" printed on the
+/// shipped `passive-eq1a` demo — four tubes, three transformers and not one
+/// BJT — and on any BJT-free pedal. Read cold, "Skipping" plus
+/// "ill-conditioned" on the flagship example says *you broke it*; it is in
+/// fact a routing note about a device class the deck does not contain.
 pub fn expand_internal_nodes_if_conditioned(
     mna: &mut crate::mna::MnaSystem,
     netlist: &crate::parser::Netlist,
@@ -494,18 +504,32 @@ pub fn expand_internal_nodes_if_conditioned(
         0.0
     };
     if k_diag_min < -100.0 {
-        report!(
-            rep,
-            "  Skipping BJT internal-node expansion (K ill-conditioned); the DK \
-             kernel solves the unexpanded MNA with full LU. NB: this is the \
-             DK internal-node path — NOT the nodal Schur-vs-full-LU sub-path."
-        );
+        // Narrate only when the deck actually declares BJTs. Deciding on the
+        // stronger condition (a BJT that declares RB/RC/RE) would need a full
+        // device-info build here, which emits model diagnostics of its own and
+        // would emit them a second time; the structural check costs nothing.
+        let declares_bjt = netlist
+            .elements
+            .iter()
+            .any(|e| matches!(e, crate::parser::Element::Bjt { .. }));
+        if declares_bjt {
+            report!(
+                rep,
+                "  info (normal): parasitic-BJT internal nodes left unexpanded — \
+                 min diag(K) = {:.3e} routes this circuit to the full N x N LU path, \
+                 which models RB/RC/RE inside the device instead of as extra MNA nodes. \
+                 Not an error and not a degradation: on this path expanding them makes \
+                 NR diverge. (Maintainers: this is the DK internal-node gate, NOT the \
+                 nodal Schur-vs-full-LU sub-path.)",
+                k_diag_min
+            );
+        }
         return false;
     }
     let device_slots =
         crate::codegen::ir::CircuitIR::build_device_info_with_mna(netlist, Some(mna))
             .unwrap_or_default();
-    if !device_slots.is_empty() {
+    if mna.expandable_bjt_internal_node_count(&device_slots) > 0 {
         mna.expand_bjt_internal_nodes(&device_slots);
         return true;
     }
