@@ -3,7 +3,7 @@
 //! render the deterministic programs, and write PCM + stats + metadata
 //! into the baseline directory.
 
-use crate::{manifest, programs, runner, stats};
+use crate::{convergence, manifest, programs, runner, stats};
 use serde::Serialize;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -154,6 +154,14 @@ pub fn run(
     } else {
         println!("work dir kept: {}", work.display());
     }
+
+    // Convergence health of what we just rendered. The audio files and their
+    // stats cannot say whether a render was ever a solution — a Newton-Raphson
+    // solve that exhausts its iteration ceiling emits the capped iterate, which
+    // looks entirely healthy to peak/RMS/band metrics. Read the baseline we
+    // just wrote, through the exact code path `compare` uses.
+    let conv = convergence::scan(out_dir);
+    convergence::print_section(&[(out_dir.display().to_string(), conv.as_slice())]);
 
     println!(
         "capture done: {}/{} circuits ok",

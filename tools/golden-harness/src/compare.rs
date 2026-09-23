@@ -11,7 +11,14 @@
 //! - INPUT-CHANGED — changed, but the netlist content hash also differs
 //!   between baselines: the .cir input moved, not the compiler.
 //! - MISSING — present on one side only, or failed to capture.
+//!
+//! None of those classes can answer "was either render ever a solution?": a
+//! Newton-Raphson solve that exhausts its iteration ceiling emits the capped
+//! iterate, which is bounded and smooth and therefore IDENTICAL to itself run
+//! after run. `convergence` assesses that separately and prints it as its own
+//! loud category; see that module for why it is deliberately report-only.
 
+use crate::convergence;
 use crate::stats::{Stats, SILENT_DB};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -707,6 +714,18 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<
         );
     }
 
+    // ---- convergence health (report-only, per baseline) ----
+    // Asks a question the A-vs-B diff structurally cannot: not "did the output
+    // change?" but "was the output ever a solution?". Printed for BOTH sides,
+    // because a non-converged render is a property of one baseline and is
+    // equally present in the reference.
+    let conv_a = convergence::scan(dir_a);
+    let conv_b = convergence::scan(dir_b);
+    convergence::print_section(&[
+        (format!("A {}", dir_a.display()), conv_a.as_slice()),
+        (format!("B {}", dir_b.display()), conv_b.as_slice()),
+    ]);
+
     // ---- JSON report ----
     let json = serde_json::json!({
         "baseline_a": dir_a.display().to_string(),
@@ -727,6 +746,22 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<
         "generated_source_differs": source_differs,
         "generated_source_unavailable": source_missing,
         "diagnostics_differ_count": n_diag_differ,
+        "convergence": {
+            "nonconverged_fraction_threshold": convergence::NONCONVERGED_FRACTION,
+            "gates_exit_code": false,
+            "a": {
+                "tally": convergence::tally(&conv_a),
+                "not_clean": conv_a.iter()
+                    .filter(|h| h.class != convergence::Class::Clean)
+                    .collect::<Vec<_>>(),
+            },
+            "b": {
+                "tally": convergence::tally(&conv_b),
+                "not_clean": conv_b.iter()
+                    .filter(|h| h.class != convergence::Class::Clean)
+                    .collect::<Vec<_>>(),
+            },
+        },
         "nodal_sub_path_moved": sub_path_moved
             .iter()
             .map(|(p, a, b)| serde_json::json!({"plugin": p, "from": a, "to": b}))

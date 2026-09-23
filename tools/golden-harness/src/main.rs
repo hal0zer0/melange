@@ -8,6 +8,7 @@
 //! Subcommands:
 //!   capture --manifest <json> --out <dir> [--fs 48000] [--timeout 600] [--keep-work]
 //!   compare <dirA> <dirB> [--json <path>]
+//!   convergence <baseline-dir>...
 //!
 //! Execution mechanism is ported from melange-validate's
 //! `run_melange_codegen_with_main` (crates/melange-validate/tests/
@@ -17,6 +18,7 @@
 
 mod capture;
 mod compare;
+mod convergence;
 mod manifest;
 mod programs;
 mod runner;
@@ -31,6 +33,7 @@ USAGE:
   golden-harness capture --manifest <manifest.json> --out <baseline-dir>
                          [--fs <hz>] [--timeout <secs>] [--keep-work] [--dry-run]
   golden-harness compare <baseline-A> <baseline-B> [--json <report.json>] [--strict]
+  golden-harness convergence <baseline-dir> [<baseline-dir> ...]
 
 COMPARE MODES:
   default   release gate — passes IDENTICAL and NEGLIGIBLE. Asks: did anything
@@ -40,9 +43,17 @@ COMPARE MODES:
             all? Use this for any change that is supposed to be behaviour-
             preserving; NEGLIGIBLE is precisely the band a refactor bug hides in.
 
+CONVERGENCE:
+  Every capture and compare prints a CONVERGENCE HEALTH section: the fraction
+  of internal samples on which Newton-Raphson hit its iteration ceiling and
+  emitted a capped iterate instead of a solution. A capped iterate is bounded
+  and smooth, so the audio metrics cannot see it. The section is REPORT-ONLY
+  and never changes an exit code; `convergence <dir>...` prints it on its own.
+
 EXIT CODES:
   capture: 0 = all circuits captured, 3 = some circuit failed (run completed)
   compare: 0 = gate passed, 1 = gate failed, 2 = usage error
+  convergence: 0 = report produced, 2 = usage error (never fails on a finding)
 ";
 
 fn main() -> ExitCode {
@@ -151,6 +162,19 @@ fn main() -> ExitCode {
                 }
                 Err(e) => {
                     eprintln!("compare error: {e}");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        Some("convergence") => {
+            let dirs: Vec<PathBuf> = args[1..].iter().map(PathBuf::from).collect();
+            if dirs.is_empty() {
+                return usage_err("convergence requires at least one baseline directory");
+            }
+            match convergence::run(&dirs) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("convergence error: {e}");
                     ExitCode::from(2)
                 }
             }
