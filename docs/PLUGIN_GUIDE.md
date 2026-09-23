@@ -35,6 +35,12 @@ If you change the netlist and want to update the DSP without losing your `lib.rs
 melange compile updated-circuit.cir --format code -o src/circuit.rs
 ```
 
+`--format code` is also how you use melange without a plugin project at all: the
+emitted file is self-contained and dependency-free. Its caller-facing API is
+documented in **[Using the Generated DSP Directly](CODE_API.md)** — construction,
+`process_sample`'s signature (it is a free function), the constants, and the
+output-level contract.
+
 ### src/lib.rs (Customizable Plugin Wrapper)
 
 Contains the nih-plug boilerplate that wraps `circuit.rs`:

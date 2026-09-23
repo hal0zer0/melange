@@ -48,8 +48,9 @@ the `cargo install` (or put `target/release` on your `PATH`).
 Then read, in this order:
 
 - **[Getting Started](docs/GETTING_STARTED.md)** — zero to a loadable plugin, following one circuit the whole way.
-- **[Writing SPICE Netlists for Melange](docs/NETLIST_GUIDE.md)** — the netlist dialect: component syntax, `.model` cards, `.pot`/`.switch` controls, unit suffixes, and the six mistakes that bite first. This is the guide for Way In #2 below.
+- **[Writing SPICE Netlists for Melange](docs/NETLIST_GUIDE.md)** — the netlist dialect: component syntax, `.model` cards, `.pot`/`.switch` controls, unit suffixes, and the six mistakes that bite first. This is the guide for Way In #1 below, and for the netlist any other path produces.
 - **[SPICE Grammar Reference](docs/spice-grammar.md)** — the complete syntax and per-device `.model` parameter tables, for when you need the exact default of something.
+- **[Using the Generated DSP Directly](docs/CODE_API.md)** — the `--format code` API: `CircuitState::default()`, `set_sample_rate()`, `process_sample()`, the constants, and what the output volts mean. Read this if you are wiring the generated file into your own code rather than taking the plugin project.
 
 Everything below this line is the argument for the tool rather than instructions for using it. [Requirements](#requirements) are near the bottom; the short version is Rust 1.85+, and everything else is optional until you need it (ngspice for `validate`, KiCad 8+ for the schematic path, network access the first time you build a `--format plugin` project).
 
@@ -63,40 +64,15 @@ That sentence should be stranger than it is. Analog circuit simulation is fifty 
 
 ## Three Ways In
 
-### 1. From a KiCad schematic
+All three arrive at the same place: a `.cir` netlist that `melange compile` turns
+into DSP. They differ only in how you get the netlist.
 
-Draw the circuit, export it, compile it. Melange ships a [KiCad symbol library and netlist exporter](kicad/README.md) covering triodes, pentodes, op-amps, VCAs, pots, wipers, and audio I/O markers.
+### 1. From a SPICE netlist
 
-**This path requires KiCad 8 or newer.** The bundled `melange.kicad_sym` library and the example schematic are saved in the KiCad 8 file format (`version 20231120`); KiCad 7's `kicad-cli` cannot read them and fails with `Failed to load schematic file`. Nothing else in melange needs KiCad — Ways In #2 and #3 have no such requirement.
-
-```
-┌──────────┐     Export      ┌──────────┐    melange     ┌──────────┐
-│  KiCad   │ ──────────────► │  .cir    │ ─────────────► │  Plugin  │
-│ Schematic│   (one click)   │ netlist  │    compile     │ Project  │
-└──────────┘                 └──────────┘                └──────────┘
-```
+Write one by hand, or take one from a circuit repository and stop pretending you were going to write it by hand. This is the path with no external tooling: a text file and melange. A complete worked example ships in [`examples/`](examples/) — a passive tube EQ — one of the hardest topologies melange solves: coupled transformers with global feedback wrapped around four nonlinear tubes (see [Spotlight](#spotlight-passive-tube-eq)):
 
 ```bash
-# Export from KiCad (or use File → Export Netlist → Melange in the GUI)
-kicad-cli sch export python-bom -o circuit.xml my-circuit.kicad_sch
-melange import circuit.xml -o circuit.cir
-
-# Compile to a plugin project, then build the DSP library
-melange compile circuit.cir --format plugin -o my-plugin
-cd my-plugin && cargo build --release
-# → raw library in target/release/. For a DAW-loadable VST3/CLAP bundle, run
-#   `bash build.sh` (bundles via the project's own xtask — no nih-plug clone).
-#   Generate the project OUTSIDE any Cargo workspace, or bundling will fail.
-```
-
-Standard parts (R, C, L, D, BJT, JFET, MOSFET) use KiCad's own `Simulation_SPICE` symbols — no reinvention, no melange-flavored resistor. The melange-specific parts (triodes, pentodes, VCAs, pots, wipers, I/O markers) live in the included `melange.kicad_sym` library, because KiCad does not ship a symbol for "the thing that makes a Wurlitzer sound like that." Setup lives in the [KiCad integration guide](kicad/README.md).
-
-### 2. From a SPICE netlist
-
-Write one by hand, or take one from a circuit repository and stop pretending you were going to write it by hand. A complete worked example ships in [`examples/`](examples/) — a Pultec-style passive tube EQ — one of the hardest topologies melange solves: coupled transformers with global feedback wrapped around four nonlinear tubes (see [Spotlight](#spotlight-passive-tube-eq)):
-
-```bash
-# Compile the bundled passive tube EQ example — Pultec-style (4 tubes, 3 transformers, global NFB)
+# Compile the bundled passive tube EQ example (4 tubes, 3 transformers, global NFB)
 melange compile examples/passive-eq1a.cir --format plugin -o passive-eq
 cd passive-eq && cargo build --release   # builds the DSP library (target/release/)
 
@@ -112,9 +88,11 @@ Cargo workspace — the bundler walks up to the outermost `Cargo.toml` — so a
 project generated inside this repo (as `-o passive-eq` does) will `cargo build`
 in place but will not bundle until you move it out.
 
-### 3. From the built-in demo, or a circuit library
+The netlist dialect is documented in **[Writing SPICE Netlists for Melange](docs/NETLIST_GUIDE.md)**.
 
-The Pultec-style passive EQ ships **built in**, so melange can compile and demo itself with no downloads and no external repo — just name it:
+### 2. From the built-in demo, or a circuit library
+
+The passive tube EQ ships **built in**, so melange can compile and demo itself with no downloads and no external repo — just name it:
 
 ```bash
 melange compile passive-eq1a --format plugin -o my-eq   # built-in demo circuit
@@ -127,6 +105,41 @@ The full circuit library lives in its own repository (being published). Once it 
 melange sources add pedalboards https://github.com/someone/spice-pedals
 melange compile pedalboards:rat-distortion --format plugin -o rat
 ```
+
+### 3. From a KiCad schematic
+
+If you already draw in KiCad, melange can take the schematic instead of a netlist. Draw the circuit, export it, import it. Melange ships a [KiCad symbol library and netlist exporter](kicad/README.md) covering triodes, pentodes, op-amps, VCAs, pots, wipers, and audio I/O markers.
+
+This is a way to *produce* a netlist, not a separate pipeline — the import writes a `.cir` and everything downstream is Way In #1. It is listed last because it needs a GUI EDA suite installed before you can author anything, while the netlist path needs nothing but a text editor.
+
+> **Maturity.** This path did not work at all until recently: the bundled symbol
+> library and example schematic had never been opened by KiCad and did not load.
+> Both are repaired and verified against KiCad 10.0.6, but only the stock
+> `Simulation_SPICE` R and C parts, wire labels and a ground symbol have been
+> exercised end to end. The melange-specific symbols (triode, pentode, op-amp,
+> VCA, pot, wiper, I/O markers) load and render, but nobody has yet drawn a
+> circuit with them and round-tripped it. Requires **KiCad 8 or newer** — the
+> files are saved in the KiCad 8 format (`version 20231120`) and KiCad 7's
+> `kicad-cli` cannot read them. Ways In #1 and #2 need no KiCad at all.
+
+```
+┌──────────┐     Export      ┌──────────┐    melange     ┌──────────┐
+│  KiCad   │ ──────────────► │  .cir    │ ─────────────► │  Plugin  │
+│ Schematic│                 │ netlist  │    compile     │ Project  │
+└──────────┘                 └──────────┘                └──────────┘
+```
+
+```bash
+# Export from KiCad (or use File → Export Netlist → Melange in the GUI)
+kicad-cli sch export python-bom -o circuit.xml my-circuit.kicad_sch
+melange import circuit.xml -o circuit.cir
+
+# No KiCad installed? An exported XML ships in the repo, so the import half
+# is runnable on its own:
+melange import kicad/examples/rc-lowpass/rc-lowpass.xml -o rc-lowpass.cir
+```
+
+Standard parts (R, C, L, D, BJT, JFET, MOSFET) use KiCad's own `Simulation_SPICE` symbols — no reinvention, no melange-flavored resistor. The melange-specific parts live in the included `melange.kicad_sym` library, because KiCad does not ship a symbol for "the thing that makes a Wurlitzer sound like that." Setup lives in the [KiCad integration guide](kicad/README.md).
 
 ## Simulate Without Compiling
 
@@ -159,7 +172,7 @@ The generated plugin project has two files, and the division of labor between th
 melange compile my-circuit.cir --format code -o my-plugin/src/circuit.rs
 ```
 
-The generated DSP is completely standalone — zero runtime dependency on melange. Once it's emitted, melange is done and you can delete it. What comes out includes pre-inverted matrices with sparsity-aware emission, Newton-Raphson iteration, DC bias initialization, per-sample pot smoothing, optional oversampling, DC blocking, and the aforementioned ear protection.
+The generated DSP is completely standalone — zero runtime dependency on melange (an empty `[dependencies]`, one package in the lockfile: yours). Once it's emitted, melange is done and you can delete it. Its API — `CircuitState::default()`, `set_sample_rate()`, the free function `process_sample(input, &mut state)`, the pot/switch setters and the constants — is documented, with a worked ten-line consumer, in **[Using the Generated DSP Directly](docs/CODE_API.md)**. What comes out includes pre-inverted matrices with sparsity-aware emission, Newton-Raphson iteration, DC bias initialization, per-sample pot smoothing, optional oversampling, DC blocking, and a hard ±10 V output clamp. (The *soft* ear-protection limiter is part of the plugin wrapper `lib.rs`, not of `circuit.rs` — on the `--format code` path, gain staging is yours.)
 
 All buffers pre-allocated. Zero heap allocation in the audio path. No `unsafe`.
 
@@ -318,7 +331,7 @@ Every subcommand has `--help`. The flags worth knowing about up front:
 | `--input-audio file.wav` | simulate | Use a WAV file instead of a test tone |
 | `--no-ear-protection` | compile | Disable soft limiter (measurement only) |
 
-Each subcommand's own `--help` is authoritative for its flags. For the prose versions: the [Plugin Development Guide](docs/PLUGIN_GUIDE.md) covers `compile` and the generated project; [Getting Started](docs/GETTING_STARTED.md) covers `simulate`, `analyze`, and the compile-flag table.
+Each subcommand's own `--help` is authoritative for its flags. For the prose versions: the [Plugin Development Guide](docs/PLUGIN_GUIDE.md) covers `compile` and the generated project; [Using the Generated DSP Directly](docs/CODE_API.md) covers `compile --format code` (the default format) and the API of the file it emits; [Getting Started](docs/GETTING_STARTED.md) covers `simulate`, `analyze`, and the compile-flag table.
 
 ## Architecture
 

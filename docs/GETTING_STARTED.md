@@ -117,7 +117,7 @@ Key flags for `melange compile`:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--format code\|plugin` | `code` | Output format |
+| `--format code\|plugin` | `code` | Output format. `code` emits the bare `circuit.rs` — its API is in [CODE_API.md](CODE_API.md) |
 | `--sample-rate` | 48000 | Design sample rate (Hz) |
 | `--oversampling 1\|2\|4` | 1 | Anti-aliasing oversampling factor |
 | `--input-node` | `in` | Input node name in netlist |
