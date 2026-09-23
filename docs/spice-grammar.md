@@ -1500,10 +1500,15 @@ parses to 10, not 10e-15, and melange logs a warning saying so. Write `10e-15`
 or `10fF`. In a **`.model` parameter** position the token is dimensionless and
 `f` is femto: `.model DX D(IS=6.734f)` → 6.734e-15, matching ngspice.
 
-#### Infix position (BS-1852)
+#### Infix position (SI-prefix infix, `4k7`)
 
 `<digits><letter><digits>` places the decimal point where the letter sits. The
 letter must be one of `T G K M U N P`, and both sides must be digits only.
+
+Melange implements these SI-prefix infix forms only. BS 1852, which is where the
+notation comes from, also defines `R` as an ohms decimal marker; `4R7`, `1R5` and
+`10R` are parse errors here (see below). Melange does not implement that standard
+in full and should not be described as doing so.
 
 | Written | Value |
 |---------|-------|
@@ -1517,6 +1522,22 @@ letter must be one of `T G K M U N P`, and both sides must be digits only.
 Values that do not fit the pattern fall through to the suffix rules, and may
 then fail to parse: `1.5M0` is a parse error (non-digit before the letter), and
 `4f7` is a parse error (`f` is not an infix scale letter).
+
+#### The `R` ohms marker is rejected
+
+`4R7`, `1R5` and `10R` are parse errors. `R` is not in the infix letter set and
+is not stripped as a unit letter.
+
+The reason is cross-engine, not syntactic. ngspice reads the mantissa, applies a
+scale letter only if one immediately follows it, and silently discards the rest
+of the token — so ngspice reads `1R5` as **1 Ω**, not 1.5 Ω. `melange validate`
+hands the author's netlist directly to ngspice, so honouring `R` would make the
+two engines simulate different circuits while reporting a correlation between
+them. Rejecting is the honest outcome; the parse error says so.
+
+Note the same disagreement applies to the infix forms melange *does* accept —
+ngspice reads `4k7` as 4000 and `2M2` as 0.002 — so prefer `4.7k` and `2.2meg`
+in any netlist you intend to validate against ngspice.
 
 #### `M`: milli in suffix position, mega in infix position
 

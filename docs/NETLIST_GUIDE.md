@@ -281,9 +281,14 @@ X1 input mid vcc GAIN_STAGE         ; Instance: nodes..., subckt name
 ## Unit Suffixes
 
 A scale letter can sit in two places: **after** the digits (SPICE suffix
-notation, `10k`) or **between** them (BS-1852 infix notation, `4k7`). Both are
+notation, `10k`) or **between** them (infix notation, `4k7`). Both are
 supported. They do not agree on what `M` means, so read both tables before
 typing a megohm.
+
+Melange accepts the SI-prefix infix forms — `4k7`, `6n8`, `2M2`. It does **not**
+implement BS 1852 as a whole: that standard also uses `R` as the ohms decimal
+marker, and `4R7`, `1R5` and `10R` are parse errors here. See
+[The `R` marker is rejected](#the-r-marker-is-rejected) for why.
 
 ### Suffix position
 
@@ -327,6 +332,25 @@ through to the suffix rules above, and may not parse at all:
   Write `1.5meg` or `1.5e6`.
 - There is no infix femto. `4f7` is a **parse error**; write `4.7e-15` or
   `4.7fF`.
+
+### The `R` marker is rejected
+
+BS 1852 also uses `R` as an ohms decimal marker — `4R7` for 4.7 Ω, `10R` for
+10 Ω. Melange rejects all three forms. This is deliberate, not an oversight:
+
+ngspice reads the mantissa, applies a scale letter only if one immediately
+follows, and silently discards the rest of the token. So ngspice reads `1R5` as
+**1 Ω**, not 1.5 Ω. Since `melange validate` hands your netlist straight to
+ngspice and correlates the two engines, accepting `1R5` as 1.5 Ω would have
+melange and ngspice simulate different circuits and report a correlation between
+them. Failing to parse is the honest outcome.
+
+Write `4.7`, `1.5` and `10`.
+
+> The same divergence exists for the infix forms melange *does* accept: ngspice
+> reads `4k7` as 4000 and `2M2` as 0.002. Melange is right and ngspice is lossy,
+> but they disagree — so if you intend to run `melange validate` on a netlist,
+> write `4.7k` and `2.2meg` rather than `4k7` and `2M2`.
 
 ### `M` infix vs `M` suffix: 10^9 apart
 
