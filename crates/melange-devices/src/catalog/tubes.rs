@@ -20,17 +20,69 @@ pub struct TubeCatalogEntry {
     pub kp: f64,
     /// Kvb coefficient (knee shaping)
     pub kvb: f64,
-    /// Maximum grid current [A]
-    pub ig_max: f64,
-    /// Grid current onset voltage [V]
-    pub vgk_onset: f64,
+    /// Dempwolf & Zölzer eq. (11) grid perveance `Gg` [A/V^xi].
+    pub gg: f64,
+    /// Dempwolf & Zölzer eq. (11) grid exponent `xi`.
+    pub xi: f64,
+    /// Dempwolf & Zölzer eq. (11) grid adaption factor `Cg` [1/V].
+    pub cg: f64,
     /// Channel-length modulation (Early effect) [1/V]
     pub lambda: f64,
     /// Source citation
     pub source: &'static str,
 }
 
+/// Manufacturer limit on the **grid current starting point**: the most
+/// negative `Vg` at which a type is permitted to be passing `Ig = +0.3 µA`.
+///
+/// Philips publishes this as a per-type static limit — `Vg(Ig = +0.3 µA) max
+/// −0.9 V` for the ECC83 (doc. 722 0010), −1.3 V for the ECC82 — so melange
+/// keys it per type from that type's own sheet rather than carrying one global
+/// constant. A type with no limit on file is `None` and is **reported but not
+/// checked**; inventing a bracket for it would be worse than admitting there
+/// is none.
+///
+/// This is a CHECK, never a parameter. It is compared against the onset the
+/// fitted `(Gg, xi, Cg)` implies, and melange warns when the model falls
+/// outside its own type's published bracket. Nothing reads it at run time.
+///
+/// Sign: the value is the permitted lower (most negative) bound. A derived
+/// onset of −0.35 V sits comfortably inside the ECC83's −0.9 V; −1.2 V would
+/// not.
+pub fn grid_start_limit_v(name: &str) -> Option<f64> {
+    const LIMITS: &[(&[&str], f64)] = &[
+        // Philips ECC83 data sheet doc. 722 0010: Vg(Ig=+0,3 µA) max −0,9 V.
+        (
+            &[
+                "12AX7", "ECC83", "7025", "CV4004", "12AX7K", "ECC83K", "12AX7F", "ECC83F",
+            ],
+            -0.9,
+        ),
+        // Philips ECC82: max −1,3 V.
+        (&["12AU7", "ECC82", "5963", "CV4003"], -1.3),
+        // Philips ECC81: the arbiter's ruling records this type as carrying
+        // the limit "likewise", i.e. reading with the ECC82's −1,3 V. Flagged
+        // here because "likewise" is the ruling's word, not a figure read off
+        // the ECC81 sheet directly; if that sheet is ever put in front of
+        // melange and disagrees, this row is the one to correct.
+        (&["12AT7", "ECC81", "6201", "CV4024"], -1.3),
+    ];
+    LIMITS
+        .iter()
+        .find(|(names, _)| names.iter().any(|n| n.eq_ignore_ascii_case(name)))
+        .map(|(_, v)| *v)
+}
+
 /// The tube catalog.
+///
+/// **Grid current**: every entry carries the same `(Gg, xi, Cg)` — Dempwolf &
+/// Zölzer DAFx-11 Table 1 row **RSD-1** (see `tube::DEFAULT_GG`). The paper
+/// fitted 12AX7s only, and no per-type grid fit of this form exists for the
+/// other types here, so for anything but a 12AX7 the grid half of the entry is
+/// an **extrapolation from a 12AX7** and is labelled as such by the
+/// compile-time onset report. The fields are per-entry, not global, precisely
+/// so a per-type fit can land in one row without touching the others. The
+/// plate half (`mu`/`ex`/`kg1`/`kp`/`kvb`) is per-type and unaffected.
 pub const CATALOG: &[TubeCatalogEntry] = &[
     // 12AX7 / ECC83 — high-mu twin triode, the workhorse of guitar amps.
     // Norman Koren's published 1996 card, used with the full Koren equation
@@ -49,8 +101,9 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         kg1: 1060.0,
         kp: 600.0,
         kvb: 300.0,
-        ig_max: 2e-3,
-        vgk_onset: 0.5,
+        gg: crate::tube::DEFAULT_GG,
+        xi: crate::tube::DEFAULT_XI,
+        cg: crate::tube::DEFAULT_CG,
         lambda: 0.0,
         source: "Koren 1996 published card (Glass Audio 8-5; normankoren.com Table 1)",
     },
@@ -65,8 +118,9 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         kg1: 1060.0,
         kp: 600.0,
         kvb: 300.0,
-        ig_max: 2e-3,
-        vgk_onset: 0.5,
+        gg: crate::tube::DEFAULT_GG,
+        xi: crate::tube::DEFAULT_XI,
+        cg: crate::tube::DEFAULT_CG,
         lambda: 0.0,
         source: "Koren 1996 Table 1 (original Kg1=1060)",
     },
@@ -84,8 +138,9 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         kg1: 1060.0,
         kp: 600.0,
         kvb: 300.0,
-        ig_max: 2e-3,
-        vgk_onset: 0.5,
+        gg: crate::tube::DEFAULT_GG,
+        xi: crate::tube::DEFAULT_XI,
+        cg: crate::tube::DEFAULT_CG,
         lambda: 0.0,
         source: "Koren 1996 published card (equals 12AX7; historical Kg1=3000 refit removed)",
     },
@@ -103,8 +158,9 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         kg1: 1180.0,
         kp: 84.0,
         kvb: 300.0,
-        ig_max: 4e-3,
-        vgk_onset: 0.7,
+        gg: crate::tube::DEFAULT_GG,
+        xi: crate::tube::DEFAULT_XI,
+        cg: crate::tube::DEFAULT_CG,
         lambda: 0.0,
         source: "Koren 1996 original card (12AU7_OLD in Koren's library)",
     },
@@ -121,8 +177,9 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         kg1: 460.0,
         kp: 300.0,
         kvb: 300.0,
-        ig_max: 4e-3,
-        vgk_onset: 0.5,
+        gg: crate::tube::DEFAULT_GG,
+        xi: crate::tube::DEFAULT_XI,
+        cg: crate::tube::DEFAULT_CG,
         lambda: 0.0,
         source: "Koren 1996 original card (12AT7_OLD in Koren's library)",
     },
@@ -140,8 +197,9 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         kg1: 1600.0,
         kp: 260.0,
         kvb: 300.0,
-        ig_max: 2e-3,
-        vgk_onset: 0.5,
+        gg: crate::tube::DEFAULT_GG,
+        xi: crate::tube::DEFAULT_XI,
+        cg: crate::tube::DEFAULT_CG,
         lambda: 0.0,
         source: "Koren-form fit to RCA 6SL7GT datasheet (Ip=2.3mA at Vgk=-2, Vpk=250)",
     },
@@ -158,8 +216,9 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         kg1: 1680.0,
         kp: 600.0,
         kvb: 300.0,
-        ig_max: 2e-3,
-        vgk_onset: 0.5,
+        gg: crate::tube::DEFAULT_GG,
+        xi: crate::tube::DEFAULT_XI,
+        cg: crate::tube::DEFAULT_CG,
         lambda: 0.0,
         source: "Koren-form fit checked against RCA 6SN7GT datasheet (Ip=9mA at Vgk=-8, Vpk=250)",
     },
@@ -172,8 +231,9 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         kg1: 1680.0,
         kp: 600.0,
         kvb: 300.0,
-        ig_max: 2e-3,
-        vgk_onset: 0.5,
+        gg: crate::tube::DEFAULT_GG,
+        xi: crate::tube::DEFAULT_XI,
+        cg: crate::tube::DEFAULT_CG,
         lambda: 0.0,
         source: "Same as 6SN7GT (single triode version)",
     },
@@ -193,8 +253,9 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         kg1: 1460.0,
         kp: 48.0,
         kvb: 12.0,
-        ig_max: 6e-3,
-        vgk_onset: 0.7,
+        gg: crate::tube::DEFAULT_GG,
+        xi: crate::tube::DEFAULT_XI,
+        cg: crate::tube::DEFAULT_CG,
         lambda: 0.0,
         source: "Koren 1996 6L6GC card applied to 6V6 (no published Koren 6V6 card; flagged)",
     },
@@ -212,8 +273,9 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         kg1: 600.0,
         kp: 200.0,
         kvb: 300.0,
-        ig_max: 8e-3,
-        vgk_onset: 0.7,
+        gg: crate::tube::DEFAULT_GG,
+        xi: crate::tube::DEFAULT_XI,
+        cg: crate::tube::DEFAULT_CG,
         lambda: 0.0,
         source: "Unsourced Koren-form triode-mode fit (flagged: Philips triode-connected mu~19.5)",
     },
@@ -230,8 +292,9 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         kg1: 650.0,
         kp: 60.0,
         kvb: 24.0,
-        ig_max: 10e-3,
-        vgk_onset: 0.7,
+        gg: crate::tube::DEFAULT_GG,
+        xi: crate::tube::DEFAULT_XI,
+        cg: crate::tube::DEFAULT_CG,
         lambda: 0.0,
         source: "Koren 1996 original EL34 card (EL34_OLD in Koren's library)",
     },
@@ -250,8 +313,9 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         kg1: 890.0,
         kp: 48.0,
         kvb: 12.0,
-        ig_max: 8e-3,
-        vgk_onset: 0.7,
+        gg: crate::tube::DEFAULT_GG,
+        xi: crate::tube::DEFAULT_XI,
+        cg: crate::tube::DEFAULT_CG,
         lambda: 0.0,
         source: "Koren 1996 6L6GC card with unpublished Kg1=890 (~2/pi knee fold; flagged)",
     },
@@ -1021,13 +1085,18 @@ mod tests {
                 entry.names[0]
             );
             assert!(
-                entry.ig_max > 0.0 && entry.ig_max.is_finite(),
-                "{}: ig_max",
+                entry.gg > 0.0 && entry.gg.is_finite(),
+                "{}: gg",
                 entry.names[0]
             );
             assert!(
-                entry.vgk_onset > 0.0 && entry.vgk_onset.is_finite(),
-                "{}: vgk_onset",
+                entry.xi > 0.0 && entry.xi.is_finite(),
+                "{}: xi",
+                entry.names[0]
+            );
+            assert!(
+                entry.cg > 0.0 && entry.cg.is_finite(),
+                "{}: cg",
                 entry.names[0]
             );
             assert!(
@@ -1110,8 +1179,9 @@ mod tests {
             entry.kg1,
             entry.kp,
             entry.kvb,
-            entry.ig_max,
-            entry.vgk_onset,
+            entry.gg,
+            entry.xi,
+            entry.cg,
             entry.lambda,
         )
     }
@@ -1282,8 +1352,9 @@ mod tests {
         assert_eq!(j5.kg1, sn7.kg1);
         assert_eq!(j5.kp, sn7.kp);
         assert_eq!(j5.kvb, sn7.kvb);
-        assert_eq!(j5.ig_max, sn7.ig_max);
-        assert_eq!(j5.vgk_onset, sn7.vgk_onset);
+        assert_eq!(j5.gg, sn7.gg);
+        assert_eq!(j5.xi, sn7.xi);
+        assert_eq!(j5.cg, sn7.cg);
         assert_eq!(j5.lambda, sn7.lambda);
         // 6J5GT alias
         assert!(lookup("6J5GT").is_some());

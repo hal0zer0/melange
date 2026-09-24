@@ -766,10 +766,21 @@ fn check_islands(netlist: &Netlist, ports: &Ports, dangling: &BTreeSet<String>) 
 ///   `gate_current`), i.e. zero conductance, so a floating gate charges to
 ///   cutoff instead of being biased.
 /// * **Triode / pentode** — plate-cathode, plus screen-cathode on a pentode
-///   (the screen draws real DC current). NOT the grid: `Ig = ig_max ·
-///   max(0, Vgk/vgk_onset)^1.5` (`tube.rs`) is exactly zero below onset, so a
-///   grid with no leak resistor has no DC path. The pentode suppressor is
-///   modeled as cathode-tied and stamps nothing.
+///   (the screen draws real DC current). NOT the grid, though the reason now
+///   differs by family:
+///   - *Pentode* control grid: the Leach law `Ig1 = ig_max ·
+///     max(0, Vgk/vgk_onset)^1.5` (`tube.rs`) is **exactly** zero below onset,
+///     so a grid with no leak resistor has literally no DC path.
+///   - *Triode*: the Dempwolf & Zölzer law that replaced Leach conducts at
+///     EVERY Vgk, so "exactly zero" no longer holds and this entry is a
+///     deliberate choice rather than an identity. It is still the right one:
+///     at a normal bias (Vgk ≈ −1 to −2 V) the grid conductance is of order
+///     1e-9 to 1e-12 S — gigohms — which neither biases the grid in any
+///     circuit sense nor conditions the matrix. Counting it as an edge would
+///     only stop this check catching the authoring mistake it exists for (a
+///     missing grid-leak resistor), and would hand the solver a node anchored
+///     by a picosiemens. Revisit only with a corpus sweep behind it.
+///   The pentode suppressor is modeled as cathode-tied and stamps nothing.
 /// * **BJT** — both junctions. Unlike a gate or a grid, a base-emitter diode
 ///   has nonzero conductance at every bias, so it does anchor the base.
 /// * **VCA / LDR** — signal (resistance) path only; the control pair is sensed

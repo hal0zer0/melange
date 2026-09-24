@@ -279,41 +279,144 @@ dIp/dVgk = dIp_koren/dVgk * (1 + lambda * Vpk)
 dIp/dVpk = dIp_koren/dVpk * (1 + lambda * Vpk) + Ip_koren * lambda
 ```
 
-### Grid Current (Leach)
+### Grid Current (Dempwolf & Zölzer DAFx-11, eq. 11)
+
 ```
-Ig = ig_max * (vgk / vgk_onset)^1.5   for vgk > 0
-Ig = 0                                 for vgk <= 0
+s  = softplus(Cg * Vgk) / Cg        softplus(x) = ln(1 + e^x)
+Ig = Gg * s^xi                      for ALL Vgk — no branch, no onset parameter
+dIg/dVgk = Gg * xi * s^(xi-1) * sigma(Cg * Vgk)      sigma = logistic sigmoid
 ```
+
+Source: K. Dempwolf & U. Zölzer, "A physically-motivated triode model for
+circuit simulations", Proc. DAFx-11, Paris 2011, eq. (11). Parameter names are
+the paper's (`Gg`, `xi`, `Cg`) so its Table 1 rows transfer with provenance.
+
+**The negative-grid region is part of the law.** The grid is a vacuum diode:
+a space-charge power law for positive grid, joined by the initial-velocity
+current that real tubes pass at and below Vgk = 0 (D&Z §5.2). The softplus
+supplies that join with no piecewise branch. Measured 12AX7s pass **12–19 µA at
+Vgk = 0** and reach the datasheet 0.3 µA criterion at **−0.27 to −0.38 V**.
+The retired Leach law returned exactly 0.0 A everywhere below Vgk = 0 for ANY
+parameter values — wrong physics, not a scope boundary.
+
+**`Ig0` is deliberately dropped.** The paper adds a constant "due to stability
+reasons". It has zero derivative so it cannot help Newton, and it injects tens
+of nA at the negative grid voltages where the datasheets specify REVERSE grid
+current of the opposite sign. Note when reading D&Z-derived figures elsewhere:
+onsets quoted as −0.38 / −0.27 / −0.31 V are the WITH-`Ig0` values; without it
+the same rows give **−0.353 / −0.264 / −0.296 V**.
+
+**No onset parameter, and none is wanted.** Turn-on sharpness is `1/(xi*Cg)`
+and magnitude is `Gg`; a 2:1 spread in `Gg` moves the 0.3 µA criterion by only
+~50 mV, which is why real 12AX7s are tight in onset and loose (2:1) in
+magnitude. The onset is an OUTPUT of the fit, and melange reports it at compile
+time (below) precisely so an independent datasheet row can score it.
+
+**Numerics.** `softplus` is the stable two-branch form `x + ln1p(e^-x)` for
+x > 0, `ln1p(e^x)` otherwise, so nothing overflows at any finite Vgk (a bare
+`exp(Cg*Vgk)` is infinite past Vgk ≈ 71 V at the default Cg). The Jacobian is
+analytic, strictly positive and continuous through turn-on — strictly kinder to
+Newton than the retired law, whose conductance was identically zero across the
+whole negative-grid region and had a `sqrt` cusp at the crossing. The generated
+code uses `std` `exp`/`ln_1p` rather than `fast_exp`/`fast_ln` here: `fast_exp`
+clamps to [−40, 40], which would put a spurious floor under the grid current in
+exactly the deep-negative region this law exists to get right.
 
 ### 12AX7 Parameters
 ```
-mu = 100, Kp = 600, Kvb = 300, Kg1 = 1060, ex = 1.4
-ig_max = 2e-3, vgk_onset = 0.5, lambda = 0.0
+mu = 100, Kp = 600, Kvb = 300, Kg1 = 1060, ex = 1.4, lambda = 0.0
+Gg = 6.177e-4, xi = 1.314, Cg = 9.901
 ```
 
 Kg1 = 1060 is Norman Koren's published card and is only valid together with
 the `2·E1^ex/Kg1` plate equation above (see `catalog/tubes.rs` for the
 history of the Kg1=3000 compensating misfit).
 
+The grid row is **D&Z Table 1 column RSD-1** — ONE named row, never an average
+of the three the paper fitted ("an average of three fits is not a tube"). RSD-1
+is the first-listed column and the old-stock RSD sample the paper uses as its
+exemplar (Fig. 1 "measurements from a RSD 12AX7 triode"; Fig. 6 "measurement
+data from a RSD tube"). Chosen on provenance alone. The other two rows, for
+reference: RSD-2 `Gg=5.911e-4 xi=1.358 Cg=11.76`, EHX-1 `Gg=3.263e-4 xi=1.156
+Cg=11.99`.
+
+What RSD-1 gives, all DERIVED (melange computes them; none is stored or fitted):
+
+| quantity | value |
+|---|---|
+| Ig at Vgk = 0 | 18.76 µA |
+| Vgk at Ig = 0.3 µA (grid-current starting point) | −0.353 V |
+| Vgk at Ig = 2 mA | +2.445 V |
+
+**Every catalog entry carries this same grid row.** D&Z fitted 12AX7s only, and
+no per-type fit of this form exists for the others, so for anything but a 12AX7
+the grid half of a catalog entry is an EXTRAPOLATION FROM A 12AX7. The fields
+are per-entry so a per-type fit can land in one row without disturbing the rest.
+
+### Compile-time grid-current starting-point CHECK
+
+Not a parameter — a check, deliberately: a parameter would invite someone to
+fit it. At compile time melange reports the Vgk at which the resolved
+`(Gg, xi, Cg)` reaches the manufacturers' `Ig = +0.3 µA` criterion (Philips
+ECC82 1959 footnote, spelled out in full there; the ECC83 sheet carries the
+same row), and warns when that falls outside the type's own published limit:
+
+| type | Philips `Vg(Ig = +0.3 µA)` max | source |
+|---|---|---|
+| ECC83 / 12AX7 | −0.9 V | doc. 722 0010 |
+| ECC82 / 12AU7 | −1.3 V | Philips sheet |
+| ECC81 / 12AT7 | −1.3 V | recorded as "likewise" — see the note in `catalog/tubes.rs::grid_start_limit_v` |
+
+Keyed **per tube type**, never one global constant: the types genuinely differ.
+A type with no limit on file is reported and NOT checked — inventing a bracket
+would be worse than admitting there is none. Nothing reads this at run time.
+
 ### Overriding via `.model` (all triode params are deck-specifiable)
 
-Every parameter above — including the **grid-current** coefficients `IG_MAX`
-and `VGK_ONSET` — is overridable per tube on the `.model TRIODE(...)` line, not
-just the plate params. The resolver (`CircuitIR::resolve_tube_params`) reads
-each key with the fallback chain **`.model` value → `catalog/tubes.rs` entry →
-built-in default**. So `.model ECC83 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600
-KVB=300 IG_MAX=5e-3 VGK_ONSET=0.75)` emits `DEVICE_n_IG_MAX = 5e-3` /
-`VGK_ONSET = 0.75`; a deck that omits them gets the `2e-3` / `0.5` defaults.
+Every parameter above — including the **grid-current** coefficients `GG`, `XI`
+and `CG` — is overridable per tube on the `.model TRIODE(...)` line, not just
+the plate params. The resolver (`CircuitIR::resolve_tube_params`) reads each key
+with the fallback chain **`.model` value → `catalog/tubes.rs` entry → built-in
+default**. So `.model ECC83 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300
+GG=5.911e-4 XI=1.358 CG=11.76)` emits `DEVICE_n_GG` / `XI` / `CG` for the RSD-2
+row; a deck that omits them gets RSD-1.
 
-Overridable keys: `MU EX KG1 KP KVB LAMBDA IG_MAX VGK_ONSET` (sharp triode);
+Overridable keys: `MU EX KG1 KP KVB LAMBDA GG XI CG` (sharp triode);
 `MU_B SVAR EX_B` (Reefman variable-μ, off by default); `CCG CGP CCP` (inter-
 electrode caps); `RGI` (grid internal resistance). All are validated
 positive-finite (LAMBDA/caps non-negative) at resolve time.
 
-Caveat: the grid-current **form** is Leach `x^1.5` (Child-Langmuir), which is
-melange's own — not a canonical published grid model — so `IG_MAX`/`VGK_ONSET`
-let you fit the magnitude/onset, but validating the *shape* against a real tube
-needs measured grid-conduction data (no standard SPICE grid model to defer to).
+### RETIRED: `IG_MAX` / `VGK_ONSET`
+
+Both keys are a **hard error** on any command that compiles the card, and a
+warning on the inspection commands. They are not aliased (an alias preserves a
+name that was wrong about its own meaning) and not repurposed (the same key
+silently meaning something else is the silent-wrong-output class).
+
+They were wrong about themselves: `VGK_ONSET` was never the onset — it was the
+voltage at which the Leach law reached `IG_MAX` — and `IG_MAX` was never a
+maximum, the curve climbed straight past it. There was no onset parameter at
+all.
+
+The refusal prints the conversion, so an author who wants the old curve back can
+have it deliberately. The Leach law is the `xi = 1.5`, `Cg → ∞` limit of eq.
+(11):
+
+```
+GG = IG_MAX / VGK_ONSET^1.5,   XI = 1.5,   CG = large (e.g. 1e3)
+```
+
+Verified exact to machine precision (rel. err ≤ 3.2e-16 over Vgk = 0.05–2.45 V
+for `IG_MAX=5e-3, VGK_ONSET=0.75`). Reaching for it puts the Vgk = 0 hard onset
+back.
+
+### Voltage limiting
+
+`pnjlim` on the grid dimension uses the grid law's own turn-on width as its
+`vt`: **`1/Cg`** for the D&Z triode (the adaption factor is a reciprocal
+voltage, exactly the role `n·Vt` plays for a diode — 0.101 V at the default
+`Cg`), and the unchanged `vgk_onset/3` for the Leach pentode control grid.
+`DEVICE_n_VCRIT` is derived from the same scale. See `VOLTAGE_LIMITING.md`.
 
 ## Pentode / Beam Tetrode (Reefman "Derk" §4.4)
 
@@ -367,15 +470,33 @@ by symbolic expansion). `TubeParams::validate()` rejects at config time.
 **Allowed**: `a_factor >= 0` and `beta_factor >= 0`. Some fits pinpoint
 `a_factor` or `beta_factor` at zero; only `alpha_s` is load-bearing.
 
-### Grid Current (reuse Leach)
+### Grid Current (Leach — pentode only, and a KNOWN GAP)
 
 ```
 Ig1 = ig_max * (Vgk / vgk_onset)^1.5    for Vgk > 0
 Ig1 = 0                                  otherwise
 ```
 
-Identical to the triode. Pentode codegen reuses `tube_ig` / `tube_ig_deriv`
-without modification.
+Pentode codegen carries its own `tube_ig` / `tube_ig_deriv` helpers, emitted
+only when a pentode of some family is present.
+
+**This is no longer "identical to the triode", and that is a recorded gap, not
+a design.** The triode moved to Dempwolf & Zölzer eq. (11) because conduction
+pinned to `Vgk = 0` is wrong physics. The pentode control grid still has that
+same defect: it returns exactly 0 A for every negative Vgk, and `IG_MAX` /
+`VGK_ONSET` are still misnamed here for the same reasons they were misnamed on
+the triode.
+
+The pentode was NOT converted because D&Z fitted 12AX7 triodes, no published
+fit of that form exists for a power pentode's control grid, and melange does not
+invent device parameters. Reusing the 12AX7 row for a 6V6 would drop its grid
+current by more than an order of magnitude on no evidence at all. Closing this
+needs a source, not a decision.
+
+Consequence worth knowing: `IG_MAX` / `VGK_ONSET` are RETIRED on a
+`.model … TRIODE(...)` card (hard error) and still **honored** on a
+`.model … PENTODE(...)` card. That asymmetry is deliberate and follows the
+laws, not the spelling.
 
 ### 3×3 Analytic Jacobian
 

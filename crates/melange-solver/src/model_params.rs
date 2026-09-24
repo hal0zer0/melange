@@ -157,6 +157,28 @@ impl ModelClass {
         }
     }
 
+    /// Keys this class once accepted and now REFUSES, each with the message
+    /// that must be printed when a deck still carries it.
+    ///
+    /// Retirement is a hard error on purpose. The two alternatives were both
+    /// rejected: an alias preserves a name that was wrong about its own
+    /// meaning, and a repurpose makes the same key silently mean something
+    /// else — the silent-wrong-output class melange exists not to have.
+    pub fn retired(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            ModelClass::Triode => TRIODE_RETIRED,
+            _ => &[],
+        }
+    }
+
+    /// The retirement message for `key`, if this class has retired it.
+    pub fn retired_note(self, key: &str) -> Option<&'static str> {
+        self.retired()
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .map(|(_, note)| *note)
+    }
+
     /// True when `key` (any case) is honored by this class.
     pub fn is_honored(self, key: &str) -> bool {
         self.honored().iter().any(|k| k.eq_ignore_ascii_case(key))
@@ -181,6 +203,21 @@ impl ModelClass {
 /// `.model` card pass in [`crate::parser`] so all three emit an identical line.
 pub fn warn_if_unknown(model_name: &str, class: ModelClass, key: &str) {
     if class.is_honored(key) || class.unimplemented_note(key).is_some() {
+        return;
+    }
+    // A retired key is a different mistake from a typo and gets a different
+    // line. The commands that actually compile the card REFUSE it (see
+    // `check_model_params`); the inspection commands that route here warn,
+    // because refusing to show a deck's node list over one stale key would be
+    // the worse trade.
+    if let Some(note) = class.retired_note(key) {
+        log::warn!(
+            ".model {}: parameter '{}' is RETIRED and is ignored here (it is a \
+             hard error on compile) — {}.",
+            model_name,
+            key,
+            note
+        );
         return;
     }
     // The hint carries its own leading space and is usually empty; appending a
@@ -350,8 +387,9 @@ const TRIODE_HONORED: &[&str] = &[
     "KG1",
     "KP",
     "KVB",
-    "IG_MAX",
-    "VGK_ONSET",
+    "GG",
+    "XI",
+    "CG",
     "LAMBDA",
     "CCG",
     "CGP",
@@ -370,21 +408,48 @@ const TRIODE_HONORED: &[&str] = &[
 ];
 
 const TRIODE_DEFINING: &[&str] = &[
-    "MU",
-    "EX",
-    "KG1",
-    "KP",
-    "KVB",
-    "IG_MAX",
-    "VGK_ONSET",
-    "LAMBDA",
-    "CCG",
-    "CGP",
-    "CCP",
-    "RGI",
-    "MU_B",
-    "SVAR",
-    "EX_B",
+    "MU", "EX", "KG1", "KP", "KVB", "GG", "XI", "CG", "LAMBDA", "CCG", "CGP", "CCP", "RGI", "MU_B",
+    "SVAR", "EX_B",
+];
+
+/// Retired triode grid-current keys.
+///
+/// `IG_MAX` and `VGK_ONSET` parameterised a grid law melange no longer has —
+/// and never described it honestly while it did: `VGK_ONSET` was not the onset
+/// (it was the normalisation voltage at which Ig reached `IG_MAX`) and
+/// `IG_MAX` was not a maximum (the curve climbed straight past it). There was
+/// no onset parameter at all, and the law returned exactly 0 A for every
+/// negative grid voltage, for any values of either key.
+///
+/// The messages give the conversion rather than just refusing, because an
+/// author who deliberately wants the old curve back can have it: the Leach law
+/// is the `xi = 1.5`, `Cg -> infinity` limit of eq. (11).
+///
+/// Note the conversion is stated for the OLD curve, not recommended. Reaching
+/// for it puts the Vgk = 0 hard onset back.
+const TRIODE_RETIRED: &[(&str, &str)] = &[
+    (
+        "IG_MAX",
+        "the Leach grid-current law it parameterised has been replaced by \
+         Dempwolf & Zolzer DAFx-11 eq. (11), Ig = GG*(ln(1+e^(CG*Vgk))/CG)^XI. \
+         IG_MAX was never a maximum — the old curve climbed past it. To \
+         reproduce the old curve deliberately, the Leach law is the XI=1.5, \
+         CG->infinity limit of eq. (11): set GG = IG_MAX/VGK_ONSET^1.5, XI=1.5 \
+         and a large CG (e.g. CG=1e3, which puts the knee within ~1 mV of \
+         Vgk=0). The shipped default is D&Z Table 1 row RSD-1: GG=6.177e-4, \
+         XI=1.314, CG=9.901",
+    ),
+    (
+        "VGK_ONSET",
+        "it was never the onset — it was the voltage at which the retired \
+         Leach law reached IG_MAX. The grid law is now Dempwolf & Zolzer \
+         DAFx-11 eq. (11), Ig = GG*(ln(1+e^(CG*Vgk))/CG)^XI, which has NO \
+         onset parameter: real tubes pass 12-19 uA at Vgk=0 and reach the \
+         0.3 uA datasheet criterion at -0.27 to -0.38 V, so the turn-on is an \
+         OUTPUT of the fit (melange reports it at compile time), not an input. \
+         Turn-on sharpness is 1/(XI*CG); magnitude is GG. To reproduce the old \
+         curve deliberately: GG = IG_MAX/VGK_ONSET^1.5, XI=1.5, large CG",
+    ),
 ];
 
 const PENTODE_HONORED: &[&str] = &[

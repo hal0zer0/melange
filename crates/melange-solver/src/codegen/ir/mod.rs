@@ -5383,6 +5383,77 @@ impl CircuitIR {
         })
     }
 
+    /// Report the **grid current starting point** this triode's fitted grid law
+    /// implies, and warn when it falls outside the manufacturer's per-type
+    /// limit for that tube.
+    ///
+    /// This is a CHECK, deliberately not a parameter: a parameter would invite
+    /// someone to fit it, and the whole value of the onset is that it is an
+    /// *output* of `(Gg, xi, Cg)` that an independent datasheet row can score.
+    ///
+    /// The criterion is the manufacturers' own: `Ig = +0.3 µA`, positive, into
+    /// the grid (Philips ECC82 1959 footnote, spelled out in full there; the
+    /// ECC83 sheet carries the same row). The limit is read per tube type from
+    /// that type's own sheet — ECC83 `max -0.9 V`, ECC82 `max -1.3 V` — never
+    /// from one global constant, because the types genuinely differ. A type
+    /// with no limit on file is reported and not checked.
+    fn report_grid_start_point(model: &str, in_catalog: bool, gg: f64, xi: f64, cg: f64) {
+        let tube = melange_devices::KorenTriode {
+            mu: 100.0,
+            ex: 1.4,
+            kg1: 1060.0,
+            kp: 600.0,
+            kvb: 300.0,
+            gg,
+            xi,
+            cg,
+            lambda: 0.0,
+            mu_b: 0.0,
+            svar: 0.0,
+            ex_b: 0.0,
+        };
+        let Some(onset) =
+            tube.grid_voltage_at_current(melange_devices::tube::GRID_START_CRITERION_A)
+        else {
+            log::warn!(
+                "Triode '{model}': grid law (Gg={gg:.4e}, xi={xi}, Cg={cg}) never reaches the \
+                 0.3 uA grid-current starting point — the onset check cannot be evaluated."
+            );
+            return;
+        };
+        let ig_at_zero = tube.grid_current(0.0);
+        let provenance = if in_catalog {
+            ""
+        } else {
+            " [no catalog entry: grid law is the shipped 12AX7 default unless the deck set \
+             GG/XI/CG]"
+        };
+        log::info!(
+            "Triode '{model}': grid current starts (Ig = +0.3 uA) at Vgk = {onset:.3} V; \
+             Ig(0 V) = {:.2} uA{provenance}",
+            ig_at_zero * 1e6
+        );
+        match melange_devices::catalog::tubes::grid_start_limit_v(model) {
+            Some(limit) if onset < limit => log::warn!(
+                "Triode '{model}': derived grid-current starting point {onset:.3} V is BELOW the \
+                 manufacturer limit for this type (Vg(Ig = +0.3 uA) max {limit:.1} V). The fitted \
+                 grid law conducts further into the negative-grid region than the type is \
+                 specified to."
+            ),
+            Some(limit) if onset >= 0.0 => log::warn!(
+                "Triode '{model}': derived grid-current starting point {onset:.3} V is at or \
+                 above 0 V, so this grid law has no negative-grid conduction at the 0.3 uA \
+                 criterion at all. Every measured 12AX7 starts between -0.27 and -0.38 V, and \
+                 the type's own limit is {limit:.1} V. Check GG/XI/CG."
+            ),
+            Some(_) => {}
+            None => log::info!(
+                "Triode '{model}': no manufacturer grid-current starting-point limit on file for \
+                 this type — onset reported, not checked."
+            ),
+        }
+    }
+
     /// Resolve tube/triode model parameters from the netlist, with validation.
     ///
     /// Resolution order: explicit `.model` param → catalog → generic default (12AX7).
@@ -5403,12 +5474,18 @@ impl CircuitIR {
         let kvb = Self::lookup_model_param(netlist, model, "KVB")
             .or_else(|| cat.map(|c| c.kvb))
             .unwrap_or(300.0);
-        let ig_max = Self::lookup_model_param(netlist, model, "IG_MAX")
-            .or_else(|| cat.map(|c| c.ig_max))
-            .unwrap_or(2e-3);
-        let vgk_onset = Self::lookup_model_param(netlist, model, "VGK_ONSET")
-            .or_else(|| cat.map(|c| c.vgk_onset))
-            .unwrap_or(0.5);
+        // Dempwolf & Zölzer DAFx-11 eq. (11) grid law. `IG_MAX`/`VGK_ONSET` are
+        // RETIRED, not aliased and not repurposed — `check_model_params` below
+        // refuses either key and prints the conversion. See `model_params.rs`.
+        let gg = Self::lookup_model_param(netlist, model, "GG")
+            .or_else(|| cat.map(|c| c.gg))
+            .unwrap_or(melange_devices::tube::DEFAULT_GG);
+        let xi = Self::lookup_model_param(netlist, model, "XI")
+            .or_else(|| cat.map(|c| c.xi))
+            .unwrap_or(melange_devices::tube::DEFAULT_XI);
+        let cg = Self::lookup_model_param(netlist, model, "CG")
+            .or_else(|| cat.map(|c| c.cg))
+            .unwrap_or(melange_devices::tube::DEFAULT_CG);
         let lambda = Self::lookup_model_param(netlist, model, "LAMBDA")
             .or_else(|| cat.map(|c| c.lambda))
             .unwrap_or(0.0);
@@ -5427,8 +5504,9 @@ impl CircuitIR {
         validate_positive_finite(kg1, "tube model KG1")?;
         validate_positive_finite(kp, "tube model KP")?;
         validate_positive_finite(kvb, "tube model KVB")?;
-        validate_positive_finite(ig_max, "tube model IG_MAX")?;
-        validate_positive_finite(vgk_onset, "tube model VGK_ONSET")?;
+        validate_positive_finite(gg, "tube model GG")?;
+        validate_positive_finite(xi, "tube model XI")?;
+        validate_positive_finite(cg, "tube model CG")?;
 
         // Validate optional lambda: must be non-negative and finite
         if !lambda.is_finite() || lambda < 0.0 {
@@ -5537,6 +5615,8 @@ impl CircuitIR {
             "a default 12AX7-class triode",
         );
 
+        Self::report_grid_start_point(model, cat.is_some(), gg, xi, cg);
+
         Ok(TubeParams {
             kind: crate::device_types::TubeKind::SharpTriode,
             mu,
@@ -5544,8 +5624,12 @@ impl CircuitIR {
             kg1,
             kp,
             kvb,
-            ig_max,
-            vgk_onset,
+            // Leach fields, unused by the triode path (see `TubeParams::ig_max`).
+            ig_max: 0.0,
+            vgk_onset: 0.0,
+            gg,
+            xi,
+            cg,
             lambda,
             ccg,
             cgp,
@@ -5783,6 +5867,12 @@ impl CircuitIR {
             kvb,
             ig_max,
             vgk_onset,
+            // D&Z triode grid fields, unused on the pentode path: a pentode's
+            // control grid keeps the Leach law above (no published D&Z-form fit
+            // exists for a power pentode, and melange does not invent one).
+            gg: melange_devices::tube::DEFAULT_GG,
+            xi: melange_devices::tube::DEFAULT_XI,
+            cg: melange_devices::tube::DEFAULT_CG,
             lambda,
             ccg,
             cgp,
@@ -6141,6 +6231,16 @@ impl CircuitIR {
                     effect,
                 );
                 continue;
+            }
+            // A RETIRED key is refused with its conversion, not reported as a
+            // typo: the deck is not misspelled, it is written against a device
+            // law melange no longer has.
+            if let Some(note) = class.retired_note(&upper) {
+                return Err(CodegenError::InvalidConfig(format!(
+                    ".model {model_name}: parameter '{key}' is RETIRED — {note}. \
+                     Accepted for this device: {}",
+                    honored.join(", ")
+                )));
             }
             let hint = crate::model_params::alias_hint(class, &upper);
             return Err(CodegenError::InvalidConfig(format!(

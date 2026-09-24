@@ -6806,11 +6806,11 @@ impl RustEmitter {
                     };
                     if tp.has_rgi() {
                         code.push_str(&format!(
-                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate_with_rgi({vgk_expr}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda, DEVICE_{d}_RGI);\n"
+                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate_with_rgi({vgk_expr}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_gg, state.device_{d}_xi, state.device_{d}_cg, state.device_{d}_lambda, DEVICE_{d}_RGI);\n"
                         ));
                     } else {
                         code.push_str(&format!(
-                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate({vgk_expr}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda);\n"
+                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate({vgk_expr}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_gg, state.device_{d}_xi, state.device_{d}_cg, state.device_{d}_lambda);\n"
                         ));
                     }
                     code.push_str(&format!(
@@ -6933,14 +6933,16 @@ impl RustEmitter {
                         ));
                     }
                     (crate::codegen::ir::DeviceType::Tube, 0) => {
+                        let grid_vt = super::helpers::tube_grid_vt_expr(&slot.params, dev_num);
                         code.push_str(&format!(
-                            "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vgk_onset / 3.0, DEVICE_{dev_num}_VCRIT);\n"
+                            "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, {grid_vt}, DEVICE_{dev_num}_VCRIT);\n"
                         ));
                     }
                     (crate::codegen::ir::DeviceType::Tube, 2) => {
+                        let grid_vt = super::helpers::tube_grid_vt_expr(&slot.params, dev_num);
                         // Pentode dim 2 = Vg2k — log-junction limiting (see DK NR limiter).
                         code.push_str(&format!(
-                            "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vgk_onset / 3.0, DEVICE_{dev_num}_VCRIT);\n"
+                            "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, {grid_vt}, DEVICE_{dev_num}_VCRIT);\n"
                         ));
                     }
                     (crate::codegen::ir::DeviceType::Tube, _) => {
@@ -10283,7 +10285,7 @@ impl RustEmitter {
                             "{indent}{{ // Tube {dev_num} (RGI)\n\
                              {indent}    let vgk = {vgk_init};\n\
                              {indent}    let vpk = v_nl[{s1}];\n\
-                             {indent}    let (ip_t, ig_t, jac) = tube_evaluate_with_rgi(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, state.device_{dev_num}_lambda, DEVICE_{dev_num}_RGI);\n\
+                             {indent}    let (ip_t, ig_t, jac) = tube_evaluate_with_rgi(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_gg, state.device_{dev_num}_xi, state.device_{dev_num}_cg, state.device_{dev_num}_lambda, DEVICE_{dev_num}_RGI);\n\
                              {indent}    i_nl[{s}] = ip_t; i_nl[{s1}] = ig_t;\n\
                              {indent}    j_dev[{jd_ss}] = jac[0];\n\
                              {indent}    j_dev[{jd_01}] = jac[1];\n\
@@ -10303,7 +10305,7 @@ impl RustEmitter {
                             "{indent}{{ // Tube {dev_num}\n\
                              {indent}    let vgk = {vgk_init};\n\
                              {indent}    let vpk = v_nl[{s1}];\n\
-                             {indent}    let (ip_t, ig_t, jac) = tube_evaluate(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, state.device_{dev_num}_lambda);\n\
+                             {indent}    let (ip_t, ig_t, jac) = tube_evaluate(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_gg, state.device_{dev_num}_xi, state.device_{dev_num}_cg, state.device_{dev_num}_lambda);\n\
                              {indent}    i_nl[{s}] = ip_t; i_nl[{s1}] = ig_t;\n\
                              {indent}    j_dev[{jd_ss}] = jac[0];\n\
                              {indent}    j_dev[{jd_01}] = jac[1];\n\
@@ -10477,8 +10479,8 @@ impl RustEmitter {
                             format!("v_nl_final[{s}]")
                         };
                         code.push_str(&format!(
-                            "{indent}i_nl[{s}] = tube_ip_with_rgi({vgk_fe}, v_nl_final[{s1}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_lambda, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, DEVICE_{dev_num}_RGI);\n\
-                             {indent}i_nl[{s1}] = tube_ig_with_rgi({vgk_fe}, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset, DEVICE_{dev_num}_RGI);\n"
+                            "{indent}i_nl[{s}] = tube_ip_with_rgi({vgk_fe}, v_nl_final[{s1}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_lambda, state.device_{dev_num}_gg, state.device_{dev_num}_xi, state.device_{dev_num}_cg, DEVICE_{dev_num}_RGI);\n\
+                             {indent}i_nl[{s1}] = tube_ig_dz_with_rgi({vgk_fe}, state.device_{dev_num}_gg, state.device_{dev_num}_xi, state.device_{dev_num}_cg, DEVICE_{dev_num}_RGI);\n"
                         ));
                     } else {
                         let vgk_fe = if tp.has_self_heating() {
@@ -10490,7 +10492,7 @@ impl RustEmitter {
                         };
                         code.push_str(&format!(
                             "{indent}i_nl[{s}] = tube_ip({vgk_fe}, v_nl_final[{s1}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_lambda);\n\
-                             {indent}i_nl[{s1}] = tube_ig({vgk_fe}, state.device_{dev_num}_ig_max, state.device_{dev_num}_vgk_onset);\n"
+                             {indent}i_nl[{s1}] = tube_ig_dz({vgk_fe}, state.device_{dev_num}_gg, state.device_{dev_num}_xi, state.device_{dev_num}_cg);\n"
                         ));
                     }
                 }
@@ -10590,14 +10592,16 @@ impl RustEmitter {
                         ));
                     }
                     (DeviceType::Tube, 0) => {
+                        let grid_vt = super::helpers::tube_grid_vt_expr(&slot.params, dev_num);
                         code.push_str(&format!(
-                            "{indent}        let v_lim = pnjlim(v_nl_proposed, v_nl_current, state.device_{dev_num}_vgk_onset / 3.0, DEVICE_{dev_num}_VCRIT);\n"
+                            "{indent}        let v_lim = pnjlim(v_nl_proposed, v_nl_current, {grid_vt}, DEVICE_{dev_num}_VCRIT);\n"
                         ));
                     }
                     (DeviceType::Tube, 2) => {
+                        let grid_vt = super::helpers::tube_grid_vt_expr(&slot.params, dev_num);
                         // Pentode dim 2 = Vg2k — log-junction limiting (see DK NR limiter).
                         code.push_str(&format!(
-                            "{indent}        let v_lim = pnjlim(v_nl_proposed, v_nl_current, state.device_{dev_num}_vgk_onset / 3.0, DEVICE_{dev_num}_VCRIT);\n"
+                            "{indent}        let v_lim = pnjlim(v_nl_proposed, v_nl_current, {grid_vt}, DEVICE_{dev_num}_VCRIT);\n"
                         ));
                     }
                     (DeviceType::Tube, _) => {

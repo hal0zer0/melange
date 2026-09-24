@@ -334,19 +334,19 @@ fn jfet_jacobian(vgs: f64, vds: f64, idss: f64, vp: f64, lambda: f64, sign: f64)
 ```rust
 fn tube_ip(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64,
            lambda: f64) -> f64;                                                            // Koren plate current with Early effect
-fn tube_ig(vgk: f64, ig_max: f64, vgk_onset: f64) -> f64;                                // Leach grid current
+fn tube_ig_dz(vgk: f64, gg: f64, xi: f64, cg: f64) -> f64;                               // D&Z eq. (11) grid current
 fn tube_jacobian(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64,
-                 ig_max: f64, vgk_onset: f64, lambda: f64) -> [f64; 4];  // [dIp/dVgk, dIp/dVpk, dIg/dVgk, dIg/dVpk]
+                 gg: f64, xi: f64, cg: f64, lambda: f64) -> [f64; 4];  // [dIp/dVgk, dIp/dVpk, dIg/dVgk, dIg/dVpk]
 ```
 
 2D model: plate current (Ip) at `start_idx`, grid current (Ig) at `start_idx+1`.
 
 - **Plate current**: Koren model with Early-effect lambda — `Ip = Ip_koren * (1 + lambda * Vpk)` where `Ip_koren = E1^ex / kg1` and `E1 = (vpk/kp) * ln(1 + exp(kp * (1/mu + vgk/sqrt(kvb + vpk^2))))`
-- **Grid current**: Leach power-law — `Ig = ig_max * (vgk / vgk_onset)^1.5` for vgk > 0 (zero for vgk <= 0)
+- **Grid current**: Dempwolf & Zölzer DAFx-11 eq. (11) — `Ig = gg * (softplus(cg*vgk)/cg)^xi`, evaluated for ALL vgk (the negative-grid region conducts; there is no onset parameter and no branch). Uses `std` `exp`/`ln_1p`, NOT `fast_exp`/`fast_ln` — the latter's ±40 clamp would floor the deep-negative tail. `tube_ig` / `tube_ig_deriv` (Leach) still exist but are emitted only for pentode control grids, gated on `any_pentode_family`.
 - **Jacobian**: 4-element `[dIp/dVgk, dIp/dVpk, dIg/dVgk, dIg/dVpk]` — dIg/dVpk = 0. With lambda: `dIp/dVgk = dIp_koren/dVgk * (1+lambda*Vpk)`, `dIp/dVpk = dIp_koren/dVpk * (1+lambda*Vpk) + Ip_koren * lambda`
-- Constants: `DEVICE_{n}_MU`, `DEVICE_{n}_EX`, `DEVICE_{n}_KG1`, `DEVICE_{n}_KP`, `DEVICE_{n}_KVB`, `DEVICE_{n}_IG_MAX`, `DEVICE_{n}_VGK_ONSET`, `DEVICE_{n}_LAMBDA`
+- Constants: `DEVICE_{n}_MU`, `DEVICE_{n}_EX`, `DEVICE_{n}_KG1`, `DEVICE_{n}_KP`, `DEVICE_{n}_KVB`, `DEVICE_{n}_GG`, `DEVICE_{n}_XI`, `DEVICE_{n}_CG`, `DEVICE_{n}_LAMBDA` (a pentode gets `IG_MAX`/`VGK_ONSET` in place of `GG`/`XI`/`CG` — each device emits only the grid law it uses)
 - Netlist syntax: `T1 grid plate cathode modelname` with `.model modelname TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)`
-- Default params: MU=100, EX=1.4, KG1=1060, KP=600, KVB=300, IG_MAX=2e-3, VGK_ONSET=0.5, LAMBDA=0.0
+- Default params: MU=100, EX=1.4, KG1=1060, KP=600, KVB=300, GG=6.177e-4, XI=1.314, CG=9.901, LAMBDA=0.0 (grid row = D&Z Table 1 RSD-1)
 - `LAMBDA` controls Early-effect multiplier: `Ip = Ip_koren * (1 + lambda * Vpk)`. Default 0.0 = no correction (backward compatible). Plate resistance rp ~ 1/(lambda*Ip).
 - Template: `device_tube.rs.tera`
 

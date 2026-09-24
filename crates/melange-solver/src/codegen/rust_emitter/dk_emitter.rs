@@ -1518,8 +1518,20 @@ impl RustEmitter {
                     emit_device_const(&mut code, dev_num, "KG1", tp.kg1);
                     emit_device_const(&mut code, dev_num, "KP", tp.kp);
                     emit_device_const(&mut code, dev_num, "KVB", tp.kvb);
-                    emit_device_const(&mut code, dev_num, "IG_MAX", tp.ig_max);
-                    emit_device_const(&mut code, dev_num, "VGK_ONSET", tp.vgk_onset);
+                    // Grid-current law. The two tube families no longer share
+                    // one: triodes carry Dempwolf & Zölzer eq. (11) (Gg/xi/Cg),
+                    // pentode control grids still carry Leach (IG_MAX/
+                    // VGK_ONSET). Emitting only the pair the device actually
+                    // uses keeps a wrong constant from sitting in the generated
+                    // file looking authoritative.
+                    if tp.is_pentode() {
+                        emit_device_const(&mut code, dev_num, "IG_MAX", tp.ig_max);
+                        emit_device_const(&mut code, dev_num, "VGK_ONSET", tp.vgk_onset);
+                    } else {
+                        emit_device_const(&mut code, dev_num, "GG", tp.gg);
+                        emit_device_const(&mut code, dev_num, "XI", tp.xi);
+                        emit_device_const(&mut code, dev_num, "CG", tp.cg);
+                    }
                     emit_device_const(&mut code, dev_num, "LAMBDA", tp.lambda);
                     if tp.has_rgi() {
                         emit_device_const(&mut code, dev_num, "RGI", tp.rgi);
@@ -1549,8 +1561,18 @@ impl RustEmitter {
                         emit_device_const(&mut code, dev_num, "SVAR", tp.svar);
                         emit_device_const(&mut code, dev_num, "EX_B", tp.ex_b);
                     }
-                    // Precomputed critical voltage for SPICE pnjlim (grid current onset)
-                    let vt_tube = tp.vgk_onset / 3.0;
+                    // Precomputed critical voltage for SPICE pnjlim on the grid
+                    // dimension. The scale is the grid law's own turn-on width:
+                    // `1/Cg` for the D&Z triode (the softplus adaption factor is
+                    // a reciprocal voltage, exactly the role `n·Vt` plays for a
+                    // diode), `vgk_onset/3` for the Leach pentode control grid.
+                    // Must agree with `helpers::tube_grid_vt_expr`, which emits
+                    // the matching runtime expression.
+                    let vt_tube = if tp.is_pentode() {
+                        tp.vgk_onset / 3.0
+                    } else {
+                        1.0 / tp.cg
+                    };
                     let vcrit = vt_tube * (vt_tube / (std::f64::consts::SQRT_2 * 1e-10)).ln();
                     emit_device_const(&mut code, dev_num, "VCRIT", vcrit);
                     // Self-heating constants. Only the thermal gate (RTH) is
@@ -1752,7 +1774,19 @@ impl RustEmitter {
             let any_pentode = any_pentode || any_grid_off_rational;
             let any_beam_tetrode = any_beam_tetrode || any_grid_off_exponential;
             let any_classical_pentode = any_classical_pentode || any_grid_off_classical;
+            // The Leach control-grid helpers (`tube_ig` / `tube_ig_deriv`) are
+            // shared by EVERY pentode family, so they need a flag that is the
+            // union of all of them — the per-family flags below each gate only
+            // their own equation set. Triode-only circuits emit neither helper:
+            // the triode grid law is now `tube_ig_dz` (D&Z eq. 11).
+            let any_pentode_family = any_pentode
+                || any_beam_tetrode
+                || any_variable_mu_pentode
+                || any_variable_mu_beam_tetrode
+                || any_classical_pentode
+                || any_grid_off_pentode;
             let mut tube_ctx = Context::new();
+            tube_ctx.insert("any_pentode_family", &any_pentode_family);
             tube_ctx.insert("any_pentode", &any_pentode);
             tube_ctx.insert("any_beam_tetrode", &any_beam_tetrode);
             tube_ctx.insert("any_variable_mu_pentode", &any_variable_mu_pentode);
@@ -4064,8 +4098,9 @@ impl RustEmitter {
                     kg1: tp.kg1,
                     kp: tp.kp,
                     kvb: tp.kvb,
-                    ig_max: tp.ig_max,
-                    vgk_onset: tp.vgk_onset,
+                    gg: tp.gg,
+                    xi: tp.xi,
+                    cg: tp.cg,
                     lambda: tp.lambda,
                     mu_b: tp.mu_b,
                     svar: tp.svar,

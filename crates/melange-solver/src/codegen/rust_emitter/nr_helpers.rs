@@ -305,12 +305,12 @@ pub(super) fn emit_dk_device_evaluation(
                     if tp.has_rgi() {
                         // RGI: solve for internal Vgk, evaluate at internal voltage
                         code.push_str(&format!(
-                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate_with_rgi({vgk_expr}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda, DEVICE_{d}_RGI);\n"
+                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate_with_rgi({vgk_expr}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_gg, state.device_{d}_xi, state.device_{d}_cg, state.device_{d}_lambda, DEVICE_{d}_RGI);\n"
                         ));
                     } else {
                         // Standard tube (no RGI)
                         code.push_str(&format!(
-                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate({vgk_expr}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_ig_max, state.device_{d}_vgk_onset, state.device_{d}_lambda);\n"
+                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate({vgk_expr}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_gg, state.device_{d}_xi, state.device_{d}_cg, state.device_{d}_lambda);\n"
                         ));
                     }
                     code.push_str(&format!("{indent}let jdev_{s}_{s} = tube{d}_jac[0];\n"));
@@ -438,16 +438,18 @@ pub(super) fn emit_nr_limit_and_converge(
                     ));
                 }
                 (DeviceType::Tube, 0) => {
+                    let grid_vt = super::helpers::tube_grid_vt_expr(&slot.params, dev_num);
                     code.push_str(&format!(
-                        "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vgk_onset / 3.0, DEVICE_{dev_num}_VCRIT);\n"
+                        "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, {grid_vt}, DEVICE_{dev_num}_VCRIT);\n"
                     ));
                 }
                 (DeviceType::Tube, 2) => {
+                    let grid_vt = super::helpers::tube_grid_vt_expr(&slot.params, dev_num);
                     // Pentode dim 2 = Vg2k — same softplus knee behavior as Vgk;
                     // log-junction limiting prevents large NR steps from skipping
                     // the E1 knee. Triodes never reach dim==2 (they are 2D).
                     code.push_str(&format!(
-                        "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vgk_onset / 3.0, DEVICE_{dev_num}_VCRIT);\n"
+                        "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, {grid_vt}, DEVICE_{dev_num}_VCRIT);\n"
                     ));
                 }
                 (DeviceType::Tube, _) => {
@@ -628,11 +630,12 @@ pub(super) fn emit_schur_nr_limit_and_converge(
                 (DeviceType::Jfet, _) => format!("fetlim(v_trial{i}, v_d{i}, state.device_{dev_num}_vp)"),
                 (DeviceType::Mosfet, 0) => format!("fetlim(v_trial{i}, v_d{i}, 0.0)"),
                 (DeviceType::Mosfet, _) => format!("fetlim(v_trial{i}, v_d{i}, state.device_{dev_num}_vt)"),
-                (DeviceType::Tube, 0) | (DeviceType::Tube, 2) => format!(
+                (DeviceType::Tube, 0) | (DeviceType::Tube, 2) => {
                     // Pentode dim 2 = Vg2k uses same softplus knee as Vgk (dim 0).
                     // Triodes are 2D and never reach dim==2.
-                    "pnjlim(v_trial{i}, v_d{i}, state.device_{dev_num}_vgk_onset / 3.0, DEVICE_{dev_num}_VCRIT)"
-                ),
+                    let grid_vt = super::helpers::tube_grid_vt_expr(&slot.params, dev_num);
+                    format!("pnjlim(v_trial{i}, v_d{i}, {grid_vt}, DEVICE_{dev_num}_VCRIT)")
+                }
                 (DeviceType::Tube, _) => format!("fetlim(v_trial{i}, v_d{i}, 0.0)"),
                 (DeviceType::Vca, _) => format!("v_trial{i}"),
                 // LDR: linear resistance path — no limiting.

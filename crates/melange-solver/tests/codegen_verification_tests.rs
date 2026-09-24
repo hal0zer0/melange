@@ -4534,7 +4534,14 @@ fn test_codegen_triode_constants_and_functions() {
 
     // Should contain tube device functions
     assert!(code.contains("tube_ip("), "Should have tube_ip function");
-    assert!(code.contains("tube_ig("), "Should have tube_ig function");
+    assert!(
+        code.contains("tube_ig_dz("),
+        "Should have the D&Z triode grid-current function"
+    );
+    assert!(
+        !code.contains("fn tube_ig("),
+        "A triode-only circuit must NOT carry the Leach pentode grid helper"
+    );
     assert!(
         code.contains("tube_jacobian("),
         "Should have tube_jacobian function"
@@ -4546,14 +4553,9 @@ fn test_codegen_triode_constants_and_functions() {
     assert!(code.contains("DEVICE_0_KG1"), "Should have KG1 constant");
     assert!(code.contains("DEVICE_0_KP"), "Should have KP constant");
     assert!(code.contains("DEVICE_0_KVB"), "Should have KVB constant");
-    assert!(
-        code.contains("DEVICE_0_IG_MAX"),
-        "Should have IG_MAX constant"
-    );
-    assert!(
-        code.contains("DEVICE_0_VGK_ONSET"),
-        "Should have VGK_ONSET constant"
-    );
+    assert!(code.contains("DEVICE_0_GG"), "Should have GG constant");
+    assert!(code.contains("DEVICE_0_XI"), "Should have XI constant");
+    assert!(code.contains("DEVICE_0_CG"), "Should have CG constant");
 }
 
 /// Codegen: triode self-heating emits the expected constants, state field,
@@ -7209,12 +7211,21 @@ fn test_runtime_device_params_tube_state_fields() {
         "Tube state should have device_0_kvb"
     );
     assert!(
-        code.contains("pub device_0_ig_max: f64"),
-        "Tube state should have device_0_ig_max"
+        code.contains("pub device_0_gg: f64"),
+        "Tube state should have device_0_gg"
     );
     assert!(
-        code.contains("pub device_0_vgk_onset: f64"),
-        "Tube state should have device_0_vgk_onset"
+        code.contains("pub device_0_xi: f64"),
+        "Tube state should have device_0_xi"
+    );
+    assert!(
+        code.contains("pub device_0_cg: f64"),
+        "Tube state should have device_0_cg"
+    );
+    assert!(
+        !code.contains("device_0_ig_max"),
+        "IG_MAX/VGK_ONSET are retired for triodes and must not reach a triode's \
+         generated code at all"
     );
 }
 
@@ -7247,14 +7258,18 @@ fn test_runtime_device_params_tube_nr_uses_state() {
         code.contains("state.device_0_kg1"),
         "tube_ip should reference state.device_0_kg1"
     );
-    // tube_ig should use state fields
+    // tube_ig_dz should use state fields
     assert!(
-        code.contains("state.device_0_ig_max"),
-        "tube_ig should reference state.device_0_ig_max"
+        code.contains("state.device_0_gg"),
+        "tube_ig_dz should reference state.device_0_gg"
     );
     assert!(
-        code.contains("state.device_0_vgk_onset"),
-        "tube_ig should reference state.device_0_vgk_onset"
+        code.contains("state.device_0_xi"),
+        "tube_ig_dz should reference state.device_0_xi"
+    );
+    assert!(
+        code.contains("state.device_0_cg"),
+        "tube_ig_dz should reference state.device_0_cg"
     );
 }
 
@@ -7287,8 +7302,12 @@ fn test_runtime_device_params_tube_default_init() {
         "Default should init device_0_kg1"
     );
     assert!(
-        code.contains("device_0_ig_max: DEVICE_0_IG_MAX"),
-        "Default should init device_0_ig_max"
+        code.contains("device_0_gg: DEVICE_0_GG"),
+        "Default should init device_0_gg"
+    );
+    assert!(
+        code.contains("device_0_cg: DEVICE_0_CG"),
+        "Default should init device_0_cg"
     );
 }
 

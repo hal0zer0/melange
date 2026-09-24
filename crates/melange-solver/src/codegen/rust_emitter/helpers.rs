@@ -5,6 +5,29 @@ use serde::Serialize;
 
 use crate::codegen::ir::{CircuitIR, DeviceParams};
 
+/// The `vt` argument the emitted `pnjlim` call uses to limit a tube's grid
+/// dimension, as a generated-code expression.
+///
+/// The two tube families no longer share a grid law, so they no longer share a
+/// limiting scale either:
+///
+/// * **Triode** — Dempwolf & Zölzer eq. (11). `1/Cg` IS the law's own voltage
+///   scale: it is the width over which the softplus turns on, exactly as `n·Vt`
+///   is for a diode's `exp(V/nVt)`. For the shipped default `Cg = 9.901` that
+///   is 0.101 V.
+/// * **Pentode** — the Leach control-grid law, unchanged: `vgk_onset/3`.
+///
+/// Both read a live `CircuitState` field rather than a constant, so a runtime
+/// change to the model parameter still moves the limiter, as before.
+pub(super) fn tube_grid_vt_expr(params: &DeviceParams, dev_num: usize) -> String {
+    match params {
+        DeviceParams::Tube(tp) if !tp.is_pentode() => {
+            format!("(1.0 / state.device_{dev_num}_cg)")
+        }
+        _ => format!("state.device_{dev_num}_vgk_onset / 3.0"),
+    }
+}
+
 /// Inductor data passed to Tera templates.
 #[derive(Serialize)]
 pub(super) struct InductorTemplateData {
@@ -346,9 +369,8 @@ pub(super) fn device_param_template_data(ir: &CircuitIR) -> Vec<DeviceParamTempl
                         },
                     ],
                 ),
-                DeviceParams::Tube(_) => (
-                    "Tube".to_string(),
-                    vec![
+                DeviceParams::Tube(tp) => {
+                    let mut entries = vec![
                         DeviceParamEntry {
                             field_suffix: "mu".into(),
                             const_suffix: "MU".into(),
@@ -369,20 +391,37 @@ pub(super) fn device_param_template_data(ir: &CircuitIR) -> Vec<DeviceParamTempl
                             field_suffix: "kvb".into(),
                             const_suffix: "KVB".into(),
                         },
-                        DeviceParamEntry {
+                    ];
+                    // Grid law, per family — see `tube_grid_vt_expr`.
+                    if tp.is_pentode() {
+                        entries.push(DeviceParamEntry {
                             field_suffix: "ig_max".into(),
                             const_suffix: "IG_MAX".into(),
-                        },
-                        DeviceParamEntry {
+                        });
+                        entries.push(DeviceParamEntry {
                             field_suffix: "vgk_onset".into(),
                             const_suffix: "VGK_ONSET".into(),
-                        },
-                        DeviceParamEntry {
-                            field_suffix: "lambda".into(),
-                            const_suffix: "LAMBDA".into(),
-                        },
-                    ],
-                ),
+                        });
+                    } else {
+                        entries.push(DeviceParamEntry {
+                            field_suffix: "gg".into(),
+                            const_suffix: "GG".into(),
+                        });
+                        entries.push(DeviceParamEntry {
+                            field_suffix: "xi".into(),
+                            const_suffix: "XI".into(),
+                        });
+                        entries.push(DeviceParamEntry {
+                            field_suffix: "cg".into(),
+                            const_suffix: "CG".into(),
+                        });
+                    }
+                    entries.push(DeviceParamEntry {
+                        field_suffix: "lambda".into(),
+                        const_suffix: "LAMBDA".into(),
+                    });
+                    ("Tube".to_string(), entries)
+                }
                 DeviceParams::Vca(_) => (
                     "Vca".to_string(),
                     vec![

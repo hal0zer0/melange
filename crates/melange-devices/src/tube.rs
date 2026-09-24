@@ -9,9 +9,12 @@ use crate::NonlinearDevice;
 /// Based on Norman Koren's improved vacuum tube models.
 /// Parameters from SPICE model cards.
 ///
-/// Grid current uses a smooth power-law model (Leach-style):
-///   Ig = ig_max * max(0, Vgk/vgk_onset)^1.5
-/// which is physically motivated and has a well-defined analytical Jacobian.
+/// Grid current uses Dempwolf & Zölzer, "A physically-motivated triode model
+/// for circuit simulations", Proc. DAFx-11 (Paris, 2011), eq. (11):
+///   Ig = Gg * ( ln(1 + e^(Cg*Vgk)) / Cg )^xi
+/// The softplus has no knee at Vgk = 0, so the negative-grid region — where
+/// real 12AX7s pass tens of microamps — is part of the law rather than a
+/// special case. See [`grid_current`](Self::grid_current).
 ///
 /// Optional extension:
 /// - **Channel-length modulation (`lambda`)**: `Ip_final = Ip_koren * (1 + lambda * Vpk)`.
@@ -31,10 +34,15 @@ pub struct KorenTriode {
     pub kp: f64,
     /// Kvb coefficient (for knee shaping)
     pub kvb: f64,
-    /// Maximum grid current [A] at Vgk = vgk_onset
-    pub ig_max: f64,
-    /// Grid current onset voltage [V]
-    pub vgk_onset: f64,
+    /// Dempwolf & Zölzer grid perveance `Gg` [A/V^xi] — eq. (11) magnitude.
+    pub gg: f64,
+    /// Dempwolf & Zölzer grid exponent `xi` (ξ) — space-charge power on the
+    /// smoothed grid voltage.
+    pub xi: f64,
+    /// Dempwolf & Zölzer grid adaption factor `Cg` [1/V]. Sets how sharply the
+    /// law turns on; the tail slope is `1/(xi*Cg)`. `Cg -> infinity` recovers a
+    /// hard knee at Vgk = 0.
+    pub cg: f64,
     /// Channel-length modulation coefficient [1/V]. 0.0 = disabled (default).
     /// Ip_final = Ip_koren * (1 + lambda * Vpk).
     /// Gives plate resistance rp approximately 1/(lambda * Ip) at the operating point.
@@ -51,10 +59,70 @@ pub struct KorenTriode {
     pub ex_b: f64,
 }
 
-/// Default grid current maximum [A].
+/// Default grid current maximum [A] — Leach law, **pentode control grid only**.
+/// The triode grid law no longer has a `ig_max`; see [`DEFAULT_GG`].
 const DEFAULT_IG_MAX: f64 = 2e-3;
-/// Default grid current onset voltage [V].
+/// Default grid current onset voltage [V] — Leach law, **pentode control grid
+/// only**. See [`DEFAULT_CG`].
 const DEFAULT_VGK_ONSET: f64 = 0.5;
+
+// ---------------------------------------------------------------------------
+// Dempwolf & Zölzer DAFx-11 grid-current defaults.
+//
+// ONE NAMED ROW of the paper's Table 1, never an average of the three: an
+// average of three fits is not a tube. The row is **RSD-1**, the first-listed
+// column, an old-stock RSD 12AX7 — the sample the paper uses as its exemplar
+// (Fig. 1 "measurements from a RSD 12AX7 triode", Fig. 6 "measurement data
+// from a RSD tube"). Chosen on provenance alone.
+//
+// Table 1, column RSD-1 (grid half): Gg = 6.177E-4, ξ = 1.314, Cg = 9.901.
+// `Ig0 = 8.025E-8` is deliberately NOT carried — the paper adds it "due to
+// stability reasons", it has zero derivative so it cannot help Newton, and it
+// injects tens of nA of the wrong sign at the negative grid voltages where the
+// datasheets specify REVERSE grid current.
+//
+// Derived, not fitted (`melange-devices` computes these, it does not store
+// them): Ig(0 V) = 18.76 µA, Ig = 0.3 µA at Vgk = -0.353 V, Ig = 2 mA at
+// Vgk = +2.445 V.
+// ---------------------------------------------------------------------------
+
+/// Default D&Z grid perveance `Gg` [A/V^xi] — Table 1 row RSD-1.
+pub const DEFAULT_GG: f64 = 6.177e-4;
+/// Default D&Z grid exponent `xi` — Table 1 row RSD-1.
+pub const DEFAULT_XI: f64 = 1.314;
+/// Default D&Z grid adaption factor `Cg` [1/V] — Table 1 row RSD-1.
+pub const DEFAULT_CG: f64 = 9.901;
+
+/// The manufacturer criterion current for the "grid current starting point",
+/// `Ig = +0.3 µA` (positive, into the grid) — Philips ECC82 1959 data sheet
+/// footnote, and the criterion the ECC83 `V_o` acceptance row is defined at.
+pub const GRID_START_CRITERION_A: f64 = 0.3e-6;
+
+/// Numerically stable softplus, `ln(1 + e^x)`.
+///
+/// For `x > 0` the direct form overflows (`e^x` is infinite past ~709) long
+/// before the result is large, so the algebraically identical
+/// `x + ln(1 + e^-x)` is used there. Both branches are exact to the last ulp
+/// in their own range and agree at `x = 0`.
+#[inline]
+pub fn softplus(x: f64) -> f64 {
+    if x > 0.0 {
+        x + (-x).exp().ln_1p()
+    } else {
+        x.exp().ln_1p()
+    }
+}
+
+/// Logistic sigmoid `1/(1 + e^-x)` = `d/dx softplus(x)`, stable on both sides.
+#[inline]
+pub fn sigmoid(x: f64) -> f64 {
+    if x > 0.0 {
+        1.0 / (1.0 + (-x).exp())
+    } else {
+        let e = x.exp();
+        e / (1.0 + e)
+    }
+}
 
 impl KorenTriode {
     /// Create a new triode model with default grid current parameters.
@@ -67,8 +135,9 @@ impl KorenTriode {
             kg1,
             kp,
             kvb,
-            ig_max: DEFAULT_IG_MAX,
-            vgk_onset: DEFAULT_VGK_ONSET,
+            gg: DEFAULT_GG,
+            xi: DEFAULT_XI,
+            cg: DEFAULT_CG,
             lambda: 0.0,
             mu_b: 0.0,
             svar: 0.0,
@@ -76,15 +145,18 @@ impl KorenTriode {
         }
     }
 
-    /// Create a new triode model with custom grid current parameters.
+    /// Create a new triode model with custom grid current parameters
+    /// (Dempwolf & Zölzer eq. (11): `Gg`, `xi`, `Cg`).
+    #[allow(clippy::too_many_arguments)]
     pub fn with_grid_params(
         mu: f64,
         ex: f64,
         kg1: f64,
         kp: f64,
         kvb: f64,
-        ig_max: f64,
-        vgk_onset: f64,
+        gg: f64,
+        xi: f64,
+        cg: f64,
     ) -> Self {
         Self {
             mu,
@@ -92,8 +164,9 @@ impl KorenTriode {
             kg1,
             kp,
             kvb,
-            ig_max,
-            vgk_onset,
+            gg,
+            xi,
+            cg,
             lambda: 0.0,
             mu_b: 0.0,
             svar: 0.0,
@@ -109,8 +182,9 @@ impl KorenTriode {
         kg1: f64,
         kp: f64,
         kvb: f64,
-        ig_max: f64,
-        vgk_onset: f64,
+        gg: f64,
+        xi: f64,
+        cg: f64,
         lambda: f64,
     ) -> Self {
         Self {
@@ -119,8 +193,9 @@ impl KorenTriode {
             kg1,
             kp,
             kvb,
-            ig_max,
-            vgk_onset,
+            gg,
+            xi,
+            cg,
             lambda,
             mu_b: 0.0,
             svar: 0.0,
@@ -139,16 +214,7 @@ impl KorenTriode {
     /// misread datasheet point and was removed).
     pub fn ecc83() -> Self {
         let c = crate::catalog::tubes::lookup("12AX7").expect("12AX7 catalog entry");
-        Self::with_all_params(
-            c.mu,
-            c.ex,
-            c.kg1,
-            c.kp,
-            c.kvb,
-            c.ig_max,
-            c.vgk_onset,
-            c.lambda,
-        )
+        Self::with_all_params(c.mu, c.ex, c.kg1, c.kp, c.kvb, c.gg, c.xi, c.cg, c.lambda)
     }
 
     /// 12AX7 (ECC83) "fitted" alias - high-mu twin triode.
@@ -162,61 +228,25 @@ impl KorenTriode {
     /// [`ecc83`](Self::ecc83). Retained for netlists using "12AX7F".
     pub fn ecc83_fitted() -> Self {
         let c = crate::catalog::tubes::lookup("12AX7F").expect("12AX7F catalog entry");
-        Self::with_all_params(
-            c.mu,
-            c.ex,
-            c.kg1,
-            c.kp,
-            c.kvb,
-            c.ig_max,
-            c.vgk_onset,
-            c.lambda,
-        )
+        Self::with_all_params(c.mu, c.ex, c.kg1, c.kp, c.kvb, c.gg, c.xi, c.cg, c.lambda)
     }
 
     /// 12AU7 (ECC82) - medium-mu twin triode.
     pub fn ecc82() -> Self {
         let c = crate::catalog::tubes::lookup("12AU7").expect("12AU7 catalog entry");
-        Self::with_all_params(
-            c.mu,
-            c.ex,
-            c.kg1,
-            c.kp,
-            c.kvb,
-            c.ig_max,
-            c.vgk_onset,
-            c.lambda,
-        )
+        Self::with_all_params(c.mu, c.ex, c.kg1, c.kp, c.kvb, c.gg, c.xi, c.cg, c.lambda)
     }
 
     /// 12AT7 (ECC81) - medium-mu triode.
     pub fn ecc81() -> Self {
         let c = crate::catalog::tubes::lookup("12AT7").expect("12AT7 catalog entry");
-        Self::with_all_params(
-            c.mu,
-            c.ex,
-            c.kg1,
-            c.kp,
-            c.kvb,
-            c.ig_max,
-            c.vgk_onset,
-            c.lambda,
-        )
+        Self::with_all_params(c.mu, c.ex, c.kg1, c.kp, c.kvb, c.gg, c.xi, c.cg, c.lambda)
     }
 
     /// 6SL7 - high-mu octal triode.
     pub fn _6sl7() -> Self {
         let c = crate::catalog::tubes::lookup("6SL7").expect("6SL7 catalog entry");
-        Self::with_all_params(
-            c.mu,
-            c.ex,
-            c.kg1,
-            c.kp,
-            c.kvb,
-            c.ig_max,
-            c.vgk_onset,
-            c.lambda,
-        )
+        Self::with_all_params(c.mu, c.ex, c.kg1, c.kp, c.kvb, c.gg, c.xi, c.cg, c.lambda)
     }
 
     /// Evaluate one Koren section for a given `(μ, ex)` pair. Returns
@@ -304,29 +334,85 @@ impl KorenTriode {
         ip_koren * (1.0 + self.lambda * vpk)
     }
 
-    /// Grid current using smooth power-law model (Leach-style).
+    /// Grid current — Dempwolf & Zölzer DAFx-11 eq. (11).
     ///
-    /// Ig = ig_max * max(0, Vgk / vgk_onset)^1.5
+    /// ```text
+    /// s  = ln(1 + e^(Cg*Vgk)) / Cg        (softplus, smoothed grid voltage)
+    /// Ig = Gg * s^xi
+    /// ```
     ///
-    /// Physically motivated: grid acts as a diode when positive, with
-    /// a smooth onset and well-defined Jacobian. Returns 0 for Vgk <= 0.
+    /// The grid behaves as a vacuum diode: a space-charge power law `Gg*Vg^xi`
+    /// for positive grid, joined smoothly to the initial-velocity current that
+    /// real tubes pass at and below `Vgk = 0` (D&Z §5.2). The softplus supplies
+    /// that join with no piecewise branch, so **conduction is not pinned to
+    /// Vgk = 0** — there is no onset parameter, and none is wanted: `1/(xi*Cg)`
+    /// sets the tail slope and `Gg` the magnitude, which is why a 2:1 spread in
+    /// `Gg` moves the 0.3 µA criterion by only ~50 mV.
+    ///
+    /// The paper's additive `Ig0` is deliberately omitted — see [`DEFAULT_GG`].
+    ///
+    /// Numerics: `softplus` is the stable two-branch form, so nothing here can
+    /// overflow for any finite `Vgk` (unlike an `exp` written directly, which
+    /// would blow up past `Vgk ≈ 71 V` at the default `Cg`). Large negative
+    /// `Vgk` underflows `s` to exactly 0 and the law returns 0 — a floor, not a
+    /// discontinuity: `Ig` is already below 1e-300 A there.
     pub fn grid_current(&self, vgk: f64) -> f64 {
-        if vgk <= 0.0 {
+        let s = softplus(self.cg * vgk) / self.cg;
+        if s <= 0.0 {
             return 0.0;
         }
-        let x = vgk / self.vgk_onset;
-        self.ig_max * x * x.sqrt() // x^1.5 = x * sqrt(x)
+        self.gg * s.powf(self.xi)
     }
 
     /// Grid current Jacobian: dIg/dVgk.
     ///
-    /// dIg/dVgk = ig_max * 1.5 * (Vgk/vgk_onset)^0.5 / vgk_onset
+    /// ```text
+    /// dIg/dVgk = Gg * xi * (s/1)^(xi-1) * sigma(Cg*Vgk)
+    /// ```
+    ///
+    /// because `ds/dVgk = sigma(Cg*Vgk)` — the `Cg` in the softplus argument
+    /// and the `1/Cg` scaling cancel exactly.
+    ///
+    /// Positive and finite for every finite `Vgk`, and continuous through
+    /// turn-on. That is the whole point relative to the retired Leach law,
+    /// whose conductance was identically zero across the entire negative-grid
+    /// region: Newton could take no information at all from the grid dimension
+    /// until `Vgk` crossed 0, and then met a `sqrt` cusp when it did.
     pub fn grid_current_jacobian(&self, vgk: f64) -> f64 {
-        if vgk <= 0.0 {
+        let x = self.cg * vgk;
+        let s = softplus(x) / self.cg;
+        if s <= 0.0 {
             return 0.0;
         }
-        let x = vgk / self.vgk_onset;
-        self.ig_max * 1.5 * x.sqrt() / self.vgk_onset
+        self.gg * self.xi * s.powf(self.xi - 1.0) * sigmoid(x)
+    }
+
+    /// The grid voltage at which this tube reaches a given grid current, by
+    /// inverting eq. (11) in closed form:
+    ///
+    /// ```text
+    /// s = (Ig/Gg)^(1/xi),   Vgk = ln(e^(Cg*s) - 1) / Cg
+    /// ```
+    ///
+    /// Used with [`GRID_START_CRITERION_A`] to report the derived "grid current
+    /// starting point" at compile time, which is a CHECK against the
+    /// manufacturer's per-type limit and deliberately **not** a parameter —
+    /// a parameter would invite someone to fit it.
+    ///
+    /// `expm1` is used for the inverse softplus because `Cg*s` is small
+    /// (≈0.03 at the 0.3 µA criterion), where `e^x - 1` loses most of its
+    /// significant digits. Returns `None` if the target is not reachable
+    /// (non-finite, or non-positive).
+    pub fn grid_voltage_at_current(&self, ig: f64) -> Option<f64> {
+        // `is_finite` first, so a NaN target is rejected before any comparison
+        // against it (every NaN comparison is false, so an ordering test alone
+        // would let one through).
+        if !ig.is_finite() || ig <= 0.0 || !self.gg.is_finite() || self.gg <= 0.0 {
+            return None;
+        }
+        let s = (ig / self.gg).powf(1.0 / self.xi);
+        let v = (self.cg * s).exp_m1().ln() / self.cg;
+        v.is_finite().then_some(v)
     }
 }
 
@@ -1757,18 +1843,98 @@ mod tests {
         }
     }
 
+    /// The defining property of the D&Z law, and the whole reason it replaced
+    /// the Leach one: the negative-grid region CONDUCTS. The old law returned
+    /// exactly 0.0 here for every parameter value there is.
     #[test]
-    fn test_grid_current_model() {
+    fn test_grid_current_conducts_below_zero() {
         let tube = KorenTriode::ecc83();
-        assert_eq!(tube.grid_current(-1.0), 0.0);
-        assert_eq!(tube.grid_current(0.0), 0.0);
+        for &vgk in &[-1.0, -0.5, -0.3, -0.1] {
+            assert!(
+                tube.grid_current(vgk) > 0.0,
+                "Ig must be positive at Vgk={vgk} V; the negative-grid region is \
+                 part of the law, not a special case"
+            );
+        }
+        // Strictly monotonic through zero, with no knee.
+        let mut prev = 0.0;
+        let mut v = -2.0;
+        while v <= 2.0 {
+            let ig = tube.grid_current(v);
+            assert!(ig > prev, "Ig must increase monotonically (at Vgk={v})");
+            prev = ig;
+            v += 0.05;
+        }
+    }
 
-        let ig = tube.grid_current(0.5);
-        assert!(ig > 0.0);
-        assert!((ig - tube.ig_max).abs() < 1e-10);
+    /// Derived values for the shipped default (D&Z Table 1 row RSD-1), checked
+    /// against the paper's own fit. These are NOT tuned — change the row and
+    /// they all move together.
+    #[test]
+    fn test_grid_current_rsd1_reference_points() {
+        let tube = KorenTriode::ecc83();
+        // Ig at Vgk = 0: 18.76 µA. Measured 12AX7s pass 12-19 µA here.
+        let ig0 = tube.grid_current(0.0);
+        assert!(
+            (ig0 - 18.763e-6).abs() < 0.01e-6,
+            "Ig(0) = {ig0:.4e}, expected 1.8763e-5"
+        );
+        // 2 mA at +2.445 V (the paper's positive-grid anchor).
+        let v2ma = tube.grid_voltage_at_current(2e-3).unwrap();
+        assert!((v2ma - 2.445).abs() < 1e-3, "V(2 mA) = {v2ma:.4}");
+        // The 0.3 µA "grid current starting point" lands at -0.353 V, inside
+        // the ECC83's own Philips bracket of -0.9 V.
+        let onset = tube
+            .grid_voltage_at_current(GRID_START_CRITERION_A)
+            .unwrap();
+        assert!((onset - (-0.3534)).abs() < 1e-3, "onset = {onset:.4}");
+        assert!(onset > crate::catalog::tubes::grid_start_limit_v("ECC83").unwrap());
+    }
 
-        let ig2 = tube.grid_current(1.0);
-        assert!(ig2 > ig);
+    /// Round-trip the closed-form inverse against the forward law.
+    #[test]
+    fn test_grid_voltage_at_current_inverts() {
+        let tube = KorenTriode::ecc83();
+        for &ig in &[1e-9, 3e-7, 1e-6, 1e-5, 1e-4, 1e-3, 5e-3] {
+            let v = tube.grid_voltage_at_current(ig).unwrap();
+            let back = tube.grid_current(v);
+            let rel = (back - ig).abs() / ig;
+            assert!(rel < 1e-9, "Ig={ig:.3e}: round-trip rel err {rel:.3e}");
+        }
+        assert!(tube.grid_voltage_at_current(0.0).is_none());
+        assert!(tube.grid_voltage_at_current(-1.0).is_none());
+    }
+
+    /// Stable softplus: nothing overflows, at any grid voltage, either way.
+    /// A naive `(cg*vgk).exp()` is infinite past Vgk = 71.6 V at Cg = 9.901.
+    #[test]
+    fn test_grid_current_no_overflow_either_tail() {
+        let tube = KorenTriode::ecc83();
+        for &vgk in &[-1e4, -500.0, -40.0, 40.0, 500.0, 1e4] {
+            let ig = tube.grid_current(vgk);
+            let jac = tube.grid_current_jacobian(vgk);
+            assert!(ig.is_finite() && ig >= 0.0, "Ig({vgk}) = {ig}");
+            assert!(jac.is_finite() && jac >= 0.0, "dIg/dV({vgk}) = {jac}");
+        }
+        // The far positive tail is asymptotically Gg*Vgk^xi, not an exponential.
+        let ig = tube.grid_current(100.0);
+        assert!((ig / (DEFAULT_GG * 100f64.powf(DEFAULT_XI)) - 1.0).abs() < 1e-9);
+    }
+
+    /// The conductance is strictly positive EVERYWHERE the law is evaluated in
+    /// practice, including the whole negative-grid region where the retired
+    /// Leach law handed Newton an identically-zero row.
+    #[test]
+    fn test_grid_conductance_positive_through_turn_on() {
+        let tube = KorenTriode::ecc83();
+        let mut v = -5.0;
+        while v <= 5.0 {
+            assert!(
+                tube.grid_current_jacobian(v) > 0.0,
+                "dIg/dVgk must be > 0 at Vgk={v} V"
+            );
+            v += 0.01;
+        }
     }
 
     #[test]
@@ -1776,7 +1942,11 @@ mod tests {
         let tube = KorenTriode::ecc83();
         let eps = 1e-7;
 
-        for &vgk in &[0.1, 0.3, 0.5, 1.0, 2.0] {
+        // Spans the negative-grid region too — under the retired Leach law
+        // every point below 0 V had an analytic derivative of exactly zero
+        // against a finite-difference of exactly zero, so the check was vacuous
+        // over half its intended domain.
+        for &vgk in &[-2.0, -1.0, -0.5, -0.3, -0.1, 0.0, 0.1, 0.3, 0.5, 1.0, 2.0] {
             let jac = tube.grid_current_jacobian(vgk);
             let fd = (tube.grid_current(vgk + eps) - tube.grid_current(vgk - eps)) / (2.0 * eps);
             let rel_err = if fd.abs() > 1e-15 {
@@ -1793,8 +1963,6 @@ mod tests {
                 rel_err
             );
         }
-        assert_eq!(tube.grid_current_jacobian(0.0), 0.0);
-        assert_eq!(tube.grid_current_jacobian(-1.0), 0.0);
     }
 
     /// Verify Jacobian is bounded for fractional exponents (ex < 1.0).
@@ -1832,10 +2000,12 @@ mod tests {
     /// Verify lambda multiplier increases plate current proportional to Vpk.
     #[test]
     fn test_lambda_early_effect() {
-        let tube_no_lambda =
-            KorenTriode::with_all_params(100.0, 1.4, 1060.0, 600.0, 300.0, 2e-3, 0.5, 0.0);
-        let tube_with_lambda =
-            KorenTriode::with_all_params(100.0, 1.4, 1060.0, 600.0, 300.0, 2e-3, 0.5, 0.001);
+        let tube_no_lambda = KorenTriode::with_all_params(
+            100.0, 1.4, 1060.0, 600.0, 300.0, DEFAULT_GG, DEFAULT_XI, DEFAULT_CG, 0.0,
+        );
+        let tube_with_lambda = KorenTriode::with_all_params(
+            100.0, 1.4, 1060.0, 600.0, 300.0, DEFAULT_GG, DEFAULT_XI, DEFAULT_CG, 0.001,
+        );
 
         let vgk = -1.0;
         let vpk = 250.0;
@@ -1856,8 +2026,9 @@ mod tests {
     #[test]
     fn test_lambda_zero_backward_compat() {
         let tube_old = KorenTriode::new(100.0, 1.4, 1060.0, 600.0, 300.0);
-        let tube_new =
-            KorenTriode::with_all_params(100.0, 1.4, 1060.0, 600.0, 300.0, 2e-3, 0.5, 0.0);
+        let tube_new = KorenTriode::with_all_params(
+            100.0, 1.4, 1060.0, 600.0, 300.0, DEFAULT_GG, DEFAULT_XI, DEFAULT_CG, 0.0,
+        );
 
         for &(vgk, vpk) in &[(0.0, 250.0), (-1.0, 200.0), (-2.0, 100.0)] {
             let ip_old = tube_old.plate_current(vgk, vpk);
@@ -2072,7 +2243,9 @@ mod tests {
     /// Verify Jacobian with lambda against finite differences.
     #[test]
     fn test_jacobian_with_lambda_finite_difference() {
-        let tube = KorenTriode::with_all_params(100.0, 1.4, 1060.0, 600.0, 300.0, 2e-3, 0.5, 0.001);
+        let tube = KorenTriode::with_all_params(
+            100.0, 1.4, 1060.0, 600.0, 300.0, DEFAULT_GG, DEFAULT_XI, DEFAULT_CG, 0.001,
+        );
         let eps = 1e-6;
 
         for &(vgk, vpk) in &[(0.0, 250.0), (-1.0, 200.0), (-2.0, 100.0), (-0.5, 300.0)] {

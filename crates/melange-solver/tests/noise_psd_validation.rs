@@ -3238,8 +3238,10 @@ fn triode_plate_shot_space_charge_smoothing() {
         kg1: 600.0,
         kp: 300.0,
         kvb: 300.0,
-        ig_max: 0.0,
-        vgk_onset: 0.5,
+        // Grid current disabled (Gg = 0): this reference solve is plate-only.
+        gg: 0.0,
+        xi: melange_devices::tube::DEFAULT_XI,
+        cg: melange_devices::tube::DEFAULT_CG,
         lambda: 0.0,
         mu_b: 0.0,
         svar: 0.0,

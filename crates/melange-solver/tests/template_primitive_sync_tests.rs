@@ -1356,8 +1356,16 @@ fn tube_harness_rows() -> &'static Vec<(String, Vec<f64>)> {
         // Triode blocks: 12AX7 card, lambda = 0 and lambda > 0 (Early effect),
         // plus the RGI=0 exact-reduction columns.
         for (set, lambda) in [(0u32, 0.0f64), (1u32, 2e-4f64)] {
-            let (mu, ex, kg1, kp, kvb, ig_max, vgk_onset) =
-                (100.0f64, 1.4f64, 1060.0f64, 600.0f64, 300.0f64, 2e-3f64, 0.5f64);
+            let (mu, ex, kg1, kp, kvb, gg, xi, cg) = (
+                100.0f64,
+                1.4f64,
+                1060.0f64,
+                600.0f64,
+                300.0f64,
+                melange_devices::tube::DEFAULT_GG,
+                melange_devices::tube::DEFAULT_XI,
+                melange_devices::tube::DEFAULT_CG,
+            );
             main_body.push_str(&format!(
                 "{{\n\
     let mut vgk = -6.0f64;\n\
@@ -1365,11 +1373,11 @@ fn tube_harness_rows() -> &'static Vec<(String, Vec<f64>)> {
         let mut vpk = -5.0f64;\n\
         while vpk <= 400.0 {{\n\
             let ip = tube_ip(vgk, vpk, {mu:?}, {ex:?}, {kg1:?}, {kp:?}, {kvb:?}, {lambda:?});\n\
-            let ig = tube_ig(vgk, {ig_max:?}, {vgk_onset:?});\n\
-            let dig = tube_ig_deriv(vgk, {ig_max:?}, {vgk_onset:?});\n\
-            let j = tube_jacobian(vgk, vpk, {mu:?}, {ex:?}, {kg1:?}, {kp:?}, {kvb:?}, {ig_max:?}, {vgk_onset:?}, {lambda:?});\n\
-            let (eip, eig, ej) = tube_evaluate(vgk, vpk, {mu:?}, {ex:?}, {kg1:?}, {kp:?}, {kvb:?}, {ig_max:?}, {vgk_onset:?}, {lambda:?});\n\
-            let (rip, rig, rj) = tube_evaluate_with_rgi(vgk, vpk, {mu:?}, {ex:?}, {kg1:?}, {kp:?}, {kvb:?}, {ig_max:?}, {vgk_onset:?}, {lambda:?}, 0.0);\n\
+            let ig = tube_ig_dz(vgk, {gg:?}, {xi:?}, {cg:?});\n\
+            let dig = tube_ig_dz_deriv(vgk, {gg:?}, {xi:?}, {cg:?});\n\
+            let j = tube_jacobian(vgk, vpk, {mu:?}, {ex:?}, {kg1:?}, {kp:?}, {kvb:?}, {gg:?}, {xi:?}, {cg:?}, {lambda:?});\n\
+            let (eip, eig, ej) = tube_evaluate(vgk, vpk, {mu:?}, {ex:?}, {kg1:?}, {kp:?}, {kvb:?}, {gg:?}, {xi:?}, {cg:?}, {lambda:?});\n\
+            let (rip, rig, rj) = tube_evaluate_with_rgi(vgk, vpk, {mu:?}, {ex:?}, {kg1:?}, {kp:?}, {kvb:?}, {gg:?}, {xi:?}, {cg:?}, {lambda:?}, 0.0);\n\
             print!(\"triode{set} {{:.17e}} {{:.17e}} {{:.17e}} {{:.17e}} {{:.17e}}\", vgk, vpk, ip, ig, dig);\n\
             for x in j {{ print!(\" {{:.17e}}\", x); }}\n\
             print!(\" {{:.17e}} {{:.17e}}\", eip, eig);\n\
@@ -1469,7 +1477,17 @@ const TUBE_ABS: f64 = 1e-14;
 #[test]
 fn template_triode_matches_devices_crate() {
     for (set, lambda) in [(0u32, 0.0f64), (1u32, 2e-4f64)] {
-        let dev = KorenTriode::with_all_params(100.0, 1.4, 1060.0, 600.0, 300.0, 2e-3, 0.5, lambda);
+        let dev = KorenTriode::with_all_params(
+            100.0,
+            1.4,
+            1060.0,
+            600.0,
+            300.0,
+            melange_devices::tube::DEFAULT_GG,
+            melange_devices::tube::DEFAULT_XI,
+            melange_devices::tube::DEFAULT_CG,
+            lambda,
+        );
         let label = format!("triode{set}");
         let mut n = 0u32;
         let mut conducting = 0u32;
@@ -1563,7 +1581,17 @@ fn template_triode_matches_devices_crate() {
 #[test]
 fn template_triode_koren_x2_absolute_anchor() {
     // Devices-crate side (independent of the harness).
-    let dev = KorenTriode::with_all_params(100.0, 1.4, 1060.0, 600.0, 300.0, 2e-3, 0.5, 0.0);
+    let dev = KorenTriode::with_all_params(
+        100.0,
+        1.4,
+        1060.0,
+        600.0,
+        300.0,
+        melange_devices::tube::DEFAULT_GG,
+        melange_devices::tube::DEFAULT_XI,
+        melange_devices::tube::DEFAULT_CG,
+        0.0,
+    );
     let ip_dev = dev.plate_current(-2.0, 250.0);
     assert!(
         (0.90e-3..1.00e-3).contains(&ip_dev),

@@ -5054,11 +5054,16 @@ fn build_device_entries(
                 let kg1 = find_model_param(model_name, "KG1").unwrap_or(1060.0);
                 let kp = find_model_param(model_name, "KP").unwrap_or(600.0);
                 let kvb = find_model_param(model_name, "KVB").unwrap_or(300.0);
-                let ig_max = find_model_param(model_name, "IG_MAX").unwrap_or(2e-3);
-                let vgk_onset = find_model_param(model_name, "VGK_ONSET").unwrap_or(0.5);
+                // D&Z eq. (11) grid law; IG_MAX/VGK_ONSET are retired keys and
+                // a deck carrying either is refused before reaching here.
+                let gg =
+                    find_model_param(model_name, "GG").unwrap_or(melange_devices::tube::DEFAULT_GG);
+                let xi =
+                    find_model_param(model_name, "XI").unwrap_or(melange_devices::tube::DEFAULT_XI);
+                let cg =
+                    find_model_param(model_name, "CG").unwrap_or(melange_devices::tube::DEFAULT_CG);
                 let lambda = find_model_param(model_name, "LAMBDA").unwrap_or(0.0);
-                let tube =
-                    KorenTriode::with_all_params(mu, ex, kg1, kp, kvb, ig_max, vgk_onset, lambda);
+                let tube = KorenTriode::with_all_params(mu, ex, kg1, kp, kvb, gg, xi, cg, lambda);
                 devices.push(DeviceEntry::new_tube(tube, dev_info.start_idx));
             }
             melange_solver::mna::NonlinearDeviceType::Vca => {
@@ -5367,8 +5372,6 @@ fn build_device_slots(
                 let kg1 = find_param(&model_name, "KG1").unwrap_or(1060.0);
                 let kp = find_param(&model_name, "KP").unwrap_or(600.0);
                 let kvb = find_param(&model_name, "KVB").unwrap_or(300.0);
-                let ig_max = find_param(&model_name, "IG_MAX").unwrap_or(2e-3);
-                let vgk_onset = find_param(&model_name, "VGK_ONSET").unwrap_or(0.5);
                 let lambda = find_param(&model_name, "LAMBDA").unwrap_or(0.0);
                 slots.push(DeviceSlot {
                     device_type: DeviceType::Tube,
@@ -5381,8 +5384,16 @@ fn build_device_slots(
                         kg1,
                         kp,
                         kvb,
-                        ig_max,
-                        vgk_onset,
+                        // Leach fields are pentode-only; a triode slot leaves
+                        // them at zero and carries the D&Z grid law instead.
+                        ig_max: 0.0,
+                        vgk_onset: 0.0,
+                        gg: find_param(&model_name, "GG")
+                            .unwrap_or(melange_devices::tube::DEFAULT_GG),
+                        xi: find_param(&model_name, "XI")
+                            .unwrap_or(melange_devices::tube::DEFAULT_XI),
+                        cg: find_param(&model_name, "CG")
+                            .unwrap_or(melange_devices::tube::DEFAULT_CG),
                         lambda,
                         ccg: find_param(&model_name, "CCG").unwrap_or(0.0),
                         cgp: find_param(&model_name, "CGP").unwrap_or(0.0),

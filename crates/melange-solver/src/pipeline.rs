@@ -282,10 +282,31 @@ pub fn apply_linearize_reductions(
                         linearized_triodes_set.remove(&dev.name.to_ascii_uppercase());
                         continue;
                     }
-                    if vgk > -(tp.vgk_onset + 0.5) {
+                    // "Near grid conduction onset" now means near the onset
+                    // the fitted D&Z grid law actually implies (the Vgk at
+                    // which Ig reaches the manufacturers' +0.3 uA starting-
+                    // point criterion), not the retired VGK_ONSET parameter,
+                    // which was never the onset. Same half-volt guard band.
+                    let onset = melange_devices::KorenTriode {
+                        mu: tp.mu,
+                        ex: tp.ex,
+                        kg1: tp.kg1,
+                        kp: tp.kp,
+                        kvb: tp.kvb,
+                        gg: tp.gg,
+                        xi: tp.xi,
+                        cg: tp.cg,
+                        lambda: tp.lambda,
+                        mu_b: tp.mu_b,
+                        svar: tp.svar,
+                        ex_b: tp.ex_b,
+                    }
+                    .grid_voltage_at_current(melange_devices::tube::GRID_START_CRITERION_A)
+                    .unwrap_or(0.0);
+                    if vgk > onset - 0.5 {
                         report!(rep,
                             "  Warning: triode '{}' has Vgk={:.2}V (near grid conduction onset {:.2}V), skipping linearization",
-                            dev.name, vgk, tp.vgk_onset
+                            dev.name, vgk, onset
                         );
                         linearized_triodes_set.remove(&dev.name.to_ascii_uppercase());
                         continue;
@@ -298,8 +319,9 @@ pub fn apply_linearize_reductions(
                         kg1: tp.kg1,
                         kp: tp.kp,
                         kvb: tp.kvb,
-                        ig_max: tp.ig_max,
-                        vgk_onset: tp.vgk_onset,
+                        gg: tp.gg,
+                        xi: tp.xi,
+                        cg: tp.cg,
                         lambda: tp.lambda,
                         mu_b: tp.mu_b,
                         svar: tp.svar,

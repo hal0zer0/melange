@@ -32,11 +32,12 @@ use crate::spice_runner::SpiceError;
 /// Melange triode `.model` types (any of these prefix a Koren triode).
 const TRIODE_MODEL_TYPES: [&str; 3] = ["TRIODE", "VT", "TUBE"];
 
-/// Default grid-current parameters, mirroring
-/// `melange_devices::tube` (`DEFAULT_IG_MAX` / `DEFAULT_VGK_ONSET`). These are
-/// not `.model`-settable, so netlist triodes always use these values.
-const DEFAULT_IG_MAX: f64 = 2e-3;
-const DEFAULT_VGK_ONSET: f64 = 0.5;
+/// Default grid-current parameters, mirroring `melange_devices::tube`
+/// (`DEFAULT_GG` / `DEFAULT_XI` / `DEFAULT_CG`) — Dempwolf & Zölzer DAFx-11
+/// Table 1 row RSD-1.
+const DEFAULT_GG: f64 = melange_devices::tube::DEFAULT_GG;
+const DEFAULT_XI: f64 = melange_devices::tube::DEFAULT_XI;
+const DEFAULT_CG: f64 = melange_devices::tube::DEFAULT_CG;
 
 /// Resolved Koren triode parameters for one `.model`.
 struct TriodeParams {
@@ -46,8 +47,9 @@ struct TriodeParams {
     kp: f64,
     kvb: f64,
     lambda: f64,
-    ig_max: f64,
-    vgk_onset: f64,
+    gg: f64,
+    xi: f64,
+    cg: f64,
 }
 
 impl TriodeParams {
@@ -73,11 +75,13 @@ impl TriodeParams {
             kg1: require("KG1")?,
             kp: require("KP")?,
             kvb: require("KVB")?,
-            // LAMBDA (Early effect) defaults to 0 in melange; grid params are not
-            // .model-settable and always take the tube.rs defaults.
+            // LAMBDA (Early effect) defaults to 0 in melange. The D&Z grid
+            // parameters follow the same fallback the codegen resolver uses:
+            // explicit `.model` value, else the shipped RSD-1 row.
             lambda: get("LAMBDA").unwrap_or(0.0),
-            ig_max: DEFAULT_IG_MAX,
-            vgk_onset: DEFAULT_VGK_ONSET,
+            gg: get("GG").unwrap_or(DEFAULT_GG),
+            xi: get("XI").unwrap_or(DEFAULT_XI),
+            cg: get("CG").unwrap_or(DEFAULT_CG),
         })
     }
 
@@ -120,12 +124,17 @@ impl TriodeParams {
         } else {
             ip
         };
-        // Grid current: melange's Leach-style Ig = ig_max*max(0,Vgk/vgk_onset)^1.5.
-        let grid = format!(
-            "{ig}*pwr(uramp(V(g,k)/{vo}),1.5)",
-            ig = self.ig_max,
-            vo = self.vgk_onset,
-        );
+        // Grid current: Dempwolf & Zölzer DAFx-11 eq. (11),
+        //   Ig = Gg * (softplus(Cg*Vgk)/Cg)^xi.
+        // The softplus is written in the branch-free stable form
+        //   softplus(x) = max(x,0) + ln(1 + exp(-|x|)),
+        // so the exponent is never positive and ngspice cannot overflow it
+        // while probing a large trial Vgk — a bare exp(Cg*Vgk) blows up past
+        // Vgk ~ 71 V at the default Cg. `pwr` is |x|^y and the argument is
+        // non-negative by construction.
+        let x = format!("{cg}*V(g,k)", cg = self.cg);
+        let softplus = format!("(max({x},0)+ln(1+exp(-abs({x}))))/{cg}", cg = self.cg);
+        let grid = format!("{gg}*pwr({softplus},{xi})", gg = self.gg, xi = self.xi,);
         // Only mirror from_mna's 10 pF junction parasitics for purely resistive
         // nonlinear circuits (see `add_parasitics` doc).
         let parasitics = if add_parasitics {

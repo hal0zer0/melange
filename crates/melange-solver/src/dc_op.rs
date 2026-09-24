@@ -421,14 +421,7 @@ fn evaluate_devices_inner(
                         continue;
                     }
                     let tube = KorenTriode::with_all_params(
-                        tp.mu,
-                        tp.ex,
-                        tp.kg1,
-                        tp.kp,
-                        tp.kvb,
-                        tp.ig_max,
-                        tp.vgk_onset,
-                        tp.lambda,
+                        tp.mu, tp.ex, tp.kg1, tp.kp, tp.kvb, tp.gg, tp.xi, tp.cg, tp.lambda,
                     );
                     let vgk = v_nl[s];
                     let vpk = v_nl[s + 1];

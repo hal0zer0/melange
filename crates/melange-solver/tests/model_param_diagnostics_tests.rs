@@ -272,3 +272,189 @@ fn referenced_diode_card_typo_is_still_a_hard_error() {
         "error does not list the accepted keys: {msg}"
     );
 }
+
+// ── Retired triode grid-current keys ────────────────────────────────────
+//
+// `IG_MAX` / `VGK_ONSET` parameterised the Leach grid law that Dempwolf &
+// Zölzer eq. (11) replaced. They are refused, not aliased and not repurposed:
+// an alias preserves a name that was wrong about its own meaning, and the same
+// key silently meaning something else is the class of bug melange exists not to
+// have. The refusal carries the conversion so an author who wants the old curve
+// can ask for it deliberately.
+
+/// A 12AX7 common-cathode stage; `extra` goes on the `.model` card.
+fn triode_deck(extra: &str) -> String {
+    format!(
+        "Triode grid-law probe\n\
+         .model ECC83 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300{extra})\n\
+         Rg in g 68k\n\
+         T1 g p k ECC83\n\
+         Rp vcc p 100k\n\
+         Rk k 0 1.5k\n\
+         Ck k 0 22u\n\
+         Vcc vcc 0 250\n\
+         Cout p out 22n\n\
+         Rl out 0 1meg\n\
+         .END\n"
+    )
+}
+
+fn compile_triode(extra: &str) -> Result<String, String> {
+    let src = triode_deck(extra);
+    let netlist = Netlist::parse(&src).expect("parse");
+    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
+    let config = CodegenConfig {
+        circuit_name: "triode_probe".to_string(),
+        sample_rate: 48000.0,
+        input_node: mna.node_map["in"] - 1,
+        output_nodes: vec![mna.node_map["out"] - 1],
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let input_node = config.input_node;
+    mna.g[input_node][input_node] += 1.0;
+    let kernel = DkKernel::from_mna(&mna, config.sample_rate).expect("dk kernel");
+    CodeGenerator::new(config)
+        .generate(&kernel, &mna, &netlist)
+        .map(|r| r.code)
+        .map_err(|e| e.to_string())
+}
+
+#[test]
+fn retired_ig_max_is_refused_with_its_conversion() {
+    let msg = compile_triode(" IG_MAX=5e-3")
+        .expect_err("a retired key on a referenced triode card must be refused");
+    assert!(msg.contains("'IG_MAX' is RETIRED"), "{msg}");
+    assert!(
+        msg.contains("IG_MAX/VGK_ONSET^1.5"),
+        "the refusal must print the conversion to the new law: {msg}"
+    );
+    assert!(
+        !msg.contains("unknown parameter"),
+        "a retired key is not a typo and must not be reported as one: {msg}"
+    );
+}
+
+#[test]
+fn retired_vgk_onset_is_refused_and_says_it_was_never_the_onset() {
+    let msg = compile_triode(" VGK_ONSET=0.75").expect_err("VGK_ONSET must be refused");
+    assert!(msg.contains("'VGK_ONSET' is RETIRED"), "{msg}");
+    assert!(
+        msg.contains("never the onset"),
+        "the refusal must say what the key actually was: {msg}"
+    );
+}
+
+#[test]
+fn retired_keys_are_still_honored_on_a_pentode_card() {
+    // Deliberate asymmetry: the pentode CONTROL grid still carries the Leach
+    // law, because no published fit of the D&Z form exists for one and melange
+    // does not invent device parameters. The rule follows the laws, not the
+    // spelling of the key.
+    let deck = "Pentode grid-law probe\n\
+                .model EL84P VP(MU=23.36 EX=1.138 KG1=117.4 KG2=1275 KP=152.4 KVB=4015.8 \
+                ALPHA_S=7.66 A_FACTOR=4.344e-4 BETA_FACTOR=0.148 IG_MAX=8m VGK_ONSET=0.7)\n\
+                Rg in g 68k\n\
+                P1 p g k s EL84P\n\
+                Rp vcc p 5k\n\
+                Rs vcc s 1k\n\
+                Cs s 0 47u\n\
+                Rk k 0 150\n\
+                Ck k 0 100u\n\
+                Vcc vcc 0 300\n\
+                Cout p out 22n\n\
+                Rl out 0 1meg\n\
+                .END\n";
+    let netlist = Netlist::parse(deck).expect("parse");
+    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
+    let config = CodegenConfig {
+        circuit_name: "pentode_probe".to_string(),
+        sample_rate: 48000.0,
+        input_node: mna.node_map["in"] - 1,
+        output_nodes: vec![mna.node_map["out"] - 1],
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let input_node = config.input_node;
+    mna.g[input_node][input_node] += 1.0;
+    let kernel = DkKernel::from_mna(&mna, config.sample_rate).expect("dk kernel");
+    let code = CodeGenerator::new(config)
+        .generate(&kernel, &mna, &netlist)
+        .expect("IG_MAX/VGK_ONSET must still compile on a pentode card")
+        .code;
+    assert!(
+        code.contains("const DEVICE_0_IG_MAX"),
+        "pentode lost IG_MAX"
+    );
+}
+
+#[test]
+fn new_grid_keys_are_accepted_and_reach_the_generated_constants() {
+    // D&Z Table 1 row RSD-2, spelled out on the card.
+    let code = compile_triode(" GG=5.911e-4 XI=1.358 CG=11.76").expect("GG/XI/CG must compile");
+    // Emitted normalized to one leading digit at full precision, so CG=11.76
+    // prints as `1.17599999999999998e1` — match the mantissa, not the decimal
+    // spelling on the card.
+    assert!(
+        code.contains("const DEVICE_0_GG: f64 = 5.911"),
+        "GG missing"
+    );
+    assert!(
+        code.contains("const DEVICE_0_XI: f64 = 1.358"),
+        "XI missing"
+    );
+    assert!(
+        code.contains("const DEVICE_0_CG: f64 = 1.1759"),
+        "CG missing; emitted: {:?}",
+        code.lines()
+            .filter(|l| l.starts_with("const DEVICE_0_"))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !code.contains("DEVICE_0_IG_MAX"),
+        "a triode must not emit a Leach constant"
+    );
+}
+
+// ── Compile-time grid-current starting-point check ──────────────────────
+
+#[test]
+fn onset_outside_the_per_type_philips_bracket_warns() {
+    let _guard = start_capture();
+    // Slack turn-on (small CG) pushes the derived 0.3 uA starting point to
+    // -1.568 V, past the ECC83's published max of -0.9 V.
+    compile_triode(" CG=3").expect("compiles — the check warns, it does not refuse");
+    let warns: Vec<String> = warnings()
+        .into_iter()
+        .filter(|w| w.contains("grid-current starting point"))
+        .collect();
+    assert_eq!(
+        warns.len(),
+        1,
+        "expected exactly one distinct warning text: {warns:?}"
+    );
+    assert!(
+        warns[0].contains("BELOW the manufacturer limit"),
+        "{:?}",
+        warns[0]
+    );
+    assert!(
+        warns[0].contains("-0.9 V"),
+        "must name the type's own limit: {:?}",
+        warns[0]
+    );
+}
+
+#[test]
+fn onset_inside_the_bracket_does_not_warn() {
+    let _guard = start_capture();
+    compile_triode("").expect("the shipped default must compile clean");
+    let warns: Vec<String> = warnings()
+        .into_iter()
+        .filter(|w| w.contains("grid-current starting point"))
+        .collect();
+    assert!(
+        warns.is_empty(),
+        "the shipped RSD-1 row sits at -0.353 V, well inside the ECC83 bracket: {warns:?}"
+    );
+}

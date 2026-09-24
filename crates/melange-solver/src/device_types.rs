@@ -669,10 +669,31 @@ pub struct TubeParams {
     pub kp: f64,
     /// Kvb coefficient (triode: softplus denominator; pentode: arctan knee in Ip)
     pub kvb: f64,
-    /// Maximum grid current [A]
+    /// **Pentode control grid only** — Leach-law maximum grid current [A].
+    ///
+    /// Triodes do not use this: their grid law is Dempwolf & Zölzer eq. (11)
+    /// ([`gg`](Self::gg) / [`xi`](Self::xi) / [`cg`](Self::cg)). The pentode
+    /// `Ig1` still carries the Leach power law, because no published fit of
+    /// the D&Z form exists for a power pentode's control grid and melange does
+    /// not invent device parameters. That leaves the pentode control grid with
+    /// the same structural defect the triode just shed — conduction pinned to
+    /// `Vgk = 0` — which is recorded in `docs/aidocs/DEVICE_MODELS.md` rather
+    /// than papered over here.
     pub ig_max: f64,
-    /// Grid current onset voltage [V]
+    /// **Pentode control grid only** — Leach-law grid current onset voltage
+    /// [V]. See [`ig_max`](Self::ig_max).
     pub vgk_onset: f64,
+    /// Triode grid perveance `Gg` [A/V^xi] — Dempwolf & Zölzer DAFx-11 eq. (11).
+    /// Ignored for pentodes.
+    #[serde(default = "default_gg")]
+    pub gg: f64,
+    /// Triode grid exponent `xi` (ξ) — D&Z eq. (11). Ignored for pentodes.
+    #[serde(default = "default_xi")]
+    pub xi: f64,
+    /// Triode grid adaption factor `Cg` [1/V] — D&Z eq. (11). Ignored for
+    /// pentodes.
+    #[serde(default = "default_cg")]
+    pub cg: f64,
     /// Channel-length modulation coefficient [1/V]. 0.0 = disabled (default).
     #[serde(default)]
     pub lambda: f64,
@@ -861,6 +882,30 @@ impl TubeParams {
                 "tube KVB must be positive and finite, got {}",
                 self.kvb
             ));
+        }
+        if !self.is_pentode() {
+            // Triode grid law (D&Z eq. 11). Gg and Cg must be strictly
+            // positive: Gg <= 0 would make the grid a current SOURCE, and
+            // Cg <= 0 flips the softplus so the tube conducts hardest when the
+            // grid is most negative. xi <= 0 likewise inverts the law.
+            if !self.gg.is_finite() || self.gg <= 0.0 {
+                return Err(format!(
+                    "triode GG (D&Z grid perveance) must be positive and finite, got {}",
+                    self.gg
+                ));
+            }
+            if !self.xi.is_finite() || self.xi <= 0.0 {
+                return Err(format!(
+                    "triode XI (D&Z grid exponent) must be positive and finite, got {}",
+                    self.xi
+                ));
+            }
+            if !self.cg.is_finite() || self.cg <= 0.0 {
+                return Err(format!(
+                    "triode CG (D&Z grid adaption factor) must be positive and finite, got {}",
+                    self.cg
+                ));
+            }
         }
         if self.is_pentode() {
             if !self.kg2.is_finite() || self.kg2 <= 0.0 {
@@ -1168,6 +1213,21 @@ fn default_one() -> f64 {
     1.0
 }
 
+// Dempwolf & Zölzer DAFx-11 Table 1 row RSD-1 — the single named row melange
+// ships as the triode grid default. Re-exported from `melange-devices` rather
+// than duplicated so the two crates cannot drift.
+fn default_gg() -> f64 {
+    melange_devices::tube::DEFAULT_GG
+}
+
+fn default_xi() -> f64 {
+    melange_devices::tube::DEFAULT_XI
+}
+
+fn default_cg() -> f64 {
+    melange_devices::tube::DEFAULT_CG
+}
+
 fn default_ne() -> f64 {
     1.5
 }
@@ -1379,6 +1439,9 @@ mod tube_params_tests {
             kvb: 300.0,
             ig_max: 2e-3,
             vgk_onset: 0.5,
+            gg: default_gg(),
+            xi: default_xi(),
+            cg: default_cg(),
             lambda: 0.0,
             ccg: 0.0,
             cgp: 0.0,
@@ -1414,6 +1477,9 @@ mod tube_params_tests {
             kvb: 1309.0,
             ig_max: 6e-3,
             vgk_onset: 0.5,
+            gg: default_gg(),
+            xi: default_xi(),
+            cg: default_cg(),
             lambda: 0.0,
             ccg: 0.0,
             cgp: 0.0,
@@ -1449,6 +1515,9 @@ mod tube_params_tests {
             kvb: 4015.8,
             ig_max: 8e-3,
             vgk_onset: 0.7,
+            gg: default_gg(),
+            xi: default_xi(),
+            cg: default_cg(),
             lambda: 0.0,
             ccg: 0.0,
             cgp: 0.0,
@@ -1483,6 +1552,9 @@ mod tube_params_tests {
             kvb: 16.0,
             ig_max: 10e-3,
             vgk_onset: 0.7,
+            gg: default_gg(),
+            xi: default_xi(),
+            cg: default_cg(),
             lambda: 0.0,
             ccg: 0.0,
             cgp: 0.0,
@@ -1516,6 +1588,9 @@ mod tube_params_tests {
             kvb: 3205.1,
             ig_max: 10e-3,
             vgk_onset: 0.7,
+            gg: default_gg(),
+            xi: default_xi(),
+            cg: default_cg(),
             lambda: 0.0,
             ccg: 0.0,
             cgp: 0.0,
