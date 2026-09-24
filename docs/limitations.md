@@ -437,12 +437,25 @@ that must run at several host rates has to be compiled per rate.
 
 ### Performance Benchmarks
 
-Measured on an AMD Ryzen 9 7950X, single core, noiseless, `-C target-cpu=x86-64-v3` (best of 7 × 2M samples via `tools/perf-harness/bench.sh`); throughput is host-dependent.
+Measured 2026-09-24 on an AMD Ryzen 9 7950X pinned to one CCD, single core,
+noiseless, `-C target-cpu=x86-64-v3` (best of 7 × 2M samples via
+`tools/perf-harness/bench.sh`); throughput is host-dependent.
 
-- Light nonlinear circuits: 12AX7 gain stage ~230×, overdrive pedal (1 op-amp + 2 diodes) ~64× realtime
-- Germanium diode network (6 Ge diodes) ~12× realtime
-- Typical multi-device circuits: Wurlitzer preamp ~56×, tweed-style guitar amp ~23× realtime
-- Heaviest measured: a passive tube EQ (nodal full-LU, chord + sparse LU, N=52, M=8) ~24×, a bus compressor (12 op-amps + 2 VCAs) ~7.1× realtime
+- Light nonlinear circuits: 12AX7 gain stage ~153×, overdrive pedal (1 op-amp + 2 diodes) ~60× realtime
+- Germanium diode network (6 Ge diodes) ~11.5× realtime
+- Typical multi-device circuits: Wurlitzer preamp ~44×, tweed-style guitar amp ~18× realtime
+- Heaviest measured: a passive tube EQ (nodal full-LU, chord + sparse LU, N=52, M=8) ~21×, a bus compressor (12 op-amps + 2 VCAs) ~7.0× realtime
+
+Four of those seven moved at this re-measurement. The three triode rows are
+14–29 % slower than they were earlier in 0.1.9 because the Dempwolf & Zölzer
+grid-current law (`30915fb`) evaluates a softplus on the grid dimension at
+every Newton iteration, where the old law short-circuited to zero for
+Vgk ≤ 0; measured against the immediately preceding commit on the same box,
+12AX7 stage 216.7× → 153.2×, tweed amp 22.3× → 18.3×, passive EQ 24.0× → 20.6×.
+The Wurlitzer row fell because the DECK was revised on 2026-09-16, not
+because anything in melange got slower: the pre-revision deck still measures
+52.9× on the same 0.1.5 binary the 56× was published from. Re-running that
+binary today reproduces the other published rows within −6 % to +2 %.
 
 Every figure above names the circuit it came from, deliberately. Perf numbers in
 this repository from before 2026-08-25 were fabricated or stale -- a row nobody

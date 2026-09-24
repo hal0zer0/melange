@@ -217,17 +217,19 @@ Melange auto-selects the optimal solver per circuit (DK, Nodal Schur, or Nodal F
 
 A sample of what it handles, with **measured** single-core throughput:
 
-| Circuit | What it is | Devices | Throughput\* |
-|---------|-----------|---------|--------------|
-| Bus compressor (SSL-class) | VCA + op-amp sidechain | 12 op-amps + 2 VCAs | 7.1× |
-| Germanium diode network | 6-diode germanium clipping | 6 Ge diodes | 12.1× |
-| Passive tube EQ (Pultec-style) | 7 pots, 3 switches, global NFB (N=52, M=8) | 4 tubes, 3 transformers | 24× |
-| Tweed guitar amp (5F1 Champ-class) | preamp + power stage + output transformer | 12AX7 (2 triodes) + 6V6 pentode | 23× |
-| Wurlitzer 200A preamp | 2-stage BJT preamp (full Gummel-Poon) | 2 BJTs + 1 diode | 56× |
-| Overdrive pedal | op-amp gain + diode clipper | op-amp + 2 diodes | 64× |
-| 12AX7 gain stage | single triode stage | 1 triode | 230× |
+| Circuit | What it is | Devices | Throughput\* | ns/sample |
+|---------|-----------|---------|--------------|-----------|
+| Bus compressor (SSL-class) | VCA + op-amp sidechain | 12 op-amps + 2 VCAs | 7.0× | 2976 |
+| Germanium diode network | 6-diode germanium clipping | 6 Ge diodes | 11.5× | 1818 |
+| Tweed guitar amp (5F1 Champ-class) | preamp + power stage + output transformer | 12AX7 (2 triodes) + 6V6 pentode | 18.3× | 1139 |
+| Passive tube EQ (Pultec-style) | 7 pots, 3 switches, global NFB (N=52, M=8) | 4 tubes, 3 transformers | 20.6× | 1009 |
+| Wurlitzer 200A preamp | 2-stage BJT preamp (full Gummel-Poon) | 2 BJTs + 1 diode | 43.8× | 476 |
+| Overdrive pedal | op-amp gain + diode clipper | op-amp + 2 diodes | 60.3× | 346 |
+| 12AX7 gain stage | single triode stage | 1 triode | 153× | 136 |
 
-\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), best of 7 × 2M samples. Measured on an AMD Ryzen 9 7950X with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh). Re-measured 2026-09-02. Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass tops out near 2700×.
+\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), best of 7 × 2M samples. Measured on an AMD Ryzen 9 7950X pinned to one CCD, with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh). Re-measured 2026-09-24. Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass runs at 2960× (7.0 ns/sample).
+
+**Four rows moved at the 2026-09-24 re-measurement, and none of it is a mystery.** The three triode rows cost 14–29 % more than they did in 0.1.9's first half: the Dempwolf & Zölzer grid-current law (`30915fb`) evaluates a softplus on the grid dimension at every Newton iteration where the old law returned a hard zero, and that is the price of modelling the negative-grid region at all. Measured on the same box, in the same session, against the commit immediately before it: 12AX7 stage 216.7× → 153.2×, tweed amp 22.3× → 18.3×, passive EQ 24.0× → 20.6×. The Wurlitzer row fell 56× → 43.8× because **the deck changed**, not the compiler — it was revised 2026-09-16 (an extra coupling cap, a rebiased feedback network, `.integrator be`), and the pre-revision deck still measures 52.9× on the same 0.1.5 binary that published the 56×. Re-running that binary today reproduces the other published rows within −6 % to +2 %, which is the honest width of this bench on this host.
 
 Each row names the deck it was measured on, so the numbers have an address. Reproducing them is another matter: **only the passive tube EQ row can be re-measured from a clean clone today** — it ships in-tree as `examples/passive-eq1a.cir`, so `bench.sh <label> <path-to.cir>` will re-run it on your hardware. The other six decks live in the circuits repository, which is not yet published. Naming them is provenance, not an invitation.
 
@@ -250,7 +252,7 @@ A **Pultec-style passive program EQ**, and one of the hardest topologies melange
 - **4 vacuum tubes** (2× 12AX7, 2× 12AU7), **3 transformers** (HS-56 input, HS-29 coupling/phase-splitter, S-217-D output with a tertiary feedback winding)
 - **21 dB of global negative feedback** via differential cathode injection
 - **40 circuit nodes (N=52 MNA unknowns), 8 nonlinear dimensions**
-- **All 7 EQ bands function**, including the simultaneous boost + cut trick, with **zero NR failures** at 1V input, at roughly 24× realtime on one core
+- **All 7 EQ bands function**, including the simultaneous boost + cut trick, with **zero NR failures** at 1V input, at roughly 21× realtime on one core
 
 Global feedback wrapped around four tubes and three transformers is the configuration where naive solvers give up, oscillate, or quietly return garbage. This one converges every sample.
 

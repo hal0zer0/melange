@@ -9,6 +9,57 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+### Changed
+
+- **Triode grid current is now Dempwolf & Zölzer eq. (11)** (`30915fb`).
+  `Ig = Gg·(softplus(Cg·Vgk)/Cg)^ξ`, evaluated for *all* Vgk with no branch.
+  The old Leach-style law began conducting at exactly `Vgk = 0` and returned
+  a hard zero below it, so the negative-grid region was structurally absent —
+  measured tubes pass 12–19 µA at `Vgk = 0` and reach the 0.3 µA datasheet
+  criterion around −0.3 V. Default is D&Z Table 1 row RSD-1
+  (`Gg=6.177e-4, ξ=1.314, Cg=9.901`), one named row rather than an average.
+
+  **This changes generated DSP for every circuit containing a triode**, and it
+  is a breaking `.model` change: `VGK_ONSET` and `IG_MAX` are *refused* on
+  triode cards, with the conversion to the new parameters printed. They are
+  still honoured on pentodes, whose control-grid law is unchanged.
+
+- **Throughput on triode circuits is 14–29 % lower** as a direct result: a
+  softplus is evaluated on the grid dimension at every Newton iteration where
+  the old law short-circuited to zero. Measured on one box against the
+  immediately preceding commit — 12AX7 stage 216.7× → 153.2×, tweed amp
+  22.3× → 18.3×, passive tube EQ 24.0× → 20.6× realtime. Accuracy over speed,
+  as always, but the bill is real and here it is.
+
+### Fixed
+
+- `analyze` reported **phase with the sign inverted** (`bfaa707`): an RC
+  low-pass read `+45°` at its cutoff where the standard result is `−45°`, and a
+  CR high-pass the reverse. The two `atan2` arguments were swapped, so every
+  `phase_deg` melange has ever printed is the negation of the right answer.
+  Magnitudes were never affected. Any pinned `phase_deg` checkpoint will flip
+  sign on its next re-pin — that is the fix arriving, not a regression.
+- Generated triode code emitted a spurious rustc `unused_parens` warning
+  (`b46c171`). Generated output is otherwise unchanged.
+- Two 12AX7 fixtures in the shot-noise validation suite had **grid and plate
+  swapped** (`02b6e66`), and the assertion that read them was miswired to
+  match, so the pair passed while measuring a tube biased through its grid
+  from +250 V. Emitted Γ² now agrees with the independent
+  `10kT₀gm/(2qIp)` prediction to four figures.
+
+### Documentation
+
+- Performance figures **re-measured 2026-09-24** across all seven published
+  rows, with per-row attribution for the four that moved (README,
+  `docs/limitations.md`, `docs/architecture.md`, `docs/aidocs/STATUS.md`). The
+  Wurlitzer row's fall, 56× → 43.8×, is a **deck** revision of 2026-09-16, not
+  a compiler regression; the pre-revision deck still reads 52.9× on the same
+  0.1.5 binary the 56× was published from.
+- Corrected the provenance sentence under the perf table, which claimed a
+  median of 7 runs where the harness reports best-of-7 (`6f0f738`), and
+  rescued five fixes' reasoning into `docs/aidocs/` before their branches were
+  deleted (`d7741cb`).
+
 ## [0.1.9] - 2026-09-23
 
 Melange was handed to a simulated first-time user — a competent Rust and DSP

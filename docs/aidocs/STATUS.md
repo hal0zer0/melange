@@ -143,7 +143,7 @@ The compiler validation status of circuits known to exercise specific solver pat
 | Linear RC | 2 | 0 | Linear | trivial | Smoke test |
 | 2-stage BJT preamp | 11 | 3-5 | DK | fast | FA detection, 2N5089 Ebers-Moll |
 | 2-stage triode preamp | 13 | 4 | DK | fast | 2× 12AX7, pot + switch |
-| 4-tube passive EQ + 3 xfmrs | 52 | 8 | Nodal full LU | ~24× | Chord + cross-timestep + sparse LU |
+| 4-tube passive EQ + 3 xfmrs | 52 | 8 | Nodal full LU | ~21× | Chord + cross-timestep + sparse LU |
 | 8-BJT Class AB power amp | 20 | 9-16 | DK/Nodal | 0.4× / 0.04× | Parasitic R, FA detection |
 | 4-opamp + diode clipper | 44 | 10 | Nodal full LU (auto) | — | ActiveSetBe auto for clean clipping; BoyleDiodes diverges at heavy clip |
 | Op-amp overdrive + diodes | — | — | DK | — | TS808-class clipping |
@@ -256,10 +256,11 @@ Source: Sowter DWG E-72,658-2 (amp §) + Peerless/Triad winding data.
 
 ## Performance
 
-**Re-measured 2026-08-25** on an AMD Ryzen 9 7950X (single core, noiseless, `-C target-cpu=x86-64-v3`, via `tools/perf-harness/bench.sh`); host-dependent. The earlier figures below were largely fabricated/stale — see `memory/perf_numbers_measured_2026_08_25.md`. Measured: nonlinear audio circuits ≈9–65× RT; light stages hundreds× (single 12AX7 ~230×); trivial linear ~2700×.
+**Re-measured 2026-09-24** on an AMD Ryzen 9 7950X pinned to one CCD (single core, noiseless, `-C target-cpu=x86-64-v3`, via `tools/perf-harness/bench.sh`); host-dependent. Figures predating 2026-08-25 were largely fabricated/stale — see `memory/perf_numbers_measured_2026_08_25.md`. Measured: nonlinear audio circuits ≈7–60× RT; light stages ~153× (single 12AX7); trivial linear ~2960× (7.0 ns/sample).
 
-- Passive EQ (N=52, M=8, 3 xfmrs, nodal full LU): **~24×** realtime
-- Wurlitzer preamp (2 BJT, full GP): ~56× · Tweed 5F1 amp: ~23× · overdrive pedal: ~64× · bus comp (full, 12 op-amps + 2 VCAs): **~7.1×** (re-measured `d641457`, 2026-09-03; the earlier ~9× predated that pass)
+- Passive EQ (N=52, M=8, 3 xfmrs, nodal full LU): **~20.6×** realtime (1009 ns/sample)
+- Wurlitzer preamp (2 BJT, full GP): ~43.8× · Tweed 5F1 amp: ~18.3× · overdrive pedal: ~60.3× · Ge diode network: ~11.5× · bus comp (full, 12 op-amps + 2 VCAs): **~7.0×**
+- **What moved since the 2026-09-03 table**, all attributed on the same box: the three TRIODE rows lost 14–29 % to the Dempwolf & Zölzer grid-current law (`30915fb`) — 12AX7 216.7→153.2, tweed 22.3→18.3, passive EQ 24.0→20.6, each measured against the commit immediately before it. The Wurlitzer row (56→43.8) is a DECK revision of 2026-09-16, not a compiler regression: the pre-revision deck still reads 52.9× on the 0.1.5 binary that published the 56×. Everything else reproduces within −6 % to +2 % on the old binary, which is this bench's honest width on this host.
 - VCA compressor (N=21, M=3, nodal full LU): ~42× realtime *(not re-measured 2026-08-25)*
 - 8-BJT Class AB power amp (DK M=9): 0.4× realtime *(not re-measured; parasitic-R limited; K_eff approach planned)*
 
@@ -282,7 +283,7 @@ Circuit netlists live in a separate repository (public repo going to GitLab; unp
 start in `unstable/`; promotion to `stable/` requires user DAW sign-off (SPICE correlation
 and compilation are necessary but not sufficient).
 
-- **Passive tube EQ** (passive-eq1a): 4 tubes, 3 transformers, 7 pots, 3 switches, global NFB. Amp § from Sowter DWG E-72,658-2. N=52, M=8; ~24× RT on nodal full LU. Flat ±1 dB 20Hz–15kHz, 21 dB differential NFB.
+- **Passive tube EQ** (passive-eq1a): 4 tubes, 3 transformers, 7 pots, 3 switches, global NFB. Amp § from Sowter DWG E-72,658-2. N=52, M=8; ~21× RT on nodal full LU. Flat ±1 dB 20Hz–15kHz, 21 dB differential NFB.
 - **Wurlitzer 200A preamp** (wurli-preamp): N=11, M=3–5 FA, 2N5089 Ebers-Moll. SPICE-validated 6-nines, 3.2% RMS.
 - **Wurlitzer 200A power amp** (wurli-power-amp): N=20, M=9–16 FA, quasi-complementary class AB. DK codegen 0.4× RT, nodal 0.04×.
 - **Tweed-style 2-stage 12AX7 preamp** (twas-preamp): N=13, M=4. 50 mV → 549 mV (+20.8 dB). Zero NR divergence.
