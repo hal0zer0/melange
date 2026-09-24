@@ -623,8 +623,17 @@ fn main() {{
         let gain = if in_mag > 1e-30 {{ out_mag / in_mag }} else {{ 0.0 }};
         let gain_db = if gain > 1e-30 {{ 20.0 * gain.log10() }} else {{ -200.0 }};
 
-        let out_phase = (2.0 * sum_sin[0] / n).atan2(2.0 * sum_cos[0] / n);
-        let in_phase = (2.0 * sum_in_sin / n).atan2(2.0 * sum_in_cos / n);
+        // Correlating x(t) = A*sin(wt + phi) against sin(wt) gives (A/2)*cos(phi)
+        // and against cos(wt) gives (A/2)*sin(phi). So sum_sin carries the COSINE
+        // part and sum_cos the SINE part, and atan2 must be called as
+        // atan2(sine_part, cosine_part) = atan2(sum_cos, sum_sin) to recover phi.
+        // Passing them the other way round yields (pi/2 - phi), whose difference
+        // between output and input is -(phi_out - phi_in) — a sign-inverted phase.
+        // That was the behaviour up to and including 0.1.9: an RC low-pass read
+        // +45 deg at its cutoff where every other tool reads -45. Reported by
+        // melange-circuits with a known-answer probe (robogogo thread 516).
+        let out_phase = (2.0 * sum_cos[0] / n).atan2(2.0 * sum_sin[0] / n);
+        let in_phase = (2.0 * sum_in_cos / n).atan2(2.0 * sum_in_sin / n);
         let phase_diff = (out_phase - in_phase).to_degrees();
 
         if HARMONICS == 0 {{
