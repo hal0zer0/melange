@@ -564,7 +564,7 @@ changed.
 ### Performance
 
 - **Cross-sample LRU cache for the nodal-ssf Schur triple** — six-stage glow
-  divider decks (e.g. the Philicorda note boards) reuse the Schur factorization
+  divider decks (openphilicorda's six-stage 563 divider deck at 192 kHz / 4x oversampling, measured by openphilicorda 2026-09-14 over v0.1.7's per-sample memo, bit-identical across a 384 000-sample lockstep; the gain is deck k-structure dependent and a k=32 note-board variant gains only 1.28x) reuse the Schur factorization
   across host samples instead of rebuilding it, measured at ~2.49× on a
   six-stage deck. Bit-identical output; gated behind `--subsample-fire`, so
   non-glow and non-ssf circuits emit byte-identical code.

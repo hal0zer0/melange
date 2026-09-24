@@ -227,7 +227,7 @@ A sample of what it handles, with **measured** single-core throughput:
 | Overdrive pedal | op-amp gain + diode clipper | op-amp + 2 diodes | 64× |
 | 12AX7 gain stage | single triode stage | 1 triode | 230× |
 
-\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), median of 7 × 2M samples. Measured on an AMD Ryzen 9 7950X with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh). Re-measured 2026-09-02. Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass tops out near 2700×.
+\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), best of 7 × 2M samples. Measured on an AMD Ryzen 9 7950X with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh). Re-measured 2026-09-02. Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass tops out near 2700×.
 
 Each row names the deck it was measured on, so the numbers have an address. Reproducing them is another matter: **only the passive tube EQ row can be re-measured from a clean clone today** — it ships in-tree as `examples/passive-eq1a.cir`, so `bench.sh <label> <path-to.cir>` will re-run it on your hardware. The other six decks live in the circuits repository, which is not yet published. Naming them is provenance, not an invitation.
 

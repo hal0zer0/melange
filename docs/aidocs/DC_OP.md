@@ -222,7 +222,7 @@ Uses `DeviceSlot` params from `codegen::ir`:
   - `Id = sign * KP * f(Vgs, Vds, Vt) * (1 + lambda*|Vds|)`, `Ig = 0`
   - N-channel (sign=+1) / P-channel (sign=-1)
 - **Tube**: 2D Koren plate current (with Early-effect lambda) + Leach grid current
-  - `Ip = Ip_koren * (1 + lambda*Vpk)` where `Ip_koren = E1^ex / Kg1`; `Ig = ig_max * (vgk/vgk_onset)^1.5` for vgk > 0
+  - `Ip = Ip_koren * (1 + lambda*Vpk)` where `Ip_koren = E1^ex / Kg1`; `Ig = Gg * (softplus(Cg*vgk)/Cg)^xi` (D&Z eq. 11, conducts at every vgk)
 - **Clamping**: `safe_exp(x) = x.clamp(-40, 40).exp()` matching codegen/runtime
 
 ## API

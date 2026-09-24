@@ -437,7 +437,7 @@ that must run at several host rates has to be compiled per rate.
 
 ### Performance Benchmarks
 
-Measured on an AMD Ryzen 9 7950X, single core, noiseless, `-C target-cpu=x86-64-v3` (median of 7 × 2M samples via `tools/perf-harness/bench.sh`); throughput is host-dependent.
+Measured on an AMD Ryzen 9 7950X, single core, noiseless, `-C target-cpu=x86-64-v3` (best of 7 × 2M samples via `tools/perf-harness/bench.sh`); throughput is host-dependent.
 
 - Light nonlinear circuits: 12AX7 gain stage ~230×, overdrive pedal (1 op-amp + 2 diodes) ~64× realtime
 - Germanium diode network (6 Ge diodes) ~12× realtime

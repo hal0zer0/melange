@@ -125,7 +125,7 @@ M=1 direct, M=2 Cramer's, M=3..24 Gaussian elimination with partial pivoting.
 
 | Path | When Selected | Cost | Notes |
 |------|--------------|------|-------|
-| DK Schur | M<10, ≤1 xfmr, K well-conditioned | O(N²+M³)/sample | 100-600× realtime |
+| DK Schur | M<10, ≤1 xfmr, K well-conditioned | O(N²+M³)/sample | *(no measured figure — see README table)* |
 | Nodal Schur | M≥10 or 2+ xfmr, K well-conditioned | O(N²+M³)/sample | Medium-complexity circuits |
 | Nodal full LU | K≈0 (VCA), positive K diag, K ill-cond | O(N³)/sample | Matches runtime exactly |
 
@@ -291,7 +291,12 @@ and compilation are necessary but not sufficient).
 - **Klon Centaur**: ActiveSetBe auto-route (verified amp=[0.01..0.50]). BoyleDiodes opt-in only (heavy-clip divergence at amp ≥ 0.05 unsolved — not a blocker, see DEBUGGING.md).
 - **Tube-Screamer-style overdrive** / guitar pedals: stable.
 - **Pentode stages**: EL84 single stage, Tweed Deluxe (6V6GT beam tetrode), 6K7 varimu, Plexi (4×EL34; grid-off M=18→14 only under `--tube-grid-fa on` — full 3D by default routes it nodal). ngspice-validated full-3D (2026-09-04): twill-deluxe 0.063%, el84-single-stage 0.233%, noyce-6bq5 0.060%, noyce-ef86 0.060%.
-- **Uniquorn v2**: 16-stage cascade (N=64, M=12, ~3× RT mono) + push-pull power (N=23, M=6, ~15× RT).
+- **Uniquorn v2**: 16-stage cascade + push-pull power. ⚠️ The dimensions and throughput figures
+  once quoted here (N=64/M=12/~3× RT; N=23/M=6/~15× RT) are UNSUPPORTED and have been
+  removed: no `uniquorn*.cir` exists in melange-circuits, so there is no deck to attribute
+  them to and they cannot be re-measured. Do not reconstruct them from the stale generated
+  `.rs` artifacts. Survivors of the 2026-08-25 fabricated-figure sweep, which removed them
+  from README and limitations but missed this file.
 
 ## Pending Work
 

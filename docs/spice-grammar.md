@@ -426,8 +426,10 @@ P2 plate2 grid2 cath2 scr2 sup2 EF86
   `T` element's grid-plate-cathode order. Use the order that matches
   your tube: `T` for existing triode netlists, `P` for new pentode work.
 - 9 fitted Derk parameters per tube: μ, Ex, Kg1, Kg2, Kp, Kvb, αs, A, β
-  (plus optional `IG_MAX`, `VGK_ONSET`, `CCG`, `CGP`, `CCP`, `RGI`
-  which behave identically to the triode form).
+  (plus optional `IG_MAX`, `VGK_ONSET`, `CCG`, `CGP`, `CCP`, `RGI`).
+  NOTE: `IG_MAX` / `VGK_ONSET` are pentode-only now — the pentode control
+  grid keeps the Leach law, while a triode's `IG_MAX` / `VGK_ONSET` are
+  RETIRED and refused. See `docs/aidocs/DEVICE_MODELS.md`.
 - **αs must be strictly positive** — Derk with αs=0 degenerates to
   Ip=0 identically. The validator rejects `.model … VP(ALPHA_S=0)`.
 - Catalog aliases (use these instead of inline `.model VP(...)` for
@@ -718,14 +720,33 @@ Level 1 SPICE model with triode + saturation regions. When `GAMMA` > 0, body eff
 | `KP` | 600 | Koren Kp coefficient |
 | `KVB` | 300 | Koren Kvb knee shaping coefficient |
 | `LAMBDA` | 0.0 V⁻¹ | Plate resistance modulation (Early effect) |
-| `IG_MAX` | 2e-3 A | Maximum grid current |
-| `VGK_ONSET` | 0.5 V | Grid current onset voltage |
+| `GG` | 6.177e-4 | D&Z eq. (11) grid perveance (A/V^XI) |
+| `XI` | 1.314 | D&Z eq. (11) grid exponent |
+| `CG` | 9.901 V⁻¹ | D&Z eq. (11) grid adaption factor (turn-on sharpness) |
 | `CCG` | 0 F | Cathode-grid capacitance |
 | `CGP` | 0 F | Grid-plate capacitance |
 | `CCP` | 0 F | Cathode-plate capacitance |
 | `RGI` | 0 Ω | Grid internal resistance |
 
-Uses the Koren plate current model (soft-knee saturation) with Leach power-law grid current. The five core parameters (MU, EX, KG1, KP, KVB) are tube-specific — look up values for your specific tube type (12AX7, 12AU7, etc.).
+Uses the Koren plate current model (soft-knee saturation) with the Dempwolf &
+Zölzer DAFx-11 eq. (11) grid current, `Ig = GG*(ln(1+e^(CG*Vgk))/CG)^XI`. The
+five core plate parameters (MU, EX, KG1, KP, KVB) are tube-specific — look up
+values for your specific tube type (12AX7, 12AU7, etc.).
+
+The grid law **conducts below Vgk = 0**, as real tubes do (12–19 µA at 0 V,
+reaching the 0.3 µA datasheet criterion around −0.3 V), so there is no onset
+parameter: turn-on sharpness is `1/(XI*CG)` and magnitude is `GG`. melange
+reports the derived 0.3 µA starting point at compile time and warns if it falls
+outside the tube type's published manufacturer limit.
+
+> **RETIRED: `IG_MAX` and `VGK_ONSET`.** They parameterised the older Leach grid
+> law, which began conducting at exactly Vgk = 0 and returned 0 A for every
+> negative grid voltage. Both keys are now a hard error on a `TRIODE` card, with
+> the conversion printed: the Leach law is the `XI = 1.5`, `CG → ∞` limit of eq.
+> (11), so `GG = IG_MAX / VGK_ONSET^1.5`, `XI = 1.5`, and a large `CG`
+> (e.g. `1e3`) reproduces the old curve exactly if you want it deliberately.
+> They remain valid on a `PENTODE`/`VP` card, whose control grid still carries
+> the Leach law — see `docs/aidocs/DEVICE_MODELS.md`.
 
 > **Resolution order and a silent-default caveat.** For each parameter the
 > resolver takes, in order: (1) an explicit value on the `.model` card,

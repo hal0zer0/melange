@@ -115,7 +115,15 @@ in a single NR step. Adaptive step limits scale with distance from threshold.
 | BJT | pnjlim(Vbe, vold, vt, vcrit) | pnjlim(Vbc, vold, vt, vcrit) |
 | JFET | fetlim(Vds, vold, 0.0) | fetlim(Vgs, vold, Vp) |
 | MOSFET | fetlim(Vds, vold, 0.0) | fetlim(Vgs, vold, Vt) |
-| Tube | pnjlim(Vgk, vold, vgk_onset/3, vcrit) | fetlim(Vpk, vold, 0.0) |
+| Triode | pnjlim(Vgk, vold, 1/Cg, vcrit) | fetlim(Vpk, vold, 0.0) |
+| Pentode | pnjlim(Vgk, vold, vgk_onset/3, vcrit) | fetlim(Vpk, vold, 0.0) |
+
+The grid `vt` is the grid law's own turn-on width: `1/Cg` for the Dempwolf &
+Zölzer triode law (the adaption factor is a reciprocal voltage, exactly the role
+`n·Vt` plays for a diode — 0.101 V at the shipped default), `vgk_onset/3` for
+the Leach pentode control grid. `DEVICE_n_VCRIT` is derived from the same scale;
+`helpers::tube_grid_vt_expr` emits the matching runtime expression and the two
+must agree.
 
 ## Scalar Damping Factor (Alpha)
 
