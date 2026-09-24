@@ -1843,7 +1843,7 @@ const TRIODE_NO_PARTITION_SPICE: &str = "\
 Rin in 0 1Meg
 Cin in grid 100n
 Rg grid 0 1Meg
-T1 plate grid cathode 12AX7
+T1 grid plate cathode 12AX7
 Rk cathode 0 1.5k
 Ck cathode 0 22u
 Rp vcc plate 100k
@@ -3155,7 +3155,7 @@ const TRIODE_SHOT_FULL_OVERRIDE_SPICE: &str = "\
 Rin in 0 1Meg
 Cin in grid 100n
 Rg grid 0 1Meg
-T1 plate grid cathode 12AX7
+T1 grid plate cathode 12AX7
 Rk cathode 0 1.5k
 Ck cathode 0 22u
 Rp vcc plate 100k
@@ -3193,7 +3193,12 @@ fn triode_plate_shot_space_charge_smoothing() {
             circuit_name: name.to_string(),
             sample_rate: sr,
             input_node: 0,
-            output_nodes: vec![1],
+            // Node 5 = `out`, the stage's AC-coupled output. It has to be a
+            // node the plate-shot source actually drives, which rules out the
+            // grid (node 1) this used to read, and it has to be AC-coupled:
+            // measured at the bare plate (node 2) the ~154 V DC level's settling
+            // drift survives mean subtraction and skews assertion (2) by ~13 %.
+            output_nodes: vec![5],
             input_resistance: 1.0,
             dc_block: false,
             noise_mode: NoiseMode::Full,
