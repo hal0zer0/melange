@@ -22,7 +22,7 @@ use crate::codegen::ir::{CircuitIR, DeviceParams};
 pub(super) fn tube_grid_vt_expr(params: &DeviceParams, dev_num: usize) -> String {
     match params {
         DeviceParams::Tube(tp) if !tp.is_pentode() => {
-            format!("(1.0 / state.device_{dev_num}_cg)")
+            format!("1.0 / state.device_{dev_num}_cg")
         }
         _ => format!("state.device_{dev_num}_vgk_onset / 3.0"),
     }
