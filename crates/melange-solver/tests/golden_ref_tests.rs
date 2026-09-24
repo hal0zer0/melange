@@ -283,6 +283,14 @@ fn golden_triode_cc_small_sine_500hz() {
 /// CircuitSolver via record_golden_refs.rs. It was re-recorded 2026-07-18
 /// after restoring the missing ×2 in the Koren triode plate-current
 /// equation (Ip = 2·E1^EX/KG1); the old file asserted the halved currents.
+/// Re-recorded again 2026-09-24 for the Dempwolf & Zölzer grid-current law
+/// (`30915fb`): the old law returned Ig ≡ 0 for Vgk ≤ 0, so the grid drew
+/// nothing at this bias; the softplus law draws a small but nonzero current
+/// through Rg all the way down. Max |old − new| = 3.09e-3 V on a ±10 V
+/// clamped waveform (0.03 %). The ngspice-referenced transfer-curve gate
+/// (`golden_triode_cc_small_sine_500hz`) and the +35.3573 dB pinned-gain
+/// tripwire both still pass unchanged, which is what says the new waveform
+/// is the corrected one and not a drift.
 #[test]
 #[ignore]
 fn record_triode_cc_sine_500hz_codegen() {
@@ -295,6 +303,6 @@ fn record_triode_cc_sine_500hz_codegen() {
         TRIODE_CC,
         &output,
         1e-4,
-        "codegen_dk (2026-07-18, Koren x2 fix)",
+        "codegen_dk (2026-09-24, D&Z grid-current law)",
     );
 }
