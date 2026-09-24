@@ -2,11 +2,23 @@
 
 Quick-reference for AI agents. For math details see other aidocs. For architecture see CLAUDE.md.
 
-> **Latest release: v0.1.8 (`release/v0.1.8`, off `d4f67ad`, 2026-09-14)** — correctness+perf patch:
-> KCL-residual DC-op acceptance gate, parasitic-BJT `A_neg` history fix (63× spurious noise removed),
-> `rho_be`-gated backward-Euler auto-promotion, nodal-ssf Schur-triple LRU cache (~2.49× on six-stage glow),
-> rustls advisory bump. Generated audio byte-identical to v0.1.7 for every existing circuit (golden 168/168).
+> **Latest release: v0.1.9 (`e437c7f`, tag pushed 2026-09-23)** — the fail-loud / first-user
+> release. A mistyped node name used to compile clean and render silence; a `.model` typo in the
+> wrong command said nothing; `validate` would report a confident correlation between two circuits
+> that were not the same circuit, three separate ways. All refused now. One change alters generated
+> DSP: `8b5bd45` drops a double-counted `N_I · i_nl_prev` from the backward-Euler fallback RHS.
 > See CHANGELOG and `docs/aidocs/DEBUGGING.md`.
+>
+> **UNRELEASED work sits on local `main`, 8 commits ahead of `origin/main`** (a push to origin/main
+> IS a release, so it is held). Headline: the **Dempwolf & Zölzer triode grid-current law**
+> (`30915fb`) — `Ig = Gg·(softplus(Cg·Vgk)/Cg)^ξ`, evaluated for ALL Vgk. **This changes generated
+> DSP for every circuit containing a triode**, and `VGK_ONSET`/`IG_MAX` are now REFUSED on triode
+> `.model` cards (still honoured on pentodes). Costs 14–29 % throughput on triode decks. Also:
+> `analyze`'s `phase_deg` sign fix, a codegen warning fix, and a full performance re-measurement.
+>
+> **The grid law is shipped but ungraded** — the out-of-sample ECC83 `V_o` acceptance run and the
+> per-tube-type onset WARN are specified in `.claude/release-docs/FOLLOWUPS.md` and NOT started.
+> It is a better-founded law that nothing has yet falsified; that is not the same as a validated one.
 
 > **2026-07-18 accuracy campaign (commits `3e246cb`, `5159b8c`, `fde289a`, `b421358`, `8056f95` — all six review chunks complete):** a
 > full-codebase accuracy review fixed, among others: op-amp VCCS polarity (was
