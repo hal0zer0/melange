@@ -100,8 +100,20 @@ For transformer groups, full inductance sub-matrix:
 This gives A[k][k] = 2L/T (large, well-conditioned) instead of T/(2L) (tiny).
 A_neg handles all trapezoidal history — no separate inductor history injection needed.
 
-**A_neg zeroing**: Only VS/VCVS/ideal_xfmr rows (n_nodes..n_aug) are zeroed.
+**A_neg zeroing**: Only the *algebraic constraint/branch* rows in `n_nodes..n_aug`
+are zeroed — they carry no capacitance, so they have no trapezoidal history.
 Inductor rows (n_aug..n_nodal) keep their values (they have real history).
+
+> **⚠️ `n_nodes..n_aug` is NOT uniformly algebraic — do not zero the whole range.**
+> `expand_bjt_internal_nodes` appends **parasitic-BJT internal nodes** after the
+> algebraic rows, growing `n_aug`. Those are *physical* nodes with real G and C
+> stamps and **must keep their trapezoidal history** (`A_neg = αC − G`). Zeroing
+> them makes the DC OP not a trapezoidal fixed point, and the first trap step
+> kicks the capacitor-less collector row into a `z = −1` limit cycle. See
+> `MnaSystem::n_aug`'s doc comment (`mna.rs`), the `is_bjt_internal` mask, and
+> the DEBUGGING.md failure-signature row for the 63× noise inflation this caused.
+> This page previously stated the blanket rule, which is how one implementation
+> came to do it; the spec was right in `mna.rs` and wrong here.
 
 **DC OP**: The DC OP solver uses its own augmented inductor system with the same
 variable ordering. v_node from DC OP includes inductor DC branch currents at
