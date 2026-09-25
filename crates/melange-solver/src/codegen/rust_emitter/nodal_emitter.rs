@@ -1539,7 +1539,14 @@ impl RustEmitter {
     pub(super) fn emit_nodal(
         &self,
         ir: &CircuitIR,
-    ) -> Result<(String, crate::codegen::NodalSubPath), CodegenError> {
+    ) -> Result<
+        (
+            String,
+            crate::codegen::NodalSubPath,
+            Option<&'static str>,
+        ),
+        CodegenError,
+    > {
         let mut code = String::new();
 
         // Compute use_full_nodal flag FIRST — needed by emit_nodal_state for hot/cold split.
@@ -2076,7 +2083,16 @@ impl RustEmitter {
         } else {
             crate::codegen::NodalSubPath::Schur
         };
-        Ok((code, sub_path))
+        // Carry the trigger out with the decision. Reporting the route without
+        // the reason invites the reader to supply one, and the CLI did exactly
+        // that: it printed the nodal spectral radius as the deciding value for
+        // every full-LU route, including the ones a radius had no part in.
+        let trigger = if full_lu_trigger.is_empty() {
+            None
+        } else {
+            Some(full_lu_trigger)
+        };
+        Ok((code, sub_path, trigger))
     }
 
     /// Emit constants section for nodal solver.

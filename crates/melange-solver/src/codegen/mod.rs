@@ -862,13 +862,21 @@ pub struct CodegenMeta {
     /// pin it, so a change that silently moved a circuit between sub-paths was
     /// undetectable.
     pub nodal_sub_path: Option<NodalSubPath>,
-    /// The nodal trap `spectral_radius_s_aneg` that GOVERNED the Schur/full-LU
-    /// decision (`Some` sub-path only; 0.0 on the DK path). Distinct from
-    /// [`Self::backward_euler_spectral_radius`] and from the DK-kernel
-    /// `routing.spectral_radius` printed elsewhere — on a nodal deck the latter
-    /// is NOT the value that chose the sub-path, which misled a reader (arbiter
-    /// t467 #4). Reported so the number sits next to the route it decided.
+    /// The nodal trap `spectral_radius_s_aneg` (`Some` sub-path only; 0.0 on the
+    /// DK path). Distinct from [`Self::backward_euler_spectral_radius`] and from
+    /// the DK-kernel `routing.spectral_radius` printed elsewhere.
+    ///
+    /// ⚠️ It is ONE of several full-LU triggers, not the decision. This doc and
+    /// the CLI line built on it both used to say it "GOVERNED" the sub-path, and
+    /// that was false wherever another predicate fired first — `steve-1073-preamp`
+    /// routes full-LU on `s-ill-conditioned` (max|S| = 5.00e8) at rho = 0.9879,
+    /// which is below every rho threshold and decided nothing. Read
+    /// [`Self::nodal_full_lu_trigger`] for what actually fired; this is context.
     pub nodal_spectral_radius: f64,
+    /// WHICH predicate sent this circuit to full-LU, named by the emitter's own
+    /// chain (`s-ill-conditioned`, `positive-k`, `k-degenerate`, `override`, …).
+    /// `None` on DK and on Schur. Emitter-reported, never re-derived here.
+    pub nodal_full_lu_trigger: Option<&'static str>,
 }
 
 /// Build the codegen metadata block from the finished IR. Shared by the
@@ -878,6 +886,7 @@ fn build_codegen_meta(
     ir: &CircuitIR,
     parasitic_caps_inserted: bool,
     nodal_sub_path: Option<NodalSubPath>,
+    nodal_full_lu_trigger: Option<&'static str>,
 ) -> CodegenMeta {
     let backward_euler_auto = ir.integrator_selection == ir::IntegratorSelection::BeAuto;
     CodegenMeta {
@@ -902,6 +911,7 @@ fn build_codegen_meta(
         } else {
             0.0
         },
+        nodal_full_lu_trigger,
     }
 }
 
@@ -1065,13 +1075,19 @@ impl CodeGenerator {
         let ir = CircuitIR::from_kernel_with_dc_op(kernel, mna, netlist, &self.config, dc_op)?;
         let emitted: EmitOutput = select_emitter()?.emit(&ir)?;
         let nodal_sub_path = emitted.nodal_sub_path;
+        let nodal_full_lu_trigger = emitted.nodal_full_lu_trigger;
         let code = emitted.primary().to_string();
 
         Ok(GeneratedCode {
             code,
             n: ir.topology.n,
             m: ir.topology.m,
-            meta: build_codegen_meta(&ir, parasitic_caps_inserted, nodal_sub_path),
+            meta: build_codegen_meta(
+                &ir,
+                parasitic_caps_inserted,
+                nodal_sub_path,
+                nodal_full_lu_trigger,
+            ),
         })
     }
 
@@ -1246,13 +1262,19 @@ impl CodeGenerator {
         let ir = CircuitIR::from_mna(mna, netlist, &self.config)?;
         let emitted: EmitOutput = select_emitter()?.emit(&ir)?;
         let nodal_sub_path = emitted.nodal_sub_path;
+        let nodal_full_lu_trigger = emitted.nodal_full_lu_trigger;
         let code = emitted.primary().to_string();
 
         Ok(GeneratedCode {
             code,
             n: ir.topology.n,
             m: ir.topology.m,
-            meta: build_codegen_meta(&ir, parasitic_caps_inserted, nodal_sub_path),
+            meta: build_codegen_meta(
+                &ir,
+                parasitic_caps_inserted,
+                nodal_sub_path,
+                nodal_full_lu_trigger,
+            ),
         })
     }
 }

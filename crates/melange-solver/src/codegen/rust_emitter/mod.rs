@@ -103,10 +103,11 @@ impl Emitter for RustEmitter {
 
     fn emit(&self, ir: &CircuitIR) -> Result<super::emitter::EmitOutput, CodegenError> {
         self.validate(ir)?;
-        let (code, sub_path) = self.emit_inner(ir)?;
+        let (code, sub_path, full_lu_trigger) = self.emit_inner(ir)?;
         Ok(
             super::emitter::EmitOutput::single("circuit.rs", collapse_blank_lines(&code))
-                .with_nodal_sub_path(sub_path),
+                .with_nodal_sub_path(sub_path)
+                .with_nodal_full_lu_trigger(full_lu_trigger),
         )
     }
 }
@@ -144,13 +145,20 @@ impl RustEmitter {
     fn emit_inner(
         &self,
         ir: &CircuitIR,
-    ) -> Result<(String, Option<super::NodalSubPath>), CodegenError> {
+    ) -> Result<
+        (
+            String,
+            Option<super::NodalSubPath>,
+            Option<&'static str>,
+        ),
+        CodegenError,
+    > {
         use super::ir::SolverMode;
         match ir.solver_mode {
-            SolverMode::Dk => Ok((self.emit_dk(ir)?, None)),
+            SolverMode::Dk => Ok((self.emit_dk(ir)?, None, None)),
             SolverMode::Nodal => {
-                let (code, sp) = self.emit_nodal(ir)?;
-                Ok((code, Some(sp)))
+                let (code, sp, trigger) = self.emit_nodal(ir)?;
+                Ok((code, Some(sp), trigger))
             }
         }
     }

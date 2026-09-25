@@ -2516,15 +2516,28 @@ fn compile_circuit_source(
         // "Nodal NR sub-path" — explicitly the nodal Newton implementation
         // (Schur reduction vs full-LU), distinct from the DK kernel's BJT
         // internal-node expansion, which also says "full LU" (see pipeline.rs).
-        // Print the nodal trap spectral radius that GOVERNED this decision right
-        // next to the route. Without it, the only spectral radius shown is the
-        // DK-kernel one below, which does NOT drive the nodal sub-path — that
-        // mismatch misled a reader into thinking a route was wrong (arbiter t467).
-        println!(
-            "    Nodal NR sub-path: {sp} (nodal Newton; not DK node-expansion; \
-             route decided by nodal spectral radius {:.4})",
-            generated.meta.nodal_spectral_radius
-        );
+        //
+        // Name the predicate that ACTUALLY fired, as the emitter reported it.
+        // This line used to assert "route decided by nodal spectral radius
+        // {rho}" for every full-LU route — which was false whenever a different
+        // predicate fired first, and on `steve-1073-preamp` it named rho = 0.9879
+        // as the deciding value when the trigger was `s-ill-conditioned`
+        // (max|S| = 5.00e8) and 0.9879 is below every rho threshold. A confident
+        // wrong reason is worse than no reason: the line was added to stop a
+        // reader mis-attributing a route (arbiter t467) and then mis-attributed
+        // one itself (arbiter t536). rho stays, as context, labelled as context.
+        match generated.meta.nodal_full_lu_trigger {
+            Some(trigger) => println!(
+                "    Nodal NR sub-path: {sp} (nodal Newton; not DK node-expansion; \
+                 trigger: {trigger}; nodal spectral radius {:.4})",
+                generated.meta.nodal_spectral_radius
+            ),
+            None => println!(
+                "    Nodal NR sub-path: {sp} (nodal Newton; not DK node-expansion; \
+                 nodal spectral radius {:.4})",
+                generated.meta.nodal_spectral_radius
+            ),
+        }
     }
     if routing.spectral_radius > 0.0 {
         // DK-kernel trap operator (routing::compute_spectral_radius) — this is

@@ -29,6 +29,12 @@ pub struct EmitOutput {
     pub files: Vec<EmitFile>,
     /// Nodal sub-path taken, when the circuit routed nodal. `None` on DK.
     pub nodal_sub_path: Option<NodalSubPath>,
+    /// WHY the full-LU sub-path was taken, as the emitter's own predicate chain
+    /// named it (`s-ill-conditioned`, `positive-k`, `override`, …). `None` on DK
+    /// and on Schur. Travels with the decision for the same reason the decision
+    /// travels with the output: a reason recomputed downstream is a second
+    /// source of truth, and the CLI's was wrong.
+    pub nodal_full_lu_trigger: Option<&'static str>,
 }
 
 impl EmitOutput {
@@ -40,11 +46,17 @@ impl EmitOutput {
                 contents,
             }],
             nodal_sub_path: None,
+            nodal_full_lu_trigger: None,
         }
     }
 
     pub fn with_nodal_sub_path(mut self, sp: Option<NodalSubPath>) -> Self {
         self.nodal_sub_path = sp;
+        self
+    }
+
+    pub fn with_nodal_full_lu_trigger(mut self, t: Option<&'static str>) -> Self {
+        self.nodal_full_lu_trigger = t;
         self
     }
 
