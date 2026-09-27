@@ -213,6 +213,30 @@ Base device models run at a fixed nominal 27 °C, with opt-in self-heating (`RTH
 
 Netlists live in a separate repository, sorted into `stable/`, `testing/`, and `unstable/` tiers. Promotion between tiers requires a listening test in a DAW — an actual human, actual monitors, actual ears. Correlation numbers are necessary and they are not sufficient. A circuit can hit eight nines against ngspice and still sound wrong, and if it does, it does not get promoted.
 
+### Compiling one without cloning anything
+
+```bash
+melange sources add melange-circuits https://gitlab.com/oomox-group/melange-circuits/-/raw/main
+melange compile melange-circuits:passive-eq1a --format plugin -o my-eq
+```
+
+The short name is resolved through an index the repository publishes, so a
+circuit keeps working when it is reorganised — promoted from `unstable/` to
+`testing/`, say, which is the whole point of having tiers.
+
+**This is not special-cased for that repository.** Any circuit repo can serve
+one file and be usable the same way:
+
+```bash
+melange index .                  # writes circuits-index.json
+melange index . --check          # CI: fails if it stops matching the tree
+melange sources add joes-pedals https://gitlab.com/joe/pedals/-/raw/main
+melange compile joes-pedals:big-muff --format plugin -o muff
+```
+
+A source that publishes no index still works — melange falls back to
+`<base>/<name>.cir`. Format: [docs/CIRCUIT_INDEX.md](docs/CIRCUIT_INDEX.md).
+
 Melange auto-selects the optimal solver per circuit (DK, Nodal Schur, or Nodal Full LU). Override with `--solver dk` or `--solver nodal` when you disagree with it.
 
 A sample of what it handles, with **measured** single-core throughput:
@@ -231,7 +255,7 @@ A sample of what it handles, with **measured** single-core throughput:
 
 **Four rows moved at the 2026-09-24 re-measurement, and none of it is a mystery.** The three triode rows cost 14–29 % more than they did in 0.1.9's first half: the Dempwolf & Zölzer grid-current law (`30915fb`) evaluates a softplus on the grid dimension at every Newton iteration where the old law returned a hard zero, and that is the price of modelling the negative-grid region at all. Measured on the same box, in the same session, against the commit immediately before it: 12AX7 stage 216.7× → 153.2×, tweed amp 22.3× → 18.3×, passive EQ 24.0× → 20.6×. The Wurlitzer row fell 56× → 43.8× because **the deck changed**, not the compiler — it was revised 2026-09-16 (an extra coupling cap, a rebiased feedback network, `.integrator be`), and the pre-revision deck still measures 52.9× on the same 0.1.5 binary that published the 56×. Re-running that binary today reproduces the other published rows within −6 % to +2 %, which is the honest width of this bench on this host.
 
-Each row names the deck it was measured on, so the numbers have an address. Reproducing them is another matter: **only the passive tube EQ row can be re-measured from a clean clone today** — it ships in-tree as `examples/passive-eq1a.cir`, so `bench.sh <label> <path-to.cir>` will re-run it on your hardware. The other six decks live in the circuits repository, which is not yet published. Naming them is provenance, not an invitation.
+Each row names the deck it was measured on, so the numbers have an address. **Three of the seven can be re-measured from a public clone today** — the passive tube EQ also ships in-tree as `examples/passive-eq1a.cir`. The other four are still private; naming them is provenance, not an invitation. The public set is expected to grow, but I am not promising a date.
 
 | Row | Deck |
 |---|---|
@@ -243,7 +267,11 @@ Each row names the deck it was measured on, so the numbers have an address. Repr
 | Overdrive pedal | `unstable/filters/gold-press-overdrive.cir` |
 | 12AX7 gain stage | `unstable/gimmicks/noyce-triode-12ax7.cir` |
 
-The circuits repository holds the full catalog with per-circuit status. It is not public yet; until it is, six of the seven rows above are numbers you have to take on my word, which is exactly the position I would rather not be in.
+The circuits repository holds the full catalog with per-circuit status:
+
+**https://gitlab.com/oomox-group/melange-circuits**
+
+It is a filtered set — 43 circuits, not everything that exists locally. Of the seven rows above, `4kbuscomp`, `passive-eq1a` and `wurli-preamp` are in it; the other four are not yet. So four of those numbers are still ones you take on my word, which is four fewer than it was.
 
 ## Spotlight: Passive Tube EQ
 

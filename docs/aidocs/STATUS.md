@@ -145,7 +145,7 @@ K≈0 detection: max|K| < 1e-6 with M > 0.
 
 ## Circuit Library Status
 
-Circuits live in a separate repository (locally `../melange-circuits`; public repo going to GitLab, unpublished as of 2026-08-25).
+Circuits live in a separate repository. **Public since 2026-09-27: https://gitlab.com/oomox-group/melange-circuits** (43 circuits — a FILTERED set; the full catalog is the private `melange-circuits-private`, checked out locally at `../melange-circuits`). Short names resolve through the repo's `circuits-index.json`; see `docs/CIRCUIT_INDEX.md`.
 All circuits are in `unstable/` until the user manually tests and approves promotion.
 
 The compiler validation status of circuits known to exercise specific solver paths:
@@ -290,7 +290,7 @@ Source: Sowter DWG E-72,658-2 (amp §) + Peerless/Triad winding data.
 
 ## Validated Circuits
 
-Circuit netlists live in a separate repository (public repo going to GitLab; unpublished as of 2026-08-25)
+Circuit netlists live in a separate repository (public subset at https://gitlab.com/oomox-group/melange-circuits since 2026-09-27; full catalog private)
 (locally `../melange-circuits`). Circuit-specific tests use `.test.toml` sidecars. All circuits
 start in `unstable/`; promotion to `stable/` requires user DAW sign-off (SPICE correlation
 and compilation are necessary but not sufficient).

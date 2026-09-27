@@ -65,14 +65,33 @@ melange-circuits publishes `tier` and `category`; melange reads neither.
 
 ## What the file deliberately does NOT contain
 
-**No commit hash and no timestamp.** They look like provenance and are a trap: a
-self-describing hash is wrong the moment the file is written, so a `--check` job
-would fail on every rebuild, and the only way to keep it green is to regenerate
-on every commit whether or not any circuit moved.
+**No commit hash.** Embedding one is circular — the commit id is not knowable
+until after you commit the file that would contain it, so the field is stale by
+construction. The usual answer is to put a hash *beside* the file rather than
+inside it, and that does dissolve the circularity.
+
+**No sidecar hash either, but for a different reason.** It would not be wrong,
+it just does not earn its keep here. Transport integrity is already HTTPS's job;
+"which version am I looking at" is answered by the ref you fetched from; and a
+second file that must stay in lockstep with the first is a new way to be
+silently stale, which is the exact failure class this format exists to remove.
+If a repository wants one, nothing stops it — consumers ignore what they do not
+recognise.
+
+**No timestamp.** Not because it would break `--check` — it would not, since
+`--check` compares meaning and ignores unknown keys (see below) — but because it
+makes every regeneration a diff even when no circuit moved, and it implies a
+freshness guarantee the file cannot give. The index is only as current as the
+last run of the job that writes it.
 
 The file describes *the tree it sits in*. Its version is the ref you fetched it
-from. (Credit where due: melange-circuits caught this in review of an earlier
-draft that had both fields.)
+from.
+
+(History, since the reasoning matters more than the conclusion: melange-circuits
+argued both fields out of an earlier draft on the grounds that `--check` would
+fail on every rebuild. That was correct against a byte-comparing `--check` — and
+then `--check` became semantic, which retired the argument without retiring the
+conclusion. The conclusion stands on the grounds above instead.)
 
 **No unpublished circuits.** Generate the index from the tree you actually
 publish. Generated from a private tree and copied, it leaks the names of
