@@ -19,10 +19,9 @@ sort decks into directories that encode *status* — `unstable/`, `testing/`,
 that hard-codes `unstable/preamp/foo.cir` breaks the day `foo` is promoted, and
 it breaks with a message about a missing file rather than about a promotion.
 
-That is not hypothetical. On 2026-09-27 a single afternoon of tier promotions in
-melange-circuits broke melange's golden-baseline manifest twice and openwurli's
-netlist-sync test once. An index makes the same promotion invisible to every
-consumer.
+This is not hypothetical: one afternoon of tier promotions is enough to break
+every tool that pinned a path. An index makes the same promotion invisible to
+all of them.
 
 ## The file
 
@@ -78,20 +77,12 @@ silently stale, which is the exact failure class this format exists to remove.
 If a repository wants one, nothing stops it — consumers ignore what they do not
 recognise.
 
-**No timestamp.** Not because it would break `--check` — it would not, since
-`--check` compares meaning and ignores unknown keys (see below) — but because it
-makes every regeneration a diff even when no circuit moved, and it implies a
-freshness guarantee the file cannot give. The index is only as current as the
-last run of the job that writes it.
+**No timestamp.** It makes every regeneration a diff even when no circuit
+moved, and it implies a freshness the file cannot guarantee — the index is only
+as current as the last run of the job that writes it.
 
 The file describes *the tree it sits in*. Its version is the ref you fetched it
 from.
-
-(History, since the reasoning matters more than the conclusion: melange-circuits
-argued both fields out of an earlier draft on the grounds that `--check` would
-fail on every rebuild. That was correct against a byte-comparing `--check` — and
-then `--check` became semantic, which retired the argument without retiring the
-conclusion. The conclusion stands on the grounds above instead.)
 
 **No unpublished circuits.** Generate the index from the tree you actually
 publish. Generated from a private tree and copied, it leaks the names of
@@ -132,13 +123,8 @@ before `circuits`, `path` first within an entry.
 name→path mapping — and ignores keys it does not recognise. It has to: the rule
 above says readers ignore unknown keys, so a repository that enriches its
 entries is conforming, and a byte comparison would hold that against it and go
-permanently red. `melange index --check` accepts melange-circuits' published
-index unchanged, `tier` and `category` included, while melange itself emits
-neither.
-
-(An earlier draft of this document said `--check` byte-compares. That was
-wrong, and it contradicted the paragraph above it; found by running melange's
-generator against the real published file.)
+permanently red. `melange index --check` accepts an index carrying `tier` and
+`category` even though melange emits neither.
 
 ## Serving it
 
