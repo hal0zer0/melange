@@ -174,12 +174,35 @@ impl CacheStats {
 }
 
 /// Fetch content from URL using blocking HTTP client
+/// A 404 from a fetch, distinguishable from a network failure.
+///
+/// The index protocol needs the difference: "this source publishes no index"
+/// (404 -> fall back to a flat layout) is a normal, supported configuration,
+/// while "the network is down" must not be silently reinterpreted as one.
+#[derive(Debug)]
+pub struct NotFound(pub String);
+
+impl std::fmt::Display for NotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: status code 404", self.0)
+    }
+}
+
+impl std::error::Error for NotFound {}
+
 fn fetch_url_sync(url: &str) -> Result<String> {
     use std::io::Read;
 
-    let response = ureq::get(url)
-        .call()
-        .with_context(|| format!("Failed to fetch URL: {}", url))?;
+    let response = match ureq::get(url).call() {
+        Ok(r) => r,
+        Err(ureq::Error::Status(404, _)) => {
+            return Err(anyhow::Error::new(NotFound(url.to_string())));
+        }
+        Err(e) => {
+            return Err(anyhow::Error::new(e))
+                .with_context(|| format!("Failed to fetch URL: {}", url));
+        }
+    };
 
     const MAX_RESPONSE_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
     let mut content = String::new();

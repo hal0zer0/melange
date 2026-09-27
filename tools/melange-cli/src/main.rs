@@ -1739,10 +1739,8 @@ fn compile_circuit_source(
         }
         circuits::CircuitSource::Local { path } => std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read local file: {}", path.display()))?,
-        circuits::CircuitSource::Url { url } | circuits::CircuitSource::Friendly { url, .. } => {
-            println!("  Fetching from URL: {}", url);
-            let cache = cache::Cache::new()?;
-            cache.get_sync(url, false)?
+        src @ (circuits::CircuitSource::Url { .. } | circuits::CircuitSource::Friendly { .. }) => {
+            fetch_remote_circuit(src)?
         }
     };
 
@@ -3054,11 +3052,9 @@ fn validate_circuit_source(
                 let path = tmp.path().to_path_buf();
                 (path, Some(tmp))
             }
-            circuits::CircuitSource::Url { url }
-            | circuits::CircuitSource::Friendly { url, .. } => {
-                println!("  Fetching from URL: {}", url);
-                let cache = cache::Cache::new()?;
-                let content = cache.get_sync(url, false)?;
+            src @ (circuits::CircuitSource::Url { .. }
+            | circuits::CircuitSource::Friendly { .. }) => {
+                let content = fetch_remote_circuit(src)?;
                 let mut tmp = tempfile::Builder::new()
                     .prefix("melange_validate_")
                     .suffix(".cir")
@@ -6384,5 +6380,45 @@ RK cath 0 130
             "after grid-off rebuild BOTH reductions must survive: BJT 1D + pentode 2D \
              (old bug: rebuild dropped FA, giving M=4 while the summary claimed FA)"
         );
+    }
+}
+
+/// Fetch a resolved circuit's content, self-healing a stale index.
+///
+/// A 404 on a path an index gave us means the cached index is stale — the deck
+/// moved tier since we last fetched it. Refetch the index once and retry, so a
+/// promotion self-heals instead of needing `melange cache clear`. Only fires
+/// for indexed sources: an unindexed one re-resolves to the same flat URL and
+/// returns the same 404 without a wasted index request.
+///
+/// Shared by every command that reads a remote circuit, so `compile`,
+/// `simulate` and `validate` cannot drift into disagreeing about it.
+fn fetch_remote_circuit(src: &circuits::CircuitSource) -> Result<String> {
+    let (url, indexed) = match src {
+        circuits::CircuitSource::Url { url } => (url, None),
+        circuits::CircuitSource::Friendly {
+            url,
+            source,
+            circuit,
+        } => (url, Some((source, circuit))),
+        _ => anyhow::bail!("fetch_remote_circuit called on a non-remote source"),
+    };
+    println!("  Fetching from URL: {}", url);
+    let cache = cache::Cache::new()?;
+    match cache.get_sync(url, false) {
+        Ok(c) => Ok(c),
+        Err(e) if e.downcast_ref::<cache::NotFound>().is_some() => {
+            let Some((source, circuit)) = indexed else {
+                return Err(e);
+            };
+            let config = sources::SourcesConfig::load()?;
+            let fresh = config.resolve_circuit_indexed(source, circuit, &cache, true)?;
+            if &fresh == url {
+                return Err(e);
+            }
+            println!("  Index was stale; refetched: {}", fresh);
+            cache.get_sync(&fresh, false)
+        }
+        Err(e) => Err(e),
     }
 }

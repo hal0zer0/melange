@@ -121,7 +121,8 @@ pub fn resolve(circuit_ref: &str) -> Result<CircuitSource> {
     // Try friendly source (source:circuit pattern)
     if let Some((source, circuit)) = parse_friendly_ref(circuit_ref) {
         let config = crate::sources::SourcesConfig::load()?;
-        let url = config.resolve_circuit(&source, &circuit)?;
+        let cache = crate::cache::Cache::new()?;
+        let url = config.resolve_circuit_indexed(&source, &circuit, &cache, false)?;
         return Ok(CircuitSource::Friendly {
             source,
             circuit,
@@ -136,7 +137,8 @@ pub fn resolve(circuit_ref: &str) -> Result<CircuitSource> {
         let config = crate::sources::SourcesConfig::load()?;
         if let Some(default) = config.default_source.clone() {
             if config.has_source(&default) {
-                let url = config.resolve_circuit(&default, circuit_ref)?;
+                let cache = crate::cache::Cache::new()?;
+                let url = config.resolve_circuit_indexed(&default, circuit_ref, &cache, false)?;
                 return Ok(CircuitSource::Friendly {
                     source: default,
                     circuit: circuit_ref.to_string(),

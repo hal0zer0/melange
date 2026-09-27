@@ -7,6 +7,50 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// A source's published `circuits-index.json`. Schema 1: only `path` is
+/// required per entry; unknown keys (`tier`, `category`, future additions) are
+/// ignored by design so the format can grow without breaking older clients.
+#[derive(Debug, Deserialize)]
+pub struct CircuitIndex {
+    #[allow(dead_code)]
+    pub schema: u32,
+    pub circuits: HashMap<String, CircuitIndexEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CircuitIndexEntry {
+    /// Repo-relative path to the `.cir`, relative to the index file.
+    pub path: String,
+}
+
+/// Names within edit distance 2, closest first, at most three. Cheap enough
+/// for an index of this size and it turns a dead end into a next step.
+fn near_matches<'a>(want: &str, have: impl Iterator<Item = &'a String>) -> Vec<&'a str> {
+    let mut scored: Vec<(usize, &str)> = have
+        .filter_map(|h| {
+            let d = edit_distance(want, h);
+            (d <= 2).then_some((d, h.as_str()))
+        })
+        .collect();
+    scored.sort_by_key(|(d, n)| (*d, *n));
+    scored.into_iter().take(3).map(|(_, n)| n).collect()
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
 /// Configuration for a single external circuit source
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceConfig {
@@ -121,6 +165,79 @@ impl SourcesConfig {
     /// Resolve a circuit from a source to a full URL
     ///
     /// Automatically appends `.cir` extension if not present.
+    /// Resolve a circuit name against a source's published index, falling back
+    /// to a flat layout when the source publishes none.
+    ///
+    /// The protocol (agreed with melange-circuits, thread 587; spec in
+    /// `docs/CIRCUIT_INDEX.md`) is deliberately generic — any repository can
+    /// serve one, and melange special-cases nobody:
+    ///
+    /// 1. GET `<base>/circuits-index.json`.
+    /// 2. Present  -> resolve `name` through it to a repo-relative path.
+    /// 3. Absent (404) -> flat `<base>/<name>.cir`, which is what melange did
+    ///    before indexes existed, so unindexed sources keep working.
+    ///
+    /// **Present-but-missing is an ERROR, not a fallback.** An indexed source
+    /// has declared its contents; guessing at `<base>/<typo>.cir` past that
+    /// declaration costs a request and then reports the wrong problem — "not
+    /// found at .../passiveq1a.cir" instead of "that name is not in this
+    /// source; did you mean passive-eq1a?".
+    ///
+    /// `force_index_refresh` re-fetches the index past the cache. The caller
+    /// uses it after a deck 404 on an indexed source, which is how a promotion
+    /// (a deck moving tier) self-heals instead of needing a manual cache clear.
+    pub fn resolve_circuit_indexed(
+        &self,
+        source: &str,
+        circuit: &str,
+        cache: &crate::cache::Cache,
+        force_index_refresh: bool,
+    ) -> Result<String> {
+        let base_url = self.source_base(source)?;
+        let index_url = format!("{}/circuits-index.json", base_url);
+
+        let raw = match cache.get_sync(&index_url, force_index_refresh) {
+            Ok(raw) => raw,
+            Err(e) if e.downcast_ref::<crate::cache::NotFound>().is_some() => {
+                // No index published: flat layout, as before.
+                return self.resolve_circuit(source, circuit);
+            }
+            Err(e) => return Err(e),
+        };
+
+        let index: CircuitIndex = serde_json::from_str(&raw).with_context(|| {
+            format!("{index_url}: not a valid circuits-index.json (see docs/CIRCUIT_INDEX.md)")
+        })?;
+        let name = circuit.strip_suffix(".cir").unwrap_or(circuit);
+
+        match index.circuits.get(name) {
+            Some(entry) => Ok(format!("{}/{}", base_url, entry.path.trim_start_matches('/'))),
+            None => {
+                let near = near_matches(name, index.circuits.keys());
+                let hint = if near.is_empty() {
+                    format!(
+                        "Run `melange sources show {source}` for the source, or browse its \
+                         circuits-index.json ({} circuits).",
+                        index.circuits.len()
+                    )
+                } else {
+                    format!("Did you mean: {}?", near.join(", "))
+                };
+                anyhow::bail!("'{name}' is not in the '{source}' circuit index. {hint}")
+            }
+        }
+    }
+
+    fn source_base(&self, source: &str) -> Result<String> {
+        let c = self.sources.get(source).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Unknown source: '{}'\nUse 'melange sources list' to see available sources.",
+                source
+            )
+        })?;
+        Ok(c.url.trim_end_matches('/').to_string())
+    }
+
     pub fn resolve_circuit(&self, source: &str, circuit: &str) -> Result<String> {
         let source_config = self.sources.get(source).ok_or_else(|| {
             anyhow::anyhow!(

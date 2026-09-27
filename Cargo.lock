@@ -918,6 +918,7 @@ dependencies = [
  "melange-validate",
  "quick-xml",
  "serde",
+ "serde_json",
  "tempfile",
  "toml",
  "ureq",
