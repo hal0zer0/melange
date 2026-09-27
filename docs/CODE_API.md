@@ -109,6 +109,44 @@ file — grep it rather than assuming:
   single `f64`, alongside `NUM_INPUTS` / `INPUT_NODES` / `INPUT_RESISTANCES`;
 - `.inject` / `.tap` decks take an extra injection argument and return a tuple.
 
+## Did the solver actually solve it?
+
+`process_sample` always returns a number. It does not always return a
+*solution*. When every Newton path fails on a sample, the generated code still
+has to emit something, and what it emits is bounded and smooth — so peak, RMS,
+clipping indicators and the waveform on your scope all look entirely healthy.
+**No level-based check can find this.** One counter can.
+
+Exactly one of these is present on `CircuitState`, chosen by the solver route
+the circuit took. Read it after a render, or poll it per block:
+
+| Field | Route | What a nonzero value means |
+|-------|-------|----------------------------|
+| `diag_nr_hold_count` | nodal full-LU | Every path failed and the PREVIOUS sample's state was committed as this sample's output. Under a constant input this is a fixed point: the next sample re-poses the identical problem and fails identically, so the circuit can stay frozen until the input changes. |
+| `diag_nr_unconverged_commit_count` | nodal Schur | Every path failed and the DIVERGED ITERATE was committed. The state still moves, so the solver can recover on its own — but those samples were never solved. |
+
+Neither field exists on DK-routed circuits, and the full-LU field is absent on
+builds with no hold path. That is deliberate: a counter that is always zero
+because the mechanism cannot occur reads as reassurance, so the field is simply
+not there. Check with a `contains` on the generated source, or match on its
+absence.
+
+Both are `u64`, cleared by `reset()`, and free to read on the audio thread.
+
+Treat nonzero as "this render is not trustworthy", not as "quality degraded".
+It is not a rounding error: measured on one deck, 43199 held samples out of
+48000 produced output 22 dB adrift from the converged answer while reporting a
+perfectly respectable −0.50 dBFS peak. A smaller count is not proportionally
+safer — 21 held samples in 96000 still means 21 samples of fiction.
+
+If you are surfacing one number to a user, surface whether it is zero.
+
+The related counters (`diag_nr_max_iter_count`, `diag_be_fallback_count`,
+`diag_substep_count`) are NOT the same claim. A sample that hit the iteration
+ceiling and was then rescued by a sub-step or the backward-Euler fallback is a
+converged solution reached by another consistent scheme. Those counters
+describe how hard the solve was; the two above describe whether it happened.
+
 ## Levels, and the thing that will blow your monitors
 
 `process_sample` returns **volts at the output node**, not a normalized ±1
