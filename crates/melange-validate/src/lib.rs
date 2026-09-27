@@ -1067,14 +1067,22 @@ pub fn run_melange_solver_from_str(
     // hold), so it is spliced in by presence rather than hardcoded — the same
     // rule the CLI's simulate driver uses. Without the guard a DK validation
     // would fail to compile on a field its build never declares.
-    let default_main = if generated.code.contains("diag_nr_hold_count") {
-        default_main.replace(
-            "        eprintln!(\"DIAG:region_exit_count={}\", state.diag_region_exit_count);\n",
-            "        eprintln!(\"DIAG:region_exit_count={}\", state.diag_region_exit_count);\n\
-             \x20       eprintln!(\"DIAG:nr_hold_count={}\", state.diag_nr_hold_count);\n",
-        )
+    let unsolved_field = if generated.code.contains("diag_nr_hold_count") {
+        Some("diag_nr_hold_count")
+    } else if generated.code.contains("diag_nr_unconverged_commit_count") {
+        Some("diag_nr_unconverged_commit_count")
     } else {
-        default_main.to_string()
+        None
+    };
+    let default_main = match unsolved_field {
+        Some(f) => default_main.replace(
+            "        eprintln!(\"DIAG:region_exit_count={}\", state.diag_region_exit_count);\n",
+            &format!(
+                "        eprintln!(\"DIAG:region_exit_count={{}}\", state.diag_region_exit_count);\n\
+                 \x20       eprintln!(\"DIAG:nr_hold_count={{}}\", state.{f});\n"
+            ),
+        ),
+        None => default_main.to_string(),
     };
     let full_source = format!(
         "{}\n{}",

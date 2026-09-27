@@ -4281,7 +4281,7 @@ fn simulate_circuit_source(
             // different defect). Presence-filtered like the rest, so a DK build
             // stays silent rather than reporting a reassuring zero for a
             // mechanism it does not have.
-            .chain(std::iter::once("diag_nr_hold_count"))
+            .chain(["diag_nr_hold_count", "diag_nr_unconverged_commit_count"])
             .filter(|f| generated.code.contains(f))
             .collect::<Vec<&str>>(),
         opts.pcm16,
@@ -4340,7 +4340,11 @@ fn simulate_circuit_source(
                 println!("  {}: {}", parts[0], parts[1]);
                 match parts[0] {
                     "nr_max_iter_count" => nr_max_iter_count = parts[1].trim().parse().ok(),
-                    "nr_hold_count" => nr_hold_count = parts[1].trim().parse().ok(),
+                    // full-LU freezes, Schur commits the diverged iterate. A build
+                    // declares exactly one; both mean "not a solution".
+                    "nr_hold_count" | "nr_unconverged_commit_count" => {
+                        nr_hold_count = parts[1].trim().parse().ok()
+                    }
                     "samples" => diag_samples = parts[1].trim().parse().ok(),
                     "peak" => diag_peak = parts[1].trim().parse().ok(),
                     "max_abs_v_prev" => diag_max_abs_v_prev = parts[1].trim().parse().ok(),

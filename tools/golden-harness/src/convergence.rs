@@ -92,6 +92,10 @@ const LAST_ITERS_KEY: &str = "last_nr_iterations";
 /// previous state was committed as the answer. Unlike the cap, this is not a
 /// degree of difficulty — it is a non-solution shipped as output.
 const HOLD_KEY: &str = "diag_nr_hold_count";
+/// Schur's equivalent: no hold, so an unconverged sample is committed as
+/// output instead of frozen. Same silent-wrong class, so it is ranked with the
+/// hold and fails the same gates (arbiter t536).
+const UNCONVERGED_COMMIT_KEY: &str = "diag_nr_unconverged_commit_count";
 
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[serde(rename_all = "kebab-case")]
@@ -176,6 +180,10 @@ pub struct Health {
     /// wrong reason ends the reader's search at the wrong place.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hold_instrumented: Option<bool>,
+    /// Which mechanism this build has, named in the report so a reader is not
+    /// left to infer it from the route.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hold_mechanism: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hold_fraction: Option<f64>,
     pub peak_dbfs: f64,
@@ -221,7 +229,20 @@ pub fn assess(
     // fraction of that which is acceptable, so there is no threshold here.
     // A baseline with no hold key is left on its cap-based class: absence of
     // the counter is absence of evidence, not evidence of zero.
-    let hold_count = d.get(HOLD_KEY).copied();
+    // Both mechanisms ship a sample that was never solved. full-LU freezes the
+    // previous state, Schur commits the diverged iterate; neither is a solution,
+    // so they share a class and a gate. A build declares only the one it has.
+    let hold_count = match (d.get(HOLD_KEY), d.get(UNCONVERGED_COMMIT_KEY)) {
+        (None, None) => None,
+        (a, b) => Some(a.copied().unwrap_or(0.0) + b.copied().unwrap_or(0.0)),
+    };
+    let hold_mechanism = if d.contains_key(UNCONVERGED_COMMIT_KEY) {
+        Some("unconverged-commit (schur)")
+    } else if d.contains_key(HOLD_KEY) {
+        Some("death-spiral hold (full-lu)")
+    } else {
+        None
+    };
     let hold_fraction = hold_count.map(|h| h / internal as f64);
     if hold_count.is_some_and(|h| h > 0.0) {
         class = Class::Held;
@@ -245,6 +266,7 @@ pub fn assess(
         hold_count,
         hold_fraction,
         hold_instrumented,
+        hold_mechanism,
         peak_dbfs: st.peak_dbfs,
     }
 }
@@ -265,7 +287,9 @@ fn build_constants(dir: &Path, plugin: &str) -> (Option<u32>, Option<u32>, Optio
     let Ok(code) = std::fs::read_to_string(dir.join(plugin).join("circuit.rs")) else {
         return (None, None, None);
     };
-    let hold_instrumented = Some(code.contains("diag_nr_hold_count"));
+    let hold_instrumented = Some(
+        code.contains("diag_nr_hold_count") || code.contains("diag_nr_unconverged_commit_count"),
+    );
     let mut os = None;
     let mut max_iter = None;
     for line in code.lines().take(200) {
@@ -456,11 +480,12 @@ pub fn print_section(sets: &[(String, &[Health])]) {
         println!("  ######################################################");
         for (label, h) in &held {
             println!(
-                "    [{label}] {:34} hold {} of {} internal samples ({:.3}%), peak {:.2} dBFS",
+                "    [{label}] {:34} {} of {} internal samples ({:.3}%) via {}, peak {:.2} dBFS",
                 h.key(),
                 h.hold_count.unwrap_or(0.0),
                 h.internal_samples,
                 h.hold_fraction.unwrap_or(0.0) * 100.0,
+                h.hold_mechanism.unwrap_or("unknown mechanism"),
                 h.peak_dbfs
             );
             for l in detail_lines(h, "      ") {

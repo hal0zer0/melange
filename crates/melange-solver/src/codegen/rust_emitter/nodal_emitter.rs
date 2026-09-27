@@ -1969,7 +1969,7 @@ impl RustEmitter {
             crate::codegen::NodalSubPath::Schur
         };
         code.push_str(&self.emit_header(ir, &glow_prov, Some(resolved_sub_path))?);
-        code.push_str(&self.emit_nodal_constants(ir));
+        code.push_str(&self.emit_nodal_constants(ir, use_full_nodal));
         // Authentic circuit noise (Phase 1: thermal). Returns an empty
         // `NoiseEmission` when noise mode is Off — every fragment is "" and
         // emission is byte-identical to a noiseless build.
@@ -2099,7 +2099,7 @@ impl RustEmitter {
     ///
     /// Includes A, A_neg, A_be, A_neg_be, N_v, N_i, G, C, RHS_CONST, RHS_CONST_BE,
     /// DC_OP, DC_NL_I, and topology dimensions. No S, K, or S_NI.
-    pub(super) fn emit_nodal_constants(&self, ir: &CircuitIR) -> String {
+    pub(super) fn emit_nodal_constants(&self, ir: &CircuitIR, use_full_nodal: bool) -> String {
         let n = ir.topology.n;
         let m = ir.topology.m;
         let n_nodes = if ir.topology.n_nodes > 0 {
@@ -2149,6 +2149,10 @@ impl RustEmitter {
             "pub const MAX_ITER: usize = {};\n\n",
             effective_max_iter(ir)
         ));
+        // Only the full-LU sub-step has a depth ladder; Schur sub-steps at a
+        // fixed N_SUB = 2. Emitting the bound on a Schur build would publish a
+        // number that governs nothing there.
+        if use_full_nodal {
         code.push_str(
             "/// Deepest timestep subdivision the adaptive sub-step will try before\n\
              /// giving up: 2^SUBSTEP_MAX_POWER, i.e. 64x.\n\
@@ -2165,6 +2169,7 @@ impl RustEmitter {
              /// records a sample that is not a solution.\n",
         );
         code.push_str("pub const SUBSTEP_MAX_POWER: u32 = 6;\n\n");
+        }
         if ir.solver_config.breakpoint_be {
             code.push_str(
                 "/// Breakpoint-BE: number of samples solved on the backward-Euler matrices\n\
@@ -3114,6 +3119,16 @@ impl RustEmitter {
         code.push_str("    pub diag_region_exit_count: u64,\n");
         code.push_str("    /// Diagnostic: number of backward Euler fallback activations\n");
         code.push_str("    pub diag_be_fallback_count: u64,\n");
+        // Declared ONLY where the mechanism exists. A Schur build has no
+        // death-spiral hold — it commits the diverged iterate instead — so
+        // declaring the field there would report a permanent, reassuring zero
+        // for something that cannot happen, which is the same misleading-
+        // diagnostic shape this counter was added to remove.
+        let emits_hold = use_full_nodal
+            && (m > 0
+                || !ir.behavioral_sources.is_empty()
+                || !ir.saturating_inductors.is_empty());
+        if emits_hold {
         code.push_str(
             "    /// Diagnostic: samples on which EVERY Newton path failed (trap +\n\
              \x20   /// sub-step + BE) and the death-spiral hold committed the PREVIOUS\n\
@@ -3136,6 +3151,22 @@ impl RustEmitter {
              \x20   /// non-solution shipped as output.\n",
         );
         code.push_str("    pub diag_nr_hold_count: u64,\n");
+        }
+        // Schur's equivalent: no hold, so an unconverged sample is COMMITTED.
+        if !use_full_nodal {
+            code.push_str(
+                "    /// Diagnostic: samples committed to the output after every Newton\n\
+                 \x20   /// path failed (trapezoidal, sub-step and the BE fallback).\n\
+                 \x20   ///\n\
+                 \x20   /// The Schur path has no death-spiral hold: where full-LU keeps the\n\
+                 \x20   /// previous state, this commits the DIVERGED ITERATE. Same silent-wrong\n\
+                 \x20   /// class — a sample that is not a solution, shipped as output — without\n\
+                 \x20   /// the freeze, because the committed state moves and the solver can\n\
+                 \x20   /// walk back out. Nonzero means this render contains samples that were\n\
+                 \x20   /// never solved (arbiter t536).\n",
+            );
+            code.push_str("    pub diag_nr_unconverged_commit_count: u64,\n");
+        }
         code.push_str(
             "    /// Diagnostic: number of times the runtime BE-latch engaged (rising\n\
              \x20   /// edges). Nonzero means the solver detected a self-sustaining Nyquist\n\
@@ -3634,7 +3665,12 @@ impl RustEmitter {
         code.push_str("            diag_nr_max_iter_count: 0,\n");
         code.push_str("            diag_region_exit_count: 0,\n");
         code.push_str("            diag_be_fallback_count: 0,\n");
-        code.push_str("            diag_nr_hold_count: 0,\n");
+        if emits_hold {
+            code.push_str("            diag_nr_hold_count: 0,\n");
+        }
+        if !use_full_nodal {
+            code.push_str("            diag_nr_unconverged_commit_count: 0,\n");
+        }
         code.push_str("            diag_be_latch_count: 0,\n");
         code.push_str("            diag_active_set_pin_count: 0,\n");
         code.push_str("            diag_nan_reset_count: 0,\n");
@@ -3922,7 +3958,12 @@ impl RustEmitter {
         code.push_str("        self.diag_nr_max_iter_count = 0;\n");
         code.push_str("        self.diag_region_exit_count = 0;\n");
         code.push_str("        self.diag_be_fallback_count = 0;\n");
-        code.push_str("        self.diag_nr_hold_count = 0;\n");
+        if emits_hold {
+            code.push_str("        self.diag_nr_hold_count = 0;\n");
+        }
+        if !use_full_nodal {
+            code.push_str("        self.diag_nr_unconverged_commit_count = 0;\n");
+        }
         code.push_str("        self.diag_be_latch_count = 0;\n");
         code.push_str("        self.diag_active_set_pin_count = 0;\n");
         code.push_str("        self.diag_nan_reset_count = 0;\n");
@@ -6629,6 +6670,18 @@ impl RustEmitter {
         }
 
         // State update
+        //
+        // Schur has no death-spiral hold: whatever `v` holds is committed, even
+        // when every Newton path failed. That is an unconverged sample shipped
+        // as output — the same silent-wrong class as the full-LU hold, minus the
+        // freeze, since the committed state moves and the solver can walk out.
+        // Count it so it is not invisible (arbiter t536).
+        code.push_str(
+            "    if state.last_nr_iterations >= MAX_ITER as u32 {\n\
+             \x20       // Every path failed; the diverged iterate is about to be committed.\n\
+             \x20       state.diag_nr_unconverged_commit_count += 1;\n\
+             \x20   }\n",
+        );
         code.push_str("    // State update\n");
         code.push_str("    state.v_prev = v;\n");
         // Breakpoint-BE countdown: this sample was solved on the BE matrices
