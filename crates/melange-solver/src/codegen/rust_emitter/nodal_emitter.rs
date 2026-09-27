@@ -6192,6 +6192,29 @@ impl RustEmitter {
                 code.push_str(
                     "        // matvec + O(M³) NR per sub-step — same as the normal Schur path.\n",
                 );
+                // Fixed depth, PARKED not dropped — arbiter t536, with a trigger.
+                //
+                // The full-LU sub-step has a ladder to 64x (SUBSTEP_MAX_POWER);
+                // this one does not, and that difference is deliberate for now.
+                // Past full-LU's ladder lies the death-spiral hold, which FREEZES
+                // the circuit under constant input. Past this 2x lies an
+                // unconverged commit: the diverged iterate is shipped, but the
+                // state keeps moving and the solver can walk back out. Gentler
+                // cliff — still a cliff, and still silent-wrong inside a plugin,
+                // where `diag_nr_unconverged_commit_count` is the only witness
+                // and nothing gates on it.
+                //
+                // Why no ladder yet: no corpus deck fires this sub-step at all
+                // (diag_substep_count = 0 across all 8 Schur decks, every
+                // program, measured 2026-09-27). A depth change here cannot be
+                // measured, and an unmeasurable behaviour change should not ship.
+                //
+                // TRIGGER: the first time `diag_nr_unconverged_commit_count` is
+                // nonzero ANYWHERE — corpus, a circuit report, a user deck — the
+                // first remedy to try is a ladder mirroring full-LU's:
+                // pin-honouring, bounded, named constant, measured on THAT deck
+                // as the exercising case. If you are reading this because you saw
+                // that counter fire, this is the plan.
                 code.push_str("        const N_SUB: usize = 2;\n");
                 code.push_str("        let mut v_sub = state.v_prev;\n");
                 code.push_str("        let mut i_nl_sub = state.i_nl_prev;\n");
