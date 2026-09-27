@@ -3073,11 +3073,21 @@ impl CircuitIR {
             Vec::new()
         };
 
-        // Sub-step matrices: trap at 2× the internal rate (alpha_sub = 4/T).
-        // Used by ActiveSetBe sub-stepping to damp the discrete-time Nyquist
-        // artifact from the pin-and-resolve step. Precomputed so sub-steps
-        // are O(N²) matvec, same cost as the normal Schur prediction.
-        let alpha_sub = 2.0 * internal_rate * 2.0; // trap alpha at 2x rate
+        // Sub-step matrices at 2× the internal rate. Used by ActiveSetBe
+        // sub-stepping to damp the discrete-time Nyquist artifact from the
+        // pin-and-resolve step. Precomputed so sub-steps are O(N²) matvec,
+        // same cost as the normal Schur prediction.
+        //
+        // These follow the PINNED integrator. They used to be trapezoidal
+        // unconditionally (`alpha = 4/T`, history `alpha*C - G`), so a deck
+        // running backward Euler got trap sub-steps behind its back — a
+        // violated directive, and the recovery path is exactly where a scheme
+        // difference shows, since it fires at discontinuities (arbiter t536).
+        let alpha_sub = if be {
+            internal_rate * 2.0 // BE: alpha = 1/T, at 2x rate
+        } else {
+            2.0 * internal_rate * 2.0 // trap: alpha = 2/T, at 2x rate
+        };
         let mut a_sub_flat = vec![0.0f64; n * n];
         let mut a_neg_sub_flat = vec![0.0f64; n * n];
         for i in 0..n {
@@ -3085,7 +3095,12 @@ impl CircuitIR {
                 let g = g_matrix[i * n + j];
                 let c = c_matrix[i * n + j];
                 a_sub_flat[i * n + j] = g + alpha_sub * c;
-                a_neg_sub_flat[i * n + j] = alpha_sub * c - g;
+                // BE history carries no -G term.
+                a_neg_sub_flat[i * n + j] = if be {
+                    alpha_sub * c
+                } else {
+                    alpha_sub * c - g
+                };
             }
         }
         // Blanket-zero ALL augmented algebraic rows in A_neg_sub — the same

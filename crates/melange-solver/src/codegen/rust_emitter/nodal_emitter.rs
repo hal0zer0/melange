@@ -4593,7 +4593,18 @@ impl RustEmitter {
         }
         code.push_str("        let alpha_be = internal_rate;\n");
         if !ir.matrices.s_sub.is_empty() {
-            code.push_str("        let alpha_sub = 4.0 * internal_rate; // trap at 2× rate\n");
+            // Must match the IR-level bake in `ir/mod.rs` — same scheme, same
+            // alpha. A rebuild that disagreed with the baked default would make
+            // the sub-step change behaviour the first time a pot moved.
+            if ir.solver_config.backward_euler {
+                code.push_str(
+                    "        let alpha_sub = 2.0 * internal_rate; // BE (alpha = 1/T) at 2x rate\n",
+                );
+            } else {
+                code.push_str(
+                    "        let alpha_sub = 4.0 * internal_rate; // trap (alpha = 2/T) at 2x rate\n",
+                );
+            }
         }
         code.push('\n');
 
@@ -4622,12 +4633,15 @@ impl RustEmitter {
             code.push_str(&format!(
                 "        for i in 0..N {{\n\
                  \x20           for j in 0..N {{\n\
-                 \x20               {cp}a_neg_sub[i][j] = alpha_sub * {c}[i][j] - {g}[i][j];\n\
+                 \x20               {cp}a_neg_sub[i][j] = {sub_hist};\n\
                  \x20           }}\n\
                  \x20       }}\n",
                 cp = cp,
-                c = c_src,
-                g = g_src
+                sub_hist = if ir.solver_config.backward_euler {
+                    format!("alpha_sub * {c_src}[i][j]")
+                } else {
+                    format!("alpha_sub * {c_src}[i][j] - {g_src}[i][j]")
+                },
             ));
         }
 
@@ -6202,24 +6216,43 @@ impl RustEmitter {
                     code.push_str("            for i in 0..N { rhs_s[i] = RHS_CONST[i]; }\n");
                 }
                 code.push_str("            for i in 0..N { for j in 0..N { rhs_s[i] += state.a_neg_sub[i][j] * v_sub[j]; } }\n");
-                code.push_str(&emit_sparse_ni_matvec_add(
-                    ir,
-                    "rhs_s",
-                    "i_nl_sub",
-                    "            ",
-                ));
+                // Trap-midpoint companion, skipped under BE — matching the
+                // primary loop's own `!backward_euler` gate. Carried
+                // unconditionally before, which was the third way a BE-pinned
+                // deck got a trapezoidal sub-step.
+                if !ir.solver_config.backward_euler {
+                    code.push_str(&emit_sparse_ni_matvec_add(
+                        ir,
+                        "rhs_s",
+                        "i_nl_sub",
+                        "            ",
+                    ));
+                }
                 if multi_input {
-                    code.push_str(
-                        "            for k in 0..NUM_INPUTS {\n\
+                    let (prev_bind, per_port) = if ir.solver_config.backward_euler {
+                        ("", "inp_s / INPUT_RESISTANCES[k]")
+                    } else {
+                        (
+                            "                let inp_prev_s = state.inputs_prev[k] + step_k * step as f64;\n",
+                            "(inp_s + inp_prev_s) / INPUT_RESISTANCES[k]",
+                        )
+                    };
+                    code.push_str(&format!(
+                        "            for k in 0..NUM_INPUTS {{\n\
                          \x20               let step_k = (inputs[k] - state.inputs_prev[k]) / N_SUB as f64;\n\
                          \x20               let inp_s = state.inputs_prev[k] + step_k * (step + 1) as f64;\n\
-                         \x20               let inp_prev_s = state.inputs_prev[k] + step_k * step as f64;\n\
-                         \x20               rhs_s[INPUT_NODES[k]] += (inp_s + inp_prev_s) / INPUT_RESISTANCES[k];\n\
-                         \x20           }\n",
-                    );
+                         {prev_bind}\
+                         \x20               rhs_s[INPUT_NODES[k]] += {per_port};\n\
+                         \x20           }}\n",
+                    ));
                 } else {
                     code.push_str(
-                        "            rhs_s[INPUT_NODE] += (inp_s + inp_prev_s) * input_conductance;\n",
+                        if ir.solver_config.backward_euler {
+                            // BE takes the endpoint; only trap averages.
+                            "            rhs_s[INPUT_NODE] += inp_s * input_conductance;\n"
+                        } else {
+                            "            rhs_s[INPUT_NODE] += (inp_s + inp_prev_s) * input_conductance;\n"
+                        },
                     );
                 }
                 if inject_or_tap {
