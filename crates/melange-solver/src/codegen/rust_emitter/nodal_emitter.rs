@@ -2149,6 +2149,22 @@ impl RustEmitter {
             "pub const MAX_ITER: usize = {};\n\n",
             effective_max_iter(ir)
         ));
+        code.push_str(
+            "/// Deepest timestep subdivision the adaptive sub-step will try before\n\
+             /// giving up: 2^SUBSTEP_MAX_POWER, i.e. 64x.\n\
+             ///\n\
+             /// A transient Newton failure is a TIMESTEP problem, not a budget problem,\n\
+             /// so the response is to cut dt and retry rather than to raise MAX_ITER\n\
+             /// (arbiter t536). The bound is 64x because that is what this corpus\n\
+             /// measured: on a Neve-1073-style input block driven with a 0.1 V step,\n\
+             /// 9 of 43200 post-edge samples need deeper than one sub-step, 7 of those\n\
+             /// clear by 8x, and the last two need 32x and 64x. It stays BOUNDED\n\
+             /// because per-sample cost has to stay finite in a plugin.\n\
+             ///\n\
+             /// Past this depth the death-spiral hold fires and `diag_nr_hold_count`\n\
+             /// records a sample that is not a solution.\n",
+        );
+        code.push_str("pub const SUBSTEP_MAX_POWER: u32 = 6;\n\n");
         if ir.solver_config.breakpoint_be {
             code.push_str(
                 "/// Breakpoint-BE: number of samples solved on the backward-Euler matrices\n\
@@ -8540,24 +8556,46 @@ impl RustEmitter {
                 // positive-feedback circuits (compressor sidechains, oscillators, etc.).
                 code.push_str("    // Adaptive sub-stepping: retry with subdivided timestep\n");
                 code.push_str(&format!("    if !converged{be_latch_and} {{\n"));
-                code.push_str("        'substep: for subdiv_power in 1..=3u32 {\n");
-                code.push_str("            let subdiv = 1u32 << subdiv_power; // 2, 4, 8\n");
+                code.push_str(
+                    "        'substep: for subdiv_power in 1..=SUBSTEP_MAX_POWER {\n",
+                );
+                code.push_str(
+                    "            let subdiv = 1u32 << subdiv_power; // 2 .. 2^SUBSTEP_MAX_POWER\n",
+                );
                 // alpha_sub tracks the RUNTIME host rate (× oversampling), not
                 // the compile-time codegen rate — a baked literal here made the
                 // sub-step matrices inconsistent with the state matrices after
                 // any `set_sample_rate` to a non-codegen rate.
-                code.push_str(
+                // The sub-step must solve the SAME scheme the build is pinned to.
+                // It used to be hard-wired trapezoidal, so a deck that pinned BE
+                // got trap sub-steps behind its back — and the sub-step fires at
+                // discontinuities, which is exactly where the two schemes differ
+                // (measured 3.51 V vs 6.57 V against a BE-pinned reference at the
+                // step edge). A silent integrator swap inside the recovery path is
+                // the same class of defect as a silent wrong answer (arbiter t536).
+                if ir.solver_config.backward_euler {
+                    code.push_str(
+                "            // Backward Euler: alpha = 1/dt, matching the pinned scheme.\n            let alpha_sub = state.current_sample_rate * OVERSAMPLING_FACTOR as f64 * subdiv as f64;\n",
+            );
+                } else {
+                    code.push_str(
                 "            let alpha_sub = 2.0 * state.current_sample_rate * OVERSAMPLING_FACTOR as f64 * subdiv as f64;\n",
             );
+                }
                 code.push_str("            // Rebuild A and A_neg at finer timestep\n");
                 code.push_str("            let mut a_sub = [[0.0f64; N]; N];\n");
                 code.push_str("            let mut a_neg_sub = [[0.0f64; N]; N];\n");
                 code.push_str("            for i in 0..N {\n");
                 code.push_str("                for j in 0..N {\n");
                 code.push_str("                    a_sub[i][j] = G[i][j] + alpha_sub * C[i][j];\n");
-                code.push_str(
-                    "                    a_neg_sub[i][j] = alpha_sub * C[i][j] - G[i][j];\n",
-                );
+                if ir.solver_config.backward_euler {
+                    // BE history carries no -G term.
+                    code.push_str("                    a_neg_sub[i][j] = alpha_sub * C[i][j];\n");
+                } else {
+                    code.push_str(
+                        "                    a_neg_sub[i][j] = alpha_sub * C[i][j] - G[i][j];\n",
+                    );
+                }
                 code.push_str("                }\n");
                 code.push_str("            }\n");
                 // Zero VS/VCVS algebraic rows
@@ -8598,7 +8636,11 @@ impl RustEmitter {
                     code.push_str("                let mut rhs_s = [0.0f64; N];\n");
                 }
                 code.push_str("                for i in 0..N { for j in 0..N { rhs_s[i] += a_neg_sub[i][j] * v_sub[j]; } }\n");
-                if m > 0 {
+                // Trap-midpoint companion, skipped under BE — the same gate the
+                // primary loop uses (`m > 0 && !backward_euler`). The sub-step
+                // carried it unconditionally, which is the third way it silently
+                // solved trapezoidal on a BE-pinned build.
+                if m > 0 && !ir.solver_config.backward_euler {
                     code.push_str(&emit_sparse_ni_matvec_add(
                         ir,
                         "rhs_s",
@@ -8618,16 +8660,31 @@ impl RustEmitter {
                     );
                 }
                 if multi_input {
-                    code.push_str(
-                    "                for k in 0..NUM_INPUTS {\n\
+                    // Same pin-honouring rule as the single-input case below.
+                    let per_port = if ir.solver_config.backward_euler {
+                        "inp_s / INPUT_RESISTANCES[k]"
+                    } else {
+                        "(inp_s + inp_prev_s) / INPUT_RESISTANCES[k]"
+                    };
+                    let prev_binding = if ir.solver_config.backward_euler {
+                        String::new()
+                    } else {
+                        "                    let inp_prev_s = state.inputs_prev[k] + step_k * step as f64;\n".to_string()
+                    };
+                    code.push_str(&format!(
+                    "                for k in 0..NUM_INPUTS {{\n\
                      \x20                   let step_k = (inputs[k] - state.inputs_prev[k]) / subdiv as f64;\n\
                      \x20                   let inp_s = state.inputs_prev[k] + step_k * (step + 1) as f64;\n\
-                     \x20                   let inp_prev_s = state.inputs_prev[k] + step_k * step as f64;\n\
-                     \x20                   rhs_s[INPUT_NODES[k]] += (inp_s + inp_prev_s) / INPUT_RESISTANCES[k];\n\
-                     \x20               }\n",
-                );
+                     {prev_binding}\
+                     \x20                   rhs_s[INPUT_NODES[k]] += {per_port};\n\
+                     \x20               }}\n",
+                ));
                 } else {
-                    code.push_str("                rhs_s[INPUT_NODE] += (inp_s + inp_prev_s) * (1.0 / INPUT_RESISTANCE);\n");
+                    if ir.solver_config.backward_euler {
+                        code.push_str("                rhs_s[INPUT_NODE] += inp_s * (1.0 / INPUT_RESISTANCE);\n");
+                    } else {
+                        code.push_str("                rhs_s[INPUT_NODE] += (inp_s + inp_prev_s) * (1.0 / INPUT_RESISTANCE);\n");
+                    }
                 }
                 if inject_or_tap {
                     code.push_str(&emit_inject_substep_stamp(
