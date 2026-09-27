@@ -163,11 +163,19 @@ pub struct Health {
     pub refactor_per_sample: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub be_fallback_fraction: Option<f64>,
-    /// Samples the death-spiral hold committed. `None` means the baseline
-    /// predates the counter, which is UNMEASURED, not zero — the same rule this
-    /// module applies to [`MAX_ITER_KEY`].
+    /// Samples the death-spiral hold committed. `None` means no count was
+    /// recorded — see [`Self::hold_instrumented`] for whether that is a true
+    /// zero or genuinely unmeasured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hold_count: Option<f64>,
+    /// Whether this render's build has a hold path at all. `Some(false)` is a
+    /// TRUE ZERO — DK and M = 0 nodal builds cannot hold, and re-capturing them
+    /// will never produce a counter. `None` is genuinely unmeasured. Keeping
+    /// these apart matters: a report that tells someone to "re-capture to find
+    /// out" about a build with no hold mechanism is confidently wrong, and a
+    /// wrong reason ends the reader's search at the wrong place.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hold_instrumented: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hold_fraction: Option<f64>,
     pub peak_dbfs: f64,
@@ -186,6 +194,7 @@ pub fn assess(
     st: &Stats,
     oversampling: Option<u32>,
     max_iter: Option<u32>,
+    hold_instrumented: Option<bool>,
 ) -> Health {
     let d = &st.diagnostics;
     let os = oversampling.unwrap_or(1).max(1) as u64;
@@ -235,6 +244,7 @@ pub fn assess(
         be_fallback_fraction: rate(BE_FALLBACK_KEY),
         hold_count,
         hold_fraction,
+        hold_instrumented,
         peak_dbfs: st.peak_dbfs,
     }
 }
@@ -243,10 +253,19 @@ pub fn assess(
 /// generated module. Read from the baseline itself rather than from the
 /// manifest, so the numbers describe the code that actually ran and older
 /// baselines stay readable without their original manifest.
-fn build_constants(dir: &Path, plugin: &str) -> (Option<u32>, Option<u32>) {
+/// Returns `(oversampling, max_iter, hold_instrumented)`.
+///
+/// `hold_instrumented` distinguishes two very different reasons a render can
+/// have no hold count, which must never be reported as the same thing:
+/// `Some(false)` — this build has NO hold path (DK, or nodal with M = 0 and no
+/// behavioral source or saturating inductor), so it structurally cannot hold and
+/// zero is the true answer; `None` — the baseline has no stored `circuit.rs` at
+/// all, so nothing is known. Only the latter is unmeasured.
+fn build_constants(dir: &Path, plugin: &str) -> (Option<u32>, Option<u32>, Option<bool>) {
     let Ok(code) = std::fs::read_to_string(dir.join(plugin).join("circuit.rs")) else {
-        return (None, None);
+        return (None, None, None);
     };
+    let hold_instrumented = Some(code.contains("diag_nr_hold_count"));
     let mut os = None;
     let mut max_iter = None;
     for line in code.lines().take(200) {
@@ -267,7 +286,7 @@ fn build_constants(dir: &Path, plugin: &str) -> (Option<u32>, Option<u32>) {
             break;
         }
     }
-    (os, max_iter)
+    (os, max_iter, hold_instrumented)
 }
 
 fn list_plugins(dir: &Path) -> BTreeSet<String> {
@@ -289,7 +308,7 @@ fn list_plugins(dir: &Path) -> BTreeSet<String> {
 pub fn scan(dir: &Path) -> Vec<Health> {
     let mut out = Vec::new();
     for plugin in list_plugins(dir) {
-        let (os, max_iter) = build_constants(dir, &plugin);
+        let (os, max_iter, hold_instrumented) = build_constants(dir, &plugin);
         let Ok(entries) = std::fs::read_dir(dir.join(&plugin)) else {
             continue;
         };
@@ -312,7 +331,14 @@ pub fn scan(dir: &Path) -> Vec<Health> {
             let Ok(st) = serde_json::from_str::<Stats>(&txt) else {
                 continue;
             };
-            out.push(assess(&plugin, &program, &st, os, max_iter));
+            out.push(assess(
+                &plugin,
+                &program,
+                &st,
+                os,
+                max_iter,
+                hold_instrumented,
+            ));
         }
     }
     out.sort_by(|a, b| {
@@ -502,19 +528,37 @@ pub fn print_section(sets: &[(String, &[Health])]) {
              recorded; convergence is unknown, not clean."
         );
     }
+    // Two different reasons for a missing hold count, reported separately. A
+    // build with no hold path CANNOT hold, so zero is the true answer and
+    // telling anyone to re-capture it would be a confidently wrong instruction.
+    let no_hold_path: usize = sets
+        .iter()
+        .map(|(_, hs)| {
+            hs.iter()
+                .filter(|h| h.hold_instrumented == Some(false))
+                .count()
+        })
+        .sum();
     let unmeasured_hold: usize = sets
         .iter()
         .map(|(_, hs)| {
             hs.iter()
-                .filter(|h| h.class != Class::Unknown && h.hold_count.is_none())
+                .filter(|h| h.hold_instrumented.is_none() && h.hold_count.is_none())
                 .count()
         })
         .sum();
+    if no_hold_path > 0 {
+        println!(
+            "\n  {no_hold_path} render(s) have NO HOLD PATH in their build (DK, or nodal at \
+             M = 0 with no behavioral source or saturating inductor). They cannot hold; \
+             zero is the true answer, not a gap."
+        );
+    }
     if unmeasured_hold > 0 {
         println!(
-            "\n  {unmeasured_hold} render(s) have NO HOLD COUNTER — captured before \
-             `diag_nr_hold_count` existed. Whether they shipped non-solutions is \
-             unmeasured, not zero. Re-capture to find out."
+            "\n  {unmeasured_hold} render(s) are UNMEASURED for the hold — no stored \
+             `circuit.rs`, so whether their build even has a hold path is unknown. \
+             Re-capture to find out."
         );
     }
 
@@ -598,7 +642,7 @@ mod tests {
     /// `golden-baselines/` are in exactly this state.
     #[test]
     fn missing_counter_is_unknown_not_clean() {
-        let h = assess("p", "step", &stats(48000, &[]), Some(1), Some(100));
+        let h = assess("p", "step", &stats(48000, &[]), Some(1), Some(100), Some(true));
         assert_eq!(h.class, Class::Unknown);
     }
 
@@ -610,6 +654,7 @@ mod tests {
             &stats(48000, &[(MAX_ITER_KEY, 0.0)]),
             Some(1),
             Some(100),
+            Some(true),
         );
         assert_eq!(h.class, Class::Clean);
         assert_eq!(h.fraction, 0.0);
@@ -633,6 +678,7 @@ mod tests {
             ),
             Some(1),
             Some(100),
+            Some(true),
         );
         assert_eq!(h.class, Class::NotConverged);
         assert!((h.fraction - 0.9).abs() < 1e-12);
@@ -645,14 +691,14 @@ mod tests {
     #[test]
     fn oversampling_scales_the_denominator() {
         let st = stats(192000, &[(MAX_ITER_KEY, 3352.0)]);
-        let os4 = assess("gold-press", "sweep", &st, Some(4), Some(100));
+        let os4 = assess("gold-press", "sweep", &st, Some(4), Some(100), Some(true));
         assert_eq!(os4.internal_samples, 768000);
         assert!((os4.fraction - 0.004365).abs() < 1e-6);
         assert_eq!(os4.class, Class::Marginal);
 
         // Unknown oversampling falls back to frames: an OVER-estimate, which
         // is the safe direction, and the flag says so.
-        let unknown = assess("gold-press", "sweep", &st, None, Some(100));
+        let unknown = assess("gold-press", "sweep", &st, None, Some(100), Some(true));
         assert!(!unknown.oversampling_known);
         assert!(unknown.fraction > os4.fraction);
     }
@@ -666,6 +712,7 @@ mod tests {
             &stats(1000, &[(MAX_ITER_KEY, 200.0)]),
             Some(1),
             None,
+            Some(true),
         );
         assert_eq!(at.class, Class::NotConverged);
         let under = assess(
@@ -674,6 +721,7 @@ mod tests {
             &stats(1000, &[(MAX_ITER_KEY, 199.0)]),
             Some(1),
             None,
+            Some(true),
         );
         assert_eq!(under.class, Class::Marginal);
     }
@@ -696,6 +744,7 @@ mod tests {
             ),
             Some(1),
             Some(100),
+            Some(true),
         );
         assert_eq!(h.class, Class::Marginal);
         assert!(h.be_fallback_fraction.unwrap() > 0.95);
@@ -712,6 +761,7 @@ mod tests {
             &stats(96000, &[(MAX_ITER_KEY, 0.0), (LS_FAIL_KEY, 14009.0)]),
             Some(1),
             Some(100),
+            Some(true),
         );
         assert_eq!(h.class, Class::Clean);
     }
