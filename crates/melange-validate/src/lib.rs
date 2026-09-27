@@ -1063,7 +1063,24 @@ pub fn run_melange_solver_from_str(
         eprintln!(\"DIAG:nr_max_iter_count={}\", state.diag_nr_max_iter_count);\n\
         eprintln!(\"DIAG:region_exit_count={}\", state.diag_region_exit_count);\n\
     }\n";
-    let full_source = format!("{}\n{}", generated.code, main_code.unwrap_or(default_main));
+    // The death-spiral hold counter exists on the nodal path only (DK has no
+    // hold), so it is spliced in by presence rather than hardcoded — the same
+    // rule the CLI's simulate driver uses. Without the guard a DK validation
+    // would fail to compile on a field its build never declares.
+    let default_main = if generated.code.contains("diag_nr_hold_count") {
+        default_main.replace(
+            "        eprintln!(\"DIAG:region_exit_count={}\", state.diag_region_exit_count);\n",
+            "        eprintln!(\"DIAG:region_exit_count={}\", state.diag_region_exit_count);\n\
+             \x20       eprintln!(\"DIAG:nr_hold_count={}\", state.diag_nr_hold_count);\n",
+        )
+    } else {
+        default_main.to_string()
+    };
+    let full_source = format!(
+        "{}\n{}",
+        generated.code,
+        main_code.unwrap_or(default_main.as_str())
+    );
 
     // Compile
     static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -1141,10 +1158,28 @@ pub fn run_melange_solver_from_str(
     // generated solver's counters (NR max-iter, region exits) next to the
     // comparison — a validation number without them hides a starved or
     // out-of-region solve.
+    let mut held: u64 = 0;
     for line in String::from_utf8_lossy(&result.stderr).lines() {
         if let Some(diag) = line.strip_prefix("DIAG:") {
             eprintln!("  melange {}", diag.replacen('=', ": ", 1));
+            if let Some(v) = diag.strip_prefix("nr_hold_count=") {
+                held = v.trim().parse().unwrap_or(0);
+            }
         }
+    }
+
+    // A render containing samples that were never solved cannot validate
+    // anything. Correlating it against ngspice produces a number, and the
+    // number is meaningless: on those samples melange emitted the PREVIOUS
+    // state, not an answer to the circuit. Fail here rather than let a
+    // confident correlation be computed from a frozen render (arbiter t536).
+    if held > 0 {
+        return Err(ValidationError::Solver(format!(
+            "{held} sample(s) were never solved: every Newton path failed and the previous \
+             state was committed as the output. A correlation against this render does not \
+             measure agreement with ngspice — it measures agreement with a held value. \
+             Fix the convergence before trusting any number from this deck."
+        )));
     }
 
     Ok(String::from_utf8_lossy(&result.stdout)
