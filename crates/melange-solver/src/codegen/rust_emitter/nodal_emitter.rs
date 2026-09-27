@@ -3099,6 +3099,28 @@ impl RustEmitter {
         code.push_str("    /// Diagnostic: number of backward Euler fallback activations\n");
         code.push_str("    pub diag_be_fallback_count: u64,\n");
         code.push_str(
+            "    /// Diagnostic: samples on which EVERY Newton path failed (trap +\n\
+             \x20   /// sub-step + BE) and the death-spiral hold committed the PREVIOUS\n\
+             \x20   /// state as this sample's answer.\n\
+             \x20   ///\n\
+             \x20   /// **A nonzero value means this render contains samples that are not\n\
+             \x20   /// solutions.** The hold emits a bounded, smooth value, so peak, RMS,\n\
+             \x20   /// clamp count and correlation all read healthy — no level-based check\n\
+             \x20   /// can see it. This counter is the only witness.\n\
+             \x20   ///\n\
+             \x20   /// Worse, the hold is a FIXED POINT under constant input: the next\n\
+             \x20   /// sample re-poses the bit-identical problem from the same `v_prev` and\n\
+             \x20   /// fails identically, so one hard sample can freeze the circuit until\n\
+             \x20   /// the input changes. Measured on a Neve-1073-style input block: 43199\n\
+             \x20   /// consecutive held samples, output 22 dB adrift, peak a healthy\n\
+             \x20   /// -0.50 dBFS (arbiter t536).\n\
+             \x20   ///\n\
+             \x20   /// Distinct from `diag_be_fallback_count`, which counts a RECOVERY:\n\
+             \x20   /// a converged solution by another consistent scheme. This counts a\n\
+             \x20   /// non-solution shipped as output.\n",
+        );
+        code.push_str("    pub diag_nr_hold_count: u64,\n");
+        code.push_str(
             "    /// Diagnostic: number of times the runtime BE-latch engaged (rising\n\
              \x20   /// edges). Nonzero means the solver detected a self-sustaining Nyquist\n\
              \x20   /// limit cycle on this stream and permanently switched that instance to\n\
@@ -3596,6 +3618,7 @@ impl RustEmitter {
         code.push_str("            diag_nr_max_iter_count: 0,\n");
         code.push_str("            diag_region_exit_count: 0,\n");
         code.push_str("            diag_be_fallback_count: 0,\n");
+        code.push_str("            diag_nr_hold_count: 0,\n");
         code.push_str("            diag_be_latch_count: 0,\n");
         code.push_str("            diag_active_set_pin_count: 0,\n");
         code.push_str("            diag_nan_reset_count: 0,\n");
@@ -3883,6 +3906,7 @@ impl RustEmitter {
         code.push_str("        self.diag_nr_max_iter_count = 0;\n");
         code.push_str("        self.diag_region_exit_count = 0;\n");
         code.push_str("        self.diag_be_fallback_count = 0;\n");
+        code.push_str("        self.diag_nr_hold_count = 0;\n");
         code.push_str("        self.diag_be_latch_count = 0;\n");
         code.push_str("        self.diag_active_set_pin_count = 0;\n");
         code.push_str("        self.diag_nan_reset_count = 0;\n");
@@ -9274,8 +9298,11 @@ impl RustEmitter {
         if m > 0 || !ir.behavioral_sources.is_empty() || !ir.saturating_inductors.is_empty() {
             code.push_str("    if !converged {\n");
             code.push_str(
-                "        // NR failed on all paths — keep previous state, invalidate chord\n",
+                "        // NR failed on all paths — keep previous state, invalidate chord.\n\
+                 \x20       // THIS SAMPLE IS NOT A SOLUTION. It is bounded and smooth, so no\n\
+                 \x20       // level measurand can see it; diag_nr_hold_count is the witness.\n",
             );
+            code.push_str("        state.diag_nr_hold_count += 1;\n");
             code.push_str("        v = state.v_prev;\n");
             code.push_str("        i_nl = state.i_nl_prev;\n");
             code.push_str("        chord_valid = false;\n");

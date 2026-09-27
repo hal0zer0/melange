@@ -50,14 +50,34 @@ CONVERGENCE:
   and smooth, so the audio metrics cannot see it. The section is REPORT-ONLY
   and never changes an exit code; `convergence <dir>...` prints it on its own.
 
+NEWTON HOLD (all subcommands):
+  A render is HELD when every Newton path failed on a sample and the previous
+  state was committed as that sample's output. It is not a solution, and it is
+  bounded and smooth, so no level measurand can see it. Under constant input the
+  hold is a fixed point, so one hard sample can freeze a render to its end.
+  HELD fails every gate. Capped-but-recovered samples do NOT: those are a
+  converged solution by another consistent scheme, and stay report-only.
+  --allow-nr-hold  proceed anyway. Per-invocation only, never a deck property:
+                   a netlist cannot know whether it will trip (one corpus deck
+                   is clean at 0.035 V and frozen at 0.04). A capture made under
+                   it writes an ALLOW_NR_HOLD marker into the baseline.
+
 EXIT CODES:
   capture: 0 = all circuits captured, 3 = some circuit failed (run completed)
   compare: 0 = gate passed, 1 = gate failed, 2 = usage error
-  convergence: 0 = report produced, 2 = usage error (never fails on a finding)
+  convergence: 0 = no render held, 2 = usage error
+  any:     4 = a render shipped samples that are not solutions (see above)
 ";
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // Per-invocation ONLY, never a deck declaration: a netlist cannot know
+    // whether it will trip the hold — steve-1073-preamp is clean at 0.035 V and
+    // frozen at 0.04 — so a deck-level opt-out would be a claim about inputs its
+    // author never ran (arbiter t536). Stripped here so each subcommand's own
+    // parser does not have to know about it.
+    let allow_nr_hold = args.iter().any(|a| a == "--allow-nr-hold");
+    args.retain(|a| a != "--allow-nr-hold");
     match args.first().map(|s| s.as_str()) {
         Some("capture") => {
             let mut manifest: Option<PathBuf> = None;
@@ -118,12 +138,26 @@ fn main() -> ExitCode {
             let (Some(manifest), Some(out)) = (manifest, out) else {
                 return usage_err("capture requires --manifest and --out");
             };
-            match capture::run(&manifest, &out, fs, timeout, keep_work) {
-                Ok(failed) => {
-                    if failed == 0 {
-                        ExitCode::SUCCESS
-                    } else {
+            match capture::run(&manifest, &out, fs, timeout, keep_work, allow_nr_hold) {
+                Ok(capture::Outcome { failed, held }) => {
+                    if failed != 0 {
                         ExitCode::from(3)
+                    } else if held != 0 && !allow_nr_hold {
+                        eprintln!(
+                            "FAIL: {held} captured render(s) contain samples that are not \
+                             solutions (death-spiral hold). The baseline was still written \
+                             so the evidence exists; re-run with --allow-nr-hold to accept it."
+                        );
+                        ExitCode::from(4)
+                    } else {
+                        if held != 0 {
+                            eprintln!(
+                                "warning: {held} captured render(s) shipped non-solutions; \
+                                 --allow-nr-hold suppressed the failure and the baseline \
+                                 records it"
+                            );
+                        }
+                        ExitCode::SUCCESS
                     }
                 }
                 Err(e) => {
@@ -153,8 +187,22 @@ fn main() -> ExitCode {
             }
             let json_out = json_out.unwrap_or_else(|| PathBuf::from("golden-compare-report.json"));
             match compare::run(&positional[0], &positional[1], &json_out, strict) {
-                Ok(changed) => {
-                    if changed == 0 {
+                Ok(compare::Outcome { failures, held }) => {
+                    if held != 0 && !allow_nr_hold {
+                        eprintln!(
+                            "FAIL: {held} render(s) across these baselines contain samples \
+                             that are not solutions (death-spiral hold). Comparing against a \
+                             frozen-circuit golden does not measure the change. Re-run with \
+                             --allow-nr-hold to proceed anyway."
+                        );
+                        ExitCode::from(4)
+                    } else if failures == 0 {
+                        if held != 0 {
+                            eprintln!(
+                                "warning: {held} render(s) shipped non-solutions; \
+                                 --allow-nr-hold suppressed the failure"
+                            );
+                        }
                         ExitCode::SUCCESS
                     } else {
                         ExitCode::from(1)
@@ -172,7 +220,23 @@ fn main() -> ExitCode {
                 return usage_err("convergence requires at least one baseline directory");
             }
             match convergence::run(&dirs) {
-                Ok(()) => ExitCode::SUCCESS,
+                Ok(0) => ExitCode::SUCCESS,
+                Ok(held) => {
+                    if allow_nr_hold {
+                        eprintln!(
+                            "warning: {held} render(s) shipped non-solutions; \
+                             --allow-nr-hold suppressed the failure"
+                        );
+                        ExitCode::SUCCESS
+                    } else {
+                        eprintln!(
+                            "FAIL: {held} render(s) contain samples that are not solutions \
+                             (death-spiral hold). Re-run with --allow-nr-hold to proceed \
+                             anyway; the bypass is recorded."
+                        );
+                        ExitCode::from(4)
+                    }
+                }
                 Err(e) => {
                     eprintln!("convergence error: {e}");
                     ExitCode::from(2)

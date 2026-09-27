@@ -88,6 +88,10 @@ const LS_FAIL_KEY: &str = "diag_ls_fail_count";
 const REFACTOR_KEY: &str = "diag_refactor_count";
 const BE_FALLBACK_KEY: &str = "diag_be_fallback_count";
 const LAST_ITERS_KEY: &str = "last_nr_iterations";
+/// The death-spiral hold: samples where EVERY Newton path failed and the
+/// previous state was committed as the answer. Unlike the cap, this is not a
+/// degree of difficulty — it is a non-solution shipped as output.
+const HOLD_KEY: &str = "diag_nr_hold_count";
 
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[serde(rename_all = "kebab-case")]
@@ -102,6 +106,17 @@ pub enum Class {
     /// At or above [`NONCONVERGED_FRACTION`]: the emitted samples on that
     /// fraction of the render are capped iterates, not solutions.
     NotConverged,
+    /// The death-spiral hold fired: on `hold_count` samples every Newton path
+    /// failed and the PREVIOUS state was committed as this sample's output.
+    ///
+    /// Ranked above [`Class::NotConverged`] because it is a different KIND of
+    /// claim, not a worse degree of the same one. A capped-but-recovered sample
+    /// is a converged solution reached by another consistent scheme; a held
+    /// sample is not a solution at all. Under constant input the hold is also a
+    /// fixed point — the next sample re-poses the identical problem and fails
+    /// identically — so one hard sample can freeze a render to its end
+    /// (arbiter t536).
+    Held,
 }
 
 impl Class {
@@ -111,6 +126,7 @@ impl Class {
             Class::Clean => "CLEAN",
             Class::Marginal => "MARGINAL",
             Class::NotConverged => "NOT-CONVERGED",
+            Class::Held => "HELD",
         }
     }
 }
@@ -147,6 +163,13 @@ pub struct Health {
     pub refactor_per_sample: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub be_fallback_fraction: Option<f64>,
+    /// Samples the death-spiral hold committed. `None` means the baseline
+    /// predates the counter, which is UNMEASURED, not zero — the same rule this
+    /// module applies to [`MAX_ITER_KEY`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hold_count: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hold_fraction: Option<f64>,
     pub peak_dbfs: f64,
 }
 
@@ -169,7 +192,7 @@ pub fn assess(
     let internal = (st.frames as u64).saturating_mul(os).max(1);
     let rate = |k: &str| d.get(k).map(|v| v / internal as f64);
 
-    let (class, count, fraction) = match d.get(MAX_ITER_KEY) {
+    let (mut class, count, fraction) = match d.get(MAX_ITER_KEY) {
         None => (Class::Unknown, 0.0, 0.0),
         Some(&c) => {
             let f = c / internal as f64;
@@ -183,6 +206,17 @@ pub fn assess(
             (cls, c, f)
         }
     };
+
+    // The hold outranks every cap-fraction verdict, at ANY count. One held
+    // sample is one sample of output that was never solved; there is no
+    // fraction of that which is acceptable, so there is no threshold here.
+    // A baseline with no hold key is left on its cap-based class: absence of
+    // the counter is absence of evidence, not evidence of zero.
+    let hold_count = d.get(HOLD_KEY).copied();
+    let hold_fraction = hold_count.map(|h| h / internal as f64);
+    if hold_count.is_some_and(|h| h > 0.0) {
+        class = Class::Held;
+    }
 
     Health {
         plugin: plugin.to_string(),
@@ -199,6 +233,8 @@ pub fn assess(
         ls_fail_per_sample: rate(LS_FAIL_KEY),
         refactor_per_sample: rate(REFACTOR_KEY),
         be_fallback_fraction: rate(BE_FALLBACK_KEY),
+        hold_count,
+        hold_fraction,
         peak_dbfs: st.peak_dbfs,
     }
 }
@@ -372,6 +408,41 @@ pub fn print_section(sets: &[(String, &[Health])]) {
         println!("  {label}: {}", summary_line(hs));
     }
 
+    // HELD first: it is the only class that fails a gate.
+    let held: Vec<(&str, &Health)> = sets
+        .iter()
+        .flat_map(|(l, hs)| {
+            hs.iter()
+                .filter(|h| h.class == Class::Held)
+                .map(move |h| (l.as_str(), h))
+        })
+        .collect();
+    if !held.is_empty() {
+        println!("\n  ######################################################");
+        println!("  ##  {} RENDER(S) SHIPPED SAMPLES THAT ARE NOT SOLUTIONS", held.len());
+        println!("  ##  Every Newton path failed on those samples and the");
+        println!("  ##  PREVIOUS state was committed as the answer. Bounded and");
+        println!("  ##  smooth, so peak/RMS/clamp/correlation all read healthy.");
+        println!("  ##  Under constant input the hold is a FIXED POINT: the next");
+        println!("  ##  sample re-poses the identical problem and fails the same");
+        println!("  ##  way, so one hard sample can freeze a render to its end.");
+        println!("  ##  THIS FAILS THE GATE. (arbiter t536)");
+        println!("  ######################################################");
+        for (label, h) in &held {
+            println!(
+                "    [{label}] {:34} hold {} of {} internal samples ({:.3}%), peak {:.2} dBFS",
+                h.key(),
+                h.hold_count.unwrap_or(0.0),
+                h.internal_samples,
+                h.hold_fraction.unwrap_or(0.0) * 100.0,
+                h.peak_dbfs
+            );
+            for l in detail_lines(h, "      ") {
+                println!("{l}");
+            }
+        }
+    }
+
     let flagged: Vec<(&str, &Health)> = sets
         .iter()
         .flat_map(|(l, hs)| {
@@ -431,22 +502,58 @@ pub fn print_section(sets: &[(String, &[Health])]) {
              recorded; convergence is unknown, not clean."
         );
     }
-    if flagged.is_empty() {
+    let unmeasured_hold: usize = sets
+        .iter()
+        .map(|(_, hs)| {
+            hs.iter()
+                .filter(|h| h.class != Class::Unknown && h.hold_count.is_none())
+                .count()
+        })
+        .sum();
+    if unmeasured_hold > 0 {
         println!(
-            "\n  No render exceeded the {:.0}% non-convergence line. This section is \
-                  REPORT-ONLY and never changes an exit code.",
-            NONCONVERGED_FRACTION * 100.0
+            "\n  {unmeasured_hold} render(s) have NO HOLD COUNTER — captured before \
+             `diag_nr_hold_count` existed. Whether they shipped non-solutions is \
+             unmeasured, not zero. Re-capture to find out."
         );
+    }
+
+    if held.is_empty() {
+        if flagged.is_empty() {
+            println!(
+                "\n  No render was held, and none exceeded the {:.0}% non-convergence line. \
+                 The capped-sample classes below HELD are report-only; HELD is the one \
+                 that fails a gate.",
+                NONCONVERGED_FRACTION * 100.0
+            );
+        } else {
+            println!(
+                "\n  No render was held. Capped-but-recovered samples are a converged \
+                 solution reached by another consistent scheme, so NOT-CONVERGED and \
+                 MARGINAL are REPORT-ONLY and do not change the exit code."
+            );
+        }
     } else {
         println!(
-            "\n  REPORT-ONLY: this section does not change the exit code. \
-                  Non-convergence is a property of the render, not of the A-vs-B delta."
+            "\n  {} HELD render(s) FAIL this run. Capped-but-recovered counts above \
+             remain report-only — they are a different class (arbiter t536).",
+            held.len()
         );
     }
 }
 
+/// How many renders in these sets shipped non-solutions. The gate's number.
+pub fn held_count(sets: &[(String, &[Health])]) -> usize {
+    sets.iter()
+        .map(|(_, hs)| hs.iter().filter(|h| h.class == Class::Held).count())
+        .sum()
+}
+
 /// Standalone `convergence` subcommand: assess each baseline directory given.
-pub fn run(dirs: &[std::path::PathBuf]) -> Result<(), String> {
+///
+/// Returns how many renders were HELD, so the caller can fail on them. The
+/// cap-based classes stay report-only; see [`Class::Held`].
+pub fn run(dirs: &[std::path::PathBuf]) -> Result<usize, String> {
     let mut owned: Vec<(String, Vec<Health>)> = Vec::new();
     for d in dirs {
         if !d.is_dir() {
@@ -459,7 +566,7 @@ pub fn run(dirs: &[std::path::PathBuf]) -> Result<(), String> {
         .map(|(l, h)| (l.clone(), h.as_slice()))
         .collect();
     print_section(&sets);
-    Ok(())
+    Ok(held_count(&sets))
 }
 
 #[cfg(test)]

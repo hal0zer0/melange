@@ -466,7 +466,20 @@ fn delta_db(a: f64, b: f64) -> f64 {
 ///   change at all?", which is the only gate a behaviour-preserving refactor
 ///   can be held to. These are different questions and must not share a
 ///   threshold: NEGLIGIBLE is exactly the band in which a refactor bug hides.
-pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<usize, String> {
+/// Gate failures and held renders, kept separate: "the output changed" and
+/// "the output was never a solution" are different findings and get different
+/// exit codes.
+pub struct Outcome {
+    pub failures: usize,
+    pub held: usize,
+}
+
+pub fn run(
+    dir_a: &Path,
+    dir_b: &Path,
+    json_out: &Path,
+    strict: bool,
+) -> Result<Outcome, String> {
     if !dir_a.is_dir() {
         return Err(format!("{} is not a directory", dir_a.display()));
     }
@@ -721,10 +734,17 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<
     // equally present in the reference.
     let conv_a = convergence::scan(dir_a);
     let conv_b = convergence::scan(dir_b);
-    convergence::print_section(&[
+    let conv_sets = [
         (format!("A {}", dir_a.display()), conv_a.as_slice()),
         (format!("B {}", dir_b.display()), conv_b.as_slice()),
-    ]);
+    ];
+    convergence::print_section(&conv_sets);
+    // Held renders fail the compare from EITHER side: a delta measured against a
+    // frozen-circuit golden is not a measurement of the change, and a new
+    // baseline that ships non-solutions is not a reference. Baselines captured
+    // before `diag_nr_hold_count` existed carry no hold key, so they cannot be
+    // Held and this stays backward-compatible by construction.
+    let held = convergence::held_count(&conv_sets);
 
     // ---- JSON report ----
     let json = serde_json::json!({
@@ -775,13 +795,19 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<
     if strict {
         // Only IDENTICAL passes, and codegen must match. NEGLIGIBLE is a
         // failure here by design — see the doc comment on `run`.
-        return Ok(n_changed
-            + n_missing
-            + n_input_changed
-            + n_negligible
-            + source_differs.len()
-            + source_missing.len()
-            + n_diag_differ);
+        return Ok(Outcome {
+            failures: n_changed
+                + n_missing
+                + n_input_changed
+                + n_negligible
+                + source_differs.len()
+                + source_missing.len()
+                + n_diag_differ,
+            held,
+        });
     }
-    Ok(n_changed + n_missing + n_input_changed)
+    Ok(Outcome {
+        failures: n_changed + n_missing + n_input_changed,
+        held,
+    })
 }

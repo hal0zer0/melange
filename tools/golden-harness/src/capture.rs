@@ -102,13 +102,23 @@ pub fn dry_run(manifest_path: &Path) -> Result<usize, String> {
     Ok(bad)
 }
 
+/// What a capture produced: circuits that failed to render, and renders that
+/// shipped samples which are not solutions. Separate numbers because they are
+/// separate problems — a failed circuit produced nothing, a held render
+/// produced something that looks fine and is not an answer.
+pub struct Outcome {
+    pub failed: usize,
+    pub held: usize,
+}
+
 pub fn run(
     manifest_path: &Path,
     out_dir: &Path,
     fs: f64,
     timeout_s: u64,
     keep_work: bool,
-) -> Result<usize, String> {
+    allow_nr_hold: bool,
+) -> Result<Outcome, String> {
     let entries = manifest::load(manifest_path)?;
     std::fs::create_dir_all(out_dir).map_err(|e| format!("create {}: {e}", out_dir.display()))?;
 
@@ -161,14 +171,37 @@ pub fn run(
     // looks entirely healthy to peak/RMS/band metrics. Read the baseline we
     // just wrote, through the exact code path `compare` uses.
     let conv = convergence::scan(out_dir);
-    convergence::print_section(&[(out_dir.display().to_string(), conv.as_slice())]);
+    let sets = [(out_dir.display().to_string(), conv.as_slice())];
+    convergence::print_section(&sets);
+    let held = convergence::held_count(&sets);
+
+    // Record the bypass in the baseline itself, not just in the terminal. A
+    // baseline captured under --allow-nr-hold contains renders that are not
+    // solutions; whoever reviews it later must be able to see that from the
+    // artifact alone (arbiter t536).
+    if allow_nr_hold {
+        let p = out_dir.join("ALLOW_NR_HOLD");
+        let _ = std::fs::write(
+            &p,
+            format!(
+                "This baseline was captured with --allow-nr-hold.\n\
+                 {held} render(s) contain samples where every Newton path failed and the\n\
+                 previous state was committed as the answer. They are not solutions.\n\
+                 Do not treat this baseline as a reference without reading\n\
+                 <plugin>/<program>.stats.json for diag_nr_hold_count.\n",
+            ),
+        );
+    }
 
     println!(
         "capture done: {}/{} circuits ok",
         entries.len() - failed_circuits,
         entries.len()
     );
-    Ok(failed_circuits)
+    Ok(Outcome {
+        failed: failed_circuits,
+        held,
+    })
 }
 
 /// Unique per-entry directory keys: `plugin`, or `plugin--<cir-stem>` when
