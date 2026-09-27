@@ -539,6 +539,20 @@ enum Commands {
         #[arg(long)]
         max_iter: Option<usize>,
 
+        /// Render even if samples were never solved.
+        ///
+        /// When every Newton path fails on a sample, the solver commits the
+        /// PREVIOUS state as that sample's output. It is not a solution, and it
+        /// is bounded and smooth, so the peak and the waveform both look
+        /// healthy. Under constant input it is also a fixed point: the next
+        /// sample re-poses the identical problem and fails the same way, so one
+        /// hard sample can freeze the render to its end. `simulate` fails on
+        /// this by default. Per-invocation only — a netlist cannot declare it,
+        /// because whether a circuit trips depends on the input level, not the
+        /// netlist (arbiter t536).
+        #[arg(long)]
+        allow_nr_hold: bool,
+
         /// Probe an internal node. May be repeated. Probe samples are written
         /// to a sidecar CSV (one column per probe) alongside the WAV; the
         /// primary `-n/--output-node` signal goes to the WAV unchanged.
@@ -1169,6 +1183,7 @@ fn main() -> Result<()> {
             backward_euler,
             force_trap,
             max_iter,
+            allow_nr_hold,
             probes,
             probe_csv,
             pcm16,
@@ -1261,6 +1276,7 @@ fn main() -> Result<()> {
                     backward_euler,
                     force_trap,
                     max_iter,
+                    allow_nr_hold,
                     probes: &probes,
                     probe_csv: probe_csv_path.as_deref(),
                     pcm16,
@@ -3196,6 +3212,8 @@ struct SimulateOptions<'a> {
     nodal_sub_path_override: melange_solver::codegen::NodalSubPathOverride,
     /// Explicit `--max-iter` override; `None` → auto-tuned (see [`auto_tune_max_iter`]).
     max_iter: Option<usize>,
+    /// `--allow-nr-hold`: render even when samples were never solved.
+    allow_nr_hold: bool,
     probes: &'a [String],
     probe_csv: Option<&'a std::path::Path>,
     /// `--pcm16`: write the output WAV as 16-bit PCM instead of float32.
@@ -4258,6 +4276,12 @@ fn simulate_circuit_source(
         &SUBSAMPLE_FIRE_DIAG_FIELDS
             .iter()
             .copied()
+            // The death-spiral hold counter exists on the nodal path only; DK
+            // has no hold (it commits the diverged iterate instead, which is a
+            // different defect). Presence-filtered like the rest, so a DK build
+            // stays silent rather than reporting a reassuring zero for a
+            // mechanism it does not have.
+            .chain(std::iter::once("diag_nr_hold_count"))
             .filter(|f| generated.code.contains(f))
             .collect::<Vec<&str>>(),
         opts.pcm16,
@@ -4308,6 +4332,7 @@ fn simulate_circuit_source(
     // below reads them here rather than re-scanning the rendered buffer.
     let mut diag_peak: Option<f64> = None;
     let mut diag_max_abs_v_prev: Option<f64> = None;
+    let mut nr_hold_count: Option<u64> = None;
     for line in stderr.lines() {
         if let Some(diag) = line.strip_prefix("DIAG:") {
             let parts: Vec<&str> = diag.splitn(2, '=').collect();
@@ -4315,6 +4340,7 @@ fn simulate_circuit_source(
                 println!("  {}: {}", parts[0], parts[1]);
                 match parts[0] {
                     "nr_max_iter_count" => nr_max_iter_count = parts[1].trim().parse().ok(),
+                    "nr_hold_count" => nr_hold_count = parts[1].trim().parse().ok(),
                     "samples" => diag_samples = parts[1].trim().parse().ok(),
                     "peak" => diag_peak = parts[1].trim().parse().ok(),
                     "max_abs_v_prev" => diag_max_abs_v_prev = parts[1].trim().parse().ok(),
@@ -4383,6 +4409,39 @@ fn simulate_circuit_source(
                 silent_output_warning(peak, opts.output_node, diag_samples, diag_max_abs_v_prev)
             );
         }
+    }
+
+    // The death-spiral hold: samples where every Newton path failed and the
+    // previous state was committed as the answer. This is NOT the iteration
+    // ceiling warned about above — a capped sample that a fallback rescued is a
+    // converged solution by another consistent scheme. A held sample is not a
+    // solution at all, and nothing about the rendered audio can tell you: it is
+    // bounded and smooth, so peak, RMS and the waveform all read healthy.
+    //
+    // Fail, do not warn. The whole failure mode is that it looks fine
+    // (arbiter t536).
+    if let Some(held) = nr_hold_count.filter(|h| *h > 0) {
+        let of = diag_samples
+            .map(|s| format!(" of {s} output samples"))
+            .unwrap_or_default();
+        eprintln!();
+        eprintln!(
+            "ERROR: {held} sample(s){of} were never solved. Every Newton path failed there \
+             (trapezoidal, sub-step and backward-Euler), so the solver committed the PREVIOUS \
+             state as the output. Those samples are not a solution to this circuit.\n\
+             \n\
+             The rendered file looks healthy — a held value is bounded and smooth, so peak, \
+             RMS and the waveform cannot show it. Under a held input the hold is also a fixed \
+             point: the next sample re-poses the identical problem and fails identically, so \
+             one hard sample can freeze the render to its end.\n\
+             \n\
+             The WAV was still written, so you can listen to what it did. Do not treat it as \
+             this circuit's output. Re-run with --allow-nr-hold to accept it anyway."
+        );
+        if !opts.allow_nr_hold {
+            anyhow::bail!("{held} sample(s) were never solved (--allow-nr-hold to override)");
+        }
+        eprintln!("(--allow-nr-hold given: continuing.)");
     }
     Ok(())
 }

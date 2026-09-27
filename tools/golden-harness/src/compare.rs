@@ -456,6 +456,14 @@ fn delta_db(a: f64, b: f64) -> f64 {
     }
 }
 
+/// Gate failures and held renders, kept separate: "the output changed" and
+/// "the output was never a solution" are different findings and get different
+/// exit codes.
+pub struct Outcome {
+    pub failures: usize,
+    pub held: usize,
+}
+
 /// Compare two baselines.
 ///
 /// `strict` selects the gate semantics:
@@ -466,14 +474,6 @@ fn delta_db(a: f64, b: f64) -> f64 {
 ///   change at all?", which is the only gate a behaviour-preserving refactor
 ///   can be held to. These are different questions and must not share a
 ///   threshold: NEGLIGIBLE is exactly the band in which a refactor bug hides.
-/// Gate failures and held renders, kept separate: "the output changed" and
-/// "the output was never a solution" are different findings and get different
-/// exit codes.
-pub struct Outcome {
-    pub failures: usize,
-    pub held: usize,
-}
-
 pub fn run(
     dir_a: &Path,
     dir_b: &Path,
