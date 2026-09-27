@@ -19,6 +19,7 @@ mod builtins {
 
 pub mod cache;
 pub mod circuits;
+pub mod index_cmd;
 pub mod codegen_runner;
 pub mod plugin_template;
 pub mod sources;
@@ -758,6 +759,24 @@ enum Commands {
         input: String,
     },
 
+    /// Generate or check a circuit repository's `circuits-index.json`.
+    ///
+    /// Publishing one lets anyone resolve your circuits by SHORT NAME
+    /// (`yourrepo:big-muff`) instead of by path, which means you can reorganise
+    /// — promote a deck between tiers, rename a directory — without breaking
+    /// every consumer. Format spec: docs/CIRCUIT_INDEX.md.
+    Index {
+        /// Repository root to scan (default: current directory).
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+
+        /// Verify instead of writing: non-zero exit if the index is missing or
+        /// no longer matches the tree. This is the CI form — a silently stale
+        /// index is worse than none, because consumers trust it.
+        #[arg(long)]
+        check: bool,
+    },
+
     /// Manage circuit sources (friendly source:circuit references)
     Sources {
         #[command(subcommand)]
@@ -1414,6 +1433,7 @@ fn main() -> Result<()> {
             println!("Resolved circuit: {}", circuit_source.name());
             list_nodes_source(&circuit_source)
         }
+        Commands::Index { dir, check } => index_cmd::run(&dir, check),
         Commands::Sources { action } => handle_sources(action),
         Commands::Builtins => list_builtins(),
         Commands::Cache { action } => handle_cache(action),
