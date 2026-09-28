@@ -55,22 +55,46 @@ fn conflicting_saturation_currents_on_one_core_are_refused() {
     assert!(e.contains("different saturation currents"), "{e}");
 }
 
+/// On a shared core an authored LAIR is the winding's TOTAL air-core
+/// self-inductance, of which the leakage (1 - k) is already declared by K; a
+/// CORE= class (or the default) is the core's MAGNETIZING floor directly.
+/// Declarations on both windings must imply the same magnetizing floor.
 #[test]
 fn conflicting_air_core_floors_on_one_core_are_refused() {
+    // k = 0.9999: LAIR=1e-3 leaves 9e-4, CORE=steel gives 3e-4.
     let e = mna_err(
         "conflict\nR1 in a 100\nL1 a 0 100m ISAT=20m LAIR=1e-3\nL2 b 0 400m ISAT=10m CORE=steel\n\
-         K1 L1 L2 0.99\nR2 b 0 1k\n",
+         K1 L1 L2 0.9999\nR2 b 0 1k\n",
     );
     assert!(e.contains("different air-core floors"), "{e}");
-    // The same floor twice, or on one winding only, is one core.
+    // LAIR=4e-4 leaves 3e-4 = CORE=steel: one core, one floor.
     mna_ok(
-        "same\nR1 in a 100\nL1 a 0 100m ISAT=20m LAIR=3e-4\nL2 b 0 400m ISAT=10m CORE=steel\n\
-         K1 L1 L2 0.99\nR2 b 0 1k\n",
+        "same\nR1 in a 100\nL1 a 0 100m ISAT=20m LAIR=4e-4\nL2 b 0 400m ISAT=10m CORE=steel\n\
+         K1 L1 L2 0.9999\nR2 b 0 1k\n",
     );
     mna_ok(
         "one\nR1 in a 100\nL1 a 0 100m ISAT=20m CORE=gapped\nL2 b 0 400m ISAT=10m\n\
          K1 L1 L2 0.99\nR2 b 0 1k\n",
     );
+}
+
+/// An authored LAIR no larger than the leakage 1 - k contradicts the deck's
+/// own K: there is no magnetizing air floor left. A class or the default never
+/// refuses.
+#[test]
+fn authored_air_floor_inside_the_leakage_is_refused() {
+    let e = mna_err(
+        "inside\nR1 in a 100\nL1 a 0 1 ISAT=10m LAIR=3e-4\nL2 b 0 1\nK1 L1 L2 0.99\nR2 b 0 1k\n",
+    );
+    assert!(
+        e.contains("leaving no magnetizing") && e.contains("CORE="),
+        "{e}"
+    );
+    mna_ok("default\nR1 in a 100\nL1 a 0 1 ISAT=10m\nL2 b 0 1\nK1 L1 L2 0.99\nR2 b 0 1k\n");
+    mna_ok(
+        "class\nR1 in a 100\nL1 a 0 1 ISAT=10m CORE=nickel\nL2 b 0 1\nK1 L1 L2 0.99\nR2 b 0 1k\n",
+    );
+    mna_ok("above\nR1 in a 100\nL1 a 0 1 ISAT=10m LAIR=2e-2\nL2 b 0 1\nK1 L1 L2 0.99\nR2 b 0 1k\n");
 }
 
 #[test]

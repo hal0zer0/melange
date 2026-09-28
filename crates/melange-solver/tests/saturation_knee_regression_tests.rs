@@ -68,10 +68,12 @@ const C1_REF: [C1Row; 3] = [
     ),
 ];
 
-/// 1:1 shared-core transformer, 1 H windings, K = 0.99, ISAT on the primary.
+/// 1:1 shared-core transformer, 1 H windings, K = 0.99, ISAT on the primary,
+/// magnetizing air floor 3e-4 of L_ref (CORE=steel; K = 0.99 is far looser than
+/// real iron, which compile notes).
 fn c2(load: &str) -> String {
     format!(
-        "shared-core saturating transformer\nR_p in p 99\nL_pri p 0 1 ISAT=10m LAIR=3e-4\nL_sec s 0 1\n\
+        "shared-core saturating transformer\nR_p in p 99\nL_pri p 0 1 ISAT=10m CORE=steel\nL_sec s 0 1\n\
          K1 L_pri L_sec 0.99\nR_L s out 1m\nR_load out 0 {load}\n"
     )
 }

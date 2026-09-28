@@ -195,7 +195,13 @@ generated state is smaller.
   `L_mag + L_air = L0`, and `L_air` is set on the inductor line: `LAIR=` as a
   fraction of L0, or `CORE=gapped|steel|nickel` for a rule-of-thumb class
   value (1e-3, 3e-4, 3e-5). A deck with neither gets 3e-4 and a notice saying
-  so; `LAIR=0` keeps the old law, also with a notice. Driven far past `ISAT`, a
+  so; `LAIR=0` keeps the old law, also with a notice. On a shared-core
+  transformer, `CORE=` and the default set the core's magnetizing air floor
+  (leakage comes from `K`), while an authored `LAIR=` is the winding's total
+  air-core self-inductance including the leakage; an authored value no larger
+  than `1 − K` contradicts the deck's own coupling and is refused, a coupling
+  looser than real iron gets a notice, and two windings of one core that imply
+  different floors are refused. Driven far past `ISAT`, a
   core now settles on the limit its resistance and air-core inductance set
   instead of ringing past it: a saturating RL at 20× `ISAT` peaks at V/R
   without the backward-Euler net firing; the old law overshot by 20 % until

@@ -216,7 +216,11 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
   of a coupled pair puts the saturation on the magnetizing branch of a T-model
   (the load current's flux cancels, as in real iron). Refused, not
   approximated: a saturating group with coupling k ≤ 0.8 (no shared core),
-  three or more windings, or conflicting `ISAT=` values.
+  three or more windings, or conflicting `ISAT=` values. On a shared core
+  `CORE=` (and the default) is the core's magnetizing air floor, while an
+  authored `LAIR=` is the winding's total air-core self-inductance including
+  the leakage `1 − k`; an authored `LAIR ≤ 1 − k` is refused, and so are two
+  windings whose declarations imply different floors.
 - A circuit with a saturating inductor runs on the **nodal full-LU** sub-path;
   `--nodal-subpath schur` is refused.
 - **Deep saturation.** With the floor, a core driven to tens of times `ISAT`

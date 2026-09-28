@@ -200,6 +200,27 @@ pub struct InductorElement {
     /// The authored air-core floor of a saturating inductor (`LAIR=`/`CORE=`);
     /// `None` = the default. Meaningless without `isat`.
     pub air_floor: Option<crate::parser::SatFloor>,
+    /// `Some(k)` on the magnetizing branch of a shared saturating core (the
+    /// T-model's `{ref}_mag`), whose floor is read against the pair's
+    /// coupling: see [`magnetizing_air_floor`]. `None` for a single inductor.
+    pub shared_core_k: Option<f64>,
+}
+
+/// The magnetizing air-core floor of a shared saturating core, in units of
+/// the reference winding's inductance `L_ref` (analog-EE review):
+/// - `CORE=` or no declaration: the class value is the core's MAGNETIZING
+///   (mutual) air floor, `class`; leakage comes from the deck's `k`.
+/// - authored `LAIR=`: the winding's TOTAL air-core self-inductance, of which
+///   the fixed leakage `(1 - k)` is already carried by the T-model, leaving
+///   `LAIR - (1 - k)`. Non-positive is a contradiction of the deck's own `k`.
+///
+/// A fraction of a winding's own inductance is the same fraction referred to
+/// `L_ref` (both scale by turns squared).
+pub fn magnetizing_air_floor(floor: Option<crate::parser::SatFloor>, k: f64) -> f64 {
+    match floor {
+        Some(crate::parser::SatFloor::Explicit(lair)) => lair - (1.0 - k),
+        other => crate::parser::resolve_air_floor(other).0,
+    }
 }
 
 /// Coupled inductor pair info for transformer companion model.
@@ -3614,26 +3635,6 @@ impl MnaBuilder {
                         )));
                     }
                 }
-                // Likewise one air-core floor. It is a fraction of the inductance,
-                // so authored values compare directly.
-                let floors: Vec<(&String, f64)> = members
-                    .iter()
-                    .filter_map(|m| {
-                        inductor_refs[m]
-                            .air_floor
-                            .map(|f| (m, crate::parser::resolve_air_floor(Some(f)).0))
-                    })
-                    .collect();
-                if let Some(&(first_name, first)) = floors.first() {
-                    if let Some(&(name, other)) = floors.iter().find(|(_, v)| *v != first) {
-                        return Err(MnaError::TopologyError(format!(
-                            "coupled inductors {{{names}}} share one core but carry \
-                             different air-core floors: {first_name} gives {first:e} and \
-                             {name} gives {other:e}. A core has one; put LAIR= or CORE= on \
-                             one winding only."
-                        )));
-                    }
-                }
             }
             if (max_l > IDEAL_XFMR_L_THRESHOLD || group_saturating)
                 && max_k > IDEAL_XFMR_K_THRESHOLD
@@ -3725,6 +3726,7 @@ impl MnaBuilder {
                         value: l_leak,
                         isat: None,
                         air_floor: None,
+                        shared_core_k: None,
                     });
                 }
 
@@ -3752,9 +3754,55 @@ impl MnaBuilder {
                     let ind = &inductor_refs[m];
                     ind.isat.map(|isat| isat * (ind.value / l_ref).sqrt())
                 });
-                // The air-core floor is a fraction of the inductance, so it carries
-                // to the magnetizing branch unchanged (one per core, checked above).
-                let core_air_floor = members.iter().find_map(|m| inductor_refs[m].air_floor);
+                // One core, one magnetizing air floor. Each declaration is read
+                // against the pair's coupling (see `magnetizing_air_floor`): an
+                // authored LAIR is the winding's total air-core self-inductance
+                // and must exceed the leakage (1 - k) the deck already declares;
+                // declarations on both windings must imply the same floor.
+                let k_core = k_avg[ref_idx];
+                let mut core_air_floor = None;
+                let mut core_floor_value: Option<(&String, f64)> = None;
+                if core_isat.is_some() {
+                    for m in members.iter() {
+                        let Some(f) = inductor_refs[m].air_floor else {
+                            continue;
+                        };
+                        let value = magnetizing_air_floor(Some(f), k_core);
+                        if let crate::parser::SatFloor::Explicit(lair) = f {
+                            if value <= 0.0 {
+                                return Err(MnaError::TopologyError(format!(
+                                    "{m}: LAIR={lair:e} is the winding's total air-core \
+                                     inductance, but its coupling k = {k_core} already puts \
+                                     1 - k = {:.3e} of it in leakage, leaving no magnetizing \
+                                     air floor. Real audio iron has 1 - k ~ 1e-5..1e-4. Give \
+                                     LAIR > {:.3e}, or CORE= to set the core's magnetizing \
+                                     floor directly.",
+                                    1.0 - k_core,
+                                    1.0 - k_core
+                                )));
+                            }
+                        }
+                        match core_floor_value {
+                            None => {
+                                core_floor_value = Some((m, value));
+                                core_air_floor = Some(f);
+                            }
+                            Some((first, v))
+                                if (v - value).abs() > 1e-12 * v.abs().max(value.abs()) =>
+                            {
+                                return Err(MnaError::TopologyError(format!(
+                                    "coupled inductors {{{}}} share one core but carry \
+                                     different air-core floors: {first} implies a magnetizing \
+                                     floor of {v:e} and {m} one of {value:e} (of the reference \
+                                     winding's inductance). A core has one; put LAIR= or CORE= \
+                                     on one winding only.",
+                                    members.join(", ")
+                                )));
+                            }
+                            Some(_) => {}
+                        }
+                    }
+                }
                 let ref_internal_p = internal_nodes_p[ref_idx];
                 let ref_neg = inductor_refs[&members[ref_idx]].node_j;
                 // Exact magnetizing inductance is k·L_ref (primary-referred), not
@@ -3770,6 +3818,7 @@ impl MnaBuilder {
                     value: l_mag,
                     isat: core_isat,
                     air_floor: core_air_floor,
+                    shared_core_k: core_isat.map(|_| k_core),
                 });
 
                 // For each non-reference winding: add ideal transformer coupling
@@ -5214,6 +5263,7 @@ impl MnaBuilder {
                     value: *value,
                     isat: *isat,
                     air_floor: *air_floor,
+                    shared_core_k: None,
                 });
             }
             Element::VoltageSource {

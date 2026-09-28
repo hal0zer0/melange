@@ -80,7 +80,7 @@ Lchoke a b 5 ISAT=20m LAIR=1e-3     ; saturating choke, explicit floor
 
 **Notes on saturating inductors:**
 - Solved inside the Newton loop on the nodal full-LU sub-path; `--nodal-subpath schur` is refused
-- On a two-winding coupled pair, `ISAT` on one winding saturates the shared core (see `docs/limitations.md`)
+- On a two-winding coupled pair, `ISAT` on one winding saturates the shared core (see `docs/limitations.md`). There the floor has two readings. `CORE=` (or the default) is the core's **magnetizing** air floor, `class × L_ref` (`L_ref` = the larger winding); the leakage comes from the pair's `K`. An authored `LAIR=` is the winding's **total** air-core self-inductance, for example a core-removed measurement; the leakage `1 − K` is part of it, so the magnetizing floor is `(LAIR − (1 − K)) × L_ref`, and `LAIR ≤ 1 − K` is refused. A `K` looser than real audio iron (`1 − K` above ~1e-4) gets a notice with the implied deep-saturation coupling
 - See `docs/limitations.md` → Saturating Inductors for accuracy and what is refused
 
 ---

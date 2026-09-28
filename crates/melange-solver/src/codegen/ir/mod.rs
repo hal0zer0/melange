@@ -3730,16 +3730,63 @@ impl CircuitIR {
                 // matching the switch row mapping); no separate counter needed.
                 for (i, ind) in mna.inductors.iter().enumerate() {
                     if let Some(isat) = ind.isat {
-                        let (lair, lair_source) = crate::parser::resolve_air_floor(ind.air_floor);
+                        let (lair, lair_source) = match ind.shared_core_k {
+                            // Single inductor: the floor is a fraction of its own L.
+                            None => {
+                                let (lair, src) = crate::parser::resolve_air_floor(ind.air_floor);
+                                (lair, src.to_string())
+                            }
+                            // Shared core: this is the magnetizing branch, value
+                            // k·L_ref. Its floor is read against the coupling
+                            // (see mna::magnetizing_air_floor) and expressed as a
+                            // fraction of this branch.
+                            Some(k) => {
+                                let floor = crate::mna::magnetizing_air_floor(ind.air_floor, k);
+                                let reading = match ind.air_floor {
+                                    Some(crate::parser::SatFloor::Explicit(_)) => {
+                                        "LAIR=, total air-core self-inductance less leakage 1-k"
+                                            .to_string()
+                                    }
+                                    other => format!(
+                                        "{}; magnetizing air floor, leakage from K",
+                                        crate::parser::resolve_air_floor(other).1
+                                    ),
+                                };
+                                if k < 0.9995 {
+                                    let k_air = floor / ((1.0 - k) + floor);
+                                    log::warn!(
+                                        "Saturating shared core ({}): coupling k = {k} is looser than real \
+                                         audio iron (1 - k ~ 1e-5..1e-4); the implied coupling in \
+                                         deep saturation is k_air = {k_air:.3}.",
+                                        ind.name
+                                    );
+                                }
+                                (floor / k, reading)
+                            }
+                        };
                         // Never silent: a default is announced, and so is an
                         // explicit zero floor.
                         if ind.air_floor.is_none() {
+                            let d = crate::parser::DEFAULT_AIR_FLOOR;
+                            let whose = if ind.shared_core_k.is_some() {
+                                format!(
+                                    "the core's magnetizing inductance floors at {d:e} of the \
+                                     reference winding's inductance"
+                                )
+                            } else {
+                                format!(
+                                    "its saturated inductance floors at {d:e} of its inductance"
+                                )
+                            };
+                            let what = if ind.shared_core_k.is_some() {
+                                format!("shared core ({})", ind.name)
+                            } else {
+                                format!("inductor {}", ind.name)
+                            };
                             log::warn!(
-                                "Saturating inductor {}: no LAIR= or CORE= given, so its saturated \
-                                 inductance floors at {lair:e} of its inductance (rule-of-thumb for \
-                                 ungapped steel). Set LAIR=<fraction> from a measured or core-data \
-                                 value, or CORE=gapped|steel|nickel.",
-                                ind.name
+                                "Saturating {what}: no LAIR= or CORE= given, so {whose} \
+                                 (rule-of-thumb for ungapped steel). Set LAIR=<fraction> from a \
+                                 measured or core-data value, or CORE=gapped|steel|nickel."
                             );
                         } else if lair == 0.0 {
                             log::warn!(
@@ -3756,7 +3803,7 @@ impl CircuitIR {
                             aug_row: n_aug + i,
                             inductor_index: i,
                             lair,
-                            lair_source: lair_source.to_string(),
+                            lair_source,
                         });
                     }
                 }
