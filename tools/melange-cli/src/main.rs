@@ -3032,6 +3032,7 @@ fn validate_circuit_source(
             oversampling,
             sample_rate * oversampling as f64
         );
+
         println!(
             "    The emitted code interpolates and decimates through polyphase IIR \
              half-band allpass chains,"
@@ -4895,6 +4896,23 @@ fn analyze_freq_response(
         start_freq,
         end_freq
     );
+    // A constant delay is a phase slope, and the half-band filters add one:
+    // tens of degrees by a few kHz. Someone comparing this sweep against a 1×
+    // one sees phase_deg move a long way and reasonably concludes the circuit's
+    // response changed. It did not — gain is unaffected. Said where the number
+    // is produced, not only in a doc they may not have read.
+    if oversampling > 1 {
+        let added = if oversampling >= 4 { 3.47 } else { 2.65 };
+        eprintln!(
+            "  NOTE: at {}× the phase column includes ~{:.2} host samples of half-band",
+            oversampling, added
+        );
+        eprintln!(
+            "        filter delay (~{:.0}° at 3 kHz). Gain is unaffected; the circuit's",
+            360.0 * 3000.0 * added / sample_rate
+        );
+        eprintln!("        response has not changed. See docs/OVERSAMPLING.md.");
+    }
 
     // Determine settle time
     let settle_secs = if has_inductors { 5.0 } else { 0.5 };

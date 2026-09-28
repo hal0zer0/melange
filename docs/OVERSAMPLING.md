@@ -60,17 +60,44 @@ first estimate, then measure.
 
 ## What it costs: latency
 
-The half-band filters are not free in time. Measured round trip, matching the
-analytic prediction to within 0.01 samples:
+The half-band filters are not free in time. Measured as the extra delay an
+oversampled build has over a 1× build of the same circuit, in **host** samples:
 
-| Factor | Added latency |
+| Factor | Added latency | At 48 kHz |
+|---|---|---|
+| 2× | 2.65 samples | 55 µs |
+| 4× | 3.47 samples | 72 µs |
+
+Fitted from the excess phase over a 1× build of the same circuit; fits at
+several frequencies agree to a few thousandths of a sample, which is what tells
+you it is a delay and not a frequency-dependent effect.
+
+Tens of microseconds is irrelevant for most uses. It matters if you are
+phase-matching against a dry path, splitting into bands, or building something
+latency-critical — and it matters when you read a phase plot, below.
+
+### It shows up in `analyze` as phase, and that surprises people
+
+A constant delay is a phase slope. The same RC low-pass at 2 kHz, 48 kHz host
+rate:
+
+| Factor | Reported phase |
 |---|---|
-| 2× | ~2.65 samples |
-| 4× | ~3.48 samples |
+| 1× | −51.7° |
+| 2× | −91.4° |
+| 4× | −103.7° |
 
-At 48 kHz that is well under a tenth of a millisecond — irrelevant for most
-uses, and worth knowing if you are building something latency-critical or
-phase-matching against a dry path.
+The circuit did not change — its gain is identical in all three. The extra 40°
+and 52° are the filter delay expressed as phase, exactly as a plot of a delayed
+signal should look.
+
+⚠️ `analyze` defaults to a **96 kHz** sample rate, so a phase figure read from
+it is not the one your 48 kHz plugin produces. Pass `--sample-rate` to match
+what you ship.
+
+So when comparing phase across oversampling factors, subtract the delay above,
+or compare gain only. `analyze` reports what the built plugin actually does,
+delay included, rather than a phase response with the latency quietly removed.
 
 ## What it costs: phase accuracy — the part that surprises people
 
