@@ -4378,11 +4378,27 @@ fn simulate_circuit_source(
     let mut diag_peak: Option<f64> = None;
     let mut diag_max_abs_v_prev: Option<f64> = None;
     let mut nr_hold_count: Option<u64> = None;
+    // Counters that mean the solver had to WORK, not that anything is wrong.
+    // Printed as a bare list they read as a hazard panel a newcomer cannot
+    // interpret: is `region_exit_count: 0` good? is 5 bad? Nothing said.
+    let mut recoveries: u64 = 0;
+    let mut resets: u64 = 0;
+    let mut printed_header = false;
     for line in stderr.lines() {
         if let Some(diag) = line.strip_prefix("DIAG:") {
             let parts: Vec<&str> = diag.splitn(2, '=').collect();
             if parts.len() == 2 {
-                println!("  {}: {}", parts[0], parts[1]);
+                if !printed_header {
+                    println!("  Solver diagnostics:");
+                    printed_header = true;
+                }
+                let v: u64 = parts[1].trim().parse().unwrap_or(0);
+                match parts[0] {
+                    "substep_count" | "be_fallback_count" => recoveries += v,
+                    "nan_reset_count" | "magnitude_reset_count" => resets += v,
+                    _ => {}
+                }
+                println!("    {}: {}", parts[0], parts[1]);
                 match parts[0] {
                     "nr_max_iter_count" => nr_max_iter_count = parts[1].trim().parse().ok(),
                     // full-LU freezes, Schur commits the diverged iterate. A build
@@ -4396,6 +4412,28 @@ fn simulate_circuit_source(
                     _ => {}
                 }
             }
+        }
+    }
+
+    // One line saying what the block above amounts to. The counters are
+    // meaningful to a maintainer and opaque to everyone else, and a list of
+    // numbers with no verdict trains people to skip it.
+    if printed_header {
+        let capped = nr_max_iter_count.unwrap_or(0);
+        if resets > 0 {
+            println!(
+                "    -> {resets} NaN/magnitude reset(s): the solve blew up and was reset. \
+                 Treat this output as suspect."
+            );
+        } else if capped > 0 && recoveries > 0 {
+            println!(
+                "    -> {capped} sample(s) hit the iteration ceiling and {recoveries} were \
+                 recovered by a sub-step or backward-Euler retry. Normal on hard transients."
+            );
+        } else if capped > 0 {
+            println!("    -> {capped} sample(s) hit the iteration ceiling.");
+        } else {
+            println!("    -> nothing to flag: no iteration-ceiling hits, no resets.");
         }
     }
 

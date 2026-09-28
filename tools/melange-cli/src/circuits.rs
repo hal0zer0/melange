@@ -102,9 +102,9 @@ pub fn resolve(circuit_ref: &str) -> Result<CircuitSource> {
     }
 
     // Try builtin
-    if let Some(content) = get_builtin(circuit_ref) {
+    if let Some((canonical, content)) = get_builtin(circuit_ref) {
         return Ok(CircuitSource::Builtin {
-            name: circuit_ref.to_string(),
+            name: canonical.to_string(),
             content,
         });
     }
@@ -158,6 +158,23 @@ pub fn resolve(circuit_ref: &str) -> Result<CircuitSource> {
         }
     }
 
+    // A reference that can only be a path gets a path's error. The
+    // five-strategy report is genuinely useful for an ambiguous bare name; for
+    // `./nope.cir` it buries "no such file" under four irrelevancies, three of
+    // which could never have applied.
+    if circuit_ref.contains('/')
+        || circuit_ref.contains('\\')
+        || circuit_ref.ends_with(".cir")
+    {
+        anyhow::bail!(
+            "No such circuit file: '{}'\n\n\
+             That looks like a path, so melange did not try builtins or remote \
+             sources. To use a named circuit from a source instead, drop the \
+             path and write `source:name` (see `melange sources list`).",
+            circuit_ref
+        );
+    }
+
     anyhow::bail!(
         "Cannot resolve circuit reference: '{}'\n\n\
          Tried:\n\
@@ -185,9 +202,17 @@ const BUILTIN_PASSIVE_EQ: &str = include_str!("../../../examples/passive-eq1a.ci
 /// Only the passive-eq demo is embedded (see [`BUILTIN_PASSIVE_EQ`]); every
 /// other circuit resolves through configured sources. `passive-eq` is accepted
 /// as a friendly alias for `passive-eq1a`.
-fn get_builtin(name: &str) -> Option<String> {
+/// Returns `(canonical name, content)`.
+///
+/// The canonical name, not the alias the user typed: echoing the alias back
+/// teaches a name that is not the circuit's, and the next thing they do with it
+/// — search the library, ask someone, read a report — uses the name melange
+/// told them.
+fn get_builtin(name: &str) -> Option<(&'static str, String)> {
     match name {
-        "passive-eq1a" | "passive-eq" => Some(BUILTIN_PASSIVE_EQ.to_string()),
+        "passive-eq1a" | "passive-eq" => {
+            Some(("passive-eq1a", BUILTIN_PASSIVE_EQ.to_string()))
+        }
         _ => None,
     }
 }
