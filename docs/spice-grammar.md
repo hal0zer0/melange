@@ -57,7 +57,8 @@ Cc emit 0 100p
 
 **Syntax:**
 ```
-Lname n+ n- value [ISAT=saturation_current [LAIR=fraction | CORE=class]]
+Lname n+ n- value [ISAT=current [ISAT_DROP=d [ISAT_BASIS=incremental|apparent]] | L_AT_IDC=L,I]
+                  [LAIR=fraction | CORE=class]
 ```
 
 **Parameters:**
@@ -66,9 +67,12 @@ Lname n+ n- value [ISAT=saturation_current [LAIR=fraction | CORE=class]]
 | `n+` | Positive terminal node |
 | `n-` | Negative terminal node |
 | `value` | Inductance in henries (H) |
-| `ISAT` | (Optional) Core saturation current in amps, > 0. When present, flux follows `Φ(I) = L_mag·ISAT·tanh(I/ISAT) + L_air·I` with `L_air = LAIR·value` and `L_mag = value − L_air`, so the incremental inductance `L_mag/cosh²(I/ISAT) + L_air` falls from `value` toward the air-core `L_air`. At `I = ISAT` the magnetizing slope is 0.42 of its small-signal value. |
-| `LAIR` | (Optional, needs `ISAT`) Air-core floor as a fraction of `value`, `0 ≤ LAIR < 1`; a measured saturated-to-unsaturated inductance ratio is best. `LAIR=0` is accepted with a notice: the slope then goes to zero in deep saturation. |
-| `CORE` | (Optional, needs `ISAT`, not with `LAIR`) Rule-of-thumb floor by core class: `gapped` 1e-3, `steel` 3e-4, `nickel` 3e-5. With neither `LAIR` nor `CORE`, 3e-4 (ungapped steel) is used and a notice is printed. |
+| `ISAT` | (Optional) The model's saturation current in amps, > 0: the tanh scale current. Flux follows `Φ(I) = L_mag·ISAT·tanh(I/ISAT) + L_air·I` with `L_air = LAIR·value` and `L_mag = value − L_air`, so the core's saturation flux is `L_mag·ISAT` (volt-seconds, ~ `B_sat·A_core·N`), and the incremental inductance `L_mag/cosh²(I/ISAT) + L_air` falls from `value` toward `L_air`. At `I = ISAT` it is `0.42·L_mag + L_air`. This is **not** a datasheet "saturation current"; give one with `ISAT_DROP=`. |
+| `ISAT_DROP` | (Optional, needs `ISAT`) Makes `ISAT` a datasheet rating: the current at which the inductance has fallen by the fraction `d` (0 < d < 1; e.g. `0.2` for "Isat at 20 % drop"). melange converts it to the model's `ISAT` exactly against the winding's law, air floor and (on a shared core) coupling included. A drop the saturable part cannot reach is refused. For LAIR 3e-4 the model's ISAT is 3.05 / 2.08 / 1.63 × the rated current at 10 / 20 / 30 % (incremental). |
+| `ISAT_BASIS` | (Optional, needs `ISAT_DROP`) `incremental` (default): the inductance quoted is `dΦ/dI`, what an LCR meter's small signal over a DC bias measures, the usual datasheet practice. `apparent`: it is `Φ/I`, e.g. from a volt-second measurement (1.71 / 1.13 / 0.84 × at 10 / 20 / 30 %). |
+| `L_AT_IDC` | (Optional, instead of `ISAT`) `L_AT_IDC=L,I` (no spaces): the inductance is `L` at DC bias `I`, the "L at rated DC" rating of chokes and single-ended output transformers. With `value` as the unbiased inductance it is an incremental drop of `1 − L/value` at `I`. Needs `L < value`. |
+| `LAIR` | (Optional, needs `ISAT` or `L_AT_IDC`) Air-core floor as a fraction of `value`, `0 ≤ LAIR < 1`; a measured saturated-to-unsaturated inductance ratio is best. `LAIR=0` is accepted with a notice: the slope then goes to zero in deep saturation. |
+| `CORE` | (Optional, needs `ISAT` or `L_AT_IDC`, not with `LAIR`) Rule-of-thumb floor by core class: `gapped` 1e-3, `steel` 3e-4, `nickel` 3e-5. With neither `LAIR` nor `CORE`, 3e-4 (ungapped steel) is used and a notice is printed. |
 
 **Examples:**
 ```spice
@@ -76,7 +80,13 @@ L1 in out 10m
 Lchoke vcc coll 100u
 Lcore a b 100m ISAT=20m CORE=steel ; saturating inductor
 Lchoke a b 5 ISAT=20m LAIR=1e-3     ; saturating choke, explicit floor
+Lpsu vcc bplus 10 L_AT_IDC=7,100m CORE=gapped   ; PSU choke rated 7 H at 100 mA DC
+Lsmd a b 100u ISAT=2 ISAT_DROP=0.3 CORE=gapped  ; choke datasheet: Isat 2 A at 30 % drop
 ```
+
+**Where the numbers come from:**
+- `ISAT`: power and SMD chokes quote a drop (10-30 %, per manufacturer); read it off and give `ISAT_DROP=`. Tube-era chokes and single-ended output transformers are rated "L at rated DC"; give `L_AT_IDC=`, with `value` the unbiased inductance. Microphone and line transformers quote a maximum level at a frequency instead, which depends on source impedance; it does not convert to an `ISAT`.
+- `LAIR`, best first: a measured inductance of the winding with the core removed or fully saturated; core data (effective permeability with the gap, plus the coil's air-core inductance); the `CORE=` class. Datasheets almost never print it.
 
 **Notes on saturating inductors:**
 - Solved inside the Newton loop on the nodal full-LU sub-path; `--nodal-subpath schur` is refused

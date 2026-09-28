@@ -856,6 +856,34 @@ pub fn resolve_air_floor(floor: Option<SatFloor>) -> (f64, &'static str) {
     }
 }
 
+/// How an authored `ISAT=` relates to the model's saturation current.
+///
+/// The model's `ISAT` is the tanh scale current: the core's saturation flux is
+/// `L_mag·ISAT`, and at `i = ISAT` the magnetizing slope is `sech²(1) = 0.42`
+/// of its small-signal value. A datasheet "saturation current" is a different
+/// quantity, the current at which the inductance has dropped by some fraction;
+/// these forms convert it (analog-EE review).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum IsatSpec {
+    /// `ISAT=<i> ISAT_DROP=<d> [ISAT_BASIS=incremental|apparent]`: at `i` the
+    /// inductance has fallen by the fraction `d`.
+    Drop { drop: f64, basis: IsatBasis },
+    /// `L_AT_IDC=<L>,<I>`: the inductance is `L` at DC bias `I` (the "L at
+    /// rated DC" rating of chokes and single-ended output transformers). An
+    /// incremental drop of `1 - L/L0` at `I`.
+    LAtIdc { l: f64 },
+}
+
+/// Which inductance a datasheet drop refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsatBasis {
+    /// `dΦ/di` at the bias point: an LCR meter's small signal over a DC bias,
+    /// the usual measurement. The default.
+    Incremental,
+    /// `Φ/i`, e.g. from a volt-second measurement.
+    Apparent,
+}
+
 /// A circuit element (component).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Element {
@@ -885,14 +913,19 @@ pub enum Element {
         value: f64,
         ic: Option<f64>,
     },
-    /// Inductor: Lname n+ n- value [ISAT=value [LAIR=fraction | CORE=class]]
+    /// Inductor: Lname n+ n- value [ISAT=value [ISAT_DROP=d [ISAT_BASIS=b]] |
+    /// L_AT_IDC=L,I] [LAIR=fraction | CORE=class]
     Inductor {
         name: String,
         n_plus: String,
         n_minus: String,
         value: f64,
         /// Saturation current for iron-core model. None = linear (default).
+        /// As authored: with `isat_spec` it is a datasheet current, converted
+        /// to the model's tanh scale current when the MNA is built.
         isat: Option<f64>,
+        /// How `isat` was specified; `None` = it is the model's ISAT.
+        isat_spec: Option<IsatSpec>,
         /// Air-core floor of a saturating inductor's incremental inductance, as
         /// authored (`LAIR=` or `CORE=`); `None` takes the default. Resolve
         /// with [`resolve_air_floor`].
@@ -1334,6 +1367,7 @@ impl Element {
                 n_minus,
                 value,
                 isat,
+                isat_spec,
                 air_floor,
             } => Element::Inductor {
                 name: prefixed(name),
@@ -1341,6 +1375,7 @@ impl Element {
                 n_minus: remap(n_minus),
                 value: *value,
                 isat: *isat,
+                isat_spec: *isat_spec,
                 air_floor: *air_floor,
             },
             Element::VoltageSource {
@@ -4577,13 +4612,17 @@ impl Parser {
         self.require_parts(
             parts,
             4,
-            "Lname n+ n- value [ISAT=value [LAIR=fraction | CORE=gapped|steel|nickel]]",
+            "Lname n+ n- value [ISAT=value [ISAT_DROP=d [ISAT_BASIS=incremental|apparent]] | \
+             L_AT_IDC=L,I] [LAIR=fraction | CORE=gapped|steel|nickel]",
         )?;
         self.check_self_connection(parts[1], parts[2], parts[0])?;
         let value = self.parse_positive_value(parts[3], "Inductor")?;
         let mut isat = None;
         let mut lair = None;
         let mut core = None;
+        let mut drop = None;
+        let mut basis = None;
+        let mut l_at_idc = None;
         // Keyword matched case-insensitively; the value keeps its case so SPICE
         // suffixes parse exactly as elsewhere.
         let key = |part: &str, k: &str| -> Option<String> {
@@ -4610,6 +4649,49 @@ impl Parser {
                     )));
                 }
                 lair = Some(v);
+            } else if let Some(stripped) = key(part, "ISAT_DROP=") {
+                let v = parse_value(&stripped)
+                    .map_err(|_| self.error(format!("Invalid ISAT_DROP value: {}", stripped)))?;
+                if !(v > 0.0 && v < 1.0) {
+                    return Err(self.error(format!(
+                        "Inductor '{}': ISAT_DROP is the fraction the inductance has fallen by \
+                         at ISAT (0 < ISAT_DROP < 1), got {}",
+                        parts[0], stripped
+                    )));
+                }
+                drop = Some(v);
+            } else if let Some(stripped) = key(part, "ISAT_BASIS=") {
+                basis = Some(match stripped.to_ascii_uppercase().as_str() {
+                    "INCREMENTAL" => IsatBasis::Incremental,
+                    "APPARENT" => IsatBasis::Apparent,
+                    _ => {
+                        return Err(self.error(format!(
+                            "Inductor '{}': ISAT_BASIS must be incremental or apparent, got '{}'",
+                            parts[0], stripped
+                        )))
+                    }
+                });
+            } else if let Some(stripped) = key(part, "L_AT_IDC=") {
+                let fields: Vec<&str> = stripped.split(',').collect();
+                let parsed = match fields.as_slice() {
+                    [l, i] => parse_value(l).ok().zip(parse_value(i).ok()),
+                    _ => None,
+                };
+                let Some((l, i)) = parsed else {
+                    return Err(self.error(format!(
+                        "Inductor '{}': L_AT_IDC takes <inductance>,<DC current> with no \
+                         spaces (e.g. L_AT_IDC=17,100m), got '{}'",
+                        parts[0], stripped
+                    )));
+                };
+                if !(l > 0.0 && l < value && i > 0.0 && i.is_finite()) {
+                    return Err(self.error(format!(
+                        "Inductor '{}': L_AT_IDC needs 0 < L < the inductance ({}) and a \
+                         positive current, got '{}'",
+                        parts[0], value, stripped
+                    )));
+                }
+                l_at_idc = Some((l, i));
             } else if let Some(stripped) = key(part, "CORE=") {
                 core = Some(match stripped.to_ascii_uppercase().as_str() {
                     "GAPPED" => CoreClass::Gapped,
@@ -4624,7 +4706,8 @@ impl Parser {
                 });
             } else {
                 return Err(self.error(format!(
-                    "Inductor '{}': unrecognized trailing token '{}' (supported: ISAT=, LAIR=, CORE=)",
+                    "Inductor '{}': unrecognized trailing token '{}' (supported: ISAT=, \
+                     ISAT_DROP=, ISAT_BASIS=, L_AT_IDC=, LAIR=, CORE=)",
                     parts[0], part
                 )));
             }
@@ -4640,9 +4723,52 @@ impl Parser {
             (None, Some(c)) => Some(SatFloor::Class(c)),
             (None, None) => None,
         };
+        let isat_spec = match (l_at_idc, drop) {
+            (Some(_), _) if isat.is_some() || drop.is_some() => {
+                return Err(self.error(format!(
+                    "Inductor '{}': L_AT_IDC= fixes the saturation current from the \
+                     inductance itself; do not also give ISAT= or ISAT_DROP=",
+                    parts[0]
+                )))
+            }
+            (Some((l, i)), _) => {
+                isat = Some(i);
+                if basis.is_some() {
+                    return Err(self.error(format!(
+                        "Inductor '{}': L_AT_IDC= is an incremental rating; ISAT_BASIS= \
+                         applies to ISAT_DROP= only",
+                        parts[0]
+                    )));
+                }
+                Some(IsatSpec::LAtIdc { l })
+            }
+            (None, Some(d)) => {
+                if isat.is_none() {
+                    return Err(self.error(format!(
+                        "Inductor '{}': ISAT_DROP= describes the current given by ISAT= \
+                         and needs it on the same line",
+                        parts[0]
+                    )));
+                }
+                Some(IsatSpec::Drop {
+                    drop: d,
+                    basis: basis.unwrap_or(IsatBasis::Incremental),
+                })
+            }
+            (None, None) => {
+                if basis.is_some() {
+                    return Err(self.error(format!(
+                        "Inductor '{}': ISAT_BASIS= needs ISAT_DROP=",
+                        parts[0]
+                    )));
+                }
+                None
+            }
+        };
         if air_floor.is_some() && isat.is_none() {
             return Err(self.error(format!(
-                "Inductor '{}': LAIR= and CORE= describe saturation and need ISAT= on the same line",
+                "Inductor '{}': LAIR= and CORE= describe saturation and need ISAT= (or \
+                 L_AT_IDC=) on the same line",
                 parts[0]
             )));
         }
@@ -4652,6 +4778,7 @@ impl Parser {
             n_minus: parts[2].to_string(),
             value,
             isat,
+            isat_spec,
             air_floor,
         })
     }

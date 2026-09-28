@@ -216,6 +216,64 @@ pub struct InductorElement {
 ///
 /// A fraction of a winding's own inductance is the same fraction referred to
 /// `L_ref` (both scale by turns squared).
+/// Convert a datasheet saturation rating to the model's tanh scale current.
+///
+/// The winding's terminal inductance, as a fraction of its small-signal L0, is
+/// `(1 - k) + (k - F)·sech²(x) + F` (incremental) or
+/// `(1 - k) + F + (k - F)·tanh(x)/x` (apparent, `Φ/i`), with `x = i/ISAT`,
+/// `k` the coupling of a shared core (1 for a single inductor) and `F` the
+/// magnetizing air floor in units of L0. A rating that the drop says was
+/// reached at `i_ds` fixes `x`, and `ISAT = i_ds / x` (analog-EE review). A
+/// drop the saturable part `k - F` cannot reach is refused.
+pub fn isat_from_datasheet(
+    name: &str,
+    i_ds: f64,
+    spec: crate::parser::IsatSpec,
+    l0: f64,
+    k: f64,
+    floor: f64,
+) -> Result<f64, MnaError> {
+    use crate::parser::{IsatBasis, IsatSpec};
+    let (drop, basis, what) = match spec {
+        IsatSpec::Drop { drop, basis } => (drop, basis, format!("ISAT_DROP={drop}")),
+        IsatSpec::LAtIdc { l } => (
+            1.0 - l / l0,
+            IsatBasis::Incremental,
+            format!(
+                "L_AT_IDC={l:e},{i_ds:e} (a drop of {:.4} from {l0:e})",
+                1.0 - l / l0
+            ),
+        ),
+    };
+    let m = k - floor;
+    if !(drop > 0.0 && drop < m) {
+        return Err(MnaError::InvalidParameter(format!(
+            "{name}: {what} cannot be reached. Only {m:.6} of the inductance can saturate \
+             (the rest is leakage 1 - k = {:.3e} and the air-core floor {floor:.3e}), so the \
+             inductance never falls by {drop:.4}.",
+            1.0 - k
+        )));
+    }
+    let ratio = (m - drop) / m;
+    let x = match basis {
+        IsatBasis::Incremental => (1.0 / ratio.sqrt()).acosh(),
+        IsatBasis::Apparent => {
+            // tanh(x)/x falls monotonically from 1 at x = 0.
+            let (mut lo, mut hi) = (1e-9f64, 1e9f64);
+            for _ in 0..200 {
+                let mid = (lo * hi).sqrt();
+                if mid.tanh() / mid > ratio {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            (lo * hi).sqrt()
+        }
+    };
+    Ok(i_ds / x)
+}
+
 pub fn magnetizing_air_floor(floor: Option<crate::parser::SatFloor>, k: f64) -> f64 {
     match floor {
         Some(crate::parser::SatFloor::Explicit(lair)) => lair - (1.0 - k),
@@ -3442,6 +3500,7 @@ impl MnaBuilder {
             node_j: usize,
             value: f64,
             isat: Option<f64>,
+            isat_spec: Option<crate::parser::IsatSpec>,
             air_floor: Option<crate::parser::SatFloor>,
         }
         let mut inductor_refs: std::collections::HashMap<String, InductorRef> =
@@ -3452,7 +3511,7 @@ impl MnaBuilder {
                 if inductor_refs.contains_key(&lower) {
                     continue;
                 }
-                if let Some(Element::Inductor { name, n_plus, n_minus, value, isat, air_floor }) =
+                if let Some(Element::Inductor { name, n_plus, n_minus, value, isat, isat_spec, air_floor }) =
                     netlist.elements.iter().find(|e| {
                         matches!(e, Element::Inductor { name, .. } if name.eq_ignore_ascii_case(ind_name))
                     })
@@ -3472,6 +3531,7 @@ impl MnaBuilder {
                         node_j: self.node_map[n_minus],
                         value: effective_value,
                         isat: *isat,
+                        isat_spec: *isat_spec,
                         air_floor: *air_floor,
                     });
                 }
@@ -3803,6 +3863,43 @@ impl MnaBuilder {
                         }
                     }
                 }
+                // A datasheet rating converts against the core: its coupling and
+                // magnetizing floor are in the winding's terminal law. The
+                // agreement check above compares authored values, so a datasheet
+                // form is accepted on one winding only.
+                let rated: Vec<&String> = members
+                    .iter()
+                    .filter(|m| inductor_refs[m.as_str()].isat.is_some())
+                    .collect();
+                if rated.len() > 1
+                    && rated
+                        .iter()
+                        .any(|m| inductor_refs[m.as_str()].isat_spec.is_some())
+                {
+                    return Err(MnaError::TopologyError(format!(
+                        "coupled inductors {{{}}} share one core, and more than one carries \
+                         ISAT with a datasheet form (ISAT_DROP= or L_AT_IDC=). Rate the core \
+                         on one winding only.",
+                        members.join(", ")
+                    )));
+                }
+                let floor_frac = core_floor_value
+                    .map(|(_, v)| v)
+                    .unwrap_or_else(|| magnetizing_air_floor(None, k_core));
+                let core_isat = match rated.first() {
+                    Some(m) => {
+                        let ind = &inductor_refs[m.as_str()];
+                        let authored = ind.isat.unwrap_or_default();
+                        let model = match ind.isat_spec {
+                            Some(spec) => isat_from_datasheet(
+                                m, authored, spec, ind.value, k_core, floor_frac,
+                            )?,
+                            None => authored,
+                        };
+                        Some(model * (ind.value / l_ref).sqrt())
+                    }
+                    None => core_isat,
+                };
                 let ref_internal_p = internal_nodes_p[ref_idx];
                 let ref_neg = inductor_refs[&members[ref_idx]].node_j;
                 // Exact magnetizing inductance is k·L_ref (primary-referred), not
@@ -5245,6 +5342,7 @@ impl MnaBuilder {
                 n_minus,
                 value,
                 isat,
+                isat_spec,
                 air_floor,
             } => {
                 let node_i = self.node_map[n_plus];
@@ -5261,7 +5359,20 @@ impl MnaBuilder {
                     node_i,
                     node_j,
                     value: *value,
-                    isat: *isat,
+                    // A datasheet rating is converted against this inductor's
+                    // own law (k = 1). A winding of a shared core is converted
+                    // again, against the core, when the T-model is built.
+                    isat: match (*isat, *isat_spec) {
+                        (Some(i), Some(spec)) => Some(isat_from_datasheet(
+                            name,
+                            i,
+                            spec,
+                            *value,
+                            1.0,
+                            crate::parser::resolve_air_floor(*air_floor).0,
+                        )?),
+                        (i, _) => i,
+                    },
                     air_floor: *air_floor,
                     shared_core_k: None,
                 });

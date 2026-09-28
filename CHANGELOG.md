@@ -174,6 +174,15 @@ generated state is smaller.
 
 ### Added
 
+- Saturating inductors take datasheet saturation ratings directly.
+  `ISAT=<I> ISAT_DROP=<d>` says the inductance has fallen by the fraction `d`
+  at `I` (`ISAT_BASIS=incremental`, the default, or `apparent` for `Φ/I`), and
+  `L_AT_IDC=<L>,<I>` gives the "L at rated DC" rating of chokes and
+  single-ended output transformers. Both convert exactly to the model's
+  saturation current against the winding's law, including its air-core floor
+  and, on a shared core, the coupling; a drop the core cannot reach is
+  refused. The model's `ISAT` itself is the tanh scale current, which is
+  1.6-3× a typical datasheet rating.
 - `--cpu-baseline {x86-64-v3|x86-64-v2|x86-64}` on `compile --format plugin`.
   The default stays `x86-64-v3` (AVX2, Haswell 2013+, fastest), but a plugin
   built at that baseline crashes on load on an older CPU, and the only way out
