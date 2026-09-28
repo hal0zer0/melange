@@ -801,7 +801,7 @@ fn uncap_opamp_aol(g_dc: &[Vec<f64>], mna: &MnaSystem) -> Option<Vec<Vec<f64>>> 
     let mut any = false;
     for oa in &mna.opamps {
         let out = oa.n_out_idx;
-        if out == 0 || oa.aol <= AOL_DC_MAX || out - 1 >= n_aug {
+        if out == 0 || oa.aol <= AOL_DC_MAX || out > n_aug {
             continue;
         }
         let o = out - 1;
