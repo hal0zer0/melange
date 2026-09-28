@@ -177,7 +177,12 @@ generated state is smaller.
   switch change. Once latched, the output matches a `--backward-euler` build
   of the same circuit to 1e-10. On the golden set it fires once, on an open
   transformer driven into saturation by a 5 V step, and removes a 6 mV
-  sample-to-sample ring.
+  sample-to-sample ring. Deep in saturation this ringing makes the inductor
+  current overshoot its physical limit by about 20 %, and oversampling does
+  not cure it; the net brings it back to the limit. Because the switch lasts
+  for the rest of the stream, one saturating transient costs the remainder
+  about 2e-4 on the fundamental (up to 0.3 % on a choke-loaded stage's
+  output).
 
 - **Removed the old decimated saturation machinery from generated code.**
   Saturating inductors have run as flux devices inside the full-LU Newton loop

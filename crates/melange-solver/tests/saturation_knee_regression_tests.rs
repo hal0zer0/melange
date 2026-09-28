@@ -343,6 +343,69 @@ fn c1_jacobian_deletion_is_caught_at_every_newton_site() {
     );
 }
 
+/// Deep saturation rings under the trapezoidal rule: as L_diff → 0 the RL
+/// step factor tends to −1, and the current overshoots the physical ceiling
+/// V/R. Same scalar recurrence as C1's reference: at 1× the peak is 11.83 and
+/// 23.94 Isat at 10 and 20 V against a ceiling of 10 and 20, and 4× does not
+/// cure it (10.49, 24.69). The 1024× recurrence lands on the ceiling.
+///
+/// melange closes this with the runtime BE-latch, which detects the
+/// sample-to-sample alternation and switches the instance to backward Euler.
+/// The cost is first-order accuracy for the REST of the stream, because the
+/// latch is sticky: here H1 moves 1.8e-4 (10 V) and 6.8e-5 (20 V) relative.
+///
+/// (drive V, 1024× peak/Isat, 1024× H1 A)
+const C1_DEEP: [(f64, f64, f64); 2] = [(10.0, 10.0000, 9.162930e-2), (20.0, 20.0000, 1.930403e-1)];
+
+#[test]
+fn c1_deep_saturation_ring_is_caught_by_the_latch() {
+    let code = nodal_code(C1, "a");
+    let drives: Vec<String> = C1_DEEP.iter().map(|r| format!("{:?}", r.0)).collect();
+    let main = format!(
+        "fn main() {{
+    for amp in [{drives}] {{
+        let fs = {FS:?};
+        let mut s = CircuitState::default();
+        s.set_sample_rate(fs);
+        let (mut pk, mut re, mut im, mut cnt) = (0.0f64, 0.0f64, 0.0f64, 0usize);
+        for k in 0..(2.0 * fs) as usize {{
+            let w = 2.0 * std::f64::consts::PI * {F:?} * k as f64 / fs;
+            let _ = process_sample(amp * w.sin(), &mut s);
+            if k >= fs as usize {{
+                let i = s.v_prev[SAT_IND_0_AUG_ROW];
+                pk = pk.max(i.abs());
+                re += i * w.cos();
+                im += i * w.sin();
+                cnt += 1;
+            }}
+        }}
+        let h1 = 2.0 * (re / cnt as f64).hypot(im / cnt as f64);
+        println!(\"{{}} {{}} {{}} {{}}\", pk / 10e-3, h1, s.diag_be_latch_count, s.diag_nr_hold_count + s.diag_substep_count);
+    }}
+}}",
+        drives = drives.join(", ")
+    );
+    let out = support::compile_and_run(&code, &main, "c1_deep").stdout;
+    for (line, &(amp, pk_ref, h1_ref)) in out.lines().zip(C1_DEEP.iter()) {
+        let v: Vec<f64> = line
+            .split_whitespace()
+            .map(|t| t.parse().unwrap())
+            .collect();
+        let (pk, h1, latches, bad) = (v[0], v[1], v[2], v[3]);
+        assert_eq!(bad, 0.0, "{amp} V: held or sub-stepped samples");
+        assert!(latches >= 1.0, "{amp} V: the latch never fired on the ring");
+        assert!(
+            ((pk - pk_ref) / pk_ref).abs() <= 1e-2 && pk <= amp / 100.0 / 10e-3 * (1.0 + 1e-6),
+            "{amp} V: peak {pk:.4} Isat vs 1024x {pk_ref} (ceiling {})",
+            amp / 100.0 / 10e-3
+        );
+        assert!(
+            ((h1 - h1_ref) / h1_ref).abs() <= 5e-4,
+            "{amp} V: H1 {h1:.6e} vs 1024x {h1_ref:.6e}"
+        );
+    }
+}
+
 /// A choke-loaded common-source stage driven into its choke's saturation
 /// (M = 2, nodal full-LU): the deep-saturation witness with devices.
 const CHOKE_STAGE: &str = "\
