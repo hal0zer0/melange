@@ -123,6 +123,11 @@ generated state is smaller.
   saturating inductors (0-2 % more on the golden set). Golden renders change
   by less than 0.00001 dB: the one biased choke there stays below 37 % of its
   saturation current, where the core is nearly linear and the error is small.
+  The recovery paths (the smaller-step retry and the backward-Euler
+  fallback) now check the inductor's flux the same way. Before, the retry
+  never checked it at all, and neither path checked it against the flux law,
+  so a sample either path solved could carry an error the main solve would
+  have rejected.
 - **`.pot` with no default accepted a resistor value outside its own range**,
   so the knob started at a setting it could not return to. It is now refused,
   as an explicit default and `--pot` already were. A one-word label no longer

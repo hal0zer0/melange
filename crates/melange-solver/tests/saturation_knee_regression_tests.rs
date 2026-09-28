@@ -245,6 +245,104 @@ fn c1_gates_catch_a_broken_flux_device() {
     );
 }
 
+/// Every Newton site that can commit a sample (main loop, adaptive sub-step,
+/// backward-Euler fallback) checks the flux row the same way, so a wrong flux
+/// Jacobian is caught wherever it is. Deleting the Jacobian correction while
+/// keeping the companion moves the Newton fixed point off the solution; the
+/// step check alone accepts it. Deleted at one site, the next site down the
+/// ladder recovers the right answer; deleted everywhere, every sample is
+/// counted as held. With a site's residual removed as well, that site accepts
+/// the wrong point and nothing is counted, which is what shows the residual
+/// is the detector.
+#[test]
+fn c1_jacobian_deletion_is_caught_at_every_newton_site() {
+    let code = nodal_code(C1, "a");
+    let jac = |site: &str| format!("{site}[SAT_IND_0_AUG_ROW][SAT_IND_0_AUG_ROW] +=");
+    let (main, sub, be) = (jac("chord_lu"), jac("g_s"), jac("g_aug"));
+    let flag = |f: &str| format!("{f} = true; }}");
+    let mutate = |dels: &[&String], blind: Option<String>| -> String {
+        let mut hits = vec![0usize; dels.len()];
+        let mut blinded = 0usize;
+        let out: Vec<&str> = code
+            .lines()
+            .filter(|l| {
+                for (h, d) in hits.iter_mut().zip(dels) {
+                    if l.contains(d.as_str()) {
+                        *h += 1;
+                        return false;
+                    }
+                }
+                if let Some(f) = &blind {
+                    if l.contains("acc.abs()") && l.contains(f.as_str()) {
+                        blinded += 1;
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+        assert!(
+            hits.iter().all(|&h| h == 1),
+            "test premise: one stamp per site, got {hits:?}"
+        );
+        assert!(
+            blind.is_none() || blinded == 1,
+            "test premise: the site's residual line"
+        );
+        out.join("\n")
+    };
+    // (peak i_L / Isat, sub-steps, BE fallbacks, holds) over 1-2 s at 5 V.
+    let run = |code: &str, tag: &str| -> (f64, u64, u64, u64) {
+        let main_fn = "fn main() {
+    let (fs, f) = (48000.0f64, 30.0f64);
+    let mut s = CircuitState::default();
+    s.set_sample_rate(fs);
+    let mut pk = 0.0f64;
+    for i in 0..(2.0 * fs) as usize {
+        let _ = process_sample(5.0 * (2.0 * std::f64::consts::PI * f * i as f64 / fs).sin(), &mut s);
+        if i >= fs as usize { pk = pk.max(s.v_prev[SAT_IND_0_AUG_ROW].abs()); }
+    }
+    println!(\"{} {} {} {}\", pk / 10e-3, s.diag_substep_count, s.diag_be_fallback_count, s.diag_nr_hold_count);
+}";
+        let out = support::compile_and_run(code, main_fn, tag).stdout;
+        let v: Vec<f64> = out.split_whitespace().map(|t| t.parse().unwrap()).collect();
+        (v[0], v[1] as u64, v[2] as u64, v[3] as u64)
+    };
+    let pk_ref = C1_REF[2].1;
+    let right = |pk: f64| ((pk - pk_ref) / pk_ref).abs() < 1e-4;
+
+    let (pk, subs, _, holds) = run(&mutate(&[&main], None), "c1_jac_main");
+    assert!(
+        subs > 1000 && holds == 0 && right(pk),
+        "main: pk {pk} sub {subs} hold {holds}"
+    );
+
+    let (pk, _, bes, holds) = run(&mutate(&[&main, &sub], None), "c1_jac_sub");
+    assert!(
+        bes > 1000 && holds == 0 && right(pk),
+        "sub-step: pk {pk} be {bes} hold {holds}"
+    );
+    let (pk, _, _, holds) = run(
+        &mutate(&[&main, &sub], Some(flag("sub_step_exceeded"))),
+        "c1_jac_sub_blind",
+    );
+    assert!(
+        holds == 0 && !right(pk),
+        "sub-step without its residual must accept the wrong point: pk {pk}"
+    );
+
+    let (_, _, _, holds) = run(&mutate(&[&main, &sub, &be], None), "c1_jac_all");
+    assert!(holds > 1000, "all sites: only {holds} held samples");
+    let (pk, _, _, holds) = run(
+        &mutate(&[&main, &sub, &be], Some(flag("be_step_exceeded"))),
+        "c1_jac_be_blind",
+    );
+    assert!(
+        holds == 0 && !right(pk),
+        "BE without its residual must accept the wrong point: pk {pk}"
+    );
+}
+
 #[test]
 fn c2_shared_core_saturates_on_magnetizing_not_winding_current() {
     // Loaded: primary current far above Isat, core linear.

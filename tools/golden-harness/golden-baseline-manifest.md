@@ -12,6 +12,8 @@ Generated 2026-07-21. Refreshed 2026-08-30 against melange **e53573c** (correctn
 
 **Checked 2026-09-28 (saturating inductor inside the op-amp rail pin).** Against the previous capture: 180/180 identical. Generated source differs on 9 decks: four full-LU decks that can pin an op-amp (gravity, moonladder, sad-bastard, sus-bus) gain the unsolved-pin counter, 0 on every render; the five saturating decks carry a restructured flux-row residual with the same arithmetic. No golden deck combines a pinned op-amp with a saturating inductor; that combination is gated in `opamp_railing_regression_tests.rs`.
 
+**Checked 2026-09-28 (flux checks in the recovery loops).** 180/180 identical; generated source differs on the five saturating decks only. No golden render reaches the sub-step or backward-Euler loop on a saturating deck; the checks are gated by `c1_jacobian_deletion_is_caught_at_every_newton_site`.
+
 Machine-readable twin: `tools/golden-harness/golden-baseline-manifest.json`.
 
 ## Compile recipe

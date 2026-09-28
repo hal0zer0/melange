@@ -304,14 +304,12 @@ fn strip_outer_parens(expr: &str) -> &str {
 ///
 /// ## Scope
 ///
-/// The main trapezoidal/BE NR loop and the op-amp active-set pinned Newton,
-/// so a sample counts as solved by the same definition on either. `v`, `mat`
-/// and `flag` name the site's iterate, its base matrix (`A = G + alpha·C` at
-/// the site's alpha: mutual-inductance entries scale with it) and the
-/// not-converged flag the check sets. The adaptive sub-step loop and the
-/// backward-Euler fallback loop carry no residual check of any kind today
-/// (device or flux); closing that is a separate change with its own blast
-/// radius.
+/// Every Newton site that can commit a sample: the main trapezoidal/BE loop,
+/// the adaptive sub-step, the backward-Euler fallback and the op-amp
+/// active-set pinned Newton, so a sample counts as solved by one definition
+/// wherever it was solved. `v`, `mat` and `flag` name the site's iterate, its
+/// base matrix (`A = G + alpha·C` at the site's alpha: mutual-inductance
+/// entries scale with it) and the not-converged flag the check sets.
 #[allow(clippy::too_many_arguments)]
 fn emit_sat_ind_row_residual(
     code: &mut String,
@@ -8168,6 +8166,12 @@ impl RustEmitter {
                 code.push_str(
                     "                    if !lu_solve(&mut g_s, &mut v_new_s) { break; }\n",
                 );
+                // Saturating inductors: the node-row step below never looks at a
+                // branch-current row, so the flux rows get the main loop's step
+                // check and flux-row residual through this flag.
+                if has_sat_ind {
+                    code.push_str("                    let mut sub_step_exceeded = false;\n");
+                }
                 // Op-amp supply rail clamping (VCC/VEE) in sub-step. Hard mode
                 // only — same gating rationale as the trap-loop per-iteration
                 // clamp above: None must stay unbounded, ActiveSet/ActiveSetBe
@@ -8231,6 +8235,12 @@ impl RustEmitter {
                     );
                     code.push_str("                    let mut max_step = 0.0f64;\n");
                     code.push_str("                    for i in 0..N_NODES { let step = v_new_s[i] - v_sub[i]; if step.abs() > max_step { max_step = step.abs(); } }\n");
+                    for si in &ir.saturating_inductors {
+                        let k = si.aug_row;
+                        code.push_str(&format!(
+                            "                    {{ let step = alpha * (v_new_s[{k}] - v_sub[{k}]); let threshold = 1e-3 * v_sub[{k}].abs().max((v_sub[{k}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ sub_step_exceeded = true; }} }}\n"
+                        ));
+                    }
                     code.push_str("                    for i in 0..N { v_sub[i] += alpha * (v_new_s[i] - v_sub[i]); }\n");
                 } else {
                     code.push_str("                    let mut max_step = 0.0f64;\n");
@@ -8240,6 +8250,12 @@ impl RustEmitter {
                         "                        if step.abs() > max_step { max_step = step.abs(); }\n",
                     );
                     code.push_str("                    }\n");
+                    for si in &ir.saturating_inductors {
+                        let k = si.aug_row;
+                        code.push_str(&format!(
+                            "                    {{ let step = v_new_s[{k}] - v_sub[{k}]; let threshold = 1e-3 * v_sub[{k}].abs().max((v_sub[{k}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ sub_step_exceeded = true; }} }}\n"
+                        ));
+                    }
                     code.push_str("                    v_sub = v_new_s;\n");
                 }
                 // Re-evaluate devices at the updated v_sub so i_nl_sub is consistent.
@@ -8258,10 +8274,31 @@ impl RustEmitter {
                 // checked precondition of the line search — the true node-KCL
                 // residual within tolerance, so a line-search-shrunk step can
                 // never report a non-root as converged.
-                if use_line_search {
-                    code.push_str("                    if max_step < TOL + 1e-3 && kcl_residual(&v_sub, &rhs_s, &a_sub, state).1 {\n");
+                if has_sat_ind {
+                    emit_sat_ind_row_residual(
+                        &mut code,
+                        ir,
+                        setter_stamps,
+                        "rhs_s",
+                        "alpha_sub",
+                        None,
+                        "v_sub",
+                        "a_sub",
+                        "sub_step_exceeded",
+                        "                    ",
+                    );
+                }
+                let sat_gate = if has_sat_ind {
+                    " && !sub_step_exceeded"
                 } else {
-                    code.push_str("                    if max_step < TOL + 1e-3 {\n");
+                    ""
+                };
+                if use_line_search {
+                    code.push_str(&format!("                    if max_step < TOL + 1e-3{sat_gate} && kcl_residual(&v_sub, &rhs_s, &a_sub, state).1 {{\n"));
+                } else {
+                    code.push_str(&format!(
+                        "                    if max_step < TOL + 1e-3{sat_gate} {{\n"
+                    ));
                 }
                 code.push_str("                        sub_converged = true;\n");
                 code.push_str("                        break;\n");
@@ -8651,6 +8688,21 @@ impl RustEmitter {
                 code.push_str("                    }\n");
                 code.push_str("                }\n");
                 code.push_str("            }\n\n");
+                // Flux-row residual, as in the main loop and the sub-step.
+                if has_sat_ind {
+                    emit_sat_ind_row_residual(
+                        &mut code,
+                        ir,
+                        setter_stamps,
+                        "rhs_be",
+                        &sat_alpha_be,
+                        None,
+                        "v",
+                        "state.a_be",
+                        "be_step_exceeded",
+                        "            ",
+                    );
+                }
 
                 // Node-KCL residual gate (ALWAYS) — precondition of the BE line
                 // search, same rationale as the trap loop.

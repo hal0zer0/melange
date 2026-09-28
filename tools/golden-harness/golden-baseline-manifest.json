@@ -1109,5 +1109,10 @@
     "why": "Saturating inductors solved inside the op-amp rail pin; a pinned solve that does not converge is now counted on full-LU (diag_nr_unconverged_commit_count, declared on full-LU builds that can pin an op-amp).",
     "vs_previous": "180 identical, 0 negligible, 0 changed; 0 held and 0 not-converged on both sides; the new counter is 0 on every render.",
     "generated_source": "Differs on 9 decks: gravity, moonladder, sad-bastard, sus-bus (the counter's declaration and increment at the pin-failure site) and the five saturating decks (the flux-row residual emitter restructured, same arithmetic). No golden deck combines a pinned op-amp with a saturating inductor."
+  },
+  "rebaseline_2026_09_28_recovery_flux_checks": {
+    "why": "The adaptive sub-step and backward-Euler fallback loops check the saturating-inductor flux row the same way as the main loop (step check on the branch-current row, flux-row residual).",
+    "vs_previous": "180 identical, 0 negligible, 0 changed; 0 held and 0 not-converged on both sides.",
+    "generated_source": "Differs on the five saturating decks only (the added checks in the two recovery loops). No golden render reaches either recovery loop on a saturating deck."
   }
 }
