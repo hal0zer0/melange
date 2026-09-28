@@ -4188,7 +4188,7 @@ impl Parser {
                 "Invalid {} value '{}'.{}",
                 component_type,
                 raw,
-                explain_rejected_value(raw)
+                explain_rejected_value(raw, component_type)
             ))
         })?;
         if value <= 0.0 || !value.is_finite() {
@@ -5462,7 +5462,47 @@ pub fn parse_value(s: &str) -> Result<f64, ParseFloatError> {
 /// real cross-engine hazard, but not this function's to fix: `2M2` warns from
 /// [`try_parse_infix`], and changing what those tokens mean would silently
 /// change existing decks' component values.)
-fn explain_rejected_value(raw: &str) -> String {
+/// The documented argument order for a directive, keyed by the label its
+/// parser passes to [`explain_rejected_value`]. Only directives whose fields
+/// are parsed as values need an entry; anything else simply gets no shape hint.
+fn directive_shape(context: &str) -> Option<&'static str> {
+    Some(match context {
+        c if c.starts_with(".pot") => ".pot Rname min_value max_value",
+        c if c.starts_with(".tolerance") => ".tolerance <percent>",
+        c if c.starts_with(".mismatch") => ".mismatch <percent>",
+        _ => return None,
+    })
+}
+
+/// `context` is the caller's label for the field being parsed (`"R"`,
+/// `".pot min"`, …). It is used to tell "you typed a number wrong" apart from
+/// "you put something that is not a number here at all" — two different
+/// mistakes that want two different answers.
+fn explain_rejected_value(raw: &str, context: &str) -> String {
+    let t = raw.trim();
+    // A token that does not even START like a number is not a mistyped value;
+    // it is a name, or an argument in the wrong position. Answering it with the
+    // scale-suffix reference is a confident wrong diagnosis — it explains how
+    // to write 4k7 to someone whose actual problem is that this field does not
+    // take a label. (`.pot RV1 Volume 0 50k` produced exactly that.)
+    let starts_numeric = t
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_digit() || c == '.' || c == '+' || c == '-');
+    // Only where the field belongs to a directive with a known argument order.
+    // In a bare component value (`R1 in out banana`) there is no position to
+    // get wrong, so "you don't know what a value looks like" is the real
+    // problem and the accepted-forms list below is the right answer.
+    if !t.is_empty() && !starts_numeric {
+        if let Some(shape) = directive_shape(context) {
+            return format!(
+                " That is not a value — it does not start with a digit, sign or \
+                 decimal point, so it reads as a name or an argument in the wrong \
+                 position rather than a mistyped number. The form is: {shape}."
+            );
+        }
+    }
+
     // Every claim here is measured against the parser, not inferred from it:
     // `f` is deliberately absent from the scale list because a trailing `f` in
     // an ELEMENT value is the Farad unit (`10f` = 10, with its own warning from
