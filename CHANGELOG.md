@@ -9,6 +9,30 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-09-27
+
+### Fixed
+
+- **`cargo test --workspace` did not compile**, so the 0.1.10 tag ships a test
+  suite that anyone cloning it cannot run. Three faults in `melange-cli` test
+  code, none of which touch shipped behaviour:
+  - a duplicated `#[test]` attribute in `sources.rs`. A test inserted above
+    `test_resolve_circuit` stranded that function's own attribute on a doc
+    comment, so the stray one tripped `-D duplicate-macro-attributes` *and*
+    `test_resolve_circuit` silently stopped being a test. It is re-armed here
+    and passes.
+  - `circuits.rs` called `.contains()` on `get_builtin`'s return value after
+    that became `(canonical_name, content)`. The test now destructures it and
+    asserts the canonical name, which is the alias behaviour it exists for.
+
+  The binary, the library and every generated plugin are **byte-identical to
+  0.1.10** — this is test-harness code only. It escaped 0.1.10 because the
+  suites were run per-crate rather than as a workspace, which skipped the two
+  `tools/` members entirely; neither `clippy --workspace` nor
+  `cargo build --workspace` builds test targets, so a test that does not
+  compile is invisible to both. The workspace suite is 2220 tests, not the
+  2045 that six crates report.
+
 ## [0.1.10] - 2026-09-27
 
 ### Added
@@ -1453,7 +1477,8 @@ measured real hardware. Everything else is unproven against hardware. See
   KiCad file; no effect on netlist compilation, generated code, or shipped plugins. The
   fix (`quick-xml >= 0.41`) is tracked for 0.1.1.
 
-[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.10...HEAD
+[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.11...HEAD
+[0.1.11]: https://github.com/hal0zer0/melange/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/hal0zer0/melange/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/hal0zer0/melange/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/hal0zer0/melange/compare/v0.1.7...v0.1.8

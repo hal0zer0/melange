@@ -2,7 +2,9 @@
 
 Quick-reference for AI agents. For math details see other aidocs. For architecture see CLAUDE.md.
 
-> **Latest release: v0.1.10 (2026-09-27)** — the never-silently-wrong release. Nodal full-LU could
+> **Latest release: v0.1.11 (2026-09-27)** — a same-night patch over v0.1.10, whose test suite
+> did not compile (test-harness code only; shipped behaviour is byte-identical). v0.1.10 was
+> the never-silently-wrong release. Nodal full-LU could
 > commit an unsolved sample and then freeze on it, giving a 22 dB-wrong render that reported a
 > healthy −0.50 dBFS peak; the fix cuts the timestep to 64× and honours the pinned integrator, and
 > two zero-threshold counters now fail every verb rather than reporting a reassuring number. Triode
