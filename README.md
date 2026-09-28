@@ -291,6 +291,33 @@ melange compile passive-eq1a --format plugin -o my-eq
 melange analyze passive-eq1a --pot "LF Boost=10k" --switch "LF Freq=1"   # ~+10 dB shelf at 20 Hz
 ```
 
+## Oversampling
+
+A nonlinear circuit makes harmonics you did not feed it. Above Nyquist they do
+not vanish — they fold back into the audible band at frequencies unrelated to
+the note, which is the difference between distortion that sounds like a circuit
+and distortion that sounds like a plugin.
+
+**Melange defaults to 1×**, which is right for a linear circuit and usually
+wrong for a distortion:
+
+```bash
+melange compile mydist.cir --format plugin --oversampling 4 -o mydist
+melange analyze mydist.cir --harmonics 5 --amplitude 1.0   # read nyquist_dbc
+```
+
+Measure before choosing. On a two-diode clipper, going from 1 V to 3 V of drive
+costs about 14 dB of alias rejection while 4× oversampling gives back about 5 —
+**how hard you drive the nonlinearity matters more than the factor does**, and
+the benefit varies several-fold between circuits.
+
+It is also not a free quality dial: the half-band filters add latency and phase
+dispersion, and an oversampled build actually correlates *worse* against a
+reference engine than a 1× one, even while its harmonic magnitudes track better.
+
+[**docs/OVERSAMPLING.md**](docs/OVERSAMPLING.md) has the measurements, the
+trade-offs, and how to decide for your own circuit.
+
 ## Impossible Circuits
 
 Here is my favorite consequence of doing this the boring, rigorous way.

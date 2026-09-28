@@ -547,7 +547,9 @@ Noise limitations:
   mode gets, 1x included), so the half-bands' frequency-dependent phase stays
   inside the number — it ships, so it is reported rather than compensated away.
   Measured on `tube_screamer_u` (48 kHz, 0.3 V, 500 ms): 1-rho 1.00e-6 at 1x,
-  5.64e-6 at 2x, 6.25e-6 at 4x. See `docs/aidocs/OVERSAMPLING.md`
+  5.64e-6 at 2x, 6.25e-6 at 4x. See [OVERSAMPLING.md](OVERSAMPLING.md) for
+  what that means in practice, and `docs/aidocs/OVERSAMPLING.md` for the filter
+  internals.
 - Resistor `KF`/`AF` noise breaks ngspice parity (validate compiles with
   `NoiseMode::Off`, so it is simply absent from the comparison)
 - `.mismatch` / `.tolerance` jitter is **disabled automatically** on melange's
