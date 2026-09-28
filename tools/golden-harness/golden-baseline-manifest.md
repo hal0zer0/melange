@@ -10,6 +10,8 @@ Generated 2026-07-21. Refreshed 2026-08-30 against melange **e53573c** (correctn
 
 **Re-baselined 2026-09-28 (saturating-inductor flux tolerance).** Attribution: **flux-row residual tolerance 1e-3 → 1e-5 of the per-sample increment** (Newton's one-signed remainder was integrated under DC bias). Against the previous capture: 173 identical, 7 negligible (mosfet-choke-load/sweep; step and sweep of the three saturation coverage decks; within 1e-5 dB, corr 1.0000000), 0 changed. Generated source differs on the five saturating decks only; funkyinduct renders identically. Newton iterations up 0.02–2.3 % on the negligible renders; 0 sub-steps on every saturating render, before and after. No render held, none not-converged.
 
+**Checked 2026-09-28 (saturating inductor inside the op-amp rail pin).** Against the previous capture: 180/180 identical. Generated source differs on 9 decks: four full-LU decks that can pin an op-amp (gravity, moonladder, sad-bastard, sus-bus) gain the unsolved-pin counter, 0 on every render; the five saturating decks carry a restructured flux-row residual with the same arithmetic. No golden deck combines a pinned op-amp with a saturating inductor; that combination is gated in `opamp_railing_regression_tests.rs`.
+
 Machine-readable twin: `tools/golden-harness/golden-baseline-manifest.json`.
 
 ## Compile recipe

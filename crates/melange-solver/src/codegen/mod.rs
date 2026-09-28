@@ -1221,39 +1221,33 @@ impl CodeGenerator {
             netlist,
         );
         // The active-set pinned Newton stamps device Jacobians through N_i/N_v
-        // only. Behavioral sources (stamped in node space) and saturating
-        // inductors (a per-sample L update) are not in that system, and the loop
-        // stops on step size rather than a residual, so it can converge cleanly
-        // to a point that is not a solution. Refuse the combination rather than
-        // pin approximately; lift this when those Jacobians are stamped in the
-        // pinned system and railing acceptance covers them.
+        // and the saturating-inductor flux rows, and accepts an iterate on the
+        // same step and flux-row residual checks as the main loop. Behavioral
+        // sources (stamped in node space, with a non-diagonal Jacobian) are not
+        // in that system, so it could converge to a point that is not a
+        // solution. Refuse the combination rather than pin approximately; lift
+        // it when their Jacobian is stamped in the pinned system and railing
+        // acceptance covers it.
         let clamped_opamp = mna
             .opamps
             .iter()
             .any(|oa| oa.n_out_idx > 0 && (oa.vcc.is_finite() || oa.vee.is_finite()));
-        let saturating_inductor = mna.has_saturating_inductor();
-        let unpinnable = match (!mna.behavioral_sources.is_empty(), saturating_inductor) {
-            (true, true) => Some("a behavioral source and a saturating inductor"),
-            (true, false) => Some("a behavioral source"),
-            (false, true) => Some("a saturating inductor"),
-            (false, false) => None,
-        };
-        if let (true, true, Some(what)) = (
-            clamped_opamp,
-            matches!(
+        if clamped_opamp
+            && !mna.behavioral_sources.is_empty()
+            && matches!(
                 resolved.mode,
                 OpampRailMode::ActiveSet | OpampRailMode::ActiveSetBe
-            ),
-            unpinnable,
-        ) {
+            )
+        {
             return Err(CodegenError::UnsupportedTopology(format!(
-                "op-amp rail mode {} cannot be solved on this circuit: it has {what}, and \
-                 the pinned solve at the rail does not include that element yet, so it would \
-                 converge to a point that is not a solution. No rail handling is validated for \
-                 this combination yet, and the explicit modes are not a workaround: on a \
-                 railing op-amp driving a saturating inductor, `--opamp-rail-mode hard` \
-                 measured 2-290x the reference inductor current (138 V out of a 9 V supply) \
-                 and `boyle-diodes` 27% low. (Not measured with a behavioral source.)",
+                "op-amp rail mode {} cannot be solved on this circuit: it has a behavioral \
+                 source, and the pinned solve at the rail does not include behavioral sources \
+                 yet, so it would converge to a point that is not a solution. No rail handling \
+                 is validated for this combination yet. The explicit modes are not a known \
+                 workaround: neither has been measured with a behavioral source, and on a \
+                 railing op-amp driving a saturating inductor `--opamp-rail-mode hard` measured \
+                 2-290x the reference current (138 V out of a 9 V supply) and `boyle-diodes` \
+                 27% low.",
                 resolved.mode.as_str()
             )));
         }

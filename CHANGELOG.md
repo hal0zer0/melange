@@ -68,14 +68,23 @@ generated state is smaller.
   lands within 2.4 % at 1× and 1.0 % at 4×, with no unsolved samples at any
   drive. The regression suite had no circuit whose op-amp reaches its rails; it
   has one now.
+- **A railing op-amp can drive a saturating inductor.** The pinned solve
+  at the rail now includes the inductor's flux law and checks it the same
+  way the main solve does. Against an ngspice reference (a railing op-amp into
+  a 100 mH choke saturating at 2 mA), inductor current and output fundamental
+  land within 5 % at 4x oversampling in both active-set modes. At 1x both
+  modes miss by up to 14 % for integrator reasons; those cases are recorded as
+  known failures. A pinned solve that does not converge is counted as
+  unsolved, which every verb refuses; on the full-LU route it was committed
+  without being counted.
 - **Active-set rail handling is refused on a circuit that also has a
-  behavioral source or a saturating inductor.** The pinned solve does not
-  include those elements yet, and it stops on step size, so it could converge
-  to a point that is not a solution. The error says no rail handling is
-  validated for the combination and recommends nothing: on a railing op-amp
-  driving a saturating inductor, `hard` measured 2-290x the reference inductor
-  current and `boyle-diodes` 27 % low. None of the 92 corpus circuits that compile
-  with default flags has the combination.
+  behavioral source.** The pinned solve does not include behavioral sources
+  yet, so it could converge to a point that is not a solution. The error says
+  no rail handling is validated for the combination and recommends nothing:
+  neither explicit mode has been measured with a behavioral source, and on a
+  railing op-amp driving a saturating inductor `hard` measured 2-290x the
+  reference current and `boyle-diodes` 27 % low. None of the 92 corpus
+  circuits that compile with default flags has the combination.
 - `simulate --probe` help says that at `--oversampling` > 1 each row is a
   decimated, filtered host-rate sample, whose peak can exceed the raw one.
 - `simulate` failed to compile on full-LU circuits with no nonlinear devices

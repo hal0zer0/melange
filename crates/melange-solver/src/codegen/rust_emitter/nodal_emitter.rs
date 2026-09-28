@@ -96,6 +96,34 @@ fn ni_nonzeros_by_dev(ir: &CircuitIR, m: usize) -> Vec<Vec<usize>> {
 // `alpha` is the site-local integrator scalar expression (`2·rate·OS` trap,
 // `1·rate·OS` BE, `alpha_sub` sub-step) — this is what makes BE composition free.
 
+/// Where an active-set pinned resolve is emitted.
+///
+/// The two nodal routes surface an unsolved pin differently. Schur counts it at
+/// commit, from `last_nr_iterations`. Full-LU has no such check (its own
+/// failures take the hold path), so the resolve counts the failure itself, at
+/// the internal rate: a count derived from `last_nr_iterations` at the end of
+/// a host sample would miss every oversampled sub-step but the last.
+#[derive(Clone, Copy)]
+pub(super) enum PinSite<'a> {
+    Schur,
+    FullLu {
+        /// The site's integrator scalar for the saturating-inductor stamps.
+        sat_alpha: &'a str,
+        setter_stamps: &'a std::collections::BTreeSet<(usize, usize)>,
+    },
+}
+
+/// Whether a nodal build can emit the active-set pinned resolve at all.
+fn emits_active_set_resolve(ir: &CircuitIR) -> bool {
+    matches!(
+        ir.solver_config.opamp_rail_mode,
+        crate::codegen::OpampRailMode::ActiveSet | crate::codegen::OpampRailMode::ActiveSetBe
+    ) && ir
+        .opamps
+        .iter()
+        .any(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite())
+}
+
 /// History correction (once per sample, after the base `A_neg·v_prev` RHS build):
 /// swaps the baked-in `alpha·L0·i_prev` for `alpha·Φ(i_prev)`.
 fn emit_sat_ind_history(
@@ -276,10 +304,15 @@ fn strip_outer_parens(expr: &str) -> &str {
 ///
 /// ## Scope
 ///
-/// Main trapezoidal/BE NR loop only, matching the device residual check. The
-/// adaptive sub-step loop and the backward-Euler fallback loop carry no
-/// residual check of any kind today (device or flux); closing that is a
-/// separate change with its own blast radius.
+/// The main trapezoidal/BE NR loop and the op-amp active-set pinned Newton,
+/// so a sample counts as solved by the same definition on either. `v`, `mat`
+/// and `flag` name the site's iterate, its base matrix (`A = G + alpha·C` at
+/// the site's alpha: mutual-inductance entries scale with it) and the
+/// not-converged flag the check sets. The adaptive sub-step loop and the
+/// backward-Euler fallback loop carry no residual check of any kind today
+/// (device or flux); closing that is a separate change with its own blast
+/// radius.
+#[allow(clippy::too_many_arguments)]
 fn emit_sat_ind_row_residual(
     code: &mut String,
     ir: &CircuitIR,
@@ -287,6 +320,9 @@ fn emit_sat_ind_row_residual(
     rhs: &str,
     alpha: &str,
     i_nl: Option<&str>,
+    v: &str,
+    mat: &str,
+    flag: &str,
     indent: &str,
 ) {
     if ir.saturating_inductors.is_empty() {
@@ -312,7 +348,7 @@ fn emit_sat_ind_row_residual(
     // `unused_parens` in generated code compiled under `-D warnings`, so strip
     // one balanced outer pair (and only when it really is balanced).
     let sat_al_expr = strip_outer_parens(alpha);
-    code.push_str(&format!("{indent}if !max_step_exceeded {{\n"));
+    code.push_str(&format!("{indent}if !{flag} {{\n"));
     code.push_str(&format!("{indent}    let sat_al = {sat_al_expr};\n"));
 
     for (idx, si) in ir.saturating_inductors.iter().enumerate() {
@@ -350,7 +386,7 @@ fn emit_sat_ind_row_residual(
         ));
         for j in cols {
             code.push_str(&format!(
-                "{indent}        {{ let t = state.a[k][{j}] * v[{j}]; acc += t; \
+                "{indent}        {{ let t = {mat}[k][{j}] * {v}[{j}]; acc += t; \
                  let a = t.abs(); if a > den {{ den = a; }} }}\n"
             ));
         }
@@ -361,19 +397,29 @@ fn emit_sat_ind_row_residual(
             let g_kk = g[k * n + k];
             if g_kk != 0.0 {
                 code.push_str(&format!(
-                    "{indent}        {{ let t = {g_kk:.17e} * v[k]; acc += t; \
+                    "{indent}        {{ let t = {g_kk:.17e} * {v}[k]; acc += t; \
                      let a = t.abs(); if a > den {{ den = a; }} }}\n"
                 ));
             }
             // g[k][k] == 0.0: the whole self term vanishes, nothing to emit.
         } else {
             code.push_str(&format!(
-                "{indent}        {{ let t = (state.a[k][k] - sat_al * SAT_IND_{idx}_L0) * v[k]; \
+                "{indent}        {{ let t = ({mat}[k][k] - sat_al * SAT_IND_{idx}_L0) * {v}[k]; \
                  acc += t; let a = t.abs(); if a > den {{ den = a; }} }}\n"
             ));
         }
         // Device currents injected into this row (structurally empty for an
-        // inductor branch row, emitted only if N_I says otherwise).
+        // inductor branch row, emitted only if N_I says otherwise). A site that
+        // has no post-step i_nl to offer must not silently drop a nonzero one.
+        if m > 0 && ir.matrices.n_i.len() == n * m {
+            let injects = (0..m).any(|i| ir.matrices.n_i[k * m + i] != 0.0);
+            assert!(
+                !injects || i_nl.is_some(),
+                "saturating inductor {} row {k} carries a device current, but this \
+                 residual site has no i_nl to include",
+                si.name
+            );
+        }
         if let Some(i_nl) = i_nl {
             if m > 0 && ir.matrices.n_i.len() == n * m {
                 for i in 0..m {
@@ -389,15 +435,15 @@ fn emit_sat_ind_row_residual(
         // Flux-change term, kept paired so the stiff alpha*Phi magnitude never
         // reaches `den`; it sets only the rounding floor.
         code.push_str(&format!(
-            "{indent}        let mut stiff = 0.0f64;\n\
-             {indent}        {{ let phi = SAT_IND_{idx}_L0 * SAT_IND_{idx}_ISAT \
-             * (v[k] / SAT_IND_{idx}_ISAT).tanh(); \
-             let ap = sat_al * phi; stiff = ap.abs().max({rhs}[k].abs()); \
-             let t = ap - {rhs}[k]; acc += t; \
+            "{indent}        let phi = SAT_IND_{idx}_L0 * SAT_IND_{idx}_ISAT \
+             * ({v}[k] / SAT_IND_{idx}_ISAT).tanh();\n\
+             {indent}        let ap = sat_al * phi;\n\
+             {indent}        let stiff = ap.abs().max({rhs}[k].abs());\n\
+             {indent}        {{ let t = ap - {rhs}[k]; acc += t; \
              let a = t.abs(); if a > den {{ den = a; }} }}\n"
         ));
         code.push_str(&format!(
-            "{indent}        if !(acc.abs() <= (1e-5 * den).max(64.0 * f64::EPSILON * stiff)) {{ max_step_exceeded = true; }}\n"
+            "{indent}        if !(acc.abs() <= (1e-5 * den).max(64.0 * f64::EPSILON * stiff)) {{ {flag} = true; }}\n"
         ));
         code.push_str(&format!("{indent}    }}\n"));
     }
@@ -3042,6 +3088,19 @@ impl RustEmitter {
             code.push_str("    pub diag_nr_hold_count: u64,\n");
         }
         // Schur's equivalent: no hold, so an unconverged sample is COMMITTED.
+        // Full-LU declares it too when it can pin an op-amp: a pinned solve
+        // that does not converge is committed, not held.
+        let counts_unconverged_commit = !use_full_nodal || emits_active_set_resolve(ir);
+        if use_full_nodal && counts_unconverged_commit {
+            code.push_str(
+                "    /// Diagnostic: samples whose op-amp rail pin (the active-set pinned\n\
+                 \x20   /// Newton) did not converge, or whose pinned system was singular,\n\
+                 \x20   /// and whose iterate was committed anyway. Counted at the failure,\n\
+                 \x20   /// once per internal (oversampled) sample. Nonzero means this render\n\
+                 \x20   /// contains samples that were never solved (design review).\n",
+            );
+            code.push_str("    pub diag_nr_unconverged_commit_count: u64,\n");
+        }
         if !use_full_nodal {
             code.push_str(
                 "    /// Diagnostic: samples committed to the output after every Newton\n\
@@ -3485,7 +3544,7 @@ impl RustEmitter {
         if emits_hold {
             code.push_str("            diag_nr_hold_count: 0,\n");
         }
-        if !use_full_nodal {
+        if !use_full_nodal || emits_active_set_resolve(ir) {
             code.push_str("            diag_nr_unconverged_commit_count: 0,\n");
         }
         code.push_str("            diag_be_latch_count: 0,\n");
@@ -3720,7 +3779,7 @@ impl RustEmitter {
         if emits_hold {
             code.push_str("        self.diag_nr_hold_count = 0;\n");
         }
-        if !use_full_nodal {
+        if !use_full_nodal || emits_active_set_resolve(ir) {
             code.push_str("        self.diag_nr_unconverged_commit_count = 0;\n");
         }
         code.push_str("        self.diag_be_latch_count = 0;\n");
@@ -5297,7 +5356,7 @@ impl RustEmitter {
                 // block (shared with the m>0 path), not here.
                 code.push_str("    }\n\n");
             }
-            Self::emit_nodal_m0_rail_handling(&mut code, ir, "    ");
+            Self::emit_nodal_m0_rail_handling(&mut code, ir, "    ", PinSite::Schur);
         } else {
             // Step 3: Extract device voltages p = N_v * v_pred (O(M*N))
             code.push_str("    // Step 3: Extract device voltages p = N_v * v_pred (sparse)\n");
@@ -5539,7 +5598,14 @@ impl RustEmitter {
                 OpampRailMode::ActiveSet => {
                     // Original trap+pin behavior — preserves steady DC rail
                     // for control-path topologies (e.g. VCR ALC sidechain).
-                    Self::emit_nodal_active_set_resolve(&mut code, ir, "    ", "state.a", "rhs");
+                    Self::emit_nodal_active_set_resolve(
+                        &mut code,
+                        ir,
+                        "    ",
+                        "state.a",
+                        "rhs",
+                        PinSite::Schur,
+                    );
                 }
                 OpampRailMode::ActiveSetBe => {
                     // Detect-only here; resolve happens in BE fallback below.
@@ -5868,6 +5934,7 @@ impl RustEmitter {
                         "        ",
                         "state.a_be",
                         "rhs_be",
+                        PinSite::Schur,
                     );
                 }
                 OpampRailMode::Hard => {
@@ -7197,7 +7264,15 @@ impl RustEmitter {
             // (The blanket "no VSAT clamping" rule below applies to
             // arbitrary nodes — the Hard rail clamp here is scoped to
             // op-amp OUTPUT nodes, matching the M>0 paths' Hard mode.)
-            Self::emit_nodal_m0_rail_handling(&mut code, ir, "    ");
+            Self::emit_nodal_m0_rail_handling(
+                &mut code,
+                ir,
+                "    ",
+                PinSite::FullLu {
+                    sat_alpha: &sat_alpha_main,
+                    setter_stamps,
+                },
+            );
 
             // No VSAT clamping — matches runtime NodalSolver. Clamping any node
             // creates inconsistency with unclamped neighbors (e.g., 100Ω apart but
@@ -7783,6 +7858,9 @@ impl RustEmitter {
                 "rhs",
                 &sat_alpha_main,
                 if m > 0 { Some("i_nl_resid") } else { None },
+                "v",
+                "state.a",
+                "max_step_exceeded",
                 "        ",
             );
 
@@ -8233,7 +8311,17 @@ impl RustEmitter {
                 crate::codegen::OpampRailMode::ActiveSet
             ) {
                 code.push_str("    if converged {\n");
-                Self::emit_nodal_active_set_resolve(&mut code, ir, "        ", "state.a", "rhs");
+                Self::emit_nodal_active_set_resolve(
+                    &mut code,
+                    ir,
+                    "        ",
+                    "state.a",
+                    "rhs",
+                    PinSite::FullLu {
+                        sat_alpha: &sat_alpha_main,
+                        setter_stamps,
+                    },
+                );
                 code.push_str("    }\n\n");
             }
 
@@ -8627,6 +8715,10 @@ impl RustEmitter {
                         "        ",
                         "state.a_be",
                         "rhs_be",
+                        PinSite::FullLu {
+                            sat_alpha: &sat_alpha_be,
+                            setter_stamps,
+                        },
                     );
                 }
 
@@ -8847,7 +8939,12 @@ impl RustEmitter {
     /// ActiveSet modes) the generated `lu_solve` in scope — the `needs_lu_solve`
     /// gate in `emit_nodal` already covers ActiveSet/ActiveSetBe on the Schur
     /// path, and the full-LU path always emits `lu_solve`.
-    pub(super) fn emit_nodal_m0_rail_handling(code: &mut String, ir: &CircuitIR, indent: &str) {
+    pub(super) fn emit_nodal_m0_rail_handling(
+        code: &mut String,
+        ir: &CircuitIR,
+        indent: &str,
+        site: PinSite<'_>,
+    ) {
         use crate::codegen::OpampRailMode;
         let any_clampable = ir
             .opamps
@@ -8871,7 +8968,7 @@ impl RustEmitter {
                 }
             }
             OpampRailMode::ActiveSet => {
-                Self::emit_nodal_active_set_resolve(code, ir, indent, "state.a", "rhs");
+                Self::emit_nodal_active_set_resolve(code, ir, indent, "state.a", "rhs", site);
             }
             OpampRailMode::ActiveSetBe => {
                 if any_clampable {
@@ -8882,7 +8979,7 @@ impl RustEmitter {
                          on sustained rail engagement into cap-coupled loads)"
                     );
                 }
-                Self::emit_nodal_active_set_resolve(code, ir, indent, "state.a", "rhs");
+                Self::emit_nodal_active_set_resolve(code, ir, indent, "state.a", "rhs", site);
             }
             OpampRailMode::BoyleDiodes => {
                 // Catch-diode augmentation adds M≥1 per clamped op-amp, so an
@@ -8942,12 +9039,15 @@ impl RustEmitter {
     /// (trapezoidal) or `A_neg_be·v_prev + rhs_const_be + input·G_in` (backward
     /// Euler) — and `matrix_name` (`"state.a"` / `"state.a_be"`) must match the
     /// integrator that produced it.
+    /// `site` says which route this is (see [`PinSite`]); a full-LU site also
+    /// carries its saturating-inductor alpha and setter stamps.
     pub(super) fn emit_nodal_active_set_resolve(
         code: &mut String,
         ir: &CircuitIR,
         indent: &str,
         matrix_name: &str,
         rhs_name: &str,
+        site: PinSite<'_>,
     ) {
         let m = ir.topology.m;
         let n_nodes = if ir.topology.n_nodes > 0 {
@@ -8965,6 +9065,17 @@ impl RustEmitter {
         if clampable.is_empty() {
             return;
         }
+        let sat = match site {
+            PinSite::FullLu {
+                sat_alpha,
+                setter_stamps,
+            } if !ir.saturating_inductors.is_empty() => Some((sat_alpha, setter_stamps)),
+            _ => None,
+        };
+        assert!(
+            ir.saturating_inductors.is_empty() || sat.is_some(),
+            "active-set resolve emitted without the saturating-inductor alpha"
+        );
 
         code.push_str(&format!(
             "{indent}// --- Active-set op-amp rail resolve ---\n"
@@ -9072,6 +9183,23 @@ impl RustEmitter {
                 node = oa.n_out_idx
             ));
         }
+        // A saturating inductor's current starts from the previous sample, not
+        // from the unpinned solve. That solve had the op-amp far past its rail
+        // (tens of volts), so it drives the winding deep into saturation, where
+        // L_diff is tiny and Newton on the tanh flux law overshoots across the
+        // knee and settles into a 2-cycle (measured: an op-amp railing into a
+        // 2 mA choke started at 37 mA and alternated -3.1 / +7.0 mA to
+        // MAX_ITER). Inductor current is continuous, so the previous sample is
+        // the natural start. It does not guarantee convergence: Newton on tanh
+        // can still 2-cycle from a start that is far away, as after a large
+        // step within one sample. A pin that reaches MAX_ITER is counted below.
+        if sat.is_some() {
+            for idx in 0..ir.saturating_inductors.len() {
+                code.push_str(&format!(
+                    "{indent}        v_pin[SAT_IND_{idx}_AUG_ROW] = state.v_prev[SAT_IND_{idx}_AUG_ROW];\n"
+                ));
+            }
+        }
         code.push_str(&format!(
             "{indent}        let mut pin_converged = false;\n\
              {indent}        let mut pin_iters = MAX_ITER as u32;\n\
@@ -9092,6 +9220,14 @@ impl RustEmitter {
         if m > 0 {
             emit_nodal_jacobian_stamp(code, ir, m, "g_as", &it);
             emit_nodal_companion_rhs(code, ir, m, "rhs_as", "j_dev", &it);
+        }
+        // Saturating inductors: Newton on the flux rows too, at this site's
+        // alpha, linearised at the pinned iterate. Stamped before pin
+        // elimination so an inductor on the op-amp output node moves its
+        // column's contribution to the RHS with everything else.
+        if let Some((sat_alpha, _)) = sat {
+            emit_sat_ind_jacobian(code, ir, "g_as", "v_pin", sat_alpha, &it);
+            emit_sat_ind_companion(code, ir, "rhs_as", "v_pin", sat_alpha, &it);
         }
         // Pin elimination: move each pinned column's contribution to the RHS
         // and replace its row with the identity equation v[k] = c_k.
@@ -9126,14 +9262,43 @@ impl RustEmitter {
              {it}}}\n\
              {it}let mut pin_step_exceeded = limited || alpha < 1.0;\n"
         ));
-        for &node in &device_nodes {
+        // Step check over the device nodes and, as in the main loop, every
+        // saturating inductor's branch-current row.
+        let mut step_rows = device_nodes.clone();
+        if sat.is_some() {
+            step_rows.extend(ir.saturating_inductors.iter().map(|si| si.aug_row));
+            step_rows.sort();
+            step_rows.dedup();
+        }
+        for &node in &step_rows {
             code.push_str(&format!(
                 "{it}{{ let step = alpha * (v_new[{node}] - v_pin[{node}]); let threshold = 1e-3 * v_pin[{node}].abs().max((v_pin[{node}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ pin_step_exceeded = true; }} }}\n"
             ));
         }
         code.push_str(&format!(
-            "{it}for i in 0..N {{ v_pin[i] += alpha * (v_new[i] - v_pin[i]); }}\n\
-             {it}if !pin_step_exceeded {{ pin_converged = true; pin_iters = _pit as u32; break; }}\n\
+            "{it}for i in 0..N {{ v_pin[i] += alpha * (v_new[i] - v_pin[i]); }}\n"
+        ));
+        // The flux-row residual, as in the main loop: the step check alone
+        // accepts Newton's first iterate, whose remainder the flux integrates.
+        // Pinned rows are op-amp output nodes, never flux rows, so every flux
+        // row is checked; `rhs_name` is the pre-companion RHS carrying the
+        // site's history term.
+        if let Some((sat_alpha, stamps)) = sat {
+            emit_sat_ind_row_residual(
+                code,
+                ir,
+                stamps,
+                rhs_name,
+                sat_alpha,
+                None,
+                "v_pin",
+                matrix_name,
+                "pin_step_exceeded",
+                &it,
+            );
+        }
+        code.push_str(&format!(
+            "{it}if !pin_step_exceeded {{ pin_converged = true; pin_iters = _pit as u32; break; }}\n\
              {indent}        }}\n"
         ));
         // Commit the pinned iterate, with i_nl re-evaluated at it, so the next
@@ -9170,10 +9335,16 @@ impl RustEmitter {
              {indent}        // unpinned failure (whose op-amp sat far outside its rail),\n\
              {indent}        // and a pin that did not converge marks the sample unsolved\n\
              {indent}        // so every verb refuses it.\n\
-             {indent}        state.last_nr_iterations = if pin_converged && pin_lu_ok {{ pin_iters }} else {{ MAX_ITER as u32 }};\n\
-             {indent}    }}\n\
-             {indent}}}\n",
+             {indent}        state.last_nr_iterations = if pin_converged && pin_lu_ok {{ pin_iters }} else {{ MAX_ITER as u32 }};\n",
         ));
+        // Full-LU commits the pinned iterate either way, and has no
+        // end-of-sample check that would see it, so count the failure here.
+        if matches!(site, PinSite::FullLu { .. }) {
+            code.push_str(&format!(
+                "{indent}        if !(pin_converged && pin_lu_ok) {{ state.diag_nr_unconverged_commit_count += 1; }}\n"
+            ));
+        }
+        code.push_str(&format!("{indent}    }}\n{indent}}}\n"));
     }
 
     /// Emit per-op-amp slew-rate limiting on the converged node voltages.

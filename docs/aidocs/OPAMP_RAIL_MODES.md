@@ -49,14 +49,30 @@ circuit. **Only the nodal solver implements that.** The DK path implements
   `CodeGenerator::generate*` refuses an active-set mode on the DK path. There is
   no silent degrade to `Hard`: `Hard` on an AC-coupled output is exactly the
   cap-history corruption the resolver picked active-set to avoid.
-- Active-set is **refused** on a circuit that also has a behavioral source or a
-  saturating inductor: the pinned Newton stamps device Jacobians through
-  N_i/N_v only and stops on step size, so without those elements in the pinned
-  system it can converge to a non-solution. Lift the refusal when their
-  Jacobians are stamped there and railing acceptance (`opamp_railing_regression_tests.rs`)
-  covers them. The explicit modes are NOT a workaround for this class: on a railing
-  op-amp driving a saturating choke, against an ngspice twin, `hard` measured 2–290×
-  the inductor current (138 V out of a 9 V supply) and `boyle-diodes` 27 % low.
+- The pinned Newton stamps device Jacobians through N_i/N_v and the
+  saturating-inductor flux rows (at the site's alpha), and accepts an iterate
+  on the same step check and flux-row residual as the main loop, pinned rows
+  excluded. A saturating inductor's current starts from `v_prev`, not from the
+  unpinned solve: that solve has the op-amp far past its rail and drives the
+  winding deep into saturation, where Newton on tanh 2-cycles (measured: 37 mA
+  start on a 2 mA choke, alternating −3.1 / +7.0 mA to MAX_ITER). Acceptance:
+  `opamp_railing_regression_tests.rs`, a railing op-amp into a 100 mH / 2 mA
+  choke against an ngspice twin, within 5 % on i_L max and H1 at 4× in both
+  active-set modes. At 1× both miss for integrator reasons (backward Euler on
+  nearly every railed sample; the trapezoidal ring in deep saturation); those
+  cases are recorded, ignored.
+- A pinned solve that does not converge is committed and counted in
+  `diag_nr_unconverged_commit_count`, which every verb refuses. Schur counts it
+  at commit from `last_nr_iterations`; full-LU counts it at the failure, per
+  internal sample, because a count derived at the end of the host sample would
+  miss every oversampled sub-step but the last.
+- Active-set is **refused** on a circuit that also has a behavioral source:
+  its Jacobian is stamped in node space and is not diagonal, so the pinned
+  system does not include it and could converge to a non-solution. The explicit
+  modes are NOT a known workaround: neither is measured with a behavioral
+  source, and on the railing op-amp into a saturating choke `hard` measured
+  2–290× the inductor current (138 V out of a 9 V supply) and `boyle-diodes`
+  27 % low.
 - An explicit `--opamp-rail-mode hard` stays allowed, on either route — an
   explicit choice is never overridden, because overrides are how users bisect.
   When a clamped op-amp it applies to is AC-coupled downstream (where auto

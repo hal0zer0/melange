@@ -184,39 +184,28 @@ fn railing_overdrive_matches_ngspice_at_4x() {
     check_against_reference(4);
 }
 
-/// The pinned solve does not include behavioral sources or saturating
-/// inductors, and it stops on step size, so with either present it could
-/// converge to a point that is not a solution. Codegen refuses, naming the way
-/// out, rather than pinning approximately.
+/// The pinned solve does not include behavioral sources (their Jacobian is
+/// stamped in node space and is not diagonal), so with one present it could
+/// converge to a point that is not a solution. Codegen refuses rather than
+/// pinning approximately.
 #[test]
-fn active_set_with_an_element_the_pin_cannot_solve_is_refused() {
+fn active_set_with_a_behavioral_source_is_refused() {
     use melange_solver::codegen::CodeGenerator;
-    for (extra, what) in [
-        (
-            "B_x bx 0 V={ tanh(V(n3)) }\nR_bx bx 0 1k\n",
-            "behavioral source",
-        ),
-        (
-            "L_sat n3 lsat 10m ISAT=20m\nR_lsat lsat 0 10k\n",
-            "saturating inductor",
-        ),
-    ] {
-        let spice = format!("{RAILING_OVERDRIVE}{extra}");
-        let netlist = Netlist::parse(&spice).unwrap();
-        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
-        let input = mna.node_map["in"] - 1;
-        mna.g[input][input] += 1.0;
-        let config = support::config_for_spice(&spice, 48000.0);
-        let err = CodeGenerator::new(config)
-            .generate_nodal(&mna, &netlist)
-            .expect_err("active-set + an unpinnable element must be refused");
-        let msg = format!("{err:?}");
-        // It must not steer users to a mode measured wrong on this class.
-        assert!(
-            msg.contains(what) && msg.contains("No rail handling is validated"),
-            "{what}: {msg}"
-        );
-    }
+    let spice = format!("{RAILING_OVERDRIVE}B_x bx 0 V={{ tanh(V(n3)) }}\nR_bx bx 0 1k\n");
+    let netlist = Netlist::parse(&spice).unwrap();
+    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+    let input = mna.node_map["in"] - 1;
+    mna.g[input][input] += 1.0;
+    let config = support::config_for_spice(&spice, 48000.0);
+    let err = CodeGenerator::new(config)
+        .generate_nodal(&mna, &netlist)
+        .expect_err("active-set + a behavioral source must be refused");
+    let msg = format!("{err:?}");
+    // It must not steer users to a mode measured wrong on this class.
+    assert!(
+        msg.contains("behavioral source") && msg.contains("No rail handling is validated"),
+        "{msg}"
+    );
 }
 
 /// An explicit rail mode is still honoured (overrides are how users bisect),
@@ -234,4 +223,296 @@ fn explicit_hard_with_a_behavioral_source_still_compiles() {
     CodeGenerator::new(config)
         .generate_nodal(&mna, &netlist)
         .expect("an explicit rail mode is never overridden");
+}
+
+// ─── A railing op-amp driving a saturating choke ──────────────────────────
+//
+// The same single-supply overdrive, with the diode clipper replaced by a
+// 100 mH choke that saturates at 2 mA. The op-amp output is a square wave, so
+// the choke is driven hard into saturation every half cycle (about 2.7x
+// Isat) while the op-amp is pinned at a rail: the pinned solve has to carry
+// the flux law.
+//
+// Reference: ngspice, the op-amp twin above, with the choke as a flux
+// integrator (a unit capacitor charged by v(n2)) and a behavioral current
+// I = Isat·atanh(Φ/(L0·Isat)); 1 µs step, reltol 1e-5, converged to 0.02 %
+// against 0.25 µs. The references are i_L max over 0.5-1.0 s and ngspice's
+// `fourier` H1 of v(out) over the last cycle.
+//
+// Gated at 4x. At 1x both rail modes miss for integrator reasons, not the
+// pinned solve: active-set-be runs this deck on backward Euler almost all the
+// time (the op-amp is railed ~95 % of each cycle) and is first-order wrong at
+// L/R ~ 5 samples; active-set's trapezoidal rule rings in deep saturation
+// (L_diff ~ 0.03·L0 makes the RL step factor ~ -0.6) and overshoots the i_L
+// peak. Both close at 4x. The 1x cases are recorded below, ignored, as the
+// targets those integrator fixes must meet.
+
+const RAILING_INTO_CHOKE: &str = "\
+single-supply op-amp overdrive into a saturating choke
+Vcc vcc 0 DC 9
+R_b1 vcc vbias 100k
+R_b2 vbias 0 100k
+C_b vbias 0 10u
+C_in in np 100n
+R_in np vbias 1Meg
+U1 np nm oa TL072
+R_f oa nm 500k
+R_g nm ng 4.7k
+C_g ng 0 10u
+C_c oa n1 1u
+R_1 n1 n2 1k
+L_sat n2 0 100m ISAT=2m
+R_t n2 out 10k
+R_v out 0 100k
+.model TL072 OA(AOL=200000 GBW=3e6 VCC=9 VEE=0)
+";
+
+/// (drive V, ngspice i_L max A over 0.5-1.0 s)
+const CHOKE_IL: [(f64, f64); 5] = [
+    (0.05, 5.017114e-3),
+    (0.1, 5.288674e-3),
+    (0.2, 5.351541e-3),
+    (0.5, 5.377945e-3),
+    (1.0, 5.384495e-3),
+];
+
+/// (drive V, ngspice H1 of v(out))
+const CHOKE_H1: [(f64, f64); 2] = [(0.1, 1.37902), (1.0, 1.40291)];
+
+/// One rendered drive level of the choke deck.
+struct ChokeRow {
+    amp: f64,
+    il_max: f64,
+    h1: f64,
+    oa_lo: f64,
+    oa_hi: f64,
+    /// Samples committed without a solution: the unsolved-commit counter plus
+    /// any hold, NaN/magnitude reset or sub-step recovery.
+    unsolved: u64,
+}
+
+fn choke_code(mode: OpampRailMode, oversampling: usize) -> String {
+    let mut config = support::config_for_spice(RAILING_INTO_CHOKE, 48000.0);
+    config.oversampling_factor = oversampling;
+    config.opamp_rail_mode = mode;
+    support::generate_circuit_code_nodal(RAILING_INTO_CHOKE, &config).0
+}
+
+/// Render 1 s of a 1 kHz sine per drive at `host_rate`; over 0.5-1.0 s report
+/// the i_L peak (at every host sample), H1 of the plugin output, and the
+/// op-amp output range.
+fn render_choke(code: &str, host_rate: f64, tag: &str) -> Vec<ChokeRow> {
+    let counters: Vec<&str> = [
+        "diag_nr_unconverged_commit_count",
+        "diag_nr_hold_count",
+        "diag_nan_reset_count",
+        "diag_magnitude_reset_count",
+        "diag_substep_count",
+    ]
+    .into_iter()
+    .filter(|f| code.contains(&format!("pub {f}: ")))
+    .collect();
+    assert!(
+        counters.contains(&"diag_nr_unconverged_commit_count"),
+        "test premise: a build that can pin an op-amp declares the unsolved-commit counter"
+    );
+    let unsolved = counters
+        .iter()
+        .map(|f| format!("s.{f}"))
+        .collect::<Vec<_>>()
+        .join(" + ");
+    let oa = {
+        let netlist = Netlist::parse(RAILING_INTO_CHOKE).unwrap();
+        MnaSystem::from_netlist(&netlist).unwrap().node_map["oa"] - 1
+    };
+    let drives: Vec<String> = CHOKE_IL.iter().map(|r| format!("{:?}", r.0)).collect();
+    let main = format!(
+        "fn main() {{
+    let fs: f64 = {host_rate:?};
+    let n = fs as usize;
+    for amp in [{drives}] {{
+        let mut s = CircuitState::default();
+        s.set_sample_rate(fs);
+        let (mut il, mut lo, mut hi, mut re, mut im) = (0.0f64, f64::MAX, f64::MIN, 0.0f64, 0.0f64);
+        for i in 0..n {{
+            let w = 2.0 * std::f64::consts::PI * 1000.0 * i as f64 / fs;
+            let y = process_sample(amp * w.sin(), &mut s)[0];
+            if i >= n / 2 {{
+                il = il.max(s.v_prev[SAT_IND_0_AUG_ROW].abs());
+                lo = lo.min(s.v_prev[{oa}]);
+                hi = hi.max(s.v_prev[{oa}]);
+                re += y * w.cos();
+                im += y * w.sin();
+            }}
+        }}
+        let h1 = 2.0 * (re / (n / 2) as f64).hypot(im / (n / 2) as f64);
+        println!(\"{{amp}} {{il}} {{h1}} {{lo}} {{hi}} {{}}\", {unsolved});
+    }}
+}}",
+        drives = drives.join(", ")
+    );
+    support::compile_and_run(code, &main, tag)
+        .stdout
+        .lines()
+        .map(|l| {
+            let f: Vec<f64> = l.split_whitespace().map(|t| t.parse().unwrap()).collect();
+            ChokeRow {
+                amp: f[0],
+                il_max: f[1],
+                h1: f[2],
+                oa_lo: f[3],
+                oa_hi: f[4],
+                unsolved: f[5] as u64,
+            }
+        })
+        .collect()
+}
+
+/// The accuracy gates: i_L max and H1 within 5 % of ngspice, no unsolved
+/// sample, op-amp inside its rails. `Err` names the first failure.
+fn choke_gates(rows: &[ChokeRow], what: &str) -> Result<(), String> {
+    for (row, &(amp, il_ref)) in rows.iter().zip(CHOKE_IL.iter()) {
+        if row.unsolved != 0 {
+            return Err(format!("{what} {amp} V: {} unsolved samples", row.unsolved));
+        }
+        let err = (row.il_max - il_ref) / il_ref;
+        if err.abs() > 0.05 {
+            return Err(format!(
+                "{what} {amp} V: i_L max {:.4} mA vs ngspice {:.4} mA ({:+.1} %)",
+                row.il_max * 1e3,
+                il_ref * 1e3,
+                100.0 * err
+            ));
+        }
+        if let Some(&(_, h1_ref)) = CHOKE_H1.iter().find(|r| r.0 == amp) {
+            let err = (row.h1 - h1_ref) / h1_ref;
+            if err.abs() > 0.05 {
+                return Err(format!(
+                    "{what} {amp} V: H1(out) {:.4} V vs ngspice {h1_ref:.4} V ({:+.1} %)",
+                    row.h1,
+                    100.0 * err
+                ));
+            }
+        }
+        if row.oa_lo < -1e-6 || row.oa_hi > 9.0 + 1e-6 {
+            return Err(format!(
+                "{what} {amp} V: op-amp output [{}, {}] outside its 0..9 V rails",
+                row.oa_lo, row.oa_hi
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Each rail mode, at 4x oversampling (the pinned stamps carry
+/// OVERSAMPLING_FACTOR) and as a 1x build run at the same 192 kHz internal
+/// rate, where every internal sample is visible. The i_L peak is only
+/// resolved at the internal rate: the 4x build reports it once per host
+/// sample, which reads up to ~0.5 % low, so the monotonic check runs on the
+/// 192 kHz render only.
+fn choke_matches_ngspice(mode: OpampRailMode, tag: &str) {
+    let os4 = render_choke(&choke_code(mode, 4), 48000.0, &format!("{tag}_4x"));
+    choke_gates(&os4, &format!("{tag} 4x")).unwrap();
+    let full_rate = render_choke(&choke_code(mode, 1), 192000.0, &format!("{tag}_192k"));
+    choke_gates(&full_rate, &format!("{tag} 192 kHz")).unwrap();
+    for w in full_rate.windows(2) {
+        assert!(
+            w[1].il_max >= w[0].il_max * (1.0 - MONOTONIC_TOLERANCE),
+            "{tag}: i_L peak falls with drive, {:.4} mA at {} V -> {:.4} mA at {} V",
+            w[0].il_max * 1e3,
+            w[0].amp,
+            w[1].il_max * 1e3,
+            w[1].amp
+        );
+    }
+}
+
+#[test]
+fn choke_on_railing_opamp_matches_ngspice_active_set() {
+    choke_matches_ngspice(OpampRailMode::ActiveSet, "choke_as");
+}
+
+#[test]
+fn choke_on_railing_opamp_matches_ngspice_active_set_be() {
+    choke_matches_ngspice(OpampRailMode::ActiveSetBe, "choke_asbe");
+}
+
+/// The pinned solve must carry the flux law, and its flux-row residual is what
+/// detects a pinned solve that does not. With the saturating stamps stripped
+/// from the pinned loop, the residual rejects every pinned sample and each
+/// rejection is counted as unsolved; with the residual stripped as well, the
+/// same wrong answer is committed and nothing is counted. So the residual is
+/// the detector, and the counter makes its verdict visible.
+#[test]
+fn pinned_choke_without_its_stamps_is_caught_by_the_residual() {
+    let code = choke_code(OpampRailMode::ActiveSet, 4);
+    let strip = |code: &str, residual: bool| -> String {
+        let mut stamps = 0;
+        let mut residuals = 0;
+        let out: Vec<&str> = code
+            .lines()
+            .filter(|l| {
+                let stamp = l.contains("g_as[SAT_IND_0_AUG_ROW][SAT_IND_0_AUG_ROW] +=")
+                    || l.contains("rhs_as[SAT_IND_0_AUG_ROW] +=");
+                let resid =
+                    residual && l.contains("acc.abs()") && l.contains("pin_step_exceeded = true");
+                stamps += stamp as usize;
+                residuals += resid as usize;
+                !(stamp || resid)
+            })
+            .collect();
+        assert!(
+            stamps >= 2,
+            "test premise: the pinned loop stamps the choke ({stamps} lines)"
+        );
+        assert!(
+            !residual || residuals >= 1,
+            "test premise: the pinned loop checks the flux row"
+        );
+        out.join("\n")
+    };
+
+    let no_stamps = render_choke(&strip(&code, false), 48000.0, "choke_mut_stamps");
+    for row in &no_stamps {
+        assert!(
+            row.unsolved > 1000,
+            "{} V: stamps stripped, but only {} samples counted unsolved",
+            row.amp,
+            row.unsolved
+        );
+    }
+
+    let blind = render_choke(&strip(&code, true), 48000.0, "choke_mut_blind");
+    assert!(
+        blind.iter().all(|r| r.unsolved == 0),
+        "test premise: without the residual nothing detects the missing stamps"
+    );
+    let err = choke_gates(&blind, "blind mutant").expect_err("the blind mutant must be wrong");
+    assert!(err.contains("i_L max") || err.contains("H1"), "{err}");
+}
+
+/// 1x, active-set-be: backward Euler on nearly every sample. Measured H1
+/// +9.8 % at 0.1 V; i_L max -1.6 … -5.8 %.
+#[test]
+#[ignore = "1x integrator accuracy: backward Euler on nearly every railed sample at L/R ~ 5 samples; turns green with the backward-Euler latch work, do not loosen"]
+fn choke_on_railing_opamp_at_1x_active_set_be() {
+    let rows = render_choke(
+        &choke_code(OpampRailMode::ActiveSetBe, 1),
+        48000.0,
+        "choke_asbe_1x",
+    );
+    choke_gates(&rows, "active-set-be 1x").unwrap();
+}
+
+/// 1x, active-set: the trapezoidal ring in deep saturation. Measured i_L max
+/// up to +13.9 %; H1 within 0.2 %.
+#[test]
+#[ignore = "1x integrator accuracy: trapezoidal ring in deep saturation overshoots the i_L peak; turns green with deep-saturation stiffness handling, do not loosen"]
+fn choke_on_railing_opamp_at_1x_active_set() {
+    let rows = render_choke(
+        &choke_code(OpampRailMode::ActiveSet, 1),
+        48000.0,
+        "choke_as_1x",
+    );
+    choke_gates(&rows, "active-set 1x").unwrap();
 }

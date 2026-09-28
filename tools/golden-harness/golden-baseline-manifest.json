@@ -1104,5 +1104,10 @@
     "negligible": "mosfet-choke-load/sweep and the step and sweep renders of sat-knee-rl, sat-core-loaded and sat-core-open: level within 1e-5 dB, corr 1.0000000. Newton iterations (refactor count, one per iteration on these decks) up 0.02-2.3 %.",
     "sub_steps": "0 on every render of every saturating deck, before and after.",
     "generated_source": "Differs on the five saturating decks only (funkyinduct, mosfet-choke-load, sat-knee-rl, sat-core-loaded, sat-core-open); funkyinduct renders identically."
+  },
+  "rebaseline_2026_09_28_pinned_saturation": {
+    "why": "Saturating inductors solved inside the op-amp rail pin; a pinned solve that does not converge is now counted on full-LU (diag_nr_unconverged_commit_count, declared on full-LU builds that can pin an op-amp).",
+    "vs_previous": "180 identical, 0 negligible, 0 changed; 0 held and 0 not-converged on both sides; the new counter is 0 on every render.",
+    "generated_source": "Differs on 9 decks: gravity, moonladder, sad-bastard, sus-bus (the counter's declaration and increment at the pin-failure site) and the five saturating decks (the flux-row residual emitter restructured, same arithmetic). No golden deck combines a pinned op-amp with a saturating inductor."
   }
 }
