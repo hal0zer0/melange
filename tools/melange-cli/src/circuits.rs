@@ -162,10 +162,7 @@ pub fn resolve(circuit_ref: &str) -> Result<CircuitSource> {
     // five-strategy report is genuinely useful for an ambiguous bare name; for
     // `./nope.cir` it buries "no such file" under four irrelevancies, three of
     // which could never have applied.
-    if circuit_ref.contains('/')
-        || circuit_ref.contains('\\')
-        || circuit_ref.ends_with(".cir")
-    {
+    if circuit_ref.contains('/') || circuit_ref.contains('\\') || circuit_ref.ends_with(".cir") {
         anyhow::bail!(
             "No such circuit file: '{}'\n\n\
              That looks like a path, so melange did not try builtins or remote \
@@ -210,9 +207,7 @@ const BUILTIN_PASSIVE_EQ: &str = include_str!("../../../examples/passive-eq1a.ci
 /// told them.
 fn get_builtin(name: &str) -> Option<(&'static str, String)> {
     match name {
-        "passive-eq1a" | "passive-eq" => {
-            Some(("passive-eq1a", BUILTIN_PASSIVE_EQ.to_string()))
-        }
+        "passive-eq1a" | "passive-eq" => Some(("passive-eq1a", BUILTIN_PASSIVE_EQ.to_string())),
         _ => None,
     }
 }

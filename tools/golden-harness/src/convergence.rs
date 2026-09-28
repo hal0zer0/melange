@@ -469,7 +469,10 @@ pub fn print_section(sets: &[(String, &[Health])]) {
         .collect();
     if !held.is_empty() {
         println!("\n  ######################################################");
-        println!("  ##  {} RENDER(S) SHIPPED SAMPLES THAT ARE NOT SOLUTIONS", held.len());
+        println!(
+            "  ##  {} RENDER(S) SHIPPED SAMPLES THAT ARE NOT SOLUTIONS",
+            held.len()
+        );
         println!("  ##  Every Newton path failed on those samples and the");
         println!("  ##  PREVIOUS state was committed as the answer. Bounded and");
         println!("  ##  smooth, so peak/RMS/clamp/correlation all read healthy.");
@@ -667,7 +670,14 @@ mod tests {
     /// `golden-baselines/` are in exactly this state.
     #[test]
     fn missing_counter_is_unknown_not_clean() {
-        let h = assess("p", "step", &stats(48000, &[]), Some(1), Some(100), Some(true));
+        let h = assess(
+            "p",
+            "step",
+            &stats(48000, &[]),
+            Some(1),
+            Some(100),
+            Some(true),
+        );
         assert_eq!(h.class, Class::Unknown);
     }
 

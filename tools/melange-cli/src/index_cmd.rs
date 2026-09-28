@@ -188,7 +188,10 @@ mod tests {
     fn flat_and_nested_both_index() {
         let d = tree(&["rc.cir", "fuzz/big-muff.cir"]);
         let s = render(scan(d.path()).unwrap()).unwrap();
-        assert!(s.contains("\"rc\": {\n      \"path\": \"rc.cir\"\n    }"), "{s}");
+        assert!(
+            s.contains("\"rc\": {\n      \"path\": \"rc.cir\"\n    }"),
+            "{s}"
+        );
         assert!(s.contains("\"path\": \"fuzz/big-muff.cir\""), "{s}");
     }
 

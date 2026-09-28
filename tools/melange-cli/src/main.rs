@@ -19,8 +19,8 @@ mod builtins {
 
 pub mod cache;
 pub mod circuits;
-pub mod index_cmd;
 pub mod codegen_runner;
+pub mod index_cmd;
 pub mod plugin_template;
 pub mod sources;
 
@@ -2646,12 +2646,25 @@ fn compile_circuit_source(
     // golden corpus runs there), and the amount that oversampling helps is
     // strongly circuit- and drive-dependent — so this points at the
     // measurement rather than prescribing a factor.
-    if generated.m > 0 && oversampling == 1 && oversampling_cli.is_none() && netlist.recommended_oversampling.is_none() {
-        println!("    NOTE: {} nonlinear dimension(s) at 1× — harmonics above Nyquist fold", generated.m);
+    if generated.m > 0
+        && oversampling == 1
+        && oversampling_cli.is_none()
+        && netlist.recommended_oversampling.is_none()
+    {
+        println!(
+            "    NOTE: {} nonlinear dimension(s) at 1× — harmonics above Nyquist fold",
+            generated.m
+        );
         println!("          back as aliasing, which the frequency response will not show.");
-        println!("          Measure it:  melange analyze <circuit> --harmonics 5 --amplitude <drive>");
-        println!("                       (compare the worst `nyquist_dbc` against --oversampling 4)");
-        println!("          Set it:      --oversampling {{2|4}}, or `.oversampling N` in the deck.");
+        println!(
+            "          Measure it:  melange analyze <circuit> --harmonics 5 --amplitude <drive>"
+        );
+        println!(
+            "                       (compare the worst `nyquist_dbc` against --oversampling 4)"
+        );
+        println!(
+            "          Set it:      --oversampling {{2|4}}, or `.oversampling N` in the deck."
+        );
         println!("          Why it is not simply a quality dial: docs/OVERSAMPLING.md");
     }
     println!(

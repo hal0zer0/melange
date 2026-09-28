@@ -1539,14 +1539,7 @@ impl RustEmitter {
     pub(super) fn emit_nodal(
         &self,
         ir: &CircuitIR,
-    ) -> Result<
-        (
-            String,
-            crate::codegen::NodalSubPath,
-            Option<&'static str>,
-        ),
-        CodegenError,
-    > {
+    ) -> Result<(String, crate::codegen::NodalSubPath, Option<&'static str>), CodegenError> {
         let mut code = String::new();
 
         // Compute use_full_nodal flag FIRST — needed by emit_nodal_state for hot/cold split.
@@ -2153,8 +2146,8 @@ impl RustEmitter {
         // fixed N_SUB = 2. Emitting the bound on a Schur build would publish a
         // number that governs nothing there.
         if use_full_nodal {
-        code.push_str(
-            "/// Deepest timestep subdivision the adaptive sub-step will try before\n\
+            code.push_str(
+                "/// Deepest timestep subdivision the adaptive sub-step will try before\n\
              /// giving up: 2^SUBSTEP_MAX_POWER, i.e. 64x.\n\
              ///\n\
              /// A transient Newton failure is a TIMESTEP problem, not a budget problem,\n\
@@ -2167,8 +2160,8 @@ impl RustEmitter {
              ///\n\
              /// Past this depth the death-spiral hold fires and `diag_nr_hold_count`\n\
              /// records a sample that is not a solution.\n",
-        );
-        code.push_str("pub const SUBSTEP_MAX_POWER: u32 = 6;\n\n");
+            );
+            code.push_str("pub const SUBSTEP_MAX_POWER: u32 = 6;\n\n");
         }
         if ir.solver_config.breakpoint_be {
             code.push_str(
@@ -3125,12 +3118,10 @@ impl RustEmitter {
         // for something that cannot happen, which is the same misleading-
         // diagnostic shape this counter was added to remove.
         let emits_hold = use_full_nodal
-            && (m > 0
-                || !ir.behavioral_sources.is_empty()
-                || !ir.saturating_inductors.is_empty());
+            && (m > 0 || !ir.behavioral_sources.is_empty() || !ir.saturating_inductors.is_empty());
         if emits_hold {
-        code.push_str(
-            "    /// Diagnostic: samples on which EVERY Newton path failed (trap +\n\
+            code.push_str(
+                "    /// Diagnostic: samples on which EVERY Newton path failed (trap +\n\
              \x20   /// sub-step + BE) and the death-spiral hold committed the PREVIOUS\n\
              \x20   /// state as this sample's answer.\n\
              \x20   ///\n\
@@ -3149,8 +3140,8 @@ impl RustEmitter {
              \x20   /// Distinct from `diag_be_fallback_count`, which counts a RECOVERY:\n\
              \x20   /// a converged solution by another consistent scheme. This counts a\n\
              \x20   /// non-solution shipped as output.\n",
-        );
-        code.push_str("    pub diag_nr_hold_count: u64,\n");
+            );
+            code.push_str("    pub diag_nr_hold_count: u64,\n");
         }
         // Schur's equivalent: no hold, so an unconverged sample is COMMITTED.
         if !use_full_nodal {
@@ -8665,9 +8656,7 @@ impl RustEmitter {
                 // positive-feedback circuits (compressor sidechains, oscillators, etc.).
                 code.push_str("    // Adaptive sub-stepping: retry with subdivided timestep\n");
                 code.push_str(&format!("    if !converged{be_latch_and} {{\n"));
-                code.push_str(
-                    "        'substep: for subdiv_power in 1..=SUBSTEP_MAX_POWER {\n",
-                );
+                code.push_str("        'substep: for subdiv_power in 1..=SUBSTEP_MAX_POWER {\n");
                 code.push_str(
                     "            let subdiv = 1u32 << subdiv_power; // 2 .. 2^SUBSTEP_MAX_POWER\n",
                 );

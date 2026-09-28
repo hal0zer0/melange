@@ -1396,9 +1396,18 @@ fn generate_lib_rs(
     // the defaults are usable, and the newcomer path stays unblocked
     // (arbiter t588).
     let defaulted: Vec<&str> = [
-        options.vendor.is_none().then_some("--vendor (currently \"Melange\")"),
-        options.url.is_none().then_some("--url (currently the melange repo)"),
-        options.email.is_none().then_some("--email (currently empty)"),
+        options
+            .vendor
+            .is_none()
+            .then_some("--vendor (currently \"Melange\")"),
+        options
+            .url
+            .is_none()
+            .then_some("--url (currently the melange repo)"),
+        options
+            .email
+            .is_none()
+            .then_some("--email (currently empty)"),
     ]
     .into_iter()
     .flatten()

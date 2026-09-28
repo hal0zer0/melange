@@ -3096,11 +3096,7 @@ impl CircuitIR {
                 let c = c_matrix[i * n + j];
                 a_sub_flat[i * n + j] = g + alpha_sub * c;
                 // BE history carries no -G term.
-                a_neg_sub_flat[i * n + j] = if be {
-                    alpha_sub * c
-                } else {
-                    alpha_sub * c - g
-                };
+                a_neg_sub_flat[i * n + j] = if be { alpha_sub * c } else { alpha_sub * c - g };
             }
         }
         // Blanket-zero ALL augmented algebraic rows in A_neg_sub — the same

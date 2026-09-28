@@ -474,12 +474,7 @@ pub struct Outcome {
 ///   change at all?", which is the only gate a behaviour-preserving refactor
 ///   can be held to. These are different questions and must not share a
 ///   threshold: NEGLIGIBLE is exactly the band in which a refactor bug hides.
-pub fn run(
-    dir_a: &Path,
-    dir_b: &Path,
-    json_out: &Path,
-    strict: bool,
-) -> Result<Outcome, String> {
+pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<Outcome, String> {
     if !dir_a.is_dir() {
         return Err(format!("{} is not a directory", dir_a.display()));
     }

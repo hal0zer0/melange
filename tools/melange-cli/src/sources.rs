@@ -269,7 +269,11 @@ impl SourcesConfig {
         let name = circuit.strip_suffix(".cir").unwrap_or(circuit);
 
         match index.circuits.get(name) {
-            Some(entry) => Ok(format!("{}/{}", base_url, entry.path.trim_start_matches('/'))),
+            Some(entry) => Ok(format!(
+                "{}/{}",
+                base_url,
+                entry.path.trim_start_matches('/')
+            )),
             None => {
                 let near = near_matches(name, index.circuits.keys());
                 let hint = if near.is_empty() {

@@ -145,14 +145,7 @@ impl RustEmitter {
     fn emit_inner(
         &self,
         ir: &CircuitIR,
-    ) -> Result<
-        (
-            String,
-            Option<super::NodalSubPath>,
-            Option<&'static str>,
-        ),
-        CodegenError,
-    > {
+    ) -> Result<(String, Option<super::NodalSubPath>, Option<&'static str>), CodegenError> {
         use super::ir::SolverMode;
         match ir.solver_mode {
             SolverMode::Dk => Ok((self.emit_dk(ir)?, None, None)),
