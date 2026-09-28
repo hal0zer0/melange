@@ -82,6 +82,22 @@ generated state is smaller.
   (e.g. an op-amp-only stage on the nodal route): it decided which diagnostic
   counters exist by searching the generated code for their names, and a doc
   comment named one the build does not declare. It now matches the declaration.
+- **Saturating coupled inductors the shared-core model does not cover are
+  refused instead of silently mis-modelled.** Three cases compiled without a
+  word:
+  - A saturating pair with coupling k ≤ 0.8 took an old per-winding path. It
+    was a no-op unless the deck had a pot or switch (a k=0.5 pair driven to
+    2.5x its saturation current rendered bit-identical to the linear circuit),
+    physically wrong when one was present, and absent on the full-LU path. A
+    closed iron core has k above 0.99; k ≤ 0.8 means no shared core, or a
+    shunted ballast-type core that melange does not model. The message says
+    which.
+  - A saturating transformer with three or more windings used an average
+    coupling per winding: a 4 dB linear error at 20 Hz with unequal couplings.
+  - Two windings of one core with different saturation currents: the first one
+    silently won.
+
+  None of the 92 corpus circuits that compile with default flags is affected.
 - **`.pot` with no default accepted a resistor value outside its own range**,
   so the knob started at a setting it could not return to. It is now refused,
   as an explicit default and `--pot` already were. A one-word label no longer

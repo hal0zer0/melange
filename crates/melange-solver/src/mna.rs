@@ -3552,6 +3552,61 @@ impl MnaBuilder {
             // DK/Schur limitation, not a full-LU one. Still requires tight coupling
             // (max_k > 0.8) for the leakage/magnetizing split to be well-posed.
             let group_saturating = members.iter().any(|m| inductor_refs[m].isat.is_some());
+            if group_saturating {
+                // Saturating coupled groups the shared-core model does not cover
+                // are refused, not approximated. Each was silently wrong before:
+                // the old per-winding path was a no-op without a pot, per-winding
+                // (physically wrong) with one, and absent on full-LU; the T-model
+                // used a per-winding average coupling for W >= 3 (4 dB linear
+                // error at uneven k); and with several ISATs the first one won.
+                let names = members.join(", ");
+                if max_k <= IDEAL_XFMR_K_THRESHOLD {
+                    return Err(MnaError::TopologyError(format!(
+                        "coupled inductors {{{names}}} carry ISAT (a saturating shared core) \
+                         but their largest coupling is k={max_k}. A closed iron core puts \
+                         k above 0.99: leakage is a small air-path fraction. k <= 0.8 means \
+                         either no shared core, in which case give each inductor its own \
+                         ISAT and drop the K line, or a deliberate iron leakage path \
+                         (ballast, neon or welding transformers) whose leakage flux itself \
+                         saturates, which melange does not model."
+                    )));
+                }
+                if members.len() > 2 {
+                    return Err(MnaError::TopologyError(format!(
+                        "saturating transformer {{{names}}} has {} windings. The \
+                         shared-core saturation model is exact for 2 windings only; for \
+                         more it would use an average coupling per winding, which is \
+                         wrong for unequal couplings (4 dB at 20 Hz in a 3-winding \
+                         test). Remove ISAT to simulate it linearly with the exact \
+                         coupled-inductor model.",
+                        members.len()
+                    )));
+                }
+                // One shared core has one saturation current. Refer every
+                // authored ISAT to the largest-L winding and require agreement.
+                let l_ref = max_l;
+                let referred: Vec<(String, f64)> = members
+                    .iter()
+                    .filter_map(|m| {
+                        let ind = &inductor_refs[m];
+                        ind.isat
+                            .map(|i| (m.clone(), i * (ind.value / l_ref).sqrt()))
+                    })
+                    .collect();
+                if let Some((first_name, first)) = referred.first() {
+                    if let Some((name, other)) = referred
+                        .iter()
+                        .find(|(_, v)| (v - first).abs() > 1e-9 * first.abs().max(v.abs()))
+                    {
+                        return Err(MnaError::TopologyError(format!(
+                            "coupled inductors {{{names}}} share one core but carry \
+                             different saturation currents: {first_name} and {name} refer \
+                             to {first:e} A and {other:e} A on the larger winding. A core \
+                             has one saturation current; put ISAT on one winding only."
+                        )));
+                    }
+                }
+            }
             if (max_l > IDEAL_XFMR_L_THRESHOLD || group_saturating)
                 && max_k > IDEAL_XFMR_K_THRESHOLD
             {
