@@ -72,7 +72,7 @@ generated state is smaller.
   behavioral source or a saturating inductor.** The pinned solve does not
   include those elements yet, and it stops on step size, so it could converge
   to a point that is not a solution. The error names the explicit alternatives
-  (`--opamp-rail-mode hard` or `boyle-diodes`). No corpus circuit that compiles
+  (`--opamp-rail-mode hard` or `boyle-diodes`). None of the 92 corpus circuits that compile
   with default flags has the combination.
 - `simulate --probe` help says that at `--oversampling` > 1 each row is a
   decimated, filtered host-rate sample, whose peak can exceed the raw one.
