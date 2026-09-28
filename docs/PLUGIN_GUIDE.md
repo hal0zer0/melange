@@ -336,9 +336,17 @@ Output: `target/bundled/my_plugin.clap` and `target/bundled/my_plugin.vst3`
 
 ### CPU baseline — read this before you distribute
 
-The generated project ships a `.cargo/config.toml` that raises the x86-64
-instruction-set baseline to **`x86-64-v3`** (AVX2 + FMA + BMI) for every x86_64
-target it knows about:
+Choose it with `--cpu-baseline` on `melange compile --format plugin`:
+
+| `--cpu-baseline` | Needs | Runs on |
+|---|---|---|
+| `x86-64-v3` (default) | AVX2 + FMA + BMI | Intel Haswell (2013) / AMD Excavator (2015) and newer |
+| `x86-64-v2` | SSE4.2 + POPCNT | Intel Nehalem (2008) / AMD Bulldozer (2011) and newer |
+| `x86-64` | SSE2 | every x86_64 CPU |
+
+By default the generated project ships a `.cargo/config.toml` that raises the
+x86-64 instruction-set baseline to **`x86-64-v3`** for every x86_64 target it
+knows about:
 
 ```toml
 [target.x86_64-unknown-linux-gnu]
@@ -357,8 +365,9 @@ it does not warn — it takes the host DAW down with it, on their machine, in a
 way that looks like your plugin is broken. Perfectly fine for a plugin you build
 for your own rig; a decision you should make deliberately for one you ship.
 
-To build for the wider baseline, delete the `[target.…]` section matching the
-target you are building. The generated DSP is **bit-for-bit identical** either
+To build for older machines, regenerate with `--cpu-baseline x86-64` (or
+`x86-64-v2`), or delete the `[target.…]` section matching the target you are
+building. The generated DSP is **bit-for-bit identical** either
 way — Rust never contracts `a*b + c` into an FMA on its own, so the flag changes
 instruction selection, not results. What you give up is throughput: the uplift
 is documented at roughly 5–13% on matvec-heavy circuits in

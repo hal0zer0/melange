@@ -4,7 +4,8 @@
 #
 # The unit tests in plugin_template.rs only inspect the generated text; this is
 # the check that the text compiles. Covers each lib.rs skeleton (stereo, mono,
-# multi-output) and oversampling at 1x/2x/4x, plus the wet/dry dry-delay path.
+# multi-output), oversampling at 1x/2x/4x, the wet/dry dry-delay path, and
+# each --cpu-baseline.
 #
 # Usage: tools/check-generated-plugins.sh [path/to/melange]
 # Env:   CARGO_BUILD_JOBS is honoured, as for any cargo invocation.
@@ -51,6 +52,8 @@ CASES=(
   "stereo-4x-wetdry|clipper.cir|--oversampling 4 --wet-dry-mix"
   "mono-4x-wetdry|clipper.cir|--oversampling 4 --mono --wet-dry-mix"
   "multiout-2x|split.cir|--oversampling 2 --output-node lo,hi"
+  "portable-v2|clipper.cir|--cpu-baseline x86-64-v2"
+  "portable-x86-64|clipper.cir|--cpu-baseline x86-64"
 )
 
 fail=0

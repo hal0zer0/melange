@@ -164,6 +164,7 @@ Key flags for `melange compile`:
 | `--no-ear-protection` | off | Disable output soft limiter |
 | `--wet-dry-mix` | off | Add wet/dry mix parameter |
 | `--mono` | off | Generate mono instead of stereo |
+| `--cpu-baseline x86-64-v3\|x86-64-v2\|x86-64` | `x86-64-v3` | x86_64 instruction set for the plugin. v3 is fastest but crashes on pre-2013 CPUs; `x86-64` runs everywhere (plugin format only) |
 | `--backward-euler` | off | Use backward Euler (unconditionally stable) |
 | `--tube-grid-fa auto\|on\|off` | `auto` | Pentode grid-off dimension reduction |
 | `--opamp-rail-mode` | `auto` | Op-amp rail saturation strategy |

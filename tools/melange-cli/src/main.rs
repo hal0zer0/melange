@@ -333,6 +333,14 @@ enum Commands {
         /// Applies to `--format plugin`.
         #[arg(long, value_name = "STR")]
         clap_id: Option<String>,
+
+        /// x86_64 instruction-set baseline for the plugin project
+        /// (`--format plugin`). x86-64-v3 (default): AVX2, Haswell 2013+,
+        /// fastest. x86-64-v2: SSE4.2, 2008+. x86-64: runs on every x86_64 CPU.
+        /// A build above the machine's baseline crashes when the DAW loads it;
+        /// results are bit-identical across all three. aarch64 is unaffected.
+        #[arg(long, value_enum, value_name = "BASELINE", default_value = "x86-64-v3")]
+        cpu_baseline: plugin_template::CpuBaseline,
     },
 
     /// Validate circuit against ngspice reference simulation
@@ -992,6 +1000,7 @@ fn main() -> Result<()> {
             email,
             vst3_id,
             clap_id,
+            cpu_baseline,
         } => {
             // Validate numeric CLI parameters
             if sample_rate <= 0.0 || !sample_rate.is_finite() {
@@ -1121,6 +1130,7 @@ fn main() -> Result<()> {
                 email.as_deref(),
                 vst3_id.as_deref(),
                 clap_id.as_deref(),
+                cpu_baseline,
             )
         }
         Commands::Validate {
@@ -1729,6 +1739,7 @@ fn compile_circuit_source(
     email: Option<&str>,
     vst3_id_override: Option<&str>,
     clap_id_override: Option<&str>,
+    cpu_baseline: plugin_template::CpuBaseline,
 ) -> Result<()> {
     // Netlist node names are normalized (lowercase, gnd→0) at parse time;
     // fold the CLI-provided names the same way so lookups match.
@@ -2925,6 +2936,7 @@ fn compile_circuit_source(
                 email,
                 vst3_id: vst3_id_override,
                 clap_id: clap_id_override,
+                cpu_baseline,
             };
             plugin_template::generate_plugin_project_with_oversampling(
                 &project_dir,

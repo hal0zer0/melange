@@ -87,9 +87,51 @@ pub struct SwitchParamInfo {
     pub num_positions: usize,
 }
 
+/// x86_64 instruction-set baseline for a generated plugin project.
+///
+/// A real trade-off, so it is a flag: a higher baseline is faster on machines
+/// that have it and **crashes on load** (illegal instruction) on machines that
+/// do not. Results are bit-identical across all three — it changes instruction
+/// selection, not arithmetic. aarch64 is unaffected by every choice.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum CpuBaseline {
+    /// Plain x86-64 (SSE2). Runs on every x86_64 CPU ever made.
+    #[value(name = "x86-64")]
+    X86_64,
+    /// SSE4.2 + POPCNT: Intel Nehalem (2008) / AMD Bulldozer (2011) and newer.
+    #[value(name = "x86-64-v2")]
+    X86_64V2,
+    /// AVX2 + FMA + BMI: Intel Haswell (2013) / AMD Excavator (2015) and newer.
+    /// Measured ~5-13% faster on matvec-heavy circuits.
+    #[default]
+    #[value(name = "x86-64-v3")]
+    X86_64V3,
+}
+
+impl CpuBaseline {
+    /// The `target-cpu` value, or `None` for the plain baseline (no flag).
+    pub fn target_cpu(self) -> Option<&'static str> {
+        match self {
+            CpuBaseline::X86_64 => None,
+            CpuBaseline::X86_64V2 => Some("x86-64-v2"),
+            CpuBaseline::X86_64V3 => Some("x86-64-v3"),
+        }
+    }
+
+    fn cpus(self) -> &'static str {
+        match self {
+            CpuBaseline::X86_64 => "every x86_64 CPU",
+            CpuBaseline::X86_64V2 => "Intel Nehalem (2008) / AMD Bulldozer (2011) and newer",
+            CpuBaseline::X86_64V3 => "Intel Haswell (2013) / AMD Excavator (2015) and newer",
+        }
+    }
+}
+
 /// Options for plugin project generation that go beyond the core circuit parameters.
 #[derive(Default)]
 pub struct PluginOptions<'a> {
+    /// x86_64 instruction-set baseline written to `.cargo/config.toml`.
+    pub cpu_baseline: CpuBaseline,
     /// Custom display name for the plugin (overrides auto-generated name from circuit filename).
     pub plugin_name: Option<&'a str>,
     /// Generate mono (1-channel) plugin instead of stereo.
@@ -223,7 +265,7 @@ pub fn generate_plugin_project_with_oversampling(
     )?;
     std::fs::write(
         output_dir.join(".cargo/config.toml"),
-        generate_cargo_config(),
+        generate_cargo_config(options.cpu_baseline),
     )?;
     std::fs::write(output_dir.join("src/circuit.rs"), circuit_code)?;
     std::fs::write(
@@ -245,7 +287,7 @@ pub fn generate_plugin_project_with_oversampling(
     // README.md for generated plugin project
     std::fs::write(
         output_dir.join("README.md"),
-        generate_readme(circuit_name, options.plugin_name),
+        generate_readme(circuit_name, options.plugin_name, options.cpu_baseline),
     )?;
     // build.sh wrapper around nih_plug_xtask for bundling
     let build_sh_path = output_dir.join("build.sh");
@@ -360,48 +402,58 @@ fn warn_if_nested_in_cargo_workspace(output_dir: &Path) {
 /// appending to them (documented Cargo behaviour). The macOS x86_64 recipe
 /// uses `RUSTFLAGS="-Clink-arg=-headerpad_max_install_names"`, which would
 /// silently drop the baseline — hence the note in the emitted file.
-fn generate_cargo_config() -> String {
-    r#"# Instruction-set baseline for the generated plugin.
-#
-# x86-64-v3 = AVX2 + FMA + BMI (Intel Haswell 2013+, AMD Excavator 2015+).
-# This is an instruction-selection change only: Rust never contracts a*b+c
-# into an FMA on its own, so results are bit-for-bit identical to a baseline
-# x86-64 build — verified across melange's generated-circuit corpus.
-#
-# Set per target rather than under [build]: `cargo zigbuild --target
-# universal2-apple-darwin` compiles the aarch64 and x86_64 halves in one
-# invocation, and a blanket flag would be passed to the aarch64 half, where
-# `x86-64-v3` is not a valid CPU. aarch64 needs no flag at all — ARMv8-A
-# already mandates NEON and fused multiply-add.
-#
-# NOTE: a `RUSTFLAGS` environment variable REPLACES these flags, it does not
-# append. If you need extra flags (e.g. the macOS x86_64 codesign recipe's
-# `-Clink-arg=-headerpad_max_install_names`), add them to the relevant
-# section below rather than exporting RUSTFLAGS, or you will silently drop
-# the baseline.
-#
-# To build for an older CPU, delete the section for your target.
-
-[target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "target-cpu=x86-64-v3"]
-
-[target.x86_64-apple-darwin]
-rustflags = ["-C", "target-cpu=x86-64-v3"]
-
-[target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-cpu=x86-64-v3"]
-
-[target.x86_64-pc-windows-gnu]
-rustflags = ["-C", "target-cpu=x86-64-v3"]
-
-# Bundle CLAP + VST3 via the in-workspace xtask bin (no separate nih-plug
-# checkout needed):  cargo xtask bundle <plugin_name> --release
-# Release mode avoids recompiling serde twice when the plugin also builds
-# release, matching nih-plug's own alias.
-[alias]
-xtask = "run --package xtask --release --"
-"#
-    .to_string()
+fn generate_cargo_config(baseline: CpuBaseline) -> String {
+    let targets = [
+        "x86_64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+        "x86_64-pc-windows-gnu",
+    ];
+    let baseline_block = match baseline.target_cpu() {
+        Some(cpu) => {
+            let sections: String = targets
+                .iter()
+                .map(|t| format!("[target.{t}]\nrustflags = [\"-C\", \"target-cpu={cpu}\"]\n\n"))
+                .collect();
+            format!(
+                "# Instruction-set baseline for the generated plugin: {cpu}.\n\
+                 # Runs on {cpus}; on an older CPU the plugin crashes with an illegal\n\
+                 # instruction when the DAW loads it. Regenerate with\n\
+                 # `melange compile ... --cpu-baseline x86-64` for a build that runs on\n\
+                 # every x86_64 CPU, or delete the section for your target below.\n\
+                 #\n\
+                 # This is an instruction-selection change only: Rust never contracts\n\
+                 # a*b+c into an FMA on its own, so results are bit-for-bit identical to a\n\
+                 # baseline x86-64 build.\n\
+                 #\n\
+                 # Set per target rather than under [build]: `cargo zigbuild --target\n\
+                 # universal2-apple-darwin` compiles the aarch64 and x86_64 halves in one\n\
+                 # invocation, and a blanket flag would be passed to the aarch64 half,\n\
+                 # where `{cpu}` is not a valid CPU. aarch64 needs no flag at all —\n\
+                 # ARMv8-A already mandates NEON and fused multiply-add.\n\
+                 #\n\
+                 # NOTE: a `RUSTFLAGS` environment variable REPLACES these flags, it does\n\
+                 # not append. If you need extra flags (e.g. the macOS x86_64 codesign\n\
+                 # recipe's `-Clink-arg=-headerpad_max_install_names`), add them to the\n\
+                 # relevant section below rather than exporting RUSTFLAGS, or you will\n\
+                 # silently drop the baseline.\n\n{sections}",
+                cpus = baseline.cpus(),
+            )
+        }
+        None => "# Instruction-set baseline for the generated plugin: plain x86-64 (no\n\
+                 # target-cpu flag), so it runs on every x86_64 CPU. `--cpu-baseline\n\
+                 # x86-64-v3` is ~5-13% faster on AVX2 machines (Haswell 2013 and newer)\n\
+                 # with bit-identical results, at the cost of crashing on older ones.\n\n"
+            .to_string(),
+    };
+    format!(
+        "{baseline_block}# Bundle CLAP + VST3 via the in-workspace xtask bin (no separate nih-plug\n\
+         # checkout needed):  cargo xtask bundle <plugin_name> --release\n\
+         # Release mode avoids recompiling serde twice when the plugin also builds\n\
+         # release, matching nih-plug's own alias.\n\
+         [alias]\n\
+         xtask = \"run --package xtask --release --\"\n"
+    )
 }
 
 fn generate_cargo_toml(circuit_name: &str) -> String {
@@ -441,7 +493,32 @@ opt-level = 3
     )
 }
 
-fn generate_readme(circuit_name: &str, plugin_name: Option<&str>) -> String {
+fn generate_readme(
+    circuit_name: &str,
+    plugin_name: Option<&str>,
+    cpu_baseline: CpuBaseline,
+) -> String {
+    let cpu_section = match cpu_baseline.target_cpu() {
+        Some(cpu) => format!(
+            "### CPU baseline — {cpu}: will not run on older machines\n\n\
+             `.cargo/config.toml` sets `target-cpu={cpu}` for every x86_64 target, so\n\
+             this build runs on **{cpus}**. On anything older the plugin does not\n\
+             degrade — it crashes with an illegal instruction the moment the DAW loads it.\n\n\
+             It is an instruction-selection change only (results are bit-identical to a\n\
+             baseline x86-64 build). For wider compatibility, regenerate with\n\
+             `melange compile ... --cpu-baseline x86-64` (every x86_64 CPU) or\n\
+             `--cpu-baseline x86-64-v2` (2008+), or delete the section for your target\n\
+             from `.cargo/config.toml`. The file explains the trade-off and the\n\
+             `RUSTFLAGS`-replaces-rather-than-appends trap in full.\n\n",
+            cpus = cpu_baseline.cpus(),
+        ),
+        None => "### CPU baseline — plain x86-64: runs everywhere\n\n\
+                 This build uses no `target-cpu` flag, so it runs on every x86_64 CPU.\n\
+                 `melange compile ... --cpu-baseline x86-64-v3` is ~5-13% faster on\n\
+                 AVX2 machines (Haswell 2013 and newer) with bit-identical results, but\n\
+                 crashes on older CPUs.\n\n"
+            .to_string(),
+    };
     let display_name = if let Some(name) = plugin_name {
         name.to_string()
     } else {
@@ -487,20 +564,7 @@ The compiled plugin (CLAP + VST3) will be in `target/bundled/`.
 
 ## Before you distribute this
 
-### CPU baseline — this build will not run on pre-2013 machines
-
-`.cargo/config.toml` sets `target-cpu=x86-64-v3` for every x86_64 target.
-That is AVX2 + FMA + BMI: **Intel Haswell (2013) or AMD Excavator (2015) and
-newer**. On anything older the plugin does not degrade — it crashes with an
-illegal instruction the moment the DAW loads it.
-
-It is an instruction-selection change only (results are bit-identical to a
-baseline x86-64 build), so if you are shipping to other people and want the
-wider compatibility, delete the section for your target from
-`.cargo/config.toml` before building. The file explains the trade-off and the
-`RUSTFLAGS`-replaces-rather-than-appends trap in full.
-
-### Plugin identity — change these before anyone else installs it
+{cpu_section}### Plugin identity — change these before anyone else installs it
 
 All of it lives in `src/lib.rs`:
 
@@ -2720,14 +2784,44 @@ mod tests {
     }
 
     #[test]
+    fn cpu_baseline_sets_or_omits_target_cpu() {
+        let v3 = generate_cargo_config(CpuBaseline::X86_64V3);
+        assert_eq!(v3.matches("target-cpu=x86-64-v3").count(), 4, "{v3}");
+        assert!(v3.contains("[target.x86_64-apple-darwin]"));
+        assert!(
+            !v3.contains("aarch64-apple-darwin]"),
+            "aarch64 must get no flag"
+        );
+        let v2 = generate_cargo_config(CpuBaseline::X86_64V2);
+        assert_eq!(v2.matches("target-cpu=x86-64-v2\"").count(), 4, "{v2}");
+        let plain = generate_cargo_config(CpuBaseline::X86_64);
+        assert!(!plain.contains("target-cpu="), "{plain}");
+        assert!(!plain.contains("[target."), "{plain}");
+        // The bundler alias survives every choice.
+        for c in [&v3, &v2, &plain] {
+            assert!(c.contains("[alias]\nxtask = \"run --package xtask --release --\""));
+        }
+        assert_eq!(CpuBaseline::default(), CpuBaseline::X86_64V3);
+    }
+
+    #[test]
+    fn readme_states_the_chosen_cpu_baseline() {
+        let v3 = generate_readme("x", None, CpuBaseline::X86_64V3);
+        assert!(v3.contains("target-cpu=x86-64-v3") && v3.contains("--cpu-baseline x86-64"));
+        let plain = generate_readme("x", None, CpuBaseline::X86_64);
+        assert!(plain.contains("runs on every x86_64 CPU"), "{plain}");
+        assert!(!plain.contains("target-cpu=x86-64"), "{plain}");
+    }
+
+    #[test]
     fn readme_uses_custom_plugin_name() {
-        let readme = generate_readme("my-circuit", Some("My Custom Name"));
+        let readme = generate_readme("my-circuit", Some("My Custom Name"), CpuBaseline::default());
         assert!(readme.contains("# My Custom Name"));
     }
 
     #[test]
     fn readme_uses_auto_name_when_no_custom() {
-        let readme = generate_readme("tube-screamer", None);
+        let readme = generate_readme("tube-screamer", None, CpuBaseline::default());
         assert!(readme.contains("# Tube Screamer"));
     }
 

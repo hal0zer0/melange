@@ -69,6 +69,12 @@ generated state is smaller.
 
 ### Added
 
+- `--cpu-baseline {x86-64-v3|x86-64-v2|x86-64}` on `compile --format plugin`.
+  The default stays `x86-64-v3` (AVX2, Haswell 2013+, fastest), but a plugin
+  built at that baseline crashes on load on an older CPU, and the only way out
+  used to be hand-editing `.cargo/config.toml`. `x86-64` runs on every x86_64
+  CPU; results are bit-identical across all three. The generated README and
+  config say which baseline was built and how to change it.
 - `melange sources show <name>` lists the circuits a source publishes, with
   category and tier.
 - Value warnings (`1M` read as milli, `4M7` read as mega, a trailing `F`) name
