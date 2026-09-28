@@ -215,10 +215,6 @@ pub struct CoupledInductorInfo {
     pub l1_value: f64,
     pub l2_value: f64,
     pub coupling: f64,
-    /// Saturation current for winding 1. None = linear.
-    pub l1_isat: Option<f64>,
-    /// Saturation current for winding 2. None = linear.
-    pub l2_isat: Option<f64>,
 }
 
 /// Multi-winding transformer group info.
@@ -242,8 +238,6 @@ pub struct TransformerGroupInfo {
     pub inductances: Vec<f64>,
     /// NxN coupling coefficient matrix (symmetric, diagonal = 1.0)
     pub coupling_matrix: Vec<Vec<f64>>,
-    /// Per-winding saturation current. None = linear.
-    pub winding_isats: Vec<Option<f64>>,
 }
 
 /// Information about a nonlinear device in the MNA system.
@@ -853,6 +847,14 @@ pub struct AugmentedMatrices {
 }
 
 impl MnaSystem {
+    /// Whether any inductor saturates (`ISAT=`). Saturation lives only on
+    /// uncoupled inductors — a saturating tightly-coupled group is realized as
+    /// a T-model whose single `{ref}_mag` inductor carries the core's ISAT, and
+    /// every other saturating coupled group is refused while the MNA is built.
+    pub fn has_saturating_inductor(&self) -> bool {
+        self.inductors.iter().any(|ind| ind.isat.is_some())
+    }
+
     /// Create a new empty MNA system.
     ///
     /// Matrices are sized at `n × n`; the builder expands them to `n_aug × n_aug`
@@ -3543,7 +3545,7 @@ impl MnaBuilder {
             // winding is a shared-core SATURATING transformer. Route it through the
             // T-model so saturation attaches to the single {ref}_mag magnetizing
             // inductor (whose branch current IS the net magnetizing current), not
-            // the physically-wrong per-winding winding_isats path. This is
+            // a per-winding saturation (physically wrong, and removed). This is
             // ADDITIVE: non-saturating groups are unaffected (still gated by the
             // 1e30 L threshold, i.e. currently never). Saturating groups force the
             // full-LU nodal path (Phase 1 routing), where the ideal-coupling
@@ -3806,8 +3808,6 @@ impl MnaBuilder {
                     l1_value: r1.value,
                     l2_value: r2.value,
                     coupling: k_val,
-                    l1_isat: r1.isat,
-                    l2_isat: r2.isat,
                 });
             } else {
                 // Multi-winding (3+): build NxN inductance matrix and invert.
@@ -3835,14 +3835,12 @@ impl MnaBuilder {
                 let mut winding_node_j = Vec::with_capacity(w);
                 let mut inductances = Vec::with_capacity(w);
                 let mut winding_names = Vec::with_capacity(w);
-                let mut winding_isats = Vec::with_capacity(w);
                 for m in &members {
                     let r = &inductor_refs[m];
                     winding_node_i.push(r.node_i);
                     winding_node_j.push(r.node_j);
                     inductances.push(r.value);
                     winding_names.push(r.name.clone());
-                    winding_isats.push(r.isat);
                 }
                 // Validate: check that the inductance matrix is positive definite.
                 // A non-PD matrix means the coupling coefficients are physically
@@ -3892,7 +3890,6 @@ impl MnaBuilder {
                     winding_node_j,
                     inductances,
                     coupling_matrix,
-                    winding_isats,
                 });
             }
         }

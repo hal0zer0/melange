@@ -113,15 +113,7 @@ pub fn auto_route(
     // Structural nodal requirements DK cannot represent — used both for the
     // routing decision below and to reject a forced `--solver dk` override.
     let has_behavioral = !mna.behavioral_sources.is_empty();
-    let saturating_inductor = mna.inductors.iter().any(|ind| ind.isat.is_some())
-        || mna
-            .coupled_inductors
-            .iter()
-            .any(|ci| ci.l1_isat.is_some() || ci.l2_isat.is_some())
-        || mna
-            .transformer_groups
-            .iter()
-            .any(|g| g.winding_isats.iter().any(|i| i.is_some()));
+    let saturating_inductor = mna.has_saturating_inductor();
 
     // Resolve the rail mode on the same MNA the codegen will see. Only
     // clamped op-amps matter: with no finite rail there is nothing to pin.

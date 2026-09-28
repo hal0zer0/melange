@@ -123,6 +123,17 @@ generated state is smaller.
 
 ### Changed
 
+- **Removed the old decimated saturation machinery from generated code.**
+  Saturating inductors have run as flux devices inside the full-LU Newton loop
+  since August. The earlier 32-sample decimated update, and the per-winding
+  coupled model, survived as write-only fields and dead constants. They are
+  gone: `sat_ind_N_l_eff`, `sat_update_counter`, `sat_resync_counter`,
+  `sat_ci_N_*`, `sat_xg_N_*`, `SAT_UPDATE_INTERVAL`, `SAT_RESYNC_INTERVAL`,
+  `SAT_CI_*` and `SAT_XG_*`. **This is a source break for code that reads
+  them.** `sat_ind_N_l_eff` has held a constant `L0` since August, so a reader
+  was already measuring nothing. The live differential inductance is
+  `SAT_IND_N_L0 / cosh(v_prev[SAT_IND_N_AUG_ROW] / SAT_IND_N_ISAT)²`. No render
+  changes.
 - **Rail-engaged samples on the nodal Schur path go straight to the
   backward-Euler pin-and-resolve.** The 2× sub-step that used to try first is
   removed: its only rail handling was a post-solve clamp that did not re-solve

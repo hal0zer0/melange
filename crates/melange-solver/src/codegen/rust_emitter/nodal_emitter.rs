@@ -2612,78 +2612,12 @@ impl RustEmitter {
             ));
         }
         let num_sat_ind = ir.saturating_inductors.len();
-        let has_any_saturation = !ir.saturating_inductors.is_empty()
-            || !ir.saturating_coupled.is_empty()
-            || !ir.saturating_xfmr_groups.is_empty();
         if num_sat_ind > 0 {
             code.push_str(&format!(
                 "pub const NUM_SAT_IND: usize = {};\n\n",
                 num_sat_ind
             ));
         }
-        if has_any_saturation {
-            code.push_str(
-                "/// Saturation update interval (samples). L_eff recomputed every N samples.\n\
-                 /// Saturation follows the signal envelope (~ms timescale), not individual samples.\n\
-                 pub const SAT_UPDATE_INTERVAL: u32 = 32;\n\
-                 /// Full matrix rebuild every N SM updates to eliminate accumulated drift.\n\
-                 /// O(N²) SM between resyncs, O(N³) rebuild at resync. 16 keeps drift negligible.\n\
-                 pub const SAT_RESYNC_INTERVAL: u32 = 16;\n\n",
-            );
-        }
-
-        // Saturating coupled inductor constants
-        for (idx, sc) in ir.saturating_coupled.iter().enumerate() {
-            code.push_str(&format!(
-                "/// Saturating coupled pair {idx}: {name} ({l1}+{l2}, κ={k:.4})\n\
-                 pub const SAT_CI_{idx}_L1_L0: f64 = {l1_l0:.17e};\n\
-                 pub const SAT_CI_{idx}_L2_L0: f64 = {l2_l0:.17e};\n\
-                 pub const SAT_CI_{idx}_L1_ISAT: f64 = {l1_isat:.17e};\n\
-                 pub const SAT_CI_{idx}_L2_ISAT: f64 = {l2_isat:.17e};\n\
-                 pub const SAT_CI_{idx}_COUPLING: f64 = {coupling:.17e};\n\
-                 pub const SAT_CI_{idx}_K1: usize = {k1};\n\
-                 pub const SAT_CI_{idx}_K2: usize = {k2};\n\n",
-                name = sc.name,
-                l1 = sc.l1_name,
-                l2 = sc.l2_name,
-                k = sc.coupling,
-                l1_l0 = sc.l1_l0,
-                l2_l0 = sc.l2_l0,
-                l1_isat = sc.l1_isat,
-                l2_isat = sc.l2_isat,
-                coupling = sc.coupling,
-                k1 = sc.k1,
-                k2 = sc.k2,
-            ));
-        }
-
-        // Saturating transformer group constants
-        for (idx, sg) in ir.saturating_xfmr_groups.iter().enumerate() {
-            let w = sg.num_windings;
-            let l0_str: Vec<String> = sg.l0s.iter().map(|v| format!("{:.17e}", v)).collect();
-            let isat_str: Vec<String> = sg.isats.iter().map(|v| format!("{:.17e}", v)).collect();
-            let row_str: Vec<String> = sg.aug_rows.iter().map(|v| format!("{}", v)).collect();
-            let kappa_str: Vec<String> = sg
-                .coupling_flat
-                .iter()
-                .map(|v| format!("{:.17e}", v))
-                .collect();
-            code.push_str(&format!(
-                "/// Saturating transformer group {idx}: {} ({w} windings)\n\
-                 pub const SAT_XG_{idx}_W: usize = {w};\n\
-                 pub const SAT_XG_{idx}_L0: [f64; {w}] = [{}];\n\
-                 pub const SAT_XG_{idx}_ISAT: [f64; {w}] = [{}];\n\
-                 pub const SAT_XG_{idx}_ROWS: [usize; {w}] = [{}];\n\
-                 pub const SAT_XG_{idx}_KAPPA: [f64; {}] = [{}];\n\n",
-                sg.name,
-                l0_str.join(", "),
-                isat_str.join(", "),
-                row_str.join(", "),
-                w * w,
-                kappa_str.join(", "),
-            ));
-        }
-
         // Switch constants (position values)
         if !ir.switches.is_empty() {
             let labels: Vec<String> = ir
@@ -2819,8 +2753,6 @@ impl RustEmitter {
         let has_pots = !ir.pots.is_empty();
         let has_switches = !ir.switches.is_empty();
         let has_sat_ind = !ir.saturating_inductors.is_empty();
-        let has_sat_coupled =
-            !ir.saturating_coupled.is_empty() || !ir.saturating_xfmr_groups.is_empty();
         // The op-amp slew block reads `state.current_sample_rate`, so that field
         // must exist whenever any op-amp has a finite SR — independent of
         // pots/switches. Behavioral B-source circuits (forced nodal) with a
@@ -2842,7 +2774,7 @@ impl RustEmitter {
             DeviceParams::Tube(tp) => tp.has_self_heating(),
             _ => false,
         });
-        let needs_rebuild_state = has_pots || has_switches || has_sat_ind || has_sat_coupled;
+        let needs_rebuild_state = has_pots || has_switches || has_sat_ind;
         // Stateful devices (Phase 0c) read `state.current_sample_rate` for the
         // after-solve update() dt (DK parity), so the field must exist.
         let has_stateful = !stateful_device_data(ir).is_empty();
@@ -2854,7 +2786,6 @@ impl RustEmitter {
             || has_thermal_sr_consumer
             || has_stateful
             || ir.solver_config.runtime_be_latch;
-        let has_any_saturation = has_sat_ind || has_sat_coupled;
 
         let mut code = section_banner("STATE STRUCTURE (Nodal solver)");
 
@@ -2965,7 +2896,7 @@ impl RustEmitter {
                 code.push_str("    pub k_be: [[f64; M]; M],\n");
                 code.push_str("    pub s_ni_be: [[f64; M]; N],\n");
             }
-            if has_pots || has_switches || has_sat_ind || has_sat_coupled {
+            if has_pots || has_switches || has_sat_ind {
                 code.push_str("    pub g_work: [[f64; N]; N],\n");
                 code.push_str("    pub c_work: [[f64; N]; N],\n");
             }
@@ -3359,64 +3290,6 @@ impl RustEmitter {
             code.push('\n');
         }
 
-        // Saturation decimation counter
-        if has_any_saturation {
-            code.push_str("    /// Decimation counter for saturation updates (counts down to 0)\n");
-            code.push_str("    pub sat_update_counter: u32,\n");
-            code.push_str(
-                "    /// SM update counter; triggers full rebuild at SAT_RESYNC_INTERVAL\n",
-            );
-            code.push_str("    pub sat_resync_counter: u32,\n\n");
-        }
-
-        // Saturating inductor state fields.
-        // NOTE: on the full-LU NR path (which every uncoupled saturating-inductor
-        // circuit now takes), the uncoupled inductor is a flux device stamped inside
-        // the Newton loop and this `l_eff` field is unused (write-once, never read —
-        // a harmless dead pub field). It is retained only so the legacy decimated
-        // Schur/SM machinery below stays self-consistent; the whole decimated path
-        // (this field + the SM block) is slated for wholesale removal in Phase 2.
-        for (idx, si) in ir.saturating_inductors.iter().enumerate() {
-            code.push_str(&format!(
-                "    /// Saturating inductor {idx} ({}): current effective inductance\n\
-                 \x20   pub sat_ind_{idx}_l_eff: f64,\n",
-                si.name,
-            ));
-        }
-        if !ir.saturating_inductors.is_empty() {
-            code.push('\n');
-        }
-
-        // Saturating coupled inductor state fields
-        for (idx, sc) in ir.saturating_coupled.iter().enumerate() {
-            code.push_str(&format!(
-                "    /// Saturating coupled pair {idx} ({name}): effective inductances and mutual\n\
-                 \x20   pub sat_ci_{idx}_l1_eff: f64,\n\
-                 \x20   pub sat_ci_{idx}_l2_eff: f64,\n\
-                 \x20   pub sat_ci_{idx}_m_eff: f64,\n",
-                name = sc.name,
-            ));
-        }
-        if !ir.saturating_coupled.is_empty() {
-            code.push('\n');
-        }
-
-        // Saturating transformer group state fields
-        for (idx, sg) in ir.saturating_xfmr_groups.iter().enumerate() {
-            let w = sg.num_windings;
-            code.push_str(&format!(
-                "    /// Saturating transformer group {idx} ({}): effective L per winding\n\
-                 \x20   pub sat_xg_{idx}_l_eff: [f64; {w}],\n\
-                 \x20   /// Effective mutual inductance matrix (flat W×W)\n\
-                 \x20   pub sat_xg_{idx}_m_eff: [f64; {}],\n",
-                sg.name,
-                w * w,
-            ));
-        }
-        if !ir.saturating_xfmr_groups.is_empty() {
-            code.push('\n');
-        }
-
         // Device parameter state fields (runtime-adjustable)
         let device_params = device_param_template_data(ir);
         if !device_params.is_empty() {
@@ -3652,7 +3525,7 @@ impl RustEmitter {
                 code.push_str("                k_be: K_BE_DEFAULT,\n");
                 code.push_str("                s_ni_be: S_NI_BE_DEFAULT,\n");
             }
-            if has_pots || has_switches || has_sat_ind || has_sat_coupled {
+            if has_pots || has_switches || has_sat_ind {
                 code.push_str("                g_work: G,\n");
                 code.push_str("                c_work: C,\n");
             }
@@ -3684,48 +3557,6 @@ impl RustEmitter {
         if needs_rebuild_state {
             code.push_str("            matrices_dirty: false,\n");
         }
-        // Saturation decimation counter: 0 triggers update on first sample
-        if has_any_saturation {
-            code.push_str("            sat_update_counter: 0,\n");
-            code.push_str("            sat_resync_counter: 0,\n");
-        }
-        // Saturating inductor state: start at nominal L (legacy decimated field; unused
-        // on the full-LU NR path — see the field declaration note).
-        for (idx, _) in ir.saturating_inductors.iter().enumerate() {
-            code.push_str(&format!(
-                "            sat_ind_{}_l_eff: SAT_IND_{}_L0,\n",
-                idx, idx
-            ));
-        }
-        // Saturating coupled inductor state: start at nominal
-        for (idx, sc) in ir.saturating_coupled.iter().enumerate() {
-            let m0 = sc.coupling * (sc.l1_l0 * sc.l2_l0).sqrt();
-            code.push_str(&format!(
-                "            sat_ci_{idx}_l1_eff: SAT_CI_{idx}_L1_L0,\n\
-                 \x20           sat_ci_{idx}_l2_eff: SAT_CI_{idx}_L2_L0,\n\
-                 \x20           sat_ci_{idx}_m_eff: {m0:.17e},\n",
-            ));
-        }
-        // Saturating transformer group state: start at nominal
-        for (idx, sg) in ir.saturating_xfmr_groups.iter().enumerate() {
-            let w = sg.num_windings;
-            code.push_str(&format!(
-                "            sat_xg_{idx}_l_eff: SAT_XG_{idx}_L0,\n",
-            ));
-            // Build nominal M matrix: M[i][j] = kappa[i][j] * sqrt(L0[i] * L0[j])
-            let mut m_vals = Vec::with_capacity(w * w);
-            for i in 0..w {
-                for j in 0..w {
-                    let m = sg.coupling_flat[i * w + j] * (sg.l0s[i] * sg.l0s[j]).sqrt();
-                    m_vals.push(format!("{:.17e}", m));
-                }
-            }
-            code.push_str(&format!(
-                "            sat_xg_{idx}_m_eff: [{}],\n",
-                m_vals.join(", "),
-            ));
-        }
-
         for (idx, pot) in ir.pots.iter().enumerate() {
             let r_nom = 1.0 / pot.g_nominal;
             code.push_str(&format!(
@@ -3909,49 +3740,9 @@ impl RustEmitter {
         // Working G/C snap back to nominal here; every rate-dependent matrix
         // derived from them is restored at the END of reset(), once the pot,
         // switch and saturation fields below have also been restored.
-        if has_pots || has_switches || has_sat_ind || has_sat_coupled {
+        if has_pots || has_switches || has_sat_ind {
             code.push_str(&format!("        {}g_work = G;\n", cp));
             code.push_str(&format!("        {}c_work = C;\n", cp));
-        }
-        // Reset saturation counter
-        if has_any_saturation {
-            code.push_str("        self.sat_update_counter = 0;\n");
-            code.push_str("        self.sat_resync_counter = 0;\n");
-        }
-        // Reset saturating inductor L_eff to nominal (legacy decimated field; unused
-        // on the full-LU NR path).
-        for (idx, _) in ir.saturating_inductors.iter().enumerate() {
-            code.push_str(&format!(
-                "        self.sat_ind_{}_l_eff = SAT_IND_{}_L0;\n",
-                idx, idx
-            ));
-        }
-        // Reset saturating coupled inductor state to nominal
-        for (idx, sc) in ir.saturating_coupled.iter().enumerate() {
-            let m0 = sc.coupling * (sc.l1_l0 * sc.l2_l0).sqrt();
-            code.push_str(&format!(
-                "        self.sat_ci_{idx}_l1_eff = SAT_CI_{idx}_L1_L0;\n\
-                 \x20       self.sat_ci_{idx}_l2_eff = SAT_CI_{idx}_L2_L0;\n\
-                 \x20       self.sat_ci_{idx}_m_eff = {m0:.17e};\n",
-            ));
-        }
-        // Reset saturating transformer group state to nominal
-        for (idx, sg) in ir.saturating_xfmr_groups.iter().enumerate() {
-            let w = sg.num_windings;
-            code.push_str(&format!(
-                "        self.sat_xg_{idx}_l_eff = SAT_XG_{idx}_L0;\n",
-            ));
-            let mut m_vals = Vec::with_capacity(w * w);
-            for i in 0..w {
-                for j in 0..w {
-                    let m = sg.coupling_flat[i * w + j] * (sg.l0s[i] * sg.l0s[j]).sqrt();
-                    m_vals.push(format!("{:.17e}", m));
-                }
-            }
-            code.push_str(&format!(
-                "        self.sat_xg_{idx}_m_eff = [{}];\n",
-                m_vals.join(", "),
-            ));
         }
         for (idx, pot) in ir.pots.iter().enumerate() {
             let r_nom = 1.0 / pot.g_nominal;
@@ -5242,11 +5033,17 @@ impl RustEmitter {
             );
         }
 
+        // Saturating inductors force the full-LU sub-path (their flux device
+        // lives in its NR loop), and every other saturating element is refused
+        // while the MNA is built — so the Schur path never sees saturation.
+        assert!(
+            ir.saturating_inductors.is_empty(),
+            "Schur process_sample emitted for a circuit with saturating inductors; \
+             saturation must route to full-LU"
+        );
+
         // Lazy rebuild: process all pot/switch changes in one batch
-        let has_any_saturation = !ir.saturating_inductors.is_empty()
-            || !ir.saturating_coupled.is_empty()
-            || !ir.saturating_xfmr_groups.is_empty();
-        let has_rebuild = has_pots || !ir.switches.is_empty() || has_any_saturation;
+        let has_rebuild = has_pots || !ir.switches.is_empty();
         if has_rebuild {
             code.push_str(
                 "    // Lazy rebuild: batch all pot/switch changes into one matrix rebuild\n\
@@ -5264,231 +5061,6 @@ impl RustEmitter {
         }
         code.push('\n');
 
-        // Decimated saturation update: check every SAT_UPDATE_INTERVAL samples
-        if has_any_saturation {
-            code.push_str(
-                "    // Decimated saturation update (every SAT_UPDATE_INTERVAL samples)\n",
-            );
-            code.push_str("    if state.sat_update_counter == 0 {\n");
-            code.push_str("        state.sat_update_counter = SAT_UPDATE_INTERVAL;\n");
-        }
-
-        // Saturating inductor L(I) update: compute L_eff, patch c_work, rebuild
-        if !ir.saturating_inductors.is_empty() {
-            code.push_str("        // Saturating inductors: L_eff = L0 / cosh^2(I / Isat)\n");
-            code.push_str("        let mut sat_changed = false;\n");
-            for (idx, _si) in ir.saturating_inductors.iter().enumerate() {
-                code.push_str(&format!(
-                    "        {{ // Saturating inductor {idx}\n\
-                     \x20           let i_branch = state.v_prev[SAT_IND_{idx}_AUG_ROW];\n\
-                     \x20           let x = i_branch / SAT_IND_{idx}_ISAT;\n\
-                     \x20           let cosh_x = x.cosh();\n\
-                     \x20           let l_eff = (SAT_IND_{idx}_L0 / (cosh_x * cosh_x)).max(SAT_IND_{idx}_L0 * 0.01);\n\
-                     \x20           if (l_eff - state.sat_ind_{idx}_l_eff).abs() > SAT_IND_{idx}_L0 * 1e-4 {{\n\
-                     \x20               state.c_work[SAT_IND_{idx}_AUG_ROW][SAT_IND_{idx}_AUG_ROW] = l_eff;\n\
-                     \x20               state.sat_ind_{idx}_l_eff = l_eff;\n\
-                     \x20               sat_changed = true;\n\
-                     \x20           }}\n\
-                     \x20       }}\n",
-                ));
-            }
-        }
-
-        // Saturating coupled inductors: compute L_eff per winding, patch c_work
-        if !ir.saturating_coupled.is_empty() {
-            if ir.saturating_inductors.is_empty() {
-                code.push_str("        let mut sat_changed = false;\n");
-            }
-            for (idx, _sc) in ir.saturating_coupled.iter().enumerate() {
-                code.push_str(&format!(
-                    "        {{ // Coupled pair {idx}\n\
-                     \x20           let i1 = state.v_prev[SAT_CI_{idx}_K1];\n\
-                     \x20           let i2 = state.v_prev[SAT_CI_{idx}_K2];\n\
-                     \x20           let c1 = (i1 / SAT_CI_{idx}_L1_ISAT).cosh();\n\
-                     \x20           let l1_eff = (SAT_CI_{idx}_L1_L0 / (c1 * c1)).max(SAT_CI_{idx}_L1_L0 * 0.01);\n\
-                     \x20           let c2 = (i2 / SAT_CI_{idx}_L2_ISAT).cosh();\n\
-                     \x20           let l2_eff = (SAT_CI_{idx}_L2_L0 / (c2 * c2)).max(SAT_CI_{idx}_L2_L0 * 0.01);\n\
-                     \x20           let m_eff = SAT_CI_{idx}_COUPLING * (l1_eff * l2_eff).sqrt();\n\
-                     \x20           if (l1_eff - state.sat_ci_{idx}_l1_eff).abs() > SAT_CI_{idx}_L1_L0 * 1e-4 || (l2_eff - state.sat_ci_{idx}_l2_eff).abs() > SAT_CI_{idx}_L2_L0 * 1e-4 || (m_eff - state.sat_ci_{idx}_m_eff).abs() > 1e-6 {{\n\
-                     \x20               state.c_work[SAT_CI_{idx}_K1][SAT_CI_{idx}_K1] = l1_eff;\n\
-                     \x20               state.c_work[SAT_CI_{idx}_K2][SAT_CI_{idx}_K2] = l2_eff;\n\
-                     \x20               state.c_work[SAT_CI_{idx}_K1][SAT_CI_{idx}_K2] = m_eff;\n\
-                     \x20               state.c_work[SAT_CI_{idx}_K2][SAT_CI_{idx}_K1] = m_eff;\n\
-                     \x20               state.sat_ci_{idx}_l1_eff = l1_eff;\n\
-                     \x20               state.sat_ci_{idx}_l2_eff = l2_eff;\n\
-                     \x20               state.sat_ci_{idx}_m_eff = m_eff;\n\
-                     \x20               sat_changed = true;\n\
-                     \x20           }}\n\
-                     \x20       }}\n",
-                ));
-            }
-        }
-
-        // Saturating transformer groups: compute L_eff per winding, patch c_work
-        for (idx, sg) in ir.saturating_xfmr_groups.iter().enumerate() {
-            let w = sg.num_windings;
-            if ir.saturating_inductors.is_empty() && ir.saturating_coupled.is_empty() && idx == 0 {
-                code.push_str("        let mut sat_changed = false;\n");
-            }
-            code.push_str(&format!(
-                "        {{ // Transformer group {idx} ({name}, {w} windings)\n\
-                 \x20           let w = SAT_XG_{idx}_W;\n\
-                 \x20           let mut l_eff = [0.0f64; SAT_XG_{idx}_W];\n\
-                 \x20           let mut any_changed = false;\n\
-                 \x20           for wi in 0..w {{\n\
-                 \x20               let i_branch = state.v_prev[SAT_XG_{idx}_ROWS[wi]];\n\
-                 \x20               let x = i_branch / SAT_XG_{idx}_ISAT[wi];\n\
-                 \x20               let c = x.cosh();\n\
-                 \x20               l_eff[wi] = (SAT_XG_{idx}_L0[wi] / (c * c)).max(SAT_XG_{idx}_L0[wi] * 0.01);\n\
-                 \x20               if (l_eff[wi] - state.sat_xg_{idx}_l_eff[wi]).abs() > SAT_XG_{idx}_L0[wi] * 1e-4 {{\n\
-                 \x20                   any_changed = true;\n\
-                 \x20               }}\n\
-                 \x20           }}\n\
-                 \x20           if any_changed {{\n\
-                 \x20               let mut m_new = [0.0f64; SAT_XG_{idx}_W * SAT_XG_{idx}_W];\n\
-                 \x20               for i in 0..w {{\n\
-                 \x20                   for j in 0..w {{\n\
-                 \x20                       m_new[i * w + j] = SAT_XG_{idx}_KAPPA[i * w + j] * (l_eff[i] * l_eff[j]).sqrt();\n\
-                 \x20                   }}\n\
-                 \x20               }}\n\
-                 \x20               for i in 0..w {{\n\
-                 \x20                   for j in 0..w {{\n\
-                 \x20                       state.c_work[SAT_XG_{idx}_ROWS[i]][SAT_XG_{idx}_ROWS[j]] = m_new[i * w + j];\n\
-                 \x20                   }}\n\
-                 \x20               }}\n\
-                 \x20               state.sat_xg_{idx}_l_eff = l_eff;\n\
-                 \x20               state.sat_xg_{idx}_m_eff = m_new;\n\
-                 \x20               sat_changed = true;\n\
-                 \x20           }}\n\
-                 \x20       }}\n",
-                name = sg.name,
-            ));
-        }
-
-        // SM rank-1 update for each changed uncoupled inductor (O(N²) per inductor)
-        // c_work already patched above; SM updates S, K, S_NI, A_neg in-place.
-        // Every SAT_RESYNC_INTERVAL SM updates, do a full O(N³) rebuild from c_work.
-        if has_any_saturation {
-            code.push_str("        if sat_changed {\n");
-            // Saturating L(I) patched c_work in place (this path does NOT always
-            // call rebuild_matrices — the SM branch updates S/K/S_NI directly), so
-            // every sub-sample-fire Schur-triple built from c_work is now stale.
-            if ir.solver_config.subsample_fire {
-                code.push_str(
-                    "            // Sub-sample fire: c_work patched — drop all Schur-triple LRU entries\n",
-                );
-                code.push_str("            state.ssf_lru_len = 0;\n");
-                code.push_str("            state.ssf_lru_evict = 0;\n");
-            }
-            code.push_str("            state.sat_resync_counter += 1;\n");
-            code.push_str("            if state.sat_resync_counter >= SAT_RESYNC_INTERVAL {\n");
-            code.push_str("                state.sat_resync_counter = 0;\n");
-            code.push_str("                state.rebuild_matrices(state.current_sample_rate * OVERSAMPLING_FACTOR as f64);\n");
-            code.push_str("            } else {\n");
-            code.push_str(
-                "                // SM rank-1 update: O(N²) per changed diagonal entry\n",
-            );
-            if ir.solver_config.backward_euler {
-                code.push_str(
-                    "                let alpha = state.current_sample_rate * OVERSAMPLING_FACTOR as f64; // backward Euler\n",
-                );
-            } else {
-                code.push_str(
-                    "                let alpha = 2.0 * state.current_sample_rate * OVERSAMPLING_FACTOR as f64; // trapezoidal\n",
-                );
-            }
-        }
-
-        // Emit SM for each uncoupled saturating inductor
-        for (idx, _si) in ir.saturating_inductors.iter().enumerate() {
-            code.push_str(&format!(
-                "                {{ // SM for inductor {idx}\n\
-                 \x20                   let k = SAT_IND_{idx}_AUG_ROW;\n\
-                 \x20                   let old_l = state.sat_ind_{idx}_l_eff; // already updated above\n\
-                 \x20                   // delta_a is how much A[k][k] changed\n\
-                 \x20                   // We need the delta from what the matrices currently think to what l_eff is now.\n\
-                 \x20                   // Since c_work was just patched, but matrices haven't been rebuilt,\n\
-                 \x20                   // the delta is alpha * (new_l - old_l_that_matrices_know).\n\
-                 \x20                   // The matrices' last known l is c_work BEFORE we patched it,\n\
-                 \x20                   // but we already patched c_work. Use the tracking: old value is\n\
-                 \x20                   // what sat_ind_N_l_eff WAS before the update, but we already updated it.\n\
-                 \x20                   // We need to track the pre-update value. Recompute delta from A_neg.\n\
-                 \x20                   // A_neg[k][k] = alpha * C[k][k] - G[k][k], so current matrix has\n\
-                 \x20                   // A[k][k] = G[k][k] + alpha * old_C, new A[k][k] = G[k][k] + alpha * new_C\n\
-                 \x20                   // delta_a = alpha * (new_C - old_C) = alpha * (l_eff - l_eff_before_patch)\n\
-                 \x20                   // But we already updated sat_ind_N_l_eff. We know c_work was patched.\n\
-                 \x20                   // Simple: reconstruct delta from a_neg.\n\
-                 \x20                   // Actually: the simplest approach is to compute delta_a from\n\
-                 \x20                   // the difference between new A[k][k] and current A[k][k]:\n\
-                 \x20                   let new_a_kk = state.g_work[k][k] + alpha * state.c_work[k][k];\n\
-                 \x20                   let delta_a = new_a_kk - state.a[k][k];\n\
-                 \x20                   if delta_a.abs() > 1e-15 {{\n\
-                 \x20                       // Guard the SM denominator (LINEAR_ALGEBRA.md \"SM denominator\"\n\
-                 \x20                       // convention, threshold 1e-15, mirroring the DK pot-update guard):\n\
-                 \x20                       // |1 + delta*u^T*S*u| ≈ 0 means the rank-1 update is singular —\n\
-                 \x20                       // skip it and fall back to a full rebuild so S/K/A_neg stay\n\
-                 \x20                       // consistent with the already-patched c_work.\n\
-                 \x20                       let sm_denom = 1.0 + delta_a * state.s[k][k];\n\
-                 \x20                       if sm_denom.abs() > 1e-15 {{\n\
-                 \x20                       let scale = delta_a / sm_denom;\n\
-                 \x20                       let mut s_col = [0.0f64; N];\n\
-                 \x20                       let mut s_row = [0.0f64; N];\n\
-                 \x20                       for i in 0..N {{ s_col[i] = state.s[i][k]; s_row[i] = state.s[k][i]; }}\n\
-                 \x20                       for i in 0..N {{\n\
-                 \x20                           let sc = scale * s_col[i];\n\
-                 \x20                           for j in 0..N {{ state.s[i][j] -= sc * s_row[j]; }}\n\
-                 \x20                       }}\n\
-                 \x20                       state.a[k][k] = new_a_kk;\n\
-                 \x20                       state.a_neg[k][k] = alpha * state.c_work[k][k] - state.g_work[k][k];\n",
-            ));
-            if m > 0 {
-                code.push_str(
-                    "                       let mut nv_su = [0.0f64; M];\n\
-                     \x20                       let mut u_ni = [0.0f64; M];\n\
-                     \x20                       for i in 0..M {\n\
-                     \x20                           for p in 0..N { nv_su[i] += N_V[i][p] * s_col[p]; }\n\
-                     \x20                           for p in 0..N { u_ni[i] += s_row[p] * N_I[p][i]; }\n\
-                     \x20                       }\n\
-                     \x20                       for i in 0..M {\n\
-                     \x20                           let sc = scale * nv_su[i];\n\
-                     \x20                           for j in 0..M { state.k[i][j] -= sc * u_ni[j]; }\n\
-                     \x20                       }\n\
-                     \x20                       for i in 0..N {\n\
-                     \x20                           let sc = scale * s_col[i];\n\
-                     \x20                           for j in 0..M { state.s_ni[i][j] -= sc * u_ni[j]; }\n\
-                     \x20                       }\n",
-                );
-            }
-            code.push_str(
-                "                       } else {\n\
-                 \x20                       // Singular SM denominator: full O(N³) rebuild instead\n\
-                 \x20                       state.sat_resync_counter = 0;\n\
-                 \x20                       state.rebuild_matrices(state.current_sample_rate * OVERSAMPLING_FACTOR as f64);\n\
-                 \x20                       }\n\
-                 \x20                  }\n\
-                 \x20               }\n",
-            );
-        }
-
-        // TODO: SM for coupled inductors and transformer groups would go here.
-        // For now, those types trigger a full rebuild (they're rarer and more complex).
-        if !ir.saturating_coupled.is_empty() || !ir.saturating_xfmr_groups.is_empty() {
-            code.push_str("                // Coupled/transformer: full rebuild (complex multi-entry update)\n");
-            code.push_str("                state.rebuild_matrices(state.current_sample_rate * OVERSAMPLING_FACTOR as f64);\n");
-        }
-
-        if has_any_saturation {
-            code.push_str("            }\n"); // close else branch
-            code.push_str("        }\n"); // close if sat_changed
-        }
-
-        // Close decimation block
-        if has_any_saturation {
-            code.push_str("    }\n");
-            code.push_str(
-                "    state.sat_update_counter = state.sat_update_counter.saturating_sub(1);\n\n",
-            );
-        }
         // Step 1: Build RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input (sparse)
         code.push_str(
             "    // Step 1: Build RHS (sparse A_neg * v_prev + sparse N_i * i_nl_prev)\n",

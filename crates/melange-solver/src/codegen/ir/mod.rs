@@ -114,15 +114,11 @@ pub struct CircuitIR {
     pub inductors: Vec<InductorIR>,
     pub coupled_inductors: Vec<CoupledInductorIR>,
     pub transformer_groups: Vec<TransformerGroupIR>,
-    /// Saturating (iron-core) inductors: per-sample L(I) update via SM rank-1.
+    /// Saturating (iron-core) inductors: flux devices in the full-LU NR loop.
+    /// A saturating tightly-coupled transformer appears here as its T-model
+    /// `{ref}_mag` magnetizing inductor (shared-core saturation).
     #[serde(default)]
     pub saturating_inductors: Vec<SaturatingInductorIR>,
-    /// Saturating coupled inductor pairs: per-sample 2×2 eigendecomposition + 2 SM rank-1.
-    #[serde(default)]
-    pub saturating_coupled: Vec<SaturatingCoupledInductorIR>,
-    /// Saturating transformer groups (3+ windings): per-sample W² elementary SM rank-1.
-    #[serde(default)]
-    pub saturating_xfmr_groups: Vec<SaturatingTransformerGroupIR>,
     pub pots: Vec<PotentiometerIR>,
     /// Wiper potentiometer groups (two linked pots per group).
     #[serde(default)]
@@ -1212,64 +1208,24 @@ pub struct InductorIR {
     pub inductance: f64,
 }
 
-/// Saturating (iron-core) inductor for per-sample L(I) update.
+/// Saturating (iron-core) inductor.
 ///
-/// The effective inductance follows: L_eff(I) = l0 / cosh²(I / isat).
-/// At each sample, the previous branch current `v_prev[aug_row]` is used to
-/// compute L_eff, then a Sherman-Morrison rank-1 update corrects S, K, A_neg.
+/// A flux device solved inside the full-LU NR loop: flux Φ(i) = l0·isat·tanh(i/isat),
+/// differential inductance L_diff = l0/cosh²(i/isat) as the Jacobian entry, and a
+/// history correction that swaps the baked `α·l0·i_prev` for `α·Φ(i_prev)`
+/// (see `SATURATING_TRANSFORMERS.md` §3.4).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SaturatingInductorIR {
     pub name: String,
     /// Nominal inductance (henries)
     pub l0: f64,
-    /// Saturation current (amps) — L drops to L0/4 at I = 1.32*isat
+    /// Saturation current (amps): L_diff = l0/cosh²(1) ≈ 0.42·l0 at i = isat.
     pub isat: f64,
     /// Row index in the augmented system (C[aug_row][aug_row] = L)
     pub aug_row: usize,
     /// Index into the uncoupled/coupled/transformer inductor arrays for
     /// identifying which inductor this is (for naming constants).
     pub inductor_index: usize,
-}
-
-/// Saturating coupled inductor pair for per-sample L(I) update.
-///
-/// Two windings sharing a core. When either saturates, L_eff drops and
-/// M_eff = κ * sqrt(L1_eff * L2_eff) changes too. The 2×2 delta block
-/// is decomposed via eigendecomposition into 2 rank-1 SM updates to S.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SaturatingCoupledInductorIR {
-    pub name: String,
-    pub l1_name: String,
-    pub l2_name: String,
-    pub l1_l0: f64,
-    pub l2_l0: f64,
-    pub l1_isat: f64,
-    pub l2_isat: f64,
-    pub coupling: f64,
-    /// Augmented row index for winding 1
-    pub k1: usize,
-    /// Augmented row index for winding 2
-    pub k2: usize,
-}
-
-/// Saturating W-winding transformer group for per-sample L(I) update.
-///
-/// Each winding saturates independently based on its own branch current.
-/// The W×W delta block is decomposed into W diagonal + W*(W-1) off-diagonal
-/// elementary rank-1 SM updates (W² total).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SaturatingTransformerGroupIR {
-    pub name: String,
-    pub num_windings: usize,
-    pub winding_names: Vec<String>,
-    /// Nominal inductance per winding
-    pub l0s: Vec<f64>,
-    /// Saturation current per winding (1e6 = effectively linear)
-    pub isats: Vec<f64>,
-    /// Coupling coefficients: flat W×W row-major (κ[i][j])
-    pub coupling_flat: Vec<f64>,
-    /// Augmented row index per winding
-    pub aug_rows: Vec<usize>,
 }
 
 /// Coupled inductor pair parameters for code generation (transformer).
@@ -2730,8 +2686,6 @@ impl CircuitIR {
             coupled_inductors,
             transformer_groups,
             saturating_inductors: Vec::new(), // DK path: saturation routes to nodal
-            saturating_coupled: Vec::new(),
-            saturating_xfmr_groups: Vec::new(),
             pots,
             wiper_groups,
             gang_groups,
@@ -3323,15 +3277,7 @@ impl CircuitIR {
         // of the same circuit is stable). Such circuits should pin BE with
         // `.integrator be` if they need it. A general fix (SM-update the BE
         // matrices too) is left as future work.
-        let has_saturating = mna.inductors.iter().any(|l| l.isat.is_some())
-            || mna
-                .coupled_inductors
-                .iter()
-                .any(|c| c.l1_isat.is_some() || c.l2_isat.is_some())
-            || mna
-                .transformer_groups
-                .iter()
-                .any(|g| g.winding_isats.iter().any(|isat| isat.is_some()));
+        let has_saturating = mna.has_saturating_inductor();
         solver_config.runtime_be_latch =
             !solver_config.backward_euler && !cfg_force_trap && m > 0 && !has_saturating;
 
@@ -3790,70 +3736,6 @@ impl CircuitIR {
                     }
                 }
                 sat_inds
-            },
-            saturating_coupled: {
-                // Coupled inductor pairs with ISAT on either winding.
-                // Augmented rows: uncoupled inductors are at n_aug..n_aug+n_uncoupled,
-                // coupled pairs start at n_aug+n_uncoupled, 2 rows each.
-                let ci_base = n_aug + mna.inductors.len();
-                let mut sat_ci = Vec::new();
-                for (i, ci) in mna.coupled_inductors.iter().enumerate() {
-                    if ci.l1_isat.is_some() || ci.l2_isat.is_some() {
-                        // Both windings must have ISAT for the coupled model.
-                        // If only one has ISAT, use the other's L0 as its "isat"
-                        // (effectively infinite — no saturation on that winding).
-                        let l1_isat = ci.l1_isat.unwrap_or(1e6);
-                        let l2_isat = ci.l2_isat.unwrap_or(1e6);
-                        sat_ci.push(SaturatingCoupledInductorIR {
-                            name: ci.name.clone(),
-                            l1_name: ci.l1_name.clone(),
-                            l2_name: ci.l2_name.clone(),
-                            l1_l0: ci.l1_value,
-                            l2_l0: ci.l2_value,
-                            l1_isat,
-                            l2_isat,
-                            coupling: ci.coupling,
-                            k1: ci_base + i * 2,
-                            k2: ci_base + i * 2 + 1,
-                        });
-                    }
-                }
-                sat_ci
-            },
-            saturating_xfmr_groups: {
-                // Transformer groups (3+ windings) with ISAT on any winding.
-                // Aug rows: after uncoupled (n_uncoupled) + coupled pairs (n_coupled*2).
-                let xfmr_base = n_aug + mna.inductors.len() + mna.coupled_inductors.len() * 2;
-                let mut sat_xfmr = Vec::new();
-                let mut xfmr_offset = 0usize;
-                for group in mna.transformer_groups.iter() {
-                    if group.winding_isats.iter().any(|isat| isat.is_some()) {
-                        let w = group.num_windings;
-                        let aug_rows: Vec<usize> =
-                            (0..w).map(|wi| xfmr_base + xfmr_offset + wi).collect();
-                        let isats: Vec<f64> = group
-                            .winding_isats
-                            .iter()
-                            .map(|isat| isat.unwrap_or(1e6))
-                            .collect();
-                        let coupling_flat: Vec<f64> = group
-                            .coupling_matrix
-                            .iter()
-                            .flat_map(|row| row.iter().copied())
-                            .collect();
-                        sat_xfmr.push(SaturatingTransformerGroupIR {
-                            name: group.name.clone(),
-                            num_windings: w,
-                            winding_names: group.winding_names.clone(),
-                            l0s: group.inductances.clone(),
-                            isats,
-                            coupling_flat,
-                            aug_rows,
-                        });
-                    }
-                    xfmr_offset += group.num_windings;
-                }
-                sat_xfmr
             },
             opamps: mna
                 .opamps

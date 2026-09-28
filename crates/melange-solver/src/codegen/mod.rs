@@ -1231,15 +1231,7 @@ impl CodeGenerator {
             .opamps
             .iter()
             .any(|oa| oa.n_out_idx > 0 && (oa.vcc.is_finite() || oa.vee.is_finite()));
-        let saturating_inductor = mna.inductors.iter().any(|ind| ind.isat.is_some())
-            || mna
-                .coupled_inductors
-                .iter()
-                .any(|ci| ci.l1_isat.is_some() || ci.l2_isat.is_some())
-            || mna
-                .transformer_groups
-                .iter()
-                .any(|g| g.winding_isats.iter().any(|i| i.is_some()));
+        let saturating_inductor = mna.has_saturating_inductor();
         let unpinnable = match (!mna.behavioral_sources.is_empty(), saturating_inductor) {
             (true, true) => Some("a behavioral source and a saturating inductor"),
             (true, false) => Some("a behavioral source"),

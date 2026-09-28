@@ -214,6 +214,17 @@ file:line, oomox-relative):
   (solver-owned); they appear in wrapper comments (NR-predictor rationale)
   only.
 
+- **Removed 2026-09-28: the decimated-saturation fields.** `sat_ind_N_l_eff`,
+  `sat_update_counter`, `sat_resync_counter`, `sat_ci_N_*` and `sat_xg_N_*`, plus
+  the constants `SAT_UPDATE_INTERVAL`, `SAT_RESYNC_INTERVAL`, `SAT_CI_*` and
+  `SAT_XG_*`. Saturating inductors have been flux devices inside the full-LU NR
+  loop since 76bf402, so `sat_ind_N_l_eff` has read a constant `L0` ever since —
+  a field that looks like a measurand and is not one. Known reader: uniquorn
+  `tests/matrix_health.rs:113,143`. The live replacement is the differential
+  inductance at the committed branch current:
+  `SAT_IND_N_L0 / cosh(v_prev[SAT_IND_N_AUG_ROW] / SAT_IND_N_ISAT).powi(2)`.
+  `SAT_IND_N_L0`, `SAT_IND_N_ISAT` and `SAT_IND_N_AUG_ROW` are unchanged.
+
 **Struct-field renames, field removals, or making fields private are downstream
 breaks even though no melange-side test notices.**
 
