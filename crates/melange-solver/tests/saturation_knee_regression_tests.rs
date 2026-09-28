@@ -294,12 +294,27 @@ fn c2_shared_core_saturates_on_magnetizing_not_winding_current() {
 // review), with φ0 = tanh(Idc/Isat) and a = AC flux / saturation flux:
 //   H2/H1 ≈ φ0·a / (2(1−φ0²)),  H3/H1 ≈ (2 + 6φ0²)·a² / (24(1−φ0²)²),
 // so H2 overtakes H3 once φ0 > ~a/6. The exact-FFT values below are the
-// review's; the circuit realises flux drive (1 Ω source into a 1 H core) to
-// ~1 %, so they are gated to 0.5 dB. Bias is a DC CURRENT source — a voltage
-// source's DC flux would integrate away. Cosine drive, so the AC adds no DC
-// flux of its own.
+// review's (reproduced to 0.05 dB by ideal flux drive, φ0 = tanh(Idc/Isat)).
+//
+// The deck has to BE flux drive for those values to apply. The 1 Ω source
+// makes that true only when R/(ωL) is small AND L/R is long against the 2 s
+// render: with a 1 H core the DC operating point migrates over L/R ≈ 1 s and
+// the deepest row lands 1.0 dB off the table, in melange and in the
+// continuous-time circuit alike. A 100 H core (R/(ωL) ≈ 5e-5, L/R = 100 s)
+// realises it to 0.05 dB on every row. Bias is a DC CURRENT source — a voltage
+// source's DC flux would integrate away. Cosine drive switched on at t = 0,
+// with `input_prev` set to the drive's t = 0 value, so the flux trajectory is
+// Φ0 + a·sin(ωt) with no DC flux of its own. (With `input_prev` = 0 the first
+// sample integrates half a step of drive the continuous circuit never sees, a
+// DC flux of a·ωT/2 that persists for L/R.) The input node starts at the same
+// value, the state the continuous circuit is in at t = 0+. Left at its DC
+// value of 0 instead, the node row, which trapezoidal integration enforces
+// only as an average over each step, alternates ±a·ωL0·Isat from sample to
+// sample for the whole render.
 
 /// (a, [(Idc/Isat, H2/H1 dB, H3/H1 dB)]) from the review's exact FFT.
+/// a = 0.3 stops at Idc/Isat = 0.5: at 1.0 the flux would pass saturation
+/// (φ0 + a > 1), which is not flux drive any more.
 const C3_REF: [(f64, &[(f64, f64, f64)]); 2] = [
     (
         0.1,
@@ -322,25 +337,46 @@ const C3_REF: [(f64, &[(f64, f64, f64)]); 2] = [
     ),
 ];
 
+/// The same recurrence as `c3_reference`, run at 256× (≈continuous) in a
+/// standalone release build and fitted on every 256th sample:
+/// (a, Idc/Isat, |H1| A, H2/H1, H3/H1). Every row is within 0.05 dB of
+/// `C3_REF`; the 1× recurrence is within 1.5e-6 on H1 and 2e-7 on the ratios.
+/// Computed 2026-09-28.
+const C3_REF_256: [(f64, f64, f64, f64, f64); 11] = [
+    (0.1, 0.0, 1.002512572e-3, 2.638759463e-7, 8.375280792e-4),
+    (0.1, 0.05, 1.005052155e-3, 2.522763217e-3, 8.480528588e-4),
+    (0.1, 0.1, 1.012698578e-3, 5.071707744e-3, 8.801774832e-4),
+    (0.1, 0.25, 1.067378915e-3, 1.313975917e-2, 1.121583060e-3),
+    (0.1, 0.5, 1.280023649e-3, 2.976242889e-2, 2.249874204e-3),
+    (0.1, 1.0, 2.479242787e-3, 9.554806116e-2, 1.424389503e-2),
+    (0.3, 0.0, 3.070719883e-3, 2.574341870e-6, 7.857769168e-3),
+    (0.3, 0.05, 3.079356488e-3, 8.056066379e-3, 7.966648415e-3),
+    (0.3, 0.1, 3.105418864e-3, 1.621706447e-2, 8.298774374e-3),
+    (0.3, 0.25, 3.294311977e-3, 4.240093859e-2, 1.083999947e-2),
+    (0.3, 0.5, 4.081094389e-3, 1.003148903e-1, 2.393806226e-2),
+];
+
 const C3_ISAT: f64 = 10e-3;
+const C3_L0: f64 = 100.0;
 
 fn c3_deck(idc: f64) -> String {
-    format!("biased core\nL1 in 0 1 ISAT=10m\nI_b 0 in DC {idc:e}\n")
+    format!("biased core\nL1 in 0 {C3_L0:?} ISAT=10m\nI_b 0 in DC {idc:e}\n")
 }
 
 /// Drive amplitude giving normalised AC flux `a` at 30 Hz: V = a·ω·L0·Isat.
 fn c3_amp(a: f64) -> f64 {
-    a * 2.0 * std::f64::consts::PI * F * 1.0 * C3_ISAT
+    a * 2.0 * std::f64::consts::PI * F * C3_L0 * C3_ISAT
 }
 
 /// Complex harmonics 1..3 of i_L over 1-2 s, from an independent trapezoidal
 /// recurrence of this exact circuit: dΦ(i)/dt = v_src − R·(i − Idc), R = 1 Ω,
-/// with melange's input convention (input_prev starts at 0).
+/// with the drive's previous value starting at its t = 0 value (as the melange
+/// run sets `input_prev`).
 fn c3_reference(amp: f64, idc: f64) -> [(f64, f64); 4] {
-    let (l0, r, t) = (1.0f64, 1.0f64, 1.0 / FS);
+    let (l0, r, t) = (C3_L0, 1.0f64, 1.0 / FS);
     let phi = |i: f64| l0 * C3_ISAT * (i / C3_ISAT).tanh();
     let n = (2.0 * FS) as usize;
-    let (mut i, mut xprev) = (idc, 0.0f64);
+    let (mut i, mut xprev) = (idc, amp);
     let mut ss = Vec::with_capacity(n / 2);
     for k in 1..=n {
         let x = amp * (2.0 * std::f64::consts::PI * F * k as f64 / FS).cos();
@@ -395,6 +431,7 @@ fn c3_melange(idc: f64, amps: &[f64], tag: &str) -> Vec<[(f64, f64); 4]> {
             "operating point must be baked"
         );
     }
+    let inp = node(&spice, "in");
     let amps: Vec<String> = amps.iter().map(|a| format!("{a:?}")).collect();
     let bad = bad_counters(&code);
     let main = format!(
@@ -402,6 +439,8 @@ fn c3_melange(idc: f64, amps: &[f64], tag: &str) -> Vec<[(f64, f64); 4]> {
     for amp in [{amps}] {{
         let mut s = CircuitState::default();
         s.set_sample_rate({FS:?});
+        s.input_prev = amp;
+        s.v_prev[{inp}] = amp;
         let n = (2.0 * {FS:?}) as usize;
         let mut ss: Vec<f64> = Vec::with_capacity(n / 2);
         for k in 1..=n {{
@@ -443,50 +482,58 @@ fn db(x: f64) -> f64 {
     20.0 * x.log10()
 }
 
-/// PENDING design review — measured, not tuned: with DC bias melange's i_L
-/// drifts below the independent recurrence (0.2 % on H1, up to 0.5 % on H2 at
-/// φ0 ≈ 0.5-0.8; about 1e-8 with no bias). Two parts: the NR stopping criterion
-/// admits ~1e-3-relative step and flux-row residual error per sample, which
-/// DC bias makes one-signed so the integrator accumulates it; and a smaller
-/// per-sample difference from the second sample on that is not yet
-/// attributed. The gates below stay as pre-registered; they are re-enabled
-/// when the convergence criterion is settled, not loosened to pass.
+/// Two gates per (a, bias) row. Implementation: melange against the same
+/// circuit integrated independently, at 1× (same discretisation) and at 256×
+/// (≈continuous), at C1's tolerances. Physics: the review's exact flux-drive
+/// values, to 0.5 dB.
+///
+/// This row set is what caught the NR stopping criterion accepting Newton's
+/// first iterate. The quadratic remainder is one-signed under bias, so the
+/// flux integrates it for L/R: up to 0.7 % on H1 at 2 s under the old
+/// 1e-3-of-increment tolerance, about 1e-7 at 1e-5.
 #[test]
-#[ignore = "pending design review of the NR stopping criterion under DC bias"]
 fn c3_dc_bias_makes_h2_as_the_physics_predicts() {
-    let amps: Vec<f64> = C3_REF.iter().map(|(a, _)| c3_amp(*a)).collect();
-    // Every bias any row uses, plus 0 for the crossover check.
-    let mut biases: Vec<f64> = vec![0.0];
-    for (_, rows) in C3_REF.iter() {
-        for r in rows.iter() {
-            if !biases.contains(&r.0) {
-                biases.push(r.0);
-            }
+    let mut biases: Vec<f64> = Vec::new();
+    for r in C3_REF_256.iter() {
+        if !biases.contains(&r.1) {
+            biases.push(r.1);
         }
     }
     for &b in &biases {
+        let rows: Vec<_> = C3_REF_256.iter().filter(|r| r.1 == b).collect();
+        let amps: Vec<f64> = rows.iter().map(|r| c3_amp(r.0)).collect();
         let idc = b * C3_ISAT;
         let got = c3_melange(idc, &amps, &format!("c3_{}", (b * 1000.0).round() as i64));
-        for (ai, (a, rows)) in C3_REF.iter().enumerate() {
-            let h = got[ai];
-            let rf = c3_reference(amps[ai], idc);
-            // Implementation: the same circuit, independently integrated.
+        for ((&&(a, _, h1_256, h2_256, h3_256), h), &amp) in rows.iter().zip(got).zip(&amps) {
+            let rf = c3_reference(amp, idc);
+            let h1 = mag(h[1]);
+            let (h2r, h3r) = (mag(h[2]) / h1, mag(h[3]) / h1);
+            // Implementation, 1×: the same discretisation, so tight.
             assert!(
-                ((mag(h[1]) - mag(rf[1])) / mag(rf[1])).abs() <= 1e-5,
-                "a={a} Idc/Isat={b}: H1 {:.6e} vs recurrence {:.6e}",
-                mag(h[1]),
+                ((h1 - mag(rf[1])) / mag(rf[1])).abs() <= 1e-5,
+                "a={a} Idc/Isat={b}: H1 {h1:.6e} vs 1x recurrence {:.6e}",
                 mag(rf[1])
             );
-            for k in [2, 3] {
-                let (m, r) = (mag(h[k]) / mag(h[1]), mag(rf[k]) / mag(rf[1]));
+            for (k, m) in [(2, h2r), (3, h3r)] {
+                let r = mag(rf[k]) / mag(rf[1]);
                 assert!(
                     (m - r).abs() <= 1e-3 * r + 1e-9,
-                    "a={a} Idc/Isat={b}: H{k}/H1 {m:.4e} vs recurrence {r:.4e}"
+                    "a={a} Idc/Isat={b}: H{k}/H1 {m:.4e} vs 1x recurrence {r:.4e}"
                 );
             }
+            // Implementation, 256×: C1's gates.
+            assert!(
+                ((h1 - h1_256) / h1_256).abs() <= 1e-5,
+                "a={a} Idc/Isat={b}: H1 {h1:.6e} vs 256x {h1_256:.6e}"
+            );
+            assert!(
+                (h2r - h2_256).abs() <= 1e-4 && (h3r - h3_256).abs() <= 1e-4,
+                "a={a} Idc/Isat={b}: H2/H1 {h2r:.4e} H3/H1 {h3r:.4e} vs 256x {h2_256:.4e} / {h3_256:.4e}"
+            );
             // Physics: the review's exact flux-drive values, to 0.5 dB.
-            if let Some(&(_, h2_db, h3_db)) = rows.iter().find(|r| r.0 == b) {
-                let (h2, h3) = (db(mag(h[2]) / mag(h[1])), db(mag(h[3]) / mag(h[1])));
+            let table = C3_REF.iter().find(|r| r.0 == a).map(|r| r.1).unwrap();
+            if let Some(&(_, h2_db, h3_db)) = table.iter().find(|r| r.0 == b) {
+                let (h2, h3) = (db(h2r), db(h3r));
                 assert!(
                     (h2 - h2_db).abs() <= 0.5 && (h3 - h3_db).abs() <= 0.5,
                     "a={a} Idc/Isat={b}: H2 {h2:.1} dB H3 {h3:.1} dB vs {h2_db} / {h3_db}"
@@ -510,11 +557,12 @@ fn c3_h2_flips_with_bias_sign_and_crosses_h3_near_a_over_6() {
         rel(pos),
         rel(neg)
     );
-    // Magnitudes match to the drive's start-up offset: the first sample adds a
-    // small DC flux of the SAME sign for either bias, breaking exact ± symmetry.
+    // Magnitudes match to the start-up transient: the drive starts at the same
+    // phase for either bias, so the R-driven transient is not an exact mirror
+    // (measured 1.7e-4).
     let (mp, mn) = (mag(pos[2]), mag(neg[2]));
     assert!(
-        (mp - mn).abs() <= 0.02 * mp,
+        (mp - mn).abs() <= 1e-3 * mp,
         "|H2| {mp:.4e} vs {mn:.4e} under ± bias"
     );
     // Unbiased: no H2, H3 dominates. At φ0 ≈ 0.1 (> a/6 = 0.05): H2 dominates.

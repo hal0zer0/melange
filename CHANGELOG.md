@@ -103,6 +103,17 @@ generated state is smaller.
   baked. It started from i_L = 0 and settled over L/R, which is seconds for a
   henry-class winding on the 1 Ω input. The significance check looked only at
   node rows; it now looks at everything the nodal path emits.
+- **A DC-biased saturating inductor drifted away from the solution.** The
+  convergence test on the inductor's flux accepted an error of 1e-3 of each
+  sample's flux change, which let Newton's first iterate through on every
+  sample. Under DC bias that leftover error always has the same sign, so the
+  flux integrated it: 0.7 % low on the fundamental after 2 s on a biased core
+  with a long L/R, against independent references. The tolerance is now 1e-5
+  of the change, with a floor at rounding level; the error is about 1e-7. It
+  costs up to one more Newton iteration per sample on circuits with
+  saturating inductors (0-2 % more on the golden set). Golden renders change
+  by less than 0.00001 dB: the one biased choke there stays below 37 % of its
+  saturation current, where the core is nearly linear and the error is small.
 - **`.pot` with no default accepted a resistor value outside its own range**,
   so the knob started at a setting it could not return to. It is now refused,
   as an explicit default and `--pot` already were. A one-word label no longer
@@ -166,9 +177,11 @@ generated state is smaller.
   30 Hz into saturation, and check them against independent references, both
   a same-rate trapezoidal recurrence and a 1024× near-continuous one: H1 within
   1e-5, H3 and H5 within 1e-4. The tests fail on deliberately broken flux
-  devices. A DC-biased core checks that H2 appears with bias, flips sign with
-  it, and overtakes H3 where the physics says it should. Three coverage-only
-  decks at 5 V join the golden set.
+  devices. A DC-biased core is checked the same way, at the same tolerances,
+  against a same-rate and a 256× recurrence, and against exact flux-drive
+  harmonic values to 0.5 dB; H2 must also flip sign with the bias and
+  overtake H3 where the physics says it should. Three coverage-only decks at
+  5 V join the golden set.
 
 ### Documentation
 

@@ -1097,5 +1097,12 @@
     "sub_step_removal": "Audio-neutral on its own: pre vs post 168/168 identical. The only deck that emitted the sub-step (pipe-shouter) fired it 0 times on every program.",
     "generated_source": "Differs on all 38: two new constants (OPAMP_RAIL_MODE, OPAMP_RAIL_MODE_REASON) everywhere, and the unused sub-step matrices removed from every nodal circuit's state.",
     "route_changes_outside_manifest": "noyce-ne5534, sympathy-drive and sympathy-frontend also move DK -> nodal for the same reason; they are not in this manifest."
+  },
+  "rebaseline_2026_09_28_flux_tolerance": {
+    "why": "Saturating-inductor flux-row convergence tolerance tightened from 1e-3 to 1e-5 of the per-sample increment (a one-signed Newton remainder integrated under DC bias). Attribution: flux-row residual tolerance 1e-3 -> 1e-5 of the per-sample increment.",
+    "vs_previous": "173 identical, 7 negligible, 0 changed, 0 input-changed, 0 missing; 0 held and 0 not-converged on both sides.",
+    "negligible": "mosfet-choke-load/sweep and the step and sweep renders of sat-knee-rl, sat-core-loaded and sat-core-open: level within 1e-5 dB, corr 1.0000000. Newton iterations (refactor count, one per iteration on these decks) up 0.02-2.3 %.",
+    "sub_steps": "0 on every render of every saturating deck, before and after.",
+    "generated_source": "Differs on the five saturating decks only (funkyinduct, mosfet-choke-load, sat-knee-rl, sat-core-loaded, sat-core-open); funkyinduct renders identically."
   }
 }

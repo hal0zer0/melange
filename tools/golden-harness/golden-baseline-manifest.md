@@ -8,6 +8,8 @@ Generated 2026-07-21. Refreshed 2026-08-30 against melange **e53573c** (correctn
 
 **Added 2026-09-28: three saturation coverage decks** (`sat-knee-rl`, `sat-core-loaded`, `sat-core-open`), in-repo under `tools/golden-harness/decks/`, at a 5 V manifest level. No golden program had taken any inductor past i/Isat = 0.37, so the saturation knee was never exercised; at 5 V the 20–60 Hz part of the sweep reaches it. They are change detectors only; correctness is gated in `crates/melange-solver/tests/saturation_knee_regression_tests.rs` against independent references. Their first capture is a new baseline, not a restored one.
 
+**Re-baselined 2026-09-28 (saturating-inductor flux tolerance).** Attribution: **flux-row residual tolerance 1e-3 → 1e-5 of the per-sample increment** (Newton's one-signed remainder was integrated under DC bias). Against the previous capture: 173 identical, 7 negligible (mosfet-choke-load/sweep; step and sweep of the three saturation coverage decks; within 1e-5 dB, corr 1.0000000), 0 changed. Generated source differs on the five saturating decks only; funkyinduct renders identically. Newton iterations up 0.02–2.3 % on the negligible renders; 0 sub-steps on every saturating render, before and after. No render held, none not-converged.
+
 Machine-readable twin: `tools/golden-harness/golden-baseline-manifest.json`.
 
 ## Compile recipe

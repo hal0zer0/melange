@@ -255,10 +255,21 @@ fn strip_outer_parens(expr: &str) -> &str {
 ///   are ~1e4 while their difference is the ~10 V the row is actually about.
 ///   Letting the stiff magnitude set the tolerance would make the check
 ///   unfireable — the same stiff-denominator trap the Φ-vs-Φ form falls into.
-/// * **The absolute floor is `1e-6` V**, read off this row's own emitted
-///   voltage-step check rather than introduced as a new constant. The row is
-///   dimensionally volts (it is a KVL row: `v_j − v_i + alpha·ΔΦ`), so this
-///   makes the residual test a strict refinement of the existing criterion.
+/// * **The tolerance is `1e-5·den`, floored at `64·eps` of the stiff pair.**
+///   `den` is the largest term after pairing, i.e. the row's per-sample
+///   increment (`alpha·ΔΦ`, the volts across the winding), not the flux
+///   itself. Whatever residual is accepted here is integrated into the flux
+///   history, and under a DC bias it has one sign (Newton's remainder
+///   `alpha·Φ''·Δi²/2`, with `Φ''` signed by the bias), so it accumulates with
+///   the L/R time constant instead of averaging out. The old `1e-3·den + 1e-6`
+///   accepted the first Newton iterate on every sample and drifted a 5 mA
+///   biased core by −1.6e-5 A over 2 s; at `1e-5` the drift is ~1e-10 A, for
+///   about one more iteration per sample. Tighter buys nothing at that point
+///   and leaves less room above the rounding floor at waveform turning points,
+///   where `den` goes to zero. The floor covers what the pairing
+///   cannot remove: rounding in `alpha·Φ − rhs[k]` is a few ulp of the
+///   operands, not of their difference. A fixed absolute floor would reopen
+///   the same drift at small increments.
 ///
 /// The predicate is written negated (`!(x <= tol)`) so a NaN residual reads as
 /// NOT converged, matching the device check.
@@ -376,15 +387,17 @@ fn emit_sat_ind_row_residual(
             }
         }
         // Flux-change term, kept paired so the stiff alpha*Phi magnitude never
-        // reaches `den`.
+        // reaches `den`; it sets only the rounding floor.
         code.push_str(&format!(
-            "{indent}        {{ let phi = SAT_IND_{idx}_L0 * SAT_IND_{idx}_ISAT \
+            "{indent}        let mut stiff = 0.0f64;\n\
+             {indent}        {{ let phi = SAT_IND_{idx}_L0 * SAT_IND_{idx}_ISAT \
              * (v[k] / SAT_IND_{idx}_ISAT).tanh(); \
-             let t = sat_al * phi - {rhs}[k]; acc += t; \
+             let ap = sat_al * phi; stiff = ap.abs().max({rhs}[k].abs()); \
+             let t = ap - {rhs}[k]; acc += t; \
              let a = t.abs(); if a > den {{ den = a; }} }}\n"
         ));
         code.push_str(&format!(
-            "{indent}        if !(acc.abs() <= 1e-3 * den + 1e-6) {{ max_step_exceeded = true; }}\n"
+            "{indent}        if !(acc.abs() <= (1e-5 * den).max(64.0 * f64::EPSILON * stiff)) {{ max_step_exceeded = true; }}\n"
         ));
         code.push_str(&format!("{indent}    }}\n"));
     }
