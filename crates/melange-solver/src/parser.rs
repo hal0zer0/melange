@@ -2058,12 +2058,27 @@ impl Parser {
                     .iter()
                     .find(|m| m.name.eq_ignore_ascii_case(model_ref));
                 let Some(model) = model else {
+                    // The deck usually DOES declare the model the author meant;
+                    // a typo is far likelier than a missing card, and the
+                    // candidates are right there to compare against.
+                    let near = nearest_model_names(model_ref, &netlist.models);
+                    let hint = if !near.is_empty() {
+                        format!(" Did you mean: {}?", near.join(", "))
+                    } else if netlist.models.is_empty() {
+                        " This netlist declares no `.model` cards at all.".to_string()
+                    } else {
+                        let mut all: Vec<&str> =
+                            netlist.models.iter().map(|m| m.name.as_str()).collect();
+                        all.sort_unstable();
+                        format!(" Declared here: {}.", all.join(", "))
+                    };
                     return Err(ParseError {
                         line: self.line_of_element(elem.name()),
                         message: format!(
-                            "Component '{}' references model '{}' which is not defined",
+                            "Component '{}' references model '{}' which is not defined.{}",
                             elem.name(),
-                            model_ref
+                            model_ref,
+                            hint
                         ),
                     });
                 };
@@ -5465,9 +5480,46 @@ pub fn parse_value(s: &str) -> Result<f64, ParseFloatError> {
 /// The documented argument order for a directive, keyed by the label its
 /// parser passes to [`explain_rejected_value`]. Only directives whose fields
 /// are parsed as values need an entry; anything else simply gets no shape hint.
+/// Declared model names within edit distance 2 of `want`, closest first, at
+/// most three. Case-insensitive, because `.model` references are.
+fn nearest_model_names(want: &str, models: &[Model]) -> Vec<String> {
+    let w = want.to_ascii_lowercase();
+    let mut scored: Vec<(usize, &str)> = models
+        .iter()
+        .filter_map(|m| {
+            let d = ascii_edit_distance(&w, &m.name.to_ascii_lowercase());
+            (d <= 2).then_some((d, m.name.as_str()))
+        })
+        .collect();
+    scored.sort_by_key(|(d, n)| (*d, *n));
+    scored
+        .into_iter()
+        .take(3)
+        .map(|(_, n)| n.to_string())
+        .collect()
+}
+
+fn ascii_edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
 fn directive_shape(context: &str) -> Option<&'static str> {
     Some(match context {
         c if c.starts_with(".pot") => ".pot Rname min_value max_value",
+        c if c.starts_with(".wiper") => ".wiper R_cw R_ccw total_resistance",
+        c if c.starts_with(".runtime") => ".runtime Rname min max as field_name",
+        c if c.starts_with(".input_impedance") => ".input_impedance <value>",
         c if c.starts_with(".tolerance") => ".tolerance <percent>",
         c if c.starts_with(".mismatch") => ".mismatch <percent>",
         _ => return None,

@@ -863,8 +863,14 @@ enum CacheAction {
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 enum OutputFormat {
     /// Generate only the circuit code (default)
+    // `rust` is accepted because the tool invites it: the generated output IS
+    // Rust, the docs call it "Rust code", and `--format rust` was a first
+    // user's first guess. Rejecting a guess your own wording produces is a
+    // papercut with no upside.
+    #[value(alias = "rust")]
     Code,
     /// Generate a complete plugin project
+    #[value(alias = "project")]
     Plugin,
 }
 
@@ -5777,19 +5783,53 @@ fn list_nodes_source(circuit_source: &circuits::CircuitSource) -> Result<()> {
     {
         println!();
         println!("Controls (name or label works with --pot / --switch):");
+        // A `.wiper` emits two pots — the halves of its track — and they are
+        // real setters in the generated API, so hiding them would mislead a
+        // plugin author. Listing them as if they were two independent knobs
+        // misleads everyone else. Name the relationship instead.
+        let wiper_half = |r: &str| -> Option<String> {
+            netlist.wipers.iter().find_map(|w| {
+                let label = w.label.as_deref().unwrap_or(&w.resistor_cw);
+                if w.resistor_cw == r {
+                    Some(format!("cw half of wiper \"{label}\""))
+                } else if w.resistor_ccw == r {
+                    Some(format!("ccw half of wiper \"{label}\""))
+                } else {
+                    None
+                }
+            })
+        };
         for pot in &netlist.pots {
             let label = pot.label.as_deref().unwrap_or(&pot.resistor_name);
+            // No explicit default means the resistor's own declared value —
+            // `mna.rs` resolves it with `default_value.unwrap_or(*value)`. The
+            // number is knowable, so print it rather than the word "nominal",
+            // which reads like a missing value next to every other pot's figure.
             let default = pot
                 .default_value
+                .or_else(|| {
+                    netlist.elements.iter().find_map(|e| match e {
+                        melange_solver::parser::Element::Resistor { name, value, .. }
+                            if name.eq_ignore_ascii_case(&pot.resistor_name) =>
+                        {
+                            Some(*value)
+                        }
+                        _ => None,
+                    })
+                })
                 .map(|d| format!("{d:.0}"))
                 .unwrap_or_else(|| "nominal".to_string());
+            let note = wiper_half(&pot.resistor_name)
+                .map(|w| format!("  ({w})"))
+                .unwrap_or_default();
             println!(
-                "  pot     {:<26} [{}]  {:.0}..{:.0} ohm, default {}",
+                "  pot     {:<26} [{}]  {:.0}..{:.0} ohm, default {}{}",
                 format!("\"{label}\""),
                 pot.resistor_name,
                 pot.min_value,
                 pot.max_value,
-                default
+                default,
+                note
             );
         }
         for wiper in &netlist.wipers {
