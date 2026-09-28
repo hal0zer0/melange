@@ -99,12 +99,16 @@ melange compile passive-eq1a --format plugin -o my-eq   # built-in demo circuit
 cd my-eq && cargo build --release
 ```
 
-The full circuit library lives in its own repository (being published). Once it — or any git repo full of netlists — is added as a named source, you compile by `source:circuit`:
+The circuit library lives in its own repository, and you do not have to clone
+it — add it once as a named source and compile by `source:circuit`:
 
 ```bash
-melange sources add pedalboards https://github.com/someone/spice-pedals
-melange compile pedalboards:rat-distortion --format plugin -o rat
+melange sources add melange-circuits https://gitlab.com/oomox-group/melange-circuits/-/raw/main
+melange compile melange-circuits:passive-eq1a --format plugin -o my-eq
 ```
+
+Any repository of netlists works the same way, including a folder on your own
+disk — see [Circuits](#circuits) below.
 
 ### 3. From a KiCad schematic
 
