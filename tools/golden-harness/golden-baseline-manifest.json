@@ -1,7 +1,7 @@
 {
   "generated": "2026-07-21",
   "generated_by": "melange golden-baseline manifest task",
-  "melange_verify_commit": "e070f20 (NR-hold/silent-wrong workstream merged; melange 0.1.9 built AND installed from it). Reference baseline: golden-baselines/schurpin, captured 2026-09-27, 38/38, 0 held, 0 not-converged.",
+  "melange_verify_commit": "576a492 (op-amp rail handling: active-set routes to nodal, ActiveSetBe 2x sub-step removed; built AND installed from it). Reference baseline: golden-baselines/576a492, captured 2026-09-28, 38/38, 0 held, 0 not-converged.",
   "compile_cmd_cwd": "~/dev/oomox (repo root); netlists referenced as ../melange-circuits/<cir>",
   "verification_protocol": "Each compile_cmd was executed into scratch space and diffed byte-for-byte against the checked-in oomox file. EXACT = byte-identical. DRIFT-EXPLAINED = every diff hunk attributable to known post-regen melange commits AND anchors (N, M, OVERSAMPLING_FACTOR, INPUT_NODE, OUTPUT_NODES, OUTPUT_SCALES, INPUT_RESISTANCE, SAMPLE_RATE, full setter list, noise fns) verified identical. No hand-edited generated files were found. Known post-regen drift commits: 146d51b (emitted clippy-allow header); a472807 (two-draw shot noise); 49ecaa4 (deterministic coupled-inductor augmented-row ordering); AND correctness-sweep NR globalization 0c70d44 + 83bf48d + e53573c (nodal Newton globalized with a KCL residual gate + Armijo line search; emits new kcl_residual/kcl_residual_inl fns + v_nl_final block, replaces the old adaptive sub-stepping fallback, and raises the emitted MAX_ITER cap to 100 on every deck carrying an inner nodal/behavioral NR loop; e53573c makes a line-search FAILURE fall through instead of bailing to the removed fallback \u2014 this fixed the tungsten-thunder-horse idle-collapse regression that the 83bf48d baseline carried, re-converging it to main/ngspice). Two other correctness-sweep DSP-capable commits produced NO drift in THIS corpus, verified by content diff at e53573c: 63cee6e (DC-OP candidate retention) changed zero DC_OP/DC_NL_I constants here (no corpus circuit hit the leaky-gate degenerate case); be7be88 (independent current-source sign) is inert here (no corpus deck has an explicit `I` element).",
   "melange_circuits_repo_state": {
@@ -1016,5 +1016,14 @@
     "old_render_defect": "step held 43199 of 48000 samples (previous state committed as output, frozen under the held input); sine1k held 21 of 96000. diag_nr_hold_count is 0 on both now.",
     "attribution_caveat": "The harness reports these as INPUT-CHANGED, not CHANGED, because melange-circuits edited the deck's HEADER between captures (a75037f/0293087). Circuit content is unchanged \u2014 verified by diffing non-comment lines \u2014 so the delta is attributable to e070f20, but that rests on that diff rather than on the harness, which hashes the whole file including comments.",
     "design review": "thread 536, closed both sides"
+  },
+  "rebaseline_2026_09_28": {
+    "why": "Re-baselined at 576a492. vurli/silence is the one CHANGED render. vurli-leveler (unstable/dynamics/vurli-leveler.cir) now routes DK -> nodal because its op-amp resolves to active-set rail handling, which only nodal implements (DK clamped after the solve, which corrupts capacitor history once the op-amp rails). Attribution: DK->nodal for active-set rail handling.",
+    "vs_v0111": "155 identical, 12 negligible, 1 changed (vurli/silence), 0 input-changed, 0 missing; 0 held and 0 not-converged on both sides.",
+    "changed_render": "vurli/silence: -3.12 dB on a 3.0e-6 V-peak render, maxdiff 1.118e-6 V, corr 0.958. The route change seen in noise-floor residue, not an audible change.",
+    "negligible": "The 12 are renders of the three in-manifest decks that changed route (vurli-leveler, gold-press-mastering, noyce-4558): level within 1e-5 dB, corr 1.0000000. The golden programs never drive these op-amps into their rails, which is where the two routes differ.",
+    "sub_step_removal": "Audio-neutral on its own: pre vs post 168/168 identical. The only deck that emitted the sub-step (pipe-shouter) fired it 0 times on every program.",
+    "generated_source": "Differs on all 38: two new constants (OPAMP_RAIL_MODE, OPAMP_RAIL_MODE_REASON) everywhere, and the unused sub-step matrices removed from every nodal circuit's state.",
+    "route_changes_outside_manifest": "noyce-ne5534, sympathy-drive and sympathy-frontend also move DK -> nodal for the same reason; they are not in this manifest."
   }
 }
