@@ -350,7 +350,8 @@ mod tests {
     fn test_builtin_content_is_the_passive_eq_deck() {
         // Sanity: the embedded content is actually the passive-eq netlist,
         // and resolve() picks it up as a Builtin for a bare name.
-        let content = get_builtin("passive-eq1a").unwrap();
+        let (canonical, content) = get_builtin("passive-eq1a").unwrap();
+        assert_eq!(canonical, "passive-eq1a");
         assert!(content.contains("Passive-EQ1A"));
         match resolve("passive-eq1a").unwrap() {
             CircuitSource::Builtin { name, .. } => assert_eq!(name, "passive-eq1a"),

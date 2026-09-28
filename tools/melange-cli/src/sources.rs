@@ -431,7 +431,6 @@ mod tests {
         assert!(config.default_source.is_none());
     }
 
-    #[test]
     /// A local source resolves through an index exactly as a remote one does.
     /// `melange index` writes these; if they were only usable after publishing
     /// to HTTP, the generator's own output would be dead on arrival.
@@ -487,6 +486,7 @@ mod tests {
         assert!(e.contains("melange index"), "{e}");
     }
 
+    #[test]
     fn test_resolve_circuit() {
         // Resolution mechanics, against a user-added source (nothing pre-seeded).
         let mut config = SourcesConfig::default_config();
