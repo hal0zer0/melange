@@ -3334,6 +3334,17 @@ struct AnalyzeOptions<'a> {
     max_iter: Option<usize>,
 }
 
+/// Whether generated code DECLARES `field` on its state struct.
+///
+/// Matches the declaration, not the name: generated code can mention a counter
+/// in a doc comment without declaring it (the full-LU sub-step ladder's docs
+/// name `diag_nr_hold_count` on builds that have no hold), and a substring match
+/// then made the simulate driver read a field that does not exist — it failed
+/// to compile on every such circuit.
+fn declares_state_field(code: &str, field: &str) -> bool {
+    code.contains(&format!("pub {field}: "))
+}
+
 /// `CircuitState` diagnostic counters emitted only when sub-sample fire is
 /// active; `simulate` prints them when the generated code declares them.
 const SUBSAMPLE_FIRE_DIAG_FIELDS: [&str; 10] = [
@@ -4361,7 +4372,7 @@ fn simulate_circuit_source(
             // stays silent rather than reporting a reassuring zero for a
             // mechanism it does not have.
             .chain(["diag_nr_hold_count", "diag_nr_unconverged_commit_count"])
-            .filter(|f| generated.code.contains(f))
+            .filter(|f| declares_state_field(&generated.code, f))
             .collect::<Vec<&str>>(),
         opts.pcm16,
     );
@@ -6419,6 +6430,19 @@ fn handle_cache(action: CacheAction) -> Result<()> {
             println!("  Size: {}", bin_stats.formatted_size());
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod declares_state_field_tests {
+    use super::declares_state_field;
+
+    #[test]
+    fn a_doc_comment_mention_is_not_a_declaration() {
+        let code = "/// Past this depth the hold fires and `diag_nr_hold_count` counts it.\n\
+                    pub struct CircuitState {\n    pub diag_be_fallback_count: u64,\n}\n";
+        assert!(!declares_state_field(code, "diag_nr_hold_count"));
+        assert!(declares_state_field(code, "diag_be_fallback_count"));
     }
 }
 

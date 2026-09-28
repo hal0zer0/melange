@@ -57,6 +57,21 @@ generated state is smaller.
   `--opamp-rail-mode hard` is still honoured on either route, but when it lands
   on a capacitor-coupled op-amp output compile says so, naming the op-amp, and
   the reason constant records the verdict it overrode.
+- **The active-set rail resolve did not solve the circuit it pinned.** It was
+  one linear solve with the device currents of the unpinned solve frozen, which
+  holds only if pinning the op-amp output leaves every device voltage where it
+  was. An output coupling cap passes the pin's step straight through, so on the
+  textbook single-supply overdrive (op-amp, output cap, diode clipper) it drove
+  the clipper to −2 V, re-evaluated a reverse diode at 3.6e9 A, and diverged: a
+  sample left unsolved every cycle and peaks of 21 kV. The resolve is now Newton
+  on the pinned system. Against an ngspice reference of that circuit the output
+  lands within 2.4 % at 1× and 1.0 % at 4×, with no unsolved samples at any
+  drive. The regression suite had no circuit whose op-amp reaches its rails; it
+  has one now.
+- `simulate` failed to compile on full-LU circuits with no nonlinear devices
+  (e.g. an op-amp-only stage on the nodal route): it decided which diagnostic
+  counters exist by searching the generated code for their names, and a doc
+  comment named one the build does not declare. It now matches the declaration.
 - **`.pot` with no default accepted a resistor value outside its own range**,
   so the knob started at a setting it could not return to. It is now refused,
   as an explicit default and `--pot` already were. A one-word label no longer

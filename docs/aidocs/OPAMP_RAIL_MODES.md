@@ -157,10 +157,12 @@ If BoyleDiodes heavy-clip convergence becomes a priority again:
 
 ActiveSetBe runs the trap NR loop normally, but at the end of each sample's NR convergence check, it inspects whether any clamped op-amp output is at or beyond its rail. If yes, it falls through to a constrained re-solve:
 
-1. Pin `v[out] = clamp(v[out], VEE, VCC)` (in voltage space, not via NR)
-2. Build `A_be = G + (1/T) * C` (BE matrices, more damped than `A = G + (2/T) * C`)
-3. Solve `A_be * v_be = rhs_be` with the pinned output as a constraint via augmented MNA
-4. Update `state.v_prev = v_be` so the next sample's cap history is BE-consistent
+1. Pin `v[out] = clamp(v[out], VEE, VCC)` (row/column elimination: row `out` becomes `v[out] = rail`)
+2. Use the BE matrices `A_be = G + (1/T) * C` (more damped than `A = G + (2/T) * C`)
+3. **Newton on the pinned nonlinear system**: each iteration re-evaluates every device at the pinned iterate, stamps `−N_i·J_dev·N_v` and the companion current, solves, and applies the same pnjlim/fetlim and 10 V node-step limits as the full-LU loops. A pinned solve that does not converge marks the sample unsolved.
+4. Commit the pinned solution with `i_nl` re-evaluated at it, so the next sample's cap history is BE-consistent
+
+Step 3 used to be ONE linear solve with the unpinned solve's device currents frozen. That is only a solution if the pin leaves device voltages where they were. It does not when an output coupling cap sits between the op-amp and a nonlinear device: the cap passes the pin's step straight through. On a single-supply overdrive with a diode clipper after the output cap, the frozen solve drove the clipper node to −2 V and re-evaluated a reverse diode at 3.6e9 A; the next sample diverged. Nothing had validated active-set with M > 0 at the rail — the corpus has no deck whose op-amp rails — which is why `opamp_railing_regression_tests.rs` now carries one, gated against an ngspice reference (±5 %; measured within 2.4 % at 1×, 1.0 % at 4×).
 
 The crucial difference from plain ActiveSet is that the BE re-solve damps any high-frequency content in the cap-coupled output path that the trap rule would otherwise amplify into a Nyquist limit cycle. Klon's C15 (4.7 µF, tone_out → out_ac) plus the surrounding R network forms a discrete-time LC resonator at exactly Nyquist when discretized with the trap rule; the BE re-solve sidesteps this by using a different discretization for the rail-engaged sample.
 

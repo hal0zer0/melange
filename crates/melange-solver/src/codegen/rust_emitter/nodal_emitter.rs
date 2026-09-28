@@ -9317,57 +9317,46 @@ impl RustEmitter {
 
     /// Emit the active-set constrained-resolve block for a nodal NR path.
     ///
-    /// Called after NR has converged in the Schur or full-LU nodal paths when
-    /// `OpampRailMode::ActiveSet` is selected. At entry:
-    ///   - `v` holds the *unclamped* converged solution (possibly with op-amp
-    ///     outputs outside their supply rails).
-    ///   - `i_nl` holds the final device currents at the converged v.
+    /// Called after NR has run in the Schur or full-LU nodal paths when an
+    /// active-set rail mode is selected. At entry `v` holds the *unclamped*
+    /// solution (op-amp outputs possibly outside their rails) and `i_nl` the
+    /// device currents at it.
     ///
-    /// **Key observation**: at NR convergence, the nonlinear companion equation
-    /// collapses to the linear relation `A * v = rhs + N_i * i_nl`. The device
-    /// Jacobian `J_dev` contributions that appear inside the NR iteration
-    /// cancel identically at the fixed point — you can verify this by writing
-    /// out `(A − N_i·J_dev·N_v) v = rhs + N_i·(i_nl − J_dev·v_nl)` with
-    /// `v_nl = N_v·v` and expanding. That means the active-set resolve only
-    /// needs `A` (from `state.a` or `state.a_be`) and the converged `i_nl`, not
-    /// the per-NR Jacobian, so it's portable between the Schur, full-LU, and
-    /// BE-fallback code paths.
+    /// The resolve:
+    ///   1. Detects which op-amp outputs are at or beyond their VCC/VEE rails.
+    ///      If none are, it leaves `v` alone — this is also the release test:
+    ///      a pin only exists on samples whose unconstrained solution violates
+    ///      the rail.
+    ///   2. Otherwise runs Newton on the PINNED nonlinear system
+    ///      `A·v = rhs + N_i·i_nl(N_v·v)` with each pinned row replaced by
+    ///      `v[k] = c_k` (row/column elimination), using `matrix_name`: each
+    ///      iteration re-evaluates the devices, stamps `−N_i·J_dev·N_v` and the
+    ///      companion current, solves, and applies the same pnjlim/fetlim and
+    ///      10 V node-step limits as the full-LU loops.
+    ///   3. Commits the pinned solution with `i_nl` re-evaluated at it, so the
+    ///      next sample's history terms are KCL-consistent.
+    ///   4. Sets `last_nr_iterations` from the pinned solve: converged clears an
+    ///      unpinned failure, not converged marks the sample unsolved.
     ///
-    /// The resolve does:
-    ///   1. Detect which op-amp outputs exceed their VCC/VEE rails.
-    ///   2. If none do, nothing to do — leave `v` alone.
-    ///   3. Otherwise build the linear system `A * v = rhs + N_i * i_nl` using
-    ///      `matrix_name` (with a small Gmin on node diagonals for conditioning).
-    ///   4. For each rail-violating node `k` with rail value `c_k`:
-    ///        - subtract `A[:,k] * c_k` from `rhs` at every row except `k`
-    ///        - zero column `k` in all non-`k` rows
-    ///        - zero row `k` and set `A[k][k] = 1, rhs[k] = c_k`
+    /// **Why Newton, not one linear solve.** The pin can move `v[out]` by volts
+    /// in a sample, and an output coupling cap passes that step straight to
+    /// downstream devices, so the unpinned solve's `i_nl` is not valid at the
+    /// pinned voltages. A single linear solve with it frozen is not a solution:
+    /// on a single-supply overdrive with a diode clipper after the output cap
+    /// it drove the clipper node to −2 V and re-evaluated a reverse diode at
+    /// 3.6e9 A (regression: `opamp_railing_regression_tests.rs`).
     ///
-    ///      This pins `v[k] = c_k` by row/column elimination.
-    ///   5. Solve the constrained system with the generated dense `lu_solve`.
-    ///      The result is a `v'` where every node satisfies KCL given the
-    ///      clamped outputs, so the next sample's `A_neg * v_prev` sees a
-    ///      KCL-consistent state and the cap-history corruption bug goes away.
-    ///   6. Re-evaluate `i_nl` at the new `v` so the next sample's trapezoidal
-    ///      history term (`N_i * i_nl_prev`) is also consistent with the
-    ///      constrained voltages.
-    ///
-    /// If the dense LU solve fails (shouldn't happen for well-posed circuits),
-    /// leave `v` at the unclamped solution; the downstream output clamp
-    /// (`output[idx].clamp(-10, 10)`) still prevents catastrophic output, and
-    /// the diagnostic counter `diag_nr_max_iter_count` records the failure.
+    /// If the dense LU solve fails, `v` stays at the unclamped solution and
+    /// `diag_nr_max_iter_count` records it.
     ///
     /// # Caller contract
     ///
-    /// The caller must have `v` (mutable), `i_nl`, and a variable named
-    /// `rhs_name` in scope. The `rhs` variable means the linear RHS *before*
-    /// any nonlinear companion contribution — i.e.,
-    /// `A_neg·v_prev + rhs_const + (input+input_prev)*G_in` (trapezoidal) or
-    /// `A_neg_be·v_prev + rhs_const_be + input*G_in` (backward Euler).
-    ///
-    /// `matrix_name` is the matrix expression to use for the constrained
-    /// resolve — `"state.a"` for trapezoidal, `"state.a_be"` for BE. Must be
-    /// consistent with the integrator that produced `rhs`.
+    /// The caller must have `v` (mutable), `i_nl` (mutable), and a variable
+    /// named `rhs_name` in scope. `rhs` is the linear RHS *before* any nonlinear
+    /// companion contribution — `A_neg·v_prev + rhs_const + (input+input_prev)·G_in`
+    /// (trapezoidal) or `A_neg_be·v_prev + rhs_const_be + input·G_in` (backward
+    /// Euler) — and `matrix_name` (`"state.a"` / `"state.a_be"`) must match the
+    /// integrator that produced it.
     pub(super) fn emit_nodal_active_set_resolve(
         code: &mut String,
         ir: &CircuitIR,
@@ -9456,61 +9445,118 @@ impl RustEmitter {
             "{indent}        state.diag_active_set_pin_count += 1;\n"
         ));
 
-        // Step 2: build the linear system `A * v = rhs + N_i * i_nl` at the
-        // converged operating point. Copy the matrix as scratch, add Gmin on
-        // node diagonals for LU conditioning, copy `rhs` and add the nonlinear
-        // current injection via the sparse N_i pattern.
+        // Steps 2-5: Newton on the PINNED nonlinear system.
+        //
+        // The pin moves v[out] by up to volts in one sample, and a coupling
+        // cap passes that step straight to downstream devices (a capacitor is a
+        // short to a step). So the device currents from the unpinned solve are
+        // NOT valid at the pinned voltages, and a single linear resolve with
+        // them frozen is not a solution: measured on a single-supply overdrive
+        // with a diode clipper after the output cap, it swung the clipper node
+        // to -2 V and re-evaluated a reverse diode at 3.6e9 A, which the next
+        // sample's history carried into a 1e20 A divergence.
+        //
+        // Each iteration evaluates the devices at the current pinned iterate,
+        // stamps their Jacobian and companion current into `matrix_name` (BE
+        // matrices for ActiveSetBe, trap for ActiveSet — the caller's choice),
+        // eliminates the pinned rows, and solves. Same pnjlim/fetlim limiting
+        // and 10 V node-step cap as the full-LU loops. A pinned solve that does
+        // not converge marks the sample unsolved (`last_nr_iterations =
+        // MAX_ITER`) so the verbs refuse it rather than commit it quietly.
+        //
+        // Release: a pin applies only when THIS sample's unpinned solution is
+        // outside the rail (step 1), so it lets go as soon as the unconstrained
+        // solution returns inside.
+        let mut device_nodes: Vec<usize> = ir
+            .sparsity
+            .n_v
+            .nz_by_row
+            .iter()
+            .flat_map(|row| row.iter().copied())
+            .collect();
+        device_nodes.sort();
+        device_nodes.dedup();
+        let it = format!("{indent}            ");
         code.push_str(&format!(
-            "{indent}        let mut g_as = {matrix_name};\n\
-             {indent}        for i in 0..{n_nodes} {{ g_as[i][i] += 1e-12; }}\n",
-            n_nodes = n_nodes,
+            "{indent}        let mut v_pin = v;
+"
         ));
-        code.push_str(&format!("{indent}        let mut rhs_as = {rhs_name};\n"));
-        if m > 0 {
-            let ni_nz_by_dev = ni_nonzeros_by_dev(ir, m);
-            for i in 0..m {
-                for &a in &ni_nz_by_dev[i] {
-                    code.push_str(&format!(
-                        "{indent}        rhs_as[{a}] += N_I[{a}][{i}] * i_nl[{i}];\n",
-                        a = a,
-                        i = i,
-                    ));
-                }
-            }
+        for (idx, oa) in clampable.iter().enumerate() {
+            code.push_str(&format!(
+                "{indent}        if let Some(c_k) = pinned_{idx} {{ v_pin[{node}] = c_k; }}\n",
+                node = oa.n_out_idx
+            ));
         }
-
-        // Step 3: apply active-set constraints via row/column elimination. For
-        // each pinned op-amp output k with clamp value c_k, move its
-        // contribution out of the other rows and pin the row to an identity
-        // equation `v[k] = c_k`.
+        code.push_str(&format!(
+            "{indent}        let mut pin_converged = false;\n\
+             {indent}        let mut pin_iters = MAX_ITER as u32;\n\
+             {indent}        let mut pin_lu_ok = true;\n\
+             {indent}        for _pit in 0..MAX_ITER {{\n"
+        ));
+        if m > 0 {
+            code.push_str(&format!("{it}let mut v_nl = [0.0f64; M];\n"));
+            code.push_str(&emit_sparse_nv_matvec(ir, "v_nl", "v_pin", &it));
+            code.push_str(&format!("{it}let mut j_dev = [0.0f64; M * M];\n"));
+            Self::emit_nodal_device_evaluation_body(code, ir, &it);
+        }
+        code.push_str(&format!(
+            "{it}let mut g_as = {matrix_name};\n\
+             {it}for i in 0..{n_nodes} {{ g_as[i][i] += 1e-12; }}\n\
+             {it}let mut rhs_as = {rhs_name};\n"
+        ));
+        if m > 0 {
+            emit_nodal_jacobian_stamp(code, ir, m, "g_as", &it);
+            emit_nodal_companion_rhs(code, ir, m, "rhs_as", "j_dev", &it);
+        }
+        // Pin elimination: move each pinned column's contribution to the RHS
+        // and replace its row with the identity equation v[k] = c_k.
         for (idx, oa) in clampable.iter().enumerate() {
             let node = oa.n_out_idx;
             code.push_str(&format!(
-                "{indent}        if let Some(c_k) = pinned_{idx} {{\n\
-                 {indent}            for i in 0..N {{\n\
-                 {indent}                if i != {node} {{ rhs_as[i] -= g_as[i][{node}] * c_k; }}\n\
-                 {indent}                g_as[i][{node}] = 0.0;\n\
-                 {indent}            }}\n\
-                 {indent}            for j in 0..N {{ g_as[{node}][j] = 0.0; }}\n\
-                 {indent}            g_as[{node}][{node}] = 1.0;\n\
-                 {indent}            rhs_as[{node}] = c_k;\n\
-                 {indent}        }}\n",
-                idx = idx,
-                node = node,
+                "{it}if let Some(c_k) = pinned_{idx} {{\n\
+                 {it}    for i in 0..N {{\n\
+                 {it}        if i != {node} {{ rhs_as[i] -= g_as[i][{node}] * c_k; }}\n\
+                 {it}        g_as[i][{node}] = 0.0;\n\
+                 {it}    }}\n\
+                 {it}    for j in 0..N {{ g_as[{node}][j] = 0.0; }}\n\
+                 {it}    g_as[{node}][{node}] = 1.0;\n\
+                 {it}    rhs_as[{node}] = c_k;\n\
+                 {it}}}\n"
             ));
         }
-
-        // Step 4: dense LU solve of the constrained system.
         code.push_str(&format!(
-            "{indent}        let mut v_as = rhs_as;\n\
-             {indent}        if lu_solve(&mut g_as, &mut v_as) {{\n\
-             {indent}            v = v_as;\n",
+            "{it}let mut v_new = rhs_as;\n\
+             {it}if !lu_solve(&mut g_as, &mut v_new) {{ pin_lu_ok = false; break; }}\n\
+             {it}let mut alpha = 1.0_f64;\n"
         ));
-
-        // Step 5: re-evaluate i_nl at the new v so next sample's trapezoidal
-        // history is consistent. Reuses the existing
-        // `emit_nodal_device_evaluation_final` helper in a nested scope to
-        // re-bind `v_nl_final` without colliding with any outer binding.
+        if m > 0 {
+            Self::emit_nodal_voltage_limiting_indented(code, ir, &it);
+        }
+        code.push_str(&format!(
+            "{it}let limited = alpha < 1.0;\n\
+             {it}{{\n\
+             {it}    let mut max_node_dv = 0.0_f64;\n\
+             {it}    for i in 0..{n_nodes} {{ max_node_dv = max_node_dv.max((alpha * (v_new[i] - v_pin[i])).abs()); }}\n\
+             {it}    if max_node_dv > 10.0 {{ alpha *= 10.0 / max_node_dv; }}\n\
+             {it}}}\n\
+             {it}let mut pin_step_exceeded = limited || alpha < 1.0;\n"
+        ));
+        for &node in &device_nodes {
+            code.push_str(&format!(
+                "{it}{{ let step = alpha * (v_new[{node}] - v_pin[{node}]); let threshold = 1e-3 * v_pin[{node}].abs().max((v_pin[{node}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ pin_step_exceeded = true; }} }}\n"
+            ));
+        }
+        code.push_str(&format!(
+            "{it}for i in 0..N {{ v_pin[i] += alpha * (v_new[i] - v_pin[i]); }}\n\
+             {it}if !pin_step_exceeded {{ pin_converged = true; pin_iters = _pit as u32; break; }}\n\
+             {indent}        }}\n"
+        ));
+        // Commit the pinned iterate, with i_nl re-evaluated at it, so the next
+        // sample's trapezoidal history (N_i·i_nl_prev) matches the voltages.
+        code.push_str(&format!(
+            "{indent}        if pin_lu_ok {{\n\
+             {indent}            v = v_pin;\n"
+        ));
         if m > 0 {
             code.push_str(&format!("{indent}            {{\n"));
             code.push_str(&format!(
@@ -9528,13 +9574,18 @@ impl RustEmitter {
             );
             code.push_str(&format!("{indent}            }}\n"));
         }
-
         code.push_str(&format!(
             "{indent}        }} else {{\n\
              {indent}            // LU failed — keep unclamped v. The output-stage\n\
              {indent}            // clamp and diag counters still catch pathological cases.\n\
              {indent}            state.diag_nr_max_iter_count += 1;\n\
              {indent}        }}\n\
+             {indent}        // The pinned system is the one this sample actually solves,\n\
+             {indent}        // so its outcome is the sample's: a converged pin clears an\n\
+             {indent}        // unpinned failure (whose op-amp sat far outside its rail),\n\
+             {indent}        // and a pin that did not converge marks the sample unsolved\n\
+             {indent}        // so every verb refuses it.\n\
+             {indent}        state.last_nr_iterations = if pin_converged && pin_lu_ok {{ pin_iters }} else {{ MAX_ITER as u32 }};\n\
              {indent}    }}\n\
              {indent}}}\n",
         ));
