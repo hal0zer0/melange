@@ -16,6 +16,8 @@ Generated 2026-07-21. Refreshed 2026-08-30 against melange **e53573c** (correctn
 
 **Re-baselined 2026-09-28 (MOSFET body effect).** Attribution: **MOSFET body effect: node resolution (`89a45ab`) + live-iterate Vt with gmb (DK and full-LU)**. Against `0ddf38f`: 172 identical, 8 changed, all on the two MOSFET decks. mosfet-choke-load's silence render loses its startup swing from the wrong bias (−151 dB; peak 286.7 → 9e-7); mosfet-source-follower was 8 % hot on H1 with a ninth of ngspice's H2 and now matches ngspice to 3e-6 on H1 (sine1k −0.78 dB, sweep −0.72 dB, silence −95 dB). Generated source differs on those two decks only. No render held, none not-converged.
 
+**Checked 2026-09-28 (BE-latch on saturating circuits).** 179 identical, 1 negligible, 0 changed. The negligible one is `sat-core-open/step`: the latch fires once, on a genuine trapezoidal Nyquist ring (6 mV sample-to-sample alternation around −0.236 V after the 5 V step saturates the open transformer), and removes it (corr 0.9999994). It is the only latch fire on the golden set. Generated source differs on the four saturating decks that now emit the latch; funkyinduct builds on backward Euler and emits none.
+
 Machine-readable twin: `tools/golden-harness/golden-baseline-manifest.json`.
 
 ## Compile recipe

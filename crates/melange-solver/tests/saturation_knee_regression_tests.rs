@@ -343,6 +343,114 @@ fn c1_jacobian_deletion_is_caught_at_every_newton_site() {
     );
 }
 
+/// A choke-loaded common-source stage driven into its choke's saturation
+/// (M = 2, nodal full-LU): the deep-saturation witness with devices.
+const CHOKE_STAGE: &str = "\
+choke-loaded common-source stage
+.model 2N7000 NMOS(KP=0.1 VTO=2.1 LAMBDA=0.01 GAMMA=0.5 PHI=0.6)
+VCC vcc 0 DC 24
+Cin  in     gate_i 1u
+Rb1  vcc    gate_i 1MEG
+Rb2  gate_i 0      170k
+Rg   gate_i gate   1k
+Lp   vcc    drain  5 ISAT=20m
+Rdcr drain  drain_d 120
+Cw   vcc    drain  220p
+Rw   vcc    drain  470k
+M1   drain_d gate  src  0  2N7000
+Rs   src    0      220
+Cs   src    0      100u
+Cout drain  out    100n
+Rl   out    0      100k
+";
+
+/// The runtime BE-latch is armed on saturating circuits, including M = 0 ones
+/// (the flux law is nonlinear on its own), and once latched the trapezoidal
+/// build runs every sample through its BE fallback. That fallback must be the
+/// backward-Euler solution: compared with a `--backward-euler` build of the
+/// same circuit it agrees to 1e-9 relative on the output (measured 2e-10 and
+/// 3e-11).
+///
+/// Harness trap, worth keeping: `CircuitState::default()` runs a 50-sample
+/// warmup, on the trapezoidal rule in the latched build (the latch is not set
+/// yet) and on BE in the BE build. That alone put them 3e-7 apart. Either set
+/// `be_latched` before the warmup or restart both from the baked operating
+/// point, as here.
+#[test]
+fn forced_latch_matches_the_backward_euler_build() {
+    for (spice, out_name, amp, tag) in [
+        (c2("1Meg"), "out", 5.0, "c2_open"),
+        (CHOKE_STAGE.to_string(), "out", 3.0, "choke"),
+    ] {
+        let out = node(&spice, out_name);
+        let run = |backward_euler: bool, sub: &str| -> Vec<f64> {
+            let mut config = support::config_for_spice(&spice, FS);
+            config.backward_euler = backward_euler;
+            let code = support::generate_circuit_code_nodal(&spice, &config).0;
+            let latch = if backward_euler {
+                assert!(!code.contains("pub be_latched"), "a BE build has no latch");
+                ""
+            } else {
+                assert!(
+                    code.contains("pub be_latched"),
+                    "{tag}: the latch must be emitted on a saturating circuit"
+                );
+                "s.be_latched = true;"
+            };
+            let restart_nl = if code.contains("pub i_nl_prev: [f64; M]")
+                && !code.contains("pub const M: usize = 0;")
+            {
+                "s.i_nl_prev = DC_NL_I;"
+            } else {
+                ""
+            };
+            let bad = bad_counters(&code)
+                .replace("s.diag_be_fallback_count + ", "")
+                .replace(" + s.diag_be_fallback_count", "");
+            let main = format!(
+                "fn main() {{
+    let mut s = CircuitState::default();
+    s.set_sample_rate({FS:?});
+    s.v_prev = s.dc_operating_point;
+    s.input_prev = 0.0;
+    {restart_nl}
+    {latch}
+    let n = (2.0 * {FS:?}) as usize;
+    for i in 0..n {{
+        let _ = process_sample({amp:?} * (2.0 * std::f64::consts::PI * {F:?} * i as f64 / {FS:?}).sin(), &mut s);
+        println!(\"{{:.17e}}\", s.v_prev[{out}]);
+    }}
+    let bad = {bad};
+    println!(\"bad {{}}\", bad);
+}}"
+            );
+            let stdout =
+                support::compile_and_run(&code, &main, &format!("latch_{tag}_{sub}")).stdout;
+            let mut v = Vec::new();
+            for l in stdout.lines() {
+                if let Some(b) = l.strip_prefix("bad ") {
+                    assert_eq!(b.trim(), "0", "{tag} {sub}: unsolved/held/sub-step samples");
+                } else {
+                    v.push(l.parse::<f64>().unwrap());
+                }
+            }
+            v
+        };
+        let latched = run(false, "latched");
+        let be = run(true, "be");
+        let peak = be.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        let diff = latched
+            .iter()
+            .zip(&be)
+            .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+        assert!(
+            diff <= 1e-9 * peak,
+            "{tag}: forced latch vs BE build differ by {diff:.3e} on a {peak:.3e} output ({:.2e} relative)",
+            diff / peak
+        );
+    }
+}
+
 #[test]
 fn c2_shared_core_saturates_on_magnetizing_not_winding_current() {
     // Loaded: primary current far above Isat, core linear.

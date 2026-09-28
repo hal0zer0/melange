@@ -504,9 +504,7 @@ pub struct SolverConfig {
     /// Independent of `--force-trap`: this corrects a definite discretization
     /// bug at an explicit event, not the heuristic Nyquist-latch net that
     /// force-trap opts out of. Gated off for backward-Euler builds (nothing to
-    /// fix) and for saturating-inductor circuits (the BE matrices don't receive
-    /// the per-sample Sherman-Morrison rank-1 update — same landmine as
-    /// [`Self::runtime_be_latch`]). `.runtime R` (audio-rate, continuous) does
+    /// fix). `.runtime R` (audio-rate, continuous) does
     /// NOT arm it — arming every sample would pin BE permanently, and its tiny
     /// per-sample Δg self-corrects.
     #[serde(default)]
@@ -3265,20 +3263,15 @@ impl CircuitIR {
         // linear circuit has no `N_i·i_nl_prev` stamp to seed a Nyquist cycle,
         // so it stays byte-identical (no detector emitted).
         //
-        // Saturating-inductor circuits are excluded: the runtime latch forces
-        // the *transient BE fallback* path continuously, but that path reuses
-        // the BE matrices (`s_be`/`k_be`) which do NOT receive the per-sample
-        // Sherman-Morrison rank-1 saturation update the trap matrices get. A
-        // single-sample fallback tolerates the staleness; forcing it every
-        // sample accumulates the inconsistency and diverges (observed on
-        // the-kicker — 4 saturating inductors — golden-audio regression, output
-        // ran to the ±clamp on silence, while a *pure* `--backward-euler` build
-        // of the same circuit is stable). Such circuits should pin BE with
-        // `.integrator be` if they need it. A general fix (SM-update the BE
-        // matrices too) is left as future work.
+        // Saturating inductors make a circuit nonlinear with M = 0 (the flux
+        // law lives on an augmented row, not in N_i), so they qualify on their
+        // own. They were once excluded because the latch forces the BE fallback
+        // every sample and the old decimated saturation path never updated the
+        // BE matrices; that path is gone, and the flux device is stamped at
+        // every Newton site at the site's own alpha.
         let has_saturating = mna.has_saturating_inductor();
         solver_config.runtime_be_latch =
-            !solver_config.backward_euler && !cfg_force_trap && m > 0 && !has_saturating;
+            !solver_config.backward_euler && !cfg_force_trap && (m > 0 || has_saturating);
 
         // Event-triggered breakpoint backward-Euler for `.switch`/`.pot` swaps.
         // Independent of `cfg_force_trap` (a targeted correctness fix at an
@@ -3287,8 +3280,7 @@ impl CircuitIR {
         // conductance-swap parameter and runs on trap; the machinery is
         // byte-inert until a `set_switch_*`/`set_pot_*` call arms it, so golden
         // fixtures (which never toggle) are unaffected. Gated off for BE builds
-        // (nothing to fix) and saturating-inductor circuits (BE matrices miss
-        // the per-sample SM saturation update — see `runtime_be_latch`).
+        // (nothing to fix).
         // Armed only by discrete swaps (set_switch_*/set_pot_*), never by the
         // per-sample `.runtime R` setter — so a `.runtime R`-only circuit would
         // emit machinery nothing ever arms. Gate the flag on switches or a
@@ -3306,9 +3298,8 @@ impl CircuitIR {
             .nonlinear_devices
             .iter()
             .any(|d| d.device_type == crate::mna::NonlinearDeviceType::Glow);
-        solver_config.breakpoint_be = !solver_config.backward_euler
-            && !has_saturating
-            && (!mna.switches.is_empty() || has_knob_pot || has_glow);
+        solver_config.breakpoint_be =
+            !solver_config.backward_euler && (!mna.switches.is_empty() || has_knob_pot || has_glow);
 
         // Sub-sample fire: variable-dt breakpoint re-solve at a glow strike.
         // Nodal route only (this builder), latched device required; the

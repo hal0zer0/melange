@@ -168,6 +168,17 @@ generated state is smaller.
 
 ### Changed
 
+- **The backward-Euler safety net now covers circuits with saturating
+  inductors**, including ones with no other nonlinear parts. When the
+  trapezoidal rule falls into a sample-to-sample ringing it cannot damp, the
+  solver switches that instance to backward Euler for the rest of the stream;
+  saturating circuits had been excluded, a leftover from a saturation update
+  that no longer exists. So is the single backward-Euler step at a pot or
+  switch change. Once latched, the output matches a `--backward-euler` build
+  of the same circuit to 1e-10. On the golden set it fires once, on an open
+  transformer driven into saturation by a 5 V step, and removes a 6 mV
+  sample-to-sample ring.
+
 - **Removed the old decimated saturation machinery from generated code.**
   Saturating inductors have run as flux devices inside the full-LU Newton loop
   since August. The earlier 32-sample decimated update, and the per-winding

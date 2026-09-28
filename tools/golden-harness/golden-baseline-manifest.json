@@ -1120,5 +1120,11 @@
     "vs_0ddf38f": "172 identical, 0 negligible, 8 changed, all on the two MOSFET decks; 0 held and 0 not-converged on both sides.",
     "changed": "mosfet-choke-load (nodal full-LU): silence -151 dB (the 5.4 V / 286 V-peak startup swing from the wrong bias is gone), step -2.6 dB, sine1k/sweep within 0.002 dB. mosfet-source-follower (DK): silence -95 dB, sine1k -0.78 dB and sweep -0.72 dB (the stage was 8 % hot on H1 with a ninth of ngspice's H2; now matches ngspice to 3e-6 on H1), step -4.6 dB.",
     "generated_source": "Differs on the two MOSFET decks only."
+  },
+  "rebaseline_2026_09_28_saturating_be_latch": {
+    "why": "Runtime BE-latch and breakpoint-BE enabled for saturating-inductor circuits (M = 0 saturating circuits included).",
+    "vs_previous": "179 identical, 1 negligible, 0 changed; 0 held and 0 not-converged on both sides.",
+    "negligible": "sat-core-open/step: the latch fires once (sample 5275) on a genuine trapezoidal Nyquist ring (a 6 mV sample-to-sample alternation around -0.236 V in the saturated open transformer after the 5 V step) and removes it; corr 0.9999994, maxdiff 3.0e-3 V. The only latch fire on the golden set.",
+    "generated_source": "Differs on the four saturating decks that now emit the latch (mosfet-choke-load, sat-knee-rl, sat-core-loaded, sat-core-open); funkyinduct builds on backward Euler and emits no latch."
   }
 }
