@@ -3533,7 +3533,7 @@ impl CircuitIR {
             })
             .collect();
 
-        Ok(CircuitIR {
+        let ir = CircuitIR {
             metadata,
             topology,
             solver_mode: SolverMode::Nodal,
@@ -3780,7 +3780,31 @@ impl CircuitIR {
             behavioral_scalar_runtimes,
             trap_discriminator_rho,
             integrator_selection,
-        })
+        };
+        // Measured, not a gate (design review): a railing op-amp driving a
+        // saturating inductor crosses the core's knee within one sample with
+        // the full rail across it, and trapezoidal integration at 1x
+        // overshoots the inductor's internal current. The output is not
+        // affected, and 4x is accurate.
+        let rails_into_core = !ir.saturating_inductors.is_empty()
+            && matches!(
+                ir.solver_config.opamp_rail_mode,
+                crate::codegen::OpampRailMode::ActiveSet
+                    | crate::codegen::OpampRailMode::ActiveSetBe
+            )
+            && ir
+                .opamps
+                .iter()
+                .any(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite());
+        if rails_into_core && config.oversampling_factor < 4 {
+            log::warn!(
+                "An op-amp that can rail drives a saturating inductor: at 1x, the \
+                 inductor's internal current can overshoot by up to ~13 % where the \
+                 op-amp rails into the core (output H1 is unaffected); 4x is accurate. \
+                 Consider --oversampling 4 (or `.oversampling 4` in the deck)."
+            );
+        }
+        Ok(ir)
     }
 
     /// Build device slot map and resolve per-device parameters from netlist.

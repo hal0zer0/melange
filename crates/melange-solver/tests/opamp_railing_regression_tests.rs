@@ -246,8 +246,11 @@ fn explicit_hard_with_a_behavioral_source_still_compiles() {
 // time (the op-amp is railed ~95 % of each cycle) and is first-order wrong at
 // L/R ~ 5 samples; active-set's trapezoidal rule rings in deep saturation
 // (L_diff ~ 0.02·L0 makes the RL step factor ~ -0.6) and overshoots the i_L
-// peak by 5-12 %. The choke's air-core floor (1e-3·L0) sits far below that
-// slope and leaves the overshoot where it was. Both close at 4x. The 1x cases are recorded below, ignored, as the
+// peak by 5-13 %. The overshoot is born where the core crosses its knee
+// within one sample with the full rail across it; the choke's air-core floor
+// (1e-3·L0) sits far below that slope and leaves it where it was, and one
+// backward-Euler sample at each pin change does not remove it either. Both
+// close at 4x. The 1x cases are recorded below, ignored, as the
 // targets those integrator fixes must meet.
 
 const RAILING_INTO_CHOKE: &str = "\
@@ -513,7 +516,7 @@ fn choke_on_railing_opamp_at_1x_active_set_be() {
 /// removes the ring but over-damps: i_L -3..-5 %, H1 +6 % at 1 V. With L/R of a
 /// few samples neither rule meets the gates at 1x; 4x meets them.
 #[test]
-#[ignore = "{trap, BE} per element cannot meet i_L 1-2 % AND H1 1e-3 at L/R ~ 5 samples (trap rings, BE over-damps); the air-core floor does not reach it; 4x meets it; do not loosen"]
+#[ignore = "1x ActiveSet: knee crossing within one sample with the full rail across the choke; 4x accurate (i_L 1.3 %, H1 0.1 %); a dedicated knee re-solve is parked (STATUS.md)"]
 fn choke_on_railing_opamp_at_1x_active_set() {
     let rows = render_choke(
         &choke_code(OpampRailMode::ActiveSet, 1),

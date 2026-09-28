@@ -228,7 +228,10 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
   output spectrum stays close. A railing op-amp driving a gapped choke at about
   2.7× `ISAT`: at 4× oversampling, inductor current within 1.3 % and output
   fundamental within 0.1 % of ngspice; at 1×, inductor current up to 13 % over,
-  output fundamental within 0.21 %. Where a ring dominates the output, the
+  output fundamental within 0.21 %. The overshoot is born where the core
+  crosses its knee within one sample with the full rail across it; compile
+  prints a notice for an op-amp that can rail into a saturating inductor
+  below 4× oversampling. Where a ring dominates the output, the
   runtime backward-Euler latch catches it and holds the instance on BE for the
   rest of the stream.
 - Checked against independent references of the same law (a scalar
