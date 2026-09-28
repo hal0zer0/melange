@@ -8941,7 +8941,11 @@ impl RustEmitter {
         if inject_or_tap {
             code.push_str("    state.injections_prev = injections;\n");
         }
-        if m > 0 {
+        // Whenever there is a Newton loop (devices, behavioral sources or
+        // saturating inductors), its chord and i_nl locals are written back;
+        // gating this on M > 0 left them as dead stores on M = 0 circuits,
+        // which fail `-D warnings` in users' plugin builds.
+        if m > 0 || has_behavioral || has_sat_ind {
             code.push_str("    state.i_nl_prev_prev = state.i_nl_prev;\n");
             code.push_str("    state.i_nl_prev = i_nl;\n");
             // Persist chord LU for cross-timestep reuse
