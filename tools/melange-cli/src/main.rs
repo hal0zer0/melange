@@ -6087,6 +6087,26 @@ fn handle_sources(action: SourceAction) -> Result<()> {
         } => {
             let mut config = SourcesConfig::load()?;
 
+            // Refuse here rather than store something that only fails later.
+            // A rejected source used to be accepted, listed as healthy by
+            // `sources list`, and then die at first use with a url-crate
+            // internal message telling the user their absolute path was a
+            // "relative URL without a base".
+            let looks_remote = url.starts_with("http://") || url.starts_with("https://");
+            if !looks_remote && !std::path::Path::new(url.trim_end_matches('/')).is_dir() {
+                let hint = if url.starts_with("file://") {
+                    "For a local folder give the plain path, not a file:// URL."
+                } else if std::path::Path::new(&url).exists() {
+                    "That path exists but is not a directory. A source is the \
+                     FOLDER circuits live in, not one .cir file — to compile a \
+                     single file just pass it directly."
+                } else {
+                    "A source is either an http(s) base URL or a local directory \
+                     that exists."
+                };
+                anyhow::bail!("Cannot use '{url}' as a source. {hint}");
+            }
+
             if config.has_source(&name) {
                 println!("Warning: Source '{}' already exists. Overwriting.", name);
             }

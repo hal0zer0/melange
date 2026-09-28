@@ -126,6 +126,21 @@ entries is conforming, and a byte comparison would hold that against it and go
 permanently red. `melange index --check` accepts an index carrying `tier` and
 `category` even though melange emits neither.
 
+## Using one locally
+
+A source does not have to be a URL. Point one at a directory and the same
+resolution applies, read from disk:
+
+```bash
+melange index ~/circuits
+melange sources add mine ~/circuits
+melange compile mine:big-muff --format plugin -o muff
+```
+
+Index first, flat `<dir>/<name>.cir` if there is no index, and a name that is
+indexed-but-absent is an error with near-matches — identical to the remote
+path, so a folder behaves the same before and after you publish it.
+
 ## Serving it
 
 Any static host works — the consumer only does `GET`. For a GitLab or GitHub

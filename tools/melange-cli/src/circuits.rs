@@ -121,6 +121,12 @@ pub fn resolve(circuit_ref: &str) -> Result<CircuitSource> {
     // Try friendly source (source:circuit pattern)
     if let Some((source, circuit)) = parse_friendly_ref(circuit_ref) {
         let config = crate::sources::SourcesConfig::load()?;
+        // A source whose base is a local directory resolves on disk — same
+        // index-then-flat protocol, no network, no cache.
+        if let Some(dir) = config.local_dir(&source) {
+            let path = crate::sources::SourcesConfig::resolve_local(&dir, &circuit)?;
+            return Ok(CircuitSource::Local { path });
+        }
         let cache = crate::cache::Cache::new()?;
         let url = config.resolve_circuit_indexed(&source, &circuit, &cache, false)?;
         return Ok(CircuitSource::Friendly {
@@ -137,6 +143,10 @@ pub fn resolve(circuit_ref: &str) -> Result<CircuitSource> {
         let config = crate::sources::SourcesConfig::load()?;
         if let Some(default) = config.default_source.clone() {
             if config.has_source(&default) {
+                if let Some(dir) = config.local_dir(&default) {
+                    let path = crate::sources::SourcesConfig::resolve_local(&dir, circuit_ref)?;
+                    return Ok(CircuitSource::Local { path });
+                }
                 let cache = crate::cache::Cache::new()?;
                 let url = config.resolve_circuit_indexed(&default, circuit_ref, &cache, false)?;
                 return Ok(CircuitSource::Friendly {

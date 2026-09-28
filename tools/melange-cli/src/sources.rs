@@ -165,6 +165,64 @@ impl SourcesConfig {
     /// Resolve a circuit from a source to a full URL
     ///
     /// Automatically appends `.cir` extension if not present.
+    /// The source's base as a local directory, if that is what it is.
+    ///
+    /// A source is a *place circuits live*; nothing about that requires HTTP.
+    /// `melange index` writes an index into a local directory, so refusing to
+    /// read one back would mean the generator's own output is unusable until
+    /// it is published somewhere.
+    pub fn local_dir(&self, source: &str) -> Option<std::path::PathBuf> {
+        let c = self.sources.get(source)?;
+        let p = std::path::Path::new(c.url.trim_end_matches('/'));
+        p.is_dir().then(|| p.to_path_buf())
+    }
+
+    /// Resolve a name inside a local source directory.
+    ///
+    /// Deliberately the same protocol as the remote path — index first, flat
+    /// fallback, and a present-but-missing name is an error with near-matches,
+    /// never a silent fall-through. Local and remote sources behaving
+    /// differently would make the documented protocol a half-truth.
+    pub fn resolve_local(dir: &std::path::Path, circuit: &str) -> Result<std::path::PathBuf> {
+        let name = circuit.strip_suffix(".cir").unwrap_or(circuit);
+        let index_path = dir.join("circuits-index.json");
+
+        if let Ok(raw) = std::fs::read_to_string(&index_path) {
+            let index: CircuitIndex = serde_json::from_str(&raw).with_context(|| {
+                format!(
+                    "{}: not a valid circuits-index.json (see docs/CIRCUIT_INDEX.md)",
+                    index_path.display()
+                )
+            })?;
+            return match index.circuits.get(name) {
+                Some(e) => Ok(dir.join(e.path.trim_start_matches('/'))),
+                None => {
+                    let near = near_matches(name, index.circuits.keys());
+                    let hint = if near.is_empty() {
+                        format!("{} circuits are indexed there.", index.circuits.len())
+                    } else {
+                        format!("Did you mean: {}?", near.join(", "))
+                    };
+                    anyhow::bail!(
+                        "'{name}' is not in the index at {}. {hint}",
+                        index_path.display()
+                    )
+                }
+            };
+        }
+
+        let flat = dir.join(format!("{name}.cir"));
+        if flat.is_file() {
+            return Ok(flat);
+        }
+        anyhow::bail!(
+            "'{name}' not found in {}. No circuits-index.json there, and no {name}.cir.\n\
+             Run `melange index {}` to index that directory.",
+            dir.display(),
+            dir.display()
+        )
+    }
+
     /// Resolve a circuit name against a source's published index, falling back
     /// to a flat layout when the source publishes none.
     ///
@@ -370,6 +428,61 @@ mod tests {
     }
 
     #[test]
+    /// A local source resolves through an index exactly as a remote one does.
+    /// `melange index` writes these; if they were only usable after publishing
+    /// to HTTP, the generator's own output would be dead on arrival.
+    #[test]
+    fn local_source_resolves_through_its_index() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("fuzz")).unwrap();
+        std::fs::write(d.path().join("fuzz/big-muff.cir"), "* x\n").unwrap();
+        std::fs::write(
+            d.path().join("circuits-index.json"),
+            r#"{"schema":1,"circuits":{"big-muff":{"path":"fuzz/big-muff.cir"}}}"#,
+        )
+        .unwrap();
+        let got = SourcesConfig::resolve_local(d.path(), "big-muff").unwrap();
+        assert_eq!(got, d.path().join("fuzz/big-muff.cir"));
+    }
+
+    /// No index: flat layout, same fallback the remote path uses.
+    #[test]
+    fn local_source_falls_back_to_flat() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("rc.cir"), "* x\n").unwrap();
+        assert_eq!(
+            SourcesConfig::resolve_local(d.path(), "rc").unwrap(),
+            d.path().join("rc.cir")
+        );
+    }
+
+    /// Indexed but absent is an error with a suggestion, never a silent
+    /// fall-through to a flat guess — the rule the remote path follows.
+    #[test]
+    fn local_missing_name_suggests_instead_of_guessing() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("big-muff.cir"), "* x\n").unwrap();
+        std::fs::write(
+            d.path().join("circuits-index.json"),
+            r#"{"schema":1,"circuits":{"big-muff":{"path":"big-muff.cir"}}}"#,
+        )
+        .unwrap();
+        let e = SourcesConfig::resolve_local(d.path(), "bigmuff")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("Did you mean: big-muff?"), "{e}");
+    }
+
+    /// Unindexed and absent names the command that fixes it.
+    #[test]
+    fn local_unindexed_miss_names_the_fix() {
+        let d = tempfile::tempdir().unwrap();
+        let e = SourcesConfig::resolve_local(d.path(), "nope")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("melange index"), "{e}");
+    }
+
     fn test_resolve_circuit() {
         // Resolution mechanics, against a user-added source (nothing pre-seeded).
         let mut config = SourcesConfig::default_config();
