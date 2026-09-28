@@ -102,7 +102,16 @@ pub struct PluginOptions<'a> {
     pub vendor: Option<&'a str>,
     /// Plugin URL. If `None`, defaults to "https://github.com/hal0zer0/melange".
     pub url: Option<&'a str>,
-    /// Plugin contact email. If `None`, defaults to "josh@nobledarkgames.com".
+    /// Plugin contact email, emitted as nih-plug's required `const EMAIL`.
+    ///
+    /// `None` emits an EMPTY string, deliberately. This used to default to the
+    /// melange author's personal address, which meant every plugin anyone
+    /// generated named a specific human as its support contact — a confident
+    /// false statement about a third party who never agreed to it, per plugin.
+    /// Absent is not wrong; wrong was wrong (arbiter t588).
+    ///
+    /// nih-plug declares `const EMAIL: &'static str` as a required associated
+    /// const, so the field cannot simply be omitted.
     pub email: Option<&'a str>,
     /// Override VST3 class ID. Must be exactly 16 printable ASCII bytes.
     /// If `None`, a deterministic ID is derived from the circuit name.
@@ -1377,7 +1386,31 @@ fn generate_lib_rs(
     let vendor = escape_rust_string_literal(options.vendor.unwrap_or("Melange"));
     let url =
         escape_rust_string_literal(options.url.unwrap_or("https://github.com/hal0zer0/melange"));
-    let email = escape_rust_string_literal(options.email.unwrap_or("josh@nobledarkgames.com"));
+    let email = escape_rust_string_literal(options.email.unwrap_or(""));
+
+    // Say which identity fields fell back to a default and how to set them.
+    // A DAW shows VENDOR/URL/EMAIL as the plugin's publisher and support
+    // contact, so silently shipping melange's own identity — or an empty
+    // contact — is something the author should be told once, at build time,
+    // rather than discover in a plugin browser. Informational, not an error:
+    // the defaults are usable, and the newcomer path stays unblocked
+    // (arbiter t588).
+    let defaulted: Vec<&str> = [
+        options.vendor.is_none().then_some("--vendor (currently \"Melange\")"),
+        options.url.is_none().then_some("--url (currently the melange repo)"),
+        options.email.is_none().then_some("--email (currently empty)"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !defaulted.is_empty() {
+        eprintln!(
+            "  NOTE: this plugin's DAW identity uses defaults — a DAW shows these as its\n\
+             \x20       publisher and support contact. Set them with:\n\
+             \x20         {}",
+            defaulted.join("\n          ")
+        );
+    }
     let params_struct = generate_params_struct(
         with_level_params,
         pots,
@@ -2696,7 +2729,9 @@ mod tests {
         let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, 1, &opts);
         assert!(lib.contains("const VENDOR: &'static str = \"Melange\""));
         assert!(lib.contains("const URL: &'static str = \"https://github.com/hal0zer0/melange\""));
-        assert!(lib.contains("const EMAIL: &'static str = \"josh@nobledarkgames.com\""));
+        // Empty by default, never a real person's address. See `email` on
+        // PluginOptions for why (arbiter t588).
+        assert!(lib.contains("const EMAIL: &'static str = \"\""));
     }
 
     #[test]

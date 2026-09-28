@@ -177,8 +177,8 @@ enum Commands {
         subsample_fire: String,
 
         /// Diagnostic: lit sub-step multiplier (`factor * tau`) for the glow
-        /// variable-dt re-solve. Unset → 1.0, the shipped last tested-safe point
-        /// (arbiter t303). A bisection tool in the family of `--force-trap` /
+        /// variable-dt re-solve. Unset → 1.0, the shipped last tested-safe point.
+        /// A bisection tool in the family of `--force-trap` /
         /// `--nodal-subpath` — NOT a per-deck tuning knob (a deck author cannot
         /// honestly tune it without a lock-margin sweep). Recorded in the
         /// provenance Build: line and JSON.
@@ -248,7 +248,7 @@ enum Commands {
         #[arg(long, value_name = "MODE", default_value = "auto")]
         nodal_subpath: String,
 
-        /// Escape hatch (arbiter t467): allow a relaxing-section / delayed-
+        /// Escape hatch: allow a relaxing-section / delayed-
         /// overvoltage / KSUB glow to compile on the nodal full-LU sub-path,
         /// which otherwise REFUSES. On full-LU the lit branch is the static line
         /// (v0+RS·i) while the strike seed/extinction read the section model — a
@@ -272,7 +272,7 @@ enum Commands {
         noise_seed: u64,
 
         /// Emit `CircuitState::recompute_dc_op()` for runtime DC operating
-        /// point re-solve after pot/switch changes (Oomox plugin roadmap P6).
+        /// point re-solve after pot/switch changes.
         ///
         /// Default OFF: generated code is byte-identical to pre-Phase-E output.
         /// When ON, plugins with per-instance component jitter can call
@@ -311,7 +311,8 @@ enum Commands {
         vendor_url: Option<String>,
 
         /// Plugin vendor contact email (e.g., "support@acme.example").
-        /// Defaults to "josh@nobledarkgames.com". Applies to `--format plugin`.
+        /// Empty by default — a generated plugin should not name someone who
+        /// has not agreed to answer its support mail. Applies to `--format plugin`.
         #[arg(long, value_name = "ADDR")]
         email: Option<String>,
 
@@ -550,7 +551,7 @@ enum Commands {
         /// hard sample can freeze the render to its end. `simulate` fails on
         /// this by default. Per-invocation only — a netlist cannot declare it,
         /// because whether a circuit trips depends on the input level, not the
-        /// netlist (arbiter t536).
+        /// netlist.
         #[arg(long)]
         allow_nr_hold: bool,
 
