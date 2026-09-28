@@ -98,6 +98,11 @@ generated state is smaller.
     silently won.
 
   None of the 92 corpus circuits that compile with default flags is affected.
+- A nodal circuit whose only DC quantity is an inductor current (a
+  current-biased grounded inductor: every node at 0 V) had no operating point
+  baked. It started from i_L = 0 and settled over L/R, which is seconds for a
+  henry-class winding on the 1 Ω input. The significance check looked only at
+  node rows; it now looks at everything the nodal path emits.
 - **`.pot` with no default accepted a resistor value outside its own range**,
   so the knob started at a setting it could not return to. It is now refused,
   as an explicit default and `--pot` already were. A one-word label no longer
@@ -152,6 +157,18 @@ generated state is smaller.
   notes which end of each knob is which and how to reverse or reshape it.
 - `validate` explains a failure with near-perfect correlation (a level, offset
   or timing difference, not a different circuit).
+
+### Tests
+
+- Saturation is now tested at its knee. The regression corpus exercised the
+  saturation code but never drove any inductor past 37 % of its saturation
+  current. New tests drive a saturating RL and a shared-core transformer at
+  30 Hz into saturation, and check them against independent references, both
+  a same-rate trapezoidal recurrence and a 1024× near-continuous one: H1 within
+  1e-5, H3 and H5 within 1e-4. The tests fail on deliberately broken flux
+  devices. A DC-biased core checks that H2 appears with bias, flips sign with
+  it, and overtakes H3 where the physics says it should. Three coverage-only
+  decks at 5 V join the golden set.
 
 ### Documentation
 

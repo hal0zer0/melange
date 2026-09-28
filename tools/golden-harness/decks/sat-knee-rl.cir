@@ -1,0 +1,7 @@
+* Saturating RL driven into the knee at LF (golden coverage deck).
+* R_1 + the 1 ohm input = 100 ohm; L0 1 H, Isat 10 mA. At the 5 V manifest level
+* the 20-60 Hz part of the sweep drives i_L to several x Isat.
+* Correctness is gated in crates/melange-solver/tests/saturation_knee_regression_tests.rs.
+R_1 in out 99
+L_1 out 0 1 ISAT=10m
+.end

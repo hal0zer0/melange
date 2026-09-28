@@ -888,6 +888,78 @@
       "notes": "COVERAGE-ONLY entry \u2014 no oomox plugin counterpart, so no circuit_rs and no byte-diff protocol applies. Added 2026-09-02. Authored by melange-circuits (2a92742, branch publish-prep) to close the MOSFET/JFET corpus hole: both device models were implemented and SPICE-validated but used by ZERO circuits anywhere, so the codegen refactor's flagship 'do not collapse' hazard had no circuit-level coverage at all. Nodal, sub-path FULL-LU \u2014 earned, not arranged: the choke saturates because chokes saturate (ISAT is a property of the part), no dummy B-source. This deck pins the nodal evaluation point: vsb is recomputed FROM THE LIVE NR ITERATE at THREE sites (main NR loop, sub-step, BE fallback), versus DK's single once-per-sample-from-v_pred site. That difference is the exact collapse an over-abstracted device-eval IR would make, and it is now detectable. \u26a0 PIN THE SUB-PATH, NOT THE ROUTING REASON: this deck first routed full-lu via 'trapezoidal unstable (spectral radius 1.0027 > 1.002)' and now routes via 'saturating inductors require augmented MNA' after winding self-capacitance was added for physical accuracy. Same sub-path, different first-match arm."
     },
     {
+      "plugin": "sat-knee-rl",
+      "cir": "tools/golden-harness/decks/sat-knee-rl.cir",
+      "compile_cmd": "melange compile tools/golden-harness/decks/sat-knee-rl.cir --format code -o /dev/null",
+      "input_level": 5.0,
+      "verify_status": "COVERAGE-ONLY",
+      "anchors": {
+        "n": 3,
+        "m": 0,
+        "oversampling": 1,
+        "solver": "nodal",
+        "sample_rate": 48000
+      },
+      "has_pots": false,
+      "num_pots": 0,
+      "has_switches": false,
+      "num_switches": 0,
+      "has_runtime_r": false,
+      "runtime_r_setters": [],
+      "has_noise": false,
+      "noise_mode": "off",
+      "emit_dc_op_recompute": false,
+      "notes": "Saturating RL (L0 1 H, Isat 10 mA). COVERAGE-ONLY entry added 2026-09-28, in-repo deck (tools/golden-harness/decks). No golden program took any inductor past i/Isat = 0.37, so the saturation knee was never exercised. Driven at 5 V: the 20-60 Hz part of the log sweep reaches the knee. Golden detects change and validates nothing; correctness is gated in crates/melange-solver/tests/saturation_knee_regression_tests.rs against independent references."
+    },
+    {
+      "plugin": "sat-core-loaded",
+      "cir": "tools/golden-harness/decks/sat-core-loaded.cir",
+      "compile_cmd": "melange compile tools/golden-harness/decks/sat-core-loaded.cir --format code -o /dev/null",
+      "input_level": 5.0,
+      "verify_status": "COVERAGE-ONLY",
+      "anchors": {
+        "n": 10,
+        "m": 0,
+        "oversampling": 1,
+        "solver": "nodal",
+        "sample_rate": 48000
+      },
+      "has_pots": false,
+      "num_pots": 0,
+      "has_switches": false,
+      "num_switches": 0,
+      "has_runtime_r": false,
+      "runtime_r_setters": [],
+      "has_noise": false,
+      "noise_mode": "off",
+      "emit_dc_op_recompute": false,
+      "notes": "Shared-core saturating 1:1 transformer, loaded: winding current far above Isat, core linear (Lenz). COVERAGE-ONLY entry added 2026-09-28, in-repo deck (tools/golden-harness/decks). No golden program took any inductor past i/Isat = 0.37, so the saturation knee was never exercised. Driven at 5 V: the 20-60 Hz part of the log sweep reaches the knee. Golden detects change and validates nothing; correctness is gated in crates/melange-solver/tests/saturation_knee_regression_tests.rs against independent references."
+    },
+    {
+      "plugin": "sat-core-open",
+      "cir": "tools/golden-harness/decks/sat-core-open.cir",
+      "compile_cmd": "melange compile tools/golden-harness/decks/sat-core-open.cir --format code -o /dev/null",
+      "input_level": 5.0,
+      "verify_status": "COVERAGE-ONLY",
+      "anchors": {
+        "n": 10,
+        "m": 0,
+        "oversampling": 1,
+        "solver": "nodal",
+        "sample_rate": 48000
+      },
+      "has_pots": false,
+      "num_pots": 0,
+      "has_switches": false,
+      "num_switches": 0,
+      "has_runtime_r": false,
+      "runtime_r_setters": [],
+      "has_noise": false,
+      "noise_mode": "off",
+      "emit_dc_op_recompute": false,
+      "notes": "Shared-core saturating 1:1 transformer, open secondary: magnetizing current saturates the core. COVERAGE-ONLY entry added 2026-09-28, in-repo deck (tools/golden-harness/decks). No golden program took any inductor past i/Isat = 0.37, so the saturation knee was never exercised. Driven at 5 V: the 20-60 Hz part of the log sweep reaches the knee. Golden detects change and validates nothing; correctness is gated in crates/melange-solver/tests/saturation_knee_regression_tests.rs against independent references."
+    },
+    {
       "plugin": "jfet-booster",
       "cir": "unstable/examples/jfet-booster.cir",
       "compile_cmd": "melange compile ../melange-circuits/unstable/examples/jfet-booster.cir --format code -o /dev/null",

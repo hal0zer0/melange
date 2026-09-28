@@ -3361,8 +3361,14 @@ impl CircuitIR {
         let mut device_slots = Self::build_device_info_with_mna(netlist, Some(mna))?;
 
         let dc_result = dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config);
-        let dc_op_truncated = &dc_result.v_node[..n_aug.min(dc_result.v_node.len())];
-        let has_dc_op = dc_op_truncated.iter().any(|&v| v.abs() > 1e-15);
+        // Judge significance over exactly what the nodal path emits: all N rows,
+        // inductor branch currents included (`dc_operating_point` is resized to
+        // `n` below and baked whole). Judging only the first `n_aug` rows dropped
+        // the operating point of a circuit whose only DC quantity is an inductor
+        // current (a current-biased grounded inductor: every node at 0 V), which
+        // then started from i_L = 0 and settled over L/R — seconds, for a
+        // henry-class winding on the 1 Ω input.
+        let has_dc_op = dc_result.v_node.iter().take(n).any(|&v| v.abs() > 1e-15);
         let dc_op_converged = dc_result.converged;
         let dc_op_method = format!("{:?}", dc_result.method);
         let dc_op_iterations = dc_result.iterations;

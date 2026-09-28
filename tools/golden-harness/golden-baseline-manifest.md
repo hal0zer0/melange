@@ -6,6 +6,8 @@ Generated 2026-07-21. Refreshed 2026-08-30 against melange **e53573c** (correctn
 
 **Re-baselined 2026-09-28 against melange `576a492`** (op-amp rail handling). `golden-baselines/576a492` is the reference. Against v0.1.11: 155 identical, 12 negligible, **1 changed — `vurli/silence`**, −3.1 dB on a 3 µV-peak render (max Δ 1.1 µV). Attribution: **DK→nodal for active-set rail handling** — vurli-leveler's op-amp resolves to active-set, which only nodal implements, so it no longer runs DK's post-solve clamp. The 12 negligible renders are the three in-manifest decks that changed route (vurli-leveler, gold-press-mastering, noyce-4558); the golden programs never rail their op-amps, which is where the routes differ. The removed ActiveSetBe 2× sub-step is audio-neutral on its own (168/168 identical). Generated source differs on all 38 (two new rail-mode constants; unused sub-step matrices removed from nodal state). No render held, none not-converged.
 
+**Added 2026-09-28: three saturation coverage decks** (`sat-knee-rl`, `sat-core-loaded`, `sat-core-open`), in-repo under `tools/golden-harness/decks/`, at a 5 V manifest level. No golden program had taken any inductor past i/Isat = 0.37, so the saturation knee was never exercised; at 5 V the 20–60 Hz part of the sweep reaches it. They are change detectors only; correctness is gated in `crates/melange-solver/tests/saturation_knee_regression_tests.rs` against independent references. Their first capture is a new baseline, not a restored one.
+
 Machine-readable twin: `tools/golden-harness/golden-baseline-manifest.json`.
 
 ## Compile recipe
