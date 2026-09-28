@@ -377,7 +377,7 @@ T2 grid2 plate2 cathode2 12AU7
 ```
 
 **Notes:**
-- Uses the Koren plate current model with Leach grid current
+- Uses the Koren plate current model with Dempwolf & Zölzer grid current
 - Terminal order is **grid-plate-cathode** (unusual for SPICE but kept for
   backward compatibility with existing circuits). Pentodes use a different
   (plate-first) order — see `P` element below.
@@ -419,8 +419,8 @@ P2 plate2 grid2 cath2 scr2 sup2 EF86
 - Uses the Reefman "Derk" §4.4 pentode equations:
   `Ip0 = E1^Ex/2·(1+sgn(E1))` built from `E1 = (Vg2k/Kp)·softplus(Kp·(1/μ + Vgk/sqrt(Kvb+Vg2k²)))`,
   then `Ip = Ip0·F(Vpk)` and `Ig2 = Ip0·H(Vpk)` with the Vp-dependent
-  F/H factors parametrized by `αs, A, β`. Grid current uses the same
-  Leach power-law as triodes.
+  F/H factors parametrized by `αs, A, β`. The control grid keeps the
+  Leach power-law, which triodes no longer use.
 - Terminal order is **plate-grid-cathode-screen**, which matches the
   LTspice / PSpice / Ayumi convention and deliberately differs from the
   `T` element's grid-plate-cathode order. Use the order that matches

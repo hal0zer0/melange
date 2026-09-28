@@ -28,7 +28,7 @@ Melange supports the following SPICE elements:
 | Q | BJT (NPN/PNP) | Ebers-Moll and Gummel-Poon |
 | J | JFET (NJF/PJF) | Shichman-Hodges |
 | M | MOSFET (NM/PM) | Level 1 SPICE with body effect (GAMMA/PHI) |
-| T | Triode tube | Koren plate current + Leach grid current |
+| T | Triode tube | Koren plate current + Dempwolf & Zölzer grid current |
 | P | Pentode/beam tetrode | 5 equation families, 29 catalog models |
 | U | Op-amp | Boyle macromodel (GBW, VCC/VEE rails, SR) |
 | Y | VCA | THAT 2180-style exponential gain |

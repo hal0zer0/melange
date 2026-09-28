@@ -127,7 +127,7 @@ remains in the solver crate as a fallback for purely linear circuits.
 | BJT (linearized) | 0D (removed from NR) | Small-signal `g`s stamped into G after DC OP |
 | JFET | 2D | Shichman-Hodges |
 | MOSFET | 2D | Level 1 SPICE |
-| Tube (triode) | 2D (Vgk→Ip, Vpk→Ig) | Koren + Leach |
+| Tube (triode) | 2D (Vgk→Ip, Vpk→Ig) | Koren plate + Dempwolf & Zölzer grid |
 | Tube (pentode) | 3D (Vgk→Ip, Vpk→Ig2, Vg2k→Ig1) | Reefman Derk §4.4 / DerkE §4.5 / Classical + Leach |
 | Tube (pentode, grid-off) | 2D (Vgk→Ip, Vpk→Ig2, Vg2k frozen) | Opt-in only (`--tube-grid-fa on`, warned); `auto` keeps full 3D since 2026-09-04 — the freeze is not accuracy-neutral (cathode-referenced Vg2k, +2–12% measured) |
 | VCA | 2D (Vsig, Vctrl) | THAT 2180 exponential |
@@ -207,7 +207,7 @@ Source: Sowter DWG E-72,658-2 (amp §) + Peerless/Triad winding data.
 - **BJT**: Gummel-Poon (VAF/VAR/IKF/IKR, CJE/CJC, NF/ISE/NE) matching ngspice `bjtload.c` line-for-line; Ebers-Moll fallback; self-heating (RTH/CTH/TAMB); RB/RC/RE parasitic R
 - **JFET/MOSFET**: 2D Shichman-Hodges / Level 1; CGS/CGD junction caps; RD/RS parasitic R; MOSFET body effect (GAMMA/PHI)
 - **Diode**: Shockley + RS + CJO + BV/IBV Zener; optional self-heating (RTH/CTH/XTI/EG/TAMB) using the same quasi-static electrothermal model as BJT, with `IS(T) = IS_nom·(Tj/Tnom)^XTI·exp(EG/VT_nom·(1−Tnom/Tj))` and `N·VT(T) = (N·VT)_nom·(Tj/Tnom)`. Pipe-shouter (TS-808) uses RTH=500 CTH=2e-4 on the 1N4148 clippers; sad-bastard uses RTH=1200 CTH=1e-4 EG=0.67 on the 1N34A Ge clippers. Dead code when RTH=∞ (default).
-- **Tube (triode)**: Koren + Leach grid current, early-effect lambda, CCG/CGP/CCP junction caps, RGI grid-stop
+- **Tube (triode)**: Koren plate + Dempwolf & Zölzer grid current, early-effect lambda, CCG/CGP/CCP junction caps, RGI grid-stop
 - **Tube (pentode)**: 3 screen-current equation families — Rational (Reefman §4.4), Exponential (DerkE §4.5), Classical Koren. `--tube-grid-fa {auto,on,off}`: `on` reduces 3D→2D (warned, not accuracy-neutral); `auto` == `off` == full 3D (2026-09-04). `diag_region_exit_count` counts grid-conduction / BJT-saturation samples on every path
 - **Op-amp**: Boyle macromodel, VCC/VEE asymmetric rails, optional `SR=` slew-rate limiting (V/μs), rail modes `auto/none/hard/active-set/active-set-be/boyle-diodes`, `AOL_TRANSIENT_CAP` override
 - **VCA**: THAT 2180 / DBX 2150 current-mode exponential gain with gain-dependent THD

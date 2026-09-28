@@ -201,7 +201,7 @@ Every one of these is a real published model with real published equations, impl
 | BJT | Ebers-Moll or Gummel-Poon | Junction caps, parasitic R, Early effect, high-injection knee. Follows ngspice's `bjtload.c` formulation (the `qb()` base-charge discriminant, high-injection knee) |
 | JFET | Shichman-Hodges (triode + saturation) | N-channel and P-channel |
 | MOSFET | SPICE Level 1 | Body effect, channel-length modulation |
-| Vacuum Triode | Norman Koren + Leach grid current | 12AX7, 12AU7, 12AT7, 6SN7, 6SL7, and more |
+| Vacuum Triode | Norman Koren plate + Dempwolf & Zölzer grid current | 12AX7, 12AU7, 12AT7, 6SN7, 6SL7, and more |
 | Vacuum Pentode | 5 equation families, 29 models | EL84, EL34, EF86, 6L6, 6V6, KT88, 6550, and 22 more. Auto grid-off optimization for cutoff |
 | Op-Amp | Boyle VCCS macromodel | GBW pole, slew-rate limiting, asymmetric VCC/VEE rails, 4 clamping strategies |
 | VCA | THAT 2180 exponential | Current-mode with gain-dependent THD |
@@ -506,7 +506,8 @@ If SPICE is the physics of analog circuit simulation, melange is that physics co
 - Jiri Shichman & David Hodges — JFET model (IEEE JSSC, 1968)
 - Norman Koren — vacuum tube models (1996)
 - Derk Reefman — pentode/beam tetrode models and variable-mu blend (uTracer, TubeLib.inc 2016)
-- Marshall Leach — tube grid current model
+- Marshall Leach — pentode grid current model
+- Kristjan Dempwolf & Udo Zölzer — triode grid current model (DAFx-11, eq. 11)
 - William Shockley — semiconductor diode equation
 
 ### DSP
