@@ -2241,8 +2241,7 @@ impl CircuitIR {
         // (m=0) skip BE fallback since they don't have NR iteration that could
         // diverge.
 
-        let mut device_slots = Self::build_device_info_with_mna(netlist, Some(mna))?;
-        Self::resolve_mosfet_nodes(&mut device_slots, mna);
+        let device_slots = Self::build_device_info_with_mna(netlist, Some(mna))?;
         let device_node_indices = Self::device_node_indices_for(&device_slots, mna);
 
         let inductors: Vec<InductorIR> = kernel
@@ -3358,7 +3357,7 @@ impl CircuitIR {
             ..DcOpConfig::default()
         };
         // Build device info with MNA so FA reductions are reflected in dimensions
-        let mut device_slots = Self::build_device_info_with_mna(netlist, Some(mna))?;
+        let device_slots = Self::build_device_info_with_mna(netlist, Some(mna))?;
 
         let dc_result = dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config);
         // Judge significance over exactly what the nodal path emits: all N rows,
@@ -3420,7 +3419,6 @@ impl CircuitIR {
         // stable samples then 1e27 V explosion).
         let mut dc_operating_point = dc_result.v_node.clone();
         dc_operating_point.resize(n, 0.0);
-        Self::resolve_mosfet_nodes(&mut device_slots, mna);
 
         // Sparsity analysis (K is now computed for Schur complement NR)
         //
@@ -3792,10 +3790,13 @@ impl CircuitIR {
         use crate::codegen::BjtFaMode;
         use crate::dc_op::{self, DcOpConfig};
 
-        let device_slots = Self::build_device_info(netlist).unwrap_or_default();
+        // Netlist-shaped slots (this runs before any FA reduction), with the
+        // MOSFET body-effect nodes resolved so this DC OP matches the others.
+        let mut device_slots = Self::build_device_info(netlist).unwrap_or_default();
         if device_slots.is_empty() {
             return std::collections::HashSet::new();
         }
+        Self::resolve_mosfet_nodes(&mut device_slots, mna);
 
         let dc_op_config = DcOpConfig {
             tolerance: config.dc_op_tolerance,
@@ -4556,6 +4557,18 @@ impl CircuitIR {
                     slot.has_internal_mna_nodes = true;
                 }
             }
+        }
+
+        // MOSFET body effect reads V(source) − V(bulk), so the slots need the
+        // node indices before ANY consumer evaluates them. Resolving here, not
+        // at each call site, is the point: the nodal IR used to solve its DC
+        // operating point first and resolve afterwards, so every nodal build
+        // baked an operating point without body effect (measured: a
+        // choke-loaded common-source stage at V(src) = 1.101 V, the GAMMA=0
+        // answer, against ngspice's 0.903 V) and started each render with a
+        // transient toward the body-effect bias.
+        if let Some(mna) = mna {
+            Self::resolve_mosfet_nodes(&mut slots, mna);
         }
 
         Ok(slots)

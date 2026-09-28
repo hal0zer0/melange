@@ -128,6 +128,13 @@ generated state is smaller.
   never checked it at all, and neither path checked it against the flux law,
   so a sample either path solved could carry an error the main solve would
   have rejected.
+- **The DC operating point left out MOSFET body effect** on every build
+  except the DK code generator's own solve: the nodal code generator solved
+  its operating point before it knew which nodes were each MOSFET's source
+  and bulk, and `dc-op`, `analyze` and validation never looked them up. A
+  choke-loaded common-source stage (GAMMA=0.5) sat at 1.10 V on its source
+  where ngspice puts it at 0.90 V, and every render started with a swing
+  toward the right bias. The operating point now matches ngspice.
 - **`.pot` with no default accepted a resistor value outside its own range**,
   so the knob started at a setting it could not return to. It is now refused,
   as an explicit default and `--pot` already were. A one-word label no longer
