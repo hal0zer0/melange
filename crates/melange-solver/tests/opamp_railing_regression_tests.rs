@@ -115,9 +115,27 @@ fn render(oversampling: usize) -> Vec<(f64, f64, f64, f64, f64, u64)> {
         .collect()
 }
 
+/// How far a peak may fall between successive drive levels before it counts as
+/// the wrong-sign drive response.
+///
+/// The check exists to catch a response that FALLS with drive, as the old DK +
+/// Hard route did (0.60 V -> 0.37 V, -38 %). It is not a precision criterion:
+/// ngspice itself rises only +0.2 % from 0.5 V to 1.0 V drive, less than the
+/// few-percent modelling slack between the two op-amp models, and the 4x build
+/// measured -0.02 % over that step. A zero-tolerance "non-decreasing" rule was a
+/// mis-specification. Do not tighten this by tuning the solver to it.
+const MONOTONIC_TOLERANCE: f64 = 0.005;
+
 fn check_against_reference(oversampling: usize) {
     let rows = render(oversampling);
     assert_eq!(rows.len(), REFERENCE.len());
+    for pair in rows.windows(2) {
+        let ((a0, p0, ..), (a1, p1, ..)) = (pair[0], pair[1]);
+        assert!(
+            p1 >= p0 * (1.0 - MONOTONIC_TOLERANCE),
+            "{oversampling}x: peak falls with drive, {p0:.4} V at {a0} V -> {p1:.4} V at {a1} V"
+        );
+    }
     for (row, &(amp, ref_pk, _ref_n1)) in rows.iter().zip(REFERENCE.iter()) {
         let (_, pk, n1, oa_lo, oa_hi, bad) = *row;
         let err = (pk - ref_pk) / ref_pk;
@@ -164,4 +182,54 @@ fn railing_overdrive_matches_ngspice_at_1x() {
 #[test]
 fn railing_overdrive_matches_ngspice_at_4x() {
     check_against_reference(4);
+}
+
+/// The pinned solve does not include behavioral sources or saturating
+/// inductors, and it stops on step size, so with either present it could
+/// converge to a point that is not a solution. Codegen refuses, naming the way
+/// out, rather than pinning approximately.
+#[test]
+fn active_set_with_an_element_the_pin_cannot_solve_is_refused() {
+    use melange_solver::codegen::CodeGenerator;
+    for (extra, what) in [
+        (
+            "B_x bx 0 V={ tanh(V(n3)) }\nR_bx bx 0 1k\n",
+            "behavioral source",
+        ),
+        (
+            "L_sat n3 lsat 10m ISAT=20m\nR_lsat lsat 0 10k\n",
+            "saturating inductor",
+        ),
+    ] {
+        let spice = format!("{RAILING_OVERDRIVE}{extra}");
+        let netlist = Netlist::parse(&spice).unwrap();
+        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let input = mna.node_map["in"] - 1;
+        mna.g[input][input] += 1.0;
+        let config = support::config_for_spice(&spice, 48000.0);
+        let err = CodeGenerator::new(config)
+            .generate_nodal(&mna, &netlist)
+            .expect_err("active-set + an unpinnable element must be refused");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains(what) && msg.contains("--opamp-rail-mode hard"),
+            "{what}: {msg}"
+        );
+    }
+}
+
+/// The explicit ways out stay open.
+#[test]
+fn explicit_hard_with_a_behavioral_source_still_compiles() {
+    use melange_solver::codegen::CodeGenerator;
+    let spice = format!("{RAILING_OVERDRIVE}B_x bx 0 V={{ tanh(V(n3)) }}\nR_bx bx 0 1k\n");
+    let netlist = Netlist::parse(&spice).unwrap();
+    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+    let input = mna.node_map["in"] - 1;
+    mna.g[input][input] += 1.0;
+    let mut config = support::config_for_spice(&spice, 48000.0);
+    config.opamp_rail_mode = OpampRailMode::Hard;
+    CodeGenerator::new(config)
+        .generate_nodal(&mna, &netlist)
+        .expect("an explicit hard rail mode is the documented way out");
 }

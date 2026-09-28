@@ -173,8 +173,12 @@ fn test_behavioral_plus_activesetbe_is_rejected() {
     };
     match CodeGenerator::new(config).generate_nodal(&mna, &netlist) {
         Err(CodegenError::UnsupportedTopology(msg)) => {
+            // Refused first by `generate_nodal`'s active-set + unpinnable-element
+            // check (which spells the mode `active-set-be`); the emitter's own
+            // ActiveSetBe + behavioral refusal stays behind it as a backstop.
             assert!(
-                msg.contains("ActiveSetBe") && msg.contains("behavioral"),
+                (msg.contains("ActiveSetBe") || msg.contains("active-set-be"))
+                    && msg.contains("behavioral"),
                 "error must name the behavioral/ActiveSetBe incompatibility, got: {msg}"
             );
         }

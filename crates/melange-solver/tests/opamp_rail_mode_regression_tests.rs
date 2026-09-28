@@ -24,7 +24,7 @@
 //!    `.param` constants as the invalid Rust token `inf`; now routed through
 //!    `fmt_f64` (`f64::INFINITY`).
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig, OpampRailMode};
+use melange_solver::codegen::{CodeGenerator, CodegenConfig, NodalSubPathOverride, OpampRailMode};
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
 use std::io::Write;
@@ -40,16 +40,22 @@ use std::sync::atomic::{AtomicU32, Ordering};
 /// Nonlinear-NR-path variant: the inert behavioral source (`I ≈ 1 nA·V(baux)`
 /// on an otherwise-grounded node) forces the full-LU nodal routing and the
 /// trap-NR loop without changing the electrical behavior of the amp.
+/// Full-LU NR path: an inert diode gives M > 0 (the NR loop exists) and
+/// `generate_nodal` is called with the full-LU sub-path forced. This used an
+/// inert behavioral source to reach full-LU; active-set is now refused
+/// alongside any behavioral source, inert or not, since the pinned solve does
+/// not include one.
 const OVERDRIVEN_AMP_FULL_LU_NR: &str = "\
-Overdriven inverting amp (full-LU NR path via inert B-source)
+Overdriven inverting amp (full-LU NR path, forced sub-path)
 .model OA_TEST OA(AOL=100000 ROUT=100 VCC=12 VEE=-12)
+.model DAUX D(IS=1e-14)
 Rin   in     inv    10K
 U1    0      inv    out   OA_TEST
 Rfb   out    inv    100K
 Rload out    0      10K
 Cout  out    out_ac 1U
 Rld2  out_ac 0      100K
-Baux  baux   0      I={ 1e-9 * V(baux) }
+Daux  baux   0      DAUX
 Rbaux baux   0      1K
 .END
 ";
@@ -107,6 +113,11 @@ fn generate_nodal(spice: &str, rail_mode: OpampRailMode) -> String {
         // than a high-passed/clamped copy.
         dc_block: false,
         opamp_rail_mode: rail_mode,
+        nodal_sub_path_override: if spice == OVERDRIVEN_AMP_FULL_LU_NR {
+            NodalSubPathOverride::FullLu
+        } else {
+            NodalSubPathOverride::Auto
+        },
         ..CodegenConfig::default()
     };
     CodeGenerator::new(config)

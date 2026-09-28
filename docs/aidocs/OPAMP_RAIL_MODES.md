@@ -49,6 +49,12 @@ circuit. **Only the nodal solver implements that.** The DK path implements
   `CodeGenerator::generate*` refuses an active-set mode on the DK path. There is
   no silent degrade to `Hard`: `Hard` on an AC-coupled output is exactly the
   cap-history corruption the resolver picked active-set to avoid.
+- Active-set is **refused** on a circuit that also has a behavioral source or a
+  saturating inductor: the pinned Newton stamps device Jacobians through
+  N_i/N_v only and stops on step size, so without those elements in the pinned
+  system it can converge to a non-solution. Lift the refusal when their
+  Jacobians are stamped there and railing acceptance (`opamp_railing_regression_tests.rs`)
+  covers them.
 - An explicit `--opamp-rail-mode hard` stays allowed, on either route — an
   explicit choice is never overridden, because overrides are how users bisect.
   When a clamped op-amp it applies to is AC-coupled downstream (where auto

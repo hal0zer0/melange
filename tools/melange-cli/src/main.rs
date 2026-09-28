@@ -572,6 +572,10 @@ enum Commands {
         /// Probe an internal node. May be repeated. Probe samples are written
         /// to a sidecar CSV (one column per probe) alongside the WAV; the
         /// primary `-n/--output-node` signal goes to the WAV unchanged.
+        /// With --oversampling > 1, each row is one HOST-rate sample taken after
+        /// the decimation filter, not a raw internal-rate value: on a node with
+        /// sharp edges the filter's overshoot can exceed the raw peak, so do not
+        /// gate peaks on probe rows at OS > 1.
         #[arg(long = "probe", value_name = "NODE")]
         probes: Vec<String>,
 

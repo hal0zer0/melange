@@ -68,6 +68,14 @@ generated state is smaller.
   lands within 2.4 % at 1× and 1.0 % at 4×, with no unsolved samples at any
   drive. The regression suite had no circuit whose op-amp reaches its rails; it
   has one now.
+- **Active-set rail handling is refused on a circuit that also has a
+  behavioral source or a saturating inductor.** The pinned solve does not
+  include those elements yet, and it stops on step size, so it could converge
+  to a point that is not a solution. The error names the explicit alternatives
+  (`--opamp-rail-mode hard` or `boyle-diodes`). No corpus circuit that compiles
+  with default flags has the combination.
+- `simulate --probe` help says that at `--oversampling` > 1 each row is a
+  decimated, filtered host-rate sample, whose peak can exceed the raw one.
 - `simulate` failed to compile on full-LU circuits with no nonlinear devices
   (e.g. an op-amp-only stage on the nodal route): it decided which diagnostic
   counters exist by searching the generated code for their names, and a doc

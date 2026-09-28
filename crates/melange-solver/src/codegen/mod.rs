@@ -1220,6 +1220,50 @@ impl CodeGenerator {
             mna,
             netlist,
         );
+        // The active-set pinned Newton stamps device Jacobians through N_i/N_v
+        // only. Behavioral sources (stamped in node space) and saturating
+        // inductors (a per-sample L update) are not in that system, and the loop
+        // stops on step size rather than a residual, so it can converge cleanly
+        // to a point that is not a solution. Refuse the combination rather than
+        // pin approximately; lift this when those Jacobians are stamped in the
+        // pinned system and railing acceptance covers them.
+        let clamped_opamp = mna
+            .opamps
+            .iter()
+            .any(|oa| oa.n_out_idx > 0 && (oa.vcc.is_finite() || oa.vee.is_finite()));
+        let saturating_inductor = mna.inductors.iter().any(|ind| ind.isat.is_some())
+            || mna
+                .coupled_inductors
+                .iter()
+                .any(|ci| ci.l1_isat.is_some() || ci.l2_isat.is_some())
+            || mna
+                .transformer_groups
+                .iter()
+                .any(|g| g.winding_isats.iter().any(|i| i.is_some()));
+        let unpinnable = match (!mna.behavioral_sources.is_empty(), saturating_inductor) {
+            (true, true) => Some("a behavioral source and a saturating inductor"),
+            (true, false) => Some("a behavioral source"),
+            (false, true) => Some("a saturating inductor"),
+            (false, false) => None,
+        };
+        if let (true, true, Some(what)) = (
+            clamped_opamp,
+            matches!(
+                resolved.mode,
+                OpampRailMode::ActiveSet | OpampRailMode::ActiveSetBe
+            ),
+            unpinnable,
+        ) {
+            return Err(CodegenError::UnsupportedTopology(format!(
+                "op-amp rail mode {} cannot be solved on this circuit: it has {what}, and \
+                 the pinned solve at the rail does not include that element yet, so it would \
+                 converge to a point that is not a solution. Choose the rail handling \
+                 explicitly: `--opamp-rail-mode hard` (a post-solve clamp; compile warns if \
+                 an op-amp output is capacitor-coupled, where it corrupts capacitor history) \
+                 or `--opamp-rail-mode boyle-diodes` (catch diodes; reliable at light clip).",
+                resolved.mode.as_str()
+            )));
+        }
         let augmented_storage;
         let augmented_mna_storage;
         let (mna, netlist) = if resolved.mode == OpampRailMode::BoyleDiodes {
