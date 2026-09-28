@@ -2627,6 +2627,27 @@ fn compile_circuit_source(
         }
     }
     println!("    Oversampling: {}×", oversampling);
+    // A nonlinear circuit generates harmonics above Nyquist, and at 1x they
+    // fold back into the audible band as inharmonic alias energy. The steady-
+    // state frequency response does not show it, so a first-time author has no
+    // way to discover the decision they just made by default.
+    //
+    // Fires ONLY when 1x was defaulted into — never when the author chose it on
+    // the command line or in the deck. Telling someone about a decision they
+    // already made is the noise that stops people reading notes at all.
+    //
+    // A NOTE, not a warning: 1x is correct for plenty of circuits (most of the
+    // golden corpus runs there), and the amount that oversampling helps is
+    // strongly circuit- and drive-dependent — so this points at the
+    // measurement rather than prescribing a factor.
+    if generated.m > 0 && oversampling == 1 && oversampling_cli.is_none() && netlist.recommended_oversampling.is_none() {
+        println!("    NOTE: {} nonlinear dimension(s) at 1× — harmonics above Nyquist fold", generated.m);
+        println!("          back as aliasing, which the frequency response will not show.");
+        println!("          Measure it:  melange analyze <circuit> --harmonics 5 --amplitude <drive>");
+        println!("                       (compare the worst `nyquist_dbc` against --oversampling 4)");
+        println!("          Set it:      --oversampling {{2|4}}, or `.oversampling N` in the deck.");
+        println!("          Why it is not simply a quality dial: docs/OVERSAMPLING.md");
+    }
     println!(
         "    Input: node \"{}\", resistance {}Ω ({})",
         input_node, input_resistance, ir_source
