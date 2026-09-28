@@ -6,7 +6,7 @@
 //! different feature/profile build of the same source. Two binaries built from
 //! HEAD `7b39da7` — one clean, one with three uncommitted solver edits — both
 //! printed `melange 0.1.6 (7b39da7)`, and a peer published tables from each with
-//! nothing in the output distinguishing them (robogogo thread 288, arbiter
+//! nothing in the output distinguishing them (design review
 //! ruling). The FNV-1a-64 exe hashes told them apart: `8b62d950c3c6f88b` (dirty)
 //! vs `55c248b088a69bb6` (clean).
 //!

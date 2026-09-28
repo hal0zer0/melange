@@ -1180,7 +1180,7 @@ pub fn run_melange_solver_from_str(
     // anything. Correlating it against ngspice produces a number, and the
     // number is meaningless: on those samples melange emitted the PREVIOUS
     // state, not an answer to the circuit. Fail here rather than let a
-    // confident correlation be computed from a frozen render (arbiter t536).
+    // confident correlation be computed from a frozen render (design review).
     if held > 0 {
         return Err(ValidationError::Solver(format!(
             "{held} sample(s) were never solved: every Newton path failed and the previous \

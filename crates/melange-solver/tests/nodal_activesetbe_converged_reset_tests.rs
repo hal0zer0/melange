@@ -1,5 +1,5 @@
 //! Regression test for the nodal full-LU ActiveSetBe BE-fallback
-//! `converged`-not-reset defect (2026-08-17, dr-debuggenshmirtz / L6 arbiter).
+//! `converged`-not-reset defect (2026-08-17, dr-debuggenshmirtz / L6 design review).
 //!
 //! ## The bug
 //!

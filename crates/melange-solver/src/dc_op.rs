@@ -3165,7 +3165,7 @@ fn solve_dc_operating_point_core(
     // solution IS the true operating point; skip the degeneracy check.
     let has_dc_excitation = dc_sys.b_dc.iter().any(|x| x.abs() > 0.0);
 
-    // Candidate RETENTION (arbiter thread 247). `solution_has_active_junction`
+    // Candidate RETENTION (design review). `solution_has_active_junction`
     // is a leaky heuristic — its `0.5·vcrit` cutoff provably bisects a continuous
     // forward-active regime, flagging genuine low-bias solutions (Ge/Schottky
     // junctions below the cutoff; ngspice-verified on the Ge PNP R_E sweep) as

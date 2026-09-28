@@ -161,7 +161,7 @@ same netlist again and get the same numbers — change `.seed 42` to
 
 ## Choosing Magnitudes: Modern vs. Vintage Parts
 
-(Authoring guidance, voltron analog-EE review 2026-09-13.)
+(Authoring guidance, analog-EE review 2026-09-13.)
 
 The example magnitudes throughout this doc — `.tolerance R=0.01 C=0.02`,
 tube `MU ±3%`, BJT `BF ±5%` — describe **modern** precision parts. Period
@@ -271,7 +271,7 @@ independent reimplementation of the FNV-64 → SplitMix64 chain, not read back
 out of melange.
 
 Substituting the *jittered* values into the ngspice deck was considered and
-rejected (arbiter, 2026-09-22): a correlation metric is dominated by the
+rejected (design review, 2026-09-22): a correlation metric is dominated by the
 fundamental and cannot grade an error in a −40 dB H2 residual, so it would add
 a regime the score cannot see. The push-pull H2 that `.mismatch T` exists to
 create is exactly such a residual — on `passive-eq1a` the nominal comparison

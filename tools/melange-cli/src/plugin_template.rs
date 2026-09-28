@@ -108,7 +108,7 @@ pub struct PluginOptions<'a> {
     /// melange author's personal address, which meant every plugin anyone
     /// generated named a specific human as its support contact — a confident
     /// false statement about a third party who never agreed to it, per plugin.
-    /// Absent is not wrong; wrong was wrong (arbiter t588).
+    /// Absent is not wrong; wrong was wrong (design review).
     ///
     /// nih-plug declares `const EMAIL: &'static str` as a required associated
     /// const, so the field cannot simply be omitted.
@@ -1394,7 +1394,7 @@ fn generate_lib_rs(
     // contact — is something the author should be told once, at build time,
     // rather than discover in a plugin browser. Informational, not an error:
     // the defaults are usable, and the newcomer path stays unblocked
-    // (arbiter t588).
+    // (design review).
     let defaulted: Vec<&str> = [
         options
             .vendor
@@ -2739,7 +2739,7 @@ mod tests {
         assert!(lib.contains("const VENDOR: &'static str = \"Melange\""));
         assert!(lib.contains("const URL: &'static str = \"https://github.com/hal0zer0/melange\""));
         // Empty by default, never a real person's address. See `email` on
-        // PluginOptions for why (arbiter t588).
+        // PluginOptions for why (design review).
         assert!(lib.contains("const EMAIL: &'static str = \"\""));
     }
 

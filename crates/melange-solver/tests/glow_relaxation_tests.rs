@@ -8,9 +8,9 @@
 //!    T ≈ RC·ln((Vb−V_floor)/(Vb−Vo)) period, on BOTH the nodal and DK-Schur
 //!    routes (`assert_relax_fixed`);
 //!  - supply-sensitivity (the ZA1001 divider-frequency dependence Philips
-//!    regulated for — schemer's falsification criterion);
+//!    regulated for — schematic extraction's falsification criterion);
 //!  - oversampling: preserves the oscillator physics, plus base-rate aliasing /
-//!    anti-alias validation (arbiter ruling on sub-sample edges — OS is the
+//!    anti-alias validation (design review ruling on sub-sample edges — OS is the
 //!    anti-alias; output BLEP rejected; breakpoint re-solve deferred).
 
 use std::io::Write;
@@ -73,7 +73,7 @@ fn generate_nodal_code(spice: &str, sample_rate: f64) -> String {
 /// Generate with a given whole-circuit oversampling factor and NO output clamp,
 /// so the raw reservoir swing reaches the output for spectral analysis. Used to
 /// measure whether oversampling band-limits the glow strike/extinguish edge
-/// (the arbiter-ruled anti-alias for this Stage-2a device — output BLEP was
+/// (the design review-ruled anti-alias for this Stage-2a device — output BLEP was
 /// rejected as ill-posed/cosmetic; OS is the physics-faithful mitigation).
 fn generate_glow_code_os(spice: &str, sample_rate: f64, os: usize) -> String {
     let netlist = Netlist::parse(spice).expect("parse");
@@ -240,7 +240,7 @@ fn main() {
 /// v0+RS·IHOLD≈89 V (NOT the old fixed-VD=93 floor, and NOT the older
 /// deep-discharge-to-0 bug), VO−floor swing, and the analytic
 /// RC·ln((Vb−V_floor)/(Vb−Vo)) period. Shared by the nodal and DK route tests
-/// so the fix is proven on BOTH paths — and, per the arbiter's "measure the
+/// so the fix is proven on BOTH paths — and, per the design review's "measure the
 /// emergent floor" requirement, the reset floor is asserted directly.
 ///
 /// Params: VO=135, VM=93@IK=1.5mA, RS=3000 → derived intercept v0=VM−RS·IK=88.5;
@@ -359,7 +359,7 @@ fn main() {
 }
 
 /// Supply-sensitivity: the relaxation period MUST depend on the rail voltage.
-/// This is schemer's falsification criterion for the ZA1001 divider bracket
+/// This is schematic extraction's falsification criterion for the ZA1001 divider bracket
 /// (thread 162, off the AG7500 service manual §6): Philips regulated the +1
 /// rail specifically because "the correct oscillation frequency of the divider
 /// sections depends on the supply voltage." A model whose dividers are
@@ -382,7 +382,7 @@ fn test_glow_period_is_supply_sensitive() {
     // (analytic ×1.67). A supply-insensitive model would give ratio ≈ 1.
     assert!(
         t_lo > t_hi * 1.4,
-        "divider period must be supply-sensitive (schemer's ZA1001 falsification \
+        "divider period must be supply-sensitive (schematic extraction's ZA1001 falsification \
          test): T(150V)={t_lo} ms should be ≫ T(170V)={t_hi} ms"
     );
     // And each should track its own analytic prediction + discretization (±6%).
@@ -396,7 +396,7 @@ fn test_glow_period_is_supply_sensitive() {
     );
 }
 
-// ── Oversampling anti-alias validation (arbiter ruling on sub-sample edge
+// ── Oversampling anti-alias validation (design review ruling on sub-sample edge
 // handling: OS is the physics-faithful anti-alias for the sharp glow strike/
 // extinguish edge; output BLEP was REJECTED as ill-posed for the mixed
 // multi-oscillator target and doctrinally a cosmetic output filter per
@@ -508,7 +508,7 @@ fn measure_asr_db(spice: &str, os: usize, tag: &str) -> (f64, f64) {
     (parse_kv(&out, "asr_db"), parse_kv(&out, "f0_hz"))
 }
 
-/// Quantifies the arbiter's option-D claim on a LOW divider (f0≈126 Hz), where
+/// Quantifies the design review's option-D claim on a LOW divider (f0≈126 Hz), where
 /// the period is many samples so the ASR estimate is stable.
 ///
 /// FINDING (recorded): base-rate aliasing is already modest (ASR ≈ −39 dB) and
@@ -785,7 +785,7 @@ Rin in k 100k
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// KNOWN GAP (2026-09-16, arbiter ruling 467): the relaxing-section lit branch
+// KNOWN GAP (2026-09-16, design review): the relaxing-section lit branch
 // (`has_sections()`) is ROUTE-DEPENDENT on the nodal path.
 //
 //   * nodal Schur (`emit_nodal_device_evaluation`): section-gated — lit eval
@@ -808,9 +808,9 @@ Rin in k 100k
 // the gate applied the deck OSCILLATES at ≥768k (gain < 1); K1=3 does NOT help
 // (|s_eff| still 1). Real ZA1001 key sets have Σk≈43.3 → |s_eff|≈41, so the gain
 // is tiny and full-LU would converge — but the real divider ROUTES SCHUR anyway
-// (arbiter measured: schur at 768k/1536k/6144k, even at R_total 4.6M).
+// (design review measured: schur at 768k/1536k/6144k, even at R_total 4.6M).
 //
-// VERDICT: the full-LU CONVERGENCE fix is DEFERRED behind phili (arbiter 467).
+// VERDICT: the full-LU CONVERGENCE fix is DEFERRED behind phili (design review).
 // Section glows stay Schur-only in the interim and a compiler WARN says so; do
 // NOT force section decks onto Schur (routing is a conditioning decision —
 // forcing Schur on a positive-k deck reproduces the thread-296 failure). When
@@ -862,7 +862,7 @@ fn generate_nodal_code_subpath(
 }
 
 #[test]
-#[ignore = "KNOWN GAP: full-LU section-glow NDR root-selection diverges from Schur; needs arbiter + real-rig validation (see comment above)"]
+#[ignore = "KNOWN GAP: full-LU section-glow NDR root-selection diverges from Schur; needs design review + real-rig validation (see comment above)"]
 fn test_glow_sections_route_portable_schur_vs_full_lu() {
     use melange_solver::codegen::NodalSubPathOverride;
     let deck = relax_deck_sections(170.0);
@@ -892,7 +892,7 @@ fn test_glow_sections_route_portable_schur_vs_full_lu() {
     );
 }
 
-/// Fail-loud guard (arbiter t467): a section/D/KSUB glow on the nodal full-LU
+/// Fail-loud guard (design review): a section/D/KSUB glow on the nodal full-LU
 /// sub-path is REFUSED at codegen, because full-LU runs a mixed model (static
 /// lit NR + section strike-seed/extinction) that silently produces a dead
 /// divider. The refusal must name the three exits; both overrides must compile.

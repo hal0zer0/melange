@@ -135,7 +135,7 @@ fn glow_deck_off_has_no_machinery_and_auto_resolves_to_on() {
     let auto = nodal_code(chain_deck(), 48000.0, SubsampleFireMode::Auto);
 
     // OFF: no machinery, but the glow provenance IS still emitted so a consumer
-    // can tell an off-glow deck from a non-glow deck (fleet-arbiter thread 303).
+    // can tell an off-glow deck from a non-glow deck (design review).
     assert!(
         !has_machinery(&off),
         "glow deck with off must carry no machinery"
@@ -217,7 +217,7 @@ fn on_is_refused_on_dk_route_and_auto_is_inert_there() {
         "DK route must never emit sub-sample fire machinery"
     );
     // ...but a glow deck on DK must NOT be silent about it: provenance records
-    // active:false, reason dk-route (fleet-arbiter thread 303, Q1b — this is the
+    // active:false, reason dk-route (design review, Q1b — this is the
     // shipped-route hole that left openphilicorda characterising 3/12 blind).
     assert!(
         code.contains(

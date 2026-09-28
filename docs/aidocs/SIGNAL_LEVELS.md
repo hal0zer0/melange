@@ -29,7 +29,7 @@ This removes DC bias voltages from tube, BJT, and op-amp circuits that would oth
 The DC block is transparent in *level* for audio-frequency signals (>20Hz) and
 settles within ~200ms.
 
-**Phase caveat (voltron analog-EE review, 2026-09-13):** a first-order high-pass
+**Phase caveat (analog-EE review, 2026-09-13):** a first-order high-pass
 is level-transparent above its corner but is **not** phase-transparent there. A
 5 Hz corner still adds a measurable phase *lead* at the bottom of the audio band —
 about +14° at 20 Hz (arctan(5/20)) — falling toward 0° higher up. This does not
@@ -73,7 +73,7 @@ default clamps *before* the hardware does (±10 V = 7.07 Vrms = +19.2 dBu, rough
 2–3 dB below a ±15 V op-amp and ~7 dB below a 1073), introducing distortion that
 is not in the real device. A circuit with rails above ±10 V should set the clamp
 **at or above its real peak swing** (see the table) — or, if it needs no ceiling,
-`--no-dc-block` removes the clamp path entirely. (Note, voltron analog-EE review
+`--no-dc-block` removes the clamp path entirely. (Note, analog-EE review
 2026-09-13: the previous table recommended the ±10 V default for "line-level
 op-amp, tube preamp, distortion pedal", which contradicts the hard-clip rule
 above for any of those built on ±15 V or hotter rails.)

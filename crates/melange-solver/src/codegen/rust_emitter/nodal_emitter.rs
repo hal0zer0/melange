@@ -880,7 +880,7 @@ fn emit_sparse_a_residual_matvec(
 /// The prior behavior (break to the sub-step / BE fallback on failure) was strictly
 /// worse: the residual gate already closed the false-convergence hole, and the bail
 /// routed an otherwise-recoverable iterate into the least-protected fallback, where
-/// it could limit-cycle. Contract (arbiter thread 252): a line search may only
+/// it could limit-cycle. Contract (design review): a line search may only
 /// HELP; its failure must be no worse than not having it.
 ///
 /// The guard `if r0.is_finite() && r0 > 1e-9` means a non-finite or already-tiny
@@ -1839,7 +1839,7 @@ impl RustEmitter {
         } else {
             "unknown"
         };
-        // Fail-loud refusal (arbiter t467): a relaxing-section / delayed-
+        // Fail-loud refusal (design review): a relaxing-section / delayed-
         // overvoltage / subnormal (KSUB) glow on the full-LU sub-path runs a
         // MIXED, silently-wrong model — the full-LU device eval solves the static
         // maintaining line `i=(v−V0)/RS` for the lit branch while the strike seed
@@ -1864,7 +1864,7 @@ impl RustEmitter {
                      On full-LU the lit branch is evaluated as the STATIC maintaining line \
                      (v0+RS·i) while the strike seed and extinction test read the section \
                      model — a mixed model that silently produces wrong output (a dead \
-                     divider). Refusing to emit it (arbiter ruling t467). NB: the route is \
+                     divider). Refusing to emit it (design review). NB: the route is \
                      per (deck, SAMPLE RATE) — this same deck may route Schur (which honors \
                      the sections) at another rate, so read the sub-path from the actual \
                      run, not from a compile at a different rate. Choose one:\n\
@@ -2152,7 +2152,7 @@ impl RustEmitter {
              ///\n\
              /// A transient Newton failure is a TIMESTEP problem, not a budget problem,\n\
              /// so the response is to cut dt and retry rather than to raise MAX_ITER\n\
-             /// (arbiter t536). The bound is 64x because that is what this corpus\n\
+             /// (design review). The bound is 64x because that is what this corpus\n\
              /// measured: on a Neve-1073-style input block driven with a 0.1 V step,\n\
              /// 9 of 43200 post-edge samples need deeper than one sub-step, 7 of those\n\
              /// clear by 8x, and the last two need 32x and 64x. It stays BOUNDED\n\
@@ -3135,7 +3135,7 @@ impl RustEmitter {
              \x20   /// fails identically, so one hard sample can freeze the circuit until\n\
              \x20   /// the input changes. Measured on a Neve-1073-style input block: 43199\n\
              \x20   /// consecutive held samples, output 22 dB adrift, peak a healthy\n\
-             \x20   /// -0.50 dBFS (arbiter t536).\n\
+             \x20   /// -0.50 dBFS (design review).\n\
              \x20   ///\n\
              \x20   /// Distinct from `diag_be_fallback_count`, which counts a RECOVERY:\n\
              \x20   /// a converged solution by another consistent scheme. This counts a\n\
@@ -3154,7 +3154,7 @@ impl RustEmitter {
                  \x20   /// class — a sample that is not a solution, shipped as output — without\n\
                  \x20   /// the freeze, because the committed state moves and the solver can\n\
                  \x20   /// walk back out. Nonzero means this render contains samples that were\n\
-                 \x20   /// never solved (arbiter t536).\n",
+                 \x20   /// never solved (design review).\n",
             );
             code.push_str("    pub diag_nr_unconverged_commit_count: u64,\n");
         }
@@ -6183,7 +6183,7 @@ impl RustEmitter {
                 code.push_str(
                     "        // matvec + O(M³) NR per sub-step — same as the normal Schur path.\n",
                 );
-                // Fixed depth, PARKED not dropped — arbiter t536, with a trigger.
+                // Fixed depth, PARKED not dropped — design review, with a trigger.
                 //
                 // The full-LU sub-step has a ladder to 64x (SUBSTEP_MAX_POWER);
                 // this one does not, and that difference is deliberate for now.
@@ -6722,7 +6722,7 @@ impl RustEmitter {
         // when every Newton path failed. That is an unconverged sample shipped
         // as output — the same silent-wrong class as the full-LU hold, minus the
         // freeze, since the committed state moves and the solver can walk out.
-        // Count it so it is not invisible (arbiter t536).
+        // Count it so it is not invisible (design review).
         code.push_str(
             "    if state.last_nr_iterations >= MAX_ITER as u32 {\n\
              \x20       // Every path failed; the diverged iterate is about to be committed.\n\
@@ -8334,7 +8334,7 @@ impl RustEmitter {
             // `alpha *= s` scaling only runs on acceptance) and CONTINUES — the
             // always-checked residual gate below, not a bail, decides convergence.
             // A line search may only help; its failure must be no worse than not
-            // having it (arbiter thread 252). `limited` records whether pnjlim or
+            // having it (design review). `limited` records whether pnjlim or
             // node-damping shrank alpha below 1, gating the voltage-step check (a
             // limited step's small size is not evidence of convergence — only the
             // residual gate is). Left as `alpha < 1.0` so a fall-through's natural
@@ -8670,7 +8670,7 @@ impl RustEmitter {
                 // discontinuities, which is exactly where the two schemes differ
                 // (measured 3.51 V vs 6.57 V against a BE-pinned reference at the
                 // step edge). A silent integrator swap inside the recovery path is
-                // the same class of defect as a silent wrong answer (arbiter t536).
+                // the same class of defect as a silent wrong answer (design review).
                 if ir.solver_config.backward_euler {
                     code.push_str(
                 "            // Backward Euler: alpha = 1/dt, matching the pinned scheme.\n            let alpha_sub = state.current_sample_rate * OVERSAMPLING_FACTOR as f64 * subdiv as f64;\n",

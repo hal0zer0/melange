@@ -150,6 +150,17 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
   comparison alone shows. Any future grid-current check at these points must
   report the plate model's share, because the two errors partly cancel.
 
+  **Root cause: the tail's SLOPE, not its magnitude.** For `Vgk << 0` eq. (11)
+  tends to a pure exponential of slope `xi*Cg` = 13.0 /V, an *effective* cathode
+  temperature near 890 K. The physical retarding-field law (Maxwellian emission)
+  has slope `e/kT_k` — 7.7 /V at 1500 K, ~10.6-11 /V at 1050-1100 K. eq. (11) is
+  steeper than any physical thermal slope, so a fit made in the mA region falls
+  away too fast when extrapolated three to four decades down to 0.3 uA.
+
+  Note also that a datasheet grid current is a NET reading — electron current
+  minus gas ionisation, grid primary emission and leakage — while eq. (11)
+  models the electron term alone. The gap above is therefore a lower bound.
+
   Closing the gap by refitting `Gg` would need 28.7x-257x, where D&Z's own
   three tubes span 1.89x, so this is not a tube-to-tube parameter spread.
   No parameter here is fitted to that sheet, which is what keeps it usable as

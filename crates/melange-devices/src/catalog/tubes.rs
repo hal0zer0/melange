@@ -60,7 +60,7 @@ pub fn grid_start_limit_v(name: &str) -> Option<f64> {
         ),
         // Philips ECC82: max −1,3 V.
         (&["12AU7", "ECC82", "5963", "CV4003"], -1.3),
-        // Philips ECC81: the arbiter's ruling records this type as carrying
+        // Philips ECC81: the design ruling records this type as carrying
         // the limit "likewise", i.e. reading with the ECC82's −1,3 V. Flagged
         // here because "likewise" is the ruling's word, not a figure read off
         // the ECC81 sheet directly; if that sheet is ever put in front of

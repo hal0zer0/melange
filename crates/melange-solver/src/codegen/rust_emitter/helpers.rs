@@ -990,7 +990,7 @@ pub(super) fn emit_stateful_update_fns(
 /// Ī_i (has_sections), `[1+N]` since-extinction timer t_off (has_d). Strike
 /// tests `cv ≥ V_s,eff` where `V_s,eff = VO − D(t_off)` (D≡0 without depression).
 /// The strike-bounded section seed's margin uses `V_s,eff` (not VO) — the onset
-/// overvoltage shrinks after a short off-time (arbiter coupling). t_off advances
+/// overvoltage shrinks after a short off-time (design review coupling). t_off advances
 /// by `dt` every dark non-strike sample (incl. ssf sub-steps) and resets to 0 at
 /// extinction.
 fn emit_glow_update_body(d: usize, gp: &crate::device_types::GlowParams, is_ssf: bool) -> String {
@@ -1040,7 +1040,7 @@ fn emit_glow_update_body(d: usize, gp: &crate::device_types::GlowParams, is_ssf:
     b.push_str("            state[0] = 1.0;\n");
     if has_sec {
         b.push_str(
-            "            // Balanced seed (voltron t422): Ī_i = I₀, the circuit-limited strike current,\n\
+            "            // Balanced seed (analog-EE review): Ī_i = I₀, the circuit-limited strike current,\n\
              \x20           // so Σ k·ln(I/Ī) = 0 at the peak and the sections carry NO breakdown-side\n\
              \x20           // overvoltage. The fall from V_s to the lit branch is FORMATION (the strike\n\
              \x20           // event's job, µs), NOT a lagged-section state; the undershoot below V_m is\n\

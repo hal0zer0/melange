@@ -631,7 +631,7 @@ fn main() {{
         // between output and input is -(phi_out - phi_in) — a sign-inverted phase.
         // That was the behaviour up to and including 0.1.9: an RC low-pass read
         // +45 deg at its cutoff where every other tool reads -45. Reported by
-        // melange-circuits with a known-answer probe (robogogo thread 516).
+        // melange-circuits with a known-answer probe (cross-project review).
         let out_phase = (2.0 * sum_cos[0] / n).atan2(2.0 * sum_sin[0] / n);
         let in_phase = (2.0 * sum_in_cos / n).atan2(2.0 * sum_in_sin / n);
         let phase_diff = (out_phase - in_phase).to_degrees();

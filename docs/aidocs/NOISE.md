@@ -547,7 +547,7 @@ do not measurably hiss extra over metal-film equivalents. The Hooge
 `I_DC²` form captures *that* correctly: a resistor's excess 1/f floor is
 set by the DC current it carries.
 
-**What the DC-current dependence does NOT mean (correction, voltron
+**What the DC-current dependence does NOT mean (correction, analog-EE review
 analog-EE review 2026-09-13).** It does *not* follow that "loud passages
 get louder 1/f, quiet passages return to the thermal floor." In a
 **class-A** stage the DC bias current is fixed by the operating point and
@@ -665,7 +665,7 @@ correspond to any specific Hooge α_H value across all R values — it's
 an empirical knob that produces audible 1/f at the right scale when the
 bias is real.
 
-**Datasheet anchor: KF ↔ resistor noise index (voltron analog-EE review,
+**Datasheet anchor: KF ↔ resistor noise index (analog-EE review,
 2026-09-13).** Resistor 1/f is specified on datasheets as a **noise
 index** `NI` in µV/V — the RMS microvolts of 1/f noise across the
 resistor per volt of DC drop, integrated over one decade of frequency.

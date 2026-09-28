@@ -669,7 +669,7 @@ Two reasons they live in one module:
    sites (two emitters, two template positions, one nodal reset emission, and
    `linear_solver.rs` — the *runtime* solver's own copy, which every survey
    missed because they were all looking at codegen). The implementation plan
-   recorded it as one site; the arbiter corrected that to five; it was six.
+   recorded it as one site; review corrected that to five; it was six.
 2. **They are a published contract.** A second-language backend cannot
    recompute these from the IR. A C++ emitter that picks its own 5 Hz-equivalent
    ships a plugin that measurably differs while every structural test passes.

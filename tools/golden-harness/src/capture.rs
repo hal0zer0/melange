@@ -178,7 +178,7 @@ pub fn run(
     // Record the bypass in the baseline itself, not just in the terminal. A
     // baseline captured under --allow-nr-hold contains renders that are not
     // solutions; whoever reviews it later must be able to see that from the
-    // artifact alone (arbiter t536).
+    // artifact alone (design review).
     if allow_nr_hold {
         let p = out_dir.join("ALLOW_NR_HOLD");
         let _ = std::fs::write(

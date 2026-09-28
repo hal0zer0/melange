@@ -336,8 +336,8 @@ pub(super) fn effective_max_iter(ir: &CircuitIR) -> usize {
 /// (the shipped DK route bakes `S=A^-1` and cannot carry it) and
 /// `nodal-full-lu:<trigger>` (the Schur sub-path it needs was not taken).
 /// `tau_source`/`lit_integrator` are the lit-integration manifest axes, so a
-/// measurement can never be silently paired with the wrong build. Fleet-arbiter
-/// ruling, robogogo thread 303.
+/// measurement can never be silently paired with the wrong build. design review
+/// ruling, cross-project review.
 pub(super) struct GlowProvenance {
     /// The deck instantiates at least one glow (latched) device.
     pub present: bool,
@@ -458,7 +458,7 @@ fn resolved_build_flags(ir: &CircuitIR, glow: &GlowProvenance) -> String {
     // not only when active — so the Build: line and the JSON never disagree.
     if glow.present {
         if glow.active {
-            // Show the lit sub-step factor on the human line too (arbiter t303:
+            // Show the lit sub-step factor on the human line too (design review:
             // a swept condition must be visible in the Build: line, not only JSON).
             build.push_str(&format!(
                 ", subsample-fire={} (lit×{})",
@@ -501,7 +501,7 @@ fn provenance_json(
     // Exact build identity: a runtime hash of the melange binary that emitted
     // this code. version+commit are a source-side POINTER that cannot see a
     // dirty tree or a different feature/profile build; the exe hash is computed
-    // from the artifact and is exact (robogogo thread 288, arbiter ruling). It
+    // from the artifact and is exact (design review ruling). It
     // is MASKED in the golden harness alongside melange/commit, so a clean
     // rebuild at one commit does not churn codegen diffs.
     let exe = crate::build_identity::current_exe_hash_or_unknown();
@@ -511,18 +511,18 @@ fn provenance_json(
     // Algorithm-qualified key: a digest's algorithm IS its unit, so it belongs
     // in the name — a bare `exe` slot invites a consumer to fill it with a
     // different digest of the same file and read a MATCH failure as two
-    // binaries (robogogo thread 184). Matches oomox's `..._fnv1a64` convention.
+    // binaries (cross-project review). Matches oomox's `..._fnv1a64` convention.
     s.push_str(&format!("\"exe_fnv1a64\":\"{exe}\","));
     s.push_str(&format!("\"solver\":\"{solver}\","));
     // Nodal Schur-vs-full-LU sub-path. Absent on the DK route (None). Recorded
     // so a deck can ASSERT its numerical sub-path: a silent Schur↔full-LU flip
     // (turned by conditioning — any resistor, inductor, or rate — not just a
     // flag) otherwise reaches a consumer only as an unread stderr WARN and has
-    // been read as device behaviour (arbiter t467, melange-circuits t469).
+    // been read as device behaviour (design review, melange-circuits t469).
     if let Some(sp) = nodal_sub_path {
         s.push_str(&format!("\"nodal_subpath\":\"{sp}\","));
     }
-    // Fail-loud stamp (arbiter t467): when the operator overrode the full-LU
+    // Fail-loud stamp (design review): when the operator overrode the full-LU
     // section-glow refusal (`--allow-static-glow-on-full-lu`), the section keys
     // ran INERT (the lit branch is the static maintaining line). Record it so a
     // consumer never mistakes a static-line result for the relaxing-section model.
@@ -571,7 +571,7 @@ fn provenance_json(
     // Glow sub-sample-fire: an object, always present for a glow-bearing deck,
     // carrying mode/active/reason plus the lit-integration manifest axes. A
     // consumer reads `active:false, reason:"dk-route"` instead of inferring
-    // inertness from an absent key (fleet-arbiter thread 303, Q1b).
+    // inertness from an absent key (design review, Q1b).
     if glow.present {
         s.push_str(&format!(
             ",\"subsample_fire\":{{\"mode\":\"{}\",\"active\":{},\"reason\":\"{}\",\"tau_source\":\"{}\",\"lit_integrator\":\"{}\",\"lit_factor\":{}}}",

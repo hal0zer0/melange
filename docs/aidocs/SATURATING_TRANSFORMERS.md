@@ -199,7 +199,7 @@ is a stopgap, not a fix.
 ### 3.4 Verified melange companion-form stamps (Phase 1, current-state)
 
 Decision recorded 2026-08-15: **current-state** (branch current `i_k` stays
-the augmented unknown), resolved by an impartial arbiter against the flux-state
+the augmented unknown), resolved by impartial review against the flux-state
 lean (§8-Q3). The stamps below are derived against melange's *actual* augmented
 MNA and full-LU companion NR — not the abstract residual of §3.2 — and are the
 implementation contract for Phase 1.
@@ -316,7 +316,7 @@ limited to *NFB-free* groups. The `1e30` disable was a **DK/Schur**
 limitation (algebraic loop needs a reactive-delay per feedback loop); the
 full-LU nodal path that saturating transformers force resolves the
 ideal-coupling algebraic constraint by direct LU each sample. An impartial
-arbiter confirmed the full-LU NFB-through-iron solve matches ngspice to
+design review confirmed the full-LU NFB-through-iron solve matches ngspice to
 4–5 significant figures, so Option A (fire for ALL saturating groups,
 subsuming the deferred Phase 4) is solver-sound. NFB-free detection was
 dropped as unnecessary complexity.
@@ -399,8 +399,8 @@ reference to *cite*, not the ngspice target.
 ### Honest acceptance criteria (respecting the B205 no-fabrication lesson)
 
 **No transformer deck in `melange-circuits` currently carries
-core-saturation data** — no ISAT/Bsat/Ae/turns/permeability; schemer has
-none either. Saturation cannot be "switched on"; it requires **new
+core-saturation data** — no ISAT/Bsat/Ae/turns/permeability; upstream schematic
+extraction has none either. Saturation cannot be "switched on"; it requires **new
 per-target authoring and calibration**. Getting ISAT wrong just relocates
 distortion to the wrong drive level. **Do not fabricate core parameters
 to make a deck saturate** — that is exactly the B205 "model non-existent
@@ -486,7 +486,7 @@ sound (§6) — a process/discipline risk, not a code one.
    it from broken symmetry (net DC / imbalance / asymmetric drive), **not** from
    adding hysteresis. Hysteresis remains justified — if a target needs it — by
    **loss, phase lag, and low-frequency-/level-dependent distortion**, but it is
-   NOT the mechanism for H2 on an unbiased core. (Correction, voltron analog-EE
+   NOT the mechanism for H2 on an unbiased core. (Correction, analog-EE
    review 2026-09-13: earlier text here claimed an unbiased H2 target "needs Chan
    hysteresis"; that conflated *hysteretic* with *asymmetric* and is physically
    wrong — the H2 rationale for pulling transformer-hysteresis forward is
@@ -495,7 +495,7 @@ sound (§6) — a process/discipline risk, not a code one.
 2. **Netlist authoring contract** (§3, Phase 3): `ISAT=` on the reference
    winding vs `.core Bsat/Ae/N` vs a volt-second/flux limit; how the
    leakage/magnetizing split and turns vector derive from `L` + `k`; how
-   schemer would ever supply B-H data.
+   upstream schematic extraction would ever supply B-H data.
 3. **Flux-state vs current-state:** quantify the numerics benefit vs the
    state-layout / DC-OP / `v_prev` / OOMOX_CONTRACT blast radius.
 4. **Per-sample continuation** for the knee: port `dc_op` gmin/source

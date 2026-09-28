@@ -5,7 +5,7 @@
 //                      device has D_AMP≠0; `emit_d`)
 // A no-section-no-D glow deck sees NEITHER helper (byte-identical to today).
 {% if emit_lit_eval %}
-// --- Relaxing lit branch (Benson & Bradshaw 1965; voltron/arbiter transfer) ---
+// --- Relaxing lit branch (Benson & Bradshaw 1965; analog-EE review/design review transfer) ---
 //
 // The lit branch is a maintaining line at DC asymptote R_T carrying a stack of
 // DELAYED overvoltages, plus an optional STATIC subnormal term. The transferring
@@ -17,7 +17,7 @@
 // L_i = R_i*τ_i); a zero k_i disables its section with no special case.
 //   κ (`ksub`, default 0) is the STATIC subnormal slope [V per e-fold of I]
 //   anchored at I_n (the rated current I_K, where g = V_m): as I falls, −κ·ln(I/I_n)
-//   RISES (subnormal negative dV/dI at DC). Voltron t422 / Meissner 1941: κ≈2.0.
+//   RISES (subnormal negative dV/dI at DC). analog-EE review / Meissner 1941: κ≈2.0.
 //   It is a STATIC term (not lagged), so at DC (Ī→I ⇒ sections vanish) it gives
 //   the whole gentle rise V_m→V_m+~10 V toward the extinction current; within a
 //   solve the FROZEN sections add +S/I, so the per-solve slope is (S−κ)/I.
@@ -28,7 +28,7 @@
 //     r'(x) = R_T·e^x + (S−κ)   (single-signed ⇒ monotone ⇒ globally convergent
 //                                when R_T=0 (const) OR κ≤S; I = e^x > 0 ALWAYS.
 //                                The R_T>0 && κ>S corner is non-monotone and is
-//                                REJECTED at parse time. For voltron's sets κ≈2 ≪
+//                                REJECTED at parse time. For analog-EE review's sets κ≈2 ≪
 //                                S≈43–94, so S−κ>0 and this is convex as before.)
 // Returns (i_dev, jdev) with jdev = 1/g'(I) = 1/(R_T + (S−κ)/I). g'(I)<0 is
 // possible only in the R_T=0 & κ>S subnormal corner; jdev is then floored to a

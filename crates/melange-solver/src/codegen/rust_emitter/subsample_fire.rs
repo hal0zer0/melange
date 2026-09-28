@@ -94,7 +94,7 @@ pub(super) fn emit_subsample_fire_constants(ir: &CircuitIR) -> String {
         .count();
     let lit_tau = glow_lit_tau_min(ir);
     // Diagnostic lit sub-step multiplier; 0/unset → the 1.0 (tau_min) shipping
-    // default (arbiter t303 — the last tested-safe point).
+    // default (design review — the last tested-safe point).
     let lit_factor = {
         let f = ir.solver_config.subsample_lit_factor;
         if f > 0.0 {
@@ -122,7 +122,7 @@ pub(super) fn emit_subsample_fire_constants(ir: &CircuitIR) -> String {
          pub const SUBSAMPLE_FIRE_LIT_TAU_S: f64 = {lit_tau:e};\n\
          /// Sub-sample fire: diagnostic multiplier on the lit sub-step target\n\
          /// length (`FACTOR * LIT_TAU_S`); default 0.5. Smaller = finer lit\n\
-         /// integration (fleet-arbiter thread 303 demand-3 sweep / lock-margin gate).\n\
+         /// integration (design review demand-3 sweep / lock-margin gate).\n\
          pub const SUBSAMPLE_FIRE_LIT_FACTOR: f64 = {lit_factor:e};\n\
          /// Sub-sample fire: ceiling on lit sub-steps per inner sample.\n\
          pub const SUBSAMPLE_FIRE_LIT_SUBSTEPS_MAX: u32 = 32;\n\

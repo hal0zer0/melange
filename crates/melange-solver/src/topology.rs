@@ -756,7 +756,7 @@ fn check_islands(netlist: &Netlist, ports: &Ports, dangling: &BTreeSet<String>) 
 ///   ground (`mna.rs`, "Simple VCCS"), so the output is DC-tied to ground. The
 ///   inputs stamp `1/RIN` to ground **only when `RIN` is finite**; it defaults
 ///   to `+inf`, which is the ideal op-amp, and an ideal op-amp input is an open
-///   circuit. This is the arbiter's concrete miss: unioning the three op-amp
+///   circuit. This is the design review's concrete miss: unioning the three op-amp
 ///   terminals made a cap-coupled non-inverting input whose bias resistor was
 ///   typo'd away read as "connected to the output".
 /// * **JFET / MOSFET** — channel only. The MOSFET gate is insulated
@@ -1098,7 +1098,7 @@ mod tests {
 
     #[test]
     fn opamp_input_with_its_bias_resistor_gone_is_an_island() {
-        // The arbiter's concrete miss. Unioning all three op-amp terminals made
+        // The design review's concrete miss. Unioning all three op-amp terminals made
         // `np` read as connected through the op-amp to its output.
         let deck = "opamp\n\
                     .model OA OA(AOL=200000 ROUT=100)\n\

@@ -94,7 +94,7 @@ const LAST_ITERS_KEY: &str = "last_nr_iterations";
 const HOLD_KEY: &str = "diag_nr_hold_count";
 /// Schur's equivalent: no hold, so an unconverged sample is committed as
 /// output instead of frozen. Same silent-wrong class, so it is ranked with the
-/// hold and fails the same gates (arbiter t536).
+/// hold and fails the same gates (design review).
 const UNCONVERGED_COMMIT_KEY: &str = "diag_nr_unconverged_commit_count";
 
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -119,7 +119,7 @@ pub enum Class {
     /// sample is not a solution at all. Under constant input the hold is also a
     /// fixed point — the next sample re-poses the identical problem and fails
     /// identically — so one hard sample can freeze a render to its end
-    /// (arbiter t536).
+    /// (design review).
     Held,
 }
 
@@ -479,7 +479,7 @@ pub fn print_section(sets: &[(String, &[Health])]) {
         println!("  ##  Under constant input the hold is a FIXED POINT: the next");
         println!("  ##  sample re-poses the identical problem and fails the same");
         println!("  ##  way, so one hard sample can freeze a render to its end.");
-        println!("  ##  THIS FAILS THE GATE. (arbiter t536)");
+        println!("  ##  THIS FAILS THE GATE. (design review)");
         println!("  ######################################################");
         for (label, h) in &held {
             println!(
@@ -608,7 +608,7 @@ pub fn print_section(sets: &[(String, &[Health])]) {
     } else {
         println!(
             "\n  {} HELD render(s) FAIL this run. Capped-but-recovered counts above \
-             remain report-only — they are a different class (arbiter t536).",
+             remain report-only — they are a different class (design review).",
             held.len()
         );
     }

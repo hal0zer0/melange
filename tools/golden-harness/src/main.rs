@@ -74,7 +74,7 @@ fn main() -> ExitCode {
     // Per-invocation ONLY, never a deck declaration: a netlist cannot know
     // whether it will trip the hold — steve-1073-preamp is clean at 0.035 V and
     // frozen at 0.04 — so a deck-level opt-out would be a claim about inputs its
-    // author never ran (arbiter t536). Stripped here so each subcommand's own
+    // author never ran (design review). Stripped here so each subcommand's own
     // parser does not have to know about it.
     let allow_nr_hold = args.iter().any(|a| a == "--allow-nr-hold");
     args.retain(|a| a != "--allow-nr-hold");

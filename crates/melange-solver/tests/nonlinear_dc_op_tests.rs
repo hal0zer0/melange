@@ -2024,7 +2024,7 @@ fn test_ge_pnp_common_emitter_re_sweep_converges() {
     );
 }
 
-/// Candidate-retention regression (arbiter thread 247). At R_E=10k this germanium
+/// Candidate-retention regression (design review). At R_E=10k this germanium
 /// PNP has a genuine forward-active operating point — ngspice-42: v(e1)=7.262 V,
 /// Ic=73 µA — but |Veb|=0.139 V sits just below the 0.5·vcrit≈0.142 V
 /// active-junction threshold, so ALL three general strategies (Direct NR, source

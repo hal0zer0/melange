@@ -521,7 +521,7 @@ pub struct SolverConfig {
     #[serde(default)]
     pub nodal_sub_path_override: crate::codegen::NodalSubPathOverride,
     /// Escape hatch for the fail-loud refusal of a section/D/KSUB glow on the
-    /// nodal full-LU sub-path (arbiter t467). See
+    /// nodal full-LU sub-path (design review). See
     /// [`crate::codegen::CodegenConfig::allow_static_glow_on_full_lu`].
     #[serde(default)]
     pub allow_static_glow_on_full_lu: bool,
@@ -1529,7 +1529,7 @@ fn zero_augmented_history_rows(
     // algebraic VS/inductor constraint rows — they must KEEP their trapezoidal
     // history (A_neg row = alpha*C - G). Zeroing them makes the DC OP not a trap
     // fixed point, which kicks a z=-1 (-1)^n ring on the (capacitor-less) collector
-    // row. Exclude them, mirroring dk.rs's is_bjt_internal mask. (Arbiter t319,
+    // row. Exclude them, mirroring dk.rs's is_bjt_internal mask. (design review,
     // 2026-09-13; verified via the parasitic-RB trap ring / noise test.)
     let mut is_bjt_internal = vec![false; mna_n_aug];
     for bn in bjt_internal {
@@ -2989,7 +2989,7 @@ impl CircuitIR {
         // A_neg_be — but EXCLUDE parasitic-BJT internal nodes, which are physical
         // G/C nodes that must keep their trapezoidal history (zeroing them makes the
         // DC OP not a trap fixed point → a z=-1 collector-row ring). The helper masks
-        // them out; this inline loop previously did not (arbiter t319 root fix).
+        // them out; this inline loop previously did not (design review root fix).
         zero_augmented_history_rows(&mut a_neg_flat, n, n_nodes, n_aug, &mna.bjt_internal_nodes);
         zero_augmented_history_rows(
             &mut a_neg_be_flat,
@@ -3082,7 +3082,7 @@ impl CircuitIR {
         // unconditionally (`alpha = 4/T`, history `alpha*C - G`), so a deck
         // running backward Euler got trap sub-steps behind its back — a
         // violated directive, and the recovery path is exactly where a scheme
-        // difference shows, since it fires at discontinuities (arbiter t536).
+        // difference shows, since it fires at discontinuities (design review).
         let alpha_sub = if be {
             internal_rate * 2.0 // BE: alpha = 1/T, at 2x rate
         } else {
@@ -3223,7 +3223,7 @@ impl CircuitIR {
         // (rho=0.8157, nowhere near the marginal window) no matter what the
         // less-accurate router number claims.
         let clauses_fire = crate::codegen::stability::trap_needs_be(trap_stability);
-        // Arbiter t319 (2026-09-13): on a POSITIVE dominant sign, clause 1 promotes
+        // design review (2026-09-13): on a POSITIVE dominant sign, clause 1 promotes
         // to BE only if BE actually STABILIZES the mode (rho_be <= limit). This
         // distinguishes a numerical marginal +1 mode BE removes (e.g. an expanded
         // parasitic-RB common-emitter stage whose trap map holds a stationary +1
@@ -6094,7 +6094,7 @@ impl CircuitIR {
         // static log term is folded into the section-branch g(I) — a KSUB-only
         // deck would emit the static linear path and silently drop it). The
         // R_T>0 && κ>ΣK corner makes the inner-Newton residual r'(x)=R_T·eˣ+(S−κ)
-        // change sign (two roots / none) — reject it; R_T=0 (voltron's authoring)
+        // change sign (two roots / none) — reject it; R_T=0 (analog-EE authoring guidance)
         // or κ≤ΣK stays single-signed and globally convergent.
         if !ksub.is_finite() || ksub < 0.0 {
             return Err(CodegenError::InvalidConfig(format!(

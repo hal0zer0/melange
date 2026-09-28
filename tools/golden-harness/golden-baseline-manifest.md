@@ -90,7 +90,7 @@ changes.**
 
 > **Regression + fix note.** The interim `83bf48d` baseline carried a
 > tungsten-thunder-horse line-search regression (idle output collapsed to 0.0). `e53573c`
-> (arbiter-endorsed) makes a line-search **failure** fall through instead of bailing to the
+> (review-endorsed) makes a line-search **failure** fall through instead of bailing to the
 > removed fallback, and tungsten re-converges to main. The `83bf48d`→`e53573c` compare is
 > **surgical**: only tungsten changed (181 identical, 0 other circuits affected), inverting
 > the regression almost exactly (step −10.465 dB, silence −5.851 dB).

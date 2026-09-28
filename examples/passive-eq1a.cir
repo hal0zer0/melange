@@ -236,7 +236,7 @@ R_in_shunt eq_in 0 620
 * (later third-party addition — see
 * provenance record); it was adopted on measured evidence against the
 * prior ABSounds/SIMetrix reconstruction, with factory curves + hardware
-* measurements as arbiter:
+* measurements as design review:
 *   - prior LF Atten control was electrically DEAD (max = flat, bit-
 *     identical); p6 gives the documented ~-17..19 dB shelf
 *   - prior Bandwidth control was nearly dead (sharp-broad delta 1.4 dB);

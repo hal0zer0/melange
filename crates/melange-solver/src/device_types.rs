@@ -1072,7 +1072,7 @@ pub struct LdrParams {
 /// * **Sections present** (≥1 non-zero `k`): the lit branch is the RELAXING
 ///   maintaining line of Benson & Bradshaw (1965) — a DC asymptote `r_t`
 ///   carrying a stack of DELAYED overvoltages. The transferring large-signal
-///   form (voltron, arbiter 2026-09-15) is the nonlinear lagged-current
+///   form (analog-EE review, design review-09-15) is the nonlinear lagged-current
 ///   overvoltage
 ///   `v_d = v0 + i·r_t + Σ_i k_i·ln( max(i,ifloor) / Ī_i )`,
 ///   `dĪ_i/dt = (i − Ī_i)/τ_i`, where `Ī_i` is a first-order lag of the tube
@@ -1143,7 +1143,7 @@ pub struct GlowParams {
     /// EXACTLY to the prior `V0 + I·R_T + Σ k_i·ln(I/Ī_i)`. When non-zero it adds a
     /// STATIC `−κ·ln(I/i_n)` to the maintaining line: as the current falls the lit
     /// voltage RISES (the subnormal negative dV/dI at DC), anchored so `g = V_m` at
-    /// the rated current `i_n`. Requires ≥1 active section (validated). Voltron
+    /// the rated current `i_n`. Requires ≥1 active section (validated). analog-EE review
     /// t422 / Meissner 1941: κ ≈ 2.0 V/e-fold for the 0.1 % Ar class.
     #[serde(default)]
     pub ksub: f64,

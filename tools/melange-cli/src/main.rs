@@ -931,7 +931,7 @@ fn main() -> Result<()> {
     // build-time-static version string cannot carry. A version+commit is a
     // source-side pointer that cannot see a dirty tree or a different
     // feature/profile build; two binaries at one commit printed the same string
-    // and a peer published from each (robogogo thread 288). We honour the flag
+    // and a peer published from each (cross-project review). We honour the flag
     // the way clap would: only at the top level, before any subcommand.
     for arg in std::env::args().skip(1) {
         if arg == "-V" || arg == "--version" {
@@ -1676,7 +1676,7 @@ fn resolve_oversampling(explicit_cli: Option<usize>, recommended: Option<usize>)
 }
 
 /// Diagnostic lit sub-step multiplier (`MELANGE_LIT_FACTOR` env var) for the
-/// fleet-arbiter demand-3 sweep / lock-margin gate (robogogo thread 303).
+/// design review demand-3 sweep / lock-margin gate (cross-project review).
 /// Deliberately an env var, not a CLI flag — a throwaway diagnostic knob. The
 /// resolved value is recorded in the provenance manifest (`lit_factor`), so a
 /// swept measurement carries its own build identity. Default 0.5 (= tau/2).
@@ -2565,8 +2565,8 @@ fn compile_circuit_source(
         // as the deciding value when the trigger was `s-ill-conditioned`
         // (max|S| = 5.00e8) and 0.9879 is below every rho threshold. A confident
         // wrong reason is worse than no reason: the line was added to stop a
-        // reader mis-attributing a route (arbiter t467) and then mis-attributed
-        // one itself (arbiter t536). rho stays, as context, labelled as context.
+        // reader mis-attributing a route (design review) and then mis-attributed
+        // one itself (design review). rho stays, as context, labelled as context.
         match generated.meta.nodal_full_lu_trigger {
             Some(trigger) => println!(
                 "    Nodal NR sub-path: {sp} (nodal Newton; not DK node-expansion; \
@@ -4519,7 +4519,7 @@ fn simulate_circuit_source(
     // bounded and smooth, so peak, RMS and the waveform all read healthy.
     //
     // Fail, do not warn. The whole failure mode is that it looks fine
-    // (arbiter t536).
+    // (design review).
     if let Some(held) = nr_hold_count.filter(|h| *h > 0) {
         let of = diag_samples
             .map(|s| format!(" of {s} output samples"))

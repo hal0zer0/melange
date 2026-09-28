@@ -501,7 +501,7 @@ pub struct CodegenConfig {
     pub nodal_sub_path_override: NodalSubPathOverride,
     /// Escape hatch for the fail-loud refusal of a relaxing-section / delayed-
     /// overvoltage / subnormal (KSUB) glow on the nodal full-LU sub-path
-    /// (arbiter ruling t467). By default `compile` REFUSES that combination: the
+    /// (design review). By default `compile` REFUSES that combination: the
     /// full-LU device eval runs the static maintaining line for the lit branch
     /// while the strike seed and extinction test read the section model — a
     /// mixed, silently-wrong model that has masqueraded as a circuit failure.
@@ -588,14 +588,14 @@ pub struct CodegenConfig {
     pub subsample_fire: SubsampleFireMode,
     /// Diagnostic multiplier on the lit sub-step target length (`factor * tau`,
     /// where tau = `glow_lit_tau_min`). Default **1.0** — the last tested-safe
-    /// point: the lock-margin sweep (fleet-arbiter thread 303) was flat from
+    /// point: the lock-margin sweep (design review) was flat from
     /// x = h/tau_true ≈ 0.017 to ≈ 1.1, and factor 1.0 keeps even a deck where
     /// the heuristic is EXACT (tau_min == tau_true) at x = 1.0, inside that
     /// ceiling; 2.0 would put it at x = 2, outside anything measured. Smaller =
     /// finer (0.5 buys nothing over 1.0 at ~36% more CPU). Diagnostic bisection
     /// tool (family of `--force-trap`), NOT a per-deck tuning knob.
     /// NOTE: if tau is ever DERIVED from the actual discharge loop, the factor
-    /// becomes x directly and this default must be re-taken (arbiter t303).
+    /// becomes x directly and this default must be re-taken (design review).
     pub subsample_lit_factor: f64,
 }
 
