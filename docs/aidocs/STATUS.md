@@ -315,6 +315,23 @@ and compilation are necessary but not sufficient).
 
 ## Pending Work
 
+- **⭐ TRIODE GRID CURRENT FAILS ITS ACCEPTANCE TEST — sub-µA branch specified, not built** (opened 2026-09-27, arbiter t593, voltron t592). Dempwolf & Zölzer eq. (11) as shipped in 0.1.10 reaches the 0.3 µA criterion **0.26–0.35 V too late**: −0.26..−0.35 V against the **−0.61 V** implied by the Philips ECC83 (Jan 1970) AF-amplifier block's own five columns, which agree to sd 0.067 V across a 2× range of `Vb` and 2.75× of `Rk`. Fails **15/15 cells** (3 Table 1 rows × 5 `Vb`) under *both* readings of the criterion; the verdict does not flip. It ships because the hard-zero law it replaced is 0.61 V out in the same direction — less wrong, not right. Full evidence in `CHANGELOG.md` 0.1.10 and `docs/limitations.md` → Triode.
+
+  **This is in scope, not an inaudible tail:** 0.3 µA into a following stage's 680 kΩ grid leak is ~0.2 V of bias shift, i.e. where blocking and bias-shift distortion begin in cascaded stages.
+
+  **Shape of the fix, as constrained by arbiter (do not freelance around these):**
+  - A **sub-µA branch alongside eq. (11)**, blended smoothly — *not* a refit of eq. (11), whose conducting-region fit is the part that works.
+  - Its **form and slope come from physics**, pending voltron (t592): the candidate is initial-velocity / Edison emission, exponential with an e-fold set by cathode temperature (~kT/q ≈ 0.09–0.10 V at an oxide cathode) against eq. (11)'s tail e-fold of 63–77 mV.
+  - Its **level may be anchored only by documented STATIC device data**, and **must NOT be fitted to the AF table**, which is what keeps that table an out-of-sample check.
+  - ⚠️ **Philips' static −0.9 V is a LIMIT (max), not a typical.** Do not anchor a typical tail on a limit.
+  - Closing the gap through `Gg` alone would need **28.7×–257×**, where D&Z's own three tubes span 1.89× — so it is not a tube-to-tube parameter spread, and no single-knob refit is the answer.
+
+  **Blocked on:** voltron's physics reply (t592). **Then:** implementation + re-run the acceptance. The remaining four blocks of the sheet (47 kΩ, 100 kΩ, both phase-inverters) are with schemer (t591) and are genuinely unseen by melange — they stay that way until the run.
+
+- **⭐ KOREN ECC83 PLATE CARD OVER-COMPRESSES 1.32×–2.26×** (opened 2026-09-27; predates the grid law and is a *separate* item). At the Philips sheet's printed `Vo` the shipped card (`mu=100 ex=1.4 Kg1=1060 Kp=600 Kvb=300`, Koren's published 1996 set) reads THD 6.08/4.80/4.50/3.12/2.49 % against the printed 4.6/3.4/2.6/1.6/1.1 %, and runs `Ia` 2–10 % **low** (323.7/449.9/595.5/809.0/999.0 µA vs 360/480/630/850/1020). Measured at 192 kHz with a non-commensurate 997 Hz tone — a commensurate read (1 kHz at 48 kHz) folds aliases onto harmonic bins and cannot see its own aliasing.
+
+  **⭐ STANDING RULE from arbiter: every future grid-current check at these operating points MUST report the plate model's share**, because the two errors run in opposite directions and partly cancel at the output — over-compression depresses `Vo` at the criterion, so an output-voltage comparison alone *understates* the grid-side error.
+
 - ~~**`melange simulate --switch "Label=pos"`**~~ **DONE** (verified 2026-09-22): the flag exists on `simulate` (`--switch <NAME=POS>`, `main.rs:4439` builds `switch_calls` from `switch_runtime_overrides`) and a `--switch "Tone=2"` run resolves and applies the position. This entry was stale.
 - **Switch/pot z=−1 intrinsic to hard-switching (not just `.switch`):** beyond the `.switch` G-swap fix (Deferred), the trap z=−1 mode on capless subspaces is re-excited by ANY hard-switching edge (BJT edges in the g10 divider re-excite it every ~160 samples → openfarf's residual wanders 0.9–4.9% with no decay). Existing nodal auto-BE gates on ρ>1.002; a marginal z=−1 (ρ=1) may slip it — likely gap. Grader for this case: CLI == codegen window-for-window on the g10 chain keyed closed (not a 1e-7 target).
 - **Neve 1073**: EQ section (Stage 3), integration (Stage 4), plugin (Stage 5). Stages 1 & 2 BA283 amps SPICE-validated.
