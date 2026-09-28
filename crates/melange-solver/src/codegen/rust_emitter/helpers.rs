@@ -1938,3 +1938,95 @@ pub fn dc_op_by_name(name: &str) -> Option<f64> {
     None
 }
 ";
+
+/// MOSFETs whose threshold moves with Vsb: `(k, dev_num, slot, params)`,
+/// with `k` the index into the per-iteration `body_gmb` array.
+pub(super) fn body_effect_mosfets(
+    ir: &CircuitIR,
+) -> Vec<(
+    usize,
+    usize,
+    &crate::device_types::DeviceSlot,
+    &crate::device_types::MosfetParams,
+)> {
+    ir.device_slots
+        .iter()
+        .enumerate()
+        .filter_map(|(dev_num, slot)| match &slot.params {
+            crate::codegen::ir::DeviceParams::Mosfet(mp) if mp.has_body_effect() => {
+                Some((dev_num, slot, mp))
+            }
+            _ => None,
+        })
+        .enumerate()
+        .map(|(k, (dev_num, slot, mp))| (k, dev_num, slot, mp))
+        .collect()
+}
+
+/// MOSFET body effect at the live Newton iterate, for the Schur-form loops
+/// (DK and nodal Schur), where the unknowns are `i_nl` and every node voltage
+/// is affine in them: `v = v_pred + S_NI·i_nl`. Emits, per body-effect MOSFET,
+/// the threshold at this iterate (`state.device_{d}_vt`) and
+/// `body_{d}_dvt = dVT/dVsb` (0 while `Vsb <= 0`, where the model clamps).
+/// Pair with [`body_effect_jacobian_term`]. Taking Vsb from `v_pred` alone
+/// leaves out the device's own current, which in a follower is what sets its
+/// source.
+pub(super) fn emit_body_effect_at_iterate(
+    code: &mut String,
+    ir: &CircuitIR,
+    v_pred: &str,
+    s_ni: &str,
+    indent: &str,
+) {
+    let m = ir.topology.m;
+    for (_k, dev_num, _slot, mp) in body_effect_mosfets(ir) {
+        let node = |idx: usize| {
+            if idx > 0 {
+                let r = idx - 1;
+                let mut e = format!("{v_pred}[{r}]");
+                for j in 0..m {
+                    e.push_str(&format!(" + {s_ni}[{r}][{j}] * i_nl[{j}]"));
+                }
+                e
+            } else {
+                "0.0".to_string()
+            }
+        };
+        let sign = if mp.is_p_channel { -1.0 } else { 1.0 };
+        code.push_str(&format!(
+            "{indent}// MOSFET {dev_num} body effect at this iterate\n\
+             {indent}let body_{dev_num}_vsb = ({sign:.1}) * (({}) - ({}));\n\
+             {indent}state.device_{dev_num}_vt = DEVICE_{dev_num}_VT + ({sign:.1}) * DEVICE_{dev_num}_GAMMA * ((DEVICE_{dev_num}_PHI + body_{dev_num}_vsb.max(0.0)).sqrt() - DEVICE_{dev_num}_PHI.sqrt());\n\
+             {indent}let body_{dev_num}_dvt = if body_{dev_num}_vsb > 0.0 {{ DEVICE_{dev_num}_GAMMA / (2.0 * (DEVICE_{dev_num}_PHI + body_{dev_num}_vsb).sqrt()) }} else {{ 0.0 }};\n",
+            node(mp.source_node),
+            node(mp.bulk_node)
+        ));
+    }
+}
+
+/// The body-effect term of `J[i][j]` in a Schur-form Newton loop, empty unless
+/// row `i` is a body-effect MOSFET's Id row. `dId/dVT = −gm = −jdev_{i}_{i+1}`
+/// (the Vgs column) and `dVT/di_j = dVT/dVsb · (S_NI[src][j] − S_NI[bulk][j])`
+/// (the channel sign squares away), so the residual `i − Id` gains
+/// `+gm·dVT/dVsb·(S_NI[src][j] − S_NI[bulk][j])`.
+pub(super) fn body_effect_jacobian_term(ir: &CircuitIR, i: usize, j: usize, s_ni: &str) -> String {
+    let Some((_, dev_num, _, mp)) = body_effect_mosfets(ir)
+        .into_iter()
+        .find(|b| b.2.start_idx == i)
+    else {
+        return String::new();
+    };
+    let col = |idx: usize| {
+        if idx > 0 {
+            format!("{s_ni}[{}][{j}]", idx - 1)
+        } else {
+            "0.0".to_string()
+        }
+    };
+    format!(
+        " + jdev_{i}_{} * body_{dev_num}_dvt * ({} - {})",
+        i + 1,
+        col(mp.source_node),
+        col(mp.bulk_node)
+    )
+}

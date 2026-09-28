@@ -130,6 +130,26 @@ pub fn compute_g_aug_pattern(
         }
     }
 
+    // MOSFET body effect: Id also depends on V(source) and V(bulk) through
+    // the threshold, so its injection rows get those two columns too. This
+    // must mirror `nodal_emitter::emit_body_gmb_stamp`. The source column is
+    // usually already present (it is in Vds and Vgs); the bulk column is not,
+    // unless the bulk is grounded.
+    for slot in device_slots {
+        if let crate::device_types::DeviceParams::Mosfet(mp) = &slot.params {
+            if !mp.has_body_effect() || slot.start_idx >= m {
+                continue;
+            }
+            for &a in &ni_nz_by_dev[slot.start_idx] {
+                for node in [mp.source_node, mp.bulk_node] {
+                    if node > 0 && node - 1 < n {
+                        pattern[a].insert(node - 1);
+                    }
+                }
+            }
+        }
+    }
+
     // Behavioral B-source Jacobian stamp positions. This must mirror
     // `nodal_emitter::emit_behavioral_jacobian` exactly, which stamps:
     //

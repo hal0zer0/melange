@@ -1114,5 +1114,11 @@
     "why": "The adaptive sub-step and backward-Euler fallback loops check the saturating-inductor flux row the same way as the main loop (step check on the branch-current row, flux-row residual).",
     "vs_previous": "180 identical, 0 negligible, 0 changed; 0 held and 0 not-converged on both sides.",
     "generated_source": "Differs on the five saturating decks only (the added checks in the two recovery loops). No golden render reaches either recovery loop on a saturating deck."
+  },
+  "rebaseline_2026_09_28_mosfet_body_effect": {
+    "why": "MOSFET body effect: node resolution (89a45ab) + live-iterate Vt with gmb (DK and full-LU). The DC operating point left body effect out on every nodal build, and the DK/nodal-Schur transient took Vsb from the linear prediction (missing the device's own current).",
+    "vs_0ddf38f": "172 identical, 0 negligible, 8 changed, all on the two MOSFET decks; 0 held and 0 not-converged on both sides.",
+    "changed": "mosfet-choke-load (nodal full-LU): silence -151 dB (the 5.4 V / 286 V-peak startup swing from the wrong bias is gone), step -2.6 dB, sine1k/sweep within 0.002 dB. mosfet-source-follower (DK): silence -95 dB, sine1k -0.78 dB and sweep -0.72 dB (the stage was 8 % hot on H1 with a ninth of ngspice's H2; now matches ngspice to 3e-6 on H1), step -4.6 dB.",
+    "generated_source": "Differs on the two MOSFET decks only."
   }
 }

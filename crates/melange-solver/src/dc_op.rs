@@ -1835,6 +1835,57 @@ struct DcCircuit<'a> {
     is_voltage_row: &'a [bool],
 }
 
+/// MOSFET body-effect transconductance at the node iterate `v`.
+///
+/// The model's threshold is `VT + s·GAMMA·(√(PHI + max(Vsb, 0)) − √PHI)` with
+/// `Vsb = s·(V(source) − V(bulk))` (see [`evaluate_devices_inner`]), and the
+/// drain current depends on it only through the overdrive `vc − s·VT`, so
+/// `∂Id/∂VT = −∂Id/∂Vgs = −gm` in every region and for both channel types.
+/// With `s² = 1` the chain rule gives `∂Id/∂V(source) = −gmb` and
+/// `∂Id/∂V(bulk) = +gmb`, where `gmb = gm·GAMMA / (2√(PHI + Vsb))` for
+/// `Vsb > 0` and 0 otherwise (the model clamps `Vsb` at 0).
+///
+/// Returns `(id_row, source_node, bulk_node, gmb)` per MOSFET with body
+/// effect; node indices are 1-based (0 = ground, contributes nothing).
+/// Without this term the Newton Jacobian misses how the device's own current
+/// moves its threshold (a follower's source is set by that current), so the
+/// threshold converges by fixed-point iteration, linearly, and the delta stop
+/// leaves a one-signed remainder under bias.
+fn mosfet_gmb_terms(
+    device_slots: &[DeviceSlot],
+    j_dev: &[f64],
+    m: usize,
+    v: &[f64],
+) -> Vec<(usize, usize, usize, f64)> {
+    let node = |idx: usize| {
+        if idx > 0 {
+            v.get(idx - 1).copied().unwrap_or(0.0)
+        } else {
+            0.0
+        }
+    };
+    let mut out = Vec::new();
+    for slot in device_slots {
+        if let DeviceParams::Mosfet(mp) = &slot.params {
+            if !mp.has_body_effect() || slot.dimension < 2 {
+                continue;
+            }
+            let sign = if mp.is_p_channel { -1.0 } else { 1.0 };
+            let vsb = sign * (node(mp.source_node) - node(mp.bulk_node));
+            if vsb <= 0.0 {
+                continue;
+            }
+            let id_row = slot.start_idx;
+            let gm = j_dev[id_row * m + id_row + 1];
+            let gmb = gm * mp.gamma / (2.0 * (mp.phi + vsb).sqrt());
+            if gmb.is_finite() && gmb != 0.0 {
+                out.push((id_row, mp.source_node, mp.bulk_node, gmb));
+            }
+        }
+    }
+    out
+}
+
 /// Uses companion formulation at each iteration:
 ///   G_aug = G_dc - N_i · J_dev · N_v
 ///   rhs = b_dc + N_i · (i_nl - J_dev · v_nl)
@@ -2008,6 +2059,25 @@ fn nr_dc_solve(
                 *g_aug_ab -= sum;
             }
         }
+        // Body effect: Id also depends on V(source) and V(bulk) through the
+        // threshold, outside the device's own controlling voltages. Stamp that
+        // node-space column and linearise it in the companion below, so the
+        // Newton fixed point is unchanged and convergence is quadratic.
+        let gmb_terms = mosfet_gmb_terms(device_slots, &j_dev, m, v);
+        for &(row, s_node, b_node, gmb) in &gmb_terms {
+            for (a, g_aug_a) in g_aug.iter_mut().enumerate().take(n_dc) {
+                let ni = dc_n_i[a][row];
+                if ni == 0.0 {
+                    continue;
+                }
+                if s_node > 0 && s_node - 1 < n_dc {
+                    g_aug_a[s_node - 1] += ni * gmb;
+                }
+                if b_node > 0 && b_node - 1 < n_dc {
+                    g_aug_a[b_node - 1] -= ni * gmb;
+                }
+            }
+        }
 
         // 4. Build companion RHS: rhs = b_dc_scaled + dc_N_i · (i_nl - J_dev · v_nl)
         //    Source stepping scales ALL sources (both current sources in node rows AND
@@ -2030,7 +2100,13 @@ fn nr_dc_solve(
             for j in 0..m {
                 jdev_vnl_i += j_dev[i * m + j] * v_nl[j];
             }
-            let i_comp = i_nl[i] - jdev_vnl_i;
+            let mut i_comp = i_nl[i] - jdev_vnl_i;
+            for &(row, s_node, b_node, gmb) in &gmb_terms {
+                if row == i {
+                    let at = |n: usize| if n > 0 { v[n - 1] } else { 0.0 };
+                    i_comp += gmb * (at(s_node) - at(b_node));
+                }
+            }
 
             // Inject into RHS: rhs[a] += dc_N_i[a][i] * i_comp
             for (a, rhs_a) in rhs.iter_mut().enumerate().take(n_dc) {

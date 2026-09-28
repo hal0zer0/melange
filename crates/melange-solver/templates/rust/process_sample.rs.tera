@@ -62,13 +62,10 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
 
     // Step 3: Extract controlling voltages for nonlinear devices
     let p = extract_controlling_voltages(&v_pred);
-{% if body_effect_update is defined and body_effect_update != "" %}
 
-    // Step 3c: MOSFET body effect — update VT from predicted node voltages
-{{ body_effect_update }}{% endif %}
 
     // Step 4: Solve M×M nonlinear system via Newton-Raphson
-    let i_nl = solve_nonlinear(&p, state);
+    let i_nl = solve_nonlinear(&p, {% if dk_body_effect %}&v_pred, {% endif %}state);
 
     // Step 5: Compute final node voltages
     let {% if opamp_clamps is defined and opamp_clamps | length > 0 %}mut {% endif %}v = compute_final_voltages(&v_pred, &i_nl, state);
@@ -145,7 +142,7 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
         // BE NR solve: swap k/k_be so solve_nonlinear uses BE kernel
         std::mem::swap(&mut state.k, &mut state.k_be);
         std::mem::swap(&mut state.s_ni, &mut state.s_ni_be);
-        let i_nl_be = solve_nonlinear(&p_be, state);
+        let i_nl_be = solve_nonlinear(&p_be, {% if dk_body_effect %}&v_pred_be, {% endif %}state);
         std::mem::swap(&mut state.k, &mut state.k_be);
         std::mem::swap(&mut state.s_ni, &mut state.s_ni_be);
         // Recover full v from BE

@@ -435,10 +435,14 @@ it can never **be** the evidence for one.
 ## Coverage closed
 
 * **MOSFET / JFET** — were implemented and SPICE-validated with **zero** circuits
-  anywhere. Three decks added (`150bda6`). The MOSFET pair is the point: DK
-  evaluates body effect **once per sample from `v_pred`**, nodal **three times
-  from the live NR iterate**. Both legitimate; collapsing them is what an
-  over-abstracted device-eval IR would do.
+  anywhere. Three decks added (`150bda6`). The MOSFET pair covers both solver
+  families. Body effect is evaluated at the **live Newton iterate on every
+  path** — DK and nodal Schur from `v = v_pred + S_NI·i_nl`, full-LU from the
+  node iterate — with gmb = gm·dVT/dVsb in the Jacobian, and the DC operating
+  point the same way. Taking Vsb from `v_pred` alone (the old DK/Schur form)
+  leaves out the device's own current; in a follower that current sets the
+  source, and the stage settled 1 V high, 8 % hot on H1. Pinned against
+  ngspice by `mosfet_body_effect_tests.rs`.
 * **Pentode ngspice validation** (`a62ddad`) — 10 library decks / 4 corpus decks
   had no oracle at all.
 

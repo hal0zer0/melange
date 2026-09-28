@@ -3173,44 +3173,12 @@ impl RustEmitter {
         // a_neg_correction / s_correction / sni_correction context vars are
         // emitted; the templates never referenced them.
 
-        // MOSFET body effect: compute VT_eff from v_pred before NR (DK path only)
-        let mut body_effect_update = String::new();
-        if ir.solver_mode == crate::codegen::ir::SolverMode::Dk {
-            for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-                if let DeviceParams::Mosfet(mp) = &slot.params {
-                    if mp.has_body_effect() {
-                        // Extract Vsb from v_pred (node indices are 1-based; 0 = ground)
-                        let vs_expr = if mp.source_node > 0 {
-                            format!("v_pred[{}]", mp.source_node - 1)
-                        } else {
-                            "0.0".to_string()
-                        };
-                        let vb_expr = if mp.bulk_node > 0 {
-                            format!("v_pred[{}]", mp.bulk_node - 1)
-                        } else {
-                            "0.0".to_string()
-                        };
-                        let sign = if mp.is_p_channel { -1.0 } else { 1.0 };
-                        // The body-effect shift must be applied in the
-                        // channel's effective (magnitude) space: the stored VT
-                        // is signed (negative for PMOS — device_mosfet.rs.tera
-                        // does vt_eff = sign * vt), so the GAMMA term is
-                        // multiplied by the channel sign. Reverse body bias
-                        // then always *increases* |VT|; without the sign a
-                        // PMOS |VT| would shrink instead.
-                        body_effect_update.push_str(&format!(
-                                "    {{ // MOSFET {dev_num} body effect\n\
-                                 \x20       let vsb = ({sign:.1}) * ({vs_expr} - {vb_expr});\n\
-                                 \x20       state.device_{dev_num}_vt = DEVICE_{dev_num}_VT + ({sign:.1}) * DEVICE_{dev_num}_GAMMA * ((DEVICE_{dev_num}_PHI + vsb.max(0.0)).sqrt() - DEVICE_{dev_num}_PHI.sqrt());\n\
-                                 \x20   }}\n"
-                            ));
-                    }
-                }
-            }
-        }
-        if !body_effect_update.is_empty() {
-            ctx.insert("body_effect_update", &body_effect_update);
-        }
+        // MOSFET body effect: VT is re-evaluated inside solve_nonlinear at every
+        // Newton iterate (V(source), V(bulk) = v_pred + S_NI·i_nl), with gmb in
+        // the Jacobian; solve_nonlinear then needs v_pred.
+        let dk_body_effect = ir.solver_mode == crate::codegen::ir::SolverMode::Dk
+            && !super::helpers::body_effect_mosfets(ir).is_empty();
+        ctx.insert("dk_body_effect", &dk_body_effect);
 
         // Device self-heating thermal update (after NR, before state save).
         // Runs for each BJT/diode whose `.model` sets a finite RTH. Uses the

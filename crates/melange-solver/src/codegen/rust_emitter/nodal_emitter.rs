@@ -10,7 +10,8 @@ use super::dk_emitter::{
     emit_inject_tap_constants, emit_noise_replay_body, emit_warmup_call, NoiseEmission,
 };
 use super::helpers::{
-    device_param_template_data, emit_glow_lit_be_hold, emit_pentode_nr_dk_stamp,
+    body_effect_jacobian_term, body_effect_mosfets, device_param_template_data,
+    emit_body_effect_at_iterate, emit_glow_lit_be_hold, emit_pentode_nr_dk_stamp,
     emit_stateful_default_fields, emit_stateful_set_sample_rate_body, emit_stateful_state_fields,
     emit_stateful_state_restore, emit_stateful_update, emit_thermal_tj_advance, fmt_f64,
     format_matrix_rows, has_latched_device, oversampling_info, pentode_dispatch,
@@ -95,6 +96,70 @@ fn ni_nonzeros_by_dev(ir: &CircuitIR, m: usize) -> Vec<Vec<usize>> {
 //
 // `alpha` is the site-local integrator scalar expression (`2·rate·OS` trap,
 // `1·rate·OS` BE, `alpha_sub` sub-step) — this is what makes BE composition free.
+
+/// Stamp each body-effect MOSFET's `gmb` into the node-space Jacobian `mat`:
+/// `∂Id/∂V(source) = −gmb`, `∂Id/∂V(bulk) = +gmb` (see
+/// `dc_op::mosfet_gmb_terms` for the derivation), injected through the Id
+/// column of N_I with the same `MAT −= N_I·∂i/∂v` convention as
+/// [`emit_nodal_jacobian_stamp`]. `lu::compute_g_aug_pattern` carries the same
+/// positions.
+fn emit_body_gmb_stamp(code: &mut String, ir: &CircuitIR, mat: &str, gmb: &str, indent: &str) {
+    let (n, m) = (ir.topology.n, ir.topology.m);
+    for (k, _dev_num, slot, mp) in body_effect_mosfets(ir) {
+        let row = slot.start_idx;
+        for a in 0..n {
+            let ni = ir.matrices.n_i[a * m + row];
+            if ni == 0.0 {
+                continue;
+            }
+            if mp.source_node > 0 {
+                code.push_str(&format!(
+                    "{indent}{mat}[{a}][{}] += N_I[{a}][{row}] * {gmb}[{k}];\n",
+                    mp.source_node - 1
+                ));
+            }
+            if mp.bulk_node > 0 {
+                code.push_str(&format!(
+                    "{indent}{mat}[{a}][{}] -= N_I[{a}][{row}] * {gmb}[{k}];\n",
+                    mp.bulk_node - 1
+                ));
+            }
+        }
+    }
+}
+
+/// Companion term matching [`emit_body_gmb_stamp`]: the linearisation of Id's
+/// source/bulk dependence at the iterate `it`, `+gmb·(V(source) − V(bulk))`
+/// on the Id column, so the Newton fixed point is unchanged.
+fn emit_body_gmb_companion(
+    code: &mut String,
+    ir: &CircuitIR,
+    rhs: &str,
+    gmb: &str,
+    it: &str,
+    indent: &str,
+) {
+    let (n, m) = (ir.topology.n, ir.topology.m);
+    for (k, _dev_num, slot, mp) in body_effect_mosfets(ir) {
+        let row = slot.start_idx;
+        let node = |idx: usize| {
+            if idx > 0 {
+                format!("{it}[{}]", idx - 1)
+            } else {
+                "0.0".to_string()
+            }
+        };
+        let (vs, vb) = (node(mp.source_node), node(mp.bulk_node));
+        for a in 0..n {
+            if ir.matrices.n_i[a * m + row] == 0.0 {
+                continue;
+            }
+            code.push_str(&format!(
+                "{indent}{rhs}[{a}] += N_I[{a}][{row}] * {gmb}[{k}] * ({vs} - {vb});\n"
+            ));
+        }
+    }
+}
 
 /// Where an active-set pinned resolve is emitted.
 ///
@@ -3239,6 +3304,12 @@ impl RustEmitter {
             code.push_str("    pub chord_perm: [usize; N],\n");
             code.push_str("    /// Device Jacobian consistent with chord_lu (for companion RHS)\n");
             code.push_str("    pub chord_j_dev: [f64; M * M],\n");
+            let nb = body_effect_mosfets(ir).len();
+            if nb > 0 {
+                code.push_str(&format!(
+                    "    /// MOSFET body-effect transconductance frozen with the chord.\n    pub chord_body_gmb: [f64; {nb}],\n"
+                ));
+            }
             code.push_str(
                 "    /// Whether chord LU factors are valid (false until first convergence)\n",
             );
@@ -3575,6 +3646,10 @@ impl RustEmitter {
             code.push_str("            chord_dc: [1.0; N],\n");
             code.push_str("            chord_perm: {{ let mut p = [0usize; N]; let mut i = 0; while i < N { p[i] = i; i += 1; } p }},\n");
             code.push_str("            chord_j_dev: [0.0; M * M],\n");
+            let nb = body_effect_mosfets(ir).len();
+            if nb > 0 {
+                code.push_str(&format!("            chord_body_gmb: [0.0; {nb}],\n"));
+            }
             code.push_str("            chord_valid: false,\n");
             code.push_str("            chord_dense: false,\n");
         }
@@ -5372,35 +5447,8 @@ impl RustEmitter {
             }
             code.push('\n');
 
-            // Step 3c: MOSFET body effect update (from v_pred, before NR)
-            for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-                if let DeviceParams::Mosfet(mp) = &slot.params {
-                    if mp.has_body_effect() {
-                        let vs_expr = if mp.source_node > 0 {
-                            format!("v_pred[{}]", mp.source_node - 1)
-                        } else {
-                            "0.0".to_string()
-                        };
-                        let vb_expr = if mp.bulk_node > 0 {
-                            format!("v_pred[{}]", mp.bulk_node - 1)
-                        } else {
-                            "0.0".to_string()
-                        };
-                        let sign = if mp.is_p_channel { -1.0 } else { 1.0 };
-                        // Body effect in magnitude space: reverse body bias
-                        // (vsb > 0 in channel-sign convention) must INCREASE
-                        // |VT|. VT is signed (PMOS VT < 0), so the GAMMA
-                        // correction carries the channel sign: for NMOS it
-                        // raises VT, for PMOS it makes VT more negative.
-                        code.push_str(&format!(
-                            "    {{ // MOSFET {dev_num} body effect\n\
-                             \x20       let vsb = ({sign:.1}) * ({vs_expr} - {vb_expr});\n\
-                             \x20       state.device_{dev_num}_vt = DEVICE_{dev_num}_VT + ({sign:.1}) * DEVICE_{dev_num}_GAMMA * ((DEVICE_{dev_num}_PHI + vsb.max(0.0)).sqrt() - DEVICE_{dev_num}_PHI.sqrt());\n\
-                             \x20   }}\n"
-                        ));
-                    }
-                }
-            }
+            // MOSFET body effect: evaluated inside the Newton loops below, at
+            // each iterate (see helpers::emit_body_effect_at_iterate).
 
             // Step 4: M-dim NR (same structure as DK solve_nonlinear)
             code.push_str("    // Step 4: M-dim Newton-Raphson (Schur complement)\n");
@@ -5448,6 +5496,7 @@ impl RustEmitter {
             }
             code.push('\n');
 
+            emit_body_effect_at_iterate(&mut code, ir, "v_pred", "state.s_ni", "        ");
             // 4b. Evaluate device currents and Jacobian (reuse DK style)
             code.push_str("        // 4b. Evaluate device currents and Jacobians\n");
             for (dev_num, slot) in ir.device_slots.iter().enumerate() {
@@ -5483,6 +5532,7 @@ impl RustEmitter {
                     for k in blk_start..blk_start + blk_dim {
                         terms.push_str(&format!(" - jdev_{}_{} * state.k[{}][{}]", i, k, k, j));
                     }
+                    terms.push_str(&body_effect_jacobian_term(ir, i, j, "state.s_ni"));
                     // Separator is load-bearing: `j{i}{j}` without it collides
                     // at M≥12 (e.g. j110 could be i=1,j=10 or i=11,j=0).
                     code.push_str(&format!("        let j{}_{} = {}{};\n", i, j, diag, terms));
@@ -5779,6 +5829,13 @@ impl RustEmitter {
                 code.push_str(";\n");
             }
             code.push('\n');
+            emit_body_effect_at_iterate(
+                &mut code,
+                ir,
+                "v_pred_be",
+                "state.s_ni_be",
+                "            ",
+            );
 
             // Evaluate devices (reuse same functions)
             for (dev_num, slot) in ir.device_slots.iter().enumerate() {
@@ -5820,6 +5877,7 @@ impl RustEmitter {
                     for k in blk_start..blk_start + blk_dim {
                         terms.push_str(&format!(" - jdev_{}_{} * state.k_be[{}][{}]", i, k, k, j));
                     }
+                    terms.push_str(&body_effect_jacobian_term(ir, i, j, "state.s_ni_be"));
                     // Separator is load-bearing: `j{i}{j}` without it collides
                     // at M≥12 (e.g. j110 could be i=1,j=10 or i=11,j=0).
                     code.push_str(&format!(
@@ -7031,7 +7089,7 @@ impl RustEmitter {
             code.push_str("    let mut v_nl_final = [0.0f64; M];\n");
             code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_final", "v", "    "));
             code.push_str("    let mut i_nl = [0.0f64; M];\n");
-            Self::emit_nodal_device_evaluation_final(&mut code, ir, "    ");
+            Self::emit_nodal_device_evaluation_final(&mut code, ir, "    ", "v");
             code.push_str(&tail);
 
             // (2) i_nl-reusing residual for the Armijo r0 only. The main NR body
@@ -7311,6 +7369,9 @@ impl RustEmitter {
             code.push_str("    let mut chord_dc = state.chord_dc;\n");
             code.push_str("    let mut chord_perm = state.chord_perm;\n");
             code.push_str("    let mut chord_j_dev = state.chord_j_dev;\n");
+            if !body_effect_mosfets(ir).is_empty() {
+                code.push_str("    let mut chord_body_gmb = state.chord_body_gmb;\n");
+            }
             code.push_str("    let mut chord_valid = state.chord_valid;\n");
             if ir.sparsity.lu.is_some() {
                 code.push_str("    let mut chord_dense = state.chord_dense;\n");
@@ -7342,7 +7403,7 @@ impl RustEmitter {
             );
             // i_nl is declared in outer scope (line above NR loop), j_dev is per-iteration
             code.push_str("        let mut j_dev = [0.0f64; M * M];\n");
-            Self::emit_nodal_device_evaluation_body(&mut code, ir, "        ");
+            Self::emit_nodal_device_evaluation_body(&mut code, ir, "        ", "v");
             code.push('\n');
 
             // Behavioral B-source value + partials at the current iterate.
@@ -7419,6 +7480,12 @@ impl RustEmitter {
                 // Build transpose of N_i sparsity: for each device dim i, which nodes a are nonzero
                 emit_nodal_jacobian_stamp(&mut code, ir, m, "chord_lu", "            ");
             }
+            // MOSFET body effect: gmb is part of the factored chord, so it is
+            // frozen with it and the companion below uses the same values.
+            if !body_effect_mosfets(ir).is_empty() {
+                code.push_str("            chord_body_gmb = body_gmb;\n");
+                emit_body_gmb_stamp(&mut code, ir, "chord_lu", "chord_body_gmb", "            ");
+            }
             // Saturating-inductor Jacobian: alpha·L0 → alpha·L_diff(v[k]) at [k][k].
             if has_sat_ind {
                 emit_sat_ind_jacobian(
@@ -7478,6 +7545,7 @@ impl RustEmitter {
             );
             code.push_str("        let mut rhs_work = rhs;\n");
             emit_nodal_companion_rhs(&mut code, ir, m, "rhs_work", "chord_j_dev", "        ");
+            emit_body_gmb_companion(&mut code, ir, "rhs_work", "chord_body_gmb", "v", "        ");
             // Saturating-inductor companion current (consistent with the Jacobian
             // stamp above — same iterate `v`, re-factored every iteration).
             if has_sat_ind {
@@ -7823,7 +7891,7 @@ impl RustEmitter {
                     "            ",
                 ));
                 code.push_str("            let mut i_nl = [0.0f64; M];\n");
-                Self::emit_nodal_device_evaluation_final(&mut code, ir, "            ");
+                Self::emit_nodal_device_evaluation_final(&mut code, ir, "            ", "v");
                 code.push_str("            i_nl_resid = i_nl;\n");
                 code.push_str(
                     "            // Tolerance matches DK Schur path: ABSTOL=1e-12, RELTOL=1e-3,\n",
@@ -7914,7 +7982,7 @@ impl RustEmitter {
                     "v",
                     "            ",
                 ));
-                Self::emit_nodal_device_evaluation_final(&mut code, ir, "            ");
+                Self::emit_nodal_device_evaluation_final(&mut code, ir, "            ", "v");
             }
 
             // ActiveSet (plain): the pin-and-resolve used to be emitted right
@@ -8126,11 +8194,17 @@ impl RustEmitter {
                 code.push_str("                    let mut i_nl = [0.0f64; M];\n");
                 code.push_str("                    let mut j_dev = [0.0f64; M * M];\n");
                 // Device evaluation
-                Self::emit_nodal_device_evaluation_body(&mut code, ir, "                    ");
+                Self::emit_nodal_device_evaluation_body(
+                    &mut code,
+                    ir,
+                    "                    ",
+                    "v_sub",
+                );
                 code.push('\n');
                 // Build G_aug from a_sub
                 code.push_str("                    let mut g_s = a_sub;\n");
                 emit_nodal_jacobian_stamp(&mut code, ir, m, "g_s", "                    ");
+                emit_body_gmb_stamp(&mut code, ir, "g_s", "body_gmb", "                    ");
                 if has_sat_ind {
                     emit_sat_ind_jacobian(
                         &mut code,
@@ -8149,6 +8223,14 @@ impl RustEmitter {
                     m,
                     "rhs_w",
                     "j_dev",
+                    "                    ",
+                );
+                emit_body_gmb_companion(
+                    &mut code,
+                    ir,
+                    "rhs_w",
+                    "body_gmb",
+                    "v_sub",
                     "                    ",
                 );
                 if has_sat_ind {
@@ -8268,7 +8350,12 @@ impl RustEmitter {
                     "v_sub",
                     "                    ",
                 ));
-                Self::emit_nodal_device_evaluation_final(&mut code, ir, "                    ");
+                Self::emit_nodal_device_evaluation_final(
+                    &mut code,
+                    ir,
+                    "                    ",
+                    "v_sub",
+                );
                 code.push_str("                    i_nl_sub = i_nl;\n");
                 // Convergence: raw (undamped) Newton step small AND — the always-
                 // checked precondition of the line search — the true node-KCL
@@ -8484,7 +8571,7 @@ impl RustEmitter {
                 // Evaluate devices (write to outer i_nl, declare local j_dev)
                 code.push_str("            // Evaluate devices\n");
                 code.push_str("            let mut j_dev = [0.0f64; M * M];\n");
-                Self::emit_nodal_device_evaluation_body(&mut code, ir, "            ");
+                Self::emit_nodal_device_evaluation_body(&mut code, ir, "            ", "v");
                 code.push('\n');
 
                 // Build Jacobian for BE (sparse, same structure as trapezoidal)
@@ -8492,6 +8579,7 @@ impl RustEmitter {
                 code.push_str("            // Gmin regularization\n");
                 code.push_str("            for i in 0..N_NODES { g_aug[i][i] += 1e-12; }\n");
                 emit_nodal_jacobian_stamp(&mut code, ir, m, "g_aug", "            ");
+                emit_body_gmb_stamp(&mut code, ir, "g_aug", "body_gmb", "            ");
                 if has_sat_ind {
                     emit_sat_ind_jacobian(
                         &mut code,
@@ -8507,6 +8595,7 @@ impl RustEmitter {
                 // Companion RHS for BE (sparse)
                 code.push_str("            let mut rhs_work = rhs_be;\n");
                 emit_nodal_companion_rhs(&mut code, ir, m, "rhs_work", "j_dev", "            ");
+                emit_body_gmb_companion(&mut code, ir, "rhs_work", "body_gmb", "v", "            ");
                 if has_sat_ind {
                     emit_sat_ind_companion(
                         &mut code,
@@ -8677,7 +8766,7 @@ impl RustEmitter {
                     "                ",
                 ));
                 code.push_str("                let mut i_nl = [0.0f64; M];\n");
-                Self::emit_nodal_device_evaluation_final(&mut code, ir, "                ");
+                Self::emit_nodal_device_evaluation_final(&mut code, ir, "                ", "v");
                 code.push_str("                for i in 0..M {\n");
                 code.push_str("                    let r = (i_nl[i] - i_nl_be_chord[i]).abs();\n");
                 code.push_str("                    let tol = 1e-3 * i_nl[i].abs().max(i_nl_be_chord[i].abs()).max(1e-9) + 1e-12;\n");
@@ -8725,7 +8814,7 @@ impl RustEmitter {
                     "v",
                     "                ",
                 ));
-                Self::emit_nodal_device_evaluation_final(&mut code, ir, "                ");
+                Self::emit_nodal_device_evaluation_final(&mut code, ir, "                ", "v");
                 code.push_str("                break;\n");
                 code.push_str("            }\n");
                 code.push_str("        }\n\n"); // end BE NR loop
@@ -8742,7 +8831,7 @@ impl RustEmitter {
                     "v",
                     "            ",
                 ));
-                Self::emit_nodal_device_evaluation_final(&mut code, ir, "            ");
+                Self::emit_nodal_device_evaluation_final(&mut code, ir, "            ", "v");
                 code.push_str("        }\n");
 
                 // ActiveSetBe post-BE resolve: if any op-amp output is railed in
@@ -8861,6 +8950,9 @@ impl RustEmitter {
             code.push_str("    state.chord_dc = chord_dc;\n");
             code.push_str("    state.chord_perm = chord_perm;\n");
             code.push_str("    state.chord_j_dev = chord_j_dev;\n");
+            if !body_effect_mosfets(ir).is_empty() {
+                code.push_str("    state.chord_body_gmb = chord_body_gmb;\n");
+            }
             code.push_str("    state.chord_valid = chord_valid;\n");
             if ir.sparsity.lu.is_some() {
                 code.push_str("    state.chord_dense = chord_dense;\n");
@@ -9262,7 +9354,7 @@ impl RustEmitter {
             code.push_str(&format!("{it}let mut v_nl = [0.0f64; M];\n"));
             code.push_str(&emit_sparse_nv_matvec(ir, "v_nl", "v_pin", &it));
             code.push_str(&format!("{it}let mut j_dev = [0.0f64; M * M];\n"));
-            Self::emit_nodal_device_evaluation_body(code, ir, &it);
+            Self::emit_nodal_device_evaluation_body(code, ir, &it, "v_pin");
         }
         code.push_str(&format!(
             "{it}let mut g_as = {matrix_name};\n\
@@ -9272,6 +9364,8 @@ impl RustEmitter {
         if m > 0 {
             emit_nodal_jacobian_stamp(code, ir, m, "g_as", &it);
             emit_nodal_companion_rhs(code, ir, m, "rhs_as", "j_dev", &it);
+            emit_body_gmb_stamp(code, ir, "g_as", "body_gmb", &it);
+            emit_body_gmb_companion(code, ir, "rhs_as", "body_gmb", "v_pin", &it);
         }
         // Saturating inductors: Newton on the flux rows too, at this site's
         // alpha, linearised at the pinned iterate. Stamped before pin
@@ -9373,6 +9467,7 @@ impl RustEmitter {
                 code,
                 ir,
                 &format!("{indent}                "),
+                "v",
             );
             code.push_str(&format!("{indent}            }}\n"));
         }
@@ -9700,12 +9795,26 @@ impl RustEmitter {
     }
 
     /// Emit device evaluation code WITHOUT declarations (writes to existing i_nl, j_dev).
+    ///
+    /// `it` is the node iterate the caller extracted `v_nl` from; a MOSFET's
+    /// body-effect threshold is taken from the same iterate. When the circuit
+    /// has body-effect MOSFETs this also declares `body_gmb` (one entry per
+    /// such MOSFET), which the caller must stamp with [`emit_body_gmb_stamp`]
+    /// and linearise with [`emit_body_gmb_companion`].
     pub(super) fn emit_nodal_device_evaluation_body(
         code: &mut String,
         ir: &CircuitIR,
         indent: &str,
+        it: &str,
     ) {
         let m = ir.topology.m;
+        let body = body_effect_mosfets(ir);
+        if !body.is_empty() {
+            code.push_str(&format!(
+                "{indent}let mut body_gmb = [0.0f64; {}];\n",
+                body.len()
+            ));
+        }
 
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
             let s = slot.start_idx;
@@ -9852,14 +9961,15 @@ impl RustEmitter {
                     let jd_10 = s1 * m + s;
                     let jd_11 = s1 * m + s1;
                     // For body effect, compute VT_eff from node voltages at each NR iteration
+                    let body_k = body.iter().find(|b| b.1 == dev_num).map(|b| b.0);
                     let vt_expr = if mp.has_body_effect() {
                         let vs_expr = if mp.source_node > 0 {
-                            format!("v[{}]", mp.source_node - 1)
+                            format!("{it}[{}]", mp.source_node - 1)
                         } else {
                             "0.0".to_string()
                         };
                         let vb_expr = if mp.bulk_node > 0 {
-                            format!("v[{}]", mp.bulk_node - 1)
+                            format!("{it}[{}]", mp.bulk_node - 1)
                         } else {
                             "0.0".to_string()
                         };
@@ -9890,6 +10000,13 @@ impl RustEmitter {
                     // jac = [dId/dVgs, dId/dVds, dIg/dVgs, dIg/dVds]; NR dims
                     // are (s = Vds, s+1 = Vgs) — column swap, same as JFET
                     // above and emit_dk_device_eval_for_nodal_schur_indented.
+                    // Body effect: dId/dVT = -dId/dVgs, so gmb = gm·dVT/dVsb.
+                    let gmb_line = match body_k {
+                        Some(k) => format!(
+                            "{indent}    body_gmb[{k}] = if vsb > 0.0 {{ jac[0] * DEVICE_{dev_num}_GAMMA / (2.0 * (DEVICE_{dev_num}_PHI + vsb).sqrt()) }} else {{ 0.0 }};\n"
+                        ),
+                        None => String::new(),
+                    };
                     code.push_str(&format!(
                         "{indent}    let vds = v_nl[{s}];\n\
                          {indent}    let vgs = v_nl[{s1}];\n\
@@ -9901,7 +10018,7 @@ impl RustEmitter {
                          {indent}    j_dev[{jd_01}] = jac[0];\n\
                          {indent}    j_dev[{jd_10}] = jac[3];\n\
                          {indent}    j_dev[{jd_11}] = jac[2];\n\
-                         {indent}}}\n"
+                         {gmb_line}{indent}}}\n"
                     ));
                 }
                 (DeviceType::Tube, DeviceParams::Tube(tp)) => {
@@ -10053,10 +10170,14 @@ impl RustEmitter {
     }
 
     /// Emit final device evaluation at converged point (writes into existing `i_nl`).
+    /// `it` is the node iterate `v_nl_final` was extracted from; a MOSFET's
+    /// body-effect threshold is recomputed from it rather than read from the
+    /// last Newton iteration's value.
     pub(super) fn emit_nodal_device_evaluation_final(
         code: &mut String,
         ir: &CircuitIR,
         indent: &str,
+        it: &str,
     ) {
         for (dev_num, slot) in ir.device_slots.iter().enumerate() {
             let s = slot.start_idx;
@@ -10122,10 +10243,27 @@ impl RustEmitter {
                          {indent}i_nl[{s1}] = jfet_ig(v_nl_final[{s1}], DEVICE_{dev_num}_SIGN);\n"
                     ));
                 }
-                (DeviceType::Mosfet, DeviceParams::Mosfet(_mp)) => {
+                (DeviceType::Mosfet, DeviceParams::Mosfet(mp)) => {
                     let s1 = s + 1;
+                    let vt = if mp.has_body_effect() {
+                        let node = |idx: usize| {
+                            if idx > 0 {
+                                format!("{it}[{}]", idx - 1)
+                            } else {
+                                "0.0".to_string()
+                            }
+                        };
+                        let sign = if mp.is_p_channel { -1.0 } else { 1.0 };
+                        format!(
+                            "{{ let vsb = ({sign:.1}) * ({} - {}); DEVICE_{dev_num}_VT + ({sign:.1}) * DEVICE_{dev_num}_GAMMA * ((DEVICE_{dev_num}_PHI + vsb.max(0.0)).sqrt() - DEVICE_{dev_num}_PHI.sqrt()) }}",
+                            node(mp.source_node),
+                            node(mp.bulk_node)
+                        )
+                    } else {
+                        format!("state.device_{dev_num}_vt")
+                    };
                     code.push_str(&format!(
-                        "{indent}i_nl[{s}] = mosfet_id(v_nl_final[{s1}], v_nl_final[{s}], state.device_{dev_num}_kp, state.device_{dev_num}_vt, state.device_{dev_num}_lambda, DEVICE_{dev_num}_SIGN);\n\
+                        "{indent}i_nl[{s}] = mosfet_id(v_nl_final[{s1}], v_nl_final[{s}], state.device_{dev_num}_kp, {vt}, state.device_{dev_num}_lambda, DEVICE_{dev_num}_SIGN);\n\
                          {indent}i_nl[{s1}] = 0.0;\n"
                     ));
                 }

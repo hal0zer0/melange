@@ -135,6 +135,14 @@ generated state is smaller.
   choke-loaded common-source stage (GAMMA=0.5) sat at 1.10 V on its source
   where ngspice puts it at 0.90 V, and every render started with a swing
   toward the right bias. The operating point now matches ngspice.
+- **MOSFET body effect was wrong in transient simulation on the DK and nodal
+  Schur solvers.** They took the source voltage from a prediction that leaves
+  out the transistor's own current, which in a source follower is what sets
+  the source: a follower with its bulk grounded sat 1 V high, 8 % hot on the
+  fundamental, with a ninth of the second harmonic ngspice gives. Every solver
+  now evaluates body effect at each Newton step, with its derivative in the
+  Jacobian so the solve converges as fast as before; the follower matches
+  ngspice to 3e-6 on the fundamental on all three solver paths.
 - **`.pot` with no default accepted a resistor value outside its own range**,
   so the knob started at a setting it could not return to. It is now refused,
   as an explicit default and `--pot` already were. A one-word label no longer

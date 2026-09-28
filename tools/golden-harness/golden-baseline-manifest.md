@@ -14,6 +14,8 @@ Generated 2026-07-21. Refreshed 2026-08-30 against melange **e53573c** (correctn
 
 **Checked 2026-09-28 (flux checks in the recovery loops).** 180/180 identical; generated source differs on the five saturating decks only. No golden render reaches the sub-step or backward-Euler loop on a saturating deck; the checks are gated by `c1_jacobian_deletion_is_caught_at_every_newton_site`.
 
+**Re-baselined 2026-09-28 (MOSFET body effect).** Attribution: **MOSFET body effect: node resolution (`89a45ab`) + live-iterate Vt with gmb (DK and full-LU)**. Against `0ddf38f`: 172 identical, 8 changed, all on the two MOSFET decks. mosfet-choke-load's silence render loses its startup swing from the wrong bias (−151 dB; peak 286.7 → 9e-7); mosfet-source-follower was 8 % hot on H1 with a ninth of ngspice's H2 and now matches ngspice to 3e-6 on H1 (sine1k −0.78 dB, sweep −0.72 dB, silence −95 dB). Generated source differs on those two decks only. No render held, none not-converged.
+
 Machine-readable twin: `tools/golden-harness/golden-baseline-manifest.json`.
 
 ## Compile recipe

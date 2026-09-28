@@ -4,7 +4,9 @@
 //! `generate_schur_gauss_elim` — the procedural NR solver code that is
 //! too deeply conditional for Tera templates.
 
-use super::helpers::has_latched_device;
+use super::helpers::{
+    body_effect_jacobian_term, body_effect_mosfets, emit_body_effect_at_iterate, has_latched_device,
+};
 use super::nr_helpers::{
     emit_dk_device_evaluation, emit_nr_limit_and_converge, emit_nr_singular_fallback,
     emit_schur_nr_limit_and_converge,
@@ -25,13 +27,28 @@ impl RustEmitter {
         ir: &CircuitIR,
     ) -> Result<(), CodegenError> {
         let m = ir.topology.m;
+        let body = if ir.solver_mode == crate::codegen::ir::SolverMode::Dk {
+            body_effect_mosfets(ir)
+        } else {
+            Vec::new()
+        };
 
         code.push_str("/// Solve M×M nonlinear system via Newton-Raphson\n");
         code.push_str("/// \n");
         code.push_str("/// Solves: i_nl - i_d(p + K*i_nl) = 0\n");
         code.push_str("/// where p = N_v * v_pred is the linear prediction\n");
         code.push_str("#[inline(always)]\n");
-        code.push_str("fn solve_nonlinear(p: &[f64; M], state: &mut CircuitState) -> [f64; M] {\n");
+        if body.is_empty() {
+            code.push_str(
+                "fn solve_nonlinear(p: &[f64; M], state: &mut CircuitState) -> [f64; M] {\n",
+            );
+        } else {
+            // v_pred: the MOSFET body-effect threshold needs node voltages
+            // beyond the controlling voltages (see the body-effect block below).
+            code.push_str(
+                "fn solve_nonlinear(p: &[f64; M], v_pred: &[f64; N], state: &mut CircuitState) -> [f64; M] {\n",
+            );
+        }
         code.push_str(&format!(
             "    const MAX_ITER: usize = {};\n",
             ir.solver_config.max_iterations
@@ -95,6 +112,14 @@ impl RustEmitter {
         }
         code.push('\n');
 
+        // MOSFET body effect at the live iterate (with its Jacobian term below).
+        if !body.is_empty() {
+            emit_body_effect_at_iterate(code, ir, "v_pred", "state.s_ni", "        ");
+        }
+        if !body.is_empty() {
+            code.push('\n');
+        }
+
         if has_nonlinear {
             // Device currents and Jacobian entries (shared with Phase E
             // runtime DC-OP recompute — see `nr_helpers::emit_dk_device_evaluation`).
@@ -139,6 +164,9 @@ impl RustEmitter {
                     let mut terms = String::new();
                     for k in blk_start..blk_start + blk_dim {
                         terms.push_str(&format!(" - jdev_{}_{} * state.k[{}][{}]", i, k, k, j));
+                    }
+                    if !body.is_empty() {
+                        terms.push_str(&body_effect_jacobian_term(ir, i, j, "state.s_ni"));
                     }
                     // Separator is load-bearing: `j{i}{j}` without it collides
                     // at M≥12 (e.g. j110 could be i=1,j=10 or i=11,j=0).
