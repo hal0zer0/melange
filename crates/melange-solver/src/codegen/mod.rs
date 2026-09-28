@@ -1257,10 +1257,11 @@ impl CodeGenerator {
             return Err(CodegenError::UnsupportedTopology(format!(
                 "op-amp rail mode {} cannot be solved on this circuit: it has {what}, and \
                  the pinned solve at the rail does not include that element yet, so it would \
-                 converge to a point that is not a solution. Choose the rail handling \
-                 explicitly: `--opamp-rail-mode hard` (a post-solve clamp; compile warns if \
-                 an op-amp output is capacitor-coupled, where it corrupts capacitor history) \
-                 or `--opamp-rail-mode boyle-diodes` (catch diodes; reliable at light clip).",
+                 converge to a point that is not a solution. No rail handling is validated for \
+                 this combination yet, and the explicit modes are not a workaround: on a \
+                 railing op-amp driving a saturating inductor, `--opamp-rail-mode hard` \
+                 measured 2-290x the reference inductor current (138 V out of a 9 V supply) \
+                 and `boyle-diodes` 27% low. (Not measured with a behavioral source.)",
                 resolved.mode.as_str()
             )));
         }

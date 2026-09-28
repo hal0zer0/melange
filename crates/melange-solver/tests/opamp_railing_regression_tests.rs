@@ -211,14 +211,16 @@ fn active_set_with_an_element_the_pin_cannot_solve_is_refused() {
             .generate_nodal(&mna, &netlist)
             .expect_err("active-set + an unpinnable element must be refused");
         let msg = format!("{err:?}");
+        // It must not steer users to a mode measured wrong on this class.
         assert!(
-            msg.contains(what) && msg.contains("--opamp-rail-mode hard"),
+            msg.contains(what) && msg.contains("No rail handling is validated"),
             "{what}: {msg}"
         );
     }
 }
 
-/// The explicit ways out stay open.
+/// An explicit rail mode is still honoured (overrides are how users bisect),
+/// even though it is not validated on this class.
 #[test]
 fn explicit_hard_with_a_behavioral_source_still_compiles() {
     use melange_solver::codegen::CodeGenerator;
@@ -231,5 +233,5 @@ fn explicit_hard_with_a_behavioral_source_still_compiles() {
     config.opamp_rail_mode = OpampRailMode::Hard;
     CodeGenerator::new(config)
         .generate_nodal(&mna, &netlist)
-        .expect("an explicit hard rail mode is the documented way out");
+        .expect("an explicit rail mode is never overridden");
 }

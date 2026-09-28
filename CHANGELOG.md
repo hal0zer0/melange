@@ -71,8 +71,10 @@ generated state is smaller.
 - **Active-set rail handling is refused on a circuit that also has a
   behavioral source or a saturating inductor.** The pinned solve does not
   include those elements yet, and it stops on step size, so it could converge
-  to a point that is not a solution. The error names the explicit alternatives
-  (`--opamp-rail-mode hard` or `boyle-diodes`). None of the 92 corpus circuits that compile
+  to a point that is not a solution. The error says no rail handling is
+  validated for the combination and recommends nothing: on a railing op-amp
+  driving a saturating inductor, `hard` measured 2-290x the reference inductor
+  current and `boyle-diodes` 27 % low. None of the 92 corpus circuits that compile
   with default flags has the combination.
 - `simulate --probe` help says that at `--oversampling` > 1 each row is a
   decimated, filtered host-rate sample, whose peak can exceed the raw one.

@@ -54,7 +54,9 @@ circuit. **Only the nodal solver implements that.** The DK path implements
   N_i/N_v only and stops on step size, so without those elements in the pinned
   system it can converge to a non-solution. Lift the refusal when their
   Jacobians are stamped there and railing acceptance (`opamp_railing_regression_tests.rs`)
-  covers them.
+  covers them. The explicit modes are NOT a workaround for this class: on a railing
+  op-amp driving a saturating choke, against an ngspice twin, `hard` measured 2–290×
+  the inductor current (138 V out of a 9 V supply) and `boyle-diodes` 27 % low.
 - An explicit `--opamp-rail-mode hard` stays allowed, on either route — an
   explicit choice is never overridden, because overrides are how users bisect.
   When a clamped op-amp it applies to is AC-coupled downstream (where auto
