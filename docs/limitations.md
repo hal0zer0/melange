@@ -129,6 +129,31 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
 ### Triode
 - Koren model with lambda for finite plate resistance
 - No space-charge or transit-time effects
+- **Grid current FAILS its acceptance test against a real datasheet.** Grid
+  current follows Dempwolf & Zolzer eq. (11). Measured against the Philips
+  ECC83 (January 1970) "As A.F. amplifier" block, row *Output voltage
+  (Ig = 0.3 uA)*, it fails **15 of 15 cells** (3 D&Z Table 1 rows x 5 supply
+  voltages): the modelled grid-current onset is **0.26-0.35 V too late**
+  (-0.26..-0.35 V against the -0.61 V implied by the sheet's own five columns,
+  which agree to sd 0.067 V across a 2x range of Vb and 2.75x of Rk). The
+  previous hard-zero law was 0.61 V late, in the same direction.
+
+  **Consequence:** stages driven from a high source impedance show grid-current
+  loading *later* than a real ECC83, so maximum clean output is overpredicted
+  (1.16x-1.55x on this block). This is not an inaudible tail — 0.3 uA into a
+  following stage's 680 kOhm grid leak is ~0.2 V of bias shift, which is where
+  blocking and bias-shift distortion begin in cascaded stages.
+
+  The shipped Koren ECC83 plate card independently **over-compresses 1.3x-2.3x**
+  at the same operating points (and runs Ia 2-10% low), which partly *masks*
+  this at the output — the grid-side error is larger than an output-voltage
+  comparison alone shows. Any future grid-current check at these points must
+  report the plate model's share, because the two errors partly cancel.
+
+  Closing the gap by refitting `Gg` would need 28.7x-257x, where D&Z's own
+  three tubes span 1.89x, so this is not a tube-to-tube parameter spread.
+  No parameter here is fitted to that sheet, which is what keeps it usable as
+  an out-of-sample check.
 
 ### Pentode
 - 5 equation families: Rational (Derk), Exponential (DerkE), Classical (Koren/Cohen-Helie), plus variable-mu variants
@@ -447,7 +472,7 @@ noiseless, `-C target-cpu=x86-64-v3` (best of 7 × 2M samples via
 - Heaviest measured: a passive tube EQ (nodal full-LU, chord + sparse LU, N=52, M=8) ~21×, a bus compressor (12 op-amps + 2 VCAs) ~7.0× realtime
 
 Four of those seven moved at this re-measurement. The three triode rows are
-14–29 % slower than they were earlier in 0.1.9 because the Dempwolf & Zölzer
+14–29 % slower than they were in 0.1.9 because the Dempwolf & Zölzer
 grid-current law (`30915fb`) evaluates a softplus on the grid dimension at
 every Newton iteration, where the old law short-circuited to zero for
 Vgk ≤ 0; measured against the immediately preceding commit on the same box,

@@ -2,12 +2,14 @@
 
 Quick-reference for AI agents. For math details see other aidocs. For architecture see CLAUDE.md.
 
-> **Latest release: v0.1.9 (`e437c7f`, tag pushed 2026-09-23)** — the fail-loud / first-user
-> release. A mistyped node name used to compile clean and render silence; a `.model` typo in the
-> wrong command said nothing; `validate` would report a confident correlation between two circuits
-> that were not the same circuit, three separate ways. All refused now. One change alters generated
-> DSP: `8b5bd45` drops a double-counted `N_I · i_nl_prev` from the backward-Euler fallback RHS.
-> See CHANGELOG and `docs/aidocs/DEBUGGING.md`.
+> **v0.1.10 prepared 2026-09-27, NOT YET PUSHED — latest pushed release is still v0.1.9
+> (`e437c7f`, 2026-09-23).** 0.1.10 is the never-silently-wrong release. Nodal full-LU could
+> commit an unsolved sample and freeze on it, giving a 22 dB-wrong render that reported a healthy
+> −0.50 dBFS peak; the fix cuts the timestep to 64× and honours the pinned integrator, and two
+> zero-threshold counters now fail every verb rather than reporting a reassuring number. Triode
+> grid current became Dempwolf & Zölzer eq. (11) — which **fails** its Philips ECC83 acceptance
+> test 15/15 and ships as the less-wrong model, replacing a law that was further out in the same
+> direction. See CHANGELOG and `docs/aidocs/DEBUGGING.md`.
 >
 > **UNRELEASED work sits on local `main`, 8 commits ahead of `origin/main`** (a push to origin/main
 > IS a release, so it is held). Headline: the **Dempwolf & Zölzer triode grid-current law**

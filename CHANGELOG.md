@@ -7,9 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 It is `0.x` software: below 1.0.0 there is no stability guarantee — the solver,
 codegen output, CLI flags, and netlist semantics may all change.
 
-## [Unreleased]
+## [0.1.10] - 2026-09-27
+
+### Added
+
+- **melange now fails loudly when a sample was never actually solved.** Two
+  counters are emitted, each declared only on the path that can produce it:
+  `diag_nr_hold_count` (nodal full-LU) and `diag_nr_unconverged_commit_count`
+  (nodal Schur). They have **no threshold** — one hold is a failure — and they
+  fail `capture`, `compare`, `convergence`, `simulate` and `validate` alike.
+  `--allow-nr-hold` bypasses it for a single invocation and never persists. A
+  render that merely hit the iteration cap but recovered stays report-only.
+  Builds with no hold path report a true zero rather than a reassuring blank.
+  Documented for hosts in `docs/CODE_API.md`.
+- **`melange index`**, and the circuit-index format melange owns
+  (`docs/CIRCUIT_INDEX.md`). Short circuit names now resolve through a
+  published `circuits-index.json` for *any* circuit repository, not just ours,
+  with a flat-layout fallback and near-match errors when a name is close but
+  wrong. `--check` compares meaning (schema, name→path), not bytes, so a repo
+  may carry its own extra keys. Local directories work as circuit sources, and
+  a bad source is now refused when it is added rather than when it is used.
+- **A user-facing page on oversampling** (`docs/OVERSAMPLING.md`) and a pointer
+  to it from the README, covering the half-band filters' phase behaviour and
+  where the aliasing actually goes.
 
 ### Changed
+
 
 - **Triode grid current is now Dempwolf & Zölzer eq. (11)** (`30915fb`).
   `Ig = Gg·(softplus(Cg·Vgk)/Cg)^ξ`, evaluated for *all* Vgk with no branch.
@@ -22,7 +45,31 @@ codegen output, CLI flags, and netlist semantics may all change.
   **This changes generated DSP for every circuit containing a triode**, and it
   is a breaking `.model` change: `VGK_ONSET` and `IG_MAX` are *refused* on
   triode cards, with the conversion to the new parameters printed. They are
-  still honoured on pentodes, whose control-grid law is unchanged.
+  still honoured on pentodes, whose control-grid law is unchanged. Exactly the
+  15 triode decks in the golden corpus moved, and no non-triode deck did.
+
+  **It FAILS its acceptance test, and ships anyway as the less-wrong model.**
+  Measured against the Philips ECC83 (January 1970) "As A.F. amplifier" block,
+  row *Output voltage (Ig = 0.3 µA)*, it fails **15 of 15 cells** (3 D&Z
+  Table 1 rows × 5 supply voltages, under both the peak and cycle-average
+  readings of the criterion — the verdict does not flip between them). The
+  modelled grid-current onset is **0.26–0.35 V too late**: −0.26..−0.35 V
+  against the −0.61 V the sheet's own five columns imply, and those five agree
+  to sd 0.067 V across a 2× range of `Vb` and 2.75× of `Rk`. The previous
+  hard-zero law was 0.61 V late, in the same direction.
+
+  **Consequence:** a stage driven from a high source impedance shows
+  grid-current loading *later* than a real ECC83, overpredicting maximum clean
+  output by 1.16×–1.55× on this block. That is not an inaudible tail — 0.3 µA
+  into a following stage's 680 kΩ grid leak is ~0.2 V of bias shift, where
+  blocking and bias-shift distortion begin in cascaded stages. The shipped
+  Koren ECC83 plate card independently over-compresses 1.3×–2.3× at the same
+  operating points, which partly *masks* this at the output.
+
+  Nothing is fitted to that sheet, which is what keeps it an out-of-sample
+  check. Closing the gap via `Gg` alone would need 28.7×–257×, where D&Z's own
+  three tubes span 1.89×, so it is not a tube-to-tube parameter spread.
+  See `docs/limitations.md` → Triode.
 
 - **Throughput on triode circuits is 14–29 % lower** as a direct result: a
   softplus is evaluated on the grid dimension at every Newton iteration where
@@ -33,6 +80,30 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ### Fixed
 
+- **Nodal full-LU could commit an unsolved sample and then freeze on it,
+  producing a 22 dB-wrong render that reported a healthy −0.50 dBFS peak.** On
+  a non-converged sample the death-spiral hold kept `v_prev`; a BE-pinned deck
+  under constant input then re-posed the bit-identical problem every sample, so
+  the state never moved again and the output was one committed sample decaying
+  through the DC blocker. It was a fixed point of the *failure handler*, not of
+  the circuit. The quiet cases were the dangerous ones: at 0.04–0.05 V the
+  render correlated **−0.31/−0.38** with the truth while sitting within 0.24 dB
+  of the right peak, so no level check could ever have caught it.
+  **The fix is to cut the timestep, not to raise the iteration budget**
+  (`37f96b6`): sub-stepping now goes to 64× and honours the deck's pinned
+  integrator. At the shipping iteration cap the same render goes from
+  correlation 0.5478 to 0.999931, and from 523.7 s to 0.4 s. The corpus went
+  from 2 held renders to **0 held, 38/38**.
+- **The Schur sub-step solved trapezoidal on backward-Euler-pinned decks**
+  (`9e31c6a`) — a separate discretization defect found while fixing the above.
+  Audio is byte-identical across the corpus (168/168), because that path never
+  ran on a shipped deck.
+- **The nodal sub-path diagnostic named a spectral radius that decided nothing**
+  (`5ee0452`); the real trigger is `s-ill-conditioned`.
+- **Generated plugin projects named a real person as their support contact**
+  (`d964df6`). The field now defaults to empty, with a note saying so.
+- **A name in a value slot is no longer reported as a mistyped number**
+  (`d809ee0`); the parser says which forms the directive actually accepts.
 - `analyze` reported **phase with the sign inverted** (`bfaa707`): an RC
   low-pass read `+45°` at its cutoff where the standard result is `−45°`, and a
   CR high-pass the reverse. The two `atan2` arguments were swapped, so every
@@ -47,8 +118,18 @@ codegen output, CLI flags, and netlist semantics may all change.
   from +250 V. Emitted Γ² now agrees with the independent
   `10kT₀gm/(2qIp)` prediction to four figures.
 
+- **Eight first-user papercuts** found by a cold-start run and fixed
+  (`58c4f50`, `cf40f5b`, `2a0d38d`, `b88d9f7`, `ebffc98`): `.model` typo
+  suggestions, `--format rust`, wiper halves, the word "nominal", path errors,
+  builtin aliases, the diagnostics verdict, `analyze` saying when its phase
+  column is filter delay rather than circuit phase, and a word when a nonlinear
+  circuit compiles at 1×. The README's source example pointed at a repository
+  that does not exist.
+
 ### Documentation
 
+- **melange-circuits is public** (`025f91c`) — the docs say so, and document
+  the compile-time on-ramp.
 - Performance figures **re-measured 2026-09-24** across all seven published
   rows, with per-row attribution for the four that moved (README,
   `docs/limitations.md`, `docs/architecture.md`, `docs/aidocs/STATUS.md`). The
