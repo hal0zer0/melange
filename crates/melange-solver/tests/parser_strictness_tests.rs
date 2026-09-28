@@ -425,11 +425,51 @@ fn capacitor_and_inductor_junk_rejected() {
     );
     assert!(
         Netlist::parse("Test\nL1 a 0 1m junk\nR1 a 0 1k\n").is_err(),
-        "inductor junk must error (only ISAT= allowed)"
+        "inductor junk must error (only ISAT=, LAIR=, CORE= allowed)"
     );
     // The legitimate forms keep working
     assert!(Netlist::parse("Test\nC1 a 0 1u IC=2.5\nR1 a 0 1k\n").is_ok());
     assert!(Netlist::parse("Test\nL1 a 0 1m ISAT=20m\nR1 a 0 1k\n").is_ok());
+}
+
+/// The air-core floor: LAIR= (a fraction of L0) or CORE= (a class), each
+/// needing ISAT=, never both; the resolved fraction and where it came from.
+#[test]
+fn inductor_air_core_floor_forms() {
+    use melange_solver::parser::{resolve_air_floor, Element};
+    let floor = |line: &str| {
+        let n = Netlist::parse(&format!("Test\n{line}\nR1 a 0 1k\n"))?;
+        Ok::<_, melange_solver::parser::ParseError>(
+            n.elements
+                .iter()
+                .find_map(|e| match e {
+                    Element::Inductor { air_floor, .. } => Some(resolve_air_floor(*air_floor)),
+                    _ => None,
+                })
+                .unwrap(),
+        )
+    };
+    assert_eq!(
+        floor("L1 a 0 1 ISAT=10m LAIR=2e-3").unwrap(),
+        (2e-3, "LAIR=")
+    );
+    assert_eq!(floor("L1 a 0 1 isat=10m lair=0").unwrap().0, 0.0);
+    assert_eq!(floor("L1 a 0 1 ISAT=10m CORE=gapped").unwrap().0, 1e-3);
+    assert_eq!(floor("L1 a 0 1 ISAT=10m core=Steel").unwrap().0, 3e-4);
+    assert_eq!(floor("L1 a 0 1 ISAT=10m CORE=nickel").unwrap().0, 3e-5);
+    assert_eq!(floor("L1 a 0 1 ISAT=10m").unwrap().0, 3e-4);
+    for bad in [
+        "L1 a 0 1 ISAT=10m LAIR=1",
+        "L1 a 0 1 ISAT=10m LAIR=-1e-3",
+        "L1 a 0 1 ISAT=10m LAIR=x",
+        "L1 a 0 1 ISAT=10m CORE=ferrite",
+        "L1 a 0 1 ISAT=10m LAIR=1e-3 CORE=steel",
+        "L1 a 0 1 LAIR=1e-3",
+        "L1 a 0 1 CORE=steel",
+        "L1 a 0 1 ISAT=10m LAIRµ=1",
+    ] {
+        assert!(floor(bad).is_err(), "must be refused: {bad}");
+    }
 }
 
 #[test]

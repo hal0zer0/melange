@@ -202,7 +202,7 @@ fn emit_sat_ind_history(
     for (idx, _si) in ir.saturating_inductors.iter().enumerate() {
         code.push_str(&format!(
             "{indent}{{ let ip = {vprev}[SAT_IND_{idx}_AUG_ROW]; \
-             let phi = SAT_IND_{idx}_L0 * SAT_IND_{idx}_ISAT * (ip / SAT_IND_{idx}_ISAT).tanh(); \
+             let phi = SAT_IND_{idx}_LMAG * SAT_IND_{idx}_ISAT * (ip / SAT_IND_{idx}_ISAT).tanh() + SAT_IND_{idx}_LAIR * ip; \
              {rhs}[SAT_IND_{idx}_AUG_ROW] += {alpha} * (phi - SAT_IND_{idx}_L0 * ip); }}\n"
         ));
     }
@@ -222,7 +222,7 @@ fn emit_sat_ind_jacobian(
         code.push_str(&format!(
             "{indent}{{ let i0 = {iterate}[SAT_IND_{idx}_AUG_ROW]; \
              let cx = (i0 / SAT_IND_{idx}_ISAT).clamp(-40.0, 40.0).cosh(); \
-             let ld = (SAT_IND_{idx}_L0 / (cx * cx)).max(SAT_IND_{idx}_L0 * 1e-6); \
+             let ld = (SAT_IND_{idx}_LMAG / (cx * cx) + SAT_IND_{idx}_LAIR).max(SAT_IND_{idx}_L0 * 1e-6); \
              {mat}[SAT_IND_{idx}_AUG_ROW][SAT_IND_{idx}_AUG_ROW] += {alpha} * (ld - SAT_IND_{idx}_L0); }}\n"
         ));
     }
@@ -243,8 +243,8 @@ fn emit_sat_ind_companion(
         code.push_str(&format!(
             "{indent}{{ let i0 = {iterate}[SAT_IND_{idx}_AUG_ROW]; \
              let cx = (i0 / SAT_IND_{idx}_ISAT).clamp(-40.0, 40.0).cosh(); \
-             let ld = (SAT_IND_{idx}_L0 / (cx * cx)).max(SAT_IND_{idx}_L0 * 1e-6); \
-             let phi = SAT_IND_{idx}_L0 * SAT_IND_{idx}_ISAT * (i0 / SAT_IND_{idx}_ISAT).tanh(); \
+             let ld = (SAT_IND_{idx}_LMAG / (cx * cx) + SAT_IND_{idx}_LAIR).max(SAT_IND_{idx}_L0 * 1e-6); \
+             let phi = SAT_IND_{idx}_LMAG * SAT_IND_{idx}_ISAT * (i0 / SAT_IND_{idx}_ISAT).tanh() + SAT_IND_{idx}_LAIR * i0; \
              {rhs}[SAT_IND_{idx}_AUG_ROW] += {alpha} * (ld * i0 - phi); }}\n"
         ));
     }
@@ -498,8 +498,8 @@ fn emit_sat_ind_row_residual(
         // Flux-change term, kept paired so the stiff alpha*Phi magnitude never
         // reaches `den`; it sets only the rounding floor.
         code.push_str(&format!(
-            "{indent}        let phi = SAT_IND_{idx}_L0 * SAT_IND_{idx}_ISAT \
-             * ({v}[k] / SAT_IND_{idx}_ISAT).tanh();\n\
+            "{indent}        let phi = SAT_IND_{idx}_LMAG * SAT_IND_{idx}_ISAT \
+             * ({v}[k] / SAT_IND_{idx}_ISAT).tanh() + SAT_IND_{idx}_LAIR * {v}[k];\n\
              {indent}        let ap = sat_al * phi;\n\
              {indent}        let stiff = ap.abs().max({rhs}[k].abs());\n\
              {indent}        {{ let t = ap - {rhs}[k]; acc += t; \
@@ -2722,13 +2722,22 @@ impl RustEmitter {
         for (idx, si) in ir.saturating_inductors.iter().enumerate() {
             code.push_str(&format!(
                 "/// Saturating inductor {idx}: {} (L0={:.4e} H, Isat={:.4e} A)\n\
+                 /// Flux: Φ(i) = LMAG·ISAT·tanh(i/ISAT) + LAIR·i, LMAG + LAIR = L0; the\n\
+                 /// saturated incremental inductance floors at the air-core LAIR.\n\
                  pub const SAT_IND_{idx}_L0: f64 = {l0:.17e};\n\
+                 pub const SAT_IND_{idx}_LMAG: f64 = {lmag:.17e};\n\
+                 pub const SAT_IND_{idx}_LAIR: f64 = {lair:.17e};\n\
+                 /// Where LAIR came from.\n\
+                 pub const SAT_IND_{idx}_LAIR_SOURCE: &str = \"{src}\";\n\
                  pub const SAT_IND_{idx}_ISAT: f64 = {isat:.17e};\n\
                  pub const SAT_IND_{idx}_AUG_ROW: usize = {row};\n\n",
                 si.name,
                 si.l0,
                 si.isat,
                 l0 = si.l0,
+                lmag = si.l0 * (1.0 - si.lair),
+                lair = si.l0 * si.lair,
+                src = si.lair_source,
                 isat = si.isat,
                 row = si.aug_row,
             ));

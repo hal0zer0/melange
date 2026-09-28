@@ -3,7 +3,8 @@
 * is far above Isat while the core stays linear (Lenz); open, the magnetizing
 * current saturates the core. Gated in saturation_knee_regression_tests.rs.
 R_p in p 99
-L_pri p 0 1 ISAT=10m
+* LAIR=3e-4: air-core floor, ungapped-steel rule of thumb (same as the regression test).
+L_pri p 0 1 ISAT=10m LAIR=3e-4
 L_sec s 0 1
 K1 L_pri L_sec 0.99
 R_L s out 1m

@@ -177,6 +177,26 @@ generated state is smaller.
 
 ### Changed
 
+- **Saturating inductors bottom out at their air-core inductance.** The flux
+  law was `L0·Isat·tanh(i/Isat)`, whose incremental inductance falls toward
+  zero: about 1e-7 of L0 at 9× `ISAT`, flat in double precision past about
+  19×. Real iron bottoms out near the inductance of the winding with no core.
+  The law is now `L_mag·Isat·tanh(i/Isat) + L_air·i` with
+  `L_mag + L_air = L0`, and `L_air` is set on the inductor line: `LAIR=` as a
+  fraction of L0, or `CORE=gapped|steel|nickel` for a rule-of-thumb class
+  value (1e-3, 3e-4, 3e-5). A deck with neither gets 3e-4 and a notice saying
+  so; `LAIR=0` keeps the old law, also with a notice. Driven far past `ISAT`, a
+  core now settles on the limit its resistance and air-core inductance set
+  instead of ringing past it: a saturating RL at 20× `ISAT` peaks at V/R
+  without the backward-Euler net firing; the old law overshot by 20 % until
+  the net caught it.
+  Small-signal behaviour is unchanged (the inductance at zero current is still
+  L0). **Renders of saturating circuits change near and past the knee**: on
+  the golden set, a 5 V step into the saturating RL moves by up to 0.35 V at
+  the knee; every other render is identical or moves by under 0.002 dB.
+  Generated code gains `SAT_IND_N_LMAG`, `SAT_IND_N_LAIR` and
+  `SAT_IND_N_LAIR_SOURCE`.
+
 - **The backward-Euler safety net now covers circuits with saturating
   inductors**, including ones with no other nonlinear parts. When the
   trapezoidal rule falls into a sample-to-sample ringing it cannot damp, the
@@ -186,12 +206,11 @@ generated state is smaller.
   switch change. Once latched, the output matches a `--backward-euler` build
   of the same circuit to 1e-10. On the golden set it fires once, on an open
   transformer driven into saturation by a 5 V step, and removes a 6 mV
-  sample-to-sample ring. Deep in saturation this ringing makes the inductor
-  current overshoot its physical limit by about 20 %, and oversampling does
-  not cure it; the net brings it back to the limit. Because the switch lasts
-  for the rest of the stream, one saturating transient costs the remainder
-  about 2e-4 on the fundamental (up to 0.3 % on a choke-loaded stage's
-  output).
+  sample-to-sample ring. On a core with no air-core floor (`LAIR=0`), deep
+  saturation makes this ringing overshoot the inductor current's physical
+  limit by about 20 %, and oversampling does not cure it; the net brings it
+  back to the limit. Because the switch lasts for the rest of the stream, a
+  latched instance gives up about 2e-4 on the fundamental.
 
 - **Removed the old decimated saturation machinery from generated code.**
   Saturating inductors have run as flux devices inside the full-LU Newton loop
@@ -202,8 +221,8 @@ generated state is smaller.
   `SAT_CI_*` and `SAT_XG_*`. **This is a source break for code that reads
   them.** `sat_ind_N_l_eff` has held a constant `L0` since August, so a reader
   was already measuring nothing. The live differential inductance is
-  `SAT_IND_N_L0 / cosh(v_prev[SAT_IND_N_AUG_ROW] / SAT_IND_N_ISAT)²`. No render
-  changes.
+  `SAT_IND_N_LMAG / cosh(v_prev[SAT_IND_N_AUG_ROW] / SAT_IND_N_ISAT)² +
+  SAT_IND_N_LAIR`. No render changes.
 - **Rail-engaged samples on the nodal Schur path go straight to the
   backward-Euler pin-and-resolve.** The 2× sub-step that used to try first is
   removed: its only rail handling was a post-solve clamp that did not re-solve

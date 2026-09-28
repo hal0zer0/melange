@@ -581,8 +581,8 @@ fn test_gain_sanity_two_tube() {
 /// inductor is no longer a lagged/decimated Sherman-Morrison patch on the trap
 /// matrices; it is a genuine device on its augmented branch row, stamped inside
 /// the full-LU Newton loop: residual uses the flux integral
-/// `Φ(i) = L0·Isat·tanh(i/Isat)`, Jacobian uses the differential
-/// `L_diff = L0/cosh²(i/Isat)`. This test pins the new emitted structure (the
+/// `Φ(i) = L_mag·Isat·tanh(i/Isat) + L_air·i`, Jacobian uses the differential
+/// `L_diff = L_mag/cosh²(i/Isat) + L_air`. This test pins the new emitted structure (the
 /// old SM block is gone) and proves the generated code still compiles and runs.
 #[test]
 fn test_saturating_inductor_nr_flux_stamp() {
@@ -606,13 +606,16 @@ Rterm out 0 10k
     );
     // Flux-integral residual term Φ(i) (the history / companion use tanh).
     assert!(
-        code.contains("SAT_IND_0_L0 * SAT_IND_0_ISAT * (i0 / SAT_IND_0_ISAT).tanh()"),
-        "expected the flux integral Φ(i)=L0·Isat·tanh(i/Isat) in the companion stamp"
+        code.contains(
+            "SAT_IND_0_LMAG * SAT_IND_0_ISAT * (i0 / SAT_IND_0_ISAT).tanh() + SAT_IND_0_LAIR * i0"
+        ),
+        "expected the flux integral Φ(i)=L_mag·Isat·tanh(i/Isat)+L_air·i in the companion stamp"
     );
-    // Differential-inductance Jacobian L_diff = L0/cosh²(i/Isat).
+    // Differential-inductance Jacobian L_diff = L_mag/cosh²(i/Isat) + L_air.
     assert!(
-        code.contains("(i0 / SAT_IND_0_ISAT).clamp(-40.0, 40.0).cosh()"),
-        "expected the differential L_diff = L0/cosh²(i/Isat) Jacobian stamp"
+        code.contains("(i0 / SAT_IND_0_ISAT).clamp(-40.0, 40.0).cosh()")
+            && code.contains("(SAT_IND_0_LMAG / (cx * cx) + SAT_IND_0_LAIR)"),
+        "expected the differential L_diff = L_mag/cosh²(i/Isat) + L_air Jacobian stamp"
     );
     // Stamp targets the augmented branch row of the inductor.
     assert!(

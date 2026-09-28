@@ -31,7 +31,7 @@ Cin  in     gate_i 1u
 Rb1  vcc    gate_i 1MEG
 Rb2  gate_i 0      170k
 Rg   gate_i gate   1k
-Lp   vcc    drain  5 ISAT=20m
+Lp   vcc    drain  5 ISAT=20m CORE=gapped
 Rdcr drain  drain_d 120
 Cw   vcc    drain  220p
 Rw   vcc    drain  470k

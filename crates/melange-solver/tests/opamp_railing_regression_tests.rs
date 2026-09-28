@@ -228,23 +228,26 @@ fn explicit_hard_with_a_behavioral_source_still_compiles() {
 // ─── A railing op-amp driving a saturating choke ──────────────────────────
 //
 // The same single-supply overdrive, with the diode clipper replaced by a
-// 100 mH choke that saturates at 2 mA. The op-amp output is a square wave, so
+// 100 mH gapped choke (CORE=gapped: air-core floor 1e-3 of L0) that saturates
+// at 2 mA. The op-amp output is a square wave, so
 // the choke is driven hard into saturation every half cycle (about 2.7x
 // Isat) while the op-amp is pinned at a rail: the pinned solve has to carry
 // the flux law.
 //
-// Reference: ngspice, the op-amp twin above, with the choke as a flux
-// integrator (a unit capacitor charged by v(n2)) and a behavioral current
-// I = Isat·atanh(Φ/(L0·Isat)); 1 µs step, reltol 1e-5, converged to 0.02 %
-// against 0.25 µs. The references are i_L max over 0.5-1.0 s and ngspice's
-// `fourier` H1 of v(out) over the last cycle.
+// Reference: ngspice, the op-amp twin above, with the choke as its air-core
+// inductance L_air = 0.1 mH in series with a flux integrator (a unit capacitor
+// charged by the voltage past L_air) and a behavioral current
+// I = Isat·atanh(Φ/(L_mag·Isat)), L_mag = L0 − L_air; 1 µs step, reltol 1e-5,
+// converged to 0.02 % against 0.25 µs. The references are i_L max over
+// 0.5-1.0 s and ngspice's `fourier` H1 of v(out) over the last cycle.
 //
 // Gated at 4x. At 1x both rail modes miss for integrator reasons, not the
 // pinned solve: active-set-be runs this deck on backward Euler almost all the
 // time (the op-amp is railed ~95 % of each cycle) and is first-order wrong at
 // L/R ~ 5 samples; active-set's trapezoidal rule rings in deep saturation
-// (L_diff ~ 0.03·L0 makes the RL step factor ~ -0.6) and overshoots the i_L
-// peak. Both close at 4x. The 1x cases are recorded below, ignored, as the
+// (L_diff ~ 0.02·L0 makes the RL step factor ~ -0.6) and overshoots the i_L
+// peak by 5-12 %. The choke's air-core floor (1e-3·L0) sits far below that
+// slope and leaves the overshoot where it was. Both close at 4x. The 1x cases are recorded below, ignored, as the
 // targets those integrator fixes must meet.
 
 const RAILING_INTO_CHOKE: &str = "\
@@ -261,7 +264,7 @@ R_g nm ng 4.7k
 C_g ng 0 10u
 C_c oa n1 1u
 R_1 n1 n2 1k
-L_sat n2 0 100m ISAT=2m
+L_sat n2 0 100m ISAT=2m CORE=gapped
 R_t n2 out 10k
 R_v out 0 100k
 .model TL072 OA(AOL=200000 GBW=3e6 VCC=9 VEE=0)
@@ -269,15 +272,15 @@ R_v out 0 100k
 
 /// (drive V, ngspice i_L max A over 0.5-1.0 s)
 const CHOKE_IL: [(f64, f64); 5] = [
-    (0.05, 5.017114e-3),
-    (0.1, 5.288674e-3),
-    (0.2, 5.351541e-3),
-    (0.5, 5.377945e-3),
-    (1.0, 5.384495e-3),
+    (0.05, 5.016789e-3),
+    (0.1, 5.286189e-3),
+    (0.2, 5.348911e-3),
+    (0.5, 5.375429e-3),
+    (1.0, 5.382274e-3),
 ];
 
 /// (drive V, ngspice H1 of v(out))
-const CHOKE_H1: [(f64, f64); 2] = [(0.1, 1.37902), (1.0, 1.40291)];
+const CHOKE_H1: [(f64, f64); 2] = [(0.1, 1.3807), (1.0, 1.40461)];
 
 /// One rendered drive level of the choke deck.
 struct ChokeRow {
@@ -494,7 +497,7 @@ fn pinned_choke_without_its_stamps_is_caught_by_the_residual() {
 /// 1x, active-set-be: backward Euler on nearly every sample. Measured H1
 /// +9.8 % at 0.1 V; i_L max -1.6 … -5.8 %.
 #[test]
-#[ignore = "1x integrator accuracy: backward Euler on nearly every railed sample at L/R ~ 5 samples; turns green with the backward-Euler latch work, do not loosen"]
+#[ignore = "1x integrator accuracy: backward Euler on nearly every railed sample at L/R ~ 5 samples is 5 % low on i_L; 4x meets it; do not loosen"]
 fn choke_on_railing_opamp_at_1x_active_set_be() {
     let rows = render_choke(
         &choke_code(OpampRailMode::ActiveSetBe, 1),
@@ -510,7 +513,7 @@ fn choke_on_railing_opamp_at_1x_active_set_be() {
 /// removes the ring but over-damps: i_L -3..-5 %, H1 +6 % at 1 V. With L/R of a
 /// few samples neither rule meets the gates at 1x; 4x meets them.
 #[test]
-#[ignore = "{trap, BE} per element cannot meet i_L 1-2 % AND H1 1e-3 at L/R ~ 5 samples (trap rings, BE over-damps); 4x meets it; pending the saturated-slope question, do not loosen"]
+#[ignore = "{trap, BE} per element cannot meet i_L 1-2 % AND H1 1e-3 at L/R ~ 5 samples (trap rings, BE over-damps); the air-core floor does not reach it; 4x meets it; do not loosen"]
 fn choke_on_railing_opamp_at_1x_active_set() {
     let rows = render_choke(
         &choke_code(OpampRailMode::ActiveSet, 1),

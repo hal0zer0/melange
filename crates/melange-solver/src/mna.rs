@@ -194,8 +194,12 @@ pub struct InductorElement {
     pub node_j: usize,
     pub value: f64,
     /// Saturation current for iron-core model. None = linear (default).
-    /// When set, L_eff(I) = value / cosh²(I / isat).
+    /// When set, the flux is Φ(i) = L_mag·isat·tanh(i/isat) + L_air·i with
+    /// L_mag + L_air = value (see `air_floor`).
     pub isat: Option<f64>,
+    /// The authored air-core floor of a saturating inductor (`LAIR=`/`CORE=`);
+    /// `None` = the default. Meaningless without `isat`.
+    pub air_floor: Option<crate::parser::SatFloor>,
 }
 
 /// Coupled inductor pair info for transformer companion model.
@@ -3417,6 +3421,7 @@ impl MnaBuilder {
             node_j: usize,
             value: f64,
             isat: Option<f64>,
+            air_floor: Option<crate::parser::SatFloor>,
         }
         let mut inductor_refs: std::collections::HashMap<String, InductorRef> =
             std::collections::HashMap::new();
@@ -3426,7 +3431,7 @@ impl MnaBuilder {
                 if inductor_refs.contains_key(&lower) {
                     continue;
                 }
-                if let Some(Element::Inductor { name, n_plus, n_minus, value, isat }) =
+                if let Some(Element::Inductor { name, n_plus, n_minus, value, isat, air_floor }) =
                     netlist.elements.iter().find(|e| {
                         matches!(e, Element::Inductor { name, .. } if name.eq_ignore_ascii_case(ind_name))
                     })
@@ -3446,6 +3451,7 @@ impl MnaBuilder {
                         node_j: self.node_map[n_minus],
                         value: effective_value,
                         isat: *isat,
+                        air_floor: *air_floor,
                     });
                 }
             }
@@ -3608,6 +3614,26 @@ impl MnaBuilder {
                         )));
                     }
                 }
+                // Likewise one air-core floor. It is a fraction of the inductance,
+                // so authored values compare directly.
+                let floors: Vec<(&String, f64)> = members
+                    .iter()
+                    .filter_map(|m| {
+                        inductor_refs[m]
+                            .air_floor
+                            .map(|f| (m, crate::parser::resolve_air_floor(Some(f)).0))
+                    })
+                    .collect();
+                if let Some(&(first_name, first)) = floors.first() {
+                    if let Some(&(name, other)) = floors.iter().find(|(_, v)| *v != first) {
+                        return Err(MnaError::TopologyError(format!(
+                            "coupled inductors {{{names}}} share one core but carry \
+                             different air-core floors: {first_name} gives {first:e} and \
+                             {name} gives {other:e}. A core has one; put LAIR= or CORE= on \
+                             one winding only."
+                        )));
+                    }
+                }
             }
             if (max_l > IDEAL_XFMR_L_THRESHOLD || group_saturating)
                 && max_k > IDEAL_XFMR_K_THRESHOLD
@@ -3698,6 +3724,7 @@ impl MnaBuilder {
                         node_j: internal_p,
                         value: l_leak,
                         isat: None,
+                        air_floor: None,
                     });
                 }
 
@@ -3725,6 +3752,9 @@ impl MnaBuilder {
                     let ind = &inductor_refs[m];
                     ind.isat.map(|isat| isat * (ind.value / l_ref).sqrt())
                 });
+                // The air-core floor is a fraction of the inductance, so it carries
+                // to the magnetizing branch unchanged (one per core, checked above).
+                let core_air_floor = members.iter().find_map(|m| inductor_refs[m].air_floor);
                 let ref_internal_p = internal_nodes_p[ref_idx];
                 let ref_neg = inductor_refs[&members[ref_idx]].node_j;
                 // Exact magnetizing inductance is k·L_ref (primary-referred), not
@@ -3739,6 +3769,7 @@ impl MnaBuilder {
                     node_j: ref_neg,
                     value: l_mag,
                     isat: core_isat,
+                    air_floor: core_air_floor,
                 });
 
                 // For each non-reference winding: add ideal transformer coupling
@@ -5165,6 +5196,7 @@ impl MnaBuilder {
                 n_minus,
                 value,
                 isat,
+                air_floor,
             } => {
                 let node_i = self.node_map[n_plus];
                 let node_j = self.node_map[n_minus];
@@ -5181,6 +5213,7 @@ impl MnaBuilder {
                     node_j,
                     value: *value,
                     isat: *isat,
+                    air_floor: *air_floor,
                 });
             }
             Element::VoltageSource {

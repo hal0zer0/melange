@@ -21,7 +21,7 @@ Melange supports the following SPICE elements:
 |--------|------|-------|
 | R | Resistor | |
 | C | Capacitor | `IC=` initial voltage supported |
-| L | Inductor | `ISAT=` for saturation: single inductors and two-winding shared cores (see Saturating Inductors) |
+| L | Inductor | `ISAT=` (with `LAIR=`/`CORE=`) for saturation: single inductors and two-winding shared cores (see Saturating Inductors) |
 | V | Voltage source | DC value (+ optional AC mag/phase). A transient spec (`SIN`/`PULSE`/`PWL`/`EXP`/`SFFM`/`AM`) is a **hard parse error** — audio comes in through the input node, not a source |
 | I | Current source | Same: DC only, transient specs rejected |
 | D | Diode | Shockley + RS + BV/IBV (Zener) |
@@ -199,10 +199,19 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
 - `noise_floor` field exists but unused
 
 ### Saturating Inductors
-- `L1 a b 100m ISAT=20m`. Anhysteretic saturating flux
-  `Φ(i) = L0·Isat·tanh(i/Isat)`, solved inside the Newton loop with the
-  differential inductance `L_diff(i) = L0/cosh²(i/Isat)` in the Jacobian and the
-  flux law checked as a residual at every Newton site.
+- `L1 a b 100m ISAT=20m LAIR=3e-4`. Anhysteretic saturating flux
+  `Φ(i) = L_mag·Isat·tanh(i/Isat) + L_air·i`, with `L_air = LAIR·L0` and
+  `L_mag = L0 − L_air`: the incremental inductance
+  `L_diff(i) = L_mag/cosh²(i/Isat) + L_air` falls from L0 toward the core's
+  air-core value instead of toward zero. It is solved inside the Newton loop
+  with `L_diff` in the Jacobian and the flux law checked as a residual at every
+  Newton site.
+- **The air-core floor.** `LAIR=` gives it as a fraction of L0 (a measured
+  saturated-to-unsaturated inductance ratio is best); `CORE=gapped|steel|nickel`
+  picks a rule-of-thumb class value (1e-3, 3e-4, 3e-5). A deck with neither gets
+  3e-4 (ungapped steel) and a notice. `LAIR=0` is accepted, with a notice: the
+  pure tanh law's slope goes to zero, and driven far past `ISAT` the current is
+  then limited by a numerical floor, not a physical one.
 - **Two-winding transformers saturate as a shared core**: `ISAT=` on one winding
   of a coupled pair puts the saturation on the magnetizing branch of a T-model
   (the load current's flux cancels, as in real iron). Refused, not
@@ -210,22 +219,21 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
   three or more windings, or conflicting `ISAT=` values.
 - A circuit with a saturating inductor runs on the **nodal full-LU** sub-path;
   `--nodal-subpath schur` is refused.
-- **Accuracy in deep saturation.** Driven to tens of times `ISAT` with a short
-  L/R (a few samples), the trapezoidal rule can ring on the inductor current:
-  the current overshoots its physical value while the output spectrum stays
-  close. At 4× oversampling it is accurate (a railing op-amp driving a choke:
-  inductor current within 1.2 % and output fundamental within 0.1 % of
-  ngspice). At 1× the same circuit's inductor current overshoots up to 14 %,
-  output fundamental within 0.2 %. Where the ring dominates the output, the
+- **Deep saturation.** With the floor, a core driven to tens of times `ISAT`
+  settles on its resistive-plus-air-core limit: a 1 H, 10 mA core behind 100 Ω
+  driven at 20 V peaks at V/R with no ring at 1×.
+- **Accuracy near the knee at a short L/R.** Just past the knee (a few times
+  `ISAT`) the tanh slope, not the floor, sets `L_diff`, and with L/R of a few
+  samples the trapezoidal rule can overshoot the inductor current while the
+  output spectrum stays close. A railing op-amp driving a gapped choke at about
+  2.7× `ISAT`: at 4× oversampling, inductor current within 1.3 % and output
+  fundamental within 0.1 % of ngspice; at 1×, inductor current up to 13 % over,
+  output fundamental within 0.21 %. Where a ring dominates the output, the
   runtime backward-Euler latch catches it and holds the instance on BE for the
-  rest of the stream (about 2e-4 on the fundamental).
-- The tanh law's incremental inductance goes to zero in deep saturation (about
-  1e-7 of L0 at 9× `ISAT`), where real iron bottoms out near its air-core
-  value; beyond about 19× `ISAT` the flux is flat in double precision. Treat
-  results that deep with care.
-- Checked against independent references (a scalar trapezoidal recurrence at
-  1× and 256-1024×, exact flux-drive harmonic tables for a DC-biased core) and
-  one ngspice twin (the railing op-amp into a choke).
+  rest of the stream.
+- Checked against independent references of the same law (a scalar
+  trapezoidal recurrence at 1× and 256-1024×, exact flux-drive harmonic tables
+  for a DC-biased core) and one ngspice twin (the railing op-amp into a choke).
 - No magnetic hysteresis, core loss, or remanence anywhere in the code
 
 ### Glow Discharge / Neon (`N`) [EXPERIMENTAL]

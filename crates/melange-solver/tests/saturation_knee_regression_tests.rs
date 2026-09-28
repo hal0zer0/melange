@@ -8,8 +8,9 @@
 //!
 //! References, both independent of melange:
 //! - a scalar trapezoidal recurrence of `V − R·i = dΦ(i)/dt`,
-//!   `Φ(i) = L0·Isat·tanh(i/Isat)`, solved by bracketed Newton to 1e-16, at the
-//!   same 48 kHz (checks the implementation), and
+//!   `Φ(i) = L_mag·Isat·tanh(i/Isat) + L_air·i` with `L_air = LAIR·L0` and
+//!   `L_mag = L0 − L_air`, solved by bracketed Newton to 1e-16, at the same
+//!   48 kHz (checks the implementation), and
 //! - the same recurrence at 1024× (≈continuous; checks the physics). At these
 //!   drives the two agree to 7e-6 relative on H1, so both are gated.
 //!
@@ -26,47 +27,51 @@ use melange_solver::parser::Netlist;
 const FS: f64 = 48000.0;
 const F: f64 = 30.0;
 
-/// Saturating RL: R = 99 + the 1 Ω input = 100 Ω, L0 = 1 H, Isat = 10 mA.
-const C1: &str = "saturating RL driven into the knee at LF\nR1 in a 99\nL1 a 0 1 ISAT=10m\n";
+/// Saturating RL: R = 99 + the 1 Ω input = 100 Ω, L0 = 1 H, Isat = 10 mA,
+/// air-core floor LAIR = 3e-4 (L_air = 0.3 mH).
+const C1: &str =
+    "saturating RL driven into the knee at LF\nR1 in a 99\nL1 a 0 1 ISAT=10m LAIR=3e-4\n";
 
 /// (drive V, pk/Isat, H1 A [1x], H3/H1 [1x], H5/H1 [1x], H1 A [1024x], H3/H1 [1024x], H5/H1 [1024x])
-const C1_REF: [(f64, f64, f64, f64, f64, f64, f64, f64); 3] = [
+type C1Row = (f64, f64, f64, f64, f64, f64, f64, f64);
+
+const C1_REF: [C1Row; 3] = [
     (
         0.5,
         0.2380,
-        2.368764e-3,
-        0.004600,
+        2.368756e-3,
+        0.004599,
         0.000039,
-        2.368766e-3,
-        0.004600,
+        2.368758e-3,
+        0.004599,
         0.000039,
     ),
     (
         2.0,
-        1.2888,
-        1.146205e-2,
-        0.103742,
-        0.020109,
-        1.146206e-2,
-        0.103742,
-        0.020109,
+        1.2885,
+        1.146091e-2,
+        0.103668,
+        0.020073,
+        1.146092e-2,
+        0.103668,
+        0.020073,
     ),
     (
         5.0,
         5.0000,
-        4.079957e-2,
-        0.272241,
-        0.110613,
-        4.079984e-2,
-        0.272238,
-        0.110613,
+        4.079793e-2,
+        0.272194,
+        0.110529,
+        4.079782e-2,
+        0.272193,
+        0.110527,
     ),
 ];
 
 /// 1:1 shared-core transformer, 1 H windings, K = 0.99, ISAT on the primary.
 fn c2(load: &str) -> String {
     format!(
-        "shared-core saturating transformer\nR_p in p 99\nL_pri p 0 1 ISAT=10m\nL_sec s 0 1\n\
+        "shared-core saturating transformer\nR_p in p 99\nL_pri p 0 1 ISAT=10m LAIR=3e-4\nL_sec s 0 1\n\
          K1 L_pri L_sec 0.99\nR_L s out 1m\nR_load out 0 {load}\n"
     )
 }
@@ -148,12 +153,14 @@ fn render(code: &str, drives: &[f64], probe: &str, extra_pk: &str, tag: &str) ->
         .collect()
 }
 
-/// C1's gates against both references. `Err` names the first gate that fails.
-fn c1_gates(code: &str, tag: &str) -> Result<(), String> {
-    let drives: Vec<f64> = C1_REF.iter().map(|r| r.0).collect();
+/// C1's gates against both references. The 1× recurrence is held to H1 1e-5
+/// relative and H3/H5 1e-4 absolute; the 1024× one to `tol_1024` (H1
+/// relative, ratios absolute). `Err` names the first gate that fails.
+fn c1_gates(code: &str, table: &[C1Row], tol_1024: (f64, f64), tag: &str) -> Result<(), String> {
+    let drives: Vec<f64> = table.iter().map(|r| r.0).collect();
     let rows = render(code, &drives, "s.v_prev[SAT_IND_0_AUG_ROW]", "0.0", tag);
     let isat = 10e-3;
-    for (row, r) in rows.iter().zip(C1_REF.iter()) {
+    for (row, r) in rows.iter().zip(table.iter()) {
         let (amp, pk, h1, h2, h3, h5, bad) =
             (row[0], row[1], row[2], row[3], row[4], row[6], row[8]);
         if bad != 0.0 {
@@ -162,11 +169,14 @@ fn c1_gates(code: &str, tag: &str) -> Result<(), String> {
             ));
         }
         let (h3r, h5r) = (h3 / h1, h5 / h1);
-        for (name, h1_ref, h3_ref, h5_ref) in [("1x", r.2, r.3, r.4), ("1024x", r.5, r.6, r.7)] {
-            if ((h1 - h1_ref) / h1_ref).abs() > 1e-5 {
+        for (name, h1_ref, h3_ref, h5_ref, (h1_tol, ratio_tol)) in [
+            ("1x", r.2, r.3, r.4, (1e-5, 1e-4)),
+            ("1024x", r.5, r.6, r.7, tol_1024),
+        ] {
+            if ((h1 - h1_ref) / h1_ref).abs() > h1_tol {
                 return Err(format!("{amp} V: H1 {h1:.6e} vs {name} {h1_ref:.6e}"));
             }
-            if (h3r - h3_ref).abs() > 1e-4 || (h5r - h5_ref).abs() > 1e-4 {
+            if (h3r - h3_ref).abs() > ratio_tol || (h5r - h5_ref).abs() > ratio_tol {
                 return Err(format!(
                     "{amp} V: H3/H1 {h3r:.6} H5/H1 {h5r:.6} vs {name} {h3_ref:.6} / {h5_ref:.6}"
                 ));
@@ -174,6 +184,10 @@ fn c1_gates(code: &str, tag: &str) -> Result<(), String> {
         }
         if (pk / isat - r.1).abs() > 1e-3 * r.1 {
             return Err(format!("{amp} V: peak {:.4}·Isat vs {:.4}", pk / isat, r.1));
+        }
+        // The current can never pass V/R (R = 100 Ω): past it is a ring.
+        if pk > amp / 100.0 * (1.0 + 1e-6) {
+            return Err(format!("{amp} V: peak {pk:.6} A over the V/R ceiling"));
         }
         // A symmetric tanh core under symmetric drive makes odd harmonics only.
         if h2 / h1 > 1e-9 {
@@ -200,7 +214,7 @@ fn c1_gates(code: &str, tag: &str) -> Result<(), String> {
 #[test]
 fn c1_saturating_rl_matches_both_references() {
     let code = nodal_code(C1, "a");
-    c1_gates(&code, "c1").unwrap();
+    c1_gates(&code, &C1_REF, (1e-5, 1e-4), "c1").unwrap();
 }
 
 /// The gates must fail on a broken implementation, or they gate nothing.
@@ -218,7 +232,7 @@ fn c1_gates_catch_a_broken_flux_device() {
         "test premise: history correction not found"
     );
     assert!(
-        c1_gates(&no_history, "c1_nohist").is_err(),
+        c1_gates(&no_history, &C1_REF, (1e-5, 1e-4), "c1_nohist").is_err(),
         "history mutant passed"
     );
     // Main-loop Jacobian stamp removed.
@@ -232,15 +246,21 @@ fn c1_gates_catch_a_broken_flux_device() {
         "test premise: main-loop Jacobian stamp not found"
     );
     assert!(
-        c1_gates(&no_jacobian, "c1_nojac").is_err(),
+        c1_gates(&no_jacobian, &C1_REF, (1e-5, 1e-4), "c1_nojac").is_err(),
         "Jacobian mutant passed"
+    );
+    // No air-core floor: the pure-tanh law, 4e-5 low on H1 at 5 V.
+    let no_air = nodal_code(&C1.replace("LAIR=3e-4", "LAIR=0"), "a");
+    assert!(
+        c1_gates(&no_air, &C1_REF, (1e-5, 1e-4), "c1_noair").is_err(),
+        "zero-floor mutant passed"
     );
     // Linear inductor: no knee at all. Same topology, so its branch current is
     // on the augmented row the saturating build names SAT_IND_0_AUG_ROW (2).
     let linear = nodal_code("linear RL\nR1 in a 99\nL1 a 0 1\n", "a")
         + "\npub const SAT_IND_0_AUG_ROW: usize = 2;\n";
     assert!(
-        c1_gates(&linear, "c1_lin").is_err(),
+        c1_gates(&linear, &C1_REF, (1e-5, 1e-4), "c1_lin").is_err(),
         "linear inductor passed"
     );
 }
@@ -343,24 +363,76 @@ fn c1_jacobian_deletion_is_caught_at_every_newton_site() {
     );
 }
 
-/// Deep saturation rings under the trapezoidal rule: as L_diff → 0 the RL
-/// step factor tends to −1, and the current overshoots the physical ceiling
-/// V/R. Same scalar recurrence as C1's reference: at 1× the peak is 11.83 and
-/// 23.94 Isat at 10 and 20 V against a ceiling of 10 and 20, and 4× does not
-/// cure it (10.49, 24.69). The 1024× recurrence lands on the ceiling.
-///
-/// melange closes this with the runtime BE-latch, which detects the
-/// sample-to-sample alternation and switches the instance to backward Euler.
-/// The cost is first-order accuracy for the REST of the stream, because the
-/// latch is sticky: here H1 moves 1.8e-4 (10 V) and 6.8e-5 (20 V) relative.
-///
-/// (drive V, 1024× peak/Isat, 1024× H1 A)
-const C1_DEEP: [(f64, f64, f64); 2] = [(10.0, 10.0000, 9.162930e-2), (20.0, 20.0000, 1.930403e-1)];
+/// Deep saturation, pre-registered: with the air-core floor the circuit is
+/// R + L_air once the core saturates, ωL_air ≪ R, so the current settles on
+/// V/R, and the trapezoidal step factor on the air slope,
+/// (αL_air − R)/(αL_air + R) = −0.55, damps any alternation: no ring and no
+/// backward-Euler latch (a latched sample counts as a BE fallback, which the
+/// gates refuse). 100 V is 100× Isat, and the most a drive can be: generated
+/// code clamps its input to ±100 V. The 1× recurrence sits 1e-4 from the
+/// 1024× one on H1 here (the trapezoidal rule at a knee a few samples wide),
+/// so 1024× is held to 2e-4 on H1 and 3e-4 on the ratios.
+const C1_DEEP: [C1Row; 3] = [
+    (
+        10.0,
+        10.0000,
+        9.162833e-2,
+        0.191747,
+        0.110251,
+        9.161853e-2,
+        0.191852,
+        0.110260,
+    ),
+    (
+        20.0,
+        20.0000,
+        1.930396e-1,
+        0.108684,
+        0.085239,
+        1.930551e-1,
+        0.108543,
+        0.085158,
+    ),
+    (
+        100.0,
+        100.0000,
+        9.962042e-1,
+        0.023559,
+        0.022648,
+        9.962352e-1,
+        0.023435,
+        0.022534,
+    ),
+];
 
 #[test]
-fn c1_deep_saturation_ring_is_caught_by_the_latch() {
+fn c1_deep_saturation_settles_on_the_rl_limit_without_ringing() {
     let code = nodal_code(C1, "a");
-    let drives: Vec<String> = C1_DEEP.iter().map(|r| format!("{:?}", r.0)).collect();
+    c1_gates(&code, &C1_DEEP, (2e-4, 3e-4), "c1_deep").unwrap();
+}
+
+/// With no air-core floor (`LAIR=0`) deep saturation rings under the
+/// trapezoidal rule: as L_diff → 0 the RL step factor tends to −1, and the
+/// current overshoots the physical ceiling V/R. Same scalar recurrence as
+/// C1's reference: at 1× the peak is 11.83 and 23.94 Isat at 10 and 20 V
+/// against a ceiling of 10 and 20, and 4× does not cure it (10.49, 24.69).
+/// The 1024× recurrence lands on the ceiling.
+///
+/// The runtime BE-latch closes it: it detects the sample-to-sample
+/// alternation and switches the instance to backward Euler for the rest of the
+/// stream.
+///
+/// (drive V, 1024× peak/Isat, 1024× H1 A)
+const C1_DEEP_NO_FLOOR: [(f64, f64, f64); 2] =
+    [(10.0, 10.0000, 9.165534e-2), (20.0, 20.0000, 1.930722e-1)];
+
+#[test]
+fn c1_zero_floor_deep_saturation_ring_is_caught_by_the_latch() {
+    let code = nodal_code(&C1.replace("LAIR=3e-4", "LAIR=0"), "a");
+    let drives: Vec<String> = C1_DEEP_NO_FLOOR
+        .iter()
+        .map(|r| format!("{:?}", r.0))
+        .collect();
     let main = format!(
         "fn main() {{
     for amp in [{drives}] {{
@@ -385,8 +457,8 @@ fn c1_deep_saturation_ring_is_caught_by_the_latch() {
 }}",
         drives = drives.join(", ")
     );
-    let out = support::compile_and_run(&code, &main, "c1_deep").stdout;
-    for (line, &(amp, pk_ref, h1_ref)) in out.lines().zip(C1_DEEP.iter()) {
+    let out = support::compile_and_run(&code, &main, "c1_deep_no_floor").stdout;
+    for (line, &(amp, pk_ref, h1_ref)) in out.lines().zip(C1_DEEP_NO_FLOOR.iter()) {
         let v: Vec<f64> = line
             .split_whitespace()
             .map(|t| t.parse().unwrap())
@@ -416,7 +488,7 @@ Cin  in     gate_i 1u
 Rb1  vcc    gate_i 1MEG
 Rb2  gate_i 0      170k
 Rg   gate_i gate   1k
-Lp   vcc    drain  5 ISAT=20m
+Lp   vcc    drain  5 ISAT=20m CORE=gapped
 Rdcr drain  drain_d 120
 Cw   vcc    drain  220p
 Rw   vcc    drain  470k
@@ -543,15 +615,15 @@ fn c2_shared_core_saturates_on_magnetizing_not_winding_current() {
 
     // Open: magnetizing current saturates the core. Independent 1024x
     // reference of R + linear leakage + saturating magnetizing branch:
-    // H3/H1 = 0.50513, i_mag/Isat = 4.999.
+    // H3/H1 = 0.50460 (0.50513 without the air-core floor), i_mag/Isat = 4.999.
     let spice = c2("1MEG");
     let code = nodal_code(&spice, "out");
     let row = &render(&code, &[5.0], "s.v_prev[OUTPUT_NODES[0]]", "0.0", "c2_open")[0];
     let (h1, h3, bad) = (row[2], row[4], row[8]);
     assert_eq!(bad, 0.0, "open: unsolved samples");
     assert!(
-        (h3 / h1 - 0.50513).abs() <= 1e-3,
-        "open secondary H3/H1 {:.5} vs reference 0.50513",
+        (h3 / h1 - 0.50460).abs() <= 1e-4,
+        "open secondary H3/H1 {:.5} vs reference 0.50460",
         h3 / h1
     );
 }
@@ -562,8 +634,10 @@ fn c2_shared_core_saturates_on_magnetizing_not_winding_current() {
 // bias breaks the symmetry and H2 appears. Flux-drive analysis (analog-EE
 // review), with φ0 = tanh(Idc/Isat) and a = AC flux / saturation flux:
 //   H2/H1 ≈ φ0·a / (2(1−φ0²)),  H3/H1 ≈ (2 + 6φ0²)·a² / (24(1−φ0²)²),
-// so H2 overtakes H3 once φ0 > ~a/6. The exact-FFT values below are the
-// review's (reproduced to 0.05 dB by ideal flux drive, φ0 = tanh(Idc/Isat)).
+// so H2 overtakes H3 once φ0 > ~a/6. The exact-FFT values below are ideal
+// flux drive of this deck's law (Φ0 = Φ(Idc), AC flux a·L0·Isat), inverted by
+// Newton and fitted over one period of 4096 points; with LAIR = 0 the same
+// computation reproduces the review's values to 0.05 dB.
 //
 // The deck has to BE flux drive for those values to apply. The 1 Ω source
 // makes that true only when R/(ωL) is small AND L/R is long against the 2 s
@@ -581,27 +655,27 @@ fn c2_shared_core_saturates_on_magnetizing_not_winding_current() {
 // only as an average over each step, alternates ±a·ωL0·Isat from sample to
 // sample for the whole render.
 
-/// (a, [(Idc/Isat, H2/H1 dB, H3/H1 dB)]) from the review's exact FFT.
+/// (a, [(Idc/Isat, H2/H1 dB, H3/H1 dB)]) from exact flux drive, LAIR = 3e-4.
 /// a = 0.3 stops at Idc/Isat = 0.5: at 1.0 the flux would pass saturation
 /// (φ0 + a > 1), which is not flux drive any more.
 const C3_REF: [(f64, &[(f64, f64, f64)]); 2] = [
     (
         0.1,
         &[
-            (0.05, -52.0, -61.4),
-            (0.1, -45.9, -61.1),
-            (0.25, -37.6, -59.0),
-            (0.5, -30.5, -52.9),
-            (1.0, -20.4, -36.9),
+            (0.05, -51.96, -61.43),
+            (0.1, -45.90, -61.11),
+            (0.25, -37.63, -59.00),
+            (0.5, -30.53, -52.96),
+            (1.0, -20.39, -36.92),
         ],
     ),
     (
         0.3,
         &[
-            (0.05, -41.9, -42.0),
-            (0.1, -35.8, -41.6),
-            (0.25, -27.4, -39.3),
-            (0.5, -20.0, -32.4),
+            (0.05, -41.87, -41.98),
+            (0.1, -35.80, -41.62),
+            (0.25, -27.45, -39.30),
+            (0.5, -19.96, -32.40),
         ],
     ),
 ];
@@ -612,24 +686,25 @@ const C3_REF: [(f64, &[(f64, f64, f64)]); 2] = [
 /// `C3_REF`; the 1× recurrence is within 1.5e-6 on H1 and 2e-7 on the ratios.
 /// Computed 2026-09-28.
 const C3_REF_256: [(f64, f64, f64, f64, f64); 11] = [
-    (0.1, 0.0, 1.002512572e-3, 2.638759463e-7, 8.375280792e-4),
-    (0.1, 0.05, 1.005052155e-3, 2.522763217e-3, 8.480528588e-4),
-    (0.1, 0.1, 1.012698578e-3, 5.071707744e-3, 8.801774832e-4),
-    (0.1, 0.25, 1.067378915e-3, 1.313975917e-2, 1.121583060e-3),
-    (0.1, 0.5, 1.280023649e-3, 2.976242889e-2, 2.249874204e-3),
-    (0.1, 1.0, 2.479242787e-3, 9.554806116e-2, 1.424389503e-2),
-    (0.3, 0.0, 3.070719883e-3, 2.574341870e-6, 7.857769168e-3),
-    (0.3, 0.05, 3.079356488e-3, 8.056066379e-3, 7.966648415e-3),
-    (0.3, 0.1, 3.105418864e-3, 1.621706447e-2, 8.298774374e-3),
-    (0.3, 0.25, 3.294311977e-3, 4.240093859e-2, 1.083999947e-2),
-    (0.3, 0.5, 4.081094389e-3, 1.003148903e-1, 2.393806226e-2),
+    (0.1, 0.0, 1.002511812e-3, 2.637954878e-7, 8.372742869e-4),
+    (0.1, 0.05, 1.005050611e-3, 2.521991660e-3, 8.477900284e-4),
+    (0.1, 0.1, 1.012694651e-3, 5.070132708e-3, 8.798867637e-4),
+    (0.1, 0.25, 1.067356841e-3, 1.313523432e-2, 1.121064519e-3),
+    (0.1, 0.5, 1.279912075e-3, 2.974821512e-2, 2.247920740e-3),
+    (0.1, 1.0, 2.477944612e-3, 9.542253734e-2, 1.420358373e-2),
+    (0.3, 0.0, 3.070696935e-3, 2.573443884e-6, 7.855181198e-3),
+    (0.3, 0.05, 3.079330282e-3, 8.053291937e-3, 7.963956272e-3),
+    (0.3, 0.1, 3.105382663e-3, 1.621137109e-2, 8.295758884e-3),
+    (0.3, 0.25, 3.294195808e-3, 4.238394415e-2, 1.083422220e-2),
+    (0.3, 0.5, 4.080470766e-3, 1.002508694e-1, 2.391043203e-2),
 ];
 
 const C3_ISAT: f64 = 10e-3;
 const C3_L0: f64 = 100.0;
+const C3_LAIR: f64 = 3e-4;
 
 fn c3_deck(idc: f64) -> String {
-    format!("biased core\nL1 in 0 {C3_L0:?} ISAT=10m\nI_b 0 in DC {idc:e}\n")
+    format!("biased core\nL1 in 0 {C3_L0:?} ISAT=10m LAIR={C3_LAIR:e}\nI_b 0 in DC {idc:e}\n")
 }
 
 /// Drive amplitude giving normalised AC flux `a` at 30 Hz: V = a·ω·L0·Isat.
@@ -642,8 +717,8 @@ fn c3_amp(a: f64) -> f64 {
 /// with the drive's previous value starting at its t = 0 value (as the melange
 /// run sets `input_prev`).
 fn c3_reference(amp: f64, idc: f64) -> [(f64, f64); 4] {
-    let (l0, r, t) = (C3_L0, 1.0f64, 1.0 / FS);
-    let phi = |i: f64| l0 * C3_ISAT * (i / C3_ISAT).tanh();
+    let (lmag, lair, r, t) = (C3_L0 * (1.0 - C3_LAIR), C3_L0 * C3_LAIR, 1.0f64, 1.0 / FS);
+    let phi = |i: f64| lmag * C3_ISAT * (i / C3_ISAT).tanh() + lair * i;
     let n = (2.0 * FS) as usize;
     let (mut i, mut xprev) = (idc, amp);
     let mut ss = Vec::with_capacity(n / 2);
@@ -659,7 +734,7 @@ fn c3_reference(amp: f64, idc: f64) -> [(f64, f64); 4] {
                 lo = y
             }
             let ch = (y / C3_ISAT).clamp(-300.0, 300.0).cosh();
-            let mut yn = y - f / (l0 / (ch * ch) + t / 2.0 * r);
+            let mut yn = y - f / (lmag / (ch * ch) + lair + t / 2.0 * r);
             if !(yn > lo && yn < hi) {
                 yn = 0.5 * (lo + hi);
             }
@@ -754,7 +829,7 @@ fn db(x: f64) -> f64 {
 /// Two gates per (a, bias) row. Implementation: melange against the same
 /// circuit integrated independently, at 1× (same discretisation) and at 256×
 /// (≈continuous), at C1's tolerances. Physics: the review's exact flux-drive
-/// values, to 0.5 dB.
+/// values for this law, to 0.5 dB.
 ///
 /// This row set is what caught the NR stopping criterion accepting Newton's
 /// first iterate. The quadratic remainder is one-signed under bias, so the
@@ -799,7 +874,7 @@ fn c3_dc_bias_makes_h2_as_the_physics_predicts() {
                 (h2r - h2_256).abs() <= 1e-4 && (h3r - h3_256).abs() <= 1e-4,
                 "a={a} Idc/Isat={b}: H2/H1 {h2r:.4e} H3/H1 {h3r:.4e} vs 256x {h2_256:.4e} / {h3_256:.4e}"
             );
-            // Physics: the review's exact flux-drive values, to 0.5 dB.
+            // Physics: exact flux-drive values, to 0.5 dB.
             let table = C3_REF.iter().find(|r| r.0 == a).map(|r| r.1).unwrap();
             if let Some(&(_, h2_db, h3_db)) = table.iter().find(|r| r.0 == b) {
                 let (h2, h3) = (db(h2r), db(h3r));

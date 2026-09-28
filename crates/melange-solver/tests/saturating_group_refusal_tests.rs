@@ -56,6 +56,24 @@ fn conflicting_saturation_currents_on_one_core_are_refused() {
 }
 
 #[test]
+fn conflicting_air_core_floors_on_one_core_are_refused() {
+    let e = mna_err(
+        "conflict\nR1 in a 100\nL1 a 0 100m ISAT=20m LAIR=1e-3\nL2 b 0 400m ISAT=10m CORE=steel\n\
+         K1 L1 L2 0.99\nR2 b 0 1k\n",
+    );
+    assert!(e.contains("different air-core floors"), "{e}");
+    // The same floor twice, or on one winding only, is one core.
+    mna_ok(
+        "same\nR1 in a 100\nL1 a 0 100m ISAT=20m LAIR=3e-4\nL2 b 0 400m ISAT=10m CORE=steel\n\
+         K1 L1 L2 0.99\nR2 b 0 1k\n",
+    );
+    mna_ok(
+        "one\nR1 in a 100\nL1 a 0 100m ISAT=20m CORE=gapped\nL2 b 0 400m ISAT=10m\n\
+         K1 L1 L2 0.99\nR2 b 0 1k\n",
+    );
+}
+
+#[test]
 fn covered_saturating_groups_still_build() {
     // Tight pair, ISAT on one winding.
     mna_ok("tight\nR1 in a 100\nL1 a 0 100m ISAT=20m\nL2 b 0 100m\nK1 L1 L2 0.95\nR2 b 0 1k\n");

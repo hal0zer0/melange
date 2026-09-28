@@ -3,5 +3,6 @@
 * the 20-60 Hz part of the sweep drives i_L to several x Isat.
 * Correctness is gated in crates/melange-solver/tests/saturation_knee_regression_tests.rs.
 R_1 in out 99
-L_1 out 0 1 ISAT=10m
+* LAIR=3e-4: air-core floor, ungapped-steel rule of thumb (same as the regression test).
+L_1 out 0 1 ISAT=10m LAIR=3e-4
 .end

@@ -203,7 +203,7 @@ See [spice-grammar.md](spice-grammar.md#5-melange-extensions) for full syntax.
 R1 node1 node2 10k          ; Resistor (ohms)
 C1 node1 node2 100n         ; Capacitor (farads)
 L1 node1 node2 10m          ; Inductor (henries)
-L2 node1 node2 100m ISAT=20m ; Saturating inductor (tanh model)
+L2 node1 node2 100m ISAT=20m CORE=steel ; Saturating inductor (tanh + air-core floor)
 C2 node1 node2 10u IC=5     ; Capacitor with initial voltage
 ```
 

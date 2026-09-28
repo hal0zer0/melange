@@ -1208,10 +1208,13 @@ pub struct InductorIR {
 
 /// Saturating (iron-core) inductor.
 ///
-/// A flux device solved inside the full-LU NR loop: flux Φ(i) = l0·isat·tanh(i/isat),
-/// differential inductance L_diff = l0/cosh²(i/isat) as the Jacobian entry, and a
+/// A flux device solved inside the full-LU NR loop: flux
+/// Φ(i) = L_mag·isat·tanh(i/isat) + L_air·i with L_mag = (1−lair)·l0 and
+/// L_air = lair·l0 (so the small-signal inductance is still l0), differential
+/// inductance L_diff = L_mag/cosh²(i/isat) + L_air as the Jacobian entry, and a
 /// history correction that swaps the baked `α·l0·i_prev` for `α·Φ(i_prev)`
-/// (see `SATURATING_TRANSFORMERS.md` §3.4).
+/// (see `SATURATING_TRANSFORMERS.md` §3.4). L_air is the winding's air-core
+/// inductance: past saturation dB/dH falls to µ0, not to zero.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SaturatingInductorIR {
     pub name: String,
@@ -1224,6 +1227,12 @@ pub struct SaturatingInductorIR {
     /// Index into the uncoupled/coupled/transformer inductor arrays for
     /// identifying which inductor this is (for naming constants).
     pub inductor_index: usize,
+    /// Air-core fraction L_air/l0 (see the struct doc).
+    #[serde(default)]
+    pub lair: f64,
+    /// Where `lair` came from (`LAIR=`, `CORE=<class>` or the default).
+    #[serde(default)]
+    pub lair_source: String,
 }
 
 /// Coupled inductor pair parameters for code generation (transformer).
@@ -3721,12 +3730,33 @@ impl CircuitIR {
                 // matching the switch row mapping); no separate counter needed.
                 for (i, ind) in mna.inductors.iter().enumerate() {
                     if let Some(isat) = ind.isat {
+                        let (lair, lair_source) = crate::parser::resolve_air_floor(ind.air_floor);
+                        // Never silent: a default is announced, and so is an
+                        // explicit zero floor.
+                        if ind.air_floor.is_none() {
+                            log::warn!(
+                                "Saturating inductor {}: no LAIR= or CORE= given, so its saturated \
+                                 inductance floors at {lair:e} of its inductance (rule-of-thumb for \
+                                 ungapped steel). Set LAIR=<fraction> from a measured or core-data \
+                                 value, or CORE=gapped|steel|nickel.",
+                                ind.name
+                            );
+                        } else if lair == 0.0 {
+                            log::warn!(
+                                "Saturating inductor {}: LAIR=0 gives a zero final slope; driven far \
+                                 past ISAT (beyond ~10x) its current is set by a numerical, not a \
+                                 physical, floor.",
+                                ind.name
+                            );
+                        }
                         sat_inds.push(SaturatingInductorIR {
                             name: ind.name.clone(),
                             l0: ind.value,
                             isat,
                             aug_row: n_aug + i,
                             inductor_index: i,
+                            lair,
+                            lair_source: lair_source.to_string(),
                         });
                     }
                 }

@@ -815,6 +815,47 @@ impl Netlist {
     }
 }
 
+/// How an inductor's saturated incremental inductance was authored.
+///
+/// Past saturation the iron's magnetisation is spent and dB/dH falls to µ0,
+/// so the winding keeps its air-core inductance: the flux law is
+/// `Φ(i) = L_mag·Isat·tanh(i/Isat) + L_air·i` with `L_mag + L_air = L0`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SatFloor {
+    /// `LAIR=<fraction>`: L_air as a fraction of L0 (0 allowed, for bisecting
+    /// and for comparison with tanh-only work).
+    Explicit(f64),
+    /// `CORE=<class>`: a rule-of-thumb class default.
+    Class(CoreClass),
+}
+
+/// Core classes with rule-of-thumb air-core fractions (L_air/L0 ~ g/mu_eff).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreClass {
+    /// Gapped chokes and single-ended output transformers: 1e-3.
+    Gapped,
+    /// Ungapped silicon steel: 3e-4.
+    Steel,
+    /// High-nickel (Mumetal-type) cores: 3e-5.
+    Nickel,
+}
+
+/// The air-core fraction used when a saturating inductor declares neither
+/// `LAIR=` nor `CORE=` (ungapped steel, rule-of-thumb).
+pub const DEFAULT_AIR_FLOOR: f64 = 3e-4;
+
+/// Resolve an authored floor to `(L_air/L0, provenance)`. `None` is the
+/// default, which every caller must announce.
+pub fn resolve_air_floor(floor: Option<SatFloor>) -> (f64, &'static str) {
+    match floor {
+        Some(SatFloor::Explicit(v)) => (v, "LAIR="),
+        Some(SatFloor::Class(CoreClass::Gapped)) => (1e-3, "CORE=gapped (rule-of-thumb)"),
+        Some(SatFloor::Class(CoreClass::Steel)) => (3e-4, "CORE=steel (rule-of-thumb)"),
+        Some(SatFloor::Class(CoreClass::Nickel)) => (3e-5, "CORE=nickel (rule-of-thumb)"),
+        None => (DEFAULT_AIR_FLOOR, "default (rule-of-thumb, ungapped steel)"),
+    }
+}
+
 /// A circuit element (component).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Element {
@@ -844,7 +885,7 @@ pub enum Element {
         value: f64,
         ic: Option<f64>,
     },
-    /// Inductor: Lname n+ n- value [ISAT=value]
+    /// Inductor: Lname n+ n- value [ISAT=value [LAIR=fraction | CORE=class]]
     Inductor {
         name: String,
         n_plus: String,
@@ -852,6 +893,10 @@ pub enum Element {
         value: f64,
         /// Saturation current for iron-core model. None = linear (default).
         isat: Option<f64>,
+        /// Air-core floor of a saturating inductor's incremental inductance, as
+        /// authored (`LAIR=` or `CORE=`); `None` takes the default. Resolve
+        /// with [`resolve_air_floor`].
+        air_floor: Option<SatFloor>,
     },
     /// Voltage source: Vname n+ n- [DC value] [AC mag phase]
     VoltageSource {
@@ -1289,12 +1334,14 @@ impl Element {
                 n_minus,
                 value,
                 isat,
+                air_floor,
             } => Element::Inductor {
                 name: prefixed(name),
                 n_plus: remap(n_plus),
                 n_minus: remap(n_minus),
                 value: *value,
                 isat: *isat,
+                air_floor: *air_floor,
             },
             Element::VoltageSource {
                 name,
@@ -4527,27 +4574,75 @@ impl Parser {
     }
 
     fn parse_inductor(&self, parts: &[&str]) -> Result<Element, ParseError> {
-        self.require_parts(parts, 4, "Lname n+ n- value [ISAT=value]")?;
+        self.require_parts(
+            parts,
+            4,
+            "Lname n+ n- value [ISAT=value [LAIR=fraction | CORE=gapped|steel|nickel]]",
+        )?;
         self.check_self_connection(parts[1], parts[2], parts[0])?;
         let value = self.parse_positive_value(parts[3], "Inductor")?;
         let mut isat = None;
+        let mut lair = None;
+        let mut core = None;
+        // Keyword matched case-insensitively; the value keeps its case so SPICE
+        // suffixes parse exactly as elsewhere.
+        let key = |part: &str, k: &str| -> Option<String> {
+            part.get(..k.len())
+                .filter(|head| head.eq_ignore_ascii_case(k) && part.len() > k.len())
+                .map(|_| part[k.len()..].to_string())
+        };
         for &part in &parts[4..] {
-            if let Some(stripped) = part
-                .strip_prefix("ISAT=")
-                .or_else(|| part.strip_prefix("isat="))
-            {
-                let v = parse_value(stripped)
+            if let Some(stripped) = key(part, "ISAT=") {
+                let v = parse_value(&stripped)
                     .map_err(|_| self.error(format!("Invalid ISAT value: {}", stripped)))?;
                 if !(v > 0.0 && v.is_finite()) {
                     return Err(self.error("ISAT must be positive and finite"));
                 }
                 isat = Some(v);
+            } else if let Some(stripped) = key(part, "LAIR=") {
+                let v = parse_value(&stripped)
+                    .map_err(|_| self.error(format!("Invalid LAIR value: {}", stripped)))?;
+                if !(v.is_finite() && (0.0..1.0).contains(&v)) {
+                    return Err(self.error(format!(
+                        "Inductor '{}': LAIR is the air-core inductance as a fraction of the \
+                         inductance (0 <= LAIR < 1), got {}",
+                        parts[0], stripped
+                    )));
+                }
+                lair = Some(v);
+            } else if let Some(stripped) = key(part, "CORE=") {
+                core = Some(match stripped.to_ascii_uppercase().as_str() {
+                    "GAPPED" => CoreClass::Gapped,
+                    "STEEL" => CoreClass::Steel,
+                    "NICKEL" => CoreClass::Nickel,
+                    _ => {
+                        return Err(self.error(format!(
+                            "Inductor '{}': CORE must be gapped, steel or nickel, got '{}'",
+                            parts[0], stripped
+                        )))
+                    }
+                });
             } else {
                 return Err(self.error(format!(
-                    "Inductor '{}': unrecognized trailing token '{}' (only ISAT=<value> is supported)",
+                    "Inductor '{}': unrecognized trailing token '{}' (supported: ISAT=, LAIR=, CORE=)",
                     parts[0], part
                 )));
             }
+        }
+        let air_floor = match (lair, core) {
+            (Some(_), Some(_)) => return Err(self.error(format!(
+                "Inductor '{}': give LAIR= or CORE=, not both (CORE= picks a rule-of-thumb LAIR)",
+                parts[0]
+            ))),
+            (Some(v), None) => Some(SatFloor::Explicit(v)),
+            (None, Some(c)) => Some(SatFloor::Class(c)),
+            (None, None) => None,
+        };
+        if air_floor.is_some() && isat.is_none() {
+            return Err(self.error(format!(
+                "Inductor '{}': LAIR= and CORE= describe saturation and need ISAT= on the same line",
+                parts[0]
+            )));
         }
         Ok(Element::Inductor {
             name: parts[0].to_string(),
@@ -4555,6 +4650,7 @@ impl Parser {
             n_minus: parts[2].to_string(),
             value,
             isat,
+            air_floor,
         })
     }
 

@@ -57,7 +57,7 @@ Cc emit 0 100p
 
 **Syntax:**
 ```
-Lname n+ n- value [IC=initial_current] [ISAT=saturation_current]
+Lname n+ n- value [ISAT=saturation_current [LAIR=fraction | CORE=class]]
 ```
 
 **Parameters:**
@@ -66,21 +66,22 @@ Lname n+ n- value [IC=initial_current] [ISAT=saturation_current]
 | `n+` | Positive terminal node |
 | `n-` | Negative terminal node |
 | `value` | Inductance in henries (H) |
-| `IC` | (Optional) Initial current at t=0 |
-| `ISAT` | (Optional) Core saturation current in amps. When present, inductance follows a tanh model: `L(I) = L0 * (1 - tanh(I/ISAT)^2)`. Must be positive. |
+| `ISAT` | (Optional) Core saturation current in amps, > 0. When present, flux follows `Φ(I) = L_mag·ISAT·tanh(I/ISAT) + L_air·I` with `L_air = LAIR·value` and `L_mag = value − L_air`, so the incremental inductance `L_mag/cosh²(I/ISAT) + L_air` falls from `value` toward the air-core `L_air`. At `I = ISAT` the magnetizing slope is 0.42 of its small-signal value. |
+| `LAIR` | (Optional, needs `ISAT`) Air-core floor as a fraction of `value`, `0 ≤ LAIR < 1`; a measured saturated-to-unsaturated inductance ratio is best. `LAIR=0` is accepted with a notice: the slope then goes to zero in deep saturation. |
+| `CORE` | (Optional, needs `ISAT`, not with `LAIR`) Rule-of-thumb floor by core class: `gapped` 1e-3, `steel` 3e-4, `nickel` 3e-5. With neither `LAIR` nor `CORE`, 3e-4 (ungapped steel) is used and a notice is printed. |
 
 **Examples:**
 ```spice
 L1 in out 10m
 Lchoke vcc coll 100u
-Lcore a b 100m ISAT=20m          ; saturating inductor
+Lcore a b 100m ISAT=20m CORE=steel ; saturating inductor
+Lchoke a b 5 ISAT=20m LAIR=1e-3     ; saturating choke, explicit floor
 ```
 
 **Notes on saturating inductors:**
-- Uses Sherman-Morrison rank-1 per-sample update with drift resync every 16 updates
-- Currently uncoupled only (cannot combine with `K` coupling statements)
-- L(I) computation is lagged by one sample (uses previous-sample current)
-- No ngspice validation available for saturation behavior
+- Solved inside the Newton loop on the nodal full-LU sub-path; `--nodal-subpath schur` is refused
+- On a two-winding coupled pair, `ISAT` on one winding saturates the shared core (see `docs/limitations.md`)
+- See `docs/limitations.md` → Saturating Inductors for accuracy and what is refused
 
 ---
 
@@ -1472,7 +1473,7 @@ The following SPICE features are **not supported** by melange-solver:
 
 ### Nonlinear Reactive Components
 - Nonlinear capacitors (`C` with nonlinear expression)
-- Nonlinear inductors with arbitrary expressions (note: `ISAT=` tanh saturation IS supported for uncoupled inductors)
+- Nonlinear inductors with arbitrary expressions (note: `ISAT=` saturation IS supported for single inductors and two-winding shared cores)
 - Nonlinear magnetic core models (SPICE `.model CORE` syntax)
 - Coupled saturating inductors (saturation only works on uncoupled inductors)
 
