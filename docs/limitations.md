@@ -21,7 +21,7 @@ Melange supports the following SPICE elements:
 |--------|------|-------|
 | R | Resistor | |
 | C | Capacitor | `IC=` initial voltage supported |
-| L | Inductor | `ISAT=` for saturation, **uncoupled inductors only** (see Saturating Inductors) |
+| L | Inductor | `ISAT=` for saturation: single inductors and two-winding shared cores (see Saturating Inductors) |
 | V | Voltage source | DC value (+ optional AC mag/phase). A transient spec (`SIN`/`PULSE`/`PWL`/`EXP`/`SFFM`/`AM`) is a **hard parse error** — audio comes in through the input node, not a source |
 | I | Current source | Same: DC only, transient specs rejected |
 | D | Diode | Shockley + RS + BV/IBV (Zener) |
@@ -200,24 +200,32 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
 
 ### Saturating Inductors
 - `L1 a b 100m ISAT=20m`. Anhysteretic saturating flux
-  `Φ(i) = L0·Isat·tanh(i/Isat)`, with the Jacobian built from the differential
-  inductance `L_diff(i) = L0/cosh²(i/Isat)`
-- **Uncoupled inductors only.** Coupled/transformer core saturation is NOT
-  available. Types named `SaturatingTransformerGroupIR` / `winding_isats` do
-  exist in the tree, but they saturate each winding independently off its own
-  branch current, which is physically wrong for a shared core -- they are
-  unvalidated and unused. Do not put `ISAT=` on a transformer winding and expect
-  core saturation. See `docs/aidocs/SATURATING_TRANSFORMERS.md` §1, which is a
-  design plan, not a description of shipped behaviour.
-- Lagged: `L(I)` is evaluated from the previous solved current, and the update is
-  decimated to every `SAT_UPDATE_INTERVAL = 32` samples, with a Sherman-Morrison
-  rank-1 patch on change and a full O(N³) rebuild every
-  `SAT_RESYNC_INTERVAL = 16` SM updates to bound drift
-- A circuit with an uncoupled saturating inductor is forced onto the **nodal
-  full-LU** sub-path (the inductor is stamped as a nonlinear device inside the NR
-  loop); `--nodal-subpath schur` is refused
-  (`crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs:1730`)
-- No ngspice validation
+  `Φ(i) = L0·Isat·tanh(i/Isat)`, solved inside the Newton loop with the
+  differential inductance `L_diff(i) = L0/cosh²(i/Isat)` in the Jacobian and the
+  flux law checked as a residual at every Newton site.
+- **Two-winding transformers saturate as a shared core**: `ISAT=` on one winding
+  of a coupled pair puts the saturation on the magnetizing branch of a T-model
+  (the load current's flux cancels, as in real iron). Refused, not
+  approximated: a saturating group with coupling k ≤ 0.8 (no shared core),
+  three or more windings, or conflicting `ISAT=` values.
+- A circuit with a saturating inductor runs on the **nodal full-LU** sub-path;
+  `--nodal-subpath schur` is refused.
+- **Accuracy in deep saturation.** Driven to tens of times `ISAT` with a short
+  L/R (a few samples), the trapezoidal rule can ring on the inductor current:
+  the current overshoots its physical value while the output spectrum stays
+  close. At 4× oversampling it is accurate (a railing op-amp driving a choke:
+  inductor current within 1.2 % and output fundamental within 0.1 % of
+  ngspice). At 1× the same circuit's inductor current overshoots up to 14 %,
+  output fundamental within 0.2 %. Where the ring dominates the output, the
+  runtime backward-Euler latch catches it and holds the instance on BE for the
+  rest of the stream (about 2e-4 on the fundamental).
+- The tanh law's incremental inductance goes to zero in deep saturation (about
+  1e-7 of L0 at 9× `ISAT`), where real iron bottoms out near its air-core
+  value; beyond about 19× `ISAT` the flux is flat in double precision. Treat
+  results that deep with care.
+- Checked against independent references (a scalar trapezoidal recurrence at
+  1× and 256-1024×, exact flux-drive harmonic tables for a DC-biased core) and
+  one ngspice twin (the railing op-amp into a choke).
 - No magnetic hysteresis, core loss, or remanence anywhere in the code
 
 ### Glow Discharge / Neon (`N`) [EXPERIMENTAL]
@@ -458,7 +466,6 @@ Matrix recomputation is O(N^3) and occurs at:
 - `set_pot_N()` / `set_switch_N()` / `set_runtime_R_<field>()` calls (per-block,
   when the value actually changes; batched into one rebuild per sample via a
   `matrices_dirty` flag on the nodal path)
-- the saturating-inductor drift resync, every 16 Sherman-Morrison updates
 
 There is no current benchmark for pot-rebuild latency. A `~250 us at N=37` figure
 appeared here from 2026-04 with no reproducible source and no deck attribution,

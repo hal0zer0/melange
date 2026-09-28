@@ -505,9 +505,12 @@ fn choke_on_railing_opamp_at_1x_active_set_be() {
 }
 
 /// 1x, active-set: the trapezoidal ring in deep saturation. Measured i_L max
-/// up to +13.9 %; H1 within 0.2 %.
+/// up to +13.9 %; H1 within 0.2 %. Switching just the choke to backward Euler
+/// on its stiff samples (measured with an exact per-element stiffness trigger)
+/// removes the ring but over-damps: i_L -3..-5 %, H1 +6 % at 1 V. With L/R of a
+/// few samples neither rule meets the gates at 1x; 4x meets them.
 #[test]
-#[ignore = "1x integrator accuracy: trapezoidal ring in deep saturation overshoots the i_L peak; turns green with deep-saturation stiffness handling, do not loosen"]
+#[ignore = "{trap, BE} per element cannot meet i_L 1-2 % AND H1 1e-3 at L/R ~ 5 samples (trap rings, BE over-damps); 4x meets it; pending the saturated-slope question, do not loosen"]
 fn choke_on_railing_opamp_at_1x_active_set() {
     let rows = render_choke(
         &choke_code(OpampRailMode::ActiveSet, 1),
