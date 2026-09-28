@@ -18,6 +18,8 @@ Generated 2026-07-21. Refreshed 2026-08-30 against melange **e53573c** (correctn
 
 **Checked 2026-09-28 (BE-latch on saturating circuits).** 179 identical, 1 negligible, 0 changed. The negligible one is `sat-core-open/step`: the latch fires once, on a genuine trapezoidal Nyquist ring (6 mV sample-to-sample alternation around −0.236 V after the 5 V step saturates the open transformer), and removes it (corr 0.9999994). It is the only latch fire on the golden set. Generated source differs on the four saturating decks that now emit the latch; funkyinduct builds on backward Euler and emits none.
 
+**Re-baselined 2026-09-28 (op-amp DC operating point).** Attribution: **DC OP consistent with the transient model (op-amp stage)** — the DC solve's AOL = 1000 cap was returned as the answer; it is now finished at the full AOL. Against `614d169`: 155 identical, 18 negligible, 7 changed. The changed renders are moonladder and pipe-shouter losing a decaying startup transient from the capped bias (moonladder 21 mV at sample 0; its sine1k/sweep level figures are that transient leaving the RMS). Latch sweep: 116 renders emit the latch, one fires before and after (sat-core-open/step), so no golden deck was latching on a bad start.
+
 Machine-readable twin: `tools/golden-harness/golden-baseline-manifest.json`.
 
 ## Compile recipe

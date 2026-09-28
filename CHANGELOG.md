@@ -24,6 +24,15 @@ generated state is smaller.
 
 ### Fixed
 
+- **Every circuit with an op-amp started away from its own bias.** The DC
+  operating point was solved with each op-amp's gain capped at 1000, a
+  convergence aid that was kept as the answer, so every virtual ground was
+  off by about 0.1 % (4.5 mV on a 4.5 V bias). The simulation, which uses the
+  full gain, then moved away from that point on its first samples: a
+  decaying swing at startup (21 mV on a ladder filter) and, on a
+  single-supply stage, a ±0.48 V ring at half the sample rate that persisted
+  at zero input. The operating point is now finished at the full gain, and
+  the reported residual is measured against the real circuit.
 - **An oversampled `--format plugin` project did not compile.** The template
   emitted `fn latency()` on `impl Plugin`, which nih-plug does not have
   (`E0407`), so every `--oversampling 2`/`4` plugin failed to build — the path

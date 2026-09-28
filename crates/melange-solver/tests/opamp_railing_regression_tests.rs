@@ -516,3 +516,95 @@ fn choke_on_railing_opamp_at_1x_active_set() {
     );
     choke_gates(&rows, "active-set 1x").unwrap();
 }
+
+// ─── The DC operating point is the transient's own equilibrium ────────────
+//
+// The DC solver caps op-amp gain at AOL = 1000 to keep its Newton ladder
+// stable on precision rectifiers. That cap used to be the final answer: every
+// op-amp virtual ground carried a 0.1 % error (4.5 mV on a 4.5 V bias), so
+// the transient, which runs the full AOL, did not start at its own
+// equilibrium. The first sample jumped the output ~1 V and the trapezoidal
+// rule rang at fs/2, ±0.48 V, from the first sample at zero input; since the
+// BE-latch is armed on saturating circuits, that ring tripped it inside the
+// default warmup and put the whole stream on backward Euler. The ladder now
+// finishes at the full AOL.
+
+/// Non-inverting stage, gain 1 at DC (the feedback leg's cap blocks DC).
+/// Low-impedance resistors, so node Gmin (1e-12 S, an open item) moves the
+/// answer by well under the tolerance.
+const DC_STAGE: &str = "\
+non-inverting stage biased at mid-supply
+Vcc vcc 0 DC 9
+R_b1 vcc vbias 100
+R_b2 vbias 0 100
+R_in vbias np 100
+U1 np nm oa TL072
+R_f oa nm 100
+R_g nm ng 100
+C_g ng 0 10u
+R_l oa 0 10k
+.model TL072 OA(AOL=200000 GBW=3e6 VCC=9 VEE=0)
+";
+
+#[test]
+fn dc_operating_point_uses_the_full_open_loop_gain() {
+    use melange_solver::codegen::ir::CircuitIR;
+    use melange_solver::dc_op::{self, DcOpConfig};
+    let netlist = Netlist::parse(DC_STAGE).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).unwrap();
+    let slots = CircuitIR::build_device_info_with_mna(&netlist, Some(&mna)).unwrap();
+    let r = dc_op::solve_dc_operating_point(&mna, &slots, &DcOpConfig::default());
+    assert!(r.converged);
+    let oa = r.v_node[mna.node_map["oa"] - 1];
+    let np = r.v_node[mna.node_map["np"] - 1];
+    // oa = AOL·(np − nm) with nm = oa at DC.
+    let analytic = np * 200_000.0 / 200_001.0;
+    assert!(
+        ((oa - analytic) / analytic).abs() <= 1e-9,
+        "DC op-amp output {oa:.12} V vs full-AOL {analytic:.12} V (the AOL=1000 cap gives {:.12})",
+        np * 1000.0 / 1001.0
+    );
+}
+
+/// A zero-input render from the baked operating point stays put: no fs/2
+/// ring on the op-amp output and no latch. 1e-5 V is the interim bound: the
+/// remaining 1.1 µV comes from full-LU's node Gmin, which sits in its
+/// Jacobian but not its RHS and so moves the transient's fixed point away
+/// from the DC solve's (an open item; with it removed the ring is 2.5e-13 V).
+#[test]
+fn railing_choke_stage_starts_at_its_own_equilibrium() {
+    let mut config = support::config_for_spice(RAILING_INTO_CHOKE, 48000.0);
+    config.opamp_rail_mode = OpampRailMode::ActiveSet;
+    let code = support::generate_circuit_code_nodal(RAILING_INTO_CHOKE, &config).0;
+    let oa = {
+        let netlist = Netlist::parse(RAILING_INTO_CHOKE).unwrap();
+        MnaSystem::from_netlist(&netlist).unwrap().node_map["oa"] - 1
+    };
+    let main = format!(
+        "fn main() {{
+    let mut s = CircuitState::default();
+    s.set_sample_rate(48000.0);
+    let (mut sum, mut alt, mut n) = (0.0f64, 0.0f64, 0usize);
+    for k in 0..48000 {{
+        let _ = process_sample(0.0, &mut s);
+        let y = s.v_prev[{oa}];
+        sum += y;
+        alt += if k % 2 == 0 {{ y }} else {{ -y }};
+        n += 1;
+    }}
+    let _ = sum;
+    println!(\"{{}} {{}}\", (alt / n as f64).abs(), s.diag_be_latch_count);
+}}"
+    );
+    let out = support::compile_and_run(&code, &main, "choke_start").stdout;
+    let v: Vec<f64> = out.split_whitespace().map(|t| t.parse().unwrap()).collect();
+    assert_eq!(
+        v[1], 0.0,
+        "the BE-latch fired at zero input: the start is not an equilibrium"
+    );
+    assert!(
+        v[0] <= 1e-5,
+        "fs/2 content on the op-amp output at zero input: {:.3e} V",
+        v[0]
+    );
+}

@@ -1126,5 +1126,13 @@
     "vs_previous": "179 identical, 1 negligible, 0 changed; 0 held and 0 not-converged on both sides.",
     "negligible": "sat-core-open/step: the latch fires once (sample 5275) on a genuine trapezoidal Nyquist ring (a 6 mV sample-to-sample alternation around -0.236 V in the saturated open transformer after the 5 V step) and removes it; corr 0.9999994, maxdiff 3.0e-3 V. The only latch fire on the golden set.",
     "generated_source": "Differs on the four saturating decks that now emit the latch (mosfet-choke-load, sat-knee-rl, sat-core-loaded, sat-core-open); funkyinduct builds on backward Euler and emits no latch."
+  },
+  "rebaseline_2026_09_28_opamp_dc_op": {
+    "why": "DC OP consistent with the transient model (op-amp stage): the DC solve's AOL=1000 cap was returned as the answer; the operating point is now finished at the full AOL.",
+    "vs_614d169": "155 identical, 18 negligible, 7 changed; 0 held and 0 not-converged on both sides.",
+    "changed": "moonladder (silence -56 dB, step -28 dB, sine1k -7.7 dB, sweep -5.6 dB, potsweep +0.35 dB) and pipe-shouter (silence -24.5 dB, step -0.015 dB): a decaying startup transient from the capped bias is gone (moonladder: 21 mV at sample 0); the level figures on sine1k/sweep are that transient leaving the RMS, not a change to the signal.",
+    "negligible": "gravity, sad-bastard, vurli (all programs) and pipe-shouter's remaining programs: within 7e-5 dB.",
+    "latch_sweep": "116 renders emit a BE-latch; it fires on exactly one before and after (sat-core-open/step, a genuine deep-saturation ring). No golden deck was latching on a bad start.",
+    "generated_source": "Differs on the seven op-amp decks whose baked DC_OP moved (gravity, moonladder, pipe-shouter, sad-bastard, subspace radio-am/fm, vurli)."
   }
 }

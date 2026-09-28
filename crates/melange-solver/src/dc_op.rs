@@ -789,6 +789,34 @@ struct BjtInternalNodes {
 }
 
 /// Extended DC system info including internal nodes for parasitic BJTs.
+/// DC-system op-amp gain cap used by the strategy ladder (see
+/// `build_dc_system`); never the final answer.
+const AOL_DC_MAX: f64 = 1000.0;
+
+/// Undo `build_dc_system`'s AOL cap: the DC conductance matrix of the real
+/// circuit, full AOL on every op-amp. `None` when nothing was capped.
+fn uncap_opamp_aol(g_dc: &[Vec<f64>], mna: &MnaSystem) -> Option<Vec<Vec<f64>>> {
+    let n_aug = mna.n_aug;
+    let mut g = g_dc.to_vec();
+    let mut any = false;
+    for oa in &mna.opamps {
+        let out = oa.n_out_idx;
+        if out == 0 || oa.aol <= AOL_DC_MAX || out - 1 >= n_aug {
+            continue;
+        }
+        let o = out - 1;
+        let delta_gm = (oa.aol - AOL_DC_MAX) / oa.r_out;
+        if oa.n_plus_idx > 0 && oa.n_plus_idx - 1 < n_aug {
+            g[o][oa.n_plus_idx - 1] -= delta_gm;
+        }
+        if oa.n_minus_idx > 0 && oa.n_minus_idx - 1 < n_aug {
+            g[o][oa.n_minus_idx - 1] += delta_gm;
+        }
+        any = true;
+    }
+    any.then_some(g)
+}
+
 struct DcSystemInfo {
     g_dc: Vec<Vec<f64>>,
     b_dc: Vec<f64>,
@@ -860,11 +888,11 @@ fn build_dc_system(
     // Cap op-amp VCCS gain in the DC system to prevent NR instability.
     // Precision rectifiers create multi-equilibrium landscapes where
     // AOL=200,000 makes the NR overshoot from one rail to the other
-    // in a single iteration. Capping at AOL_DC=1000 keeps the NR stable
-    // while maintaining accurate virtual grounds (0.1% error).
-    // The full AOL is used in the transient codegen path where the
-    // active-set rail resolver handles convergence.
-    const AOL_DC_MAX: f64 = 1000.0;
+    // in a single iteration. The cap is a HOMOTOPY aid only: the strategy
+    // ladder solves the capped system, then `solve_dc_operating_point`
+    // finishes at the full AOL (see `uncap_opamp_aol`), because the capped
+    // answer carries a 0.1 % virtual-ground error and is not an equilibrium
+    // of the transient, which runs the full AOL.
     for oa in &mna.opamps {
         let out = oa.n_out_idx;
         if out == 0 || oa.aol <= AOL_DC_MAX {
@@ -2991,6 +3019,52 @@ pub fn solve_dc_operating_point(
     let dc_sys = build_dc_system(mna, device_slots, config);
     let mut result = solve_dc_operating_point_core(mna, device_slots, config, &dc_sys);
 
+    // The ladder solved the AOL-capped system (a homotopy aid; see
+    // `build_dc_system`). Finish at the full AOL from that point, so the
+    // operating point is the real circuit's and the transient's own
+    // equilibrium: a capped answer is off by ~0.1 % at every op-amp virtual
+    // ground, and a trapezoidal start from it kicks the op-amp output and
+    // rings (measured: ±0.48 V at fs/2 on a single-supply stage at zero
+    // input). The residual below is always reported against the full system,
+    // so a finish that fails shows its real error.
+    let g_full = uncap_opamp_aol(&dc_sys.g_dc, mna);
+    let g_true: &[Vec<f64>] = g_full.as_deref().unwrap_or(&dc_sys.g_dc);
+    if let (Some(g_full), true) = (&g_full, result.converged) {
+        let circuit = DcCircuit {
+            g_dc: g_full,
+            b_dc: &dc_sys.b_dc,
+            mna,
+            device_slots,
+            config,
+            dc_n_v: &dc_sys.dc_n_v,
+            dc_n_i: &dc_sys.dc_n_i,
+            n_dc: dc_sys.n_dc,
+            has_internal_nodes: !dc_sys.bjt_internal.is_empty()
+                || !mna.bjt_internal_nodes.is_empty(),
+            is_voltage_row: &dc_sys.is_voltage_row,
+        };
+        let keep = result.v_node.len();
+        let mut v = result.v_node.clone();
+        v.resize(dc_sys.n_dc, 0.0);
+        let mut v_nl = vec![0.0; mna.m];
+        let mut i_nl = vec![0.0; mna.m];
+        let (ok, iters) = nr_dc_solve(&circuit, &mut v, &mut v_nl, &mut i_nl, 1.0, 0.0, false);
+        if ok {
+            v.truncate(keep);
+            result.v_node = v;
+            result.v_nl = v_nl;
+            result.i_nl = i_nl;
+            result.iterations += iters;
+        } else {
+            log::warn!(
+                "DC OP: the full-AOL finish did not converge; keeping the operating point \
+                 solved with op-amp gain capped at {AOL_DC_MAX}. It carries a ~0.1 % \
+                 virtual-ground error and is not the transient's equilibrium, so the \
+                 first samples will move away from it."
+            );
+        }
+    }
+
     // Report the KCL residual of whatever is being returned — every method,
     // every fallback, NO exemptions (the rail-clamp exemption applies only to
     // the acceptance gate inside `nr_dc_solve`; a pinned op-amp row still
@@ -2999,7 +3073,7 @@ pub fn solve_dc_operating_point(
     let n_dc = dc_sys.n_dc;
     let m = mna.m;
     let circuit = DcCircuit {
-        g_dc: &dc_sys.g_dc,
+        g_dc: g_true,
         b_dc: &dc_sys.b_dc,
         mna,
         device_slots,
