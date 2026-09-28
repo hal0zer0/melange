@@ -1084,6 +1084,22 @@ pub fn run_melange_solver_from_str(
         ),
         None => default_main.to_string(),
     };
+    // The input-sanitisation counters (clamp to INPUT_LIMIT_V, NaN -> 0), by
+    // presence like the hold counter.
+    let input_diag: String = ["diag_input_clamp_count", "diag_input_nan_count"]
+        .iter()
+        .filter(|f| generated.code.contains(&format!("pub {f}: ")))
+        .map(|f| {
+            let key = f.strip_prefix("diag_").unwrap_or(f);
+            format!("        eprintln!(\"DIAG:{key}={{}}\", state.{f});\n")
+        })
+        .collect();
+    let default_main = default_main.replace(
+        "        eprintln!(\"DIAG:region_exit_count={}\", state.diag_region_exit_count);\n",
+        &format!(
+            "        eprintln!(\"DIAG:region_exit_count={{}}\", state.diag_region_exit_count);\n{input_diag}"
+        ),
+    );
     let full_source = format!(
         "{}\n{}",
         generated.code,
@@ -1166,14 +1182,32 @@ pub fn run_melange_solver_from_str(
     // generated solver's counters (NR max-iter, region exits) next to the
     // comparison — a validation number without them hides a starved or
     // out-of-region solve.
-    let mut held: u64 = 0;
+    let (mut held, mut clamped, mut nan) = (0u64, 0u64, 0u64);
     for line in String::from_utf8_lossy(&result.stderr).lines() {
         if let Some(diag) = line.strip_prefix("DIAG:") {
             eprintln!("  melange {}", diag.replacen('=', ": ", 1));
             if let Some(v) = diag.strip_prefix("nr_hold_count=") {
                 held = v.trim().parse().unwrap_or(0);
             }
+            if let Some(v) = diag.strip_prefix("input_clamp_count=") {
+                clamped = v.trim().parse().unwrap_or(0);
+            }
+            if let Some(v) = diag.strip_prefix("input_nan_count=") {
+                nan = v.trim().parse().unwrap_or(0);
+            }
         }
+    }
+
+    // ngspice was driven with the requested input; a melange render whose
+    // input was clamped to INPUT_LIMIT_V (or had NaN replaced by 0) answers a
+    // different question, and a correlation between the two measures nothing.
+    if clamped > 0 || nan > 0 {
+        return Err(ValidationError::Solver(format!(
+            "melange was not driven with the requested input: {clamped} sample(s) exceeded \
+             the generated code's input limit (INPUT_LIMIT_V = 100 V) and were clamped, \
+             {nan} were NaN/Inf and replaced by 0. ngspice saw the unclamped input, so the \
+             two renders are not comparable."
+        )));
     }
 
     // A render containing samples that were never solved cannot validate

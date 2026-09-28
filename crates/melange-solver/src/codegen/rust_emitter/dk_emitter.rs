@@ -3486,7 +3486,7 @@ impl RustEmitter {
             );
         }
         code.push_str(
-            "    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };\n\n",
+            "    let input = if !input.is_finite() { state.diag_input_nan_count += 1; 0.0 } else if input.abs() > INPUT_LIMIT_V { state.diag_input_clamp_count += 1; input.clamp(-INPUT_LIMIT_V, INPUT_LIMIT_V) } else { input };\n\n",
         );
 
         if factor == 2 {
@@ -3531,7 +3531,7 @@ impl RustEmitter {
             "pub fn process_sample(input: f64, injections_inner: &[[f64; NUM_INJECT]; OVERSAMPLING_FACTOR], state: &mut CircuitState) -> ([f64; NUM_OUTPUTS], [[f64; NUM_TAP]; OVERSAMPLING_FACTOR]) {\n",
         );
         code.push_str(
-            "    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };\n",
+            "    let input = if !input.is_finite() { state.diag_input_nan_count += 1; 0.0 } else if input.abs() > INPUT_LIMIT_V { state.diag_input_clamp_count += 1; input.clamp(-INPUT_LIMIT_V, INPUT_LIMIT_V) } else { input };\n",
         );
         code.push_str(
             "    let (output, tap) = process_sample_inner(input, injections_inner[0], state);\n",

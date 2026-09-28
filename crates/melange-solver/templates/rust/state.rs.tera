@@ -78,6 +78,11 @@ pub struct CircuitState {
     pub diag_nr_max_iter_count: u64,
     /// Diagnostic: number of times NaN triggered state reset
     pub diag_nan_reset_count: u64,
+    /// Diagnostic: input samples clamped to +/-INPUT_LIMIT_V (the circuit
+    /// was driven with a smaller input than requested)
+    pub diag_input_clamp_count: u64,
+    /// Diagnostic: NaN/Inf input (or injection) samples replaced by 0
+    pub diag_input_nan_count: u64,
     /// Diagnostic: number of times a finite-but-implausible iterate (state
     /// magnitude beyond any physically-realizable circuit value) triggered
     /// state reset. NaN/Inf is caught by `diag_nan_reset_count`; this counts
@@ -281,6 +286,8 @@ impl Default for CircuitState {
             diag_clamp_count: 0,
             diag_nr_max_iter_count: 0,
             diag_nan_reset_count: 0,
+            diag_input_clamp_count: 0,
+            diag_input_nan_count: 0,
             diag_magnitude_reset_count: 0,
             diag_singular_matrix_count: 0,
             diag_voltage_damp_count: 0,
@@ -401,6 +408,8 @@ impl CircuitState {
         self.diag_clamp_count = 0;
         self.diag_nr_max_iter_count = 0;
         self.diag_nan_reset_count = 0;
+        self.diag_input_clamp_count = 0;
+        self.diag_input_nan_count = 0;
         self.diag_magnitude_reset_count = 0;
         self.diag_singular_matrix_count = 0;
         self.diag_voltage_damp_count = 0;

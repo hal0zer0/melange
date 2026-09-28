@@ -356,6 +356,11 @@ downstream measures that automatically.
   generated code, seeded from the DC OP) — plugin-side DC blockers were
   removed as double-filtering (debugging-history). Changing `DC_BLOCK_R`
   policy or seeding changes LF response and onset thumps downstream.
+- Input clamp: generated code clamps its input to ±`INPUT_LIMIT_V` (100 V)
+  and replaces NaN/Inf by 0, counting each in `diag_input_clamp_count` /
+  `diag_input_nan_count` (every route, single- and multi-input; injections'
+  NaN counts too). A nonzero count means the circuit was not driven with the
+  host's signal; the counters are the plugin-side witness.
 - Output clamp: generated ±10 V clamp is melange's safety; plugins add final
   `.clamp(-4.0, 4.0)` or `brickwall_limit` on the f32.
 - Multi-circuit chaining passes **volts directly** between `process_sample`

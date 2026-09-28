@@ -495,7 +495,17 @@ pub fn generate_analyze_main(
     switch_calls: &[String],
     harmonics: usize,
     noise_enabled: bool,
+    // `CircuitState` u64 counters to print as `DIAG:<name without diag_>=<v>`
+    // at the end of the run (the caller presence-filters them per build).
+    diag_counters: &[&str],
 ) -> String {
+    let diag_lines: String = diag_counters
+        .iter()
+        .map(|f| {
+            let key = f.strip_prefix("diag_").unwrap_or(f);
+            format!("    eprintln!(\"DIAG:{key}={{}}\", state.{f});\n")
+        })
+        .collect();
     let pot_lines: String = pot_calls.iter().map(|c| format!("    {c};\n")).collect();
     let switch_lines: String = switch_calls.iter().map(|c| format!("    {c};\n")).collect();
     // See `generate_simulate_main`'s comment: `--noise <mode>` bakes in the
@@ -704,7 +714,7 @@ fn main() {{
             );
         }}
     }}
-}}
+{diag_lines}}}
 "#,
     )
 }

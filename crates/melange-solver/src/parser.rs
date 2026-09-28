@@ -4630,10 +4630,12 @@ impl Parser {
             }
         }
         let air_floor = match (lair, core) {
-            (Some(_), Some(_)) => return Err(self.error(format!(
+            (Some(_), Some(_)) => {
+                return Err(self.error(format!(
                 "Inductor '{}': give LAIR= or CORE=, not both (CORE= picks a rule-of-thumb LAIR)",
                 parts[0]
-            ))),
+            )))
+            }
             (Some(v), None) => Some(SatFloor::Explicit(v)),
             (None, Some(c)) => Some(SatFloor::Class(c)),
             (None, None) => None,

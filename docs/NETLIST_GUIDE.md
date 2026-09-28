@@ -27,6 +27,12 @@ Every component connects to **nodes** — named connection points in the circuit
   melange drives it for you — **don't** put a `Vin in 0 ...` source on it the
   way a SPICE deck would. That source holds the input at a fixed voltage, and
   melange refuses the deck rather than render silence.
+  The input is limited to ±100 V (`INPUT_LIMIT_V` in the generated code).
+  A larger sample is clamped to it and a NaN/Inf sample becomes 0 V; each is
+  counted (`diag_input_clamp_count`, `diag_input_nan_count`), and `simulate`,
+  `analyze` and `validate` fail when either is nonzero, because the circuit
+  was not driven with what was asked (`--allow-input-clamp` overrides
+  `simulate`/`analyze`).
 - **Output** is conventionally `out` (matches the default `--output-node`)
 - Use descriptive names: `vcc`, `base`, `plate`, `cathode`, `mid`
 - No spaces or special characters — letters, digits, and underscores only

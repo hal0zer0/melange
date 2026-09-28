@@ -422,6 +422,11 @@ fn c1_deep_saturation_settles_on_the_rl_limit_without_ringing() {
 /// alternation and switches the instance to backward Euler for the rest of the
 /// stream.
 ///
+/// Do not widen the 5e-4 H1 tolerance below: it once hid reference constants
+/// that were the 1× trapezoidal values, 2.8e-4 off the converged 1024× ones.
+/// Check a reference's convergence (256/1024/4096× agree here to 1e-9) before
+/// touching the tolerance.
+///
 /// (drive V, 1024× peak/Isat, 1024× H1 A)
 const C1_DEEP_NO_FLOOR: [(f64, f64, f64); 2] =
     [(10.0, 10.0000, 9.165534e-2), (20.0, 20.0000, 1.930722e-1)];

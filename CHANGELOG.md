@@ -24,6 +24,16 @@ generated state is smaller.
 
 ### Fixed
 
+- **An input beyond ±100 V was clipped silently.** Generated code clamps its
+  input to ±100 V and replaces NaN/Inf with 0 V, a guard against garbage host
+  input, but counted neither, so a render driven past the limit looked like a
+  render of the requested drive. A 200 V sine reached the circuit as a sine
+  clipped at 100 V (fundamental 39 % low) with nothing to show for it. The
+  limit is now a named constant, `INPUT_LIMIT_V`, and both events are counted
+  on every route (`diag_input_clamp_count`, `diag_input_nan_count`; NaN
+  `.inject` samples count too). `simulate` and `analyze` fail when either is
+  nonzero (`--allow-input-clamp` overrides), and `validate` fails outright,
+  since ngspice saw the unclamped input. The clamp itself stays.
 - **Every circuit with an op-amp started away from its own bias.** The DC
   operating point was solved with each op-amp's gain capped at 1000, a
   convergence aid that was kept as the answer, so every virtual ground was

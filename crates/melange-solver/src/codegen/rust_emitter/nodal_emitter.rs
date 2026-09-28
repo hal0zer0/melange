@@ -2249,6 +2249,13 @@ impl RustEmitter {
              /// supplies) — see docs/aidocs/DEBUGGING.md \"finite runaway\" entry.\n",
         );
         code.push_str("pub const STATE_MAX_PLAUSIBLE_MAGNITUDE: f64 = 1e6;\n\n");
+        code.push_str(
+            "/// Largest input voltage the circuit is driven with, in volts. A larger\n\
+             /// input is clamped to it and counted in `diag_input_clamp_count`; a NaN or\n\
+             /// infinite input is replaced by 0 V and counted in `diag_input_nan_count`.\n\
+             /// Both are witnesses that the circuit was not driven with what was asked.\n\
+             pub const INPUT_LIMIT_V: f64 = 100.0;\n\n",
+        );
         code.push_str("/// Maximum NR iterations per sample\n");
         // Budget CEILING, not a target: a sample that converges in 8 iterations
         // still exits at 8, so raising the ceiling costs nothing on converging
@@ -3202,6 +3209,13 @@ impl RustEmitter {
         code.push_str("    /// Diagnostic: number of times NaN triggered state reset\n");
         code.push_str("    pub diag_nan_reset_count: u64,\n");
         code.push_str(
+            "    /// Diagnostic: input samples clamped to +/-INPUT_LIMIT_V (the circuit\n\
+             \x20   /// was driven with a smaller input than requested)\n\
+             \x20   pub diag_input_clamp_count: u64,\n\
+             \x20   /// Diagnostic: NaN/Inf input (or injection) samples replaced by 0\n\
+             \x20   pub diag_input_nan_count: u64,\n",
+        );
+        code.push_str(
             "    /// Diagnostic: number of times a finite-but-implausible iterate\n\
              \x20   /// (state magnitude beyond any physically-realizable circuit value)\n\
              \x20   /// triggered state reset. NaN/Inf is caught by diag_nan_reset_count;\n\
@@ -3628,6 +3642,9 @@ impl RustEmitter {
         code.push_str("            diag_be_latch_count: 0,\n");
         code.push_str("            diag_active_set_pin_count: 0,\n");
         code.push_str("            diag_nan_reset_count: 0,\n");
+        code.push_str(
+            "            diag_input_clamp_count: 0,\n            diag_input_nan_count: 0,\n",
+        );
         code.push_str("            diag_magnitude_reset_count: 0,\n");
         code.push_str("            diag_substep_count: 0,\n");
         code.push_str(&super::subsample_fire::emit_subsample_fire_default_fields(
@@ -3867,6 +3884,9 @@ impl RustEmitter {
         code.push_str("        self.diag_be_latch_count = 0;\n");
         code.push_str("        self.diag_active_set_pin_count = 0;\n");
         code.push_str("        self.diag_nan_reset_count = 0;\n");
+        code.push_str(
+            "        self.diag_input_clamp_count = 0;\n        self.diag_input_nan_count = 0;\n",
+        );
         code.push_str("        self.diag_magnitude_reset_count = 0;\n");
         code.push_str("        self.diag_voltage_damp_count = 0;\n");
         code.push_str("        self.diag_substep_count = 0;\n");
@@ -5171,11 +5191,11 @@ impl RustEmitter {
         // Input sanitization
         if multi_input {
             code.push_str(
-                "    let mut inputs = inputs;\n    for v in inputs.iter_mut() { *v = if v.is_finite() { v.clamp(-100.0, 100.0) } else { 0.0 }; }\n\n",
+                "    let mut inputs = inputs;\n    for v in inputs.iter_mut() { *v = if !v.is_finite() { state.diag_input_nan_count += 1; 0.0 } else if v.abs() > INPUT_LIMIT_V { state.diag_input_clamp_count += 1; v.clamp(-INPUT_LIMIT_V, INPUT_LIMIT_V) } else { *v }; }\n\n",
             );
         } else {
             code.push_str(
-                "    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };\n\n",
+                "    let input = if !input.is_finite() { state.diag_input_nan_count += 1; 0.0 } else if input.abs() > INPUT_LIMIT_V { state.diag_input_clamp_count += 1; input.clamp(-INPUT_LIMIT_V, INPUT_LIMIT_V) } else { input };\n\n",
             );
         }
         if inject_or_tap {
@@ -5183,7 +5203,7 @@ impl RustEmitter {
                 "    // Sanitize injections (NaN/Inf → 0). No magnitude clamp: a feedback value\n\
                  \x20   // is arbitrary and the plausibility guard catches any runaway.\n\
                  \x20   let mut injections = injections;\n\
-                 \x20   for v in injections.iter_mut() { *v = if v.is_finite() { *v } else { 0.0 }; }\n\n",
+                 \x20   for v in injections.iter_mut() { *v = if v.is_finite() { *v } else { state.diag_input_nan_count += 1; 0.0 }; }\n\n",
             );
         }
 
@@ -7149,11 +7169,11 @@ impl RustEmitter {
         // Input sanitization
         if multi_input {
             code.push_str(
-                "    let mut inputs = inputs;\n    for v in inputs.iter_mut() { *v = if v.is_finite() { v.clamp(-100.0, 100.0) } else { 0.0 }; }\n\n",
+                "    let mut inputs = inputs;\n    for v in inputs.iter_mut() { *v = if !v.is_finite() { state.diag_input_nan_count += 1; 0.0 } else if v.abs() > INPUT_LIMIT_V { state.diag_input_clamp_count += 1; v.clamp(-INPUT_LIMIT_V, INPUT_LIMIT_V) } else { *v }; }\n\n",
             );
         } else {
             code.push_str(
-                "    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };\n\n",
+                "    let input = if !input.is_finite() { state.diag_input_nan_count += 1; 0.0 } else if input.abs() > INPUT_LIMIT_V { state.diag_input_clamp_count += 1; input.clamp(-INPUT_LIMIT_V, INPUT_LIMIT_V) } else { input };\n\n",
             );
         }
         if inject_or_tap {
@@ -7161,7 +7181,7 @@ impl RustEmitter {
                 "    // Sanitize injections (NaN/Inf → 0). No magnitude clamp: a feedback value\n\
                  \x20   // is arbitrary and the plausibility guard catches any runaway.\n\
                  \x20   let mut injections = injections;\n\
-                 \x20   for v in injections.iter_mut() { *v = if v.is_finite() { *v } else { 0.0 }; }\n\n",
+                 \x20   for v in injections.iter_mut() { *v = if v.is_finite() { *v } else { state.diag_input_nan_count += 1; 0.0 }; }\n\n",
             );
         }
 

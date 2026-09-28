@@ -1397,3 +1397,56 @@ fn test_a_declaration_elsewhere_does_not_excuse_the_typo() {
     );
     let _ = std::fs::remove_file(&cir);
 }
+
+/// A drive beyond the generated code's input limit (INPUT_LIMIT_V = 100 V) is
+/// clamped, so the circuit is not driven with the requested input. simulate
+/// and analyze fail on it (the output looks healthy), and say how to override.
+#[test]
+fn test_input_beyond_the_limit_is_refused_unless_allowed() {
+    let cir = write_test_circuit("rc\nR1 in out 1k\nC1 out 0 100n\n", "input_limit");
+    let cir = cir.to_str().unwrap();
+    let wav = std::env::temp_dir().join("melange_cli_test_input_limit.wav");
+    let wav = wav.to_str().unwrap();
+    let sim = |amp: &'static str| {
+        vec![
+            "simulate",
+            cir,
+            "--amplitude",
+            amp,
+            "--duration",
+            "0.05",
+            "-o",
+            wav,
+        ]
+    };
+    let err = run_melange_fail(&sim("200"));
+    assert!(
+        err.contains("clamped") && err.contains("--allow-input-clamp"),
+        "simulate: {err}"
+    );
+    run_melange(&sim("50"));
+    let mut allowed = sim("200");
+    allowed.push("--allow-input-clamp");
+    run_melange(&allowed);
+
+    let ana = |amp: &'static str| {
+        vec![
+            "analyze",
+            cir,
+            "--start-freq",
+            "100",
+            "--end-freq",
+            "200",
+            "--points-per-decade",
+            "1",
+            "--amplitude",
+            amp,
+        ]
+    };
+    let err = run_melange_fail(&ana("200"));
+    assert!(
+        err.contains("clamped") && err.contains("--allow-input-clamp"),
+        "analyze: {err}"
+    );
+    run_melange(&ana("50"));
+}

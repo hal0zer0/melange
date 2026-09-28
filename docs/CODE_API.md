@@ -139,6 +139,17 @@ It is not a rounding error: measured on one deck, 43199 held samples out of
 perfectly respectable −0.50 dBFS peak. A smaller count is not proportionally
 safer — 21 held samples in 96000 still means 21 samples of fiction.
 
+Two more counters say whether the circuit was driven with the input you
+passed. They exist on every route:
+
+| Field | What a nonzero value means |
+|-------|----------------------------|
+| `diag_input_clamp_count` | Input samples beyond `INPUT_LIMIT_V` (±100 V) were clamped to it. |
+| `diag_input_nan_count` | NaN/Inf input (or `.inject`) samples were replaced by 0 V. |
+
+Both are `u64` and cleared by `reset()`. The clamp keeps garbage host input
+from reaching the solver; the counter is how you know it happened.
+
 If you are surfacing one number to a user, surface whether it is zero.
 
 The related counters (`diag_nr_max_iter_count`, `diag_be_fallback_count`,

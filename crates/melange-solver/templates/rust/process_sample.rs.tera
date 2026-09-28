@@ -25,17 +25,19 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
 {% if multi_input %}pub fn process_sample(inputs: [f64; NUM_INPUTS], state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {
 {% else %}pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {
 {% endif %}{% endif %}
-{% if multi_input %}    // Validate inputs — handle NaN, inf, and extreme values (per port)
+{% if multi_input %}    // Validate inputs: NaN/Inf -> 0 and beyond INPUT_LIMIT_V -> clamped, each counted
     let mut inputs = inputs;
     for v in inputs.iter_mut() {
-        *v = if v.is_finite() { v.clamp(-100.0, 100.0) } else { 0.0 };
+        *v = if !v.is_finite() { state.diag_input_nan_count += 1; 0.0 }
+            else if v.abs() > INPUT_LIMIT_V { state.diag_input_clamp_count += 1; v.clamp(-INPUT_LIMIT_V, INPUT_LIMIT_V) }
+            else { *v };
     }
-{% else %}    // Validate input — handle NaN, inf, and extreme values
-    let input = if input.is_finite() { input.clamp(-100.0, 100.0) } else { 0.0 };
+{% else %}    // Validate input: NaN/Inf -> 0 and beyond INPUT_LIMIT_V -> clamped, each counted
+    let input = if !input.is_finite() { state.diag_input_nan_count += 1; 0.0 } else if input.abs() > INPUT_LIMIT_V { state.diag_input_clamp_count += 1; input.clamp(-INPUT_LIMIT_V, INPUT_LIMIT_V) } else { input };
 {% endif %}{% if inject_or_tap %}    // Sanitize injections (NaN/Inf → 0). No magnitude clamp: a feedback value
     // is arbitrary and the Step-7 plausibility guard catches any runaway.
     let mut injections = injections;
-    for v in injections.iter_mut() { *v = if v.is_finite() { *v } else { 0.0 }; }
+    for v in injections.iter_mut() { *v = if v.is_finite() { *v } else { state.diag_input_nan_count += 1; 0.0 }; }
 {% endif %}
 {% if num_switches > 0 or num_pots > 0 %}
     // Lazy rebuild: process all pot/switch changes in one batch

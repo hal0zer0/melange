@@ -569,6 +569,14 @@ enum Commands {
         #[arg(help_heading = EXPERT_HEADING, long)]
         allow_nr_hold: bool,
 
+        /// Render even when the circuit was not driven with the requested
+        /// input: samples beyond the generated code's input limit
+        /// (`INPUT_LIMIT_V`, 100 V) are clamped to it, and NaN/Inf samples are
+        /// replaced by 0. Both are counted, and the command fails on either by
+        /// default, because the output then answers a different question.
+        #[arg(help_heading = EXPERT_HEADING, long)]
+        allow_input_clamp: bool,
+
         /// Probe an internal node. May be repeated. Probe samples are written
         /// to a sidecar CSV (one column per probe) alongside the WAV; the
         /// primary `-n/--output-node` signal goes to the WAV unchanged.
@@ -744,6 +752,14 @@ enum Commands {
         /// spectral radius).
         #[arg(help_heading = EXPERT_HEADING, long)]
         max_iter: Option<usize>,
+
+        /// Render even when the circuit was not driven with the requested
+        /// input: samples beyond the generated code's input limit
+        /// (`INPUT_LIMIT_V`, 100 V) are clamped to it, and NaN/Inf samples are
+        /// replaced by 0. Both are counted, and the command fails on either by
+        /// default, because the output then answers a different question.
+        #[arg(help_heading = EXPERT_HEADING, long)]
+        allow_input_clamp: bool,
     },
 
     /// Compute DC operating point and print node voltages
@@ -1232,6 +1248,7 @@ fn main() -> Result<()> {
             force_trap,
             max_iter,
             allow_nr_hold,
+            allow_input_clamp,
             probes,
             probe_csv,
             pcm16,
@@ -1325,6 +1342,7 @@ fn main() -> Result<()> {
                     force_trap,
                     max_iter,
                     allow_nr_hold,
+                    allow_input_clamp,
                     probes: &probes,
                     probe_csv: probe_csv_path.as_deref(),
                     pcm16,
@@ -1358,6 +1376,7 @@ fn main() -> Result<()> {
             backward_euler,
             force_trap,
             max_iter,
+            allow_input_clamp,
         } => {
             // Validate numeric CLI parameters
             if start_freq <= 0.0 || !start_freq.is_finite() {
@@ -1439,6 +1458,7 @@ fn main() -> Result<()> {
                     backward_euler,
                     force_trap,
                     max_iter,
+                    allow_input_clamp,
                 },
             )
         }
@@ -3294,6 +3314,8 @@ struct SimulateOptions<'a> {
     max_iter: Option<usize>,
     /// `--allow-nr-hold`: render even when samples were never solved.
     allow_nr_hold: bool,
+    /// `--allow-input-clamp`: render even when the input was clamped or NaN.
+    allow_input_clamp: bool,
     probes: &'a [String],
     probe_csv: Option<&'a std::path::Path>,
     /// `--pcm16`: write the output WAV as 16-bit PCM instead of float32.
@@ -3336,6 +3358,8 @@ struct AnalyzeOptions<'a> {
     nodal_sub_path_override: melange_solver::codegen::NodalSubPathOverride,
     /// Explicit `--max-iter` override; `None` → auto-tuned (see [`auto_tune_max_iter`]).
     max_iter: Option<usize>,
+    /// `--allow-input-clamp`: report even when the input was clamped or NaN.
+    allow_input_clamp: bool,
 }
 
 /// Whether generated code DECLARES `field` on its state struct.
@@ -4376,6 +4400,7 @@ fn simulate_circuit_source(
             // stays silent rather than reporting a reassuring zero for a
             // mechanism it does not have.
             .chain(["diag_nr_hold_count", "diag_nr_unconverged_commit_count"])
+            .chain(INPUT_DIAG_FIELDS)
             .filter(|f| declares_state_field(&generated.code, f))
             .collect::<Vec<&str>>(),
         opts.pcm16,
@@ -4579,6 +4604,51 @@ fn simulate_circuit_source(
         }
         eprintln!("(--allow-nr-hold given: continuing.)");
     }
+    refuse_on_input_diag(&stderr, opts.allow_input_clamp)?;
+    Ok(())
+}
+
+/// The generated code's input-sanitisation counters, printed as `DIAG:` lines
+/// by the simulate and analyze harnesses (presence-filtered per build).
+const INPUT_DIAG_FIELDS: [&str; 2] = ["diag_input_clamp_count", "diag_input_nan_count"];
+
+/// Fail when the circuit was not driven with the requested input: samples
+/// clamped to `INPUT_LIMIT_V`, or NaN/Inf samples replaced by 0. Like an NR
+/// hold, the output then looks healthy while answering a different question
+/// (design review). `allow` is the explicit override.
+fn refuse_on_input_diag(stderr: &str, allow: bool) -> Result<()> {
+    let count = |key: &str| -> u64 {
+        stderr
+            .lines()
+            .filter_map(|l| l.strip_prefix("DIAG:"))
+            .filter_map(|d| d.strip_prefix(key))
+            .filter_map(|v| v.strip_prefix('='))
+            .filter_map(|v| v.trim().parse::<u64>().ok())
+            .next_back()
+            .unwrap_or(0)
+    };
+    let (clamped, nan) = (count("input_clamp_count"), count("input_nan_count"));
+    if clamped == 0 && nan == 0 {
+        return Ok(());
+    }
+    eprintln!();
+    if clamped > 0 {
+        eprintln!(
+            "ERROR: {clamped} input sample(s) exceeded the generated code's input limit \
+             (INPUT_LIMIT_V = 100 V) and were clamped to it. The circuit was driven with a \
+             clipped input, not the one requested, and nothing in the output shows it."
+        );
+    }
+    if nan > 0 {
+        eprintln!("ERROR: {nan} input sample(s) were NaN or infinite and were replaced by 0 V.");
+    }
+    if !allow {
+        anyhow::bail!(
+            "the circuit was not driven with the requested input ({clamped} clamped, {nan} \
+             NaN/Inf; --allow-input-clamp to override)"
+        );
+    }
+    eprintln!("(--allow-input-clamp given: continuing.)");
     Ok(())
 }
 
@@ -4613,6 +4683,7 @@ fn analyze_freq_response(
         backward_euler,
         force_trap,
         max_iter,
+        allow_input_clamp,
     } = *opts;
     // Match parse-time node normalization (lowercase, gnd→0).
     let input_node_owned = melange_solver::parser::normalize_node_name(input_node_name);
@@ -5029,6 +5100,11 @@ fn analyze_freq_response(
         &switch_calls,
         harmonics,
         noise_mode != melange_solver::codegen::NoiseMode::Off,
+        &INPUT_DIAG_FIELDS
+            .iter()
+            .copied()
+            .filter(|f| declares_state_field(&generated.code, f))
+            .collect::<Vec<&str>>(),
     );
     let full_source = format!("{}\n{}", generated.code, analyze_main);
 
@@ -5057,6 +5133,7 @@ fn analyze_freq_response(
     for line in stderr.lines() {
         eprintln!("{}", line);
     }
+    refuse_on_input_diag(&stderr, allow_input_clamp)?;
 
     // Output CSV.
     //
