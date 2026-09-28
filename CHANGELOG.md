@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 It is `0.x` software: below 1.0.0 there is no stability guarantee — the solver,
 codegen output, CLI flags, and netlist semantics may all change.
 
+## [Unreleased]
+
 ## [0.1.10] - 2026-09-27
 
 ### Added
@@ -1451,7 +1453,9 @@ measured real hardware. Everything else is unproven against hardware. See
   KiCad file; no effect on netlist compilation, generated code, or shipped plugins. The
   fix (`quick-xml >= 0.41`) is tracked for 0.1.1.
 
-[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.10...HEAD
+[0.1.10]: https://github.com/hal0zer0/melange/compare/v0.1.9...v0.1.10
+[0.1.9]: https://github.com/hal0zer0/melange/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/hal0zer0/melange/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/hal0zer0/melange/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/hal0zer0/melange/compare/v0.1.5...v0.1.6
