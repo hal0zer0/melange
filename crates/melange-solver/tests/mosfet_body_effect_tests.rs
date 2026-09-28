@@ -169,3 +169,76 @@ fn follower_matches_ngspice_on_every_path() {
         );
     }
 }
+
+/// v(gate) and v(out) per sample over 3 s at 48 kHz, 1 V at 1 kHz, from the
+/// default (warmed-up) state.
+fn follower_trace(code: &str, tag: &str) -> Vec<(f64, f64)> {
+    let netlist = Netlist::parse(FOLLOWER).unwrap();
+    let map = MnaSystem::from_netlist(&netlist).unwrap().node_map;
+    let (gate, out) = (map["gate"] - 1, map["out"] - 1);
+    let main = format!(
+        "fn main() {{
+    let fs = 48000.0f64;
+    let mut s = CircuitState::default();
+    s.set_sample_rate(fs);
+    for k in 0..(3.0 * fs) as usize {{
+        let w = 2.0 * std::f64::consts::PI * 1000.0 * k as f64 / fs;
+        let _ = process_sample(w.sin(), &mut s);
+        println!(\"{{:.17e}} {{:.17e}}\", s.v_prev[{gate}], s.v_prev[{out}]);
+    }}
+}}"
+    );
+    support::compile_and_run(code, &main, tag)
+        .stdout
+        .lines()
+        .map(|l| {
+            let v: Vec<f64> = l.split_whitespace().map(|t| t.parse().unwrap()).collect();
+            (v[0], v[1])
+        })
+        .collect()
+}
+
+/// TRIPWIRE, not a certificate. DK and the nodal paths should solve the same
+/// discrete circuit, and today they do not quite: they differ by ~1e-6 at the
+/// follower's gate and ~2e-5 at its output, whatever the Newton tolerance. The
+/// cause is not body effect but node Gmin: the nodal G carries 1e-12 S to
+/// ground on every node, full-LU adds a second 1e-12 through its Jacobian
+/// regularisation (in the matrix but not the RHS, so it moves the fixed
+/// point), and a third, unidentified contribution holds the nodal gate at the
+/// DC solve's leaky value. The target is every path equal to ngspice (no
+/// shunt) and cross-path agreement to 1e-9; until that lands these bounds sit
+/// 2.5-5x above what is measured, to catch a NEW divergence.
+#[test]
+fn follower_paths_agree_within_the_node_gmin_tripwire() {
+    let config = support::config_for_spice(FOLLOWER, 48000.0);
+    let mut schur = config.clone();
+    schur.nodal_sub_path_override = NodalSubPathOverride::Schur;
+    let mut full_lu = config.clone();
+    full_lu.nodal_sub_path_override = NodalSubPathOverride::FullLu;
+    let dk = follower_trace(
+        &support::generate_circuit_code(FOLLOWER, &config).0,
+        "trip_dk",
+    );
+    for (name, cfg) in [("schur", schur), ("full_lu", full_lu)] {
+        let other = follower_trace(
+            &support::generate_circuit_code_nodal(FOLLOWER, &cfg).0,
+            &format!("trip_{name}"),
+        );
+        let rel = |pick: fn(&(f64, f64)) -> f64| {
+            let peak = dk.iter().map(|p| pick(p).abs()).fold(0.0f64, f64::max);
+            let diff = dk
+                .iter()
+                .zip(&other)
+                .map(|(a, b)| (pick(a) - pick(b)).abs())
+                .fold(0.0f64, f64::max);
+            diff / peak
+        };
+        let (gate, out) = (rel(|p| p.0), rel(|p| p.1));
+        assert!(
+            gate <= 5e-6 && out <= 5e-5,
+            "{name} vs DK: gate {gate:.2e}, out {out:.2e} relative. The node-Gmin fixed-point \
+             item (regularisation must not move the fixed point) has not landed, and something \
+             else has made the paths diverge further"
+        );
+    }
+}
