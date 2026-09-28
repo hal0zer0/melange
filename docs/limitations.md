@@ -477,10 +477,10 @@ Measured 2026-09-24 on an AMD Ryzen 9 7950X pinned to one CCD, single core,
 noiseless, `-C target-cpu=x86-64-v3` (best of 7 × 2M samples via
 `tools/perf-harness/bench.sh`); throughput is host-dependent.
 
-- Light nonlinear circuits: 12AX7 gain stage ~153×, overdrive pedal (1 op-amp + 2 diodes) ~60× realtime
-- Germanium diode network (6 Ge diodes) ~11.5× realtime
-- Typical multi-device circuits: Wurlitzer preamp ~44×, tweed-style guitar amp ~18× realtime
-- Heaviest measured: a passive tube EQ (nodal full-LU, chord + sparse LU, N=52, M=8) ~21×, a bus compressor (12 op-amps + 2 VCAs) ~7.0× realtime
+- Light nonlinear circuits: 12AX7 gain stage ~159× realtime
+- Germanium diode network (6 Ge diodes) ~12.0× realtime
+- Typical multi-device circuits: Wurlitzer preamp ~46×, tweed-style guitar amp ~19× realtime
+- Heaviest measured: a passive tube EQ (nodal full-LU, chord + sparse LU, N=52, M=8) ~20×, a bus compressor (12 op-amps + 2 VCAs) ~7.5× realtime
 
 Four of those seven moved at this re-measurement. The three triode rows are
 14–29 % slower than they were in 0.1.9 because the Dempwolf & Zölzer

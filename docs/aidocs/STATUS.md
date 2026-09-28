@@ -270,10 +270,11 @@ Source: Sowter DWG E-72,658-2 (amp §) + Peerless/Triad winding data.
 
 ## Performance
 
-**Re-measured 2026-09-24** on an AMD Ryzen 9 7950X pinned to one CCD (single core, noiseless, `-C target-cpu=x86-64-v3`, via `tools/perf-harness/bench.sh`); host-dependent. Figures predating 2026-08-25 were largely fabricated/stale — see `memory/perf_numbers_measured_2026_08_25.md`. Measured: nonlinear audio circuits ≈7–60× RT; light stages ~153× (single 12AX7); trivial linear ~2960× (7.0 ns/sample).
+**Re-measured 2026-09-27** on an AMD Ryzen 9 7950X pinned to one CCD (single core, noiseless, `-C target-cpu=x86-64-v3`, via `tools/perf-harness/bench.sh`); host-dependent. Figures predating 2026-08-25 were largely fabricated/stale — see `memory/perf_numbers_measured_2026_08_25.md`. Measured: nonlinear audio circuits ≈7.5–46× RT; light stages ~159× (single 12AX7); trivial linear ~2960× (7.0 ns/sample).
 
-- Passive EQ (N=52, M=8, 3 xfmrs, nodal full LU): **~20.6×** realtime (1009 ns/sample)
-- Wurlitzer preamp (2 BJT, full GP): ~43.8× · Tweed 5F1 amp: ~18.3× · overdrive pedal: ~60.3× · Ge diode network: ~11.5× · bus comp (full, 12 op-amps + 2 VCAs): **~7.0×**
+- Passive EQ (N=52, M=8, 3 xfmrs, nodal full LU): **~20.3×** realtime (1028 ns/sample)
+- Wurlitzer preamp (2 BJT, full GP): ~45.9× · Tweed 5F1 amp: ~19.0× · Ge diode network: ~12.0× · bus comp (full, 12 op-amps + 2 VCAs): **~7.5×** · 12AX7 stage: ~158.8×
+- ⚠️ The **"overdrive pedal ~60.3×"** row was DELETED 2026-09-27: no deck in any repo matches its "op-amp + 2 diodes" description, so it has been unreproducible since 2026-09-02 and shipped twice unverified. Do not reinstate it without a named deck.
 - **What moved since the 2026-09-03 table**, all attributed on the same box: the three TRIODE rows lost 14–29 % to the Dempwolf & Zölzer grid-current law (`30915fb`) — 12AX7 216.7→153.2, tweed 22.3→18.3, passive EQ 24.0→20.6, each measured against the commit immediately before it. The Wurlitzer row (56→43.8) is a DECK revision of 2026-09-16, not a compiler regression: the pre-revision deck still reads 52.9× on the 0.1.5 binary that published the 56×. Everything else reproduces within −6 % to +2 % on the old binary, which is this bench's honest width on this host.
 - VCA compressor (N=21, M=3, nodal full LU): ~42× realtime *(not re-measured 2026-08-25)*
 - 8-BJT Class AB power amp (DK M=9): 0.4× realtime *(not re-measured; parasitic-R limited; K_eff approach planned)*

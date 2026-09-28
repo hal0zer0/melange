@@ -247,19 +247,18 @@ A sample of what it handles, with **measured** single-core throughput:
 
 | Circuit | What it is | Devices | Throughput\* | ns/sample |
 |---------|-----------|---------|--------------|-----------|
-| Bus compressor (SSL-class) | VCA + op-amp sidechain | 12 op-amps + 2 VCAs | 7.0× | 2976 |
-| Germanium diode network | 6-diode germanium clipping | 6 Ge diodes | 11.5× | 1818 |
-| Tweed guitar amp (5F1 Champ-class) | preamp + power stage + output transformer | 12AX7 (2 triodes) + 6V6 pentode | 18.3× | 1139 |
-| Passive tube EQ (Pultec-style) | 7 pots, 3 switches, global NFB (N=52, M=8) | 4 tubes, 3 transformers | 20.6× | 1009 |
-| Wurlitzer 200A preamp | 2-stage BJT preamp (full Gummel-Poon) | 2 BJTs + 1 diode | 43.8× | 476 |
-| Overdrive pedal | op-amp gain + diode clipper | op-amp + 2 diodes | 60.3× | 346 |
-| 12AX7 gain stage | single triode stage | 1 triode | 153× | 136 |
+| Bus compressor (SSL-class) | VCA + op-amp sidechain | 12 op-amps + 2 VCAs | 7.5× | 2777 |
+| Germanium diode network | 6-diode germanium clipping | 6 Ge diodes | 12.0× | 1736 |
+| Tweed guitar amp (5F1 Champ-class) | preamp + power stage + output transformer | 12AX7 (2 triodes) + 6V6 pentode | 19.0× | 1095 |
+| Passive tube EQ (Pultec-style) | 7 pots, 3 switches, global NFB (N=52, M=8) | 4 tubes, 3 transformers | 20.3× | 1028 |
+| Wurlitzer 200A preamp | 2-stage BJT preamp (full Gummel-Poon) | 2 BJTs + 1 diode | 45.9× | 454 |
+| 12AX7 gain stage | single triode stage | 1 triode | 158.8× | 131 |
 
-\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), best of 7 × 2M samples. Measured on an AMD Ryzen 9 7950X pinned to one CCD, with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh). Re-measured 2026-09-24. Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass runs at 2960× (7.0 ns/sample).
+\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), best of 7 × 2M samples. Measured on an AMD Ryzen 9 7950X pinned to one CCD, with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh). Re-measured 2026-09-27 on an idle machine; run-to-run spread was under 2 % on every row. Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass runs at 2960× (7.0 ns/sample).
 
-**Four rows moved at the 2026-09-24 re-measurement, and none of it is a mystery.** The three triode rows cost 14–29 % more than they did in 0.1.9: the Dempwolf & Zölzer grid-current law (`30915fb`) evaluates a softplus on the grid dimension at every Newton iteration where the old law returned a hard zero, and that is the price of modelling the negative-grid region at all. Measured on the same box, in the same session, against the commit immediately before it: 12AX7 stage 216.7× → 153.2×, tweed amp 22.3× → 18.3×, passive EQ 24.0× → 20.6×. The Wurlitzer row fell 56× → 43.8× because **the deck changed**, not the compiler — it was revised 2026-09-16 (an extra coupling cap, a rebiased feedback network, `.integrator be`), and the pre-revision deck still measures 52.9× on the same 0.1.5 binary that published the 56×. Re-running that binary today reproduces the other published rows within −6 % to +2 %, which is the honest width of this bench on this host.
+**The three triode rows cost 14–29 % more than they did in 0.1.9.** The Dempwolf & Zölzer grid-current law (`30915fb`) evaluates a softplus on the grid dimension at every Newton iteration where the old law returned a hard zero, and that is the price of modelling the negative-grid region at all. Measured against the commit immediately before it, on one box in one session: 12AX7 stage 216.7× → 153.2×, tweed amp 22.3× → 18.3×, passive EQ 24.0× → 20.6×. The Wurlitzer row sits below the 56× published through 0.1.8 because **the deck changed**, not the compiler — it was revised 2026-09-16 (an extra coupling cap, a rebiased feedback network, `.integrator be`), and the pre-revision deck still measures 52.9× on the same 0.1.5 binary that published the 56×.
 
-Each row names the deck it was measured on, so the numbers have an address. **Three of the seven can be re-measured from a public clone today** — the passive tube EQ also ships in-tree as `examples/passive-eq1a.cir`. The other four are still private; naming them is provenance, not an invitation. The public set is expected to grow, but I am not promising a date.
+Each row names the deck it was measured on, so the numbers have an address. **Three of the six can be re-measured from a public clone today** — the passive tube EQ also ships in-tree as `examples/passive-eq1a.cir`. The other three are still private; naming them is provenance, not an invitation. The public set is expected to grow, but I am not promising a date.
 
 | Row | Deck |
 |---|---|
