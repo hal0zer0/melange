@@ -9,6 +9,100 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+A cold first-user run against the public on-ramp produced one blocker and one
+silent failure. Both are fixed here, along with most of what else it found.
+Fixing a message about op-amp rails turned up two solver-level defects in how
+railed op-amps are handled; those are fixed too.
+
+**Six corpus circuits change solver route** (DK → nodal) — every one whose
+op-amp can rail into a capacitor-coupled output. They now run the rail handling
+their resolver chose instead of a clamp, which matters once an op-amp actually
+rails; below the rails the two routes agree (the golden renders of the three in
+the regression set move by at most 1.1 µV). Every other circuit renders
+identically. Every generated file gains two constants, and nodal circuits'
+generated state is smaller.
+
+### Fixed
+
+- **An oversampled `--format plugin` project did not compile.** The template
+  emitted `fn latency()` on `impl Plugin`, which nih-plug does not have
+  (`E0407`), so every `--oversampling 2`/`4` plugin failed to build — the path
+  the README and compile's own 1× note both recommend for distortion circuits.
+  Latency is now reported through `set_latency_samples()` in `initialize()`.
+  The reported figure also changes from 2 or 4 samples to the filter design's
+  actual round trip, 2.65 and 3.47 host samples, rounded to 3 at both factors;
+  the `--wet-dry-mix` dry-path delay uses the same 3. CI now builds generated
+  plugin projects (`tools/check-generated-plugins.sh`: stereo, mono and
+  multi-output, 1×/2×/4×), which fails on 0.1.11.
+- **A voltage source on the input node silenced the circuit.** `Vin in 0 ...`,
+  a SPICE deck's stimulus, holds the node melange drives at a fixed voltage.
+  It compiled clean and rendered silence, and the SIN/PULSE error's own advice
+  ("keep only the DC value") produced exactly that deck. A voltage source from
+  an input port to ground is now refused by every verb that knows its input
+  (compile, simulate, analyze; `nodes` and `dc-op` warn), naming the line and
+  saying to delete it. `validate` is unaffected — it strips that source before
+  comparing. The SIN/PULSE error now says to delete a test-signal line, and
+  `SINE(` gets it too instead of "Invalid DC value".
+- **The DK solver silently downgraded op-amp rail handling.** An op-amp whose
+  output is capacitor-coupled downstream resolves to an active-set rail mode,
+  which pins the railed output and re-solves the circuit. The DK path cannot do
+  that; it applied a post-solve clamp instead — the mode
+  `OPAMP_RAIL_MODES.md` documents as corrupting capacitor history, on exactly
+  the circuits the resolver had picked active-set to protect — and printed a
+  warning from inside the generated plugin's `CircuitState::default()` into the
+  DAW's stderr. Such circuits now route to nodal; `--solver dk` on them is
+  refused, as is an active-set mode in the DK generator. The runtime warning is
+  gone. Generated code now states its rail handling:
+  `pub const OPAMP_RAIL_MODE` and `OPAMP_RAIL_MODE_REASON`. An explicit
+  `--opamp-rail-mode hard` is still honoured on either route, but when it lands
+  on a capacitor-coupled op-amp output compile says so, naming the op-amp, and
+  the reason constant records the verdict it overrode.
+- **`.pot` with no default accepted a resistor value outside its own range**,
+  so the knob started at a setting it could not return to. It is now refused,
+  as an explicit default and `--pot` already were. A one-word label no longer
+  needs quotes; anything else after the range must be a quoted label.
+- The plugin identity note told users to pass `--url`, which does not exist;
+  the flag is `--vendor-url`.
+- A local circuit source added with a relative path broke from any other
+  directory, with "Failed to fetch URL" and an empty cause. Local sources are
+  now stored absolute, and an unreachable one says why.
+
+### Added
+
+- `melange sources show <name>` lists the circuits a source publishes, with
+  category and tier.
+- Value warnings (`1M` read as milli, `4M7` read as mega, a trailing `F`) name
+  the line and element they came from.
+
+### Changed
+
+- **Rail-engaged samples on the nodal Schur path go straight to the
+  backward-Euler pin-and-resolve.** The 2× sub-step that used to try first is
+  removed: its only rail handling was a post-solve clamp that did not re-solve
+  downstream nodes, and its fixed-point solve could not contract once a
+  junction conducted. It fired on no corpus circuit under any drive tried, so
+  no render changes; the sub-step matrices it carried are gone from every
+  nodal circuit's generated state.
+- The six circuits above run on nodal. Below the rails their output matches
+  the DK build to within 1.1 µV on the regression renders; when an op-amp
+  rails, it now gets the pin-and-resolve instead of a clamp.
+- The automatic backward-Euler notice is one plain sentence; the eigenvalue
+  detail is under `RUST_LOG=info`.
+- `simulate`, `analyze` and `compile` `--help` list the solver-override flags
+  under their own heading.
+- Wiper knobs display as a percentage, like pot knobs. The generated `lib.rs`
+  notes which end of each knob is which and how to reverse or reshape it.
+- `validate` explains a failure with near-perfect correlation (a level, offset
+  or timing difference, not a different circuit).
+
+### Documentation
+
+- GETTING_STARTED covers the circuit library (sources, `sources show`,
+  `melange index`); PLUGIN_GUIDE describes pot parameters as they are (0..1,
+  shown as %) and lists the whole generated project; the grammar reference no
+  longer documents SIN/PULSE sources melange refuses, and its "complete,
+  parseable" example no longer contains a source that silences it.
+
 ## [0.1.11] - 2026-09-27
 
 ### Fixed
@@ -144,7 +238,7 @@ codegen output, CLI flags, and netlist semantics may all change.
   from +250 V. Emitted Γ² now agrees with the independent
   `10kT₀gm/(2qIp)` prediction to four figures.
 
-- **Eight first-user papercuts** found by a cold-start run and fixed
+- **Nine first-user papercuts** found by a cold-start run and fixed
   (`58c4f50`, `cf40f5b`, `2a0d38d`, `b88d9f7`, `ebffc98`): `.model` typo
   suggestions, `--format rust`, wiper halves, the word "nominal", path errors,
   builtin aliases, the diagnostics verdict, `analyze` saying when its phase

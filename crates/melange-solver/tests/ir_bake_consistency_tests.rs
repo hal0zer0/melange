@@ -6,9 +6,6 @@
 //!    wrong DC fixed point, silent convention swap on first rebuild).
 //! 2. The DK auto-BE discriminator must evaluate the internal-rate
 //!    (S, A_neg) pair it actually ships, not the base-rate kernel pair.
-//! 3. A_NEG_SUB must blanket-zero ALL augmented algebraic rows at bake,
-//!    matching the runtime rebuild (per-type enumeration missed
-//!    current-mode-VCA and behavioral-V rows).
 //! 5. The DK path must NOT rail-clamp the baked DC_OP against unclamped
 //!    DC_NL_I (v_prev / i_nl_prev consistency — nodal-path policy).
 //! 6. Inverted op-amp rails (VCC <= VEE, both finite) must hard-error at
@@ -20,7 +17,7 @@
 mod support;
 
 use melange_solver::codegen::ir::CircuitIR;
-use melange_solver::codegen::{CodeGenerator, CodegenConfig, CodegenError, OpampRailMode};
+use melange_solver::codegen::{CodeGenerator, CodegenConfig, CodegenError};
 use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
@@ -288,81 +285,6 @@ fn dk_discriminator_evaluates_internal_rate_pair_under_oversampling() {
         (ir.trap_discriminator_rho - base.rho).abs() > 1e-8,
         "discriminator must not evaluate the base-rate kernel pair (rho {})",
         base.rho
-    );
-}
-
-// ── Fix 3: A_NEG_SUB blanket-zeroes all augmented algebraic rows ────────
-
-#[test]
-fn a_neg_sub_bake_zeroes_vca_and_behavioral_aug_rows() {
-    // VS + VCVS + current-mode VCA (internal node + sense branch) +
-    // behavioral V={} row — the per-type enumeration only caught the first
-    // two classes. Mirrors mna_stamp_regression_tests'
-    // `a_neg_zeroes_all_augmented_rows_including_vca_and_behavioral`, but
-    // asserts the BAKED sub-step matrix (ActiveSetBe pin-and-resolve path).
-    let spice = "\
-Aneg sub blanket zero
-V1 vcc 0 DC 15
-E1 e_out 0 in 0 2.0
-Rin in 0 10k
-Rvcc vcc 0 100k
-Re e_out 0 10k
-Rdrv in sigp 10k
-Y1 sigp sigm cv 0 VCAM
-Rterm sigm 0 10k
-Rcv cv 0 10k
-Csig sigm 0 10n
-B1 bx 0 V={ tanh(V(in)) }
-Rb bx 0 1k
-.model VCAM VCA(MODE=1)
-";
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mna = MnaSystem::from_netlist(&netlist).expect("MNA");
-    assert_eq!(
-        mna.n_aug,
-        mna.n + 5,
-        "expected 5 augmented rows (VS + VCVS + VCA internal + VCA sense + behavioral-V)"
-    );
-
-    let config = CodegenConfig {
-        circuit_name: "aneg_sub_zero".to_string(),
-        sample_rate: 48000.0,
-        input_node: 0,
-        output_nodes: vec![1],
-        input_resistance: 1.0,
-        opamp_rail_mode: OpampRailMode::ActiveSetBe,
-        ..CodegenConfig::default()
-    };
-    let ir = CircuitIR::from_mna(&mna, &netlist, &config).expect("nodal IR");
-    let n = ir.topology.n;
-    let n_nodes = ir.topology.n_nodes;
-    let n_aug = ir.topology.n_aug;
-    assert!(!ir.matrices.a_neg_sub.is_empty(), "sub-step matrices baked");
-
-    for row in n_nodes..n_aug {
-        for j in 0..n {
-            let v = ir.matrices.a_neg_sub[row * n + j];
-            assert!(
-                v == 0.0,
-                "A_NEG_SUB[{row}][{j}] = {v} — augmented algebraic row must be \
-                 blanket-zeroed at bake (VCA internal/sense and behavioral-V rows \
-                 were previously missed, disagreeing with the first runtime rebuild)"
-            );
-        }
-    }
-    // The forward sub-step matrix keeps the constraint stamps (sanity that
-    // the rows aren't trivially empty in the system).
-    let mut any_constraint = false;
-    for row in n_nodes..n_aug {
-        for j in 0..n {
-            if ir.matrices.a_matrix[row * n + j] != 0.0 {
-                any_constraint = true;
-            }
-        }
-    }
-    assert!(
-        any_constraint,
-        "aug rows should carry constraint stamps in A"
     );
 }
 

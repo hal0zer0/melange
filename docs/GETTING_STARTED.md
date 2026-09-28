@@ -15,6 +15,10 @@ Melange compiles SPICE circuit netlists into real-time audio DSP code. This guid
   This puts `melange` on your `PATH` (in `~/.cargo/bin`). Verify with
   `melange --version`. The rest of this guide can then run from any directory.
 
+  To try it without installing, `cargo build --release -p melange-cli` and run
+  `./target/release/melange` instead — the README's "Start here" does that. The
+  two are the same binary.
+
 Optional:
 - **ngspice** — for validation against SPICE reference (`apt install ngspice` / `brew install ngspice`)
 - **zig + cargo-zigbuild** — for macOS cross-compilation from Linux
@@ -52,6 +56,35 @@ The compiled CLAP and VST3 plugins appear in `target/bundled/`.
 > either way.
 
 **Testing:** Always start with your monitor volume at zero and increase gradually — circuit simulations can produce unexpected levels.
+
+## Quick Start: A Circuit From the Library
+
+The circuit library is a separate repository; you do not clone it. Add it once
+as a named *source*, list what it has, and compile by `source:name`:
+
+```bash
+melange sources add melange-circuits https://gitlab.com/oomox-group/melange-circuits/-/raw/main
+melange sources show melange-circuits            # lists its circuits, by category
+melange nodes melange-circuits:pipe-shouter      # inspect one
+melange compile melange-circuits:pipe-shouter --format plugin -o shouter
+cd shouter && bash build.sh
+```
+
+The listing also shows each circuit's tier — `stable`, `testing` or `unstable`
+(see the README's [Circuits](../README.md#circuits) section for what that means).
+
+A folder of your own works the same way. Index it once and add it by path:
+
+```bash
+melange index ~/circuits                 # writes ~/circuits/circuits-index.json
+melange sources add mine ~/circuits
+melange compile mine:big-muff --format plugin -o muff
+```
+
+Without an index a source still resolves `source:name` to `<base>/<name>.cir`;
+the index is what lets `sources show` list it and lets circuits move between
+folders without breaking the name. Format:
+[CIRCUIT_INDEX.md](CIRCUIT_INDEX.md).
 
 ## Quick Start: Your Own Circuit
 
@@ -102,7 +135,10 @@ Each `.pot` becomes a knob and each `.switch` becomes a selector in the generate
 
 | Command | What it does |
 |---------|-------------|
+| `melange sources add <name> <url-or-dir>` | Add a circuit source |
 | `melange sources list` | List configured circuit sources |
+| `melange sources show <name>` | List the circuits a source publishes |
+| `melange index <dir>` | Write a `circuits-index.json` for a folder of circuits |
 | `melange nodes circuit.cir` | Show nodes and devices |
 | `melange compile circuit.cir -f plugin -o dir` | Generate plugin project |
 | `melange compile circuit.cir -f code -o file.rs` | Generate standalone Rust code |
@@ -132,6 +168,7 @@ Key flags for `melange compile`:
 | `--tube-grid-fa auto\|on\|off` | `auto` | Pentode grid-off dimension reduction |
 | `--opamp-rail-mode` | `auto` | Op-amp rail saturation strategy |
 | `--vendor` | `"Melange"` | Plugin vendor name (plugin format only) |
+| `--vendor-url` / `--email` | melange repo / empty | Publisher URL and support contact the DAW shows |
 | `--vst3-id` | derived | Stable VST3 class ID (16 ASCII chars) |
 | `--clap-id` | derived | CLAP plugin ID (reverse-DNS) |
 

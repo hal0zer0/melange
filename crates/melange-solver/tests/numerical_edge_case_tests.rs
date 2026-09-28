@@ -473,7 +473,12 @@ R_out out 0 100k
 
 #[test]
 fn test_wide_bandgap_clipper_clamps_at_diode_knee() {
-    let config = support::config_for_spice(WIDE_BANDGAP_CLIPPER_SPICE, 48000.0);
+    let mut config = support::config_for_spice(WIDE_BANDGAP_CLIPPER_SPICE, 48000.0);
+    // This exercises the DK diode-with-RS path. The capacitor-coupled output
+    // would auto-resolve an active-set rail mode, which is nodal-only; the
+    // diodes clamp at ~3.6 V, far inside the 13 V rails, so rail handling never
+    // engages and pinning Hard keeps the test on the path it is about.
+    config.opamp_rail_mode = melange_solver::codegen::OpampRailMode::Hard;
     let circuit = support::build_circuit(WIDE_BANDGAP_CLIPPER_SPICE, &config, "wbg_clipper");
     let samples = support::run_sine(&circuit, 440.0, 0.5, 4800, 48000.0);
     support::assert_finite(&samples);

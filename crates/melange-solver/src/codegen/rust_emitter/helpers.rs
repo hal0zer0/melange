@@ -1886,6 +1886,21 @@ pub(super) fn node_names_array_body(ir: &CircuitIR) -> String {
         .join(", ")
 }
 
+/// `OPAMP_RAIL_MODE` / `OPAMP_RAIL_MODE_REASON`: the op-amp rail handling
+/// this build actually runs, and why it was chosen. Emitted identically by
+/// both paths so the choice is assertable from the generated code instead of
+/// reported only in a log.
+pub(super) fn opamp_rail_consts(ir: &CircuitIR) -> String {
+    format!(
+        "\n/// Op-amp supply-rail handling this build runs (resolved; never `auto`).\n\
+         pub const OPAMP_RAIL_MODE: &str = \"{}\";\n\
+         /// Why that rail mode was chosen.\n\
+         pub const OPAMP_RAIL_MODE_REASON: &str = \"{}\";\n",
+        ir.solver_config.opamp_rail_mode.as_str(),
+        escape_rust_str(&ir.solver_config.opamp_rail_mode_reason),
+    )
+}
+
 /// Escape a netlist node name for a Rust string literal. Node names are almost
 /// always `[A-Za-z0-9_]`, but escape defensively so a stray `"`/`\` can never
 /// break the emitted array.

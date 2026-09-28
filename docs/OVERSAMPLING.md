@@ -72,6 +72,10 @@ Fitted from the excess phase over a 1× build of the same circuit; fits at
 several frequencies agree to a few thousandths of a sample, which is what tells
 you it is a delay and not a frequency-dependent effect.
 
+A generated plugin (`--format plugin`) reports this to the host for delay
+compensation, rounded to whole samples: 3 at both 2× and 4×. With
+`--wet-dry-mix` the dry path is delayed by the same 3 samples.
+
 Tens of microseconds is irrelevant for most uses. It matters if you are
 phase-matching against a dry path, splitting into bands, or building something
 latency-critical — and it matters when you read a phase plot, below.

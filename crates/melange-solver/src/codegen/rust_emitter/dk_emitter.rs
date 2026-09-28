@@ -731,6 +731,7 @@ impl RustEmitter {
             &format!("{:.1}", ir.solver_config.sample_rate),
         );
         ctx.insert("oversampling_factor", &ir.solver_config.oversampling_factor);
+        ctx.insert("opamp_rail_consts", &super::helpers::opamp_rail_consts(ir));
         if ir.solver_config.oversampling_factor > 1 {
             let internal_rate =
                 ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
@@ -1262,32 +1263,6 @@ impl RustEmitter {
             || num_thermal_devices > 0
             || has_stateful;
         ctx.insert("needs_current_sr", &needs_current_sr);
-
-        // DK rail-mode consumption: the DK path implements only the Hard
-        // post-NR clamp. ActiveSet/ActiveSetBe degrade to Hard (+ the BE
-        // fallback that DK already carries), so surface a one-shot runtime
-        // warning at construction of the generated state. `None` suppresses
-        // the clamp entirely (handled in emit_process_sample); Hard and
-        // BoyleDiodes (guarded off DK upstream) emit no warning.
-        let has_clamped_opamp = ir
-            .opamps
-            .iter()
-            .any(|oa| oa.vclamp_lo.is_finite() || oa.vclamp_hi.is_finite());
-        if has_clamped_opamp
-            && matches!(
-                ir.solver_config.opamp_rail_mode,
-                crate::codegen::OpampRailMode::ActiveSet
-                    | crate::codegen::OpampRailMode::ActiveSetBe
-            )
-        {
-            ctx.insert(
-                "opamp_rail_degrade_warn",
-                &format!(
-                    "melange: warning: opamp rail mode '{}' degrades to Hard+BE-fallback on the DK path",
-                    ir.solver_config.opamp_rail_mode.as_str()
-                ),
-            );
-        }
 
         // Backward Euler fallback state fields (for BE fallback in DK NR solver)
         let has_be_fallback = !ir.matrices.s_be.is_empty() && ir.topology.m > 0;

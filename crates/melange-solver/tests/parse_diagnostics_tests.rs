@@ -626,3 +626,91 @@ fn both_readings_of_m_are_reported() {
         );
     }
 }
+
+/// Two `1M`s in one deck used to give two identical warnings with nothing to
+/// tell them apart. Each now names its line and element.
+#[test]
+fn value_warnings_name_the_line_and_element() {
+    let _guard = start_capture();
+    // 1 title / 2 R1 / 3 R4 / 4 R5
+    Netlist::parse("two milli typos\nR1 in a 1k\nR4 a out 1M\nR5 out 0 2M\n").unwrap();
+    let w = warnings();
+    assert!(w.iter().any(|m| m.contains("'1M' (line 3, R4)")), "{w:?}");
+    assert!(w.iter().any(|m| m.contains("'2M' (line 4, R5)")), "{w:?}");
+
+    // Outside a parse there is no context to name, and none is invented.
+    buffer().lock().unwrap().clear();
+    melange_solver::parser::parse_value("1M").unwrap();
+    assert!(
+        warnings().iter().all(|m| !m.contains("(line")),
+        "{:?}",
+        warnings()
+    );
+}
+
+// ── Codegen-time notice: explicit `hard` against the resolver ──────────────
+
+/// A single-supply op-amp stage, capacitor-coupled out: auto picks an
+/// active-set mode. An explicit `hard` is honoured — overrides are how users
+/// bisect — but it is said out loud at codegen time and recorded in the
+/// provenance reason, because a post-solve clamp corrupts that capacitor's
+/// history (measured: 11 kV on a 9 V supply at 0.5 V drive).
+const SINGLE_SUPPLY_STAGE: &str = "\
+Single-supply non-inverting stage
+Vcc vcc 0 DC 9
+Rb1 vcc bias 10k
+Rb2 bias 0 10k
+Cb bias 0 10u
+Cin in inp 100n
+Rinb inp bias 1meg
+U1 inp inv opout TL072
+Rf opout inv 100k
+Rg inv mid 4.7k
+Cg mid 0 1u
+Cout opout out 1u
+Rl out 0 100k
+.model TL072 OA(AOL=200000 GBW=3MEG VCC=9 VEE=0)
+";
+
+fn rail_reason_and_warnings(mode: melange_solver::codegen::OpampRailMode) -> (String, Vec<String>) {
+    use melange_solver::codegen::ir::CircuitIR;
+    use melange_solver::codegen::CodegenConfig;
+    let netlist = Netlist::parse(SINGLE_SUPPLY_STAGE).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).unwrap();
+    let input = *mna.node_map.get("in").unwrap() - 1;
+    let output = *mna.node_map.get("out").unwrap() - 1;
+    let config = CodegenConfig {
+        circuit_name: "single_supply".to_string(),
+        sample_rate: 48000.0,
+        input_node: input,
+        output_nodes: vec![output],
+        input_resistance: 1.0,
+        opamp_rail_mode: mode,
+        ..CodegenConfig::default()
+    };
+    buffer().lock().unwrap().clear();
+    let ir = CircuitIR::from_mna(&mna, &netlist, &config).expect("nodal IR");
+    (ir.solver_config.opamp_rail_mode_reason.clone(), warnings())
+}
+
+#[test]
+fn explicit_hard_on_an_ac_coupled_op_amp_is_noticed_and_recorded() {
+    use melange_solver::codegen::OpampRailMode;
+    let _guard = start_capture();
+
+    let (reason, w) = rail_reason_and_warnings(OpampRailMode::Hard);
+    assert!(
+        w.iter().any(|m| m.contains("hard rail mode requested")
+            && m.contains("U1")
+            && m.contains("auto would pick active-set")),
+        "{w:?}"
+    );
+    assert!(reason.starts_with("user requested (auto: "), "{reason}");
+
+    let (reason, w) = rail_reason_and_warnings(OpampRailMode::Auto);
+    assert!(
+        w.iter().all(|m| !m.contains("hard rail mode requested")),
+        "{w:?}"
+    );
+    assert!(!reason.contains("(auto: "), "{reason}");
+}

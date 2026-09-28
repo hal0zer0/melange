@@ -23,7 +23,10 @@ C1 out 0 100n
 Every component connects to **nodes** — named connection points in the circuit.
 
 - **Ground** is always node `0` (you can also write `gnd`)
-- **Input** is conventionally `in` (matches the default `--input-node`)
+- **Input** is conventionally `in` (matches the default `--input-node`).
+  melange drives it for you — **don't** put a `Vin in 0 ...` source on it the
+  way a SPICE deck would. That source holds the input at a fixed voltage, and
+  melange refuses the deck rather than render silence.
 - **Output** is conventionally `out` (matches the default `--output-node`)
 - Use descriptive names: `vcc`, `base`, `plate`, `cathode`, `mid`
 - No spaces or special characters — letters, digits, and underscores only
@@ -139,7 +142,7 @@ or more components and the values they take in each position:
 * Bright switch: either 0 (off) or a small coupling cap in parallel
 .switch C_bright 0 470p "Bright"
 
-* Clipping diode selector (5 positions, ganged across 5 R_sel resistors)
+* Clipping diode selector (3 positions, ganged across 3 R_sel resistors)
 .switch R_sel_ge,R_sel_si,R_sel_led 1/10Meg/10Meg 10Meg/1/10Meg 10Meg/10Meg/1 "Clip"
 ```
 
@@ -403,14 +406,15 @@ trailing zero is the entire difference between 1 mΩ and 1 MΩ.
 
 Melange logs a warning every time it reads an infix `M` as mega, naming the
 value and the magnitude it produced, so a stray `1M0` shows up in the compile
-log. The reverse typo — `1M` where `1M0` was meant — is **silent**, and turns a
-1 MΩ bias resistor into a 1 mΩ short.
+log. The reverse typo — `1M` where `1M0` was meant — turns a 1 MΩ bias
+resistor into a 1 mΩ short; melange parses it as SPICE does (milli) and warns,
+naming the value, its line and the element.
 
 ```spice
 R1 in out 1meg    ; 1 MΩ — unambiguous, no warning
 R2 in out 1M0     ; 1 MΩ — BS-1852 infix, correct, logs a warning
 R3 in out 1e6     ; 1 MΩ — unambiguous
-R4 in out 1M      ; 1 mΩ — milli. Silent. Almost certainly a typo.
+R4 in out 1M      ; 1 mΩ — milli, logs a warning. Almost certainly a typo.
 ```
 
 There is no infix milli, so `1m5` is 1.5 M, not 1.5 m. Write milli with an
@@ -598,6 +602,19 @@ R1 in out 0       ; ERROR: must be positive
 C1 in out -10n    ; ERROR: must be positive
 ```
 
+### 7. A voltage source on the input
+
+SPICE decks drive the circuit with a source on the input node. melange drives
+the input itself, so that source shorts it:
+
+```spice
+Vin in 0 SIN(0 0.1 1k)   ; ERROR: no time-domain sources
+Vin in 0 DC 0            ; ERROR: pins `in` to 0 V — delete the line
+```
+
+Delete the line. `melange validate` removes it for you when it runs the same
+deck through ngspice.
+
 ## Validation Workflow
 
 Before compiling to a plugin, validate your netlist:
@@ -630,7 +647,7 @@ melange compile my-circuit.cir --format plugin -o my-plugin
 - **Decompose large circuits when there's no global feedback.** If your circuit has no feedback path between subsystems — e.g. a preamp → tone-stack → power-amp cascade where each stage drives the next through a coupling cap and nothing feeds back — compile each subsystem as a separate `.cir` and chain them in plugin code. This keeps N and M small per kernel (linear in DK cost, cubic in nodal), avoids cross-subsystem matrix conditioning issues, and lets each stage pick its best solver path independently. A 16-stage tube cascade with real global feedback has to be one monolithic netlist; an 8-stage preamp where each stage is capacitively coupled to the next does not.
 - **Use `.linearize` for semantic control, not CPU savings.** NR converges in 0–1 iterations for devices in their small-signal region, so linearizing produces negligible speedup. The real use case is **forcing a device to stay small-signal** — e.g. a Vbe multiplier that must not clip, a preamp stage that should be clean even at extreme input. Linearized devices cannot clip because they're replaced with small-signal conductances at the DC operating point.
 - **Per-instance parameter jitter needs warmup.** If the plugin sets `state.pot_N_resistance = jittered_value` at construction, loop `process_sample(0.0, &mut state)` `WARMUP_SAMPLES_RECOMMENDED` times before processing audio — the DC_OP constant is baked at nominal values, so jittered circuits need time to settle to their actual equilibrium.
-- **Skip warmup with `recompute_dc_op()` / `settle_dc_op()`.** Pass `--emit-dc-op-recompute` to `melange compile` and the generated `CircuitState` gains two methods. `recompute_dc_op(&mut self)` runs the runtime NR directly — use it when you want explicit control. `settle_dc_op(&mut self)` is the convenience wrapper: it calls `recompute_dc_op` first and falls back to the `WARMUP_SAMPLES_RECOMMENDED` silence loop if the NR fails or the circuit is nodal-routed. Prefer `settle_dc_op` unless you need to observe the recompute-vs-fallback decision yourself — it handles the DK-vs-nodal distinction uniformly so plugin code doesn't need to branch. Neither method is audio-thread safe; call from plugin init or parameter-change callbacks. DK-path circuits (tube preamps, op-amp clippers) get the full NR; nodal full-LU circuits (passive-eq, 4kbuscomp, VCR ALC, wurli power amp) always fall through to warmup today (the nodal NR body is deferred indefinitely; warmup remains the documented path for nodal plugins). See `docs/aidocs/DC_OP.md` "Runtime DC OP recompute" for the full contract.
+- **Skip warmup with `recompute_dc_op()` / `settle_dc_op()`.** Pass `--emit-dc-op-recompute` to `melange compile` and the generated `CircuitState` gains two methods. `recompute_dc_op(&mut self)` runs the runtime NR directly — use it when you want explicit control. `settle_dc_op(&mut self)` is the convenience wrapper: it calls `recompute_dc_op` first and falls back to the `WARMUP_SAMPLES_RECOMMENDED` silence loop if the NR fails or the circuit is nodal-routed. Prefer `settle_dc_op` unless you need to observe the recompute-vs-fallback decision yourself — it handles the DK-vs-nodal distinction uniformly so plugin code doesn't need to branch. Neither method is audio-thread safe; call from plugin init or parameter-change callbacks. DK-path circuits (tube preamps, op-amp clippers) get the full NR; nodal full-LU circuits (passive-eq, 4kbuscomp, VCR ALC, wurli power amp) always fall through to warmup — warmup is the supported path for nodal plugins.
 - **Runtime-adjustable device model fields** are already emitted as `pub` on `CircuitState`: `device_0_mu`, `device_0_ex`, `device_0_kg1`, etc. for tubes; similar for BJTs, JFETs, MOSFETs. Write them directly from plugin code for per-instance tube aging, transistor matching, or user-exposed model parameters. No codegen changes needed.
 
 ## Further Reading

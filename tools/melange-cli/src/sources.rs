@@ -21,6 +21,17 @@ pub struct CircuitIndex {
 pub struct CircuitIndexEntry {
     /// Repo-relative path to the `.cir`, relative to the index file.
     pub path: String,
+    /// Optional publisher metadata, shown by `melange sources show`. Never
+    /// used for resolution.
+    #[serde(default)]
+    pub tier: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+}
+
+/// Whether a source's base is an http(s) URL rather than a local directory.
+pub fn is_remote(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
 }
 
 /// Names within edit distance 2, closest first, at most three. Cheap enough
@@ -175,6 +186,66 @@ impl SourcesConfig {
         let c = self.sources.get(source)?;
         let p = std::path::Path::new(c.url.trim_end_matches('/'));
         p.is_dir().then(|| p.to_path_buf())
+    }
+
+    /// Refuse a local source whose directory is not there.
+    ///
+    /// Without this, a source that is not a URL and not a directory from the
+    /// current working directory fell through to the HTTP path and died as
+    /// "Failed to fetch URL: ./mycircuits/circuits-index.json" with an empty
+    /// cause — calling a folder a URL and saying nothing about why.
+    pub fn check_local_reachable(&self, source: &str) -> Result<()> {
+        let Some(c) = self.sources.get(source) else {
+            return Ok(());
+        };
+        if is_remote(&c.url) || self.local_dir(source).is_some() {
+            return Ok(());
+        }
+        let relative = if std::path::Path::new(&c.url).is_relative() {
+            " It is a relative path, so it only resolves from the directory it was \
+             added in; re-add it with an absolute path."
+        } else {
+            ""
+        };
+        anyhow::bail!(
+            "Source '{source}' is the local directory '{}', which does not exist from \
+             here.{relative} (`melange sources add {source} <dir>` overwrites it.)",
+            c.url
+        )
+    }
+
+    /// Every circuit a source's index lists, sorted by category then name.
+    ///
+    /// `Ok(None)` when the source publishes no index — its circuits still
+    /// resolve by file name, they just cannot be listed.
+    pub fn list_circuits(
+        &self,
+        source: &str,
+        cache: &crate::cache::Cache,
+    ) -> Result<Option<Vec<(String, CircuitIndexEntry)>>> {
+        let raw = if let Some(dir) = self.local_dir(source) {
+            match std::fs::read_to_string(dir.join("circuits-index.json")) {
+                Ok(raw) => raw,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(e.into()),
+            }
+        } else {
+            self.check_local_reachable(source)?;
+            let index_url = format!("{}/circuits-index.json", self.source_base(source)?);
+            match cache.get_sync(&index_url, false) {
+                Ok(raw) => raw,
+                Err(e) if e.downcast_ref::<crate::cache::NotFound>().is_some() => return Ok(None),
+                Err(e) => return Err(e),
+            }
+        };
+        let index: CircuitIndex = serde_json::from_str(&raw)
+            .with_context(|| "not a valid circuits-index.json (see docs/CIRCUIT_INDEX.md)")?;
+        let mut entries: Vec<(String, CircuitIndexEntry)> = index.circuits.into_iter().collect();
+        entries.sort_by(|(an, ae), (bn, be)| {
+            (ae.category.as_deref().unwrap_or(""), an.as_str())
+                .cmp(&(be.category.as_deref().unwrap_or(""), bn.as_str()))
+        });
+        Ok(Some(entries))
     }
 
     /// Resolve a name inside a local source directory.
@@ -474,6 +545,47 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("Did you mean: big-muff?"), "{e}");
+    }
+
+    /// A relative local source that does not resolve from here says so,
+    /// instead of being fetched as a URL.
+    #[test]
+    fn unreachable_relative_local_source_names_the_fix() {
+        let mut config = SourcesConfig::default();
+        config.add_source("mine", "./no-such-dir-anywhere", None, None);
+        let e = config
+            .check_local_reachable("mine")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("does not exist from here"), "{e}");
+        assert!(e.contains("absolute path"), "{e}");
+        config.add_source("remote", "https://example.com/x", None, None);
+        assert!(config.check_local_reachable("remote").is_ok());
+    }
+
+    /// `sources show` lists an index's circuits, grouped by category.
+    #[test]
+    fn local_index_lists_its_circuits_by_category() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("circuits-index.json"),
+            r#"{"schema":1,"circuits":{
+                "zeta":{"path":"a/zeta.cir","category":"eq"},
+                "alpha":{"path":"b/alpha.cir","category":"pedals","tier":"stable"},
+                "beta":{"path":"a/beta.cir","category":"eq"}}}"#,
+        )
+        .unwrap();
+        let mut config = SourcesConfig::default();
+        config.add_source("mine", d.path().to_str().unwrap(), None, None);
+        let cache = crate::cache::Cache::new().unwrap();
+        let names: Vec<String> = config
+            .list_circuits("mine", &cache)
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(names, ["beta", "zeta", "alpha"]);
     }
 
     /// Unindexed and absent names the command that fixes it.

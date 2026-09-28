@@ -127,6 +127,7 @@ pub fn resolve(circuit_ref: &str) -> Result<CircuitSource> {
             let path = crate::sources::SourcesConfig::resolve_local(&dir, &circuit)?;
             return Ok(CircuitSource::Local { path });
         }
+        config.check_local_reachable(&source)?;
         let cache = crate::cache::Cache::new()?;
         let url = config.resolve_circuit_indexed(&source, &circuit, &cache, false)?;
         return Ok(CircuitSource::Friendly {
@@ -147,6 +148,7 @@ pub fn resolve(circuit_ref: &str) -> Result<CircuitSource> {
                     let path = crate::sources::SourcesConfig::resolve_local(&dir, circuit_ref)?;
                     return Ok(CircuitSource::Local { path });
                 }
+                config.check_local_reachable(&default)?;
                 let cache = crate::cache::Cache::new()?;
                 let url = config.resolve_circuit_indexed(&default, circuit_ref, &cache, false)?;
                 return Ok(CircuitSource::Friendly {
@@ -172,16 +174,17 @@ pub fn resolve(circuit_ref: &str) -> Result<CircuitSource> {
         );
     }
 
+    let config_path = crate::sources::SourcesConfig::config_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "melange's sources.toml".to_string());
     anyhow::bail!(
-        "Cannot resolve circuit reference: '{}'\n\n\
-         Tried:\n\
-         - Local file (not found)\n\
-         - Builtin circuit (not found)\n\
-         - URL (must start with http:// or https://)\n\
-         - Friendly source (invalid format)\n\
-         - Default source (bare name, but no default source is configured)\n\n\
-         Use 'melange sources list' to see configured sources.",
-        circuit_ref
+        "Cannot resolve circuit reference: '{circuit_ref}'\n\n\
+         It is not a file here and not a builtin (`melange builtins`). A circuit from a \
+         source is written `source:name`, e.g. `melange-circuits:{circuit_ref}`: \
+         `melange sources list` shows your sources, and `melange sources show <source>` \
+         lists a source's circuits.\n\
+         To let bare names resolve against one source, set `default_source = \"<source>\"` \
+         in {config_path}."
     )
 }
 

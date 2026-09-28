@@ -95,6 +95,7 @@
 //! |---|---|
 //! | dangling node on a two-terminal element (R, C, L, D, V, I, B, N), ports declared | [`Severity::Refuse`] |
 //! | `.port` names a node the netlist does not have | [`Severity::Refuse`] |
+//! | ideal voltage source from the input port to ground, input declared | [`Severity::Refuse`] |
 //! | dangling terminal on a multi-terminal element | [`Severity::Warn`] |
 //! | true cap-only DC island | [`Severity::Warn`] |
 //!
@@ -172,6 +173,27 @@ pub enum Finding {
         /// first. Empty when nothing is close enough to be worth guessing.
         suggestions: Vec<String>,
     },
+    /// An ideal voltage source from the input node to ground.
+    ///
+    /// melange drives the input itself, through a Thevenin conductance. An
+    /// ideal source across the same node holds it at a fixed voltage, so the
+    /// audio input is shorted and the circuit renders silence — while every
+    /// solver counter stays healthy. It is the stimulus a SPICE deck needs,
+    /// carried into a deck melange drives.
+    SourcePinsInput {
+        /// The voltage source's name.
+        source: String,
+        /// The input node it pins.
+        node: String,
+        /// 1-based raw source line of the source, or 0 when unknown.
+        line: usize,
+        /// Whether the source is written `V <input> 0` (the orientation
+        /// `melange validate` strips) rather than `V 0 <input>`.
+        input_is_n_plus: bool,
+        /// Whether the caller named the input port, as opposed to guessing
+        /// it (see [`Ports::inferred`]).
+        input_known: bool,
+    },
     /// A set of nodes with no DC path to ground.
     FloatingIsland {
         /// The island's nodes, sorted.
@@ -211,6 +233,13 @@ impl Finding {
                 }
             }
             Finding::UnknownPort { .. } => Severity::Refuse,
+            Finding::SourcePinsInput { input_known, .. } => {
+                if *input_known {
+                    Severity::Refuse
+                } else {
+                    Severity::Warn
+                }
+            }
             Finding::FloatingIsland { .. } => Severity::Warn,
         }
     }
@@ -297,6 +326,41 @@ impl Finding {
                      node, so there is no such pin to declare.{guess} A `.port` line covers a \
                      node the circuit already has; it does not create one. Fix the spelling, \
                      or delete the declaration."
+                )
+            }
+            Finding::SourcePinsInput {
+                source,
+                node,
+                line,
+                input_is_n_plus,
+                input_known,
+            } => {
+                let at = if *line > 0 {
+                    format!(" (line {line})")
+                } else {
+                    String::new()
+                };
+                let validate = if *input_is_n_plus {
+                    " `melange validate` removes it automatically before comparing against \
+                     ngspice, so a deck kept for ngspice can keep it."
+                } else {
+                    ""
+                };
+                let caveat = if *input_known {
+                    String::new()
+                } else {
+                    format!(
+                        " No input port was declared for this run; if '{node}' is not the \
+                         circuit's input, this is not a defect."
+                    )
+                };
+                format!(
+                    "voltage source {source}{at} ties input node '{node}' to ground. melange \
+                     drives the input itself, through a Thevenin source (1 Ω unless \
+                     --input-resistance or .input_impedance says otherwise); an ideal source \
+                     across the same node holds it at a fixed voltage, so the audio input is \
+                     shorted and the circuit renders silence. Delete the {source} line — \
+                     melange needs no input source in the deck.{validate}{caveat}"
                 )
             }
             Finding::FloatingIsland { nodes } => format!(
@@ -411,6 +475,7 @@ impl Ports {
 /// `melange nodes` refuses on nothing).
 pub fn check(netlist: &Netlist, ports: &Ports) -> Vec<Finding> {
     let mut findings = check_declared_ports(netlist);
+    findings.extend(check_input_sources(netlist, ports));
     findings.extend(check_dangling(netlist, ports));
     let dangling: BTreeSet<String> = findings
         .iter()
@@ -454,6 +519,47 @@ fn check_declared_ports(netlist: &Netlist) -> Vec<Finding> {
             suggestions: nearest_names(&pin.node, &all_names),
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Check 0b — no ideal source on the input node
+// ---------------------------------------------------------------------------
+
+/// Every voltage source connected between an input port and ground.
+///
+/// Only the to-ground case: a source from the input to another node is a
+/// level shift the input still drives through, not a short. Findings come
+/// back in element order.
+fn check_input_sources(netlist: &Netlist, ports: &Ports) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for elem in &netlist.elements {
+        let Element::VoltageSource {
+            name,
+            n_plus,
+            n_minus,
+            ..
+        } = elem
+        else {
+            continue;
+        };
+        for input in &ports.inputs {
+            let pins = (n_plus == input && n_minus == "0") || (n_minus == input && n_plus == "0");
+            if pins {
+                findings.push(Finding::SourcePinsInput {
+                    source: name.clone(),
+                    node: input.clone(),
+                    line: netlist
+                        .element_lines
+                        .get(&name.to_ascii_lowercase())
+                        .copied()
+                        .unwrap_or(0),
+                    input_is_n_plus: n_plus == input,
+                    input_known: ports.declared,
+                });
+            }
+        }
+    }
+    findings
 }
 
 // ---------------------------------------------------------------------------
@@ -952,6 +1058,52 @@ mod tests {
                 .all(|f| !matches!(f, Finding::DanglingNode { .. })),
             "{:?}",
             findings(deck, &ports_in_out())
+        );
+    }
+
+    #[test]
+    fn voltage_source_on_the_input_refuses_in_either_orientation() {
+        // The SPICE habit: `Vin in 0 ...` pins the node melange drives, and the
+        // circuit renders silence with healthy counters.
+        for (src, n_plus) in [("Vin in 0 DC 0", true), ("Vin 0 in DC 0 AC 1", false)] {
+            let deck = format!("vin\n{src}\nR1 in out 10k\nR2 out 0 10k\n");
+            let f = findings(&deck, &ports_in_out());
+            let pin = f
+                .iter()
+                .find(|f| matches!(f, Finding::SourcePinsInput { .. }))
+                .unwrap_or_else(|| panic!("{src}: {f:?}"));
+            assert_eq!(pin.severity(), Severity::Refuse, "{src}");
+            let m = pin.message();
+            assert!(m.contains("Vin") && m.contains("line 2"), "{m}");
+            assert!(m.contains("Delete the"), "{m}");
+            assert_eq!(m.contains("melange validate"), n_plus, "{m}");
+        }
+    }
+
+    #[test]
+    fn voltage_source_on_a_guessed_input_only_warns() {
+        let deck = "vin\nVin in 0 DC 0\nR1 in out 10k\nR2 out 0 10k\n";
+        let netlist = Netlist::parse(deck).expect("deck parses");
+        let f = check(&netlist, &Ports::inferred(&netlist));
+        let pin = f
+            .iter()
+            .find(|f| matches!(f, Finding::SourcePinsInput { .. }))
+            .expect("still reported");
+        assert_eq!(pin.severity(), Severity::Warn);
+        assert!(pin.message().contains("No input port was declared"));
+    }
+
+    #[test]
+    fn voltage_source_elsewhere_is_not_an_input_short() {
+        // A supply rail, and a source from the input to another node (a level
+        // shift the input still drives through), are both fine.
+        let deck = "ok\nVcc vcc 0 DC 9\nVb in mid DC 1\nR1 mid out 10k\nR2 out 0 10k\n\
+                    R3 vcc out 100k\n";
+        let f = findings(deck, &ports_in_out());
+        assert!(
+            f.iter()
+                .all(|f| !matches!(f, Finding::SourcePinsInput { .. })),
+            "{f:?}"
         );
     }
 

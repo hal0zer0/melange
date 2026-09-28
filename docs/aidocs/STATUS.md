@@ -140,11 +140,16 @@ M=1 direct, M=2 Cramer's, M=3..24 Gaussian elimination with partial pivoting.
 
 | Path | When Selected | Cost | Notes |
 |------|--------------|------|-------|
-| DK Schur | M<10, ≤1 xfmr, K well-conditioned | O(N²+M³)/sample | *(no measured figure — see README table)* |
+| DK Schur | M<10, ≤1 xfmr, K well-conditioned, no op-amp needing active-set rail handling | O(N²+M³)/sample | *(no measured figure — see README table)* |
 | Nodal Schur | M≥10 or 2+ xfmr, K well-conditioned | O(N²+M³)/sample | Medium-complexity circuits |
 | Nodal full LU | K≈0 (VCA), positive K diag, K ill-cond | O(N³)/sample | Matches runtime exactly |
 
 K≈0 detection: max|K| < 1e-6 with M > 0.
+
+A clamped op-amp whose rail mode resolves to `active-set`/`active-set-be` (an
+AC-coupled output under `auto`, or asked for explicitly) routes nodal: only
+nodal implements the pin-and-resolve, and forcing DK is refused. See
+`OPAMP_RAIL_MODES.md` → "Which solver runs which mode".
 
 ## Circuit Library Status
 

@@ -411,6 +411,30 @@ pub fn resolve_opamp_rail_mode(
     }
 }
 
+/// The op-amps an explicit `Hard` request puts at risk: clamped op-amps whose
+/// output is capacitor-coupled downstream, where the auto-resolver would have
+/// picked an active-set mode because a post-solve clamp corrupts that
+/// capacitor's history.
+///
+/// Empty unless `requested` is exactly `Hard`. The explicit choice still wins
+/// (overrides are how users bisect); this only lets codegen say that it was
+/// made against the resolver's verdict. Route-independent: `Hard` is the same
+/// post-solve clamp on DK and nodal.
+pub fn hard_override_at_risk(
+    mna: &crate::mna::MnaSystem,
+    requested: crate::codegen::OpampRailMode,
+) -> Vec<String> {
+    if requested != crate::codegen::OpampRailMode::Hard {
+        return Vec::new();
+    }
+    mna.opamps
+        .iter()
+        .filter(|oa| oa.n_out_idx > 0 && (oa.vcc.is_finite() || oa.vee.is_finite()))
+        .filter(|oa| opamp_has_ac_coupled_downstream(mna, oa))
+        .map(|oa| oa.name.clone())
+        .collect()
+}
+
 /// Refine an [`OpampRailMode::ActiveSet`] auto-decision by inspecting the
 /// netlist topology. If no clampable op-amp has an R-only path to a nonlinear
 /// device terminal, the circuit is "audio-path" — upgrade to

@@ -92,7 +92,12 @@ fn build_mna(input_node_name: &str) -> (Netlist, MnaSystem, usize) {
 fn route_at_rate(rate: f64) -> routing::RoutingDecision {
     let (_netlist, mna, _input_node) = build_mna("in");
     let kernel = DkKernel::from_mna_augmented(&mna, rate).expect("augmented kernel");
-    routing::auto_route(&kernel, &mna, false)
+    routing::auto_route(
+        &kernel,
+        &mna,
+        false,
+        melange_solver::codegen::OpampRailMode::Auto,
+    )
 }
 
 /// At a plausible host rate (48 kHz), this oscillator's trap propagation

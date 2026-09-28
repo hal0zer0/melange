@@ -1872,6 +1872,7 @@ impl Parser {
             // Raw source line of THIS statement, captured before parsing:
             // `.subckt` consumes its whole body, leaving `line_num` on `.ends`.
             let stmt_line = self.line_num;
+            let _value_ctx = ValueContextGuard::set(stmt_line, &line);
 
             // Parse directive or element
             if line.starts_with('.') {
@@ -2070,7 +2071,7 @@ impl Parser {
                         let mut all: Vec<&str> =
                             netlist.models.iter().map(|m| m.name.as_str()).collect();
                         all.sort_unstable();
-                        format!(" Declared here: {}.", all.join(", "))
+                        format!(" The models this deck declares: {}.", all.join(", "))
                     };
                     return Err(ParseError {
                         line: self.line_of_element(elem.name()),
@@ -2146,15 +2147,37 @@ impl Parser {
             if pot.resistor_name.contains('.') {
                 continue; // Will be validated after subcircuit expansion
             }
-            let exists = netlist.elements.iter().any(|e| {
-                matches!(e, Element::Resistor { name, .. } if name.eq_ignore_ascii_case(&pot.resistor_name))
+            let nominal = netlist.elements.iter().find_map(|e| match e {
+                Element::Resistor { name, value, .. }
+                    if name.eq_ignore_ascii_case(&pot.resistor_name) =>
+                {
+                    Some(*value)
+                }
+                _ => None,
             });
-            if !exists {
+            let Some(nominal) = nominal else {
                 return Err(ParseError {
                     line: self.line_of_directive(&[".pot", ".wiper"], &pot.resistor_name),
                     message: format!(
                         ".pot references resistor '{}' which was not found in the netlist",
                         pot.resistor_name
+                    ),
+                });
+            };
+            // With no explicit default the knob starts at the resistor's own
+            // value, so that value has to be one the knob can reach — the same
+            // rule an explicit default and `--pot` are held to.
+            if pot.default_value.is_none() && (nominal < pot.min_value || nominal > pot.max_value) {
+                return Err(ParseError {
+                    line: self.line_of_directive(&[".pot"], &pot.resistor_name),
+                    message: format!(
+                        ".pot {name}: the resistor's netlist value ({nominal}) is outside the \
+                         pot's range {min}..{max}, and with no explicit default the knob would \
+                         start at a setting it cannot reach. Put {name}'s value inside the \
+                         range, or give a default: `.pot {name} {min} {max} <default> \"Label\"`.",
+                        name = pot.resistor_name,
+                        min = pot.min_value,
+                        max = pot.max_value,
                     ),
                 });
             }
@@ -3527,8 +3550,15 @@ impl Parser {
         let mut default_value = None;
         let mut label_start = 4;
 
-        if parts.len() > 4 && !parts[4].starts_with('"') {
-            // 5th token is not a quoted label — must be the default value
+        // A 5th token that starts like a number is the default; anything else
+        // (a quoted or a bare word) starts the label.
+        let looks_numeric = |t: &str| {
+            t.chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit() || c == '.' || c == '+' || c == '-')
+        };
+        if parts.len() > 4 && looks_numeric(parts[4]) {
+            // 5th token is a number — the default value
             default_value = Some(self.parse_positive_value(parts[4], ".pot default")?);
             let dv = default_value.unwrap();
             if dv < min_value || dv > max_value {
@@ -3544,6 +3574,15 @@ impl Parser {
         // to be silently dropped.
         let label = if parts.len() > label_start {
             let rest = parts[label_start..].join(" ");
+            let quoted = rest.len() >= 2 && rest.starts_with('"') && rest.ends_with('"');
+            let bare_word = parts.len() == label_start + 1 && !rest.contains('"');
+            if !quoted && !bare_word {
+                return Err(self.error(format!(
+                    ".pot {resistor_name}: cannot read '{rest}' as a label. The form is: \
+                     .pot Rname min_value max_value [default] [\"Label\"] — a label with \
+                     spaces must be quoted."
+                )));
+            }
             let trimmed = rest.trim_matches('"');
             if trimmed.is_empty() {
                 None
@@ -4560,12 +4599,7 @@ impl Parser {
                 ac = Some((mag, phase));
                 i += consumed;
             } else if Self::is_transient_spec_token(parts[i]) {
-                return Err(self.error(format!(
-                    "Voltage source '{}': transient specification '{}' (SIN/PULSE/PWL/EXP/...) \
-                     is not supported — melange input comes via the input node; remove the \
-                     transient spec and keep only the DC value",
-                    parts[0], parts[i]
-                )));
+                return Err(self.error(Self::transient_spec_message("Voltage", parts[0], parts[i])));
             } else if dc.is_none() {
                 // Bare value is DC
                 dc = Some(
@@ -4592,12 +4626,27 @@ impl Parser {
         })
     }
 
+    /// The refusal for a `SIN(...)`/`PULSE(...)`/... on a V or I source.
+    ///
+    /// Names both remedies, because the right one depends on what the line
+    /// is: a test signal on the input must go entirely (a source left on the
+    /// input node shorts it), a supply keeps its DC value.
+    fn transient_spec_message(kind: &str, name: &str, token: &str) -> String {
+        format!(
+            "{kind} source '{name}': transient specification '{token}' (SIN/PULSE/PWL/EXP/...) \
+             is not supported — melange has no time-domain sources; audio enters through the \
+             input node (`-i`, default `in`), which melange drives itself. If this line is your \
+             test signal, delete the whole line: a source left on the input node shorts it. If \
+             it is a DC supply, keep only the DC value (`Vcc vcc 0 DC 9`)."
+        )
+    }
+
     /// Does this token open a SPICE transient specification (`SIN(...)`,
     /// `PULSE(...)`, `PWL(...)`, ...)? Used to give a targeted error instead
     /// of a generic "invalid value" / silent skip.
     fn is_transient_spec_token(tok: &str) -> bool {
         let upper = tok.to_ascii_uppercase();
-        ["SIN", "PULSE", "PWL", "EXP", "SFFM", "AM"]
+        ["SIN", "SINE", "PULSE", "PWL", "EXP", "SFFM", "AM"]
             .iter()
             .any(|kw| upper == *kw || upper.starts_with(&format!("{}(", kw)))
     }
@@ -4620,12 +4669,7 @@ impl Parser {
                 )
             }
             Some(p) if Self::is_transient_spec_token(p) => {
-                return Err(self.error(format!(
-                    "Current source '{}': transient specification '{}' (SIN/PULSE/PWL/EXP/...) \
-                     is not supported — melange input comes via the input node; remove the \
-                     transient spec and keep only the DC value",
-                    parts[0], p
-                )));
+                return Err(self.error(Self::transient_spec_message("Current", parts[0], p)));
             }
             Some(p) => (
                 Some(parse_value(p).map_err(|_| self.error(format!("Invalid DC value: {}", p)))?),
@@ -4639,15 +4683,13 @@ impl Parser {
         if parts.len() > consumed {
             let extra = &parts[consumed..];
             if extra.iter().any(|t| Self::is_transient_spec_token(t)) {
-                return Err(self.error(format!(
-                    "Current source '{}': transient specification '{}' (SIN/PULSE/PWL/EXP/...) \
-                     is not supported — melange input comes via the input node; remove the \
-                     transient spec and keep only the DC value",
+                return Err(self.error(Self::transient_spec_message(
+                    "Current",
                     parts[0],
                     extra
                         .iter()
                         .find(|t| Self::is_transient_spec_token(t))
-                        .unwrap()
+                        .unwrap(),
                 )));
             }
             return Err(self.error(format!(
@@ -4765,9 +4807,11 @@ impl Parser {
         if parts.len() > 5 {
             return Err(self.error(format!(
                 "Op-amp '{}': unexpected trailing token(s): '{}' — expected \
-                 'Uname n_plus n_minus n_out modelname'",
+                 'Uname n_plus n_minus n_out modelname'. There are no supply pins: \
+                 the rails go on the model card (`.model {} OA(VCC=9 VEE=0)`).",
                 parts[0],
-                parts[5..].join(" ")
+                parts[5..].join(" "),
+                parts[parts.len() - 1]
             )));
         }
         Ok(Element::Opamp {
@@ -5408,9 +5452,10 @@ fn try_parse_infix(s: &str) -> Option<f64> {
         // wrong circuit.
         'M' => {
             log::warn!(
-                "value '{}': infix 'M' interpreted as MEGA per BS-1852 ({} = {:.3e}); \
+                "value '{}'{}: infix 'M' interpreted as MEGA per BS-1852 ({} = {:.3e}); \
                  suffix-position 'm' remains milli (e.g. '10m' = 10e-3)",
                 s,
+                value_context_suffix(),
                 s,
                 base * 1e6
             );
@@ -5427,6 +5472,44 @@ fn try_parse_infix(s: &str) -> Option<f64> {
     } else {
         None
     }
+}
+
+thread_local! {
+    /// Where the statement being parsed came from, for value warnings.
+    ///
+    /// The value parsers are free functions with no line in hand, and two
+    /// `1M`s in one deck produced two identical warnings a user could not
+    /// place. The parse loop sets this per statement; it is empty outside a
+    /// parse, so a bare `parse_value` call from elsewhere warns as before.
+    static VALUE_CONTEXT: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Sets [`VALUE_CONTEXT`] for the life of the guard.
+struct ValueContextGuard;
+
+impl ValueContextGuard {
+    fn set(line: usize, statement: &str) -> Self {
+        let head = statement.split_whitespace().next().unwrap_or("");
+        VALUE_CONTEXT.with(|c| *c.borrow_mut() = Some(format!("line {line}, {head}")));
+        ValueContextGuard
+    }
+}
+
+impl Drop for ValueContextGuard {
+    fn drop(&mut self) {
+        VALUE_CONTEXT.with(|c| *c.borrow_mut() = None);
+    }
+}
+
+/// `" (line 7, R4)"` while a statement is being parsed, else empty.
+fn value_context_suffix() -> String {
+    VALUE_CONTEXT.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|ctx| format!(" ({ctx})"))
+            .unwrap_or_default()
+    })
 }
 
 /// Parse a SPICE value with optional scale suffix.
@@ -5516,7 +5599,7 @@ fn ascii_edit_distance(a: &str, b: &str) -> usize {
 
 fn directive_shape(context: &str) -> Option<&'static str> {
     Some(match context {
-        c if c.starts_with(".pot") => ".pot Rname min_value max_value",
+        c if c.starts_with(".pot") => ".pot Rname min_value max_value [default] [\"Label\"]",
         c if c.starts_with(".wiper") => ".wiper R_cw R_ccw total_resistance",
         c if c.starts_with(".runtime") => ".runtime Rname min max as field_name",
         c if c.starts_with(".input_impedance") => ".input_impedance <value>",
@@ -5697,9 +5780,10 @@ fn parse_value_ctx(s: &str, model_param_ctx: bool) -> Result<f64, ParseFloatErro
                 return Ok(result);
             }
             log::warn!(
-                "value '{}' parsed as {} (trailing 'F' treated as a Farad unit, NOT femto); \
+                "value '{}'{} parsed as {} (trailing 'F' treated as a Farad unit, NOT femto); \
                  write '{}e-15' or '{}fF' if femto was intended",
                 s,
+                value_context_suffix(),
                 &s[..run_start],
                 &s[..run_start],
                 &s[..run_start]
@@ -5748,10 +5832,11 @@ fn parse_value_ctx(s: &str, model_param_ctx: bool) -> Result<f64, ParseFloatErro
                     let mantissa = &num_part[..num_part.len() - 1];
                     if let Ok(m) = mantissa.parse::<f64>() {
                         log::warn!(
-                            "value '{}': a suffix 'M' is MILLI in SPICE, so this is {:.3e}, \
+                            "value '{}'{}: a suffix 'M' is MILLI in SPICE, so this is {:.3e}, \
                              not mega — a factor of 10^9 apart. Write '{}meg' (or '{}M0') \
                              for mega; write '{}m' for milli and this warning goes away.",
                             s,
+                            value_context_suffix(),
                             m * 1e-3,
                             mantissa,
                             mantissa,

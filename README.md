@@ -104,6 +104,7 @@ it — add it once as a named source and compile by `source:circuit`:
 
 ```bash
 melange sources add melange-circuits https://gitlab.com/oomox-group/melange-circuits/-/raw/main
+melange sources show melange-circuits        # what it has
 melange compile melange-circuits:passive-eq1a --format plugin -o my-eq
 ```
 
@@ -201,7 +202,7 @@ Every one of these is a real published model with real published equations, impl
 | BJT | Ebers-Moll or Gummel-Poon | Junction caps, parasitic R, Early effect, high-injection knee. Follows ngspice's `bjtload.c` formulation (the `qb()` base-charge discriminant, high-injection knee) |
 | JFET | Shichman-Hodges (triode + saturation) | N-channel and P-channel |
 | MOSFET | SPICE Level 1 | Body effect, channel-length modulation |
-| Vacuum Triode | Norman Koren plate + Dempwolf & Zölzer grid current | 12AX7, 12AU7, 12AT7, 6SN7, 6SL7, and more |
+| Vacuum Triode | Norman Koren plate + Dempwolf & Zölzer grid current ([onset runs late](docs/limitations.md#triode)) | 12AX7, 12AU7, 12AT7, 6SN7, 6SL7, and more |
 | Vacuum Pentode | 5 equation families, 29 models | EL84, EL34, EF86, 6L6, 6V6, KT88, 6550, and 22 more. Auto grid-off optimization for cutoff |
 | Op-Amp | Boyle VCCS macromodel | GBW pole, slew-rate limiting, asymmetric VCC/VEE rails, 4 clamping strategies |
 | VCA | THAT 2180 exponential | Current-mode with gain-dependent THD |
@@ -256,7 +257,7 @@ A sample of what it handles, with **measured** single-core throughput:
 
 \* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), best of 7 × 2M samples. Measured on an AMD Ryzen 9 7950X pinned to one CCD, with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh). Re-measured 2026-09-27 on an idle machine; run-to-run spread was under 2 % on every row. Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass runs at 2960× (7.0 ns/sample).
 
-**The three triode rows cost 14–29 % more than they did in 0.1.9.** The Dempwolf & Zölzer grid-current law (`30915fb`) evaluates a softplus on the grid dimension at every Newton iteration where the old law returned a hard zero, and that is the price of modelling the negative-grid region at all. Measured against the commit immediately before it, on one box in one session: 12AX7 stage 216.7× → 153.2×, tweed amp 22.3× → 18.3×, passive EQ 24.0× → 20.6×. The Wurlitzer row sits below the 56× published through 0.1.8 because **the deck changed**, not the compiler — it was revised 2026-09-16 (an extra coupling cap, a rebiased feedback network, `.integrator be`), and the pre-revision deck still measures 52.9× on the same 0.1.5 binary that published the 56×.
+**The triode rows pay for grid current.** The Dempwolf & Zölzer grid-current law evaluates a softplus on the grid dimension at every Newton iteration, where a hard-zero law would skip it; that is what modelling the negative-grid region costs. The CHANGELOG has the before/after figures.
 
 Each row names the deck it was measured on, so the numbers have an address. **Three of the six can be re-measured from a public clone today** — the passive tube EQ also ships in-tree as `examples/passive-eq1a.cir`. The other three are still private; naming them is provenance, not an invitation. The public set is expected to grow, but I am not promising a date.
 
@@ -267,14 +268,13 @@ Each row names the deck it was measured on, so the numbers have an address. **Th
 | Passive tube EQ | `testing/filters/passive-eq1a.cir` |
 | Tweed guitar amp | `unstable/amp/champ-5f1.cir` |
 | Wurlitzer 200A preamp | `unstable/preamp/wurli-preamp.cir` |
-| Overdrive pedal | `unstable/filters/gold-press-overdrive.cir` |
 | 12AX7 gain stage | `unstable/gimmicks/noyce-triode-12ax7.cir` |
 
 The circuits repository holds the full catalog with per-circuit status:
 
 **https://gitlab.com/oomox-group/melange-circuits**
 
-It is a filtered set — 43 circuits, not everything that exists locally. Of the seven rows above, `4kbuscomp`, `passive-eq1a` and `wurli-preamp` are in it; the other four are not yet. So four of those numbers are still ones you take on my word, which is four fewer than it was.
+It is a filtered set — 43 circuits, not everything that exists locally. Of the six rows above, `4kbuscomp`, `passive-eq1a` and `wurli-preamp` are in it; the other three are not yet, so those three numbers are still ones you take on my word.
 
 ## Spotlight: Passive Tube EQ
 
@@ -373,7 +373,8 @@ melange dc-op <circuit>                   DC operating point: node voltages + KC
 melange cache list|clear|stats            Manage the circuit cache
 melange import <file.xml> -o <file.cir>   Import KiCad XML to Melange format
 melange builtins                          List embedded demo circuits (ships with passive-eq1a)
-melange sources list|add|remove|show      Manage circuit source repos
+melange sources list|add|remove|show      Manage circuit sources (`show` lists a source's circuits)
+melange index <dir> [--check]             Write/verify a circuits-index.json for a folder
 ```
 
 Every subcommand has `--help`. The flags worth knowing about up front:

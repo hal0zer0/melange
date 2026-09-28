@@ -9,9 +9,13 @@ When you run `melange compile circuit.cir --format plugin -o my-plugin`, you get
 ```
 my-plugin/
   Cargo.toml        # Rust package with nih-plug dependency
+  build.sh          # Bundles a DAW-loadable CLAP + VST3 into target/bundled/
   src/
     circuit.rs      # Generated DSP code — DO NOT EDIT
     lib.rs          # Plugin wrapper — SAFE TO EDIT
+  xtask/            # nih-plug's bundler, used by build.sh (no separate checkout needed)
+  .cargo/
+    config.toml     # CPU baseline for the build (x86-64-v3 by default; see README.md)
   README.md         # Build instructions
   .gitignore
 ```
@@ -66,15 +70,26 @@ Applied as linear gain before/after `process_sample()`. Smoothed over 50ms to av
 ### Pot Parameters (from `.pot` directives)
 
 ```rust
-pot_0: FloatParam   // range: min..max ohms, default: nominal
-pot_1: FloatParam   // ...
+pot_drive: FloatParam   // 0..1 (shown as 0-100%), mapped onto min..max ohms
+pot_tone: FloatParam    // ...  (field named from the .pot label)
 ```
 
 Each `.pot` directive in the netlist becomes a `FloatParam` with:
-- Range: min to max resistance (from `.pot Rname min max`)
-- Default: netlist nominal (or explicit default if specified)
-- Unit: Ohms
+- Range: normalized 0..1, displayed as 0–100 %. `process()` maps it
+  **linearly** onto the pot's resistance, `min + t * (max - min)` from
+  `.pot Rname min max`.
+- Direction: 0 % is the min resistance, 100 % the max. If more resistance
+  means *less* of the effect in your circuit (a gain-setting resistor, for
+  instance), the knob reads backwards. Flip it in `process()` with
+  `let t = 1.0 - t;` — the generated code marks the spot.
+- Taper: linear, which is circuit-true but feels wrong for most Volume/Tone
+  pots (real ones are usually log/audio taper). Reshape `t` at the same spot,
+  e.g. `let t = t * t;`.
+- Default: the explicit `.pot` default if given, otherwise the resistor's
+  netlist value.
 - Smoothing: 10ms linear ramp
+
+`.wiper` pots are the same shape: a 0..1 wiper position, shown as a percentage.
 
 **Update timing:**
 - **All solvers**: per-block (matrix rebuild O(N^3) on value change)
@@ -95,8 +110,8 @@ state.recompute_dc_op();  // refresh NR seed to the new operating point
 
 On DK-path circuits this re-solves the operating point from the new pot
 value and writes `v_prev`/`i_nl_prev` with the converged equilibrium. On
-nodal-path circuits `recompute_dc_op()` is a stub today (Phase E handoff
-— body deferred); NR catches up on its own over roughly
+nodal-path circuits `recompute_dc_op()` does nothing yet; NR catches up on
+its own over roughly
 `WARMUP_SAMPLES_RECOMMENDED` samples after the jump.
 
 ### Switch Parameters (from `.switch` directives)
@@ -157,17 +172,21 @@ Per sample:
 Find the parameter in `CircuitParams::default()`:
 
 ```rust
-pot_0: FloatParam::new(
-    "R1 (Tone)",         // display name — change this
-    10000.0,             // default value
+pot_tone: FloatParam::new(
+    "Tone",              // display name — change this
+    0.1934,              // default position, 0..1
     FloatRange::Linear {
-        min: 500.0,      // change range here
-        max: 50000.0,
+        min: 0.0,
+        max: 1.0,
     },
 )
 .with_smoother(SmoothingStyle::Linear(10.0))  // smoothing time (ms)
-.with_unit(" Ohm"),                            // display unit
+.with_unit("%")                               // display unit
 ```
+
+The resistance range itself lives in `process()`, where the 0..1 value is
+scaled onto the `.pot` min..max — change the circuit's range in the netlist,
+not here.
 
 ### Add a Custom Parameter
 

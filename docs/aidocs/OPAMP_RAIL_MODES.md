@@ -34,6 +34,40 @@ heavy-clip convergence bug documented below.
 
 The auto-detector lives in `codegen::ir::resolve_opamp_rail_mode` + `refine_active_set_for_audio_path` (`crates/melange-solver/src/codegen/ir.rs:479-599`). It inspects the netlist topology around each clamped op-amp and picks the rail mode based on whether the output is cap-coupled (audio path) or DC-coupled to other nonlinear devices (control path).
 
+## Which solver runs which mode
+
+`ActiveSet` and `ActiveSetBe` pin a railed output and re-solve the rest of the
+circuit. **Only the nodal solver implements that.** The DK path implements
+`Hard` (and `None`) only.
+
+- `routing::auto_route` takes the requested rail mode, resolves it on the MNA
+  (`resolve_opamp_rail_mode`), and routes to nodal when a clamped op-amp
+  resolves to either active-set mode (`RoutingDecision::opamp_active_set`).
+  The audio-path refinement to `ActiveSetBe` happens later in codegen and does
+  not affect routing — both variants are nodal-only.
+- `--solver dk` on such a circuit is refused (CLI forced-DK blocker), and
+  `CodeGenerator::generate*` refuses an active-set mode on the DK path. There is
+  no silent degrade to `Hard`: `Hard` on an AC-coupled output is exactly the
+  cap-history corruption the resolver picked active-set to avoid.
+- An explicit `--opamp-rail-mode hard` stays allowed, on either route — an
+  explicit choice is never overridden, because overrides are how users bisect.
+  When a clamped op-amp it applies to is AC-coupled downstream (where auto
+  would pick active-set), codegen warns, naming the op-amp(s), and the reason
+  records the overridden verdict: `user requested (auto: …)`. Measured cost of
+  ignoring it: a single-supply stage at 0.5 V drive reached 11 kV on a 9 V
+  supply under Hard, 4.5 V under active-set.
+- Every generated file states what it runs: `pub const OPAMP_RAIL_MODE: &str`
+  (resolved, never `auto`) and `pub const OPAMP_RAIL_MODE_REASON: &str`.
+
+Why not a DK active-set: nodal already implements both modes, and nothing has
+shown nodal's cost to be a problem for a circuit that needs one.
+
+On the nodal Schur path, a rail-engaged sample goes straight to the BE fallback
+and its pin-and-resolve on the BE matrices. There is no 2× sub-step recovery: it
+used to exist, but its only rail handling was a post-solve clamp that did not
+re-solve downstream nodes (`Hard` at twice the rate), and its fixed-point solve
+could not contract once a junction conducted.
+
 ## The 5 modes
 
 | Mode | What it does | Cost | Status |

@@ -24,8 +24,8 @@ claim that nothing else is harder.
 melange analyze examples/passive-eq1a.cir
 
 # Sweep a control. Pot values are in ohms and must sit inside the declared
-# range — `melange nodes` prints it (LF Boost is 100..10000 ohm); out-of-range
-# values are accepted silently today, so check the range rather than the output.
+# range — `melange nodes` prints it (LF Boost is 100..10000 ohm); a value
+# outside it is refused.
 melange analyze examples/passive-eq1a.cir --pot "LF Boost=10k" --switch "LF Freq=1"
 
 # Run audio through it

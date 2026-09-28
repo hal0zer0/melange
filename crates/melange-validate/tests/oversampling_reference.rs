@@ -64,7 +64,12 @@ fn run_divider(oversampling: usize, input: &[f64]) -> Vec<f64> {
     // compile path does it.
     let routing_rate = SAMPLE_RATE * oversampling as f64;
     let kernel = DkKernel::from_mna(&mna, routing_rate).expect("dk kernel");
-    let decision = routing::auto_route(&kernel, &mna, false);
+    let decision = routing::auto_route(
+        &kernel,
+        &mna,
+        false,
+        melange_solver::codegen::OpampRailMode::Auto,
+    );
     assert_eq!(
         decision.route,
         routing::SolverRoute::DkSchur,

@@ -535,14 +535,15 @@ pub fn expand_internal_nodes_if_conditioned(
             .iter()
             .any(|e| matches!(e, crate::parser::Element::Bjt { .. }));
         if declares_bjt {
+            // This is the DK internal-node gate, NOT the nodal
+            // Schur-vs-full-LU sub-path.
             report!(
                 rep,
                 "  info (normal): parasitic-BJT internal nodes left unexpanded — \
                  min diag(K) = {:.3e} routes this circuit to the full N x N LU path, \
                  which models RB/RC/RE inside the device instead of as extra MNA nodes. \
                  Not an error and not a degradation: on this path expanding them makes \
-                 NR diverge. (Maintainers: this is the DK internal-node gate, NOT the \
-                 nodal Schur-vs-full-LU sub-path.)",
+                 NR diverge.",
                 k_diag_min
             );
         }
@@ -575,6 +576,7 @@ pub fn should_skip_fa_for_nodal_reroute(
     mna: &crate::mna::MnaSystem,
     sample_rate: f64,
     oversampling: usize,
+    opamp_rail_mode: crate::codegen::OpampRailMode,
 ) -> bool {
     use crate::codegen::routing::{self, SolverRoute};
     use crate::dk::DkKernel;
@@ -595,7 +597,7 @@ pub fn should_skip_fa_for_nodal_reroute(
             return true;
         }
     };
-    let decision = routing::auto_route(&kernel, mna, dk_failed);
+    let decision = routing::auto_route(&kernel, mna, dk_failed, opamp_rail_mode);
     log::info!(
         "Pre-route (un-reduced MNA, N={}, M={}): route={:?}, reason={}",
         kernel.n,
@@ -639,8 +641,12 @@ pub fn apply_forward_active_reduction(
 
     let forward_active = if solver_override == "nodal"
         || (solver_override == "auto"
-            && should_skip_fa_for_nodal_reroute(mna, sample_rate, oversampling))
-    {
+            && should_skip_fa_for_nodal_reroute(
+                mna,
+                sample_rate,
+                oversampling,
+                fa_config.opamp_rail_mode,
+            )) {
         std::collections::HashSet::new()
     } else {
         CircuitIR::detect_forward_active_bjts(mna, netlist, fa_config)
@@ -713,7 +719,12 @@ pub fn apply_grid_off_reduction(
         // the full 3D model is kept (no DC OP is solved on this path).
         CircuitIR::detect_grid_off_pentodes(mna, netlist, fa_config, false)
     } else if solver_override == "auto"
-        && should_skip_fa_for_nodal_reroute(mna, sample_rate, oversampling)
+        && should_skip_fa_for_nodal_reroute(
+            mna,
+            sample_rate,
+            oversampling,
+            fa_config.opamp_rail_mode,
+        )
     {
         std::collections::HashMap::new()
     } else {

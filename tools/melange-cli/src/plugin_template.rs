@@ -780,7 +780,10 @@ fn generate_wiper_default(wiper: &WiperParamInfo) -> String {
                     max: 1.0,
                 }},
             )
-            .with_smoother(SmoothingStyle::Linear(10.0)),
+            .with_smoother(SmoothingStyle::Linear(10.0))
+            .with_unit("%")
+            .with_value_to_string(Arc::new(|v| format!("{{:.0}}", v * 100.0)))
+            .with_string_to_value(Arc::new(|s| s.trim_end_matches('%').trim().parse::<f32>().ok().map(|v| v / 100.0))),
 "#,
         idx = wiper.wiper_index,
         name = name,
@@ -880,14 +883,23 @@ impl Default for CircuitParams {{
     )
 }
 
-/// Half-band IIR decimator group delay in output samples for a given
-/// oversampling factor. Must agree with the `latency()` method emitted by
-/// `generate_lib_rs` — the dry-path delay ring uses the same value.
-fn oversampling_latency_samples(oversampling_factor: usize) -> usize {
-    // For the supported half-band factors (2, 4) the decimator group delay in
-    // output samples equals the oversampling factor; factor 1 (no oversampling)
-    // has no decimator and falls through to the same identity.
-    oversampling_factor
+/// Latency the oversampler adds, in whole host samples, as reported to the
+/// host and used for the dry-path delay.
+///
+/// Read off the filter design rather than asserted: the round-trip delay of
+/// the half-band chain is 2.65 host samples at 2× and 3.47 at 4×, and is flat
+/// across the audio band (docs/OVERSAMPLING.md), so both round to 3. Hosts take
+/// whole samples.
+pub(crate) fn oversampling_latency_samples(oversampling_factor: usize) -> usize {
+    if oversampling_factor <= 1 {
+        return 0;
+    }
+    melange_validate::oversampling_round_trip_group_delay_samples(
+        oversampling_factor,
+        48_000.0,
+        1_000.0,
+    )
+    .round() as usize
 }
 
 fn generate_process_loop(
@@ -990,6 +1002,9 @@ fn generate_process_loop(
             "// little over its first ~80% of travel. To change the FEEL, reshape",
             "// `t` right here before it is scaled -- e.g. `let t = t * t;` for a",
             "// rough audio taper -- and leave the circuit alone.",
+            "// DIRECTION: 0% is the pot's min resistance, 100% its max. Where more",
+            "// resistance means less of the effect (a gain-setting resistor, say),",
+            "// the knob reads backwards; flip it with `let t = 1.0 - t;`.",
         ]
         .iter()
         .map(|l| format!("            {l}\n"))
@@ -1166,7 +1181,7 @@ fn generate_process_loop(
     // Build sample processing snippet.
     //
     // Wet/dry + oversampling: the wet path is delayed by the decimator group
-    // delay (the same value reported via `latency()`), so the dry branch must
+    // delay (the same value reported to the host from `initialize()`), so the dry branch must
     // be delayed to match — an undelayed dry mix comb-filters at HF. Small
     // fixed ring buffer per channel; allocated in initialize(), never in
     // process().
@@ -1403,7 +1418,7 @@ fn generate_lib_rs(
         options
             .url
             .is_none()
-            .then_some("--url (currently the melange repo)"),
+            .then_some("--vendor-url (currently the melange repo)"),
         options
             .email
             .is_none()
@@ -1639,7 +1654,7 @@ fn generate_lib_rs(
 
     // Wet/dry + oversampling: patch the struct/default/init/reset skeletons
     // with a per-channel dry-path delay ring matching the decimator group
-    // delay reported by latency(). Allocation happens in initialize(), and
+    // delay reported to the host. Allocation happens in initialize(), and
     // Default pre-allocates so an out-of-order process() call can't panic.
     let dry_delay_active = options.wet_dry_mix && oversampling_factor > 1;
     let (plugin_struct, plugin_default, init_method, reset_method) = if dry_delay_active {
@@ -1710,18 +1725,31 @@ fn generate_lib_rs(
         "ClapFeature::Stereo"
     };
 
-    // Oversampling latency: half-band IIR group delay in output samples
-    let latency_method = if oversampling_factor > 1 {
+    // Oversampling latency: nih-plug has no `latency()` on `Plugin`; the host
+    // is told through the init context, once the plugin knows it is running.
+    let init_method = if oversampling_factor > 1 {
         let latency_samples = oversampling_latency_samples(oversampling_factor);
-        format!(
-            "\n    fn latency(&self) -> u32 {{\n\
-             \x20       // Oversampling {}x half-band IIR decimation filter group delay\n\
-             \x20       {}\n\
-             \x20   }}\n",
-            oversampling_factor, latency_samples,
-        )
+        let patched = init_method
+            .replace(
+                "_context: &mut impl InitContext<Self>",
+                "context: &mut impl InitContext<Self>",
+            )
+            .replace(
+                "        true\n    }",
+                &format!(
+                    "        // {oversampling_factor}x half-band round trip: ~{latency_samples} host samples.\n\
+                     \x20       context.set_latency_samples({latency_samples});\n\
+                     \x20       true\n\
+                     \x20   }}"
+                ),
+            );
+        debug_assert!(
+            patched.contains("context.set_latency_samples("),
+            "latency patch anchors must match the generated initialize()"
+        );
+        patched
     } else {
-        String::new()
+        init_method
     };
 
     let ear_protection_fn = if options.ear_protection {
@@ -1818,7 +1846,7 @@ impl Plugin for CircuitPlugin {{
 {reset_method}
 
 {deactivate_method}
-{latency_method}
+
     fn process(
         &mut self,
         buffer: &mut Buffer,
@@ -3092,11 +3120,11 @@ mod tests {
             "plugin struct must carry the dry delay ring:\n{lib}"
         );
         assert!(
-            lib.contains("self.dry_delay = vec![vec![0.0f32; 4];"),
-            "initialize() must allocate the ring at the 4x decimator latency:\n{lib}"
+            lib.contains("self.dry_delay = vec![vec![0.0f32; 3];"),
+            "initialize() must allocate the ring at the 4x round-trip latency:\n{lib}"
         );
         assert!(
-            lib.contains("self.dry_delay_pos = (self.dry_delay_pos + 1) % 4;"),
+            lib.contains("self.dry_delay_pos = (self.dry_delay_pos + 1) % 3;"),
             "ring position must advance once per sample frame:\n{lib}"
         );
         assert!(
@@ -3105,7 +3133,62 @@ mod tests {
         );
         assert!(lib.contains("mix * out + (1.0 - mix) * dry"));
         // Latency report and dry delay must agree.
-        assert!(lib.contains("fn latency(&self) -> u32"));
+        assert!(lib.contains("context.set_latency_samples(3);"));
+    }
+
+    #[test]
+    fn oversampling_latency_matches_the_filter_design() {
+        // 2.65 and 3.47 host samples (docs/OVERSAMPLING.md): both round to 3.
+        assert_eq!(oversampling_latency_samples(1), 0);
+        assert_eq!(oversampling_latency_samples(2), 3);
+        assert_eq!(oversampling_latency_samples(4), 3);
+    }
+
+    #[test]
+    fn oversampled_plugin_reports_latency_through_init_context() {
+        // nih-plug has no `Plugin::latency()`; emitting one is E0407 and the
+        // generated project does not build. Every skeleton variant (stereo,
+        // mono, multi-output) must go through the init context instead.
+        for (mono, num_outputs) in [(false, 1), (true, 1), (false, 2)] {
+            for factor in [2, 4] {
+                let opts = PluginOptions {
+                    mono,
+                    ..Default::default()
+                };
+                let lib = generate_lib_rs(
+                    "test",
+                    false,
+                    &[],
+                    &[],
+                    &[],
+                    &[],
+                    num_outputs,
+                    factor,
+                    &opts,
+                );
+                assert!(
+                    !lib.contains("fn latency("),
+                    "mono={mono} outputs={num_outputs} {factor}x:\n{lib}"
+                );
+                assert!(
+                    lib.contains("context: &mut impl InitContext<Self>")
+                        && lib.contains("context.set_latency_samples(3);"),
+                    "mono={mono} outputs={num_outputs} {factor}x:\n{lib}"
+                );
+            }
+        }
+        let lib = generate_lib_rs(
+            "test",
+            false,
+            &[],
+            &[],
+            &[],
+            &[],
+            1,
+            1,
+            &PluginOptions::default(),
+        );
+        assert!(!lib.contains("set_latency_samples"));
     }
 
     #[test]

@@ -93,6 +93,11 @@ impl BinaryCache {
         Ok(Self { cache_dir })
     }
 
+    /// Where compiled simulate/analyze binaries are kept.
+    pub fn cache_dir(&self) -> &std::path::Path {
+        &self.cache_dir
+    }
+
     /// Compile source code to a binary, using cache if available.
     ///
     /// # Arguments

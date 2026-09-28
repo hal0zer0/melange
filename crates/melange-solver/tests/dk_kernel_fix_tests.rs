@@ -146,7 +146,12 @@ C1 a 0 100n
     );
 
     // Healthy kernel routes normally (whatever the other gates decide)
-    let healthy = auto_route(&kernel, &mna, false);
+    let healthy = auto_route(
+        &kernel,
+        &mna,
+        false,
+        melange_solver::codegen::OpampRailMode::Auto,
+    );
     assert!(
         !healthy.k_diag_unsafe,
         "negative K diagonal must not be flagged"
@@ -154,7 +159,12 @@ C1 a 0 100n
 
     // Flip the diagonal: transformer-NFB stand-in
     kernel.k[0] = kernel.k[0].abs();
-    let decision = auto_route(&kernel, &mna, false);
+    let decision = auto_route(
+        &kernel,
+        &mna,
+        false,
+        melange_solver::codegen::OpampRailMode::Auto,
+    );
     assert!(
         decision.k_diag_unsafe,
         "positive K diagonal with live N_i column must set k_diag_unsafe"
@@ -196,7 +206,12 @@ Vdd vdd 0 DC 5
 
     let kernel = DkKernel::from_mna(&mna, 48000.0)
         .expect("MOSFET kernel must build (zero N_i column exception)");
-    let decision = auto_route(&kernel, &mna, false);
+    let decision = auto_route(
+        &kernel,
+        &mna,
+        false,
+        melange_solver::codegen::OpampRailMode::Auto,
+    );
     assert!(
         !decision.k_diag_unsafe,
         "zero-N_i-column K[i][i]=0 must not be flagged (reason: {})",
@@ -236,7 +251,12 @@ Vdd vdd 0 DC 5
 
     let kernel =
         DkKernel::from_mna_augmented(&mna, 48000.0).expect("augmented MOSFET kernel must build");
-    let decision = auto_route(&kernel, &mna, false);
+    let decision = auto_route(
+        &kernel,
+        &mna,
+        false,
+        melange_solver::codegen::OpampRailMode::Auto,
+    );
     assert!(
         !decision.k_diag_unsafe,
         "augmented-path zero-N_i-column dims must not be flagged (reason: {})",

@@ -250,6 +250,26 @@ fn vsource_with_bare_sin_rejected_loudly() {
 }
 
 #[test]
+fn transient_error_tells_a_test_signal_to_delete_the_line() {
+    // Keeping only the DC value of `Vin in 0 SIN(...)` leaves `Vin in 0 DC 0`,
+    // which shorts the input. The error must not steer a test signal there.
+    let msg = Netlist::parse("Test\nVin in 0 SIN(0 0.1 1k)\nR1 in 0 1k\n")
+        .unwrap_err()
+        .message;
+    assert!(msg.contains("delete the whole line"), "{msg}");
+}
+
+#[test]
+fn vsource_with_sine_spelling_gets_the_transient_error() {
+    // `SINE(` is the LTspice spelling; it used to fall through to
+    // "Invalid DC value: SINE(0".
+    let msg = Netlist::parse("Test\nVsig x 0 SINE(0 1 1k)\nR1 x 0 1k\n")
+        .unwrap_err()
+        .message;
+    assert!(msg.contains("transient specification"), "{msg}");
+}
+
+#[test]
 fn vsource_trailing_junk_rejected() {
     let spice = "Test\nV1 x 0 5 3\nR1 x 0 1k\n";
     let result = Netlist::parse(spice);
@@ -617,4 +637,39 @@ fn first_line_is_always_title_even_if_element_shaped() {
     let netlist = Netlist::parse(spice).unwrap();
     assert_eq!(netlist.title, "R1 in out 1k");
     assert_eq!(netlist.elements.len(), 2, "R1 was consumed as the title");
+}
+
+// ===========================================================================
+// .pot label and default forms
+// ===========================================================================
+
+#[test]
+fn pot_takes_a_bare_one_word_label() {
+    let n = Netlist::parse("T\nR1 in out 10k\nR2 out 0 10k\n.pot R1 1k 1meg Drive\n").unwrap();
+    assert_eq!(n.pots[0].label.as_deref(), Some("Drive"));
+    assert_eq!(n.pots[0].default_value, None);
+}
+
+#[test]
+fn pot_rejects_trailing_words_that_are_not_a_quoted_label() {
+    let msg = Netlist::parse("T\nR1 in out 10k\nR2 out 0 10k\n.pot R1 1k 1meg Drive Level\n")
+        .unwrap_err()
+        .message;
+    assert!(msg.contains("must be quoted"), "{msg}");
+    let n = Netlist::parse("T\nR1 in out 10k\nR2 out 0 10k\n.pot R1 1k 1meg 5k \"Drive Level\"\n")
+        .unwrap();
+    assert_eq!(n.pots[0].label.as_deref(), Some("Drive Level"));
+    assert_eq!(n.pots[0].default_value, Some(5000.0));
+}
+
+#[test]
+fn pot_refuses_a_netlist_value_its_own_range_cannot_reach() {
+    // No explicit default: the knob starts at the resistor's value, so that
+    // value must be in range — the rule an explicit default and `--pot` obey.
+    let msg = Netlist::parse("T\nR1 in out 10k\nR2 out 0 10k\n.pot R1 20k 50k \"Tone\"\n")
+        .unwrap_err()
+        .message;
+    assert!(msg.contains("outside the pot's range"), "{msg}");
+    // An explicit in-range default makes the netlist value irrelevant.
+    Netlist::parse("T\nR1 in out 10k\nR2 out 0 10k\n.pot R1 20k 50k 25k \"Tone\"\n").unwrap();
 }

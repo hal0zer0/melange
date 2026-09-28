@@ -88,10 +88,19 @@ Lcore a b 100m ISAT=20m          ; saturating inductor
 
 **Syntax:**
 ```
-Vname n+ n- DC value [AC mag [phase]]
-Vname n+ n- PULSE(v1 v2 td tr tf pw per)
-Vname n+ n- SINE(vo va freq [td [theta [phase]]])
+Vname n+ n- [DC] value [AC mag [phase]]
 ```
+
+DC only. melange has no time-domain sources: `SIN(...)`, `SINE(...)`,
+`PULSE(...)`, `PWL(...)` and the rest are refused. Audio enters through the
+input node (`-i`, default `in`), which melange drives itself through a Thevenin
+source.
+
+⚠️ **Do not put a voltage source on the input node.** `Vin in 0 ...` is what a
+SPICE deck needs to have a stimulus, but in melange it holds the input at a
+fixed voltage and the circuit renders silence. Every verb that knows the input
+node refuses it; `melange validate` removes a `Vname <input> 0 ...` line before
+comparing against ngspice, so a deck kept for both can keep it.
 
 **Parameters:**
 | Parameter | Description |
@@ -105,8 +114,8 @@ Vname n+ n- SINE(vo va freq [td [theta [phase]]])
 **Examples:**
 ```spice
 Vcc vcc 0 9V
-Vin in 0 DC 0 AC 1V
-Vsig in 0 SINE(0 1 1k)
+Vbias bias 0 DC 4.5
+Vee vee 0 DC -15 AC 0
 ```
 
 ---
@@ -1004,8 +1013,8 @@ Marks a resistor as runtime-variable. In generated plugins, each `.pot` becomes 
 | `Rname` | Resistor name (must start with R) |
 | `min_value` | Minimum resistance (Ohms) |
 | `max_value` | Maximum resistance (Ohms) |
-| `default_value` | (Optional) Default resistance; must be between min and max. If omitted, uses the resistor's netlist nominal value. |
-| `"Label"` | (Optional) Quoted parameter label for plugin UI |
+| `default_value` | (Optional) Default resistance; must be between min and max. If omitted, the resistor's own netlist value is the default, and it must be in range too. |
+| `"Label"` | (Optional) Parameter label for plugin UI. Quote it; a single word may go unquoted. |
 
 **Constraints:** min < max (strictly). Maximum 64 combined `.pot` + `.wiper` leg entries per circuit.
 
@@ -1676,9 +1685,8 @@ Vcc vcc 0 9V
 R1 vcc base 100k
 R2 base 0 22k
 
-* Coupling capacitors
+* Coupling capacitors (melange drives `in`; no source on it)
 C1 in base 10u
-Vin in 0 DC 0 AC 1V
 
 * Transistor stage
 Rc vcc coll 4.7k
@@ -1703,8 +1711,11 @@ Rload out 0 10k
 .end
 ```
 
+To run the same file in ngspice, add a stimulus on the input —
+`Vin in 0 DC 0 AC 1V` — which `melange validate` removes before its own run.
+
 This netlist demonstrates:
-- Resistors, capacitors, voltage sources
+- Resistors, capacitors, a DC supply
 - A BJT with `.model` definition
 - Multi-line `.model` with continuation
 - Analysis directives for validation

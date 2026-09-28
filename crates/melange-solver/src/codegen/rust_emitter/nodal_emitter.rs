@@ -2257,6 +2257,7 @@ impl RustEmitter {
             "/// Oversampling factor (1 = none, 2 = 2x, 4 = 4x)\npub const OVERSAMPLING_FACTOR: usize = {};\n",
             ir.solver_config.oversampling_factor
         ));
+        code.push_str(&super::helpers::opamp_rail_consts(ir));
         if ir.solver_config.oversampling_factor > 1 {
             let internal_rate =
                 ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
@@ -2505,45 +2506,6 @@ impl RustEmitter {
                             let mut val = 0.0;
                             for k in 0..n {
                                 val += ir.s_be(i, k) * ir.n_i(k, j);
-                            }
-                            fmt_f64(val)
-                        })
-                        .collect();
-                    code.push_str(&format!("    [{}],\n", row.join(", ")));
-                }
-                code.push_str("];\n\n");
-            }
-        }
-
-        // Sub-step matrices (trap at 2× internal rate for ActiveSetBe sub-stepping)
-        if !ir.matrices.s_sub.is_empty() {
-            code.push_str("/// S_sub matrix: (G + 4C/T)^{-1} (trap at 2× rate, for sub-stepping)\nconst S_SUB_DEFAULT: [[f64; N]; N] = [\n");
-            for row in format_matrix_rows(n, n, |i, j| ir.s_sub(i, j)) {
-                code.push_str(&format!("    [{}],\n", row));
-            }
-            code.push_str("];\n\n");
-
-            code.push_str("/// A_neg_sub matrix: 4C/T - G (trap at 2× rate history)\nconst A_NEG_SUB_DEFAULT: [[f64; N]; N] = [\n");
-            for row in format_matrix_rows(n, n, |i, j| ir.a_neg_sub(i, j)) {
-                code.push_str(&format!("    [{}],\n", row));
-            }
-            code.push_str("];\n\n");
-
-            if m > 0 && !ir.matrices.k_sub.is_empty() {
-                code.push_str("/// K_sub matrix: N_v * S_sub * N_i (sub-step kernel)\nconst K_SUB_DEFAULT: [[f64; M]; M] = [\n");
-                for row in format_matrix_rows(m, m, |i, j| ir.k_sub(i, j)) {
-                    code.push_str(&format!("    [{}],\n", row));
-                }
-                code.push_str("];\n\n");
-
-                // S_NI_sub = S_sub * N_i (N × M)
-                code.push_str("/// S_NI_sub matrix: S_sub * N_i (sub-step voltage recovery)\nconst S_NI_SUB_DEFAULT: [[f64; M]; N] = [\n");
-                for i in 0..n {
-                    let row: Vec<String> = (0..m)
-                        .map(|j| {
-                            let mut val = 0.0;
-                            for k in 0..n {
-                                val += ir.s_sub(i, k) * ir.n_i(k, j);
                             }
                             fmt_f64(val)
                         })
@@ -3003,14 +2965,6 @@ impl RustEmitter {
                 code.push_str("    pub k_be: [[f64; M]; M],\n");
                 code.push_str("    pub s_ni_be: [[f64; M]; N],\n");
             }
-            if !ir.matrices.s_sub.is_empty() {
-                code.push_str("    pub s_sub: [[f64; N]; N],\n");
-                code.push_str("    pub a_neg_sub: [[f64; N]; N],\n");
-                if m > 0 {
-                    code.push_str("    pub k_sub: [[f64; M]; M],\n");
-                    code.push_str("    pub s_ni_sub: [[f64; M]; N],\n");
-                }
-            }
             if has_pots || has_switches || has_sat_ind || has_sat_coupled {
                 code.push_str("    pub g_work: [[f64; N]; N],\n");
                 code.push_str("    pub c_work: [[f64; N]; N],\n");
@@ -3345,20 +3299,6 @@ impl RustEmitter {
                 code.push_str("    pub k_be: [[f64; M]; M],\n");
                 code.push_str("    /// S_NI_be matrix: S_be * N_i (BE voltage recovery), recomputed by set_sample_rate\n");
                 code.push_str("    pub s_ni_be: [[f64; M]; N],\n");
-            }
-            if !ir.matrices.s_sub.is_empty() {
-                code.push_str("    /// S_sub matrix: (G+4C/T)^{-1} (trap at 2× rate), recomputed by set_sample_rate\n");
-                code.push_str("    pub s_sub: [[f64; N]; N],\n");
-                code.push_str("    /// A_neg_sub matrix: 4C/T-G (trap at 2× rate history), recomputed by set_sample_rate\n");
-                code.push_str("    pub a_neg_sub: [[f64; N]; N],\n");
-                if m > 0 {
-                    code.push_str("    /// K_sub matrix: N_v*S_sub*N_i (sub-step kernel)\n");
-                    code.push_str("    pub k_sub: [[f64; M]; M],\n");
-                    code.push_str(
-                        "    /// S_NI_sub matrix: S_sub*N_i (sub-step voltage recovery)\n",
-                    );
-                    code.push_str("    pub s_ni_sub: [[f64; M]; N],\n");
-                }
             }
         }
         code.push('\n');
@@ -3712,14 +3652,6 @@ impl RustEmitter {
                 code.push_str("                k_be: K_BE_DEFAULT,\n");
                 code.push_str("                s_ni_be: S_NI_BE_DEFAULT,\n");
             }
-            if !ir.matrices.s_sub.is_empty() {
-                code.push_str("                s_sub: S_SUB_DEFAULT,\n");
-                code.push_str("                a_neg_sub: A_NEG_SUB_DEFAULT,\n");
-                if m > 0 {
-                    code.push_str("                k_sub: K_SUB_DEFAULT,\n");
-                    code.push_str("                s_ni_sub: S_NI_SUB_DEFAULT,\n");
-                }
-            }
             if has_pots || has_switches || has_sat_ind || has_sat_coupled {
                 code.push_str("                g_work: G,\n");
                 code.push_str("                c_work: C,\n");
@@ -3732,14 +3664,6 @@ impl RustEmitter {
                 code.push_str("            s_ni: S_NI_DEFAULT,\n");
             }
             code.push_str("            s_be: S_BE_DEFAULT,\n");
-            if !ir.matrices.s_sub.is_empty() {
-                code.push_str("            s_sub: S_SUB_DEFAULT,\n");
-                code.push_str("            a_neg_sub: A_NEG_SUB_DEFAULT,\n");
-                if m > 0 {
-                    code.push_str("            k_sub: K_SUB_DEFAULT,\n");
-                    code.push_str("            s_ni_sub: S_NI_SUB_DEFAULT,\n");
-                }
-            }
             if m > 0 {
                 code.push_str("            k_be: K_BE_DEFAULT,\n");
                 code.push_str("            s_ni_be: S_NI_BE_DEFAULT,\n");
@@ -4117,14 +4041,6 @@ impl RustEmitter {
                 code.push_str(&format!("{ind}{cp}k_be = K_BE_DEFAULT;\n"));
                 code.push_str(&format!("{ind}{cp}s_ni_be = S_NI_BE_DEFAULT;\n"));
             }
-            if !ir.matrices.s_sub.is_empty() {
-                code.push_str(&format!("{ind}{cp}s_sub = S_SUB_DEFAULT;\n"));
-                code.push_str(&format!("{ind}{cp}a_neg_sub = A_NEG_SUB_DEFAULT;\n"));
-                if m > 0 {
-                    code.push_str(&format!("{ind}{cp}k_sub = K_SUB_DEFAULT;\n"));
-                    code.push_str(&format!("{ind}{cp}s_ni_sub = S_NI_SUB_DEFAULT;\n"));
-                }
-            }
         };
         if needs_current_sr {
             code.push_str("        if (self.current_sample_rate - SAMPLE_RATE).abs() < 0.5 {\n");
@@ -4430,17 +4346,6 @@ impl RustEmitter {
         }
         // Sub-step (2× rate) matrices must also snap back to defaults —
         // they were rebuilt by any earlier off-rate set_sample_rate call.
-        if !ir.matrices.s_sub.is_empty() {
-            code.push_str(&format!("            {}s_sub = S_SUB_DEFAULT;\n", cp));
-            code.push_str(&format!(
-                "            {}a_neg_sub = A_NEG_SUB_DEFAULT;\n",
-                cp
-            ));
-            if m > 0 {
-                code.push_str(&format!("            {}k_sub = K_SUB_DEFAULT;\n", cp));
-                code.push_str(&format!("            {}s_ni_sub = S_NI_SUB_DEFAULT;\n", cp));
-            }
-        }
         if ir.dc_block {
             code.push_str("            self.dc_block_r = DC_BLOCK_R;\n");
         }
@@ -4549,19 +4454,10 @@ impl RustEmitter {
         //   chord_lu and never touches them, so building them there is dead
         //   work — three N×N inversions plus three Schur products per pot,
         //   switch, or sample-rate change.
-        // * S_sub / K_sub / S_NI_sub are read only by the nodal-Schur
-        //   ActiveSetBe sub-step block. The full-LU sub-step builds its own
-        //   `a_neg_sub` locally at the runtime rate, and every other circuit
-        //   never enters a sub-step at all.
         //
-        // `a_neg_sub` itself is still rebuilt unconditionally: it is an O(N²)
-        // store, and the Schur sub-step reads the persisted copy.
+        // The full-LU sub-step builds its own `a_neg_sub` locally at the
+        // runtime rate; nothing persists sub-step matrices.
         let schur_matrices_live = !use_full_nodal;
-        let sub_matrices_live = !use_full_nodal
-            && matches!(
-                ir.solver_config.opamp_rail_mode,
-                crate::codegen::OpampRailMode::ActiveSetBe
-            );
         code.push_str("    /// Recompute A, A_neg, A_be, A_neg_be from G and C.\n");
         code.push_str("    ///\n");
         code.push_str("    /// Called by set_sample_rate, set_pot, and set_switch.\n");
@@ -4583,20 +4479,6 @@ impl RustEmitter {
             code.push_str("        let alpha = 2.0 * internal_rate; // trapezoidal: alpha = 2/T\n");
         }
         code.push_str("        let alpha_be = internal_rate;\n");
-        if !ir.matrices.s_sub.is_empty() {
-            // Must match the IR-level bake in `ir/mod.rs` — same scheme, same
-            // alpha. A rebuild that disagreed with the baked default would make
-            // the sub-step change behaviour the first time a pot moved.
-            if ir.solver_config.backward_euler {
-                code.push_str(
-                    "        let alpha_sub = 2.0 * internal_rate; // BE (alpha = 1/T) at 2x rate\n",
-                );
-            } else {
-                code.push_str(
-                    "        let alpha_sub = 4.0 * internal_rate; // trap (alpha = 2/T) at 2x rate\n",
-                );
-            }
-        }
         code.push('\n');
 
         // Build A = G + alpha*C and A_neg:
@@ -4620,23 +4502,7 @@ impl RustEmitter {
             g_src, c_src, a_neg_formula, g_src, c_src, c_src
         ));
 
-        if !ir.matrices.s_sub.is_empty() {
-            code.push_str(&format!(
-                "        for i in 0..N {{\n\
-                 \x20           for j in 0..N {{\n\
-                 \x20               {cp}a_neg_sub[i][j] = {sub_hist};\n\
-                 \x20           }}\n\
-                 \x20       }}\n",
-                cp = cp,
-                sub_hist = if ir.solver_config.backward_euler {
-                    format!("alpha_sub * {c_src}[i][j]")
-                } else {
-                    format!("alpha_sub * {c_src}[i][j] - {g_src}[i][j]")
-                },
-            ));
-        }
-
-        // Zero VS/VCVS algebraic rows in A_neg, A_neg_be, A_neg_sub (NOT inductor rows)
+        // Zero VS/VCVS algebraic rows in A_neg and A_neg_be (NOT inductor rows)
         if n_nodes < n_aug {
             code.push_str(&format!(
                 "        for i in {}..{} {{\n\
@@ -4647,12 +4513,6 @@ impl RustEmitter {
                  \x20       }}\n",
                 n_nodes, n_aug
             ));
-            if !ir.matrices.s_sub.is_empty() {
-                code.push_str(&format!(
-                    "        for i in {}..{} {{ for j in 0..N {{ {}a_neg_sub[i][j] = 0.0; }} }}\n",
-                    n_nodes, n_aug, cp
-                ));
-            }
         }
 
         // Emit `S_NI = S · N_i` (N×M) followed by `K = N_v · S_NI` (M×M) for one
@@ -4709,22 +4569,6 @@ impl RustEmitter {
             code.push_str("        if let Some(inv) = invert_n(&self.a_be) {\n");
             code.push_str(&format!("            {}s_be = inv;\n", cp));
             emit_schur_products(&mut code, "s_be", "s_ni_be", "k_be");
-            code.push_str("        }\n");
-        }
-
-        // Recompute S_sub = (G + alpha_sub*C)^{-1} (trap at 2× rate)
-        if !ir.matrices.s_sub.is_empty() && sub_matrices_live {
-            code.push_str(
-                "        // Recompute S_sub = (G + alpha_sub*C)^{-1} (trap at 2× rate)\n",
-            );
-            code.push_str(&format!(
-                "        let mut a_sub = [[0.0f64; N]; N];\n\
-                 \x20       for i in 0..N {{ for j in 0..N {{ a_sub[i][j] = {g}[i][j] + alpha_sub * {c}[i][j]; }} }}\n",
-                g = g_src, c = c_src
-            ));
-            code.push_str("        if let Some(inv) = invert_n(&a_sub) {\n");
-            code.push_str(&format!("            {}s_sub = inv;\n", cp));
-            emit_schur_products(&mut code, "s_sub", "s_ni_sub", "k_sub");
             code.push_str("        }\n");
         }
 
@@ -6138,7 +5982,7 @@ impl RustEmitter {
             // triggers the BE fallback so the cap history stays consistent.
             if active_set_be_mode {
                 code.push_str(&format!(
-                    "    let mut converged = state.last_nr_iterations < MAX_ITER as u32 \
+                    "    let converged = state.last_nr_iterations < MAX_ITER as u32 \
                      && !active_set_engaged{be_latch_and};\n\n",
                 ));
             } else {
@@ -6147,228 +5991,13 @@ impl RustEmitter {
                 ));
             }
 
-            // ActiveSetBe sub-stepping: when trap NR converged but the op-amp
-            // output is railed, sub-step at 2x the sample rate using the trap
-            // rule with ActiveSet pin at each sub-step. At the finer timestep
-            // the discrete-time LC resonator (C15 + R network in the Klon)
-            // has its Nyquist at 2× the original, so the Δv pulse from the
-            // pin excites a mode that decays instead of sustaining.
-            //
-            // This matches the mechanism behind ngspice's adaptive timestep:
-            // smaller dt at clipping transitions naturally damps the trap-rule
-            // Nyquist artifact. The sub-stepping fires only on rail-engaged
-            // samples, so linear-regime performance is unaffected.
-            //
-            // Each sub-step runs a Picard fixed-point iteration on i_nl
-            // against the frozen linear prediction (v_pred_s is not
-            // re-solved per iteration; K_sub couples the update). If the
-            // fixed-point iteration fails to settle within MAX_ITER (or a
-            // sub-step iterate goes non-finite), the sub-step result is
-            // DISCARDED and `converged` stays false so the documented BE
-            // fallback runs — committing a diverged i_nl here used to both
-            // corrupt state and suppress the fallback.
-            // Cost: 2 × O(N²) matvec + O(M) Picard per rail-engaged sample.
-            if active_set_be_mode && !ir.matrices.s_sub.is_empty() {
-                code.push_str(&format!("    if !converged{be_latch_and} && active_set_engaged && state.last_nr_iterations < MAX_ITER as u32 {{\n"));
-                code.push_str("        // Sub-step at 2× rate using precomputed Schur matrices.\n");
-                code.push_str(
-                    "        // At the finer timestep the discrete-time LC resonator from\n",
-                );
-                code.push_str(
-                    "        // the ActiveSet pin has its Nyquist at 2× the audio Nyquist,\n",
-                );
-                code.push_str(
-                    "        // so the artifact decays instead of sustaining. Cost: 2 × O(N²)\n",
-                );
-                code.push_str(
-                    "        // matvec + O(M³) NR per sub-step — same as the normal Schur path.\n",
-                );
-                // Fixed depth, PARKED not dropped — design review, with a trigger.
-                //
-                // The full-LU sub-step has a ladder to 64x (SUBSTEP_MAX_POWER);
-                // this one does not, and that difference is deliberate for now.
-                // Past full-LU's ladder lies the death-spiral hold, which FREEZES
-                // the circuit under constant input. Past this 2x lies an
-                // unconverged commit: the diverged iterate is shipped, but the
-                // state keeps moving and the solver can walk back out. Gentler
-                // cliff — still a cliff, and still silent-wrong inside a plugin,
-                // where `diag_nr_unconverged_commit_count` is the only witness
-                // and nothing gates on it.
-                //
-                // Why no ladder yet: no corpus deck fires this sub-step at all
-                // (diag_substep_count = 0 across all 8 Schur decks, every
-                // program, measured 2026-09-27). A depth change here cannot be
-                // measured, and an unmeasurable behaviour change should not ship.
-                //
-                // TRIGGER: the first time `diag_nr_unconverged_commit_count` is
-                // nonzero ANYWHERE — corpus, a circuit report, a user deck — the
-                // first remedy to try is a ladder mirroring full-LU's:
-                // pin-honouring, bounded, named constant, measured on THAT deck
-                // as the exercising case. If you are reading this because you saw
-                // that counter fire, this is the plan.
-                code.push_str("        const N_SUB: usize = 2;\n");
-                code.push_str("        let mut v_sub = state.v_prev;\n");
-                code.push_str("        let mut i_nl_sub = state.i_nl_prev;\n");
-                code.push_str("        let mut sub_ok = true;\n");
-                if !multi_input {
-                    code.push_str(
-                        "        let input_step = (input - state.input_prev) / N_SUB as f64;\n",
-                    );
-                }
-                code.push_str("        for step in 0..N_SUB {\n");
-                if !multi_input {
-                    code.push_str(
-                        "            let inp_s = state.input_prev + input_step * (step + 1) as f64;\n",
-                    );
-                    code.push_str(
-                        "            let inp_prev_s = state.input_prev + input_step * step as f64;\n",
-                    );
-                }
-                // Build RHS: A_neg_sub * v_sub + N_i * i_nl_sub + input + rhs_const
-                code.push_str("            let mut rhs_s = [0.0f64; N];\n");
-                if ir.has_dc_sources {
-                    code.push_str("            for i in 0..N { rhs_s[i] = RHS_CONST[i]; }\n");
-                }
-                code.push_str("            for i in 0..N { for j in 0..N { rhs_s[i] += state.a_neg_sub[i][j] * v_sub[j]; } }\n");
-                // Trap-midpoint companion, skipped under BE — matching the
-                // primary loop's own `!backward_euler` gate. Carried
-                // unconditionally before, which was the third way a BE-pinned
-                // deck got a trapezoidal sub-step.
-                if !ir.solver_config.backward_euler {
-                    code.push_str(&emit_sparse_ni_matvec_add(
-                        ir,
-                        "rhs_s",
-                        "i_nl_sub",
-                        "            ",
-                    ));
-                }
-                if multi_input {
-                    let (prev_bind, per_port) = if ir.solver_config.backward_euler {
-                        ("", "inp_s / INPUT_RESISTANCES[k]")
-                    } else {
-                        (
-                            "                let inp_prev_s = state.inputs_prev[k] + step_k * step as f64;\n",
-                            "(inp_s + inp_prev_s) / INPUT_RESISTANCES[k]",
-                        )
-                    };
-                    code.push_str(&format!(
-                        "            for k in 0..NUM_INPUTS {{\n\
-                         \x20               let step_k = (inputs[k] - state.inputs_prev[k]) / N_SUB as f64;\n\
-                         \x20               let inp_s = state.inputs_prev[k] + step_k * (step + 1) as f64;\n\
-                         {prev_bind}\
-                         \x20               rhs_s[INPUT_NODES[k]] += {per_port};\n\
-                         \x20           }}\n",
-                    ));
-                } else {
-                    code.push_str(
-                        if ir.solver_config.backward_euler {
-                            // BE takes the endpoint; only trap averages.
-                            "            rhs_s[INPUT_NODE] += inp_s * input_conductance;\n"
-                        } else {
-                            "            rhs_s[INPUT_NODE] += (inp_s + inp_prev_s) * input_conductance;\n"
-                        },
-                    );
-                }
-                if inject_or_tap {
-                    code.push_str(&emit_inject_substep_stamp(
-                        ir,
-                        "rhs_s",
-                        "            ",
-                        "N_SUB",
-                    ));
-                }
-                // Runtime voltage sources: the algebraic constraint value is
-                // integration-scheme-independent, so every from-scratch RHS
-                // rebuild must re-stamp it or the source reads as 0 V.
-                if !ir.runtime_sources.is_empty() {
-                    code.push_str("            // Runtime voltage sources (.runtime directive)\n");
-                    for rt in &ir.runtime_sources {
-                        code.push_str(&format!(
-                            "            rhs_s[{}] += state.{};\n",
-                            rt.vs_row, rt.field_name
-                        ));
-                    }
-                }
-                // Noise replay: this is a from-scratch RHS rebuild, so it must
-                // re-stamp the per-source currents the primary `rhs_stamp`
-                // already drew and cached this sample. Omitting it dropped the
-                // noise for the whole sample while the RNG stream stayed
-                // aligned, making the loss invisible to every determinism
-                // check (F10). Drawing fresh values here instead would break
-                // determinism outright: sub-stepping is signal-dependent, so the
-                // stream position would become a function of the audio.
-                if noise.enabled {
-                    code.push_str(
-                        "            // Noise replay (cached i_n; consumes no RNG draws).\n",
-                    );
-                    code.push_str(&emit_noise_replay_body(
-                        noise.replay_counts,
-                        "rhs_s",
-                        "            ",
-                    ));
-                }
-                // Linear prediction: v_pred_s = S_sub * rhs_s (O(N²))
-                code.push_str("            let mut v_pred_s = [0.0f64; N];\n");
-                code.push_str("            for i in 0..N { for j in 0..N { v_pred_s[i] += state.s_sub[i][j] * rhs_s[j]; } }\n");
-                // Extract device voltages: p_s = N_v * v_pred_s
-                code.push_str("            let mut p_s = [0.0f64; M];\n");
-                code.push_str("            for i in 0..M { for j in 0..N { p_s[i] += N_V[i][j] * v_pred_s[j]; } }\n");
-                // Picard fixed-point on i_nl with K_sub coupling. Honesty
-                // contract: `nr_ok` carries the FINAL iteration's
-                // convergence status out of the loop — if the loop exhausts
-                // MAX_ITER without the delta settling (or an iterate goes
-                // non-finite), this sub-step has failed and the whole
-                // sub-step recovery is abandoned below.
-                code.push_str("            i_nl_sub = state.i_nl_prev;\n");
-                code.push_str("            let mut nr_ok = false;\n");
-                code.push_str("            for _iter in 0..MAX_ITER {\n");
-                code.push_str("                let mut v_nl = [0.0f64; M];\n");
-                code.push_str("                for i in 0..M { v_nl[i] = p_s[i]; for j in 0..M { v_nl[i] += state.k_sub[i][j] * i_nl_sub[j]; } }\n");
-                code.push_str("                let mut i_nl = [0.0f64; M];\n");
-                code.push_str("                let mut j_dev = [0.0f64; M * M];\n");
-                Self::emit_nodal_device_evaluation_body(&mut code, ir, "                ");
-                // Negated comparison so a NaN delta counts as NOT converged
-                // (`NaN > tol` is false, which the old form read as "ok").
-                code.push_str("                nr_ok = true;\n");
-                code.push_str("                for i in 0..M { let d = i_nl[i] - i_nl_sub[i]; if !(d.abs() <= TOL + 1e-3 * i_nl[i].abs()) { nr_ok = false; } }\n");
-                code.push_str("                i_nl_sub = i_nl;\n");
-                code.push_str("                if nr_ok { break; }\n");
-                code.push_str("            }\n");
-                code.push_str(
-                    "            if !nr_ok || !i_nl_sub.iter().all(|x| x.is_finite()) {\n",
-                );
-                code.push_str("                sub_ok = false;\n");
-                code.push_str("                break;\n");
-                code.push_str("            }\n");
-                // Recover full v: v_sub = v_pred_s + S_NI_sub * i_nl_sub
-                code.push_str("            v_sub = v_pred_s;\n");
-                code.push_str("            for i in 0..N { for j in 0..M { v_sub[i] += state.s_ni_sub[i][j] * i_nl_sub[j]; } }\n");
-                // Hard clamp op-amp outputs at each sub-step. At 2× rate the
-                // clamp artifact is above audio Nyquist and decays naturally.
-                // Downstream nodes are NOT re-solved (to avoid Nyquist
-                // reintroduction from S_sub column propagation); the elevated
-                // downstream voltages are handled by output scaling.
-                for oa in &ir.opamps {
-                    let target = format!("v_sub[{}]", oa.n_out_idx);
-                    if let Some(stmt) = Self::rail_clamp_stmt(&target, oa.vclamp_lo, oa.vclamp_hi) {
-                        code.push_str(&format!("            {stmt}\n"));
-                    }
-                }
-                code.push_str("        }\n");
-                code.push_str(
-                    "        // Commit only when every sub-step's fixed point settled;\n",
-                );
-                code.push_str(
-                    "        // otherwise leave converged = false so the BE fallback runs.\n",
-                );
-                code.push_str("        if sub_ok {\n");
-                code.push_str("            v = v_sub;\n");
-                code.push_str("            i_nl = i_nl_sub;\n");
-                code.push_str("            converged = true;\n");
-                code.push_str("            state.diag_substep_count += 1;\n");
-                code.push_str("        }\n");
-                code.push_str("    }\n\n");
-            }
+            // Rail-engaged samples go straight to the BE fallback below, whose
+            // pin-and-resolve (`emit_nodal_active_set_resolve` on the BE
+            // matrices) is the production ActiveSetBe path. There is no 2x
+            // sub-step recovery here: its only rail handling was a post-solve
+            // clamp that did not re-solve downstream nodes — Hard mode at twice
+            // the rate — and its fixed-point solve could not contract once a
+            // junction conducted.
 
             // Backward Euler fallback (also fires when active-set engaged in
             // ActiveSetBe mode — see comment above).
@@ -6642,8 +6271,8 @@ impl RustEmitter {
             // runs the constrained re-solve against `state.a_be` so the cap
             // history (built from BE matrices) stays KCL-consistent. ActiveSet
             // mode is not normally reachable here (its trap path doesn't trip
-            // BE on engagement), but if NR genuinely failed and substep didn't
-            // recover, fall back to ActiveSet on BE matrices too. Hard mode
+            // BE on engagement), but if NR genuinely failed, fall back to
+            // ActiveSet on BE matrices too. Hard mode
             // falls back to a plain post-recovery clamp (only safe for
             // DC-coupled downstream stages — see opamp_rail_clamp_bug.md).
             match ir.solver_config.opamp_rail_mode {

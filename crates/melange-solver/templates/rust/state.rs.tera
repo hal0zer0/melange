@@ -236,16 +236,9 @@ pub struct CircuitState {
 {% endfor %}{% endif %}
 }
 
-{% if opamp_rail_degrade_warn is defined %}/// One-shot latch for the DK rail-mode degradation warning emitted from
-/// `Default::default()` — fires at most once per process, not per channel.
-static OPAMP_RAIL_DEGRADE_WARN_ONCE: std::sync::Once = std::sync::Once::new();
-
-{% endif %}impl Default for CircuitState {
+impl Default for CircuitState {
     fn default() -> Self {
-{% if opamp_rail_degrade_warn is defined %}        OPAMP_RAIL_DEGRADE_WARN_ONCE.call_once(|| {
-            eprintln!("{{ opamp_rail_degrade_warn }}");
-        });
-{% endif %}{% if noise_enabled_emit %}{{ noise_default_stmts }}{% endif %}{% if dc_block and (has_dc_op or has_cap_ic) %}{% if has_cap_ic %}        // Seed the DC blocker's x[n-1] with the true t=0 output value, so the
+{% if noise_enabled_emit %}{{ noise_default_stmts }}{% endif %}{% if dc_block and (has_dc_op or has_cap_ic) %}{% if has_cap_ic %}        // Seed the DC blocker's x[n-1] with the true t=0 output value, so the
         // first processed sample doesn't see a spurious startup thump from the
         // blocker's own history mismatch. V_PREV_IC_SEED when the circuit has
         // IC=-bearing caps (their prescribed initial voltage IS the t=0 state),

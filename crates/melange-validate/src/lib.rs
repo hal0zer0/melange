@@ -972,7 +972,7 @@ pub fn run_melange_solver_from_str(
         }
     };
 
-    let decision = routing::auto_route(&kernel, &mna, dk_failed);
+    let decision = routing::auto_route(&kernel, &mna, dk_failed, fa_config.opamp_rail_mode);
     let use_nodal = decision.route == routing::SolverRoute::Nodal;
 
     if use_nodal {

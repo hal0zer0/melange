@@ -1063,6 +1063,30 @@ impl CodeGenerator {
                     .to_string(),
             ));
         }
+        // ActiveSet / ActiveSetBe pin a railed op-amp output and re-solve the
+        // rest of the circuit; only the nodal solver implements that. DK could
+        // only clamp the output after the solve, which corrupts the downstream
+        // capacitor history — the very case the resolver picked an active-set
+        // mode to avoid. `routing::auto_route` sends these circuits to nodal;
+        // reaching here means DK was forced, so refuse rather than degrade.
+        let has_clamped_opamp = mna
+            .opamps
+            .iter()
+            .any(|oa| oa.n_out_idx > 0 && (oa.vcc.is_finite() || oa.vee.is_finite()));
+        if has_clamped_opamp
+            && matches!(
+                resolved.mode,
+                OpampRailMode::ActiveSet | OpampRailMode::ActiveSetBe
+            )
+        {
+            return Err(CodegenError::UnsupportedTopology(format!(
+                "op-amp rail mode {} ({}) needs the pin-and-resolve at the rail, which only \
+                 the nodal solver implements; the DK solver can only clamp the output, which \
+                 corrupts downstream capacitor history. Use `--solver auto` or `--solver nodal`.",
+                resolved.mode.as_str(),
+                resolved.reason.as_str()
+            )));
+        }
 
         // Auto-insert parasitic caps if C matrix is all zeros and circuit has
         // nonlinear devices. The IR stores G/C for runtime sample rate recomputation,

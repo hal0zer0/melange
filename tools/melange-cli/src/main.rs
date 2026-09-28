@@ -40,6 +40,11 @@ struct Cli {
     command: Commands,
 }
 
+/// Help heading for flags that override a choice melange makes itself. Kept
+/// out of the main list so `--help` leads with what a new user needs.
+const EXPERT_HEADING: &str =
+    "Solver overrides (melange chooses these; set them to pin or debug a route)";
+
 #[derive(Subcommand)]
 enum Commands {
     /// Compile a SPICE netlist to optimized Rust code
@@ -69,11 +74,11 @@ enum Commands {
         output_node: String,
 
         /// Maximum NR iterations
-        #[arg(long, default_value = "50")]
+        #[arg(help_heading = EXPERT_HEADING, long, default_value = "50")]
         max_iter: usize,
 
         /// Convergence tolerance
-        #[arg(long, default_value = "1e-9")]
+        #[arg(help_heading = EXPERT_HEADING, long, default_value = "1e-9")]
         tolerance: f64,
 
         /// Output format
@@ -119,13 +124,13 @@ enum Commands {
         /// Solver type: auto (default), dk, nodal.
         /// Auto selects DK for most circuits, nodal for multi-transformer.
         /// Use nodal for large M circuits where DK NR doesn't converge.
-        #[arg(long, default_value = "auto")]
+        #[arg(help_heading = EXPERT_HEADING, long, default_value = "auto")]
         solver: String,
 
         /// Use backward Euler integration instead of trapezoidal.
         /// Unconditionally stable — fixes divergence in high-gain feedback amplifiers.
         /// Trades second-order accuracy for first-order (slight HF rolloff).
-        #[arg(long)]
+        #[arg(help_heading = EXPERT_HEADING, long)]
         backward_euler: bool,
 
         /// Force trapezoidal even when the nodal auto-detector would promote
@@ -133,7 +138,7 @@ enum Commands {
         /// 1.002 — persistent Nyquist-rate limit cycle in v_prev). Escape
         /// hatch for bisecting regressions or reproducing legacy output.
         /// Ignored when `--backward-euler` is already set.
-        #[arg(long)]
+        #[arg(help_heading = EXPERT_HEADING, long)]
         force_trap: bool,
 
         /// Pentode grid-off dimension reduction mode.
@@ -153,7 +158,7 @@ enum Commands {
         ///   small-signal gain error on cathode-biased stages) and all grid
         ///   current for Vgk > 0. Warns per device. Opt-in only.{n}{n}
         /// * off — never reduce; all pentodes keep their full 3D NR block.
-        #[arg(long, default_value = "auto")]
+        #[arg(help_heading = EXPERT_HEADING, long, default_value = "auto")]
         tube_grid_fa: String,
 
         /// Sub-sample fire: variable-dt breakpoint re-solve at a glow-discharge
@@ -173,7 +178,7 @@ enum Commands {
         /// * on — force; refused on the DK route and on the nodal full-LU
         ///   sub-path.{n}{n}
         /// * off — whole-sample latch flip (pre-feature behaviour).
-        #[arg(long, default_value = "auto")]
+        #[arg(help_heading = EXPERT_HEADING, long, default_value = "auto")]
         subsample_fire: String,
 
         /// Diagnostic: lit sub-step multiplier (`factor * tau`) for the glow
@@ -182,7 +187,7 @@ enum Commands {
         /// `--nodal-subpath` — NOT a per-deck tuning knob (a deck author cannot
         /// honestly tune it without a lock-margin sweep). Recorded in the
         /// provenance Build: line and JSON.
-        #[arg(long)]
+        #[arg(help_heading = EXPERT_HEADING, long)]
         subsample_lit_factor: Option<f64>,
 
         /// BJT forward-active (frozen-analysis) reduction mode.
@@ -197,7 +202,7 @@ enum Commands {
         ///   under hard drive, larger for parasitics). Self-heating BJTs are
         ///   never force-reduced (structural).{n}{n}
         /// * off — never reduce; all BJTs keep their full 2-D NR block.
-        #[arg(long, default_value = "auto")]
+        #[arg(help_heading = EXPERT_HEADING, long, default_value = "auto")]
         bjt_fa: String,
 
         /// Op-amp supply rail saturation strategy.
@@ -226,7 +231,7 @@ enum Commands {
         ///   rail-offset voltage sources. Matches commercial SPICE Boyle
         ///   macromodels. Produces soft exponential knee — best for
         ///   distortion pedals.
-        #[arg(long, value_name = "MODE", default_value = "auto")]
+        #[arg(help_heading = EXPERT_HEADING, long, value_name = "MODE", default_value = "auto")]
         opamp_rail_mode: String,
 
         /// Which nodal sub-path to emit: auto (default), schur, full-lu.
@@ -245,7 +250,7 @@ enum Commands {
         /// require full-LU — uncoupled saturating inductors and behavioral
         /// B-sources cannot be expressed by the Schur reduction, and forcing it
         /// would silently drop the nonlinearity. Ignored for DK-routed circuits.
-        #[arg(long, value_name = "MODE", default_value = "auto")]
+        #[arg(help_heading = EXPERT_HEADING, long, value_name = "MODE", default_value = "auto")]
         nodal_subpath: String,
 
         /// Escape hatch: allow a relaxing-section / delayed-
@@ -255,7 +260,7 @@ enum Commands {
         /// mixed, silently-wrong model. With this flag the section keys go INERT
         /// on full-LU and provenance records `glow_sections: inert (full-lu)`.
         /// Diagnostic only; the Schur route honors the section model.
-        #[arg(long, default_value_t = false)]
+        #[arg(help_heading = EXPERT_HEADING, long, default_value_t = false)]
         allow_static_glow_on_full_lu: bool,
 
         /// Authentic circuit noise mode: off (default), thermal, shot, full.
@@ -467,7 +472,8 @@ enum Commands {
         #[arg(short, long, default_value = "1.0")]
         duration: f64,
 
-        /// Input signal amplitude (0.0 to 1.0)
+        /// Test-tone amplitude in volts (peak) at the input node. Ignored with
+        /// --input-audio, which is fed in as-is (full scale = 1 V)
         #[arg(long, default_value = "0.5")]
         amplitude: f64,
 
@@ -477,19 +483,19 @@ enum Commands {
 
         /// Solver type: auto (default), dk (DK method), nodal (full-nodal NR).
         /// Auto selects nodal for nonlinear circuits with inductors, dk otherwise.
-        #[arg(long, default_value = "auto")]
+        #[arg(help_heading = EXPERT_HEADING, long, default_value = "auto")]
         solver: String,
 
         /// Nodal Schur-vs-full-LU sub-path: auto, schur, full-lu. Mirrors
         /// `compile --nodal-subpath`. A measuring verb must be able to pin its
         /// route — the auto route is per (deck, sample rate), so a measurement
         /// that cannot force the sub-path cannot reproduce or isolate it.
-        #[arg(long, value_name = "MODE", default_value = "auto")]
+        #[arg(help_heading = EXPERT_HEADING, long, value_name = "MODE", default_value = "auto")]
         nodal_subpath: String,
 
         /// Op-amp rail saturation mode: auto, none, hard, active-set, active-set-be, boyle-diodes.
         /// Default 'auto' inspects the topology and picks the cheapest correct mode.
-        #[arg(long, default_value = "auto")]
+        #[arg(help_heading = EXPERT_HEADING, long, default_value = "auto")]
         opamp_rail_mode: String,
 
         /// Pentode grid-off dimension reduction mode: auto, on, off.
@@ -498,13 +504,13 @@ enum Commands {
         /// 3D blocks. auto is reserved for reductions that are provably
         /// neutral; none exists today, so auto currently keeps the full 3D
         /// model (== off). Mirrors `compile --tube-grid-fa`.
-        #[arg(long, default_value = "auto")]
+        #[arg(help_heading = EXPERT_HEADING, long, default_value = "auto")]
         tube_grid_fa: String,
 
         /// Sub-sample fire (glow-strike variable-dt re-solve): auto, on, off.
         /// Mirrors `compile --subsample-fire`. auto = on for glow decks on
         /// nodal-Schur, inert otherwise; on is refused on DK / full-LU.
-        #[arg(long, default_value = "auto")]
+        #[arg(help_heading = EXPERT_HEADING, long, default_value = "auto")]
         subsample_fire: String,
 
         /// Oversampling factor (1=none, 2=2x, 4=4x). Higher reduces aliasing
@@ -525,20 +531,20 @@ enum Commands {
         /// Use backward Euler integration instead of trapezoidal.
         /// Unconditionally stable — fixes divergence in high-gain feedback
         /// amplifiers. Mirrors `compile --backward-euler`.
-        #[arg(long)]
+        #[arg(help_heading = EXPERT_HEADING, long)]
         backward_euler: bool,
 
         /// Force trapezoidal even when the nodal auto-detector would promote
         /// to backward Euler. Escape hatch for bisecting regressions.
         /// Ignored when `--backward-euler` is already set. Mirrors
         /// `compile --force-trap`.
-        #[arg(long)]
+        #[arg(help_heading = EXPERT_HEADING, long)]
         force_trap: bool,
 
         /// Maximum NR iterations per sample. Defaults to the same auto-tuned
         /// budget `compile` uses (scales with M, solver route, and trap
         /// spectral radius).
-        #[arg(long)]
+        #[arg(help_heading = EXPERT_HEADING, long)]
         max_iter: Option<usize>,
 
         /// Render even if samples were never solved.
@@ -552,7 +558,7 @@ enum Commands {
         /// this by default. Per-invocation only — a netlist cannot declare it,
         /// because whether a circuit trips depends on the input level, not the
         /// netlist.
-        #[arg(long)]
+        #[arg(help_heading = EXPERT_HEADING, long)]
         allow_nr_hold: bool,
 
         /// Probe an internal node. May be repeated. Probe samples are written
@@ -561,8 +567,9 @@ enum Commands {
         #[arg(long = "probe", value_name = "NODE")]
         probes: Vec<String>,
 
-        /// Where to write the probe CSV. Defaults to `<output>.probes.csv`
-        /// (ignored when no `--probe` is given).
+        /// Where to write the probe CSV. Defaults to the output name with
+        /// `.wav` swapped for `.probes.csv` (`out.wav` -> `out.probes.csv`);
+        /// ignored when no `--probe` is given.
         #[arg(long = "probe-csv", value_name = "PATH")]
         probe_csv: Option<PathBuf>,
 
@@ -625,7 +632,7 @@ enum Commands {
         #[arg(long, default_value = "10")]
         points_per_decade: usize,
 
-        /// Input amplitude in volts
+        /// Input signal amplitude in volts (peak), applied to the input node
         #[arg(long, default_value = "0.1")]
         amplitude: f64,
 
@@ -660,12 +667,12 @@ enum Commands {
         /// the auto/on/off semantics. Defaults to `auto`, which is reserved
         /// for provably-neutral reductions and currently keeps the full 3D
         /// model (== off).
-        #[arg(long, default_value = "auto")]
+        #[arg(help_heading = EXPERT_HEADING, long, default_value = "auto")]
         tube_grid_fa: String,
 
         /// Solver type: auto (default), dk (DK method), nodal (full-nodal NR).
         /// Mirrors `compile --solver`.
-        #[arg(long, default_value = "auto")]
+        #[arg(help_heading = EXPERT_HEADING, long, default_value = "auto")]
         solver: String,
 
         /// Oversampling factor (1=none, 2=2x, 4=4x). Mirrors
@@ -678,7 +685,7 @@ enum Commands {
 
         /// Op-amp rail saturation mode: auto, none, hard, active-set,
         /// active-set-be, boyle-diodes. Mirrors `compile --opamp-rail-mode`.
-        #[arg(long, value_name = "MODE", default_value = "auto")]
+        #[arg(help_heading = EXPERT_HEADING, long, value_name = "MODE", default_value = "auto")]
         opamp_rail_mode: String,
 
         /// Which nodal sub-path to emit: auto (default), schur, full-lu.
@@ -697,7 +704,7 @@ enum Commands {
         /// require full-LU — uncoupled saturating inductors and behavioral
         /// B-sources cannot be expressed by the Schur reduction, and forcing it
         /// would silently drop the nonlinearity. Ignored for DK-routed circuits.
-        #[arg(long, value_name = "MODE", default_value = "auto")]
+        #[arg(help_heading = EXPERT_HEADING, long, value_name = "MODE", default_value = "auto")]
         nodal_subpath: String,
 
         /// Authentic circuit noise mode: off (default), thermal, shot, full.
@@ -712,18 +719,18 @@ enum Commands {
 
         /// Use backward Euler integration instead of trapezoidal.
         /// Mirrors `compile --backward-euler`.
-        #[arg(long)]
+        #[arg(help_heading = EXPERT_HEADING, long)]
         backward_euler: bool,
 
         /// Force trapezoidal even when auto-BE would fire. Ignored when
         /// `--backward-euler` is already set. Mirrors `compile --force-trap`.
-        #[arg(long)]
+        #[arg(help_heading = EXPERT_HEADING, long)]
         force_trap: bool,
 
         /// Maximum NR iterations per sample. Defaults to the same auto-tuned
         /// budget `compile` uses (scales with M, solver route, and trap
         /// spectral radius).
-        #[arg(long)]
+        #[arg(help_heading = EXPERT_HEADING, long)]
         max_iter: Option<usize>,
     },
 
@@ -825,7 +832,8 @@ enum SourceAction {
     Add {
         /// Source name
         name: String,
-        /// Base URL for the source
+        /// Where the circuits live: a local directory, or an http(s) base URL
+        /// that serves raw files (on GitLab, `https://gitlab.com/<group>/<repo>/-/raw/main`)
         url: String,
         /// License identifier (optional)
         #[arg(short, long)]
@@ -841,7 +849,7 @@ enum SourceAction {
         name: String,
     },
 
-    /// Show details for a source
+    /// Show details for a source, and list the circuits its index publishes
     Show {
         /// Source name
         name: String,
@@ -1510,23 +1518,6 @@ fn has_output_coupling_cap(
     })
 }
 
-/// Count nonlinear devices by type. Used to suggest oversampling.
-fn count_nonlinear_devices(netlist: &melange_solver::parser::Netlist) -> (usize, usize, usize) {
-    use melange_solver::parser::Element;
-    let mut diodes = 0usize;
-    let mut opamps = 0usize;
-    let mut tubes = 0usize;
-    for elem in &netlist.elements {
-        match elem {
-            Element::Diode { .. } => diodes += 1,
-            Element::Opamp { .. } => opamps += 1,
-            Element::Triode { .. } | Element::Pentode { .. } => tubes += 1,
-            _ => {}
-        }
-    }
-    (diodes, opamps, tubes)
-}
-
 #[allow(clippy::too_many_arguments)]
 /// Suggest similar node names when a lookup fails.
 /// Returns names that share a common prefix or contain the query as a substring.
@@ -1600,14 +1591,19 @@ fn format_system_size(n_total: usize, n_circuit_nodes: usize, m: usize) -> Strin
 /// maintainer detail verbatim — just say out loud that this line is normal.
 /// Mirrors the `info (normal):` prefix used in `melange_solver::pipeline`.
 fn format_route_info(route_label: &str, reason: &str) -> String {
+    // The "why not DK" gloss only makes sense when DK was not chosen.
+    let why_not_dk = if route_label.eq_ignore_ascii_case("dk") {
+        ")"
+    } else {
+        " \"unstable\" / \"ill-conditioned\" say\n\
+         \x20                 why the DK route was not the fit here \u{2014} nothing is wrong with \
+         the netlist.)"
+    };
     format!(
         "  info (normal): solver route = {route_label} \u{2014} {reason}\n\
          \x20                (normal routing output, not a warning: melange measures the DK kernel \
          it just built and\n\
-         \x20                 picks the solver that models this circuit correctly. \"unstable\" / \
-         \"ill-conditioned\" say\n\
-         \x20                 why the DK route was not the fit here \u{2014} nothing is wrong with \
-         the netlist.)"
+         \x20                 picks the solver that models this circuit correctly.{why_not_dk}"
     )
 }
 
@@ -1633,15 +1629,23 @@ fn parse_bjt_fa_mode(s: &str) -> melange_solver::codegen::BjtFaMode {
 /// kernel construction, so it is not repeated here.
 fn forced_dk_hard_blocker(
     routing: &melange_solver::codegen::routing::RoutingDecision,
-) -> Option<&'static str> {
+) -> Option<String> {
     if routing.behavioral {
-        Some("a behavioral B-source is present — DK cannot stamp it, so it is dropped (linear passthrough)")
+        Some("a behavioral B-source is present — DK cannot stamp it, so it is dropped (linear passthrough)".to_string())
     } else if routing.saturating_inductor {
-        Some("a saturating inductor is present — DK cannot do the per-sample L update, so it is linearized (no saturation)")
+        Some("a saturating inductor is present — DK cannot do the per-sample L update, so it is linearized (no saturation)".to_string())
     } else if routing.multi_transformer {
-        Some("multiple transformer groups are present — the DK K matrix is singular (the build ships converged=false)")
+        Some("multiple transformer groups are present — the DK K matrix is singular (the build ships converged=false)".to_string())
     } else if routing.k_diag_unsafe {
-        Some("a non-negative K diagonal with live current injection (e.g. transformer-coupled negative feedback) — the DK Schur Newton iteration diverges")
+        Some("a non-negative K diagonal with live current injection (e.g. transformer-coupled negative feedback) — the DK Schur Newton iteration diverges".to_string())
+    } else if routing.opamp_active_set {
+        Some(
+            "an op-amp needs active-set rail handling (asked for with --opamp-rail-mode, or \
+             picked because an op-amp output is capacitor-coupled downstream) — pinning a \
+             railed output and re-solving the circuit is nodal-only, and DK can only clamp \
+             the output, which corrupts the downstream capacitor history"
+                .to_string(),
+        )
     } else {
         None
     }
@@ -2382,25 +2386,9 @@ fn compile_circuit_source(
         );
     }
 
-    // Oversampling suggestion: hard clippers (diodes) benefit most from oversampling.
-    // Tubes and op-amps produce softer harmonics and alias less at 1×.
-    if oversampling == 1 {
-        let (diodes, _opamps, _tubes) = count_nonlinear_devices(&netlist);
-        if diodes >= 4 {
-            println!(
-                "  Hint: {} diodes detected. Consider --oversampling 4 to reduce aliasing.",
-                diodes
-            );
-        } else if diodes >= 2 {
-            println!(
-                "  Hint: {} diodes detected. Consider --oversampling 2 to reduce aliasing.",
-                diodes
-            );
-        }
-    }
-
     // Route solver first — routing info feeds into config auto-tuning.
-    let routing = melange_solver::codegen::routing::auto_route(&kernel, &mna, dk_failed);
+    let routing =
+        melange_solver::codegen::routing::auto_route(&kernel, &mna, dk_failed, opamp_rail_mode);
 
     // Tier 3b: Auto-tune max_iter based on M and solver path (shared with
     // simulate/analyze — see `auto_tune_max_iter`). `--max-iter 50` (the
@@ -3237,11 +3225,29 @@ fn validate_circuit_source(
         println!("Validation PASSED{}", qualifier);
         Ok(())
     } else {
+        // A near-perfect correlation next to a failed error gate is the
+        // confusing case: the shapes agree, so the difference is in level,
+        // offset or timing. Say which question to ask next.
+        let shape_agrees = result.report.correlation_coefficient >= 0.999;
+        let next_step = if shape_agrees {
+            format!(
+                "Correlation is {:.5}, so the two waveforms have the same shape: the difference \
+                 is a gain, a DC offset, or a small time shift, not a different circuit. Rerun \
+                 with --csv <file> and compare the spice_voltage and melange_voltage columns' \
+                 peaks and means to see which. --relaxed loosens the error gates if that \
+                 difference is acceptable for your use.",
+                result.report.correlation_coefficient
+            )
+        } else {
+            "Rerun with --csv <file> to see where the two engines part ways, or --relaxed for \
+             looser tolerances."
+                .to_string()
+        };
         anyhow::bail!(
-            "Validation FAILED{}: {} tolerance check(s) exceeded.\n\
-             Use --relaxed for less strict tolerances, or investigate the differences.",
+            "Validation FAILED{}: {} tolerance check(s) exceeded.\n{}",
             qualifier,
-            result.report.failures.len()
+            result.report.failures.len(),
+            next_step
         );
     }
 }
@@ -3758,10 +3764,11 @@ fn silent_output_warning(
     );
     msg.push_str("  Nothing else in this report flags that, so check, roughly in order:\n");
     msg.push_str(
-        "    1. A mistyped node name. A misspelled node is CREATED, not rejected: writing\n\
-         \x20      `C3 n33 n4 220n` instead of `C3 n3 n4 220n` quietly invents node `n33` and\n\
-         \x20      leaves that stage floating. Check every node name in the netlist against\n\
-         \x20      `melange nodes <circuit>`.\n",
+        "    1. A mistyped node name the topology check could not see. A typo that leaves a\n\
+         \x20      node on one resistor or cap is refused, but one on a transistor, tube or\n\
+         \x20      op-amp terminal only warns (scroll up), and one that happens to spell\n\
+         \x20      another real node is invisible. Check every node name in the netlist\n\
+         \x20      against `melange nodes <circuit>`.\n",
     );
     msg.push_str(
         "    2. A node with no DC path to ground (one reachable only through capacitors): that\n\
@@ -3773,7 +3780,9 @@ fn silent_output_warning(
     ));
     msg.push_str(
         "    4. The input never reaches the output: a missing coupling cap, a pot or switch\n\
-         \x20      sitting at its zero position, or a supply rail that was never connected.\n",
+         \x20      sitting at its zero position, a supply rail that was never connected, or a\n\
+         \x20      SPICE-style stimulus source left in the deck that still clamps the input\n\
+         \x20      (melange drives the input node itself; the deck needs no source for it).\n",
     );
     match max_abs_node_v {
         Some(v) if v.is_finite() && v.abs() < SILENT_OUTPUT_PEAK_V => msg.push_str(
@@ -4182,7 +4191,7 @@ fn simulate_circuit_source(
     );
 
     // Route: DK or nodal
-    let decision = routing::auto_route(&kernel, &mna, dk_failed);
+    let decision = routing::auto_route(&kernel, &mna, dk_failed, opts.opamp_rail_mode);
     if opts.solver == "dk" {
         if let Some(blocker) = forced_dk_hard_blocker(&decision) {
             anyhow::bail!(
@@ -4839,7 +4848,7 @@ fn analyze_freq_response(
         }
     };
 
-    let decision = routing::auto_route(&kernel, &mna, dk_failed);
+    let decision = routing::auto_route(&kernel, &mna, dk_failed, opamp_rail_mode);
     if solver == "dk" {
         if let Some(blocker) = forced_dk_hard_blocker(&decision) {
             anyhow::bail!(
@@ -6237,6 +6246,17 @@ fn handle_sources(action: SourceAction) -> Result<()> {
                 anyhow::bail!("Cannot use '{url}' as a source. {hint}");
             }
 
+            // Store a local directory absolute: a relative path only resolves
+            // from the directory it was added in.
+            let url = if looks_remote {
+                url
+            } else {
+                std::fs::canonicalize(url.trim_end_matches('/'))
+                    .with_context(|| format!("Cannot resolve '{url}'"))?
+                    .to_string_lossy()
+                    .into_owned()
+            };
+
             if config.has_source(&name) {
                 println!("Warning: Source '{}' already exists. Overwriting.", name);
             }
@@ -6281,6 +6301,33 @@ fn handle_sources(action: SourceAction) -> Result<()> {
                 if let Some(subdir) = &source.subdirectory {
                     println!("  Subdirectory: {}", subdir);
                 }
+                let cache = crate::cache::Cache::new()?;
+                match config.list_circuits(&name, &cache)? {
+                    Some(circuits) => {
+                        println!();
+                        println!("  {} circuits:", circuits.len());
+                        let width = circuits.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+                        for (circuit, entry) in &circuits {
+                            let meta: Vec<&str> =
+                                [entry.category.as_deref(), entry.tier.as_deref()]
+                                    .into_iter()
+                                    .flatten()
+                                    .collect();
+                            println!("    {circuit:<width$}  {}", meta.join(", "));
+                        }
+                        if let Some((first, _)) = circuits.first() {
+                            println!();
+                            println!("  Use one as `{name}:<circuit>`, e.g. `melange nodes {name}:{first}`.");
+                        }
+                    }
+                    None => {
+                        println!();
+                        println!(
+                            "  No circuits-index.json published, so its circuits cannot be \
+                             listed; `{name}:<file-name>` still resolves <base>/<file-name>.cir."
+                        );
+                    }
+                }
             } else {
                 anyhow::bail!("Source '{}' not found", name);
             }
@@ -6306,8 +6353,13 @@ fn list_builtins() -> Result<()> {
     println!("  melange simulate passive-eq1a --amplitude 0.1 -o drive.wav");
     println!("  melange nodes passive-eq1a");
     println!();
-    println!("The full circuit library lives in a separate repo; add it with");
-    println!("`melange sources add` and browse with `melange sources list`.");
+    println!("The full circuit library lives in a separate repo. Add it, list it, use it:");
+    println!(
+        "  melange sources add melange-circuits \
+         https://gitlab.com/oomox-group/melange-circuits/-/raw/main"
+    );
+    println!("  melange sources show melange-circuits");
+    println!("  melange nodes melange-circuits:<circuit>");
 
     Ok(())
 }
@@ -6349,7 +6401,8 @@ fn handle_cache(action: CacheAction) -> Result<()> {
             let bin_cache = BinaryCache::new()?;
             let bin_stats = bin_cache.stats();
             println!();
-            println!("Binary cache:");
+            println!("Binary cache (compiled simulate/analyze runs; `melange cache clear` empties both):");
+            println!("  Location: {}", bin_cache.cache_dir().display());
             println!("  Files: {}", bin_stats.total_files);
             println!("  Size: {}", bin_stats.formatted_size());
             Ok(())

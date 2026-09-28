@@ -52,6 +52,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
       - run: cargo build --release --locked -p melange-cli
+      # The template unit tests read the generated text; this compiles it.
+      - run: tools/check-generated-plugins.sh target/release/melange
       - uses: actions/upload-artifact@v4
         with:
           name: melange-linux-x86_64

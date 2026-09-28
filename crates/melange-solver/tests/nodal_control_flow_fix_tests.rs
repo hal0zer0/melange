@@ -15,9 +15,10 @@
 //!  5. `.runtime V` sources are stamped in ALL from-scratch RHS rebuilds
 //!     (trap, sub-step, BE fallback) — they are integration-scheme
 //!     independent algebraic constraints.
-//!  6. Schur ActiveSetBe sub-step honesty: a diverged Picard fixed point
-//!     must leave `converged = false` (BE fallback runs) instead of being
-//!     committed unconditionally.
+//!  6. Schur ActiveSetBe has no 2x sub-step: a rail-engaged sample goes
+//!     straight to the BE fallback's pin-and-resolve. (The sub-step it
+//!     replaced handled the rail with a post-solve clamp that did not
+//!     re-solve downstream nodes.)
 //!  7. Schur BE-fallback voltage limiting uses a single scalar alpha
 //!     (min across ALL dims) — per-dimension alpha breaks the coupled
 //!     Newton direction (VOLTAGE_LIMITING.md).
@@ -613,11 +614,11 @@ fn main() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Fix 6 — ActiveSetBe sub-step honesty (emission shape)
+// Fix 6 — ActiveSetBe rail engagement goes to the BE pin-and-resolve
 // ═══════════════════════════════════════════════════════════════════════
 
 #[test]
-fn schur_active_set_be_substep_honest_convergence() {
+fn schur_active_set_be_rail_engagement_goes_to_be_pin_and_resolve() {
     use melange_solver::codegen::OpampRailMode;
     // Op-amp with feedback clipping diodes: M=2, ActiveSetBe, Schur route.
     let spice = "\
@@ -637,36 +638,28 @@ Rld2 out_ac 0 100k
     config.opamp_rail_mode = OpampRailMode::ActiveSetBe;
     let (code, _n, _m) = support::generate_circuit_code_nodal(spice, &config);
 
-    if !code.contains("Sub-step at 2× rate") {
-        panic!(
-            "test premise broken: ActiveSetBe circuit no longer emits the \
-             Schur sub-step block — update the circuit or the marker"
-        );
+    // Rail engagement makes the trap solve "not converged"...
+    let converged = find(
+        &code,
+        "&& !active_set_engaged",
+        "rail engagement must send the sample to the BE fallback",
+    );
+    // ...and the BE fallback pins and re-solves against the BE matrices.
+    let fallback = find(&code, "// Backward Euler fallback", "BE fallback block");
+    let resolve = find(
+        &code,
+        "// --- Active-set op-amp rail resolve ---",
+        "pin-and-resolve",
+    );
+    assert!(converged < fallback && fallback < code.len() && resolve > 0);
+    assert!(
+        code[fallback..].contains("// --- Active-set op-amp rail resolve ---"),
+        "the BE fallback must carry the pin-and-resolve"
+    );
+    // No 2x sub-step and no sub-step matrices.
+    for gone in ["const N_SUB", "S_SUB_DEFAULT", "a_neg_sub", "s_ni_sub"] {
+        assert!(!code.contains(gone), "{gone} must not be emitted");
     }
-    find(
-        &code,
-        "let mut sub_ok = true;",
-        "sub-step recovery must track per-substep convergence",
-    );
-    let commit_gate = find(
-        &code,
-        "if sub_ok {",
-        "sub-step result must only be committed when every fixed point settled",
-    );
-    let substep_count = find(
-        &code,
-        "state.diag_substep_count += 1;",
-        "substep diag count",
-    );
-    assert!(
-        substep_count > commit_gate,
-        "diag_substep_count must only count successful sub-step recoveries"
-    );
-    assert!(
-        !code.contains("let mut nr_ok = true;\n                for i in 0..M"),
-        "the fixed-point convergence flag must carry the FINAL iteration's \
-         status out of the loop (declared before the loop, not per-iteration)"
-    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════

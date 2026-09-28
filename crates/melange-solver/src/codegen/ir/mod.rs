@@ -537,6 +537,11 @@ pub struct SolverConfig {
     /// [`OpampRailMode::Auto`]: crate::codegen::OpampRailMode::Auto
     #[serde(default = "default_opamp_rail_mode")]
     pub opamp_rail_mode: crate::codegen::OpampRailMode,
+    /// Why [`Self::opamp_rail_mode`] was chosen, in words (the resolver's
+    /// reason). Emitted as `OPAMP_RAIL_MODE_REASON` so the choice is
+    /// assertable from the generated code.
+    #[serde(default)]
+    pub opamp_rail_mode_reason: String,
     /// Emit `CircuitState::recompute_dc_op()` for runtime DC operating-point
     /// re-solve (Oomox roadmap P6 / Phase E). Default `false` → output is
     /// byte-identical to pre-Phase-E codegen. Threaded from
@@ -837,17 +842,6 @@ pub struct Matrices {
     /// Values > 1 mean the Schur path is unstable. Only computed for nodal path.
     #[serde(default)]
     pub spectral_radius_s_aneg: f64,
-
-    // --- Sub-step matrices (trap at 2× internal rate, for ActiveSetBe sub-stepping) ---
-    /// S_sub = (G + (4/T)*C)^{-1}, N×N row-major (trap at 2× rate)
-    #[serde(default)]
-    pub s_sub: Vec<f64>,
-    /// K_sub = N_v * S_sub * N_i, M×M row-major (sub-step kernel)
-    #[serde(default)]
-    pub k_sub: Vec<f64>,
-    /// A_neg_sub = (4/T)*C - G, N×N row-major (sub-step history)
-    #[serde(default)]
-    pub a_neg_sub: Vec<f64>,
 }
 
 /// Op-amp output voltage clamping for code generation.
@@ -2002,6 +1996,8 @@ impl CircuitIR {
             rail_mode.mode,
             rail_mode.reason.as_str()
         );
+        let rail_mode_reason =
+            opamp_rail_reason_with_override(mna, config.opamp_rail_mode, &rail_mode);
 
         let solver_config = SolverConfig {
             sample_rate: config.sample_rate,
@@ -2022,6 +2018,7 @@ impl CircuitIR {
             runtime_be_latch: false,
             breakpoint_be: false,
             opamp_rail_mode: rail_mode.mode,
+            opamp_rail_mode_reason: rail_mode_reason.clone(),
             emit_dc_op_recompute: config.emit_dc_op_recompute,
             nodal_sub_path_override: config.nodal_sub_path_override,
             allow_static_glow_on_full_lu: config.allow_static_glow_on_full_lu,
@@ -2124,9 +2121,6 @@ impl CircuitIR {
                 s_be: Vec::new(),
                 k_be: Vec::new(),
                 spectral_radius_s_aneg: 0.0,
-                s_sub: Vec::new(),
-                k_sub: Vec::new(),
-                a_neg_sub: Vec::new(),
             }
         } else if os_factor > 1 {
             // Trapezoidal + oversampling: the internal-rate pair was already
@@ -2175,9 +2169,6 @@ impl CircuitIR {
                 s_be,
                 k_be,
                 spectral_radius_s_aneg: 0.0,
-                s_sub: Vec::new(),
-                k_sub: Vec::new(),
-                a_neg_sub: Vec::new(),
             }
         } else if be {
             // Backward Euler: recompute S, A_neg, K from G/C with alpha = 1/T
@@ -2248,9 +2239,6 @@ impl CircuitIR {
                 s_be: Vec::new(),
                 k_be: Vec::new(),
                 spectral_radius_s_aneg: 0.0,
-                s_sub: Vec::new(),
-                k_sub: Vec::new(),
-                a_neg_sub: Vec::new(),
             }
         } else {
             // Standard trapezoidal: use kernel matrices directly.
@@ -2288,9 +2276,6 @@ impl CircuitIR {
                 s_be,
                 k_be,
                 spectral_radius_s_aneg: 0.0,
-                s_sub: Vec::new(),
-                k_sub: Vec::new(),
-                a_neg_sub: Vec::new(),
             }
         };
 
@@ -3023,6 +3008,8 @@ impl CircuitIR {
             rail_mode.mode,
             rail_mode.reason.as_str()
         );
+        let rail_mode_reason =
+            opamp_rail_reason_with_override(mna, config.opamp_rail_mode, &rail_mode);
 
         // Provisional solver_config. `alpha` and `backward_euler` may still be
         // updated by the auto-BE promotion block below.
@@ -3046,6 +3033,7 @@ impl CircuitIR {
             runtime_be_latch: false,
             breakpoint_be: false,
             opamp_rail_mode: rail_mode.mode,
+            opamp_rail_mode_reason: rail_mode_reason.clone(),
             emit_dc_op_recompute: config.emit_dc_op_recompute,
             nodal_sub_path_override: config.nodal_sub_path_override,
             allow_static_glow_on_full_lu: config.allow_static_glow_on_full_lu,
@@ -3069,55 +3057,6 @@ impl CircuitIR {
         let s_be_flat = invert_flat_matrix(&a_be_flat, n)?;
         let k_be_flat = if m > 0 {
             compute_k_from_s(&s_be_flat, &n_v_flat, &n_i_flat, n, m)
-        } else {
-            Vec::new()
-        };
-
-        // Sub-step matrices at 2× the internal rate. Used by ActiveSetBe
-        // sub-stepping to damp the discrete-time Nyquist artifact from the
-        // pin-and-resolve step. Precomputed so sub-steps are O(N²) matvec,
-        // same cost as the normal Schur prediction.
-        //
-        // These follow the PINNED integrator. They used to be trapezoidal
-        // unconditionally (`alpha = 4/T`, history `alpha*C - G`), so a deck
-        // running backward Euler got trap sub-steps behind its back — a
-        // violated directive, and the recovery path is exactly where a scheme
-        // difference shows, since it fires at discontinuities (design review).
-        let alpha_sub = if be {
-            internal_rate * 2.0 // BE: alpha = 1/T, at 2x rate
-        } else {
-            2.0 * internal_rate * 2.0 // trap: alpha = 2/T, at 2x rate
-        };
-        let mut a_sub_flat = vec![0.0f64; n * n];
-        let mut a_neg_sub_flat = vec![0.0f64; n * n];
-        for i in 0..n {
-            for j in 0..n {
-                let g = g_matrix[i * n + j];
-                let c = c_matrix[i * n + j];
-                a_sub_flat[i * n + j] = g + alpha_sub * c;
-                // BE history carries no -G term.
-                a_neg_sub_flat[i * n + j] = if be { alpha_sub * c } else { alpha_sub * c - g };
-            }
-        }
-        // Blanket-zero ALL augmented algebraic rows in A_neg_sub — the same
-        // rows and policy as A_neg / A_neg_be above and as the emitted
-        // `rebuild_matrices()` (which zeroes `n_nodes..n_aug` for all three
-        // history matrices in one loop). The old per-type enumeration
-        // (VS / VCVS / ideal-xfmr) missed Boyle op-amp internal rows,
-        // current-mode VCA rows (internal node + sense branch), and
-        // behavioral-V rows, so the baked A_NEG_SUB_DEFAULT disagreed with
-        // the first runtime rebuild. Inductor branch rows (>= n_aug) keep
-        // their trapezoidal history — L lives in C there.
-        if n_aug > n_nodes {
-            for row in n_nodes..n_aug.min(n) {
-                for j in 0..n {
-                    a_neg_sub_flat[row * n + j] = 0.0;
-                }
-            }
-        }
-        let s_sub_flat = invert_flat_matrix(&a_sub_flat, n)?;
-        let k_sub_flat = if m > 0 {
-            compute_k_from_s(&s_sub_flat, &n_v_flat, &n_i_flat, n, m)
         } else {
             Vec::new()
         };
@@ -3264,7 +3203,16 @@ impl CircuitIR {
                 trap_stability,
             );
         if !be && !cfg_force_trap && m > 0 && (local_needs_be || router_corroborated_marginal) {
+            // One plain sentence by default; the eigenvalue detail is for
+            // whoever asks for it. A first-time user sees this on a five-line
+            // diode clipper and needs to know whether to act (they do not).
             log::warn!(
+                "Using backward Euler integration: the trapezoidal rule would ring or grow at \
+                 Nyquist on this circuit. BE is stable, at the cost of slightly damping the top \
+                 octave (oversampling reduces that). No action needed; RUST_LOG=info for the \
+                 numbers."
+            );
+            log::info!(
                 "Nodal: auto-enabling backward Euler — spectral_radius(S*A_neg) = \
                  {:.4} (nodal, input-deflated), dominant_sign = {:+.0}{}. BE is L-stable. \
                  Override with --force-trap only to reproduce legacy trap output.",
@@ -3447,9 +3395,6 @@ impl CircuitIR {
             s_be: s_be_flat,
             k_be: k_be_flat,
             spectral_radius_s_aneg,
-            s_sub: s_sub_flat,
-            k_sub: k_sub_flat,
-            a_neg_sub: a_neg_sub_flat,
         };
 
         // Run DC OP (operates on the original MNA system — which still has Gm for correct DC point)
@@ -6479,21 +6424,35 @@ impl CircuitIR {
     pub fn k_be(&self, i: usize, j: usize) -> f64 {
         self.matrices.k_be[i * self.topology.m + j]
     }
+}
 
-    /// Access S_sub matrix element S_sub[i][j] (trap at 2× rate, sub-stepping)
-    pub fn s_sub(&self, i: usize, j: usize) -> f64 {
-        self.matrices.s_sub[i * self.topology.n + j]
+/// The rail-mode reason as recorded in `OPAMP_RAIL_MODE_REASON`, plus a
+/// codegen-time notice when an explicit `hard` was chosen against the
+/// resolver's verdict (see [`opamp_rail::hard_override_at_risk`]). Never a
+/// runtime message: generated code does not print.
+fn opamp_rail_reason_with_override(
+    mna: &crate::mna::MnaSystem,
+    requested: crate::codegen::OpampRailMode,
+    resolved: &opamp_rail::ResolvedOpampRailMode,
+) -> String {
+    let base = resolved.reason.as_str().to_string();
+    let at_risk = opamp_rail::hard_override_at_risk(mna, requested);
+    if at_risk.is_empty() {
+        return base;
     }
-
-    /// Access K_sub matrix element K_sub[i][j] (trap at 2× rate, sub-stepping)
-    pub fn k_sub(&self, i: usize, j: usize) -> f64 {
-        self.matrices.k_sub[i * self.topology.m + j]
-    }
-
-    /// Access A_neg_sub matrix element A_neg_sub[i][j] (trap at 2× rate history)
-    pub fn a_neg_sub(&self, i: usize, j: usize) -> f64 {
-        self.matrices.a_neg_sub[i * self.topology.n + j]
-    }
+    let who = if at_risk.len() == 1 {
+        format!("{} output is", at_risk[0])
+    } else {
+        format!("{} outputs are", at_risk.join(", "))
+    };
+    log::warn!(
+        "hard rail mode requested; {who} AC-coupled downstream, where hard corrupts \
+         capacitor history; auto would pick active-set"
+    );
+    format!(
+        "{base} (auto: {})",
+        opamp_rail::OpampRailModeReason::AcCoupledDownstream.as_str()
+    )
 }
 
 #[cfg(test)]

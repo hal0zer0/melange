@@ -18,7 +18,8 @@
 
 mod support;
 
-use melange_solver::codegen::{CodegenConfig, OpampRailMode};
+use melange_solver::codegen::{CodeGenerator, CodegenConfig, OpampRailMode};
+use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
 
@@ -226,32 +227,35 @@ fn dk_rail_mode_none_suppresses_opamp_clamp() {
 }
 
 #[test]
-fn dk_rail_mode_active_set_be_degrades_to_hard_with_warning() {
-    let config = opamp_slew_config(OpampRailMode::ActiveSetBe);
-    let (code, _n, _m) = support::generate_circuit_code(OPAMP_SLEW_SPICE, &config);
+fn dk_refuses_active_set_rail_modes_instead_of_degrading() {
+    // ActiveSet / ActiveSetBe need the pin-and-resolve only nodal implements.
+    // DK used to clamp instead and print a warning into the plugin's stderr;
+    // now the DK generator refuses (auto-routing sends these circuits to nodal).
+    for mode in [OpampRailMode::ActiveSet, OpampRailMode::ActiveSetBe] {
+        let config = opamp_slew_config(mode);
+        let netlist = Netlist::parse(OPAMP_SLEW_SPICE).unwrap();
+        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+        mna.g[config.input_node][config.input_node] += 1.0 / config.input_resistance;
+        let kernel = DkKernel::from_mna(&mna, config.sample_rate).unwrap();
+        let err = CodeGenerator::new(config)
+            .generate(&kernel, &mna, &netlist)
+            .expect_err("DK must refuse an active-set rail mode");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("nodal"), "{mode:?}: {msg}");
+    }
 
-    assert!(
-        code.contains("Op-amp output voltage clamping"),
-        "active-set-be on the DK path must still emit the Hard clamp"
-    );
-    assert!(
-        code.contains(
-            "opamp rail mode 'active-set-be' degrades to Hard+BE-fallback on the DK path"
-        ),
-        "active-set-be must emit the one-shot degrade warning at construction"
-    );
-    assert!(
-        code.contains("OPAMP_RAIL_DEGRADE_WARN_ONCE"),
-        "degrade warning must be latched through std::sync::Once (once per process)"
-    );
-
-    // Hard mode keeps the clamp and stays silent.
+    // Hard mode keeps the clamp, and the generated code says which mode it runs.
     let config_hard = opamp_slew_config(OpampRailMode::Hard);
     let (code_hard, _n, _m) = support::generate_circuit_code(OPAMP_SLEW_SPICE, &config_hard);
+    assert!(code_hard.contains("Op-amp output voltage clamping"));
     assert!(
-        code_hard.contains("Op-amp output voltage clamping")
-            && !code_hard.contains("degrades to Hard"),
-        "Hard mode must emit the clamp with no degrade warning"
+        code_hard.contains("pub const OPAMP_RAIL_MODE: &str = \"hard\";"),
+        "the effective rail mode must be assertable from the generated code"
+    );
+    assert!(code_hard.contains("pub const OPAMP_RAIL_MODE_REASON: &str = \"user requested\";"));
+    assert!(
+        !code_hard.contains("degrades to Hard"),
+        "no runtime rail warning"
     );
 }
 

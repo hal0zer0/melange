@@ -116,7 +116,12 @@ fn gen_and_run(
             }
         }
     };
-    let decision = routing::auto_route(&kernel, &mna, dk_failed);
+    let decision = routing::auto_route(
+        &kernel,
+        &mna,
+        dk_failed,
+        melange_solver::codegen::OpampRailMode::Auto,
+    );
     let use_nodal = decision.route == routing::SolverRoute::Nodal;
     if use_nodal {
         let slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(

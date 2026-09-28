@@ -334,7 +334,12 @@ fn test_on_does_not_reduce_when_unreduced_route_is_nodal() {
     let (netlist, mut mna, config) = build_mna(&spice);
     assert_eq!(mna.m, 12);
     assert!(
-        melange_solver::pipeline::should_skip_fa_for_nodal_reroute(&mna, 48000.0, 1),
+        melange_solver::pipeline::should_skip_fa_for_nodal_reroute(
+            &mna,
+            48000.0,
+            1,
+            melange_solver::codegen::OpampRailMode::Auto
+        ),
         "precondition: the unreduced circuit auto-routes nodal"
     );
     let none = HashSet::new();

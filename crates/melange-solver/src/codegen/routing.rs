@@ -7,6 +7,7 @@
 //! - Trapezoidal stability (spectral radius of S*A_neg)
 //! - Multi-transformer circuits (DK K matrix instability)
 //! - Nonlinear dimension (M≥10 → M×M elimination expensive)
+//! - Op-amp rail handling (an active-set rail mode needs nodal; DK only clamps)
 
 use crate::dk::DkKernel;
 use crate::mna::MnaSystem;
@@ -61,6 +62,18 @@ pub struct RoutingDecision {
     /// (`isat` set), needing a per-sample L update that DK's precomputed
     /// S=A⁻¹ cannot provide — a HARD structural requirement for nodal.
     pub saturating_inductor: bool,
+    /// The op-amp rail mode as routing sees it: the requested mode, or the
+    /// auto-resolver's pick from the MNA. Codegen may still refine an
+    /// auto-picked `ActiveSet` to `ActiveSetBe` from the netlist; routing does
+    /// not need that distinction, since both are nodal-only.
+    pub opamp_rail_mode: crate::codegen::OpampRailMode,
+    /// Whether a clamped op-amp resolved to `ActiveSet`/`ActiveSetBe`. Those
+    /// pin a railed output and re-solve the rest of the circuit, which only
+    /// the nodal solver implements; DK can only clamp the output after the
+    /// solve, which corrupts downstream capacitor history — exactly the case
+    /// the resolver picked an active-set mode to avoid. A HARD structural
+    /// requirement for nodal.
+    pub opamp_active_set: bool,
     /// Human-readable reason for the routing decision.
     pub reason: String,
 }
@@ -71,10 +84,18 @@ pub struct RoutingDecision {
 /// * `kernel` - The DK kernel (may be from a failed build attempt)
 /// * `mna` - The MNA system
 /// * `dk_failed` - Whether `DkKernel::from_mna()` returned an error
+/// * `opamp_rail_mode` - The requested op-amp rail mode (`Auto` to let the
+///   resolver pick). Routing needs the resolved mode: an active-set mode can
+///   only be honoured on nodal.
 ///
 /// # Returns
 /// A `RoutingDecision` with the chosen route and diagnostic info.
-pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> RoutingDecision {
+pub fn auto_route(
+    kernel: &DkKernel,
+    mna: &MnaSystem,
+    dk_failed: bool,
+    opamp_rail_mode: crate::codegen::OpampRailMode,
+) -> RoutingDecision {
     let n = kernel.n;
     let m = kernel.m;
 
@@ -101,6 +122,21 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
             .transformer_groups
             .iter()
             .any(|g| g.winding_isats.iter().any(|i| i.is_some()));
+
+    // Resolve the rail mode on the same MNA the codegen will see. Only
+    // clamped op-amps matter: with no finite rail there is nothing to pin.
+    use crate::codegen::OpampRailMode;
+    let resolved_rail =
+        crate::codegen::ir::opamp_rail::resolve_opamp_rail_mode(mna, opamp_rail_mode).mode;
+    let has_clamped_opamp = mna
+        .opamps
+        .iter()
+        .any(|oa| oa.n_out_idx > 0 && (oa.vcc.is_finite() || oa.vee.is_finite()));
+    let opamp_active_set = has_clamped_opamp
+        && matches!(
+            resolved_rail,
+            OpampRailMode::ActiveSet | OpampRailMode::ActiveSetBe
+        );
 
     // Check trapezoidal stability via power iteration on S*A_neg
     let (dk_unstable, spectral_radius) = if !dk_failed && m > 0 && n > 0 {
@@ -221,6 +257,13 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
             SolverRoute::Nodal,
             "saturating inductors require augmented MNA (per-sample L update)".to_string(),
         )
+    } else if opamp_active_set {
+        (
+            SolverRoute::Nodal,
+            "op-amp needs active-set rail handling (pin-and-resolve at the rail is nodal-only; \
+             DK can only clamp the output)"
+                .to_string(),
+        )
     } else {
         (SolverRoute::DkSchur, format!("DK Schur (N={}, M={})", n, m))
     };
@@ -237,6 +280,8 @@ pub fn auto_route(kernel: &DkKernel, mna: &MnaSystem, dk_failed: bool) -> Routin
         s_ill_conditioned,
         behavioral: has_behavioral,
         saturating_inductor,
+        opamp_rail_mode: resolved_rail,
+        opamp_active_set,
         reason,
     }
 }
@@ -289,7 +334,7 @@ mod tests {
         let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
         mna.g[0][0] += 1.0;
         let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
-        let decision = auto_route(&kernel, &mna, false);
+        let decision = auto_route(&kernel, &mna, false, crate::codegen::OpampRailMode::Auto);
         assert_eq!(decision.route, SolverRoute::DkSchur);
         assert!(!decision.dk_failed);
         assert!(!decision.dk_unstable);
@@ -309,7 +354,7 @@ C1 out 0 1u
         let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
         mna.g[0][0] += 1.0;
         let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
-        let decision = auto_route(&kernel, &mna, false);
+        let decision = auto_route(&kernel, &mna, false, crate::codegen::OpampRailMode::Auto);
         assert_eq!(decision.route, SolverRoute::DkSchur);
         assert!(decision.spectral_radius < crate::codegen::stability::TRAP_BE_PROMOTION_RHO);
     }
@@ -348,7 +393,12 @@ C3 out 0 100p
             Ok(k) => (k, false),
             Err(_) => (DkKernel::from_mna_augmented(&mna, 44100.0).unwrap(), true),
         };
-        let decision = auto_route(&kernel, &mna, dk_failed);
+        let decision = auto_route(
+            &kernel,
+            &mna,
+            dk_failed,
+            crate::codegen::OpampRailMode::Auto,
+        );
         assert!(
             decision.multi_transformer,
             "two independent K-pairs must be counted as two transformer groups"
@@ -368,7 +418,7 @@ C3 out 0 100p
         let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
         mna.g[0][0] += 1.0;
         let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
-        let decision = auto_route(&kernel, &mna, true);
+        let decision = auto_route(&kernel, &mna, true, crate::codegen::OpampRailMode::Auto);
         assert_eq!(decision.route, SolverRoute::Nodal);
         assert!(decision.dk_failed);
     }
