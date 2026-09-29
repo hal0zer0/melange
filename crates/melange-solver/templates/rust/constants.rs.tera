@@ -218,45 +218,6 @@ pub const A_NEG_BE_DEFAULT: [[f64; N]; N] = [
 pub const RHS_CONST_BE: [f64; N] = [{{ rhs_const_be_values }}];
 {% endif %}
 {% endif %}
-{% if num_inductors > 0 %}
-
-/// Number of inductors
-pub const NUM_INDUCTORS: usize = {{ num_inductors }};
-{% for ind in inductors %}
-const IND_{{ loop.index0 }}_NODE_I: usize = {{ ind.node_i }};
-const IND_{{ loop.index0 }}_NODE_J: usize = {{ ind.node_j }};
-const IND_{{ loop.index0 }}_G_EQ: f64 = {{ ind.g_eq }};
-const IND_{{ loop.index0 }}_INDUCTANCE: f64 = {{ ind.inductance }};
-{% endfor %}
-{% endif %}
-{% if num_coupled_inductors > 0 %}
-/// Number of coupled inductor pairs (transformers)
-pub const NUM_COUPLED_INDUCTORS: usize = {{ num_coupled_inductors }};
-{% for ci in coupled_inductors %}
-const CI_{{ loop.index0 }}_L1_NODE_I: usize = {{ ci.l1_node_i }};
-const CI_{{ loop.index0 }}_L1_NODE_J: usize = {{ ci.l1_node_j }};
-const CI_{{ loop.index0 }}_L2_NODE_I: usize = {{ ci.l2_node_i }};
-const CI_{{ loop.index0 }}_L2_NODE_J: usize = {{ ci.l2_node_j }};
-const CI_{{ loop.index0 }}_L1_INDUCTANCE: f64 = {{ ci.l1_inductance }};
-const CI_{{ loop.index0 }}_L2_INDUCTANCE: f64 = {{ ci.l2_inductance }};
-const CI_{{ loop.index0 }}_COUPLING: f64 = {{ ci.coupling }};
-const CI_{{ loop.index0 }}_G_SELF_1: f64 = {{ ci.g_self_1 }};
-const CI_{{ loop.index0 }}_G_SELF_2: f64 = {{ ci.g_self_2 }};
-const CI_{{ loop.index0 }}_G_MUTUAL: f64 = {{ ci.g_mutual }};
-{% endfor %}
-{% endif %}
-{% if num_transformer_groups > 0 %}
-/// Number of transformer groups (3+ winding)
-pub const NUM_TRANSFORMER_GROUPS: usize = {{ num_transformer_groups }};
-{% for g in transformer_groups %}
-const XFMR_{{ g.index }}_NUM_WINDINGS: usize = {{ g.num_windings }};
-const XFMR_{{ g.index }}_NODE_I: [usize; {{ g.num_windings }}] = [{% for n in g.winding_node_i %}{{ n }}{% if not loop.last %}, {% endif %}{% endfor %}];
-const XFMR_{{ g.index }}_NODE_J: [usize; {{ g.num_windings }}] = [{% for n in g.winding_node_j %}{{ n }}{% if not loop.last %}, {% endif %}{% endfor %}];
-const XFMR_{{ g.index }}_INDUCTANCES: [f64; {{ g.num_windings }}] = [{% for v in g.inductances %}{{ v }}{% if not loop.last %}, {% endif %}{% endfor %}];
-const XFMR_{{ g.index }}_COUPLING: [f64; {{ g.num_windings * g.num_windings }}] = [{% for v in g.coupling_flat %}{{ v }}{% if not loop.last %}, {% endif %}{% endfor %}];
-const XFMR_{{ g.index }}_Y_DEFAULT: [f64; {{ g.num_windings * g.num_windings }}] = [{% for v in g.y_matrix %}{{ v }}{% if not loop.last %}, {% endif %}{% endfor %}];
-{% endfor %}
-{% endif %}
 
 {% if num_switches > 0 %}
 // =============================================================================
@@ -275,8 +236,7 @@ const SWITCH_{{ sw.index }}_COMP_{{ loop.index0 }}_NODE_P: usize = {{ comp.node_
 const SWITCH_{{ sw.index }}_COMP_{{ loop.index0 }}_NODE_Q: usize = {{ comp.node_q }};
 const SWITCH_{{ sw.index }}_COMP_{{ loop.index0 }}_NOMINAL: f64 = {{ comp.nominal }};
 const SWITCH_{{ sw.index }}_COMP_{{ loop.index0 }}_TYPE: char = '{{ comp.comp_type }}';
-{% if comp.inductor_index is defined and comp.inductor_index >= 0 %}const SWITCH_{{ sw.index }}_COMP_{{ loop.index0 }}_IND_IDX: usize = {{ comp.inductor_index }};
-{% endif %}{% endfor %}
+{% endfor %}
 /// Position values for switch {{ sw.index }}: [position][component]
 pub const SWITCH_{{ sw.index }}_VALUES: [[f64; {{ sw.num_components }}]; {{ sw.num_positions }}] = [
 {% for pos in sw.position_rows %}    [{{ pos }}],

@@ -1,21 +1,18 @@
-//! Inductor companion model tests.
+//! Inductor tests.
 //!
-//! Verifies that inductor support works correctly in the codegen pipeline.
-//! Uses trapezoidal companion model: the inductor is replaced each timestep
-//! by an equivalent conductance g_eq = T/(2L) in parallel with a history
-//! current source.
+//! Generated code carries every inductor as an augmented-MNA branch row (L on
+//! the C diagonal of its row). The MNA- and kernel-level tests below check the
+//! companion-model form `DkKernel::from_mna` still builds for the runtime
+//! `LinearSolver` (g_eq = T/(2L) with a history current source).
 //!
 //! Tests cover:
 //! - RL circuit step response (exponential current ramp toward V/R)
 //! - Inductor current continuity (no jumps)
 //! - Generated code for inductor circuits compiles with rustc
 //! - RLC circuit basic resonance behavior
-//! - Codegen contains correct inductor constants and state fields
 
 mod support;
 
-use melange_solver::codegen::ir::CircuitIR;
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
 use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
@@ -25,6 +22,8 @@ use std::io::Write;
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// The raw MNA and companion-model DK kernel (the runtime `LinearSolver`'s
+/// form), for the MNA- and kernel-level tests.
 fn build_pipeline(spice: &str) -> (Netlist, MnaSystem, DkKernel) {
     let netlist = Netlist::parse(spice).expect("failed to parse netlist");
     let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
@@ -32,24 +31,10 @@ fn build_pipeline(spice: &str) -> (Netlist, MnaSystem, DkKernel) {
     (netlist, mna, kernel)
 }
 
-fn default_config() -> CodegenConfig {
-    CodegenConfig {
-        circuit_name: "test_circuit".to_string(),
-        sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![1],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    }
-}
-
+/// The shipped build of `spice` (inductors as augmented branch rows).
 fn generate_code(spice: &str) -> String {
-    let (netlist, mna, kernel) = build_pipeline(spice);
-    let codegen = CodeGenerator::new(default_config());
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("code generation failed");
-    result.code
+    let config = support::config_in_out_or_node1(spice, 44100.0);
+    support::build_as_shipped(spice, &config, "dk").0
 }
 
 /// Compile generated code with rustc, panicking with stderr on failure.
@@ -268,210 +253,6 @@ fn test_two_inductor_codegen_compiles() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 4: Codegen contains correct inductor constants and state
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_inductor_codegen_constants() {
-    let code = generate_code(RL_LOWPASS_SPICE);
-
-    // Should contain inductor equivalent conductance constant
-    assert!(
-        code.contains("IND_0_G_EQ"),
-        "Generated code should contain IND_0_G_EQ constant"
-    );
-
-    // The G_EQ value should be T/(2*L) = (1/44100)/(2*0.1) = 1.133786...e-4
-    let expected_g_eq = 1.0 / 44100.0 / (2.0 * 0.1);
-    let g_eq_str = format!("{:.17e}", expected_g_eq);
-    assert!(
-        code.contains(&g_eq_str),
-        "IND_0_G_EQ should be {}, got code containing: {}",
-        g_eq_str,
-        code.lines()
-            .find(|l| l.contains("IND_0_G_EQ"))
-            .unwrap_or("<not found>")
-    );
-
-    // Should contain NUM_INDUCTORS
-    assert!(
-        code.contains("NUM_INDUCTORS"),
-        "Generated code should contain NUM_INDUCTORS constant"
-    );
-
-    // Should contain inductor node constants
-    assert!(
-        code.contains("IND_0_NODE_I"),
-        "Generated code should contain IND_0_NODE_I constant"
-    );
-    assert!(
-        code.contains("IND_0_NODE_J"),
-        "Generated code should contain IND_0_NODE_J constant"
-    );
-}
-
-#[test]
-fn test_inductor_codegen_state_fields() {
-    let code = generate_code(RL_LOWPASS_SPICE);
-
-    // State struct should have inductor fields
-    assert!(
-        code.contains("ind_i_prev"),
-        "State should have ind_i_prev field for inductor current history"
-    );
-    assert!(
-        code.contains("ind_v_prev"),
-        "State should have ind_v_prev field for inductor voltage history"
-    );
-    assert!(
-        code.contains("ind_i_hist"),
-        "State should have ind_i_hist field for inductor history current source"
-    );
-}
-
-#[test]
-fn test_inductor_codegen_rhs_injection() {
-    let code = generate_code(RL_LOWPASS_SPICE);
-
-    // build_rhs should inject inductor history current
-    // The template subtracts i_hist at node_i and adds at node_j
-    assert!(
-        code.contains("ind_i_hist"),
-        "build_rhs should reference ind_i_hist for inductor RHS injection"
-    );
-}
-
-#[test]
-fn test_inductor_codegen_state_update() {
-    let code = generate_code(RL_LOWPASS_SPICE);
-
-    // process_sample should update inductor state after computing voltages
-    assert!(
-        code.contains("state.ind_i_prev"),
-        "process_sample should update ind_i_prev"
-    );
-    assert!(
-        code.contains("state.ind_v_prev"),
-        "process_sample should update ind_v_prev"
-    );
-    assert!(
-        code.contains("state.ind_i_hist"),
-        "process_sample should update ind_i_hist"
-    );
-
-    // The update should use the trapezoidal formula:
-    // i_new = i_prev + g_eq * (v_prev + v_new)
-    assert!(
-        code.contains("IND_0_G_EQ"),
-        "State update should reference IND_0_G_EQ"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Test 5: Two inductor circuit codegen
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_two_inductor_codegen_constants() {
-    let code = generate_code(TWO_INDUCTOR_SPICE);
-
-    // Should have constants for both inductors
-    assert!(code.contains("IND_0_G_EQ"), "Missing IND_0_G_EQ");
-    assert!(code.contains("IND_1_G_EQ"), "Missing IND_1_G_EQ");
-    assert!(code.contains("IND_0_NODE_I"), "Missing IND_0_NODE_I");
-    assert!(code.contains("IND_1_NODE_I"), "Missing IND_1_NODE_I");
-
-    // G_EQ values should differ (different inductance values)
-    let (_, _, kernel) = build_pipeline(TWO_INDUCTOR_SPICE);
-    assert_eq!(kernel.inductors.len(), 2, "Should have 2 inductors");
-    assert!(
-        (kernel.inductors[0].g_eq - kernel.inductors[1].g_eq).abs() > 1e-10,
-        "Two inductors with different L values should have different g_eq"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Test 6: Inductor IR data
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_inductor_ir() {
-    let (netlist, mna, kernel) = build_pipeline(RL_LOWPASS_SPICE);
-    let config = default_config();
-    let ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config).unwrap();
-
-    assert_eq!(ir.inductors.len(), 1, "Should have 1 inductor in IR");
-    assert_eq!(ir.inductors[0].name, "L1");
-
-    // g_eq should match kernel
-    let expected_g_eq = 1.0 / 44100.0 / (2.0 * 0.1); // T/(2L) for L=100mH
-    assert!(
-        (ir.inductors[0].g_eq - expected_g_eq).abs() < 1e-15,
-        "IR g_eq should match: expected {:.17e}, got {:.17e}",
-        expected_g_eq,
-        ir.inductors[0].g_eq
-    );
-
-    // Node indices should be non-zero (connected between named nodes)
-    // L1 is between "out" and "0" (ground), so one node should be > 0
-    let out_idx = *mna.node_map.get("out").unwrap();
-    assert!(
-        ir.inductors[0].node_i == out_idx || ir.inductors[0].node_j == out_idx,
-        "Inductor should connect to 'out' node"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Test 6b: backward-Euler + companion inductor must be REJECTED, not shipped wrong
-// ---------------------------------------------------------------------------
-
-/// The DK backward-Euler matrix build cannot correctly discretize a
-/// companion-modeled inductor: `stamp_dk_companion_inductors` stamps the
-/// trapezoidal companion value `g_eq = T/(2L)` (BE needs `T/L`, with
-/// `A_neg = alpha*C` and no `-g_eq` history term), and the os=1 primary-BE
-/// branch never stamps it at all (open circuit). Rather than silently ship
-/// wrong magnetics, `from_kernel` rejects BE + non-augmented inductors at the
-/// API boundary. This path is reachable through the public `DkKernel::from_mna`
-/// entry point (the documented example), so it must fail in RELEASE builds too
-/// — a hard `CodegenError`, not a `debug_assert`. Inductor circuits should use
-/// `DkKernel::from_mna_augmented`, which is exact under backward Euler.
-#[test]
-fn test_backward_euler_companion_inductor_rejected() {
-    let (netlist, mna, kernel) = build_pipeline(RL_LOWPASS_SPICE);
-    // Precondition: the non-augmented kernel carries the inductor as a companion.
-    assert!(
-        !kernel.inductors.is_empty(),
-        "expected a companion-modeled inductor in the non-augmented kernel"
-    );
-
-    let be_config = CodegenConfig {
-        backward_euler: true,
-        ..default_config()
-    };
-    match CircuitIR::from_kernel(&kernel, &mna, &netlist, &be_config) {
-        Err(melange_solver::codegen::CodegenError::UnsupportedTopology(msg)) => {
-            assert!(
-                msg.contains("backward-Euler") && msg.contains("from_mna_augmented"),
-                "error must name the BE/inductor limitation and the augmented remedy, got: {msg}"
-            );
-        }
-        Err(e) => panic!("expected UnsupportedTopology, got a different error: {e:?}"),
-        Ok(_) => panic!(
-            "BE + companion inductor must be rejected, but from_kernel returned Ok \
-             (that build would ship g_eq = T/2L instead of T/L — wrong magnetics)"
-        ),
-    }
-
-    // Trapezoidal with the SAME companion inductor must still succeed — only the
-    // BE discretization is broken, and the trap companion stamp is correct.
-    let trap_config = default_config();
-    assert!(
-        CircuitIR::from_kernel(&kernel, &mna, &netlist, &trap_config).is_ok(),
-        "trapezoidal companion-inductor build must still succeed"
-    );
-}
-
-// ---------------------------------------------------------------------------
 // Test 7: RLC circuit behavior — output should show oscillation/resonance
 // ---------------------------------------------------------------------------
 
@@ -595,46 +376,6 @@ fn test_inductor_dk_kernel() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 10: Inductor codegen sanitization resets inductor state
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_inductor_codegen_sanitization() {
-    let code = generate_code(RL_LOWPASS_SPICE);
-
-    // NaN sanitization should reset inductor state
-    // NaN/magnitude check now happens before state write: checks local `v`
-    // not `state.v_prev`. The predicate also bounds finite-but-implausible
-    // magnitude (see docs/aidocs/DEBUGGING.md "finite runaway" entry).
-    let sanitize_idx = code
-        .find("if !v_is_finite || v.iter().any(|x| x.abs() > STATE_MAX_PLAUSIBLE_MAGNITUDE)")
-        .or_else(|| code.find("if !v.iter().all(|x| x.is_finite())"))
-        .or_else(|| code.find("if !state.v_prev.iter().all(|x| x.is_finite())"));
-    assert!(sanitize_idx.is_some(), "Should have NaN sanitization block");
-
-    let after_sanitize = &code[sanitize_idx.unwrap()..];
-    // NaN reset now returns DC operating point output instead of zeros
-    let return_idx = after_sanitize
-        .find("return dc_output;")
-        .or_else(|| after_sanitize.find("return [0.0; NUM_OUTPUTS];"))
-        .expect("Missing return in sanitization");
-    let sanitize_block = &after_sanitize[..return_idx];
-
-    assert!(
-        sanitize_block.contains("ind_i_prev"),
-        "Sanitization should reset ind_i_prev"
-    );
-    assert!(
-        sanitize_block.contains("ind_v_prev"),
-        "Sanitization should reset ind_v_prev"
-    );
-    assert!(
-        sanitize_block.contains("ind_i_hist"),
-        "Sanitization should reset ind_i_hist"
-    );
-}
-
-// ---------------------------------------------------------------------------
 // Test 11: No inductor code when circuit has no inductors
 // ---------------------------------------------------------------------------
 
@@ -666,34 +407,6 @@ C1 out 0 100n
     assert!(
         !code.contains("ind_i_hist"),
         "Code without inductors should not have ind_i_hist state"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Test 12: Inductor reset clears state
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_inductor_reset() {
-    let code = generate_code(RL_LOWPASS_SPICE);
-
-    // The reset() method should clear inductor state
-    let reset_idx = code.find("fn reset(");
-    assert!(reset_idx.is_some(), "Should have reset() method");
-
-    // Scan the whole reset() body — up to the next method definition. The
-    // previous first-`}` heuristic broke when reset() gained a for-loop
-    // (2026-07-18: dc_block_x_prev is now seeded from the output-node DC OP
-    // in a loop, so the first `}` closes that loop, not the function).
-    let after_reset = &code[reset_idx.unwrap()..];
-    let end_fn = after_reset
-        .find("\n    pub fn ")
-        .unwrap_or(after_reset.len());
-    let reset_body = &after_reset[..end_fn];
-
-    assert!(
-        reset_body.contains("ind_i_prev"),
-        "reset() should clear inductor state (ind_i_prev)"
     );
 }
 

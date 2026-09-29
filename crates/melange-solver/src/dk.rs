@@ -241,6 +241,11 @@ pub const MAX_N: usize = 256;
 impl DkKernel {
     /// Build DK kernel from MNA system.
     ///
+    /// Inductors are carried as trapezoidal companion models (`inductors`,
+    /// `coupled_inductors`, `transformer_groups`), the form the runtime
+    /// [`crate::LinearSolver`] steps. Code generation does not accept such a
+    /// kernel: it needs [`DkKernel::from_mna_augmented`] for an inductor deck.
+    ///
     /// # Errors
     /// Returns an error if `sample_rate` is not positive and finite, if the
     /// A matrix is singular, if any inductor has non-positive inductance,

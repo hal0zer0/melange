@@ -252,16 +252,7 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
 {% if multi_input %}        state.inputs_prev = [0.0; NUM_INPUTS];
 {% else %}        state.input_prev = 0.0;
 {% endif %}{% if inject_or_tap %}        state.injections_prev = [0.0; NUM_INJECT];
-{% endif %}{% if num_inductors > 0 %}        state.ind_i_prev = [0.0; {{ num_inductors }}];
-        state.ind_v_prev = [0.0; {{ num_inductors }}];
-        state.ind_i_hist = [0.0; {{ num_inductors }}];
-{% endif %}{% if num_coupled_inductors > 0 %}        state.ci_i1_prev = [0.0; {{ num_coupled_inductors }}];
-        state.ci_i2_prev = [0.0; {{ num_coupled_inductors }}];
-        state.ci_v1_prev = [0.0; {{ num_coupled_inductors }}];
-        state.ci_v2_prev = [0.0; {{ num_coupled_inductors }}];
-        state.ci_i1_hist = [0.0; {{ num_coupled_inductors }}];
-        state.ci_i2_hist = [0.0; {{ num_coupled_inductors }}];
-{% endif %}{% if num_transformer_groups > 0 %}{{ xfmr_nan_reset_lines }}{% endif %}{# NaN recovery deliberately does NOT touch pot/switch fields: the live
+{% endif %}{# NaN recovery deliberately does NOT touch pot/switch fields: the live
    matrices were built at the actual knob positions and remain valid —
    snapping the fields to nominal here would create a field/matrix
    disagreement that the setters' unchanged-value check could then lock in.
@@ -297,49 +288,6 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
 {% else %}    state.input_prev = input;
 {% endif %}{% if inject_or_tap %}    state.injections_prev = injections;
 {% endif %}
-{% if num_inductors > 0 %}
-
-    // Step 7b: Update inductor companion model state
-{% for ind in inductors %}    {
-        let v_i = {% if ind.node_i > 0 %}v[{{ ind.node_i - 1 }}]{% else %}0.0{% endif %};
-        let v_j = {% if ind.node_j > 0 %}v[{{ ind.node_j - 1 }}]{% else %}0.0{% endif %};
-        let v_new = v_i - v_j;
-        let g_eq = state.ind_g_eq[{{ loop.index0 }}];
-        let i_new = state.ind_i_prev[{{ loop.index0 }}] + g_eq * (state.ind_v_prev[{{ loop.index0 }}] + v_new);
-        // Companion history (charge form): i_L[n+1] = g_eq*v[n+1] + (i_L[n] + g_eq*v[n]);
-        // the g_eq*v[n+1] part is the g_eq stamp in A, the rest is injected.
-        state.ind_i_hist[{{ loop.index0 }}] = i_new + g_eq * v_new;
-        state.ind_i_prev[{{ loop.index0 }}] = i_new;
-        state.ind_v_prev[{{ loop.index0 }}] = v_new;
-    }
-{% endfor %}{% endif %}
-{% if num_coupled_inductors > 0 %}
-    // Step 7c: Update coupled inductor companion model state
-{% for ci in coupled_inductors %}    {
-        let v1_i = {% if ci.l1_node_i > 0 %}v[{{ ci.l1_node_i - 1 }}]{% else %}0.0{% endif %};
-        let v1_j = {% if ci.l1_node_j > 0 %}v[{{ ci.l1_node_j - 1 }}]{% else %}0.0{% endif %};
-        let v1_new = v1_i - v1_j;
-        let v2_i = {% if ci.l2_node_i > 0 %}v[{{ ci.l2_node_i - 1 }}]{% else %}0.0{% endif %};
-        let v2_j = {% if ci.l2_node_j > 0 %}v[{{ ci.l2_node_j - 1 }}]{% else %}0.0{% endif %};
-        let v2_new = v2_i - v2_j;
-        let gs1 = state.ci_g_self_1[{{ loop.index0 }}];
-        let gs2 = state.ci_g_self_2[{{ loop.index0 }}];
-        let gm = state.ci_g_mutual[{{ loop.index0 }}];
-        let i1_new = state.ci_i1_prev[{{ loop.index0 }}] + gs1 * (state.ci_v1_prev[{{ loop.index0 }}] + v1_new) + gm * (state.ci_v2_prev[{{ loop.index0 }}] + v2_new);
-        let i2_new = state.ci_i2_prev[{{ loop.index0 }}] + gm * (state.ci_v1_prev[{{ loop.index0 }}] + v1_new) + gs2 * (state.ci_v2_prev[{{ loop.index0 }}] + v2_new);
-        // Companion history (vector form): the known part i[n] + Y*v[n] per
-        // winding; the Y*v[n+1] part is the stamp in A.
-        state.ci_i1_hist[{{ loop.index0 }}] = i1_new + gs1 * v1_new + gm * v2_new;
-        state.ci_i2_hist[{{ loop.index0 }}] = i2_new + gm * v1_new + gs2 * v2_new;
-        state.ci_i1_prev[{{ loop.index0 }}] = i1_new;
-        state.ci_i2_prev[{{ loop.index0 }}] = i2_new;
-        state.ci_v1_prev[{{ loop.index0 }}] = v1_new;
-        state.ci_v2_prev[{{ loop.index0 }}] = v2_new;
-    }
-{% endfor %}{% endif %}
-{% if num_transformer_groups > 0 %}
-    // Step 7d: Update transformer group companion model state
-{{ xfmr_update_lines }}{% endif %}
 
 {% if thermal_update is defined and thermal_update != "" %}
     // Step 7e: BJT self-heating thermal update (quasi-static, outside NR)

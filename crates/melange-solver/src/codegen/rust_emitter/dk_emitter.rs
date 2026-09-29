@@ -8,14 +8,12 @@
 use tera::Context;
 
 use super::helpers::{
-    carries_q_dot, coupled_inductor_template_data, device_param_template_data, emit_device_const,
-    emit_stateful_default_fields, emit_stateful_set_sample_rate_body, emit_stateful_state_fields,
-    emit_stateful_state_restore, emit_stateful_update, emit_stateful_update_fns,
-    emit_thermal_tj_advance, fmt_f64, format_matrix_rows, history_zero_row_ranges,
-    inductor_template_data, named_const_entries, oversampling_info, q_dot_start,
-    recommended_warmup_samples, section_banner, self_heating_device_data, stateful_device_data,
-    transformer_group_template_data, warmup_estimate_capped, SwitchCompTemplateData,
-    SwitchTemplateData,
+    carries_q_dot, device_param_template_data, emit_device_const, emit_stateful_default_fields,
+    emit_stateful_set_sample_rate_body, emit_stateful_state_fields, emit_stateful_state_restore,
+    emit_stateful_update, emit_stateful_update_fns, emit_thermal_tj_advance, fmt_f64,
+    format_matrix_rows, history_zero_row_ranges, named_const_entries, oversampling_info,
+    q_dot_start, recommended_warmup_samples, section_banner, self_heating_device_data,
+    stateful_device_data, warmup_estimate_capped, SwitchCompTemplateData, SwitchTemplateData,
 };
 use super::RustEmitter;
 use crate::codegen::ir::{CircuitIR, DeviceParams, DeviceType};
@@ -625,7 +623,6 @@ impl RustEmitter {
             code.push_str(&noise.top_level);
         }
         code.push_str(&self.emit_state(ir, &noise)?);
-        code.push_str(&Self::emit_transformer_group_helpers(ir));
         code.push_str(&self.emit_device_models(ir)?);
         // (Stateful-device update() hooks are emitted inside emit_device_models,
         //  which both the DK and nodal generate paths call — single source.)
@@ -724,36 +721,6 @@ impl RustEmitter {
         ctx.insert("augmented_inductors", &ir.topology.augmented_inductors);
         ctx.insert("n_aug", &ir.topology.n_aug);
 
-        // When augmented_inductors is true, companion model constants (IND_*_G_EQ,
-        // CI_*_G_SELF/MUTUAL, XFMR_*_Y) are not needed. The G/C matrices already
-        // contain inductor stamps and A_neg handles history.
-        let num_inductors = if ir.topology.augmented_inductors {
-            0
-        } else {
-            ir.inductors.len()
-        };
-        ctx.insert("num_inductors", &num_inductors);
-        if num_inductors > 0 {
-            ctx.insert("inductors", &inductor_template_data(ir, true));
-        }
-        let num_coupled_inductors = if ir.topology.augmented_inductors {
-            0
-        } else {
-            ir.coupled_inductors.len()
-        };
-        ctx.insert("num_coupled_inductors", &num_coupled_inductors);
-        if num_coupled_inductors > 0 {
-            ctx.insert("coupled_inductors", &coupled_inductor_template_data(ir));
-        }
-        let num_transformer_groups = if ir.topology.augmented_inductors {
-            0
-        } else {
-            ir.transformer_groups.len()
-        };
-        ctx.insert("num_transformer_groups", &num_transformer_groups);
-        if num_transformer_groups > 0 {
-            ctx.insert("transformer_groups", &transformer_group_template_data(ir));
-        }
         ctx.insert(
             "sample_rate",
             &format!("{:.1}", ir.solver_config.sample_rate),
@@ -957,7 +924,6 @@ impl RustEmitter {
                             node_q: comp.node_q,
                             nominal: fmt_f64(comp.nominal_value),
                             comp_type: comp.component_type,
-                            inductor_index: comp.inductor_index.map(|i| i as i64).unwrap_or(-1),
                         })
                         .collect();
                     let position_rows: Vec<String> = sw
@@ -1063,14 +1029,6 @@ impl RustEmitter {
         ctx.insert("augmented_inductors", &ir.topology.augmented_inductors);
         ctx.insert("n_aug", &ir.topology.n_aug);
         ctx.insert("n_nodes", &ir.topology.n_nodes);
-        // When augmented_inductors is true, companion model state (ind_i_prev, ci_i_hist,
-        // xfmr_y, etc.) is not needed. A_neg handles history through augmented G/C.
-        let num_inductors = if ir.topology.augmented_inductors {
-            0
-        } else {
-            ir.inductors.len()
-        };
-        ctx.insert("num_inductors", &num_inductors);
         let num_pots = ir.pots.len();
         ctx.insert("num_pots", &num_pots);
         let num_outputs = ir.solver_config.output_nodes.len();
@@ -1087,102 +1045,6 @@ impl RustEmitter {
             }
         } else {
             ctx.insert("oversampling_4x", &false);
-        }
-
-        if num_inductors > 0 {
-            ctx.insert("inductors", &inductor_template_data(ir, true));
-        }
-        let num_coupled_inductors = if ir.topology.augmented_inductors {
-            0
-        } else {
-            ir.coupled_inductors.len()
-        };
-        ctx.insert("num_coupled_inductors", &num_coupled_inductors);
-        if num_coupled_inductors > 0 {
-            ctx.insert("coupled_inductors", &coupled_inductor_template_data(ir));
-        }
-        let num_transformer_groups = if ir.topology.augmented_inductors {
-            0
-        } else {
-            ir.transformer_groups.len()
-        };
-        ctx.insert("num_transformer_groups", &num_transformer_groups);
-        if num_transformer_groups > 0 {
-            ctx.insert("transformer_groups", &transformer_group_template_data(ir));
-
-            // Generate set_sample_rate recomputation lines procedurally
-            let mut xfmr_ssr_lines = String::new();
-            for (gi, g) in ir.transformer_groups.iter().enumerate() {
-                let w = g.num_windings;
-                xfmr_ssr_lines.push_str(
-                    "        {\n\
-                     \x20           let half_t = t / 2.0;\n",
-                );
-                // Build L matrix
-                for i in 0..w {
-                    for j in 0..w {
-                        xfmr_ssr_lines.push_str(&format!(
-                            "            let l_{i}_{j} = XFMR_{gi}_COUPLING[{}] * (XFMR_{gi}_INDUCTANCES[{i}] * XFMR_{gi}_INDUCTANCES[{j}]).sqrt();\n",
-                            i * w + j,
-                        ));
-                    }
-                }
-                // Call inversion helper
-                xfmr_ssr_lines.push_str(&format!("            let y = invert_xfmr_{gi}(["));
-                for i in 0..w {
-                    if i > 0 {
-                        xfmr_ssr_lines.push_str(", ");
-                    }
-                    xfmr_ssr_lines.push('[');
-                    for j in 0..w {
-                        if j > 0 {
-                            xfmr_ssr_lines.push_str(", ");
-                        }
-                        xfmr_ssr_lines.push_str(&format!("l_{i}_{j}"));
-                    }
-                    xfmr_ssr_lines.push(']');
-                }
-                xfmr_ssr_lines.push_str("]);\n");
-                // Store Y and stamp
-                for i in 0..w {
-                    for j in 0..w {
-                        xfmr_ssr_lines.push_str(&format!(
-                            "            self.xfmr_{gi}_y[{}] = half_t * y[{i}][{j}];\n",
-                            i * w + j,
-                        ));
-                    }
-                }
-                // Stamp self-conductances
-                for i in 0..w {
-                    let flat = i * w + i;
-                    xfmr_ssr_lines.push_str(&format!(
-                        "            stamp_conductance(&mut a, XFMR_{gi}_NODE_I[{i}], XFMR_{gi}_NODE_J[{i}], self.xfmr_{gi}_y[{flat}]);\n"
-                    ));
-                }
-                // Stamp mutual conductances
-                for i in 0..w {
-                    for j in 0..w {
-                        if i == j {
-                            continue;
-                        }
-                        let flat = i * w + j;
-                        xfmr_ssr_lines.push_str(&format!(
-                            "            stamp_mutual(&mut a, XFMR_{gi}_NODE_I[{i}], XFMR_{gi}_NODE_J[{i}], XFMR_{gi}_NODE_I[{j}], XFMR_{gi}_NODE_J[{j}], self.xfmr_{gi}_y[{flat}]);\n"
-                        ));
-                    }
-                }
-                xfmr_ssr_lines.push_str("        }\n");
-            }
-            // Reset transformer group transient state
-            for (gi, g) in ir.transformer_groups.iter().enumerate() {
-                xfmr_ssr_lines.push_str(&format!(
-                    "        self.xfmr_{gi}_i_prev = [0.0; {}];\n\
-                     \x20       self.xfmr_{gi}_v_prev = [0.0; {}];\n\
-                     \x20       self.xfmr_{gi}_i_hist = [0.0; {}];\n",
-                    g.num_windings, g.num_windings, g.num_windings,
-                ));
-            }
-            ctx.insert("xfmr_set_sample_rate_lines", &xfmr_ssr_lines);
         }
 
         let pot_defaults: Vec<String> =
@@ -1918,11 +1780,6 @@ impl RustEmitter {
     fn emit_switch_methods(&self, ir: &CircuitIR, noise: &NoiseEmission) -> String {
         let m = ir.topology.m;
         let num_pots = ir.pots.len();
-        let num_inductors = if ir.topology.augmented_inductors {
-            0
-        } else {
-            ir.inductors.len()
-        };
         let mut code = String::new();
 
         // Emit set_switch_N() for each switch (DK path)
@@ -2096,9 +1953,6 @@ impl RustEmitter {
         } else {
             code.push_str("        let alpha = 2.0 * internal_rate; // trapezoidal: alpha = 2/T\n");
         }
-        if num_inductors > 0 {
-            code.push_str("        let t = 1.0 / internal_rate;\n");
-        }
 
         // Start from constant G, C
         let has_r_switch = ir
@@ -2249,228 +2103,6 @@ impl RustEmitter {
                  \x20           }}\n\
                  \x20       }}\n"
             ));
-        }
-
-        // Inductor companion stamps (with switch-aware inductance)
-        if num_inductors > 0 {
-            code.push_str("\n        // Add inductor companion model conductances\n");
-            for (li, ind) in ir.inductors.iter().enumerate() {
-                // Check if any switch controls this inductor
-                let mut switched = false;
-                for sw in &ir.switches {
-                    for (ci, comp) in sw.components.iter().enumerate() {
-                        if comp.component_type == 'L' && comp.inductor_index == Some(li) {
-                            code.push_str(&format!(
-                                "        {{\n\
-                                 \x20           let inductance = SWITCH_{}_VALUES[self.switch_{}_position][{}];\n\
-                                 \x20           let g_eq = t / (2.0 * inductance);\n\
-                                 \x20           self.ind_g_eq[{}] = g_eq;\n\
-                                 \x20           stamp_conductance(&mut a, {}, {}, g_eq);\n\
-                                 \x20       }}\n",
-                                sw.index, sw.index, ci,
-                                li,
-                                ind.node_i, ind.node_j,
-                            ));
-                            switched = true;
-                            break;
-                        }
-                    }
-                    if switched {
-                        break;
-                    }
-                }
-                if !switched {
-                    // Non-switched inductor: use constant
-                    code.push_str(&format!(
-                        "        {{\n\
-                         \x20           let g_eq = t / (2.0 * IND_{}_INDUCTANCE);\n\
-                         \x20           self.ind_g_eq[{}] = g_eq;\n\
-                         \x20           stamp_conductance(&mut a, IND_{}_NODE_I, IND_{}_NODE_J, g_eq);\n\
-                         \x20       }}\n",
-                        li, li, li, li,
-                    ));
-                }
-            }
-            code.push_str(&format!(
-                "        // Preserve inductor transient state across rebuilds: zeroing\n\
-                 \x20       // i_prev here would dump any standing DC current on every\n\
-                 \x20       // pot/switch move (per-sample pot smoothing calls rebuild\n\
-                 \x20       // continuously → audible DC thump). Refresh the history from\n\
-                 \x20       // the preserved state at the new g_eq: the known part of\n\
-                 \x20       // i_L[n+1] = g_eq*v[n+1] + (i[n] + g_eq*v[n]).\n\
-                 \x20       for li in 0..{} {{\n\
-                 \x20           self.ind_i_hist[li] = self.ind_i_prev[li] + self.ind_g_eq[li] * self.ind_v_prev[li];\n\
-                 \x20       }}\n",
-                num_inductors,
-            ));
-        }
-
-        // Coupled inductor companion stamps
-        let num_coupled = if ir.topology.augmented_inductors {
-            0
-        } else {
-            ir.coupled_inductors.len()
-        };
-        if num_coupled > 0 {
-            if num_inductors == 0 {
-                code.push_str("        let t = 1.0 / internal_rate;\n");
-            }
-            code.push_str("\n        // Add coupled inductor companion model conductances\n");
-            for (ci_idx, _ci) in ir.coupled_inductors.iter().enumerate() {
-                // Check if either winding is switch-controlled
-                let mut l1_switch: Option<(usize, usize)> = None; // (sw_index, comp_index)
-                let mut l2_switch: Option<(usize, usize)> = None;
-                for sw in &ir.switches {
-                    for (comp_i, comp) in sw.components.iter().enumerate() {
-                        if comp.coupled_inductor_index == Some(ci_idx) {
-                            match comp.coupled_winding {
-                                Some(1) => l1_switch = Some((sw.index, comp_i)),
-                                Some(2) => l2_switch = Some((sw.index, comp_i)),
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-
-                let l1_expr = if let Some((sw_idx, comp_idx)) = l1_switch {
-                    format!(
-                        "SWITCH_{}_COMP_{}_VALUES[self.switch_{}_position]",
-                        sw_idx, comp_idx, sw_idx
-                    )
-                } else {
-                    format!("CI_{}_L1_INDUCTANCE", ci_idx)
-                };
-                let l2_expr = if let Some((sw_idx, comp_idx)) = l2_switch {
-                    format!(
-                        "SWITCH_{}_COMP_{}_VALUES[self.switch_{}_position]",
-                        sw_idx, comp_idx, sw_idx
-                    )
-                } else {
-                    format!("CI_{}_L2_INDUCTANCE", ci_idx)
-                };
-
-                code.push_str(&format!(
-                    "        {{\n\
-                     \x20           let l1_val = {l1};\n\
-                     \x20           let l2_val = {l2};\n\
-                     \x20           let m_val = CI_{ci}_COUPLING * (l1_val * l2_val).sqrt();\n\
-                     \x20           let det = l1_val * l2_val - m_val * m_val;\n\
-                     \x20           let half_t = t / 2.0;\n\
-                     \x20           let gs1 = half_t * l2_val / det;\n\
-                     \x20           let gs2 = half_t * l1_val / det;\n\
-                     \x20           let gm = -half_t * m_val / det;\n\
-                     \x20           self.ci_g_self_1[{ci}] = gs1;\n\
-                     \x20           self.ci_g_self_2[{ci}] = gs2;\n\
-                     \x20           self.ci_g_mutual[{ci}] = gm;\n\
-                     \x20           stamp_conductance(&mut a, CI_{ci}_L1_NODE_I, CI_{ci}_L1_NODE_J, gs1);\n\
-                     \x20           stamp_conductance(&mut a, CI_{ci}_L2_NODE_I, CI_{ci}_L2_NODE_J, gs2);\n\
-                     \x20           stamp_mutual(&mut a, CI_{ci}_L1_NODE_I, CI_{ci}_L1_NODE_J, CI_{ci}_L2_NODE_I, CI_{ci}_L2_NODE_J, gm);\n\
-                     \x20           stamp_mutual(&mut a, CI_{ci}_L2_NODE_I, CI_{ci}_L2_NODE_J, CI_{ci}_L1_NODE_I, CI_{ci}_L1_NODE_J, gm);\n\
-                     \x20       }}\n",
-                    l1 = l1_expr,
-                    l2 = l2_expr,
-                    ci = ci_idx,
-                ));
-            }
-            code.push_str(&format!(
-                "        // Preserve coupled-inductor transient state across rebuilds\n\
-                 \x20       // (see uncoupled comment); refresh history from the preserved\n\
-                 \x20       // state at the new conductances: i[n] + Y*v[n] per winding.\n\
-                 \x20       for ci in 0..{n} {{\n\
-                 \x20           self.ci_i1_hist[ci] = self.ci_i1_prev[ci] + self.ci_g_self_1[ci] * self.ci_v1_prev[ci] + self.ci_g_mutual[ci] * self.ci_v2_prev[ci];\n\
-                 \x20           self.ci_i2_hist[ci] = self.ci_i2_prev[ci] + self.ci_g_mutual[ci] * self.ci_v1_prev[ci] + self.ci_g_self_2[ci] * self.ci_v2_prev[ci];\n\
-                 \x20       }}\n",
-                n = num_coupled,
-            ));
-        }
-
-        // Transformer group companion stamps
-        let num_xfmr_groups = if ir.topology.augmented_inductors {
-            0
-        } else {
-            ir.transformer_groups.len()
-        };
-        if num_xfmr_groups > 0 {
-            if num_inductors == 0 && num_coupled == 0 {
-                code.push_str("        let t = 1.0 / internal_rate;\n");
-            }
-            code.push_str("\n        // Add transformer group companion model conductances\n");
-            for (gi, g) in ir.transformer_groups.iter().enumerate() {
-                let w = g.num_windings;
-                // Build L matrix from inductances and couplings, invert, multiply by T/2
-                code.push_str(
-                    "        {\n\
-                     \x20           let half_t = t / 2.0;\n\
-                     \x20           // Build inductance matrix L[i][j] = k[i][j] * sqrt(Li*Lj)\n",
-                );
-                // Emit L matrix construction
-                for i in 0..w {
-                    for j in 0..w {
-                        code.push_str(&format!(
-                            "            let l_{i}_{j} = XFMR_{gi}_COUPLING[{flat}] * (XFMR_{gi}_INDUCTANCES[{i}] * XFMR_{gi}_INDUCTANCES[{j}]).sqrt();\n",
-                            flat = i * w + j,
-                        ));
-                    }
-                }
-                // Inline Gauss elimination to invert W x W matrix
-                code.push_str(&format!("            let y = invert_xfmr_{gi}(["));
-                for i in 0..w {
-                    if i > 0 {
-                        code.push_str(", ");
-                    }
-                    code.push('[');
-                    for j in 0..w {
-                        if j > 0 {
-                            code.push_str(", ");
-                        }
-                        code.push_str(&format!("l_{i}_{j}"));
-                    }
-                    code.push(']');
-                }
-                code.push_str("]);\n");
-                // Store Y = half_t * inv(L) and stamp
-                for i in 0..w {
-                    for j in 0..w {
-                        code.push_str(&format!(
-                            "            self.xfmr_{gi}_y[{flat}] = half_t * y[{i}][{j}];\n",
-                            flat = i * w + j,
-                        ));
-                    }
-                }
-                // Stamp self-conductances (diagonal)
-                for i in 0..w {
-                    let flat = i * w + i;
-                    code.push_str(&format!(
-                        "            stamp_conductance(&mut a, XFMR_{gi}_NODE_I[{i}], XFMR_{gi}_NODE_J[{i}], self.xfmr_{gi}_y[{flat}]);\n",
-                    ));
-                }
-                // Stamp mutual conductances (off-diagonal)
-                for i in 0..w {
-                    for j in 0..w {
-                        if i == j {
-                            continue;
-                        }
-                        let flat = i * w + j;
-                        code.push_str(&format!(
-                            "            stamp_mutual(&mut a, XFMR_{gi}_NODE_I[{i}], XFMR_{gi}_NODE_J[{i}], XFMR_{gi}_NODE_I[{j}], XFMR_{gi}_NODE_J[{j}], self.xfmr_{gi}_y[{flat}]);\n",
-                        ));
-                    }
-                }
-                code.push_str("        }\n");
-            }
-            // Preserve transformer-group transient state across rebuilds
-            // (see uncoupled comment); refresh history from the preserved
-            // state at the new Y: i[n] + Y*v[n] per winding.
-            for (gi, g) in ir.transformer_groups.iter().enumerate() {
-                let w = g.num_windings;
-                code.push_str(&format!(
-                    "        for wk in 0..{w} {{\n\
-                     \x20           let mut h = self.xfmr_{gi}_i_prev[wk];\n\
-                     \x20           for wl in 0..{w} {{ h += self.xfmr_{gi}_y[wk * {w} + wl] * self.xfmr_{gi}_v_prev[wl]; }}\n\
-                     \x20           self.xfmr_{gi}_i_hist[wk] = h;\n\
-                     \x20       }}\n",
-                ));
-            }
         }
 
         // Invert A → S, compute S_NI, K. Use the equilibrated invert so
@@ -2674,91 +2306,6 @@ impl RustEmitter {
         code
     }
 
-    /// Emit inline Gaussian elimination inversion functions for transformer groups.
-    ///
-    /// Each transformer group of size W gets its own `invert_xfmr_{n}` function
-    /// that inverts a W x W matrix. The size is known at codegen time so the
-    /// function is fully unrolled.
-    fn emit_transformer_group_helpers(ir: &CircuitIR) -> String {
-        if ir.transformer_groups.is_empty() {
-            return String::new();
-        }
-        let mut code = section_banner("TRANSFORMER GROUP INVERSION HELPERS");
-
-        for (gi, g) in ir.transformer_groups.iter().enumerate() {
-            let w = g.num_windings;
-            code.push_str(&format!(
-                "/// Invert a {w}x{w} matrix for transformer group {gi} using Gaussian elimination.\n\
-                 #[inline(always)]\n\
-                 fn invert_xfmr_{gi}(a: [[f64; {w}]; {w}]) -> [[f64; {w}]; {w}] {{\n\
-                 \x20   let mut aug = [[0.0f64; {w2}]; {w}];\n\
-                 \x20   for i in 0..{w} {{\n\
-                 \x20       for j in 0..{w} {{\n\
-                 \x20           aug[i][j] = a[i][j];\n\
-                 \x20       }}\n\
-                 \x20       aug[i][{w} + i] = 1.0;\n\
-                 \x20   }}\n\n",
-                w2 = w * 2,
-            ));
-            // Forward elimination with partial pivoting
-            code.push_str(&format!(
-                "    for col in 0..{w} {{\n\
-                 \x20       let mut max_row = col;\n\
-                 \x20       let mut max_val = aug[col][col].abs();\n\
-                 \x20       for row in (col + 1)..{w} {{\n\
-                 \x20           if aug[row][col].abs() > max_val {{\n\
-                 \x20               max_val = aug[row][col].abs();\n\
-                 \x20               max_row = row;\n\
-                 \x20           }}\n\
-                 \x20       }}\n\
-                 \x20       if max_val < 1e-30 {{\n\
-                 \x20           let mut result = [[0.0f64; {w}]; {w}];\n\
-                 \x20           for i in 0..{w} {{ result[i][i] = 1.0; }}\n\
-                 \x20           return result;\n\
-                 \x20       }}\n\
-                 \x20       if max_row != col {{ aug.swap(col, max_row); }}\n\
-                 \x20       let pivot = aug[col][col];\n\
-                 \x20       for row in (col + 1)..{w} {{\n\
-                 \x20           let factor = aug[row][col] / pivot;\n\
-                 \x20           for j in col..{w2} {{\n\
-                 \x20               aug[row][j] -= factor * aug[col][j];\n\
-                 \x20           }}\n\
-                 \x20       }}\n\
-                 \x20   }}\n\n",
-                w2 = w * 2,
-            ));
-            // Back-substitution
-            code.push_str(&format!(
-                "    for col in (0..{w}).rev() {{\n\
-                 \x20       let pivot = aug[col][col];\n\
-                 \x20       if pivot.abs() < 1e-30 {{\n\
-                 \x20           let mut result = [[0.0f64; {w}]; {w}];\n\
-                 \x20           for i in 0..{w} {{ result[i][i] = 1.0; }}\n\
-                 \x20           return result;\n\
-                 \x20       }}\n\
-                 \x20       for j in 0..{w2} {{ aug[col][j] /= pivot; }}\n\
-                 \x20       for row in 0..col {{\n\
-                 \x20           let factor = aug[row][col];\n\
-                 \x20           for j in 0..{w2} {{ aug[row][j] -= factor * aug[col][j]; }}\n\
-                 \x20       }}\n\
-                 \x20   }}\n\n",
-                w2 = w * 2,
-            ));
-            // Extract result
-            code.push_str(&format!(
-                "    let mut result = [[0.0f64; {w}]; {w}];\n\
-                 \x20   for i in 0..{w} {{\n\
-                 \x20       for j in 0..{w} {{\n\
-                 \x20           result[i][j] = aug[i][{w} + j];\n\
-                 \x20       }}\n\
-                 \x20   }}\n\
-                 \x20   result\n\
-                 }}\n\n",
-            ));
-        }
-        code
-    }
-
     fn emit_build_rhs(
         &self,
         ir: &CircuitIR,
@@ -2776,58 +2323,6 @@ impl RustEmitter {
         // after the input stamp. Safe on both trapezoidal and BE paths — the
         // field is the raw per-sample value, not rate-dependent.
         ctx.insert("runtime_sources", &ir.runtime_sources);
-
-        // When augmented_inductors is true, companion model history is handled by A_neg,
-        // so num_inductors/num_coupled_inductors/num_transformer_groups should be 0
-        // for the build_rhs template (no history current injection).
-        let num_inductors = if ir.topology.augmented_inductors {
-            0
-        } else {
-            ir.inductors.len()
-        };
-        ctx.insert("num_inductors", &num_inductors);
-        if num_inductors > 0 {
-            ctx.insert("inductors", &inductor_template_data(ir, false));
-        }
-        let num_coupled_inductors = if ir.topology.augmented_inductors {
-            0
-        } else {
-            ir.coupled_inductors.len()
-        };
-        ctx.insert("num_coupled_inductors", &num_coupled_inductors);
-        if num_coupled_inductors > 0 {
-            ctx.insert("coupled_inductors", &coupled_inductor_template_data(ir));
-        }
-        let num_transformer_groups = if ir.topology.augmented_inductors {
-            0
-        } else {
-            ir.transformer_groups.len()
-        };
-        ctx.insert("num_transformer_groups", &num_transformer_groups);
-        if num_transformer_groups > 0 {
-            let mut xfmr_rhs_lines = String::new();
-            for (gi, g) in ir.transformer_groups.iter().enumerate() {
-                for k in 0..g.num_windings {
-                    if g.winding_node_i[k] > 0 {
-                        xfmr_rhs_lines.push_str(&format!(
-                            "    rhs[{}] -= state.xfmr_{}_i_hist[{}];\n",
-                            g.winding_node_i[k] - 1,
-                            gi,
-                            k
-                        ));
-                    }
-                    if g.winding_node_j[k] > 0 {
-                        xfmr_rhs_lines.push_str(&format!(
-                            "    rhs[{}] += state.xfmr_{}_i_hist[{}];\n",
-                            g.winding_node_j[k] - 1,
-                            gi,
-                            k
-                        ));
-                    }
-                }
-            }
-            ctx.insert("xfmr_rhs_lines", &xfmr_rhs_lines);
-        }
 
         // A_neg * v_prev lines (using pre-analyzed sparsity)
         let assign_op = if ir.has_dc_sources { "+=" } else { "=" };
@@ -3008,102 +2503,6 @@ impl RustEmitter {
         ctx.insert("be_p_lines", &be_p_lines);
         ctx.insert("has_dc_sources", &ir.has_dc_sources);
         ctx.insert("max_iter", &ir.solver_config.max_iterations);
-        // When augmented_inductors is true, companion model state update is not needed —
-        // A_neg handles all inductor history through the augmented G/C matrices.
-        let num_inductors = if ir.topology.augmented_inductors {
-            0
-        } else {
-            ir.inductors.len()
-        };
-        ctx.insert("num_inductors", &num_inductors);
-        if num_inductors > 0 {
-            ctx.insert("inductors", &inductor_template_data(ir, false));
-        }
-        let num_coupled_inductors = if ir.topology.augmented_inductors {
-            0
-        } else {
-            ir.coupled_inductors.len()
-        };
-        ctx.insert("num_coupled_inductors", &num_coupled_inductors);
-        if num_coupled_inductors > 0 {
-            ctx.insert("coupled_inductors", &coupled_inductor_template_data(ir));
-        }
-        let num_transformer_groups = if ir.topology.augmented_inductors {
-            0
-        } else {
-            ir.transformer_groups.len()
-        };
-        ctx.insert("num_transformer_groups", &num_transformer_groups);
-        if num_transformer_groups > 0 {
-            // Generate transformer group state update code procedurally
-            let mut xfmr_update_lines = String::new();
-            for (gi, g) in ir.transformer_groups.iter().enumerate() {
-                let w = g.num_windings;
-                xfmr_update_lines.push_str("    {\n");
-                // Extract winding voltages
-                for k in 0..w {
-                    let v_i = if g.winding_node_i[k] > 0 {
-                        format!("v[{}]", g.winding_node_i[k] - 1)
-                    } else {
-                        "0.0".to_string()
-                    };
-                    let v_j = if g.winding_node_j[k] > 0 {
-                        format!("v[{}]", g.winding_node_j[k] - 1)
-                    } else {
-                        "0.0".to_string()
-                    };
-                    xfmr_update_lines
-                        .push_str(&format!("        let v_new_{k} = {v_i} - {v_j};\n"));
-                }
-                // Compute new currents: i_new[k] = i_prev[k] + sum_j Y[k][j] * (v_prev[j] + v_new[j])
-                for k in 0..w {
-                    xfmr_update_lines.push_str(&format!(
-                        "        let i_new_{k} = state.xfmr_{gi}_i_prev[{k}]"
-                    ));
-                    for j in 0..w {
-                        xfmr_update_lines.push_str(&format!(
-                            " + state.xfmr_{gi}_y[{}] * (state.xfmr_{gi}_v_prev[{j}] + v_new_{j})",
-                            k * w + j,
-                        ));
-                    }
-                    xfmr_update_lines.push_str(";\n");
-                }
-                // Companion history (charge form): the known part of the next
-                // winding current, i_hist[k] = i_new[k] + sum_j Y[k][j]*v_new[j];
-                // the Y*v[n+1] part is the admittance stamp in A.
-                for k in 0..w {
-                    xfmr_update_lines
-                        .push_str(&format!("        state.xfmr_{gi}_i_hist[{k}] = i_new_{k}"));
-                    for j in 0..w {
-                        xfmr_update_lines
-                            .push_str(&format!(" + state.xfmr_{gi}_y[{}] * v_new_{j}", k * w + j,));
-                    }
-                    xfmr_update_lines.push_str(";\n");
-                }
-                // Update i_prev and v_prev
-                for k in 0..w {
-                    xfmr_update_lines.push_str(&format!(
-                        "        state.xfmr_{gi}_i_prev[{k}] = i_new_{k};\n\
-                         \x20       state.xfmr_{gi}_v_prev[{k}] = v_new_{k};\n"
-                    ));
-                }
-                xfmr_update_lines.push_str("    }\n");
-            }
-            ctx.insert("xfmr_update_lines", &xfmr_update_lines);
-
-            // Generate NaN reset lines
-            let mut xfmr_nan_reset_lines = String::new();
-            for (gi, g) in ir.transformer_groups.iter().enumerate() {
-                xfmr_nan_reset_lines.push_str(&format!(
-                    "        state.xfmr_{gi}_i_prev = [0.0; {}];\n\
-                     \x20       state.xfmr_{gi}_v_prev = [0.0; {}];\n\
-                     \x20       state.xfmr_{gi}_i_hist = [0.0; {}];\n",
-                    g.num_windings, g.num_windings, g.num_windings,
-                ));
-            }
-            ctx.insert("xfmr_nan_reset_lines", &xfmr_nan_reset_lines);
-        }
-
         let os_factor = ir.solver_config.oversampling_factor;
         ctx.insert("oversampling_factor", &os_factor);
         if os_factor > 1 {

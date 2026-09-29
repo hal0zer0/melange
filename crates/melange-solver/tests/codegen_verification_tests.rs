@@ -75,20 +75,6 @@ fn generate_code(spice: &str) -> (String, Netlist, MnaSystem, DkKernel) {
     (built.generated.code, built.netlist, built.mna, built.kernel)
 }
 
-/// DK codegen straight from the raw MNA with companion-model inductors.
-/// Bypasses the production pipeline on purpose: tests the companion-inductor
-/// codegen path, which no shipped build reaches (an inductor deck always
-/// builds the augmented kernel); it goes with that path's deletion.
-fn generate_code_companion_raw(spice: &str, config: CodegenConfig) -> String {
-    let (netlist, mut mna, _) = build_pipeline(spice);
-    mna.g[config.input_node][config.input_node] += 1.0 / config.input_resistance;
-    let kernel = DkKernel::from_mna(&mna, config.sample_rate).expect("DK kernel");
-    CodeGenerator::new(config)
-        .generate(&kernel, &mna, &netlist)
-        .expect("companion codegen")
-        .code
-}
-
 // ---------------------------------------------------------------------------
 // Circuit definitions reused across tests
 // ---------------------------------------------------------------------------
@@ -1609,43 +1595,6 @@ L1 out 0 10m
 C1 out 0 100p
 ";
 
-/// Verify that generated code for an RL lowpass circuit contains
-/// inductor state fields, constants, RHS injection, and state update.
-/// Companion-model codegen (see [`generate_code_companion_raw`]).
-#[test]
-fn test_inductor_codegen_e2e() {
-    let code = generate_code_companion_raw(
-        RL_LOWPASS_SPICE,
-        shipped_config(RL_LOWPASS_SPICE, "test_circuit"),
-    );
-
-    // Should contain inductor constants
-    assert!(
-        code.contains("IND_0_G_EQ") || code.contains("INDUCTOR_0_G_EQ"),
-        "Generated code should contain inductor equivalent conductance constant.\n\
-         Code snippet: {}",
-        &code[..code.len().min(500)]
-    );
-
-    // Should contain inductor state fields (history current)
-    assert!(
-        code.contains("i_ind_hist") || code.contains("ind_i_hist") || code.contains("i_hist"),
-        "Generated code should contain inductor history current state field"
-    );
-
-    // Should contain inductor RHS injection (history current injection into build_rhs)
-    assert!(
-        code.contains("ind") || code.contains("IND"),
-        "Generated code should reference inductor constants or state"
-    );
-
-    // Verify the code mentions inductor-related updates in process_sample
-    assert!(
-        code.contains("state.i_ind") || code.contains("state.ind"),
-        "Generated code should update inductor state in process_sample"
-    );
-}
-
 /// The shipped build of the RL lowpass: the inductor is an augmented branch
 /// row (N = 2 nodes + 1), with no companion-model constants or state.
 #[test]
@@ -2661,7 +2610,8 @@ fn test_nonlinear_circuit_set_sample_rate_compiles() {
     }
 }
 
-/// Verify that the IR stores inductor inductance values.
+/// Verify that the IR carries an inductor as an augmented branch row whose C
+/// diagonal is the inductance.
 #[test]
 fn test_ir_stores_inductor_inductance() {
     let spice = "\
@@ -2672,24 +2622,41 @@ C1 out 0 1u
 ";
     let netlist = Netlist::parse(spice).expect("parse");
     let mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("kernel");
+    let kernel = DkKernel::from_mna_augmented(&mna, 44100.0).expect("kernel");
 
-    let config = CodegenConfig {
-        circuit_name: "ind_test".to_string(),
-        sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![1],
-        input_resistance: 1000.0,
-        ..CodegenConfig::default()
-    };
+    let ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &default_config())
+        .expect("IR build failed");
 
-    let ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config).expect("IR build failed");
-
-    assert_eq!(ir.inductors.len(), 1, "Should have 1 inductor");
+    let n = ir.topology.n;
+    let row = mna.n_aug;
+    assert!(ir.topology.augmented_inductors);
+    assert_eq!(n, mna.n_aug + 1, "one inductor branch row");
     assert!(
-        (ir.inductors[0].inductance - 0.01).abs() < 1e-10,
-        "Inductance should be 10mH = 0.01H, got {}",
-        ir.inductors[0].inductance
+        (ir.c(row, row).abs() - 0.01).abs() < 1e-12,
+        "branch-row C diagonal should be L = 10mH, got {}",
+        ir.c(row, row)
+    );
+}
+
+/// A companion-model kernel (DkKernel::from_mna on an inductor deck) has no
+/// codegen path: the IR refuses it and names the augmented kernel.
+#[test]
+fn test_companion_inductor_kernel_is_refused() {
+    let spice = "\
+Inductor Circuit
+R1 in out 1k
+L1 out 0 10m
+C1 out 0 1u
+";
+    let netlist = Netlist::parse(spice).expect("parse");
+    let mna = MnaSystem::from_netlist(&netlist).expect("mna");
+    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("kernel");
+    let err = CircuitIR::from_kernel(&kernel, &mna, &netlist, &default_config())
+        .err()
+        .expect("a companion-model kernel must be refused");
+    assert!(
+        err.to_string().contains("DkKernel::from_mna_augmented"),
+        "{err}"
     );
 }
 
@@ -2779,103 +2746,6 @@ C1 out 0 100n
     if !run_output.status.success() {
         panic!(
             "Pot set_sample_rate test failed:\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&run_output.stdout),
-            String::from_utf8_lossy(&run_output.stderr)
-        );
-    }
-}
-
-/// Verify that set_sample_rate works for a circuit with an inductor.
-/// ind_g_eq must be recomputed for the new rate.
-#[test]
-fn test_inductor_circuit_set_sample_rate_compiles_and_runs() {
-    let ind_spice = "\
-Inductor SR Test
-R1 in out 1k
-L1 out 0 10m
-C1 out 0 1u
-";
-    // Companion-model codegen (see [`generate_code_companion_raw`]).
-    let code = generate_code_companion_raw(ind_spice, shipped_config(ind_spice, "ind_sr_test"));
-
-    let test_harness = format!(
-        "{}\n\
-         fn main() {{\n\
-             let mut state = CircuitState::default();\n\
-             let default_g_eq = state.ind_g_eq[0];\n\
-             \n\
-             // Switch to 96kHz — g_eq = T/(2L) should change\n\
-             state.set_sample_rate(96000.0);\n\
-             let new_g_eq = state.ind_g_eq[0];\n\
-             \n\
-             // g_eq = T/(2*L) = 1/(2*sr*L), so at 96kHz it should be smaller\n\
-             assert!(\n\
-                 (default_g_eq - new_g_eq).abs() > 1e-10,\n\
-                 \"ind_g_eq should change with sample rate: default={{}} vs 96k={{}}\",\n\
-                 default_g_eq, new_g_eq\n\
-             );\n\
-             assert!(\n\
-                 new_g_eq < default_g_eq,\n\
-                 \"g_eq at 96kHz should be smaller (shorter T): {{}} < {{}}\",\n\
-                 new_g_eq, default_g_eq\n\
-             );\n\
-             \n\
-             // Process samples and verify finite output\n\
-             let mut outputs = Vec::new();\n\
-             for i in 0..200 {{\n\
-                 let t = i as f64 / 96000.0;\n\
-                 let input = (2.0 * std::f64::consts::PI * 1000.0 * t).sin();\n\
-                 outputs.push(process_sample(input, &mut state)[0]);\n\
-             }}\n\
-             assert!(outputs.iter().all(|v| v.is_finite()), \"All outputs should be finite\");\n\
-             let max_out = outputs.iter().cloned().fold(0.0f64, f64::max);\n\
-             assert!(max_out > 1e-6, \"Inductor circuit should produce output\");\n\
-             \n\
-             // S matrix should also differ from default\n\
-             let mut s_matches = true;\n\
-             for i in 0..N {{\n\
-                 for j in 0..N {{\n\
-                     if (state.s[i][j] - S_DEFAULT[i][j]).abs() > 1e-15 {{\n\
-                         s_matches = false;\n\
-                     }}\n\
-                 }}\n\
-             }}\n\
-             assert!(!s_matches, \"S at 96kHz should differ from S_DEFAULT\");\n\
-             \n\
-             eprintln!(\"inductor set_sample_rate test passed!\");\n\
-         }}\n",
-        code
-    );
-
-    let path = std::path::Path::new("/tmp/melange_ind_sr_test.rs");
-    let mut f = std::fs::File::create(path).expect("create temp file");
-    f.write_all(test_harness.as_bytes())
-        .expect("write temp file");
-
-    let output = std::process::Command::new("rustc")
-        .args([
-            path.to_str().unwrap(),
-            "-o",
-            "/tmp/melange_ind_sr_test",
-            "--edition",
-            "2021",
-        ])
-        .output()
-        .expect("run rustc");
-
-    if !output.status.success() {
-        panic!(
-            "Inductor set_sample_rate test failed to compile:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    let run_output = std::process::Command::new("/tmp/melange_ind_sr_test")
-        .output()
-        .expect("run test");
-    if !run_output.status.success() {
-        panic!(
-            "Inductor set_sample_rate test failed:\nstdout: {}\nstderr: {}",
             String::from_utf8_lossy(&run_output.stdout),
             String::from_utf8_lossy(&run_output.stderr)
         );

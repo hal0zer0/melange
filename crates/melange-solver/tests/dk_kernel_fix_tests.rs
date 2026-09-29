@@ -1,8 +1,8 @@
 //! Regression tests for the 2026-07 DK kernel / codegen fix wave:
 //!
 //! - F1: companion-path inductor history (i_hist = 2*i[n-1]) — the
-//!   time-march reference tests live in src/dk_math_verification.rs;
-//!   here we cover the emitted-code side effects.
+//!   time-march reference tests live in src/dk_math_verification.rs (the
+//!   library kernel; generated code carries inductors as augmented rows).
 //! - F2: emitted rebuild_matrices refreshes the backward-Euler fallback
 //!   matrix set (s_be/k_be/a_neg_be/s_ni_be).
 //! - F3: non-negative K diagonal (with live N_i column) forces the nodal
@@ -387,14 +387,6 @@ fn main() {
 }
 
 // ──────── F5: rebuild preserves inductor state (no pot-sweep DC thump) ─────
-
-// Note the 100n node capacitance at `mid`: the doubled-trapezoidal DK
-// formulation has A + A_neg = 2*alpha*C exactly (G cancels), so any
-// node-voltage pattern in null(C) is a marginally-stable period-2
-// (Nyquist) mode. The startup inconsistency between v_prev = DC_OP and
-// ind_i_prev = 0 excites that mode; a capacitance on the inductor node
-// (physically always present) pins it to zero. Without the cap the test
-// would measure that startup artifact, not the rebuild behavior.
 const POT_INDUCTOR_SPICE: &str = "\
 Pot Inductor Continuity
 Vcc vcc 0 DC 9
@@ -410,17 +402,18 @@ Rout out 0 10k
 #[test]
 fn test_pot_sweep_preserves_inductor_dc_current() {
     let config = support::config_for_spice(POT_INDUCTOR_SPICE, 48000.0);
-    // Companion-inductor codegen: raw build on purpose (see support).
-    let (code, _n, m) = support::generate_circuit_code_raw_dk(POT_INDUCTOR_SPICE, &config);
+    let (code, _n, m) = support::generate_circuit_code(POT_INDUCTOR_SPICE, &config);
     assert_eq!(m, 0, "linear circuit");
+    // The inductor current is the augmented branch row, the last row of the
+    // state (after the circuit nodes and the Vcc row).
     assert!(
-        code.contains("ind_i_hist"),
-        "companion inductor path expected"
+        code.contains("pub const N: usize = 6;"),
+        "4 nodes + Vcc + L1 rows"
     );
 
     // L1 carries a standing DC current (9 V / R1). Sweeping the pot
-    // per-block must not reset ind_i_prev — pre-fix, every rebuild zeroed
-    // it, injecting an ~I*R voltage spike at `mid` on every knob tick.
+    // per-block must not reset it: a rebuild that dropped the standing
+    // current would inject an ~I*R voltage spike at `mid` on every knob tick.
     let main_code = r#"
 fn main() {
     let mut state = CircuitState::default();
@@ -428,7 +421,7 @@ fn main() {
     for _ in 0..96000 {
         let _ = process_sample(0.0, &mut state);
     }
-    let i_settled = state.ind_i_prev[0];
+    let i_settled = state.v_prev[N - 1];
     println!("i_settled={i_settled:.6e}");
 
     // Sweep the pot from its 1k nominal to 2k in small per-block steps
@@ -454,7 +447,7 @@ fn main() {
         }
     }
     println!("max_step={max_step:.6e}");
-    println!("i_final={:.6e}", state.ind_i_prev[0]);
+    println!("i_final={:.6e}", state.v_prev[N - 1]);
 }
 "#;
 
@@ -472,8 +465,8 @@ fn main() {
     assert!(
         max_step < 0.1,
         "per-block pot sweep must not thump the output \
-         (max sample-to-sample step = {max_step:.3e} V; pre-fix the rebuild \
-         zeroed ind_i_prev and re-injected the full standing current each block)"
+         (max sample-to-sample step = {max_step:.3e} V; a rebuild that drops \
+         the standing inductor current re-injects it every block)"
     );
     let i_final = output.parse_kv("i_final").expect("main must print i_final");
     assert!(

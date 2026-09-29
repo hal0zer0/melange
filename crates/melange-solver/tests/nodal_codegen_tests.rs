@@ -155,11 +155,6 @@ fn test_nodal_ir_construction() {
         !ir.matrices.s.is_empty(),
         "S should be computed for Schur complement"
     );
-
-    // No companion model state
-    assert!(ir.inductors.is_empty());
-    assert!(ir.coupled_inductors.is_empty());
-    assert!(ir.transformer_groups.is_empty());
 }
 
 // ---------------------------------------------------------------------------

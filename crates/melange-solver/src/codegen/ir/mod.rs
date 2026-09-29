@@ -124,9 +124,6 @@ pub struct CircuitIR {
     pub dc_op_iterations: usize,
     /// Whether to include DC blocking filter on outputs.
     pub dc_block: bool,
-    pub inductors: Vec<InductorIR>,
-    pub coupled_inductors: Vec<CoupledInductorIR>,
-    pub transformer_groups: Vec<TransformerGroupIR>,
     /// Saturating (iron-core) inductors: flux devices in the full-LU NR loop.
     /// A saturating tightly-coupled transformer appears here as its T-model
     /// `{ref}_mag` magnetizing inductor (shared-core saturation).
@@ -420,8 +417,8 @@ pub struct Topology {
     /// should be zeroed. Inductor rows (n_aug..n) and internal BJT node rows should NOT.
     #[serde(default)]
     pub n_aug: usize,
-    /// True when inductors use augmented MNA (branch current variables in G/C)
-    /// instead of companion model (history currents in state).
+    /// True when the circuit has inductors: augmented-MNA branch current
+    /// variables on rows n_aug..n (L in C).
     #[serde(default)]
     pub augmented_inductors: bool,
     /// Number of devices linearized at DC OP (triodes + BJTs).
@@ -853,7 +850,7 @@ pub struct Matrices {
     /// under both integrators a source enters once, at `n+1`.
     pub rhs_const: Vec<f64>,
     /// Raw conductance matrix G, N×N row-major (sample-rate independent).
-    /// Includes input conductance but NOT inductor companion conductances.
+    /// Includes input conductance.
     /// An op-amp whose card sets `AOL_TRANSIENT_CAP` has its Gm reduced to the
     /// cap; every other op-amp keeps full Gm stamped.
     #[serde(default)]
@@ -1090,21 +1087,10 @@ pub struct SwitchComponentIR {
     pub node_q: usize,
     /// Nominal value from netlist
     pub nominal_value: f64,
-    /// For 'L' components: index into the inductors vec (for g_eq recomputation)
-    pub inductor_index: Option<usize>,
-    /// For 'L' components in augmented MNA: row index in augmented C matrix
-    /// where the inductance value lives (c_work[k][k] = L). None for DK path
-    /// or non-inductor components.
+    /// For 'L' components: row index in the augmented C matrix where the
+    /// inductance value lives (c_work[k][k] = L). None for non-inductors.
     #[serde(default)]
     pub augmented_row: Option<usize>,
-    /// For 'L' components in a coupled inductor pair (DK path): index into
-    /// `coupled_inductors` vec. None for uncoupled inductors or non-inductors.
-    #[serde(default)]
-    pub coupled_inductor_index: Option<usize>,
-    /// Which winding (1 = L1, 2 = L2) within the coupled pair.
-    /// Only meaningful when `coupled_inductor_index` is Some.
-    #[serde(default)]
-    pub coupled_winding: Option<u8>,
 }
 
 /// Mutual inductance entry that must be recomputed when a switch changes
@@ -1141,21 +1127,6 @@ pub struct SwitchIR {
     pub mutual_entries: Vec<SwitchMutualEntry>,
 }
 
-/// Inductor parameters for code generation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InductorIR {
-    pub name: String,
-    /// Node index (1-indexed, 0=ground)
-    pub node_i: usize,
-    /// Node index (1-indexed, 0=ground)
-    pub node_j: usize,
-    /// Equivalent conductance T/(2L) (at the codegen sample rate)
-    pub g_eq: f64,
-    /// Raw inductance value in henries (for sample rate recomputation)
-    #[serde(default)]
-    pub inductance: f64,
-}
-
 /// Saturating (iron-core) inductor.
 ///
 /// A flux device solved inside the full-LU NR loop: flux
@@ -1184,42 +1155,6 @@ pub struct SaturatingInductorIR {
     /// Where `lair` came from (`LAIR=`, `CORE=<class>` or the default).
     #[serde(default)]
     pub lair_source: String,
-}
-
-/// Coupled inductor pair parameters for code generation (transformer).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CoupledInductorIR {
-    pub name: String,
-    pub l1_name: String,
-    pub l2_name: String,
-    pub l1_node_i: usize,
-    pub l1_node_j: usize,
-    pub l2_node_i: usize,
-    pub l2_node_j: usize,
-    pub l1_inductance: f64,
-    pub l2_inductance: f64,
-    pub coupling: f64,
-    /// Self-conductance for L1: (T/2) * L2 / det
-    pub g_self_1: f64,
-    /// Self-conductance for L2: (T/2) * L1 / det
-    pub g_self_2: f64,
-    /// Mutual conductance: -(T/2) * M / det
-    pub g_mutual: f64,
-}
-
-/// Multi-winding transformer group for codegen.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TransformerGroupIR {
-    pub name: String,
-    pub num_windings: usize,
-    pub winding_names: Vec<String>,
-    pub winding_node_i: Vec<usize>,
-    pub winding_node_j: Vec<usize>,
-    pub inductances: Vec<f64>,
-    /// NxN coupling matrix, flat row-major
-    pub coupling_flat: Vec<f64>,
-    /// NxN admittance matrix Y = (T/2) * inv(L), flat row-major (at codegen sample rate)
-    pub y_matrix: Vec<f64>,
 }
 
 // Re-export device types from the shared module (always compiled, no tera dependency).
@@ -1281,87 +1216,6 @@ pub struct SparseInfo {
 // LuSparsity, LuOp, and SPARSITY_THRESHOLD are defined in crate::lu
 // and re-imported at the top of this file.
 
-/// Analyze sparsity pattern of a flattened row-major matrix.
-/// Stamp DK companion-model inductor conductances into (A, A_neg) at time
-/// step `t = 1/rate`.
-///
-/// No-op on the augmented-inductor path (branch rows carry L in C there).
-/// The companion form is the trapezoidal one (`g_eq = T/(2L)`) for BOTH
-/// primary integrators — this mirrors the emitted `rebuild_matrices()`,
-/// which stamps the same form regardless of `backward_euler`. The `−g_eq`
-/// stamped into `a_neg_flat` here builds the whole-system operator the
-/// stability discriminator evaluates; the shipped charge-form history keeps
-/// the companion's known current in its source instead
-/// (`i_hist = i + g_eq·v`, see [`charge_form_history`]).
-fn stamp_dk_companion_inductors(
-    a_flat: &mut [f64],
-    a_neg_flat: &mut [f64],
-    n: usize,
-    augmented_inductors: bool,
-    kernel: &DkKernel,
-    t: f64,
-) {
-    if augmented_inductors {
-        return;
-    }
-    // Companion model path: stamp inductor conductances at this rate
-    for ind in &kernel.inductors {
-        let g_eq = t / (2.0 * ind.inductance);
-        stamp_flat_conductance(a_flat, n, ind.node_i, ind.node_j, g_eq);
-        stamp_flat_conductance(a_neg_flat, n, ind.node_i, ind.node_j, -g_eq);
-    }
-
-    // Stamp coupled inductor companion conductances at this rate
-    for ci in &kernel.coupled_inductors {
-        let m_val = ci.coupling * (ci.l1_inductance * ci.l2_inductance).sqrt();
-        let det = ci.l1_inductance * ci.l2_inductance - m_val * m_val;
-        let half_t = t / 2.0;
-        let gs1 = half_t * ci.l2_inductance / det;
-        let gs2 = half_t * ci.l1_inductance / det;
-        let gm = -half_t * m_val / det;
-        stamp_flat_conductance(a_flat, n, ci.l1_node_i, ci.l1_node_j, gs1);
-        stamp_flat_conductance(a_neg_flat, n, ci.l1_node_i, ci.l1_node_j, -gs1);
-        stamp_flat_conductance(a_flat, n, ci.l2_node_i, ci.l2_node_j, gs2);
-        stamp_flat_conductance(a_neg_flat, n, ci.l2_node_i, ci.l2_node_j, -gs2);
-        stamp_flat_mutual(
-            a_flat,
-            n,
-            ci.l1_node_i,
-            ci.l1_node_j,
-            ci.l2_node_i,
-            ci.l2_node_j,
-            gm,
-        );
-        stamp_flat_mutual(
-            a_flat,
-            n,
-            ci.l2_node_i,
-            ci.l2_node_j,
-            ci.l1_node_i,
-            ci.l1_node_j,
-            gm,
-        );
-        stamp_flat_mutual(
-            a_neg_flat,
-            n,
-            ci.l1_node_i,
-            ci.l1_node_j,
-            ci.l2_node_i,
-            ci.l2_node_j,
-            -gm,
-        );
-        stamp_flat_mutual(
-            a_neg_flat,
-            n,
-            ci.l2_node_i,
-            ci.l2_node_j,
-            ci.l1_node_i,
-            ci.l1_node_j,
-            -gm,
-        );
-    }
-}
-
 /// Blanket-zero ALL augmented algebraic rows (`n_nodes..mna_n_aug`) in a DK
 /// history matrix — same semantics as the nodal branch's blanket zeroing in
 /// `from_mna` and the emitted `rebuild_matrices()`.
@@ -1383,11 +1237,7 @@ fn stamp_dk_companion_inductors(
 ///   mna_n_aug..n              inductor branch rows appended by
 ///                             build_augmented_matrices (L lives in C on
 ///                             these rows) → NOT zeroed, they need
-///                             trapezoidal history. When
-///                             `!augmented_inductors`, inductors are
-///                             companion-stamped into node rows and no
-///                             branch rows exist, so the range is safe
-///                             either way.
+///                             trapezoidal history.
 /// BJT internal nodes (expand_bjt_internal_nodes) also land inside
 /// n_nodes..n_aug, but only on the nodal route — the DK path never expands
 /// them (see melange-cli routing).
@@ -1550,12 +1400,9 @@ fn build_dk_trap_matrices_at_rate(
     n_nodes: usize,
     mna_n_aug: usize,
     bjt_internal: &[crate::mna::BjtTransientInternalNodes],
-    augmented_inductors: bool,
-    kernel: &DkKernel,
     rate: f64,
 ) -> (Vec<f64>, Vec<f64>) {
     let alpha = 2.0 * rate;
-    let t = 1.0 / rate;
 
     // Build A = G + alpha*C, A_neg = alpha*C - G
     let mut a_flat = vec![0.0f64; n * n];
@@ -1569,14 +1416,6 @@ fn build_dk_trap_matrices_at_rate(
         }
     }
 
-    stamp_dk_companion_inductors(
-        &mut a_flat,
-        &mut a_neg_flat,
-        n,
-        augmented_inductors,
-        kernel,
-        t,
-    );
     zero_augmented_history_rows(&mut a_neg_flat, n, n_nodes, mna_n_aug, bjt_internal);
 
     (a_flat, a_neg_flat)
@@ -1587,9 +1426,9 @@ fn build_dk_trap_matrices_at_rate(
 /// constants use ONE integrator convention: A = G + (1/T)·C,
 /// A_neg = (1/T)·C (no −G term), rhs_const ×1 — exactly mirroring the
 /// os=1 BE branch of `from_kernel_with_dc_op`, evaluated at the internal
-/// rate, plus the companion-inductor stamps and blanket algebraic-row
-/// zeroing that the emitted `rebuild_matrices()` applies (baked constants
-/// must equal the first runtime rebuild's output).
+/// rate, plus the blanket algebraic-row zeroing that the emitted
+/// `rebuild_matrices()` applies (baked constants must equal the first
+/// runtime rebuild's output).
 #[allow(clippy::too_many_arguments)]
 fn build_dk_be_matrices_at_rate(
     g_matrix: &[f64],
@@ -1597,13 +1436,10 @@ fn build_dk_be_matrices_at_rate(
     n: usize,
     n_nodes: usize,
     mna_n_aug: usize,
-    augmented_inductors: bool,
-    kernel: &DkKernel,
     rate: f64,
     mna: &MnaSystem,
 ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), CodegenError> {
     let alpha = rate; // BE: alpha = 1/T
-    let t = 1.0 / rate;
 
     let mut a_flat = vec![0.0f64; n * n];
     let mut a_neg_flat = vec![0.0f64; n * n];
@@ -1616,14 +1452,6 @@ fn build_dk_be_matrices_at_rate(
         }
     }
 
-    stamp_dk_companion_inductors(
-        &mut a_flat,
-        &mut a_neg_flat,
-        n,
-        augmented_inductors,
-        kernel,
-        t,
-    );
     // BE A_neg = alpha·C is already zero on most algebraic rows, but
     // Boyle-internal / current-mode-VCA / behavioral-V rows can carry C
     // entries — blanket-zero to match the trap arm and the runtime rebuild.
@@ -1723,10 +1551,7 @@ impl CircuitIR {
     ///
     /// Only a default-trapezoidal build is decided: a flag, a directive or
     /// behavioral sources already fixed the integrator. The predicate failing
-    /// to evaluate is an error, not a silent default. An IR the predicate
-    /// cannot represent (companion-modelled inductors, DK library path) stays
-    /// trapezoidal with the reason recorded — BE is refused on that path
-    /// anyway.
+    /// to evaluate is an error, not a silent default.
     fn ring_promotion(
         ir: &mut CircuitIR,
         config: &CodegenConfig,
@@ -1898,10 +1723,25 @@ impl CircuitIR {
             ));
         }
 
-        // Detect augmented inductors: kernel.inductors is empty when from_mna_augmented
-        // was used (companion vectors cleared), and kernel.n > mna.n_aug means extra
-        // inductor branch variables were added.
-        let augmented_inductors = kernel.inductors.is_empty() && (kernel.n > mna.n_aug);
+        // Inductors are augmented-MNA branch rows (DkKernel::from_mna_augmented,
+        // as the build makes every inductor kernel): L lives in C on rows
+        // n_aug..n. A companion-model kernel (DkKernel::from_mna on an inductor
+        // deck, the runtime LinearSolver's form) has no codegen path.
+        if !kernel.inductors.is_empty()
+            || !kernel.coupled_inductors.is_empty()
+            || !kernel.transformer_groups.is_empty()
+        {
+            return Err(CodegenError::UnsupportedTopology(format!(
+                "a DK kernel with {} companion-modelled inductor(s), {} coupled pair(s) \
+                 and {} transformer group(s) cannot be code-generated: inductors are \
+                 generated as augmented-MNA branch rows. Build the kernel with \
+                 DkKernel::from_mna_augmented (as melange_solver::build::build does).",
+                kernel.inductors.len(),
+                kernel.coupled_inductors.len(),
+                kernel.transformer_groups.len(),
+            )));
+        }
+        let augmented_inductors = kernel.n > mna.n_aug;
 
         let topology = Topology {
             n,
@@ -1945,8 +1785,6 @@ impl CircuitIR {
                 n_nodes,
                 mna.n_aug,
                 &mna.bjt_internal_nodes,
-                augmented_inductors,
-                kernel,
                 internal_rate,
             );
             let s = invert_flat_matrix(&a_flat, n)?;
@@ -1963,30 +1801,6 @@ impl CircuitIR {
         let trap_discriminator_rho = promoted.map_or(0.0, |v| v.rho);
         let be = cfg_backward_euler || auto_be;
 
-        // The DK backward-Euler matrix build cannot correctly discretize
-        // companion-modeled inductors. `stamp_dk_companion_inductors` stamps the
-        // TRAPEZOIDAL companion value g_eq = T/(2L) unconditionally (the correct
-        // BE value is T/L, with A_neg = alpha*C and no -g_eq history term), and
-        // the os=1 primary-BE branch never calls the stamp at all — treating each
-        // companion inductor as an open circuit. The augmented-MNA inductor path
-        // (from_mna_augmented: L as branch rows in the C matrix, so
-        // augmented_inductors == true) IS exact under BE and is what the CLI uses
-        // for every inductor circuit. Only a library consumer building a kernel
-        // via the non-augmented DkKernel::from_mna with inductors present
-        // (kernel.inductors non-empty => augmented_inductors false) and requesting
-        // BE reaches the broken path. Fail loud at this API boundary rather than
-        // silently ship wrong magnetics. (This is NOT a debug_assert: release
-        // builds — how a consumer crate builds — must reject it too.)
-        if be && !augmented_inductors && !kernel.inductors.is_empty() {
-            return Err(CodegenError::UnsupportedTopology(format!(
-                "backward-Euler integration with {} companion-modeled inductor(s) is not \
-                 supported on the DK path: the companion stamp uses the trapezoidal value \
-                 g_eq = T/(2L), but BE needs g_eq = T/L with A_neg = alpha*C (history x1). \
-                 Build the kernel with DkKernel::from_mna_augmented — augmented-MNA inductor \
-                 branch rows are exact under backward Euler — or use trapezoidal integration.",
-                kernel.inductors.len()
-            )));
-        }
         if auto_be {
             integrator_selection = IntegratorSelection::BeAuto;
         }
@@ -2053,35 +1867,6 @@ impl CircuitIR {
             generator_version: env!("CARGO_PKG_VERSION").to_string(),
         };
 
-        // DK BE fallback vs companion-model magnetics: the fallback matrices
-        // (`compute_dk_be_fallback`) are built from the raw MNA G/C, which do
-        // NOT carry the trapezoidal companion-model magnetics stamps that the
-        // shipped trap matrices get via `stamp_dk_companion_inductors` — and
-        // the per-sample BE RHS in process_sample.rs.tera stamps no
-        // inductor / coupled-inductor / transformer history currents. A BE
-        // fallback sample would therefore see every companion-modeled
-        // inductor as an OPEN CIRCUIT and drop its standing current. Until
-        // the fallback carries BE-consistent magnetics (g_eq = T/L, history
-        // ×1 — see the `compute_dk_be_fallback` doc), gate the fallback OFF
-        // when companion-path magnetics are present. Augmented-inductor
-        // systems (branch rows with L in the C matrix) are exact under
-        // A_be = G + (1/T)·C / A_neg_be = (1/T)·C and keep the fallback.
-        let has_companion_magnetics = !kernel.inductors.is_empty()
-            || !kernel.coupled_inductors.is_empty()
-            || !kernel.transformer_groups.is_empty();
-        if has_companion_magnetics && !config.disable_be_fallback && m > 0 && !be {
-            log::info!(
-                "DK backward-Euler fallback disabled: companion-model magnetics present \
-                 ({} inductor(s), {} coupled pair(s), {} transformer group(s)) — the BE \
-                 fallback matrices/RHS lack companion magnetics stamps and history \
-                 (mechanism: be-fallback-companion-magnetics gate; augmented-inductor \
-                 circuits are unaffected)",
-                kernel.inductors.len(),
-                kernel.coupled_inductors.len(),
-                kernel.transformer_groups.len(),
-            );
-        }
-
         let matrices = if os_factor > 1 && be {
             // BE + oversampling: build backward-Euler matrices at the
             // INTERNAL rate, mirroring the os=1 BE branch below. This branch
@@ -2101,8 +1886,6 @@ impl CircuitIR {
                 n,
                 n_nodes,
                 mna.n_aug,
-                augmented_inductors,
-                kernel,
                 internal_rate,
                 mna,
             )?;
@@ -2148,10 +1931,7 @@ impl CircuitIR {
             let k = compute_k_from_s(&s, &kernel.n_v, &kernel.n_i, n, m);
 
             // Compute BE fallback matrices for adaptive per-sample fallback
-            let want_be_fallback = !config.backward_euler
-                && !config.disable_be_fallback
-                && m > 0
-                && !has_companion_magnetics;
+            let want_be_fallback = !config.backward_euler && !config.disable_be_fallback && m > 0;
             let (s_be, k_be, a_neg_be, rhs_const_be) = if want_be_fallback {
                 compute_dk_be_fallback(
                     &g_matrix,
@@ -2266,7 +2046,7 @@ impl CircuitIR {
         } else {
             // Standard trapezoidal: use kernel matrices directly.
             // Also compute BE fallback matrices for adaptive per-sample fallback.
-            let want_be_fallback = !config.disable_be_fallback && m > 0 && !has_companion_magnetics;
+            let want_be_fallback = !config.disable_be_fallback && m > 0;
             let (s_be, k_be, a_neg_be, rhs_const_be) = if want_be_fallback {
                 compute_dk_be_fallback(
                     &g_matrix,
@@ -2310,115 +2090,11 @@ impl CircuitIR {
         };
 
         // BE fallback matrices are populated for nonlinear circuits (m>0) unless
-        // config.disable_be_fallback is set OR companion-model magnetics are
-        // present (see the has_companion_magnetics gate above). Linear circuits
-        // (m=0) skip BE fallback since they don't have NR iteration that could
-        // diverge.
+        // config.disable_be_fallback is set. Linear circuits (m=0) skip BE
+        // fallback since they don't have NR iteration that could diverge.
 
         let device_slots = Self::build_device_info_with_mna(netlist, Some(mna))?;
         let device_node_indices = Self::device_node_indices_for(&device_slots, mna);
-
-        let inductors: Vec<InductorIR> = kernel
-            .inductors
-            .iter()
-            .map(|ind| {
-                // Recompute g_eq at internal rate when oversampling
-                let g_eq = if os_factor > 1 {
-                    1.0 / (2.0 * internal_rate * ind.inductance)
-                } else {
-                    ind.g_eq
-                };
-                InductorIR {
-                    name: ind.name.to_string(),
-                    node_i: ind.node_i,
-                    node_j: ind.node_j,
-                    g_eq,
-                    inductance: ind.inductance,
-                }
-            })
-            .collect();
-
-        let coupled_inductors: Vec<CoupledInductorIR> = kernel
-            .coupled_inductors
-            .iter()
-            .map(|ci| {
-                // Recompute conductances at internal rate when oversampling
-                let (g_self_1, g_self_2, g_mutual) = if os_factor > 1 {
-                    let t = 1.0 / internal_rate;
-                    let m_val = ci.coupling * (ci.l1_inductance * ci.l2_inductance).sqrt();
-                    let det = ci.l1_inductance * ci.l2_inductance - m_val * m_val;
-                    let half_t = t / 2.0;
-                    (
-                        half_t * ci.l2_inductance / det,
-                        half_t * ci.l1_inductance / det,
-                        -half_t * m_val / det,
-                    )
-                } else {
-                    (ci.g_self_1, ci.g_self_2, ci.g_mutual)
-                };
-                CoupledInductorIR {
-                    name: ci.name.clone(),
-                    l1_name: ci.l1_name.clone(),
-                    l2_name: ci.l2_name.clone(),
-                    l1_node_i: ci.l1_node_i,
-                    l1_node_j: ci.l1_node_j,
-                    l2_node_i: ci.l2_node_i,
-                    l2_node_j: ci.l2_node_j,
-                    l1_inductance: ci.l1_inductance,
-                    l2_inductance: ci.l2_inductance,
-                    coupling: ci.coupling,
-                    g_self_1,
-                    g_self_2,
-                    g_mutual,
-                }
-            })
-            .collect();
-
-        let transformer_groups: Vec<TransformerGroupIR> = kernel
-            .transformer_groups
-            .iter()
-            .map(|g| {
-                let w = g.num_windings;
-                // Recompute Y matrix at internal rate when oversampling
-                let y_matrix = if os_factor > 1 {
-                    let t = 1.0 / internal_rate;
-                    let half_t = t / 2.0;
-                    let mut l_mat = vec![vec![0.0f64; w]; w];
-                    for i in 0..w {
-                        for j in 0..w {
-                            l_mat[i][j] = g.coupling_matrix[i][j]
-                                * (g.inductances[i] * g.inductances[j]).sqrt();
-                        }
-                    }
-                    let y_raw = crate::mna::invert_small_matrix(&l_mat);
-                    let mut y_flat = vec![0.0f64; w * w];
-                    for i in 0..w {
-                        for j in 0..w {
-                            y_flat[i * w + j] = half_t * y_raw[i][j];
-                        }
-                    }
-                    y_flat
-                } else {
-                    g.y_matrix.clone()
-                };
-                let mut coupling_flat = vec![0.0f64; w * w];
-                for i in 0..w {
-                    for j in 0..w {
-                        coupling_flat[i * w + j] = g.coupling_matrix[i][j];
-                    }
-                }
-                TransformerGroupIR {
-                    name: g.name.clone(),
-                    num_windings: w,
-                    winding_names: g.winding_names.clone(),
-                    winding_node_i: g.winding_node_i.clone(),
-                    winding_node_j: g.winding_node_j.clone(),
-                    inductances: g.inductances.clone(),
-                    coupling_flat,
-                    y_matrix,
-                }
-            })
-            .collect();
 
         let pots = kernel
             .pots
@@ -2476,13 +2152,9 @@ impl CircuitIR {
 
         // Build switches from MNA resolved info.
         //
-        // When augmented MNA is used for inductors (DK path with
-        // `augmented_inductors = true`), `rebuild_matrices()` stamps the L
-        // delta into `c_eff[aug_row][aug_row]` — mirroring the nodal path.
-        // Without this, the switch-delta loop in the DK emitter hits the
-        // `augmented_row: None` branch, emits a stub, and the companion-stamp
-        // fallback is compiled out because `num_inductors` is forced to 0
-        // under augmented MNA. See `dk_emitter::emit_switch_methods`.
+        // Inductor branch rows: `rebuild_matrices()` stamps a switched L
+        // delta into `c_eff[aug_row][aug_row]`, mirroring the nodal path. See
+        // `dk_emitter::emit_switch_methods`.
         let inductor_aug_rows: std::collections::HashMap<String, usize> = if augmented_inductors {
             let mut map = std::collections::HashMap::new();
             let mut var_idx = mna.n_aug;
@@ -2515,34 +2187,6 @@ impl CircuitIR {
                     .components
                     .iter()
                     .map(|comp| {
-                        // For inductor components, find matching index in the inductors vec
-                        let inductor_index = if comp.component_type == 'L' {
-                            kernel
-                                .inductors
-                                .iter()
-                                .position(|ind| ind.name.eq_ignore_ascii_case(&comp.name))
-                        } else {
-                            None
-                        };
-                        // For coupled inductor windings (not in uncoupled list),
-                        // find the coupled pair index and winding number.
-                        let (coupled_inductor_index, coupled_winding) =
-                            if comp.component_type == 'L' && inductor_index.is_none() {
-                                let mut found = None;
-                                for (ci_idx, ci) in kernel.coupled_inductors.iter().enumerate() {
-                                    if ci.l1_name.eq_ignore_ascii_case(&comp.name) {
-                                        found = Some((ci_idx, 1u8));
-                                        break;
-                                    }
-                                    if ci.l2_name.eq_ignore_ascii_case(&comp.name) {
-                                        found = Some((ci_idx, 2u8));
-                                        break;
-                                    }
-                                }
-                                found.map_or((None, None), |(i, w)| (Some(i), Some(w)))
-                            } else {
-                                (None, None)
-                            };
                         let augmented_row = if comp.component_type == 'L' {
                             inductor_aug_rows
                                 .get(&comp.name.to_ascii_uppercase())
@@ -2556,10 +2200,7 @@ impl CircuitIR {
                             node_p: comp.node_p,
                             node_q: comp.node_q,
                             nominal_value: comp.nominal_value,
-                            inductor_index,
                             augmented_row,
-                            coupled_inductor_index,
-                            coupled_winding,
                         }
                     })
                     .collect();
@@ -2575,7 +2216,7 @@ impl CircuitIR {
                     components,
                     positions: sw.positions.clone(),
                     num_positions: sw.positions.len(),
-                    mutual_entries: Vec::new(), // DK path uses companion model
+                    mutual_entries: Vec::new(),
                 }
             })
             .collect();
@@ -2733,7 +2374,6 @@ impl CircuitIR {
             // For augmented inductors, the DC OP solver returns n_aug-sized vectors
             // but the kernel dimension is n_nodal = n_aug + n_inductor_vars.
             // Pad with zeros for inductor branch currents (DC OP doesn't solve them).
-            // For companion model, truncate to kernel.n (= n_aug).
             dc_operating_point: {
                 // DC OP may return fewer nodes than kernel.n (e.g., when computed
                 // on unexpanded MNA before internal node expansion). Pad with zeros.
@@ -2767,9 +2407,6 @@ impl CircuitIR {
             dc_op_rail_pin,
             dc_op_iterations,
             dc_block: config.dc_block,
-            inductors,
-            coupled_inductors,
-            transformer_groups,
             saturating_inductors: Vec::new(), // DK path: saturation routes to nodal
             pots,
             wiper_groups,
@@ -3527,9 +3164,6 @@ impl CircuitIR {
             dc_op_rail_pin,
             dc_op_iterations,
             dc_block: config.dc_block,
-            inductors: Vec::new(), // no companion model
-            coupled_inductors: Vec::new(),
-            transformer_groups: Vec::new(),
             pots: mna
                 .pots
                 .iter()
@@ -3684,10 +3318,7 @@ impl CircuitIR {
                                         node_p: comp.node_p,
                                         node_q: comp.node_q,
                                         nominal_value: comp.nominal_value,
-                                        inductor_index: None,
                                         augmented_row,
-                                        coupled_inductor_index: None,
-                                        coupled_winding: None,
                                     }
                                 })
                                 .collect(),

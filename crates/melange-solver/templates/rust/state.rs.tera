@@ -167,46 +167,6 @@ pub struct CircuitState {
 {% endif %}
     /// Diagnostic: number of backward Euler fallback activations
     pub diag_be_fallback_count: u64,
-{% if num_inductors > 0 %}
-    /// Inductor previous currents
-    pub ind_i_prev: [f64; {{ num_inductors }}],
-    /// Inductor previous voltages
-    pub ind_v_prev: [f64; {{ num_inductors }}],
-    /// Inductor history currents (Norton equivalent)
-    pub ind_i_hist: [f64; {{ num_inductors }}],
-    /// Inductor equivalent conductances (sample-rate dependent)
-    pub ind_g_eq: [f64; {{ num_inductors }}],
-{% endif %}
-{% if num_coupled_inductors > 0 %}
-    /// Coupled inductor L1 previous currents
-    pub ci_i1_prev: [f64; {{ num_coupled_inductors }}],
-    /// Coupled inductor L2 previous currents
-    pub ci_i2_prev: [f64; {{ num_coupled_inductors }}],
-    /// Coupled inductor L1 previous voltages
-    pub ci_v1_prev: [f64; {{ num_coupled_inductors }}],
-    /// Coupled inductor L2 previous voltages
-    pub ci_v2_prev: [f64; {{ num_coupled_inductors }}],
-    /// Coupled inductor L1 history currents (Norton equivalent)
-    pub ci_i1_hist: [f64; {{ num_coupled_inductors }}],
-    /// Coupled inductor L2 history currents (Norton equivalent)
-    pub ci_i2_hist: [f64; {{ num_coupled_inductors }}],
-    /// Coupled inductor self-conductances and mutual conductance (sample-rate dependent)
-    pub ci_g_self_1: [f64; {{ num_coupled_inductors }}],
-    pub ci_g_self_2: [f64; {{ num_coupled_inductors }}],
-    pub ci_g_mutual: [f64; {{ num_coupled_inductors }}],
-{% endif %}
-{% if num_transformer_groups > 0 %}
-{% for g in transformer_groups %}
-    /// Transformer group {{ g.index }} admittance matrix Y (flat {{ g.num_windings }}x{{ g.num_windings }}, sample-rate dependent)
-    pub xfmr_{{ g.index }}_y: [f64; {{ g.num_windings * g.num_windings }}],
-    /// Transformer group {{ g.index }} previous winding currents
-    pub xfmr_{{ g.index }}_i_prev: [f64; {{ g.num_windings }}],
-    /// Transformer group {{ g.index }} previous winding voltages
-    pub xfmr_{{ g.index }}_v_prev: [f64; {{ g.num_windings }}],
-    /// Transformer group {{ g.index }} history currents (Norton equivalent)
-    pub xfmr_{{ g.index }}_i_hist: [f64; {{ g.num_windings }}],
-{% endfor %}
-{% endif %}
 {% for default in pot_defaults %}
     /// Potentiometer {{ loop.index0 }} current resistance (ohms)
     pub pot_{{ loop.index0 }}_resistance: f64,
@@ -337,31 +297,6 @@ impl Default for CircuitState {
             be_cooldown: 0,
 {% endif %}
             diag_be_fallback_count: 0,
-{% if num_inductors > 0 %}
-            ind_i_prev: [0.0; {{ num_inductors }}],
-            ind_v_prev: [0.0; {{ num_inductors }}],
-            ind_i_hist: [0.0; {{ num_inductors }}],
-            ind_g_eq: [{% for ind in inductors %}IND_{{ loop.index0 }}_G_EQ{% if not loop.last %}, {% endif %}{% endfor %}],
-{% endif %}
-{% if num_coupled_inductors > 0 %}
-            ci_i1_prev: [0.0; {{ num_coupled_inductors }}],
-            ci_i2_prev: [0.0; {{ num_coupled_inductors }}],
-            ci_v1_prev: [0.0; {{ num_coupled_inductors }}],
-            ci_v2_prev: [0.0; {{ num_coupled_inductors }}],
-            ci_i1_hist: [0.0; {{ num_coupled_inductors }}],
-            ci_i2_hist: [0.0; {{ num_coupled_inductors }}],
-            ci_g_self_1: [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_SELF_1{% if not loop.last %}, {% endif %}{% endfor %}],
-            ci_g_self_2: [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_SELF_2{% if not loop.last %}, {% endif %}{% endfor %}],
-            ci_g_mutual: [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_MUTUAL{% if not loop.last %}, {% endif %}{% endfor %}],
-{% endif %}
-{% if num_transformer_groups > 0 %}
-{% for g in transformer_groups %}
-            xfmr_{{ g.index }}_y: XFMR_{{ g.index }}_Y_DEFAULT,
-            xfmr_{{ g.index }}_i_prev: [0.0; {{ g.num_windings }}],
-            xfmr_{{ g.index }}_v_prev: [0.0; {{ g.num_windings }}],
-            xfmr_{{ g.index }}_i_hist: [0.0; {{ g.num_windings }}],
-{% endfor %}
-{% endif %}
 {% for default in pot_defaults %}
             pot_{{ loop.index0 }}_resistance: {{ default }},
             pot_{{ loop.index0 }}_resistance_prev: {{ default }},
@@ -454,26 +389,6 @@ impl CircuitState {
 {% endif %}        self.diag_be_fallback_count = 0;
 {% if has_be_fallback %}
         self.be_cooldown = 0;
-{% endif %}
-{% if num_inductors > 0 %}
-        self.ind_i_prev = [0.0; {{ num_inductors }}];
-        self.ind_v_prev = [0.0; {{ num_inductors }}];
-        self.ind_i_hist = [0.0; {{ num_inductors }}];
-{% endif %}
-{% if num_coupled_inductors > 0 %}
-        self.ci_i1_prev = [0.0; {{ num_coupled_inductors }}];
-        self.ci_i2_prev = [0.0; {{ num_coupled_inductors }}];
-        self.ci_v1_prev = [0.0; {{ num_coupled_inductors }}];
-        self.ci_v2_prev = [0.0; {{ num_coupled_inductors }}];
-        self.ci_i1_hist = [0.0; {{ num_coupled_inductors }}];
-        self.ci_i2_hist = [0.0; {{ num_coupled_inductors }}];
-{% endif %}
-{% if num_transformer_groups > 0 %}
-{% for g in transformer_groups %}
-        self.xfmr_{{ g.index }}_i_prev = [0.0; {{ g.num_windings }}];
-        self.xfmr_{{ g.index }}_v_prev = [0.0; {{ g.num_windings }}];
-        self.xfmr_{{ g.index }}_i_hist = [0.0; {{ g.num_windings }}];
-{% endfor %}
 {% endif %}
 {% for default in pot_defaults %}
         self.pot_{{ loop.index0 }}_resistance = {{ default }};
@@ -621,8 +536,8 @@ impl CircuitState {
     /// Recompute all sample-rate-dependent matrices for a new sample rate.
     ///
     /// Call this once during plugin initialization (NOT on the audio thread).
-    /// This recomputes S, A_neg, K, S*N_i, and inductor g_eq from the stored
-    /// G and C matrices.
+    /// This recomputes S, A_neg, K and S*N_i from the stored G and C
+    /// matrices.
     ///
     /// If `sample_rate` matches [`SAMPLE_RATE`], only the rate-dependent
     /// coefficients are restored to their baked defaults; transient state
@@ -658,19 +573,6 @@ impl CircuitState {
                 self.k_be = K_BE_DEFAULT;
                 self.s_ni_be = S_NI_BE_DEFAULT;
                 self.a_neg_be = A_NEG_BE_DEFAULT;
-{% endif %}
-{% if num_inductors > 0 %}
-                self.ind_g_eq = [{% for ind in inductors %}IND_{{ loop.index0 }}_G_EQ{% if not loop.last %}, {% endif %}{% endfor %}];
-{% endif %}
-{% if num_coupled_inductors > 0 %}
-                self.ci_g_self_1 = [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_SELF_1{% if not loop.last %}, {% endif %}{% endfor %}];
-                self.ci_g_self_2 = [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_SELF_2{% if not loop.last %}, {% endif %}{% endfor %}];
-                self.ci_g_mutual = [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_MUTUAL{% if not loop.last %}, {% endif %}{% endfor %}];
-{% endif %}
-{% if num_transformer_groups > 0 %}
-{% for g in transformer_groups %}
-                self.xfmr_{{ g.index }}_y = XFMR_{{ g.index }}_Y_DEFAULT;
-{% endfor %}
 {% endif %}
 {% if dc_block %}                self.dc_block_r = DC_BLOCK_R;
 {% endif %}
@@ -723,19 +625,6 @@ impl CircuitState {
             self.s_ni_be = S_NI_BE_DEFAULT;
             self.a_neg_be = A_NEG_BE_DEFAULT;
 {% endif %}
-{% if num_inductors > 0 %}
-            self.ind_g_eq = [{% for ind in inductors %}IND_{{ loop.index0 }}_G_EQ{% if not loop.last %}, {% endif %}{% endfor %}];
-{% endif %}
-{% if num_coupled_inductors > 0 %}
-            self.ci_g_self_1 = [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_SELF_1{% if not loop.last %}, {% endif %}{% endfor %}];
-            self.ci_g_self_2 = [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_SELF_2{% if not loop.last %}, {% endif %}{% endfor %}];
-            self.ci_g_mutual = [{% for ci in coupled_inductors %}CI_{{ loop.index0 }}_G_MUTUAL{% if not loop.last %}, {% endif %}{% endfor %}];
-{% endif %}
-{% if num_transformer_groups > 0 %}
-{% for g in transformer_groups %}
-            self.xfmr_{{ g.index }}_y = XFMR_{{ g.index }}_Y_DEFAULT;
-{% endfor %}
-{% endif %}
 {% if dc_block %}            self.dc_block_r = DC_BLOCK_R;
 {% endif %}
             // POLICY: transient state — oversampler filter history,
@@ -750,8 +639,6 @@ impl CircuitState {
         let internal_rate = sample_rate * OVERSAMPLING_FACTOR as f64;
 {% if backward_euler %}        let alpha = internal_rate;
 {% else %}        let alpha = 2.0 * internal_rate;
-{% endif %}
-{% if num_inductors > 0 or num_coupled_inductors > 0 or num_transformer_groups > 0 %}        let t = 1.0 / internal_rate;
 {% endif %}
         // Build A = G + alpha*C
         let mut a = [[0.0f64; N]; N];
@@ -782,51 +669,6 @@ impl CircuitState {
             }
         }
 {% endif %}
-{% if num_inductors > 0 %}
-
-        // Add inductor companion model conductances
-{% for ind in inductors %}        {
-            let g_eq = t / (2.0 * IND_{{ loop.index0 }}_INDUCTANCE);
-            self.ind_g_eq[{{ loop.index0 }}] = g_eq;
-            stamp_conductance(&mut a, IND_{{ loop.index0 }}_NODE_I, IND_{{ loop.index0 }}_NODE_J, g_eq);
-        }
-{% endfor %}
-        // Reset inductor transient state (old g_eq is incompatible with new rate)
-        self.ind_i_prev = [0.0; {{ num_inductors }}];
-        self.ind_v_prev = [0.0; {{ num_inductors }}];
-        self.ind_i_hist = [0.0; {{ num_inductors }}];
-{% endif %}
-{% if num_coupled_inductors > 0 %}
-
-        // Add coupled inductor companion model conductances
-{% for ci in coupled_inductors %}        {
-            let m_val = CI_{{ loop.index0 }}_COUPLING * (CI_{{ loop.index0 }}_L1_INDUCTANCE * CI_{{ loop.index0 }}_L2_INDUCTANCE).sqrt();
-            let det = CI_{{ loop.index0 }}_L1_INDUCTANCE * CI_{{ loop.index0 }}_L2_INDUCTANCE - m_val * m_val;
-            let half_t = t / 2.0;
-            let gs1 = half_t * CI_{{ loop.index0 }}_L2_INDUCTANCE / det;
-            let gs2 = half_t * CI_{{ loop.index0 }}_L1_INDUCTANCE / det;
-            let gm = -half_t * m_val / det;
-            self.ci_g_self_1[{{ loop.index0 }}] = gs1;
-            self.ci_g_self_2[{{ loop.index0 }}] = gs2;
-            self.ci_g_mutual[{{ loop.index0 }}] = gm;
-            stamp_conductance(&mut a, CI_{{ loop.index0 }}_L1_NODE_I, CI_{{ loop.index0 }}_L1_NODE_J, gs1);
-            stamp_conductance(&mut a, CI_{{ loop.index0 }}_L2_NODE_I, CI_{{ loop.index0 }}_L2_NODE_J, gs2);
-            stamp_mutual(&mut a, CI_{{ loop.index0 }}_L1_NODE_I, CI_{{ loop.index0 }}_L1_NODE_J, CI_{{ loop.index0 }}_L2_NODE_I, CI_{{ loop.index0 }}_L2_NODE_J, gm);
-            stamp_mutual(&mut a, CI_{{ loop.index0 }}_L2_NODE_I, CI_{{ loop.index0 }}_L2_NODE_J, CI_{{ loop.index0 }}_L1_NODE_I, CI_{{ loop.index0 }}_L1_NODE_J, gm);
-        }
-{% endfor %}
-        // Reset coupled inductor transient state
-        self.ci_i1_prev = [0.0; {{ num_coupled_inductors }}];
-        self.ci_i2_prev = [0.0; {{ num_coupled_inductors }}];
-        self.ci_v1_prev = [0.0; {{ num_coupled_inductors }}];
-        self.ci_v2_prev = [0.0; {{ num_coupled_inductors }}];
-        self.ci_i1_hist = [0.0; {{ num_coupled_inductors }}];
-        self.ci_i2_hist = [0.0; {{ num_coupled_inductors }}];
-{% endif %}
-{% if num_transformer_groups > 0 %}
-
-        // Add transformer group companion model conductances
-{{ xfmr_set_sample_rate_lines }}{% endif %}
 
         // Invert A to get S (equilibrated to keep cond(A) inside f64 precision
         // regardless of unit imbalance between G_in and internal conductances)
@@ -948,7 +790,7 @@ impl CircuitState {
 {% endif %}
 }
 
-{% if num_inductors > 0 or num_switches > 0 or num_coupled_inductors > 0 or num_transformer_groups > 0 %}/// Stamp a conductance between two nodes into a matrix.
+{% if num_switches > 0 %}/// Stamp a conductance between two nodes into a matrix.
 /// Node indices are 1-indexed; 0 means ground.
 fn stamp_conductance(mat: &mut [[f64; N]; N], node_i: usize, node_j: usize, g: f64) {
     match (node_i > 0, node_j > 0) {
@@ -964,14 +806,6 @@ fn stamp_conductance(mat: &mut [[f64; N]; N], node_i: usize, node_j: usize, g: f
         (false, true) => { mat[node_j - 1][node_j - 1] += g; }
         (false, false) => {}
     }
-}
-
-{% endif %}{% if num_coupled_inductors > 0 or num_transformer_groups > 0 %}/// Stamp mutual conductance between two 2-terminal elements.
-fn stamp_mutual(mat: &mut [[f64; N]; N], a: usize, b: usize, c: usize, d: usize, g: f64) {
-    if a > 0 && c > 0 { mat[a - 1][c - 1] += g; }
-    if b > 0 && d > 0 { mat[b - 1][d - 1] += g; }
-    if a > 0 && d > 0 { mat[a - 1][d - 1] -= g; }
-    if b > 0 && c > 0 { mat[b - 1][c - 1] -= g; }
 }
 
 {% endif %}/// Invert an N x N matrix via LU factorization + N identity-column back-solves.

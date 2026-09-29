@@ -740,23 +740,9 @@ impl RingSystem {
     /// The linearised system of a built trapezoidal IR: its shipped `G` and
     /// `C`, the device Jacobian evaluated at its DC operating point, its
     /// saturating rows, internal rate, and input/output ports.
-    ///
-    /// `Err` when the IR carries companion-modelled inductors (the DK library
-    /// path without augmented branch rows): their dynamics are not in `C`, so
-    /// the propagator would be missing modes.
     pub fn from_ir(ir: &crate::codegen::ir::CircuitIR) -> Result<Self, RingError> {
         let n = ir.topology.n;
         let m = ir.topology.m;
-        if !ir.topology.augmented_inductors
-            && (!ir.inductors.is_empty()
-                || !ir.coupled_inductors.is_empty()
-                || !ir.transformer_groups.is_empty())
-        {
-            return Err(RingError(
-                "companion-modelled inductors are not in C (build with augmented inductors)"
-                    .to_string(),
-            ));
-        }
         let dc_op: Vec<f64> = (0..n)
             .map(|i| ir.dc_operating_point.get(i).copied().unwrap_or(0.0))
             .collect();

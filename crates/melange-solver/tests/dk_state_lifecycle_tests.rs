@@ -1,8 +1,7 @@
 //! DK template state-lifecycle regression tests (2026-07 campaign).
 //!
 //! Covers the verified bugs in `set_sample_rate` / `reset()` / the NaN
-//! recovery path / the DC-blocker feedback state / the BE-fallback vs
-//! companion-magnetics interaction:
+//! recovery path / the DC-blocker feedback state / the BE fallback:
 //!
 //! 1. Same-rate `set_sample_rate` must not revert moved pots to nominal
 //!    matrices (the all_default guard now checks pot resistances too).
@@ -12,8 +11,7 @@
 //!    and restores the baked DC operating point (factory-state contract).
 //! 4. The DC-blocker feedback state carries no ±100 V clamp (masking class;
 //!    corrupted the HPF state for tube-level >100 V outputs).
-//! 5. DK BE fallback is gated OFF for companion-model magnetics (the BE
-//!    matrices/RHS lack the companion stamps and history).
+//! 5. A nonlinear circuit keeps the DK BE fallback.
 //! 6. `.runtime V` sources are stamped into the BE-fallback RHS.
 //! 11. Same-rate `set_sample_rate` calls preserve transient state
 //!     (magnetics standing currents, filter history) — no click.
@@ -80,7 +78,7 @@ C1 out 0 100n
 .pot R1 1k 100k
 ";
 
-/// Pot + companion inductor: standing current through L1 at low frequency.
+/// Pot + inductor: standing current through L1 at low frequency.
 const POT_INDUCTOR: &str = "\
 Pot Inductor Continuity
 R1 in mid 1k
@@ -99,28 +97,6 @@ RLC Resonator
 R1 in a 30
 L1 a b 1
 C1 b 0 10u
-";
-
-/// Nonlinear + companion inductor: BE fallback must be gated off.
-const DIODE_INDUCTOR: &str = "\
-Diode Inductor
-R1 in a 1k
-L1 a b 10m
-D1 b 0 DMOD
-C1 b 0 100n
-.model DMOD D(IS=1e-14)
-";
-
-/// Nonlinear + coupled inductors: BE fallback must be gated off.
-const DIODE_XFMR: &str = "\
-Diode Transformer
-R1 in p 100
-L1 p 0 100m
-L2 s 0 100m
-K1 L1 L2 0.95
-D1 s 0 DMOD
-C1 s 0 100n
-.model DMOD D(IS=1e-14)
 ";
 
 /// Nonlinear, magnetics-free control: BE fallback stays available.
@@ -340,33 +316,8 @@ fn main() {
 }
 
 // ---------------------------------------------------------------------------
-// Fix 5 — BE fallback gated off for companion-model magnetics
+// Fix 5 — BE fallback present on nonlinear circuits
 // ---------------------------------------------------------------------------
-
-#[test]
-fn companion_inductor_disables_be_fallback() {
-    // Companion-inductor codegen: raw build on purpose (see support).
-    let code = support::generate_circuit_code_raw_dk(DIODE_INDUCTOR, &default_config()).0;
-    assert!(
-        !code.contains("S_BE_DEFAULT"),
-        "companion-inductor circuit must not emit BE fallback matrices \
-         (they lack the companion stamps and history)"
-    );
-    assert!(
-        !code.contains("let mut rhs_be"),
-        "companion-inductor circuit must not emit the BE fallback RHS path"
-    );
-}
-
-#[test]
-fn companion_transformer_disables_be_fallback() {
-    // Companion-inductor codegen: raw build on purpose (see support).
-    let code = support::generate_circuit_code_raw_dk(DIODE_XFMR, &default_config()).0;
-    assert!(
-        !code.contains("S_BE_DEFAULT"),
-        "coupled-inductor circuit must not emit BE fallback matrices"
-    );
-}
 
 #[test]
 fn magnetics_free_nonlinear_keeps_be_fallback() {

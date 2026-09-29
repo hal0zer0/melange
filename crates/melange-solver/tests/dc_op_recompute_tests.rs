@@ -15,10 +15,7 @@
 
 mod support;
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
-use melange_solver::dk::DkKernel;
-use melange_solver::mna::MnaSystem;
-use melange_solver::parser::Netlist;
+use melange_solver::codegen::CodegenConfig;
 
 /// The shipped DK build (input `in`, output `out`, or circuit node 1 on a
 /// deck without an `out` node).
@@ -27,29 +24,6 @@ fn generate_dk(spice: &str, emit_recompute: bool) -> String {
     cfg.circuit_name = "dc_op_recompute_test".to_string();
     cfg.emit_dc_op_recompute = emit_recompute;
     support::build_as_shipped(spice, &cfg, "dk").0
-}
-
-/// DK codegen straight from the raw MNA with companion-model inductors.
-/// Bypasses the production pipeline on purpose: tests the companion-winding
-/// equilibrium guard in `recompute_dc_op`, which only the companion-model
-/// kernel emits. No shipped build reaches it (an inductor deck always builds
-/// the augmented kernel, whose branch rows solve the winding at DC); it goes
-/// with the companion-inductor codegen path.
-fn generate_dk_companion_raw(spice: &str) -> String {
-    let cfg = support::config_in_out_or_node1(spice, 44100.0);
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    mna.g[cfg.input_node][cfg.input_node] += 1.0 / cfg.input_resistance;
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("kernel");
-    let cfg = CodegenConfig {
-        circuit_name: "dc_op_recompute_test".to_string(),
-        emit_dc_op_recompute: true,
-        ..cfg
-    };
-    CodeGenerator::new(cfg)
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen")
-        .code
 }
 
 const REGRESSION_NETLIST: &str = "\
@@ -2073,99 +2047,6 @@ L1 mid 0 100m
 R1 mid out 1k
 R2 out 0 100k
 ";
-
-/// recompute_dc_op on a DC-biased choke must refuse: state untouched,
-/// `diag_nr_max_iter_count` bumped exactly once (the settle failure signal).
-#[test]
-fn fix3_dc_biased_choke_recompute_refuses() {
-    let code = generate_dk_companion_raw(DC_CHOKE_NETLIST);
-    // Emission check: the guard is present and precedes the writeback.
-    let body = recompute_body(&code);
-    assert!(
-        body.contains("Inductor equilibrium guard"),
-        "recompute body must carry the winding V_L guard"
-    );
-    assert!(
-        body.contains("max_winding_v > 1e-3"),
-        "guard must compare winding voltage against the 1 mV tolerance"
-    );
-
-    let main = "\n\nfn main() {\n\
-        let mut state = CircuitState::default();\n\
-        let before: [f64; N] = *state.dc_op();\n\
-        let v_prev_before: [f64; N] = state.v_prev;\n\
-        let c0 = state.diag_nr_max_iter_count;\n\
-        state.recompute_dc_op();\n\
-        assert_eq!(state.diag_nr_max_iter_count, c0 + 1,\n\
-            \"DC-biased choke: recompute must report failure exactly once, got {} -> {}\",\n\
-            c0, state.diag_nr_max_iter_count);\n\
-        for i in 0..N {\n\
-            assert_eq!(state.dc_op()[i], before[i],\n\
-                \"refused recompute must not touch dc_operating_point[{}]\", i);\n\
-            assert_eq!(state.v_prev[i], v_prev_before[i],\n\
-                \"refused recompute must not touch v_prev[{}]\", i);\n\
-        }\n\
-        println!(\"ok\");\n\
-    }\n";
-
-    compile_and_run(&code, main, "fix3_dc_choke_refuse");
-}
-
-/// settle_dc_op on the DC-biased choke must detect the refusal and run the
-/// warmup loop, which DOES reach the true (inductor-short) OP: mid node
-/// within a volt of the 10 V supply after settling.
-#[test]
-fn fix3_dc_biased_choke_settle_falls_back_to_warmup() {
-    let code = generate_dk_companion_raw(DC_CHOKE_NETLIST);
-
-    let main = "\n\nfn main() {\n\
-        let mut state = CircuitState::default();\n\
-        // Cold start so the warmup fallback has real work to do.\n\
-        for i in 0..N { state.v_prev[i] = 0.0; }\n\
-        let c0 = state.diag_nr_max_iter_count;\n\
-        state.settle_dc_op();\n\
-        assert!(state.diag_nr_max_iter_count > c0,\n\
-            \"settle must have detected the recompute refusal\");\n\
-        for (i, &v) in state.v_prev.iter().enumerate() {\n\
-            assert!(v.is_finite(), \"non-finite v_prev[{}] after settle: {}\", i, v);\n\
-        }\n\
-        // Warmup reaches the true DC OP: the choke is a DC short, so the\n\
-        // mid node settles at the 10 V supply (tau = L/R = 0.1 ms << warmup).\n\
-        let v_mid = state.v_prev[NODE_MID];\n\
-        assert!((v_mid - 10.0).abs() < 1.0,\n\
-            \"warmup fallback should reach inductor-short OP at mid ~10 V, got {}\", v_mid);\n\
-        println!(\"ok\");\n\
-    }\n";
-
-    compile_and_run(&code, main, "fix3_dc_choke_settle");
-}
-
-/// Control: an unbiased inductor (V_L = 0 at the fixed point) must recompute
-/// exactly as before — no guard trip, writeback runs (v_prev re-seeded).
-#[test]
-fn fix3_unbiased_choke_recompute_still_succeeds() {
-    let code = generate_dk_companion_raw(AC_CHOKE_NETLIST);
-
-    let main = "\n\nfn main() {\n\
-        let mut state = CircuitState::default();\n\
-        // Dirty v_prev so we can observe the writeback actually running.\n\
-        for i in 0..N { state.v_prev[i] = 1.0; }\n\
-        let c0 = state.diag_nr_max_iter_count;\n\
-        state.recompute_dc_op();\n\
-        assert_eq!(state.diag_nr_max_iter_count, c0,\n\
-            \"unbiased choke must not trip the winding guard\");\n\
-        for i in 0..N {\n\
-            assert!(state.v_prev[i].is_finite());\n\
-            assert_eq!(state.v_prev[i], state.dc_op()[i],\n\
-                \"writeback must have run (v_prev re-seeded at node {})\", i);\n\
-            assert!(state.v_prev[i].abs() < 1e-9,\n\
-                \"source-free circuit DC OP must be ~0 at node {}, got {}\", i, state.v_prev[i]);\n\
-        }\n\
-        println!(\"ok\");\n\
-    }\n";
-
-    compile_and_run(&code, main, "fix3_ac_choke_ok");
-}
 
 /// The shipped build of the DC-biased choke: the inductor is an augmented
 /// branch row, so the DC solve treats it as the short it is. No guard, no

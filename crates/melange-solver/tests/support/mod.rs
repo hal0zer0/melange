@@ -399,26 +399,6 @@ pub fn generate_circuit_code_nodal(spice: &str, config: &CodegenConfig) -> (Stri
     build_as_shipped(spice, config, "nodal")
 }
 
-/// DK codegen straight from the raw MNA (companion-model inductors, no pipeline
-/// steps). BYPASSES THE PRODUCTION PIPELINE ON PURPOSE: it exists only for the
-/// tests of the companion-inductor codegen path, which no shipped build reaches
-/// (inductor decks always build the augmented kernel); that path and those
-/// tests are scheduled for deletion.
-#[allow(dead_code)]
-pub fn generate_circuit_code_raw_dk(spice: &str, config: &CodegenConfig) -> (String, usize, usize) {
-    let netlist = Netlist::parse(spice).expect("parse failed");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("MNA build failed");
-    if config.input_node < mna.n {
-        mna.g[config.input_node][config.input_node] += 1.0 / config.input_resistance;
-    }
-    let kernel = melange_solver::dk::DkKernel::from_mna(&mna, config.sample_rate)
-        .expect("DK kernel build failed");
-    let result = melange_solver::codegen::CodeGenerator::new(config.clone())
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
-    (result.code, result.n, result.m)
-}
-
 /// `spice` parsed with its subcircuits expanded, as `build` expands them, so
 /// node names and indices match the build's.
 pub fn parse_expanded(spice: &str) -> Netlist {

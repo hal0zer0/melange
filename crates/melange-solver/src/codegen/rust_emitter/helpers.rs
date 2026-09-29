@@ -28,47 +28,6 @@ pub(super) fn tube_grid_vt_expr(params: &DeviceParams, dev_num: usize) -> String
     }
 }
 
-/// Inductor data passed to Tera templates.
-#[derive(Serialize)]
-pub(super) struct InductorTemplateData {
-    pub(super) name: String,
-    pub(super) node_i: usize,
-    pub(super) node_j: usize,
-    /// Formatted g_eq string for constants template (empty when not needed)
-    pub(super) g_eq: String,
-    /// Formatted inductance string for constants template (empty when not needed)
-    pub(super) inductance: String,
-}
-
-/// Coupled inductor data passed to Tera templates.
-#[derive(Serialize)]
-pub(super) struct CoupledInductorTemplateData {
-    pub(super) name: String,
-    l1_node_i: usize,
-    l1_node_j: usize,
-    l2_node_i: usize,
-    l2_node_j: usize,
-    l1_inductance: String,
-    l2_inductance: String,
-    pub(super) coupling: String,
-    g_self_1: String,
-    g_self_2: String,
-    pub(super) g_mutual: String,
-}
-
-/// Transformer group data passed to Tera templates.
-#[derive(Serialize)]
-pub(super) struct TransformerGroupTemplateData {
-    pub(super) index: usize,
-    pub(super) name: String,
-    pub(super) num_windings: usize,
-    pub(super) winding_node_i: Vec<usize>,
-    pub(super) winding_node_j: Vec<usize>,
-    pub(super) inductances: Vec<String>,
-    pub(super) coupling_flat: Vec<String>,
-    pub(super) y_matrix: Vec<String>,
-}
-
 /// Named constant entry for Tera templates.
 ///
 /// Used for `NODE_<name>`, `VSOURCE_<name>_RHS_ROW`, and `POT_<name>_INDEX`
@@ -180,7 +139,6 @@ pub(super) struct SwitchCompTemplateData {
     pub(super) node_q: usize,
     pub(super) nominal: String,
     pub(super) comp_type: char,
-    pub(super) inductor_index: i64, // -1 if not an inductor
 }
 
 /// Switch data passed to Tera templates.
@@ -515,69 +473,6 @@ pub(super) fn format_matrix_rows(
                 .map(|j| fmt_f64(get(i, j)))
                 .collect::<Vec<_>>()
                 .join(", ")
-        })
-        .collect()
-}
-
-/// Build `InductorTemplateData` from IR inductors.
-///
-/// When `with_g_eq` is true, each entry includes the formatted g_eq value
-/// (needed by the constants template). Otherwise g_eq is left empty.
-pub(super) fn inductor_template_data(ir: &CircuitIR, with_g_eq: bool) -> Vec<InductorTemplateData> {
-    ir.inductors
-        .iter()
-        .map(|ind| InductorTemplateData {
-            name: ind.name.clone(),
-            node_i: ind.node_i,
-            node_j: ind.node_j,
-            g_eq: if with_g_eq {
-                fmt_f64(ind.g_eq)
-            } else {
-                String::new()
-            },
-            inductance: if with_g_eq {
-                fmt_f64(ind.inductance)
-            } else {
-                String::new()
-            },
-        })
-        .collect()
-}
-
-/// Build `CoupledInductorTemplateData` from IR coupled inductors.
-pub(super) fn coupled_inductor_template_data(ir: &CircuitIR) -> Vec<CoupledInductorTemplateData> {
-    ir.coupled_inductors
-        .iter()
-        .map(|ci| CoupledInductorTemplateData {
-            name: ci.name.clone(),
-            l1_node_i: ci.l1_node_i,
-            l1_node_j: ci.l1_node_j,
-            l2_node_i: ci.l2_node_i,
-            l2_node_j: ci.l2_node_j,
-            l1_inductance: fmt_f64(ci.l1_inductance),
-            l2_inductance: fmt_f64(ci.l2_inductance),
-            coupling: fmt_f64(ci.coupling),
-            g_self_1: fmt_f64(ci.g_self_1),
-            g_self_2: fmt_f64(ci.g_self_2),
-            g_mutual: fmt_f64(ci.g_mutual),
-        })
-        .collect()
-}
-
-/// Build `TransformerGroupTemplateData` from IR transformer groups.
-pub(super) fn transformer_group_template_data(ir: &CircuitIR) -> Vec<TransformerGroupTemplateData> {
-    ir.transformer_groups
-        .iter()
-        .enumerate()
-        .map(|(idx, g)| TransformerGroupTemplateData {
-            index: idx,
-            name: g.name.clone(),
-            num_windings: g.num_windings,
-            winding_node_i: g.winding_node_i.clone(),
-            winding_node_j: g.winding_node_j.clone(),
-            inductances: g.inductances.iter().map(|v| fmt_f64(*v)).collect(),
-            coupling_flat: g.coupling_flat.iter().map(|v| fmt_f64(*v)).collect(),
-            y_matrix: g.y_matrix.iter().map(|v| fmt_f64(*v)).collect(),
         })
         .collect()
 }

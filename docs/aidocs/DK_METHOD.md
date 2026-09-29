@@ -107,33 +107,18 @@ q_dot = (C/T)*(v - v_prev)                  (BE-fallback sample)
 v_prev = v
 ```
 
-## Companion Inductors in the DK Formulation
+## Inductors in the DK Formulation
 
-The CLI builds every inductor as an augmented branch row (its `L` sits in
-`C`, so its history is part of `H` and `q_dot`). When the DK path instead
-companion-models an inductor (library use), the trapezoidal update
-
-```
-i_L[n+1] = i_L[n] + g_eq*(v[n+1] + v[n])          g_eq = T/(2L)
-         = g_eq*v[n+1] + (i_L[n] + g_eq*v[n])
-```
-
-splits into a conductance `g_eq` stamped into `A` (and not into `H`) and a
-history current source carrying the whole known part:
-
-```
-i_hist = i_L[n] + g_eq*v[n]          (the single-step Norton source, COMPANION_MODELS.md)
-```
-
-The same form applies vector-wise to coupled pairs and transformer groups:
-`i_hist = i[n] + Y*v[n]` per winding, with the `Y*v[n+1]` part in the
-admittance stamps of `A`.
+Generated code builds every inductor as an augmented branch row (its `L` sits
+in `C`, so its history is part of `H` and `q_dot`); code generation refuses a
+companion-model kernel.
 
 Capacitor-free rows (null(C)) carry no history under the charge form: their
 equation each sample is KCL at `n+1`, so no period-2 mode lives there. The
-library `DkKernel` / `LinearSolver` keep the whole-system companion
-(`i_hist = 2*i_L[n]`, with `g_eq` in both `A` and `a_neg`), verified against
-an exact trapezoidal reference in `dk_math_verification.rs`.
+library `DkKernel::from_mna` / `LinearSolver` companion-model inductors in the
+whole-system form (`g_eq = T/(2L)` in both `A` and `a_neg`,
+`i_hist = 2*i_L[n]`), verified against an exact trapezoidal reference in
+`dk_math_verification.rs`.
 
 ## Sign Convention Summary
 

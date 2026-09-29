@@ -36,59 +36,6 @@ pub(super) fn analyze_matrix_sparsity(data: &[f64], rows: usize, cols: usize) ->
 // find_row_swaps, symbolic_lu) are defined in crate::lu and called
 // via lu::compute_g_aug_pattern(...) etc. at the call sites below.
 
-/// Stamp mutual conductance between two 2-terminal elements into a flat row-major matrix.
-/// Node indices are 1-indexed; 0 means ground.
-pub(super) fn stamp_flat_mutual(
-    mat: &mut [f64],
-    n: usize,
-    a: usize,
-    b: usize,
-    c: usize,
-    d: usize,
-    g: f64,
-) {
-    if a > 0 && c > 0 {
-        mat[(a - 1) * n + (c - 1)] += g;
-    }
-    if b > 0 && d > 0 {
-        mat[(b - 1) * n + (d - 1)] += g;
-    }
-    if a > 0 && d > 0 {
-        mat[(a - 1) * n + (d - 1)] -= g;
-    }
-    if b > 0 && c > 0 {
-        mat[(b - 1) * n + (c - 1)] -= g;
-    }
-}
-
-/// Stamp a conductance between two nodes into a flat row-major matrix.
-/// Node indices are 1-indexed; 0 means ground.
-pub(super) fn stamp_flat_conductance(
-    mat: &mut [f64],
-    n: usize,
-    node_i: usize,
-    node_j: usize,
-    g: f64,
-) {
-    match (node_i > 0, node_j > 0) {
-        (true, true) => {
-            let i = node_i - 1;
-            let j = node_j - 1;
-            mat[i * n + i] += g;
-            mat[j * n + j] += g;
-            mat[i * n + j] -= g;
-            mat[j * n + i] -= g;
-        }
-        (true, false) => {
-            mat[(node_i - 1) * n + (node_i - 1)] += g;
-        }
-        (false, true) => {
-            mat[(node_j - 1) * n + (node_j - 1)] += g;
-        }
-        (false, false) => {}
-    }
-}
-
 /// Invert a flat row-major N×N matrix using Gaussian elimination with partial pivoting.
 ///
 /// Returns `CodegenError::InvalidConfig` if the matrix is singular.
@@ -263,28 +210,9 @@ pub(super) fn validate_positive_finite(value: f64, param_label: &str) -> Result<
 /// Returns (s_be, k_be, a_neg_be, rhs_const_be) or empty vecs if BE fallback is disabled.
 /// The BE matrices use alpha_be = 1/T (instead of trapezoidal alpha = 2/T).
 ///
-/// # Companion-model magnetics are NOT supported here
-///
-/// `g_matrix`/`c_matrix` are the raw MNA matrices — they carry no
-/// companion-model inductor / coupled-inductor / transformer-group stamps
-/// (the shipped trap matrices get those separately via
-/// `stamp_dk_companion_inductors`, with the trapezoidal `g_eq = T/(2L)`).
-/// Consequently the A_be/S_be built here treat companion-modeled magnetics
-/// as open circuits, and the per-sample BE RHS in process_sample.rs.tera
-/// stamps no magnetics history currents at all. Callers must therefore gate
-/// the BE fallback OFF when companion-path magnetics exist (done in
-/// `CircuitIR::from_kernel_with_dc_op`). A future BE-consistent
-/// implementation needs, per companion element:
-///   * conductance stamps with the BE companion value `g_eq = T/L`
-///     (coupled/xfmr: `T·L⁻¹` of the full inductance matrix, i.e. the
-///     half_t factors doubled) stamped into A_be — NOT the trap `T/(2L)`;
-///   * history current injection ×1 (`i_hist = i[n-1]`, not the
-///     doubled-trapezoidal `2·i[n-1]`) stamped into the BE RHS each
-///     fallback sample, plus a state-update convention that keeps the trap
-///     path's doubled history intact for the next trap sample.
-/// Augmented-inductor systems (branch rows, L in the C matrix) need none of
-/// this — `A_be = G + (1/T)·C`, `A_neg_be = (1/T)·C` is already the exact
-/// BE discretization of the branch equations.
+/// Inductors are augmented branch rows (L in the C matrix), for which
+/// `A_be = G + (1/T)·C`, `A_neg_be = (1/T)·C` is the exact BE discretization of
+/// the branch equations.
 pub(super) fn compute_dk_be_fallback(
     g_matrix: &[f64],
     c_matrix: &[f64],

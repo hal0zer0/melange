@@ -15,19 +15,7 @@
 {{ a_neg_lines }}
 {% if carries_q_dot %}    // Charge form: the carried charge derivative q_dot = C*dx/dt
 {{ q_dot_lines }}
-{% endif %}{% if num_inductors > 0 %}    // Inductor history current (companion model: the known part of i_L[n+1],
-    // i_hist = i[n] + g_eq*v[n]; the g_eq*v[n+1] part is the stamp in A)
-{% for ind in inductors %}{% if ind.node_i > 0 %}    rhs[{{ ind.node_i - 1 }}] -= state.ind_i_hist[{{ loop.index0 }}];
-{% endif %}{% if ind.node_j > 0 %}    rhs[{{ ind.node_j - 1 }}] += state.ind_i_hist[{{ loop.index0 }}];
-{% endif %}{% endfor %}
-{% endif %}{% if num_coupled_inductors > 0 %}    // Add coupled inductor history current contribution
-{% for ci in coupled_inductors %}{% if ci.l1_node_i > 0 %}    rhs[{{ ci.l1_node_i - 1 }}] -= state.ci_i1_hist[{{ loop.index0 }}];
-{% endif %}{% if ci.l1_node_j > 0 %}    rhs[{{ ci.l1_node_j - 1 }}] += state.ci_i1_hist[{{ loop.index0 }}];
-{% endif %}{% if ci.l2_node_i > 0 %}    rhs[{{ ci.l2_node_i - 1 }}] -= state.ci_i2_hist[{{ loop.index0 }}];
-{% endif %}{% if ci.l2_node_j > 0 %}    rhs[{{ ci.l2_node_j - 1 }}] += state.ci_i2_hist[{{ loop.index0 }}];
-{% endif %}{% endfor %}
-{% endif %}{% if num_transformer_groups > 0 %}    // Add transformer group history current contribution
-{{ xfmr_rhs_lines }}{% endif %}{% if multi_input %}    // Per-port input contributions (Thevenin, V_in(n+1) * G_in)
+{% endif %}{% if multi_input %}    // Per-port input contributions (Thevenin, V_in(n+1) * G_in)
     for k in 0..NUM_INPUTS {
         rhs[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k];
     }

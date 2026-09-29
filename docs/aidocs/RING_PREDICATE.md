@@ -249,11 +249,6 @@ summary, and the generated `// provenance:` JSON (`"integration_reason"`).
 A build kept trapezoidal also records `CircuitIR::be_latch_reference`
 (passband gain, ring poles, index-2 hold) for the latch.
 
-The DK library path with companion-modelled inductors (not built by the
-CLI) has no inductor dynamics in `C`; the rule is not evaluated there and the
-build stays trapezoidal with that reason recorded (backward Euler is refused
-on that path anyway).
-
 The whole-system `S·A_neg` spectral radius (`stability.rs`) is still what the
 nodal emitter's Schur-versus-full-LU gate reads (`spectral_radius_s_aneg`),
 and the router's DK-kernel estimate still selects DK or nodal. Neither

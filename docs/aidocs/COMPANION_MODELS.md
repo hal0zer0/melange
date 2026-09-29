@@ -151,16 +151,12 @@ there (`CircuitIR::q_dot_ic_seed`, `crates/melange-solver/src/codegen/ir/mod.rs`
 the RHS (`SATURATING_TRANSFORMERS.md` §3.2) and to the `q_dot` update, where
 the linear `alpha·L0·(i_{n+1} − i_n)` becomes `alpha·(Φ(i_{n+1}) − Φ(i_n))`.
 
-**Companion-model inductors (DK library path).** The CLI always builds
-inductors as augmented branch rows. When the DK path companion-models them
-instead, `H` carries no companion stamp; the `g_eq = T/(2L)` stamp stays in
-`A`, and the companion's whole known current goes into its history source —
-the single-step Norton source of the Inductor section above:
-
-```
-i_hist = i_L[n] + g_eq·v_L[n]                 (per inductor)
-i_hist = i[n] + Y·v[n]                        (per winding, coupled pairs / transformer groups)
-```
+**Inductors are augmented branch rows.** Generated code carries every
+inductor, coupled pair and transformer winding as a branch row whose `L` sits
+in `C`, so its history is part of `H` and `q_dot`. Code generation refuses a
+companion-model kernel (`DkKernel::from_mna` on an inductor deck); the library
+`DkKernel` and runtime `LinearSolver` keep the whole-system companion
+(`DK_METHOD.md`).
 
 ### Equivalence with the whole-system form
 

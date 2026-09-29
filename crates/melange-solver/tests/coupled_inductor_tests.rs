@@ -6,14 +6,13 @@
 //! Tests cover:
 //! - Parser: K element parsing, error cases (k bounds, self-coupling, missing inductor)
 //! - MNA: coupled inductor removal from uncoupled list, A matrix cross-coupling stamps
-//! - DK Kernel: companion conductance computation, initial state
-//! - Codegen: compilation, constants, state fields, RHS injection, backward compat
+//! - DK Kernel: companion conductance computation, initial state (the runtime
+//!   `LinearSolver`'s form; generated code carries windings as augmented rows)
+//! - Codegen: compilation, determinism, backward compat
 //! - Behavioral: step-up/step-down transformer voltage ratios, weak coupling, 1:1
 
 mod support;
 
-use melange_solver::codegen::ir::CircuitIR;
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
 use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
@@ -23,6 +22,8 @@ use std::io::Write;
 // Helpers
 // ===========================================================================
 
+/// The raw MNA and companion-model DK kernel (the runtime `LinearSolver`'s
+/// form), for the MNA- and kernel-level tests.
 fn build_pipeline(spice: &str) -> (Netlist, MnaSystem, DkKernel) {
     let netlist = Netlist::parse(spice).expect("failed to parse netlist");
     let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
@@ -30,24 +31,11 @@ fn build_pipeline(spice: &str) -> (Netlist, MnaSystem, DkKernel) {
     (netlist, mna, kernel)
 }
 
-fn default_config() -> CodegenConfig {
-    CodegenConfig {
-        circuit_name: "test_circuit".to_string(),
-        sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![1],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    }
-}
-
+/// The shipped build of `spice` on the route `compile` picks (windings as
+/// augmented branch rows).
 fn generate_code(spice: &str) -> String {
-    let (netlist, mna, kernel) = build_pipeline(spice);
-    let codegen = CodeGenerator::new(default_config());
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("code generation failed");
-    result.code
+    let config = support::config_in_out_or_node1(spice, 44100.0);
+    support::build_as_shipped(spice, &config, "auto").0
 }
 
 /// Compile generated code with rustc, panicking with stderr on failure.
@@ -691,37 +679,6 @@ fn test_dk_mixed_inductors() {
 // Codegen IR Tests
 // ===========================================================================
 
-#[test]
-fn test_ir_coupled_inductors() {
-    let (netlist, mna, kernel) = build_pipeline(SIMPLE_COUPLED);
-    let config = default_config();
-    let ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config).unwrap();
-
-    assert_eq!(ir.coupled_inductors.len(), 1);
-    assert_eq!(ir.coupled_inductors[0].name, "K1");
-    assert!((ir.coupled_inductors[0].coupling - 0.95).abs() < 1e-10);
-    assert!(ir.coupled_inductors[0].g_self_1 > 0.0);
-    assert!(ir.coupled_inductors[0].g_self_2 > 0.0);
-    assert!(
-        ir.coupled_inductors[0].g_mutual < 0.0,
-        "g_mutual should be negative"
-    );
-}
-
-#[test]
-fn test_ir_no_coupled_inductors_when_none() {
-    let spice = "\
-RC Only
-R1 in out 1k
-C1 out 0 100n
-";
-    let (netlist, mna, kernel) = build_pipeline(spice);
-    let config = default_config();
-    let ir = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config).unwrap();
-
-    assert_eq!(ir.coupled_inductors.len(), 0);
-}
-
 // ===========================================================================
 // Codegen Compilation Tests
 // ===========================================================================
@@ -749,165 +706,6 @@ fn test_mixed_inductors_codegen_compiles() {
 // ===========================================================================
 
 #[test]
-fn test_codegen_constants_present() {
-    let code = generate_code(SIMPLE_COUPLED);
-
-    assert!(
-        code.contains("CI_0_G_SELF_1"),
-        "Missing CI_0_G_SELF_1 constant"
-    );
-    assert!(
-        code.contains("CI_0_G_SELF_2"),
-        "Missing CI_0_G_SELF_2 constant"
-    );
-    assert!(
-        code.contains("CI_0_G_MUTUAL"),
-        "Missing CI_0_G_MUTUAL constant"
-    );
-    assert!(
-        code.contains("CI_0_L1_NODE_I"),
-        "Missing CI_0_L1_NODE_I constant"
-    );
-    assert!(
-        code.contains("CI_0_L1_NODE_J"),
-        "Missing CI_0_L1_NODE_J constant"
-    );
-    assert!(
-        code.contains("CI_0_L2_NODE_I"),
-        "Missing CI_0_L2_NODE_I constant"
-    );
-    assert!(
-        code.contains("CI_0_L2_NODE_J"),
-        "Missing CI_0_L2_NODE_J constant"
-    );
-    assert!(
-        code.contains("CI_0_L1_INDUCTANCE"),
-        "Missing CI_0_L1_INDUCTANCE constant"
-    );
-    assert!(
-        code.contains("CI_0_L2_INDUCTANCE"),
-        "Missing CI_0_L2_INDUCTANCE constant"
-    );
-    assert!(
-        code.contains("CI_0_COUPLING"),
-        "Missing CI_0_COUPLING constant"
-    );
-}
-
-#[test]
-fn test_codegen_state_fields_present() {
-    let code = generate_code(SIMPLE_COUPLED);
-
-    assert!(
-        code.contains("ci_i1_prev"),
-        "Missing ci_i1_prev state field"
-    );
-    assert!(
-        code.contains("ci_i2_prev"),
-        "Missing ci_i2_prev state field"
-    );
-    assert!(
-        code.contains("ci_v1_prev"),
-        "Missing ci_v1_prev state field"
-    );
-    assert!(
-        code.contains("ci_v2_prev"),
-        "Missing ci_v2_prev state field"
-    );
-    assert!(
-        code.contains("ci_i1_hist"),
-        "Missing ci_i1_hist state field"
-    );
-    assert!(
-        code.contains("ci_i2_hist"),
-        "Missing ci_i2_hist state field"
-    );
-    assert!(
-        code.contains("ci_g_self_1"),
-        "Missing ci_g_self_1 state field"
-    );
-    assert!(
-        code.contains("ci_g_self_2"),
-        "Missing ci_g_self_2 state field"
-    );
-    assert!(
-        code.contains("ci_g_mutual"),
-        "Missing ci_g_mutual state field"
-    );
-}
-
-#[test]
-fn test_codegen_rhs_injection() {
-    let code = generate_code(SIMPLE_COUPLED);
-
-    // build_rhs should inject coupled inductor history currents
-    assert!(
-        code.contains("ci_i1_hist"),
-        "build_rhs should reference ci_i1_hist"
-    );
-    assert!(
-        code.contains("ci_i2_hist"),
-        "build_rhs should reference ci_i2_hist"
-    );
-}
-
-#[test]
-fn test_codegen_process_sample_update() {
-    let code = generate_code(SIMPLE_COUPLED);
-
-    // process_sample should update coupled inductor state
-    assert!(
-        code.contains("state.ci_i1_prev"),
-        "process_sample should update ci_i1_prev"
-    );
-    assert!(
-        code.contains("state.ci_i2_prev"),
-        "process_sample should update ci_i2_prev"
-    );
-    assert!(
-        code.contains("state.ci_v1_prev"),
-        "process_sample should update ci_v1_prev"
-    );
-    assert!(
-        code.contains("state.ci_v2_prev"),
-        "process_sample should update ci_v2_prev"
-    );
-}
-
-#[test]
-fn test_codegen_nan_sanitization() {
-    let code = generate_code(SIMPLE_COUPLED);
-
-    // NaN/magnitude check now happens before state write: checks local `v`
-    // not `state.v_prev`. The predicate also bounds finite-but-implausible
-    // magnitude (see docs/aidocs/DEBUGGING.md "finite runaway" entry), so
-    // match the extended form; fall back to the older exact forms for
-    // pre-fix compatibility.
-    let sanitize_idx = code
-        .find("if !v_is_finite || v.iter().any(|x| x.abs() > STATE_MAX_PLAUSIBLE_MAGNITUDE)")
-        .or_else(|| code.find("if !v.iter().all(|x| x.is_finite())"))
-        .or_else(|| code.find("if !state.v_prev.iter().all(|x| x.is_finite())"));
-    assert!(sanitize_idx.is_some(), "Should have NaN sanitization block");
-
-    let after_sanitize = &code[sanitize_idx.unwrap()..];
-    // NaN reset now returns DC operating point output instead of zeros
-    let return_idx = after_sanitize
-        .find("return dc_output;")
-        .or_else(|| after_sanitize.find("return [0.0; NUM_OUTPUTS];"))
-        .expect("Missing return in sanitization");
-    let sanitize_block = &after_sanitize[..return_idx];
-
-    assert!(
-        sanitize_block.contains("ci_i1_prev"),
-        "Sanitization should reset ci_i1_prev"
-    );
-    assert!(
-        sanitize_block.contains("ci_i2_prev"),
-        "Sanitization should reset ci_i2_prev"
-    );
-}
-
-#[test]
 fn test_codegen_backward_compat_no_coupling() {
     // A circuit with no coupled inductors should NOT emit CI_ constants
     let spice = "\
@@ -932,28 +730,6 @@ C1 out 0 100n
     assert!(
         !code.contains("ci_g_mutual"),
         "No ci_g_mutual when no coupled inductors"
-    );
-}
-
-#[test]
-fn test_codegen_backward_compat_uncoupled_inductors_only() {
-    // A circuit with ONLY uncoupled inductors should have IND_ but NOT CI_
-    let spice = "\
-Uncoupled Only
-R1 in out 1k
-L1 out 0 100m
-C1 out 0 100p
-";
-    let code = generate_code(spice);
-
-    assert!(
-        code.contains("IND_0"),
-        "Should have IND_0 for uncoupled inductor"
-    );
-    assert!(!code.contains("CI_0"), "No CI_0 when no coupled inductors");
-    assert!(
-        !code.contains("ci_i1_prev"),
-        "No ci_i1_prev when no coupled inductors"
     );
 }
 
@@ -1424,16 +1200,14 @@ C1 a 0 1n
 C2 b 0 1n
 C3 c 0 1n
 C4 d 0 1n
+Rin in 0 1meg
 ";
-    let code = generate_code(spice);
+    let config = support::config_in_out_or_node1(spice, 44100.0);
+    let built = support::build_shipped(spice, &config, "auto");
+    // Four windings, four augmented branch rows.
+    assert_eq!(built.kernel.n, built.mna.n_aug + 4);
 
-    // Both CI_0 and CI_1 should be present
-    assert!(code.contains("CI_0_G_SELF_1"), "Missing CI_0_G_SELF_1");
-    assert!(code.contains("CI_1_G_SELF_1"), "Missing CI_1_G_SELF_1");
-    assert!(code.contains("CI_0_G_MUTUAL"), "Missing CI_0_G_MUTUAL");
-    assert!(code.contains("CI_1_G_MUTUAL"), "Missing CI_1_G_MUTUAL");
-
-    assert_compiles(&code, "two_coupled_pairs");
+    assert_compiles(&built.generated.code, "two_coupled_pairs");
 }
 
 // ===========================================================================

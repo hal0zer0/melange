@@ -778,18 +778,6 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR, seed: &str) -> Result<String, CodegenEr
 ///     and the `_outer` pair for 4× OS). Mid-stream the filter state
 ///     reflects the old DC level and would ring down as the output steps to
 ///     the new one; zeroing matches `reset()`.
-///   * Linear-companion-model history for inductors / coupled inductors /
-///     transformer groups (`ind_{i,v}_prev`, `ind_i_hist`, etc.) zeroed —
-///     valid ONLY when `V_L ≈ 0` across every companion winding at the
-///     converged point (zero history is the `I_L = V_L = 0` equilibrium).
-///     A DC-carrying winding (e.g. a plate choke) has `V_L ≠ 0` at the
-///     companion-shunt fixed point, so writing back zeroed history there
-///     would be a false equilibrium that slews audibly as `process_sample`
-///     rebuilds the true history. The writeback therefore guards: if any
-///     winding's `|V_L|` exceeds 1 mV, it bumps `diag_nr_max_iter_count`
-///     (the `settle_dc_op` failure signal) and returns with state
-///     untouched, routing callers to the `WARMUP_SAMPLES_RECOMMENDED`
-///     fallback which does reach the true DC OP.
 ///
 /// Deliberately preserved: `noise_rng_state` (footgun — resetting would make
 /// plugins produce identical noise sequences after every parameter change),
@@ -799,69 +787,6 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR, seed: &str) -> Result<String, CodegenEr
 /// (the NR loop itself isn't plumbed through this counter in the MVP).
 fn emit_dc_op_writeback_dk(ir: &CircuitIR, nonlinear: bool) -> String {
     let mut body = String::new();
-
-    // Inductor equilibrium guard (honest-failure principle): the zeroed
-    // winding history written back below is only a true equilibrium when
-    // V_L ≈ 0 across every companion winding. Check the converged node
-    // voltages first; on violation, report failure via the settle_dc_op
-    // signal counter and leave state untouched.
-    let has_windings = !ir.inductors.is_empty()
-        || !ir.coupled_inductors.is_empty()
-        || !ir.transformer_groups.is_empty();
-    if has_windings {
-        let node_expr = |node: usize| -> String {
-            if node > 0 {
-                format!("v_node[{}]", node - 1)
-            } else {
-                "0.0".to_string()
-            }
-        };
-        body.push_str(
-            "\n        // --- Inductor equilibrium guard ---------------------------\n\
-             \x20       // The zeroed winding history below is only an equilibrium when\n\
-             \x20       // V_L = 0. A DC-carrying winding (plate choke, DC-biased xfmr\n\
-             \x20       // primary) carries history I at the companion fixed point —\n\
-             \x20       // writing back a false \"settled\" state would slew audibly as\n\
-             \x20       // process_sample rebuilds the true history. Refuse honestly:\n\
-             \x20       // bump the settle_dc_op failure signal so callers run the\n\
-             \x20       // WARMUP_SAMPLES_RECOMMENDED loop (which reaches the true OP).\n\
-             \x20       let mut max_winding_v = 0.0_f64;\n",
-        );
-        for ind in &ir.inductors {
-            body.push_str(&format!(
-                "        {{ let vl = ({} - {}).abs(); if vl > max_winding_v {{ max_winding_v = vl; }} }}\n",
-                node_expr(ind.node_i),
-                node_expr(ind.node_j),
-            ));
-        }
-        for ci in &ir.coupled_inductors {
-            body.push_str(&format!(
-                "        {{ let vl = ({} - {}).abs(); if vl > max_winding_v {{ max_winding_v = vl; }} }}\n",
-                node_expr(ci.l1_node_i),
-                node_expr(ci.l1_node_j),
-            ));
-            body.push_str(&format!(
-                "        {{ let vl = ({} - {}).abs(); if vl > max_winding_v {{ max_winding_v = vl; }} }}\n",
-                node_expr(ci.l2_node_i),
-                node_expr(ci.l2_node_j),
-            ));
-        }
-        for g in &ir.transformer_groups {
-            for w in 0..g.num_windings {
-                body.push_str(&format!(
-                    "        {{ let vl = ({} - {}).abs(); if vl > max_winding_v {{ max_winding_v = vl; }} }}\n",
-                    node_expr(g.winding_node_i[w]),
-                    node_expr(g.winding_node_j[w]),
-                ));
-            }
-        }
-        body.push_str(
-            "        if max_winding_v > 1e-3 {\n\
-             \x20           self.diag_nr_max_iter_count += 1;\n\
-             \x20           return;\n\
-             \x20       }\n",
-        );
-    }
 
     body.push_str(
         "\n        // --- Converged: write back to state -----------------------\n\
@@ -930,38 +855,6 @@ fn emit_dc_op_writeback_dk(ir: &CircuitIR, nonlinear: bool) -> String {
                 size = os.state_size_outer,
             ));
         }
-    }
-
-    // Linear-companion-model history: inductors, coupled inductors, and
-    // transformer winding currents. The DK MVP's DC equilibrium is the
-    // `process_sample(0.0)` fixed point where the companion shunt keeps
-    // `V_L = 0` and therefore `I_L = 0` — which is exactly the zeroed state.
-    if !ir.inductors.is_empty() {
-        let n = ir.inductors.len();
-        body.push_str(&format!(
-            "        self.ind_i_prev = [0.0; {n}];\n\
-             \x20       self.ind_v_prev = [0.0; {n}];\n\
-             \x20       self.ind_i_hist = [0.0; {n}];\n",
-        ));
-    }
-    if !ir.coupled_inductors.is_empty() {
-        let n = ir.coupled_inductors.len();
-        body.push_str(&format!(
-            "        self.ci_i1_prev = [0.0; {n}];\n\
-             \x20       self.ci_i2_prev = [0.0; {n}];\n\
-             \x20       self.ci_v1_prev = [0.0; {n}];\n\
-             \x20       self.ci_v2_prev = [0.0; {n}];\n\
-             \x20       self.ci_i1_hist = [0.0; {n}];\n\
-             \x20       self.ci_i2_hist = [0.0; {n}];\n",
-        ));
-    }
-    for (idx, g) in ir.transformer_groups.iter().enumerate() {
-        let nw = g.num_windings;
-        body.push_str(&format!(
-            "        self.xfmr_{idx}_i_prev = [0.0; {nw}];\n\
-             \x20       self.xfmr_{idx}_v_prev = [0.0; {nw}];\n\
-             \x20       self.xfmr_{idx}_i_hist = [0.0; {nw}];\n",
-        ));
     }
 
     body
