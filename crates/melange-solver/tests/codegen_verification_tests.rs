@@ -10,16 +10,19 @@ mod support;
 use melange_solver::codegen::emitter::Emitter;
 use melange_solver::codegen::ir::CircuitIR;
 use melange_solver::codegen::rust_emitter::RustEmitter;
-use melange_solver::codegen::{CodeGenerator, CodegenConfig, CodegenError};
+use melange_solver::codegen::{CodeGenerator, CodegenConfig, CodegenError, GeneratedCode};
 use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
 use std::io::Write;
 
 // ---------------------------------------------------------------------------
-// Helper: build kernel pipeline from a SPICE string
+// Helpers
 // ---------------------------------------------------------------------------
 
+/// The raw MNA and DK kernel of `spice` (no input stamp, no pipeline steps).
+/// For the IR- and kernel-level tests, and for the tests of the generator's
+/// own config validation, which a build (ports by name) cannot reach.
 fn build_pipeline(spice: &str) -> (Netlist, MnaSystem, DkKernel) {
     let netlist = Netlist::parse(spice).expect("failed to parse netlist");
     let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
@@ -27,6 +30,7 @@ fn build_pipeline(spice: &str) -> (Netlist, MnaSystem, DkKernel) {
     (netlist, mna, kernel)
 }
 
+/// The IR-level tests' config: input circuit node 0, output node 1.
 fn default_config() -> CodegenConfig {
     CodegenConfig {
         circuit_name: "test_circuit".to_string(),
@@ -38,19 +42,51 @@ fn default_config() -> CodegenConfig {
     }
 }
 
+/// A shipped-build config for `spice`: input `in`, output `out` (or circuit
+/// node 1 on a deck without one), 44.1 kHz, a 1 kOhm input resistance.
+fn shipped_config(spice: &str, name: &str) -> CodegenConfig {
+    CodegenConfig {
+        circuit_name: name.to_string(),
+        input_resistance: 1000.0,
+        ..support::config_in_out_or_node1(spice, 44100.0)
+    }
+}
+
+/// The shipped DK build of `spice` for `config`.
+fn shipped(spice: &str, config: &CodegenConfig) -> GeneratedCode {
+    support::build_shipped(spice, config, "dk").generated
+}
+
+/// [`shipped`], returning the build's refusal instead of panicking on it.
+fn try_shipped(spice: &str, config: &CodegenConfig) -> Result<GeneratedCode, String> {
+    support::try_build_shipped(spice, config, "dk").map(|b| b.generated)
+}
+
+/// The shipped DK build of `spice` (see [`shipped_config`]), with the MNA and
+/// kernel it was generated from.
 fn generate_code(spice: &str) -> (String, Netlist, MnaSystem, DkKernel) {
-    let (netlist, mna, kernel) = build_pipeline(spice);
     // Existing tests in this file compare against `kernel.k(i,j)` and
     // similar trap-rule matrices. Force trap so auto-BE promotion from
     // the Nyquist-eigenvalue discriminator (added 2026-05-15) does not
     // silently switch the codegen output to BE matrices.
-    let mut config = default_config();
+    let mut config = shipped_config(spice, "test_circuit");
     config.force_trap = true;
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
+    let built = support::build_shipped(spice, &config, "dk");
+    (built.generated.code, built.netlist, built.mna, built.kernel)
+}
+
+/// DK codegen straight from the raw MNA with companion-model inductors.
+/// Bypasses the production pipeline on purpose: tests the companion-inductor
+/// codegen path, which no shipped build reaches (an inductor deck always
+/// builds the augmented kernel); it goes with that path's deletion.
+fn generate_code_companion_raw(spice: &str, config: CodegenConfig) -> String {
+    let (netlist, mut mna, _) = build_pipeline(spice);
+    mna.g[config.input_node][config.input_node] += 1.0 / config.input_resistance;
+    let kernel = DkKernel::from_mna(&mna, config.sample_rate).expect("DK kernel");
+    CodeGenerator::new(config)
         .generate(&kernel, &mna, &netlist)
-        .expect("code generation failed");
-    (result.code, netlist, mna, kernel)
+        .expect("companion codegen")
+        .code
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +124,7 @@ Rc c 0 1k
 Rb b 0 100k
 Re e 0 1k
 .model 2N2222 NPN(IS=1e-15 BF=200)
+Rin in 0 1meg
 ";
 
 // ==========================================================================
@@ -1038,6 +1075,9 @@ fn test_generated_code_has_input_prev() {
 // Test: Invalid input/output node indices are rejected
 // ==========================================================================
 
+/// Bypasses the production pipeline on purpose: tests the generator's own
+/// port-index validation (a build takes port names and refuses an unknown one
+/// first; see `test_unknown_port_name_refused_by_build`).
 #[test]
 fn test_invalid_input_node_rejected() {
     let (netlist, mna, kernel) = build_pipeline(RC_CIRCUIT_SPICE);
@@ -1060,6 +1100,8 @@ fn test_invalid_input_node_rejected() {
     );
 }
 
+/// Bypasses the production pipeline on purpose: tests the generator's own
+/// port-index validation (see `test_unknown_port_name_refused_by_build`).
 #[test]
 fn test_invalid_output_node_rejected() {
     let (netlist, mna, kernel) = build_pipeline(RC_CIRCUIT_SPICE);
@@ -1080,6 +1122,27 @@ fn test_invalid_output_node_rejected() {
         "Error should be InvalidConfig, got: {:?}",
         err
     );
+}
+
+/// The shipped build refuses a port name the deck does not have.
+#[test]
+fn test_unknown_port_name_refused_by_build() {
+    // A tap keeps `in` connected when it is not the input, so the refusal is
+    // the port name's, not the topology gate's.
+    let spice = format!("{RC_CIRCUIT_SPICE}Rt in 0 1meg\n");
+    let config = shipped_config(&spice, "test_circuit");
+    let err = support::try_build_shipped_with(&spice, &config, "dk", |o| {
+        o.input_nodes = vec!["nosuch".to_string()];
+    })
+    .err()
+    .expect("unknown input node must be refused");
+    assert!(err.contains("Input node 'nosuch' not found"), "{err}");
+    let err = support::try_build_shipped_with(&spice, &config, "dk", |o| {
+        o.output_nodes = vec!["nosuch".to_string()];
+    })
+    .err()
+    .expect("unknown output node must be refused");
+    assert!(err.contains("Output node 'nosuch' not found"), "{err}");
 }
 
 // ==========================================================================
@@ -1451,34 +1514,41 @@ fn test_heterogeneous_diode_models_compile() {
 
 #[test]
 fn test_dc_op_includes_input_conductance() {
-    // BJT circuit with DC bias — the DC OP should change with different input resistance
-    let (netlist, mna, kernel) = build_pipeline(BJT_SPICE);
-
-    let config_low_r = CodegenConfig {
-        input_resistance: 1.0, // 1 ohm — near-ideal voltage source
-        ..default_config()
-    };
-    let ir_low_r = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config_low_r).unwrap();
-
-    let config_high_r = CodegenConfig {
-        input_resistance: 1e6, // 1 Mohm — very high impedance
-        ..default_config()
-    };
-    let ir_high_r = CircuitIR::from_kernel(&kernel, &mna, &netlist, &config_high_r).unwrap();
-
-    // DC operating points should differ when input resistance changes
-    // (because input conductance is part of the G matrix used in DC OP calculation)
-    // Note: they may both be zero if no DC sources — that's also valid
-    // The key property: the function accepts and uses input resistance
-    let _low_r_op = &ir_low_r.dc_operating_point;
-    let _high_r_op = &ir_high_r.dc_operating_point;
-
-    // For a circuit WITH DC sources, the operating points must differ
-    // The BJT circuit has VCC stamped via voltage source → has_dc_sources
-    if ir_low_r.has_dc_sources {
-        // At minimum, the DC OP calculation should not crash
-        assert_eq!(ir_low_r.dc_operating_point.len(), ir_low_r.topology.n);
-        assert_eq!(ir_high_r.dc_operating_point.len(), ir_high_r.topology.n);
+    // The input port is part of the circuit the DC OP solves: the build stamps
+    // G_in = 1/R_in at the input node, so a DC-biased input node sits behind
+    // R_in to ground. Tapped 12 V divider, R1 = R2 = 10k, input at the tap:
+    //   v(in) = 12 * (R2 || R_in) / (R1 + R2 || R_in)
+    const SPICE: &str = "\
+Tapped divider
+V1 vcc 0 DC 12
+R1 vcc in 10k
+R2 in 0 10k
+C1 in 0 1n
+Rl in out 1k
+Cl out 0 1n
+";
+    for r_in in [1.0, 1e6] {
+        let config = CodegenConfig {
+            input_resistance: r_in,
+            ..shipped_config(SPICE, "test_circuit")
+        };
+        let code = shipped(SPICE, &config).code;
+        let dc_op = code
+            .lines()
+            .find(|l| l.starts_with("pub const DC_OP: [f64; N] = ["))
+            .expect("DC_OP constant");
+        let v_in: f64 = dc_op
+            .split('[')
+            .nth(2)
+            .and_then(|v| v.split(',').nth(support::node_index(SPICE, "in")))
+            .and_then(|v| v.trim().trim_end_matches("];").parse().ok())
+            .expect("DC_OP[in]");
+        let r2_par = 10e3 * r_in / (10e3 + r_in);
+        let expected = 12.0 * r2_par / (10e3 + r2_par);
+        assert!(
+            (v_in - expected).abs() < 1e-6 * expected.max(1e-3),
+            "R_in = {r_in}: DC_OP v(in) = {v_in}, expected {expected}"
+        );
     }
 }
 
@@ -1532,17 +1602,22 @@ fn test_ir_roundtrip_heterogeneous_devices() {
 // Test: Inductor codegen E2E
 // ==========================================================================
 
-/// Verify that generated code for an RL lowpass circuit contains
-/// inductor state fields, constants, RHS injection, and state update.
-#[test]
-fn test_inductor_codegen_e2e() {
-    let spice = "\
+const RL_LOWPASS_SPICE: &str = "\
 RL Lowpass
 R1 in out 1k
 L1 out 0 10m
 C1 out 0 100p
 ";
-    let (code, _netlist, _mna, _kernel) = generate_code(spice);
+
+/// Verify that generated code for an RL lowpass circuit contains
+/// inductor state fields, constants, RHS injection, and state update.
+/// Companion-model codegen (see [`generate_code_companion_raw`]).
+#[test]
+fn test_inductor_codegen_e2e() {
+    let code = generate_code_companion_raw(
+        RL_LOWPASS_SPICE,
+        shipped_config(RL_LOWPASS_SPICE, "test_circuit"),
+    );
 
     // Should contain inductor constants
     assert!(
@@ -1569,6 +1644,22 @@ C1 out 0 100p
         code.contains("state.i_ind") || code.contains("state.ind"),
         "Generated code should update inductor state in process_sample"
     );
+}
+
+/// The shipped build of the RL lowpass: the inductor is an augmented branch
+/// row (N = 2 nodes + 1), with no companion-model constants or state.
+#[test]
+fn test_inductor_shipped_build_is_augmented() {
+    let (code, _netlist, mna, kernel) = generate_code(RL_LOWPASS_SPICE);
+    assert_eq!(mna.n, 2, "two circuit nodes");
+    assert_eq!(kernel.n, 3, "the inductor current is an augmented row");
+    assert!(code.contains("pub const N: usize = 3;"));
+    for token in ["IND_0_G_EQ", "ind_g_eq", "ind_i_hist", "i_ind_hist"] {
+        assert!(
+            !code.contains(token),
+            "the augmented build carries no companion token `{token}`"
+        );
+    }
 }
 
 // ==========================================================================
@@ -1683,20 +1774,18 @@ C1 out 0 1u
     let kernel = DkKernel::from_mna(&mna, 44100.0).expect("M=10 should succeed with MAX_M=24");
     assert_eq!(kernel.m, 10);
 
-    // Also verify codegen works for M=10
+    // Also verify the shipped build works for M=10
     let config = CodegenConfig {
         circuit_name: "ten_diode_test".to_string(),
-        input_node: 0,
-        output_nodes: vec![kernel.n - 1],
-        ..CodegenConfig::default()
+        ..support::config_for_spice(spice, 44100.0)
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist);
+    let result = try_shipped(spice, &config);
     assert!(
         result.is_ok(),
         "Codegen for M=10 should succeed: {:?}",
         result.err()
     );
+    assert_eq!(result.unwrap().m, 10);
 }
 
 // ==========================================================================
@@ -1737,22 +1826,32 @@ Vin in 0 0
 
 #[test]
 fn test_invalid_input_resistance_rejected() {
-    let (netlist, mna, kernel) = build_pipeline(RC_CIRCUIT_SPICE);
-    let config = CodegenConfig {
-        input_resistance: 0.0,
-        ..default_config()
-    };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist);
-    assert!(result.is_err(), "input_resistance=0 should be rejected");
+    // The shipped build refuses a non-positive input resistance.
+    for r in [0.0, -1.0] {
+        let config = CodegenConfig {
+            input_resistance: r,
+            ..shipped_config(RC_CIRCUIT_SPICE, "test_circuit")
+        };
+        let err = try_shipped(RC_CIRCUIT_SPICE, &config)
+            .err()
+            .unwrap_or_else(|| panic!("input_resistance={r} should be refused"));
+        assert!(
+            err.contains("input resistance must be positive and finite"),
+            "{err}"
+        );
+    }
 
-    let config2 = CodegenConfig {
-        input_resistance: -1.0,
-        ..default_config()
-    };
-    let codegen2 = CodeGenerator::new(config2);
-    let result2 = codegen2.generate(&kernel, &mna, &netlist);
-    assert!(result2.is_err(), "input_resistance=-1 should be rejected");
+    // The generator's own backstop. Bypasses the production pipeline on
+    // purpose: the build refuses first.
+    let (netlist, mna, kernel) = build_pipeline(RC_CIRCUIT_SPICE);
+    for r in [0.0, -1.0] {
+        let config = CodegenConfig {
+            input_resistance: r,
+            ..shipped_config(RC_CIRCUIT_SPICE, "test_circuit")
+        };
+        let result = CodeGenerator::new(config).generate(&kernel, &mna, &netlist);
+        assert!(result.is_err(), "input_resistance={r} should be rejected");
+    }
 }
 
 // ==========================================================================
@@ -1792,30 +1891,20 @@ fn test_sample_rate_info_present_in_generated_code() {
 #[test]
 fn test_different_sample_rates_produce_different_alpha() {
     let spice = RC_CIRCUIT_SPICE;
-    let netlist = Netlist::parse(spice).expect("failed to parse netlist");
-    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
 
     // Generate code at 44100 Hz
-    let kernel_44100 = DkKernel::from_mna(&mna, 44100.0).expect("failed to build DK kernel");
     let config_44100 = CodegenConfig {
         sample_rate: 44100.0,
-        ..default_config()
+        ..shipped_config(spice, "test_circuit")
     };
-    let codegen_44100 = CodeGenerator::new(config_44100);
-    let result_44100 = codegen_44100
-        .generate(&kernel_44100, &mna, &netlist)
-        .expect("code generation at 44100 Hz failed");
+    let result_44100 = shipped(spice, &config_44100);
 
     // Generate code at 48000 Hz
-    let kernel_48000 = DkKernel::from_mna(&mna, 48000.0).expect("failed to build DK kernel");
     let config_48000 = CodegenConfig {
         sample_rate: 48000.0,
-        ..default_config()
+        ..shipped_config(spice, "test_circuit")
     };
-    let codegen_48000 = CodeGenerator::new(config_48000);
-    let result_48000 = codegen_48000
-        .generate(&kernel_48000, &mna, &netlist)
-        .expect("code generation at 48000 Hz failed");
+    let result_48000 = shipped(spice, &config_48000);
 
     // ALPHA = 2 * sample_rate, so they must be different
     let alpha_44100 = format!("{:.17e}", 2.0 * 44100.0_f64);
@@ -1850,18 +1939,11 @@ fn test_different_sample_rates_produce_different_alpha() {
 #[test]
 fn test_sample_rate_96000_produces_correct_alpha() {
     let spice = RC_CIRCUIT_SPICE;
-    let netlist = Netlist::parse(spice).expect("failed to parse netlist");
-    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
-
-    let kernel = DkKernel::from_mna(&mna, 96000.0).expect("failed to build DK kernel");
     let config = CodegenConfig {
         sample_rate: 96000.0,
-        ..default_config()
+        ..shipped_config(spice, "test_circuit")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("code generation at 96000 Hz failed");
+    let result = shipped(spice, &config);
 
     let expected_alpha = format!("{:.17e}", 2.0 * 96000.0_f64);
     assert!(
@@ -1984,23 +2066,10 @@ fn test_vs_divider_dc_accuracy() {
 #[test]
 fn test_generated_code_includes_rhs_const_for_dc_source() {
     // When DC sources are present, generated code must include RHS_CONST array.
-    let spice = VS_DIVIDER_SPICE;
-    let netlist = Netlist::parse(spice).expect("failed to parse");
-    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("failed to build DK kernel");
-
-    let config = CodegenConfig {
-        circuit_name: "vs_test".to_string(),
-        sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![1],
-        input_resistance: 1000.0,
-        ..CodegenConfig::default()
-    };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("code generation failed");
+    // The divider has no input node (its first node, vcc, is pinned by V1);
+    // a 1 MOhm tap gives the build one.
+    let spice = format!("{VS_DIVIDER_SPICE}Rin in 0 1meg\n");
+    let result = shipped(&spice, &shipped_config(&spice, "vs_test"));
 
     assert!(
         result.code.contains("RHS_CONST"),
@@ -2636,11 +2705,7 @@ C1 out 0 100n
 .model D1N4148 D(IS=1e-15)
 .pot R1 1k 100k
 ";
-    let (netlist, mna, kernel) = build_pipeline(pot_spice);
-    let codegen = CodeGenerator::new(default_config());
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
+    let result = shipped(pot_spice, &shipped_config(pot_spice, "test_circuit"));
 
     let test_harness = format!(
         "{}\n\
@@ -2730,19 +2795,8 @@ R1 in out 1k
 L1 out 0 10m
 C1 out 0 1u
 ";
-    let (netlist, mna, kernel) = build_pipeline(ind_spice);
-    let config = CodegenConfig {
-        circuit_name: "ind_sr_test".to_string(),
-        sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![1],
-        input_resistance: 1000.0,
-        ..CodegenConfig::default()
-    };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
+    // Companion-model codegen (see [`generate_code_companion_raw`]).
+    let code = generate_code_companion_raw(ind_spice, shipped_config(ind_spice, "ind_sr_test"));
 
     let test_harness = format!(
         "{}\n\
@@ -2790,7 +2844,7 @@ C1 out 0 1u
              \n\
              eprintln!(\"inductor set_sample_rate test passed!\");\n\
          }}\n",
-        result.code
+        code
     );
 
     let path = std::path::Path::new("/tmp/melange_ind_sr_test.rs");
@@ -2826,6 +2880,47 @@ C1 out 0 1u
             String::from_utf8_lossy(&run_output.stderr)
         );
     }
+}
+
+/// The shipped (augmented-inductor) build of the same deck: set_sample_rate
+/// rebuilds S at the new rate and the circuit still runs.
+#[test]
+fn test_inductor_shipped_set_sample_rate_compiles_and_runs() {
+    let ind_spice = "\
+Inductor SR Test
+R1 in out 1k
+L1 out 0 10m
+C1 out 0 1u
+";
+    let code = shipped(ind_spice, &shipped_config(ind_spice, "ind_sr_shipped")).code;
+    let main_code = r#"
+fn main() {
+    let mut state = CircuitState::default();
+    state.set_sample_rate(96000.0);
+    let mut s_matches = true;
+    for i in 0..N {
+        for j in 0..N {
+            if (state.s[i][j] - S_DEFAULT[i][j]).abs() > 1e-15 {
+                s_matches = false;
+            }
+        }
+    }
+    assert!(!s_matches, "S at 96kHz should differ from S_DEFAULT");
+    for i in 0..200 {
+        let t = i as f64 / 96000.0;
+        let input = (2.0 * std::f64::consts::PI * 1000.0 * t).sin();
+        println!("{:.15e}", process_sample(input, &mut state)[0]);
+    }
+}
+"#;
+    let outputs = support::compile_and_run(&code, main_code, "ind_sr_shipped").parse_samples();
+    assert_eq!(outputs.len(), 200);
+    assert!(
+        outputs.iter().all(|v| v.is_finite()),
+        "All outputs should be finite"
+    );
+    let max_out = outputs.iter().cloned().fold(0.0f64, f64::max);
+    assert!(max_out > 1e-6, "Inductor circuit should produce output");
 }
 
 // ==========================================================================
@@ -3245,19 +3340,13 @@ Cs src 0 10u
 /// output is finite, non-zero, and the signal passes through.
 #[test]
 fn test_jfet_codegen_compiles_and_runs() {
-    let (netlist, mna, kernel) = build_pipeline(JFET_CS_SPICE);
     let config = CodegenConfig {
         circuit_name: "jfet_cs_run".to_string(),
         sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![1],
         input_resistance: 1.0,
-        ..CodegenConfig::default()
+        ..shipped_config(JFET_CS_SPICE, "jfet_cs_run")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
+    let result = shipped(JFET_CS_SPICE, &config);
 
     let test_harness = format!(
         "{}\n\
@@ -3348,21 +3437,14 @@ V1 vdd 0 DC 9
 C1 out 0 100n
 .model PJFET1 PJ(IDSS=2e-3)
 ";
-    let (netlist, mna, kernel) = build_pipeline(spice);
-    assert_eq!(kernel.m, 2, "P-channel JFET should be 2D (M=2)");
-
     let config = CodegenConfig {
         circuit_name: "pjfet_test".to_string(),
         sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![1],
         input_resistance: 1.0,
-        ..CodegenConfig::default()
+        ..shipped_config(spice, "pjfet_test")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
+    let result = shipped(spice, &config);
+    assert_eq!(result.m, 2, "P-channel JFET should be 2D (M=2)");
 
     // Verify P-channel sign is emitted
     assert!(
@@ -3449,18 +3531,14 @@ C1 out 0 100n
 
 #[test]
 fn test_oversampling_2x_generates_correct_structure() {
-    let (netlist, mna, kernel) = build_pipeline(DIODE_CLIPPER_SPICE);
     let config = CodegenConfig {
         circuit_name: "test_os2x".to_string(),
         sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![1],
         input_resistance: 1000.0,
         oversampling_factor: 2,
-        ..CodegenConfig::default()
+        ..shipped_config(DIODE_CLIPPER_SPICE, "test_os2x")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).unwrap();
+    let result = shipped(DIODE_CLIPPER_SPICE, &config);
     let code = &result.code;
 
     // Should have OVERSAMPLING_FACTOR constant
@@ -3553,46 +3631,33 @@ fn test_oversampling_factor_1_unchanged() {
 
 #[test]
 fn test_oversampling_invalid_factor_rejected() {
-    let (netlist, mna, kernel) = build_pipeline(RC_CIRCUIT_SPICE);
     let config = CodegenConfig {
         circuit_name: "test_invalid_os".to_string(),
         sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![0],
         input_resistance: 1.0,
         oversampling_factor: 3,
-        ..CodegenConfig::default()
+        ..shipped_config(RC_CIRCUIT_SPICE, "test_invalid_os")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist);
+    let result = try_shipped(RC_CIRCUIT_SPICE, &config);
     assert!(result.is_err(), "Factor 3 should be rejected");
-    let err = result.unwrap_err();
-    match err {
-        CodegenError::InvalidConfig(msg) => {
-            assert!(
-                msg.contains("oversampling_factor"),
-                "Error should mention oversampling_factor: {}",
-                msg
-            );
-        }
-        _ => panic!("Expected InvalidConfig, got {:?}", err),
-    }
+    let msg = result.unwrap_err();
+    assert!(
+        msg.contains("oversampling_factor must be 1, 2, or 4"),
+        "Error should mention oversampling_factor: {}",
+        msg
+    );
 }
 
 #[test]
 fn test_oversampling_2x_diode_clipper_compiles() {
-    let (netlist, mna, kernel) = build_pipeline(DIODE_CLIPPER_SPICE);
     let config = CodegenConfig {
         circuit_name: "test_os2x_compile".to_string(),
         sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![1],
         input_resistance: 1000.0,
         oversampling_factor: 2,
-        ..CodegenConfig::default()
+        ..shipped_config(DIODE_CLIPPER_SPICE, "test_os2x_compile")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).unwrap();
+    let result = shipped(DIODE_CLIPPER_SPICE, &config);
 
     let tmp_dir = std::env::temp_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_os2x_diode.rs");
@@ -3622,18 +3687,14 @@ fn test_oversampling_2x_diode_clipper_compiles() {
 
 #[test]
 fn test_oversampling_2x_rc_linear_compiles() {
-    let (netlist, mna, kernel) = build_pipeline(RC_CIRCUIT_SPICE);
     let config = CodegenConfig {
         circuit_name: "test_os2x_rc".to_string(),
         sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![0],
         input_resistance: 1.0,
         oversampling_factor: 2,
-        ..CodegenConfig::default()
+        ..shipped_config(RC_CIRCUIT_SPICE, "test_os2x_rc")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).unwrap();
+    let result = shipped(RC_CIRCUIT_SPICE, &config);
 
     let tmp_dir = std::env::temp_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_os2x_rc.rs");
@@ -3663,18 +3724,14 @@ fn test_oversampling_2x_rc_linear_compiles() {
 
 #[test]
 fn test_oversampling_2x_bjt_compiles() {
-    let (netlist, mna, kernel) = build_pipeline(BJT_SPICE);
     let config = CodegenConfig {
         circuit_name: "test_os2x_bjt".to_string(),
         sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![1],
         input_resistance: 1000.0,
         oversampling_factor: 2,
-        ..CodegenConfig::default()
+        ..shipped_config(BJT_SPICE, "test_os2x_bjt")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).unwrap();
+    let result = shipped(BJT_SPICE, &config);
 
     let tmp_dir = std::env::temp_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_os2x_bjt.rs");
@@ -3704,18 +3761,14 @@ fn test_oversampling_2x_bjt_compiles() {
 
 #[test]
 fn test_oversampling_4x_diode_clipper_compiles() {
-    let (netlist, mna, kernel) = build_pipeline(DIODE_CLIPPER_SPICE);
     let config = CodegenConfig {
         circuit_name: "test_os4x".to_string(),
         sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![1],
         input_resistance: 1000.0,
         oversampling_factor: 4,
-        ..CodegenConfig::default()
+        ..shipped_config(DIODE_CLIPPER_SPICE, "test_os4x")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).unwrap();
+    let result = shipped(DIODE_CLIPPER_SPICE, &config);
 
     let code = &result.code;
 
@@ -3761,22 +3814,15 @@ fn test_oversampling_4x_diode_clipper_compiles() {
 ///     assignment was backwards).
 #[test]
 fn test_oversampling_polyphase_structure_and_stage_assignment() {
-    let (netlist, mna, kernel) = build_pipeline(DIODE_CLIPPER_SPICE);
-
     // 2x: steep 7-section set, decimator function present
     let config_2x = CodegenConfig {
         circuit_name: "test_os2x_stage".to_string(),
         sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![1],
         input_resistance: 1000.0,
         oversampling_factor: 2,
-        ..CodegenConfig::default()
+        ..shipped_config(DIODE_CLIPPER_SPICE, "test_os2x_stage")
     };
-    let code_2x = CodeGenerator::new(config_2x)
-        .generate(&kernel, &mna, &netlist)
-        .unwrap()
-        .code;
+    let code_2x = shipped(DIODE_CLIPPER_SPICE, &config_2x).code;
     assert!(
         code_2x.contains("const OS_COEFFS: [f64; 7]"),
         "2x should use the steep 7-section half-band"
@@ -3796,16 +3842,11 @@ fn test_oversampling_polyphase_structure_and_stage_assignment() {
     let config_4x = CodegenConfig {
         circuit_name: "test_os4x_stage".to_string(),
         sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![1],
         input_resistance: 1000.0,
         oversampling_factor: 4,
-        ..CodegenConfig::default()
+        ..shipped_config(DIODE_CLIPPER_SPICE, "test_os4x_stage")
     };
-    let code_4x = CodeGenerator::new(config_4x)
-        .generate(&kernel, &mna, &netlist)
-        .unwrap()
-        .code;
+    let code_4x = shipped(DIODE_CLIPPER_SPICE, &config_4x).code;
     assert!(
         code_4x.contains("const OS_COEFFS: [f64; 3]"),
         "4x inner stage should use the wide 3-section half-band"
@@ -3845,19 +3886,14 @@ fn test_oversampling_polyphase_structure_and_stage_assignment() {
 /// generated code, plus a full process_sample sanity run.)
 #[test]
 fn test_oversampling_2x_emitted_filters_measured() {
-    let (netlist, mna, kernel) = build_pipeline(DIODE_CLIPPER_SPICE);
     let config = CodegenConfig {
         circuit_name: "test_os2x_measure".to_string(),
         sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![1],
         input_resistance: 1000.0,
         oversampling_factor: 2,
-        ..CodegenConfig::default()
+        ..shipped_config(DIODE_CLIPPER_SPICE, "test_os2x_measure")
     };
-    let result = CodeGenerator::new(config)
-        .generate(&kernel, &mna, &netlist)
-        .unwrap();
+    let result = shipped(DIODE_CLIPPER_SPICE, &config);
 
     let test_harness = format!(
         "{}\n{}",
@@ -4094,20 +4130,19 @@ Rc c 0 1k
 Rb b 0 100k
 Re e 0 1k
 .model 2N2222 NPN(IS=1e-14 BF=200 VAF=100 IKF=0.3)
+Rin in 0 1meg
 ";
 
 /// GP BJT codegen compiles successfully.
 #[test]
 fn test_codegen_bjt_gummel_poon_compiles() {
-    let (netlist, mna, kernel) = build_pipeline(BJT_GP_SPICE);
     let config = CodegenConfig {
         circuit_name: "test_gp_bjt".to_string(),
-        input_node: 0,
-        output_nodes: vec![kernel.n - 1],
-        ..CodegenConfig::default()
+        output_nodes: vec![support::node_index(BJT_GP_SPICE, "e")],
+        input_resistance: 1.0,
+        ..shipped_config(BJT_GP_SPICE, "test_gp_bjt")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).unwrap();
+    let result = shipped(BJT_GP_SPICE, &config);
 
     let tmp_dir = std::env::temp_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_gp_bjt.rs");
@@ -4138,15 +4173,13 @@ fn test_codegen_bjt_gummel_poon_compiles() {
 /// GP constants appear in generated code.
 #[test]
 fn test_codegen_bjt_gp_constants_emitted() {
-    let (netlist, mna, kernel) = build_pipeline(BJT_GP_SPICE);
     let config = CodegenConfig {
         circuit_name: "test_gp_bjt_consts".to_string(),
-        input_node: 0,
-        output_nodes: vec![kernel.n - 1],
-        ..CodegenConfig::default()
+        output_nodes: vec![support::node_index(BJT_GP_SPICE, "e")],
+        input_resistance: 1.0,
+        ..shipped_config(BJT_GP_SPICE, "test_gp_bjt_consts")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).unwrap();
+    let result = shipped(BJT_GP_SPICE, &config);
     let code = &result.code;
 
     assert!(
@@ -4184,6 +4217,7 @@ Rc c 0 1k
 Rb b 0 100k
 Re e 0 1k
 .model MYBJTMODEL NPN(IS=1e-15 BF=200)
+Rin in 0 1meg
 ";
     let (code, _netlist, _mna, _kernel) = generate_code(spice);
 
@@ -4714,21 +4748,14 @@ fn test_codegen_triode_compiles() {
 /// Feed a sine wave, verify output is finite and non-zero.
 #[test]
 fn test_codegen_triode_compiles_and_runs() {
-    let (netlist, mna, kernel) = build_pipeline(TRIODE_CC_SPICE);
-    assert_eq!(kernel.m, 2);
-
     let config = CodegenConfig {
         circuit_name: "triode_cc_run".to_string(),
         sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![1],
         input_resistance: 1.0,
-        ..CodegenConfig::default()
+        ..shipped_config(TRIODE_CC_SPICE, "triode_cc_run")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
+    let result = shipped(TRIODE_CC_SPICE, &config);
+    assert_eq!(result.m, 2);
 
     let test_harness = format!(
         "{}\n\
@@ -4805,21 +4832,14 @@ fn test_codegen_triode_compiles_and_runs() {
 /// Multi-triode: 2-stage preamp (2 triodes = M=4) compiles and runs.
 #[test]
 fn test_codegen_two_triode_preamp_compiles_and_runs() {
-    let (netlist, mna, kernel) = build_pipeline(TRIODE_TWO_STAGE_SPICE);
-    assert_eq!(kernel.m, 4, "Two triodes should have M=4");
-
     let config = CodegenConfig {
         circuit_name: "triode_preamp_run".to_string(),
         sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![1],
         input_resistance: 1.0,
-        ..CodegenConfig::default()
+        ..shipped_config(TRIODE_TWO_STAGE_SPICE, "triode_preamp_run")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
+    let result = shipped(TRIODE_TWO_STAGE_SPICE, &config);
+    assert_eq!(result.m, 4, "Two triodes should have M=4");
 
     let test_harness = format!(
         "{}\n\
@@ -4933,11 +4953,10 @@ fn test_codegen_pentode_emits_helpers_and_constants() {
         "Single pentode should contribute M=3 nonlinear dimensions (Vgk→Ip, Vpk→Ig2, Vg2k→Ig1)"
     );
 
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("failed to build DK kernel for pentode");
-    let codegen = CodeGenerator::new(default_config());
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("pentode codegen failed");
+    let result = shipped(
+        PENTODE_CC_SPICE,
+        &shipped_config(PENTODE_CC_SPICE, "test_circuit"),
+    );
     let code = result.code;
 
     // Pentode helpers must be emitted (any_pentode == true).
@@ -4990,13 +5009,10 @@ fn test_codegen_pentode_emits_helpers_and_constants() {
 /// Catches template syntax errors and stale Jacobian indices.
 #[test]
 fn test_codegen_pentode_compiles() {
-    let netlist = Netlist::parse(PENTODE_CC_SPICE).expect("parse pentode netlist");
-    let mna = MnaSystem::from_netlist(&netlist).expect("MNA pentode");
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("DK pentode kernel");
-    let codegen = CodeGenerator::new(default_config());
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("pentode codegen failed");
+    let result = shipped(
+        PENTODE_CC_SPICE,
+        &shipped_config(PENTODE_CC_SPICE, "test_circuit"),
+    );
 
     let tmp_dir = std::env::temp_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_pentode.rs");
@@ -5235,13 +5251,10 @@ fn test_codegen_beam_tetrode_compiles() {
 /// gating.
 #[test]
 fn test_codegen_pentode_omits_beam_tetrode_helpers() {
-    let netlist = Netlist::parse(PENTODE_CC_SPICE).expect("parse pentode netlist");
-    let mna = MnaSystem::from_netlist(&netlist).expect("MNA pentode");
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("DK pentode kernel");
-    let codegen = CodeGenerator::new(default_config());
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("pentode codegen");
+    let result = shipped(
+        PENTODE_CC_SPICE,
+        &shipped_config(PENTODE_CC_SPICE, "test_circuit"),
+    );
     let code = result.code;
 
     // Rational pentode path must still emit the phase 1a helpers.
@@ -5539,13 +5552,10 @@ fn test_codegen_classical_pentode_compiles() {
 /// gating.
 #[test]
 fn test_codegen_sharp_pentode_omits_classical_helpers() {
-    let netlist = Netlist::parse(PENTODE_CC_SPICE).expect("parse pentode netlist");
-    let mna = MnaSystem::from_netlist(&netlist).expect("MNA pentode");
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("DK pentode kernel");
-    let codegen = CodeGenerator::new(default_config());
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("pentode codegen");
+    let result = shipped(
+        PENTODE_CC_SPICE,
+        &shipped_config(PENTODE_CC_SPICE, "test_circuit"),
+    );
     let code = result.code;
 
     // Rational pentode path must still emit the phase 1a helpers.
@@ -5889,13 +5899,10 @@ fn test_codegen_grid_off_pentode_compiles() {
 /// guard is forgotten.
 #[test]
 fn test_codegen_sharp_pentode_omits_grid_off_helpers() {
-    let netlist = Netlist::parse(PENTODE_CC_SPICE).expect("parse pentode netlist");
-    let mna = MnaSystem::from_netlist(&netlist).expect("MNA");
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("DK kernel");
-    let codegen = CodeGenerator::new(default_config());
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("sharp pentode codegen failed");
+    let result = shipped(
+        PENTODE_CC_SPICE,
+        &shipped_config(PENTODE_CC_SPICE, "test_circuit"),
+    );
     let code = result.code;
 
     // Sharp EL84 must still emit the 3D helper family.
@@ -6233,15 +6240,11 @@ fn test_codegen_classical_vp_independent_screen() {
 /// Verify that a non-default output_scales is emitted into the generated code.
 #[test]
 fn test_output_scale_non_default_emitted() {
-    let (netlist, mna, kernel) = build_pipeline(DIODE_CLIPPER_SPICE);
     let config = CodegenConfig {
         output_scales: vec![0.5],
-        ..default_config()
+        ..shipped_config(DIODE_CLIPPER_SPICE, "test_circuit")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("code generation failed");
+    let result = shipped(DIODE_CLIPPER_SPICE, &config);
 
     // Should contain 0.5 (5.0e-1) as the OUTPUT_SCALES constant
     assert!(
@@ -6273,15 +6276,11 @@ fn test_output_scale_non_default_emitted() {
 /// Verify that output_scales=[2.0] is applied in process_sample via dc_blocked * OUTPUT_SCALES[out_idx].
 #[test]
 fn test_output_scale_applied_in_process_sample() {
-    let (netlist, mna, kernel) = build_pipeline(DIODE_CLIPPER_SPICE);
     let config = CodegenConfig {
         output_scales: vec![2.0],
-        ..default_config()
+        ..shipped_config(DIODE_CLIPPER_SPICE, "test_circuit")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("code generation failed");
+    let result = shipped(DIODE_CLIPPER_SPICE, &config);
 
     // The process_sample template applies: dc_blocked * OUTPUT_SCALES[out_idx]
     assert!(
@@ -6306,40 +6305,39 @@ fn test_output_scale_applied_in_process_sample() {
 // MOSFET codegen tests
 // ==========================================================================
 
+// Biased common-source stage: the input couples into a divider-biased gate
+// (Vg ~ 3.4 V > VTO), 220 Ohm source degeneration, drain ~7 V. An earlier
+// deck drove the source of a device whose gate sat at 0 V (off at every
+// sample); its gain assertion passed only on a helper that injected the
+// input current without stamping the input conductance (a ~10 V drive
+// across R2).
 const MOSFET_CS_SPICE: &str = "\
 MOSFET Common Source
-M1 out gate in 0 NMOD
+M1 out gate src 0 NMOD
 .model NMOD NM(VTO=2.0 KP=0.1 LAMBDA=0.01)
 R1 vcc out 1k
 R2 in 0 100
-C1 gate 0 100n
+Cin in gate 1u
+Rb1 vcc gate 100k
+Rb2 gate 0 39k
+Rs src 0 220
 VCC vcc 0 DC 12
 ";
 
 #[test]
 fn test_mosfet_codegen_generates_correct_functions() {
-    let (netlist, mna, kernel) = build_pipeline(MOSFET_CS_SPICE);
-
-    let input_node_idx = mna.node_map["in"] - 1;
-    let output_node_idx = mna.node_map["out"] - 1;
-
     let config = CodegenConfig {
         circuit_name: "mosfet_cs".to_string(),
         sample_rate: 44100.0,
-        input_node: input_node_idx,
-        output_nodes: vec![output_node_idx],
         output_scales: vec![1.0],
         input_resistance: 1.0,
-        ..CodegenConfig::default()
+        ..shipped_config(MOSFET_CS_SPICE, "mosfet_cs")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
+    let result = shipped(MOSFET_CS_SPICE, &config);
+    assert_eq!(result.m, 2, "MOSFET should be 2D (M=2)");
     let code = result.code;
 
     // MOSFET is 2D: M=2 (Id + Ig)
-    assert_eq!(kernel.m, 2, "MOSFET should be 2D (M=2)");
 
     // Should contain MOSFET device functions
     assert!(
@@ -6369,25 +6367,15 @@ fn test_mosfet_codegen_generates_correct_functions() {
 /// verify output is finite, non-zero, and the signal passes through.
 #[test]
 fn test_mosfet_codegen_compiles_and_runs() {
-    let (netlist, mna, kernel) = build_pipeline(MOSFET_CS_SPICE);
-    assert_eq!(kernel.m, 2, "MOSFET should be 2D (M=2)");
-
-    let input_node_idx = mna.node_map["in"] - 1;
-    let output_node_idx = mna.node_map["out"] - 1;
-
     let config = CodegenConfig {
         circuit_name: "mosfet_cs_run".to_string(),
         sample_rate: 44100.0,
-        input_node: input_node_idx,
-        output_nodes: vec![output_node_idx],
         output_scales: vec![1.0],
         input_resistance: 1.0,
-        ..CodegenConfig::default()
+        ..shipped_config(MOSFET_CS_SPICE, "mosfet_cs_run")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
+    let result = shipped(MOSFET_CS_SPICE, &config);
+    assert_eq!(result.m, 2, "MOSFET should be 2D (M=2)");
 
     let test_harness = format!(
         "{}\n\
@@ -6483,25 +6471,16 @@ Rg in gate 10k
 C1 gate 0 100n
 VCC vcc 0 DC 12
 ";
-    let (netlist, mna, kernel) = build_pipeline(spice);
-    assert_eq!(kernel.m, 2, "P-channel MOSFET should be 2D (M=2)");
-
-    let input_node_idx = mna.node_map["in"] - 1;
-    let output_node_idx = mna.node_map["out"] - 1;
 
     let config = CodegenConfig {
         circuit_name: "pmos_test".to_string(),
         sample_rate: 44100.0,
-        input_node: input_node_idx,
-        output_nodes: vec![output_node_idx],
         output_scales: vec![1.0],
         input_resistance: 1.0,
-        ..CodegenConfig::default()
+        ..shipped_config(spice, "pmos_test")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
+    let result = shipped(spice, &config);
+    assert_eq!(result.m, 2, "P-channel MOSFET should be 2D (M=2)");
 
     // Verify P-channel sign is emitted
     assert!(
@@ -6588,25 +6567,18 @@ R2 mid out 1k
 C1 mid 0 100n
 C2 out 0 100n
 ";
-    let (netlist, mna, kernel) = build_pipeline(spice);
-
-    let in_idx = mna.node_map["in"] - 1;
-    let mid_idx = mna.node_map["mid"] - 1;
-    let out_idx = mna.node_map["out"] - 1;
-
     let config = CodegenConfig {
         circuit_name: "multi_output_test".to_string(),
         sample_rate: 44100.0,
-        input_node: in_idx,
-        output_nodes: vec![mid_idx, out_idx],
+        output_nodes: vec![
+            support::node_index(spice, "mid"),
+            support::node_index(spice, "out"),
+        ],
         output_scales: vec![1.0, 1.0],
         input_resistance: 1.0,
-        ..CodegenConfig::default()
+        ..shipped_config(spice, "multi_output_test")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
+    let result = shipped(spice, &config);
     let code = &result.code;
 
     // Verify multi-output constants
@@ -6699,16 +6671,27 @@ C2 out 0 100n
     }
 }
 
-/// Multi-output validation: empty output_nodes is rejected.
+/// Multi-output validation: empty output_nodes is rejected, by the shipped
+/// build and by the generator's own check (raw on purpose: its backstop).
 #[test]
 fn test_empty_output_nodes_rejected() {
+    let config = CodegenConfig {
+        output_nodes: vec![],
+        output_scales: vec![],
+        ..shipped_config(RC_CIRCUIT_SPICE, "test_circuit")
+    };
+    let err = try_shipped(RC_CIRCUIT_SPICE, &config)
+        .err()
+        .expect("the build must refuse a config with no outputs");
+    assert!(err.contains("output_nodes must not be empty"), "{err}");
+
     let (netlist, mna, kernel) = build_pipeline(RC_CIRCUIT_SPICE);
 
     let config = CodegenConfig {
         input_node: 0,
         output_nodes: vec![],
         output_scales: vec![],
-        ..default_config()
+        ..shipped_config(RC_CIRCUIT_SPICE, "test_circuit")
     };
 
     let codegen = CodeGenerator::new(config);
@@ -6724,6 +6707,8 @@ fn test_empty_output_nodes_rejected() {
 }
 
 /// Multi-output validation: mismatched output_scales length is rejected.
+/// Bypasses the production pipeline on purpose: tests the generator's own
+/// check; a build sizes the scales to its outputs, so it cannot mismatch them.
 #[test]
 fn test_mismatched_output_scales_rejected() {
     let (netlist, mna, kernel) = build_pipeline(RC_CIRCUIT_SPICE);
@@ -6793,21 +6778,14 @@ C1 out 0 1u
 /// VCCS circuit: verify codegen produces valid code (linear, M=0).
 #[test]
 fn test_vccs_codegen_compiles_and_runs() {
-    let (netlist, mna, kernel) = build_pipeline(VCCS_CIRCUIT_SPICE);
-    assert_eq!(kernel.m, 0, "VCCS is linear, M should be 0");
-
     let config = CodegenConfig {
         circuit_name: "vccs_test".to_string(),
         sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![1],
         input_resistance: 1.0,
-        ..CodegenConfig::default()
+        ..shipped_config(VCCS_CIRCUIT_SPICE, "vccs_test")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
+    let result = shipped(VCCS_CIRCUIT_SPICE, &config);
+    assert_eq!(result.m, 0, "VCCS is linear, M should be 0");
 
     let test_harness = format!(
         "{}\n\
@@ -6878,21 +6856,14 @@ fn test_vccs_codegen_compiles_and_runs() {
 /// VCVS circuit: verify codegen produces valid code (linear, M=0).
 #[test]
 fn test_vcvs_codegen_compiles_and_runs() {
-    let (netlist, mna, kernel) = build_pipeline(VCVS_CIRCUIT_SPICE);
-    assert_eq!(kernel.m, 0, "VCVS is linear, M should be 0");
-
     let config = CodegenConfig {
         circuit_name: "vcvs_test".to_string(),
         sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![1],
         input_resistance: 1.0,
-        ..CodegenConfig::default()
+        ..shipped_config(VCVS_CIRCUIT_SPICE, "vcvs_test")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
+    let result = shipped(VCVS_CIRCUIT_SPICE, &config);
+    assert_eq!(result.m, 0, "VCVS is linear, M should be 0");
 
     let test_harness = format!(
         "{}\n\
@@ -6963,21 +6934,14 @@ fn test_vcvs_codegen_compiles_and_runs() {
 /// VCCS + nonlinear device (diode): verify codegen handles mixed circuit.
 #[test]
 fn test_vccs_with_diode_codegen_compiles_and_runs() {
-    let (netlist, mna, kernel) = build_pipeline(VCCS_WITH_DIODE_SPICE);
-    assert_eq!(kernel.m, 1, "One diode -> M=1");
-
     let config = CodegenConfig {
         circuit_name: "vccs_diode_test".to_string(),
-        sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![2], // output node index for 'out'
+        sample_rate: 44100.0, // output node index for 'out'
         input_resistance: 1.0,
-        ..CodegenConfig::default()
+        ..shipped_config(VCCS_WITH_DIODE_SPICE, "vccs_diode_test")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
+    let result = shipped(VCCS_WITH_DIODE_SPICE, &config);
+    assert_eq!(result.m, 1, "One diode -> M=1");
 
     let test_harness = format!(
         "{}\n\
@@ -7195,21 +7159,13 @@ fn test_runtime_device_params_bjt_sign_stays_const() {
 /// Tube circuit: state struct contains all 7 tube params.
 #[test]
 fn test_runtime_device_params_tube_state_fields() {
-    let (netlist, mna, kernel) = build_pipeline(TRIODE_CC_SPICE);
-    let input_node_idx = mna.node_map["in"] - 1;
-    let output_node_idx = mna.node_map["out"] - 1;
     let config = CodegenConfig {
         circuit_name: "tube_params".to_string(),
         sample_rate: 44100.0,
-        input_node: input_node_idx,
-        output_nodes: vec![output_node_idx],
         input_resistance: 1.0,
-        ..CodegenConfig::default()
+        ..shipped_config(TRIODE_CC_SPICE, "tube_params")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
+    let result = shipped(TRIODE_CC_SPICE, &config);
     let code = result.code;
 
     assert!(
@@ -7254,21 +7210,13 @@ fn test_runtime_device_params_tube_state_fields() {
 /// Tube circuit: NR loop uses state fields for all tube params.
 #[test]
 fn test_runtime_device_params_tube_nr_uses_state() {
-    let (netlist, mna, kernel) = build_pipeline(TRIODE_CC_SPICE);
-    let input_node_idx = mna.node_map["in"] - 1;
-    let output_node_idx = mna.node_map["out"] - 1;
     let config = CodegenConfig {
         circuit_name: "tube_nr".to_string(),
         sample_rate: 44100.0,
-        input_node: input_node_idx,
-        output_nodes: vec![output_node_idx],
         input_resistance: 1.0,
-        ..CodegenConfig::default()
+        ..shipped_config(TRIODE_CC_SPICE, "tube_nr")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
+    let result = shipped(TRIODE_CC_SPICE, &config);
     let code = result.code;
 
     // tube_ip should use state fields
@@ -7298,21 +7246,13 @@ fn test_runtime_device_params_tube_nr_uses_state() {
 /// Tube circuit: Default impl initializes tube params from consts.
 #[test]
 fn test_runtime_device_params_tube_default_init() {
-    let (netlist, mna, kernel) = build_pipeline(TRIODE_CC_SPICE);
-    let input_node_idx = mna.node_map["in"] - 1;
-    let output_node_idx = mna.node_map["out"] - 1;
     let config = CodegenConfig {
         circuit_name: "tube_default".to_string(),
         sample_rate: 44100.0,
-        input_node: input_node_idx,
-        output_nodes: vec![output_node_idx],
         input_resistance: 1.0,
-        ..CodegenConfig::default()
+        ..shipped_config(TRIODE_CC_SPICE, "tube_default")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
+    let result = shipped(TRIODE_CC_SPICE, &config);
     let code = result.code;
 
     assert!(
@@ -7375,22 +7315,14 @@ fn test_runtime_device_params_jfet_state_fields() {
 /// MOSFET circuit: state struct contains KP/VT/LAMBDA, SIGN stays const.
 #[test]
 fn test_runtime_device_params_mosfet_state_fields() {
-    let (netlist, mna, kernel) = build_pipeline(MOSFET_CS_SPICE);
-    let input_node_idx = mna.node_map["in"] - 1;
-    let output_node_idx = mna.node_map["out"] - 1;
     let config = CodegenConfig {
         circuit_name: "mosfet_params".to_string(),
         sample_rate: 44100.0,
-        input_node: input_node_idx,
-        output_nodes: vec![output_node_idx],
         output_scales: vec![1.0],
         input_resistance: 1.0,
-        ..CodegenConfig::default()
+        ..shipped_config(MOSFET_CS_SPICE, "mosfet_params")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
+    let result = shipped(MOSFET_CS_SPICE, &config);
     let code = result.code;
 
     assert!(
@@ -7458,19 +7390,13 @@ fn test_runtime_device_params_linear_circuit_no_fields() {
 /// Compile-and-run test: diode circuit with modified device params produces different output.
 #[test]
 fn test_runtime_device_params_compile_and_run_diode() {
-    let (netlist, mna, kernel) = build_pipeline(DIODE_CLIPPER_SPICE);
     let config = CodegenConfig {
         circuit_name: "diode_runtime_params".to_string(),
         sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![1],
         input_resistance: 1.0,
-        ..CodegenConfig::default()
+        ..shipped_config(DIODE_CLIPPER_SPICE, "diode_runtime_params")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
+    let result = shipped(DIODE_CLIPPER_SPICE, &config);
 
     let test_harness = format!(
         "{}\n\
@@ -7560,19 +7486,28 @@ fn test_runtime_device_params_compile_and_run_diode() {
 /// Compile-and-run test: BJT circuit with modified BF produces different output.
 #[test]
 fn test_runtime_device_params_compile_and_run_bjt() {
-    let (netlist, mna, kernel) = build_pipeline(BJT_SPICE);
+    // A biased common-emitter stage. The test used to drive BJT_SPICE (no
+    // supply, no input node) on its collector and read its base.
+    const SPICE: &str = "\
+BJT runtime params
+Vcc vcc 0 DC 12
+Cin in b 10u
+R1 vcc b 100k
+R2 b 0 22k
+Q1 c b e 2N2222
+Rc vcc c 4.7k
+Re e 0 1k
+Cout c out 10u
+Rload out 0 100k
+.model 2N2222 NPN(IS=1e-15 BF=200)
+";
     let config = CodegenConfig {
         circuit_name: "bjt_runtime_params".to_string(),
         sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![1],
         input_resistance: 1.0,
-        ..CodegenConfig::default()
+        ..shipped_config(SPICE, "bjt_runtime_params")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
+    let result = shipped(SPICE, &config);
 
     let test_harness = format!(
         "{}\n\
@@ -7664,21 +7599,13 @@ fn test_runtime_device_params_compile_and_run_bjt() {
 
 #[test]
 fn test_vca_codegen_compiles_and_runs() {
-    let (netlist, mna, kernel) = build_pipeline(VCA_GAIN_STAGE_SPICE);
-    let input_node_idx = mna.node_map["in"] - 1;
-    let output_node_idx = mna.node_map["out"] - 1;
     let config = CodegenConfig {
         circuit_name: "vca_gain_stage_run".to_string(),
         sample_rate: 44100.0,
-        input_node: input_node_idx,
-        output_nodes: vec![output_node_idx],
         input_resistance: 1.0,
-        ..CodegenConfig::default()
+        ..shipped_config(VCA_GAIN_STAGE_SPICE, "vca_gain_stage_run")
     };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
+    let result = shipped(VCA_GAIN_STAGE_SPICE, &config);
 
     let test_harness = format!(
         "{}\n\
@@ -7757,23 +7684,21 @@ fn test_vca_codegen_compiles_and_runs() {
 // ---------------------------------------------------------------------------
 
 fn generate_code_with_config(spice: &str, config: CodegenConfig) -> String {
-    let (netlist, mna, kernel) = build_pipeline(spice);
-    let codegen = CodeGenerator::new(config);
-    codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("code generation failed")
-        .code
+    shipped(spice, &config).code
 }
 
 #[test]
 fn noise_off_is_byte_identical_to_baseline() {
     // Default config (NoiseMode::Off) must emit exactly the same code as
     // explicitly passing NoiseMode::Off — and must NOT contain any noise tokens.
-    let default_code = generate_code_with_config(RC_CIRCUIT_SPICE, default_config());
+    let default_code = generate_code_with_config(
+        RC_CIRCUIT_SPICE,
+        shipped_config(RC_CIRCUIT_SPICE, "test_circuit"),
+    );
 
     let explicit_off = CodegenConfig {
         noise_mode: melange_solver::codegen::NoiseMode::Off,
-        ..default_config()
+        ..shipped_config(RC_CIRCUIT_SPICE, "test_circuit")
     };
     let off_code = generate_code_with_config(RC_CIRCUIT_SPICE, explicit_off);
 
@@ -7804,7 +7729,7 @@ fn noise_thermal_emits_expected_tokens_and_source_count() {
     let config = CodegenConfig {
         noise_mode: melange_solver::codegen::NoiseMode::Thermal,
         noise_master_seed: 42,
-        ..default_config()
+        ..shipped_config(RC_CIRCUIT_SPICE, "test_circuit")
     };
     let code = generate_code_with_config(RC_CIRCUIT_SPICE, config);
 
@@ -7877,7 +7802,7 @@ C1 out 0 1u
 ";
     let config = CodegenConfig {
         noise_mode: melange_solver::codegen::NoiseMode::Thermal,
-        ..default_config()
+        ..shipped_config(spice_with_pot, "test_circuit")
     };
     let code = generate_code_with_config(spice_with_pot, config);
 
@@ -7919,7 +7844,7 @@ C1 out 0 1u
 ";
     let config = CodegenConfig {
         noise_mode: melange_solver::codegen::NoiseMode::Thermal,
-        ..default_config()
+        ..shipped_config(spice, "test_circuit")
     };
     let code = generate_code_with_config(spice, config);
 
@@ -7964,7 +7889,7 @@ fn noise_thermal_includes_switch_r() {
     // per-component 1D array — different layout, same semantic).
     let config = CodegenConfig {
         noise_mode: melange_solver::codegen::NoiseMode::Thermal,
-        ..default_config()
+        ..shipped_config(SWITCH_R_SPICE, "test_circuit")
     };
     let code = generate_code_with_config(SWITCH_R_SPICE, config);
 
@@ -7998,7 +7923,7 @@ fn noise_nodal_thermal_includes_switch_r_via_per_component_values() {
     // differs: nodal emits `SWITCH_<N>_COMP_<ci>_VALUES[position]`.
     let config = CodegenConfig {
         noise_mode: melange_solver::codegen::NoiseMode::Thermal,
-        ..default_config()
+        ..shipped_config(SWITCH_R_SPICE, "test_circuit")
     };
     let code = generate_nodal_code_with_config(SWITCH_R_SPICE, config);
 
@@ -8028,10 +7953,13 @@ fn noise_switch_r_off_stays_byte_identical() {
     // With noise mode Off, no noise tokens should appear. Guards against
     // the collector or emitter accidentally running its switch-R path
     // when noise is compiled out.
-    let default_code = generate_code_with_config(SWITCH_R_SPICE, default_config());
+    let default_code = generate_code_with_config(
+        SWITCH_R_SPICE,
+        shipped_config(SWITCH_R_SPICE, "test_circuit"),
+    );
     let explicit_off = CodegenConfig {
         noise_mode: melange_solver::codegen::NoiseMode::Off,
-        ..default_config()
+        ..shipped_config(SWITCH_R_SPICE, "test_circuit")
     };
     let off_code = generate_code_with_config(SWITCH_R_SPICE, explicit_off);
     assert_eq!(
@@ -8070,7 +7998,7 @@ fn noise_shot_mode_emits_shot_tokens_and_source_count() {
     let config = CodegenConfig {
         noise_mode: melange_solver::codegen::NoiseMode::Shot,
         noise_master_seed: 42,
-        ..default_config()
+        ..shipped_config(DIODE_ONE_SPICE, "test_circuit")
     };
     let code = generate_code_with_config(DIODE_ONE_SPICE, config);
 
@@ -8118,7 +8046,7 @@ fn noise_thermal_mode_does_not_emit_shot_tokens() {
     // builds of thermal-only circuits.
     let config = CodegenConfig {
         noise_mode: melange_solver::codegen::NoiseMode::Thermal,
-        ..default_config()
+        ..shipped_config(DIODE_ONE_SPICE, "test_circuit")
     };
     let code = generate_code_with_config(DIODE_ONE_SPICE, config);
 
@@ -8164,7 +8092,7 @@ C_out out 0 1u
 ";
     let config = CodegenConfig {
         noise_mode: melange_solver::codegen::NoiseMode::Shot,
-        ..default_config()
+        ..shipped_config(MIXED_SPICE, "test_circuit")
     };
     let code = generate_code_with_config(MIXED_SPICE, config);
 
@@ -8524,12 +8452,8 @@ VCC vcc 0 300
 // ---------------------------------------------------------------------------
 
 fn generate_nodal_code_with_config(spice: &str, config: CodegenConfig) -> String {
-    let netlist = Netlist::parse(spice).expect("failed to parse netlist");
-    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
-    let codegen = CodeGenerator::new(config);
-    codegen
-        .generate_nodal(&mna, &netlist)
-        .expect("nodal code generation failed")
+    support::build_shipped(spice, &config, "nodal")
+        .generated
         .code
 }
 
@@ -8538,10 +8462,13 @@ fn noise_nodal_off_is_byte_identical_to_baseline() {
     // Default config (NoiseMode::Off) and explicit Off must produce
     // byte-identical output, and neither may leak any noise tokens into
     // the generated nodal code.
-    let default_code = generate_nodal_code_with_config(RC_CIRCUIT_SPICE, default_config());
+    let default_code = generate_nodal_code_with_config(
+        RC_CIRCUIT_SPICE,
+        shipped_config(RC_CIRCUIT_SPICE, "test_circuit"),
+    );
     let explicit_off = CodegenConfig {
         noise_mode: melange_solver::codegen::NoiseMode::Off,
-        ..default_config()
+        ..shipped_config(RC_CIRCUIT_SPICE, "test_circuit")
     };
     let off_code = generate_nodal_code_with_config(RC_CIRCUIT_SPICE, explicit_off);
 
@@ -8572,7 +8499,7 @@ fn noise_nodal_emits_expected_tokens_and_source_count() {
     let config = CodegenConfig {
         noise_mode: melange_solver::codegen::NoiseMode::Thermal,
         noise_master_seed: 7,
-        ..default_config()
+        ..shipped_config(RC_CIRCUIT_SPICE, "test_circuit")
     };
     let code = generate_nodal_code_with_config(RC_CIRCUIT_SPICE, config);
 
@@ -8632,7 +8559,7 @@ fn noise_nodal_generated_code_compiles() {
     let config = CodegenConfig {
         noise_mode: melange_solver::codegen::NoiseMode::Thermal,
         noise_master_seed: 1,
-        ..default_config()
+        ..shipped_config(RC_CIRCUIT_SPICE, "test_circuit")
     };
     let code = generate_nodal_code_with_config(RC_CIRCUIT_SPICE, config);
 
@@ -8690,7 +8617,7 @@ fn noise_flicker_absent_when_kf_zero() {
     // preserves byte-identity vs pre-Step-5 builds of such circuits.
     let config = CodegenConfig {
         noise_mode: melange_solver::codegen::NoiseMode::Full,
-        ..default_config()
+        ..shipped_config(DIODE_NO_KF_SPICE, "test_circuit")
     };
     let code = generate_code_with_config(DIODE_NO_KF_SPICE, config);
 
@@ -8721,7 +8648,7 @@ fn noise_flicker_emits_when_kf_set() {
     let config = CodegenConfig {
         noise_mode: melange_solver::codegen::NoiseMode::Full,
         noise_master_seed: 42,
-        ..default_config()
+        ..shipped_config(DIODE_WITH_KF_SPICE, "test_circuit")
     };
     let code = generate_code_with_config(DIODE_WITH_KF_SPICE, config);
 
@@ -8771,7 +8698,7 @@ fn noise_flicker_off_when_mode_is_shot() {
     // `includes_full()` is the gate; Shot stops one level below.
     let config = CodegenConfig {
         noise_mode: melange_solver::codegen::NoiseMode::Shot,
-        ..default_config()
+        ..shipped_config(DIODE_WITH_KF_SPICE, "test_circuit")
     };
     let code = generate_code_with_config(DIODE_WITH_KF_SPICE, config);
 
@@ -8810,7 +8737,7 @@ Cout out 0 1u
 ";
     let config = CodegenConfig {
         noise_mode: melange_solver::codegen::NoiseMode::Full,
-        ..default_config()
+        ..shipped_config(BJT_WITH_KF_SPICE, "test_circuit")
     };
     let code = generate_code_with_config(BJT_WITH_KF_SPICE, config);
 
@@ -8853,8 +8780,14 @@ fn noise_off_is_byte_identical_with_kf_resistor() {
     // A resistor with KF=… in Off mode must produce byte-identical code to
     // the same circuit without KF in Off mode — KF is purely a noise-mode
     // input; nothing should leak when noise is off.
-    let off_with_kf = generate_code_with_config(R_FLICKER_SPICE, default_config());
-    let off_no_kf = generate_code_with_config(R_FLICKER_NO_KF_SPICE, default_config());
+    let off_with_kf = generate_code_with_config(
+        R_FLICKER_SPICE,
+        shipped_config(R_FLICKER_SPICE, "test_circuit"),
+    );
+    let off_no_kf = generate_code_with_config(
+        R_FLICKER_NO_KF_SPICE,
+        shipped_config(R_FLICKER_NO_KF_SPICE, "test_circuit"),
+    );
     assert_eq!(
         off_with_kf, off_no_kf,
         "KF on a resistor leaked into Off-mode codegen"
@@ -8868,7 +8801,7 @@ fn noise_full_no_kf_resistors_emits_zero_r_flicker() {
     // build of the same circuit at the relevant tokens.
     let config = CodegenConfig {
         noise_mode: melange_solver::codegen::NoiseMode::Full,
-        ..default_config()
+        ..shipped_config(R_FLICKER_NO_KF_SPICE, "test_circuit")
     };
     let code = generate_code_with_config(R_FLICKER_NO_KF_SPICE, config);
     for tok in [
@@ -8899,7 +8832,7 @@ fn noise_full_emits_r_flicker_tokens() {
     let config = CodegenConfig {
         noise_mode: melange_solver::codegen::NoiseMode::Full,
         noise_master_seed: 42,
-        ..default_config()
+        ..shipped_config(R_FLICKER_SPICE, "test_circuit")
     };
     let code = generate_code_with_config(R_FLICKER_SPICE, config);
 
@@ -8966,7 +8899,7 @@ C1 out 0 1u
 ";
     let config = CodegenConfig {
         noise_mode: melange_solver::codegen::NoiseMode::Full,
-        ..default_config()
+        ..shipped_config(SPICE_KF_ONLY, "test_circuit")
     };
     let code = generate_code_with_config(SPICE_KF_ONLY, config);
     let line = code
@@ -8993,7 +8926,7 @@ C1 out 0 1u
 ";
     let config = CodegenConfig {
         noise_mode: melange_solver::codegen::NoiseMode::Full,
-        ..default_config()
+        ..shipped_config(SPICE, "test_circuit")
     };
     let code = generate_code_with_config(SPICE, config);
     // Find the set_pot_0 body and assert it touches noise_r_flicker_inv_r.
@@ -9027,7 +8960,7 @@ C1 out 0 1u
 ";
     let config = CodegenConfig {
         noise_mode: melange_solver::codegen::NoiseMode::Full,
-        ..default_config()
+        ..shipped_config(SPICE, "test_circuit")
     };
     let code = generate_code_with_config(SPICE, config);
     let setter = code
@@ -9049,7 +8982,7 @@ fn noise_full_r_flicker_generated_code_compiles() {
     let config = CodegenConfig {
         noise_mode: melange_solver::codegen::NoiseMode::Full,
         noise_master_seed: 1,
-        ..default_config()
+        ..shipped_config(R_FLICKER_SPICE, "test_circuit")
     };
     let code = generate_code_with_config(R_FLICKER_SPICE, config);
 
@@ -9256,7 +9189,6 @@ fn test_mismatch_jfet_class_j_jitters_per_device() {
 JFET pair
 .seed 42
 .mismatch J IDSS=0.08 VP=0.05
-Vin in 0 DC 0
 Rin in g1 1k
 Rin2 in g2 1k
 J1 out g1 0 J2N5457
@@ -9285,7 +9217,6 @@ fn test_mismatch_mosfet_class_m_jitters_per_device() {
 MOSFET pair
 .seed 42
 .mismatch M KP=0.08 VT=0.05
-Vin in 0 DC 0
 Rin in g1 1k
 Rin2 in g2 1k
 M1 out g1 0 0 NMOS1
@@ -9334,17 +9265,11 @@ R_load   out       0         47k
     let config = CodegenConfig {
         circuit_name: "passive_lc_no_be".to_string(),
         sample_rate: 96_000.0,
-        input_node: 0,
-        output_nodes: vec![2],
         input_resistance: 1.0,
         dc_block: false,
-        ..CodegenConfig::default()
+        ..shipped_config(SPICE, "passive_lc_no_be")
     };
-    let netlist = Netlist::parse(SPICE).expect("parse");
-    let mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let kernel = DkKernel::from_mna(&mna, 96_000.0).expect("kernel");
-    let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("generate");
+    let result = shipped(SPICE, &config);
     let alpha = extract_const_f64(&result.code, "ALPHA");
     let fs = 96_000.0_f64;
     let trap_alpha = 2.0 * fs;
@@ -9388,23 +9313,14 @@ Rload out 0 1Meg
 VCC vcc 0 250
 .model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
 ";
-    let netlist = Netlist::parse(SPICE).expect("parse");
-    let mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let kernel = DkKernel::from_mna(&mna, 48000.0).expect("kernel");
-
     let be_config = CodegenConfig {
         circuit_name: "be_no_nl_prev".to_string(),
         sample_rate: 48000.0,
-        input_node: 0,
-        output_nodes: vec![3],
         input_resistance: 1.0,
         backward_euler: true,
-        ..CodegenConfig::default()
+        ..shipped_config(SPICE, "test_circuit")
     };
-    let be_code = CodeGenerator::new(be_config)
-        .generate(&kernel, &mna, &netlist)
-        .expect("BE generate")
-        .code;
+    let be_code = shipped(SPICE, &be_config).code;
 
     // BE-only path: no N_I * i_nl_prev in build_rhs.
     let in_build_rhs: String = be_code
@@ -9424,19 +9340,14 @@ VCC vcc 0 250
     let trap_config = CodegenConfig {
         circuit_name: "trap_keeps_nl_prev".to_string(),
         sample_rate: 48000.0,
-        input_node: 0,
-        output_nodes: vec![3],
         input_resistance: 1.0,
         backward_euler: false,
         // Force trap — single-triode also has a small Nyquist eigenvalue
         // that the discriminator would otherwise auto-promote.
         force_trap: true,
-        ..CodegenConfig::default()
+        ..shipped_config(SPICE, "test_circuit")
     };
-    let trap_code = CodeGenerator::new(trap_config)
-        .generate(&kernel, &mna, &netlist)
-        .expect("trap generate")
-        .code;
+    let trap_code = shipped(SPICE, &trap_config).code;
     let trap_in_build_rhs: String = trap_code
         .split("fn build_rhs")
         .nth(1)
@@ -9520,24 +9431,15 @@ Rload out 0    1Meg
 VCC vcc 0 250
 .model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
 ";
-    let netlist = Netlist::parse(CASCADE).expect("parse");
-    let mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let kernel = DkKernel::from_mna(&mna, 48000.0).expect("kernel");
-    let in_idx = mna.node_map["in"] - 1;
-    let out_idx = mna.node_map["out"] - 1;
 
     // Default config: the ring predicate keeps trapezoidal.
     let auto_config = CodegenConfig {
         circuit_name: "cascade_auto".to_string(),
         sample_rate: 48000.0,
-        input_node: in_idx,
-        output_nodes: vec![out_idx],
         input_resistance: 1.0,
-        ..CodegenConfig::default()
+        ..shipped_config(CASCADE, "test_circuit")
     };
-    let auto_result = CodeGenerator::new(auto_config)
-        .generate(&kernel, &mna, &netlist)
-        .expect("auto-config generate");
+    let auto_result = shipped(CASCADE, &auto_config);
     assert_eq!(
         auto_result.meta.integrator_selection,
         melange_solver::codegen::ir::IntegratorSelection::TrapDefault,
@@ -9557,15 +9459,11 @@ VCC vcc 0 250
     let force_trap_config = CodegenConfig {
         circuit_name: "cascade_force_trap".to_string(),
         sample_rate: 48000.0,
-        input_node: in_idx,
-        output_nodes: vec![out_idx],
         input_resistance: 1.0,
         force_trap: true,
-        ..CodegenConfig::default()
+        ..shipped_config(CASCADE, "test_circuit")
     };
-    let trap_result = CodeGenerator::new(force_trap_config)
-        .generate(&kernel, &mna, &netlist)
-        .expect("force-trap generate");
+    let trap_result = shipped(CASCADE, &force_trap_config);
     assert_eq!(
         trap_result.meta.integrator_selection,
         melange_solver::codegen::ir::IntegratorSelection::TrapCliFlag,
@@ -9586,23 +9484,14 @@ RC Lowpass
 R1 in out 1k
 C1 out 0 100n
 ";
-    let netlist = Netlist::parse(RC).expect("parse");
-    let mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let kernel = DkKernel::from_mna(&mna, 48000.0).expect("kernel");
-    let in_idx = mna.node_map["in"] - 1;
-    let out_idx = mna.node_map["out"] - 1;
 
     let config = CodegenConfig {
         circuit_name: "rc_no_auto_be".to_string(),
         sample_rate: 48000.0,
-        input_node: in_idx,
-        output_nodes: vec![out_idx],
         input_resistance: 1.0,
-        ..CodegenConfig::default()
+        ..shipped_config(RC, "test_circuit")
     };
-    let result = CodeGenerator::new(config)
-        .generate(&kernel, &mna, &netlist)
-        .expect("generate");
+    let result = shipped(RC, &config);
     assert!(
         !result.meta.backward_euler_auto,
         "passive RC lowpass must not auto-promote to BE: {}",
@@ -9699,21 +9588,13 @@ C1 out 0 1u
 .mismatch D IS=0.05 N=0.02
 .model D1N4148 D(IS=2.52e-9 N=1.752)
 ";
-    let netlist = Netlist::parse_with_options(
-        SPICE,
-        melange_solver::parser::ParseOptions {
-            disable_unit_variation: true,
-        },
-    )
-    .expect("failed to parse netlist");
-    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("failed to build DK kernel");
-    let mut config = default_config();
+    let mut config = shipped_config(SPICE, "test_circuit");
     config.force_trap = true;
-    let code = CodeGenerator::new(config)
-        .generate(&kernel, &mna, &netlist)
-        .expect("code generation failed")
-        .code;
+    let built = support::try_build_shipped_with(SPICE, &config, "dk", |o| {
+        o.disable_unit_variation = true;
+    })
+    .expect("build failed");
+    let (code, netlist) = (built.generated.code, built.netlist);
 
     // Bit-identical to the model card, for every device and every param.
     assert_eq!(extract_const_f64(&code, "DEVICE_0_IS"), 2.52e-9);
@@ -9787,13 +9668,10 @@ C1 out 0 100n
     // calls `factor` times per external sample. The live-rate expression
     // (host rate × OVERSAMPLING_FACTOR) covers this for every factor —
     // same token at 2x as at 1x, with OVERSAMPLING_FACTOR = 2 baked.
-    let (netlist, mna, kernel) = build_pipeline(SPICE);
-    let mut config = default_config();
+    let mut config = shipped_config(SPICE, "test_circuit");
     config.force_trap = true;
     config.oversampling_factor = 2;
-    let result = CodeGenerator::new(config)
-        .generate(&kernel, &mna, &netlist)
-        .expect("oversampled thermal codegen failed");
+    let result = shipped(SPICE, &config);
     assert!(
         result
             .code
@@ -9936,7 +9814,6 @@ fn emitted_fast_math_coefficients_are_canonical() {
     // both helpers are emitted together).
     let (code, _, _, _) = generate_code(
         "Fast math coefficient check\n\
-         V1 in 0 DC 0\n\
          R1 in out 1k\n\
          D1 out 0 DMOD\n\
          C1 out 0 10n\n\
