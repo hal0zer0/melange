@@ -980,6 +980,20 @@ impl CodeGenerator {
             ));
         }
 
+        // Saturating inductors are flux devices solved by Newton on their
+        // augmented row, and a saturating transformer is a T-model of ideal
+        // couplings with (1 - k)·L leakage, which S = A^-1 cannot carry. This
+        // entry would drop the saturation (the DK IR has no saturating list),
+        // so it refuses, whoever calls it.
+        if mna.has_saturating_inductor() {
+            return Err(CodegenError::UnsupportedTopology(
+                "saturating inductors (ISAT=) must use the nodal full-LU path (they route \
+                 there automatically; call generate_nodal). See \
+                 docs/aidocs/SATURATING_TRANSFORMERS.md."
+                    .to_string(),
+            ));
+        }
+
         // Validate config
         self.config.validate()?;
         match self.config.oversampling_factor {

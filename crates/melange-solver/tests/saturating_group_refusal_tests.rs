@@ -175,3 +175,39 @@ fn max_iter_counter_is_emitted_for_an_m0_saturating_build() {
         "M = 0 saturating build does not count MAX_ITER exhaustion"
     );
 }
+
+/// No DK path can carry saturation: the DK entry refuses any MNA with a
+/// saturating inductor (the DK IR has no saturating list, so it would have
+/// run the core linear), and with it the saturating T-model, whose ideal
+/// couplings and (1 - k)·L leakage belong to the nodal full-LU path.
+#[test]
+fn dk_codegen_refuses_saturating_inductors() {
+    use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+    use melange_solver::dk::DkKernel;
+    let mut reached = 0;
+    for spice in [
+        "rl\nR1 in out 30\nL1 out 0 1 ISAT=10m\n",
+        "xf\nR1 in p 100\nL1 p 0 1 ISAT=10m\nL2 out 0 1\nK1 L1 L2 0.9999\nR2 out 0 1k\n",
+    ] {
+        let netlist = Netlist::parse(spice).expect("parse");
+        let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
+        let config = CodegenConfig {
+            circuit_name: "dk".to_string(),
+            sample_rate: 48000.0,
+            input_node: mna.node_map["in"] - 1,
+            output_nodes: vec![mna.node_map["out"] - 1],
+            input_resistance: 1.0,
+            ..CodegenConfig::default()
+        };
+        mna.g[config.input_node][config.input_node] += 1.0;
+        let Ok(kernel) = DkKernel::from_mna(&mna, 48000.0) else {
+            continue; // no kernel, no DK code either
+        };
+        let err = CodeGenerator::new(config)
+            .generate(&kernel, &mna, &netlist)
+            .expect_err("DK codegen must refuse a saturating circuit");
+        assert!(err.to_string().contains("saturating inductors"), "{err}");
+        reached += 1;
+    }
+    assert!(reached > 0, "no case reached the DK generator; the test is void");
+}
