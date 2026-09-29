@@ -12,7 +12,6 @@
 
 mod support;
 
-use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
 
@@ -130,7 +129,7 @@ fn test_opamp_summing_amplifier() {
 
 #[test]
 fn test_opamp_codegen_inverting_amplifier() {
-    use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+    use melange_solver::codegen::CodegenConfig;
 
     let spice = r#"Inverting Amplifier
 R1 in inv 10k
@@ -139,26 +138,12 @@ C1 out 0 100n
 U1 0 inv out opamp
 .model opamp OA(AOL=200000)
 "#;
-    let netlist = Netlist::parse(spice).unwrap();
-    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
-    let node_map = mna.node_map.clone();
-
-    let input_node_0 = node_map["in"] - 1;
-    let output_node_0 = node_map["out"] - 1;
-
-    mna.stamp_input_conductance(input_node_0, 1.0);
-    let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
-
     let config = CodegenConfig {
         circuit_name: "inverting_opamp".to_string(),
-        sample_rate: 44100.0,
-        input_node: input_node_0,
-        output_nodes: vec![output_node_0],
-        ..CodegenConfig::default()
+        output_nodes: vec![support::node_index(spice, "out")],
+        ..support::config_for_spice(spice, 44100.0)
     };
-
-    let generator = CodeGenerator::new(config);
-    let result = generator.generate(&kernel, &mna, &netlist);
+    let result = support::try_build_shipped(spice, &config, "dk").map(|b| b.generated);
     assert!(result.is_ok(), "Codegen failed: {:?}", result.err());
 
     let generated = result.unwrap();
@@ -168,7 +153,7 @@ U1 0 inv out opamp
 
 #[test]
 fn test_opamp_with_diode_codegen() {
-    use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+    use melange_solver::codegen::CodegenConfig;
 
     let spice = r#"Op-Amp Then Diode Clipper
 R1 in inv 10k
@@ -182,26 +167,12 @@ C2 out 0 100n
 .model opamp OA(AOL=10000)
 .model D1N4148 D(IS=2.52e-9 N=1.752)
 "#;
-    let netlist = Netlist::parse(spice).unwrap();
-    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
-    let node_map = mna.node_map.clone();
-
-    let input_node_0 = node_map["in"] - 1;
-    let output_node_0 = node_map["out"] - 1;
-
-    mna.stamp_input_conductance(input_node_0, 1.0);
-    let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
-
     let config = CodegenConfig {
         circuit_name: "opamp_then_diode".to_string(),
-        sample_rate: 44100.0,
-        input_node: input_node_0,
-        output_nodes: vec![output_node_0],
-        ..CodegenConfig::default()
+        output_nodes: vec![support::node_index(spice, "out")],
+        ..support::config_for_spice(spice, 44100.0)
     };
-
-    let generator = CodeGenerator::new(config);
-    let result = generator.generate(&kernel, &mna, &netlist);
+    let result = support::try_build_shipped(spice, &config, "dk").map(|b| b.generated);
     assert!(result.is_ok(), "Codegen failed: {:?}", result.err());
 
     let generated = result.unwrap();
@@ -451,7 +422,7 @@ U1 0 inv out oa
 
 #[test]
 fn test_opamp_vcc_vee_codegen_asymmetric_clamp() {
-    use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+    use melange_solver::codegen::CodegenConfig;
 
     // Op-amp with asymmetric rails + diode (separated by coupling R to avoid +K diagonal)
     let spice = r#"Asymmetric Clamp Codegen
@@ -466,26 +437,12 @@ C2 out 0 100n
 .model oa OA(AOL=200000 VCC=9 VEE=0 VOH_DROP=0 VOL_DROP=0)
 .model D1N4148 D(IS=2.52e-9 N=1.752)
 "#;
-    let netlist = Netlist::parse(spice).unwrap();
-    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
-    let node_map = mna.node_map.clone();
-
-    let input_node_0 = node_map["in"] - 1;
-    let output_node_0 = node_map["out"] - 1;
-
-    mna.stamp_input_conductance(input_node_0, 1.0);
-    let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
-
     let config = CodegenConfig {
         circuit_name: "vcc_vee_test".to_string(),
-        sample_rate: 44100.0,
-        input_node: input_node_0,
-        output_nodes: vec![output_node_0],
-        ..CodegenConfig::default()
+        output_nodes: vec![support::node_index(spice, "out")],
+        ..support::config_for_spice(spice, 44100.0)
     };
-
-    let generator = CodeGenerator::new(config);
-    let result = generator.generate(&kernel, &mna, &netlist);
+    let result = support::try_build_shipped(spice, &config, "dk").map(|b| b.generated);
     assert!(result.is_ok(), "Codegen failed: {:?}", result.err());
 
     let generated = result.unwrap();
@@ -502,7 +459,7 @@ C2 out 0 100n
 
 #[test]
 fn test_opamp_dk_path_has_clamping() {
-    use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+    use melange_solver::codegen::CodegenConfig;
 
     // Pure opamp with diode (M=1, DK Schur path) should have clamping in generated code
     let spice = r#"DK Path Clamping
@@ -517,26 +474,12 @@ C2 dout 0 100n
 .model oa OA(AOL=200000 VSAT=5)
 .model D1N4148 D(IS=2.52e-9 N=1.752)
 "#;
-    let netlist = Netlist::parse(spice).unwrap();
-    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
-    let node_map = mna.node_map.clone();
-
-    let input_node_0 = node_map["in"] - 1;
-    let output_node_0 = node_map["dout"] - 1;
-
-    mna.stamp_input_conductance(input_node_0, 1.0);
-    let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
-
     let config = CodegenConfig {
         circuit_name: "dk_vsat_test".to_string(),
-        sample_rate: 44100.0,
-        input_node: input_node_0,
-        output_nodes: vec![output_node_0],
-        ..CodegenConfig::default()
+        output_nodes: vec![support::node_index(spice, "dout")],
+        ..support::config_for_spice(spice, 44100.0)
     };
-
-    let generator = CodeGenerator::new(config);
-    let result = generator.generate(&kernel, &mna, &netlist);
+    let result = support::try_build_shipped(spice, &config, "dk").map(|b| b.generated);
     assert!(result.is_ok(), "Codegen failed: {:?}", result.err());
 
     let generated = result.unwrap();
@@ -628,7 +571,7 @@ U1 0 inv out oa
 
 #[test]
 fn test_opamp_sr_codegen_emits_constant_and_clamp() {
-    use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+    use melange_solver::codegen::CodegenConfig;
 
     // Full op-amp circuit with SR=13 V/μs. Must route through a codegen
     // path that lands in ir.opamps and emits the slew clamp. The DK Schur
@@ -645,26 +588,12 @@ C2 out 0 100n
 .model oa OA(AOL=200000 ROUT=75 GBW=3Meg VSAT=13 SR=13)
 .model D1N4148 D(IS=2.52e-9 N=1.752)
 "#;
-    let netlist = Netlist::parse(spice).unwrap();
-    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
-    let node_map = mna.node_map.clone();
-
-    let input_node_0 = node_map["in"] - 1;
-    let output_node_0 = node_map["out"] - 1;
-
-    mna.stamp_input_conductance(input_node_0, 1.0);
-    let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
-
     let config = CodegenConfig {
         circuit_name: "sr_codegen_test".to_string(),
-        sample_rate: 44100.0,
-        input_node: input_node_0,
-        output_nodes: vec![output_node_0],
-        ..CodegenConfig::default()
+        output_nodes: vec![support::node_index(spice, "out")],
+        ..support::config_for_spice(spice, 44100.0)
     };
-
-    let generator = CodeGenerator::new(config);
-    let result = generator.generate(&kernel, &mna, &netlist);
+    let result = support::try_build_shipped(spice, &config, "dk").map(|b| b.generated);
     assert!(result.is_ok(), "Codegen failed: {:?}", result.err());
     let generated = result.unwrap();
 
@@ -751,7 +680,7 @@ fn test_opamp_no_sr_emits_no_slew_code() {
     // Regression check: a circuit WITHOUT `SR=` in its .model must not
     // cause any slew-limit code to be emitted. This protects the byte-
     // identical generated-output guarantee for existing circuits.
-    use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+    use melange_solver::codegen::CodegenConfig;
 
     let spice = r#"No SR Codegen
 R1 in inv 10k
@@ -765,26 +694,12 @@ C2 out 0 100n
 .model oa OA(AOL=200000 ROUT=75 GBW=3Meg VSAT=13)
 .model D1N4148 D(IS=2.52e-9 N=1.752)
 "#;
-    let netlist = Netlist::parse(spice).unwrap();
-    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
-    let node_map = mna.node_map.clone();
-
-    let input_node_0 = node_map["in"] - 1;
-    let output_node_0 = node_map["out"] - 1;
-
-    mna.stamp_input_conductance(input_node_0, 1.0);
-    let kernel = DkKernel::from_mna(&mna, 44100.0).unwrap();
-
     let config = CodegenConfig {
         circuit_name: "no_sr_codegen_test".to_string(),
-        sample_rate: 44100.0,
-        input_node: input_node_0,
-        output_nodes: vec![output_node_0],
-        ..CodegenConfig::default()
+        output_nodes: vec![support::node_index(spice, "out")],
+        ..support::config_for_spice(spice, 44100.0)
     };
-
-    let generator = CodeGenerator::new(config);
-    let generated = generator.generate(&kernel, &mna, &netlist).unwrap();
+    let generated = support::build_shipped(spice, &config, "dk").generated;
 
     // No SR constant, no slew clamp code.
     assert!(

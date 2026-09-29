@@ -768,6 +768,17 @@ pub fn config_in_out_or_node1(spice: &str, sample_rate: f64) -> CodegenConfig {
     config
 }
 
+/// The 0-based circuit-node index of `name` in the build of `spice` (subcircuits
+/// expanded, as `build` expands them). Panics on an unknown node.
+pub fn node_index(spice: &str, name: &str) -> usize {
+    let mna = MnaSystem::from_netlist(&parse_expanded(spice)).expect("mna");
+    mna.node_map
+        .get(name)
+        .copied()
+        .unwrap_or_else(|| panic!("node `{name}` is not in the deck"))
+        - 1
+}
+
 /// Create a default codegen config for a circuit with "in" and "out" nodes.
 ///
 /// Resolves input/output node indices from the SPICE netlist.

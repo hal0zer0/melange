@@ -13,26 +13,38 @@
 //! jittered-match and `.switch`-change behavioral tests come in E7 once the
 //! solver proper lands.
 
+mod support;
+
 use melange_solver::codegen::{CodeGenerator, CodegenConfig};
 use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
 
+/// The shipped DK build (input `in`, output `out`, or circuit node 1 on a
+/// deck without an `out` node).
 fn generate_dk(spice: &str, emit_recompute: bool) -> String {
+    let mut cfg = support::config_in_out_or_node1(spice, 44100.0);
+    cfg.circuit_name = "dc_op_recompute_test".to_string();
+    cfg.emit_dc_op_recompute = emit_recompute;
+    support::build_as_shipped(spice, &cfg, "dk").0
+}
+
+/// DK codegen straight from the raw MNA with companion-model inductors.
+/// Bypasses the production pipeline on purpose: tests the companion-winding
+/// equilibrium guard in `recompute_dc_op`, which only the companion-model
+/// kernel emits. No shipped build reaches it (an inductor deck always builds
+/// the augmented kernel, whose branch rows solve the winding at DC); it goes
+/// with the companion-inductor codegen path.
+fn generate_dk_companion_raw(spice: &str) -> String {
+    let cfg = support::config_in_out_or_node1(spice, 44100.0);
     let netlist = Netlist::parse(spice).expect("parse");
     let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    if mna.n > 0 {
-        mna.g[0][0] += 1.0;
-    }
+    mna.g[cfg.input_node][cfg.input_node] += 1.0 / cfg.input_resistance;
     let kernel = DkKernel::from_mna(&mna, 44100.0).expect("kernel");
     let cfg = CodegenConfig {
         circuit_name: "dc_op_recompute_test".to_string(),
-        sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![if kernel.n > 1 { 1 } else { 0 }],
-        input_resistance: 1.0,
-        emit_dc_op_recompute: emit_recompute,
-        ..CodegenConfig::default()
+        emit_dc_op_recompute: true,
+        ..cfg
     };
     CodeGenerator::new(cfg)
         .generate(&kernel, &mna, &netlist)
@@ -71,24 +83,11 @@ fn flag_off_byte_identical_to_default() {
 
     // Generate again with the default config (which should also have the
     // flag OFF). If the default ever flips, this test will fail loudly.
-    let netlist = Netlist::parse(REGRESSION_NETLIST).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    if mna.n > 0 {
-        mna.g[0][0] += 1.0;
-    }
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("kernel");
     let cfg = CodegenConfig {
         circuit_name: "dc_op_recompute_test".to_string(),
-        sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![if kernel.n > 1 { 1 } else { 0 }],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
+        ..support::config_in_out_or_node1(REGRESSION_NETLIST, 44100.0)
     };
-    let fresh = CodeGenerator::new(cfg)
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen")
-        .code;
+    let fresh = support::build_as_shipped(REGRESSION_NETLIST, &cfg, "dk").0;
     assert_eq!(
         default_code, fresh,
         "flag-off output must be byte-identical to CodegenConfig::default()"
@@ -763,9 +762,7 @@ fn e5_diode_converges_to_dc_op_at_nominal() {
     );
 }
 
-// `in` declared first so the test helper's `mna.g[0][0] += 1.0`
-// input-conductance stamp lands on an isolated signal node instead of
-// short-circuiting the VCC supply.
+// The input port sits on `in`, an isolated signal node, not on the VCC supply.
 const DIODE_VCC_NETLIST: &str = "\
 Phase E.5 diode with VCC supply
 R_in_load in 0 10k
@@ -1167,8 +1164,7 @@ fn e6_pot_resistance_prev_synced_after_recompute() {
 /// DC OP: 12AU7 common-cathode stage with fixed-bias grid summing network,
 /// fully-bypassed cathode, plate-load pad, output coupling. Matches the
 /// active netlist in `../../melange-circuits/unstable/dynamics/series-of-tubes-stage.cir`
-/// line-for-line; input guard (`Rin_guard`) is prepended so parsing assigns
-/// `in` to MNA node 0 as the test harness expects.
+/// line-for-line, plus an input guard (`Rin_guard`) on the `in` node.
 const SOT_STAGE_NETLIST: &str = "\
 SeriesOfTubes stage — Phase E.7 DK validation
 Rin_guard in 0 1meg
@@ -1474,22 +1470,12 @@ fn e7_ts808_clipping_stage_converges_at_nominal() {
 //   * Flag-on output compiles and the stub is callable from default state.
 // -----------------------------------------------------------------------------
 
+/// The shipped nodal build (`--solver nodal`).
 fn generate_nodal(spice: &str, emit_recompute: bool) -> String {
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let cfg = CodegenConfig {
-        circuit_name: "dc_op_recompute_nodal_test".to_string(),
-        sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![if mna.n > 1 { 1 } else { 0 }],
-        input_resistance: 1.0,
-        emit_dc_op_recompute: emit_recompute,
-        ..CodegenConfig::default()
-    };
-    CodeGenerator::new(cfg)
-        .generate_nodal(&mna, &netlist)
-        .expect("codegen_nodal")
-        .code
+    let mut cfg = support::config_in_out_or_node1(spice, 44100.0);
+    cfg.circuit_name = "dc_op_recompute_nodal_test".to_string();
+    cfg.emit_dc_op_recompute = emit_recompute;
+    support::build_as_shipped(spice, &cfg, "nodal").0
 }
 
 /// Simple linear RC circuit routed through the nodal full-LU emitter.
@@ -1519,20 +1505,11 @@ fn e8_nodal_flag_off_does_not_emit_recompute_dc_op() {
 #[test]
 fn e8_nodal_flag_off_byte_identical_to_default() {
     let off_code = generate_nodal(NODAL_REGRESSION_NETLIST, false);
-    let netlist = Netlist::parse(NODAL_REGRESSION_NETLIST).expect("parse");
-    let mna = MnaSystem::from_netlist(&netlist).expect("mna");
     let cfg = CodegenConfig {
         circuit_name: "dc_op_recompute_nodal_test".to_string(),
-        sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![if mna.n > 1 { 1 } else { 0 }],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
+        ..support::config_in_out_or_node1(NODAL_REGRESSION_NETLIST, 44100.0)
     };
-    let default_code = CodeGenerator::new(cfg)
-        .generate_nodal(&mna, &netlist)
-        .expect("codegen_nodal")
-        .code;
+    let default_code = support::build_as_shipped(NODAL_REGRESSION_NETLIST, &cfg, "nodal").0;
     assert_eq!(
         off_code, default_code,
         "nodal flag-off output must be byte-identical to CodegenConfig::default()"
@@ -1859,26 +1836,11 @@ fn settle_nodal_path_falls_back_to_warmup() {
 /// Like `generate_dk` but with backward-Euler-primary integration, so the
 /// baked `RHS_CONST` is the ×1 BE build (`A − A_neg = G` on all rows).
 fn generate_dk_be(spice: &str) -> String {
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    if mna.n > 0 {
-        mna.g[0][0] += 1.0;
-    }
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("kernel");
-    let cfg = CodegenConfig {
-        circuit_name: "dc_op_recompute_be_test".to_string(),
-        sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![if kernel.n > 1 { 1 } else { 0 }],
-        input_resistance: 1.0,
-        emit_dc_op_recompute: true,
-        backward_euler: true,
-        ..CodegenConfig::default()
-    };
-    CodeGenerator::new(cfg)
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen")
-        .code
+    let mut cfg = support::config_in_out_or_node1(spice, 44100.0);
+    cfg.circuit_name = "dc_op_recompute_be_test".to_string();
+    cfg.emit_dc_op_recompute = true;
+    cfg.backward_euler = true;
+    support::build_as_shipped(spice, &cfg, "dk").0
 }
 
 /// Shared rustc-compile-and-run harness for the bugfix tests (same pattern
@@ -2116,7 +2078,7 @@ R2 out 0 100k
 /// `diag_nr_max_iter_count` bumped exactly once (the settle failure signal).
 #[test]
 fn fix3_dc_biased_choke_recompute_refuses() {
-    let code = generate_dk(DC_CHOKE_NETLIST, true);
+    let code = generate_dk_companion_raw(DC_CHOKE_NETLIST);
     // Emission check: the guard is present and precedes the writeback.
     let body = recompute_body(&code);
     assert!(
@@ -2154,7 +2116,7 @@ fn fix3_dc_biased_choke_recompute_refuses() {
 /// within a volt of the 10 V supply after settling.
 #[test]
 fn fix3_dc_biased_choke_settle_falls_back_to_warmup() {
-    let code = generate_dk(DC_CHOKE_NETLIST, true);
+    let code = generate_dk_companion_raw(DC_CHOKE_NETLIST);
 
     let main = "\n\nfn main() {\n\
         let mut state = CircuitState::default();\n\
@@ -2182,7 +2144,7 @@ fn fix3_dc_biased_choke_settle_falls_back_to_warmup() {
 /// exactly as before — no guard trip, writeback runs (v_prev re-seeded).
 #[test]
 fn fix3_unbiased_choke_recompute_still_succeeds() {
-    let code = generate_dk(AC_CHOKE_NETLIST, true);
+    let code = generate_dk_companion_raw(AC_CHOKE_NETLIST);
 
     let main = "\n\nfn main() {\n\
         let mut state = CircuitState::default();\n\
@@ -2203,6 +2165,39 @@ fn fix3_unbiased_choke_recompute_still_succeeds() {
     }\n";
 
     compile_and_run(&code, main, "fix3_ac_choke_ok");
+}
+
+/// The shipped build of the DC-biased choke: the inductor is an augmented
+/// branch row, so the DC solve treats it as the short it is. No guard, no
+/// refusal: `recompute_dc_op` from a cold start converges to the baked
+/// `DC_OP`, with the mid node at the 10 V supply.
+#[test]
+fn fix3_dc_biased_choke_shipped_recompute_reaches_inductor_short_op() {
+    let code = generate_dk(DC_CHOKE_NETLIST, true);
+    assert!(
+        !recompute_body(&code).contains("Inductor equilibrium guard"),
+        "the augmented build has no companion windings to guard"
+    );
+
+    let main = "\n\nfn main() {\n\
+        let mut state = CircuitState::default();\n\
+        for i in 0..N { state.v_prev[i] = 0.0; }\n\
+        let c0 = state.diag_nr_max_iter_count;\n\
+        state.recompute_dc_op();\n\
+        assert_eq!(state.diag_nr_max_iter_count, c0,\n\
+            \"shipped DC-biased choke: recompute must not refuse\");\n\
+        for i in 0..N {\n\
+            assert_eq!(state.v_prev[i], state.dc_op()[i], \"writeback at row {}\", i);\n\
+            let tol = 1e-6 * DC_OP[i].abs().max(1e-3);\n\
+            assert!((state.v_prev[i] - DC_OP[i]).abs() < tol,\n\
+                \"row {}: recompute {} vs baked DC_OP {}\", i, state.v_prev[i], DC_OP[i]);\n\
+        }\n\
+        assert!((state.v_prev[NODE_MID] - 10.0).abs() < 1e-6,\n\
+            \"choke is a DC short: mid must sit at the 10 V supply, got {}\", state.v_prev[NODE_MID]);\n\
+        println!(\"ok\");\n\
+    }\n";
+
+    compile_and_run(&code, main, "fix3_dc_choke_shipped");
 }
 
 // --- Fix 4: RELTOL convergence -----------------------------------------------

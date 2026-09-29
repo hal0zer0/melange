@@ -16,10 +16,9 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig, SubsampleFireMode};
-use melange_solver::dk::DkKernel;
-use melange_solver::mna::MnaSystem;
-use melange_solver::parser::Netlist;
+mod support;
+
+use melange_solver::codegen::{CodegenConfig, SubsampleFireMode};
 
 // Rc = 1 MΩ, C = 10 nF → τ_charge = 10 ms. Vb = 170 V, VO = 135, VM = 93 @
 // IK = 1.5 mA, RS = 3 kΩ → derived intercept v0 = VM−RS·IK = 88.5 V, emergent
@@ -44,30 +43,24 @@ Rin in 0 1G
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
-fn generate_nodal_code(spice: &str, sample_rate: f64) -> String {
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let input_node = mna.node_map["in"] - 1;
-    let output_node = mna.node_map["osc"] - 1;
-    mna.g[input_node][input_node] += 1.0;
+/// A test config for a glow deck: input `in`, output the reservoir `osc`.
+fn glow_config(spice: &str, sample_rate: f64, name: &str) -> CodegenConfig {
+    let mut config = support::config_for_spice(spice, sample_rate);
+    config.circuit_name = name.to_string();
+    config.output_nodes = vec![support::node_index(spice, "osc")];
+    config
+}
 
+fn generate_nodal_code(spice: &str, sample_rate: f64) -> String {
     // Pinned to the WHOLE-SAMPLE latch: these tests document the pre-feature
     // glow behaviour (strike/extinguish on the grid, lit-hold BE, OS ASR). The
     // sub-sample fire re-solve (default `auto` on nodal-Schur glow decks) is
     // covered by `subsample_fire_tests.rs`.
     let config = CodegenConfig {
-        circuit_name: "glow_relax_test".to_string(),
-        sample_rate,
-        input_node,
-        output_nodes: vec![output_node],
-        input_resistance: 1.0,
         subsample_fire: SubsampleFireMode::Off,
-        ..CodegenConfig::default()
+        ..glow_config(spice, sample_rate, "glow_relax_test")
     };
-    CodeGenerator::new(config)
-        .generate_nodal(&mna, &netlist)
-        .expect("nodal codegen")
-        .code
+    support::build_as_shipped(spice, &config, "nodal").0
 }
 
 /// Generate with a given whole-circuit oversampling factor and NO output clamp,
@@ -76,27 +69,13 @@ fn generate_nodal_code(spice: &str, sample_rate: f64) -> String {
 /// (the design review-ruled anti-alias for this Stage-2a device — output BLEP was
 /// rejected as ill-posed/cosmetic; OS is the physics-faithful mitigation).
 fn generate_glow_code_os(spice: &str, sample_rate: f64, os: usize) -> String {
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let input_node = mna.node_map["in"] - 1;
-    let output_node = mna.node_map["osc"] - 1;
-    mna.g[input_node][input_node] += 1.0;
-
     let config = CodegenConfig {
-        circuit_name: "glow_os_test".to_string(),
-        sample_rate,
-        input_node,
-        output_nodes: vec![output_node],
-        input_resistance: 1.0,
         oversampling_factor: os,
         output_clamp_v: 1.0e9, // don't clip the ~40 V reservoir AC swing
         subsample_fire: SubsampleFireMode::Off, // whole-sample latch (see generate_nodal_code)
-        ..CodegenConfig::default()
+        ..glow_config(spice, sample_rate, "glow_os_test")
     };
-    CodeGenerator::new(config)
-        .generate_nodal(&mna, &netlist)
-        .expect("nodal codegen")
-        .code
+    support::build_as_shipped(spice, &config, "nodal").0
 }
 
 fn compile_and_run(code: &str, main_code: &str, tag: &str) -> String {
@@ -154,28 +133,11 @@ fn parse_kv(output: &str, key: &str) -> f64 {
         .unwrap()
 }
 
-/// Generate DK-route (`generate`) code for the glow deck — mirrors the CLI's
-/// default routing for this circuit (DK Schur). Stamps the input conductance
-/// before building the kernel (S = A⁻¹ bakes G).
+/// The shipped DK-route build of the glow deck — the CLI's default routing
+/// for this circuit (DK Schur).
 fn generate_dk_code(spice: &str, sample_rate: f64) -> String {
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let input_node = mna.node_map["in"] - 1;
-    let output_node = mna.node_map["osc"] - 1;
-    mna.g[input_node][input_node] += 1.0;
-    let kernel = DkKernel::from_mna(&mna, sample_rate).expect("dk kernel");
-    let config = CodegenConfig {
-        circuit_name: "glow_relax_dk".to_string(),
-        sample_rate,
-        input_node,
-        output_nodes: vec![output_node],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    };
-    CodeGenerator::new(config)
-        .generate(&kernel, &mna, &netlist)
-        .expect("dk codegen")
-        .code
+    let config = glow_config(spice, sample_rate, "glow_relax_dk");
+    support::build_as_shipped(spice, &config, "dk").0
 }
 
 /// Observation `main`: free-runs the oscillator for 0.2 s and reports the raw
@@ -840,25 +802,12 @@ fn generate_nodal_code_subpath(
     sample_rate: f64,
     sub: melange_solver::codegen::NodalSubPathOverride,
 ) -> String {
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let input_node = mna.node_map["in"] - 1;
-    let output_node = mna.node_map["osc"] - 1;
-    mna.g[input_node][input_node] += 1.0;
     let config = CodegenConfig {
-        circuit_name: "glow_relax_sec".to_string(),
-        sample_rate,
-        input_node,
-        output_nodes: vec![output_node],
-        input_resistance: 1.0,
         subsample_fire: SubsampleFireMode::Off,
         nodal_sub_path_override: sub,
-        ..CodegenConfig::default()
+        ..glow_config(spice, sample_rate, "glow_relax_sec")
     };
-    CodeGenerator::new(config)
-        .generate_nodal(&mna, &netlist)
-        .expect("nodal codegen")
-        .code
+    support::build_as_shipped(spice, &config, "nodal").0
 }
 
 #[test]
@@ -900,30 +849,20 @@ fn test_glow_sections_route_portable_schur_vs_full_lu() {
 fn test_glow_sections_on_full_lu_is_refused() {
     use melange_solver::codegen::NodalSubPathOverride;
     let deck = relax_deck_sections(170.0);
-    let netlist = Netlist::parse(&deck).unwrap();
     let build = |sub: NodalSubPathOverride, allow: bool| {
-        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
-        let input_node = mna.node_map["in"] - 1;
-        let output_node = mna.node_map["osc"] - 1;
-        mna.g[input_node][input_node] += 1.0;
         let config = CodegenConfig {
-            circuit_name: "glow_refuse_test".to_string(),
-            sample_rate: 48000.0,
-            input_node,
-            output_nodes: vec![output_node],
-            input_resistance: 1.0,
             subsample_fire: SubsampleFireMode::Off,
             nodal_sub_path_override: sub,
             allow_static_glow_on_full_lu: allow,
-            ..CodegenConfig::default()
+            ..glow_config(&deck, 48000.0, "glow_refuse_test")
         };
-        CodeGenerator::new(config).generate_nodal(&mna, &netlist)
+        support::try_build_shipped(&deck, &config, "nodal")
     };
     // full-LU without the override → REFUSED, naming every exit.
-    let msg = format!(
-        "{}",
-        build(NodalSubPathOverride::FullLu, false).unwrap_err()
-    );
+    let msg = match build(NodalSubPathOverride::FullLu, false) {
+        Ok(_) => panic!("full-LU section glow must be refused"),
+        Err(e) => e,
+    };
     assert!(
         msg.contains("FULL-LU")
             && msg.contains("--nodal-subpath schur")

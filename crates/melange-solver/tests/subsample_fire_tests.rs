@@ -16,12 +16,9 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use melange_solver::codegen::{
-    CodeGenerator, CodegenConfig, NodalSubPathOverride, SubsampleFireMode,
-};
-use melange_solver::dk::DkKernel;
-use melange_solver::mna::MnaSystem;
-use melange_solver::parser::Netlist;
+mod support;
+
+use melange_solver::codegen::{CodegenConfig, NodalSubPathOverride, SubsampleFireMode};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -72,32 +69,19 @@ fn make_config(
     sample_rate: f64,
     mode: SubsampleFireMode,
     sub_path: NodalSubPathOverride,
-) -> (CodegenConfig, MnaSystem, Netlist) {
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let input_node = mna.node_map["in"] - 1;
-    let output_node = mna.node_map["osc"] - 1;
-    mna.g[input_node][input_node] += 1.0;
-    let config = CodegenConfig {
-        circuit_name: "subsample_fire_test".to_string(),
-        sample_rate,
-        input_node,
-        output_nodes: vec![output_node],
-        input_resistance: 1.0,
-        dc_block: false,
-        subsample_fire: mode,
-        nodal_sub_path_override: sub_path,
-        ..CodegenConfig::default()
-    };
-    (config, mna, netlist)
+) -> CodegenConfig {
+    let mut config = support::config_for_spice(spice, sample_rate);
+    config.circuit_name = "subsample_fire_test".to_string();
+    config.output_nodes = vec![support::node_index(spice, "osc")];
+    config.dc_block = false;
+    config.subsample_fire = mode;
+    config.nodal_sub_path_override = sub_path;
+    config
 }
 
 fn nodal_code(spice: &str, sample_rate: f64, mode: SubsampleFireMode) -> String {
-    let (config, mna, netlist) = make_config(spice, sample_rate, mode, NodalSubPathOverride::Auto);
-    CodeGenerator::new(config)
-        .generate_nodal(&mna, &netlist)
-        .expect("nodal codegen")
-        .code
+    let config = make_config(spice, sample_rate, mode, NodalSubPathOverride::Auto);
+    support::build_as_shipped(spice, &config, "nodal").0
 }
 
 /// Sub-sample-fire MACHINERY is emitted only when the feature resolves active;
@@ -187,31 +171,26 @@ fn glow_deck_off_has_no_machinery_and_auto_resolves_to_on() {
 
 #[test]
 fn on_is_refused_on_dk_route_and_auto_is_inert_there() {
-    let (config, mna, netlist) = make_config(
+    let config = make_config(
         chain_deck(),
         48000.0,
         SubsampleFireMode::On,
         NodalSubPathOverride::Auto,
     );
-    let kernel = DkKernel::from_mna(&mna, 48000.0).expect("kernel");
-    let err = CodeGenerator::new(config)
-        .generate(&kernel, &mna, &netlist)
+    let err = support::try_build_shipped(chain_deck(), &config, "dk")
         .err()
         .expect("--subsample-fire on must be refused on the DK route");
     assert!(
-        format!("{err}").contains("requires the nodal route"),
+        err.contains("requires the nodal route"),
         "unexpected DK refusal message: {err}"
     );
-    let (config, mna, netlist) = make_config(
+    let config = make_config(
         chain_deck(),
         48000.0,
         SubsampleFireMode::Auto,
         NodalSubPathOverride::Auto,
     );
-    let code = CodeGenerator::new(config)
-        .generate(&kernel, &mna, &netlist)
-        .expect("DK auto")
-        .code;
+    let code = support::build_as_shipped(chain_deck(), &config, "dk").0;
     assert!(
         !has_machinery(&code),
         "DK route must never emit sub-sample fire machinery"
@@ -229,30 +208,26 @@ fn on_is_refused_on_dk_route_and_auto_is_inert_there() {
 
 #[test]
 fn on_is_refused_on_full_lu_subpath_and_auto_is_inert_there() {
-    let (config, mna, netlist) = make_config(
+    let config = make_config(
         chain_deck(),
         48000.0,
         SubsampleFireMode::On,
         NodalSubPathOverride::FullLu,
     );
-    let err = CodeGenerator::new(config)
-        .generate_nodal(&mna, &netlist)
+    let err = support::try_build_shipped(chain_deck(), &config, "nodal")
         .err()
         .expect("--subsample-fire on must be refused on the full-LU sub-path");
     assert!(
-        format!("{err}").contains("full-LU"),
+        err.contains("full-LU"),
         "unexpected full-LU refusal message: {err}"
     );
-    let (config, mna, netlist) = make_config(
+    let config = make_config(
         chain_deck(),
         48000.0,
         SubsampleFireMode::Auto,
         NodalSubPathOverride::FullLu,
     );
-    let code = CodeGenerator::new(config)
-        .generate_nodal(&mna, &netlist)
-        .expect("full-LU auto")
-        .code;
+    let code = support::build_as_shipped(chain_deck(), &config, "nodal").0;
     assert!(
         !has_machinery(&code),
         "full-LU sub-path must emit no sub-sample fire machinery"

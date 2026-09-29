@@ -6,7 +6,6 @@
 
 mod support;
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
 use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
@@ -88,25 +87,11 @@ Vcc vcc 0 DC 250
 // Shared helpers
 // ============================================================================
 
-/// Build full pipeline from SPICE string, stamping input conductance.
-fn build_pipeline(spice: &str, sample_rate: f64) -> (Netlist, MnaSystem, DkKernel, usize, usize) {
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let input_node = mna
-        .node_map
-        .get("in")
-        .copied()
-        .unwrap_or(1)
-        .saturating_sub(1);
-    let output_node = mna
-        .node_map
-        .get("out")
-        .copied()
-        .unwrap_or(2)
-        .saturating_sub(1);
-    mna.g[input_node][input_node] += 1.0; // G_in stamp before kernel
-    let kernel = DkKernel::from_mna(&mna, sample_rate).expect("kernel");
-    (netlist, mna, kernel, input_node, output_node)
+/// The shipped build of `spice` (input `in`, output `out`) on `solver`.
+fn shipped_code(spice: &str, sample_rate: f64, name: &str, solver: &str) -> String {
+    let mut config = support::config_for_spice(spice, sample_rate);
+    config.circuit_name = name.to_string();
+    support::build_as_shipped(spice, &config, solver).0
 }
 
 /// Compile and run generated code with configurable amplitude, return output samples.
@@ -373,38 +358,10 @@ fn test_nodal_vs_dk_diode_clipper() {
     let skip_samples = 10;
     let amplitude = 2.0;
 
-    let netlist = Netlist::parse(DIODE_CLIPPER).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let input_node = mna
-        .node_map
-        .get("in")
-        .copied()
-        .unwrap_or(1)
-        .saturating_sub(1);
-    let output_node = mna
-        .node_map
-        .get("out")
-        .copied()
-        .unwrap_or(2)
-        .saturating_sub(1);
-    mna.g[input_node][input_node] += 1.0;
-
     // --- DK path ---
-    let kernel = DkKernel::from_mna(&mna, sample_rate).expect("dk kernel");
-    let dk_config = CodegenConfig {
-        circuit_name: "xval_dk_diode".to_string(),
-        sample_rate,
-        input_node,
-        output_nodes: vec![output_node],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    };
-    let dk_codegen = CodeGenerator::new(dk_config);
-    let dk_result = dk_codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("dk codegen");
+    let dk_code = shipped_code(DIODE_CLIPPER, sample_rate, "xval_dk_diode", "dk");
     let dk_output = compile_and_run_codegen_with_amplitude(
-        &dk_result.code,
+        &dk_code,
         num_samples,
         sample_rate,
         amplitude,
@@ -412,20 +369,9 @@ fn test_nodal_vs_dk_diode_clipper() {
     );
 
     // --- Nodal path ---
-    let nodal_config = CodegenConfig {
-        circuit_name: "xval_nodal_diode".to_string(),
-        sample_rate,
-        input_node,
-        output_nodes: vec![output_node],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    };
-    let nodal_codegen = CodeGenerator::new(nodal_config);
-    let nodal_result = nodal_codegen
-        .generate_nodal(&mna, &netlist)
-        .expect("nodal codegen");
+    let nodal_code = shipped_code(DIODE_CLIPPER, sample_rate, "xval_nodal_diode", "nodal");
     let nodal_output = compile_and_run_codegen_with_amplitude(
-        &nodal_result.code,
+        &nodal_code,
         num_samples,
         sample_rate,
         amplitude,
@@ -489,36 +435,9 @@ fn test_codegen_gummel_poon_vs_ebers_moll() {
     let amplitude = 0.01;
 
     // --- Gummel-Poon codegen ---
-    let gp_netlist = Netlist::parse(BJT_CE_GP).expect("parse GP");
-    let mut gp_mna = MnaSystem::from_netlist(&gp_netlist).expect("mna GP");
-    let gp_input = gp_mna
-        .node_map
-        .get("in")
-        .copied()
-        .unwrap_or(1)
-        .saturating_sub(1);
-    let gp_output = gp_mna
-        .node_map
-        .get("out")
-        .copied()
-        .unwrap_or(2)
-        .saturating_sub(1);
-    gp_mna.g[gp_input][gp_input] += 1.0;
-    let gp_kernel = DkKernel::from_mna(&gp_mna, sample_rate).expect("gp kernel");
-    let gp_config = CodegenConfig {
-        circuit_name: "crossval_gp".to_string(),
-        sample_rate,
-        input_node: gp_input,
-        output_nodes: vec![gp_output],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    };
-    let gp_codegen = CodeGenerator::new(gp_config);
-    let gp_result = gp_codegen
-        .generate(&gp_kernel, &gp_mna, &gp_netlist)
-        .expect("gp codegen");
+    let gp_code = shipped_code(BJT_CE_GP, sample_rate, "crossval_gp", "dk");
     let gp_samples = compile_and_run_codegen_with_amplitude(
-        &gp_result.code,
+        &gp_code,
         num_samples,
         sample_rate,
         amplitude,
@@ -526,36 +445,9 @@ fn test_codegen_gummel_poon_vs_ebers_moll() {
     );
 
     // --- Ebers-Moll codegen ---
-    let em_netlist = Netlist::parse(BJT_CE_EM).expect("parse EM");
-    let mut em_mna = MnaSystem::from_netlist(&em_netlist).expect("mna EM");
-    let em_input = em_mna
-        .node_map
-        .get("in")
-        .copied()
-        .unwrap_or(1)
-        .saturating_sub(1);
-    let em_output = em_mna
-        .node_map
-        .get("out")
-        .copied()
-        .unwrap_or(2)
-        .saturating_sub(1);
-    em_mna.g[em_input][em_input] += 1.0;
-    let em_kernel = DkKernel::from_mna(&em_mna, sample_rate).expect("em kernel");
-    let em_config = CodegenConfig {
-        circuit_name: "crossval_em".to_string(),
-        sample_rate,
-        input_node: em_input,
-        output_nodes: vec![em_output],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    };
-    let em_codegen = CodeGenerator::new(em_config);
-    let em_result = em_codegen
-        .generate(&em_kernel, &em_mna, &em_netlist)
-        .expect("em codegen");
+    let em_code = shipped_code(BJT_CE_EM, sample_rate, "crossval_em", "dk");
     let em_samples = compile_and_run_codegen_with_amplitude(
-        &em_result.code,
+        &em_code,
         num_samples,
         sample_rate,
         amplitude,
@@ -663,22 +555,9 @@ fn test_codegen_zener_breakdown() {
     let amplitude = 10.0;
 
     // --- Zener circuit (BV=5.0) ---
-    let (zener_nl, zener_mna, zener_kernel, zener_in, zener_out) =
-        build_pipeline(ZENER_CLIPPER, sample_rate);
-    let zener_config = CodegenConfig {
-        circuit_name: "xval_zener".to_string(),
-        sample_rate,
-        input_node: zener_in,
-        output_nodes: vec![zener_out],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    };
-    let zener_codegen = CodeGenerator::new(zener_config);
-    let zener_result = zener_codegen
-        .generate(&zener_kernel, &zener_mna, &zener_nl)
-        .expect("zener codegen");
+    let zener_code = shipped_code(ZENER_CLIPPER, sample_rate, "xval_zener", "dk");
     let zener_output = compile_and_run_codegen_with_amplitude(
-        &zener_result.code,
+        &zener_code,
         num_samples,
         sample_rate,
         amplitude,
@@ -686,22 +565,9 @@ fn test_codegen_zener_breakdown() {
     );
 
     // --- Normal diode circuit (no BV) ---
-    let (normal_nl, normal_mna, normal_kernel, normal_in, normal_out) =
-        build_pipeline(DIODE_CLIPPER_NO_BV, sample_rate);
-    let normal_config = CodegenConfig {
-        circuit_name: "xval_normal_diode".to_string(),
-        sample_rate,
-        input_node: normal_in,
-        output_nodes: vec![normal_out],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    };
-    let normal_codegen = CodeGenerator::new(normal_config);
-    let normal_result = normal_codegen
-        .generate(&normal_kernel, &normal_mna, &normal_nl)
-        .expect("normal codegen");
+    let normal_code = shipped_code(DIODE_CLIPPER_NO_BV, sample_rate, "xval_normal_diode", "dk");
     let normal_output = compile_and_run_codegen_with_amplitude(
-        &normal_result.code,
+        &normal_code,
         num_samples,
         sample_rate,
         amplitude,
@@ -804,21 +670,9 @@ fn test_codegen_bjt_parasitic_resistances() {
     let amplitude = 0.01;
 
     // --- With parasitic R ---
-    let (pr_nl, pr_mna, pr_kernel, pr_in, pr_out) = build_pipeline(BJT_CE_PARASITIC, sample_rate);
-    let pr_config = CodegenConfig {
-        circuit_name: "xval_bjt_pr".to_string(),
-        sample_rate,
-        input_node: pr_in,
-        output_nodes: vec![pr_out],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    };
-    let pr_codegen = CodeGenerator::new(pr_config);
-    let pr_result = pr_codegen
-        .generate(&pr_kernel, &pr_mna, &pr_nl)
-        .expect("parasitic codegen");
+    let pr_code = shipped_code(BJT_CE_PARASITIC, sample_rate, "xval_bjt_pr", "dk");
     let pr_output = compile_and_run_codegen_with_amplitude(
-        &pr_result.code,
+        &pr_code,
         num_samples,
         sample_rate,
         amplitude,
@@ -826,22 +680,9 @@ fn test_codegen_bjt_parasitic_resistances() {
     );
 
     // --- Without parasitic R ---
-    let (np_nl, np_mna, np_kernel, np_in, np_out) =
-        build_pipeline(BJT_CE_NO_PARASITIC, sample_rate);
-    let np_config = CodegenConfig {
-        circuit_name: "xval_bjt_np".to_string(),
-        sample_rate,
-        input_node: np_in,
-        output_nodes: vec![np_out],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    };
-    let np_codegen = CodeGenerator::new(np_config);
-    let np_result = np_codegen
-        .generate(&np_kernel, &np_mna, &np_nl)
-        .expect("no-parasitic codegen");
+    let np_code = shipped_code(BJT_CE_NO_PARASITIC, sample_rate, "xval_bjt_np", "dk");
     let np_output = compile_and_run_codegen_with_amplitude(
-        &np_result.code,
+        &np_code,
         num_samples,
         sample_rate,
         amplitude,
@@ -960,32 +801,20 @@ fn test_codegen_mosfet_body_effect() {
     let amplitude = 0.05;
 
     // --- With body effect ---
-    let (be_nl, be_mna, be_kernel, be_in, be_out) = build_pipeline(MOSFET_CS_BODY, sample_rate);
-    let be_config = CodegenConfig {
-        circuit_name: "xval_mos_be".to_string(),
-        sample_rate,
-        input_node: be_in,
-        output_nodes: vec![be_out],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    };
-    let be_codegen = CodeGenerator::new(be_config);
-    let be_result = be_codegen
-        .generate(&be_kernel, &be_mna, &be_nl)
-        .expect("body effect codegen");
+    let be_code = shipped_code(MOSFET_CS_BODY, sample_rate, "xval_mos_be", "dk");
 
     // Verify GAMMA/PHI constants appear in generated code
     assert!(
-        be_result.code.contains("DEVICE_0_GAMMA"),
+        be_code.contains("DEVICE_0_GAMMA"),
         "Generated code should contain DEVICE_0_GAMMA constant"
     );
     assert!(
-        be_result.code.contains("DEVICE_0_PHI"),
+        be_code.contains("DEVICE_0_PHI"),
         "Generated code should contain DEVICE_0_PHI constant"
     );
 
     let be_output = compile_and_run_codegen_with_amplitude(
-        &be_result.code,
+        &be_code,
         num_samples,
         sample_rate,
         amplitude,
@@ -993,21 +822,9 @@ fn test_codegen_mosfet_body_effect() {
     );
 
     // --- Without body effect ---
-    let (nb_nl, nb_mna, nb_kernel, nb_in, nb_out) = build_pipeline(MOSFET_CS_NO_BODY, sample_rate);
-    let nb_config = CodegenConfig {
-        circuit_name: "xval_mos_nb".to_string(),
-        sample_rate,
-        input_node: nb_in,
-        output_nodes: vec![nb_out],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    };
-    let nb_codegen = CodeGenerator::new(nb_config);
-    let nb_result = nb_codegen
-        .generate(&nb_kernel, &nb_mna, &nb_nl)
-        .expect("no body effect codegen");
+    let nb_code = shipped_code(MOSFET_CS_NO_BODY, sample_rate, "xval_mos_nb", "dk");
     let nb_output = compile_and_run_codegen_with_amplitude(
-        &nb_result.code,
+        &nb_code,
         num_samples,
         sample_rate,
         amplitude,
@@ -1101,25 +918,17 @@ fn test_schur_nodal_diode_inductor() {
     let skip_samples = 480;
     let amplitude = 2.0;
 
-    let (nl, mna, _, in_node, out_node) = build_pipeline(DIODE_CLIPPER_WITH_INDUCTOR, sample_rate);
-
-    // This circuit has inductors + nonlinear devices, so generate_nodal
-    // should be used (the DK kernel may auto-route to nodal anyway).
-    let config = CodegenConfig {
-        circuit_name: "xval_schur_diode_ind".to_string(),
+    // This circuit has inductors + nonlinear devices; build it on the nodal
+    // route.
+    let code = shipped_code(
+        DIODE_CLIPPER_WITH_INDUCTOR,
         sample_rate,
-        input_node: in_node,
-        output_nodes: vec![out_node],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate_nodal(&mna, &nl)
-        .expect("schur nodal codegen");
+        "xval_schur_diode_ind",
+        "nodal",
+    );
 
     let output = compile_and_run_codegen_with_amplitude(
-        &result.code,
+        &code,
         num_samples,
         sample_rate,
         amplitude,
