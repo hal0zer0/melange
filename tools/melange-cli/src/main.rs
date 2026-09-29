@@ -2324,14 +2324,8 @@ fn compile_circuit_source(
     // the actual mode baked into the IR happens inside codegen (which does
     // the same resolution deterministically).
     {
-        use melange_solver::codegen::ir::{
-            refine_active_set_for_audio_path, resolve_opamp_rail_mode,
-        };
-        let resolved = refine_active_set_for_audio_path(
-            resolve_opamp_rail_mode(&mna, opamp_rail_mode),
-            &mna,
-            &netlist,
-        );
+        use melange_solver::codegen::ir::resolve_opamp_rail_mode;
+        let resolved = resolve_opamp_rail_mode(&mna, opamp_rail_mode);
         println!(
             "  Op-amp rail mode: {} ({})",
             resolved.mode,

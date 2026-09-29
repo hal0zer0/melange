@@ -189,13 +189,11 @@ system via DK reduction).
    refactor-every-iter preserves linear but doesn't fix heavy clip;
    disabling `damp_thresh` preserves linear but doesn't fix heavy
    clip. All three rejected. See `task_12_bistable_oscillation_finding.md`
-   fourth-session sweep table for raw data. **Klon ships under
-   `active-set-be` auto-detect** (CLI logs
-   `Op-amp rail mode: active-set-be (audio path — BE-on-clamp damps
-   Nyquist limit cycle)` for distortion pedals). Empirically verified:
-   ActiveSetBe raw peak bounded 10.70–10.76 V at every tested
-   amplitude; trap NR fails frequently at heavy clip but the BE
-   fallback converges every time. BoyleDiodes remains opt-in (flag
+   fourth-session sweep table for raw data. On that overdrive deck
+   ActiveSetBe was verified: raw peak bounded 10.70–10.76 V at every
+   tested amplitude; trap NR fails frequently at heavy clip but the BE
+   fallback converges every time. The auto choice for such decks is now
+   `active-set` with transition-BE (see `OPAMP_RAIL_MODES.md`). BoyleDiodes remains opt-in (flag
    `--opamp-rail-mode boyle-diodes`) and correct for light clip and
    control-path topologies. See `DEBUGGING.md` "Op-amp BoyleDiodes
    Failure Signatures" for the full heavy-clip failure signature and

@@ -1,7 +1,7 @@
 //! Op-amp supply-rail mode resolution + Boyle-diode netlist augmentation.
 //!
 //! Resolves `OpampRailMode::Auto` to a concrete mode by inspecting the parsed
-//! MNA system (audio-path topology, AC coupling, DC-rail connections). The
+//! MNA system (AC coupling of each clamped op-amp output). The
 //! `augment_netlist_with_boyle_diodes` pass synthesises catch-diodes around
 //! VCCS op-amp outputs when the resolved mode requires them, so the resulting
 //! netlist matches the on-rail "Boyle" macro-model exactly.
@@ -29,27 +29,15 @@ pub enum OpampRailModeReason {
     /// At least one clamped op-amp has an output cap coupling into a downstream
     /// non-feedback node. The post-NR hard clamp would corrupt that cap's
     /// trapezoidal history on rail-violating samples. Auto-select `ActiveSet`
-    /// to keep KCL consistent. (`BoyleDiodes` has since landed as an explicit
+    /// to keep KCL consistent; a trapezoidal build solves the sample after each
+    /// pin or release on backward Euler (transition-BE), which ends the `z=-1`
+    /// residual an equation-set swap leaves on capless rows. This holds for
+    /// audio-path and control-path topologies alike; `ActiveSetBe` (backward
+    /// Euler on every rail-engaged sample) is an explicit mode only, since it
+    /// damps whole rail plateaus and measures 2-4x the peak error. (`BoyleDiodes` has since landed as an explicit
     /// opt-in mode, but the auto-resolver never picks it — it diverges at
     /// heavy clip; see `docs/aidocs/OPAMP_RAIL_MODES.md`.)
     AcCoupledDownstream,
-    /// At least one clamped op-amp output is connected via an R-only path
-    /// (no series caps) to a nonlinear device terminal. This is the
-    /// sidechain / control-path topology pattern (e.g. compressor envelope
-    /// detector: op-amp output → R → diode anode → cap to ground). The
-    /// rail-clamped DC value drives the nonlinear device's operating point,
-    /// so any damping (BE switch on engagement) would change the envelope
-    /// dynamics. Use plain `ActiveSet` (trap+pin) which preserves the steady
-    /// rail value.
-    AcCoupledDownstreamControlPath,
-    /// All clamped op-amps have only AC-coupled downstream paths to
-    /// nonlinear devices (or no nonlinear devices at all). This is the
-    /// audio-path topology where the op-amp drives a coupling cap to the
-    /// next stage. Trap+pin develops a Nyquist-rate limit cycle on these
-    /// circuits when the rail is engaged across multiple samples; switch to
-    /// `ActiveSetBe` so the BE fallback runs the constrained re-solve and
-    /// damps the ringing.
-    AcCoupledDownstreamAudioPath,
 }
 
 impl OpampRailModeReason {
@@ -58,13 +46,7 @@ impl OpampRailModeReason {
             Self::UserRequested => "user requested",
             Self::NoClampedOpamps => "no op-amps with finite VCC/VEE",
             Self::AllDcCoupled => "op-amps only DC-coupled downstream (hard clamp safe)",
-            Self::AcCoupledDownstream => "op-amp output has cap-coupled downstream (active-set keeps cap history consistent)",
-            Self::AcCoupledDownstreamControlPath => {
-                "op-amp output has R-only path to a nonlinear device terminal (sidechain/control path — trap+pin preserves steady DC rail)"
-            }
-            Self::AcCoupledDownstreamAudioPath => {
-                "op-amp output is cap-coupled with no R-only path to nonlinear devices (audio path — BE-on-clamp damps Nyquist limit cycle)"
-            }
+            Self::AcCoupledDownstream => "op-amp output has cap-coupled downstream (active-set keeps cap history consistent; one backward-Euler sample per pin or release)",
         }
     }
 }
@@ -143,182 +125,6 @@ fn opamp_has_ac_coupled_downstream(
     false
 }
 
-/// Returns `true` if the op-amp's output node has an R-only path (no series
-/// capacitors) to any nonlinear device terminal.
-///
-/// This is the **control-path / sidechain criterion**: when the op-amp output
-/// is wired through resistors directly to a diode/BJT/JFET/MOSFET/tube/VCA
-/// terminal, the rail-clamped DC value drives that device's operating point.
-/// Switching to BE on engagement (the [`OpampRailMode::ActiveSetBe`] strategy)
-/// would damp this DC behavior and change the envelope dynamics — wrong for
-/// compressors, expanders, ALCs, and any sidechain rectifier. So if any
-/// clampable op-amp matches this pattern, the auto-detector picks plain
-/// [`OpampRailMode::ActiveSet`] (trap+pin), which preserves the rail value.
-///
-/// **What "R-only path" means**: BFS from the op-amp output through resistor
-/// edges only. We never traverse capacitor edges. The op-amp's own inverting
-/// input is excluded (resistor feedback through the closed loop is not a
-/// downstream control path). Ground is excluded.
-///
-/// **What "nonlinear device terminal" means**: any node listed in
-/// [`crate::mna::NonlinearDeviceInfo::node_indices`] for any device in
-/// `mna.nonlinear_devices` — diode anode/cathode, BJT base/collector/emitter,
-/// JFET/MOSFET gate/drain/source, tube grid/plate/cathode, VCA signal/control
-/// pins.
-///
-/// **Bound**: BFS depth is bounded by the number of nodes (no infinite loops
-/// possible — the visited set guarantees termination in O(N + E) where N is
-/// nodes and E is resistor count).
-///
-/// **Why R-only and not "any linear element"**: caps in series provide
-/// AC-coupling that decouples the DC rail value from the downstream device's
-/// operating point. With a series cap, the cap charges to the rail offset
-/// and the downstream node sees only AC excursion. The rail value's specific
-/// magnitude doesn't affect the downstream operating point. Without caps,
-/// the rail value IS what the downstream node sees at DC.
-///
-/// [`OpampRailMode::ActiveSet`]: crate::codegen::OpampRailMode::ActiveSet
-/// [`OpampRailMode::ActiveSetBe`]: crate::codegen::OpampRailMode::ActiveSetBe
-fn opamp_has_r_only_path_to_nonlinear(
-    netlist: &crate::parser::Netlist,
-    mna: &crate::mna::MnaSystem,
-    opamp: &crate::mna::OpampInfo,
-) -> bool {
-    use crate::parser::Element;
-    use std::collections::HashSet;
-
-    if opamp.n_out_idx == 0 {
-        return false;
-    }
-
-    // Resolve the op-amp output and inverting-input node names from indices.
-    // We use names because netlist Elements are name-keyed.
-    let name_of_idx = |idx: usize| -> Option<String> {
-        if idx == 0 {
-            return None;
-        }
-        mna.node_map
-            .iter()
-            .find_map(|(name, &i)| if i == idx { Some(name.clone()) } else { None })
-    };
-    let out_name = match name_of_idx(opamp.n_out_idx) {
-        Some(n) => n,
-        None => return false,
-    };
-    let inv_name = name_of_idx(opamp.n_minus_idx); // None if grounded
-
-    // Collect names of all nodes that are DC voltage source terminals. These
-    // are bias rails (Vbias, VCC, VEE, etc.) — KCL-clamped to a fixed
-    // potential by an ideal source, so they're effectively ground for AC
-    // purposes. The BFS treats them as stop nodes: we don't traverse through
-    // them, and we don't count them as nonlinear-device terminals even if a
-    // diode happens to anchor to them.
-    //
-    // Why this matters: in distortion pedals, shunt clipping diodes are
-    // anchored to a DC bias node (e.g. Klon: D2 anode = diode_jct, cathode =
-    // vbias). The bias rail is a voltage source. If we counted vbias as a
-    // "nonlinear terminal", every R-network path to the bias rail would
-    // falsely register as a control path, because every op-amp's bias path
-    // touches the rail somewhere. The DC level on the op-amp output isn't
-    // actually driving the diode through that path — the diode is referenced
-    // to vbias, not to the op-amp signal.
-    let dc_source_nodes: HashSet<String> = netlist
-        .elements
-        .iter()
-        .filter_map(|e| {
-            if let Element::VoltageSource {
-                n_plus, n_minus, ..
-            } = e
-            {
-                Some([n_plus.clone(), n_minus.clone()])
-            } else {
-                None
-            }
-        })
-        .flatten()
-        .filter(|n| n != "0")
-        .collect();
-
-    // Collect names of all nodes that are nonlinear-device terminals AND not
-    // DC source nodes. The exclusion prevents the false positive described
-    // above.
-    let nonlinear_terminal_names: HashSet<&String> = mna
-        .nonlinear_devices
-        .iter()
-        .flat_map(|d| d.nodes.iter())
-        .filter(|n| !dc_source_nodes.contains(n.as_str()))
-        .collect();
-
-    // BFS from the op-amp output through resistor edges only. Stop at:
-    // - ground ("0")
-    // - the op-amp's own inverting input (feedback loop)
-    // - any DC voltage source node (bias rails are AC-ground)
-    //
-    // The starting node is NEVER counted as a downstream terminal. A
-    // nonlinear device directly anchored to the op-amp output is a local
-    // feedback element (classic diode-feedback clipper: D1 anode = op-amp
-    // output, cathode = inv input) — not a control-path driver. A real
-    // control path requires at least one R-hop so the op-amp drives the
-    // downstream device through a signal-path resistor (e.g. VCR ALC
-    // sidechain: `Rsc op_out sc_node 10k; D1 sc_node cv_node`). Tracking
-    // the starting node explicitly via `start_node` keeps the BFS
-    // conditional simple.
-    let start_node = out_name.clone();
-    let mut visited: HashSet<String> = HashSet::new();
-    let mut frontier: Vec<String> = vec![out_name.clone()];
-    visited.insert(out_name);
-
-    while let Some(node) = frontier.pop() {
-        // If this node is itself a (filtered) nonlinear-device terminal,
-        // we've found a real control path — but only if we reached it
-        // via an R-hop from the op-amp output, not as the seed itself.
-        if node != start_node && nonlinear_terminal_names.contains(&node) {
-            return true;
-        }
-
-        // Walk every resistor in the netlist looking for one that touches `node`.
-        // O(N · E) total over the BFS — fine for typical circuit sizes (E < 1000).
-        for elem in &netlist.elements {
-            if let Element::Resistor {
-                n_plus, n_minus, ..
-            } = elem
-            {
-                let other = if n_plus.eq_ignore_ascii_case(&node) {
-                    Some(n_minus.clone())
-                } else if n_minus.eq_ignore_ascii_case(&node) {
-                    Some(n_plus.clone())
-                } else {
-                    None
-                };
-
-                if let Some(other_node) = other {
-                    // Skip ground.
-                    if other_node == "0" {
-                        continue;
-                    }
-                    // Skip the op-amp's own inverting input (feedback path).
-                    if let Some(inv) = &inv_name {
-                        if other_node.eq_ignore_ascii_case(inv) {
-                            continue;
-                        }
-                    }
-                    // Skip DC voltage source nodes — bias rails terminate
-                    // the BFS because they're AC-ground.
-                    if dc_source_nodes.contains(&other_node) {
-                        continue;
-                    }
-                    if !visited.contains(&other_node) {
-                        visited.insert(other_node.clone());
-                        frontier.push(other_node);
-                    }
-                }
-            }
-        }
-    }
-
-    false
-}
-
 /// Resolve an [`OpampRailMode`] request into a concrete mode using the MNA
 /// as the basis for auto-detection.
 ///
@@ -341,8 +147,8 @@ fn opamp_has_r_only_path_to_nonlinear(
 /// (`--opamp-rail-mode boyle-diodes`, scaffolding in
 /// [`augment_netlist_with_boyle_diodes`]) — a Boyle catch-diode model that
 /// produces the soft exponential knee characteristic of real op-amp
-/// saturation. The auto-resolver deliberately still stops at
-/// `ActiveSet`/`ActiveSetBe` and never picks BoyleDiodes: it is validated
+/// saturation. The auto-resolver deliberately stops at `ActiveSet` and
+/// never picks BoyleDiodes (nor `ActiveSetBe`): it is validated
 /// for light clip only and diverges at heavy clip (see
 /// `docs/aidocs/OPAMP_RAIL_MODES.md`, "The BoyleDiodes heavy-clip problem").
 ///
@@ -433,76 +239,6 @@ pub fn hard_override_at_risk(
         .filter(|oa| opamp_has_ac_coupled_downstream(mna, oa))
         .map(|oa| oa.name.clone())
         .collect()
-}
-
-/// Refine an [`OpampRailMode::ActiveSet`] auto-decision by inspecting the
-/// netlist topology. If no clampable op-amp has an R-only path to a nonlinear
-/// device terminal, the circuit is "audio-path" — upgrade to
-/// [`OpampRailMode::ActiveSetBe`] which damps the trap+pin Nyquist limit
-/// cycle by switching to BE matrices on rail engagement. If at least one
-/// op-amp does have such a path, the circuit is "control-path" (sidechain
-/// rectifier, compressor envelope detector, etc.) and stays on plain
-/// [`OpampRailMode::ActiveSet`] so the steady DC rail value is preserved.
-///
-/// This refinement runs *after* [`resolve_opamp_rail_mode`] because the
-/// initial resolve only needs the MNA, but the topology check needs the raw
-/// netlist (to enumerate `Element::Resistor` rather than the post-stamping
-/// `G` matrix, which conflates resistors with op-amp VCCS entries). Splitting
-/// the resolve in two avoids threading `&Netlist` through ~20 call sites that
-/// don't need it.
-///
-/// # When this is called
-///
-/// Call this from any code path that has both the MNA and the original
-/// netlist available (e.g. `CodeGenerator::generate_with_dc_op` and
-/// `CodeGenerator::generate_nodal`). User overrides are honored unchanged —
-/// the refinement only runs when the input was an Auto decision that
-/// resolved to `ActiveSet`.
-///
-/// # Why "any" rather than "all"
-///
-/// One sidechain op-amp is enough to ruin the compressor envelope if BE
-/// damping kicks in for the whole circuit. Generated code emits one rail
-/// strategy for the entire process_sample function — we can't mix
-/// strategies per op-amp. So we conservatively pick the strategy that's
-/// safe for ALL clampable op-amps: if even one needs the trap+pin steady
-/// rail, plain ActiveSet wins.
-pub fn refine_active_set_for_audio_path(
-    resolved: ResolvedOpampRailMode,
-    mna: &crate::mna::MnaSystem,
-    netlist: &crate::parser::Netlist,
-) -> ResolvedOpampRailMode {
-    use crate::codegen::OpampRailMode;
-
-    // Only refine the auto-resolved ActiveSet decision. User overrides
-    // (UserRequested) and other modes pass through unchanged.
-    if resolved.mode != OpampRailMode::ActiveSet
-        || resolved.reason != OpampRailModeReason::AcCoupledDownstream
-    {
-        return resolved;
-    }
-
-    let clamped_opamps: Vec<&crate::mna::OpampInfo> = mna
-        .opamps
-        .iter()
-        .filter(|oa| oa.n_out_idx > 0 && (oa.vcc.is_finite() || oa.vee.is_finite()))
-        .collect();
-
-    let any_control_path = clamped_opamps
-        .iter()
-        .any(|oa| opamp_has_r_only_path_to_nonlinear(netlist, mna, oa));
-
-    if any_control_path {
-        ResolvedOpampRailMode {
-            mode: OpampRailMode::ActiveSet,
-            reason: OpampRailModeReason::AcCoupledDownstreamControlPath,
-        }
-    } else {
-        ResolvedOpampRailMode {
-            mode: OpampRailMode::ActiveSetBe,
-            reason: OpampRailModeReason::AcCoupledDownstreamAudioPath,
-        }
-    }
 }
 
 /// Name of the synthetic catch-diode model inserted by

@@ -174,9 +174,10 @@ pub enum OpampRailMode {
     /// Post-NR hard clamp (pre-2026-04 behavior). Breaks KCL for AC-coupled downstream.
     Hard,
     /// Post-NR constrained re-solve on trapezoidal `state.a`. KCL-consistent hard
-    /// clip with square-wave harmonics. Preserves the steady DC rail value the
-    /// op-amp converged to — required for circuits where the rail-clipped value
-    /// IS the signal (e.g. control-path op-amps driving a VCA gain port).
+    /// clip with square-wave harmonics. On a trapezoidal build the sample after
+    /// each pin or release is solved on backward Euler (transition-BE), which
+    /// ends the `z=-1` residual an equation-set swap leaves on capless rows.
+    /// The auto-resolver's choice for any cap-coupled railing op-amp.
     ActiveSet,
     /// On rail engagement, fall through to the BE NR fallback and run the
     /// constrained re-solve against `state.a_be` (backward Euler).
@@ -184,13 +185,11 @@ pub enum OpampRailMode {
     /// the clamp is engaged across multiple samples (the cap-history term
     /// `(2/T)·C·v_prev` alternates sign every sample); BE damps this.
     ///
-    /// Required for audio-path op-amps whose output is cap-coupled to a
-    /// downstream stage that integrates the op-amp's transient behavior —
-    /// e.g. Klon Centaur's tone-out -> C15 -> output. Cost: BE NR runs every
-    /// sample where the rail is engaged (~2x NR work for those samples).
-    /// Compared to ActiveSet, produces cleaner clipped output but slightly
-    /// different envelope dynamics (BE damps cap-coupled feedback more
-    /// aggressively).
+    /// Explicit mode only. It runs backward Euler on every rail-engaged sample,
+    /// i.e. on whole rail plateaus (73-96 % of samples on a single-supply
+    /// overdrive), which is first-order there: 2-4x the output-peak error of
+    /// `ActiveSet` with transition-BE, at about the same CPU. See
+    /// `docs/aidocs/OPAMP_RAIL_MODES.md`.
     ActiveSetBe,
     /// Auto-inserted Boyle catch diodes. Soft exponential knee, correct physics.
     BoyleDiodes,
@@ -1062,11 +1061,7 @@ impl CodeGenerator {
         // (new N, new spectral radius, etc.), so for now BoyleDiodes is only
         // supported on the nodal path. Explicit request on the DK path is a
         // user error with a clear remedy.
-        let resolved = ir::refine_active_set_for_audio_path(
-            ir::resolve_opamp_rail_mode(mna, self.config.opamp_rail_mode),
-            mna,
-            netlist,
-        );
+        let resolved = ir::resolve_opamp_rail_mode(mna, self.config.opamp_rail_mode);
         if resolved.mode == OpampRailMode::BoyleDiodes {
             return Err(CodegenError::UnsupportedTopology(
                 "OpampRailMode::BoyleDiodes is not yet supported on the DK codegen \
@@ -1229,11 +1224,7 @@ impl CodeGenerator {
         // impedance internal node via `R_BOYLE_INT_LOAD`) is in
         // `mna::MnaSystem::from_netlist`. The augmented MNA naturally
         // inherits that behavior.
-        let resolved = ir::refine_active_set_for_audio_path(
-            ir::resolve_opamp_rail_mode(mna, self.config.opamp_rail_mode),
-            mna,
-            netlist,
-        );
+        let resolved = ir::resolve_opamp_rail_mode(mna, self.config.opamp_rail_mode);
         // The active-set pinned Newton stamps device Jacobians through N_i/N_v
         // and the saturating-inductor flux rows, and accepts an iterate on the
         // same step and flux-row residual checks as the main loop. Behavioral

@@ -216,6 +216,22 @@ generated state is smaller.
 
 ### Changed
 
+- **Every op-amp whose output is capacitor-coupled downstream now gets
+  `active-set` rail handling by default**, with one backward-Euler sample at
+  each pin and release. Circuits the automatic choice used to send to
+  `active-set-be` move: in the regression set, moonladder, sad-bastard,
+  noyce-4558, pipe-shouter, vurli and sus-bus. `active-set-be` solves every
+  rail-engaged sample with backward Euler, which on a single-supply overdrive
+  meant 73–96 % of all samples and an output-peak error 2–4× larger at every
+  sample rate. It is still available with `--opamp-rail-mode active-set-be`.
+  The six circuits' regression renders are unchanged, because no regression
+  program drives their op-amps into the rails. In use they change whenever an
+  op-amp rails. Two new regression circuits do rail. On one, the peak error
+  against ngspice fell from 2.2 % to 0.25 % at 48 kHz, 0.5 V. One cost: at 1x
+  oversampling, a railing op-amp with top-octave drive aliases about twice as
+  much as it did under `active-set-be`. That mode aliased less only because
+  backward Euler smears the rail edges. Both are clean at 4x. Compile now says
+  so when it picks `active-set` at 1x.
 - **Saturating inductors bottom out at their air-core inductance.** The flux
   law was `L0·Isat·tanh(i/Isat)`, whose incremental inductance falls toward
   zero: about 1e-7 of L0 at 9× `ISAT`, flat in double precision past about
@@ -289,6 +305,9 @@ generated state is smaller.
 
 ### Tests
 
+- Two regression circuits pin an op-amp at its rail every half cycle, one per
+  rail mode the automatic choice used to pick. Until now no regression program
+  drove an op-amp into its rails, so a change to rail handling could not show.
 - `transition_be_tests.rs`: on both nodal sub-paths the transition count
   equals the pin changes, and the diode node's residual stays under 5 µA,
   while a copy with the arming removed reads about 200 µA. On a linear

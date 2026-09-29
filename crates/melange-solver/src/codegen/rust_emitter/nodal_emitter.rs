@@ -8018,9 +8018,8 @@ impl RustEmitter {
         // ActiveSetBe rail engagement check (post-trap, post-substep).
         // Runs on the final v from either the regular NR loop or the
         // substep recovery, whichever produced the converged result. If
-        // any op-amp output is railed, set the flag so the BE fallback
-        // fires — trap+pin develops a Nyquist-rate limit cycle on
-        // audio-path topologies; BE+pin doesn't.
+        // any op-amp output is railed, set the flag so the BE solve runs
+        // the sample (ActiveSetBe: backward Euler on every engaged sample).
         //
         // Plain ActiveSet doesn't take this path — its trap+pin happens
         // inside the NR break block above.
@@ -8030,11 +8029,9 @@ impl RustEmitter {
             code.push_str("    }\n\n");
         }
 
-        // ActiveSet (plain) — pin and re-solve in trap matrices, preserving
-        // the steady DC rail value the op-amp converged to. Used by
-        // control-path topologies (VCR ALC sidechain etc.) where the
-        // rail-clamped value drives a nonlinear device's operating point.
-        // Runs on the final converged v from EITHER the regular trap NR
+        // ActiveSet (plain) — pin and re-solve on the site's matrices; on a
+        // trapezoidal build a pin or release arms one BE sample
+        // (transition-BE, see emit_transition_be_detect). Runs on the final converged v from EITHER the regular trap NR
         // loop or the substep recovery (it used to be emitted inside the
         // trap NR convergence block, which skipped substep-recovered
         // samples). ActiveSetBe takes a different path: detect-only above,
@@ -8564,15 +8561,11 @@ impl RustEmitter {
         //             `state.a` (trapezoidal). Detects rail violations
         //             and pins them via row/column elimination, then
         //             re-solves the whole network so KCL is satisfied at
-        //             every node with the clamped outputs. Preserves the
-        //             steady DC rail value the op-amp converged to —
-        //             required for control-path op-amps where the rail
-        //             value drives a nonlinear device's operating point
-        //             (VCR ALC sidechain → VCA control). May develop a
-        //             Nyquist-rate limit cycle on audio-path op-amps
-        //             whose output is cap-coupled to a downstream stage
-        //             that integrates the rail behavior — for those use
-        //             ActiveSetBe.
+        //             every node with the clamped outputs. On a
+        //             trapezoidal build the sample after each pin or
+        //             release is solved on backward Euler (transition-BE),
+        //             which ends the z=-1 residual the equation-set swap
+        //             leaves on capless rows. The auto-resolver's choice.
         // * `ActiveSetBe` — detect rail violations here without mutating;
         //             if any are detected, fall through to the BE fallback
         //             below (which re-runs NR with backward-Euler matrices
@@ -8581,10 +8574,9 @@ impl RustEmitter {
         //             Nyquist-rate limit cycle when the clamp is engaged
         //             across multiple samples on audio-path op-amps
         //             (cap-history term `(2/T)·C·v_prev` alternates sign
-        //             every sample); BE damps this. The auto-detector
-        //             picks ActiveSetBe over ActiveSet for audio-path
-        //             topologies (no R-only path from op-amp output to a
-        //             nonlinear device terminal).
+        //             every sample); BE damps this. Explicit mode only:
+        //             it damps whole rail plateaus, so its error is
+        //             first-order where ActiveSet + transition-BE is not.
         // * `BoyleDiodes` — physical catch diodes are already in the
         //             MNA via `augment_netlist_with_boyle_diodes`. NR
         //             handles saturation naturally through the diode
@@ -8605,8 +8597,7 @@ impl RustEmitter {
                 }
             }
             OpampRailMode::ActiveSet => {
-                // Original trap+pin behavior — preserves steady DC rail
-                // for control-path topologies (e.g. VCR ALC sidechain).
+                // Trap+pin; transition-BE arms the next sample on a change.
                 Self::emit_nodal_active_set_resolve(
                     code,
                     ir,

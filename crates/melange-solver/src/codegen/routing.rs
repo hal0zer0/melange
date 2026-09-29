@@ -64,9 +64,7 @@ pub struct RoutingDecision {
     /// precomputed S=A⁻¹ cannot carry — a HARD structural requirement for nodal.
     pub saturating_inductor: bool,
     /// The op-amp rail mode as routing sees it: the requested mode, or the
-    /// auto-resolver's pick from the MNA. Codegen may still refine an
-    /// auto-picked `ActiveSet` to `ActiveSetBe` from the netlist; routing does
-    /// not need that distinction, since both are nodal-only.
+    /// auto-resolver's pick from the MNA (the same pick codegen bakes in).
     pub opamp_rail_mode: crate::codegen::OpampRailMode,
     /// Whether a clamped op-amp resolved to `ActiveSet`/`ActiveSetBe`. Those
     /// pin a railed output and re-solve the rest of the circuit, which only

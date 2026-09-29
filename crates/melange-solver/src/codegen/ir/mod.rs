@@ -1974,11 +1974,7 @@ impl CircuitIR {
             }
         }
 
-        let rail_mode = refine_active_set_for_audio_path(
-            resolve_opamp_rail_mode(mna, config.opamp_rail_mode),
-            mna,
-            netlist,
-        );
+        let rail_mode = resolve_opamp_rail_mode(mna, config.opamp_rail_mode);
         log::info!(
             "Op-amp rail mode: {} ({})",
             rail_mode.mode,
@@ -2994,11 +2990,7 @@ impl CircuitIR {
             num_linearized_devices: mna.linearized_triodes.len() + mna.linearized_bjts.len(),
         };
 
-        let rail_mode = refine_active_set_for_audio_path(
-            resolve_opamp_rail_mode(mna, config.opamp_rail_mode),
-            mna,
-            netlist,
-        );
+        let rail_mode = resolve_opamp_rail_mode(mna, config.opamp_rail_mode);
         log::info!(
             "Op-amp rail mode: {} ({})",
             rail_mode.mode,
@@ -3908,6 +3900,26 @@ impl CircuitIR {
                  inductor's internal current can overshoot by up to ~13 % where the \
                  op-amp rails into the core (output H1 is unaffected); 4x is accurate. \
                  Consider --oversampling 4 (or `.oversampling 4` in the deck)."
+            );
+        }
+        // Measured, not a gate (design review): a railing op-amp switches rail
+        // to rail within a sample, and at 1x the harmonics of those edges fold
+        // back below Nyquist. `active-set-be` shows less of it only because
+        // backward Euler dissipates the edges; oversampling is the remedy.
+        let railing_at_1x = rail_mode.reason == OpampRailModeReason::AcCoupledDownstream
+            && ir.solver_config.opamp_rail_mode == crate::codegen::OpampRailMode::ActiveSet
+            && ir
+                .opamps
+                .iter()
+                .any(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite())
+            && config.oversampling_factor == 1;
+        if railing_at_1x {
+            log::warn!(
+                "An op-amp here can rail (rail mode active-set, chosen automatically). \
+                 Rail clipping makes harmonics above Nyquist, which alias at 1x: on a \
+                 single-supply overdrive, a 16 kHz tone at 48 kHz put a 66 Hz alias on \
+                 the output at 18x the level of its fundamental; at 4x the alias was \
+                 0.5 mV. Consider --oversampling 4 (or `.oversampling 4` in the deck)."
             );
         }
         // In augmented MNA every inductor has its own branch row; an L switch
@@ -7023,24 +7035,17 @@ U3 0 sum3 out OA1
         assert_eq!(r.reason, OpampRailModeReason::AcCoupledDownstream);
     }
 
-    fn parse_and_refine(spice: &str) -> ResolvedOpampRailMode {
-        let netlist = crate::parser::Netlist::parse(spice)
-            .unwrap_or_else(|e| panic!("failed to parse: {}", e));
-        let mna = MnaSystem::from_netlist(&netlist)
-            .unwrap_or_else(|e| panic!("failed to build MNA: {}", e));
-        let resolved = resolve_opamp_rail_mode(&mna, OpampRailMode::Auto);
-        refine_active_set_for_audio_path(resolved, &mna, &netlist)
-    }
-
-    /// Pipe-shouter / tube-screamer feedback-clipper pattern: two antiparallel
-    /// diodes span the op-amp output and its inverting input. Before the
-    /// starting-node exclusion, the BFS returned true on iteration 0 (the
-    /// op-amp output was itself a diode terminal), which demoted the whole
-    /// family of overdrive pedals from `ActiveSetBe` to `ActiveSet` and
-    /// starved the sub-step Nyquist damping that runs on rail engagement.
+    /// Audio-path (a feedback clipper, output cap-coupled) and control-path (the
+    /// output drives a rectifier through a resistor) topologies used to resolve
+    /// to different modes, because a backward-Euler step on every rail-engaged
+    /// sample was thought to suit one and not the other. Both now resolve to
+    /// `ActiveSet`: a trapezoidal build solves the sample after each pin or
+    /// release on backward Euler (transition-BE), which clears the `z=-1`
+    /// residual on capless rows in either topology, and `ActiveSetBe` is an
+    /// explicit mode only.
     #[test]
-    fn feedback_clipper_refines_to_active_set_be() {
-        let spice = "\
+    fn audio_and_control_path_topologies_both_resolve_to_active_set() {
+        let feedback_clipper = "\
 Feedback Clipper Test (overdrive pedal pattern)
 R1 in sum 10k
 R2 sum clip_out 100k
@@ -7050,26 +7055,9 @@ D1 clip_out sum DCLIP
 D2 sum clip_out DCLIP
 U1 0 sum clip_out OA1
 .model DCLIP D(IS=1e-14 N=1.9)
-.model OA1 OA(AOL=200k GBW=3e6 ROUT=75 VCC=4.5 VEE=-4.5)
+.model OA1 OA(AOL=200k ROUT=75 VCC=4.5 VEE=-4.5)
 ";
-        let r = parse_and_refine(spice);
-        assert_eq!(
-            r.mode,
-            OpampRailMode::ActiveSetBe,
-            "feedback clipper must refine to ActiveSetBe — the diodes are in \
-             the op-amp's own feedback loop, not a downstream control path"
-        );
-    }
-
-    /// VCR ALC sidechain-rectifier pattern: the op-amp output drives a
-    /// rectifier diode *through a series resistor* (`Rsc op_out sc_node`).
-    /// The R-hop makes this a genuine control path: the rail voltage
-    /// directly drives the downstream device's operating point. Stays on
-    /// `ActiveSet` so the steady DC rail value is preserved across a
-    /// rail-engage boundary (BE's sub-step would corrupt envelope dynamics).
-    #[test]
-    fn sidechain_rectifier_stays_on_active_set() {
-        let spice = "\
+        let sidechain = "\
 Sidechain Rectifier Test (compressor/ALC pattern)
 R1 in sum 10k
 R2 sum op_out 100k
@@ -7080,14 +7068,12 @@ D1 sc_node cv_node DRECT
 Rrel cv_node 0 2MEG
 U1 0 sum op_out OA1
 .model DRECT D(IS=2e-9 N=1.906)
-.model OA1 OA(AOL=200k GBW=3e6 ROUT=75 VCC=9 VEE=-9)
+.model OA1 OA(AOL=200k ROUT=75 VCC=9 VEE=-9)
 ";
-        let r = parse_and_refine(spice);
-        assert_eq!(
-            r.mode,
-            OpampRailMode::ActiveSet,
-            "sidechain rectifier must stay on ActiveSet — the op-amp drives \
-             the detector diode through Rsc, which IS a downstream control path"
-        );
+        for spice in [feedback_clipper, sidechain] {
+            let r = parse_and_resolve(spice);
+            assert_eq!(r.mode, OpampRailMode::ActiveSet);
+            assert_eq!(r.reason, OpampRailModeReason::AcCoupledDownstream);
+        }
     }
 }

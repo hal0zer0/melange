@@ -113,12 +113,15 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
 
 ### Diode
 - BV/IBV: hard clamp reverse breakdown (no smooth Zener knee)
+- Junction capacitance `CJO` is a constant capacitor at its zero-bias value; it
+  does not vary with bias
 - No TC1/TC2 temperature coefficients; optional quasi-static self-heating (RTH/CTH/XTI/EG/TAMB), disabled by default
 
 ### BJT (Gummel-Poon)
 - Q1 Early effect guard: `q1_denom <= 0` clamps to 1.0 (physically near Early voltage limit)
 - Self-heating (RTH/CTH) available but disabled by default (RTH=infinity)
-- Junction capacitances (CJE/CJC) and diffusion capacitance (TF) available
+- Junction capacitances (CJE/CJC) and diffusion capacitance (TF) available,
+  linearized once at the DC operating point: a large signal does not move them
 - Parasitic resistances (RB/RC/RE) supported with internal nodes
 - No substrate current or avalanche breakdown
 
@@ -185,11 +188,18 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
 - Slew-rate limiting via `SR=` in V/us (per-sample clamp, all 3 codegen paths)
 - Rail mode selection: `--opamp-rail-mode {auto,none,hard,active-set,active-set-be,boyle-diodes}`
   (`active-set-be` is accepted but is not listed in `--help`)
-- `auto` resolves only to `none` / `hard` / `active-set` / `active-set-be`. It
-  **never** selects `boyle-diodes`: that mode is validated for light clip and
-  diverges at heavy clip, so it stays opt-in
-  (`crates/melange-solver/src/codegen/ir/opamp_rail.rs:340-347`; see
-  `docs/aidocs/OPAMP_RAIL_MODES.md`, "The BoyleDiodes heavy-clip problem")
+- `auto` resolves only to `none` / `hard` / `active-set`: `active-set` for any
+  op-amp whose output is capacitor-coupled downstream, where the sample after
+  each rail pin or release is solved on backward Euler. It **never** selects
+  `active-set-be` (backward Euler on every rail-engaged sample: 2-4x the
+  output-peak error on a railing overdrive) or `boyle-diodes` (validated for
+  light clip, diverges at heavy clip); both stay opt-in (see
+  `docs/aidocs/OPAMP_RAIL_MODES.md`)
+- A railing op-amp switches rail to rail within a sample. Without oversampling,
+  top-octave drive aliases: a 16 kHz tone into a single-supply overdrive at
+  48 kHz, 1x, puts 0.44 V at 66 Hz on the output, gone at 4x (0.5 mV).
+  `active-set-be` shows about half of it at 1x because backward Euler damps the
+  edges, not because it is more accurate; oversample railing circuits
 - An explicit `--opamp-rail-mode` is honoured verbatim and is never silently
   upgraded, including `none` on a circuit `auto` would have clamped
 

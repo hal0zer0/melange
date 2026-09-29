@@ -191,6 +191,14 @@ file:line, oomox-relative):
   ActiveSetBe circuits (sus-bus), nr_max_iter counts can drop, and
   velvet-elvis's `last_nr_iterations` runtime-health read changes meaning on
   failed samples.
+- **`diag_transition_be_count` (new 2026-09-28, transition-BE)** — op-amp
+  rail pin-state changes on a trapezoidal nodal build in `active-set` mode,
+  each of which solves the next sample on backward Euler. Declared only on
+  those builds. `active-set` is now the automatic mode for every capacitor-
+  coupled railing op-amp (it used to be `active-set-be` for many), so on those
+  decks `diag_be_fallback_count` drops from most of each railed stretch to
+  one per transition, and equals `diag_transition_be_count` when nothing else
+  forced a backward-Euler sample.
 - **`diag_be_latch_count` (new 2026-07, runtime BE-latch)** — rising-edge
   count of runtime backward-Euler latch engagements. On a trapezoidal nodal
   build, a cheap per-sample detector watches for a self-sustaining Nyquist

@@ -25,14 +25,12 @@ heavy-clip convergence bug documented below.
 
 | Circuit | Auto-detect picks | Why |
 |---|---|---|
-| Klon Centaur (audio-path distortion) | `ActiveSetBe` | Cap-coupled output, no R-only path to nonlinear devices, BE damps the trap-rule Nyquist limit cycle |
-| VCR ALC (sidechain compressor) | `ActiveSet` | Control-path: rail-clipped value drives a secondary nonlinear device; need exact pinned voltage, not soft saturation |
-| SSL bus compressor | `ActiveSetBe` | Same audio-path reasoning as Klon |
-| Anything else with finite rails | `ActiveSet` | Fallback for control-path-style topologies |
-| `.model OA(GBW=…)` with no VCC/VEE/VSAT | a **clamped** mode (Hard/ActiveSet/ActiveSetBe by topology) | GBW triggers the ±13 V auto-default rails (`mna.rs`, priority VCC/VEE > VSAT > GBW-default), so the op-amp is NOT rail-free. Caveat: the default applies per side — a single-supply card like `OA(VCC=9 GBW=3MEG)` gets an asymmetric 9 V / −13 V clamp window, not 9 V / 0 V |
+| Op-amp output capacitor-coupled downstream (overdrive into a clipper, a compressor sidechain, a line stage) | `ActiveSet` | Pin at the rail and re-solve keeps the coupling cap's history consistent; on a trapezoidal build the sample after each pin or release is solved on backward Euler (transition-BE, below) |
+| Op-amp outputs only DC-coupled downstream | `Hard` | A post-solve clamp has no cap history to corrupt |
+| `.model OA(GBW=…)` with no VCC/VEE/VSAT | a **clamped** mode (`Hard`/`ActiveSet` by coupling) | GBW triggers the ±13 V auto-default rails (`mna.rs`, priority VCC/VEE > VSAT > GBW-default), so the op-amp is NOT rail-free. Caveat: the default applies per side — a single-supply card like `OA(VCC=9 GBW=3MEG)` gets an asymmetric 9 V / −13 V clamp window, not 9 V / 0 V |
 | Truly infinite rails (no VCC, no VEE, no VSAT, **and no GBW**) | `None` | Linear VCCS, no clamping needed |
 
-The auto-detector lives in `codegen::ir::resolve_opamp_rail_mode` + `refine_active_set_for_audio_path` (`crates/melange-solver/src/codegen/ir.rs:479-599`). It inspects the netlist topology around each clamped op-amp and picks the rail mode based on whether the output is cap-coupled (audio path) or DC-coupled to other nonlinear devices (control path).
+The auto-detector is `codegen::ir::resolve_opamp_rail_mode` (`crates/melange-solver/src/codegen/ir/opamp_rail.rs`). It checks each clamped op-amp's output for a capacitor coupling into a node other than its own inverting input. `ActiveSetBe` and `BoyleDiodes` are explicit modes only. Whether the op-amp drives a nonlinear device through resistors (a sidechain) or only through the coupling cap does not change the choice: transition-BE serves both.
 
 ## Which solver runs which mode
 
@@ -43,8 +41,6 @@ circuit. **Only the nodal solver implements that.** The DK path implements
 - `routing::auto_route` takes the requested rail mode, resolves it on the MNA
   (`resolve_opamp_rail_mode`), and routes to nodal when a clamped op-amp
   resolves to either active-set mode (`RoutingDecision::opamp_active_set`).
-  The audio-path refinement to `ActiveSetBe` happens later in codegen and does
-  not affect routing — both variants are nodal-only.
 - `--solver dk` on such a circuit is refused (CLI forced-DK blocker), and
   `CodeGenerator::generate*` refuses an active-set mode on the DK path. There is
   no silent degrade to `Hard`: `Hard` on an AC-coupled output is exactly the
@@ -98,8 +94,8 @@ could not contract once a junction conducted.
 |---|---|---|---|
 | `None` | Linear VCCS at op-amp output, no clamping | Cheapest | Default for ideal-rail op-amps |
 | `Hard` | Post-NR `v[out].clamp(VEE, VCC)` after the trap step | ~free | Broken: cap history corruption (see `opamp_rail_clamp_bug.md`) |
-| `ActiveSet` | Detect rail engagement, pin v[out] = rail, re-solve constrained; the sample after each pin or release is solved on BE (transition-BE, below) | +1 LU per engaged sample; one BE sample per pin/release | Production for control-path topologies |
-| `ActiveSetBe` | Same as ActiveSet but re-solve uses BE matrices instead of trap | +1 LU + BE solve per engaged sample | **Production for audio-path topologies** |
+| `ActiveSet` | Detect rail engagement, pin v[out] = rail, re-solve constrained; the sample after each pin or release is solved on BE (transition-BE, below) | +1 LU per engaged sample; one BE sample per pin/release | **Production: the auto choice for any cap-coupled railing op-amp** |
+| `ActiveSetBe` | Same as ActiveSet but every rail-engaged sample is solved on BE | +1 LU + BE solve per engaged sample | Explicit only: first-order on rail plateaus, 2–4× the peak error of ActiveSet + transition-BE |
 | `BoyleDiodes` | Augment netlist with internal gain node + catch diodes per clamped op-amp; let NR handle the saturation through the diodes | +N nodes per op-amp; ~1.5x NR work | **Light clip only (amp ≤ 0.05 V)**; diverges at heavy clip |
 
 ## How `BoyleDiodes` works
@@ -124,7 +120,7 @@ Go_int = 1e-6 S
 
 ## The BoyleDiodes heavy-clip problem (OPEN)
 
-**Symptom** (Klon at amp ≥ 0.07 V, 1 kHz sine):
+**Symptom** (the overdrive-pedal test deck at amp ≥ 0.07 V, 1 kHz sine):
 - Raw op-amp output peak: 50–500 V (should be ≈ VCC ± VOH_DROP ≈ 7.5 V or 17 V)
 - NR fails on >95% of samples
 - Output safety clamp `output[i].clamp(-10.0, 10.0)` masks this as a flat ±10 V — **always measure raw `state.v_prev[OUTPUT_NODES[0]]` when debugging**
@@ -151,7 +147,7 @@ The fundamental problem: row 41's diagonal (`Go_int = 1e-6`) is too small relati
 
 ## Fix candidates already tested and REJECTED
 
-All tested 2026-04-08 against Klon BoyleDiodes at amp = [0.01, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.30, 0.50] V. **DO NOT RE-TEST** unless you have new evidence that previous testing was flawed.
+All tested 2026-04-08 against the overdrive-pedal test deck in BoyleDiodes mode at amp = [0.01, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.30, 0.50] V. **DO NOT RE-TEST** unless you have new evidence that previous testing was flawed.
 
 | Fix | Description | Why it fails |
 |---|---|---|
@@ -169,7 +165,7 @@ All tested 2026-04-08 against Klon BoyleDiodes at amp = [0.01, 0.03, 0.05, 0.07,
 
 If BoyleDiodes heavy-clip convergence becomes a priority again:
 
-1. **BoyleDiodes → ActiveSetBe failure hybrid** (~30 lines). On NR failure in BoyleDiodes mode, fall through to ActiveSetBe's pin-and-resolve path on BE matrices instead of letting the raw output diverge. Lowest-risk escalation: ActiveSetBe is already production-quality on Klon, so the worst case of the hybrid is "it works as well as ActiveSetBe alone".
+1. **BoyleDiodes → ActiveSetBe failure hybrid** (~30 lines). On NR failure in BoyleDiodes mode, fall through to ActiveSetBe's pin-and-resolve path on BE matrices instead of letting the raw output diverge. Lowest-risk escalation: ActiveSetBe already converges on that deck at every tested drive, so the worst case of the hybrid is "it works as well as ActiveSetBe alone".
 
 2. **Re-test PTC on row 41 with corrected testing protocol** (~30 lines). The third session's PTC rejection was based on a confounded A/B test (different amp literals in the two compared files). The mechanism (regularize the chord LU diagonal to mechanically bound the operator norm) directly addresses row 41's near-singularity. Use disciplined sweep: same compile flags, same harness, single-variable changes, all 9 amplitudes per test.
 
@@ -177,7 +173,7 @@ If BoyleDiodes heavy-clip convergence becomes a priority again:
 
 4. **Real Boyle two-stage with R1 = 1 kΩ** (Untested, no memory record). Currently `R_BOYLE_INT_LOAD = 1 MΩ` with `Gm_int = AOL/R1 = 0.2 S`. Switching to R1 = 1 kΩ keeps `AOL = Gm_int * R1` at 200 000 but changes `Go_int = 1 mS` (1000× larger) and `Gm_int = 200 S` (1000× larger). Row 41 becomes `(diagonal 1 mS, off-diagonal 200 S)` — same 1e5 ratio, BUT in absolute terms 1000× better-conditioned for floating point. Risk: `Gm_int = 200 S` may destabilize other parts of the linear system. Test before assuming.
 
-## How `ActiveSetBe` actually works (production reference)
+## How `ActiveSetBe` works (explicit mode)
 
 ActiveSetBe runs the trap NR loop normally, but at the end of each sample's NR convergence check, it inspects whether any clamped op-amp output is at or beyond its rail. If yes, it falls through to a constrained re-solve:
 
@@ -188,17 +184,13 @@ ActiveSetBe runs the trap NR loop normally, but at the end of each sample's NR c
 
 Step 3 used to be ONE linear solve with the unpinned solve's device currents frozen. That is only a solution if the pin leaves device voltages where they were. It does not when an output coupling cap sits between the op-amp and a nonlinear device: the cap passes the pin's step straight through. On a single-supply overdrive with a diode clipper after the output cap, the frozen solve drove the clipper node to −2 V and re-evaluated a reverse diode at 3.6e9 A; the next sample diverged. Nothing had validated active-set with M > 0 at the rail — the corpus has no deck whose op-amp rails — which is why `opamp_railing_regression_tests.rs` now carries one, gated against an ngspice reference (±5 %; measured within 2.4 % at 1×, 1.0 % at 4×).
 
-The crucial difference from plain ActiveSet is that the BE re-solve damps any high-frequency content in the cap-coupled output path that the trap rule would otherwise amplify into a Nyquist limit cycle. Klon's C15 (4.7 µF, tone_out → out_ac) plus the surrounding R network forms a discrete-time LC resonator at exactly Nyquist when discretized with the trap rule; the BE re-solve sidesteps this by using a different discretization for the rail-engaged sample.
+The difference from plain ActiveSet is that every rail-engaged sample is solved on backward Euler, which damps high-frequency content in the cap-coupled output path. That was introduced for a Nyquist-rate ring on an overdrive whose output coupling cap follows a tone network. The ring is the trapezoidal `z=−1` mode on capless rows excited at the pin and release. Transition-BE removes it with one BE sample per event instead of BE across the whole plateau.
 
 Code: search `rust_emitter/nodal_emitter.rs` for `emit_nodal_active_set_resolve`.
 
 ## How `ActiveSet` differs from `ActiveSetBe`
 
-ActiveSet (without "Be") does the same pin-and-resolve but on the trap matrices `state.a` instead of `state.a_be`. This works correctly for **control-path** topologies (e.g. VCR ALC sidechain) where the rail-clipped op-amp output drives a secondary nonlinear device's operating point — the secondary device wants the EXACT pinned voltage, and the trap rule's higher-frequency response is desirable for fast envelope detection.
-
-For **audio-path** topologies (e.g. Klon, SSL), the trap rule's response IS the bug — it excites the output coupling cap's Nyquist resonance. ActiveSetBe replaces it.
-
-The auto-detector picks ActiveSet vs ActiveSetBe based on whether the op-amp's output has a cap-coupled path to the speaker (audio) vs a DC path to another nonlinear device (control). See `refine_active_set_for_audio_path` in `ir.rs`.
+`ActiveSet` pins and re-solves on the site's own matrices: trapezoidal on a trapezoidal build. With transition-BE, the sample after each pin or release is solved on backward Euler. `ActiveSetBe` solves every rail-engaged sample on backward Euler. On a single-supply overdrive that is 73–96 % of samples, and its output-peak error is 2–4× larger at every rate (tables below). The two cost about the same CPU.
 
 ## Transition-BE: one backward-Euler sample per pin or release (`ActiveSet`)
 
@@ -278,10 +270,30 @@ trap, the lock appears at 192k only (33.7 µA on the rectifier node, alternating
 and transition-BE removes it (0.13 µA). At 48k and 96k that deck sits at the
 floor either way. **This is confirmed under a forced trap only.**
 
-Auto resolution is unchanged: the audio-path class still resolves to
-`ActiveSetBe`. Moving both classes to `ActiveSet` + transition-BE waits on the
-pinned-resolve convergence item and on a golden render that actually pins
-under `ActiveSet` (the corpus has none).
+Auto resolution picks `ActiveSet` + transition-BE for every cap-coupled
+railing op-amp. The residual gate was re-scoped to what the solver can promise: the
+walk is bounded (flat per-second maxima over 30 s at 768k), and at its maximum
+it stays within the main loop's own row tolerance. Two golden decks,
+`opamp-pin-audio` and `opamp-pin-control`, pin every half cycle. Against the
+ngspice twin, the output-peak error of the audio deck went from −2.18 / −1.33 /
+−0.71 % (auto `ActiveSetBe`) to −0.25 / −0.07 / −0.24 % at 0.5 V and
+48/96/192k, and from −2.45 / −0.95 / −0.51 % to −0.90 / −0.31 / −0.09 % at 0.1 V.
+
+**Railing at 1× aliases, in every mode.** A railing op-amp switches rail to
+rail within a sample, and the harmonics of those edges fold back below
+Nyquist. A 0.5 V, 15 978 Hz tone into the overdrive deck at 48 kHz:
+
+| Build | Alias at 66 Hz | 16 kHz fundamental |
+|---|---|---|
+| 1× ActiveSet + transition-BE | 0.439 V | 0.0247 V |
+| 1× ActiveSetBe | 0.216 V | 0.0384 V |
+| 4× ActiveSet + transition-BE | 0.0005 V | 0.0364 V |
+| 4× ActiveSetBe | 0.0011 V | 0.0366 V |
+
+ASBe's lower 1× alias is dissipation, not accuracy: its alias is still 6× its
+fundamental, and the same damping removes real top-octave content on any deck.
+At 4× both modes converge. Oversample railing decks. Compile prints a notice
+when the automatic choice is `ActiveSet` at 1×.
 
 Code: `emit_transition_be_detect` / `emit_transition_be_arm` in
 `rust_emitter/helpers.rs`. Tests: `transition_be_tests.rs`.
@@ -297,7 +309,7 @@ See `opamp_rail_clamp_bug.md` for the full history. This mode is kept in the enu
 | File | Lines | What |
 |---|---|---|
 | `crates/melange-solver/src/codegen/mod.rs` | 84-128 | `OpampRailMode` enum, parser, Display |
-| `crates/melange-solver/src/codegen/ir.rs` | 479-599 | `resolve_opamp_rail_mode` + `refine_active_set_for_audio_path` (auto-detector) |
+| `crates/melange-solver/src/codegen/ir/opamp_rail.rs` | `resolve_opamp_rail_mode` | Auto-detector |
 | `crates/melange-solver/src/codegen/ir.rs` | 708-835 | `augment_netlist_with_boyle_diodes` (BoyleDiodes scaffolding) |
 | `crates/melange-solver/src/mna.rs` | 374 | `R_BOYLE_INT_LOAD = 1e6` (the R1 value) |
 | `crates/melange-solver/src/mna.rs` | 2847-2964 | Op-amp stamping dispatch (BoyleDiodes detection + non-Boyle linear path) |
@@ -336,4 +348,4 @@ These are the agent-memory files with full session-by-session investigation hist
 - Don't propose global Gmin bumps without checking what value it changes from (1e-12 to 1e-6 breaks linear behaviour at high-Z nodes).
 - Don't propose C_dom at `_oa_int_`. Any value > ~5 pF breaks linear.
 - Don't propose Boyle 1974 as a "new idea" — the scaffolding is 90% built (`augment_netlist_with_boyle_diodes`); the open question is the heavy-clip NR convergence on the EXISTING scaffolding, not building scaffolding from scratch.
-- Don't claim "Klon doesn't work". Klon ships under auto-detected `ActiveSetBe`. The user does NOT need a flag. The OPEN problem is BoyleDiodes mode at heavy clip, which is opt-in only.
+- Don't claim a railing overdrive "doesn't work". It runs under auto-detected `ActiveSet` + transition-BE with no flag. The OPEN problem is BoyleDiodes mode at heavy clip, which is opt-in only.
