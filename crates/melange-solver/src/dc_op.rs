@@ -3157,7 +3157,7 @@ pub fn solve_dc_operating_point(
         n_dc,
         has_internal_nodes: !dc_sys.bjt_internal.is_empty() || !mna.bjt_internal_nodes.is_empty(),
         is_voltage_row: &dc_sys.is_voltage_row,
-            pinned_outputs: &[],
+        pinned_outputs: &[],
     };
     let mut v = result.v_node.clone();
     v.resize(n_dc, 0.0);
@@ -3440,7 +3440,7 @@ fn solve_dc_operating_point_core(
         n_dc,
         has_internal_nodes,
         is_voltage_row: &dc_sys.is_voltage_row,
-            pinned_outputs: &[],
+        pinned_outputs: &[],
     };
 
     // Clamp junction voltages in the linear initial guess to prevent
@@ -3903,7 +3903,7 @@ fn solve_dc_operating_point_core(
                 n_dc,
                 has_internal_nodes,
                 is_voltage_row: &dc_sys.is_voltage_row,
-            pinned_outputs: &[],
+                pinned_outputs: &[],
             };
 
             let step_ok;

@@ -831,7 +831,6 @@ fn test_g10_oscillator_default_routing_is_bounded() {
     );
 }
 
-
 /// A self-starting oscillator stays off the DK solver at any rate. At the
 /// 48 kHz host rate the router reads this oscillator trap-stable and picks DK,
 /// but its DC operating point has a growing pole (trapezoidal spectral radius
@@ -855,7 +854,10 @@ fn test_g10_self_starting_oscillator_is_refused_on_dk() {
         "the default build must say why it left DK:\n{stdout}"
     );
     let code = std::fs::read_to_string(&out).unwrap();
-    assert!(code.contains("\"solver\":\"nodal\""), "the build must be nodal");
+    assert!(
+        code.contains("\"solver\":\"nodal\""),
+        "the build must be nodal"
+    );
     let stderr = run_melange_fail(&[
         "compile",
         path,

@@ -52,9 +52,14 @@ fn dc_op(deck: &str, extra: &str, tag: &str) -> serde_json::Value {
 }
 
 fn assert_nodes(v: &serde_json::Value, want: &[(&str, f64)], what: &str) {
-    assert_eq!(v["converged"], true, "{what}: DC operating point did not converge");
+    assert_eq!(
+        v["converged"], true,
+        "{what}: DC operating point did not converge"
+    );
     for (node, volts) in want {
-        let got = v["nodes"][node].as_f64().unwrap_or_else(|| panic!("{what}: no node {node}"));
+        let got = v["nodes"][node]
+            .as_f64()
+            .unwrap_or_else(|| panic!("{what}: no node {node}"));
         assert!(
             (got - volts).abs() < TOL_V,
             "{what}: v({node}) = {got:.7} V, ngspice {volts:.7} V"
@@ -68,7 +73,11 @@ fn tamb_is_the_device_temperature() {
         (DIODE, DIODE_60C, DIODE_27C, "diode"),
         (BJT, BJT_60C, BJT_27C, "BJT"),
     ] {
-        assert_nodes(&dc_op(deck, "", &format!("{name}_27")), at_27, &format!("{name}, no TAMB"));
+        assert_nodes(
+            &dc_op(deck, "", &format!("{name}_27")),
+            at_27,
+            &format!("{name}, no TAMB"),
+        );
         assert_nodes(
             &dc_op(deck, " TAMB=333.15", &format!("{name}_60")),
             at_60,

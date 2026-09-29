@@ -133,10 +133,7 @@ pub fn auto_route(
             OpampRailMode::ActiveSet | OpampRailMode::ActiveSetBe
         );
 
-    let opamp_transient_aol_cap = mna
-        .opamps
-        .iter()
-        .any(|oa| oa.aol_transient_cap < oa.aol);
+    let opamp_transient_aol_cap = mna.opamps.iter().any(|oa| oa.aol_transient_cap < oa.aol);
 
     // Check trapezoidal stability via power iteration on S*A_neg
     let (dk_unstable, spectral_radius) = if !dk_failed && m > 0 && n > 0 {

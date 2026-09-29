@@ -4821,8 +4821,8 @@ impl CircuitIR {
             )));
         }
 
-        let tamb = Self::lookup_model_param(netlist, model, "TAMB")
-            .unwrap_or(melange_primitives::T_NOM);
+        let tamb =
+            Self::lookup_model_param(netlist, model, "TAMB").unwrap_or(melange_primitives::T_NOM);
         if tamb <= 0.0 || !tamb.is_finite() {
             return Err(CodegenError::InvalidConfig(format!(
                 "diode model TAMB must be positive and finite, got {tamb}"
@@ -5099,8 +5099,8 @@ impl CircuitIR {
             )));
         }
 
-        let tamb = Self::lookup_model_param(netlist, model, "TAMB")
-            .unwrap_or(melange_primitives::T_NOM);
+        let tamb =
+            Self::lookup_model_param(netlist, model, "TAMB").unwrap_or(melange_primitives::T_NOM);
         if tamb <= 0.0 || !tamb.is_finite() {
             return Err(CodegenError::InvalidConfig(format!(
                 "BJT model TAMB must be positive and finite, got {tamb}"

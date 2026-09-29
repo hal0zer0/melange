@@ -147,9 +147,8 @@ impl OpampParams {
         }
         // The swing window melange itself resolves (`mna.rs`), not a copy of
         // its rules.
-        let resolved =
-            melange_solver::mna::resolve_opamp_swing(&m.name, &swing, gbw.is_finite())
-                .map_err(|e| SpiceError::ParseError(format!("op-amp translation: {e}")))?;
+        let resolved = melange_solver::mna::resolve_opamp_swing(&m.name, &swing, gbw.is_finite())
+            .map_err(|e| SpiceError::ParseError(format!("op-amp translation: {e}")))?;
         p.vcc = resolved.high;
         p.vee = resolved.low;
         if p.r_out == 0.0 {

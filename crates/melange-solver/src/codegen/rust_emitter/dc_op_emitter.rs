@@ -194,14 +194,24 @@ pub(super) fn emit_recompute_dc_op_body_dk(ir: &CircuitIR) -> Result<String, Cod
     body.push_str(&format!("        let next_pins: [Option<f64>; {k}] = [\n"));
     for oa in &pinned {
         let aol = oa.gm / oa.g_out;
-        let vp = oa.n_plus_idx.map_or("0.0".to_string(), |i| format!("v_node[{i}]"));
-        let vm = oa.n_minus_idx.map_or("0.0".to_string(), |i| format!("v_node[{i}]"));
+        let vp = oa
+            .n_plus_idx
+            .map_or("0.0".to_string(), |i| format!("v_node[{i}]"));
+        let vm = oa
+            .n_minus_idx
+            .map_or("0.0".to_string(), |i| format!("v_node[{i}]"));
         let mut expr = format!("{{ let u = {aol:.17e} * ({vp} - {vm}); ");
         if oa.vclamp_hi.is_finite() {
-            expr.push_str(&format!("if u >= {hi:.17e} {{ Some({hi:.17e}) }} else ", hi = oa.vclamp_hi));
+            expr.push_str(&format!(
+                "if u >= {hi:.17e} {{ Some({hi:.17e}) }} else ",
+                hi = oa.vclamp_hi
+            ));
         }
         if oa.vclamp_lo.is_finite() {
-            expr.push_str(&format!("if u <= {lo:.17e} {{ Some({lo:.17e}) }} else ", lo = oa.vclamp_lo));
+            expr.push_str(&format!(
+                "if u <= {lo:.17e} {{ Some({lo:.17e}) }} else ",
+                lo = oa.vclamp_lo
+            ));
         }
         expr.push_str("{ None } }");
         body.push_str(&format!("            {expr},\n"));

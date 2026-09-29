@@ -882,27 +882,28 @@ pub fn resolve_opamp_swing(
         }
     }
     let mut notices = Vec::new();
-    let mut side = |rail: Option<f64>, drop: Option<f64>, sign: f64, rail_key: &str, drop_key: &str| {
-        if let Some(r) = rail {
-            let d = drop.unwrap_or(OPAMP_DEFAULT_RAIL_DROP_V);
-            let limit = r - sign * d;
-            if drop.is_none() {
-                notices.push(format!(
-                    "Op-amp {name}: zero-load swing limit assumed {rail_key} {} \
+    let mut side =
+        |rail: Option<f64>, drop: Option<f64>, sign: f64, rail_key: &str, drop_key: &str| {
+            if let Some(r) = rail {
+                let d = drop.unwrap_or(OPAMP_DEFAULT_RAIL_DROP_V);
+                let limit = r - sign * d;
+                if drop.is_none() {
+                    notices.push(format!(
+                        "Op-amp {name}: zero-load swing limit assumed {rail_key} {} \
                      {OPAMP_DEFAULT_RAIL_DROP_V} V = {limit} V (a railed output sags R_SAG·I_load \
                      below it); set {drop_key} (0 for rail-to-rail parts).",
-                    if sign > 0.0 { "−" } else { "+" }
-                ));
+                        if sign > 0.0 { "−" } else { "+" }
+                    ));
+                }
+                limit
+            } else if let Some(v) = card.vsat {
+                sign * v
+            } else if has_gbw {
+                sign * OPAMP_GBW_DEFAULT_SWING_V
+            } else {
+                sign * f64::INFINITY
             }
-            limit
-        } else if let Some(v) = card.vsat {
-            sign * v
-        } else if has_gbw {
-            sign * OPAMP_GBW_DEFAULT_SWING_V
-        } else {
-            sign * f64::INFINITY
-        }
-    };
+        };
     let high = side(card.vcc, card.voh_drop, 1.0, "VCC", "VOH_DROP");
     let low = side(card.vee, card.vol_drop, -1.0, "VEE", "VOL_DROP");
     // Both finite and crossed would panic inside `f64::clamp(min, max)` on the
@@ -3319,7 +3320,6 @@ impl MnaBuilder {
                 gbw_named.join(", ")
             );
         }
-
 
         // Resolve VCA model parameters from netlist .model directives
         for (vca, elem) in self.vcas.iter_mut().zip(

@@ -55,7 +55,6 @@ struct Case {
     alone_only: &'static [&'static str],
 }
 
-
 const CASES: &[Case] = &[
     Case {
         class: ModelClass::Diode,
@@ -292,7 +291,8 @@ static SEQ: AtomicUsize = AtomicUsize::new(0);
 
 /// A scratch directory per test (tests in one binary run concurrently).
 fn scratch(test: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("melange_key_effect_{}_{test}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("melange_key_effect_{}_{test}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -345,7 +345,13 @@ fn lines_differing(a: &[String], b: &[String]) -> usize {
 }
 
 /// The first and second compile for one key's witness.
-fn witness_pair(case: &Case, key: &str, a: &str, b: &str, w: Witness) -> (String, String, Vec<&'static str>) {
+fn witness_pair(
+    case: &Case,
+    key: &str,
+    a: &str,
+    b: &str,
+    w: Witness,
+) -> (String, String, Vec<&'static str>) {
     let rich: Vec<(&str, &str)> = case
         .keys
         .iter()
@@ -414,9 +420,10 @@ fn every_accepted_key_changes_the_generated_code() {
                 let verdict = match (compile(&d1, &args, "effect"), compile(&d2, &args, "effect")) {
                     (Ok(x), Ok(y)) if lines_differing(&x, &y) > 0 => None,
                     (Ok(_), Ok(_)) => Some("no effect on the generated code".to_string()),
-                    (Err(e), _) | (_, Err(e)) => {
-                        Some(format!("compile failed: {}", e.lines().last().unwrap_or("")))
-                    }
+                    (Err(e), _) | (_, Err(e)) => Some(format!(
+                        "compile failed: {}",
+                        e.lines().last().unwrap_or("")
+                    )),
                 };
                 if let Some(v) = verdict {
                     failures
@@ -469,7 +476,9 @@ fn unimplemented_keys_compile_with_a_costed_notice() {
                 case.class.label()
             );
             assert!(
-                text.contains(&format!("'{key}' is a recognized parameter that melange does not model yet")),
+                text.contains(&format!(
+                    "'{key}' is a recognized parameter that melange does not model yet"
+                )),
                 "{} / {key}: no notice naming the cost:\n{text}",
                 case.class.label()
             );
@@ -489,7 +498,10 @@ fn an_unknown_key_is_refused() {
             .chain(std::iter::once(("ZORP", "1")))
             .collect();
         let Err(err) = compile(&card(case, &rich), &[], "unknown") else {
-            panic!("{}: a card with an unknown key compiled", case.class.label());
+            panic!(
+                "{}: a card with an unknown key compiled",
+                case.class.label()
+            );
         };
         assert!(
             err.contains("unknown parameter 'ZORP'"),

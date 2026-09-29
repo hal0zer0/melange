@@ -51,7 +51,11 @@ fn a_biased_precision_rectifier_matches_ngspice_at_full_aol() {
         let max = tail.iter().copied().fold(f64::MIN, f64::max);
         let min = tail.iter().copied().fold(f64::MAX, f64::min);
         eprintln!("{amp} V: mean {mean:.7} max {max:.7} min {min:.7}");
-        for (what, got, want) in [("mean", mean, mean_ref), ("max", max, max_ref), ("min", min, min_ref)] {
+        for (what, got, want) in [
+            ("mean", mean, mean_ref),
+            ("max", max, max_ref),
+            ("min", min, min_ref),
+        ] {
             assert!(
                 (got - want).abs() < TOL_V,
                 "{amp} V drive: {what} v(out) {got:.7} V vs ngspice {want:.7} V \
