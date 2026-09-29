@@ -24,6 +24,10 @@ generated state is smaller.
 
 ### Fixed
 
+- **Generated code failed `-D warnings` on a nodal Schur build run with
+  `--force-trap`** ("value assigned to `v` is never read"), so a plugin crate
+  that denies warnings did not build. A new test compiles a matrix of generated
+  builds warning-strict.
 - **A pot move or a host sample-rate change dropped part of a transistor's
   model on nodal circuits.** A transistor with base, collector or emitter
   resistance (`RB`, `RC`, `RE`) gets internal nodes. The generated

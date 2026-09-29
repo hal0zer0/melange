@@ -8325,7 +8325,11 @@ impl RustEmitter {
             (false, true) => Some("state.breakpoint_be > 0"),
             (false, false) => None,
         };
-        code.push_str("    let mut v = [0.0f64; N];\n    let mut i_nl = [0.0f64; M];\n");
+        // Every path writes `v` before it is read; without a forced BE sample the
+        // trapezoidal block always runs, so the initial value is dead.
+        code.push_str(
+            "    #[allow(unused_assignments)]\n    let mut v = [0.0f64; N];\n    let mut i_nl = [0.0f64; M];\n",
+        );
         if active_set_be {
             code.push_str("    let mut active_set_engaged = false;\n");
         }
