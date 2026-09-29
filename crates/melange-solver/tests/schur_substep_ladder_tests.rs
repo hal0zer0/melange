@@ -59,7 +59,7 @@ fn config(spice: &str, sub_path: NodalSubPathOverride, be: bool) -> CodegenConfi
 fn render(spice: &str, c: &CodegenConfig, setup: &str, force: bool, tag: &str) -> Render {
     let full = support::generate_circuit_code_nodal(spice, c).0;
     assert!(
-        full.contains("'substep:"),
+        full.contains("local refinement of the failing sub-step"),
         "{tag}: build has no sub-step ladder"
     );
     let primaries = full.matches(PRIMARY_LOOP).count();

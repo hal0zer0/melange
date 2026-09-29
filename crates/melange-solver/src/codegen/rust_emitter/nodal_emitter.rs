@@ -2886,21 +2886,28 @@ impl RustEmitter {
         // elsewhere would publish a number that governs nothing.
         if use_full_nodal || m > 0 {
             code.push_str(
-                "/// Deepest timestep subdivision the adaptive sub-step will try before\n\
-             /// giving up: 2^SUBSTEP_MAX_POWER, i.e. 64x.\n\
+                "/// Finest sub-step the adaptive sub-stepping will try before giving up:\n\
+             /// T / 2^SUBSTEP_MAX_POWER. A failing sub-step is bisected (only that\n\
+             /// sub-step; the converged prefix is kept), down to this depth.\n\
              ///\n\
              /// A transient Newton failure is a TIMESTEP problem, not a budget problem,\n\
              /// so the response is to cut dt and retry rather than to raise MAX_ITER\n\
-             /// (design review). The bound is 64x because that is what this corpus\n\
-             /// measured: on a Neve-1073-style input block driven with a 0.1 V step,\n\
-             /// 9 of 43200 post-edge samples need deeper than one sub-step, 7 of those\n\
-             /// clear by 8x, and the last two need 32x and 64x. It stays BOUNDED\n\
-             /// because per-sample cost has to stay finite in a plugin.\n\
-             ///\n\
-             /// Past this depth the death-spiral hold fires and `diag_nr_hold_count`\n\
-             /// records a sample that is not a solution.\n",
+             /// (design review). Past this depth, or past SUBSTEP_BUDGET attempts, the\n\
+             /// death-spiral hold fires and `diag_unsolved_sample_count` records a\n\
+             /// sample that is not a solution.\n",
             );
-            code.push_str("pub const SUBSTEP_MAX_POWER: u32 = 6;\n\n");
+            code.push_str("pub const SUBSTEP_MAX_POWER: u32 = 12;\n\n");
+            code.push_str(
+                "/// Most sub-step attempts (converged or bisected) one sample may spend\n\
+                 /// in the adaptive sub-stepping: the bound on a rescued sample's cost.\n\
+                 ///\n\
+                 /// Measured on an IC-seeded transistor astable (the hardest switching\n\
+                 /// edges in the test set) at 48 and 96 kHz on both nodal sub-paths: the\n\
+                 /// deepest bisection reached 2^9, the most attempts one sample used was\n\
+                 /// 31, the mean about 12. 64 is twice that, and half the 126 sub-steps a\n\
+                 /// uniform 2..64x restart could spend (design review).\n",
+            );
+            code.push_str("pub const SUBSTEP_BUDGET: u32 = 64;\n\n");
         }
         if ir.solver_config.breakpoint_be {
             code.push_str(
@@ -7390,12 +7397,56 @@ impl RustEmitter {
             // Adaptive sub-stepping: when trapezoidal NR fails, subdivide the timestep
             // and retry with tighter capacitor conductances. This is how ngspice handles
             // positive-feedback circuits (compressor sidechains, oscillators, etc.).
-            code.push_str("    // Adaptive sub-stepping: retry with subdivided timestep\n");
-            code.push_str("    if !converged {\n");
-            code.push_str("        'substep: for subdiv_power in 1..=SUBSTEP_MAX_POWER {\n");
+            // Adaptive sub-stepping by LOCAL REFINEMENT: when a sample's Newton
+            // solve fails, walk the sample in sub-steps, bisecting only a
+            // sub-step that fails and keeping the converged prefix (SPICE-style
+            // timestep control), then growing the step back once it is aligned.
+            // Time is kept in integer units of T/2^SUBSTEP_MAX_POWER, so a
+            // sub-step's end is exact and the input interpolation below reads it
+            // as `(step + 1) / subdiv`. Bounded two ways: the finest step
+            // (T/2^SUBSTEP_MAX_POWER) and a total of SUBSTEP_BUDGET sub-step
+            // attempts per sample. A uniform restart at 2^n (the previous
+            // ladder) re-solved the whole sample at every level and never
+            // reached a regenerative fold at base rates (design review).
             code.push_str(
-                "            let subdiv = 1u32 << subdiv_power; // 2 .. 2^SUBSTEP_MAX_POWER\n",
+                "    // Adaptive sub-stepping: local refinement of the failing sub-step\n",
             );
+            code.push_str("    if !converged {\n");
+            code.push_str(
+                "        let subdiv: u64 = 1u64 << SUBSTEP_MAX_POWER; // time units per sample\n",
+            );
+            code.push_str("        let mut t_units: u64 = 0;\n");
+            code.push_str("        let mut h_pow: u32 = 1; // sub-step = T / 2^h_pow\n");
+            code.push_str("        let mut built_pow: u32 = 0;\n");
+            code.push_str("        let mut attempts: u32 = 0;\n");
+            // Read inside the rebuild before any use; the initial value is dead
+            // on builds whose sub-step reads it nowhere else.
+            code.push_str(
+                "        #[allow(unused_assignments)]\n        let mut alpha_sub = 0.0f64;\n",
+            );
+            code.push_str("        let mut a_sub = [[0.0f64; N]; N];\n");
+            code.push_str("        let mut a_neg_sub = [[0.0f64; N]; N];\n");
+            code.push_str("        let mut v_sub = state.v_prev;\n");
+            code.push_str("        let mut i_nl_sub = state.i_nl_prev;\n");
+            // The charge derivative carried across the sub-steps: each is a
+            // full step of its integrator at `alpha_sub`.
+            let q_sub_carried = carries_q_dot(ir);
+            if q_sub_carried {
+                code.push_str("        let mut q_s = state.q_dot;\n");
+            }
+            if !multi_input {
+                code.push_str(
+                    "        let input_step = (input - state.input_prev) / subdiv as f64;\n",
+                );
+            }
+            code.push_str("        let mut all_sub_converged = true;\n");
+            code.push_str("        while t_units < subdiv {\n");
+            code.push_str(
+                "            if attempts >= SUBSTEP_BUDGET { all_sub_converged = false; break; }\n\
+                 \x20           attempts += 1;\n\
+                 \x20           let h_units = subdiv >> h_pow;\n",
+            );
+            code.push_str("            if built_pow != h_pow {\n");
             // alpha_sub tracks the RUNTIME host rate (× oversampling), not
             // the compile-time codegen rate — a baked literal here made the
             // sub-step matrices inconsistent with the state matrices after
@@ -7409,60 +7460,47 @@ impl RustEmitter {
             // the same class of defect as a silent wrong answer (design review).
             if be {
                 code.push_str(
-                "            // Backward Euler: alpha = 1/dt, matching the pinned scheme.\n            let alpha_sub = state.current_sample_rate * OVERSAMPLING_FACTOR as f64 * subdiv as f64;\n",
+                "                // Backward Euler: alpha = 1/dt, matching the pinned scheme.\n                alpha_sub = state.current_sample_rate * OVERSAMPLING_FACTOR as f64 * (1u64 << h_pow) as f64;\n",
             );
             } else {
                 code.push_str(
-                "            let alpha_sub = 2.0 * state.current_sample_rate * OVERSAMPLING_FACTOR as f64 * subdiv as f64;\n",
+                "                alpha_sub = 2.0 * state.current_sample_rate * OVERSAMPLING_FACTOR as f64 * (1u64 << h_pow) as f64;\n",
             );
             }
             // From the same G/C `rebuild_matrices` reads (the setters'
             // working copies when there are knobs).
             let (g_src, c_src) = live_g_c(ir, full_nodal, "state");
-            code.push_str("            // Rebuild A and A_neg at finer timestep\n");
-            code.push_str("            let mut a_sub = [[0.0f64; N]; N];\n");
-            code.push_str("            let mut a_neg_sub = [[0.0f64; N]; N];\n");
-            code.push_str("            for i in 0..N {\n");
-            code.push_str("                for j in 0..N {\n");
+            code.push_str("                // Rebuild A and A_neg at this sub-step\n");
+            code.push_str("                for i in 0..N {\n");
+            code.push_str("                    for j in 0..N {\n");
             code.push_str(&format!(
-                "                    a_sub[i][j] = {g_src}[i][j] + alpha_sub * {c_src}[i][j];\n"
+                "                        a_sub[i][j] = {g_src}[i][j] + alpha_sub * {c_src}[i][j];\n"
             ));
             // Charge form: the history is alpha*C under both integrators.
             code.push_str(&format!(
-                "                    a_neg_sub[i][j] = alpha_sub * {c_src}[i][j];\n"
+                "                        a_neg_sub[i][j] = alpha_sub * {c_src}[i][j];\n"
             ));
+            code.push_str("                    }\n");
             code.push_str("                }\n");
-            code.push_str("            }\n");
             // Zero the algebraic rows (as the baked A_neg does)
             for (lo, hi) in history_zero_row_ranges(ir) {
                 code.push_str(&format!(
-                    "            for i in {}..{} {{ for j in 0..N {{ a_neg_sub[i][j] = 0.0; }} }}\n",
+                    "                for i in {}..{} {{ for j in 0..N {{ a_neg_sub[i][j] = 0.0; }} }}\n",
                     lo, hi
                 ));
             }
             // Gmin on A_sub — 1e-12, matching every other Gmin stamp in the
             // nodal emitter (1e-6 was strong enough to skew high-impedance
             // nodes by an audible amount on sub-stepped samples).
-            code.push_str("            for i in 0..N_NODES { a_sub[i][i] += 1e-12; }\n");
-            code.push_str("            // Run subdivided sub-steps\n");
-            code.push_str("            let mut v_sub = state.v_prev;\n");
-            code.push_str("            let mut i_nl_sub = state.i_nl_prev;\n");
-            // The charge derivative carried across the sub-steps: each is a
-            // full step of its integrator at `alpha_sub`.
-            let q_sub_carried = carries_q_dot(ir);
-            if q_sub_carried {
-                code.push_str("            let mut q_s = state.q_dot;\n");
-            }
-            if !multi_input {
-                code.push_str(
-                    "            let input_step = (input - state.input_prev) / subdiv as f64;\n",
-                );
-            }
-            code.push_str("            let mut all_sub_converged = true;\n");
-            code.push_str("            for step in 0..subdiv {\n");
-            if q_sub_carried {
-                code.push_str("                let v_sub0 = v_sub;\n");
-            }
+            code.push_str("                for i in 0..N_NODES { a_sub[i][i] += 1e-12; }\n");
+            code.push_str("                built_pow = h_pow;\n");
+            code.push_str("            }\n");
+            code.push_str(
+                "            // This sub-step ends at unit `step + 1` of `subdiv`.\n\
+                 \x20           let step = t_units + h_units - 1;\n\
+                 \x20           let v_sub0 = v_sub;\n\
+                 \x20           let i_nl_sub0 = i_nl_sub;\n",
+            );
             if !multi_input {
                 code.push_str(
                     "                let inp_s = state.input_prev + input_step * (step + 1) as f64;\n",
@@ -7737,16 +7775,14 @@ impl RustEmitter {
             code.push_str("                        break;\n");
             code.push_str("                    }\n");
             code.push_str("                }\n"); // end sub-step NR loop
-            code.push_str(
-                "                if !sub_converged { all_sub_converged = false; break; }\n",
-            );
+            code.push_str("                if sub_converged {\n");
             if q_sub_carried {
                 // Charge form: advance q_dot across this sub-step (trapezoidal
                 // alpha_sub*C*dv - q, or the backward-Euler alpha_sub*C*dv).
                 let tail = if be { "" } else { " - q_s[i]" };
                 code.push_str(&format!(
-                    "                for i in 0..N {{ let mut acc = 0.0; for j in 0..N {{ acc += a_neg_sub[i][j] * (v_sub[j] - v_sub0[j]); }} q_s[i] = acc{tail}; }}\n"
-                ));
+                        "                for i in 0..N {{ let mut acc = 0.0; for j in 0..N {{ acc += a_neg_sub[i][j] * (v_sub[j] - v_sub0[j]); }} q_s[i] = acc{tail}; }}\n"
+                    ));
                 emit_sat_ind_q_dot(
                     code,
                     ir,
@@ -7757,6 +7793,18 @@ impl RustEmitter {
                     "                ",
                 );
             }
+            code.push_str(
+                    "                    t_units += h_units;\n\
+                     \x20                   // Grow back once aligned to the coarser grid.\n\
+                     \x20                   if h_pow > 1 && t_units % (h_units << 1) == 0 { h_pow -= 1; }\n\
+                     \x20               } else {\n\
+                     \x20                   // Bisect this sub-step, from its start.\n\
+                     \x20                   v_sub = v_sub0;\n\
+                     \x20                   i_nl_sub = i_nl_sub0;\n\
+                     \x20                   if h_pow >= SUBSTEP_MAX_POWER { all_sub_converged = false; break; }\n\
+                     \x20                   h_pow += 1;\n\
+                     \x20               }\n",
+                );
             code.push_str("            }\n"); // end sub-step loop
             code.push_str("            if all_sub_converged {\n");
             code.push_str("                v = v_sub;\n");
@@ -7766,9 +7814,7 @@ impl RustEmitter {
             code.push_str("                i_nl = i_nl_sub;\n");
             code.push_str("                converged = true;\n");
             code.push_str("                state.diag_substep_count += 1;\n");
-            code.push_str("                break 'substep;\n");
             code.push_str("            }\n");
-            code.push_str("        }\n"); // end subdiv_power loop
             code.push_str("    }\n\n"); // end if !converged
         } // end: behavioral circuits omit the adaptive sub-step fallback
     }

@@ -227,11 +227,11 @@ fn full_lu_alpha_sub_tracks_runtime_rate() {
     let code = nodal_code(CLIPPER_FULL_LU);
     find(
         &code,
-        "let alpha_sub = 2.0 * state.current_sample_rate * OVERSAMPLING_FACTOR as f64 * subdiv as f64;",
+        "alpha_sub = 2.0 * state.current_sample_rate * OVERSAMPLING_FACTOR as f64 * (1u64 << h_pow) as f64;",
         "sub-step alpha must be computed from the runtime host rate",
     );
     // The old form baked 2·fs·os as a 17-digit literal.
-    let baked = format!("{:.17e} * subdiv as f64", 2.0 * SR);
+    let baked = format!("{:.17e} * (1u64 << h_pow) as f64", 2.0 * SR);
     assert!(
         !code.contains(&baked),
         "sub-step alpha must not bake the codegen-time rate ({baked})"
@@ -694,7 +694,7 @@ Rld2 out_ac 0 100k
         assert!(!code.contains(gone), "{gone} must not be emitted");
     }
     // ...keyed on a Newton failure alone: a rail engagement does not enter it.
-    let ladder = find(&code, "'substep: for subdiv_power", "sub-step ladder");
+    let ladder = find(&code, "while t_units < subdiv {", "sub-step ladder");
     let ladder_gate = code[..ladder]
         .rfind("    if !converged {")
         .expect("ladder gate");

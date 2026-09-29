@@ -24,6 +24,17 @@ generated state is smaller.
 
 ### Fixed
 
+- **The nodal sub-step rescue now reaches a switching edge at the base
+  sample rate.** When a sample's Newton solve fails, it used to re-solve the
+  whole sample at 2, 4, … 64 equal sub-steps; a transistor astable's edges
+  needed finer steps than that at 48 and 96 kHz, so 1–3 % of its samples were
+  held (refused by `simulate`) and the period ran 2–3 % long. The rescue now
+  bisects only the sub-step that fails, keeps what converged, and grows the
+  step back afterwards, down to 1/4096 of a sample within 64 attempts. The
+  astable solves every sample at 48 kHz (period within 0.4 % of ngspice), and
+  a transistor Schmitt trigger switches at ngspice's thresholds. The per-sample
+  cost bound is lower than before (64 attempts against up to 126 sub-steps).
+
 - **A nodal-Schur build no longer switches a regenerative circuit early.** Its
   Newton started from extrapolated device currents; near a switching point that
   start reached a genuine but wrong root, silently: an IC-seeded transistor

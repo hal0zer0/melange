@@ -1017,6 +1017,178 @@ fn test_ic_seeded_astable_schur_period_matches_spice() {
     );
 }
 
+/// Render `deck` through `melange simulate` with `--probe <probe>` and return
+/// (stdout, rows of (time_s, probe value)). Fails on any unsolved sample (no
+/// `--allow-nr-hold`).
+fn simulate_probe(deck: &str, tag: &str, probe: &str, args: &[&str]) -> (String, Vec<(f64, f64)>) {
+    let cir = write_test_circuit(deck, tag);
+    let wav = std::env::temp_dir().join(format!("melange_cli_test_{tag}.wav"));
+    let csv = std::env::temp_dir().join(format!("melange_cli_test_{tag}.csv"));
+    let mut all: Vec<&str> = vec!["simulate", cir.to_str().unwrap()];
+    all.extend_from_slice(args);
+    all.extend_from_slice(&["--probe", probe, "--probe-csv", csv.to_str().unwrap()]);
+    all.extend_from_slice(&["--output", wav.to_str().unwrap()]);
+    let stdout = run_melange(&all);
+    let text = std::fs::read_to_string(&csv).unwrap();
+    let _ = std::fs::remove_file(&wav);
+    let _ = std::fs::remove_file(&csv);
+    let _ = std::fs::remove_file(&cir);
+    let rows = text
+        .lines()
+        .skip(1)
+        .map(|l| {
+            let f: Vec<&str> = l.split(',').collect();
+            (f[1].parse::<f64>().unwrap(), f[2].parse::<f64>().unwrap())
+        })
+        .collect();
+    (stdout, rows)
+}
+
+/// Mean period (ms) of the rising mid-level crossings of `rows` in [t0, t1].
+fn mean_period_ms(rows: &[(f64, f64)], t0: f64, t1: f64) -> f64 {
+    let w: Vec<(f64, f64)> = rows
+        .iter()
+        .copied()
+        .filter(|(t, _)| (t0..=t1).contains(t))
+        .collect();
+    let (lo, hi) = w
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(a, b), &(_, v)| (a.min(v), b.max(v)));
+    let mid = 0.5 * (lo + hi);
+    let cross: Vec<f64> = w
+        .windows(2)
+        .filter(|p| p[0].1 < mid && p[1].1 >= mid)
+        .map(|p| p[0].0 + (mid - p[0].1) * (p[1].0 - p[0].0) / (p[1].1 - p[0].1))
+        .collect();
+    (cross[cross.len() - 1] - cross[0]) / (cross.len() - 1) as f64 * 1e3
+}
+
+/// At base rate the astable's switching edges need a much finer step than one
+/// sample; the sub-step ladder bisects only the failing sub-step (keeping the
+/// converged prefix) down to T/2^12 within 64 attempts. The earlier uniform
+/// 2..64x restart held 1174-1320 samples over this render on both nodal
+/// sub-paths, which moved the period +2-3 %.
+/// Reference: ngspice settled period 1.1662 ms (see the 192 kHz test above).
+#[test]
+fn test_ic_seeded_astable_base_rate_solves_every_sample() {
+    for sub_path in ["schur", "full-lu"] {
+        let (stdout, rows) = simulate_probe(
+            IC_VCVS_ASTABLE,
+            &format!("ic_astable_48k_{sub_path}"),
+            "c3",
+            &[
+                "--output-node",
+                "out",
+                "--amplitude",
+                "1e-9",
+                "--duration",
+                "0.8",
+                "--sample-rate",
+                "48000",
+                "--solver",
+                "nodal",
+                "--nodal-subpath",
+                sub_path,
+            ],
+        );
+        assert_eq!(parse_summary_value(&stdout, "unsolved_sample_count"), 0.0);
+        let period = mean_period_ms(&rows, 0.65, 0.8);
+        eprintln!("{sub_path} astable at 48 kHz: period {period:.4} ms");
+        assert!(
+            (period - 1.1662).abs() <= 0.005 * 1.1662,
+            "{sub_path}: period {period} ms against ngspice's 1.1662 ms"
+        );
+    }
+}
+
+/// A driven emitter-coupled BJT Schmitt trigger: its switching thresholds are
+/// regenerative folds. Both nodal sub-paths must solve every sample and switch
+/// at ngspice's thresholds (gear, reltol 1e-4, 0.2 us step, 2 V 1 kHz drive:
+/// output rises at input 1.3986 V and falls at -0.8338 V). Measured 2026-09-29
+/// at 192 kHz: 1.3908 V / -0.8550 V on both sub-paths.
+const SCHMITT: &str = "\
+BJT Schmitt trigger (emitter-coupled), driven
+Vcc vcc 0 DC 12
+E1 bx 0 in 0 1
+Vb b1 bx DC 3
+Rb1 b1 base1 1k
+Q1 c1 base1 e NX
+Rc1 vcc c1 4.7k
+R1 c1 base2 10k
+R2 base2 0 10k
+Q2 out base2 e NX
+Rc2 vcc out 2.2k
+Re e 0 1k
+Cm out 0 100p
+.model NX NPN(IS=1e-14 BF=200 VAF=100 CJE=5p CJC=3p TF=0.4n)
+";
+
+#[test]
+fn test_schmitt_trigger_switches_at_spice_thresholds() {
+    for sub_path in ["schur", "full-lu"] {
+        let (stdout, rows) = simulate_probe(
+            SCHMITT,
+            &format!("schmitt_{sub_path}"),
+            "out",
+            &[
+                "--output-node",
+                "out",
+                "--amplitude",
+                "2",
+                "--duration",
+                "0.01",
+                "--sample-rate",
+                "192000",
+                "--solver",
+                "nodal",
+                "--nodal-subpath",
+                sub_path,
+            ],
+        );
+        assert_eq!(parse_summary_value(&stdout, "unsolved_sample_count"), 0.0);
+        // Input at each output crossing of mid-level, after the first 2 ms.
+        let w: Vec<(f64, f64)> = rows.into_iter().filter(|(t, _)| *t >= 0.002).collect();
+        let (lo, hi) = w
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(a, b), &(_, v)| (a.min(v), b.max(v)));
+        let mid = 0.5 * (lo + hi);
+        let input = |t: f64| 2.0 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();
+        let (mut up, mut dn) = (Vec::new(), Vec::new());
+        for p in w.windows(2) {
+            let (t0, y0) = p[0];
+            let (t1, y1) = p[1];
+            if (y0 < mid) != (y1 < mid) {
+                let t = t0 + (mid - y0) * (t1 - t0) / (y1 - y0);
+                if y1 > y0 {
+                    up.push(input(t))
+                } else {
+                    dn.push(input(t))
+                }
+            }
+        }
+        let mean = |x: &[f64]| x.iter().sum::<f64>() / x.len() as f64;
+        let (rise, fall) = (mean(&up), mean(&dn));
+        eprintln!(
+            "{sub_path} Schmitt: rise {rise:.4} V, fall {fall:.4} V ({} / {} edges)",
+            up.len(),
+            dn.len()
+        );
+        assert_eq!(
+            (up.len(), dn.len()),
+            (8, 8),
+            "{sub_path}: every edge switches"
+        );
+        assert!(
+            (rise - 1.3986).abs() < 0.03,
+            "{sub_path}: rise threshold {rise} V vs 1.3986"
+        );
+        assert!(
+            (fall + 0.8338).abs() < 0.04,
+            "{sub_path}: fall threshold {fall} V vs -0.8338"
+        );
+    }
+}
+
 /// Pins the OS4-specific NR damping-floor bug: at `--oversampling 4`
 /// (192 kHz internal rate for a 48 kHz host), the same IC-seeded transient
 /// that converges cleanly at base rate (peak ~1.18 V, `nr_max_iter_count`

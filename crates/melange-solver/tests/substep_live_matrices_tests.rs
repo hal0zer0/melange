@@ -39,7 +39,7 @@ fn run(spice: &str, setup: &str, amp: f64, f: f64, tag: &str) -> (Vec<f64>, u64,
     config.dc_block = false;
     let full = support::generate_circuit_code_nodal(spice, &config).0;
     assert!(
-        full.contains("'substep:"),
+        full.contains("local refinement of the failing sub-step"),
         "{tag}: build has no adaptive sub-step"
     );
     // Drop the first (main-loop) flux-row step limit; see the module doc.
