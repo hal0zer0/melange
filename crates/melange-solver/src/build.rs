@@ -612,6 +612,15 @@ pub fn build(
         }
     }
 
+    // Every conductance to ground stamped above: the input ports and the
+    // `.inject` sources. A reduction that rebuilds the MNA from the netlist
+    // restamps all of them.
+    let port_stamps: Vec<(usize, f64)> = std::iter::once(input_node_idx)
+        .chain(extra_input_nodes.iter().copied())
+        .map(|node| (node, input_conductance))
+        .chain(injection_specs.iter().map(|s| (s.node, 1.0 / s.resistance)))
+        .collect();
+
     // Stamp junction capacitances BEFORE FA detection (caps affect DC OP).
     // Internal node expansion happens AFTER FA detection to avoid disrupting it.
     {
@@ -643,8 +652,7 @@ pub fn build(
         solver_override,
         sample_rate,
         oversampling,
-        input_node_idx,
-        input_conductance,
+        &port_stamps,
         out,
     )?;
 
@@ -662,8 +670,7 @@ pub fn build(
         solver_override,
         sample_rate,
         oversampling,
-        input_node_idx,
-        input_conductance,
+        &port_stamps,
     )?;
     if let Some(msg) = crate::pipeline::format_grid_off_log(&grid_off_pentodes) {
         report!(out, "{msg}");
@@ -678,8 +685,7 @@ pub fn build(
         &netlist,
         &forward_active,
         &grid_off_pentodes,
-        input_node_idx,
-        input_conductance,
+        &port_stamps,
         out,
     )?;
 

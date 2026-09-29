@@ -499,6 +499,11 @@ it can never **be** the evidence for one.
 
 ## Still open
 
+* **`melange dc-op` does not stamp `.inject` conductances.** It builds its own
+  MNA rather than going through `build()`, and stamps only the `-i` port, so on
+  a `.inject` deck it reports the operating point of a circuit without the
+  injection's impedance — not the one `compile` ships. Fix: stamp the
+  injections (or route the verb through `build()`).
 * Validate applies **no forward-active reduction** (residual 0.246% on
   wurli-power-amp is a candidate).
 * **Per-timestep junction-charge re-linearization** — blocks `TR`, would make

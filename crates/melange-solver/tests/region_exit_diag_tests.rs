@@ -178,8 +178,7 @@ fn generate_dk(spice: &str, tube_grid_fa: &str) -> (String, MnaSystem) {
         "",
         48000.0,
         1,
-        input,
-        1.0,
+        &[(input, 1.0)],
         &melange_solver::pipeline::silent,
     )
     .expect("FA step");
@@ -192,8 +191,7 @@ fn generate_dk(spice: &str, tube_grid_fa: &str) -> (String, MnaSystem) {
         "",
         48000.0,
         1,
-        input,
-        1.0,
+        &[(input, 1.0)],
     )
     .expect("grid-off step");
     let kernel = DkKernel::from_mna(&mna, 48000.0).expect("kernel");
@@ -355,8 +353,7 @@ fn test_on_does_not_reduce_when_unreduced_route_is_nodal() {
         "auto",
         48000.0,
         1,
-        config.input_node,
-        1.0,
+        &[(config.input_node, 1.0)],
     )
     .expect("grid-off step");
     assert!(reduced.is_empty(), "on + auto-route-nodal must not reduce");
@@ -372,8 +369,7 @@ fn test_on_does_not_reduce_when_unreduced_route_is_nodal() {
         "",
         48000.0,
         1,
-        config.input_node,
-        1.0,
+        &[(config.input_node, 1.0)],
     )
     .expect("grid-off step");
     assert_eq!(reduced.len(), 4, "without a pre-route, on reduces all four");

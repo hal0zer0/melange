@@ -24,6 +24,16 @@ generated state is smaller.
 
 ### Fixed
 
+- **A `.inject` source survives `.linearize` and the device reductions.**
+  `.linearize`, `--bjt-fa auto|force` and `--tube-grid-fa on` rebuild the
+  circuit's matrices from the netlist, and the rebuild restamped only the
+  primary input port, so a `.inject` deck with any of them shipped without
+  the injection's impedance, in the solver and in its operating point alike.
+  A 10 kΩ injection at a common-emitter collector (3.48 V) left the collector
+  at 6.95 V, where it sits with no injection. The rebuild now restamps every
+  input port and injection. One corpus deck combines `.inject` with
+  `.linearize`.
+
 - **The DC operating point counts the input port once.** The compile-time
   operating point and `melange dc-op` added the input port's source
   conductance on top of the one the build had already stamped, so they solved

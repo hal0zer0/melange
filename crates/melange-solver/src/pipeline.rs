@@ -94,13 +94,25 @@ pub struct LinearizeOutcome {
     pub triodes_linearized: usize,
 }
 
+/// Stamp each `(node, conductance)` to ground into `mna.g`: every input port
+/// and every `.inject` source the build stamped. A reduction that rebuilds the
+/// MNA from the netlist starts from an unstamped G and must restamp all of
+/// them, or the shipped circuit loses a port's impedance.
+fn stamp_ports(mna: &mut crate::mna::MnaSystem, port_stamps: &[(usize, f64)]) {
+    for &(node, g) in port_stamps {
+        if node < mna.n {
+            mna.g[node][node] += g;
+        }
+    }
+}
+
 /// Apply `.linearize` directives to `mna` in-place.
 ///
 /// Computes a DC OP on the current MNA to extract small-signal g-parameters for
 /// flagged BJTs and triodes, then rebuilds the MNA via
 /// `from_netlist_with_all_reductions` with those devices collapsed from
 /// active-NR (2D per device) to linear stamps (0D). Re-stamps junction caps
-/// against the reduced dimension and restamps the input conductance.
+/// against the reduced dimension and restamps every port (`port_stamps`).
 ///
 /// No-op when the netlist has no `.linearize` directives, in which case any
 /// FA / grid-off rebuilds the caller already did remain in place and this
@@ -118,8 +130,7 @@ pub fn apply_linearize_reductions(
     netlist: &crate::parser::Netlist,
     forward_active: &std::collections::HashSet<String>,
     grid_off_pentodes: &std::collections::HashMap<String, f64>,
-    input_node_idx: usize,
-    input_conductance: f64,
+    port_stamps: &[(usize, f64)],
     rep: Reporter<'_>,
 ) -> Result<LinearizeOutcome, PipelineError> {
     use crate::parser::Element;
@@ -394,9 +405,7 @@ pub fn apply_linearize_reductions(
         grid_off_pentodes,
     )
     .map_err(|e| PipelineError::DcOp(format!("rebuild MNA with linearized devices: {e}")))?;
-    if input_node_idx < mna.n {
-        mna.g[input_node_idx][input_node_idx] += input_conductance;
-    }
+    stamp_ports(mna, port_stamps);
 
     // Stamp linearized g-parameters into G. Must precede the junction-cap
     // re-stamp so `build_device_info_with_mna` can skip linearized devices
@@ -625,8 +634,7 @@ pub fn apply_forward_active_reduction(
     solver_override: &str,
     sample_rate: f64,
     oversampling: usize,
-    input_node_idx: usize,
-    input_conductance: f64,
+    port_stamps: &[(usize, f64)],
     rep: Reporter<'_>,
 ) -> Result<std::collections::HashSet<String>, PipelineError> {
     use crate::codegen::ir::CircuitIR;
@@ -657,9 +665,7 @@ pub fn apply_forward_active_reduction(
                 "Failed to rebuild MNA for forward-active BJTs: {e}"
             ))
         })?;
-        if input_node_idx < mna.n {
-            mna.g[input_node_idx][input_node_idx] += input_conductance;
-        }
+        stamp_ports(mna, port_stamps);
         // `build_device_info_with_mna` (not the bare netlist builder) so the
         // FA-reduced BJT dimensions are reflected, giving the correct
         // `start_idx` for junction-cap stamping.
@@ -699,8 +705,7 @@ pub fn apply_grid_off_reduction(
     solver_override: &str,
     sample_rate: f64,
     oversampling: usize,
-    input_node_idx: usize,
-    input_conductance: f64,
+    port_stamps: &[(usize, f64)],
 ) -> Result<std::collections::HashMap<String, f64>, PipelineError> {
     use crate::codegen::ir::CircuitIR;
     use crate::mna::MnaSystem;
@@ -740,9 +745,7 @@ pub fn apply_grid_off_reduction(
                 "Failed to rebuild MNA for grid-off pentodes (+ FA BJTs): {e}"
             ))
         })?;
-        if input_node_idx < mna.n {
-            mna.g[input_node_idx][input_node_idx] += input_conductance;
-        }
+        stamp_ports(mna, port_stamps);
         let device_slots =
             CircuitIR::build_device_info_with_mna(netlist, Some(&*mna)).unwrap_or_default();
         if !device_slots.is_empty() {

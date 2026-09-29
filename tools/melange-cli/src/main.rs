@@ -5067,8 +5067,7 @@ RK cath 0 130
             "",
             48000.0,
             1,
-            0,
-            1.0,
+            &[(0, 1.0)],
         )
         .expect("grid-off reduction");
         assert_eq!(grid_off.len(), 1, "pentode P1 must be grid-off reduced");
