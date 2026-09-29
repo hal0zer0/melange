@@ -206,6 +206,43 @@ fn emits_active_set_resolve(ir: &CircuitIR) -> bool {
         .any(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite())
 }
 
+/// Newton step limiter on each saturating inductor's branch-current row.
+///
+/// Node damping covers node rows and pnjlim covers devices; nothing limited the
+/// augmented flux rows. From deep saturation (`L_diff ~ L_air`) a Newton step
+/// crossing the knee is amps long and lands deep on the other side, where the
+/// slope is flat again: Newton 2-cycles and exhausts MAX_ITER. Like pnjlim, the
+/// limit is a ratio on the shared step fraction `alpha` (so the Newton
+/// direction is kept), unfloored, since a deep-saturation overshoot needs far
+/// less than 1 %.
+fn emit_sat_ind_step_limit(
+    code: &mut String,
+    ir: &CircuitIR,
+    v: &str,
+    v_new: &str,
+    alpha: &str,
+    indent: &str,
+) {
+    // Only a step that crosses the knee (|i| = Isat, or a sign change) and
+    // lands more than Isat past it is scaled, to land at 2·Isat on its side.
+    // Steps within one regime (both deep, or both below the knee) are nearly
+    // linear and pass unscaled. Measured against a blanket
+    // |Δi| ≤ 2·Isat + 0.5·|i|: both removed every MAX_ITER exhaustion on the
+    // square-wave witnesses, but the blanket form throttled converging steps
+    // (99 V 1 kHz square: 2.749 vs 2.666 iterations/sample) and moved
+    // converged outputs (up to 2.8e-7); this form is bit-identical to the
+    // unlimited build wherever that build converged.
+    for (idx, _si) in ir.saturating_inductors.iter().enumerate() {
+        code.push_str(&format!(
+            "{indent}{{ let i0 = {v}[SAT_IND_{idx}_AUG_ROW]; let i1 = {v_new}[SAT_IND_{idx}_AUG_ROW]; \
+             let is = SAT_IND_{idx}_ISAT; \
+             if (i0 * i1 < 0.0 || (i0.abs() > is) != (i1.abs() > is)) && i1.abs() > 2.0 * is {{ \
+             let r = (i1.signum() * 2.0 * is - i0) / (i1 - i0); \
+             if r < {alpha} {{ {alpha} = r; }} }} }}\n"
+        ));
+    }
+}
+
 /// History correction (once per sample, after the base `A_neg·v_prev` RHS build):
 /// swaps the baked-in `alpha·L0·i_prev` for `alpha·Φ(i_prev)`.
 fn emit_sat_ind_history(
@@ -7710,6 +7747,10 @@ impl RustEmitter {
             code.push_str("            }\n");
             code.push_str("        }\n\n");
 
+            // Layer 3: saturating-inductor branch-current limit (all four
+            // Newton sites carry it; see `emit_sat_ind_step_limit`).
+            emit_sat_ind_step_limit(&mut code, ir, "v", "v_new", "alpha", "        ");
+
             // Armijo backtracking line search (trap site): scales the already-
             // limited step along the ray v -> v + alpha*(v_new-v) to enforce a
             // monotone node-KCL residual decrease. On a non-descent direction the
@@ -8334,6 +8375,14 @@ impl RustEmitter {
                          \x20                       if max_node_dv > damp_thresh {{ alpha *= damp_thresh / max_node_dv; }}\n\
                          \x20                   }}\n"
                     ));
+                    emit_sat_ind_step_limit(
+                        &mut code,
+                        ir,
+                        "v_sub",
+                        "v_new_s",
+                        "alpha",
+                        "                    ",
+                    );
                     emit_armijo_line_search(
                         &mut code,
                         "                    ",
@@ -8368,13 +8417,30 @@ impl RustEmitter {
                         "                        if step.abs() > max_step { max_step = step.abs(); }\n",
                     );
                     code.push_str("                    }\n");
+                    if has_sat_ind {
+                        // The flux-row limit scales the step (no line search
+                        // here to do it).
+                        code.push_str("                    let mut alpha = 1.0_f64;\n");
+                        emit_sat_ind_step_limit(
+                            &mut code,
+                            ir,
+                            "v_sub",
+                            "v_new_s",
+                            "alpha",
+                            "                    ",
+                        );
+                    }
                     for si in &ir.saturating_inductors {
                         let k = si.aug_row;
                         code.push_str(&format!(
-                            "                    {{ let step = v_new_s[{k}] - v_sub[{k}]; let threshold = 1e-3 * v_sub[{k}].abs().max((v_sub[{k}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ sub_step_exceeded = true; }} }}\n"
+                            "                    {{ let step = alpha * (v_new_s[{k}] - v_sub[{k}]); let threshold = 1e-3 * v_sub[{k}].abs().max((v_sub[{k}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ sub_step_exceeded = true; }} }}\n"
                         ));
                     }
-                    code.push_str("                    v_sub = v_new_s;\n");
+                    if has_sat_ind {
+                        code.push_str("                    for i in 0..N { v_sub[i] += alpha * (v_new_s[i] - v_sub[i]); }\n");
+                    } else {
+                        code.push_str("                    v_sub = v_new_s;\n");
+                    }
                 }
                 // Re-evaluate devices at the updated v_sub so i_nl_sub is consistent.
                 // Uses `_final` variant: reads v_nl_final, writes i_nl (no j_dev update).
@@ -8694,7 +8760,9 @@ impl RustEmitter {
                 code.push_str(
                     "                if max_node_dv > 10.0 { alpha *= 10.0 / max_node_dv; }\n",
                 );
-                code.push_str("            }\n\n");
+                code.push_str("            }\n");
+                emit_sat_ind_step_limit(&mut code, ir, "v", "v_new", "alpha", "            ");
+                code.push('\n');
 
                 // Armijo backtracking line search (BE site), on the BE matrices.
                 // Same globalization + `limited` gating + fall-through as the trap
@@ -9440,6 +9508,9 @@ impl RustEmitter {
         ));
         if m > 0 {
             Self::emit_nodal_voltage_limiting_indented(code, ir, &it);
+        }
+        if sat.is_some() {
+            emit_sat_ind_step_limit(code, ir, "v_pin", "v_new", "alpha", &it);
         }
         code.push_str(&format!(
             "{it}let limited = alpha < 1.0;\n\

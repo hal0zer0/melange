@@ -13,6 +13,11 @@
 //! drive) against a native build of the same circuit with that value
 //! written in. The drive must reach the sub-step, or the witness says
 //! nothing; then both builds take the same path and give the same output.
+//!
+//! The route into the sub-step is the saturating core's knee edges with the
+//! main loop's flux-row step limit removed (from both builds alike): without
+//! it trapezoidal Newton 2-cycles at those edges and hands them to the
+//! sub-step, which is the path under test. The circuit itself is unchanged.
 
 mod support;
 
@@ -32,11 +37,26 @@ fn run(spice: &str, setup: &str, amp: f64, f: f64, tag: &str) -> (Vec<f64>, u64,
     let mut config = support::config_for_spice(spice, FS);
     config.output_nodes = vec![node(spice, "out")];
     config.dc_block = false;
-    let code = support::generate_circuit_code_nodal(spice, &config).0;
+    let full = support::generate_circuit_code_nodal(spice, &config).0;
     assert!(
-        code.contains("'substep:"),
+        full.contains("'substep:"),
         "{tag}: build has no adaptive sub-step"
     );
+    // Drop the first (main-loop) flux-row step limit; see the module doc.
+    let mut dropped = 0;
+    let code: String = full
+        .lines()
+        .filter(|l| {
+            let limit = l.contains("let i1 = ") && l.contains("SAT_IND_0_AUG_ROW");
+            if limit && dropped == 0 {
+                dropped += 1;
+                return false;
+            }
+            true
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(dropped, 1, "{tag}: main-loop flux limit not found");
     let main = format!(
         "fn main() {{
     let mut s = CircuitState::default();
