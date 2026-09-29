@@ -24,6 +24,14 @@ generated state is smaller.
 
 ### Fixed
 
+- **An op-amp railed at rest no longer gets an unclamped DC operating point on
+  a circuit with no nonlinear devices.** The DC solve of such a circuit is one
+  linear solve, which applied no rail at all: a comparator on ±15 V with its
+  input tipped 0.1 V off started at 93 V. Railed outputs now sit on their load
+  line at the operating point on every circuit, and the build records the
+  outcome (`dc_op_rail_pin` in the provenance), including a fallback when the
+  pinned solve fails.
+
 - **A precision rectifier or comparator op-amp keeps its full open-loop
   gain.** melange capped AOL at 1000 in the transient solve of any op-amp
   whose non-inverting input sat on a DC rail with a diode from its output to
@@ -312,21 +320,25 @@ generated state is smaller.
   `VOHDROP`) compiled and was silently ignored. `melange nodes`, which stops
   before code generation, still only warns.
 
-- **An op-amp's `VCC`/`VEE` are its supply, and its output now stops short of
-  them in every rail mode.** The output reaches `VCC − VOH_DROP` and
-  `VEE + VOL_DROP`; a card that sets the rails without the drops gets 1.5 V (a
-  vintage TL07x into 10 kΩ) and a notice saying so — put the part's own drop
-  on its card, 0 for a rail-to-rail part. Before, the hard and active-set rail
-  modes clipped at the rails themselves and ignored the drops, while
-  boyle-diodes applied them and then saturated a catch-diode drop (~0.75 V)
-  beyond; the three modes disagreed by up to 1.5 V on the same card.
-  boyle-diodes now places its catch so the gain node rests on the limit (within
-  ~0.06 V from 2× to 100× overdrive). **Every railing circuit whose op-amp card
-  sets `VCC`/`VEE` clips 1.5 V lower** unless the card sets the drops. A card
-  with `VSAT` and `VCC`/`VEE` is refused (both set the same limit), as is a
-  drop without its rail. `VSAT` alone and the ±13 V `GBW` default are
-  unchanged.
-
+- **An op-amp's `VCC`/`VEE` are its supply; its output stops short of them,
+  and a railed output sags under load, in every rail mode that pins.** The
+  zero-load limit is `VCC − VOH_DROP` / `VEE + VOL_DROP`; a card that sets the
+  rails without the drops gets 1.0 V (the zero-load intercept of the audio
+  parts' datasheet V_OM-versus-load lines) and a notice saying so. A railed
+  output sits at `limit − R_SAG·I_load`, where the new `R_SAG` key (default
+  200 Ω, from the same datasheet lines) is the saturated sag; the active-set
+  modes and the DC operating point pin there, continuously at engagement and
+  release. `ROUT`, the open-loop output resistance, now defaults to 75 Ω (the
+  741's documented value) instead of 1 Ω. Before, hard and active-set clipped
+  at the rails themselves and ignored the drops, and boyle-diodes applied
+  them, then saturated a catch-diode drop (~0.75 V) beyond through a private
+  75 Ω. boyle-diodes now catches at the limit (within ~0.06 V from 2× to 100×
+  overdrive) and uses the card's `ROUT`; hard still clips at the zero-load
+  limit, without sag. **Every railing circuit whose op-amp card sets
+  `VCC`/`VEE` clips at a different level** (1.0 V inside the rail at no load,
+  lower under load) unless its card sets the drops and `R_SAG`. A card with
+  `VSAT` and `VCC`/`VEE` is refused (both set the same limit), as is a drop
+  without its rail. `VSAT` alone and the ±13 V `GBW` default are unchanged.
 - **The thermal voltage is kT/q at 27 °C (300.15 K), SPICE's nominal
   temperature, instead of 300 K.** Every diode, BJT, JFET and MOSFET that does
   not set its own `VT` sees a 0.05 % larger Vt; the self-heating ambient

@@ -823,6 +823,8 @@ pub struct CodegenMeta {
     pub dc_op_iterations: usize,
     /// Whether DC operating point converged.
     pub dc_op_converged: bool,
+    /// Railed op-amp outputs at the DC operating point (`dc_op::RailPin::label`).
+    pub dc_op_rail_pin: String,
     /// Whether a sparse LU elimination schedule was baked (nodal path;
     /// requires G_aug density < 40% and N >= 8). `false` on the DK path.
     pub sparse_lu_enabled: bool,
@@ -881,6 +883,7 @@ fn build_codegen_meta(
         dc_op_method: ir.dc_op_method.clone(),
         dc_op_iterations: ir.dc_op_iterations,
         dc_op_converged: ir.dc_op_converged,
+        dc_op_rail_pin: ir.dc_op_rail_pin.clone(),
         sparse_lu_enabled: ir.sparsity.lu.is_some(),
         sparse_lu_density: ir.sparsity.g_aug_density,
         parasitic_caps_inserted,

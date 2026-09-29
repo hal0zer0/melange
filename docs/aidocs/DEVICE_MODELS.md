@@ -1085,11 +1085,10 @@ Gate current derivatives are always zero.
 > clamping** — the rail-mode landscape has multi-session investigation history
 > and several already-tested-and-rejected fix candidates.
 
-### Output Swing Limits
+### Output Swing Limits and Saturated Sag
 
-`VCC`/`VEE` are the supply rails. The output reaches `VCC − VOH_DROP` and
-`VEE + VOL_DROP`; that swing limit is the one level every rail mode clamps,
-pins or catches at (`mna::resolve_opamp_swing`, shared with the validate
+`VCC`/`VEE` are the supply rails. The zero-load swing limit is `VCC − VOH_DROP`
+and `VEE + VOL_DROP` (`mna::resolve_opamp_swing`, shared with the validate
 harness's ngspice twin). Each side resolves on its own:
 
 | Card | Upper / lower limit |
@@ -1099,17 +1098,51 @@ harness's ngspice twin). Each side resolves on its own:
 | `GBW` only | ±13 V |
 | none | unlimited |
 
-A missing drop defaults to **1.5 V** with a compile notice (`set VOH_DROP (0
-for rail-to-rail parts)`). Source: a vintage TL07x swings ±13.5 V into 10 kΩ
-on ±15 V (TI SLOS080 rev D, V_OM). Other parts differ — 4558 and 741 about
-1.0 V (TI SLOS073 rev H, uA741 rev B), NE5532 1.5 V at 2 kΩ, a current TL072
-die 0.2 V (SLOS080 rev W) — so a part's own drop belongs on its card. The
-drop grows into low loads (another 0.3–1.5 V at 2 kΩ), which a fixed drop does
-not follow: it understates clipping on 2 kΩ/600 Ω line drivers.
+A railed output sags under load: it sits on the load line
+`limit − R_SAG·I_load`. `R_SAG` is the saturated sag, a different mechanism
+from the open-loop output resistance `ROUT` (output-stage series resistance
+plus drive starvation at clip; 2–4× larger on the audio parts), so the two are
+separate keys:
+
+| Key | Default | Source (datasheet V_OM-versus-load at ±15 V, or r_o) |
+|---|---|---|
+| `VOH_DROP`, `VOL_DROP` | 1.0 V, with a compile notice | zero-load intercept: vintage TL072 1.06 V (TI SLOS080 rev D), 741 0.73 V (SLOS094 rev B), 4558 0.82 V (SLOS073 rev H), NE5532 1.27 V (Philips 1997); a current TL072 die ~0.2 V |
+| `R_SAG` | 200 Ω | slope 10 kΩ→2 kΩ: vintage TL072 323 Ω, 741 196 Ω, 4558 55 Ω (rev H) / 196 Ω (rev G), NE5532 34 Ω (2 kΩ→600 Ω) |
+| `ROUT` | 75 Ω | open-loop r_o: 741 75 Ω (SLOS094 note 5), new TL07x die 125 Ω at 1 MHz (SLOS080 rev W), NE5532 ~10 Ω |
+
+A part's own values belong on its card. The sag line is a linear fit, valid for
+loads down to about 600 Ω, not near the output's current limit.
+
+**How each rail mode saturates** (measured 2026-09-29, VCC ±15, defaults,
+open-loop comparator, 2× and 100× overdrive):
+
+| Mode | Saturated output | 10 kΩ | 1 kΩ |
+|---|---|---|---|
+| active-set, active-set-be | `limit − R_SAG·I_load` (load-line pin) | 13.7255 V | 11.6667 V (both = hand calculation) |
+| hard | `limit` at the terminal, no sag | 14.0000 V | 14.0000 V |
+| boyle-diodes | catch at the limit (±~0.06 V Vf residual), then `ROUT·I_load` | 13.84–13.96 V | 12.97–13.08 V |
+
+Active-set pins when the unpinned solution passes the load line: with
+`I_load = Gm·(v+ − v−) − v_out/ROUT` (the linear model's output current),
+`w = v_out + R_SAG·I_load` passing the limit is the test. The pinned row keeps
+the node's KCL; the VCCS leaves it and the limit enters behind `R_SAG`.
+Engagement and release are continuous: on a slow sine clipped at 10 kΩ and
+1 kΩ the output step at every pin edge is below the neighbouring unclipped
+steps (worst ratio 0.71). The DC operating point saturates a railed output the way the transient's rail
+mode does (`dc_op::pin_railed_opamps`, an active set iterated to a fixed point;
+`DcOpConfig::rail` from `codegen::ir::dc_rail_for`): on the load line for the
+active-set modes, at the zero-load limit for hard, not at all for none and
+Boyle (whose catch diodes are devices the DC solve carries). A railed-at-rest
+output starts where the transient keeps it and the first sample does not move. Its outcome is recorded: `dc_op_rail_pin` in the provenance and the build
+summary, `rail_pin` in `melange dc-op --format json` ("pinned N", or
+"FELL BACK …" with the reason when the pinned re-solve fails or the pin set
+does not settle within `DcOpConfig::max_rail_pin_rounds`). Hard is the crude mode: it clips at
+the zero-load limit whatever the load, ~`R_SAG·I_load` high (+0.27 V at 10 kΩ,
++2.3 V at 1 kΩ). Boyle is explicit-only; its sag is `ROUT·I_load`.
 
 Refused: `VSAT` together with `VCC` or `VEE` (both claim the limit; use the
-drops with the rails), a drop without its rail, a negative drop, and an empty
-swing.
+drops with the rails), a drop without its rail, a negative drop, an empty
+swing, and a non-positive `ROUT` or `R_SAG`.
 
 The op-amp is modeled as a linear voltage-controlled current source (VCCS).
 It does NOT add nonlinear dimensions (M stays unchanged). All behavior is

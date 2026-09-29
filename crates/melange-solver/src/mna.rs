@@ -684,8 +684,15 @@ pub struct OpampInfo {
     pub n_out_idx: usize,
     /// Open-loop gain (default 200,000)
     pub aol: f64,
-    /// Output resistance in ohms (default 1)
+    /// Open-loop small-signal output resistance [Ω] (`ROUT`, default
+    /// [`OPAMP_DEFAULT_ROUT_OHM`]). The linear model's output impedance; in
+    /// closed loop it is divided by the loop gain.
     pub r_out: f64,
+    /// Saturated output sag [Ω] (`R_SAG`, default [`OPAMP_DEFAULT_R_SAG_OHM`]):
+    /// a railed output sits at `limit − R_SAG·I_load`. A different mechanism
+    /// from `r_out` (output-stage series resistance plus drive starvation at
+    /// clip), 2–4× larger on the audio parts.
+    pub r_sag: f64,
     /// Highest output voltage the op-amp can drive [V] — its upper swing
     /// limit, the level every rail mode clamps or pins at (default +inf =
     /// none). Resolved from the card by [`resolve_opamp_swing`]:
@@ -790,12 +797,25 @@ pub struct OpampInfo {
     pub in_amps: f64,
 }
 
-/// Drop from a supply rail to the op-amp's output swing limit when the card
-/// sets `VCC`/`VEE` without `VOH_DROP`/`VOL_DROP` [V]. A vintage TL07x swings
-/// ±13.5 V into 10 kΩ on ±15 V (TI SLOS080 rev D, V_OM); a 4558 or 741 gets
-/// about 1 V closer, a modern TL072 die 0.2 V. The drop grows into lower
-/// loads (another 0.3–1.5 V at 2 kΩ), which a fixed drop does not follow.
-pub const OPAMP_DEFAULT_RAIL_DROP_V: f64 = 1.5;
+/// Drop from a supply rail to the op-amp's zero-load swing limit when the card
+/// sets `VCC`/`VEE` without `VOH_DROP`/`VOL_DROP` [V]. The load sag is
+/// `R_SAG·I_load` on top, so this is the zero-load intercept of the
+/// datasheet V_OM-versus-load line at ±15 V: vintage TL072 1.06 V (TI SLOS080
+/// rev D), 741 0.73 V (SLOS094 rev B), 4558 0.82 V (SLOS073 rev H), NE5532
+/// 1.27 V (Philips 1997). A modern TL072 die is about 0.2 V.
+pub const OPAMP_DEFAULT_RAIL_DROP_V: f64 = 1.0;
+
+/// Open-loop output resistance when the card sets no `ROUT` [Ω]: the 741's
+/// documented r_o (TI SLOS094 rev B, note 5). A new TL07x die is 125 Ω at
+/// 1 MHz (SLOS080 rev W), an NE5532 about 10 Ω.
+pub const OPAMP_DEFAULT_ROUT_OHM: f64 = 75.0;
+
+/// Saturated output sag when the card sets no `R_SAG` [Ω]: the slope of the
+/// datasheet V_OM-versus-load line at ±15 V, 10 kΩ to 2 kΩ. Vintage TL072
+/// 323 Ω (SLOS080 rev D), 741 196 Ω (SLOS094 rev B), 4558 55 Ω (rev H) or
+/// 196 Ω (rev G), NE5532 34 Ω (2 kΩ to 600 Ω, Philips 1997). A linear fit;
+/// not valid near the output's current limit.
+pub const OPAMP_DEFAULT_R_SAG_OHM: f64 = 200.0;
 
 /// Swing limit an op-amp card with `GBW` but no `VCC`/`VEE`/`VSAT` gets [V].
 pub const OPAMP_GBW_DEFAULT_SWING_V: f64 = 13.0;
@@ -868,8 +888,9 @@ pub fn resolve_opamp_swing(
             let limit = r - sign * d;
             if drop.is_none() {
                 notices.push(format!(
-                    "Op-amp {name}: swing limit assumed {rail_key} {} {OPAMP_DEFAULT_RAIL_DROP_V} V \
-                     = {limit} V; set {drop_key} (0 for rail-to-rail parts).",
+                    "Op-amp {name}: zero-load swing limit assumed {rail_key} {} \
+                     {OPAMP_DEFAULT_RAIL_DROP_V} V = {limit} V (a railed output sags R_SAG·I_load \
+                     below it); set {drop_key} (0 for rail-to-rail parts).",
                     if sign > 0.0 { "−" } else { "+" }
                 ));
             }
@@ -3229,6 +3250,7 @@ impl MnaBuilder {
                         match key.to_ascii_uppercase().as_str() {
                             "AOL" => oa.aol = *val,
                             "ROUT" => oa.r_out = *val,
+                            "R_SAG" => oa.r_sag = *val,
                             "VSAT" => swing.vsat = Some(*val),
                             "VCC" => swing.vcc = Some(*val),
                             "VEE" => swing.vee = Some(*val),
@@ -3258,6 +3280,14 @@ impl MnaBuilder {
                                 crate::model_params::ModelClass::Opamp,
                                 key,
                             ),
+                        }
+                    }
+                    for (key, value) in [("ROUT", oa.r_out), ("R_SAG", oa.r_sag)] {
+                        if !(value.is_finite() && value > 0.0) {
+                            return Err(MnaError::InvalidParameter(format!(
+                                "Op-amp {}: {key} must be positive and finite, got {value}",
+                                oa.name
+                            )));
                         }
                     }
                     let resolved = resolve_opamp_swing(&oa.name, &swing, oa.gbw.is_finite())
@@ -5900,7 +5930,8 @@ impl MnaBuilder {
                     n_minus_idx: nm_idx,
                     n_out_idx: no_idx,
                     aol: 200_000.0,
-                    r_out: 1.0,
+                    r_out: OPAMP_DEFAULT_ROUT_OHM,
+                    r_sag: OPAMP_DEFAULT_R_SAG_OHM,
                     vcc: f64::INFINITY,
                     vee: f64::NEG_INFINITY,
                     gbw: f64::INFINITY,

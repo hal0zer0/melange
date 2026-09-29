@@ -1201,5 +1201,11 @@
     "tamb_device_temperature": "179 identical, 9 negligible (gold-press-overdrive/-mastering: diode cards with TAMB=300, <= +0.0036 dB).",
     "opamp_swing_limit": "182 identical, 6 changed: opamp-pin-audio/-control step/sine1k/sweep pin at 7.5/1.5 V instead of 9/0 V (VCC=9 VEE=0 cards, default 1.5 V drops); pin count 5872 -> 7158 on step; -0.3..-0.55 dB. Source-only: pipe-shouter, noyce-4558, radio-am, radio-fm.",
     "health": "0 held, 0 not-converged on every capture."
+  },
+  "rebaseline_2026_09_29_opamp_saturated_sag": {
+    "why": "Op-amp output model: ROUT default 75 ohm (741 SLOS094), R_SAG saturated sag default 200 ohm (datasheet V_OM-vs-load fits), zero-load drop default 1.0 V; active-set pin and DC OP on the load line limit - R_SAG*I_load.",
+    "vs_previous": "vs golden-baselines/a2: 180 identical, 4 negligible, 4 changed; 0 held, 0 not-converged.",
+    "changed": "opamp-pin-audio/-control step and sweep: VCC=9/VEE=0 cards pin at 8.0/1.0 V less R_SAG*I_load; pin count 7158 -> 6665 on step; +0.14..+0.32 dB.",
+    "source_only": "gold-press-mastering, gravity, moonladder, noyce-4558, pipe-shouter, sad-bastard, sus-bus, vurli (load-line detection code); radio-am, radio-fm (hard: 1.0 V drop)."
   }
 }

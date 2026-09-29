@@ -233,11 +233,15 @@ const CASES: &[Case] = &[
     },
     Case {
         class: ModelClass::Opamp,
-        deck: "opamp\nR1 in inv 10k\nR2 inv out 100k\nU1 0 inv out OX\nRl out 0 10k\n{CARD}\n",
+        // Capacitor-coupled downstream, so the auto rail mode is active-set:
+        // R_SAG acts through the active-set pin.
+        deck: "opamp\nR1 in inv 10k\nR2 inv out 100k\nU1 0 inv out OX\nRl out 0 10k\n\
+               Cc out o2 1u\nR3 o2 0 10k\n{CARD}\n",
         card: "OX OA",
         keys: &[
             ("AOL", "100000", "200000", Rich),
             ("ROUT", "100", "50", Rich),
+            ("R_SAG", "200", "100", Rich),
             ("VCC", "15", "12", Rich),
             ("VEE", "-15", "-12", Rich),
             ("SR", "1", "0.5", Rich),

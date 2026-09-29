@@ -72,13 +72,16 @@ const OPAMP_MODEL_TYPE: &str = "OA";
 // `Element::Opamp` arm). A `U` element whose `.model` card is absent or omits a
 // key gets these on melange's side, so the twin must use them too.
 const DEFAULT_AOL: f64 = 200_000.0;
-const DEFAULT_ROUT: f64 = 1.0;
+const DEFAULT_ROUT: f64 = melange_solver::mna::OPAMP_DEFAULT_ROUT_OHM;
 
 /// Op-amp parameters resolved exactly as `mna.rs` resolves them.
 #[derive(Debug, Clone)]
 pub(crate) struct OpampParams {
     aol: f64,
     r_out: f64,
+    /// Saturated output sag (`R_SAG`): melange's pin puts a railed output at
+    /// `limit - R_SAG*I_load`, so the rail probe measures the load line.
+    r_sag: f64,
     rin: f64,
     ib: f64,
     /// Upper output swing limit, resolved by melange's own
@@ -98,6 +101,7 @@ impl Default for OpampParams {
         Self {
             aol: DEFAULT_AOL,
             r_out: DEFAULT_ROUT,
+            r_sag: melange_solver::mna::OPAMP_DEFAULT_R_SAG_OHM,
             rin: f64::INFINITY,
             ib: 0.0,
             vcc: f64::INFINITY,
@@ -126,6 +130,7 @@ impl OpampParams {
             match key.to_ascii_uppercase().as_str() {
                 "AOL" => p.aol = *val,
                 "ROUT" => p.r_out = *val,
+                "R_SAG" => p.r_sag = *val,
                 "RIN" => p.rin = *val,
                 "IB" => p.ib = *val,
                 "VCC" => swing.vcc = Some(*val),
@@ -220,12 +225,20 @@ fn num(v: f64) -> String {
 /// anyway would put a resistor and a current source across ground.
 fn emit_instance(name: &str, n_plus: &str, n_minus: &str, n_out: &str, p: &OpampParams) -> String {
     let gm = p.aol / p.r_out;
+    // EOATH is a measurement only: a dangling node at AOL*(v+ - v-), so the
+    // rail probe reads the output current as (v_th - v_out)/ROUT. That holds
+    // to the solver's precision because the G card uses the same (v+ - v-);
+    // rebuilding Gm*(v+ - v-) from the printed traces would multiply their
+    // rounding by Gm.
+    let th = thevenin_node(name);
     let mut s = format!(
         "* melange op-amp {name}: linear VCCS twin of mna.rs (Gm = AOL/ROUT, Go = 1/ROUT)\n\
          GOA_{name} {n_out} 0 {n_minus} {n_plus} {gm}\n\
-         ROA_{name} {n_out} 0 {rout}\n",
+         ROA_{name} {n_out} 0 {rout}\n\
+         EOATH_{name} {th} 0 {n_plus} {n_minus} {aol}\n",
         gm = num(gm),
         rout = num(p.r_out),
+        aol = num(p.aol),
     );
     if p.rin.is_finite() && p.rin > 0.0 {
         if !is_ground(n_plus) {
@@ -247,6 +260,11 @@ fn emit_instance(name: &str, n_plus: &str, n_minus: &str, n_out: &str, p: &Opamp
         }
     }
     s
+}
+
+/// The measurement node `AOL*(v+ - v-)` the twin adds for op-amp `name`.
+fn thevenin_node(name: &str) -> String {
+    format!("oa_th_{}", name.to_ascii_lowercase())
 }
 
 /// Ground, as melange's parser resolves it: `0`, and the `gnd`/`ground`
@@ -338,6 +356,13 @@ pub(crate) struct RailProbe {
     pub name: String,
     /// Output node name, as written in the deck.
     pub node: String,
+    /// The twin's measurement node `AOL*(v+ - v-)` (the Thevenin voltage behind
+    /// ROUT), for the load-line test; `None` in unit tests that probe the
+    /// terminal only.
+    pub th_node: Option<String>,
+    /// The twin's `ROUT` and melange's saturated sag `R_SAG`.
+    pub r_out: f64,
+    pub r_sag: f64,
     pub vcc: f64,
     pub vee: f64,
     /// Slew rate in V/s (`INFINITY` = no slew clamp).
@@ -372,6 +397,9 @@ pub(crate) fn rail_probes(content: &str) -> Vec<RailProbe> {
                 probes.push(RailProbe {
                     name: name.clone(),
                     node: n_out.clone(),
+                    th_node: Some(thevenin_node(name)),
+                    r_out: p.r_out,
+                    r_sag: p.r_sag,
                     vcc: p.vcc,
                     vee: p.vee,
                     sr: p.sr,
@@ -385,11 +413,8 @@ pub(crate) fn rail_probes(content: &str) -> Vec<RailProbe> {
 /// Op-amps whose transient Gm melange changes out from under the DC stamp via
 /// an explicit `AOL_TRANSIENT_CAP`, which one ngspice `G` card cannot express.
 ///
-/// Returns `(element name, model name, cap)` per affected instance. The
-/// auto-detected Rule D' cap (`opamp_is_sidechain_rectifier`) is deliberately
-/// not reproduced here: it fires only on precision-rectifier topologies, which
-/// are *designed* to sit on a rail and are therefore already refused by
-/// [`check_rail_probes`].
+/// Returns `(element name, model name, cap)` per affected instance. melange
+/// applies no transient cap of its own.
 pub(crate) fn transient_aol_cap_opamps(content: &str) -> Vec<(String, String, f64)> {
     let Ok(netlist) = Netlist::parse(content) else {
         return Vec::new();
@@ -452,24 +477,34 @@ pub(crate) fn check_rail_probes(
             )));
         };
 
-        if probe.vcc.is_finite() {
-            if let Some((idx, v)) = trace
-                .iter()
-                .enumerate()
-                .find(|(_, v)| **v >= probe.vcc - RAIL_MARGIN_V)
-                .map(|(i, v)| (i, *v))
-            {
-                return Err(rail_refusal(probe, "VCC", probe.vcc, v, idx, dt));
-            }
-        }
-        if probe.vee.is_finite() {
-            if let Some((idx, v)) = trace
-                .iter()
-                .enumerate()
-                .find(|(_, v)| **v <= probe.vee + RAIL_MARGIN_V)
-                .map(|(i, v)| (i, *v))
-            {
-                return Err(rail_refusal(probe, "VEE", probe.vee, v, idx, dt));
+        // melange pins a railed output on its load line, so it engages when
+        // `w = v_out + R_SAG*I_load` reaches the limit, with the twin's output
+        // current `I_load = (v_th - v_out)/ROUT`. A missing Thevenin trace is
+        // a guard that cannot run.
+        let th = match &probe.th_node {
+            None => None,
+            Some(node) => Some(voltages.get(node).ok_or_else(|| {
+                SpiceError::DeckNotComparable(format!(
+                    "op-amp {} declares a supply rail, so validate has to watch its internal \
+                     node '{}' to know whether melange's rail pin engaged — but ngspice printed \
+                     no trace for that node. Refusing rather than reporting a correlation the \
+                     rail guard never checked.",
+                    probe.name, node
+                ))
+            })?),
+        };
+        if probe.vcc.is_finite() || probe.vee.is_finite() {
+            for (idx, &v_out) in trace.iter().enumerate() {
+                let i_load = th
+                    .and_then(|t| t.get(idx))
+                    .map_or(0.0, |&v_th| (v_th - v_out) / probe.r_out);
+                let w = v_out + probe.r_sag * i_load;
+                if probe.vcc.is_finite() && w >= probe.vcc - RAIL_MARGIN_V {
+                    return Err(rail_refusal(probe, "VCC", probe.vcc, v_out, idx, dt));
+                }
+                if probe.vee.is_finite() && w <= probe.vee + RAIL_MARGIN_V {
+                    return Err(rail_refusal(probe, "VEE", probe.vee, v_out, idx, dt));
+                }
             }
         }
         if probe.sr.is_finite() && dt > 0.0 {
@@ -513,7 +548,8 @@ fn rail_refusal(
 ) -> SpiceError {
     SpiceError::DeckNotComparable(format!(
         "op-amp {} reached its {} rail during the reference run: at t = {:.6} s the output node \
-         '{}' is at {:.4} V against {} = {:.4} V.\n\n\
+         '{}' is at {:.4} V, on or past its saturated ceiling ({} = {:.4} V less R_SAG times the \
+         output current).\n\n\
          melange clamps that node to the rail (one of the five modes in \
          docs/aidocs/OPAMP_RAIL_MODES.md, chosen from the topology); the ngspice reference is the \
          linear VCCS macromodel and keeps going. From this sample on the two engines are running \
@@ -646,10 +682,10 @@ Cstab out 0 1p
         assert_eq!(p.len(), 1);
         assert_eq!(p[0].vcc, 13.0);
         assert_eq!(p[0].vee, -13.0);
-        // VCC/VEE are the supply: the swing stops the drop short of each rail
-        // (1.5 V by default).
+        // VCC/VEE are the supply: the zero-load swing stops the drop short of
+        // each rail (1.0 V by default).
         let p = mk(".model OA1 OA(AOL=1e5 ROUT=75 VCC=9 VEE=-9)");
-        assert_eq!((p[0].vcc, p[0].vee), (7.5, -7.5));
+        assert_eq!((p[0].vcc, p[0].vee), (8.0, -8.0));
         let p = mk(".model OA1 OA(AOL=1e5 ROUT=75 VCC=9 VEE=-9 VOH_DROP=0 VOL_DROP=0.5)");
         assert_eq!((p[0].vcc, p[0].vee), (9.0, -8.5));
         // VSAT with VCC/VEE is refused by melange, so there is no twin.
@@ -657,9 +693,9 @@ Cstab out 0 1p
         // GBW alone triggers the +/-13 V auto-default.
         let p = mk(".model OA1 OA(AOL=1e5 ROUT=75 GBW=3e6)");
         assert_eq!((p[0].vcc, p[0].vee), (13.0, -13.0));
-        // GBW's default applies PER SIDE: a single-supply card gets 7.5 / -13.
+        // GBW's default applies PER SIDE: a single-supply card gets 8 / -13.
         let p = mk(".model OA1 OA(AOL=1e5 ROUT=75 VCC=9 GBW=3e6)");
-        assert_eq!((p[0].vcc, p[0].vee), (7.5, -13.0));
+        assert_eq!((p[0].vcc, p[0].vee), (8.0, -13.0));
         // SR alone is a clamp too, even with infinite rails.
         let p = mk(".model OA1 OA(AOL=1e5 ROUT=75 SR=13)");
         assert_eq!(p.len(), 1);
@@ -671,6 +707,10 @@ Cstab out 0 1p
         RailProbe {
             name: "U1".into(),
             node: "out".into(),
+            // No Thevenin trace: the load-line test reads v(out).
+            th_node: None,
+            r_out: 1.0,
+            r_sag: 0.0,
             vcc,
             vee,
             sr,

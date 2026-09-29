@@ -48,6 +48,28 @@ pub struct DcOpConfig {
     /// G matrix, matching the per-sample input stamping. See
     /// `local-docs/multi-input-ports-plan.md`.
     pub extra_inputs: Vec<(usize, f64)>,
+    /// Active-set rounds allowed when placing railed op-amp outputs on their
+    /// load line ([`pin_railed_opamps`]). Each round is a Newton re-solve; the
+    /// pin set usually settles in one or two. Exceeding it falls back to the
+    /// terminal clamp, recorded in [`DcOpResult::rail_pin`].
+    pub max_rail_pin_rounds: usize,
+    /// How a railed op-amp output sits at the operating point: the same
+    /// saturation the transient's rail mode applies (set by the codegen
+    /// builder from its resolved rail mode).
+    pub rail: DcRail,
+}
+
+/// The saturation a railed op-amp output gets at the DC operating point,
+/// matching the transient rail mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DcRail {
+    /// On the load line `limit - R_SAG*I_load` (active-set modes).
+    #[default]
+    LoadLine,
+    /// At the zero-load limit at the terminal (hard mode).
+    Terminal,
+    /// No pin (rail mode `none`, or Boyle catch diodes, which are devices).
+    Free,
 }
 
 impl Default for DcOpConfig {
@@ -63,6 +85,8 @@ impl Default for DcOpConfig {
             input_node: 0,
             input_resistance: 1.0,
             extra_inputs: Vec::new(),
+            max_rail_pin_rounds: 8,
+            rail: DcRail::LoadLine,
         }
     }
 }
@@ -94,6 +118,37 @@ pub struct DcOpResult {
     /// `row < mna.n`; a BJT internal node otherwise). `None` when the DC
     /// system has no voltage rows.
     pub kcl_worst_row: Option<usize>,
+    /// Whether railed op-amp outputs sit on their load line
+    /// (`limit - R_SAG*I_load`), as the transient pins them.
+    pub rail_pin: RailPin,
+}
+
+/// Outcome of placing railed op-amp outputs on their load line
+/// ([`pin_railed_opamps`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum RailPin {
+    /// No op-amp is railed at the operating point (or it did not converge).
+    None,
+    /// This many op-amp outputs are pinned on their load line.
+    Pinned(usize),
+    /// The pin failed: the returned point does not have railed outputs on
+    /// their load line (they are clamped at the terminal limit, or, on a
+    /// circuit with no nonlinear devices, not clamped at all), so the
+    /// transient's first samples move them. Surfaced in provenance.
+    FellBack(String),
+}
+
+impl RailPin {
+    /// One token for the provenance JSON and the build summary.
+    pub fn label(&self) -> String {
+        match self {
+            RailPin::None => "none".to_string(),
+            RailPin::Pinned(k) => format!("pinned {k}"),
+            RailPin::FellBack(why) => {
+                format!("FELL BACK (railed outputs not on their load line): {why}")
+            }
+        }
+    }
 }
 
 /// Which convergence method was used.
@@ -1861,6 +1916,10 @@ struct DcCircuit<'a> {
     /// internal nodes) are damped and flat-clamped; branch-current rows
     /// (VS/VCVS/inductor augmented variables) are updated directly.
     is_voltage_row: &'a [bool],
+    /// Op-amp output rows (0-indexed) whose row in `g_dc`/`b_dc` already
+    /// carries the saturated-output pin (see [`pin_railed_opamps`]): the
+    /// terminal rail projection leaves them alone.
+    pinned_outputs: &'a [usize],
 }
 
 /// MOSFET body-effect transconductance at the node iterate `v`.
@@ -2357,7 +2416,7 @@ fn nr_dc_solve(
         let mut clamped_rows: Vec<usize> = Vec::new();
         for oa in &mna.opamps {
             let out = oa.n_out_idx; // 1-indexed
-            if out > 0 {
+            if out > 0 && !circuit.pinned_outputs.contains(&(out - 1)) {
                 let o = out - 1; // 0-indexed
                 if o < mna.n {
                     // Determine effective rail limits for this op-amp.
@@ -3042,6 +3101,7 @@ pub fn solve_dc_operating_point(
             has_internal_nodes: !dc_sys.bjt_internal.is_empty()
                 || !mna.bjt_internal_nodes.is_empty(),
             is_voltage_row: &dc_sys.is_voltage_row,
+            pinned_outputs: &[],
         };
         let keep = result.v_node.len();
         let mut v = result.v_node.clone();
@@ -3065,16 +3125,30 @@ pub fn solve_dc_operating_point(
         }
     }
 
+    // A railed op-amp's output sits on its load line, `limit - R_SAG*I_load`,
+    // as in the transient's pin: without this the transient's first sample
+    // would move a railed-at-rest output by R_SAG*I_load.
+    let pinned = if result.converged {
+        pin_railed_opamps(&mut result, &dc_sys, g_true, mna, device_slots, config)
+    } else {
+        None
+    };
+    let (g_report, b_report): (&[Vec<f64>], &[f64]) = match &pinned {
+        Some((g, b)) => (g, b),
+        None => (g_true, &dc_sys.b_dc),
+    };
+
     // Report the KCL residual of whatever is being returned — every method,
     // every fallback, NO exemptions (the rail-clamp exemption applies only to
-    // the acceptance gate inside `nr_dc_solve`; a pinned op-amp row still
-    // reports here). `i_nl` is re-evaluated at the returned `v` so the number
-    // is a property of the returned state, not of the last NR iterate.
+    // the acceptance gate inside `nr_dc_solve`; a terminal-clamped op-amp row
+    // still reports here, a load-line-pinned one against its pinned
+    // equation). `i_nl` is re-evaluated at the returned `v` so the number is
+    // a property of the returned state, not of the last NR iterate.
     let n_dc = dc_sys.n_dc;
     let m = mna.m;
     let circuit = DcCircuit {
-        g_dc: g_true,
-        b_dc: &dc_sys.b_dc,
+        g_dc: g_report,
+        b_dc: b_report,
         mna,
         device_slots,
         config,
@@ -3083,6 +3157,7 @@ pub fn solve_dc_operating_point(
         n_dc,
         has_internal_nodes: !dc_sys.bjt_internal.is_empty() || !mna.bjt_internal_nodes.is_empty(),
         is_voltage_row: &dc_sys.is_voltage_row,
+            pinned_outputs: &[],
     };
     let mut v = result.v_node.clone();
     v.resize(n_dc, 0.0);
@@ -3137,6 +3212,150 @@ pub fn solve_dc_operating_point(
     result
 }
 
+/// The op-amp's load-line quantity at `v` (0-indexed node vector) under the
+/// linear full-AOL model: `w = v_out + R_SAG*I_load`, with
+/// `I_load = Gm*(v+ - v-) - v_out/ROUT`. The output is past its saturated
+/// ceiling `limit - R_SAG*I_load` exactly when `w` passes the limit. Mirrors
+/// the transient's `opamp_load_line_expr`.
+fn opamp_load_line(oa: &crate::mna::OpampInfo, v: &[f64]) -> f64 {
+    let at = |n: usize| if n > 0 { v[n - 1] } else { 0.0 };
+    let gm = oa.aol / oa.r_out;
+    let i_load = gm * (at(oa.n_plus_idx) - at(oa.n_minus_idx)) - at(oa.n_out_idx) / oa.r_out;
+    at(oa.n_out_idx) + oa.r_sag * i_load
+}
+
+/// Re-solve a converged full-AOL operating point with every railed op-amp's
+/// output on its load line, the transient's saturated-output pin: the row
+/// keeps the node's KCL, the VCCS leaves it (Gm entries removed, `1/ROUT`
+/// replaced by `1/R_SAG`) and the limit enters as `limit/R_SAG`. The pin set
+/// is the active set of the load-line test, iterated to a fixed point.
+///
+/// Returns the pinned `(G, b)` the result satisfies, for the residual
+/// report, or `None` when no op-amp is railed (or the re-solve fails, which
+/// keeps the terminal-clamped point with a warning).
+fn pin_railed_opamps(
+    result: &mut DcOpResult,
+    dc_sys: &DcSystemInfo,
+    g_full: &[Vec<f64>],
+    mna: &MnaSystem,
+    device_slots: &[DeviceSlot],
+    config: &DcOpConfig,
+) -> Option<(Vec<Vec<f64>>, Vec<f64>)> {
+    let n_dc = dc_sys.n_dc;
+    // Boyle-augmented op-amps (`n_int_idx != 0`) carry real catch diodes and
+    // are not pinned.
+    if config.rail == DcRail::Free {
+        return None;
+    }
+    let terminal = config.rail == DcRail::Terminal;
+    let pin_of = |oa: &crate::mna::OpampInfo, v: &[f64]| -> Option<f64> {
+        if oa.n_out_idx == 0 || oa.n_out_idx > mna.n_aug || oa.n_int_idx != 0 {
+            return None;
+        }
+        // Hard clips the terminal: the test is the linear model's output
+        // itself (`w` with no sag). A pinned terminal row carries no Gm, so
+        // its release test is the internal voltage `AOL*(v+ - v-)`.
+        let w = if terminal {
+            let at = |n: usize| if n > 0 { v[n - 1] } else { 0.0 };
+            oa.aol * (at(oa.n_plus_idx) - at(oa.n_minus_idx))
+        } else {
+            opamp_load_line(oa, v)
+        };
+        if oa.vcc.is_finite() && w >= oa.vcc {
+            Some(oa.vcc)
+        } else if oa.vee.is_finite() && w <= oa.vee {
+            Some(oa.vee)
+        } else {
+            None
+        }
+    };
+    let mut v = result.v_node.clone();
+    v.resize(n_dc, 0.0);
+    let mut pins: Vec<Option<f64>> = mna.opamps.iter().map(|oa| pin_of(oa, &v)).collect();
+    if pins.iter().all(Option::is_none) {
+        return None;
+    }
+    let rounds = config.max_rail_pin_rounds;
+    for _ in 0..rounds {
+        let mut g = g_full.to_vec();
+        let mut b = dc_sys.b_dc.clone();
+        let mut rows = Vec::new();
+        for (oa, pin) in mna.opamps.iter().zip(&pins) {
+            let Some(c) = pin else { continue };
+            let o = oa.n_out_idx - 1;
+            if terminal {
+                // Hard: the output node IS the limit.
+                for x in g[o].iter_mut() {
+                    *x = 0.0;
+                }
+                g[o][o] = 1.0;
+                b[o] = *c;
+            } else {
+                let gm = oa.aol / oa.r_out;
+                if oa.n_plus_idx > 0 {
+                    g[o][oa.n_plus_idx - 1] += gm;
+                }
+                if oa.n_minus_idx > 0 {
+                    g[o][oa.n_minus_idx - 1] -= gm;
+                }
+                g[o][o] += 1.0 / oa.r_sag - 1.0 / oa.r_out;
+                b[o] += c / oa.r_sag;
+            }
+            rows.push(o);
+        }
+        let circuit = DcCircuit {
+            g_dc: &g,
+            b_dc: &b,
+            mna,
+            device_slots,
+            config,
+            dc_n_v: &dc_sys.dc_n_v,
+            dc_n_i: &dc_sys.dc_n_i,
+            n_dc,
+            has_internal_nodes: !dc_sys.bjt_internal.is_empty()
+                || !mna.bjt_internal_nodes.is_empty(),
+            is_voltage_row: &dc_sys.is_voltage_row,
+            pinned_outputs: &rows,
+        };
+        let mut v_try = v.clone();
+        let mut v_nl = vec![0.0; mna.m];
+        let mut i_nl = vec![0.0; mna.m];
+        let (ok, iters) = nr_dc_solve(&circuit, &mut v_try, &mut v_nl, &mut i_nl, 1.0, 0.0, false);
+        if !ok {
+            let why = "the pinned re-solve did not converge".to_string();
+            log::warn!(
+                "DC OP: {why}; keeping the operating point without the pin, so a railed \
+                 output's first samples will move"
+            );
+            result.rail_pin = RailPin::FellBack(why);
+            return None;
+        }
+        let next: Vec<Option<f64>> = mna.opamps.iter().map(|oa| pin_of(oa, &v_try)).collect();
+        v = v_try;
+        result.iterations += iters;
+        if next == pins {
+            let keep = result.v_node.len();
+            v.truncate(keep);
+            result.v_node = v;
+            result.v_nl = v_nl;
+            result.i_nl = i_nl;
+            result.rail_pin = RailPin::Pinned(rows.len());
+            return Some((g, b));
+        }
+        pins = next;
+        if pins.iter().all(Option::is_none) {
+            let why = "the re-solve released every pin".to_string();
+            log::warn!("DC OP: {why}; keeping the operating point before the pin");
+            result.rail_pin = RailPin::FellBack(why);
+            return None;
+        }
+    }
+    let why = format!("the railed op-amp pin set did not settle in {rounds} rounds");
+    log::warn!("DC OP: {why}; keeping the operating point without the pin");
+    result.rail_pin = RailPin::FellBack(why);
+    None
+}
+
 /// Strategy ladder body of [`solve_dc_operating_point`]. `dc_sys` is the DC
 /// system built by the caller (shared with the final residual report). Every
 /// `DcOpResult` constructed here leaves `kcl_residual_max` / `kcl_worst_row`
@@ -3189,6 +3408,7 @@ fn solve_dc_operating_point_core(
                 iterations: 0,
                 kcl_residual_max: f64::NAN,
                 kcl_worst_row: None,
+                rail_pin: RailPin::None,
             };
         }
     };
@@ -3204,6 +3424,7 @@ fn solve_dc_operating_point_core(
             iterations: 0,
             kcl_residual_max: f64::NAN,
             kcl_worst_row: None,
+            rail_pin: RailPin::None,
         };
     }
 
@@ -3219,6 +3440,7 @@ fn solve_dc_operating_point_core(
         n_dc,
         has_internal_nodes,
         is_voltage_row: &dc_sys.is_voltage_row,
+            pinned_outputs: &[],
     };
 
     // Clamp junction voltages in the linear initial guess to prevent
@@ -3358,6 +3580,7 @@ fn solve_dc_operating_point_core(
             iterations: iters,
             kcl_residual_max: f64::NAN,
             kcl_worst_row: None,
+            rail_pin: RailPin::None,
         };
     } else if converged {
         // Converged but read as degenerate — retain as a fallback (see the
@@ -3373,6 +3596,7 @@ fn solve_dc_operating_point_core(
             iterations: iters,
             kcl_residual_max: f64::NAN,
             kcl_worst_row: None,
+            rail_pin: RailPin::None,
         });
     }
 
@@ -3441,6 +3665,7 @@ fn solve_dc_operating_point_core(
                     iterations: total_iters,
                     kcl_residual_max: f64::NAN,
                     kcl_worst_row: None,
+                    rail_pin: RailPin::None,
                 });
             }
         }
@@ -3461,6 +3686,7 @@ fn solve_dc_operating_point_core(
             iterations: total_iters,
             kcl_residual_max: f64::NAN,
             kcl_worst_row: None,
+            rail_pin: RailPin::None,
         };
     }
 
@@ -3609,6 +3835,7 @@ fn solve_dc_operating_point_core(
                 iterations: total_iters,
                 kcl_residual_max: f64::NAN,
                 kcl_worst_row: None,
+                rail_pin: RailPin::None,
             };
         } else if converged && retained_degenerate.is_none() {
             let mut v_node = v.clone();
@@ -3622,6 +3849,7 @@ fn solve_dc_operating_point_core(
                 iterations: total_iters,
                 kcl_residual_max: f64::NAN,
                 kcl_worst_row: None,
+                rail_pin: RailPin::None,
             });
         }
     }
@@ -3675,6 +3903,7 @@ fn solve_dc_operating_point_core(
                 n_dc,
                 has_internal_nodes,
                 is_voltage_row: &dc_sys.is_voltage_row,
+            pinned_outputs: &[],
             };
 
             let step_ok;
@@ -3765,6 +3994,7 @@ fn solve_dc_operating_point_core(
                         iterations: total_iters,
                         kcl_residual_max: f64::NAN,
                         kcl_worst_row: None,
+                        rail_pin: RailPin::None,
                     };
                 }
             }
@@ -3998,6 +4228,7 @@ fn solve_dc_operating_point_core(
             iterations: total_iters,
             kcl_residual_max: f64::NAN,
             kcl_worst_row: None,
+            rail_pin: RailPin::None,
         };
     }
 
@@ -4010,6 +4241,7 @@ fn solve_dc_operating_point_core(
         iterations: total_iters,
         kcl_residual_max: f64::NAN,
         kcl_worst_row: None,
+        rail_pin: RailPin::None,
     }
 }
 
@@ -4679,6 +4911,7 @@ Cx c3 b4 6n IC=-4\n";
             n_out_idx: 3,
             aol,
             r_out,
+            r_sag: crate::mna::OPAMP_DEFAULT_R_SAG_OHM,
             vcc: f64::INFINITY,
             vee: f64::NEG_INFINITY,
             gbw: f64::INFINITY,

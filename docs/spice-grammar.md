@@ -792,7 +792,8 @@ outside the tube type's published manufacturer limit.
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `AOL` | 200000 | Open-loop voltage gain (V/V) |
-| `ROUT` | 1.0 Ω | Output resistance |
+| `ROUT` | 75 Ω | Open-loop output resistance (small-signal; divided by the loop gain in closed loop) |
+| `R_SAG` | 200 Ω | Saturated output sag: a railed output sits at `limit − R_SAG·I_load` (active-set modes and the DC operating point) |
 | `GBW` | ∞ Hz | Gain-bandwidth product. **Not modelled as a pole** (the gain is `AOL` at every frequency; a notice says so); a finite value only defaults the rails, below |
 | `VSAT` | ∞ V | Symmetric swing limit: the output is held to ±`VSAT`. Not with `VCC`/`VEE` (refused) |
 | `VCC` | +∞ V | Positive supply rail. The output reaches `VCC − VOH_DROP` |
@@ -800,8 +801,8 @@ outside the tube type's published manufacturer limit.
 | `SR` | ∞ V/µs | Slew rate, **in V/µs** (SPICE convention). Emitted as a per-sample output delta clamp |
 | `IB` | 0 A | Input bias current at each input pin (positive = current out of the pin) |
 | `RIN` | ∞ Ω | Input resistance from each input pin to ground |
-| `VOH_DROP` | 1.5 V | Drop from `VCC` to the highest drivable output, in every rail mode. The default prints a notice; set 0 for rail-to-rail parts. Needs `VCC` |
-| `VOL_DROP` | 1.5 V | Drop from `VEE` to the lowest drivable output. Needs `VEE` |
+| `VOH_DROP` | 1.0 V | Drop from `VCC` to the zero-load upper swing limit, in every rail mode. The default prints a notice; set 0 for rail-to-rail parts. Needs `VCC` |
+| `VOL_DROP` | 1.0 V | Drop from `VEE` to the zero-load lower swing limit. Needs `VEE` |
 | `AOL_TRANSIENT_CAP` | ∞ | AOL the transient solve uses (the DC operating point keeps the full AOL). Lowers the gain, so it changes the circuit; the circuit routes nodal |
 | `EN` | 0 V/√Hz | Input-referred voltage-noise density. Emitted only under `--noise` |
 | `IN` | 0 A/√Hz | Input-referred current-noise density. Emitted only under `--noise` |
@@ -824,7 +825,7 @@ lower limit:  VEE + VOL_DROP  |  −VSAT  |  −13.0 V if GBW is finite  |  none
 Consequences worth knowing before you write your first card:
 
 1. **A card with no `VCC`/`VEE`/`VSAT`/`GBW` has no output limit at all.** `OA(AOL=1e5 ROUT=75)` is an op-amp with infinite headroom — drop it into a 9 V pedal and the output will sail past 9 V to wherever the closed-loop gain takes it, with no warning. If your circuit's character comes from the op-amp running out of rail, the model card has to say so.
-2. **`VCC` without `VOH_DROP` swings to `VCC − 1.5 V`**, a vintage TL07x into 10 kΩ, and the compile says so. Put the part's own drop on its card (0 for a rail-to-rail part).
+2. **`VCC` without `VOH_DROP` swings to `VCC − 1.0 V` at no load**, and a railed output sags `R_SAG·I_load` below that (200 Ω by default); the compile says so. Put the part's own drop and sag on its card (drop 0 for a rail-to-rail part).
 3. **`VSAT` with `VCC` or `VEE` is refused**: both would set the same limit. Use `VSAT` alone, or the rails with their drops. A drop without its rail is refused too.
 4. **Setting `GBW` alone also sets a ±13 V limit**, because a finite `GBW` implies you meant a real part. That is a deliberate default, but it is a side effect of a parameter about *bandwidth* — and it is `GBW`'s only effect, since no bandwidth pole is modelled.
 5. **An empty swing is a hard error, not a warning.** `OA(VCC=-9 VEE=9)` fails at build time rather than reaching `clamp(min, max)` with `min > max` on the audio thread.

@@ -115,6 +115,10 @@ pub struct CircuitIR {
     /// DC OP convergence method name (e.g. "DirectNR", "SourceStepping").
     #[serde(default)]
     pub dc_op_method: String,
+    /// Railed op-amp outputs at the DC operating point: `dc_op::RailPin::label`
+    /// ("none", "pinned N", or the fallback and why).
+    #[serde(default)]
+    pub dc_op_rail_pin: String,
     /// DC OP total NR iterations used.
     #[serde(default)]
     pub dc_op_iterations: usize,
@@ -919,6 +923,16 @@ pub struct OpampIR {
     /// where `gm_capped = AOL_TRANSIENT_CAP / r_out`. Zero when the card sets
     /// no cap (or one at or above AOL).
     pub gm_delta: f64,
+    /// Transconductance of the VCCS as stamped in the transient matrices,
+    /// `min(AOL, AOL_TRANSIENT_CAP) / ROUT` [S].
+    #[serde(default)]
+    pub gm: f64,
+    /// `1 / ROUT` [S]: the linear model's output conductance.
+    #[serde(default)]
+    pub g_out: f64,
+    /// `1 / R_SAG` [S]: the saturated output's conductance to its swing limit.
+    #[serde(default)]
+    pub g_sag: f64,
 }
 
 /// The transient-solve AOL cap an op-amp card asks for with
@@ -933,6 +947,21 @@ pub struct OpampIR {
 /// without.)
 fn effective_aol_cap(oa: &crate::mna::OpampInfo) -> f64 {
     oa.aol_transient_cap
+}
+
+/// The DC operating point's saturation for a railed op-amp output: the same
+/// the transient rail mode applies, so the first sample does not move it.
+pub fn dc_rail_for(mode: crate::codegen::OpampRailMode) -> crate::dc_op::DcRail {
+    use crate::codegen::OpampRailMode;
+    use crate::dc_op::DcRail;
+    match mode {
+        OpampRailMode::ActiveSet | OpampRailMode::ActiveSetBe => DcRail::LoadLine,
+        OpampRailMode::Hard => DcRail::Terminal,
+        // Boyle's catch diodes are devices the DC solve already carries.
+        OpampRailMode::BoyleDiodes | OpampRailMode::None => DcRail::Free,
+        // Auto is resolved before any DC solve; treat as the default.
+        OpampRailMode::Auto => DcRail::LoadLine,
+    }
 }
 
 /// Build an `OpampIR` from the MNA `OpampInfo`, computing the Gm delta
@@ -959,6 +988,9 @@ fn opamp_ir_from_info(oa: &crate::mna::OpampInfo) -> OpampIR {
         vclamp_lo: oa.vee,
         sr: oa.sr,
         gm_delta,
+        gm: gm_capped,
+        g_out: 1.0 / oa.r_out,
+        g_sag: 1.0 / oa.r_sag,
     }
 }
 
@@ -2528,6 +2560,7 @@ impl CircuitIR {
                 .copied()
                 .zip(config.extra_input_resistances.iter().copied())
                 .collect(),
+            rail: dc_rail_for(resolve_opamp_rail_mode(mna, config.opamp_rail_mode).mode),
             ..DcOpConfig::default()
         };
         // Use pre-computed DC OP if available, otherwise run solver.
@@ -2545,6 +2578,7 @@ impl CircuitIR {
         let has_dc_op = dc_op_truncated.iter().any(|&v| v.abs() > 1e-15);
         let dc_op_converged = dc_result.converged;
         let dc_op_method = format!("{:?}", dc_result.method);
+        let dc_op_rail_pin = dc_result.rail_pin.label();
         let dc_op_iterations = dc_result.iterations;
         // Paired with `dc_operating_point` (plain, non-IC quiescent point) —
         // see the pairing note on `dc_operating_point` below, and the
@@ -2705,6 +2739,7 @@ impl CircuitIR {
             q_dot_ic_seed,
             dc_op_converged,
             dc_op_method,
+            dc_op_rail_pin,
             dc_op_iterations,
             dc_block: config.dc_block,
             inductors,
@@ -3258,6 +3293,7 @@ impl CircuitIR {
                 .copied()
                 .zip(config.extra_input_resistances.iter().copied())
                 .collect(),
+            rail: dc_rail_for(resolve_opamp_rail_mode(mna, config.opamp_rail_mode).mode),
             ..DcOpConfig::default()
         };
         // Build device info with MNA so FA reductions are reflected in dimensions
@@ -3274,6 +3310,7 @@ impl CircuitIR {
         let has_dc_op = dc_result.v_node.iter().take(n).any(|&v| v.abs() > 1e-15);
         let dc_op_converged = dc_result.converged;
         let dc_op_method = format!("{:?}", dc_result.method);
+        let dc_op_rail_pin = dc_result.rail_pin.label();
         let dc_op_iterations = dc_result.iterations;
         // Paired with `dc_operating_point` (plain, non-IC quiescent point).
         // Do NOT repoint this at the IC-seeded solve — see
@@ -3470,6 +3507,7 @@ impl CircuitIR {
             q_dot_ic_seed,
             dc_op_converged,
             dc_op_method,
+            dc_op_rail_pin,
             dc_op_iterations,
             dc_block: config.dc_block,
             inductors: Vec::new(), // no companion model
@@ -3858,6 +3896,7 @@ impl CircuitIR {
                 .copied()
                 .zip(config.extra_input_resistances.iter().copied())
                 .collect(),
+            rail: dc_rail_for(resolve_opamp_rail_mode(mna, config.opamp_rail_mode).mode),
             ..DcOpConfig::default()
         };
         let dc_result = dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config);
@@ -4113,6 +4152,7 @@ impl CircuitIR {
                 .copied()
                 .zip(config.extra_input_resistances.iter().copied())
                 .collect(),
+            rail: dc_rail_for(resolve_opamp_rail_mode(mna, config.opamp_rail_mode).mode),
             ..DcOpConfig::default()
         };
         let dc_result = dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config);
@@ -6461,6 +6501,7 @@ mod opamp_rail_mode_tests {
             n_out_idx: 3,
             aol: 200_000.0,
             r_out: 50.0,
+            r_sag: crate::mna::OPAMP_DEFAULT_R_SAG_OHM,
             vcc,
             vee,
             gbw: f64::INFINITY,
@@ -6564,6 +6605,7 @@ mod opamp_rail_mode_tests {
             n_out_idx: out,
             aol: 200_000.0,
             r_out: 50.0,
+            r_sag: crate::mna::OPAMP_DEFAULT_R_SAG_OHM,
             vcc,
             vee,
             gbw: f64::INFINITY,

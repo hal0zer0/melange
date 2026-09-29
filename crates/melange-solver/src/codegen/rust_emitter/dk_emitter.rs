@@ -568,6 +568,12 @@ fn provenance_json(
         ir.integrator_selection.is_backward_euler()
     ));
     s.push_str(&format!("\"max_iter\":{},", effective_max_iter(ir)));
+    if !ir.dc_op_rail_pin.is_empty() && ir.dc_op_rail_pin != "none" {
+        s.push_str(&format!(
+            "\"dc_op_rail_pin\":\"{}\",",
+            ir.dc_op_rail_pin.replace('\\', "\\\\").replace('"', "\\\"")
+        ));
+    }
     s.push_str(&format!(
         "\"oversampling\":{},",
         ir.solver_config.oversampling_factor

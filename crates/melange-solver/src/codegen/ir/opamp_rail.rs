@@ -304,8 +304,8 @@ fn boyle_catch_offset(limit: f64) -> f64 {
 ///
 /// - A unity-gain output buffer VCVS `E_oa_buf_{name}` forcing
 ///   `V(_oa_buf_out_{name}) = V(_oa_int_{name})` regardless of load, followed
-///   by a series output resistor `R_oa_ro_{name}` (`R = r_out`: Boyle's 75 Ω
-///   default, or `.model OA(ROUT=…)`) from the buffer output to the original
+///   by a series output resistor `R_oa_ro_{name}` (`R` = the card's `ROUT`,
+///   the same output impedance the other rail modes use) from the buffer output to the original
 ///   output node. The series-R form — NOT a VCCS + shunt-to-ground — is
 ///   essential: a shunt to ground would fight the op-amp's DC bias on any
 ///   circuit lacking a hard pull-up (e.g. a high-Z vbias divider). Gives
@@ -518,15 +518,12 @@ pub fn augment_netlist_with_boyle_diodes(
             gain: 1.0,
         });
 
-        // Output series resistance. Boyle's canonical value is 75 Ω,
-        // matching TL072-class bipolar op-amps. For feedback-dominated
-        // topologies (all audio circuits we target), closed-loop output
-        // impedance is `R_ro / (1 + loop_gain) ≈ µΩ`, so 75 Ω has no
-        // audible effect. For high-impedance loads (cap-coupled,
-        // 10 kΩ+ feedback networks) the 75 Ω drop is a fraction of
-        // a millivolt. Use the op-amp's `r_out` field if the user
-        // overrode it in `.model OA(ROUT=…)`, otherwise 75 Ω.
-        let r_out = if oa.r_out > 1.0 { oa.r_out } else { 75.0 };
+        // Output series resistance: the card's ROUT, the op-amp's output
+        // impedance in every rail mode (the linear model's VCCS drives the
+        // output node through the same ROUT). A saturated output therefore
+        // sags ROUT·I_load below the swing limit, as a real output stage
+        // does.
+        let r_out = oa.r_out;
         augmented.elements.push(Element::Resistor {
             name: format!("R_oa_ro_{}", safe_name),
             n_plus: buf_out_node,

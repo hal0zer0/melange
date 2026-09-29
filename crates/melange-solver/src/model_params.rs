@@ -562,6 +562,7 @@ const PENTODE_DEFINING: &[&str] = &[
 const OPAMP_HONORED: &[&str] = &[
     "AOL",
     "ROUT",
+    "R_SAG",
     "VSAT",
     "VCC",
     "VEE",

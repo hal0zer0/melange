@@ -919,11 +919,10 @@ pub fn run_transient_with_thevenin_pwl(
     let rail_probes = crate::opamp_translate::rail_probes(netlist_content);
     let mut capture: Vec<String> = nodes_to_capture.to_vec();
     for p in &rail_probes {
-        if !capture
-            .iter()
-            .any(|n| n.eq_ignore_ascii_case(p.node.as_str()))
-        {
-            capture.push(p.node.clone());
+        for node in std::iter::once(&p.node).chain(p.th_node.as_ref()) {
+            if !capture.iter().any(|n| n.eq_ignore_ascii_case(node)) {
+                capture.push(node.clone());
+            }
         }
     }
 

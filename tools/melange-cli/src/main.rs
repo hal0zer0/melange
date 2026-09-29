@@ -1522,6 +1522,7 @@ fn preflight_relinearize_bjt_caps(
     netlist: &melange_solver::parser::Netlist,
     input_node: usize,
     input_resistance: f64,
+    rail_mode: melange_solver::codegen::OpampRailMode,
 ) -> Option<melange_solver::dc_op::DcOpResult> {
     let device_slots =
         melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(netlist, Some(mna))
@@ -1529,9 +1530,14 @@ fn preflight_relinearize_bjt_caps(
     if device_slots.is_empty() {
         return None;
     }
+    // A railed op-amp sits where the transient's rail mode puts it.
+    let rail = melange_solver::codegen::ir::dc_rail_for(
+        melange_solver::codegen::ir::opamp_rail::resolve_opamp_rail_mode(mna, rail_mode).mode,
+    );
     let dc_config = melange_solver::dc_op::DcOpConfig {
         input_node,
         input_resistance,
+        rail,
         ..melange_solver::dc_op::DcOpConfig::default()
     };
     let dc = melange_solver::dc_op::solve_dc_operating_point(mna, &device_slots, &dc_config);
@@ -1689,6 +1695,12 @@ fn forced_dk_hard_blocker(
     } else {
         None
     }
+}
+
+/// Whether the build summary names the DC operating point's railed op-amps:
+/// always when they are pinned or the pin fell back.
+fn meta_rail_pin_shown(label: &str) -> bool {
+    !label.is_empty() && label != "none"
 }
 
 /// Resolve the effective oversampling factor for the shipping path
@@ -2254,7 +2266,7 @@ fn compile_circuit_source(
     // harness for the matching call site — the two paths must agree so a
     // plugin built from `melange compile` behaves like the validated one.
     let dc_preflight =
-        preflight_relinearize_bjt_caps(&mut mna, &netlist, input_node_idx, input_resistance);
+        preflight_relinearize_bjt_caps(&mut mna, &netlist, input_node_idx, input_resistance, opamp_rail_mode);
 
     // Step 3: Create DK kernel
     // Use augmented MNA for inductor circuits (well-conditioned for large L)
@@ -2730,6 +2742,9 @@ fn compile_circuit_source(
         if meta.parasitic_caps_inserted {
             println!("    Parasitic caps: auto-inserted (no capacitors in circuit)");
         }
+    }
+    if meta_rail_pin_shown(&generated.meta.dc_op_rail_pin) {
+        println!("    Railed op-amps at DC: {}", generated.meta.dc_op_rail_pin);
     }
     if !forward_active.is_empty() {
         println!(
@@ -4146,7 +4161,7 @@ fn simulate_circuit_source(
     // simulate in sync with compile means `melange simulate` hears the
     // same plugin the user will eventually `melange compile`.
     let dc_preflight =
-        preflight_relinearize_bjt_caps(&mut mna, &netlist, input_node_idx, input_resistance);
+        preflight_relinearize_bjt_caps(&mut mna, &netlist, input_node_idx, input_resistance, opts.opamp_rail_mode);
 
     // Step 4: Build DK kernel and route
     let has_inductors = !mna.inductors.is_empty()
@@ -4878,7 +4893,7 @@ fn analyze_freq_response(
     // must match compile so the harmonic / frequency-response curve reflects
     // what the user will hear in the generated plugin.
     let dc_preflight =
-        preflight_relinearize_bjt_caps(&mut mna, &netlist, input_node_idx, input_resistance);
+        preflight_relinearize_bjt_caps(&mut mna, &netlist, input_node_idx, input_resistance, opamp_rail_mode);
 
     // Build DK kernel and route
     let has_inductors = !mna.inductors.is_empty()
@@ -6174,6 +6189,14 @@ fn run_dc_op(
         // absent port stamps nothing — matching the `mna.g` stamp skipped above.
         input_node: input_node_idx.unwrap_or(usize::MAX),
         input_resistance: r_in,
+        // A railed op-amp sits where a default compile's rail mode puts it.
+        rail: melange_solver::codegen::ir::dc_rail_for(
+            melange_solver::codegen::ir::opamp_rail::resolve_opamp_rail_mode(
+                &mna,
+                melange_solver::codegen::OpampRailMode::Auto,
+            )
+            .mode,
+        ),
         ..DcOpConfig::default()
     };
 
@@ -6200,6 +6223,10 @@ fn run_dc_op(
                 Some(row) => format!("\"{}\"", dc_op_row_name(row, &idx_to_name, mna.n)),
                 None => "null".to_string(),
             }
+        );
+        print!(
+            "\"rail_pin\":\"{}\",",
+            result.rail_pin.label().replace('\\', "\\\\").replace('"', "\\\"")
         );
         print!("\"n\":{},\"m\":{},", mna.n, mna.m);
 
@@ -6264,6 +6291,9 @@ fn run_dc_op(
             "  Converged: {} ({:?}, {} iterations)",
             result.converged, result.method, result.iterations
         );
+        if result.rail_pin != melange_solver::dc_op::RailPin::None {
+            eprintln!("  Railed op-amps: {}", result.rail_pin.label());
+        }
         match result.kcl_worst_row {
             Some(row) => eprintln!(
                 "  KCL residual: max |F| = {:.3e} A at {}",

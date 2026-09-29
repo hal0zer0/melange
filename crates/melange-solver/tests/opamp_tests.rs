@@ -255,7 +255,8 @@ U1 0 inv out myopamp
 
     assert_eq!(mna.opamps.len(), 1);
     assert_eq!(mna.opamps[0].aol, 200_000.0);
-    assert_eq!(mna.opamps[0].r_out, 1.0);
+    assert_eq!(mna.opamps[0].r_out, 75.0);
+    assert_eq!(mna.opamps[0].r_sag, 200.0);
 }
 
 #[test]
@@ -323,11 +324,11 @@ U1 0 inv out oa
     let netlist = Netlist::parse(spice).unwrap();
     let mna = MnaSystem::from_netlist(&netlist).unwrap();
 
-    // VCC/VEE are the supply; without VOH_DROP/VOL_DROP the output swings to
-    // within the 1.5 V default drop of each rail.
+    // VCC/VEE are the supply; without VOH_DROP/VOL_DROP the zero-load swing
+    // stops the 1.0 V default drop short of each rail.
     assert_eq!(mna.opamps.len(), 1);
-    assert_eq!(mna.opamps[0].vcc, 7.5, "upper swing limit VCC - 1.5 V");
-    assert_eq!(mna.opamps[0].vee, 1.5, "lower swing limit VEE + 1.5 V");
+    assert_eq!(mna.opamps[0].vcc, 8.0, "upper swing limit VCC - 1.0 V");
+    assert_eq!(mna.opamps[0].vee, 1.0, "lower swing limit VEE + 1.0 V");
 }
 
 #[test]
@@ -367,8 +368,8 @@ U1 0 inv out oa
     let netlist = Netlist::parse(spice).unwrap();
     let mna = MnaSystem::from_netlist(&netlist).unwrap();
 
-    assert_eq!(mna.opamps[0].vcc, 16.5, "upper swing limit VCC - 1.5 V");
-    assert_eq!(mna.opamps[0].vee, -7.5, "lower swing limit VEE + 1.5 V");
+    assert_eq!(mna.opamps[0].vcc, 17.0, "upper swing limit VCC - 1.0 V");
+    assert_eq!(mna.opamps[0].vee, -8.0, "lower swing limit VEE + 1.0 V");
 }
 
 #[test]

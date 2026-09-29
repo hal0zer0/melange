@@ -943,9 +943,18 @@ pub fn run_melange_solver_from_str(
         if device_slots.is_empty() {
             None
         } else {
+            // A railed op-amp sits where the transient's rail mode puts it.
+            let rail = melange_solver::codegen::ir::dc_rail_for(
+                melange_solver::codegen::ir::opamp_rail::resolve_opamp_rail_mode(
+                    &mna,
+                    fa_config.opamp_rail_mode,
+                )
+                .mode,
+            );
             let dc_config = melange_solver::dc_op::DcOpConfig {
                 input_node,
                 input_resistance: 1.0,
+                rail,
                 ..melange_solver::dc_op::DcOpConfig::default()
             };
             Some(mna.stamp_caps_and_solve_dc_op(&device_slots, &dc_config))

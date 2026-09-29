@@ -9031,28 +9031,36 @@ impl RustEmitter {
         // redundant LU solve on exactly-at-rail samples.
         code.push_str(&format!("{indent}    let mut any_pinned = false;\n"));
         for (idx, oa) in clampable.iter().enumerate() {
+            // The load line: the unpinned solution exceeds the saturated
+            // output's ceiling `limit - R_SAG*I_load` exactly when
+            // `w = v_out + R_SAG*I_load` passes the limit (see
+            // `opamp_load_line_expr`). Engagement is continuous: the pinned
+            // row puts `v_out` on that same line.
+            //
             // Emit a violation branch per FINITE rail only — formatting an
             // infinite bound would render the invalid Rust token `-inf`/`inf`
             // for single-supply op-amps (only one of VCC/VEE specified).
             // `clampable` guarantees at least one branch is emitted.
+            code.push_str(&format!(
+                "{indent}    let w_{idx} = {};\n",
+                opamp_load_line_expr(oa, "v")
+            ));
             let mut branches = String::new();
             if oa.vclamp_hi.is_finite() {
                 branches.push_str(&format!(
-                    "if v[{node}] >= {hi:.17e} {{\n\
+                    "if w_{idx} >= {hi:.17e} {{\n\
                      {indent}        any_pinned = true;\n\
                      {indent}        Some({hi:.17e})\n\
                      {indent}    }} else ",
-                    node = oa.n_out_idx,
                     hi = oa.vclamp_hi,
                 ));
             }
             if oa.vclamp_lo.is_finite() {
                 branches.push_str(&format!(
-                    "if v[{node}] <= {lo:.17e} {{\n\
+                    "if w_{idx} <= {lo:.17e} {{\n\
                      {indent}        any_pinned = true;\n\
                      {indent}        Some({lo:.17e})\n\
                      {indent}    }} else ",
-                    node = oa.n_out_idx,
                     lo = oa.vclamp_lo,
                 ));
             }
@@ -9158,20 +9166,29 @@ impl RustEmitter {
             emit_sat_ind_jacobian(code, ir, "g_as", "v_pin", sat_alpha, &it);
             emit_sat_ind_companion(code, ir, "rhs_as", "v_pin", sat_alpha, &it);
         }
-        // Pin elimination: move each pinned column's contribution to the RHS
-        // and replace its row with the identity equation v[k] = c_k.
+        // Pin: the railed output is its swing limit `c_k` behind `R_SAG`.
+        // Its row keeps the node's KCL; the VCCS leaves it (its Gm entries
+        // are removed and its output conductance `1/ROUT` becomes `1/R_SAG`)
+        // and the limit enters as the source current `c_k/R_SAG`. So the
+        // output sits at `c_k - R_SAG*I_load`, on the load line the
+        // detection above measured against.
         for (idx, oa) in clampable.iter().enumerate() {
             let node = oa.n_out_idx;
+            let mut unstamp = String::new();
+            if let Some(np) = oa.n_plus_idx {
+                unstamp.push_str(&format!("{it}    g_as[{node}][{np}] += {:.17e};\n", oa.gm));
+            }
+            if let Some(nm) = oa.n_minus_idx {
+                unstamp.push_str(&format!("{it}    g_as[{node}][{nm}] -= {:.17e};\n", oa.gm));
+            }
             code.push_str(&format!(
                 "{it}if let Some(c_k) = pinned_{idx} {{\n\
-                 {it}    for i in 0..N {{\n\
-                 {it}        if i != {node} {{ rhs_as[i] -= g_as[i][{node}] * c_k; }}\n\
-                 {it}        g_as[i][{node}] = 0.0;\n\
-                 {it}    }}\n\
-                 {it}    for j in 0..N {{ g_as[{node}][j] = 0.0; }}\n\
-                 {it}    g_as[{node}][{node}] = 1.0;\n\
-                 {it}    rhs_as[{node}] = c_k;\n\
-                 {it}}}\n"
+                 {unstamp}\
+                 {it}    g_as[{node}][{node}] += {dg:.17e};\n\
+                 {it}    rhs_as[{node}] += {g_sag:.17e} * c_k;\n\
+                 {it}}}\n",
+                dg = oa.g_sag - oa.g_out,
+                g_sag = oa.g_sag,
             ));
         }
         code.push_str(&format!(
@@ -9395,23 +9412,16 @@ impl RustEmitter {
         // "pinned exactly" case and any tiny numerical overshoot past the
         // rail, covering 4kbuscomp without over-eager NR-iteration tracking.
         for oa in &clampable {
-            // Compare against FINITE rails only (an infinite bound would emit
-            // the invalid token `inf`/`-inf`). `clampable` guarantees at
-            // least one comparison per op-amp.
+            // Compare the load-line quantity against FINITE rails only (an
+            // infinite bound would emit the invalid token `inf`/`-inf`).
+            // `clampable` guarantees at least one comparison per op-amp.
+            let w = opamp_load_line_expr(oa, "v");
             let mut conds: Vec<String> = Vec::new();
             if oa.vclamp_hi.is_finite() {
-                conds.push(format!(
-                    "v[{node}] >= {hi:.17e}",
-                    node = oa.n_out_idx,
-                    hi = oa.vclamp_hi
-                ));
+                conds.push(format!("{w} >= {hi:.17e}", hi = oa.vclamp_hi));
             }
             if oa.vclamp_lo.is_finite() {
-                conds.push(format!(
-                    "v[{node}] <= {lo:.17e}",
-                    node = oa.n_out_idx,
-                    lo = oa.vclamp_lo
-                ));
+                conds.push(format!("{w} <= {lo:.17e}", lo = oa.vclamp_lo));
             }
             code.push_str(&format!(
                 "{indent}if {} {{ {flag_name} = true; }}\n",
@@ -10249,4 +10259,26 @@ impl RustEmitter {
             }
         }
     }
+}
+
+/// The load-line quantity of an op-amp on the node vector `v`:
+/// `w = v_out + R_SAG * I_load`, with `I_load = Gm*(v+ - v-) - v_out/ROUT`
+/// the current the linear model delivers into the circuit. A saturated output
+/// can supply at most `limit - R_SAG*I_load`, so the linear solution is past
+/// the rail exactly when `w` passes the limit. With `R_SAG = ROUT`, `w` is the
+/// internal (Thevenin) voltage `AOL*(v+ - v-)`.
+fn opamp_load_line_expr(oa: &crate::codegen::ir::OpampIR, v: &str) -> String {
+    let r_sag = 1.0 / oa.g_sag;
+    let a = 1.0 - oa.g_out * r_sag;
+    let b = oa.gm * r_sag;
+    let vp = oa
+        .n_plus_idx
+        .map_or("0.0".to_string(), |i| format!("{v}[{i}]"));
+    let vm = oa
+        .n_minus_idx
+        .map_or("0.0".to_string(), |i| format!("{v}[{i}]"));
+    format!(
+        "({v}[{o}] * {a:.17e} + {b:.17e} * ({vp} - {vm}))",
+        o = oa.n_out_idx
+    )
 }
