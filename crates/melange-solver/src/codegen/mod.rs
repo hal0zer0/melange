@@ -537,6 +537,17 @@ pub struct CodegenConfig {
     /// MVP scope: Direct-NR only, no source/Gmin stepping, no basin-trap handling.
     /// Not supported for DK circuits with parasitic-R BJTs (use nodal path).
     pub emit_dc_op_recompute: bool,
+    /// TEST-ONLY: replace the DC operating-point Newton budget (iterations
+    /// per solve attempt, [`crate::dc_op::DcOpConfig::max_iterations`]) of
+    /// every DC solve the build makes. It exists so the unconverged-DC-OP
+    /// refusal has a witness that does not depend on an open convergence bug
+    /// staying open. It cannot ship a wrong operating point: a solve either
+    /// converges within the budget (and passes the same step test and KCL
+    /// residual gate as always), or it does not and the build is refused, or,
+    /// under `--allow-unconverged-dc-op`, built with `DC_OP_CONVERGED = false`.
+    /// `None` (every real build) keeps the default budget.
+    #[doc(hidden)]
+    pub dc_op_max_iterations: Option<usize>,
     /// The Newton iteration budget for a build the ring predicate promotes
     /// to backward Euler (`ir::CircuitIR::ring_promotion`), which replaces
     /// `max_iterations` in the rebuild. `None` keeps `max_iterations`. The
@@ -692,6 +703,7 @@ impl Default for CodegenConfig {
             noise_master_seed: 0,
             emit_dc_op_recompute: false,
             max_iterations_be_promoted: None,
+            dc_op_max_iterations: None,
             injections: Vec::new(),
             taps: Vec::new(),
             bjt_fa_mode: BjtFaMode::Off,

@@ -166,6 +166,10 @@ pub struct BuildOptions {
     /// (`--allow-unconverged-dc-op`). By default such a build is refused: its
     /// generated code would start from a state that is not a solution.
     pub allow_unconverged_dc_op: bool,
+    /// TEST-ONLY DC-OP Newton budget: see
+    /// [`crate::codegen::CodegenConfig::dc_op_max_iterations`].
+    #[doc(hidden)]
+    pub dc_op_max_iterations: Option<usize>,
     /// Raise the output clamp to three times the largest DC operating-point
     /// node voltage when that is higher (validate: a high-rail circuit swings
     /// its output tens of volts legitimately; a 10 V clamp would square it).
@@ -257,6 +261,11 @@ pub fn assemble(
     let subsample_fire = opts.subsample_fire;
     let subsample_lit_factor = opts.subsample_lit_factor;
     let opamp_rail_mode = opts.opamp_rail_mode;
+    // Every DC solve this build makes solves the same problem.
+    let dc_request = crate::codegen::ir::DcOpRequest {
+        opamp_rail_mode,
+        max_iterations: opts.dc_op_max_iterations,
+    };
     let nodal_sub_path_override = opts.nodal_sub_path_override;
     let allow_static_glow_on_full_lu = opts.allow_static_glow_on_full_lu;
     let noise_mode = opts.noise_mode;
@@ -701,6 +710,7 @@ pub fn assemble(
         input_node: input_node_idx,
         input_resistance,
         bjt_fa_mode: opts.bjt_fa_mode,
+        dc_op_max_iterations: opts.dc_op_max_iterations,
         ..crate::codegen::CodegenConfig::default()
     };
     // Skip FA detection when the final solver will be Nodal:
@@ -751,7 +761,7 @@ pub fn assemble(
         &forward_active,
         &grid_off_pentodes,
         &port_stamps,
-        opamp_rail_mode,
+        dc_request,
         out,
     )?;
 
@@ -765,7 +775,7 @@ pub fn assemble(
     // defaults (TF = 0, CJE = CJC = 0, etc.). See the SPICE validation
     // harness for the matching call site — the two paths must agree so a
     // plugin built from `melange compile` behaves like the validated one.
-    let dc_preflight = preflight_relinearize_bjt_caps(&mut mna, &netlist, opamp_rail_mode);
+    let dc_preflight = preflight_relinearize_bjt_caps(&mut mna, &netlist, dc_request);
     let output_clamp = if opts.output_clamp_auto {
         dc_preflight
             .as_ref()
@@ -987,6 +997,7 @@ pub fn assemble(
         subsample_fire,
         subsample_lit_factor,
         allow_static_glow_on_full_lu,
+        dc_op_max_iterations: opts.dc_op_max_iterations,
         ..CodegenConfig::default()
     };
 
@@ -1030,14 +1041,7 @@ pub fn assemble(
     // handed to the IR.
     let (prepared, dc_op) = if use_nodal_codegen {
         report!(out, "  Using nodal solver codegen");
-        prepare_nodal_route(
-            &generator,
-            &mut mna,
-            &netlist,
-            &kernel,
-            opamp_rail_mode,
-            out,
-        )?
+        prepare_nodal_route(&generator, &mut mna, &netlist, &kernel, dc_request, out)?
     } else {
         // DK path: do NOT expand internal nodes. The DK kernel is ill-conditioned
         // with high-conductance parasitic nodes. Instead, bjt_with_parasitics()
@@ -1049,7 +1053,7 @@ pub fn assemble(
         // devices had no preflight).
         let dc_op = match dc_preflight {
             Some(dc) => dc,
-            None => crate::codegen::ir::solve_dc_op(&mna, &netlist, opamp_rail_mode)
+            None => crate::codegen::ir::solve_dc_op(&mna, &netlist, dc_request)
                 .with_context(|| "Code generation failed")?,
         };
         match generator.prepare_dk(&kernel, &mna, &netlist, Some(dc_op.clone())) {
@@ -1059,14 +1063,7 @@ pub fn assemble(
                 report!(out, "  Using nodal solver codegen: {why}");
                 solver_label = "nodal";
                 solver_reason = format!("self-starting oscillator: {why}");
-                prepare_nodal_route(
-                    &generator,
-                    &mut mna,
-                    &netlist,
-                    &kernel,
-                    opamp_rail_mode,
-                    out,
-                )?
+                prepare_nodal_route(&generator, &mut mna, &netlist, &kernel, dc_request, out)?
             }
             other => (other.with_context(|| "Code generation failed")?, dc_op),
         }
@@ -1138,11 +1135,11 @@ fn prepare_nodal_route(
     mna: &mut MnaSystem,
     netlist: &Netlist,
     kernel: &DkKernel,
-    opamp_rail_mode: crate::codegen::OpampRailMode,
+    dc_request: crate::codegen::ir::DcOpRequest,
     out: Reporter<'_>,
 ) -> Result<(crate::codegen::PreparedIr, crate::dc_op::DcOpResult), BuildError> {
     crate::pipeline::expand_internal_nodes_if_conditioned(mna, netlist, kernel, out);
-    let dc_op = crate::codegen::ir::solve_dc_op(mna, netlist, opamp_rail_mode)
+    let dc_op = crate::codegen::ir::solve_dc_op(mna, netlist, dc_request)
         .with_context(|| "Nodal code generation failed")?;
     let prepared = generator
         .prepare_nodal(mna, netlist, Some(dc_op.clone()))
@@ -1353,7 +1350,7 @@ pub fn resolve_oversampling(explicit_cli: Option<usize>, recommended: Option<usi
 pub fn preflight_relinearize_bjt_caps(
     mna: &mut crate::mna::MnaSystem,
     netlist: &crate::parser::Netlist,
-    rail_mode: crate::codegen::OpampRailMode,
+    dc_request: crate::codegen::ir::DcOpRequest,
 ) -> Option<crate::dc_op::DcOpResult> {
     let device_slots =
         crate::codegen::ir::CircuitIR::build_device_info_with_mna(netlist, Some(mna))
@@ -1364,7 +1361,7 @@ pub fn preflight_relinearize_bjt_caps(
     let dc = crate::dc_op::solve_dc_operating_point(
         mna,
         &device_slots,
-        &crate::codegen::ir::dc_op_config(mna, rail_mode),
+        &crate::codegen::ir::dc_op_config(mna, dc_request),
     );
     if dc.converged {
         mna.relinearize_bjt_caps_at_dc_op(&device_slots, &dc.v_nl, &dc.i_nl);

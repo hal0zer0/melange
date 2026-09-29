@@ -823,6 +823,7 @@ pub fn run_melange_solver_from_str(
         // A build that starts from an unconverged operating point is refused:
         // comparing it against ngspice would measure the wrong start.
         allow_unconverged_dc_op: false,
+        dc_op_max_iterations: None,
         output_clamp_auto: true,
     };
     let built =

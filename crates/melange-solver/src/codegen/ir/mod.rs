@@ -961,29 +961,61 @@ pub fn dc_rail_for(mode: crate::codegen::OpampRailMode) -> crate::dc_op::DcRail 
     }
 }
 
-/// The DC operating-point solver settings of a build of `mna` with the op-amp
-/// rail mode `opamp_rail_mode`: every DC solve a build makes (the operating
-/// point it ships, the `IC=` seed, the reduction detectors, the `.linearize`
-/// bias point, the capacitance preflight) uses these, so they all solve the
-/// same problem. A railed op-amp sits where the build's rail mode puts it.
-pub fn dc_op_config(mna: &MnaSystem, opamp_rail_mode: crate::codegen::OpampRailMode) -> DcOpConfig {
-    DcOpConfig {
-        rail: dc_rail_for(resolve_opamp_rail_mode(mna, opamp_rail_mode).mode),
-        ..DcOpConfig::default()
+/// What a build's DC operating point is solved with, besides the circuit.
+#[derive(Debug, Clone, Copy)]
+pub struct DcOpRequest {
+    /// The build's op-amp rail mode: a railed op-amp sits where it puts it.
+    pub opamp_rail_mode: crate::codegen::OpampRailMode,
+    /// See [`crate::codegen::CodegenConfig::dc_op_max_iterations`].
+    pub max_iterations: Option<usize>,
+}
+
+impl From<crate::codegen::OpampRailMode> for DcOpRequest {
+    fn from(opamp_rail_mode: crate::codegen::OpampRailMode) -> Self {
+        Self {
+            opamp_rail_mode,
+            max_iterations: None,
+        }
     }
+}
+
+impl From<&crate::codegen::CodegenConfig> for DcOpRequest {
+    fn from(config: &crate::codegen::CodegenConfig) -> Self {
+        Self {
+            opamp_rail_mode: config.opamp_rail_mode,
+            max_iterations: config.dc_op_max_iterations,
+        }
+    }
+}
+
+/// The DC operating-point solver settings of a build of `mna`: every DC solve
+/// a build makes (the operating point it ships, the `IC=` seed, the reduction
+/// detectors, the `.linearize` bias point, the capacitance preflight) uses
+/// these, so they all solve the same problem. A railed op-amp sits where the
+/// build's rail mode puts it.
+pub fn dc_op_config(mna: &MnaSystem, request: impl Into<DcOpRequest>) -> DcOpConfig {
+    let request = request.into();
+    let mut config = DcOpConfig {
+        rail: dc_rail_for(resolve_opamp_rail_mode(mna, request.opamp_rail_mode).mode),
+        ..DcOpConfig::default()
+    };
+    if let Some(n) = request.max_iterations {
+        config.max_iterations = n;
+    }
+    config
 }
 
 /// The DC operating point a build of `mna` ships (see [`dc_op_config`]).
 pub fn solve_dc_op(
     mna: &MnaSystem,
     netlist: &Netlist,
-    opamp_rail_mode: crate::codegen::OpampRailMode,
+    request: impl Into<DcOpRequest>,
 ) -> Result<dc_op::DcOpResult, CodegenError> {
     let device_slots = CircuitIR::build_device_info_with_mna(netlist, Some(mna))?;
     Ok(dc_op::solve_dc_operating_point(
         mna,
         &device_slots,
-        &dc_op_config(mna, opamp_rail_mode),
+        &dc_op_config(mna, request),
     ))
 }
 
@@ -1659,7 +1691,7 @@ impl CircuitIR {
     ) -> Result<Self, CodegenError> {
         let dc_op_result = match dc_op_result {
             Some(dc) => dc,
-            None => solve_dc_op(mna, netlist, config.opamp_rail_mode)?,
+            None => solve_dc_op(mna, netlist, config)?,
         };
         let mut ir = Self::build_dk(kernel, mna, netlist, config, &dc_op_result, None)?;
         Self::refuse_self_starting_on_dk(&ir)?;
@@ -2254,7 +2286,7 @@ impl CircuitIR {
 
         let has_dc_sources = kernel.rhs_const.iter().any(|&v| v != 0.0);
 
-        let dc_config = dc_op_config(mna, config.opamp_rail_mode);
+        let dc_config = dc_op_config(mna, config);
         // Check DC OP significance on the truncated vector (n_aug), not the full
         // n_dc vector which includes inductor branch currents.
         let dc_op_len = dc_result.v_node.len();
@@ -2481,7 +2513,7 @@ impl CircuitIR {
     ) -> Result<Self, CodegenError> {
         let dc_op_result = match dc_op_result {
             Some(dc) => dc,
-            None => solve_dc_op(mna, netlist, config.opamp_rail_mode)?,
+            None => solve_dc_op(mna, netlist, config)?,
         };
         let mut ir = Self::build_nodal(mna, netlist, config, &dc_op_result, None)?;
         let Some(p) = Self::ring_promotion(&mut ir, config)? else {
@@ -2979,7 +3011,7 @@ impl CircuitIR {
 
         // The DC OP was solved on this MNA (`mna.g`, which still has the full
         // op-amp Gm; only the `aug.g` copy was stripped).
-        let dc_config = dc_op_config(mna, config.opamp_rail_mode);
+        let dc_config = dc_op_config(mna, config);
         // Build device info with MNA so FA reductions are reflected in dimensions
         let device_slots = Self::build_device_info_with_mna(netlist, Some(mna))?;
 
@@ -3562,11 +3594,8 @@ impl CircuitIR {
         }
         Self::resolve_mosfet_nodes(&mut device_slots, mna);
 
-        let dc_result = dc_op::solve_dc_operating_point(
-            mna,
-            &device_slots,
-            &dc_op_config(mna, config.opamp_rail_mode),
-        );
+        let dc_result =
+            dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config(mna, config));
 
         let mut forward_active = std::collections::HashSet::new();
         for (slot_idx, slot) in device_slots.iter().enumerate() {
@@ -3808,11 +3837,8 @@ impl CircuitIR {
             return std::collections::HashMap::new();
         }
 
-        let dc_result = dc_op::solve_dc_operating_point(
-            mna,
-            &device_slots,
-            &dc_op_config(mna, config.opamp_rail_mode),
-        );
+        let dc_result =
+            dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config(mna, config));
         let v_at = |n: usize| -> f64 {
             if n > 0 && n - 1 < dc_result.v_node.len() {
                 dc_result.v_node[n - 1]

@@ -280,6 +280,10 @@ enum Commands {
         /// only; the build still warns.
         #[arg(help_heading = EXPERT_HEADING, long)]
         allow_unconverged_dc_op: bool,
+        /// Test-only: the DC operating point's Newton budget per solve
+        /// attempt, for the unconverged-DC-OP refusal's witness. Hidden.
+        #[arg(long, hide = true)]
+        dc_op_max_iterations: Option<usize>,
 
         /// Emit `CircuitState::recompute_dc_op()` for runtime DC operating
         /// point re-solve after pot/switch changes.
@@ -544,6 +548,10 @@ enum Commands {
         /// only; the build still warns.
         #[arg(help_heading = EXPERT_HEADING, long)]
         allow_unconverged_dc_op: bool,
+        /// Test-only: the DC operating point's Newton budget per solve
+        /// attempt, for the unconverged-DC-OP refusal's witness. Hidden.
+        #[arg(long, hide = true)]
+        dc_op_max_iterations: Option<usize>,
 
         /// Use backward Euler integration instead of trapezoidal.
         /// Unconditionally stable — fixes divergence in high-gain feedback
@@ -751,6 +759,10 @@ enum Commands {
         /// only; the build still warns.
         #[arg(help_heading = EXPERT_HEADING, long)]
         allow_unconverged_dc_op: bool,
+        /// Test-only: the DC operating point's Newton budget per solve
+        /// attempt, for the unconverged-DC-OP refusal's witness. Hidden.
+        #[arg(long, hide = true)]
+        dc_op_max_iterations: Option<usize>,
 
         /// Use backward Euler integration instead of trapezoidal.
         /// Mirrors `compile --backward-euler`.
@@ -836,6 +848,10 @@ enum Commands {
         /// build refuses that by default).
         #[arg(help_heading = EXPERT_HEADING, long)]
         allow_unconverged_dc_op: bool,
+        /// Test-only: the DC operating point's Newton budget per solve
+        /// attempt, for the unconverged-DC-OP refusal's witness. Hidden.
+        #[arg(long, hide = true)]
+        dc_op_max_iterations: Option<usize>,
     },
 
     /// List available nodes in a netlist
@@ -1060,6 +1076,7 @@ fn main() -> Result<()> {
             noise,
             noise_seed,
             allow_unconverged_dc_op,
+            dc_op_max_iterations,
             emit_dc_op_recompute,
             name,
             mono,
@@ -1193,6 +1210,7 @@ fn main() -> Result<()> {
                     noise_seed,
                     emit_dc_op_recompute,
                     allow_unconverged_dc_op,
+                    dc_op_max_iterations,
                     plugin_name: name.as_deref(),
                     mono,
                     wet_dry_mix,
@@ -1300,6 +1318,7 @@ fn main() -> Result<()> {
             noise,
             noise_seed,
             allow_unconverged_dc_op,
+            dc_op_max_iterations,
             backward_euler,
             force_trap,
             max_iter,
@@ -1395,6 +1414,7 @@ fn main() -> Result<()> {
                     noise_mode,
                     noise_seed,
                     allow_unconverged_dc_op,
+                    dc_op_max_iterations,
                     backward_euler,
                     force_trap,
                     max_iter,
@@ -1431,6 +1451,7 @@ fn main() -> Result<()> {
             noise,
             noise_seed,
             allow_unconverged_dc_op,
+            dc_op_max_iterations,
             backward_euler,
             force_trap,
             max_iter,
@@ -1514,6 +1535,7 @@ fn main() -> Result<()> {
                     noise_mode,
                     noise_seed,
                     allow_unconverged_dc_op,
+                    dc_op_max_iterations,
                     backward_euler,
                     force_trap,
                     max_iter,
@@ -1534,6 +1556,7 @@ fn main() -> Result<()> {
             tube_grid_fa,
             pot_overrides,
             allow_unconverged_dc_op,
+            dc_op_max_iterations,
         } => {
             if sample_rate <= 0.0 || !sample_rate.is_finite() {
                 anyhow::bail!(
@@ -1588,6 +1611,7 @@ fn main() -> Result<()> {
                     tube_grid_fa: &tube_grid_fa,
                     pot_overrides: &pot_overrides,
                     allow_unconverged_dc_op,
+                    dc_op_max_iterations,
                 },
             )
         }
@@ -1708,6 +1732,8 @@ struct CompileOptions<'a> {
     noise_seed: u64,
     emit_dc_op_recompute: bool,
     allow_unconverged_dc_op: bool,
+    /// Test-only DC-OP Newton budget (hidden `--dc-op-max-iterations`).
+    dc_op_max_iterations: Option<usize>,
     plugin_name: Option<&'a str>,
     mono: bool,
     wet_dry_mix: bool,
@@ -1752,6 +1778,7 @@ fn compile_circuit_source(
         noise_seed,
         emit_dc_op_recompute,
         allow_unconverged_dc_op,
+        dc_op_max_iterations,
         plugin_name,
         mono,
         wet_dry_mix,
@@ -1873,6 +1900,7 @@ fn compile_circuit_source(
         inject_runtime: true,
         disable_unit_variation: false,
         allow_unconverged_dc_op,
+        dc_op_max_iterations,
         output_clamp_auto: false,
     };
     let melange_solver::build::Built {
@@ -2696,6 +2724,8 @@ struct SimulateOptions<'a> {
     /// `--allow-unconverged-dc-op`: build even when the DC operating point did
     /// not converge.
     allow_unconverged_dc_op: bool,
+    /// Test-only DC-OP Newton budget (hidden `--dc-op-max-iterations`).
+    dc_op_max_iterations: Option<usize>,
     backward_euler: bool,
     force_trap: bool,
     /// Nodal sub-path override (`--nodal-subpath`). `Auto` for `simulate`,
@@ -2746,6 +2776,8 @@ struct AnalyzeOptions<'a> {
     /// `--allow-unconverged-dc-op`: build even when the DC operating point did
     /// not converge.
     allow_unconverged_dc_op: bool,
+    /// Test-only DC-OP Newton budget (hidden `--dc-op-max-iterations`).
+    dc_op_max_iterations: Option<usize>,
     backward_euler: bool,
     force_trap: bool,
     /// Nodal sub-path override (`--nodal-subpath`).
@@ -3071,6 +3103,7 @@ fn simulate_circuit_source(
         inject_runtime: true,
         disable_unit_variation: false,
         allow_unconverged_dc_op: opts.allow_unconverged_dc_op,
+        dc_op_max_iterations: opts.dc_op_max_iterations,
         output_clamp_auto: false,
     };
     let built =
@@ -3494,6 +3527,7 @@ fn analyze_freq_response(
         noise_mode,
         noise_seed,
         allow_unconverged_dc_op,
+        dc_op_max_iterations,
         backward_euler,
         force_trap,
         max_iter,
@@ -3556,6 +3590,7 @@ fn analyze_freq_response(
         inject_runtime: false,
         disable_unit_variation: false,
         allow_unconverged_dc_op,
+        dc_op_max_iterations,
         output_clamp_auto: false,
     };
     let built =
@@ -4583,6 +4618,8 @@ struct DcOpOptions<'a> {
     tube_grid_fa: &'a str,
     pot_overrides: &'a [String],
     allow_unconverged_dc_op: bool,
+    /// Test-only DC-OP Newton budget (hidden `--dc-op-max-iterations`).
+    dc_op_max_iterations: Option<usize>,
 }
 
 /// `melange dc-op`: the operating point the build ships. The circuit is
@@ -4642,6 +4679,7 @@ fn run_dc_op(circuit_source: &circuits::CircuitSource, opts: &DcOpOptions<'_>) -
         inject_runtime: true,
         disable_unit_variation: false,
         allow_unconverged_dc_op: opts.allow_unconverged_dc_op,
+        dc_op_max_iterations: opts.dc_op_max_iterations,
         output_clamp_auto: false,
     };
     // The build's own lines go to stderr: stdout is the report (JSON-clean).

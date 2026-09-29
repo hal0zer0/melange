@@ -173,24 +173,17 @@ fn dc_op_needs_an_input_port_like_compile() {
     assert!(stderr.contains("Input node 'in' not found"), "{stderr}");
 }
 
-/// A high-gain op-amp whose output sits beyond its rail at rest, driving a BJT
-/// base, under `--opamp-rail-mode boyle-diodes` (the rail is a pair of catch
-/// diodes): its DC operating point does not converge (open finding; the same
-/// deck converges under every other rail mode).
-const UNCONVERGED: &str = "Railed op-amp into a BJT base, catch-diode rail
-Vref ref 0 DC 1
-R1 in inv 10k
-R2 inv oa 100k
-U1 ref inv oa OA1
-Rload oa 0 1k
-Rb oa b 1meg
-Q1 c b 0 QN
-Rc vcc c 4.7k
-Vcc vcc 0 DC 12
-Co c out 1u
-Rl out 0 100k
-.model OA1 OA(AOL=200000 VCC=9 VEE=-9)
-.model QN NPN(IS=1e-14 BF=100)
+/// A diode biased from a 9 V supply. Every verb here runs with the hidden
+/// test-only `--dc-op-max-iterations 1`, which its operating point cannot
+/// converge in, so the refusal is witnessed without depending on an open
+/// convergence bug.
+const UNCONVERGED: &str = "Biased diode
+Vcc vcc 0 DC 9
+Rb vcc out 10k
+D1 out 0 DX
+Rin in out 10k
+C1 out 0 10n
+.model DX D(IS=1e-14)
 ";
 
 #[test]
@@ -204,20 +197,20 @@ fn an_unconverged_operating_point_is_refused_unless_allowed() {
             "code",
             "-o",
             rs.to_str().unwrap(),
-            "--opamp-rail-mode",
-            "boyle-diodes",
+            "--dc-op-max-iterations",
+            "1",
         ],
         &deck,
     );
-    let dc_op = melange(&["dc-op", "--opamp-rail-mode", "boyle-diodes"], &deck);
+    let dc_op = melange(&["dc-op", "--dc-op-max-iterations", "1"], &deck);
     let dc_op_allowed = melange(
         &[
             "dc-op",
             "--format",
             "json",
             "--allow-unconverged-dc-op",
-            "--opamp-rail-mode",
-            "boyle-diodes",
+            "--dc-op-max-iterations",
+            "1",
         ],
         &deck,
     );

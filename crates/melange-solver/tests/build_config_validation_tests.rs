@@ -77,12 +77,71 @@ fn the_valid_factors_still_build_on_both_routes() {
     }
 }
 
-/// A high-gain op-amp whose linear output (10.87 V) sits beyond its 9 V rail
-/// at rest, driving a BJT base, under `BoyleDiodes` (the rail is a pair of
-/// catch diodes on an internal gain node): the DC operating point does not
-/// converge today (open finding; the same deck converges under every other
-/// rail mode). The build refuses to ship a start that is not a solution.
-const UNCONVERGED_DC_OP: &str = "\
+/// A diode biased from a 9 V supply: its linear start puts the junction at
+/// about 4.5 V, so its operating point takes Newton more than one iteration.
+const BIASED_DIODE: &str = "\
+Biased diode
+Vcc vcc 0 DC 9
+Rb vcc out 10k
+D1 out 0 DX
+Rin in out 10k
+C1 out 0 10n
+.model DX D(IS=1e-14)
+";
+
+/// A one-iteration DC-OP Newton budget (the test-only knob): the biased
+/// diode's operating point cannot converge in it, so the build is refused
+/// without depending on any open convergence bug.
+fn one_dc_op_iteration(o: &mut melange_solver::build::BuildOptions) {
+    o.dc_op_max_iterations = Some(1);
+}
+
+#[test]
+fn an_unconverged_dc_operating_point_is_refused() {
+    let config = support::config_for_spice(BIASED_DIODE, 48000.0);
+    for solver in ["auto", "nodal"] {
+        let err = match support::try_build_shipped_with(
+            BIASED_DIODE,
+            &config,
+            solver,
+            one_dc_op_iteration,
+        ) {
+            Ok(_) => panic!("--solver {solver}: an unconverged DC OP must be refused"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("the DC operating point did not converge")
+                && err.contains("--allow-unconverged-dc-op"),
+            "--solver {solver}: {err}"
+        );
+    }
+}
+
+#[test]
+fn allow_unconverged_dc_op_builds_it_and_says_so_in_the_code() {
+    let config = support::config_for_spice(BIASED_DIODE, 48000.0);
+    let built = support::try_build_shipped_with(BIASED_DIODE, &config, "auto", |o| {
+        one_dc_op_iteration(o);
+        o.allow_unconverged_dc_op = true;
+    })
+    .expect("--allow-unconverged-dc-op builds it");
+    assert!(!built.dc_op.converged);
+    assert!(
+        built
+            .generated
+            .code
+            .contains("pub const DC_OP_CONVERGED: bool = false;"),
+        "the generated code records the unconverged start"
+    );
+}
+
+/// OPEN FINDING. A high-gain op-amp whose linear output (10.87 V) sits beyond
+/// its 9 V rail at rest, driving a BJT base, under `BoyleDiodes` (the rail is
+/// a pair of catch diodes on an internal gain node): the DC operating point
+/// does not converge, so the build is refused. The same deck converges under
+/// every other rail mode. When a fix resolves it, this test fails: turn it
+/// into a positive test with the operating point.
+const RAILED_BJT_CATCH_DIODE_RAIL: &str = "\
 Railed op-amp into a BJT base, catch-diode rail
 Vref ref 0 DC 1
 R1 in inv 10k
@@ -99,41 +158,16 @@ Rl out 0 100k
 .model QN NPN(IS=1e-14 BF=100)
 ";
 
-fn unconverged_config() -> melange_solver::codegen::CodegenConfig {
-    let mut config = support::config_for_spice(UNCONVERGED_DC_OP, 48000.0);
+#[test]
+fn open_finding_a_railed_bjt_deck_under_catch_diodes_has_no_dc_op() {
+    let mut config = support::config_for_spice(RAILED_BJT_CATCH_DIODE_RAIL, 48000.0);
     config.opamp_rail_mode = melange_solver::codegen::OpampRailMode::BoyleDiodes;
-    config
-}
-
-#[test]
-fn an_unconverged_dc_operating_point_is_refused() {
-    let config = unconverged_config();
-    for solver in ["auto", "nodal"] {
-        let err = match support::try_build_shipped(UNCONVERGED_DC_OP, &config, solver) {
-            Ok(_) => panic!("--solver {solver}: an unconverged DC OP must be refused"),
-            Err(e) => e,
-        };
-        assert!(
-            err.contains("the DC operating point did not converge")
-                && err.contains("--allow-unconverged-dc-op"),
-            "--solver {solver}: {err}"
-        );
-    }
-}
-
-#[test]
-fn allow_unconverged_dc_op_builds_it_and_says_so_in_the_code() {
-    let config = unconverged_config();
-    let built = support::try_build_shipped_with(UNCONVERGED_DC_OP, &config, "auto", |o| {
-        o.allow_unconverged_dc_op = true;
-    })
-    .expect("--allow-unconverged-dc-op builds it");
-    assert!(!built.dc_op.converged);
+    let err = match support::try_build_shipped(RAILED_BJT_CATCH_DIODE_RAIL, &config, "auto") {
+        Ok(_) => panic!("the open finding is resolved: make this a positive test"),
+        Err(e) => e,
+    };
     assert!(
-        built
-            .generated
-            .code
-            .contains("pub const DC_OP_CONVERGED: bool = false;"),
-        "the generated code records the unconverged start"
+        err.contains("the DC operating point did not converge"),
+        "{err}"
     );
 }
