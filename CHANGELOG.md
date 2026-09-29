@@ -24,6 +24,16 @@ generated state is smaller.
 
 ### Fixed
 
+- **`TAMB` on a diode or BJT card now sets the device's temperature**, as
+  SPICE's `.temp` does. It was only the starting point of self-heating: a card
+  without `RTH` ran at 27 °C whatever `TAMB` said, and a card with `RTH` read
+  its `IS`, `BF` and `BR` as if they had been measured at `TAMB` (and a
+  diode's thermal voltage stayed at 27 °C). The card is now scaled from 27 °C
+  to `TAMB` with SPICE's laws (`IS` through `XTI`/`EG`, `BF`/`BR` through
+  `XTB`, `ISE`/`ISC`, and the thermal voltage), and self-heating moves on from
+  there. Operating points at 60 °C match ngspice to about 1 µV. Cards without
+  `TAMB` are unchanged.
+
 - **A diode `.model` card carrying `VJ`, `M`, `FC` or `TT` now compiles.**
   These are on every vendor 1N4148-class card, and melange refused the card
   as having an unknown parameter. melange still does not model them (the

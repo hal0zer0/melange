@@ -9485,8 +9485,10 @@ impl RustEmitter {
     /// - Diode: `N·VT(T)` scales linearly; `IS(T)` divides both exponents by
     ///   the ideality factor N (SPICE3f5 diode law:
     ///   `IS(T) = IS·(Tj/TAMB)^(XTI/N)·exp((EG/(N·vt_nom))·(1-TAMB/Tj))`).
-    ///   N is recovered at codegen time as `dp.n_vt / VT_ROOM`, the same
-    ///   constant `resolve_diode_params` used to build `n_vt = N·VT_ROOM`.
+    ///   `IS_NOM` and `N_VT_NOM` are the card's values at TAMB
+    ///   (`resolve_diode_params` scales them from TNOM), so the law composes.
+    ///   N is recovered at codegen time as `dp.n_vt / Vt(TAMB)`, the thermal
+    ///   voltage `resolve_diode_params` used to build `n_vt = N·Vt(TAMB)`.
     /// - Triode: Tj only — the Koren coefficients are untouched; the drift
     ///   rides the `VBIAS_ALPHA·(Tj-TAMB)` Vgk shift at the NR call sites.
     fn emit_self_heating_thermal_updates(code: &mut String, ir: &CircuitIR) {
@@ -9541,8 +9543,9 @@ impl RustEmitter {
                 DeviceParams::Diode(dp) if dp.has_self_heating() => {
                     let s = slot.start_idx;
                     // SPICE3f5 diode law divides both IS(T) exponents by the
-                    // ideality factor N. n_vt was built as N·VT_ROOM.
-                    let n_ideality = dp.n_vt / melange_primitives::VT_ROOM;
+                    // ideality factor N. n_vt was built as N·Vt(TAMB).
+                    let n_ideality = dp.n_vt
+                        / (melange_primitives::VT_ROOM * (dp.tamb / melange_primitives::T_NOM));
                     code.push_str(&format!(
                         "    {{ // Diode {dev_num} self-heating thermal update\n\
                          \x20       let id = i_nl[{s}];\n\

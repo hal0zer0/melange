@@ -82,9 +82,10 @@ const CASES: &[Case] = &[
             ("CTH", "1e-4", "1e-3", Rich),
             ("XTI", "3", "2", Rich),
             ("EG", "1.11", "0.69", Rich),
-            ("TAMB", "300.15", "320", Rich),
+            // The device temperature: acts on its own, as SPICE's `.temp`.
+            ("TAMB", "", "320", Alone),
         ],
-        alone_only: &[],
+        alone_only: &["TAMB"],
     },
     Case {
         class: ModelClass::Bjt,
@@ -122,7 +123,7 @@ const CASES: &[Case] = &[
             ("XTI", "3", "2", Rich),
             ("XTB", "1.5", "1", Rich),
             ("EG", "1.11", "0.69", Rich),
-            ("TAMB", "300.15", "320", Rich),
+            ("TAMB", "", "320", Alone),
             ("KF", "1e-16", "1e-14", Noise),
             ("AF", "1", "1.3", Noise),
             ("VT", "", "0.03", Alone),
@@ -131,7 +132,7 @@ const CASES: &[Case] = &[
             ("JBF", "", "0.01", Alone),
             ("JBR", "", "0.001", Alone),
         ],
-        alone_only: &["VT", "VA", "VB", "JBF", "JBR"],
+        alone_only: &["TAMB", "VT", "VA", "VB", "JBF", "JBR"],
     },
     Case {
         class: ModelClass::Jfet,

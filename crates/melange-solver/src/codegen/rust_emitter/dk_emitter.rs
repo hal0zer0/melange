@@ -3219,9 +3219,10 @@ impl RustEmitter {
                     //   IS(T) = IS_NOM · (Tj/TAMB)^(XTI/N)
                     //                  · exp((EG/(N·vt_nom)) · (1 − TAMB/Tj))
                     // N is not stored separately in DiodeParams — recover it
-                    // from n_vt = N · VT_ROOM (ir/mod.rs resolve_diode_params)
+                    // from n_vt = N · Vt(TAMB) (ir/mod.rs resolve_diode_params)
                     // and bake it into the emitted expression at codegen time.
-                    let n_emission = dp.n_vt / melange_primitives::VT_ROOM;
+                    let n_emission = dp.n_vt
+                        / (melange_primitives::VT_ROOM * (dp.tamb / melange_primitives::T_NOM));
                     thermal_update.push_str(&format!(
                             "    {{ // Diode {dev_num} self-heating thermal update\n\
                              \x20       let id = i_nl[{s}];\n\

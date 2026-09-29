@@ -69,7 +69,8 @@ and not reported:
 | Triode/pentode MU_B, EX_B | SVAR > 0 (SVAR > 0 without MU_B is refused) |
 | AF | KF is set |
 | KF, AF, SHOT_GAMMA2, PARTITION_F, op-amp EN, IN | `--noise` is on |
-| CTH, XTI, EG, XTB, TAMB, VBIAS_ALPHA | RTH is set (self-heating) |
+| Diode/BJT XTI, EG, XTB | the device is not at TNOM: TAMB ≠ 27 °C, or RTH is set (self-heating) |
+| CTH, VBIAS_ALPHA, triode TAMB | RTH is set (self-heating) |
 | Op-amp VSAT | VCC/VEE are absent (they take priority) |
 | Op-amp GBW | VCC, VEE and VSAT are absent: it only defaults the rails to ±13 V; it is not a bandwidth pole, and a notice says so |
 | Op-amp VOH_DROP, VOL_DROP | `--opamp-rail-mode boyle-diodes`; hard and active-set pin at VCC/VEE |
@@ -118,6 +119,30 @@ silicon_1n4148()   IS=2.52e-9, n=1.752 (signal diode)
 silicon_ideal()    IS=1e-14, n=1.0    (textbook ideal)
 ```
 
+### Device Temperature (TAMB, Shared With BJT)
+
+A card's parameters are SPICE's, extracted at TNOM = 27 °C (300.15 K). A
+diode or BJT sits at `TAMB` (default TNOM), as SPICE's `.temp`: when the card
+is resolved (`resolve_diode_params` / `resolve_bjt_params`) its parameters
+are scaled from TNOM to TAMB with the SPICE3 laws (ngspice `diotemp.c`,
+`bjttemp.c`), with `t = TAMB/TNOM` and `Vt = k·TAMB/q`:
+
+```
+Diode:  IS  ← IS · t^(XTI/N) · exp((t − 1)·EG/(N·Vt))
+        N·VT ← N·Vt
+BJT:    factlog = (t − 1)·EG/Vt + XTI·ln t,   bfactor = t^XTB
+        IS ← IS·e^factlog,   BF, BR ← BF·bfactor, BR·bfactor
+        ISE ← ISE·e^(factlog/NE)/bfactor,   ISC ← ISC·e^(factlog/NC)/bfactor
+        VT ← VT·t
+```
+
+At TAMB = TNOM every factor is exactly 1. Gated against ngspice-42 `.op` at
+`.temp 60` and `.temp 27` (`tools/melange-cli/tests/device_temperature.rs`,
+agreement ~1 µV). Not scaled: the junction capacitances (SPICE scales CJO,
+CJE, CJC and VJ with temperature), RS/RB/RC/RE, BV, and the JFET and MOSFET
+(no temperature law). Behavioural models (op-amp, VCA, tubes) have none; a
+triode's `TAMB` is only its self-heating ambient.
+
 ### Self-Heating (Shared With BJT)
 
 The same quasi-static electrothermal model used on BJTs applies to
@@ -132,14 +157,18 @@ tau    = Rth · Cth
 Tj    += (Tss − Tj) · (1 − exp(−dt/tau))  (exact exponential step)
 Tj     = clamp(Tj, 200 K, 500 K)          (runaway guard)
 
-IS(T)   = IS_nom · (Tj/Tnom)^(XTI/N) · exp(EG/(N·VT_nom) · (1 − Tnom/Tj))
-N·VT(T) = (N·VT)_nom · (Tj/Tnom)
+IS(T)   = IS_amb · (Tj/TAMB)^(XTI/N) · exp(EG/(N·VT_amb) · (1 − TAMB/Tj))
+N·VT(T) = (N·VT)_amb · (Tj/TAMB)
 ```
+
+`IS_amb`, `(N·VT)_amb` and `VT_amb = k·TAMB/q` are the card's values at TAMB
+(see Device Temperature). The law composes over temperature, so a junction
+at Tj sees exactly the SPICE value IS(TNOM → Tj).
 
 Note the diode IS(T) divides **both** the XTI power and the EG exponent by
 the emission coefficient N — SPICE3f5/ngspice diode convention (the BJT
 IS(T) below has no such division). N is not stored separately in
-`DiodeParams`; codegen recovers it as `n_vt / VT_ROOM` and bakes it in.
+`DiodeParams`; codegen recovers it as `n_vt / Vt(TAMB)` and bakes it in.
 The `N·VT` scaling exploits the fact that `N·VT = N·k·T/q` scales
 linearly in T, so we don't need to decompose the stored `n_vt` product.
 
@@ -270,11 +299,14 @@ Tj     = clamp(Tj, 200 K, 500 K)
 
 - Temperature-dependent saturation current (SPICE3f5 exact, BJT convention —
   no /N division, unlike the diode form above):
-  `IS(T) = IS_nom * (Tj/Tnom)^XTI * exp(EG/VT_nom * (1 - Tnom/Tj))`
-  where `VT_nom = k·Tnom/q`. This is the SPICE identity
-  `exp(EG/vt(T) * (T/Tnom - 1))` rewritten at the nominal thermal voltage —
-  do not "simplify" to `exp(EG/VT_nom * (Tj/Tnom - 1))`, which differs by a
-  factor of `Tj/Tnom` in the exponent argument.
+  `IS(T) = IS_amb * (Tj/TAMB)^XTI * exp(EG/VT_amb * (1 - TAMB/Tj))`
+  where `IS_amb` is the card's IS at TAMB (see the diode's Device
+  Temperature section) and `VT_amb = k·TAMB/q`. This is the SPICE identity
+  `exp(EG/vt(T) * (T/T0 - 1))` rewritten at the reference thermal voltage —
+  do not "simplify" to `exp(EG/VT_amb * (Tj/TAMB - 1))`, which differs by a
+  factor of `Tj/TAMB` in the exponent argument. BF and BR scale by
+  `(Tj/TAMB)^XTB`; ISE and ISC are held at their TAMB values (SPICE also
+  moves them with Tj).
 - `VT(T) = k * Tj / q` (thermal voltage tracks junction temperature)
 - Zero overhead when disabled (RTH = infinity, the default)
 

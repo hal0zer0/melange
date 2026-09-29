@@ -34,5 +34,5 @@ pub use oversampling::{
 pub use util::{
     db_to_gain, freq_to_midi, gain_to_db, is_valid_audio, lerp, map_range, midi_to_freq, saturate,
     sin_approx, soft_clip, soft_clip_variable, thermal_voltage, triangle_from_phase,
-    variation_hash, variation_range, VT_ROOM,
+    variation_hash, variation_range, T_NOM, VT_ROOM,
 };

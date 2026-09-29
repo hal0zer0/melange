@@ -4886,12 +4886,24 @@ impl CircuitIR {
             )));
         }
 
-        let tamb = Self::lookup_model_param(netlist, model, "TAMB").unwrap_or(300.15);
+        let tamb = Self::lookup_model_param(netlist, model, "TAMB")
+            .unwrap_or(melange_primitives::T_NOM);
         if tamb <= 0.0 || !tamb.is_finite() {
             return Err(CodegenError::InvalidConfig(format!(
                 "diode model TAMB must be positive and finite, got {tamb}"
             )));
         }
+
+        // The card is SPICE's, extracted at TNOM; the device sits at TAMB.
+        // Scale IS and N·Vt there with the SPICE3 diode law (ngspice
+        // `diotemp.c`). Self-heating then moves Tj from TAMB with the same law
+        // written relative to TAMB (`emit_self_heating_thermal_updates`); the
+        // law composes, so a junction at Tj sees exactly IS(TNOM -> Tj). At
+        // TAMB = TNOM every factor is exactly 1.
+        let t = tamb / melange_primitives::T_NOM;
+        let vt = vt * t;
+        let is = is * t.powf(xti / n) * ((t - 1.0) * eg / (n * vt)).exp();
+        validate_positive_finite(is, "diode model IS at TAMB")?;
 
         Self::check_model_params(netlist, model, ModelClass::Diode)?;
         // NOTE: no warn_unresolved_model() here — the diode resolver already
@@ -5152,12 +5164,30 @@ impl CircuitIR {
             )));
         }
 
-        let tamb = Self::lookup_model_param(netlist, model, "TAMB").unwrap_or(300.15);
+        let tamb = Self::lookup_model_param(netlist, model, "TAMB")
+            .unwrap_or(melange_primitives::T_NOM);
         if tamb <= 0.0 || !tamb.is_finite() {
             return Err(CodegenError::InvalidConfig(format!(
                 "BJT model TAMB must be positive and finite, got {tamb}"
             )));
         }
+
+        // The card is SPICE's, extracted at TNOM; the device sits at TAMB.
+        // Scale it there with the SPICE3 BJT law (ngspice `bjttemp.c`): IS
+        // through XTI and EG, BF/BR through XTB, and the leakage currents
+        // ISE/ISC through both. Self-heating then moves Tj from TAMB with the
+        // IS/BF/BR law written relative to TAMB; the law composes. At TAMB =
+        // TNOM every factor is exactly 1.
+        let t = tamb / melange_primitives::T_NOM;
+        let vt = vt * t;
+        let factlog = (t - 1.0) * eg / vt + xti * t.ln();
+        let bfactor = t.powf(xtb);
+        let is = is * factlog.exp();
+        let beta_f = beta_f * bfactor;
+        let beta_r = beta_r * bfactor;
+        let ise = ise * (factlog / ne).exp() / bfactor;
+        let isc = isc * (factlog / nc).exp() / bfactor;
+        validate_positive_finite(is, "BJT model IS at TAMB")?;
 
         Self::check_model_params(netlist, model, ModelClass::Bjt)?;
         Self::warn_unresolved_model(
