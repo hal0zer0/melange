@@ -162,6 +162,10 @@ pub struct BuildOptions {
     /// Parse with `.tolerance` / `.mismatch` jitter off (validate: the reference
     /// deck carries the values as written).
     pub disable_unit_variation: bool,
+    /// Build even when the DC operating point did not converge
+    /// (`--allow-unconverged-dc-op`). By default such a build is refused: its
+    /// generated code would start from a state that is not a solution.
+    pub allow_unconverged_dc_op: bool,
     /// Raise the output clamp to three times the largest DC operating-point
     /// node voltage when that is higher (validate: a high-rail circuit swings
     /// its output tens of volts legitimately; a 10 V clamp would square it).
@@ -1067,6 +1071,41 @@ pub fn assemble(
             other => (other.with_context(|| "Code generation failed")?, dc_op),
         }
     };
+
+    // An operating point that is not a solution is not a place to start from:
+    // the generated code would begin there and slew or ring away from it, with
+    // only a WARN to say so.
+    if !dc_op.converged {
+        let names = mna.node_names_in_index_order();
+        let worst = dc_op
+            .kcl_worst_row
+            .map(|row| {
+                let name = names.get(row + 1).copied().unwrap_or("");
+                if name.is_empty() {
+                    format!(" at row {row}")
+                } else {
+                    format!(" at v({name})")
+                }
+            })
+            .unwrap_or_default();
+        let what = format!(
+            "the DC operating point did not converge ({:?}, {} iterations; KCL residual \
+             {:.3e} A{worst})",
+            dc_op.method, dc_op.iterations, dc_op.kcl_residual_max
+        );
+        if opts.allow_unconverged_dc_op {
+            report!(
+                err,
+                "  WARNING: {what}. Building anyway (--allow-unconverged-dc-op): the \
+                 generated code starts from a state that is not a solution."
+            );
+        } else {
+            bail!(
+                "{what}: the generated code would start from a state that is not a \
+                 solution. --allow-unconverged-dc-op builds it anyway."
+            );
+        }
+    }
 
     Ok(Assembled {
         config,

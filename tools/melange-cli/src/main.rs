@@ -276,6 +276,12 @@ enum Commands {
         /// init. Nonzero → deterministic noise (same seed → bit-identical output).
         #[arg(long, value_name = "SEED", default_value = "0")]
         noise_seed: u64,
+        /// Build even when the DC operating point did not converge. By default
+        /// the build is refused: its generated code would start from a state that
+        /// is not a solution and slew or ring away from it. For deliberate use
+        /// only; the build still warns.
+        #[arg(help_heading = EXPERT_HEADING, long)]
+        allow_unconverged_dc_op: bool,
 
         /// Emit `CircuitState::recompute_dc_op()` for runtime DC operating
         /// point re-solve after pot/switch changes.
@@ -534,6 +540,12 @@ enum Commands {
         /// Master noise seed (u64). `0` → entropy from system clock; nonzero → deterministic.
         #[arg(long, value_name = "SEED", default_value = "0")]
         noise_seed: u64,
+        /// Build even when the DC operating point did not converge. By default
+        /// the build is refused: its generated code would start from a state that
+        /// is not a solution and slew or ring away from it. For deliberate use
+        /// only; the build still warns.
+        #[arg(help_heading = EXPERT_HEADING, long)]
+        allow_unconverged_dc_op: bool,
 
         /// Use backward Euler integration instead of trapezoidal.
         /// Unconditionally stable — fixes divergence in high-gain feedback
@@ -735,6 +747,12 @@ enum Commands {
         /// Mirrors `compile --noise-seed`.
         #[arg(long, value_name = "SEED", default_value = "0")]
         noise_seed: u64,
+        /// Build even when the DC operating point did not converge. By default
+        /// the build is refused: its generated code would start from a state that
+        /// is not a solution and slew or ring away from it. For deliberate use
+        /// only; the build still warns.
+        #[arg(help_heading = EXPERT_HEADING, long)]
+        allow_unconverged_dc_op: bool,
 
         /// Use backward Euler integration instead of trapezoidal.
         /// Mirrors `compile --backward-euler`.
@@ -762,20 +780,20 @@ enum Commands {
     },
 
     /// Compute DC operating point and print node voltages
+    ///
+    /// The operating point `compile` ships with the same flags: the circuit is
+    /// built exactly as `compile` builds it (ports, `.inject`, reductions,
+    /// route) and the vector reported is the one its generated code embeds as
+    /// `DC_OP`.
     DcOp {
         /// Input SPICE netlist file or circuit reference
         input: String,
 
-        /// Input node name. OPTIONAL for `dc-op`: a DC operating point is a
-        /// bias solve with the input at 0 V, so it does not need a signal
-        /// input. When given, the node's Thevenin source conductance is
-        /// stamped exactly as compile/simulate/analyze stamp it. When omitted,
-        /// `in` is used if the circuit has such a node (so decks that already
-        /// worked are unchanged), and otherwise no input port is stamped at
-        /// all. An explicitly-named node that does not exist is still an
-        /// error.
-        #[arg(short, long)]
-        input_node: Option<String>,
+        /// Input node name. As in `compile`: the input port's source
+        /// conductance is part of the circuit the operating point is solved
+        /// for, and a deck without the node is refused.
+        #[arg(short, long, default_value = "in")]
+        input_node: String,
 
         /// Override input resistance (ohms). Default: 1Ω, or from
         /// .input_impedance directive. An explicit flag beats the directive,
@@ -786,6 +804,40 @@ enum Commands {
         /// Output format: "human" (default) or "json"
         #[arg(short = 'f', long, default_value = "human")]
         format: String,
+
+        /// Sample rate in Hz, as for `compile` (the route can depend on it).
+        #[arg(short, long, default_value = "48000")]
+        sample_rate: f64,
+
+        /// Oversampling factor, as for `compile` (the route can depend on it).
+        #[arg(long)]
+        oversampling: Option<usize>,
+
+        /// Solver: auto (default), dk, nodal — as for `compile`.
+        #[arg(help_heading = EXPERT_HEADING, long, default_value = "auto")]
+        solver: String,
+
+        /// Op-amp rail mode, as for `compile`.
+        #[arg(help_heading = EXPERT_HEADING, long, default_value = "auto")]
+        opamp_rail_mode: String,
+
+        /// Forward-active BJT reduction, as for `compile` (auto|off|force).
+        #[arg(help_heading = EXPERT_HEADING, long, default_value = "off")]
+        bjt_fa: String,
+
+        /// Grid-off pentode reduction, as for `compile` (auto|on|off).
+        #[arg(help_heading = EXPERT_HEADING, long, default_value = "auto")]
+        tube_grid_fa: String,
+
+        /// Set a pot: "Label=value" or "Rname=value", as for `simulate` and
+        /// `analyze`. May be repeated.
+        #[arg(long = "pot", value_name = "NAME=VALUE")]
+        pot_overrides: Vec<String>,
+
+        /// Report the operating point even when it did not converge (every
+        /// build refuses that by default).
+        #[arg(help_heading = EXPERT_HEADING, long)]
+        allow_unconverged_dc_op: bool,
     },
 
     /// List available nodes in a netlist
@@ -1009,6 +1061,7 @@ fn main() -> Result<()> {
             allow_static_glow_on_full_lu,
             noise,
             noise_seed,
+            allow_unconverged_dc_op,
             emit_dc_op_recompute,
             name,
             mono,
@@ -1140,6 +1193,7 @@ fn main() -> Result<()> {
                 noise_mode,
                 noise_seed,
                 emit_dc_op_recompute,
+                allow_unconverged_dc_op,
                 name.as_deref(),
                 mono,
                 wet_dry_mix,
@@ -1243,6 +1297,7 @@ fn main() -> Result<()> {
             oversampling,
             noise,
             noise_seed,
+            allow_unconverged_dc_op,
             backward_euler,
             force_trap,
             max_iter,
@@ -1337,6 +1392,7 @@ fn main() -> Result<()> {
                     oversampling,
                     noise_mode,
                     noise_seed,
+                    allow_unconverged_dc_op,
                     backward_euler,
                     force_trap,
                     max_iter,
@@ -1372,6 +1428,7 @@ fn main() -> Result<()> {
             nodal_subpath,
             noise,
             noise_seed,
+            allow_unconverged_dc_op,
             backward_euler,
             force_trap,
             max_iter,
@@ -1454,6 +1511,7 @@ fn main() -> Result<()> {
                     opamp_rail_mode: rail_mode,
                     noise_mode,
                     noise_seed,
+                    allow_unconverged_dc_op,
                     backward_euler,
                     force_trap,
                     max_iter,
@@ -1466,14 +1524,69 @@ fn main() -> Result<()> {
             input_node,
             input_resistance,
             format,
+            sample_rate,
+            oversampling,
+            solver,
+            opamp_rail_mode,
+            bjt_fa,
+            tube_grid_fa,
+            pot_overrides,
+            allow_unconverged_dc_op,
         } => {
+            if sample_rate <= 0.0 || !sample_rate.is_finite() {
+                anyhow::bail!(
+                    "Sample rate must be positive and finite, got {}",
+                    sample_rate
+                );
+            }
+            if let Some(n) = oversampling {
+                if !matches!(n, 1 | 2 | 4) {
+                    anyhow::bail!("oversampling must be 1, 2, or 4, got {}", n);
+                }
+            }
+            if !matches!(solver.as_str(), "auto" | "dk" | "nodal") {
+                anyhow::bail!(
+                    "Unknown --solver '{}'. Valid values: auto, dk, nodal",
+                    solver
+                );
+            }
+            if !matches!(tube_grid_fa.as_str(), "auto" | "on" | "off") {
+                anyhow::bail!(
+                    "Unknown --tube-grid-fa '{}'. Valid values: auto, on, off",
+                    tube_grid_fa
+                );
+            }
+            if !matches!(bjt_fa.as_str(), "auto" | "off" | "force") {
+                anyhow::bail!(
+                    "Unknown --bjt-fa '{}'. Valid values: auto, off, force",
+                    bjt_fa
+                );
+            }
+            let rail_mode = melange_solver::codegen::OpampRailMode::parse(&opamp_rail_mode)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Unknown --opamp-rail-mode '{}'. Valid values: auto, none, hard, \
+                         active-set, active-set-be, boyle-diodes",
+                        opamp_rail_mode
+                    )
+                })?;
             let circuit_source = circuits::resolve(&input)?;
             eprintln!("Resolved circuit: {}", circuit_source.name());
             run_dc_op(
                 &circuit_source,
-                input_node.as_deref(),
-                input_resistance,
-                &format,
+                &DcOpOptions {
+                    input_node: &input_node,
+                    input_resistance,
+                    format: &format,
+                    sample_rate,
+                    oversampling,
+                    solver: &solver,
+                    opamp_rail_mode: rail_mode,
+                    bjt_fa: &bjt_fa,
+                    tube_grid_fa: &tube_grid_fa,
+                    pot_overrides: &pot_overrides,
+                    allow_unconverged_dc_op,
+                },
             )
         }
         Commands::Nodes { input } => {
@@ -1591,6 +1704,7 @@ fn compile_circuit_source(
     noise_mode: melange_solver::codegen::NoiseMode,
     noise_seed: u64,
     emit_dc_op_recompute: bool,
+    allow_unconverged_dc_op: bool,
     plugin_name: Option<&str>,
     mono: bool,
     wet_dry_mix: bool,
@@ -1711,6 +1825,7 @@ fn compile_circuit_source(
         resolve_taps: true,
         inject_runtime: true,
         disable_unit_variation: false,
+        allow_unconverged_dc_op,
         output_clamp_auto: false,
     };
     let melange_solver::build::Built {
@@ -2514,6 +2629,9 @@ struct SimulateOptions<'a> {
     oversampling: Option<usize>,
     noise_mode: melange_solver::codegen::NoiseMode,
     noise_seed: u64,
+    /// `--allow-unconverged-dc-op`: build even when the DC operating point did
+    /// not converge.
+    allow_unconverged_dc_op: bool,
     backward_euler: bool,
     force_trap: bool,
     /// Nodal sub-path override (`--nodal-subpath`). `Auto` for `simulate`,
@@ -2561,6 +2679,9 @@ struct AnalyzeOptions<'a> {
     opamp_rail_mode: melange_solver::codegen::OpampRailMode,
     noise_mode: melange_solver::codegen::NoiseMode,
     noise_seed: u64,
+    /// `--allow-unconverged-dc-op`: build even when the DC operating point did
+    /// not converge.
+    allow_unconverged_dc_op: bool,
     backward_euler: bool,
     force_trap: bool,
     /// Nodal sub-path override (`--nodal-subpath`).
@@ -2885,6 +3006,7 @@ fn simulate_circuit_source(
         resolve_taps: false,
         inject_runtime: true,
         disable_unit_variation: false,
+        allow_unconverged_dc_op: opts.allow_unconverged_dc_op,
         output_clamp_auto: false,
     };
     let built =
@@ -3306,6 +3428,7 @@ fn analyze_freq_response(
         opamp_rail_mode,
         noise_mode,
         noise_seed,
+        allow_unconverged_dc_op,
         backward_euler,
         force_trap,
         max_iter,
@@ -3367,6 +3490,7 @@ fn analyze_freq_response(
         resolve_taps: false,
         inject_runtime: false,
         disable_unit_variation: false,
+        allow_unconverged_dc_op,
         output_clamp_auto: false,
     };
     let built =
@@ -4381,19 +4505,27 @@ fn dc_op_row_name(row: usize, idx_to_name: &[String], n: usize) -> String {
     }
 }
 
-fn run_dc_op(
-    circuit_source: &circuits::CircuitSource,
-    input_node_name: Option<&str>,
-    input_resistance_flag: Option<f64>,
-    format: &str,
-) -> Result<()> {
-    // Match parse-time node normalization (lowercase, gnd→0).
-    let requested_input: Option<String> =
-        input_node_name.map(melange_solver::parser::normalize_node_name);
+/// Options for `melange dc-op` (see `Commands::DcOp`).
+struct DcOpOptions<'a> {
+    input_node: &'a str,
+    input_resistance: Option<f64>,
+    format: &'a str,
+    sample_rate: f64,
+    oversampling: Option<usize>,
+    solver: &'a str,
+    opamp_rail_mode: melange_solver::codegen::OpampRailMode,
+    bjt_fa: &'a str,
+    tube_grid_fa: &'a str,
+    pot_overrides: &'a [String],
+    allow_unconverged_dc_op: bool,
+}
+
+/// `melange dc-op`: the operating point the build ships. The circuit is
+/// assembled by the one build every verb uses ([`melange_solver::build::assemble`],
+/// up to the IR, where the route and the operating point are settled), so
+/// the vector printed is the one the generated code embeds as `DC_OP`.
+fn run_dc_op(circuit_source: &circuits::CircuitSource, opts: &DcOpOptions<'_>) -> Result<()> {
     use melange_solver::codegen::ir::CircuitIR;
-    use melange_solver::dc_op::solve_dc_operating_point;
-    use melange_solver::mna::MnaSystem;
-    use melange_solver::parser::Netlist;
 
     // Get circuit content
     let netlist_str = match circuit_source {
@@ -4406,107 +4538,59 @@ fn run_dc_op(
         }
     };
 
-    let mut netlist =
-        Netlist::parse(&netlist_str).with_context(|| "Failed to parse SPICE netlist")?;
-
-    if !netlist.subcircuits.is_empty() {
-        netlist
-            .expand_subcircuits()
-            .with_context(|| "Failed to expand subcircuits")?;
-    }
-
-    // Topology gate: the wiring defects a solver cannot see. A typo'd node
-    // name invents a node and floats whatever it was on, and every number
-    // melange prints afterwards is correct for the circuit it was handed. One
-    // implementation for every verb — `melange_solver::topology`.
-    // `dc-op` has no `--output-node`, so on a deck that says nothing about its
-    // own edges the gate can only warn here — see `topology::Finding::severity`.
-    // It DOES know its input port (explicit `-i`, else the `in` fallback this
-    // verb already documents below), and the input conductance is stamped at
-    // that node, so it belongs in the graph.
-    //
-    // A deck that declares its pins with `.port` has stated where its edges
-    // are, which is the knowledge the `-o` would have supplied, so `dc-op`
-    // refuses on it like every other verb (`with_deck_pins`). Decks with no
-    // declaration keep the guess and its warning.
-    let gate_ports = match requested_input.clone() {
-        Some(name) => melange_solver::topology::Ports::inputs_only([name]),
-        None => melange_solver::topology::Ports::inferred(&netlist),
-    }
-    .with_deck_pins(&netlist);
-    melange_solver::pipeline::topology_gate(&netlist, &gate_ports, &|m| println!("{m}"))?;
-
-    // Resolve input resistance: CLI flag > .input_impedance directive > 1Ω
-    // default — matching compile/simulate/analyze. (The flag used to be
-    // silently overridden by the directive.)
-    let r_in = input_resistance_flag
-        .or(netlist.input_impedance)
-        .unwrap_or(1.0);
-    if !(r_in > 0.0 && r_in.is_finite()) {
-        anyhow::bail!("input resistance must be positive and finite, got {}", r_in);
-    }
-
-    // Build MNA (no FA detection — DC OP wants full device dimensions)
-    let mut mna =
-        MnaSystem::from_netlist(&netlist).with_context(|| "Failed to build MNA system")?;
-
-    // Resolve the input port. `-i` is OPTIONAL here: a DC operating point is a
-    // bias solve with the input held at 0 V, so it does not need a signal
-    // input at all. Refusing to report bias voltages because the deck has no
-    // node literally spelled `in` was the wrong shape of error.
-    //
-    //   * `-i NAME` given  -> must exist (hard error, listing the nodes)
-    //   * `-i` omitted     -> use `in` if the circuit has it (decks that
-    //                         already worked keep their exact numbers), else
-    //                         stamp no input port at all.
-    let mut input_port_absent = false;
-    let input_node_idx: Option<usize> = match requested_input.as_deref() {
-        Some(name) => {
-            let raw = mna.node_map.get(name).copied().with_context(|| {
-                let available = mna.node_names_in_index_order();
-                format!(
-                    "Input node '{}' not found. Available: {:?}",
-                    name, available
-                )
-            })?;
-            if raw == 0 {
-                anyhow::bail!("Input node cannot be ground (0). Please specify a non-ground node.");
-            }
-            Some(raw - 1)
-        }
-        None => match mna.node_map.get("in").copied() {
-            Some(0) | None => {
-                input_port_absent = true;
-                None
-            }
-            Some(raw) => Some(raw - 1),
+    let d = melange_solver::codegen::CodegenConfig::default();
+    let build_opts = melange_solver::build::BuildOptions {
+        sample_rate: opts.sample_rate,
+        circuit_name: "dc_op".to_string(),
+        // Match parse-time node normalization (lowercase, gnd→0).
+        input_nodes: vec![melange_solver::parser::normalize_node_name(opts.input_node)],
+        // An operating point has no output.
+        output_nodes: Vec::new(),
+        max_iter: None,
+        tolerance: d.tolerance,
+        output_scale: 1.0,
+        output_clamp: d.output_clamp_v,
+        input_resistance: opts.input_resistance,
+        oversampling: opts.oversampling,
+        dc_block: true,
+        solver: opts.solver.to_string(),
+        backward_euler: false,
+        force_trap: false,
+        tube_grid_fa: opts.tube_grid_fa.to_string(),
+        subsample_fire: d.subsample_fire,
+        subsample_lit_factor: diag_lit_factor(),
+        bjt_fa_mode: parse_bjt_fa_mode(opts.bjt_fa),
+        opamp_rail_mode: opts.opamp_rail_mode,
+        nodal_sub_path_override: d.nodal_sub_path_override,
+        allow_static_glow_on_full_lu: false,
+        noise_mode: d.noise_mode,
+        noise_seed: d.noise_master_seed,
+        emit_dc_op_recompute: false,
+        plugin_format: false,
+        // Without --pot the deck's `.pot` defaults, as `compile` builds it.
+        pot_overrides: if opts.pot_overrides.is_empty() {
+            None
+        } else {
+            Some(opts.pot_overrides.to_vec())
         },
+        resolve_taps: true,
+        inject_runtime: true,
+        disable_unit_variation: false,
+        allow_unconverged_dc_op: opts.allow_unconverged_dc_op,
+        output_clamp_auto: false,
     };
-
-    // Stamp input conductance
-    let input_conductance = 1.0 / r_in;
-    if let Some(idx) = input_node_idx {
-        if idx < mna.n {
-            mna.g[idx][idx] += input_conductance;
-        }
-    }
-
-    // Build device slots and stamp junction caps
+    // The build's own lines go to stderr: stdout is the report (JSON-clean).
+    let assembled =
+        melange_solver::build::assemble(&netlist_str, &build_opts, &|a| eprintln!("{a}"), &|a| {
+            eprintln!("{a}")
+        })
+        .map_err(build_error)?;
+    let format = opts.format;
+    let result = &assembled.dc_op;
+    let mna = &assembled.mna;
     let device_slots =
-        CircuitIR::build_device_info_with_mna(&netlist, Some(&mna)).unwrap_or_default();
-    if !device_slots.is_empty() {
-        mna.stamp_device_junction_caps(&device_slots);
-    }
-
-    // The input conductance is in `mna.g` (stamped above, as the build
-    // stamps it); the DC OP solves the circuit it is given.
-    // A railed op-amp sits where a default compile's rail mode puts it.
-    let dc_config = melange_solver::codegen::ir::dc_op_config(
-        &mna,
-        melange_solver::codegen::OpampRailMode::Auto,
-    );
-
-    let result = solve_dc_operating_point(&mna, &device_slots, &dc_config);
+        CircuitIR::build_device_info_with_mna(&assembled.netlist, Some(mna)).unwrap_or_default();
+    let route = assembled.solver_label;
 
     // Build reverse node map (index → name)
     let mut idx_to_name: Vec<String> = vec!["0".to_string(); mna.n + 1];
@@ -4538,6 +4622,7 @@ fn run_dc_op(
                 .replace('\\', "\\\\")
                 .replace('"', "\\\"")
         );
+        print!("\"solver\":\"{}\",", route);
         print!("\"n\":{},\"m\":{},", mna.n, mna.m);
 
         // Node voltages
@@ -4591,12 +4676,7 @@ fn run_dc_op(
         // Human-readable output
         eprintln!("melange dc-op");
         eprintln!("  {}", format_system_size(mna.n, mna.n, mna.m));
-        if input_port_absent {
-            eprintln!(
-                "  Input port: none (no -i given and this circuit has no node named 'in'); \
-                 solving the unforced bias point."
-            );
-        }
+        eprintln!("  Solver: {route} ({})", assembled.solver_reason);
         eprintln!(
             "  Converged: {} ({:?}, {} iterations)",
             result.converged, result.method, result.iterations

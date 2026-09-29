@@ -40,6 +40,17 @@ generated state is smaller.
   before the build rather than during code generation. No shipped build used
   `boyle-diodes`.
 
+- **`melange dc-op` reports the operating point `compile` ships.** It built
+  its own circuit and left out what the build adds: a `.inject` source's
+  impedance (a common-emitter collector read 6.95 V where the build puts it at
+  3.48 V), the `.linearize` and device reductions, and the route (a
+  self-starting oscillator builds on the nodal solver). It now runs the same
+  build as every other verb, up to the point where the route and the operating
+  point are settled, and prints the vector the generated code embeds. It takes
+  the flags that change that circuit or its route: `--sample-rate`,
+  `--oversampling`, `--solver`, `--opamp-rail-mode`, `--bjt-fa`,
+  `--tube-grid-fa` and `--pot`.
+
 - **A build logs each model warning once.** A build resolves device
   parameters and solves operating points at several steps, and each step
   logged its warnings again: `melange compile` of a one-triode deck printed
@@ -452,6 +463,17 @@ generated state is smaller.
   the line and element they came from.
 
 ### Changed
+
+- **A circuit whose DC operating point does not converge is refused.** Its
+  generated code would start from a state that is not a solution, with only a
+  warning to say so. Every verb now refuses it; `--allow-unconverged-dc-op`
+  (compile, simulate, analyze, dc-op) builds it anyway. No circuit in the
+  regression corpus is affected.
+
+- **`melange dc-op` needs an input port, like `compile`.** It solved the bias
+  point with no input port when the deck had no node named `in`; no build has
+  that circuit (every build stamps its input's source impedance). A deck
+  without `in` now needs `-i`, and is refused otherwise.
 
 - **Generated code no longer carries companion-model inductors.** Every build
   `melange` makes has carried inductors, coupled inductors and transformer

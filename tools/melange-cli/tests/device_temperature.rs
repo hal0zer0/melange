@@ -4,17 +4,18 @@
 //! card with `TAMB` sits at that temperature, with or without self-heating.
 //! The operating points below are compared with ngspice-42 `.op` on the same
 //! deck (the `.model` line without `TAMB`, and `.temp 60` / `.temp 27`),
-//! recorded 2026-09-29. The decks have no input node, so melange's 1 Ω input
-//! stamp does not load them and the two engines agree to about 1 µV.
+//! recorded 2026-09-29. The decks put melange's input port on an isolated
+//! 1 MΩ tap (`in`), so its 1 Ω source loads nothing ngspice sees, and the two
+//! engines agree to about 1 µV.
 
 use std::path::PathBuf;
 use std::process::Command;
 
-const DIODE: &str = "diode\nVcc vcc 0 DC 5\nR1 vcc a 4.7k\nD1 a 0 DX\n\
+const DIODE: &str = "diode\nVcc vcc 0 DC 5\nR1 vcc a 4.7k\nD1 a 0 DX\nRin in 0 1meg\n\
                      .model DX D(IS=2.52n N=1.752 XTI=3 EG=1.11{EXTRA})\n";
 
 const BJT: &str = "bjt\nVcc vcc 0 DC 12\nR1 vcc base 100k\nR2 base 0 22k\nQ1 coll base emit QX\n\
-                   Rc vcc coll 4.7k\nRe emit 0 1k\n\
+                   Rc vcc coll 4.7k\nRe emit 0 1k\nRin in 0 1meg\n\
                    .model QX NPN(IS=1e-14 BF=200 BR=3 XTI=3 XTB=1.5 EG=1.11 ISE=1e-13 NE=1.5 \
                    ISC=1e-14 NC=2{EXTRA})\n";
 

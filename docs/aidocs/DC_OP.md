@@ -132,6 +132,14 @@ report. `DcOpResult::kcl_residual_max` / `kcl_worst_row` carry the residual of
 the RETURNED solution over all voltage rows with no exemptions; `melange dc-op`
 prints them (human and `--format json`).
 
+A build whose operating point did not converge is refused, by every verb
+(`build::assemble`): its generated code would start from a state that is not a
+solution. `--allow-unconverged-dc-op` (compile, simulate, analyze, dc-op)
+builds it anyway, with a warning; `validate` has no override. `melange dc-op`
+reports the operating point the build ships: it runs `build::assemble`, the
+build every verb uses up to the IR, so the vector it prints is the `DC_OP` the
+generated code embeds, on the route that build takes.
+
 The reported residual is computed against the circuit, not the working copy.
 `build_dc_system` snapshots `g_circuit` (the shipped `mna.g`, the inductor DC
 shorts, the BJT internal-node expansion) before adding the solver aids to the

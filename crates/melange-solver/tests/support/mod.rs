@@ -497,6 +497,7 @@ pub fn try_build_shipped_with(
         resolve_taps: true,
         inject_runtime: true,
         disable_unit_variation: false,
+        allow_unconverged_dc_op: false,
         output_clamp_auto: false,
     };
     let mut opts = opts;

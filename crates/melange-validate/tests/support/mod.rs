@@ -39,6 +39,7 @@ pub fn options(sample_rate: f64, input: &str, outputs: &[&str]) -> BuildOptions 
         resolve_taps: true,
         inject_runtime: true,
         disable_unit_variation: false,
+        allow_unconverged_dc_op: false,
         output_clamp_auto: false,
     }
 }
