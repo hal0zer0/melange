@@ -204,7 +204,7 @@ Every one of these is a real published model with real published equations, impl
 | MOSFET | SPICE Level 1 | Body effect, channel-length modulation |
 | Vacuum Triode | Norman Koren plate + Dempwolf & Zölzer grid current ([onset runs late](docs/limitations.md#triode)) | 12AX7, 12AU7, 12AT7, 6SN7, 6SL7, and more |
 | Vacuum Pentode | 5 equation families, 29 models | EL84, EL34, EF86, 6L6, 6V6, KT88, 6550, and 22 more. Auto grid-off optimization for cutoff |
-| Op-Amp | Boyle VCCS macromodel | GBW pole, slew-rate limiting, asymmetric VCC/VEE rails, 4 clamping strategies |
+| Op-Amp | Boyle VCCS macromodel | slew-rate limiting, asymmetric VCC/VEE rails, 4 clamping strategies; no bandwidth pole (`GBW` only defaults the rails) |
 | VCA | THAT 2180 exponential | Current-mode with gain-dependent THD |
 | CdS LDR (opto) | VTL5C3/4, NSL-32 | Placed with the `O` element (`O1 rphoto+ rphoto- led+ led- MODEL`); attack/release photocell dynamics on the stateful-device codegen path. No ngspice twin — SPICE has no LDR model, so there is nothing to compare against |
 | Potentiometer | `.pot` / `.wiper` / `.gang` directives | Per-sample smoothing; `recompute_dc_op()` available for preset-recall NR-seed refresh |

@@ -3115,6 +3115,25 @@ impl MnaBuilder {
             }
         }
 
+        // GBW is parsed but no bandwidth pole reaches any solver path (the IIR
+        // dominant-pole model was removed as dead code in e91e4ed), so the
+        // gain is AOL at every frequency. Its one live effect is defaulting
+        // the rails below. Say so: the card reads as a pole.
+        let gbw_named: Vec<&str> = self
+            .opamps
+            .iter()
+            .filter(|oa| oa.gbw.is_finite())
+            .map(|oa| oa.name.as_str())
+            .collect();
+        if !gbw_named.is_empty() {
+            log::warn!(
+                "Op-amp {}: GBW is not modelled as a bandwidth pole (the gain is AOL at \
+                 every frequency). It only sets the default +/-13 V rails when VCC, VEE \
+                 and VSAT are absent.",
+                gbw_named.join(", ")
+            );
+        }
+
         // Resolve op-amp output voltage clamps from VCC/VEE/VSAT/GBW.
         // Priority: VCC/VEE (explicit) > VSAT (symmetric) > GBW auto-default > none.
         for oa in self.opamps.iter_mut() {

@@ -30,7 +30,7 @@ Melange supports the following SPICE elements:
 | M | MOSFET (NM/PM) | Level 1 SPICE with body effect (GAMMA/PHI) |
 | T | Triode tube | Koren plate current + Dempwolf & Zölzer grid current |
 | P | Pentode/beam tetrode | 5 equation families, 29 catalog models |
-| U | Op-amp | Boyle macromodel (GBW, VCC/VEE rails, SR) |
+| U | Op-amp | Boyle VCCS macromodel (AOL, ROUT, VCC/VEE rails, SR); `GBW` is not modelled as a pole |
 | Y | VCA | THAT 2180-style exponential gain |
 | E | VCVS | Voltage-controlled voltage source |
 | G | VCCS | Voltage-controlled current source |
@@ -180,7 +180,7 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
 - 6386/6BA6/6BC8 datasheet fits for variable-mu compressors deferred (phase 1d)
 
 ### Op-amp
-- Boyle macromodel with GBW dominant pole
+- Boyle VCCS macromodel **without a bandwidth pole**: the gain is `AOL` at every frequency. `GBW` is parsed and prints a notice; its only effect is the default ±13 V rails when `VCC`/`VEE`/`VSAT` are absent. A circuit whose response depends on the op-amp's open-loop rolloff (high closed-loop gain near the top of the audio band, or a low-GBW part) will read flat where the hardware rolls off.
 - VCC/VEE asymmetric supply rail clamping
 - Slew-rate limiting via `SR=` in V/us (per-sample clamp, all 3 codegen paths)
 - Rail mode selection: `--opamp-rail-mode {auto,none,hard,active-set,active-set-be,boyle-diodes}`

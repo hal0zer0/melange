@@ -228,6 +228,37 @@ fn referenced_opamp_card_still_warns_exactly_as_before() {
     );
 }
 
+/// `GBW` is parsed, but no solver path models a bandwidth pole: the gain is
+/// `AOL` at every frequency and `GBW` only defaults the rails. A card that
+/// authors it gets a notice naming the op-amp; a card without it gets none.
+#[test]
+fn authored_gbw_says_it_is_not_a_pole() {
+    let gbw_notices = || -> Vec<String> {
+        warnings()
+            .into_iter()
+            .filter(|w| w.contains("GBW is not modelled"))
+            .collect()
+    };
+    let _guard = start_capture();
+    let with_gbw = OPAMP_DECK.replace("BANANA=999 VSATT=4.5", "GBW=1k");
+    MnaSystem::from_netlist(&Netlist::parse(&with_gbw).expect("parse")).expect("mna");
+    let notices = gbw_notices();
+    assert_eq!(notices.len(), 1, "expected one GBW notice, got {notices:?}");
+    assert!(
+        notices[0].contains("U1"),
+        "notice does not name the op-amp: {notices:?}"
+    );
+
+    buffer().lock().unwrap().clear();
+    let without = OPAMP_DECK.replace("BANANA=999 VSATT=4.5", "VSAT=13");
+    MnaSystem::from_netlist(&Netlist::parse(&without).expect("parse")).expect("mna");
+    assert!(
+        gbw_notices().is_empty(),
+        "notice without GBW: {:?}",
+        warnings()
+    );
+}
+
 #[test]
 fn referenced_vca_card_does_not_warn_about_honored_thd() {
     // Regression: the `mna.rs` VCA match arm knew VSCALE/G0/MODE only, so it
