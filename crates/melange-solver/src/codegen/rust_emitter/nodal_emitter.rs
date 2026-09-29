@@ -179,6 +179,22 @@ pub(super) enum PinSite<'a> {
     },
 }
 
+/// The G and C a matrix build must read: the working copies the `.pot` /
+/// `.switch` setters write when the circuit has any, else the compile-time
+/// constants (identical then). `rebuild_matrices` and the full-LU sub-step
+/// both take them from here, so a sub-step can never solve the nominal
+/// circuit while the knobs say otherwise. `recv` is `self` or `state`.
+fn live_g_c(ir: &CircuitIR, full_nodal: bool, recv: &str) -> (String, String) {
+    if ir.pots.is_empty() && ir.switches.is_empty() {
+        return ("G".to_string(), "C".to_string());
+    }
+    let cold = if full_nodal { "cold." } else { "" };
+    (
+        format!("{recv}.{cold}g_work"),
+        format!("{recv}.{cold}c_work"),
+    )
+}
+
 /// Whether a nodal build can emit the active-set pinned resolve at all.
 fn emits_active_set_resolve(ir: &CircuitIR) -> bool {
     matches!(
@@ -4393,24 +4409,8 @@ impl RustEmitter {
         code.push_str("    }\n\n");
 
         // rebuild_matrices: recompute A/A_neg/A_be/A_neg_be from G+C
-        let g_src = if has_pots || has_switches {
-            if use_full_nodal {
-                "self.cold.g_work"
-            } else {
-                "self.g_work"
-            }
-        } else {
-            "G"
-        };
-        let c_src = if has_pots || has_switches {
-            if use_full_nodal {
-                "self.cold.c_work"
-            } else {
-                "self.c_work"
-            }
-        } else {
-            "C"
-        };
+        let (g_src, c_src) = live_g_c(ir, use_full_nodal, "self");
+        let (g_src, c_src) = (g_src.as_str(), c_src.as_str());
 
         // Which Schur matrices does the generated per-sample code actually read?
         //
@@ -8067,19 +8067,26 @@ impl RustEmitter {
                 "            let alpha_sub = 2.0 * state.current_sample_rate * OVERSAMPLING_FACTOR as f64 * subdiv as f64;\n",
             );
                 }
+                // From the same G/C `rebuild_matrices` reads (the setters'
+                // working copies when there are knobs).
+                let (g_src, c_src) = live_g_c(ir, true, "state");
                 code.push_str("            // Rebuild A and A_neg at finer timestep\n");
                 code.push_str("            let mut a_sub = [[0.0f64; N]; N];\n");
                 code.push_str("            let mut a_neg_sub = [[0.0f64; N]; N];\n");
                 code.push_str("            for i in 0..N {\n");
                 code.push_str("                for j in 0..N {\n");
-                code.push_str("                    a_sub[i][j] = G[i][j] + alpha_sub * C[i][j];\n");
+                code.push_str(&format!(
+                    "                    a_sub[i][j] = {g_src}[i][j] + alpha_sub * {c_src}[i][j];\n"
+                ));
                 if ir.solver_config.backward_euler {
                     // BE history carries no -G term.
-                    code.push_str("                    a_neg_sub[i][j] = alpha_sub * C[i][j];\n");
+                    code.push_str(&format!(
+                        "                    a_neg_sub[i][j] = alpha_sub * {c_src}[i][j];\n"
+                    ));
                 } else {
-                    code.push_str(
-                        "                    a_neg_sub[i][j] = alpha_sub * C[i][j] - G[i][j];\n",
-                    );
+                    code.push_str(&format!(
+                        "                    a_neg_sub[i][j] = alpha_sub * {c_src}[i][j] - {g_src}[i][j];\n"
+                    ));
                 }
                 code.push_str("                }\n");
                 code.push_str("            }\n");
