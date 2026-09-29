@@ -431,7 +431,7 @@ fn template_diode_deep_reverse_value_derivative_consistent() {
 fn template_diode_matches_devices_crate() {
     for &(is, n) in &[(1e-12_f64, 1.5_f64), (2.68e-14, 1.07), (1e-30, 2.0)] {
         let d = DiodeShockley::new_room_temp(is, n);
-        let n_vt = n * 0.025851991;
+        let n_vt = n * VT_ROOM;
         let mut v = -20.0;
         while v <= 5.0 {
             let i_t = tpl::diode_current_tpl(v, is, n_vt);

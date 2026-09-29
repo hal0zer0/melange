@@ -35,7 +35,7 @@ Where:
 - `Vt` = device thermal voltage (n * kT/q for diodes, vt for BJTs)
 - `IS` = saturation current
 
-Example values (Vt = VT_ROOM = 0.025852 V = kT/q at 300 K; n applied for diodes,
+Example values (Vt = VT_ROOM = 0.025865 V = kT/q at 300.15 K; n applied for diodes,
 BJT junctions use vt directly):
 ```
 1N4148 (IS=2.52e-9, n=1.752):  vcrit = 0.741V

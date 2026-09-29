@@ -187,14 +187,10 @@ pub fn thermal_voltage(temp_c: f64) -> f64 {
     K_BOLTZMANN * temp_k / Q_ELECTRON
 }
 
-/// Standard thermal voltage: kT/q at 300.00 K (= 0.025852 V).
-///
-/// NOTE: this is NOT the same reference temperature as `thermal_voltage(27.0)`
-/// — ngspice's TNOM = 27°C = 300.15 K gives kT/q = 0.025865 V. The ~0.05%
-/// discrepancy is a known internal inconsistency; unification is a
-/// catalog-coordinated change (device catalogs were fit against this value)
-/// tracked as a follow-up. Do not change this constant in isolation.
-pub const VT_ROOM: f64 = 0.025851991; // kT/q at 300.00 K
+/// Standard thermal voltage: kT/q at SPICE's nominal temperature, TNOM =
+/// 27 °C = 300.15 K (= 0.0258649 V) — the temperature a vendor SPICE card's
+/// parameters are extracted at, and melange's own `TAMB` default.
+pub const VT_ROOM: f64 = 1.380649e-23 * 300.15 / 1.602176634e-19;
 
 #[cfg(test)]
 mod tests {

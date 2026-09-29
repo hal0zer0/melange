@@ -39,7 +39,7 @@ pub const CATALOG: &[BjtCatalogEntry] = &[
     BjtCatalogEntry {
         names: &["2N2222", "2N2222A", "PN2222A"],
         is: 1.26e-14,
-        vt: 0.025851991,
+        vt: crate::VT_ROOM,
         beta_f: 200.0,
         beta_r: 3.0,
         is_pnp: false,
@@ -58,7 +58,7 @@ pub const CATALOG: &[BjtCatalogEntry] = &[
     BjtCatalogEntry {
         names: &["2N3904"],
         is: 6.734e-15,
-        vt: 0.025851991,
+        vt: crate::VT_ROOM,
         beta_f: 416.4,
         beta_r: 0.7371,
         is_pnp: false,
@@ -76,7 +76,7 @@ pub const CATALOG: &[BjtCatalogEntry] = &[
     BjtCatalogEntry {
         names: &["2N3906"],
         is: 1.41e-15,
-        vt: 0.025851991,
+        vt: crate::VT_ROOM,
         beta_f: 180.7,
         beta_r: 4.977,
         is_pnp: true,
@@ -95,7 +95,7 @@ pub const CATALOG: &[BjtCatalogEntry] = &[
     BjtCatalogEntry {
         names: &["2N5088", "2N5089"],
         is: 4.8e-14,
-        vt: 0.025851991,
+        vt: crate::VT_ROOM,
         beta_f: 600.0,
         beta_r: 3.5,
         is_pnp: false,
@@ -114,7 +114,7 @@ pub const CATALOG: &[BjtCatalogEntry] = &[
     BjtCatalogEntry {
         names: &["BC547B", "BC547C"],
         is: 1.8e-14,
-        vt: 0.025851991,
+        vt: crate::VT_ROOM,
         beta_f: 400.0,
         beta_r: 35.5,
         is_pnp: false,
@@ -133,7 +133,7 @@ pub const CATALOG: &[BjtCatalogEntry] = &[
     BjtCatalogEntry {
         names: &["BC557B"],
         is: 2.0e-14,
-        vt: 0.025851991,
+        vt: crate::VT_ROOM,
         beta_f: 330.0,
         beta_r: 10.0,
         is_pnp: true,
@@ -148,7 +148,7 @@ pub const CATALOG: &[BjtCatalogEntry] = &[
     BjtCatalogEntry {
         names: &["AC128"],
         is: 1e-6,
-        vt: 0.025851991,
+        vt: crate::VT_ROOM,
         beta_f: 70.0,
         beta_r: 3.0,
         is_pnp: true,
@@ -163,7 +163,7 @@ pub const CATALOG: &[BjtCatalogEntry] = &[
     BjtCatalogEntry {
         names: &["BC184C", "BC184"],
         is: 1.8e-14,
-        vt: 0.025851991,
+        vt: crate::VT_ROOM,
         beta_f: 420.0,
         beta_r: 20.0,
         is_pnp: false,
@@ -184,7 +184,7 @@ pub const CATALOG: &[BjtCatalogEntry] = &[
     BjtCatalogEntry {
         names: &["2N3055"],
         is: 9.744e-13,
-        vt: 0.025851991,
+        vt: crate::VT_ROOM,
         beta_f: 99.49,
         beta_r: 2.949,
         is_pnp: false,

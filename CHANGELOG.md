@@ -279,6 +279,15 @@ generated state is smaller.
 
 ### Changed
 
+- **The thermal voltage is kT/q at 27 °C (300.15 K), SPICE's nominal
+  temperature, instead of 300 K.** Every diode, BJT, JFET and MOSFET that does
+  not set its own `VT` sees a 0.05 % larger Vt; the self-heating ambient
+  default was already 300.15 K, so the two now agree, and melange reads a card
+  at the temperature ngspice does. Across the golden corpus 16 circuits'
+  generated code changes. Audio moves by at most 0.01 dB on every render above
+  the -120 dBFS floor except one dynamics circuit's pot sweep, which moves by up
+  to 0.044 dB at the pot extreme.
+
 - **The backward-Euler safety latch no longer overrides that rule in a quiet
   passage.** It engaged on any ring that dominated the output, and in a quiet
   tail anything does, so a ring the rule had left on trapezoidal switched the

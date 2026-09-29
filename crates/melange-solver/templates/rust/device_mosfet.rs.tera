@@ -37,8 +37,8 @@ fn mosfet_id(vgs: f64, vds: f64, kp: f64, vt: f64, lambda: f64, sign: f64) -> f6
         // Subthreshold: weak exponential for smooth NR convergence.
         // Gated by tanh(vd/2VT) so the leakage is continuous (and zero)
         // at Vds = 0 where the mode polarity m flips sign.
-        let sub = 1e-12 * fast_exp(vov / (2.0 * 0.025851991)).min(1.0);
-        return sign * m * sub * (vd / (2.0 * 0.025851991)).tanh();
+        let sub = 1e-12 * fast_exp(vov / (2.0 * 0.025864925786328753)).min(1.0);
+        return sign * m * sub * (vd / (2.0 * 0.025864925786328753)).tanh();
     }
     // Channel-length modulation uses the mode-consistent |Vds|.
     let clm = 1.0 + lambda * vd;
@@ -81,11 +81,11 @@ fn mosfet_jacobian(vgs: f64, vds: f64, kp: f64, vt: f64, lambda: f64, sign: f64)
     // (f_c, f_d) = (df/dvc, df/dvd)
     let (f_c, f_d) = if vov <= 0.0 {
         // Subthreshold: derivative of tanh-gated weak exponential
-        let sub = 1e-12 * fast_exp(vov / (2.0 * 0.025851991)).min(1.0);
-        let t = (vd / (2.0 * 0.025851991)).tanh();
+        let sub = 1e-12 * fast_exp(vov / (2.0 * 0.025864925786328753)).min(1.0);
+        let t = (vd / (2.0 * 0.025864925786328753)).tanh();
         (
-            sub * t / (2.0 * 0.025851991),
-            sub * (1.0 - t * t) / (2.0 * 0.025851991),
+            sub * t / (2.0 * 0.025864925786328753),
+            sub * (1.0 - t * t) / (2.0 * 0.025864925786328753),
         )
     } else {
         let clm = 1.0 + lambda * vd;
