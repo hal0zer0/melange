@@ -8,6 +8,10 @@
 //! - compile command under `compile_cmd` | `compile` | `cmd`
 //! - `has_pots` | `pots`, `has_noise` | `noise` (booleans)
 //! - `input_level` | `level` (volts, default 0.1)
+//! - `expected_output_clamp`: `{ "reason": "...", "programs": ["sweep", ...] }`,
+//!   declaring that the generated output clamp engages on purpose (`programs`
+//!   absent = every program). The reason is required. Without it, a render
+//!   whose output clamp engages fails capture.
 //!
 //! Unknown fields are ignored.
 
@@ -21,6 +25,17 @@ pub struct Entry {
     pub has_pots: bool,
     pub has_noise: bool,
     pub input_level: f64,
+    /// Declared output-clamp engagement: `(reason, programs)`; an empty
+    /// program list means every program.
+    pub expected_output_clamp: Option<(String, Vec<String>)>,
+}
+
+impl Entry {
+    /// The declared reason when `program`'s output clamp is expected to engage.
+    pub fn expected_clamp_reason(&self, program: &str) -> Option<&str> {
+        let (reason, programs) = self.expected_output_clamp.as_ref()?;
+        (programs.is_empty() || programs.iter().any(|p| p == program)).then_some(reason.as_str())
+    }
 }
 
 fn get_str(v: &serde_json::Value, keys: &[&str]) -> Option<String> {
@@ -72,6 +87,33 @@ pub fn load(path: &Path) -> Result<Vec<Entry>, String> {
             .ok_or_else(|| format!("manifest entry {i}: no plugin/name field"))?;
         let cir = get_str(item, &["cir", "cir_path", "netlist", "path"])
             .ok_or_else(|| format!("manifest entry {i} ({plugin}): no cir/netlist path field"))?;
+        let expected_output_clamp = match item.get("expected_output_clamp") {
+            None => None,
+            Some(c) => {
+                let reason = c
+                    .get("reason")
+                    .and_then(|r| r.as_str())
+                    .map(str::trim)
+                    .filter(|r| !r.is_empty())
+                    .ok_or_else(|| {
+                        format!(
+                            "manifest entry {i} ({plugin}): expected_output_clamp needs a \
+                             non-empty \"reason\""
+                        )
+                    })?
+                    .to_string();
+                let programs = c
+                    .get("programs")
+                    .and_then(|p| p.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Some((reason, programs))
+            }
+        };
         out.push(Entry {
             plugin,
             cir: expand_tilde(&cir),
@@ -79,10 +121,42 @@ pub fn load(path: &Path) -> Result<Vec<Entry>, String> {
             has_pots: get_bool(item, &["has_pots", "pots"], false),
             has_noise: get_bool(item, &["has_noise", "noise"], false),
             input_level: get_f64(item, &["input_level", "level"], 0.1),
+            expected_output_clamp,
         });
     }
     if out.is_empty() {
         return Err("manifest contains no circuits".into());
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod expected_output_clamp_tests {
+    use super::*;
+
+    fn load_str(json: &str) -> Result<Vec<Entry>, String> {
+        let dir = std::env::temp_dir().join(format!("gh-manifest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(format!("m{}.json", json.len()));
+        std::fs::write(&p, json).unwrap();
+        load(&p)
+    }
+
+    #[test]
+    fn a_declared_clamp_names_its_programs_and_needs_a_reason() {
+        let e = load_str(
+            r#"[{"plugin":"a","cir":"a.cir","expected_output_clamp":{"reason":"rail test","programs":["sweep"]}},
+                {"plugin":"b","cir":"b.cir","expected_output_clamp":{"reason":"always"}},
+                {"plugin":"c","cir":"c.cir"}]"#,
+        )
+        .unwrap();
+        assert_eq!(e[0].expected_clamp_reason("sweep"), Some("rail test"));
+        assert_eq!(e[0].expected_clamp_reason("sine1k"), None);
+        assert_eq!(e[1].expected_clamp_reason("step"), Some("always"));
+        assert_eq!(e[2].expected_clamp_reason("sweep"), None);
+        let err =
+            load_str(r#"[{"plugin":"d","cir":"d.cir","expected_output_clamp":{"reason":"  "}}]"#)
+                .unwrap_err();
+        assert!(err.contains("reason"), "{err}");
+    }
 }

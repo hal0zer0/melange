@@ -1003,7 +1003,8 @@
       "has_noise": false,
       "noise_mode": "off",
       "emit_dc_op_recompute": false,
-      "notes": "COVERAGE-ONLY entry added 2026-09-02 to restore the recovery-ladder coverage lost when the 11 abandoned decks were dropped (see prune_2026_09_02). Chosen by MEASUREMENT, not by reputation: compiled, driven with a hot 20Hz-20kHz sweep, and the diag_* counters read off the run. Nodal full-LU. MEASURED substep=490, ls_fail=12412, be_fallback=896, nr_max=1386 \u2014 it enters FOUR ladders hard, and is by a wide margin the strongest ladder exerciser in the library (the dropped tungsten-thunder-horse managed substep=53, ls_fail=5627). Independently significant: this deck is the recorded tripwire for the v0.1.4 nodal NR globalization, and oomox's records name it as the ONE sound repro for the auto-BE detector gap. It restores coverage for the adaptive sub-step path where F10's noise-replay fix (1dc8bad) landed."
+      "notes": "COVERAGE-ONLY entry added 2026-09-02 to restore the recovery-ladder coverage lost when the 11 abandoned decks were dropped (see prune_2026_09_02). Chosen by MEASUREMENT, not by reputation: compiled, driven with a hot 20Hz-20kHz sweep, and the diag_* counters read off the run. Nodal full-LU. MEASURED substep=490, ls_fail=12412, be_fallback=896, nr_max=1386 \u2014 it enters FOUR ladders hard, and is by a wide margin the strongest ladder exerciser in the library (the dropped tungsten-thunder-horse managed substep=53, ls_fail=5627). Independently significant: this deck is the recorded tripwire for the v0.1.4 nodal NR globalization, and oomox's records name it as the ONE sound repro for the auto-BE detector gap. It restores coverage for the adaptive sub-step path where F10's noise-replay fix (1dc8bad) landed.",
+      "input_level": 0.001
     },
     {
       "plugin": "wurli-power-amp",

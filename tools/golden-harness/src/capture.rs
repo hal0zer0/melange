@@ -109,6 +109,8 @@ pub fn dry_run(manifest_path: &Path) -> Result<usize, String> {
 pub struct Outcome {
     pub failed: usize,
     pub held: usize,
+    /// Renders whose output clamp engaged without a declared expectation.
+    pub clamped: usize,
 }
 
 pub fn run(
@@ -193,6 +195,8 @@ pub fn run(
         );
     }
 
+    let clamped = print_output_clamp_section(out_dir, &entries, &ids);
+
     println!(
         "capture done: {}/{} circuits ok",
         entries.len() - failed_circuits,
@@ -201,7 +205,81 @@ pub fn run(
     Ok(Outcome {
         failed: failed_circuits,
         held,
+        clamped,
     })
+}
+
+/// Report every render whose generated output clamp (`scaled.clamp(±V)`,
+/// counted in `diag_clamp_count`) engaged, and return how many were not
+/// declared by their manifest entry. Such a render's audio is partly a
+/// measurement of the clamp, not of the circuit, so it fails capture unless
+/// the entry says the clamp is intended and why (design review; the same
+/// principle as the input clamp).
+fn print_output_clamp_section(
+    out_dir: &Path,
+    entries: &[manifest::Entry],
+    ids: &[String],
+) -> usize {
+    let mut undeclared = 0usize;
+    let mut lines = Vec::new();
+    for (entry, id) in entries.iter().zip(ids) {
+        let Ok(rd) = std::fs::read_dir(out_dir.join(id)) else {
+            continue;
+        };
+        let mut stats: Vec<_> = rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.to_string_lossy().ends_with(".stats.json"))
+            .collect();
+        stats.sort();
+        for p in stats {
+            let program = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_suffix(".stats.json"))
+                .unwrap_or("?")
+                .to_string();
+            let count = std::fs::read_to_string(&p)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| {
+                    v.pointer("/diagnostics/diag_clamp_count")
+                        .and_then(|c| c.as_f64())
+                })
+                .unwrap_or(0.0);
+            if count <= 0.0 {
+                continue;
+            }
+            match entry.expected_clamp_reason(&program) {
+                Some(reason) => lines.push(format!(
+                    "    declared  {id}/{program}: {count} sample(s) clamped ({reason})"
+                )),
+                None => {
+                    undeclared += 1;
+                    lines.push(format!(
+                        "    FAIL      {id}/{program}: {count} sample(s) past the output clamp"
+                    ));
+                }
+            }
+        }
+    }
+    println!("\n---- OUTPUT CLAMP ----");
+    if lines.is_empty() {
+        println!("  No render engaged the generated output clamp.");
+    } else {
+        for l in &lines {
+            println!("{l}");
+        }
+        if undeclared > 0 {
+            println!(
+                "  {undeclared} render(s) engaged the output clamp without a declared \
+                 expectation: their audio is partly a measurement of the clamp, not the \
+                 circuit. Lower the entry's input_level, or declare expected_output_clamp \
+                 with a reason."
+            );
+        }
+    }
+    undeclared
 }
 
 /// Unique per-entry directory keys: `plugin`, or `plugin--<cir-stem>` when

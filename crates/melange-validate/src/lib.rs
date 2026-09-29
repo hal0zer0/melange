@@ -1048,25 +1048,17 @@ pub fn run_melange_solver_from_str(
     // Append the driver main — caller-supplied, else stdin/stdout.
     // Diagnostics go to stderr as `DIAG:key=value` lines (same protocol as
     // the CLI's simulate driver) and are echoed below.
-    let default_main = "fn main() {\n\
-        let mut state = CircuitState::default();\n\
-        let stdin = std::io::stdin();\n\
-        let mut line = String::new();\n\
-        loop {\n\
-            line.clear();\n\
-            if stdin.read_line(&mut line).unwrap() == 0 { break; }\n\
-            if let Ok(input) = line.trim().parse::<f64>() {\n\
-                let out = process_sample(input, &mut state);\n\
-                println!(\"{:.15e}\", out[0]);\n\
-            }\n\
-        }\n\
-        eprintln!(\"DIAG:nr_max_iter_count={}\", state.diag_nr_max_iter_count);\n\
-        eprintln!(\"DIAG:region_exit_count={}\", state.diag_region_exit_count);\n\
-    }\n";
-    // The death-spiral hold counter exists on the nodal path only (DK has no
-    // hold), so it is spliced in by presence rather than hardcoded — the same
-    // rule the CLI's simulate driver uses. Without the guard a DK validation
-    // would fail to compile on a field its build never declares.
+    //
+    // Build-conditional counters are added by presence, so a build that does
+    // not declare one still compiles:
+    // - the unsolved-sample counter (nodal only: the full-LU death-spiral
+    //   hold, or Schur's unconverged commit);
+    // - the input sanitisation (clamp to INPUT_LIMIT_V, NaN -> 0) and the
+    //   output clamp.
+    // The lines are part of the template by construction. They used to be
+    // spliced in with `str::replace` on an indented copy of the region-exit
+    // line, which never matched (a `\` line continuation strips the next
+    // line's indentation), so validate never saw these counters.
     let unsolved_field = if generated.code.contains("diag_nr_hold_count") {
         Some("diag_nr_hold_count")
     } else if generated.code.contains("diag_nr_unconverged_commit_count") {
@@ -1074,31 +1066,35 @@ pub fn run_melange_solver_from_str(
     } else {
         None
     };
-    let default_main = match unsolved_field {
-        Some(f) => default_main.replace(
-            "        eprintln!(\"DIAG:region_exit_count={}\", state.diag_region_exit_count);\n",
-            &format!(
-                "        eprintln!(\"DIAG:region_exit_count={{}}\", state.diag_region_exit_count);\n\
-                 \x20       eprintln!(\"DIAG:nr_hold_count={{}}\", state.{f});\n"
-            ),
-        ),
-        None => default_main.to_string(),
-    };
-    // The input-sanitisation counters (clamp to INPUT_LIMIT_V, NaN -> 0), by
-    // presence like the hold counter.
-    let input_diag: String = ["diag_input_clamp_count", "diag_input_nan_count"]
-        .iter()
-        .filter(|f| generated.code.contains(&format!("pub {f}: ")))
-        .map(|f| {
+    let mut extra_diag: String = unsolved_field
+        .map(|f| format!("    eprintln!(\"DIAG:nr_hold_count={{}}\", state.{f});\n"))
+        .unwrap_or_default();
+    for f in [
+        "diag_input_clamp_count",
+        "diag_input_nan_count",
+        "diag_clamp_count",
+    ] {
+        if generated.code.contains(&format!("pub {f}: ")) {
             let key = f.strip_prefix("diag_").unwrap_or(f);
-            format!("        eprintln!(\"DIAG:{key}={{}}\", state.{f});\n")
-        })
-        .collect();
-    let default_main = default_main.replace(
-        "        eprintln!(\"DIAG:region_exit_count={}\", state.diag_region_exit_count);\n",
-        &format!(
-            "        eprintln!(\"DIAG:region_exit_count={{}}\", state.diag_region_exit_count);\n{input_diag}"
-        ),
+            extra_diag.push_str(&format!("    eprintln!(\"DIAG:{key}={{}}\", state.{f});\n"));
+        }
+    }
+    let default_main = format!(
+        "fn main() {{\n\
+         \x20   let mut state = CircuitState::default();\n\
+         \x20   let stdin = std::io::stdin();\n\
+         \x20   let mut line = String::new();\n\
+         \x20   loop {{\n\
+         \x20       line.clear();\n\
+         \x20       if stdin.read_line(&mut line).unwrap() == 0 {{ break; }}\n\
+         \x20       if let Ok(input) = line.trim().parse::<f64>() {{\n\
+         \x20           let out = process_sample(input, &mut state);\n\
+         \x20           println!(\"{{:.15e}}\", out[0]);\n\
+         \x20       }}\n\
+         \x20   }}\n\
+         \x20   eprintln!(\"DIAG:nr_max_iter_count={{}}\", state.diag_nr_max_iter_count);\n\
+         \x20   eprintln!(\"DIAG:region_exit_count={{}}\", state.diag_region_exit_count);\n\
+         {extra_diag}}}\n"
     );
     let full_source = format!(
         "{}\n{}",
@@ -1182,7 +1178,7 @@ pub fn run_melange_solver_from_str(
     // generated solver's counters (NR max-iter, region exits) next to the
     // comparison — a validation number without them hides a starved or
     // out-of-region solve.
-    let (mut held, mut clamped, mut nan) = (0u64, 0u64, 0u64);
+    let (mut held, mut clamped, mut nan, mut out_clamped) = (0u64, 0u64, 0u64, 0u64);
     for line in String::from_utf8_lossy(&result.stderr).lines() {
         if let Some(diag) = line.strip_prefix("DIAG:") {
             eprintln!("  melange {}", diag.replacen('=', ": ", 1));
@@ -1194,6 +1190,9 @@ pub fn run_melange_solver_from_str(
             }
             if let Some(v) = diag.strip_prefix("input_nan_count=") {
                 nan = v.trim().parse().unwrap_or(0);
+            }
+            if let Some(v) = diag.strip_prefix("clamp_count=") {
+                out_clamped = v.trim().parse().unwrap_or(0);
             }
         }
     }
@@ -1207,6 +1206,17 @@ pub fn run_melange_solver_from_str(
              the generated code's input limit (INPUT_LIMIT_V = 100 V) and were clamped, \
              {nan} were NaN/Inf and replaced by 0. ngspice saw the unclamped input, so the \
              two renders are not comparable."
+        )));
+    }
+
+    // The generated code clamps its output (after DC blocking) to the output
+    // limit. ngspice has no such clamp, so on clamped samples the comparison
+    // measures the clamp, not the circuit (design review).
+    if out_clamped > 0 {
+        return Err(ValidationError::Solver(format!(
+            "{out_clamped} output sample(s) exceeded the generated code's output clamp and \
+             were clipped to it. ngspice has no output clamp, so the two renders are not \
+             comparable there. Lower the input level."
         )));
     }
 

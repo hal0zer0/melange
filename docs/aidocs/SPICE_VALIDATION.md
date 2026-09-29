@@ -217,6 +217,18 @@ Melange output first 5: [0.0, 0.0134, 0.0402, 0.0804, 0.1340]
 Correlation: 0.99999995
 ```
 
+### Renders validate refuses
+
+The melange side prints its solver counters as `DIAG:` lines. Before any
+comparison, validate refuses the render when:
+- any sample was never solved (`nr_hold_count` > 0: the full-LU death-spiral
+  hold, or Schur's unconverged commit): those samples are the previous state;
+- the input was clamped to `INPUT_LIMIT_V` (100 V) or had NaN/Inf replaced by
+  0: ngspice saw the unclamped input;
+- the output passed the generated output clamp (`clamp_count` > 0, the
+  post-DC-block limit, 10 V by default): ngspice has no output clamp.
+`output_clamp_tests.rs` covers the last two.
+
 ## Thread Safety
 
 When running validation tests concurrently:

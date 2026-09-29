@@ -67,6 +67,8 @@ EXIT CODES:
   compare: 0 = gate passed, 1 = gate failed, 2 = usage error
   convergence: 0 = no render held, 2 = usage error
   any:     4 = a render shipped samples that are not solutions (see above)
+  capture: 5 = a render engaged the output clamp without a declared
+               `expected_output_clamp` in its manifest entry
 ";
 
 fn main() -> ExitCode {
@@ -139,7 +141,11 @@ fn main() -> ExitCode {
                 return usage_err("capture requires --manifest and --out");
             };
             match capture::run(&manifest, &out, fs, timeout, keep_work, allow_nr_hold) {
-                Ok(capture::Outcome { failed, held }) => {
+                Ok(capture::Outcome {
+                    failed,
+                    held,
+                    clamped,
+                }) => {
                     if failed != 0 {
                         ExitCode::from(3)
                     } else if held != 0 && !allow_nr_hold {
@@ -149,6 +155,13 @@ fn main() -> ExitCode {
                              so the evidence exists; re-run with --allow-nr-hold to accept it."
                         );
                         ExitCode::from(4)
+                    } else if clamped != 0 {
+                        eprintln!(
+                            "FAIL: {clamped} captured render(s) engaged the generated output \
+                             clamp without a declared expectation (see OUTPUT CLAMP above). \
+                             The baseline was still written so the evidence exists."
+                        );
+                        ExitCode::from(5)
                     } else {
                         if held != 0 {
                             eprintln!(

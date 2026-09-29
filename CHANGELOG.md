@@ -24,6 +24,12 @@ generated state is smaller.
 
 ### Fixed
 
+- **`validate` never saw the counters it was meant to refuse on.** It
+  rejects a render with unsolved samples, or one whose input was clamped, but
+  the lines that report those counters were added by a text substitution that
+  never matched. Neither refusal could fire. The counters are now part of the
+  driver it generates. `validate` also refuses a render whose output passed
+  the generated output clamp: ngspice has no such clamp.
 - **The full-LU solver left a small current error on diode nodes with no
   capacitor.** It reuses a factored Jacobian across Newton iterations and
   samples, and a step taken on that stale Jacobian leaves an error of up to a
@@ -319,6 +325,12 @@ generated state is smaller.
 
 ### Tests
 
+- The regression capture fails a render whose output hits the generated
+  output clamp, unless its entry declares that the clamp is intended and why.
+  On clamped samples the recording measures the clamp, not the circuit. The
+  mic-preamp circuit now runs at 1 mV instead of 0.1 V. At 0.1 V its output
+  was clipped on 15 % of the 1 kHz render. Five more circuits still trip and
+  are with their owner.
 - Two regression circuits pin an op-amp at its rail every half cycle, one per
   rail mode the automatic choice used to pick. Until now no regression program
   drove an op-amp into its rails, so a change to rail handling could not show.
