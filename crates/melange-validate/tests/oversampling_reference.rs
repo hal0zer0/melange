@@ -31,11 +31,9 @@
 //! wrong, so these assert exactly rather than within a comfortable band.
 
 use melange_primitives::oversampling::coefficients::{HB_STEEP_7SECTION, HB_WIDE_3SECTION};
-use melange_solver::codegen::{routing, CodeGenerator, CodegenConfig};
-use melange_solver::dk::DkKernel;
-use melange_solver::mna::MnaSystem;
-use melange_solver::parser::Netlist;
 use melange_validate::apply_oversampling_round_trip;
+
+mod support;
 
 /// A purely resistive divider: its response is a rate-independent gain, so the
 /// only thing that can differ between a 1x and a 2x/4x build of it IS the
@@ -52,43 +50,9 @@ const SAMPLE_RATE: f64 = 48_000.0;
 /// Generate, compile and run the divider at `oversampling`, returning the
 /// output for `input`.
 fn run_divider(oversampling: usize, input: &[f64]) -> Vec<f64> {
-    let netlist = Netlist::parse(DIVIDER).expect("parse divider");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-
-    let input_node = mna.node_map["in"] - 1;
-    let output_node = mna.node_map["mid"] - 1;
-    // Thevenin input stamp, before the kernel — see the input-modeling contract.
-    mna.g[input_node][input_node] += 1.0;
-
-    // Rate-dependent build happens at the INTERNAL rate, as the shipped
-    // compile path does it.
-    let routing_rate = SAMPLE_RATE * oversampling as f64;
-    let kernel = DkKernel::from_mna(&mna, routing_rate).expect("dk kernel");
-    let decision = routing::auto_route(
-        &kernel,
-        &mna,
-        false,
-        melange_solver::codegen::OpampRailMode::Auto,
-    );
-    assert_eq!(
-        decision.route,
-        routing::SolverRoute::DkSchur,
-        "divider should route DK"
-    );
-
-    let config = CodegenConfig {
-        circuit_name: "os_ref".to_string(),
-        sample_rate: SAMPLE_RATE,
-        input_node,
-        output_nodes: vec![output_node],
-        input_resistance: 1.0,
-        dc_block: false,
-        oversampling_factor: oversampling,
-        ..CodegenConfig::default()
-    };
-    let generated = CodeGenerator::new(config)
-        .generate(&kernel, &mna, &netlist)
-        .unwrap_or_else(|e| panic!("codegen at {oversampling}x: {e}"));
+    let built = support::build(DIVIDER, &divider_options(oversampling));
+    assert_eq!(built.solver_label, "DK", "divider should route DK");
+    let generated = built.generated;
 
     let main_body = "fn main() {\n\
         let mut state = CircuitState::default();\n\
@@ -175,26 +139,21 @@ fn emitted_const_array(source: &str, name: &str) -> Vec<f64> {
 }
 
 fn generated_source(oversampling: usize) -> String {
-    let netlist = Netlist::parse(DIVIDER).expect("parse divider");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let input_node = mna.node_map["in"] - 1;
-    let output_node = mna.node_map["mid"] - 1;
-    mna.g[input_node][input_node] += 1.0;
-    let kernel = DkKernel::from_mna(&mna, SAMPLE_RATE * oversampling as f64).expect("dk kernel");
-    let config = CodegenConfig {
-        circuit_name: "os_ref".to_string(),
-        sample_rate: SAMPLE_RATE,
-        input_node,
-        output_nodes: vec![output_node],
-        input_resistance: 1.0,
-        dc_block: false,
-        oversampling_factor: oversampling,
-        ..CodegenConfig::default()
-    };
-    CodeGenerator::new(config)
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen")
+    support::build(DIVIDER, &divider_options(oversampling))
+        .generated
         .code
+}
+
+/// The shipped build of the divider at `oversampling` (input `in`, output
+/// `mid`, 1 Ohm input, no DC blocker).
+fn divider_options(oversampling: usize) -> melange_solver::build::BuildOptions {
+    melange_solver::build::BuildOptions {
+        circuit_name: "os_ref".to_string(),
+        input_resistance: Some(1.0),
+        oversampling: Some(oversampling),
+        dc_block: false,
+        ..support::options(SAMPLE_RATE, "in", &["mid"])
+    }
 }
 
 #[test]

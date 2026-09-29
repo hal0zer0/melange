@@ -3,7 +3,8 @@
 //! This test verifies the basic workflow works without requiring ngspice.
 //! Tests use the codegen compile-and-run pipeline.
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+mod support;
+
 use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
@@ -65,35 +66,13 @@ fn compile_and_run(code: &str, main_code: &str, tag: &str) -> String {
     String::from_utf8_lossy(&r.stdout).to_string()
 }
 
+/// The shipped build of `spice` (input `in`, output `out`).
 fn generate_code(spice: &str, sample_rate: f64) -> String {
-    let netlist = Netlist::parse(spice).unwrap();
-    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
-    let in_node = mna
-        .node_map
-        .get("in")
-        .copied()
-        .unwrap_or(1)
-        .saturating_sub(1);
-    let out_node = mna
-        .node_map
-        .get("out")
-        .copied()
-        .unwrap_or(2)
-        .saturating_sub(1);
-    mna.g[in_node][in_node] += 1.0;
-    let kernel = DkKernel::from_mna(&mna, sample_rate).unwrap();
-    let config = CodegenConfig {
+    let opts = melange_solver::build::BuildOptions {
         circuit_name: "e2e".to_string(),
-        sample_rate,
-        input_node: in_node,
-        output_nodes: vec![out_node],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
+        ..support::options(sample_rate, "in", &["out"])
     };
-    CodeGenerator::new(config)
-        .generate(&kernel, &mna, &netlist)
-        .unwrap()
-        .code
+    support::build(spice, &opts).generated.code
 }
 
 // =========================================================================

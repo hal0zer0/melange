@@ -29,6 +29,8 @@
 //!     (asserts the injection bypasses the anti-alias up-filter and the tap
 //!     bypasses the decimator).
 
+mod support;
+
 use std::sync::atomic::{AtomicU32, Ordering};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -44,9 +46,11 @@ struct Inj<'a> {
 /// Generate code for `netlist_str` with the given injections + taps, append
 /// `main_body`, compile with `rustc`, run (no stdin), and return stdout.
 ///
-/// Mirrors the CLI compile path: stamps `G_in` at `in` and `1/ohms` at each
-/// injection node BEFORE building the kernel, routes DK/nodal automatically,
-/// and threads the resolved `InjectionSpec`/`TapSpec` into `CodegenConfig`.
+/// Builds through `melange_solver::build::build`, the build `melange compile`
+/// ships: the injections and taps are written into the deck as `.inject` /
+/// `.tap` directives (in `injects` order, the order `process_sample` takes
+/// them), and the build stamps `G_in` and every injection conductance, routes
+/// DK/nodal, and resolves the specs itself.
 #[allow(clippy::too_many_arguments)]
 fn gen_and_run(
     netlist_str: &str,
@@ -58,101 +62,39 @@ fn gen_and_run(
     oversampling: usize,
     main_body: &str,
 ) -> String {
-    use melange_solver::codegen::ir::{InjectionSpec, TapSpec};
-    use melange_solver::codegen::routing;
-    use melange_solver::codegen::{CodeGenerator, CodegenConfig};
-    use melange_solver::dk::DkKernel;
-
-    let netlist = melange_solver::parser::Netlist::parse(netlist_str)
-        .unwrap_or_else(|e| panic!("parse: {}", e.message));
-    let mut mna = melange_solver::mna::MnaSystem::from_netlist(&netlist)
-        .unwrap_or_else(|e| panic!("mna: {e}"));
-
-    let resolve = |name: &str| -> usize {
-        mna.node_map
-            .get(name)
-            .copied()
-            .unwrap_or_else(|| panic!("node '{name}' not found"))
-    };
-
-    let input_node = resolve(input_name).saturating_sub(1);
-    let out_idx = resolve(output_node).saturating_sub(1);
-    if input_node < mna.n {
-        mna.g[input_node][input_node] += 1.0 / input_resistance; // G_in = 1/R_in
-    }
-
-    // Stamp each injection conductance BEFORE the kernel (baked into S / DC-OP).
-    let mut inj_specs = Vec::new();
-    for inj in injects {
-        let idx = resolve(inj.node) - 1;
-        mna.g[idx][idx] += 1.0 / inj.ohms;
-        inj_specs.push(InjectionSpec {
-            node: idx,
-            name: inj.field.to_string(),
-            resistance: inj.ohms,
-            norton: inj.norton,
-        });
-    }
-    let tap_specs: Vec<TapSpec> = taps
-        .iter()
-        .map(|t| TapSpec {
-            node: resolve(t) - 1,
-            name: (*t).to_string(),
-        })
+    let mut deck: String = netlist_str
+        .lines()
+        .filter(|l| !l.trim().eq_ignore_ascii_case(".end"))
+        .map(|l| format!("{l}\n"))
         .collect();
-
-    let has_inductors = !mna.inductors.is_empty()
-        || !mna.coupled_inductors.is_empty()
-        || !mna.transformer_groups.is_empty();
-    let mut dk_failed = false;
-    let kernel = if has_inductors {
-        DkKernel::from_mna_augmented(&mna, 48000.0).expect("aug DK")
-    } else {
-        match DkKernel::from_mna(&mna, 48000.0) {
-            Ok(k) => k,
-            Err(_) => {
-                dk_failed = true;
-                DkKernel::from_mna_augmented(&mna, 48000.0).expect("DK fallback")
-            }
-        }
-    };
-    let decision = routing::auto_route(
-        &kernel,
-        &mna,
-        dk_failed,
-        melange_solver::codegen::OpampRailMode::Auto,
-    );
-    let use_nodal = decision.route == routing::SolverRoute::Nodal;
-    if use_nodal {
-        let slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-            &netlist,
-            Some(&mna),
-        )
-        .unwrap_or_default();
-        if !slots.is_empty() {
-            mna.expand_bjt_internal_nodes(&slots);
-        }
+    for inj in injects {
+        let kind = if inj.norton { "RSHUNT" } else { "R" };
+        deck.push_str(&format!(
+            ".inject {} {} {kind}={}\n",
+            inj.node, inj.field, inj.ohms
+        ));
     }
+    for t in taps {
+        deck.push_str(&format!(".tap {t}\n"));
+    }
+    deck.push_str(".end\n");
 
-    let config = CodegenConfig {
+    let opts = melange_solver::build::BuildOptions {
         circuit_name: "inject_oracle".to_string(),
-        sample_rate: 48000.0,
-        input_node,
-        output_nodes: vec![out_idx],
-        input_resistance,
+        input_resistance: Some(input_resistance),
+        oversampling: Some(oversampling),
         dc_block: false, // raw DC comparison — no 5 Hz HPF on the output
-        oversampling_factor: oversampling,
-        injections: inj_specs,
-        taps: tap_specs,
-        ..CodegenConfig::default()
+        ..support::options(48000.0, input_name, &[output_node])
     };
-    let generator = CodeGenerator::new(config);
-    let generated = if use_nodal {
-        generator.generate_nodal(&mna, &netlist)
-    } else {
-        generator.generate(&kernel, &mna, &netlist)
-    }
-    .unwrap_or_else(|e| panic!("codegen: {e}"));
+    let built = support::build(&deck, &opts);
+    let names: Vec<&str> = built
+        .injection_specs
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    let fields: Vec<&str> = injects.iter().map(|i| i.field).collect();
+    assert_eq!(names, fields, "injection order");
+    let generated = built.generated;
 
     let full_source = format!("{}\n{}", generated.code, main_body);
     let tmp = std::env::temp_dir();

@@ -7,6 +7,7 @@
 //! read were once never printed by validate's driver, so every refusal was
 //! dead at once. Each test here fails if its refusal goes dead again.
 
+mod support;
 use melange_solver::codegen::BjtFaMode;
 use melange_validate::run_melange_solver_from_str;
 
@@ -57,34 +58,19 @@ fn a_render_with_a_clamped_input_is_refused() {
 /// to 1 cannot converge and commits held samples, and validate must refuse it.
 #[test]
 fn a_render_with_unsolved_samples_is_refused() {
-    use melange_solver::codegen::{CodeGenerator, CodegenConfig, NodalSubPathOverride};
-    use melange_solver::mna::MnaSystem;
-    use melange_solver::parser::Netlist;
     use melange_validate::run_generated_solver;
 
     let spice =
         "hard clipper\nR1 in a 1k\nD1 a 0 DX\nD2 0 a DX\nC1 a 0 10n\nR2 a out 1k\nR3 out 0 100k\n\
                  .model DX D(IS=2.52n N=1.752)\n";
-    let netlist = Netlist::parse(spice).unwrap();
-    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
-    let input_node = mna.node_map["in"] - 1;
-    let output_node = mna.node_map["out"] - 1;
-    mna.g[input_node][input_node] += 1.0;
-    let config = CodegenConfig {
+    let opts = melange_solver::build::BuildOptions {
         circuit_name: "hold_witness".to_string(),
-        sample_rate: 48000.0,
-        input_node,
-        output_nodes: vec![output_node],
-        output_scales: vec![1.0],
-        input_resistance: 1.0,
-        dc_block: true,
-        nodal_sub_path_override: NodalSubPathOverride::FullLu,
-        ..CodegenConfig::default()
+        input_resistance: Some(1.0),
+        solver: "nodal".to_string(),
+        nodal_sub_path_override: melange_solver::codegen::NodalSubPathOverride::FullLu,
+        ..support::options(48000.0, "in", &["out"])
     };
-    let code = CodeGenerator::new(config)
-        .generate_nodal(&mna, &netlist)
-        .unwrap()
-        .code;
+    let code = support::build(spice, &opts).generated.code;
     assert!(
         code.contains("pub diag_nr_hold_count"),
         "a full-LU build declares the hold"
@@ -112,35 +98,18 @@ fn a_render_with_unsolved_samples_is_refused() {
 /// every solve ends unsolved, and validate must refuse the render.
 #[test]
 fn a_dk_render_with_unsolved_samples_is_refused() {
-    use melange_solver::codegen::{CodeGenerator, CodegenConfig};
-    use melange_solver::dk::DkKernel;
-    use melange_solver::mna::MnaSystem;
-    use melange_solver::parser::Netlist;
     use melange_validate::run_generated_solver;
 
     let spice =
         "hard clipper\nR1 in a 1k\nD1 a 0 DX\nD2 0 a DX\nC1 a 0 10n\nR2 a out 1k\nR3 out 0 100k\n\
                  .model DX D(IS=2.52n N=1.752)\n";
-    let netlist = Netlist::parse(spice).unwrap();
-    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
-    let input_node = mna.node_map["in"] - 1;
-    let output_node = mna.node_map["out"] - 1;
-    mna.g[input_node][input_node] += 1.0;
-    let kernel = DkKernel::from_mna(&mna, 48000.0).unwrap();
-    let config = CodegenConfig {
+    let opts = melange_solver::build::BuildOptions {
         circuit_name: "dk_unsolved_witness".to_string(),
-        sample_rate: 48000.0,
-        input_node,
-        output_nodes: vec![output_node],
-        output_scales: vec![1.0],
-        input_resistance: 1.0,
-        dc_block: true,
-        ..CodegenConfig::default()
+        input_resistance: Some(1.0),
+        solver: "dk".to_string(),
+        ..support::options(48000.0, "in", &["out"])
     };
-    let code = CodeGenerator::new(config)
-        .generate(&kernel, &mna, &netlist)
-        .unwrap()
-        .code;
+    let code = support::build(spice, &opts).generated.code;
     assert!(
         code.contains("pub diag_nr_unconverged_commit_count")
             && !code.contains("pub diag_nr_hold_count"),
