@@ -182,3 +182,24 @@ fn explicit_hard_rail_mode_stays_allowed_on_dk() {
         d.reason
     );
 }
+
+/// `AOL_TRANSIENT_CAP` is applied to the transient matrices by the nodal IR
+/// builder only; the DK kernel is built from the uncapped `G`. A card that sets
+/// it routes nodal, and the flag lets the CLI refuse a forced `--solver dk`
+/// rather than ship the cap silently dropped.
+#[test]
+fn an_author_transient_aol_cap_routes_nodal() {
+    use melange_solver::codegen::OpampRailMode;
+    let baseline = route_with(DK_OPAMP_STAGE, OpampRailMode::Hard);
+    assert_eq!(baseline.route, SolverRoute::DkSchur, "{}", baseline.reason);
+    assert!(!baseline.opamp_transient_aol_cap);
+    let capped = DK_OPAMP_STAGE.replace(
+        "OA(AOL=200000 ROUT=75 VCC=13 VEE=-13)",
+        "OA(AOL=200000 ROUT=75 VCC=13 VEE=-13 AOL_TRANSIENT_CAP=1000)",
+    );
+    assert_ne!(capped, DK_OPAMP_STAGE);
+    let d = route_with(&capped, OpampRailMode::Hard);
+    assert!(d.opamp_transient_aol_cap);
+    assert_eq!(d.route, SolverRoute::Nodal);
+    assert!(d.reason.contains("AOL_TRANSIENT_CAP"), "{}", d.reason);
+}

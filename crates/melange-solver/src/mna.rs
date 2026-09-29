@@ -747,13 +747,10 @@ pub struct OpampInfo {
     /// under DC offsets that would otherwise cause ideal-op-amp models to
     /// drift without bound.
     pub rin: f64,
-    /// User override for the transient-NR AOL cap.
-    /// `INFINITY` (default) defers to the auto-detect heuristic in
-    /// `crates/melange-solver/src/codegen/ir.rs::effective_aol_cap`. Set finite
-    /// to force a specific cap; set to `oa.aol` (or larger) to fully disable
-    /// the cap on this op-amp; set to a small value (e.g. 1000) to force the
-    /// cap on a circuit the auto-detect missed. Only consulted in the codegen
-    /// path; runtime DC OP uses its own `AOL_DC_MAX = 1000` cap.
+    /// `.model OA(AOL_TRANSIENT_CAP=N)`: the AOL the transient solve uses, for
+    /// this op-amp only (default `INFINITY` = full AOL). The DC operating point
+    /// keeps the full AOL. Applied by the nodal IR builder; a card that sets it
+    /// routes nodal (`routing::auto_route`).
     pub aol_transient_cap: f64,
     /// Boyle internal gain node index (1-indexed, 0 = none).
     /// No longer used with IIR op-amp model (always 0).

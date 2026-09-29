@@ -24,6 +24,16 @@ generated state is smaller.
 
 ### Fixed
 
+- **A precision rectifier or comparator op-amp keeps its full open-loop
+  gain.** melange capped AOL at 1000 in the transient solve of any op-amp
+  whose non-inverting input sat on a DC rail with a diode from its output to
+  its inverting input, a numerical guard that is no longer needed and that
+  changed the answer: a biased half-wave precision rectifier sat 4.5 mV off
+  ngspice (11.8 % of the signal at 0.1 V drive); it now agrees to 0.2 µV.
+  `AOL_TRANSIENT_CAP` on a card still applies a cap, and such a circuit now
+  routes to the nodal solver (the DK solver ignored the key) — `--solver dk`
+  is refused for it. No golden circuit used the automatic cap.
+
 - **`TAMB` on a diode or BJT card now sets the device's temperature**, as
   SPICE's `.temp` does. It was only the starting point of self-heating: a card
   without `RTH` ran at 27 °C whatever `TAMB` said, and a card with `RTH` read

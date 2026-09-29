@@ -112,7 +112,7 @@ is R(t) zero-order-hold discretization at 5 kHz mod / 48 kHz fs, not the
   - Tube Koren: no space-charge, no transit-time effects
   - JFET/MOSFET subthreshold: hardcoded 2×VT slope (real devices: 60-120 mV/decade)
   - VCA noise_floor field exists but unused
-  - Precision rectifier transient: VCCS back-substitution contamination at cap-only nodes downstream of high-AOL op-amps. Fixed via selective Gm cap on op-amps matching Rule D' (n_plus on non-zero DC rail AND diode connects output→inverting input through R-only path). 4kbuscomp `max_abs_v_prev`: 1.18B → 15V. User override via `.model OA(AOL_TRANSIENT_CAP=N)`. Klon and other working circuits unaffected (Rule D' correctly excludes them). (FIXED 2026-04-16)
+  - Precision rectifier transient: VCCS back-substitution contamination at cap-only nodes downstream of high-AOL op-amps. Fixed via selective Gm cap on op-amps matching Rule D' (n_plus on non-zero DC rail AND diode connects output→inverting input through R-only path). 4kbuscomp `max_abs_v_prev`: 1.18B → 15V. User override via `.model OA(AOL_TRANSIENT_CAP=N)`. Klon and other working circuits unaffected (Rule D' correctly excludes them). (FIXED 2026-04-16) **The automatic cap was removed 2026-09-29** (unneeded under the charge form and active-set pinning, and it moved the answer by 4.5 mV on a biased rectifier); `AOL_TRANSIENT_CAP` remains an author's key and routes nodal.
 
 ## Codegen Device Support
 

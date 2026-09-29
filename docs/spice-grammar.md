@@ -802,7 +802,7 @@ outside the tube type's published manufacturer limit.
 | `RIN` | ∞ Ω | Input resistance from each input pin to ground |
 | `VOH_DROP` | 1.5 V | Drop from `VCC` to the highest drivable output, in every rail mode. The default prints a notice; set 0 for rail-to-rail parts. Needs `VCC` |
 | `VOL_DROP` | 1.5 V | Drop from `VEE` to the lowest drivable output. Needs `VEE` |
-| `AOL_TRANSIENT_CAP` | ∞ | Override for the transient-NR open-loop-gain cap (auto-detected otherwise) |
+| `AOL_TRANSIENT_CAP` | ∞ | AOL the transient solve uses (the DC operating point keeps the full AOL). Lowers the gain, so it changes the circuit; the circuit routes nodal |
 | `EN` | 0 V/√Hz | Input-referred voltage-noise density. Emitted only under `--noise` |
 | `IN` | 0 A/√Hz | Input-referred current-noise density. Emitted only under `--noise` |
 | `EN_FC` | — | Voltage-noise 1/f corner. **Accepted, not modelled** (compile notice): op-amp noise is white |

@@ -39,9 +39,6 @@ enum Witness {
     /// A card with only this key, against a card without it. For aliases and
     /// keys superseded by another key on the rich card.
     Alone,
-    /// As `Rich`, with extra compile arguments: a key honoured only under a
-    /// route or rail mode the auto choice does not take on this deck.
-    RichWith(&'static [&'static str]),
 }
 
 use Witness::*;
@@ -58,8 +55,6 @@ struct Case {
     alone_only: &'static [&'static str],
 }
 
-/// AOL_TRANSIENT_CAP is applied by the nodal IR builder only.
-const NODAL: &[&str] = &["--solver", "nodal"];
 
 const CASES: &[Case] = &[
     Case {
@@ -248,7 +243,7 @@ const CASES: &[Case] = &[
             ("SR", "1", "0.5", Rich),
             ("VOH_DROP", "1", "1.5", Rich),
             ("VOL_DROP", "1", "1.5", Rich),
-            ("AOL_TRANSIENT_CAP", "1000", "500", RichWith(NODAL)),
+            ("AOL_TRANSIENT_CAP", "1000", "500", Rich),
             ("IB", "1e-9", "1e-8", Rich),
             ("RIN", "1e6", "2e6", Rich),
             ("EN", "10e-9", "20e-9", Noise),
@@ -369,7 +364,6 @@ fn witness_pair(case: &Case, key: &str, a: &str, b: &str, w: Witness) -> (String
             let without: Vec<(&str, &str)> = if a.is_empty() { vec![] } else { vec![(key, a)] };
             (card(case, &without), card(case, &with), vec![])
         }
-        RichWith(extra) => (card(case, &rich), card(case, &changed), extra.to_vec()),
     }
 }
 

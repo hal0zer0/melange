@@ -528,6 +528,8 @@ Sub-step NR handles the rest. Circuit stable at all amplitudes (0.001–1.0V).
 
 ## Precision Rectifier Transient NR — VCCS Back-Sub Contamination (FIXED 2026-04-16)
 
+> **Superseded 2026-09-29: the automatic cap is removed.** Under the charge form and active-set pinning the uncapped solve converges on every sample, and the cap moved the fixed point (a biased half-wave rectifier sat 4.5 mV off ngspice with it, 0.2 µV without; see DEVICE_MODELS.md "Transient AOL Cap"). `AOL_TRANSIENT_CAP` remains as an author's key and routes nodal. The DC-OP copy of the classifier (`dc_opamp_is_sidechain_rectifier`) still seeds the DC homotopy, which finishes at full AOL. The history below is the original fix.
+
 The full-LU NR path had a structural problem with high-gain VCCS op-amps:
 
 1. The NR Jacobian `g_aug = A - N_I*J_dev*N_V` inherits Gm ≈ 2000 S from A = G + alpha*C

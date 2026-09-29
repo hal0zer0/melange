@@ -72,7 +72,6 @@ and not reported:
 | Diode/BJT XTI, EG, XTB | the device is not at TNOM: TAMB ≠ 27 °C, or RTH is set (self-heating) |
 | CTH, VBIAS_ALPHA, triode TAMB | RTH is set (self-heating) |
 | Op-amp GBW | VCC, VEE and VSAT are absent: it only sets a ±13 V swing limit; it is not a bandwidth pole, and a notice says so |
-| Op-amp AOL_TRANSIENT_CAP | the nodal route; the DK route does not apply it |
 
 ## Diode (Shockley)
 
@@ -1171,44 +1170,25 @@ card:
 - **Parser validation**: `SR <= 0` is rejected at parse time with a
   `ParseError`.
 
-### Selective AOL Cap for Transient NR (`AOL_TRANSIENT_CAP`)
+### Transient AOL Cap (`AOL_TRANSIENT_CAP`)
 
-High-AOL op-amps in precision-rectifier topologies cause LU back-substitution
-to compute extreme intermediate voltages (400 kV+) at the op-amp output row
-before the post-solve rail clamp can fire. These extreme values propagate to
-neighboring linear nodes via fill-in, contaminating `v_prev` and accumulating
-across samples (4kbuscomp originally hit 1.18 BILLION volts at `cv_to_vcas`).
+`.model OA(... AOL_TRANSIENT_CAP=N)` makes the transient solve use AOL = N for
+that card's op-amps; the DC operating point keeps the full AOL. It subtracts
+`delta_Gm = (AOL − N) / r_out` from the VCCS stamp in the transient `G` (baked
+into the emitted constants; the charge-form history `A_neg = alpha·C` carries
+no `G`). The nodal IR builder applies it, so a card that sets it routes nodal
+and a forced `--solver dk` is refused. The validate harness refuses it: its
+ngspice twin has one transconductance for both phases.
 
-melange auto-detects this topology (Rule D' in `crates/melange-solver/src/codegen/ir.rs::opamp_is_sidechain_rectifier`)
-and caps the effective AOL to 1000 in the constant G matrix for matching op-amps.
-The cap is baked into the emitted G/A constants (the charge-form history
-`A_neg = alpha·C` carries no `G`) — zero runtime cost.
-
-**Auto-detect rule** (both must hold):
-1. `n_plus` is connected to a non-zero DC voltage source (ground does not count;
-   a `vbias`-style mid-rail does, but soft-clipper topologies that bias `n_plus`
-   to ground are correctly excluded).
-2. A diode connects the op-amp output to the inverting input, optionally through
-   a pure-resistor path (handles full-wave summing rectifiers).
-
-**User override**: `.model OA_TL074 OA(... AOL_TRANSIENT_CAP=1000)` forces a
-specific cap on the model's op-amps regardless of Rule D'. Set to a value `≥ AOL`
-to disable the cap on a false positive.
-
-```
-.model OA_TL074 OA(AOL=200000 ROUT=75 VCC=12 VEE=-12 AOL_TRANSIENT_CAP=1000)
-```
-
-- **Default**: `f64::INFINITY` (defer to auto-detect; auto-detect itself defaults
-  to no cap unless Rule D' fires).
-- **Effect**: subtracts `delta_Gm = (AOL - AOL_cap) / r_out` from the VCCS stamp,
-  reducing the effective op-amp transconductance from ~Gm = AOL/r_out down to
-  Gm_cap = AOL_cap/r_out. Closed-loop gain at frequencies well below GBW is set
-  by the feedback network and is largely unaffected; precision-rectifier behavior
-  (output saturates to a rail when input crosses the comparator threshold) still
-  works because saturation is set by the ±VCC/VEE clamp, not by AOL.
-- **Diagnostic**: when the cap fires at codegen time, an `INFO` log line is emitted:
-  `"Selective Gm cap on op-amp U8: AOL 200000 → 1000 (delta_Gm=1990.0 S)"`.
+melange applies no cap of its own. An automatic cap on precision-rectifier and
+comparator op-amps (AOL 1000 when `n_plus` sat on a DC rail with a diode from the
+output to the inverting input) guarded against LU back-substitution
+contamination under a post-solve clamp. Under the charge form and active-set
+pinning the uncapped solve converges on every sample, and the cap moved the
+answer: on a biased half-wave precision rectifier it left a 4.5 mV
+virtual-ground error against ngspice (11.8 % of the signal at 0.1 V), 0.2 µV
+without it (`precision_rectifier_aol_tests.rs`). The one corpus deck it fired
+on (4kbuscomp, U8/U9) runs clean uncapped at 0.1–6 V drive.
 
 ## VCA (Voltage-Controlled Amplifier)
 

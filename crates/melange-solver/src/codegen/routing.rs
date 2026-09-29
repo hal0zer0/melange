@@ -73,6 +73,10 @@ pub struct RoutingDecision {
     /// the resolver picked an active-set mode to avoid. A HARD structural
     /// requirement for nodal.
     pub opamp_active_set: bool,
+    /// Whether an op-amp card sets `AOL_TRANSIENT_CAP` below its AOL. The cap
+    /// is applied to the transient matrices by the nodal IR builder only; the
+    /// DK kernel is built from the uncapped `G`, so DK would ignore it.
+    pub opamp_transient_aol_cap: bool,
     /// Human-readable reason for the routing decision.
     pub reason: String,
 }
@@ -128,6 +132,11 @@ pub fn auto_route(
             resolved_rail,
             OpampRailMode::ActiveSet | OpampRailMode::ActiveSetBe
         );
+
+    let opamp_transient_aol_cap = mna
+        .opamps
+        .iter()
+        .any(|oa| oa.aol_transient_cap < oa.aol);
 
     // Check trapezoidal stability via power iteration on S*A_neg
     let (dk_unstable, spectral_radius) = if !dk_failed && m > 0 && n > 0 {
@@ -256,6 +265,13 @@ pub fn auto_route(
              DK can only clamp the output)"
                 .to_string(),
         )
+    } else if opamp_transient_aol_cap {
+        (
+            SolverRoute::Nodal,
+            "an op-amp card sets AOL_TRANSIENT_CAP (applied to the transient matrices by the \
+             nodal solver only)"
+                .to_string(),
+        )
     } else {
         (SolverRoute::DkSchur, format!("DK Schur (N={}, M={})", n, m))
     };
@@ -274,6 +290,7 @@ pub fn auto_route(
         saturating_inductor,
         opamp_rail_mode: resolved_rail,
         opamp_active_set,
+        opamp_transient_aol_cap,
         reason,
     }
 }

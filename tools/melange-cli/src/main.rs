@@ -1680,6 +1680,12 @@ fn forced_dk_hard_blocker(
              the output, which corrupts the downstream capacitor history"
                 .to_string(),
         )
+    } else if routing.opamp_transient_aol_cap {
+        Some(
+            "an op-amp card sets AOL_TRANSIENT_CAP — the cap is applied to the transient \
+             matrices by the nodal solver only, and DK would ignore it"
+                .to_string(),
+        )
     } else {
         None
     }
