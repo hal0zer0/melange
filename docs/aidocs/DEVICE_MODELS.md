@@ -45,8 +45,8 @@ device class (`crates/melange-solver/src/model_params.rs`):
 - **Recognised, not modelled** — accepted, ignored, and reported at compile
   time with what the omission costs. These arrive on authentic vendor cards;
   refusing them would reject genuine SPICE decks over a gap in melange.
-- **Unknown** — refused, naming the keys the class accepts. (Op-amp and VCA
-  cards are resolved in `mna.rs` and warn instead.)
+- **Unknown** — refused at code generation, naming the keys the class
+  accepts. Commands that stop short of code generation (`nodes`) warn.
 
 Recognised, not modelled:
 

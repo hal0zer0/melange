@@ -1194,5 +1194,12 @@
     "why": "Output-clamp gate: renders whose generated output clamp engaged are refused. Levels and clamps chosen by the deck owner.",
     "output_clamp_raised": "champ-5f1 --output-clamp 150 (plate/OT-side swing; peak 79.8 V on backward Euler, 105 V on trapezoidal since the ring predicate, 2026-09-29; drive kept at 0.1 V guitar level by the deck owner); warpony --output-clamp 150 (cascade output, peak 99.2 V; the plugin maps 75 V to full scale); mosfet-choke-load --output-clamp 100 (choke flyback above the 24 V rail is the point of the fixture, peak 68.8 V)",
     "level_lowered": "steve-1073-preamp 0.1 -> 0.001 V (mic level, from the deck's 63.45 dB static gain); gold-press-riaa 0.1 -> 0.005 V (MM phono level); noyce-amp-at-idle 0.1 -> 0.01 V (noise source; the program input is incidental)"
+  },
+  "rebaseline_2026_09_29_model_semantics": {
+    "why": "Three model-semantics fixes, each attributed alone: thermal voltage at TNOM (d52869d), TAMB as the device temperature (3fa7f9b), one op-amp swing limit VCC-VOH_DROP/VEE+VOL_DROP in every rail mode (fc259ed).",
+    "vt_tnom": "130 identical, 57 negligible, 1 changed (gravity/potsweep -0.025 dB, linear response: a 1e-9 Vt probe gives the same ~0.28/unit sensitivity).",
+    "tamb_device_temperature": "179 identical, 9 negligible (gold-press-overdrive/-mastering: diode cards with TAMB=300, <= +0.0036 dB).",
+    "opamp_swing_limit": "182 identical, 6 changed: opamp-pin-audio/-control step/sine1k/sweep pin at 7.5/1.5 V instead of 9/0 V (VCC=9 VEE=0 cards, default 1.5 V drops); pin count 5872 -> 7158 on step; -0.3..-0.55 dB. Source-only: pipe-shouter, noyce-4558, radio-am, radio-fm.",
+    "health": "0 held, 0 not-converged on every capture."
   }
 }

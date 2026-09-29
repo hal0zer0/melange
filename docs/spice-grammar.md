@@ -810,7 +810,7 @@ outside the tube type's published manufacturer limit.
 
 Linear device — does not add nonlinear dimensions to the solver. Modeled as Boyle VCCS macromodel with output resistance. Input impedance is infinite unless you set `RIN`.
 
-An unrecognized parameter on an `OA` card produces a `.model <name>: unrecognized parameter '<key>' (ignored)` warning and is then ignored. This is looser than every other device class, where an unknown key is a **hard error** raised during code generation — `.model 1N4148: unknown parameter 'RSS'. Accepted for this device: IS, N, CJO, RS, …` — so `compile`, `simulate` and `analyze` all refuse the deck. Note that `melange nodes` stops short of codegen and so reports neither.
+An unrecognized parameter on an `OA` card is a **hard error** raised during code generation, as for every other device class — `.model TL072: unknown parameter 'VOHDROP'. Accepted for this device: AOL, ROUT, …` — so `compile`, `simulate` and `analyze` all refuse the deck. `melange nodes` stops short of code generation and warns instead.
 
 #### Swing limits, and the op-amp that cannot clip
 

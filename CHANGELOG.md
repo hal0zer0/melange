@@ -297,6 +297,11 @@ generated state is smaller.
 
 ### Changed
 
+- **An unknown parameter on an op-amp `.model` card is now refused**, as on
+  every other device class. It was only warned about, so a mistyped key (say
+  `VOHDROP`) compiled and was silently ignored. `melange nodes`, which stops
+  before code generation, still only warns.
+
 - **An op-amp's `VCC`/`VEE` are its supply, and its output now stops short of
   them in every rail mode.** The output reaches `VCC − VOH_DROP` and
   `VEE + VOL_DROP`; a card that sets the rails without the drops gets 1.5 V (a

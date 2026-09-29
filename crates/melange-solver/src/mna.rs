@@ -3251,23 +3251,16 @@ impl MnaBuilder {
                             "IN" => oa.in_amps = *val,
                             // Accepted-key set lives in `model_params` so this
                             // arm, the codegen resolvers and the orphan-card
-                            // pass in the parser cannot drift apart (they did:
-                            // this was the only `.model` typo report melange
-                            // ever emitted for an op-amp, and the VCA arm below
-                            // used to warn about `THD`, which is honored).
-                            _ => {
-                                if !crate::model_params::notice_if_unimplemented(
-                                    &m.name,
-                                    crate::model_params::ModelClass::Opamp,
-                                    key,
-                                ) {
-                                    crate::model_params::warn_if_unknown(
-                                        &m.name,
-                                        crate::model_params::ModelClass::Opamp,
-                                        key,
-                                    );
-                                }
-                            }
+                            // pass in the parser cannot drift apart. This is the
+                            // warning for commands that stop at the MNA
+                            // (`nodes`); code generation refuses an unknown key
+                            // and gives the notice for an unimplemented one
+                            // (`build_device_info_with_mna`).
+                            _ => crate::model_params::warn_if_unknown(
+                                &m.name,
+                                crate::model_params::ModelClass::Opamp,
+                                key,
+                            ),
                         }
                     }
                     let resolved = resolve_opamp_swing(&oa.name, &swing, oa.gbw.is_finite())

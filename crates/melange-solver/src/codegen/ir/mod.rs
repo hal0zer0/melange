@@ -4735,6 +4735,12 @@ impl CircuitIR {
                     dim_offset += 1;
                     nl_dev_idx += 1;
                 }
+                // An op-amp is a linear VCCS stamped in mna.rs, not a device
+                // slot; its card is still checked here like every other
+                // class's, so an unknown key is refused rather than warned.
+                Element::Opamp { model, .. } => {
+                    Self::check_model_params(netlist, model, ModelClass::Opamp)?;
+                }
                 _ => {}
             }
         }

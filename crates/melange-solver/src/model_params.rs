@@ -201,9 +201,8 @@ impl ModelClass {
 /// what its omission costs. Returns `false` (and emits nothing) when `key` is
 /// not on the class's `unimplemented` list.
 ///
-/// The one place that notice is worded: the codegen resolvers reach it
-/// through `check_model_params`, the op-amp card through the resolution loop
-/// in [`crate::mna`].
+/// The one place that notice is worded; every class reaches it through the
+/// codegen check `check_model_params`.
 pub fn notice_if_unimplemented(model_name: &str, class: ModelClass, key: &str) -> bool {
     let Some(effect) = class.unimplemented_note(key) else {
         return false;

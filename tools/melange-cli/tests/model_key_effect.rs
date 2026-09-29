@@ -306,9 +306,9 @@ fn card(case: &Case, params: &[(&str, &str)]) -> String {
 
 /// Compile `deck` and return the generated code without comments and
 /// without lines naming the scratch file; `Err` carries the CLI output.
-fn compile(deck: &str, args: &[&str]) -> Result<Vec<String>, String> {
+fn compile(deck: &str, args: &[&str], test: &str) -> Result<Vec<String>, String> {
     let stem = format!("k{}", SEQ.fetch_add(1, Ordering::Relaxed));
-    let dir = scratch("effect");
+    let dir = scratch(test);
     let cir = dir.join(format!("{stem}.cir"));
     let rs = dir.join(format!("{stem}.rs"));
     std::fs::write(&cir, deck).unwrap();
@@ -413,7 +413,7 @@ fn every_accepted_key_changes_the_generated_code() {
                     break;
                 };
                 let (d1, d2, args) = witness_pair(case, key, a, b, w);
-                let verdict = match (compile(&d1, &args), compile(&d2, &args)) {
+                let verdict = match (compile(&d1, &args, "effect"), compile(&d2, &args, "effect")) {
                     (Ok(x), Ok(y)) if lines_differing(&x, &y) > 0 => None,
                     (Ok(_), Ok(_)) => Some("no effect on the generated code".to_string()),
                     (Err(e), _) | (_, Err(e)) => {
@@ -478,4 +478,26 @@ fn unimplemented_keys_compile_with_a_costed_notice() {
         }
     }
     let _ = std::fs::remove_dir_all(scratch("notice"));
+}
+
+#[test]
+fn an_unknown_key_is_refused() {
+    for case in CASES {
+        let rich: Vec<(&str, &str)> = case
+            .keys
+            .iter()
+            .filter(|(k, ..)| !case.alone_only.contains(k))
+            .map(|(k, v, ..)| (*k, *v))
+            .chain(std::iter::once(("ZORP", "1")))
+            .collect();
+        let Err(err) = compile(&card(case, &rich), &[], "unknown") else {
+            panic!("{}: a card with an unknown key compiled", case.class.label());
+        };
+        assert!(
+            err.contains("unknown parameter 'ZORP'"),
+            "{}: an unknown key must be refused by name:\n{err}",
+            case.class.label()
+        );
+    }
+    let _ = std::fs::remove_dir_all(scratch("unknown"));
 }
