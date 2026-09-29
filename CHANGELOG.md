@@ -24,6 +24,30 @@ generated state is smaller.
 
 ### Fixed
 
+- **`--opamp-rail-mode boyle-diodes` builds the circuit every other mode
+  builds, plus its catch diodes.** The catch diodes were added inside nodal
+  code generation, which rebuilt the circuit's matrices from the augmented
+  netlist and restamped only the input ports and junction capacitances: a
+  `.inject` source's impedance and a `.linearize` reduction were silently
+  dropped (an `.inject` node read G = 1.1 mS where the hard-rail build of the
+  same deck reads 2.1 mS; a linearized BJT came back as a full nonlinear
+  device), as were the BJT capacitance re-linearization at the operating point
+  and the nodal internal-node expansion. The Newton budget was tuned for the
+  circuit without the diodes; like the budget fix below, it now belongs to the
+  circuit that ships (a railing inverting amp: 250 iterations, was 100). The
+  diodes now join the netlist before the circuit is assembled. The mode runs on
+  the nodal solver: `--solver auto` picks it, and `--solver dk` is refused
+  before the build rather than during code generation. No shipped build used
+  `boyle-diodes`.
+
+- **A library build validates its configuration on the DK route.** The DK
+  route generated through an entry point that skipped the configuration
+  checks (oversampling factor, tolerance, Newton budget, input resistance,
+  output ports): a library build with oversampling 3 emitted the 2× wrapper
+  around matrices built at 3×, so each output sample advanced two-thirds of a
+  sample period. Every command already refused such a configuration before
+  building.
+
 - **A `.switch` on an inductor compiles on the DK solver.** On the DK route
   an inductor is a branch row of the augmented matrices, and a switch writes
   its new inductance into that row of C at every rebuild; the generated
@@ -422,6 +446,17 @@ generated state is smaller.
   the line and element they came from.
 
 ### Changed
+
+- **Generated code no longer carries companion-model inductors.** Every build
+  `melange` makes has carried inductors, coupled inductors and transformer
+  windings as branch rows of the augmented matrices; the separate code path
+  for companion-model inductors was reachable only by building the kernel
+  yourself with `DkKernel::from_mna`, and is removed. `CircuitIR::from_kernel`
+  now refuses such a kernel and names `DkKernel::from_mna_augmented`, which is
+  what `melange_solver::build::build` uses. `DkKernel::from_mna` and the
+  runtime `LinearSolver` still model inductors as companions. Generated code
+  for every build `melange` makes is unchanged apart from one corrected doc
+  comment.
 
 - **Every generated build has `diag_unsolved_sample_count`**, the number of
   samples that were never solved, whatever the solver route and the failure
