@@ -412,6 +412,19 @@ fields, then Newton-iterates
 `rhs_nr = b_dc + N_i · (i_nl − J_dev · v_nl)`,
 `v_new = G_aug_nr⁻¹ · rhs_nr` to convergence (1e-9 step tolerance).
 
+### Railed op-amps
+
+A railed op-amp output sits where the transient's rail mode keeps it, as in
+the compile-time DC OP (`dc_op::pin_railed_opamps`). The runtime recompute is
+DK-only, and on DK a clamped op-amp runs hard, so the recompute pins a railed
+output at its zero-load limit at the terminal: an active set (pin every output
+whose linear model `AOL·(v+ − v−)` passes its limit, re-solve with those rows
+fixed, repeat until the set is unchanged, at most 8 rounds). A set that does
+not settle is a failed recompute (`diag_nr_max_iter_count`), so `settle_dc_op`
+falls back to the warmup loop. Without the pin the recompute solved the linear
+model: a comparator railed at rest landed at 8989 V on a 15 V supply
+(`opamp_saturated_sag_tests::the_runtime_recompute_keeps_a_railed_output_on_its_rail`).
+
 ### MVP limitations
 
 - **Direct NR only** — no source / Gmin stepping. The warm-start from

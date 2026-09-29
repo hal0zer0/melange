@@ -130,13 +130,96 @@ pub(super) fn emit_recompute_dc_op_body_dk(ir: &CircuitIR) -> Result<String, Cod
     body.push_str(&emit_dc_op_build_g_aug_dk(ir));
     body.push_str(&emit_dc_op_build_b_dc_dk(ir));
 
-    if ir.topology.m == 0 || ir.device_slots.is_empty() {
-        // Linear circuit: single LU solve. No NR loop needed.
-        body.push_str(&emit_dc_op_linear_solve_dk(ir));
-    } else {
-        body.push_str(&emit_dc_op_nr_loop_dk(ir)?);
+    let linear = ir.topology.m == 0 || ir.device_slots.is_empty();
+    let pinned: Vec<&crate::codegen::ir::OpampIR> = ir
+        .opamps
+        .iter()
+        .filter(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite())
+        .collect();
+    let hard = ir.solver_config.opamp_rail_mode == crate::codegen::OpampRailMode::Hard;
+    if !hard || pinned.is_empty() {
+        if linear {
+            // Linear circuit: single LU solve. No NR loop needed.
+            body.push_str(&emit_dc_op_linear_solve_dk(ir, "self.v_prev"));
+        } else {
+            body.push_str(&emit_dc_op_nr_loop_dk(ir, "self.v_prev")?);
+        }
+        body.push_str(&emit_dc_op_writeback_dk(ir, !linear));
+        return Ok(body);
     }
 
+    // Hard rail mode: a railed op-amp output sits at its zero-load limit at
+    // the terminal, as the transient clamps it and as the compile-time DC OP
+    // (`dc_op::pin_railed_opamps`, `DcRail::Terminal`) places it. An active
+    // set: pin every output whose linear model passes its limit
+    // (`AOL*(v+ - v-)`), re-solve with those rows fixed, repeat until the set
+    // is unchanged. A set that does not settle is a failed recompute
+    // (`diag_nr_max_iter_count`), so `settle_dc_op` falls back to warmup.
+    const MAX_RAIL_ROUNDS: usize = 8;
+    let k = pinned.len();
+    // Newton warm-starts each round from the last; a linear solve needs none.
+    let (seed_decl, seed_advance) = if linear {
+        ("", "")
+    } else {
+        (
+            "        let mut v_seed: [f64; N] = self.v_prev;\n",
+            "        v_seed = v_node;\n",
+        )
+    };
+    body.push_str(&format!(
+        "\n        // --- Railed op-amp outputs: terminal pin (hard rail mode) ---\n\
+         \x20       let g_aug_base = g_aug;\n\
+         \x20       let b_dc_base = b_dc;\n\
+         \x20       let mut rail_pins: [Option<f64>; {k}] = [None; {k}];\n\
+         {seed_decl}\
+         \x20       for _rail_round in 0..={MAX_RAIL_ROUNDS} {{\n\
+         \x20       let mut g_aug = g_aug_base;\n\
+         \x20       let mut b_dc = b_dc_base;\n"
+    ));
+    for (idx, oa) in pinned.iter().enumerate() {
+        let o = oa.n_out_idx;
+        body.push_str(&format!(
+            "        if let Some(c) = rail_pins[{idx}] {{\n\
+             \x20           for j in 0..N {{ g_aug[{o}][j] = 0.0; }}\n\
+             \x20           g_aug[{o}][{o}] = 1.0;\n\
+             \x20           b_dc[{o}] = c;\n\
+             \x20       }}\n"
+        ));
+    }
+    if linear {
+        body.push_str(&emit_dc_op_linear_solve_dk(ir, "v_seed"));
+    } else {
+        body.push_str(&emit_dc_op_nr_loop_dk(ir, "v_seed")?);
+    }
+    body.push_str(&format!("        let next_pins: [Option<f64>; {k}] = [\n"));
+    for oa in &pinned {
+        let aol = oa.gm / oa.g_out;
+        let vp = oa.n_plus_idx.map_or("0.0".to_string(), |i| format!("v_node[{i}]"));
+        let vm = oa.n_minus_idx.map_or("0.0".to_string(), |i| format!("v_node[{i}]"));
+        let mut expr = format!("{{ let u = {aol:.17e} * ({vp} - {vm}); ");
+        if oa.vclamp_hi.is_finite() {
+            expr.push_str(&format!("if u >= {hi:.17e} {{ Some({hi:.17e}) }} else ", hi = oa.vclamp_hi));
+        }
+        if oa.vclamp_lo.is_finite() {
+            expr.push_str(&format!("if u <= {lo:.17e} {{ Some({lo:.17e}) }} else ", lo = oa.vclamp_lo));
+        }
+        expr.push_str("{ None } }");
+        body.push_str(&format!("            {expr},\n"));
+    }
+    body.push_str(
+        "        ];\n\
+         \x20       if next_pins == rail_pins {\n",
+    );
+    body.push_str(&emit_dc_op_writeback_dk(ir, !linear));
+    body.push_str(&format!(
+        "        return;\n\
+         \x20       }}\n\
+         \x20       rail_pins = next_pins;\n\
+         {seed_advance}\
+         \x20       }}\n\
+         \x20       // The railed op-amp pin set did not settle: a failed recompute.\n\
+         \x20       self.diag_nr_max_iter_count += 1;\n",
+    ));
     Ok(body)
 }
 
@@ -345,7 +428,7 @@ fn emit_dc_op_build_b_dc_dk(ir: &CircuitIR) -> String {
 /// `diag_singular_matrix_count` and `diag_nr_max_iter_count` are bumped —
 /// the latter is the signal `settle_dc_op` watches, so the warmup fallback
 /// engages instead of silently proceeding with stale state.
-fn emit_dc_op_linear_solve_dk(_ir: &CircuitIR) -> String {
+fn emit_dc_op_linear_solve_dk(_ir: &CircuitIR, _seed: &str) -> String {
     let mut body = String::new();
     body.push_str(
         "\n        // Linear circuit (M == 0): solve g_aug · v = b_dc once.\n\
@@ -371,7 +454,6 @@ fn emit_dc_op_linear_solve_dk(_ir: &CircuitIR) -> String {
          \x20           v_node[i] = sum;\n\
          \x20       }\n",
     );
-    body.push_str(&emit_dc_op_writeback_dk(_ir, /*nonlinear=*/ false));
     body
 }
 
@@ -398,7 +480,7 @@ fn emit_dc_op_linear_solve_dk(_ir: &CircuitIR) -> String {
 /// `emit_dc_op_writeback_dk`; on max-iter exhaustion `diag_nr_max_iter_count`
 /// is bumped and state is left untouched so the caller can fall back to the
 /// warmup loop.
-fn emit_dc_op_nr_loop_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
+fn emit_dc_op_nr_loop_dk(ir: &CircuitIR, seed: &str) -> Result<String, CodegenError> {
     const MAX_ITER: usize = 200;
     const TOL: f64 = 1e-9;
     /// Relative convergence term, mirroring `dc_op.rs::DcOpConfig::reltol`
@@ -414,7 +496,7 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
 
     out.push_str(&format!(
         "\n        // --- Direct Newton-Raphson DC OP loop -----------------------\n\
-         \x20       let mut v_node: [f64; N] = self.v_prev;\n\
+         \x20       let mut v_node: [f64; N] = {seed};\n\
          \x20       let mut i_nl_final: [f64; M] = [0.0; M];\n\
          \x20       let mut nr_converged = false;\n\
          \x20       const MAX_ITER: usize = {MAX_ITER};\n\
@@ -659,8 +741,6 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
          \x20           return;\n\
          \x20       }\n",
     );
-
-    out.push_str(&emit_dc_op_writeback_dk(ir, /*nonlinear=*/ true));
     Ok(out)
 }
 

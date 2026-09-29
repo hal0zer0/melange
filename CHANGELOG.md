@@ -24,6 +24,14 @@ generated state is smaller.
 
 ### Fixed
 
+- **The runtime DC-operating-point recompute (`--emit-dc-op-recompute`) now
+  keeps a railed op-amp output on its rail.** It solved the linear op-amp
+  model, so a pot move on a circuit whose op-amp sits railed at rest set the
+  output to its open-loop value — 8989 V on a 15 V comparator — and the next
+  samples started from there. It now pins the output at its limit, as the
+  transient does, and reports a failed recompute if the pin set does not
+  settle.
+
 - **An op-amp railed at rest no longer gets an unclamped DC operating point on
   a circuit with no nonlinear devices.** The DC solve of such a circuit is one
   linear solve, which applied no rail at all: a comparator on ±15 V with its

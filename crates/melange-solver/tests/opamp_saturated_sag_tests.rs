@@ -221,3 +221,47 @@ fn the_rail_pin_outcome_is_surfaced_and_its_fallback_is_counted() {
     let unpinned = fell_back.v_node[mna.node_map["out"] - 1];
     assert!((unpinned - 14.0 / 1.2).abs() > 1.0, "fallback DC OP {unpinned} V");
 }
+
+/// The runtime DC OP recompute (DK route, hard rail mode here) places a
+/// railed output where the transient keeps it — the zero-load limit at the
+/// terminal — and the first sample after a pot move does not kick. Without
+/// the pin the recompute solved the linear model, an unclamped `AOL*vd`
+/// operating point (here 8989 V on a 15 V supply).
+#[test]
+fn the_runtime_recompute_keeps_a_railed_output_on_its_rail() {
+    let deck = "comparator railed at rest, pot load\nVref ref 0 DC 0.1\nRin in 0 10k\n\
+                U1 ref in out OX\nRl out 0 1k\nRpot out 0 10k\n.pot Rpot 1k 100k \"Load\"\n\
+                .model OX OA(AOL=100000 VCC=15 VEE=-15)\n";
+    let mut config = support::config_for_spice(deck, 48000.0);
+    config.dc_block = false;
+    config.emit_dc_op_recompute = true;
+    let code = support::generate_circuit_code(deck, &config).0;
+    assert!(code.contains("pub const OPAMP_RAIL_MODE: &str = \"hard\""));
+    assert!(code.contains("Railed op-amp outputs: terminal pin"));
+    let main = "fn main() {
+    let mut s = CircuitState::default();
+    s.set_sample_rate(48000.0);
+    let before = s.diag_nr_max_iter_count;
+    s.set_pot_0(2000.0);
+    s.recompute_dc_op();
+    assert_eq!(s.diag_nr_max_iter_count, before, \"the recompute failed\");
+    println!(\"dc={:.17e}\", s.dc_operating_point[NODE_OUT]);
+    for _ in 0..8 {
+        let y = process_sample(0.0, &mut s)[0];
+        println!(\"{:.17e}\", y);
+    }
+}";
+    let out = support::compile_and_run(&code, main, "sag_runtime_recompute");
+    let dc = out.parse_kv("dc").unwrap();
+    assert!((dc - 14.0).abs() < 1e-9, "recomputed DC OP {dc} V, the hard limit is 14 V");
+    for (n, y) in out.parse_samples().iter().enumerate() {
+        assert!((y - 14.0).abs() < 1e-9, "sample {n} at {y} V after the recompute");
+    }
+    // Mutant: write back the first, unpinned solve (the old recompute).
+    let mutant = code.replace("        if next_pins == rail_pins {", "        if true {");
+    assert_ne!(mutant, code);
+    let m = support::compile_and_run(&mutant, main, "sag_runtime_recompute_mutant");
+    let dc_m = m.parse_kv("dc").unwrap();
+    eprintln!("unpinned recompute: DC OP {dc_m} V");
+    assert!(dc_m > 20.0, "the mutant's unclamped DC OP ({dc_m} V) is not caught");
+}
