@@ -24,6 +24,19 @@ generated state is smaller.
 
 ### Fixed
 
+- **The DC operating point counts the input port once.** The compile-time
+  operating point and `melange dc-op` added the input port's source
+  conductance on top of the one the build had already stamped, so they solved
+  a circuit with twice the input conductance. It shows only where there is DC
+  at the input node behind a large input resistance: a divider tapped through
+  a 1 MΩ port read v(in) = 1.993 V where ngspice reads 2.993 V, and the
+  runtime `recompute_dc_op`, which counted the port once, disagreed with the
+  baked `DC_OP`. The transient always ran the right circuit; it started from
+  the wrong point. The reported KCL residual is now computed against the
+  circuit as built rather than the solver's working copy, so a mismatch like
+  this can no longer certify itself; it now includes the DC solve's 1e-12 S
+  node Gmin leak (about 1e-12·|v| A per node).
+
 - **The forward-active BJT reduction is off by default, and a reduced device
   leaving its region is refused.** `--bjt-fa auto` reduced a BJT to a
   forward-active-only model when it was forward-active at the DC operating

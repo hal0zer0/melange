@@ -313,8 +313,6 @@ Rin in vp 1Meg
     let device_slots =
         CircuitIR::build_device_info_with_mna(&netlist, Some(&mna)).expect("device slots");
     let dc_op_config = melange_solver::dc_op::DcOpConfig {
-        input_node: config.input_node,
-        input_resistance: config.input_resistance,
         ..melange_solver::dc_op::DcOpConfig::default()
     };
     let mut dc =

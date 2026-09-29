@@ -680,7 +680,6 @@ pub fn build(
         &grid_off_pentodes,
         input_node_idx,
         input_conductance,
-        input_resistance,
         out,
     )?;
 
@@ -694,13 +693,7 @@ pub fn build(
     // defaults (TF = 0, CJE = CJC = 0, etc.). See the SPICE validation
     // harness for the matching call site — the two paths must agree so a
     // plugin built from `melange compile` behaves like the validated one.
-    let dc_preflight = preflight_relinearize_bjt_caps(
-        &mut mna,
-        &netlist,
-        input_node_idx,
-        input_resistance,
-        opamp_rail_mode,
-    );
+    let dc_preflight = preflight_relinearize_bjt_caps(&mut mna, &netlist, opamp_rail_mode);
     let output_clamp = if opts.output_clamp_auto {
         dc_preflight
             .as_ref()
@@ -1169,8 +1162,6 @@ pub fn resolve_oversampling(explicit_cli: Option<usize>, recommended: Option<usi
 pub fn preflight_relinearize_bjt_caps(
     mna: &mut crate::mna::MnaSystem,
     netlist: &crate::parser::Netlist,
-    input_node: usize,
-    input_resistance: f64,
     rail_mode: crate::codegen::OpampRailMode,
 ) -> Option<crate::dc_op::DcOpResult> {
     let device_slots =
@@ -1184,8 +1175,6 @@ pub fn preflight_relinearize_bjt_caps(
         crate::codegen::ir::opamp_rail::resolve_opamp_rail_mode(mna, rail_mode).mode,
     );
     let dc_config = crate::dc_op::DcOpConfig {
-        input_node,
-        input_resistance,
         rail,
         ..crate::dc_op::DcOpConfig::default()
     };

@@ -468,8 +468,6 @@ fn ir_dc_nl_currents_ic_seed_present_and_differs_from_plain() {
     // the plain, non-IC quiescent solve — independently recomputed here.
     let device_slots = CircuitIR::build_device_info_with_mna(&netlist, Some(&mna)).unwrap();
     let dc_op_config = melange_solver::dc_op::DcOpConfig {
-        input_node: config.input_node,
-        input_resistance: config.input_resistance,
         ..melange_solver::dc_op::DcOpConfig::default()
     };
     let plain = melange_solver::dc_op::solve_dc_operating_point(&mna, &device_slots, &dc_op_config);

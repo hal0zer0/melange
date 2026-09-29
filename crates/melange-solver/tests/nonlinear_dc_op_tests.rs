@@ -120,11 +120,7 @@ fn test_linear_circuits_unchanged() {
     // Voltage divider with no DC sources and no nonlinear devices
     // should return all zeros
     let (_netlist, mna, _) = build_pipeline(VOLTAGE_DIVIDER);
-    let config = DcOpConfig {
-        input_node: 0,
-        input_resistance: 1.0,
-        ..DcOpConfig::default()
-    };
+    let config = DcOpConfig::default();
 
     let slots: Vec<DeviceSlot> = vec![];
     let result = solve_dc_operating_point(&mna, &slots, &config);
@@ -138,16 +134,7 @@ fn test_linear_circuits_unchanged() {
 fn test_vcc_bias_linear() {
     // VCC bias network — no nonlinear devices, should match linear solver
     let (_netlist, mna, _) = build_pipeline(VCC_BIAS);
-    let config = DcOpConfig {
-        input_node: mna
-            .node_map
-            .get("in")
-            .copied()
-            .unwrap_or(1)
-            .saturating_sub(1),
-        input_resistance: 1.0,
-        ..DcOpConfig::default()
-    };
+    let config = DcOpConfig::default();
 
     let slots: Vec<DeviceSlot> = vec![];
     let result = solve_dc_operating_point(&mna, &slots, &config);
@@ -181,16 +168,7 @@ fn test_single_diode_vcc() {
     // VCC=5V → R=1k → D1 → GND
     // Expected: V_anode ≈ 0.6-0.7V (diode forward voltage)
     let (netlist, mna, _) = build_pipeline(SINGLE_DIODE_VCC);
-    let config = DcOpConfig {
-        input_node: mna
-            .node_map
-            .get("in")
-            .copied()
-            .unwrap_or(1)
-            .saturating_sub(1),
-        input_resistance: 1.0,
-        ..DcOpConfig::default()
-    };
+    let config = DcOpConfig::default();
 
     // Build device slots from MNA device info
     let slots = build_device_slots(&netlist, &mna);
@@ -230,16 +208,7 @@ fn test_single_diode_vcc() {
 #[test]
 fn test_antiparallel_diodes_dc_op() {
     let (netlist, mna, _) = build_pipeline(ANTIPARALLEL_DIODES_VCC);
-    let config = DcOpConfig {
-        input_node: mna
-            .node_map
-            .get("in")
-            .copied()
-            .unwrap_or(1)
-            .saturating_sub(1),
-        input_resistance: 1.0,
-        ..DcOpConfig::default()
-    };
+    let config = DcOpConfig::default();
 
     let slots = build_device_slots(&netlist, &mna);
     let result = solve_dc_operating_point(&mna, &slots, &config);
@@ -262,16 +231,7 @@ fn test_bjt_common_emitter_bias() {
     // I_C ≈ V_emit/R_E ≈ 1.5mA
     // V_coll ≈ VCC - IC*RC ≈ 12 - 1.5*6.8 ≈ 1.8V
     let (netlist, mna, _) = build_pipeline(BJT_COMMON_EMITTER);
-    let config = DcOpConfig {
-        input_node: mna
-            .node_map
-            .get("in")
-            .copied()
-            .unwrap_or(1)
-            .saturating_sub(1),
-        input_resistance: 1.0,
-        ..DcOpConfig::default()
-    };
+    let config = DcOpConfig::default();
 
     let slots = build_device_slots(&netlist, &mna);
     let result = solve_dc_operating_point(&mna, &slots, &config);
@@ -356,16 +316,7 @@ fn test_bjt_common_emitter_bias() {
 #[test]
 fn test_pnp_bjt_dc_op() {
     let (netlist, mna, _) = build_pipeline(PNP_CIRCUIT);
-    let config = DcOpConfig {
-        input_node: mna
-            .node_map
-            .get("in")
-            .copied()
-            .unwrap_or(1)
-            .saturating_sub(1),
-        input_resistance: 1.0,
-        ..DcOpConfig::default()
-    };
+    let config = DcOpConfig::default();
 
     let slots = build_device_slots(&netlist, &mna);
     let result = solve_dc_operating_point(&mna, &slots, &config);
@@ -405,26 +356,12 @@ fn test_source_stepping_and_direct_nr_agree() {
     let slots = build_device_slots(&netlist, &mna);
 
     let config_direct = DcOpConfig {
-        input_node: mna
-            .node_map
-            .get("in")
-            .copied()
-            .unwrap_or(1)
-            .saturating_sub(1),
-        input_resistance: 1.0,
         max_iterations: 200,
         source_steps: 1, // Force single step = direct NR
         ..DcOpConfig::default()
     };
 
     let config_stepping = DcOpConfig {
-        input_node: mna
-            .node_map
-            .get("in")
-            .copied()
-            .unwrap_or(1)
-            .saturating_sub(1),
-        input_resistance: 1.0,
         max_iterations: 200,
         source_steps: 20, // Fine-grained stepping
         ..DcOpConfig::default()
@@ -640,11 +577,7 @@ fn solve_deck(spice: &str) -> (MnaSystem, melange_solver::dc_op::DcOpResult) {
         .saturating_sub(1);
     mna.g[input_node][input_node] += 1.0;
     let slots = build_device_slots(&netlist, &mna);
-    let config = DcOpConfig {
-        input_node,
-        input_resistance: 1.0,
-        ..DcOpConfig::default()
-    };
+    let config = DcOpConfig::default();
     let result = solve_dc_operating_point(&mna, &slots, &config);
     (mna, result)
 }
@@ -929,16 +862,7 @@ fn test_bjt_ise_leakage_in_dc_op() {
     if input_node < mna.n {
         mna.g[input_node][input_node] += 1.0;
     }
-    let config = DcOpConfig {
-        input_node: mna
-            .node_map
-            .get("in")
-            .copied()
-            .unwrap_or(1)
-            .saturating_sub(1),
-        input_resistance: 1.0,
-        ..DcOpConfig::default()
-    };
+    let config = DcOpConfig::default();
     let slots = build_device_slots(&netlist, &mna);
     // Sanity: the harness must have picked up ISE from the model card.
     match &slots[0].params {
@@ -1130,16 +1054,7 @@ fn test_diode_rs_dc_op_matches_devices_crate() {
     use melange_devices::diode::{DiodeShockley, DiodeWithRs};
 
     let (netlist, mna, _) = build_pipeline(DIODE_RS_VCC);
-    let config = DcOpConfig {
-        input_node: mna
-            .node_map
-            .get("in")
-            .copied()
-            .unwrap_or(1)
-            .saturating_sub(1),
-        input_resistance: 1.0,
-        ..DcOpConfig::default()
-    };
+    let config = DcOpConfig::default();
     let slots = build_device_slots(&netlist, &mna);
     match &slots[0].params {
         DeviceParams::Diode(dp) => {
@@ -1445,13 +1360,6 @@ C1 b 0 1u
 ";
     let (netlist, mna, _) = build_pipeline(spice);
     let config = DcOpConfig {
-        input_node: mna
-            .node_map
-            .get("in")
-            .copied()
-            .unwrap_or(1)
-            .saturating_sub(1),
-        input_resistance: 1.0,
         // Iteration budget: the normalized distribution needs ~34 pnjlim-paced
         // iterations (each iteration multiplies the diode current by ~e while
         // climbing from the clamped 0.6 V seed to the 0.9 V high-current Vf).
@@ -1517,16 +1425,7 @@ C1 out 0 1u
 .MODEL DMOD D(IS=2.52e-9 N=1.752)
 ";
     let (netlist, mna, _) = build_pipeline(spice);
-    let config = DcOpConfig {
-        input_node: mna
-            .node_map
-            .get("in")
-            .copied()
-            .unwrap_or(1)
-            .saturating_sub(1),
-        input_resistance: 1.0,
-        ..DcOpConfig::default()
-    };
+    let config = DcOpConfig::default();
     let slots = build_device_slots(&netlist, &mna);
     let result = solve_dc_operating_point(&mna, &slots, &config);
 
@@ -1621,8 +1520,6 @@ C1 in base 10u
     }
 
     let config = DcOpConfig {
-        input_node,
-        input_resistance: 1.0,
         // Pre-fix, the ~5900 A branch current is clamped to 50 per iteration:
         // ≥118 iterations just for the branch row. 80 iterations is generous
         // for the fixed solver and unreachable for the clamped one.
@@ -1724,11 +1621,7 @@ C1 in gate 10u
         stateful: None,
     }];
 
-    let config = DcOpConfig {
-        input_node,
-        input_resistance: 1.0,
-        ..DcOpConfig::default()
-    };
+    let config = DcOpConfig::default();
     let result = solve_dc_operating_point(&mna, &slots, &config);
 
     assert!(result.converged, "JFET self-bias DC OP must converge");
@@ -1774,16 +1667,7 @@ C1 a 0 10n
 .MODEL DMOD D(IS=2.52e-9 N=1.752)
 ";
     let (netlist, mna, _) = build_pipeline(spice);
-    let config = DcOpConfig {
-        input_node: mna
-            .node_map
-            .get("in")
-            .copied()
-            .unwrap_or(1)
-            .saturating_sub(1),
-        input_resistance: 1.0,
-        ..DcOpConfig::default()
-    };
+    let config = DcOpConfig::default();
     let slots = build_device_slots(&netlist, &mna);
     let result = solve_dc_operating_point(&mna, &slots, &config);
 
@@ -1847,16 +1731,7 @@ R1 a 0 1k
 #[test]
 fn test_bjt_ce_fixed_point_unchanged_by_nr_fixes() {
     let (netlist, mna, _) = build_pipeline(BJT_COMMON_EMITTER);
-    let config = DcOpConfig {
-        input_node: mna
-            .node_map
-            .get("in")
-            .copied()
-            .unwrap_or(1)
-            .saturating_sub(1),
-        input_resistance: 1.0,
-        ..DcOpConfig::default()
-    };
+    let config = DcOpConfig::default();
     let slots = build_device_slots(&netlist, &mna);
     let result = solve_dc_operating_point(&mna, &slots, &config);
     assert!(result.converged);
@@ -1932,11 +1807,7 @@ fn solve_ge_pnp_stage(re_ohms: f64) -> (MnaSystem, melange_solver::dc_op::DcOpRe
     }
     let device_slots =
         CircuitIR::build_device_info_with_mna(&netlist, Some(&mna)).unwrap_or_default();
-    let config = DcOpConfig {
-        input_node,
-        input_resistance: 1.0,
-        ..DcOpConfig::default()
-    };
+    let config = DcOpConfig::default();
     let result = solve_dc_operating_point(&mna, &device_slots, &config);
     (mna, result)
 }

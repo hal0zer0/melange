@@ -4498,12 +4498,9 @@ fn run_dc_op(
         mna.stamp_device_junction_caps(&device_slots);
     }
 
+    // The input conductance is in `mna.g` (stamped above, as the build
+    // stamps it); the DC OP solves the circuit it is given.
     let dc_config = DcOpConfig {
-        // `usize::MAX` is deliberately out of range: `solve_dc_operating_point`
-        // stamps the input conductance only when `input_node < n`, so an
-        // absent port stamps nothing — matching the `mna.g` stamp skipped above.
-        input_node: input_node_idx.unwrap_or(usize::MAX),
-        input_resistance: r_in,
         // A railed op-amp sits where a default compile's rail mode puts it.
         rail: melange_solver::codegen::ir::dc_rail_for(
             melange_solver::codegen::ir::opamp_rail::resolve_opamp_rail_mode(

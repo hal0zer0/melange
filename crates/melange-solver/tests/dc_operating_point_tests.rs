@@ -13,8 +13,10 @@
 //! - Verification that `set_dc_operating_point()` properly initializes `v_prev`
 //! - DC OP with input conductance affecting the result
 
+mod support;
+
 use melange_solver::codegen::ir::CircuitIR;
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+use melange_solver::codegen::CodegenConfig;
 use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
@@ -31,8 +33,14 @@ fn build_pipeline(spice: &str) -> (Netlist, MnaSystem, DkKernel) {
     (netlist, mna, kernel)
 }
 
+/// Bypasses the production pipeline on purpose: tests the DC operating point
+/// `CircuitIR` computes from a kernel, below any build. The input port is
+/// stamped into `mna.g` before the kernel, as the build stamps it.
 fn build_ir(spice: &str, config: &CodegenConfig) -> CircuitIR {
-    let (netlist, mna, kernel) = build_pipeline(spice);
+    let netlist = Netlist::parse(spice).expect("failed to parse netlist");
+    let mut mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
+    mna.stamp_input_conductance(config.input_node, 1.0 / config.input_resistance);
+    let kernel = DkKernel::from_mna(&mna, config.sample_rate).expect("failed to build DK kernel");
     CircuitIR::from_kernel(&kernel, &mna, &netlist, config).unwrap()
 }
 
@@ -48,12 +56,22 @@ fn default_config() -> CodegenConfig {
 }
 
 fn generate_code(spice: &str, config: &CodegenConfig) -> String {
-    let (netlist, mna, kernel) = build_pipeline(spice);
-    let codegen = CodeGenerator::new(config.clone());
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("code generation failed");
-    result.code
+    support::build_as_shipped(spice, config, "dk").0
+}
+
+/// The divider driven through a 1 MΩ tap on `mid`, output `mid` — the decks
+/// for the emitted-code tests, whose input must be a real node (index 0 on
+/// [`VOLTAGE_DIVIDER_SPICE`] is the supply rail).
+fn tapped_divider_config(circuit_name: &str) -> CodegenConfig {
+    let (_, mna, _) = build_pipeline(TAPPED_DIVIDER_SPICE);
+    CodegenConfig {
+        circuit_name: circuit_name.to_string(),
+        sample_rate: 44100.0,
+        input_node: mna.node_map["in"] - 1,
+        output_nodes: vec![mna.node_map["mid"] - 1],
+        input_resistance: 1e6,
+        ..CodegenConfig::default()
+    }
 }
 
 /// Compile generated code with rustc, panicking with stderr on failure.
@@ -104,6 +122,16 @@ V1 vcc 0 12
 R1 vcc mid 10k
 R2 mid 0 10k
 C1 mid 0 1n
+";
+
+/// [`VOLTAGE_DIVIDER_SPICE`] with an input tap.
+const TAPPED_DIVIDER_SPICE: &str = "\
+Voltage Divider
+V1 vcc 0 12
+R1 vcc mid 10k
+R2 mid 0 10k
+C1 mid 0 1n
+Rin in mid 1Meg
 ";
 
 /// RC circuit: R1=10k, C1=100n. At DC, capacitor is open, so
@@ -368,16 +396,9 @@ fn test_dc_op_dual_supply() {
 
 #[test]
 fn test_dc_op_initializes_v_prev_in_codegen() {
-    let config = CodegenConfig {
-        circuit_name: "dcop_init".to_string(),
-        sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![1],
-        input_resistance: 1e6,
-        ..CodegenConfig::default()
-    };
+    let config = tapped_divider_config("dcop_init");
 
-    let code = generate_code(VOLTAGE_DIVIDER_SPICE, &config);
+    let code = generate_code(TAPPED_DIVIDER_SPICE, &config);
 
     // The generated code should contain DC_OP constant
     assert!(
@@ -414,16 +435,9 @@ fn test_dc_op_initializes_v_prev_in_codegen() {
 
 #[test]
 fn test_dc_op_codegen_compiles_with_vcc() {
-    let config = CodegenConfig {
-        circuit_name: "dcop_compile".to_string(),
-        sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![1],
-        input_resistance: 1e6,
-        ..CodegenConfig::default()
-    };
+    let config = tapped_divider_config("dcop_compile");
 
-    let code = generate_code(VOLTAGE_DIVIDER_SPICE, &config);
+    let code = generate_code(TAPPED_DIVIDER_SPICE, &config);
     assert_compiles(&code, "voltage_divider_dcop");
 }
 
@@ -433,17 +447,10 @@ fn test_dc_op_codegen_compiles_with_vcc() {
 
 #[test]
 fn test_dc_op_values_embedded_correctly() {
-    let config = CodegenConfig {
-        circuit_name: "dcop_values".to_string(),
-        sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![1],
-        input_resistance: 1e6,
-        ..CodegenConfig::default()
-    };
+    let config = tapped_divider_config("dcop_values");
 
-    let ir = build_ir(VOLTAGE_DIVIDER_SPICE, &config);
-    let code = generate_code(VOLTAGE_DIVIDER_SPICE, &config);
+    let ir = build_ir(TAPPED_DIVIDER_SPICE, &config);
+    let code = generate_code(TAPPED_DIVIDER_SPICE, &config);
 
     // The DC_OP constant values should be present in the code
     // and should match the computed IR values
@@ -678,11 +685,7 @@ K1 L1 L2 0.95\n";
         mna.g[in_node - 1][in_node - 1] += 0.001;
     }
 
-    let config = dc_op::DcOpConfig {
-        input_node: 0,
-        input_resistance: 1000.0,
-        ..Default::default()
-    };
+    let config = dc_op::DcOpConfig::default();
 
     let result = dc_op::solve_dc_operating_point(&mna, &[], &config);
     assert!(
@@ -867,5 +870,95 @@ fn test_dc_op_independent_current_source_sign() {
         (ir.dc_operating_point[out_idx] - (-1.0)).abs() < 1e-3,
         "independent current source sign: V(out) should be -1V to match ngspice, got {:.6}",
         ir.dc_operating_point[out_idx]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The input port's conductance is counted once
+// ---------------------------------------------------------------------------
+
+/// ngspice `.op` on [`TAPPED_DIVIDER_SPICE`] with the input port as a 0 V
+/// source behind 1 MΩ at `in` (`Vin src 0 0` + `Rsrc src in 1Meg`).
+const NGSPICE_TAPPED_V_IN: f64 = 2.992519;
+const NGSPICE_TAPPED_V_MID: f64 = 5.985037;
+
+/// The shipped tapped-divider build (input `in` behind 1 MΩ, output `mid`),
+/// compiled with the runtime DC-OP solver, run by `main` with the node
+/// indices of `in` and `mid` substituted for `{IN}` and `{MID}`.
+fn run_tapped_divider(main: &str, tag: &str) -> support::RunOutput {
+    let mut config = tapped_divider_config(tag);
+    config.emit_dc_op_recompute = true;
+    let code = generate_code(TAPPED_DIVIDER_SPICE, &config);
+    let (_, mna, _) = build_pipeline(TAPPED_DIVIDER_SPICE);
+    let main = main
+        .replace("{IN}", &(mna.node_map["in"] - 1).to_string())
+        .replace("{MID}", &(mna.node_map["mid"] - 1).to_string());
+    support::compile_and_run(&code, &main, tag)
+}
+
+/// The shipped `DC_OP` of a divider with DC at its input node, behind a 1 MΩ
+/// input port, matches ngspice. The compile-time DC OP used to stamp the port
+/// conductance a second time on top of the one the build had already put in
+/// `mna.g`, which put `v(in)` at 1.9934 V.
+#[test]
+fn shipped_dc_op_counts_the_input_port_once() {
+    let out = run_tapped_divider(
+        "fn main() {\n\
+            println!(\"v_in={:.9}\", DC_OP[{IN}]);\n\
+            println!(\"v_mid={:.9}\", DC_OP[{MID}]);\n\
+        }",
+        "dcop_tapped_ngspice",
+    );
+    let v_in = out.parse_kv("v_in").expect("v_in");
+    let v_mid = out.parse_kv("v_mid").expect("v_mid");
+    // The DC solve's node Gmin (1e-12 S) against the 1 MΩ port moves v(in) by
+    // ~3 µV; 1e-5 V covers it and nothing else.
+    assert!(
+        (v_in - NGSPICE_TAPPED_V_IN).abs() < 1e-5,
+        "v(in) {v_in:.6} V vs ngspice {NGSPICE_TAPPED_V_IN} V"
+    );
+    assert!(
+        (v_mid - NGSPICE_TAPPED_V_MID).abs() < 1e-5,
+        "v(mid) {v_mid:.6} V vs ngspice {NGSPICE_TAPPED_V_MID} V"
+    );
+}
+
+/// The compile-time `DC_OP` and the runtime `recompute_dc_op` agree on a
+/// circuit with DC at its input node. Before the fix they disagreed there:
+/// the runtime solver counted the port conductance once, the compile-time one
+/// twice.
+#[test]
+fn baked_dc_op_matches_runtime_recompute_with_dc_at_the_input() {
+    let out = run_tapped_divider(
+        "fn main() {\n\
+            let mut state = CircuitState::default();\n\
+            let baked: [f64; N] = DC_OP;\n\
+            for i in 0..N { state.v_prev[i] = 0.0; }\n\
+            state.recompute_dc_op();\n\
+            let live: [f64; N] = *state.dc_op();\n\
+            for i in 0..N {\n\
+                println!(\"node{}={:.12e} {:.12e}\", i, baked[i], live[i]);\n\
+            }\n\
+            println!(\"live_in={:.9}\", live[{IN}]);\n\
+        }",
+        "dcop_tapped_recompute",
+    );
+    let mut rows = 0;
+    for line in out.stdout.lines().filter(|l| l.starts_with("node")) {
+        let (node, vals) = line.split_once('=').unwrap();
+        let mut it = vals.split_whitespace().map(|v| v.parse::<f64>().unwrap());
+        let (baked, live) = (it.next().unwrap(), it.next().unwrap());
+        let rel = (baked - live).abs() / baked.abs().max(live.abs()).max(1.0);
+        assert!(
+            rel < 1e-6,
+            "{node}: baked DC_OP {baked:.9} vs runtime recompute {live:.9}"
+        );
+        rows += 1;
+    }
+    assert!(rows > 0, "no node rows printed:\n{}", out.stdout);
+    let live_in = out.parse_kv("live_in").expect("live_in");
+    assert!(
+        (live_in - NGSPICE_TAPPED_V_IN).abs() < 1e-5,
+        "runtime v(in) {live_in:.6} V vs ngspice {NGSPICE_TAPPED_V_IN} V"
     );
 }

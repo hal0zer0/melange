@@ -120,7 +120,6 @@ pub fn apply_linearize_reductions(
     grid_off_pentodes: &std::collections::HashMap<String, f64>,
     input_node_idx: usize,
     input_conductance: f64,
-    input_resistance: f64,
     rep: Reporter<'_>,
 ) -> Result<LinearizeOutcome, PipelineError> {
     use crate::parser::Element;
@@ -171,12 +170,11 @@ pub fn apply_linearize_reductions(
     let device_slots =
         crate::codegen::ir::CircuitIR::build_device_info_with_mna(netlist, Some(mna))
             .unwrap_or_default();
-    let dc_op_config = crate::dc_op::DcOpConfig {
-        input_node: input_node_idx,
-        input_resistance,
-        ..crate::dc_op::DcOpConfig::default()
-    };
-    let dc_result = crate::dc_op::solve_dc_operating_point(mna, &device_slots, &dc_op_config);
+    let dc_result = crate::dc_op::solve_dc_operating_point(
+        mna,
+        &device_slots,
+        &crate::dc_op::DcOpConfig::default(),
+    );
 
     // Extract BJT small-signal g-params (gm, gpi, gmu, go) at DC bias.
     let mut bjt_lin_infos = Vec::new();

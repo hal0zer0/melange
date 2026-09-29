@@ -2585,14 +2585,6 @@ impl CircuitIR {
         let dc_op_config = DcOpConfig {
             tolerance: config.dc_op_tolerance,
             max_iterations: config.dc_op_max_iterations,
-            input_node: config.input_node,
-            input_resistance: config.input_resistance,
-            extra_inputs: config
-                .extra_input_nodes
-                .iter()
-                .copied()
-                .zip(config.extra_input_resistances.iter().copied())
-                .collect(),
             rail: dc_rail_for(resolve_opamp_rail_mode(mna, config.opamp_rail_mode).mode),
             ..DcOpConfig::default()
         };
@@ -3318,14 +3310,6 @@ impl CircuitIR {
         // NOTE: The MNA's G matrix still has Gm stamped (we only stripped from aug.g which is a copy).
         // DC OP uses mna.g directly, so it sees the full Gm and computes the correct bias point.
         let dc_op_config = DcOpConfig {
-            input_node: config.input_node,
-            input_resistance: config.input_resistance,
-            extra_inputs: config
-                .extra_input_nodes
-                .iter()
-                .copied()
-                .zip(config.extra_input_resistances.iter().copied())
-                .collect(),
             rail: dc_rail_for(resolve_opamp_rail_mode(mna, config.opamp_rail_mode).mode),
             ..DcOpConfig::default()
         };
@@ -3921,14 +3905,6 @@ impl CircuitIR {
         let dc_op_config = DcOpConfig {
             tolerance: config.dc_op_tolerance,
             max_iterations: config.dc_op_max_iterations,
-            input_node: config.input_node,
-            input_resistance: config.input_resistance,
-            extra_inputs: config
-                .extra_input_nodes
-                .iter()
-                .copied()
-                .zip(config.extra_input_resistances.iter().copied())
-                .collect(),
             rail: dc_rail_for(resolve_opamp_rail_mode(mna, config.opamp_rail_mode).mode),
             ..DcOpConfig::default()
         };
@@ -4177,14 +4153,6 @@ impl CircuitIR {
         let dc_op_config = DcOpConfig {
             tolerance: config.dc_op_tolerance,
             max_iterations: config.dc_op_max_iterations,
-            input_node: config.input_node,
-            input_resistance: config.input_resistance,
-            extra_inputs: config
-                .extra_input_nodes
-                .iter()
-                .copied()
-                .zip(config.extra_input_resistances.iter().copied())
-                .collect(),
             rail: dc_rail_for(resolve_opamp_rail_mode(mna, config.opamp_rail_mode).mode),
             ..DcOpConfig::default()
         };

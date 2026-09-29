@@ -38,16 +38,6 @@ pub struct DcOpConfig {
     pub gmin_end: f64,
     /// Number of Gmin stepping stages
     pub gmin_steps: usize,
-    /// Input node index (0-indexed into N-vector) of the primary input port.
-    pub input_node: usize,
-    /// Input resistance (ohms) of the primary input port.
-    pub input_resistance: f64,
-    /// Extra input ports for multi-input (M=0) circuits: `(node_index,
-    /// resistance)` for each port beyond the primary. Empty for single-input.
-    /// Each is stamped with its own `1/R` Thevenin conductance in the DC-OP
-    /// G matrix, matching the per-sample input stamping. See
-    /// `local-docs/multi-input-ports-plan.md`.
-    pub extra_inputs: Vec<(usize, f64)>,
     /// Active-set rounds allowed when placing railed op-amp outputs on their
     /// load line ([`pin_railed_opamps`]). Each round is a Newton re-solve; the
     /// pin set usually settles in one or two. Exceeding it falls back to the
@@ -82,9 +72,6 @@ impl Default for DcOpConfig {
             gmin_start: 1e-2,
             gmin_end: 1e-12,
             gmin_steps: 10,
-            input_node: 0,
-            input_resistance: 1.0,
-            extra_inputs: Vec::new(),
             max_rail_pin_rounds: 8,
             rail: DcRail::LoadLine,
         }
@@ -873,7 +860,14 @@ fn uncap_opamp_aol(g_dc: &[Vec<f64>], mna: &MnaSystem) -> Option<Vec<Vec<f64>>> 
 }
 
 struct DcSystemInfo {
+    /// The working matrix the solver iterates: [`Self::g_circuit`] plus the
+    /// solver aids (op-amp gain capped at `AOL_DC_MAX`, the gmin floor).
     g_dc: Vec<Vec<f64>>,
+    /// The circuit's own DC matrix: the shipped `mna.g` (every input port's
+    /// conductance included, as the build stamped it), the inductor DC shorts
+    /// and the BJT internal-node expansion — no solver aid. The KCL residual
+    /// is reported against this.
+    g_circuit: Vec<Vec<f64>>,
     b_dc: Vec<f64>,
     n_dc: usize,
     /// DC-local N_v (M × n_dc) — uses internal nodes for parasitic BJTs
@@ -900,11 +894,7 @@ struct DcSystemInfo {
 /// - BJTs with parasitic R get internal nodes (like ngspice basePrime/colPrime/emitPrime)
 ///
 /// Returns DcSystemInfo with expanded matrices.
-fn build_dc_system(
-    mna: &MnaSystem,
-    device_slots: &[DeviceSlot],
-    config: &DcOpConfig,
-) -> DcSystemInfo {
+fn build_dc_system(mna: &MnaSystem, device_slots: &[DeviceSlot]) -> DcSystemInfo {
     let n = mna.n;
     let n_aug = mna.n_aug;
 
@@ -938,48 +928,6 @@ fn build_dc_system(
         for j in 0..n_aug {
             g_dc[i][j] = mna.g[i][j];
         }
-    }
-
-    // Cap op-amp VCCS gain in the DC system to prevent NR instability.
-    // Precision rectifiers create multi-equilibrium landscapes where
-    // AOL=200,000 makes the NR overshoot from one rail to the other
-    // in a single iteration. The cap is a HOMOTOPY aid only: the strategy
-    // ladder solves the capped system, then `solve_dc_operating_point`
-    // finishes at the full AOL (see `uncap_opamp_aol`), because the capped
-    // answer carries a 0.1 % virtual-ground error and is not an equilibrium
-    // of the transient, which runs the full AOL.
-    for oa in &mna.opamps {
-        let out = oa.n_out_idx;
-        if out == 0 || oa.aol <= AOL_DC_MAX {
-            continue;
-        }
-        let o = out - 1;
-        if o >= n_aug {
-            continue;
-        }
-        let np = oa.n_plus_idx;
-        let nm = oa.n_minus_idx;
-        let gm_full = oa.aol / oa.r_out;
-        let gm_capped = AOL_DC_MAX / oa.r_out;
-        let delta_gm = gm_full - gm_capped;
-        // Undo the excess Gm from the MNA stamps. The corrected VCCS stamp is
-        // np -= gm / nm += gm, so removing delta_gm reverses those signs.
-        if np > 0 && np - 1 < n_aug {
-            g_dc[o][np - 1] += delta_gm;
-        }
-        if nm > 0 && nm - 1 < n_aug {
-            g_dc[o][nm - 1] -= delta_gm;
-        }
-    }
-
-    // Stamp input conductance
-    for &(in_node, r) in &config.extra_inputs {
-        if in_node < n && r > 0.0 {
-            g_dc[in_node][in_node] += 1.0 / r;
-        }
-    }
-    if config.input_node < n && config.input_resistance > 0.0 {
-        g_dc[config.input_node][config.input_node] += 1.0 / config.input_resistance;
     }
 
     // Stamp inductor short-circuit constraints as augmented rows/cols.
@@ -1149,6 +1097,47 @@ fn build_dc_system(
         }
     }
 
+    // Everything above is the circuit: the shipped G (which carries every
+    // input port's Thevenin conductance — the build stamps it into `mna.g`,
+    // exactly as the transient sees it), the inductor DC shorts and the BJT
+    // internal-node expansion. Everything below is a solver aid on the working
+    // copy only. The KCL residual is reported against this snapshot, so an aid
+    // that leaks into the answer shows up as residual instead of being
+    // certified by the system it changed.
+    let g_circuit = g_dc.clone();
+
+    // Cap op-amp VCCS gain in the DC system to prevent NR instability.
+    // Precision rectifiers create multi-equilibrium landscapes where
+    // AOL=200,000 makes the NR overshoot from one rail to the other
+    // in a single iteration. The cap is a HOMOTOPY aid only: the strategy
+    // ladder solves the capped system, then `solve_dc_operating_point`
+    // finishes at the full AOL (see `uncap_opamp_aol`), because the capped
+    // answer carries a 0.1 % virtual-ground error and is not an equilibrium
+    // of the transient, which runs the full AOL.
+    for oa in &mna.opamps {
+        let out = oa.n_out_idx;
+        if out == 0 || oa.aol <= AOL_DC_MAX {
+            continue;
+        }
+        let o = out - 1;
+        if o >= n_aug {
+            continue;
+        }
+        let np = oa.n_plus_idx;
+        let nm = oa.n_minus_idx;
+        let gm_full = oa.aol / oa.r_out;
+        let gm_capped = AOL_DC_MAX / oa.r_out;
+        let delta_gm = gm_full - gm_capped;
+        // Undo the excess Gm from the MNA stamps. The corrected VCCS stamp is
+        // np -= gm / nm += gm, so removing delta_gm reverses those signs.
+        if np > 0 && np - 1 < n_aug {
+            g_dc[o][np - 1] += delta_gm;
+        }
+        if nm > 0 && nm - 1 < n_aug {
+            g_dc[o][nm - 1] -= delta_gm;
+        }
+    }
+
     // Regularize: Gmin on all circuit nodes AND internal nodes
     let gmin_floor = 1e-12;
     for i in 0..n {
@@ -1282,6 +1271,7 @@ fn build_dc_system(
 
     DcSystemInfo {
         g_dc,
+        g_circuit,
         b_dc,
         n_dc,
         dc_n_v,
@@ -3075,7 +3065,7 @@ pub fn solve_dc_operating_point(
 ) -> DcOpResult {
     // Build DC system with internal nodes for parasitic BJTs.
     // Dimension n_dc = n_aug + num_inductors + num_internal_nodes.
-    let dc_sys = build_dc_system(mna, device_slots, config);
+    let dc_sys = build_dc_system(mna, device_slots);
     let mut result = solve_dc_operating_point_core(mna, device_slots, config, &dc_sys);
 
     // The ladder solved the AOL-capped system (a homotopy aid; see
@@ -3128,16 +3118,41 @@ pub fn solve_dc_operating_point(
     // A railed op-amp's output sits on its load line, `limit - R_SAG*I_load`,
     // as in the transient's pin: without this the transient's first sample
     // would move a railed-at-rest output by R_SAG*I_load.
-    let pinned = if result.converged {
+    let pins = if result.converged {
         pin_railed_opamps(&mut result, &dc_sys, g_true, mna, device_slots, config)
     } else {
         None
     };
-    let (g_report, b_report): (&[Vec<f64>], &[f64]) = match &pinned {
-        Some((g, b)) => (g, b),
-        None => (g_true, &dc_sys.b_dc),
-    };
+    // The report is of the circuit, not of the working copy: `g_circuit`, with
+    // the settled rail pins applied the way the transient applies them.
+    let mut g_report = dc_sys.g_circuit.clone();
+    let mut b_report = dc_sys.b_dc.clone();
+    if let Some(pins) = &pins {
+        apply_rail_pins(&mut g_report, &mut b_report, mna, pins, config.rail);
+    }
+    report_kcl_residual(
+        &mut result,
+        &dc_sys,
+        &g_report,
+        &b_report,
+        mna,
+        device_slots,
+        config,
+    );
+    result
+}
 
+/// Fill `result.kcl_residual_max` / `kcl_worst_row` with the KCL residual of
+/// the returned state against `(g_report, b_report)`.
+fn report_kcl_residual(
+    result: &mut DcOpResult,
+    dc_sys: &DcSystemInfo,
+    g_report: &[Vec<f64>],
+    b_report: &[f64],
+    mna: &MnaSystem,
+    device_slots: &[DeviceSlot],
+    config: &DcOpConfig,
+) {
     // Report the KCL residual of whatever is being returned — every method,
     // every fallback, NO exemptions (the rail-clamp exemption applies only to
     // the acceptance gate inside `nr_dc_solve`; a terminal-clamped op-amp row
@@ -3209,7 +3224,6 @@ pub fn solve_dc_operating_point(
             );
         }
     }
-    result
 }
 
 /// The op-amp's load-line quantity at `v` (0-indexed node vector) under the
@@ -3224,15 +3238,55 @@ fn opamp_load_line(oa: &crate::mna::OpampInfo, v: &[f64]) -> f64 {
     at(oa.n_out_idx) + oa.r_sag * i_load
 }
 
+/// Pin each railed op-amp output in `(g, b)` (`pins[k]` is op-amp `k`'s
+/// limit, `None` when free): on its load line (the row keeps the node's KCL,
+/// the VCCS leaves it, `1/ROUT` becomes `1/R_SAG`, the limit enters as
+/// `limit/R_SAG`), or at the terminal under [`DcRail::Terminal`]. Returns the
+/// pinned rows.
+fn apply_rail_pins(
+    g: &mut [Vec<f64>],
+    b: &mut [f64],
+    mna: &MnaSystem,
+    pins: &[Option<f64>],
+    rail: DcRail,
+) -> Vec<usize> {
+    let mut rows = Vec::new();
+    for (oa, pin) in mna.opamps.iter().zip(pins) {
+        let Some(c) = pin else { continue };
+        let o = oa.n_out_idx - 1;
+        if rail == DcRail::Terminal {
+            // Hard: the output node IS the limit.
+            for x in g[o].iter_mut() {
+                *x = 0.0;
+            }
+            g[o][o] = 1.0;
+            b[o] = *c;
+        } else {
+            let gm = oa.aol / oa.r_out;
+            if oa.n_plus_idx > 0 {
+                g[o][oa.n_plus_idx - 1] += gm;
+            }
+            if oa.n_minus_idx > 0 {
+                g[o][oa.n_minus_idx - 1] -= gm;
+            }
+            g[o][o] += 1.0 / oa.r_sag - 1.0 / oa.r_out;
+            b[o] += c / oa.r_sag;
+        }
+        rows.push(o);
+    }
+    rows
+}
+
 /// Re-solve a converged full-AOL operating point with every railed op-amp's
 /// output on its load line, the transient's saturated-output pin: the row
 /// keeps the node's KCL, the VCCS leaves it (Gm entries removed, `1/ROUT`
 /// replaced by `1/R_SAG`) and the limit enters as `limit/R_SAG`. The pin set
 /// is the active set of the load-line test, iterated to a fixed point.
 ///
-/// Returns the pinned `(G, b)` the result satisfies, for the residual
-/// report, or `None` when no op-amp is railed (or the re-solve fails, which
-/// keeps the terminal-clamped point with a warning).
+/// Returns the settled pin set (one entry per op-amp, `Some(limit)` when
+/// pinned) for the residual report, or `None` when no op-amp is railed (or
+/// the re-solve fails, which keeps the terminal-clamped point with a
+/// warning).
 fn pin_railed_opamps(
     result: &mut DcOpResult,
     dc_sys: &DcSystemInfo,
@@ -3240,7 +3294,7 @@ fn pin_railed_opamps(
     mna: &MnaSystem,
     device_slots: &[DeviceSlot],
     config: &DcOpConfig,
-) -> Option<(Vec<Vec<f64>>, Vec<f64>)> {
+) -> Option<Vec<Option<f64>>> {
     let n_dc = dc_sys.n_dc;
     // Boyle-augmented op-amps (`n_int_idx != 0`) carry real catch diodes and
     // are not pinned.
@@ -3279,30 +3333,7 @@ fn pin_railed_opamps(
     for _ in 0..rounds {
         let mut g = g_full.to_vec();
         let mut b = dc_sys.b_dc.clone();
-        let mut rows = Vec::new();
-        for (oa, pin) in mna.opamps.iter().zip(&pins) {
-            let Some(c) = pin else { continue };
-            let o = oa.n_out_idx - 1;
-            if terminal {
-                // Hard: the output node IS the limit.
-                for x in g[o].iter_mut() {
-                    *x = 0.0;
-                }
-                g[o][o] = 1.0;
-                b[o] = *c;
-            } else {
-                let gm = oa.aol / oa.r_out;
-                if oa.n_plus_idx > 0 {
-                    g[o][oa.n_plus_idx - 1] += gm;
-                }
-                if oa.n_minus_idx > 0 {
-                    g[o][oa.n_minus_idx - 1] -= gm;
-                }
-                g[o][o] += 1.0 / oa.r_sag - 1.0 / oa.r_out;
-                b[o] += c / oa.r_sag;
-            }
-            rows.push(o);
-        }
+        let rows = apply_rail_pins(&mut g, &mut b, mna, &pins, config.rail);
         let circuit = DcCircuit {
             g_dc: &g,
             b_dc: &b,
@@ -3340,7 +3371,7 @@ fn pin_railed_opamps(
             result.v_nl = v_nl;
             result.i_nl = i_nl;
             result.rail_pin = RailPin::Pinned(rows.len());
-            return Some((g, b));
+            return Some(pins);
         }
         pins = next;
         if pins.iter().all(Option::is_none) {
@@ -4947,8 +4978,7 @@ Cx c3 b4 6n IC=-4\n";
         mna.g[2][2] += 1.0 / r_out;
 
         // build_dc_system bakes the AOL_DC_MAX=1000 cap into base g_dc.
-        let config = DcOpConfig::default();
-        let dc_sys = build_dc_system(&mna, &[], &config);
+        let dc_sys = build_dc_system(&mna, &[]);
         const AOL_DC_MAX: f64 = 1000.0; // must match dc_op.rs constants
         let gm_capped = AOL_DC_MAX / r_out;
         assert!(
@@ -5197,6 +5227,69 @@ Cx c3 b4 6n IC=-4\n";
             corrections.iter().all(|&c| c == 0.0),
             "zero row must not distribute anything, got {:?}",
             corrections
+        );
+    }
+
+    // ── The residual is reported against the shipped G ───────────────
+
+    /// A working copy that drifts from the circuit must show up as KCL
+    /// residual. The mis-stamp is the input-port double count this
+    /// residual failed to catch: a second `1/R_in` at `in` on the working
+    /// copy only. Checked against the working copy the answer is certified
+    /// (the system it solved); against the shipped G it is not.
+    #[test]
+    fn kcl_residual_against_shipped_g_catches_a_mis_stamped_working_copy() {
+        let spice = "tapped divider\n\
+V1 vcc 0 12\n\
+R1 vcc mid 10k\n\
+R2 mid 0 10k\n\
+C1 mid 0 1n\n\
+Rin in mid 1Meg\n";
+        let netlist = Netlist::parse(spice).unwrap();
+        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+        let g_in = 1.0 / 1e6;
+        let i_in = mna.node_map["in"] - 1;
+        // The build's stamp: the circuit as shipped.
+        mna.stamp_input_conductance(i_in, g_in);
+        let config = DcOpConfig::default();
+
+        let residual = |dc_sys: &DcSystemInfo, g_report: &[Vec<f64>]| {
+            let mut result = solve_dc_operating_point_core(&mna, &[], &config, dc_sys);
+            assert!(result.converged);
+            let v_in = result.v_node[i_in];
+            report_kcl_residual(
+                &mut result,
+                dc_sys,
+                g_report,
+                &dc_sys.b_dc,
+                &mna,
+                &[],
+                &config,
+            );
+            (v_in, result.kcl_residual_max)
+        };
+
+        // Honest: only the gmin floor (1e-12 S per node) separates the working
+        // copy from the circuit.
+        let dc_sys = build_dc_system(&mna, &[]);
+        let (v_in, f) = residual(&dc_sys, &dc_sys.g_circuit);
+        assert!((v_in - 2.992519).abs() < 1e-5, "v(in) {v_in}");
+        assert!(f < 1e-10, "honest residual {f:.3e} A");
+
+        // Mis-stamped working copy: v(in) moves to the doubled system's answer.
+        let mut bad = build_dc_system(&mna, &[]);
+        bad.g_dc[i_in][i_in] += g_in;
+        let (v_bad, f_self) = residual(&bad, &bad.g_dc);
+        assert!((v_bad - 1.9934).abs() < 1e-3, "mis-stamped v(in) {v_bad}");
+        assert!(
+            f_self < 1e-10,
+            "checked against itself the mis-stamped system certifies: {f_self:.3e} A"
+        );
+        let (_, f_shipped) = residual(&bad, &bad.g_circuit);
+        // The extra 1e-6 S at ~2 V leaks ~2 µA.
+        assert!(
+            f_shipped > 1e-6,
+            "the shipped G must expose the mis-stamp: residual {f_shipped:.3e} A"
         );
     }
 }

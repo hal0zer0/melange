@@ -59,13 +59,11 @@ Rl   out   0      100k
 
 fn dc_op(spice: &str) -> (dc_op::DcOpResult, std::collections::HashMap<String, usize>) {
     let netlist = Netlist::parse(spice).unwrap();
-    let mna = MnaSystem::from_netlist(&netlist).unwrap();
+    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+    // The 1 Ω input port at `in`, stamped as the build stamps it.
+    mna.stamp_input_conductance(mna.node_map["in"] - 1, 1.0);
     let slots = CircuitIR::build_device_info_with_mna(&netlist, Some(&mna)).unwrap();
-    let config = DcOpConfig {
-        input_node: mna.node_map["in"] - 1,
-        input_resistance: 1.0,
-        ..DcOpConfig::default()
-    };
+    let config = DcOpConfig::default();
     (
         dc_op::solve_dc_operating_point(&mna, &slots, &config),
         mna.node_map.clone(),
@@ -88,9 +86,16 @@ fn dc_operating_point_includes_body_effect_at_newton_precision() {
     ] {
         let (r, nodes) = dc_op(spice);
         assert!(r.converged, "DC OP did not converge");
+        // The residual is reported against the circuit's own G, so it carries
+        // the DC solve's node Gmin (1e-12 S) leak, 1e-12·|v| on each row
+        // (2.4e-11 A at the 24 V rail). The stalls this pins were 3.9e-10 A and
+        // 4.2e-9 A.
+        let v_max = r.v_node.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+        let gmin_leak = 1e-12 * v_max;
         assert!(
-            r.kcl_residual_max <= 1e-12,
-            "KCL residual {:.3e} A: Newton is not converging quadratically on the threshold",
+            r.kcl_residual_max <= gmin_leak + 1e-12,
+            "KCL residual {:.3e} A over the node-Gmin leak {gmin_leak:.3e} A: Newton is not \
+             converging quadratically on the threshold",
             r.kcl_residual_max
         );
         let src = r.v_node[nodes["src"] - 1];

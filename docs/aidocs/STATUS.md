@@ -107,6 +107,7 @@ is R(t) zero-order-hold discretization at 5 kHz mod / 48 kHz fs, not the
   - Diode BV: exponential reverse breakdown (matches codegen template), evaluated in both codegen and DC OP solver (FIXED 2026-04-15)
   - DC OP diode Gmin: 1e-12 S minimum junction conductance added to prevent zero Jacobian entries at reverse bias (FIXED 2026-04-15)
   - DC OP op-amp AOL capped at 1000 to prevent multi-equilibrium NR instability in precision rectifier circuits (FIXED 2026-04-15)
+  - DC OP input ports: the DC OP solves the `mna.g` the build stamped (every input port's conductance counted once, as the transient counts it); `DcOpConfig` has no input fields. The reported KCL residual is against the circuit's own G, not the working copy with its solver aids, so it carries the node Gmin leak (~1e-12·|v| A). Witness: a divider tapped through a 1 MΩ port matches ngspice (v(in) 2.992519 V) in the baked `DC_OP`, `recompute_dc_op` and `melange dc-op` (FIXED 2026-09-29; the compile-time DC OP and `dc-op` had counted the port twice, v(in) 1.9934 V)
   - DC OP failed convergence: low-rate warmup (200 Hz × 1000 samples = 5s circuit time) charges coupling caps before transient NR. Settled state cached for `reset()`. 4kbuscomp: BE fallback <1%, stable at all amplitudes. (ADDED 2026-04-16)
   - BJT GP Q1: singularity guard at `q1_denom <= 0` (physically near Early voltage limit)
   - Tube Koren: no space-charge, no transit-time effects

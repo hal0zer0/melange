@@ -132,6 +132,15 @@ report. `DcOpResult::kcl_residual_max` / `kcl_worst_row` carry the residual of
 the RETURNED solution over all voltage rows with no exemptions; `melange dc-op`
 prints them (human and `--format json`).
 
+The reported residual is computed against the circuit, not the working copy.
+`build_dc_system` snapshots `g_circuit` (the shipped `mna.g`, the inductor DC
+shorts, the BJT internal-node expansion) before adding the solver aids to the
+working `g_dc` (op-amp gain capped at `AOL_DC_MAX`, the 1e-12 S node gmin
+floor); the report uses `g_circuit` with the settled rail pins applied as the
+transient applies them. An aid, or a mis-stamp, that moves the answer shows
+up as residual instead of being certified by the system it changed. The gmin
+floor alone reads about 1e-12 S × |v| (1.2e-11 A at a 12 V rail).
+
 Measured before landing (golden corpus + openwurli decks, 41 nonlinear
 decks): 0 flips to non-converged, 0.0 V node-voltage change at reltol 1e-6.
 
@@ -183,7 +192,11 @@ At DC steady state:
 - **Capacitors**: Open circuit (C not stamped — `i_C = C·dv/dt = 0` at DC)
 - **Inductors**: Short circuit (`VS_CONDUCTANCE` between terminals)
 - **Voltage sources**: Norton equivalent (`VS_CONDUCTANCE` + current injection)
-- **Input**: `1/input_resistance` added to `g_dc[input_node][input_node]`
+- **Input ports**: nothing added. The DC OP solves the `mna.g` it is given,
+  which the build has already stamped with every input port's Thevenin
+  conductance before the kernel — the same G the transient runs. `DcOpConfig`
+  carries no input node or resistance; a caller that wants a port stamps it
+  into `mna.g` (`MnaSystem::stamp_input_conductance`).
 
 ### BJT Junction Cap Linearization
 
@@ -231,14 +244,15 @@ Uses `DeviceSlot` params from `codegen::ir`:
 
 ```rust
 pub struct DcOpConfig {
-    pub tolerance: f64,        // 1e-9
-    pub max_iterations: usize, // 200
-    pub source_steps: usize,   // 10
-    pub gmin_start: f64,       // 1e-2
-    pub gmin_end: f64,         // 1e-12
-    pub gmin_steps: usize,     // 10
-    pub input_node: usize,     // 0-indexed
-    pub input_resistance: f64, // ohms
+    pub tolerance: f64,             // 1e-9 V (ABSTOL of the step test)
+    pub reltol: f64,                // 1e-6
+    pub max_iterations: usize,      // 200
+    pub source_steps: usize,        // 10
+    pub gmin_start: f64,            // 1e-2
+    pub gmin_end: f64,              // 1e-12
+    pub gmin_steps: usize,          // 10
+    pub max_rail_pin_rounds: usize, // 8
+    pub rail: DcRail,               // LoadLine
 }
 
 pub struct DcOpResult {
@@ -248,9 +262,14 @@ pub struct DcOpResult {
     pub converged: bool,
     pub method: DcOpMethod,
     pub iterations: usize,
+    pub kcl_residual_max: f64,         // A, against the circuit's own G
+    pub kcl_worst_row: Option<usize>,
+    pub rail_pin: RailPin,
 }
 
-pub enum DcOpMethod { Linear, DirectNr, SourceStepping, GminStepping, Failed }
+pub enum DcOpMethod {
+    Linear, DirectNr, SourceStepping, GminStepping, AolStepping, Failed, SingularLinear,
+}
 ```
 
 ### Entry Point
@@ -345,7 +364,6 @@ V(coll) ≈ 1.73V  (12 - 1.51e-3 * 6800)
 | NR diverges (oscillating v) | Wrong Jacobian sign (using + instead of -) | Use `G_aug = G_dc - N_i·J_dev·N_v` |
 | Converges to wrong point | Linear initial guess too far | Source stepping will fix automatically |
 | PNP BJT wrong polarity | Missing sign parameter | Check `is_pnp` flag in DeviceParams |
-| V_node all zeros | Input conductance not stamped | Check `config.input_resistance > 0` |
 | BJT oscillation in transient | Mixed integration mismatch | Fixed: DK now uses trapezoidal for nonlinear currents |
 
 ## Runtime DC OP Recompute (Oomox P6, Phase E)
