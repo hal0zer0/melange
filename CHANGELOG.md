@@ -64,8 +64,12 @@ generated state is smaller.
   mode, `none` included. The rail is now part of each Newton solve, pinned the
   way the rail mode pins it (at the terminal for `hard`, on the load line for
   the active-set modes), and a pinned output releases when the op-amp's own
-  test says so. Both circuits now converge under every rail mode, within 1 µV
-  of ngspice with the op-amp clamped the same way. No circuit in the
+  test says so; a pinned output releases rather than jumping to the other
+  rail (pinned, a follower's loop is open and its input difference points
+  at the opposite rail). The runtime operating-point recompute
+  (`--emit-dc-op-recompute`) follows the same rule. Both circuits now
+  converge under every rail mode, within 1 µV of ngspice with the op-amp
+  clamped the same way. No circuit in the
   regression corpus rails at rest, and every generated file is unchanged.
 
 - **`melange dc-op` reports the operating point `compile` ships.** It built

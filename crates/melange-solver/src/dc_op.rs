@@ -3556,7 +3556,16 @@ fn pin_railed_opamps(
             result.rail_pin = RailPin::FellBack(why);
             return None;
         }
-        let next: Vec<Option<f64>> = mna.opamps.iter().map(|oa| pin_of(oa, &v_try)).collect();
+        // A held pin stays while its own test holds and otherwise releases;
+        // it never moves to the other rail in one round (see
+        // [`RailTest::Solved`]): pinned, the loop is open and `v+ - v-`
+        // points at the opposite rail.
+        let next: Vec<Option<f64>> = mna
+            .opamps
+            .iter()
+            .zip(&pins)
+            .map(|(oa, &held)| hold_or_release(held, pin_of(oa, &v_try)))
+            .collect();
         v = v_try;
         result.iterations += iters;
         if next == pins {
@@ -3580,6 +3589,18 @@ fn pin_railed_opamps(
     crate::diag_warn!("DC OP: {why}; keeping the operating point without the pin");
     result.rail_pin = RailPin::FellBack(why);
     None
+}
+
+/// The next round's pin of one op-amp in an active set iterated by whole
+/// re-solves: `fresh` is the free test on the latest solve (`Some(limit)`
+/// past a limit). A held pin stays only while that test still puts the
+/// output past the same limit, and otherwise releases; a free output takes
+/// the test. The in-Newton set ([`dc_rail_pins`]) applies the same rule.
+fn hold_or_release(held: Option<f64>, fresh: Option<f64>) -> Option<f64> {
+    match held {
+        Some(limit) => (fresh == Some(limit)).then_some(limit),
+        None => fresh,
+    }
 }
 
 /// Strategy ladder body of [`solve_dc_operating_point`]. `dc_sys` is the DC

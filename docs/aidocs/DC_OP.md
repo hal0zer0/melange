@@ -524,7 +524,9 @@ the compile-time DC OP (see "Railed op-amps: an active set inside Newton"). The 
 DK-only, and on DK a clamped op-amp runs hard, so the recompute pins a railed
 output at its zero-load limit at the terminal: an active set (pin every output
 whose linear model `AOL·(v+ − v−)` passes its limit, re-solve with those rows
-fixed, repeat until the set is unchanged, at most 8 rounds). A set that does
+fixed, repeat until the set is unchanged, at most 8 rounds; a held pin stays
+only while its own test holds and otherwise releases, never moving to the
+other rail in one round, the rule of the compile-time active set). A set that does
 not settle is a failed recompute (`diag_nr_max_iter_count`), so `settle_dc_op`
 falls back to the warmup loop. Without the pin the recompute solved the linear
 model: a comparator railed at rest landed at 8989 V on a 15 V supply

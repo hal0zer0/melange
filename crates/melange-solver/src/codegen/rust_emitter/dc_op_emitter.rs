@@ -191,8 +191,12 @@ pub(super) fn emit_recompute_dc_op_body_dk(ir: &CircuitIR) -> Result<String, Cod
     } else {
         body.push_str(&emit_dc_op_nr_loop_dk(ir, "v_seed")?);
     }
+    // A held pin stays only while its own test still passes and otherwise
+    // releases; it never moves to the other rail in one round (pinned, the
+    // loop is open and `v+ - v-` points at the opposite rail). The same rule
+    // as the compile-time DC OP (`dc_op::hold_or_release`).
     body.push_str(&format!("        let next_pins: [Option<f64>; {k}] = [\n"));
-    for oa in &pinned {
+    for (idx, oa) in pinned.iter().enumerate() {
         let aol = oa.gm / oa.g_out;
         let vp = oa
             .n_plus_idx
@@ -200,7 +204,7 @@ pub(super) fn emit_recompute_dc_op_body_dk(ir: &CircuitIR) -> Result<String, Cod
         let vm = oa
             .n_minus_idx
             .map_or("0.0".to_string(), |i| format!("v_node[{i}]"));
-        let mut expr = format!("{{ let u = {aol:.17e} * ({vp} - {vm}); ");
+        let mut expr = format!("{{ let u = {aol:.17e} * ({vp} - {vm}); let fresh = ");
         if oa.vclamp_hi.is_finite() {
             expr.push_str(&format!(
                 "if u >= {hi:.17e} {{ Some({hi:.17e}) }} else ",
@@ -213,7 +217,9 @@ pub(super) fn emit_recompute_dc_op_body_dk(ir: &CircuitIR) -> Result<String, Cod
                 lo = oa.vclamp_lo
             ));
         }
-        expr.push_str("{ None } }");
+        expr.push_str(&format!(
+            "{{ None }}; match rail_pins[{idx}] {{ Some(h) => (fresh == Some(h)).then_some(h), None => fresh }} }}"
+        ));
         body.push_str(&format!("            {expr},\n"));
     }
     body.push_str(
