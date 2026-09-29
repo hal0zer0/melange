@@ -1053,7 +1053,20 @@ pub fn run_melange_solver_from_str(
     let generated = if use_nodal {
         generator.generate_nodal(&mna, &netlist)
     } else {
-        generator.generate_with_dc_op(&kernel, &mna, &netlist, dc_preflight)
+        // The DK build refuses a self-starting oscillator; the auto route
+        // then takes the nodal solver, as `melange compile` does.
+        match generator.generate_with_dc_op(&kernel, &mna, &netlist, dc_preflight) {
+            Err(melange_solver::codegen::CodegenError::SelfStartingOscillator(_)) => {
+                melange_solver::pipeline::expand_internal_nodes_if_conditioned(
+                    &mut mna,
+                    &netlist,
+                    &kernel,
+                    &|_| {},
+                );
+                generator.generate_nodal(&mna, &netlist)
+            }
+            other => other,
+        }
     }
     .map_err(|e| ValidationError::Solver(format!("Codegen: {}", e)))?;
 

@@ -1807,6 +1807,7 @@ impl CircuitIR {
         dc_op_result: Option<dc_op::DcOpResult>,
     ) -> Result<Self, CodegenError> {
         let mut ir = Self::build_dk(kernel, mna, netlist, config, dc_op_result.clone(), None)?;
+        Self::refuse_self_starting_on_dk(&ir)?;
         let Some(p) = Self::ring_promotion(&mut ir, config)? else {
             return Ok(ir);
         };
@@ -1820,6 +1821,38 @@ impl CircuitIR {
         )?;
         ir.integration_reason = p.reason;
         Ok(ir)
+    }
+
+    /// Refuse a DK build whose DC operating point has a growing pole.
+    ///
+    /// Under the charge form trapezoidal integration is the bilinear map, so
+    /// its propagator grows (`rho > TRAP_BE_PROMOTION_RHO`) exactly when the
+    /// DC-OP-linearised continuous system has a right-half-plane pole: the
+    /// circuit leaves its operating point on its own, a self-starting
+    /// oscillator. Its switching folds are samples Newton cannot solve in one
+    /// step; the nodal solver cuts the timestep there, DK cannot. Scope: the
+    /// test sees only oscillators that start themselves. A kick-started or
+    /// driven regenerative circuit (an astable seeded by an initial condition,
+    /// a flip-flop) has a stable DC operating point; the runtime unsolved-
+    /// sample counter catches it instead.
+    fn refuse_self_starting_on_dk(ir: &CircuitIR) -> Result<(), CodegenError> {
+        if !ir.dc_op_converged {
+            return Ok(());
+        }
+        let Ok(sys) = crate::codegen::ring::RingSystem::from_ir(ir) else {
+            return Ok(());
+        };
+        let verdict = crate::codegen::ring::analyze(&sys)
+            .map_err(|e| CodegenError::InvalidKernel(e.to_string()))?;
+        if verdict.growth {
+            return Err(CodegenError::SelfStartingOscillator(format!(
+                "the DC operating point has a growing pole (trapezoidal spectral radius \
+                 {:.6}): the circuit oscillates on its own. The DK solver cannot contain \
+                 its switching; it needs the nodal solver (--solver auto or nodal)",
+                verdict.rho
+            )));
+        }
+        Ok(())
     }
 
     /// The DK builder. `promoted` is the ring predicate's verdict when this

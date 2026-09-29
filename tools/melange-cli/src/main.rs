@@ -2512,8 +2512,8 @@ fn compile_circuit_source(
         "dk" => false,
         _ => routing.route == melange_solver::codegen::routing::SolverRoute::Nodal,
     };
-    let solver_label = if use_nodal_codegen { "nodal" } else { "DK" };
-    let solver_reason = if solver_override == "nodal" || solver_override == "dk" {
+    let mut solver_label = if use_nodal_codegen { "nodal" } else { "DK" };
+    let mut solver_reason = if solver_override == "nodal" || solver_override == "dk" {
         // Forced route: still surface what the auto-router decided so the pinned
         // sub-path is visible, not masked by the override reason (melange-circuits
         // t469 — a measuring verb must see the route it is actually on).
@@ -2551,9 +2551,25 @@ fn compile_circuit_source(
         if has_inductors_compile {
             println!("  Using DK codegen with augmented MNA for inductors");
         }
-        generator
-            .generate_with_dc_op(&kernel, &mna, &netlist, dc_preflight)
-            .with_context(|| "Code generation failed")?
+        match generator.generate_with_dc_op(&kernel, &mna, &netlist, dc_preflight) {
+            Err(melange_solver::codegen::CodegenError::SelfStartingOscillator(why))
+                if solver_override != "dk" =>
+            {
+                println!("  Using nodal solver codegen: {why}");
+                melange_solver::pipeline::expand_internal_nodes_if_conditioned(
+                    &mut mna,
+                    &netlist,
+                    &kernel,
+                    &|a| println!("{a}"),
+                );
+                solver_label = "nodal";
+                solver_reason = format!("self-starting oscillator: {why}");
+                generator
+                    .generate_nodal(&mna, &netlist)
+                    .with_context(|| "Nodal code generation failed")?
+            }
+            other => other.with_context(|| "Code generation failed")?,
+        }
     };
 
     let line_count = generated.code.lines().count();
@@ -4368,9 +4384,23 @@ fn simulate_circuit_source(
             .generate_nodal(&mna, &netlist)
             .with_context(|| "Nodal codegen failed")?
     } else {
-        generator
-            .generate_with_dc_op(&kernel, &mna, &netlist, dc_preflight)
-            .with_context(|| "DK codegen failed")?
+        match generator.generate_with_dc_op(&kernel, &mna, &netlist, dc_preflight) {
+            Err(melange_solver::codegen::CodegenError::SelfStartingOscillator(why))
+                if opts.solver != "dk" =>
+            {
+                println!("  Route: nodal — self-starting oscillator: {why}");
+                melange_solver::pipeline::expand_internal_nodes_if_conditioned(
+                    &mut mna,
+                    &netlist,
+                    &kernel,
+                    &|a| println!("{a}"),
+                );
+                generator
+                    .generate_nodal(&mna, &netlist)
+                    .with_context(|| "Nodal codegen failed")?
+            }
+            other => other.with_context(|| "DK codegen failed")?,
+        }
     };
     println!("  {} lines of code", generated.code.lines().count());
 
@@ -5072,9 +5102,23 @@ fn analyze_freq_response(
             .generate_nodal(&mna, &netlist)
             .with_context(|| "Nodal codegen failed")?
     } else {
-        generator
-            .generate_with_dc_op(&kernel, &mna, &netlist, dc_preflight)
-            .with_context(|| "DK codegen failed")?
+        match generator.generate_with_dc_op(&kernel, &mna, &netlist, dc_preflight) {
+            Err(melange_solver::codegen::CodegenError::SelfStartingOscillator(why))
+                if solver != "dk" =>
+            {
+                println!("  Route: nodal — self-starting oscillator: {why}");
+                melange_solver::pipeline::expand_internal_nodes_if_conditioned(
+                    &mut mna,
+                    &netlist,
+                    &kernel,
+                    &|a| println!("{a}"),
+                );
+                generator
+                    .generate_nodal(&mna, &netlist)
+                    .with_context(|| "Nodal codegen failed")?
+            }
+            other => other.with_context(|| "DK codegen failed")?,
+        }
     };
 
     // Generate frequency list

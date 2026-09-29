@@ -323,6 +323,13 @@ generated state is smaller.
 
 ### Changed
 
+- **A self-starting oscillator is no longer built on the DK solver.** When
+  the operating point has a growing pole the circuit leaves it on its own,
+  and DK cannot contain the switching that follows. Such a circuit now
+  builds on the nodal solver with the reason printed, and `--solver dk`
+  refuses it. Circuits that oscillate only after a kick (an `IC=` seed) are
+  not detected here; the unsolved-sample count catches them at run time.
+
 - **An unknown parameter on an op-amp `.model` card is now refused**, as on
   every other device class. It was only warned about, so a mistyped key (say
   `VOHDROP`) compiled and was silently ignored. `melange nodes`, which stops

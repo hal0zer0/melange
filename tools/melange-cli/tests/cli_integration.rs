@@ -831,6 +831,49 @@ fn test_g10_oscillator_default_routing_is_bounded() {
     );
 }
 
+
+/// A self-starting oscillator stays off the DK solver at any rate. At the
+/// 48 kHz host rate the router reads this oscillator trap-stable and picks DK,
+/// but its DC operating point has a growing pole (trapezoidal spectral radius
+/// ~1.015): the DK build refuses it, the default route builds nodal and says
+/// why, and a forced `--solver dk` fails with the reason.
+#[test]
+fn test_g10_self_starting_oscillator_is_refused_on_dk() {
+    let cir = write_test_circuit(G10_OSCILLATOR, "g10_self_starting");
+    let out = std::env::temp_dir().join("melange_cli_test_g10_self_starting.rs");
+    let path = cir.to_str().unwrap();
+    let stdout = run_melange(&[
+        "compile",
+        path,
+        "-o",
+        out.to_str().unwrap(),
+        "--output-node",
+        "term_f",
+    ]);
+    assert!(
+        stdout.contains("self-starting oscillator"),
+        "the default build must say why it left DK:\n{stdout}"
+    );
+    let code = std::fs::read_to_string(&out).unwrap();
+    assert!(code.contains("\"solver\":\"nodal\""), "the build must be nodal");
+    let stderr = run_melange_fail(&[
+        "compile",
+        path,
+        "-o",
+        out.to_str().unwrap(),
+        "--output-node",
+        "term_f",
+        "--solver",
+        "dk",
+    ]);
+    assert!(
+        stderr.contains("Self-starting oscillator"),
+        "a forced --solver dk must be refused with the reason:\n{stderr}"
+    );
+    let _ = std::fs::remove_file(&cir);
+    let _ = std::fs::remove_file(&out);
+}
+
 // ============================================================================
 // IC= + oversampling — NR damping-floor regression (2026-08-14)
 // ============================================================================

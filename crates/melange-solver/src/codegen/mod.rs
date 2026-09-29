@@ -722,6 +722,12 @@ pub enum CodegenError {
     Dk(crate::dk::DkError),
     /// An upstream MNA error
     Mna(crate::mna::MnaError),
+    /// The DK path refuses a circuit whose DC operating point has a growing
+    /// (right-half-plane) pole: a self-starting oscillator switches
+    /// regeneratively, and DK cannot contain an unsolved fold sample the way
+    /// the nodal solver does. An auto route rebuilds on nodal; a forced
+    /// `--solver dk` fails with this reason.
+    SelfStartingOscillator(String),
 }
 
 /// Classify whether the nodal emitter can currently stamp a behavioral source.
@@ -750,6 +756,7 @@ impl std::fmt::Display for CodegenError {
             CodegenError::InvalidDevice(s) => ("Invalid device", s.as_str()),
             CodegenError::InvalidConfig(s) => ("Invalid config", s.as_str()),
             CodegenError::TemplateError(s) => ("Template error", s.as_str()),
+            CodegenError::SelfStartingOscillator(s) => ("Self-starting oscillator", s.as_str()),
             CodegenError::Dk(e) => return write!(f, "Codegen error: {}", e),
             CodegenError::Mna(e) => return write!(f, "Codegen error: {}", e),
         };
