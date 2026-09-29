@@ -2037,17 +2037,6 @@ C1 mid out 1u
 R2 out 0 100k
 ";
 
-/// AC-coupled shunt inductor with zero DC bias: V_L = 0 at the fixed point,
-/// so the guard must NOT fire and the writeback must proceed as before.
-const AC_CHOKE_NETLIST: &str = "\
-AC-coupled choke with no DC bias — fix 3 control (guard must not fire)
-R_in in 0 10k
-C1 in mid 100n
-L1 mid 0 100m
-R1 mid out 1k
-R2 out 0 100k
-";
-
 /// The shipped build of the DC-biased choke: the inductor is an augmented
 /// branch row, so the DC solve treats it as the short it is. No guard, no
 /// refusal: `recompute_dc_op` from a cold start converges to the baked
