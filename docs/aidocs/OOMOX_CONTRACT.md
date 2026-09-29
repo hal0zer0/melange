@@ -200,15 +200,18 @@ file:line, oomox-relative):
   L-stable BE path for the rest of the stream (cleared by `reset()`).
   **Nonzero = "solver degraded, ran on BE"** — a plugin may surface that.
   Always `0` on backward-Euler builds, `--force-trap` / `.integrator trap`
-  builds, passive (`m==0`) circuits, and **saturating-inductor circuits**
-  (the net is not emitted there). Verified `== 0` across all 42 golden
-  circuits (no shipped circuit latches). When it *is* nonzero,
+  builds, and `m==0` circuits without a saturating inductor (the net is not
+  emitted there). A saturating inductor's flux law is nonlinear without adding
+  to M, so saturating-inductor builds DO carry the net, `m==0` included. No shipped circuit latches on the golden set; its one
+  fire is the coverage deck `sat-core-open/step`, the start-up ring of an open
+  transformer secondary (`SATURATING_TRANSFORMERS.md` §3.4). When it *is* nonzero,
   `diag_be_fallback_count` also climbs every subsequent sample (BE runs each
   sample while latched) — do not read that as per-sample NR failure.
 - **New solver-owned detector fields on trap nodal builds** (`be_x_prev`,
   `be_r1_num`, `be_pow`, `be_in_x_prev`, `be_in_r1_num`, `be_in_pow`,
-  `be_latched`) — additive, **do not poke**. Absent on BE/force-trap/passive/
-  saturating-inductor builds. Construct via `::default()` (never a struct
+  `be_latched`) — additive, **do not poke**. Absent on BE/force-trap builds and
+  on `m==0` circuits without a saturating inductor; present on
+  saturating-inductor builds, `m==0` included. Construct via `::default()` (never a struct
   literal) so field additions like these stay non-breaking.
 - `i_nl_prev` / `input_prev` / `dc_block_*` are **not** written by wrappers
   (solver-owned); they appear in wrapper comments (NR-predictor rationale)

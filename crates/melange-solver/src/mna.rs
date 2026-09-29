@@ -3710,8 +3710,11 @@ impl MnaBuilder {
                 // creates an algebraic loop that produces positive K diagonals.
                 //
                 // For each winding i:
-                //   - Leakage: L_leak_i = (1 - k_avg_i²) × L_i
-                //   - k_avg_i = average coupling of winding i to all other windings
+                //   - Leakage: L_leak_i = (1 - k) × L_i
+                //   - Magnetizing (once, on the reference winding): k × L_ref
+                // Only saturating two-winding groups reach this point (three or
+                // more are refused above, and non-saturating groups are held off
+                // by IDEAL_XFMR_L_THRESHOLD), so k is the pair's one coupling.
                 //
                 // The leakage inductor connects from the original positive node to a new
                 // internal node. The original negative node is shared. The ideal transformer
@@ -3766,8 +3769,7 @@ impl MnaBuilder {
                     // realized k_eff = 1/(2−k²) ≈ 0.98 for a specified k=0.99 (~0.8%
                     // transfer error, growing with frequency) — verified against an
                     // ngspice coupled-inductor twin built from the realized [L] matrix.
-                    // Exact for 2-winding; a natural (approximate) generalization for
-                    // W>2 with per-winding average coupling.
+                    // Exact for 2 windings (the only case that reaches here).
                     let l_leak = (1.0 - k_i) * ind.value;
                     // Minimum leakage: ensure non-zero reactive element for numerical stability
                     let l_leak = l_leak.max(ind.value * 1e-4);
@@ -3808,8 +3810,8 @@ impl MnaBuilder {
                 // Current refers inversely to turns, N ∝ √L:
                 //   Isat_ref = Isat_authored · √(L_authored / L_ref)
                 // ISAT-on-reference is the common case and referral is then a no-op
-                // (√1 = 1). Take the first winding carrying ISAT (one shared core =
-                // one authored ISAT) so a mis-authored deck still saturates.
+                // (√1 = 1). Windings whose referred ISATs disagree were refused
+                // above, so the first one carrying ISAT speaks for the core.
                 let core_isat = members.iter().find_map(|m| {
                     let ind = &inductor_refs[m];
                     ind.isat.map(|isat| isat * (ind.value / l_ref).sqrt())
@@ -3904,9 +3906,11 @@ impl MnaBuilder {
                 let ref_neg = inductor_refs[&members[ref_idx]].node_j;
                 // Exact magnetizing inductance is k·L_ref (primary-referred), not
                 // L_ref — pairs with the (1−k)·L leakage above to realize the
-                // specified coupling exactly. ISAT (core saturation current, from the
-                // reference winding) applies to this branch's net magnetizing current;
-                // the flux law Φ(i)=L_mag·Isat·tanh(i/Isat) uses L_mag=k·L_ref.
+                // specified coupling exactly. ISAT (the core's, referred to the
+                // reference winding) applies to this branch's net magnetizing
+                // current; the flux law Φ(i) = L_mag·Isat·tanh(i/Isat) + L_air·i
+                // splits this branch's k·L_ref into the saturable L_mag and the
+                // air-core floor L_air.
                 let l_mag = k_avg[ref_idx] * l_ref;
                 self.inductors.push(InductorElement {
                     name: format!("{}_mag", ref_ind.name),

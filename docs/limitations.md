@@ -441,7 +441,7 @@ these holds:
 | `K` ill-conditioned | max\|K\| > 1e8 (`K_ILL_COND_MAX`) |
 | `S` ill-conditioned | max\|S\| > 1e6 (`S_ILL_COND_MAX`) |
 | Behavioral `B` source | structural -- DK cannot stamp in node space |
-| Saturating inductor (`ISAT=`) | structural -- DK bakes `S = A^-1` and cannot update L per sample |
+| Saturating inductor (`ISAT=`) | structural -- the flux law is solved by Newton on the inductor's augmented row each sample; DK bakes `S = A^-1` and has no such row |
 
 The last two are hard structural requirements: `--solver dk` is **rejected**, not
 downgraded.

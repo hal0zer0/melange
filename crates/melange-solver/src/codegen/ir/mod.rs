@@ -1213,14 +1213,15 @@ pub struct InductorIR {
 /// L_air = lair·l0 (so the small-signal inductance is still l0), differential
 /// inductance L_diff = L_mag/cosh²(i/isat) + L_air as the Jacobian entry, and a
 /// history correction that swaps the baked `α·l0·i_prev` for `α·Φ(i_prev)`
-/// (see `SATURATING_TRANSFORMERS.md` §3.4). L_air is the winding's air-core
+/// (see `SATURATING_TRANSFORMERS.md` §3). L_air is the winding's air-core
 /// inductance: past saturation dB/dH falls to µ0, not to zero.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SaturatingInductorIR {
     pub name: String,
     /// Nominal inductance (henries)
     pub l0: f64,
-    /// Saturation current (amps): L_diff = l0/cosh²(1) ≈ 0.42·l0 at i = isat.
+    /// Saturation current (amps), the tanh scale current:
+    /// L_diff = L_mag/cosh²(1) + L_air ≈ 0.42·L_mag + L_air at i = isat.
     pub isat: f64,
     /// Row index in the augmented system (C[aug_row][aug_row] = L)
     pub aug_row: usize,

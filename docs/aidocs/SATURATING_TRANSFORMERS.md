@@ -1,372 +1,382 @@
-# Saturating Transformers — Design Plan
+# Saturating Inductors and Transformers
 
-**STATUS: NOT IMPLEMENTED. This is a design/roadmap document.**
+Reference for melange's iron-core saturation: the flux law, the shared-core
+T-model, authoring (`ISAT=`, `LAIR=`/`CORE=`, datasheet ratings), how it is
+solved, what is refused, how it is checked, and what is open. Read it before
+touching `SaturatingInductorIR`, `mna::magnetizing_air_floor`,
+`mna::isat_from_datasheet`, the T-model decomposition in `mna.rs`, or the
+`emit_sat_ind_*` stamps in `nodal_emitter.rs`.
 
-Nothing described past §1 exists in the code today. What ships now is
-*uncoupled* saturating inductors (`L1 a b 100m ISAT=20m`, lagged
-`L(I)=L0/cosh²(I/Isat)`, Sherman-Morrison rank-1, 32-sample decimated,
-nodal **full-LU** sub-path — `force_full_lu_sat = !ir.saturating_inductors
-.is_empty()` feeds `structurally_needs_full_lu`, and `--nodal-subpath schur`
-is refused on such a circuit, `nodal_emitter.rs:1730-1790`; this preamble said
-"nodal-Schur path" until 2026-09-22, which was wrong). The coupled/transformer
-saturation machinery that
-exists in the tree (`SaturatingTransformerGroupIR`, `winding_isats`) is
-physically wrong, unvalidated, and unused — see §1.
-
-This document is the plan to build shared-core saturating transformers
-correctly. Read it before touching any `Saturating*IR`, `winding_isats`,
-or the ideal-transformer T-model in `mna.rs`.
+User-facing: [spice-grammar.md](../spice-grammar.md) (the inductor keywords,
+what `ISAT` means, where each class of part's numbers come from) and
+[limitations.md](../limitations.md) → "Saturating Inductors".
 
 Related: [MNA.md](MNA.md) (augmented MNA, inductor branch currents),
 [COMPANION_MODELS.md](COMPANION_MODELS.md) (trap/BE companions),
-[NR_SOLVER.md](NR_SOLVER.md) (Jacobian assembly),
-[DC_OP.md](DC_OP.md) (gmin/source-stepping continuation),
-[DEVICE_MODELS.md](DEVICE_MODELS.md), [SHERMAN_MORRISON.md](SHERMAN_MORRISON.md).
+[NR_SOLVER.md](NR_SOLVER.md), [DC_OP.md](DC_OP.md),
+[OPAMP_RAIL_MODES.md](OPAMP_RAIL_MODES.md) (the active-set pinned solve).
 
 ---
 
-## 1. Scope and the honesty statement
+## 1. What ships
 
-**In scope (v1):** physically-correct shared-core saturation for
-transformers with **no global negative feedback through the iron**.
-Marquee targets are guitar output transformers (SE and push-pull) and
-1:1 character-pedal iron. Tape-head / iron-clip stages already go through
-the uncoupled path.
-
-**Explicitly deferred:** NFB-through-iron transformers (the passive EQ, Neve
-1073), hysteresis / core loss / remanence, and multi-limb cores.
-
-### Why the current independent-winding code is wrong
-
-`SaturatingTransformerGroupIR`
-(`crates/melange-solver/src/codegen/ir/mod.rs:1091-1109`) documents its
-own defect: *"Each winding saturates independently based on its own
-branch current."* A real transformer has **one shared core** threaded by
-all windings; its single physical state is core flux Φ (equivalently the
-magnetizing current `i_m`), driven by the **net MMF `F = Σ Nᵢ·Iᵢ`**, not
-by any one winding's current. Under load, primary and secondary MMFs
-nearly cancel (Lenz), so winding currents can be 100× the magnetizing
-current while the core is *unsaturated*. Keying saturation off `|Iᵢ|`
-therefore saturates the core exactly when it physically should not,
-misses saturation of the true magnetizing current, breaks the
-shared-permeance coupling structure (selfs and mutuals must scale by the
-*same* factor — independent scaling can push `k_eff ≥ 1` and lose
-positive-definiteness), and — having no flux state — cannot produce
-volt-second saturation, DC-bias flux-walking, or the even-harmonic
-"iron" that makes transformers audible. It has zero prior art and zero
-users. **Delete it; do not fix it.**
+- **Single saturating inductor:** `L1 a b 1 ISAT=10m [LAIR=f | CORE=class]`.
+- **Two-winding shared core:** `ISAT=` on either winding of a `K`-coupled pair
+  with k > 0.8. The pair is realized as a T-model whose one magnetizing branch
+  carries the saturation (§2.2).
+- **Anhysteretic and stateless.** No hysteresis, core loss or remanence (§7).
+- **Solved as a flux device inside the nodal full-LU Newton loop**, at every
+  Newton site, at that site's own integrator coefficient, so trapezoidal and
+  backward Euler use the same device (§3).
+- **Refused, not approximated:** saturating groups the shared-core model does
+  not cover, and authoring that contradicts itself (§5).
 
 ---
 
-## 2. The physics/model melange will adopt
+## 2. The model
 
-### 2.1 The load-bearing discovery: the correct topology already exists
-
-`mna.rs:3439-3560` already decomposes a coupled transformer group into
-the physically-correct **T-model**: per-winding **linear leakage**
-inductors + **ideal turns-ratio couplings** + exactly **one magnetizing
-inductance `{ref}_mag`** (= L of the reference winding), which is added
-to the *uncoupled* inductor list. Its branch current **is** the net
-magnetizing current by construction, because the ideal couplings reflect
-load current out.
-
-Consequence: attaching saturation to that single `{ref}_mag` inductor
-(created with `isat: None` at `mna.rs:3525-3530`) yields
-physically-correct shared-core saturation **with no new coupled math**,
-reusing the uncoupled-inductor saturation locus. **This collapses all
-three transformer blockers into the single "uncoupled saturating
-inductor" problem.** Fix uncoupled saturation once and transformers come
-along for free.
-
-**The catch:** the T-model is deliberately disabled —
-`IDEAL_XFMR_L_THRESHOLD = 1e30` (`mna.rs:171`) — because the ideal
-couplings form **algebraic loops in circuits with global NFB through the
-iron** (the passive EQ tertiary NFB, Neve 1073). Enabling it must be **gated to
-NFB-free groups**, or it regresses validated circuits. Loosely-coupled /
-small transformers currently also fall through to the (wrong)
-`winding_isats` path, so routing must be re-verified.
-
-### 2.2 Magnetizing vs leakage split
-
-- **Leakage stays strictly linear.** `L_leak,k ≈ (1−k)·L_k` (air path).
-  Never fold leakage into the nonlinearity.
-- **Only the shared magnetizing element saturates.** In matrix form the
-  magnetizing block is a rank-1 outer product `L_mag = s(F)·n·nᵀ` with
-  turns `nᵢ = √L_mag,i`; shared-core saturation is a *single* rank-1
-  update, not W² elementary updates. The T-model already encodes this
-  split. Guard numerics as `k → 1` (leakage → 0, block near-singular).
-
-### 2.3 Saturation curve (v1: anhysteretic)
-
-Use the anhysteretic flux law already shipped for uncoupled inductors:
+### 2.1 Flux law with an air-core floor
 
 ```
-Φ(i) = L0 · Isat · tanh(i / Isat)
+Φ(i)      = L_mag·Isat·tanh(i/Isat) + L_air·i        L_mag + L_air = L0
+L_diff(i) = dΦ/di = L_mag/cosh²(i/Isat) + L_air
 ```
 
-Its **differential** inductance is
+`L_air = LAIR·L0`. The small-signal inductance is still `L0`; deep in
+saturation `L_diff` falls to `L_air`, not to zero.
+
+**Why the floor.** In iron `B = µ0(H + M)` and only `M` saturates, so `dB/dH`
+falls to `µ0`: the winding bottoms out at its air-core inductance (analog-EE
+review). The pure tanh law has zero final slope — `L_diff` is 6e-8 of `L0` at
+9× `Isat` and exactly flat in f64 past about 19× — so the branch equation
+degenerates and the current past saturation is set by numerical floors, not
+physics. Measured on a saturating RL (1 H, `Isat` 10 mA, 100 Ω, 30 Hz):
+`LAIR=0` peaks at 11.83× / 23.94× `Isat` at 10 V / 20 V against a V/R ceiling
+of 10× / 20× (a trapezoidal ring, §3.4); with the steel floor it peaks at
+10.0000× / 20.0000× with no ring.
+
+**What `ISAT` is.** The tanh scale current. The core's saturation flux is
+`λ_sat = L_mag·ISAT` volt-seconds (≈ `B_sat·A_core·N`), and
+`L_diff(ISAT) = 0.42·L_mag + L_air`. It is **not** a datasheet "saturation
+current" — that is the current at a stated inductance drop, 1.6–3× smaller;
+give one with the datasheet forms (§2.4).
+
+**Floor authoring.** `LAIR=<fraction of L0>`, 0 ≤ LAIR < 1 (a measured
+saturated-to-unsaturated inductance ratio is best), or
+`CORE=gapped|steel|nickel` for a rule-of-thumb class value (1e-3 / 3e-4 /
+3e-5). Not both. Neither gives the default 3e-4 (ungapped steel) with a compile
+notice; `LAIR=0` is accepted with a notice. Generated code carries
+`SAT_IND_N_{L0, LMAG, LAIR, LAIR_SOURCE, ISAT, AUG_ROW}`; `LAIR_SOURCE` records
+which reading applied.
+
+### 2.2 Shared core: the T-model
+
+A transformer has one core. Its state is the core flux, driven by the net MMF
+`Σ Nᵢ·Iᵢ`. Under load the primary and secondary MMFs nearly cancel (Lenz), so a
+winding can carry 100× the magnetizing current while the core is unsaturated.
+Saturation keyed on any one winding's current is therefore wrong: it saturates
+a loaded core that should stay linear, and misses the magnetizing current that
+actually saturates it.
+
+melange realizes a saturating two-winding group as (`mna.rs`, the
+ideal-transformer decomposition):
+
+- per winding, a **linear leakage** inductor `(1 − k)·Lᵢ` from the winding's
+  node to a new internal node;
+- **ideal couplings** between the internal nodes, turns ratio
+  `n = √(Lᵢ/L_ref)`;
+- exactly **one magnetizing inductor** `{ref}_mag = k·L_ref` on the reference
+  winding (the largest `L`, not necessarily the primary), carrying the core's
+  `ISAT` and floor.
+
+The ideal couplings reflect load current out of the magnetizing branch, so its
+branch current **is** the net magnetizing current, and saturating that one
+inductor is shared-core saturation. Leakage is an air path and stays linear.
+Self and mutual inductances come out exact for two windings
+(`(1 − k)·L₁ + k·L₁ = L₁`, `(1 − k)·L₂ + n²·k·L₁ = L₂`, `M = n·k·L₁ = k√(L₁L₂)`);
+checked 2026-08-16 against the exact coupled-inductor `[L]` path and ngspice to
++0.011 %, flat across k and frequency.
+
+**Leakage floor.** Each leakage inductor is floored at `1e-4·Lᵢ`. For
+k > 0.9999 the realized leakage is the floor, not `(1 − k)·Lᵢ`, so the realized
+coupling is looser than authored (k = 0.99999 realizes about 0.9999) and the
+winding self-inductance is high by the difference. No notice is printed. Real
+audio iron sits at `1 − k` ≈ 1e-5..1e-4, so this range is reachable by a
+faithful deck. Open, §8.
+
+**ISAT referral.** Current refers inversely to turns (`N ∝ √L`), so an `ISAT`
+authored on winding `a` becomes `ISAT·√(L_a/L_ref)` on the magnetizing branch.
+On a step-up transformer the reference winding is the secondary, and an
+unreferred primary `ISAT` would saturate the core `n×` too late.
+
+**Where the T-model is used.** Only for saturating groups (the gate is
+`group_saturating && max_k > 0.8`). Non-saturating coupled groups stay on the
+exact coupled-inductor `[L]` path; `IDEAL_XFMR_L_THRESHOLD = 1e30` keeps the
+T-model off for them. The ideal couplings form algebraic loops that DK and
+nodal Schur cannot take, but saturating circuits run on nodal full-LU (§4),
+which solves the coupling constraint directly each sample. That includes
+negative feedback through the iron: a scratch `ISAT` on the passive EQ's
+push-pull primary (2026-08-26) routed through the T-model, auto-BE, and stayed
+bounded with no NaN or Newton starvation up to 8 V.
+
+### 2.3 The air floor on a shared core
+
+A winding's air-core self-inductance splits into the fixed air-path leakage,
+which the T-model already carries as `(1 − k)·L`, and the air-core mutual part.
+The two ways of stating a floor therefore read differently on a shared core
+(`mna::magnetizing_air_floor`):
+
+| Declaration | Reading | Magnetizing floor F (× L_ref) |
+|---|---|---|
+| `CORE=<class>` or none | the core's magnetizing air floor; leakage comes from K | `class` (never refuses) |
+| `LAIR=<f>` | the winding's **total** air-core self-inductance (e.g. measured with the core removed) | `f − (1 − k)`; refused if ≤ 0 |
+
+- Declarations on both windings must imply the same F (to 1e-12 relative), or
+  the deck is refused.
+- The IR expresses F as a fraction of the magnetizing branch (`F/k`).
+- For k < 0.9995 a notice says the coupling is looser than real audio iron and
+  gives the implied deep-saturation coupling `k_air = F/((1 − k) + F)` (0.029 for
+  K = 0.99 with the steel floor).
+
+### 2.4 Datasheet ratings
+
+| Form | Meaning |
+|---|---|
+| `ISAT=<I> ISAT_DROP=<d>` | the inductance has fallen by the fraction d at current I |
+| `ISAT_BASIS=incremental` (default) / `apparent` | the quoted inductance is `dΦ/di` (LCR meter over a DC bias; usual datasheet practice) or `Φ/i` (volt-second measurement) |
+| `L_AT_IDC=<L>,<I>` | inductance L at DC bias I ("L at rated DC" on chokes and single-ended output transformers): an incremental drop of `1 − L/L0` at I |
+
+`mna::isat_from_datasheet` converts exactly against the winding's terminal law,
+with `x = I/ISAT`:
 
 ```
-L_diff(i) = dΦ/di = L0 / cosh²(i / Isat)
-dL/di     = -(2/Isat) · L_diff(i) · tanh(i / Isat)
+incremental:  L/L0 = (1 − k) + (k − F)·sech²(x) + F
+apparent:     L/L0 = (1 − k) + F + (k − F)·tanh(x)/x
 ```
 
-This is stateless: no loss, no remanence, no minor loops. Do **not**
-claim hysteresis or "iron memory" fidelity from it. Hysteresis (Chan,
-Jiles-Atherton) is deferred to §8.
+`k = 1` and `F = LAIR` for a single inductor. The rated drop fixes `x`, and
+`ISAT = I/x`. A drop larger than the saturable part `k − F` can reach is
+refused. On a shared core the rating is converted against the pair's k and F on
+the rated winding, then referred (§2.2); a datasheet form on a core where both
+windings carry `ISAT` is refused, because the agreement check compares authored
+values. At LAIR 3e-4 the model's `ISAT` is 3.05 / 2.08 / 1.63 × the rated
+current at a 10 / 20 / 30 % incremental drop, and 1.71 / 1.13 / 0.84 × apparent.
+
+A maximum-level spec ("+x dBu at y Hz") needs the source impedance before it
+implies a current, and mic/line transformer level ratings do not convert to an
+`ISAT` at all.
+
+### 2.5 Harmonics: what this law can and cannot produce
+
+The law is point-symmetric. Under symmetric drive with no DC it gives **odd
+harmonics only** — and so would a symmetric hysteresis loop (Chan,
+Jiles-Atherton). H2 needs **broken symmetry**: net DC magnetizing bias
+(single-ended class-A iron, push-pull imbalance), an asymmetric drive from
+upstream, or transient remanence. It does not need hysteresis. Hysteresis adds
+loss, phase lag and level-/LF-dependent distortion, which is what could justify
+it (§8).
+
+With a DC bias established as a **current** (analog-EE review), writing
+`φ0 = tanh(Idc/Isat)` and `a` = AC flux / saturation flux:
+
+```
+H2/H1 ≈ φ0·a / (2·(1 − φ0²))
+H3/H1 ≈ (2 + 6φ0²)·a² / (24·(1 − φ0²)²)
+```
+
+H2 is proportional to φ0 and flips sign with `Idc`; H2 = H3 near φ0 ≈ a/6. The
+C3 tests gate this (§6).
+
+The passive EQ's H2 comes from sourced push-pull tube `.mismatch`, not from its
+iron, which carries no `ISAT`.
 
 ---
 
 ## 3. Numerical formulation
 
-The shipped uncoupled path patches only the **trap** DK matrices
-(S/K/A_neg) with a lagged Sherman-Morrison update using `I_prev`,
-outside the NR loop, decimated every 32 samples. That design carries two
-of the three blockers: it does not compose with the backward-Euler
-fallback (the BE matrices `s_be`/`k_be` at `ir/mod.rs:662-665` receive no
-patch — see the explicit "future work" note at `ir/mod.rs:3009-3017`),
-and lagged/decimated evaluation is wrong for hard, fast saturation. The
-fix is to **move saturation into the full-LU nonlinear NR loop as a
-genuine device on the augmented magnetizing branch.**
+### 3.1 State variable
 
-### 3.1 State variable: prefer flux-linkage λ
+The branch current `i_k` of the inductor's augmented row stays the unknown
+(decided 2026-08-15). Flux linkage as the state would make `v = dλ/dt` linear
+under both integrators, but it changes the augmented state layout, DC-OP
+seeding, `v_prev` indexing and the generated-code contract; current-state with
+the correct residual/Jacobian split was taken instead.
 
-Make the augmented unknown the **flux linkage λ** (or Φ), not
-current-with-`L(I)`. Then Faraday `v = dλ/dt` is **linear and exact
-under both trap and BE** with constant integrator coefficients, and the
-nonlinearity collapses to a pure algebraic NR equation `i = g(λ)` — 1D
-per core, any winding count. This is the EMTP/EMTDC-standard choice: it
-decouples stiffness from the integrator, conserves flux across
-timesteps (a `current + L(I)` coefficient leaks flux on fast
-transients), and avoids inverting a near-zero `L_diff` deep in
-saturation.
+### 3.2 Stamps
 
-Cost: it changes the augmented state-vector layout, DC-OP seeding,
-`v_prev` indexing, and OOMOX_CONTRACT struct fields. **Fallback** if
-flux-state proves too invasive: keep `i` as the branch state and only
-fix the Jacobian/residual (§3.2). The numerics-vs-blast-radius tradeoff
-is an open question (§8).
-
-### 3.2 Stamps and Jacobian (current-state form, the fallback)
-
-Stamp saturation as a nonlinear device in the same slot as diodes/BJTs,
-on the augmented magnetizing-branch row `k` between nodes `i, j`. The
-full-LU path assembles the Jacobian fresh each iteration against a single
-integrator scalar `alpha` (`nodal_emitter.rs:3147-3149`: `alpha = 1/T`
-for BE, `2/T` for trap).
-
-**Critical footgun — chord vs differential inductance.**
-`L0/cosh²(i/Isat)` is the **differential** slope `dΦ/di`. It is correct
-as the **Jacobian entry** but *wrong* if used as a chord `L` in a
-`Φ = L·i` product. The NR **residual must use the flux integral `Φ(i)`**,
-not `L_eff·i`.
-
-Trap companion, branch row `k`:
+Augmented row `k` between nodes `i, j` (`mna.rs::build_augmented_matrices`):
 
 ```
-R_k        = -(V_i - V_j)^{n+1} + (2/T)·Φ(i_k^{n+1}) - (2/T)·Φ(i_k^n) - (V_i - V_j)^n
-∂R_k/∂V_i  = -1
-∂R_k/∂V_j  = +1
-∂R_k/∂i_k  = (2/T)·L_diff(i_k^{n+1})
+G:  g[i][k] += 1 ;  g[j][k] -= 1        KCL: branch current enters i, exits j
+    g[k][i] -= 1 ;  g[k][j] += 1        KVL row k reads (−V_i + V_j)
+C:  c[k][k]  = L0
 ```
 
-Backward-Euler companion: identical with `2/T → 1/T` and the `(V_i−V_j)^n`
-history term dropped.
-
-The node-KCL rows couple to `i_k` with the usual ±1 incidence entries,
-unchanged. The magnetizing rank-1 core term `(2/T)·L_diff·n·nᵀ` sits on
-the augmented block; whether it can be applied via Sherman-Morrison
-*inside* the NR iteration or forces full-LU unconditionally is open (§8).
-
-### 3.3 How NR-integration dissolves the BE blocker
-
-Because saturation is evaluated **inside** the NR loop against the single
-`alpha` scalar, there is exactly one code path and **no precomputed
-trap-only matrices to keep in sync**. Trap and BE differ only by
-`alpha ∈ {2/T, 1/T}` and the history term. Saturation therefore composes
-with auto-BE, breakpoint-BE, the runtime BE-latch, and `--backward-euler`
-**for free** — this is the structural reason the in-loop approach
-dissolves blocker (2), which the SM-on-trap-matrices scheme cannot.
-
-Integrator policy is unchanged from melange's existing handling: **trap
-by default, conditional BE**. Trap is A-stable but not L-stable (z=−1
-Nyquist ring on a stiff saturation collapse); BE is L-stable but
-over-damps the lightly-damped LC resonances that *are* the transformer's
-audible character. Reuse the existing `nyquist_dbc` auto-BE detector and
-breakpoint-BE. **Do not pin BE** — `.integrator be` dulls resonances and
-is a stopgap, not a fix.
-
-### 3.4 Verified melange companion-form stamps (Phase 1, current-state)
-
-Decision recorded 2026-08-15: **current-state** (branch current `i_k` stays
-the augmented unknown), resolved by impartial review against the flux-state
-lean (§8-Q3). The stamps below are derived against melange's *actual* augmented
-MNA and full-LU companion NR — not the abstract residual of §3.2 — and are the
-implementation contract for Phase 1.
-
-**Augmented row sign convention (verified `mna.rs:build_augmented_matrices`,
-uncoupled inductor, row `k` between nodes `i,j`):**
+Trap `A = G + alpha·C`, `A_neg = alpha·C − G`; BE `A_neg = alpha·C` (no
+voltage-history term on inductor rows). The base matrices bake the linear flux
+`L0·i`. The saturating inductor is three corrections against the site's
+`alpha`, with `i0` the iterate the Jacobian was factored at:
 
 ```
-G:  g[i][k] += 1 ;  g[j][k] -= 1        // KCL: branch current enters i, exits j
-    g[k][i] -= 1 ;  g[k][j] += 1        // KVL row k reads  (-V_i + V_j)
-C:  c[k][k]  = L0                        // self-inductance
-```
-
-Trap system `A = G + alpha·C`, `A_neg = alpha·C − G`; BE `A_neg = alpha·C`
-(G dropped — no voltage-history term on BE inductor rows). Row `k` of
-`A·v = A_neg·v_prev + rhs` reproduces the trapezoidal rule for `V = L·di/dt`.
-Flux linkage `λ = L0·i` generalises to `Φ(i) = L0·Isat·tanh(i/Isat)`
-(`Φ ≈ L0·i` as `i→0`; `L_diff = dΦ/di = L0/cosh²(i/Isat)` = the shipped
-`l_eff`). The **residual/history uses `Φ`; the Jacobian uses `L_diff`** — never
-`L_eff·i` (§3.2 footgun).
-
-**The full-LU NR is companion-form**, not residual-delta: `chord_lu` starts as
-the base matrix (with `alpha·L0` already at `[k][k]`), device Jacobians are
-stamped in, `rhs_work = rhs + companion`, and the back-solve yields `v_new`
-directly. So the saturating inductor is a **three-line correction** at each
-assembly site, against that site's integrator `alpha`, frozen at the same
-iterate `i0` used to factor (chord-consistent, like `chord_j_dev`):
-
-```
-Jacobian:      MAT[k][k]  += alpha·(L_diff(i0) − L0)        // alpha·L0 → alpha·L_diff
+Jacobian:      MAT[k][k]   += alpha·(L_diff(i0) − L0)
 companion RHS: rhs_work[k] += alpha·(L_diff(i0)·i0 − Φ(i0))
-history:       rhs[k]      += alpha·(Φ(i_prev) − L0·i_prev)  // i_prev = v_prev[k], once/sample
+history:       rhs[k]      += alpha·(Φ(i_prev) − L0·i_prev)     once per sample
 ```
 
-**Three assembly sites** must each carry the correction with its own `alpha`
-(this is what makes BE composition "free" — one nonlinearity, no matrix sync):
+**Footgun:** `L_diff` is the Jacobian entry only. The residual and history use
+the flux integral `Φ(i)`, never `L_diff·i` or any `L_eff·i` product.
 
-1. **Main trap loop** — base `state.a`/`chord_lu`, `alpha = 2·rate·OS`. Add the
-   inductor's `L_diff` drift to the chord refactor trigger (like the >50% j_dev
-   check) so a fast knee re-factors.
-2. **Adaptive sub-step** — base `a_sub`, `alpha = alpha_sub` (already local).
-3. **BE fallback** — base BE matrices, `alpha = 1·rate·OS`; history has **no**
-   `V_i−V_j` term (BE `A_neg` drops G), so only the `alpha·L0·i_prev →
-   alpha·Φ(i_prev)` correction applies.
+Numerical guards in the stamps: the `cosh` argument is clamped to ±40, and
+`L_diff` is floored at `1e-6·L0` (inactive unless `LAIR` < 1e-6).
 
-**Routing / structural prerequisites (Phase 1):**
-- Force `use_full_nodal = true` when uncoupled saturating inductors are present
-  (today `use_full_nodal` ignores them; a linear+sat-inductor circuit is `m=0`
-  and would route to Schur or the `m==0 && !behavioral` linear fast-path).
-- Exclude sat-inductor circuits from the `m == 0 && !has_behavioral` direct-LU
-  branch (`emit_nodal_process_sample`) — they now need Newton iteration even at
-  `m=0`.
-- DC-OP is unchanged: an inductor is a DC short (zero self-diagonal, ±1
-  incidence) regardless of saturation; sample-0 history uses the DC branch
-  current via `v_prev[k]`.
-- **Delete the decimated uncoupled block** (`c_work[k][k]` patch, `SAT_UPDATE_
-  INTERVAL`, `sat_ind_N_l_eff`) for uncoupled inductors. Coupled/xfmr decimated
-  paths stay until Phase 2 deprecation.
-- `M`-anchor check: moving the inductor in-loop makes it a counted nonlinear
-  element — confirm the emitted `M`/`N` anchors OOMOX pins don't shift
-  unexpectedly (`OOMOX_CONTRACT.md:136`).
+### 3.3 Newton sites and one convergence definition
 
----
+A saturating inductor makes the circuit nonlinear even at M = 0, so it forces
+the full-LU path and is excluded from the M = 0 direct-LU fast path. The stamps
+go in at every site that can commit a sample:
 
-## 4. NR convergence / continuation for the stiff knee
+1. the main trapezoidal (or BE) loop, `alpha = 2·fs·OS` (or `fs·OS`);
+2. the adaptive sub-step, `alpha_sub`;
+3. the backward-Euler fallback, `alpha = fs·OS`, history without the
+   `V_i − V_j` term;
+4. the op-amp active-set pinned Newton. Its start takes `i_L` from `v_prev`: an
+   unpinned iterate 2-cycles on tanh. A pinned solve that fails is counted in
+   `diag_nr_unconverged_commit_count`.
 
-A hard saturation knee is a stiff nonlinearity. Per-sample
-`solve_nonlinear` currently runs plain damped Newton with no
-continuation — the same limitation behind the G10 / diode-switching
-convergence class (STATUS.md:299). `dc_op.rs` **does** have gmin and
-source-stepping continuation, but only for the DC operating point, not
-per-sample.
+Each site checks the flux row with the same residual
+(`emit_sat_ind_row_residual`): the row's equation evaluated at the accepted
+iterate, stop at `max(1e-5·den, 64·eps·max(|alpha·Φ|, |rhs[k]|))`, where `den`
+is the row's per-sample increment (`alpha·ΔΦ`, the volts across the winding),
+not the flux. The tolerance is load-bearing: under a DC bias Newton's remainder
+is one-signed and integrates with the L/R time constant. At `1e-3·den` a 5 mA
+biased core drifted −1.6e-5 A over 2 s (0.7 % on H1 in C3); at `1e-5` the drift
+is about 1e-10 A, for about one more iteration per sample. The function's doc
+comment records why the cheaper Φ-vs-Φ drift test can never fire.
 
-Plan: **expect the knee to expose the per-sample continuation gap, and
-plan to port the DC-OP gmin/source-stepping into `solve_nonlinear`**
-rather than assuming plain Newton converges through the knee. Flux-state
-(§3.1) helps here — with λ as the unknown the residual `i = g(λ)` stays
-well-scaled through the knee where `L_diff → 0` would otherwise make the
-current-state Jacobian catastrophically ill-conditioned. A flux-homotopy
-or damped-Newton line search is a candidate alternative. This is likely
-the *same substantial fix* already scoped for the G10-astable /
-diode-switching class; treat it as shared work, not transformer-specific.
+**DC operating point.** An inductor is a DC short; the DC branch current seeds
+`v_prev[k]`. A circuit whose DC solution has all node voltages at zero but a
+nonzero inductor current (a current-biased grounded inductor) still has a DC
+operating point; the nodal "has DC OP" test reads the augmented rows too.
 
----
+### 3.4 Integrator
 
-## 5. Phased implementation plan
+Trapezoidal by default. Auto-BE, breakpoint-BE and the runtime BE-latch are
+armed on saturating circuits, M = 0 ones included, because the flux device is
+stamped at every site at that site's `alpha`. A forced latch matches a
+`--backward-euler` build of the same circuit to 2.1e-10 relative (open
+shared-core transformer, 5 V) and 3.1e-11 / 1.9e-11 (choke-loaded MOSFET stage,
+3 V / 5 V).
 
-Ordered by dependency. Each phase has a concrete milestone.
+**Deep saturation.** Trapezoidal integration is A-stable, not L-stable: as
+`L_diff` collapses, a branch's trapezoidal factor tends to −1 and a Nyquist ring
+can survive. With an air-core floor the measured cases do not ring (saturating
+RL at 10, 20 and 100 V; choke-loaded common-source stage at 1–30 V), and the
+latch does not fire. With `LAIR=0` the RL rings (current 20 % over the V/R
+ceiling at 20× `Isat`, not cured by 4× oversampling) and the latch catches it.
+The latch is sticky, so a transient ring commits that instance to BE for the
+rest of the stream; measured with `LAIR=0`: H1 −1.8e-4 (RL at 10 V), output
+−0.28 % (choke-loaded stage at 5 V).
 
-**Phase 0 — Decide and audit (no code).**
-Decide state formulation (flux-state strongly preferred; current-state
-fallback). Confirm nothing besides routing references the deprecated IR:
-`routing.rs:179` reads `winding_isats`; audit all consumers of
-`SaturatingCoupledInductorIR` / `SaturatingTransformerGroupIR` before
-deprecating. *Milestone:* written decision + a clean deprecation list.
+**Start-up ring on an open transformer.** On the golden `sat-core-open/step`
+render the latch fires once: a 6 mV sample-to-sample alternation around
+−0.236 V after the 5 V step. That ring is not saturation. Measured 2026-09-28:
+the same deck with `ISAT=100` (the core never leaves its linear region) latches
+identically, and with a 600 Ω load instead of 1 MΩ it does not latch. It is
+consistent with the open secondary's stiff linear mode — leakage
+`(1 − k)·L` = 10 mH into 1 MΩ, a 10 ns time constant against a 21 µs sample,
+trapezoidal factor ≈ −0.998.
 
-**Phase 1 — Fix the UNCOUPLED saturating inductor.**
-Move it from lagged/decimated SM-on-trap-matrices onto the full-LU NR
-loop as a flux-state (or current-state fallback) nonlinear device (§3).
-This alone fixes blockers (2) and (3) for the *already-shipped* feature.
-*Milestone / acceptance witness:* **the-kicker** (4 saturating
-inductors) stable on silence **and** under `--backward-euler`, plus a
-single-inductor XSPICE-core validation (§6).
-
-**Phase 2 — Route coupled transformers through the T-model. [IMPLEMENTED
-2026-08-16, commit `ba64ddb`.]**
-The gate is ADDITIVE: `(max_l > 1e30 || group_saturating) && max_k > 0.8`
-(`mna.rs` ~3439) — any tight-coupled group carrying ISAT routes through the
-T-model; non-saturating groups stay byte-identical. Core saturation is
-propagated onto `{ref}_mag` (reference/primary winding's ISAT).
-
-**Correction to the original scoping above:** the gate does NOT need to be
-limited to *NFB-free* groups. The `1e30` disable was a **DK/Schur**
-limitation (algebraic loop needs a reactive-delay per feedback loop); the
-full-LU nodal path that saturating transformers force resolves the
-ideal-coupling algebraic constraint by direct LU each sample. An impartial
-design review confirmed the full-LU NFB-through-iron solve matches ngspice to
-4–5 significant figures, so Option A (fire for ALL saturating groups,
-subsuming the deferred Phase 4) is solver-sound. NFB-free detection was
-dropped as unnecessary complexity.
-
-**Two correctness fixes to the T-model realization** (both were latent
-while it was disabled):
-1. **Exact element values:** `L_leak = (1−k)·L`, `L_mag = k·L_ref` (were
-   `(1−k²)·L`, `L_ref`, realizing `k_eff = 1/(2−k²) ≈ 0.98`).
-2. **Ideal-transformer sign bug** (`mna.rs` ~3963): the current-injection
-   column's *primary* entries were negated relative to the voltage-
-   constraint row, when they must be its **transpose**. That gave
-   `I_pri = +n·I_sec` (non-power-conserving) and a non-symmetric `[L]` with
-   the mutual wrong-signed — a ~5% frequency-growing transfer error. Fixed
-   to `I_pri = −n·I_sec`. **The fixed T-model matches the exact
-   CoupledInductor `[L]` path and ngspice to +0.011%, flat across k and
-   frequency** — 6-nines, same as the exact path.
-
-*Milestone:* blocker (1) dissolved — mag current = net magnetizing current
-by construction; SE saturation odd-symmetric (H2=0, H3≈27%); saturating
-transformer validated by composition (6-nines linear T-model + the
-Phase-1-validated `{ref}_mag` flux device) plus independent ngspice
-shared-core twins. Still OPEN: delete the `winding_isats` path (loose-
-coupling k≤0.8 saturating groups still fall to it); a PP output-transformer
-deck with authored core data.
-
-**Phase 3 — Netlist authoring contract** (decide early, spans Phases
-1-2). `ISAT=` on the primary/reference winding (matches shipped inductor
-syntax) vs a dedicated `.core Bsat=.. Ae=.. N=..` directive. Default to
-the broadest-safety option. Document how the leakage/magnetizing split
-and turns vector derive from existing `L` + coupling `k`. *Milestone:*
-documented, tested parser path; ISAT authored into marquee decks.
-
-**Phase 4 — DEFERRED: NFB-through-iron.** For the passive EQ / 1073, compute net
-MMF `Σ Nᵢ·Iᵢ` directly from the augmented branch currents already
-present in the coupled-Y path and apply one shared saturation term,
-sidestepping the algebraic loop. Open feasibility question.
-
-**Phase 5 — DEFERRED: hysteresis / loss / advanced cores** (§8).
+**Knee at a short L/R (railing op-amp, 1×).** Just past the knee the tanh slope,
+not the floor, sets `L_diff`. A railing op-amp driving a gapped choke at about
+2.7× `Isat`, active-set rail mode: at 1× the inductor current overshoots by
+5–13 % over ngspice while the output fundamental stays within 0.21 %; at 4× the
+current is within 1.3 % and H1 within 0.1 %. A per-sample trace puts the
+overshoot where the core crosses its knee within one sample with the full rail
+across it, 2–3 samples after the pin, not at the pin change. Measured and
+rejected: one backward-Euler sample at each pin-state change (inductor current
+still −1.6..+13 %); the recovery sub-step triggered on the `L_diff` collapse
+ratio (fired on the unpinned iterate, and the full-step pin re-solve discarded
+the sub-steps; the ratio is not a sound trigger — a saturating RL at 20 V
+collapses harder and does not ring); a per-element trapezoidal-factor guard
+(every threshold that removes the ring over-damps: inductor current −4 %, H1
++6 % at 1 V). Compile prints a notice when a clamped op-amp in an active-set
+mode and a saturating inductor meet below 4× oversampling. Parked, with its
+reopen trigger, in STATUS.md → Pending Work.
 
 ---
 
-## 6. Validation strategy and acceptance criteria
+## 4. Routing
 
-**ngspice's native `.model IND` core is LINEAR** (constant µ, no Chan
-model). Validating against it looks fine at low drive and is silently
-wrong in saturation. **Do not use it.**
+- **Nodal full-LU, unconditionally.** The flux device lives on an augmented
+  row inside the full-LU Newton loop.
+- `--solver dk` is **refused**: DK bakes `S = A⁻¹` and has no per-sample Newton
+  on the augmented row, so it would run the inductor linear.
+- `--nodal-subpath schur` is **refused** for the same reason: the Schur
+  reduction does not iterate on augmented rows.
+- Provenance: the route reason is "saturating inductors are flux devices
+  solved in the nodal full-LU Newton loop"; the full-LU trigger is
+  `saturating-inductor`.
 
-**Use the XSPICE `core` + `lcouple` code models** (present and working in
-the installed ngspice — "XSPICE extensions included"), which are
-architecturally the *same shared-core MMF model* melange targets:
+---
+
+## 5. Refusals and notices
+
+Refused, with a message naming the elements:
+
+| Case | Why |
+|---|---|
+| Saturating coupled group with largest k ≤ 0.8 | A closed iron core has k > 0.99. k ≤ 0.8 is either no shared core (give each inductor its own `ISAT` and drop the `K`) or a deliberate leakage path whose flux itself saturates (ballast, neon and welding transformers), which is out of scope. Permanent. |
+| Saturating group with 3 or more windings | The two-winding T-model does not generalize by averaging couplings (4 dB at 20 Hz in a 3-winding test). §8. |
+| Two windings of one core with different referred `ISAT` | One core has one saturation current. |
+| Two windings implying different magnetizing floors | One core has one floor. |
+| Authored `LAIR` ≤ `1 − k` on a shared core | The deck's own k already puts that much in leakage. |
+| Datasheet form on a core whose two windings both carry `ISAT` | The agreement check compares authored values. |
+| Datasheet drop the saturable part cannot reach | No `ISAT` produces it. |
+| `LAIR=` with `CORE=`; `L_AT_IDC=` with `ISAT=`/`ISAT_DROP=`; `ISAT_BASIS=` without `ISAT_DROP=`; out-of-range values | Strict parsing. |
+
+Compile notices: default floor (with the reading used on a shared core);
+`LAIR=0`; shared-core k < 0.9995; railing op-amp into a saturating inductor
+below 4× oversampling.
+
+---
+
+## 6. Validation
+
+**Tests** (`crates/melange-solver/tests/`):
+
+- `saturation_knee_regression_tests.rs` — the knee, driven at 30 Hz.
+  - **C1** saturating RL against a scalar trapezoidal recurrence of
+    `V − R·i = dΦ/dt` at 1× (checks the implementation) and 1024× (≈continuous;
+    checks the physics). A reference that shares melange's discretization
+    validates the implementation only, which is why the 1024× gate stays.
+    Mutants (broken flux device, zero floor) must fail;
+    `c1_jacobian_deletion_is_caught_at_every_newton_site` removes the Jacobian
+    stamp at each site in turn. Deep saturation settles on V/R; the `LAIR=0`
+    ring is caught by the latch; a forced latch matches the BE build.
+  - **C2** shared-core discriminator: loaded, H3/H1 ≈ 0 (per-winding saturation
+    gave 0.16); open, the magnetizing current saturates the core (H3/H1 0.50460,
+    gate 1e-4).
+  - **C3** DC bias: H2 against the exact flux-drive values to 0.5 dB and a 256×
+    recurrence; H2 flips with the bias sign and crosses H3 near a/6.
+- `saturating_group_refusal_tests.rs` — every refusal in §5 on the MNA side,
+  plus covered groups still building.
+- `isat_datasheet_tests.rs` — the converted `ISAT` reproduces the rated drop to
+  1e-12 (single and shared cores, both bases); the published factors;
+  `L_AT_IDC` equals the matching `ISAT_DROP`; parse strictness.
+- `opamp_railing_regression_tests.rs` — the railing op-amp into a choke,
+  against an ngspice twin built from the same law: `L_air` (0.1 mH) in series
+  with a flux integrator and a behavioral current
+  `I = Isat·atanh(Φ/(L_mag·Isat))`.
+
+**Golden corpus.** Three coverage-only decks in
+`tools/golden-harness/decks/` (`sat-knee-rl`, `sat-core-loaded`,
+`sat-core-open`) at a 5 V manifest level; before them no golden program took
+any inductor past i/Isat = 0.37. They detect change and validate nothing.
+
+**ngspice.** Its native inductor core is linear: agreement at low drive says
+nothing about saturation, so do not validate against it. An XSPICE
+`core` + `lcouple` twin is the same shared-core MMF architecture and is useful
+as an integrator check only:
 
 ```
 awind (elec+ elec-) (mag+ mag-) wmodel     ; per winding
@@ -375,159 +385,50 @@ acore mag+ mag- cmodel                       ; ONE shared core
 .model cmodel core(mode=1 area=.. length=.. H_array=[...] B_array=[...])
 ```
 
-- **All windings tie to the SAME `(mag+ mag-)` pair.** Distinct pairs
-  re-creates the independent-core bug.
-- Ports are bare parenthesized node pairs — **not** `%vd` (throws "Port
-  type is invalid").
-- **`mode=1` (anhysteretic PWL) only** — melange has no hysteresis.
-- Sample `B_array`/`H_array` from melange's *own* law
-  `Φ = L0·Isat·tanh(I/Isat)` (`B = Φ/(N·A)`, `H = N·I/Lm`) so both
-  engines model the *same* curve.
-- Watch the **`lcouple` sign flip** (negative on `INPUT(mmf_out)`): a
-  wrong winding-current→MMF sign turns NFB into positive feedback and
-  blows up. Respect the per-winding dot convention.
+- All windings tie to the **same** `(mag+ mag-)` pair; separate pairs rebuild
+  the independent-core error.
+- Ports are bare parenthesized node pairs, not `%vd`.
+- `mode=1` (anhysteretic PWL) only. Sample `B_array`/`H_array` from melange's
+  own law (floor included) so both engines model the same curve.
+- `lcouple` negates `INPUT(mmf_out)`: a wrong winding-current→MMF sign turns
+  feedback positive. Respect each winding's dot.
+- XSPICE A-devices force `trtol→1`, so correlate with INTERP resampling, never
+  bytes.
 
-**Correlate secondary V / core flux with INTERP resampling — never
-bytes.** XSPICE uses behavioral "fake integration" and force-reduces
-`trtol→1` for A-devices; stepping differs. Saturation already breaks
-ngspice parity for the shipped uncoupled inductors, so anchor acceptance
-to **hardware harmonic behavior**, not SPICE 1:1.
-
-The **Chan model** (Hc/Br/Bs/A/Lm/Lg/N) is the LTspice/industry
-reference to *cite*, not the ngspice target.
-
-### Honest acceptance criteria (respecting the B205 no-fabrication lesson)
-
-**No transformer deck in `melange-circuits` currently carries
-core-saturation data** — no ISAT/Bsat/Ae/turns/permeability; upstream schematic
-extraction has none either. Saturation cannot be "switched on"; it requires **new
-per-target authoring and calibration**. Getting ISAT wrong just relocates
-distortion to the wrong drive level. **Do not fabricate core parameters
-to make a deck saturate** — that is exactly the B205 "model non-existent
-inductors" failure. A target ships only when its core data has a real
-source (datasheet, measurement, or a documented, labeled estimate) and
-the harmonic behavior is validated against the XSPICE twin built from
-that same data.
-
-Concrete gates:
-1. Single uncoupled inductor: correlation vs XSPICE-core twin (INTERP,
-   not bytes) within the saturation-regime tolerance used for shipped
-   inductors.
-2. the-kicker: bounded on silence AND under `--backward-euler`.
-3. One SE + one PP output-transformer deck: harmonic (H2/H3) trend
-   matches the authored B-H curve; no `k_eff ≥ 1` / loss of
-   positive-definiteness; no Nyquist ring per `nyquist_dbc`.
-4. NFB-through-iron saturating decks (the passive EQ, 1073) **route through the
-   T-model and must converge bounded/correct** — NOT "route away." This gate
-   was written before Phase 2's Option-A finding (§5) and is now corrected:
-   verified 2026-08-26 on the passive-EQ S-217-D (place a scratch ISAT on the
-   push-pull primary → group routes T-model, N 52→62, auto-BE, bounded, no
-   NaN/NR-starvation to amp 8V). The `1e30` "route away" was a DK/Schur
-   limitation; the full-LU nodal path that saturating transformers force
-   resolves the ideal-coupling algebraic loop directly. Any NON-saturating
-   deck (no ISAT) still stays byte-identical — the additive gate never fires.
+**Core data.** Do not fabricate core parameters to make a deck saturate:
+getting `ISAT` wrong only moves the distortion to the wrong drive level. A
+target's core data needs a source (datasheet, measurement, or a labeled
+estimate). Corpus `ISAT` values written before the datasheet forms existed may
+be datasheet ratings read as tanh scale currents, which saturates the core
+1.6–3× too early; restate them with `ISAT_DROP=` or `L_AT_IDC=`.
 
 ---
 
-## 7. Effort / risk assessment
+## 7. Not modeled
 
-- **Phase 1 (uncoupled → NR loop):** medium effort, medium-high risk.
-  Touches the augmented-MNA state layout and the nodal codegen NR body.
-  Flux-state raises blast radius (DC-OP seeding, `v_prev` indexing,
-  OOMOX_CONTRACT). This is the load-bearing phase — it fixes two blockers
-  for a *shipping* feature, so regression surface is the existing
-  saturating-inductor decks. Golden-audio gate mandatory.
-- **Phase 2 (T-model routing):** low-medium *additional* effort once
-  Phase 1 lands (no new coupled math), but the `1e30`→gated-enable change
-  is high-risk near the passive EQ/1073. Must prove NFB-free gating before merge.
-- **Phase 3 (syntax):** low effort, low risk; mostly a contract decision.
-- **Continuation for the knee (§4):** high effort, high risk, but shared
-  with the G10/diode-switching class — cost is amortized.
-- **Deprecating the wrong IR:** low risk once Phase 0 audit confirms only
-  routing references it.
-
-Biggest risk is the per-sample continuation gap (§4) surfacing at the
-knee and blocking hard-saturation targets. Flux-state mitigates but does
-not guarantee convergence. Second risk is fabricating core data to hit a
-sound (§6) — a process/discipline risk, not a code one.
+- **Hysteresis, core loss, remanence, minor loops.** The law is stateless.
+- **Frequency-dependent core loss** (a parallel nonlinear R across the
+  magnetizing branch) is a separate effect from saturation.
+- **Multi-limb / multi-flux-path cores** need a permeance network, not a scalar
+  flux.
+- **Saturating leakage flux** (ballast, neon, welding transformers): refused
+  (§5).
 
 ---
 
-## 8. Open questions
+## 8. Open
 
-1. **Hysteresis — needed for audio at all?** Stateless anhysteretic
-   (tanh/cosh⁻²/Fröhlich, reuses shipped path) vs Chan simplified
-   (Bs/Br/Hc) vs Jiles-Atherton (full, stateful, stiff, hard to fit).
-   Uniquorn V2/V3 briefs already defer core hysteresis to a "melange
-   Phase 2". Does any *target's* character actually require
-   loss/remanence, or is anhysteretic enough?
-   **PARTIAL ANSWER (measured 2026-08-26, `analyze --harmonics`):** the shipped
-   anhysteretic **symmetric-tanh** law produces **ODD harmonics only** (H3/H5)
-   when driven symmetrically — H2 requires **broken odd-symmetry**, NOT
-   hysteresis. The distinguishing property is *symmetry*, not *memory*: any
-   point-symmetric B(H) law — anhysteretic tanh, or a **symmetric** Chan /
-   Jiles-Atherton hysteresis loop — has half-wave symmetry under symmetric AC
-   drive with no DC, so its steady-state flux contains **odd harmonics only**.
-   A symmetric hysteresis loop adds loss, phase lag, and level-/LF-dependent
-   distortion, but it does **not** by itself add H2. Odd-symmetry is broken by:
-   (a) **net DC magnetizing bias** — single-ended Class-A bias (as in the 1073's
-   68 mA SE output core, which correctly gives H2), or push-pull *imbalance*;
-   (b) an **asymmetric drive** delivered from upstream; (c) **transient
-   remanence** — the flux walking off-center under sustained AC above H_c before
-   it settles. So for a core with ~zero net DC bias (the passive-EQ's HS-56 input
-   & HS-29 interstage; a *balanced* push-pull output core), symmetric saturation
-   — anhysteretic OR hysteretic — gives H3, NOT the hardware's H2. Melange's own
-   result demonstrates the principle: adding scratch ISAT (a symmetric saturation
-   curve) to the passive-EQ HS-56 gave H3=−22 dBc / H5=−24 dBc with H2 at the
-   floor; a symmetric hysteresis loop does the same. **Consequence:** the
-   passive-EQ's H2 ships from sourced push-pull **tube `.mismatch`** (v0.1.3) —
-   i.e. from *broken push-pull symmetry*, not from the iron. A biased-core target
-   reaches H2 with anhysteretic tanh; an *unbiased* target that needs H2 must get
-   it from broken symmetry (net DC / imbalance / asymmetric drive), **not** from
-   adding hysteresis. Hysteresis remains justified — if a target needs it — by
-   **loss, phase lag, and low-frequency-/level-dependent distortion**, but it is
-   NOT the mechanism for H2 on an unbiased core. (Correction, analog-EE
-   review 2026-09-13: earlier text here claimed an unbiased H2 target "needs Chan
-   hysteresis"; that conflated *hysteretic* with *asymmetric* and is physically
-   wrong — the H2 rationale for pulling transformer-hysteresis forward is
-   retired. See melange-circuits' 0.2.0 request, 2026-08-26, whose H2 premise
-   this supersedes.)
-2. **Netlist authoring contract** (§3, Phase 3): `ISAT=` on the reference
-   winding vs `.core Bsat/Ae/N` vs a volt-second/flux limit; how the
-   leakage/magnetizing split and turns vector derive from `L` + `k`; how
-   upstream schematic extraction would ever supply B-H data.
-3. **Flux-state vs current-state:** quantify the numerics benefit vs the
-   state-layout / DC-OP / `v_prev` / OOMOX_CONTRACT blast radius.
-4. **Per-sample continuation** for the knee: port `dc_op` gmin/source
-   stepping into `solve_nonlinear`, or flux-homotopy / line search? Same
-   fix as the g10-astable / diode-switching class?
-5. **NFB-through-iron (Phase 4): RESOLVED — no separate mechanism needed.**
-   Saturating NFB-through-iron groups route through the ordinary T-model on the
-   full-LU nodal path, which resolves the ideal-coupling algebraic loop by
-   direct LU each sample (verified 2026-08-26 on the passive-EQ S-217-D: bounded,
-   converges, no blow-up; see §6 gate 4). The net-MMF-from-coupled-Y idea is
-   unnecessary. What remains for a real passive-EQ/1073 iron-coloration ship is
-   the curve law (Q1: symmetric saturation — anhysteretic OR symmetric-hysteretic
-   — gives odd-only on these unbiased cores; H2 needs broken odd-symmetry, i.e.
-   net DC / push-pull imbalance / asymmetric drive, NOT hysteresis) + REAL sourced
-   B-H data, not the routing.
-6. **Rank-1 core Jacobian routing:** can `(2/T)·L_diff·n·nᵀ` go through
-   Sherman-Morrison *inside* the NR iteration, or does a saturating
-   transformer force full-LU unconditionally?
-7. **Out of v1 scope, noted:** multi-limb / multi-flux-path cores (need a
-   gyrator-capacitor permeance network, not a scalar Φ); frequency-
-   dependent core loss (parallel nonlinear R across the magnetizing
-   branch — a separate linear effect from saturation, do not conflate);
-   do input/mic transformers (Marinair/Carnhill) even saturate audibly at
-   in-app drive?
-
----
-
-**Bottom line.** Delete the independent-winding path. Make the single
-`{ref}_mag` inductor in melange's existing T-model the saturation locus,
-gated to NFB-free groups. Fix the *uncoupled* saturating-inductor path
-itself by moving it into the full-LU NR loop with flux-state — which
-fixes all three blockers at once and carries transformers with it.
-Validate anhysteretic (`mode=1`) against the XSPICE core+lcouple twin on
-correlation, not bytes, and never on fabricated core data. Defer
-hysteresis, NFB-through-iron, and multi-limb cores.
+1. **Three-winding shared cores.** Physics (analog-EE review): one saturating
+   magnetizing branch with fixed linear leakages is correct. The star form is
+   exact for W = 3: per-winding `cᵢ` with `k_ij = cᵢ·c_j`, leakage
+   `(1 − cᵢ²)·Lᵢ`, magnetizing `c_ref²·L_ref`. Refuse when some `cᵢ ≥ 1` (a
+   sandwiched winding gives a negative leakage). W ≥ 4 is not a star in
+   general, so its refusal stays. Not built; three windings are refused today.
+2. **Leakage floor above k = 0.9999** (§2.2): the `1e-4·Lᵢ` floor silently
+   loosens the realized coupling of tight iron.
+3. **Knee re-solve for a railing op-amp at 1×** (§3.4): parked.
+4. **A second-order L-stable integrator** (BDF2) for magnetics: held pending
+   physics.
+5. **Hysteresis** — justified, if any target needs it, by loss, phase lag and
+   LF/level-dependent distortion, not by H2 (§2.5). Chan (Hc/Br/Bs) is the
+   reference to cite.

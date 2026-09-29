@@ -247,7 +247,7 @@ enum Commands {
         /// implementations on one netlist, or reproduce a build from before a
         /// routing decision moved). They warn when they contradict the auto
         /// choice. `schur` is REFUSED outright on circuits that structurally
-        /// require full-LU — uncoupled saturating inductors and behavioral
+        /// require full-LU — saturating inductors and behavioral
         /// B-sources cannot be expressed by the Schur reduction, and forcing it
         /// would silently drop the nonlinearity. Ignored for DK-routed circuits.
         #[arg(help_heading = EXPERT_HEADING, long, value_name = "MODE", default_value = "auto")]
@@ -721,7 +721,7 @@ enum Commands {
         /// implementations on one netlist, or reproduce a build from before a
         /// routing decision moved). They warn when they contradict the auto
         /// choice. `schur` is REFUSED outright on circuits that structurally
-        /// require full-LU — uncoupled saturating inductors and behavioral
+        /// require full-LU — saturating inductors and behavioral
         /// B-sources cannot be expressed by the Schur reduction, and forcing it
         /// would silently drop the nonlinearity. Ignored for DK-routed circuits.
         #[arg(help_heading = EXPERT_HEADING, long, value_name = "MODE", default_value = "auto")]
@@ -1667,7 +1667,7 @@ fn forced_dk_hard_blocker(
     if routing.behavioral {
         Some("a behavioral B-source is present — DK cannot stamp it, so it is dropped (linear passthrough)".to_string())
     } else if routing.saturating_inductor {
-        Some("a saturating inductor is present — DK cannot do the per-sample L update, so it is linearized (no saturation)".to_string())
+        Some("a saturating inductor is present — its flux law is solved by Newton on an augmented row each sample, which DK cannot do, so it would run linear (no saturation)".to_string())
     } else if routing.multi_transformer {
         Some("multiple transformer groups are present — the DK K matrix is singular (the build ships converged=false)".to_string())
     } else if routing.k_diag_unsafe {

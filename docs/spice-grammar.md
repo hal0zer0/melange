@@ -1485,7 +1485,7 @@ The following SPICE features are **not supported** by melange-solver:
 - Nonlinear capacitors (`C` with nonlinear expression)
 - Nonlinear inductors with arbitrary expressions (note: `ISAT=` saturation IS supported for single inductors and two-winding shared cores)
 - Nonlinear magnetic core models (SPICE `.model CORE` syntax)
-- Coupled saturating inductors (saturation only works on uncoupled inductors)
+- Saturating coupled groups with three or more windings, or with coupling k ≤ 0.8 (both refused; two-winding shared cores are supported)
 
 ### Transmission Lines
 - Lossless transmission lines

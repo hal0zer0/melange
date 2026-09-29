@@ -119,7 +119,7 @@ fn select_emitter() -> Result<Box<dyn Emitter>, CodegenError> {
 /// from before a routing decision moved. Neither is a production setting.
 ///
 /// **Forcing is refused, not warned about, when the choice is structural rather
-/// than heuristic.** Uncoupled saturating inductors are stamped as nonlinear
+/// than heuristic.** Saturating inductors are stamped as nonlinear
 /// devices on their augmented branch row inside the full-LU Newton loop, and
 /// behavioral B-sources are stamped in node space only on the full-LU path — the
 /// Schur reduction cannot express either. Asking for `Schur` on such a circuit

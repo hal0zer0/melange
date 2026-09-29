@@ -58,9 +58,10 @@ pub struct RoutingDecision {
     /// Whether a behavioral B-source is present. DK's N_v/N_i reduction cannot
     /// express node-space stamping — a HARD structural requirement for nodal.
     pub behavioral: bool,
-    /// Whether any inductor / coupled-inductor / transformer winding saturates
-    /// (`isat` set), needing a per-sample L update that DK's precomputed
-    /// S=A⁻¹ cannot provide — a HARD structural requirement for nodal.
+    /// Whether any inductor saturates (`isat` set; on a shared core, the
+    /// T-model's magnetizing branch). The flux law is a nonlinear device on
+    /// the inductor's augmented row, solved by Newton each sample, which DK's
+    /// precomputed S=A⁻¹ cannot carry — a HARD structural requirement for nodal.
     pub saturating_inductor: bool,
     /// The op-amp rail mode as routing sees it: the requested mode, or the
     /// auto-resolver's pick from the MNA. Codegen may still refine an
@@ -247,7 +248,8 @@ pub fn auto_route(
     } else if saturating_inductor {
         (
             SolverRoute::Nodal,
-            "saturating inductors require augmented MNA (per-sample L update)".to_string(),
+            "saturating inductors are flux devices solved in the nodal full-LU Newton loop"
+                .to_string(),
         )
     } else if opamp_active_set {
         (

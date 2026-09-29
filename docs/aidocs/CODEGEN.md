@@ -692,7 +692,7 @@ The forcing modes are **diagnostic escape hatches**, in the documented spirit of
 is otherwise impossible because the emitter chooses it for you.
 
 `schur` is **refused** — not warned about — when the circuit structurally
-requires full-LU (uncoupled saturating inductors, behavioral B-sources). The
+requires full-LU (saturating inductors, behavioral B-sources). The
 Schur reduction cannot express either, so forcing it would emit a solver that
 silently drops the nonlinearity. Where the auto choice was a conditioning
 *heuristic*, forcing is allowed and warns with the predicates that fired.

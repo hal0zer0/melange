@@ -84,15 +84,16 @@ fn ni_nonzeros_by_dev(ir: &CircuitIR, m: usize) -> Vec<Vec<usize>> {
     out
 }
 
-// Saturating (iron-core) UNCOUPLED inductor — in-NR-loop companion stamps.
+// Saturating (iron-core) inductor — in-NR-loop companion stamps. On a shared
+// core this is the T-model's single magnetizing branch.
 //
 // The augmented branch row `k = aug_row` holds branch current `i_k`. A linear
 // inductor bakes `alpha·L0` into the base matrix at `[k][k]` and `alpha·L0·i_prev`
 // into the history (`A_neg·v_prev`). A saturating inductor replaces the linear
-// flux `L0·i` with `Φ(i) = L0·Isat·tanh(i/Isat)`; the Jacobian uses the
-// differential `L_diff(i) = L0/cosh²(i/Isat)`. See `SATURATING_TRANSFORMERS.md`
-// §3.4 for the derivation and sign convention (verified against
-// `mna.rs::build_augmented_matrices`).
+// flux `L0·i` with `Φ(i) = L_mag·Isat·tanh(i/Isat) + L_air·i`; the Jacobian uses
+// the differential `L_diff(i) = L_mag/cosh²(i/Isat) + L_air`. See
+// `SATURATING_TRANSFORMERS.md` §3.2 for the stamps and sign convention (verified
+// against `mna.rs::build_augmented_matrices`).
 //
 // `alpha` is the site-local integrator scalar expression (`2·rate·OS` trap,
 // `1·rate·OS` BE, `alpha_sub` sub-step) — this is what makes BE composition free.
@@ -284,7 +285,7 @@ fn strip_outer_parens(expr: &str) -> &str {
 /// ## The check
 ///
 /// For saturating inductor `s` on augmented row `k`, the converged row equation
-/// (see `SATURATING_TRANSFORMERS.md` §3.4 for the augmented-row sign
+/// (see `SATURATING_TRANSFORMERS.md` §3.2 for the augmented-row sign
 /// convention) is
 ///
 /// ```text
@@ -312,8 +313,8 @@ fn strip_outer_parens(expr: &str) -> &str {
 /// 1. The augmented row `k` is ALREADY in the emitted voltage-step convergence
 ///    list, so on the accepting iteration `|Δi_k| ≤ RELTOL·max|i_k| + 1e-6`
 ///    already holds.
-/// 2. `Φ(i) = L0·Isat·tanh(i/Isat)` is Lipschitz with constant `L0`, because
-///    `L_diff(i) = L0/cosh²(i/Isat) ≤ L0`. Hence
+/// 2. `Φ(i) = L_mag·Isat·tanh(i/Isat) + L_air·i` is Lipschitz with constant
+///    `L0`, because `L_diff(i) = L_mag/cosh²(i/Isat) + L_air ≤ L0`. Hence
 ///    `|Φ(i_post) − Φ(i_pre)| ≤ L0·(RELTOL·max|i_k| + 1e-6)`.
 /// 3. Any tolerance for that comparison that is dimensionally consistent with
 ///    the row's own step check — `RELTOL·max|Φ| + L0·1e-6` — equals that bound
@@ -1840,18 +1841,17 @@ impl RustEmitter {
             && m >= 10
             && ir.matrices.spectral_radius_s_aneg > 0.995;
 
-        // Uncoupled saturating inductors are genuine nonlinear devices on their
+        // Saturating inductors (single inductors, and the magnetizing branch of
+        // a shared-core T-model) are genuine nonlinear devices on their
         // augmented branch row, stamped inside the full-LU NR loop (flux integral
         // Φ(i) residual, differential L_diff Jacobian — SATURATING_TRANSFORMERS.md
-        // §3.4). They therefore force the full-LU path unconditionally, even at
+        // §3). They therefore force the full-LU path unconditionally, even at
         // M=0: a linear-plus-saturating-inductor circuit has no M-devices and
         // would otherwise route to Schur / the M==0 direct-LU fast-path, neither
-        // of which iterates on the inductor nonlinearity. (Coupled/xfmr saturating
-        // groups still use the legacy decimated Schur patch until Phase 2; no
-        // shipping deck mixes uncoupled + coupled saturation.)
+        // of which iterates on the inductor nonlinearity.
         let force_full_lu_sat = !ir.saturating_inductors.is_empty();
         // Structural requirements for full-LU, as opposed to conditioning
-        // heuristics. Uncoupled saturating inductors are stamped as nonlinear
+        // heuristics. Saturating inductors are stamped as nonlinear
         // devices on their augmented branch row INSIDE the full-LU NR loop, and
         // behavioral B-sources are stamped in node space only on the full-LU
         // path. The Schur reduction cannot express either, so these are not
@@ -1898,7 +1898,7 @@ impl RustEmitter {
             NodalSubPathOverride::Schur => {
                 if structurally_needs_full_lu {
                     let reason = if force_full_lu_sat {
-                        "uncoupled saturating inductors are stamped as nonlinear devices \
+                        "saturating inductors are stamped as nonlinear devices \
                          inside the full-LU NR loop"
                     } else {
                         "behavioral B-sources are stamped in node space only on the \
@@ -7329,7 +7329,7 @@ impl RustEmitter {
 
         // Handle linear circuits (M=0): direct LU solve, no NR iteration.
         // Behavioral B-sources are nonlinear even when M=0, so they take the NR
-        // path below. Uncoupled saturating inductors are also nonlinear (flux
+        // path below. Saturating inductors are also nonlinear (flux
         // stamp on their augmented branch row), so an M=0 circuit with any
         // saturating inductor must iterate too.
         if m == 0 && !has_behavioral && !has_sat_ind {

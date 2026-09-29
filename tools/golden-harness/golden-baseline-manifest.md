@@ -83,7 +83,6 @@ Status legend:
 | subspace | `plugins/subspace/src/circuits/radio_am.rs` | `unstable/gimmicks/radio-am.cir` | `--noise full` | DRIFT (header) | nodal | 17 | 0 | 0 | 0 | 2 | full |
 | subspace | `plugins/subspace/src/circuits/radio_fm.rs` | `unstable/gimmicks/radio-fm.cir` | `--noise full` | UNRESOLVED | dk | 16 | 0 | 2 | 0 | 1 | full |
 | sus-bus | `plugins/sus-bus/src/circuit.rs` | `testing/dynamics/4kbuscomp-audiopath.cir` | `--noise shot` | DRIFT (header) | nodal | 25 | 2 | 0 | 0 | 0 | shot |
-| the-kicker | `plugins/the-kicker/src/circuit.rs` | `unstable/drums/the-kicker.cir` | `--noise shot` | DRIFT (hdr+shot) | nodal | 35 | 6 | 9 | 0 | 0 | shot |
 | tungsten-glow | `plugins/tungsten-glow/src/circuit.rs` | `unstable/dynamics/tungsten-glow.cir` | `--noise shot --emit-dc-op-recompute` | DRIFT (hdr+shot) | nodal | 26 | 6 | 7 | 0 | 0 | shot |
 | tungsten-thunder-horse | `plugins/tungsten-thunder-horse/src/cascade.rs` | `unstable/pedals/tungsten-thunder-horse-cascade.cir` | `--noise shot --emit-dc-op-recompute` | DRIFT (hdr+shot) | dk | 25 | 8 | 4 | 0 | 0 | shot |
 | tungsten-thunder-horse | `plugins/tungsten-thunder-horse/src/circuit.rs` | `unstable/pedals/tungsten-thunder-horse.cir` | `--noise shot` | DRIFT (hdr+shot) | nodal | 37 | 14 | 11 | 0 | 0 | shot |
@@ -95,7 +94,7 @@ Status legend:
 | vurli | `plugins/vurli/src/comp/circuit.rs` | `unstable/dynamics/vurli-leveler.cir` | `--emit-dc-op-recompute` | DRIFT (header) | dk | 10 | 2 | 1 | 0 | 0 | — |
 | warpony | `plugins/warpony/src/circuit.rs` | `unstable/pedals/warpony.cir` | `--noise shot` | DRIFT (hdr+shot) | nodal | 30 | 14 | 6 | 0 | 0 | shot |
 
-Counts: 42 generated files across 22 plugin trees — 9 EXACT, 32 DRIFT-EXPLAINED, 1 UNRESOLVED (at e53573c; germanium-cluster and tape-head flipped EXACT→DRIFT under the NR globalization).
+Counts: 42 generated files across 22 plugin trees — 9 EXACT, 32 DRIFT-EXPLAINED, 1 UNRESOLVED (at e53573c; germanium-cluster and tape-head flipped EXACT→DRIFT under the NR globalization). The table omits the-kicker (one DRIFT row): that circuit never worked, its netlist was pruned 2026-09-02, and nothing it rendered is evidence.
 
 ## Correctness sweep (2026-08-30) — refresh main (ee8841e) → correctness-sweep HEAD (e53573c)
 

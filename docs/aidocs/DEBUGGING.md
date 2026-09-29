@@ -231,6 +231,7 @@ Using addition causes NR divergence. See `DC_OP.md` for the mathematical derivat
 | Trapezoidal NR ringing | Marginally stable oscillatory mode at Nyquist | BE fallback catches these samples automatically (FIXED) |
 | Output latches to full-scale near-DC/Nyquist on program transients; sine & two-tone sweeps pass; compile-time auto-BE never fires (quiescent rho stable) | Self-sustaining trapezoidal Nyquist `(-1)^n` limit cycle reached at a **large-signal** operating point (e.g. a one-way bias servo driven to cutoff), which the compile-time quiescent-OP spectral-radius promotion cannot see. The per-sample max-iter BE fallback fires once at onset but the cycle then converges cleanly each sample, so it re-latches. (jeffreys-tube V2, oomox 2026-07-28) | Runtime BE-latch net (nodal trap builds): lag-1 anti-correlation detector on the output, **input-aware** (only latches when the output is anti-correlated AND the input does not explain it — a bright near-Nyquist input tone is not a limit cycle), sticky→BE for the rest of the stream, cleared by `reset()`. Exposed via `diag_be_latch_count`. Emitted for saturating-inductor circuits since 2026-09-28 (it had been excluded because the old decimated saturation update did not reach the BE matrices; that path is gone). Deterministic pin: `.integrator {trap\|be}`. (FIXED 2026-07-28) |
 | Incomplete transformer coupling matrix | Missing K directive between windings on same core | Add K for ALL winding pairs; non-PD det warns |
+| `diag_be_latch_count` = 1 on a step into a transformer with an open (megohm-loaded) secondary; a few-mV sample-to-sample alternation after the edge | Not saturation: the secondary's leakage into the megohm load is a stiff linear mode (τ = L_leak/R ≪ T, trapezoidal factor ≈ −1). Measured on golden `sat-core-open/step`: identical with the core made linear (`ISAT=100`), gone with a 600 Ω load | Nothing to fix in the core model; the latch removes the ring (corr 0.9999994). See SATURATING_TRANSFORMERS.md §3.4 |
 
 ## Op-amp BoyleDiodes Failure Signatures
 
@@ -352,6 +353,29 @@ All windings on the same core must have coupling coefficients that form a positi
 inductance matrix. For a 4-winding transformer with k_ab=0.95 and k_ac=0.95, k_bc must be
 ≥~0.88 for the matrix to be PD. A k_bc of 0.50 gives det<0 (physically impossible) and
 causes NR divergence. The MNA builder validates this and emits `log::warn`.
+
+## Trapezoidal Integration Holds an Algebraic Row Only on Average
+
+On a row with no capacitor or inductor (a KCL row at a capless node, a source
+constraint), the trapezoidal rule enforces the AVERAGE of the equation over
+the step, `(f(n) + f(n−1))/2 = 0`, not `f(n) = 0`. A residual injected into such
+a row therefore does not decay: it alternates sign every sample (trapezoidal's
+z = −1 mode), `r(n) + r(n−1) ≈ 0` with `|r|` far above the floor.
+
+- **Hand-poked state.** Setting `input_prev` without also setting the input
+  node to the same drive value gives an inconsistent start. On a saturating-core
+  test fixture this alternated ±53 V at `in` for the whole render, and node
+  damping then clipped every Newton step (11–12 iterations per sample), while
+  the inductor current was unaffected (only `v + v_prev` enters the flux).
+  melange's own generated state starts consistent; this bites test harnesses
+  that poke state. Start consistent: set the history AND the node.
+- **Mid-run equation swaps** (a switch, a pot rebuild, an op-amp pin or release)
+  leave the history built on the old equation set; the kick lands on the z = −1
+  mode. Breakpoint-BE (one backward-Euler sample at the swap) is the existing
+  remedy for switch and pot events.
+- **Fingerprint:** read the residual of the capless row itself. A lag-1
+  detector on a filtered output misses it when the network downstream removes
+  the Nyquist content.
 
 ## Cap-Only Nodes and Schur NR Failure (Transistor Ladders)
 

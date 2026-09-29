@@ -576,8 +576,8 @@ fn test_gain_sanity_two_tube() {
     assert!(nr_fail == 0, "No NR failures expected, got {nr_fail}");
 }
 
-/// Saturating (uncoupled) inductor as an in-NR-loop nonlinear device
-/// (SATURATING_TRANSFORMERS.md §3.4). Since 2026-08-15 the uncoupled saturating
+/// Saturating inductor as an in-NR-loop nonlinear device
+/// (SATURATING_TRANSFORMERS.md §3). Since 2026-08-15 the saturating
 /// inductor is no longer a lagged/decimated Sherman-Morrison patch on the trap
 /// matrices; it is a genuine device on its augmented branch row, stamped inside
 /// the full-LU Newton loop: residual uses the flux integral
