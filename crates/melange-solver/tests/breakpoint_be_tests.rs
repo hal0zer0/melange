@@ -14,9 +14,9 @@
 //! these tests pin the codegen surface, including the load-bearing "exactly one
 //! BE sample" — a second sample over-damps and collapses the G10 astable.
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
-use melange_solver::mna::MnaSystem;
-use melange_solver::parser::Netlist;
+mod support;
+
+use melange_solver::codegen::CodegenConfig;
 
 // Nonlinear (m>0 → full-LU) clipper with a switched load resistor.
 const SWITCH_CLIPPER: &str = "\
@@ -76,26 +76,10 @@ C1 out 0 10n
 ";
 
 fn generate_nodal(spice: &str, mut tweak: impl FnMut(&mut CodegenConfig)) -> String {
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let in_idx = *mna.node_map.get("in").unwrap();
-    if in_idx > 0 {
-        mna.g[in_idx - 1][in_idx - 1] += 1.0; // G_in = 1/1Ω
-    }
-    let out_idx = *mna.node_map.get("out").unwrap() - 1;
-    let mut config = CodegenConfig {
-        circuit_name: "bp_test".to_string(),
-        sample_rate: 48000.0,
-        input_node: in_idx - 1,
-        output_nodes: vec![out_idx],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    };
+    let mut config = support::config_for_spice(spice, 48000.0);
+    config.circuit_name = "bp_test".to_string();
     tweak(&mut config);
-    CodeGenerator::new(config)
-        .generate_nodal(&mna, &netlist)
-        .expect("nodal codegen")
-        .code
+    support::build_as_shipped(spice, &config, "nodal").0
 }
 
 #[test]

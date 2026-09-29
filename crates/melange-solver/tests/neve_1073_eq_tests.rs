@@ -9,12 +9,9 @@
 //! - Coupled inductor switching: compiles, positions produce different responses
 //! - Full EQ chain: HPF + bridge + amp combined
 
-use std::io::Write;
+mod support;
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
-use melange_solver::dk::DkKernel;
-use melange_solver::mna::MnaSystem;
-use melange_solver::parser::Netlist;
+use std::io::Write;
 
 static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
@@ -77,42 +74,10 @@ fn parse_kv(output: &str, key: &str) -> f64 {
 /// Generate codegen result from a SPICE netlist string using auto-routing
 /// (same path as `melange compile`).
 fn codegen_from_spice(spice: &str, input_r: f64) -> String {
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-
-    let input_node = mna
-        .node_map
-        .get("in")
-        .copied()
-        .unwrap_or(1)
-        .saturating_sub(1);
-    let output_node = mna
-        .node_map
-        .get("out")
-        .copied()
-        .unwrap_or(2)
-        .saturating_sub(1);
-    mna.g[input_node][input_node] += 1.0 / input_r;
-
-    let config = CodegenConfig {
-        circuit_name: "neve_1073_eq_test".to_string(),
-        sample_rate: 48000.0,
-        input_node,
-        output_nodes: vec![output_node],
-        input_resistance: input_r,
-        ..CodegenConfig::default()
-    };
-
-    // Build DK kernel (uses augmented MNA for circuits with inductors)
-    let kernel = if mna.has_inductors() {
-        DkKernel::from_mna_augmented(&mna, 48000.0).expect("dk kernel")
-    } else {
-        DkKernel::from_mna(&mna, 48000.0).expect("dk kernel")
-    };
-
-    let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen");
-    result.code
+    let mut config = support::config_for_spice(spice, 48000.0);
+    config.circuit_name = "neve_1073_eq_test".to_string();
+    config.input_resistance = input_r;
+    support::build_as_shipped(spice, &config, "dk").0
 }
 
 /// Generate main() that measures peak amplitude at multiple frequencies.

@@ -21,11 +21,12 @@
 //!    fixed point), and a capless node driven afterwards shows no Nyquist ring
 //!    (positive lag-1 autocorrelation).
 
+mod support;
+
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig, NodalSubPathOverride};
-use melange_solver::dk::DkKernel;
+use melange_solver::codegen::NodalSubPathOverride;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
 
@@ -50,47 +51,22 @@ Rg g 0 27k
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 fn generate_nodal(spice: &str, sub_path: NodalSubPathOverride) -> String {
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let input_node = mna.node_map["in"] - 1;
-    let output_node = mna.node_map["anode"] - 1;
-    mna.g[input_node][input_node] += 1.0;
-    let config = CodegenConfig {
-        circuit_name: "be_fallback_fp".to_string(),
-        sample_rate: 48000.0,
-        input_node,
-        output_nodes: vec![output_node],
-        input_resistance: 1.0,
-        nodal_sub_path_override: sub_path,
-        dc_block: false,
-        ..CodegenConfig::default()
-    };
-    CodeGenerator::new(config)
-        .generate_nodal(&mna, &netlist)
-        .expect("nodal codegen")
-        .code
+    let mna = MnaSystem::from_netlist(&Netlist::parse(spice).expect("parse")).expect("mna");
+    let mut config = support::config_for_spice(spice, 48000.0);
+    config.circuit_name = "be_fallback_fp".to_string();
+    config.output_nodes = vec![mna.node_map["anode"] - 1];
+    config.nodal_sub_path_override = sub_path;
+    config.dc_block = false;
+    support::build_as_shipped(spice, &config, "nodal").0
 }
 
 fn generate_dk(spice: &str) -> String {
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let input_node = mna.node_map["in"] - 1;
-    let output_node = mna.node_map["anode"] - 1;
-    mna.g[input_node][input_node] += 1.0;
-    let kernel = DkKernel::from_mna(&mna, 48000.0).expect("dk kernel");
-    let config = CodegenConfig {
-        circuit_name: "be_fallback_fp_dk".to_string(),
-        sample_rate: 48000.0,
-        input_node,
-        output_nodes: vec![output_node],
-        input_resistance: 1.0,
-        dc_block: false,
-        ..CodegenConfig::default()
-    };
-    CodeGenerator::new(config)
-        .generate(&kernel, &mna, &netlist)
-        .expect("dk codegen")
-        .code
+    let mna = MnaSystem::from_netlist(&Netlist::parse(spice).expect("parse")).expect("mna");
+    let mut config = support::config_for_spice(spice, 48000.0);
+    config.circuit_name = "be_fallback_fp_dk".to_string();
+    config.output_nodes = vec![mna.node_map["anode"] - 1];
+    config.dc_block = false;
+    support::build_as_shipped(spice, &config, "dk").0
 }
 
 /// Every `rhs_be` build block in `code` (each starts at `let mut rhs_be` and

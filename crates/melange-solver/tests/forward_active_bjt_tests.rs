@@ -11,7 +11,9 @@
 //! 4. Cross-validation: M=5 vs M=4 for wurli-preamp (1D approx error)
 
 use melange_solver::codegen::ir::{CircuitIR, DeviceParams, DeviceType};
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+mod support;
+
+use melange_solver::codegen::{BjtFaMode, CodeGenerator, CodegenConfig};
 use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
@@ -34,6 +36,7 @@ RC vcc collector 10k
 RE emitter 0 1k
 CE emitter 0 100u
 Q1 collector base emitter NPN1
+Cin in base 10u
 ";
 
 /// Saturated NPN BJT. Heavy base drive (1k from 5V) into high RC (100k):
@@ -120,26 +123,6 @@ fn make_config(input_node: usize, output_node: usize) -> CodegenConfig {
         bjt_fa_mode: melange_solver::codegen::BjtFaMode::Auto,
         ..CodegenConfig::default()
     }
-}
-
-/// Resolve input/output node indices from an MNA system.
-fn resolve_nodes(mna: &MnaSystem) -> (usize, usize) {
-    let input_node = mna
-        .node_map
-        .get("in")
-        .copied()
-        .unwrap_or(1)
-        .saturating_sub(1);
-    // Try common output node names
-    let output_node = mna
-        .node_map
-        .get("out")
-        .or_else(|| mna.node_map.get("collector"))
-        .or_else(|| mna.node_map.get("coll2"))
-        .copied()
-        .unwrap_or(2)
-        .saturating_sub(1);
-    (input_node, output_node)
 }
 
 /// Compile generated code with rustc, panicking with stderr on failure.
@@ -239,107 +222,73 @@ fn compile_and_run(
         .collect()
 }
 
-/// Full forward-active pipeline: detect, rebuild MNA, build kernel, generate code.
+/// The shipped `--solver dk --bjt-fa auto` build: code, M, and the BJTs it reduced.
 fn generate_with_forward_active(spice: &str) -> (String, usize, HashSet<String>) {
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("MNA");
-    let (input_node, output_node) = resolve_nodes(&mna);
-
-    // Stamp junction caps
-    let device_slots = CircuitIR::build_device_info(&netlist).unwrap_or_default();
-    if !device_slots.is_empty() {
-        mna.stamp_device_junction_caps(&device_slots);
-    }
-
-    // Stamp input conductance
-    if input_node < mna.n {
-        mna.g[input_node][input_node] += 1.0;
-    }
-
-    let config = make_config(input_node, output_node);
-
-    // Detect forward-active BJTs
-    let forward_active = CircuitIR::detect_forward_active_bjts(&mna, &netlist, &config);
-
-    // Rebuild MNA if any forward-active BJTs detected
-    if !forward_active.is_empty() {
-        mna =
-            MnaSystem::from_netlist_forward_active(&netlist, &forward_active).expect("MNA rebuild");
-        // Re-stamp junction caps with the new MNA
-        let device_slots =
-            CircuitIR::build_device_info_with_mna(&netlist, Some(&mna)).unwrap_or_default();
-        if !device_slots.is_empty() {
-            mna.stamp_device_junction_caps(&device_slots);
-        }
-        // Re-stamp input conductance
-        if input_node < mna.n {
-            mna.g[input_node][input_node] += 1.0;
-        }
-    }
-
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("kernel");
-    let m = kernel.m;
-
-    let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen");
-    (result.code, m, forward_active)
+    let built = support::build_shipped(spice, &shipped_config(spice, BjtFaMode::Auto), "dk");
+    (
+        built.generated.code,
+        built.generated.m,
+        built.forward_active,
+    )
 }
 
-/// Forward-active pipeline with a caller-forced FA set (bypasses detection).
+/// The shipped `--solver dk` config for `spice` at 44.1 kHz with the given
+/// `--bjt-fa` mode; the output is `out`, or the collector on decks without one.
+fn shipped_config(spice: &str, bjt_fa_mode: BjtFaMode) -> CodegenConfig {
+    let mna = MnaSystem::from_netlist(&Netlist::parse(spice).expect("parse")).expect("MNA");
+    let mut config = support::config_for_spice(spice, 44100.0);
+    config.circuit_name = "fa_test".to_string();
+    if config.output_nodes.is_empty() {
+        config.output_nodes = vec![mna.node_map["collector"] - 1];
+    }
+    config.bjt_fa_mode = bjt_fa_mode;
+    config
+}
+
+/// The shipped `--solver dk --bjt-fa force` build, which must reduce exactly
+/// `forced`.
 ///
-/// Since 2026-07-18, `detect_forward_active_bjts` excludes parasitic-carded
-/// and self-heating BJTs, so the K_eff-vs-FA regression tests below can no
-/// longer reach the FA-reduced-parasitic-BJT state through detection. The
-/// state is still reachable through the public
-/// `MnaSystem::from_netlist_forward_active` API, so the emitter-side
-/// dimension gates keep their own regression coverage via this helper.
+/// Since 2026-07-18, `--bjt-fa auto` excludes parasitic-carded and
+/// self-heating BJTs, so the K_eff-vs-FA regression tests below reach the
+/// FA-reduced-parasitic-BJT state through `force`, which still reduces a
+/// parasitic-carded device (with a warning).
 fn generate_with_forced_fa(spice: &str, forced: &HashSet<String>) -> (String, usize) {
+    let built = support::build_shipped(spice, &shipped_config(spice, BjtFaMode::Force), "dk");
+    assert_eq!(
+        &built.forward_active, forced,
+        "--bjt-fa force reduced a different set of BJTs"
+    );
+    (built.generated.code, built.generated.m)
+}
+
+/// A forced-FA build straight from `MnaSystem::from_netlist_forward_active`.
+/// Bypasses the production pipeline on purpose: tests the emitter's guard on
+/// an FA-reduced self-heating BJT, a state no shipped build produces (the
+/// reduction never takes a self-heating device, not even under `force`).
+fn generate_with_forced_fa_raw(spice: &str, forced: &HashSet<String>) -> (String, usize) {
     let netlist = Netlist::parse(spice).expect("parse");
     let mut mna = MnaSystem::from_netlist_forward_active(&netlist, forced).expect("FA MNA");
-    let (input_node, output_node) = resolve_nodes(&mna);
+    let config = shipped_config(spice, BjtFaMode::Force);
 
     let device_slots =
         CircuitIR::build_device_info_with_mna(&netlist, Some(&mna)).unwrap_or_default();
     if !device_slots.is_empty() {
         mna.stamp_device_junction_caps(&device_slots);
     }
-    if input_node < mna.n {
-        mna.g[input_node][input_node] += 1.0;
-    }
+    mna.g[config.input_node][config.input_node] += 1.0;
 
-    let config = make_config(input_node, output_node);
     let kernel = DkKernel::from_mna(&mna, 44100.0).expect("kernel");
     let m = kernel.m;
-
-    let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen");
+    let result = CodeGenerator::new(config)
+        .generate(&kernel, &mna, &netlist)
+        .expect("codegen");
     (result.code, m)
 }
 
-/// Generate code WITHOUT forward-active optimization (standard 2D).
+/// The shipped build WITHOUT the forward-active reduction (standard 2D).
 fn generate_without_forward_active(spice: &str) -> (String, usize) {
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("MNA");
-    let (input_node, output_node) = resolve_nodes(&mna);
-
-    // Stamp junction caps
-    let device_slots = CircuitIR::build_device_info(&netlist).unwrap_or_default();
-    if !device_slots.is_empty() {
-        mna.stamp_device_junction_caps(&device_slots);
-    }
-
-    // Stamp input conductance
-    if input_node < mna.n {
-        mna.g[input_node][input_node] += 1.0;
-    }
-
-    let config = make_config(input_node, output_node);
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("kernel");
-    let m = kernel.m;
-
-    let codegen = CodeGenerator::new(config);
-    let result = codegen.generate(&kernel, &mna, &netlist).expect("codegen");
-    (result.code, m)
+    let built = support::build_shipped(spice, &shipped_config(spice, BjtFaMode::Off), "dk");
+    (built.generated.code, built.generated.m)
 }
 
 // ============================================================================
@@ -1193,6 +1142,7 @@ RC2 vcc out 10k
 RE2 emit2 0 1k
 CE2 emit2 0 100u
 Q2 out base2 emit2 NPN_PAR
+Cin in base1 1u
 ";
 
 /// Same circuit but with a .pot so rebuild_matrices() runs at startup.
@@ -1216,6 +1166,7 @@ CE2 emit2 0 100u
 Q2 out base2 emit2 NPN_PAR
 Rvol out 0 50k
 .pot Rvol 1k 100k \"Volume\"
+Cin in base1 1u
 ";
 
 /// Regression: K_DEFAULT for cascaded FA-reduced BJTs with parasitics must
@@ -1303,6 +1254,7 @@ RC vcc collector 10k
 RE emitter 0 1k
 CE emitter 0 100u
 Q1 collector base emitter NPN_TH
+Cin in base 10u
 ";
 
 /// Pure Ebers-Moll BJT with only RE=0.5 (power-BJT emitter resistance),
@@ -1318,6 +1270,7 @@ RC vcc collector 10k
 RE emitter 0 1k
 CE emitter 0 100u
 Q1 collector base emitter NPN_RE
+Cin in base 10u
 ";
 
 /// Self-heating BJT in FA bias must NOT be FA-reduced: the thermal update
@@ -1382,7 +1335,8 @@ fn test_codegen_re_only_fa_bias_stays_2d_and_compiles() {
 }
 
 /// Belt-and-braces (emitter-side guard): even when FA reduction is FORCED on
-/// a self-heating BJT through the public from_netlist_forward_active API,
+/// a self-heating BJT through the public from_netlist_forward_active API
+/// (which no shipped build does),
 /// the thermal arm must not emit — the match arms require
 /// slot.device_type == DeviceType::Bjt, making slot aliasing structurally
 /// impossible. Pre-guard, this emitted `i_nl[1]` on an M=1 kernel and the
@@ -1390,7 +1344,7 @@ fn test_codegen_re_only_fa_bias_stays_2d_and_compiles() {
 #[test]
 fn test_forced_fa_self_heating_thermal_arm_not_emitted() {
     let forced: HashSet<String> = ["Q1".to_string()].into_iter().collect();
-    let (code, m) = generate_with_forced_fa(BJT_SELF_HEATING_FA, &forced);
+    let (code, m) = generate_with_forced_fa_raw(BJT_SELF_HEATING_FA, &forced);
     assert_eq!(m, 1, "Forced FA reduction should give M=1");
     assert!(
         !code.contains("self-heating thermal update"),

@@ -432,6 +432,17 @@ pub fn build_as_shipped(
     config: &CodegenConfig,
     solver: &str,
 ) -> (String, usize, usize) {
+    let built = build_shipped(spice, config, solver);
+    (built.generated.code, built.generated.n, built.generated.m)
+}
+
+/// [`build_as_shipped`], returning the whole build (the reductions it applied,
+/// its routing, its MNA) for tests that assert on more than the code.
+pub fn build_shipped(
+    spice: &str,
+    config: &CodegenConfig,
+    solver: &str,
+) -> melange_solver::build::Built {
     let netlist = Netlist::parse(spice).expect("parse failed");
     let mna = MnaSystem::from_netlist(&netlist).expect("MNA build failed");
     // Index order starts with ground, so circuit node `i` is entry `i + 1`.
@@ -479,9 +490,8 @@ pub fn build_as_shipped(
         output_clamp_auto: false,
     };
     let silent = &melange_solver::pipeline::silent;
-    let built = melange_solver::build::build(spice, &opts, silent, silent)
-        .unwrap_or_else(|e| panic!("build failed: {e}"));
-    (built.generated.code, built.generated.n, built.generated.m)
+    melange_solver::build::build(spice, &opts, silent, silent)
+        .unwrap_or_else(|e| panic!("build failed: {e}"))
 }
 
 /// Compile circuit code into a cached binary. Returns the binary path.

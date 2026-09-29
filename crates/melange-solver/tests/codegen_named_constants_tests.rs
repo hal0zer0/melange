@@ -4,30 +4,30 @@
 //! `NODE_<NAME>`, `VSOURCE_<NAME>_RHS_ROW`, `POT_<NAME>_INDEX` constants
 //! with correct indices. Exercised on both DK and nodal codegen paths.
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
-use melange_solver::dk::DkKernel;
+mod support;
+
+use melange_solver::codegen::CodegenConfig;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
 
 fn generate_dk(spice: &str) -> String {
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    if mna.n > 0 {
-        mna.g[0][0] += 1.0;
-    }
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("kernel");
+    generate_dk_driven_at(spice, "in")
+}
+
+/// As [`generate_dk`], with the input on the named node.
+fn generate_dk_driven_at(spice: &str, input: &str) -> String {
+    let mna = MnaSystem::from_netlist(&Netlist::parse(spice).expect("parse")).expect("mna");
+    let input_node = mna.node_map[input] - 1;
     let cfg = CodegenConfig {
         circuit_name: "named_const_test".to_string(),
         sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![if kernel.n > 1 { 1 } else { 0 }],
+        input_node,
+        // The output this test always read: circuit node 1 (0 on a one-node deck).
+        output_nodes: vec![if mna.n > 1 { 1 } else { 0 }],
         input_resistance: 1.0,
         ..CodegenConfig::default()
     };
-    CodeGenerator::new(cfg)
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen")
-        .code
+    support::build_as_shipped(spice, &cfg, "dk").0
 }
 
 #[test]
@@ -70,7 +70,7 @@ C1 in- 0 100n
 R2 in- 3v3 1k
 V1 3v3 0 DC 3.3
 ";
-    let code = generate_dk(spice);
+    let code = generate_dk_driven_at(spice, "in+");
     assert!(
         code.contains("pub const NODE_IN_: usize ="),
         "first IN_ missing:\n{}",
@@ -135,6 +135,7 @@ R1 in mid 10k
 Rvol mid out 100k
 C1 out 0 100n
 V1 vcc 0 DC 9
+Rb vcc mid 1Meg
 .pot Rvol 1k 100k
 ";
     let code = generate_dk(spice);

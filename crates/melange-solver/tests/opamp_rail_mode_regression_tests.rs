@@ -24,8 +24,9 @@
 //!    `.param` constants as the invalid Rust token `inf`; now routed through
 //!    `fmt_f64` (`f64::INFINITY`).
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig, NodalSubPathOverride, OpampRailMode};
-use melange_solver::mna::MnaSystem;
+mod support;
+
+use melange_solver::codegen::{NodalSubPathOverride, OpampRailMode};
 use melange_solver::parser::Netlist;
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -95,35 +96,19 @@ Cxb   x1     0      1P
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 fn generate_nodal(spice: &str, rail_mode: OpampRailMode) -> String {
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let input_node = mna.node_map["in"] - 1;
-    let output_node = mna.node_map["out"] - 1;
-    mna.g[input_node][input_node] += 1.0;
-
-    let config = CodegenConfig {
-        circuit_name: "rail_mode_test".to_string(),
-        sample_rate: 48000.0,
-        input_node,
-        output_nodes: vec![output_node],
-        output_scales: vec![1.0],
-        input_resistance: 1.0,
-        // No DC block: output[0] is the raw op-amp output-node voltage, so
-        // the peak assertions below measure the actual rail behavior rather
-        // than a high-passed/clamped copy.
-        dc_block: false,
-        opamp_rail_mode: rail_mode,
-        nodal_sub_path_override: if spice == OVERDRIVEN_AMP_FULL_LU_NR {
-            NodalSubPathOverride::FullLu
-        } else {
-            NodalSubPathOverride::Auto
-        },
-        ..CodegenConfig::default()
+    let mut config = support::config_for_spice(spice, 48000.0);
+    config.circuit_name = "rail_mode_test".to_string();
+    // No DC block: output[0] is the raw op-amp output-node voltage, so the
+    // peak assertions below measure the actual rail behavior rather than a
+    // high-passed/clamped copy.
+    config.dc_block = false;
+    config.opamp_rail_mode = rail_mode;
+    config.nodal_sub_path_override = if spice == OVERDRIVEN_AMP_FULL_LU_NR {
+        NodalSubPathOverride::FullLu
+    } else {
+        NodalSubPathOverride::Auto
     };
-    CodeGenerator::new(config)
-        .generate_nodal(&mna, &netlist)
-        .expect("nodal codegen")
-        .code
+    support::build_as_shipped(spice, &config, "nodal").0
 }
 
 fn compile_and_run(code: &str, main_code: &str, tag: &str) -> String {

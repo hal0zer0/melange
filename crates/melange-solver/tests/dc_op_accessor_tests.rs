@@ -1,30 +1,18 @@
 //! Tests for `CircuitState::dc_op()` and `dc_op_dump()` (Oomox P4).
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
-use melange_solver::dk::DkKernel;
+mod support;
+
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
 use std::io::Write;
 
 fn generate_dk(spice: &str) -> String {
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    if mna.n > 0 {
-        mna.g[0][0] += 1.0;
-    }
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("kernel");
-    let cfg = CodegenConfig {
-        circuit_name: "dc_op_accessor_test".to_string(),
-        sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![if kernel.n > 1 { 1 } else { 0 }],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    };
-    CodeGenerator::new(cfg)
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen")
-        .code
+    let mna = MnaSystem::from_netlist(&Netlist::parse(spice).expect("parse")).expect("mna");
+    let mut cfg = support::config_for_spice(spice, 44100.0);
+    cfg.circuit_name = "dc_op_accessor_test".to_string();
+    // The output this test always read: circuit node 1 (0 on a one-node deck).
+    cfg.output_nodes = vec![if mna.n > 1 { 1 } else { 0 }];
+    support::build_as_shipped(spice, &cfg, "dk").0
 }
 
 #[test]

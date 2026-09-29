@@ -8,10 +8,12 @@
 //! - Produce output matching a rebuilt circuit at non-nominal resistance
 //! - Don't change codegen output when no pots are present (backward compat)
 
+mod support;
+
 use std::io::Write;
 
 use melange_solver::codegen::ir::CircuitIR;
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+use melange_solver::codegen::CodegenConfig;
 use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
@@ -39,12 +41,10 @@ fn default_config() -> CodegenConfig {
 }
 
 fn generate_code(spice: &str) -> String {
-    let (netlist, mna, kernel) = build_pipeline(spice);
-    let codegen = CodeGenerator::new(default_config());
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("code generation failed");
-    result.code
+    let mut config = support::config_for_spice(spice, 44100.0);
+    config.circuit_name = "test_circuit".to_string();
+    config.input_resistance = 1000.0;
+    support::build_as_shipped(spice, &config, "dk").0
 }
 
 /// Compile generated code with rustc, panicking with stderr on failure.

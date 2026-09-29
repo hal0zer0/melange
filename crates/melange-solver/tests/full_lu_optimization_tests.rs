@@ -6,11 +6,9 @@
 //! These tests verify that the optimized paths produce the same results
 //! as the dense/non-optimized paths across various circuit topologies.
 
-use std::io::Write;
+mod support;
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
-use melange_solver::mna::MnaSystem;
-use melange_solver::parser::Netlist;
+use std::io::Write;
 
 // ── Circuit definitions ──────────────────────────────────────────────
 
@@ -29,14 +27,14 @@ BJT CE amp
 R1 in base 10k
 R2 vcc base 100k
 R3 base 0 47k
-RC vcc collector 4.7k
+RC vcc out 4.7k
 RE emitter 0 1k
 CE emitter 0 10u
-Q1 collector base emitter QNPN
+Q1 out base emitter QNPN
 .model QNPN NPN(IS=1e-14 BF=200 BR=1 CJE=10p CJC=5p)
 VCC vcc 0 DC 12
 C1 in 0 100n
-C2 collector 0 100p
+C2 out 0 100p
 .END";
 
 /// Two-tube stage (N≈15, M=4) — forces full LU, tests sparse LU on medium circuit
@@ -65,35 +63,9 @@ Cin in 0 100p
 
 /// Generate nodal codegen for a circuit, return the generated code string.
 fn generate_nodal_code(spice: &str, sample_rate: f64) -> String {
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let input_node = mna
-        .node_map
-        .get("in")
-        .copied()
-        .unwrap_or(1)
-        .saturating_sub(1);
-    let output_node = mna
-        .node_map
-        .get("out")
-        .copied()
-        .unwrap_or(2)
-        .saturating_sub(1);
-    mna.g[input_node][input_node] += 1.0;
-
-    let config = CodegenConfig {
-        circuit_name: "test_full_lu".to_string(),
-        sample_rate,
-        input_node,
-        output_nodes: vec![output_node],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate_nodal(&mna, &netlist)
-        .expect("nodal codegen");
-    result.code
+    let mut config = support::config_for_spice(spice, sample_rate);
+    config.circuit_name = "test_full_lu".to_string();
+    support::build_as_shipped(spice, &config, "nodal").0
 }
 
 /// Compile and run generated code with a custom main function.
