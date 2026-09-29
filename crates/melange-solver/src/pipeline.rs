@@ -9,7 +9,7 @@
 //! | step | compile | simulate | analyze | validate |
 //! |---|---|---|---|---|
 //! | [`apply_linearize_reductions`] | yes | yes | yes | **no** |
-//! | [`expand_internal_nodes_if_conditioned`] | yes | yes | **unconditional** | **unconditional** |
+//! | [`expand_internal_nodes`] (then gated at `min diag(K) < -100`) | yes | yes | **unconditional** | **unconditional** |
 //! | [`auto_tune_max_iter`] | yes | yes | yes | **no** |
 //!
 //! **The sequence itself now lives in one place, [`crate::build::build`]**, which
@@ -30,7 +30,7 @@
 //!   different circuit than compile ships for any deck with
 //!   `k_diag_min < -100` (measured on wurli-power-amp: compile skipped
 //!   expansion, analyze expanded). All four consumers now call
-//!   [`expand_internal_nodes_if_conditioned`]; nobody hand-rolls the −100 gate.
+//!   [`expand_internal_nodes`]; nobody hand-rolls it.
 //!
 //! Forward-active and grid-off reduction were never in this table and were
 //! private to `melange-cli` until 2026-09-03. They are now
@@ -493,56 +493,27 @@ pub fn auto_tune_max_iter(
     };
     base + stiffness_bonus
 }
-/// Expand parasitic-BJT internal nodes (RB/RC/RE as explicit MNA nodes) unless
-/// the expansion gate declines: `min(diag(K)) < -100`. Declined, the resistors
-/// are modelled inside the device (`bjt_with_parasitics`), the circuit keeps
-/// its smaller N, and their thermal noise is not injected (NOISE.md). The gate
-/// is an expansion gate only; it does not choose the nodal Schur or full-LU
-/// sub-path.
+/// Expand parasitic-BJT internal nodes: RB/RC/RE become explicit MNA nodes,
+/// where their thermal noise is injected (NOISE.md). Only the nodal route calls
+/// this; DK keeps them inside the device (K_eff).
 ///
-/// Only the nodal route calls this (DK never expands). Measured 2026-09-29 by
-/// forcing expansion on every gated corpus deck (pipe-shouter, steve-1073,
-/// wurli-power-amp, wurli-preamp, an RB = 1 kΩ CE stage): no deck held a
-/// sample either way, and expansion removed the 1073's one held sample. The
-/// shipped wurli-power-amp is why the gate stays: expanded, it hits the Newton
-/// ceiling ~1000 times a second (rescued) and sits further from ngspice than
-/// unexpanded (settled residual after gain and delay, 0.1 V drive: −52.7 dB
-/// against −61.5 dB), with ±33 mV errors at the same phases each cycle.
+/// Every nodal build expands. A gate at `min(diag(K)) < -100` used to decline
+/// it, derived from one deck's divergence. Measured 2026-09-29 on every gated
+/// corpus deck, once the nodal convergence checks covered the internal rows
+/// (`4219abb`): no deck held a sample expanded, expansion removed the 1073's
+/// held sample, and the shipped wurli-power-amp expanded agrees with its
+/// unexpanded render to -176 dB, equals it against ngspice, and runs 2.3-2.7x
+/// faster (the unexpanded device runs its own inner Newton for RB/RC/RE).
 ///
 /// Returns `true` if expansion was actually applied.
-///
-/// # Diagnostics
-///
-/// Reports the declined case only when there was something to decline: a BJT
-/// with an expandable internal node. A deck without one (a tube demo, a BJT
-/// with no RB/RC/RE) has nothing the gate could change.
-pub fn expand_internal_nodes_if_conditioned(
+pub fn expand_internal_nodes(
     mna: &mut crate::mna::MnaSystem,
     netlist: &crate::parser::Netlist,
-    kernel: &crate::dk::DkKernel,
-    rep: Reporter<'_>,
 ) -> bool {
     let device_slots =
         crate::codegen::ir::CircuitIR::build_device_info_with_mna(netlist, Some(mna))
             .unwrap_or_default();
     if mna.expandable_bjt_internal_node_count(&device_slots) == 0 {
-        return false;
-    }
-    let k_diag_min = if kernel.m > 0 {
-        (0..kernel.m)
-            .map(|i| kernel.k[i * kernel.m + i])
-            .fold(0.0_f64, f64::min)
-    } else {
-        0.0
-    };
-    if k_diag_min < -100.0 {
-        report!(
-            rep,
-            "  info (normal): parasitic-BJT internal nodes left unexpanded (min diag K = \
-             {:.3e}, below the -100 expansion gate); RB/RC/RE are modelled inside the \
-             device; their thermal noise is not injected (see NOISE.md).",
-            k_diag_min
-        );
         return false;
     }
     mna.expand_bjt_internal_nodes(&device_slots);

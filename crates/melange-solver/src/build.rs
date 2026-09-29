@@ -1041,7 +1041,7 @@ pub fn assemble(
     // handed to the IR.
     let (prepared, dc_op) = if use_nodal_codegen {
         report!(out, "  Using nodal solver codegen");
-        prepare_nodal_route(&generator, &mut mna, &netlist, &kernel, dc_request, out)?
+        prepare_nodal_route(&generator, &mut mna, &netlist, dc_request)?
     } else {
         // DK path: do NOT expand internal nodes. The DK kernel is ill-conditioned
         // with high-conductance parasitic nodes. Instead, bjt_with_parasitics()
@@ -1063,7 +1063,7 @@ pub fn assemble(
                 report!(out, "  Using nodal solver codegen: {why}");
                 solver_label = "nodal";
                 solver_reason = format!("self-starting oscillator: {why}");
-                prepare_nodal_route(&generator, &mut mna, &netlist, &kernel, dc_request, out)?
+                prepare_nodal_route(&generator, &mut mna, &netlist, dc_request)?
             }
             other => (other.with_context(|| "Code generation failed")?, dc_op),
         }
@@ -1127,18 +1127,16 @@ pub fn assemble(
     })
 }
 
-/// The nodal route's tail: expand the parasitic-BJT internal nodes (gated on
-/// the kernel's conditioning), solve the operating point the build ships on
-/// the result, and build the nodal IR from it.
+/// The nodal route's tail: expand the parasitic-BJT internal nodes, solve the
+/// operating point the build ships on the result, and build the nodal IR from
+/// it.
 fn prepare_nodal_route(
     generator: &CodeGenerator,
     mna: &mut MnaSystem,
     netlist: &Netlist,
-    kernel: &DkKernel,
     dc_request: crate::codegen::ir::DcOpRequest,
-    out: Reporter<'_>,
 ) -> Result<(crate::codegen::PreparedIr, crate::dc_op::DcOpResult), BuildError> {
-    crate::pipeline::expand_internal_nodes_if_conditioned(mna, netlist, kernel, out);
+    crate::pipeline::expand_internal_nodes(mna, netlist);
     let dc_op = crate::codegen::ir::solve_dc_op(mna, netlist, dc_request)
         .with_context(|| "Nodal code generation failed")?;
     let prepared = generator

@@ -384,44 +384,6 @@ C1 out 0 10n
     }
 }
 
-// ── Pipeline narration ──────────────────────────────────────────────────
-
-/// "Skipping BJT internal-node expansion (K ill-conditioned)" used to print on
-/// any deck whose K diagonal tripped the −100 gate — including the shipped
-/// four-tube `passive-eq1a` demo, which contains no BJT at all. Read cold,
-/// "Skipping" + "ill-conditioned" on the flagship example says *you broke it*.
-///
-/// The deck below is BJT-free. Whatever its conditioning, the expansion gate
-/// must not narrate a decision about a device class it does not contain.
-#[test]
-fn bjt_free_deck_never_narrates_bjt_expansion() {
-    use melange_solver::dk::DkKernel;
-    use melange_solver::pipeline::expand_internal_nodes_if_conditioned;
-
-    let deck = "\
-BJT-free clipper
-R1 in a 4.7k
-D1 a 0 DTEST
-D2 0 a DTEST
-C1 a out 100n
-R2 out 0 10k
-.model DTEST D(IS=2.52e-9 N=1.752)
-";
-    let netlist = Netlist::parse(deck).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let kernel = DkKernel::from_mna(&mna, 48_000.0).expect("kernel");
-
-    let lines = std::sync::Mutex::new(Vec::<String>::new());
-    let rep = |a: std::fmt::Arguments<'_>| lines.lock().unwrap().push(a.to_string());
-    expand_internal_nodes_if_conditioned(&mut mna, &netlist, &kernel, &rep);
-
-    let printed = lines.lock().unwrap().clone();
-    assert!(
-        !printed.iter().any(|l| l.contains("BJT")),
-        "BJT expansion narrated on a BJT-free deck: {printed:?}"
-    );
-}
-
 // ── `melange nodes`-grade .model key check ──────────────────────────────
 //
 // `nodes` never builds the codegen IR, so the resolvers' hard error on an

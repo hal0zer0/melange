@@ -556,16 +556,15 @@ pub fn collect_thermal_noise_sources(
                 .iter()
                 .find(|bn| bn.device_name.eq_ignore_ascii_case(&dev.name));
             let Some(internal) = internal else {
-                // No internal node pair to inject across: the DK route (K_eff
-                // absorption), or a nodal build that declined the expansion
-                // (min diag(K) < -100; RB/RC/RE stay inside the device).
-                // Honest skip — do not fake an equivalent stamp.
+                // No internal node pair to inject across: the DK route keeps
+                // RB/RC/RE inside the device (K_eff absorption). Honest skip —
+                // do not fake an equivalent stamp.
                 crate::diag_warn!(
                     "noise: BJT {} parasitic RB/RC/RE thermal noise skipped — \
-                     this build has no internal nodes for it (the DK route, or \
-                     a nodal build that keeps RB/RC/RE inside the device \
-                     because min diag(K) < -100). rbb' hiss for this device is \
-                     under-modeled. See NOISE.md.",
+                     the DK route keeps RB/RC/RE inside the device, so there are \
+                     no internal nodes to inject it across. rbb' hiss for this \
+                     device is under-modeled; a nodal build includes it. See \
+                     NOISE.md.",
                     dev.name
                 );
                 continue;

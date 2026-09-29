@@ -669,9 +669,8 @@ in `crates/melange-solver/src/linear_solver.rs`.
 Everything a consumer must do between parsing a netlist and generating code:
 
 * `apply_linearize_reductions` — applies `.linearize`
-* `expand_internal_nodes_if_conditioned` — parasitic-BJT internal nodes, skipped
-  when `min(diag(K)) < -100` (that routes to full-LU, which handles parasitics
-  through `bjt_with_parasitics()` directly)
+* `expand_internal_nodes` — parasitic-BJT internal nodes, on every nodal build
+  (DK keeps RB/RC/RE inside the device)
 * `auto_tune_max_iter` — the NR iteration budget
 
 **Every consumer must call these.** They lived in `tools/melange-cli/src/main.rs`

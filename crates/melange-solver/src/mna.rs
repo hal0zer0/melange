@@ -1840,12 +1840,8 @@ impl MnaSystem {
     /// Mirrors the collection loop in [`Self::expand_bjt_internal_nodes`]
     /// exactly: a count of 0 means that function is a guaranteed no-op.
     ///
-    /// Exists so callers can tell "expansion was declined" from "there was
-    /// nothing to expand" *before* narrating a decision. The K-conditioning
-    /// gate in [`crate::pipeline::expand_internal_nodes_if_conditioned`] used
-    /// to print "Skipping BJT internal-node expansion" on any deck whose K
-    /// diagonal tripped the threshold — including 4-tube and BJT-free ones,
-    /// where there was never anything to skip.
+    /// [`crate::pipeline::expand_internal_nodes`] reads it to skip the device
+    /// walk when there is nothing to expand.
     pub fn expandable_bjt_internal_node_count(
         &self,
         device_slots: &[crate::device_types::DeviceSlot],

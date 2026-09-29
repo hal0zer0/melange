@@ -470,10 +470,13 @@ Overrides:
   sub-path as a variable; it warns when it contradicts `auto`, and `schur` is
   refused outright on circuits that structurally require full LU.
 
-**Known latent gap:** Schur NR can diverge on expanded parasitic internal nodes
-where the same circuit converges unexpanded, or expanded on full LU. No corpus
-deck is in that state and the CLI's K-gate never constructs the combination, so
-it is latent rather than observed.
+**Schur on expanded parasitic internal nodes works harder than full LU on one
+deck.** Every nodal build expands the parasitic-BJT internal nodes. Auto routes
+pipe-shouter and the wurli preamp to Schur that way, with no unsolved sample.
+Forced onto Schur (`--nodal-subpath schur`), the wurli power amp holds no sample
+either but hits the Newton ceiling 749 times a second at 1 V drive (rescued by
+sub-stepping), where full LU, which auto picks for it, hits it never. Measured
+2026-09-29.
 
 ## Real-Time Constraints
 
@@ -547,7 +550,7 @@ Shipped noise sources:
 
 Noise limitations:
 - Op-amp `EN_FC`/`IN_FC` (1/f corner) are accepted with a compile notice but **not modelled** — Phase 4 is white-band only
-- BJT parasitic RB/RC/RE thermal noise (rbb′) is skipped (logged as a `warn!`) on every build that keeps RB/RC/RE inside the device model: the **DK codegen path**, and a nodal build with min diag(K) < −100, which does not expand the BJT internal nodes. Only a nodal build that expands them includes it
+- BJT parasitic RB/RC/RE thermal noise (rbb′) is skipped (logged as a `warn!`) on the **DK codegen path**, which keeps RB/RC/RE inside the device model. Every nodal build expands the BJT internal nodes and includes it
 - Diode `RS` and tube `RGI` parasitic resistances are not yet thermal-noise sources
 - Setting `KF`/`AF` on resistors breaks ngspice parity — strip before SPICE-validating. (`.mismatch`/`.tolerance` jitter does not need stripping: `melange validate` disables it on melange's side automatically and says so on the result line)
 - **Tube microphonics** (Phase 6) is research only, not implemented
