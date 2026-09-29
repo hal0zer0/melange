@@ -1196,6 +1196,7 @@ fn emit_sparse_a_residual_matvec(
             ));
         }
         code.push_str(&format!("{indent}    norm_sq += acc * acc;\n"));
+        code.push_str(&format!("{indent}    max_abs = max_abs.max(acc.abs());\n"));
         code.push_str(&format!(
             "{indent}    if !(acc.abs() <= 1e-3 * den + 1e-9) {{ ok = false; }}\n"
         ));
@@ -1257,14 +1258,14 @@ fn emit_armijo_line_search(
          {indent}    // r0 = ||F({v})||: reuses the device currents `{inl}` the NR body\n\
          {indent}    // already evaluated at this exact {v} (bit-identical to a fresh\n\
          {indent}    // kcl_residual — same N_v·v, same device fn, no pnjlim on the eval).\n\
-         {indent}    let (r0, _) = kcl_residual_inl(&{v}, &{rhs}, &{amat}, &{inl});\n\
+         {indent}    let (r0, _, _) = kcl_residual_inl(&{v}, &{rhs}, &{amat}, &{inl});\n\
          {indent}    if r0.is_finite() && r0 > 1e-9 {{\n\
          {indent}        let mut s = 1.0_f64;\n\
          {indent}        let mut accepted = false;\n\
          {indent}        while s >= (1.0 / 1024.0) {{\n\
          {indent}            let mut vc = {v};\n\
          {indent}            for i in 0..N {{ vc[i] += ({alpha} * s) * ({new}[i] - {v}[i]); }}\n\
-         {indent}            let (rc, _) = kcl_residual(&vc, &{rhs}, &{amat}, state);\n\
+         {indent}            let (rc, _, _) = kcl_residual(&vc, &{rhs}, &{amat}, state);\n\
          {indent}            if rc <= (1.0 - 1e-4 * s) * r0 {{ accepted = true; break; }}\n\
          {indent}            s *= 0.5;\n\
          {indent}        }}\n\
@@ -6322,12 +6323,12 @@ impl RustEmitter {
             code.push_str(
                 "/// Node-space KCL residual for the full-LU NR convergence gate and\n\
                  /// Armijo line search. `F = A·v - rhs - N_i·i_nl(N_v·v)` over node rows\n\
-                 /// 0..N_NODES. Returns `(||F||_2, all_rows_within_tol)`. Generic over the\n\
+                 /// 0..N_NODES. Returns `(||F||_2, all_rows_within_tol, ||F||_inf)`. Generic over the\n\
                  /// A matrix + rhs so the trap / sub-step / BE sites share one body.\n",
             );
             code.push_str("#[inline]\n");
             code.push_str(
-                "fn kcl_residual(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], state: &CircuitState) -> (f64, bool) {\n",
+                "fn kcl_residual(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], state: &CircuitState) -> (f64, bool, f64) {\n",
             );
             // Shared residual tail: `q = N_i·i_nl`, then `||F||_2` over node rows
             // with the sparse `A·v` matvec. Emitted verbatim into BOTH residual
@@ -6344,6 +6345,7 @@ impl RustEmitter {
             tail.push_str("    let mut q = [0.0f64; N];\n");
             tail.push_str(&emit_sparse_ni_matvec_add(ir, "q", "i_nl", "    "));
             tail.push_str("    let mut norm_sq = 0.0f64;\n");
+            tail.push_str("    let mut max_abs = 0.0f64;\n");
             tail.push_str("    let mut ok = true;\n");
             match emit_sparse_a_residual_matvec(ir, setter_stamps, n_nodes, "    ") {
                 Some(sparse) => tail.push_str(&sparse),
@@ -6357,6 +6359,7 @@ impl RustEmitter {
                     tail.push_str("            let a = t.abs(); if a > den { den = a; }\n");
                     tail.push_str("        }\n");
                     tail.push_str("        norm_sq += acc * acc;\n");
+                    tail.push_str("        max_abs = max_abs.max(acc.abs());\n");
                     // Per-node relative KCL tolerance: same RELTOL=1e-3 as the
                     // device and sat-inductor residual checks, with a 1e-9 A
                     // absolute floor so a node carrying ~zero net current does not
@@ -6365,7 +6368,7 @@ impl RustEmitter {
                     tail.push_str("    }\n");
                 }
             }
-            tail.push_str("    (norm_sq.sqrt(), ok)\n");
+            tail.push_str("    (norm_sq.sqrt(), ok, max_abs)\n");
             tail.push_str("}\n\n");
 
             // (1) Device-evaluating residual — used by the always-checked
@@ -6390,7 +6393,7 @@ impl RustEmitter {
             );
             code.push_str("#[inline]\n");
             code.push_str(
-                "fn kcl_residual_inl(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], i_nl: &[f64; M]) -> (f64, bool) {\n",
+                "fn kcl_residual_inl(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], i_nl: &[f64; M]) -> (f64, bool, f64) {\n",
             );
             code.push_str(&tail);
         }
@@ -6996,6 +6999,12 @@ impl RustEmitter {
             ir.solver_config.opamp_rail_mode,
             crate::codegen::OpampRailMode::ActiveSetBe
         );
+        // The chord (a reused LU) is emitted unless the Jacobian must be
+        // refactored every iteration anyway.
+        let chord = !(has_behavioral || has_sat_ind);
+        if chord {
+            code.push_str("    let mut exit_step = false;\n");
+        }
         // Trapezoidal NR loop
         code.push_str(&format!("    for iter in 0..{} {{\n", site.iter_budget));
 
@@ -7074,7 +7083,7 @@ impl RustEmitter {
             // deferred an L_diff-drift refactor trigger, §3.4).
             code.push_str("        let need_refactor = true;\n");
         } else {
-            code.push_str("        let mut need_refactor = !chord_valid || (iter > 0 && iter % CHORD_REFACTOR == 0) || iter >= 10;\n");
+            code.push_str("        let mut need_refactor = exit_step || !chord_valid || (iter > 0 && iter % CHORD_REFACTOR == 0) || iter >= 10;\n");
             code.push_str("        if !need_refactor {\n");
             code.push_str("            for k in 0..M {\n");
             code.push_str("                let jk = j_dev[k * M + k];\n");
@@ -7562,12 +7571,14 @@ impl RustEmitter {
             // populated (the `if !max_step_exceeded` branch ran).
             if m > 0 {
                 code.push_str(&format!(
-                        "        let converged_check = !max_step_exceeded && kcl_residual_inl(&v, &rhs, &{}, &i_nl_resid).1;\n\n",
+                        "        let (_, kcl_ok, kcl_inf) = if max_step_exceeded {{ (f64::INFINITY, false, f64::INFINITY) }} else {{ kcl_residual_inl(&v, &rhs, &{}, &i_nl_resid) }};\n\
+                         \x20       let converged_check = !max_step_exceeded && kcl_ok;\n\n",
                         site.a
                     ));
             } else {
                 code.push_str(&format!(
-                        "        let converged_check = !max_step_exceeded && kcl_residual(&v, &rhs, &{}, state).1;\n\n",
+                        "        let (_, kcl_ok, kcl_inf) = if max_step_exceeded {{ (f64::INFINITY, false, f64::INFINITY) }} else {{ kcl_residual(&v, &rhs, &{}, state) }};\n\
+                         \x20       let converged_check = !max_step_exceeded && kcl_ok;\n\n",
                         site.a
                     ));
             }
@@ -7575,6 +7586,38 @@ impl RustEmitter {
             code.push_str("        let converged_check = !max_step_exceeded;\n\n");
         }
 
+        // Exit on an exact-Jacobian step. A chord step leaves a KCL residual
+        // (J - J_chord)·Δ, first order in the step, which the node-step test
+        // cannot see: on a stiff junction row the node tolerance is tens of µA
+        // of current. Where no capacitor damps it (a capless nonlinear row),
+        // trapezoidal integration carries that residual forward, alternating in
+        // sign, until a backward-Euler sample. So a chord-accepted iterate whose
+        // node residual is above the row test's absolute floor takes one more
+        // Newton step, refactored at the accepted point, and that step is the
+        // one accepted.
+        //
+        // The gate is the row test's own norm and floor: max over node rows of
+        // |F_row| > 1e-9 A. Below it there is nothing to carry: 1e-9 A per sample
+        // over a ~100-sample rail plateau is ~1e-7 A, under the ~0.4 µA the
+        // exact-Jacobian path itself leaves on the witness. So on quiet signal the
+        // chord keeps its reuse across samples and pays no refactor. The gate
+        // covers node rows (amps) only; saturating-inductor flux rows keep their
+        // own residual check. A stopping test on the chord's contraction rate
+        // was measured and changes nothing: the accepted chord step is already
+        // far inside the node tolerance.
+        if chord {
+            assert!(
+                use_line_search,
+                "the chord exit gate reads the node residual, computed when M > 0"
+            );
+            code.push_str(&format!(
+                "        if converged_check && !need_refactor && !exit_step && kcl_inf > 1e-9 && iter + 1 < {} {{\n\
+                 \x20           exit_step = true;\n\
+                 \x20           continue;\n\
+                 \x20       }}\n",
+                site.iter_budget
+            ));
+        }
         code.push_str("        if converged_check {\n");
         code.push_str("            converged = true;\n");
         code.push_str("            state.last_nr_iterations = iter as u32;\n");

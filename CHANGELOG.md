@@ -24,6 +24,16 @@ generated state is smaller.
 
 ### Fixed
 
+- **The full-LU solver left a small current error on diode nodes with no
+  capacitor.** It reuses a factored Jacobian across Newton iterations and
+  samples, and a step taken on that stale Jacobian leaves an error of up to a
+  few µA. The trapezoidal step carries that error forward on any node without
+  a capacitor, so it builds up. On a railing overdrive it reached 3.5 µA, where
+  the Schur solver reads 0.4 µA. A sample accepted on a reused Jacobian now
+  takes one fresh Newton step whenever its node residual is above 1 nA. The
+  two solvers now agree. On quiet signal the reused Jacobian is still kept, so
+  silence costs nothing extra. Busy full-LU circuits pay 3–32 % (the bus
+  compressor benchmark −7.5 %).
 - **An input beyond ±100 V was clipped silently.** Generated code clamps its
   input to ±100 V and replaces NaN/Inf with 0 V, a guard against garbage host
   input, but counted neither, so a render driven past the limit looked like a
