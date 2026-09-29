@@ -1661,7 +1661,18 @@ pub fn solve_linear(g_aug: &[Vec<f64>], rhs: &[f64]) -> Option<Vec<f64>> {
 /// Jacobians that make NR oscillate.
 ///
 /// This function detects junctions with |V_nl| > V_CLAMP and adjusts the
-/// appropriate node voltages to bring controlling voltages within range.
+/// appropriate node voltages to bring controlling voltages within range. It
+/// clamps the JUNCTION: it moves the dependent node (cathode, emitter) when
+/// that node is a solution variable, and the other node (anode, base) when the
+/// dependent node is ground. A dependent node a voltage source fixes (a
+/// supply rail) is still moved: the guess is then linearised at the clamped
+/// junction with every free node where the linear solve put it, and the
+/// source's own row restores the rail on the first Newton step. Moving the
+/// base instead drags a node its bias network holds (measured: the power-amp
+/// deck's DC OP then fails). A grounded dependent node cannot move, and
+/// without moving the other node the junction keeps the guess's bias: a
+/// grounded-emitter BJT whose linear guess holds its base at 5.4 V then
+/// descends one thermal voltage per Newton iteration (~190).
 /// Diodes and BJTs get full PN junction pre-bias. Sharp pentodes get a Class A
 /// power-stage seed (Vg2k clamped to ≤250V, Vgk clamped to ≈-2V) so the Reefman
 /// Derk equations start near a real bias point — without it the linear solve
@@ -1690,8 +1701,12 @@ fn clamp_junction_voltages(
                 if nl_idx >= m {
                     continue;
                 }
+                // Only a guess deep in FORWARD bias is clamped. A reverse-biased
+                // diode (a zener at breakdown, a Boyle catch diode at rest) is
+                // left where the circuit puts it: pulling it to -0.6 V moves it
+                // toward forward bias, away from its operating point.
                 let v_diode = v_nl[nl_idx];
-                if v_diode.abs() <= 0.8 {
+                if v_diode <= 0.8 {
                     continue;
                 }
 
@@ -1707,10 +1722,13 @@ fn clamp_junction_voltages(
                         cathode = Some(j);
                     }
                 }
-                // Set cathode voltage so V_junction = sign * 0.6V
-                if let (Some(a), Some(c)) = (anode, cathode) {
-                    let target = 0.6 * v_diode.signum();
-                    v[c] = v[a] - target;
+                // Bring the junction to 0.6 V: move the cathode, or the anode
+                // when the cathode is ground.
+                let target = 0.6;
+                match (anode, cathode) {
+                    (a, Some(c)) => v[c] = a.map_or(0.0, |a| v[a]) - target,
+                    (Some(a), None) => v[a] = target,
+                    (None, None) => {}
                 }
             }
             DeviceType::Bjt | DeviceType::BjtForwardActive => {
@@ -1737,12 +1755,27 @@ fn clamp_junction_voltages(
                     }
                 }
 
-                // Set emitter so Vbe = sign * 0.65V (positive for NPN, negative for PNP)
-                if let (Some(b), Some(e)) = (base_node, emitter_node) {
-                    let new_ve = v[b] - sign * 0.65;
-                    if (v[e] - new_ve).abs() > 0.1 {
-                        v[e] = new_ve;
+                // Bring Vbe to sign * 0.65 V (positive for NPN, negative for
+                // PNP): move the emitter, or the base when the emitter is ground.
+                // Unlike the diode clamp this acts from any Vbe, a cut-off or
+                // reverse one included: pre-biasing the base-emitter junction
+                // is the aid that keeps a feedback amplifier's Newton out of
+                // its all-off solution. The asymmetry is deliberate. Skipping
+                // reverse-biased Vbe measured +1 iteration on the Wurlitzer
+                // power amp and no gain on any deck.
+                match (base_node, emitter_node) {
+                    (b, Some(e)) => {
+                        let new_ve = b.map_or(0.0, |b| v[b]) - sign * 0.65;
+                        if (v[e] - new_ve).abs() > 0.1 {
+                            v[e] = new_ve;
+                        }
                     }
+                    (Some(b), None) => {
+                        if (v[b] - sign * 0.65).abs() > 0.1 {
+                            v[b] = sign * 0.65;
+                        }
+                    }
+                    (None, None) => {}
                 }
 
                 // Find collector node from Vbc N_v row

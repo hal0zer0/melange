@@ -220,6 +220,36 @@ The solver tries three strategies in order:
 Start from the linear DC OP (no nonlinear devices) and iterate NR.
 Works for simple circuits (single diode with VCC).
 
+The linear solve has no device currents, so it can put a junction volts into
+forward bias. `clamp_junction_voltages` clamps the JUNCTION before Newton
+starts:
+
+- **Diode**, only when the guess puts it above 0.8 V forward: the cathode moves
+  to `anode − 0.6 V`, or the anode to 0.6 V when the cathode is ground. A
+  reverse-biased diode (a zener at breakdown, a Boyle catch diode at rest) is
+  left alone: pulling it to −0.6 V moves it toward forward bias.
+- **BJT**, from any Vbe: the emitter moves to `base − sign·0.65 V`, or the base
+  to `sign·0.65 V` when the emitter is ground. Unlike the diode clamp this also
+  raises a cut-off Vbe, a deliberate pre-bias that keeps a feedback amplifier
+  out of its all-off solution (skipping reverse Vbe measured +1 iteration on
+  the Wurlitzer power amp and no gain anywhere).
+
+The dependent node (cathode, emitter) moves whenever it is a solution
+variable, including when a voltage source fixes it (a supply rail): the guess
+is then linearised at the clamped junction with every free node where the
+linear solve put it, and the source's row restores the rail on the first step.
+Moving the other node instead drags a node its bias network holds (measured:
+the Wurlitzer power amp's DC OP then fails). Only a grounded dependent node,
+which is not a variable, moves the other node. Without that, a grounded-emitter
+BJT whose guess holds its base at the driving op-amp's 5.4 V descends one
+thermal voltage per Newton iteration (193 iterations; now 7).
+
+SPICE's `MODEINITJCT` (every junction evaluated at `vcrit` on iteration 0) was
+measured against this and rejected: layered on melange's linear-guess start it
+linearises at `vcrit` with the nodes still at the guess, and on parasitic BJTs
+(whose pnjlim the DC loop skips) that first step is unbounded. The Wurlitzer
+preamp went from DirectNr 8 to Failed. See STATUS.md, Deferred.
+
 ### 2. Source Stepping (DcOpMethod::SourceStepping)
 
 Scale all DC sources from 0 → full value in `source_steps` stages (default 50).

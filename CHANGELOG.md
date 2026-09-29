@@ -40,6 +40,22 @@ generated state is smaller.
   before the build rather than during code generation. No shipped build used
   `boyle-diodes`.
 
+- **A transistor whose emitter is grounded no longer starts its DC operating
+  point volts into forward bias.** The Newton start is a linear solve with no
+  device currents, and its junction clamp could only move the emitter; with
+  the emitter at ground it moved nothing. An op-amp driving a grounded-emitter
+  BJT through 1 MΩ put the base at the op-amp's 5.4 V, and Newton descended
+  one thermal voltage per iteration: 193 of its 200. The clamp now moves the
+  base when the emitter is ground, and the anode when a diode's cathode is:
+  7 iterations. The same op-amp railed at rest converges directly (was source
+  stepping, 171–315 iterations), and under `--opamp-rail-mode boyle-diodes`
+  both circuits now have an operating point (they did not converge). The
+  diode clamp also stops pulling a reverse-biased diode toward forward bias
+  (a zener at breakdown, a catch diode at rest). Operating points are
+  unchanged wherever they converged before; every regression-corpus
+  operating point is identical, and under `boyle-diodes` some decks take
+  fewer iterations and two take a few more.
+
 - **An op-amp whose output rails at rest beside a diode or transistor now has
   a DC operating point.** The rail was a clamp applied after each Newton step,
   so the convergence test kept reading the unclamped step: an inverting stage
