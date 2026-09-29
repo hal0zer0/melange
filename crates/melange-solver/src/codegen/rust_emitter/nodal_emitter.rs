@@ -2574,31 +2574,22 @@ impl RustEmitter {
         // Runtime BE-latch detector constants (trapezoidal builds only).
         if ir.solver_config.runtime_be_latch {
             code.push_str(
-                "/// Runtime BE-latch detector: EMA time constant (s) for the lag-1\n\
-                 /// autocorrelation estimator. ~0.5 ms — long enough to ignore isolated\n\
-                 /// bright transients, short enough to catch a sustained Nyquist limit\n\
-                 /// cycle within ~1 ms (fs-invariant: coefficient = 1/(τ·fs)).\n",
+                "/// Runtime BE-latch detector: time constant (s) of its estimator, which\n\
+                 /// forgets at alpha = 1/(tau*fs) per internal sample. For an output made of\n\
+                 /// one mode x = A*z^n the lag-1 ratio it tracks equals z; for a mixture it\n\
+                 /// is the power-weighted mean of the components' lag-1 factors. The latch\n\
+                 /// engages at ratio <= -exp(-alpha): the output within the window is an\n\
+                 /// alternating mode that outlives the window, with nothing else of\n\
+                 /// comparable power. Trapezoidal integration maps a stiff mode (h =\n\
+                 /// lambda*T) to z = (1 - h/2)/(1 + h/2), so this is a mode with h >~ 4/alpha\n\
+                 /// that dominates the output: one the circuit damps within a fraction of a\n\
+                 /// sample but trap keeps ringing for longer than the window.\n",
             );
             code.push_str("pub const BE_LATCH_TAU_S: f64 = 5.0e-4;\n\n");
             code.push_str(
-                "/// Runtime BE-latch detector: entry threshold on the OUTPUT normalized\n\
-                 /// lag-1 autocorrelation r1. A pure Nyquist (-1)^n cycle gives r1 = −1;\n\
-                 /// the input-awareness gate (below) rejects legitimate near-Nyquist input\n\
-                 /// tones, so this only has to clear the empty gap above musical HF content.\n",
-            );
-            code.push_str("pub const BE_LATCH_R1_ENTER: f64 = -0.6;\n\n");
-            code.push_str(
-                "/// Runtime BE-latch detector: the drive is deemed to \"explain\" an anti-\n\
-                 /// correlated output when the INPUT's own lag-1 autocorrelation is below\n\
-                 /// this (i.e. the input is itself near Nyquist / bright). In that case the\n\
-                 /// output Nyquist content is input-driven, not a self-generated limit\n\
-                 /// cycle, so we must NOT latch.\n",
-            );
-            code.push_str("pub const BE_LATCH_IN_R1_MAX: f64 = -0.3;\n\n");
-            code.push_str(
-                "/// Runtime BE-latch detector: power floor below which an r1 estimate is\n\
-                 /// not trusted (avoids a divide-by-near-zero verdict on silence). Applied\n\
-                 /// to both the output and input power EMAs.\n",
+                "/// Runtime BE-latch detector: power floor below which the INPUT's decay\n\
+                 /// estimate is not trusted (avoids a divide-by-near-zero verdict on\n\
+                 /// silence). The output's floor is the solver's node tolerance.\n",
             );
             code.push_str("pub const BE_LATCH_POWER_FLOOR: f64 = 1.0e-12;\n\n");
         }
@@ -3479,31 +3470,23 @@ impl RustEmitter {
 
         // Runtime BE-latch detector working state (trapezoidal builds only).
         if ir.solver_config.runtime_be_latch {
-            code.push_str("    /// Runtime BE-latch: previous primary-output sample (detector).\n");
-            code.push_str("    pub be_x_prev: f64,\n");
+            code.push_str(
+                "    /// Runtime BE-latch estimator on the primary output: its running mean,\n\
+                 \x20   /// the previous mean-removed sample, and EMAs of x*x_prev and x*x.\n",
+            );
             code.push_str("    pub be_x_mean: f64,\n");
-            code.push_str(
-                "    /// Runtime BE-latch: EMA of x·x₋₁ (output lag-1 autocovariance numerator).\n",
-            );
+            code.push_str("    pub be_x_prev: f64,\n");
             code.push_str("    pub be_r1_num: f64,\n");
-            code.push_str(
-                "    /// Runtime BE-latch: EMA of x² (output power, autocorr denominator).\n",
-            );
             code.push_str("    pub be_pow: f64,\n");
             code.push_str(
-                "    /// Runtime BE-latch: previous input sample (input-awareness gate).\n",
+                "    /// Runtime BE-latch estimator on the input (the input-awareness gate).\n",
             );
+            code.push_str("    pub be_in_x_mean: f64,\n");
             code.push_str("    pub be_in_x_prev: f64,\n");
-            code.push_str(
-                "    /// Runtime BE-latch: EMA of u·u₋₁ (input lag-1 autocovariance numerator).\n",
-            );
             code.push_str("    pub be_in_r1_num: f64,\n");
-            code.push_str(
-                "    /// Runtime BE-latch: EMA of u² (input power, autocorr denominator).\n",
-            );
             code.push_str("    pub be_in_pow: f64,\n");
             code.push_str(
-                "    /// Runtime BE-latch: true once a Nyquist limit cycle was detected;\n\
+                "    /// Runtime BE-latch: true once a stiff alternating mode was detected;\n\
                  \x20   /// forces the L-stable BE path for the rest of the stream (cleared by\n\
                  \x20   /// reset()).\n",
             );
@@ -3904,13 +3887,18 @@ impl RustEmitter {
         code.push_str("            diag_ls_fail_count: 0,\n");
         code.push_str("            diag_voltage_damp_count: 0,\n");
         if ir.solver_config.runtime_be_latch {
-            code.push_str("            be_x_prev: 0.0,\n");
-            code.push_str("            be_x_mean: 0.0,\n");
-            code.push_str("            be_r1_num: 0.0,\n");
-            code.push_str("            be_pow: 0.0,\n");
-            code.push_str("            be_in_x_prev: 0.0,\n");
-            code.push_str("            be_in_r1_num: 0.0,\n");
-            code.push_str("            be_in_pow: 0.0,\n");
+            for f in [
+                "be_x_mean",
+                "be_x_prev",
+                "be_r1_num",
+                "be_pow",
+                "be_in_x_mean",
+                "be_in_x_prev",
+                "be_in_r1_num",
+                "be_in_pow",
+            ] {
+                code.push_str(&format!("            {f}: 0.0,\n"));
+            }
             code.push_str("            be_latched: false,\n");
         }
         if ir.solver_config.breakpoint_be {
@@ -4163,13 +4151,18 @@ impl RustEmitter {
         code.push_str("        self.diag_refactor_count = 0;\n");
         code.push_str("        self.diag_ls_fail_count = 0;\n");
         if ir.solver_config.runtime_be_latch {
-            code.push_str("        self.be_x_prev = 0.0;\n");
-            code.push_str("        self.be_x_mean = 0.0;\n");
-            code.push_str("        self.be_r1_num = 0.0;\n");
-            code.push_str("        self.be_pow = 0.0;\n");
-            code.push_str("        self.be_in_x_prev = 0.0;\n");
-            code.push_str("        self.be_in_r1_num = 0.0;\n");
-            code.push_str("        self.be_in_pow = 0.0;\n");
+            for f in [
+                "be_x_mean",
+                "be_x_prev",
+                "be_r1_num",
+                "be_pow",
+                "be_in_x_mean",
+                "be_in_x_prev",
+                "be_in_r1_num",
+                "be_in_pow",
+            ] {
+                code.push_str(&format!("        self.{f} = 0.0;\n"));
+            }
             code.push_str("        self.be_latched = false;\n");
         }
         if ir.solver_config.breakpoint_be {
@@ -5335,39 +5328,40 @@ impl RustEmitter {
             return;
         }
         code.push_str(&format!(
-            "{indent}// Runtime BE-latch detector (self-sustaining Nyquist (-1)^n cycle).\n\
-             {indent}// Latch iff the OUTPUT is strongly lag-1 anti-correlated AND the INPUT\n\
-             {indent}// does not explain it (input silent or not itself near Nyquist) — a\n\
-             {indent}// true limit cycle is self-generated; a bright input tone near Nyquist\n\
-             {indent}// is not. On latch the L-stable BE path takes over for the rest of the\n\
-             {indent}// stream (cleared by reset()).\n\
+            "{indent}// Runtime BE-latch. Track the lag-1 ratio of the mean-removed output over\n\
+             {indent}// the estimator window; for one mode x = A*z^n it equals z, for a mixture\n\
+             {indent}// it is the power-weighted mean of the components' factors. Engage at\n\
+             {indent}// ratio <= -exp(-alpha): the output is an alternating mode that outlives\n\
+             {indent}// the window and dominates it, and the input is not itself one. That is a\n\
+             {indent}// stiff mode trapezoidal keeps ringing. A decaying transient tail, or a\n\
+             {indent}// small ring under program, does not qualify. Once engaged, the L-stable\n\
+             {indent}// BE path runs for the rest of the stream (cleared by reset()).\n\
              {indent}if !state.be_latched {{\n\
+             {indent}    let be_ema = (1.0 / (BE_LATCH_TAU_S * state.current_sample_rate * OVERSAMPLING_FACTOR as f64)).clamp(1e-4, 0.5);\n\
              {indent}    let be_x = v[OUTPUT_NODES[0]];\n\
              {indent}    let be_x = if be_x.is_finite() {{ be_x }} else {{ 0.0 }};\n\
-             {indent}    let be_u = if input.is_finite() {{ input }} else {{ 0.0 }};\n\
-             {indent}    let be_ema = (1.0 / (BE_LATCH_TAU_S * state.current_sample_rate)).clamp(1e-4, 0.5);\n\
-             {indent}    // Mean-remove the output before correlating: a DC-biased output node\n\
-             {indent}    // (e.g. a collector sitting at several volts) otherwise makes the lag-1\n\
-             {indent}    // products bias-dominated (r1 ~ +1), so a mV-scale (-1)^n ring riding on\n\
-             {indent}    // the bias never crosses the anti-correlation threshold and the latch is\n\
-             {indent}    // silently inert. Track the DC with an EMA (same coefficient) and\n\
-             {indent}    // correlate the AC residual.\n\
              {indent}    state.be_x_mean += be_ema * (be_x - state.be_x_mean);\n\
              {indent}    let be_x = be_x - state.be_x_mean;\n\
              {indent}    state.be_r1_num += be_ema * (be_x * state.be_x_prev - state.be_r1_num);\n\
              {indent}    state.be_pow += be_ema * (be_x * be_x - state.be_pow);\n\
              {indent}    state.be_x_prev = be_x;\n\
+             {indent}    let be_u = if input.is_finite() {{ input }} else {{ 0.0 }};\n\
+             {indent}    state.be_in_x_mean += be_ema * (be_u - state.be_in_x_mean);\n\
+             {indent}    let be_u = be_u - state.be_in_x_mean;\n\
              {indent}    state.be_in_r1_num += be_ema * (be_u * state.be_in_x_prev - state.be_in_r1_num);\n\
              {indent}    state.be_in_pow += be_ema * (be_u * be_u - state.be_in_pow);\n\
              {indent}    state.be_in_x_prev = be_u;\n\
-             {indent}    // Cross-multiplied comparisons (be_pow, be_in_pow ≥ 0):\n\
-             {indent}    //   output anti-correlated: out_r1 < BE_LATCH_R1_ENTER\n\
-             {indent}    //   input explains it:      in_pow significant AND in_r1 < BE_LATCH_IN_R1_MAX\n\
-             {indent}    let out_nyquist = state.be_pow > BE_LATCH_POWER_FLOOR\n\
-             {indent}        && state.be_r1_num < BE_LATCH_R1_ENTER * state.be_pow;\n\
-             {indent}    let input_explains = state.be_in_pow > BE_LATCH_POWER_FLOOR\n\
-             {indent}        && state.be_in_r1_num < BE_LATCH_IN_R1_MAX * state.be_in_pow;\n\
-             {indent}    if out_nyquist && !input_explains {{\n\
+             {indent}    // Cross-multiplied (the powers are >= 0): r1_num/pow <= -exp(-alpha).\n\
+             {indent}    let be_enter = -(-be_ema).exp();\n\
+             {indent}    // An alternation inside the solver's own node tolerance (RELTOL*|v| +\n\
+             {indent}    // VNTOL, the Newton node-step test) cannot be told apart from\n\
+             {indent}    // convergence noise, so it is not evidence.\n\
+             {indent}    let be_tol = 1e-3 * state.be_x_mean.abs() + 1e-6;\n\
+             {indent}    let out_ring = state.be_pow > be_tol * be_tol\n\
+             {indent}        && state.be_r1_num <= be_enter * state.be_pow;\n\
+             {indent}    let in_ring = state.be_in_pow > BE_LATCH_POWER_FLOOR\n\
+             {indent}        && state.be_in_r1_num <= be_enter * state.be_in_pow;\n\
+             {indent}    if out_ring && !in_ring {{\n\
              {indent}        state.be_latched = true;\n\
              {indent}        state.diag_be_latch_count += 1;\n\
              {indent}    }}\n\

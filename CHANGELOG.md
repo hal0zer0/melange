@@ -24,6 +24,18 @@ generated state is smaller.
 
 ### Fixed
 
+- **The backward-Euler safety latch could engage on a single click and stay
+  on for the rest of the stream.** It watches for a trapezoidal ring at half the
+  sample rate, and its trigger was a hand-picked threshold. One impulse into a
+  mastering circuit fired it, and the stream then ran on the less accurate
+  integrator until reset, up to 15 % low on the third harmonic of a saturating
+  circuit. It now engages only when an alternating ring outlasts the
+  detector's own averaging window and carries the output, and not on an
+  alternation smaller than the solver's own convergence tolerance. On 60 s of
+  realistic program (level jumps, transport starts and stops, pot sweeps, an
+  impulse train) across the nine circuits that carry the latch, it fires only
+  on the known genuine ring. At 2x or 4x oversampling its averaging window
+  also spanned a quarter of its stated length; that is fixed too.
 - **`validate` never saw the counters it was meant to refuse on.** It
   rejects a render with unsolved samples, or one whose input was clamped, but
   the lines that report those counters were added by a text substitution that

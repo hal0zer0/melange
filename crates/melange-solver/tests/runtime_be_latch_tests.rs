@@ -77,8 +77,8 @@ fn nodal_trap_build_emits_be_latch_detector() {
     let code = generate_nodal_with(DIODE_CLIPPER, |_| {});
     // Detector constants + state.
     assert!(
-        code.contains("BE_LATCH_R1_ENTER"),
-        "trap nodal build must emit the BE-latch entry threshold constant"
+        code.contains("BE_LATCH_TAU_S"),
+        "trap nodal build must emit the BE-latch estimator window constant"
     );
     assert!(
         code.contains("pub be_latched: bool"),
@@ -105,7 +105,7 @@ fn force_trap_build_omits_be_latch_detector() {
     // --force-trap opts out of the runtime net entirely (raw trapezoidal).
     let code = generate_nodal_with(DIODE_CLIPPER, |c| c.force_trap = true);
     assert!(
-        !code.contains("BE_LATCH_R1_ENTER") && !code.contains("state.be_r1_num"),
+        !code.contains("BE_LATCH_TAU_S") && !code.contains("state.be_r1_num"),
         "--force-trap must suppress the runtime BE-latch detector"
     );
     // ...but the diagnostic counter field stays for a stable struct/contract.
@@ -124,7 +124,7 @@ fn backward_euler_build_omits_be_latch_detector() {
     // A BE build has nothing to catch — no detector.
     let code = generate_nodal_with(DIODE_CLIPPER, |c| c.backward_euler = true);
     assert!(
-        !code.contains("BE_LATCH_R1_ENTER") && !code.contains("state.be_r1_num"),
+        !code.contains("BE_LATCH_TAU_S") && !code.contains("state.be_r1_num"),
         "backward-Euler build must not emit the runtime BE-latch detector"
     );
 }
@@ -161,7 +161,7 @@ fn integrator_be_directive_forces_backward_euler() {
     let spice = format!("{DIODE_CLIPPER}.integrator be\n");
     let code = generate_nodal_with(&spice, |_| {});
     assert!(
-        !code.contains("BE_LATCH_R1_ENTER"),
+        !code.contains("BE_LATCH_TAU_S"),
         ".integrator be must produce a BE build (no runtime detector)"
     );
     // ALPHA = fs (BE) not 2*fs (trap).
@@ -177,7 +177,7 @@ fn integrator_trap_directive_suppresses_runtime_latch() {
     let spice = format!("{DIODE_CLIPPER}.integrator trap\n");
     let code = generate_nodal_with(&spice, |_| {});
     assert!(
-        !code.contains("BE_LATCH_R1_ENTER") && !code.contains("state.be_r1_num"),
+        !code.contains("BE_LATCH_TAU_S") && !code.contains("state.be_r1_num"),
         ".integrator trap must suppress the runtime BE-latch net (like --force-trap)"
     );
 }
@@ -188,7 +188,7 @@ fn cli_backward_euler_flag_overrides_integrator_trap_directive() {
     let spice = format!("{DIODE_CLIPPER}.integrator trap\n");
     let code = generate_nodal_with(&spice, |c| c.backward_euler = true);
     assert!(
-        !code.contains("BE_LATCH_R1_ENTER"),
+        !code.contains("BE_LATCH_TAU_S"),
         "a BE build (CLI flag overriding .integrator trap) emits no detector"
     );
 }
