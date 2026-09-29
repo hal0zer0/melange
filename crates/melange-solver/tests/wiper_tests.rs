@@ -68,10 +68,10 @@ R_load out 0 100k
 const DIODE_WIPER_SPICE: &str = "\
 Diode wiper test
 R_cw in wiper 5k
-R_ccw wiper clip 5k
-D1 clip 0 DTEST
-C1 clip 0 100n
-R_load clip 0 100k
+R_ccw wiper out 5k
+D1 out 0 DTEST
+C1 out 0 100n
+R_load out 0 100k
 .model DTEST D(IS=1e-12 N=1.5)
 .wiper R_cw R_ccw 10k \"Drive\"
 .END

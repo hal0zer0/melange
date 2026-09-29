@@ -961,6 +961,23 @@ impl CodeGenerator {
         mna: &MnaSystem,
         netlist: &Netlist,
     ) -> Result<GeneratedCode, CodegenError> {
+        self.generate_with_dc_op(kernel, mna, netlist, None)
+    }
+
+    /// Generate Rust solver code with a pre-computed DC operating point.
+    ///
+    /// When `dc_op` is provided, it is used instead of running the internal DC OP solver.
+    /// This is useful when the MNA has been expanded (e.g., with internal nodes for
+    /// parasitic BJTs) after the DC OP was computed on the original system.
+    pub fn generate_with_dc_op(
+        &self,
+        kernel: &DkKernel,
+        mna: &MnaSystem,
+        netlist: &Netlist,
+        dc_op: Option<crate::dc_op::DcOpResult>,
+    ) -> Result<GeneratedCode, CodegenError> {
+        // Every check `generate` promises runs here, so the entry the build
+        // takes (with its DC-OP preflight) validates exactly as `generate` does.
         // Behavioral B-sources route to the nodal path (see `routing.rs`); they
         // are not supported on this DK entry. `generate_nodal` is where the
         // node-space stamping lives.
@@ -1033,21 +1050,6 @@ impl CodeGenerator {
             )));
         }
 
-        self.generate_with_dc_op(kernel, mna, netlist, None)
-    }
-
-    /// Generate Rust solver code with a pre-computed DC operating point.
-    ///
-    /// When `dc_op` is provided, it is used instead of running the internal DC OP solver.
-    /// This is useful when the MNA has been expanded (e.g., with internal nodes for
-    /// parasitic BJTs) after the DC OP was computed on the original system.
-    pub fn generate_with_dc_op(
-        &self,
-        kernel: &DkKernel,
-        mna: &MnaSystem,
-        netlist: &Netlist,
-        dc_op: Option<crate::dc_op::DcOpResult>,
-    ) -> Result<GeneratedCode, CodegenError> {
         // BoyleDiodes mode auto-inserts catch diodes into the netlist, which
         // grows the MNA/kernel dimensions. Rebuilding the DkKernel from the
         // augmented netlist would also change the DK vs nodal routing decision
