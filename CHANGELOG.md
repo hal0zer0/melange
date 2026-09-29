@@ -24,6 +24,14 @@ generated state is smaller.
 
 ### Fixed
 
+- **A pot move or a host sample-rate change dropped part of a transistor's
+  model on nodal circuits.** A transistor with base, collector or emitter
+  resistance (`RB`, `RC`, `RE`) gets internal nodes. The generated
+  `rebuild_matrices()`, which runs on every pot or switch change and at any
+  host rate other than the compiled one, cleared those nodes' history terms.
+  The matrices baked into the file keep them. So the first knob move changed how
+  the stage integrated. The rebuild now clears the same rows the baked matrices
+  do.
 - **The backward-Euler safety latch could engage on a single click and stay
   on for the rest of the stream.** It watches for a trapezoidal ring at half the
   sample rate, and its trigger was a hand-picked threshold. One impulse into a

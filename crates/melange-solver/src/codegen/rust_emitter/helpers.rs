@@ -457,6 +457,20 @@ pub(super) fn device_param_template_data(ir: &CircuitIR) -> Vec<DeviceParamTempl
 // ============================================================================
 
 /// Format a float with full precision for codegen constants.
+/// [`Topology::history_zero_rows`](crate::codegen::ir::Topology) as
+/// contiguous `start..end` ranges, for the emitted zeroing loops. One range
+/// `n_nodes..n_aug` unless parasitic-BJT internal nodes break it up.
+pub(super) fn history_zero_row_ranges(ir: &CircuitIR) -> Vec<(usize, usize)> {
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for &row in &ir.topology.history_zero_rows {
+        match ranges.last_mut() {
+            Some((_, end)) if *end == row => *end = row + 1,
+            _ => ranges.push((row, row + 1)),
+        }
+    }
+    ranges
+}
+
 pub(super) fn fmt_f64(v: f64) -> String {
     if v.is_infinite() {
         if v > 0.0 {

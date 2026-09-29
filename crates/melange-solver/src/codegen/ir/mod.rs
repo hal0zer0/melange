@@ -390,6 +390,15 @@ pub struct Topology {
     /// without making K = N_V * S * N_I ill-conditioned.
     #[serde(default)]
     pub num_linearized_devices: usize,
+    /// Rows whose history is zeroed in every history matrix (`A_neg`,
+    /// `A_neg_be`, the sub-step and sub-sample-fire twins): the algebraic
+    /// augmented rows `n_nodes..n_aug` (voltage sources, VCVS, ideal
+    /// transformers, op-amp internal and VCA rows), minus the parasitic-BJT
+    /// internal nodes that `expand_bjt_internal_nodes` appends there. Those are
+    /// physical G/C nodes and keep their history. Every emitted rebuild zeroes
+    /// exactly these rows, so a runtime rebuild matches the baked constants.
+    #[serde(default)]
+    pub history_zero_rows: Vec<usize>,
 }
 
 /// A resolved `.inject` runtime feedback source.
@@ -1506,6 +1515,21 @@ fn zero_augmented_history_rows(
     mna_n_aug: usize,
     bjt_internal: &[crate::mna::BjtTransientInternalNodes],
 ) {
+    for row in history_zero_rows(n, n_nodes, mna_n_aug, bjt_internal) {
+        for j in 0..n {
+            a_neg_flat[row * n + j] = 0.0;
+        }
+    }
+}
+
+/// The rows [`zero_augmented_history_rows`] zeroes; see
+/// [`Topology::history_zero_rows`].
+fn history_zero_rows(
+    n: usize,
+    n_nodes: usize,
+    mna_n_aug: usize,
+    bjt_internal: &[crate::mna::BjtTransientInternalNodes],
+) -> Vec<usize> {
     // Parasitic-BJT internal nodes are appended into [n_nodes, n_aug) by
     // expand_bjt_internal_nodes but are PHYSICAL nodes (real G/C stamps), NOT
     // algebraic VS/inductor constraint rows — they must KEEP their trapezoidal
@@ -1524,14 +1548,9 @@ fn zero_augmented_history_rows(
             }
         }
     }
-    for row in n_nodes..mna_n_aug.min(n) {
-        if is_bjt_internal[row] {
-            continue;
-        }
-        for j in 0..n {
-            a_neg_flat[row * n + j] = 0.0;
-        }
-    }
+    (n_nodes..mna_n_aug.min(n))
+        .filter(|&row| !is_bjt_internal[row])
+        .collect()
 }
 
 /// Build the DK trapezoidal (A, A_neg) pair from raw G/C at an arbitrary
@@ -1774,6 +1793,7 @@ impl CircuitIR {
             n_aug: mna.n_aug,
             augmented_inductors,
             num_linearized_devices: mna.linearized_triodes.len() + mna.linearized_bjts.len(),
+            history_zero_rows: history_zero_rows(n, n_nodes, mna.n_aug, &mna.bjt_internal_nodes),
         };
 
         let os_factor = config.oversampling_factor;
@@ -2988,6 +3008,7 @@ impl CircuitIR {
             n_aug,
             augmented_inductors: true,
             num_linearized_devices: mna.linearized_triodes.len() + mna.linearized_bjts.len(),
+            history_zero_rows: history_zero_rows(n, n_nodes, n_aug, &mna.bjt_internal_nodes),
         };
 
         let rail_mode = resolve_opamp_rail_mode(mna, config.opamp_rail_mode);

@@ -67,7 +67,9 @@
 //! so decks without the feature are byte-identical to the pre-feature emitter.
 
 use super::dk_emitter::{emit_noise_replay_body, NoiseEmission};
-use super::helpers::{emit_stateful_update_at, stateful_device_data, StatefulDeviceData};
+use super::helpers::{
+    emit_stateful_update_at, history_zero_row_ranges, stateful_device_data, StatefulDeviceData,
+};
 use super::nodal_emitter::emit_sparse_ni_matvec_add;
 use super::nr_helpers::{emit_nr_singular_fallback, emit_schur_nr_limit_and_converge};
 use super::RustEmitter;
@@ -275,13 +277,6 @@ pub(super) fn emit_subsample_schur_builder(ir: &CircuitIR) -> String {
     if !ir.solver_config.subsample_fire {
         return String::new();
     }
-    let n = ir.topology.n;
-    let n_nodes = if ir.topology.n_nodes > 0 {
-        ir.topology.n_nodes
-    } else {
-        n
-    };
-    let n_aug = ir.topology.n_aug;
     let mut s = String::new();
     s.push_str(
         "/// Schur triple for one variable-dt sub-step (sub-sample fire). Persisted\n\
@@ -326,9 +321,9 @@ pub(super) fn emit_subsample_schur_builder(ir: &CircuitIR) -> String {
          \x20       }\n\
          \x20   }\n",
     );
-    if n_nodes < n_aug {
+    for (lo, hi) in history_zero_row_ranges(ir) {
         s.push_str(&format!(
-            "    for i in {n_nodes}..{n_aug} {{\n\
+            "    for i in {lo}..{hi} {{\n\
              \x20       for j in 0..N {{ out.a_neg[i][j] = 0.0; }}\n\
              \x20   }}\n"
         ));

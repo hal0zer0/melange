@@ -11,10 +11,11 @@ use super::helpers::{
     coupled_inductor_template_data, device_param_template_data, emit_device_const,
     emit_stateful_default_fields, emit_stateful_set_sample_rate_body, emit_stateful_state_fields,
     emit_stateful_state_restore, emit_stateful_update, emit_stateful_update_fns,
-    emit_thermal_tj_advance, fmt_f64, format_matrix_rows, inductor_template_data,
-    named_const_entries, oversampling_info, recommended_warmup_samples, section_banner,
-    self_heating_device_data, stateful_device_data, transformer_group_template_data,
-    warmup_estimate_capped, SwitchCompTemplateData, SwitchTemplateData,
+    emit_thermal_tj_advance, fmt_f64, format_matrix_rows, history_zero_row_ranges,
+    inductor_template_data, named_const_entries, oversampling_info, recommended_warmup_samples,
+    section_banner, self_heating_device_data, stateful_device_data,
+    transformer_group_template_data, warmup_estimate_capped, SwitchCompTemplateData,
+    SwitchTemplateData,
 };
 use super::RustEmitter;
 use crate::codegen::ir::{CircuitIR, DeviceParams, DeviceType};
@@ -1882,13 +1883,7 @@ impl RustEmitter {
 
     /// Generate switch setter methods and rebuild_matrices() procedurally.
     fn emit_switch_methods(&self, ir: &CircuitIR, noise: &NoiseEmission) -> String {
-        let n = ir.topology.n;
         let m = ir.topology.m;
-        let n_nodes = if ir.topology.n_nodes > 0 {
-            ir.topology.n_nodes
-        } else {
-            n
-        };
         let num_pots = ir.pots.len();
         let num_inductors = if ir.topology.augmented_inductors {
             0
@@ -2218,18 +2213,12 @@ impl RustEmitter {
             },
             a_neg_formula
         ));
-        // Zero augmented rows in A_neg (algebraic constraints for VS/VCVS)
-        // When augmented_inductors, only zero n_nodes..n_aug (not inductor rows)
-        let n_aug = ir.topology.n_aug;
-        let a_neg_zero_end = if ir.topology.augmented_inductors {
-            n_aug
-        } else {
-            n
-        };
-        if n_nodes < a_neg_zero_end {
+        // Zero augmented rows in A_neg (algebraic constraints for VS/VCVS),
+        // not inductor rows.
+        for (lo, hi) in history_zero_row_ranges(ir) {
             code.push_str(&format!(
                 "        // Zero VS/VCVS algebraic rows in A_neg (NOT inductor rows)\n\
-                 \x20       for i in {n_nodes}..{a_neg_zero_end} {{\n\
+                 \x20       for i in {lo}..{hi} {{\n\
                  \x20           for j in 0..N {{\n\
                  \x20               a_neg[i][j] = 0.0;\n\
                  \x20           }}\n\
@@ -2553,10 +2542,10 @@ impl RustEmitter {
                  \x20           }\n\
                  \x20       }\n",
             );
-            if n_nodes < a_neg_zero_end {
+            for (lo, hi) in history_zero_row_ranges(ir) {
                 code.push_str(&format!(
                     "        // Zero VS/VCVS algebraic rows in A_neg_be (NOT inductor rows)\n\
-                     \x20       for i in {n_nodes}..{a_neg_zero_end} {{\n\
+                     \x20       for i in {lo}..{hi} {{\n\
                      \x20           for j in 0..N {{\n\
                      \x20               a_neg_be[i][j] = 0.0;\n\
                      \x20           }}\n\

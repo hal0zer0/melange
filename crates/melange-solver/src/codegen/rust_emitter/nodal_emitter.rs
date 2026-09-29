@@ -15,8 +15,9 @@ use super::helpers::{
     emit_stateful_default_fields, emit_stateful_set_sample_rate_body, emit_stateful_state_fields,
     emit_stateful_state_restore, emit_stateful_update, emit_thermal_tj_advance,
     emit_transition_be_arm, emit_transition_be_detect, fmt_f64, format_matrix_rows,
-    has_latched_device, oversampling_info, pentode_dispatch, recommended_warmup_samples,
-    section_banner, self_heating_device_data, stateful_device_data, warmup_estimate_capped,
+    has_latched_device, history_zero_row_ranges, oversampling_info, pentode_dispatch,
+    recommended_warmup_samples, section_banner, self_heating_device_data, stateful_device_data,
+    warmup_estimate_capped,
 };
 use super::nr_helpers::{emit_nr_singular_fallback, emit_schur_nr_limit_and_converge};
 use super::RustEmitter;
@@ -3094,17 +3095,10 @@ impl RustEmitter {
         noise: &NoiseEmission,
         setter_stamps: &mut std::collections::BTreeSet<(usize, usize)>,
     ) -> String {
-        let n = ir.topology.n;
         let m = ir.topology.m;
         // Multi-input ports (M=0 only): the input-history state field becomes a
         // per-port array. See multi-input-ports-plan.md.
         let multi_input = ir.solver_config.num_inputs() > 1;
-        let n_nodes = if ir.topology.n_nodes > 0 {
-            ir.topology.n_nodes
-        } else {
-            n
-        };
-        let n_aug = ir.topology.n_aug;
         let has_pots = !ir.pots.is_empty();
         let has_switches = !ir.switches.is_empty();
         let has_sat_ind = !ir.saturating_inductors.is_empty();
@@ -4719,8 +4713,10 @@ impl RustEmitter {
             g_src, c_src, a_neg_formula, g_src, c_src, c_src
         ));
 
-        // Zero VS/VCVS algebraic rows in A_neg and A_neg_be (NOT inductor rows)
-        if n_nodes < n_aug {
+        // Zero the algebraic rows in A_neg and A_neg_be: the same rows the IR
+        // zeroes in the baked constants (not inductor rows, not parasitic-BJT
+        // internal nodes).
+        for (lo, hi) in history_zero_row_ranges(ir) {
             code.push_str(&format!(
                 "        for i in {}..{} {{\n\
                  \x20           for j in 0..N {{\n\
@@ -4728,7 +4724,7 @@ impl RustEmitter {
                  \x20               self.a_neg_be[i][j] = 0.0;\n\
                  \x20           }}\n\
                  \x20       }}\n",
-                n_nodes, n_aug
+                lo, hi
             ));
         }
 
@@ -7714,12 +7710,11 @@ impl RustEmitter {
             }
             code.push_str("                }\n");
             code.push_str("            }\n");
-            // Zero VS/VCVS algebraic rows
-            let n_aug = ir.topology.n_aug;
-            if n_nodes < n_aug {
+            // Zero the algebraic rows (as the baked A_neg does)
+            for (lo, hi) in history_zero_row_ranges(ir) {
                 code.push_str(&format!(
                     "            for i in {}..{} {{ for j in 0..N {{ a_neg_sub[i][j] = 0.0; }} }}\n",
-                    n_nodes, n_aug
+                    lo, hi
                 ));
             }
             // Gmin on A_sub — 1e-12, matching every other Gmin stamp in the
