@@ -3852,6 +3852,20 @@ impl CircuitIR {
                  Consider --oversampling 4 (or `.oversampling 4` in the deck)."
             );
         }
+        // In augmented MNA every inductor has its own branch row; an L switch
+        // component without one would be stamped into the node block as a
+        // capacitance, which is a different circuit. Never emit that.
+        for sw in &ir.switches {
+            for comp in &sw.components {
+                if comp.component_type == 'L' && comp.augmented_row.is_none() {
+                    return Err(CodegenError::InvalidConfig(format!(
+                        ".switch '{}': inductor {} has no branch row in this build, so \
+                         the switch cannot change it.",
+                        sw.label, comp.name
+                    )));
+                }
+            }
+        }
         Ok(ir)
     }
 

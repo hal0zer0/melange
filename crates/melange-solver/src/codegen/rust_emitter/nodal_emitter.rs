@@ -9010,7 +9010,9 @@ impl RustEmitter {
         // loop and only overwritten on convergence, so this fires exactly
         // once per sample whose trapezoidal NR failed — including LU-factor
         // failures — regardless of whether substep/BE later recovered it.
-        if m > 0 {
+        // Every build with a Newton loop counts, M = 0 included: a saturating
+        // inductor or a behavioral source iterates without adding to M.
+        if m > 0 || has_behavioral || has_sat_ind {
             code.push_str("    if state.last_nr_iterations >= MAX_ITER as u32 {\n");
             code.push_str("        state.diag_nr_max_iter_count += 1;\n");
             code.push_str("    }\n\n");

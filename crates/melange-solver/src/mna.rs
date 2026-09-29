@@ -206,6 +206,50 @@ pub struct InductorElement {
     pub shared_core_k: Option<f64>,
 }
 
+/// Why `name` belongs to saturating iron, if it does: it carries `ISAT=` (or a
+/// datasheet rating) itself, or it is `K`-coupled, directly or through other
+/// windings, to an inductor that does. `None` for a linear inductor.
+fn saturating_core_member(netlist: &Netlist, name: &str) -> Option<String> {
+    let saturates = |n: &str| {
+        netlist.elements.iter().any(|e| {
+            matches!(e, Element::Inductor { name, isat, .. }
+                if name.eq_ignore_ascii_case(n) && isat.is_some())
+        })
+    };
+    if saturates(name) {
+        return Some("it is a saturating inductor (ISAT=)".to_string());
+    }
+    let mut seen = vec![name.to_ascii_lowercase()];
+    let mut i = 0;
+    while i < seen.len() {
+        let cur = seen[i].clone();
+        for k in &netlist.couplings {
+            let (a, b) = (
+                k.inductor1_name.to_ascii_lowercase(),
+                k.inductor2_name.to_ascii_lowercase(),
+            );
+            let other = if a == cur {
+                b
+            } else if b == cur {
+                a
+            } else {
+                continue;
+            };
+            if !seen.contains(&other) {
+                if saturates(&other) {
+                    return Some(format!(
+                        "it is a winding of a saturating core ({} carries ISAT)",
+                        other.to_ascii_uppercase()
+                    ));
+                }
+                seen.push(other);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 /// The magnetizing air-core floor of a shared saturating core, in units of
 /// the reference winding's inductance `L_ref` (analog-EE review):
 /// - `CORE=` or no declaration: the class value is the core's MAGNETIZING
@@ -254,12 +298,25 @@ pub fn isat_from_datasheet(
             1.0 - k
         )));
     }
+    // Below this the drop is not a datasheet rating, and tanh(x)/x cannot
+    // resolve it in f64 (its deficit from 1 is x²/3).
+    const MIN_DROP: f64 = 1e-6;
+    if drop < MIN_DROP {
+        return Err(MnaError::InvalidParameter(format!(
+            "{name}: {what} is a drop of {drop:.3e}, below {MIN_DROP:e}. That is not a \
+             saturation rating and cannot be converted accurately; give ISAT= directly."
+        )));
+    }
     let ratio = (m - drop) / m;
     let x = match basis {
-        IsatBasis::Incremental => (1.0 / ratio.sqrt()).acosh(),
+        // sech²(x) = ratio  <=>  tanh²(x) = drop/m; atanh is the stable form
+        // (acosh(1/√ratio) loses digits as ratio -> 1).
+        IsatBasis::Incremental => (drop / m).sqrt().atanh(),
         IsatBasis::Apparent => {
             // tanh(x)/x falls monotonically from 1 at x = 0.
-            let (mut lo, mut hi) = (1e-9f64, 1e9f64);
+            const LO: f64 = 1e-9;
+            const HI: f64 = 1e9;
+            let (mut lo, mut hi) = (LO, HI);
             for _ in 0..200 {
                 let mid = (lo * hi).sqrt();
                 if mid.tanh() / mid > ratio {
@@ -268,10 +325,24 @@ pub fn isat_from_datasheet(
                     hi = mid;
                 }
             }
-            (lo * hi).sqrt()
+            let x = (lo * hi).sqrt();
+            if x <= LO * (1.0 + 1e-6) || x >= HI * (1.0 - 1e-6) {
+                return Err(MnaError::InvalidParameter(format!(
+                    "{name}: {what} (apparent) is outside the range the conversion can \
+                     resolve (x = I/ISAT would be {x:e}); give ISAT= directly."
+                )));
+            }
+            x
         }
     };
-    Ok(i_ds / x)
+    let isat = i_ds / x;
+    if !(isat.is_finite() && isat > 0.0) {
+        return Err(MnaError::InvalidParameter(format!(
+            "{name}: {what} at {i_ds:e} A converts to ISAT = {isat:e}, which is not a \
+             usable saturation current."
+        )));
+    }
+    Ok(isat)
 }
 
 pub fn magnetizing_air_floor(floor: Option<crate::parser::SatFloor>, k: f64) -> f64 {
@@ -3450,6 +3521,14 @@ impl MnaBuilder {
                             ..
                         }) = elem
                         {
+                            if let Some(sat) = saturating_core_member(netlist, comp_name) {
+                                return Err(MnaError::TopologyError(format!(
+                                    ".switch cannot change {comp_name}: {sat}. Its flux law \
+                                     (L0, ISAT, air floor) is fixed at compile time, so a \
+                                     switched value would solve a different device than the \
+                                     one named."
+                                )));
+                            }
                             (self.node_map[n_plus], self.node_map[n_minus], *value)
                         } else {
                             return Err(MnaError::TopologyError(format!(
@@ -3917,7 +3996,16 @@ impl MnaBuilder {
                             )?,
                             None => authored,
                         };
-                        Some(model * (ind.value / l_ref).sqrt())
+                        let referred = model * (ind.value / l_ref).sqrt();
+                        if !(referred.is_finite() && referred > 0.0) {
+                            return Err(MnaError::InvalidParameter(format!(
+                                "{m}: ISAT {model:e} A referred to the reference winding \
+                                 (x sqrt({:e}/{l_ref:e})) is {referred:e}, not a usable \
+                                 saturation current.",
+                                ind.value
+                            )));
+                        }
+                        Some(referred)
                     }
                     None => core_isat,
                 };

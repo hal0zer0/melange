@@ -110,3 +110,68 @@ fn covered_saturating_groups_still_build() {
     // A non-saturating loose pair is untouched.
     mna_ok("linear\nR1 in a 100\nL1 a 0 100m\nL2 b 0 100m\nK1 L1 L2 0.5\nR2 b 0 1k\n");
 }
+
+/// A `.switch` cannot change a saturating inductor. Its flux law (L0, ISAT,
+/// floor) is baked at compile time while the switch moves only the linear L,
+/// so a switched position solved Φ_L0(i) + (L_new − L0)·i: a 1 H → 0.1 H
+/// switch ran away to 740 V from a 10 mV input. A winding of a saturating
+/// core has no branch row of its own after the T-model split, so the switch
+/// was stamped as a capacitance on the winding's node: output ~1e-6 of normal.
+/// Both compiled silently.
+#[test]
+fn switch_on_saturating_iron_is_refused() {
+    let single =
+        mna_err("sw\nR1 in out 100\nL1 out 0 1 ISAT=0.1m LAIR=1e-3\n.switch L1 1 0.1 \"Tap\"\n");
+    assert!(
+        single.contains("L1") && single.contains("saturating inductor"),
+        "{single}"
+    );
+    let core = "xf\nR1 in a 100\nL1 a 0 1 ISAT=10m CORE=steel\nL2 b 0 1\nK1 L1 L2 0.999\n\
+                R2 b 0 1k\n";
+    for (winding, pos, why) in [
+        ("L1", "1 0.5", "saturating inductor"),
+        (
+            "L2",
+            "1 4",
+            "winding of a saturating core (L1 carries ISAT)",
+        ),
+    ] {
+        let e = mna_err(&format!("{core}.switch {winding} {pos} \"Tap\"\n"));
+        assert!(e.contains(winding) && e.contains(why), "{winding}: {e}");
+    }
+    // A linear inductor, and a linear coupled pair, still switch.
+    mna_ok("lin\nR1 in out 100\nL1 out 0 1\n.switch L1 1 0.1 \"Tap\"\n");
+    mna_ok(
+        "linx\nR1 in a 100\nL1 a 0 1\nL2 b 0 1\nK1 L1 L2 0.999\nR2 b 0 1k\n\
+         .switch L1 1 0.5 \"Tap\"\n",
+    );
+}
+
+/// Every build with a Newton loop counts a trapezoidal MAX_ITER exhaustion,
+/// M = 0 included: a saturating inductor iterates without adding to M, and
+/// the counter used to be emitted only for M > 0, so a passive saturating
+/// deck could fail Newton on every edge with `diag_nr_max_iter_count == 0`.
+#[test]
+fn max_iter_counter_is_emitted_for_an_m0_saturating_build() {
+    use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+    let spice = "rl\nR1 in out 30\nL1 out 0 1 ISAT=10m LAIR=3e-4\n";
+    let netlist = Netlist::parse(spice).expect("parse");
+    let mna = MnaSystem::from_netlist(&netlist).expect("mna");
+    assert_eq!(mna.m, 0);
+    let config = CodegenConfig {
+        circuit_name: "rl".to_string(),
+        sample_rate: 48000.0,
+        input_node: mna.node_map["in"] - 1,
+        output_nodes: vec![mna.node_map["out"] - 1],
+        input_resistance: 1.0,
+        ..CodegenConfig::default()
+    };
+    let code = CodeGenerator::new(config)
+        .generate_nodal(&mna, &netlist)
+        .expect("codegen")
+        .code;
+    assert!(
+        code.contains("state.diag_nr_max_iter_count += 1;"),
+        "M = 0 saturating build does not count MAX_ITER exhaustion"
+    );
+}

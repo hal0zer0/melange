@@ -3568,7 +3568,8 @@ impl Parser {
         let coupling = parse_value(parts[3])
             .map_err(|_| self.error(format!("Invalid coupling coefficient: {}", parts[3])))?;
 
-        if coupling <= 0.0 || coupling >= 1.0 {
+        // Written so a NaN fails it too.
+        if !(coupling > 0.0 && coupling < 1.0) {
             return Err(self.error(format!(
                 "Coupling coefficient must be in (0, 1) exclusive, got {}",
                 coupling
@@ -5967,7 +5968,13 @@ fn parse_value_ctx(s: &str, model_param_ctx: bool) -> Result<f64, ParseFloatErro
             return Err(ParseFloatError);
         }
         let value: f64 = num_part.parse().map_err(|_| ParseFloatError)?;
-        return Ok(value * 1e6);
+        // Rust's f64 parser accepts "nan"/"inf", so "nanmeg" must be caught
+        // here like every other path.
+        let result = value * 1e6;
+        if !result.is_finite() {
+            return Err(ParseFloatError);
+        }
+        return Ok(result);
     }
 
     // Femto handling. The general unit-stripping below removes trailing
@@ -6345,6 +6352,18 @@ mod tests {
         assert_eq!(parse_value("4.7u").unwrap(), 4.7e-6);
         assert_eq!(parse_value("10pF").unwrap(), 10e-12);
         assert_eq!(parse_value("1MEG").unwrap(), 1e6);
+    }
+
+    /// The MEG branch returned before the finiteness check every other path
+    /// has, and Rust's f64 parser takes "nan"/"inf": `K1 L1 L2 nanmeg` built
+    /// NaN matrices, because `c <= 0 || c >= 1` is false for NaN.
+    #[test]
+    fn non_finite_meg_values_and_couplings_are_refused() {
+        for v in ["nanmeg", "infmeg", "-infMEG", "1e303meg"] {
+            assert!(parse_value(v).is_err(), "{v}");
+        }
+        let deck = "k\nR1 in a 100\nL1 a 0 1\nL2 b 0 1\nR2 b 0 1k\nK1 L1 L2 nanmeg\n";
+        assert!(Netlist::parse(deck).is_err());
     }
 
     #[test]

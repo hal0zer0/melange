@@ -111,6 +111,44 @@ fn datasheet_forms_reach_the_model_and_refuse_what_cannot_be() {
     assert!(e.contains("one winding only"), "{e}");
 }
 
+/// A converted or referred ISAT that is not a finite positive current is
+/// refused. A drop of 1e-17 used to convert through acosh(1) = 0 to
+/// `SAT_IND_0_ISAT = inf`, compile exited 0 and the emitted Rust did not
+/// build; a referral that underflowed to 0 gave NaN every sample.
+#[test]
+fn unusable_saturation_currents_are_refused() {
+    for spice in [
+        "t\nR1 in a 99\nL1 a 0 1 ISAT=10m ISAT_DROP=1e-17\n",
+        "t\nR1 in a 99\nL1 a 0 1 ISAT=10m ISAT_DROP=1e-17 ISAT_BASIS=apparent\n",
+        "t\nR1 in a 99\nL1 a 0 1 ISAT=1e308 ISAT_DROP=0.2\n",
+    ] {
+        let e = mna(spice).unwrap_err();
+        assert!(e.contains("L1"), "{spice}: {e}");
+    }
+    let e = mna("x\nR1 in p 99\nL1 p 0 1\nL2 s 0 1e-9 ISAT=5e-324\nK1 L1 L2 0.9999\nR2 s 0 1k\n")
+        .unwrap_err();
+    assert!(e.contains("referred"), "{e}");
+    // The conversion near its resolvable limit is still exact (the atanh form).
+    let at = |d: f64| {
+        isat_from_datasheet(
+            "L",
+            1.0,
+            IsatSpec::Drop {
+                drop: d,
+                basis: IsatBasis::Incremental,
+            },
+            1.0,
+            1.0,
+            3e-4,
+        )
+        .unwrap()
+    };
+    let m = 1.0 - 3e-4;
+    let x = 1.0 / at(1e-6);
+    let got = (1.0 - m) + m / x.cosh().powi(2);
+    assert!(((1.0 - got) - 1e-6).abs() < 1e-15, "{got}");
+}
+
 #[test]
 fn datasheet_keywords_are_parsed_strictly() {
     for bad in [
