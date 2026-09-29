@@ -440,7 +440,7 @@ the other mechanisms opt in per device on the `.model` card or per element:
 * Resistor flicker: KF/AF on the element (Hooge bias-squared, AF defaults to 2.0)
 R1 vcc plate 100k KF=1e-10 AF=2.0
 
-* Op-amp en/in: EN/IN on the model (EN_FC/IN_FC parse but are not yet wired)
+* Op-amp en/in: EN/IN on the model (EN_FC/IN_FC are accepted with a notice, not modelled)
 .model NE5534 OA(AOL=1e5 ROUT=75 EN=3.5n IN=0.4p)
 
 * Pentode partition / triode shot smoothing: PARTITION_F / SHOT_GAMMA2 on the tube model

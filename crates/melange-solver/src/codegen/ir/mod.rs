@@ -6277,14 +6277,7 @@ impl CircuitIR {
             if honored.iter().any(|k| k.eq_ignore_ascii_case(&upper)) {
                 continue;
             }
-            if let Some(effect) = class.unimplemented_note(&upper) {
-                log::warn!(
-                    ".model {}: '{}' is a recognized SPICE parameter that melange \
-                     does not model yet, so it is IGNORED — {}",
-                    model_name,
-                    key,
-                    effect,
-                );
+            if crate::model_params::notice_if_unimplemented(model_name, class, &upper) {
                 continue;
             }
             // A RETIRED key is refused with its conversion, not reported as a
@@ -6591,8 +6584,6 @@ mod opamp_rail_mode_tests {
             n_int_idx: 0,
             en: 0.0,
             in_amps: 0.0,
-            en_fc: 0.0,
-            in_fc: 0.0,
         }
     }
 
@@ -6699,8 +6690,6 @@ mod opamp_rail_mode_tests {
             n_int_idx: 0,
             en: 0.0,
             in_amps: 0.0,
-            en_fc: 0.0,
-            in_fc: 0.0,
         }
     }
 

@@ -130,13 +130,16 @@ impl ModelClass {
         }
     }
 
-    /// Real SPICE keys melange does not model yet, each paired with what the
-    /// omission costs. Warned about, never an error — these arrive on authentic
-    /// vendor cards and refusing them would mean melange rejects genuine SPICE
-    /// decks over a gap of its own.
+    /// Keys melange recognises but does not model, each paired with what the
+    /// omission costs. Accepted with a compile notice, never an error — these
+    /// arrive on authentic vendor cards and refusing them would mean melange
+    /// rejects genuine SPICE decks over a gap of its own. An unknown key is
+    /// still refused.
     pub fn unimplemented(self) -> &'static [(&'static str, &'static str)] {
         match self {
+            ModelClass::Diode => DIODE_UNIMPLEMENTED,
             ModelClass::Bjt => BJT_UNIMPLEMENTED,
+            ModelClass::Opamp => OPAMP_UNIMPLEMENTED,
             _ => &[],
         }
     }
@@ -192,6 +195,27 @@ impl ModelClass {
             .find(|(k, _)| k.eq_ignore_ascii_case(key))
             .map(|(_, effect)| *effect)
     }
+}
+
+/// Emit the compile notice for a recognised-but-unimplemented `key`, naming
+/// what its omission costs. Returns `false` (and emits nothing) when `key` is
+/// not on the class's `unimplemented` list.
+///
+/// The one place that notice is worded: the codegen resolvers reach it
+/// through `check_model_params`, the op-amp card through the resolution loop
+/// in [`crate::mna`].
+pub fn notice_if_unimplemented(model_name: &str, class: ModelClass, key: &str) -> bool {
+    let Some(effect) = class.unimplemented_note(key) else {
+        return false;
+    };
+    log::warn!(
+        ".model {}: '{}' is a recognized parameter that melange does not \
+         model yet, so it is IGNORED — {}",
+        model_name,
+        key,
+        effect,
+    );
+    true
 }
 
 /// Emit the standard unrecognized-parameter warning unless `key` is a key this
@@ -332,6 +356,35 @@ pub fn alias_hint(class: ModelClass, key: &str) -> &'static str {
 /// `KF`/`AF` (flicker) are read by `codegen::ir::noise`, not by the resolvers.
 const DIODE_HONORED: &[&str] = &[
     "IS", "N", "CJO", "RS", "BV", "IBV", "KF", "AF", "RTH", "CTH", "XTI", "EG", "TAMB",
+];
+
+/// The junction capacitance is held at `CJO` at every bias; the depletion law
+/// its shape keys describe, and the transit-time diffusion charge, are not
+/// modelled.
+const DIODE_UNIMPLEMENTED: &[(&str, &str)] = &[
+    (
+        "VJ",
+        "junction potential of the depletion law — the junction capacitance \
+         is held at CJO at every bias, so it is overstated under reverse \
+         bias and understated approaching forward conduction.",
+    ),
+    (
+        "M",
+        "grading coefficient of the depletion law — the junction capacitance \
+         is held at CJO at every bias, so it is overstated under reverse \
+         bias and understated approaching forward conduction.",
+    ),
+    (
+        "FC",
+        "forward-bias depletion-capacitance coefficient — the junction \
+         capacitance is held at CJO at every bias.",
+    ),
+    (
+        "TT",
+        "transit time — the diffusion charge is not modelled, so there is \
+         no reverse recovery. It matters for rectifier and switching use at \
+         high frequency.",
+    ),
 ];
 
 const BJT_HONORED: &[&str] = &[
@@ -504,9 +557,9 @@ const PENTODE_DEFINING: &[&str] = &[
 
 /// Op-amp keys are read by the `Element::Opamp` resolution loop in
 /// [`crate::mna`] (`build()`), not by a codegen resolver — an op-amp is a 0D
-/// linear VCCS stamped straight into `G`. `EN`/`IN`/`EN_FC`/`IN_FC` are the
-/// Phase 4 input-referred noise parameters; `EN_FC`/`IN_FC` are parsed and
-/// stored but not yet wired into the noise IR (v1 is white-only).
+/// linear VCCS stamped straight into `G`. `EN`/`IN` are the Phase 4
+/// input-referred noise parameters; their 1/f corners are on
+/// [`OPAMP_UNIMPLEMENTED`].
 const OPAMP_HONORED: &[&str] = &[
     "AOL",
     "ROUT",
@@ -522,8 +575,19 @@ const OPAMP_HONORED: &[&str] = &[
     "RIN",
     "EN",
     "IN",
-    "EN_FC",
-    "IN_FC",
+];
+
+const OPAMP_UNIMPLEMENTED: &[(&str, &str)] = &[
+    (
+        "EN_FC",
+        "1/f corner of the input voltage noise — op-amp noise is white \
+         (EN only), so the low-frequency rise below EN_FC is missing.",
+    ),
+    (
+        "IN_FC",
+        "1/f corner of the input current noise — op-amp noise is white \
+         (IN only), so the low-frequency rise below IN_FC is missing.",
+    ),
 ];
 
 /// `MODE` is read in [`crate::mna`] (`current_mode`); `VSCALE`/`G0`/`THD` by the

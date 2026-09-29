@@ -173,10 +173,10 @@ Melange stamps three Norton streams (one voltage-noise equivalent at the
 non-inverting input, one current-noise stream at each input) so the op-amp's
 signature is applied to the real source impedance the circuit presents.
 
-> **Limitation — 1/f corner not yet wired.** `EN_FC` and `IN_FC` parse and are
-> stored, but v1 op-amp noise is **white-band only** — the 1/f blend is not yet
-> implemented. Setting them does nothing today; do not rely on an op-amp 1/f
-> corner. See "Limitations" below.
+> **Limitation — 1/f corner not modelled.** `EN_FC` and `IN_FC` are accepted,
+> and compiling a card that sets them prints a notice, but v1 op-amp noise is
+> **white-band only** — the 1/f blend is not implemented. Setting them changes
+> nothing; do not rely on an op-amp 1/f corner. See "Limitations" below.
 
 ### Pentode partition
 
@@ -306,8 +306,8 @@ time-domain stochastic injection sample-for-sample, only in integrated PSD.
 
 These are real gaps, not soft-pedaled:
 
-- **Op-amp `EN_FC`/`IN_FC` are unwired.** v1 op-amp noise is white-band only.
-  The parameters parse but the 1/f corner blend is not implemented. An op-amp's
+- **Op-amp `EN_FC`/`IN_FC` are not modelled.** v1 op-amp noise is white-band only.
+  The parameters are accepted with a compile notice; the 1/f corner blend is not implemented. An op-amp's
   low-frequency flicker rise is not modeled today.
 - **DK-path BJT `rbb′` thermal noise is skipped** (logged `warn!`). Route the
   circuit `--solver nodal` to include base/collector/emitter parasitic-R

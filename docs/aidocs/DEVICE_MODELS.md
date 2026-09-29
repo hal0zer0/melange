@@ -12,7 +12,7 @@ cards (dumped 2026-09-29); these are also the SPICE3 manual's values.
 | Device | Parameter | melange (no card, no catalog) | SPICE / ngspice |
 |---|---|---|---|
 | Diode | IS, N, RS, CJO | 1e-14, 1, 0, 0 | same |
-| Diode | junction capacitance | constant CJO (a card that sets VJ or M is refused) | depletion law, VJ 1, M 0.5 |
+| Diode | junction capacitance | constant CJO (VJ, M, FC accepted with a notice, not modelled) | depletion law, VJ 1, M 0.5 |
 | Diode | BV, IBV | ∞, 1e-3 | same (BV = 0 means none) |
 | Diode | EG, XTI | 1.11, 3 | same |
 | BJT | IS, BF, BR | 1e-16, 100, 1 | same |
@@ -31,6 +31,49 @@ cards (dumped 2026-09-29); these are also the SPICE3 manual's values.
 One row differs: the diode junction capacitance, which melange holds constant at CJO where SPICE follows
 the depletion law (a model feature, not a default). Tubes, VCAs, LDRs and glow lamps have no SPICE counterpart; their
 defaults are the documented catalog or model values in their own sections.
+
+## Model-Card Parameters: What Is Accepted
+
+Every `.model` key falls in one of three classes, the same policy for every
+device class (`crates/melange-solver/src/model_params.rs`):
+
+- **Honoured** — melange models it. Each honoured key of each class is
+  proven to change the compiled circuit by
+  `tools/melange-cli/tests/model_key_effect.rs`, which compiles a witness card
+  twice through `melange compile` with only that key changed. A newly accepted
+  key must be added there with its witness.
+- **Recognised, not modelled** — accepted, ignored, and reported at compile
+  time with what the omission costs. These arrive on authentic vendor cards;
+  refusing them would reject genuine SPICE decks over a gap in melange.
+- **Unknown** — refused, naming the keys the class accepts. (Op-amp and VCA
+  cards are resolved in `mna.rs` and warn instead.)
+
+Recognised, not modelled:
+
+| Class | Keys | Cost |
+|---|---|---|
+| Diode | VJ, M, FC | Junction capacitance held at CJO at every bias: overstated under reverse bias, understated approaching forward conduction |
+| Diode | TT | No diffusion charge, so no reverse recovery (rectifier/switching use at HF) |
+| BJT | TR | No reverse transit-time (BC diffusion) charge; junction charge is linearised at the DC operating point |
+| BJT | XCJC | All of CJC sits at the internal base (XCJC = 1, the SPICE default); only XCJC < 1 differs |
+| Op-amp | EN_FC, IN_FC | Op-amp noise is white; the 1/f rise below the corner is missing |
+
+Honoured keys that act only with a companion — inert otherwise, as in SPICE,
+and not reported:
+
+| Key(s) | Acts when |
+|---|---|
+| Diode IBV | BV is set |
+| BJT VJE, MJE, VJC, MJC, FC | CJE / CJC is set |
+| MOSFET PHI | GAMMA is set |
+| Triode/pentode MU_B, EX_B | SVAR > 0 (SVAR > 0 without MU_B is refused) |
+| AF | KF is set |
+| KF, AF, SHOT_GAMMA2, PARTITION_F, op-amp EN, IN | `--noise` is on |
+| CTH, XTI, EG, XTB, TAMB, VBIAS_ALPHA | RTH is set (self-heating) |
+| Op-amp VSAT | VCC/VEE are absent (they take priority) |
+| Op-amp GBW | VCC, VEE and VSAT are absent: it only defaults the rails to ±13 V; it is not a bandwidth pole, and a notice says so |
+| Op-amp VOH_DROP, VOL_DROP | `--opamp-rail-mode boyle-diodes`; hard and active-set pin at VCC/VEE |
+| Op-amp AOL_TRANSIENT_CAP | the nodal route; the DK route does not apply it |
 
 ## Diode (Shockley)
 

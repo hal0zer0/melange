@@ -4694,8 +4694,6 @@ Cx c3 b4 6n IC=-4\n";
             n_int_idx: 0,
             en: 0.0,
             in_amps: 0.0,
-            en_fc: 0.0,
-            in_fc: 0.0,
         });
 
         // Base non-opamp contributions: feedback resistors from `out` to each

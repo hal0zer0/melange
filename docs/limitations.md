@@ -544,7 +544,7 @@ Shipped noise sources:
 - **Pentode partition** noise (Schottky) and **op-amp en/in** (`.model OA(EN=… IN=…)`, white-band v1)
 
 Noise limitations:
-- Op-amp `EN_FC`/`IN_FC` (1/f corner) parameters parse but are **not yet wired** — Phase 4 is white-band only
+- Op-amp `EN_FC`/`IN_FC` (1/f corner) are accepted with a compile notice but **not modelled** — Phase 4 is white-band only
 - On the **DK codegen path**, BJT parasitic RB/RC/RE thermal noise (rbb′) is skipped (logged as a `warn!`); route the circuit nodal to include it
 - Diode `RS` and tube `RGI` parasitic resistances are not yet thermal-noise sources
 - Setting `KF`/`AF` on resistors breaks ngspice parity — strip before SPICE-validating. (`.mismatch`/`.tolerance` jitter does not need stripping: `melange validate` disables it on melange's side automatically and says so on the result line)

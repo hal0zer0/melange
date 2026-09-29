@@ -24,6 +24,14 @@ generated state is smaller.
 
 ### Fixed
 
+- **A diode `.model` card carrying `VJ`, `M`, `FC` or `TT` now compiles.**
+  These are on every vendor 1N4148-class card, and melange refused the card
+  as having an unknown parameter. melange still does not model them (the
+  junction capacitance is held at `CJO`; there is no reverse recovery), so
+  they are accepted and the compile says what ignoring each one costs, as for
+  the BJT's `TR` and `XCJC`. The op-amp noise corners `EN_FC`/`IN_FC`, which
+  were accepted and silently unused, now get the same notice.
+
 - **A `.model` card that omits a parameter now gets the SPICE default.** For a
   part melange does not know by name, a missing BJT `IS`, `BF` or `BR` became
   1.26e-14, 200 and 3 (a 2N2222A's values) instead of SPICE's 1e-16, 100 and

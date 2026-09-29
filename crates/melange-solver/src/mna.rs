@@ -805,16 +805,6 @@ pub struct OpampInfo {
     /// Stamped as an independent Norton current at each of `n_plus_idx`
     /// and `n_minus_idx` — two uncorrelated streams per op-amp.
     pub in_amps: f64,
-    /// 1/f corner frequency [Hz] for `en` (Phase 4, reserved). v1 emits
-    /// white-only en/in (per the Noyce response letter: "the audible
-    /// signature is dominated by the flat-band magnitude"); EN_FC is
-    /// parsed and stored for a future Kellett-pink blend extension.
-    /// `0.0` (default) = pure white. Currently has no codegen effect.
-    pub en_fc: f64,
-    /// 1/f corner frequency [Hz] for `in` (Phase 4, reserved). Same v1
-    /// semantics as [`en_fc`] — parsed but unused; future extension will
-    /// blend Kellett-pink shaping when non-zero.
-    pub in_fc: f64,
 }
 
 /// Effective output resistance for the
@@ -3161,25 +3151,30 @@ impl MnaBuilder {
                             "AOL_TRANSIENT_CAP" => oa.aol_transient_cap = *val,
                             "IB" => oa.ib = *val,
                             "RIN" => oa.rin = *val,
-                            // Phase 4 input-referred noise (datasheet en/in
-                            // and their 1/f corner frequencies). 1/f corners
-                            // are parsed but not yet wired (v1 is white-only;
-                            // Kellett-pink blend reserved for follow-up).
+                            // Phase 4 input-referred noise (datasheet en/in).
+                            // The 1/f corners EN_FC/IN_FC are on the op-amp
+                            // `unimplemented` list: accepted with a notice.
                             "EN" => oa.en = *val,
                             "IN" => oa.in_amps = *val,
-                            "EN_FC" => oa.en_fc = *val,
-                            "IN_FC" => oa.in_fc = *val,
                             // Accepted-key set lives in `model_params` so this
                             // arm, the codegen resolvers and the orphan-card
                             // pass in the parser cannot drift apart (they did:
                             // this was the only `.model` typo report melange
                             // ever emitted for an op-amp, and the VCA arm below
                             // used to warn about `THD`, which is honored).
-                            _ => crate::model_params::warn_if_unknown(
-                                &m.name,
-                                crate::model_params::ModelClass::Opamp,
-                                key,
-                            ),
+                            _ => {
+                                if !crate::model_params::notice_if_unimplemented(
+                                    &m.name,
+                                    crate::model_params::ModelClass::Opamp,
+                                    key,
+                                ) {
+                                    crate::model_params::warn_if_unknown(
+                                        &m.name,
+                                        crate::model_params::ModelClass::Opamp,
+                                        key,
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -5880,8 +5875,6 @@ impl MnaBuilder {
                     // byte-identical codegen to pre-Phase-4 builds.
                     en: 0.0,
                     in_amps: 0.0,
-                    en_fc: 0.0,
-                    in_fc: 0.0,
                 });
             }
             Element::Vcvs {

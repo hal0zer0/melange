@@ -635,10 +635,11 @@ The `.model` statement defines the parameters for semiconductor devices. Paramet
 | `IS` | 1e-14 A | Saturation current |
 | `N` | 1.0 | Emission coefficient (ideality factor) |
 | `RS` | 0 Ω | Series resistance |
-| `CJO` | 0 F | Zero-bias junction capacitance |
-| `VJ` | 1.0 V | Junction potential |
-| `M` | 0.5 | Grading coefficient |
-| `TT` | 0 s | Transit time |
+| `CJO` | 0 F | Zero-bias junction capacitance, held constant at every bias |
+| `VJ` | — | Junction potential. **Accepted, not modelled** (compile notice): the depletion law is not applied |
+| `M` | — | Grading coefficient. **Accepted, not modelled** (compile notice) |
+| `FC` | — | Forward-bias depletion coefficient. **Accepted, not modelled** (compile notice) |
+| `TT` | — | Transit time. **Accepted, not modelled** (compile notice): no reverse recovery |
 | `BV` | ∞ V | Reverse breakdown voltage |
 | `IBV` | 1e-3 A | Current at breakdown |
 
@@ -804,8 +805,8 @@ outside the tube type's published manufacturer limit.
 | `AOL_TRANSIENT_CAP` | ∞ | Override for the transient-NR open-loop-gain cap (auto-detected otherwise) |
 | `EN` | 0 V/√Hz | Input-referred voltage-noise density. Emitted only under `--noise` |
 | `IN` | 0 A/√Hz | Input-referred current-noise density. Emitted only under `--noise` |
-| `EN_FC` | 0 Hz | Voltage-noise 1/f corner — **parsed but not yet wired** |
-| `IN_FC` | 0 Hz | Current-noise 1/f corner — **parsed but not yet wired** |
+| `EN_FC` | — | Voltage-noise 1/f corner. **Accepted, not modelled** (compile notice): op-amp noise is white |
+| `IN_FC` | — | Current-noise 1/f corner. **Accepted, not modelled** (compile notice): op-amp noise is white |
 
 Linear device — does not add nonlinear dimensions to the solver. Modeled as Boyle VCCS macromodel with output resistance. Input impedance is infinite unless you set `RIN`.
 

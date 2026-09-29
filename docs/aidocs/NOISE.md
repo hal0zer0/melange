@@ -161,9 +161,10 @@
 >   `set_switch_N` whose element touches in+. (Replaced the incremental
 >   `+= 1/r − 1/r_old` accumulation, which drifted in FP over unbounded
 >   knob rides; the `.switch` hook was previously missing entirely.)
->   `EN_FC`/`IN_FC` parameters are parsed and stored on `OpampInfo` /
->   `OpampNoiseSource` but **not yet wired** in v1 — v1 is white-only;
->   Kellett-pink 1/f blend is reserved for follow-up. Zero codegen / zero
+>   `EN_FC`/`IN_FC` are on the op-amp `unimplemented` list
+>   (`model_params.rs`): accepted with a compile notice, not stored, not
+>   modelled — v1 is white-only; Kellett-pink 1/f blend is reserved for
+>   follow-up. Zero codegen / zero
 >   state for op-amps without EN/IN — byte-identical to pre-Phase-4 builds
 >   under `--noise full`. Available via `--noise full`. Runtime smoke test:
 >   `tests/noise_psd_validation.rs::opamp_noise_emission_compiles_and_runs`.
@@ -687,7 +688,7 @@ Data-sheet values per op-amp family:
 - NE5534: `EN = 3.5 nV/√Hz`, `IN = 0.4 pA/√Hz`
 - OP07: `EN = 10 nV/√Hz`, `IN = 0.13 pA/√Hz`
 
-Added as `.model OA(EN=… IN=… EN_FC=… IN_FC=…)` parameters. Defaults zero.
+Added as `.model OA(EN=… IN=…)` parameters. Defaults zero. The 1/f corners `EN_FC`/`IN_FC` are accepted with a notice and not modelled.
 
 ### Pentode Partition — Phase 5
 

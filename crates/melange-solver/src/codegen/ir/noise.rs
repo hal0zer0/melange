@@ -233,11 +233,10 @@ pub struct ResistorFlickerNoiseSource {
 /// `+= 1/r − 1/r_old` accumulation (FP drift over unbounded knob rides)
 /// and the missing `.switch` hook are both gone.
 ///
-/// `en_fc` and `in_fc` (1/f corner frequencies) are parsed and stored but
-/// **not yet wired to codegen** in v1 — Kellett-pink blend is the planned
-/// extension. Per the response-letter agreement with Noyce, white-band
-/// en/in magnitude dominates the audible op-amp signature; the 1/f shaping
-/// is a v1.5 enhancement.
+/// The 1/f corners (`EN_FC`, `IN_FC`) are not modelled: v1 en/in is white,
+/// and a card that sets them gets a compile notice. White-band en/in
+/// magnitude dominates the audible op-amp signature; Kellett-pink shaping
+/// is the planned extension.
 ///
 /// `in+` and `in-` streams are uncorrelated (independent xoshiro states
 /// salted via `NOISE_OPAMP_IN_SALT`). The literature treats `en`/`in`
@@ -257,11 +256,6 @@ pub struct OpampNoiseSource {
     /// Input-referred current noise spectral density [A/√Hz]. Stamps
     /// independently at `node_plus` and `node_minus` (two streams).
     pub in_amps: f64,
-    /// 1/f corner for en [Hz]. Parsed/stored; not yet wired to codegen
-    /// (v1 is white-only).
-    pub en_fc: f64,
-    /// 1/f corner for in [Hz]. Same v1 semantics as [`en_fc`].
-    pub in_fc: f64,
     /// Static `G[in+, in+]` at codegen time — diagonal admittance seen at
     /// the non-inverting input. The `en` stamp uses this as the
     /// voltage-to-Norton-current conversion factor: `i_n = en · G_diag · g`.
@@ -818,16 +812,6 @@ pub fn collect_opamp_noise_sources(mna: &MnaSystem) -> Vec<OpampNoiseSource> {
             en: if en.is_finite() && en > 0.0 { en } else { 0.0 },
             in_amps: if in_amps.is_finite() && in_amps > 0.0 {
                 in_amps
-            } else {
-                0.0
-            },
-            en_fc: if oa.en_fc.is_finite() && oa.en_fc > 0.0 {
-                oa.en_fc
-            } else {
-                0.0
-            },
-            in_fc: if oa.in_fc.is_finite() && oa.in_fc > 0.0 {
-                oa.in_fc
             } else {
                 0.0
             },
