@@ -2970,9 +2970,11 @@ fn main() {{
 // BJT parasitic RB thermal noise (rbb′) — nodal internal-node path
 // ======================================================================
 
-/// Nodal codegen with BJT internal-node expansion (the CLI arrangement —
-/// the plain `support::generate_circuit_code_nodal` does not expand, so
-/// parasitic-R noise sources would have no internal node to attach to).
+/// Nodal codegen with the BJT internal nodes expanded unconditionally.
+/// Bypasses the production pipeline on purpose: tests the parasitic-RB thermal
+/// source on an expanded MNA. The shipped build expands only when
+/// min diag(K) >= -100; the parasitic-RB deck below reads -897, so it ships
+/// unexpanded, and the parasitic-R thermal sources are skipped with a warning.
 fn generate_nodal_expanded(spice: &str, config: &CodegenConfig, out_node: &str) -> String {
     use melange_solver::codegen::{ir::CircuitIR, CodeGenerator};
     use melange_solver::mna::MnaSystem;
@@ -3354,10 +3356,6 @@ fn main() {{
 /// Γ² = 1/BF (sqrt(1/200) ≈ 0.0707 here). Compile+run smoke included.
 #[test]
 fn fa_reduced_bjt_emits_base_shot() {
-    use melange_solver::codegen::CodeGenerator;
-    use melange_solver::dk::DkKernel;
-    use melange_solver::mna::MnaSystem;
-    use melange_solver::parser::Netlist;
     const SPICE: &str = "\
 BJT FA base shot
 Rin in b 1k
@@ -3368,28 +3366,19 @@ Rc vcc c 10k
 VCC vcc 0 12
 .model QFA NPN(IS=1e-14 BF=200)
 ";
-    let netlist = Netlist::parse(SPICE).expect("parse");
-    let mut fa = std::collections::HashSet::new();
-    fa.insert("Q1".to_string());
-    let mut mna = MnaSystem::from_netlist_forward_active(&netlist, &fa).expect("FA MNA");
-    mna.g[0][0] += 1.0; // 1 Ω input stamp at `in`
-    let kernel = DkKernel::from_mna(&mna, 96_000.0).expect("kernel");
-    let config = CodegenConfig {
-        circuit_name: "fa_base_shot".to_string(),
-        sample_rate: 96_000.0,
-        input_node: 0,
-        output_nodes: vec![2], // node `c` (rows: in=0, b=1, c=2, e=3, vcc=4)
-        input_resistance: 1.0,
-        dc_block: false,
-        noise_mode: NoiseMode::Shot,
-        noise_master_seed: 42,
-        ..CodegenConfig::default()
-    };
-    let generator = CodeGenerator::new(config);
-    let code = generator
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen")
-        .code;
+    let mut config = support::config_for_spice(SPICE, 96_000.0);
+    config.circuit_name = "fa_base_shot".to_string();
+    config.output_nodes = vec![2]; // node `c` (rows: in=0, b=1, c=2, e=3, vcc=4)
+    config.dc_block = false;
+    config.noise_mode = NoiseMode::Shot;
+    config.noise_master_seed = 42;
+    config.bjt_fa_mode = melange_solver::codegen::BjtFaMode::Force;
+    let built = support::build_shipped(SPICE, &config, "dk");
+    assert!(
+        built.forward_active.contains("Q1"),
+        "--bjt-fa force must reduce Q1"
+    );
+    let code = built.generated.code;
 
     assert!(
         code.contains("pub const NOISE_SHOT_N: usize = 2;"),

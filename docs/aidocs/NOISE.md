@@ -803,23 +803,27 @@ advertise low base spreading resistance). `collect_thermal_noise_sources`
 now emits one thermal source per parasitic R with `RB`/`RC`/`RE > 0` on
 the model card:
 
-- **Nodal path** (internal-node expansion active): the source spans the
-  real (external, internal) node pair — exactly where the physical
-  resistor sits. No approximation. Validated by
+- **Expanded internal nodes** (a nodal build whose min diag(K) ≥ −100): the
+  source spans the real (external, internal) node pair — exactly where the
+  physical resistor sits. No approximation. Validated by
   `noise_psd_validation.rs::bjt_parasitic_rb_thermal_matches_explicit_base_resistor_nodal`:
   a CE stage with `.model … RB=1000` matches the same stage built with an
   explicit external 1 kΩ base resistor to 0.1 % in output noise variance
-  (and exceeds the RB=0 control by ~69 % in that bias network).
-- **DK path** (K_eff absorption, no internal nodes): there is no node
-  pair to inject across with the existing Norton machinery, so the
-  source is **skipped** and codegen logs
+  (and exceeds the RB=0 control by ~69 % in that bias network). That test
+  expands the internal nodes itself: its deck reads min diag(K) = −897, so
+  the shipped build of it does not expand and skips the source.
+- **No internal nodes** — the DK route (K_eff absorption), and a nodal build
+  with min diag(K) < −100, which keeps RB/RC/RE inside the device model and
+  does not expand them: there is no node pair to inject across with the existing Norton
+  machinery, so the source is **skipped** and codegen logs
   `log::warn!("noise: BJT <name> parasitic RB/RC/RE thermal noise skipped …")`.
-  This is an honest under-modeling of rbb′ hiss on DK-routed multi-BJT
-  circuits (wurli/Neve class when they route DK). A faithful DK-side
-  equivalent (base-side voltage noise → current injection across
-  (base, emitter) scaled by the small-signal loop admittance at the OP)
-  needs the loop Jacobian at codegen time; do it properly or not at all —
-  do not fake a magnitude. Routing the circuit nodal includes the noise.
+  This is an honest under-modeling of rbb′ hiss on those builds (wurli/Neve
+  class when they route DK or decline the expansion). A faithful equivalent
+  (base-side voltage noise → current injection across (base, emitter) scaled
+  by the small-signal loop admittance at the OP) needs the loop Jacobian at
+  codegen time; do it properly or not at all — do not fake a magnitude.
+  Routing the circuit nodal includes the noise only when the build expands
+  the internal nodes.
 
 ## Validation
 
