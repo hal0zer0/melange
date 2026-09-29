@@ -97,12 +97,12 @@ Self and mutual inductances come out exact for two windings
 checked 2026-08-16 against the exact coupled-inductor `[L]` path and ngspice to
 +0.011 %, flat across k and frequency.
 
-**Leakage floor.** Each leakage inductor is floored at `1e-4·Lᵢ`. For
-k > 0.9999 the realized leakage is the floor, not `(1 − k)·Lᵢ`, so the realized
-coupling is looser than authored (k = 0.99999 realizes about 0.9999) and the
-winding self-inductance is high by the difference. No notice is printed. Real
-audio iron sits at `1 − k` ≈ 1e-5..1e-4, so this range is reachable by a
-faithful deck. Open, §8.
+**No leakage minimum.** The leakage is exactly `(1 − k)·Lᵢ` at any k < 1. On
+the nodal full-LU path a small leakage is an inductor branch row tending to a
+0 V source, which is well-posed. (A minimum of `1e-4·Lᵢ`, from the DK era,
+realized k ≈ 0.9999 for every authored k above that: +0.15 dB at 20 kHz on a
+1:4 step-up into 1 nF.) Checked against the exact `[L]` path to 1e-4 dB at
+k = 0.99999 and 0.999999.
 
 **ISAT referral.** Current refers inversely to turns (`N ∝ √L`), so an `ISAT`
 authored on winding `a` becomes `ISAT·√(L_a/L_ref)` on the magnetizing branch.
@@ -440,11 +440,9 @@ be datasheet ratings read as tanh scale currents, which saturates the core
    `(1 − cᵢ²)·Lᵢ`, magnetizing `c_ref²·L_ref`. Refuse when some `cᵢ ≥ 1` (a
    sandwiched winding gives a negative leakage). W ≥ 4 is not a star in
    general, so its refusal stays. Not built; three windings are refused today.
-2. **Leakage floor above k = 0.9999** (§2.2): the `1e-4·Lᵢ` floor silently
-   loosens the realized coupling of tight iron.
-3. **Knee re-solve for a railing op-amp at 1×** (§3.4): parked.
-4. **A second-order L-stable integrator** (BDF2) for magnetics: held pending
+2. **Knee re-solve for a railing op-amp at 1×** (§3.4): parked.
+3. **A second-order L-stable integrator** (BDF2) for magnetics: held pending
    physics.
-5. **Hysteresis** — justified, if any target needs it, by loss, phase lag and
+4. **Hysteresis** — justified, if any target needs it, by loss, phase lag and
    LF/level-dependent distortion, not by H2 (§2.5). Chan (Hc/Br/Bs) is the
    reference to cite.
