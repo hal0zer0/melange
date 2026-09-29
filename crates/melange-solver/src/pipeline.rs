@@ -12,6 +12,9 @@
 //! | [`expand_internal_nodes_if_conditioned`] | yes | yes | **unconditional** | **unconditional** |
 //! | [`auto_tune_max_iter`] | yes | yes | yes | **no** |
 //!
+//! **The sequence itself now lives in one place, [`crate::build::build`]**, which
+//! every verb calls; the table below is the history of why.
+//!
 //! **That table is the 2026-09-02 state and every cell is now closed**, but two
 //! of them outlived the commit that is usually credited with closing them, so
 //! read it as history and not as a status board:
@@ -37,8 +40,10 @@
 //! N=20, M=14 system while `melange validate` built N=44, M=16: more than twice
 //! the nodes, and a different solver sub-path. Validation reported 1319% RMS
 //! error and correlation 0.0002 against ngspice, which read as a catastrophic
-//! solver defect and was nothing of the kind. Driven through the CLI's pipeline
-//! the same circuit validates at 0.228% RMS, correlation 1.000000.
+//! solver defect and was nothing of the kind. Driven through the build that
+//! ships, the same circuit validates at 0.0924 % RMS, correlation 0.9999996
+//! (`melange validate` defaults, 1 s; peak error 3.3e-2 V against a 2e-2 V
+//! tolerance; measured 2026-09-29).
 //!
 //! **A verification instrument that builds a different system than the one it is
 //! verifying is worse than no instrument, because it is believed.**

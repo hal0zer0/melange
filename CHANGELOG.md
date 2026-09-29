@@ -24,6 +24,16 @@ generated state is smaller.
 
 ### Fixed
 
+- **`simulate`, `analyze` and `validate` now build exactly the circuit
+  `compile` ships.** Each verb assembled the build steps in its own sequence,
+  and they had drifted. `simulate`, `analyze` and `validate` tuned the Newton
+  budget for the wrong integrator on `.integrator be` decks; `analyze` and
+  `validate` left `.inject` source impedances out; and `validate` stamped every
+  junction capacitance twice on decks with `.linearize` (its verdicts on those
+  decks were for a different circuit). All four verbs now call one build
+  function, with each verb's legitimate choices as explicit options.
+  `analyze` no longer prints a solver note into its CSV output.
+
 - **The nodal sub-step rescue now reaches a switching edge at the base
   sample rate.** When a sample's Newton solve fails, it used to re-solve the
   whole sample at 2, 4, … 64 equal sub-steps; a transistor astable's edges

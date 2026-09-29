@@ -864,10 +864,9 @@ pub fn build(
     // Route solver first — routing info feeds into config auto-tuning.
     let routing = crate::codegen::routing::auto_route(&kernel, &mna, dk_failed, opamp_rail_mode);
 
-    // Tier 3b: Auto-tune max_iter based on M and solver path (shared with
-    // simulate/analyze — see `auto_tune_max_iter`). `--max-iter 50` (the
-    // default value) is treated as "not explicitly set", preserving the
-    // historical detect-via-default behavior of this flag.
+    // Tier 3b: Auto-tune max_iter based on M and solver path (see
+    // `auto_tune_max_iter`); `opts.max_iter` is the user's explicit budget, if
+    // any.
     //
     // Resolve the `.integrator` directive with the same precedence codegen
     // uses so the iteration budget matches the integrator that ships, on every

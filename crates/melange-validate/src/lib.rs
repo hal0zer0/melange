@@ -760,315 +760,74 @@ pub fn run_melange_solver_from_str(
     oversampling: usize,
     main_code: Option<&str>,
 ) -> Result<Vec<f64>, ValidationError> {
-    use melange_solver::codegen::{routing, CodeGenerator, CodegenConfig};
+    use melange_solver::codegen::CodegenConfig;
 
     if !matches!(oversampling, 1 | 2 | 4) {
         return Err(ValidationError::InvalidInput(format!(
             "oversampling must be 1, 2, or 4, got {oversampling}"
         )));
     }
-    // The solver runs at the INTERNAL rate under oversampling, so every
-    // rate-dependent decision below — kernel build, routing, the reduction
-    // gates — is made at `routing_rate`, exactly as `melange compile` and
-    // `melange simulate` do it. Equals `sample_rate` when oversampling is off.
-    let routing_rate = sample_rate * oversampling as f64;
 
-    // Unit variation OFF on the melange side, unconditionally.
-    //
-    // `.tolerance` jitters fixed R/C/L values in the parser and `.mismatch`
-    // jitters device model parameters in codegen — both on melange's side only.
-    // The reference deck handed to ngspice carries the values as written, so a
-    // jittered melange side puts a correlation between two DIFFERENT circuits
-    // on the result line and attributes the gap to the solver. Measured on
-    // `examples/passive-eq1a.cir` (`.seed 4142` / `.mismatch T MU=0.09
-    // KG1=0.20`): 16 emitted device constants differ, `DEVICE_0_MU` by -7.6%
-    // and `DEVICE_0_KG1` by -5.1%.
-    //
-    // This is what the docs already told authors to do by hand
-    // (`docs/aidocs/UNIT_VARIATION.md`, `docs/limitations.md`); only the
-    // automation was missing. It matches what validate measures: the solver
-    // against a reference engine at the SAME component values. Jitter changes
-    // values, not the solver, and whether the draw itself is correct is a
-    // unit-test question ngspice cannot answer — see
-    // `melange_solver::parser::tests::tolerance_draw_matches_nominal_times_one_plus_tol_u`.
-    //
-    // The caller names the disabled directives on the result line via
-    // `deck_guard::unit_variation_note`; it is not a preamble, because a
-    // footnote above a number does not retract the number.
-    //
-    // Unconditional here rather than an option on `ValidationOptions`: this
-    // function IS the melange side of every comparison, so there is no caller
-    // for whom the jittered answer would be the honest one.
-    let parse_options = melange_solver::parser::ParseOptions {
-        disable_unit_variation: true,
-    };
-    let netlist = melange_solver::parser::Netlist::parse_with_options(netlist_str, parse_options)
-        .map_err(|e| {
-        ValidationError::Solver(format!("Parse error at line {}: {}", e.line, e.message))
-    })?;
-
-    // Topology gate — the same one `melange compile` runs, on the same shared
-    // implementation. A deck with an inert element validates a circuit the
-    // author did not write, and a correlation number printed for the wrong
-    // circuit is worse than no number. Warnings go to the log; refusals stop
-    // the run here, before ngspice's answer can be compared to anything.
-    melange_solver::pipeline::topology_gate(
-        &netlist,
-        &melange_solver::topology::Ports::declared(
-            [input_node_name.to_string()],
-            [output_node_name.to_string()],
-        ),
-        &|m| log::warn!("{m}"),
-    )
-    .map_err(|e| ValidationError::Solver(e.to_string()))?;
-
-    let mut mna = melange_solver::mna::MnaSystem::from_netlist(&netlist)
-        .map_err(|e| ValidationError::Solver(format!("MNA error: {}", e)))?;
-
-    let input_node = mna
-        .node_map
-        .get(input_node_name)
-        .copied()
-        .ok_or_else(|| {
-            ValidationError::Solver(format!(
-                "Input node '{}' not found. Available: {:?}",
-                input_node_name,
-                mna.node_names_in_index_order()
-            ))
-        })?
-        .saturating_sub(1);
-    let output_node = mna
-        .node_map
-        .get(output_node_name)
-        .copied()
-        .ok_or_else(|| {
-            ValidationError::Solver(format!(
-                "Output node '{}' not found. Available: {:?}",
-                output_node_name,
-                mna.node_names_in_index_order()
-            ))
-        })?
-        .saturating_sub(1);
-
-    if input_node < mna.n {
-        mna.g[input_node][input_node] += 1.0;
-    }
-
-    // Apply `.linearize` — the SAME shared pipeline step `melange compile` runs.
-    //
-    // This harness used to skip it entirely, which is how `wurli-power-amp` came
-    // to "fail" validation at 1319% RMS and correlation 0.0002: without a
-    // linearized device the emitter's `linearized_bypass` gate never fires, so
-    // it chose Schur NR instead of full-LU and diverged on the first non-zero
-    // sample. The shipped build validates at 0.228% RMS, correlation 1.000000.
-    // A validator that builds a different circuit than the one it validates is
-    // worse than no validator, because it is believed.
-    //
-    // Forward-active + grid-off reductions, then `.linearize` — the SAME three
-    // shared pipeline steps, in the same order, that `melange compile` runs.
-    //
-    // Until 2026-09-03 this harness passed EMPTY forward-active and grid-off
-    // sets, so it validated a full-2D system for any circuit the shipped build
-    // reduces. Measured on the `wurli_preamp` validation deck: shipped M=3,
-    // harness M=5 — a different circuit, and therefore not a statement about
-    // what ships. `--bjt-fa` / `--tube-grid-fa` still select the mode, so
-    // `off` remains available to attribute a residual to the reduction.
-    let fa_config = melange_solver::codegen::CodegenConfig {
-        circuit_name: "fa_detect".to_string(),
+    // The melange side of every comparison is the build `melange compile`
+    // ships: the one build function every verb calls. What validate chooses
+    // differently is visible in these options:
+    // * unit variation OFF, unconditionally. `.tolerance` jitters fixed R/C/L
+    //   values in the parser and `.mismatch` jitters device model parameters,
+    //   both on melange's side only; the reference deck handed to ngspice
+    //   carries the values as written, so a jittered melange side would put a
+    //   correlation between two DIFFERENT circuits on the result line (measured
+    //   on `examples/passive-eq1a.cir`, `.seed 4142` / `.mismatch T MU=0.09
+    //   KG1=0.20`: 16 emitted device constants differ, `DEVICE_0_MU` by -7.6 %).
+    //   The caller names the disabled directives on the result line via
+    //   `deck_guard::unit_variation_note`.
+    // * the 1-ohm Thevenin input the harness drives the reference with;
+    // * an output clamp raised to three times the largest DC operating-point
+    //   node voltage (never below the 10 V default): a high-rail circuit (a
+    //   250 V tube B+) swings its output tens of volts under large-signal
+    //   drive, and a fixed 10 V ceiling would square it into a divergence that
+    //   is a harness gap, not a solver bug (triode_cc overdrive, 2026-08);
+    // * the base rate unless an oversampling factor is passed: at 2x/4x the
+    //   emitted code upsamples, solves at the internal rate and decimates, and
+    //   the reference goes through the same half-band round trip in
+    //   `validate_circuit_with_options`.
+    let build_opts = melange_solver::build::BuildOptions {
         sample_rate,
-        input_resistance: 1.0,
-        input_node,
-        output_nodes: vec![output_node],
-        bjt_fa_mode,
-        ..melange_solver::codegen::CodegenConfig::default()
-    };
-    let forward_active = melange_solver::pipeline::apply_forward_active_reduction(
-        &mut mna,
-        &netlist,
-        &fa_config,
-        "auto",
-        sample_rate,
-        oversampling,
-        input_node,
-        1.0,
-        &melange_solver::pipeline::silent,
-    )
-    .map_err(|e| ValidationError::Solver(format!("forward-active: {e}")))?;
-
-    let grid_off_pentodes = melange_solver::pipeline::apply_grid_off_reduction(
-        &mut mna,
-        &netlist,
-        &fa_config,
-        &forward_active,
-        tube_grid_fa,
-        "auto",
-        sample_rate,
-        oversampling,
-        input_node,
-        1.0,
-    )
-    .map_err(|e| ValidationError::Solver(format!("grid-off: {e}")))?;
-
-    melange_solver::pipeline::apply_linearize_reductions(
-        &mut mna,
-        &netlist,
-        &forward_active,
-        &grid_off_pentodes,
-        input_node,
-        1.0,
-        1.0,
-        &melange_solver::pipeline::silent,
-    )
-    .map_err(|e| ValidationError::Solver(format!("linearize: {e}")))?;
-
-    // Stamp junction caps + pre-solve DC OP so BJT charge-storage caps are
-    // linearized at the true operating point. When all BJTs use the default
-    // CJE/CJC/TF parameters this is byte-identical to the zero-bias stamp;
-    // when `.model` cards carry TF/VJE/etc. the kernel now sees the ngspice
-    // depletion + diffusion cap values rather than the zero-bias shape.
-    //
-    // Uses `CircuitIR::build_device_info_with_mna` rather than the harness's
-    // bare-minimum `build_device_slots_from_netlist` so the BJT `.model`
-    // card's CJE/CJC/TF/VJE/MJE/VJC/MJC/FC are actually read. The original
-    // harness builder hardcoded these to zero, which defeated the fix.
-    //
-    // The pre-solved DC OP is forwarded to `generate_with_dc_op` below so
-    // we don't double-solve.
-    let dc_preflight = {
-        let device_slots = melange_solver::codegen::ir::CircuitIR::build_device_info_with_mna(
-            &netlist,
-            Some(&mna),
-        )
-        .unwrap_or_default();
-        if device_slots.is_empty() {
-            None
-        } else {
-            // A railed op-amp sits where the transient's rail mode puts it.
-            let rail = melange_solver::codegen::ir::dc_rail_for(
-                melange_solver::codegen::ir::opamp_rail::resolve_opamp_rail_mode(
-                    &mna,
-                    fa_config.opamp_rail_mode,
-                )
-                .mode,
-            );
-            let dc_config = melange_solver::dc_op::DcOpConfig {
-                input_node,
-                input_resistance: 1.0,
-                rail,
-                ..melange_solver::dc_op::DcOpConfig::default()
-            };
-            Some(mna.stamp_caps_and_solve_dc_op(&device_slots, &dc_config))
-        }
-    };
-
-    // Build kernel and route
-    let has_inductors = !mna.inductors.is_empty()
-        || !mna.coupled_inductors.is_empty()
-        || !mna.transformer_groups.is_empty();
-    let mut dk_failed = false;
-    let kernel = if has_inductors {
-        melange_solver::dk::DkKernel::from_mna_augmented(&mna, routing_rate)
-            .map_err(|e| ValidationError::Solver(format!("Augmented DK: {:?}", e)))?
-    } else {
-        match melange_solver::dk::DkKernel::from_mna(&mna, routing_rate) {
-            Ok(k) => k,
-            Err(_) => {
-                dk_failed = true;
-                melange_solver::dk::DkKernel::from_mna_augmented(&mna, routing_rate)
-                    .map_err(|e| ValidationError::Solver(format!("DK fallback: {:?}", e)))?
-            }
-        }
-    };
-
-    let decision = routing::auto_route(&kernel, &mna, dk_failed, fa_config.opamp_rail_mode);
-    let use_nodal = decision.route == routing::SolverRoute::Nodal;
-
-    if use_nodal {
-        // K-gated, exactly as the CLI does it. Expanding unconditionally is what
-        // pushed this harness onto Schur-with-expanded-parasitics, which
-        // diverges where the shipped full-LU build converges.
-        melange_solver::pipeline::expand_internal_nodes_if_conditioned(
-            &mut mna,
-            &netlist,
-            &kernel,
-            &melange_solver::pipeline::silent,
-        );
-    }
-
-    // Post-DC-block output ceiling (default 10 V, see docs/aidocs/SIGNAL_LEVELS.md
-    // "Signal Level Contract"). Sized for line-level circuits; a circuit whose DC
-    // operating point carries a high-voltage rail (e.g. a 250 V tube B+) can
-    // legitimately swing its output node tens of volts under large-signal drive.
-    // A fixed 10 V ceiling silently hard-clips that into a square wave, which
-    // then reads as a large melange-vs-ngspice divergence that is actually a
-    // harness/config gap, not a solver bug (see triode_cc overdrive
-    // investigation, 2026-08). Auto-scale from the DC operating point's node
-    // voltage headroom (`dc_preflight`, already computed above) so any
-    // high-rail circuit validated through this path gets a ceiling that won't
-    // clip a legitimate large-signal swing; never lower it below the existing
-    // 10 V default so line-level circuits keep their historical clamp
-    // behavior byte-for-byte.
-    let auto_clamp_v = dc_preflight
-        .as_ref()
-        .map(|dc| {
-            dc.v_node
-                .iter()
-                .cloned()
-                .fold(0.0_f64, |acc, v| acc.max(v.abs()))
-                * 3.0
-        })
-        .unwrap_or(0.0)
-        .max(CodegenConfig::default().output_clamp_v);
-
-    let config = CodegenConfig {
         circuit_name: "validate".to_string(),
-        sample_rate,
-        input_node,
-        output_nodes: vec![output_node],
-        input_resistance: 1.0,
+        input_nodes: vec![input_node_name.to_string()],
+        output_nodes: vec![output_node_name.to_string()],
+        max_iter: None,
+        tolerance: CodegenConfig::default().tolerance,
+        output_scale: 1.0,
+        output_clamp: CodegenConfig::default().output_clamp_v,
+        input_resistance: Some(1.0),
+        oversampling: Some(oversampling),
         dc_block: true,
-        output_clamp_v: auto_clamp_v,
-        // Same budgets the shipped build gets; the default 100 is not what ships.
-        max_iterations: melange_solver::pipeline::auto_tune_max_iter(
-            None,
-            &kernel,
-            &decision,
-            !backward_euler,
-        ),
-        max_iterations_be_promoted: Some(melange_solver::pipeline::auto_tune_max_iter(
-            None, &kernel, &decision, false,
-        )),
-        // Diagnostics (default: shipped behaviour — auto integrator).
+        solver: "auto".to_string(),
         backward_euler,
         force_trap,
-        // Compile-time DSP, NOT a diagnostic: at 2x/4x the emitted code
-        // upsamples, solves at `routing_rate`, and decimates. The reference is
-        // put through the same half-band round trip in
-        // `validate_circuit_with_options` so the filters' known response is
-        // included in the comparison rather than charged to the solver.
-        oversampling_factor: oversampling,
-        ..CodegenConfig::default()
+        tube_grid_fa: tube_grid_fa.to_string(),
+        subsample_fire: CodegenConfig::default().subsample_fire,
+        subsample_lit_factor: CodegenConfig::default().subsample_lit_factor,
+        bjt_fa_mode,
+        opamp_rail_mode: CodegenConfig::default().opamp_rail_mode,
+        nodal_sub_path_override: CodegenConfig::default().nodal_sub_path_override,
+        allow_static_glow_on_full_lu: false,
+        noise_mode: CodegenConfig::default().noise_mode,
+        noise_seed: CodegenConfig::default().noise_master_seed,
+        emit_dc_op_recompute: false,
+        plugin_format: false,
+        pot_overrides: None,
+        resolve_taps: false,
+        inject_runtime: false,
+        disable_unit_variation: true,
+        output_clamp_auto: true,
     };
-    let generator = CodeGenerator::new(config);
-    let generated = if use_nodal {
-        generator.generate_nodal(&mna, &netlist)
-    } else {
-        // The DK build refuses a self-starting oscillator; the auto route
-        // then takes the nodal solver, as `melange compile` does.
-        match generator.generate_with_dc_op(&kernel, &mna, &netlist, dc_preflight) {
-            Err(melange_solver::codegen::CodegenError::SelfStartingOscillator(_)) => {
-                melange_solver::pipeline::expand_internal_nodes_if_conditioned(
-                    &mut mna,
-                    &netlist,
-                    &kernel,
-                    &|_| {},
-                );
-                generator.generate_nodal(&mna, &netlist)
-            }
-            other => other,
-        }
-    }
-    .map_err(|e| ValidationError::Solver(format!("Codegen: {}", e)))?;
+    let built =
+        melange_solver::build::build(netlist_str, &build_opts, &|m| log::info!("{m}"), &|m| {
+            log::warn!("{m}")
+        })
+        .map_err(|e| ValidationError::Solver(e.to_string()))?;
+    let generated = built.generated;
 
     run_generated_solver(&generated.code, input_signal, main_code)
 }
@@ -1152,6 +911,13 @@ pub fn run_generated_solver(
          {extra_diag}}}\n"
     );
     let full_source = format!("{}\n{}", code, main_code.unwrap_or(default_main.as_str()));
+    // Diagnostic: MELANGE_DUMP_SOURCE=<dir> writes the generated circuit code
+    // to <dir>/validate.rs, so two builds of one deck can be diffed.
+    if let Some(dir) = std::env::var_os("MELANGE_DUMP_SOURCE") {
+        let dir = std::path::PathBuf::from(dir);
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("validate.rs"), code);
+    }
 
     // Compile
     static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
