@@ -227,7 +227,8 @@ comparison, validate refuses the render when:
   0: ngspice saw the unclamped input;
 - the output passed the generated output clamp (`clamp_count` > 0, the
   post-DC-block limit, 10 V by default): ngspice has no output clamp.
-`output_clamp_tests.rs` covers the last two.
+`validate_refusal_tests.rs` has a witness for each of the three, including a
+real full-LU build forced to `MAX_ITER = 1` for the unsolved-sample case.
 
 ## Thread Safety
 

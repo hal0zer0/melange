@@ -761,7 +761,6 @@ pub fn run_melange_solver_from_str(
     main_code: Option<&str>,
 ) -> Result<Vec<f64>, ValidationError> {
     use melange_solver::codegen::{routing, CodeGenerator, CodegenConfig};
-    use std::io::Write;
 
     if !matches!(oversampling, 1 | 2 | 4) {
         return Err(ValidationError::InvalidInput(format!(
@@ -1045,6 +1044,24 @@ pub fn run_melange_solver_from_str(
     }
     .map_err(|e| ValidationError::Solver(format!("Codegen: {}", e)))?;
 
+    run_generated_solver(&generated.code, input_signal, main_code)
+}
+
+/// Compile generated circuit code with the validation driver, run it on
+/// `input_signal`, and return the output, or refuse the render.
+///
+/// The second half of [`run_melange_solver_from_str`], public so a test can
+/// run a deliberately broken build of real generated code (e.g. `MAX_ITER`
+/// forced to 1) through the exact driver and refusals validate uses. Each
+/// refusal (unsolved samples, clamped input, clamped output) needs a witness
+/// that fails if it goes dead: they were once dead together.
+pub fn run_generated_solver(
+    code: &str,
+    input_signal: &[f64],
+    main_code: Option<&str>,
+) -> Result<Vec<f64>, ValidationError> {
+    use std::io::Write;
+
     // Append the driver main — caller-supplied, else stdin/stdout.
     // Diagnostics go to stderr as `DIAG:key=value` lines (same protocol as
     // the CLI's simulate driver) and are echoed below.
@@ -1059,9 +1076,9 @@ pub fn run_melange_solver_from_str(
     // spliced in with `str::replace` on an indented copy of the region-exit
     // line, which never matched (a `\` line continuation strips the next
     // line's indentation), so validate never saw these counters.
-    let unsolved_field = if generated.code.contains("diag_nr_hold_count") {
+    let unsolved_field = if code.contains("diag_nr_hold_count") {
         Some("diag_nr_hold_count")
-    } else if generated.code.contains("diag_nr_unconverged_commit_count") {
+    } else if code.contains("diag_nr_unconverged_commit_count") {
         Some("diag_nr_unconverged_commit_count")
     } else {
         None
@@ -1074,7 +1091,7 @@ pub fn run_melange_solver_from_str(
         "diag_input_nan_count",
         "diag_clamp_count",
     ] {
-        if generated.code.contains(&format!("pub {f}: ")) {
+        if code.contains(&format!("pub {f}: ")) {
             let key = f.strip_prefix("diag_").unwrap_or(f);
             extra_diag.push_str(&format!("    eprintln!(\"DIAG:{key}={{}}\", state.{f});\n"));
         }
@@ -1096,11 +1113,7 @@ pub fn run_melange_solver_from_str(
          \x20   eprintln!(\"DIAG:region_exit_count={{}}\", state.diag_region_exit_count);\n\
          {extra_diag}}}\n"
     );
-    let full_source = format!(
-        "{}\n{}",
-        generated.code,
-        main_code.unwrap_or(default_main.as_str())
-    );
+    let full_source = format!("{}\n{}", code, main_code.unwrap_or(default_main.as_str()));
 
     // Compile
     static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
