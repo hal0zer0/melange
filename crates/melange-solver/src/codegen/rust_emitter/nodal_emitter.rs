@@ -14,7 +14,7 @@ use super::helpers::{
     emit_body_effect_at_iterate, emit_glow_lit_be_hold, emit_pentode_nr_dk_stamp,
     emit_stateful_default_fields, emit_stateful_set_sample_rate_body, emit_stateful_state_fields,
     emit_stateful_state_restore, emit_stateful_update, emit_thermal_tj_advance, fmt_f64,
-    format_matrix_rows, has_latched_device, history_zero_row_ranges, oversampling_info,
+    format_matrix_rows, has_latched_device, history_zero_row_ranges, kcl_rows, oversampling_info,
     pentode_dispatch, q_dot_start, recommended_warmup_samples, section_banner,
     self_heating_device_data, stateful_device_data, warmup_estimate_capped,
 };
@@ -625,6 +625,23 @@ pub(super) fn emit_k_seed_helpers() -> String {
         .to_string()
 }
 
+/// The Rust iterator over `rows` in emitted code: `contiguous` (the site's
+/// own spelling of `0..n_nodes`) when the rows are exactly the circuit nodes,
+/// the explicit list otherwise.
+fn row_iter(rows: &[usize], contiguous: &str) -> String {
+    if rows.iter().enumerate().all(|(k, &r)| k == r) {
+        contiguous.to_string()
+    } else {
+        format!(
+            "[{}]",
+            rows.iter()
+                .map(|r| r.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
 /// The node-space KCL residual helpers (`kcl_residual`, `kcl_residual_inl`)
 /// the Newton convergence gate and the Armijo line search read: the full-LU
 /// Newton, and the sub-step ladder on both nodal routes. Emitted when M > 0.
@@ -632,23 +649,20 @@ fn emit_kcl_residual_fns(
     ir: &CircuitIR,
     setter_stamps: &std::collections::BTreeSet<(usize, usize)>,
 ) -> String {
-    let n = ir.topology.n;
-    let n_nodes = if ir.topology.n_nodes > 0 {
-        ir.topology.n_nodes
-    } else {
-        n
-    };
+    let rows = kcl_rows(ir);
     let mut code = String::new();
     // Shared node-space KCL residual helper, generic over the A matrix +
     // rhs so the trap (state.a/rhs), sub-step (a_sub/rhs_s) and BE
     // (state.a_be/rhs_be) sites share one implementation. Returns
     // (||F||_2, all-node-rows-within-tolerance) for F = A·v - rhs -
-    // N_i·i_nl(N_v·v) over node rows 0..N_NODES. The ||.||_2 drives the
+    // N_i·i_nl(N_v·v) over the KCL rows (`kcl_rows`: circuit nodes and
+    // parasitic-BJT internal nodes). The ||.||_2 drives the
     // Armijo ratio test; the bool is the always-checked convergence gate.
     code.push_str(
         "/// Node-space KCL residual for the nodal NR convergence gate and\n\
-         /// Armijo line search. `F = A·v - rhs - N_i·i_nl(N_v·v)` over node rows\n\
-         /// 0..N_NODES. Returns `(||F||_2, all_rows_within_tol, ||F||_inf)`. Generic over the\n\
+         /// Armijo line search. `F = A·v - rhs - N_i·i_nl(N_v·v)` over every KCL\n\
+         /// row (circuit nodes and parasitic-BJT internal nodes). Returns\n\
+         /// `(||F||_2, all_rows_within_tol, ||F||_inf)`. Generic over the\n\
          /// A matrix + rhs so the trap / sub-step / BE sites share one body.\n",
     );
     code.push_str("#[inline]\n");
@@ -672,10 +686,13 @@ fn emit_kcl_residual_fns(
     tail.push_str("    let mut norm_sq = 0.0f64;\n");
     tail.push_str("    let mut max_abs = 0.0f64;\n");
     tail.push_str("    let mut ok = true;\n");
-    match emit_sparse_a_residual_matvec(ir, setter_stamps, n_nodes, "    ") {
+    match emit_sparse_a_residual_matvec(ir, setter_stamps, &rows, "    ") {
         Some(sparse) => tail.push_str(&sparse),
         None => {
-            tail.push_str(&format!("    for i in 0..{n_nodes} {{\n"));
+            tail.push_str(&format!(
+                "    for i in {} {{\n",
+                row_iter(&rows, &format!("0..{}", rows.len()))
+            ));
             tail.push_str("        let mut acc = -rhs[i] - q[i];\n");
             tail.push_str("        let mut den = rhs[i].abs().max(q[i].abs());\n");
             tail.push_str("        for j in 0..N {\n");
@@ -1527,7 +1544,7 @@ pub(super) fn emit_sparse_ni_matvec_add(
 fn emit_sparse_a_residual_matvec(
     ir: &CircuitIR,
     setter_stamps: &std::collections::BTreeSet<(usize, usize)>,
-    n_nodes: usize,
+    rows: &[usize],
     indent: &str,
 ) -> Option<String> {
     use crate::lu::SPARSITY_THRESHOLD;
@@ -1539,7 +1556,7 @@ fn emit_sparse_a_residual_matvec(
         return None;
     }
     let mut code = String::new();
-    for i in 0..n_nodes {
+    for &i in rows {
         let mut cols: BTreeSet<usize> = BTreeSet::new();
         for j in 0..n {
             if a[i * n + j].abs() >= SPARSITY_THRESHOLD
@@ -7703,7 +7720,10 @@ impl RustEmitter {
                 // decides convergence. A line search may only help.
                 code.push_str("                    if !ls_ok { state.diag_ls_fail_count += 1; }\n");
                 code.push_str("                    let mut max_step = 0.0f64;\n");
-                code.push_str("                    for i in 0..N_NODES { let step = v_new_s[i] - v_sub[i]; if step.abs() > max_step { max_step = step.abs(); } }\n");
+                code.push_str(&format!(
+                    "                    for i in {} {{ let step = v_new_s[i] - v_sub[i]; if step.abs() > max_step {{ max_step = step.abs(); }} }}\n",
+                    row_iter(&kcl_rows(ir), "0..N_NODES")
+                ));
                 for si in &ir.saturating_inductors {
                     let k = si.aug_row;
                     code.push_str(&format!(

@@ -444,6 +444,22 @@ pub(super) fn history_zero_row_ranges(ir: &CircuitIR) -> Vec<(usize, usize)> {
     ranges
 }
 
+/// The rows whose equation is Kirchhoff's current law at a node: the circuit
+/// nodes `0..n_nodes`, and the parasitic-BJT internal nodes internal-node
+/// expansion appends among the augmented rows (the augmented rows that keep
+/// their history; the rest are algebraic source/constraint rows). Inductor
+/// branch rows (`n_aug..n`) are branch equations, not KCL rows. Every
+/// convergence check that reads a KCL residual or a node step covers these
+/// rows, so an expanded BJT's internal nodes, where its junction currents
+/// enter, are never left unchecked.
+pub(super) fn kcl_rows(ir: &CircuitIR) -> Vec<usize> {
+    let t = &ir.topology;
+    let n_nodes = if t.n_nodes > 0 { t.n_nodes } else { t.n };
+    let mut rows: Vec<usize> = (0..n_nodes).collect();
+    rows.extend((n_nodes..t.n_aug.min(t.n)).filter(|r| !t.history_zero_rows.contains(r)));
+    rows
+}
+
 /// Format a float with full precision for codegen constants.
 pub(super) fn fmt_f64(v: f64) -> String {
     if v.is_infinite() {

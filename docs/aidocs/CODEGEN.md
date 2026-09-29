@@ -535,6 +535,20 @@ convergence check accepts. **Mitigations** (BoyleDiodes-gated):
 - See `DEBUGGING.md` "Op-amp BoyleDiodes Failure Signatures" for the
   remaining open issue (heavy clipping → bistable Newton oscillation).
 
+### Rows the nodal convergence checks cover
+
+The KCL residual (`kcl_residual`, the full-LU Newton's and the sub-step
+ladder's acceptance gate and the Armijo line search's merit) and the ladder's
+step test run over every KCL row (`helpers::kcl_rows`): the circuit nodes
+`0..N_NODES` and the parasitic-BJT internal nodes `expand_bjt_internal_nodes`
+appends among the augmented rows (the augmented rows outside
+`history_zero_rows`). Those rows are where an expanded BJT's junction currents
+enter. The algebraic augmented rows and the inductor branch rows are not KCL
+rows. With the internal rows left out, the line search could not see their
+residual: the wurli power amp with its internal nodes expanded hit the Newton
+ceiling ~1000 times a second and sat 51 dB from its unexpanded render;
+covered, it hits it never and the two renders agree to -176 dB.
+
 ## Verification Checklist
 - [ ] INPUT_RESISTANCE matches G matrix stamping (default: 1 ohm)
 - [ ] A_NEG is alpha*C (no -G term); trapezoidal builds add `state.q_dot`
