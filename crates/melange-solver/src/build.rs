@@ -168,9 +168,43 @@ pub struct BuildOptions {
     pub output_clamp_auto: bool,
 }
 
+/// An assembled build: everything [`build`] ships but the emitted code.
+pub struct Assembled {
+    /// The codegen configuration the IR was built with.
+    pub config: CodegenConfig,
+    /// The IR, route settled.
+    pub prepared: crate::codegen::PreparedIr,
+    /// The DC operating point the build ships (`DC_OP`), solved on `mna`.
+    pub dc_op: crate::dc_op::DcOpResult,
+    pub netlist: Netlist,
+    /// The MNA the IR was built from (on the nodal route, internal nodes
+    /// expanded).
+    pub mna: MnaSystem,
+    pub kernel: DkKernel,
+    pub routing: crate::codegen::routing::RoutingDecision,
+    /// `"nodal"` or `"DK"`.
+    pub solver_label: &'static str,
+    pub solver_reason: String,
+    /// The Newton budget that ships.
+    pub max_iter: usize,
+    pub oversampling: usize,
+    pub input_node_idx: usize,
+    pub input_resistance: f64,
+    /// Where the input resistance came from.
+    pub input_resistance_source: &'static str,
+    pub output_node_indices: Vec<usize>,
+    pub forward_active: std::collections::HashSet<String>,
+    pub grid_off_pentodes: std::collections::HashMap<String, f64>,
+    pub linearize_outcome: crate::pipeline::LinearizeOutcome,
+    /// The resolved `.inject` sources, in generated-code order.
+    pub injection_specs: Vec<crate::codegen::ir::InjectionSpec>,
+}
+
 /// A finished build and what the caller reports about it.
 pub struct Built {
     pub generated: crate::codegen::GeneratedCode,
+    /// The DC operating point the generated code embeds (`DC_OP`).
+    pub dc_op: crate::dc_op::DcOpResult,
     pub netlist: Netlist,
     pub mna: MnaSystem,
     pub kernel: DkKernel,
@@ -193,13 +227,16 @@ pub struct Built {
     pub injection_specs: Vec<crate::codegen::ir::InjectionSpec>,
 }
 
-/// Build `netlist_str` as every verb ships it.
-pub fn build(
+/// Assemble `netlist_str` as every verb ships it, up to the IR: the circuit,
+/// its route and the DC operating point it ships. [`build`] emits the code;
+/// `melange dc-op` reports the operating point. `opts.output_nodes` may be
+/// empty here (no output is needed to reach the IR).
+pub fn assemble(
     netlist_str: &str,
     opts: &BuildOptions,
     out: Reporter<'_>,
     err: Reporter<'_>,
-) -> Result<Built, BuildError> {
+) -> Result<Assembled, BuildError> {
     // Each model warning once per build, however many steps resolve the model.
     let _warnings = crate::diag::BuildScope::begin();
     let sample_rate = opts.sample_rate;
@@ -256,11 +293,14 @@ pub fn build(
     // name invents a node and floats whatever it was on, and every number
     // melange prints afterwards is correct for the circuit it was handed. One
     // implementation for every verb — `crate::topology`.
-    crate::pipeline::topology_gate(
-        &netlist,
-        &crate::topology::Ports::declared(opts.input_nodes.clone(), opts.output_nodes.clone()),
-        out,
-    )?;
+    // With no output named (`melange dc-op`), the build knows only its input
+    // ports, plus any `.port` the deck declares.
+    let ports = if opts.output_nodes.is_empty() {
+        crate::topology::Ports::inputs_only(opts.input_nodes.clone()).with_deck_pins(&netlist)
+    } else {
+        crate::topology::Ports::declared(opts.input_nodes.clone(), opts.output_nodes.clone())
+    };
+    crate::pipeline::topology_gate(&netlist, &ports, out)?;
 
     report!(out, "  ✓ Parsed {} elements", netlist.elements.len());
 
@@ -872,6 +912,7 @@ pub fn build(
     // output node, the built-in 5 Hz DC blocker is redundant (double-filtering
     // and adds 200ms settle time). Suggest --no-dc-block.
     let dc_block_auto_skip = !no_dc_block
+        && !output_node_names.is_empty()
         && output_node_names
             .iter()
             .all(|name| has_output_coupling_cap(&netlist, name));
@@ -945,7 +986,7 @@ pub fn build(
         ..CodegenConfig::default()
     };
 
-    let generator = CodeGenerator::new(config);
+    let generator = CodeGenerator::new(config.clone());
     if solver_override == "dk" {
         if let Some(blocker) = forced_dk_hard_blocker(&routing) {
             bail!(
@@ -979,14 +1020,20 @@ pub fn build(
     // audio-level transients. Previously this blanket-undid all FA for nodal,
     // but that forces M=16 for ladder filters where all BJTs are clearly FA.
 
-    let generated = if use_nodal_codegen {
+    // The IR, and with it the route: the DK IR refuses a self-starting
+    // oscillator, which then builds on nodal. The operating point the build
+    // ships is solved once, here, on the MNA its route generates from, and
+    // handed to the IR.
+    let (prepared, dc_op) = if use_nodal_codegen {
         report!(out, "  Using nodal solver codegen");
-        // Expand MNA with internal nodes for parasitic BJTs, gated on K
-        // conditioning — shared with simulate/analyze/validate.
-        crate::pipeline::expand_internal_nodes_if_conditioned(&mut mna, &netlist, &kernel, out);
-        generator
-            .generate_nodal(&mna, &netlist)
-            .with_context(|| "Nodal code generation failed")?
+        prepare_nodal_route(
+            &generator,
+            &mut mna,
+            &netlist,
+            &kernel,
+            opamp_rail_mode,
+            out,
+        )?
     } else {
         // DK path: do NOT expand internal nodes. The DK kernel is ill-conditioned
         // with high-conductance parasitic nodes. Instead, bjt_with_parasitics()
@@ -994,26 +1041,37 @@ pub fn build(
         if has_inductors_compile {
             report!(out, "  Using DK codegen with augmented MNA for inductors");
         }
-        match generator.generate_with_dc_op(&kernel, &mna, &netlist, dc_preflight) {
+        // The preflight solved this MNA's operating point (a circuit without
+        // devices had no preflight).
+        let dc_op = match dc_preflight {
+            Some(dc) => dc,
+            None => crate::codegen::ir::solve_dc_op(&mna, &netlist, opamp_rail_mode)
+                .with_context(|| "Code generation failed")?,
+        };
+        match generator.prepare_dk(&kernel, &mna, &netlist, Some(dc_op.clone())) {
             Err(crate::codegen::CodegenError::SelfStartingOscillator(why))
                 if solver_override != "dk" =>
             {
                 report!(out, "  Using nodal solver codegen: {why}");
-                crate::pipeline::expand_internal_nodes_if_conditioned(
-                    &mut mna, &netlist, &kernel, out,
-                );
                 solver_label = "nodal";
                 solver_reason = format!("self-starting oscillator: {why}");
-                generator
-                    .generate_nodal(&mna, &netlist)
-                    .with_context(|| "Nodal code generation failed")?
+                prepare_nodal_route(
+                    &generator,
+                    &mut mna,
+                    &netlist,
+                    &kernel,
+                    opamp_rail_mode,
+                    out,
+                )?
             }
-            other => other.with_context(|| "Code generation failed")?,
+            other => (other.with_context(|| "Code generation failed")?, dc_op),
         }
     };
 
-    Ok(Built {
-        generated,
+    Ok(Assembled {
+        config,
+        prepared,
+        dc_op,
         netlist,
         mna,
         kernel,
@@ -1030,6 +1088,66 @@ pub fn build(
         grid_off_pentodes,
         linearize_outcome,
         injection_specs,
+    })
+}
+
+/// The nodal route's tail: expand the parasitic-BJT internal nodes (gated on
+/// the kernel's conditioning), solve the operating point the build ships on
+/// the result, and build the nodal IR from it.
+fn prepare_nodal_route(
+    generator: &CodeGenerator,
+    mna: &mut MnaSystem,
+    netlist: &Netlist,
+    kernel: &DkKernel,
+    opamp_rail_mode: crate::codegen::OpampRailMode,
+    out: Reporter<'_>,
+) -> Result<(crate::codegen::PreparedIr, crate::dc_op::DcOpResult), BuildError> {
+    crate::pipeline::expand_internal_nodes_if_conditioned(mna, netlist, kernel, out);
+    let dc_op = crate::codegen::ir::solve_dc_op(mna, netlist, opamp_rail_mode)
+        .with_context(|| "Nodal code generation failed")?;
+    let prepared = generator
+        .prepare_nodal(mna, netlist, Some(dc_op.clone()))
+        .with_context(|| "Nodal code generation failed")?;
+    Ok((prepared, dc_op))
+}
+
+/// Build `netlist_str` as every verb ships it: [`assemble`], then emit.
+pub fn build(
+    netlist_str: &str,
+    opts: &BuildOptions,
+    out: Reporter<'_>,
+    err: Reporter<'_>,
+) -> Result<Built, BuildError> {
+    // Each model warning once per build, emission included.
+    let _warnings = crate::diag::BuildScope::begin();
+    let a = assemble(netlist_str, opts, out, err)?;
+    let context = if a.solver_label == "nodal" {
+        "Nodal code generation failed"
+    } else {
+        "Code generation failed"
+    };
+    let generated = CodeGenerator::new(a.config)
+        .emit(&a.prepared)
+        .with_context(|| context)?;
+    Ok(Built {
+        generated,
+        dc_op: a.dc_op,
+        netlist: a.netlist,
+        mna: a.mna,
+        kernel: a.kernel,
+        routing: a.routing,
+        solver_label: a.solver_label,
+        solver_reason: a.solver_reason,
+        max_iter: a.max_iter,
+        oversampling: a.oversampling,
+        input_node_idx: a.input_node_idx,
+        input_resistance: a.input_resistance,
+        input_resistance_source: a.input_resistance_source,
+        output_node_indices: a.output_node_indices,
+        forward_active: a.forward_active,
+        grid_off_pentodes: a.grid_off_pentodes,
+        linearize_outcome: a.linearize_outcome,
+        injection_specs: a.injection_specs,
     })
 }
 

@@ -790,6 +790,15 @@ pub struct GeneratedCode {
     pub meta: CodegenMeta,
 }
 
+/// A circuit's IR, ready for [`CodeGenerator::emit`].
+#[derive(Debug, Clone)]
+pub struct PreparedIr {
+    /// The IR.
+    pub ir: CircuitIR,
+    /// Whether parasitic caps were auto-inserted before the IR was built.
+    pub parasitic_caps_inserted: bool,
+}
+
 /// Metadata about decisions made during code generation.
 ///
 /// Every field here is actually populated by the codegen pipeline (the CLI
@@ -958,11 +967,8 @@ impl CodeGenerator {
         self.generate_with_dc_op(kernel, mna, netlist, None)
     }
 
-    /// Generate Rust solver code with a pre-computed DC operating point.
-    ///
-    /// When `dc_op` is provided, it is used instead of running the internal DC OP solver.
-    /// This is useful when the MNA has been expanded (e.g., with internal nodes for
-    /// parasitic BJTs) after the DC OP was computed on the original system.
+    /// Generate Rust solver code with a pre-computed DC operating point
+    /// ([`Self::prepare_dk`], then [`Self::emit`]).
     pub fn generate_with_dc_op(
         &self,
         kernel: &DkKernel,
@@ -970,8 +976,23 @@ impl CodeGenerator {
         netlist: &Netlist,
         dc_op: Option<crate::dc_op::DcOpResult>,
     ) -> Result<GeneratedCode, CodegenError> {
-        // Every check `generate` promises runs here, so the entry the build
-        // takes (with its DC-OP preflight) validates exactly as `generate` does.
+        let prepared = self.prepare_dk(kernel, mna, netlist, dc_op)?;
+        self.emit(&prepared)
+    }
+
+    /// The DK IR of a circuit, every check but the output ports' (those are
+    /// [`Self::emit`]'s): the IR fixes the route (a self-starting oscillator is
+    /// refused here) and carries the operating point the build ships.
+    ///
+    /// `dc_op` is the DC operating point of `mna` (see
+    /// [`ir::solve_dc_op`]); `None` solves it.
+    pub fn prepare_dk(
+        &self,
+        kernel: &DkKernel,
+        mna: &MnaSystem,
+        netlist: &Netlist,
+        dc_op: Option<crate::dc_op::DcOpResult>,
+    ) -> Result<PreparedIr, CodegenError> {
         // Behavioral B-sources route to the nodal path (see `routing.rs`); they
         // are not supported on this DK entry. `generate_nodal` is where the
         // node-space stamping lives.
@@ -1020,28 +1041,6 @@ impl CodeGenerator {
                     in_node, kernel.n_nodes
                 )));
             }
-        }
-        if self.config.output_nodes.is_empty() {
-            return Err(CodegenError::InvalidConfig(
-                "output_nodes must not be empty".to_string(),
-            ));
-        }
-        for (i, &node) in self.config.output_nodes.iter().enumerate() {
-            // Validate against n_nodes (original circuit nodes), not n_aug
-            let n_nodes = kernel.n_nodes;
-            if node >= n_nodes {
-                return Err(CodegenError::InvalidConfig(format!(
-                    "output_nodes[{}] = {} >= n_nodes={} (original circuit node count)",
-                    i, node, n_nodes
-                )));
-            }
-        }
-        if self.config.output_scales.len() != self.config.output_nodes.len() {
-            return Err(CodegenError::InvalidConfig(format!(
-                "output_scales length ({}) must match output_nodes length ({})",
-                self.config.output_scales.len(),
-                self.config.output_nodes.len()
-            )));
         }
 
         // BoyleDiodes mode auto-inserts catch diodes into the netlist, which
@@ -1095,7 +1094,38 @@ impl CodeGenerator {
             maybe_insert_parasitic_caps(mna, &mut patched_mna, "Codegen");
 
         let ir = CircuitIR::from_kernel_with_dc_op(kernel, mna, netlist, &self.config, dc_op)?;
-        let emitted: EmitOutput = select_emitter()?.emit(&ir)?;
+        Ok(PreparedIr {
+            ir,
+            parasitic_caps_inserted,
+        })
+    }
+
+    /// Emit the code of a prepared IR, after checking its output ports.
+    pub fn emit(&self, prepared: &PreparedIr) -> Result<GeneratedCode, CodegenError> {
+        let ir = &prepared.ir;
+        if self.config.output_nodes.is_empty() {
+            return Err(CodegenError::InvalidConfig(
+                "output_nodes must not be empty".to_string(),
+            ));
+        }
+        // Validate against n_nodes (original circuit nodes), not the augmented
+        // dimension.
+        for (i, &node) in self.config.output_nodes.iter().enumerate() {
+            if node >= ir.topology.n_nodes {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "output_nodes[{}] = {} >= n_nodes={} (original circuit node count)",
+                    i, node, ir.topology.n_nodes
+                )));
+            }
+        }
+        if self.config.output_scales.len() != self.config.output_nodes.len() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "output_scales length ({}) must match output_nodes length ({})",
+                self.config.output_scales.len(),
+                self.config.output_nodes.len()
+            )));
+        }
+        let emitted: EmitOutput = select_emitter()?.emit(ir)?;
         let nodal_sub_path = emitted.nodal_sub_path;
         let nodal_full_lu_trigger = emitted.nodal_full_lu_trigger;
         let code = emitted.primary().to_string();
@@ -1105,8 +1135,8 @@ impl CodeGenerator {
             n: ir.topology.n,
             m: ir.topology.m,
             meta: build_codegen_meta(
-                &ir,
-                parasitic_caps_inserted,
+                ir,
+                prepared.parasitic_caps_inserted,
                 nodal_sub_path,
                 nodal_full_lu_trigger,
             ),
@@ -1127,6 +1157,19 @@ impl CodeGenerator {
         mna: &MnaSystem,
         netlist: &Netlist,
     ) -> Result<GeneratedCode, CodegenError> {
+        let prepared = self.prepare_nodal(mna, netlist, None)?;
+        self.emit(&prepared)
+    }
+
+    /// The nodal IR of a circuit, every check but the output ports' (see
+    /// [`Self::prepare_dk`]); `dc_op` is the DC operating point of `mna`,
+    /// `None` solves it.
+    pub fn prepare_nodal(
+        &self,
+        mna: &MnaSystem,
+        netlist: &Netlist,
+        dc_op: Option<crate::dc_op::DcOpResult>,
+    ) -> Result<PreparedIr, CodegenError> {
         // Validate config (same checks as generate, but against MNA dimensions)
         self.config.validate()?;
         match self.config.oversampling_factor {
@@ -1144,26 +1187,6 @@ impl CodeGenerator {
                     in_node, mna.n
                 )));
             }
-        }
-        if self.config.output_nodes.is_empty() {
-            return Err(CodegenError::InvalidConfig(
-                "output_nodes must not be empty".to_string(),
-            ));
-        }
-        for (i, &node) in self.config.output_nodes.iter().enumerate() {
-            if node >= mna.n {
-                return Err(CodegenError::InvalidConfig(format!(
-                    "output_nodes[{}] = {} >= n_nodes={}",
-                    i, node, mna.n
-                )));
-            }
-        }
-        if self.config.output_scales.len() != self.config.output_nodes.len() {
-            return Err(CodegenError::InvalidConfig(format!(
-                "output_scales length ({}) must match output_nodes length ({})",
-                self.config.output_scales.len(),
-                self.config.output_nodes.len()
-            )));
         }
 
         // Behavioral B-sources: the nodal node-space stamping is being brought
@@ -1276,22 +1299,10 @@ impl CodeGenerator {
         let (mna, parasitic_caps_inserted) =
             maybe_insert_parasitic_caps(mna, &mut patched_mna, "Codegen nodal");
 
-        let ir = CircuitIR::from_mna(mna, netlist, &self.config)?;
-        let emitted: EmitOutput = select_emitter()?.emit(&ir)?;
-        let nodal_sub_path = emitted.nodal_sub_path;
-        let nodal_full_lu_trigger = emitted.nodal_full_lu_trigger;
-        let code = emitted.primary().to_string();
-
-        Ok(GeneratedCode {
-            code,
-            n: ir.topology.n,
-            m: ir.topology.m,
-            meta: build_codegen_meta(
-                &ir,
-                parasitic_caps_inserted,
-                nodal_sub_path,
-                nodal_full_lu_trigger,
-            ),
+        let ir = CircuitIR::from_mna_with_dc_op(mna, netlist, &self.config, dc_op)?;
+        Ok(PreparedIr {
+            ir,
+            parasitic_caps_inserted,
         })
     }
 }
