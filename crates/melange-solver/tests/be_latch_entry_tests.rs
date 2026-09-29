@@ -7,21 +7,24 @@
 //! ratio <= -exp(-alpha): an alternating mode that outlives the estimator's
 //! own window and dominates the output.
 //!
-//! The positive witness is a stiff node (1 kOhm into 10 pF, tau = 10 ns):
-//! trapezoidal integration is A-stable but not L-stable, so after a program
-//! stop the node rings at z = -0.998 per sample at 48 kHz. The negative
-//! witnesses: the in-repo saturating transformer with an open secondary, whose
-//! ring after a stop was the whole-system trapezoidal form's z = -1 memory on
-//! the algebraic rows and is gone under the charge form, and a corpus
-//! mastering deck the previous detector latched on a 2-sample impulse tail
-//! (its minimum ratio over a 60 s hostile program is -0.32 against a -0.99
-//! threshold; it lives outside this repository).
+//! The positive witness is a stiff node (1 kOhm into 1 pF, tau = 1 ns):
+//! trapezoidal integration is A-stable but not L-stable, so the node rings at
+//! z = -0.99981 per sample at 48 kHz. Its input residue is -74 dB relative to
+//! the passband, below the compile-time ring predicate's -60 dB, so the build
+//! stays trapezoidal (at 10 pF it is -54 dB and the build is promoted to BE);
+//! after a program stop that ring is all the output has left, and the latch
+//! must take it. The negative witnesses: the in-repo saturating transformer
+//! with a loaded secondary, and a corpus mastering deck the previous detector
+//! latched on a 2-sample impulse tail (its minimum ratio over a 60 s hostile
+//! program is -0.32 against a -0.99 threshold; it lives outside this
+//! repository).
 
 mod support;
 
-const SAT_CORE_OPEN: &str = include_str!("../../../tools/golden-harness/decks/sat-core-open.cir");
+const SAT_CORE_LOADED: &str =
+    include_str!("../../../tools/golden-harness/decks/sat-core-loaded.cir");
 
-const STIFF: &str = "stiff node witness\nR_s in out 1k\nC_p out 0 10p\nD_1 out 0 DX\n\
+const STIFF: &str = "stiff node witness\nR_s in out 1k\nC_p out 0 1p\nD_1 out 0 DX\n\
 D_2 0 out DX\nR_l out 0 100k\n.model DX D(IS=2.52n N=1.752)\n";
 
 /// Play 1 s of 220 Hz + 1760 Hz at `amp`, stop, and return the sample (after
@@ -77,14 +80,15 @@ fn the_latch_engages_on_a_stiff_trapezoidal_ring() {
     assert!(at < 4800, "engaged {at} samples after the stop (> 100 ms)");
 }
 
-/// Under the whole-system trapezoidal form this deck's leakage mode rang for
-/// seconds after a stop and engaged the latch (it was the witness here). That
-/// ring was the accepted-residual walk on the algebraic rows, not a physical
-/// or integrator mode, and the charge form removes it.
+/// The loaded secondary has no lasting Nyquist-side mode; nothing rings after
+/// a stop. (The open-secondary deck, whose ring after a stop was the
+/// whole-system trapezoidal form's z = -1 memory on the algebraic rows, now
+/// has an input-driven leakage ring at -48 dB and is promoted to backward
+/// Euler at compile time.)
 #[test]
-fn the_open_secondary_no_longer_rings_after_a_stop() {
+fn the_loaded_secondary_does_not_ring_after_a_stop() {
     for os in [1, 4] {
-        let at = latch_after_stop(SAT_CORE_OPEN, 5.0, os, "latch_sat_core_open");
+        let at = latch_after_stop(SAT_CORE_LOADED, 5.0, os, "latch_sat_core_loaded");
         assert_eq!(
             at, None,
             "{os}x: latch engaged {at:?} samples after the stop"

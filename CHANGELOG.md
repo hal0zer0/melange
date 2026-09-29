@@ -256,6 +256,26 @@ generated state is smaller.
 
 ### Changed
 
+- **Which circuits are switched to backward Euler is decided by a new rule,
+  and 15 corpus circuits return to the trapezoidal integrator.** A build is
+  promoted when the trapezoidal rule would make it ring at half the sample
+  rate audibly: a stiff mode that is still above −60 dB after 10 ms and that
+  the input excites at −60 dB or more of the 1 kHz passband. Growth that
+  backward Euler removes also promotes. The rule works on the exact
+  eigenvalues and modal residues of the integrator the build ships, taken at
+  the circuit's DC operating point (`docs/aidocs/RING_PREDICATE.md`). The old
+  test read a spectral radius off an operator that put every capacitor-less
+  node at the Nyquist rate, and gated on the largest entry of `S`. Most of
+  the promotions it made were for that artefact, and each cost first-order
+  accuracy for nothing: against an 8× render, the sine error of the circuits
+  that return to trapezoidal falls to 0.017–0.13 of what it was on 10 of 15.
+  One corpus circuit is newly promoted (a saturating transformer with an open
+  secondary, whose leakage mode rings from the input at −48 dB). Linear
+  circuits are now judged too. The build log, `CodegenMeta` and the
+  provenance JSON (`"integration_reason"`) state the verdict.
+  `CodegenConfig::router_dk_unstable`/`router_dk_spectral_radius` are
+  removed; `max_iterations_be_promoted` is new (the Newton budget of a
+  promoted build).
 - **An op-amp rail pin or release no longer forces a backward-Euler sample.**
   With the charge form the pinned solve already keeps capacitor currents
   consistent. The extra sample re-seeded them with a first-order difference

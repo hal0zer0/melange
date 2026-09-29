@@ -9483,22 +9483,19 @@ VCC vcc 0 250
 }
 
 #[test]
-fn test_cap_coupled_triode_cascade_auto_promotes_to_be() {
-    // Regression guard for the noyce-cascaded-triodes Nyquist limit cycle.
+fn test_cap_coupled_triode_cascade_stays_trapezoidal() {
+    // The noyce-cascaded-triodes Nyquist limit cycle, and why it is gone.
     //
     // Three 12AX7 stages cap-coupled with 100n / 1Meg (~10 Hz HPF per
-    // stage). Cascade gain ~3800×. Under trap rule the propagation
-    // operator S·A_neg has its dominant eigenvalue at z ≈ -0.9999
-    // (Nyquist-marginal). Trap has gain magnitude 1 at fs/2, so any
-    // f64-round-off seed in the per-sample matrix-vector multiplications
-    // persists indefinitely, amplified through the cascade gain to a
-    // 28 mV fs/2 limit cycle at the output.
-    //
-    // The Nyquist-eigenvalue discriminator (added 2026-05-15) catches
-    // this and auto-promotes to backward Euler. Without the
-    // discriminator, the historical 1.002 threshold lets the cascade
-    // ship with the limit cycle, masked at calibrated noise levels but
-    // visible at low noise gain.
+    // stage), cascade gain ~3800x. Under the whole-system trapezoidal form
+    // the operator S·A_neg had its dominant eigenvalue at z ≈ -0.9999, and
+    // the accepted Newton residual on the algebraic rows walked there with
+    // no damping: a 28 mV fs/2 limit cycle at the output, which auto-BE
+    // promotion used to suppress. That mode was the algebraic z = -1 family,
+    // not a circuit mode; the charge form removes it, and the charge
+    // propagator linearised at the DC operating point has no lasting
+    // Nyquist-side pole at all. The build stays trapezoidal. The render at
+    // rest is pinned in `ring_promotion_tests.rs`.
     const CASCADE: &str = "\
 Cap-coupled triode cascade
 R_iso in   g1   1Meg
@@ -9529,7 +9526,7 @@ VCC vcc 0 250
     let in_idx = mna.node_map["in"] - 1;
     let out_idx = mna.node_map["out"] - 1;
 
-    // Default config: discriminator should fire and promote to BE.
+    // Default config: the ring predicate keeps trapezoidal.
     let auto_config = CodegenConfig {
         circuit_name: "cascade_auto".to_string(),
         sample_rate: 48000.0,
@@ -9541,18 +9538,22 @@ VCC vcc 0 250
     let auto_result = CodeGenerator::new(auto_config)
         .generate(&kernel, &mna, &netlist)
         .expect("auto-config generate");
-    assert!(
-        auto_result.meta.backward_euler_auto,
-        "cap-coupled 3× 12AX7 cascade must auto-promote to BE \
-         (dominant eigenvalue near z=-1, Nyquist-marginal trap mode)"
-    );
     assert_eq!(
         auto_result.meta.integrator_selection,
-        melange_solver::codegen::ir::IntegratorSelection::BeAuto,
-        "auto-promotion must be recorded as BeAuto in the selection record"
+        melange_solver::codegen::ir::IntegratorSelection::TrapDefault,
+        "cap-coupled 3x 12AX7 cascade: {}",
+        auto_result.meta.integration_reason
+    );
+    assert!(
+        auto_result
+            .meta
+            .integration_reason
+            .contains("no lasting Nyquist-side pole"),
+        "the verdict is recorded: {}",
+        auto_result.meta.integration_reason
     );
 
-    // Force trap: meta.backward_euler_auto must stay false (escape hatch).
+    // Force trap: a CLI pin, recorded as such, and nothing is decided.
     let force_trap_config = CodegenConfig {
         circuit_name: "cascade_force_trap".to_string(),
         sample_rate: 48000.0,
@@ -9565,33 +9566,21 @@ VCC vcc 0 250
     let trap_result = CodeGenerator::new(force_trap_config)
         .generate(&kernel, &mna, &netlist)
         .expect("force-trap generate");
-    assert!(
-        !trap_result.meta.backward_euler_auto,
-        "force_trap must override auto-BE (escape hatch for bisecting regressions)"
-    );
     assert_eq!(
         trap_result.meta.integrator_selection,
         melange_solver::codegen::ir::IntegratorSelection::TrapCliFlag,
         "force_trap must be recorded as a CLI pin in the selection record"
     );
+    assert!(trap_result.meta.integration_reason.is_empty());
 }
 
 #[test]
 fn test_passive_rc_lowpass_does_not_auto_promote() {
-    // The Nyquist-eigenvalue discriminator must not false-fire on
-    // passive linear circuits. The Thevenin input stamping creates a
-    // "fake" eigenvalue near z=-1 in S·A_neg (S[in,in]·A_neg[in,in] ≈
-    // 1/G_in · -G_in = -1) that would trip a naïve discriminator.
-    //
-    // Two layers of defense:
-    // - The DK auto-BE gate checks `m > 0` (passive circuits have m=0
-    //   so the gate doesn't fire at all).
-    // - The Nyquist analyzer uses the deflated variant which projects
-    //   out the input-node component (so even nonlinear circuits with
-    //   only the input-Thevenin fake eigenvalue won't false-fire).
-    //
-    // Regression: noyce-cascaded-triodes auto-BE addition must not
-    // promote a simple RC lowpass.
+    // The ring predicate runs on linear (M = 0) circuits too. A plain RC
+    // lowpass has one pole on the positive side and nothing to promote. (The
+    // whole-system operator put the Thevenin input row at z ≈ -1, which
+    // needed an `m > 0` gate and input-node deflation; in the charge
+    // propagator an algebraic row goes to z = 0.)
     const RC: &str = "\
 RC Lowpass
 R1 in out 1k
@@ -9616,8 +9605,8 @@ C1 out 0 100n
         .expect("generate");
     assert!(
         !result.meta.backward_euler_auto,
-        "passive RC lowpass must not auto-promote to BE \
-         (no nonlinear stages, no real Nyquist seeding mechanism)"
+        "passive RC lowpass must not auto-promote to BE: {}",
+        result.meta.integration_reason
     );
 }
 

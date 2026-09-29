@@ -1,44 +1,23 @@
-//! Trap-rule stability analysis on the propagation operator `S · A_neg`.
+//! Power-iteration spectral radius of the whole-system operator `S · A_neg`.
 //!
-//! Used by the DK and nodal auto-BE gates to decide whether the trap rule
-//! will produce a usable result for a given circuit.
-//!
-//! Power iteration on `S · A_neg` returns `max|eigenvalue|` (the spectral
-//! radius). For trap stability, ρ > 1 → unstable (mode grows). But ρ
-//! exactly at 1 also matters: trap has gain magnitude 1 at z = -1
-//! (Nyquist), so any eigenvalue near -1 is a marginal mode that the trap
-//! rule cannot damp. On high-gain cap-coupled cascades, sub-µV f64
-//! round-off in the per-sample matrix-vector multiplications seeds
-//! Nyquist content that is amplified by the cascade gain into mV-level
-//! limit cycles at the output.
-//!
-//! We discriminate "ρ near 1, eigenvalue near +1" (slow LF mode, trap
-//! handles fine — bilinear preserves these poles exactly) from "ρ near 1,
-//! eigenvalue near -1" (Nyquist-marginal trap mode, requires BE).
+//! The nodal emitter's Schur-versus-full-LU gate (`spectral_radius_s_aneg`)
+//! and the post-promotion sanity check on backward-Euler matrices
+//! ([`log_be_post_promotion_check`]) read this. Whether a circuit is
+//! promoted to backward Euler is NOT decided here: that is the ring
+//! predicate (`codegen::ring`), on the charge-form propagator linearised at
+//! the DC operating point. The whole-system operator puts every algebraic
+//! direction at `z = −1`, which made it the wrong operator to judge ringing
+//! on (`COMPANION_MODELS.md`).
 //!
 //! After power iteration converges to the dominant eigenvector x, one
 //! more application of S·A_neg gives y ≈ λ·x. The sign of `<x, y>`
-//! recovers sign(λ) when λ is real. Complex conjugate pairs near the
-//! unit circle are rare in audio circuits and not the common failure
-//! mode this gate is designed to catch.
+//! recovers sign(λ) when λ is real.
 
-/// Trap-rule promotes to backward Euler above this spectral radius.
-/// Strict `> 1.0` false-fires on trivial passive networks where power
-/// iteration converges to ≈ 1.0 plus float noise (2026-04-22 passive-LC fix).
+/// Growth threshold on a spectral radius: above it, a trapezoidal mode grows.
+/// Strict `> 1.0` false-fires on trivial passive networks where the estimate
+/// lands at ≈ 1.0 plus float noise (2026-04-22 passive-LC fix). The ring
+/// predicate uses the same margin on its exact eigenvalues.
 pub const TRAP_BE_PROMOTION_RHO: f64 = 1.002;
-
-/// Lower-bound threshold for the sign-aware Nyquist-marginal gate.
-/// Activates when ρ between this and `TRAP_BE_PROMOTION_RHO` AND the
-/// dominant eigenvalue is real-negative AND the gain proxy `max|S|`
-/// exceeds [`NYQUIST_GATE_MAX_ABS_S`]. Excludes positive-eigenvalue
-/// modes (slow LF resonance — bilinear preserves those exactly).
-pub const TRAP_BE_SIGN_FLIP_RHO: f64 = 0.999;
-
-/// Gain proxy (resolvent magnitude) above which the Nyquist-marginal gate
-/// fires. Keeps low-gain marginal circuits on trap (a 2-stage BJT preamp
-/// at `max|S| ~ 3e4` stays at µV limit cycle; a 3× triode cascade at
-/// `max|S| ~ 5e5` produces an audible mV limit cycle without BE).
-pub const NYQUIST_GATE_MAX_ABS_S: f64 = 1.0e5;
 
 /// Post-promotion sanity check on backward-Euler matrices. BE is L-stable
 /// by construction, so `ρ` on the BE matrices must be ≤ 1. A violation
@@ -55,20 +34,11 @@ pub struct TrapStability {
     /// eigenvector. Approximately `sign(λ_dom)` when the dominant
     /// eigenvalue is real:
     /// - `> 0` → eigenvalue near `+1` (slow LF mode, trap is fine)
-    /// - `< 0` → eigenvalue near `-1` (Nyquist-marginal trap mode that
-    ///   trap cannot damp; auto-promote to BE on high-gain cap-coupled
-    ///   cascades to avoid mV-level fs/2 limit cycles at the output)
+    /// - `< 0` → eigenvalue near `-1`
     /// - `0`  → dominant magnitude is too small to classify (degenerate
     ///   or null case)
     pub dominant_sign: f64,
-    /// `max |S[i][j]|` — magnitude of the largest resolvent entry. Used as a
-    /// gain proxy for the Nyquist-marginal auto-BE gate: a marginal `z ≈ -1`
-    /// mode only sustains an *audible* fs/2 limit cycle on high-gain
-    /// topologies (large resolvent → high-impedance cap-coupled cascades like
-    /// 3× triode stages, `max|S| ~ 5e5`). Low-gain marginal circuits
-    /// (e.g. a 2-stage BJT preamp, `max|S| ~ 3e4`) keep their µV limit cycle
-    /// sub-audible under trap, so they must NOT be promoted to BE. See
-    /// [`trap_needs_be`].
+    /// `max |S[i][j]|` — magnitude of the largest resolvent entry (logged).
     pub max_abs_s: f64,
 }
 
@@ -272,40 +242,6 @@ fn apply_s_a_neg(s: &[f64], a_neg: &[f64], n: usize, x: &[f64]) -> Vec<f64> {
     y
 }
 
-/// Decide whether the trap rule's spectral profile requires backward
-/// Euler promotion.
-///
-/// Two regimes:
-/// - `ρ > 1.002`: classic trap instability (mode grows unboundedly).
-///   Always promote. Threshold matches the historical value chosen by
-///   the 2026-04-22 passive-LC fix: strict `> 1.0` false-fires on
-///   trivial passive networks where power iteration converges to ≈ 1.0
-///   plus float noise.
-/// - `ρ > 0.999` AND `dominant_sign < 0` AND `max|S| > 1e5`:
-///   Nyquist-marginal trap mode on a *high-gain* topology. The dominant
-///   eigenvalue is real-negative near `-1`; trap has gain magnitude
-///   exactly 1 at `z = -1`, so any seed from f64 round-off in the
-///   per-sample matrix-vector multiplications persists indefinitely.
-///   This is only *audible* when the circuit's gain amplifies that seed
-///   to a meaningful output level — catastrophic on high-gain cap-coupled
-///   cascades (noyce-cascaded-triodes: 3× 12AX7, ρ = 0.9999,
-///   `max|S| ≈ 5e5`, fs/2 limit cycle of 28 mV). The `max|S| > 1e5` gate
-///   (resolvent magnitude as a gain proxy) keeps *low-gain* marginal
-///   circuits on trap: a 2-stage BJT preamp (wurli-preamp, ρ ≈ 1.0000,
-///   `max|S| ≈ 3e4`) has the same z ≈ -1 mode but its limit cycle stays
-///   at the µV (sub-audible) level, and promoting it to BE would instead
-///   introduce an audible low-frequency pump under per-sample `.runtime R`
-///   modulation. The 0.999 threshold excludes positive-eigenvalue modes
-///   (slow LF resonance — bilinear preserves those exactly). Genuinely
-///   unstable circuits (`ρ > 1.002`) are caught by the first clause
-///   regardless of gain.
-pub fn trap_needs_be(stability: TrapStability) -> bool {
-    stability.rho > TRAP_BE_PROMOTION_RHO
-        || (stability.rho > TRAP_BE_SIGN_FLIP_RHO
-            && stability.dominant_sign < 0.0
-            && stability.max_abs_s > NYQUIST_GATE_MAX_ABS_S)
-}
-
 /// Post-promotion sanity check on newly-built backward-Euler matrices,
 /// shared by the DK and nodal BE builders.
 ///
@@ -377,38 +313,6 @@ pub fn log_be_post_promotion_check(
     }
 }
 
-/// Whether an independent, less-precise "trap unstable" finding (e.g. the
-/// DK-vs-nodal router's fixed-iteration-count, non-deflected spectral-radius
-/// estimate — `routing::RoutingDecision::dk_unstable`) should be allowed to
-/// lift the gain-gate exclusion in [`trap_needs_be`]'s Nyquist-marginal
-/// clause for the nodal auto-BE promotion.
-///
-/// The router's own estimator is measurably less accurate than the shared,
-/// converged, input-deflated analyzer used here (verified 2026-07-25: on the
-/// same DK-kernel matrices, the router's raw fixed-20-iteration number can
-/// disagree with the converged+deflated value by several tens of percent —
-/// e.g. tungsten-thunder-horse measures 1.1163 raw vs 0.8157
-/// converged+deflated, comfortably trap-stable). Trusting the router's flag
-/// unconditionally reproduces the wurli-power-amp fix but also force-promotes
-/// circuits the accurate local analysis reports as nowhere near marginal,
-/// which showed up as a severe (non-benign, near-zero-correlation)
-/// golden-audio regression on tungsten-thunder-horse.
-///
-/// So the router's finding is only trusted as a tie-breaker: it may lift the
-/// `max_abs_s` gain-gate requirement, but only when the LOCAL, accurate
-/// estimate independently corroborates that this circuit is at least in the
-/// marginal Nyquist zone (`rho > TRAP_BE_SIGN_FLIP_RHO` with a negative
-/// dominant eigenvalue). A circuit the local analysis reports as comfortably
-/// stable is never promoted no matter what the router claims.
-pub fn router_corroborates_marginal_instability(
-    router_flagged_unstable: bool,
-    stability: TrapStability,
-) -> bool {
-    router_flagged_unstable
-        && stability.rho > TRAP_BE_SIGN_FLIP_RHO
-        && stability.dominant_sign < 0.0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,58 +357,11 @@ mod tests {
             "expected negative sign, got {}",
             r.dominant_sign
         );
-        // max|S| = 1 (low gain) → marginal Nyquist mode is sub-audible → must
-        // NOT trip the gain-gated auto-BE clause.
-        assert!(
-            !trap_needs_be(r),
-            "low-gain (max|S|=1) Nyquist mode must NOT trip auto-BE"
-        );
     }
 
     #[test]
-    fn nyquist_marginal_high_gain_trips_be() {
-        // ρ ≈ 1, dominant eigenvalue near -1, AND a large resolvent entry
-        // (max|S| = 3e5 > 1e5). Models noyce-cascaded-triodes: marginal
-        // Nyquist mode on a high-gain cascade → audible fs/2 limit cycle →
-        // must promote to BE. Upper-triangular so eigenvalues are -1, -0.5.
-        let (s, n) = flat(&[&[-1.0, 3.0e5], &[0.0, -0.5]]);
-        let id = vec![1.0, 0.0, 0.0, 1.0];
-        let r = analyze_trap_stability(&s, &id, n);
-        assert!(
-            r.dominant_sign < 0.0,
-            "expected negative sign, got {}",
-            r.dominant_sign
-        );
-        assert!(r.max_abs_s > 1.0e5, "max_abs_s={}", r.max_abs_s);
-        assert!(
-            trap_needs_be(r),
-            "high-gain (max|S|=3e5) Nyquist-marginal mode must trip auto-BE"
-        );
-    }
-
-    #[test]
-    fn nyquist_marginal_low_gain_stays_trap() {
-        // Same marginal Nyquist mode but low resolvent (max|S| = 1e3 < 1e5).
-        // Models wurli-preamp: µV-level limit cycle, sub-audible → keep trap
-        // (promoting to BE would add an audible .runtime-R pump).
-        let (s, n) = flat(&[&[-1.0, 1.0e3], &[0.0, -0.5]]);
-        let id = vec![1.0, 0.0, 0.0, 1.0];
-        let r = analyze_trap_stability(&s, &id, n);
-        assert!(
-            r.dominant_sign < 0.0,
-            "expected negative sign, got {}",
-            r.dominant_sign
-        );
-        assert!(
-            !trap_needs_be(r),
-            "low-gain (max|S|=1e3) Nyquist-marginal mode must NOT trip auto-BE"
-        );
-    }
-
-    #[test]
-    fn analyze_passive_lc_eigenvalue_near_plus_one_does_not_trip() {
+    fn analyze_passive_lc_eigenvalue_near_plus_one_classifies_positive() {
         // S·A_neg ≈ diag(0.9999, 0.5) — slow LF mode at z ≈ +1.
-        // Should classify as positive sign and NOT trip auto-BE.
         let (s, n) = flat(&[&[0.9999, 0.0], &[0.0, 0.5]]);
         let id = vec![1.0, 0.0, 0.0, 1.0];
         let r = analyze_trap_stability(&s, &id, n);
@@ -513,30 +370,24 @@ mod tests {
             "passive LF mode should classify positive, got {}",
             r.dominant_sign
         );
-        assert!(
-            !trap_needs_be(r),
-            "ρ near +1 (passive LF) must NOT trip auto-BE"
-        );
     }
 
     #[test]
-    fn analyze_unstable_eigenvalue_above_threshold_trips_regardless_of_sign() {
-        // ρ = 1.05 > 1.002 → trip regardless of sign.
+    fn analyze_unstable_eigenvalue_reports_growth() {
+        // ρ = 1.05 > 1.002.
         let (s, n) = flat(&[&[1.05, 0.0], &[0.0, 0.5]]);
         let id = vec![1.0, 0.0, 0.0, 1.0];
         let r = analyze_trap_stability(&s, &id, n);
-        assert!(r.rho > 1.002);
-        assert!(trap_needs_be(r));
+        assert!(r.rho > TRAP_BE_PROMOTION_RHO);
     }
 
     #[test]
     fn close_subdominant_eigenvalue_converges_within_1e4() {
-        // λ = {1.003, 0.98}: subdominant/dominant ratio 0.977. The old
-        // fixed-20-iteration norm-ratio estimate lands at ≈ 0.9964 — BELOW
-        // the 1.002 promotion threshold even though the true dominant
-        // eigenvalue (1.003) is above it, so a genuinely trap-unstable mode
-        // escaped auto-BE. The CONVERGED estimate must land within 1e-4 of
-        // the true 1.003.
+        // λ = {1.003, 0.98}: subdominant/dominant ratio 0.977. A
+        // fixed-20-iteration norm-ratio estimate lands at ≈ 0.9964, below
+        // the 1.002 growth threshold although the true dominant eigenvalue
+        // (1.003) is above it. The CONVERGED estimate must land within 1e-4
+        // of the true 1.003.
         let (s, n) = flat(&[&[1.003, 0.0], &[0.0, 0.98]]);
         let id = vec![1.0, 0.0, 0.0, 1.0];
         let r = analyze_trap_stability(&s, &id, n);
@@ -546,10 +397,6 @@ mod tests {
             r.rho
         );
         assert!(r.dominant_sign > 0.0, "dominant sign should be positive");
-        assert!(
-            trap_needs_be(r),
-            "rho=1.003 > 1.002 must trip auto-BE (old fixed-20 estimate ~0.9964 missed it)"
-        );
     }
 
     #[test]
@@ -592,86 +439,5 @@ mod tests {
         let r = analyze_trap_stability(&[], &[], 0);
         assert_eq!(r.rho, 0.0);
         assert_eq!(r.dominant_sign, 0.0);
-        assert!(!trap_needs_be(r));
-    }
-
-    // -- router_corroborates_marginal_instability (2026-07-25 fix) --------
-
-    #[test]
-    fn router_hint_corroborated_by_marginal_local_rho_trips() {
-        // wurli-power-amp's actual measured values: nodal-local (converged,
-        // deflated) rho=1.0005, dominant_sign=-1, max_abs_s=9.4e3 (below the
-        // 1e5 gain gate, so `trap_needs_be` alone declines). The router
-        // independently measured DK-kernel rho=1.0040 (> 1.002) on the
-        // un-reduced circuit. The local estimate IS in the marginal window
-        // (>0.999, sign<0), so the router's finding should be trusted here.
-        let stability = TrapStability {
-            rho: 1.0005,
-            dominant_sign: -1.0,
-            max_abs_s: 9.4e3,
-        };
-        assert!(
-            !trap_needs_be(stability),
-            "gain gate should decline promotion on its own for this low max_abs_s"
-        );
-        assert!(
-            router_corroborates_marginal_instability(true, stability),
-            "router's trap-unstable finding must be honored when the local estimate \
-             independently corroborates a marginal (rho>0.999, sign<0) mode"
-        );
-    }
-
-    #[test]
-    fn router_hint_not_corroborated_by_comfortably_stable_local_rho_does_not_trip() {
-        // tungsten-thunder-horse's actual measured values: nodal-local
-        // (converged, deflated) rho=0.8157 — comfortably trap-stable,
-        // nowhere near the marginal window. The router's raw (fixed-20-
-        // iteration, non-deflected) estimate on the same DK-kernel matrices
-        // was 1.1163 (> 1.002) — but that number is demonstrably inaccurate
-        // (verified 2026-07-25 against the converged+deflated recompute on
-        // the identical kernel matrices), so it must NOT force promotion
-        // when the local estimate flatly disagrees. Blindly trusting the
-        // router's flag here caused a severe, non-benign golden-audio
-        // regression (correlation collapsing to ~0.006-0.6 on some test
-        // programs) before this corroboration gate was added.
-        let stability = TrapStability {
-            rho: 0.8157,
-            dominant_sign: -1.0,
-            max_abs_s: 5.87e5,
-        };
-        assert!(!trap_needs_be(stability));
-        assert!(
-            !router_corroborates_marginal_instability(true, stability),
-            "router's flag must NOT force promotion when the local estimate is \
-             comfortably stable (rho=0.8157, far from the marginal window)"
-        );
-    }
-
-    #[test]
-    fn router_hint_ignored_when_not_flagged() {
-        // Even a marginal local rho must not trip the corroboration gate
-        // when the router itself never flagged trap-unstable (e.g. routed
-        // nodal for an unrelated reason, or dk_unstable's own gates never
-        // fired). This mirrors `trap_needs_be`'s existing gain-gate decline.
-        let stability = TrapStability {
-            rho: 1.0005,
-            dominant_sign: -1.0,
-            max_abs_s: 9.4e3,
-        };
-        assert!(!router_corroborates_marginal_instability(false, stability));
-    }
-
-    #[test]
-    fn router_hint_ignored_on_positive_dominant_sign() {
-        // Marginal magnitude but positive dominant eigenvalue (slow LF mode,
-        // e.g. a passive-LC tank) must not be promoted even with the router
-        // flag set — positive-sign marginal modes are handled exactly by
-        // the bilinear transform (2026-04-22 passive-LC precedent).
-        let stability = TrapStability {
-            rho: 1.0005,
-            dominant_sign: 1.0,
-            max_abs_s: 9.4e3,
-        };
-        assert!(!router_corroborates_marginal_instability(true, stability));
     }
 }

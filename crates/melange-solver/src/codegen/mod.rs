@@ -22,6 +22,8 @@ pub mod fast_math;
 pub mod ir;
 #[cfg(feature = "codegen")]
 pub mod policy;
+#[cfg(feature = "codegen")]
+pub mod ring;
 pub mod routing;
 #[cfg(feature = "codegen")]
 pub mod rust_emitter;
@@ -535,36 +537,13 @@ pub struct CodegenConfig {
     /// MVP scope: Direct-NR only, no source/Gmin stepping, no basin-trap handling.
     /// Not supported for DK circuits with parasitic-R BJTs (use nodal path).
     pub emit_dc_op_recompute: bool,
-    /// Whether `routing::auto_route` selected the nodal path because the
-    /// DK-kernel spectral radius exceeded the trap-instability threshold
-    /// (`RoutingDecision::dk_unstable`). Threaded in by the caller
-    /// (CLI/library routing call sites) so the nodal auto-BE promotion gate
-    /// can use it as a corroborating (not unconditional) signal — see
-    /// `stability::router_corroborates_marginal_instability`.
-    ///
-    /// The router measures spectral radius on the un-reduced DK-kernel
-    /// `S·A_neg` via a fixed-iteration-count, non-deflected power iteration;
-    /// the nodal IR build recomputes a more accurate (converged,
-    /// input-deflated) estimate on its own matrices. The two can straddle
-    /// the 1.002 promotion threshold on the same circuit (observed on
-    /// `wurli-power-amp`: DK-kernel rho = 1.0040 vs nodal-deflated
-    /// rho = 1.0005) — but the router's raw number is also demonstrably
-    /// inaccurate on some circuits (verified on tungsten-thunder-horse:
-    /// 1.1163 raw vs 0.8157 converged+deflated, comfortably trap-stable), so
-    /// it is NOT trusted unconditionally. It only tips the balance when the
-    /// nodal-local estimate independently corroborates a marginal
-    /// (rho > 0.999, negative dominant eigenvalue) mode that the local
-    /// gain-gate alone would otherwise decline to promote. Default `false`
-    /// (nodal auto-BE promotion unchanged) when unset — e.g. library callers
-    /// that construct `CodegenConfig` without running `routing::auto_route`
-    /// first.
-    pub router_dk_unstable: bool,
-    /// Diagnostic companion to `router_dk_unstable`: the DK-kernel spectral
-    /// radius that produced it (0.0 when `router_dk_unstable` is false).
-    /// Used only for log messages when the router signal is the deciding
-    /// factor (the nodal-local estimate alone did not cross the promotion
-    /// threshold).
-    pub router_dk_spectral_radius: f64,
+    /// The Newton iteration budget for a build the ring predicate promotes
+    /// to backward Euler (`ir::CircuitIR::ring_promotion`), which replaces
+    /// `max_iterations` in the rebuild. `None` keeps `max_iterations`. The
+    /// CLI budgets a trapezoidal build and a promoted one differently
+    /// (`pipeline::auto_tune_max_iter`), and only the finished trapezoidal IR
+    /// can say which one ships.
+    pub max_iterations_be_promoted: Option<usize>,
     /// Runtime feedback-injection sources (`.inject`), resolved by the caller
     /// (CLI) from node names to 0-indexed node rows. The caller must ALSO
     /// stamp each source's conductance (`1/resistance`) into
@@ -715,8 +694,7 @@ impl Default for CodegenConfig {
             noise_mode: NoiseMode::Off,
             noise_master_seed: 0,
             emit_dc_op_recompute: false,
-            router_dk_unstable: false,
-            router_dk_spectral_radius: 0.0,
+            max_iterations_be_promoted: None,
             injections: Vec::new(),
             taps: Vec::new(),
             bjt_fa_mode: BjtFaMode::Auto,
@@ -821,7 +799,7 @@ pub struct GeneratedCode {
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct CodegenMeta {
-    /// Whether backward Euler was auto-selected (spectral radius > threshold).
+    /// Whether backward Euler was auto-selected by the ring predicate.
     /// `false` for every explicit selection (`--backward-euler`, `.integrator
     /// be`, behavioral-source forcing) — equivalent to
     /// `integrator_selection == IntegratorSelection::BeAuto`.
@@ -831,10 +809,13 @@ pub struct CodegenMeta {
     /// default trap). The CLI summary prints from this so a directive-pinned
     /// build is never reported as auto-promoted.
     pub integrator_selection: ir::IntegratorSelection,
-    /// Spectral radius measured by the trap-stability discriminator that
-    /// triggered auto-BE (0.0 when auto-BE did not fire). Evaluated on the
-    /// trap `S·A_neg` pair at the rate the solver actually ships — under
-    /// oversampling that is the internal (oversampled) rate.
+    /// Why a default build integrates the way it does: the ring predicate's
+    /// verdict in one line (`ir::CircuitIR::integration_reason`). Empty when
+    /// the integrator was pinned.
+    pub integration_reason: String,
+    /// Spectral radius of the trapezoidal charge propagator at the DC
+    /// operating point, as the ring predicate measured it, when auto-BE fired
+    /// (0.0 otherwise). At the internal (oversampled) rate.
     pub backward_euler_spectral_radius: f64,
     /// DC operating point convergence method (e.g. "Direct NR", "Source Stepping").
     pub dc_op_method: String,
@@ -889,6 +870,7 @@ fn build_codegen_meta(
     CodegenMeta {
         backward_euler_auto,
         integrator_selection: ir.integrator_selection,
+        integration_reason: ir.integration_reason.clone(),
         // Report the discriminator's trap rho (internal-rate matrices under
         // oversampling) only when auto-BE fired, matching the field contract.
         backward_euler_spectral_radius: if backward_euler_auto {

@@ -1018,13 +1018,17 @@ pub fn run_melange_solver_from_str(
         output_nodes: vec![output_node],
         input_resistance: 1.0,
         dc_block: true,
-        router_dk_unstable: decision.dk_unstable,
-        router_dk_spectral_radius: decision.spectral_radius,
         output_clamp_v: auto_clamp_v,
-        // Same budget the shipped build gets; the default 100 is not what ships.
+        // Same budgets the shipped build gets; the default 100 is not what ships.
         max_iterations: melange_solver::pipeline::auto_tune_max_iter(
-            None, &kernel, &decision, false, false, input_node,
+            None,
+            &kernel,
+            &decision,
+            !backward_euler,
         ),
+        max_iterations_be_promoted: Some(melange_solver::pipeline::auto_tune_max_iter(
+            None, &kernel, &decision, false,
+        )),
         // Diagnostics (default: shipped behaviour — auto integrator).
         backward_euler,
         force_trap,

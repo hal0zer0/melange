@@ -75,6 +75,7 @@ pub mod codegen;
 pub mod dc_op;
 pub mod device_types;
 pub mod dk;
+pub mod eigen;
 pub mod expr;
 pub mod linear_solver;
 pub(crate) mod lu;

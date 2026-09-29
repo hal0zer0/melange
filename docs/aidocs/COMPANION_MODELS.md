@@ -229,15 +229,14 @@ there.
 
 ### What still uses the whole-system operator
 
-The stability discriminators — auto-BE promotion,
-`spectral_radius_s_aneg`, and routing — evaluate `S·(alpha·C − G)`, the
-whole-system operator they were calibrated against; `CircuitIR` builds it
-for them and replaces it with `H = alpha·C` only after they run. The library
-`DkKernel` (`crates/melange-solver/src/dk.rs`) and the runtime
-`LinearSolver` built on it (`crates/melange-solver/src/linear_solver.rs`,
-linear circuits only, where the forms coincide) keep the whole-system
-matrices. Whether those discriminators should move to the charge-form
-operator is pending re-measurement (`STATUS.md`, Pending Work).
+Promotion to backward Euler is decided on the charge-form propagator
+(`RING_PREDICATE.md`). The whole-system spectral radius `ρ(S·(alpha·C − G))`
+(`codegen/stability.rs`) is still the nodal emitter's Schur-versus-full-LU
+input (`spectral_radius_s_aneg`), and the router's DK-kernel estimate still
+selects DK or nodal; neither decides the integrator. The library `DkKernel`
+(`crates/melange-solver/src/dk.rs`) and the runtime `LinearSolver` built on
+it (`crates/melange-solver/src/linear_solver.rs`, linear circuits only, where
+the forms coincide) keep the whole-system matrices.
 
 ## Key Insight
 Trapezoidal rule is implicit: solution at t[n] depends on itself. Companion model makes this explicit by converting differential equation to algebraic equation with equivalent conductance.

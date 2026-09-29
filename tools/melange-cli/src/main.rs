@@ -2428,20 +2428,20 @@ fn compile_circuit_source(
     // uses so the iteration budget matches the integrator that ships. The
     // simulate/analyze call sites intentionally pass the raw CLI flags —
     // the runtime solvers do not honor the directive (compile-time pin).
-    let (effective_backward_euler, effective_force_trap, _) =
-        melange_solver::codegen::ir::resolve_integrator_flags(
-            backward_euler,
-            force_trap,
-            netlist.integrator,
-        );
+    let (effective_backward_euler, _, _) = melange_solver::codegen::ir::resolve_integrator_flags(
+        backward_euler,
+        force_trap,
+        netlist.integrator,
+    );
+    let user_max_iter = if max_iter == 50 { None } else { Some(max_iter) };
     let max_iter = melange_solver::pipeline::auto_tune_max_iter(
-        if max_iter == 50 { None } else { Some(max_iter) },
+        user_max_iter,
         &kernel,
         &routing,
-        effective_backward_euler,
-        effective_force_trap,
-        input_node_idx,
+        !effective_backward_euler,
     );
+    let max_iter_be_promoted =
+        melange_solver::pipeline::auto_tune_max_iter(user_max_iter, &kernel, &routing, false);
 
     // Broadcast single output_scale to all outputs
     let output_scales = vec![output_scale; output_node_indices.len()];
@@ -2470,8 +2470,7 @@ fn compile_circuit_source(
         noise_mode,
         noise_master_seed: noise_seed,
         emit_dc_op_recompute,
-        router_dk_unstable: routing.dk_unstable,
-        router_dk_spectral_radius: routing.spectral_radius,
+        max_iterations_be_promoted: Some(max_iter_be_promoted),
         injections: injection_specs.clone(),
         taps: tap_specs.clone(),
         subsample_fire,
@@ -2607,14 +2606,20 @@ fn compile_circuit_source(
     }
     // Integration line: printed from the codegen-recorded selection so the
     // stated reason is the actual one (a `.integrator be` pin is NOT
-    // "auto-selected"). The BeAuto case is suppressed here — the DC-OP block
-    // below prints the definitive "Backward Euler (auto-selected…)" line —
-    // so the two lines never print together and contradict each other.
+    // "auto-selected").
     {
         use melange_solver::codegen::ir::IntegratorSelection as Sel;
         match generated.meta.integrator_selection {
-            Sel::BeAuto => {}
-            Sel::TrapDefault => println!("    Integration: Trapezoidal"),
+            Sel::BeAuto => {
+                println!("    Integration: Backward Euler (auto-selected)");
+                println!("      ({})", generated.meta.integration_reason);
+            }
+            Sel::TrapDefault => {
+                println!("    Integration: Trapezoidal");
+                if !generated.meta.integration_reason.is_empty() {
+                    println!("      ({})", generated.meta.integration_reason);
+                }
+            }
             Sel::TrapCliFlag => println!("    Integration: Trapezoidal (pinned by --force-trap)"),
             Sel::TrapDirective => {
                 println!("    Integration: Trapezoidal (pinned by .integrator directive)");
@@ -2715,9 +2720,6 @@ fn compile_circuit_source(
                 "    DC operating point: *** DID NOT CONVERGE *** ({}, {} iterations)",
                 meta.dc_op_method, meta.dc_op_iterations
             );
-        }
-        if meta.backward_euler_auto {
-            println!("    Integration: Backward Euler (auto-selected — trap unstable or Nyquist-marginal; see RUST_LOG=info for details)");
         }
         if meta.parasitic_caps_inserted {
             println!("    Parasitic caps: auto-inserted (no capacitors in circuit)");
@@ -4298,10 +4300,10 @@ fn simulate_circuit_source(
         opts.max_iter,
         &kernel,
         &decision,
-        opts.backward_euler,
-        opts.force_trap,
-        input_node_idx,
+        !opts.backward_euler,
     );
+    let max_iterations_be_promoted =
+        melange_solver::pipeline::auto_tune_max_iter(opts.max_iter, &kernel, &decision, false);
     if max_iterations != 100 {
         println!("  Max NR iterations: {max_iterations}");
     }
@@ -4332,8 +4334,7 @@ fn simulate_circuit_source(
         noise_mode: opts.noise_mode,
         noise_master_seed: opts.noise_seed,
         emit_dc_op_recompute: false,
-        router_dk_unstable: decision.dk_unstable,
-        router_dk_spectral_radius: decision.spectral_radius,
+        max_iterations_be_promoted: Some(max_iterations_be_promoted),
         injections: injection_specs.clone(),
         taps: Vec::new(),
         bjt_fa_mode: melange_solver::codegen::BjtFaMode::Auto,
@@ -4987,14 +4988,10 @@ fn analyze_freq_response(
     }
 
     // Generate circuit code
-    let max_iterations = melange_solver::pipeline::auto_tune_max_iter(
-        max_iter,
-        &kernel,
-        &decision,
-        backward_euler,
-        force_trap,
-        input_node_idx,
-    );
+    let max_iterations =
+        melange_solver::pipeline::auto_tune_max_iter(max_iter, &kernel, &decision, !backward_euler);
+    let max_iterations_be_promoted =
+        melange_solver::pipeline::auto_tune_max_iter(max_iter, &kernel, &decision, false);
     if max_iterations != 100 {
         eprintln!("  Max NR iterations: {max_iterations}");
     }
@@ -5025,8 +5022,7 @@ fn analyze_freq_response(
         noise_mode,
         noise_master_seed: noise_seed,
         emit_dc_op_recompute: false,
-        router_dk_unstable: decision.dk_unstable,
-        router_dk_spectral_radius: decision.spectral_radius,
+        max_iterations_be_promoted: Some(max_iterations_be_promoted),
         injections: Vec::new(),
         taps: Vec::new(),
         bjt_fa_mode: melange_solver::codegen::BjtFaMode::Auto,

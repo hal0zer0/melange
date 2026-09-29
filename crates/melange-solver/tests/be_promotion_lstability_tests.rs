@@ -11,30 +11,32 @@
 //! consistent integrator, backward Euler included, can force to `rho <= 1`
 //! without falsifying the circuit's own physics.
 //!
-//! Two circuits pin the two sides of this:
+//! `dissipative_circuit_achieves_rho_below_one_under_be` pins the
+//! dissipative side: a stiff diode-clamped node (1 kOhm into 10 pF) that the
+//! ring predicate promotes to backward Euler (its trapezoidal Nyquist ring
+//! starts at -54 dB of the passband from the input). BE must genuinely
+//! achieve rho < 1 there, which checks the BE matrix-building math
+//! (alpha = 1/T, A_neg_be = alpha*C, no -G term).
 //!
-//! 1. `dissipative_circuit_achieves_rho_below_one_under_be` — a diode-RC
-//!    circuit (no feedback, no gain, obviously dissipative) sampled at an
-//!    absurd rate (5 MHz) where trap's discretization shows a spurious
-//!    "trap unstable" reading purely from round-off (rho = 1.0084,
-//!    dominant_sign -1 — the round-off/Nyquist artifact signature, NOT a
-//!    real growing pole). This is exactly the case the post-promotion check
-//!    exists to validate: BE genuinely achieves rho < 1 here, proving the
-//!    BE matrix-building math (alpha = 1/T, A_neg_be = alpha*C, no -G term)
-//!    is correct.
-//!
-//! 2. `regenerative_oscillator_be_rho_exceeds_one_is_not_a_bug` (in
-//!    `routing_oversampling_rate_tests.rs`'s sibling coverage — see the g10
-//!    oscillator handling in `codegen::ir::mod` tests) is NOT re-asserted
-//!    here as "rho < 1" because doing so would be asserting something
-//!    false about real circuit physics. Instead
-//!    `crates/melange-solver/tests/routing_oversampling_rate_tests.rs`
-//!    pins that such a circuit correctly routes to nodal (which has a
-//!    full-LU NR fallback) instead of demanding an impossible rho.
+//! The regenerative side (a real growing pole keeps rho > 1 under BE) is not
+//! re-asserted here as "rho < 1", because that would assert something false
+//! about the circuit's physics; `routing_oversampling_rate_tests.rs` covers
+//! it.
 
-use melange_solver::codegen::{ir::CircuitIR, CodegenConfig};
+use melange_solver::codegen::ir::{CircuitIR, IntegratorSelection};
+use melange_solver::codegen::CodegenConfig;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
+
+const STIFF_CLAMP: &str = "\
+Stiff diode-clamped node (dissipative, no feedback)
+R_s in out 1k
+C_p out 0 10p
+D_1 out 0 DX
+D_2 0 out DX
+R_l out 0 100k
+.model DX D(IS=2.52n N=1.752)
+";
 
 const DIODE_RC: &str = "\
 Diode RC (dissipative, no feedback)
@@ -46,40 +48,36 @@ Rload out 0 100k
 .model DMOD D(IS=1e-14 N=1.0)
 ";
 
-/// At 5 MHz this obviously-dissipative circuit (a diode clamp feeding an RC
-/// lowpass — no gain, no feedback, unconditionally stable for any real
-/// component values) shows a trap-instability reading purely from f64
-/// round-off in the `(2/T)*C` conditioning at an absurd sample rate. It is
-/// the "false positive, not a real growing pole" counterpart to the g10
-/// regenerative oscillator (which IS a real growing pole and correctly
-/// keeps rho > 1 even under BE).
-#[test]
-fn dissipative_circuit_achieves_rho_below_one_under_be() {
-    let netlist = Netlist::parse(DIODE_RC).expect("parse");
+fn build(deck: &str, sample_rate: f64) -> (CircuitIR, usize) {
+    let netlist = Netlist::parse(deck).expect("parse");
     let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
     let input_node = mna.node_map["in"] - 1;
     let output_node = mna.node_map["out"] - 1;
     mna.g[input_node][input_node] += 1.0;
-
     let cfg = CodegenConfig {
-        circuit_name: "diode_rc_hirate".to_string(),
-        sample_rate: 5.0e6,
+        circuit_name: "lstability".to_string(),
+        sample_rate,
         input_node,
         output_nodes: vec![output_node],
         output_scales: vec![1.0],
         input_resistance: 1.0,
         ..CodegenConfig::default()
     };
+    (
+        CircuitIR::from_mna(&mna, &netlist, &cfg).expect("nodal IR build"),
+        input_node,
+    )
+}
 
-    let ir = CircuitIR::from_mna(&mna, &netlist, &cfg).expect("nodal IR build");
-
-    assert!(
-        ir.solver_config.backward_euler,
-        "fixture regression: this circuit must auto-promote to BE at 5 MHz \
-         (trap propagation operator must read unstable here) for the test to \
-         exercise the post-promotion path at all"
+#[test]
+fn dissipative_circuit_achieves_rho_below_one_under_be() {
+    let (ir, input_node) = build(STIFF_CLAMP, 48000.0);
+    assert_eq!(
+        ir.integrator_selection,
+        IntegratorSelection::BeAuto,
+        "fixture regression: the ring predicate must promote this stiff node ({})",
+        ir.integration_reason
     );
-
     let stability = melange_solver::codegen::stability::analyze_trap_stability_deflated(
         &ir.matrices.s,
         &ir.matrices.a_neg,
@@ -89,10 +87,9 @@ fn dissipative_circuit_achieves_rho_below_one_under_be() {
     assert!(
         stability.rho < 1.0,
         "BE matrices must genuinely achieve rho < 1 for a dissipative, feedback-free \
-         circuit misdetected as trap-unstable due to sample-rate round-off — got \
-         rho={:.6}, dominant_sign={:+.0}. A violation here (unlike a genuinely \
-         unstable circuit's linearization) WOULD indicate a real BE matrix-builder \
-         defect.",
+         circuit — got rho={:.6}, dominant_sign={:+.0}. A violation here (unlike a \
+         genuinely unstable circuit's linearization) WOULD indicate a real BE \
+         matrix-builder defect.",
         stability.rho,
         stability.dominant_sign
     );
@@ -103,4 +100,20 @@ fn dissipative_circuit_achieves_rho_below_one_under_be() {
          promotion for this dissipative circuit, got {}",
         ir.matrices.spectral_radius_s_aneg
     );
+}
+
+/// At 5 MHz the whole-system power iteration read this diode-RC as
+/// trap-unstable (rho = 1.0084, a round-off artifact of the `(2/T)*C`
+/// conditioning) and promoted it. The ring predicate works on the exact
+/// eigenvalues of the charge propagator and finds nothing to promote.
+#[test]
+fn a_round_off_reading_at_5_mhz_does_not_promote() {
+    let (ir, _) = build(DIODE_RC, 5.0e6);
+    assert_eq!(
+        ir.integrator_selection,
+        IntegratorSelection::TrapDefault,
+        "{}",
+        ir.integration_reason
+    );
+    assert!(!ir.integration_reason.is_empty());
 }

@@ -31,6 +31,7 @@ AI agent consumption: dense equations, code patterns, cross-references, no narra
 | Changing oversampling or anti-alias filters | [OVERSAMPLING.md](OVERSAMPLING.md) |
 | Changing generated code structure | [CODEGEN.md](CODEGEN.md) |
 | Changing trapezoidal integration or companions | [COMPANION_MODELS.md](COMPANION_MODELS.md) |
+| Changing when a build is promoted to backward Euler (auto-BE), the charge propagator or `eigen.rs` | [RING_PREDICATE.md](RING_PREDICATE.md) |
 | Changing augmented MNA inductor handling | [MNA.md](MNA.md) (augmented MNA section) |
 | Saturating inductors and two-winding shared-core transformers (flux law + air floor, T-model, datasheet ratings, Newton sites, refusals) | [SATURATING_TRANSFORMERS.md](SATURATING_TRANSFORMERS.md) |
 | Changing the netlist topology checks (dangling nodes, cap-only DC islands, which terminals conduct at DC) | `crates/melange-solver/src/topology.rs` (module docs) |

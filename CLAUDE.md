@@ -66,6 +66,7 @@ docs/aidocs/            # Detailed math reference docs — READ THESE before cha
 | `OVERSAMPLING.md` | Changing oversampling, anti-alias filters, polyphase half-band IIR |
 | `CODEGEN.md` | Changing generated solver code structure or templates |
 | `COMPANION_MODELS.md` | Changing trapezoidal integration or companion circuits |
+| `RING_PREDICATE.md` | Changing auto-BE promotion (the ring predicate), the charge propagator, or `eigen.rs` |
 | `SIGNAL_LEVELS.md` | Changing signal levels, DC blocking, output scaling |
 | `NOISE.md` | Changing thermal/shot/1f noise generation |
 | `DEBUGGING.md` | **Diagnosing solver output issues, known failure signatures, historical fix catalog** |

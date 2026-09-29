@@ -232,11 +232,11 @@ fn main() {
     );
 }
 
-// ── Fix 2: discriminator evaluates the shipped internal-rate pair ───────
+// ── Fix 2: the ring predicate evaluates the shipped internal rate ───────
 
 #[test]
-fn dk_discriminator_evaluates_internal_rate_pair_under_oversampling() {
-    use melange_solver::codegen::stability::analyze_trap_stability_deflated;
+fn dk_ring_predicate_evaluates_the_internal_rate_under_oversampling() {
+    use melange_solver::codegen::ring::{self, RingSystem};
 
     let config = CodegenConfig {
         circuit_name: "os2_trap_disc".to_string(),
@@ -250,49 +250,26 @@ fn dk_discriminator_evaluates_internal_rate_pair_under_oversampling() {
     let (netlist, mna, kernel) = build_pipeline(DIODE_BIAS_SPICE, &config);
     let ir = CircuitIR::from_kernel_with_dc_op(&kernel, &mna, &netlist, &config, None)
         .expect("build IR");
-
-    // This circuit stays on trap, so the shipped S and the shipped charge-form
-    // history alpha*C (with G) ARE the internal-rate trap pair: the
-    // discriminator's whole-system operator is alpha*C - G on the rows that
-    // carry history. The recorded discriminator rho must match a re-run of the
-    // analyzer on exactly that pair...
     assert!(
         !ir.solver_config.backward_euler,
         "test circuit must stay trapezoidal for this check"
     );
-    let n = ir.topology.n;
-    let mut whole_system = vec![0.0f64; n * n];
-    for i in 0..n {
-        if ir.topology.history_zero_rows.contains(&i) {
-            continue;
-        }
-        for j in 0..n {
-            whole_system[i * n + j] =
-                ir.matrices.a_neg[i * n + j] - ir.matrices.g_matrix[i * n + j];
-        }
-    }
-    let shipped =
-        analyze_trap_stability_deflated(&ir.matrices.s, &whole_system, n, &[config.input_node]);
-    assert!(
-        (ir.trap_discriminator_rho - shipped.rho).abs() < 1e-12,
-        "discriminator rho {} must equal rho of the shipped internal-rate pair {}",
-        ir.trap_discriminator_rho,
-        shipped.rho
-    );
+    assert!(!ir.integration_reason.is_empty(), "the verdict is recorded");
 
-    // ...and must NOT be the base-rate kernel rho (rho is rate-dependent;
-    // if these coincide the discriminator is evaluating the wrong pair).
-    let base = analyze_trap_stability_deflated(&kernel.s, &kernel.a_neg, n, &[config.input_node]);
+    // The predicate's system is the shipped IR at the internal rate...
+    let sys = RingSystem::from_ir(&ir).expect("ring system");
+    assert_eq!(sys.rate, 88200.0);
+    let internal = ring::analyze(&sys).expect("internal-rate verdict");
+    // ...and the propagator is strongly rate-dependent, so evaluating the
+    // base rate would be a different question.
+    let mut base_sys = sys.clone();
+    base_sys.rate = 44100.0;
+    let base = ring::analyze(&base_sys).expect("base-rate verdict");
     assert!(
-        (base.rho - shipped.rho).abs() > 1e-8,
+        (internal.rho - base.rho).abs() > 1e-8,
         "test premise: base-rate rho ({}) must differ measurably from internal-rate rho ({})",
         base.rho,
-        shipped.rho
-    );
-    assert!(
-        (ir.trap_discriminator_rho - base.rho).abs() > 1e-8,
-        "discriminator must not evaluate the base-rate kernel pair (rho {})",
-        base.rho
+        internal.rho
     );
 }
 

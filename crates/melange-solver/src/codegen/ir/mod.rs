@@ -185,6 +185,12 @@ pub struct CircuitIR {
     /// config flags — a directive-pinned BE build is NOT "auto-selected".
     #[serde(default)]
     pub integrator_selection: IntegratorSelection,
+    /// Why a default-trapezoidal build stayed trapezoidal or was promoted to
+    /// backward Euler: the ring predicate's verdict in one line
+    /// (`codegen::ring::RingVerdict::reason`). Empty when the integrator was
+    /// pinned (flag, directive, behavioral sources) and nothing was decided.
+    #[serde(default)]
+    pub integration_reason: String,
 }
 
 /// Why the shipped integration scheme is what it is.
@@ -1776,7 +1782,74 @@ fn resolve_integrator_pref(
     resolve_integrator_flags(config.backward_euler, config.force_trap, pref)
 }
 
+/// A default-trapezoidal IR the ring predicate promotes: rebuild it with
+/// backward Euler under this configuration, and record this reason.
+struct Promotion {
+    verdict: crate::codegen::ring::RingVerdict,
+    config: CodegenConfig,
+    reason: String,
+}
+
 impl CircuitIR {
+    /// Decide whether a finished IR ships as built (`None`, with the verdict
+    /// recorded in `integration_reason`) or is rebuilt with backward Euler,
+    /// by the ring predicate (`codegen::ring`) on the
+    /// linearised trapezoidal system at its DC operating point.
+    ///
+    /// Only a default-trapezoidal build is decided: a flag, a directive or
+    /// behavioral sources already fixed the integrator. The predicate failing
+    /// to evaluate is an error, not a silent default. An IR the predicate
+    /// cannot represent (companion-modelled inductors, DK library path) stays
+    /// trapezoidal with the reason recorded — BE is refused on that path
+    /// anyway.
+    fn ring_promotion(
+        ir: &mut CircuitIR,
+        config: &CodegenConfig,
+    ) -> Result<Option<Promotion>, CodegenError> {
+        if ir.integrator_selection != IntegratorSelection::TrapDefault {
+            return Ok(None);
+        }
+        let rate = ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;
+        let sys = match crate::codegen::ring::RingSystem::from_ir(ir) {
+            Ok(sys) => sys,
+            Err(e) => {
+                log::warn!("Trapezoidal kept without a ring check: {e}");
+                ir.integration_reason = format!("ring predicate not evaluated: {}", e.0);
+                return Ok(None);
+            }
+        };
+        let verdict = crate::codegen::ring::analyze(&sys)
+            .map_err(|e| CodegenError::InvalidKernel(e.to_string()))?;
+        let mut reason = verdict.reason(rate);
+        if !ir.dc_op_converged {
+            reason.push_str(" (linearised at a DC operating point that did not converge)");
+        }
+        if verdict.promote {
+            // One plain sentence by default; the eigenvalue detail is for
+            // whoever asks for it. A first-time user sees this on a five-line
+            // diode clipper and needs to know whether to act (they do not).
+            log::warn!(
+                "Using backward Euler integration: the trapezoidal rule would ring or grow at \
+                 Nyquist on this circuit. BE is stable, at the cost of slightly damping the top \
+                 octave (oversampling reduces that). No action needed; RUST_LOG=info for the \
+                 numbers."
+            );
+            log::info!("Auto-enabling backward Euler: {reason}");
+            let mut config_be = config.clone();
+            if let Some(budget) = config.max_iterations_be_promoted {
+                config_be.max_iterations = budget;
+            }
+            return Ok(Some(Promotion {
+                verdict,
+                config: config_be,
+                reason,
+            }));
+        }
+        log::info!("Trapezoidal: {reason}");
+        ir.integration_reason = reason;
+        Ok(None)
+    }
+
     /// Build a `CircuitIR` from the compiled kernel, MNA system, netlist, and config.
     ///
     /// # Errors
@@ -1803,13 +1876,41 @@ impl CircuitIR {
         config: &CodegenConfig,
         dc_op_result: Option<dc_op::DcOpResult>,
     ) -> Result<Self, CodegenError> {
+        let mut ir = Self::build_dk(kernel, mna, netlist, config, dc_op_result.clone(), None)?;
+        let Some(p) = Self::ring_promotion(&mut ir, config)? else {
+            return Ok(ir);
+        };
+        let mut ir = Self::build_dk(
+            kernel,
+            mna,
+            netlist,
+            &p.config,
+            dc_op_result,
+            Some(&p.verdict),
+        )?;
+        ir.integration_reason = p.reason;
+        Ok(ir)
+    }
+
+    /// The DK builder. `promoted` is the ring predicate's verdict when this
+    /// build is the backward-Euler rebuild of a trapezoidal IR it promoted
+    /// (see [`Self::ring_promotion`]); `None` builds the scheme the flags and
+    /// directive select.
+    fn build_dk(
+        kernel: &DkKernel,
+        mna: &MnaSystem,
+        netlist: &Netlist,
+        config: &CodegenConfig,
+        dc_op_result: Option<dc_op::DcOpResult>,
+        promoted: Option<&crate::codegen::ring::RingVerdict>,
+    ) -> Result<Self, CodegenError> {
         let n = kernel.n; // = n_aug (system dimension)
         let n_nodes = kernel.n_nodes; // original circuit node count
         let m = kernel.m;
 
         // Resolve the effective integration scheme: CLI flags override the
         // `.integrator` netlist directive, which overrides auto-promotion.
-        let (cfg_backward_euler, cfg_force_trap, mut integrator_selection) =
+        let (cfg_backward_euler, _, mut integrator_selection) =
             resolve_integrator_pref(config, netlist.integrator);
 
         if m > crate::dk::MAX_M {
@@ -1857,10 +1958,6 @@ impl CircuitIR {
         // The MNA G matrix already includes input conductance (stamped before kernel build).
         // When augmented inductors are used, kernel.n > mna.n_aug, so we need the
         // augmented G/C (with inductor KCL/KVL/L stamps) at the full n_nodal dimension.
-        //
-        // Built up-front (before the auto-BE discriminator) because the
-        // oversampled trap matrices — the pair the discriminator must
-        // evaluate — are derived from G/C at the internal rate.
         let (g_matrix, c_matrix) = if augmented_inductors {
             let aug = mna.build_augmented_matrices();
             (
@@ -1875,15 +1972,9 @@ impl CircuitIR {
         };
 
         // When oversampling, the shipped trap matrices are rebuilt at the
-        // internal (oversampled) rate. Build them BEFORE the auto-BE
-        // discriminator so the discriminator evaluates the exact (S, A_neg)
-        // pair the generated solver ships. rho(S·A_neg) is strongly
-        // rate-dependent (passive-LC survey: 1.0023 → 1.2871 across sample
-        // rates), so evaluating the base-rate kernel pair while shipping
-        // internal-rate matrices mis-gates the promotion in both directions.
-        // Skipped when the user forced BE explicitly — no trap pair is
-        // shipped or discriminated in that case.
-        let os_trap_pair = if os_factor > 1 && !cfg_backward_euler {
+        // internal (oversampled) rate. Skipped when BE ships (forced, or this
+        // is the promoted rebuild) — no trap pair is shipped then.
+        let os_trap_pair = if os_factor > 1 && !cfg_backward_euler && promoted.is_none() {
             let (a_flat, a_neg_flat) = build_dk_trap_matrices_at_rate(
                 &g_matrix,
                 &c_matrix,
@@ -1901,107 +1992,12 @@ impl CircuitIR {
             None
         };
 
-        // Auto-detect stiffness: if the trapezoidal time-stepping operator S*A_neg
-        // has spectral radius > TRAP_BE_PROMOTION_RHO (above the stability
-        // boundary), or is Nyquist-marginal (rho > TRAP_BE_SIGN_FLIP_RHO with a
-        // negative dominant eigenvalue), the circuit is too stiff for trapezoidal
-        // and needs backward Euler. See `trap_needs_be` for the exact predicate.
-        //
-        // Reaching this on a DK build is the estimator-disagreement case, not the
-        // normal one. `routing::auto_route` already sends trap-unstable circuits
-        // (`dk_unstable`) and high-|S| circuits (`s_ill_conditioned`) to the nodal
-        // path (see routing.rs) — the reroute is the primary mechanism and it
-        // happens upstream. But the router measures with a fixed-iteration power
-        // method and no input deflation, while this block uses the converged,
-        // input-deflated analyzer (`analyze_trap_stability_deflated`); the two
-        // straddle the threshold in both directions (cf. the router-hint
-        // discussion at the nodal auto-BE site). So a DK build lands here only
-        // when the router's cruder estimate said DK was safe and the better one
-        // disagrees, or when DK was forced. BE-on-DK is the rescue for that
-        // residual population; it is not the intended handling for a circuit the
-        // router would have rerouted.
-        //
-        // Measured 2026-08-30 across the 42-circuit golden corpus: the DK-routed
-        // auto-BE population is 5 promotions (gold-press @192k os=4; noyce ×4),
-        // ALL of them the Nyquist sign-flip case (rho ≈ 1.0000..1.0002,
-        // dominant_sign < 0), NOT trap-unstable (rho > TRAP_BE_PROMOTION_RHO). The
-        // router's power method measures the eigenvalue MAGNITUDE fine (|lambda| ≈
-        // 1.0) — what it lacks is a dominant-sign discriminator, and its only test
-        // is rho > 1.002, so a mode at z ≈ -0.9999 reads as a magnitude safely
-        // under threshold and correctly does NOT trip a trap-instability reroute.
-        // Magnitude alone is the wrong question for the Nyquist case; the router
-        // is not asking the sign question at all. These 5 promotions are not mere
-        // threshold-straddlers: the sign-flip clause of `trap_needs_be` also gates
-        // on max|S| > NYQUIST_GATE_MAX_ABS_S, calibrated to fire only where the
-        // fs/2 limit cycle is AUDIBLE (a 2-stage BJT preamp at max|S| ≈ 3e4 stays
-        // on trap with a µV cycle; a 3× triode cascade at ≈5e5 needs BE). BE works
-        // because it is L-stable. All 5 are golden-verified. No reroute is warranted: wiring this
-        // analyzer into the router's `dk_unstable` would move 5 working circuits
-        // onto the costlier nodal full-LU path for zero correctness benefit.
-        //
-        // Gated on `m > 0`: passive linear circuits (M=0) are inherently stable
-        // under trap-rule discretization — the bilinear transform preserves
-        // unit-circle eigenvalues exactly for imaginary poles, so any measured
-        // `rho > 1` is LU round-off, not physical instability. Forcing BE on a
-        // passive LC (e.g., MM cartridge LRC at ~10 kHz) over-damps the
-        // resonance peak the circuit is supposed to produce. The Nyquist
-        // artifact that motivates auto-BE (`docs/aidocs/NOISE.md`,
-        // 2026-04-19 nodal fix) arises on nonlinear circuits and doesn't exist
-        // when `m == 0`. Empirical signature
-        // before the gate: gold-press-cartridge peak was killed at fs ∈
-        // {88.2k, 96k, 150k, 300k, 384k} with spectral_radius ∈ 1.002..1.29,
-        // while adjacent rates sampled rho < 1.002 and produced the correct
-        // +0.9 dB @ 10 kHz peak.
-        let mut trap_discriminator_rho = 0.0f64;
-        let auto_be = if !cfg_backward_euler && !cfg_force_trap && n > 0 && m > 0 {
-            // Trap-rule stability via shared analyzer: returns rho =
-            // max|eigenvalue(S·A_neg)| AND the sign of the dominant
-            // eigenvalue (positive → near +1, slow LF mode trap handles
-            // exactly via bilinear; negative → near -1, Nyquist-marginal
-            // trap mode that has gain magnitude 1 at fs/2 and seeds an
-            // f64-round-off limit cycle the trap rule cannot damp).
-            //
-            // The Nyquist case at rho ≈ 0.999..1.0 was the
-            // noyce-cascaded-triodes regression: 3× 12AX7 cap-coupled
-            // cascade, dominant eigenvalue at z ≈ -0.9999, output 28 mV
-            // fs/2 limit cycle from cascade gain × f64 round-off seed.
-            // Pre-discriminator the gate at 1.002 missed it.
-            //
-            // Under oversampling, the internal-rate pair built above is
-            // used — the base-rate kernel matrices are never shipped and
-            // their rho is the wrong question.
-            let (s_ref, a_neg_ref): (&[f64], &[f64]) = match &os_trap_pair {
-                Some((s, a_neg)) => (s.as_slice(), a_neg.as_slice()),
-                None => (kernel.s.as_slice(), kernel.a_neg.as_slice()),
-            };
-            let stability = crate::codegen::stability::analyze_trap_stability_deflated(
-                s_ref,
-                a_neg_ref,
-                n,
-                &config.input_node_indices(),
-            );
-            trap_discriminator_rho = stability.rho;
-            if crate::codegen::stability::trap_needs_be(stability) {
-                log::info!(
-                    "Auto-selecting backward Euler: spectral_radius(S*A_neg) = {:.4} at {} Hz, \
-                     dominant_sign = {:+.0} (trapezoidal {} — promoting to BE)",
-                    stability.rho,
-                    internal_rate,
-                    stability.dominant_sign,
-                    if stability.rho > crate::codegen::stability::TRAP_BE_PROMOTION_RHO {
-                        "unstable"
-                    } else {
-                        "marginally stable at fs/2 with negative dominant eigenvalue \
-                         (Nyquist-rate limit cycle in v_prev for high-gain cap-coupled cascades)"
-                    }
-                );
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        };
+        // Auto-promotion to backward Euler is decided on the finished
+        // trapezoidal IR by the ring predicate (`codegen::ring`), which needs
+        // the DC operating point; this build is then repeated with
+        // `promoted` set. See `CircuitIR::ring_promotion`.
+        let auto_be = promoted.is_some();
+        let trap_discriminator_rho = promoted.map_or(0.0, |v| v.rho);
         let be = cfg_backward_euler || auto_be;
 
         // The DK backward-Euler matrix build cannot correctly discretize
@@ -2181,8 +2177,7 @@ impl CircuitIR {
             }
         } else if os_factor > 1 {
             // Trapezoidal + oversampling: the internal-rate pair was already
-            // built above (before the auto-BE discriminator, which evaluated
-            // exactly these matrices).
+            // built above.
             let (s, a_neg_flat) =
                 os_trap_pair.expect("internal-rate trap pair built when os>1 and trap ships");
 
@@ -2846,6 +2841,7 @@ impl CircuitIR {
             behavioral_scalar_runtimes,
             trap_discriminator_rho,
             integrator_selection,
+            integration_reason: String::new(),
         })
     }
 
@@ -2857,6 +2853,22 @@ impl CircuitIR {
         mna: &MnaSystem,
         netlist: &Netlist,
         config: &CodegenConfig,
+    ) -> Result<Self, CodegenError> {
+        let mut ir = Self::build_nodal(mna, netlist, config, None)?;
+        let Some(p) = Self::ring_promotion(&mut ir, config)? else {
+            return Ok(ir);
+        };
+        let mut ir = Self::build_nodal(mna, netlist, &p.config, Some(&p.verdict))?;
+        ir.integration_reason = p.reason;
+        Ok(ir)
+    }
+
+    /// The nodal builder; `promoted` as in [`Self::build_dk`].
+    fn build_nodal(
+        mna: &MnaSystem,
+        netlist: &Netlist,
+        config: &CodegenConfig,
+        promoted: Option<&crate::codegen::ring::RingVerdict>,
     ) -> Result<Self, CodegenError> {
         let n_nodes = mna.n;
         let n_aug = mna.n_aug;
@@ -3166,7 +3178,7 @@ impl CircuitIR {
         // When the build is already BE (flag/directive/behavioral), the pair
         // analyzed above IS the BE pair — no trap discriminator ran, so the
         // field stays 0.0 (matching the DK path and the field contract).
-        let trap_discriminator_rho = if be { 0.0 } else { trap_stability.rho };
+        let trap_discriminator_rho = promoted.map_or(0.0, |v| v.rho);
         if spectral_radius_s_aneg > 0.99 {
             log::info!(
                 "Nodal: spectral_radius(S*A_neg) = {:.4} ({} pair), dominant_sign = {:+.0}, \
@@ -3179,148 +3191,16 @@ impl CircuitIR {
             );
         }
 
-        // Auto-BE promotion for the nodal path.
-        //
-        // The trap propagation operator `S*A_neg` is A-stable but not
-        // L-stable: on stiff nodal circuits its spectral radius can exceed 1
-        // and seed a stationary Nyquist-rate `(-1)^n` limit cycle in
-        // `v_prev`. Inaudible above SR/2 but large enough (observed A2/A1 ≈
-        // 1.73 on pipe-shouter small-signal) to wreck narrow post-circuit
-        // EQs and inflate RMS meters. BE is L-stable and always has ρ ≤ 1.
-        //
-        // The BE matrices are already built above as the transient BE
-        // fallback (`a_be_flat`, `a_neg_be_flat`, `s_be_flat`, `k_be_flat`,
-        // `rhs_const_be`). When trap is unstable we clone them into the
-        // primary slot and flip `alpha`/`solver_config.backward_euler` so
-        // every downstream emitter picks BE formulas. `config.force_trap`
-        // is the escape hatch for bisection only — trap on a circuit where
-        // the auto-detector fires produces a real Nyquist-rate artifact.
-        //
-        // Gate: `trap_needs_be(stability)` — promotes when (rho > 1.002) OR
-        // (rho > 0.999 AND dominant_sign < 0). The lower threshold for the
-        // Nyquist case catches noyce-cascaded-triodes (rho=0.9999, eigenvalue
-        // near -1) without false-firing on passive LC tanks (rho near +1,
-        // bilinear preserves exactly — gold-press cartridge regression).
-        //
-        // Additional `m > 0` gate (matching the DK path): pure-linear passive
-        // circuits have no nonlinear residual to seed the Nyquist mode, AND
-        // their Thevenin-stamped input nodes can produce a
-        // degenerate eigenvalue near -1 in `S·A_neg` that has no physical
-        // meaning (the input is driven externally each sample, so the
-        // input-row dynamics are arbitrary). Without the gate, an RC lowpass
-        // false-fires the discriminator. See augmented_mna_tests::
-        // test_no_inductors_exact_match.
-        //
-        // `config.router_dk_unstable` OR-branch: `routing::auto_route`
-        // already measured spectral radius on the un-reduced DK-kernel
-        // `S·A_neg` (no input-node deflation, fixed-iteration-count power
-        // method) and selected this nodal path BECAUSE it found trap
-        // unstable there. The nodal-local estimate above is the shared,
-        // converged, input-deflated analyzer (`stability::
-        // analyze_trap_stability_deflated`) on the nodal matrices, which
-        // can straddle the 1.002 threshold on the same circuit
-        // (wurli-power-amp: DK-kernel rho=1.0040, nodal-deflated
-        // rho=1.0005) because the router's own estimator is measurably
-        // less accurate (verified 2026-07-25: the router's raw number can
-        // be off by several percent from the converged/deflated value on
-        // the SAME kernel matrices — e.g. tungsten-thunder-horse measures
-        // 1.1163 raw vs 0.8157 converged+deflated, comfortably trap-stable).
-        // So the router's flag alone is NOT trustworthy as an unconditional
-        // override — verified with the golden-audio harness, blindly OR-ing
-        // it in reproduces wurli's fix but also force-promotes circuits
-        // whose nodal-local estimate shows they are NOT anywhere near
-        // marginal (severe, non-benign output deltas on
-        // tungsten-thunder-horse).
-        //
-        // Instead, require the nodal-local estimate to INDEPENDENTLY
-        // corroborate that this circuit is at least in the marginal
-        // Nyquist zone (`rho > TRAP_BE_SIGN_FLIP_RHO` with a negative
-        // dominant eigenvalue) before letting the router's finding lift the
-        // `max_abs_s` gain-gate exclusion. This still fixes wurli-power-amp
-        // (nodal-local rho=1.0005 > 0.999, sign=-1, gain=9.4e3 too low to
-        // pass the gain gate on its own — the router's corroborating
-        // "trap-unstable" finding is what tips a genuinely marginal,
-        // already-suspect case into promotion) while refusing to promote a
-        // circuit the nodal-local analysis reports as comfortably stable
-        // (rho=0.8157, nowhere near the marginal window) no matter what the
-        // less-accurate router number claims.
-        let clauses_fire = crate::codegen::stability::trap_needs_be(trap_stability);
-        // design review (2026-09-13): on a POSITIVE dominant sign, clause 1 promotes
-        // to BE only if BE actually STABILIZES the mode (rho_be <= limit). This
-        // distinguishes a numerical marginal +1 mode BE removes (e.g. an expanded
-        // parasitic-RB common-emitter stage whose trap map holds a stationary +1
-        // offset — promote, for noise fidelity) from a real growing pole BE cannot
-        // fix (a regenerative oscillator: rho_be still > 1 under the L-stable BE
-        // companion — keep trap, so its physical limit cycle is not over-damped).
-        // rho_be is the same quantity `log_be_post_promotion_check` reports, on the
-        // BE matrices already built above (`s_be_flat`, `a_neg_be_flat`). A negative
-        // dominant sign (Nyquist mode) is unchanged — it always promotes.
-        let local_needs_be = if clauses_fire && trap_stability.dominant_sign > 0.0 {
-            let rho_be = crate::codegen::stability::analyze_trap_stability_deflated(
-                &s_be_flat,
-                &a_neg_be_flat,
-                n,
-                &config.input_node_indices(),
-            )
-            .rho;
-            let be_stabilizes = rho_be <= crate::codegen::stability::BE_POST_PROMOTION_LIMIT;
-            if !be_stabilizes {
-                log::info!(
-                    "Nodal: growing mode at the DC operating point (spectral_radius(S*A_neg) = \
-                     {:.4}, dominant_sign +1) SURVIVES backward Euler \
-                     (spectral_radius(S_be*A_neg_be) = {:.4} > 1) — a real growing pole, as an \
-                     oscillator or latch is expected to have. Trapezoidal kept (BE would only \
-                     over-damp the physical limit cycle without stabilising it). Use \
-                     `.integrator be` / `--backward-euler` to force BE anyway.",
-                    trap_stability.rho,
-                    rho_be
-                );
-            }
-            be_stabilizes
-        } else {
-            clauses_fire
-        };
-        let router_corroborated_marginal =
-            crate::codegen::stability::router_corroborates_marginal_instability(
-                config.router_dk_unstable,
-                trap_stability,
-            );
-        if !be && !cfg_force_trap && m > 0 && (local_needs_be || router_corroborated_marginal) {
-            // One plain sentence by default; the eigenvalue detail is for
-            // whoever asks for it. A first-time user sees this on a five-line
-            // diode clipper and needs to know whether to act (they do not).
-            log::warn!(
-                "Using backward Euler integration: the trapezoidal rule would ring or grow at \
-                 Nyquist on this circuit. BE is stable, at the cost of slightly damping the top \
-                 octave (oversampling reduces that). No action needed; RUST_LOG=info for the \
-                 numbers."
-            );
-            log::info!(
-                "Nodal: auto-enabling backward Euler — spectral_radius(S*A_neg) = \
-                 {:.4} (nodal, input-deflated), dominant_sign = {:+.0}{}. BE is L-stable. \
-                 Override with --force-trap only to reproduce legacy trap output.",
-                trap_stability.rho,
-                trap_stability.dominant_sign,
-                if local_needs_be {
-                    format!(
-                        " ({})",
-                        if trap_stability.rho > crate::codegen::stability::TRAP_BE_PROMOTION_RHO {
-                            "trap unstable, mode would grow unboundedly"
-                        } else {
-                            "Nyquist-marginal trap mode that trap cannot damp \
-                             — fs/2 limit cycle in v_prev for high-gain cap-coupled cascades"
-                        }
-                    )
-                } else {
-                    format!(
-                        " (nodal-local estimate is in the marginal Nyquist zone but below the \
-                         gain-gated threshold; routing::auto_route independently flagged \
-                         trap-unstable via DK-kernel spectral radius {:.4} on the un-reduced \
-                         circuit — corroborated marginal case, honoring the router's finding)",
-                        config.router_dk_spectral_radius
-                    )
-                }
-            );
+        // Auto-BE promotion for the nodal path. The decision is the ring
+        // predicate's (`codegen::ring`), taken on the finished trapezoidal IR
+        // at its DC operating point; this build is repeated with `promoted`
+        // set (see `CircuitIR::ring_promotion`). The BE matrices are already
+        // built above as the transient fallback (`a_be_flat`,
+        // `a_neg_be_flat`, `s_be_flat`, `k_be_flat`, `rhs_const_be`); a
+        // promoted build clones them into the primary slot and flips
+        // `alpha`/`solver_config.backward_euler` so every downstream emitter
+        // picks BE formulas.
+        if promoted.is_some() && !be {
             alpha = alpha_be;
             a_flat = a_be_flat.clone();
             a_neg_flat = a_neg_be_flat.clone();
@@ -3985,6 +3865,7 @@ impl CircuitIR {
             behavioral_scalar_runtimes,
             trap_discriminator_rho,
             integrator_selection,
+            integration_reason: String::new(),
         };
         // Measured, not a gate (design review): a railing op-amp driving a
         // saturating inductor crosses the core's knee within one sample with

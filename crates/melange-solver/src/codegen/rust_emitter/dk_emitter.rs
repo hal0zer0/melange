@@ -555,6 +555,14 @@ fn provenance_json(
         "\"integration_source\":\"{}\",",
         ir.integrator_selection.integration_source()
     ));
+    if !ir.integration_reason.is_empty() {
+        s.push_str(&format!(
+            "\"integration_reason\":\"{}\",",
+            ir.integration_reason
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+        ));
+    }
     s.push_str(&format!(
         "\"backward_euler\":{},",
         ir.integrator_selection.is_backward_euler()

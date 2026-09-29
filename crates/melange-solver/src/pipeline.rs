@@ -432,7 +432,7 @@ pub fn apply_linearize_reductions(
     })
 }
 
-/// Auto-tune the NR iteration budget from routing + trap stability (Tier 3b).
+/// Auto-tune the NR iteration budget from routing and the integrator (Tier 3b).
 ///
 /// Shared by `compile`, `simulate`, and `analyze` so every command runs the
 /// same budget — simulate/analyze previously hardcoded 100 while compile
@@ -444,18 +444,21 @@ pub fn apply_linearize_reductions(
 /// Rationale for the numbers (kept verbatim from the original compile-path
 /// implementation): nodal full-LU is O(N³) per iteration — expensive iters
 /// that converge reliably, so a flat 50; DK Schur is O(M³) — cheap iters
-/// that may need more, so 50 + 5·M. A marginal-Nyquist circuit kept on TRAP
-/// has damped-NR convergence that slows sharply as ρ→1 (e.g. wurli-preamp,
-/// ρ≈1.0000, needs ~186 iters/sample), hence the +200 bonus when ρ > 0.999
-/// and the circuit actually stays on trapezoidal; a BE-promoted circuit
-/// converges in a few iters and must NOT inherit that worst-case bound.
+/// that may need more, so 50 + 5·M. A marginal-Nyquist circuit on
+/// TRAPEZOIDAL has damped-NR convergence that slows sharply as ρ→1 (e.g.
+/// wurli-preamp, ρ≈1.0000, needs ~186 iters/sample), hence the +200 bonus
+/// when ρ > 0.999 and `trapezoidal`; a backward-Euler build converges in a
+/// few iters and must NOT inherit that worst-case bound.
+///
+/// Whether a default build stays trapezoidal is decided later, on the
+/// finished IR (the ring predicate, `codegen::ring`). Callers therefore pass
+/// the budget for `trapezoidal = !backward_euler` as `max_iterations` and
+/// the `trapezoidal = false` budget as `max_iterations_be_promoted`.
 pub fn auto_tune_max_iter(
     user_max_iter: Option<usize>,
     kernel: &crate::dk::DkKernel,
     routing: &crate::codegen::routing::RoutingDecision,
-    backward_euler: bool,
-    force_trap: bool,
-    input_node_idx: usize,
+    trapezoidal: bool,
 ) -> usize {
     if let Some(n) = user_max_iter {
         return n;
@@ -468,20 +471,7 @@ pub fn auto_tune_max_iter(
     } else {
         50 + kernel.m * 5 // DK: scale with M (M=8 → 90 iters)
     };
-    // Will this circuit actually run on trapezoidal? Replicate the codegen
-    // auto-BE decision (ir.rs `auto_be`) so the iteration budget matches the
-    // integrator that ships.
-    let stays_trap = !backward_euler
-        && (force_trap
-            || !crate::codegen::stability::trap_needs_be(
-                crate::codegen::stability::analyze_trap_stability_deflated(
-                    &kernel.s,
-                    &kernel.a_neg,
-                    kernel.n,
-                    &[input_node_idx],
-                ),
-            ));
-    let stiffness_bonus = if routing.spectral_radius > 0.999 && stays_trap {
+    let stiffness_bonus = if routing.spectral_radius > 0.999 && trapezoidal {
         200
     } else if routing.spectral_radius > 0.95 {
         20

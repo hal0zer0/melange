@@ -578,7 +578,7 @@ Rl   out    0      100k
 #[test]
 fn forced_latch_matches_the_backward_euler_build() {
     for (spice, out_name, amp, f, active_set, tag) in [
-        (c2("1Meg"), "out", 5.0, F, false, "c2_open"),
+        (c2("10"), "out", 5.0, F, false, "c2_loaded"),
         (CHOKE_STAGE.to_string(), "out", 3.0, F, false, "choke"),
         (
             RAILING_CHOKE.to_string(),
@@ -784,16 +784,31 @@ fn c2_shared_core_saturates_on_magnetizing_not_winding_current() {
     // Open: magnetizing current saturates the core. Independent 1024x
     // reference of R + linear leakage + saturating magnetizing branch:
     // H3/H1 = 0.50460 (0.50513 without the air-core floor), i_mag/Isat = 4.999.
+    // The flux law is checked on the trapezoidal build. The shipped build is
+    // backward Euler: the open secondary's leakage mode rings at fs/2 from
+    // the input at -48 dB (the ring predicate promotes it), and BE's
+    // first-order error shows in H3/H1 (measured 0.50435).
     let spice = c2("1MEG");
-    let code = nodal_code(&spice, "out");
-    let row = &render(&code, &[5.0], "s.v_prev[OUTPUT_NODES[0]]", "0.0", "c2_open")[0];
-    let (h1, h3, bad) = (row[2], row[4], row[8]);
-    assert_eq!(bad, 0.0, "open: unsolved samples");
-    assert!(
-        (h3 / h1 - 0.50460).abs() <= 1e-4,
-        "open secondary H3/H1 {:.5} vs reference 0.50460",
-        h3 / h1
-    );
+    for (force_trap, tol, tag) in [(true, 1e-4, "c2_open_trap"), (false, 4e-4, "c2_open")] {
+        let mut config = support::config_for_spice(&spice, FS);
+        config.output_nodes = vec![node(&spice, "out")];
+        config.dc_block = false;
+        config.force_trap = force_trap;
+        let code = support::generate_circuit_code_nodal(&spice, &config).0;
+        assert_eq!(
+            code.contains("\"integration_source\":\"auto-promoted\""),
+            !force_trap,
+            "{tag}: the default build is promoted to backward Euler"
+        );
+        let row = &render(&code, &[5.0], "s.v_prev[OUTPUT_NODES[0]]", "0.0", tag)[0];
+        let (h1, h3, bad) = (row[2], row[4], row[8]);
+        assert_eq!(bad, 0.0, "{tag}: unsolved samples");
+        assert!(
+            (h3 / h1 - 0.50460).abs() <= tol,
+            "{tag}: open secondary H3/H1 {:.5} vs reference 0.50460",
+            h3 / h1
+        );
+    }
 }
 
 // ─── C3: single-ended DC-biased core — where H2 comes from ─────────────────
