@@ -70,6 +70,12 @@ fn generated_code_is_warning_free() {
     let c = config(|c| c.force_trap = true);
     let code = support::generate_circuit_code(DECK, &c).0;
     assert_warning_free(&code, "dk");
+    // DK with no nonlinear device (M = 0).
+    let rc = "rc\nR1 in out 1k\nC1 out 0 100n\n";
+    let mut c = support::config_for_spice(rc, 48000.0);
+    c.force_trap = true;
+    let code = support::generate_circuit_code(rc, &c).0;
+    assert_warning_free(&code, "dk_m0");
 }
 
 /// Active-set rail handling (pin detection, pinned resolve) on both nodal

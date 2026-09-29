@@ -71,6 +71,15 @@ impl RustEmitter {
         ));
         code.push_str("    const SINGULARITY_THRESHOLD: f64 = 1e-15;\n\n");
 
+        // DK keeps the first-order current predictor, where the nodal Schur
+        // Newton starts at full-LU's point (`emit_schur_warm_start`). Safe
+        // while DK cannot sub-step: without regeneration a step has one root,
+        // so the start changes only the iteration count; with regeneration DK
+        // has no rescue, so a failed jump exhausts MAX_ITER and is counted and
+        // refused. The exact start cost +21..100 % CPU on every DK deck with no
+        // reachable silent case (design review). Once DK gets a timestep cut, a
+        // rescued sample converges on whatever branch its start favours: the
+        // exact start must land WITH it (STATUS, "(iv) DK containment parity").
         code.push_str(
             "    // First-order predictor for NR warm start: i_guess = 2*i_nl[n-1] - i_nl[n-2]\n",
         );
