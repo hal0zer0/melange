@@ -131,6 +131,7 @@ pub fn apply_linearize_reductions(
     forward_active: &std::collections::HashSet<String>,
     grid_off_pentodes: &std::collections::HashMap<String, f64>,
     port_stamps: &[(usize, f64)],
+    opamp_rail_mode: crate::codegen::OpampRailMode,
     rep: Reporter<'_>,
 ) -> Result<LinearizeOutcome, PipelineError> {
     use crate::parser::Element;
@@ -184,7 +185,7 @@ pub fn apply_linearize_reductions(
     let dc_result = crate::dc_op::solve_dc_operating_point(
         mna,
         &device_slots,
-        &crate::dc_op::DcOpConfig::default(),
+        &crate::codegen::ir::dc_op_config(mna, opamp_rail_mode),
     );
 
     // Extract BJT small-signal g-params (gm, gpi, gmu, go) at DC bias.

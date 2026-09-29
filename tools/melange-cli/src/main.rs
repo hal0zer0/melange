@@ -4391,7 +4391,7 @@ fn run_dc_op(
     let requested_input: Option<String> =
         input_node_name.map(melange_solver::parser::normalize_node_name);
     use melange_solver::codegen::ir::CircuitIR;
-    use melange_solver::dc_op::{solve_dc_operating_point, DcOpConfig};
+    use melange_solver::dc_op::solve_dc_operating_point;
     use melange_solver::mna::MnaSystem;
     use melange_solver::parser::Netlist;
 
@@ -4500,17 +4500,11 @@ fn run_dc_op(
 
     // The input conductance is in `mna.g` (stamped above, as the build
     // stamps it); the DC OP solves the circuit it is given.
-    let dc_config = DcOpConfig {
-        // A railed op-amp sits where a default compile's rail mode puts it.
-        rail: melange_solver::codegen::ir::dc_rail_for(
-            melange_solver::codegen::ir::opamp_rail::resolve_opamp_rail_mode(
-                &mna,
-                melange_solver::codegen::OpampRailMode::Auto,
-            )
-            .mode,
-        ),
-        ..DcOpConfig::default()
-    };
+    // A railed op-amp sits where a default compile's rail mode puts it.
+    let dc_config = melange_solver::codegen::ir::dc_op_config(
+        &mna,
+        melange_solver::codegen::OpampRailMode::Auto,
+    );
 
     let result = solve_dc_operating_point(&mna, &device_slots, &dc_config);
 

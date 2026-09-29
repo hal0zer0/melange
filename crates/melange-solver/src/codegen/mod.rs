@@ -468,10 +468,6 @@ pub struct CodegenConfig {
     pub output_clamp_v: f64,
     /// Include DC operating point in generated code
     pub include_dc_op: bool,
-    /// Maximum NR iterations for DC operating point solver
-    pub dc_op_max_iterations: usize,
-    /// Convergence tolerance for DC operating point solver
-    pub dc_op_tolerance: f64,
     /// Include DC blocking filter on outputs (default true).
     /// Set to false for circuits with output coupling caps or when the downstream
     /// pipeline handles DC offset. Removes the 5Hz HPF and its settling time.
@@ -684,8 +680,6 @@ impl Default for CodegenConfig {
             output_scales: vec![1.0],
             output_clamp_v: 10.0,
             include_dc_op: true,
-            dc_op_max_iterations: 200,
-            dc_op_tolerance: 1e-9,
             dc_block: true,
             pot_settle_samples: 64,
             backward_euler: false,

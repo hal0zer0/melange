@@ -1812,38 +1812,6 @@ impl MnaSystem {
         }
     }
 
-    /// Stamp zero-bias BJT junction caps, solve the DC operating point, and
-    /// re-linearize the caps at that operating point. Convenience wrapper
-    /// combining `stamp_device_junction_caps` +
-    /// `crate::dc_op::solve_dc_operating_point` +
-    /// `relinearize_bjt_caps_at_dc_op`.
-    ///
-    /// Returns the solved `DcOpResult` so callers can forward it to
-    /// `CircuitIR::from_kernel_with_dc_op` and skip a redundant solve. If
-    /// the DC OP does not converge, the re-linearization step is skipped
-    /// and the zero-bias baseline is retained — the returned result still
-    /// carries `converged = false` so callers can downgrade gracefully.
-    ///
-    /// This is the preflight both the CLI codegen path and the SPICE
-    /// validation harness call before `DkKernel::from_mna` so the kernel's
-    /// precomputed `S = A^-1` reflects the BJT charge-storage params
-    /// (`TF`, `VJE`/`MJE`/`VJC`/`MJC`/`FC`) at the true bias point. With
-    /// default params (CJE = CJC = TF = 0 or VJE = VJC = 0.75, etc.) the
-    /// re-linearization is a no-op and the kernel is byte-identical to the
-    /// pre-2.1b behaviour.
-    pub fn stamp_caps_and_solve_dc_op(
-        &mut self,
-        device_slots: &[crate::device_types::DeviceSlot],
-        dc_op_config: &crate::dc_op::DcOpConfig,
-    ) -> crate::dc_op::DcOpResult {
-        self.stamp_device_junction_caps(device_slots);
-        let dc = crate::dc_op::solve_dc_operating_point(self, device_slots, dc_op_config);
-        if dc.converged {
-            self.relinearize_bjt_caps_at_dc_op(device_slots, &dc.v_nl, &dc.i_nl);
-        }
-        dc
-    }
-
     /// Every node name, ordered by MNA index — which is netlist appearance
     /// order, ground (`"0"`) first.
     ///

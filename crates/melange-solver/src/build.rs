@@ -707,6 +707,7 @@ pub fn build(
         &forward_active,
         &grid_off_pentodes,
         &port_stamps,
+        opamp_rail_mode,
         out,
     )?;
 
@@ -1203,15 +1204,11 @@ pub fn preflight_relinearize_bjt_caps(
     if device_slots.is_empty() {
         return None;
     }
-    // A railed op-amp sits where the transient's rail mode puts it.
-    let rail = crate::codegen::ir::dc_rail_for(
-        crate::codegen::ir::opamp_rail::resolve_opamp_rail_mode(mna, rail_mode).mode,
+    let dc = crate::dc_op::solve_dc_operating_point(
+        mna,
+        &device_slots,
+        &crate::codegen::ir::dc_op_config(mna, rail_mode),
     );
-    let dc_config = crate::dc_op::DcOpConfig {
-        rail,
-        ..crate::dc_op::DcOpConfig::default()
-    };
-    let dc = crate::dc_op::solve_dc_operating_point(mna, &device_slots, &dc_config);
     if dc.converged {
         mna.relinearize_bjt_caps_at_dc_op(&device_slots, &dc.v_nl, &dc.i_nl);
     }
