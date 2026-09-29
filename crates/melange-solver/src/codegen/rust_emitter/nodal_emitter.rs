@@ -9509,6 +9509,10 @@ impl RustEmitter {
         if m > 0 {
             Self::emit_nodal_voltage_limiting_indented(code, ir, &it);
         }
+        // Unwitnessed by design: this Newton starts from v_prev, so no reachable
+        // step crosses the knee and the limit never fires here. It is carried
+        // for parity (site-count tripwire in saturation_step_limit_tests.rs);
+        // a start that can jump (a predictor) would need a witness.
         if sat.is_some() {
             emit_sat_ind_step_limit(code, ir, "v_pin", "v_new", "alpha", &it);
         }
