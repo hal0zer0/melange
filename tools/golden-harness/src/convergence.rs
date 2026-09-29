@@ -92,10 +92,14 @@ const LAST_ITERS_KEY: &str = "last_nr_iterations";
 /// previous state was committed as the answer. Unlike the cap, this is not a
 /// degree of difficulty — it is a non-solution shipped as output.
 const HOLD_KEY: &str = "diag_nr_hold_count";
-/// Schur's equivalent: no hold, so an unconverged sample is committed as
-/// output instead of frozen. Same silent-wrong class, so it is ranked with the
-/// hold and fails the same gates (design review).
+/// An unconverged sample committed as output instead of frozen (DK, and a
+/// failed op-amp pin). Same silent-wrong class, so it is ranked with the hold
+/// and fails the same gates (design review).
 const UNCONVERGED_COMMIT_KEY: &str = "diag_nr_unconverged_commit_count";
+/// Every unsolved sample, whatever the mechanism: the sum of the two above,
+/// counted where each is counted. Present on every build since it was added;
+/// older baselines carry only the mechanism counters, summed as a fallback.
+const UNSOLVED_KEY: &str = "diag_unsolved_sample_count";
 
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[serde(rename_all = "kebab-case")]
@@ -229,19 +233,27 @@ pub fn assess(
     // fraction of that which is acceptable, so there is no threshold here.
     // A baseline with no hold key is left on its cap-based class: absence of
     // the counter is absence of evidence, not evidence of zero.
-    // Both mechanisms ship a sample that was never solved. full-LU freezes the
-    // previous state, Schur commits the diverged iterate; neither is a solution,
-    // so they share a class and a gate. A build declares only the one it has.
-    let hold_count = match (d.get(HOLD_KEY), d.get(UNCONVERGED_COMMIT_KEY)) {
-        (None, None) => None,
-        (a, b) => Some(a.copied().unwrap_or(0.0) + b.copied().unwrap_or(0.0)),
+    // Both mechanisms ship a sample that was never solved. The hold freezes
+    // the previous state; a committed sample (DK, or a failed op-amp pin) is
+    // the unconverged iterate. Neither is a solution, so they share a class and
+    // a gate. A build can declare both, so they are summed.
+    let hold_count = match (
+        d.get(UNSOLVED_KEY),
+        d.get(HOLD_KEY),
+        d.get(UNCONVERGED_COMMIT_KEY),
+    ) {
+        (Some(u), _, _) => Some(*u),
+        (None, None, None) => None,
+        (None, a, b) => Some(a.copied().unwrap_or(0.0) + b.copied().unwrap_or(0.0)),
     };
-    let hold_mechanism = if d.contains_key(UNCONVERGED_COMMIT_KEY) {
-        Some("unconverged-commit (schur)")
-    } else if d.contains_key(HOLD_KEY) {
-        Some("death-spiral hold (full-lu)")
-    } else {
-        None
+    let hold_mechanism = match (
+        d.contains_key(HOLD_KEY),
+        d.contains_key(UNCONVERGED_COMMIT_KEY),
+    ) {
+        (true, true) => Some("death-spiral hold + unconverged commit"),
+        (true, false) => Some("death-spiral hold"),
+        (false, true) => Some("unconverged commit"),
+        (false, false) => None,
     };
     let hold_fraction = hold_count.map(|h| h / internal as f64);
     if hold_count.is_some_and(|h| h > 0.0) {

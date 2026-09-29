@@ -2265,8 +2265,13 @@ fn compile_circuit_source(
     // defaults (TF = 0, CJE = CJC = 0, etc.). See the SPICE validation
     // harness for the matching call site — the two paths must agree so a
     // plugin built from `melange compile` behaves like the validated one.
-    let dc_preflight =
-        preflight_relinearize_bjt_caps(&mut mna, &netlist, input_node_idx, input_resistance, opamp_rail_mode);
+    let dc_preflight = preflight_relinearize_bjt_caps(
+        &mut mna,
+        &netlist,
+        input_node_idx,
+        input_resistance,
+        opamp_rail_mode,
+    );
 
     // Step 3: Create DK kernel
     // Use augmented MNA for inductor circuits (well-conditioned for large L)
@@ -2760,7 +2765,10 @@ fn compile_circuit_source(
         }
     }
     if meta_rail_pin_shown(&generated.meta.dc_op_rail_pin) {
-        println!("    Railed op-amps at DC: {}", generated.meta.dc_op_rail_pin);
+        println!(
+            "    Railed op-amps at DC: {}",
+            generated.meta.dc_op_rail_pin
+        );
     }
     if !forward_active.is_empty() {
         println!(
@@ -4176,8 +4184,13 @@ fn simulate_circuit_source(
     // BJT junction-cap preflight — see compile path for rationale. Keeping
     // simulate in sync with compile means `melange simulate` hears the
     // same plugin the user will eventually `melange compile`.
-    let dc_preflight =
-        preflight_relinearize_bjt_caps(&mut mna, &netlist, input_node_idx, input_resistance, opts.opamp_rail_mode);
+    let dc_preflight = preflight_relinearize_bjt_caps(
+        &mut mna,
+        &netlist,
+        input_node_idx,
+        input_resistance,
+        opts.opamp_rail_mode,
+    );
 
     // Step 4: Build DK kernel and route
     let has_inductors = !mna.inductors.is_empty()
@@ -4440,12 +4453,16 @@ fn simulate_circuit_source(
         &SUBSAMPLE_FIRE_DIAG_FIELDS
             .iter()
             .copied()
-            // The death-spiral hold counter exists on nodal full-LU only; nodal
-            // Schur and DK (M > 0) have no hold and count the unsolved sample
-            // they commit instead. Presence-filtered like the rest, so a build
-            // stays silent rather than reporting a reassuring zero for a
-            // mechanism it does not have.
-            .chain(["diag_nr_hold_count", "diag_nr_unconverged_commit_count"])
+            // The unsolved-sample counters exist only where their mechanism
+            // does (the hold on nodal builds with a Newton solve; the committed
+            // count on DK and wherever a failed op-amp pin is committed).
+            // Presence-filtered like the rest, so a build stays silent rather
+            // than reporting a reassuring zero for a mechanism it does not have.
+            .chain([
+                "diag_unsolved_sample_count",
+                "diag_nr_hold_count",
+                "diag_nr_unconverged_commit_count",
+            ])
             .chain(INPUT_DIAG_FIELDS)
             .filter(|f| declares_state_field(&generated.code, f))
             .collect::<Vec<&str>>(),
@@ -4497,8 +4514,13 @@ fn simulate_circuit_source(
     // below reads them here rather than re-scanning the rendered buffer.
     let mut diag_peak: Option<f64> = None;
     let mut diag_max_abs_v_prev: Option<f64> = None;
+    // The two unsolved-sample counters: the death-spiral hold, and a failed
+    // op-amp pin (or a DK Newton) whose iterate was committed. A nodal build
+    // with an active-set pin declares both, so they are kept apart.
     let mut nr_hold_count: Option<u64> = None;
-    let mut unsolved_is_hold = true;
+    let mut nr_commit_count: Option<u64> = None;
+    // The unified count every build declares; it is what the verb refuses on.
+    let mut unsolved_count: Option<u64> = None;
     // Counters that mean the solver had to WORK, not that anything is wrong.
     // Printed as a bare list they read as a hazard panel a newcomer cannot
     // interpret: is `region_exit_count: 0` good? is 5 bad? Nothing said.
@@ -4522,12 +4544,10 @@ fn simulate_circuit_source(
                 println!("    {}: {}", parts[0], parts[1]);
                 match parts[0] {
                     "nr_max_iter_count" => nr_max_iter_count = parts[1].trim().parse().ok(),
-                    // full-LU freezes, Schur commits the diverged iterate. A build
-                    // declares exactly one; both mean "not a solution".
-                    "nr_hold_count" | "nr_unconverged_commit_count" => {
-                        nr_hold_count = parts[1].trim().parse().ok();
-                        unsolved_is_hold = parts[0] == "nr_hold_count";
-                    }
+                    // Both mean "not a solution"; see nr_commit_count above.
+                    "unsolved_sample_count" => unsolved_count = parts[1].trim().parse().ok(),
+                    "nr_hold_count" => nr_hold_count = parts[1].trim().parse().ok(),
+                    "nr_unconverged_commit_count" => nr_commit_count = parts[1].trim().parse().ok(),
                     "samples" => diag_samples = parts[1].trim().parse().ok(),
                     "peak" => diag_peak = parts[1].trim().parse().ok(),
                     "max_abs_v_prev" => diag_max_abs_v_prev = parts[1].trim().parse().ok(),
@@ -4629,38 +4649,42 @@ fn simulate_circuit_source(
     //
     // Fail, do not warn. The whole failure mode is that it looks fine
     // (design review).
-    if let Some(held) = nr_hold_count.filter(|h| *h > 0) {
+    let held = nr_hold_count.unwrap_or(0);
+    let committed = nr_commit_count.unwrap_or(0);
+    let total = unsolved_count.unwrap_or(held + committed);
+    if total > 0 {
         let of = diag_samples
             .map(|s| format!(" of {s} output samples"))
             .unwrap_or_default();
-        eprintln!();
-        if unsolved_is_hold {
+        if held > 0 {
+            eprintln!();
             eprintln!(
                 "ERROR: {held} sample(s){of} were never solved. Every Newton path failed there \
-                 (trapezoidal, sub-step and backward-Euler), so the solver committed the PREVIOUS \
-                 state as the output. Those samples are not a solution to this circuit.\n\
+                 (the solve, the sub-step and, on a trapezoidal build, backward Euler), so the \
+                 solver committed the PREVIOUS state as the output. Those samples are not a \
+                 solution to this circuit.\n\
                  \n\
                  The rendered file looks healthy — a held value is bounded and smooth, so peak, \
                  RMS and the waveform cannot show it. Under a held input the hold is also a fixed \
                  point: the next sample re-poses the identical problem and fails identically, so \
-                 one hard sample can freeze the render to its end.\n\
-                 \n\
-                 The WAV was still written, so you can listen to what it did. Do not treat it as \
-                 this circuit's output. Re-run with --allow-nr-hold to accept it anyway."
-            );
-        } else {
-            eprintln!(
-                "ERROR: {held} sample(s){of} were never solved. The final Newton solve (the \
-                 trapezoidal one, or the backward-Euler fallback when it ran) ended unconverged, \
-                 and the solver committed that iterate as the output. Those samples are not a \
-                 solution to this circuit, and a bounded, smooth render does not show it.\n\
-                 \n\
-                 The WAV was still written, so you can listen to what it did. Do not treat it as \
-                 this circuit's output. Re-run with --allow-nr-hold to accept it anyway."
+                 one hard sample can freeze the render to its end."
             );
         }
+        if committed > 0 {
+            eprintln!();
+            eprintln!(
+                "ERROR: {committed} sample(s){of} were never solved. The final Newton solve (an \
+                 op-amp rail pin, or the DK solve) ended unconverged, and the solver committed \
+                 that iterate as the output. Those samples are not a solution to this circuit, \
+                 and a bounded, smooth render does not show it."
+            );
+        }
+        eprintln!(
+            "\nThe WAV was still written, so you can listen to what it did. Do not treat it as \
+             this circuit's output. Re-run with --allow-nr-hold to accept it anyway."
+        );
         if !opts.allow_nr_hold {
-            anyhow::bail!("{held} sample(s) were never solved (--allow-nr-hold to override)");
+            anyhow::bail!("{total} sample(s) were never solved (--allow-nr-hold to override)");
         }
         eprintln!("(--allow-nr-hold given: continuing.)");
     }
@@ -4922,8 +4946,13 @@ fn analyze_freq_response(
     // BJT junction-cap preflight — see compile path for rationale. Analyze
     // must match compile so the harmonic / frequency-response curve reflects
     // what the user will hear in the generated plugin.
-    let dc_preflight =
-        preflight_relinearize_bjt_caps(&mut mna, &netlist, input_node_idx, input_resistance, opamp_rail_mode);
+    let dc_preflight = preflight_relinearize_bjt_caps(
+        &mut mna,
+        &netlist,
+        input_node_idx,
+        input_resistance,
+        opamp_rail_mode,
+    );
 
     // Build DK kernel and route
     let has_inductors = !mna.inductors.is_empty()
@@ -6270,7 +6299,11 @@ fn run_dc_op(
         );
         print!(
             "\"rail_pin\":\"{}\",",
-            result.rail_pin.label().replace('\\', "\\\\").replace('"', "\\\"")
+            result
+                .rail_pin
+                .label()
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
         );
         print!("\"n\":{},\"m\":{},", mna.n, mna.m);
 

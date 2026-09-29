@@ -174,6 +174,20 @@ file:line, oomox-relative):
   `lib.rs:962-981`); `settle_dc_op`'s fallback detection reads
   `diag_nr_max_iter_count` exclusively. Renaming or repurposing a diag counter
   is an API + test break.
+- **`diag_unsolved_sample_count` (2026-09-29)**: ONE always-present field on
+  every generated build (DK and both nodal sub-paths, any integrator, M = 0
+  included, where it is a constant 0): every sample that was never solved,
+  whatever the mechanism. **The plugin-test assertion is
+  `diag_unsolved_sample_count == 0`**; a test need not know which route or
+  failure mechanism its circuit compiles to. The mechanism counters stay as
+  detail and are route-dependent: `diag_nr_hold_count` wherever a nodal Newton
+  solve can end unsolved (a nodal-Schur build with devices now runs the full-LU
+  sub-step ladder and the same hold, and no longer declares
+  `diag_nr_unconverged_commit_count`); `diag_nr_unconverged_commit_count` on DK
+  (M > 0) and wherever a failed op-amp pin is committed (full-LU with an
+  active-set rail mode, Schur with no devices). `diag_substep_count` can now be
+  nonzero on Schur builds. Like every counter, it includes the warm-up samples
+  `default()`/`reset()` run.
 - **DK diag semantics (2026-09-29)**: `diag_voltage_damp_count` now counts only
   UNSOLVED samples whose step was contained; a converged sample is never damped
   (it used to be, silently). `== 0` stays true on a healthy stream, and a

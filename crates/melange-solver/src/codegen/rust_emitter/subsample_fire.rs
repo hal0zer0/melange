@@ -676,7 +676,7 @@ fn emit_cached_build(
 
 /// The per-sample block. Replaces the plain `emit_stateful_update` splice on
 /// the nodal-Schur path when the feature is active. Expects in scope: `input`,
-/// `input_conductance`, `injections` (if `.inject`), `converged`, `v` (mut),
+/// `input_conductance`, `injections` (if `.inject`), `trap_ok` (trapezoidal builds), `v` (mut),
 /// `i_nl` (mut), `state`.
 pub(super) fn emit_subsample_fire_block(
     ir: &CircuitIR,
@@ -773,7 +773,7 @@ pub(super) fn emit_subsample_fire_block(
          {i1}let mut ssf_cur: usize = 0;\n\
          {i1}let mut ssf_builds: u32 = 0;\n\
          {i1}let mut ssf_reuses: u32 = 0;\n",
-        seg_be = if be_primary { "true" } else { "!converged" },
+        seg_be = if be_primary { "true" } else { "!trap_ok" },
         q_init = if carries_q_dot(ir) {
             // q_dot at the segment start, and at the whole-sample solution
             // (the first segment's end until a segment is re-solved).

@@ -102,6 +102,27 @@ pub struct CompiledCircuit {
     pub m: usize,
 }
 
+/// The number of unsolved samples of a build, as a Rust expression over the
+/// state `recv`: `diag_unsolved_sample_count`, which every build declares; for
+/// a build that predates it, the sum of the mechanism counters it declares
+/// (the death-spiral hold, the committed unconverged iterate), or `0u64`.
+#[allow(dead_code)]
+pub fn unsolved_expr(code: &str, recv: &str) -> String {
+    if code.contains("pub diag_unsolved_sample_count: ") {
+        return format!("{recv}.diag_unsolved_sample_count");
+    }
+    let fields: Vec<String> = ["diag_nr_hold_count", "diag_nr_unconverged_commit_count"]
+        .into_iter()
+        .filter(|f| code.contains(&format!("pub {f}: ")))
+        .map(|f| format!("{recv}.{f}"))
+        .collect();
+    if fields.is_empty() {
+        "0u64".to_string()
+    } else {
+        format!("({})", fields.join(" + "))
+    }
+}
+
 // ── Low-level: compile_and_run ─────────────────────────────────────────
 
 /// Compile circuit code + custom main, run the binary, return output.

@@ -132,23 +132,27 @@ file — grep it rather than assuming:
 *solution*. When every Newton path fails on a sample, the generated code still
 has to emit something, and what it emits is bounded and smooth — so peak, RMS,
 clipping indicators and the waveform on your scope all look entirely healthy.
-**No level-based check can find this.** One counter can.
+**No level-based check can find this.** One counter can:
+`diag_unsolved_sample_count`. It is present on every generated build, whatever
+the solver route (always 0 where no Newton solve exists), and counts every
+sample that was never solved. Assert it is zero; that is the whole check. Read
+it after a render, or poll it per block.
 
-Exactly one of these is present on `CircuitState`, chosen by the solver route
-the circuit took. Read it after a render, or poll it per block:
+Two mechanism counters carry the detail. Each exists only where its mechanism
+does, and a build can have both; the unified count is their sum:
 
-| Field | Route | What a nonzero value means |
-|-------|-------|----------------------------|
-| `diag_nr_hold_count` | nodal full-LU | Every path failed and the PREVIOUS sample's state was committed as this sample's output. Under a constant input this is a fixed point: the next sample re-poses the identical problem and fails identically, so the circuit can stay frozen until the input changes. |
-| `diag_nr_unconverged_commit_count` | nodal Schur | Every path failed and the DIVERGED ITERATE was committed. The state still moves, so the solver can recover on its own — but those samples were never solved. |
+| Field | Present on | What a nonzero value means |
+|-------|-----------|----------------------------|
+| `diag_nr_hold_count` | nodal builds with a Newton solve (any nonlinear device, behavioral source or saturating inductor), both sub-paths | Every path failed (the solve, the sub-step ladder and, on a trapezoidal build, backward Euler) and the PREVIOUS sample's state was committed as this sample's output. Under a constant input this is a fixed point: the next sample re-poses the identical problem and fails identically, so the circuit can stay frozen until the input changes. |
+| `diag_nr_unconverged_commit_count` | DK builds with devices; nodal full-LU builds with an active-set op-amp pin; nodal Schur builds with an active-set pin and no devices | The final solve (a DK Newton solve, or an op-amp's pinned solve) ended unconverged and that iterate was committed. The state still moves, so the solver can recover on its own — but those samples were never solved. |
 
-Neither field exists on DK-routed circuits, and the full-LU field is absent on
-builds with no hold path. That is deliberate: a counter that is always zero
-because the mechanism cannot occur reads as reassurance, so the field is simply
-not there. Check with a `contains` on the generated source, or match on its
-absence.
+A mechanism field is absent where its mechanism cannot occur, so a counter that
+could never move does not read as reassurance. Code that must work on any
+build reads the unified count instead.
 
-Both are `u64`, cleared by `reset()`, and free to read on the audio thread.
+All three are `u64`, cleared by `reset()`, and free to read on the audio
+thread. They count every sample `process_sample` ran, including the silent
+warm-up samples `CircuitState::default()` and `reset()` run.
 
 Treat nonzero as "this render is not trustworthy", not as "quality degraded".
 It is not a rounding error: measured on one deck, 43199 held samples out of

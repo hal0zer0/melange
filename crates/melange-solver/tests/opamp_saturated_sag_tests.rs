@@ -39,8 +39,9 @@ fn render(code: &str, amp: f64, freq: f64, n: usize, tag: &str) -> Vec<f64> {
         let y = process_sample(u, &mut s)[0];
         println!(\"{{:.17e}}\", y);
     }}
-    assert_eq!(s.diag_nr_unconverged_commit_count, 0);
-}}"
+    assert_eq!({unsolved}, 0);
+}}",
+        unsolved = support::unsolved_expr(code, "s"),
     );
     support::compile_and_run(code, &main, tag).parse_samples()
 }
@@ -94,17 +95,20 @@ fn pin_engagement_and_release_are_continuous() {
         );
         let shipped = code(&deck, OpampRailMode::ActiveSet);
         let worst = |code: &str, tag: &str| -> f64 {
-            let main = "fn main() {
+            let main = format!(
+                "fn main() {{
     let mut s = CircuitState::default();
     s.set_sample_rate(48000.0);
-    for i in 0..2400usize {
+    for i in 0..2400usize {{
         let u = (2.0 * std::f64::consts::PI * 100.0 * i as f64 / 48000.0).sin();
         let y = process_sample(u, &mut s)[0];
-        println!(\"{:.17e} {:.17e}\", y, s.v_prev[NODE_INV]);
-    }
-    assert_eq!(s.diag_nr_unconverged_commit_count, 0);
-}";
-            let out = support::compile_and_run(code, main, tag);
+        println!(\"{{:.17e}} {{:.17e}}\", y, s.v_prev[NODE_INV]);
+    }}
+    assert_eq!({unsolved}, 0);
+}}",
+                unsolved = support::unsolved_expr(code, "s"),
+            );
+            let out = support::compile_and_run(code, &main, tag);
             let rows: Vec<(f64, f64)> = out
                 .stdout
                 .lines()
@@ -126,7 +130,11 @@ fn pin_engagement_and_release_are_continuous() {
                 if pinned[e] == pinned[e + 1] || e < 4 || e + 4 >= dv.len() {
                     continue;
                 }
-                let side: Vec<usize> = if pinned[e] { (e + 1..e + 4).collect() } else { (e - 3..e).collect() };
+                let side: Vec<usize> = if pinned[e] {
+                    (e + 1..e + 4).collect()
+                } else {
+                    (e - 3..e).collect()
+                };
                 let neighbour = side.iter().map(|&j| dv[j]).fold(0.0, f64::max);
                 worst = worst.max(dv[e] / neighbour);
             }
@@ -149,7 +157,10 @@ fn pin_engagement_and_release_are_continuous() {
         assert_ne!(mutant, shipped);
         let rm = worst(&mutant, &format!("sag_edge_mutant_{load}"));
         eprintln!("{load}: terminal-detection mutant {rm:.3}");
-        assert!(rm > 1.1, "{load}: the mutant's jump ({rm:.2}x) is not caught");
+        assert!(
+            rm > 1.1,
+            "{load}: the mutant's jump ({rm:.2}x) is not caught"
+        );
     }
 }
 
@@ -166,7 +177,13 @@ fn a_railed_at_rest_output_starts_on_its_load_line() {
         (OpampRailMode::ActiveSetBe, 14.0 / 1.2),
         (OpampRailMode::Hard, 14.0),
     ] {
-        let y = render(&code(deck, mode), 0.0, 1000.0, 48, &format!("sag_rest_{mode:?}"));
+        let y = render(
+            &code(deck, mode),
+            0.0,
+            1000.0,
+            48,
+            &format!("sag_rest_{mode:?}"),
+        );
         for (n, v) in y.iter().enumerate() {
             assert!(
                 (v - line).abs() < 1e-6,
@@ -219,7 +236,10 @@ fn the_rail_pin_outcome_is_surfaced_and_its_fallback_is_counted() {
     );
     assert!(fell_back.rail_pin.label().starts_with("FELL BACK"));
     let unpinned = fell_back.v_node[mna.node_map["out"] - 1];
-    assert!((unpinned - 14.0 / 1.2).abs() > 1.0, "fallback DC OP {unpinned} V");
+    assert!(
+        (unpinned - 14.0 / 1.2).abs() > 1.0,
+        "fallback DC OP {unpinned} V"
+    );
 }
 
 /// The runtime DC OP recompute (DK route, hard rail mode here) places a
@@ -253,9 +273,15 @@ fn the_runtime_recompute_keeps_a_railed_output_on_its_rail() {
 }";
     let out = support::compile_and_run(&code, main, "sag_runtime_recompute");
     let dc = out.parse_kv("dc").unwrap();
-    assert!((dc - 14.0).abs() < 1e-9, "recomputed DC OP {dc} V, the hard limit is 14 V");
+    assert!(
+        (dc - 14.0).abs() < 1e-9,
+        "recomputed DC OP {dc} V, the hard limit is 14 V"
+    );
     for (n, y) in out.parse_samples().iter().enumerate() {
-        assert!((y - 14.0).abs() < 1e-9, "sample {n} at {y} V after the recompute");
+        assert!(
+            (y - 14.0).abs() < 1e-9,
+            "sample {n} at {y} V after the recompute"
+        );
     }
     // Mutant: write back the first, unpinned solve (the old recompute).
     let mutant = code.replace("        if next_pins == rail_pins {", "        if true {");
@@ -263,5 +289,8 @@ fn the_runtime_recompute_keeps_a_railed_output_on_its_rail() {
     let m = support::compile_and_run(&mutant, main, "sag_runtime_recompute_mutant");
     let dc_m = m.parse_kv("dc").unwrap();
     eprintln!("unpinned recompute: DC OP {dc_m} V");
-    assert!(dc_m > 20.0, "the mutant's unclamped DC OP ({dc_m} V) is not caught");
+    assert!(
+        dc_m > 20.0,
+        "the mutant's unclamped DC OP ({dc_m} V) is not caught"
+    );
 }

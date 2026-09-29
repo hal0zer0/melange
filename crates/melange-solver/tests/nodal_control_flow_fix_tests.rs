@@ -688,10 +688,20 @@ Rld2 out_ac 0 100k
         code[fallback..].contains("// --- Active-set op-amp rail resolve ---"),
         "the backward-Euler solve must carry the pin-and-resolve"
     );
-    // No 2x sub-step and no sub-step matrices.
-    for gone in ["const N_SUB", "S_SUB_DEFAULT", "a_neg_sub", "s_ni_sub"] {
+    // No reduced (Schur-space) sub-step and no sub-step kernels: the only
+    // sub-step is the shared full-N ladder...
+    for gone in ["const N_SUB", "S_SUB_DEFAULT", "s_ni_sub"] {
         assert!(!code.contains(gone), "{gone} must not be emitted");
     }
+    // ...keyed on a Newton failure alone: a rail engagement does not enter it.
+    let ladder = find(&code, "'substep: for subdiv_power", "sub-step ladder");
+    let ladder_gate = code[..ladder]
+        .rfind("    if !converged {")
+        .expect("ladder gate");
+    assert!(
+        ladder_gate < converged && !code[ladder_gate..ladder].contains("active_set_engaged"),
+        "the trapezoidal ladder must run before the rail verdict and ignore it"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════

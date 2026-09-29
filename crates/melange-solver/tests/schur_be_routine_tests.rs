@@ -92,8 +92,9 @@ fn run(
         let _ = process_sample({amp:?} * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / {FS:?}).sin(), &mut s);
         println!(\"{{:.17e}}\", s.v_prev[{out}]);
     }}
-    if s.diag_nr_unconverged_commit_count != 0 {{ println!(\"unsolved {{}}\", s.diag_nr_unconverged_commit_count); }}
-}}"
+    if {unsolved} != 0 {{ println!(\"unsolved {{}}\", {unsolved}); }}
+}}",
+        unsolved = support::unsolved_expr(&code, "s"),
     );
     let stdout = support::compile_and_run(&code, &main, tag).stdout;
     let mut v = Vec::new();

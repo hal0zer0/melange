@@ -107,6 +107,13 @@ pub struct CircuitState {
     /// bound and was scaled back to it. A converged sample is never damped.
     /// Any nonzero value is a symptom to investigate.
     pub diag_voltage_damp_count: u64,
+    /// Diagnostic: samples that were NEVER SOLVED, whatever the route and the
+    /// failure mechanism (a death-spiral hold, or an unconverged iterate
+    /// committed). Present on every generated build (always 0 where no Newton
+    /// solve exists). A nonzero value means this render contains samples that
+    /// are not solutions; `melange validate`, `simulate` and the golden harness
+    /// refuse on it. The mechanism-specific counters are detail.
+    pub diag_unsolved_sample_count: u64,
 {% if m > 0 %}    /// Diagnostic: samples committed although their final Newton solve (the
     /// trapezoidal one, or the BE fallback when it ran) ended unconverged. DK
     /// has no hold or timestep cut, so such a sample ships as output: a
@@ -308,6 +315,7 @@ impl Default for CircuitState {
             diag_magnitude_reset_count: 0,
             diag_singular_matrix_count: 0,
             diag_voltage_damp_count: 0,
+            diag_unsolved_sample_count: 0,
 {% if m > 0 %}            diag_nr_unconverged_commit_count: 0,
 {% endif %}            diag_substep_count: 0,
             diag_region_exit_count: 0,
@@ -432,6 +440,7 @@ impl CircuitState {
         self.diag_magnitude_reset_count = 0;
         self.diag_singular_matrix_count = 0;
         self.diag_voltage_damp_count = 0;
+        self.diag_unsolved_sample_count = 0;
 {% if m > 0 %}        self.diag_nr_unconverged_commit_count = 0;
 {% endif %}        self.diag_substep_count = 0;
         self.diag_region_exit_count = 0;

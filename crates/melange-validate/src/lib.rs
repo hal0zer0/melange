@@ -1094,8 +1094,8 @@ pub fn run_generated_solver(
     //
     // Build-conditional counters are added by presence, so a build that does
     // not declare one still compiles:
-    // - the unsolved-sample counter (the nodal full-LU death-spiral hold, or
-    //   the unconverged commit of nodal Schur and DK);
+    // - the unsolved-sample count (`diag_unsolved_sample_count`: the nodal
+    //   death-spiral hold plus every committed unconverged iterate);
     // - the input sanitisation (clamp to INPUT_LIMIT_V, NaN -> 0) and the
     //   output clamp.
     // The lines are part of the template by construction. They used to be
@@ -1104,16 +1104,26 @@ pub fn run_generated_solver(
     // line's indentation), so validate never saw these counters.
     // Matched on the field declaration: generated comments name the counters
     // on builds that do not declare them.
-    let unsolved_field = if code.contains("pub diag_nr_hold_count: ") {
-        Some("diag_nr_hold_count")
-    } else if code.contains("pub diag_nr_unconverged_commit_count: ") {
-        Some("diag_nr_unconverged_commit_count")
+    // Every unsolved sample: the always-present unified counter, or on a
+    // build that predates it the sum of the mechanism counters it declares.
+    let unsolved_fields: Vec<&str> = if code.contains("pub diag_unsolved_sample_count: ") {
+        vec!["diag_unsolved_sample_count"]
     } else {
-        None
+        ["diag_nr_hold_count", "diag_nr_unconverged_commit_count"]
+            .into_iter()
+            .filter(|f| code.contains(&format!("pub {f}: ")))
+            .collect()
     };
-    let mut extra_diag: String = unsolved_field
-        .map(|f| format!("    eprintln!(\"DIAG:nr_hold_count={{}}\", state.{f});\n"))
-        .unwrap_or_default();
+    let mut extra_diag: String = if unsolved_fields.is_empty() {
+        String::new()
+    } else {
+        let sum = unsolved_fields
+            .iter()
+            .map(|f| format!("state.{f}"))
+            .collect::<Vec<_>>()
+            .join(" + ");
+        format!("    eprintln!(\"DIAG:nr_hold_count={{}}\", {sum});\n")
+    };
     for f in [
         "diag_input_clamp_count",
         "diag_input_nan_count",

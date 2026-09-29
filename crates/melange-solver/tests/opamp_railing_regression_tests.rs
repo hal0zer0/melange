@@ -101,11 +101,12 @@ fn render(oversampling: usize) -> Vec<(f64, f64, f64, f64, f64, u64)> {
                 oa_hi = oa_hi.max(s.v_prev[{oa}]);
             }}
         }}
-        let bad = s.diag_nr_unconverged_commit_count + s.diag_magnitude_reset_count + s.diag_nan_reset_count;
+        let bad = {unsolved} + s.diag_magnitude_reset_count + s.diag_nan_reset_count;
         println!(\"{{amp}} {{pk}} {{n1}} {{oa_lo}} {{oa_hi}} {{bad}}\");
     }}
 }}",
-        drives = drives.join(", ")
+        drives = drives.join(", "),
+        unsolved = support::unsolved_expr(&code, "s"),
     );
     let run = support::compile_and_run(&code, &main, &format!("railing_{oversampling}x"));
     run.stdout

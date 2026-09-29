@@ -24,6 +24,27 @@ generated state is smaller.
 
 ### Fixed
 
+- **A nodal-Schur build now cuts the timestep when its Newton solve fails,
+  instead of shipping the diverged iterate.** Nodal full-LU builds re-solve a
+  failed sample at up to 64 sub-steps; nodal Schur builds had no such rescue
+  (a backward-Euler build had nothing at all after a failed solve), so the
+  failed iterate was committed as output. Both sub-paths now run the same
+  sub-step ladder after every Newton solve, under that solve's integrator. It
+  re-solves the full system, so a Schur rescue is the full-LU rescue. On an
+  IC-seeded transistor astable at 192 kHz the Schur render went from c3 swinging
+  −200..+37 V on an 8 V rail (1335 unsolved samples) to bounded with none. A
+  sample every path fails is now held, as on full-LU, and counted in
+  `diag_unsolved_sample_count` (see *Changed*).
+
+- **Generated code for an active-set op-amp build compiles under `-D warnings`
+  again.** The rail detection line carried redundant parentheses
+  (`unused_parens`).
+
+- **`simulate` and `validate` count every unsolved sample.** A build can
+  declare both unsolved-sample counters (the hold, and a failed op-amp pin that
+  is committed); `simulate` kept only the last one it read and `validate` only
+  the hold, so a nonzero count could be masked by a zero one.
+
 - **The runtime DC-operating-point recompute (`--emit-dc-op-recompute`) now
   keeps a railed op-amp output on its rail.** It solved the linear op-amp
   model, so a pot move on a circuit whose op-amp sits railed at rest set the
@@ -322,6 +343,18 @@ generated state is smaller.
   the line and element they came from.
 
 ### Changed
+
+- **Every generated build has `diag_unsolved_sample_count`**, the number of
+  samples that were never solved, whatever the solver route and the failure
+  mechanism (always 0 where there is no Newton solve). A plugin test asserts
+  this one field is zero; `simulate`, `validate` and the golden harness refuse
+  on it. The mechanism counters remain as detail and follow the mechanism, not
+  the route: `diag_nr_hold_count` on every nodal build with a Newton solve
+  (both sub-paths), `diag_nr_unconverged_commit_count` on DK and wherever a
+  failed op-amp pin is committed (full-LU, and a Schur build with no nonlinear
+  devices). A Schur build with devices no longer declares
+  `diag_nr_unconverged_commit_count`: a failed pin there goes to the
+  backward-Euler solve and then the hold.
 
 - **A self-starting oscillator is no longer built on the DK solver.** When
   the operating point has a growing pole the circuit leaves it on its own,

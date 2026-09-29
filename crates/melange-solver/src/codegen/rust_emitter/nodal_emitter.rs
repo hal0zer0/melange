@@ -525,6 +525,27 @@ fn emit_chord_cache(code: &mut String, ir: &CircuitIR, src: &str, indent: &str, 
     }
 }
 
+/// True when a Newton solve in this build can end unsolved, so the
+/// death-spiral hold and its `diag_nr_hold_count` exist: any nonlinear device,
+/// behavioral source or saturating inductor. The same rule on both nodal
+/// routes (behavioral sources and saturating inductors always route full-LU).
+fn emits_hold(ir: &CircuitIR) -> bool {
+    ir.topology.m > 0 || !ir.behavioral_sources.is_empty() || !ir.saturating_inductors.is_empty()
+}
+
+/// Whether a failed op-amp pin at `site` is committed (and counted in
+/// `diag_nr_unconverged_commit_count`) rather than handed to the sample's
+/// `converged`. See [`RustEmitter::emit_nodal_active_set_resolve`].
+fn pin_failure_is_committed(ir: &CircuitIR, site: &PinSite<'_>) -> bool {
+    matches!(site, PinSite::FullLu { .. }) || ir.topology.m == 0
+}
+
+/// True when some pin in this build commits its failure: the build declares
+/// `diag_nr_unconverged_commit_count`.
+fn counts_unconverged_commit(ir: &CircuitIR, full_nodal: bool) -> bool {
+    emits_active_set_resolve(ir) && (full_nodal || ir.topology.m == 0)
+}
+
 /// Whether a nodal build can emit the active-set pinned resolve at all.
 fn emits_active_set_resolve(ir: &CircuitIR) -> bool {
     matches!(
@@ -534,6 +555,105 @@ fn emits_active_set_resolve(ir: &CircuitIR) -> bool {
         .opamps
         .iter()
         .any(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite())
+}
+
+/// The node-space KCL residual helpers (`kcl_residual`, `kcl_residual_inl`)
+/// the Newton convergence gate and the Armijo line search read: the full-LU
+/// Newton, and the sub-step ladder on both nodal routes. Emitted when M > 0.
+fn emit_kcl_residual_fns(
+    ir: &CircuitIR,
+    setter_stamps: &std::collections::BTreeSet<(usize, usize)>,
+) -> String {
+    let n = ir.topology.n;
+    let n_nodes = if ir.topology.n_nodes > 0 {
+        ir.topology.n_nodes
+    } else {
+        n
+    };
+    let mut code = String::new();
+    // Shared node-space KCL residual helper, generic over the A matrix +
+    // rhs so the trap (state.a/rhs), sub-step (a_sub/rhs_s) and BE
+    // (state.a_be/rhs_be) sites share one implementation. Returns
+    // (||F||_2, all-node-rows-within-tolerance) for F = A·v - rhs -
+    // N_i·i_nl(N_v·v) over node rows 0..N_NODES. The ||.||_2 drives the
+    // Armijo ratio test; the bool is the always-checked convergence gate.
+    code.push_str(
+        "/// Node-space KCL residual for the nodal NR convergence gate and\n\
+         /// Armijo line search. `F = A·v - rhs - N_i·i_nl(N_v·v)` over node rows\n\
+         /// 0..N_NODES. Returns `(||F||_2, all_rows_within_tol, ||F||_inf)`. Generic over the\n\
+         /// A matrix + rhs so the trap / sub-step / BE sites share one body.\n",
+    );
+    code.push_str("#[inline]\n");
+    code.push_str(
+        "fn kcl_residual(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], state: &CircuitState) -> (f64, bool, f64) {\n",
+    );
+    // Shared residual tail: `q = N_i·i_nl`, then `||F||_2` over node rows
+    // with the sparse `A·v` matvec. Emitted verbatim into BOTH residual
+    // functions below, so `kcl_residual` (device-evaluating) and
+    // `kcl_residual_inl` (`i_nl` reused) are bit-for-bit identical past the
+    // point i_nl is available — the guarantee the r0 CSE rests on.
+    //
+    // The `A·v` term dominates this residual (it runs >=2x per NR iteration
+    // via the convergence gate + Armijo r0). Emit it sparsely over the
+    // structural nonzeros of the raw forward A — a byte-identical transform
+    // (skipped columns are structural zeros). Fall back to the dense sweep
+    // only when the forward matrices are unavailable.
+    let mut tail = String::new();
+    tail.push_str("    let mut q = [0.0f64; N];\n");
+    tail.push_str(&emit_sparse_ni_matvec_add(ir, "q", "i_nl", "    "));
+    tail.push_str("    let mut norm_sq = 0.0f64;\n");
+    tail.push_str("    let mut max_abs = 0.0f64;\n");
+    tail.push_str("    let mut ok = true;\n");
+    match emit_sparse_a_residual_matvec(ir, setter_stamps, n_nodes, "    ") {
+        Some(sparse) => tail.push_str(&sparse),
+        None => {
+            tail.push_str(&format!("    for i in 0..{n_nodes} {{\n"));
+            tail.push_str("        let mut acc = -rhs[i] - q[i];\n");
+            tail.push_str("        let mut den = rhs[i].abs().max(q[i].abs());\n");
+            tail.push_str("        for j in 0..N {\n");
+            tail.push_str("            let t = amat[i][j] * v[j];\n");
+            tail.push_str("            acc += t;\n");
+            tail.push_str("            let a = t.abs(); if a > den { den = a; }\n");
+            tail.push_str("        }\n");
+            tail.push_str("        norm_sq += acc * acc;\n");
+            tail.push_str("        max_abs = max_abs.max(acc.abs());\n");
+            // Per-node relative KCL tolerance: same RELTOL=1e-3 as the
+            // device and sat-inductor residual checks, with a 1e-9 A
+            // absolute floor so a node carrying ~zero net current does not
+            // demand an unreachable tolerance.
+            tail.push_str("        if !(acc.abs() <= 1e-3 * den + 1e-9) { ok = false; }\n");
+            tail.push_str("    }\n");
+        }
+    }
+    tail.push_str("    (norm_sq.sqrt(), ok, max_abs)\n");
+    tail.push_str("}\n\n");
+
+    // (1) Device-evaluating residual — used by the always-checked
+    // convergence gate (at v_new) and the Armijo backtrack trials (at
+    // v + s·alpha·d). Evaluates i_nl at N_v·v via the device model.
+    code.push_str("    let mut v_nl_final = [0.0f64; M];\n");
+    code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_final", "v", "    "));
+    code.push_str("    let mut i_nl = [0.0f64; M];\n");
+    RustEmitter::emit_nodal_device_evaluation_final(&mut code, ir, "    ", "v");
+    code.push_str(&tail);
+
+    // (2) i_nl-reusing residual for the Armijo r0 only. The main NR body
+    // already evaluated i_nl at this exact v (same N_v·v — no pnjlim on the
+    // eval voltage, limiting is applied to the *step* — and the same
+    // #[inline(always)] device fn as `_final`), so F(v) is bit-identical to
+    // (1) without re-running the per-device parasitic inner-NR. Only r0
+    // qualifies: the convergence gate is at v_new and the backtrack trials
+    // are at v + s·alpha·d, both different v, and keep (1).
+    code.push_str(
+        "/// KCL residual reusing an already-computed `i_nl` (Armijo r0 CSE);\n\
+         /// bit-identical to `kcl_residual` when `i_nl == i_nl(N_v·v)`.\n",
+    );
+    code.push_str("#[inline]\n");
+    code.push_str(
+        "fn kcl_residual_inl(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], i_nl: &[f64; M]) -> (f64, bool, f64) {\n",
+    );
+    code.push_str(&tail);
+    code
 }
 
 /// Newton step limiter on each saturating inductor's branch-current row.
@@ -2446,12 +2566,14 @@ impl RustEmitter {
         };
         // The dense `lu_solve` helper is emitted whenever any generated code
         // path needs it. The full-LU nodal path always needs it. The Schur
-        // path also needs it when op-amp rail handling is in `ActiveSet` mode,
-        // because the post-NR constrained resolve does one dense LU solve per
-        // clamp-active sample. Without this gate the Schur path would
-        // reference an undefined function and fail to compile.
+        // path needs it for the sub-step ladder (M > 0), and when op-amp rail
+        // handling is in `ActiveSet` mode, because the post-NR constrained
+        // resolve does one dense LU solve per clamp-active sample. Without this
+        // gate the Schur path would reference an undefined function and fail
+        // to compile.
         use crate::codegen::OpampRailMode;
         let needs_lu_solve = use_full_nodal
+            || ir.topology.m > 0
             || (matches!(
                 ir.solver_config.opamp_rail_mode,
                 OpampRailMode::ActiveSet | OpampRailMode::ActiveSetBe
@@ -2586,12 +2708,20 @@ impl RustEmitter {
                     rho_pair
                 );
             }
-            // Schur path doesn't emit lu_solve by default, but active-set
-            // resolve needs it. Emit it on demand.
+            // The Schur solve itself needs no N×N LU; the active-set resolve
+            // and the sub-step ladder (M > 0) do, and the ladder also reads the
+            // node-space KCL residual.
             if needs_lu_solve {
                 code.push_str(&Self::emit_nodal_lu_solve(ir, equil_pat.as_ref()));
             }
-            code.push_str(&Self::emit_nodal_schur_process_sample(ir, &noise)?);
+            if ir.topology.m > 0 {
+                code.push_str(&emit_kcl_residual_fns(ir, &setter_stamps));
+            }
+            code.push_str(&Self::emit_nodal_schur_process_sample(
+                ir,
+                &noise,
+                &setter_stamps,
+            )?);
         }
 
         if ir.solver_config.oversampling_factor > 1 {
@@ -2680,10 +2810,10 @@ impl RustEmitter {
             "pub const MAX_ITER: usize = {};\n\n",
             effective_max_iter(ir)
         ));
-        // Only the full-LU sub-step has a depth ladder; Schur sub-steps at a
-        // fixed N_SUB = 2. Emitting the bound on a Schur build would publish a
-        // number that governs nothing there.
-        if use_full_nodal {
+        // The sub-step ladder runs wherever a Newton solve can fail: every
+        // full-LU build, and a Schur build with devices. Emitting the bound
+        // elsewhere would publish a number that governs nothing.
+        if use_full_nodal || m > 0 {
             code.push_str(
                 "/// Deepest timestep subdivision the adaptive sub-step will try before\n\
              /// giving up: 2^SUBSTEP_MAX_POWER, i.e. 64x.\n\
@@ -3359,13 +3489,12 @@ impl RustEmitter {
         // must exist whenever any op-amp has a finite SR — independent of
         // pots/switches. Behavioral B-source circuits (forced nodal) with a
         // slew-limited op-amp and no pots/switches exposed this gap.
-        // The full-LU adaptive sub-stepping block also reads it (its
-        // `alpha_sub` must track the runtime sample rate, not the baked
-        // codegen rate), so the field is emitted for every nonlinear /
-        // behavioral full-LU circuit as well.
+        // The adaptive sub-step ladder also reads it (its `alpha_sub` must
+        // track the runtime sample rate, not the baked codegen rate), so the
+        // field is emitted for every build with a Newton solve on either
+        // nodal route.
         let has_opamp_slew = ir.opamps.iter().any(|oa| oa.sr.is_finite());
-        let has_full_lu_substep = use_full_nodal
-            && (m > 0 || !ir.behavioral_sources.is_empty() || !ir.saturating_inductors.is_empty());
+        let has_substep_ladder = emits_hold(ir);
         // Device self-heating reads `state.current_sample_rate` for its
         // thermal dt (emit_self_heating_thermal_updates, DK parity) — the
         // field must exist even for a Schur-routed thermal circuit with no
@@ -3384,7 +3513,7 @@ impl RustEmitter {
         // live sample rate (fs-invariant time constant), so it needs the field.
         let needs_current_sr = needs_rebuild_state
             || has_opamp_slew
-            || has_full_lu_substep
+            || has_substep_ladder
             || has_thermal_sr_consumer
             || has_stateful
             || ir.solver_config.runtime_be_latch;
@@ -3615,14 +3744,22 @@ impl RustEmitter {
         code.push_str("    pub diag_region_exit_count: u64,\n");
         code.push_str("    /// Diagnostic: number of backward Euler fallback activations\n");
         code.push_str("    pub diag_be_fallback_count: u64,\n");
-        // Declared ONLY where the mechanism exists. A Schur build has no
-        // death-spiral hold — it commits the diverged iterate instead — so
-        // declaring the field there would report a permanent, reassuring zero
+        code.push_str(
+            "    /// Diagnostic: samples that were NEVER SOLVED, whatever the route and\n\
+             \x20   /// the failure mechanism (a death-spiral hold, or an unconverged\n\
+             \x20   /// iterate committed). Present on every generated build (always 0\n\
+             \x20   /// where no Newton solve exists). A nonzero value means this render\n\
+             \x20   /// contains samples that are not solutions; `melange validate`,\n\
+             \x20   /// `simulate` and the golden harness refuse on it. The\n\
+             \x20   /// mechanism-specific counters below are detail.\n",
+        );
+        code.push_str("    pub diag_unsolved_sample_count: u64,\n");
+        // Declared ONLY where the mechanism exists: a build with no Newton
+        // solve that can end unsolved would report a permanent, reassuring zero
         // for something that cannot happen, which is the same misleading-
         // diagnostic shape this counter was added to remove.
-        let emits_hold = use_full_nodal
-            && (m > 0 || !ir.behavioral_sources.is_empty() || !ir.saturating_inductors.is_empty());
-        if emits_hold {
+        let hold = emits_hold(ir);
+        if hold {
             code.push_str(
                 "    /// Diagnostic: samples on which EVERY Newton path failed (trap +\n\
              \x20   /// sub-step + BE) and the death-spiral hold committed the PREVIOUS\n\
@@ -3646,31 +3783,15 @@ impl RustEmitter {
             );
             code.push_str("    pub diag_nr_hold_count: u64,\n");
         }
-        // Schur's equivalent: no hold, so an unconverged sample is COMMITTED.
-        // Full-LU declares it too when it can pin an op-amp: a pinned solve
-        // that does not converge is committed, not held.
-        let counts_unconverged_commit = !use_full_nodal || emits_active_set_resolve(ir);
-        if use_full_nodal && counts_unconverged_commit {
+        // A pinned solve that does not converge is committed, not held, where
+        // no Newton solve takes its outcome (see pin_failure_is_committed).
+        if counts_unconverged_commit(ir, use_full_nodal) {
             code.push_str(
                 "    /// Diagnostic: samples whose op-amp rail pin (the active-set pinned\n\
                  \x20   /// Newton) did not converge, or whose pinned system was singular,\n\
                  \x20   /// and whose iterate was committed anyway. Counted at the failure,\n\
                  \x20   /// once per internal (oversampled) sample. Nonzero means this render\n\
                  \x20   /// contains samples that were never solved (design review).\n",
-            );
-            code.push_str("    pub diag_nr_unconverged_commit_count: u64,\n");
-        }
-        if !use_full_nodal {
-            code.push_str(
-                "    /// Diagnostic: samples committed to the output after every Newton\n\
-                 \x20   /// path failed (trapezoidal, sub-step and the BE fallback).\n\
-                 \x20   ///\n\
-                 \x20   /// The Schur path has no death-spiral hold: where full-LU keeps the\n\
-                 \x20   /// previous state, this commits the DIVERGED ITERATE. Same silent-wrong\n\
-                 \x20   /// class — a sample that is not a solution, shipped as output — without\n\
-                 \x20   /// the freeze, because the committed state moves and the solver can\n\
-                 \x20   /// walk back out. Nonzero means this render contains samples that were\n\
-                 \x20   /// never solved (design review).\n",
             );
             code.push_str("    pub diag_nr_unconverged_commit_count: u64,\n");
         }
@@ -4135,10 +4256,11 @@ impl RustEmitter {
         code.push_str("            diag_nr_max_iter_count: 0,\n");
         code.push_str("            diag_region_exit_count: 0,\n");
         code.push_str("            diag_be_fallback_count: 0,\n");
-        if emits_hold {
+        code.push_str("            diag_unsolved_sample_count: 0,\n");
+        if emits_hold(ir) {
             code.push_str("            diag_nr_hold_count: 0,\n");
         }
-        if !use_full_nodal || emits_active_set_resolve(ir) {
+        if counts_unconverged_commit(ir, use_full_nodal) {
             code.push_str("            diag_nr_unconverged_commit_count: 0,\n");
         }
         code.push_str("            diag_be_latch_count: 0,\n");
@@ -4405,10 +4527,11 @@ impl RustEmitter {
         code.push_str("        self.diag_nr_max_iter_count = 0;\n");
         code.push_str("        self.diag_region_exit_count = 0;\n");
         code.push_str("        self.diag_be_fallback_count = 0;\n");
-        if emits_hold {
+        code.push_str("        self.diag_unsolved_sample_count = 0;\n");
+        if emits_hold(ir) {
             code.push_str("        self.diag_nr_hold_count = 0;\n");
         }
-        if !use_full_nodal || emits_active_set_resolve(ir) {
+        if counts_unconverged_commit(ir, use_full_nodal) {
             code.push_str("        self.diag_nr_unconverged_commit_count = 0;\n");
         }
         code.push_str("        self.diag_be_latch_count = 0;\n");
@@ -5656,6 +5779,7 @@ impl RustEmitter {
     pub(super) fn emit_nodal_schur_process_sample(
         ir: &CircuitIR,
         noise: &NoiseEmission,
+        setter_stamps: &std::collections::BTreeSet<(usize, usize)>,
     ) -> Result<String, CodegenError> {
         let m = ir.topology.m;
         let os_factor = ir.solver_config.oversampling_factor;
@@ -5766,7 +5890,7 @@ impl RustEmitter {
             "    ",
             ir.topology.m > 0 || ir.solver_config.breakpoint_be,
         );
-        Self::emit_schur_solve(&mut code, ir, noise)?;
+        Self::emit_schur_solve(&mut code, ir, noise, setter_stamps)?;
 
         // NaN/Inf recovery: shared reset + DC-OP return. Schur path has no
         // cross-timestep chord LU to invalidate, so is_full_lu = false.
@@ -5781,6 +5905,11 @@ impl RustEmitter {
         // caps `|i_in| ≤ SR*C_dom`. Emitted only for op-amps with finite
         // SR; circuits without `SR=` in the .model generate identical code.
         Self::emit_opamp_slew_limit(&mut code, ir, "    ", "v");
+
+        // Every Newton path failed: keep the previous state (shared with full-LU).
+        if m > 0 {
+            Self::emit_death_spiral_hold(&mut code, ir, false);
+        }
 
         // Runtime BE-latch detector (updates state.be_latched for next sample).
         Self::emit_be_latch_detector(&mut code, ir, "    ");
@@ -5800,18 +5929,6 @@ impl RustEmitter {
         }
 
         // State update
-        //
-        // Schur has no death-spiral hold: whatever `v` holds is committed, even
-        // when every Newton path failed. That is an unconverged sample shipped
-        // as output — the same silent-wrong class as the full-LU hold, minus the
-        // freeze, since the committed state moves and the solver can walk out.
-        // Count it so it is not invisible (design review).
-        code.push_str(
-            "    if state.last_nr_iterations >= MAX_ITER as u32 {\n\
-             \x20       // Every path failed; the diverged iterate is about to be committed.\n\
-             \x20       state.diag_nr_unconverged_commit_count += 1;\n\
-             \x20   }\n",
-        );
         code.push_str("    // State update\n");
         emit_q_dot_commit(
             &mut code,
@@ -6552,13 +6669,7 @@ impl RustEmitter {
         noise: &NoiseEmission,
         setter_stamps: &std::collections::BTreeSet<(usize, usize)>,
     ) -> String {
-        let n = ir.topology.n;
         let m = ir.topology.m;
-        let n_nodes = if ir.topology.n_nodes > 0 {
-            ir.topology.n_nodes
-        } else {
-            n
-        };
         let os_factor = ir.solver_config.oversampling_factor;
         // Multi-input ports (M=0 only): see emit_nodal_schur_process_sample.
         // Multi-input is CLI-restricted to M==0 && OS==1, so the sub-step /
@@ -6604,88 +6715,7 @@ impl RustEmitter {
 
         let mut code = String::new();
         if use_line_search {
-            // Shared node-space KCL residual helper, generic over the A matrix +
-            // rhs so the trap (state.a/rhs), sub-step (a_sub/rhs_s) and BE
-            // (state.a_be/rhs_be) sites share one implementation. Returns
-            // (||F||_2, all-node-rows-within-tolerance) for F = A·v - rhs -
-            // N_i·i_nl(N_v·v) over node rows 0..N_NODES. The ||.||_2 drives the
-            // Armijo ratio test; the bool is the always-checked convergence gate.
-            code.push_str(
-                "/// Node-space KCL residual for the full-LU NR convergence gate and\n\
-                 /// Armijo line search. `F = A·v - rhs - N_i·i_nl(N_v·v)` over node rows\n\
-                 /// 0..N_NODES. Returns `(||F||_2, all_rows_within_tol, ||F||_inf)`. Generic over the\n\
-                 /// A matrix + rhs so the trap / sub-step / BE sites share one body.\n",
-            );
-            code.push_str("#[inline]\n");
-            code.push_str(
-                "fn kcl_residual(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], state: &CircuitState) -> (f64, bool, f64) {\n",
-            );
-            // Shared residual tail: `q = N_i·i_nl`, then `||F||_2` over node rows
-            // with the sparse `A·v` matvec. Emitted verbatim into BOTH residual
-            // functions below, so `kcl_residual` (device-evaluating) and
-            // `kcl_residual_inl` (`i_nl` reused) are bit-for-bit identical past the
-            // point i_nl is available — the guarantee the r0 CSE rests on.
-            //
-            // The `A·v` term dominates this residual (it runs >=2x per NR iteration
-            // via the convergence gate + Armijo r0). Emit it sparsely over the
-            // structural nonzeros of the raw forward A — a byte-identical transform
-            // (skipped columns are structural zeros). Fall back to the dense sweep
-            // only when the forward matrices are unavailable.
-            let mut tail = String::new();
-            tail.push_str("    let mut q = [0.0f64; N];\n");
-            tail.push_str(&emit_sparse_ni_matvec_add(ir, "q", "i_nl", "    "));
-            tail.push_str("    let mut norm_sq = 0.0f64;\n");
-            tail.push_str("    let mut max_abs = 0.0f64;\n");
-            tail.push_str("    let mut ok = true;\n");
-            match emit_sparse_a_residual_matvec(ir, setter_stamps, n_nodes, "    ") {
-                Some(sparse) => tail.push_str(&sparse),
-                None => {
-                    tail.push_str(&format!("    for i in 0..{n_nodes} {{\n"));
-                    tail.push_str("        let mut acc = -rhs[i] - q[i];\n");
-                    tail.push_str("        let mut den = rhs[i].abs().max(q[i].abs());\n");
-                    tail.push_str("        for j in 0..N {\n");
-                    tail.push_str("            let t = amat[i][j] * v[j];\n");
-                    tail.push_str("            acc += t;\n");
-                    tail.push_str("            let a = t.abs(); if a > den { den = a; }\n");
-                    tail.push_str("        }\n");
-                    tail.push_str("        norm_sq += acc * acc;\n");
-                    tail.push_str("        max_abs = max_abs.max(acc.abs());\n");
-                    // Per-node relative KCL tolerance: same RELTOL=1e-3 as the
-                    // device and sat-inductor residual checks, with a 1e-9 A
-                    // absolute floor so a node carrying ~zero net current does not
-                    // demand an unreachable tolerance.
-                    tail.push_str("        if !(acc.abs() <= 1e-3 * den + 1e-9) { ok = false; }\n");
-                    tail.push_str("    }\n");
-                }
-            }
-            tail.push_str("    (norm_sq.sqrt(), ok, max_abs)\n");
-            tail.push_str("}\n\n");
-
-            // (1) Device-evaluating residual — used by the always-checked
-            // convergence gate (at v_new) and the Armijo backtrack trials (at
-            // v + s·alpha·d). Evaluates i_nl at N_v·v via the device model.
-            code.push_str("    let mut v_nl_final = [0.0f64; M];\n");
-            code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_final", "v", "    "));
-            code.push_str("    let mut i_nl = [0.0f64; M];\n");
-            Self::emit_nodal_device_evaluation_final(&mut code, ir, "    ", "v");
-            code.push_str(&tail);
-
-            // (2) i_nl-reusing residual for the Armijo r0 only. The main NR body
-            // already evaluated i_nl at this exact v (same N_v·v — no pnjlim on the
-            // eval voltage, limiting is applied to the *step* — and the same
-            // #[inline(always)] device fn as `_final`), so F(v) is bit-identical to
-            // (1) without re-running the per-device parasitic inner-NR. Only r0
-            // qualifies: the convergence gate is at v_new and the backtrack trials
-            // are at v + s·alpha·d, both different v, and keep (1).
-            code.push_str(
-                "/// KCL residual reusing an already-computed `i_nl` (Armijo r0 CSE);\n\
-                 /// bit-identical to `kcl_residual` when `i_nl == i_nl(N_v·v)`.\n",
-            );
-            code.push_str("#[inline]\n");
-            code.push_str(
-                "fn kcl_residual_inl(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], i_nl: &[f64; M]) -> (f64, bool, f64) {\n",
-            );
-            code.push_str(&tail);
+            code.push_str(&emit_kcl_residual_fns(ir, setter_stamps));
         }
         code.push_str(&section_banner(
             "PROCESS SAMPLE (Full-nodal NR with LU solve)",
@@ -6860,25 +6890,7 @@ impl RustEmitter {
         // this protection too. Without it the diverged trap iterate is committed
         // to v_prev unconditionally — and with the fallbacks below gated off for
         // behavioral circuits, a genuine trap failure now relies on this hold.
-        if m > 0 || !ir.behavioral_sources.is_empty() || !ir.saturating_inductors.is_empty() {
-            code.push_str("    if !converged {\n");
-            code.push_str(
-                "        // NR failed on all paths — keep previous state, invalidate chord.\n\
-                 \x20       // THIS SAMPLE IS NOT A SOLUTION. It is bounded and smooth, so no\n\
-                 \x20       // level measurand can see it; diag_nr_hold_count is the witness.\n",
-            );
-            code.push_str("        state.diag_nr_hold_count += 1;\n");
-            code.push_str("        v = state.v_prev;\n");
-            if carries_q_dot(ir) {
-                code.push_str("        q_sub = Some(state.q_dot);\n");
-            }
-            code.push_str("        i_nl = state.i_nl_prev;\n");
-            code.push_str("        chord_valid = false;\n");
-            if has_be_instance(ir) {
-                code.push_str("        state.chord_be_valid = false;\n");
-            }
-            code.push_str("    }\n\n");
-        }
+        Self::emit_death_spiral_hold(&mut code, ir, true);
 
         // Runtime BE-latch detector (updates state.be_latched for next sample).
         Self::emit_be_latch_detector(&mut code, ir, "    ");
@@ -7190,6 +7202,460 @@ impl RustEmitter {
             emit_sat_ind_history(code, ir, "rhs", "state.v_prev", &site.sat_alpha, "    ");
             code.push('\n');
         }
+    }
+
+    /// The death-spiral hold, one rule for both nodal routes: when every
+    /// Newton path failed (the solve, the sub-step ladder and, on a
+    /// trapezoidal build, the backward-Euler solve with its own ladder), the
+    /// sample commits the PREVIOUS state, not the diverged iterate, and
+    /// `diag_nr_hold_count` counts it. `full_lu` adds the invalidation of the
+    /// cross-sample chord factorisations, which only full-LU keeps. Emitted
+    /// wherever a Newton solve can end unsolved; see [`emits_hold`].
+    fn emit_death_spiral_hold(code: &mut String, ir: &CircuitIR, full_lu: bool) {
+        if !emits_hold(ir) {
+            return;
+        }
+        code.push_str("    if !converged {\n");
+        if full_lu {
+            code.push_str(
+                "        // NR failed on all paths — keep previous state, invalidate chord.\n",
+            );
+        } else {
+            code.push_str("        // NR failed on all paths — keep previous state.\n");
+        }
+        code.push_str(
+            "        // THIS SAMPLE IS NOT A SOLUTION. It is bounded and smooth, so no\n\
+             \x20       // level measurand can see it; diag_nr_hold_count is the witness.\n",
+        );
+        code.push_str("        state.diag_nr_hold_count += 1;\n");
+        code.push_str("        state.diag_unsolved_sample_count += 1;\n");
+        code.push_str("        v = state.v_prev;\n");
+        if carries_q_dot(ir) {
+            code.push_str("        q_sub = Some(state.q_dot);\n");
+        }
+        code.push_str("        i_nl = state.i_nl_prev;\n");
+        if full_lu {
+            code.push_str("        chord_valid = false;\n");
+            if has_be_instance(ir) {
+                code.push_str("        state.chord_be_valid = false;\n");
+            }
+        }
+        code.push_str("    }\n\n");
+    }
+
+    /// The adaptive sub-step ladder: when this sample's Newton solve failed,
+    /// cut the timestep (2x .. 2^SUBSTEP_MAX_POWER) and re-solve the full
+    /// N-dimensional system under the integrator of the solve it rescues
+    /// (`be`), from the live G/C. One ladder for both nodal routes, called after
+    /// each Newton solve (a Schur build is a reduced form of the same
+    /// equations, so its rescue solves them in full). `full_nodal` names the
+    /// route, which only decides where the live G/C are held.
+    /// Reads the caller's `converged`, `input`, `state`; on success writes `v`,
+    /// `i_nl`, `q_sub` (charge state) and sets `converged`.
+    pub(super) fn emit_substep_ladder(
+        code: &mut String,
+        ir: &CircuitIR,
+        noise: &NoiseEmission,
+        setter_stamps: &std::collections::BTreeSet<(usize, usize)>,
+        be: bool,
+        full_nodal: bool,
+    ) {
+        let n = ir.topology.n;
+        let m = ir.topology.m;
+        let n_nodes = if ir.topology.n_nodes > 0 {
+            ir.topology.n_nodes
+        } else {
+            n
+        };
+        let multi_input = ir.solver_config.num_inputs() > 1;
+        let has_sat_ind = !ir.saturating_inductors.is_empty();
+        let inject_or_tap = ir.solver_config.has_inject_or_tap();
+        let use_line_search = m > 0;
+        if ir.behavioral_sources.is_empty() {
+            // Adaptive sub-stepping: when trapezoidal NR fails, subdivide the timestep
+            // and retry with tighter capacitor conductances. This is how ngspice handles
+            // positive-feedback circuits (compressor sidechains, oscillators, etc.).
+            code.push_str("    // Adaptive sub-stepping: retry with subdivided timestep\n");
+            code.push_str("    if !converged {\n");
+            code.push_str("        'substep: for subdiv_power in 1..=SUBSTEP_MAX_POWER {\n");
+            code.push_str(
+                "            let subdiv = 1u32 << subdiv_power; // 2 .. 2^SUBSTEP_MAX_POWER\n",
+            );
+            // alpha_sub tracks the RUNTIME host rate (× oversampling), not
+            // the compile-time codegen rate — a baked literal here made the
+            // sub-step matrices inconsistent with the state matrices after
+            // any `set_sample_rate` to a non-codegen rate.
+            // The sub-step must solve the SAME scheme the build is pinned to.
+            // It used to be hard-wired trapezoidal, so a deck that pinned BE
+            // got trap sub-steps behind its back — and the sub-step fires at
+            // discontinuities, which is exactly where the two schemes differ
+            // (measured 3.51 V vs 6.57 V against a BE-pinned reference at the
+            // step edge). A silent integrator swap inside the recovery path is
+            // the same class of defect as a silent wrong answer (design review).
+            if be {
+                code.push_str(
+                "            // Backward Euler: alpha = 1/dt, matching the pinned scheme.\n            let alpha_sub = state.current_sample_rate * OVERSAMPLING_FACTOR as f64 * subdiv as f64;\n",
+            );
+            } else {
+                code.push_str(
+                "            let alpha_sub = 2.0 * state.current_sample_rate * OVERSAMPLING_FACTOR as f64 * subdiv as f64;\n",
+            );
+            }
+            // From the same G/C `rebuild_matrices` reads (the setters'
+            // working copies when there are knobs).
+            let (g_src, c_src) = live_g_c(ir, full_nodal, "state");
+            code.push_str("            // Rebuild A and A_neg at finer timestep\n");
+            code.push_str("            let mut a_sub = [[0.0f64; N]; N];\n");
+            code.push_str("            let mut a_neg_sub = [[0.0f64; N]; N];\n");
+            code.push_str("            for i in 0..N {\n");
+            code.push_str("                for j in 0..N {\n");
+            code.push_str(&format!(
+                "                    a_sub[i][j] = {g_src}[i][j] + alpha_sub * {c_src}[i][j];\n"
+            ));
+            // Charge form: the history is alpha*C under both integrators.
+            code.push_str(&format!(
+                "                    a_neg_sub[i][j] = alpha_sub * {c_src}[i][j];\n"
+            ));
+            code.push_str("                }\n");
+            code.push_str("            }\n");
+            // Zero the algebraic rows (as the baked A_neg does)
+            for (lo, hi) in history_zero_row_ranges(ir) {
+                code.push_str(&format!(
+                    "            for i in {}..{} {{ for j in 0..N {{ a_neg_sub[i][j] = 0.0; }} }}\n",
+                    lo, hi
+                ));
+            }
+            // Gmin on A_sub — 1e-12, matching every other Gmin stamp in the
+            // nodal emitter (1e-6 was strong enough to skew high-impedance
+            // nodes by an audible amount on sub-stepped samples).
+            code.push_str("            for i in 0..N_NODES { a_sub[i][i] += 1e-12; }\n");
+            code.push_str("            // Run subdivided sub-steps\n");
+            code.push_str("            let mut v_sub = state.v_prev;\n");
+            code.push_str("            let mut i_nl_sub = state.i_nl_prev;\n");
+            // The charge derivative carried across the sub-steps: each is a
+            // full step of its integrator at `alpha_sub`.
+            let q_sub_carried = carries_q_dot(ir);
+            if q_sub_carried {
+                code.push_str("            let mut q_s = state.q_dot;\n");
+            }
+            if !multi_input {
+                code.push_str(
+                    "            let input_step = (input - state.input_prev) / subdiv as f64;\n",
+                );
+            }
+            code.push_str("            let mut all_sub_converged = true;\n");
+            code.push_str("            for step in 0..subdiv {\n");
+            if q_sub_carried {
+                code.push_str("                let v_sub0 = v_sub;\n");
+            }
+            if !multi_input {
+                code.push_str(
+                    "                let inp_s = state.input_prev + input_step * (step + 1) as f64;\n",
+                );
+            }
+            // Build sub-step RHS
+            code.push_str("                // Sub-step RHS\n");
+            if ir.has_dc_sources {
+                code.push_str("                let mut rhs_s = RHS_CONST;\n");
+            } else {
+                code.push_str("                let mut rhs_s = [0.0f64; N];\n");
+            }
+            code.push_str("                for i in 0..N { for j in 0..N { rhs_s[i] += a_neg_sub[i][j] * v_sub[j]; } }\n");
+            if q_sub_carried && !be {
+                code.push_str("                for i in 0..N { rhs_s[i] += q_s[i]; }\n");
+            }
+            // Saturating-inductor flux history (sub-step: base v_sub, alpha_sub)
+            if has_sat_ind {
+                emit_sat_ind_history(code, ir, "rhs_s", "v_sub", "alpha_sub", "                ");
+            }
+            // The input at the sub-step's end (the charge form's n+1).
+            if multi_input {
+                code.push_str(
+                    "                for k in 0..NUM_INPUTS {\n\
+                     \x20                   let step_k = (inputs[k] - state.inputs_prev[k]) / subdiv as f64;\n\
+                     \x20                   let inp_s = state.inputs_prev[k] + step_k * (step + 1) as f64;\n\
+                     \x20                   rhs_s[INPUT_NODES[k]] += inp_s / INPUT_RESISTANCES[k];\n\
+                     \x20               }\n",
+                );
+            } else {
+                code.push_str(
+                    "                rhs_s[INPUT_NODE] += inp_s * (1.0 / INPUT_RESISTANCE);\n",
+                );
+            }
+            if inject_or_tap {
+                code.push_str(&emit_inject_substep_stamp(
+                    ir,
+                    "rhs_s",
+                    "                ",
+                    "subdiv",
+                ));
+            }
+            // Runtime voltage sources: integration-scheme-independent; every
+            // from-scratch RHS rebuild must re-stamp them.
+            if !ir.runtime_sources.is_empty() {
+                code.push_str("                // Runtime voltage sources (.runtime directive)\n");
+                for rt in &ir.runtime_sources {
+                    code.push_str(&format!(
+                        "                rhs_s[{}] += state.{};\n",
+                        rt.vs_row, rt.field_name
+                    ));
+                }
+            }
+            // Noise replay: this is a from-scratch RHS rebuild, so it must
+            // re-stamp the per-source currents the primary `rhs_stamp`
+            // already drew and cached this sample. Omitting it dropped the
+            // noise for the whole sample while the RNG stream stayed
+            // aligned, making the loss invisible to every determinism
+            // check (F10). Drawing fresh values here instead would break
+            // determinism outright: sub-stepping is signal-dependent, so the
+            // stream position would become a function of the audio.
+            if noise.enabled {
+                code.push_str(
+                    "                // Noise replay (cached i_n; consumes no RNG draws).\n",
+                );
+                code.push_str(&emit_noise_replay_body(
+                    noise.replay_counts,
+                    "rhs_s",
+                    "                ",
+                ));
+            }
+            // Sub-step NR loop
+            code.push_str("                let mut sub_converged = false;\n");
+            code.push_str("                for _iter in 0..MAX_ITER {\n");
+            code.push_str("                    let mut v_nl = [0.0f64; M];\n");
+            code.push_str(&emit_sparse_nv_matvec(
+                ir,
+                "v_nl",
+                "v_sub",
+                "                    ",
+            ));
+            code.push_str("                    let mut i_nl = [0.0f64; M];\n");
+            code.push_str("                    let mut j_dev = [0.0f64; M * M];\n");
+            // Device evaluation
+            Self::emit_nodal_device_evaluation_body(code, ir, "                    ", "v_sub");
+            code.push('\n');
+            // Build G_aug from a_sub
+            code.push_str("                    let mut g_s = a_sub;\n");
+            emit_nodal_jacobian_stamp(code, ir, m, "g_s", "                    ");
+            emit_body_gmb_stamp(code, ir, "g_s", "body_gmb", "                    ");
+            if has_sat_ind {
+                emit_sat_ind_jacobian(
+                    code,
+                    ir,
+                    "g_s",
+                    "v_sub",
+                    "alpha_sub",
+                    "                    ",
+                );
+            }
+            // Build companion RHS
+            code.push_str("                    let mut rhs_w = rhs_s;\n");
+            emit_nodal_companion_rhs(code, ir, m, "rhs_w", "j_dev", "                    ");
+            emit_body_gmb_companion(
+                code,
+                ir,
+                "rhs_w",
+                "body_gmb",
+                "v_sub",
+                "                    ",
+            );
+            if has_sat_ind {
+                emit_sat_ind_companion(
+                    code,
+                    ir,
+                    "rhs_w",
+                    "v_sub",
+                    "alpha_sub",
+                    "                    ",
+                );
+            }
+            // LU solve
+            code.push_str("                    let mut v_new_s = rhs_w;\n");
+            code.push_str("                    if !lu_solve(&mut g_s, &mut v_new_s) { break; }\n");
+            // Saturating inductors: the node-row step below never looks at a
+            // branch-current row, so the flux rows get the main loop's step
+            // check and flux-row residual through this flag.
+            if has_sat_ind {
+                code.push_str("                    let mut sub_step_exceeded = false;\n");
+            }
+            // Op-amp supply rail clamping (VCC/VEE) in sub-step. Hard mode
+            // only — same gating rationale as the trap-loop per-iteration
+            // clamp above: None must stay unbounded, ActiveSet/ActiveSetBe
+            // rely on their post-convergence pin-and-resolve seeing the
+            // genuine (unclamped) violation, and BoyleDiodes saturates via
+            // physical catch diodes.
+            if matches!(
+                ir.solver_config.opamp_rail_mode,
+                crate::codegen::OpampRailMode::Hard
+            ) {
+                emit_hard_rail_clamp(code, ir, "v_new_s", "                    ", None, false);
+            }
+            // Convergence check + update
+            if use_line_search {
+                // pnjlim + node damping (parity with the trap/BE loops): the
+                // sub-step inner NR was previously RAW undamped Newton. On a
+                // stiff junction the raw step overshoots past the fast_exp
+                // clamp where the device Jacobian flattens to ~0, making the
+                // Newton direction non-descent and defeating the line search.
+                // Limiting keeps the iterate where the Jacobian is valid.
+                code.push_str("                    let v_new = v_new_s;\n");
+                code.push_str("                    let mut alpha = 1.0_f64;\n");
+                Self::emit_nodal_voltage_limiting_indented(code, ir, "                    ");
+                code.push_str(&format!(
+                        "                    {{\n\
+                         \x20                       let mut max_node_dv = 0.0_f64;\n\
+                         \x20                       for i in 0..{n_nodes} {{ let dv = alpha * (v_new_s[i] - v_sub[i]); max_node_dv = max_node_dv.max(dv.abs()); }}\n\
+                         \x20                       let mut max_v = 0.0_f64;\n\
+                         \x20                       for i in 0..{n_nodes} {{ max_v = max_v.max(v_sub[i].abs()); }}\n\
+                         \x20                       let damp_thresh = 10.0_f64.max(max_v * 0.05);\n\
+                         \x20                       if max_node_dv > damp_thresh {{ alpha *= damp_thresh / max_node_dv; }}\n\
+                         \x20                   }}\n"
+                    ));
+                emit_sat_ind_step_limit(
+                    code,
+                    ir,
+                    "v_sub",
+                    "v_new_s",
+                    "alpha",
+                    "                    ",
+                );
+                emit_armijo_line_search(
+                    code,
+                    "                    ",
+                    "v_sub",
+                    "v_new_s",
+                    "alpha",
+                    "a_sub",
+                    "rhs_s",
+                    "ls_ok",
+                    "i_nl",
+                );
+                // Fall-through on Armijo failure (see trap site): take the
+                // un-line-searched limited step and continue; the residual gate
+                // decides convergence. A line search may only help.
+                code.push_str("                    if !ls_ok { state.diag_ls_fail_count += 1; }\n");
+                code.push_str("                    let mut max_step = 0.0f64;\n");
+                code.push_str("                    for i in 0..N_NODES { let step = v_new_s[i] - v_sub[i]; if step.abs() > max_step { max_step = step.abs(); } }\n");
+                for si in &ir.saturating_inductors {
+                    let k = si.aug_row;
+                    code.push_str(&format!(
+                            "                    {{ let step = alpha * (v_new_s[{k}] - v_sub[{k}]); let threshold = 1e-3 * v_sub[{k}].abs().max((v_sub[{k}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ sub_step_exceeded = true; }} }}\n"
+                        ));
+                }
+                code.push_str("                    for i in 0..N { v_sub[i] += alpha * (v_new_s[i] - v_sub[i]); }\n");
+            } else {
+                code.push_str("                    let mut max_step = 0.0f64;\n");
+                code.push_str("                    for i in 0..N_NODES {\n");
+                code.push_str("                        let step = v_new_s[i] - v_sub[i];\n");
+                code.push_str(
+                    "                        if step.abs() > max_step { max_step = step.abs(); }\n",
+                );
+                code.push_str("                    }\n");
+                if has_sat_ind {
+                    // The flux-row limit scales the step (no line search
+                    // here to do it).
+                    code.push_str("                    let mut alpha = 1.0_f64;\n");
+                    emit_sat_ind_step_limit(
+                        code,
+                        ir,
+                        "v_sub",
+                        "v_new_s",
+                        "alpha",
+                        "                    ",
+                    );
+                }
+                for si in &ir.saturating_inductors {
+                    let k = si.aug_row;
+                    code.push_str(&format!(
+                            "                    {{ let step = alpha * (v_new_s[{k}] - v_sub[{k}]); let threshold = 1e-3 * v_sub[{k}].abs().max((v_sub[{k}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ sub_step_exceeded = true; }} }}\n"
+                        ));
+                }
+                if has_sat_ind {
+                    code.push_str("                    for i in 0..N { v_sub[i] += alpha * (v_new_s[i] - v_sub[i]); }\n");
+                } else {
+                    code.push_str("                    v_sub = v_new_s;\n");
+                }
+            }
+            // Re-evaluate devices at the updated v_sub so i_nl_sub is consistent.
+            // Uses `_final` variant: reads v_nl_final, writes i_nl (no j_dev update).
+            code.push_str("                    // Re-extract i_nl at updated v\n");
+            code.push_str("                    let mut v_nl_final = [0.0f64; M];\n");
+            code.push_str(&emit_sparse_nv_matvec(
+                ir,
+                "v_nl_final",
+                "v_sub",
+                "                    ",
+            ));
+            Self::emit_nodal_device_evaluation_final(code, ir, "                    ", "v_sub");
+            code.push_str("                    i_nl_sub = i_nl;\n");
+            // Convergence: raw (undamped) Newton step small AND — the always-
+            // checked precondition of the line search — the true node-KCL
+            // residual within tolerance, so a line-search-shrunk step can
+            // never report a non-root as converged.
+            if has_sat_ind {
+                emit_sat_ind_row_residual(
+                    code,
+                    ir,
+                    setter_stamps,
+                    "rhs_s",
+                    "alpha_sub",
+                    None,
+                    "v_sub",
+                    "a_sub",
+                    "sub_step_exceeded",
+                    "                    ",
+                );
+            }
+            let sat_gate = if has_sat_ind {
+                " && !sub_step_exceeded"
+            } else {
+                ""
+            };
+            if use_line_search {
+                code.push_str(&format!("                    if max_step < TOL + 1e-3{sat_gate} && kcl_residual(&v_sub, &rhs_s, &a_sub, state).1 {{\n"));
+            } else {
+                code.push_str(&format!(
+                    "                    if max_step < TOL + 1e-3{sat_gate} {{\n"
+                ));
+            }
+            code.push_str("                        sub_converged = true;\n");
+            code.push_str("                        break;\n");
+            code.push_str("                    }\n");
+            code.push_str("                }\n"); // end sub-step NR loop
+            code.push_str(
+                "                if !sub_converged { all_sub_converged = false; break; }\n",
+            );
+            if q_sub_carried {
+                // Charge form: advance q_dot across this sub-step (trapezoidal
+                // alpha_sub*C*dv - q, or the backward-Euler alpha_sub*C*dv).
+                let tail = if be { "" } else { " - q_s[i]" };
+                code.push_str(&format!(
+                    "                for i in 0..N {{ let mut acc = 0.0; for j in 0..N {{ acc += a_neg_sub[i][j] * (v_sub[j] - v_sub0[j]); }} q_s[i] = acc{tail}; }}\n"
+                ));
+                emit_sat_ind_q_dot(
+                    code,
+                    ir,
+                    "q_s",
+                    "v_sub",
+                    "v_sub0",
+                    "alpha_sub",
+                    "                ",
+                );
+            }
+            code.push_str("            }\n"); // end sub-step loop
+            code.push_str("            if all_sub_converged {\n");
+            code.push_str("                v = v_sub;\n");
+            if q_sub_carried {
+                code.push_str("                q_sub = Some(q_s);\n");
+            }
+            code.push_str("                i_nl = i_nl_sub;\n");
+            code.push_str("                converged = true;\n");
+            code.push_str("                state.diag_substep_count += 1;\n");
+            code.push_str("                break 'substep;\n");
+            code.push_str("            }\n");
+            code.push_str("        }\n"); // end subdiv_power loop
+            code.push_str("    }\n\n"); // end if !converged
+        } // end: behavioral circuits omit the adaptive sub-step fallback
     }
 
     /// Step 2 of a full-LU sample, for one integrator (`site`): the Newton
@@ -7898,391 +8364,7 @@ impl RustEmitter {
         // Non-behavioral circuits emit byte-identically. (behavioral + ActiveSetBe
         // full-LU is hard-errored earlier in from_kernel, so no behavioral circuit
         // reaches these blocks needing the BE path for rail resolution.)
-        if ir.behavioral_sources.is_empty() {
-            // Adaptive sub-stepping: when trapezoidal NR fails, subdivide the timestep
-            // and retry with tighter capacitor conductances. This is how ngspice handles
-            // positive-feedback circuits (compressor sidechains, oscillators, etc.).
-            code.push_str("    // Adaptive sub-stepping: retry with subdivided timestep\n");
-            code.push_str("    if !converged {\n");
-            code.push_str("        'substep: for subdiv_power in 1..=SUBSTEP_MAX_POWER {\n");
-            code.push_str(
-                "            let subdiv = 1u32 << subdiv_power; // 2 .. 2^SUBSTEP_MAX_POWER\n",
-            );
-            // alpha_sub tracks the RUNTIME host rate (× oversampling), not
-            // the compile-time codegen rate — a baked literal here made the
-            // sub-step matrices inconsistent with the state matrices after
-            // any `set_sample_rate` to a non-codegen rate.
-            // The sub-step must solve the SAME scheme the build is pinned to.
-            // It used to be hard-wired trapezoidal, so a deck that pinned BE
-            // got trap sub-steps behind its back — and the sub-step fires at
-            // discontinuities, which is exactly where the two schemes differ
-            // (measured 3.51 V vs 6.57 V against a BE-pinned reference at the
-            // step edge). A silent integrator swap inside the recovery path is
-            // the same class of defect as a silent wrong answer (design review).
-            if site.be {
-                code.push_str(
-                "            // Backward Euler: alpha = 1/dt, matching the pinned scheme.\n            let alpha_sub = state.current_sample_rate * OVERSAMPLING_FACTOR as f64 * subdiv as f64;\n",
-            );
-            } else {
-                code.push_str(
-                "            let alpha_sub = 2.0 * state.current_sample_rate * OVERSAMPLING_FACTOR as f64 * subdiv as f64;\n",
-            );
-            }
-            // From the same G/C `rebuild_matrices` reads (the setters'
-            // working copies when there are knobs).
-            let (g_src, c_src) = live_g_c(ir, true, "state");
-            code.push_str("            // Rebuild A and A_neg at finer timestep\n");
-            code.push_str("            let mut a_sub = [[0.0f64; N]; N];\n");
-            code.push_str("            let mut a_neg_sub = [[0.0f64; N]; N];\n");
-            code.push_str("            for i in 0..N {\n");
-            code.push_str("                for j in 0..N {\n");
-            code.push_str(&format!(
-                "                    a_sub[i][j] = {g_src}[i][j] + alpha_sub * {c_src}[i][j];\n"
-            ));
-            // Charge form: the history is alpha*C under both integrators.
-            code.push_str(&format!(
-                "                    a_neg_sub[i][j] = alpha_sub * {c_src}[i][j];\n"
-            ));
-            code.push_str("                }\n");
-            code.push_str("            }\n");
-            // Zero the algebraic rows (as the baked A_neg does)
-            for (lo, hi) in history_zero_row_ranges(ir) {
-                code.push_str(&format!(
-                    "            for i in {}..{} {{ for j in 0..N {{ a_neg_sub[i][j] = 0.0; }} }}\n",
-                    lo, hi
-                ));
-            }
-            // Gmin on A_sub — 1e-12, matching every other Gmin stamp in the
-            // nodal emitter (1e-6 was strong enough to skew high-impedance
-            // nodes by an audible amount on sub-stepped samples).
-            code.push_str("            for i in 0..N_NODES { a_sub[i][i] += 1e-12; }\n");
-            code.push_str("            // Run subdivided sub-steps\n");
-            code.push_str("            let mut v_sub = state.v_prev;\n");
-            code.push_str("            let mut i_nl_sub = state.i_nl_prev;\n");
-            // The charge derivative carried across the sub-steps: each is a
-            // full step of its integrator at `alpha_sub`.
-            let q_sub_carried = carries_q_dot(ir);
-            if q_sub_carried {
-                code.push_str("            let mut q_s = state.q_dot;\n");
-            }
-            if !multi_input {
-                code.push_str(
-                    "            let input_step = (input - state.input_prev) / subdiv as f64;\n",
-                );
-            }
-            code.push_str("            let mut all_sub_converged = true;\n");
-            code.push_str("            for step in 0..subdiv {\n");
-            if q_sub_carried {
-                code.push_str("                let v_sub0 = v_sub;\n");
-            }
-            if !multi_input {
-                code.push_str(
-                    "                let inp_s = state.input_prev + input_step * (step + 1) as f64;\n",
-                );
-            }
-            // Build sub-step RHS
-            code.push_str("                // Sub-step RHS\n");
-            if ir.has_dc_sources {
-                code.push_str("                let mut rhs_s = RHS_CONST;\n");
-            } else {
-                code.push_str("                let mut rhs_s = [0.0f64; N];\n");
-            }
-            code.push_str("                for i in 0..N { for j in 0..N { rhs_s[i] += a_neg_sub[i][j] * v_sub[j]; } }\n");
-            if q_sub_carried && !site.be {
-                code.push_str("                for i in 0..N { rhs_s[i] += q_s[i]; }\n");
-            }
-            // Saturating-inductor flux history (sub-step: base v_sub, alpha_sub)
-            if has_sat_ind {
-                emit_sat_ind_history(code, ir, "rhs_s", "v_sub", "alpha_sub", "                ");
-            }
-            // The input at the sub-step's end (the charge form's n+1).
-            if multi_input {
-                code.push_str(
-                    "                for k in 0..NUM_INPUTS {\n\
-                     \x20                   let step_k = (inputs[k] - state.inputs_prev[k]) / subdiv as f64;\n\
-                     \x20                   let inp_s = state.inputs_prev[k] + step_k * (step + 1) as f64;\n\
-                     \x20                   rhs_s[INPUT_NODES[k]] += inp_s / INPUT_RESISTANCES[k];\n\
-                     \x20               }\n",
-                );
-            } else {
-                code.push_str(
-                    "                rhs_s[INPUT_NODE] += inp_s * (1.0 / INPUT_RESISTANCE);\n",
-                );
-            }
-            if inject_or_tap {
-                code.push_str(&emit_inject_substep_stamp(
-                    ir,
-                    "rhs_s",
-                    "                ",
-                    "subdiv",
-                ));
-            }
-            // Runtime voltage sources: integration-scheme-independent; every
-            // from-scratch RHS rebuild must re-stamp them.
-            if !ir.runtime_sources.is_empty() {
-                code.push_str("                // Runtime voltage sources (.runtime directive)\n");
-                for rt in &ir.runtime_sources {
-                    code.push_str(&format!(
-                        "                rhs_s[{}] += state.{};\n",
-                        rt.vs_row, rt.field_name
-                    ));
-                }
-            }
-            // Noise replay: this is a from-scratch RHS rebuild, so it must
-            // re-stamp the per-source currents the primary `rhs_stamp`
-            // already drew and cached this sample. Omitting it dropped the
-            // noise for the whole sample while the RNG stream stayed
-            // aligned, making the loss invisible to every determinism
-            // check (F10). Drawing fresh values here instead would break
-            // determinism outright: sub-stepping is signal-dependent, so the
-            // stream position would become a function of the audio.
-            if noise.enabled {
-                code.push_str(
-                    "                // Noise replay (cached i_n; consumes no RNG draws).\n",
-                );
-                code.push_str(&emit_noise_replay_body(
-                    noise.replay_counts,
-                    "rhs_s",
-                    "                ",
-                ));
-            }
-            // Sub-step NR loop
-            code.push_str("                let mut sub_converged = false;\n");
-            code.push_str("                for _iter in 0..MAX_ITER {\n");
-            code.push_str("                    let mut v_nl = [0.0f64; M];\n");
-            code.push_str(&emit_sparse_nv_matvec(
-                ir,
-                "v_nl",
-                "v_sub",
-                "                    ",
-            ));
-            code.push_str("                    let mut i_nl = [0.0f64; M];\n");
-            code.push_str("                    let mut j_dev = [0.0f64; M * M];\n");
-            // Device evaluation
-            Self::emit_nodal_device_evaluation_body(code, ir, "                    ", "v_sub");
-            code.push('\n');
-            // Build G_aug from a_sub
-            code.push_str("                    let mut g_s = a_sub;\n");
-            emit_nodal_jacobian_stamp(code, ir, m, "g_s", "                    ");
-            emit_body_gmb_stamp(code, ir, "g_s", "body_gmb", "                    ");
-            if has_sat_ind {
-                emit_sat_ind_jacobian(
-                    code,
-                    ir,
-                    "g_s",
-                    "v_sub",
-                    "alpha_sub",
-                    "                    ",
-                );
-            }
-            // Build companion RHS
-            code.push_str("                    let mut rhs_w = rhs_s;\n");
-            emit_nodal_companion_rhs(code, ir, m, "rhs_w", "j_dev", "                    ");
-            emit_body_gmb_companion(
-                code,
-                ir,
-                "rhs_w",
-                "body_gmb",
-                "v_sub",
-                "                    ",
-            );
-            if has_sat_ind {
-                emit_sat_ind_companion(
-                    code,
-                    ir,
-                    "rhs_w",
-                    "v_sub",
-                    "alpha_sub",
-                    "                    ",
-                );
-            }
-            // LU solve
-            code.push_str("                    let mut v_new_s = rhs_w;\n");
-            code.push_str("                    if !lu_solve(&mut g_s, &mut v_new_s) { break; }\n");
-            // Saturating inductors: the node-row step below never looks at a
-            // branch-current row, so the flux rows get the main loop's step
-            // check and flux-row residual through this flag.
-            if has_sat_ind {
-                code.push_str("                    let mut sub_step_exceeded = false;\n");
-            }
-            // Op-amp supply rail clamping (VCC/VEE) in sub-step. Hard mode
-            // only — same gating rationale as the trap-loop per-iteration
-            // clamp above: None must stay unbounded, ActiveSet/ActiveSetBe
-            // rely on their post-convergence pin-and-resolve seeing the
-            // genuine (unclamped) violation, and BoyleDiodes saturates via
-            // physical catch diodes.
-            if matches!(
-                ir.solver_config.opamp_rail_mode,
-                crate::codegen::OpampRailMode::Hard
-            ) {
-                emit_hard_rail_clamp(code, ir, "v_new_s", "                    ", None, false);
-            }
-            // Convergence check + update
-            if use_line_search {
-                // pnjlim + node damping (parity with the trap/BE loops): the
-                // sub-step inner NR was previously RAW undamped Newton. On a
-                // stiff junction the raw step overshoots past the fast_exp
-                // clamp where the device Jacobian flattens to ~0, making the
-                // Newton direction non-descent and defeating the line search.
-                // Limiting keeps the iterate where the Jacobian is valid.
-                code.push_str("                    let v_new = v_new_s;\n");
-                code.push_str("                    let mut alpha = 1.0_f64;\n");
-                Self::emit_nodal_voltage_limiting_indented(code, ir, "                    ");
-                code.push_str(&format!(
-                        "                    {{\n\
-                         \x20                       let mut max_node_dv = 0.0_f64;\n\
-                         \x20                       for i in 0..{n_nodes} {{ let dv = alpha * (v_new_s[i] - v_sub[i]); max_node_dv = max_node_dv.max(dv.abs()); }}\n\
-                         \x20                       let mut max_v = 0.0_f64;\n\
-                         \x20                       for i in 0..{n_nodes} {{ max_v = max_v.max(v_sub[i].abs()); }}\n\
-                         \x20                       let damp_thresh = 10.0_f64.max(max_v * 0.05);\n\
-                         \x20                       if max_node_dv > damp_thresh {{ alpha *= damp_thresh / max_node_dv; }}\n\
-                         \x20                   }}\n"
-                    ));
-                emit_sat_ind_step_limit(
-                    code,
-                    ir,
-                    "v_sub",
-                    "v_new_s",
-                    "alpha",
-                    "                    ",
-                );
-                emit_armijo_line_search(
-                    code,
-                    "                    ",
-                    "v_sub",
-                    "v_new_s",
-                    "alpha",
-                    "a_sub",
-                    "rhs_s",
-                    "ls_ok",
-                    "i_nl",
-                );
-                // Fall-through on Armijo failure (see trap site): take the
-                // un-line-searched limited step and continue; the residual gate
-                // decides convergence. A line search may only help.
-                code.push_str("                    if !ls_ok { state.diag_ls_fail_count += 1; }\n");
-                code.push_str("                    let mut max_step = 0.0f64;\n");
-                code.push_str("                    for i in 0..N_NODES { let step = v_new_s[i] - v_sub[i]; if step.abs() > max_step { max_step = step.abs(); } }\n");
-                for si in &ir.saturating_inductors {
-                    let k = si.aug_row;
-                    code.push_str(&format!(
-                            "                    {{ let step = alpha * (v_new_s[{k}] - v_sub[{k}]); let threshold = 1e-3 * v_sub[{k}].abs().max((v_sub[{k}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ sub_step_exceeded = true; }} }}\n"
-                        ));
-                }
-                code.push_str("                    for i in 0..N { v_sub[i] += alpha * (v_new_s[i] - v_sub[i]); }\n");
-            } else {
-                code.push_str("                    let mut max_step = 0.0f64;\n");
-                code.push_str("                    for i in 0..N_NODES {\n");
-                code.push_str("                        let step = v_new_s[i] - v_sub[i];\n");
-                code.push_str(
-                    "                        if step.abs() > max_step { max_step = step.abs(); }\n",
-                );
-                code.push_str("                    }\n");
-                if has_sat_ind {
-                    // The flux-row limit scales the step (no line search
-                    // here to do it).
-                    code.push_str("                    let mut alpha = 1.0_f64;\n");
-                    emit_sat_ind_step_limit(
-                        code,
-                        ir,
-                        "v_sub",
-                        "v_new_s",
-                        "alpha",
-                        "                    ",
-                    );
-                }
-                for si in &ir.saturating_inductors {
-                    let k = si.aug_row;
-                    code.push_str(&format!(
-                            "                    {{ let step = alpha * (v_new_s[{k}] - v_sub[{k}]); let threshold = 1e-3 * v_sub[{k}].abs().max((v_sub[{k}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ sub_step_exceeded = true; }} }}\n"
-                        ));
-                }
-                if has_sat_ind {
-                    code.push_str("                    for i in 0..N { v_sub[i] += alpha * (v_new_s[i] - v_sub[i]); }\n");
-                } else {
-                    code.push_str("                    v_sub = v_new_s;\n");
-                }
-            }
-            // Re-evaluate devices at the updated v_sub so i_nl_sub is consistent.
-            // Uses `_final` variant: reads v_nl_final, writes i_nl (no j_dev update).
-            code.push_str("                    // Re-extract i_nl at updated v\n");
-            code.push_str("                    let mut v_nl_final = [0.0f64; M];\n");
-            code.push_str(&emit_sparse_nv_matvec(
-                ir,
-                "v_nl_final",
-                "v_sub",
-                "                    ",
-            ));
-            Self::emit_nodal_device_evaluation_final(code, ir, "                    ", "v_sub");
-            code.push_str("                    i_nl_sub = i_nl;\n");
-            // Convergence: raw (undamped) Newton step small AND — the always-
-            // checked precondition of the line search — the true node-KCL
-            // residual within tolerance, so a line-search-shrunk step can
-            // never report a non-root as converged.
-            if has_sat_ind {
-                emit_sat_ind_row_residual(
-                    code,
-                    ir,
-                    setter_stamps,
-                    "rhs_s",
-                    "alpha_sub",
-                    None,
-                    "v_sub",
-                    "a_sub",
-                    "sub_step_exceeded",
-                    "                    ",
-                );
-            }
-            let sat_gate = if has_sat_ind {
-                " && !sub_step_exceeded"
-            } else {
-                ""
-            };
-            if use_line_search {
-                code.push_str(&format!("                    if max_step < TOL + 1e-3{sat_gate} && kcl_residual(&v_sub, &rhs_s, &a_sub, state).1 {{\n"));
-            } else {
-                code.push_str(&format!(
-                    "                    if max_step < TOL + 1e-3{sat_gate} {{\n"
-                ));
-            }
-            code.push_str("                        sub_converged = true;\n");
-            code.push_str("                        break;\n");
-            code.push_str("                    }\n");
-            code.push_str("                }\n"); // end sub-step NR loop
-            code.push_str(
-                "                if !sub_converged { all_sub_converged = false; break; }\n",
-            );
-            if q_sub_carried {
-                // Charge form: advance q_dot across this sub-step (trapezoidal
-                // alpha_sub*C*dv - q, or the backward-Euler alpha_sub*C*dv).
-                let tail = if site.be { "" } else { " - q_s[i]" };
-                code.push_str(&format!(
-                    "                for i in 0..N {{ let mut acc = 0.0; for j in 0..N {{ acc += a_neg_sub[i][j] * (v_sub[j] - v_sub0[j]); }} q_s[i] = acc{tail}; }}\n"
-                ));
-                emit_sat_ind_q_dot(
-                    code,
-                    ir,
-                    "q_s",
-                    "v_sub",
-                    "v_sub0",
-                    "alpha_sub",
-                    "                ",
-                );
-            }
-            code.push_str("            }\n"); // end sub-step loop
-            code.push_str("            if all_sub_converged {\n");
-            code.push_str("                v = v_sub;\n");
-            if q_sub_carried {
-                code.push_str("                q_sub = Some(q_s);\n");
-            }
-            code.push_str("                i_nl = i_nl_sub;\n");
-            code.push_str("                converged = true;\n");
-            code.push_str("                state.diag_substep_count += 1;\n");
-            code.push_str("                break 'substep;\n");
-            code.push_str("            }\n");
-            code.push_str("        }\n"); // end subdiv_power loop
-            code.push_str("    }\n\n"); // end if !converged
-        } // end: behavioral circuits omit the adaptive sub-step fallback
+        Self::emit_substep_ladder(code, ir, noise, setter_stamps, site.be, true);
 
         // ActiveSetBe rail engagement check (post-trap, post-substep).
         // Runs on the final v from either the regular NR loop or the
@@ -8335,6 +8417,7 @@ impl RustEmitter {
         code: &mut String,
         ir: &CircuitIR,
         noise: &NoiseEmission,
+        setter_stamps: &std::collections::BTreeSet<(usize, usize)>,
     ) -> Result<(), CodegenError> {
         let m = ir.topology.m;
         let multi_input = ir.solver_config.num_inputs() > 1;
@@ -8374,14 +8457,22 @@ impl RustEmitter {
             return Ok(());
         }
 
+        // Each solve is followed by the sub-step ladder (the full-LU routine,
+        // shared) on its own integrator, then by its rail handling on whichever
+        // `v` the solve ended with. `converged` is the ladder's contract: this
+        // solve's outcome, which the death-spiral hold reads at the end.
+        let not_converged_count = "    if state.last_nr_iterations >= MAX_ITER as u32 {\n\
+             \x20       state.diag_nr_max_iter_count += 1;\n\
+             \x20   }\n";
+        let converged_now = "    converged = state.last_nr_iterations < MAX_ITER as u32;\n";
         if ir.solver_config.backward_euler {
             Self::emit_schur_rhs_pred(code, ir, noise, &primary, NoiseMode::Draw);
             Self::emit_schur_newton(code, ir, &primary, true)?;
-            code.push_str(
-                "    if state.last_nr_iterations >= MAX_ITER as u32 {\n\
-                 \x20       state.diag_nr_max_iter_count += 1;\n\
-                 \x20   }\n\n",
-            );
+            code.push_str(not_converged_count);
+            code.push_str("    let mut converged = state.last_nr_iterations < MAX_ITER as u32;\n");
+            Self::emit_substep_ladder(code, ir, noise, setter_stamps, true, false);
+            Self::emit_schur_rail_handling(code, ir, &primary);
+            code.push('\n');
             return Ok(());
         }
 
@@ -8398,10 +8489,12 @@ impl RustEmitter {
             (false, true) => Some("state.breakpoint_be > 0"),
             (false, false) => None,
         };
-        // Every path writes `v` before it is read; without a forced BE sample the
-        // trapezoidal block always runs, so the initial value is dead.
+        // Every path writes `v` and `converged` before they are read; without
+        // a forced BE sample the trapezoidal block always runs, so the initial
+        // values are dead.
         code.push_str(
-            "    #[allow(unused_assignments)]\n    let mut v = [0.0f64; N];\n    let mut i_nl = [0.0f64; M];\n",
+            "    #[allow(unused_assignments)]\n    let mut v = [0.0f64; N];\n    let mut i_nl = [0.0f64; M];\n\
+             \x20   #[allow(unused_assignments)]\n    let mut converged = false;\n",
         );
         if active_set_be {
             code.push_str("    let mut active_set_engaged = false;\n");
@@ -8416,39 +8509,34 @@ impl RustEmitter {
         }
         Self::emit_schur_rhs_pred(code, ir, noise, &primary, NoiseMode::Draw);
         Self::emit_schur_newton(code, ir, &primary, false)?;
+        // Max-iter counts a genuine trapezoidal exhaustion, whether or not the
+        // ladder or the BE solve then recovers it.
+        code.push_str(not_converged_count);
+        code.push_str(converged_now);
+        Self::emit_substep_ladder(code, ir, noise, setter_stamps, false, false);
+        Self::emit_schur_rail_handling(code, ir, &primary);
         code.push_str("    }\n\n");
 
-        // `converged` = the trapezoidal solve was accepted (the sub-sample-fire
+        // `trap_ok` = the trapezoidal solve was accepted (the sub-sample-fire
         // block reads it too).
-        let mut trap_ok = String::new();
-        if forced.is_some() {
-            trap_ok.push_str("!be_first && ");
-        }
-        trap_ok.push_str("state.last_nr_iterations < MAX_ITER as u32");
+        let mut trap_ok = "converged".to_string();
         if active_set_be {
             trap_ok.push_str(" && !active_set_engaged");
         }
-        code.push_str(&format!("    let converged = {trap_ok};\n"));
+        code.push_str(&format!("    let trap_ok = {trap_ok};\n"));
         code.push_str(
             "    // Backward-Euler solve: the same routine a BE build runs, on the BE\n\
              \x20   // kernel (s_be/k_be/s_ni_be, a_be/a_neg_be).\n",
         );
-        code.push_str("    if !converged {\n");
-        // Diag contract: max-iter counts a genuine trapezoidal exhaustion (not
-        // a rail engagement, not a skipped trap solve); be_fallback counts
-        // every entry.
-        let not_forced = if forced.is_some() {
-            "!be_first && "
-        } else {
-            ""
-        };
-        code.push_str(&format!(
-            "        if {not_forced}state.last_nr_iterations >= MAX_ITER as u32 {{\n\
-             \x20           state.diag_nr_max_iter_count += 1;\n\
-             \x20       }}\n"
-        ));
+        code.push_str("    if !trap_ok {\n");
+        // Diag contract: be_fallback counts every entry.
         code.push_str("        state.diag_be_fallback_count += 1;\n");
         code.push_str("        q_be = true;\n");
+        if carries_q_dot(ir) {
+            // A trapezoidal ladder that converged but engaged an ActiveSetBe
+            // rail left its charge state here; the BE solve replaces it.
+            code.push_str("        q_sub = None;\n");
+        }
         if ir.solver_config.breakpoint_be {
             code.push_str(
                 "        let be_iter_budget = if state.breakpoint_be > 0 { BREAKPOINT_BE_MAX_ITER } else { MAX_ITER };\n",
@@ -8468,6 +8556,9 @@ impl RustEmitter {
                  \x20       }\n",
             );
         }
+        code.push_str(converged_now);
+        Self::emit_substep_ladder(code, ir, noise, setter_stamps, true, false);
+        Self::emit_schur_rail_handling(code, ir, &be);
         code.push_str("    }\n\n");
         Ok(())
     }
@@ -8736,6 +8827,12 @@ impl RustEmitter {
         ));
         code.push_str("    }\n");
 
+        Ok(())
+    }
+
+    /// The op-amp rail handling of one Schur solve (`site`), on the final `v`
+    /// of that solve: its Newton, or the sub-step ladder that rescued it.
+    fn emit_schur_rail_handling(code: &mut String, ir: &CircuitIR, site: &SchurSite) {
         // Op-amp supply rail handling.
         //
         // * `Hard`  — apply the post-NR `v[out].clamp(VEE, VCC)` mutation
@@ -8818,7 +8915,6 @@ impl RustEmitter {
                 );
             }
         }
-        Ok(())
     }
 
     /// True when [`Self::emit_nodal_m0_rail_handling`] will emit code that
@@ -9291,11 +9387,18 @@ impl RustEmitter {
              {indent}        // so every verb refuses it.\n\
              {indent}        state.last_nr_iterations = if pin_converged && pin_lu_ok {{ pin_iters }} else {{ MAX_ITER as u32 }};\n",
         ));
-        // Full-LU commits the pinned iterate either way, and has no
-        // end-of-sample check that would see it, so count the failure here.
-        if matches!(site, PinSite::FullLu { .. }) {
+        // Where the pinned iterate is committed either way (full-LU, and the
+        // Newton-free M = 0 Schur solve), count the failure here. A Schur
+        // Newton hands the pinned outcome to `converged`, so a failed pin goes
+        // to the backward-Euler solve and then the death-spiral hold, like a
+        // failed Newton solve.
+        if pin_failure_is_committed(ir, &site) {
             code.push_str(&format!(
-                "{indent}        if !(pin_converged && pin_lu_ok) {{ state.diag_nr_unconverged_commit_count += 1; }}\n"
+                "{indent}        if !(pin_converged && pin_lu_ok) {{ state.diag_nr_unconverged_commit_count += 1; state.diag_unsolved_sample_count += 1; }}\n"
+            ));
+        } else {
+            code.push_str(&format!(
+                "{indent}        converged = pin_converged && pin_lu_ok;\n"
             ));
         }
         code.push_str(&format!("{indent}    }}\n{indent}}}\n"));
@@ -10266,7 +10369,8 @@ impl RustEmitter {
 /// the current the linear model delivers into the circuit. A saturated output
 /// can supply at most `limit - R_SAG*I_load`, so the linear solution is past
 /// the rail exactly when `w` passes the limit. With `R_SAG = ROUT`, `w` is the
-/// internal (Thevenin) voltage `AOL*(v+ - v-)`.
+/// internal (Thevenin) voltage `AOL*(v+ - v-)`. Returned as a bare sum (a
+/// wrapping pair of parentheses is an `unused_parens` warning in a `let`).
 fn opamp_load_line_expr(oa: &crate::codegen::ir::OpampIR, v: &str) -> String {
     let r_sag = 1.0 / oa.g_sag;
     let a = 1.0 - oa.g_out * r_sag;
@@ -10278,7 +10382,7 @@ fn opamp_load_line_expr(oa: &crate::codegen::ir::OpampIR, v: &str) -> String {
         .n_minus_idx
         .map_or("0.0".to_string(), |i| format!("{v}[{i}]"));
     format!(
-        "({v}[{o}] * {a:.17e} + {b:.17e} * ({vp} - {vm}))",
+        "{v}[{o}] * {a:.17e} + {b:.17e} * ({vp} - {vm})",
         o = oa.n_out_idx
     )
 }

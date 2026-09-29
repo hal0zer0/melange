@@ -60,11 +60,12 @@ fn residual(code: &str, tag: &str) -> f64 {
             worst = worst.max(r.abs());
         }}
     }}
-    assert_eq!(s.diag_nr_unconverged_commit_count, 0, \"unsolved samples\");
+    assert_eq!({unsolved}, 0, \"unsolved samples\");
     println!(\"residual={{:e}}\", worst);
 }}",
         n = (0.5 * FS) as usize,
         w = (0.1 * FS) as usize,
+        unsolved = support::unsolved_expr(code, "s"),
     );
     support::compile_and_run(code, &main, tag)
         .parse_kv("residual")

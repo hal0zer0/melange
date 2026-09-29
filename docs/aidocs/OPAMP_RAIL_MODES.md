@@ -57,11 +57,15 @@ circuit. **Only the nodal solver implements that.** The DK path implements
   active-set modes. At 1× both miss for integrator reasons (backward Euler on
   nearly every railed sample; the trapezoidal ring in deep saturation); those
   cases are recorded, ignored.
-- A pinned solve that does not converge is committed and counted in
-  `diag_nr_unconverged_commit_count`, which every verb refuses. Schur counts it
-  at commit from `last_nr_iterations`; full-LU counts it at the failure, per
-  internal sample, because a count derived at the end of the host sample would
-  miss every oversampled sub-step but the last.
+- A pinned solve that does not converge is never shipped silently. On full-LU,
+  and on a Schur build with no devices, its iterate is committed and counted in
+  `diag_nr_unconverged_commit_count` at the failure, per internal sample (a
+  count derived at the end of the host sample would miss every oversampled
+  sample but the last). On a Schur build with devices the pinned outcome is the
+  sample's outcome (`converged`): a failed pin on the trapezoidal solve hands the
+  sample to the backward-Euler solve, and a failed pin there ends in the
+  death-spiral hold (`diag_nr_hold_count`). Both are counted in
+  `diag_unsolved_sample_count`, which every verb refuses on.
 - Active-set is **refused** on a circuit that also has a behavioral source:
   its Jacobian is stamped in node space and is not diagonal, so the pinned
   system does not include it and could converge to a non-solution. The explicit
@@ -83,10 +87,10 @@ Why not a DK active-set: nodal already implements both modes, and nothing has
 shown nodal's cost to be a problem for a circuit that needs one.
 
 On the nodal Schur path, a rail-engaged sample goes straight to the BE fallback
-and its pin-and-resolve on the BE matrices. There is no 2× sub-step recovery: it
-used to exist, but its only rail handling was a post-solve clamp that did not
-re-solve downstream nodes (`Hard` at twice the rate), and its fixed-point solve
-could not contract once a junction conducted.
+and its pin-and-resolve on the BE matrices. A rail engagement is not a Newton
+failure, so it does not enter the sub-step ladder. When the ladder does run (a
+failed Newton solve), its result goes through the same rail handling as a
+Newton result, on both routes.
 
 ## The 5 modes
 

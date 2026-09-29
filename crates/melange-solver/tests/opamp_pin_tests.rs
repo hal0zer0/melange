@@ -68,13 +68,14 @@ fn run(code: &str, tag: &str) -> Run {
             worst = worst.max(r.abs());
         }}
     }}
-    assert_eq!(s.diag_nr_unconverged_commit_count, 0, \"unsolved samples\");
+    assert_eq!({unsolved}, 0, \"unsolved samples\");
     println!(\"residual={{:e}}\", worst);
     println!(\"pin_changes={{}}\", changes);
     println!(\"be_fallback={{}}\", s.diag_be_fallback_count);
 }}",
         n = (0.5 * fs) as usize,
         tail = (0.05 * fs) as usize,
+        unsolved = support::unsolved_expr(code, "s"),
     );
     let out = support::compile_and_run(code, &main, tag);
     Run {

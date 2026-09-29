@@ -178,9 +178,10 @@ The DK sample path (`templates/rust/process_sample.rs.tera`, Step 6c) has a
 per-SAMPLE containment of an **unsolved** sample, separate from the per-iteration
 limits above. When the final Newton solve of a sample (the trapezoidal one, or
 the BE fallback when it ran) ends at `MAX_ITER`, the sample is committed (DK has
-no hold or timestep cut) and counted in `diag_nr_unconverged_commit_count`, which
-every verb refuses on; a step larger than `damp_thresh = max(2 V, 5 % of
-max|DC_OP|)` is then scaled back to that bound (`diag_voltage_damp_count`).
+no hold or timestep cut) and counted in `diag_nr_unconverged_commit_count` and
+`diag_unsolved_sample_count`, which every verb refuses on; a step larger than
+`damp_thresh = max(2 V, 5 % of max|DC_OP|)` is then scaled back to that bound
+(`diag_voltage_damp_count`).
 
 **A converged sample is never touched.** It is the circuit's answer; its step
 size is not evidence of anything. The containment used to scale every sample's

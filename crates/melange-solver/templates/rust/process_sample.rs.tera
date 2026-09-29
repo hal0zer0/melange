@@ -164,14 +164,16 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
     // The final solve of this sample (the trapezoidal one, or the BE fallback
     // when it ran) ended at MAX_ITER, so `v` is not a solution. It is committed
     // (DK has no hold or timestep cut) but counted in
-    // diag_nr_unconverged_commit_count, which every verb refuses on, and a step
-    // larger than damp_thresh = max(2 V, 5 % of max |DC_OP|) is scaled back to
-    // it (counted in diag_voltage_damp_count). A converged sample is the
+    // diag_nr_unconverged_commit_count and diag_unsolved_sample_count, which
+    // every verb refuses on, and a step larger than damp_thresh = max(2 V,
+    // 5 % of max |DC_OP|) is scaled back to it (counted in
+    // diag_voltage_damp_count). A converged sample is the
     // circuit's answer and passes untouched whatever its step: per-sample step
     // size is not evidence of an error.
 {% if m > 0 %}    let unsolved = state.last_nr_iterations >= MAX_ITER as u32;
     if unsolved {
         state.diag_nr_unconverged_commit_count = state.diag_nr_unconverged_commit_count.saturating_add(1);
+        state.diag_unsolved_sample_count = state.diag_unsolved_sample_count.saturating_add(1);
     }
 {% else %}    let unsolved = false;
 {% endif %}    let (v, i_nl) = {
