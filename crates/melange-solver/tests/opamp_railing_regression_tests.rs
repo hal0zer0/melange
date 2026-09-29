@@ -193,17 +193,12 @@ fn railing_overdrive_matches_ngspice_at_4x() {
 /// pinning approximately.
 #[test]
 fn active_set_with_a_behavioral_source_is_refused() {
-    use melange_solver::codegen::CodeGenerator;
     let spice = format!("{RAILING_OVERDRIVE}B_x bx 0 V={{ tanh(V(n3)) }}\nR_bx bx 0 1k\n");
-    let netlist = Netlist::parse(&spice).unwrap();
-    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
-    let input = mna.node_map["in"] - 1;
-    mna.g[input][input] += 1.0;
     let config = support::config_for_spice(&spice, 48000.0);
-    let err = CodeGenerator::new(config)
-        .generate_nodal(&mna, &netlist)
-        .expect_err("active-set + a behavioral source must be refused");
-    let msg = format!("{err:?}");
+    let msg = match support::try_build_shipped(&spice, &config, "nodal") {
+        Err(msg) => msg,
+        Ok(_) => panic!("active-set + a behavioral source must be refused"),
+    };
     // It must not steer users to a mode measured wrong on this class.
     assert!(
         msg.contains("behavioral source") && msg.contains("No rail handling is validated"),
@@ -215,17 +210,12 @@ fn active_set_with_a_behavioral_source_is_refused() {
 /// even though it is not validated on this class.
 #[test]
 fn explicit_hard_with_a_behavioral_source_still_compiles() {
-    use melange_solver::codegen::CodeGenerator;
     let spice = format!("{RAILING_OVERDRIVE}B_x bx 0 V={{ tanh(V(n3)) }}\nR_bx bx 0 1k\n");
-    let netlist = Netlist::parse(&spice).unwrap();
-    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
-    let input = mna.node_map["in"] - 1;
-    mna.g[input][input] += 1.0;
     let mut config = support::config_for_spice(&spice, 48000.0);
     config.opamp_rail_mode = OpampRailMode::Hard;
-    CodeGenerator::new(config)
-        .generate_nodal(&mna, &netlist)
-        .expect("an explicit rail mode is never overridden");
+    if let Err(e) = support::try_build_shipped(&spice, &config, "nodal") {
+        panic!("an explicit rail mode is never overridden: {e}");
+    }
 }
 
 // ─── A railing op-amp driving a saturating choke ──────────────────────────

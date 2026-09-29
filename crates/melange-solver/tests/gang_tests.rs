@@ -3,6 +3,8 @@
 //! Tests verify that the `.gang` directive correctly links multiple `.pot`
 //! and `.wiper` entries under a single parameter.
 
+mod support;
+
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
 
@@ -177,7 +179,7 @@ C1 out 0 100n
 
 #[test]
 fn test_gang_codegen_ir() {
-    use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+    use melange_solver::codegen::CodegenConfig;
     use melange_solver::dk::DkKernel;
 
     let spice = r#"Gang Codegen Test
@@ -211,8 +213,7 @@ C1 out 0 100n
         ..CodegenConfig::default()
     };
 
-    let generator = CodeGenerator::new(config);
-    let result = generator.generate(&kernel, &mna, &netlist);
+    let result = support::try_build_shipped(spice, &config, "dk");
     assert!(result.is_ok(), "Codegen failed: {:?}", result.err());
 }
 

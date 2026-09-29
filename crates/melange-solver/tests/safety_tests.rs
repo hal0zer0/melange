@@ -1,6 +1,7 @@
 //! Speaker Safety and Matrix Validation Tests
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+mod support;
+
 use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
@@ -277,23 +278,18 @@ fn test_solver_has_step_clamping() {
 R1 in n1 1k
 D1 n1 0 D
 D2 0 n1 D
-Vin in 0 0
 .END"#;
 
-    let netlist = Netlist::parse(spice).unwrap();
-    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
-    mna.g[0][0] += 1.0;
-
-    let kernel = DkKernel::from_mna(&mna, 48000.0).unwrap();
-
-    println!("M = {}", kernel.m);
-
-    let config = CodegenConfig::default();
-    let generator = CodeGenerator::new(config);
-    let generated = generator.generate(&kernel, &mna, &netlist).unwrap();
+    let mna = MnaSystem::from_netlist(&Netlist::parse(spice).unwrap()).unwrap();
+    let mut config = support::config_for_spice(spice, 48000.0);
+    config.output_nodes = vec![mna.node_map["n1"] - 1];
+    let generated = support::build_shipped(spice, &config, "dk").generated;
+    let m = generated.m;
+    println!("M = {m}");
 
     // For 2D systems (two diodes), verify SPICE-style voltage limiting is present
-    if kernel.m == 2 {
+    assert_eq!(m, 2, "two diodes: M = 2");
+    {
         assert!(
             generated.code.contains("pnjlim"),
             "2D solver MUST have SPICE pnjlim to prevent NR divergence. \

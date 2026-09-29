@@ -20,12 +20,10 @@
 //! this is the washout footgun, and it proves the active-CV test above has real
 //! discriminating power (it would fail on a MODE=0 deck).
 
+mod support;
+
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, Ordering};
-
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
-use melange_solver::mna::MnaSystem;
-use melange_solver::parser::Netlist;
 
 /// VCA isolation deck. `{MODE}` and `{VCTRL}` are substituted per run.
 /// Control voltage is applied directly to the VCA control node so V_ctrl equals
@@ -54,25 +52,9 @@ fn build_deck(mode: u32, vctrl: f64) -> String {
 }
 
 fn generate_nodal_code(spice: &str, sample_rate: f64) -> String {
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let input_node = mna.node_map["in"] - 1;
-    let output_node = mna.node_map["out"] - 1;
-    // Thevenin input conductance (1 Ω source), stamped BEFORE codegen.
-    mna.g[input_node][input_node] += 1.0;
-
-    let config = CodegenConfig {
-        circuit_name: "vca_ctrl_test".to_string(),
-        sample_rate,
-        input_node,
-        output_nodes: vec![output_node],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    };
-    CodeGenerator::new(config)
-        .generate_nodal(&mna, &netlist)
-        .expect("nodal codegen")
-        .code
+    let mut config = support::config_for_spice(spice, sample_rate);
+    config.circuit_name = "vca_ctrl_test".to_string();
+    support::build_as_shipped(spice, &config, "nodal").0
 }
 
 fn compile_and_run(code: &str, main_code: &str, tag: &str) -> String {

@@ -156,12 +156,8 @@ B1 out 0 I={tanh(5.0*V(in)) * 1.0e-3}
 
 #[test]
 fn test_behavioral_plus_activesetbe_is_rejected() {
-    use melange_solver::codegen::{CodeGenerator, CodegenConfig, CodegenError};
-    use melange_solver::mna::MnaSystem;
-    use melange_solver::parser::Netlist;
+    use melange_solver::codegen::CodegenConfig;
 
-    let netlist = Netlist::parse(BEHAVIORAL_ACTIVESETBE_SPICE).expect("parse");
-    let mna = MnaSystem::from_netlist(&netlist).expect("mna");
     let config = CodegenConfig {
         circuit_name: "behavioral_activesetbe_reject".to_string(),
         sample_rate: SR,
@@ -169,8 +165,8 @@ fn test_behavioral_plus_activesetbe_is_rejected() {
         opamp_rail_mode: OpampRailMode::ActiveSetBe,
         ..support::config_for_spice(BEHAVIORAL_ACTIVESETBE_SPICE, SR)
     };
-    match CodeGenerator::new(config).generate_nodal(&mna, &netlist) {
-        Err(CodegenError::UnsupportedTopology(msg)) => {
+    match support::try_build_shipped(BEHAVIORAL_ACTIVESETBE_SPICE, &config, "nodal") {
+        Err(msg) => {
             // Refused first by `generate_nodal`'s active-set + unpinnable-element
             // check (which spells the mode `active-set-be`); the emitter's own
             // ActiveSetBe + behavioral refusal stays behind it as a backstop.
@@ -180,7 +176,6 @@ fn test_behavioral_plus_activesetbe_is_rejected() {
                 "error must name the behavioral/ActiveSetBe incompatibility, got: {msg}"
             );
         }
-        Err(e) => panic!("expected UnsupportedTopology, got: {e:?}"),
         Ok(_) => panic!(
             "behavioral + ActiveSetBe must be rejected at codegen (the BE fallback that \
              resolves ActiveSetBe rails is gated off for behavioral circuits and would \

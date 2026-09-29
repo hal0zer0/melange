@@ -3,9 +3,8 @@
 //! Parser validation + codegen emission + full compile-and-run roundtrip
 //! verifying that `state.<field>` stamps into the correct RHS row.
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
-use melange_solver::dk::DkKernel;
-use melange_solver::mna::MnaSystem;
+mod support;
+
 use melange_solver::parser::Netlist;
 use std::io::Write;
 
@@ -147,25 +146,9 @@ Vb b 0 DC 0
 // ---------------------------------------------------------------------------
 
 fn generate_dk(spice: &str) -> String {
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    // Stamp input conductance the same way the CLI does.
-    if mna.n > 0 {
-        mna.g[0][0] += 1.0;
-    }
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("kernel");
-    let cfg = CodegenConfig {
-        circuit_name: "runtime_test".to_string(),
-        sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![if kernel.n > 1 { 1 } else { 0 }],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    };
-    CodeGenerator::new(cfg)
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen")
-        .code
+    let mut config = support::config_in_out_or_node1(spice, 44100.0);
+    config.circuit_name = "runtime_test".to_string();
+    support::build_as_shipped(spice, &config, "dk").0
 }
 
 #[test]
@@ -571,8 +554,6 @@ fn nodal_codegen_emits_runtime_r_setter_without_dc_op_snap() {
     // Force the nodal path via a cap-only node arrangement that triggers
     // the "S ill-conditioned" routing check; verify the nodal emitter also
     // respects the runtime_field contract.
-    use melange_solver::codegen::CodegenConfig;
-    use melange_solver::parser::Netlist;
     let spice = "\
 Runtime R Nodal
 R1 in n1 1k
@@ -580,23 +561,9 @@ C1 n1 out 100n
 Rbias out 0 10k
 .runtime Rbias 2k 12k as bias_r
 ";
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = melange_solver::mna::MnaSystem::from_netlist(&netlist).expect("mna");
-    if mna.n > 0 {
-        mna.g[0][0] += 1.0;
-    }
-    let cfg = CodegenConfig {
-        circuit_name: "runtime_r_nodal".to_string(),
-        sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![2],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    };
-    let code = melange_solver::codegen::CodeGenerator::new(cfg)
-        .generate_nodal(&mna, &netlist)
-        .expect("codegen")
-        .code;
+    let mut cfg = support::config_for_spice(spice, 44100.0);
+    cfg.circuit_name = "runtime_r_nodal".to_string();
+    let code = support::build_as_shipped(spice, &cfg, "nodal").0;
 
     assert!(
         code.contains("pub fn set_runtime_R_bias_r("),

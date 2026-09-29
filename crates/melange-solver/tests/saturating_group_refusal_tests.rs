@@ -11,6 +11,8 @@
 //!   linear error at 20 Hz with k = (0.95, 0.6, 0.6).
 //! - Several ISATs on one core: the first silently won.
 
+mod support;
+
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
 
@@ -153,7 +155,7 @@ fn switch_on_saturating_iron_is_refused() {
 /// deck could fail Newton on every edge with `diag_nr_max_iter_count == 0`.
 #[test]
 fn max_iter_counter_is_emitted_for_an_m0_saturating_build() {
-    use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+    use melange_solver::codegen::CodegenConfig;
     let spice = "rl\nR1 in out 30\nL1 out 0 1 ISAT=10m LAIR=3e-4\n";
     let netlist = Netlist::parse(spice).expect("parse");
     let mna = MnaSystem::from_netlist(&netlist).expect("mna");
@@ -166,10 +168,7 @@ fn max_iter_counter_is_emitted_for_an_m0_saturating_build() {
         input_resistance: 1.0,
         ..CodegenConfig::default()
     };
-    let code = CodeGenerator::new(config)
-        .generate_nodal(&mna, &netlist)
-        .expect("codegen")
-        .code;
+    let code = support::build_as_shipped(spice, &config, "nodal").0;
     assert!(
         code.contains("state.diag_nr_max_iter_count += 1;"),
         "M = 0 saturating build does not count MAX_ITER exhaustion"
@@ -199,6 +198,13 @@ fn dk_codegen_refuses_saturating_inductors() {
             input_resistance: 1.0,
             ..CodegenConfig::default()
         };
+        // The shipped build refuses `--solver dk` on a saturating circuit.
+        assert!(
+            support::try_build_shipped(spice, &config, "dk").is_err(),
+            "the shipped DK build must refuse a saturating circuit"
+        );
+        // Bypasses the production pipeline on purpose: tests the DK
+        // generator's own refusal, the backstop behind the build's.
         mna.g[config.input_node][config.input_node] += 1.0;
         let Ok(kernel) = DkKernel::from_mna(&mna, 48000.0) else {
             continue; // no kernel, no DK code either

@@ -1,29 +1,11 @@
 //! Tests for WARMUP_SAMPLES_RECOMMENDED (Oomox P5).
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
-use melange_solver::dk::DkKernel;
-use melange_solver::mna::MnaSystem;
-use melange_solver::parser::Netlist;
+mod support;
 
 fn generate_at(spice: &str, sample_rate: f64) -> String {
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    if mna.n > 0 {
-        mna.g[0][0] += 1.0;
-    }
-    let kernel = DkKernel::from_mna(&mna, sample_rate).expect("kernel");
-    let cfg = CodegenConfig {
-        circuit_name: "warmup_test".to_string(),
-        sample_rate,
-        input_node: 0,
-        output_nodes: vec![if kernel.n > 1 { 1 } else { 0 }],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    };
-    CodeGenerator::new(cfg)
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen")
-        .code
+    let mut config = support::config_in_out_or_node1(spice, sample_rate);
+    config.circuit_name = "warmup_test".to_string();
+    support::build_as_shipped(spice, &config, "dk").0
 }
 
 fn extract_warmup_samples(code: &str) -> usize {
@@ -113,26 +95,12 @@ R1 in out 10k
 C1 out 0 1u
 ";
     let generate_at_os = |os: usize| -> String {
-        let netlist = Netlist::parse(spice).expect("parse");
-        let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-        if mna.n > 0 {
-            mna.g[0][0] += 1.0;
-        }
-        let kernel = DkKernel::from_mna(&mna, 44100.0).expect("kernel");
-        let cfg = CodegenConfig {
-            circuit_name: "warmup_os_test".to_string(),
-            sample_rate: 44100.0,
-            input_node: 0,
-            output_nodes: vec![1],
-            input_resistance: 1.0,
-            oversampling_factor: os,
-            ..CodegenConfig::default()
-        };
-        CodeGenerator::new(cfg)
-            .generate(&kernel, &mna, &netlist)
-            .expect("codegen")
-            .code
+        let mut config = support::config_in_out_or_node1(spice, 44100.0);
+        config.circuit_name = "warmup_os_test".to_string();
+        config.oversampling_factor = os;
+        support::build_as_shipped(spice, &config, "dk").0
     };
+
     let n_1x = extract_warmup_samples(&generate_at_os(1));
     let n_4x = extract_warmup_samples(&generate_at_os(4));
     assert_eq!(

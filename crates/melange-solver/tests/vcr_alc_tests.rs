@@ -5,12 +5,13 @@
 //! - De-emphasis filter (pot-controlled) + bandwidth LPF
 //! - Voltage-mode VCA with I-V converter (100Ω decoupling for K stability)
 //!
-//! N=21, M=3 (VCA 2D + diode 1D). DK for runtime, nodal full-LU for codegen.
+//! N=14, M=3 (VCA 2D + diode 1D). DK for runtime, nodal full-LU for codegen.
+
+mod support;
 
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
 use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
@@ -22,8 +23,6 @@ VCR Linear Audio ALC
 .model OA_4558 OA(AOL=100000 ROUT=100 VSAT=13 GBW=3MEG)
 .model D1N4148 D(IS=2.52e-9 N=1.752 CJO=4e-12)
 .model VCA_ALC VCA(VSCALE=0.5 G0=6.667e-5 THD=0.001 MODE=0)
-Vpos  vcc  0  DC 15
-Vneg  vee  0  DC -15
 Cin      in       in_ac      10U
 Rbias_in in_ac    0          100K
 Rin_buf  in_ac    buf_inv    10K
@@ -73,26 +72,10 @@ fn generate_nodal_code_with_rail_mode(
     sample_rate: f64,
     opamp_rail_mode: melange_solver::codegen::OpampRailMode,
 ) -> String {
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let input_node = mna.node_map["in"] - 1;
-    let output_node = mna.node_map["out"] - 1;
-    mna.g[input_node][input_node] += 1.0;
-
-    let config = CodegenConfig {
-        circuit_name: "vcr_alc_test".to_string(),
-        sample_rate,
-        input_node,
-        output_nodes: vec![output_node],
-        input_resistance: 1.0,
-        opamp_rail_mode,
-        ..CodegenConfig::default()
-    };
-    let codegen = CodeGenerator::new(config);
-    codegen
-        .generate_nodal(&mna, &netlist)
-        .expect("nodal codegen")
-        .code
+    let mut config = support::config_for_spice(spice, sample_rate);
+    config.circuit_name = "vcr_alc_test".to_string();
+    config.opamp_rail_mode = opamp_rail_mode;
+    support::build_as_shipped(spice, &config, "nodal").0
 }
 
 fn compile_and_run(code: &str, main_code: &str, tag: &str) -> String {
@@ -220,8 +203,8 @@ fn test_vcr_alc_mna_dimensions() {
     let netlist = Netlist::parse(VCR_ALC_SPICE).unwrap();
     let mna = MnaSystem::from_netlist(&netlist).unwrap();
 
-    // Verify node count
-    assert_eq!(mna.n, 16, "Expected 16 circuit nodes (excluding ground)");
+    // Verify node count (the op-amp rails are on the model card: VSAT)
+    assert_eq!(mna.n, 14, "Expected 14 circuit nodes (excluding ground)");
 
     // Verify nonlinear device count: 1 VCA (2D) + 1 diode (1D) = M=3
     let total_m: usize = mna.nonlinear_devices.iter().map(|d| d.dimension).sum();
@@ -280,10 +263,11 @@ fn test_vcr_alc_dk_kernel_builds() {
 
     let kernel = kernel.unwrap();
     assert_eq!(kernel.m, 3, "Expected M=3");
-    // IIR op-amp model: no Boyle internal nodes, so N = 16 circuit nodes + 2 VS = 18
+    // IIR op-amp model: no Boyle internal nodes, and no voltage sources, so
+    // N = the 14 circuit nodes
     assert_eq!(
-        kernel.n, 18,
-        "Expected N=18 (16 nodes + 2 VS augmented, IIR op-amp has no internal nodes)"
+        kernel.n, 14,
+        "Expected N=14 (14 nodes, IIR op-amp has no internal nodes)"
     );
 }
 
@@ -332,10 +316,10 @@ fn test_vcr_alc_dk_kernel_has_pot() {
 fn test_vcr_alc_nodal_codegen() {
     let code = generate_nodal_code(VCR_ALC_SPICE, 48000.0);
 
-    // N=21 before Boyle Schur elimination, N=18 after (3 GBW op-amps eliminated)
+    // N=17 before Boyle Schur elimination, N=14 after (3 GBW op-amps eliminated)
     assert!(
-        code.contains("pub const N: usize = 18"),
-        "Generated code should have N=18 (after Boyle Schur elimination of 3 internal nodes)"
+        code.contains("pub const N: usize = 14"),
+        "Generated code should have N=14 (after Boyle Schur elimination of 3 internal nodes)"
     );
     assert!(
         code.contains("pub const M: usize = 3"),

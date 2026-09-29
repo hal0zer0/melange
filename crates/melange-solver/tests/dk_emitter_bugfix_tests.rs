@@ -233,6 +233,14 @@ fn dk_refuses_active_set_rail_modes_instead_of_degrading() {
     // now the DK generator refuses (auto-routing sends these circuits to nodal).
     for mode in [OpampRailMode::ActiveSet, OpampRailMode::ActiveSetBe] {
         let config = opamp_slew_config(mode);
+        // The shipped build refuses `--solver dk` with an active-set mode.
+        let shipped = support::try_build_shipped(OPAMP_SLEW_SPICE, &config, "dk");
+        assert!(
+            shipped.is_err(),
+            "{mode:?}: the shipped DK build must refuse"
+        );
+        // Bypasses the production pipeline on purpose: tests the DK generator's
+        // own refusal, the backstop behind the build's.
         let netlist = Netlist::parse(OPAMP_SLEW_SPICE).unwrap();
         let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
         mna.g[config.input_node][config.input_node] += 1.0 / config.input_resistance;

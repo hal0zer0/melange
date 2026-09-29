@@ -1,5 +1,7 @@
 //! Tests for subcircuit expansion (.subckt / X instance support).
 
+mod support;
+
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::{Element, Netlist};
 
@@ -422,9 +424,6 @@ X1 a b buf
 
 #[test]
 fn test_rc_lowpass_subcircuit_codegen() {
-    use melange_solver::codegen::{CodeGenerator, CodegenConfig};
-    use melange_solver::dk::DkKernel;
-
     let spice = r#"RC Lowpass as Subcircuit
 .subckt lowpass in out
 R1 in out 10k
@@ -432,29 +431,9 @@ C1 out 0 100n
 .ends
 X1 in out lowpass
 "#;
-    let mut netlist = Netlist::parse(spice).unwrap();
-    netlist.expand_subcircuits().unwrap();
-
-    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
-    let input_node_idx = mna.node_map["in"] - 1;
-    let output_node_idx = mna.node_map["out"] - 1;
-    mna.g[input_node_idx][input_node_idx] += 1.0;
-
-    let kernel = DkKernel::from_mna(&mna, 48000.0).unwrap();
-
-    let config = CodegenConfig {
-        circuit_name: "rc_lowpass_subckt".to_string(),
-        input_node: input_node_idx,
-        output_nodes: vec![output_node_idx],
-        sample_rate: 48000.0,
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    };
-
-    let generator = CodeGenerator::new(config);
-    let result = generator.generate(&kernel, &mna, &netlist);
-    assert!(result.is_ok(), "Codegen failed: {:?}", result.err());
-    let code = result.unwrap().code;
+    let mut config = support::config_for_spice(spice, 48000.0);
+    config.circuit_name = "rc_lowpass_subckt".to_string();
+    let code = support::build_as_shipped(spice, &config, "dk").0;
     assert!(
         code.contains("process_sample"),
         "Generated code missing process_sample"

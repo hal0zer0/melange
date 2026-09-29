@@ -14,9 +14,10 @@
 //! The end-to-end audio no-latch proof lives in oomox's jeffreys-tube latch
 //! corpus (36 corners on speech); these tests pin the codegen surface.
 
+mod support;
+
 use melange_solver::codegen::ir::IntegratorSelection;
-use melange_solver::codegen::{CodeGenerator, CodegenConfig, GeneratedCode};
-use melange_solver::mna::MnaSystem;
+use melange_solver::codegen::{CodegenConfig, GeneratedCode};
 use melange_solver::parser::{IntegratorPref, Netlist};
 
 // A minimal nonlinear circuit driven through the *nodal* codegen path. The
@@ -32,36 +33,11 @@ C1 out 0 10n
 .model D1N4148 D(IS=2.52e-9 N=1.752)
 ";
 
-fn build_mna_with_input(spice: &str, in_name: &str, r_in: f64) -> (Netlist, MnaSystem) {
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let in_idx = *mna.node_map.get(in_name).unwrap();
-    if in_idx > 0 {
-        mna.g[in_idx - 1][in_idx - 1] += 1.0 / r_in;
-    }
-    (netlist, mna)
-}
-
-fn nodal_config(in_name: &str, out_name: &str, mna: &MnaSystem) -> CodegenConfig {
-    let in_idx = *mna.node_map.get(in_name).unwrap() - 1;
-    let out_idx = *mna.node_map.get(out_name).unwrap() - 1;
-    CodegenConfig {
-        circuit_name: "test_nodal".to_string(),
-        sample_rate: 48000.0,
-        input_node: in_idx,
-        output_nodes: vec![out_idx],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    }
-}
-
 fn generate_nodal_full(spice: &str, mut tweak: impl FnMut(&mut CodegenConfig)) -> GeneratedCode {
-    let (netlist, mna) = build_mna_with_input(spice, "in", 1.0);
-    let mut config = nodal_config("in", "out", &mna);
+    let mut config = support::config_for_spice(spice, 48000.0);
+    config.circuit_name = "test_nodal".to_string();
     tweak(&mut config);
-    CodeGenerator::new(config)
-        .generate_nodal(&mna, &netlist)
-        .expect("nodal codegen")
+    support::build_shipped(spice, &config, "nodal").generated
 }
 
 fn generate_nodal_with(spice: &str, tweak: impl FnMut(&mut CodegenConfig)) -> String {

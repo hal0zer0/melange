@@ -6,7 +6,7 @@
 mod support;
 
 use melange_solver::codegen::ir::CircuitIR;
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+use melange_solver::codegen::CodegenConfig;
 use melange_solver::dc_op::{solve_dc_operating_point, DcOpConfig, DcOpMethod};
 use melange_solver::device_types::{BjtParams, DeviceParams, DeviceSlot, DeviceType, DiodeParams};
 use melange_solver::dk::DkKernel;
@@ -456,18 +456,9 @@ fn test_codegen_bjt_has_dc_nl_i() {
 #[test]
 fn test_codegen_dc_nl_i_in_generated_code() {
     // Generate code for a BJT circuit and check that DC_NL_I constant is present
-    let (netlist, mna, kernel) = build_pipeline(BJT_COMMON_EMITTER);
-    let config = CodegenConfig {
-        circuit_name: "bjt_dc_gen".to_string(),
-        input_node: 0,
-        output_nodes: vec![1],
-        ..default_config()
-    };
-
-    let generator = CodeGenerator::new(config);
-    let result = generator
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
+    let mut config = support::config_for_spice(BJT_COMMON_EMITTER, 44100.0);
+    config.circuit_name = "bjt_dc_gen".to_string();
+    let result = support::build_shipped(BJT_COMMON_EMITTER, &config, "dk").generated;
 
     // Check that generated code contains DC_NL_I
     assert!(
@@ -485,18 +476,9 @@ fn test_codegen_dc_nl_i_in_generated_code() {
 #[test]
 fn test_codegen_linear_circuit_no_dc_nl_i() {
     // Linear circuit should NOT have DC_NL_I
-    let (netlist, mna, kernel) = build_pipeline(RC_LOWPASS);
-    let config = CodegenConfig {
-        circuit_name: "rc_linear".to_string(),
-        input_node: 0,
-        output_nodes: vec![1],
-        ..default_config()
-    };
-
-    let generator = CodeGenerator::new(config);
-    let result = generator
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
+    let mut config = support::config_for_spice(RC_LOWPASS, 44100.0);
+    config.circuit_name = "rc_linear".to_string();
+    let result = support::build_shipped(RC_LOWPASS, &config, "dk").generated;
 
     // Linear circuit should not have DC_NL_I
     assert!(

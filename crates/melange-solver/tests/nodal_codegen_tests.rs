@@ -9,8 +9,10 @@
 //! - Generated code contains correct constants and structures
 //! - Various circuit topologies (RL, diode+L, tube+transformer)
 
+mod support;
+
 use melange_solver::codegen::ir::{CircuitIR, SolverMode};
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+use melange_solver::codegen::CodegenConfig;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
 use std::io::Write;
@@ -44,13 +46,9 @@ fn nodal_config(in_name: &str, out_name: &str, mna: &MnaSystem) -> CodegenConfig
 }
 
 fn generate_nodal(spice: &str, in_name: &str, out_name: &str) -> String {
-    let (netlist, mna) = build_mna_with_input(spice, in_name, 1.0);
+    let mna = MnaSystem::from_netlist(&Netlist::parse(spice).expect("parse")).expect("mna");
     let config = nodal_config(in_name, out_name, &mna);
-    let generator = CodeGenerator::new(config);
-    generator
-        .generate_nodal(&mna, &netlist)
-        .expect("nodal codegen")
-        .code
+    support::build_as_shipped(spice, &config, "nodal").0
 }
 
 fn assert_compiles(code: &str, label: &str) {
@@ -376,23 +374,11 @@ Rvol2 vol_w 0 5k
 ";
 
 fn generate_nodal_be(spice: &str, in_name: &str, out_name: &str) -> String {
-    let (netlist, mna) = build_mna_with_input(spice, in_name, 1.0);
-    let in_idx = *mna.node_map.get(in_name).unwrap() - 1;
-    let out_idx = *mna.node_map.get(out_name).unwrap() - 1;
-    let config = CodegenConfig {
-        circuit_name: "test_be".to_string(),
-        sample_rate: 48000.0,
-        input_node: in_idx,
-        output_nodes: vec![out_idx],
-        input_resistance: 1.0,
-        backward_euler: true,
-        ..CodegenConfig::default()
-    };
-    let generator = CodeGenerator::new(config);
-    generator
-        .generate_nodal(&mna, &netlist)
-        .expect("nodal BE codegen")
-        .code
+    let mna = MnaSystem::from_netlist(&Netlist::parse(spice).expect("parse")).expect("mna");
+    let mut config = nodal_config(in_name, out_name, &mna);
+    config.circuit_name = "test_be".to_string();
+    config.backward_euler = true;
+    support::build_as_shipped(spice, &config, "nodal").0
 }
 
 #[test]

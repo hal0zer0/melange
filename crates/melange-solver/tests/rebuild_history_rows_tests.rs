@@ -10,7 +10,7 @@
 
 mod support;
 
-use melange_solver::codegen::{ir::CircuitIR, CodeGenerator, CodegenConfig, NodalSubPathOverride};
+use melange_solver::codegen::{CodegenConfig, NodalSubPathOverride};
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
 
@@ -20,23 +20,16 @@ R_c vcc c 4.7k\nR_e e 0 1k\nC_e e 0 10u\nC_o c out 1u\nR_l out 0 100k\n\
 .model NPN1 NPN(IS=1e-14 BF=200 RB=100 RC=10 RE=1 CJE=10p CJC=5p)\n\
 .pot R_c 1k 10k\n";
 
-/// Nodal code with the BJT internal nodes expanded, as the CLI builds it.
+/// The shipped nodal build, which expands the BJT internal nodes.
 fn expanded_code(config: &CodegenConfig) -> String {
-    let netlist = Netlist::parse(CE).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    mna.g[config.input_node][config.input_node] += 1.0 / config.input_resistance;
-    let slots = CircuitIR::build_device_info(&netlist).expect("device info");
-    let before = mna.n_aug;
-    mna.expand_bjt_internal_nodes(&slots);
+    let unexpanded = MnaSystem::from_netlist(&Netlist::parse(CE).expect("parse")).expect("mna");
+    let built = support::build_shipped(CE, config, "nodal");
     assert_eq!(
-        mna.n_aug,
-        before + 3,
+        built.mna.n_aug,
+        unexpanded.n_aug + 3,
         "RB, RC and RE each add an internal node"
     );
-    CodeGenerator::new(config.clone())
-        .generate_nodal(&mna, &netlist)
-        .expect("nodal codegen")
-        .code
+    built.generated.code
 }
 
 const MAIN: &str = "fn main() {
