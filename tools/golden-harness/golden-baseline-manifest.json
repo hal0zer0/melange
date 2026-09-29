@@ -89,7 +89,7 @@
       "plugin": "five-watt-freddie",
       "circuit_rs": "plugins/five-watt-freddie/src/circuit.rs",
       "cir": "unstable/amp/champ-5f1.cir",
-      "compile_cmd": "melange compile ../melange-circuits/unstable/amp/champ-5f1.cir --format code --noise thermal --output-clamp 100 -o plugins/five-watt-freddie/src/circuit.rs",
+      "compile_cmd": "melange compile ../melange-circuits/unstable/amp/champ-5f1.cir --format code --noise thermal --output-clamp 150 -o plugins/five-watt-freddie/src/circuit.rs",
       "verify_status": "DRIFT-EXPLAINED",
       "anchors": {
         "n": 24,
@@ -1192,7 +1192,7 @@
   },
   "output_clamp_levels_2026_09_28": {
     "why": "Output-clamp gate: renders whose generated output clamp engaged are refused. Levels and clamps chosen by the deck owner.",
-    "output_clamp_raised": "champ-5f1 --output-clamp 100 (plate/OT-side swing, peak 79.8 V); warpony --output-clamp 150 (cascade output, peak 99.2 V; the plugin maps 75 V to full scale); mosfet-choke-load --output-clamp 100 (choke flyback above the 24 V rail is the point of the fixture, peak 68.8 V)",
+    "output_clamp_raised": "champ-5f1 --output-clamp 150 (plate/OT-side swing; peak 79.8 V on backward Euler, 105 V on trapezoidal since the ring predicate, 2026-09-29; drive kept at 0.1 V guitar level by the deck owner); warpony --output-clamp 150 (cascade output, peak 99.2 V; the plugin maps 75 V to full scale); mosfet-choke-load --output-clamp 100 (choke flyback above the 24 V rail is the point of the fixture, peak 68.8 V)",
     "level_lowered": "steve-1073-preamp 0.1 -> 0.001 V (mic level, from the deck's 63.45 dB static gain); gold-press-riaa 0.1 -> 0.005 V (MM phono level); noyce-amp-at-idle 0.1 -> 0.01 V (noise source; the program input is incidental)"
   }
 }
