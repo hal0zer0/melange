@@ -11,9 +11,10 @@
 //!   base-collector junction goes forward (saturation): the regions the
 //!   grid-off / forward-active reductions assume are never entered.
 
+mod support;
+
 use melange_solver::codegen::ir::CircuitIR;
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
-use melange_solver::dk::DkKernel;
+use melange_solver::codegen::CodegenConfig;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
 use std::collections::HashSet;
@@ -163,51 +164,23 @@ fn build_mna(spice: &str) -> (Netlist, MnaSystem, CodegenConfig) {
     (netlist, mna, config)
 }
 
-/// Run the shared pipeline steps (FA + grid-off) exactly as compile does
-/// and return the MNA plus the DK-emitted code.
+/// The shipped `--solver dk` build (FA + grid-off reductions as compile runs
+/// them): the code and the reduced MNA.
 fn generate_dk(spice: &str, tube_grid_fa: &str) -> (String, MnaSystem) {
-    let (netlist, mut mna, mut config) = build_mna(spice);
+    let (_, _, mut config) = build_mna(spice);
     // The counters under test are on the reduced devices: request the
     // forward-active reduction (off by default).
     config.bjt_fa_mode = melange_solver::codegen::BjtFaMode::Auto;
-    let input = config.input_node;
-    let forward_active = melange_solver::pipeline::apply_forward_active_reduction(
-        &mut mna,
-        &netlist,
-        &config,
-        "",
-        48000.0,
-        1,
-        &[(input, 1.0)],
-        &melange_solver::pipeline::silent,
-    )
-    .expect("FA step");
-    melange_solver::pipeline::apply_grid_off_reduction(
-        &mut mna,
-        &netlist,
-        &config,
-        &forward_active,
-        tube_grid_fa,
-        "",
-        48000.0,
-        1,
-        &[(input, 1.0)],
-    )
-    .expect("grid-off step");
-    let kernel = DkKernel::from_mna(&mna, 48000.0).expect("kernel");
-    let code = CodeGenerator::new(config)
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen")
-        .code;
-    (code, mna)
+    let built = support::try_build_shipped_with(spice, &config, "dk", |o| {
+        o.tube_grid_fa = tube_grid_fa.to_string();
+    })
+    .unwrap_or_else(|e| panic!("build failed: {e}"));
+    (built.generated.code, built.mna)
 }
 
 fn generate_nodal(spice: &str) -> String {
-    let (netlist, mna, config) = build_mna(spice);
-    CodeGenerator::new(config)
-        .generate_nodal(&mna, &netlist)
-        .expect("nodal codegen")
-        .code
+    let (_, _, config) = build_mna(spice);
+    support::build_as_shipped(spice, &config, "nodal").0
 }
 
 fn count_increments(code: &str) -> usize {
@@ -426,15 +399,12 @@ fn test_dk_counter_emitted_for_fa_reduced_and_full_bjt() {
         "FA-reduced BJT gets a Vbc arm"
     );
 
-    // Same deck, FA skipped (solver override nodal makes the FA step a
-    // no-op) -> full 2D BJT, still exactly one arm.
-    let (netlist, mna, config) = build_mna(CE_SATURATING);
-    assert_eq!(mna.m, 2);
-    let kernel = DkKernel::from_mna(&mna, 48000.0).expect("kernel");
-    let code_2d = CodeGenerator::new(config)
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen")
-        .code;
+    // Same deck, `--bjt-fa off` (the default) -> full 2D BJT, still exactly
+    // one arm.
+    let (_, _, config) = build_mna(CE_SATURATING);
+    let built_2d = support::build_shipped(CE_SATURATING, &config, "dk");
+    assert_eq!(built_2d.mna.m, 2);
+    let code_2d = built_2d.generated.code;
     assert_eq!(count_increments(&code_2d), 1, "full 2D BJT gets a Vbc arm");
 }
 

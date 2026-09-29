@@ -462,6 +462,17 @@ pub fn try_build_shipped(
     config: &CodegenConfig,
     solver: &str,
 ) -> Result<melange_solver::build::Built, String> {
+    try_build_shipped_with(spice, config, solver, |_| {})
+}
+
+/// [`try_build_shipped`] with a hook on the `BuildOptions`, for the build
+/// flags a `CodegenConfig` does not carry (`--tube-grid-fa`).
+pub fn try_build_shipped_with(
+    spice: &str,
+    config: &CodegenConfig,
+    solver: &str,
+    tweak: impl FnOnce(&mut melange_solver::build::BuildOptions),
+) -> Result<melange_solver::build::Built, String> {
     let netlist = parse_expanded(spice);
     let mna = MnaSystem::from_netlist(&netlist).expect("MNA build failed");
     // Index order starts with ground, so circuit node `i` is entry `i + 1`.
@@ -508,6 +519,8 @@ pub fn try_build_shipped(
         disable_unit_variation: false,
         output_clamp_auto: false,
     };
+    let mut opts = opts;
+    tweak(&mut opts);
     let silent = &melange_solver::pipeline::silent;
     melange_solver::build::build(spice, &opts, silent, silent).map_err(|e| e.to_string())
 }

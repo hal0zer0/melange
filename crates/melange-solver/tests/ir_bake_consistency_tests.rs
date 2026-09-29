@@ -389,7 +389,9 @@ fn input_node_on_aug_row_rejected() {
     );
 
     // Point input_node at the first augmented row: inside kernel.n (the old
-    // check passed it through) but outside the circuit-node range.
+    // check passed it through) but outside the circuit-node range. Bypasses
+    // the production pipeline on purpose: tests the generator's own index
+    // validation, which a build (it takes node names) cannot reach.
     let bad_config = CodegenConfig {
         input_node: kernel.n_nodes,
         ..config
@@ -412,11 +414,7 @@ fn input_node_on_aug_row_rejected() {
 #[test]
 fn codegen_meta_sparse_lu_fields_populated() {
     // DK path: no sparse LU, density 0.0.
-    let config = be_os_config(1);
-    let (netlist, mna, kernel) = build_pipeline(DIODE_BIAS_SPICE, &config);
-    let generated = CodeGenerator::new(config)
-        .generate(&kernel, &mna, &netlist)
-        .expect("DK codegen");
+    let generated = support::build_shipped(DIODE_BIAS_SPICE, &be_os_config(1), "dk").generated;
     assert!(
         !generated.meta.sparse_lu_enabled,
         "DK path has no sparse LU"
@@ -426,20 +424,10 @@ fn codegen_meta_sparse_lu_fields_populated() {
     // Nodal path with m > 0: the G_aug pattern density is computed and must
     // surface (> 0), and sparse_lu_enabled must agree with the density/size
     // gate (density < 0.4 && n >= 8).
-    let nodal_config = CodegenConfig {
-        circuit_name: "meta_nodal".to_string(),
-        sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![1],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    };
-    let netlist2 = Netlist::parse(DIODE_BIAS_SPICE).expect("parse");
-    let mut mna2 = MnaSystem::from_netlist(&netlist2).expect("MNA");
-    mna2.g[0][0] += 1.0;
-    let generated2 = CodeGenerator::new(nodal_config)
-        .generate_nodal(&mna2, &netlist2)
-        .expect("nodal codegen");
+    let mut nodal_config = support::config_for_spice(DIODE_BIAS_SPICE, 44100.0);
+    nodal_config.circuit_name = "meta_nodal".to_string();
+    nodal_config.output_nodes = vec![1]; // node "a" (vcc=0, a=1, in=2)
+    let generated2 = support::build_shipped(DIODE_BIAS_SPICE, &nodal_config, "nodal").generated;
     assert!(
         generated2.meta.sparse_lu_density > 0.0,
         "nodal m>0 circuit must surface the G_aug pattern density, got {}",

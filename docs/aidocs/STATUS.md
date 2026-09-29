@@ -499,6 +499,12 @@ it can never **be** the evidence for one.
 
 ## Still open
 
+* **Model diagnostics repeat once per device-parameter resolution.** A build
+  resolves device parameters at several steps (junction caps, reductions,
+  routing, codegen), and each resolution logs its model warnings again:
+  `melange compile` of a one-triode deck prints the grid-current
+  starting-point warning 5 times. Fix: emit model diagnostics from one pass in
+  `build()`, not from the resolver.
 * **`melange dc-op` does not stamp `.inject` conductances.** It builds its own
   MNA rather than going through `build()`, and stamps only the `-i` port, so on
   a `.inject` deck it reports the operating point of a circuit without the

@@ -5,33 +5,22 @@
 //! `V={}` constraint form, `ddt`/`idt`, and named parameters are guarded off in
 //! codegen until wired — see `docs/aidocs/BEHAVIORAL_SOURCES.md`.
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+mod support;
+
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
 use std::io::Write;
 
-/// Generate nodal code with the input conductance stamped at `input_node`.
-fn generate_nodal(spice: &str, input_node: usize, output_node: usize) -> String {
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    // Mirror the CLI: stamp the 1Ω input Thevenin conductance.
-    mna.g[input_node][input_node] += 1.0;
-    let cfg = CodegenConfig {
-        circuit_name: "bsrc_test".to_string(),
-        sample_rate: 48000.0,
-        input_node,
-        output_nodes: vec![output_node],
-        output_scales: vec![1.0],
-        input_resistance: 1.0,
-        // These oracles produce DC outputs; the default output DC-blocker would
-        // high-pass them away.
-        dc_block: false,
-        ..CodegenConfig::default()
-    };
-    CodeGenerator::new(cfg)
-        .generate_nodal(&mna, &netlist)
-        .expect("codegen")
-        .code
+/// The shipped nodal build with the output on the named node.
+fn generate_nodal(spice: &str, output: &str) -> String {
+    let mna = MnaSystem::from_netlist(&Netlist::parse(spice).expect("parse")).expect("mna");
+    let mut cfg = support::config_for_spice(spice, 48000.0);
+    cfg.circuit_name = "bsrc_test".to_string();
+    cfg.output_nodes = vec![mna.node_map[output] - 1];
+    // These oracles produce DC outputs; the default output DC-blocker would
+    // high-pass them away.
+    cfg.dc_block = false;
+    support::build_as_shipped(spice, &cfg, "nodal").0
 }
 
 /// Compile `code` (with an appended `main`), run it, return stdout.
@@ -100,9 +89,9 @@ Vb b 0 DC 0.4
 B1 out 0 I={ V(a)*V(b) }
 Rout out 0 1
 Cout out 0 1u
+Rin in 0 1meg
 ";
-    // Nodes (0-based): a=0, b=1, out=2.
-    let code = generate_nodal(spice, 0, 2);
+    let code = generate_nodal(spice, "out");
     let out = compile_and_run(&code, &settle_main(64), "multiplier");
     let v_out: f64 = out
         .parse()
@@ -123,9 +112,9 @@ Va a 0 DC 0.6
 B1 out 0 I={ tanh(V(a)) }
 Rout out 0 1
 Cout out 0 1u
+Rin in 0 1meg
 ";
-    // Nodes (0-based): a=0, out=1.
-    let code = generate_nodal(spice, 0, 1);
+    let code = generate_nodal(spice, "out");
     let out = compile_and_run(&code, &settle_main(64), "tanh");
     let v_out: f64 = out
         .parse()
@@ -148,8 +137,8 @@ Rout out 0 1
 Cout out 0 1u
 Rin in 0 1meg
 ";
-    // Nodes (0-based): out=0, in=1. Drive input on the isolated `in` node.
-    let code = generate_nodal(spice, 1, 0);
+    // Drive input on the isolated `in` node.
+    let code = generate_nodal(spice, "out");
     let out = compile_and_run(&code, &settle_main(64), "ddt_time");
     let v_out: f64 = out
         .parse()
@@ -170,9 +159,9 @@ Va a 0 DC 1
 B1 out 0 I={ idt(V(a)) }
 Rout out 0 1
 Cout out 0 1u
+Rin in 0 1meg
 ";
-    // Nodes (0-based): a=0, out=1.
-    let code = generate_nodal(spice, 0, 1);
+    let code = generate_nodal(spice, "out");
     let out = compile_and_run(&code, &settle_main(4800), "idt_const");
     let v_out: f64 = out
         .parse()
@@ -192,9 +181,9 @@ Behavioral voltage source
 Va a 0 DC 0.6
 B1 out 0 V={ tanh(V(a)) }
 Rout out 0 1meg
+Rin in 0 1meg
 ";
-    // Nodes (0-based): a=0, out=1.
-    let code = generate_nodal(spice, 0, 1);
+    let code = generate_nodal(spice, "out");
     let out = compile_and_run(&code, &settle_main(64), "vtanh");
     let v_out: f64 = out
         .parse()
@@ -223,9 +212,9 @@ B_demod audio 0 V={ ddt( atan2(V(lim_q), V(lim_i)) ) }
 Rli lim_i 0 1meg
 Rlq lim_q 0 1meg
 Ra audio 0 1meg
+Rin in 0 1meg
 ";
-    // Nodes (0-based): iq_i=0, iq_q=1, lim_i=2, lim_q=3, audio=4.
-    let code_li = generate_nodal(spice, 0, 2);
+    let code_li = generate_nodal(spice, "lim_i");
     let lim_i: f64 = compile_and_run(&code_li, &settle_main(64), "fm_lim_i")
         .parse()
         .unwrap();
@@ -234,7 +223,7 @@ Ra audio 0 1meg
         "limiter normalize: lim_i got {lim_i}, expected 0.6 (no NR collapse)"
     );
 
-    let code_d = generate_nodal(spice, 0, 4);
+    let code_d = generate_nodal(spice, "audio");
     let audio: f64 = compile_and_run(&code_d, &settle_main(64), "fm_demod")
         .parse()
         .unwrap();
@@ -265,9 +254,9 @@ Riq iq_q 0 1meg
 Rli lim_i 0 1meg
 Rlq lim_q 0 1meg
 Ra audio 0 1meg
+Rin in 0 1meg
 ";
-    // audio node index: ph=0, iq_i=1, iq_q=2, lim_i=3, lim_q=4, audio=5 (0-based).
-    let code = generate_nodal(spice, 0, 5);
+    let code = generate_nodal(spice, "audio");
     // f=100 Hz: phase reaches π near sample 240; average over pre-wrap samples.
     let main = "fn main() {\n\
         \x20   let mut s = CircuitState::default();\n\
@@ -296,9 +285,9 @@ Va a 0 DC 1
 B1 out 0 I={ gain * amp * V(a) }
 Rout out 0 1
 Cout out 0 1u
+Rin in 0 1meg
 ";
-    // Nodes (0-based): a=0, out=1.
-    let code = generate_nodal(spice, 0, 1);
+    let code = generate_nodal(spice, "out");
     let main = "fn main() {\n\
         \x20   let mut s = CircuitState::default();\n\
         \x20   s.set_runtime_amp(2.0);\n\
@@ -334,9 +323,10 @@ U1 0 vn out OP
 Rg sig vn 1k
 Rf out vn 50k
 Rl out 0 100k
+Rin in 0 1meg
 ";
     // Just needs to generate AND rustc-compile (the bug is a compile error).
-    let code = generate_nodal(spice, 0, 0);
+    let code = generate_nodal(spice, "out");
     assert!(
         code.contains("pub current_sample_rate: f64"),
         "current_sample_rate field must be declared when an op-amp has finite SR"
@@ -355,21 +345,13 @@ Behavioral unknown param
 Va a 0 DC 0.5
 B1 out 0 V={ mystery * V(a) }
 Rout out 0 1meg
+Rin in 0 1meg
 ";
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    mna.g[0][0] += 1.0;
-    let cfg = CodegenConfig {
-        circuit_name: "unk".to_string(),
-        sample_rate: 48000.0,
-        input_node: 0,
-        output_nodes: vec![1],
-        output_scales: vec![1.0],
-        ..CodegenConfig::default()
+    let mut cfg = support::config_for_spice(spice, 48000.0);
+    cfg.circuit_name = "unk".to_string();
+    let Err(err) = support::try_build_shipped(spice, &cfg, "nodal") else {
+        panic!("an undefined parameter must be refused");
     };
-    let err = CodeGenerator::new(cfg)
-        .generate_nodal(&mna, &netlist)
-        .unwrap_err();
     assert!(
         format!("{err}").to_lowercase().contains("mystery"),
         "unexpected: {err}"
@@ -413,25 +395,10 @@ Rl bout out 1k
 Rout out 0 10k
 Cout out 0 10n
 ";
-    let netlist = Netlist::parse(spice).expect("parse");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
-    let input_node = mna.node_map["in"] - 1;
-    let output_node = mna.node_map["out"] - 1;
-    mna.g[input_node][input_node] += 1.0;
-    let cfg = CodegenConfig {
-        circuit_name: "bsrc_sparse".to_string(),
-        sample_rate: 48000.0,
-        input_node,
-        output_nodes: vec![output_node],
-        output_scales: vec![1.0],
-        input_resistance: 1.0,
-        dc_block: false,
-        ..CodegenConfig::default()
-    };
-    let code = CodeGenerator::new(cfg)
-        .generate_nodal(&mna, &netlist)
-        .expect("codegen")
-        .code;
+    let mut cfg = support::config_for_spice(spice, 48000.0);
+    cfg.circuit_name = "bsrc_sparse".to_string();
+    cfg.dc_block = false;
+    let code = support::build_as_shipped(spice, &cfg, "nodal").0;
 
     // The circuit must actually take the sparse path, or this test is vacuous.
     assert!(
@@ -506,9 +473,9 @@ Va a 0 DC 0
 B1 out 0 I={ abs(V(a)) }
 Rout out 0 1
 Cout out 0 1u
+Rin in 0 1meg
 ";
-    // Nodes (0-based): a=0, out=1.
-    let code = generate_nodal(spice, 0, 1);
+    let code = generate_nodal(spice, "out");
     let out = compile_and_run(&code, &settle_main(64), "abs_zero");
     let v_out: f64 = out
         .parse()
@@ -529,8 +496,9 @@ Va a 0 DC -0.75
 B1 out 0 I={ abs(V(a)) }
 Rout out 0 1
 Cout out 0 1u
+Rin in 0 1meg
 ";
-    let code = generate_nodal(spice, 0, 1);
+    let code = generate_nodal(spice, "out");
     let out = compile_and_run(&code, &settle_main(64), "abs_neg");
     let v_out: f64 = out
         .parse()
@@ -553,8 +521,9 @@ Va a 0 DC 0.6
 B1 out 0 I={ exp(V(a)) }
 Rout out 0 1
 Cout out 0 1u
+Rin in 0 1meg
 ";
-    let code = generate_nodal(spice, 0, 1);
+    let code = generate_nodal(spice, "out");
     assert!(
         !code.contains("bsrc_safe_exp"),
         "generated code must not reference the undefined bsrc_safe_exp helper"
@@ -582,8 +551,9 @@ Va a 0 DC -0.5
 B1 out 0 I={ pow(V(a), 1.5) }
 Rout out 0 1
 Cout out 0 1u
+Rin in 0 1meg
 ";
-    let code = generate_nodal(spice, 0, 1);
+    let code = generate_nodal(spice, "out");
     let out = compile_and_run(&code, &settle_main(64), "pow_negbase");
     let v_out: f64 = out
         .parse()
