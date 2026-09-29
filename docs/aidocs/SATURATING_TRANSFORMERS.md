@@ -253,6 +253,20 @@ biased core drifted −1.6e-5 A over 2 s (0.7 % on H1 in C3); at `1e-5` the drif
 is about 1e-10 A, for about one more iteration per sample. The function's doc
 comment records why the cheaper Φ-vs-Φ drift test can never fire.
 
+**Step limit.** Each site also limits the Newton step on the flux row. From
+deep saturation (`L_diff ≈ L_air`) a step that crosses the knee is amps long and
+lands deep on the far side, where the slope is flat again, and Newton
+2-cycles. A step that crosses `|i| = Isat` (or changes sign) and lands more than
+`Isat` past the knee is scaled, through the shared step fraction as pnjlim is,
+to land at `2·Isat`; steps within one regime pass unscaled. Measured: a
+saturating RL under a ±20 V 100 Hz square went from 398 MAX_ITER samples/s
+(each recovered by a sub-step, 3.3 % off the circuit's own 1× trapezoidal
+solution) to 0, matching an independent recurrence to 1.2e-6; wherever the
+unlimited build converged, the output is bit-identical. A blanket
+`|Δi| ≤ 2·Isat + 0.5·|i|` was measured and rejected (it throttles converging
+steps and moves converged outputs). The limit is not in the Armijo merit
+(node KCL, in amps); mixing flux rows into it needs its own scaling decision.
+
 **DC operating point.** An inductor is a DC short; the DC branch current seeds
 `v_prev[k]`. A circuit whose DC solution has all node voltages at zero but a
 nonzero inductor current (a current-biased grounded inductor) still has a DC
