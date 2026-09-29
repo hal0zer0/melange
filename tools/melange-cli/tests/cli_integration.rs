@@ -946,6 +946,77 @@ fn test_ic_seeded_astable_stays_bounded_at_os1() {
     );
 }
 
+/// The nodal-Schur Newton starts where full-LU's does (`v = v_prev`), so at a
+/// regenerative fold it reaches the same root. Its old first-order current
+/// predictor reached a genuine root on the switched branch early: at 192 kHz
+/// this astable settled to a 0.4617 ms period with every sample KCL-valid and
+/// no counter moving.
+///
+/// Reference: ngspice (gear, reltol 1e-4, 1 µs max step), window 0.65–0.8 s
+/// (C_out·R_bleed = 0.1 s, so past 5τ): period 1.1662 ms, c3 1.739–7.961 V.
+/// Measured 2026-09-29: forced Schur 1.1664 ms, forced full-LU 1.1645 ms.
+#[test]
+fn test_ic_seeded_astable_schur_period_matches_spice() {
+    let cir = write_test_circuit(IC_VCVS_ASTABLE, "ic_astable_schur_period");
+    let tmp_wav = std::env::temp_dir().join("melange_cli_test_ic_astable_schur_period.wav");
+    let tmp_csv = std::env::temp_dir().join("melange_cli_test_ic_astable_schur_period.csv");
+    // Fails (non-zero exit) on any unsolved sample: no --allow-nr-hold here.
+    let stdout = run_melange(&[
+        "simulate",
+        cir.to_str().unwrap(),
+        "--output-node",
+        "out",
+        "--amplitude",
+        "1e-9",
+        "--duration",
+        "0.8",
+        "--sample-rate",
+        "192000",
+        "--solver",
+        "nodal",
+        "--nodal-subpath",
+        "schur",
+        "--probe",
+        "c3",
+        "--probe-csv",
+        tmp_csv.to_str().unwrap(),
+        "--output",
+        tmp_wav.to_str().unwrap(),
+    ]);
+    let csv = std::fs::read_to_string(&tmp_csv).unwrap();
+    let _ = std::fs::remove_file(&tmp_wav);
+    let _ = std::fs::remove_file(&tmp_csv);
+    let _ = std::fs::remove_file(&cir);
+    assert_eq!(parse_summary_value(&stdout, "unsolved_sample_count"), 0.0);
+    let (t, c3): (Vec<f64>, Vec<f64>) = csv
+        .lines()
+        .skip(1)
+        .map(|l| {
+            let f: Vec<&str> = l.split(',').collect();
+            (f[1].parse::<f64>().unwrap(), f[2].parse::<f64>().unwrap())
+        })
+        .filter(|(t, _)| (0.65..=0.8).contains(t))
+        .unzip();
+    let (lo, hi) = c3
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+    let mid = 0.5 * (lo + hi);
+    let cross: Vec<f64> = (1..c3.len())
+        .filter(|&k| c3[k - 1] < mid && c3[k] >= mid)
+        .map(|k| t[k - 1] + (mid - c3[k - 1]) * (t[k] - t[k - 1]) / (c3[k] - c3[k - 1]))
+        .collect();
+    let period_ms = (cross[cross.len() - 1] - cross[0]) / (cross.len() - 1) as f64 * 1e3;
+    eprintln!("Schur astable at 192 kHz: period {period_ms:.4} ms, c3 {lo:.3}..{hi:.3} V");
+    assert!(
+        (period_ms - 1.1662).abs() <= 0.005 * 1.1662,
+        "period {period_ms} ms against ngspice's 1.1662 ms. Full stdout:\n{stdout}"
+    );
+    assert!(
+        (lo - 1.739).abs() < 0.02,
+        "c3 minimum {lo} V against ngspice's 1.739 V"
+    );
+}
+
 /// Pins the OS4-specific NR damping-floor bug: at `--oversampling 4`
 /// (192 kHz internal rate for a 48 kHz host), the same IC-seeded transient
 /// that converges cleanly at base rate (peak ~1.18 V, `nr_max_iter_count`

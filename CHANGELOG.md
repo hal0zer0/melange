@@ -24,6 +24,19 @@ generated state is smaller.
 
 ### Fixed
 
+- **A nodal-Schur build no longer switches a regenerative circuit early.** Its
+  Newton started from extrapolated device currents; near a switching point that
+  start reached a genuine but wrong root, silently: an IC-seeded transistor
+  astable at 192 kHz settled to a 0.46 ms period against ngspice's 1.166 ms,
+  every sample passing its checks. The Newton now starts where the full-LU
+  Newton does (the previous sample's voltages), and the astable settles to
+  1.166 ms. Smooth signals now take about one more Newton iteration per sample
+  on Schur circuits (+7 % to +80 % CPU, e.g. the Wurlitzer preamp +31 %);
+  circuits the old start served badly get faster (up to 2.1×). New diagnostic
+  `diag_warm_start_fallback_count` (Schur builds) counts samples where that
+  start is unreachable and the old predictor is used; it is 0 across the
+  regression corpus.
+
 - **A nodal-Schur build now cuts the timestep when its Newton solve fails,
   instead of shipping the diverged iterate.** Nodal full-LU builds re-solve a
   failed sample at up to 64 sub-steps; nodal Schur builds had no such rescue

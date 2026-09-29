@@ -160,6 +160,11 @@ It is not a rounding error: measured on one deck, 43199 held samples out of
 perfectly respectable −0.50 dBFS peak. A smaller count is not proportionally
 safer — 21 held samples in 96000 still means 21 samples of fiction.
 
+Nodal-Schur builds with devices also carry `diag_warm_start_fallback_count`:
+Newton solves that could not start from the previous sample's voltages (the
+point that keeps a switching circuit on its branch) and used an extrapolated
+start instead. It is not an unsolved sample; a nonzero value is worth a look.
+
 Two more counters say whether the circuit was driven with the input you
 passed. They exist on every route:
 

@@ -557,6 +557,74 @@ fn emits_active_set_resolve(ir: &CircuitIR) -> bool {
         .any(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite())
 }
 
+/// True when a Schur build seeds its Newton at full-LU's starting point
+/// ([`RustEmitter::emit_schur_warm_start`]) and so carries the cached `K`
+/// factorisations and `diag_warm_start_fallback_count`.
+fn schur_exact_seed(ir: &CircuitIR, full_nodal: bool) -> bool {
+    !full_nodal && ir.topology.m > 0 && !has_latched_device(ir)
+}
+
+/// `k_factor` / `k_solve`: a rank-revealing LU (full pivoting) of the M×M
+/// kernel `K`, for the Newton warm start that solves `K·i_nl = N_v·v_prev − p`.
+///
+/// `K` is singular whenever two devices share a controlling voltage (an
+/// antiparallel diode pair: `K = [[−a, a], [a, −a]]`). The system is then still
+/// consistent, and ANY solution gives the same Newton sequence: the first
+/// update depends on `i_nl` only through `K·i_nl` (= `v_d − p`), and so does
+/// every step after it. So a singular `K` is solved with its free variables at
+/// zero. Only an inconsistent system (the start is not reachable through the
+/// device currents) returns `None`.
+pub(super) fn emit_k_seed_helpers() -> String {
+    "/// Rank-revealing LU (full pivoting) of the M×M kernel K, for the Newton\n\
+     /// warm start. Returns (factors, row order, column order, rank).\n\
+     fn k_factor(k: &[[f64; M]; M]) -> ([[f64; M]; M], [usize; M], [usize; M], usize) {\n\
+     \x20   let mut a = *k;\n\
+     \x20   let mut pr = [0usize; M];\n\
+     \x20   let mut pc = [0usize; M];\n\
+     \x20   for i in 0..M { pr[i] = i; pc[i] = i; }\n\
+     \x20   let mut scale = 0.0f64;\n\
+     \x20   for r in 0..M { for c in 0..M { scale = scale.max(a[r][c].abs()); } }\n\
+     \x20   let tol = (scale * 1e-12).max(1e-300);\n\
+     \x20   let mut rank = 0;\n\
+     \x20   for c in 0..M {\n\
+     \x20       let (mut br, mut bc, mut bv) = (c, c, 0.0f64);\n\
+     \x20       for r in c..M { for q in c..M { let v = a[r][q].abs(); if v > bv { bv = v; br = r; bc = q; } } }\n\
+     \x20       if !(bv > tol) { break; }\n\
+     \x20       a.swap(c, br);\n\
+     \x20       pr.swap(c, br);\n\
+     \x20       for row in a.iter_mut() { row.swap(c, bc); }\n\
+     \x20       pc.swap(c, bc);\n\
+     \x20       for r in c + 1..M {\n\
+     \x20           let f = a[r][c] / a[c][c];\n\
+     \x20           a[r][c] = f;\n\
+     \x20           for q in c + 1..M { a[r][q] -= f * a[c][q]; }\n\
+     \x20       }\n\
+     \x20       rank += 1;\n\
+     \x20   }\n\
+     \x20   (a, pr, pc, rank)\n\
+     }\n\n\
+     /// A solution of K·x = b from `k_factor`'s factors (free variables zero),\n\
+     /// or None when the system is inconsistent.\n\
+     #[inline]\n\
+     fn k_solve(lu: &[[f64; M]; M], pr: &[usize; M], pc: &[usize; M], rank: usize, b: [f64; M]) -> Option<[f64; M]> {\n\
+     \x20   let mut y = [0.0f64; M];\n\
+     \x20   let mut bmax = 0.0f64;\n\
+     \x20   for i in 0..M { y[i] = b[pr[i]]; bmax = bmax.max(b[i].abs()); }\n\
+     \x20   for c in 0..rank { for r in c + 1..M { y[r] -= lu[r][c] * y[c]; } }\n\
+     \x20   for r in rank..M { if !(y[r].abs() <= 1e-9 * bmax) { return None; } }\n\
+     \x20   let mut z = [0.0f64; M];\n\
+     \x20   for c in (0..rank).rev() {\n\
+     \x20       let mut acc = y[c];\n\
+     \x20       for q in c + 1..rank { acc -= lu[c][q] * z[q]; }\n\
+     \x20       z[c] = acc / lu[c][c];\n\
+     \x20   }\n\
+     \x20   let mut x = [0.0f64; M];\n\
+     \x20   for i in 0..M { x[pc[i]] = z[i]; }\n\
+     \x20   Some(x)\n\
+     }\n\n"
+        .to_string()
+}
+
 /// The node-space KCL residual helpers (`kcl_residual`, `kcl_residual_inl`)
 /// the Newton convergence gate and the Armijo line search read: the full-LU
 /// Newton, and the sub-step ladder on both nodal routes. Emitted when M > 0.
@@ -2717,6 +2785,9 @@ impl RustEmitter {
             if ir.topology.m > 0 {
                 code.push_str(&emit_kcl_residual_fns(ir, &setter_stamps));
             }
+            if schur_exact_seed(ir, use_full_nodal) {
+                code.push_str(&emit_k_seed_helpers());
+            }
             code.push_str(&Self::emit_nodal_schur_process_sample(
                 ir,
                 &noise,
@@ -3825,6 +3896,19 @@ impl RustEmitter {
         code.push_str("    pub diag_magnitude_reset_count: u64,\n");
         code.push_str("    /// Diagnostic: number of samples that needed adaptive sub-stepping\n");
         code.push_str("    pub diag_substep_count: u64,\n");
+        if schur_exact_seed(ir, use_full_nodal) {
+            code.push_str(
+                "    /// Diagnostic: Newton solves whose warm start fell back to the\n\
+                 \x20   /// first-order current predictor because full-LU's start was not\n\
+                 \x20   /// reachable through the device currents (K·i_nl = N_v·v_prev − p\n\
+                 \x20   /// inconsistent; a singular but consistent K is solved exactly).\n\
+                 \x20   /// The exact start (full-LU's `v_prev`) keeps a regenerative circuit\n\
+                 \x20   /// on its branch; the predictor can land on another root with no\n\
+                 \x20   /// other counter moving, so a nonzero value flags samples solved\n\
+                 \x20   /// without that guarantee.\n",
+            );
+            code.push_str("    pub diag_warm_start_fallback_count: u64,\n");
+        }
         code.push_str(&super::subsample_fire::emit_subsample_fire_state_fields(ir));
         code.push_str("    /// Diagnostic: number of LU refactorizations performed\n");
         code.push_str("    pub diag_refactor_count: u64,\n");
@@ -4014,6 +4098,19 @@ impl RustEmitter {
                 code.push_str("    pub k_be: [[f64; M]; M],\n");
                 code.push_str("    /// S_NI_be matrix: S_be * N_i (BE voltage recovery), recomputed by set_sample_rate\n");
                 code.push_str("    pub s_ni_be: [[f64; M]; N],\n");
+            }
+            if schur_exact_seed(ir, use_full_nodal) {
+                for k in ["k", "k_be"] {
+                    code.push_str(&format!(
+                        "    /// Newton warm start: the `{k}` last factored, its rank-revealing LU\n\
+                         \x20   /// factors, row and column orders, and rank (refactored when `{k}` changes).\n\
+                         \x20   pub ws_{k}_key: [[f64; M]; M],\n\
+                         \x20   pub ws_{k}_lu: [[f64; M]; M],\n\
+                         \x20   pub ws_{k}_pr: [usize; M],\n\
+                         \x20   pub ws_{k}_pc: [usize; M],\n\
+                         \x20   pub ws_{k}_rank: usize,\n"
+                    ));
+                }
             }
         }
         code.push('\n');
@@ -4271,6 +4368,9 @@ impl RustEmitter {
         );
         code.push_str("            diag_magnitude_reset_count: 0,\n");
         code.push_str("            diag_substep_count: 0,\n");
+        if schur_exact_seed(ir, use_full_nodal) {
+            code.push_str("            diag_warm_start_fallback_count: 0,\n");
+        }
         code.push_str(&super::subsample_fire::emit_subsample_fire_default_fields(
             ir,
         ));
@@ -4357,6 +4457,18 @@ impl RustEmitter {
             if m > 0 {
                 code.push_str("            k_be: K_BE_DEFAULT,\n");
                 code.push_str("            s_ni_be: S_NI_BE_DEFAULT,\n");
+            }
+            if schur_exact_seed(ir, use_full_nodal) {
+                for k in ["k", "k_be"] {
+                    // NaN key: the first solve factors.
+                    code.push_str(&format!(
+                        "            ws_{k}_key: [[f64::NAN; M]; M],\n\
+                         \x20           ws_{k}_lu: [[0.0; M]; M],\n\
+                         \x20           ws_{k}_pr: [0; M],\n\
+                         \x20           ws_{k}_pc: [0; M],\n\
+                         \x20           ws_{k}_rank: 0,\n"
+                    ));
+                }
             }
         }
 
@@ -4543,6 +4655,9 @@ impl RustEmitter {
         code.push_str("        self.diag_magnitude_reset_count = 0;\n");
         code.push_str("        self.diag_voltage_damp_count = 0;\n");
         code.push_str("        self.diag_substep_count = 0;\n");
+        if schur_exact_seed(ir, use_full_nodal) {
+            code.push_str("        self.diag_warm_start_fallback_count = 0;\n");
+        }
         code.push_str(&super::subsample_fire::emit_subsample_fire_reset(ir));
         code.push_str("        self.diag_refactor_count = 0;\n");
         code.push_str("        self.diag_ls_fail_count = 0;\n");
@@ -8684,7 +8799,6 @@ impl RustEmitter {
 
         // Step 4: M-dim NR (same structure as DK solve_nonlinear)
         code.push_str("    // Step 4: M-dim Newton-Raphson (Schur complement)\n");
-        code.push_str("    // First-order predictor warm start\n");
         if declare {
             code.push_str("    let mut i_nl = [0.0f64; M];\n");
         }
@@ -8701,11 +8815,7 @@ impl RustEmitter {
             // latched-device presence → byte-identical for every non-glow circuit.
             code.push_str("    i_nl.copy_from_slice(&state.i_nl_prev);\n");
         } else {
-            code.push_str("    for i in 0..M {\n");
-            code.push_str(
-                "        i_nl[i] = 2.0 * state.i_nl_prev[i] - state.i_nl_prev_prev[i];\n",
-            );
-            code.push_str("    }\n");
+            Self::emit_schur_warm_start(code, ir, site);
         }
         // Convergence is determined post-loop by `state.last_nr_iterations
         // < MAX_ITER as u32` (see emission a few lines below). Earlier
@@ -8828,6 +8938,68 @@ impl RustEmitter {
         code.push_str("    }\n");
 
         Ok(())
+    }
+
+    /// The Schur Newton's starting point: the device currents `i_nl` whose
+    /// controlling voltages `p + K·i_nl` equal `N_v·v_prev`, the point the
+    /// full-LU Newton starts from (`v = v_prev`). One starting-point definition
+    /// for both nodal sub-paths.
+    ///
+    /// Near a regenerative fold the implicit step has more than one root, and
+    /// which one Newton reaches depends on where it starts. The first-order
+    /// predictor `2·i_prev − i_prev_prev` started the Schur Newton elsewhere,
+    /// and it reached a genuine root on the switched branch before the fold:
+    /// an IC-seeded transistor astable at 192 kHz settled to a 0.4617 ms period
+    /// against ngspice's 1.1662 ms, with every sample KCL-valid and no counter
+    /// moving. From this start it settles to 1.1664 ms (design review).
+    ///
+    /// `K`'s rank-revealing LU is cached in the state and refactored only when
+    /// `K` changes (a rebuild, a rate change, a reset). A singular `K` (devices
+    /// sharing a controlling voltage) is solved exactly; see
+    /// [`emit_k_seed_helpers`]. Only an inconsistent system falls back to the
+    /// first-order predictor, counted in `diag_warm_start_fallback_count`.
+    fn emit_schur_warm_start(code: &mut String, ir: &CircuitIR, site: &SchurSite) {
+        let m = ir.topology.m;
+        let k = site.k;
+        let name = k.strip_prefix("state.").unwrap_or(k);
+        code.push_str(
+            "    // Warm start at full-LU's starting point: solve K·i_nl = N_v·v_prev − p.\n",
+        );
+        code.push_str("    {\n");
+        code.push_str(&format!(
+            "        if {k} != state.ws_{name}_key {{\n\
+             \x20           let (lu, pr, pc, rank) = k_factor(&{k});\n\
+             \x20           state.ws_{name}_lu = lu;\n\
+             \x20           state.ws_{name}_pr = pr;\n\
+             \x20           state.ws_{name}_pc = pc;\n\
+             \x20           state.ws_{name}_rank = rank;\n\
+             \x20           state.ws_{name}_key = {k};\n\
+             \x20       }}\n"
+        ));
+        code.push_str("        let mut kb = [0.0f64; M];\n");
+        for i in 0..m {
+            let terms: Vec<String> = ir.sparsity.n_v.nz_by_row[i]
+                .iter()
+                .map(|&j| format!("N_V[{i}][{j}] * state.v_prev[{j}]"))
+                .collect();
+            let vl = if terms.is_empty() {
+                "0.0".to_string()
+            } else {
+                terms.join(" + ")
+            };
+            code.push_str(&format!("        kb[{i}] = {vl} - p[{i}];\n"));
+        }
+        code.push_str(&format!(
+            "        match k_solve(&state.ws_{name}_lu, &state.ws_{name}_pr, &state.ws_{name}_pc, state.ws_{name}_rank, kb) {{\n\
+             \x20           Some(x) if x.iter().all(|v| v.is_finite()) => i_nl = x,\n\
+             \x20           _ => {{\n\
+             \x20               // Unreachable start: the first-order predictor, counted.\n\
+             \x20               for i in 0..M {{ i_nl[i] = 2.0 * state.i_nl_prev[i] - state.i_nl_prev_prev[i]; }}\n\
+             \x20               state.diag_warm_start_fallback_count += 1;\n\
+             \x20           }}\n\
+             \x20       }}\n\
+             \x20   }}\n"
+        ));
     }
 
     /// The op-amp rail handling of one Schur solve (`site`), on the final `v`

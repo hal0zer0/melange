@@ -4462,6 +4462,7 @@ fn simulate_circuit_source(
                 "diag_unsolved_sample_count",
                 "diag_nr_hold_count",
                 "diag_nr_unconverged_commit_count",
+                "diag_warm_start_fallback_count",
             ])
             .chain(INPUT_DIAG_FIELDS)
             .filter(|f| declares_state_field(&generated.code, f))

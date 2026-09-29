@@ -188,6 +188,12 @@ file:line, oomox-relative):
   active-set rail mode, Schur with no devices). `diag_substep_count` can now be
   nonzero on Schur builds. Like every counter, it includes the warm-up samples
   `default()`/`reset()` run.
+- **`diag_warm_start_fallback_count` (2026-09-29, nodal-Schur builds with
+  devices)**: Newton solves whose exact start (full-LU's `v_prev`) was not
+  reachable, so the old current predictor was used. Informational, not an
+  unsolved sample; 0 across the regression corpus. Worth surfacing if nonzero.
+  Schur circuits now take about one more Newton iteration per sample on smooth
+  signals (e.g. the Wurlitzer preamp +31 % CPU on regeneration).
 - **DK diag semantics (2026-09-29)**: `diag_voltage_damp_count` now counts only
   UNSOLVED samples whose step was contained; a converged sample is never damped
   (it used to be, silently). `== 0` stays true on a healthy stream, and a
