@@ -107,8 +107,10 @@ When `opamp_rail_mode == BoyleDiodes`, `codegen::ir::augment_netlist_with_boyle_
    - Intermediate buffer-output node `_oa_buf_out_{name}`
    - Unity-gain VCVS `E_oa_buf_{name}`: `V(buf_out) = V(int)`
    - Series resistor `R_oa_ro_{name} = 75 Ω` between `buf_out` and the user's output node (canonical Boyle 1974 / TL072 macromodel topology)
-3. Two rail-reference DC voltage sources `V_boyle_hi_{name} = VCC - VOH_DROP` and `V_boyle_lo_{name} = VEE + VOL_DROP`
+3. Two rail-reference DC voltage sources `V_boyle_hi_{name} = limit_hi − Vf` and `V_boyle_lo_{name} = limit_lo + Vf`, where the limits are the op-amp's swing limits (`VCC − VOH_DROP` / `VEE + VOL_DROP`, see DEVICE_MODELS.md "Output Swing Limits") and `Vf` is the catch diode's forward voltage at the clamp current of a 10× overdrive (`boyle_catch_offset`: `(10 − 1)·|limit|/R_BOYLE_INT_LOAD`, AOL cancels; |limit| floored at 1 V)
 4. Two catch diodes `D_boyle_hi/lo_{name}` between the internal node and the rail references (`IS = 1e-15`, `N = 1`)
+
+The internal node therefore rests on the swing limit at 10× overdrive and moves about 60 mV per decade around it. Measured (VCC = ±15, VOH_DROP = 1.5, AOL 1e5, open loop, 2026-09-29): internal node −0.05 V at 2× and +0.06 V at 100× overdrive. The output adds the buffer's `R_oa_ro` drop, `R_ro·I_load`: into 10 kΩ the output sits 0.15 / 0.04 V under the 13.5 V limit (2× / 100×), into 1 kΩ 0.99 / 0.88 V. Hard and active-set pin the output node itself at the limit whatever the load.
 
 The MNA dispatcher in `mna.rs:2871` auto-detects `_oa_int_{safe_name}` in `node_map` and stamps `Gm_int = AOL / R_BOYLE_INT_LOAD` and `Go_int = 1 / R_BOYLE_INT_LOAD` at the internal node row INSTEAD of the user's output node. The output buffer chain is purely linear and is built from the augmented netlist.
 

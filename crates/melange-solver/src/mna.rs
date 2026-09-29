@@ -686,29 +686,15 @@ pub struct OpampInfo {
     pub aol: f64,
     /// Output resistance in ohms (default 1)
     pub r_out: f64,
-    /// Output saturation voltage [V] (default: infinity = no saturation).
-    /// Typical NE5534: 13.0. When finite, output is clamped to ±VSAT.
-    /// Superseded by VCC/VEE when those are specified.
-    pub vsat: f64,
-    /// Positive supply rail voltage [V] (default: infinity = no upper clamp).
-    /// When finite, output is clamped to ≤ VCC. Takes priority over VSAT.
-    /// Example: VCC=9 for single-supply 9V, VCC=18 for charge-pump 18V rail.
+    /// Highest output voltage the op-amp can drive [V] — its upper swing
+    /// limit, the level every rail mode clamps or pins at (default +inf =
+    /// none). Resolved from the card by [`resolve_opamp_swing`]:
+    /// `VCC − VOH_DROP`, or `+VSAT`, or +13 V when only `GBW` is given.
     pub vcc: f64,
-    /// Negative supply rail voltage [V] (default: -infinity = no lower clamp).
-    /// When finite, output is clamped to ≥ VEE. Takes priority over VSAT.
-    /// Example: VEE=0 for single-supply, VEE=-9 for charge-pump negative rail.
+    /// Lowest output voltage the op-amp can drive [V] — its lower swing limit
+    /// (default −inf = none): `VEE + VOL_DROP`, or `−VSAT`, or −13 V when
+    /// only `GBW` is given.
     pub vee: f64,
-    /// Voltage drop from VCC to the maximum output voltage the op-amp can
-    /// actually drive [V]. Models the output-stage transistor saturation
-    /// (in Boyle macromodels, the `V_upper = VCC - VOH_DROP` rail-offset
-    /// source). Default 1.5 V for TL072/NE5532-class parts. Set smaller
-    /// for rail-to-rail op-amps (e.g. `VOH_DROP=0.05` for LMV358 light load).
-    /// Only consulted when `OpampRailMode::BoyleDiodes` is active; ignored
-    /// by the `Hard` and `ActiveSet` rail-handling modes.
-    pub voh_drop: f64,
-    /// Voltage drop from VEE to the minimum output voltage the op-amp can
-    /// actually drive [V]. Symmetrical counterpart to `voh_drop`. Default 1.5 V.
-    pub vol_drop: f64,
     /// Gain-bandwidth product [Hz] (default: infinity = no dominant pole).
     /// When finite, a dominant pole capacitor C = AOL / (2π × GBW × ROUT)
     /// is stamped at an internal Boyle gain node.
@@ -805,6 +791,112 @@ pub struct OpampInfo {
     /// Stamped as an independent Norton current at each of `n_plus_idx`
     /// and `n_minus_idx` — two uncorrelated streams per op-amp.
     pub in_amps: f64,
+}
+
+/// Drop from a supply rail to the op-amp's output swing limit when the card
+/// sets `VCC`/`VEE` without `VOH_DROP`/`VOL_DROP` [V]. A vintage TL07x swings
+/// ±13.5 V into 10 kΩ on ±15 V (TI SLOS080 rev D, V_OM); a 4558 or 741 gets
+/// about 1 V closer, a modern TL072 die 0.2 V. The drop grows into lower
+/// loads (another 0.3–1.5 V at 2 kΩ), which a fixed drop does not follow.
+pub const OPAMP_DEFAULT_RAIL_DROP_V: f64 = 1.5;
+
+/// Swing limit an op-amp card with `GBW` but no `VCC`/`VEE`/`VSAT` gets [V].
+pub const OPAMP_GBW_DEFAULT_SWING_V: f64 = 13.0;
+
+/// The swing-related keys of an op-amp `.model` card, as written.
+#[derive(Debug, Clone, Default)]
+pub struct OpampSwingCard {
+    pub vcc: Option<f64>,
+    pub vee: Option<f64>,
+    pub vsat: Option<f64>,
+    pub voh_drop: Option<f64>,
+    pub vol_drop: Option<f64>,
+}
+
+/// An op-amp's output swing limits, and the notices resolving them produced.
+#[derive(Debug, Clone)]
+pub struct OpampSwing {
+    pub high: f64,
+    pub low: f64,
+    pub notices: Vec<String>,
+}
+
+/// Resolve an op-amp card's output swing limits — the one level every rail
+/// mode (hard clamp, active-set pin, Boyle catch diodes) uses.
+///
+/// `VCC`/`VEE` are the supply rails; the output reaches `VCC − VOH_DROP` and
+/// `VEE + VOL_DROP` (drop default [`OPAMP_DEFAULT_RAIL_DROP_V`], with a
+/// notice). `VSAT` gives a symmetric swing limit directly. `has_gbw` without
+/// any of them gives ±[`OPAMP_GBW_DEFAULT_SWING_V`]. Each side resolves on
+/// its own, so `VCC=9` alone leaves the lower side to the GBW default or
+/// unlimited.
+///
+/// Refused: `VSAT` together with `VCC` or `VEE` (two keys claiming the same
+/// limit); a drop without its rail (it would be inert); a negative or
+/// non-finite drop; an empty swing.
+pub fn resolve_opamp_swing(
+    name: &str,
+    card: &OpampSwingCard,
+    has_gbw: bool,
+) -> Result<OpampSwing, String> {
+    if card.vsat.is_some() && (card.vcc.is_some() || card.vee.is_some()) {
+        return Err(format!(
+            "Op-amp {name}: the card sets VSAT and VCC/VEE. VSAT sets the swing limit \
+             directly; with VCC/VEE use VOH_DROP/VOL_DROP instead."
+        ));
+    }
+    for (drop, rail, drop_key, rail_key) in [
+        (card.voh_drop, card.vcc, "VOH_DROP", "VCC"),
+        (card.vol_drop, card.vee, "VOL_DROP", "VEE"),
+    ] {
+        if let Some(d) = drop {
+            if rail.is_none() {
+                return Err(format!(
+                    "Op-amp {name}: {drop_key} is the drop from {rail_key}, and the card \
+                     sets no {rail_key}. Set {rail_key}, or give the swing limit directly \
+                     with VSAT."
+                ));
+            }
+            if !(d.is_finite() && d >= 0.0) {
+                return Err(format!(
+                    "Op-amp {name}: {drop_key} must be non-negative and finite, got {d}"
+                ));
+            }
+        }
+    }
+    let mut notices = Vec::new();
+    let mut side = |rail: Option<f64>, drop: Option<f64>, sign: f64, rail_key: &str, drop_key: &str| {
+        if let Some(r) = rail {
+            let d = drop.unwrap_or(OPAMP_DEFAULT_RAIL_DROP_V);
+            let limit = r - sign * d;
+            if drop.is_none() {
+                notices.push(format!(
+                    "Op-amp {name}: swing limit assumed {rail_key} {} {OPAMP_DEFAULT_RAIL_DROP_V} V \
+                     = {limit} V; set {drop_key} (0 for rail-to-rail parts).",
+                    if sign > 0.0 { "−" } else { "+" }
+                ));
+            }
+            limit
+        } else if let Some(v) = card.vsat {
+            sign * v
+        } else if has_gbw {
+            sign * OPAMP_GBW_DEFAULT_SWING_V
+        } else {
+            sign * f64::INFINITY
+        }
+    };
+    let high = side(card.vcc, card.voh_drop, 1.0, "VCC", "VOH_DROP");
+    let low = side(card.vee, card.vol_drop, -1.0, "VEE", "VOL_DROP");
+    // Both finite and crossed would panic inside `f64::clamp(min, max)` on the
+    // audio thread at the first sample; a one-sided limit is legal.
+    if high.is_finite() && low.is_finite() && high <= low {
+        return Err(format!(
+            "Op-amp {name}: the output swing is empty: upper limit {high} V <= lower \
+             limit {low} V. VCC − VOH_DROP must stay above VEE + VOL_DROP, and VSAT \
+             must be positive."
+        ));
+    }
+    Ok(OpampSwing { high, low, notices })
 }
 
 /// Effective output resistance for the
@@ -3135,19 +3227,20 @@ impl MnaBuilder {
                             model, m.name, m.model_type
                         )));
                     }
+                    let mut swing = OpampSwingCard::default();
                     for (key, val) in &m.params {
                         match key.to_ascii_uppercase().as_str() {
                             "AOL" => oa.aol = *val,
                             "ROUT" => oa.r_out = *val,
-                            "VSAT" => oa.vsat = *val,
-                            "VCC" => oa.vcc = *val,
-                            "VEE" => oa.vee = *val,
+                            "VSAT" => swing.vsat = Some(*val),
+                            "VCC" => swing.vcc = Some(*val),
+                            "VEE" => swing.vee = Some(*val),
                             "GBW" => oa.gbw = *val,
                             // SR is specified in V/μs (SPICE convention) and
                             // stored in V/s internally — multiply by 1e6.
                             "SR" => oa.sr = *val * 1.0e6,
-                            "VOH_DROP" => oa.voh_drop = *val,
-                            "VOL_DROP" => oa.vol_drop = *val,
+                            "VOH_DROP" => swing.voh_drop = Some(*val),
+                            "VOL_DROP" => swing.vol_drop = Some(*val),
                             "AOL_TRANSIENT_CAP" => oa.aol_transient_cap = *val,
                             "IB" => oa.ib = *val,
                             "RIN" => oa.rin = *val,
@@ -3177,6 +3270,13 @@ impl MnaBuilder {
                             }
                         }
                     }
+                    let resolved = resolve_opamp_swing(&oa.name, &swing, oa.gbw.is_finite())
+                        .map_err(MnaError::InvalidParameter)?;
+                    for notice in &resolved.notices {
+                        log::warn!("{notice}");
+                    }
+                    oa.vcc = resolved.high;
+                    oa.vee = resolved.low;
                 }
             }
         }
@@ -3200,49 +3300,6 @@ impl MnaBuilder {
             );
         }
 
-        // Resolve op-amp output voltage clamps from VCC/VEE/VSAT/GBW.
-        // Priority: VCC/VEE (explicit) > VSAT (symmetric) > GBW auto-default > none.
-        for oa in self.opamps.iter_mut() {
-            // Resolve VCC (upper clamp): VCC > +VSAT > GBW auto-default
-            if !oa.vcc.is_finite() {
-                if oa.vsat.is_finite() {
-                    oa.vcc = oa.vsat;
-                } else if oa.gbw.is_finite() {
-                    oa.vcc = 13.0;
-                }
-            }
-            // Resolve VEE (lower clamp): VEE > -VSAT > GBW auto-default
-            if !oa.vee.is_finite() {
-                if oa.vsat.is_finite() {
-                    oa.vee = -oa.vsat;
-                } else if oa.gbw.is_finite() {
-                    oa.vee = -13.0;
-                }
-            }
-            // Hard-error on inverted/degenerate rails at resolve time. A
-            // swapped card (e.g. `OA(VCC=-9 VEE=9)`) would otherwise sail
-            // through codegen and panic inside `f64::clamp(min, max)` with
-            // min > max — on the audio thread, at the first processed
-            // sample. Both-finite is required: a single-rail clamp
-            // (one side ±inf) is legal and clamp() handles it fine.
-            if oa.vcc.is_finite() && oa.vee.is_finite() && oa.vcc <= oa.vee {
-                return Err(MnaError::InvalidParameter(format!(
-                    "Op-amp {}: resolved supply rails are inverted or degenerate \
-                     (VCC={} V <= VEE={} V). VCC must be strictly above VEE — \
-                     check the OA model card's VCC/VEE (or VSAT, which resolves \
-                     to VCC=+VSAT / VEE=-VSAT and must be positive).",
-                    oa.name, oa.vcc, oa.vee
-                )));
-            }
-            if oa.vcc.is_finite() || oa.vee.is_finite() {
-                log::debug!(
-                    "Op-amp {}: output clamp VCC={:.1}V, VEE={:.1}V",
-                    oa.name,
-                    oa.vcc,
-                    oa.vee
-                );
-            }
-        }
 
         // Resolve VCA model parameters from netlist .model directives
         for (vca, elem) in self.vcas.iter_mut().zip(
@@ -5854,18 +5911,12 @@ impl MnaBuilder {
                     n_out_idx: no_idx,
                     aol: 200_000.0,
                     r_out: 1.0,
-                    vsat: f64::INFINITY,
                     vcc: f64::INFINITY,
                     vee: f64::NEG_INFINITY,
                     gbw: f64::INFINITY,
                     sr: f64::INFINITY,
                     ib: 0.0,
                     rin: f64::INFINITY,
-                    // Boyle-macromodel default: TL072/NE5532-class parts can swing
-                    // to within ~1.5 V of each rail under typical load. Rail-to-rail
-                    // parts should override this in their .model OA() entry.
-                    voh_drop: 1.5,
-                    vol_drop: 1.5,
                     aol_transient_cap: f64::INFINITY,
                     n_internal_idx: 0,
                     iir_c_dom: 0.0,

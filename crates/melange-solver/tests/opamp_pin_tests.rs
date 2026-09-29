@@ -15,7 +15,8 @@ mod support;
 
 use melange_solver::codegen::{NodalSubPathOverride, OpampRailMode};
 
-/// Single-supply overdrive (gain ~107, rails 0/9 V) into a diode clipper. `n2`
+/// Single-supply overdrive (gain ~107, supply 0/9 V, swing 1.5/7.5 V with the
+/// default 1.5 V drops) into a diode clipper. `n2`
 /// is capless: R_1 from the coupling cap, R_t to the output filter, the diodes.
 const OVERDRIVE: &str = "single-supply op-amp overdrive into a diode clipper\n\
 Vcc vcc 0 DC 9\nR_b1 vcc vbias 100k\nR_b2 vbias 0 100k\nC_b vbias 0 10u\n\
@@ -50,7 +51,7 @@ fn run(code: &str, tag: &str) -> Run {
     let tail = n - {tail}usize;
     let (is, nvt) = (s.device_0_is, s.device_0_n_vt);
     assert_eq!((is, nvt), (s.device_1_is, s.device_1_n_vt));
-    let pin = |v: f64| if v >= 9.0 {{ 1u8 }} else if v <= 0.0 {{ 2u8 }} else {{ 0u8 }};
+    let pin = |v: f64| if v >= 7.5 {{ 1u8 }} else if v <= 1.5 {{ 2u8 }} else {{ 0u8 }};
     let mut prev_pin = pin(s.v_prev[NODE_OA]);
     let mut changes = 0u64;
     let mut worst = 0.0f64;

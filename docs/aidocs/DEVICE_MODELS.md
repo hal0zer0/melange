@@ -71,9 +71,7 @@ and not reported:
 | KF, AF, SHOT_GAMMA2, PARTITION_F, op-amp EN, IN | `--noise` is on |
 | Diode/BJT XTI, EG, XTB | the device is not at TNOM: TAMB ≠ 27 °C, or RTH is set (self-heating) |
 | CTH, VBIAS_ALPHA, triode TAMB | RTH is set (self-heating) |
-| Op-amp VSAT | VCC/VEE are absent (they take priority) |
-| Op-amp GBW | VCC, VEE and VSAT are absent: it only defaults the rails to ±13 V; it is not a bandwidth pole, and a notice says so |
-| Op-amp VOH_DROP, VOL_DROP | `--opamp-rail-mode boyle-diodes`; hard and active-set pin at VCC/VEE |
+| Op-amp GBW | VCC, VEE and VSAT are absent: it only sets a ±13 V swing limit; it is not a bandwidth pole, and a notice says so |
 | Op-amp AOL_TRANSIENT_CAP | the nodal route; the DK route does not apply it |
 
 ## Diode (Shockley)
@@ -1087,6 +1085,32 @@ Gate current derivatives are always zero.
 > before touching anything related to op-amp saturation, BoyleDiodes, or rail
 > clamping** — the rail-mode landscape has multi-session investigation history
 > and several already-tested-and-rejected fix candidates.
+
+### Output Swing Limits
+
+`VCC`/`VEE` are the supply rails. The output reaches `VCC − VOH_DROP` and
+`VEE + VOL_DROP`; that swing limit is the one level every rail mode clamps,
+pins or catches at (`mna::resolve_opamp_swing`, shared with the validate
+harness's ngspice twin). Each side resolves on its own:
+
+| Card | Upper / lower limit |
+|---|---|
+| `VCC`, `VEE` (+ optional `VOH_DROP`, `VOL_DROP`) | `VCC − VOH_DROP` / `VEE + VOL_DROP` |
+| `VSAT` | `+VSAT` / `−VSAT` |
+| `GBW` only | ±13 V |
+| none | unlimited |
+
+A missing drop defaults to **1.5 V** with a compile notice (`set VOH_DROP (0
+for rail-to-rail parts)`). Source: a vintage TL07x swings ±13.5 V into 10 kΩ
+on ±15 V (TI SLOS080 rev D, V_OM). Other parts differ — 4558 and 741 about
+1.0 V (TI SLOS073 rev H, uA741 rev B), NE5532 1.5 V at 2 kΩ, a current TL072
+die 0.2 V (SLOS080 rev W) — so a part's own drop belongs on its card. The
+drop grows into low loads (another 0.3–1.5 V at 2 kΩ), which a fixed drop does
+not follow: it understates clipping on 2 kΩ/600 Ω line drivers.
+
+Refused: `VSAT` together with `VCC` or `VEE` (both claim the limit; use the
+drops with the rails), a drop without its rail, a negative drop, and an empty
+swing.
 
 The op-amp is modeled as a linear voltage-controlled current source (VCCS).
 It does NOT add nonlinear dimensions (M stays unchanged). All behavior is

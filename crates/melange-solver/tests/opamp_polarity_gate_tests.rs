@@ -178,7 +178,7 @@ Opamp Rail Polarity
 Rleak in 0 1Meg
 U1 in 0 out OPA
 Rload out 0 1k
-.model OPA OA(AOL=200000 ROUT=1 VCC=9 VEE=0)
+.model OPA OA(AOL=200000 ROUT=1 VCC=9 VEE=0 VOH_DROP=0 VOL_DROP=0)
 ";
     let netlist = Netlist::parse(spice).unwrap();
     let mna = MnaSystem::from_netlist(&netlist).unwrap();

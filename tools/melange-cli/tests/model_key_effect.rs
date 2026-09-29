@@ -58,9 +58,6 @@ struct Case {
     alone_only: &'static [&'static str],
 }
 
-/// Active-set and hard rail modes pin at VCC/VEE; only boyle-diodes places
-/// the catch at VCC - VOH_DROP / VEE + VOL_DROP.
-const BOYLE: &[&str] = &["--solver", "nodal", "--opamp-rail-mode", "boyle-diodes"];
 /// AOL_TRANSIENT_CAP is applied by the nodal IR builder only.
 const NODAL: &[&str] = &["--solver", "nodal"];
 
@@ -249,8 +246,8 @@ const CASES: &[Case] = &[
             ("VCC", "15", "12", Rich),
             ("VEE", "-15", "-12", Rich),
             ("SR", "1", "0.5", Rich),
-            ("VOH_DROP", "1", "1.5", RichWith(BOYLE)),
-            ("VOL_DROP", "1", "1.5", RichWith(BOYLE)),
+            ("VOH_DROP", "1", "1.5", Rich),
+            ("VOL_DROP", "1", "1.5", Rich),
             ("AOL_TRANSIENT_CAP", "1000", "500", RichWith(NODAL)),
             ("IB", "1e-9", "1e-8", Rich),
             ("RIN", "1e6", "2e6", Rich),

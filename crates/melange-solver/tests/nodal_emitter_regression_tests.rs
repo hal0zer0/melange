@@ -134,7 +134,7 @@ Rload out 0 100k
 Rdx out dx 1Meg
 Ddx dx 0 DDX
 .model DDX D(IS=1e-15)
-.model OA1 OA(AOL=200000 ROUT=100 VCC=9)
+.model OA1 OA(AOL=200000 ROUT=100 VCC=9 VOH_DROP=0)
 ";
 
 #[test]
@@ -183,7 +183,7 @@ Rfb oa_neg oa_out 47k
 U1 0 oa_neg oa_out OA1
 Cout oa_out out 10u
 Rload out 0 100k
-.model OA1 OA(AOL=200000 ROUT=100 VCC=9)
+.model OA1 OA(AOL=200000 ROUT=100 VCC=9 VOH_DROP=0)
 ";
 
 #[test]

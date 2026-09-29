@@ -297,6 +297,21 @@ generated state is smaller.
 
 ### Changed
 
+- **An op-amp's `VCC`/`VEE` are its supply, and its output now stops short of
+  them in every rail mode.** The output reaches `VCC − VOH_DROP` and
+  `VEE + VOL_DROP`; a card that sets the rails without the drops gets 1.5 V (a
+  vintage TL07x into 10 kΩ) and a notice saying so — put the part's own drop
+  on its card, 0 for a rail-to-rail part. Before, the hard and active-set rail
+  modes clipped at the rails themselves and ignored the drops, while
+  boyle-diodes applied them and then saturated a catch-diode drop (~0.75 V)
+  beyond; the three modes disagreed by up to 1.5 V on the same card.
+  boyle-diodes now places its catch so the gain node rests on the limit (within
+  ~0.06 V from 2× to 100× overdrive). **Every railing circuit whose op-amp card
+  sets `VCC`/`VEE` clips 1.5 V lower** unless the card sets the drops. A card
+  with `VSAT` and `VCC`/`VEE` is refused (both set the same limit), as is a
+  drop without its rail. `VSAT` alone and the ±13 V `GBW` default are
+  unchanged.
+
 - **The thermal voltage is kT/q at 27 °C (300.15 K), SPICE's nominal
   temperature, instead of 300 K.** Every diode, BJT, JFET and MOSFET that does
   not set its own `VT` sees a 0.05 % larger Vt; the self-heating ambient

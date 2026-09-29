@@ -74,13 +74,6 @@ const OPAMP_MODEL_TYPE: &str = "OA";
 const DEFAULT_AOL: f64 = 200_000.0;
 const DEFAULT_ROUT: f64 = 1.0;
 
-/// Rail melange auto-defaults to when `GBW` is specified but no explicit
-/// VCC/VEE/VSAT is (`mna.rs`, "Resolve op-amp output voltage clamps"). Applied
-/// per side, so `OA(VCC=9 GBW=3MEG)` really does resolve to a 9 V / −13 V
-/// window — mirrored here rather than "fixed", because the point is to match
-/// melange.
-const GBW_DEFAULT_RAIL: f64 = 13.0;
-
 /// Op-amp parameters resolved exactly as `mna.rs` resolves them.
 #[derive(Debug, Clone)]
 pub(crate) struct OpampParams {
@@ -88,9 +81,10 @@ pub(crate) struct OpampParams {
     r_out: f64,
     rin: f64,
     ib: f64,
-    /// Resolved upper clamp (VCC > +VSAT > GBW default > +inf).
+    /// Upper output swing limit, resolved by melange's own
+    /// `resolve_opamp_swing` (`VCC − VOH_DROP`, `+VSAT`, GBW default, +inf).
     vcc: f64,
-    /// Resolved lower clamp (VEE > −VSAT > −GBW default > −inf).
+    /// Lower output swing limit (`VEE + VOL_DROP`, `−VSAT`, GBW default, −inf).
     vee: f64,
     /// Slew rate in V/s (`.model` gives V/µs; melange multiplies by 1e6).
     sr: f64,
@@ -126,7 +120,7 @@ impl OpampParams {
             )));
         }
         let mut p = Self::default();
-        let mut vsat = f64::INFINITY;
+        let mut swing = melange_solver::mna::OpampSwingCard::default();
         let mut gbw = f64::INFINITY;
         for (key, val) in &m.params {
             match key.to_ascii_uppercase().as_str() {
@@ -134,9 +128,11 @@ impl OpampParams {
                 "ROUT" => p.r_out = *val,
                 "RIN" => p.rin = *val,
                 "IB" => p.ib = *val,
-                "VCC" => p.vcc = *val,
-                "VEE" => p.vee = *val,
-                "VSAT" => vsat = *val,
+                "VCC" => swing.vcc = Some(*val),
+                "VEE" => swing.vee = Some(*val),
+                "VSAT" => swing.vsat = Some(*val),
+                "VOH_DROP" => swing.voh_drop = Some(*val),
+                "VOL_DROP" => swing.vol_drop = Some(*val),
                 "GBW" => gbw = *val,
                 // SPICE convention: V/µs on the card, V/s internally.
                 "SR" => p.sr = *val * 1.0e6,
@@ -144,21 +140,13 @@ impl OpampParams {
                 _ => {}
             }
         }
-        // Rail resolution, in melange's priority order (`mna.rs`).
-        if !p.vcc.is_finite() {
-            if vsat.is_finite() {
-                p.vcc = vsat;
-            } else if gbw.is_finite() {
-                p.vcc = GBW_DEFAULT_RAIL;
-            }
-        }
-        if !p.vee.is_finite() {
-            if vsat.is_finite() {
-                p.vee = -vsat;
-            } else if gbw.is_finite() {
-                p.vee = -GBW_DEFAULT_RAIL;
-            }
-        }
+        // The swing window melange itself resolves (`mna.rs`), not a copy of
+        // its rules.
+        let resolved =
+            melange_solver::mna::resolve_opamp_swing(&m.name, &swing, gbw.is_finite())
+                .map_err(|e| SpiceError::ParseError(format!("op-amp translation: {e}")))?;
+        p.vcc = resolved.high;
+        p.vee = resolved.low;
         if p.r_out == 0.0 {
             return Err(SpiceError::ParseError(format!(
                 "op-amp translation: model '{}' has ROUT=0, which gives an \
@@ -646,7 +634,7 @@ Cstab out 0 1p
     }
 
     #[test]
-    fn rails_resolve_in_melanges_priority_order() {
+    fn rails_resolve_as_melange_resolves_them() {
         let mk = |card: &str| {
             let deck = format!("amp\nR1 in inv 10k\nU1 0 inv out OA1\nC1 out 0 1p\n{card}\n.end\n");
             rail_probes(&deck)
@@ -658,15 +646,20 @@ Cstab out 0 1p
         assert_eq!(p.len(), 1);
         assert_eq!(p[0].vcc, 13.0);
         assert_eq!(p[0].vee, -13.0);
-        // VCC/VEE win over VSAT.
-        let p = mk(".model OA1 OA(AOL=1e5 ROUT=75 VSAT=13 VCC=9 VEE=-9)");
-        assert_eq!((p[0].vcc, p[0].vee), (9.0, -9.0));
+        // VCC/VEE are the supply: the swing stops the drop short of each rail
+        // (1.5 V by default).
+        let p = mk(".model OA1 OA(AOL=1e5 ROUT=75 VCC=9 VEE=-9)");
+        assert_eq!((p[0].vcc, p[0].vee), (7.5, -7.5));
+        let p = mk(".model OA1 OA(AOL=1e5 ROUT=75 VCC=9 VEE=-9 VOH_DROP=0 VOL_DROP=0.5)");
+        assert_eq!((p[0].vcc, p[0].vee), (9.0, -8.5));
+        // VSAT with VCC/VEE is refused by melange, so there is no twin.
+        assert!(mk(".model OA1 OA(AOL=1e5 ROUT=75 VSAT=13 VCC=9 VEE=-9)").is_empty());
         // GBW alone triggers the +/-13 V auto-default.
         let p = mk(".model OA1 OA(AOL=1e5 ROUT=75 GBW=3e6)");
         assert_eq!((p[0].vcc, p[0].vee), (13.0, -13.0));
-        // GBW's default applies PER SIDE: a single-supply card gets 9 / -13.
+        // GBW's default applies PER SIDE: a single-supply card gets 7.5 / -13.
         let p = mk(".model OA1 OA(AOL=1e5 ROUT=75 VCC=9 GBW=3e6)");
-        assert_eq!((p[0].vcc, p[0].vee), (9.0, -13.0));
+        assert_eq!((p[0].vcc, p[0].vee), (7.5, -13.0));
         // SR alone is a clamp too, even with infinite rails.
         let p = mk(".model OA1 OA(AOL=1e5 ROUT=75 SR=13)");
         assert_eq!(p.len(), 1);

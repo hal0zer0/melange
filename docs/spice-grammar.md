@@ -794,14 +794,14 @@ outside the tube type's published manufacturer limit.
 | `AOL` | 200000 | Open-loop voltage gain (V/V) |
 | `ROUT` | 1.0 Ω | Output resistance |
 | `GBW` | ∞ Hz | Gain-bandwidth product. **Not modelled as a pole** (the gain is `AOL` at every frequency; a notice says so); a finite value only defaults the rails, below |
-| `VSAT` | ∞ V | Symmetric output clamp: output is held to ±`VSAT` |
-| `VCC` | +∞ V | Positive supply rail — upper output clamp. Takes priority over `VSAT` |
-| `VEE` | −∞ V | Negative supply rail — lower output clamp. Takes priority over `VSAT` |
+| `VSAT` | ∞ V | Symmetric swing limit: the output is held to ±`VSAT`. Not with `VCC`/`VEE` (refused) |
+| `VCC` | +∞ V | Positive supply rail. The output reaches `VCC − VOH_DROP` |
+| `VEE` | −∞ V | Negative supply rail. The output reaches `VEE + VOL_DROP` |
 | `SR` | ∞ V/µs | Slew rate, **in V/µs** (SPICE convention). Emitted as a per-sample output delta clamp |
 | `IB` | 0 A | Input bias current at each input pin (positive = current out of the pin) |
 | `RIN` | ∞ Ω | Input resistance from each input pin to ground |
-| `VOH_DROP` | 1.5 V | Drop from `VCC` to the highest drivable output. **Only read in `--opamp-rail-mode boyle-diodes`** |
-| `VOL_DROP` | 1.5 V | Drop from `VEE` to the lowest drivable output. Same mode restriction |
+| `VOH_DROP` | 1.5 V | Drop from `VCC` to the highest drivable output, in every rail mode. The default prints a notice; set 0 for rail-to-rail parts. Needs `VCC` |
+| `VOL_DROP` | 1.5 V | Drop from `VEE` to the lowest drivable output. Needs `VEE` |
 | `AOL_TRANSIENT_CAP` | ∞ | Override for the transient-NR open-loop-gain cap (auto-detected otherwise) |
 | `EN` | 0 V/√Hz | Input-referred voltage-noise density. Emitted only under `--noise` |
 | `IN` | 0 A/√Hz | Input-referred current-noise density. Emitted only under `--noise` |
@@ -812,20 +812,22 @@ Linear device — does not add nonlinear dimensions to the solver. Modeled as Bo
 
 An unrecognized parameter on an `OA` card produces a `.model <name>: unrecognized parameter '<key>' (ignored)` warning and is then ignored. This is looser than every other device class, where an unknown key is a **hard error** raised during code generation — `.model 1N4148: unknown parameter 'RSS'. Accepted for this device: IS, N, CJO, RS, …` — so `compile`, `simulate` and `analyze` all refuse the deck. Note that `melange nodes` stops short of codegen and so reports neither.
 
-#### Rail resolution order, and the op-amp that cannot clip
+#### Swing limits, and the op-amp that cannot clip
 
-The two output clamps are resolved independently, each taking the first source that is finite (`crates/melange-solver/src/mna.rs`, "Resolve op-amp output voltage clamps"):
+`VCC`/`VEE` are the supply rails; the output stops a drop short of each. The two swing limits resolve independently (`resolve_opamp_swing` in `crates/melange-solver/src/mna.rs`), and every rail mode clamps, pins or catches at them:
 
 ```
-upper clamp:  VCC   >  +VSAT  >  +13.0 V if GBW is finite  >  none
-lower clamp:  VEE   >  −VSAT  >  −13.0 V if GBW is finite  >  none
+upper limit:  VCC − VOH_DROP  |  +VSAT  |  +13.0 V if GBW is finite  |  none
+lower limit:  VEE + VOL_DROP  |  −VSAT  |  −13.0 V if GBW is finite  |  none
 ```
 
-Three consequences worth knowing before you write your first card:
+Consequences worth knowing before you write your first card:
 
-1. **A card with no `VCC`/`VEE`/`VSAT`/`GBW` has no output clamp at all.** `OA(AOL=1e5 ROUT=75)` is an op-amp with infinite headroom — drop it into a 9 V pedal and the output will sail past 9 V to wherever the closed-loop gain takes it, with no warning. If your circuit's character comes from the op-amp running out of rail, the model card has to say so.
-2. **Setting `GBW` alone also sets your rails**, to ±13 V, because a finite `GBW` implies you meant a real part. That is a deliberate default, but it is a side effect of a parameter about *bandwidth* — and it is `GBW`'s only effect, since no bandwidth pole is modelled.
-3. **Inverted rails are a hard error, not a warning.** `OA(VCC=-9 VEE=9)` fails at build time rather than reaching `clamp(min, max)` with `min > max` on the audio thread.
+1. **A card with no `VCC`/`VEE`/`VSAT`/`GBW` has no output limit at all.** `OA(AOL=1e5 ROUT=75)` is an op-amp with infinite headroom — drop it into a 9 V pedal and the output will sail past 9 V to wherever the closed-loop gain takes it, with no warning. If your circuit's character comes from the op-amp running out of rail, the model card has to say so.
+2. **`VCC` without `VOH_DROP` swings to `VCC − 1.5 V`**, a vintage TL07x into 10 kΩ, and the compile says so. Put the part's own drop on its card (0 for a rail-to-rail part).
+3. **`VSAT` with `VCC` or `VEE` is refused**: both would set the same limit. Use `VSAT` alone, or the rails with their drops. A drop without its rail is refused too.
+4. **Setting `GBW` alone also sets a ±13 V limit**, because a finite `GBW` implies you meant a real part. That is a deliberate default, but it is a side effect of a parameter about *bandwidth* — and it is `GBW`'s only effect, since no bandwidth pole is modelled.
+5. **An empty swing is a hard error, not a warning.** `OA(VCC=-9 VEE=9)` fails at build time rather than reaching `clamp(min, max)` with `min > max` on the audio thread.
 
 Rail *behavior* — how the clamp interacts with Newton-Raphson — is selected by `--opamp-rail-mode {auto|none|hard|active-set|active-set-be|boyle-diodes}`, not by the model card. See [OPAMP_RAIL_MODES.md](aidocs/OPAMP_RAIL_MODES.md).
 

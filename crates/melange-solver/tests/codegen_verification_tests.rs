@@ -9832,7 +9832,7 @@ fn test_single_sided_opamp_rail_clamp_emits_valid_rust() {
     // `.min(hi)` clamp).
     // Closed-loop inverting stage + diode, mirrors the DK-routed circuit in
     // opamp_tests::test_opamp_vcc_vee_codegen_asymmetric_clamp but with VEE
-    // omitted from the model card.
+    // omitted from the model card (VOH_DROP=0: the limit is VCC itself).
     const SPICE: &str = "\
 Single-Sided Rail
 R1 in inv 10k
@@ -9843,7 +9843,7 @@ Rcouple opout out 1k
 D1 out 0 D1N4148
 Rload out 0 10k
 C2 out 0 100n
-.model oa OA(AOL=200000 VCC=9)
+.model oa OA(AOL=200000 VCC=9 VOH_DROP=0)
 .model D1N4148 D(IS=2.52e-9 N=1.752)
 ";
     let (code, _, _, _) = generate_code(SPICE);

@@ -245,6 +245,35 @@ pub fn hard_override_at_risk(
 /// op-amp model's output-stage clamp diodes.
 pub const BOYLE_CATCH_DIODE_MODEL: &str = "D_BOYLE_CATCH";
 
+/// Catch-diode saturation current and emission coefficient.
+const BOYLE_CATCH_IS: f64 = 1e-15;
+const BOYLE_CATCH_N: f64 = 1.0;
+
+/// Overdrive at which the catch diodes hold the internal node exactly at the
+/// swing limit: the differential input at this multiple of the linear-range
+/// input that reaches the limit.
+const BOYLE_CATCH_OVERDRIVE: f64 = 10.0;
+
+/// Smallest |limit| used to set the clamp current, so a limit at 0 V (a
+/// rail-to-rail single-supply part) still has a defined operating point.
+const BOYLE_CATCH_MIN_LIMIT_V: f64 = 1.0;
+
+/// How far a catch reference sits inside the swing limit: the catch diode's
+/// forward voltage at the clamp current [`BOYLE_CATCH_OVERDRIVE`] sets.
+///
+/// The catch diodes clamp the internal gain node, whose load is
+/// `R_BOYLE_INT_LOAD` to ground. At a differential input `k` times the one
+/// that brings the node to `limit`, the gain stage pushes `k·limit/R` and the
+/// load takes `limit/R`, so the diode carries `(k − 1)·|limit|/R` — AOL
+/// cancels. With the reference at `limit − Vf(that current)` the node rests
+/// on the limit at that overdrive, and moves about 60 mV per decade of
+/// overdrive around it: within ~0.1 V from 2x to 100x.
+fn boyle_catch_offset(limit: f64) -> f64 {
+    let i_clamp = (BOYLE_CATCH_OVERDRIVE - 1.0) * limit.abs().max(BOYLE_CATCH_MIN_LIMIT_V)
+        / crate::mna::R_BOYLE_INT_LOAD;
+    BOYLE_CATCH_N * melange_primitives::VT_ROOM * (i_clamp / BOYLE_CATCH_IS).ln_1p()
+}
+
 /// Augment a parsed netlist with the Boyle-style internal-gain-node op-amp
 /// model (catch diodes + output buffer), returning a fresh [`Netlist`] that
 /// contains the original elements plus the synthesized internal-node
@@ -284,7 +313,9 @@ pub const BOYLE_CATCH_DIODE_MODEL: &str = "D_BOYLE_CATCH";
 ///   sink to ground.
 ///
 /// - For each finite rail, a reference node `_boyle_hi_{name}` /
-///   `_boyle_lo_{name}` pinned to `VCC − VOH_DROP` / `VEE + VOL_DROP` by a
+///   `_boyle_lo_{name}` pinned one catch-diode drop inside the op-amp's swing
+///   limit (`oa.vcc` / `oa.vee`, i.e. `VCC − VOH_DROP` / `VEE + VOL_DROP`;
+///   see [`boyle_catch_offset`]) by a
 ///   synthesized DC voltage source, and a catch diode between
 ///   **`_oa_int_{name}`** and that reference node. The diodes are placed
 ///   on the internal node — NOT on the original output — so they only have
@@ -305,9 +336,8 @@ pub const BOYLE_CATCH_DIODE_MODEL: &str = "D_BOYLE_CATCH";
 /// [`crate::mna::R_BOYLE_INT_LOAD`] as the effective output resistance). See
 /// [`crate::mna::MnaSystem::from_netlist`] for the dispatch.
 ///
-/// VOH_DROP and VOL_DROP default to 1.5 V in [`crate::mna::OpampInfo`] for
-/// TL072/NE5532-class parts and can be overridden in the user's
-/// `.model OA(VOH_DROP=… VOL_DROP=…)` for rail-to-rail op-amps.
+/// The swing limits are resolved once, for every rail mode, by
+/// [`crate::mna::resolve_opamp_swing`].
 ///
 /// # Why this specific topology
 ///
@@ -364,7 +394,10 @@ pub fn augment_netlist_with_boyle_diodes(
         augmented.models.push(Model {
             name: BOYLE_CATCH_DIODE_MODEL.to_string(),
             model_type: "D".to_string(),
-            params: vec![("IS".to_string(), 1e-15), ("N".to_string(), 1.0)],
+            params: vec![
+                ("IS".to_string(), BOYLE_CATCH_IS),
+                ("N".to_string(), BOYLE_CATCH_N),
+            ],
         });
     }
 
@@ -504,7 +537,7 @@ pub fn augment_netlist_with_boyle_diodes(
         });
 
         if has_upper {
-            // Upper catch: internal node → (VCC − VOH_DROP) reference node.
+            // Upper catch: internal node → upper swing limit reference node.
             // Diode anode is the internal node so positive overdrive (V_int
             // climbing toward VCC) forward-biases the diode and pins V_int.
             let rail_node = format!("_boyle_hi_{}", safe_name);
@@ -512,7 +545,7 @@ pub fn augment_netlist_with_boyle_diodes(
                 name: format!("V_boyle_hi_{}", safe_name),
                 n_plus: rail_node.clone(),
                 n_minus: "0".to_string(),
-                dc: Some(oa.vcc - oa.voh_drop),
+                dc: Some(oa.vcc - boyle_catch_offset(oa.vcc)),
                 ac: None,
             });
             augmented.elements.push(Element::Diode {
@@ -524,13 +557,13 @@ pub fn augment_netlist_with_boyle_diodes(
         }
 
         if has_lower {
-            // Lower catch: (VEE + VOL_DROP) reference node → internal node.
+            // Lower catch: lower swing limit reference node → internal node.
             let rail_node = format!("_boyle_lo_{}", safe_name);
             augmented.elements.push(Element::VoltageSource {
                 name: format!("V_boyle_lo_{}", safe_name),
                 n_plus: rail_node.clone(),
                 n_minus: "0".to_string(),
-                dc: Some(oa.vee + oa.vol_drop),
+                dc: Some(oa.vee + boyle_catch_offset(oa.vee)),
                 ac: None,
             });
             augmented.elements.push(Element::Diode {

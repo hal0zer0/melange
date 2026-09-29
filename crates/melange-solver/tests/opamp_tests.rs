@@ -323,9 +323,36 @@ U1 0 inv out oa
     let netlist = Netlist::parse(spice).unwrap();
     let mna = MnaSystem::from_netlist(&netlist).unwrap();
 
+    // VCC/VEE are the supply; without VOH_DROP/VOL_DROP the output swings to
+    // within the 1.5 V default drop of each rail.
     assert_eq!(mna.opamps.len(), 1);
-    assert_eq!(mna.opamps[0].vcc, 9.0, "VCC should be 9.0");
-    assert_eq!(mna.opamps[0].vee, 0.0, "VEE should be 0.0");
+    assert_eq!(mna.opamps[0].vcc, 7.5, "upper swing limit VCC - 1.5 V");
+    assert_eq!(mna.opamps[0].vee, 1.5, "lower swing limit VEE + 1.5 V");
+}
+
+#[test]
+fn test_opamp_rail_drops_set_the_swing_limit() {
+    let spice = r#"Rail Drops
+R1 in inv 10k
+R2 inv out 100k
+C1 out 0 100n
+U1 0 inv out oa
+.model oa OA(AOL=200000 VCC=9 VEE=0 VOH_DROP=0.2 VOL_DROP=0)
+"#;
+    let netlist = Netlist::parse(spice).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).unwrap();
+    assert_eq!(mna.opamps[0].vcc, 8.8);
+    assert_eq!(mna.opamps[0].vee, 0.0);
+}
+
+#[test]
+fn test_opamp_drop_without_its_rail_is_refused() {
+    for card in ["OA(AOL=200000 VOH_DROP=1)", "OA(AOL=200000 VCC=9 VOL_DROP=1)", "OA(AOL=200000 VSAT=13 VOH_DROP=1)"] {
+        let spice = format!("Drop Without Rail\nR1 in inv 10k\nR2 inv out 100k\nU1 0 inv out oa\n.model oa {card}\n");
+        let netlist = Netlist::parse(&spice).unwrap();
+        let err = MnaSystem::from_netlist(&netlist).err().expect(card);
+        assert!(format!("{err:?}").contains("is the drop from"), "{card}: {err:?}");
+    }
 }
 
 #[test]
@@ -340,8 +367,8 @@ U1 0 inv out oa
     let netlist = Netlist::parse(spice).unwrap();
     let mna = MnaSystem::from_netlist(&netlist).unwrap();
 
-    assert_eq!(mna.opamps[0].vcc, 18.0, "VCC should be 18.0");
-    assert_eq!(mna.opamps[0].vee, -9.0, "VEE should be -9.0");
+    assert_eq!(mna.opamps[0].vcc, 16.5, "upper swing limit VCC - 1.5 V");
+    assert_eq!(mna.opamps[0].vee, -7.5, "lower swing limit VEE + 1.5 V");
 }
 
 #[test]
@@ -362,8 +389,10 @@ U1 0 inv out oa
 }
 
 #[test]
-fn test_opamp_vcc_vee_overrides_vsat() {
-    let spice = r#"VCC/VEE Override
+fn test_opamp_vsat_with_vcc_vee_is_refused() {
+    // VSAT and VCC/VEE both claim the swing limit; a silent priority between
+    // them would ignore one. The card is refused.
+    let spice = r#"VSAT With VCC/VEE
 R1 in inv 10k
 R2 inv out 100k
 C1 out 0 100n
@@ -371,11 +400,8 @@ U1 0 inv out oa
 .model oa OA(AOL=200000 VSAT=13 VCC=9 VEE=0)
 "#;
     let netlist = Netlist::parse(spice).unwrap();
-    let mna = MnaSystem::from_netlist(&netlist).unwrap();
-
-    // VCC/VEE should take priority over VSAT
-    assert_eq!(mna.opamps[0].vcc, 9.0, "VCC should override VSAT");
-    assert_eq!(mna.opamps[0].vee, 0.0, "VEE should override VSAT");
+    let err = MnaSystem::from_netlist(&netlist).err().expect("refused");
+    assert!(format!("{err:?}").contains("VSAT sets the swing limit"), "{err:?}");
 }
 
 #[test]
@@ -426,7 +452,7 @@ Rcouple opout out 1k
 D1 out 0 D1N4148
 Rload out 0 10k
 C2 out 0 100n
-.model oa OA(AOL=200000 VCC=9 VEE=0)
+.model oa OA(AOL=200000 VCC=9 VEE=0 VOH_DROP=0 VOL_DROP=0)
 .model D1N4148 D(IS=2.52e-9 N=1.752)
 "#;
     let netlist = Netlist::parse(spice).unwrap();

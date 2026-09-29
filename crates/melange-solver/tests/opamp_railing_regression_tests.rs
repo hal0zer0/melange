@@ -15,7 +15,8 @@
 //!
 //! Reference: ngspice, with the op-amp modelled as gm = 0.2 S into
 //! 1 MΩ ∥ 10.61 nF (AOL 2e5, 15 Hz pole, GBW 3 MHz), an anti-windup wall at
-//! 0 / 9 V and an ideal output buffer. Steady-state output peak (0.5-1.0 s):
+//! 0 / 9 V and an ideal output buffer. The melange cards set VOH_DROP=0 and
+//! VOL_DROP=0 so their swing limit is that same wall. Steady-state output peak (0.5-1.0 s):
 //! 0.466 / 0.480 / 0.487 / 0.490 / 0.491 V at 0.05 / 0.1 / 0.2 / 0.5 / 1.0 V;
 //! |v(n1)| 4.77 / 5.14 / 5.29 / 5.38 / 5.41 V. The two op-amp models differ
 //! only in details worth a few percent on a diode-clipped square wave (ROUT,
@@ -50,7 +51,7 @@ R_t n2 n3 10k
 C_t n3 0 22n
 C_o n3 out 1u
 R_v out 0 100k
-.model TL072 OA(AOL=200000 GBW=3e6 VCC=9 VEE=0)
+.model TL072 OA(AOL=200000 GBW=3e6 VCC=9 VEE=0 VOH_DROP=0 VOL_DROP=0)
 .model D1N914 D(IS=2.52n N=1.752)
 ";
 
@@ -270,7 +271,7 @@ R_1 n1 n2 1k
 L_sat n2 0 100m ISAT=2m CORE=gapped
 R_t n2 out 10k
 R_v out 0 100k
-.model TL072 OA(AOL=200000 GBW=3e6 VCC=9 VEE=0)
+.model TL072 OA(AOL=200000 GBW=3e6 VCC=9 VEE=0 VOH_DROP=0 VOL_DROP=0)
 ";
 
 /// (drive V, ngspice i_L max A over 0.5-1.0 s)
