@@ -3868,9 +3868,12 @@ impl MnaBuilder {
                     // transfer error, growing with frequency) — verified against an
                     // ngspice coupled-inductor twin built from the realized [L] matrix.
                     // Exact for 2 windings (the only case that reaches here).
+                    // No minimum: this path is nodal full-LU only (DK refuses
+                    // saturating circuits), where a small leakage is an
+                    // inductor branch row tending to a 0 V source, which is
+                    // well-posed. A floor of 1e-4·L here silently realized
+                    // k_eff = 0.9999 for any authored k above that.
                     let l_leak = (1.0 - k_i) * ind.value;
-                    // Minimum leakage: ensure non-zero reactive element for numerical stability
-                    let l_leak = l_leak.max(ind.value * 1e-4);
 
                     // Allocate internal node (1-indexed). Use next_internal_node counter
                     // that starts at n+1 and increments across all groups.

@@ -209,5 +209,39 @@ fn dk_codegen_refuses_saturating_inductors() {
         assert!(err.to_string().contains("saturating inductors"), "{err}");
         reached += 1;
     }
-    assert!(reached > 0, "no case reached the DK generator; the test is void");
+    assert!(
+        reached > 0,
+        "no case reached the DK generator; the test is void"
+    );
+}
+
+/// The T-model realizes the authored coupling exactly, at any k < 1. Its
+/// leakage was floored at 1e-4·L, so every k above 0.9999 silently realized
+/// k_eff = k/(k + 1e-4) ≈ 0.9999 (0.15 dB high at 20 kHz on a 1:4 step-up
+/// into 1 nF, and the same response at k = 0.99999 and 0.999999). Real audio
+/// iron sits at 1 - k ~ 1e-5..1e-4.
+#[test]
+fn tmodel_realizes_tight_coupling_exactly() {
+    for k in [0.99999f64, 0.999999] {
+        let spice = format!(
+            "xf\nR1 in p 600\nL1 p 0 1 ISAT=10m\nL2 out 0 16\nK1 L1 L2 {k}\nR2 out 0 100k\n"
+        );
+        let mna = MnaSystem::from_netlist(&Netlist::parse(&spice).unwrap()).unwrap();
+        let l = |name: &str| {
+            mna.inductors
+                .iter()
+                .find(|i| i.name.eq_ignore_ascii_case(name))
+                .unwrap_or_else(|| panic!("{name} missing"))
+                .value
+        };
+        // Reference winding is the larger one (L2 = 16 H).
+        let (leak1, leak2, mag) = (l("L1_leak"), l("L2_leak"), l("L2_mag"));
+        assert_eq!(leak1, (1.0 - k) * 1.0, "k={k}: L1 leakage");
+        assert_eq!(leak2, (1.0 - k) * 16.0, "k={k}: L2 leakage");
+        // Realized coupling: mutual n·mag over sqrt(self1·self2), n = sqrt(L1/L_ref).
+        let n = (1.0f64 / 16.0).sqrt();
+        let (self1, self2) = (leak1 + n * n * mag, leak2 + mag);
+        let k_eff = n * mag / (self1 * self2).sqrt();
+        assert!((k_eff - k).abs() < 1e-14, "k={k}: realized {k_eff}");
+    }
 }
