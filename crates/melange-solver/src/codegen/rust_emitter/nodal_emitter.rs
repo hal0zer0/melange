@@ -195,6 +195,106 @@ fn live_g_c(ir: &CircuitIR, full_nodal: bool, recv: &str) -> (String, String) {
     )
 }
 
+/// Which integrator one emitted full-LU solve runs, and the state it reads.
+/// The primary solve uses the build's own matrices (`state.a` is
+/// backward-Euler-baked on a BE build); the BE instance of a trapezoidal build
+/// uses `state.a_be` / `state.a_neg_be` / `RHS_CONST_BE`, which the IR bakes by
+/// the same expressions as a BE build's `a` / `a_neg` / `RHS_CONST`, so the two
+/// are the same arithmetic.
+pub(super) struct NewtonSite {
+    be: bool,
+    a: &'static str,
+    a_neg: &'static str,
+    be_instance: bool,
+    rhs_const: Option<&'static str>,
+    sat_alpha: String,
+    iter_budget: &'static str,
+}
+
+const SAT_INT_RATE: &str = "state.current_sample_rate * OVERSAMPLING_FACTOR as f64";
+
+impl NewtonSite {
+    fn primary(ir: &CircuitIR) -> Self {
+        let be = ir.solver_config.backward_euler;
+        NewtonSite {
+            be,
+            a: "state.a",
+            a_neg: "state.a_neg",
+            be_instance: false,
+            rhs_const: ir.has_dc_sources.then_some("RHS_CONST"),
+            sat_alpha: if be {
+                format!("({SAT_INT_RATE})")
+            } else {
+                format!("(2.0 * {SAT_INT_RATE})")
+            },
+            iter_budget: "MAX_ITER",
+        }
+    }
+
+    fn be_instance(ir: &CircuitIR) -> Self {
+        NewtonSite {
+            be: true,
+            a: "state.a_be",
+            a_neg: "state.a_neg_be",
+            be_instance: true,
+            rhs_const: (ir.has_dc_sources && !ir.matrices.rhs_const_be.is_empty())
+                .then_some("RHS_CONST_BE"),
+            sat_alpha: format!("({SAT_INT_RATE})"),
+            iter_budget: if ir.solver_config.breakpoint_be {
+                "be_iter_budget"
+            } else {
+                "MAX_ITER"
+            },
+        }
+    }
+
+    fn a_neg_sparsity<'a>(&self, ir: &'a CircuitIR) -> &'a crate::codegen::ir::MatrixSparsity {
+        if self.be_instance {
+            &ir.sparsity.a_neg_be
+        } else {
+            &ir.sparsity.a_neg
+        }
+    }
+}
+
+/// Noise in one solve's RHS: draw fresh (the sample's primary solve), replay
+/// the draw cached this sample (a fallback), or decide at runtime.
+pub(super) enum NoiseMode {
+    Draw,
+    Replay,
+    DrawIf(&'static str),
+}
+
+/// A trapezoidal full-LU build with a Newton loop carries a backward-Euler
+/// instance of the same solve, run on a failed trapezoidal sample, while
+/// latched, on a breakpoint, or when ActiveSetBe sees a rail. Behavioral
+/// circuits (BE-primary) and BE builds have only the primary.
+pub(super) fn has_be_instance(ir: &CircuitIR) -> bool {
+    (ir.topology.m > 0 || !ir.saturating_inductors.is_empty())
+        && ir.behavioral_sources.is_empty()
+        && !ir.solver_config.backward_euler
+}
+
+/// The cross-timestep chord cache, as `let mut chord_* = {src}*;` locals
+/// (`src` = `state.chord_` or `state.chord_be_`), or stored back.
+fn emit_chord_cache(code: &mut String, ir: &CircuitIR, src: &str, indent: &str, load: bool) {
+    let mut fields = vec!["lu", "dr", "dc", "perm", "j_dev"];
+    if !body_effect_mosfets(ir).is_empty() {
+        fields.push("body_gmb");
+    }
+    fields.push("valid");
+    if ir.sparsity.lu.is_some() {
+        fields.push("dense");
+    }
+    for f in fields {
+        if load {
+            code.push_str(&format!("{indent}let mut chord_{f} = {src}{f};\n"));
+        } else {
+            code.push_str(&format!("{indent}{src}{f} = chord_{f};\n"));
+        }
+    }
+}
+
 /// Whether a nodal build can emit the active-set pinned resolve at all.
 fn emits_active_set_resolve(ir: &CircuitIR) -> bool {
     matches!(
@@ -1642,6 +1742,9 @@ fn emit_nodal_nan_reset(
     // Full-LU-only: invalidate the cross-timestep chord LU factorization.
     if is_full_lu && m > 0 {
         code.push_str(&format!("{body}state.chord_valid = false;\n"));
+        if has_be_instance(ir) {
+            code.push_str(&format!("{body}state.chord_be_valid = false;\n"));
+        }
     }
 
     // Noise NaN-recovery: clear two-draw lag + BE-replay caches if noise
@@ -3398,6 +3501,22 @@ impl RustEmitter {
             );
             code.push_str("    /// excessive element growth). Selects the matching back-solve.\n");
             code.push_str("    pub chord_dense: bool,\n\n");
+            if use_full_nodal && has_be_instance(ir) {
+                code.push_str(
+                    "    // --- Chord cache of the backward-Euler solve (latch, fallback,\n    // breakpoint): kept apart so neither integrator clobbers the other ---\n",
+                );
+                code.push_str("    pub chord_be_lu: [[f64; N]; N],\n");
+                code.push_str("    pub chord_be_dr: [f64; N],\n");
+                code.push_str("    pub chord_be_dc: [f64; N],\n");
+                code.push_str("    pub chord_be_perm: [usize; N],\n");
+                code.push_str("    pub chord_be_j_dev: [f64; M * M],\n");
+                let nb = body_effect_mosfets(ir).len();
+                if nb > 0 {
+                    code.push_str(&format!("    pub chord_be_body_gmb: [f64; {nb}],\n"));
+                }
+                code.push_str("    pub chord_be_valid: bool,\n");
+                code.push_str("    pub chord_be_dense: bool,\n\n");
+            }
         }
 
         code.push_str(
@@ -3731,6 +3850,19 @@ impl RustEmitter {
             }
             code.push_str("            chord_valid: false,\n");
             code.push_str("            chord_dense: false,\n");
+            if use_full_nodal && has_be_instance(ir) {
+                code.push_str("            chord_be_lu: [[0.0; N]; N],\n");
+                code.push_str("            chord_be_dr: [1.0; N],\n");
+                code.push_str("            chord_be_dc: [1.0; N],\n");
+                code.push_str("            chord_be_perm: {{ let mut p = [0usize; N]; let mut i = 0; while i < N { p[i] = i; i += 1; } p }},\n");
+                code.push_str("            chord_be_j_dev: [0.0; M * M],\n");
+                let nb = body_effect_mosfets(ir).len();
+                if nb > 0 {
+                    code.push_str(&format!("            chord_be_body_gmb: [0.0; {nb}],\n"));
+                }
+                code.push_str("            chord_be_valid: false,\n");
+                code.push_str("            chord_be_dense: false,\n");
+            }
         }
         code.push_str("            a: A_DEFAULT,\n");
         code.push_str("            a_neg: A_NEG_DEFAULT,\n");
@@ -3917,6 +4049,9 @@ impl RustEmitter {
         }
         if m > 0 {
             code.push_str("        self.chord_valid = false;\n");
+            if use_full_nodal && has_be_instance(ir) {
+                code.push_str("        self.chord_be_valid = false;\n");
+            }
         }
         // Re-init DC blocker from the same t=0 state as v_prev above
         // (prevents transient on reset)
@@ -4353,6 +4488,9 @@ impl RustEmitter {
             code.push_str("            // attack-timing-sensitive control circuits, so we gate\n");
             code.push_str("            // the reset on BoyleDiodes mode only.\n");
             code.push_str("            self.chord_valid = false;\n");
+            if use_full_nodal && has_be_instance(ir) {
+                code.push_str("            self.chord_be_valid = false;\n");
+            }
         }
         code.push_str(&format!("            {}s = S_DEFAULT;\n", cp));
         code.push_str(&format!("            {}s_be = S_BE_DEFAULT;\n", cp));
@@ -4578,6 +4716,9 @@ impl RustEmitter {
         if m > 0 {
             code.push_str("\n        // Invalidate chord LU cache (matrices changed)\n");
             code.push_str("        self.chord_valid = false;\n");
+            if use_full_nodal && has_be_instance(ir) {
+                code.push_str("        self.chord_be_valid = false;\n");
+            }
         }
 
         // Invalidate the sub-sample-fire Schur-triple LRU — G/C changed, so every
@@ -7045,31 +7186,9 @@ impl RustEmitter {
         } else {
             format!("(2.0 * {sat_int_rate})")
         };
-        let sat_alpha_be = format!("({sat_int_rate})");
         let has_bsrc_time = ir.behavioral_sources.iter().any(|b| b.time_dependent);
-        // "Force BE this sample" guards. Trap is accepted only when nothing is
-        // forcing BE: the runtime Nyquist BE-latch OR the breakpoint-BE countdown
-        // armed by a .switch/.pot swap (which routes the swap sample through the
-        // L-stable BE fallback to kill the 2× / z=-1 artifact). Empty on builds
-        // with neither → byte-identical.
-        let be_latch_and = match (
-            ir.solver_config.runtime_be_latch,
-            ir.solver_config.breakpoint_be,
-        ) {
-            (true, true) => " && !state.be_latched && state.breakpoint_be == 0",
-            (true, false) => " && !state.be_latched",
-            (false, true) => " && state.breakpoint_be == 0",
-            (false, false) => "",
-        };
-        let be_latch_or = match (
-            ir.solver_config.runtime_be_latch,
-            ir.solver_config.breakpoint_be,
-        ) {
-            (true, true) => " || state.be_latched || state.breakpoint_be > 0",
-            (true, false) => " || state.be_latched",
-            (false, true) => " || state.breakpoint_be > 0",
-            (false, false) => "",
-        };
+        // Forcing backward Euler (latch, breakpoint) is decided in
+        // `emit_nodal_solve`, which skips the trapezoidal solve on such samples.
 
         // `.inject`/`.tap`: see emit_nodal_schur_process_sample. Mutually
         // exclusive with multi_input (CLI-rejected).
@@ -7248,128 +7367,14 @@ impl RustEmitter {
         }
         code.push('\n');
 
-        // Step 1: Build RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input (sparse)
-        code.push_str(
-            "    // Step 1: Build RHS (sparse A_neg * v_prev + sparse N_i * i_nl_prev)\n",
-        );
-        if ir.has_dc_sources {
-            code.push_str("    let mut rhs = RHS_CONST;\n");
-        } else {
-            code.push_str("    let mut rhs = [0.0f64; N];\n");
-        }
-        // Sparse A_neg * v_prev
-        for i in 0..n {
-            let nz_cols = &ir.sparsity.a_neg.nz_by_row[i];
-            if nz_cols.is_empty() {
-                continue;
-            }
-            for &j in nz_cols {
-                code.push_str(&format!(
-                    "    rhs[{}] += state.a_neg[{}][{}] * state.v_prev[{}];\n",
-                    i, i, j, j
-                ));
-            }
-        }
-        // Sparse N_i * i_nl_prev (N_I is N×M, direct row access).
-        // Trap-midpoint companion, skipped under BE — see the matching
-        // comment block in `emit_nodal_schur_process_sample` for the
-        // derivation and the pipe-shouter warmup-divergence case this
-        // fixes.
-        if m > 0 && !ir.solver_config.backward_euler {
-            for i in 0..n {
-                for &j in &ir.sparsity.n_i.nz_by_row[i] {
-                    code.push_str(&format!(
-                        "    rhs[{}] += N_I[{}][{}] * state.i_nl_prev[{}];\n",
-                        i, i, j, j
-                    ));
-                }
-            }
-        }
-        code.push('\n');
-
-        // Input source (Thevenin)
-        if multi_input {
-            if ir.solver_config.backward_euler {
-                code.push_str("    // Input sources (backward Euler: per-port V_in * G_in)\n");
-                code.push_str("    for k in 0..NUM_INPUTS {\n        rhs[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k];\n    }\n");
-            } else {
-                code.push_str(
-                    "    // Input sources (trapezoidal: per-port (V_in + V_in_prev) * G_in)\n",
-                );
-                code.push_str("    for k in 0..NUM_INPUTS {\n        rhs[INPUT_NODES[k]] += (inputs[k] + state.inputs_prev[k]) / INPUT_RESISTANCES[k];\n    }\n");
-            }
-        } else {
-            code.push_str("    let input_conductance = 1.0 / INPUT_RESISTANCE;\n");
-            if ir.solver_config.backward_euler {
-                code.push_str("    // Input source (backward Euler: V_in * G_in)\n");
-                code.push_str("    rhs[INPUT_NODE] += input * input_conductance;\n");
-            } else {
-                code.push_str("    // Input source (trapezoidal: (V_in + V_in_prev) * G_in)\n");
-                code.push_str(
-                    "    rhs[INPUT_NODE] += (input + state.input_prev) * input_conductance;\n",
-                );
-            }
-        }
-        if inject_or_tap {
-            code.push_str(&emit_inject_rhs_stamp(
-                ir,
-                "rhs",
-                "    ",
-                ir.solver_config.backward_euler,
-            ));
-        }
-        // NOTE: `state.input_prev` is deliberately NOT committed here. The
-        // adaptive sub-stepping below interpolates the input ramp as
-        // `(input - state.input_prev) / subdiv`, so committing before the
-        // sub-steps read it would zero the ramp exactly on the hard-transient
-        // samples that trigger sub-stepping. The commit happens in the
-        // end-of-sample state-update block (matching the DK template).
-        code.push('\n');
-
-        // Runtime voltage sources (.runtime directive): host-driven per-sample values.
-        if !ir.runtime_sources.is_empty() {
-            code.push_str("    // Runtime voltage sources (.runtime directive)\n");
-            for rt in &ir.runtime_sources {
-                code.push_str(&format!(
-                    "    rhs[{}] += state.{};\n",
-                    rt.vs_row, rt.field_name
-                ));
-            }
-            code.push('\n');
-        }
-
-        // Authentic circuit noise — Phase 1 thermal stamp.
-        // One draw per audio sample, before NR (and before the M=0 direct
-        // LU solve). See `emit_nodal_schur_process_sample` for the full
-        // rationale; the placement is identical here.
-        if noise.enabled {
-            code.push_str(&noise.rhs_stamp);
-            code.push('\n');
-        }
-
-        // Saturating-inductor history: swap the baked-in linear flux
-        // `alpha·L0·i_prev` (already in rhs via A_neg·v_prev) for `alpha·Φ(i_prev)`.
-        if has_sat_ind {
-            code.push_str(
-                "    // Saturating inductor flux history (Φ(i_prev) replaces L0·i_prev)\n",
-            );
-            emit_sat_ind_history(
-                &mut code,
-                ir,
-                "rhs",
-                "state.v_prev",
-                &sat_alpha_main,
-                "    ",
-            );
-            code.push('\n');
-        }
-
         // Handle linear circuits (M=0): direct LU solve, no NR iteration.
         // Behavioral B-sources are nonlinear even when M=0, so they take the NR
         // path below. Saturating inductors are also nonlinear (flux
         // stamp on their augmented branch row), so an M=0 circuit with any
         // saturating inductor must iterate too.
+        let primary = NewtonSite::primary(ir);
         if m == 0 && !has_behavioral && !has_sat_ind {
+            Self::emit_nodal_rhs(&mut code, ir, noise, &primary, NoiseMode::Draw);
             code.push_str("    // Linear circuit: direct LU solve (no NR needed)\n");
             code.push_str("    let mut g_aug = state.a;\n");
             code.push_str(
@@ -7400,1575 +7405,7 @@ impl RustEmitter {
             // creates inconsistency with unclamped neighbors (e.g., 100Ω apart but
             // 227V difference), corrupting the trapezoidal history feedback.
         } else {
-            // Step 2: Newton-Raphson in full augmented voltage space
-            code.push_str("    // Step 2: Newton-Raphson in full augmented voltage space\n");
-            code.push_str("    let mut v = state.v_prev;\n");
-            code.push_str("    let mut converged = false;\n");
-            // Pessimistic init (matches the Schur path): overwritten with the
-            // converging iteration index on success, so a trap failure leaves
-            // MAX_ITER in the field instead of last sample's stale value —
-            // the post-loop `last_nr_iterations >= MAX_ITER` diagnostic and
-            // the BE-fallback gating both rely on this.
-            code.push_str("    state.last_nr_iterations = MAX_ITER as u32;\n");
-            code.push_str("    let mut i_nl = [0.0f64; M];\n");
-            // ActiveSetBe rail engagement flag — set after substep, checked
-            // before BE fallback. Only used in ActiveSetBe mode (NOT plain
-            // ActiveSet, which keeps its trap+pin behavior). See
-            // OpampRailMode::ActiveSetBe handling below.
-            let active_set_be_mode_full_lu = matches!(
-                ir.solver_config.opamp_rail_mode,
-                crate::codegen::OpampRailMode::ActiveSetBe
-            );
-            if active_set_be_mode_full_lu {
-                code.push_str("    let mut active_set_engaged = false;\n");
-            }
-            code.push('\n');
-
-            // Cross-timestep chord: reuse LU factors from previous sample when valid.
-            // Local aliases avoid repeated state.chord_* indirection in the hot loop.
-            // After convergence, chord_lu/d/perm/j_dev are persisted back to state.
-            code.push_str(
-                "    // Cross-timestep chord: start from previous sample's converged LU\n",
-            );
-            code.push_str("    let mut chord_lu = state.chord_lu;\n");
-            code.push_str("    let mut chord_dr = state.chord_dr;\n");
-            code.push_str("    let mut chord_dc = state.chord_dc;\n");
-            code.push_str("    let mut chord_perm = state.chord_perm;\n");
-            code.push_str("    let mut chord_j_dev = state.chord_j_dev;\n");
-            if !body_effect_mosfets(ir).is_empty() {
-                code.push_str("    let mut chord_body_gmb = state.chord_body_gmb;\n");
-            }
-            code.push_str("    let mut chord_valid = state.chord_valid;\n");
-            if ir.sparsity.lu.is_some() {
-                code.push_str("    let mut chord_dense = state.chord_dense;\n");
-            }
-            code.push('\n');
-
-            // Trapezoidal NR loop
-            code.push_str("    for iter in 0..MAX_ITER {\n");
-
-            // 2a. Extract nonlinear voltages: v_nl = N_v * v (sparse)
-            code.push_str("        // 2a. Extract nonlinear voltages: v_nl = N_v * v (sparse)\n");
-            code.push_str("        let mut v_nl = [0.0f64; M];\n");
-            for i in 0..m {
-                let nz_cols = &ir.sparsity.n_v.nz_by_row[i];
-                if nz_cols.is_empty() {
-                    continue;
-                }
-                let terms: Vec<String> = nz_cols
-                    .iter()
-                    .map(|&j| format!("N_V[{}][{}] * v[{}]", i, j, j))
-                    .collect();
-                code.push_str(&format!("        v_nl[{}] = {};\n", i, terms.join(" + ")));
-            }
-            code.push('\n');
-
-            // 2b. Evaluate device currents and Jacobian
-            code.push_str(
-                "        // 2b. Evaluate device currents and Jacobian (block-diagonal)\n",
-            );
-            // i_nl is declared in outer scope (line above NR loop), j_dev is per-iteration
-            code.push_str("        let mut j_dev = [0.0f64; M * M];\n");
-            Self::emit_nodal_device_evaluation_body(&mut code, ir, "        ", "v");
-            code.push('\n');
-
-            // Behavioral B-source value + partials at the current iterate.
-            // Used by both the Jacobian (2c) and companion RHS (2d) below.
-            if has_behavioral {
-                code.push_str("        // Behavioral B-source evaluation (value + partials)\n");
-                emit_behavioral_evals(&mut code, ir, "        ");
-                code.push('\n');
-            }
-
-            // 2c. Build and factor Jacobian: G_aug = A - N_i * J_dev * N_v (chord method)
-            // Factor LU periodically: iter 0, then every CHORD_REFACTOR iterations.
-            // Between refactors, reuse stored LU for O(N²) back-solve instead of O(N³) factor.
-            // J_dev is block-diagonal; N_i and N_v have ~2 nonzero entries per device dim.
-            // Compile-time unrolled: ~64 stamps for 4 tubes vs 107K dense iterations.
-            code.push_str(
-                "        // 2c. Build and factor Jacobian (adaptive chord: reuse across timesteps)\n",
-            );
-            // Refactor when: (a) no valid LU, (b) within-sample periodic
-            // refresh, OR (c) any device's diagonal Jacobian has diverged
-            // from `chord_j_dev` by >50 % relative.
-            //
-            // The cross-timestep chord persistence holds `chord_j_dev`
-            // frozen across many samples. That's fine while a device
-            // conducts smoothly, but a stale chord across an exponential
-            // knee is device-generic: any diode/junction crossing from
-            // reverse- to forward-bias moves `j_dev` by many orders of
-            // magnitude between refactors (the extreme case is the Boyle
-            // catch diode: ≈1e-31 S deeply reverse-biased vs ≈1e1 S at
-            // the rail — 32 OOM). Without the adaptive trigger, refactors
-            // only happen at iter % 5 == 0 / iter >= 10, by which point
-            // pnjlim has damped the steps so far that the chord can't
-            // catch up within MAX_ITER.
-            //
-            // The trigger is emitted unconditionally (was BoyleDiodes-only):
-            // it only compares the already-computed per-iteration `j_dev`
-            // diagonal against the persisted `chord_j_dev` — O(M) compares,
-            // no extra device evaluations — and for smoothly-conducting
-            // devices it simply never fires.
-            //
-            // The 50 % threshold is empirical: lower (e.g. 20 %) causes
-            // spurious refactors that trap pnjlim's step damping in a
-            // different slow-oscillation regime; higher (e.g. 80 %)
-            // misses the diode-knee transition.
-            if has_behavioral || has_sat_ind {
-                // Behavioral B-source and saturating-inductor Jacobian entries
-                // change every iteration (nonlinear, not part of the frozen chord
-                // device block `chord_j_dev`), so refactor each iteration — this
-                // keeps the inductor Jacobian (stamped below) consistent with the
-                // companion RHS, both evaluated at the current iterate `v`.
-                // Correctness over the chord's per-sample speedup (perf: Phase 1
-                // deferred an L_diff-drift refactor trigger, §3.4).
-                code.push_str("        let need_refactor = true;\n");
-            } else {
-                code.push_str("        let mut need_refactor = !chord_valid || (iter > 0 && iter % CHORD_REFACTOR == 0) || iter >= 10;\n");
-                code.push_str("        if !need_refactor {\n");
-                code.push_str("            for k in 0..M {\n");
-                code.push_str("                let jk = j_dev[k * M + k];\n");
-                code.push_str("                let ck = chord_j_dev[k * M + k];\n");
-                code.push_str("                let mx = jk.abs().max(ck.abs());\n");
-                code.push_str("                if mx > 1e-20 && (jk - ck).abs() / mx > 0.5 {\n");
-                code.push_str("                    need_refactor = true;\n");
-                code.push_str("                    break;\n");
-                code.push_str("                }\n");
-                code.push_str("            }\n");
-                code.push_str("        }\n");
-            }
-            code.push_str("        if need_refactor {\n");
-            code.push_str("            chord_j_dev = j_dev;\n");
-            code.push_str("            chord_lu = state.a;\n");
-            code.push_str("            // Gmin regularization\n");
-            code.push_str("            for i in 0..N_NODES { chord_lu[i][i] += 1e-12; }\n");
-            {
-                // Build transpose of N_i sparsity: for each device dim i, which nodes a are nonzero
-                emit_nodal_jacobian_stamp(&mut code, ir, m, "chord_lu", "            ");
-            }
-            // MOSFET body effect: gmb is part of the factored chord, so it is
-            // frozen with it and the companion below uses the same values.
-            if !body_effect_mosfets(ir).is_empty() {
-                code.push_str("            chord_body_gmb = body_gmb;\n");
-                emit_body_gmb_stamp(&mut code, ir, "chord_lu", "chord_body_gmb", "            ");
-            }
-            // Saturating-inductor Jacobian: alpha·L0 → alpha·L_diff(v[k]) at [k][k].
-            if has_sat_ind {
-                emit_sat_ind_jacobian(
-                    &mut code,
-                    ir,
-                    "chord_lu",
-                    "v",
-                    &sat_alpha_main,
-                    "            ",
-                );
-            }
-            // Behavioral B-source Jacobian: stamp ∂f/∂V directly into G_aug.
-            if has_behavioral {
-                emit_behavioral_jacobian(&mut code, ir, "            ");
-            }
-            // Factor: try sparse LU (if available). The sparse schedule uses
-            // STATIC (symbolic) pivoting, which can fail at runtime — a pivot
-            // numerically near zero, or excessive element growth (checked
-            // inside sparse_lu_factor). On rejection, re-factor DENSE with
-            // partial pivoting in the same NR iteration on the saved stamped
-            // G_aug; `chord_dense` records which factorization the persisted
-            // chord_lu holds so back-solves (this sample and later ones via
-            // cross-timestep persistence) dispatch correctly.
-            if ir.sparsity.lu.is_some() {
-                code.push_str("            let g_aug_stamped = chord_lu;\n");
-                code.push_str("            if sparse_lu_factor(&mut chord_lu, &mut chord_dr, &mut chord_dc) {\n");
-                code.push_str("                chord_dense = false;\n");
-                code.push_str("            } else {\n");
-                code.push_str("                // Sparse factor rejected (tiny pivot or growth-factor check):\n");
-                code.push_str("                // re-factor DENSE with partial pivoting in this same iteration.\n");
-                code.push_str("                chord_lu = g_aug_stamped;\n");
-                // On failure, break with `converged` false; the pessimistic
-                // `last_nr_iterations = MAX_ITER` init means the post-loop
-                // diagnostic counts this sample exactly once (no direct
-                // increment here — it would double-count).
-                code.push_str("                if !lu_factor(&mut chord_lu, &mut chord_dr, &mut chord_dc, &mut chord_perm) {\n");
-                code.push_str("                    break;\n");
-                code.push_str("                }\n");
-                code.push_str("                chord_dense = true;\n");
-                code.push_str("            }\n");
-            } else {
-                code.push_str(
-                    "            if !lu_factor(&mut chord_lu, &mut chord_dr, &mut chord_dc, &mut chord_perm) {\n",
-                );
-                code.push_str("                break;\n");
-                code.push_str("            }\n");
-            }
-            code.push_str("            chord_valid = true;\n");
-            code.push_str("            state.diag_refactor_count += 1;\n");
-            code.push_str("        }\n\n");
-
-            // 2d. Build companion RHS: rhs_base + N_i * (i_nl - J_dev_0 * v_nl) (sparse)
-            // Uses chord_j_dev (from iter 0) to match the LU factorization.
-            // Using current j_dev here would create an inconsistent fixed point.
-            code.push_str(
-                "        // 2d. Build companion RHS: rhs + N_i * (i_nl - chord_J_dev * v_nl) (sparse)\n",
-            );
-            code.push_str("        let mut rhs_work = rhs;\n");
-            emit_nodal_companion_rhs(&mut code, ir, m, "rhs_work", "chord_j_dev", "        ");
-            emit_body_gmb_companion(&mut code, ir, "rhs_work", "chord_body_gmb", "v", "        ");
-            // Saturating-inductor companion current (consistent with the Jacobian
-            // stamp above — same iterate `v`, re-factored every iteration).
-            if has_sat_ind {
-                emit_sat_ind_companion(&mut code, ir, "rhs_work", "v", &sat_alpha_main, "        ");
-            }
-            // Behavioral B-source companion current: f(v) - Σ (∂f/∂V)·v.
-            if has_behavioral {
-                emit_behavioral_rhs(&mut code, ir, "        ");
-            }
-            code.push('\n');
-
-            // 2e. Solve with stored LU factors (O(N²) back-solve)
-            if ir.sparsity.lu.is_some() {
-                code.push_str(
-                    "        // 2e. Back-solve with stored LU factors (sparse, or the dense\n",
-                );
-                code.push_str(
-                    "        // runtime fallback when the sparse factorization was rejected)\n",
-                );
-                code.push_str("        let mut v_new = rhs_work;\n");
-                code.push_str("        if chord_dense {\n");
-                code.push_str("            lu_back_solve(&chord_lu, &chord_dr, &chord_dc, &chord_perm, &mut v_new);\n");
-                code.push_str("        } else {\n");
-                code.push_str("            sparse_lu_back_solve(&chord_lu, &chord_dr, &chord_dc, &mut v_new);\n");
-                code.push_str("        }\n\n");
-            } else {
-                code.push_str(
-                    "        // 2e. Solve with stored LU factors (chord: O(N²) back-solve)\n",
-                );
-                code.push_str("        let mut v_new = rhs_work;\n");
-                code.push_str(
-                    "        lu_back_solve(&chord_lu, &chord_dr, &chord_dc, &chord_perm, &mut v_new);\n\n",
-                );
-            }
-
-            // Op-amp output clamping inside NR loop — prevents physically impossible
-            // voltages that destabilize downstream device evaluation. Applied after the
-            // back-solve, before device voltage limiting.
-            //
-            // Emitted for `Hard` mode ONLY. This clamp originally ran for
-            // every mode with clampable op-amps (b5c5011 death-spiral
-            // protection), but that contradicted the mode contracts:
-            //   * `None` must leave the output unbounded (raw-diagnostic use);
-            //   * `ActiveSet`/`ActiveSetBe` deliberately skip the in-NR clamp
-            //     so NR converges to the unconstrained solution and the
-            //     post-convergence pin-and-resolve sees a genuine violation
-            //     (the clamp pinned v EXACTLY at the rail, so the resolve's
-            //     detection never fired and ActiveSet degraded to Hard
-            //     semantics on this path);
-            //   * `BoyleDiodes` models saturation with physical catch diodes —
-            //     clamping on top double-limits.
-            // Non-Hard modes keep their divergence protection from the global
-            // node damping (damp_thresh), SPICE device voltage limiting, the
-            // residual check, the substep retry, the BE fallback, and the
-            // failed-sample state-keep below.
-            //
-            // For `ActiveSetBe` we used to ALSO raise `active_set_engaged = true`
-            // here so the post-convergence check didn't miss a "v pinned exactly at
-            // rail" case (the check used strict inequality). That was load-bearing
-            // for 4kbuscomp but sticky — intermediate NR iterations can ride AOL
-            // into rail-range values mid-solve on high-gain feedback clippers
-            // (pipe-shouter at Tone=1.0 was seeing the flag latched for entire
-            // linear-regime buffers, firing BE fallback on every sample), crushing
-            // H2 purity and dropping gain 5–15 dB. The post-convergence check now
-            // uses inclusive `>=` / `<=` (see `emit_nodal_active_set_check`), which
-            // covers the 4kbuscomp pinned-at-rail case without tracking per-NR-
-            // iteration transients.
-            if matches!(
-                ir.solver_config.opamp_rail_mode,
-                crate::codegen::OpampRailMode::Hard
-            ) {
-                emit_hard_rail_clamp(
-                    &mut code,
-                    ir,
-                    "v_new",
-                    "        ",
-                    Some("        // Per-iteration op-amp output rail clamp (Hard mode)\n"),
-                    true,
-                );
-            }
-
-            // 2f. SPICE-style voltage limiting + global node damping
-            code.push_str("        // 2f. SPICE voltage limiting + node damping\n");
-            code.push_str("        let mut alpha = 1.0_f64;\n\n");
-
-            // Layer 1: Device voltage limiting
-            code.push_str("        // Layer 1: SPICE device voltage limiting\n");
-            Self::emit_nodal_voltage_limiting(&mut code, ir);
-            code.push('\n');
-
-            // Layer 2: Global node voltage damping (adaptive threshold).
-            // Behavioral V={} output nodes are algebraically forced (V=f), so
-            // they're excluded — a legit large value (the ddt discriminator
-            // startup spike) must not throttle every other node's step.
-            code.push_str("        // Layer 2: Global node voltage damping\n");
-            code.push_str("        {\n");
-            let damp_skip = if has_behavioral {
-                let lit = behavioral_damp_skip_literal(ir);
-                code.push_str(&format!("            let damp_skip = {lit};\n"));
-                "if damp_skip.contains(&i) { continue; } "
-            } else {
-                ""
-            };
-            code.push_str("            let mut max_node_dv = 0.0_f64;\n");
-            code.push_str(&format!(
-                "            for i in 0..{} {{\n\
-                 \x20               {}let dv = alpha * (v_new[i] - v[i]);\n\
-                 \x20               max_node_dv = max_node_dv.max(dv.abs());\n\
-                 \x20           }}\n",
-                n_nodes, damp_skip
-            ));
-            // Adaptive threshold: max(10V, 5% of max node voltage)
-            code.push_str("            let mut max_v = 0.0_f64;\n");
-            code.push_str(&format!(
-                "            for i in 0..{} {{ {}max_v = max_v.max(v[i].abs()); }}\n",
-                n_nodes, damp_skip
-            ));
-            code.push_str("            let damp_thresh = 10.0_f64.max(max_v * 0.05);\n");
-            code.push_str("            if max_node_dv > damp_thresh {\n");
-            // No `.max(0.01)` floor here (removed 2026-08-03): flooring the
-            // ratio bounds how much the RAW step gets shrunk BY, not what
-            // the resulting damped step IS. When a companion-model LU solve
-            // produces a pathologically large raw delta (observed: 3.8e7 V
-            // at a device-state transition on wurli-power-amp), a 1% floor
-            // still lets a catastrophic multiple of `damp_thresh` through
-            // (0.01 * 3.8e7 =~ 380,000 V, not <=10 V), launching the
-            // trajectory into a nonphysical regime the remaining NR
-            // iterations can't recover from. Uncapped division keeps the
-            // worst-case per-iteration node step at exactly `damp_thresh`
-            // regardless of the raw delta's magnitude. Regression:
-            // nodal_be_fallback_alpha_floor_tests.rs.
-            code.push_str("                alpha *= damp_thresh / max_node_dv;\n");
-            code.push_str("            }\n");
-            code.push_str("        }\n\n");
-
-            // Layer 3: saturating-inductor branch-current limit (all four
-            // Newton sites carry it; see `emit_sat_ind_step_limit`).
-            emit_sat_ind_step_limit(&mut code, ir, "v", "v_new", "alpha", "        ");
-
-            // Armijo backtracking line search (trap site): scales the already-
-            // limited step along the ray v -> v + alpha*(v_new-v) to enforce a
-            // monotone node-KCL residual decrease. On a non-descent direction the
-            // search fails (ls_ok=false); the loop then takes the un-line-searched
-            // pnjlim/node-damping-limited step (alpha keeps its limiter value; the
-            // `alpha *= s` scaling only runs on acceptance) and CONTINUES — the
-            // always-checked residual gate below, not a bail, decides convergence.
-            // A line search may only help; its failure must be no worse than not
-            // having it (design review). `limited` records whether pnjlim or
-            // node-damping shrank alpha below 1, gating the voltage-step check (a
-            // limited step's small size is not evidence of convergence — only the
-            // residual gate is). Left as `alpha < 1.0` so a fall-through's natural
-            // value is used unchanged (do NOT force it true — that would SKIP the
-            // step check and be more permissive, the opposite of intended).
-            if use_line_search {
-                emit_armijo_line_search(
-                    &mut code, "        ", "v", "v_new", "alpha", "state.a", "rhs", "ls_ok", "i_nl",
-                );
-                code.push_str("        if !ls_ok { state.diag_ls_fail_count += 1; }\n");
-                code.push_str("        let limited = alpha < 1.0;\n");
-            }
-
-            // Apply damped Newton step and check convergence
-            // Compute step BEFORE updating v, so convergence check sees the actual delta
-            // (the check runs every iteration, including iter 0 — a zero-step
-            // first iteration is a legitimate converged warm start).
-            // Convergence check on nonlinear device nodes only (N_V nonzero columns).
-            // Linearized stages respond linearly and converge passively — checking
-            // all N nodes causes spurious chord refactors when linear coupling
-            // ripple from nonlinear stages hasn't settled to sub-µV precision.
-            code.push_str("        // Compute damped step, check convergence, then apply\n");
-            code.push_str("        let mut max_step_exceeded = false;\n");
-            // DK/Schur convergence contract: the voltage-step check is only
-            // meaningful when the step was NOT limited this iteration. When it
-            // was, the step's small size is an artifact of damping, not
-            // convergence — the always-checked ||F|| residual gate decides.
-            if use_line_search {
-                code.push_str("        if !limited {\n");
-            }
-            {
-                let mut device_nodes: Vec<usize> = ir
-                    .sparsity
-                    .n_v
-                    .nz_by_row
-                    .iter()
-                    .flat_map(|row| row.iter().copied())
-                    .collect();
-                // Behavioral B-sources are often M=0 (no N_v rows); include their
-                // terminal + referenced nodes so the check isn't vacuously true.
-                device_nodes.extend(behavioral_convergence_nodes(ir));
-                // Saturating inductors: check the augmented branch-current row so
-                // NR actually iterates on the flux nonlinearity. Essential at M=0,
-                // where the N_v/behavioral node set is empty and the step check
-                // would otherwise be vacuously "converged" on iteration 0.
-                for si in &ir.saturating_inductors {
-                    device_nodes.push(si.aug_row);
-                }
-                device_nodes.sort();
-                device_nodes.dedup();
-                let extra = if use_line_search { "    " } else { "" };
-                for &node in &device_nodes {
-                    code.push_str(&format!(
-                        "        {extra}{{ let step = alpha * (v_new[{node}] - v[{node}]); let threshold = 1e-3 * v[{node}].abs().max((v[{node}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ max_step_exceeded = true; }} }}\n"
-                    ));
-                }
-            }
-            if use_line_search {
-                code.push_str("        }\n");
-            }
-            code.push_str("        for i in 0..N { v[i] += alpha * (v_new[i] - v[i]); }\n");
-
-            // Mid-NR op-amp output clamping (VCC/VEE).
-            //
-            // In `Hard` and `None` modes we either apply the clamp every
-            // iteration (Hard) or do nothing (None). In `ActiveSet` mode the
-            // in-NR clamp is SKIPPED — NR converges to whatever the linear
-            // system dictates, then a post-convergence constrained resolve
-            // pins the rail-violating nodes and re-solves the network to a
-            // KCL-consistent state (see emit_nodal_active_set_resolve).
-            //
-            // The reason we skip the mid-NR clamp for ActiveSet: the hard
-            // clamp writes `v_clamped` back into `v` but the rest of the
-            // solve is consistent with `v_unclamped`. That inconsistency
-            // corrupts the trapezoidal cap history on the next sample. The
-            // active-set resolve rebuilds the full v so KCL is satisfied at
-            // every node given the clamped value — no corruption.
-            //
-            // BoyleDiodes mode will eventually make this block unreachable
-            // (rail saturation will be modeled by nonlinear catch diodes in
-            // J_dev), but until that lands we still fall through to Hard
-            // semantics if requested.
-            //
-            // Step 4 fix: when we do apply the clamp, re-check convergence
-            // against the POST-clamp v so a silent mutation of v[out] can't
-            // be reported as "converged". The previous code computed the
-            // step magnitude against the unclamped v[out] + step — if
-            // clamping then shifted v[out] by a significant amount, NR would
-            // still report converged because `max_step_exceeded` was computed
-            // on the pre-clamp step. This check catches that case.
-            use crate::codegen::OpampRailMode;
-            // BoyleDiodes mode has already inserted physical catch diodes into
-            // the MNA; the NR solve naturally drives v[out] toward the rails
-            // via those diodes. Emitting a post-NR hard clamp on top would
-            // double-limit and re-introduce the KCL corruption we're trying
-            // to avoid. So BoyleDiodes skips the in-NR clamp entirely, same
-            // as ActiveSet.
-            let emit_in_nr_clamp = matches!(ir.solver_config.opamp_rail_mode, OpampRailMode::Hard);
-            if emit_in_nr_clamp && !ir.opamps.is_empty() {
-                for oa in &ir.opamps {
-                    let target = format!("v[{}]", oa.n_out_idx);
-                    let Some(stmt) = Self::rail_clamp_stmt(&target, oa.vclamp_lo, oa.vclamp_hi)
-                    else {
-                        continue;
-                    };
-                    code.push_str(&format!(
-                        "        {{\n\
-                         \x20           let v_pre_clamp = v[{idx}];\n\
-                         \x20           {stmt}\n\
-                         \x20           // Post-clamp convergence re-check: if the clamp mutated\n\
-                         \x20           // v[{idx}] meaningfully, the iteration hasn't really\n\
-                         \x20           // converged — the rest of the network is still consistent\n\
-                         \x20           // with the pre-clamp value.\n\
-                         \x20           let clamp_delta = (v[{idx}] - v_pre_clamp).abs();\n\
-                         \x20           let clamp_thresh = 1e-3 * v[{idx}].abs().max(v_pre_clamp.abs()) + 1e-6;\n\
-                         \x20           if clamp_delta >= clamp_thresh {{ max_step_exceeded = true; }}\n\
-                         \x20       }}\n",
-                        idx = oa.n_out_idx,
-                    ));
-                }
-            }
-
-            // Residual-based convergence safety net (unconditional whenever a
-            // chord is in use — i.e. always on this path when M > 0).
-            //
-            // The voltage-step check above (`max_step_exceeded`) declares
-            // convergence whenever the damped Newton step is small. That
-            // criterion is necessary but NOT sufficient when the chord
-            // persistence holds a stale Jacobian: the LU back-solve uses
-            // `chord_j_dev` while the actual device current at the new
-            // operating point is `i_dev(v_nl_new)`. If `chord_j_dev` is
-            // grossly out of date, the LU's "fixed point" is a non-physical
-            // state where KCL is satisfied for the LINEARISED network but
-            // not for the actual nonlinear devices — NR happily reports
-            // converged on a wildly wrong v. A stale chord across an
-            // exponential knee is device-generic (any diode/junction
-            // crossing reverse→forward moves j_dev by many OOM between
-            // refactors); the historical extreme is the Boyle catch diode
-            // (≈1e-31 S reverse-biased vs ≈1e+1 S at the rail, 32 OOM),
-            // and 4kbuscomp's ActiveSetBe precision rectifiers hit the
-            // same class — which is why this used to be rail-mode-gated
-            // (BoyleDiodes, later + ActiveSet/ActiveSetBe) and is now
-            // emitted unconditionally, matching the DK path, whose
-            // residual check has always been ungated (see
-            // `nr_helpers.rs::emit_nr_limit_and_converge`, "Current
-            // residual check: always").
-            //
-            // Cost: the block only runs on the ACCEPTING iteration (inside
-            // `if !max_step_exceeded`), so it adds M device evaluations
-            // once per sample, not per NR iteration.
-            //
-            // Mismatch ⇒ NR keeps iterating, triggering the adaptive
-            // >50 %-j_dev refactor above, the periodic chord refactor, the
-            // sub-step retry, or the BE fallback — any of which can break
-            // out of the stale-chord trap.
-            //
-            // Implementation note: the device-evaluation helper writes
-            // into local `v_nl`, `i_nl`, `j_dev` arrays of fixed names.
-            // We use a nested `{ }` block so Rust shadows those bindings
-            // — the throwaway `j_dev` inside the block doesn't disturb
-            // the chord-stamped `j_dev` in the outer scope.
-            if m > 0 {
-                code.push_str(
-                    "        // Residual check: re-evaluate i_nl at the post-step v and force\n",
-                );
-                code.push_str(
-                    "        // NR to keep iterating if the chord linearisation produced an\n",
-                );
-                code.push_str(
-                    "        // inconsistent fixed point. Required for any topology where the\n",
-                );
-                code.push_str(
-                    "        // per-iteration op-amp rail clamp + stale chord_j_dev can\n",
-                );
-                code.push_str(
-                    "        // combine to produce false convergence (voltage step small,\n",
-                );
-                code.push_str("        // but device KCL residual huge).\n");
-                // #2: hold the residual-check device currents so the converged
-                // branch can reuse them (same v ⇒ identical i_nl) instead of a
-                // second device evaluation.
-                code.push_str("        let mut i_nl_resid = [0.0f64; M];\n");
-                code.push_str("        if !max_step_exceeded {\n");
-                code.push_str("            let i_nl_chord = i_nl;\n");
-                // `_final` (i_nl-only, no `j_dev`) rather than the full
-                // per-iteration evaluation body: this residual check only
-                // ever consumes `i_nl_resid` below, never a Jacobian. The
-                // full body unconditionally emits `j_dev[...] = jac[...]`
-                // writes for every device; declaring `j_dev` here just to
-                // discard it produced a genuine dead store (rustc's
-                // `unused_assignments` flagged the last device's last
-                // entry — e.g. `j_dev[195] = jac[3];` on wurli-power-amp,
-                // M=14 — under `-D warnings`).
-                code.push_str("            let mut v_nl_final = [0.0f64; M];\n");
-                code.push_str(&emit_sparse_nv_matvec(
-                    ir,
-                    "v_nl_final",
-                    "v",
-                    "            ",
-                ));
-                code.push_str("            let mut i_nl = [0.0f64; M];\n");
-                Self::emit_nodal_device_evaluation_final(&mut code, ir, "            ", "v");
-                code.push_str("            i_nl_resid = i_nl;\n");
-                code.push_str(
-                    "            // Tolerance matches DK Schur path: ABSTOL=1e-12, RELTOL=1e-3,\n",
-                );
-                code.push_str(
-                    "            // with a 1e-9 floor on the magnitude denominator so devices\n",
-                );
-                code.push_str(
-                    "            // with i_nl ≈ 0 don't have an unreachably tight tolerance.\n",
-                );
-                code.push_str("            for i in 0..M {\n");
-                code.push_str("                let r = (i_nl[i] - i_nl_chord[i]).abs();\n");
-                code.push_str("                let tol = 1e-3 * i_nl[i].abs().max(i_nl_chord[i].abs()).max(1e-9) + 1e-12;\n");
-                // Negated form: a NaN residual must read as NOT converged.
-                code.push_str("                if !(r <= tol) {\n");
-                code.push_str("                    max_step_exceeded = true;\n");
-                code.push_str("                    break;\n");
-                code.push_str("                }\n");
-                code.push_str("            }\n");
-                code.push_str("        }\n\n");
-            }
-
-            // Flux-row analogue of the device residual check above. Emitted
-            // whether or not `m > 0`: a circuit can carry a saturating
-            // inductor with no nonlinear devices at all.
-            emit_sat_ind_row_residual(
-                &mut code,
-                ir,
-                setter_stamps,
-                "rhs",
-                &sat_alpha_main,
-                if m > 0 { Some("i_nl_resid") } else { None },
-                "v",
-                "state.a",
-                "max_step_exceeded",
-                "        ",
-            );
-
-            // Node-KCL residual gate (ALWAYS, precondition of the line search):
-            // a backtracking search can shrink the damped step toward zero at a
-            // stagnation point, so convergence must require the true equation
-            // residual ||F|| = ||A·v - rhs - N_i·i_nl|| within tolerance — never
-            // the (possibly line-search-damped) step size alone. The device-chord
-            // consistency check above is a linearization test, not an equation
-            // residual, so it cannot substitute for this.
-            if use_line_search {
-                // Saving 1: the gate residual is at the committed `v`, where the
-                // device-chord check (guarded by the same `!max_step_exceeded`)
-                // already evaluated `i_nl_resid = i_nl(N_v·v)`. The mid-NR op-amp
-                // clamp (Hard) mutates `v` BEFORE that check, so `i_nl_resid` and
-                // this gate see the SAME post-clamp `v` — no eval between them.
-                // Reuse it via `kcl_residual_inl` (bit-identical to re-evaluating).
-                // `&&` short-circuits, so `i_nl_resid` is only read when it was
-                // populated (the `if !max_step_exceeded` branch ran).
-                if m > 0 {
-                    code.push_str(
-                        "        let converged_check = !max_step_exceeded && kcl_residual_inl(&v, &rhs, &state.a, &i_nl_resid).1;\n\n",
-                    );
-                } else {
-                    code.push_str(
-                        "        let converged_check = !max_step_exceeded && kcl_residual(&v, &rhs, &state.a, state).1;\n\n",
-                    );
-                }
-            } else {
-                code.push_str("        let converged_check = !max_step_exceeded;\n\n");
-            }
-
-            code.push_str("        if converged_check {\n");
-            code.push_str("            converged = true;\n");
-            code.push_str("            state.last_nr_iterations = iter as u32;\n");
-
-            // Final device currents at the converged point. For m > 0 the
-            // residual check above already evaluated i_nl at this exact v (v is
-            // unchanged since), so reuse it instead of a second device
-            // evaluation. Byte-identical: emit_nodal_device_evaluation_body and
-            // _final apply the same current expressions to v_nl = N_v·v.
-            if m > 0 {
-                code.push_str(
-                    "            // Final device currents: reuse the residual-check eval (same v)\n",
-                );
-                code.push_str("            i_nl = i_nl_resid;\n");
-            } else {
-                code.push_str("            // Final device evaluation at converged point\n");
-                code.push_str("            let mut v_nl_final = [0.0f64; M];\n");
-                code.push_str(&emit_sparse_nv_matvec(
-                    ir,
-                    "v_nl_final",
-                    "v",
-                    "            ",
-                ));
-                Self::emit_nodal_device_evaluation_final(&mut code, ir, "            ", "v");
-            }
-
-            // ActiveSet (plain): the pin-and-resolve used to be emitted right
-            // here, inside the trap NR convergence block — which silently
-            // skipped substep-recovered samples. It now runs once after the
-            // trap+substep section (see "ActiveSet (plain) — pin and
-            // re-solve" below), covering both convergence paths.
-
-            code.push_str("            break;\n");
-            code.push_str("        }\n");
-            code.push_str("    }\n\n"); // end trapezoidal NR loop
-
-            // Behavioral B-sources are stamped ONLY in the primary trapezoidal NR
-            // loop; the adaptive sub-step and BE fallbacks below rebuild the Newton
-            // system from the base G/C matrices, so they would solve a SOURCE-LESS
-            // network (the B-source dropped) and then falsely report convergence,
-            // committing a wrong result and corrupting trap history. For behavioral
-            // circuits we therefore omit BOTH fallbacks — a trap-NR failure falls
-            // through to the death-spiral state-hold instead. Behavioral circuits are
-            // already BE-primary (IntegratorSelection::BeBehavioral), so this drops
-            // only a same-scheme BE restart, not an L-stability rescue. This mirrors
-            // the DK BE fallback's own companion-magnetics gate (ir/mod.rs:1891-1910).
-            // Non-behavioral circuits emit byte-identically. (behavioral + ActiveSetBe
-            // full-LU is hard-errored earlier in from_kernel, so no behavioral circuit
-            // reaches these blocks needing the BE path for rail resolution.)
-            if ir.behavioral_sources.is_empty() {
-                // Adaptive sub-stepping: when trapezoidal NR fails, subdivide the timestep
-                // and retry with tighter capacitor conductances. This is how ngspice handles
-                // positive-feedback circuits (compressor sidechains, oscillators, etc.).
-                code.push_str("    // Adaptive sub-stepping: retry with subdivided timestep\n");
-                code.push_str(&format!("    if !converged{be_latch_and} {{\n"));
-                code.push_str("        'substep: for subdiv_power in 1..=SUBSTEP_MAX_POWER {\n");
-                code.push_str(
-                    "            let subdiv = 1u32 << subdiv_power; // 2 .. 2^SUBSTEP_MAX_POWER\n",
-                );
-                // alpha_sub tracks the RUNTIME host rate (× oversampling), not
-                // the compile-time codegen rate — a baked literal here made the
-                // sub-step matrices inconsistent with the state matrices after
-                // any `set_sample_rate` to a non-codegen rate.
-                // The sub-step must solve the SAME scheme the build is pinned to.
-                // It used to be hard-wired trapezoidal, so a deck that pinned BE
-                // got trap sub-steps behind its back — and the sub-step fires at
-                // discontinuities, which is exactly where the two schemes differ
-                // (measured 3.51 V vs 6.57 V against a BE-pinned reference at the
-                // step edge). A silent integrator swap inside the recovery path is
-                // the same class of defect as a silent wrong answer (design review).
-                if ir.solver_config.backward_euler {
-                    code.push_str(
-                "            // Backward Euler: alpha = 1/dt, matching the pinned scheme.\n            let alpha_sub = state.current_sample_rate * OVERSAMPLING_FACTOR as f64 * subdiv as f64;\n",
-            );
-                } else {
-                    code.push_str(
-                "            let alpha_sub = 2.0 * state.current_sample_rate * OVERSAMPLING_FACTOR as f64 * subdiv as f64;\n",
-            );
-                }
-                // From the same G/C `rebuild_matrices` reads (the setters'
-                // working copies when there are knobs).
-                let (g_src, c_src) = live_g_c(ir, true, "state");
-                code.push_str("            // Rebuild A and A_neg at finer timestep\n");
-                code.push_str("            let mut a_sub = [[0.0f64; N]; N];\n");
-                code.push_str("            let mut a_neg_sub = [[0.0f64; N]; N];\n");
-                code.push_str("            for i in 0..N {\n");
-                code.push_str("                for j in 0..N {\n");
-                code.push_str(&format!(
-                    "                    a_sub[i][j] = {g_src}[i][j] + alpha_sub * {c_src}[i][j];\n"
-                ));
-                if ir.solver_config.backward_euler {
-                    // BE history carries no -G term.
-                    code.push_str(&format!(
-                        "                    a_neg_sub[i][j] = alpha_sub * {c_src}[i][j];\n"
-                    ));
-                } else {
-                    code.push_str(&format!(
-                        "                    a_neg_sub[i][j] = alpha_sub * {c_src}[i][j] - {g_src}[i][j];\n"
-                    ));
-                }
-                code.push_str("                }\n");
-                code.push_str("            }\n");
-                // Zero VS/VCVS algebraic rows
-                let n_aug = ir.topology.n_aug;
-                if n_nodes < n_aug {
-                    code.push_str(&format!(
-                    "            for i in {}..{} {{ for j in 0..N {{ a_neg_sub[i][j] = 0.0; }} }}\n",
-                    n_nodes, n_aug
-                ));
-                }
-                // Gmin on A_sub — 1e-12, matching every other Gmin stamp in the
-                // nodal emitter (1e-6 was strong enough to skew high-impedance
-                // nodes by an audible amount on sub-stepped samples).
-                code.push_str("            for i in 0..N_NODES { a_sub[i][i] += 1e-12; }\n");
-                code.push_str("            // Run subdivided sub-steps\n");
-                code.push_str("            let mut v_sub = state.v_prev;\n");
-                code.push_str("            let mut i_nl_sub = state.i_nl_prev;\n");
-                if !multi_input {
-                    code.push_str(
-                    "            let input_step = (input - state.input_prev) / subdiv as f64;\n",
-                );
-                }
-                code.push_str("            let mut all_sub_converged = true;\n");
-                code.push_str("            for step in 0..subdiv {\n");
-                if !multi_input {
-                    code.push_str(
-                    "                let inp_s = state.input_prev + input_step * (step + 1) as f64;\n",
-                );
-                    code.push_str(
-                    "                let inp_prev_s = state.input_prev + input_step * step as f64;\n",
-                );
-                }
-                // Build sub-step RHS
-                code.push_str("                // Sub-step RHS\n");
-                if ir.has_dc_sources {
-                    code.push_str("                let mut rhs_s = RHS_CONST;\n");
-                } else {
-                    code.push_str("                let mut rhs_s = [0.0f64; N];\n");
-                }
-                code.push_str("                for i in 0..N { for j in 0..N { rhs_s[i] += a_neg_sub[i][j] * v_sub[j]; } }\n");
-                // Trap-midpoint companion, skipped under BE — the same gate the
-                // primary loop uses (`m > 0 && !backward_euler`). The sub-step
-                // carried it unconditionally, which is the third way it silently
-                // solved trapezoidal on a BE-pinned build.
-                if m > 0 && !ir.solver_config.backward_euler {
-                    code.push_str(&emit_sparse_ni_matvec_add(
-                        ir,
-                        "rhs_s",
-                        "i_nl_sub",
-                        "                ",
-                    ));
-                }
-                // Saturating-inductor flux history (sub-step: base v_sub, alpha_sub)
-                if has_sat_ind {
-                    emit_sat_ind_history(
-                        &mut code,
-                        ir,
-                        "rhs_s",
-                        "v_sub",
-                        "alpha_sub",
-                        "                ",
-                    );
-                }
-                if multi_input {
-                    // Same pin-honouring rule as the single-input case below.
-                    let per_port = if ir.solver_config.backward_euler {
-                        "inp_s / INPUT_RESISTANCES[k]"
-                    } else {
-                        "(inp_s + inp_prev_s) / INPUT_RESISTANCES[k]"
-                    };
-                    let prev_binding = if ir.solver_config.backward_euler {
-                        String::new()
-                    } else {
-                        "                    let inp_prev_s = state.inputs_prev[k] + step_k * step as f64;\n".to_string()
-                    };
-                    code.push_str(&format!(
-                    "                for k in 0..NUM_INPUTS {{\n\
-                     \x20                   let step_k = (inputs[k] - state.inputs_prev[k]) / subdiv as f64;\n\
-                     \x20                   let inp_s = state.inputs_prev[k] + step_k * (step + 1) as f64;\n\
-                     {prev_binding}\
-                     \x20                   rhs_s[INPUT_NODES[k]] += {per_port};\n\
-                     \x20               }}\n",
-                ));
-                } else {
-                    if ir.solver_config.backward_euler {
-                        code.push_str("                rhs_s[INPUT_NODE] += inp_s * (1.0 / INPUT_RESISTANCE);\n");
-                    } else {
-                        code.push_str("                rhs_s[INPUT_NODE] += (inp_s + inp_prev_s) * (1.0 / INPUT_RESISTANCE);\n");
-                    }
-                }
-                if inject_or_tap {
-                    code.push_str(&emit_inject_substep_stamp(
-                        ir,
-                        "rhs_s",
-                        "                ",
-                        "subdiv",
-                    ));
-                }
-                // Runtime voltage sources: integration-scheme-independent; every
-                // from-scratch RHS rebuild must re-stamp them.
-                if !ir.runtime_sources.is_empty() {
-                    code.push_str(
-                        "                // Runtime voltage sources (.runtime directive)\n",
-                    );
-                    for rt in &ir.runtime_sources {
-                        code.push_str(&format!(
-                            "                rhs_s[{}] += state.{};\n",
-                            rt.vs_row, rt.field_name
-                        ));
-                    }
-                }
-                // Noise replay: this is a from-scratch RHS rebuild, so it must
-                // re-stamp the per-source currents the primary `rhs_stamp`
-                // already drew and cached this sample. Omitting it dropped the
-                // noise for the whole sample while the RNG stream stayed
-                // aligned, making the loss invisible to every determinism
-                // check (F10). Drawing fresh values here instead would break
-                // determinism outright: sub-stepping is signal-dependent, so the
-                // stream position would become a function of the audio.
-                if noise.enabled {
-                    code.push_str(
-                        "                // Noise replay (cached i_n; consumes no RNG draws).\n",
-                    );
-                    code.push_str(&emit_noise_replay_body(
-                        noise.replay_counts,
-                        "rhs_s",
-                        "                ",
-                    ));
-                }
-                // Sub-step NR loop
-                code.push_str("                let mut sub_converged = false;\n");
-                code.push_str("                for _iter in 0..MAX_ITER {\n");
-                code.push_str("                    let mut v_nl = [0.0f64; M];\n");
-                code.push_str(&emit_sparse_nv_matvec(
-                    ir,
-                    "v_nl",
-                    "v_sub",
-                    "                    ",
-                ));
-                code.push_str("                    let mut i_nl = [0.0f64; M];\n");
-                code.push_str("                    let mut j_dev = [0.0f64; M * M];\n");
-                // Device evaluation
-                Self::emit_nodal_device_evaluation_body(
-                    &mut code,
-                    ir,
-                    "                    ",
-                    "v_sub",
-                );
-                code.push('\n');
-                // Build G_aug from a_sub
-                code.push_str("                    let mut g_s = a_sub;\n");
-                emit_nodal_jacobian_stamp(&mut code, ir, m, "g_s", "                    ");
-                emit_body_gmb_stamp(&mut code, ir, "g_s", "body_gmb", "                    ");
-                if has_sat_ind {
-                    emit_sat_ind_jacobian(
-                        &mut code,
-                        ir,
-                        "g_s",
-                        "v_sub",
-                        "alpha_sub",
-                        "                    ",
-                    );
-                }
-                // Build companion RHS
-                code.push_str("                    let mut rhs_w = rhs_s;\n");
-                emit_nodal_companion_rhs(
-                    &mut code,
-                    ir,
-                    m,
-                    "rhs_w",
-                    "j_dev",
-                    "                    ",
-                );
-                emit_body_gmb_companion(
-                    &mut code,
-                    ir,
-                    "rhs_w",
-                    "body_gmb",
-                    "v_sub",
-                    "                    ",
-                );
-                if has_sat_ind {
-                    emit_sat_ind_companion(
-                        &mut code,
-                        ir,
-                        "rhs_w",
-                        "v_sub",
-                        "alpha_sub",
-                        "                    ",
-                    );
-                }
-                // LU solve
-                code.push_str("                    let mut v_new_s = rhs_w;\n");
-                code.push_str(
-                    "                    if !lu_solve(&mut g_s, &mut v_new_s) { break; }\n",
-                );
-                // Saturating inductors: the node-row step below never looks at a
-                // branch-current row, so the flux rows get the main loop's step
-                // check and flux-row residual through this flag.
-                if has_sat_ind {
-                    code.push_str("                    let mut sub_step_exceeded = false;\n");
-                }
-                // Op-amp supply rail clamping (VCC/VEE) in sub-step. Hard mode
-                // only — same gating rationale as the trap-loop per-iteration
-                // clamp above: None must stay unbounded, ActiveSet/ActiveSetBe
-                // rely on their post-convergence pin-and-resolve seeing the
-                // genuine (unclamped) violation, and BoyleDiodes saturates via
-                // physical catch diodes.
-                if matches!(
-                    ir.solver_config.opamp_rail_mode,
-                    crate::codegen::OpampRailMode::Hard
-                ) {
-                    emit_hard_rail_clamp(
-                        &mut code,
-                        ir,
-                        "v_new_s",
-                        "                    ",
-                        None,
-                        false,
-                    );
-                }
-                // Convergence check + update
-                if use_line_search {
-                    // pnjlim + node damping (parity with the trap/BE loops): the
-                    // sub-step inner NR was previously RAW undamped Newton. On a
-                    // stiff junction the raw step overshoots past the fast_exp
-                    // clamp where the device Jacobian flattens to ~0, making the
-                    // Newton direction non-descent and defeating the line search.
-                    // Limiting keeps the iterate where the Jacobian is valid.
-                    code.push_str("                    let v_new = v_new_s;\n");
-                    code.push_str("                    let mut alpha = 1.0_f64;\n");
-                    Self::emit_nodal_voltage_limiting_indented(
-                        &mut code,
-                        ir,
-                        "                    ",
-                    );
-                    code.push_str(&format!(
-                        "                    {{\n\
-                         \x20                       let mut max_node_dv = 0.0_f64;\n\
-                         \x20                       for i in 0..{n_nodes} {{ let dv = alpha * (v_new_s[i] - v_sub[i]); max_node_dv = max_node_dv.max(dv.abs()); }}\n\
-                         \x20                       let mut max_v = 0.0_f64;\n\
-                         \x20                       for i in 0..{n_nodes} {{ max_v = max_v.max(v_sub[i].abs()); }}\n\
-                         \x20                       let damp_thresh = 10.0_f64.max(max_v * 0.05);\n\
-                         \x20                       if max_node_dv > damp_thresh {{ alpha *= damp_thresh / max_node_dv; }}\n\
-                         \x20                   }}\n"
-                    ));
-                    emit_sat_ind_step_limit(
-                        &mut code,
-                        ir,
-                        "v_sub",
-                        "v_new_s",
-                        "alpha",
-                        "                    ",
-                    );
-                    emit_armijo_line_search(
-                        &mut code,
-                        "                    ",
-                        "v_sub",
-                        "v_new_s",
-                        "alpha",
-                        "a_sub",
-                        "rhs_s",
-                        "ls_ok",
-                        "i_nl",
-                    );
-                    // Fall-through on Armijo failure (see trap site): take the
-                    // un-line-searched limited step and continue; the residual gate
-                    // decides convergence. A line search may only help.
-                    code.push_str(
-                        "                    if !ls_ok { state.diag_ls_fail_count += 1; }\n",
-                    );
-                    code.push_str("                    let mut max_step = 0.0f64;\n");
-                    code.push_str("                    for i in 0..N_NODES { let step = v_new_s[i] - v_sub[i]; if step.abs() > max_step { max_step = step.abs(); } }\n");
-                    for si in &ir.saturating_inductors {
-                        let k = si.aug_row;
-                        code.push_str(&format!(
-                            "                    {{ let step = alpha * (v_new_s[{k}] - v_sub[{k}]); let threshold = 1e-3 * v_sub[{k}].abs().max((v_sub[{k}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ sub_step_exceeded = true; }} }}\n"
-                        ));
-                    }
-                    code.push_str("                    for i in 0..N { v_sub[i] += alpha * (v_new_s[i] - v_sub[i]); }\n");
-                } else {
-                    code.push_str("                    let mut max_step = 0.0f64;\n");
-                    code.push_str("                    for i in 0..N_NODES {\n");
-                    code.push_str("                        let step = v_new_s[i] - v_sub[i];\n");
-                    code.push_str(
-                        "                        if step.abs() > max_step { max_step = step.abs(); }\n",
-                    );
-                    code.push_str("                    }\n");
-                    if has_sat_ind {
-                        // The flux-row limit scales the step (no line search
-                        // here to do it).
-                        code.push_str("                    let mut alpha = 1.0_f64;\n");
-                        emit_sat_ind_step_limit(
-                            &mut code,
-                            ir,
-                            "v_sub",
-                            "v_new_s",
-                            "alpha",
-                            "                    ",
-                        );
-                    }
-                    for si in &ir.saturating_inductors {
-                        let k = si.aug_row;
-                        code.push_str(&format!(
-                            "                    {{ let step = alpha * (v_new_s[{k}] - v_sub[{k}]); let threshold = 1e-3 * v_sub[{k}].abs().max((v_sub[{k}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ sub_step_exceeded = true; }} }}\n"
-                        ));
-                    }
-                    if has_sat_ind {
-                        code.push_str("                    for i in 0..N { v_sub[i] += alpha * (v_new_s[i] - v_sub[i]); }\n");
-                    } else {
-                        code.push_str("                    v_sub = v_new_s;\n");
-                    }
-                }
-                // Re-evaluate devices at the updated v_sub so i_nl_sub is consistent.
-                // Uses `_final` variant: reads v_nl_final, writes i_nl (no j_dev update).
-                code.push_str("                    // Re-extract i_nl at updated v\n");
-                code.push_str("                    let mut v_nl_final = [0.0f64; M];\n");
-                code.push_str(&emit_sparse_nv_matvec(
-                    ir,
-                    "v_nl_final",
-                    "v_sub",
-                    "                    ",
-                ));
-                Self::emit_nodal_device_evaluation_final(
-                    &mut code,
-                    ir,
-                    "                    ",
-                    "v_sub",
-                );
-                code.push_str("                    i_nl_sub = i_nl;\n");
-                // Convergence: raw (undamped) Newton step small AND — the always-
-                // checked precondition of the line search — the true node-KCL
-                // residual within tolerance, so a line-search-shrunk step can
-                // never report a non-root as converged.
-                if has_sat_ind {
-                    emit_sat_ind_row_residual(
-                        &mut code,
-                        ir,
-                        setter_stamps,
-                        "rhs_s",
-                        "alpha_sub",
-                        None,
-                        "v_sub",
-                        "a_sub",
-                        "sub_step_exceeded",
-                        "                    ",
-                    );
-                }
-                let sat_gate = if has_sat_ind {
-                    " && !sub_step_exceeded"
-                } else {
-                    ""
-                };
-                if use_line_search {
-                    code.push_str(&format!("                    if max_step < TOL + 1e-3{sat_gate} && kcl_residual(&v_sub, &rhs_s, &a_sub, state).1 {{\n"));
-                } else {
-                    code.push_str(&format!(
-                        "                    if max_step < TOL + 1e-3{sat_gate} {{\n"
-                    ));
-                }
-                code.push_str("                        sub_converged = true;\n");
-                code.push_str("                        break;\n");
-                code.push_str("                    }\n");
-                code.push_str("                }\n"); // end sub-step NR loop
-                code.push_str(
-                    "                if !sub_converged { all_sub_converged = false; break; }\n",
-                );
-                code.push_str("            }\n"); // end sub-step loop
-                code.push_str("            if all_sub_converged {\n");
-                code.push_str("                v = v_sub;\n");
-                code.push_str("                i_nl = i_nl_sub;\n");
-                code.push_str("                converged = true;\n");
-                code.push_str("                state.diag_substep_count += 1;\n");
-                code.push_str("                break 'substep;\n");
-                code.push_str("            }\n");
-                code.push_str("        }\n"); // end subdiv_power loop
-                code.push_str("    }\n\n"); // end if !converged
-            } // end: behavioral circuits omit the adaptive sub-step fallback
-
-            // ActiveSetBe rail engagement check (post-trap, post-substep).
-            // Runs on the final v from either the regular NR loop or the
-            // substep recovery, whichever produced the converged result. If
-            // any op-amp output is railed, set the flag so the BE fallback
-            // fires — trap+pin develops a Nyquist-rate limit cycle on
-            // audio-path topologies; BE+pin doesn't.
-            //
-            // Plain ActiveSet doesn't take this path — its trap+pin happens
-            // inside the NR break block above.
-            if active_set_be_mode_full_lu {
-                code.push_str("    if converged {\n");
-                Self::emit_nodal_active_set_check(&mut code, ir, "        ", "active_set_engaged");
-                code.push_str("    }\n\n");
-            }
-
-            // ActiveSet (plain) — pin and re-solve in trap matrices, preserving
-            // the steady DC rail value the op-amp converged to. Used by
-            // control-path topologies (VCR ALC sidechain etc.) where the
-            // rail-clamped value drives a nonlinear device's operating point.
-            // Runs on the final converged v from EITHER the regular trap NR
-            // loop or the substep recovery (it used to be emitted inside the
-            // trap NR convergence block, which skipped substep-recovered
-            // samples). ActiveSetBe takes a different path: detect-only above,
-            // BE fallback for the actual resolve.
-            if matches!(
-                ir.solver_config.opamp_rail_mode,
-                crate::codegen::OpampRailMode::ActiveSet
-            ) {
-                code.push_str("    if converged {\n");
-                Self::emit_nodal_active_set_resolve(
-                    &mut code,
-                    ir,
-                    "        ",
-                    "state.a",
-                    "rhs",
-                    PinSite::FullLu {
-                        sat_alpha: &sat_alpha_main,
-                        setter_stamps,
-                    },
-                );
-                code.push_str("    }\n\n");
-            }
-
-            // Behavioral circuits also omit the BE fallback (same source-less-solve
-            // reason as the sub-step above — it would drop the B-source and falsely
-            // converge). See the block comment at the sub-step guard above.
-            if ir.behavioral_sources.is_empty() {
-                // Backward Euler fallback. Triggered when trapezoidal NR (and
-                // sub-stepping) failed, OR when ActiveSetBe detected a rail
-                // engagement (BE doesn't ring under the row/col pin where
-                // trapezoidal does).
-                code.push_str(
-                "    // Backward Euler fallback: if trapezoidal NR and sub-stepping both failed,\n",
-            );
-                code.push_str(
-                    "    // or if ActiveSetBe detected a rail engagement on the trap result.\n",
-                );
-                if active_set_be_mode_full_lu {
-                    code.push_str(&format!(
-                        "    if !converged || active_set_engaged{be_latch_or} {{\n"
-                    ));
-                } else {
-                    code.push_str(&format!("    if !converged{be_latch_or} {{\n"));
-                }
-                // Diag contract (matches Schur/DK): be_fallback counts every
-                // ENTRY into the fallback (success or not). Genuine trap
-                // max-iter is counted once, post-loop, via the pessimistic
-                // `last_nr_iterations = MAX_ITER` init — an unconditional
-                // increment here would also count ActiveSetBe rail-engagement
-                // entries with a fully converged trap solve as NR failures.
-                code.push_str("        state.diag_be_fallback_count += 1;\n");
-                code.push_str("        chord_valid = false;\n");
-                // Reset `converged` at fallback ENTRY. In ActiveSetBe mode the
-                // fallback can be entered with a converged trap/substep primary
-                // (`active_set_engaged`), in which case `converged` is still true
-                // from that primary solve. If the BE NR loop below then fails, it
-                // never clears the flag, so the death-spiral guard
-                // (`if !converged { v = state.v_prev; ... }`) is skipped and the
-                // diverged BE iterate is committed over the valid primary root and
-                // reported clean (nr_max_iter_count stays 0). Entering the fallback
-                // means we are re-deriving the solution on BE matrices; until the BE
-                // loop proves convergence we do NOT hold a trustworthy result. The
-                // BE loop sets `converged = true` again on success, so samples whose
-                // BE fallback converges are byte-identical.
-                code.push_str("        converged = false;\n\n");
-
-                // Rebuild RHS with BE matrices
-                code.push_str("        // Rebuild RHS with backward Euler matrices\n");
-                code.push_str("        v = state.v_prev;\n");
-                code.push_str("        let mut rhs_be = [0.0f64; N];\n");
-                code.push_str("        for i in 0..N {\n");
-                if ir.has_dc_sources && !ir.matrices.rhs_const_be.is_empty() {
-                    code.push_str("            let mut sum = RHS_CONST_BE[i];\n");
-                } else {
-                    code.push_str("            let mut sum = 0.0;\n");
-                }
-                code.push_str("            for j in 0..N {\n");
-                code.push_str("                sum += state.a_neg_be[i][j] * state.v_prev[j];\n");
-                code.push_str("            }\n");
-                // No trap-midpoint N_I·i_nl_prev stamp: a BE step stamps only
-                // N_I·i(n) (added after the LU solve). See the matching comment
-                // on the Schur path for the double-count failure this removes.
-                code.push_str("            rhs_be[i] = sum;\n");
-                code.push_str("        }\n");
-                // Saturating-inductor flux history (BE: base v_prev, alpha = 1·rate·OS;
-                // BE A_neg drops the G term, so only the L0·i_prev → Φ(i_prev) swap applies)
-                if has_sat_ind {
-                    emit_sat_ind_history(
-                        &mut code,
-                        ir,
-                        "rhs_be",
-                        "state.v_prev",
-                        &sat_alpha_be,
-                        "        ",
-                    );
-                }
-                code.push_str(
-                    "        // BE input: just input[n+1] * G_in (no trapezoidal average)\n",
-                );
-                if multi_input {
-                    code.push_str("        for k in 0..NUM_INPUTS { rhs_be[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k]; }\n");
-                } else {
-                    code.push_str("        rhs_be[INPUT_NODE] += input * input_conductance;\n");
-                }
-                if inject_or_tap {
-                    code.push_str(&emit_inject_rhs_stamp(ir, "rhs_be", "        ", true));
-                }
-                // Runtime voltage sources: integration-scheme-independent; every
-                // from-scratch RHS rebuild must re-stamp them.
-                if !ir.runtime_sources.is_empty() {
-                    code.push_str("        // Runtime voltage sources (.runtime directive)\n");
-                    for rt in &ir.runtime_sources {
-                        code.push_str(&format!(
-                            "        rhs_be[{}] += state.{};\n",
-                            rt.vs_row, rt.field_name
-                        ));
-                    }
-                }
-
-                // BE-fallback noise replay (full-LU path) — same shape as Schur.
-                if noise.enabled && !noise.rhs_stamp_be.is_empty() {
-                    code.push_str(&noise.rhs_stamp_be);
-                }
-                code.push('\n');
-
-                // BE NR loop. Breakpoint-BE samples get the larger budget so a stiff
-                // swap-sample solve never hits the trap wall and reinjects the latch
-                // (openfarf). Byte-identical to `0..MAX_ITER` on non-breakpoint builds.
-                if ir.solver_config.breakpoint_be {
-                    code.push_str(
-                    "        let be_iter_budget = if state.breakpoint_be > 0 { BREAKPOINT_BE_MAX_ITER } else { MAX_ITER };\n",
-                );
-                    code.push_str("        for _iter in 0..be_iter_budget {\n");
-                } else {
-                    code.push_str("        for _iter in 0..MAX_ITER {\n");
-                }
-
-                // Extract v_nl (sparse N_V)
-                code.push_str("            let mut v_nl = [0.0f64; M];\n");
-                code.push_str(&emit_sparse_nv_matvec(ir, "v_nl", "v", "            "));
-                code.push('\n');
-
-                // Evaluate devices (write to outer i_nl, declare local j_dev)
-                code.push_str("            // Evaluate devices\n");
-                code.push_str("            let mut j_dev = [0.0f64; M * M];\n");
-                Self::emit_nodal_device_evaluation_body(&mut code, ir, "            ", "v");
-                code.push('\n');
-
-                // Build Jacobian for BE (sparse, same structure as trapezoidal)
-                code.push_str("            let mut g_aug = state.a_be;\n");
-                code.push_str("            // Gmin regularization\n");
-                code.push_str("            for i in 0..N_NODES { g_aug[i][i] += 1e-12; }\n");
-                emit_nodal_jacobian_stamp(&mut code, ir, m, "g_aug", "            ");
-                emit_body_gmb_stamp(&mut code, ir, "g_aug", "body_gmb", "            ");
-                if has_sat_ind {
-                    emit_sat_ind_jacobian(
-                        &mut code,
-                        ir,
-                        "g_aug",
-                        "v",
-                        &sat_alpha_be,
-                        "            ",
-                    );
-                }
-                code.push('\n');
-
-                // Companion RHS for BE (sparse)
-                code.push_str("            let mut rhs_work = rhs_be;\n");
-                emit_nodal_companion_rhs(&mut code, ir, m, "rhs_work", "j_dev", "            ");
-                emit_body_gmb_companion(&mut code, ir, "rhs_work", "body_gmb", "v", "            ");
-                if has_sat_ind {
-                    emit_sat_ind_companion(
-                        &mut code,
-                        ir,
-                        "rhs_work",
-                        "v",
-                        &sat_alpha_be,
-                        "            ",
-                    );
-                }
-                code.push('\n');
-
-                // LU solve for BE
-                code.push_str("            let mut v_new = rhs_work;\n");
-                code.push_str("            if !lu_solve(&mut g_aug, &mut v_new) { break; }\n\n");
-
-                // Per-iteration op-amp output rail clamp for BE path. Hard mode
-                // only — same gating rationale as the trap-loop clamp: for
-                // ActiveSet/ActiveSetBe the post-BE pin-and-resolve below needs
-                // to see the genuine unclamped violation, None stays unbounded,
-                // and BoyleDiodes uses physical catch diodes.
-                if matches!(
-                    ir.solver_config.opamp_rail_mode,
-                    crate::codegen::OpampRailMode::Hard
-                ) {
-                    emit_hard_rail_clamp(
-                    &mut code,
-                    ir,
-                    "v_new",
-                    "            ",
-                    Some("            // Per-iteration op-amp output rail clamp (BE, Hard mode)\n"),
-                    true,
-                );
-                }
-
-                // Limiting and damping for BE (same structure)
-                code.push_str("            let mut alpha = 1.0_f64;\n");
-                Self::emit_nodal_voltage_limiting_indented(&mut code, ir, "            ");
-                code.push_str("            {\n");
-                code.push_str("                let mut max_node_dv = 0.0_f64;\n");
-                code.push_str(&format!(
-                    "                for i in 0..{} {{\n\
-                 \x20                   let dv = alpha * (v_new[i] - v[i]);\n\
-                 \x20                   max_node_dv = max_node_dv.max(dv.abs());\n\
-                 \x20               }}\n",
-                    n_nodes
-                ));
-                // No `.max(0.01)` floor (removed 2026-08-03) — same rationale
-                // as the primary-loop damping above: a floored ratio still lets
-                // through a fixed fraction (>=1%) of an arbitrarily large raw
-                // delta, defeating the intended node-step ceiling exactly when
-                // a catastrophic LU solve most needs it contained. Root-caused
-                // on wurli-power-amp's BE fallback: a 3.8e7 V raw delta at a
-                // class-AB crossover transition survived the 1% floor as a
-                // ~3.8 kV single-iteration jump, launching the trajectory into
-                // a KCL-satisfying-but-nonphysical fixed point (~-16 kV) that
-                // the voltage-step-only convergence check couldn't detect,
-                // since the relative tolerance scales with the already-diverged
-                // voltage. Regression: nodal_be_fallback_alpha_floor_tests.rs.
-                code.push_str(
-                    "                if max_node_dv > 10.0 { alpha *= 10.0 / max_node_dv; }\n",
-                );
-                code.push_str("            }\n");
-                emit_sat_ind_step_limit(&mut code, ir, "v", "v_new", "alpha", "            ");
-                code.push('\n');
-
-                // Armijo backtracking line search (BE site), on the BE matrices.
-                // Same globalization + `limited` gating + fall-through as the trap
-                // loop: on Armijo failure take the un-line-searched limited step and
-                // continue; the residual gate decides convergence.
-                if use_line_search {
-                    emit_armijo_line_search(
-                        &mut code,
-                        "            ",
-                        "v",
-                        "v_new",
-                        "alpha",
-                        "state.a_be",
-                        "rhs_be",
-                        "ls_ok",
-                        "i_nl",
-                    );
-                    code.push_str("            if !ls_ok { state.diag_ls_fail_count += 1; }\n");
-                    code.push_str("            let limited = alpha < 1.0;\n");
-                }
-
-                // Apply damped step and check convergence (compute delta before updating).
-                // Convergence check on nonlinear device nodes only (N_V nonzero columns),
-                // matching the trapezoidal NR path. Checking all N nodes includes VCCS rows
-                // for op-amps which may never satisfy the step criterion when op-amp outputs
-                // are railed — causing BE to loop to MAX_ITER perpetually.
-                code.push_str("            let mut be_step_exceeded = false;\n");
-                if use_line_search {
-                    code.push_str("            if !limited {\n");
-                }
-                {
-                    let mut device_nodes: Vec<usize> = ir
-                        .sparsity
-                        .n_v
-                        .nz_by_row
-                        .iter()
-                        .flat_map(|row| row.iter().copied())
-                        .collect();
-                    // Behavioral B-sources are often M=0 (no N_v rows); include their
-                    // terminal + referenced nodes so the check isn't vacuously true.
-                    device_nodes.extend(behavioral_convergence_nodes(ir));
-                    // Saturating inductors: check the augmented branch-current row so
-                    // NR actually iterates on the flux nonlinearity. Essential at M=0,
-                    // where the N_v/behavioral node set is empty and the step check
-                    // would otherwise be vacuously "converged" on iteration 0.
-                    for si in &ir.saturating_inductors {
-                        device_nodes.push(si.aug_row);
-                    }
-                    device_nodes.sort();
-                    device_nodes.dedup();
-                    let extra = if use_line_search { "    " } else { "" };
-                    for &node in &device_nodes {
-                        code.push_str(&format!(
-                        "            {extra}{{ let step = alpha * (v_new[{node}] - v[{node}]); let threshold = 1e-3 * v[{node}].abs().max((v[{node}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ be_step_exceeded = true; }} }}\n"
-                    ));
-                    }
-                }
-                if use_line_search {
-                    code.push_str("            }\n");
-                }
-                code.push_str("            for i in 0..N { v[i] += alpha * (v_new[i] - v[i]); }\n");
-
-                // Mid-NR op-amp clamping for BE path. Only emit for Hard mode;
-                // ActiveSet and BoyleDiodes handle rails via their respective
-                // mechanisms (active-set resolve / physical catch diodes), and a
-                // hard clamp here would conflict with them.
-                if matches!(
-                    ir.solver_config.opamp_rail_mode,
-                    crate::codegen::OpampRailMode::Hard
-                ) && !ir.opamps.is_empty()
-                {
-                    for oa in &ir.opamps {
-                        let target = format!("v[{}]", oa.n_out_idx);
-                        if let Some(stmt) =
-                            Self::rail_clamp_stmt(&target, oa.vclamp_lo, oa.vclamp_hi)
-                        {
-                            code.push_str(&format!("            {stmt}\n"));
-                        }
-                    }
-                }
-
-                // Residual-based convergence safety net for the BE fallback —
-                // emitted UNCONDITIONALLY (was BoyleDiodes-only until 2026-08-03).
-                //
-                // The BE convergence criterion above is voltage-step-only
-                // (`be_step_exceeded`), whose relative tolerance scales with the
-                // node voltage — so once a node has diverged it can declare a small
-                // damped step "converged" on a KCL-satisfying-but-nonphysical state
-                // (the wurli-power-amp ~-16 kV false convergence). This was formerly
-                // gated to BoyleDiodes on the assumption that every other mode's BE
-                // fallback does true Newton and lands on a real root; the
-                // wurli-power-amp blowup disproved that assumption, so the guard now
-                // matches the primary NR loop and the DK path. A converged BE step
-                // must ALSO have a small device-KCL residual: the i_nl that fed the
-                // LU vs i_nl re-evaluated at the post-step v. Uses the i_nl-only
-                // device eval (`_final`) so it declares no discarded `j_dev`.
-                code.push_str("            // Residual convergence safety net (BE path)\n");
-                code.push_str("            if !be_step_exceeded {\n");
-                code.push_str("                let i_nl_be_chord = i_nl;\n");
-                code.push_str("                let mut v_nl_final = [0.0f64; M];\n");
-                code.push_str(&emit_sparse_nv_matvec(
-                    ir,
-                    "v_nl_final",
-                    "v",
-                    "                ",
-                ));
-                code.push_str("                let mut i_nl = [0.0f64; M];\n");
-                Self::emit_nodal_device_evaluation_final(&mut code, ir, "                ", "v");
-                code.push_str("                for i in 0..M {\n");
-                code.push_str("                    let r = (i_nl[i] - i_nl_be_chord[i]).abs();\n");
-                code.push_str("                    let tol = 1e-3 * i_nl[i].abs().max(i_nl_be_chord[i].abs()).max(1e-9) + 1e-12;\n");
-                // Negated form: a NaN residual must read as NOT converged.
-                code.push_str("                    if !(r <= tol) {\n");
-                code.push_str("                        be_step_exceeded = true;\n");
-                code.push_str("                        break;\n");
-                code.push_str("                    }\n");
-                code.push_str("                }\n");
-                code.push_str("            }\n\n");
-                // Flux-row residual, as in the main loop and the sub-step.
-                if has_sat_ind {
-                    emit_sat_ind_row_residual(
-                        &mut code,
-                        ir,
-                        setter_stamps,
-                        "rhs_be",
-                        &sat_alpha_be,
-                        None,
-                        "v",
-                        "state.a_be",
-                        "be_step_exceeded",
-                        "            ",
-                    );
-                }
-
-                // Node-KCL residual gate (ALWAYS) — precondition of the BE line
-                // search, same rationale as the trap loop.
-                if use_line_search {
-                    code.push_str(
-                        "            let be_converged = !be_step_exceeded && kcl_residual(&v, &rhs_be, &state.a_be, state).1;\n\n",
-                    );
-                } else {
-                    code.push_str("            let be_converged = !be_step_exceeded;\n\n");
-                }
-
-                code.push_str("            if be_converged {\n");
-                code.push_str("                converged = true;\n");
-                // (diag_be_fallback_count is bumped at fallback ENTRY, not here —
-                // counting success-only hid every failed BE attempt.)
-                code.push_str("                let mut v_nl_final = [0.0f64; M];\n");
-                code.push_str(&emit_sparse_nv_matvec(
-                    ir,
-                    "v_nl_final",
-                    "v",
-                    "                ",
-                ));
-                Self::emit_nodal_device_evaluation_final(&mut code, ir, "                ", "v");
-                code.push_str("                break;\n");
-                code.push_str("            }\n");
-                code.push_str("        }\n\n"); // end BE NR loop
-
-                // If still not converged, ensure i_nl is consistent
-                code.push_str(
-                    "        // If still not converged, ensure i_nl is consistent with v\n",
-                );
-                code.push_str("        if !converged {\n");
-                code.push_str("            let mut v_nl_final = [0.0f64; M];\n");
-                code.push_str(&emit_sparse_nv_matvec(
-                    ir,
-                    "v_nl_final",
-                    "v",
-                    "            ",
-                ));
-                Self::emit_nodal_device_evaluation_final(&mut code, ir, "            ", "v");
-                code.push_str("        }\n");
-
-                // ActiveSetBe post-BE resolve: if any op-amp output is railed in
-                // the BE result, pin and re-solve against `state.a_be`. BE+pin
-                // doesn't develop the trap+pin Nyquist limit cycle, so the cap
-                // history stays consistent across the next sample.
-                //
-                // Plain ActiveSet also resolves here when it reaches the BE
-                // fallback (trap + substep both failed): its trap-path resolve
-                // only runs on converged samples, and with the per-iteration
-                // clamp now Hard-gated the BE result would otherwise carry an
-                // unbounded op-amp output into v_prev. Mirrors the Schur BE
-                // fallback's `ActiveSetBe | ActiveSet` dispatch arm.
-                if matches!(
-                    ir.solver_config.opamp_rail_mode,
-                    crate::codegen::OpampRailMode::ActiveSetBe
-                        | crate::codegen::OpampRailMode::ActiveSet
-                ) {
-                    Self::emit_nodal_active_set_resolve(
-                        &mut code,
-                        ir,
-                        "        ",
-                        "state.a_be",
-                        "rhs_be",
-                        PinSite::FullLu {
-                            sat_alpha: &sat_alpha_be,
-                            setter_stamps,
-                        },
-                    );
-                }
-
-                code.push_str("    }\n\n"); // end BE fallback block
-            } // end: behavioral circuits omit the BE fallback
+            Self::emit_nodal_solve(&mut code, ir, noise, setter_stamps);
         }
 
         // NaN/Inf recovery: shared reset + DC-OP return. Full-LU path
@@ -9012,6 +7449,9 @@ impl RustEmitter {
             code.push_str("        v = state.v_prev;\n");
             code.push_str("        i_nl = state.i_nl_prev;\n");
             code.push_str("        chord_valid = false;\n");
+            if has_be_instance(ir) {
+                code.push_str("        state.chord_be_valid = false;\n");
+            }
             code.push_str("    }\n\n");
         }
 
@@ -9147,6 +7587,1360 @@ impl RustEmitter {
         code.push_str("}\n\n");
 
         code
+    }
+
+    /// The Newton part of a full-LU sample: the primary solve and, on a
+    /// trapezoidal build, the backward-Euler instance of the same routine.
+    fn emit_nodal_solve(
+        code: &mut String,
+        ir: &CircuitIR,
+        noise: &NoiseEmission,
+        setter_stamps: &std::collections::BTreeSet<(usize, usize)>,
+    ) {
+        let primary = NewtonSite::primary(ir);
+        let active_set_be = matches!(
+            ir.solver_config.opamp_rail_mode,
+            crate::codegen::OpampRailMode::ActiveSetBe
+        );
+        code.push_str("    // Step 2: Newton-Raphson in full augmented voltage space\n");
+        code.push_str("    let mut v = state.v_prev;\n");
+        code.push_str("    let mut converged = false;\n");
+        // Pessimistic init: overwritten with the converging iteration index on
+        // success, so a failure leaves MAX_ITER for the post-loop max-iter
+        // counter instead of last sample's stale value.
+        code.push_str("    state.last_nr_iterations = MAX_ITER as u32;\n");
+        code.push_str("    let mut i_nl = [0.0f64; M];\n");
+        if active_set_be {
+            code.push_str("    let mut active_set_engaged = false;\n");
+        }
+        code.push_str("    // Cross-timestep chord: start from previous sample's converged LU\n");
+        emit_chord_cache(code, ir, "state.chord_", "    ", true);
+        code.push('\n');
+
+        if !has_be_instance(ir) {
+            Self::emit_nodal_rhs(code, ir, noise, &primary, NoiseMode::Draw);
+            Self::emit_nodal_newton(code, ir, noise, setter_stamps, &primary);
+            return;
+        }
+
+        // A sample that must be backward Euler (latched, or a breakpoint)
+        // skips the trapezoidal solve: its result would be discarded.
+        let forced = match (
+            ir.solver_config.runtime_be_latch,
+            ir.solver_config.breakpoint_be,
+        ) {
+            (true, true) => Some("state.be_latched || state.breakpoint_be > 0"),
+            (true, false) => Some("state.be_latched"),
+            (false, true) => Some("state.breakpoint_be > 0"),
+            (false, false) => None,
+        };
+        match forced {
+            Some(f) => code.push_str(&format!("    let be_first = {f};\n    if !be_first {{\n")),
+            None => code.push_str("    {\n"),
+        }
+        Self::emit_nodal_rhs(code, ir, noise, &primary, NoiseMode::Draw);
+        Self::emit_nodal_newton(code, ir, noise, setter_stamps, &primary);
+        code.push_str("    }\n\n");
+
+        let mut cond = "!converged".to_string();
+        if active_set_be {
+            cond.push_str(" || active_set_engaged");
+        }
+        if forced.is_some() {
+            cond.push_str(" || be_first");
+        }
+        code.push_str(
+            "    // Backward-Euler solve: the same routine a BE build runs (main loop,\n\
+             \x20   // sub-step, pin-and-resolve), on the BE matrices and its own chord.\n",
+        );
+        code.push_str(&format!("    if {cond} {{\n"));
+        // Diag contract: be_fallback counts every entry (latched samples too).
+        code.push_str("        state.diag_be_fallback_count += 1;\n");
+        code.push_str("        chord_valid = false;\n");
+        code.push_str("        converged = false;\n");
+        code.push_str("        let primary_iters = state.last_nr_iterations;\n");
+        code.push_str("        v = state.v_prev;\n");
+        code.push_str("        state.last_nr_iterations = MAX_ITER as u32;\n");
+        if ir.solver_config.breakpoint_be {
+            code.push_str(
+                "        let be_iter_budget = if state.breakpoint_be > 0 { BREAKPOINT_BE_MAX_ITER } else { MAX_ITER };\n",
+            );
+        }
+        emit_chord_cache(code, ir, "state.chord_be_", "        ", true);
+        let be = NewtonSite::be_instance(ir);
+        let noise_mode = match forced {
+            Some(_) => NoiseMode::DrawIf("be_first"),
+            None => NoiseMode::Replay,
+        };
+        Self::emit_nodal_rhs(code, ir, noise, &be, noise_mode);
+        Self::emit_nodal_newton(code, ir, noise, setter_stamps, &be);
+        emit_chord_cache(code, ir, "state.chord_be_", "        ", false);
+        // The max-iter counter reports the sample's primary solve.
+        match forced {
+            Some(_) => code
+                .push_str("        if !be_first { state.last_nr_iterations = primary_iters; }\n"),
+            None => code.push_str("        state.last_nr_iterations = primary_iters;\n"),
+        }
+        code.push_str("    }\n\n");
+    }
+
+    /// Step 1 of a full-LU sample: the right-hand side for one integrator
+    /// (`site`) into a local `rhs` — constant sources, `A_neg·v_prev`, the
+    /// trapezoidal `N_i·i_nl_prev` companion, input, runtime sources, noise,
+    /// saturating-inductor flux history.
+    fn emit_nodal_rhs(
+        code: &mut String,
+        ir: &CircuitIR,
+        noise: &NoiseEmission,
+        site: &NewtonSite,
+        noise_mode: NoiseMode,
+    ) {
+        let n = ir.topology.n;
+        let m = ir.topology.m;
+        let n_nodes = if ir.topology.n_nodes > 0 {
+            ir.topology.n_nodes
+        } else {
+            n
+        };
+        let multi_input = ir.solver_config.num_inputs() > 1;
+        let has_behavioral = !ir.behavioral_sources.is_empty();
+        let has_sat_ind = !ir.saturating_inductors.is_empty();
+        let inject_or_tap = ir.solver_config.has_inject_or_tap();
+        let use_line_search = m > 0;
+        let _ = (
+            n,
+            m,
+            n_nodes,
+            multi_input,
+            has_behavioral,
+            has_sat_ind,
+            inject_or_tap,
+            use_line_search,
+        );
+        // Step 1: Build RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input (sparse)
+        code.push_str(
+            "    // Step 1: Build RHS (sparse A_neg * v_prev + sparse N_i * i_nl_prev)\n",
+        );
+        if let Some(rc) = site.rhs_const {
+            code.push_str(&format!("    let mut rhs = {rc};\n"));
+        } else {
+            code.push_str("    let mut rhs = [0.0f64; N];\n");
+        }
+        // Sparse A_neg * v_prev
+        for i in 0..n {
+            let nz_cols = &site.a_neg_sparsity(ir).nz_by_row[i];
+            if nz_cols.is_empty() {
+                continue;
+            }
+            for &j in nz_cols {
+                code.push_str(&format!(
+                    "    rhs[{}] += {}[{}][{}] * state.v_prev[{}];\n",
+                    i, site.a_neg, i, j, j
+                ));
+            }
+        }
+        // Sparse N_i * i_nl_prev (N_I is N×M, direct row access).
+        // Trap-midpoint companion, skipped under BE — see the matching
+        // comment block in `emit_nodal_schur_process_sample` for the
+        // derivation and the pipe-shouter warmup-divergence case this
+        // fixes.
+        if m > 0 && !site.be {
+            for i in 0..n {
+                for &j in &ir.sparsity.n_i.nz_by_row[i] {
+                    code.push_str(&format!(
+                        "    rhs[{}] += N_I[{}][{}] * state.i_nl_prev[{}];\n",
+                        i, i, j, j
+                    ));
+                }
+            }
+        }
+        code.push('\n');
+
+        // Input source (Thevenin)
+        if multi_input {
+            if site.be {
+                code.push_str("    // Input sources (backward Euler: per-port V_in * G_in)\n");
+                code.push_str("    for k in 0..NUM_INPUTS {\n        rhs[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k];\n    }\n");
+            } else {
+                code.push_str(
+                    "    // Input sources (trapezoidal: per-port (V_in + V_in_prev) * G_in)\n",
+                );
+                code.push_str("    for k in 0..NUM_INPUTS {\n        rhs[INPUT_NODES[k]] += (inputs[k] + state.inputs_prev[k]) / INPUT_RESISTANCES[k];\n    }\n");
+            }
+        } else {
+            code.push_str("    let input_conductance = 1.0 / INPUT_RESISTANCE;\n");
+            if site.be {
+                code.push_str("    // Input source (backward Euler: V_in * G_in)\n");
+                code.push_str("    rhs[INPUT_NODE] += input * input_conductance;\n");
+            } else {
+                code.push_str("    // Input source (trapezoidal: (V_in + V_in_prev) * G_in)\n");
+                code.push_str(
+                    "    rhs[INPUT_NODE] += (input + state.input_prev) * input_conductance;\n",
+                );
+            }
+        }
+        if inject_or_tap {
+            code.push_str(&emit_inject_rhs_stamp(ir, "rhs", "    ", site.be));
+        }
+        // NOTE: `state.input_prev` is deliberately NOT committed here. The
+        // adaptive sub-stepping below interpolates the input ramp as
+        // `(input - state.input_prev) / subdiv`, so committing before the
+        // sub-steps read it would zero the ramp exactly on the hard-transient
+        // samples that trigger sub-stepping. The commit happens in the
+        // end-of-sample state-update block (matching the DK template).
+        code.push('\n');
+
+        // Runtime voltage sources (.runtime directive): host-driven per-sample values.
+        if !ir.runtime_sources.is_empty() {
+            code.push_str("    // Runtime voltage sources (.runtime directive)\n");
+            for rt in &ir.runtime_sources {
+                code.push_str(&format!(
+                    "    rhs[{}] += state.{};\n",
+                    rt.vs_row, rt.field_name
+                ));
+            }
+            code.push('\n');
+        }
+
+        // Authentic circuit noise — Phase 1 thermal stamp.
+        // One draw per audio sample, before NR (and before the M=0 direct
+        // LU solve). See `emit_nodal_schur_process_sample` for the full
+        // rationale; the placement is identical here.
+        if noise.enabled {
+            match noise_mode {
+                NoiseMode::Draw => code.push_str(&noise.rhs_stamp),
+                NoiseMode::Replay => {
+                    code.push_str(&emit_noise_replay_body(noise.replay_counts, "rhs", "    "))
+                }
+                NoiseMode::DrawIf(cond) => {
+                    code.push_str(&format!("    if {cond} {{\n"));
+                    code.push_str(&noise.rhs_stamp);
+                    code.push_str("    } else {\n");
+                    code.push_str(&emit_noise_replay_body(
+                        noise.replay_counts,
+                        "rhs",
+                        "        ",
+                    ));
+                    code.push_str("    }\n");
+                }
+            }
+            code.push('\n');
+        }
+
+        // Saturating-inductor history: swap the baked-in linear flux
+        // `alpha·L0·i_prev` (already in rhs via A_neg·v_prev) for `alpha·Φ(i_prev)`.
+        if has_sat_ind {
+            code.push_str(
+                "    // Saturating inductor flux history (Φ(i_prev) replaces L0·i_prev)\n",
+            );
+            emit_sat_ind_history(code, ir, "rhs", "state.v_prev", &site.sat_alpha, "    ");
+            code.push('\n');
+        }
+    }
+
+    /// Step 2 of a full-LU sample, for one integrator (`site`): the Newton
+    /// loop, the adaptive sub-step, and the op-amp pin-and-resolve. The BE
+    /// build, a trapezoidal build's BE instance (latch, fallback, breakpoint)
+    /// and the trapezoidal solve are all this one routine; they differ only in
+    /// `site`. Writes the caller's `v`, `converged`, `i_nl`, chord locals.
+    fn emit_nodal_newton(
+        code: &mut String,
+        ir: &CircuitIR,
+        noise: &NoiseEmission,
+        setter_stamps: &std::collections::BTreeSet<(usize, usize)>,
+        site: &NewtonSite,
+    ) {
+        let n = ir.topology.n;
+        let m = ir.topology.m;
+        let n_nodes = if ir.topology.n_nodes > 0 {
+            ir.topology.n_nodes
+        } else {
+            n
+        };
+        let multi_input = ir.solver_config.num_inputs() > 1;
+        let has_behavioral = !ir.behavioral_sources.is_empty();
+        let has_sat_ind = !ir.saturating_inductors.is_empty();
+        let inject_or_tap = ir.solver_config.has_inject_or_tap();
+        let use_line_search = m > 0;
+        let _ = (
+            n,
+            m,
+            n_nodes,
+            multi_input,
+            has_behavioral,
+            has_sat_ind,
+            inject_or_tap,
+            use_line_search,
+        );
+        let active_set_be_mode_full_lu = matches!(
+            ir.solver_config.opamp_rail_mode,
+            crate::codegen::OpampRailMode::ActiveSetBe
+        );
+        // Trapezoidal NR loop
+        code.push_str(&format!("    for iter in 0..{} {{\n", site.iter_budget));
+
+        // 2a. Extract nonlinear voltages: v_nl = N_v * v (sparse)
+        code.push_str("        // 2a. Extract nonlinear voltages: v_nl = N_v * v (sparse)\n");
+        code.push_str("        let mut v_nl = [0.0f64; M];\n");
+        for i in 0..m {
+            let nz_cols = &ir.sparsity.n_v.nz_by_row[i];
+            if nz_cols.is_empty() {
+                continue;
+            }
+            let terms: Vec<String> = nz_cols
+                .iter()
+                .map(|&j| format!("N_V[{}][{}] * v[{}]", i, j, j))
+                .collect();
+            code.push_str(&format!("        v_nl[{}] = {};\n", i, terms.join(" + ")));
+        }
+        code.push('\n');
+
+        // 2b. Evaluate device currents and Jacobian
+        code.push_str("        // 2b. Evaluate device currents and Jacobian (block-diagonal)\n");
+        // i_nl is declared in outer scope (line above NR loop), j_dev is per-iteration
+        code.push_str("        let mut j_dev = [0.0f64; M * M];\n");
+        Self::emit_nodal_device_evaluation_body(code, ir, "        ", "v");
+        code.push('\n');
+
+        // Behavioral B-source value + partials at the current iterate.
+        // Used by both the Jacobian (2c) and companion RHS (2d) below.
+        if has_behavioral {
+            code.push_str("        // Behavioral B-source evaluation (value + partials)\n");
+            emit_behavioral_evals(code, ir, "        ");
+            code.push('\n');
+        }
+
+        // 2c. Build and factor Jacobian: G_aug = A - N_i * J_dev * N_v (chord method)
+        // Factor LU periodically: iter 0, then every CHORD_REFACTOR iterations.
+        // Between refactors, reuse stored LU for O(N²) back-solve instead of O(N³) factor.
+        // J_dev is block-diagonal; N_i and N_v have ~2 nonzero entries per device dim.
+        // Compile-time unrolled: ~64 stamps for 4 tubes vs 107K dense iterations.
+        code.push_str(
+            "        // 2c. Build and factor Jacobian (adaptive chord: reuse across timesteps)\n",
+        );
+        // Refactor when: (a) no valid LU, (b) within-sample periodic
+        // refresh, OR (c) any device's diagonal Jacobian has diverged
+        // from `chord_j_dev` by >50 % relative.
+        //
+        // The cross-timestep chord persistence holds `chord_j_dev`
+        // frozen across many samples. That's fine while a device
+        // conducts smoothly, but a stale chord across an exponential
+        // knee is device-generic: any diode/junction crossing from
+        // reverse- to forward-bias moves `j_dev` by many orders of
+        // magnitude between refactors (the extreme case is the Boyle
+        // catch diode: ≈1e-31 S deeply reverse-biased vs ≈1e1 S at
+        // the rail — 32 OOM). Without the adaptive trigger, refactors
+        // only happen at iter % 5 == 0 / iter >= 10, by which point
+        // pnjlim has damped the steps so far that the chord can't
+        // catch up within MAX_ITER.
+        //
+        // The trigger is emitted unconditionally (was BoyleDiodes-only):
+        // it only compares the already-computed per-iteration `j_dev`
+        // diagonal against the persisted `chord_j_dev` — O(M) compares,
+        // no extra device evaluations — and for smoothly-conducting
+        // devices it simply never fires.
+        //
+        // The 50 % threshold is empirical: lower (e.g. 20 %) causes
+        // spurious refactors that trap pnjlim's step damping in a
+        // different slow-oscillation regime; higher (e.g. 80 %)
+        // misses the diode-knee transition.
+        if has_behavioral || has_sat_ind {
+            // Behavioral B-source and saturating-inductor Jacobian entries
+            // change every iteration (nonlinear, not part of the frozen chord
+            // device block `chord_j_dev`), so refactor each iteration — this
+            // keeps the inductor Jacobian (stamped below) consistent with the
+            // companion RHS, both evaluated at the current iterate `v`.
+            // Correctness over the chord's per-sample speedup (perf: Phase 1
+            // deferred an L_diff-drift refactor trigger, §3.4).
+            code.push_str("        let need_refactor = true;\n");
+        } else {
+            code.push_str("        let mut need_refactor = !chord_valid || (iter > 0 && iter % CHORD_REFACTOR == 0) || iter >= 10;\n");
+            code.push_str("        if !need_refactor {\n");
+            code.push_str("            for k in 0..M {\n");
+            code.push_str("                let jk = j_dev[k * M + k];\n");
+            code.push_str("                let ck = chord_j_dev[k * M + k];\n");
+            code.push_str("                let mx = jk.abs().max(ck.abs());\n");
+            code.push_str("                if mx > 1e-20 && (jk - ck).abs() / mx > 0.5 {\n");
+            code.push_str("                    need_refactor = true;\n");
+            code.push_str("                    break;\n");
+            code.push_str("                }\n");
+            code.push_str("            }\n");
+            code.push_str("        }\n");
+        }
+        code.push_str("        if need_refactor {\n");
+        code.push_str("            chord_j_dev = j_dev;\n");
+        code.push_str(&format!("            chord_lu = {};\n", site.a));
+        code.push_str("            // Gmin regularization\n");
+        code.push_str("            for i in 0..N_NODES { chord_lu[i][i] += 1e-12; }\n");
+        {
+            // Build transpose of N_i sparsity: for each device dim i, which nodes a are nonzero
+            emit_nodal_jacobian_stamp(code, ir, m, "chord_lu", "            ");
+        }
+        // MOSFET body effect: gmb is part of the factored chord, so it is
+        // frozen with it and the companion below uses the same values.
+        if !body_effect_mosfets(ir).is_empty() {
+            code.push_str("            chord_body_gmb = body_gmb;\n");
+            emit_body_gmb_stamp(code, ir, "chord_lu", "chord_body_gmb", "            ");
+        }
+        // Saturating-inductor Jacobian: alpha·L0 → alpha·L_diff(v[k]) at [k][k].
+        if has_sat_ind {
+            emit_sat_ind_jacobian(code, ir, "chord_lu", "v", &site.sat_alpha, "            ");
+        }
+        // Behavioral B-source Jacobian: stamp ∂f/∂V directly into G_aug.
+        if has_behavioral {
+            emit_behavioral_jacobian(code, ir, "            ");
+        }
+        // Factor: try sparse LU (if available). The sparse schedule uses
+        // STATIC (symbolic) pivoting, which can fail at runtime — a pivot
+        // numerically near zero, or excessive element growth (checked
+        // inside sparse_lu_factor). On rejection, re-factor DENSE with
+        // partial pivoting in the same NR iteration on the saved stamped
+        // G_aug; `chord_dense` records which factorization the persisted
+        // chord_lu holds so back-solves (this sample and later ones via
+        // cross-timestep persistence) dispatch correctly.
+        if ir.sparsity.lu.is_some() {
+            code.push_str("            let g_aug_stamped = chord_lu;\n");
+            code.push_str(
+                "            if sparse_lu_factor(&mut chord_lu, &mut chord_dr, &mut chord_dc) {\n",
+            );
+            code.push_str("                chord_dense = false;\n");
+            code.push_str("            } else {\n");
+            code.push_str(
+                "                // Sparse factor rejected (tiny pivot or growth-factor check):\n",
+            );
+            code.push_str("                // re-factor DENSE with partial pivoting in this same iteration.\n");
+            code.push_str("                chord_lu = g_aug_stamped;\n");
+            // On failure, break with `converged` false; the pessimistic
+            // `last_nr_iterations = MAX_ITER` init means the post-loop
+            // diagnostic counts this sample exactly once (no direct
+            // increment here — it would double-count).
+            code.push_str("                if !lu_factor(&mut chord_lu, &mut chord_dr, &mut chord_dc, &mut chord_perm) {\n");
+            code.push_str("                    break;\n");
+            code.push_str("                }\n");
+            code.push_str("                chord_dense = true;\n");
+            code.push_str("            }\n");
+        } else {
+            code.push_str(
+                    "            if !lu_factor(&mut chord_lu, &mut chord_dr, &mut chord_dc, &mut chord_perm) {\n",
+                );
+            code.push_str("                break;\n");
+            code.push_str("            }\n");
+        }
+        code.push_str("            chord_valid = true;\n");
+        code.push_str("            state.diag_refactor_count += 1;\n");
+        code.push_str("        }\n\n");
+
+        // 2d. Build companion RHS: rhs_base + N_i * (i_nl - J_dev_0 * v_nl) (sparse)
+        // Uses chord_j_dev (from iter 0) to match the LU factorization.
+        // Using current j_dev here would create an inconsistent fixed point.
+        code.push_str(
+                "        // 2d. Build companion RHS: rhs + N_i * (i_nl - chord_J_dev * v_nl) (sparse)\n",
+            );
+        code.push_str("        let mut rhs_work = rhs;\n");
+        emit_nodal_companion_rhs(code, ir, m, "rhs_work", "chord_j_dev", "        ");
+        emit_body_gmb_companion(code, ir, "rhs_work", "chord_body_gmb", "v", "        ");
+        // Saturating-inductor companion current (consistent with the Jacobian
+        // stamp above — same iterate `v`, re-factored every iteration).
+        if has_sat_ind {
+            emit_sat_ind_companion(code, ir, "rhs_work", "v", &site.sat_alpha, "        ");
+        }
+        // Behavioral B-source companion current: f(v) - Σ (∂f/∂V)·v.
+        if has_behavioral {
+            emit_behavioral_rhs(code, ir, "        ");
+        }
+        code.push('\n');
+
+        // 2e. Solve with stored LU factors (O(N²) back-solve)
+        if ir.sparsity.lu.is_some() {
+            code.push_str(
+                "        // 2e. Back-solve with stored LU factors (sparse, or the dense\n",
+            );
+            code.push_str(
+                "        // runtime fallback when the sparse factorization was rejected)\n",
+            );
+            code.push_str("        let mut v_new = rhs_work;\n");
+            code.push_str("        if chord_dense {\n");
+            code.push_str("            lu_back_solve(&chord_lu, &chord_dr, &chord_dc, &chord_perm, &mut v_new);\n");
+            code.push_str("        } else {\n");
+            code.push_str(
+                "            sparse_lu_back_solve(&chord_lu, &chord_dr, &chord_dc, &mut v_new);\n",
+            );
+            code.push_str("        }\n\n");
+        } else {
+            code.push_str(
+                "        // 2e. Solve with stored LU factors (chord: O(N²) back-solve)\n",
+            );
+            code.push_str("        let mut v_new = rhs_work;\n");
+            code.push_str(
+                    "        lu_back_solve(&chord_lu, &chord_dr, &chord_dc, &chord_perm, &mut v_new);\n\n",
+                );
+        }
+
+        // Op-amp output clamping inside NR loop — prevents physically impossible
+        // voltages that destabilize downstream device evaluation. Applied after the
+        // back-solve, before device voltage limiting.
+        //
+        // Emitted for `Hard` mode ONLY. This clamp originally ran for
+        // every mode with clampable op-amps (b5c5011 death-spiral
+        // protection), but that contradicted the mode contracts:
+        //   * `None` must leave the output unbounded (raw-diagnostic use);
+        //   * `ActiveSet`/`ActiveSetBe` deliberately skip the in-NR clamp
+        //     so NR converges to the unconstrained solution and the
+        //     post-convergence pin-and-resolve sees a genuine violation
+        //     (the clamp pinned v EXACTLY at the rail, so the resolve's
+        //     detection never fired and ActiveSet degraded to Hard
+        //     semantics on this path);
+        //   * `BoyleDiodes` models saturation with physical catch diodes —
+        //     clamping on top double-limits.
+        // Non-Hard modes keep their divergence protection from the global
+        // node damping (damp_thresh), SPICE device voltage limiting, the
+        // residual check, the substep retry, the BE fallback, and the
+        // failed-sample state-keep below.
+        //
+        // For `ActiveSetBe` we used to ALSO raise `active_set_engaged = true`
+        // here so the post-convergence check didn't miss a "v pinned exactly at
+        // rail" case (the check used strict inequality). That was load-bearing
+        // for 4kbuscomp but sticky — intermediate NR iterations can ride AOL
+        // into rail-range values mid-solve on high-gain feedback clippers
+        // (pipe-shouter at Tone=1.0 was seeing the flag latched for entire
+        // linear-regime buffers, firing BE fallback on every sample), crushing
+        // H2 purity and dropping gain 5–15 dB. The post-convergence check now
+        // uses inclusive `>=` / `<=` (see `emit_nodal_active_set_check`), which
+        // covers the 4kbuscomp pinned-at-rail case without tracking per-NR-
+        // iteration transients.
+        if matches!(
+            ir.solver_config.opamp_rail_mode,
+            crate::codegen::OpampRailMode::Hard
+        ) {
+            emit_hard_rail_clamp(
+                code,
+                ir,
+                "v_new",
+                "        ",
+                Some("        // Per-iteration op-amp output rail clamp (Hard mode)\n"),
+                true,
+            );
+        }
+
+        // 2f. SPICE-style voltage limiting + global node damping
+        code.push_str("        // 2f. SPICE voltage limiting + node damping\n");
+        code.push_str("        let mut alpha = 1.0_f64;\n\n");
+
+        // Layer 1: Device voltage limiting
+        code.push_str("        // Layer 1: SPICE device voltage limiting\n");
+        Self::emit_nodal_voltage_limiting(code, ir);
+        code.push('\n');
+
+        // Layer 2: Global node voltage damping (adaptive threshold).
+        // Behavioral V={} output nodes are algebraically forced (V=f), so
+        // they're excluded — a legit large value (the ddt discriminator
+        // startup spike) must not throttle every other node's step.
+        code.push_str("        // Layer 2: Global node voltage damping\n");
+        code.push_str("        {\n");
+        let damp_skip = if has_behavioral {
+            let lit = behavioral_damp_skip_literal(ir);
+            code.push_str(&format!("            let damp_skip = {lit};\n"));
+            "if damp_skip.contains(&i) { continue; } "
+        } else {
+            ""
+        };
+        code.push_str("            let mut max_node_dv = 0.0_f64;\n");
+        code.push_str(&format!(
+            "            for i in 0..{} {{\n\
+                 \x20               {}let dv = alpha * (v_new[i] - v[i]);\n\
+                 \x20               max_node_dv = max_node_dv.max(dv.abs());\n\
+                 \x20           }}\n",
+            n_nodes, damp_skip
+        ));
+        // Adaptive threshold: max(10V, 5% of max node voltage)
+        code.push_str("            let mut max_v = 0.0_f64;\n");
+        code.push_str(&format!(
+            "            for i in 0..{} {{ {}max_v = max_v.max(v[i].abs()); }}\n",
+            n_nodes, damp_skip
+        ));
+        code.push_str("            let damp_thresh = 10.0_f64.max(max_v * 0.05);\n");
+        code.push_str("            if max_node_dv > damp_thresh {\n");
+        // No `.max(0.01)` floor here (removed 2026-08-03): flooring the
+        // ratio bounds how much the RAW step gets shrunk BY, not what
+        // the resulting damped step IS. When a companion-model LU solve
+        // produces a pathologically large raw delta (observed: 3.8e7 V
+        // at a device-state transition on wurli-power-amp), a 1% floor
+        // still lets a catastrophic multiple of `damp_thresh` through
+        // (0.01 * 3.8e7 =~ 380,000 V, not <=10 V), launching the
+        // trajectory into a nonphysical regime the remaining NR
+        // iterations can't recover from. Uncapped division keeps the
+        // worst-case per-iteration node step at exactly `damp_thresh`
+        // regardless of the raw delta's magnitude. Regression:
+        // nodal_be_fallback_alpha_floor_tests.rs.
+        code.push_str("                alpha *= damp_thresh / max_node_dv;\n");
+        code.push_str("            }\n");
+        code.push_str("        }\n\n");
+
+        // Layer 3: saturating-inductor branch-current limit (all four
+        // Newton sites carry it; see `emit_sat_ind_step_limit`).
+        emit_sat_ind_step_limit(code, ir, "v", "v_new", "alpha", "        ");
+
+        // Armijo backtracking line search (trap site): scales the already-
+        // limited step along the ray v -> v + alpha*(v_new-v) to enforce a
+        // monotone node-KCL residual decrease. On a non-descent direction the
+        // search fails (ls_ok=false); the loop then takes the un-line-searched
+        // pnjlim/node-damping-limited step (alpha keeps its limiter value; the
+        // `alpha *= s` scaling only runs on acceptance) and CONTINUES — the
+        // always-checked residual gate below, not a bail, decides convergence.
+        // A line search may only help; its failure must be no worse than not
+        // having it (design review). `limited` records whether pnjlim or
+        // node-damping shrank alpha below 1, gating the voltage-step check (a
+        // limited step's small size is not evidence of convergence — only the
+        // residual gate is). Left as `alpha < 1.0` so a fall-through's natural
+        // value is used unchanged (do NOT force it true — that would SKIP the
+        // step check and be more permissive, the opposite of intended).
+        if use_line_search {
+            emit_armijo_line_search(
+                code, "        ", "v", "v_new", "alpha", site.a, "rhs", "ls_ok", "i_nl",
+            );
+            code.push_str("        if !ls_ok { state.diag_ls_fail_count += 1; }\n");
+            code.push_str("        let limited = alpha < 1.0;\n");
+        }
+
+        // Apply damped Newton step and check convergence
+        // Compute step BEFORE updating v, so convergence check sees the actual delta
+        // (the check runs every iteration, including iter 0 — a zero-step
+        // first iteration is a legitimate converged warm start).
+        // Convergence check on nonlinear device nodes only (N_V nonzero columns).
+        // Linearized stages respond linearly and converge passively — checking
+        // all N nodes causes spurious chord refactors when linear coupling
+        // ripple from nonlinear stages hasn't settled to sub-µV precision.
+        code.push_str("        // Compute damped step, check convergence, then apply\n");
+        code.push_str("        let mut max_step_exceeded = false;\n");
+        // DK/Schur convergence contract: the voltage-step check is only
+        // meaningful when the step was NOT limited this iteration. When it
+        // was, the step's small size is an artifact of damping, not
+        // convergence — the always-checked ||F|| residual gate decides.
+        if use_line_search {
+            code.push_str("        if !limited {\n");
+        }
+        {
+            let mut device_nodes: Vec<usize> = ir
+                .sparsity
+                .n_v
+                .nz_by_row
+                .iter()
+                .flat_map(|row| row.iter().copied())
+                .collect();
+            // Behavioral B-sources are often M=0 (no N_v rows); include their
+            // terminal + referenced nodes so the check isn't vacuously true.
+            device_nodes.extend(behavioral_convergence_nodes(ir));
+            // Saturating inductors: check the augmented branch-current row so
+            // NR actually iterates on the flux nonlinearity. Essential at M=0,
+            // where the N_v/behavioral node set is empty and the step check
+            // would otherwise be vacuously "converged" on iteration 0.
+            for si in &ir.saturating_inductors {
+                device_nodes.push(si.aug_row);
+            }
+            device_nodes.sort();
+            device_nodes.dedup();
+            let extra = if use_line_search { "    " } else { "" };
+            for &node in &device_nodes {
+                code.push_str(&format!(
+                        "        {extra}{{ let step = alpha * (v_new[{node}] - v[{node}]); let threshold = 1e-3 * v[{node}].abs().max((v[{node}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ max_step_exceeded = true; }} }}\n"
+                    ));
+            }
+        }
+        if use_line_search {
+            code.push_str("        }\n");
+        }
+        code.push_str("        for i in 0..N { v[i] += alpha * (v_new[i] - v[i]); }\n");
+
+        // Mid-NR op-amp output clamping (VCC/VEE).
+        //
+        // In `Hard` and `None` modes we either apply the clamp every
+        // iteration (Hard) or do nothing (None). In `ActiveSet` mode the
+        // in-NR clamp is SKIPPED — NR converges to whatever the linear
+        // system dictates, then a post-convergence constrained resolve
+        // pins the rail-violating nodes and re-solves the network to a
+        // KCL-consistent state (see emit_nodal_active_set_resolve).
+        //
+        // The reason we skip the mid-NR clamp for ActiveSet: the hard
+        // clamp writes `v_clamped` back into `v` but the rest of the
+        // solve is consistent with `v_unclamped`. That inconsistency
+        // corrupts the trapezoidal cap history on the next sample. The
+        // active-set resolve rebuilds the full v so KCL is satisfied at
+        // every node given the clamped value — no corruption.
+        //
+        // BoyleDiodes mode will eventually make this block unreachable
+        // (rail saturation will be modeled by nonlinear catch diodes in
+        // J_dev), but until that lands we still fall through to Hard
+        // semantics if requested.
+        //
+        // Step 4 fix: when we do apply the clamp, re-check convergence
+        // against the POST-clamp v so a silent mutation of v[out] can't
+        // be reported as "converged". The previous code computed the
+        // step magnitude against the unclamped v[out] + step — if
+        // clamping then shifted v[out] by a significant amount, NR would
+        // still report converged because `max_step_exceeded` was computed
+        // on the pre-clamp step. This check catches that case.
+        use crate::codegen::OpampRailMode;
+        // BoyleDiodes mode has already inserted physical catch diodes into
+        // the MNA; the NR solve naturally drives v[out] toward the rails
+        // via those diodes. Emitting a post-NR hard clamp on top would
+        // double-limit and re-introduce the KCL corruption we're trying
+        // to avoid. So BoyleDiodes skips the in-NR clamp entirely, same
+        // as ActiveSet.
+        let emit_in_nr_clamp = matches!(ir.solver_config.opamp_rail_mode, OpampRailMode::Hard);
+        if emit_in_nr_clamp && !ir.opamps.is_empty() {
+            for oa in &ir.opamps {
+                let target = format!("v[{}]", oa.n_out_idx);
+                let Some(stmt) = Self::rail_clamp_stmt(&target, oa.vclamp_lo, oa.vclamp_hi) else {
+                    continue;
+                };
+                code.push_str(&format!(
+                        "        {{\n\
+                         \x20           let v_pre_clamp = v[{idx}];\n\
+                         \x20           {stmt}\n\
+                         \x20           // Post-clamp convergence re-check: if the clamp mutated\n\
+                         \x20           // v[{idx}] meaningfully, the iteration hasn't really\n\
+                         \x20           // converged — the rest of the network is still consistent\n\
+                         \x20           // with the pre-clamp value.\n\
+                         \x20           let clamp_delta = (v[{idx}] - v_pre_clamp).abs();\n\
+                         \x20           let clamp_thresh = 1e-3 * v[{idx}].abs().max(v_pre_clamp.abs()) + 1e-6;\n\
+                         \x20           if clamp_delta >= clamp_thresh {{ max_step_exceeded = true; }}\n\
+                         \x20       }}\n",
+                        idx = oa.n_out_idx,
+                    ));
+            }
+        }
+
+        // Residual-based convergence safety net (unconditional whenever a
+        // chord is in use — i.e. always on this path when M > 0).
+        //
+        // The voltage-step check above (`max_step_exceeded`) declares
+        // convergence whenever the damped Newton step is small. That
+        // criterion is necessary but NOT sufficient when the chord
+        // persistence holds a stale Jacobian: the LU back-solve uses
+        // `chord_j_dev` while the actual device current at the new
+        // operating point is `i_dev(v_nl_new)`. If `chord_j_dev` is
+        // grossly out of date, the LU's "fixed point" is a non-physical
+        // state where KCL is satisfied for the LINEARISED network but
+        // not for the actual nonlinear devices — NR happily reports
+        // converged on a wildly wrong v. A stale chord across an
+        // exponential knee is device-generic (any diode/junction
+        // crossing reverse→forward moves j_dev by many OOM between
+        // refactors); the historical extreme is the Boyle catch diode
+        // (≈1e-31 S reverse-biased vs ≈1e+1 S at the rail, 32 OOM),
+        // and 4kbuscomp's ActiveSetBe precision rectifiers hit the
+        // same class — which is why this used to be rail-mode-gated
+        // (BoyleDiodes, later + ActiveSet/ActiveSetBe) and is now
+        // emitted unconditionally, matching the DK path, whose
+        // residual check has always been ungated (see
+        // `nr_helpers.rs::emit_nr_limit_and_converge`, "Current
+        // residual check: always").
+        //
+        // Cost: the block only runs on the ACCEPTING iteration (inside
+        // `if !max_step_exceeded`), so it adds M device evaluations
+        // once per sample, not per NR iteration.
+        //
+        // Mismatch ⇒ NR keeps iterating, triggering the adaptive
+        // >50 %-j_dev refactor above, the periodic chord refactor, the
+        // sub-step retry, or the BE fallback — any of which can break
+        // out of the stale-chord trap.
+        //
+        // Implementation note: the device-evaluation helper writes
+        // into local `v_nl`, `i_nl`, `j_dev` arrays of fixed names.
+        // We use a nested `{ }` block so Rust shadows those bindings
+        // — the throwaway `j_dev` inside the block doesn't disturb
+        // the chord-stamped `j_dev` in the outer scope.
+        if m > 0 {
+            code.push_str(
+                "        // Residual check: re-evaluate i_nl at the post-step v and force\n",
+            );
+            code.push_str(
+                "        // NR to keep iterating if the chord linearisation produced an\n",
+            );
+            code.push_str(
+                "        // inconsistent fixed point. Required for any topology where the\n",
+            );
+            code.push_str("        // per-iteration op-amp rail clamp + stale chord_j_dev can\n");
+            code.push_str("        // combine to produce false convergence (voltage step small,\n");
+            code.push_str("        // but device KCL residual huge).\n");
+            // #2: hold the residual-check device currents so the converged
+            // branch can reuse them (same v ⇒ identical i_nl) instead of a
+            // second device evaluation.
+            code.push_str("        let mut i_nl_resid = [0.0f64; M];\n");
+            code.push_str("        if !max_step_exceeded {\n");
+            code.push_str("            let i_nl_chord = i_nl;\n");
+            // `_final` (i_nl-only, no `j_dev`) rather than the full
+            // per-iteration evaluation body: this residual check only
+            // ever consumes `i_nl_resid` below, never a Jacobian. The
+            // full body unconditionally emits `j_dev[...] = jac[...]`
+            // writes for every device; declaring `j_dev` here just to
+            // discard it produced a genuine dead store (rustc's
+            // `unused_assignments` flagged the last device's last
+            // entry — e.g. `j_dev[195] = jac[3];` on wurli-power-amp,
+            // M=14 — under `-D warnings`).
+            code.push_str("            let mut v_nl_final = [0.0f64; M];\n");
+            code.push_str(&emit_sparse_nv_matvec(
+                ir,
+                "v_nl_final",
+                "v",
+                "            ",
+            ));
+            code.push_str("            let mut i_nl = [0.0f64; M];\n");
+            Self::emit_nodal_device_evaluation_final(code, ir, "            ", "v");
+            code.push_str("            i_nl_resid = i_nl;\n");
+            code.push_str(
+                "            // Tolerance matches DK Schur path: ABSTOL=1e-12, RELTOL=1e-3,\n",
+            );
+            code.push_str(
+                "            // with a 1e-9 floor on the magnitude denominator so devices\n",
+            );
+            code.push_str(
+                "            // with i_nl ≈ 0 don't have an unreachably tight tolerance.\n",
+            );
+            code.push_str("            for i in 0..M {\n");
+            code.push_str("                let r = (i_nl[i] - i_nl_chord[i]).abs();\n");
+            code.push_str("                let tol = 1e-3 * i_nl[i].abs().max(i_nl_chord[i].abs()).max(1e-9) + 1e-12;\n");
+            // Negated form: a NaN residual must read as NOT converged.
+            code.push_str("                if !(r <= tol) {\n");
+            code.push_str("                    max_step_exceeded = true;\n");
+            code.push_str("                    break;\n");
+            code.push_str("                }\n");
+            code.push_str("            }\n");
+            code.push_str("        }\n\n");
+        }
+
+        // Flux-row analogue of the device residual check above. Emitted
+        // whether or not `m > 0`: a circuit can carry a saturating
+        // inductor with no nonlinear devices at all.
+        emit_sat_ind_row_residual(
+            code,
+            ir,
+            setter_stamps,
+            "rhs",
+            &site.sat_alpha,
+            if m > 0 { Some("i_nl_resid") } else { None },
+            "v",
+            site.a,
+            "max_step_exceeded",
+            "        ",
+        );
+
+        // Node-KCL residual gate (ALWAYS, precondition of the line search):
+        // a backtracking search can shrink the damped step toward zero at a
+        // stagnation point, so convergence must require the true equation
+        // residual ||F|| = ||A·v - rhs - N_i·i_nl|| within tolerance — never
+        // the (possibly line-search-damped) step size alone. The device-chord
+        // consistency check above is a linearization test, not an equation
+        // residual, so it cannot substitute for this.
+        if use_line_search {
+            // Saving 1: the gate residual is at the committed `v`, where the
+            // device-chord check (guarded by the same `!max_step_exceeded`)
+            // already evaluated `i_nl_resid = i_nl(N_v·v)`. The mid-NR op-amp
+            // clamp (Hard) mutates `v` BEFORE that check, so `i_nl_resid` and
+            // this gate see the SAME post-clamp `v` — no eval between them.
+            // Reuse it via `kcl_residual_inl` (bit-identical to re-evaluating).
+            // `&&` short-circuits, so `i_nl_resid` is only read when it was
+            // populated (the `if !max_step_exceeded` branch ran).
+            if m > 0 {
+                code.push_str(&format!(
+                        "        let converged_check = !max_step_exceeded && kcl_residual_inl(&v, &rhs, &{}, &i_nl_resid).1;\n\n",
+                        site.a
+                    ));
+            } else {
+                code.push_str(&format!(
+                        "        let converged_check = !max_step_exceeded && kcl_residual(&v, &rhs, &{}, state).1;\n\n",
+                        site.a
+                    ));
+            }
+        } else {
+            code.push_str("        let converged_check = !max_step_exceeded;\n\n");
+        }
+
+        code.push_str("        if converged_check {\n");
+        code.push_str("            converged = true;\n");
+        code.push_str("            state.last_nr_iterations = iter as u32;\n");
+
+        // Final device currents at the converged point. For m > 0 the
+        // residual check above already evaluated i_nl at this exact v (v is
+        // unchanged since), so reuse it instead of a second device
+        // evaluation. Byte-identical: emit_nodal_device_evaluation_body and
+        // _final apply the same current expressions to v_nl = N_v·v.
+        if m > 0 {
+            code.push_str(
+                "            // Final device currents: reuse the residual-check eval (same v)\n",
+            );
+            code.push_str("            i_nl = i_nl_resid;\n");
+        } else {
+            code.push_str("            // Final device evaluation at converged point\n");
+            code.push_str("            let mut v_nl_final = [0.0f64; M];\n");
+            code.push_str(&emit_sparse_nv_matvec(
+                ir,
+                "v_nl_final",
+                "v",
+                "            ",
+            ));
+            Self::emit_nodal_device_evaluation_final(code, ir, "            ", "v");
+        }
+
+        // ActiveSet (plain): the pin-and-resolve used to be emitted right
+        // here, inside the trap NR convergence block — which silently
+        // skipped substep-recovered samples. It now runs once after the
+        // trap+substep section (see "ActiveSet (plain) — pin and
+        // re-solve" below), covering both convergence paths.
+
+        code.push_str("            break;\n");
+        code.push_str("        }\n");
+        code.push_str("    }\n\n"); // end trapezoidal NR loop
+
+        // Behavioral B-sources are stamped ONLY in the primary trapezoidal NR
+        // loop; the adaptive sub-step and BE fallbacks below rebuild the Newton
+        // system from the base G/C matrices, so they would solve a SOURCE-LESS
+        // network (the B-source dropped) and then falsely report convergence,
+        // committing a wrong result and corrupting trap history. For behavioral
+        // circuits we therefore omit BOTH fallbacks — a trap-NR failure falls
+        // through to the death-spiral state-hold instead. Behavioral circuits are
+        // already BE-primary (IntegratorSelection::BeBehavioral), so this drops
+        // only a same-scheme BE restart, not an L-stability rescue. This mirrors
+        // the DK BE fallback's own companion-magnetics gate (ir/mod.rs:1891-1910).
+        // Non-behavioral circuits emit byte-identically. (behavioral + ActiveSetBe
+        // full-LU is hard-errored earlier in from_kernel, so no behavioral circuit
+        // reaches these blocks needing the BE path for rail resolution.)
+        if ir.behavioral_sources.is_empty() {
+            // Adaptive sub-stepping: when trapezoidal NR fails, subdivide the timestep
+            // and retry with tighter capacitor conductances. This is how ngspice handles
+            // positive-feedback circuits (compressor sidechains, oscillators, etc.).
+            code.push_str("    // Adaptive sub-stepping: retry with subdivided timestep\n");
+            code.push_str("    if !converged {\n");
+            code.push_str("        'substep: for subdiv_power in 1..=SUBSTEP_MAX_POWER {\n");
+            code.push_str(
+                "            let subdiv = 1u32 << subdiv_power; // 2 .. 2^SUBSTEP_MAX_POWER\n",
+            );
+            // alpha_sub tracks the RUNTIME host rate (× oversampling), not
+            // the compile-time codegen rate — a baked literal here made the
+            // sub-step matrices inconsistent with the state matrices after
+            // any `set_sample_rate` to a non-codegen rate.
+            // The sub-step must solve the SAME scheme the build is pinned to.
+            // It used to be hard-wired trapezoidal, so a deck that pinned BE
+            // got trap sub-steps behind its back — and the sub-step fires at
+            // discontinuities, which is exactly where the two schemes differ
+            // (measured 3.51 V vs 6.57 V against a BE-pinned reference at the
+            // step edge). A silent integrator swap inside the recovery path is
+            // the same class of defect as a silent wrong answer (design review).
+            if site.be {
+                code.push_str(
+                "            // Backward Euler: alpha = 1/dt, matching the pinned scheme.\n            let alpha_sub = state.current_sample_rate * OVERSAMPLING_FACTOR as f64 * subdiv as f64;\n",
+            );
+            } else {
+                code.push_str(
+                "            let alpha_sub = 2.0 * state.current_sample_rate * OVERSAMPLING_FACTOR as f64 * subdiv as f64;\n",
+            );
+            }
+            // From the same G/C `rebuild_matrices` reads (the setters'
+            // working copies when there are knobs).
+            let (g_src, c_src) = live_g_c(ir, true, "state");
+            code.push_str("            // Rebuild A and A_neg at finer timestep\n");
+            code.push_str("            let mut a_sub = [[0.0f64; N]; N];\n");
+            code.push_str("            let mut a_neg_sub = [[0.0f64; N]; N];\n");
+            code.push_str("            for i in 0..N {\n");
+            code.push_str("                for j in 0..N {\n");
+            code.push_str(&format!(
+                "                    a_sub[i][j] = {g_src}[i][j] + alpha_sub * {c_src}[i][j];\n"
+            ));
+            if site.be {
+                // BE history carries no -G term.
+                code.push_str(&format!(
+                    "                    a_neg_sub[i][j] = alpha_sub * {c_src}[i][j];\n"
+                ));
+            } else {
+                code.push_str(&format!(
+                        "                    a_neg_sub[i][j] = alpha_sub * {c_src}[i][j] - {g_src}[i][j];\n"
+                    ));
+            }
+            code.push_str("                }\n");
+            code.push_str("            }\n");
+            // Zero VS/VCVS algebraic rows
+            let n_aug = ir.topology.n_aug;
+            if n_nodes < n_aug {
+                code.push_str(&format!(
+                    "            for i in {}..{} {{ for j in 0..N {{ a_neg_sub[i][j] = 0.0; }} }}\n",
+                    n_nodes, n_aug
+                ));
+            }
+            // Gmin on A_sub — 1e-12, matching every other Gmin stamp in the
+            // nodal emitter (1e-6 was strong enough to skew high-impedance
+            // nodes by an audible amount on sub-stepped samples).
+            code.push_str("            for i in 0..N_NODES { a_sub[i][i] += 1e-12; }\n");
+            code.push_str("            // Run subdivided sub-steps\n");
+            code.push_str("            let mut v_sub = state.v_prev;\n");
+            code.push_str("            let mut i_nl_sub = state.i_nl_prev;\n");
+            if !multi_input {
+                code.push_str(
+                    "            let input_step = (input - state.input_prev) / subdiv as f64;\n",
+                );
+            }
+            code.push_str("            let mut all_sub_converged = true;\n");
+            code.push_str("            for step in 0..subdiv {\n");
+            if !multi_input {
+                code.push_str(
+                    "                let inp_s = state.input_prev + input_step * (step + 1) as f64;\n",
+                );
+                code.push_str(
+                    "                let inp_prev_s = state.input_prev + input_step * step as f64;\n",
+                );
+            }
+            // Build sub-step RHS
+            code.push_str("                // Sub-step RHS\n");
+            if ir.has_dc_sources {
+                code.push_str("                let mut rhs_s = RHS_CONST;\n");
+            } else {
+                code.push_str("                let mut rhs_s = [0.0f64; N];\n");
+            }
+            code.push_str("                for i in 0..N { for j in 0..N { rhs_s[i] += a_neg_sub[i][j] * v_sub[j]; } }\n");
+            // Trap-midpoint companion, skipped under BE — the same gate the
+            // primary loop uses (`m > 0 && !backward_euler`). The sub-step
+            // carried it unconditionally, which is the third way it silently
+            // solved trapezoidal on a BE-pinned build.
+            if m > 0 && !site.be {
+                code.push_str(&emit_sparse_ni_matvec_add(
+                    ir,
+                    "rhs_s",
+                    "i_nl_sub",
+                    "                ",
+                ));
+            }
+            // Saturating-inductor flux history (sub-step: base v_sub, alpha_sub)
+            if has_sat_ind {
+                emit_sat_ind_history(code, ir, "rhs_s", "v_sub", "alpha_sub", "                ");
+            }
+            if multi_input {
+                // Same pin-honouring rule as the single-input case below.
+                let per_port = if site.be {
+                    "inp_s / INPUT_RESISTANCES[k]"
+                } else {
+                    "(inp_s + inp_prev_s) / INPUT_RESISTANCES[k]"
+                };
+                let prev_binding = if site.be {
+                    String::new()
+                } else {
+                    "                    let inp_prev_s = state.inputs_prev[k] + step_k * step as f64;\n".to_string()
+                };
+                code.push_str(&format!(
+                    "                for k in 0..NUM_INPUTS {{\n\
+                     \x20                   let step_k = (inputs[k] - state.inputs_prev[k]) / subdiv as f64;\n\
+                     \x20                   let inp_s = state.inputs_prev[k] + step_k * (step + 1) as f64;\n\
+                     {prev_binding}\
+                     \x20                   rhs_s[INPUT_NODES[k]] += {per_port};\n\
+                     \x20               }}\n",
+                ));
+            } else {
+                if site.be {
+                    code.push_str(
+                        "                rhs_s[INPUT_NODE] += inp_s * (1.0 / INPUT_RESISTANCE);\n",
+                    );
+                } else {
+                    code.push_str("                rhs_s[INPUT_NODE] += (inp_s + inp_prev_s) * (1.0 / INPUT_RESISTANCE);\n");
+                }
+            }
+            if inject_or_tap {
+                code.push_str(&emit_inject_substep_stamp(
+                    ir,
+                    "rhs_s",
+                    "                ",
+                    "subdiv",
+                ));
+            }
+            // Runtime voltage sources: integration-scheme-independent; every
+            // from-scratch RHS rebuild must re-stamp them.
+            if !ir.runtime_sources.is_empty() {
+                code.push_str("                // Runtime voltage sources (.runtime directive)\n");
+                for rt in &ir.runtime_sources {
+                    code.push_str(&format!(
+                        "                rhs_s[{}] += state.{};\n",
+                        rt.vs_row, rt.field_name
+                    ));
+                }
+            }
+            // Noise replay: this is a from-scratch RHS rebuild, so it must
+            // re-stamp the per-source currents the primary `rhs_stamp`
+            // already drew and cached this sample. Omitting it dropped the
+            // noise for the whole sample while the RNG stream stayed
+            // aligned, making the loss invisible to every determinism
+            // check (F10). Drawing fresh values here instead would break
+            // determinism outright: sub-stepping is signal-dependent, so the
+            // stream position would become a function of the audio.
+            if noise.enabled {
+                code.push_str(
+                    "                // Noise replay (cached i_n; consumes no RNG draws).\n",
+                );
+                code.push_str(&emit_noise_replay_body(
+                    noise.replay_counts,
+                    "rhs_s",
+                    "                ",
+                ));
+            }
+            // Sub-step NR loop
+            code.push_str("                let mut sub_converged = false;\n");
+            code.push_str("                for _iter in 0..MAX_ITER {\n");
+            code.push_str("                    let mut v_nl = [0.0f64; M];\n");
+            code.push_str(&emit_sparse_nv_matvec(
+                ir,
+                "v_nl",
+                "v_sub",
+                "                    ",
+            ));
+            code.push_str("                    let mut i_nl = [0.0f64; M];\n");
+            code.push_str("                    let mut j_dev = [0.0f64; M * M];\n");
+            // Device evaluation
+            Self::emit_nodal_device_evaluation_body(code, ir, "                    ", "v_sub");
+            code.push('\n');
+            // Build G_aug from a_sub
+            code.push_str("                    let mut g_s = a_sub;\n");
+            emit_nodal_jacobian_stamp(code, ir, m, "g_s", "                    ");
+            emit_body_gmb_stamp(code, ir, "g_s", "body_gmb", "                    ");
+            if has_sat_ind {
+                emit_sat_ind_jacobian(
+                    code,
+                    ir,
+                    "g_s",
+                    "v_sub",
+                    "alpha_sub",
+                    "                    ",
+                );
+            }
+            // Build companion RHS
+            code.push_str("                    let mut rhs_w = rhs_s;\n");
+            emit_nodal_companion_rhs(code, ir, m, "rhs_w", "j_dev", "                    ");
+            emit_body_gmb_companion(
+                code,
+                ir,
+                "rhs_w",
+                "body_gmb",
+                "v_sub",
+                "                    ",
+            );
+            if has_sat_ind {
+                emit_sat_ind_companion(
+                    code,
+                    ir,
+                    "rhs_w",
+                    "v_sub",
+                    "alpha_sub",
+                    "                    ",
+                );
+            }
+            // LU solve
+            code.push_str("                    let mut v_new_s = rhs_w;\n");
+            code.push_str("                    if !lu_solve(&mut g_s, &mut v_new_s) { break; }\n");
+            // Saturating inductors: the node-row step below never looks at a
+            // branch-current row, so the flux rows get the main loop's step
+            // check and flux-row residual through this flag.
+            if has_sat_ind {
+                code.push_str("                    let mut sub_step_exceeded = false;\n");
+            }
+            // Op-amp supply rail clamping (VCC/VEE) in sub-step. Hard mode
+            // only — same gating rationale as the trap-loop per-iteration
+            // clamp above: None must stay unbounded, ActiveSet/ActiveSetBe
+            // rely on their post-convergence pin-and-resolve seeing the
+            // genuine (unclamped) violation, and BoyleDiodes saturates via
+            // physical catch diodes.
+            if matches!(
+                ir.solver_config.opamp_rail_mode,
+                crate::codegen::OpampRailMode::Hard
+            ) {
+                emit_hard_rail_clamp(code, ir, "v_new_s", "                    ", None, false);
+            }
+            // Convergence check + update
+            if use_line_search {
+                // pnjlim + node damping (parity with the trap/BE loops): the
+                // sub-step inner NR was previously RAW undamped Newton. On a
+                // stiff junction the raw step overshoots past the fast_exp
+                // clamp where the device Jacobian flattens to ~0, making the
+                // Newton direction non-descent and defeating the line search.
+                // Limiting keeps the iterate where the Jacobian is valid.
+                code.push_str("                    let v_new = v_new_s;\n");
+                code.push_str("                    let mut alpha = 1.0_f64;\n");
+                Self::emit_nodal_voltage_limiting_indented(code, ir, "                    ");
+                code.push_str(&format!(
+                        "                    {{\n\
+                         \x20                       let mut max_node_dv = 0.0_f64;\n\
+                         \x20                       for i in 0..{n_nodes} {{ let dv = alpha * (v_new_s[i] - v_sub[i]); max_node_dv = max_node_dv.max(dv.abs()); }}\n\
+                         \x20                       let mut max_v = 0.0_f64;\n\
+                         \x20                       for i in 0..{n_nodes} {{ max_v = max_v.max(v_sub[i].abs()); }}\n\
+                         \x20                       let damp_thresh = 10.0_f64.max(max_v * 0.05);\n\
+                         \x20                       if max_node_dv > damp_thresh {{ alpha *= damp_thresh / max_node_dv; }}\n\
+                         \x20                   }}\n"
+                    ));
+                emit_sat_ind_step_limit(
+                    code,
+                    ir,
+                    "v_sub",
+                    "v_new_s",
+                    "alpha",
+                    "                    ",
+                );
+                emit_armijo_line_search(
+                    code,
+                    "                    ",
+                    "v_sub",
+                    "v_new_s",
+                    "alpha",
+                    "a_sub",
+                    "rhs_s",
+                    "ls_ok",
+                    "i_nl",
+                );
+                // Fall-through on Armijo failure (see trap site): take the
+                // un-line-searched limited step and continue; the residual gate
+                // decides convergence. A line search may only help.
+                code.push_str("                    if !ls_ok { state.diag_ls_fail_count += 1; }\n");
+                code.push_str("                    let mut max_step = 0.0f64;\n");
+                code.push_str("                    for i in 0..N_NODES { let step = v_new_s[i] - v_sub[i]; if step.abs() > max_step { max_step = step.abs(); } }\n");
+                for si in &ir.saturating_inductors {
+                    let k = si.aug_row;
+                    code.push_str(&format!(
+                            "                    {{ let step = alpha * (v_new_s[{k}] - v_sub[{k}]); let threshold = 1e-3 * v_sub[{k}].abs().max((v_sub[{k}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ sub_step_exceeded = true; }} }}\n"
+                        ));
+                }
+                code.push_str("                    for i in 0..N { v_sub[i] += alpha * (v_new_s[i] - v_sub[i]); }\n");
+            } else {
+                code.push_str("                    let mut max_step = 0.0f64;\n");
+                code.push_str("                    for i in 0..N_NODES {\n");
+                code.push_str("                        let step = v_new_s[i] - v_sub[i];\n");
+                code.push_str(
+                    "                        if step.abs() > max_step { max_step = step.abs(); }\n",
+                );
+                code.push_str("                    }\n");
+                if has_sat_ind {
+                    // The flux-row limit scales the step (no line search
+                    // here to do it).
+                    code.push_str("                    let mut alpha = 1.0_f64;\n");
+                    emit_sat_ind_step_limit(
+                        code,
+                        ir,
+                        "v_sub",
+                        "v_new_s",
+                        "alpha",
+                        "                    ",
+                    );
+                }
+                for si in &ir.saturating_inductors {
+                    let k = si.aug_row;
+                    code.push_str(&format!(
+                            "                    {{ let step = alpha * (v_new_s[{k}] - v_sub[{k}]); let threshold = 1e-3 * v_sub[{k}].abs().max((v_sub[{k}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ sub_step_exceeded = true; }} }}\n"
+                        ));
+                }
+                if has_sat_ind {
+                    code.push_str("                    for i in 0..N { v_sub[i] += alpha * (v_new_s[i] - v_sub[i]); }\n");
+                } else {
+                    code.push_str("                    v_sub = v_new_s;\n");
+                }
+            }
+            // Re-evaluate devices at the updated v_sub so i_nl_sub is consistent.
+            // Uses `_final` variant: reads v_nl_final, writes i_nl (no j_dev update).
+            code.push_str("                    // Re-extract i_nl at updated v\n");
+            code.push_str("                    let mut v_nl_final = [0.0f64; M];\n");
+            code.push_str(&emit_sparse_nv_matvec(
+                ir,
+                "v_nl_final",
+                "v_sub",
+                "                    ",
+            ));
+            Self::emit_nodal_device_evaluation_final(code, ir, "                    ", "v_sub");
+            code.push_str("                    i_nl_sub = i_nl;\n");
+            // Convergence: raw (undamped) Newton step small AND — the always-
+            // checked precondition of the line search — the true node-KCL
+            // residual within tolerance, so a line-search-shrunk step can
+            // never report a non-root as converged.
+            if has_sat_ind {
+                emit_sat_ind_row_residual(
+                    code,
+                    ir,
+                    setter_stamps,
+                    "rhs_s",
+                    "alpha_sub",
+                    None,
+                    "v_sub",
+                    "a_sub",
+                    "sub_step_exceeded",
+                    "                    ",
+                );
+            }
+            let sat_gate = if has_sat_ind {
+                " && !sub_step_exceeded"
+            } else {
+                ""
+            };
+            if use_line_search {
+                code.push_str(&format!("                    if max_step < TOL + 1e-3{sat_gate} && kcl_residual(&v_sub, &rhs_s, &a_sub, state).1 {{\n"));
+            } else {
+                code.push_str(&format!(
+                    "                    if max_step < TOL + 1e-3{sat_gate} {{\n"
+                ));
+            }
+            code.push_str("                        sub_converged = true;\n");
+            code.push_str("                        break;\n");
+            code.push_str("                    }\n");
+            code.push_str("                }\n"); // end sub-step NR loop
+            code.push_str(
+                "                if !sub_converged { all_sub_converged = false; break; }\n",
+            );
+            code.push_str("            }\n"); // end sub-step loop
+            code.push_str("            if all_sub_converged {\n");
+            code.push_str("                v = v_sub;\n");
+            code.push_str("                i_nl = i_nl_sub;\n");
+            code.push_str("                converged = true;\n");
+            code.push_str("                state.diag_substep_count += 1;\n");
+            code.push_str("                break 'substep;\n");
+            code.push_str("            }\n");
+            code.push_str("        }\n"); // end subdiv_power loop
+            code.push_str("    }\n\n"); // end if !converged
+        } // end: behavioral circuits omit the adaptive sub-step fallback
+
+        // ActiveSetBe rail engagement check (post-trap, post-substep).
+        // Runs on the final v from either the regular NR loop or the
+        // substep recovery, whichever produced the converged result. If
+        // any op-amp output is railed, set the flag so the BE fallback
+        // fires — trap+pin develops a Nyquist-rate limit cycle on
+        // audio-path topologies; BE+pin doesn't.
+        //
+        // Plain ActiveSet doesn't take this path — its trap+pin happens
+        // inside the NR break block above.
+        if active_set_be_mode_full_lu && !site.be {
+            code.push_str("    if converged {\n");
+            Self::emit_nodal_active_set_check(code, ir, "        ", "active_set_engaged");
+            code.push_str("    }\n\n");
+        }
+
+        // ActiveSet (plain) — pin and re-solve in trap matrices, preserving
+        // the steady DC rail value the op-amp converged to. Used by
+        // control-path topologies (VCR ALC sidechain etc.) where the
+        // rail-clamped value drives a nonlinear device's operating point.
+        // Runs on the final converged v from EITHER the regular trap NR
+        // loop or the substep recovery (it used to be emitted inside the
+        // trap NR convergence block, which skipped substep-recovered
+        // samples). ActiveSetBe takes a different path: detect-only above,
+        // BE fallback for the actual resolve.
+        // On a backward-Euler solve (the BE build, or the BE instance of a
+        // trapezoidal build) ActiveSetBe resolves here too: that is where
+        // its pin-and-resolve belongs.
+        if matches!(
+            ir.solver_config.opamp_rail_mode,
+            crate::codegen::OpampRailMode::ActiveSet
+        ) || (site.be && active_set_be_mode_full_lu)
+        {
+            code.push_str("    if converged {\n");
+            Self::emit_nodal_active_set_resolve(
+                code,
+                ir,
+                "        ",
+                site.a,
+                "rhs",
+                PinSite::FullLu {
+                    sat_alpha: &site.sat_alpha,
+                    setter_stamps,
+                },
+            );
+            code.push_str("    }\n\n");
+        }
     }
 
     /// True when [`Self::emit_nodal_m0_rail_handling`] will emit code that

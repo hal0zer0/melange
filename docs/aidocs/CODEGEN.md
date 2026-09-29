@@ -517,8 +517,10 @@ convergence check accepts. **Mitigations** (BoyleDiodes-gated):
 - **Residual safety net**: re-evaluate `i_nl_fresh` from device equations
   at the post-step v and require `|i_nl_fresh − i_nl_chord| < tol` in
   addition to the voltage-step check. Mirrors the DK Schur path's
-  convergence gate. Emitted in both the trapezoidal main NR loop and the
-  BE fallback NR loop.
+  convergence gate. Emitted in the solve routine, so in both the
+  trapezoidal instance and the backward-Euler instance (a trapezoidal full-LU
+  build's latch / fallback / breakpoint solve is the same routine a
+  `--backward-euler` build runs; see SATURATING_TRANSFORMERS.md §3.3).
 - **Adaptive refactor**: see #4 above.
 - See `DEBUGGING.md` "Op-amp BoyleDiodes Failure Signatures" for the
   remaining open issue (heavy clipping → bistable Newton oscillation).

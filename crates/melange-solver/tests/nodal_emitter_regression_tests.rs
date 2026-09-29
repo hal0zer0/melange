@@ -76,7 +76,7 @@ fn assert_full_lu_fet_matches_dk(spice: &str, tag: &str, amp: f64) {
     let dk = support::build_circuit(spice, &cb, &format!("{tag}_dk"));
     let lu = support::build_circuit_nodal(spice, &cf, &format!("{tag}_lu"));
     assert!(
-        lu.code.contains("g_aug"),
+        lu.code.contains("state.chord_lu"),
         "{tag}: forcing branch must route the nodal build to full-LU NR"
     );
 

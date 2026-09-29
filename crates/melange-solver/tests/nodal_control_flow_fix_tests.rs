@@ -331,10 +331,17 @@ fn runtime_v_source_stamped_in_all_rhs_rebuilds() {
         regex_lite_count(&full, "rhs_s[", "state.ctrl_v;") >= 1,
         "full-LU sub-step RHS must stamp the runtime V source"
     );
-    assert!(
-        regex_lite_count(&full, "rhs_be[", "state.ctrl_v;") >= 1,
-        "full-LU BE-fallback RHS must stamp the runtime V source"
-    );
+    // On full-LU the backward-Euler solve is the same routine as the primary
+    // one, with its own `rhs`: when the build has one, it must stamp too.
+    if let Some(be_solve) = full
+        .split("// Backward-Euler solve: the same routine")
+        .nth(1)
+    {
+        assert!(
+            regex_lite_count(be_solve, "rhs[", "state.ctrl_v;") >= 1,
+            "full-LU BE-solve RHS must stamp the runtime V source"
+        );
+    }
 }
 
 /// Count lines that contain both fragments (poor man's regex).
@@ -432,15 +439,23 @@ fn full_lu_diag_counter_contract() {
         "state.diag_be_fallback_count += 1;",
         "BE entry count",
     );
-    let be_loop = find(
+    // The BE solve is the same routine as the primary one; its Newton loop is
+    // the first `for iter in` after the BE-solve marker.
+    let be_start = find(
         ps_code,
-        "// Rebuild RHS with backward Euler matrices",
-        "BE fallback RHS rebuild",
+        "// Backward-Euler solve: the same routine",
+        "backward-Euler solve",
     );
+    let be_loop = be_start
+        + find(
+            &ps_code[be_start..],
+            "for iter in 0..",
+            "BE solve Newton loop",
+        );
     assert!(
-        be_bump < be_loop,
-        "diag_be_fallback_count must increment at fallback ENTRY (before the \
-         BE RHS rebuild), not on success only"
+        be_start < be_bump && be_bump < be_loop,
+        "diag_be_fallback_count must increment at BE-solve ENTRY (before its \
+         Newton loop), not on success only"
     );
 }
 

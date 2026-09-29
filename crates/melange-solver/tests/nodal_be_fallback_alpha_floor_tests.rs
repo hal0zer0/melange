@@ -125,10 +125,9 @@ fn test_nodal_full_lu_node_damping_has_no_ratio_floor() {
         code.contains("alpha *= damp_thresh / max_node_dv;"),
         "primary-loop node damping should divide uncapped by damp_thresh (no ratio floor)"
     );
-    assert!(
-        code.contains("alpha *= 10.0 / max_node_dv;"),
-        "BE-fallback node damping should divide uncapped by 10.0 (no ratio floor)"
-    );
+    // The separate BE-fallback ladder (fixed 10 V damping) is gone: the
+    // backward-Euler solve is the primary routine above, so its damping is the
+    // `damp_thresh` line just checked.
     assert!(
         !code.contains("(damp_thresh / max_node_dv).max(0.01)"),
         "primary-loop node damping must not reintroduce the 1% ratio floor \

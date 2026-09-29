@@ -232,14 +232,21 @@ Numerical guards in the stamps: the `cosh` argument is clamped to ±40, and
 ### 3.3 Newton sites and one convergence definition
 
 A saturating inductor makes the circuit nonlinear even at M = 0, so it forces
-the full-LU path and is excluded from the M = 0 direct-LU fast path. The stamps
-go in at every site that can commit a sample:
+the full-LU path and is excluded from the M = 0 direct-LU fast path.
 
-1. the main trapezoidal (or BE) loop, `alpha = 2·fs·OS` (or `fs·OS`);
-2. the adaptive sub-step, `alpha_sub`;
-3. the backward-Euler fallback, `alpha = fs·OS`, history without the
-   `V_i − V_j` term;
-4. the op-amp active-set pinned Newton. Its start takes `i_L` from `v_prev`: an
+A full-LU sample is one solve routine (`emit_nodal_rhs` + `emit_nodal_newton`),
+emitted once per integrator. A backward-Euler build runs it once. A trapezoidal
+build runs the trapezoidal instance and then, when that fails, when the latch or
+a breakpoint forces BE, or when ActiveSetBe sees a rail, the backward-Euler
+instance, which is the same routine on `a_be`/`a_neg_be`/`RHS_CONST_BE` with its
+own chord cache: a latched instance is bit-identical to a `--backward-euler`
+build from the same state. Each instance has three sites that can commit a
+sample, and the stamps go in at every one:
+
+1. the main loop, `alpha = 2·fs·OS` (trapezoidal) or `fs·OS` (BE, history
+   without the `V_i − V_j` term);
+2. the adaptive sub-step, `alpha_sub` in the same scheme;
+3. the op-amp active-set pinned Newton. Its start takes `i_L` from `v_prev`: an
    unpinned iterate 2-cycles on tanh. A pinned solve that fails is counted in
    `diag_nr_unconverged_commit_count`.
 
@@ -275,11 +282,20 @@ operating point; the nodal "has DC OP" test reads the augmented rows too.
 ### 3.4 Integrator
 
 Trapezoidal by default. Auto-BE, breakpoint-BE and the runtime BE-latch are
-armed on saturating circuits, M = 0 ones included, because the flux device is
-stamped at every site at that site's `alpha`. A forced latch matches a
-`--backward-euler` build of the same circuit to 2.1e-10 relative (open
-shared-core transformer, 5 V) and 3.1e-11 / 1.9e-11 (choke-loaded MOSFET stage,
-3 V / 5 V).
+armed on saturating circuits, M = 0 ones included. A latched sample skips the
+trapezoidal solve and runs the backward-Euler instance of the solve routine
+(§3.3), so a forced latch is bit-identical to a `--backward-euler` build of the
+same circuit (open shared-core transformer, choke-loaded MOSFET stage, and a
+railing op-amp into a deep-saturating choke), including after a pot move while
+latched. The BE instance's chord cache is invalidated with the trapezoidal one
+(pot/switch/sample-rate rebuild, reset, NaN recovery, a held sample).
+
+A separate, weaker BE ladder used to run latched samples: no sub-step rung, and
+the discarded trapezoidal solve ran first. On a railing op-amp at high gain
+into a deep-saturating choke (ISAT 0.2 mA, 1 V 1 kHz), where BE Newton fails at
+every rail-to-rail swing and the BE build's sub-step rescues it, the latched
+instance held 1996 samples/s at 26.3 µs/sample; it now sub-steps like the BE
+build (0 held, 14.9 µs).
 
 **Deep saturation.** Trapezoidal integration is A-stable, not L-stable: as
 `L_diff` collapses, a branch's trapezoidal factor tends to −1 and a Nyquist ring

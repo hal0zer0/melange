@@ -267,53 +267,80 @@ fn c1_gates_catch_a_broken_flux_device() {
     );
 }
 
-/// Every Newton site that can commit a sample (main loop, adaptive sub-step,
-/// backward-Euler fallback) checks the flux row the same way, so a wrong flux
-/// Jacobian is caught wherever it is. Deleting the Jacobian correction while
-/// keeping the companion moves the Newton fixed point off the solution; the
-/// step check alone accepts it. Deleted at one site, the next site down the
-/// ladder recovers the right answer; deleted everywhere, every sample is
-/// counted as held. With a site's residual removed as well, that site accepts
-/// the wrong point and nothing is counted, which is what shows the residual
-/// is the detector.
+/// Every Newton site that can commit a sample checks the flux row the same way,
+/// so a wrong flux Jacobian is caught wherever it is. A trapezoidal build runs
+/// two instances of one solve routine, trapezoidal then backward Euler, each
+/// with a main loop and a sub-step: four sites, in that order. Deleting the
+/// Jacobian correction while keeping the companion moves the Newton fixed point
+/// off the solution; the step check alone accepts it. Deleted at the first k
+/// sites, the next site down the ladder recovers the right answer; deleted at
+/// all four, every sample is counted as held. With a site's residual removed as
+/// well, that site accepts the wrong point and nothing is counted, which is
+/// what shows the residual is the detector.
 #[test]
 fn c1_jacobian_deletion_is_caught_at_every_newton_site() {
     let code = nodal_code(C1, "a");
-    let jac = |site: &str| format!("{site}[SAT_IND_0_AUG_ROW][SAT_IND_0_AUG_ROW] +=");
-    let (main, sub, be) = (jac("chord_lu"), jac("g_s"), jac("g_aug"));
-    let flag = |f: &str| format!("{f} = true; }}");
-    let mutate = |dels: &[&String], blind: Option<String>| -> String {
-        let mut hits = vec![0usize; dels.len()];
+    let jac = |m: &str| format!("{m}[SAT_IND_0_AUG_ROW][SAT_IND_0_AUG_ROW] +=");
+    // Sites in emission order: (Jacobian stamp line, its occurrence index).
+    let (chord, sub) = (jac("chord_lu"), jac("g_s"));
+    let sites = [(&chord, 0usize), (&sub, 0), (&chord, 1), (&sub, 1)];
+    // The residual line of each site: (flag, occurrence index).
+    let residuals = [
+        ("max_step_exceeded", 0usize),
+        ("sub_step_exceeded", 0),
+        ("max_step_exceeded", 1),
+        ("sub_step_exceeded", 1),
+    ];
+    // Delete the Jacobian stamp at the first `k` sites, and optionally blind
+    // one site's residual.
+    let mutate = |k: usize, blind: Option<usize>| -> String {
+        let mut seen: std::collections::HashMap<String, usize> = Default::default();
+        let mut deleted = 0usize;
         let mut blinded = 0usize;
         let out: Vec<&str> = code
             .lines()
             .filter(|l| {
-                for (h, d) in hits.iter_mut().zip(dels) {
-                    if l.contains(d.as_str()) {
-                        *h += 1;
-                        return false;
+                for (pat, _) in &sites {
+                    if l.contains(pat.as_str()) {
+                        let n = seen.entry(pat.to_string()).or_default();
+                        let idx = *n;
+                        *n += 1;
+                        if sites[..k].iter().any(|(p, i)| p == pat && *i == idx) {
+                            deleted += 1;
+                            return false;
+                        }
+                        return true;
                     }
                 }
-                if let Some(f) = &blind {
-                    if l.contains("acc.abs()") && l.contains(f.as_str()) {
-                        blinded += 1;
-                        return false;
+                if l.contains("acc.abs()") {
+                    for (flag, _) in &residuals {
+                        let f = format!("{flag} = true; }}");
+                        if l.contains(&f) {
+                            let key = format!("res:{flag}");
+                            let n = seen.entry(key).or_default();
+                            let idx = *n;
+                            *n += 1;
+                            if let Some(b) = blind {
+                                if residuals[b] == (*flag, idx) {
+                                    blinded += 1;
+                                    return false;
+                                }
+                            }
+                            return true;
+                        }
                     }
                 }
                 true
             })
             .collect();
-        assert!(
-            hits.iter().all(|&h| h == 1),
-            "test premise: one stamp per site, got {hits:?}"
-        );
+        assert_eq!(deleted, k, "test premise: one stamp per site");
         assert!(
             blind.is_none() || blinded == 1,
             "test premise: the site's residual line"
         );
         out.join("\n")
     };
-    // (peak i_L / Isat, sub-steps, BE fallbacks, holds) over 1-2 s at 5 V.
+    // (peak i_L / Isat, sub-steps, BE entries, holds) over 1-2 s at 5 V.
     let run = |code: &str, tag: &str| -> (f64, u64, u64, u64) {
         let main_fn = "fn main() {
     let (fs, f) = (48000.0f64, 30.0f64);
@@ -333,35 +360,41 @@ fn c1_jacobian_deletion_is_caught_at_every_newton_site() {
     let pk_ref = C1_REF[2].1;
     let right = |pk: f64| ((pk - pk_ref) / pk_ref).abs() < 1e-4;
 
-    let (pk, subs, _, holds) = run(&mutate(&[&main], None), "c1_jac_main");
+    // Trap main deleted: the trap sub-step recovers.
+    let (pk, subs, bes, holds) = run(&mutate(1, None), "c1_jac_1");
     assert!(
-        subs > 1000 && holds == 0 && right(pk),
-        "main: pk {pk} sub {subs} hold {holds}"
+        subs > 1000 && bes == 0 && holds == 0 && right(pk),
+        "trap main: pk {pk} sub {subs} be {bes} hold {holds}"
     );
-
-    let (pk, _, bes, holds) = run(&mutate(&[&main, &sub], None), "c1_jac_sub");
+    // Trap main + sub deleted: the BE main loop recovers.
+    let (pk, _, bes, holds) = run(&mutate(2, None), "c1_jac_2");
     assert!(
         bes > 1000 && holds == 0 && right(pk),
-        "sub-step: pk {pk} be {bes} hold {holds}"
+        "trap sub-step: pk {pk} be {bes} hold {holds}"
     );
-    let (pk, _, _, holds) = run(
-        &mutate(&[&main, &sub], Some(flag("sub_step_exceeded"))),
-        "c1_jac_sub_blind",
-    );
+    let (pk, _, _, holds) = run(&mutate(2, Some(1)), "c1_jac_2_blind");
     assert!(
         holds == 0 && !right(pk),
-        "sub-step without its residual must accept the wrong point: pk {pk}"
+        "trap sub-step without its residual must accept the wrong point: pk {pk}"
     );
-
-    let (_, _, _, holds) = run(&mutate(&[&main, &sub, &be], None), "c1_jac_all");
+    // Through BE main deleted: the BE sub-step recovers.
+    let (pk, _, bes, holds) = run(&mutate(3, None), "c1_jac_3");
+    assert!(
+        bes > 1000 && holds == 0 && right(pk),
+        "BE main: pk {pk} be {bes} hold {holds}"
+    );
+    let (pk, _, _, holds) = run(&mutate(3, Some(2)), "c1_jac_3_blind");
+    assert!(
+        holds == 0 && !right(pk),
+        "BE main without its residual must accept the wrong point: pk {pk}"
+    );
+    // All four deleted: nothing can solve it; every such sample is held.
+    let (_, _, _, holds) = run(&mutate(4, None), "c1_jac_4");
     assert!(holds > 1000, "all sites: only {holds} held samples");
-    let (pk, _, _, holds) = run(
-        &mutate(&[&main, &sub, &be], Some(flag("be_step_exceeded"))),
-        "c1_jac_be_blind",
-    );
+    let (pk, _, _, holds) = run(&mutate(4, Some(3)), "c1_jac_4_blind");
     assert!(
         holds == 0 && !right(pk),
-        "BE without its residual must accept the wrong point: pk {pk}"
+        "BE sub-step without its residual must accept the wrong point: pk {pk}"
     );
 }
 
@@ -485,6 +518,29 @@ fn c1_zero_floor_deep_saturation_ring_is_caught_by_the_latch() {
     }
 }
 
+/// A single-supply op-amp at high gain railing into a deep-saturating choke:
+/// at each input zero crossing the output swings rail to rail within one
+/// sample, where backward-Euler Newton fails and the sub-step rescues it.
+const RAILING_CHOKE: &str = "\
+single-supply op-amp overdrive into a deep-saturating choke
+Vcc vcc 0 DC 9
+R_b1 vcc vbias 100k
+R_b2 vbias 0 100k
+C_b vbias 0 10u
+C_in in np 100n
+R_in np vbias 1Meg
+U1 np nm oa TL072
+R_f oa nm 500k
+R_g nm ng 4.7k
+C_g ng 0 10u
+C_c oa n1 1u
+R_1 n1 n2 1k
+L_sat n2 0 100m ISAT=0.2m CORE=steel
+R_t n2 out 10k
+R_v out 0 100k
+.model TL072 OA(AOL=200000 VCC=9 VEE=0)
+";
+
 /// A choke-loaded common-source stage driven into its choke's saturation
 /// (M = 2, nodal full-LU): the deep-saturation witness with devices.
 const CHOKE_STAGE: &str = "\
@@ -507,27 +563,39 @@ Rl   out    0      100k
 ";
 
 /// The runtime BE-latch is armed on saturating circuits, including M = 0 ones
-/// (the flux law is nonlinear on its own), and once latched the trapezoidal
-/// build runs every sample through its BE fallback. That fallback must be the
-/// backward-Euler solution: compared with a `--backward-euler` build of the
-/// same circuit it agrees to 1e-9 relative on the output (measured 2e-10 and
-/// 3e-11).
+/// (the flux law is nonlinear on its own). A latched trapezoidal build runs the
+/// SAME backward-Euler routine a `--backward-euler` build runs (main loop,
+/// sub-step, pin-and-resolve), on BE matrices the IR bakes by the same
+/// expressions, so from the same state the output is bit-identical. Before
+/// that routine was shared, the latched path was a separate BE ladder without
+/// the sub-step: it agreed to 1e-9 here, and held 1996 samples/s on a railing
+/// op-amp driving a deep-saturating choke, where the BE build sub-steps.
 ///
-/// Harness trap, worth keeping: `CircuitState::default()` runs a 50-sample
-/// warmup, on the trapezoidal rule in the latched build (the latch is not set
-/// yet) and on BE in the BE build. That alone put them 3e-7 apart. Either set
-/// `be_latched` before the warmup or restart both from the baked operating
-/// point, as here.
+/// Harness traps, worth keeping: `CircuitState::default()` warms up on each
+/// build's own integrator (3e-7 apart), and the runtime-settled
+/// `dc_operating_point` differs between them too. Restart both with `reset()`
+/// (which also invalidates every chord) from the baked `DC_OP`.
 #[test]
 fn forced_latch_matches_the_backward_euler_build() {
-    for (spice, out_name, amp, tag) in [
-        (c2("1Meg"), "out", 5.0, "c2_open"),
-        (CHOKE_STAGE.to_string(), "out", 3.0, "choke"),
+    for (spice, out_name, amp, f, active_set, tag) in [
+        (c2("1Meg"), "out", 5.0, F, false, "c2_open"),
+        (CHOKE_STAGE.to_string(), "out", 3.0, F, false, "choke"),
+        (
+            RAILING_CHOKE.to_string(),
+            "out",
+            1.0,
+            1000.0,
+            true,
+            "railing_choke",
+        ),
     ] {
         let out = node(&spice, out_name);
         let run = |backward_euler: bool, sub: &str| -> Vec<f64> {
             let mut config = support::config_for_spice(&spice, FS);
             config.backward_euler = backward_euler;
+            if active_set {
+                config.opamp_rail_mode = melange_solver::codegen::OpampRailMode::ActiveSet;
+            }
             let code = support::generate_circuit_code_nodal(&spice, &config).0;
             let latch = if backward_euler {
                 assert!(!code.contains("pub be_latched"), "a BE build has no latch");
@@ -546,20 +614,30 @@ fn forced_latch_matches_the_backward_euler_build() {
             } else {
                 ""
             };
+            // Sub-steps are solves (the BE routine's own ladder); what must
+            // not occur is a held, unsolved or reset sample.
             let bad = bad_counters(&code)
                 .replace("s.diag_be_fallback_count + ", "")
-                .replace(" + s.diag_be_fallback_count", "");
+                .replace(" + s.diag_be_fallback_count", "")
+                .replace("s.diag_substep_count + ", "")
+                .replace(" + s.diag_substep_count", "");
+            let start = if code.contains("pub const DC_OP:") {
+                "DC_OP"
+            } else {
+                "[0.0; N]"
+            };
             let main = format!(
                 "fn main() {{
     let mut s = CircuitState::default();
     s.set_sample_rate({FS:?});
-    s.v_prev = s.dc_operating_point;
+    s.reset();
+    s.v_prev = {start};
     s.input_prev = 0.0;
     {restart_nl}
     {latch}
     let n = (2.0 * {FS:?}) as usize;
     for i in 0..n {{
-        let _ = process_sample({amp:?} * (2.0 * std::f64::consts::PI * {F:?} * i as f64 / {FS:?}).sin(), &mut s);
+        let _ = process_sample({amp:?} * (2.0 * std::f64::consts::PI * {f:?} * i as f64 / {FS:?}).sin(), &mut s);
         println!(\"{{:.17e}}\", s.v_prev[{out}]);
     }}
     let bad = {bad};
@@ -580,16 +658,99 @@ fn forced_latch_matches_the_backward_euler_build() {
         };
         let latched = run(false, "latched");
         let be = run(true, "be");
-        let peak = be.iter().fold(0.0f64, |m, x| m.max(x.abs()));
-        let diff = latched
-            .iter()
-            .zip(&be)
-            .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
-        assert!(
-            diff <= 1e-9 * peak,
-            "{tag}: forced latch vs BE build differ by {diff:.3e} on a {peak:.3e} output ({:.2e} relative)",
-            diff / peak
-        );
+        assert_eq!(latched.len(), be.len());
+        if let Some(k) = (0..be.len()).find(|&k| latched[k].to_bits() != be[k].to_bits()) {
+            panic!(
+                "{tag}: forced latch vs BE build first differ at sample {k}: {:e} vs {:e}",
+                latched[k], be[k]
+            );
+        }
+    }
+}
+
+/// A pot moved while latched: the latched trapezoidal build and a
+/// `--backward-euler` build take the same move and stay bit-identical. The
+/// latched solve keeps its own chord cache (`chord_be_*`); a knob move (via
+/// `rebuild_matrices`) must invalidate it as it does the trapezoidal one, or
+/// the BE solve would restart from a factorisation of the old circuit (the
+/// sub-step constant-matrix bug in a new place). The diode clipper reuses its
+/// chord across samples (no saturating or behavioral stamp forces a refactor),
+/// so a stale cache would change its Newton path.
+#[test]
+fn knob_move_while_latched_matches_the_backward_euler_build() {
+    for (spice, amp, tag) in [
+        (
+            "clip\nR_1 in a 10k\nD1 a 0 D1N\nD2 0 a D1N\nC1 a 0 10n\nR2 a out 1k\nR3 out 0 100k\n\
+             .model D1N D(IS=2.52n N=1.752)\n.pot R_1 1k 100k 10k \"Drive\"\n",
+            2.0,
+            "clipper",
+        ),
+        (
+            "rl\nR_1 in out 99\nL_1 out 0 1 ISAT=10m LAIR=3e-4\n.pot R_1 10 1k 99 \"Drive\"\n",
+            5.0,
+            "sat_rl",
+        ),
+    ] {
+        let out = node(spice, "out");
+        let run = |backward_euler: bool, sub: &str| -> Vec<f64> {
+            let mut config = support::config_for_spice(spice, FS);
+            config.backward_euler = backward_euler;
+            // The full-LU solve is the one under test (the clipper would
+            // otherwise take the nodal Schur sub-path).
+            config.nodal_sub_path_override = melange_solver::codegen::NodalSubPathOverride::FullLu;
+            let code = support::generate_circuit_code_nodal(spice, &config).0;
+            assert!(
+                code.contains("state.chord_lu"),
+                "{tag}: not a full-LU build"
+            );
+            let latch = if backward_euler {
+                ""
+            } else {
+                assert!(code.contains("pub be_latched"), "{tag}: latch not emitted");
+                "s.be_latched = true;"
+            };
+            let restart_nl = if code.contains("pub const DC_NL_I:") {
+                "s.i_nl_prev = DC_NL_I;"
+            } else {
+                ""
+            };
+            let start = if code.contains("pub const DC_OP:") {
+                "DC_OP"
+            } else {
+                "[0.0; N]"
+            };
+            let main = format!(
+                "fn main() {{
+    let mut s = CircuitState::default();
+    s.set_sample_rate({FS:?});
+    s.reset();
+    s.v_prev = {start};
+    s.input_prev = 0.0;
+    {restart_nl}
+    {latch}
+    for i in 0..24000usize {{
+        if i == 7000 {{ s.set_pot_0(1000.0); }}
+        if i == 15000 {{ s.set_pot_0(50000.0); }}
+        let _ = process_sample({amp:?} * (2.0 * std::f64::consts::PI * 300.0 * i as f64 / {FS:?}).sin(), &mut s);
+        println!(\"{{:.17e}}\", s.v_prev[{out}]);
+    }}
+}}"
+            );
+            support::compile_and_run(&code, &main, &format!("knob_latch_{tag}_{sub}"))
+                .stdout
+                .lines()
+                .map(|l| l.parse::<f64>().unwrap())
+                .collect()
+        };
+        let latched = run(false, "latched");
+        let be = run(true, "be");
+        assert_eq!(latched.len(), be.len());
+        if let Some(k) = (0..be.len()).find(|&k| latched[k].to_bits() != be[k].to_bits()) {
+            panic!(
+                "{tag}: knob move while latched vs BE build first differ at sample {k}: {:e} vs {:e}",
+                latched[k], be[k]
+            );
+        }
     }
 }
 

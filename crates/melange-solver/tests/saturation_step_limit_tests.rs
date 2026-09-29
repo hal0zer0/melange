@@ -10,11 +10,15 @@
 //! 1× trapezoidal solution. The limit scales the step fraction (as pnjlim
 //! does) so a step crossing the knee lands 2·Isat past it.
 //!
-//! Every site that can commit a sample carries the limit. The main-loop,
-//! sub-step and backward-Euler sites each have a witness that fails without
-//! their own limit; the op-amp pinned site has none (the pinned Newton starts
-//! from the previous sample's current, so its steps do not cross the knee on
-//! any deck tried), so its presence is checked structurally.
+//! Every site that can commit a sample carries the limit. A trapezoidal build
+//! runs one solve routine twice (trapezoidal, then backward Euler), each with a
+//! main loop, a sub-step and, with a railing op-amp, a pinned solve. The
+//! trapezoidal main loop, its sub-step and the BE main loop each have a witness
+//! that fails without their own limit. The BE sub-step is the same emitted code
+//! as the trapezoidal one (its limit shows only as cost there: 148 -> 212
+//! ns/sample on the latched witness), and the pinned solve starts from the
+//! previous sample's current, so its steps do not cross the knee on any deck
+//! tried; those two are checked structurally.
 
 mod support;
 
@@ -217,14 +221,18 @@ fn substep_site_carries_the_limit() {
     );
 }
 
-/// Backward-Euler site, reached on every sample by forcing the latch. Without
-/// its limit the BE Newton 2-cycles at the knee and about half the samples
-/// are held.
+/// Backward-Euler main loop, reached on every sample by forcing the latch.
+/// With its limit every knee edge solves there; without it Newton 2-cycles at
+/// the edges and the BE sub-step has to take them.
 #[test]
-fn knee_crossings_solve_in_the_backward_euler_fallback() {
+fn knee_crossings_solve_in_the_backward_euler_solve() {
     let code = nodal_code(RL, None);
     let r = run(&code, 20.0, 100.0, true, "satlim_be");
-    assert_eq!(r.hold, 0, "latched build held {} samples", r.hold);
+    assert_eq!(
+        (r.max_iter, r.substep, r.hold),
+        (0, 0, 0),
+        "latched build: max_iter/substep/hold"
+    );
     let m = run(
         &without_limit(&code, &[3]),
         20.0,
@@ -233,15 +241,17 @@ fn knee_crossings_solve_in_the_backward_euler_fallback() {
         "satlim_be_mut",
     );
     assert!(
-        m.hold > 10_000,
-        "without the BE limit only {} samples held",
+        m.max_iter > 100 && m.substep == m.max_iter && m.hold == 0,
+        "without the BE main-loop limit: max_iter {} substep {} hold {}",
+        m.max_iter,
+        m.substep,
         m.hold
     );
 }
 
 /// Parity: every Newton site that can commit a sample carries the limit. A
-/// railing op-amp driving the core adds the pinned solve after the main loop
-/// and after the BE fallback (5 sites); a passive deck has 3.
+/// passive deck has 4 (trapezoidal and BE: main loop and sub-step each); a
+/// railing op-amp driving the core adds a pinned solve to each instance (6).
 #[test]
 fn every_newton_site_carries_the_limit() {
     let count = |code: &str| {
@@ -249,7 +259,11 @@ fn every_newton_site_carries_the_limit() {
             .filter(|l| l.contains(LIMIT_MARK) && l.contains("SAT_IND_0_AUG_ROW"))
             .count()
     };
-    assert_eq!(count(&nodal_code(RL, None)), 3, "main, sub-step, BE");
+    assert_eq!(
+        count(&nodal_code(RL, None)),
+        4,
+        "trap main, trap sub-step, BE main, BE sub-step"
+    );
     let oa = "choke\nVcc vcc 0 DC 9\nR_b1 vcc vbias 100k\nR_b2 vbias 0 100k\nC_b vbias 0 10u\n\
               C_in in np 100n\nR_in np vbias 1Meg\nU1 np nm oa TL072\nR_f oa nm 500k\n\
               R_g nm ng 4.7k\nC_g ng 0 10u\nC_c oa n1 1u\nR_1 n1 n2 1k\n\
@@ -262,7 +276,7 @@ fn every_newton_site_carries_the_limit() {
         .count();
     assert_eq!(
         (count(&code), pinned),
-        (5, 2),
-        "main, sub-step, pinned, BE, pinned-after-BE"
+        (6, 2),
+        "main, sub-step and pinned, in each of the trapezoidal and BE solves"
     );
 }

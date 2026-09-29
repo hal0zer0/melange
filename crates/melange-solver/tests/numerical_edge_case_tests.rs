@@ -537,7 +537,7 @@ fn test_wide_bandgap_clipper_no_rs_nodal_full_lu() {
     // The forcing branch must actually route full-LU, and the no-RS diode
     // must go through the shared extended-exp helpers, not the inline clamp.
     assert!(
-        circuit.code.contains("g_aug"),
+        circuit.code.contains("state.chord_lu"),
         "forcing branch must route the nodal build to full-LU NR"
     );
     assert!(
