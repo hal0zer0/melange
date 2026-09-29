@@ -402,12 +402,13 @@ Related consequences:
   `reset()` / `set_dc_operating_point()`. Under the whole-system form a
   poked `input_prev` without the matching input-node voltage alternated
   ±53 V at `in` for a whole render on a saturating-core fixture.
-- **Mid-run equation swaps** (a switch, a pot rebuild, an op-amp pin or
-  release) start from a `q_dot` built on the old equation set.
-  Breakpoint-BE / transition-BE (one backward-Euler sample at the swap)
-  does not read that `q_dot`, re-seeds it, and damps the mode the step
-  excited. Whether they still earn their keep under the charge form is
-  pending re-measurement (`STATUS.md`).
+- **Mid-run component changes** (a switch, a pot rebuild) start from a
+  `q_dot` built on the old values. Breakpoint-BE (one backward-Euler sample
+  after the change) does not read that `q_dot`, re-seeds it, and damps the
+  mode the step excited; a capacitor change needs it
+  (`charge_form_c_switch_tests.rs`). An op-amp pin or release takes no BE
+  sample: the pinned solve commits a consistent `q_dot`
+  (`OPAMP_RAIL_MODES.md`).
 
 ## Cap-Only Nodes and Schur NR Failure (Transistor Ladders)
 

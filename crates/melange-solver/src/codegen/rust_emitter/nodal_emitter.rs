@@ -13,11 +13,10 @@ use super::helpers::{
     body_effect_jacobian_term, body_effect_mosfets, carries_q_dot, device_param_template_data,
     emit_body_effect_at_iterate, emit_glow_lit_be_hold, emit_pentode_nr_dk_stamp,
     emit_stateful_default_fields, emit_stateful_set_sample_rate_body, emit_stateful_state_fields,
-    emit_stateful_state_restore, emit_stateful_update, emit_thermal_tj_advance,
-    emit_transition_be_arm, emit_transition_be_detect, fmt_f64, format_matrix_rows,
-    has_latched_device, history_zero_row_ranges, oversampling_info, pentode_dispatch, q_dot_start,
-    recommended_warmup_samples, section_banner, self_heating_device_data, stateful_device_data,
-    warmup_estimate_capped,
+    emit_stateful_state_restore, emit_stateful_update, emit_thermal_tj_advance, fmt_f64,
+    format_matrix_rows, has_latched_device, history_zero_row_ranges, oversampling_info,
+    pentode_dispatch, q_dot_start, recommended_warmup_samples, section_banner,
+    self_heating_device_data, stateful_device_data, warmup_estimate_capped,
 };
 use super::nr_helpers::{emit_nr_singular_fallback, emit_schur_nr_limit_and_converge};
 use super::RustEmitter;
@@ -3696,18 +3695,11 @@ impl RustEmitter {
         if ir.solver_config.breakpoint_be {
             code.push_str(
                 "    /// Breakpoint-BE: samples remaining to solve on the backward-Euler\n\
-                 \x20   /// matrices after a .switch/.pot conductance swap (armed by\n\
-                 \x20   /// set_switch_*/set_pot_*) or an op-amp rail pin/release (transition-BE),\n\
-                 \x20   /// decremented per sample, cleared by reset().\n",
+                 \x20   /// matrices after a .switch/.pot change (armed by set_switch_*/set_pot_*)\n\
+                 \x20   /// or while a glow device is lit, decremented per sample, cleared by\n\
+                 \x20   /// reset().\n",
             );
             code.push_str("    pub breakpoint_be: u32,\n\n");
-        }
-        if ir.solver_config.transition_be {
-            code.push_str(
-                "    /// Transition-BE: op-amp rail pin-state changes, each of which armed\n\
-                 \x20   /// one backward-Euler sample (cleared by reset()).\n\
-                 \x20   pub diag_transition_be_count: u64,\n\n",
-            );
         }
 
         // DC settling state: when DC OP didn't converge at codegen time, the warmup
@@ -4105,9 +4097,6 @@ impl RustEmitter {
         if ir.solver_config.breakpoint_be {
             code.push_str("            breakpoint_be: 0,\n");
         }
-        if ir.solver_config.transition_be {
-            code.push_str("            diag_transition_be_count: 0,\n");
-        }
         if m > 0 || !ir.behavioral_sources.is_empty() || !ir.saturating_inductors.is_empty() {
             code.push_str("            chord_lu: [[0.0; N]; N],\n");
             code.push_str("            chord_dr: [1.0; N],\n");
@@ -4371,9 +4360,6 @@ impl RustEmitter {
         }
         if ir.solver_config.breakpoint_be {
             code.push_str("        self.breakpoint_be = 0;\n");
-        }
-        if ir.solver_config.transition_be {
-            code.push_str("        self.diag_transition_be_count = 0;\n");
         }
         let cp = if use_full_nodal {
             "self.cold."
@@ -5733,7 +5719,6 @@ impl RustEmitter {
              \x20   }\n",
         );
         code.push_str("    // State update\n");
-        code.push_str(&emit_transition_be_detect(ir));
         emit_q_dot_commit(
             &mut code,
             ir,
@@ -5749,8 +5734,6 @@ impl RustEmitter {
         }
         // Glow lit-hold re-arm (after the decrement; empty for non-glow).
         code.push_str(&emit_glow_lit_be_hold(ir));
-        // Pin-transition arm (after the decrement; empty without transition-BE).
-        code.push_str(&emit_transition_be_arm(ir));
         // Commit input_prev here (NOT at the RHS build) so the sub-step input
         // interpolation earlier in the sample still sees last sample's value.
         if multi_input {
@@ -6815,7 +6798,6 @@ impl RustEmitter {
         // Stateful-device (Phase 0c) after-solve update — BEFORE state.v_prev = v
         // so v_prev holds the prior sample. Shared with the DK path.
         code.push_str(&emit_stateful_update(&stateful_device_data(ir)));
-        code.push_str(&emit_transition_be_detect(ir));
         emit_q_dot_commit(
             &mut code,
             ir,
@@ -6830,8 +6812,6 @@ impl RustEmitter {
         }
         // Glow lit-hold re-arm (after the decrement; empty for non-glow).
         code.push_str(&emit_glow_lit_be_hold(ir));
-        // Pin-transition arm (after the decrement; empty without transition-BE).
-        code.push_str(&emit_transition_be_arm(ir));
         // Commit input_prev here (NOT at the RHS build) so the sub-step input
         // interpolation earlier in the sample still sees last sample's value.
         if multi_input {
@@ -8224,9 +8204,8 @@ impl RustEmitter {
             code.push_str("    }\n\n");
         }
 
-        // ActiveSet (plain) — pin and re-solve on the site's matrices; on a
-        // trapezoidal build a pin or release arms one BE sample
-        // (transition-BE, see emit_transition_be_detect). Runs on the final converged v from EITHER the regular trap NR
+        // ActiveSet (plain) — pin and re-solve on the site's matrices. Runs on
+        // the final converged v from EITHER the regular trap NR
         // loop or the substep recovery (it used to be emitted inside the
         // trap NR convergence block, which skipped substep-recovered
         // samples). ActiveSetBe takes a different path: detect-only above,
@@ -8673,22 +8652,15 @@ impl RustEmitter {
         //             `state.a` (trapezoidal). Detects rail violations
         //             and pins them via row/column elimination, then
         //             re-solves the whole network so KCL is satisfied at
-        //             every node with the clamped outputs. On a
-        //             trapezoidal build the sample after each pin or
-        //             release is solved on backward Euler (transition-BE),
-        //             which re-seeds q_dot on the new equation set. The
+        //             every node with the clamped outputs. The
         //             auto-resolver's choice.
         // * `ActiveSetBe` — detect rail violations here without mutating;
         //             if any are detected, fall through to the BE fallback
         //             below (which re-runs NR with backward-Euler matrices
         //             and then applies the active-set row/col elimination
-        //             using `state.a_be`). Trapezoidal + pin develops a
-        //             Nyquist-rate limit cycle when the clamp is engaged
-        //             across multiple samples on audio-path op-amps
-        //             (cap-history term `(2/T)·C·v_prev` alternates sign
-        //             every sample); BE damps this. Explicit mode only:
-        //             it damps whole rail plateaus, so its error is
-        //             first-order where ActiveSet + transition-BE is not.
+        //             using `state.a_be`). Explicit mode only: it damps
+        //             whole rail plateaus, so its error is first-order
+        //             where ActiveSet is not.
         // * `BoyleDiodes` — physical catch diodes are already in the
         //             MNA via `augment_netlist_with_boyle_diodes`. NR
         //             handles saturation naturally through the diode
@@ -8709,7 +8681,7 @@ impl RustEmitter {
                 }
             }
             OpampRailMode::ActiveSet => {
-                // Trap+pin; transition-BE arms the next sample on a change.
+                // Pin and re-solve on the site's own integrator.
                 Self::emit_nodal_active_set_resolve(
                     code,
                     ir,

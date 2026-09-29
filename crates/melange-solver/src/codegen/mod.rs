@@ -174,10 +174,8 @@ pub enum OpampRailMode {
     /// Post-NR hard clamp (pre-2026-04 behavior). Breaks KCL for AC-coupled downstream.
     Hard,
     /// Post-NR constrained re-solve on trapezoidal `state.a`. KCL-consistent hard
-    /// clip with square-wave harmonics. On a trapezoidal build the sample after
-    /// each pin or release is solved on backward Euler (transition-BE), which
-    /// ends the `z=-1` residual an equation-set swap leaves on capless rows.
-    /// The auto-resolver's choice for any cap-coupled railing op-amp.
+    /// clip with square-wave harmonics. The auto-resolver's choice for any
+    /// cap-coupled railing op-amp.
     ActiveSet,
     /// On rail engagement, fall through to the BE NR fallback and run the
     /// constrained re-solve against `state.a_be` (backward Euler).
@@ -188,7 +186,7 @@ pub enum OpampRailMode {
     /// Explicit mode only. It runs backward Euler on every rail-engaged sample,
     /// i.e. on whole rail plateaus (73-96 % of samples on a single-supply
     /// overdrive), which is first-order there: 2-4x the output-peak error of
-    /// `ActiveSet` with transition-BE, at about the same CPU. See
+    /// `ActiveSet`, at about the same CPU. See
     /// `docs/aidocs/OPAMP_RAIL_MODES.md`.
     ActiveSetBe,
     /// Auto-inserted Boyle catch diodes. Soft exponential knee, correct physics.

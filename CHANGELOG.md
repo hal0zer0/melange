@@ -256,6 +256,18 @@ generated state is smaller.
 
 ### Changed
 
+- **An op-amp rail pin or release no longer forces a backward-Euler sample.**
+  With the charge form the pinned solve already keeps capacitor currents
+  consistent. The extra sample re-seeded them with a first-order difference
+  across the edge, which cost accuracy and no longer lowered the residual. On
+  a railing overdrive with incommensurate drive, the waveform error against
+  ngspice is now lower at every rate and level: at 96 kHz, 0.61 mV rms (was
+  0.84) at 0.1 V and 3.55 mV (was 10.09) at 0.5 V. The per-cycle peak error
+  at 0.5 V is larger at 48 and 96 kHz (2.17 / 0.81 % vs 1.43 / 0.43 %). The
+  BE sample had shifted the waveform by 0.2–0.35 samples, which happened to
+  raise the peaks. `diag_transition_be_count` and the `transition-be`
+  build/provenance flag are removed. The two pin decks in the regression set
+  change. Nothing else does.
 - **The trapezoidal integrator now carries the capacitor currents as state
   (the charge, or companion, form), and Kirchhoff's current law holds exactly
   at every sample.** The generated solvers used to sum the circuit equations
@@ -399,10 +411,12 @@ generated state is smaller.
   positive witness is a stiff node (1 kOhm into 10 pF), which trapezoidal
   integration still rings after a stop. The tolerance-floor witness excites
   that node through `q_dot`, at 1x and 4x oversampling.
-- The transition-BE and chord-exit-step witnesses no longer see a carried
-  residual. Their mutants now sit at the Newton floor too: 0.29 uA at the
-  clipper node without the transition-BE sample, and 1.09 uA per sample
-  without the exit step (0.39 uA with it).
+- `opamp_pin_tests.rs` replaces `transition_be_tests.rs`. A railing op-amp takes
+  no backward-Euler sample and the clipper node sits at the Newton floor
+  (0.29 uA). At 96 kHz the render is 0.32 mV rms from a 768 kHz render at the
+  op-amp output, and 4.1 mV rms at `out`. The chord-exit-step witness no
+  longer sees a carried residual: 1.09 uA per sample without the exit step,
+  0.39 uA with it.
 - The regression capture fails a render whose output hits the generated
   output clamp, unless its entry declares that the clamp is intended and why.
   On clamped samples the recording measures the clamp, not the circuit. The

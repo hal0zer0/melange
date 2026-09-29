@@ -195,7 +195,7 @@ system via DK reduction).
    ActiveSetBe was verified: raw peak bounded 10.70–10.76 V at every
    tested amplitude; trap NR fails frequently at heavy clip but the BE
    fallback converges every time. The auto choice for such decks is now
-   `active-set` with transition-BE (see `OPAMP_RAIL_MODES.md`). BoyleDiodes remains opt-in (flag
+   `active-set` (see `OPAMP_RAIL_MODES.md`). BoyleDiodes remains opt-in (flag
    `--opamp-rail-mode boyle-diodes`) and correct for light clip and
    control-path topologies. See `DEBUGGING.md` "Op-amp BoyleDiodes
    Failure Signatures" for the full heavy-clip failure signature and

@@ -29,9 +29,7 @@ pub enum OpampRailModeReason {
     /// At least one clamped op-amp has an output cap coupling into a downstream
     /// non-feedback node. The post-NR hard clamp would corrupt that cap's
     /// trapezoidal history on rail-violating samples. Auto-select `ActiveSet`
-    /// to keep KCL consistent; a trapezoidal build solves the sample after each
-    /// pin or release on backward Euler (transition-BE), which ends the `z=-1`
-    /// residual an equation-set swap leaves on capless rows. This holds for
+    /// to keep KCL consistent. This holds for
     /// audio-path and control-path topologies alike; `ActiveSetBe` (backward
     /// Euler on every rail-engaged sample) is an explicit mode only, since it
     /// damps whole rail plateaus and measures 2-4x the peak error. (`BoyleDiodes` has since landed as an explicit

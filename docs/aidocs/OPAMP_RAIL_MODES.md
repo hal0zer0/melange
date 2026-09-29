@@ -25,12 +25,12 @@ heavy-clip convergence bug documented below.
 
 | Circuit | Auto-detect picks | Why |
 |---|---|---|
-| Op-amp output capacitor-coupled downstream (overdrive into a clipper, a compressor sidechain, a line stage) | `ActiveSet` | Pin at the rail and re-solve keeps the coupling cap's history consistent; on a trapezoidal build the sample after each pin or release is solved on backward Euler (transition-BE, below) |
+| Op-amp output capacitor-coupled downstream (overdrive into a clipper, a compressor sidechain, a line stage) | `ActiveSet` | Pin at the rail and re-solve keeps the coupling cap's history consistent (see "A pin or release takes no backward-Euler sample", below) |
 | Op-amp outputs only DC-coupled downstream | `Hard` | A post-solve clamp has no cap history to corrupt |
 | `.model OA(GBW=…)` with no VCC/VEE/VSAT | a **clamped** mode (`Hard`/`ActiveSet` by coupling) | GBW triggers the ±13 V auto-default rails (`mna.rs`, priority VCC/VEE > VSAT > GBW-default), so the op-amp is NOT rail-free. Caveat: the default applies per side — a single-supply card like `OA(VCC=9 GBW=3MEG)` gets an asymmetric 9 V / −13 V clamp window, not 9 V / 0 V |
 | Truly infinite rails (no VCC, no VEE, no VSAT, **and no GBW**) | `None` | Linear VCCS, no clamping needed |
 
-The auto-detector is `codegen::ir::resolve_opamp_rail_mode` (`crates/melange-solver/src/codegen/ir/opamp_rail.rs`). It checks each clamped op-amp's output for a capacitor coupling into a node other than its own inverting input. `ActiveSetBe` and `BoyleDiodes` are explicit modes only. Whether the op-amp drives a nonlinear device through resistors (a sidechain) or only through the coupling cap does not change the choice: transition-BE serves both.
+The auto-detector is `codegen::ir::resolve_opamp_rail_mode` (`crates/melange-solver/src/codegen/ir/opamp_rail.rs`). It checks each clamped op-amp's output for a capacitor coupling into a node other than its own inverting input. `ActiveSetBe` and `BoyleDiodes` are explicit modes only. Whether the op-amp drives a nonlinear device through resistors (a sidechain) or only through the coupling cap does not change the choice.
 
 ## Which solver runs which mode
 
@@ -94,8 +94,8 @@ could not contract once a junction conducted.
 |---|---|---|---|
 | `None` | Linear VCCS at op-amp output, no clamping | Cheapest | Default for ideal-rail op-amps |
 | `Hard` | Post-NR `v[out].clamp(VEE, VCC)` after the trap step | ~free | Broken: cap history corruption (see `opamp_rail_clamp_bug.md`) |
-| `ActiveSet` | Detect rail engagement, pin v[out] = rail, re-solve constrained; the sample after each pin or release is solved on BE (transition-BE, below) | +1 LU per engaged sample; one BE sample per pin/release | **Production: the auto choice for any cap-coupled railing op-amp** |
-| `ActiveSetBe` | Same as ActiveSet but every rail-engaged sample is solved on BE | +1 LU + BE solve per engaged sample | Explicit only: first-order on rail plateaus, 2–4× the peak error of ActiveSet + transition-BE |
+| `ActiveSet` | Detect rail engagement, pin v[out] = rail, re-solve constrained, on the build's own integrator | +1 LU per engaged sample | **Production: the auto choice for any cap-coupled railing op-amp** |
+| `ActiveSetBe` | Same as ActiveSet but every rail-engaged sample is solved on BE | +1 LU + BE solve per engaged sample | Explicit only: first-order on rail plateaus, 2–5× the error of ActiveSet |
 | `BoyleDiodes` | Augment netlist with internal gain node + catch diodes per clamped op-amp; let NR handle the saturation through the diodes | +N nodes per op-amp; ~1.5x NR work | **Light clip only (amp ≤ 0.05 V)**; diverges at heavy clip |
 
 ## How `BoyleDiodes` works
@@ -190,128 +190,75 @@ Code: search `rust_emitter/nodal_emitter.rs` for `emit_nodal_active_set_resolve`
 
 ## How `ActiveSet` differs from `ActiveSetBe`
 
-`ActiveSet` pins and re-solves on the site's own matrices: trapezoidal on a trapezoidal build. With transition-BE, the sample after each pin or release is solved on backward Euler. `ActiveSetBe` solves every rail-engaged sample on backward Euler. On a single-supply overdrive that is 73–96 % of samples, and its output-peak error is 2–4× larger at every rate (tables below). The two cost about the same CPU.
+`ActiveSet` pins and re-solves on the site's own matrices: trapezoidal on a trapezoidal build, every sample. `ActiveSetBe` solves every rail-engaged sample on backward Euler. On a single-supply overdrive that is 73–96 % of samples, and its error is 2–5× larger at every rate (tables below). The two cost about the same CPU.
 
-## Transition-BE: one backward-Euler sample per pin or release (`ActiveSet`)
+## A pin or release takes no backward-Euler sample
 
 A pin replaces the op-amp's output row with the rail constraint; a release gives
-it back. That is an equation-set swap of the same kind as a `.switch` toggle.
-The sample after the swap starts from a `q_dot` (the carried capacitor currents,
-`COMPANION_MODELS.md` "Charge (Companion) Form") built on the old equation set.
-One backward-Euler sample does not read that `q_dot`, re-seeds it from its own
-capacitor currents, and damps the mode the step excited (BE is L-stable); trap
-resumes on the next sample.
+it back. Under the charge form (`COMPANION_MODELS.md` "Charge (Companion) Form")
+both the pinned solve and the release commit a consistent capacitor current
+`q_dot`, so the swap leaves no carried residual. A backward-Euler sample at the
+swap would re-seed `q_dot` with a backward difference across the edge; measured,
+it no longer lowered the residual and it cost accuracy, so no BE sample is taken
+(the breakpoint-BE countdown keeps its other sources: `.switch`/`.pot` setters
+and the glow).
 
-Under the whole-system trapezoidal form the swap also fed the swap sample's
-residual into that form's `z = −1` walk. On a **capless nonlinear row**
-downstream of the pinned output (the diode node of a clipper behind the output
-coupling cap and a resistor) the walk never decays: the row satisfies only the
-two-sample *average* of its KCL. Fingerprint: the row's KCL residual alternates
-in sign every sample, `r_n + r_(n−1) ≈ 0`, with `|r|` far above the floor. A
-filtered output hides it (the `out` node of the test deck below carries ~1e-9 V
-at Nyquist). The charge form carries no such walk: on the deck below with the
-transition-BE sample removed, the `n2` KCL residual is 0.29–0.43 µA at
-48 / 96 / 192 kHz and 0.1 / 0.5 V, the floor. At 1 kHz, 0.5 V, 48 kHz against a
-768 kHz render (transition-BE on in both forms),
-the op-amp output RMS error is 1.1 mV and the clipper node 0.29 mV (0.49 V and
-0.23 V under the whole-system form). Whether transition-BE still earns its keep
-under the charge form is pending re-measurement (`STATUS.md` Pending Work).
+Measured 2026-09-29 on a single-supply overdrive (TL072 card, AOL 200k, rails
+0/9 V, gain ~107, output cap → 1k → antiparallel 1N914 → 10k/22n → output), 1×:
 
-On a trapezoidal nodal build in `ActiveSet` mode with a clampable op-amp
-(`SolverConfig::transition_be`), a change in any op-amp's pin state between the
-committed previous sample and this one arms the breakpoint-BE countdown. The
-pin is its third source, after the `.switch`/`.pot` setters and the glow. The
-next sample runs the same backward-Euler solve a `--backward-euler` build runs,
-on both nodal sub-paths and on the linear (M = 0) solves. The comparison uses
-the inclusive rail tests of the active-set check against `state.v_prev`, so it
-needs no state of its own and is right after a DC OP, a `reset()` or a NaN
-recovery. `diag_transition_be_count` counts the pin changes. The build header
-and provenance JSON say `transition-be`. `ActiveSetBe`, `Hard`, `None` and BE
-builds emit nothing for it.
+| Drive | n2 KCL residual, last 0.1 s (48k / 96k / 192k) |
+|---|---|
+| 0.1 V | 0.30 / 0.31 / 0.39 µA |
+| 0.5 V | 0.35 / 0.29 / 0.43 µA |
 
-The tables in the rest of this section were measured with the whole-system
-trapezoidal integrator; under the charge form they are pending re-measurement.
+That is the Newton acceptance floor, with zero backward-Euler samples.
 
-Measured on a single-supply overdrive (TL072 card, AOL 200k, rails 0/9 V, gain
-~107, output cap → 1k → antiparallel 1N914 → 10k/22n → output), 1 kHz, 1×,
-1 s, ngspice reference with the op-amp as an ideal clamped VCCS (matched to the
-melange model; converged: 0.5 µs and 0.1 µs/reltol 1e-5 agree to 6e-6):
+Against an ngspice twin (the op-amp as an ideal clamped VCCS matched to the
+melange model; 0.2 µs step), incommensurate drive 1001.3 Hz so the rail-edge
+timing sweeps the sample grid, last 0.5 s. RMS waveform error, unaligned:
 
-| Drive | Build | n2 KCL residual, last 0.1 s (48k / 96k / 192k) |
+| Drive | Build | 48k / 96k / 192k |
 |---|---|---|
-| 0.1 V | ActiveSet without transition-BE | 0.77 / 191 / 153 µA |
-| 0.1 V | ActiveSet with transition-BE | 0.29 / 0.56 / 0.26 µA |
-| 0.5 V | ActiveSet without transition-BE | 105 / 230 / 2650 µA |
-| 0.5 V | ActiveSet with transition-BE | 0.44 / 0.96 / 1.90 µA |
-| both | ActiveSetBe | 0.27–0.40 µA |
+| 0.1 V | ActiveSet | 2.51 / 0.61 / 0.21 mV |
+| 0.1 V | ActiveSetBe | 10.51 / 5.09 / 2.58 mV |
+| 0.5 V | ActiveSet | 9.74 / 3.55 / 0.85 mV |
+| 0.5 V | ActiveSetBe | 14.03 / 7.56 / 3.49 mV |
 
-The BE count equals the pin-transition count exactly (4 per cycle). What
-remains with transition-BE is not the transition: the BE sample reads
-0.006 µA. The residual regrows within each rail plateau. That is the pinned
-resolve's acceptance, see STATUS Pending Work.
+Worst-case per-cycle peak error, same renders:
 
-**Rate convergence of the output peak, and why it is measured incommensurate.**
-The acceptance for this change was pre-registered as the output-peak error at
-1 kHz, required to converge monotonically with rate and to be no worse than
-`ActiveSetBe` at each rate. It was **amended after the run** to the worst-case
-per-cycle peak error under an incommensurate drive (1001.3 Hz). The reason:
-at 1 kHz every test rate has an integer number of samples per cycle, so the
-rail-edge timing error is phase-locked to the grid, and each rate samples one
-fixed point of an O(T) band. That metric measures grid alignment, not
-convergence. The same band shows in the peak-to-peak error. The amended metric
-is applied identically to every mode, and "no worse than `ActiveSetBe`" holds
-under both.
+| Drive | Build | 48k / 96k / 192k |
+|---|---|---|
+| 0.1 V | ActiveSet | 0.80 / 0.23 / 0.09 % |
+| 0.1 V | ActiveSetBe | 2.64 / 1.13 / 0.54 % |
+| 0.5 V | ActiveSet | 2.17 / 0.81 / 0.24 % |
+| 0.5 V | ActiveSetBe | 3.60 / 1.94 / 0.78 % |
 
-| Drive | Build | 1 kHz peak error (48k / 96k / 192k) | 1001.3 Hz worst-case per-cycle error |
-|---|---|---|---|
-| 0.1 V | ActiveSet + transition-BE | −0.902 / −0.307 / −0.088 % | 1.073 / 0.314 / 0.116 % |
-| 0.1 V | ActiveSetBe | −2.445 / −0.948 / −0.513 % | 2.889 / 1.061 / 0.528 % |
-| 0.5 V | ActiveSet + transition-BE | −0.251 / −0.067 / −0.243 % | 1.505 / 0.474 / 0.277 % |
-| 0.5 V | ActiveSetBe | −2.179 / −1.332 / −0.710 % | 3.648 / 1.953 / 0.814 % |
-| 0.5 V | ActiveSet without transition-BE | −0.969 / −0.052 / −0.747 % | 2.219 / 1.070 / 2.501 % |
+At 0.5 V the peak metric alone favoured a BE sample at each pin and release
+(1.43 / 0.43 / 0.27 %) while its waveform error was worse (10.9 / 10.1 /
+0.91 mV): that build's waveform only matched when shifted by 0.2–0.35 samples,
+a timing error that happened to raise the cycle peaks. The waveform error is
+the gate. Against a 768 kHz render of the same build at 1 kHz 0.5 V, the 96 kHz
+render sits 0.32 mV rms off at the op-amp output and 4.1 mV at `out`
+(`opamp_pin_tests.rs`).
 
 **Rule for future gates:** a rate-convergence gate on an edge-driven deck uses
-an incommensurate drive frequency by default.
-
-`ActiveSetBe` costs no more CPU than `ActiveSet` + transition-BE on this deck
-(6.1 vs 6.8 µs/sample at 48k, within run noise). Its cost is accuracy: it runs
-BE on 73–96 % of samples (whole rail plateaus), and its first-order error is
-2–4× the transition-BE error in every cell above.
+an incommensurate drive frequency by default: at 1 kHz every test rate has an
+integer number of samples per cycle, so the rail-edge timing error is
+phase-locked to the grid and each rate samples one fixed point of an O(T) band.
 
 A control-path deck (inverting stage, rails ±9 V, driving a rectifier diode
-through 10k into 2 MΩ, no capacitor at either diode node) is auto-promoted to
-a backward-Euler build, so neither mechanism applies to it as routed. Forced to
-trap, the lock appears at 192k only (33.7 µA on the rectifier node, alternating)
-and transition-BE removes it (0.13 µA). At 48k and 96k that deck sits at the
-floor either way. **This is confirmed under a forced trap only.**
+through 10k into 2 MΩ, no capacitor at either diode node) is auto-promoted to a
+backward-Euler build, so this does not apply to it as routed.
 
-Auto resolution picks `ActiveSet` + transition-BE for every cap-coupled
-railing op-amp. The residual gate was re-scoped to what the solver can promise: the
-walk is bounded (flat per-second maxima over 30 s at 768k), and at its maximum
-it stays within the main loop's own row tolerance. Two golden decks,
-`opamp-pin-audio` and `opamp-pin-control`, pin every half cycle. Against the
-ngspice twin, the output-peak error of the audio deck went from −2.18 / −1.33 /
-−0.71 % (auto `ActiveSetBe`) to −0.25 / −0.07 / −0.24 % at 0.5 V and
-48/96/192k, and from −2.45 / −0.95 / −0.51 % to −0.90 / −0.31 / −0.09 % at 0.1 V.
+Two golden decks, `opamp-pin-audio` and `opamp-pin-control`, pin every half
+cycle.
 
 **Railing at 1× aliases, in every mode.** A railing op-amp switches rail to
 rail within a sample, and the harmonics of those edges fold back below
-Nyquist. A 0.5 V, 15 978 Hz tone into the overdrive deck at 48 kHz:
+Nyquist. At 4× both modes converge. Oversample railing decks. Compile prints a
+notice when the automatic choice is `ActiveSet` at 1×.
 
-| Build | Alias at 66 Hz | 16 kHz fundamental |
-|---|---|---|
-| 1× ActiveSet + transition-BE | 0.439 V | 0.0247 V |
-| 1× ActiveSetBe | 0.216 V | 0.0384 V |
-| 4× ActiveSet + transition-BE | 0.0005 V | 0.0364 V |
-| 4× ActiveSetBe | 0.0011 V | 0.0366 V |
-
-ASBe's lower 1× alias is dissipation, not accuracy: its alias is still 6× its
-fundamental, and the same damping removes real top-octave content on any deck.
-At 4× both modes converge. Oversample railing decks. Compile prints a notice
-when the automatic choice is `ActiveSet` at 1×.
-
-Code: `emit_transition_be_detect` / `emit_transition_be_arm` in
-`rust_emitter/helpers.rs`. Tests: `transition_be_tests.rs`.
+Tests: `opamp_pin_tests.rs`.
 
 ## The `Hard` mode bug (historical)
 
@@ -363,4 +310,4 @@ These are the agent-memory files with full session-by-session investigation hist
 - Don't propose global Gmin bumps without checking what value it changes from (1e-12 to 1e-6 breaks linear behaviour at high-Z nodes).
 - Don't propose C_dom at `_oa_int_`. Any value > ~5 pF breaks linear.
 - Don't propose Boyle 1974 as a "new idea" — the scaffolding is 90% built (`augment_netlist_with_boyle_diodes`); the open question is the heavy-clip NR convergence on the EXISTING scaffolding, not building scaffolding from scratch.
-- Don't claim a railing overdrive "doesn't work". It runs under auto-detected `ActiveSet` + transition-BE with no flag. The OPEN problem is BoyleDiodes mode at heavy clip, which is opt-in only.
+- Don't claim a railing overdrive "doesn't work". It runs under auto-detected `ActiveSet` with no flag. The OPEN problem is BoyleDiodes mode at heavy clip, which is opt-in only.

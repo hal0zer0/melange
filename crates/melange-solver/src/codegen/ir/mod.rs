@@ -506,8 +506,7 @@ pub struct SolverConfig {
     /// the carried charge derivative `q_dot` built on the old values: after a
     /// capacitor change, `alpha·C_new·v_prev` meets a `q_dot` built on `C_old`.
     ///
-    /// When `true`, `set_switch_*`/`set_pot_*` (and, under
-    /// [`Self::transition_be`], an op-amp rail pin/release) arm a one-sample countdown
+    /// When `true`, `set_switch_*`/`set_pot_*` (and a lit glow device) arm a one-sample countdown
     /// (`BREAKPOINT_BE_SAMPLES = 1`) that routes the next sample through the
     /// L-stable backward-Euler matrices. The BE sample does not read `q_dot`,
     /// re-seeds it from its own capacitor currents, and damps the mode the step
@@ -525,17 +524,6 @@ pub struct SolverConfig {
     /// per-sample Δg self-corrects.
     #[serde(default)]
     pub breakpoint_be: bool,
-    /// Arm the breakpoint-BE countdown on an op-amp rail pin-state change under
-    /// [`crate::codegen::OpampRailMode::ActiveSet`] (nodal route, trapezoidal
-    /// build): the third source for [`Self::breakpoint_be`], after the
-    /// `.switch`/`.pot` setters and the glow.
-    ///
-    /// A pin or a release is an equation-set swap of the same kind as a switch
-    /// toggle: the op-amp's output row is replaced by the rail constraint (or
-    /// given back). The sample after the swap is solved on backward Euler,
-    /// which does not read the `q_dot` built on the old set and re-seeds it.
-    #[serde(default)]
-    pub transition_be: bool,
     /// Requested nodal sub-path override (see
     /// [`crate::codegen::NodalSubPathOverride`]). `Auto` is the shipping
     /// behaviour; the forcing modes are diagnostic escape hatches.
@@ -2086,7 +2074,6 @@ impl CircuitIR {
             // DK codegen path does not emit the runtime BE-latch net yet.
             runtime_be_latch: false,
             breakpoint_be: false,
-            transition_be: false,
             opamp_rail_mode: rail_mode.mode,
             opamp_rail_mode_reason: rail_mode_reason.clone(),
             emit_dc_op_recompute: config.emit_dc_op_recompute,
@@ -3128,7 +3115,6 @@ impl CircuitIR {
             // final `solver_config.backward_euler`).
             runtime_be_latch: false,
             breakpoint_be: false,
-            transition_be: false,
             opamp_rail_mode: rail_mode.mode,
             opamp_rail_mode_reason: rail_mode_reason.clone(),
             emit_dc_op_recompute: config.emit_dc_op_recompute,
@@ -3444,20 +3430,13 @@ impl CircuitIR {
             .nonlinear_devices
             .iter()
             .any(|d| d.device_type == crate::mna::NonlinearDeviceType::Glow);
-        // An op-amp rail pin-state change under ActiveSet is the third source
-        // (see `SolverConfig::transition_be`). Armed at runtime by the pin
-        // transition itself, so a build that never pins stays on trap.
-        solver_config.transition_be = !solver_config.backward_euler
-            && solver_config.opamp_rail_mode == crate::codegen::OpampRailMode::ActiveSet
-            && mna
-                .opamps
-                .iter()
-                .any(|oa| oa.n_out_idx > 0 && (oa.vcc.is_finite() || oa.vee.is_finite()));
-        solver_config.breakpoint_be = !solver_config.backward_euler
-            && (!mna.switches.is_empty()
-                || has_knob_pot
-                || has_glow
-                || solver_config.transition_be);
+        // An op-amp rail pin or release is not a source: under the charge form
+        // the pinned solve and the release commit a consistent q_dot, and a
+        // backward-Euler sample there only re-seeds q_dot with a backward
+        // difference across the edge (measured: it no longer lowers the
+        // residual and costs output accuracy).
+        solver_config.breakpoint_be =
+            !solver_config.backward_euler && (!mna.switches.is_empty() || has_knob_pot || has_glow);
 
         // Sub-sample fire: variable-dt breakpoint re-solve at a glow strike.
         // Nodal route only (this builder), latched device required; the
@@ -7167,8 +7146,7 @@ U3 0 sum3 out OA1
     /// output drives a rectifier through a resistor) topologies used to resolve
     /// to different modes, because a backward-Euler step on every rail-engaged
     /// sample was thought to suit one and not the other. Both now resolve to
-    /// `ActiveSet`: a trapezoidal build solves the sample after each pin or
-    /// release on backward Euler (transition-BE), which clears the `z=-1`
+    /// `ActiveSet`: under the charge form a pin or release leaves no carried
     /// residual on capless rows in either topology, and `ActiveSetBe` is an
     /// explicit mode only.
     #[test]

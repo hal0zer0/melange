@@ -4394,8 +4394,6 @@ fn simulate_circuit_source(
             // stays silent rather than reporting a reassuring zero for a
             // mechanism it does not have.
             .chain(["diag_nr_hold_count", "diag_nr_unconverged_commit_count"])
-            // One backward-Euler sample per op-amp rail pin/release (ActiveSet).
-            .chain(["diag_transition_be_count"])
             .chain(INPUT_DIAG_FIELDS)
             .filter(|f| declares_state_field(&generated.code, f))
             .collect::<Vec<&str>>(),

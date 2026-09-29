@@ -1076,7 +1076,7 @@
       "has_noise": false,
       "noise_mode": "off",
       "emit_dc_op_recompute": false,
-      "notes": "Op-amp rail pin coverage, audio-path class (auto resolves active-set-be). COVERAGE-ONLY entry added 2026-09-28, in-repo deck (tools/golden-harness/decks). No golden program had pinned an op-amp under any active-set mode, so a change to rail handling was attributed to nothing. At 0.5 V the op-amp (gain ~107, rails 0/9 V) pins every half cycle; the diode node behind the output cap is capless. Correctness is gated in crates/melange-solver/tests/transition_be_tests.rs and opamp_railing_regression_tests.rs."
+      "notes": "Op-amp rail pin coverage, audio-path class (auto resolves active-set; it resolved active-set-be when added). COVERAGE-ONLY entry added 2026-09-28, in-repo deck (tools/golden-harness/decks). No golden program had pinned an op-amp under any active-set mode, so a change to rail handling was attributed to nothing. At 0.5 V the op-amp (gain ~107, rails 0/9 V) pins every half cycle; the diode node behind the output cap is capless. Correctness is gated in crates/melange-solver/tests/transition_be_tests.rs and opamp_railing_regression_tests.rs."
     },
     {
       "plugin": "opamp-pin-control",
@@ -1100,7 +1100,7 @@
       "has_noise": false,
       "noise_mode": "off",
       "emit_dc_op_recompute": false,
-      "notes": "Op-amp rail pin coverage, control-path class (auto resolves active-set, trapezoidal, transition-BE armed). COVERAGE-ONLY entry added 2026-09-28, in-repo deck. The audio-path deck plus an envelope-detector sidechain (10k into a diode and 1u/1Meg hold) off the op-amp output. At 0.5 V it pins every half cycle and exercises the transition-BE sample."
+      "notes": "Op-amp rail pin coverage, control-path class (auto resolves active-set, trapezoidal; a pin takes no backward-Euler sample since 2026-09-29). COVERAGE-ONLY entry added 2026-09-28, in-repo deck. The audio-path deck plus an envelope-detector sidechain (10k into a diode and 1u/1Meg hold) off the op-amp output. At 0.5 V it pins every half cycle and exercises the transition-BE sample."
     }
   ],
   "corpus_role": "WHAT THIS CORPUS IS, AND IS NOT (recorded 2026-09-02 after getting it wrong twice in one day). It is a CHANGE DETECTOR: it compares melange against melange, so a deck's circuit quality is irrelevant to catching a refactor that moves output. It is NOT an ACCURACY ORACLE. 44 of the pre-prune 46 decks were unstable/ tier and stable/ is empty, so almost every deck is an in-progress or abandoned circuit. NEVER cite a render from these decks as evidence about a circuit, about which solver path is more correct, or about audible behaviour \u2014 'rigour applied to a broken ruler produces confident wrong conclusions, not safe ones' (oomox user, 2026-08-16). Note the asymmetry that makes the corpus still useful: AGREEMENT is robust to deck quality (a bad circuit cannot manufacture agreement between two implementations), DISAGREEMENT is not (it cannot separate 'the code differs' from 'this circuit is pathological'). A broken deck may DETECT a defect; it can never BE the evidence for one. Adjudicating accuracy requires ngspice, on a completed deck.",
@@ -1187,7 +1187,7 @@
     "generated_source": "Differs on the seven op-amp decks whose baked DC_OP moved (gravity, moonladder, pipe-shouter, sad-bastard, subspace radio-am/fm, vurli)."
   },
   "added_2026_09_28_opamp_pin_coverage": {
-    "why": "No golden program had pinned an op-amp under any active-set mode, so a change to rail handling (transition-BE, or moving the automatic rail-mode choice) was attributed to nothing. Two in-repo decks at a 0.5 V manifest level pin every half cycle: opamp-pin-audio (auto resolves active-set-be) and opamp-pin-control (auto resolves active-set, trapezoidal, transition-BE armed).",
+    "why": "No golden program had pinned an op-amp under any active-set mode, so a change to rail handling (a BE sample at a pin, or moving the automatic rail-mode choice) was attributed to nothing. Two in-repo decks at a 0.5 V manifest level pin every half cycle: opamp-pin-audio (auto resolves active-set-be) and opamp-pin-control (auto resolves active-set, trapezoidal, transition-BE armed).",
     "baseline": "Their first capture is a new baseline, not a restored one."
   },
   "output_clamp_levels_2026_09_28": {

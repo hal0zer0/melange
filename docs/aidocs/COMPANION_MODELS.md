@@ -133,7 +133,7 @@ sources) carries none, because its RHS never reads it.
 | Event | `q_dot` after the event |
 |---|---|
 | Trapezoidal sample | `alpha·C·(x_{n+1} − x_n) − q_dot` |
-| Backward-Euler sample inside a trap build (NR/ringing fallback, breakpoint-BE, transition-BE, BE-latch) | `(C/T)·(x_{n+1} − x_n)` — BE's own capacitor current; the BE RHS does not read `q_dot` |
+| Backward-Euler sample inside a trap build (NR/ringing fallback, breakpoint-BE, BE-latch) | `(C/T)·(x_{n+1} − x_n)` — BE's own capacitor current; the BE RHS does not read `q_dot` |
 | Adaptive sub-steps, sub-sample-fire segments | advanced per sub-step at the sub-step's own `alpha` (and its own integrator) |
 | Held (unconverged) sample | unchanged |
 | NaN / magnitude reset, `set_dc_operating_point()`, DK `recompute_dc_op()` writeback | `0` (rest) |
