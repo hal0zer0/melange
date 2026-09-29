@@ -234,28 +234,45 @@ fn hash_source(source: &str) -> u64 {
 
 // ── Main generation templates ──────────────────────────────────────────
 
+/// What [`generate_simulate_main`] emits (named, so two same-typed options
+/// cannot be passed in each other's place).
+pub struct SimulateMain<'a> {
+    pub sample_rate: f64,
+    pub pot_calls: &'a [String],
+    pub switch_calls: &'a [String],
+    pub amplitude: Option<f64>,
+    pub freq: f64,
+    pub duration_secs: f64,
+    pub probe_names: &'a [&'a str],
+    pub noise_enabled: bool,
+    pub inject_driven: &'a [(usize, InjectSource)],
+    pub num_inject: usize,
+    pub extra_diag_counters: &'a [&'a str],
+    /// `--pcm16`: write 16-bit signed PCM instead of the default IEEE float32.
+    /// Affects the FILE FORMAT only; the rendered samples are identical, and
+    /// the DIAG figures are computed from the f64 buffer before encoding.
+    pub pcm16: bool,
+}
+
 /// Generate a `fn main()` for the `simulate` command.
 ///
 /// The binary reads input WAV from argv[1], writes output WAV to argv[2].
 /// Supports both WAV file input and sine test tone generation.
-#[allow(clippy::too_many_arguments)]
-pub fn generate_simulate_main(
-    sample_rate: f64,
-    pot_calls: &[String],
-    switch_calls: &[String],
-    amplitude: Option<f64>,
-    freq: f64,
-    duration_secs: f64,
-    probe_names: &[&str],
-    noise_enabled: bool,
-    inject_driven: &[(usize, InjectSource)],
-    num_inject: usize,
-    extra_diag_counters: &[&str],
-    // `--pcm16`: write 16-bit signed PCM instead of the default IEEE float32.
-    // Affects the FILE FORMAT only; the rendered samples are identical, and
-    // the DIAG figures are computed from the f64 buffer before encoding.
-    pcm16: bool,
-) -> String {
+pub fn generate_simulate_main(main: SimulateMain<'_>) -> String {
+    let SimulateMain {
+        sample_rate,
+        pot_calls,
+        switch_calls,
+        amplitude,
+        freq,
+        duration_secs,
+        probe_names,
+        noise_enabled,
+        inject_driven,
+        num_inject,
+        extra_diag_counters,
+        pcm16,
+    } = main;
     // Optional `CircuitState` u64 diagnostic counters that exist only on some
     // builds (e.g. `diag_subsample_fire_count` on glow nodal-Schur decks).
     // Printed as `DIAG:<name without diag_>=<value>` after the fixed set.

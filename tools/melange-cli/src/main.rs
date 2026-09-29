@@ -7,8 +7,6 @@
 //!   melange sources list
 //!   melange builtins
 
-// CLI driver functions take many parameters by nature (mirrors the solver lib).
-#![allow(clippy::too_many_arguments)]
 // Doc comments use markdown lists whose continuations render fine.
 #![allow(clippy::doc_lazy_continuation)]
 
@@ -1167,43 +1165,45 @@ fn main() -> Result<()> {
 
             compile_circuit_source(
                 &circuit_source,
-                &output,
-                sample_rate,
-                &input_node,
-                &output_node,
-                max_iter,
-                tolerance,
-                output_scale,
-                output_clamp,
-                format,
-                level_params,
-                input_resistance_flag,
-                oversampling,
-                no_dc_block,
-                &solver,
-                backward_euler,
-                force_trap,
-                &tube_grid_fa,
-                subsample_fire_mode,
-                subsample_lit_factor,
-                &bjt_fa,
-                rail_mode,
-                nodal_sub_path_override,
-                allow_static_glow_on_full_lu,
-                noise_mode,
-                noise_seed,
-                emit_dc_op_recompute,
-                allow_unconverged_dc_op,
-                name.as_deref(),
-                mono,
-                wet_dry_mix,
-                !no_ear_protection,
-                vendor.as_deref(),
-                vendor_url.as_deref(),
-                email.as_deref(),
-                vst3_id.as_deref(),
-                clap_id.as_deref(),
-                cpu_baseline,
+                CompileOptions {
+                    output: &output,
+                    sample_rate,
+                    input_node: &input_node,
+                    output_node: &output_node,
+                    max_iter,
+                    tolerance,
+                    output_scale,
+                    output_clamp,
+                    format,
+                    with_level_params: level_params,
+                    input_resistance_flag,
+                    oversampling_cli: oversampling,
+                    no_dc_block,
+                    solver_override: &solver,
+                    backward_euler,
+                    force_trap,
+                    tube_grid_fa: &tube_grid_fa,
+                    subsample_fire: subsample_fire_mode,
+                    subsample_lit_factor,
+                    bjt_fa: &bjt_fa,
+                    opamp_rail_mode: rail_mode,
+                    nodal_sub_path_override,
+                    allow_static_glow_on_full_lu,
+                    noise_mode,
+                    noise_seed,
+                    emit_dc_op_recompute,
+                    allow_unconverged_dc_op,
+                    plugin_name: name.as_deref(),
+                    mono,
+                    wet_dry_mix,
+                    ear_protection: !no_ear_protection,
+                    vendor: vendor.as_deref(),
+                    vendor_url: vendor_url.as_deref(),
+                    email: email.as_deref(),
+                    vst3_id_override: vst3_id.as_deref(),
+                    clap_id_override: clap_id.as_deref(),
+                    cpu_baseline,
+                },
             )
         }
         Commands::Validate {
@@ -1256,27 +1256,29 @@ fn main() -> Result<()> {
             println!("Resolved circuit: {}", circuit_source.name());
             validate_circuit_source(
                 &circuit_source,
-                &output_node,
-                sample_rate,
-                duration,
-                amplitude,
-                &input_node,
-                csv.as_ref(),
-                relaxed,
-                ToleranceOverrides {
-                    rms_pct: rms_tolerance,
-                    peak_v: peak_tolerance,
-                    max_rel_pct: max_rel_tolerance,
-                    corr_min,
-                    thd_db: thd_tolerance,
+                ValidateOptions {
+                    output_node: &output_node,
+                    sample_rate,
+                    duration,
+                    amplitude,
+                    input_node: &input_node,
+                    csv_output: csv.as_ref(),
+                    relaxed,
+                    tol: ToleranceOverrides {
+                        rms_pct: rms_tolerance,
+                        peak_v: peak_tolerance,
+                        max_rel_pct: max_rel_tolerance,
+                        corr_min,
+                        thd_db: thd_tolerance,
+                    },
+                    reductions: ReductionModes {
+                        bjt_fa: &bjt_fa,
+                        tube_grid_fa: &tube_grid_fa,
+                        backward_euler,
+                        force_trap,
+                    },
+                    oversampling,
                 },
-                ReductionModes {
-                    bjt_fa: &bjt_fa,
-                    tube_grid_fa: &tube_grid_fa,
-                    backward_euler,
-                    force_trap,
-                },
-                oversampling,
             )
         }
         Commands::Simulate {
@@ -1676,12 +1678,13 @@ fn build_error(e: melange_solver::build::BuildError) -> anyhow::Error {
     }
 }
 
-fn compile_circuit_source(
-    circuit_source: &circuits::CircuitSource,
-    output: &PathBuf,
+/// `melange compile`'s options (named, so two same-typed options cannot be
+/// passed in each other's place).
+struct CompileOptions<'a> {
+    output: &'a PathBuf,
     sample_rate: f64,
-    input_node: &str,
-    output_node: &str,
+    input_node: &'a str,
+    output_node: &'a str,
     max_iter: usize,
     tolerance: f64,
     output_scale: f64,
@@ -1691,13 +1694,13 @@ fn compile_circuit_source(
     input_resistance_flag: Option<f64>,
     oversampling_cli: Option<usize>,
     no_dc_block: bool,
-    solver_override: &str,
+    solver_override: &'a str,
     backward_euler: bool,
     force_trap: bool,
-    tube_grid_fa: &str,
+    tube_grid_fa: &'a str,
     subsample_fire: melange_solver::codegen::SubsampleFireMode,
     subsample_lit_factor: Option<f64>,
-    bjt_fa: &str,
+    bjt_fa: &'a str,
     opamp_rail_mode: melange_solver::codegen::OpampRailMode,
     nodal_sub_path_override: melange_solver::codegen::NodalSubPathOverride,
     allow_static_glow_on_full_lu: bool,
@@ -1705,17 +1708,61 @@ fn compile_circuit_source(
     noise_seed: u64,
     emit_dc_op_recompute: bool,
     allow_unconverged_dc_op: bool,
-    plugin_name: Option<&str>,
+    plugin_name: Option<&'a str>,
     mono: bool,
     wet_dry_mix: bool,
     ear_protection: bool,
-    vendor: Option<&str>,
-    vendor_url: Option<&str>,
-    email: Option<&str>,
-    vst3_id_override: Option<&str>,
-    clap_id_override: Option<&str>,
+    vendor: Option<&'a str>,
+    vendor_url: Option<&'a str>,
+    email: Option<&'a str>,
+    vst3_id_override: Option<&'a str>,
+    clap_id_override: Option<&'a str>,
     cpu_baseline: plugin_template::CpuBaseline,
+}
+
+fn compile_circuit_source(
+    circuit_source: &circuits::CircuitSource,
+    opts: CompileOptions<'_>,
 ) -> Result<()> {
+    let CompileOptions {
+        output,
+        sample_rate,
+        input_node,
+        output_node,
+        max_iter,
+        tolerance,
+        output_scale,
+        output_clamp,
+        format,
+        with_level_params,
+        input_resistance_flag,
+        oversampling_cli,
+        no_dc_block,
+        solver_override,
+        backward_euler,
+        force_trap,
+        tube_grid_fa,
+        subsample_fire,
+        subsample_lit_factor,
+        bjt_fa,
+        opamp_rail_mode,
+        nodal_sub_path_override,
+        allow_static_glow_on_full_lu,
+        noise_mode,
+        noise_seed,
+        emit_dc_op_recompute,
+        allow_unconverged_dc_op,
+        plugin_name,
+        mono,
+        wet_dry_mix,
+        ear_protection,
+        vendor,
+        vendor_url,
+        email,
+        vst3_id_override,
+        clap_id_override,
+        cpu_baseline,
+    } = opts;
     // Netlist node names are normalized (lowercase, gnd→0) at parse time;
     // fold the CLI-provided names the same way so lookups match.
     // Parse comma-separated input nodes (multi-input ports), mirroring the
@@ -2350,25 +2397,42 @@ struct ReductionModes<'a> {
     // Diagnostics (not reductions): melange-side integrator override, for
     // attributing integrator error against ngspice. Oversampling is NOT here —
     // it is not a diagnostic but part of the shipped build, and it rides its
-    // own parameter on `validate_circuit_source`.
+    // own field on `ValidateOptions`.
     backward_euler: bool,
     force_trap: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn validate_circuit_source(
-    circuit_source: &circuits::CircuitSource,
-    output_node: &str,
+/// `melange validate`'s options (named, so two same-typed options cannot be
+/// passed in each other's place).
+struct ValidateOptions<'a> {
+    output_node: &'a str,
     sample_rate: f64,
     duration: f64,
     amplitude: f64,
-    input_node: &str,
-    csv_output: Option<&PathBuf>,
+    input_node: &'a str,
+    csv_output: Option<&'a PathBuf>,
     relaxed: bool,
     tol: ToleranceOverrides,
-    reductions: ReductionModes<'_>,
+    reductions: ReductionModes<'a>,
     oversampling: usize,
+}
+
+fn validate_circuit_source(
+    circuit_source: &circuits::CircuitSource,
+    opts: ValidateOptions<'_>,
 ) -> Result<()> {
+    let ValidateOptions {
+        output_node,
+        sample_rate,
+        duration,
+        amplitude,
+        input_node,
+        csv_output,
+        relaxed,
+        tol,
+        reductions,
+        oversampling,
+    } = opts;
     // Match parse-time node normalization (lowercase, gnd→0).
     let input_node_owned = melange_solver::parser::normalize_node_name(input_node);
     let input_node = input_node_owned.as_str();
@@ -3080,45 +3144,46 @@ fn simulate_circuit_source(
         .iter()
         .map(|(idx, pos)| format!("state.set_switch_{idx}({pos})"))
         .collect();
-    let simulate_main = codegen_runner::generate_simulate_main(
-        opts.sample_rate,
+    let extra_diag_counters = SUBSAMPLE_FIRE_DIAG_FIELDS
+        .iter()
+        .copied()
+        // The unsolved-sample counters exist only where their mechanism
+        // does (the hold on nodal builds with a Newton solve; the committed
+        // count on DK and wherever a failed op-amp pin is committed).
+        // Presence-filtered like the rest, so a build stays silent rather
+        // than reporting a reassuring zero for a mechanism it does not have.
+        .chain([
+            "diag_unsolved_sample_count",
+            "diag_nr_hold_count",
+            "diag_nr_unconverged_commit_count",
+            "diag_warm_start_fallback_count",
+            "diag_reduced_model_exit_count",
+        ])
+        .chain(INPUT_DIAG_FIELDS)
+        .filter(|f| declares_state_field(&generated.code, f))
+        .collect::<Vec<&str>>();
+    let simulate_main = codegen_runner::generate_simulate_main(codegen_runner::SimulateMain {
+        sample_rate: opts.sample_rate,
         // `--pot` is baked into the netlist's R values before the MNA is built
         // (see `apply_pot_overrides`), so there is nothing to set at runtime.
-        &[],
-        &switch_calls,
-        if opts.input_audio.is_none() {
+        pot_calls: &[],
+        switch_calls: &switch_calls,
+        amplitude: if opts.input_audio.is_none() {
             Some(opts.amplitude)
         } else {
             None
         },
-        1000.0, // test tone freq
-        opts.duration,
-        &probe_names,
-        opts.noise_mode != melange_solver::codegen::NoiseMode::Off,
-        &inject_driven,
-        injection_specs.len(),
+        freq: 1000.0, // test tone freq
+        duration_secs: opts.duration,
+        probe_names: &probe_names,
+        noise_enabled: opts.noise_mode != melange_solver::codegen::NoiseMode::Off,
+        inject_driven: &inject_driven,
+        num_inject: injection_specs.len(),
         // Build-conditional counters: only present in the generated state when
         // the emitter resolved the feature active (auto = glow on nodal-Schur).
-        &SUBSAMPLE_FIRE_DIAG_FIELDS
-            .iter()
-            .copied()
-            // The unsolved-sample counters exist only where their mechanism
-            // does (the hold on nodal builds with a Newton solve; the committed
-            // count on DK and wherever a failed op-amp pin is committed).
-            // Presence-filtered like the rest, so a build stays silent rather
-            // than reporting a reassuring zero for a mechanism it does not have.
-            .chain([
-                "diag_unsolved_sample_count",
-                "diag_nr_hold_count",
-                "diag_nr_unconverged_commit_count",
-                "diag_warm_start_fallback_count",
-                "diag_reduced_model_exit_count",
-            ])
-            .chain(INPUT_DIAG_FIELDS)
-            .filter(|f| declares_state_field(&generated.code, f))
-            .collect::<Vec<&str>>(),
-        opts.pcm16,
-    );
+        extra_diag_counters: &extra_diag_counters,
+        pcm16: opts.pcm16,
+    });
     let full_source = format!("{}\n{}", generated.code, simulate_main);
 
     let binary_cache =
