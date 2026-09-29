@@ -713,6 +713,68 @@ pub(super) fn emit_glow_lit_be_hold(ir: &CircuitIR) -> String {
     )
 }
 
+/// Transition-BE detect: whether this sample changed any op-amp's rail
+/// pin state against the committed previous sample (see
+/// `SolverConfig::transition_be`). Spliced BEFORE `state.v_prev = v`, so the
+/// comparison reads the prior committed state whatever seeded it (DC OP,
+/// reset, a NaN recovery). The comparisons are the inclusive ones the
+/// active-set check uses: a pinned output lands on the rail to the last bit.
+/// Empty for a build without transition-BE.
+pub(super) fn emit_transition_be_detect(ir: &CircuitIR) -> String {
+    if !ir.solver_config.transition_be {
+        return String::new();
+    }
+    let mut terms: Vec<String> = Vec::new();
+    for oa in &ir.opamps {
+        let n = oa.n_out_idx;
+        if oa.vclamp_hi.is_finite() {
+            let hi = oa.vclamp_hi;
+            terms.push(format!(
+                "(v[{n}] >= {hi:.17e}) != (state.v_prev[{n}] >= {hi:.17e})"
+            ));
+        }
+        if oa.vclamp_lo.is_finite() {
+            let lo = oa.vclamp_lo;
+            terms.push(format!(
+                "(v[{n}] <= {lo:.17e}) != (state.v_prev[{n}] <= {lo:.17e})"
+            ));
+        }
+    }
+    assert!(
+        !terms.is_empty(),
+        "transition-BE is resolved only for a build with a clampable op-amp"
+    );
+    format!(
+        "    // Transition-BE: did an op-amp enter or leave a rail on this sample?
+             let pin_transition = {};
+",
+        terms.join("\n        || ")
+    )
+}
+
+/// Transition-BE arm: solve the sample after a pin-state change on the BE
+/// matrices (the existing breakpoint countdown; the pin is its third source).
+/// Spliced AFTER the per-sample `breakpoint_be` decrement. Empty for a build
+/// without transition-BE.
+pub(super) fn emit_transition_be_arm(ir: &CircuitIR) -> String {
+    if !ir.solver_config.transition_be {
+        return String::new();
+    }
+    assert!(
+        ir.solver_config.breakpoint_be,
+        "transition-BE arms the breakpoint-BE countdown"
+    );
+    "    // Transition-BE: a pin or a release swaps the op-amp's equation for the\n\
+     \x20   // rail constraint; trap's history was built on the old set and leaves\n\
+     \x20   // an undamped z=-1 residual on capless nonlinear rows. One BE sample\n\
+     \x20   // enforces them exactly.\n\
+     \x20   if pin_transition {\n\
+     \x20       state.breakpoint_be = state.breakpoint_be.max(BREAKPOINT_BE_SAMPLES);\n\
+     \x20       state.diag_transition_be_count += 1;\n\
+     \x20   }\n"
+        .to_string()
+}
+
 /// Format a state-block seed as a Rust array literal, e.g. `[1.0e7, 7.5e1]`.
 ///
 /// Length is `state_size`; if `state_seed` is short it is padded with `0.0`

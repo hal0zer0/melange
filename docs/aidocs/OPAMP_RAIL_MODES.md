@@ -98,7 +98,7 @@ could not contract once a junction conducted.
 |---|---|---|---|
 | `None` | Linear VCCS at op-amp output, no clamping | Cheapest | Default for ideal-rail op-amps |
 | `Hard` | Post-NR `v[out].clamp(VEE, VCC)` after the trap step | ~free | Broken: cap history corruption (see `opamp_rail_clamp_bug.md`) |
-| `ActiveSet` | Detect rail engagement, pin v[out] = rail, re-solve constrained | +1 LU per engaged sample | Production for control-path topologies |
+| `ActiveSet` | Detect rail engagement, pin v[out] = rail, re-solve constrained; the sample after each pin or release is solved on BE (transition-BE, below) | +1 LU per engaged sample; one BE sample per pin/release | Production for control-path topologies |
 | `ActiveSetBe` | Same as ActiveSet but re-solve uses BE matrices instead of trap | +1 LU + BE solve per engaged sample | **Production for audio-path topologies** |
 | `BoyleDiodes` | Augment netlist with internal gain node + catch diodes per clamped op-amp; let NR handle the saturation through the diodes | +N nodes per op-amp; ~1.5x NR work | **Light clip only (amp ≤ 0.05 V)**; diverges at heavy clip |
 
@@ -199,6 +199,92 @@ ActiveSet (without "Be") does the same pin-and-resolve but on the trap matrices 
 For **audio-path** topologies (e.g. Klon, SSL), the trap rule's response IS the bug — it excites the output coupling cap's Nyquist resonance. ActiveSetBe replaces it.
 
 The auto-detector picks ActiveSet vs ActiveSetBe based on whether the op-amp's output has a cap-coupled path to the speaker (audio) vs a DC path to another nonlinear device (control). See `refine_active_set_for_audio_path` in `ir.rs`.
+
+## Transition-BE: one backward-Euler sample per pin or release (`ActiveSet`)
+
+A pin replaces the op-amp's output row with the rail constraint; a release gives
+it back. That is an equation-set swap of the same kind as a `.switch` toggle.
+The sample that makes the swap is solved on trapezoidal history built on the old
+set, and the mismatch goes into trap's `z = −1` mode. On a **capless nonlinear
+row** downstream of the pinned output (the diode node of a clipper behind the
+output coupling cap and a resistor) that mode never decays: the row satisfies
+only the two-sample *average* of its KCL. Fingerprint: the row's KCL residual
+alternates in sign every sample, `r_n + r_(n−1) ≈ 0`, with `|r|` far above the
+floor. A filtered output hides it (the `out` node of the test deck below
+carries ~1e-9 V at Nyquist).
+
+On a trapezoidal nodal build in `ActiveSet` mode with a clampable op-amp
+(`SolverConfig::transition_be`), a change in any op-amp's pin state between the
+committed previous sample and this one arms the breakpoint-BE countdown. The
+pin is its third source, after the `.switch`/`.pot` setters and the glow. The
+next sample runs the same backward-Euler solve a `--backward-euler` build runs,
+on both nodal sub-paths and on the linear (M = 0) solves. The comparison uses
+the inclusive rail tests of the active-set check against `state.v_prev`, so it
+needs no state of its own and is right after a DC OP, a `reset()` or a NaN
+recovery. `diag_transition_be_count` counts the pin changes. The build header
+and provenance JSON say `transition-be`. `ActiveSetBe`, `Hard`, `None` and BE
+builds emit nothing for it.
+
+Measured on a single-supply overdrive (TL072 card, AOL 200k, rails 0/9 V, gain
+~107, output cap → 1k → antiparallel 1N914 → 10k/22n → output), 1 kHz, 1×,
+1 s, ngspice reference with the op-amp as an ideal clamped VCCS (matched to the
+melange model; converged: 0.5 µs and 0.1 µs/reltol 1e-5 agree to 6e-6):
+
+| Drive | Build | n2 KCL residual, last 0.1 s (48k / 96k / 192k) |
+|---|---|---|
+| 0.1 V | ActiveSet without transition-BE | 0.77 / 191 / 153 µA |
+| 0.1 V | ActiveSet with transition-BE | 0.29 / 0.56 / 0.26 µA |
+| 0.5 V | ActiveSet without transition-BE | 105 / 230 / 2650 µA |
+| 0.5 V | ActiveSet with transition-BE | 0.44 / 0.96 / 1.90 µA |
+| both | ActiveSetBe | 0.27–0.40 µA |
+
+The BE count equals the pin-transition count exactly (4 per cycle). What
+remains with transition-BE is not the transition: the BE sample reads
+0.006 µA. The residual regrows within each rail plateau. That is the pinned
+resolve's acceptance, see STATUS Pending Work.
+
+**Rate convergence of the output peak, and why it is measured incommensurate.**
+The acceptance for this change was pre-registered as the output-peak error at
+1 kHz, required to converge monotonically with rate and to be no worse than
+`ActiveSetBe` at each rate. It was **amended after the run** to the worst-case
+per-cycle peak error under an incommensurate drive (1001.3 Hz). The reason:
+at 1 kHz every test rate has an integer number of samples per cycle, so the
+rail-edge timing error is phase-locked to the grid, and each rate samples one
+fixed point of an O(T) band. That metric measures grid alignment, not
+convergence. The same band shows in the peak-to-peak error. The amended metric
+is applied identically to every mode, and "no worse than `ActiveSetBe`" holds
+under both.
+
+| Drive | Build | 1 kHz peak error (48k / 96k / 192k) | 1001.3 Hz worst-case per-cycle error |
+|---|---|---|---|
+| 0.1 V | ActiveSet + transition-BE | −0.902 / −0.307 / −0.088 % | 1.073 / 0.314 / 0.116 % |
+| 0.1 V | ActiveSetBe | −2.445 / −0.948 / −0.513 % | 2.889 / 1.061 / 0.528 % |
+| 0.5 V | ActiveSet + transition-BE | −0.251 / −0.067 / −0.243 % | 1.505 / 0.474 / 0.277 % |
+| 0.5 V | ActiveSetBe | −2.179 / −1.332 / −0.710 % | 3.648 / 1.953 / 0.814 % |
+| 0.5 V | ActiveSet without transition-BE | −0.969 / −0.052 / −0.747 % | 2.219 / 1.070 / 2.501 % |
+
+**Rule for future gates:** a rate-convergence gate on an edge-driven deck uses
+an incommensurate drive frequency by default.
+
+`ActiveSetBe` costs no more CPU than `ActiveSet` + transition-BE on this deck
+(6.1 vs 6.8 µs/sample at 48k, within run noise). Its cost is accuracy: it runs
+BE on 73–96 % of samples (whole rail plateaus), and its first-order error is
+2–4× the transition-BE error in every cell above.
+
+A control-path deck (inverting stage, rails ±9 V, driving a rectifier diode
+through 10k into 2 MΩ, no capacitor at either diode node) is auto-promoted to
+a backward-Euler build, so neither mechanism applies to it as routed. Forced to
+trap, the lock appears at 192k only (33.7 µA on the rectifier node, alternating)
+and transition-BE removes it (0.13 µA). At 48k and 96k that deck sits at the
+floor either way. **This is confirmed under a forced trap only.**
+
+Auto resolution is unchanged: the audio-path class still resolves to
+`ActiveSetBe`. Moving both classes to `ActiveSet` + transition-BE waits on the
+pinned-resolve convergence item and on a golden render that actually pins
+under `ActiveSet` (the corpus has none).
+
+Code: `emit_transition_be_detect` / `emit_transition_be_arm` in
+`rust_emitter/helpers.rs`. Tests: `transition_be_tests.rs`.
 
 ## The `Hard` mode bug (historical)
 

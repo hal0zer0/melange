@@ -450,6 +450,9 @@ fn resolved_build_flags(ir: &CircuitIR, glow: &GlowProvenance) -> String {
     if ir.solver_config.breakpoint_be {
         build.push_str(", breakpoint-be");
     }
+    if ir.solver_config.transition_be {
+        build.push_str(", transition-be");
+    }
     if ir.solver_config.runtime_be_latch {
         build.push_str(", runtime-be-latch");
     }
@@ -564,6 +567,9 @@ fn provenance_json(
     }
     if ir.solver_config.breakpoint_be {
         s.push_str(",\"breakpoint_be\":true");
+    }
+    if ir.solver_config.transition_be {
+        s.push_str(",\"transition_be\":true");
     }
     if ir.solver_config.runtime_be_latch {
         s.push_str(",\"runtime_be_latch\":true");

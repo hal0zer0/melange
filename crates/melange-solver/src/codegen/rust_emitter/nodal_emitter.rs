@@ -13,10 +13,10 @@ use super::helpers::{
     body_effect_jacobian_term, body_effect_mosfets, device_param_template_data,
     emit_body_effect_at_iterate, emit_glow_lit_be_hold, emit_pentode_nr_dk_stamp,
     emit_stateful_default_fields, emit_stateful_set_sample_rate_body, emit_stateful_state_fields,
-    emit_stateful_state_restore, emit_stateful_update, emit_thermal_tj_advance, fmt_f64,
-    format_matrix_rows, has_latched_device, oversampling_info, pentode_dispatch,
-    recommended_warmup_samples, section_banner, self_heating_device_data, stateful_device_data,
-    warmup_estimate_capped,
+    emit_stateful_state_restore, emit_stateful_update, emit_thermal_tj_advance,
+    emit_transition_be_arm, emit_transition_be_detect, fmt_f64, format_matrix_rows,
+    has_latched_device, oversampling_info, pentode_dispatch, recommended_warmup_samples,
+    section_banner, self_heating_device_data, stateful_device_data, warmup_estimate_capped,
 };
 use super::nr_helpers::{emit_nr_singular_fallback, emit_schur_nr_limit_and_converge};
 use super::RustEmitter;
@@ -2519,11 +2519,12 @@ impl RustEmitter {
         if ir.solver_config.breakpoint_be {
             code.push_str(
                 "/// Breakpoint-BE: number of samples solved on the backward-Euler matrices\n\
-                 /// after a .switch/.pot swap. Exactly ONE: a single BE sample removes both\n\
-                 /// the swap-sample 2× (BE's a_neg has no G term) and the excited z=-1 mode\n\
-                 /// (BE is L-stable), then trap resumes. Do NOT raise this — a second BE\n\
-                 /// sample over-damps and can knock a marginal self-oscillator (e.g. the\n\
-                 /// Farfisa G10 divider under --force-trap) into the wrong equilibrium.\n",
+                 /// after a .switch/.pot swap or an op-amp rail pin/release. Exactly ONE: a\n\
+                 /// single BE sample removes both the swap-sample 2× (BE's a_neg has no G\n\
+                 /// term) and the excited z=-1 mode (BE is L-stable), then trap resumes.\n\
+                 /// Do NOT raise this — a second BE sample over-damps and can knock a\n\
+                 /// marginal self-oscillator (e.g. the Farfisa G10 divider under\n\
+                 /// --force-trap) into the wrong equilibrium.\n",
             );
             code.push_str("pub const BREAKPOINT_BE_SAMPLES: u32 = 1;\n\n");
             code.push_str(
@@ -3516,9 +3517,17 @@ impl RustEmitter {
             code.push_str(
                 "    /// Breakpoint-BE: samples remaining to solve on the backward-Euler\n\
                  \x20   /// matrices after a .switch/.pot conductance swap (armed by\n\
-                 \x20   /// set_switch_*/set_pot_*, decremented per sample, cleared by reset()).\n",
+                 \x20   /// set_switch_*/set_pot_*) or an op-amp rail pin/release (transition-BE),\n\
+                 \x20   /// decremented per sample, cleared by reset().\n",
             );
             code.push_str("    pub breakpoint_be: u32,\n\n");
+        }
+        if ir.solver_config.transition_be {
+            code.push_str(
+                "    /// Transition-BE: op-amp rail pin-state changes, each of which armed\n\
+                 \x20   /// one backward-Euler sample (cleared by reset()).\n\
+                 \x20   pub diag_transition_be_count: u64,\n\n",
+            );
         }
 
         // DC settling state: when DC OP didn't converge at codegen time, the warmup
@@ -3906,6 +3915,9 @@ impl RustEmitter {
         if ir.solver_config.breakpoint_be {
             code.push_str("            breakpoint_be: 0,\n");
         }
+        if ir.solver_config.transition_be {
+            code.push_str("            diag_transition_be_count: 0,\n");
+        }
         if m > 0 || !ir.behavioral_sources.is_empty() || !ir.saturating_inductors.is_empty() {
             code.push_str("            chord_lu: [[0.0; N]; N],\n");
             code.push_str("            chord_dr: [1.0; N],\n");
@@ -4161,6 +4173,9 @@ impl RustEmitter {
         }
         if ir.solver_config.breakpoint_be {
             code.push_str("        self.breakpoint_be = 0;\n");
+        }
+        if ir.solver_config.transition_be {
+            code.push_str("        self.diag_transition_be_count = 0;\n");
         }
         let cp = if use_full_nodal {
             "self.cold."
@@ -5510,6 +5525,7 @@ impl RustEmitter {
              \x20   }\n",
         );
         code.push_str("    // State update\n");
+        code.push_str(&emit_transition_be_detect(ir));
         code.push_str("    state.v_prev = v;\n");
         // Breakpoint-BE countdown: this sample was solved on the BE matrices
         // (both the m=0 override above and the m>0 BE fallback, forced via the
@@ -5519,6 +5535,8 @@ impl RustEmitter {
         }
         // Glow lit-hold re-arm (after the decrement; empty for non-glow).
         code.push_str(&emit_glow_lit_be_hold(ir));
+        // Pin-transition arm (after the decrement; empty without transition-BE).
+        code.push_str(&emit_transition_be_arm(ir));
         // Commit input_prev here (NOT at the RHS build) so the sub-step input
         // interpolation earlier in the sample still sees last sample's value.
         if multi_input {
@@ -6456,32 +6474,49 @@ impl RustEmitter {
         // saturating inductor must iterate too.
         let primary = NewtonSite::primary(ir);
         if m == 0 && !has_behavioral && !has_sat_ind {
-            Self::emit_nodal_rhs(&mut code, ir, noise, &primary, NoiseMode::Draw);
-            code.push_str("    // Linear circuit: direct LU solve (no NR needed)\n");
-            code.push_str("    let mut g_aug = state.a;\n");
-            code.push_str(
-                "    // Gmin regularization: improves conditioning for high-gain VCCS (op-amps)\n",
-            );
-            code.push_str("    for i in 0..N_NODES { g_aug[i][i] += 1e-12; }\n");
-            code.push_str("    let mut v = rhs;\n");
-            code.push_str("    if !lu_solve(&mut g_aug, &mut v) {\n");
-            code.push_str("        v = state.v_prev;\n");
-            code.push_str("    }\n\n");
+            // A breakpoint sample (a .switch/.pot swap, a rail pin/release)
+            // solves the same direct LU on the BE matrices, as the BE build does.
+            let linear_solve = |code: &mut String, site: &NewtonSite, sat_alpha: &str| {
+                Self::emit_nodal_rhs(code, ir, noise, site, NoiseMode::Draw);
+                code.push_str("    // Linear circuit: direct LU solve (no NR needed)\n");
+                code.push_str(&format!("    let mut g_aug = {};\n", site.a));
+                code.push_str(
+                    "    // Gmin regularization: improves conditioning for high-gain VCCS (op-amps)\n",
+                );
+                code.push_str("    for i in 0..N_NODES { g_aug[i][i] += 1e-12; }\n");
+                code.push_str("    let mut v = rhs;\n");
+                code.push_str("    if !lu_solve(&mut g_aug, &mut v) {\n");
+                code.push_str("        v = state.v_prev;\n");
+                code.push_str("    }\n\n");
 
-            // Op-amp supply rail handling. The M=0 branch historically
-            // emitted none in any mode; see emit_nodal_m0_rail_handling.
-            // (The blanket "no VSAT clamping" rule below applies to
-            // arbitrary nodes — the Hard rail clamp here is scoped to
-            // op-amp OUTPUT nodes, matching the M>0 paths' Hard mode.)
-            Self::emit_nodal_m0_rail_handling(
-                &mut code,
-                ir,
-                "    ",
-                PinSite::FullLu {
-                    sat_alpha: &sat_alpha_main,
-                    setter_stamps,
-                },
-            );
+                // Op-amp supply rail handling. The M=0 branch historically
+                // emitted none in any mode; see emit_nodal_m0_rail_handling.
+                // (The blanket "no VSAT clamping" rule below applies to
+                // arbitrary nodes — the Hard rail clamp here is scoped to
+                // op-amp OUTPUT nodes, matching the M>0 paths' Hard mode.)
+                Self::emit_nodal_m0_rail_handling(
+                    code,
+                    ir,
+                    "    ",
+                    site.a,
+                    PinSite::FullLu {
+                        sat_alpha,
+                        setter_stamps,
+                    },
+                );
+            };
+            if ir.solver_config.breakpoint_be && !ir.solver_config.backward_euler {
+                let be = NewtonSite::be_instance(ir);
+                code.push_str(
+                    "    #[allow(unused_mut)]\n    let mut v = if state.breakpoint_be > 0 {\n",
+                );
+                linear_solve(&mut code, &be, &be.sat_alpha);
+                code.push_str("    v\n    } else {\n");
+                linear_solve(&mut code, &primary, &sat_alpha_main);
+                code.push_str("    v\n    };\n\n");
+            } else {
+                linear_solve(&mut code, &primary, &sat_alpha_main);
+            }
 
             // No VSAT clamping — matches runtime NodalSolver. Clamping any node
             // creates inconsistency with unclamped neighbors (e.g., 100Ω apart but
@@ -6549,6 +6584,7 @@ impl RustEmitter {
         // Stateful-device (Phase 0c) after-solve update — BEFORE state.v_prev = v
         // so v_prev holds the prior sample. Shared with the DK path.
         code.push_str(&emit_stateful_update(&stateful_device_data(ir)));
+        code.push_str(&emit_transition_be_detect(ir));
         code.push_str("    state.v_prev = v;\n");
         // Breakpoint-BE countdown: this sample was solved on the BE matrices via
         // the forced BE fallback. One decrement per sample, after the solve.
@@ -6557,6 +6593,8 @@ impl RustEmitter {
         }
         // Glow lit-hold re-arm (after the decrement; empty for non-glow).
         code.push_str(&emit_glow_lit_be_hold(ir));
+        // Pin-transition arm (after the decrement; empty without transition-BE).
+        code.push_str(&emit_transition_be_arm(ir));
         // Commit input_prev here (NOT at the RHS build) so the sub-step input
         // interpolation earlier in the sample still sees last sample's value.
         if multi_input {
@@ -8049,19 +8087,25 @@ impl RustEmitter {
             } else {
                 "let v"
             };
+            // Each branch resolves a rail pin on its own integrator's matrix and
+            // right-hand side, so a breakpoint sample is the BE build's sample.
             if ir.solver_config.breakpoint_be && !ir.solver_config.backward_euler {
                 code.push_str(&format!(
                     "    {binding};\n    if state.breakpoint_be > 0 {{\n"
                 ));
                 Self::emit_schur_rhs_pred(code, ir, noise, &be, NoiseMode::Draw);
-                code.push_str("    v = v_pred;\n    } else {\n");
+                code.push_str("    v = v_pred;\n");
+                Self::emit_nodal_m0_rail_handling(code, ir, "    ", be.a, PinSite::Schur);
+                code.push_str("    } else {\n");
                 Self::emit_schur_rhs_pred(code, ir, noise, &primary, NoiseMode::Draw);
-                code.push_str("    v = v_pred;\n    }\n\n");
+                code.push_str("    v = v_pred;\n");
+                Self::emit_nodal_m0_rail_handling(code, ir, "    ", primary.a, PinSite::Schur);
+                code.push_str("    }\n\n");
             } else {
                 Self::emit_schur_rhs_pred(code, ir, noise, &primary, NoiseMode::Draw);
                 code.push_str(&format!("    {binding} = v_pred;\n\n"));
+                Self::emit_nodal_m0_rail_handling(code, ir, "    ", primary.a, PinSite::Schur);
             }
-            Self::emit_nodal_m0_rail_handling(code, ir, "    ", PinSite::Schur);
             return Ok(());
         }
 
@@ -8656,6 +8700,7 @@ impl RustEmitter {
         code: &mut String,
         ir: &CircuitIR,
         indent: &str,
+        a: &str,
         site: PinSite<'_>,
     ) {
         use crate::codegen::OpampRailMode;
@@ -8681,7 +8726,7 @@ impl RustEmitter {
                 }
             }
             OpampRailMode::ActiveSet => {
-                Self::emit_nodal_active_set_resolve(code, ir, indent, "state.a", "rhs", site);
+                Self::emit_nodal_active_set_resolve(code, ir, indent, a, "rhs", site);
             }
             OpampRailMode::ActiveSetBe => {
                 if any_clampable {
@@ -8692,7 +8737,7 @@ impl RustEmitter {
                          on sustained rail engagement into cap-coupled loads)"
                     );
                 }
-                Self::emit_nodal_active_set_resolve(code, ir, indent, "state.a", "rhs", site);
+                Self::emit_nodal_active_set_resolve(code, ir, indent, a, "rhs", site);
             }
             OpampRailMode::BoyleDiodes => {
                 // Catch-diode augmentation adds M≥1 per clamped op-amp, so an

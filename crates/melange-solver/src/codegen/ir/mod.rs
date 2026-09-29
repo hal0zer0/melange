@@ -491,7 +491,8 @@ pub struct SolverConfig {
     /// `2×` the physical value — and the kick excites trap's marginal `z=−1`
     /// eigenmode, which never decays on a capless (algebraic) node.
     ///
-    /// When `true`, `set_switch_*`/`set_pot_*` arm a one-sample countdown
+    /// When `true`, `set_switch_*`/`set_pot_*` (and, under
+    /// [`Self::transition_be`], an op-amp rail pin/release) arm a one-sample countdown
     /// (`BREAKPOINT_BE_SAMPLES = 1`) that routes the swap sample through the
     /// L-stable backward-Euler matrices. BE's `A_neg = (1/T)C` has no `G` term,
     /// so there is no double-count (fixes the 2×) and BE damps `z=−1` at the
@@ -509,6 +510,23 @@ pub struct SolverConfig {
     /// per-sample Δg self-corrects.
     #[serde(default)]
     pub breakpoint_be: bool,
+    /// Arm the breakpoint-BE countdown on an op-amp rail pin-state change under
+    /// [`crate::codegen::OpampRailMode::ActiveSet`] (nodal route, trapezoidal
+    /// build): the third source for [`Self::breakpoint_be`], after the
+    /// `.switch`/`.pot` setters and the glow.
+    ///
+    /// A pin or a release is an equation-set swap of the same kind as a switch
+    /// toggle: the op-amp's output row is replaced by the rail constraint (or
+    /// given back). The sample that makes the swap is solved on trapezoidal
+    /// history built on the old set, and the mismatch is injected into trap's
+    /// `z=-1` mode, which never decays on a capless nonlinear row downstream
+    /// of the pinned output (a diode clipper node behind a coupling cap and a
+    /// resistor): that row then satisfies only the two-sample AVERAGE of its
+    /// KCL. With one pin entry and one release per half cycle, the injections
+    /// accumulate. The sample after the swap is solved on backward Euler,
+    /// which enforces the algebraic rows exactly and ends the mode.
+    #[serde(default)]
+    pub transition_be: bool,
     /// Requested nodal sub-path override (see
     /// [`crate::codegen::NodalSubPathOverride`]). `Auto` is the shipping
     /// behaviour; the forcing modes are diagnostic escape hatches.
@@ -1987,6 +2005,7 @@ impl CircuitIR {
             // DK codegen path does not emit the runtime BE-latch net yet.
             runtime_be_latch: false,
             breakpoint_be: false,
+            transition_be: false,
             opamp_rail_mode: rail_mode.mode,
             opamp_rail_mode_reason: rail_mode_reason.clone(),
             emit_dc_op_recompute: config.emit_dc_op_recompute,
@@ -3009,6 +3028,7 @@ impl CircuitIR {
             // final `solver_config.backward_euler`).
             runtime_be_latch: false,
             breakpoint_be: false,
+            transition_be: false,
             opamp_rail_mode: rail_mode.mode,
             opamp_rail_mode_reason: rail_mode_reason.clone(),
             emit_dc_op_recompute: config.emit_dc_op_recompute,
@@ -3324,8 +3344,20 @@ impl CircuitIR {
             .nonlinear_devices
             .iter()
             .any(|d| d.device_type == crate::mna::NonlinearDeviceType::Glow);
-        solver_config.breakpoint_be =
-            !solver_config.backward_euler && (!mna.switches.is_empty() || has_knob_pot || has_glow);
+        // An op-amp rail pin-state change under ActiveSet is the third source
+        // (see `SolverConfig::transition_be`). Armed at runtime by the pin
+        // transition itself, so a build that never pins stays on trap.
+        solver_config.transition_be = !solver_config.backward_euler
+            && solver_config.opamp_rail_mode == crate::codegen::OpampRailMode::ActiveSet
+            && mna
+                .opamps
+                .iter()
+                .any(|oa| oa.n_out_idx > 0 && (oa.vcc.is_finite() || oa.vee.is_finite()));
+        solver_config.breakpoint_be = !solver_config.backward_euler
+            && (!mna.switches.is_empty()
+                || has_knob_pot
+                || has_glow
+                || solver_config.transition_be);
 
         // Sub-sample fire: variable-dt breakpoint re-solve at a glow strike.
         // Nodal route only (this builder), latched device required; the

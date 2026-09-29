@@ -62,6 +62,26 @@ generated state is smaller.
   saying to delete it. `validate` is unaffected — it strips that source before
   comparing. The SIN/PULSE error now says to delete a test-signal line, and
   `SINE(` gets it too instead of "Invalid DC value".
+- **`--opamp-rail-mode active-set` left a persistent error behind a railing
+  op-amp.** Pinning an op-amp to its rail, and releasing it, swaps an equation,
+  and the trapezoidal step across the swap left a residual that never decays on
+  a node with no capacitor, such as the diode node of a clipper after the
+  output coupling cap. Each pin and release added to it. On a single-supply
+  overdrive at 0.5 V the diode node was out of balance by 105 µA at 48 kHz and
+  2.6 mA at 192 kHz, against a diode current of about 4 mA. The sample after
+  each pin or release is now solved with backward Euler, the same one-sample
+  treatment a `.switch` or `.pot` change already gets. The residual is now
+  0.3–1.9 µA, and the output-peak error falls below `active-set-be`'s at every
+  rate. `diag_transition_be_count` counts these samples, and the build header
+  says `transition-be`. The automatic choice of rail mode is unchanged.
+- **A linear circuit with active-set rail handling and a knob did not
+  compile** on the nodal Schur path. The rail resolve read a right-hand side
+  that the knob's one-sample backward-Euler branch had scoped away. Each branch
+  now resolves the rail on its own matrices.
+- **A linear circuit forced onto the full-LU nodal path ignored the
+  backward-Euler sample** after a `.switch` or `.pot` change, so that sample
+  stayed trapezoidal. It is now solved like the backward-Euler build's sample,
+  bit for bit.
 - **The DK solver silently downgraded op-amp rail handling.** An op-amp whose
   output is capacitor-coupled downstream resolves to an active-set rail mode,
   which pins the railed output and re-solves the circuit. The DK path cannot do
@@ -269,6 +289,11 @@ generated state is smaller.
 
 ### Tests
 
+- `transition_be_tests.rs`: on both nodal sub-paths the transition count
+  equals the pin changes, and the diode node's residual stays under 5 µA,
+  while a copy with the arming removed reads about 200 µA. On a linear
+  railing stage, a forced backward-Euler sample matches the backward-Euler
+  build bit for bit.
 - Saturation is now tested at its knee. The regression corpus exercised the
   saturation code but never drove any inductor past 37 % of its saturation
   current. New tests drive a saturating RL and a shared-core transformer at
