@@ -110,8 +110,10 @@ fn switch_trap_build_emits_breakpoint_be() {
         "set_switch_* must arm the breakpoint-BE countdown"
     );
     assert!(
-        code.contains("state.breakpoint_be == 0"),
-        "converged must be gated so breakpoint_be>0 forces the BE fallback"
+        code.contains("let be_first = ")
+            && code.contains("state.breakpoint_be > 0")
+            && code.contains("if !be_first {"),
+        "a breakpoint sample (breakpoint_be > 0) must skip the trap solve and take the BE solve"
     );
     assert!(
         code.contains("BREAKPOINT_BE_MAX_ITER"),

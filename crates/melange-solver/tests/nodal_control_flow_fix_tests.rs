@@ -303,14 +303,18 @@ fn runtime_v_source_stamped_in_all_rhs_rebuilds() {
         "runtime source field must be consumed"
     );
     let re_rhs = regex_lite_count(&schur, "rhs[", "state.ctrl_v;");
-    let re_be = regex_lite_count(&schur, "rhs_be[", "state.ctrl_v;");
+    // The backward-Euler solve is the same routine with its own `rhs`.
+    let re_be = schur
+        .split("// Backward-Euler solve: the same routine")
+        .nth(1)
+        .map_or(0, |be| regex_lite_count(be, "rhs[", "state.ctrl_v;"));
     assert!(
         re_rhs >= 1,
         "Schur trap RHS must stamp the runtime V source"
     );
     assert!(
         re_be >= 1,
-        "Schur BE-fallback RHS must stamp the runtime V source (it vanished \
+        "Schur BE-solve RHS must stamp the runtime V source (it vanished \
          to 0 V on fallback samples before this fix)"
     );
 
@@ -358,24 +362,26 @@ fn regex_lite_count(code: &str, frag_a: &str, frag_b: &str) -> usize {
 #[test]
 fn schur_be_fallback_uses_scalar_alpha() {
     let code = nodal_code(CLIPPER);
+    // The backward-Euler solve is the primary Schur routine on the BE kernel,
+    // so it limits with one scalar step fraction across all dimensions.
+    let be_solve = code
+        .split("// Backward-Euler solve: the same routine")
+        .nth(1)
+        .expect("trap Schur build: expected the backward-Euler solve");
     find(
-        &code,
-        "let mut alpha_scalar = alpha[0].min(alpha[1]);",
-        "BE fallback must min-reduce alpha across ALL dims (M=2 clipper)",
+        be_solve,
+        "let mut global_alpha = 1.0_f64;",
+        "BE solve must reduce limiting to one scalar step fraction (M=2 clipper)",
     );
     find(
-        &code,
-        "i_nl[0] -= alpha_scalar * delta0;",
-        "BE fallback step must apply the scalar alpha",
+        be_solve,
+        "i_nl[0] -= global_alpha * delta0;",
+        "BE solve step must apply the scalar step fraction",
     );
     assert!(
-        !code.contains("i_nl[0] -= alpha[0] * delta0;"),
+        !be_solve.contains("i_nl[0] -= alpha[0] * delta0;"),
         "per-dimension alpha application breaks the coupled Newton direction \
          (VOLTAGE_LIMITING.md / nr_helpers.rs scalar-alpha rationale)"
-    );
-    assert!(
-        !code.contains("let dev_alpha = alpha["),
-        "the per-device grouping is subsumed by the global scalar min"
     );
 }
 
@@ -659,8 +665,12 @@ Rld2 out_ac 0 100k
         "&& !active_set_engaged",
         "rail engagement must send the sample to the BE fallback",
     );
-    // ...and the BE fallback pins and re-solves against the BE matrices.
-    let fallback = find(&code, "// Backward Euler fallback", "BE fallback block");
+    // ...and the backward-Euler solve pins and re-solves against the BE matrices.
+    let fallback = find(
+        &code,
+        "// Backward-Euler solve: the same routine",
+        "backward-Euler solve",
+    );
     let resolve = find(
         &code,
         "// --- Active-set op-amp rail resolve ---",
@@ -669,7 +679,7 @@ Rld2 out_ac 0 100k
     assert!(converged < fallback && fallback < code.len() && resolve > 0);
     assert!(
         code[fallback..].contains("// --- Active-set op-amp rail resolve ---"),
-        "the BE fallback must carry the pin-and-resolve"
+        "the backward-Euler solve must carry the pin-and-resolve"
     );
     // No 2x sub-step and no sub-step matrices.
     for gone in ["const N_SUB", "S_SUB_DEFAULT", "a_neg_sub", "s_ni_sub"] {

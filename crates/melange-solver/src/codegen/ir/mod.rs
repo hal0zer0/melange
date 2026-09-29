@@ -1312,6 +1312,12 @@ pub struct SparseInfo {
     pub a_neg_be: MatrixSparsity,
     /// K matrix (M×M) — nonlinear kernel
     pub k: MatrixSparsity,
+    /// K_be matrix (M×M) — the backward-Euler kernel, so a trapezoidal Schur
+    /// build's BE solve skips exactly the entries a BE build's `k` pattern
+    /// skips (the threshold drops tiny values, not only zeros). Empty when
+    /// there is no BE kernel.
+    #[serde(default)]
+    pub k_be: MatrixSparsity,
     /// Sparse LU elimination schedule for G_aug (full LU path only)
     pub lu: Option<LuSparsity>,
     /// G_aug sparsity-pattern density (0.0..1.0 fraction of nonzeros)
@@ -2616,6 +2622,16 @@ impl CircuitIR {
                 analyze_matrix_sparsity(&matrices.a_neg_be, n, n)
             },
             k: analyze_matrix_sparsity(&matrices.k, m, m),
+            k_be: if matrices.k_be.len() == m * m && m > 0 {
+                analyze_matrix_sparsity(&matrices.k_be, m, m)
+            } else {
+                MatrixSparsity {
+                    rows: m,
+                    cols: m,
+                    nnz: 0,
+                    nz_by_row: vec![Vec::new(); m],
+                }
+            },
             lu: None, // DK path doesn't use full LU
             g_aug_density: 0.0,
         };
@@ -3502,6 +3518,16 @@ impl CircuitIR {
                 analyze_matrix_sparsity(&matrices.a_neg_be, n, n)
             },
             k: analyze_matrix_sparsity(&matrices.k, m, m),
+            k_be: if matrices.k_be.len() == m * m && m > 0 {
+                analyze_matrix_sparsity(&matrices.k_be, m, m)
+            } else {
+                MatrixSparsity {
+                    rows: m,
+                    cols: m,
+                    nnz: 0,
+                    nz_by_row: vec![Vec::new(); m],
+                }
+            },
             lu: lu_sparsity,
             g_aug_density,
         };

@@ -108,6 +108,38 @@ fn fallback_rhs_blocks(code: &str) -> Vec<String> {
         .collect()
 }
 
+/// The backward-Euler solve of a trapezoidal nodal build (either sub-path) is
+/// the same routine a BE build runs, with its own `rhs`: the block from the
+/// BE-solve marker to its input stamp must not carry the trapezoidal
+/// `N_I·i_nl_prev` half, while the trapezoidal solve before it keeps it.
+fn assert_be_solve_has_no_midpoint_stamp(label: &str, code: &str) {
+    // Its RHS is a plain `rhs`: the block from the BE-solve marker to its
+    // input stamp.
+    let be_solve = code
+        .split("// Backward-Euler solve: the same routine")
+        .nth(1)
+        .unwrap_or_else(|| panic!("{label}: expected the trap build's backward-Euler solve"));
+    let rhs_block = be_solve.split("rhs[INPUT_NODE]").next().unwrap_or("");
+    assert!(
+        rhs_block.contains("let mut rhs = "),
+        "{label}: the BE solve builds no RHS of its own"
+    );
+    assert!(
+        !(rhs_block.contains("N_I[") && rhs_block.contains("state.i_nl_prev")),
+        "{label}: BE solve RHS still carries the trap-midpoint N_I * i_nl_prev \
+         stamp — a BE step must stamp only N_I * i_nl(n):\n{rhs_block}"
+    );
+    // The trapezoidal solve keeps its midpoint half.
+    let trap = code
+        .split("// Backward-Euler solve: the same routine")
+        .next()
+        .unwrap();
+    assert!(
+        trap.contains("N_I[") && trap.contains("state.i_nl_prev"),
+        "{label}: the trapezoidal solve lost its N_I * i_nl_prev half"
+    );
+}
+
 fn assert_no_midpoint_stamp(label: &str, code: &str) {
     let blocks = fallback_rhs_blocks(code);
     assert!(
@@ -127,38 +159,13 @@ fn assert_no_midpoint_stamp(label: &str, code: &str) {
 fn nodal_schur_fallback_rhs_has_no_midpoint_stamp() {
     let code = generate_nodal(SWITCHED_TRIODE, NodalSubPathOverride::Schur);
     assert!(code.contains("pub const BREAKPOINT_BE_SAMPLES"));
-    assert_no_midpoint_stamp("nodal Schur", &code);
+    assert_be_solve_has_no_midpoint_stamp("nodal Schur", &code);
 }
 
 #[test]
 fn nodal_full_lu_fallback_rhs_has_no_midpoint_stamp() {
     let code = generate_nodal(SWITCHED_TRIODE, NodalSubPathOverride::FullLu);
-    // On full-LU the backward-Euler solve is the same routine a BE build runs,
-    // so its RHS is a plain `rhs`: the block from the BE-solve marker to its
-    // input stamp.
-    let be_solve = code
-        .split("// Backward-Euler solve: the same routine")
-        .nth(1)
-        .expect("nodal full-LU: expected the trap build's backward-Euler solve");
-    let rhs_block = be_solve.split("rhs[INPUT_NODE]").next().unwrap_or("");
-    assert!(
-        rhs_block.contains("let mut rhs = "),
-        "nodal full-LU: the BE solve builds no RHS of its own"
-    );
-    assert!(
-        !(rhs_block.contains("N_I[") && rhs_block.contains("state.i_nl_prev")),
-        "nodal full-LU: BE solve RHS still carries the trap-midpoint N_I * i_nl_prev \
-         stamp — a BE step must stamp only N_I * i_nl(n):\n{rhs_block}"
-    );
-    // The trapezoidal solve keeps its midpoint half.
-    let trap = code
-        .split("// Backward-Euler solve: the same routine")
-        .next()
-        .unwrap();
-    assert!(
-        trap.contains("N_I[") && trap.contains("state.i_nl_prev"),
-        "nodal full-LU: the trapezoidal solve lost its N_I * i_nl_prev half"
-    );
+    assert_be_solve_has_no_midpoint_stamp("nodal full-LU", &code);
 }
 
 #[test]

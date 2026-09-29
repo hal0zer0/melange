@@ -257,6 +257,74 @@ impl NewtonSite {
     }
 }
 
+/// The Schur counterpart of [`NewtonSite`]: which integrator one emitted
+/// Schur solve runs and the precomputed kernel it reads. A BE build's
+/// `s`/`k`/`s_ni`/`a`/`a_neg`/`RHS_CONST` are backward-Euler-baked; a
+/// trapezoidal build's BE instance reads the `_be` twins, which the IR bakes
+/// by the same expressions.
+pub(super) struct SchurSite {
+    be: bool,
+    be_instance: bool,
+    s: &'static str,
+    k: &'static str,
+    s_ni: &'static str,
+    a: &'static str,
+    a_neg: &'static str,
+    rhs_const: Option<&'static str>,
+    iter_budget: &'static str,
+}
+
+impl SchurSite {
+    fn primary(ir: &CircuitIR) -> Self {
+        SchurSite {
+            be: ir.solver_config.backward_euler,
+            be_instance: false,
+            s: "state.s",
+            k: "state.k",
+            s_ni: "state.s_ni",
+            a: "state.a",
+            a_neg: "state.a_neg",
+            rhs_const: ir.has_dc_sources.then_some("RHS_CONST"),
+            iter_budget: "MAX_ITER",
+        }
+    }
+
+    fn be_instance(ir: &CircuitIR) -> Self {
+        SchurSite {
+            be: true,
+            be_instance: true,
+            s: "state.s_be",
+            k: "state.k_be",
+            s_ni: "state.s_ni_be",
+            a: "state.a_be",
+            a_neg: "state.a_neg_be",
+            rhs_const: (ir.has_dc_sources && !ir.matrices.rhs_const_be.is_empty())
+                .then_some("RHS_CONST_BE"),
+            iter_budget: if ir.solver_config.breakpoint_be {
+                "be_iter_budget"
+            } else {
+                "MAX_ITER"
+            },
+        }
+    }
+
+    fn a_neg_sparsity<'a>(&self, ir: &'a CircuitIR) -> &'a crate::codegen::ir::MatrixSparsity {
+        if self.be_instance {
+            &ir.sparsity.a_neg_be
+        } else {
+            &ir.sparsity.a_neg
+        }
+    }
+
+    fn k_sparsity<'a>(&self, ir: &'a CircuitIR) -> &'a crate::codegen::ir::MatrixSparsity {
+        if self.be_instance {
+            &ir.sparsity.k_be
+        } else {
+            &ir.sparsity.k
+        }
+    }
+}
+
 /// Noise in one solve's RHS: draw fresh (the sample's primary solve), replay
 /// the draw cached this sample (a fallback), or decide at runtime.
 pub(super) enum NoiseMode {
@@ -5295,7 +5363,6 @@ impl RustEmitter {
         ir: &CircuitIR,
         noise: &NoiseEmission,
     ) -> Result<String, CodegenError> {
-        let n = ir.topology.n;
         let m = ir.topology.m;
         let os_factor = ir.solver_config.oversampling_factor;
         let has_pots = !ir.pots.is_empty();
@@ -5305,23 +5372,6 @@ impl RustEmitter {
         // BE-fallback blocks below (all M>0) never coexist with `multi_input`,
         // but they are still gated defensively. See multi-input-ports-plan.md.
         let multi_input = ir.solver_config.num_inputs() > 1;
-        // "Force BE this sample" guard appended to the trap-accept `converged`
-        // expression: trap is accepted only when NO mechanism is forcing BE.
-        //  - runtime BE-latch (Nyquist limit cycle detected → sticky BE)
-        //  - breakpoint-BE (a .switch/.pot swap armed a short BE countdown)
-        // Either forces the L-stable BE fallback (which for breakpoint kills the
-        // swap-sample 2× and the excited z=-1 mode). Empty on builds with
-        // neither, so those stay byte-identical.
-        let be_latch_and = match (
-            ir.solver_config.runtime_be_latch,
-            ir.solver_config.breakpoint_be,
-        ) {
-            (true, true) => " && !state.be_latched && state.breakpoint_be == 0",
-            (true, false) => " && !state.be_latched",
-            (false, true) => " && state.breakpoint_be == 0",
-            (false, false) => "",
-        };
-
         // `.inject`/`.tap`: when present, the inner solve gains an `injections`
         // param and returns raw `.tap` node voltages; the public entry becomes
         // the per-inner-sample array API (emit_oversampler / emit_inject_wrapper_1x).
@@ -5413,821 +5463,7 @@ impl RustEmitter {
         }
         code.push('\n');
 
-        // Step 1: Build RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input (sparse)
-        code.push_str(
-            "    // Step 1: Build RHS (sparse A_neg * v_prev + sparse N_i * i_nl_prev)\n",
-        );
-        if ir.has_dc_sources {
-            code.push_str("    let mut rhs = RHS_CONST;\n");
-        } else {
-            code.push_str("    let mut rhs = [0.0f64; N];\n");
-        }
-        // Sparse A_neg * v_prev
-        for i in 0..n {
-            let nz_cols = &ir.sparsity.a_neg.nz_by_row[i];
-            if nz_cols.is_empty() {
-                continue;
-            }
-            for &j in nz_cols {
-                code.push_str(&format!(
-                    "    rhs[{}] += state.a_neg[{}][{}] * state.v_prev[{}];\n",
-                    i, i, j, j
-                ));
-            }
-        }
-        // Sparse N_i * i_nl_prev.
-        //
-        // This term is TRAPEZOIDAL MIDPOINT machinery: combined with the full
-        // `S*N_i*i_nl` that the NR loop adds via `v = v_pred + S_ni*i_nl`, the
-        // net effective contribution becomes `N_i*(i_nl_prev + i_nl)` — the
-        // midpoint average of the nonlinear current across the step (see
-        // `docs/aidocs/NR_SOLVER.md:20` and `DK_METHOD.md:62-66`).
-        //
-        // Under BACKWARD EULER we want ONLY `N_i*i_nl(n+1)` — no averaging.
-        // Omitting the i_nl_prev stamp here, combined with the `S*N_i*i_nl`
-        // that NR still adds later, yields exactly the BE companion. Keeping
-        // the i_nl_prev stamp under BE was the root cause of the pipe-shouter
-        // warmup divergence (v_prev[21] drifting 186 V in 50 zero-input
-        // samples): `v_pred` over-incorporated the previous sample's
-        // nonlinear current, NR couldn't climb out of the wrong basin, hit
-        // MAX_ITER every sample, and BE fallback landed at whatever the
-        // last iterate was.
-        if m > 0 && !ir.solver_config.backward_euler {
-            for i in 0..n {
-                for &j in &ir.sparsity.n_i.nz_by_row[i] {
-                    code.push_str(&format!(
-                        "    rhs[{}] += N_I[{}][{}] * state.i_nl_prev[{}];\n",
-                        i, i, j, j
-                    ));
-                }
-            }
-        }
-        code.push('\n');
-
-        // Input source (Thevenin).
-        //
-        // Trapezoidal stamps the average of V_in(n) and V_in(n+1):
-        //     rhs[in] += (V_in(n+1) + V_in(n)) * G_in
-        // Backward Euler stamps only V_in(n+1):
-        //     rhs[in] += V_in(n+1) * G_in
-        // Mixing trap input stamping with a BE `a_neg` (which is `alpha*C`,
-        // no `-G` history term) is a discretization mismatch — the first
-        // non-zero sample pushes the solver into an NR basin it cannot
-        // climb out of. Observed on pipe-shouter at Tone=1.0 / amp=0.1 /
-        // 96 kHz as instant v[7] runaway to 10^13 V and NR max-iter hits
-        // on every sample. Branch on `ir.solver_config.backward_euler`
-        // so the Schur path matches the emitter's integrator choice —
-        // same gate used by `emit_nodal_process_sample` for the full-LU
-        // NR (see the `if ir.solver_config.backward_euler` block there).
-        if multi_input {
-            if ir.solver_config.backward_euler {
-                code.push_str("    // Input sources (backward Euler: per-port V_in * G_in)\n");
-                code.push_str("    for k in 0..NUM_INPUTS {\n        rhs[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k];\n    }\n");
-            } else {
-                code.push_str(
-                    "    // Input sources (trapezoidal: per-port (V_in + V_in_prev) * G_in)\n",
-                );
-                code.push_str("    for k in 0..NUM_INPUTS {\n        rhs[INPUT_NODES[k]] += (inputs[k] + state.inputs_prev[k]) / INPUT_RESISTANCES[k];\n    }\n");
-            }
-        } else {
-            code.push_str("    let input_conductance = 1.0 / INPUT_RESISTANCE;\n");
-            if ir.solver_config.backward_euler {
-                code.push_str("    // Input source (backward Euler: V_in * G_in)\n");
-                code.push_str("    rhs[INPUT_NODE] += input * input_conductance;\n");
-            } else {
-                code.push_str("    // Input source (trapezoidal: (V_in + V_in_prev) * G_in)\n");
-                code.push_str(
-                    "    rhs[INPUT_NODE] += (input + state.input_prev) * input_conductance;\n",
-                );
-            }
-        }
-        if inject_or_tap {
-            code.push_str(&emit_inject_rhs_stamp(
-                ir,
-                "rhs",
-                "    ",
-                ir.solver_config.backward_euler,
-            ));
-        }
-        // NOTE: `state.input_prev` is deliberately NOT committed here. The
-        // ActiveSetBe sub-step machinery below interpolates the input ramp as
-        // `(input - state.input_prev) / N_SUB`, so committing before the
-        // sub-steps read it would zero the ramp exactly on the hard-transient
-        // samples that trigger sub-stepping. The commit happens in the
-        // end-of-sample state-update block (matching the DK template).
-        code.push('\n');
-
-        // Runtime voltage sources (.runtime directive): host-driven per-sample values.
-        // Stamped after the DC RHS_CONST and the input stamp so the field value is
-        // additive with any DC bias declared on the voltage source itself.
-        if !ir.runtime_sources.is_empty() {
-            code.push_str("    // Runtime voltage sources (.runtime directive)\n");
-            for rt in &ir.runtime_sources {
-                code.push_str(&format!(
-                    "    rhs[{}] += state.{};\n",
-                    rt.vs_row, rt.field_name
-                ));
-            }
-            code.push('\n');
-        }
-
-        // Authentic circuit noise — Phase 1 thermal stamp.
-        //
-        // Stamped once per audio sample (NOT per NR iteration), after all
-        // deterministic RHS contributions and before the linear prediction
-        // `v_pred = S * rhs` so noise is shaped by the circuit's transfer
-        // function exactly like the input source. BE-fallback samples don't
-        // re-draw — they reuse the trapezoidal NR's noise contribution
-        // implicitly via `v_prev` history.
-        //
-        // The fragment is `""` when noise mode is Off — zero bytes emitted
-        // and the build is byte-identical to a noiseless one.
-        if noise.enabled {
-            code.push_str(&noise.rhs_stamp);
-            code.push('\n');
-        }
-
-        // Step 2: Linear prediction v_pred = S * rhs (O(N^2))
-        code.push_str("    // Step 2: Linear prediction v_pred = S * rhs (O(N^2))\n");
-        code.push_str("    let mut v_pred = [0.0f64; N];\n");
-        code.push_str("    for i in 0..N {\n");
-        code.push_str("        let mut sum = 0.0;\n");
-        code.push_str("        for j in 0..N { sum += state.s[i][j] * rhs[j]; }\n");
-        code.push_str("        v_pred[i] = sum;\n");
-        code.push_str("    }\n\n");
-
-        // Handle linear circuits (M=0): v_pred is the final answer, plus
-        // mode-appropriate op-amp rail handling (historically none was
-        // emitted in any mode — see emit_nodal_m0_rail_handling).
-        if m == 0 {
-            code.push_str("    // Linear circuit: v = v_pred (no NR needed)\n");
-            if Self::m0_rail_handling_mutates_v(ir) || ir.solver_config.breakpoint_be {
-                code.push_str("    let mut v = v_pred;\n\n");
-            } else {
-                code.push_str("    let v = v_pred;\n\n");
-            }
-            // Breakpoint-BE (linear path): on the sample(s) right after a
-            // .switch/.pot conductance swap, re-solve on the L-stable BE
-            // matrices. a_neg_be = (1/T)C has no G term, so the swapped Δg is
-            // not double-counted (kills the 2× first sample), and BE damps
-            // trap's marginal z=-1 eigenmode at the source (kills the ring and
-            // the persistent capless-node residual). Reverts to trap after the
-            // countdown. Byte-inert until set_switch_*/set_pot_* arms it.
-            if ir.solver_config.breakpoint_be {
-                code.push_str("    if state.breakpoint_be > 0 {\n");
-                if ir.has_dc_sources && !ir.matrices.rhs_const_be.is_empty() {
-                    code.push_str("        let mut rhs_be = RHS_CONST_BE;\n");
-                } else {
-                    code.push_str("        let mut rhs_be = [0.0f64; N];\n");
-                }
-                // BE history: a_neg_be * v_prev (a_neg sparsity is a superset of
-                // a_neg_be's — a_neg_be = alpha_be*C, a_neg = alpha*C - G).
-                for i in 0..n {
-                    for &j in &ir.sparsity.a_neg.nz_by_row[i] {
-                        code.push_str(&format!(
-                            "        rhs_be[{i}] += state.a_neg_be[{i}][{j}] * state.v_prev[{j}];\n",
-                        ));
-                    }
-                }
-                // BE input stamp: V_in * G_in (no trapezoidal average).
-                if multi_input {
-                    code.push_str("        for k in 0..NUM_INPUTS { rhs_be[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k]; }\n");
-                } else {
-                    if multi_input {
-                        code.push_str("        for k in 0..NUM_INPUTS { rhs_be[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k]; }\n");
-                    } else {
-                        code.push_str("        rhs_be[INPUT_NODE] += input * input_conductance;\n");
-                    }
-                }
-                if inject_or_tap {
-                    code.push_str(&emit_inject_rhs_stamp(ir, "rhs_be", "        ", true));
-                }
-                // Runtime voltage sources (same rows as the trap stamp).
-                for rt in &ir.runtime_sources {
-                    code.push_str(&format!(
-                        "        rhs_be[{}] += state.{};\n",
-                        rt.vs_row, rt.field_name
-                    ));
-                }
-                // Noise replay: this is a from-scratch RHS rebuild, so it must
-                // re-stamp the per-source currents the primary `rhs_stamp`
-                // already drew and cached this sample. Omitting it dropped the
-                // noise for the whole sample while the RNG stream stayed
-                // aligned, making the loss invisible to every determinism
-                // check (F10). Drawing fresh values here instead would break
-                // determinism outright: breakpoint-BE arming is signal-dependent, so the
-                // stream position would become a function of the audio.
-                if noise.enabled {
-                    code.push_str("        // Noise replay (cached i_n; consumes no RNG draws).\n");
-                    code.push_str(&emit_noise_replay_body(
-                        noise.replay_counts,
-                        "rhs_be",
-                        "        ",
-                    ));
-                }
-                code.push_str(
-                    "        for i in 0..N {\n\
-                     \x20           let mut sum = 0.0;\n\
-                     \x20           for j in 0..N { sum += state.s_be[i][j] * rhs_be[j]; }\n\
-                     \x20           v[i] = sum;\n\
-                     \x20       }\n",
-                );
-                // Decrement happens once per sample at the common state-update
-                // block (shared with the m>0 path), not here.
-                code.push_str("    }\n\n");
-            }
-            Self::emit_nodal_m0_rail_handling(&mut code, ir, "    ", PinSite::Schur);
-        } else {
-            // Step 3: Extract device voltages p = N_v * v_pred (O(M*N))
-            code.push_str("    // Step 3: Extract device voltages p = N_v * v_pred (sparse)\n");
-            code.push_str("    let mut p = [0.0f64; M];\n");
-            for i in 0..m {
-                let nz_cols = &ir.sparsity.n_v.nz_by_row[i];
-                if nz_cols.is_empty() {
-                    continue;
-                }
-                let terms: Vec<String> = nz_cols
-                    .iter()
-                    .map(|&j| format!("N_V[{}][{}] * v_pred[{}]", i, j, j))
-                    .collect();
-                code.push_str(&format!("    p[{}] = {};\n", i, terms.join(" + ")));
-            }
-            code.push('\n');
-
-            // MOSFET body effect: evaluated inside the Newton loops below, at
-            // each iterate (see helpers::emit_body_effect_at_iterate).
-
-            // Step 4: M-dim NR (same structure as DK solve_nonlinear)
-            code.push_str("    // Step 4: M-dim Newton-Raphson (Schur complement)\n");
-            code.push_str("    // First-order predictor warm start\n");
-            code.push_str("    let mut i_nl = [0.0f64; M];\n");
-            if has_latched_device(ir) {
-                // Glow present → ZERO-ORDER warm start: copy the previous i_nl
-                // (a memcpy — `copy_from_slice` keeps clippy quiet). The
-                // first-order predictor `2·i_prev − i_prev_prev` extrapolates the
-                // stiff lit-discharge current (RS↔ROFF is a ~1e5 conductance step)
-                // into the cathode diode's reverse breakdown, which the Schur
-                // convergence accepts (nodal divergence to ~1e6 V). The overshoot
-                // spans the whole lit discharge, not just the flip, so
-                // flip-adjacent narrowing is insufficient (measured); unconditional
-                // zero-order-when-glow is clean and tighter. Compile-time gated on
-                // latched-device presence → byte-identical for every non-glow circuit.
-                code.push_str("    i_nl.copy_from_slice(&state.i_nl_prev);\n");
-            } else {
-                code.push_str("    for i in 0..M {\n");
-                code.push_str(
-                    "        i_nl[i] = 2.0 * state.i_nl_prev[i] - state.i_nl_prev_prev[i];\n",
-                );
-                code.push_str("    }\n");
-            }
-            // Convergence is determined post-loop by `state.last_nr_iterations
-            // < MAX_ITER as u32` (see emission a few lines below). Earlier
-            // versions of the emitter declared `let mut converged = false;`
-            // here and set it inside the NR loop; that was dead code because
-            // every emit path immediately shadowed it with `let converged =
-            // …;` after the loop. Removing the dead declaration eliminates a
-            // clippy `unused_assignments` warning in generated code.
-            code.push_str("    state.last_nr_iterations = MAX_ITER as u32;\n\n");
-
-            // Trapezoidal NR loop
-            code.push_str("    for iter in 0..MAX_ITER {\n");
-
-            // 4a. Compute v_d = p + K * i_nl
-            code.push_str("        // 4a. Compute controlling voltages: v_d = p + K * i_nl\n");
-            for i in 0..m {
-                code.push_str(&format!("        let v_d{} = p[{}]", i, i));
-                for &j in &ir.sparsity.k.nz_by_row[i] {
-                    code.push_str(&format!(" + state.k[{}][{}] * i_nl[{}]", i, j, j));
-                }
-                code.push_str(";\n");
-            }
-            code.push('\n');
-
-            emit_body_effect_at_iterate(&mut code, ir, "v_pred", "state.s_ni", "        ");
-            // 4b. Evaluate device currents and Jacobian (reuse DK style)
-            code.push_str("        // 4b. Evaluate device currents and Jacobians\n");
-            for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-                Self::emit_dk_device_eval_for_nodal_schur(&mut code, dev_num, slot)?;
-            }
-            code.push('\n');
-
-            // 4c. Residuals
-            code.push_str("        // 4c. Residuals: f(i) = i_nl - i_dev = 0\n");
-            for i in 0..m {
-                code.push_str(&format!("        let f{} = i_nl[{}] - i_dev{};\n", i, i, i));
-            }
-            code.push('\n');
-
-            // 4d. NR Jacobian: J[i][j] = delta_ij - sum_k(jdev_ik * K[k][j])
-            code.push_str("        // 4d. Jacobian: J[i][j] = delta_ij - jdev * K\n");
-            for i in 0..m {
-                let slot = ir
-                    .device_slots
-                    .iter()
-                    .find(|s| i >= s.start_idx && i < s.start_idx + s.dimension)
-                    .ok_or_else(|| {
-                        CodegenError::InvalidConfig(format!(
-                            "no device slot found for M-dimension index {}",
-                            i
-                        ))
-                    })?;
-                let blk_start = slot.start_idx;
-                let blk_dim = slot.dimension;
-                for j in 0..m {
-                    let diag = if i == j { "1.0" } else { "0.0" };
-                    let mut terms = String::new();
-                    for k in blk_start..blk_start + blk_dim {
-                        terms.push_str(&format!(" - jdev_{}_{} * state.k[{}][{}]", i, k, k, j));
-                    }
-                    terms.push_str(&body_effect_jacobian_term(ir, i, j, "state.s_ni"));
-                    // Separator is load-bearing: `j{i}{j}` without it collides
-                    // at M≥12 (e.g. j110 could be i=1,j=10 or i=11,j=0).
-                    code.push_str(&format!("        let j{}_{} = {}{};\n", i, j, diag, terms));
-                }
-            }
-            code.push('\n');
-
-            // 4e. Solve the M×M linear system (1×1, 2×2 Cramer, 3..16 Gauss)
-            // Uses `break` on convergence (not `return i_nl` like DK's solve_nonlinear)
-            match m {
-                1 => {
-                    code.push_str("        // Solve 1x1: delta = f / J\n");
-                    code.push_str("        let det = j0_0;\n");
-                    code.push_str("        if det.abs() < 1e-15 {\n");
-                    emit_nr_singular_fallback(&mut code, 1, "            ");
-                    code.push_str("            continue;\n");
-                    code.push_str("        }\n");
-                    code.push_str("        let delta0 = f0 / det;\n\n");
-                    emit_schur_nr_limit_and_converge(&mut code, ir, 1, "        ", "state.k");
-                }
-                2 => {
-                    code.push_str("        // Solve 2x2 (Cramer's rule)\n");
-                    code.push_str("        let det = j0_0 * j1_1 - j0_1 * j1_0;\n");
-                    code.push_str("        if det.abs() < 1e-15 {\n");
-                    emit_nr_singular_fallback(&mut code, 2, "            ");
-                    code.push_str("            continue;\n");
-                    code.push_str("        }\n");
-                    code.push_str("        let inv_det = 1.0 / det;\n");
-                    code.push_str("        let delta0 = inv_det * (j1_1 * f0 - j0_1 * f1);\n");
-                    code.push_str("        let delta1 = inv_det * (-j1_0 * f0 + j0_0 * f1);\n\n");
-                    emit_schur_nr_limit_and_converge(&mut code, ir, 2, "        ", "state.k");
-                }
-                3..=24 => {
-                    Self::generate_schur_gauss_elim(&mut code, ir, m);
-                }
-                _ => {
-                    return Err(CodegenError::UnsupportedTopology(format!(
-                        "M={} not supported (max {})",
-                        m,
-                        crate::dk::MAX_M
-                    )));
-                }
-            }
-
-            code.push_str("    }\n\n"); // end trapezoidal NR loop
-
-            // Step 5: Recover full v = v_pred + S_NI * i_nl
-            code.push_str("    // Step 5: Recover full node voltages: v = v_pred + S_NI * i_nl\n");
-            code.push_str("    let mut v = v_pred;\n");
-            code.push_str("    for i in 0..N {\n");
-            code.push_str("        for j in 0..M { v[i] += state.s_ni[i][j] * i_nl[j]; }\n");
-            code.push_str("    }\n");
-
-            // Op-amp supply rail handling.
-            //
-            // * `Hard`  — apply the post-NR `v[out].clamp(VEE, VCC)` mutation
-            //             (matches pre-2026-04 behavior). This corrupts cap
-            //             history for AC-coupled downstream stages; only use
-            //             on circuits with DC-coupled downstream.
-            // * `ActiveSet` — call `emit_nodal_active_set_resolve` against
-            //             `state.a` (trapezoidal). Detects rail violations
-            //             and pins them via row/column elimination, then
-            //             re-solves the whole network so KCL is satisfied at
-            //             every node with the clamped outputs. Preserves the
-            //             steady DC rail value the op-amp converged to —
-            //             required for control-path op-amps where the rail
-            //             value drives a nonlinear device's operating point
-            //             (VCR ALC sidechain → VCA control). May develop a
-            //             Nyquist-rate limit cycle on audio-path op-amps
-            //             whose output is cap-coupled to a downstream stage
-            //             that integrates the rail behavior — for those use
-            //             ActiveSetBe.
-            // * `ActiveSetBe` — detect rail violations here without mutating;
-            //             if any are detected, fall through to the BE fallback
-            //             below (which re-runs NR with backward-Euler matrices
-            //             and then applies the active-set row/col elimination
-            //             using `state.a_be`). Trapezoidal + pin develops a
-            //             Nyquist-rate limit cycle when the clamp is engaged
-            //             across multiple samples on audio-path op-amps
-            //             (cap-history term `(2/T)·C·v_prev` alternates sign
-            //             every sample); BE damps this. The auto-detector
-            //             picks ActiveSetBe over ActiveSet for audio-path
-            //             topologies (no R-only path from op-amp output to a
-            //             nonlinear device terminal).
-            // * `BoyleDiodes` — physical catch diodes are already in the
-            //             MNA via `augment_netlist_with_boyle_diodes`. NR
-            //             handles saturation naturally through the diode
-            //             exponential, producing a soft knee. Emit nothing
-            //             here.
-            // * `None`  — no clamping; caller accepts unbounded output.
-            use crate::codegen::OpampRailMode;
-            let active_set_be_mode =
-                matches!(ir.solver_config.opamp_rail_mode, OpampRailMode::ActiveSetBe);
-            if active_set_be_mode {
-                code.push_str("    let mut active_set_engaged = false;\n");
-            }
-            match ir.solver_config.opamp_rail_mode {
-                OpampRailMode::Hard => {
-                    for oa in &ir.opamps {
-                        // rail_clamp_stmt returns None for op-amps that only
-                        // appear in OpampIR for slew-rate limiting (VCC/VEE
-                        // both infinite) and clamps only finite bounds.
-                        let target = format!("v[{}]", oa.n_out_idx);
-                        if let Some(stmt) =
-                            Self::rail_clamp_stmt(&target, oa.vclamp_lo, oa.vclamp_hi)
-                        {
-                            code.push_str(&format!("    {stmt}\n"));
-                        }
-                    }
-                }
-                OpampRailMode::ActiveSet => {
-                    // Original trap+pin behavior — preserves steady DC rail
-                    // for control-path topologies (e.g. VCR ALC sidechain).
-                    Self::emit_nodal_active_set_resolve(
-                        &mut code,
-                        ir,
-                        "    ",
-                        "state.a",
-                        "rhs",
-                        PinSite::Schur,
-                    );
-                }
-                OpampRailMode::ActiveSetBe => {
-                    // Detect-only here; resolve happens in BE fallback below.
-                    Self::emit_nodal_active_set_check(&mut code, ir, "    ", "active_set_engaged");
-                }
-                OpampRailMode::BoyleDiodes => {
-                    // Catch diodes are physically in the circuit — no extra
-                    // post-NR mutation needed.
-                }
-                OpampRailMode::None => {
-                    // No clamping — caller accepts unbounded op-amp output.
-                }
-                OpampRailMode::Auto => {
-                    // resolve_opamp_rail_mode() is responsible for converting
-                    // Auto to a concrete mode before reaching the emitter.
-                    unreachable!(
-                        "OpampRailMode::Auto should have been resolved in ir::from_mna; \
-                         emitter should only see concrete modes"
-                    );
-                }
-            }
-
-            // Convergence check: NR must have converged AND, in ActiveSetBe
-            // mode, no op-amp output may have engaged its rail. The latter
-            // triggers the BE fallback so the cap history stays consistent.
-            if active_set_be_mode {
-                code.push_str(&format!(
-                    "    let converged = state.last_nr_iterations < MAX_ITER as u32 \
-                     && !active_set_engaged{be_latch_and};\n\n",
-                ));
-            } else {
-                code.push_str(&format!(
-                    "    let converged = state.last_nr_iterations < MAX_ITER as u32{be_latch_and};\n\n",
-                ));
-            }
-
-            // Rail-engaged samples go straight to the BE fallback below, whose
-            // pin-and-resolve (`emit_nodal_active_set_resolve` on the BE
-            // matrices) is the production ActiveSetBe path. There is no 2x
-            // sub-step recovery here: its only rail handling was a post-solve
-            // clamp that did not re-solve downstream nodes — Hard mode at twice
-            // the rate — and its fixed-point solve could not contract once a
-            // junction conducted.
-
-            // Backward Euler fallback (also fires when active-set engaged in
-            // ActiveSetBe mode — see comment above).
-            code.push_str("    // Backward Euler fallback\n");
-            code.push_str("    if !converged {\n");
-            // Diag contract (matches DK): be_fallback counts every ENTRY;
-            // nr_max_iter counts only a genuine trap max-iter exhaustion —
-            // ActiveSetBe can enter here on rail engagement with a fully
-            // converged trap solve, which must not read as an NR failure.
-            code.push_str("        if state.last_nr_iterations >= MAX_ITER as u32 {\n");
-            code.push_str("            state.diag_nr_max_iter_count += 1;\n");
-            code.push_str("        }\n");
-            code.push_str("        state.diag_be_fallback_count += 1;\n\n");
-
-            // Rebuild RHS with BE matrices
-            code.push_str("        // Rebuild RHS with backward Euler matrices\n");
-            code.push_str("        let mut rhs_be = [0.0f64; N];\n");
-            code.push_str("        for i in 0..N {\n");
-            if ir.has_dc_sources && !ir.matrices.rhs_const_be.is_empty() {
-                code.push_str("            let mut sum = RHS_CONST_BE[i];\n");
-            } else {
-                code.push_str("            let mut sum = 0.0;\n");
-            }
-            code.push_str(
-                "            for j in 0..N { sum += state.a_neg_be[i][j] * state.v_prev[j]; }\n",
-            );
-            // No trap-midpoint N_I·i_nl_prev stamp here. A BE step is
-            // (G + C/T)·v(n) = (C/T)·v_prev + u(n) + N_I·i(n): the only nonlinear
-            // term is the current at the NEW sample (added via S_ni_be below).
-            // Stamping i_nl_prev as well solves N_I·(i_prev + i(n)) — every
-            // device's bias current counted twice — so the fallback is not a
-            // fixed point of the DC operating point. From an exact DC OP on
-            // silence one such sample moved a triode anode by 24-30 V
-            // (philicorda-voicing-coupled, 2026-09-14), and because the kick
-            // lands in null(C) — the exact z=-1 eigenspace of the trap operator —
-            // trap then carried it as an undamped (-1)^n ring bounded only by
-            // the tube. Every user of this fallback (max-iter fallback,
-            // breakpoint-BE after a .switch/.pot event, the runtime BE-latch,
-            // the glow lit-hold) needs the clean step; the same omission was
-            // first landed glow-only in 7b39da7. The trap-primary Step 1 RHS
-            // keeps its N_I·i_nl_prev half (trap average split across Step 1
-            // and Step 5) — that is a different discretization.
-            code.push_str("            rhs_be[i] = sum;\n");
-            code.push_str("        }\n");
-            if multi_input {
-                code.push_str("        for k in 0..NUM_INPUTS { rhs_be[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k]; }\n");
-            } else {
-                code.push_str("        rhs_be[INPUT_NODE] += input * input_conductance;\n");
-            }
-            if inject_or_tap {
-                code.push_str(&emit_inject_rhs_stamp(ir, "rhs_be", "        ", true));
-            }
-            // Runtime voltage sources: integration-scheme-independent; every
-            // from-scratch RHS rebuild must re-stamp them.
-            if !ir.runtime_sources.is_empty() {
-                code.push_str("        // Runtime voltage sources (.runtime directive)\n");
-                for rt in &ir.runtime_sources {
-                    code.push_str(&format!(
-                        "        rhs_be[{}] += state.{};\n",
-                        rt.vs_row, rt.field_name
-                    ));
-                }
-            }
-
-            // BE-fallback noise replay: re-stamp the cached per-source i_n
-            // (populated by the trap rhs_stamp earlier this sample) into
-            // rhs_be so BE samples carry the same noise content as the trap
-            // solve they replaced — no audible silence during BE cooldowns.
-            // Empty fragment when noise mode is Off.
-            if noise.enabled && !noise.rhs_stamp_be.is_empty() {
-                code.push_str(&noise.rhs_stamp_be);
-            }
-            code.push('\n');
-
-            // BE linear prediction
-            code.push_str("        // BE linear prediction: v_pred_be = S_be * rhs_be\n");
-            code.push_str("        let mut v_pred_be = [0.0f64; N];\n");
-            code.push_str("        for i in 0..N {\n");
-            code.push_str("            let mut sum = 0.0;\n");
-            code.push_str("            for j in 0..N { sum += state.s_be[i][j] * rhs_be[j]; }\n");
-            code.push_str("            v_pred_be[i] = sum;\n");
-            code.push_str("        }\n\n");
-
-            // BE device voltages
-            code.push_str("        let mut p_be = [0.0f64; M];\n");
-            code.push_str("        for i in 0..M {\n");
-            code.push_str("            let mut sum = 0.0;\n");
-            code.push_str("            for j in 0..N { sum += N_V[i][j] * v_pred_be[j]; }\n");
-            code.push_str("            p_be[i] = sum;\n");
-            code.push_str("        }\n\n");
-
-            // BE NR loop (use k_be, s_ni_be)
-            code.push_str("        // Reset i_nl to predictor for BE attempt\n");
-            if has_latched_device(ir) {
-                // Same zero-order-when-glow gate as the trap predictor (memcpy via
-                // copy_from_slice). The BE retry inherited the same first-order
-                // warm start, so a reactive be_fallback could not recover across
-                // the glow discontinuity without this (the auto-detector fired but
-                // did not save the trap run). Compile-time gated → byte-identical
-                // for non-glow.
-                code.push_str("        i_nl.copy_from_slice(&state.i_nl_prev);\n\n");
-            } else {
-                code.push_str("        for i in 0..M {\n");
-                code.push_str(
-                    "            i_nl[i] = 2.0 * state.i_nl_prev[i] - state.i_nl_prev_prev[i];\n",
-                );
-                code.push_str("        }\n\n");
-            }
-
-            // Breakpoint-BE samples get a larger NR budget: the swap sample can
-            // be a stiff step off a biased operating point, and a BE sample that
-            // hits the trap per-sample wall would reinject the very latch it is
-            // meant to remove (openfarf, g10 Key event). Byte-identical to the
-            // old `0..MAX_ITER` on non-breakpoint builds.
-            if ir.solver_config.breakpoint_be {
-                code.push_str(
-                    "        let be_iter_budget = if state.breakpoint_be > 0 { BREAKPOINT_BE_MAX_ITER } else { MAX_ITER };\n",
-                );
-                code.push_str("        for _iter in 0..be_iter_budget {\n");
-            } else {
-                code.push_str("        for _iter in 0..MAX_ITER {\n");
-            }
-
-            // v_d = p_be + K_be * i_nl
-            for i in 0..m {
-                code.push_str(&format!("            let v_d{} = p_be[{}]", i, i));
-                for j in 0..m {
-                    code.push_str(&format!(" + state.k_be[{}][{}] * i_nl[{}]", i, j, j));
-                }
-                code.push_str(";\n");
-            }
-            code.push('\n');
-            emit_body_effect_at_iterate(
-                &mut code,
-                ir,
-                "v_pred_be",
-                "state.s_ni_be",
-                "            ",
-            );
-
-            // Evaluate devices (reuse same functions)
-            for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-                Self::emit_dk_device_eval_for_nodal_schur_indented(
-                    &mut code,
-                    dev_num,
-                    slot,
-                    "            ",
-                )?;
-            }
-            code.push('\n');
-
-            // Residuals
-            for i in 0..m {
-                code.push_str(&format!(
-                    "            let f{} = i_nl[{}] - i_dev{};\n",
-                    i, i, i
-                ));
-            }
-            code.push('\n');
-
-            // Jacobian (using k_be)
-            for i in 0..m {
-                let slot = ir
-                    .device_slots
-                    .iter()
-                    .find(|s| i >= s.start_idx && i < s.start_idx + s.dimension)
-                    .ok_or_else(|| {
-                        CodegenError::InvalidConfig(format!(
-                            "No device slot found for NR dimension index {}",
-                            i
-                        ))
-                    })?;
-                let blk_start = slot.start_idx;
-                let blk_dim = slot.dimension;
-                for j in 0..m {
-                    let diag = if i == j { "1.0" } else { "0.0" };
-                    let mut terms = String::new();
-                    for k in blk_start..blk_start + blk_dim {
-                        terms.push_str(&format!(" - jdev_{}_{} * state.k_be[{}][{}]", i, k, k, j));
-                    }
-                    terms.push_str(&body_effect_jacobian_term(ir, i, j, "state.s_ni_be"));
-                    // Separator is load-bearing: `j{i}{j}` without it collides
-                    // at M≥12 (e.g. j110 could be i=1,j=10 or i=11,j=0).
-                    code.push_str(&format!(
-                        "            let j{}_{} = {}{};\n",
-                        i, j, diag, terms
-                    ));
-                }
-            }
-            code.push('\n');
-
-            // Solve (same structure but at 12-space indent)
-            match m {
-                1 => {
-                    code.push_str("            let det = j0_0;\n");
-                    code.push_str("            if det.abs() < 1e-15 { i_nl[0] -= (f0 * 0.5).clamp(-0.01, 0.01); continue; }\n");
-                    code.push_str("            let delta0 = f0 / det;\n");
-                    // Simple inline limit+converge for BE
-                    Self::emit_be_nr_limit_and_converge(&mut code, ir, m, "            ");
-                }
-                2 => {
-                    code.push_str("            let det = j0_0 * j1_1 - j0_1 * j1_0;\n");
-                    code.push_str("            if det.abs() < 1e-15 { i_nl[0] -= (f0 * 0.5).clamp(-0.01, 0.01); i_nl[1] -= (f1 * 0.5).clamp(-0.01, 0.01); continue; }\n");
-                    code.push_str("            let inv_det = 1.0 / det;\n");
-                    code.push_str("            let delta0 = inv_det * (j1_1 * f0 - j0_1 * f1);\n");
-                    code.push_str("            let delta1 = inv_det * (-j1_0 * f0 + j0_0 * f1);\n");
-                    Self::emit_be_nr_limit_and_converge(&mut code, ir, m, "            ");
-                }
-                3..=24 => {
-                    // Inline Gaussian elimination for BE
-                    code.push_str("            let mut a = [\n");
-                    for i in 0..m {
-                        let row = (0..m)
-                            .map(|j| format!("j{i}_{j}"))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        code.push_str(&format!("                [{row}],\n"));
-                    }
-                    code.push_str("            ];\n");
-                    let b_init = (0..m)
-                        .map(|i| format!("f{i}"))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    code.push_str(&format!("            let mut b = [{b_init}];\n"));
-                    code.push_str(&format!(
-                        "            let mut singular = false;\n\
-                         \x20           for col in 0..{m} {{\n\
-                         \x20               let mut max_row = col;\n\
-                         \x20               let mut max_val = a[col][col].abs();\n\
-                         \x20               for row in (col+1)..{m} {{\n\
-                         \x20                   if a[row][col].abs() > max_val {{ max_val = a[row][col].abs(); max_row = row; }}\n\
-                         \x20               }}\n\
-                         \x20               if max_val < 1e-15 {{ singular = true; break; }}\n\
-                         \x20               if max_row != col {{ a.swap(col, max_row); b.swap(col, max_row); }}\n\
-                         \x20               let pivot = a[col][col];\n\
-                         \x20               for row in (col+1)..{m} {{\n\
-                         \x20                   let factor = a[row][col] / pivot;\n\
-                         \x20                   for j in (col+1)..{m} {{ a[row][j] -= factor * a[col][j]; }}\n\
-                         \x20                   b[row] -= factor * b[col];\n\
-                         \x20               }}\n\
-                         \x20           }}\n"
-                    ));
-                    code.push_str(&format!(
-                        "            if !singular {{\n\
-                         \x20               for i in (0..{m}).rev() {{\n\
-                         \x20                   let mut sum = b[i];\n\
-                         \x20                   for j in (i+1)..{m} {{ sum -= a[i][j] * b[j]; }}\n\
-                         \x20                   if a[i][i].abs() < 1e-15 {{ singular = true; break; }}\n\
-                         \x20                   b[i] = sum / a[i][i];\n\
-                         \x20               }}\n\
-                         \x20           }}\n"
-                    ));
-                    code.push_str("            if !singular {\n");
-                    for i in 0..m {
-                        code.push_str(&format!("                let delta{i} = b[{i}];\n"));
-                    }
-                    Self::emit_be_nr_limit_and_converge(&mut code, ir, m, "                ");
-                    code.push_str("            } else {\n");
-                    for i in 0..m {
-                        code.push_str(&format!(
-                            "                i_nl[{i}] -= (f{i} * 0.5).clamp(-0.01, 0.01);\n"
-                        ));
-                    }
-                    code.push_str("            }\n");
-                }
-                _ => {}
-            }
-
-            code.push_str("        }\n\n"); // end BE NR loop
-
-            // Recover full v from BE
-            code.push_str("        // Recover full v from BE solve\n");
-            code.push_str("        v = v_pred_be;\n");
-            code.push_str("        for i in 0..N {\n");
-            code.push_str("            for j in 0..M { v[i] += state.s_ni_be[i][j] * i_nl[j]; }\n");
-            code.push_str("        }\n");
-
-            // Op-amp supply rail handling on the BE result. ActiveSetBe mode
-            // runs the constrained re-solve against `state.a_be` so the cap
-            // history (built from BE matrices) stays KCL-consistent. ActiveSet
-            // mode is not normally reachable here (its trap path doesn't trip
-            // BE on engagement), but if NR genuinely failed, fall back to
-            // ActiveSet on BE matrices too. Hard mode
-            // falls back to a plain post-recovery clamp (only safe for
-            // DC-coupled downstream stages — see opamp_rail_clamp_bug.md).
-            match ir.solver_config.opamp_rail_mode {
-                OpampRailMode::ActiveSetBe | OpampRailMode::ActiveSet => {
-                    Self::emit_nodal_active_set_resolve(
-                        &mut code,
-                        ir,
-                        "        ",
-                        "state.a_be",
-                        "rhs_be",
-                        PinSite::Schur,
-                    );
-                }
-                OpampRailMode::Hard => {
-                    for oa in &ir.opamps {
-                        let target = format!("v[{}]", oa.n_out_idx);
-                        if let Some(stmt) =
-                            Self::rail_clamp_stmt(&target, oa.vclamp_lo, oa.vclamp_hi)
-                        {
-                            code.push_str(&format!("        {stmt}\n"));
-                        }
-                    }
-                }
-                OpampRailMode::None => {
-                    // No clamping — `None` means the caller accepts unbounded
-                    // op-amp output on every path, including the BE fallback.
-                    // (This arm used to share the Hard clamp, which silently
-                    // bounded None-mode output on BE-fallback samples.)
-                }
-                OpampRailMode::BoyleDiodes => {
-                    // Catch diodes are physically in the circuit; no post-NR
-                    // mutation. (BE NR converged with the diodes active, so v
-                    // is already saturation-bounded.)
-                }
-                OpampRailMode::Auto => {
-                    unreachable!("OpampRailMode::Auto should have been resolved in ir::from_mna")
-                }
-            }
-
-            code.push_str("    }\n\n"); // end BE fallback block
-        }
+        Self::emit_schur_solve(&mut code, ir, noise)?;
 
         // NaN/Inf recovery: shared reset + DC-OP return. Schur path has no
         // cross-timestep chord LU to invalidate, so is_full_lu = false.
@@ -6577,160 +5813,6 @@ impl RustEmitter {
             _ => {}
         }
         Ok(())
-    }
-
-    /// Emit voltage limiting + convergence + step for BE fallback NR in Schur mode.
-    fn emit_be_nr_limit_and_converge(code: &mut String, ir: &CircuitIR, dim: usize, indent: &str) {
-        // Compute voltage-space changes for limiting
-        for i in 0..dim {
-            code.push_str(&format!("{indent}let dv{i} = -("));
-            let mut first = true;
-            for j in 0..dim {
-                if !first {
-                    code.push_str(" + ");
-                }
-                code.push_str(&format!("state.k_be[{i}][{j}] * delta{j}"));
-                first = false;
-            }
-            code.push_str(");\n");
-        }
-
-        // Compute per-dimension damping factor from per-device limiting
-        code.push_str(&format!("{indent}let mut alpha = [1.0_f64; {dim}];\n"));
-        code.push_str(&format!("{indent}let mut any_limited = false;\n"));
-        for (dev_num, slot) in ir.device_slots.iter().enumerate() {
-            for d in 0..slot.dimension {
-                let i = slot.start_idx + d;
-                // Skip pnjlim/fetlim for steps < 0.1 mV — both are no-ops
-                // for |dv| < 2·Vt ≈ 52 mV (silicon), so 1e-4 is 500× conservative.
-                code.push_str(&format!("{indent}if dv{i}.abs() > 1e-4 {{\n"));
-                match (&slot.device_type, d) {
-                    (crate::codegen::ir::DeviceType::Diode, _) => {
-                        code.push_str(&format!(
-                            "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_VCRIT);\n"
-                        ));
-                    }
-                    (crate::codegen::ir::DeviceType::Bjt, _)
-                    | (crate::codegen::ir::DeviceType::BjtForwardActive, _) => {
-                        code.push_str(&format!(
-                            "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vt, DEVICE_{dev_num}_VCRIT);\n"
-                        ));
-                    }
-                    (crate::codegen::ir::DeviceType::Jfet, 0)
-                    | (crate::codegen::ir::DeviceType::Mosfet, 0) => {
-                        code.push_str(&format!(
-                            "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, 0.0);\n"
-                        ));
-                    }
-                    (crate::codegen::ir::DeviceType::Jfet, _) => {
-                        code.push_str(&format!(
-                            "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vp);\n"
-                        ));
-                    }
-                    (crate::codegen::ir::DeviceType::Mosfet, _) => {
-                        code.push_str(&format!(
-                            "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vt);\n"
-                        ));
-                    }
-                    (crate::codegen::ir::DeviceType::Tube, 0) => {
-                        let grid_vt = super::helpers::tube_grid_vt_expr(&slot.params, dev_num);
-                        code.push_str(&format!(
-                            "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, {grid_vt}, DEVICE_{dev_num}_VCRIT);\n"
-                        ));
-                    }
-                    (crate::codegen::ir::DeviceType::Tube, 2) => {
-                        let grid_vt = super::helpers::tube_grid_vt_expr(&slot.params, dev_num);
-                        // Pentode dim 2 = Vg2k — log-junction limiting (see DK NR limiter).
-                        code.push_str(&format!(
-                            "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, {grid_vt}, DEVICE_{dev_num}_VCRIT);\n"
-                        ));
-                    }
-                    (crate::codegen::ir::DeviceType::Tube, _) => {
-                        code.push_str(&format!(
-                            "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, 0.0);\n"
-                        ));
-                    }
-                    (crate::codegen::ir::DeviceType::Vca, _) => {
-                        // VCA: no junction limiting needed — fast_exp already clamps
-                        code.push_str(&format!("{indent}    let v_lim = v_d{i} + dv{i};\n"));
-                    }
-                    (crate::codegen::ir::DeviceType::Ldr, _) => {
-                        // LDR: linear resistance path, no junction — no limiting.
-                        code.push_str(&format!("{indent}    let v_lim = v_d{i} + dv{i};\n"));
-                    }
-                    (crate::codegen::ir::DeviceType::Glow, _) => {
-                        // Glow: monotone resistance path, no junction — no limiting.
-                        code.push_str(&format!("{indent}    let v_lim = v_d{i} + dv{i};\n"));
-                    }
-                }
-                code.push_str(&format!(
-                    "{indent}    let ratio = ((v_lim - v_d{i}) / dv{i}).max(0.01);\n\
-                     {indent}    if ratio < alpha[{i}] {{ alpha[{i}] = ratio; if ratio < 1.0 {{ any_limited = true; }} }}\n\
-                     {indent}}}\n"
-                ));
-            }
-        }
-
-        // Scalar alpha: global minimum across ALL dimensions. Per-dimension
-        // alpha breaks the coupled Newton direction for multi-device systems
-        // (e.g. anti-parallel diodes), causing oscillation when limiting is
-        // asymmetric — see VOLTAGE_LIMITING.md and the same reduction in
-        // `nr_helpers.rs::emit_nr_limit_and_converge`. Subsumes the old
-        // per-device (2D-block) grouping.
-        let min_chain = (0..dim)
-            .map(|i| format!("alpha[{i}]"))
-            .collect::<Vec<_>>()
-            .join(".min(")
-            + &")".repeat(dim.saturating_sub(1));
-        code.push_str(&format!("{indent}let mut alpha_scalar = {min_chain};\n"));
-
-        // Global voltage backstop: adaptive limit based on DC operating point voltages
-        let max_dc_v = ir
-            .dc_operating_point
-            .iter()
-            .map(|v| v.abs())
-            .fold(0.0_f64, f64::max);
-        let dv_limit = if max_dc_v > 20.0 {
-            (max_dc_v * 0.15).max(3.5)
-        } else {
-            3.5
-        };
-        code.push_str(&format!(
-            "{indent}// Global voltage backstop: limit max voltage change to {dv_limit:.1}V\n"
-        ));
-        code.push_str(&format!("{indent}let max_dv = "));
-        for i in 0..dim {
-            if i > 0 {
-                code.push_str(&format!(".max((dv{i} * alpha_scalar).abs())"));
-            } else {
-                code.push_str(&format!("(dv{i} * alpha_scalar).abs()"));
-            }
-        }
-        code.push_str(";\n");
-        code.push_str(&format!(
-            "{indent}if max_dv > {dv_limit:.6} {{ alpha_scalar *= ({dv_limit:.6} / max_dv).max(0.1); }}\n"
-        ));
-
-        // Apply scalar-damped step
-        for i in 0..dim {
-            code.push_str(&format!("{indent}i_nl[{i}] -= alpha_scalar * delta{i};\n"));
-        }
-
-        // RELTOL convergence check
-        code.push_str(&format!(
-            "{indent}// Convergence check (SPICE RELTOL=0.001, VNTOL=1e-6)\n"
-        ));
-        code.push_str(&format!("{indent}if !any_limited {{\n"));
-        code.push_str(&format!("{indent}    let mut nr_converged = true;\n"));
-        for i in 0..dim {
-            code.push_str(&format!(
-                "{indent}    {{ let step = dv{i} * alpha_scalar; let v_new = v_d{i} + step; let threshold = 1e-3 * v_d{i}.abs().max(v_new.abs()) + 1e-6; if !(step.abs() <= threshold) {{ nr_converged = false; }} }}\n"
-            ));
-        }
-        code.push_str(&format!(
-            "{indent}    if nr_converged {{ state.last_nr_iterations = _iter as u32; break; }}\n"
-        ));
-        code.push_str(&format!("{indent}}}\n"));
     }
 
     /// Emit LU solve function for the nodal solver (N x N with partial pivoting).
@@ -8941,6 +8023,589 @@ impl RustEmitter {
             );
             code.push_str("    }\n\n");
         }
+    }
+
+    /// The solve part of a nodal-Schur sample: the primary solve and, on a
+    /// trapezoidal build, the backward-Euler instance of the same routine
+    /// (latch, breakpoint, trapezoidal failure, ActiveSetBe rail).
+    fn emit_schur_solve(
+        code: &mut String,
+        ir: &CircuitIR,
+        noise: &NoiseEmission,
+    ) -> Result<(), CodegenError> {
+        let m = ir.topology.m;
+        let multi_input = ir.solver_config.num_inputs() > 1;
+        let primary = SchurSite::primary(ir);
+        let be = SchurSite::be_instance(ir);
+
+        if m == 0 {
+            // Linear circuit: v_pred is the answer. A breakpoint sample (after a
+            // .switch/.pot swap) takes the BE solve: a_neg_be = (1/T)C has no G
+            // term, so the swapped conductance is not double-counted, and BE
+            // damps trap's z=-1 mode at the source.
+            code.push_str("    // Linear circuit: v = v_pred (no NR needed)\n");
+            let binding = if Self::m0_rail_handling_mutates_v(ir) {
+                "let mut v"
+            } else {
+                "let v"
+            };
+            if ir.solver_config.breakpoint_be && !ir.solver_config.backward_euler {
+                code.push_str(&format!(
+                    "    {binding};\n    if state.breakpoint_be > 0 {{\n"
+                ));
+                Self::emit_schur_rhs_pred(code, ir, noise, &be, NoiseMode::Draw);
+                code.push_str("    v = v_pred;\n    } else {\n");
+                Self::emit_schur_rhs_pred(code, ir, noise, &primary, NoiseMode::Draw);
+                code.push_str("    v = v_pred;\n    }\n\n");
+            } else {
+                Self::emit_schur_rhs_pred(code, ir, noise, &primary, NoiseMode::Draw);
+                code.push_str(&format!("    {binding} = v_pred;\n\n"));
+            }
+            Self::emit_nodal_m0_rail_handling(code, ir, "    ", PinSite::Schur);
+            return Ok(());
+        }
+
+        if ir.solver_config.backward_euler {
+            Self::emit_schur_rhs_pred(code, ir, noise, &primary, NoiseMode::Draw);
+            Self::emit_schur_newton(code, ir, &primary, true)?;
+            code.push_str(
+                "    if state.last_nr_iterations >= MAX_ITER as u32 {\n\
+                 \x20       state.diag_nr_max_iter_count += 1;\n\
+                 \x20   }\n\n",
+            );
+            return Ok(());
+        }
+
+        let active_set_be = matches!(
+            ir.solver_config.opamp_rail_mode,
+            crate::codegen::OpampRailMode::ActiveSetBe
+        );
+        let forced = match (
+            ir.solver_config.runtime_be_latch,
+            ir.solver_config.breakpoint_be,
+        ) {
+            (true, true) => Some("state.be_latched || state.breakpoint_be > 0"),
+            (true, false) => Some("state.be_latched"),
+            (false, true) => Some("state.breakpoint_be > 0"),
+            (false, false) => None,
+        };
+        code.push_str("    let mut v = [0.0f64; N];\n    let mut i_nl = [0.0f64; M];\n");
+        if active_set_be {
+            code.push_str("    let mut active_set_engaged = false;\n");
+        }
+        if ir.solver_config.subsample_fire && !multi_input {
+            // The sub-sample-fire re-solve stamps the input at function scope.
+            code.push_str("    let input_conductance = 1.0 / INPUT_RESISTANCE;\n");
+        }
+        match forced {
+            Some(f) => code.push_str(&format!("    let be_first = {f};\n    if !be_first {{\n")),
+            None => code.push_str("    {\n"),
+        }
+        Self::emit_schur_rhs_pred(code, ir, noise, &primary, NoiseMode::Draw);
+        Self::emit_schur_newton(code, ir, &primary, false)?;
+        code.push_str("    }\n\n");
+
+        // `converged` = the trapezoidal solve was accepted (the sub-sample-fire
+        // block reads it too).
+        let mut trap_ok = String::new();
+        if forced.is_some() {
+            trap_ok.push_str("!be_first && ");
+        }
+        trap_ok.push_str("state.last_nr_iterations < MAX_ITER as u32");
+        if active_set_be {
+            trap_ok.push_str(" && !active_set_engaged");
+        }
+        code.push_str(&format!("    let converged = {trap_ok};\n"));
+        code.push_str(
+            "    // Backward-Euler solve: the same routine a BE build runs, on the BE\n\
+             \x20   // kernel (s_be/k_be/s_ni_be, a_be/a_neg_be).\n",
+        );
+        code.push_str("    if !converged {\n");
+        // Diag contract: max-iter counts a genuine trapezoidal exhaustion (not
+        // a rail engagement, not a skipped trap solve); be_fallback counts
+        // every entry.
+        let not_forced = if forced.is_some() {
+            "!be_first && "
+        } else {
+            ""
+        };
+        code.push_str(&format!(
+            "        if {not_forced}state.last_nr_iterations >= MAX_ITER as u32 {{\n\
+             \x20           state.diag_nr_max_iter_count += 1;\n\
+             \x20       }}\n"
+        ));
+        code.push_str("        state.diag_be_fallback_count += 1;\n");
+        if ir.solver_config.breakpoint_be {
+            code.push_str(
+                "        let be_iter_budget = if state.breakpoint_be > 0 { BREAKPOINT_BE_MAX_ITER } else { MAX_ITER };\n",
+            );
+        }
+        let noise_mode = match forced {
+            Some(_) => NoiseMode::DrawIf("be_first"),
+            None => NoiseMode::Replay,
+        };
+        Self::emit_schur_rhs_pred(code, ir, noise, &be, noise_mode);
+        Self::emit_schur_newton(code, ir, &be, false)?;
+        if forced.is_some() {
+            // A forced sample's BE solve is its primary: count its exhaustion.
+            code.push_str(
+                "        if be_first && state.last_nr_iterations >= MAX_ITER as u32 {\n\
+                 \x20           state.diag_nr_max_iter_count += 1;\n\
+                 \x20       }\n",
+            );
+        }
+        code.push_str("    }\n\n");
+        Ok(())
+    }
+
+    /// Schur Step 1-2 for one integrator (`site`): the right-hand side into a
+    /// local `rhs`, then the linear prediction `v_pred = S·rhs`.
+    fn emit_schur_rhs_pred(
+        code: &mut String,
+        ir: &CircuitIR,
+        noise: &NoiseEmission,
+        site: &SchurSite,
+        noise_mode: NoiseMode,
+    ) {
+        let n = ir.topology.n;
+        let m = ir.topology.m;
+        let multi_input = ir.solver_config.num_inputs() > 1;
+        let inject_or_tap = ir.solver_config.has_inject_or_tap();
+        let _ = (n, m, multi_input, inject_or_tap);
+        // Step 1: Build RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input (sparse)
+        code.push_str(
+            "    // Step 1: Build RHS (sparse A_neg * v_prev + sparse N_i * i_nl_prev)\n",
+        );
+        if let Some(rc) = site.rhs_const {
+            code.push_str(&format!("    let mut rhs = {rc};\n"));
+        } else {
+            code.push_str("    let mut rhs = [0.0f64; N];\n");
+        }
+        // Sparse A_neg * v_prev
+        for i in 0..n {
+            let nz_cols = &site.a_neg_sparsity(ir).nz_by_row[i];
+            if nz_cols.is_empty() {
+                continue;
+            }
+            for &j in nz_cols {
+                code.push_str(&format!(
+                    "    rhs[{}] += {}[{}][{}] * state.v_prev[{}];\n",
+                    i, site.a_neg, i, j, j
+                ));
+            }
+        }
+        // Sparse N_i * i_nl_prev.
+        //
+        // This term is TRAPEZOIDAL MIDPOINT machinery: combined with the full
+        // `S*N_i*i_nl` that the NR loop adds via `v = v_pred + S_ni*i_nl`, the
+        // net effective contribution becomes `N_i*(i_nl_prev + i_nl)` — the
+        // midpoint average of the nonlinear current across the step (see
+        // `docs/aidocs/NR_SOLVER.md:20` and `DK_METHOD.md:62-66`).
+        //
+        // Under BACKWARD EULER we want ONLY `N_i*i_nl(n+1)` — no averaging.
+        // Omitting the i_nl_prev stamp here, combined with the `S*N_i*i_nl`
+        // that NR still adds later, yields exactly the BE companion. Keeping
+        // the i_nl_prev stamp under BE was the root cause of the pipe-shouter
+        // warmup divergence (v_prev[21] drifting 186 V in 50 zero-input
+        // samples): `v_pred` over-incorporated the previous sample's
+        // nonlinear current, NR couldn't climb out of the wrong basin, hit
+        // MAX_ITER every sample, and BE fallback landed at whatever the
+        // last iterate was.
+        if m > 0 && !site.be {
+            for i in 0..n {
+                for &j in &ir.sparsity.n_i.nz_by_row[i] {
+                    code.push_str(&format!(
+                        "    rhs[{}] += N_I[{}][{}] * state.i_nl_prev[{}];\n",
+                        i, i, j, j
+                    ));
+                }
+            }
+        }
+        code.push('\n');
+
+        // Input source (Thevenin).
+        //
+        // Trapezoidal stamps the average of V_in(n) and V_in(n+1):
+        //     rhs[in] += (V_in(n+1) + V_in(n)) * G_in
+        // Backward Euler stamps only V_in(n+1):
+        //     rhs[in] += V_in(n+1) * G_in
+        // Mixing trap input stamping with a BE `a_neg` (which is `alpha*C`,
+        // no `-G` history term) is a discretization mismatch — the first
+        // non-zero sample pushes the solver into an NR basin it cannot
+        // climb out of. Observed on pipe-shouter at Tone=1.0 / amp=0.1 /
+        // 96 kHz as instant v[7] runaway to 10^13 V and NR max-iter hits
+        // on every sample. Branch on `site.be`
+        // so the Schur path matches the emitter's integrator choice —
+        // same gate used by `emit_nodal_process_sample` for the full-LU
+        // NR (see the `if site.be` block there).
+        if multi_input {
+            if site.be {
+                code.push_str("    // Input sources (backward Euler: per-port V_in * G_in)\n");
+                code.push_str("    for k in 0..NUM_INPUTS {\n        rhs[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k];\n    }\n");
+            } else {
+                code.push_str(
+                    "    // Input sources (trapezoidal: per-port (V_in + V_in_prev) * G_in)\n",
+                );
+                code.push_str("    for k in 0..NUM_INPUTS {\n        rhs[INPUT_NODES[k]] += (inputs[k] + state.inputs_prev[k]) / INPUT_RESISTANCES[k];\n    }\n");
+            }
+        } else {
+            code.push_str("    let input_conductance = 1.0 / INPUT_RESISTANCE;\n");
+            if site.be {
+                code.push_str("    // Input source (backward Euler: V_in * G_in)\n");
+                code.push_str("    rhs[INPUT_NODE] += input * input_conductance;\n");
+            } else {
+                code.push_str("    // Input source (trapezoidal: (V_in + V_in_prev) * G_in)\n");
+                code.push_str(
+                    "    rhs[INPUT_NODE] += (input + state.input_prev) * input_conductance;\n",
+                );
+            }
+        }
+        if inject_or_tap {
+            code.push_str(&emit_inject_rhs_stamp(ir, "rhs", "    ", site.be));
+        }
+        // NOTE: `state.input_prev` is deliberately NOT committed here. The
+        // ActiveSetBe sub-step machinery below interpolates the input ramp as
+        // `(input - state.input_prev) / N_SUB`, so committing before the
+        // sub-steps read it would zero the ramp exactly on the hard-transient
+        // samples that trigger sub-stepping. The commit happens in the
+        // end-of-sample state-update block (matching the DK template).
+        code.push('\n');
+
+        // Runtime voltage sources (.runtime directive): host-driven per-sample values.
+        // Stamped after the DC RHS_CONST and the input stamp so the field value is
+        // additive with any DC bias declared on the voltage source itself.
+        if !ir.runtime_sources.is_empty() {
+            code.push_str("    // Runtime voltage sources (.runtime directive)\n");
+            for rt in &ir.runtime_sources {
+                code.push_str(&format!(
+                    "    rhs[{}] += state.{};\n",
+                    rt.vs_row, rt.field_name
+                ));
+            }
+            code.push('\n');
+        }
+
+        // Authentic circuit noise — Phase 1 thermal stamp.
+        //
+        // Stamped once per audio sample (NOT per NR iteration), after all
+        // deterministic RHS contributions and before the linear prediction
+        // `v_pred = S * rhs` so noise is shaped by the circuit's transfer
+        // function exactly like the input source. BE-fallback samples don't
+        // re-draw — they reuse the trapezoidal NR's noise contribution
+        // implicitly via `v_prev` history.
+        //
+        // The fragment is `""` when noise mode is Off — zero bytes emitted
+        // and the build is byte-identical to a noiseless one.
+        if noise.enabled {
+            match noise_mode {
+                NoiseMode::Draw => code.push_str(&noise.rhs_stamp),
+                NoiseMode::Replay => {
+                    code.push_str(&emit_noise_replay_body(noise.replay_counts, "rhs", "    "))
+                }
+                NoiseMode::DrawIf(cond) => {
+                    code.push_str(&format!("    if {cond} {{\n"));
+                    code.push_str(&noise.rhs_stamp);
+                    code.push_str("    } else {\n");
+                    code.push_str(&emit_noise_replay_body(
+                        noise.replay_counts,
+                        "rhs",
+                        "        ",
+                    ));
+                    code.push_str("    }\n");
+                }
+            }
+            code.push('\n');
+        }
+
+        // Step 2: Linear prediction v_pred = S * rhs (O(N^2))
+        code.push_str("    // Step 2: Linear prediction v_pred = S * rhs (O(N^2))\n");
+        code.push_str("    let mut v_pred = [0.0f64; N];\n");
+        code.push_str("    for i in 0..N {\n");
+        code.push_str("        let mut sum = 0.0;\n");
+        code.push_str(&format!(
+            "        for j in 0..N {{ sum += {}[i][j] * rhs[j]; }}\n",
+            site.s
+        ));
+        code.push_str("        v_pred[i] = sum;\n");
+        code.push_str("    }\n\n");
+    }
+
+    /// Schur Step 3-5 for one integrator (`site`): the M-dimensional Newton
+    /// loop, recovery of the full `v`, and op-amp rail handling. The BE build's
+    /// solve and a trapezoidal build's backward-Euler solve (latch, fallback,
+    /// breakpoint, ActiveSetBe rail) are this one routine. With `declare`
+    /// false it writes the caller's `v`, `i_nl`, `active_set_engaged`.
+    fn emit_schur_newton(
+        code: &mut String,
+        ir: &CircuitIR,
+        site: &SchurSite,
+        declare: bool,
+    ) -> Result<(), CodegenError> {
+        let n = ir.topology.n;
+        let m = ir.topology.m;
+        let multi_input = ir.solver_config.num_inputs() > 1;
+        let inject_or_tap = ir.solver_config.has_inject_or_tap();
+        let _ = (n, m, multi_input, inject_or_tap);
+        // Step 3: Extract device voltages p = N_v * v_pred (O(M*N))
+        code.push_str("    // Step 3: Extract device voltages p = N_v * v_pred (sparse)\n");
+        code.push_str("    let mut p = [0.0f64; M];\n");
+        for i in 0..m {
+            let nz_cols = &ir.sparsity.n_v.nz_by_row[i];
+            if nz_cols.is_empty() {
+                continue;
+            }
+            let terms: Vec<String> = nz_cols
+                .iter()
+                .map(|&j| format!("N_V[{}][{}] * v_pred[{}]", i, j, j))
+                .collect();
+            code.push_str(&format!("    p[{}] = {};\n", i, terms.join(" + ")));
+        }
+        code.push('\n');
+
+        // MOSFET body effect: evaluated inside the Newton loops below, at
+        // each iterate (see helpers::emit_body_effect_at_iterate).
+
+        // Step 4: M-dim NR (same structure as DK solve_nonlinear)
+        code.push_str("    // Step 4: M-dim Newton-Raphson (Schur complement)\n");
+        code.push_str("    // First-order predictor warm start\n");
+        if declare {
+            code.push_str("    let mut i_nl = [0.0f64; M];\n");
+        }
+        if has_latched_device(ir) {
+            // Glow present → ZERO-ORDER warm start: copy the previous i_nl
+            // (a memcpy — `copy_from_slice` keeps clippy quiet). The
+            // first-order predictor `2·i_prev − i_prev_prev` extrapolates the
+            // stiff lit-discharge current (RS↔ROFF is a ~1e5 conductance step)
+            // into the cathode diode's reverse breakdown, which the Schur
+            // convergence accepts (nodal divergence to ~1e6 V). The overshoot
+            // spans the whole lit discharge, not just the flip, so
+            // flip-adjacent narrowing is insufficient (measured); unconditional
+            // zero-order-when-glow is clean and tighter. Compile-time gated on
+            // latched-device presence → byte-identical for every non-glow circuit.
+            code.push_str("    i_nl.copy_from_slice(&state.i_nl_prev);\n");
+        } else {
+            code.push_str("    for i in 0..M {\n");
+            code.push_str(
+                "        i_nl[i] = 2.0 * state.i_nl_prev[i] - state.i_nl_prev_prev[i];\n",
+            );
+            code.push_str("    }\n");
+        }
+        // Convergence is determined post-loop by `state.last_nr_iterations
+        // < MAX_ITER as u32` (see emission a few lines below). Earlier
+        // versions of the emitter declared `let mut converged = false;`
+        // here and set it inside the NR loop; that was dead code because
+        // every emit path immediately shadowed it with `let converged =
+        // …;` after the loop. Removing the dead declaration eliminates a
+        // clippy `unused_assignments` warning in generated code.
+        code.push_str("    state.last_nr_iterations = MAX_ITER as u32;\n\n");
+
+        // Trapezoidal NR loop
+        code.push_str(&format!("    for iter in 0..{} {{\n", site.iter_budget));
+
+        // 4a. Compute v_d = p + K * i_nl
+        code.push_str("        // 4a. Compute controlling voltages: v_d = p + K * i_nl\n");
+        for i in 0..m {
+            code.push_str(&format!("        let v_d{} = p[{}]", i, i));
+            for &j in &site.k_sparsity(ir).nz_by_row[i] {
+                code.push_str(&format!(" + {}[{}][{}] * i_nl[{}]", site.k, i, j, j));
+            }
+            code.push_str(";\n");
+        }
+        code.push('\n');
+
+        emit_body_effect_at_iterate(code, ir, "v_pred", site.s_ni, "        ");
+        // 4b. Evaluate device currents and Jacobian (reuse DK style)
+        code.push_str("        // 4b. Evaluate device currents and Jacobians\n");
+        for (dev_num, slot) in ir.device_slots.iter().enumerate() {
+            Self::emit_dk_device_eval_for_nodal_schur(code, dev_num, slot)?;
+        }
+        code.push('\n');
+
+        // 4c. Residuals
+        code.push_str("        // 4c. Residuals: f(i) = i_nl - i_dev = 0\n");
+        for i in 0..m {
+            code.push_str(&format!("        let f{} = i_nl[{}] - i_dev{};\n", i, i, i));
+        }
+        code.push('\n');
+
+        // 4d. NR Jacobian: J[i][j] = delta_ij - sum_k(jdev_ik * K[k][j])
+        code.push_str("        // 4d. Jacobian: J[i][j] = delta_ij - jdev * K\n");
+        for i in 0..m {
+            let slot = ir
+                .device_slots
+                .iter()
+                .find(|s| i >= s.start_idx && i < s.start_idx + s.dimension)
+                .ok_or_else(|| {
+                    CodegenError::InvalidConfig(format!(
+                        "no device slot found for M-dimension index {}",
+                        i
+                    ))
+                })?;
+            let blk_start = slot.start_idx;
+            let blk_dim = slot.dimension;
+            for j in 0..m {
+                let diag = if i == j { "1.0" } else { "0.0" };
+                let mut terms = String::new();
+                for k in blk_start..blk_start + blk_dim {
+                    terms.push_str(&format!(" - jdev_{}_{} * {}[{}][{}]", i, k, site.k, k, j));
+                }
+                terms.push_str(&body_effect_jacobian_term(ir, i, j, site.s_ni));
+                // Separator is load-bearing: `j{i}{j}` without it collides
+                // at M≥12 (e.g. j110 could be i=1,j=10 or i=11,j=0).
+                code.push_str(&format!("        let j{}_{} = {}{};\n", i, j, diag, terms));
+            }
+        }
+        code.push('\n');
+
+        // 4e. Solve the M×M linear system (1×1, 2×2 Cramer, 3..16 Gauss)
+        // Uses `break` on convergence (not `return i_nl` like DK's solve_nonlinear)
+        match m {
+            1 => {
+                code.push_str("        // Solve 1x1: delta = f / J\n");
+                code.push_str("        let det = j0_0;\n");
+                code.push_str("        if det.abs() < 1e-15 {\n");
+                emit_nr_singular_fallback(code, 1, "            ");
+                code.push_str("            continue;\n");
+                code.push_str("        }\n");
+                code.push_str("        let delta0 = f0 / det;\n\n");
+                emit_schur_nr_limit_and_converge(code, ir, 1, "        ", site.k);
+            }
+            2 => {
+                code.push_str("        // Solve 2x2 (Cramer's rule)\n");
+                code.push_str("        let det = j0_0 * j1_1 - j0_1 * j1_0;\n");
+                code.push_str("        if det.abs() < 1e-15 {\n");
+                emit_nr_singular_fallback(code, 2, "            ");
+                code.push_str("            continue;\n");
+                code.push_str("        }\n");
+                code.push_str("        let inv_det = 1.0 / det;\n");
+                code.push_str("        let delta0 = inv_det * (j1_1 * f0 - j0_1 * f1);\n");
+                code.push_str("        let delta1 = inv_det * (-j1_0 * f0 + j0_0 * f1);\n\n");
+                emit_schur_nr_limit_and_converge(code, ir, 2, "        ", site.k);
+            }
+            3..=24 => {
+                Self::generate_schur_gauss_elim_k(code, ir, m, site.k);
+            }
+            _ => {
+                return Err(CodegenError::UnsupportedTopology(format!(
+                    "M={} not supported (max {})",
+                    m,
+                    crate::dk::MAX_M
+                )));
+            }
+        }
+
+        code.push_str("    }\n\n"); // end trapezoidal NR loop
+
+        // Step 5: Recover full v = v_pred + S_NI * i_nl
+        code.push_str("    // Step 5: Recover full node voltages: v = v_pred + S_NI * i_nl\n");
+        if declare {
+            code.push_str("    let mut v = v_pred;\n");
+        } else {
+            code.push_str("    v = v_pred;\n");
+        }
+        code.push_str("    for i in 0..N {\n");
+        code.push_str(&format!(
+            "        for j in 0..M {{ v[i] += {}[i][j] * i_nl[j]; }}\n",
+            site.s_ni
+        ));
+        code.push_str("    }\n");
+
+        // Op-amp supply rail handling.
+        //
+        // * `Hard`  — apply the post-NR `v[out].clamp(VEE, VCC)` mutation
+        //             (matches pre-2026-04 behavior). This corrupts cap
+        //             history for AC-coupled downstream stages; only use
+        //             on circuits with DC-coupled downstream.
+        // * `ActiveSet` — call `emit_nodal_active_set_resolve` against
+        //             `state.a` (trapezoidal). Detects rail violations
+        //             and pins them via row/column elimination, then
+        //             re-solves the whole network so KCL is satisfied at
+        //             every node with the clamped outputs. Preserves the
+        //             steady DC rail value the op-amp converged to —
+        //             required for control-path op-amps where the rail
+        //             value drives a nonlinear device's operating point
+        //             (VCR ALC sidechain → VCA control). May develop a
+        //             Nyquist-rate limit cycle on audio-path op-amps
+        //             whose output is cap-coupled to a downstream stage
+        //             that integrates the rail behavior — for those use
+        //             ActiveSetBe.
+        // * `ActiveSetBe` — detect rail violations here without mutating;
+        //             if any are detected, fall through to the BE fallback
+        //             below (which re-runs NR with backward-Euler matrices
+        //             and then applies the active-set row/col elimination
+        //             using `state.a_be`). Trapezoidal + pin develops a
+        //             Nyquist-rate limit cycle when the clamp is engaged
+        //             across multiple samples on audio-path op-amps
+        //             (cap-history term `(2/T)·C·v_prev` alternates sign
+        //             every sample); BE damps this. The auto-detector
+        //             picks ActiveSetBe over ActiveSet for audio-path
+        //             topologies (no R-only path from op-amp output to a
+        //             nonlinear device terminal).
+        // * `BoyleDiodes` — physical catch diodes are already in the
+        //             MNA via `augment_netlist_with_boyle_diodes`. NR
+        //             handles saturation naturally through the diode
+        //             exponential, producing a soft knee. Emit nothing
+        //             here.
+        // * `None`  — no clamping; caller accepts unbounded output.
+        use crate::codegen::OpampRailMode;
+        match ir.solver_config.opamp_rail_mode {
+            OpampRailMode::Hard => {
+                for oa in &ir.opamps {
+                    // rail_clamp_stmt returns None for op-amps that only
+                    // appear in OpampIR for slew-rate limiting (VCC/VEE
+                    // both infinite) and clamps only finite bounds.
+                    let target = format!("v[{}]", oa.n_out_idx);
+                    if let Some(stmt) = Self::rail_clamp_stmt(&target, oa.vclamp_lo, oa.vclamp_hi) {
+                        code.push_str(&format!("    {stmt}\n"));
+                    }
+                }
+            }
+            OpampRailMode::ActiveSet => {
+                // Original trap+pin behavior — preserves steady DC rail
+                // for control-path topologies (e.g. VCR ALC sidechain).
+                Self::emit_nodal_active_set_resolve(
+                    code,
+                    ir,
+                    "    ",
+                    site.a,
+                    "rhs",
+                    PinSite::Schur,
+                );
+            }
+            OpampRailMode::ActiveSetBe if site.be => {
+                // The backward-Euler solve pins and re-solves on its own
+                // matrices: this is where ActiveSetBe's resolve belongs.
+                Self::emit_nodal_active_set_resolve(
+                    code,
+                    ir,
+                    "    ",
+                    site.a,
+                    "rhs",
+                    PinSite::Schur,
+                );
+            }
+            OpampRailMode::ActiveSetBe => {
+                // Detect-only on the trapezoidal solve; an engaged rail
+                // hands the sample to the backward-Euler solve.
+                Self::emit_nodal_active_set_check(code, ir, "    ", "active_set_engaged");
+            }
+            OpampRailMode::BoyleDiodes => {
+                // Catch diodes are physically in the circuit — no extra
+                // post-NR mutation needed.
+            }
+            OpampRailMode::None => {
+                // No clamping — caller accepts unbounded op-amp output.
+            }
+            OpampRailMode::Auto => {
+                // resolve_opamp_rail_mode() is responsible for converting
+                // Auto to a concrete mode before reaching the emitter.
+                unreachable!(
+                    "OpampRailMode::Auto should have been resolved in ir::from_mna; \
+                         emitter should only see concrete modes"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// True when [`Self::emit_nodal_m0_rail_handling`] will emit code that

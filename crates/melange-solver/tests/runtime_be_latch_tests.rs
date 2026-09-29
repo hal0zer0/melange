@@ -88,10 +88,10 @@ fn nodal_trap_build_emits_be_latch_detector() {
         code.contains("state.be_r1_num") && code.contains("state.be_pow"),
         "trap nodal build must carry the lag-1 autocorrelation EMAs"
     );
-    // The convergence check must be gated so a latch forces the BE path.
+    // A latched sample must skip the trapezoidal solve and take the BE one.
     assert!(
-        code.contains("&& !state.be_latched"),
-        "converged must be gated on !be_latched so a latch forces the BE fallback"
+        code.contains("let be_first = state.be_latched") && code.contains("if !be_first {"),
+        "a latched sample must skip the trap solve and take the BE solve"
     );
     // The observability counter (oomox ask #3) is always present.
     assert!(
