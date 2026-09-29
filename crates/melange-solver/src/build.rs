@@ -147,6 +147,25 @@ pub struct BuildOptions {
     /// The build feeds a plugin project (not `--format code`): refuses the
     /// features only `--format code` carries (multi-input, `.inject`/`.tap`).
     pub plugin_format: bool,
+    /// `--pot NAME=VALUE` overrides, applied to the netlist before the MNA is
+    /// built, which also settles every other pot onto its `.pot` default
+    /// ([`apply_pot_overrides`]). `None` leaves the netlist as written (the MNA
+    /// applies `.pot` defaults itself).
+    pub pot_overrides: Option<Vec<String>>,
+    /// Resolve `.tap` probes (they change the generated `process_sample` API).
+    pub resolve_taps: bool,
+    /// Give the generated code the `.inject` runtime API. Either way every
+    /// `.inject` source's conductance is stamped (it is part of the circuit);
+    /// without the API each injection holds 0 (a verb whose driver calls the
+    /// plain `process_sample`, e.g. `analyze`).
+    pub inject_runtime: bool,
+    /// Parse with `.tolerance` / `.mismatch` jitter off (validate: the reference
+    /// deck carries the values as written).
+    pub disable_unit_variation: bool,
+    /// Raise the output clamp to three times the largest DC operating-point
+    /// node voltage when that is higher (validate: a high-rail circuit swings
+    /// its output tens of volts legitimately; a 10 V clamp would square it).
+    pub output_clamp_auto: bool,
 }
 
 /// A finished build and what the caller reports about it.
@@ -170,6 +189,8 @@ pub struct Built {
     pub forward_active: std::collections::HashSet<String>,
     pub grid_off_pentodes: std::collections::HashMap<String, f64>,
     pub linearize_outcome: crate::pipeline::LinearizeOutcome,
+    /// The resolved `.inject` sources, in generated-code order.
+    pub injection_specs: Vec<crate::codegen::ir::InjectionSpec>,
 }
 
 /// Build `netlist_str` as every verb ships it.
@@ -206,8 +227,11 @@ pub fn build(
 
     // Step 1: Parse netlist
     report!(out, "Step 1: Parsing SPICE netlist...");
-    let mut netlist =
-        Netlist::parse(netlist_str).with_context(|| "Failed to parse SPICE netlist")?;
+    let parse_options = crate::parser::ParseOptions {
+        disable_unit_variation: opts.disable_unit_variation,
+    };
+    let mut netlist = Netlist::parse_with_options(netlist_str, parse_options)
+        .with_context(|| "Failed to parse SPICE netlist")?;
 
     // Resolve the effective oversampling factor: explicit --oversampling wins,
     // else the deck's `.oversampling` recommendation, else 1.
@@ -237,6 +261,12 @@ pub fn build(
     )?;
 
     report!(out, "  ✓ Parsed {} elements", netlist.elements.len());
+
+    // `--pot` overrides (and every other pot settled onto its `.pot` default),
+    // BEFORE the MNA: pot values are R values that flow into G at codegen time.
+    if let Some(overrides) = &opts.pot_overrides {
+        apply_pot_overrides(&mut netlist, overrides, &|m| report!(out, "{m}"))?;
+    }
 
     // Step 2: Build MNA system
     report!(out, "Step 2: Building MNA system...");
@@ -447,7 +477,7 @@ pub fn build(
                 norton,
             });
         }
-        for tap in &netlist.taps {
+        for tap in netlist.taps.iter().filter(|_| opts.resolve_taps) {
             let raw = mna
                 .node_map
                 .get(tap.node.as_str())
@@ -671,6 +701,21 @@ pub fn build(
         input_resistance,
         opamp_rail_mode,
     );
+    let output_clamp = if opts.output_clamp_auto {
+        dc_preflight
+            .as_ref()
+            .map(|dc| {
+                dc.v_node
+                    .iter()
+                    .cloned()
+                    .fold(0.0_f64, |acc, v| acc.max(v.abs()))
+                    * 3.0
+            })
+            .unwrap_or(0.0)
+            .max(output_clamp)
+    } else {
+        output_clamp
+    };
 
     // Step 3: Create DK kernel
     // Use augmented MNA for inductor circuits (well-conditioned for large L)
@@ -825,9 +870,8 @@ pub fn build(
     // historical detect-via-default behavior of this flag.
     //
     // Resolve the `.integrator` directive with the same precedence codegen
-    // uses so the iteration budget matches the integrator that ships. The
-    // simulate/analyze call sites intentionally pass the raw CLI flags —
-    // the runtime solvers do not honor the directive (compile-time pin).
+    // uses so the iteration budget matches the integrator that ships, on every
+    // verb: they all compile and run this same generated code.
     let (effective_backward_euler, _, _) = crate::codegen::ir::resolve_integrator_flags(
         backward_euler,
         force_trap,
@@ -869,7 +913,11 @@ pub fn build(
         noise_master_seed: noise_seed,
         emit_dc_op_recompute,
         max_iterations_be_promoted: Some(max_iter_be_promoted),
-        injections: injection_specs.clone(),
+        injections: if opts.inject_runtime {
+            injection_specs.clone()
+        } else {
+            Vec::new()
+        },
         taps: tap_specs.clone(),
         subsample_fire,
         subsample_lit_factor,
@@ -961,6 +1009,7 @@ pub fn build(
         forward_active,
         grid_off_pentodes,
         linearize_outcome,
+        injection_specs,
     })
 }
 

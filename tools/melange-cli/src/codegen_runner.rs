@@ -107,6 +107,14 @@ impl BinaryCache {
     /// # Returns
     /// Path to the compiled binary. Cached binaries are reused without recompilation.
     pub fn compile(&self, source: &str, name: &str) -> Result<CompiledBinary> {
+        // Diagnostic: MELANGE_DUMP_SOURCE=<dir> writes the exact source a verb
+        // compiles to <dir>/<name>.rs, so two builds of one deck can be diffed
+        // (the cache itself keeps only binaries).
+        if let Some(dir) = std::env::var_os("MELANGE_DUMP_SOURCE") {
+            let dir = std::path::PathBuf::from(dir);
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join(format!("{name}.rs")), source);
+        }
         let hash = hash_source(source);
         let bin_name = format!("melange_{name}_{hash:016x}");
         let bin_path = self.cache_dir.join(&bin_name);

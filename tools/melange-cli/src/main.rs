@@ -26,10 +26,7 @@ pub mod sources;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use melange_solver::build::{
-    apply_pot_overrides, forced_dk_hard_blocker, format_system_size,
-    preflight_relinearize_bjt_caps, resolve_oversampling,
-};
+use melange_solver::build::format_system_size;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -1711,6 +1708,11 @@ fn compile_circuit_source(
         noise_seed,
         emit_dc_op_recompute,
         plugin_format: format != OutputFormat::Code,
+        pot_overrides: None,
+        resolve_taps: true,
+        inject_runtime: true,
+        disable_unit_variation: false,
+        output_clamp_auto: false,
     };
     let melange_solver::build::Built {
         generated,
@@ -2829,13 +2831,6 @@ fn simulate_circuit_source(
     circuit_source: &circuits::CircuitSource,
     opts: &SimulateOptions,
 ) -> Result<()> {
-    use melange_solver::{
-        codegen::{routing, CodeGenerator, CodegenConfig},
-        dk::DkKernel,
-        mna::MnaSystem,
-        parser::Netlist,
-    };
-
     println!("melange simulate");
     println!("  Source: {}", circuit_source.name());
     println!();
@@ -2854,95 +2849,69 @@ fn simulate_circuit_source(
         }
     };
 
-    // Step 2: Parse netlist
-    println!("Step 1: Parsing SPICE netlist...");
-    let mut netlist =
-        Netlist::parse(&netlist_str).with_context(|| "Failed to parse SPICE netlist")?;
-    // Resolve the effective oversampling factor: explicit --oversampling wins,
-    // else the deck's `.oversampling` recommendation, else 1.
-    let oversampling = resolve_oversampling(opts.oversampling, netlist.recommended_oversampling);
-    if !netlist.subcircuits.is_empty() {
-        netlist
-            .expand_subcircuits()
-            .with_context(|| "Failed to expand subcircuits")?;
-    }
-
-    // Topology gate: the wiring defects a solver cannot see. A typo'd node
-    // name invents a node and floats whatever it was on, and every number
-    // melange prints afterwards is correct for the circuit it was handed. One
-    // implementation for every verb — `melange_solver::topology`.
-    melange_solver::pipeline::topology_gate(
-        &netlist,
-        &melange_solver::topology::Ports::declared(
-            opts.input_node.split(',').map(|s| s.trim().to_string()),
-            opts.output_node.split(',').map(|s| s.trim().to_string()),
-        ),
-        &|m| println!("{m}"),
-    )?;
-
-    println!("  {} elements", netlist.elements.len());
-
-    // Apply `--pot NAME=VALUE` and settle un-overridden pots onto their `.pot`
-    // defaults, BEFORE the MNA is built — pot values are R values that flow
-    // into G at codegen time (unlike `--switch`, which is applied at runtime
-    // via `set_switch_N`). Exactly the path `analyze` uses, so a knob setting
-    // means the same thing whether you are looking at the response or
-    // listening to it.
-    apply_pot_overrides(&mut netlist, opts.pot_overrides, &|m| println!("{m}"))
+    // The one build every verb ships (melange_solver::build). Output layout:
+    // [primary, probe_1, probe_2, ...]. The generated `process_sample` returns
+    // these in order; the simulate main routes index 0 to the WAV and 1.. to the
+    // probe CSV.
+    let mut output_nodes = vec![opts.output_node.to_string()];
+    output_nodes.extend(opts.probes.iter().cloned());
+    let build_opts = melange_solver::build::BuildOptions {
+        sample_rate: opts.sample_rate,
+        circuit_name: "simulate".to_string(),
+        input_nodes: vec![opts.input_node.to_string()],
+        output_nodes,
+        max_iter: opts.max_iter,
+        tolerance: 1e-9,
+        output_scale: 1.0,
+        output_clamp: 10.0,
+        input_resistance: opts.input_resistance_flag,
+        oversampling: opts.oversampling,
+        dc_block: false, // preserve DC for accurate WAV output
+        solver: opts.solver.to_string(),
+        backward_euler: opts.backward_euler,
+        force_trap: opts.force_trap,
+        tube_grid_fa: opts.tube_grid_fa.to_string(),
+        subsample_fire: opts.subsample_fire,
+        subsample_lit_factor: diag_lit_factor(),
+        bjt_fa_mode: melange_solver::codegen::BjtFaMode::Auto,
+        opamp_rail_mode: opts.opamp_rail_mode,
+        nodal_sub_path_override: opts.nodal_sub_path_override,
+        allow_static_glow_on_full_lu: false,
+        noise_mode: opts.noise_mode,
+        noise_seed: opts.noise_seed,
+        emit_dc_op_recompute: false,
+        plugin_format: false,
+        // Knob settings mean the same thing here as in `analyze`.
+        pot_overrides: Some(opts.pot_overrides.to_vec()),
+        resolve_taps: false,
+        inject_runtime: true,
+        disable_unit_variation: false,
+        output_clamp_auto: false,
+    };
+    let built =
+        melange_solver::build::build(&netlist_str, &build_opts, &|a| println!("{a}"), &|a| {
+            eprintln!("{a}")
+        })
         .map_err(build_error)?;
-
-    // Step 3: Build MNA
-    println!("Step 2: Building MNA system...");
-    let mut mna =
-        MnaSystem::from_netlist(&netlist).with_context(|| "Failed to build MNA system")?;
-
-    // Resolve `.inject` runtime sources so `simulate` can DRIVE them from the
-    // CLI (`--inject FIELD=SPEC`). The compile path resolves these too;
-    // `simulate` previously built the IR with `injections: Vec::new()` and
-    // dropped the drive. Each Thevenin/Norton conductance MUST be stamped into
-    // `mna.g` BEFORE the DK kernel is built (the source is baked into S = A⁻¹).
-    let mut injection_specs: Vec<melange_solver::codegen::ir::InjectionSpec> = Vec::new();
-    for inj in &netlist.injections {
-        let raw = mna
-            .node_map
-            .get(inj.node.as_str())
-            .copied()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    ".inject node '{}' not found. Available: {:?}",
-                    inj.node,
-                    mna.node_names_in_index_order()
-                )
-            })?;
-        if raw == 0 {
-            anyhow::bail!(
-                ".inject node '{}' resolves to ground; injection is single-ended \
-                 (node-to-ground) and must target a non-ground node.",
-                inj.node
-            );
-        }
-        let idx = raw - 1;
-        let (resistance, norton) = match inj.impedance {
-            melange_solver::parser::InjectImpedance::Thevenin(r) => (r, false),
-            melange_solver::parser::InjectImpedance::Norton(r) => (r, true),
-        };
-        if !(resistance > 0.0 && resistance.is_finite()) {
-            anyhow::bail!(
-                ".inject '{}' impedance must be positive and finite, got {}",
-                inj.field_name,
-                resistance
-            );
-        }
-        if idx < mna.n {
-            mna.g[idx][idx] += 1.0 / resistance;
-        }
-        injection_specs.push(melange_solver::codegen::ir::InjectionSpec {
-            node: idx,
-            name: inj.field_name.clone(),
-            resistance,
-            norton,
-        });
+    println!(
+        "{}",
+        format_route_info(built.solver_label, &built.solver_reason)
+    );
+    // Non-negative K diagonal note, printed ONCE (kernel builder logs it at
+    // debug only — it is rebuilt several times per run). See compile summary.
+    if built.routing.k_diag_unsafe {
+        println!(
+            "  Note: non-negative K diagonal (positive DK-Schur feedback, \
+             expected for transformer-coupled NFB) — handled by nodal full-NR."
+        );
     }
+    if built.max_iter != 100 {
+        println!("  Max NR iterations: {}", built.max_iter);
+    }
+    let injection_specs = built.injection_specs;
+    let generated = built.generated;
+    let netlist = built.netlist;
+    let oversampling = built.oversampling;
 
     // Map `--inject FIELD=SPEC` to injection indices (by field name).
     let mut inject_driven: Vec<(usize, codegen_runner::InjectSource)> = Vec::new();
@@ -2974,377 +2943,6 @@ fn simulate_circuit_source(
         }
     }
 
-    let input_node_raw = mna.node_map.get(opts.input_node).copied().ok_or_else(|| {
-        anyhow::anyhow!(
-            "Input node '{}' not found. Available: {:?}",
-            opts.input_node,
-            mna.node_names_in_index_order()
-        )
-    })?;
-    if input_node_raw == 0 {
-        anyhow::bail!("Input node cannot be ground");
-    }
-    let input_node_idx = input_node_raw - 1;
-
-    let output_node_raw = mna.node_map.get(opts.output_node).copied().ok_or_else(|| {
-        anyhow::anyhow!(
-            "Output node '{}' not found. Available: {:?}",
-            opts.output_node,
-            mna.node_names_in_index_order()
-        )
-    })?;
-    if output_node_raw == 0 {
-        anyhow::bail!("Output node cannot be ground");
-    }
-    let output_node_idx = output_node_raw - 1;
-
-    // Resolve probes — each name must be an existing non-ground node.
-    // Probes are additive to the primary `-n` output; they share the same
-    // `output_nodes` slot ordering as the generated `process_sample` return.
-    let mut probe_indices: Vec<usize> = Vec::with_capacity(opts.probes.len());
-    for probe_name in opts.probes {
-        let raw = mna
-            .node_map
-            .get(probe_name.as_str())
-            .copied()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Probe node '{}' not found. Available: {:?}",
-                    probe_name,
-                    mna.node_names_in_index_order()
-                )
-            })?;
-        if raw == 0 {
-            anyhow::bail!("Probe node '{}' is ground (not probeable)", probe_name);
-        }
-        probe_indices.push(raw - 1);
-    }
-
-    // Input resistance
-    let (input_resistance, ir_source) = if let Some(r) = opts.input_resistance_flag {
-        (r, "from --input-resistance flag")
-    } else if let Some(r) = netlist.input_impedance {
-        (r, "from .input_impedance directive")
-    } else {
-        (1.0, "default")
-    };
-    if !(input_resistance > 0.0 && input_resistance.is_finite()) {
-        anyhow::bail!(
-            "input resistance must be positive and finite, got {}",
-            input_resistance
-        );
-    }
-    println!(
-        "  Input resistance: {} ohm ({})",
-        input_resistance, ir_source
-    );
-    let input_conductance = 1.0 / input_resistance;
-    if input_node_idx < mna.n {
-        mna.g[input_node_idx][input_node_idx] += input_conductance;
-    }
-
-    println!(
-        "  {} nodes, {} nonlinear devices",
-        mna.n,
-        mna.nonlinear_devices.len()
-    );
-
-    // Stamp junction caps
-    {
-        let device_slots =
-            melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist).unwrap_or_default();
-        if !device_slots.is_empty() {
-            mna.stamp_device_junction_caps(&device_slots);
-        }
-    }
-
-    // Detect forward-active BJTs (runs DC OP, checks Vbc < -0.5V)
-    let config_for_fa = CodegenConfig {
-        circuit_name: "fa_detect".to_string(),
-        sample_rate: opts.sample_rate,
-        input_resistance,
-        input_node: input_node_idx,
-        output_nodes: vec![output_node_idx],
-        ..CodegenConfig::default()
-    };
-    // See compile path for rationale — mirrors the same gate.
-    let forward_active = melange_solver::pipeline::apply_forward_active_reduction(
-        &mut mna,
-        &netlist,
-        &config_for_fa,
-        opts.solver,
-        opts.sample_rate,
-        oversampling,
-        input_node_idx,
-        input_conductance,
-        &|a| println!("{a}"),
-    )?;
-
-    // Detect grid-off pentodes (shared helper with compile/analyze). For
-    // `--solver nodal` this is a no-op — nodal doesn't benefit from M-reduction
-    // at the solver level.
-    let grid_off_pentodes = melange_solver::pipeline::apply_grid_off_reduction(
-        &mut mna,
-        &netlist,
-        &config_for_fa,
-        &forward_active,
-        opts.tube_grid_fa,
-        opts.solver,
-        opts.sample_rate,
-        oversampling,
-        input_node_idx,
-        input_conductance,
-    )?;
-    if let Some(msg) = melange_solver::pipeline::format_grid_off_log(&grid_off_pentodes) {
-        println!("{msg}");
-    }
-
-    // Apply `.linearize` directives — shared helper documented at its definition.
-    melange_solver::pipeline::apply_linearize_reductions(
-        &mut mna,
-        &netlist,
-        &forward_active,
-        &grid_off_pentodes,
-        input_node_idx,
-        input_conductance,
-        input_resistance,
-        &|a| println!("{a}"),
-    )?;
-
-    // BJT junction-cap preflight — see compile path for rationale. Keeping
-    // simulate in sync with compile means `melange simulate` hears the
-    // same plugin the user will eventually `melange compile`.
-    let dc_preflight = preflight_relinearize_bjt_caps(
-        &mut mna,
-        &netlist,
-        input_node_idx,
-        input_resistance,
-        opts.opamp_rail_mode,
-    );
-
-    // Step 4: Build DK kernel and route
-    let has_inductors = !mna.inductors.is_empty()
-        || !mna.coupled_inductors.is_empty()
-        || !mna.transformer_groups.is_empty();
-
-    // The DK kernel is built on EVERY route, including nodal: the routing
-    // decision below is read off this kernel (S/A_neg spectral radius, K
-    // conditioning). Saying plain "Building DK kernel" and then "Solver: nodal"
-    // a few lines later reads as a contradiction; it is not one.
-    println!("Step 3: Building DK kernel (routing analysis \u{2014} built on every route)...");
-    let mut dk_failed = false;
-    // Build at the INTERNAL (oversampled) rate so the routing decision below
-    // sees the same S/A_neg the generated solver ships — see the compile
-    // path's `routing_rate` comment. For os=1 this equals `opts.sample_rate`.
-    let routing_rate = opts.sample_rate * oversampling as f64;
-    // Inductor circuits always use the augmented-MNA kernel — including under
-    // `--solver dk`. The previous `opts.solver != "dk"` gate sent dk-forced
-    // inductor circuits through the non-augmented companion-model path,
-    // diverging from compile/analyze.
-    let kernel = if has_inductors {
-        match DkKernel::from_mna_augmented(&mna, routing_rate) {
-            Ok(k) => k,
-            Err(e) => {
-                if opts.solver == "dk" {
-                    anyhow::bail!("DK kernel failed: {e}");
-                }
-                println!("  Augmented DK kernel failed: {e}, auto-selecting nodal");
-                dk_failed = true;
-                let m = mna.m;
-                let n = mna.n_aug;
-                DkKernel {
-                    n,
-                    m,
-                    n_nodes: mna.n,
-                    num_devices: mna.num_devices,
-                    sample_rate: opts.sample_rate,
-                    s: vec![0.0; n * n],
-                    a_neg: vec![0.0; n * n],
-                    k: vec![0.0; m * m],
-                    n_v: vec![0.0; m * n],
-                    n_i: vec![0.0; n * m],
-                    rhs_const: vec![0.0; n],
-                    inductors: vec![],
-                    coupled_inductors: vec![],
-                    transformer_groups: vec![],
-                    pots: vec![],
-                    wiper_groups: vec![],
-                    gang_groups: vec![],
-                }
-            }
-        }
-    } else {
-        match DkKernel::from_mna(&mna, routing_rate) {
-            Ok(k) => k,
-            Err(e) => {
-                if opts.solver == "dk" {
-                    anyhow::bail!("DK kernel failed: {e}");
-                }
-                println!("  DK kernel failed: {e}, auto-selecting nodal");
-                dk_failed = true;
-                // Try augmented; if that also fails, build dummy kernel
-                match DkKernel::from_mna_augmented(&mna, routing_rate) {
-                    Ok(k) => k,
-                    Err(_) => {
-                        let m = mna.m;
-                        let n = mna.n_aug;
-                        DkKernel {
-                            n,
-                            m,
-                            n_nodes: mna.n,
-                            num_devices: mna.num_devices,
-                            sample_rate: opts.sample_rate,
-                            s: vec![0.0; n * n],
-                            a_neg: vec![0.0; n * n],
-                            k: vec![0.0; m * m],
-                            n_v: vec![0.0; m * n],
-                            n_i: vec![0.0; n * m],
-                            rhs_const: vec![0.0; n],
-                            inductors: vec![],
-                            coupled_inductors: vec![],
-                            transformer_groups: vec![],
-                            pots: vec![],
-                            wiper_groups: vec![],
-                            gang_groups: vec![],
-                        }
-                    }
-                }
-            }
-        }
-    };
-    println!(
-        "  {}",
-        format_system_size(kernel.n, kernel.n_nodes, kernel.m)
-    );
-
-    // Route: DK or nodal
-    let decision = routing::auto_route(&kernel, &mna, dk_failed, opts.opamp_rail_mode);
-    if opts.solver == "dk" {
-        if let Some(blocker) = forced_dk_hard_blocker(&decision) {
-            anyhow::bail!(
-                "--solver dk cannot be forced on this circuit: {blocker}.\n\
-                 The DK solver structurally cannot represent it and would produce \
-                 silently-wrong results. Use --solver auto (recommended) or --solver nodal."
-            );
-        }
-    }
-    let use_nodal = match opts.solver {
-        "nodal" => true,
-        "dk" => false,
-        _ => decision.route == routing::SolverRoute::Nodal,
-    };
-    println!(
-        "{}",
-        format_route_info(if use_nodal { "nodal" } else { "DK" }, &decision.reason)
-    );
-    // Non-negative K diagonal note, printed ONCE (kernel builder logs it at
-    // debug only — it is rebuilt several times per run). See compile summary.
-    if decision.k_diag_unsafe {
-        println!(
-            "  Note: non-negative K diagonal (positive DK-Schur feedback, \
-             expected for transformer-coupled NFB) — handled by nodal full-NR."
-        );
-    }
-
-    // When routing to nodal, expand BJT internal nodes so parasitic RB/RC/RE
-    // are modeled at the MNA level (eliminates per-device inner NR). Gate on
-    // K conditioning: when K_diag is strongly negative (< -100), the Schur
-    // NR body won't be used anyway (nodal falls back to full N×N LU), and
-    // expanding just inflates N with high-conductance nodes that ill-condition
-    // the LU. Mirrors the compile path at ~line 1522.
-    //
-    // Previously this was gated on `opts.solver != "nodal"`, which meant auto
-    // routing would expand but explicit --solver nodal would not. That
-    // asymmetry is wrong: when wurli-power-amp auto-routed to Nodal, internal
-    // node expansion fired unguarded and destabilized the NR, while
-    // `--solver nodal` skipped expansion entirely and ran stably. Now both
-    // paths take the same expansion decision.
-    if use_nodal {
-        melange_solver::pipeline::expand_internal_nodes_if_conditioned(
-            &mut mna,
-            &netlist,
-            &kernel,
-            &|a| println!("{a}"),
-        );
-    }
-
-    // Step 5: Generate circuit code.
-    // output_nodes layout: [primary, probe_1, probe_2, ...]. The generated
-    // `process_sample` returns these in order; the simulate main routes
-    // index 0 to the WAV and indices 1.. to the probe CSV.
-    println!("Step 4: Generating code...");
-    let mut output_nodes = vec![output_node_idx];
-    output_nodes.extend(probe_indices.iter().copied());
-    let output_scales = vec![1.0; output_nodes.len()];
-    let max_iterations = melange_solver::pipeline::auto_tune_max_iter(
-        opts.max_iter,
-        &kernel,
-        &decision,
-        !opts.backward_euler,
-    );
-    let max_iterations_be_promoted =
-        melange_solver::pipeline::auto_tune_max_iter(opts.max_iter, &kernel, &decision, false);
-    if max_iterations != 100 {
-        println!("  Max NR iterations: {max_iterations}");
-    }
-    let config = CodegenConfig {
-        circuit_name: "simulate".to_string(),
-        sample_rate: opts.sample_rate,
-        max_iterations,
-        tolerance: 1e-9,
-        input_resistance,
-        input_node: input_node_idx,
-        extra_input_nodes: Vec::new(),
-        extra_input_resistances: Vec::new(),
-        output_nodes,
-        oversampling_factor: oversampling,
-        output_scales,
-        output_clamp_v: 10.0,
-        include_dc_op: true,
-        dc_op_max_iterations: 200,
-        dc_op_tolerance: 1e-9,
-        dc_block: false, // preserve DC for accurate WAV output
-        pot_settle_samples: 64,
-        backward_euler: opts.backward_euler,
-        force_trap: opts.force_trap,
-        nodal_sub_path_override: opts.nodal_sub_path_override,
-        allow_static_glow_on_full_lu: false,
-        disable_be_fallback: false,
-        opamp_rail_mode: opts.opamp_rail_mode,
-        noise_mode: opts.noise_mode,
-        noise_master_seed: opts.noise_seed,
-        emit_dc_op_recompute: false,
-        max_iterations_be_promoted: Some(max_iterations_be_promoted),
-        injections: injection_specs.clone(),
-        taps: Vec::new(),
-        bjt_fa_mode: melange_solver::codegen::BjtFaMode::Auto,
-        subsample_fire: opts.subsample_fire,
-        subsample_lit_factor: diag_lit_factor(),
-    };
-    let generator = CodeGenerator::new(config);
-    let generated = if use_nodal {
-        generator
-            .generate_nodal(&mna, &netlist)
-            .with_context(|| "Nodal codegen failed")?
-    } else {
-        match generator.generate_with_dc_op(&kernel, &mna, &netlist, dc_preflight) {
-            Err(melange_solver::codegen::CodegenError::SelfStartingOscillator(why))
-                if opts.solver != "dk" =>
-            {
-                println!("  Route: nodal — self-starting oscillator: {why}");
-                melange_solver::pipeline::expand_internal_nodes_if_conditioned(
-                    &mut mna,
-                    &netlist,
-                    &kernel,
-                    &|a| println!("{a}"),
-                );
-                generator
-                    .generate_nodal(&mna, &netlist)
-                    .with_context(|| "Nodal codegen failed")?
-            }
-            other => other.with_context(|| "DK codegen failed")?,
-        }
-    };
     println!("  {} lines of code", generated.code.lines().count());
 
     // Step 6: Append simulate main, compile, run.
@@ -3705,12 +3303,6 @@ fn analyze_freq_response(
     let input_node_name = input_node_owned.as_str();
     let output_node_owned = melange_solver::parser::normalize_node_name(output_node_name);
     let output_node_name = output_node_owned.as_str();
-    use melange_solver::{
-        codegen::{routing, CodeGenerator, CodegenConfig},
-        dk::DkKernel,
-        mna::MnaSystem,
-        parser::Netlist,
-    };
 
     eprintln!("melange analyze (frequency response)");
 
@@ -3727,359 +3319,65 @@ fn analyze_freq_response(
         }
     };
 
-    let mut netlist =
-        Netlist::parse(&netlist_str).with_context(|| "Failed to parse SPICE netlist")?;
-    // Resolve the effective oversampling factor: explicit --oversampling wins,
-    // else the deck's `.oversampling` recommendation, else 1.
-    let oversampling = resolve_oversampling(oversampling_cli, netlist.recommended_oversampling);
-    if !netlist.subcircuits.is_empty() {
-        netlist
-            .expand_subcircuits()
-            .with_context(|| "Failed to expand subcircuits")?;
-    }
-
-    // Topology gate: the wiring defects a solver cannot see. A typo'd node
-    // name invents a node and floats whatever it was on, and every number
-    // melange prints afterwards is correct for the circuit it was handed. One
-    // implementation for every verb — `melange_solver::topology`.
-    melange_solver::pipeline::topology_gate(
-        &netlist,
-        &melange_solver::topology::Ports::declared(
-            input_node_name.split(',').map(|s| s.trim().to_string()),
-            output_node_name.split(',').map(|s| s.trim().to_string()),
-        ),
-        &|m| eprintln!("{m}"),
-    )?;
-
-    // Apply pot overrides (and settle un-overridden pots onto their `.pot`
-    // defaults) before building the MNA. Shared with `simulate` so one knob
-    // setting means the same thing in both verbs — see `apply_pot_overrides`.
-    apply_pot_overrides(&mut netlist, pot_overrides, &|m| eprintln!("{m}")).map_err(build_error)?;
-
-    // Keep the netlist at position-0 element values and apply overrides at
-    // runtime via `state.set_switch_N(position)` (see `switch_calls` below).
-    let switch_runtime_overrides = resolve_switch_overrides(&netlist, switch_overrides)?;
-
-    // Build MNA
-    let mut mna =
-        MnaSystem::from_netlist(&netlist).with_context(|| "Failed to build MNA system")?;
-
-    let input_node_raw = mna.node_map.get(input_node_name).copied().ok_or_else(|| {
-        anyhow::anyhow!(
-            "Input node '{}' not found. Available: {:?}",
-            input_node_name,
-            mna.node_names_in_index_order()
-        )
-    })?;
-    if input_node_raw == 0 {
-        anyhow::bail!("Input node cannot be ground (0)");
-    }
-    let input_node_idx = input_node_raw - 1;
-
-    let output_node_raw = mna.node_map.get(output_node_name).copied().ok_or_else(|| {
-        anyhow::anyhow!(
-            "Output node '{}' not found. Available: {:?}",
-            output_node_name,
-            mna.node_names_in_index_order()
-        )
-    })?;
-    if output_node_raw == 0 {
-        anyhow::bail!("Output node cannot be ground (0)");
-    }
-    let output_node_idx = output_node_raw - 1;
-
-    // Input resistance
-    let (input_resistance, ir_source) = if let Some(r) = input_resistance_flag {
-        (r, "from --input-resistance")
-    } else if let Some(r) = netlist.input_impedance {
-        (r, "from .input_impedance directive")
-    } else {
-        (1.0, "default")
-    };
-    if !(input_resistance > 0.0 && input_resistance.is_finite()) {
-        anyhow::bail!(
-            "input resistance must be positive and finite, got {}",
-            input_resistance
-        );
-    }
-    eprintln!(
-        "  Input resistance: {} ohm ({})",
-        input_resistance, ir_source
-    );
-    let input_conductance = 1.0 / input_resistance;
-    if input_node_idx < mna.n {
-        mna.g[input_node_idx][input_node_idx] += input_conductance;
-    }
-
-    // Stamp junction caps
-    {
-        let device_slots =
-            melange_solver::codegen::ir::CircuitIR::build_device_info(&netlist).unwrap_or_default();
-        if !device_slots.is_empty() {
-            mna.stamp_device_junction_caps(&device_slots);
-        }
-    }
-
-    // Detect forward-active BJTs
-    let config_for_fa = CodegenConfig {
-        circuit_name: "fa_detect".to_string(),
+    // The one build every verb ships (melange_solver::build). Analyze writes
+    // its CSV to stdout, so every build line goes to stderr.
+    let build_opts = melange_solver::build::BuildOptions {
         sample_rate,
-        input_resistance,
-        input_node: input_node_idx,
-        output_nodes: vec![output_node_idx],
-        ..CodegenConfig::default()
-    };
-    // Analyze writes CSV to stdout, so progress messages go to stderr.
-    let forward_active = melange_solver::pipeline::apply_forward_active_reduction(
-        &mut mna,
-        &netlist,
-        &config_for_fa,
-        solver,
-        sample_rate,
-        oversampling,
-        input_node_idx,
-        input_conductance,
-        &|a| eprintln!("{a}"),
-    )?;
-
-    // Detect grid-off pentodes (shared helper with compile/simulate). Analyze
-    // writes CSV to stdout, so progress messages go to stderr.
-    let grid_off_pentodes = melange_solver::pipeline::apply_grid_off_reduction(
-        &mut mna,
-        &netlist,
-        &config_for_fa,
-        &forward_active,
-        tube_grid_fa,
-        solver,
-        sample_rate,
-        oversampling,
-        input_node_idx,
-        input_conductance,
-    )?;
-    if let Some(msg) = melange_solver::pipeline::format_grid_off_log(&grid_off_pentodes) {
-        eprintln!("{msg}");
-    }
-
-    // Apply `.linearize` directives — shared helper with compile/simulate.
-    // Previously missing here, which is why `melange analyze` reported the
-    // pre-linearize M on circuits like Uniquorn v2 (M=38 instead of M=20).
-    melange_solver::pipeline::apply_linearize_reductions(
-        &mut mna,
-        &netlist,
-        &forward_active,
-        &grid_off_pentodes,
-        input_node_idx,
-        input_conductance,
-        input_resistance,
-        &|a| println!("{a}"),
-    )?;
-
-    // BJT junction-cap preflight — see compile path for rationale. Analyze
-    // must match compile so the harmonic / frequency-response curve reflects
-    // what the user will hear in the generated plugin.
-    let dc_preflight = preflight_relinearize_bjt_caps(
-        &mut mna,
-        &netlist,
-        input_node_idx,
-        input_resistance,
-        opamp_rail_mode,
-    );
-
-    // Build DK kernel and route
-    let has_inductors = !mna.inductors.is_empty()
-        || !mna.coupled_inductors.is_empty()
-        || !mna.transformer_groups.is_empty();
-
-    let mut dk_failed = false;
-    // Build at the INTERNAL (oversampled) rate so the routing decision below
-    // sees the same S/A_neg the generated solver ships — see the compile
-    // path's `routing_rate` comment. For os=1 this equals `sample_rate`.
-    let routing_rate = sample_rate * oversampling as f64;
-    let kernel = if has_inductors {
-        match DkKernel::from_mna_augmented(&mna, routing_rate) {
-            Ok(k) => k,
-            Err(e) => {
-                if solver == "dk" {
-                    anyhow::bail!("DK kernel failed: {e}");
-                }
-                eprintln!("  Augmented DK kernel failed: {e}, auto-selecting nodal");
-                dk_failed = true;
-                let m = mna.m;
-                let n = mna.n_aug;
-                DkKernel {
-                    n,
-                    m,
-                    n_nodes: mna.n,
-                    num_devices: mna.num_devices,
-                    sample_rate,
-                    s: vec![0.0; n * n],
-                    a_neg: vec![0.0; n * n],
-                    k: vec![0.0; m * m],
-                    n_v: vec![0.0; m * n],
-                    n_i: vec![0.0; n * m],
-                    rhs_const: vec![0.0; n],
-                    inductors: vec![],
-                    coupled_inductors: vec![],
-                    transformer_groups: vec![],
-                    pots: vec![],
-                    wiper_groups: vec![],
-                    gang_groups: vec![],
-                }
-            }
-        }
-    } else {
-        match DkKernel::from_mna(&mna, routing_rate) {
-            Ok(k) => k,
-            Err(e) => {
-                if solver == "dk" {
-                    anyhow::bail!("DK kernel failed: {e}");
-                }
-                eprintln!("  DK kernel failed: {e}, using nodal");
-                dk_failed = true;
-                match DkKernel::from_mna_augmented(&mna, routing_rate) {
-                    Ok(k) => k,
-                    Err(_) => {
-                        let m = mna.m;
-                        let n = mna.n_aug;
-                        DkKernel {
-                            n,
-                            m,
-                            n_nodes: mna.n,
-                            num_devices: mna.num_devices,
-                            sample_rate,
-                            s: vec![0.0; n * n],
-                            a_neg: vec![0.0; n * n],
-                            k: vec![0.0; m * m],
-                            n_v: vec![0.0; m * n],
-                            n_i: vec![0.0; n * m],
-                            rhs_const: vec![0.0; n],
-                            inductors: vec![],
-                            coupled_inductors: vec![],
-                            transformer_groups: vec![],
-                            pots: vec![],
-                            wiper_groups: vec![],
-                            gang_groups: vec![],
-                        }
-                    }
-                }
-            }
-        }
-    };
-
-    let decision = routing::auto_route(&kernel, &mna, dk_failed, opamp_rail_mode);
-    if solver == "dk" {
-        if let Some(blocker) = forced_dk_hard_blocker(&decision) {
-            anyhow::bail!(
-                "--solver dk cannot be forced on this circuit: {blocker}.\n\
-                 The DK solver structurally cannot represent it and would produce \
-                 silently-wrong results. Use --solver auto (recommended) or --solver nodal."
-            );
-        }
-    }
-    let use_nodal = match solver {
-        "nodal" => true,
-        "dk" => false,
-        _ => decision.route == routing::SolverRoute::Nodal,
-    };
-    let solver_reason = if solver == "nodal" || solver == "dk" {
-        format!("--solver {solver} (user override)")
-    } else {
-        decision.reason.clone()
-    };
-    eprintln!(
-        "  {}",
-        format_system_size(kernel.n, kernel.n_nodes, kernel.m)
-    );
-    eprintln!(
-        "{}",
-        format_route_info(if use_nodal { "nodal" } else { "DK" }, &solver_reason)
-    );
-
-    if use_nodal {
-        // BEHAVIOUR FIX 2026-09-03: this was the last UNCONDITIONAL expansion.
-        // compile, simulate and validate all gate it on K conditioning; analyze
-        // did not, so `melange analyze` reported the frequency response of a
-        // DIFFERENT circuit than compile ships for any deck with
-        // k_diag_min < -100 (measured on wurli-power-amp: compile skips
-        // expansion, analyze expanded). Same family as the unconditional
-        // expansion in the validate harness that `6bc3ef1` removed.
-        // Analyze writes CSV to stdout, so the notice goes to stderr.
-        melange_solver::pipeline::expand_internal_nodes_if_conditioned(
-            &mut mna,
-            &netlist,
-            &kernel,
-            &|a| eprintln!("{a}"),
-        );
-    }
-
-    // Generate circuit code
-    let max_iterations =
-        melange_solver::pipeline::auto_tune_max_iter(max_iter, &kernel, &decision, !backward_euler);
-    let max_iterations_be_promoted =
-        melange_solver::pipeline::auto_tune_max_iter(max_iter, &kernel, &decision, false);
-    if max_iterations != 100 {
-        eprintln!("  Max NR iterations: {max_iterations}");
-    }
-    let config = CodegenConfig {
         circuit_name: "analyze".to_string(),
-        sample_rate,
-        max_iterations,
+        input_nodes: vec![input_node_name.to_string()],
+        output_nodes: vec![output_node_name.to_string()],
+        max_iter,
         tolerance: 1e-9,
-        input_resistance,
-        input_node: input_node_idx,
-        extra_input_nodes: Vec::new(),
-        extra_input_resistances: Vec::new(),
-        output_nodes: vec![output_node_idx],
-        oversampling_factor: oversampling,
-        output_scales: vec![1.0],
-        output_clamp_v: 10.0,
-        include_dc_op: true,
-        dc_op_max_iterations: 200,
-        dc_op_tolerance: 1e-9,
+        output_scale: 1.0,
+        output_clamp: 10.0,
+        input_resistance: input_resistance_flag,
+        oversampling: oversampling_cli,
         dc_block: false,
-        pot_settle_samples: 64,
+        solver: solver.to_string(),
         backward_euler,
         force_trap,
-        nodal_sub_path_override,
-        allow_static_glow_on_full_lu: false,
-        disable_be_fallback: false,
-        opamp_rail_mode,
-        noise_mode,
-        noise_master_seed: noise_seed,
-        emit_dc_op_recompute: false,
-        max_iterations_be_promoted: Some(max_iterations_be_promoted),
-        injections: Vec::new(),
-        taps: Vec::new(),
-        bjt_fa_mode: melange_solver::codegen::BjtFaMode::Auto,
+        tube_grid_fa: tube_grid_fa.to_string(),
         // `analyze` does not expose --subsample-fire; auto = active on glow
         // nodal-Schur decks, inert everywhere else.
         subsample_fire: melange_solver::codegen::SubsampleFireMode::Auto,
         subsample_lit_factor: diag_lit_factor(),
+        bjt_fa_mode: melange_solver::codegen::BjtFaMode::Auto,
+        opamp_rail_mode,
+        nodal_sub_path_override,
+        allow_static_glow_on_full_lu: false,
+        noise_mode,
+        noise_seed,
+        emit_dc_op_recompute: false,
+        plugin_format: false,
+        // One knob setting means the same thing here as in `simulate`.
+        pot_overrides: Some(pot_overrides.to_vec()),
+        resolve_taps: false,
+        inject_runtime: false,
+        disable_unit_variation: false,
+        output_clamp_auto: false,
     };
-    let generator = CodeGenerator::new(config);
-    let generated = if use_nodal {
-        generator
-            .generate_nodal(&mna, &netlist)
-            .with_context(|| "Nodal codegen failed")?
-    } else {
-        match generator.generate_with_dc_op(&kernel, &mna, &netlist, dc_preflight) {
-            Err(melange_solver::codegen::CodegenError::SelfStartingOscillator(why))
-                if solver != "dk" =>
-            {
-                println!("  Route: nodal — self-starting oscillator: {why}");
-                melange_solver::pipeline::expand_internal_nodes_if_conditioned(
-                    &mut mna,
-                    &netlist,
-                    &kernel,
-                    &|a| println!("{a}"),
-                );
-                generator
-                    .generate_nodal(&mna, &netlist)
-                    .with_context(|| "Nodal codegen failed")?
-            }
-            other => other.with_context(|| "DK codegen failed")?,
-        }
-    };
+    let built =
+        melange_solver::build::build(&netlist_str, &build_opts, &|a| eprintln!("{a}"), &|a| {
+            eprintln!("{a}")
+        })
+        .map_err(build_error)?;
+    eprintln!(
+        "{}",
+        format_route_info(built.solver_label, &built.solver_reason)
+    );
+    if built.max_iter != 100 {
+        eprintln!("  Max NR iterations: {}", built.max_iter);
+    }
+    let has_inductors = !built.mna.inductors.is_empty()
+        || !built.mna.coupled_inductors.is_empty()
+        || !built.mna.transformer_groups.is_empty();
+    let generated = built.generated;
+    let netlist = built.netlist;
+    let oversampling = built.oversampling;
+
+    // Keep the netlist at position-0 element values and apply overrides at
+    // runtime via `state.set_switch_N(position)` (see `switch_calls` below).
+    let switch_runtime_overrides = resolve_switch_overrides(&netlist, switch_overrides)?;
 
     // Generate frequency list
     let frequencies = generate_log_frequencies(start_freq, end_freq, points_per_decade);
