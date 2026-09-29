@@ -89,7 +89,7 @@
       "plugin": "five-watt-freddie",
       "circuit_rs": "plugins/five-watt-freddie/src/circuit.rs",
       "cir": "unstable/amp/champ-5f1.cir",
-      "compile_cmd": "melange compile ../melange-circuits/unstable/amp/champ-5f1.cir --format code --noise thermal -o plugins/five-watt-freddie/src/circuit.rs",
+      "compile_cmd": "melange compile ../melange-circuits/unstable/amp/champ-5f1.cir --format code --noise thermal --output-clamp 100 -o plugins/five-watt-freddie/src/circuit.rs",
       "verify_status": "DRIFT-EXPLAINED",
       "anchors": {
         "n": 24,
@@ -251,7 +251,8 @@
       "has_noise": true,
       "noise_mode": "full",
       "emit_dc_op_recompute": true,
-      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical."
+      "notes": "Last regen: oomox ab21b67 (2026-07-18) against melange 8fb9741. Regen at HEAD differs by: 146d51b header + a472807 two-draw shot-noise block (state field noise_shot_w_prev, draw-loop restructure/comments). Anchors verified identical.",
+      "input_level": 0.005
     },
     {
       "plugin": "moonladder",
@@ -299,7 +300,8 @@
       "has_noise": true,
       "noise_mode": "full",
       "emit_dc_op_recompute": true,
-      "notes": "Byte-identical when regenerated at melange HEAD 8945b67. Last regen: oomox a8c47f3 (2026-07-19) against melange a472807. WARNING: netlist has UNCOMMITTED modifications in melange-circuits (working tree, verified against it, is the shipped source; HEAD b655adf is stale)."
+      "notes": "Byte-identical when regenerated at melange HEAD 8945b67. Last regen: oomox a8c47f3 (2026-07-19) against melange a472807. WARNING: netlist has UNCOMMITTED modifications in melange-circuits (working tree, verified against it, is the shipped source; HEAD b655adf is stale).",
+      "input_level": 0.01
     },
     {
       "plugin": "noyce",
@@ -796,7 +798,7 @@
       "plugin": "warpony",
       "circuit_rs": "plugins/warpony/src/circuit.rs",
       "cir": "unstable/pedals/warpony.cir",
-      "compile_cmd": "melange compile ../melange-circuits/unstable/pedals/warpony.cir --format code --noise shot -o plugins/warpony/src/circuit.rs",
+      "compile_cmd": "melange compile ../melange-circuits/unstable/pedals/warpony.cir --format code --noise shot --output-clamp 150 -o plugins/warpony/src/circuit.rs",
       "verify_status": "DRIFT-EXPLAINED",
       "anchors": {
         "n": 30,
@@ -867,7 +869,7 @@
     {
       "plugin": "mosfet-choke-load",
       "cir": "unstable/examples/mosfet-choke-load.cir",
-      "compile_cmd": "melange compile ../melange-circuits/unstable/examples/mosfet-choke-load.cir --format code -o /dev/null",
+      "compile_cmd": "melange compile ../melange-circuits/unstable/examples/mosfet-choke-load.cir --format code --output-clamp 100 -o /dev/null",
       "verify_status": "COVERAGE-ONLY",
       "anchors": {
         "n": 10,
@@ -1187,5 +1189,10 @@
   "added_2026_09_28_opamp_pin_coverage": {
     "why": "No golden program had pinned an op-amp under any active-set mode, so a change to rail handling (transition-BE, or moving the automatic rail-mode choice) was attributed to nothing. Two in-repo decks at a 0.5 V manifest level pin every half cycle: opamp-pin-audio (auto resolves active-set-be) and opamp-pin-control (auto resolves active-set, trapezoidal, transition-BE armed).",
     "baseline": "Their first capture is a new baseline, not a restored one."
+  },
+  "output_clamp_levels_2026_09_28": {
+    "why": "Output-clamp gate: renders whose generated output clamp engaged are refused. Levels and clamps chosen by the deck owner.",
+    "output_clamp_raised": "champ-5f1 --output-clamp 100 (plate/OT-side swing, peak 79.8 V); warpony --output-clamp 150 (cascade output, peak 99.2 V; the plugin maps 75 V to full scale); mosfet-choke-load --output-clamp 100 (choke flyback above the 24 V rail is the point of the fixture, peak 68.8 V)",
+    "level_lowered": "steve-1073-preamp 0.1 -> 0.001 V (mic level, from the deck's 63.45 dB static gain); gold-press-riaa 0.1 -> 0.005 V (MM phono level); noyce-amp-at-idle 0.1 -> 0.01 V (noise source; the program input is incidental)"
   }
 }
