@@ -68,8 +68,6 @@ U1 0 ninv oap OA9
 Cout oap out 1u
 Rload out 0 100k
 D1 out 0 D1N4148
-Vee vee 0 DC -9
-Vcc vcc 0 DC 9
 .model OA9 OA(AOL=200000 ROUT=50 GBW=3MEG VCC=9 VEE=-9)
 .model D1N4148 D(IS=2.52e-9 N=1.752)
 ";

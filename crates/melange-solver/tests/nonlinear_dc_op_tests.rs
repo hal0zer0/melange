@@ -575,9 +575,11 @@ fn test_codegen_linear_circuit_no_dc_nl_i() {
 #[test]
 fn test_codegen_dc_op_produces_stable_output() {
     // Verify that codegen with DC OP init produces stable, finite output
-    // for a circuit with DC supply and nonlinear devices.
-    let config = support::config_for_spice(SINGLE_DIODE_VCC, 44100.0);
-    let circuit = support::build_circuit(SINGLE_DIODE_VCC, &config, "dc_op_codegen");
+    // for a circuit with DC supply and nonlinear devices. The shipped build
+    // needs an input port that is not the supply: a 1 Mohm tap into `out`.
+    let deck = format!("{SINGLE_DIODE_VCC}Rin in out 1Meg\n");
+    let config = support::config_for_spice(&deck, 44100.0);
+    let circuit = support::build_circuit(&deck, &config, "dc_op_codegen");
 
     // Run a few samples of zero input — DC OP should make output stable
     let output = support::run_step(&circuit, 0.0, 100, 44100.0);

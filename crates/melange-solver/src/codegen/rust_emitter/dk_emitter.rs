@@ -1021,6 +1021,11 @@ impl RustEmitter {
         let mut ctx = Context::new();
         // Gates the unsolved-sample counter (no Newton solve at M = 0).
         ctx.insert("m", &ir.topology.m);
+        // A reduced device's region exit is an unsolved sample.
+        ctx.insert(
+            "has_reduced_device",
+            &super::helpers::has_reduced_device(ir),
+        );
         insert_multi_input_ctx(&mut ctx, ir);
         insert_inject_ctx(&mut ctx, ir);
         // Noise fragments (empty strings when noise is off → template blocks become no-ops)

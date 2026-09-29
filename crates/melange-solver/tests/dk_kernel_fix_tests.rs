@@ -410,7 +410,8 @@ Rout out 0 10k
 #[test]
 fn test_pot_sweep_preserves_inductor_dc_current() {
     let config = support::config_for_spice(POT_INDUCTOR_SPICE, 48000.0);
-    let (code, _n, m) = support::generate_circuit_code(POT_INDUCTOR_SPICE, &config);
+    // Companion-inductor codegen: raw build on purpose (see support).
+    let (code, _n, m) = support::generate_circuit_code_raw_dk(POT_INDUCTOR_SPICE, &config);
     assert_eq!(m, 0, "linear circuit");
     assert!(
         code.contains("ind_i_hist"),

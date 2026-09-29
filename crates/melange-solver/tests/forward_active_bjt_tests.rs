@@ -116,6 +116,8 @@ fn make_config(input_node: usize, output_node: usize) -> CodegenConfig {
         input_node,
         output_nodes: vec![output_node],
         input_resistance: 1.0,
+        // These tests exercise the reduction, which is off by default.
+        bjt_fa_mode: melange_solver::codegen::BjtFaMode::Auto,
         ..CodegenConfig::default()
     }
 }

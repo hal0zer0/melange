@@ -39,7 +39,19 @@ fn default_config() -> CodegenConfig {
 
 /// Generate DK code with the standard harness (stamps G_in before the
 /// kernel build, per the Thevenin input contract).
-fn generate_with(spice: &str, config: CodegenConfig) -> String {
+fn generate_with(spice: &str, mut config: CodegenConfig) -> String {
+    // The input is the node named `in` (never node 0 by default: on
+    // RUNTIME_V_DIODE that is the supply).
+    let mna = melange_solver::mna::MnaSystem::from_netlist(
+        &melange_solver::parser::Netlist::parse(spice).expect("parse"),
+    )
+    .expect("mna");
+    config.input_node = mna
+        .node_map
+        .get("in")
+        .copied()
+        .expect("deck has no `in` node")
+        - 1;
     support::generate_circuit_code(spice, &config).0
 }
 
@@ -333,7 +345,8 @@ fn main() {
 
 #[test]
 fn companion_inductor_disables_be_fallback() {
-    let code = generate_code(DIODE_INDUCTOR);
+    // Companion-inductor codegen: raw build on purpose (see support).
+    let code = support::generate_circuit_code_raw_dk(DIODE_INDUCTOR, &default_config()).0;
     assert!(
         !code.contains("S_BE_DEFAULT"),
         "companion-inductor circuit must not emit BE fallback matrices \
@@ -347,7 +360,8 @@ fn companion_inductor_disables_be_fallback() {
 
 #[test]
 fn companion_transformer_disables_be_fallback() {
-    let code = generate_code(DIODE_XFMR);
+    // Companion-inductor codegen: raw build on purpose (see support).
+    let code = support::generate_circuit_code_raw_dk(DIODE_XFMR, &default_config()).0;
     assert!(
         !code.contains("S_BE_DEFAULT"),
         "coupled-inductor circuit must not emit BE fallback matrices"

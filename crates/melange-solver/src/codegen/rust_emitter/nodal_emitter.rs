@@ -3820,6 +3820,15 @@ impl RustEmitter {
              \x20   /// entered. Counted on the full models too (characterization, not a guard).\n",
         );
         code.push_str("    pub diag_region_exit_count: u64,\n");
+        if super::helpers::has_reduced_device(ir) {
+            code.push_str(
+                "    /// Diagnostic: samples on which a REDUCED device (a forward-active BJT, a\n\
+                 \x20   /// grid-off pentode) left the region its reduction assumes. Its model\n\
+                 \x20   /// no longer describes the device there, so each is also counted in\n\
+                 \x20   /// `diag_unsolved_sample_count` and refused by every verb.\n",
+            );
+            code.push_str("    pub diag_reduced_model_exit_count: u64,\n");
+        }
         code.push_str("    /// Diagnostic: number of backward Euler fallback activations\n");
         code.push_str("    pub diag_be_fallback_count: u64,\n");
         code.push_str(
@@ -4359,6 +4368,9 @@ impl RustEmitter {
         code.push_str("            diag_clamp_count: 0,\n");
         code.push_str("            diag_nr_max_iter_count: 0,\n");
         code.push_str("            diag_region_exit_count: 0,\n");
+        if super::helpers::has_reduced_device(ir) {
+            code.push_str("            diag_reduced_model_exit_count: 0,\n");
+        }
         code.push_str("            diag_be_fallback_count: 0,\n");
         code.push_str("            diag_unsolved_sample_count: 0,\n");
         if emits_hold(ir) {
@@ -4645,6 +4657,9 @@ impl RustEmitter {
         code.push_str("        self.diag_clamp_count = 0;\n");
         code.push_str("        self.diag_nr_max_iter_count = 0;\n");
         code.push_str("        self.diag_region_exit_count = 0;\n");
+        if super::helpers::has_reduced_device(ir) {
+            code.push_str("        self.diag_reduced_model_exit_count = 0;\n");
+        }
         code.push_str("        self.diag_be_fallback_count = 0;\n");
         code.push_str("        self.diag_unsolved_sample_count = 0;\n");
         if emits_hold(ir) {

@@ -305,7 +305,7 @@ fn check(
 }
 
 // Linear resistive divider — pure KCL, no reactive or nonlinear terms.
-const DIVIDER: &str = "Divider\nR1 in mid 1k\nR2 mid 0 1k\n";
+const DIVIDER: &str = "Divider\nR1 in out 1k\nR2 out 0 1k\n";
 
 // RC lowpass — adds a reactive element (zero current at DC steady state).
 const RC_LOWPASS: &str = "RC Lowpass\nR1 in out 1k\nC1 out 0 1u\n";

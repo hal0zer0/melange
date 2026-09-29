@@ -1098,14 +1098,18 @@ R_bias vcc n_zener 3.9k
 D1 0 n_zener ZENER_5V1
 Cout n_zener out 100n
 Rload out 0 1Meg
+Rin in n_zener 1Meg
 .end
 "#;
+    // The input is a 1 Mohm tap into n_zener (negligible against the knee's
+    // ~26 ohm): melange drives the input itself, and it must not sit on the
+    // supply (an ideal source there shorts it).
     let sr = 96_000.0_f64;
     let config = CodegenConfig {
         circuit_name: "shot_nyquist_regress".to_string(),
         sample_rate: sr,
-        input_node: 0,
-        output_nodes: vec![2], // "out" (nodes by appearance: vcc=0, n_zener=1, out=2)
+        input_node: 3, // "in" (nodes by appearance: vcc=0, n_zener=1, out=2, in=3)
+        output_nodes: vec![2], // "out"
         input_resistance: 1.0,
         dc_block: false,
         noise_mode: NoiseMode::Shot,
@@ -1852,11 +1856,13 @@ V1 vcc 0 DC 250
 ";
 
 fn generate_partition_code(spice: &str, mode: NoiseMode, name: &str, seed: u64) -> String {
+    // Ports by name (`in`, `out`), never by position.
+    let ports = support::config_for_spice(spice, 96_000.0);
     let config = CodegenConfig {
         circuit_name: name.to_string(),
         sample_rate: 96_000.0,
-        input_node: 0,
-        output_nodes: vec![1],
+        input_node: ports.input_node,
+        output_nodes: ports.output_nodes.clone(),
         input_resistance: 1.0,
         dc_block: false,
         noise_mode: mode,
@@ -2061,26 +2067,22 @@ Rsrc in 1 1k
 Rg1 0 2 1k
 Rf 2 out 10k
 U1 1 2 out NE5534
-V1 vcc 0 DC 15
-V2 vee 0 DC -15
 Rload out 0 10k
 .model NE5534 OA(AOL=200000 GBW=10MEG ROUT=75 VCC=15 VEE=-15 EN=3.5e-9 IN=1.5e-12)
 ";
 
 // Same topology with a level pot in the input path — exercises the dynamic
 // `noise_opamp_en_g_diag[k]` refresh in `set_pot_N`. The pot sits between
-// the input network and the op-amp's non-inverting input (node 1), so a
+// the input network and the op-amp's non-inverting input (node `in`), so a
 // pot terminal coincides with `oa.n_plus_idx`. The pot's conductance
-// stamps positively into `G[1, 1]`, so changing it shifts the live G_diag
+// stamps positively into the diagonal at `in`, so changing it shifts the live G_diag
 // at in+. (`.pot` modifies an existing R; declare it first as Rlevel.)
 const OPAMP_NE5534_WITH_INPUT_POT_SPICE: &str = "\
 NE5534 with level pot in input path
-Rlevel 1 0 25k
+Rlevel in 0 25k
 Rg1 0 2 1k
 Rf 2 out 10k
-U1 1 2 out NE5534
-V1 vcc 0 DC 15
-V2 vee 0 DC -15
+U1 in 2 out NE5534
 Rload out 0 10k
 .pot Rlevel 100 50k
 .model NE5534 OA(AOL=200000 GBW=10MEG ROUT=75 VCC=15 VEE=-15 EN=3.5e-9 IN=1.5e-12)
@@ -2096,8 +2098,6 @@ Rin in 1 1k
 Rg1 0 2 1k
 Rf 2 out 10k
 U1 1 2 out IDEAL_OA
-V1 vcc 0 DC 15
-V2 vee 0 DC -15
 Rload out 0 10k
 .model IDEAL_OA OA(AOL=1e6 ROUT=1 VCC=15 VEE=-15)
 ";
@@ -2343,9 +2343,9 @@ fn main() {{
 fn pot_not_touching_opamp_emits_no_opamp_refresh() {
     const SIMPLE_POT_RC_SPICE: &str = "\
 Simple RC with a pot — no op-amps
-R1 in mid 10k
-R2 mid 0 50k
-C1 mid 0 100n
+R1 in out 10k
+R2 out 0 50k
+C1 out 0 100n
 .pot R2 100 100k
 ";
     let code = generate_partition_code(
@@ -3459,12 +3459,10 @@ fn main() {
 fn opamp_en_g_diag_refreshes_on_switch_touching_in_plus() {
     const SPICE: &str = "\
 NE5534 with switched input load
-Rlevel 1 0 25k
+Rlevel in 0 25k
 Rg1 0 2 1k
 Rf 2 out 10k
-U1 1 2 out NE5534
-V1 vcc 0 DC 15
-V2 vee 0 DC -15
+U1 in 2 out NE5534
 Rload out 0 10k
 .switch Rlevel 10k 25k 50k
 .model NE5534 OA(AOL=200000 GBW=10MEG ROUT=75 VCC=15 VEE=-15 EN=3.5e-9 IN=1.5e-12)

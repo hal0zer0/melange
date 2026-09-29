@@ -1637,7 +1637,15 @@ pub(super) fn emit_region_exit_lines(ir: &CircuitIR, indent: &str) -> String {
         }
     };
     let mut lines = String::new();
+    let mut any_reduced = false;
     for (slot, nodes) in ir.device_slots.iter().zip(ir.device_node_indices.iter()) {
+        let reduced = is_reduced_slot(slot);
+        let on_exit = if reduced {
+            any_reduced = true;
+            "state.diag_region_exit_count += 1; reduced_exit = true;"
+        } else {
+            "state.diag_region_exit_count += 1;"
+        };
         match (&slot.device_type, &slot.params) {
             (DeviceType::Bjt | DeviceType::BjtForwardActive, DeviceParams::Bjt(bp))
                 if nodes.len() >= 3 =>
@@ -1651,16 +1659,12 @@ pub(super) fn emit_region_exit_lines(ir: &CircuitIR, indent: &str) -> String {
                 } else {
                     format!("({vb} - {vc})")
                 };
-                lines.push_str(&format!(
-                    "{indent}if {expr} > 0.0 {{ state.diag_region_exit_count += 1; }}\n"
-                ));
+                lines.push_str(&format!("{indent}if {expr} > 0.0 {{ {on_exit} }}\n"));
             }
             (DeviceType::Tube, DeviceParams::Tube(tp)) if tp.is_pentode() && nodes.len() >= 4 => {
                 // Node order [plate, grid, cathode, screen(, suppressor)].
                 let (vg, vk) = (vnode(nodes[1]), vnode(nodes[2]));
-                lines.push_str(&format!(
-                    "{indent}if ({vg} - {vk}) > 0.0 {{ state.diag_region_exit_count += 1; }}\n"
-                ));
+                lines.push_str(&format!("{indent}if ({vg} - {vk}) > 0.0 {{ {on_exit} }}\n"));
             }
             _ => {}
         }
@@ -1668,12 +1672,50 @@ pub(super) fn emit_region_exit_lines(ir: &CircuitIR, indent: &str) -> String {
     if lines.is_empty() {
         return lines;
     }
-    format!(
+    let mut out = format!(
         "{indent}// Region-exit characterization: samples where a pentode's grid\n\
          {indent}// conducts (Vgk > 0) or a BJT saturates (Vbc forward) — the regions\n\
-         {indent}// the grid-off / forward-active reductions assume are never entered.\n\
-         {lines}"
-    )
+         {indent}// the grid-off / forward-active reductions assume are never entered.\n"
+    );
+    if any_reduced {
+        // A REDUCED device outside its region is an answer from a model that
+        // no longer describes it: the sample is not a solution (design review).
+        out.push_str(&format!(
+            "{indent}// A reduced device (forward-active BJT, grid-off pentode) that\n\
+             {indent}// leaves its region makes the sample unsolved.\n\
+             {indent}let mut reduced_exit = false;\n"
+        ));
+    }
+    out.push_str(&lines);
+    if any_reduced {
+        out.push_str(&format!(
+            "{indent}if reduced_exit {{\n\
+             {indent}    state.diag_reduced_model_exit_count += 1;\n\
+             {indent}    state.diag_unsolved_sample_count += 1;\n\
+             {indent}}}\n"
+        ));
+    }
+    out
+}
+
+/// A device whose NR block is a region-restricted reduction: a forward-active
+/// BJT or a grid-off pentode.
+pub(super) fn is_reduced_slot(slot: &crate::device_types::DeviceSlot) -> bool {
+    use crate::codegen::ir::DeviceType;
+    match (&slot.device_type, &slot.params) {
+        (DeviceType::BjtForwardActive, _) => true,
+        (DeviceType::Tube, DeviceParams::Tube(tp)) => {
+            tp.kind == crate::device_types::TubeKind::SharpPentodeGridOff
+        }
+        _ => false,
+    }
+}
+
+/// True when the build carries a region-restricted reduced device, and so
+/// `diag_reduced_model_exit_count`.
+pub(super) fn has_reduced_device(ir: &CircuitIR) -> bool {
+    ir.device_node_indices.len() == ir.device_slots.len()
+        && ir.device_slots.iter().any(is_reduced_slot)
 }
 
 // ============================================================================

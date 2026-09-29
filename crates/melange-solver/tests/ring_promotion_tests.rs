@@ -30,7 +30,8 @@ const LINEAR_STIFF: &str =
 
 /// A linear negative resistance (a VCCS feeding its own node) on an RC: a
 /// real growing pole at rest, which backward Euler keeps too.
-const GROWING: &str = "growing linear node\nR_in in a 1k\nR1 a 0 1k\nC1 a 0 1u\nG1 0 a a 0 3m\n";
+const GROWING: &str =
+    "growing linear node\nR_in in out 1k\nR1 out 0 1k\nC1 out 0 1u\nG1 0 out out 0 3m\n";
 
 fn provenance_source(code: &str) -> &str {
     let key = "\"integration_source\":\"";

@@ -212,8 +212,9 @@ M-dimension: **2 per BJT** for the standard `Bjt` device type
 
 ### BJT Mode Variants (M-Dimension Reduction)
 
-The MNA builder can flag a BJT as **forward-active** (auto-detected at DC OP)
-or **linearized**, which changes its NR dimension:
+The MNA builder can flag a BJT as **forward-active** (detected at the DC OP when
+`--bjt-fa auto|force` is requested; off by default) or **linearized**, which
+changes its NR dimension:
 
 | Variant | Source | NR Dim | Behavior |
 |---------|--------|--------|----------|
@@ -221,24 +222,30 @@ or **linearized**, which changes its NR dimension:
 | `BjtForwardActive` | DC OP detects strong forward bias | 1 | Only Vbe→Ic in NR; `Ib = Ic / β_F` derived from Ic |
 | `linearized_bjts` (`mna.linearized_bjts`) | DC OP detects fully-biased linear region | 0 | Removed from NR entirely; small-signal `g_m`/`g_pi`/`r_o` stamped into G after DC OP |
 
-This is why the wurli-power-amp circuit reports `M=16→9` when it compiles:
-the 8 BJTs start at 16 nominal NR dimensions, but 7 of them are detected as
-forward-active and drop to 1D each (`16 - 7 = 9`). Linearized BJTs would drop
-the count further to 0 per device.
+With the reduction requested, 8 BJTs start at 16 NR dimensions and each one
+detected forward-active drops to 1D (7 detected: `16 - 7 = 9`). Linearized BJTs
+drop to 0 per device. The forward-active reduction is skipped on the nodal route.
 
 #### `--bjt-fa` reduction mode (compile flag)
 
-Forward-active 1D reduction is **exact only for pure Ebers-Moll** BJTs (with
-`Vbc ≪ 0`, `Ic` genuinely does not depend on `Vbc`). For Gummel-Poon / ISE /
-parasitic-carded devices the 1D emission drops `qb` (Early effect + high-level
-injection), leakage, and `RB/RC/RE` — so they route **full-2D** by default.
-The `--bjt-fa off|auto|force` flag (mirrors `--tube-grid-fa`) controls this:
+Forward-active 1D reduction is **exact only for pure Ebers-Moll** BJTs, and only
+while they stay forward-active (`Vbc ≪ 0`, where `Ic` genuinely does not depend
+on `Vbc`). Detection happens once, at the DC operating point; drive can take a
+detected device into saturation, which the 1-D model cannot represent (a
+common-emitter stage at 50 mV put its output on the -10 V clamp where ngspice
+reads -4.15 V). So the reduction is **off by default**, and when requested every
+sample on which a reduced BJT's base-collector junction goes forward counts as
+unsolved (`diag_reduced_model_exit_count`, summed into
+`diag_unsolved_sample_count`) and is refused by every verb. For Gummel-Poon /
+ISE / parasitic-carded devices the 1D emission also drops `qb` (Early effect +
+high-level injection), leakage, and `RB/RC/RE`. The `--bjt-fa off|auto|force`
+flag (mirrors `--tube-grid-fa`) controls this:
 
 | Mode | Behavior |
 |------|----------|
-| `auto` (default) | Reduce only pure-Ebers-Moll forward-active BJTs (exact). GP/ISE/self-heating/parasitic stay full-2D. Byte-identical to pre-flag codegen. |
+| `off` (default) | No reduction — every BJT stays full-2D. |
+| `auto` | Reduce pure-Ebers-Moll BJTs found forward-active at the DC operating point (exact while they stay there; a saturated sample is refused). GP/ISE/self-heating/parasitic stay full-2D. |
 | `force` | Additionally reduce GP/ISE/parasitic forward-active BJTs to 1D, each with a per-device compile **warning**. Self-heating BJTs are **never** reduced (see below). |
-| `off` | No reduction — every BJT stays full-2D (parity / bisecting escape hatch). |
 
 **Known limitation (`--bjt-fa force`):** the reduction is **not accuracy-safe
 under signal**. A GP BJT's `qb` is modulated by the collector swing (`Vbc/VAF`

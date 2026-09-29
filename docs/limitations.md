@@ -407,10 +407,12 @@ Codegen supports up to M=24 nonlinear device dimensions (`MAX_M=24`,
 rule, M=3..24 by Gaussian elimination with partial pivoting on a block-diagonal
 Jacobian.
 
-Three mechanisms reduce M, and only the first is on by default:
+Three mechanisms reduce M, and none is on by default:
 
-- **BJT forward-active detection** (`--bjt-fa {auto,force,off}`). `auto` reduces
-  only pure Ebers-Moll BJTs, where the 1-D forward-active model is exact.
+- **BJT forward-active detection** (`--bjt-fa {off,auto,force}`, default `off`).
+  `auto` reduces pure Ebers-Moll BJTs that are forward-active at the DC
+  operating point, where the 1-D model is exact until the device saturates;
+  a sample on which a reduced BJT saturates is counted unsolved and refused.
   Gummel-Poon / ISE / self-heating / parasitic BJTs stay full 2-D. `force`
   reduces them too, per-device warned, at a documented accuracy cost (drops the
   `qb` base-charge term).

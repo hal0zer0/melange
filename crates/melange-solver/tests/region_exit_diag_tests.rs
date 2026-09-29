@@ -166,7 +166,10 @@ fn build_mna(spice: &str) -> (Netlist, MnaSystem, CodegenConfig) {
 /// Run the shared pipeline steps (FA + grid-off) exactly as compile does
 /// and return the MNA plus the DK-emitted code.
 fn generate_dk(spice: &str, tube_grid_fa: &str) -> (String, MnaSystem) {
-    let (netlist, mut mna, config) = build_mna(spice);
+    let (netlist, mut mna, mut config) = build_mna(spice);
+    // The counters under test are on the reduced devices: request the
+    // forward-active reduction (off by default).
+    config.bjt_fa_mode = melange_solver::codegen::BjtFaMode::Auto;
     let input = config.input_node;
     let forward_active = melange_solver::pipeline::apply_forward_active_reduction(
         &mut mna,

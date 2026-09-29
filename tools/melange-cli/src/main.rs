@@ -193,17 +193,17 @@ enum Commands {
 
         /// BJT forward-active (frozen-analysis) reduction mode.
         ///
-        /// * auto — reduce only pure-Ebers-Moll BJTs, for which the 1-D
-        ///   forward-active model is EXACT; Gummel-Poon / ISE / self-heating /
-        ///   parasitic BJTs stay full-2-D. Default; byte-identical to prior
-        ///   codegen.{n}{n}
+        /// * off — never reduce; all BJTs keep their full 2-D NR block. Default.{n}{n}
+        /// * auto — reduce pure-Ebers-Moll BJTs found forward-active at the DC
+        ///   operating point (Gummel-Poon / ISE / self-heating / parasitic BJTs
+        ///   stay full-2-D). Exact only while a reduced BJT stays forward-active:
+        ///   a sample on which one saturates is counted unsolved and refused.{n}{n}
         /// * force — also 1-D-reduce Gummel-Poon / ISE / parasitic BJTs, each
         ///   with a per-device WARNING. Drops the qb base-charge term (Early +
         ///   high-level injection); NOT accuracy-safe under signal (~1-2 dB
         ///   under hard drive, larger for parasitics). Self-heating BJTs are
-        ///   never force-reduced (structural).{n}{n}
-        /// * off — never reduce; all BJTs keep their full 2-D NR block.
-        #[arg(help_heading = EXPERT_HEADING, long, default_value = "auto")]
+        ///   never force-reduced (structural).
+        #[arg(help_heading = EXPERT_HEADING, long, default_value = "off")]
         bjt_fa: String,
 
         /// Op-amp supply rail saturation strategy.
@@ -402,12 +402,10 @@ enum Commands {
         #[arg(long, value_name = "DB")]
         thd_tolerance: Option<f64>,
 
-        /// Forward-active BJT reduction: auto (default), off, force.
+        /// Forward-active BJT reduction: off (default), auto, force.
         ///
-        /// Same mechanism as `melange compile --bjt-fa`. `off` keeps every BJT
-        /// full-2D, which is what this harness did unconditionally before
-        /// 2026-09-03 — use it to attribute a residual to the reduction.
-        #[arg(long, default_value = "auto")]
+        /// Same mechanism as `melange compile --bjt-fa`.
+        #[arg(long, default_value = "off")]
         bjt_fa: String,
 
         /// Grid-off pentode reduction: auto (default), on, off.
@@ -1525,12 +1523,13 @@ fn format_route_info(route_label: &str, reason: &str) -> String {
 
 /// Parse the `--bjt-fa` string into a [`melange_solver::codegen::BjtFaMode`].
 /// Assumes the value was already validated (`auto` | `off` | `force`); an
-/// unrecognized value falls back to `Auto`.
+/// unrecognized value falls back to `Off`, the default.
 fn parse_bjt_fa_mode(s: &str) -> melange_solver::codegen::BjtFaMode {
     match s {
         "off" => melange_solver::codegen::BjtFaMode::Off,
         "force" => melange_solver::codegen::BjtFaMode::Force,
-        _ => melange_solver::codegen::BjtFaMode::Auto,
+        "auto" => melange_solver::codegen::BjtFaMode::Auto,
+        _ => melange_solver::codegen::BjtFaMode::Off,
     }
 }
 
@@ -2873,7 +2872,7 @@ fn simulate_circuit_source(
         tube_grid_fa: opts.tube_grid_fa.to_string(),
         subsample_fire: opts.subsample_fire,
         subsample_lit_factor: diag_lit_factor(),
-        bjt_fa_mode: melange_solver::codegen::BjtFaMode::Auto,
+        bjt_fa_mode: melange_solver::codegen::BjtFaMode::Off,
         opamp_rail_mode: opts.opamp_rail_mode,
         nodal_sub_path_override: opts.nodal_sub_path_override,
         allow_static_glow_on_full_lu: false,
@@ -2991,6 +2990,7 @@ fn simulate_circuit_source(
                 "diag_nr_hold_count",
                 "diag_nr_unconverged_commit_count",
                 "diag_warm_start_fallback_count",
+                "diag_reduced_model_exit_count",
             ])
             .chain(INPUT_DIAG_FIELDS)
             .filter(|f| declares_state_field(&generated.code, f))
@@ -3048,6 +3048,7 @@ fn simulate_circuit_source(
     // with an active-set pin declares both, so they are kept apart.
     let mut nr_hold_count: Option<u64> = None;
     let mut nr_commit_count: Option<u64> = None;
+    let mut reduced_exit_count: Option<u64> = None;
     // The unified count every build declares; it is what the verb refuses on.
     let mut unsolved_count: Option<u64> = None;
     // Counters that mean the solver had to WORK, not that anything is wrong.
@@ -3077,6 +3078,7 @@ fn simulate_circuit_source(
                     "unsolved_sample_count" => unsolved_count = parts[1].trim().parse().ok(),
                     "nr_hold_count" => nr_hold_count = parts[1].trim().parse().ok(),
                     "nr_unconverged_commit_count" => nr_commit_count = parts[1].trim().parse().ok(),
+                    "reduced_model_exit_count" => reduced_exit_count = parts[1].trim().parse().ok(),
                     "samples" => diag_samples = parts[1].trim().parse().ok(),
                     "peak" => diag_peak = parts[1].trim().parse().ok(),
                     "max_abs_v_prev" => diag_max_abs_v_prev = parts[1].trim().parse().ok(),
@@ -3197,6 +3199,17 @@ fn simulate_circuit_source(
                  RMS and the waveform cannot show it. Under a held input the hold is also a fixed \
                  point: the next sample re-poses the identical problem and fails identically, so \
                  one hard sample can freeze the render to its end."
+            );
+        }
+        let reduced = reduced_exit_count.unwrap_or(0);
+        if reduced > 0 {
+            eprintln!();
+            eprintln!(
+                "ERROR: {reduced} sample(s){of} were solved on a REDUCED device model outside \
+                 its region: a forward-active BJT that saturated, or a grid-off pentode whose \
+                 grid conducted. The reduction (--bjt-fa / --tube-grid-fa) assumes the device \
+                 never goes there, so those samples are not a solution to this circuit. \
+                 Rebuild without the reduction (--bjt-fa off / --tube-grid-fa off)."
             );
         }
         if committed > 0 {
@@ -3341,7 +3354,7 @@ fn analyze_freq_response(
         // nodal-Schur decks, inert everywhere else.
         subsample_fire: melange_solver::codegen::SubsampleFireMode::Auto,
         subsample_lit_factor: diag_lit_factor(),
-        bjt_fa_mode: melange_solver::codegen::BjtFaMode::Auto,
+        bjt_fa_mode: melange_solver::codegen::BjtFaMode::Off,
         opamp_rail_mode,
         nodal_sub_path_override,
         allow_static_glow_on_full_lu: false,

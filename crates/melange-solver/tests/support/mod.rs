@@ -25,8 +25,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{LazyLock, Mutex};
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
-use melange_solver::dk::DkKernel;
+use melange_solver::codegen::CodegenConfig;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
 
@@ -387,43 +386,102 @@ pub fn build_circuit_nodal(spice: &str, config: &CodegenConfig, tag: &str) -> Co
 
 /// Generate circuit code through the DK codegen pipeline (no compilation).
 ///
-/// Returns (code, n, m). Useful when you need the code for a custom main.
+/// Builds through `melange_solver::build::build` — the build `melange compile`
+/// ships — with the DK solver forced. Returns (code, n, m).
 pub fn generate_circuit_code(spice: &str, config: &CodegenConfig) -> (String, usize, usize) {
+    build_as_shipped(spice, config, "dk")
+}
+
+/// Generate circuit code through the nodal codegen pipeline (no compilation),
+/// with the nodal solver forced (the build `melange compile --solver nodal`
+/// ships).
+pub fn generate_circuit_code_nodal(spice: &str, config: &CodegenConfig) -> (String, usize, usize) {
+    build_as_shipped(spice, config, "nodal")
+}
+
+/// DK codegen straight from the raw MNA (companion-model inductors, no pipeline
+/// steps). BYPASSES THE PRODUCTION PIPELINE ON PURPOSE: it exists only for the
+/// tests of the companion-inductor codegen path, which no shipped build reaches
+/// (inductor decks always build the augmented kernel); that path and those
+/// tests are scheduled for deletion.
+#[allow(dead_code)]
+pub fn generate_circuit_code_raw_dk(spice: &str, config: &CodegenConfig) -> (String, usize, usize) {
     let netlist = Netlist::parse(spice).expect("parse failed");
     let mut mna = MnaSystem::from_netlist(&netlist).expect("MNA build failed");
-
-    let input_node = config.input_node;
-    let input_conductance = 1.0 / config.input_resistance;
-    if input_node < mna.n {
-        mna.g[input_node][input_node] += input_conductance;
+    if config.input_node < mna.n {
+        mna.g[config.input_node][config.input_node] += 1.0 / config.input_resistance;
     }
-
-    let kernel = DkKernel::from_mna(&mna, config.sample_rate).expect("DK kernel build failed");
-    let generator = CodeGenerator::new(config.clone());
-    let result = generator
+    let kernel = melange_solver::dk::DkKernel::from_mna(&mna, config.sample_rate)
+        .expect("DK kernel build failed");
+    let result = melange_solver::codegen::CodeGenerator::new(config.clone())
         .generate(&kernel, &mna, &netlist)
         .expect("codegen failed");
-
     (result.code, result.n, result.m)
 }
 
-/// Generate circuit code through the nodal codegen pipeline (no compilation).
-pub fn generate_circuit_code_nodal(spice: &str, config: &CodegenConfig) -> (String, usize, usize) {
+/// The shipped build of `spice` for a test's `CodegenConfig`.
+///
+/// Tests used to generate code straight from the raw MNA (no junction caps, no
+/// forward-active / grid-off / `.linearize` reduction, no DC-OP cap preflight,
+/// no routing gates, the default Newton budget), so they tested a circuit that
+/// does not ship. The config maps onto `BuildOptions`; a field left at its
+/// default takes the production default (the auto-tuned budget, the deck's
+/// `.input_impedance` / `.oversampling`), a field a test set is passed through.
+pub fn build_as_shipped(
+    spice: &str,
+    config: &CodegenConfig,
+    solver: &str,
+) -> (String, usize, usize) {
     let netlist = Netlist::parse(spice).expect("parse failed");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("MNA build failed");
-
-    let input_node = config.input_node;
-    let input_conductance = 1.0 / config.input_resistance;
-    if input_node < mna.n {
-        mna.g[input_node][input_node] += input_conductance;
-    }
-
-    let generator = CodeGenerator::new(config.clone());
-    let result = generator
-        .generate_nodal(&mna, &netlist)
-        .expect("nodal codegen failed");
-
-    (result.code, result.n, result.m)
+    let mna = MnaSystem::from_netlist(&netlist).expect("MNA build failed");
+    // Index order starts with ground, so circuit node `i` is entry `i + 1`.
+    let names = mna.node_names_in_index_order();
+    let name_of = |idx: usize| -> String {
+        names
+            .get(idx + 1)
+            .unwrap_or_else(|| panic!("node index {idx} is not a circuit node"))
+            .to_string()
+    };
+    let d = CodegenConfig::default();
+    let opts = melange_solver::build::BuildOptions {
+        sample_rate: config.sample_rate,
+        circuit_name: config.circuit_name.clone(),
+        input_nodes: std::iter::once(config.input_node)
+            .chain(config.extra_input_nodes.iter().copied())
+            .map(name_of)
+            .collect(),
+        output_nodes: config.output_nodes.iter().map(|&i| name_of(i)).collect(),
+        max_iter: (config.max_iterations != d.max_iterations).then_some(config.max_iterations),
+        tolerance: config.tolerance,
+        output_scale: config.output_scales.first().copied().unwrap_or(1.0),
+        output_clamp: config.output_clamp_v,
+        input_resistance: (config.input_resistance != 1.0).then_some(config.input_resistance),
+        oversampling: (config.oversampling_factor != 1).then_some(config.oversampling_factor),
+        dc_block: config.dc_block,
+        solver: solver.to_string(),
+        backward_euler: config.backward_euler,
+        force_trap: config.force_trap,
+        tube_grid_fa: "auto".to_string(),
+        subsample_fire: config.subsample_fire,
+        subsample_lit_factor: config.subsample_lit_factor,
+        bjt_fa_mode: config.bjt_fa_mode,
+        opamp_rail_mode: config.opamp_rail_mode,
+        nodal_sub_path_override: config.nodal_sub_path_override,
+        allow_static_glow_on_full_lu: config.allow_static_glow_on_full_lu,
+        noise_mode: config.noise_mode,
+        noise_seed: config.noise_master_seed,
+        emit_dc_op_recompute: config.emit_dc_op_recompute,
+        plugin_format: false,
+        pot_overrides: None,
+        resolve_taps: true,
+        inject_runtime: true,
+        disable_unit_variation: false,
+        output_clamp_auto: false,
+    };
+    let silent = &melange_solver::pipeline::silent;
+    let built = melange_solver::build::build(spice, &opts, silent, silent)
+        .unwrap_or_else(|e| panic!("build failed: {e}"));
+    (built.generated.code, built.generated.n, built.generated.m)
 }
 
 /// Compile circuit code into a cached binary. Returns the binary path.
@@ -665,24 +723,31 @@ pub fn config_for_spice(spice: &str, sample_rate: f64) -> CodegenConfig {
     let netlist = Netlist::parse(spice).expect("parse");
     let mna = MnaSystem::from_netlist(&netlist).expect("mna");
 
+    // No silent default: a deck without an `in` / `out` node used to get node
+    // index 0 / 1 — on several decks a supply rail — as its input, and the test
+    // then measured a circuit driven through its rail. The input must be named.
     let input_node = mna
         .node_map
         .get("in")
         .copied()
-        .unwrap_or(1)
+        .unwrap_or_else(|| {
+            panic!("config_for_spice: the deck has no node named `in`; name the input node")
+        })
         .saturating_sub(1);
-    let output_node = mna
+    // No `out` node: no output, rather than a guessed one; the caller sets
+    // `output_nodes` (a build with none fails loudly where it is used).
+    let output_nodes: Vec<usize> = mna
         .node_map
         .get("out")
-        .copied()
-        .unwrap_or(2)
-        .saturating_sub(1);
+        .map(|&i| i - 1)
+        .into_iter()
+        .collect();
 
     CodegenConfig {
         circuit_name: "test_circuit".to_string(),
         sample_rate,
         input_node,
-        output_nodes: vec![output_node],
+        output_nodes,
         input_resistance: 1.0,
         ..CodegenConfig::default()
     }

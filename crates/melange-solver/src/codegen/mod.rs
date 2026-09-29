@@ -411,10 +411,14 @@ impl SubsampleFireMode {
 #[cfg(feature = "codegen")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BjtFaMode {
-    /// No FA reduction — all BJTs full-2-D.
-    Off,
-    /// Reduce only pure-Ebers-Moll BJTs (exact). Default.
+    /// No FA reduction — all BJTs full-2-D. Default: the reduction's premise
+    /// (the junction never leaves forward-active) is checked only at the DC
+    /// operating point, and ordinary drive can break it.
     #[default]
+    Off,
+    /// Reduce pure-Ebers-Moll BJTs found forward-active at the DC operating
+    /// point (exact while they stay there). On request only; a sample on which
+    /// a reduced BJT leaves forward-active is counted unsolved.
     Auto,
     /// Also force-reduce GP/ISE/parasitic BJTs (warned, accuracy-lossy).
     Force,
@@ -553,8 +557,7 @@ pub struct CodegenConfig {
     pub injections: Vec<crate::codegen::ir::InjectionSpec>,
     /// Raw inner-rate tap probes (`.tap`). Empty when no `.tap` directive.
     pub taps: Vec<crate::codegen::ir::TapSpec>,
-    /// Forward-active BJT reduction mode. Default [`BjtFaMode::Auto`] (reduce
-    /// pure-Ebers-Moll only — byte-identical to pre-flag codegen). See
+    /// Forward-active BJT reduction mode. Default [`BjtFaMode::Off`]. See
     /// [`BjtFaMode`] and the `--bjt-fa` CLI flag.
     pub bjt_fa_mode: BjtFaMode,
     /// Sub-sample fire (variable-dt glow-strike breakpoint re-solve) mode.
@@ -697,7 +700,7 @@ impl Default for CodegenConfig {
             max_iterations_be_promoted: None,
             injections: Vec::new(),
             taps: Vec::new(),
-            bjt_fa_mode: BjtFaMode::Auto,
+            bjt_fa_mode: BjtFaMode::Off,
             subsample_fire: SubsampleFireMode::Auto,
             subsample_lit_factor: 1.0,
         }

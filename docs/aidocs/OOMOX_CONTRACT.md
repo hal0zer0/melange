@@ -188,6 +188,13 @@ file:line, oomox-relative):
   active-set rail mode, Schur with no devices). `diag_substep_count` can now be
   nonzero on Schur builds. Like every counter, it includes the warm-up samples
   `default()`/`reset()` run.
+- **Reductions fail loud (2026-09-29)**: `--bjt-fa` defaults to `off`.
+  Requesting a reduction (`--bjt-fa auto|force`, `--tube-grid-fa on`) now makes
+  every sample on which a reduced device leaves its region (a forward-active
+  BJT saturating, a grid-off pentode's grid conducting) count in
+  `diag_unsolved_sample_count` (detail: `diag_reduced_model_exit_count`), so a
+  plugin test asserting `diag_unsolved_sample_count == 0` fails on it. No
+  current generated file uses a reduction (all `bjt-fa=0fa/...`).
 - **`diag_warm_start_fallback_count` (2026-09-29, nodal-Schur builds with
   devices)**: Newton solves whose exact start (full-LU's `v_prev`) was not
   reachable, so the old current predictor was used. Informational, not an

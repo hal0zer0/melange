@@ -57,6 +57,31 @@ R4 b4 0 10k
 Cx c3 b4 6n IC=-4
 ";
 
+// The same circuits as a shipped build takes them. `melange compile` drives
+// the input node itself (a Thevenin source, 1 ohm), so an ideal source on `in`
+// is refused; the codegen / compiled tests below use these. With a 0 V drive
+// the input holds `in` at 0 through 1 ohm, where V1 held it exactly. The diode
+// decks keep their 5 V bias on its own node and take the input through 1 Mohm.
+// (The IR-level tests build the raw IR on purpose and keep the decks above.)
+const RC_DISCHARGE_IC_SHIPPED: &str = "\
+RC discharge IC
+R1 in out 1k
+C1 out 0 10u IC=5
+";
+const RC_DISCHARGE_NO_IC_SHIPPED: &str = "\
+RC discharge no IC
+R1 in out 1k
+C1 out 0 10u
+";
+const TWO_NODE_IC_SHIPPED: &str = "\
+Two-node IC test
+R1 in c3 1k
+R2 c3 0 10k
+R3 c3 b4 5k
+R4 b4 0 10k
+Cx c3 b4 6n IC=-4
+";
+
 // Hand-derived (independently, via numpy) solution of the augmented linear
 // system for TWO_NODE_IC: v(c3) - v(b4) = -4 exactly, with the rest of the
 // network fully KCL-consistent. V1 pins v(in) to exactly 0 V (an augmented
@@ -167,7 +192,7 @@ fn ir_v_prev_ic_seed_two_node_cap() {
 
 #[test]
 fn codegen_dk_emits_v_prev_ic_seed_const() {
-    let (code, _n, _m) = support::generate_circuit_code(RC_DISCHARGE_IC, &ic_config(1));
+    let (code, _n, _m) = support::generate_circuit_code(RC_DISCHARGE_IC_SHIPPED, &ic_config(1));
     assert!(
         code.contains("pub const V_PREV_IC_SEED: [f64; N]"),
         "generated code must declare V_PREV_IC_SEED"
@@ -204,7 +229,7 @@ fn codegen_dk_emits_v_prev_ic_seed_const() {
 
 #[test]
 fn codegen_dk_no_ic_omits_v_prev_ic_seed_const() {
-    let (code, _n, _m) = support::generate_circuit_code(RC_DISCHARGE_NO_IC, &ic_config(1));
+    let (code, _n, _m) = support::generate_circuit_code(RC_DISCHARGE_NO_IC_SHIPPED, &ic_config(1));
     assert!(
         !code.contains("V_PREV_IC_SEED"),
         "circuit without IC= must not emit V_PREV_IC_SEED anywhere"
@@ -221,7 +246,8 @@ fn codegen_dk_no_ic_omits_v_prev_ic_seed_const() {
 
 #[test]
 fn codegen_nodal_emits_v_prev_ic_seed_const() {
-    let (code, _n, _m) = support::generate_circuit_code_nodal(RC_DISCHARGE_IC, &ic_config(1));
+    let (code, _n, _m) =
+        support::generate_circuit_code_nodal(RC_DISCHARGE_IC_SHIPPED, &ic_config(1));
     assert!(
         code.contains("pub const V_PREV_IC_SEED: [f64; N]"),
         "nodal codegen must declare V_PREV_IC_SEED"
@@ -238,7 +264,8 @@ fn codegen_nodal_emits_v_prev_ic_seed_const() {
 
 #[test]
 fn codegen_nodal_no_ic_omits_v_prev_ic_seed_const() {
-    let (code, _n, _m) = support::generate_circuit_code_nodal(RC_DISCHARGE_NO_IC, &ic_config(1));
+    let (code, _n, _m) =
+        support::generate_circuit_code_nodal(RC_DISCHARGE_NO_IC_SHIPPED, &ic_config(1));
     assert!(
         !code.contains("V_PREV_IC_SEED"),
         "nodal circuit without IC= must not emit V_PREV_IC_SEED anywhere"
@@ -251,7 +278,7 @@ fn codegen_nodal_no_ic_omits_v_prev_ic_seed_const() {
 
 #[test]
 fn compiled_rc_discharge_matches_analytic_decay() {
-    let circuit = support::build_circuit(RC_DISCHARGE_IC, &ic_config(1), "ic_rc_discharge");
+    let circuit = support::build_circuit(RC_DISCHARGE_IC_SHIPPED, &ic_config(1), "ic_rc_discharge");
     let sample_rate = 48000.0_f64;
     let num_samples = 2000; // ~42 ms, several time constants
     let input = vec![0.0; num_samples];
@@ -275,7 +302,7 @@ fn compiled_rc_discharge_matches_analytic_decay() {
 fn compiled_rc_no_ic_stays_at_zero() {
     // Control: without IC=, the same topology with V1=0 must stay at zero
     // (no DC source, no charge) — proves the IC feature is opt-in.
-    let circuit = support::build_circuit(RC_DISCHARGE_NO_IC, &ic_config(1), "ic_rc_no_ic");
+    let circuit = support::build_circuit(RC_DISCHARGE_NO_IC_SHIPPED, &ic_config(1), "ic_rc_no_ic");
     let sample_rate = 48000.0_f64;
     let input = vec![0.0; 100];
     let out = support::run_signal(&circuit, &input, sample_rate);
@@ -289,14 +316,14 @@ fn compiled_rc_no_ic_stays_at_zero() {
 
 #[test]
 fn compiled_two_node_ic_constraint_holds_at_first_sample() {
-    let (netlist, mna, _kernel) = build_pipeline(TWO_NODE_IC);
+    let (netlist, mna, _kernel) = build_pipeline(TWO_NODE_IC_SHIPPED);
     let c3 = mna.node_map["c3"] - 1;
     let b4 = mna.node_map["b4"] - 1;
     let mut config = ic_config(c3);
     config.circuit_name = "ic_two_node".to_string();
     let _ = netlist; // node maps already resolved above
 
-    let circuit = support::build_circuit_nodal(TWO_NODE_IC, &config, "ic_two_node_nodal");
+    let circuit = support::build_circuit_nodal(TWO_NODE_IC_SHIPPED, &config, "ic_two_node_nodal");
     let sample_rate = 48000.0_f64;
     let input = vec![0.0; 5];
     let out_c3 = support::run_signal(&circuit, &input, sample_rate);
@@ -305,7 +332,8 @@ fn compiled_two_node_ic_constraint_holds_at_first_sample() {
     // circuit/topology, cheap to compile again — cached by content hash).
     let mut config_b4 = ic_config(b4);
     config_b4.circuit_name = "ic_two_node".to_string();
-    let circuit_b4 = support::build_circuit_nodal(TWO_NODE_IC, &config_b4, "ic_two_node_nodal_b4");
+    let circuit_b4 =
+        support::build_circuit_nodal(TWO_NODE_IC_SHIPPED, &config_b4, "ic_two_node_nodal_b4");
     let out_b4 = support::run_signal(&circuit_b4, &input, sample_rate);
 
     // With a 6nF cap and 5k series R, tau ~ 30us — comparable to the 20.8us
@@ -329,14 +357,16 @@ fn compiled_two_node_ic_constraint_holds_at_first_sample() {
 
 #[test]
 fn compiled_ic_circuit_compiles_dk_and_nodal() {
-    let (code_dk, _, _) = support::generate_circuit_code(RC_DISCHARGE_IC, &ic_config(1));
-    let (code_nodal, _, _) = support::generate_circuit_code_nodal(RC_DISCHARGE_IC, &ic_config(1));
+    let (code_dk, _, _) = support::generate_circuit_code(RC_DISCHARGE_IC_SHIPPED, &ic_config(1));
+    let (code_nodal, _, _) =
+        support::generate_circuit_code_nodal(RC_DISCHARGE_IC_SHIPPED, &ic_config(1));
     // build_circuit / build_circuit_nodal already assert_compiles internally
     // via compile_circuit_code (panics on failure); calling them here is the
     // actual regression pin, but also sanity-check the raw strings compile
     // conceptually by construction, not just contain the right substrings.
-    let _ = support::build_circuit(RC_DISCHARGE_IC, &ic_config(1), "ic_compile_dk");
-    let _ = support::build_circuit_nodal(RC_DISCHARGE_IC, &ic_config(1), "ic_compile_nodal");
+    let _ = support::build_circuit(RC_DISCHARGE_IC_SHIPPED, &ic_config(1), "ic_compile_dk");
+    let _ =
+        support::build_circuit_nodal(RC_DISCHARGE_IC_SHIPPED, &ic_config(1), "ic_compile_nodal");
     assert!(code_dk.contains("V_PREV_IC_SEED"));
     assert!(code_nodal.contains("V_PREV_IC_SEED"));
 }
@@ -375,6 +405,33 @@ const DIODE_E_NO_IC: &str = "\
 Diode E no IC (control)
 V1 in 0 DC 5
 E1 drv 0 in 0 2
+R1 drv a 1k
+D1 a 0 DMOD
+Ca a b 1u
+Rb b 0 10k
+.model DMOD D(IS=1e-14)
+";
+
+/// [`DIODE_E_IC`] / [`DIODE_E_NO_IC`] as a shipped build takes them: the 5 V
+/// bias on its own node `bias`, the input `in` (listed first, so node 0) into
+/// `a` through 1 Mohm.
+const DIODE_E_IC_SHIPPED: &str = "\
+Diode E IC pairing test
+Rin in a 1Meg
+V1 bias 0 DC 5
+E1 drv 0 bias 0 2
+R1 drv a 1k
+D1 a 0 DMOD
+Ca a b 1u IC=2
+Rb b 0 10k
+.model DMOD D(IS=1e-14)
+";
+
+const DIODE_E_NO_IC_SHIPPED: &str = "\
+Diode E no IC (control)
+Rin in a 1Meg
+V1 bias 0 DC 5
+E1 drv 0 bias 0 2
 R1 drv a 1k
 D1 a 0 DMOD
 Ca a b 1u
@@ -446,11 +503,11 @@ fn ir_dc_nl_currents_ic_seed_absent_without_ic() {
 #[test]
 fn codegen_dk_pairs_dc_nl_i_ic_seed_with_v_prev_ic_seed() {
     let a_idx = {
-        let netlist = Netlist::parse(DIODE_E_IC).unwrap();
+        let netlist = Netlist::parse(DIODE_E_IC_SHIPPED).unwrap();
         let mna = MnaSystem::from_netlist(&netlist).unwrap();
         mna.node_map["a"] - 1
     };
-    let (code, _n, _m) = support::generate_circuit_code(DIODE_E_IC, &ic_config(a_idx));
+    let (code, _n, _m) = support::generate_circuit_code(DIODE_E_IC_SHIPPED, &ic_config(a_idx));
 
     // Both constants must be present — the plain quiescent DC_NL_I and the
     // IC-seeded twin — since this circuit has a nonzero plain-DC diode
@@ -490,11 +547,12 @@ fn codegen_dk_pairs_dc_nl_i_ic_seed_with_v_prev_ic_seed() {
 #[test]
 fn codegen_nodal_pairs_dc_nl_i_ic_seed_with_v_prev_ic_seed() {
     let a_idx = {
-        let netlist = Netlist::parse(DIODE_E_IC).unwrap();
+        let netlist = Netlist::parse(DIODE_E_IC_SHIPPED).unwrap();
         let mna = MnaSystem::from_netlist(&netlist).unwrap();
         mna.node_map["a"] - 1
     };
-    let (code, _n, _m) = support::generate_circuit_code_nodal(DIODE_E_IC, &ic_config(a_idx));
+    let (code, _n, _m) =
+        support::generate_circuit_code_nodal(DIODE_E_IC_SHIPPED, &ic_config(a_idx));
     assert!(code.contains("pub const DC_NL_I_IC_SEED: [f64; M]"));
     assert!(code.contains("i_nl_prev: DC_NL_I_IC_SEED"));
     assert!(code.contains("self.i_nl_prev = DC_NL_I_IC_SEED;"));
@@ -502,7 +560,7 @@ fn codegen_nodal_pairs_dc_nl_i_ic_seed_with_v_prev_ic_seed() {
 
 #[test]
 fn codegen_dk_no_ic_omits_dc_nl_i_ic_seed() {
-    let (code, _n, _m) = support::generate_circuit_code(DIODE_E_NO_IC, &ic_config(1));
+    let (code, _n, _m) = support::generate_circuit_code(DIODE_E_NO_IC_SHIPPED, &ic_config(1));
     assert!(
         !code.contains("DC_NL_I_IC_SEED"),
         "circuit without IC= must not emit DC_NL_I_IC_SEED anywhere"

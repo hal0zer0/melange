@@ -196,6 +196,9 @@ fn golden_diode_clipper_sine_500hz() {
     support::assert_matches_golden(&output, "diode_clipper_sine_500hz.json", 1e-6);
 }
 
+/// Under the default (no forward-active reduction) the full model tracks
+/// ngspice: out bottoms at -4.13 V against ngspice's -4.152 V (gear, reltol
+/// 1e-4, measured 2026-09-29).
 #[test]
 fn golden_bjt_ce_sine_500hz() {
     let c = config(BJT_CE);
@@ -304,5 +307,38 @@ fn record_triode_cc_sine_500hz_codegen() {
         &output,
         1e-4,
         "codegen_dk (2026-09-24, D&Z grid-current law)",
+    );
+}
+
+/// The same drive with the forward-active reduction requested: Q1 saturates,
+/// which the 1-D model cannot represent (it put the output on the -10 V clamp
+/// where ngspice reads -4.15 V). Every such sample must be counted unsolved,
+/// so every verb refuses the render (design review).
+#[test]
+fn bjt_ce_with_forward_active_reduction_counts_its_saturation_unsolved() {
+    let mut c = config(BJT_CE);
+    c.bjt_fa_mode = melange_solver::codegen::BjtFaMode::Auto;
+    let (code, _, m) = support::generate_circuit_code(BJT_CE, &c);
+    assert_eq!(m, 1, "premise: Q1 is reduced to forward-active 1-D");
+    let main = "fn main() {
+    let mut s = CircuitState::default();
+    let u0 = s.diag_unsolved_sample_count;
+    for i in 0..960usize {
+        let x = 0.05 * (2.0 * std::f64::consts::PI * 500.0 * i as f64 / 48000.0).sin();
+        let _ = process_sample(x, &mut s);
+    }
+    println!(\"unsolved={}\", s.diag_unsolved_sample_count - u0);
+    println!(\"reduced={}\", s.diag_reduced_model_exit_count);
+}";
+    let out = support::compile_and_run(&code, main, "bjt_ce_fa_refused");
+    let unsolved = out.parse_kv("unsolved").unwrap();
+    let reduced = out.parse_kv("reduced").unwrap();
+    assert!(
+        unsolved > 0.0,
+        "a saturated reduced BJT must be unsolved ({unsolved})"
+    );
+    assert!(
+        reduced >= unsolved,
+        "unsolved {unsolved} vs reduced exits {reduced}"
     );
 }

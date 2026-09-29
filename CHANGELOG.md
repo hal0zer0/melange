@@ -24,6 +24,18 @@ generated state is smaller.
 
 ### Fixed
 
+- **The forward-active BJT reduction is off by default, and a reduced device
+  leaving its region is refused.** `--bjt-fa auto` reduced a BJT to a
+  forward-active-only model when it was forward-active at the DC operating
+  point, but ordinary drive can saturate it: a common-emitter stage driven
+  with 50 mV put its output on the -10 V output clamp where ngspice reads
+  -4.15 V, and nothing flagged it. `--bjt-fa` now defaults to `off`. When a
+  reduction is requested (`--bjt-fa auto|force`, `--tube-grid-fa on`), every
+  sample on which a reduced device leaves its region counts as unsolved
+  (`diag_reduced_model_exit_count`, summed into `diag_unsolved_sample_count`)
+  and every verb refuses it. No circuit in the regression corpus, and no
+  generated plugin file we know of, used the reduction.
+
 - **`simulate`, `analyze` and `validate` now build exactly the circuit
   `compile` ships.** Each verb assembled the build steps in its own sequence,
   and they had drifted. `simulate`, `analyze` and `validate` tuned the Newton
