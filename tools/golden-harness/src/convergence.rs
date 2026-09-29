@@ -279,16 +279,17 @@ pub fn assess(
 ///
 /// `hold_instrumented` distinguishes two very different reasons a render can
 /// have no hold count, which must never be reported as the same thing:
-/// `Some(false)` — this build has NO hold path (DK, or nodal with M = 0 and no
-/// behavioral source or saturating inductor), so it structurally cannot hold and
-/// zero is the true answer; `None` — the baseline has no stored `circuit.rs` at
+/// `Some(false)` — this build declares neither the hold nor the unconverged-commit
+/// counter (M = 0 with no behavioral source or saturating inductor: no Newton
+/// solve can end unsolved), so zero is the true answer; `None` — the baseline has no stored `circuit.rs` at
 /// all, so nothing is known. Only the latter is unmeasured.
 fn build_constants(dir: &Path, plugin: &str) -> (Option<u32>, Option<u32>, Option<bool>) {
     let Ok(code) = std::fs::read_to_string(dir.join(plugin).join("circuit.rs")) else {
         return (None, None, None);
     };
     let hold_instrumented = Some(
-        code.contains("diag_nr_hold_count") || code.contains("diag_nr_unconverged_commit_count"),
+        code.contains("pub diag_nr_hold_count: ")
+            || code.contains("pub diag_nr_unconverged_commit_count: "),
     );
     let mut os = None;
     let mut max_iter = None;
@@ -577,9 +578,9 @@ pub fn print_section(sets: &[(String, &[Health])]) {
         .sum();
     if no_hold_path > 0 {
         println!(
-            "\n  {no_hold_path} render(s) have NO HOLD PATH in their build (DK, or nodal at \
-             M = 0 with no behavioral source or saturating inductor). They cannot hold; \
-             zero is the true answer, not a gap."
+            "\n  {no_hold_path} render(s) have NO NEWTON SOLVE that can end unsolved in their \
+             build (M = 0, with no behavioral source or saturating inductor). Zero is the \
+             true answer, not a gap."
         );
     }
     if unmeasured_hold > 0 {

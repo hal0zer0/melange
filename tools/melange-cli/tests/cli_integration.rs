@@ -879,6 +879,10 @@ fn test_ic_seeded_astable_stays_bounded_at_os1() {
         "1e-9",
         "--duration",
         "0.05",
+        // This DK astable fails Newton on about half its samples (1330 of 2400
+        // at 1x, pre-existing): simulate refuses those. This test guards the
+        // bound on the trajectory, so it accepts them explicitly.
+        "--allow-nr-hold",
         "--output",
         tmp_wav.to_str().unwrap(),
     ]);
@@ -933,6 +937,10 @@ fn test_ic_seeded_astable_stays_bounded_at_os4() {
         "0.05",
         "--oversampling",
         "4",
+        // This DK astable fails Newton on about half its samples (1330 of 2400
+        // at 1x, pre-existing): simulate refuses those. This test guards the
+        // bound on the trajectory, so it accepts them explicitly.
+        "--allow-nr-hold",
         "--output",
         tmp_wav.to_str().unwrap(),
     ]);
@@ -995,13 +1003,39 @@ fn test_simulate_warns_on_nr_starvation() {
         .expect("failed to run melange");
     let starved_err = String::from_utf8_lossy(&starved.stderr).to_string();
     assert!(
-        starved.status.success(),
-        "simulate should still succeed (warning is advisory), stderr:\n{starved_err}"
-    );
-    assert!(
         starved_err.contains("WARNING") && starved_err.contains("Newton-Raphson"),
         "expected an NR-starvation WARNING on stderr at --max-iter 1, got:\nstdout:{}\nstderr:{starved_err}",
         String::from_utf8_lossy(&starved.stdout)
+    );
+    // Every sample's final solve ends unconverged and is committed anyway (DK
+    // has no hold): not a solution, so simulate refuses unless told otherwise.
+    assert!(
+        !starved.status.success() && starved_err.contains("never solved"),
+        "simulate must refuse unsolved samples, stderr:\n{starved_err}"
+    );
+    let allowed = Command::new(melange_bin())
+        .args([
+            "simulate",
+            cir.to_str().unwrap(),
+            "-n",
+            "out",
+            "--amplitude",
+            "0.9",
+            "-d",
+            "0.01",
+            "--max-iter",
+            "1",
+            "--allow-nr-hold",
+            "--output",
+            tmp_wav.to_str().unwrap(),
+        ])
+        .current_dir(project_root())
+        .output()
+        .expect("failed to run melange");
+    assert!(
+        allowed.status.success(),
+        "--allow-nr-hold renders anyway, stderr:\n{}",
+        String::from_utf8_lossy(&allowed.stderr)
     );
 
     // Same circuit with an adequate ceiling must NOT warn (no false positive).

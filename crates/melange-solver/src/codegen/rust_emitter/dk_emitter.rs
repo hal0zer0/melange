@@ -1013,6 +1013,8 @@ impl RustEmitter {
 
     fn emit_state(&self, ir: &CircuitIR, noise: &NoiseEmission) -> Result<String, CodegenError> {
         let mut ctx = Context::new();
+        // Gates the unsolved-sample counter (no Newton solve at M = 0).
+        ctx.insert("m", &ir.topology.m);
         insert_multi_input_ctx(&mut ctx, ir);
         insert_inject_ctx(&mut ctx, ir);
         // Noise fragments (empty strings when noise is off → template blocks become no-ops)
@@ -2992,17 +2994,6 @@ impl RustEmitter {
         ctx.insert("be_p_lines", &be_p_lines);
         ctx.insert("has_dc_sources", &ir.has_dc_sources);
         ctx.insert("max_iter", &ir.solver_config.max_iterations);
-        // V_MAX_DC: maximum physically reasonable node voltage (supply rails + margin).
-        // Used by BE fallback to detect trapezoidal ringing artifacts.
-        let v_max_dc = ir
-            .dc_operating_point
-            .iter()
-            .map(|v| v.abs())
-            .fold(0.0_f64, f64::max)
-            .max(1.0)
-            * 3.0
-            + 10.0; // 3× margin + 10V headroom (generous for transients)
-        ctx.insert("v_max_dc", &format!("{:.17e}", v_max_dc));
         // When augmented_inductors is true, companion model state update is not needed —
         // A_neg handles all inductor history through the augmented G/C matrices.
         let num_inductors = if ir.topology.augmented_inductors {

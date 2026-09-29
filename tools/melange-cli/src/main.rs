@@ -4389,9 +4389,9 @@ fn simulate_circuit_source(
         &SUBSAMPLE_FIRE_DIAG_FIELDS
             .iter()
             .copied()
-            // The death-spiral hold counter exists on the nodal path only; DK
-            // has no hold (it commits the diverged iterate instead, which is a
-            // different defect). Presence-filtered like the rest, so a DK build
+            // The death-spiral hold counter exists on nodal full-LU only; nodal
+            // Schur and DK (M > 0) have no hold and count the unsolved sample
+            // they commit instead. Presence-filtered like the rest, so a build
             // stays silent rather than reporting a reassuring zero for a
             // mechanism it does not have.
             .chain(["diag_nr_hold_count", "diag_nr_unconverged_commit_count"])
@@ -4447,6 +4447,7 @@ fn simulate_circuit_source(
     let mut diag_peak: Option<f64> = None;
     let mut diag_max_abs_v_prev: Option<f64> = None;
     let mut nr_hold_count: Option<u64> = None;
+    let mut unsolved_is_hold = true;
     // Counters that mean the solver had to WORK, not that anything is wrong.
     // Printed as a bare list they read as a hazard panel a newcomer cannot
     // interpret: is `region_exit_count: 0` good? is 5 bad? Nothing said.
@@ -4473,7 +4474,8 @@ fn simulate_circuit_source(
                     // full-LU freezes, Schur commits the diverged iterate. A build
                     // declares exactly one; both mean "not a solution".
                     "nr_hold_count" | "nr_unconverged_commit_count" => {
-                        nr_hold_count = parts[1].trim().parse().ok()
+                        nr_hold_count = parts[1].trim().parse().ok();
+                        unsolved_is_hold = parts[0] == "nr_hold_count";
                     }
                     "samples" => diag_samples = parts[1].trim().parse().ok(),
                     "peak" => diag_peak = parts[1].trim().parse().ok(),
@@ -4581,19 +4583,31 @@ fn simulate_circuit_source(
             .map(|s| format!(" of {s} output samples"))
             .unwrap_or_default();
         eprintln!();
-        eprintln!(
-            "ERROR: {held} sample(s){of} were never solved. Every Newton path failed there \
-             (trapezoidal, sub-step and backward-Euler), so the solver committed the PREVIOUS \
-             state as the output. Those samples are not a solution to this circuit.\n\
-             \n\
-             The rendered file looks healthy — a held value is bounded and smooth, so peak, \
-             RMS and the waveform cannot show it. Under a held input the hold is also a fixed \
-             point: the next sample re-poses the identical problem and fails identically, so \
-             one hard sample can freeze the render to its end.\n\
-             \n\
-             The WAV was still written, so you can listen to what it did. Do not treat it as \
-             this circuit's output. Re-run with --allow-nr-hold to accept it anyway."
-        );
+        if unsolved_is_hold {
+            eprintln!(
+                "ERROR: {held} sample(s){of} were never solved. Every Newton path failed there \
+                 (trapezoidal, sub-step and backward-Euler), so the solver committed the PREVIOUS \
+                 state as the output. Those samples are not a solution to this circuit.\n\
+                 \n\
+                 The rendered file looks healthy — a held value is bounded and smooth, so peak, \
+                 RMS and the waveform cannot show it. Under a held input the hold is also a fixed \
+                 point: the next sample re-poses the identical problem and fails identically, so \
+                 one hard sample can freeze the render to its end.\n\
+                 \n\
+                 The WAV was still written, so you can listen to what it did. Do not treat it as \
+                 this circuit's output. Re-run with --allow-nr-hold to accept it anyway."
+            );
+        } else {
+            eprintln!(
+                "ERROR: {held} sample(s){of} were never solved. The final Newton solve (the \
+                 trapezoidal one, or the backward-Euler fallback when it ran) ended unconverged, \
+                 and the solver committed that iterate as the output. Those samples are not a \
+                 solution to this circuit, and a bounded, smooth render does not show it.\n\
+                 \n\
+                 The WAV was still written, so you can listen to what it did. Do not treat it as \
+                 this circuit's output. Re-run with --allow-nr-hold to accept it anyway."
+            );
+        }
         if !opts.allow_nr_hold {
             anyhow::bail!("{held} sample(s) were never solved (--allow-nr-hold to override)");
         }

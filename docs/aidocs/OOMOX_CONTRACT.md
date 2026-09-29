@@ -174,6 +174,14 @@ file:line, oomox-relative):
   `lib.rs:962-981`); `settle_dc_op`'s fallback detection reads
   `diag_nr_max_iter_count` exclusively. Renaming or repurposing a diag counter
   is an API + test break.
+- **DK diag semantics (2026-09-29)**: `diag_voltage_damp_count` now counts only
+  UNSOLVED samples whose step was contained; a converged sample is never damped
+  (it used to be, silently). `== 0` stays true on a healthy stream, and a
+  nonzero value now always means unsolved samples. DK builds with M > 0 gain
+  `diag_nr_unconverged_commit_count` (samples committed although their final
+  Newton solve ended unconverged — the same field and meaning as nodal Schur;
+  `validate`, `simulate` and the golden harness refuse on it), and a
+  module-level `pub const MAX_ITER` (it was local to `solve_nonlinear`).
 - **Diag-counter semantics recount (changed 2026-07 campaign, oomox relay
   pending)**: on the nodal paths, (a) `diag_be_fallback_count` now counts
   every BE-fallback **entry**, not only successes — previously failed BE

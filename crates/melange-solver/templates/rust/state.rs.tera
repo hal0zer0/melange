@@ -102,11 +102,18 @@ pub struct CircuitState {
     pub diag_magnitude_reset_count: u64,
     /// Diagnostic: number of times matrix inversion detected a singular matrix
     pub diag_singular_matrix_count: u64,
-    /// Diagnostic: number of samples hit by the global voltage-damping safety
-    /// net. Per CLAUDE.md ("never use output attenuation to mask simulation
-    /// errors"), any nonzero value here is a symptom to investigate, not an
-    /// acceptable steady-state.
+    /// Diagnostic: number of UNSOLVED samples (see
+    /// `diag_nr_unconverged_commit_count`) whose step exceeded the containment
+    /// bound and was scaled back to it. A converged sample is never damped.
+    /// Any nonzero value is a symptom to investigate.
     pub diag_voltage_damp_count: u64,
+{% if m > 0 %}    /// Diagnostic: samples committed although their final Newton solve (the
+    /// trapezoidal one, or the BE fallback when it ran) ended unconverged. DK
+    /// has no hold or timestep cut, so such a sample ships as output: a
+    /// non-solution. `melange validate`, `simulate` and the golden harness
+    /// refuse on any nonzero value.
+    pub diag_nr_unconverged_commit_count: u64,
+{% endif %}
     /// Diagnostic: number of times sub-step NR was used (nodal full-LU only;
     /// always 0 on the DK path)
     pub diag_substep_count: u64,
@@ -301,7 +308,8 @@ impl Default for CircuitState {
             diag_magnitude_reset_count: 0,
             diag_singular_matrix_count: 0,
             diag_voltage_damp_count: 0,
-            diag_substep_count: 0,
+{% if m > 0 %}            diag_nr_unconverged_commit_count: 0,
+{% endif %}            diag_substep_count: 0,
             diag_region_exit_count: 0,
             s: S_DEFAULT,
             a_neg: A_NEG_DEFAULT,
@@ -424,7 +432,8 @@ impl CircuitState {
         self.diag_magnitude_reset_count = 0;
         self.diag_singular_matrix_count = 0;
         self.diag_voltage_damp_count = 0;
-        self.diag_substep_count = 0;
+{% if m > 0 %}        self.diag_nr_unconverged_commit_count = 0;
+{% endif %}        self.diag_substep_count = 0;
         self.diag_region_exit_count = 0;
         self.diag_be_fallback_count = 0;
 {% if has_be_fallback %}

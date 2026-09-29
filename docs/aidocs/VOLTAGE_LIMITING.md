@@ -172,6 +172,25 @@ delta's magnitude. See DEBUGGING.md (2026-08-03) and
 `nodal_be_fallback_alpha_floor_tests.rs`. **Do not reintroduce a floor here** —
 if NR stalls, the fix is elsewhere (limiter/vcrit), not a bigger minimum step.
 
+## DK Per-Sample Containment (not a Newton limit)
+
+The DK sample path (`templates/rust/process_sample.rs.tera`, Step 6c) has a
+per-SAMPLE containment of an **unsolved** sample, separate from the per-iteration
+limits above. When the final Newton solve of a sample (the trapezoidal one, or
+the BE fallback when it ran) ends at `MAX_ITER`, the sample is committed (DK has
+no hold or timestep cut) and counted in `diag_nr_unconverged_commit_count`, which
+every verb refuses on; a step larger than `damp_thresh = max(2 V, 5 % of
+max|DC_OP|)` is then scaled back to that bound (`diag_voltage_damp_count`).
+
+**A converged sample is never touched.** It is the circuit's answer; its step
+size is not evidence of anything. The containment used to scale every sample's
+step, solved or not: a hard-driven input node or a high-gain stage at high
+frequency was pulled toward the previous sample, silently (noyce-amp-at-idle's
+golden sweep was 78 % wrong against an 8× render; `dk_step_containment_tests.rs`).
+For the same reason the BE fallback (Step 6b) runs only for an unsolved
+trapezoidal sample (and its cooldown); it used to run whenever a converged node
+exceeded 3·max|DC_OP| + 10 V.
+
 ## Codegen Implementation
 
 Generated code emits self-contained `pnjlim()` and `fetlim()` functions via

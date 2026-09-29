@@ -24,6 +24,21 @@ generated state is smaller.
 
 ### Fixed
 
+- **DK circuits no longer edit a solved sample.** A safety net scaled every
+  sample's voltage step down to 2 V (or 5 % of the largest bias voltage),
+  whether or not the sample had been solved, so a legitimately large step —
+  a hard-driven input, a high-gain stage at high frequency — was pulled back
+  toward the previous sample without a warning. Against an 8× render, the
+  noyce-amp-at-idle corpus amplifier's error falls from 12 % / 78 % / 27 %
+  (sine / sweep / step) to 0.7 % / 0.8 % / 1.7 %, and jfet-booster's sweep
+  from 1.8 % to 0.03 %. The step bound now applies only to a sample whose
+  Newton solve failed. Likewise the backward-Euler fallback now runs only for
+  a failed solve; it also ran whenever a node swung past three times its bias
+  voltage plus 10 V. DK builds now count samples whose solve failed
+  (`diag_nr_unconverged_commit_count`), and `validate`, `simulate` and the
+  golden harness refuse them, as on the nodal path; `diag_voltage_damp_count`
+  now counts only those samples when their step is bounded. Four golden
+  renders change; nothing else does.
 - **Generated code failed `-D warnings` on a nodal Schur build run with
   `--force-trap`** ("value assigned to `v` is never read"), so a plugin crate
   that denies warnings did not build. A new test compiles a matrix of generated

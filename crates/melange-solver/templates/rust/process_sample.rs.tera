@@ -81,21 +81,21 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
     // Step 6: Update history (no-op, handled by A_neg formulation)
     update_history(&v, state);
 {% if has_be_fallback %}
-    // Step 6b: Backward Euler fallback for trapezoidal instability.
-    // Triggers when: (a) trapezoidal NR didn't converge, OR (b) any node voltage
-    // exceeds supply rails (trapezoidal ringing artifact), OR (c) previous sample
-    // used BE (cooldown: stay on BE until ringing decays).
-    // BE is L-stable and damps all oscillatory modes that trapezoidal preserves.
-    let nr_failed = state.last_nr_iterations >= {{ max_iter }}_u32;
-    let ringing = v.iter().take({{ n_nodes }}).any(|&x| x.abs() > {{ v_max_dc }});
-    let need_be = nr_failed || ringing || force_be;
+    // Step 6b: Backward Euler fallback for an unsolved trapezoidal sample.
+    // Triggers when (a) trapezoidal NR did not converge, or (b) the previous
+    // sample did (cooldown: stay on BE for a few samples after a failure).
+    // A converged sample is the circuit's answer: a node beyond its DC-OP
+    // range is legitimate signal, not evidence of ringing, so nothing here
+    // looks at the converged voltages.
+    let nr_failed = state.last_nr_iterations >= MAX_ITER as u32;
+    let need_be = nr_failed || force_be;
 {% if carries_q_dot %}    // Charge form: this sample's q_dot follows the integrator that produced it.
     let q_be = need_be;
 {% endif %}    let (v, i_nl) = if need_be {
         if nr_failed { state.diag_nr_max_iter_count += 1; }
-        // Set cooldown: stay on BE long enough for trapezoidal ringing to decay.
-        // 64 samples ≈ 1.5ms at 44.1kHz — enough for most parasitic modes.
-        if ringing || nr_failed { state.be_cooldown = 64; }
+        // Set cooldown: stay on BE for 64 samples (≈ 1.5 ms at 44.1 kHz) after a
+        // failed trapezoidal solve.
+        if nr_failed { state.be_cooldown = 64; }
         state.diag_be_fallback_count += 1;
         // Rebuild RHS with backward Euler matrices.
         //
@@ -160,24 +160,30 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
     };
 {% endif %}
 
-    // Step 6c: Global node voltage damping safety net.
-    // Threshold scales with max DC OP voltage so tube 250V circuits aren't over-damped.
-    let (v, i_nl) = {
+    // Step 6c: Containment of an UNSOLVED sample.
+    // The final solve of this sample (the trapezoidal one, or the BE fallback
+    // when it ran) ended at MAX_ITER, so `v` is not a solution. It is committed
+    // (DK has no hold or timestep cut) but counted in
+    // diag_nr_unconverged_commit_count, which every verb refuses on, and a step
+    // larger than damp_thresh = max(2 V, 5 % of max |DC_OP|) is scaled back to
+    // it (counted in diag_voltage_damp_count). A converged sample is the
+    // circuit's answer and passes untouched whatever its step: per-sample step
+    // size is not evidence of an error.
+{% if m > 0 %}    let unsolved = state.last_nr_iterations >= MAX_ITER as u32;
+    if unsolved {
+        state.diag_nr_unconverged_commit_count = state.diag_nr_unconverged_commit_count.saturating_add(1);
+    }
+{% else %}    let unsolved = false;
+{% endif %}    let (v, i_nl) = {
         let mut max_delta = 0.0_f64;
         for i in 0..{{ n_nodes }} {
             let d = (v[i] - state.v_prev[i]).abs();
             if d > max_delta { max_delta = d; }
         }
-        // Adaptive threshold: max(2V, 5% of max DC OP node voltage). Cached in
-        // state.damp_thresh (refreshed only when dc_operating_point changes)
-        // instead of recomputing the max over all nodes every sample.
+        // Cached in state.damp_thresh (refreshed only when dc_operating_point
+        // changes) instead of recomputing the max over all nodes every sample.
         let damp_thresh = state.damp_thresh;
-        if max_delta > damp_thresh {
-            // This is a last-ditch safety net that should only fire when the
-            // solver has produced a pathological step. A nonzero value here is
-            // a symptom that needs investigation, not an acceptable steady-state
-            // (per CLAUDE.md: "never use output attenuation to mask simulation
-            // errors"). Surfaced via state.diag_voltage_damp_count.
+        if unsolved && max_delta > damp_thresh {
             state.diag_voltage_damp_count = state.diag_voltage_damp_count.saturating_add(1);
             // Uncapped division — `damp_thresh` and `max_delta` are both
             // strictly positive here (max_delta > damp_thresh > 0), so
@@ -340,7 +346,7 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
     // (NaN check already done in Step 7, before state update)
 
     {% if m > 0 %}
-    if state.last_nr_iterations >= {{ max_iter }}_u32 {
+    if state.last_nr_iterations >= MAX_ITER as u32 {
         state.diag_nr_max_iter_count += 1;
     }
     {% endif %}

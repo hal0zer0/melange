@@ -33,6 +33,16 @@ impl RustEmitter {
             Vec::new()
         };
 
+        let dk = ir.solver_mode == crate::codegen::ir::SolverMode::Dk;
+        if dk {
+            // One definition of the Newton budget: the solver's loop and the
+            // per-sample unsolved checks in `process_sample` both read it.
+            code.push_str(&format!(
+                "/// Newton iteration budget per solve. A solve that ends here is unsolved.\n\
+                 pub const MAX_ITER: usize = {};\n\n",
+                ir.solver_config.max_iterations
+            ));
+        }
         code.push_str("/// Solve M×M nonlinear system via Newton-Raphson\n");
         code.push_str("/// \n");
         code.push_str("/// Solves: i_nl - i_d(p + K*i_nl) = 0\n");
@@ -49,10 +59,12 @@ impl RustEmitter {
                 "fn solve_nonlinear(p: &[f64; M], v_pred: &[f64; N], state: &mut CircuitState) -> [f64; M] {\n",
             );
         }
-        code.push_str(&format!(
-            "    const MAX_ITER: usize = {};\n",
-            ir.solver_config.max_iterations
-        ));
+        if !dk {
+            code.push_str(&format!(
+                "    const MAX_ITER: usize = {};\n",
+                ir.solver_config.max_iterations
+            ));
+        }
         code.push_str(&format!(
             "    const TOL: f64 = {:.17e};\n",
             ir.solver_config.tolerance

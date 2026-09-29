@@ -1072,17 +1072,19 @@ pub fn run_generated_solver(
     //
     // Build-conditional counters are added by presence, so a build that does
     // not declare one still compiles:
-    // - the unsolved-sample counter (nodal only: the full-LU death-spiral
-    //   hold, or Schur's unconverged commit);
+    // - the unsolved-sample counter (the nodal full-LU death-spiral hold, or
+    //   the unconverged commit of nodal Schur and DK);
     // - the input sanitisation (clamp to INPUT_LIMIT_V, NaN -> 0) and the
     //   output clamp.
     // The lines are part of the template by construction. They used to be
     // spliced in with `str::replace` on an indented copy of the region-exit
     // line, which never matched (a `\` line continuation strips the next
     // line's indentation), so validate never saw these counters.
-    let unsolved_field = if code.contains("diag_nr_hold_count") {
+    // Matched on the field declaration: generated comments name the counters
+    // on builds that do not declare them.
+    let unsolved_field = if code.contains("pub diag_nr_hold_count: ") {
         Some("diag_nr_hold_count")
-    } else if code.contains("diag_nr_unconverged_commit_count") {
+    } else if code.contains("pub diag_nr_unconverged_commit_count: ") {
         Some("diag_nr_unconverged_commit_count")
     } else {
         None

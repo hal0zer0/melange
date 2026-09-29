@@ -105,3 +105,59 @@ fn a_render_with_unsolved_samples_is_refused() {
         .to_string();
     assert!(err.contains("never solved"), "{err}");
 }
+
+/// The same refusal on the DK path, which has no hold: an unsolved final
+/// solve (the trapezoidal one, or the BE fallback when it ran) is committed and
+/// counted in `diag_nr_unconverged_commit_count`. With `MAX_ITER` forced to 1
+/// every solve ends unsolved, and validate must refuse the render.
+#[test]
+fn a_dk_render_with_unsolved_samples_is_refused() {
+    use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+    use melange_solver::dk::DkKernel;
+    use melange_solver::mna::MnaSystem;
+    use melange_solver::parser::Netlist;
+    use melange_validate::run_generated_solver;
+
+    let spice =
+        "hard clipper\nR1 in a 1k\nD1 a 0 DX\nD2 0 a DX\nC1 a 0 10n\nR2 a out 1k\nR3 out 0 100k\n\
+                 .model DX D(IS=2.52n N=1.752)\n";
+    let netlist = Netlist::parse(spice).unwrap();
+    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+    let input_node = mna.node_map["in"] - 1;
+    let output_node = mna.node_map["out"] - 1;
+    mna.g[input_node][input_node] += 1.0;
+    let kernel = DkKernel::from_mna(&mna, 48000.0).unwrap();
+    let config = CodegenConfig {
+        circuit_name: "dk_unsolved_witness".to_string(),
+        sample_rate: 48000.0,
+        input_node,
+        output_nodes: vec![output_node],
+        output_scales: vec![1.0],
+        input_resistance: 1.0,
+        dc_block: true,
+        ..CodegenConfig::default()
+    };
+    let code = CodeGenerator::new(config)
+        .generate(&kernel, &mna, &netlist)
+        .unwrap()
+        .code;
+    assert!(
+        code.contains("pub diag_nr_unconverged_commit_count")
+            && !code.contains("pub diag_nr_hold_count"),
+        "a DK build counts its unsolved commits and has no hold"
+    );
+    let input: Vec<f64> = (0..4800)
+        .map(|i| 20.0 * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 48000.0).sin())
+        .collect();
+    run_generated_solver(&code, &input, None).expect("the unmodified build validates");
+
+    let max_iter_line = code
+        .lines()
+        .find(|l| l.starts_with("pub const MAX_ITER: usize ="))
+        .expect("MAX_ITER constant");
+    let starved = code.replace(max_iter_line, "pub const MAX_ITER: usize = 1;");
+    let err = run_generated_solver(&starved, &input, None)
+        .expect_err("unsolved samples must not validate")
+        .to_string();
+    assert!(err.contains("never solved"), "{err}");
+}
