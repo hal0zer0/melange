@@ -3,19 +3,19 @@
 //! The full-LU loop reuses a factored Jacobian (the chord) across iterations
 //! and samples. A chord step leaves a KCL residual `(J - J_chord)·Δ`, first
 //! order in the step. The node-step test cannot see it: on a stiff junction
-//! row the node tolerance is tens of µA of current. On a capless nonlinear
-//! row, trapezoidal integration carries every sample's residual forward,
-//! alternating in sign, until a backward-Euler sample. So a chord-accepted
+//! row the node tolerance is tens of µA of current. So a chord-accepted
 //! iterate takes one more Newton step, refactored at the accepted point,
 //! when its node residual is above the row test's absolute floor (1e-9 A).
-//! Below that floor there is nothing to carry, so on quiet signal the chord
-//! keeps its reuse across samples.
+//! Below that floor the step would change nothing, so on quiet signal the
+//! chord keeps its reuse across samples.
 //!
 //! Witness: the diode node of a single-supply overdrive, 384 kHz, 0.1 V drive.
 //! The op-amp swings rail to rail between plateaus, and the full-LU loop
-//! accepted chord steps through the swing. Measured: 3.48 µA carried residual
-//! with chord acceptance, 0.407 µA with the exit step, the same as the Schur
-//! sub-path, whose M-dimensional Newton refactors every iteration.
+//! accepted chord steps through the swing. Measured under the charge form:
+//! 1.09 µA residual on the accepted samples with chord acceptance, 0.390 µA
+//! with the exit step, the same as the Schur sub-path, whose M-dimensional
+//! Newton refactors every iteration. (Under the whole-system trapezoidal form
+//! the capless row also carried each sample's residual forward: 3.48 µA.)
 
 mod support;
 
@@ -94,8 +94,8 @@ fn full_lu_exits_on_an_exact_jacobian_step() {
         "n2 residual: full-LU {r_full_lu:.3e} A, Schur {r_schur:.3e} A, chord-accepting mutant {r_mutant:.3e} A"
     );
     assert!(
-        r_mutant > 2e-6,
-        "the witness no longer sees chord acceptance ({r_mutant:e} A)"
+        r_mutant > 2.0 * r_schur,
+        "the witness no longer sees chord acceptance ({r_mutant:e} A against Schur {r_schur:e} A)"
     );
     assert!(
         r_full_lu < 1.2 * r_schur,

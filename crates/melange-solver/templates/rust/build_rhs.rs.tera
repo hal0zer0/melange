@@ -1,21 +1,22 @@
-/// Build RHS vector: rhs = rhs_const + A_neg * v_prev + N_i^T * i_nl_prev + input
+/// Build RHS vector (charge form): rhs = rhs_const + A_neg * v_prev [+ q_dot] + sources at n+1
 ///
-/// The A_neg * v_prev term captures capacitor history contribution
-/// via alpha*C*v_prev (implicit in the matrix formulation).
+/// `A_neg = alpha*C` carries the capacitor history; a trapezoidal build adds
+/// the carried charge derivative `q_dot = C*dx/dt` of the previous sample.
+/// Every source (DC, input, injection, runtime) enters once, at n+1, and the
+/// nonlinear current enters through the solve at n+1 alone.
 #[inline(always)]
-{% if multi_input %}fn build_rhs(inputs: &[f64; NUM_INPUTS], inputs_prev: &[f64; NUM_INPUTS], state: &CircuitState) -> [f64; N] {
-{% else %}fn build_rhs(input: f64, input_prev: f64, {% if inject_or_tap %}injections: &[f64; NUM_INJECT], {% endif %}state: &CircuitState) -> [f64; N] {
+{% if multi_input %}fn build_rhs(inputs: &[f64; NUM_INPUTS], state: &CircuitState) -> [f64; N] {
+{% else %}fn build_rhs(input: f64, {% if inject_or_tap %}injections: &[f64; NUM_INJECT], {% endif %}state: &CircuitState) -> [f64; N] {
 {% endif %}
 {% if has_dc_sources %}    let mut rhs = RHS_CONST;
 {% else %}    let mut rhs = [0.0; N];
 {% endif %}
-    // A_neg * v_prev contribution (includes alpha*C*v_prev capacitor history)
+    // A_neg * v_prev: the alpha*C*v_prev capacitor history
 {{ a_neg_lines }}
-{% if has_nl_prev %}    // Add N_i * i_nl_prev contribution
-{{ nl_prev_lines }}
-{% endif %}{% if num_inductors > 0 %}    // Add inductor history current contribution (doubled-trapezoidal
-    // companion: i_hist = 2*i[n-1]; the g_eq*(v[n]+v[n-1]) part of
-    // i_L[n]+i_L[n-1] is carried by the g_eq stamps in A / A_neg)
+{% if carries_q_dot %}    // Charge form: the carried charge derivative q_dot = C*dx/dt
+{{ q_dot_lines }}
+{% endif %}{% if num_inductors > 0 %}    // Inductor history current (companion model: the known part of i_L[n+1],
+    // i_hist = i[n] + g_eq*v[n]; the g_eq*v[n+1] part is the stamp in A)
 {% for ind in inductors %}{% if ind.node_i > 0 %}    rhs[{{ ind.node_i - 1 }}] -= state.ind_i_hist[{{ loop.index0 }}];
 {% endif %}{% if ind.node_j > 0 %}    rhs[{{ ind.node_j - 1 }}] += state.ind_i_hist[{{ loop.index0 }}];
 {% endif %}{% endfor %}
@@ -26,34 +27,22 @@
 {% endif %}{% if ci.l2_node_j > 0 %}    rhs[{{ ci.l2_node_j - 1 }}] += state.ci_i2_hist[{{ loop.index0 }}];
 {% endif %}{% endfor %}
 {% endif %}{% if num_transformer_groups > 0 %}    // Add transformer group history current contribution
-{{ xfmr_rhs_lines }}{% endif %}{% if multi_input %}{% if backward_euler %}    // Add per-port input contributions (backward Euler: V_in * G_in)
+{{ xfmr_rhs_lines }}{% endif %}{% if multi_input %}    // Per-port input contributions (Thevenin, V_in(n+1) * G_in)
     for k in 0..NUM_INPUTS {
         rhs[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k];
     }
-{% else %}    // Add per-port input contributions (Thevenin: (V_in + V_in_prev) * G_in)
-    for k in 0..NUM_INPUTS {
-        rhs[INPUT_NODES[k]] += (inputs[k] + inputs_prev[k]) / INPUT_RESISTANCES[k];
-    }
-{% endif %}{% else %}{% if backward_euler %}    // Add input contribution (backward Euler: V_in * G_in)
+{% else %}    // Input contribution (Thevenin, V_in(n+1) * G_in)
     rhs[INPUT_NODE] += input / INPUT_RESISTANCE;
-{% else %}    // Add input contribution (Thevenin: (V_in + V_in_prev) * G_in)
-    rhs[INPUT_NODE] += (input + input_prev) / INPUT_RESISTANCE;
-{% endif %}{% endif %}{% if inject_or_tap %}    // Runtime feedback injections (.inject): the source value is known at
-    // sample start, so it enters the RHS as an ordinary constant (the NR loop
-    // never sees it). Same stamp shape as the audio input port. Both kinds carry
-    // the trapezoidal (val + val_prev) history (dropped under BE): a Norton
-    // current source I is the exact equivalent of a Thevenin V=I/G behind R=1/G,
-    // so its trap RHS is (I + I_prev) — the SAME averaging as Thevenin, just
-    // without the /R (the value is already a current).
+{% endif %}{% if inject_or_tap %}    // Runtime feedback injections (.inject): the source value is known at
+    // sample start, so it enters the RHS as an ordinary constant at n+1 (the NR
+    // loop never sees it). A Norton current source I is the exact equivalent of
+    // a Thevenin V=I/G behind R=1/G, so it stamps I where Thevenin stamps V/R.
     for k in 0..NUM_INJECT {
         if INJECT_IS_NORTON[k] {
-{% if backward_euler %}            rhs[INJECT_NODES[k]] += injections[k];
-{% else %}            rhs[INJECT_NODES[k]] += injections[k] + state.injections_prev[k];
-{% endif %}        } else {
-{% if backward_euler %}            rhs[INJECT_NODES[k]] += injections[k] / INJECT_RESISTANCES[k];
-{% else %}            rhs[INJECT_NODES[k]] +=
-                (injections[k] + state.injections_prev[k]) / INJECT_RESISTANCES[k];
-{% endif %}        }
+            rhs[INJECT_NODES[k]] += injections[k];
+        } else {
+            rhs[INJECT_NODES[k]] += injections[k] / INJECT_RESISTANCES[k];
+        }
     }
 {% endif %}{% if runtime_sources | length > 0 %}    // Runtime voltage sources (.runtime directive): host-driven per-sample values.
 {% for rt in runtime_sources %}    rhs[{{ rt.vs_row }}] += state.{{ rt.field_name }};

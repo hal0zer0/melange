@@ -50,14 +50,15 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
     // Flush denormals in state vectors to prevent 50-100x CPU penalty during silence.
     // (Most DAW hosts set FTZ/DAZ, but generated code should not rely on it.)
     for v in state.v_prev.iter_mut() { *v = *v + 1e-25 - 1e-25; }
-{% if m > 0 %}    for v in state.i_nl_prev.iter_mut() { *v = *v + 1e-25 - 1e-25; }
+{% if carries_q_dot %}    for v in state.q_dot.iter_mut() { *v = *v + 1e-25 - 1e-25; }
+{% endif %}{% if m > 0 %}    for v in state.i_nl_prev.iter_mut() { *v = *v + 1e-25 - 1e-25; }
 {% endif %}
 {% if has_be_fallback %}    // Pre-check: force BE if cooldown active from previous ringing detection.
     let force_be = state.be_cooldown > 0;
     if state.be_cooldown > 0 { state.be_cooldown -= 1; }
 {% endif %}
     // Step 1: Build RHS vector from history and input
-    let {% if noise_enabled_emit %}mut {% endif %}rhs = {% if multi_input %}build_rhs(&inputs, &state.inputs_prev, state){% else %}build_rhs(input, state.input_prev, {% if inject_or_tap %}&injections, {% endif %}state){% endif %};
+    let {% if noise_enabled_emit %}mut {% endif %}rhs = {% if multi_input %}build_rhs(&inputs, state){% else %}build_rhs(input, {% if inject_or_tap %}&injections, {% endif %}state){% endif %};
 {% if noise_enabled_emit %}{{ noise_rhs_stamp }}{% endif %}
     // Step 2: Linear prediction: v_pred = S * rhs
     let v_pred = mat_vec_mul_s(&rhs, state);
@@ -88,7 +89,9 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
     let nr_failed = state.last_nr_iterations >= {{ max_iter }}_u32;
     let ringing = v.iter().take({{ n_nodes }}).any(|&x| x.abs() > {{ v_max_dc }});
     let need_be = nr_failed || ringing || force_be;
-    let (v, i_nl) = if need_be {
+{% if carries_q_dot %}    // Charge form: this sample's q_dot follows the integrator that produced it.
+    let q_be = need_be;
+{% endif %}    let (v, i_nl) = if need_be {
         if nr_failed { state.diag_nr_max_iter_count += 1; }
         // Set cooldown: stay on BE long enough for trapezoidal ringing to decay.
         // 64 samples ≈ 1.5ms at 44.1kHz — enough for most parasitic modes.
@@ -99,13 +102,8 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
         // This is the per-sample BE *fallback* inside a trapezoidal-primary
         // solver. A BE step is (G + C/T)·v(n) = (C/T)·v_prev + u(n) + N_I·i(n):
         // the ONLY nonlinear term is the current at the new sample, added via
-        // S_ni_be·i_nl after the NR loop. It must NOT also stamp N_I·i_nl_prev
-        // (the trap-midpoint half that trap `build_rhs` carries): that counts
-        // every device's bias current twice, so the fallback sample is not a
-        // fixed point of the DC operating point, and the excursion lands in
-        // null(C) — trap's exact z=-1 eigenspace — where the resumed trap
-        // never damps it. A clean BE step hands trap a consistent history
-        // (KCL at n reconstructs the capacitor currents correctly).
+        // S_ni_be·i_nl after the NR loop. Its q_dot (C/T)·(v - v_prev) re-seeds
+        // the trapezoidal history for the next sample.
         // Sparse-pruned A_neg_be·v_prev (+ RHS_CONST_BE when DC sources
         // present). Generated per-row from the A_neg_be pattern.
         let mut rhs_be = [0.0f64; N];
@@ -237,7 +235,8 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
     let v_is_finite = v.iter().all(|x| x.is_finite());
     if !v_is_finite || v.iter().any(|x| x.abs() > STATE_MAX_PLAUSIBLE_MAGNITUDE) {
         state.v_prev = state.dc_operating_point;
-{% if has_dc_nl %}        state.i_nl_prev = DC_NL_I;
+{% if carries_q_dot %}        state.q_dot = [0.0; N];
+{% endif %}{% if has_dc_nl %}        state.i_nl_prev = DC_NL_I;
         state.i_nl_prev_prev = DC_NL_I;
 {% else %}        state.i_nl_prev = [0.0; M];
         state.i_nl_prev_prev = [0.0; M];
@@ -282,7 +281,7 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
 
 {% if stateful_update is defined and stateful_update != "" %}    // Step 6z: stateful-device update (after solve, on converged driving-node
     // voltage(s), BEFORE state.v_prev = v so v_prev is still the prior sample)
-{{ stateful_update }}{% endif %}    // Update state for next iteration
+{{ stateful_update }}{% endif %}{% if carries_q_dot %}{{ q_dot_commit }}{% endif %}    // Update state for next iteration
     state.v_prev = v;
     state.i_nl_prev_prev = state.i_nl_prev;
     state.i_nl_prev = i_nl;
@@ -299,11 +298,9 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
         let v_new = v_i - v_j;
         let g_eq = state.ind_g_eq[{{ loop.index0 }}];
         let i_new = state.ind_i_prev[{{ loop.index0 }}] + g_eq * (state.ind_v_prev[{{ loop.index0 }}] + v_new);
-        // Doubled-trapezoidal history: the DK RHS sums the KCL of steps n
-        // and n-1, so the injection is i_L[n] + i_L[n-1] minus the
-        // g_eq*(v[n]+v[n-1]) part already carried by the g_eq stamp in
-        // A / A_neg — leaving exactly 2*i[n-1].
-        state.ind_i_hist[{{ loop.index0 }}] = 2.0 * i_new;
+        // Companion history (charge form): i_L[n+1] = g_eq*v[n+1] + (i_L[n] + g_eq*v[n]);
+        // the g_eq*v[n+1] part is the g_eq stamp in A, the rest is injected.
+        state.ind_i_hist[{{ loop.index0 }}] = i_new + g_eq * v_new;
         state.ind_i_prev[{{ loop.index0 }}] = i_new;
         state.ind_v_prev[{{ loop.index0 }}] = v_new;
     }
@@ -322,10 +319,10 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
         let gm = state.ci_g_mutual[{{ loop.index0 }}];
         let i1_new = state.ci_i1_prev[{{ loop.index0 }}] + gs1 * (state.ci_v1_prev[{{ loop.index0 }}] + v1_new) + gm * (state.ci_v2_prev[{{ loop.index0 }}] + v2_new);
         let i2_new = state.ci_i2_prev[{{ loop.index0 }}] + gm * (state.ci_v1_prev[{{ loop.index0 }}] + v1_new) + gs2 * (state.ci_v2_prev[{{ loop.index0 }}] + v2_new);
-        // Doubled-trapezoidal history (vector form): 2*i[n-1] per winding;
-        // the Y*(v[n]+v[n-1]) part is already in the A / A_neg stamps.
-        state.ci_i1_hist[{{ loop.index0 }}] = 2.0 * i1_new;
-        state.ci_i2_hist[{{ loop.index0 }}] = 2.0 * i2_new;
+        // Companion history (vector form): the known part i[n] + Y*v[n] per
+        // winding; the Y*v[n+1] part is the stamp in A.
+        state.ci_i1_hist[{{ loop.index0 }}] = i1_new + gs1 * v1_new + gm * v2_new;
+        state.ci_i2_hist[{{ loop.index0 }}] = i2_new + gm * v1_new + gs2 * v2_new;
         state.ci_i1_prev[{{ loop.index0 }}] = i1_new;
         state.ci_i2_prev[{{ loop.index0 }}] = i2_new;
         state.ci_v1_prev[{{ loop.index0 }}] = v1_new;

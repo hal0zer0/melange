@@ -456,7 +456,22 @@ pub(super) fn device_param_template_data(ir: &CircuitIR) -> Vec<DeviceParamTempl
 // Formatting helpers — reduce repetition in string-building code
 // ============================================================================
 
-/// Format a float with full precision for codegen constants.
+/// A trapezoidal build carries the charge derivative `q_dot = C·ẋ` of the
+/// committed sample (the charge form); a backward-Euler build needs none.
+pub(super) fn carries_q_dot(ir: &CircuitIR) -> bool {
+    !ir.solver_config.backward_euler
+}
+
+/// The `q_dot` a reset starts from: `Q_DOT_IC_SEED` on an `IC=` build, else
+/// rest.
+pub(super) fn q_dot_start(ir: &CircuitIR) -> &'static str {
+    if ir.q_dot_ic_seed.is_some() {
+        "Q_DOT_IC_SEED"
+    } else {
+        "[0.0; N]"
+    }
+}
+
 /// [`Topology::history_zero_rows`](crate::codegen::ir::Topology) as
 /// contiguous `start..end` ranges, for the emitted zeroing loops. One range
 /// `n_nodes..n_aug` unless parasitic-BJT internal nodes break it up.
@@ -471,6 +486,7 @@ pub(super) fn history_zero_row_ranges(ir: &CircuitIR) -> Vec<(usize, usize)> {
     ranges
 }
 
+/// Format a float with full precision for codegen constants.
 pub(super) fn fmt_f64(v: f64) -> String {
     if v.is_infinite() {
         if v > 0.0 {
@@ -779,9 +795,8 @@ pub(super) fn emit_transition_be_arm(ir: &CircuitIR) -> String {
         "transition-BE arms the breakpoint-BE countdown"
     );
     "    // Transition-BE: a pin or a release swaps the op-amp's equation for the\n\
-     \x20   // rail constraint; trap's history was built on the old set and leaves\n\
-     \x20   // an undamped z=-1 residual on capless nonlinear rows. One BE sample\n\
-     \x20   // enforces them exactly.\n\
+     \x20   // rail constraint. One BE sample solves the new set without reading the\n\
+     \x20   // q_dot built on the old one, and re-seeds it.\n\
      \x20   if pin_transition {\n\
      \x20       state.breakpoint_be = state.breakpoint_be.max(BREAKPOINT_BE_SAMPLES);\n\
      \x20       state.diag_transition_be_count += 1;\n\

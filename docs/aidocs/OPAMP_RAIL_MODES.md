@@ -184,7 +184,7 @@ ActiveSetBe runs the trap NR loop normally, but at the end of each sample's NR c
 
 Step 3 used to be ONE linear solve with the unpinned solve's device currents frozen. That is only a solution if the pin leaves device voltages where they were. It does not when an output coupling cap sits between the op-amp and a nonlinear device: the cap passes the pin's step straight through. On a single-supply overdrive with a diode clipper after the output cap, the frozen solve drove the clipper node to −2 V and re-evaluated a reverse diode at 3.6e9 A; the next sample diverged. Nothing had validated active-set with M > 0 at the rail — the corpus has no deck whose op-amp rails — which is why `opamp_railing_regression_tests.rs` now carries one, gated against an ngspice reference (±5 %; measured within 2.4 % at 1×, 1.0 % at 4×).
 
-The difference from plain ActiveSet is that every rail-engaged sample is solved on backward Euler, which damps high-frequency content in the cap-coupled output path. That was introduced for a Nyquist-rate ring on an overdrive whose output coupling cap follows a tone network. The ring is the trapezoidal `z=−1` mode on capless rows excited at the pin and release. Transition-BE removes it with one BE sample per event instead of BE across the whole plateau.
+The difference from plain ActiveSet is that every rail-engaged sample is solved on backward Euler, which damps high-frequency content in the cap-coupled output path. That was introduced for a Nyquist-rate ring on an overdrive whose output coupling cap follows a tone network. The ring was the whole-system trapezoidal form's `z = −1` walk on capless rows (`COMPANION_MODELS.md`), excited at the pin and release. Transition-BE removed it with one BE sample per event instead of BE across the whole plateau; the charge form does not carry that walk at all.
 
 Code: search `rust_emitter/nodal_emitter.rs` for `emit_nodal_active_set_resolve`.
 
@@ -196,14 +196,26 @@ Code: search `rust_emitter/nodal_emitter.rs` for `emit_nodal_active_set_resolve`
 
 A pin replaces the op-amp's output row with the rail constraint; a release gives
 it back. That is an equation-set swap of the same kind as a `.switch` toggle.
-The sample that makes the swap is solved on trapezoidal history built on the old
-set, and the mismatch goes into trap's `z = −1` mode. On a **capless nonlinear
-row** downstream of the pinned output (the diode node of a clipper behind the
-output coupling cap and a resistor) that mode never decays: the row satisfies
-only the two-sample *average* of its KCL. Fingerprint: the row's KCL residual
-alternates in sign every sample, `r_n + r_(n−1) ≈ 0`, with `|r|` far above the
-floor. A filtered output hides it (the `out` node of the test deck below
-carries ~1e-9 V at Nyquist).
+The sample after the swap starts from a `q_dot` (the carried capacitor currents,
+`COMPANION_MODELS.md` "Charge (Companion) Form") built on the old equation set.
+One backward-Euler sample does not read that `q_dot`, re-seeds it from its own
+capacitor currents, and damps the mode the step excited (BE is L-stable); trap
+resumes on the next sample.
+
+Under the whole-system trapezoidal form the swap also fed the swap sample's
+residual into that form's `z = −1` walk. On a **capless nonlinear row**
+downstream of the pinned output (the diode node of a clipper behind the output
+coupling cap and a resistor) the walk never decays: the row satisfies only the
+two-sample *average* of its KCL. Fingerprint: the row's KCL residual alternates
+in sign every sample, `r_n + r_(n−1) ≈ 0`, with `|r|` far above the floor. A
+filtered output hides it (the `out` node of the test deck below carries ~1e-9 V
+at Nyquist). The charge form carries no such walk: on the deck below with the
+transition-BE sample removed, the `n2` KCL residual is 0.29–0.43 µA at
+48 / 96 / 192 kHz and 0.1 / 0.5 V, the floor. At 1 kHz, 0.5 V, 48 kHz against a
+768 kHz render (transition-BE on in both forms),
+the op-amp output RMS error is 1.1 mV and the clipper node 0.29 mV (0.49 V and
+0.23 V under the whole-system form). Whether transition-BE still earns its keep
+under the charge form is pending re-measurement (`STATUS.md` Pending Work).
 
 On a trapezoidal nodal build in `ActiveSet` mode with a clampable op-amp
 (`SolverConfig::transition_be`), a change in any op-amp's pin state between the
@@ -216,6 +228,9 @@ needs no state of its own and is right after a DC OP, a `reset()` or a NaN
 recovery. `diag_transition_be_count` counts the pin changes. The build header
 and provenance JSON say `transition-be`. `ActiveSetBe`, `Hard`, `None` and BE
 builds emit nothing for it.
+
+The tables in the rest of this section were measured with the whole-system
+trapezoidal integrator; under the charge form they are pending re-measurement.
 
 Measured on a single-supply overdrive (TL072 card, AOL 200k, rails 0/9 V, gain
 ~107, output cap → 1k → antiparallel 1N914 → 10k/22n → output), 1 kHz, 1×,

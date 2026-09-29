@@ -1957,26 +1957,23 @@ R2 out 0 100k
 .model DMOD D(IS=2.5e-9 N=1.8)
 ";
 
-/// BE-primary emission must NOT halve node rows (RHS_CONST is already ×1);
-/// trapezoidal emission must keep the halving (RHS_CONST is ×2).
+/// No build halves node rows: under the charge form every integrator stamps
+/// each DC source once, so RHS_CONST is the DC right-hand side verbatim.
 #[test]
 fn fix1_be_primary_omits_node_row_halving() {
-    let be_code = generate_dk_be(BE_ISRC_NETLIST);
-    assert!(
-        !be_code.contains("b_dc[i] *= 0.5"),
-        "BE-primary recompute must not halve node rows of b_dc"
-    );
-    assert!(
-        be_code.contains("BE-primary: RHS_CONST is the"),
-        "BE-primary recompute should carry the explanatory comment"
-    );
-
-    // Trap-primary control: the halving must remain.
-    let trap_code = generate_dk(DIODE_VCC_NETLIST, true);
-    assert!(
-        trap_code.contains("b_dc[i] *= 0.5"),
-        "trapezoidal recompute must keep the node-row halving"
-    );
+    for code in [
+        generate_dk_be(BE_ISRC_NETLIST),
+        generate_dk(DIODE_VCC_NETLIST, true),
+    ] {
+        assert!(
+            !code.contains("b_dc[i] *= 0.5"),
+            "recompute must not halve node rows of b_dc"
+        );
+        assert!(
+            code.contains("let mut b_dc: [f64; N] = RHS_CONST;"),
+            "b_dc is RHS_CONST verbatim"
+        );
+    }
 }
 
 /// Behavioral: BE-primary recompute from a cold start must converge to the

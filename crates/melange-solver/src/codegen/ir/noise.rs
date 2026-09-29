@@ -15,16 +15,15 @@ use crate::parser::{Element, Netlist};
 
 /// Johnson-Nyquist (thermal) noise source stamped at one fixed resistor.
 ///
-/// Emitted as a Norton current source in the MNA RHS via a two-draw
-/// Nyquist-anti-alias scheme (shipped 2026-04-24):
-/// `i_n[n] = w[n] + w[n-1]` where `w[n] = (scale/2)·sqrt(1/R)·N(0,1)`
-/// and `scale = sqrt(8·k_B·T·fs)`. The two-draw sum has PSD ∝
-/// `4·cos²(πf/fs)` — zero at Nyquist, ≈ flat at audio. Single source of
-/// truth: `RustEmitter::build_noise_emission` (used by both DK and
-/// nodal codegen paths). See `docs/aidocs/NOISE.md` for the full
-/// derivation, including the `8` (not `4` or `2`) calibration constant
-/// and the BE-fallback replay path that re-injects the cached `i_n`
-/// from `state.noise_thermal_last_i_n[k]` into `rhs_be`.
+/// Emitted as a Norton current source in the MNA RHS: one draw per sample,
+/// the physical Johnson current at `n+1`,
+/// `i_n = sqrt(2·k_B·T·fs)·sqrt(1/R)·N(0,1)` (PSD 4kT/R over [0, fs/2]).
+/// The trapezoidal integrator's own `(1 + z⁻¹)` zero nulls Nyquist on the
+/// charge-carrying rows. Single source of truth:
+/// `RustEmitter::build_noise_emission` (used by both DK and nodal codegen
+/// paths). See `docs/aidocs/NOISE.md` for the derivation and the
+/// BE-fallback replay path that re-injects the cached `i_n` from
+/// `state.noise_thermal_last_i_n[k]`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThermalNoiseSource {
     /// Resistor component name (for debug / future per-source overrides).
@@ -87,11 +86,10 @@ pub enum ShotSourceKind {
 ///
 /// Emitted as a Norton current source in the MNA RHS: for sample rate `fs`
 /// and instantaneous bias current `|I(t)|` (read from `state.i_nl_prev`),
-/// the per-sample current is `sqrt(Γ²) · sqrt(4·q·|I|·fs) · N(0,1)`
-/// injected at `node_i` and extracted at `node_j`. The `4·q·fs` matches
-/// thermal's trap-MNA calibration (2× amplitude / 4× variance over the
-/// physical one-sided `2·q·|I|` PSD; ×1 amplitude under BE-primary). See
-/// `docs/aidocs/NOISE.md` "Constant derivation" for why.
+/// the per-sample current is `sqrt(Γ²) · sqrt(q·|I|·fs) · N(0,1)` (the
+/// physical one-sided `2·q·|I|` PSD over [0, fs/2]), injected at `node_i`
+/// and extracted at `node_j`. See `docs/aidocs/NOISE.md` "Constant
+/// derivation".
 ///
 /// `Γ²` (the shot-suppression multiplier) defaults to 1 for plain
 /// junctions; see [`ShotSourceKind`] for the tube-plate smoothing and
@@ -127,14 +125,13 @@ pub struct ShotNoiseSource {
 /// For instantaneous bias current `|I(t)|` (read from `state.i_nl_prev`)
 /// and device-specific `KF` / `AF` model params, the per-sample injected
 /// current is
-/// `kellett(sqrt(2·KF/K_pink) · |I|^(AF/2) · N(0,1))`  (trapezoidal build)
+/// `kellett(sqrt(0.5·KF/K_pink) · |I|^(AF/2) · N(0,1))`
 /// where `K_pink = kellett_pink_normalized_gain()` ≈ 0.0060 is the
 /// cascade's normalized-frequency gain constant (`|H(ν)|² ≈ K_pink/ν`).
 /// This calibration is **fs- and oversampling-invariant** and lands the
 /// output PSD at the ngspice semantics `S_i(f) = KF·I^AF / f` (one-sided
 /// A²/Hz) — see `docs/aidocs/NOISE.md` "Flicker calibration" for the full
-/// derivation, including the trap-MNA ×2-amplitude compensation folded
-/// into the `2·…` factor (BE-primary uses `0.5·KF/K_pink`).
+/// derivation.
 ///
 /// (Pre-2026-07-18 this used `sqrt(4·KF·fs)` white-input scaling — correct
 /// for WHITE phases whose PSD = σ²/fs, but wrong through a fixed digital
@@ -164,20 +161,15 @@ pub struct FlickerNoiseSource {
 /// Emitted as a Norton current source whose amplitude is shaped by the same
 /// Paul Kellett 7-pole pink filter used by junction flicker, with the same
 /// fs/OS-invariant calibration (2026-07-18):
-/// `kellett(sqrt(2·KF/K_pink) · |I_R(t)|^(AF/2) · N(0,1))`  (trap build;
-/// `0.5·KF/K_pink` under BE-primary), landing the output PSD at
+/// `kellett(sqrt(0.5·KF/K_pink) · |I_R(t)|^(AF/2) · N(0,1))`, landing the
+/// output PSD at
 /// `S_i(f) = KF·I_R^AF / f` (one-sided A²/Hz).
 /// `I_R(t) = (V_+ − V_−) / R` is the **live** current through this
 /// resistor at the previous sample (read from `state.v_prev`). A resistor
 /// with no current carries only thermal — there is no constant pink floor.
 ///
-/// (Pre-2026-07-18 the amplitude was `sqrt(KF·fs)·…` — fs-dependent, and
-/// additionally missing the trap-MNA stamp compensation that every other
-/// phase carries. The old rationale that r-flicker "is not stamped through
-/// the trap companion path" was false: the stamp is a Norton RHS current
-/// identical to junction flicker's, so it sees the same `(A−A_neg) = 2G`
-/// halved LF gain. Both errors are fixed by the shared calibration above;
-/// `KF` remains the documented empirical Hooge-style knob, but its
+/// (The stamp is a Norton RHS current identical to junction flicker's and
+/// shares its calibration; `KF` remains the documented empirical Hooge-style knob, but its
 /// dimensioning is now literally `S_i·f/I^AF`, consistent across fs.)
 /// AF defaults to `2.0` at codegen time (Hooge's exponent for resistors;
 /// `Element::Resistor.af` is `Option<f64>` so an unspecified AF is filled
@@ -228,9 +220,9 @@ pub struct ResistorFlickerNoiseSource {
 ///   so no netlist resistor is inserted.
 /// - **in+ stream** at `node_plus`, amplitude `in_amps · sqrt(fs)`.
 /// - **in- stream** at `node_minus`, amplitude `in_amps · sqrt(fs)`.
-/// All three use the two-draw Nyquist anti-alias and 2× trap-MNA compensation
-/// (per-sample `sqrt(4·…·fs)` form for in; en uses `sqrt(2·en²·fs)` because
-/// the source is voltage and the Norton transform absorbs the conductance).
+/// All three are one physical draw per sample (per-sample amplitude
+/// `sqrt(0.5·fs)` times the one-sided density; the en stream is Norton-
+/// transformed through the conductance).
 ///
 /// `g_diag_plus_default` is the static `G[in+, in+]` at codegen time.
 /// Dynamic elements at in+ are tracked by the emitted
@@ -294,9 +286,8 @@ pub struct OpampNoiseSource {
 /// when the partition collector picks them up.
 ///
 /// Per-sample injected current at sample rate `fs` is
-/// `sqrt(4·q · I_p·I_s/(I_p+I_s) · fs) · PARTITION_F · N(0,1)`,
-/// stamped with the same two-draw Nyquist anti-alias as thermal/shot and
-/// the same 2× trap-MNA compensation factor. `I_p` and `I_s` are read
+/// `sqrt(q · I_p·I_s/(I_p+I_s) · fs) · PARTITION_F · N(0,1)`, one draw per
+/// sample like thermal and shot. `I_p` and `I_s` are read
 /// one-sample-lagged from `state.i_nl_prev[ip_slot]` / `[is_slot]`.
 ///
 /// `PARTITION_F` is a process-variation knob from `.model TUBE(PARTITION_F=…)`,
@@ -1005,9 +996,7 @@ pub fn collect_resistor_flicker_noise_sources(
 ///
 /// so `σ² = KF·I^AF / (2·K_pink)` yields `S_out = KF·I^AF/(2f)` two-sided
 /// = `KF·I^AF/f` one-sided — the ngspice `.model KF/AF` semantics — at any
-/// sample rate and oversampling factor. (Codegen then applies the same
-/// trap/BE stamp compensation the other phases use: ×4 variance under
-/// trap, ×1 under BE-primary.)
+/// sample rate and oversampling factor.
 ///
 /// Computed analytically at codegen time (no magic constant): the cascade
 ///

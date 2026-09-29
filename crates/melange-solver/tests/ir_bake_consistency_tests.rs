@@ -251,20 +251,28 @@ fn dk_discriminator_evaluates_internal_rate_pair_under_oversampling() {
     let ir = CircuitIR::from_kernel_with_dc_op(&kernel, &mna, &netlist, &config, None)
         .expect("build IR");
 
-    // This circuit stays on trap, so the shipped (S, A_neg) IS the
-    // internal-rate trap pair. The recorded discriminator rho must match a
-    // re-run of the analyzer on exactly those matrices...
+    // This circuit stays on trap, so the shipped S and the shipped charge-form
+    // history alpha*C (with G) ARE the internal-rate trap pair: the
+    // discriminator's whole-system operator is alpha*C - G on the rows that
+    // carry history. The recorded discriminator rho must match a re-run of the
+    // analyzer on exactly that pair...
     assert!(
         !ir.solver_config.backward_euler,
         "test circuit must stay trapezoidal for this check"
     );
     let n = ir.topology.n;
-    let shipped = analyze_trap_stability_deflated(
-        &ir.matrices.s,
-        &ir.matrices.a_neg,
-        n,
-        &[config.input_node],
-    );
+    let mut whole_system = vec![0.0f64; n * n];
+    for i in 0..n {
+        if ir.topology.history_zero_rows.contains(&i) {
+            continue;
+        }
+        for j in 0..n {
+            whole_system[i * n + j] =
+                ir.matrices.a_neg[i * n + j] - ir.matrices.g_matrix[i * n + j];
+        }
+    }
+    let shipped =
+        analyze_trap_stability_deflated(&ir.matrices.s, &whole_system, n, &[config.input_node]);
     assert!(
         (ir.trap_discriminator_rho - shipped.rho).abs() < 1e-12,
         "discriminator rho {} must equal rho of the shipped internal-rate pair {}",

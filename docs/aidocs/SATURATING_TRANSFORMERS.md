@@ -212,15 +212,20 @@ G:  g[i][k] += 1 ;  g[j][k] -= 1        KCL: branch current enters i, exits j
 C:  c[k][k]  = L0
 ```
 
-Trap `A = G + alpha·C`, `A_neg = alpha·C − G`; BE `A_neg = alpha·C` (no
-voltage-history term on inductor rows). The base matrices bake the linear flux
-`L0·i`. The saturating inductor is three corrections against the site's
-`alpha`, with `i0` the iterate the Jacobian was factored at:
+Both integrators: `A = G + alpha·C` and history `A_neg = alpha·C` (the
+charge form, `COMPANION_MODELS.md`; no voltage-history term on inductor rows).
+A trapezoidal build adds the carried `q_dot`, whose branch-row entry is `dΦ/dt`.
+The base matrices bake the linear flux `L0·i`. The saturating inductor is four
+corrections against the site's `alpha`, with `i0` the iterate the Jacobian was
+factored at:
 
 ```
 Jacobian:      MAT[k][k]   += alpha·(L_diff(i0) − L0)
 companion RHS: rhs_work[k] += alpha·(L_diff(i0)·i0 − Φ(i0))
 history:       rhs[k]      += alpha·(Φ(i_prev) − L0·i_prev)     once per sample
+q_dot commit:  q_dot[k]    += alpha·((Φ(i) − L0·i) − (Φ(i_prev) − L0·i_prev))
+               (so q_dot[k] = alpha·(Φ(i) − Φ(i_prev)) − q_dot_prev[k] on trap,
+                              (1/T)·(Φ(i) − Φ(i_prev))       on a BE sample)
 ```
 
 **Footgun:** `L_diff` is the Jacobian entry only. The residual and history use
@@ -243,8 +248,7 @@ own chord cache: a latched instance is bit-identical to a `--backward-euler`
 build from the same state. Each instance has three sites that can commit a
 sample, and the stamps go in at every one:
 
-1. the main loop, `alpha = 2·fs·OS` (trapezoidal) or `fs·OS` (BE, history
-   without the `V_i − V_j` term);
+1. the main loop, `alpha = 2·fs·OS` (trapezoidal) or `fs·OS` (BE);
 2. the adaptive sub-step, `alpha_sub` in the same scheme;
 3. the op-amp active-set pinned Newton. Its start takes `i_L` from `v_prev`: an
    unpinned iterate 2-cycles on tanh. A pinned solve that fails is counted in

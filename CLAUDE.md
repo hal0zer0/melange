@@ -79,9 +79,16 @@ docs/aidocs/            # Detailed math reference docs — READ THESE before cha
 K = N_v * S * N_i          (NO negation — K is naturally negative)
 J[i][j] = delta_ij - sum_k jdev[i][k] * K[k][j]   (NR Jacobian)
 A = G + (2/T) * C          (trapezoidal forward matrix)
-A_neg = (2/T) * C - G      (trapezoidal history matrix)
-RHS input = (V_in(n+1) + V_in(n)) * G_in   (proper trapezoidal, NOT 2*V*G)
+A_neg = (2/T) * C          (history matrix — charge form, NO -G term)
+RHS = RHS_CONST + A_neg*v_prev + q_dot + V_in(n+1)*G_in   (sources enter ONCE, at n+1)
+q_dot <- A_neg*(v - v_prev) - q_dot   after a trap sample;  (C/T)*(v - v_prev) after a BE sample
 ```
+
+`q_dot = C·dx/dt` (capacitor currents; `dΦ/dt` on inductor branch rows) is state,
+committed with `v_prev`. KCL holds exactly at every committed sample. The whole-system
+form (`A_neg = αC − G`, `(V_in(n+1)+V_in(n))·G_in`, `N_i·i_nl_prev` in the RHS) fed
+each accepted residual back on the algebraic rows as a z = −1 memory — do not
+reintroduce any of its terms. See `docs/aidocs/COMPANION_MODELS.md`.
 
 - **N_i[anode] = -1** (current extracted), **N_i[cathode] = +1** (current injected)
 - K is naturally negative from this convention, giving correct negative feedback
@@ -103,7 +110,7 @@ RHS input = (V_in(n+1) + V_in(n)) * G_in   (proper trapezoidal, NOT 2*V*G)
 ### Input Modeling (Thevenin Source)
 Audio input = voltage source with 1Ω series resistance:
 1. Stamp `G_in = 1.0` into `mna.g[input_node][input_node]` **before** building DK kernel.
-2. Solver RHS: `(input + input_prev) * input_conductance`.
+2. Solver RHS: `input * input_conductance` — V_in at n+1 only; `q_dot` carries the history.
 3. DK kernel bakes G into S = A⁻¹, so the stamp MUST happen before `DkKernel::from_mna()`.
 
 Too-high R_in (e.g. 10k) causes signal attenuation through coupling caps.
@@ -126,7 +133,7 @@ Tests compare melange output against ngspice (`crates/melange-validate/`). See `
 | Symptom | Fix |
 |---------|-----|
 | Correlation ~ 0 | Stamp `mna.g[in][in] += G_in` **before** `DkKernel::from_mna()` |
-| ~3% error on linear circuit | Using `2*V*G` instead of `(V+V_prev)*G` — track `input_prev`, use proper trapezoidal |
+| ~3% error on linear circuit | Input stamped twice (`2*V*G` or `(V+V_prev)*G`) — the charge form stamps `V_in(n+1)*G_in` once |
 | Sample count mismatch | Add `.OPTIONS INTERP` (after title line!) |
 | Halved drive / ~6 dB low on a validated deck | VIN's n+ must BE the input node (`in`). A baked Thevenin pair like `VIN in_src 0` + `R_src in_src in` evades `strip_vin_source` AND the harness Thevenin inject, leaving a second 1Ω shunt at the input on both sides |
 | Onset transient / LF droop vs ngspice | PWL input must start at 0 V — ngspice pre-settles its DC OP at PWL(t=0); an abrupt nonzero first sample gives the two engines different initial conditions |

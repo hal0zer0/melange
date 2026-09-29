@@ -372,27 +372,31 @@ to a usable level with `OUTPUT_TRIM`.
 
 ### A subtlety this source flushed out
 
-Stiff reverse-breakdown junctions revealed a numerical issue in the shot path
-(fixed 2026-07-19). Under trapezoidal integration, a resistor-only node carries
-a `z = −1` pole at Nyquist. A Zener at breakdown has ~26 Ω dynamic resistance,
-so its auto-inserted 10 pF parasitic cap sits at ~600 MHz — four decades above
-fs/2 — leaving the junction node effectively resistor-only at Nyquist. The
-original single-draw shot injection excited that pole into an fs/2 limit cycle,
-which the breakdown exponential then rectified into the audio band (seed-
-dependent level, tens of dB hot). The fix stamps shot as a two-draw
-anti-aliased pair `i_n = w[n] + w[n−1]`, zeroing the Nyquist bin while leaving
-the audio band unchanged — the same scheme thermal noise already used. You do
-not need to do anything to get the fix; it is automatic. It is documented here
-because it is a good illustration of *why* melange injects noise into the solver
-RHS rather than filtering it afterward: the noise inherits both the circuit's
-correct behavior and its numerical subtleties, and both have to be handled
-honestly. Full detail in [`docs/aidocs/NOISE.md`](aidocs/NOISE.md) under
-"Nyquist anti-aliasing".
+Stiff reverse-breakdown junctions are where a noise stamp's interaction with
+the integrator shows. A Zener at breakdown has ~26 Ω dynamic resistance, so its
+auto-inserted 10 pF parasitic cap sits at ~600 MHz — four decades above fs/2 —
+leaving the junction node effectively resistor-only at Nyquist. A trapezoidal
+discretization that holds such a node only on average (the whole-system form)
+carries an undamped `z = −1` pole there, and a white shot draw excites it into
+an fs/2 limit cycle that the breakdown exponential rectifies into the audio band
+(seed-dependent level, tens of dB hot). The Zener bench measured exactly that.
+
+Melange's generated integrator is the charge (companion) form. Every noise source
+is one draw of the physical current per sample, entered once, at the new
+sample. On a node with capacitance the trapezoidal step itself has a zero at
+Nyquist; on a capacitor-free node there is no history to accumulate anything.
+The Zener bench is kept as a regression test. You do not need to do anything —
+it is automatic. It is documented here because it is a good illustration of
+*why* melange injects noise into the solver RHS rather than filtering it
+afterward: the noise inherits both the circuit's correct behavior and the
+integrator's numerical properties, and both have to be handled honestly. Full
+detail in [`docs/aidocs/NOISE.md`](aidocs/NOISE.md) under "Constant derivation"
+and "Whole-system Nyquist history".
 
 ## Where to go deeper
 
 - [`docs/aidocs/NOISE.md`](aidocs/NOISE.md) — the authoritative reference:
-  every formula, the trap-MNA calibration derivations, the Kellett pink filter,
+  every formula, the calibration derivations, the Kellett pink filter,
   per-phase validation, and the failure-mode table.
 - [Netlist Writing Guide](NETLIST_GUIDE.md) — the `.model` and per-element
   syntax the noise opt-in parameters attach to.

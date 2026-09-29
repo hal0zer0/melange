@@ -16,11 +16,13 @@ f(i) = i - i_d           // Residual (should be 0 at solution)
 K = N_v*S*N_i is naturally negative for stable circuits.
 So `v = p + K*i = p - |K|*i` gives correct negative feedback.
 
-**Note on trapezoidal nonlinear integration**: The prediction `p = N_v * v_pred` already
-includes `K * i_nl_prev` from the RHS (via `N_i * i_nl_prev` in `build_rhs`). The NR
-correction then adds `S * N_i * i_nl` (full, not delta). The combined effect is
-`N_i * (i_nl_prev + i_nl)` — proper trapezoidal averaging. The NR equations themselves
-(`f(i) = i - i_dev(p + K*i)` and `J = I - J_dev*K`) are unchanged by this choice.
+**Note on the integrator**: The prediction `p = N_v * v_pred` comes from the
+charge-form RHS (`RHS_CONST + H*v_prev + q_dot + sources at n+1`), which carries
+no nonlinear term. The NR correction adds `S * N_i * i_nl` (full, not delta), so
+the nonlinear current enters the step at `n+1` alone — KCL at `n+1`. The capacitor
+history, including the charge the devices moved last sample, arrives through
+`q_dot`. `i_nl_prev` is not in the RHS; it is the warm-start seed below. See
+`COMPANION_MODELS.md`, "Charge (Companion) Form".
 
 ## Jacobian Formula
 

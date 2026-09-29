@@ -1027,9 +1027,9 @@ card:
   `|Δv| ≤ SR * dt` caps `|i_in| ≤ SR * C_dom`.
 - **Emitted in all three codegen paths**: DK Schur (via the Tera
   `process_sample.rs.tera` template), nodal Schur, and nodal full-LU.
-  Applied AFTER rail clamping and the damping safety net, BEFORE
-  `state.v_prev = v` so the next sample's cap history reflects the
-  slew-limited voltage.
+  Applied AFTER rail clamping and the damping safety net, BEFORE the
+  `q_dot` commit and `state.v_prev = v`, so the next sample's cap history
+  (`alpha·C·v_prev + q_dot`) reflects the slew-limited voltage.
 - **Rail-mode interaction**: compatible with `None`, `Hard`, `ActiveSet`,
   `ActiveSetBe`, and `BoyleDiodes`. BoyleDiodes heavy-clip convergence
   issues (see [`OPAMP_RAIL_MODES.md`](OPAMP_RAIL_MODES.md)) are unrelated
@@ -1047,7 +1047,8 @@ across samples (4kbuscomp originally hit 1.18 BILLION volts at `cv_to_vcas`).
 
 melange auto-detects this topology (Rule D' in `crates/melange-solver/src/codegen/ir.rs::opamp_is_sidechain_rectifier`)
 and caps the effective AOL to 1000 in the constant G matrix for matching op-amps.
-The cap is baked into the emitted G/A/A_neg constants — zero runtime cost.
+The cap is baked into the emitted G/A constants (the charge-form history
+`A_neg = alpha·C` carries no `G`) — zero runtime cost.
 
 **Auto-detect rule** (both must hold):
 1. `n_plus` is connected to a non-zero DC voltage source (ground does not count;

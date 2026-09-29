@@ -11,7 +11,7 @@ Field manual for debugging mismatches between ngspice and Rust DSP.
 | **ZDF** | Implicit trapezoidal for filters | One-pole LPF/HPF |
 | **Forward Euler** | `x[n+1] = x[n] + T*f[n]` | **DO NOT USE** — unstable |
 
-**Critical rule:** Both `A = 2C/T + G` and `A_neg = 2C/T - G` must use the **same G** (including companion conductances).
+**Critical rule:** `A = 2C/T + G` carries the **whole G** (including companion conductances). melange's generated code uses the charge (companion) form: the history is `A_neg·v_prev + q_dot` with `A_neg = 2C/T` and no G at all ([COMPANION_MODELS.md](aidocs/COMPANION_MODELS.md)). A hand-written whole-system discretization (`A_neg = 2C/T - G`, sources as `b(n) + b(n+1)`) must use the **same G** in both matrices.
 
 ## Common Bug Patterns
 
@@ -23,7 +23,7 @@ Field manual for debugging mismatches between ngspice and Rust DSP.
 ### 2. Discretization Errors
 - **Companion conductance in G:** `g_c = 2C/T` must be in G, not separate
 - **History update order:** Update AFTER solve, BEFORE next timestep
-- **Trapezoidal symmetry:** `A` and `A_neg` share same G
+- **Trapezoidal consistency:** charge form — `A_neg` has no G, and `q_dot` is committed with `v_prev`; whole-system form — `A` and `A_neg` share the same G
 
 ### 3. Value/Unit Errors
 - **Hz vs rad/s:** `ω = 2πf` — SPICE uses Hz, code may use either

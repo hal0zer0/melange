@@ -170,11 +170,15 @@ fn full_lu_input_prev_committed_after_substep_block() {
          identically zero on exactly the hard-transient samples that trigger \
          sub-stepping"
     );
-    // The trapezoidal input stamp must still read the previous value.
+    // The charge form stamps the input at n+1 only.
     find(
         &code,
-        "(input + state.input_prev) * input_conductance",
-        "trap input stamp must remain (V + V_prev) * G_in",
+        "rhs[INPUT_NODE] += input * input_conductance;",
+        "the input stamp is V_in(n+1) * G_in",
+    );
+    assert!(
+        !code.contains("(input + state.input_prev) * input_conductance"),
+        "no trapezoidal average of the input under the charge form"
     );
 }
 
@@ -261,11 +265,11 @@ fn full_lu_substep_gmin_matches_other_stamps() {
 #[test]
 fn be_primary_fallback_skips_trap_midpoint_stamp() {
     // The runtime-loop form of the stamp only ever appeared in the BE-fallback
-    // RHS builds (the primary trap RHS uses unrolled sparse stamps). Since
-    // 2026-09-14 no build carries it: a BE step stamps only N_I*i_nl(n), and
-    // the stamped fallback double-counted the bias current (see
-    // be_fallback_fixed_point_tests.rs). Trap-primary builds must still
-    // stamp the midpoint half in their primary (unrolled) RHS.
+    // RHS builds. Since 2026-09-14 no fallback carries it: a BE step stamps
+    // only N_I*i_nl(n), and the stamped fallback double-counted the bias
+    // current (see be_fallback_fixed_point_tests.rs). Under the charge form
+    // no RHS carries it at all: the trapezoidal history is alpha*C*v_prev +
+    // q_dot.
     let midpoint_stamp = "sum += N_I[i][j] * state.i_nl_prev[j];";
 
     for (tag, spice) in [("schur", CLIPPER), ("full_lu", CLIPPER_FULL_LU)] {
@@ -277,8 +281,11 @@ fn be_primary_fallback_skips_trap_midpoint_stamp() {
              is then not a fixed point of the DC OP)"
         );
         assert!(
-            trap_code.contains("* state.i_nl_prev["),
-            "{tag}: trap-primary build lost the midpoint half of its primary RHS"
+            !trap_code.lines().any(|l| l.contains("rhs[")
+                && l.contains("N_I[")
+                && l.contains("state.i_nl_prev["))
+                && trap_code.contains("+= state.q_dot["),
+            "{tag}: the trapezoidal RHS carries q_dot, not the N_I*i_nl_prev midpoint half"
         );
         let be_code = nodal_code_with(spice, |c| c.backward_euler = true);
         assert!(

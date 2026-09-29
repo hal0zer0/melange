@@ -46,16 +46,14 @@
 //! (zero-order NR warm start), with input and `.inject` values linearly
 //! interpolated to the segment ends. The first pre-flip segment uses the
 //! integrator the whole-sample solve used (trap, or BE via fallback /
-//! breakpoint-BE); every later segment is BE. The trap RHS carries the
-//! segment-start `N_I*i_nl` midpoint stamp; BE does not (matches the glow BE
-//! fallback).
+//! breakpoint-BE); every later segment is BE.
 //!
-//! History correctness: melange's "no history vector" companion form derives
-//! the trap RHS `(2C/T - G) v_n + u_n + u_{n+1} + N_I(i_n + i_{n+1})` from KCL
-//! at the step start, which holds at the end of ANY implicit step regardless
-//! of its length or scheme, so chaining segments of different length and the
-//! next full-dt step is self-consistent as long as each step uses matrices for
-//! its own dt.
+//! History: every segment is a full step of the charge form at its own dt.
+//! Its RHS is `alpha*C*v_start` (plus the carried `q_dot` on a trapezoidal
+//! segment) with the sources at the segment's end. `q_dot = C*dx/dt` is
+//! advanced across each segment (`ssf_q_advance`), so segments of any
+//! length and scheme chain into the next full-dt step. `q_dot` is a current,
+//! independent of the step length.
 //!
 //! Failure (singular A, NR budget exhausted, non-finite) ABANDONS the sample's
 //! split: the whole-sample solution and its post-hook latches are restored and
@@ -68,9 +66,9 @@
 
 use super::dk_emitter::{emit_noise_replay_body, NoiseEmission};
 use super::helpers::{
-    emit_stateful_update_at, history_zero_row_ranges, stateful_device_data, StatefulDeviceData,
+    carries_q_dot, emit_stateful_update_at, history_zero_row_ranges, stateful_device_data,
+    StatefulDeviceData,
 };
-use super::nodal_emitter::emit_sparse_ni_matvec_add;
 use super::nr_helpers::{emit_nr_singular_fallback, emit_schur_nr_limit_and_converge};
 use super::RustEmitter;
 use crate::codegen::ir::CircuitIR;
@@ -301,12 +299,29 @@ pub(super) fn emit_subsample_schur_builder(ir: &CircuitIR) -> String {
          \x20   }\n\
          }\n\n",
     );
+    if carries_q_dot(ir) {
+        s.push_str(
+            "/// Charge form: q_dot after a step from `v0` to `v1` on history matrix `h`\n\
+             /// (= alpha*C): trapezoidal `h*(v1 - v0) - q0`, backward Euler `h*(v1 - v0)`.\n\
+             #[inline(never)]\n\
+             fn ssf_q_advance(h: &[[f64; N]; N], v1: &[f64; N], v0: &[f64; N], q0: &[f64; N], be: bool) -> [f64; N] {\n\
+             \x20   let mut q = [0.0f64; N];\n\
+             \x20   for i in 0..N {\n\
+             \x20       let mut acc = 0.0;\n\
+             \x20       for j in 0..N { acc += h[i][j] * (v1[j] - v0[j]); }\n\
+             \x20       q[i] = if be { acc } else { acc - q0[i] };\n\
+             \x20   }\n\
+             \x20   q\n\
+             }\n\n",
+        );
+    }
     s.push_str(
         "/// Build A = G + alpha*C at the sub-step rate, invert it, and form the Schur\n\
          /// products S_NI = S*N_i, K = N_v*S_NI. `be` selects the backward-Euler\n\
-         /// companion (alpha = rate, A_neg = alpha*C) over trapezoidal (alpha = 2*rate,\n\
-         /// A_neg = alpha*C - G). Same construction as `rebuild_matrices`, including\n\
-         /// the zeroed voltage-source algebraic history rows. False if A is singular.\n\
+         /// companion (alpha = rate) over trapezoidal (alpha = 2*rate); the history\n\
+         /// matrix is A_neg = alpha*C under both (charge form). Same construction as\n\
+         /// `rebuild_matrices`, including the zeroed algebraic history rows. False if\n\
+         /// A is singular.\n\
          /// Takes the G/C sources by reference (`&state.g_work`/`&state.c_work`, or\n\
          /// `&G`/`&C` when there are no pots/switches) so the caller can pass\n\
          /// `&mut state.ssf_lru[slot]` as `out` under disjoint-field borrows.\n\
@@ -317,7 +332,7 @@ pub(super) fn emit_subsample_schur_builder(ir: &CircuitIR) -> String {
          \x20   for i in 0..N {\n\
          \x20       for j in 0..N {\n\
          \x20           a[i][j] = g_src[i][j] + alpha * c_src[i][j];\n\
-         \x20           out.a_neg[i][j] = if be { alpha * c_src[i][j] } else { alpha * c_src[i][j] - g_src[i][j] };\n\
+         \x20           out.a_neg[i][j] = alpha * c_src[i][j];\n\
          \x20       }\n\
          \x20   }\n",
     );
@@ -490,6 +505,7 @@ fn emit_substep_solve(
 /// `.inject` sources interpolated to the segment ends (trap: start+end, BE:
 /// end only), runtime sources, noise replay. `ta_var`/`tb_var` are the segment
 /// end fractions in scope.
+#[allow(clippy::too_many_arguments)]
 fn emit_segment_rhs(
     code: &mut String,
     ir: &CircuitIR,
@@ -497,52 +513,35 @@ fn emit_segment_rhs(
     indent: &str,
     rhs_var: &str,
     v_start: &str,
-    i_start: &str,
-    ta_var: &str,
+    q_start: &str,
     tb_var: &str,
     be_var: &str,
 ) {
-    let has_rhs_be = ir.has_dc_sources && !ir.matrices.rhs_const_be.is_empty();
-    let trap_const = if ir.has_dc_sources {
+    // Charge form: constant sources at x1 and the segment's alpha*C*v_start
+    // under both integrators, plus the carried q_dot on a trapezoidal segment.
+    // Sources enter at the segment's end only.
+    let rhs_const = if ir.has_dc_sources {
         "RHS_CONST"
     } else {
         "[0.0f64; N]"
     };
-    let be_const = if has_rhs_be {
-        "RHS_CONST_BE"
-    } else {
-        "[0.0f64; N]"
-    };
     code.push_str(&format!(
-        "{indent}let mut {rhs_var}: [f64; N] = if {be_var} {{ {be_const} }} else {{ {trap_const} }};\n\
+        "{indent}let mut {rhs_var}: [f64; N] = {rhs_const};\n\
          {indent}for i in 0..N {{ for j in 0..N {{ {rhs_var}[i] += state.ssf_lru[ssf_cur].a_neg[i][j] * {v_start}[j]; }} }}\n"
     ));
-    if !ir.solver_config.backward_euler {
-        // Trap-midpoint stamp of the segment-start nonlinear current. Omitted
-        // on BE segments (the glow BE fallback omits it too: BE is N_I*i(n+1)).
-        code.push_str(&format!("{indent}if !{be_var} {{\n"));
-        code.push_str(&emit_sparse_ni_matvec_add(
-            ir,
-            rhs_var,
-            i_start,
-            &format!("{indent}    "),
+    if carries_q_dot(ir) {
+        code.push_str(&format!(
+            "{indent}if !{be_var} {{ for i in 0..N {{ {rhs_var}[i] += {q_start}[i]; }} }}\n"
         ));
-        code.push_str(&format!("{indent}}}\n"));
     }
-    // Input: linear ramp across the sample, evaluated at the segment ends.
+    // Input: linear ramp across the sample, evaluated at the segment's end.
     code.push_str(&format!(
-        "{indent}{{\n\
-         {indent}    let ua = state.input_prev + {ta_var} * (input - state.input_prev);\n\
-         {indent}    let ub = state.input_prev + {tb_var} * (input - state.input_prev);\n\
-         {indent}    {rhs_var}[INPUT_NODE] += (if {be_var} {{ ub }} else {{ ua + ub }}) * input_conductance;\n\
-         {indent}}}\n"
+        "{indent}{rhs_var}[INPUT_NODE] += (state.input_prev + {tb_var} * (input - state.input_prev)) * input_conductance;\n"
     ));
     if !ir.solver_config.injections.is_empty() {
         code.push_str(&format!(
             "{indent}for k in 0..NUM_INJECT {{\n\
-             {indent}    let ia = state.injections_prev[k] + {ta_var} * (injections[k] - state.injections_prev[k]);\n\
-             {indent}    let ib = state.injections_prev[k] + {tb_var} * (injections[k] - state.injections_prev[k]);\n\
-             {indent}    let inj = if {be_var} {{ ib }} else {{ ia + ib }};\n\
+             {indent}    let inj = state.injections_prev[k] + {tb_var} * (injections[k] - state.injections_prev[k]);\n\
              {indent}    if INJECT_IS_NORTON[k] {{\n\
              {indent}        {rhs_var}[INJECT_NODES[k]] += inj;\n\
              {indent}    }} else {{\n\
@@ -565,6 +564,26 @@ fn emit_segment_rhs(
             noise.replay_counts,
             rhs_var,
             indent,
+        ));
+    }
+}
+
+/// Charge form: the `q_dot` at the end of a segment solved on the current
+/// LRU triple, from `v_start` to `v_end` (trapezoidal `alpha*C*dv - q`,
+/// backward Euler `alpha*C*dv`). Empty on a build without `q_dot`.
+fn emit_segment_q(
+    code: &mut String,
+    ir: &CircuitIR,
+    indent: &str,
+    q_out: &str,
+    v_end: &str,
+    v_start: &str,
+    q_start: &str,
+    be_var: &str,
+) {
+    if carries_q_dot(ir) {
+        code.push_str(&format!(
+            "{indent}{q_out} = ssf_q_advance(&state.ssf_lru[ssf_cur].a_neg, &{v_end}, &{v_start}, &{q_start}, {be_var});\n"
         ));
     }
 }
@@ -738,6 +757,7 @@ pub(super) fn emit_subsample_fire_block(
          {i1}let mut ssf_breaks = 0u32;\n\
          {i1}let mut ssf_segs = 0u32;\n\
          {i1}let mut ssf_ok = true;\n\
+         {q_init}\
          {i1}let mut ssf_detected = 0u64;\n\
          {i1}let mut ssf_unres_ceiling = 0u64;\n\
          {i1}let mut ssf_unres_gridpoint = 0u64;\n\
@@ -753,7 +773,17 @@ pub(super) fn emit_subsample_fire_block(
          {i1}let mut ssf_cur: usize = 0;\n\
          {i1}let mut ssf_builds: u32 = 0;\n\
          {i1}let mut ssf_reuses: u32 = 0;\n",
-        seg_be = if be_primary { "true" } else { "!converged" }
+        seg_be = if be_primary { "true" } else { "!converged" },
+        q_init = if carries_q_dot(ir) {
+            // q_dot at the segment start, and at the whole-sample solution
+            // (the first segment's end until a segment is re-solved).
+            format!(
+                "{i1}let mut ssf_q0 = state.q_dot;\n\
+                 {i1}let mut ssf_q_end = ssf_q_advance(if ssf_seg_be {{ &state.a_neg_be }} else {{ &state.a_neg }}, &v, &state.v_prev, &state.q_dot, ssf_seg_be);\n"
+            )
+        } else {
+            String::new()
+        }
     ));
     // Pre-sample latch snapshot: the abandon path replays the whole-sample hooks from it.
     snapshot(&mut code, i1, "let ssf_start_");
@@ -782,8 +812,7 @@ pub(super) fn emit_subsample_fire_block(
         i3,
         "ssf_rhs",
         "ssf_v0",
-        "ssf_i0",
-        "ssf_t0",
+        "ssf_q0",
         "ssf_t1",
         "ssf_seg_be",
     );
@@ -797,6 +826,16 @@ pub(super) fn emit_subsample_fire_block(
         "ssf_i_end",
         "ssf_ok",
     )?;
+    emit_segment_q(
+        &mut code,
+        ir,
+        i3,
+        "ssf_q_end",
+        "ssf_v_end",
+        "ssf_v0",
+        "ssf_q0",
+        "ssf_seg_be",
+    );
     code.push_str(&format!(
         "{i2}}}\n\
          {i1}}}\n\
@@ -819,6 +858,11 @@ pub(super) fn emit_subsample_fire_block(
         "ssf_seg_dt",
         "if upd.fired || upd.extinguished { ssf_fired += 1; if upd.alpha < ssf_alpha { ssf_alpha = upd.alpha; ssf_dev = {n}; ssf_dir = if upd.fired { 1.0 } else { 0.0 }; } }",
     ));
+    let q_commit_end = if carries_q_dot(ir) {
+        format!("{i3}ssf_q0 = ssf_q_end;\n")
+    } else {
+        String::new()
+    };
     code.push_str(&format!(
         "{i2}let ssf_tc = ssf_t0 + ssf_alpha * (ssf_t1 - ssf_t0);\n\
          {i2}let ssf_split = ssf_dev != usize::MAX\n\
@@ -840,6 +884,7 @@ pub(super) fn emit_subsample_fire_block(
          {i3}ssf_t0 = ssf_t1;\n\
          {i3}ssf_v0 = ssf_v_end;\n\
          {i3}ssf_i0 = ssf_i_end;\n\
+         {q_commit_end}\
          {i3}if ssf_t0 >= 1.0 {{ break; }}\n\
          {i2}}} else {{\n\
          {i3}// Interior flip at tc: rewind the latches to the segment start.\n"
@@ -849,7 +894,13 @@ pub(super) fn emit_subsample_fire_block(
         "{i3}ssf_breaks += 1;\n\
          {i3}let mut ssf_vc = ssf_v0;\n\
          {i3}let mut ssf_ic = ssf_i0;\n\
-         {i3}if ssf_tc - ssf_t0 > SUBSAMPLE_FIRE_MIN_SEGMENT {{\n"
+         {q_c_init}\
+         {i3}if ssf_tc - ssf_t0 > SUBSAMPLE_FIRE_MIN_SEGMENT {{\n",
+        q_c_init = if carries_q_dot(ir) {
+            format!("{i3}let mut ssf_qc = ssf_q0;\n")
+        } else {
+            String::new()
+        }
     ));
     let i4 = "                    ";
     code.push_str(&format!(
@@ -871,14 +922,23 @@ pub(super) fn emit_subsample_fire_block(
         i4,
         "ssf_rhs",
         "ssf_v0",
-        "ssf_i0",
-        "ssf_t0",
+        "ssf_q0",
         "ssf_tc",
         "ssf_seg_be",
     );
     emit_substep_solve(
         &mut code, ir, i4, "ssf_rhs", "ssf_i0", "ssf_vc", "ssf_ic", "ssf_ok",
     )?;
+    emit_segment_q(
+        &mut code,
+        ir,
+        i4,
+        "ssf_qc",
+        "ssf_vc",
+        "ssf_v0",
+        "ssf_q0",
+        "ssf_seg_be",
+    );
     code.push_str(&format!(
         "{i4}if !ssf_ok {{ break; }}\n\
          {i4}// Hooks over the pre-flip segment (another lamp flipping before tc lands on\n\
@@ -941,6 +1001,11 @@ pub(super) fn emit_subsample_fire_block(
             ));
         }
     }
+    let q_commit_c = if carries_q_dot(ir) {
+        format!("{i3}ssf_q0 = ssf_qc;\n")
+    } else {
+        String::new()
+    };
     code.push_str(&format!(
         "{i4}_ => {{}}\n\
          {i3}}}\n\
@@ -948,6 +1013,7 @@ pub(super) fn emit_subsample_fire_block(
          {i3}ssf_t0 = ssf_tc;\n\
          {i3}ssf_v0 = ssf_vc;\n\
          {i3}ssf_i0 = ssf_ic;\n\
+         {q_commit_c}\
          {i2}}}\n\
          {i2}// NEXT segment [t0, t1] on the L-stable BE companion (a breakpoint sample is\n\
          {i2}// a BE sample, as with breakpoint-BE / the glow lit-hold). While a lamp is\n\
@@ -974,8 +1040,7 @@ pub(super) fn emit_subsample_fire_block(
         i2,
         "ssf_rhs",
         "ssf_v0",
-        "ssf_i0",
-        "ssf_t0",
+        "ssf_q0",
         "ssf_t1",
         "ssf_seg_be",
     );
@@ -989,10 +1054,26 @@ pub(super) fn emit_subsample_fire_block(
         "ssf_i_end",
         "ssf_ok",
     )?;
+    emit_segment_q(
+        &mut code,
+        ir,
+        i2,
+        "ssf_q_end",
+        "ssf_v_end",
+        "ssf_v0",
+        "ssf_q0",
+        "ssf_seg_be",
+    );
+    let q_sub_set = if carries_q_dot(ir) {
+        format!("{i2}q_sub = Some(ssf_q_end);\n")
+    } else {
+        String::new()
+    };
     code.push_str(&format!(
         "{i1}}}\n\
          {i1}if ssf_ok {{\n\
          {i2}v = ssf_v_end;\n\
+         {q_sub_set}\
          {i2}i_nl = ssf_i_end;\n\
          {i2}state.diag_subsample_fire_detected += ssf_detected;\n\
          {i2}state.diag_subsample_fire_resolved += ssf_breaks as u64;\n\

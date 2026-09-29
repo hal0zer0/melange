@@ -292,11 +292,14 @@ been deleted. All circuit processing now flows through the codegen pipeline abov
 (`CircuitIR::from_kernel` → emitted `DC_NL_I` constant). If you find references to
 `CircuitSolver::initialize_dc_op` in older docs or examples, they are dead code.
 
-## DK Trapezoidal Steady State
+## Trapezoidal Steady State
 
-The DK solver uses **trapezoidal** integration for both linear and nonlinear currents.
-The net nonlinear contribution is `N_i * (i_nl[n+1] + i_nl[n])`, which is a proper
-trapezoidal average matching the linear discretization.
+The generated solvers (DK and nodal) integrate in the charge form
+(`COMPANION_MODELS.md`, "Charge (Companion) Form"): every source and the
+nonlinear current enter at `n+1`, and the capacitor history is
+`alpha*C*v_prev + q_dot`. At rest `q_dot = 0` and `A − A_neg = G` on every
+row, so the per-sample fixed point is exactly the DC OP `G·v = RHS_CONST +
+N_i·i_nl(v)` under both integrators.
 
 **Warm-up**: The generated `warmup()` method runs after construction and `reset()`.
 Two phases:
@@ -305,7 +308,7 @@ Two phases:
    `rebuild_matrices(200.0)` → 1000 silent samples (5 seconds circuit time) →
    `rebuild_matrices(target_rate)`. This charges coupling caps (e.g. 22µF × 27K =
    0.6s RC) that the failed DC OP left uncharged. The DC steady state is rate-
-   independent (`A - A_neg = 2G`, no rate terms), so values found at 200 Hz are
+   independent (`A - A_neg = G`, no rate terms), so values found at 200 Hz are
    exact at any target rate. The settled state is cached in `dc_operating_point`
    and `settled_i_nl` — the expensive phase runs only once; subsequent `reset()`
    calls reuse the cached values.
@@ -378,10 +381,11 @@ audio-thread safe** — intended for plugin init / parameter-change callbacks.
 | `dc_operating_point` | Converged node voltages at current pot/switch values |
 | `v_prev` | Same — next sample starts at equilibrium |
 | `i_nl_prev`, `i_nl_prev_prev` | Converged per-device current vector |
+| `q_dot` (trapezoidal builds) | `[0.0; N]` — the new equilibrium is at rest |
 | `input_prev` | `0.0` (new equilibrium assumes zero input history) |
 | `dc_block_x_prev[k]` | `v_node[OUTPUT_NODES[k]]` — seeds IIR at steady state |
 | `dc_block_y_prev` | `[0.0; NUM_OUTPUTS]` — DC blocker's fixed point |
-| `pot_N_resistance_prev` | `pot_N_resistance` — no phantom A_neg delta |
+| `pot_N_resistance_prev` | `pot_N_resistance` (kept in step with the current value) |
 | `os_up_state`, `os_dn_state` (+ `_outer`) | Zeroed — stale DC trajectory discarded |
 | `ind_*_prev`, `ci_*_prev`, `xfmr_*_prev`, `*_i_hist` | Zeroed (DK MVP companion-shunt equilibrium has `V_L = I_L = 0`) |
 | `noise_rng_state` | **Preserved** — resetting would repeat the same noise after every param change |
@@ -391,20 +395,19 @@ audio-thread safe** — intended for plugin init / parameter-change callbacks.
 
 ### DC fixed-point algebra
 
-The transient NR step at a converged sample is
-`A · v_{n+1} = RHS + A_neg · v_n + N_i · i_nl + input`. Substituting
-steady state (`v_{n+1} = v_n = v_dc`, `input = 0`, `i_nl_prev = i_nl_dc`)
-and using `A - A_neg = 2·G` on node rows / `A - A_neg = G` on VS/VCVS
-algebraic rows gives the DC fixed point:
+The transient NR step at a converged sample is (charge form, both integrators)
+`A · v_{n+1} − N_i · i_nl(v_{n+1}) = RHS_CONST + A_neg · v_n + q_dot_n + input(n+1)`,
+with `A_neg = alpha·C` (`q_dot` only in trapezoidal builds). Substituting
+steady state (`v_{n+1} = v_n = v_dc`, `input = 0`, `q_dot = 0`) and using
+`A − A_neg = G` on every row gives the DC fixed point:
 
 ```
-2·G · v_dc = RHS_CONST + 2·N_i · i_nl_dc          (node rows)
-  G · v_dc = RHS_CONST                             (VS/VCVS rows)
+G · v_dc = RHS_CONST + N_i · i_nl_dc
 ```
 
-The runtime solver halves the node rows of `RHS_CONST` (folding the
-trapezoidal current doubling back into the DC source value), preserves
-VS/VCVS rows, adds `.runtime` voltage-source fields, then Newton-iterates
+The runtime solver therefore uses `b_dc = RHS_CONST` verbatim (DC sources
+are ×1 on every row; VS rows carry `V_dc`), adds `.runtime` voltage-source
+fields, then Newton-iterates
 `G_aug_nr = g_aug − N_i · J_dev · N_v`,
 `rhs_nr = b_dc + N_i · (i_nl − J_dev · v_nl)`,
 `v_new = G_aug_nr⁻¹ · rhs_nr` to convergence (1e-9 step tolerance).

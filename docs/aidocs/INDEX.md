@@ -45,13 +45,18 @@ AI agent consumption: dense equations, code patterns, cross-references, no narra
 
 ## Critical Equations (Verified)
 
-### Trapezoidal Integration
+### Trapezoidal Integration (Charge Form)
 ```
 alpha = 2/T = 2 * sample_rate
 A = G + alpha*C
-A_neg = alpha*C - G
+H = alpha*C                 (stored as a_neg / A_NEG_DEFAULT — NO -G term)
 S = A^{-1}
+rhs   = RHS_CONST + H*v_prev + q_dot + V_in(n+1)*G_in     (every source once, at n+1)
+q_dot = H*(v - v_prev) - q_dot        after a trapezoidal sample
+q_dot = (C/T)*(v - v_prev)            after a backward-Euler sample
 ```
+`q_dot = C*dx/dt` is state, committed with `v_prev`. See
+[COMPANION_MODELS.md](COMPANION_MODELS.md) "Charge (Companion) Form".
 
 ### DK Method — K Matrix
 ```
@@ -77,7 +82,7 @@ n_nodal = n_aug + total_inductor_windings
 G_nodal = [G,      N_L   ]     C_nodal = [C,  0 ]
           [-N_L^T,  0     ]               [0,  L ]
 A_nodal = G_nodal + (2/T)*C_nodal
-A_neg   = (2/T)*C_nodal - G_nodal   (zero VS/VCVS rows only, NOT inductor rows)
+H       = (2/T)*C_nodal             (zero VS/VCVS rows only, NOT inductor rows)
 ```
 Used by the codegen "nodal" routing path (selected automatically for circuits
 with multi-transformer groups, M ≥ 10, or K ill-conditioning).
@@ -98,7 +103,7 @@ K' = K - scale * (N_v * su) * (su^T * N_i)
 | K = N_v*S*N_i | Naturally negative | Correct negative feedback |
 | DC OP G_aug | G_dc minus N_i*J_dev*N_v | Subtraction for convergence |
 | Voltage source RHS row | `rhs[k] = V_dc` (algebraic) | NOT multiplied by 2 |
-| Current source RHS row | `rhs[node] += 2 * I_dc` | Multiplied by 2 for trapezoidal |
+| Current source RHS row | `rhs[node] += I_dc` | ×1 — every source enters once, at n+1 |
 
 ## Common Bug Signatures
 
@@ -106,7 +111,8 @@ K' = K - scale * (N_v * su) * (su^T * N_i)
 |---------|-------|-----|
 | Explosion | Extra K negation | Use `K = N_v*S*N_i` (no negation) |
 | No output | Input R not stamped before kernel | Add to G[in,in] before from_mna() |
-| DC offset | Double history | Remove cap_history, use A_neg only |
+| DC offset | Double history | History is `H*v_prev + q_dot` only — no cap_history, no `-G*v_prev`, no `N_i*i_nl_prev` |
+| Residual alternates sign sample to sample on capless rows / across a coupling cap, far above the NR floor | Whole-system `z = -1` walk | Charge form (see DEBUGGING.md) |
 | Quiet | INPUT_RESISTANCE too high | Use 1 ohm (near-ideal voltage source) |
 | Unstable | No voltage limiting | Add SPICE pnjlim/fetlim |
 | Wrong freq | Wrong alpha | Use 2/T not 1/T |
@@ -125,7 +131,7 @@ K' = K - scale * (N_v * su) * (su^T * N_i)
 | Doc | Size | Topics |
 |-----|------|--------|
 | [MNA.md](MNA.md) | Comprehensive | All 17 stamping rules, N_v/N_i matrices, parasitic caps |
-| [DK_METHOD.md](DK_METHOD.md) | Comprehensive | A/S/K matrices, RHS, NR loop, trapezoidal nonlinear |
+| [DK_METHOD.md](DK_METHOD.md) | Comprehensive | A/S/K matrices, charge-form RHS, NR loop |
 | [NR_SOLVER.md](NR_SOLVER.md) | Comprehensive | Residual, Jacobian, update step, M=1/2/3+ solves |
 | [VOLTAGE_LIMITING.md](VOLTAGE_LIMITING.md) | Comprehensive | pnjlim, fetlim, vcrit, scalar damping alpha |
 | [DC_OP.md](DC_OP.md) | Comprehensive | Companion formulation, source/gmin stepping, device eval |
@@ -137,7 +143,7 @@ K' = K - scale * (N_v * su) * (su^T * N_i)
 | [DYNAMIC_PARAMS.md](DYNAMIC_PARAMS.md) | Reference | `.pot` / `.wiper` / `.gang` / `.switch` directives, plugin param emission |
 | [OVERSAMPLING.md](OVERSAMPLING.md) | Comprehensive | Polyphase allpass half-band, 2x/4x, coefficients |
 | [CODEGEN.md](CODEGEN.md) | Comprehensive | Generated code structure, templates, codegen capability matrix |
-| [COMPANION_MODELS.md](COMPANION_MODELS.md) | Reference | Trapezoidal companion for C and L |
+| [COMPANION_MODELS.md](COMPANION_MODELS.md) | Reference | Trapezoidal companion for C and L; charge (companion) form of the generated integrator, `q_dot` rules, z = -1 walk |
 | [BEHAVIORAL_SOURCES.md](BEHAVIORAL_SOURCES.md) | Reference | SPICE3 `B` arbitrary-expression V/I sources, expression engine, ddt/idt, FM discriminator |
 | [DEBUGGING.md](DEBUGGING.md) | Reference | Bug signatures, diagnostic patterns, verified values |
 | [SIGNAL_LEVELS.md](SIGNAL_LEVELS.md) | Reference | DC blocking, output scaling, plugin levels |

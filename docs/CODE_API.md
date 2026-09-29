@@ -97,6 +97,23 @@ Emitted only when the netlist asks for them:
   `recompute_dc_op(&mut self)` — present on some routes, absent on others.
   Check the file before calling.
 
+`CircuitState`'s fields are `pub`. Two of them are the integrator's history:
+
+- `v_prev: [f64; N]` — the last committed node voltages (and augmented
+  branch values). Safe to read per sample.
+- `q_dot: [f64; N]` — present on trapezoidal builds only: the matching
+  charge derivative `C·dv/dt`, i.e. the capacitor currents at `v_prev`
+  (`dΦ/dt` on inductor branch rows). Committed together with `v_prev`.
+
+Writing them is not a control path. The trapezoidal history is
+`alpha·C·v_prev + q_dot` (the charge form, see
+[COMPANION_MODELS.md](aidocs/COMPANION_MODELS.md)), so writing `v_prev` alone
+barely moves the next sample on capacitor-free and small-capacitance nodes and
+leaves the two inconsistent. If you must set state by hand, set `q_dot`
+consistently with it (from KCL), or use `reset()` or
+`set_dc_operating_point(v)` — the latter puts `q_dot` at rest, which is right
+when `v` is an equilibrium.
+
 Pot and switch setters are cheap themselves but mark the matrices dirty; the
 rebuild (O(N³)) happens inside the next `process_sample`. Drive them per block,
 never per sample.

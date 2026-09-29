@@ -344,33 +344,26 @@ Mitigations worth trying: raise the NR budget, soften the stimulus edge, or
 `--backward-euler`. If the counter stays pinned, the circuit is hitting a genuine
 conditioning problem and the number melange prints should not be trusted.
 
-### Known Defect: conductance-swap transient [OPEN]
+### Conductance swaps (`.switch`, `.pot`, `.runtime R`)
 
-Changing a conductance mid-run -- any `.switch`, `.pot`, or `.runtime R` setter --
-has a reproducible artifact on the swap sample, root-caused 2026-08-15 and not
-yet fixed (the fix touches the core solver and is gated on full golden/SPICE
-re-validation).
+Changing a conductance mid-run changes `A = G + (2/T)C` only. The generated
+integrator's history is `(2/T)C·v_prev + q_dot` (the charge form, see
+[COMPANION_MODELS.md](aidocs/COMPANION_MODELS.md)), which carries no
+conductance, so a swap is not counted twice, and a capacitor-free node has no
+history to carry a residual. On a trapezoidal build each `set_switch_*` /
+`set_pot_*` call additionally solves the next sample on backward Euler
+(breakpoint-BE), which re-seeds `q_dot` on the new component values and damps
+the mode the step excited. `.runtime R` does not arm it.
 
-Trapezoidal puts every conductance in **both** the forward matrix
-`A = G + (2/T)C` and the history matrix `A_neg = (2/T)C - G`, so a change of Δg
-adds `+Δg` to one and `-Δg` to the other. On the swap sample the output deflects
-exactly **2.000×** the physical value -- drive-independent, deterministic, correct
-one sample later.
-
-The same event also excites the trapezoidal `z = -1` Nyquist marginal mode:
-
-- On a node with capacitance, it rings for ~1000 samples and is damped by the
-  circuit's own RC.
-- On a **capless (purely resistive) node it does not decay at all.** The residual
-  persists for as long as you rest in the non-default position. A resistive
-  divider node should obey `node - ratio·other ≈ 0` at all times; under trap,
-  held off-default, it does not.
-
-This is a bug, not a contract -- do not design around it as "undefined". Both
-mitigations available today: `--backward-euler` (measured residual -3.5e-13 on
-the capless repro, versus 1.44% under trap), or fitting transients from
-closure+1 sample. Measurements taken while resting in a non-default position on a
-capless node are contaminated under trapezoidal.
+The artifacts recorded for this event on 2026-08-15 — a swap sample deflecting
+exactly 2.000× the physical value, a `z = -1` ring of ~1000 samples on
+capacitive nodes, and a persistent residual on capless nodes held off-default
+(1.44% on a resistive divider, versus -3.5e-13 under `--backward-euler`) — were
+measured under the whole-system trapezoidal form, whose history matrix was
+`(2/T)C - G`. Re-measuring swaps under the charge form, with and without
+breakpoint-BE, is open work (`STATUS.md`, Pending Work). The oracle for that
+measurement: a resistive divider node obeys `node - ratio·other ≈ 0` at all
+times.
 
 ### Device Linearization
 - `.linearize Q9` or `.linearize T1` removes a BJT or **triode** from the NR
@@ -391,10 +384,10 @@ Matrices use `Vec<Vec<f64>>` (jagged arrays) instead of flat storage. This has p
 
 Generated code flushes denormals in the state vectors (`v_prev`, and `i_nl_prev`
 when M > 0) once per sample with an add/subtract of `1e-25`, on **both** the DK
-and nodal paths. Most DAW hosts set FTZ/DAZ, but the generated code does not rely
+and nodal paths. The charge-form `q_dot` vector is flushed with them. Most DAW hosts set FTZ/DAZ, but the generated code does not rely
 on it. The DC-blocking feedback path carries a tiny bias for the same reason.
 
-This covers the state that persists across samples. It is not a global FPU mode
+This covers `v_prev` and `i_nl_prev`. It is not a global FPU mode
 change -- an intermediate inside one sample's solve can still go denormal.
 
 ### Condition Number [NUMERICAL]
@@ -449,7 +442,7 @@ these holds:
 | Large nonlinear dimension | M >= 10 |
 | Multiple transformer groups | > 1 coupled-inductor / transformer group |
 | DK kernel build failed | -- |
-| Trapezoidal instability | spectral radius of `S·A_neg` > 1.002 |
+| Trapezoidal instability | spectral radius of the whole-system operator `S·((2/T)C - G)` > 1.002 |
 | `K` ill-conditioned | max\|K\| > 1e8 (`K_ILL_COND_MAX`) |
 | `S` ill-conditioned | max\|S\| > 1e6 (`S_ILL_COND_MAX`) |
 | Behavioral `B` source | structural -- DK cannot stamp in node space |

@@ -1,8 +1,8 @@
 /// Compute final node voltages: v = v_pred + state.s_ni * i_nl
 ///
-/// Uses full i_nl (not delta) for trapezoidal nonlinear integration.
-/// Combined with N_i * i_nl_prev in the RHS, this gives the proper
-/// trapezoidal average: S * N_i * (i_nl + i_nl_prev).
+/// Uses the full i_nl at n+1 (not a delta): under the charge form the
+/// nonlinear current enters the step at n+1 only, and the capacitor history
+/// (alpha*C*v_prev + q_dot) is carried by the RHS.
 ///
 /// The S*N_i product is stored in state.s_ni for sample rate independence.
 #[inline(always)]

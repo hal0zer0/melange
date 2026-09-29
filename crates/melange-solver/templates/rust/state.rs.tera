@@ -13,6 +13,10 @@ pub const DC_OP: [f64; N] = [{{ dc_op_values }}];
 /// IC-free DC bias point.
 pub const V_PREV_IC_SEED: [f64; N] = [{{ v_prev_ic_values }}];
 
+{% endif %}{% if has_q_dot_ic_seed %}/// Charge derivative `C*dx/dt` at the IC-seeded start, paired with
+/// `V_PREV_IC_SEED`: each `IC=` capacitor's current at t = 0.
+pub const Q_DOT_IC_SEED: [f64; N] = [{{ q_dot_ic_seed_values }}];
+
 {% endif %}{% if has_dc_nl %}/// DC operating point: nonlinear device currents at bias point
 pub const DC_NL_I: [f64; M] = [{{ dc_nl_i_values }}];
 
@@ -35,7 +39,12 @@ pub struct CircuitState {
     /// Previous node voltages v[n-1]
     pub v_prev: [f64; N],
 
-    /// Previous nonlinear currents i_nl[n-1]
+{% if carries_q_dot %}    /// Charge derivative `C*dx/dt` at v[n-1] (capacitor currents). The
+    /// trapezoidal history is `alpha*C*v[n-1]` plus this, so KCL holds exactly
+    /// at every committed sample.
+    pub q_dot: [f64; N],
+
+{% endif %}    /// Previous nonlinear currents i_nl[n-1]
     pub i_nl_prev: [f64; M],
 
     /// Nonlinear currents from two samples ago i_nl[n-2] (for NR predictor)
@@ -51,12 +60,12 @@ pub struct CircuitState {
     /// sample in the process_sample safety net.
     pub damp_thresh: f64,
 
-    /// Previous input sample(s) for trapezoidal integration
+    /// Previous input sample(s) (the input stamp is at n+1; kept for hosts
+    /// that read it)
 {% if multi_input %}    pub inputs_prev: [f64; NUM_INPUTS],
 {% else %}    pub input_prev: f64,
-{% endif %}{% if inject_or_tap %}    /// Previous `.inject` values (per inner sample), for the trapezoidal
-    /// history term of Thevenin injections. Advanced once per inner call
-    /// alongside `input_prev`.
+{% endif %}{% if inject_or_tap %}    /// Previous `.inject` values (per inner sample; the nodal sub-step ramp
+    /// reads them). Advanced once per inner call alongside `input_prev`.
     pub injections_prev: [f64; NUM_INJECT],
 {% endif %}
 
@@ -112,7 +121,7 @@ pub struct CircuitState {
     /// S = A^{-1} matrix, recomputed by set_sample_rate
     pub s: [[f64; N]; N],
 
-    /// A_neg = alpha*C - G matrix, recomputed by set_sample_rate
+    /// A_neg = alpha*C history matrix, recomputed by set_sample_rate
     pub a_neg: [[f64; N]; N],
 
     /// K = N_v * S * N_i kernel matrix, recomputed by set_sample_rate
@@ -257,7 +266,8 @@ impl Default for CircuitState {
 {% if has_cap_ic %}        for k in 0..NUM_OUTPUTS { dc_block_x_seed[k] = V_PREV_IC_SEED[OUTPUT_NODES[k]]; }
 {% else %}        for k in 0..NUM_OUTPUTS { dc_block_x_seed[k] = DC_OP[OUTPUT_NODES[k]]; }
 {% endif %}{% endif %}        Self {
-{% if has_dc_op %}            v_prev: {% if has_cap_ic %}V_PREV_IC_SEED{% else %}DC_OP{% endif %},
+{% if carries_q_dot %}            q_dot: {{ q_dot_start }},
+{% endif %}{% if has_dc_op %}            v_prev: {% if has_cap_ic %}V_PREV_IC_SEED{% else %}DC_OP{% endif %},
 {% if has_dc_nl_ic_seed %}            i_nl_prev: DC_NL_I_IC_SEED,
             i_nl_prev_prev: DC_NL_I_IC_SEED,
 {% elif has_dc_nl %}            i_nl_prev: DC_NL_I,
@@ -386,7 +396,8 @@ impl CircuitState {
 {% else %}        self.dc_operating_point = [0.0; N];
         self.damp_thresh = 2.0;
 {% endif %}        self.v_prev = {% if has_cap_ic %}V_PREV_IC_SEED{% else %}self.dc_operating_point{% endif %};
-{% if has_dc_nl_ic_seed %}        self.i_nl_prev = DC_NL_I_IC_SEED;
+{% if carries_q_dot %}        self.q_dot = {{ q_dot_start }};
+{% endif %}{% if has_dc_nl_ic_seed %}        self.i_nl_prev = DC_NL_I_IC_SEED;
         self.i_nl_prev_prev = DC_NL_I_IC_SEED;
 {% elif has_dc_nl %}        self.i_nl_prev = DC_NL_I;
         self.i_nl_prev_prev = DC_NL_I;
@@ -483,7 +494,8 @@ impl CircuitState {
     pub fn set_dc_operating_point(&mut self, v_dc: [f64; N]) {
         self.dc_operating_point = v_dc;
         self.v_prev = v_dc;
-        self.refresh_damp_thresh();
+{% if carries_q_dot %}        self.q_dot = [0.0; N];
+{% endif %}        self.refresh_damp_thresh();
     }
 
     /// Recompute the cached Step-6c damping threshold from the current DC
@@ -724,21 +736,14 @@ impl CircuitState {
             }
         }
 
-{% if backward_euler %}        // Build A_neg = alpha*C (backward Euler: no -G term)
+        // Build A_neg = alpha*C (charge-form history under both integrators)
         let mut a_neg = [[0.0f64; N]; N];
         for i in 0..N {
             for j in 0..N {
                 a_neg[i][j] = alpha * C[i][j];
             }
         }
-{% else %}        // Build A_neg = alpha*C - G (trapezoidal)
-        let mut a_neg = [[0.0f64; N]; N];
-        for i in 0..N {
-            for j in 0..N {
-                a_neg[i][j] = alpha * C[i][j] - G[i][j];
-            }
-        }
-{% endif %}
+
 {% if has_augmented %}
         // Zero VS/VCVS algebraic rows in A_neg (NOT inductor rows).
         // These have no capacitance and no history — rhs_const provides V_dc directly.
@@ -759,7 +764,6 @@ impl CircuitState {
             let g_eq = t / (2.0 * IND_{{ loop.index0 }}_INDUCTANCE);
             self.ind_g_eq[{{ loop.index0 }}] = g_eq;
             stamp_conductance(&mut a, IND_{{ loop.index0 }}_NODE_I, IND_{{ loop.index0 }}_NODE_J, g_eq);
-            stamp_conductance(&mut a_neg, IND_{{ loop.index0 }}_NODE_I, IND_{{ loop.index0 }}_NODE_J, -g_eq);
         }
 {% endfor %}
         // Reset inductor transient state (old g_eq is incompatible with new rate)
@@ -781,13 +785,9 @@ impl CircuitState {
             self.ci_g_self_2[{{ loop.index0 }}] = gs2;
             self.ci_g_mutual[{{ loop.index0 }}] = gm;
             stamp_conductance(&mut a, CI_{{ loop.index0 }}_L1_NODE_I, CI_{{ loop.index0 }}_L1_NODE_J, gs1);
-            stamp_conductance(&mut a_neg, CI_{{ loop.index0 }}_L1_NODE_I, CI_{{ loop.index0 }}_L1_NODE_J, -gs1);
             stamp_conductance(&mut a, CI_{{ loop.index0 }}_L2_NODE_I, CI_{{ loop.index0 }}_L2_NODE_J, gs2);
-            stamp_conductance(&mut a_neg, CI_{{ loop.index0 }}_L2_NODE_I, CI_{{ loop.index0 }}_L2_NODE_J, -gs2);
             stamp_mutual(&mut a, CI_{{ loop.index0 }}_L1_NODE_I, CI_{{ loop.index0 }}_L1_NODE_J, CI_{{ loop.index0 }}_L2_NODE_I, CI_{{ loop.index0 }}_L2_NODE_J, gm);
             stamp_mutual(&mut a, CI_{{ loop.index0 }}_L2_NODE_I, CI_{{ loop.index0 }}_L2_NODE_J, CI_{{ loop.index0 }}_L1_NODE_I, CI_{{ loop.index0 }}_L1_NODE_J, gm);
-            stamp_mutual(&mut a_neg, CI_{{ loop.index0 }}_L1_NODE_I, CI_{{ loop.index0 }}_L1_NODE_J, CI_{{ loop.index0 }}_L2_NODE_I, CI_{{ loop.index0 }}_L2_NODE_J, -gm);
-            stamp_mutual(&mut a_neg, CI_{{ loop.index0 }}_L2_NODE_I, CI_{{ loop.index0 }}_L2_NODE_J, CI_{{ loop.index0 }}_L1_NODE_I, CI_{{ loop.index0 }}_L1_NODE_J, -gm);
         }
 {% endfor %}
         // Reset coupled inductor transient state

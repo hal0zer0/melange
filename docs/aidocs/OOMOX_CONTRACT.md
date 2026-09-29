@@ -224,6 +224,19 @@ file:line, oomox-relative):
 - `i_nl_prev` / `input_prev` / `dc_block_*` are **not** written by wrappers
   (solver-owned); they appear in wrapper comments (NR-predictor rationale)
   only.
+- **`q_dot: [f64; N]`** (trapezoidal builds; absent on BE builds) —
+  solver-owned charge derivative `C·dx/dt` at `v_prev` (capacitor currents),
+  committed together with `v_prev`. The trapezoidal history is
+  `alpha·C·v_prev + q_dot` (`COMPANION_MODELS.md`), so a wrapper that writes
+  or saves/restores `v_prev` must treat `q_dot` the same way, or go through
+  `reset()` / `set_dc_operating_point()` (both set it consistently).
+  Reading `v_prev` is unaffected.
+- **Not emitted: the noise two-draw lag buffers** `noise_thermal_w_prev`,
+  `noise_shot_w_prev`, `noise_flicker_w_prev`, `noise_r_flicker_w_prev`,
+  `noise_partition_w_prev`, `noise_opamp_en_w_prev`, `noise_opamp_in_w_prev`.
+  Every noise source is one physical draw per sample (`NOISE.md`, "Constant
+  derivation"); trapezoidal noise transfer and kTC are unchanged, and BE
+  builds are bit-identical.
 
 - **Removed 2026-09-28: the decimated-saturation fields.** `sat_ind_N_l_eff`,
   `sat_update_counter`, `sat_resync_counter`, `sat_ci_N_*` and `sat_xg_N_*`, plus

@@ -946,6 +946,14 @@ fn c3_melange(idc: f64, amps: &[f64], tag: &str) -> Vec<[(f64, f64); 4]> {
     let inp = node(&spice, "in");
     let amps: Vec<String> = amps.iter().map(|a| format!("{a:?}")).collect();
     let bad = bad_counters(&code);
+    // The drive starts at its t = 0 value. The charge form carries the
+    // start's C*dx/dt in `q_dot` (the reference recurrence starts from the
+    // same KCL), so it is seeded from KCL at t = 0 with the source at `amp`.
+    let rc = if code.contains("pub const RHS_CONST") {
+        "RHS_CONST[r]"
+    } else {
+        "0.0"
+    };
     let main = format!(
         "fn main() {{
     for amp in [{amps}] {{
@@ -953,6 +961,13 @@ fn c3_melange(idc: f64, amps: &[f64], tag: &str) -> Vec<[(f64, f64); 4]> {
         s.set_sample_rate({FS:?});
         s.input_prev = amp;
         s.v_prev[{inp}] = amp;
+        for r in 0..N {{
+            if A_NEG_DEFAULT[r].iter().any(|&h| h != 0.0) {{
+                let mut q = {rc} + if r == INPUT_NODE {{ amp / INPUT_RESISTANCE }} else {{ 0.0 }};
+                for j in 0..N {{ q -= G[r][j] * s.v_prev[j]; }}
+                s.q_dot[r] = q;
+            }}
+        }}
         let n = (2.0 * {FS:?}) as usize;
         let mut ss: Vec<f64> = Vec::with_capacity(n / 2);
         for k in 1..=n {{

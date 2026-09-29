@@ -233,7 +233,7 @@ fn test_generated_code_final_voltage_coefficients() {
 
 #[test]
 fn test_codegen_runtime_consistency_rc_circuit() {
-    let (code, _netlist, _mna, kernel) = generate_code(RC_CIRCUIT_SPICE);
+    let (code, _netlist, mna, kernel) = generate_code(RC_CIRCUIT_SPICE);
 
     let n = kernel.n;
     assert_eq!(
@@ -256,10 +256,12 @@ fn test_codegen_runtime_consistency_rc_circuit() {
         }
     }
 
-    // Verify A_NEG matrix values in generated code match kernel
+    // The shipped history matrix is the charge form's alpha*C (the kernel's
+    // whole-system alpha*C - G is the stability discriminator's operator).
+    let alpha = 2.0 * 44100.0;
     for i in 0..n {
         for j in 0..n {
-            let expected = format!("{:.17e}", kernel.a_neg(i, j));
+            let expected = format!("{:.17e}", alpha * mna.c[i][j]);
             assert!(
                 code.contains(&expected),
                 "A_NEG[{}][{}] = {} not found in generated code.",
@@ -991,39 +993,38 @@ fn test_generated_code_compiles() {
 }
 
 // ==========================================================================
-// Test: Generated code uses proper trapezoidal RHS with input_prev
+// Test: the charge form stamps the input at n+1 and carries q_dot
 // ==========================================================================
 
 #[test]
 fn test_generated_code_has_input_prev() {
     let (code, _netlist, _mna, _kernel) = generate_code(DIODE_CLIPPER_SPICE);
 
-    // CircuitState should have input_prev field
+    // CircuitState keeps input_prev (the sub-step input ramp reads it)
     assert!(
         code.contains("pub input_prev: f64"),
         "CircuitState should contain input_prev field."
     );
-
-    // build_rhs should take input_prev parameter
+    // The input enters at n+1 only; the history is alpha*C*v_prev + q_dot.
     assert!(
-        code.contains("fn build_rhs(input: f64, input_prev: f64, state: &CircuitState)"),
-        "build_rhs should take input_prev parameter."
+        code.contains("fn build_rhs(input: f64, state: &CircuitState)")
+            && code.contains("rhs[INPUT_NODE] += input / INPUT_RESISTANCE;")
+            && !code.contains("input + input_prev"),
+        "build_rhs should stamp V_in(n+1) * G_in only."
+    );
+    assert!(
+        code.contains("pub q_dot: [f64; N]") && code.contains("+= state.q_dot["),
+        "a trapezoidal build carries q_dot into its RHS."
     );
 
-    // Formula should use (input + input_prev), not 2.0 * input
-    assert!(
-        code.contains("(input + input_prev) / INPUT_RESISTANCE"),
-        "RHS should use (input + input_prev) / INPUT_RESISTANCE for proper trapezoidal."
-    );
+    // Neither the old doubled stamp nor a trapezoidal average of the input.
     assert!(
         !code.contains("2.0 * input / INPUT_RESISTANCE"),
-        "RHS must NOT use 2.0 * input (wrong trapezoidal formula)."
+        "RHS must NOT use 2.0 * input."
     );
-
-    // process_sample should call build_rhs with state.input_prev
     assert!(
-        code.contains("build_rhs(input, state.input_prev, state)"),
-        "process_sample should call build_rhs with state.input_prev."
+        code.contains("build_rhs(input, state)"),
+        "process_sample should call build_rhs with the n+1 input only."
     );
 
     // process_sample should update state.input_prev
@@ -1273,13 +1274,33 @@ fn test_ir_fields_match_kernel() {
     assert_eq!(ir.topology.n, kernel.n);
     assert_eq!(ir.topology.m, kernel.m);
 
-    // Matrices are byte-identical copies
+    // Matrices are byte-identical copies, except the history set: the kernel
+    // holds the whole-system alpha*C - G (the stability discriminator's
+    // operator) and doubled DC rows; the IR ships the charge form's alpha*C
+    // and DC at x1.
     assert_eq!(ir.matrices.s, kernel.s);
-    assert_eq!(ir.matrices.a_neg, kernel.a_neg);
     assert_eq!(ir.matrices.k, kernel.k);
     assert_eq!(ir.matrices.n_v, kernel.n_v);
     assert_eq!(ir.matrices.n_i, kernel.n_i);
-    assert_eq!(ir.matrices.rhs_const, kernel.rhs_const);
+    let nk = kernel.n;
+    let alpha = 2.0 * 44100.0;
+    for i in 0..nk {
+        for j in 0..nk {
+            let h = ir.matrices.a_neg[i * nk + j];
+            assert_eq!(h, alpha * mna.c[i][j], "A_neg[{i}][{j}] is alpha*C");
+            let ws = kernel.a_neg[i * nk + j] + mna.g[i][j];
+            assert!(
+                (h - ws).abs() <= 1e-12 * h.abs().max(mna.g[i][j].abs()).max(1.0),
+                "A_neg[{i}][{j}]: alpha*C {h} vs whole-system + G {ws}"
+            );
+        }
+        let rc = if i < mna.n {
+            0.5 * kernel.rhs_const[i]
+        } else {
+            kernel.rhs_const[i]
+        };
+        assert_eq!(ir.matrices.rhs_const[i], rc, "RHS_CONST[{i}] at x1");
+    }
 
     // G and C matrices match MNA source (flattened row-major)
     let n = kernel.n;
@@ -2379,10 +2400,11 @@ fn test_set_sample_rate_builds_a_from_g_and_c() {
         code.contains("G[i][j] + alpha * C[i][j]"),
         "set_sample_rate should compute A = G + alpha*C."
     );
-    // Should compute A_neg = alpha*C - G
+    // Should compute the charge-form history A_neg = alpha*C (no G term)
     assert!(
-        code.contains("alpha * C[i][j] - G[i][j]"),
-        "set_sample_rate should compute A_neg = alpha*C - G."
+        code.contains("a_neg[i][j] = alpha * C[i][j];")
+            && !code.contains("alpha * C[i][j] - G[i][j]"),
+        "set_sample_rate should compute A_neg = alpha*C."
     );
 }
 
@@ -9421,10 +9443,12 @@ VCC vcc 0 250
         .and_then(|after| after.split("fn ").next())
         .unwrap_or("")
         .to_string();
+    // Charge form: no integrator stamps N_I * i_nl_prev (the nonlinear current
+    // enters at n+1 only); the trapezoidal history carries q_dot instead.
     assert!(
-        trap_in_build_rhs.contains("N_I[")
-            && trap_in_build_rhs.contains("state.i_nl_prev"),
-        "trap codegen lost N_I * i_nl_prev from build_rhs (trap NEEDS it for the proper trap-average split — would break trap fidelity):\n{}",
+        !trap_in_build_rhs.contains("state.i_nl_prev")
+            && trap_in_build_rhs.contains("state.q_dot["),
+        "trap build_rhs must carry q_dot and no N_I * i_nl_prev:\n{}",
         trap_in_build_rhs
     );
 

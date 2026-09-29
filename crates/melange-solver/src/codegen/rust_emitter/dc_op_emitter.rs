@@ -20,8 +20,7 @@
 //! 1. `emit_recompute_dc_op_body_dk` — top-level body assembler (DK path).
 //! 2. `emit_dc_op_build_g_aug_dk` — G_aug base construction from live
 //!    pot/switch state (E.3).
-//! 3. `emit_dc_op_build_b_dc_dk` — DC RHS from `RHS_CONST` (halved on
-//!    node rows in trapezoidal mode; verbatim under BE-primary) +
+//! 3. `emit_dc_op_build_b_dc_dk` — DC RHS = `RHS_CONST` +
 //!    `.runtime` voltage source fields (E.5).
 //! 4. `emit_dc_op_extract_v_nl_dk` + `emit_dk_device_evaluation` —
 //!    per-device i_nl + Jacobian evaluator shared with transient NR (E.4).
@@ -41,26 +40,22 @@
 //!
 //! ## DC fixed-point algebra (E.5 derivation)
 //!
-//! The trapezoidal per-sample equation is
+//! The per-sample equation (charge form, both integrators) is
 //!
 //! ```text
-//!     A · v_{n+1} = RHS_CONST + A_neg · v_n + N_i · i_nl_prev + input
+//!     A · v_{n+1} = RHS_CONST + A_neg · v_n + q_dot_n + input(n+1)
 //! ```
 //!
 //! and the NR loop in `process_sample` adds `N_i · i_nl(v_{n+1})` to both
-//! sides. Substituting steady state `v_{n+1} = v_n = v_dc`, `input = 0`,
-//! `i_nl_prev = i_nl_dc`, and using `A - A_neg = 2·G` on node rows (`A_neg`
-//! is zeroed on VS/VCVS algebraic rows by `get_a_neg_matrix`, so the row-
-//! wise identity `A - A_neg = G` holds there and `N_i`'s VS-row entries are
-//! structurally zero anyway) gives the DC fixed point
+//! sides. At steady state `v_{n+1} = v_n = v_dc`, `input = 0`, and the
+//! charge derivative `q_dot` is zero. With `A − A_neg = G` on every row
+//! (`A_neg = alpha·C`), that gives the DC fixed point
 //!
 //! ```text
-//!     2·G · v_dc = RHS_CONST + 2·N_i · i_nl_dc            (node rows)
-//!        G · v_dc = RHS_CONST                               (VS/VCVS rows)
+//!     G · v_dc = RHS_CONST + N_i · i_nl_dc
 //! ```
 //!
-//! Halving the node-row equation and folding both into a single Newton step
-//! yields the compile-time `dc_op.rs` form
+//! which one Newton step at a time is the compile-time `dc_op.rs` form
 //!
 //! ```text
 //!     G_aug_nr = g_aug − N_i · J_dev · N_v
@@ -68,13 +63,7 @@
 //!     v_new    = G_aug_nr⁻¹ · rhs_nr
 //! ```
 //!
-//! with `b_dc` built from `RHS_CONST` by halving rows `[0..n_nodes)` — **in
-//! trapezoidal mode only**. Under BE-primary integration
-//! (`solver_config.backward_euler`) the baked `RHS_CONST` is already the ×1
-//! BE build and the row-wise identity is `A − A_neg = G` on ALL rows (BE
-//! also skips the `N_i·i_nl_prev` history stamp), so `b_dc = RHS_CONST`
-//! verbatim — halving there would converge to a fixed point with HALF the
-//! DC current-source injection.
+//! with `b_dc = RHS_CONST`.
 //!
 //! This converges to the exact compile-time DC OP for inductor-free
 //! circuits. Inductor-bearing circuits: the `g_eq = T/(2L)` companion shunt
@@ -90,7 +79,7 @@
 use crate::codegen::ir::CircuitIR;
 use crate::codegen::CodegenError;
 
-use super::helpers::{fmt_f64, oversampling_info};
+use super::helpers::{carries_q_dot, fmt_f64, oversampling_info};
 use super::nr_helpers::emit_dk_device_evaluation;
 
 /// Emit the body of `CircuitState::recompute_dc_op()` for a DK-path circuit.
@@ -311,52 +300,22 @@ fn emit_dc_op_extract_v_nl_dk(ir: &CircuitIR, indent: &str) -> String {
 
 /// Emit the DC RHS vector `b_dc: [f64; N]` for `recompute_dc_op`.
 ///
-/// Maps `RHS_CONST` (the per-sample Norton current vector) to the DC
-/// steady-state RHS:
-///   * Node rows `[0..n_nodes)` are halved in trapezoidal mode (`RHS_CONST`
-///     doubles current-source injections for trapezoidal averaging — at DC
-///     that averaging collapses back to the single DC source value). Under
-///     BE-primary integration (`solver_config.backward_euler`) the baked
-///     `RHS_CONST` is already the ×1 BE build (`A − A_neg = G` row-wise), so
-///     node rows are preserved verbatim — halving would solve a fixed point
-///     with half the DC current-source injection.
-///   * VS / VCVS / ideal-transformer aug rows `[n_nodes..n_aug)` are preserved
-///     (their per-sample value is already the algebraic RHS — `V_dc` for VS,
-///     0 for VCVS / ideal-xfmr KVL — with no trapezoidal scaling).
-///   * Inductor branch rows `[n_aug..N)` are preserved (zero, since inductor
-///     short-circuit constraints contribute 0 to `RHS_CONST` by construction
-///     in `dk::build_rhs_const`).
-///   * `.runtime` voltage sources add `self.<field>` to their target VS row
-///     so `recompute_dc_op` converges to the bias point the host will drive
-///     on the first real sample.
+/// `b_dc = RHS_CONST`, verbatim, under both integrators: the charge form
+/// stamps each DC source once, at n+1, so the per-sample constant already
+/// is the DC right-hand side (`A − A_neg = G` on every row). Inductor
+/// branch rows are zero in `RHS_CONST` (short-circuit constraints), VS rows
+/// carry `V_dc`. `.runtime` voltage sources add `self.<field>` to their VS
+/// row so `recompute_dc_op` converges to the bias point the host will drive
+/// on the first real sample.
 fn emit_dc_op_build_b_dc_dk(ir: &CircuitIR) -> String {
     let mut body = String::new();
-    let n_nodes = ir.topology.n_nodes;
-
-    let halve_node_rows = !ir.solver_config.backward_euler;
-    if halve_node_rows {
-        body.push_str(
-            "\n        // Build b_dc: DC steady-state RHS from the per-sample RHS_CONST.\n\
-             \x20       // Node rows are halved (trapezoidal averaging collapses at DC);\n\
-             \x20       // VS/VCVS/ideal-xfmr algebraic rows and inductor branch rows are\n\
-             \x20       // preserved verbatim. See module-level DC fixed-point derivation.\n",
-        );
-    } else {
-        body.push_str(
-            "\n        // Build b_dc: DC steady-state RHS from the per-sample RHS_CONST.\n\
-             \x20       // BE-primary: RHS_CONST is the ×1 backward-Euler build and\n\
-             \x20       // A − A_neg = G holds row-wise, so b_dc = RHS_CONST verbatim\n\
-             \x20       // (no node-row halving — that is trapezoidal-only algebra).\n\
-             \x20       // See module-level DC fixed-point derivation.\n",
-        );
-    }
+    body.push_str(
+        "\n        // Build b_dc: the DC steady-state RHS is the per-sample RHS_CONST\n\
+         \x20       // (charge form: every source enters once). See the module-level\n\
+         \x20       // DC fixed-point derivation.\n",
+    );
     if ir.has_dc_sources {
         body.push_str("        let mut b_dc: [f64; N] = RHS_CONST;\n");
-        if n_nodes > 0 && halve_node_rows {
-            body.push_str(&format!(
-                "        for i in 0..{n_nodes} {{ b_dc[i] *= 0.5; }}\n",
-            ));
-        }
     } else {
         body.push_str("        let mut b_dc: [f64; N] = [0.0; N];\n");
     }
@@ -771,7 +730,7 @@ fn emit_dc_op_writeback_dk(ir: &CircuitIR, nonlinear: bool) -> String {
             "\n        // --- Inductor equilibrium guard ---------------------------\n\
              \x20       // The zeroed winding history below is only an equilibrium when\n\
              \x20       // V_L = 0. A DC-carrying winding (plate choke, DC-biased xfmr\n\
-             \x20       // primary) sees V_L = I·2L/T at the companion fixed point —\n\
+             \x20       // primary) carries history I at the companion fixed point —\n\
              \x20       // writing back a false \"settled\" state would slew audibly as\n\
              \x20       // process_sample rebuilds the true history. Refuse honestly:\n\
              \x20       // bump the settle_dc_op failure signal so callers run the\n\
@@ -820,6 +779,9 @@ fn emit_dc_op_writeback_dk(ir: &CircuitIR, nonlinear: bool) -> String {
          \x20       self.v_prev = v_node;\n\
          \x20       self.input_prev = 0.0;\n",
     );
+    if carries_q_dot(ir) {
+        body.push_str("        self.q_dot = [0.0; N];\n");
+    }
     if nonlinear && ir.topology.m > 0 {
         body.push_str(
             "        self.i_nl_prev = i_nl_final;\n\

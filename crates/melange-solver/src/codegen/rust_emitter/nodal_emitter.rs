@@ -10,12 +10,12 @@ use super::dk_emitter::{
     emit_inject_tap_constants, emit_noise_replay_body, emit_warmup_call, NoiseEmission,
 };
 use super::helpers::{
-    body_effect_jacobian_term, body_effect_mosfets, device_param_template_data,
+    body_effect_jacobian_term, body_effect_mosfets, carries_q_dot, device_param_template_data,
     emit_body_effect_at_iterate, emit_glow_lit_be_hold, emit_pentode_nr_dk_stamp,
     emit_stateful_default_fields, emit_stateful_set_sample_rate_body, emit_stateful_state_fields,
     emit_stateful_state_restore, emit_stateful_update, emit_thermal_tj_advance,
     emit_transition_be_arm, emit_transition_be_detect, fmt_f64, format_matrix_rows,
-    has_latched_device, history_zero_row_ranges, oversampling_info, pentode_dispatch,
+    has_latched_device, history_zero_row_ranges, oversampling_info, pentode_dispatch, q_dot_start,
     recommended_warmup_samples, section_banner, self_heating_device_data, stateful_device_data,
     warmup_estimate_capped,
 };
@@ -334,6 +334,168 @@ pub(super) enum NoiseMode {
     DrawIf(&'static str),
 }
 
+/// Step 1 of every solve: the constant sources, the integrator history and
+/// the inputs, into a new local `rhs`.
+///
+/// Both integrators take the charge (companion) form: the history is
+/// `H·v_prev` with `H = alpha·C` (`a_neg`), and every source enters once, at
+/// `n+1`. A trapezoidal solve (`trap`) adds the carried charge derivative
+/// `q_dot`. With KCL exact at `n`, this equals the whole-system trapezoidal RHS
+/// `(alpha·C − G)·v_n + N_i·i_nl(n) + b(n) + b(n+1)`. When the accepted solve
+/// leaves a KCL residual, the whole-system form feeds it back into the next
+/// sample on the algebraic rows as a z = −1 memory; this form does not. The
+/// nonlinear current enters through the Newton solve at `n+1` alone.
+pub(super) fn emit_history_rhs(
+    code: &mut String,
+    ir: &CircuitIR,
+    rhs_const: Option<&str>,
+    a_neg: &str,
+    a_neg_sparsity: &crate::codegen::ir::MatrixSparsity,
+    trap: bool,
+) {
+    let n = ir.topology.n;
+    code.push_str(if trap {
+        "    // Step 1: RHS = constant sources + alpha*C*v_prev + q_dot + inputs at n+1\n"
+    } else {
+        "    // Step 1: RHS = constant sources + (1/T)*C*v_prev + inputs at n+1\n"
+    });
+    match rhs_const {
+        Some(rc) => code.push_str(&format!("    let mut rhs = {rc};\n")),
+        None => code.push_str("    let mut rhs = [0.0f64; N];\n"),
+    }
+    for i in 0..n {
+        for &j in &a_neg_sparsity.nz_by_row[i] {
+            code.push_str(&format!(
+                "    rhs[{i}] += {a_neg}[{i}][{j}] * state.v_prev[{j}];\n"
+            ));
+        }
+        if trap && !a_neg_sparsity.nz_by_row[i].is_empty() {
+            code.push_str(&format!("    rhs[{i}] += state.q_dot[{i}];\n"));
+        }
+    }
+    code.push('\n');
+    if ir.solver_config.num_inputs() > 1 {
+        code.push_str("    // Input sources (Thevenin, V_in(n+1) * G_in per port)\n");
+        code.push_str("    for k in 0..NUM_INPUTS {\n        rhs[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k];\n    }\n");
+    } else {
+        code.push_str("    // Input source (Thevenin, V_in(n+1) * G_in)\n");
+        code.push_str("    let input_conductance = 1.0 / INPUT_RESISTANCE;\n");
+        code.push_str("    rhs[INPUT_NODE] += input * input_conductance;\n");
+    }
+    if ir.solver_config.has_inject_or_tap() {
+        code.push_str(&emit_inject_rhs_stamp(ir, "rhs", "    "));
+    }
+}
+
+/// Charge form, trapezoidal builds: the per-sample locals that record how the
+/// committed sample was integrated. `q_be` means a backward-Euler solve
+/// produced it. `q_sub` holds its `q_dot` when that is already known: from
+/// adaptive sub-steps or a sub-sample fire, or unchanged on a hold.
+/// `be_possible`: the build has a backward-Euler solve (else `q_be` is not
+/// declared); must match the [`emit_q_dot_commit`] argument.
+pub(super) fn emit_q_dot_locals(
+    code: &mut String,
+    ir: &CircuitIR,
+    indent: &str,
+    be_possible: bool,
+) {
+    if !carries_q_dot(ir) {
+        return;
+    }
+    code.push_str(&format!(
+        "{indent}// Charge form: how the committed sample is integrated (see q_dot).\n"
+    ));
+    if be_possible {
+        code.push_str(&format!("{indent}let mut q_be = false;\n"));
+    }
+    code.push_str(&format!(
+        "{indent}#[allow(unused_mut)]\n\
+         {indent}let mut q_sub: Option<[f64; N]> = None;\n"
+    ));
+}
+
+/// Charge form: `q_dot` for the committed `v`, before `v_prev` moves. A
+/// trapezoidal step gives `alpha·C·(v − v_prev) − q_dot`, a backward-Euler
+/// step `(1/T)·C·(v − v_prev)`. A backward-Euler step thus re-seeds `q_dot`
+/// from its own capacitor current. On a saturating inductor's branch row the
+/// charge is the flux `Φ(i)`, not `L0·i`. `be_possible`: the build has a
+/// backward-Euler solve.
+pub(super) fn emit_q_dot_commit(
+    code: &mut String,
+    ir: &CircuitIR,
+    indent: &str,
+    be_possible: bool,
+) {
+    if !carries_q_dot(ir) {
+        return;
+    }
+    let n = ir.topology.n;
+    let rate = "state.current_sample_rate * OVERSAMPLING_FACTOR as f64";
+    let update = |code: &mut String,
+                  mat: &str,
+                  sp: &crate::codegen::ir::MatrixSparsity,
+                  trap: bool,
+                  alpha: &str,
+                  ind: &str| {
+        for i in 0..n {
+            let terms: Vec<String> = sp.nz_by_row[i]
+                .iter()
+                .map(|&j| format!("{mat}[{i}][{j}] * (v[{j}] - state.v_prev[{j}])"))
+                .collect();
+            if terms.is_empty() {
+                continue;
+            }
+            let tail = if trap {
+                format!(" - state.q_dot[{i}]")
+            } else {
+                String::new()
+            };
+            code.push_str(&format!("{ind}q[{i}] = {}{tail};\n", terms.join(" + ")));
+        }
+        emit_sat_ind_q_dot(code, ir, "q", "v", "state.v_prev", alpha, ind);
+    };
+    code.push_str(&format!(
+        "{indent}// Charge form: q_dot = C*dx/dt at the committed sample.\n\
+         {indent}state.q_dot = match q_sub {{\n\
+         {indent}    Some(q) => q,\n\
+         {indent}    None => {{\n\
+         {indent}        let mut q = [0.0f64; N];\n"
+    ));
+    let ind2 = format!("{indent}            ");
+    let ind1 = format!("{indent}        ");
+    if be_possible {
+        code.push_str(&format!("{ind1}if q_be {{\n"));
+        update(
+            code,
+            "state.a_neg_be",
+            &ir.sparsity.a_neg_be,
+            false,
+            &format!("({rate})"),
+            &ind2,
+        );
+        code.push_str(&format!("{ind1}}} else {{\n"));
+        update(
+            code,
+            "state.a_neg",
+            &ir.sparsity.a_neg,
+            true,
+            &format!("(2.0 * {rate})"),
+            &ind2,
+        );
+        code.push_str(&format!("{ind1}}}\n"));
+    } else {
+        update(
+            code,
+            "state.a_neg",
+            &ir.sparsity.a_neg,
+            true,
+            &format!("(2.0 * {rate})"),
+            &ind1,
+        );
+    }
+    code.push_str(&format!("{ind1}q\n{indent}    }}\n{indent}}};\n"));
+}
+
 /// A trapezoidal full-LU build with a Newton loop carries a backward-Euler
 /// instance of the same solve, run on a failed trapezoidal sample, while
 /// latched, on a breakpoint, or when ActiveSetBe sees a rail. Behavioral
@@ -427,6 +589,25 @@ fn emit_sat_ind_history(
             "{indent}{{ let ip = {vprev}[SAT_IND_{idx}_AUG_ROW]; \
              let phi = SAT_IND_{idx}_LMAG * SAT_IND_{idx}_ISAT * (ip / SAT_IND_{idx}_ISAT).tanh() + SAT_IND_{idx}_LAIR * ip; \
              {rhs}[SAT_IND_{idx}_AUG_ROW] += {alpha} * (phi - SAT_IND_{idx}_L0 * ip); }}\n"
+        ));
+    }
+}
+
+/// Charge-form history on a saturating inductor's branch row: the linear
+/// `alpha·L0·Δi` that `H·(v − v_prev)` put in `q` becomes `alpha·ΔΦ`.
+fn emit_sat_ind_q_dot(
+    code: &mut String,
+    ir: &CircuitIR,
+    q: &str,
+    v_new: &str,
+    v_old: &str,
+    alpha: &str,
+    indent: &str,
+) {
+    for (idx, _si) in ir.saturating_inductors.iter().enumerate() {
+        code.push_str(&format!(
+            "{indent}{{ let flux = |i: f64| SAT_IND_{idx}_LMAG * SAT_IND_{idx}_ISAT * (i / SAT_IND_{idx}_ISAT).tanh() + SAT_IND_{idx}_LAIR * i - SAT_IND_{idx}_L0 * i; \
+             {q}[SAT_IND_{idx}_AUG_ROW] += {alpha} * (flux({v_new}[SAT_IND_{idx}_AUG_ROW]) - flux({v_old}[SAT_IND_{idx}_AUG_ROW])); }}\n"
         ));
     }
 }
@@ -1723,6 +1904,9 @@ fn emit_nodal_nan_reset(
 
     // Core NR state
     code.push_str(&format!("{body}state.v_prev = state.dc_operating_point;\n"));
+    if carries_q_dot(ir) {
+        code.push_str(&format!("{body}state.q_dot = [0.0; N];\n"));
+    }
     if has_dc_nl {
         code.push_str(&format!("{body}state.i_nl_prev = DC_NL_I;\n"));
         code.push_str(&format!("{body}state.i_nl_prev_prev = DC_NL_I;\n"));
@@ -2522,8 +2706,9 @@ impl RustEmitter {
             code.push_str(
                 "/// Breakpoint-BE: number of samples solved on the backward-Euler matrices\n\
                  /// after a .switch/.pot swap or an op-amp rail pin/release. Exactly ONE: a\n\
-                 /// single BE sample removes both the swap-sample 2× (BE's a_neg has no G\n\
-                 /// term) and the excited z=-1 mode (BE is L-stable), then trap resumes.\n\
+                 /// single BE sample does not read the carried q_dot (built on the old\n\
+                 /// component values), re-seeds it from its own capacitor currents, and\n\
+                 /// damps the mode the step excited (BE is L-stable); then trap resumes.\n\
                  /// Do NOT raise this — a second BE sample over-damps and can knock a\n\
                  /// marginal self-oscillator (e.g. the Farfisa G10 divider under\n\
                  /// --force-trap) into the wrong equilibrium.\n",
@@ -2764,8 +2949,8 @@ impl RustEmitter {
         }
         code.push_str("];\n\n");
 
-        // A_neg = alpha*C - G (trapezoidal history matrix)
-        code.push_str("/// Default A_neg matrix: A_neg = (2/T)*C - G (trapezoidal history, at SAMPLE_RATE)\nconst A_NEG_DEFAULT: [[f64; N]; N] = [\n");
+        // A_neg = alpha*C (charge-form history matrix)
+        code.push_str("/// Default A_neg matrix: alpha*C, the history matrix (charge form, at SAMPLE_RATE)\nconst A_NEG_DEFAULT: [[f64; N]; N] = [\n");
         for row in format_matrix_rows(n, n, |i, j| ir.a_neg(i, j)) {
             code.push_str(&format!("    [{}],\n", row));
         }
@@ -3174,6 +3359,14 @@ impl RustEmitter {
                 v_prev_ic_values
             ));
         }
+        if let Some(q) = &ir.q_dot_ic_seed {
+            let values = q.iter().map(|v| fmt_f64(*v)).collect::<Vec<_>>().join(", ");
+            code.push_str(&format!(
+                "/// Charge derivative `C·dx/dt` at the IC-seeded start, paired with\n\
+                 /// `V_PREV_IC_SEED`: each `IC=` capacitor's current at t = 0.\n\
+                 pub const Q_DOT_IC_SEED: [f64; N] = [{values}];\n\n"
+            ));
+        }
 
         // DC NL currents
         let has_dc_nl = m > 0
@@ -3256,6 +3449,14 @@ impl RustEmitter {
         code.push_str("pub struct CircuitState {\n");
         code.push_str("    /// Previous node voltages v[n-1]\n");
         code.push_str("    pub v_prev: [f64; N],\n\n");
+        if carries_q_dot(ir) {
+            code.push_str(
+                "    /// Charge derivative `C·dx/dt` at v[n-1] (capacitor currents; `dΦ/dt` on\n\
+                 \x20   /// inductor branch rows). The trapezoidal history is `alpha·C·v[n-1]`\n\
+                 \x20   /// plus this, so KCL holds exactly at every committed sample.\n\
+                 \x20   pub q_dot: [f64; N],\n\n",
+            );
+        }
         code.push_str("    /// Previous nonlinear currents i_nl[n-1]\n");
         code.push_str("    pub i_nl_prev: [f64; M],\n\n");
         code.push_str(
@@ -3489,8 +3690,9 @@ impl RustEmitter {
 
         // Breakpoint-BE countdown (trapezoidal builds with .switch/.pot). Armed
         // by set_switch_*/set_pot_* to a small const; while > 0 the sample is
-        // solved with the L-stable BE matrices (kills the swap-sample 2× and the
-        // excited z=-1 mode), then decremented. Zero at rest → byte-inert.
+        // solved with the L-stable BE matrices (re-seeds q_dot on the new
+        // component values, damps the excited mode), then decremented. Zero at
+        // rest → byte-inert.
         if ir.solver_config.breakpoint_be {
             code.push_str(
                 "    /// Breakpoint-BE: samples remaining to solve on the backward-Euler\n\
@@ -3578,7 +3780,9 @@ impl RustEmitter {
             "    /// A matrix: G + alpha*C (trapezoidal), recomputed by set_sample_rate\n",
         );
         code.push_str("    pub a: [[f64; N]; N],\n");
-        code.push_str("    /// A_neg matrix: alpha*C - G (trapezoidal history), recomputed by set_sample_rate\n");
+        code.push_str(
+            "    /// A_neg matrix: alpha*C (charge-form history), recomputed by set_sample_rate\n",
+        );
         code.push_str("    pub a_neg: [[f64; N]; N],\n");
         code.push_str(
             "    /// A_be matrix: G + (1/T)*C (backward Euler), recomputed by set_sample_rate\n",
@@ -3779,6 +3983,9 @@ impl RustEmitter {
             code.push_str("            v_prev: DC_OP,\n");
         } else {
             code.push_str("            v_prev: [0.0; N],\n");
+        }
+        if carries_q_dot(ir) {
+            code.push_str(&format!("            q_dot: {},\n", q_dot_start(ir)));
         }
         if has_dc_nl_ic_seed {
             code.push_str("            i_nl_prev: DC_NL_I_IC_SEED,\n");
@@ -4068,6 +4275,9 @@ impl RustEmitter {
         } else {
             code.push_str("        self.v_prev = self.dc_operating_point;\n");
         }
+        if carries_q_dot(ir) {
+            code.push_str(&format!("        self.q_dot = {};\n", q_dot_start(ir)));
+        }
         if has_dc_nl_ic_seed {
             // has_cap_ic already forced `self.v_prev = V_PREV_IC_SEED` above,
             // overriding the dc_settled/quiescent warmup machinery below for
@@ -4343,6 +4553,9 @@ impl RustEmitter {
         code.push_str("    pub fn set_dc_operating_point(&mut self, v_dc: [f64; N]) {\n");
         code.push_str("        self.dc_operating_point = v_dc;\n");
         code.push_str("        self.v_prev = v_dc;\n");
+        if carries_q_dot(ir) {
+            code.push_str("        self.q_dot = [0.0; N];\n");
+        }
         code.push_str("    }\n\n");
 
         // dc_op() accessor — P4 from the Oomox plugin roadmap. Lets plugins
@@ -4692,15 +4905,10 @@ impl RustEmitter {
         code.push_str("        let alpha_be = internal_rate;\n");
         code.push('\n');
 
-        // Build A = G + alpha*C and A_neg:
-        //   trapezoidal: A_neg = alpha*C - G
-        //   backward Euler: A_neg = alpha*C  (no G term — history has only capacitor)
+        // Build A = G + alpha*C and the history matrix A_neg = alpha*C (both
+        // integrators; the charge form carries no G term in its history).
         // No Boyle elimination here — the op-amp Gm is stamped directly in G (ideal model).
-        let a_neg_formula = if ir.solver_config.backward_euler {
-            format!("alpha * {}[i][j]", c_src)
-        } else {
-            format!("alpha * {}[i][j] - {}[i][j]", c_src, g_src)
-        };
+        let a_neg_formula = format!("alpha * {}[i][j]", c_src);
         code.push_str(&format!(
             "        for i in 0..N {{\n\
              \x20           for j in 0..N {{\n\
@@ -4808,9 +5016,9 @@ impl RustEmitter {
         code.push_str("    }\n\n");
 
         // set_pot_N() / set_runtime_R_<field>() methods — O(1) delta stamping
-        // into A/A_neg/A_be matrices. Since A = G + alpha*C, changing G by
-        // delta_g means A changes by delta_g at the same entries. A_neg =
-        // alpha*C - G, so A_neg changes by -delta_g. A_neg_be has no G term.
+        // into A/A_be. Since A = G + alpha*C, changing G by delta_g means A
+        // changes by delta_g at the same entries. The history matrices
+        // (alpha*C) have no G term.
         //
         // Neither setter reseeds NR state. Callers that need a fresh NR
         // seed (preset recall, raw unsmoothed jumps) must follow with
@@ -4939,9 +5147,9 @@ impl RustEmitter {
                 };
 
                 emit_delta_stamp(&mut code, "a", "+");
-                emit_delta_stamp(&mut code, "a_neg", "-");
                 emit_delta_stamp(&mut code, "a_be", "+");
-                // A_neg_be = alpha_be * C — no G term, unchanged by pot
+                // The history matrices (A_neg = alpha*C, A_neg_be = alpha_be*C)
+                // carry no G term: a pot does not touch them.
 
                 // Also update g_work for consistency
                 if has_pots || has_switches {
@@ -5464,11 +5672,20 @@ impl RustEmitter {
 
         // Flush denormals in state vectors (prevents 50-100x CPU penalty during silence)
         code.push_str("    for v in state.v_prev.iter_mut() { *v = *v + 1e-25 - 1e-25; }\n");
+        if carries_q_dot(ir) {
+            code.push_str("    for v in state.q_dot.iter_mut() { *v = *v + 1e-25 - 1e-25; }\n");
+        }
         if m > 0 {
             code.push_str("    for v in state.i_nl_prev.iter_mut() { *v = *v + 1e-25 - 1e-25; }\n");
         }
         code.push('\n');
 
+        emit_q_dot_locals(
+            &mut code,
+            ir,
+            "    ",
+            ir.topology.m > 0 || ir.solver_config.breakpoint_be,
+        );
         Self::emit_schur_solve(&mut code, ir, noise)?;
 
         // NaN/Inf recovery: shared reset + DC-OP return. Schur path has no
@@ -5517,6 +5734,12 @@ impl RustEmitter {
         );
         code.push_str("    // State update\n");
         code.push_str(&emit_transition_be_detect(ir));
+        emit_q_dot_commit(
+            &mut code,
+            ir,
+            "    ",
+            ir.topology.m > 0 || ir.solver_config.breakpoint_be,
+        );
         code.push_str("    state.v_prev = v;\n");
         // Breakpoint-BE countdown: this sample was solved on the BE matrices
         // (both the m=0 override above and the m>0 BE fallback, forced via the
@@ -6455,6 +6678,9 @@ impl RustEmitter {
 
         // Flush denormals in state vectors (prevents 50-100x CPU penalty during silence)
         code.push_str("    for v in state.v_prev.iter_mut() { *v = *v + 1e-25 - 1e-25; }\n");
+        if carries_q_dot(ir) {
+            code.push_str("    for v in state.q_dot.iter_mut() { *v = *v + 1e-25 - 1e-25; }\n");
+        }
         if m > 0 {
             code.push_str("    for v in state.i_nl_prev.iter_mut() { *v = *v + 1e-25 - 1e-25; }\n");
         }
@@ -6466,6 +6692,12 @@ impl RustEmitter {
         // stamp on their augmented branch row), so an M=0 circuit with any
         // saturating inductor must iterate too.
         let primary = NewtonSite::primary(ir);
+        emit_q_dot_locals(
+            &mut code,
+            ir,
+            "    ",
+            has_be_instance(ir) || ir.solver_config.breakpoint_be,
+        );
         if m == 0 && !has_behavioral && !has_sat_ind {
             // A breakpoint sample (a .switch/.pot swap, a rail pin/release)
             // solves the same direct LU on the BE matrices, as the BE build does.
@@ -6480,6 +6712,9 @@ impl RustEmitter {
                 code.push_str("    let mut v = rhs;\n");
                 code.push_str("    if !lu_solve(&mut g_aug, &mut v) {\n");
                 code.push_str("        v = state.v_prev;\n");
+                if carries_q_dot(ir) {
+                    code.push_str("        q_sub = Some(state.q_dot);\n");
+                }
                 code.push_str("    }\n\n");
 
                 // Op-amp supply rail handling. The M=0 branch historically
@@ -6501,7 +6736,7 @@ impl RustEmitter {
             if ir.solver_config.breakpoint_be && !ir.solver_config.backward_euler {
                 let be = NewtonSite::be_instance(ir);
                 code.push_str(
-                    "    #[allow(unused_mut)]\n    let mut v = if state.breakpoint_be > 0 {\n",
+                    "    #[allow(unused_mut)]\n    let mut v = if state.breakpoint_be > 0 {\n    q_be = true;\n",
                 );
                 linear_solve(&mut code, &be, &be.sat_alpha);
                 code.push_str("    v\n    } else {\n");
@@ -6525,7 +6760,7 @@ impl RustEmitter {
         // No VSAT clamping on v — clamping any subset of nodes creates physical
         // inconsistency with unclamped neighbors (e.g., 100Ω resistor between
         // clamped node at 13V and unclamped node at 240V), corrupting the
-        // trapezoidal history (a_neg * v_prev). Matches runtime NodalSolver.
+        // history (a_neg * v_prev + q_dot). Matches runtime NodalSolver.
         // Output is clamped downstream by DC block (±10V) or ear protection.
 
         // Op-amp slew-rate limiting (nodal full-LU path). Clamp
@@ -6557,6 +6792,9 @@ impl RustEmitter {
             );
             code.push_str("        state.diag_nr_hold_count += 1;\n");
             code.push_str("        v = state.v_prev;\n");
+            if carries_q_dot(ir) {
+                code.push_str("        q_sub = Some(state.q_dot);\n");
+            }
             code.push_str("        i_nl = state.i_nl_prev;\n");
             code.push_str("        chord_valid = false;\n");
             if has_be_instance(ir) {
@@ -6578,6 +6816,12 @@ impl RustEmitter {
         // so v_prev holds the prior sample. Shared with the DK path.
         code.push_str(&emit_stateful_update(&stateful_device_data(ir)));
         code.push_str(&emit_transition_be_detect(ir));
+        emit_q_dot_commit(
+            &mut code,
+            ir,
+            "    ",
+            has_be_instance(ir) || ir.solver_config.breakpoint_be,
+        );
         code.push_str("    state.v_prev = v;\n");
         // Breakpoint-BE countdown: this sample was solved on the BE matrices via
         // the forced BE fallback. One decrement per sample, after the solve.
@@ -6773,6 +7017,7 @@ impl RustEmitter {
         code.push_str("        converged = false;\n");
         code.push_str("        let primary_iters = state.last_nr_iterations;\n");
         code.push_str("        v = state.v_prev;\n");
+        code.push_str("        q_be = true;\n        q_sub = None;\n");
         code.push_str("        state.last_nr_iterations = MAX_ITER as u32;\n");
         if ir.solver_config.breakpoint_be {
             code.push_str(
@@ -6798,9 +7043,9 @@ impl RustEmitter {
     }
 
     /// Step 1 of a full-LU sample: the right-hand side for one integrator
-    /// (`site`) into a local `rhs` — constant sources, `A_neg·v_prev`, the
-    /// trapezoidal `N_i·i_nl_prev` companion, input, runtime sources, noise,
-    /// saturating-inductor flux history.
+    /// (`site`) into a local `rhs` — the history and inputs
+    /// ([`emit_history_rhs`]), runtime sources, noise, saturating-inductor
+    /// flux history.
     fn emit_nodal_rhs(
         code: &mut String,
         ir: &CircuitIR,
@@ -6808,93 +7053,15 @@ impl RustEmitter {
         site: &NewtonSite,
         noise_mode: NoiseMode,
     ) {
-        let n = ir.topology.n;
-        let m = ir.topology.m;
-        let n_nodes = if ir.topology.n_nodes > 0 {
-            ir.topology.n_nodes
-        } else {
-            n
-        };
-        let multi_input = ir.solver_config.num_inputs() > 1;
-        let has_behavioral = !ir.behavioral_sources.is_empty();
         let has_sat_ind = !ir.saturating_inductors.is_empty();
-        let inject_or_tap = ir.solver_config.has_inject_or_tap();
-        let use_line_search = m > 0;
-        let _ = (
-            n,
-            m,
-            n_nodes,
-            multi_input,
-            has_behavioral,
-            has_sat_ind,
-            inject_or_tap,
-            use_line_search,
+        emit_history_rhs(
+            code,
+            ir,
+            site.rhs_const,
+            site.a_neg,
+            site.a_neg_sparsity(ir),
+            !site.be,
         );
-        // Step 1: Build RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input (sparse)
-        code.push_str(
-            "    // Step 1: Build RHS (sparse A_neg * v_prev + sparse N_i * i_nl_prev)\n",
-        );
-        if let Some(rc) = site.rhs_const {
-            code.push_str(&format!("    let mut rhs = {rc};\n"));
-        } else {
-            code.push_str("    let mut rhs = [0.0f64; N];\n");
-        }
-        // Sparse A_neg * v_prev
-        for i in 0..n {
-            let nz_cols = &site.a_neg_sparsity(ir).nz_by_row[i];
-            if nz_cols.is_empty() {
-                continue;
-            }
-            for &j in nz_cols {
-                code.push_str(&format!(
-                    "    rhs[{}] += {}[{}][{}] * state.v_prev[{}];\n",
-                    i, site.a_neg, i, j, j
-                ));
-            }
-        }
-        // Sparse N_i * i_nl_prev (N_I is N×M, direct row access).
-        // Trap-midpoint companion, skipped under BE — see the matching
-        // comment block in `emit_nodal_schur_process_sample` for the
-        // derivation and the pipe-shouter warmup-divergence case this
-        // fixes.
-        if m > 0 && !site.be {
-            for i in 0..n {
-                for &j in &ir.sparsity.n_i.nz_by_row[i] {
-                    code.push_str(&format!(
-                        "    rhs[{}] += N_I[{}][{}] * state.i_nl_prev[{}];\n",
-                        i, i, j, j
-                    ));
-                }
-            }
-        }
-        code.push('\n');
-
-        // Input source (Thevenin)
-        if multi_input {
-            if site.be {
-                code.push_str("    // Input sources (backward Euler: per-port V_in * G_in)\n");
-                code.push_str("    for k in 0..NUM_INPUTS {\n        rhs[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k];\n    }\n");
-            } else {
-                code.push_str(
-                    "    // Input sources (trapezoidal: per-port (V_in + V_in_prev) * G_in)\n",
-                );
-                code.push_str("    for k in 0..NUM_INPUTS {\n        rhs[INPUT_NODES[k]] += (inputs[k] + state.inputs_prev[k]) / INPUT_RESISTANCES[k];\n    }\n");
-            }
-        } else {
-            code.push_str("    let input_conductance = 1.0 / INPUT_RESISTANCE;\n");
-            if site.be {
-                code.push_str("    // Input source (backward Euler: V_in * G_in)\n");
-                code.push_str("    rhs[INPUT_NODE] += input * input_conductance;\n");
-            } else {
-                code.push_str("    // Input source (trapezoidal: (V_in + V_in_prev) * G_in)\n");
-                code.push_str(
-                    "    rhs[INPUT_NODE] += (input + state.input_prev) * input_conductance;\n",
-                );
-            }
-        }
-        if inject_or_tap {
-            code.push_str(&emit_inject_rhs_stamp(ir, "rhs", "    ", site.be));
-        }
         // NOTE: `state.input_prev` is deliberately NOT committed here. The
         // adaptive sub-stepping below interpolates the input ramp as
         // `(input - state.input_prev) / subdiv`, so committing before the
@@ -7698,16 +7865,10 @@ impl RustEmitter {
             code.push_str(&format!(
                 "                    a_sub[i][j] = {g_src}[i][j] + alpha_sub * {c_src}[i][j];\n"
             ));
-            if site.be {
-                // BE history carries no -G term.
-                code.push_str(&format!(
-                    "                    a_neg_sub[i][j] = alpha_sub * {c_src}[i][j];\n"
-                ));
-            } else {
-                code.push_str(&format!(
-                        "                    a_neg_sub[i][j] = alpha_sub * {c_src}[i][j] - {g_src}[i][j];\n"
-                    ));
-            }
+            // Charge form: the history is alpha*C under both integrators.
+            code.push_str(&format!(
+                "                    a_neg_sub[i][j] = alpha_sub * {c_src}[i][j];\n"
+            ));
             code.push_str("                }\n");
             code.push_str("            }\n");
             // Zero the algebraic rows (as the baked A_neg does)
@@ -7724,6 +7885,12 @@ impl RustEmitter {
             code.push_str("            // Run subdivided sub-steps\n");
             code.push_str("            let mut v_sub = state.v_prev;\n");
             code.push_str("            let mut i_nl_sub = state.i_nl_prev;\n");
+            // The charge derivative carried across the sub-steps: each is a
+            // full step of its integrator at `alpha_sub`.
+            let q_sub_carried = carries_q_dot(ir);
+            if q_sub_carried {
+                code.push_str("            let mut q_s = state.q_dot;\n");
+            }
             if !multi_input {
                 code.push_str(
                     "            let input_step = (input - state.input_prev) / subdiv as f64;\n",
@@ -7731,12 +7898,12 @@ impl RustEmitter {
             }
             code.push_str("            let mut all_sub_converged = true;\n");
             code.push_str("            for step in 0..subdiv {\n");
+            if q_sub_carried {
+                code.push_str("                let v_sub0 = v_sub;\n");
+            }
             if !multi_input {
                 code.push_str(
                     "                let inp_s = state.input_prev + input_step * (step + 1) as f64;\n",
-                );
-                code.push_str(
-                    "                let inp_prev_s = state.input_prev + input_step * step as f64;\n",
                 );
             }
             // Build sub-step RHS
@@ -7747,50 +7914,26 @@ impl RustEmitter {
                 code.push_str("                let mut rhs_s = [0.0f64; N];\n");
             }
             code.push_str("                for i in 0..N { for j in 0..N { rhs_s[i] += a_neg_sub[i][j] * v_sub[j]; } }\n");
-            // Trap-midpoint companion, skipped under BE — the same gate the
-            // primary loop uses (`m > 0 && !backward_euler`). The sub-step
-            // carried it unconditionally, which is the third way it silently
-            // solved trapezoidal on a BE-pinned build.
-            if m > 0 && !site.be {
-                code.push_str(&emit_sparse_ni_matvec_add(
-                    ir,
-                    "rhs_s",
-                    "i_nl_sub",
-                    "                ",
-                ));
+            if q_sub_carried && !site.be {
+                code.push_str("                for i in 0..N { rhs_s[i] += q_s[i]; }\n");
             }
             // Saturating-inductor flux history (sub-step: base v_sub, alpha_sub)
             if has_sat_ind {
                 emit_sat_ind_history(code, ir, "rhs_s", "v_sub", "alpha_sub", "                ");
             }
+            // The input at the sub-step's end (the charge form's n+1).
             if multi_input {
-                // Same pin-honouring rule as the single-input case below.
-                let per_port = if site.be {
-                    "inp_s / INPUT_RESISTANCES[k]"
-                } else {
-                    "(inp_s + inp_prev_s) / INPUT_RESISTANCES[k]"
-                };
-                let prev_binding = if site.be {
-                    String::new()
-                } else {
-                    "                    let inp_prev_s = state.inputs_prev[k] + step_k * step as f64;\n".to_string()
-                };
-                code.push_str(&format!(
-                    "                for k in 0..NUM_INPUTS {{\n\
+                code.push_str(
+                    "                for k in 0..NUM_INPUTS {\n\
                      \x20                   let step_k = (inputs[k] - state.inputs_prev[k]) / subdiv as f64;\n\
                      \x20                   let inp_s = state.inputs_prev[k] + step_k * (step + 1) as f64;\n\
-                     {prev_binding}\
-                     \x20                   rhs_s[INPUT_NODES[k]] += {per_port};\n\
-                     \x20               }}\n",
-                ));
+                     \x20                   rhs_s[INPUT_NODES[k]] += inp_s / INPUT_RESISTANCES[k];\n\
+                     \x20               }\n",
+                );
             } else {
-                if site.be {
-                    code.push_str(
-                        "                rhs_s[INPUT_NODE] += inp_s * (1.0 / INPUT_RESISTANCE);\n",
-                    );
-                } else {
-                    code.push_str("                rhs_s[INPUT_NODE] += (inp_s + inp_prev_s) * (1.0 / INPUT_RESISTANCE);\n");
-                }
+                code.push_str(
+                    "                rhs_s[INPUT_NODE] += inp_s * (1.0 / INPUT_RESISTANCE);\n",
+                );
             }
             if inject_or_tap {
                 code.push_str(&emit_inject_substep_stamp(
@@ -8035,9 +8178,29 @@ impl RustEmitter {
             code.push_str(
                 "                if !sub_converged { all_sub_converged = false; break; }\n",
             );
+            if q_sub_carried {
+                // Charge form: advance q_dot across this sub-step (trapezoidal
+                // alpha_sub*C*dv - q, or the backward-Euler alpha_sub*C*dv).
+                let tail = if site.be { "" } else { " - q_s[i]" };
+                code.push_str(&format!(
+                    "                for i in 0..N {{ let mut acc = 0.0; for j in 0..N {{ acc += a_neg_sub[i][j] * (v_sub[j] - v_sub0[j]); }} q_s[i] = acc{tail}; }}\n"
+                ));
+                emit_sat_ind_q_dot(
+                    code,
+                    ir,
+                    "q_s",
+                    "v_sub",
+                    "v_sub0",
+                    "alpha_sub",
+                    "                ",
+                );
+            }
             code.push_str("            }\n"); // end sub-step loop
             code.push_str("            if all_sub_converged {\n");
             code.push_str("                v = v_sub;\n");
+            if q_sub_carried {
+                code.push_str("                q_sub = Some(q_s);\n");
+            }
             code.push_str("                i_nl = i_nl_sub;\n");
             code.push_str("                converged = true;\n");
             code.push_str("                state.diag_substep_count += 1;\n");
@@ -8120,7 +8283,7 @@ impl RustEmitter {
             // right-hand side, so a breakpoint sample is the BE build's sample.
             if ir.solver_config.breakpoint_be && !ir.solver_config.backward_euler {
                 code.push_str(&format!(
-                    "    {binding};\n    if state.breakpoint_be > 0 {{\n"
+                    "    {binding};\n    if state.breakpoint_be > 0 {{\n    q_be = true;\n"
                 ));
                 Self::emit_schur_rhs_pred(code, ir, noise, &be, NoiseMode::Draw);
                 code.push_str("    v = v_pred;\n");
@@ -8208,6 +8371,7 @@ impl RustEmitter {
              \x20       }}\n"
         ));
         code.push_str("        state.diag_be_fallback_count += 1;\n");
+        code.push_str("        q_be = true;\n");
         if ir.solver_config.breakpoint_be {
             code.push_str(
                 "        let be_iter_budget = if state.breakpoint_be > 0 { BREAKPOINT_BE_MAX_ITER } else { MAX_ITER };\n",
@@ -8240,102 +8404,14 @@ impl RustEmitter {
         site: &SchurSite,
         noise_mode: NoiseMode,
     ) {
-        let n = ir.topology.n;
-        let m = ir.topology.m;
-        let multi_input = ir.solver_config.num_inputs() > 1;
-        let inject_or_tap = ir.solver_config.has_inject_or_tap();
-        let _ = (n, m, multi_input, inject_or_tap);
-        // Step 1: Build RHS = rhs_const + A_neg * v_prev + N_i * i_nl_prev + input (sparse)
-        code.push_str(
-            "    // Step 1: Build RHS (sparse A_neg * v_prev + sparse N_i * i_nl_prev)\n",
+        emit_history_rhs(
+            code,
+            ir,
+            site.rhs_const,
+            site.a_neg,
+            site.a_neg_sparsity(ir),
+            !site.be,
         );
-        if let Some(rc) = site.rhs_const {
-            code.push_str(&format!("    let mut rhs = {rc};\n"));
-        } else {
-            code.push_str("    let mut rhs = [0.0f64; N];\n");
-        }
-        // Sparse A_neg * v_prev
-        for i in 0..n {
-            let nz_cols = &site.a_neg_sparsity(ir).nz_by_row[i];
-            if nz_cols.is_empty() {
-                continue;
-            }
-            for &j in nz_cols {
-                code.push_str(&format!(
-                    "    rhs[{}] += {}[{}][{}] * state.v_prev[{}];\n",
-                    i, site.a_neg, i, j, j
-                ));
-            }
-        }
-        // Sparse N_i * i_nl_prev.
-        //
-        // This term is TRAPEZOIDAL MIDPOINT machinery: combined with the full
-        // `S*N_i*i_nl` that the NR loop adds via `v = v_pred + S_ni*i_nl`, the
-        // net effective contribution becomes `N_i*(i_nl_prev + i_nl)` — the
-        // midpoint average of the nonlinear current across the step (see
-        // `docs/aidocs/NR_SOLVER.md:20` and `DK_METHOD.md:62-66`).
-        //
-        // Under BACKWARD EULER we want ONLY `N_i*i_nl(n+1)` — no averaging.
-        // Omitting the i_nl_prev stamp here, combined with the `S*N_i*i_nl`
-        // that NR still adds later, yields exactly the BE companion. Keeping
-        // the i_nl_prev stamp under BE was the root cause of the pipe-shouter
-        // warmup divergence (v_prev[21] drifting 186 V in 50 zero-input
-        // samples): `v_pred` over-incorporated the previous sample's
-        // nonlinear current, NR couldn't climb out of the wrong basin, hit
-        // MAX_ITER every sample, and BE fallback landed at whatever the
-        // last iterate was.
-        if m > 0 && !site.be {
-            for i in 0..n {
-                for &j in &ir.sparsity.n_i.nz_by_row[i] {
-                    code.push_str(&format!(
-                        "    rhs[{}] += N_I[{}][{}] * state.i_nl_prev[{}];\n",
-                        i, i, j, j
-                    ));
-                }
-            }
-        }
-        code.push('\n');
-
-        // Input source (Thevenin).
-        //
-        // Trapezoidal stamps the average of V_in(n) and V_in(n+1):
-        //     rhs[in] += (V_in(n+1) + V_in(n)) * G_in
-        // Backward Euler stamps only V_in(n+1):
-        //     rhs[in] += V_in(n+1) * G_in
-        // Mixing trap input stamping with a BE `a_neg` (which is `alpha*C`,
-        // no `-G` history term) is a discretization mismatch — the first
-        // non-zero sample pushes the solver into an NR basin it cannot
-        // climb out of. Observed on pipe-shouter at Tone=1.0 / amp=0.1 /
-        // 96 kHz as instant v[7] runaway to 10^13 V and NR max-iter hits
-        // on every sample. Branch on `site.be`
-        // so the Schur path matches the emitter's integrator choice —
-        // same gate used by `emit_nodal_process_sample` for the full-LU
-        // NR (see the `if site.be` block there).
-        if multi_input {
-            if site.be {
-                code.push_str("    // Input sources (backward Euler: per-port V_in * G_in)\n");
-                code.push_str("    for k in 0..NUM_INPUTS {\n        rhs[INPUT_NODES[k]] += inputs[k] / INPUT_RESISTANCES[k];\n    }\n");
-            } else {
-                code.push_str(
-                    "    // Input sources (trapezoidal: per-port (V_in + V_in_prev) * G_in)\n",
-                );
-                code.push_str("    for k in 0..NUM_INPUTS {\n        rhs[INPUT_NODES[k]] += (inputs[k] + state.inputs_prev[k]) / INPUT_RESISTANCES[k];\n    }\n");
-            }
-        } else {
-            code.push_str("    let input_conductance = 1.0 / INPUT_RESISTANCE;\n");
-            if site.be {
-                code.push_str("    // Input source (backward Euler: V_in * G_in)\n");
-                code.push_str("    rhs[INPUT_NODE] += input * input_conductance;\n");
-            } else {
-                code.push_str("    // Input source (trapezoidal: (V_in + V_in_prev) * G_in)\n");
-                code.push_str(
-                    "    rhs[INPUT_NODE] += (input + state.input_prev) * input_conductance;\n",
-                );
-            }
-        }
-        if inject_or_tap {
-            code.push_str(&emit_inject_rhs_stamp(ir, "rhs", "    ", site.be));
-        }
         // NOTE: `state.input_prev` is deliberately NOT committed here. The
         // ActiveSetBe sub-step machinery below interpolates the input ramp as
         // `(input - state.input_prev) / N_SUB`, so committing before the
@@ -8596,8 +8672,8 @@ impl RustEmitter {
         //             every node with the clamped outputs. On a
         //             trapezoidal build the sample after each pin or
         //             release is solved on backward Euler (transition-BE),
-        //             which ends the z=-1 residual the equation-set swap
-        //             leaves on capless rows. The auto-resolver's choice.
+        //             which re-seeds q_dot on the new equation set. The
+        //             auto-resolver's choice.
         // * `ActiveSetBe` — detect rail violations here without mutating;
         //             if any are detected, fall through to the BE fallback
         //             below (which re-runs NR with backward-Euler matrices
@@ -8816,7 +8892,7 @@ impl RustEmitter {
     ///
     /// The caller must have `v` (mutable), `i_nl` (mutable), and a variable
     /// named `rhs_name` in scope. `rhs` is the linear RHS *before* any nonlinear
-    /// companion contribution — `A_neg·v_prev + rhs_const + (input+input_prev)·G_in`
+    /// companion contribution — `A_neg·v_prev + q_dot + rhs_const + input·G_in`
     /// (trapezoidal) or `A_neg_be·v_prev + rhs_const_be + input·G_in` (backward
     /// Euler) — and `matrix_name` (`"state.a"` / `"state.a_be"`) must match the
     /// integrator that produced it.
@@ -9091,8 +9167,8 @@ impl RustEmitter {
             "{it}if !pin_step_exceeded {{ pin_converged = true; pin_iters = _pit as u32; break; }}\n\
              {indent}        }}\n"
         ));
-        // Commit the pinned iterate, with i_nl re-evaluated at it, so the next
-        // sample's trapezoidal history (N_i·i_nl_prev) matches the voltages.
+        // Commit the pinned iterate, with i_nl re-evaluated at it, so the
+        // committed state (and the q_dot built from it) matches the voltages.
         code.push_str(&format!(
             "{indent}        if pin_lu_ok {{\n\
              {indent}            v = v_pin;\n"

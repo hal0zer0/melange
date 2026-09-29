@@ -44,6 +44,8 @@ struct Run {
     pin_changes: u64,
     transition_be: u64,
     be_fallback: u64,
+    /// BE samples still armed when the render ends (a pin on its last sample).
+    pending: u64,
 }
 
 /// Render 0.5 s of a 1 kHz, 0.5 V sine (the op-amp rails every half cycle).
@@ -78,6 +80,7 @@ fn run(code: &str, tag: &str) -> Run {
     println!(\"pin_changes={{}}\", changes);
     println!(\"transition_be={{}}\", s.diag_transition_be_count);
     println!(\"be_fallback={{}}\", s.diag_be_fallback_count);
+    println!(\"pending={{}}\", s.breakpoint_be);
 }}",
         n = (0.5 * FS) as usize,
         tail = (0.05 * FS) as usize,
@@ -88,6 +91,7 @@ fn run(code: &str, tag: &str) -> Run {
         pin_changes: out.parse_kv("pin_changes").unwrap() as u64,
         transition_be: out.parse_kv("transition_be").unwrap() as u64,
         be_fallback: out.parse_kv("be_fallback").unwrap() as u64,
+        pending: out.parse_kv("pending").unwrap() as u64,
     }
 }
 
@@ -146,21 +150,26 @@ fn a_pin_transition_arms_one_backward_euler_sample_on_both_sub_paths() {
             armed.pin_changes
         );
         assert_eq!(armed.transition_be, armed.pin_changes, "{tag}");
-        assert_eq!(armed.be_fallback, armed.transition_be, "{tag}");
+        assert_eq!(
+            armed.be_fallback + armed.pending,
+            armed.transition_be,
+            "{tag}"
+        );
         assert_eq!(mutant.be_fallback, 0, "{tag}: the mutant never arms");
 
-        // The mutant carries the alternating residual (~230 uA measured); the
-        // armed build sits near the Newton acceptance floor.
-        assert!(
-            mutant.residual > 50e-6,
-            "{tag}: mutant n2 residual {:e} A — the witness no longer sees the lock",
-            mutant.residual
-        );
-        assert!(
-            armed.residual < 5e-6,
-            "{tag}: n2 KCL residual {:e} A with transition-BE",
-            armed.residual
-        );
+        // Both sit at the Newton acceptance floor. Under the whole-system
+        // trapezoidal form the mutant carried an alternating n2 residual
+        // (~230 uA measured): the accepted residual at a pin fed back on the
+        // capless row as a z = -1 memory. The charge form enforces KCL at
+        // every committed sample, so the residual no longer depends on the
+        // transition-BE sample.
+        for (run, which) in [(&armed, "transition-BE"), (&mutant, "mutant")] {
+            assert!(
+                run.residual < 5e-6,
+                "{tag}: n2 KCL residual {:e} A ({which})",
+                run.residual
+            );
+        }
     }
 }
 

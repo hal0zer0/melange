@@ -34,7 +34,7 @@ const DEVICE_1_SIGN: f64 = 1.0;       // +1.0 N-ch, -1.0 P-ch
 struct CircuitState {
     // Matrices recomputed by set_sample_rate()
     s: [[f64; N]; N],          // S = A^{-1} (at internal rate)
-    a_neg: [[f64; N]; N],      // A_neg = alpha*C - G
+    a_neg: [[f64; N]; N],      // A_neg = alpha*C (charge-form history, no -G term)
     k: [[f64; M]; M],          // K = N_v*S*N_i
     s_ni: [[f64; M]; N],       // S*N_i (for final voltages)
     // ...
@@ -100,7 +100,7 @@ impl Default for CircuitState {
     fn default() -> Self { Self { /* ... */ ctrl_voltage: 0.0, /* ... */ } }
 }
 
-fn build_rhs(input: f64, input_prev: f64, state: &CircuitState) -> [f64; N] {
+fn build_rhs(input: f64, state: &CircuitState) -> [f64; N] {
     // ...
     rhs[VSOURCE_VCTRL_RHS_ROW] += state.ctrl_voltage;
     rhs
@@ -239,7 +239,7 @@ pattern by hand on the host side.
 
 State touched by the DK-path method (mirror of `reset()` but preserving
 noise RNG, pot/switch values, device runtime params, and diag counters):
-`dc_operating_point`, `v_prev`, `input_prev`, `i_nl_prev`/`i_nl_prev_prev`,
+`dc_operating_point`, `v_prev`, `q_dot` (zeroed), `input_prev`, `i_nl_prev`/`i_nl_prev_prev`,
 `dc_block_x_prev` (seeded at new DC output, not 0),
 `pot_N_resistance_prev` (synced to `pot_N_resistance`),
 oversampler taps zeroed, inductor / coupled-inductor / transformer history
@@ -250,8 +250,11 @@ contract and derivation.
 ```rust
 struct CircuitState {
     v_prev: [f64; N],        // Previous node voltages
-    i_nl_prev: [f64; M],     // Previous nonlinear currents (init from DC_NL_I if present)
-    input_prev: f64,          // Previous input (for trapezoidal RHS)
+    q_dot: [f64; N],         // C*dx/dt at v_prev: capacitor currents (dPhi/dt on inductor
+                             // branch rows); trapezoidal builds only, committed with v_prev
+    i_nl_prev: [f64; M],     // Previous nonlinear currents (NR predictor seed; init from DC_NL_I)
+    input_prev: f64,          // Previous input; read only by the nodal sub-step /
+                              // sub-sample-fire input ramp, not by build_rhs
     dc_operating_point: [f64; N],
     last_nr_iterations: u32,
     // Runtime matrices (recomputed by set_sample_rate)
@@ -370,17 +373,21 @@ Dim:      1D     -----2D-----    ------2D------
 
 ### build_rhs
 ```rust
-fn build_rhs(input: f64, input_prev: f64, state: &CircuitState) -> [f64; N] {
-    // RHS_CONST (DC sources, if any)
-    // + A_neg * v_prev  (includes capacitor history via alpha*C!)
-    // + N_i^T * i_nl_prev  (part of trapezoidal nonlinear integration)
-    // + (input + input_prev) / INPUT_RESISTANCE  (proper trapezoidal)
+fn build_rhs(input: f64, state: &CircuitState) -> [f64; N] {
+    // RHS_CONST (DC sources, if any; x1 on every row)
+    // + A_neg * v_prev  (A_neg = alpha*C: capacitor history)
+    // + q_dot           (carried charge derivative; trapezoidal builds)
+    // + inductor companion history (DK companion path only)
+    // + input / INPUT_RESISTANCE  (V_in(n+1) * G_in, once)
+    // + .inject / .runtime sources at n+1
 }
 ```
-A_neg already contains alpha*C. Do NOT add separate cap_history.
-The input uses proper trapezoidal integration: `(V_in(n+1) + V_in(n)) * G_in`.
-The `N_i * i_nl_prev` term, combined with `S * N_i * i_nl` in `compute_final_voltages`,
-gives the trapezoidal average `N_i * (i_nl[n+1] + i_nl[n])`.
+This is the charge (companion) form: `A_neg * v_prev + q_dot` is the whole
+capacitor history, and every source enters once, at `n+1`. Do NOT add a
+separate cap_history, `-G * v_prev`, `V_in(n) * G_in` or `N_i * i_nl_prev`.
+The nonlinear current enters only through `S * N_i * i_nl` in
+`compute_final_voltages` (KCL at `n+1`). See `COMPANION_MODELS.md`,
+"Charge (Companion) Form".
 
 ### solve_nonlinear
 ```rust
@@ -439,15 +446,18 @@ pub fn process_sample(input: f64, state: &mut CircuitState) -> f64 {
 The inner function contains the standard DK pipeline:
 ```rust
 fn process_sample_inner(input: f64, state: &mut CircuitState) -> f64 {
-    let rhs = build_rhs(input, state.input_prev, state);
+    let rhs = build_rhs(input, state);
     let v_pred = mat_vec_mul_s(&rhs, state);  // Uses state.s (runtime matrix)
     let p = extract_controlling_voltages(&v_pred);
     let i_nl = solve_nonlinear(&p, state);
     let v = compute_final_voltages(&v_pred, &i_nl, state);
 
+    // Charge form: commit q_dot before v_prev moves
+    //   trapezoidal sample: q_dot = A_neg*(v - v_prev) - q_dot
+    //   BE-fallback sample: q_dot = A_neg_be*(v - v_prev)
     state.v_prev = v;
     state.i_nl_prev = i_nl;
-    state.input_prev = input;  // Track for trapezoidal RHS
+    state.input_prev = input;  // Not read by build_rhs (nodal sub-step ramp only)
 
     v[OUTPUT_NODE]
 }
@@ -483,10 +493,10 @@ fn process_sample_inner(input: f64, state: &mut CircuitState) -> f64 {
 let history = alpha * C * v_prev;
 rhs += history;
 
-// RIGHT: A_neg contains history
-// A_neg = alpha*C - G
-// rhs = A_neg * v_prev = alpha*C*v_prev - G*v_prev
-//       ^^^^^^^^^^^^^ history term included!
+// RIGHT: the charge form — A_neg = alpha*C, plus the carried q_dot
+// rhs = A_neg * v_prev + q_dot + (sources at n+1)
+//       ^^^^^^^^^^^^^^^^^^^^^^ the whole capacitor history
+// q_dot = C*dx/dt is state, committed with v_prev (COMPANION_MODELS.md)
 ```
 
 ### Linear Solve by M Size
@@ -527,8 +537,9 @@ convergence check accepts. **Mitigations** (BoyleDiodes-gated):
 
 ## Verification Checklist
 - [ ] INPUT_RESISTANCE matches G matrix stamping (default: 1 ohm)
-- [ ] A_NEG contains alpha*C terms
-- [ ] No separate cap_history in build_rhs
+- [ ] A_NEG is alpha*C (no -G term); trapezoidal builds add `state.q_dot`
+- [ ] No separate cap_history in build_rhs; every source stamped once, at n+1
+- [ ] `q_dot` committed before `v_prev` on every commit path (trap, BE, sub-step, hold)
 - [ ] K has no extra negation (naturally negative from kernel)
 - [ ] Jacobian uses block-diagonal jdev entries (not just diagonal g_dev)
 - [ ] SPICE-style voltage limiting present (pnjlim/fetlim with per-device VCRIT)
@@ -599,7 +610,7 @@ impl CircuitState {
         let internal_rate = sample_rate * OVERSAMPLING_FACTOR as f64;
         let alpha = 2.0 * internal_rate;
         // Recompute A = G + alpha*C, then S = A^{-1}
-        // Recompute A_neg = alpha*C - G
+        // Recompute A_neg = alpha*C (charge-form history; q_dot is kept)
         // Recompute K = N_v * S * N_i
         // Recompute S_NI = S * N_i (for final voltage computation)
         // Recompute inductor g_eq and pot SM vectors if applicable

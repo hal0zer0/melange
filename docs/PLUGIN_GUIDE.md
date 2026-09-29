@@ -109,7 +109,8 @@ state.recompute_dc_op();  // refresh NR seed to the new operating point
 ```
 
 On DK-path circuits this re-solves the operating point from the new pot
-value and writes `v_prev`/`i_nl_prev` with the converged equilibrium. On
+value and writes `v_prev`/`i_nl_prev` with the converged equilibrium (and
+puts the trapezoidal history `q_dot` at rest). On
 nodal-path circuits `recompute_dc_op()` does nothing yet; NR catches up on
 its own over roughly
 `WARMUP_SAMPLES_RECOMMENDED` samples after the jump.

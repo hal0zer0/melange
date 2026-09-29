@@ -66,6 +66,12 @@ In A_neg matrix (g_sign = -1):
 Stamped directly into the discretized matrices during `build_discretized_matrix()`,
 not into G or C separately. History current i_hist injected into RHS each sample.
 
+This is the library `MnaSystem` / `DkKernel` / `LinearSolver` form (whole-system
+history, `i_hist = 2*i_L[n]`). Generated code uses the charge form: the `g_eq`
+stamp goes into `A` only, and `i_hist = i_L[n] + g_eq*v_L[n]` carries the whole
+known current (`COMPANION_MODELS.md`, "Charge (Companion) Form"). The CLI never
+takes this path — it always builds inductors as augmented branch rows.
+
 **Limitation**: For large inductors (L > ~1H at audio rates), g_eq ≈ 8e-8 S.
 This creates ill-conditioned A matrices (cond ~ 1e9+). See augmented MNA below.
 
@@ -98,18 +104,21 @@ For transformer groups, full inductance sub-matrix:
 ```
 
 This gives A[k][k] = 2L/T (large, well-conditioned) instead of T/(2L) (tiny).
-A_neg handles all trapezoidal history — no separate inductor history injection needed.
+The history `H*v_prev + q_dot` (`H = (2/T)*C`, charge form) covers the inductor
+rows too — no separate inductor history injection needed.
 
-**A_neg zeroing**: Only the *algebraic constraint/branch* rows in `n_nodes..n_aug`
-are zeroed — they carry no capacitance, so they have no trapezoidal history.
+**History-row zeroing** (`a_neg`, `a_neg_be`, `q_dot`): Only the *algebraic
+constraint/branch* rows in `n_nodes..n_aug` are zeroed — they carry no
+capacitance, so they have no trapezoidal history.
 Inductor rows (n_aug..n_nodal) keep their values (they have real history).
 
 > **⚠️ `n_nodes..n_aug` is NOT uniformly algebraic — do not zero the whole range.**
 > `expand_bjt_internal_nodes` appends **parasitic-BJT internal nodes** after the
 > algebraic rows, growing `n_aug`. Those are *physical* nodes with real G and C
-> stamps and **must keep their trapezoidal history** (`A_neg = αC − G`). Zeroing
-> them makes the DC OP not a trapezoidal fixed point, and the first trap step
-> kicks the capacitor-less collector row into a `z = −1` limit cycle. See
+> stamps and **must keep their trapezoidal history** (`H = αC` plus `q_dot`).
+> Zeroing them discards real capacitor history; under the whole-system form it
+> made the DC OP not a trapezoidal fixed point and kicked the capacitor-less
+> collector row into a `z = −1` limit cycle. See
 > `MnaSystem::n_aug`'s doc comment (`mna.rs`), the `is_bjt_internal` mask, and
 > the DEBUGGING.md failure-signature row for the 63× noise inflation this caused.
 > This page previously stated the blanket rule, which is how one implementation
@@ -148,10 +157,13 @@ rhs[n_plus - 1]  += I_dc
 rhs[n_minus - 1] -= I_dc
 ```
 
-**Current-source node rows** in `rhs_const` are multiplied by 2.0 for trapezoidal
-consistency (see `build_rhs_const` in `crates/melange-solver/src/dk.rs`).
-**Voltage-source augmented rows are NOT** multiplied — they are algebraic KVL
-constraints, not differential equations, so `rhs[k] = V_dc` is set directly.
+**Generated code** ships `RHS_CONST` at ×1 on every row, under both
+integrators: the charge form enters each source once, at `n+1`
+(`rhs_const_1x` in `crates/melange-solver/src/codegen/ir/mod.rs`).
+**Voltage-source augmented rows** are algebraic KVL constraints, so
+`rhs[k] = V_dc` is set directly. The library `DkKernel` (`build_rhs_const` in
+`crates/melange-solver/src/dk.rs`) uses the whole-system form and doubles the
+current-source node rows (never the voltage-source rows).
 
 ### Input Conductance (Thevenin Source)
 
@@ -389,4 +401,4 @@ inject_rhs_current(rhs, node, current):
 | Wrong frequency | Stamping C into G | Use separate C matrix |
 | DC offset | Ground node in matrix | Node 0 excluded (1-indexed to 0-indexed) |
 | Singular A | Missing parasitic caps | Call add_parasitic_caps() |
-| Augmented row issues | RHS not multiplied by 2 | Check trapezoidal scaling |
+| Augmented row issues | `V_dc` row scaled like a node row | VS rows are set to `V_dc`, never scaled |

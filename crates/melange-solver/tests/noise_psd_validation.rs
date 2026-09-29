@@ -1906,8 +1906,8 @@ fn partition_emits_constants_for_pentode_under_noise_full() {
         "expected noise_partition_rng state field"
     );
     assert!(
-        code.contains("noise_partition_w_prev"),
-        "expected two-draw lag buffer for partition (Nyquist anti-alias)"
+        !code.contains("noise_partition_w_prev"),
+        "partition is one physical draw per sample (no two-draw lag buffer)"
     );
     assert!(
         code.contains("noise_partition_last_i_n"),
@@ -2145,8 +2145,8 @@ fn opamp_emits_constants_for_ne5534_under_noise_full() {
         "expected dynamic-refreshable G_diag(in+) mirror in state"
     );
     assert!(
-        code.contains("noise_opamp_en_w_prev") && code.contains("noise_opamp_in_w_prev"),
-        "expected two-draw Nyquist anti-alias buffers for en and in"
+        !code.contains("noise_opamp_en_w_prev") && !code.contains("noise_opamp_in_w_prev"),
+        "en and in are one physical draw per sample (no two-draw lag buffers)"
     );
     assert!(
         code.contains("noise_opamp_en_last_i_n") && code.contains("noise_opamp_in_last_i_n"),
@@ -2469,10 +2469,12 @@ fn thermal_noise_be_primary_matches_trap_anchor() {
         !code_be.contains("w_new + state.noise_thermal_w_prev"),
         "BE-primary build must emit a single-draw thermal stamp (no w[n]+w[n-1] pair)"
     );
+    // Charge form: the trapezoidal build stamps the same physical current at
+    // n+1 (the two-draw w[n] + w[n-1] pair was the whole-system image of it).
     assert!(
-        code_trap.contains("(8.0 * K_B * T_ROOM_K * fs_internal).sqrt()")
-            && code_trap.contains("w_new + state.noise_thermal_w_prev"),
-        "trap build must keep the two-draw sqrt(8kT·fs) calibration"
+        code_trap.contains("(2.0 * K_B * T_ROOM_K * fs_internal).sqrt()")
+            && !code_trap.contains("w_new + state.noise_thermal_w_prev"),
+        "trap build must stamp the single-draw sqrt(2kT·fs) physical current"
     );
 
     let main = be_anchor_main(n, warmup, sr);
@@ -2487,8 +2489,14 @@ fn thermal_noise_be_primary_matches_trap_anchor() {
         K_B * 290.0 / CAP_F
     );
 
-    // Absolute anchor: kTC theorem on the BE build.
+    // Absolute anchor: kTC theorem on both builds.
     let expected = K_B * 290.0 / CAP_F;
+    let ktc_trap = v_trap / expected;
+    assert!(
+        (0.85..=1.15).contains(&ktc_trap),
+        "trapezoidal kTC violated: measured {v_trap:.3e} V² vs kT/C = {expected:.3e} V² \
+         (ratio {ktc_trap:.3})"
+    );
     let ktc_ratio = v_be / expected;
     assert!(
         (0.85..=1.15).contains(&ktc_ratio),

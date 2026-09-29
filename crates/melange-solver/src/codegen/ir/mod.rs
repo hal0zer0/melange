@@ -100,6 +100,15 @@ pub struct CircuitIR {
     /// `None`.
     #[serde(default)]
     pub dc_nl_currents_ic_seed: Option<Vec<f64>>,
+    /// Charge derivative `q_dot = C·ẋ` at the IC-seeded point, paired with
+    /// `v_prev_ic_seed` (trapezoidal builds). The IC solve holds each `IC=`
+    /// capacitor with a voltage source, so the circuit is not at rest there:
+    /// that source's current is the capacitor's current at t = 0. It is
+    /// `RHS_CONST + N_i·i_nl − G·x` on the rows that carry charge, and zero on
+    /// the algebraic rows. `None` when `v_prev_ic_seed` is `None` or the build
+    /// is backward Euler (which carries no `q_dot`).
+    #[serde(default)]
+    pub q_dot_ic_seed: Option<Vec<f64>>,
     /// Whether the nonlinear DC OP solver converged
     #[serde(default)]
     pub dc_op_converged: bool,
@@ -493,19 +502,16 @@ pub struct SolverConfig {
     /// Emit event-triggered *breakpoint backward-Euler* on a trapezoidal build
     /// with `.switch`/`.pot` parameters.
     ///
-    /// A mid-run conductance swap (a `.switch` toggle or a `.pot` step) stamps
-    /// `Δg` into both the forward matrix `A` and the trapezoidal history matrix
-    /// `A_neg = (2/T)C − G`. On the swap sample the history term still carries the
-    /// pre-swap `v_prev`, so `Δg` is effectively counted twice — the output is
-    /// `2×` the physical value — and the kick excites trap's marginal `z=−1`
-    /// eigenmode, which never decays on a capless (algebraic) node.
+    /// A mid-run component change (a `.switch` toggle or a `.pot` step) leaves
+    /// the carried charge derivative `q_dot` built on the old values: after a
+    /// capacitor change, `alpha·C_new·v_prev` meets a `q_dot` built on `C_old`.
     ///
     /// When `true`, `set_switch_*`/`set_pot_*` (and, under
     /// [`Self::transition_be`], an op-amp rail pin/release) arm a one-sample countdown
-    /// (`BREAKPOINT_BE_SAMPLES = 1`) that routes the swap sample through the
-    /// L-stable backward-Euler matrices. BE's `A_neg = (1/T)C` has no `G` term,
-    /// so there is no double-count (fixes the 2×) and BE damps `z=−1` at the
-    /// source (fixes the ring / the persistent capless residual). Exactly one
+    /// (`BREAKPOINT_BE_SAMPLES = 1`) that routes the next sample through the
+    /// L-stable backward-Euler matrices. The BE sample does not read `q_dot`,
+    /// re-seeds it from its own capacitor currents, and damps the mode the step
+    /// excited. Exactly one
     /// sample: a second BE sample over-damps and can knock a marginal
     /// self-oscillator (Farfisa G10 divider under `--force-trap`) into the wrong
     /// equilibrium. Byte-neutral for runs that never call a setter (e.g. golden
@@ -526,14 +532,8 @@ pub struct SolverConfig {
     ///
     /// A pin or a release is an equation-set swap of the same kind as a switch
     /// toggle: the op-amp's output row is replaced by the rail constraint (or
-    /// given back). The sample that makes the swap is solved on trapezoidal
-    /// history built on the old set, and the mismatch is injected into trap's
-    /// `z=-1` mode, which never decays on a capless nonlinear row downstream
-    /// of the pinned output (a diode clipper node behind a coupling cap and a
-    /// resistor): that row then satisfies only the two-sample AVERAGE of its
-    /// KCL. With one pin entry and one release per half cycle, the injections
-    /// accumulate. The sample after the swap is solved on backward Euler,
-    /// which enforces the algebraic rows exactly and ends the mode.
+    /// given back). The sample after the swap is solved on backward Euler,
+    /// which does not read the `q_dot` built on the old set and re-seeds it.
     #[serde(default)]
     pub transition_be: bool,
     /// Requested nodal sub-path override (see
@@ -819,7 +819,10 @@ mod named_constants_tests {
 pub struct Matrices {
     /// S = A^{-1}, N×N row-major (default for codegen sample rate)
     pub s: Vec<f64>,
-    /// A_neg = alpha*C - G, N×N row-major (default for codegen sample rate)
+    /// History matrix `alpha·C` (algebraic rows zeroed), N×N row-major, at the
+    /// codegen sample rate. Trapezoidal builds use the charge form: this plus
+    /// the carried charge derivative `q_dot`, see [`charge_form_history`].
+    /// Backward-Euler builds: `(1/T)·C`.
     pub a_neg: Vec<f64>,
     /// Nonlinear kernel K = N_v * S * N_i, M×M row-major (default for codegen sample rate)
     pub k: Vec<f64>,
@@ -827,7 +830,8 @@ pub struct Matrices {
     pub n_v: Vec<f64>,
     /// Current injection N_i, N×M row-major (kernel storage order)
     pub n_i: Vec<f64>,
-    /// Constant RHS contribution from DC sources, length N
+    /// Constant RHS contribution from DC sources, length N. ×1 on every row:
+    /// under both integrators a source enters once, at `n+1`.
     pub rhs_const: Vec<f64>,
     /// Raw conductance matrix G, N×N row-major (sample-rate independent).
     /// Includes input conductance but NOT inductor companion conductances.
@@ -1363,13 +1367,13 @@ pub struct SparseInfo {
 /// step `t = 1/rate`.
 ///
 /// No-op on the augmented-inductor path (branch rows carry L in C there).
-/// The companion form is the trapezoidal one (`g_eq = T/(2L)`, `−g_eq` into
-/// A_neg) for BOTH primary integrators — this mirrors the emitted
-/// `rebuild_matrices()`, which stamps the same form regardless of
-/// `backward_euler`, and the per-sample history update
-/// (`i_hist = 2·i_prev`, doubled-trapezoidal). Baked constants must equal
-/// the first runtime rebuild's output or the integrator convention would
-/// silently swap on the first pot/switch/sample-rate change.
+/// The companion form is the trapezoidal one (`g_eq = T/(2L)`) for BOTH
+/// primary integrators — this mirrors the emitted `rebuild_matrices()`,
+/// which stamps the same form regardless of `backward_euler`. The `−g_eq`
+/// stamped into `a_neg_flat` here builds the whole-system operator the
+/// stability discriminator evaluates; the shipped charge-form history keeps
+/// the companion's known current in its source instead
+/// (`i_hist = i + g_eq·v`, see [`charge_form_history`]).
 fn stamp_dk_companion_inductors(
     a_flat: &mut [f64],
     a_neg_flat: &mut [f64],
@@ -1550,6 +1554,68 @@ fn history_zero_rows(
     }
     (n_nodes..mna_n_aug.min(n))
         .filter(|&row| !is_bjt_internal[row])
+        .collect()
+}
+
+/// The charge-form history matrix: `alpha·C` with the algebraic rows zeroed.
+/// It multiplies `x_n` in the per-sample RHS
+///
+/// ```text
+///     A·x_{n+1} − N_i·i_nl(x_{n+1}) = RHS_CONST + H·x_n + q_dot_n + b_{n+1}
+/// ```
+///
+/// with `q_dot` the carried charge derivative (`C·ẋ`: a capacitor current on
+/// node rows, `dΦ/dt` on inductor branch rows; trapezoidal builds only). The
+/// whole-system form `H = alpha·C − G` fed every accepted KCL residual on the
+/// algebraic combinations back as a z = −1 memory; this form enforces KCL at
+/// `n+1` exactly. Companion-modeled inductors (DK library path) carry their
+/// whole known current in their history source, not here. See
+/// docs/aidocs/COMPANION_MODELS.md.
+fn charge_form_history(c_matrix: &[f64], n: usize, alpha: f64, zero_rows: &[usize]) -> Vec<f64> {
+    let mut h: Vec<f64> = c_matrix.iter().map(|&c| alpha * c).collect();
+    for &row in zero_rows {
+        for j in 0..n {
+            h[row * n + j] = 0.0;
+        }
+    }
+    h
+}
+
+/// DC sources at ×1: current sources on their node rows, voltage-source
+/// values on their extension rows. The constant RHS of both integrators.
+fn rhs_const_1x(mna: &MnaSystem, n: usize) -> Vec<f64> {
+    let mut rc = vec![0.0f64; n];
+    for src in &mna.current_sources {
+        crate::mna::inject_rhs_current(&mut rc, src.n_plus_idx, src.dc_value);
+        crate::mna::inject_rhs_current(&mut rc, src.n_minus_idx, -src.dc_value);
+    }
+    for vs in &mna.voltage_sources {
+        let k = mna.n + vs.ext_idx;
+        if k < n {
+            rc[k] = vs.dc_value;
+        }
+    }
+    rc
+}
+
+/// The charge derivative at an IC-seeded start: see
+/// [`CircuitIR::q_dot_ic_seed`]. `matrices` must already be the shipped
+/// (charge-form) set.
+fn q_dot_at(matrices: &Matrices, n: usize, m: usize, x: &[f64], i_nl: &[f64]) -> Vec<f64> {
+    (0..n)
+        .map(|i| {
+            if matrices.a_neg[i * n..(i + 1) * n].iter().all(|&h| h == 0.0) {
+                return 0.0;
+            }
+            let mut q = matrices.rhs_const.get(i).copied().unwrap_or(0.0);
+            for k in 0..m.min(i_nl.len()) {
+                q += matrices.n_i[i * m + k] * i_nl[k];
+            }
+            for j in 0..n.min(x.len()) {
+                q -= matrices.g_matrix[i * n + j] * x[j];
+            }
+            q
+        })
         .collect()
 }
 
@@ -1881,8 +1947,7 @@ impl CircuitIR {
         // on max|S| > NYQUIST_GATE_MAX_ABS_S, calibrated to fire only where the
         // fs/2 limit cycle is AUDIBLE (a 2-stage BJT preamp at max|S| ≈ 3e4 stays
         // on trap with a µV cycle; a 3× triode cascade at ≈5e5 needs BE). BE works
-        // because the DK BE RHS drops the `N_i·i_nl_prev` stamp that seeds the
-        // mode. All 5 are golden-verified. No reroute is warranted: wiring this
+        // because it is L-stable. All 5 are golden-verified. No reroute is warranted: wiring this
         // analyzer into the router's `dk_unstable` would move 5 working circuits
         // onto the costlier nodal full-LU path for zero correctness benefit.
         //
@@ -1893,8 +1958,8 @@ impl CircuitIR {
         // passive LC (e.g., MM cartridge LRC at ~10 kHz) over-damps the
         // resonance peak the circuit is supposed to produce. The Nyquist
         // artifact that motivates auto-BE (`docs/aidocs/NOISE.md`,
-        // 2026-04-19 nodal fix) is specific to the nonlinear `N_i·i_nl_prev`
-        // RHS stamp and doesn't exist when `m == 0`. Empirical signature
+        // 2026-04-19 nodal fix) arises on nonlinear circuits and doesn't exist
+        // when `m == 0`. Empirical signature
         // before the gate: gold-press-cartridge peak was killed at fs ∈
         // {88.2k, 96k, 150k, 300k, 384k} with spectral_radius ∈ 1.002..1.29,
         // while adjacent rates sampled rho < 1.002 and produced the correct
@@ -2158,13 +2223,21 @@ impl CircuitIR {
                 (Vec::new(), Vec::new(), Vec::new(), Vec::new())
             };
 
+            // Charge form: history `alpha·C`, DC ×1. The whole-system
+            // `a_neg_flat` was the discriminator's operator only.
+            let _ = a_neg_flat;
             Matrices {
                 s,
-                a_neg: a_neg_flat,
+                a_neg: charge_form_history(
+                    &c_matrix,
+                    n,
+                    2.0 * internal_rate,
+                    &topology.history_zero_rows,
+                ),
                 k,
                 n_v: kernel.n_v.clone(),
                 n_i: kernel.n_i.clone(),
-                rhs_const: kernel.rhs_const.clone(),
+                rhs_const: rhs_const_1x(mna, n),
                 g_matrix,
                 c_matrix,
                 a_matrix: Vec::new(),
@@ -2265,13 +2338,20 @@ impl CircuitIR {
                 (Vec::new(), Vec::new(), Vec::new(), Vec::new())
             };
 
+            // Charge form: history `alpha·C`, DC ×1. The whole-system
+            // `kernel.a_neg` was the discriminator's operator only.
             Matrices {
                 s: kernel.s.clone(),
-                a_neg: kernel.a_neg.clone(),
+                a_neg: charge_form_history(
+                    &c_matrix,
+                    n,
+                    2.0 * internal_rate,
+                    &topology.history_zero_rows,
+                ),
                 k: kernel.k.clone(),
                 n_v: kernel.n_v.clone(),
                 n_i: kernel.n_i.clone(),
-                rhs_const: kernel.rhs_const.clone(),
+                rhs_const: rhs_const_1x(mna, n),
                 g_matrix,
                 c_matrix,
                 a_matrix: Vec::new(),
@@ -2629,6 +2709,12 @@ impl CircuitIR {
                 v.truncate(kernel.n);
                 v
             });
+        let q_dot_ic_seed = match (&v_prev_ic_seed, &dc_nl_currents_ic_seed) {
+            (Some(x), Some(i_nl)) if !solver_config.backward_euler => {
+                Some(q_dot_at(&matrices, n, m, x, i_nl))
+            }
+            _ => None,
+        };
 
         if !dc_result.converged && m > 0 {
             log::warn!(
@@ -2736,6 +2822,7 @@ impl CircuitIR {
             has_dc_op,
             dc_nl_currents,
             dc_nl_currents_ic_seed,
+            q_dot_ic_seed,
             dc_op_converged,
             dc_op_method,
             dc_op_iterations,
@@ -3130,8 +3217,8 @@ impl CircuitIR {
         // bilinear preserves exactly — gold-press cartridge regression).
         //
         // Additional `m > 0` gate (matching the DK path): pure-linear passive
-        // circuits don't have the `N_i·i_nl_prev` RHS stamp that seeds the
-        // Nyquist mode, AND their Thevenin-stamped input nodes can produce a
+        // circuits have no nonlinear residual to seed the Nyquist mode, AND
+        // their Thevenin-stamped input nodes can produce a
         // degenerate eigenvalue near -1 in `S·A_neg` that has no physical
         // meaning (the input is driven externally each sample, so the
         // input-row dynamics are arbitrary). Without the gate, an RC lowpass
@@ -3319,8 +3406,8 @@ impl CircuitIR {
         // backward Euler (by flag, `.integrator be`, behavioral sources, or the
         // promotion above), and `--force-trap` / `.integrator trap` opt out
         // entirely. The `m > 0` gate matches the auto-BE promotion: a passive
-        // linear circuit has no `N_i·i_nl_prev` stamp to seed a Nyquist cycle,
-        // so it stays byte-identical (no detector emitted).
+        // linear circuit has nothing to seed a Nyquist cycle, so it stays
+        // byte-identical (no detector emitted).
         //
         // Saturating inductors make a circuit nonlinear with M = 0 (the flux
         // law lives on an augmented row, not in N_i), so they qualify on their
@@ -3386,6 +3473,19 @@ impl CircuitIR {
             );
         }
 
+        // Charge (companion) form: a trapezoidal build ships the history
+        // matrix `alpha·C` and the DC sources at ×1 (they enter at n+1 only).
+        // The whole-system `alpha·C − G` built above is what the stability
+        // discriminators were calibrated against, so it is replaced only here,
+        // after they ran.
+        let (a_neg_flat, rhs_const) = if solver_config.backward_euler {
+            (a_neg_flat, rhs_const)
+        } else {
+            (
+                charge_form_history(&c_matrix, n, alpha, &topology.history_zero_rows),
+                rhs_const_be.clone(),
+            )
+        };
         let matrices = Matrices {
             s: s_flat,
             k: k_flat,
@@ -3469,6 +3569,12 @@ impl CircuitIR {
                 v.truncate(n);
                 v
             });
+        let q_dot_ic_seed = match (&v_prev_ic_seed, &dc_nl_currents_ic_seed) {
+            (Some(x), Some(i_nl)) if !solver_config.backward_euler => {
+                Some(q_dot_at(&matrices, n, m, x, i_nl))
+            }
+            _ => None,
+        };
 
         // Resize DC OP to n_nodal dimension. Do NOT clamp op-amp outputs
         // to supply rails here — the emitted per-sample active-set resolve
@@ -3619,6 +3725,7 @@ impl CircuitIR {
             has_dc_op,
             dc_nl_currents,
             dc_nl_currents_ic_seed,
+            q_dot_ic_seed,
             dc_op_converged,
             dc_op_method,
             dc_op_iterations,

@@ -1230,7 +1230,7 @@ struct CircuitState {
     pub ctrl_voltage: f64,
 }
 
-fn build_rhs(input: f64, input_prev: f64, state: &CircuitState) -> [f64; N] {
+fn build_rhs(input: f64, state: &CircuitState) -> [f64; N] {
     // ...
     rhs[VSOURCE_VCTRL_RHS_ROW] += state.ctrl_voltage;
     rhs

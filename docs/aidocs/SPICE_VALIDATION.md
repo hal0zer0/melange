@@ -169,17 +169,21 @@ mna.g[input_node][input_node] += input_conductance;
 let kernel = DkKernel::from_mna(&mna, sample_rate)?;
 ```
 
-### Trapezoidal Input Integration
+### Input Integration
 
 ```rust
-// In solver process_sample():
-// RIGHT: Trapezoidal rule
-rhs[input_node] += (input + input_prev) * input_conductance;
-input_prev = input;  // Save for next sample
+// In generated process_sample() (charge form): the input enters once, at n+1;
+// the capacitor history (alpha*C*v_prev + q_dot) carries the rest.
+rhs[input_node] += input * input_conductance;
 
-// WRONG: Don't use 2.0 * input
+// WRONG: stamping the source twice
 // rhs[input_node] += 2.0 * input * input_conductance;
+// rhs[input_node] += (input + input_prev) * input_conductance;
 ```
+
+(`(input + input_prev) * G_in` is the whole-system form, which the library
+`LinearSolver` still uses together with its `alpha*C - G` history; the two
+forms agree on linear circuits. See `COMPANION_MODELS.md`.)
 
 ## Debugging Low Correlation
 
@@ -201,8 +205,8 @@ If correlation ≈ 0 or very low:
    - Verify no extra voltage sources in melange netlist
 
 4. **Is input integration correct?**
-   - Verify trapezoidal rule: `(input + input_prev) * G_in`
-   - Check `input_prev` is persisted across samples
+   - Generated code: `input * G_in`, once, at `n+1`
+   - Check `q_dot` is committed with `v_prev` every sample (trapezoidal builds)
 
 ### Diagnostic Output
 

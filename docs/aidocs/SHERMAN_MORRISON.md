@@ -116,6 +116,10 @@ rhs[node_q - 1] -= delta_g * v_prev[node_q - 1]
 Note: uses `delta_g` directly (not `scale`) because this corrects the A_neg matrix
 contribution, not the S matrix.
 
+This correction belongs to the whole-system history `A_neg = alpha*C - G`. The
+generated code's charge-form history `A_neg = alpha*C` (`COMPANION_MODELS.md`)
+has no `G` term, so a conductance change has no RHS correction there.
+
 ### 3. S Matrix Correction (Linear Prediction)
 
 After computing v_pred = S * rhs:

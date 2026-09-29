@@ -13,8 +13,15 @@ Reduce N-node linear system to M-dimensional nonlinear system for real-time solv
 ### A Matrix (System Matrix)
 ```
 A = G + alpha*C    where alpha = 2/T (trapezoidal)
-A_neg = alpha*C - G
+H = alpha*C        (history matrix; stored as `a_neg` / `A_NEG_DEFAULT`)
 ```
+
+The generated solver uses the charge (companion) form: `H` has no `-G`
+term, and the carried capacitor currents `q_dot = C*dx/dt` complete the
+history. Derivation, update rules and the reason for this form:
+`COMPANION_MODELS.md` "Charge (Companion) Form". The library `DkKernel`
+still builds the whole-system `a_neg = alpha*C - G`, which the stability
+discriminators evaluate (`S*(alpha*C - G)`).
 
 ### S Matrix (Inverse System Matrix)
 ```
@@ -55,15 +62,14 @@ Devices occupy M dimensions in netlist order:
 
 ### Step 1: Build RHS
 ```
-rhs = A_neg * v_prev + N_i * i_nl_prev + (V_in + V_in_prev) * G_in + rhs_const
+rhs = rhs_const + H * v_prev + q_dot + V_in(n+1) * G_in      (+ injections, runtime sources, noise at n+1)
 ```
-Note: A_neg already contains capacitor history via alpha*C. Do NOT add separate cap_history.
+`H * v_prev + q_dot` is the whole capacitor history. Do NOT add a separate
+cap_history, and do NOT add `-G * v_prev`, `V_in(n) * G_in` or
+`N_i * i_nl_prev`: those are terms of the whole-system form, and each one
+added to the charge form double-counts a source.
 
-**CRITICAL**: Use trapezoidal rule for inputs: `(V_in + V_in_prev) * G_in`, NOT `2 * V_in * G_in`
-
-The `N_i * i_nl_prev` term is part of trapezoidal nonlinear integration. Combined with
-the full `S * N_i * i_nl` in Step 4, the net effect is `N_i * (i_nl[n+1] + i_nl[n])` —
-a proper trapezoidal average of nonlinear currents across timesteps.
+`rhs_const` is ×1 on every row. The input is stamped once, at `n+1`.
 
 ### Step 2: Linear Prediction
 ```
@@ -84,59 +90,50 @@ where J_dev is the block-diagonal device Jacobian:
 
 K is naturally negative, so J > 0 (always convergent).
 
-### Step 4: Final Voltage (Trapezoidal Nonlinear)
+### Step 4: Final Voltage
 ```
 v = v_pred + S * N_i * i_nl
 ```
 
-This uses the full `i_nl` (not the delta `i_nl - i_nl_prev`). Combined with Step 1's
-`N_i * i_nl_prev` in the RHS, the net algebraic contribution is:
+This uses the full `i_nl` at `n+1` (not a delta against `i_nl_prev`): in the
+charge form the nonlinear current enters the step at `n+1` only, exactly
+as KCL at `n+1` requires. Its effect on the capacitor charge reaches the next
+sample through `q_dot`.
+
+### Step 5: Commit
 ```
-v = S * (... + N_i * i_nl_prev + ...) + S * N_i * i_nl
-  = S * (... + N_i * (i_nl_prev + i_nl) + ...)
+q_dot = alpha*C*(v - v_prev) - q_dot       (trapezoidal sample)
+q_dot = (C/T)*(v - v_prev)                  (BE-fallback sample)
+v_prev = v
 ```
-This is trapezoidal integration for nonlinear currents, matching the trapezoidal
-discretization used for linear elements (`A = G + 2C/T`). Using only the delta
-`(i_nl - i_nl_prev)` would give backward Euler for nonlinear currents, which creates
-a mixed integration scheme that is conditionally unstable (period-3 oscillation in
-BJT circuits).
 
 ## Companion Inductors in the DK Formulation
 
-The DK RHS equation is the *sum* of the KCL systems at steps n and n-1 —
-that is what `A = G + 2C/T`, `A_neg = 2C/T − G`, the doubled source terms
-(`2*I_dc`, `(V_in + V_in_prev)*G_in`), and the trapezoidal nonlinear
-average all encode. A companion-model inductor therefore contributes
-`i_L[n] + i_L[n-1]` to that summed equation, and with the trapezoidal
-update `i_L[n] = i_L[n-1] + g_eq*(v[n] + v[n-1])` (g_eq = T/2L, stamped
-into G so it rides A and A_neg):
+The CLI builds every inductor as an augmented branch row (its `L` sits in
+`C`, so its history is part of `H` and `q_dot`). When the DK path instead
+companion-models an inductor (library use), the trapezoidal update
 
 ```
-i_L[n] + i_L[n-1] = 2*i_L[n-1] + g_eq*(v[n] + v[n-1])
+i_L[n+1] = i_L[n] + g_eq*(v[n+1] + v[n])          g_eq = T/(2L)
+         = g_eq*v[n+1] + (i_L[n] + g_eq*v[n])
 ```
 
-The `g_eq*(v[n] + v[n-1])` part is already carried by the g_eq stamp;
-the history injection is exactly:
+splits into a conductance `g_eq` stamped into `A` (and not into `H`) and a
+history current source carrying the whole known part:
 
 ```
-i_hist = 2 * i_L[n-1]          (NOT the single-step Norton i[n-1] + g_eq*v[n-1])
+i_hist = i_L[n] + g_eq*v[n]          (the single-step Norton source, COMPANION_MODELS.md)
 ```
 
-The single-step Norton source is correct for plain MNA at a single
-timestep, but under-injects history in the doubled DK equation and makes
-the inductor behave as ~2L (fixed 2026-07-18; verified against an exact
-trapezoidal reference to <1e-12 in `dk_math_verification.rs`). The same
-`2*i[n-1]` form applies vector-wise to coupled pairs and transformer
-groups (`Y*(v[n]+v[n-1])` carried by the admittance stamps).
+The same form applies vector-wise to coupled pairs and transformer groups:
+`i_hist = i[n] + Y*v[n]` per winding, with the `Y*v[n+1]` part in the
+admittance stamps of `A`.
 
-Note: because `A + A_neg = (4/T)*C` exactly (G cancels), node-voltage
-patterns in null(C) are marginally-stable period-2 (Nyquist) modes of
-this formulation. They stay at zero when state is consistent, but a
-startup inconsistency (e.g. `v_prev = DC_OP` with `ind_i_prev = 0`) can
-excite them on capacitance-free nodes. Physical nodes always carry some
-capacitance (hence the parasitic-cap auto-insertion for resistive
-nonlinear circuits); the augmented-MNA inductor path does not have this
-companion-state consistency concern.
+Capacitor-free rows (null(C)) carry no history under the charge form: their
+equation each sample is KCL at `n+1`, so no period-2 mode lives there. The
+library `DkKernel` / `LinearSolver` keep the whole-system companion
+(`i_hist = 2*i_L[n]`, with `g_eq` in both `A` and `a_neg`), verified against
+an exact trapezoidal reference in `dk_math_verification.rs`.
 
 ## Sign Convention Summary
 
@@ -158,9 +155,11 @@ companion-state consistency concern.
 
 The DK method uses the trapezoidal rule: `A = G + (2/T)*C`. When the circuit has
 nonlinear devices but no capacitors (`C = 0`), the system matrix degenerates to
-`A = G`, and `A_neg = -G`. This means `A_neg * v_prev = -G * v_prev` has no
-frequency-dependent history, and the solver can oscillate (period-2 instability for
-purely resistive nonlinear circuits).
+`A = G` and the history matrix `H = alpha*C` to zero: every row is algebraic
+and each sample is a static solve. The whole-system operator that the stability
+discriminators evaluate degenerates to `S*(alpha*C - G) = -I` — every
+eigenvalue at `z = -1`, the period-2 instability of purely resistive nonlinear
+circuits under that form. Junction capacitance is also simply physical.
 
 **Solution**: Call `MnaSystem::add_parasitic_caps()` before building the DK kernel.
 This stamps 10pF (`PARASITIC_CAP = 10e-12`) across each physical device junction:
@@ -176,8 +175,8 @@ are stamped across junctions (not node-to-ground) to avoid introducing artificia
 ground coupling. A `log::warn!` is emitted when auto-insertion occurs.
 
 With parasitic caps present, the C matrix is non-trivial, `A` has proper frequency
-dependence via `(2/T)*C`, and `A_neg = (2/T)*C - G` provides the correct capacitor
-history for stable trapezoidal integration.
+dependence via `(2/T)*C`, and `H*v_prev + q_dot` carries the junction
+capacitors' history.
 
 ## Common Bugs
 1. **Extra negation of K** -> NR diverges (positive feedback)
@@ -216,20 +215,23 @@ conductance isn't in G, it's not part of the circuit topology, and the
 generated solver's per-sample input injection creates an inconsistent system.
 This is the single most common SPICE-correlation failure for new circuits.
 
-### Trapezoidal Rule for Time-Varying Inputs
+### Time-Varying Inputs
 
-**WRONG**:
+**WRONG** (stamps the source twice — the whole-system form's `b(n) + b(n+1)`
+without its `-G*v_prev` history):
 ```rust
-rhs[input_node] += 2.0 * input * G_in;
+rhs[input_node] += 2.0 * input * G_in;            // wrong
+rhs[input_node] += (input + input_prev) * G_in;   // also wrong (whole-system input stamp)
 ```
 
-**RIGHT**:
+**RIGHT** (charge form: every source once, at `n+1`; `q_dot` carries the history):
 ```rust
-rhs[input_node] += (input + input_prev) * G_in;
-// Track input_prev across samples
+rhs[input_node] += input * G_in;
 ```
 
-**Impact**: In RC lowpass test, wrong approach gave 3.2% RMS error; correct approach gave 0.03%.
+The same holds for `.inject` sources (Norton `I`, Thevenin `V/R`) and
+`.runtime` sources. `input_prev` survives only for the linear input ramp
+across adaptive sub-steps and sub-sample-fire segments.
 
 ### Input Conductance Value for Validation
 

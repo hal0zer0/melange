@@ -98,8 +98,11 @@ by oomox (Subspace radio plugin) to make FM capture/threshold/click behavior
 > **What's wired in the emitter (algebraic `I={}`):** behavioral circuits force
 > `SolverRoute::Nodal` + `use_full_nodal` (the full-LU path) and **backward
 > Euler** (`be = … || behavioral`), because the stamp is current-only and BE's
-> steady state is exactly `G·v = i` (trapezoidal would need an `i_prev` history
-> term — a future refinement; under trap the result is half-right). Per NR
+> steady state is exactly `G·v = i` (under the whole-system trapezoidal form a
+> current-only stamp would need an `i_prev` history term; the charge-form
+> trapezoidal integrator of [COMPANION_MODELS.md](COMPANION_MODELS.md) enters
+> every current at `n+1` only, so that reason does not apply to it — whether
+> behavioral sources can run on trap is unmeasured). Per NR
 > iteration: `emit_behavioral_evals` (value + `∂f/∂V` partials at the iterate) →
 > `emit_behavioral_jacobian` stamps `∂f/∂V(k)` into `chord_lu` (full refactor
 > each iteration, since behavioral Jacobian isn't a frozen device block) →

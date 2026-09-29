@@ -172,16 +172,16 @@ fn nodal_full_lu_fallback_rhs_has_no_midpoint_stamp() {
 fn dk_fallback_rhs_has_no_midpoint_stamp() {
     let code = generate_dk(SWITCHED_TRIODE);
     assert_no_midpoint_stamp("DK", &code);
-    // The trap-primary build_rhs itself MUST keep the midpoint half (the trap
-    // average is split between build_rhs and compute_final_voltages).
+    // Charge form: the trap-primary build_rhs carries q_dot and no midpoint
+    // half either (the nonlinear current enters at n+1 only).
     let build_rhs = code
         .split("fn build_rhs")
         .nth(1)
         .and_then(|after| after.split("fn ").next())
         .unwrap_or("");
     assert!(
-        build_rhs.contains("N_I[") && build_rhs.contains("state.i_nl_prev"),
-        "DK trap-primary build_rhs lost its N_I * i_nl_prev half"
+        !build_rhs.contains("state.i_nl_prev") && build_rhs.contains("state.q_dot["),
+        "DK trap-primary build_rhs: q_dot, no N_I * i_nl_prev"
     );
 }
 

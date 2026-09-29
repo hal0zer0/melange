@@ -42,6 +42,19 @@ the matrices dirty. For smoothed knob sweeps (the common case) the NR
 seed (`v_prev`/`i_nl_prev`) stays consistent with the previous sample's
 solution, which is within basin for any realistic per-sample delta.
 
+A pot touches `A` and `S` only: the history matrix `A_neg = alpha*C` (charge
+form, `COMPANION_MODELS.md`) carries no `G` term, so a conductance change never
+enters the history. On a trapezoidal build with a `.switch` or a knob `.pot`,
+each `set_switch_*` / `set_pot_*` call arms **breakpoint-BE**
+(`SolverConfig::breakpoint_be`, `BREAKPOINT_BE_SAMPLES = 1`): the next sample
+is solved on the backward-Euler matrices. That sample does not read the
+carried `q_dot` (capacitor currents built on the old component values),
+re-seeds it from its own capacitor currents, and damps the mode the step
+excited; trap resumes on the sample after. Exactly one sample — a second one
+over-damps. `.runtime R` does not arm it. Whether breakpoint-BE still earns
+its keep under the charge form is pending re-measurement (`STATUS.md` Pending
+Work).
+
 For preset recalls, MIDI program changes, or any *unsmoothed* large R
 jump, callers should follow with `recompute_dc_op()`:
 

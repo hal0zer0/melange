@@ -252,6 +252,45 @@ generated state is smaller.
 
 ### Changed
 
+- **The trapezoidal integrator now carries the capacitor currents as state
+  (the charge, or companion, form), and Kirchhoff's current law holds exactly
+  at every sample.** The generated solvers used to sum the circuit equations
+  at the previous and the new sample, which holds current balance only on
+  average. Wherever a Newton solve stopped a little short of exact, that
+  shortfall was fed back into the next sample with alternating sign and never
+  decayed: an alternating error at half the sample rate on nodes with no
+  capacitor, and on combinations of nodes linked only through one. It is gone.
+  Each sample now solves the circuit at the new instant, using the previous
+  voltages and a stored capacitor-current vector `q_dot` (a new public state
+  field). Every source (DC, input, `.inject`, runtime, noise) enters once, at
+  the new sample. On a circuit that solves exactly the two forms are the same
+  arithmetic, so linear circuits render identically up to rounding. Measured:
+  - on a capacitor-coupled diode clipper at 96 kHz the carried current error
+    fell from 1.3–1.5 µA to at most 0.011 µA;
+  - on an op-amp that rails into a clipper, its output at 48 kHz is within
+    1.1 mV rms of a 16x-rate render, where it was 0.49 V off;
+  - circuits that sat in a tiny alternating limit cycle at rest (3.9 µV,
+    75 nV) now decay to silence;
+  - a saturating-choke stage that never reached a steady state (drifting
+    1.2 mV every 0.1 s) now settles.
+
+  In the regression set 107 renders are bit-identical (backward-Euler
+  builds), linear circuits move by 1e-13 or less, and 7 renders change. Each
+  of the 7 was traced to the old alternating error. No render is left with a
+  marginal Newton convergence rate, where one preamp had three. The
+  ngspice-validation suite is unchanged or better on every test.
+
+  What else moves with it:
+  - Noise is stamped as the physical current, one draw per source per sample.
+    The old two-draw stamps were the same current seen through the old form,
+    so the spectrum is unchanged (kT/C still holds). The backward-Euler
+    fallback now replays it exactly, where it was 3 dB hot.
+  - `recompute_dc_op()` no longer halves the node rows of the DC constant.
+  - DK circuits no longer take a kick on every pot move: the history no
+    longer contains the conductances a pot changes.
+  - A test or host that writes `v_prev` directly also has to set `q_dot`,
+    because the history is `alpha*C*v_prev + q_dot` (see `docs/CODE_API.md`).
+    `reset()` and `set_dc_operating_point()` do this for you.
 - **Every op-amp whose output is capacitor-coupled downstream now gets
   `active-set` rail handling by default**, with one backward-Euler sample at
   each pin and release. Circuits the automatic choice used to send to
@@ -345,6 +384,21 @@ generated state is smaller.
 
 ### Tests
 
+- `charge_form_c_switch_tests.rs`: a `.switch` that changes a capacitor
+  mid-render does not carry the old capacitor current. Scrambling `q_dot` at
+  the switch leaves every later sample bit-identical on both nodal sub-paths,
+  because the backward-Euler sample the switch arms does not read it. Without
+  that sample the renders differ.
+- The backward-Euler latch's witnesses changed. The ring it used to catch
+  after a stop on the open-secondary transformer was the old alternating
+  error, and it no longer occurs; that deck is now a negative witness. The
+  positive witness is a stiff node (1 kOhm into 10 pF), which trapezoidal
+  integration still rings after a stop. The tolerance-floor witness excites
+  that node through `q_dot`, at 1x and 4x oversampling.
+- The transition-BE and chord-exit-step witnesses no longer see a carried
+  residual. Their mutants now sit at the Newton floor too: 0.29 uA at the
+  clipper node without the transition-BE sample, and 1.09 uA per sample
+  without the exit step (0.39 uA with it).
 - The regression capture fails a render whose output hits the generated
   output clamp, unless its entry declares that the clamp is intended and why.
   On clamped samples the recording measures the clamp, not the circuit. The

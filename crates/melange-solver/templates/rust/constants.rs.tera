@@ -145,8 +145,8 @@ pub const S_DEFAULT: [[f64; N]; N] = [
 {% for row in s_rows %}    [{{ row }}],
 {% endfor %}];
 
-/// Default A_neg matrix: A_neg = alpha*C - G (at SAMPLE_RATE)
-/// Used for RHS computation: A_neg * v_prev gives history contribution
+/// Default A_neg matrix: A_neg = alpha*C, the charge-form history (at SAMPLE_RATE)
+/// Used for RHS computation: A_neg * v_prev (+ q_dot) gives the history contribution
 pub const A_NEG_DEFAULT: [[f64; N]; N] = [
 {% for row in a_neg_rows %}    [{{ row }}],
 {% endfor %}];
