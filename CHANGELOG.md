@@ -40,6 +40,18 @@ generated state is smaller.
   before the build rather than during code generation. No shipped build used
   `boyle-diodes`.
 
+- **An op-amp whose output rails at rest beside a diode or transistor now has
+  a DC operating point.** The rail was a clamp applied after each Newton step,
+  so the convergence test kept reading the unclamped step: an inverting stage
+  whose linear output (10.87 V) sat past its 8 V limit with a diode or a BJT
+  base on its output returned `Failed` after 200 iterations under every rail
+  mode, `none` included. The rail is now part of each Newton solve, pinned the
+  way the rail mode pins it (at the terminal for `hard`, on the load line for
+  the active-set modes), and a pinned output releases when the op-amp's own
+  test says so. Both circuits now converge under every rail mode, within 1 µV
+  of ngspice with the op-amp clamped the same way. No circuit in the
+  regression corpus rails at rest, and every generated file is unchanged.
+
 - **`melange dc-op` reports the operating point `compile` ships.** It built
   its own circuit and left out what the build adds: a `.inject` source's
   impedance (a common-emitter collector read 6.95 V where the build puts it at

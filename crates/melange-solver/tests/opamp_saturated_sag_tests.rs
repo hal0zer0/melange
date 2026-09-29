@@ -221,13 +221,30 @@ fn the_rail_pin_outcome_is_surfaced_and_its_fallback_is_counted() {
     let out = pinned.v_node[mna.node_map["out"] - 1];
     assert!((out - 14.0 / 1.2).abs() < 1e-6, "pinned DC OP {out} V");
 
-    // No active-set rounds allowed: the fallback path keeps the operating
-    // point without the pin (on this linear deck, the unclamped linear
-    // model's), and must say so.
+    // No re-solve rounds allowed. The full-AOL finish is a Newton solve whose
+    // own active set pins the output, so the point is still pinned.
     let config = DcOpConfig {
         max_rail_pin_rounds: 0,
         ..DcOpConfig::default()
     };
+    let finished = dc_op::solve_dc_operating_point(&mna, &slots, &config);
+    assert_eq!(finished.rail_pin, RailPin::Pinned(1));
+
+    // At AOL 1000 (within the ladder's gain cap) this linear deck's operating
+    // point is one linear solve and no Newton solve runs: the pin is the
+    // re-solve's alone. Without rounds, the fallback keeps the unclamped
+    // linear model's point and must say so.
+    let deck = RAILED_AT_REST.replace("AOL=100000", "AOL=1000");
+    let netlist = Netlist::parse(&deck).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).unwrap();
+    let slots = CircuitIR::build_device_info_with_mna(&netlist, Some(&mna)).unwrap();
+    let pinned = dc_op::solve_dc_operating_point(&mna, &slots, &DcOpConfig::default());
+    assert_eq!(pinned.rail_pin, RailPin::Pinned(1));
+    let out = pinned.v_node[mna.node_map["out"] - 1];
+    assert!(
+        (out - 14.0 / 1.2).abs() < 1e-6,
+        "AOL 1000 pinned DC OP {out} V"
+    );
     let fell_back = dc_op::solve_dc_operating_point(&mna, &slots, &config);
     assert!(
         matches!(&fell_back.rail_pin, RailPin::FellBack(why) if why.contains("did not settle")),

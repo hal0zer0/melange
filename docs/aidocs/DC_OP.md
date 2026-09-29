@@ -109,8 +109,8 @@ Each NR iteration is accepted only if BOTH hold:
 
 1. Per-variable step test (SPICE-style): `|delta_i| < reltol*|v_i| + tolerance`
    (`tolerance` = 1e-9 **volts**, `reltol` = 1e-6).
-2. Per-node KCL residual gate, evaluated at the post-damping, post-rail-clamp
-   iterate with freshly evaluated device currents:
+2. Per-node KCL residual gate, evaluated at the post-damping iterate with
+   freshly evaluated device currents:
    `|F_i| <= reltol * scale_i + DC_OP_KCL_ABSTOL_AMPS` for every voltage row,
    `F = G_dc*v - b_dc*scale - N_i*i_nl(N_v*v)`,
    `scale_i = max(|b_i|, |(N_i*i_nl)_i|, max_j |G_ij*v_j|)`,
@@ -124,13 +124,62 @@ KCL by kA (2026-09-13). The gate refuses such an iterate; the loop keeps
 going and, on iteration exhaustion, returns `converged = false` so the
 strategy ladder falls through (source stepping recovers the true root).
 
-Exemption: an op-amp output row is exempt from the gate ONLY on an iteration
-where the post-NR rail clamp actually pinned it (the clamp is an unmodeled
-constraint; the row carries the rail's source current) and never for
-BoyleDiodes op-amps (their rails are real catch diodes). Exempt rows still
-report. `DcOpResult::kcl_residual_max` / `kcl_worst_row` carry the residual of
-the RETURNED solution over all voltage rows with no exemptions; `melange dc-op`
+No row is exempt: a pinned op-amp output row (below) is checked against its
+own pinned equation. `DcOpResult::kcl_residual_max` / `kcl_worst_row` carry
+the residual of the RETURNED solution over all voltage rows; `melange dc-op`
 prints them (human and `--format json`).
+
+### Railed op-amps: an active set inside Newton
+
+A railed op-amp output is an active set inside every Newton iteration of every
+ladder stage (`dc_rail_pins`, `nr_dc_solve`). Each iteration solves with the
+current pin set substituted into its rows, the way the transient's rail mode
+pins them:
+
+- `DcRail::Terminal` (hard): the whole output row becomes `v_out = limit`.
+- `DcRail::LoadLine` (the active-set modes): the row keeps the node's KCL, the
+  VCCS leaves it, `1/ROUT` becomes `1/R_SAG`, and the limit enters as
+  `limit/R_SAG` (the output sits at `limit − R_SAG·I_load`).
+- `DcRail::Free` (rail mode `none`) and BoyleDiodes op-amps (their rails are
+  catch diodes, i.e. devices) are never pinned.
+
+Limits scale with the sources during source stepping; in AOL continuation a
+sidechain rectifier's lower limit widens to one volt below its `+` input
+(headroom for the rectifier diode's drop).
+
+The next iteration's pin set is read from the RAW Newton solution, before
+junction limiting and damping: only the raw solution satisfies the op-amp
+rows, so only there does `Gm·(v+ − v−)` read the output the linear model
+demands. Terminal tests `AOL·(v+ − v−)`; LoadLine tests
+`w = v_out + R_SAG·I_load`, `I_load = Gm·(v+ − v−) − v_out/ROUT`. Both use
+the gain of the system being solved (capped at `AOL_DC_MAX` in the ladder, the
+step value in AOL continuation, full in the finish). A HELD pin stays while
+its own test holds and otherwise releases; it never moves to the other rail in
+one step. With the output pinned the loop is open, so `v+ − v−` points at the
+opposite rail (a follower pinned high reads `v+ − VCC < 0`), and moving the pin
+there alternates between the rails for the whole budget. Released, the next
+solve decides the side with the loop closed, as the transient re-solves
+unpinned every sample. The start iterate of a solve is tested on the output
+node voltage itself, because it can come from another system (the finish
+starts from the gain-capped answer, whose `v+ − v−` times the full gain
+predicts an output hundreds of volts away). A pin-set change fails the step
+test.
+
+`pin_railed_opamps` pins the operating points no full-gain Newton solve
+produced: a circuit with no nonlinear devices whose op-amps all sit within
+`AOL_DC_MAX` (one linear solve, no rail), and a full-AOL finish that did not
+converge (the ladder's gain-capped point). Otherwise `DcOpResult::rail_pin`
+is the finish's settled pin set.
+
+Witnesses (`tests/dc_op_rail_active_set_tests.rs`), against ngspice `.op` at
+reltol 1e-9 with the op-amp clamped the same way (an 8 V source at the output,
+8 V behind 200 Ω, or the VCCS with `ROUT`): an op-amp linearly at 10.87 V
+beside a diode, and driving a BJT base, converge under every rail law, within
+1 µV of ngspice on the junction node (measured 2026-09-29). Both returned
+`Failed` after 200 iterations under every rail mode when the rail was a
+post-step clamp: the step test read the pre-clamp step. The held-pin rule has
+its own witness (a follower of a diode-clamped node whose linear start is past
+the rail).
 
 A build whose operating point did not converge is refused, by every verb
 (`build::assemble`): its generated code would start from a state that is not a
@@ -441,7 +490,7 @@ fields, then Newton-iterates
 ### Railed op-amps
 
 A railed op-amp output sits where the transient's rail mode keeps it, as in
-the compile-time DC OP (`dc_op::pin_railed_opamps`). The runtime recompute is
+the compile-time DC OP (see "Railed op-amps: an active set inside Newton"). The runtime recompute is
 DK-only, and on DK a clamped op-amp runs hard, so the recompute pins a railed
 output at its zero-load limit at the terminal: an active set (pin every output
 whose linear model `AOL·(v+ − v−)` passes its limit, re-solve with those rows

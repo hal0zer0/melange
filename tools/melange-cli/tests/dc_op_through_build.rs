@@ -173,20 +173,24 @@ fn dc_op_needs_an_input_port_like_compile() {
     assert!(stderr.contains("Input node 'in' not found"), "{stderr}");
 }
 
-/// A high-gain op-amp whose output sits beyond its rail at rest, beside a
-/// diode: its DC operating point does not converge (open finding).
-const UNCONVERGED: &str = "Railed op-amp beside a diode
+/// A high-gain op-amp whose output sits beyond its rail at rest, driving a BJT
+/// base, under `--opamp-rail-mode boyle-diodes` (the rail is a pair of catch
+/// diodes): its DC operating point does not converge (open finding; the same
+/// deck converges under every other rail mode).
+const UNCONVERGED: &str = "Railed op-amp into a BJT base, catch-diode rail
 Vref ref 0 DC 1
 R1 in inv 10k
 R2 inv oa 100k
 U1 ref inv oa OA1
 Rload oa 0 1k
 Rb oa b 1meg
-D1 b 0 DX
-Co oa out 1u
+Q1 c b 0 QN
+Rc vcc c 4.7k
+Vcc vcc 0 DC 12
+Co c out 1u
 Rl out 0 100k
-.model DX D(IS=1e-14)
 .model OA1 OA(AOL=200000 VCC=9 VEE=-9)
+.model QN NPN(IS=1e-14 BF=100)
 ";
 
 #[test]
@@ -194,12 +198,27 @@ fn an_unconverged_operating_point_is_refused_unless_allowed() {
     let deck = write_deck("unconverged", UNCONVERGED);
     let rs = deck.with_extension("rs");
     let compile = melange(
-        &["compile", "--format", "code", "-o", rs.to_str().unwrap()],
+        &[
+            "compile",
+            "--format",
+            "code",
+            "-o",
+            rs.to_str().unwrap(),
+            "--opamp-rail-mode",
+            "boyle-diodes",
+        ],
         &deck,
     );
-    let dc_op = melange(&["dc-op"], &deck);
+    let dc_op = melange(&["dc-op", "--opamp-rail-mode", "boyle-diodes"], &deck);
     let dc_op_allowed = melange(
-        &["dc-op", "--format", "json", "--allow-unconverged-dc-op"],
+        &[
+            "dc-op",
+            "--format",
+            "json",
+            "--allow-unconverged-dc-op",
+            "--opamp-rail-mode",
+            "boyle-diodes",
+        ],
         &deck,
     );
     let _ = std::fs::remove_file(&deck);
