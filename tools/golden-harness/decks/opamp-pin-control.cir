@@ -1,0 +1,26 @@
+single-supply op-amp overdrive into a diode clipper, with an envelope-detector sidechain (rails 0/9 V)
+Vcc vcc 0 DC 9
+R_b1 vcc vbias 100k
+R_b2 vbias 0 100k
+C_b vbias 0 10u
+C_in in np 100n
+R_in np vbias 1Meg
+U1 np nm oa OPA
+R_f oa nm 500k
+R_g nm ng 4.7k
+C_g ng 0 10u
+C_c oa n1 1u
+R_1 n1 n2 1k
+D_1 n2 0 DSIG
+D_2 0 n2 DSIG
+R_t n2 n3 10k
+C_t n3 0 22n
+C_o n3 out 1u
+R_v out 0 100k
+R_sc oa sc 10k
+D_sc sc cv DSIG
+C_cv cv 0 1u
+R_rel cv 0 1Meg
+.model OPA OA(AOL=200000 VCC=9 VEE=0)
+.model DSIG D(IS=2.52n N=1.752)
+.end
