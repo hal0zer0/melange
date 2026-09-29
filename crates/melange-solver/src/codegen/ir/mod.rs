@@ -191,6 +191,27 @@ pub struct CircuitIR {
     /// pinned (flag, directive, behavioral sources) and nothing was decided.
     #[serde(default)]
     pub integration_reason: String,
+    /// The runtime BE-latch's program reference, from the ring predicate's
+    /// verdict on this trapezoidal build (`None` when nothing was decided:
+    /// such builds carry no latch). See [`BeLatchReference`].
+    #[serde(default)]
+    pub be_latch_reference: Option<BeLatchReference>,
+}
+
+/// What the runtime BE-latch needs to judge a ring against the program that
+/// excited it, on the ring predicate's own scale (`codegen::ring`): the
+/// passband gain, and the continuous-time poles that can ring at fs/2, whose
+/// slowest decay (remapped at the host rate) sets how long the reference
+/// remembers the program.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BeLatchReference {
+    /// Pink-weighted RMS gain over 20 Hz–20 kHz, primary input to primary
+    /// output (`codegen::ring::passband_gain`).
+    pub passband_gain: f64,
+    /// Continuous-time poles `(re, im)` in rad/s, upper half-plane only.
+    pub ring_poles: Vec<(f64, f64)>,
+    /// An index-2 pole (exactly `z = −1`) rings forever: hold the reference.
+    pub hold: bool,
 }
 
 /// Why the shipped integration scheme is what it is.
@@ -1847,6 +1868,11 @@ impl CircuitIR {
         }
         log::info!("Trapezoidal: {reason}");
         ir.integration_reason = reason;
+        ir.be_latch_reference = Some(BeLatchReference {
+            passband_gain: verdict.passband_gain,
+            ring_poles: verdict.ring_poles.iter().map(|z| (z.re, z.im)).collect(),
+            hold: verdict.index2,
+        });
         Ok(None)
     }
 
@@ -2842,6 +2868,7 @@ impl CircuitIR {
             trap_discriminator_rho,
             integrator_selection,
             integration_reason: String::new(),
+            be_latch_reference: None,
         })
     }
 
@@ -3866,6 +3893,7 @@ impl CircuitIR {
             trap_discriminator_rho,
             integrator_selection,
             integration_reason: String::new(),
+            be_latch_reference: None,
         };
         // Measured, not a gate (design review): a railing op-amp driving a
         // saturating inductor crosses the core's knee within one sample with

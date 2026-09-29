@@ -18,7 +18,7 @@ promote to BE  iff  growth: rho(P) > 1.002, and backward Euler removes it
                 or  some pole z of P with
                       Re z < 0                                  (Nyquist side)
                       |z|^(0.01·fs) >= 1e-3                     (still above −60 dB after 10 ms: it lasts)
-                      |residue from the input| >= 1e-3 · |H(1 kHz)|   (it starts loud: −60 dB)
+                      |residue from the input| >= 1e-3 · H_pink        (it starts loud: −60 dB)
 ```
 
 - `P` is the trapezoidal **charge propagator** (below) linearised at the DC
@@ -27,8 +27,14 @@ promote to BE  iff  growth: rho(P) > 1.002, and backward Euler removes it
   (right vector `r`, left vector `l`, input column `B`, output row `c`): the
   initial amplitude of the spurious ring term `residue·zⁿ` in the impulse
   response. Not the total response at `n = 0`.
-- `|H(1 kHz)|` is the input-to-output gain of the linearised continuous
-  network at 1 kHz. The program level cancels: ring and passband scale alike.
+- `H_pink` is the passband gain: the pink-weighted RMS gain of the
+  linearised continuous network, `sqrt(mean |H|²)` over a 481-point
+  log-spaced 20 Hz–20 kHz grid — the output RMS for a unit pink-spectrum
+  input, the level a program comes out at. A narrow resonance counts by its
+  width, not its height; a band-limited deck is referred to its own band.
+  (The gain at one frequency sits in the stopband of a band-limited deck; the
+  largest gain lets a narrow resonance set the scale.) The program level
+  cancels: ring and passband scale alike.
 - Multiple inputs and outputs: the largest ratio over every pair.
 - Both −60 dB constants are stated in advance, not fitted
   (`RING_PERSISTENCE_FACTOR`, `RING_PERSISTENCE_SECONDS`, `RING_RESIDUE_REL`).
@@ -137,41 +143,99 @@ arithmetic gives −0.9961868486952391, `eigen.rs` −0.9961868486952, numpy
 
 Decks with a lasting Nyquist-side pole; every other deck has none:
 
-| Deck | Loudest lasting pole | Input residue | Verdict |
+| Deck | Loudest lasting pole | Input residue (rel H_pink) | Verdict |
 |---|---|---|---|
-| noyce-amp-at-idle | −0.99033 (τ 2 ms) | −40.2 dB | BE |
-| sat-core-open | −0.99619 (τ 5 ms) | −48.4 dB | BE |
-| noyce-transformer-triode | −0.99997 (τ 0.70 s) | −62.6 dB | trap |
-| wurli-power-amp | −0.99896 | −105.3 dB | trap |
-| passive-eq1a | −0.98655 | −119.0 dB | trap |
-| steve-1073-preamp | −0.99082 | −120.8 dB | trap |
-| noyce-tape-head | −0.99985 | −168.9 dB | trap |
-| basic-bitch, sad-bastard | −0.99994 | < −188 dB | trap |
+| noyce-amp-at-idle | −0.99033 (τ 2 ms) | −39.3 dB | BE |
+| sat-core-open | −0.99619 (τ 5 ms) | −48.2 dB | BE |
+| noyce-transformer-triode | −0.99997 (τ 0.70 s) | −77.7 dB | trap |
+| wurli-power-amp | −0.99896 | −105.0 dB | trap |
+| passive-eq1a | −0.98655 | −119.2 dB | trap |
+| steve-1073-preamp | −0.99082 | −120.6 dB | trap |
+| noyce-tape-head | −0.99985 | −168.0 dB | trap |
+| basic-bitch, sad-bastard | −0.99994 | < −190 dB | trap |
 | champ-5f1, sat-core-loaded, noyce-smps-ripple | −1 (index-2) | < −200 dB | trap |
 
-No deck grows at its DC operating point (largest ρ = 1 to rounding: the index-2 and DC modes).
+No deck grows at its DC operating point (largest ρ = 1 to rounding: the
+index-2 and DC modes). The three candidate passband gains give the same
+verdicts on the corpus. `H_pink` against the gain at 1 kHz / the largest
+gain: noyce-transformer-triode +15.1 / −9.5 dB (a response rising to the
+20 kHz edge), gold-press-riaa +10.1 / −6.8 dB (the phono bass boost),
+champ-5f1 +9.2 / −10.1 dB, noyce-boiler-room +40.0 / −9.1 dB (no lasting
+mode); every other deck within 7 dB of both.
 
-**noyce-transformer-triode.** A single input event rings at −63 dB of the
-passband at fs/2 and decays with τ 0.7 s. Phase-coherent even-period clicks
-accumulate it by `1/(1 − |z|^P)`: a 10 Hz impulse train (P = 4800 at 48 kHz)
-reaches −46 dB after 100 impulses, and the linearised model reproduces the
-code's per-impulse growth to 0.1 dB (−62.9, −57.5, −54.6, −52.7, −51.3 …
-−46.2). It stays trapezoidal: forced trapezoidal is 45× more accurate in
-band on this deck (sine error 0.022 of the BE build's), the tone sits at
-24 kHz ± 0.5 Hz, and with any oversampling it moves to the internal Nyquist
-where the decimator removes it. A static accumulation term would have to
-assume a click period the compiler cannot know. The build's
-`integration_reason` states this. In the default build the runtime latch
-engages 9 ms after the first impulse of the 0.1 V hostile program (between
-impulses the ring is the whole output) and, being sticky, holds backward
-Euler for the rest of the stream; at 1 mV the ring stays under the latch's
-floor. It is evidence for an L-stable integrator (BDF2 / TR-BDF2),
+**noyce-transformer-triode.** A single input event rings at −78 dB of the
+passband gain (−63 dB of the 1 kHz gain) at fs/2 and decays with τ 0.7 s.
+Phase-coherent even-period clicks accumulate it by `1/(1 − |z|^P)`: a 10 Hz
+impulse train (P = 4800 at 48 kHz) reaches −46 dB of the 1 kHz gain after
+100 impulses (−61 dB of the passband gain), and the linearised model
+reproduces the code's per-impulse growth to 0.1 dB (−62.9, −57.5, −54.6,
+−52.7, −51.3 … −46.2 of the 1 kHz gain). The runtime latch's closest approach
+on that train is −60.6 dB of the program reference: it does not engage, by
+0.6 dB. It stays trapezoidal: forced trapezoidal is 45× more
+accurate in band on this deck (sine error 0.022 of the BE build's), the tone
+sits at 24 kHz ± 0.5 Hz, and with any oversampling it moves to the internal
+Nyquist where the decimator removes it. A static accumulation term would
+have to assume a click period the compiler cannot know. The build's
+`integration_reason` states this. It is evidence for an L-stable integrator
+(BDF2 / TR-BDF2), `STATUS.md` → Pending Work.
+
+**Margins.** For a new deck whose loudest lasting pole lands within ~5 dB of
+−60 dB, measure it: the hostile program's 10–50 ms tails, dB relative to
+impulse amplitude × passband gain, on the forced-trapezoidal build.
+
+## The runtime latch uses the same threshold
+
+The runtime BE-latch (`STATUS.md`, "Runtime BE-latch") engages on an
+alternating mode that dominates the output. Dominance alone is relative to
+the instantaneous output, and in a quiet tail anything dominates, so it used
+to override this rule at the first quiet moment after a transient (it held
+noyce-transformer-triode and wurli-power-amp on BE after their −63 dB and
+−74..−81 dB rings). Its floor is now the larger of the node tolerance and
+`1e-3 × ref`:
+
+```
+ref_n = max(H_pink · |u_n|,  d · ref_{n-1})
+d     = max over BE_LATCH_RING_POLES of the Nyquist-side |z(fs)|, floored at 1e-3^(1/(0.01·fs))
+z(fs) = (1 + λ/(2fs)) / (1 − λ/(2fs))        (the trapezoidal map, at the running internal rate)
+```
+
+- The reference is on this rule's scale: passband gain × input amplitude.
+  An output-peak reference sits far above it on transformer-triode (its
+  impulse-response peak is 0.6 against a 1 kHz gain of 0.053).
+- Its memory is the slowest ring the circuit can carry: a ring cannot outlive
+  the reference of the program that excited it. A memory at the ε_ring rate
+  (−60 dB in 10 ms) is always outlived by a lasting ring, by definition.
+- `λ` are the continuous-time poles of the linearised circuit that can ring
+  at fs/2 at host rates down to a quarter of the compiled rate (stable,
+  non-algebraic, `|λ| > fs/2`), emitted as `BE_LATCH_RING_POLES`;
+  `set_sample_rate` recomputes `d`. At a rate below the compiled one a stiff
+  ring decays more slowly (as `fs²`), so a `d` frozen at the compiled rate
+  would be outlived.
+- An index-2 pole (exactly `z = −1`) rings forever: `BE_LATCH_RING_HOLD`, and
+  the reference is held. A genuine ring excited in a quiet passage long
+  after a loud one is then judged against the loud one and under-latches —
+  conservative, toward fewer BE samples, and those modes carry about zero
+  input residue. The real fix is the netlist question of whether such decks
+  should carry the physical parasitic that regularises index-2 (winding
+  capacitance, core loss), `STATUS.md` → Pending Work.
+- Ring amplitude is `sqrt(pow)`: an alternation ±A has power A².
+
+Measured 2026-09-29, 60 s hostile program at the golden level and −40 dB, on
+the default builds of the 15 decks returned to trapezoidal: no latch
+engages (four of them are DK builds, which carry no latch; their absolute
+10–50 ms ring levels on that program are below −168 dB of the passband). The single-event ring does not engage it; phase-coherent clicks
+whose accumulated ring passes −60 dB of the program do
+(`tests/be_latch_entry_tests.rs`).
+
+## Limitation: the verdict is taken at the compiled rate
+
+The trap-versus-BE verdict uses the compiled internal rate. A host rate
+above it makes stiff rings decay faster and residues smaller (the verdict
+is conservative there); below it they decay more slowly and residues grow
+(slightly optimistic). The latch's memory follows the running rate; the
+route does not. Whether a runtime rate change should be able to flip the
+route (through the BE machinery the latch already uses) is open,
 `STATUS.md` → Pending Work.
-
-**Margins.** transformer-triode stays 2.6 dB below the threshold. For a new
-deck whose loudest lasting pole lands within ~5 dB of −60 dB, measure it: the
-hostile program's 10–50 ms tails, dB relative to impulse amplitude × passband
-gain, on the forced-trapezoidal build.
 
 ## Where it runs
 
@@ -182,6 +246,8 @@ The promoted rebuild takes `CodegenConfig::max_iterations_be_promoted` (the
 CLI's BE Newton budget). The verdict is recorded in
 `CircuitIR::integration_reason`, `CodegenMeta::integration_reason`, the CLI
 summary, and the generated `// provenance:` JSON (`"integration_reason"`).
+A build kept trapezoidal also records `CircuitIR::be_latch_reference`
+(passband gain, ring poles, index-2 hold) for the latch.
 
 The DK library path with companion-modelled inductors (not built by the
 CLI) has no inductor dynamics in `C`; the rule is not evaluated there and the

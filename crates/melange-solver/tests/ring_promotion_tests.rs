@@ -3,7 +3,7 @@
 //! `codegen::ring` decides it on the charge propagator linearised at the DC
 //! operating point: promote on a lasting Nyquist-side pole (still above
 //! −60 dB after 10 ms) whose input-to-output residue is at least −60 dB of
-//! the 1 kHz passband, or on growth that backward Euler removes. The verdict
+//! the passband gain, or on growth that backward Euler removes. The verdict
 //! is recorded in the IR (`integration_reason`) and in the provenance JSON.
 
 mod support;

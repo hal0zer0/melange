@@ -256,11 +256,23 @@ generated state is smaller.
 
 ### Changed
 
+- **The backward-Euler safety latch no longer overrides that rule in a quiet
+  passage.** It engaged on any ring that dominated the output, and in a quiet
+  tail anything does, so a ring the rule had left on trapezoidal switched the
+  stream to backward Euler for good at the first silence after a transient.
+  It now also requires the ring to reach −60 dB of the program that excited
+  it: the passband gain times the input level, remembered as long as the
+  circuit's slowest ring lasts at the running sample rate. On the 60 s test
+  program no corpus circuit on trapezoidal engages it; phase-coherent clicks
+  whose ring builds past −60 dB still do. The rule's passband gain is now
+  the pink-weighted RMS gain over 20 Hz–20 kHz (the output level of a
+  pink-spectrum input) rather than the gain at 1 kHz, which sits in the
+  stopband of a band-limited circuit; no corpus verdict changes.
 - **Which circuits are switched to backward Euler is decided by a new rule,
   and 15 corpus circuits return to the trapezoidal integrator.** A build is
   promoted when the trapezoidal rule would make it ring at half the sample
   rate audibly: a stiff mode that is still above −60 dB after 10 ms and that
-  the input excites at −60 dB or more of the 1 kHz passband. Growth that
+  the input excites at −60 dB or more of the passband. Growth that
   backward Euler removes also promotes. The rule works on the exact
   eigenvalues and modal residues of the integrator the build ships, taken at
   the circuit's DC operating point (`docs/aidocs/RING_PREDICATE.md`). The old

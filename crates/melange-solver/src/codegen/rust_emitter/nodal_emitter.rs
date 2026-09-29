@@ -2777,6 +2777,75 @@ impl RustEmitter {
                  /// silence). The output's floor is the solver's node tolerance.\n",
             );
             code.push_str("pub const BE_LATCH_POWER_FLOOR: f64 = 1.0e-12;\n\n");
+            let r = ir.be_latch_reference.clone().unwrap_or_default();
+            code.push_str(
+                "/// Runtime BE-latch: a ring engages the latch only if its amplitude is at\n\
+                 /// least this fraction of the program reference (the ring predicate's\n\
+                 /// -60 dB), so the latch and the compile-time integrator choice agree on\n\
+                 /// what a ring worth backward Euler is.\n",
+            );
+            code.push_str(&format!(
+                "pub const BE_LATCH_RING_REL: f64 = {};\n\n",
+                fmt_f64(crate::codegen::ring::RING_RESIDUE_REL)
+            ));
+            code.push_str(
+                "/// Runtime BE-latch program reference: passband gain (pink-weighted RMS gain\n\
+                 /// over 20 Hz-20 kHz, primary input to primary output, at the DC operating\n\
+                 /// point).\n\
+                 /// The reference is this times the input amplitude: the predicate's scale.\n",
+            );
+            code.push_str(&format!(
+                "pub const BE_LATCH_PASSBAND_GAIN: f64 = {};\n\n",
+                fmt_f64(r.passband_gain)
+            ));
+            code.push_str(
+                "/// Runtime BE-latch: continuous-time poles (re, im; rad/s) of the linearised\n\
+                 /// circuit that can ring at the Nyquist rate. The program reference decays no\n\
+                 /// faster than the slowest of them rings at the running rate, so a ring never\n\
+                 /// outlives the reference of the program that excited it.\n",
+            );
+            code.push_str(&format!(
+                "pub const BE_LATCH_RING_POLES: [[f64; 2]; {}] = [{}];\n\n",
+                r.ring_poles.len(),
+                r.ring_poles
+                    .iter()
+                    .map(|(a, b)| format!("[{}, {}]", fmt_f64(*a), fmt_f64(*b)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            code.push_str(
+                "/// Runtime BE-latch: an index-2 pole (exactly z = -1) rings forever, so the\n\
+                 /// program reference is held.\n",
+            );
+            code.push_str(&format!(
+                "pub const BE_LATCH_RING_HOLD: bool = {};\n\n",
+                r.hold
+            ));
+            code.push_str(
+                "/// Per-sample decay of the runtime BE-latch's program reference at internal\n\
+                 /// rate `fs`: the slowest Nyquist-side |z| of BE_LATCH_RING_POLES under the\n\
+                 /// trapezoidal (bilinear) map z = (1 + lambda/(2 fs))/(1 - lambda/(2 fs)),\n\
+                 /// floored at the ring yardstick (-60 dB in 10 ms): anything decaying faster\n\
+                 /// than that is not a lasting ring.\n\
+                 fn be_latch_ref_decay(fs: f64) -> f64 {\n\
+                 \x20   if BE_LATCH_RING_HOLD {\n\
+                 \x20       return 1.0;\n\
+                 \x20   }\n\
+                 \x20   let mut d = 1.0e-3f64.powf(1.0 / (0.01 * fs));\n\
+                 \x20   let h = 0.5 / fs;\n\
+                 \x20   for p in BE_LATCH_RING_POLES.iter() {\n\
+                 \x20       let (nr, ni) = (1.0 + p[0] * h, p[1] * h);\n\
+                 \x20       let (dr, di) = (1.0 - p[0] * h, -p[1] * h);\n\
+                 \x20       let den = dr * dr + di * di;\n\
+                 \x20       let z_re = (nr * dr + ni * di) / den;\n\
+                 \x20       let z_abs = ((nr * nr + ni * ni) / den).sqrt();\n\
+                 \x20       if z_re < 0.0 && z_abs > d {\n\
+                 \x20           d = z_abs;\n\
+                 \x20       }\n\
+                 \x20   }\n\
+                 \x20   d.min(1.0)\n\
+                 }\n\n",
+            );
         }
 
         // Sample rate
@@ -3680,6 +3749,13 @@ impl RustEmitter {
             code.push_str("    pub be_in_r1_num: f64,\n");
             code.push_str("    pub be_in_pow: f64,\n");
             code.push_str(
+                "    /// Runtime BE-latch program reference (passband gain x input amplitude,\n\
+                 \x20   /// decaying at be_ref_decay per sample) and its per-sample decay at the\n\
+                 \x20   /// running rate (set by set_sample_rate).\n",
+            );
+            code.push_str("    pub be_ref: f64,\n");
+            code.push_str("    pub be_ref_decay: f64,\n");
+            code.push_str(
                 "    /// Runtime BE-latch: true once a stiff alternating mode was detected;\n\
                  \x20   /// forces the L-stable BE path for the rest of the stream (cleared by\n\
                  \x20   /// reset()).\n",
@@ -4092,6 +4168,10 @@ impl RustEmitter {
             ] {
                 code.push_str(&format!("            {f}: 0.0,\n"));
             }
+            code.push_str("            be_ref: 0.0,\n");
+            code.push_str(
+                "            be_ref_decay: be_latch_ref_decay(SAMPLE_RATE * OVERSAMPLING_FACTOR as f64),\n",
+            );
             code.push_str("            be_latched: false,\n");
         }
         if ir.solver_config.breakpoint_be {
@@ -4356,6 +4436,7 @@ impl RustEmitter {
             ] {
                 code.push_str(&format!("        self.{f} = 0.0;\n"));
             }
+            code.push_str("        self.be_ref = 0.0;\n");
             code.push_str("        self.be_latched = false;\n");
         }
         if ir.solver_config.breakpoint_be {
@@ -4686,6 +4767,12 @@ impl RustEmitter {
         // every later pot-triggered rebuild ran at a stale rate.
         if needs_current_sr {
             code.push_str("        self.current_sample_rate = sample_rate;\n\n");
+        }
+        if ir.solver_config.runtime_be_latch {
+            code.push_str(
+                "        // The latch reference's memory follows the ring decay at this rate.\n\
+                 \x20       self.be_ref_decay = be_latch_ref_decay(sample_rate * OVERSAMPLING_FACTOR as f64);\n\n",
+            );
         }
         // Stateful-device rate-baked coefficients (Phase 0c). Empty in 1a
         // (CdsLdr recomputes its coefficient live from current_sample_rate).
@@ -5536,6 +5623,9 @@ impl RustEmitter {
              {indent}    state.be_pow += be_ema * (be_x * be_x - state.be_pow);\n\
              {indent}    state.be_x_prev = be_x;\n\
              {indent}    let be_u = if input.is_finite() {{ input }} else {{ 0.0 }};\n\
+             {indent}    // Program reference on the ring predicate's scale (passband gain x\n\
+             {indent}    // input amplitude), remembered as long as this circuit's slowest ring.\n\
+             {indent}    state.be_ref = (BE_LATCH_PASSBAND_GAIN * be_u.abs()).max(state.be_ref * state.be_ref_decay);\n\
              {indent}    state.be_in_x_mean += be_ema * (be_u - state.be_in_x_mean);\n\
              {indent}    let be_u = be_u - state.be_in_x_mean;\n\
              {indent}    state.be_in_r1_num += be_ema * (be_u * state.be_in_x_prev - state.be_in_r1_num);\n\
@@ -5547,7 +5637,11 @@ impl RustEmitter {
              {indent}    // VNTOL, the Newton node-step test) cannot be told apart from\n\
              {indent}    // convergence noise, so it is not evidence.\n\
              {indent}    let be_tol = 1e-3 * state.be_x_mean.abs() + 1e-6;\n\
-             {indent}    let out_ring = state.be_pow > be_tol * be_tol\n\
+             {indent}    // A ring below -60 dB of the program that excited it is one the\n\
+             {indent}    // compile-time ring predicate left on trapezoidal: not evidence either.\n\
+             {indent}    // (An alternation of amplitude A has power A^2.)\n\
+             {indent}    let be_floor = f64::max(be_tol, BE_LATCH_RING_REL * state.be_ref);\n\
+             {indent}    let out_ring = state.be_pow > be_floor * be_floor\n\
              {indent}        && state.be_r1_num <= be_enter * state.be_pow;\n\
              {indent}    let in_ring = state.be_in_pow > BE_LATCH_POWER_FLOOR\n\
              {indent}        && state.be_in_r1_num <= be_enter * state.be_in_pow;\n\

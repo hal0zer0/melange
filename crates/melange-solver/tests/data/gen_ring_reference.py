@@ -108,7 +108,15 @@ def eigen_cases():
 
 RING_PERSISTENCE_FACTOR = 1e-3
 RING_PERSISTENCE_SECONDS = 0.01
-PASSBAND_HZ = 1000.0
+PASSBAND_LO_HZ, PASSBAND_HI_HZ = 20.0, 20000.0
+
+
+def passband_gain(g, c, b, out):
+    """Pink-weighted RMS gain: sqrt(mean |H|^2) over a 481-point log grid,
+    20 Hz-20 kHz."""
+    fr = np.logspace(np.log10(PASSBAND_LO_HZ), np.log10(PASSBAND_HI_HZ), 481)
+    h = np.array([abs(np.linalg.solve(g + 1j * 2 * np.pi * f * c, b)[out]) for f in fr])
+    return float(np.sqrt(np.mean(h ** 2)))
 
 
 def l_diff(s, i):
@@ -187,7 +195,6 @@ def ring_reference(sys_):
     w, vl, vr = sla.eig(p, left=True, right=True)
     lasts = RING_PERSISTENCE_SECONDS * rate
     modes = []
-    om = 2 * np.pi * PASSBAND_HZ
     for k in range(len(w)):
         z = w[k]
         if z.real >= 0 or abs(z) ** lasts < RING_PERSISTENCE_FACTOR or z.imag < 0:
@@ -200,7 +207,7 @@ def ring_reference(sys_):
             b[node] = gin
             bb = np.concatenate([s_ @ b, ur.T @ h @ s_ @ b])
             for out in sys_["outputs"]:
-                pb = abs(np.linalg.solve(g + 1j * om * c, b)[out])
+                pb = passband_gain(g, c, b, out)
                 if not pb > 0:
                     continue
                 res = abs(rv[out] * (lv @ bb) / (lv @ rv))

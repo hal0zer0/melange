@@ -11,8 +11,14 @@
 //!                 or  some pole z with Re z < 0 and |z|^(0.01·fs) ≥ 1e-3
 //!                     (still above −60 dB after 10 ms: the ring lasts)
 //!                     has an input-to-output modal residue ≥ −60 dB
-//!                     relative to the passband gain at 1 kHz (it starts loud).
+//!                     relative to the passband gain (it starts loud).
 //! ```
+//!
+//! The passband gain is the pink-weighted RMS gain of the linearised
+//! continuous network, `sqrt(mean |H|²)` over a log-spaced 20 Hz–20 kHz grid:
+//! the output RMS for a unit pink-spectrum input, the level a program comes
+//! out at. A narrow resonance counts by its width, not its height; a
+//! band-limited deck is referred to its own band.
 //!
 //! Both constants are stated in advance, not fitted. The program level
 //! cancels: the ring and the passband response scale with it alike.
@@ -61,8 +67,10 @@ pub const RING_PERSISTENCE_SECONDS: f64 = 0.01;
 /// A ring whose modal residue, relative to the passband gain, is at or above
 /// this starts loud (−60 dB).
 pub const RING_RESIDUE_REL: f64 = 1e-3;
-/// Frequency of the passband gain the residue is referred to.
-pub const PASSBAND_HZ: f64 = 1000.0;
+/// Lower edge of the band the passband gain is averaged over, Hz.
+pub const PASSBAND_LO_HZ: f64 = 20.0;
+/// Upper edge of the passband-gain band, Hz.
+pub const PASSBAND_HI_HZ: f64 = 20000.0;
 /// BE removes a growth when its own propagator's spectral radius is at most
 /// this (the post-promotion limit).
 pub use crate::codegen::stability::BE_POST_PROMOTION_LIMIT;
@@ -121,7 +129,7 @@ pub struct RingSystem {
 #[derive(Debug, Clone)]
 pub struct RingMode {
     pub z: Complex,
-    /// Max over input/output pairs of `|residue| / |H(1 kHz)|`.
+    /// Max over input/output pairs of `|residue| / passband gain`.
     pub residue_rel: f64,
     /// Decay time constant of the ring envelope, seconds.
     pub tau_s: f64,
@@ -149,6 +157,18 @@ pub struct RingVerdict {
     pub ring_modes: Vec<RingMode>,
     /// The verdict.
     pub promote: bool,
+    /// Passband gain (pink-weighted RMS gain, 20 Hz–20 kHz) from the primary
+    /// input to the primary output: the runtime BE-latch's program reference.
+    pub passband_gain: f64,
+    /// Continuous-time poles `λ` (rad/s, `z = (1 + λT/2)/(1 − λT/2)`) of the
+    /// linearised circuit that can ring at the Nyquist rate at any host rate
+    /// down to a quarter of the compiled one: stable, non-algebraic, and
+    /// `|λ| > fs/2`. The runtime latch's program reference must remember the
+    /// program at least as long as the slowest of them rings.
+    pub ring_poles: Vec<Complex>,
+    /// A pole at `z = −1` exactly (to 1e-12): an index-2 structure. It rings
+    /// forever under trapezoidal integration at every rate.
+    pub index2: bool,
 }
 
 impl RingVerdict {
@@ -179,7 +199,7 @@ impl RingVerdict {
             None => "no lasting Nyquist-side pole at the DC operating point".to_string(),
             Some(r) => {
                 let mode = format!(
-                    "stiff mode z = {:+.6}{} (tau {:.3} s), input residue {:.1} dB rel the {} Hz \
+                    "stiff mode z = {:+.6}{} (tau {:.3} s), input residue {:.1} dB rel the \
                      passband",
                     r.z.re,
                     if r.z.im.abs() > 0.0 {
@@ -189,7 +209,6 @@ impl RingVerdict {
                     },
                     r.tau_s,
                     r.residue_db(),
-                    PASSBAND_HZ,
                 );
                 if self.promote {
                     format!("{mode}; rings from the input at fs/2: backward Euler")
@@ -477,7 +496,7 @@ fn linearised(sys: &RingSystem) -> (Vec<f64>, Vec<f64>) {
 
 /// `|H(j·2π·f)|` from input port `inp` to output `out` of the linearised
 /// continuous network.
-fn passband_gain(g: &[f64], c: &[f64], n: usize, inp: (usize, f64), out: usize, f: f64) -> f64 {
+fn gain_at(g: &[f64], c: &[f64], n: usize, inp: (usize, f64), out: usize, f: f64) -> f64 {
     let w = 2.0 * std::f64::consts::PI * f;
     let mut m: Vec<Complex> = g
         .iter()
@@ -489,6 +508,25 @@ fn passband_gain(g: &[f64], c: &[f64], n: usize, inp: (usize, f64), out: usize, 
     let piv = eigen::lu_factor(&mut m, n, 1e-300);
     let x = eigen::lu_solve(&m, &piv, n, &b);
     x[out].abs()
+}
+
+/// The passband gain: the pink-weighted RMS gain,
+/// `sqrt(mean |H|²)` over a 481-point log-spaced grid from
+/// [`PASSBAND_LO_HZ`] to [`PASSBAND_HI_HZ`] — the output RMS for a unit
+/// pink-spectrum input. It stands for the output level a program produces:
+/// a narrow resonance counts by its width, not its height, and a band-limited
+/// deck is referred to its own band.
+pub fn passband_gain(g: &[f64], c: &[f64], n: usize, inp: (usize, f64), out: usize) -> f64 {
+    const POINTS: usize = 481;
+    let (l0, l1) = (PASSBAND_LO_HZ.log10(), PASSBAND_HI_HZ.log10());
+    let sum: f64 = (0..POINTS)
+        .map(|k| {
+            let f = 10f64.powf(l0 + (l1 - l0) * k as f64 / (POINTS - 1) as f64);
+            let h = gain_at(g, c, n, inp, out, f);
+            h * h
+        })
+        .sum();
+    (sum / POINTS as f64).sqrt()
 }
 
 /// The trapezoidal charge propagator `P` (`dim × dim`, `dim = n + rank(H)`),
@@ -601,6 +639,16 @@ pub fn analyze(sys: &RingSystem) -> Result<RingVerdict, RingError> {
     let growth = rho > TRAP_BE_PROMOTION_RHO;
 
     let (g, c) = linearised(sys);
+    let pbs: Vec<Vec<f64>> = sys
+        .inputs
+        .iter()
+        .map(|&inp| {
+            sys.outputs
+                .iter()
+                .map(|&out| passband_gain(&g, &c, sys.n, inp, out))
+                .collect()
+        })
+        .collect();
     let lasts_n = RING_PERSISTENCE_SECONDS * sys.rate;
     let mut ring_modes = Vec::new();
     for &z in &eig {
@@ -615,11 +663,11 @@ pub fn analyze(sys: &RingSystem) -> Result<RingVerdict, RingError> {
         let l = eigen::eigenvector(&prop.p, dim, z, true);
         let lr = eigen::dot(&l, &r);
         let mut best = (0.0_f64, (0usize, 0usize));
-        for (ii, (&inp, bcol)) in sys.inputs.iter().zip(&prop.b).enumerate() {
+        for (ii, bcol) in prop.b.iter().enumerate() {
             let bc: Vec<Complex> = bcol.iter().map(|&v| Complex::real(v)).collect();
             let lb = eigen::dot(&l, &bc);
             for (oi, &out) in sys.outputs.iter().enumerate() {
-                let pb = passband_gain(&g, &c, sys.n, inp, out, PASSBAND_HZ);
+                let pb = pbs[ii][oi];
                 if pb.is_nan() || pb <= 0.0 || pb.is_infinite() {
                     continue;
                 }
@@ -651,12 +699,40 @@ pub fn analyze(sys: &RingSystem) -> Result<RingVerdict, RingError> {
             .first()
             .is_some_and(|r| r.residue_rel >= RING_RESIDUE_REL),
     };
+    // Poles that can ring at fs/2 at host rates down to fs/4: map each
+    // non-algebraic eigenvalue back through the bilinear transform,
+    // lambda = 2 fs (z - 1)/(z + 1), and keep the stable ones with
+    // |lambda| > fs/2 (z(fs') is Nyquist-side iff |lambda| > 2 fs').
+    let mut ring_poles = Vec::new();
+    let mut index2 = false;
+    for &z in &eig {
+        if z.abs() < 1e-9 {
+            continue;
+        }
+        let zp1 = z + Complex::real(1.0);
+        if zp1.abs() < 1e-12 {
+            index2 = true;
+            continue;
+        }
+        let lambda = (z - Complex::real(1.0)) / zp1 * (2.0 * sys.rate);
+        if lambda.re < 0.0 && lambda.abs() > 0.5 * sys.rate && lambda.im >= 0.0 {
+            ring_poles.push(lambda);
+        }
+    }
+    let passband_gain = pbs
+        .first()
+        .and_then(|row| row.first())
+        .copied()
+        .unwrap_or(0.0);
     Ok(RingVerdict {
         rho,
         growth,
         rho_be,
         ring_modes,
         promote,
+        passband_gain,
+        ring_poles,
+        index2,
     })
 }
 
