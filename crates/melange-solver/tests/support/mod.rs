@@ -419,6 +419,16 @@ pub fn generate_circuit_code_raw_dk(spice: &str, config: &CodegenConfig) -> (Str
     (result.code, result.n, result.m)
 }
 
+/// `spice` parsed with its subcircuits expanded, as `build` expands them, so
+/// node names and indices match the build's.
+pub fn parse_expanded(spice: &str) -> Netlist {
+    let mut netlist = Netlist::parse(spice).expect("parse failed");
+    netlist
+        .expand_subcircuits()
+        .expect("subcircuit expansion failed");
+    netlist
+}
+
 /// The shipped build of `spice` for a test's `CodegenConfig`.
 ///
 /// Tests used to generate code straight from the raw MNA (no junction caps, no
@@ -443,7 +453,16 @@ pub fn build_shipped(
     config: &CodegenConfig,
     solver: &str,
 ) -> melange_solver::build::Built {
-    let netlist = Netlist::parse(spice).expect("parse failed");
+    try_build_shipped(spice, config, solver).unwrap_or_else(|e| panic!("build failed: {e}"))
+}
+
+/// [`build_shipped`], returning the build's refusal instead of panicking on it.
+pub fn try_build_shipped(
+    spice: &str,
+    config: &CodegenConfig,
+    solver: &str,
+) -> Result<melange_solver::build::Built, String> {
+    let netlist = parse_expanded(spice);
     let mna = MnaSystem::from_netlist(&netlist).expect("MNA build failed");
     // Index order starts with ground, so circuit node `i` is entry `i + 1`.
     let names = mna.node_names_in_index_order();
@@ -490,8 +509,7 @@ pub fn build_shipped(
         output_clamp_auto: false,
     };
     let silent = &melange_solver::pipeline::silent;
-    melange_solver::build::build(spice, &opts, silent, silent)
-        .unwrap_or_else(|e| panic!("build failed: {e}"))
+    melange_solver::build::build(spice, &opts, silent, silent).map_err(|e| e.to_string())
 }
 
 /// Compile circuit code into a cached binary. Returns the binary path.
@@ -725,12 +743,24 @@ pub fn run_sine_full(
 
 // ── Codegen config helpers ─────────────────────────────────────────────
 
+/// [`config_for_spice`] for the helpers that used to default to circuit node 0
+/// as the input and node 1 as the output: the input is `in`, the output `out`,
+/// or circuit node 1 (0 on a one-node deck) on a deck without an `out` node.
+pub fn config_in_out_or_node1(spice: &str, sample_rate: f64) -> CodegenConfig {
+    let mut config = config_for_spice(spice, sample_rate);
+    if config.output_nodes.is_empty() {
+        let mna = MnaSystem::from_netlist(&parse_expanded(spice)).expect("mna");
+        config.output_nodes = vec![if mna.n > 1 { 1 } else { 0 }];
+    }
+    config
+}
+
 /// Create a default codegen config for a circuit with "in" and "out" nodes.
 ///
 /// Resolves input/output node indices from the SPICE netlist.
 /// Uses sensible test defaults (44100 Hz, 1Ω input, dc_block on).
 pub fn config_for_spice(spice: &str, sample_rate: f64) -> CodegenConfig {
-    let netlist = Netlist::parse(spice).expect("parse");
+    let netlist = parse_expanded(spice);
     let mna = MnaSystem::from_netlist(&netlist).expect("mna");
 
     // No silent default: a deck without an `in` / `out` node used to get node

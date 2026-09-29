@@ -24,6 +24,16 @@ generated state is smaller.
 
 ### Fixed
 
+- **A `.switch` on an inductor compiles on the DK solver.** On the DK route
+  an inductor is a branch row of the augmented matrices, and a switch writes
+  its new inductance into that row of C at every rebuild; the generated
+  `rebuild_matrices()` declared its working copy of C immutable unless a
+  capacitor was switched, so any DK deck with a switched inductor generated
+  code that failed to compile. The test suite missed it because its switch
+  tests built inductor decks through the companion-model path that no shipped
+  build takes. Switched to 1 mH, a 500 mH deck now matches a deck built at
+  1 mH sample for sample.
+
 - **A `.inject` source survives `.linearize` and the device reductions.**
   `.linearize`, `--bjt-fa auto|force` and `--tube-grid-fa on` rebuild the
   circuit's matrices from the netlist, and the rebuild restamped only the

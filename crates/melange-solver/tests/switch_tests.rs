@@ -2,8 +2,8 @@
 //!
 //! Tests for the `.switch` directive: parser, MNA resolution, codegen, and compile-and-run.
 
-use melange_solver::codegen::{CodeGenerator, CodegenConfig};
-use melange_solver::dk::DkKernel;
+mod support;
+
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
 use std::io::Write;
@@ -12,32 +12,10 @@ use std::io::Write;
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn build_pipeline(spice: &str) -> (Netlist, MnaSystem, DkKernel) {
-    let netlist = Netlist::parse(spice).expect("failed to parse netlist");
-    let mut mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
-    // Stamp input conductance (1 ohm) at node 0 (first non-ground node)
-    if mna.n > 0 {
-        mna.g[0][0] += 1.0;
-    }
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("failed to build DK kernel");
-    (netlist, mna, kernel)
-}
-
 fn generate(spice: &str) -> String {
-    let (netlist, mna, kernel) = build_pipeline(spice);
-    let config = CodegenConfig {
-        circuit_name: "switch_test".to_string(),
-        sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![if kernel.n > 1 { 1 } else { 0 }],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
-    result.code
+    let mut config = support::config_in_out_or_node1(spice, 44100.0);
+    config.circuit_name = "switch_test".to_string();
+    support::build_as_shipped(spice, &config, "dk").0
 }
 
 fn compile_and_run(code: &str, test_name: &str) {
@@ -608,19 +586,9 @@ C2 out 0 47n
 .switch C1 100n 220n
 .pot R1 1 10k
 ";
-    let (netlist, mna, kernel) = build_pipeline(spice);
-    let config = CodegenConfig {
-        circuit_name: "switch_pot_test".to_string(),
-        sample_rate: 44100.0,
-        input_node: 0,
-        output_nodes: vec![if kernel.n > 1 { 1 } else { 0 }],
-        input_resistance: 1.0,
-        ..CodegenConfig::default()
-    };
-    let codegen = CodeGenerator::new(config);
-    let result = codegen
-        .generate(&kernel, &mna, &netlist)
-        .expect("codegen failed");
+    let mut config = support::config_in_out_or_node1(spice, 44100.0);
+    config.circuit_name = "switch_pot_test".to_string();
+    let code = support::build_as_shipped(spice, &config, "dk").0;
 
     let test_harness = format!(
         "{}\n\
@@ -649,7 +617,7 @@ C2 out 0 47n
              \n\
              eprintln!(\"Switch+Pot test passed!\");\n\
          }}\n",
-        result.code
+        code
     );
     compile_and_run(&test_harness, "switch_pot");
 }

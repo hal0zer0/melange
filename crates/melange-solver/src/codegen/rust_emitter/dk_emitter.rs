@@ -2105,10 +2105,13 @@ impl RustEmitter {
             .switches
             .iter()
             .any(|sw| sw.components.iter().any(|c| c.component_type == 'R'));
-        let has_c_switch = ir
-            .switches
-            .iter()
-            .any(|sw| sw.components.iter().any(|c| c.component_type == 'C'));
+        // A C switch stamps `c_eff`; so does an L switch on the augmented
+        // kernel, whose inductance sits on its branch row's diagonal of C.
+        let has_c_switch = ir.switches.iter().any(|sw| {
+            sw.components.iter().any(|c| {
+                c.component_type == 'C' || (c.component_type == 'L' && c.augmented_row.is_some())
+            })
+        });
         let g_mut = if has_r_switch || num_pots > 0 {
             "mut "
         } else {
