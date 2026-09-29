@@ -4923,15 +4923,18 @@ impl CircuitIR {
         let vt = Self::lookup_model_param(netlist, model, "VT")
             .or_else(|| cat.map(|c| c.vt))
             .unwrap_or(melange_primitives::VT_ROOM);
+        // Card, then catalog part, then the SPICE / ngspice default (IS 1e-16,
+        // BF 100, BR 1): a card that omits a parameter means what it means in
+        // SPICE.
         let is = Self::lookup_model_param(netlist, model, "IS")
             .or_else(|| cat.map(|c| c.is))
-            .unwrap_or(1.26e-14);
+            .unwrap_or(1e-16);
         let beta_f = Self::lookup_model_param(netlist, model, "BF")
             .or_else(|| cat.map(|c| c.beta_f))
-            .unwrap_or(200.0);
+            .unwrap_or(100.0);
         let beta_r = Self::lookup_model_param(netlist, model, "BR")
             .or_else(|| cat.map(|c| c.beta_r))
-            .unwrap_or(3.0);
+            .unwrap_or(1.0);
 
         validate_positive_finite(is, "BJT model IS")?;
         validate_positive_finite(vt, "BJT model VT")?;
@@ -5252,11 +5255,13 @@ impl CircuitIR {
         } else if let Some(beta) = Self::lookup_model_param(netlist, model, "BETA") {
             beta * vp * vp
         } else {
-            cat.map(|c| c.idss).unwrap_or(2e-3)
+            // SPICE / ngspice default BETA = 1e-4 A/V^2 (IDSS = BETA * VTO^2).
+            cat.map(|c| c.idss).unwrap_or(1e-4 * vp * vp)
         };
+        // SPICE / ngspice default LAMBDA = 0.
         let lambda = Self::lookup_model_param(netlist, model, "LAMBDA")
             .or_else(|| cat.map(|c| c.lambda))
-            .unwrap_or(0.001);
+            .unwrap_or(0.0);
 
         validate_positive_finite(idss, "JFET model IDSS")?;
         if !vp.is_finite() || vp.abs() < 1e-15 {
@@ -5330,18 +5335,18 @@ impl CircuitIR {
             .map(|m| m.model_type.to_uppercase().starts_with("PM"))
             .unwrap_or(cat.map(|c| c.is_p_channel).unwrap_or(false));
 
+        // Card, then catalog part, then the SPICE / ngspice level-1 default
+        // (KP 2e-5 A/V^2 with W = L, VTO 0, LAMBDA 0).
         let kp = Self::lookup_model_param(netlist, model, "KP")
             .or_else(|| cat.map(|c| c.kp))
-            .unwrap_or(0.1);
-        let default_vt = cat
-            .map(|c| c.vt)
-            .unwrap_or(if is_p_channel { -2.0 } else { 2.0 });
+            .unwrap_or(2e-5);
+        let default_vt = cat.map(|c| c.vt).unwrap_or(0.0);
         let vt = Self::lookup_model_param(netlist, model, "VTO")
             .or_else(|| Self::lookup_model_param(netlist, model, "VT"))
             .unwrap_or(default_vt);
         let lambda = Self::lookup_model_param(netlist, model, "LAMBDA")
             .or_else(|| cat.map(|c| c.lambda))
-            .unwrap_or(0.01);
+            .unwrap_or(0.0);
 
         validate_positive_finite(kp, "MOSFET model KP")?;
         if !vt.is_finite() {

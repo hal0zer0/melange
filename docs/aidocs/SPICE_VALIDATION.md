@@ -208,6 +208,17 @@ If correlation ≈ 0 or very low:
    - Generated code: `input * G_in`, once, at `n+1`
    - Check `q_dot` is committed with `v_prev` every sample (trapezoidal builds)
 
+5. **Has the slowest time constant settled?** Before comparing absolute
+   levels, periods or limit cycles, list every time constant in the deck and
+   compare only over a window starting at least `5 × τ_max` after the start.
+   The two engines start from different states: ngspice pre-settles its DC OP
+   (or starts every node at 0 V under `uic`), melange starts from its DC OP or
+   IC seed. A free-running circuit forgets its start only as fast as its
+   slowest network does. Measured 2026-09-29 on the G10 transistor astable:
+   its output coupling network (1 µF into 100 kΩ, τ = 0.1 s) left a 50 ms
+   comparison 6.8 % off in period and 1 V off in the low level against
+   ngspice `uic`; over 0.65–0.8 s the two agree to 0.09 % and 20 mV.
+
 ### Diagnostic Output
 
 Expected for RC lowpass (10k + 10nF, 48kHz):

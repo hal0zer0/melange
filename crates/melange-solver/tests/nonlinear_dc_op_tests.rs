@@ -791,10 +791,10 @@ fn build_device_slots(netlist: &Netlist, _mna: &MnaSystem) -> Vec<DeviceSlot> {
                 dim_offset += 1;
             }
             Element::Bjt { model, .. } => {
-                let is = lookup_model_param(netlist, model, "IS").unwrap_or(1.26e-14);
+                let is = lookup_model_param(netlist, model, "IS").unwrap_or(1e-16);
                 let vt_val = lookup_model_param(netlist, model, "VT").unwrap_or(vt);
-                let beta_f = lookup_model_param(netlist, model, "BF").unwrap_or(200.0);
-                let beta_r = lookup_model_param(netlist, model, "BR").unwrap_or(3.0);
+                let beta_f = lookup_model_param(netlist, model, "BF").unwrap_or(100.0);
+                let beta_r = lookup_model_param(netlist, model, "BR").unwrap_or(1.0);
                 let ise = lookup_model_param(netlist, model, "ISE").unwrap_or(0.0);
                 let ne = lookup_model_param(netlist, model, "NE").unwrap_or(1.5);
                 let isc = lookup_model_param(netlist, model, "ISC").unwrap_or(0.0);

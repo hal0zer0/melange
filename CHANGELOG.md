@@ -24,6 +24,14 @@ generated state is smaller.
 
 ### Fixed
 
+- **A `.model` card that omits a parameter now gets the SPICE default.** For a
+  part melange does not know by name, a missing BJT `IS`, `BF` or `BR` became
+  1.26e-14, 200 and 3 (a 2N2222A's values) instead of SPICE's 1e-16, 100 and
+  1; a JFET without `BETA`/`IDSS` got `IDSS` = 2 mA instead of `BETA` = 1e-4
+  and a `LAMBDA` of 0.001 instead of 0; a MOSFET without `KP`, `VTO` or
+  `LAMBDA` got 0.1, ±2 V and 0.01 instead of 2e-5, 0 and 0. Named catalog parts
+  are unchanged. Three corpus circuits have such a card; their renders change
+  by about one part in 10^9.
 - **DK circuits no longer edit a solved sample.** A safety net scaled every
   sample's voltage step down to 2 V (or 5 % of the largest bias voltage),
   whether or not the sample had been solved, so a legitimately large step —

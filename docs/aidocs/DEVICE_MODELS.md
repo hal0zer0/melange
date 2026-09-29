@@ -1,5 +1,38 @@
 # Nonlinear Device Models
 
+
+## Model-Card Defaults
+
+A parameter a `.model` card omits takes, in order: the card's catalog part
+(`melange-devices/src/catalog/`, a sourced value for that named part), then
+the SPICE default. A card is read the way SPICE reads it. Source for the SPICE
+column: ngspice-42 `showmod` on bare `D`, `NPN`, `NJF` and `NMOS LEVEL=1`
+cards (dumped 2026-09-29); these are also the SPICE3 manual's values.
+
+| Device | Parameter | melange (no card, no catalog) | SPICE / ngspice |
+|---|---|---|---|
+| Diode | IS, N, RS, CJO | 1e-14, 1, 0, 0 | same |
+| Diode | junction capacitance | constant CJO (VJ, M not read) | depletion law, VJ 1, M 0.5 |
+| Diode | BV, IBV | ∞, 1e-3 | same (BV = 0 means none) |
+| Diode | EG, XTI | 1.11, 3 | same |
+| BJT | IS, BF, BR | 1e-16, 100, 1 | same |
+| BJT | NF, NR, NE, NC, ISE, ISC | 1, 1, 1.5, 2, 0, 0 | same |
+| BJT | VAF, VAR, IKF, IKR | ∞ | same (0 means none) |
+| BJT | RB, RC, RE, CJE, CJC, TF | 0 | same |
+| BJT | VJE, VJC, MJE, MJC, FC | 0.75, 0.75, 0.33, 0.33, 0.5 | same |
+| BJT | XTB, XTI, EG | 0, 3, 1.11 | same |
+| JFET | VTO | −2 (N; P stored +2 in melange's convention) | −2 |
+| JFET | BETA | 1e-4 A/V² (IDSS = BETA·VTO²) | 1e-4 |
+| JFET | LAMBDA, RD, RS, CGS, CGD | 0 | same |
+| MOSFET (level 1) | VTO, KP, LAMBDA | 0, 2e-5 A/V² (W = L), 0 | same |
+| MOSFET (level 1) | GAMMA, PHI, RD, RS | 0, 0.6, 0, 0 | same |
+| All | thermal voltage | kT/q at 300.00 K (`VT_ROOM`) | TNOM = 27 °C (300.15 K) |
+
+Two rows differ: the thermal voltage (0.05 %; see STATUS.md) and the diode
+junction capacitance, which melange holds constant at CJO where SPICE follows
+the depletion law (a model feature, not a default). Tubes, VCAs, LDRs and glow lamps have no SPICE counterpart; their
+defaults are the documented catalog or model values in their own sections.
+
 ## Diode (Shockley)
 
 ### Current
@@ -932,7 +965,8 @@ dIg/dVgs and dIg/dVds are effectively zero.
 ### Sign Convention
 - N-channel (NJ): sign=+1.0, default VTO=-2.0, Vp negative
 - P-channel (PJ): sign=-1.0, default VTO=+2.0, Vp positive
-- Default IDSS=2e-3 A, lambda=0.001
+- Defaults when neither the card nor a catalog part gives them: the SPICE /
+  ngspice values BETA = 1e-4 A/V² (IDSS = BETA·VTO²), LAMBDA = 0
 
 ## MOSFET (Level 1 SPICE)
 
@@ -964,8 +998,10 @@ Ig = 0  (insulated gate — no gate current)
 Gate current derivatives are always zero.
 
 ### Sign Convention
-- N-channel (NM): sign=+1.0, default VTO=2.0, KP=0.1
-- P-channel (PM): sign=-1.0, default VTO=-2.0
+- N-channel (NM): sign=+1.0. Defaults when neither the card nor a catalog part
+  gives them: the SPICE / ngspice level-1 values VTO = 0, KP = 2e-5 A/V²
+  (W = L), LAMBDA = 0
+- P-channel (PM): sign=-1.0, same defaults (VTO = 0)
 - Channel-length modulation via LAMBDA parameter
 
 ## OpAmp (Linear VCCS)
