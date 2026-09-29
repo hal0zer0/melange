@@ -104,7 +104,7 @@ Newton result, on both routes.
 
 ## How `BoyleDiodes` works
 
-When `opamp_rail_mode == BoyleDiodes`, `codegen::ir::augment_netlist_with_boyle_diodes` (`ir.rs:708`) clones the netlist and adds, per clamped op-amp:
+When the rail mode resolves to `BoyleDiodes`, the build (`build::build`, before the MNA is assembled) calls `codegen::ir::augment_netlist_with_boyle_diodes` (`codegen/ir/opamp_rail.rs`), which clones the netlist and adds, per clamped op-amp, the elements below. Every pipeline step (ports, `.inject`, reductions, DC OP, internal-node expansion) then sees them once. The mode routes nodal (the internal gain node is nodal-only; `--solver dk` is refused), and codegen refuses a `BoyleDiodes` build whose netlist was not augmented. The rail mode is resolved on the circuit without the catch diodes on purpose: they exist because of that choice.
 
 1. Internal gain node `_oa_int_{name}` (the high-impedance summing point)
 2. Output buffer chain:
@@ -278,7 +278,7 @@ See `opamp_rail_clamp_bug.md` for the full history. This mode is kept in the enu
 |---|---|---|
 | `crates/melange-solver/src/codegen/mod.rs` | 84-128 | `OpampRailMode` enum, parser, Display |
 | `crates/melange-solver/src/codegen/ir/opamp_rail.rs` | `resolve_opamp_rail_mode` | Auto-detector |
-| `crates/melange-solver/src/codegen/ir.rs` | 708-835 | `augment_netlist_with_boyle_diodes` (BoyleDiodes scaffolding) |
+| `crates/melange-solver/src/codegen/ir/opamp_rail.rs` | — | `augment_netlist_with_boyle_diodes` (BoyleDiodes scaffolding; called by `build::build`) |
 | `crates/melange-solver/src/mna.rs` | 374 | `R_BOYLE_INT_LOAD = 1e6` (the R1 value) |
 | `crates/melange-solver/src/mna.rs` | 2847-2964 | Op-amp stamping dispatch (BoyleDiodes detection + non-Boyle linear path) |
 | `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs` | grep `trap_rail` | Trap-path mode dispatch (post-NR rail handling) |

@@ -1251,61 +1251,29 @@ impl CodeGenerator {
                 resolved.mode.as_str()
             )));
         }
-        let augmented_storage;
-        let augmented_mna_storage;
-        let (mna, netlist) = if resolved.mode == OpampRailMode::BoyleDiodes {
-            log::info!(
-                "Codegen nodal: BoyleDiodes mode active; augmenting netlist with \
-                 internal-node catch diodes for {} clamped op-amps",
-                mna.opamps
-                    .iter()
-                    .filter(|oa| oa.n_out_idx > 0 && (oa.vcc.is_finite() || oa.vee.is_finite()))
-                    .count()
-            );
-            augmented_storage = ir::augment_netlist_with_boyle_diodes(netlist, mna);
-            let mut rebuilt = MnaSystem::from_netlist(&augmented_storage).map_err(|e| {
-                CodegenError::UnsupportedTopology(format!(
-                    "BoyleDiodes augmented netlist failed to build MNA: {e}"
-                ))
-            })?;
-
-            // Re-apply caller-side MNA mutations that the rebuild dropped.
-            //
-            // 1) Input conductance: the CLI stamps `g[in][in] += 1/R_in`
-            //    into the original MNA before calling `generate_nodal`,
-            //    but `from_netlist(&augmented_storage)` returns a clean
-            //    MNA. Without this, the input node row only has the
-            //    series cap conductance (~1e-4), the LU treats it as
-            //    nearly singular, and the linear prediction blows up
-            //    on the first non-zero input sample.
-            {
-                let in_nodes = self.config.input_node_indices();
-                let in_res = self.config.input_resistance_values();
-                for (&in_node, &r) in in_nodes.iter().zip(in_res.iter()) {
-                    if in_node < rebuilt.n {
-                        rebuilt.g[in_node][in_node] += 1.0 / r;
-                    }
-                }
-            }
-
-            // 2) Device junction caps: the CLI stamps these into the
-            //    original MNA via `stamp_device_junction_caps`. The
-            //    augmented netlist has new diodes (the catch diodes),
-            //    so we need to rebuild `device_slots` on the augmented
-            //    netlist + MNA before stamping.
-            if let Ok(device_slots) =
-                ir::CircuitIR::build_device_info_with_mna(&augmented_storage, Some(&rebuilt))
-            {
-                if !device_slots.is_empty() {
-                    rebuilt.stamp_device_junction_caps(&device_slots);
-                }
-            }
-
-            augmented_mna_storage = rebuilt;
-            (&augmented_mna_storage, &augmented_storage)
-        } else {
-            (mna, netlist)
-        };
+        // BoyleDiodes: the catch diodes are circuit elements, added to the
+        // netlist BEFORE the MNA is assembled (`build::build` does it) so every
+        // pipeline step sees them. Generating from an un-augmented netlist would
+        // either rebuild the MNA here — dropping whatever the caller stamped or
+        // reduced (`.inject`, `.linearize`, internal-node expansion) — or ship
+        // no diodes at all. Refuse instead.
+        if resolved.mode == OpampRailMode::BoyleDiodes
+            && mna
+                .opamps
+                .iter()
+                .any(|oa| oa.n_out_idx > 0 && (oa.vcc.is_finite() || oa.vee.is_finite()))
+            && !netlist
+                .models
+                .iter()
+                .any(|m| m.name == ir::BOYLE_CATCH_DIODE_MODEL)
+        {
+            return Err(CodegenError::UnsupportedTopology(
+                "OpampRailMode::BoyleDiodes needs the catch diodes in the netlist before the \
+                 MNA is assembled (ir::augment_netlist_with_boyle_diodes; \
+                 melange_solver::build::build does it)."
+                    .to_string(),
+            ));
+        }
 
         // Auto-insert parasitic caps if C matrix is all zeros and circuit has
         // nonlinear devices. Without capacitors, A = G and the trapezoidal

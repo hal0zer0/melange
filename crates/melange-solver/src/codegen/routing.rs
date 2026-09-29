@@ -73,6 +73,10 @@ pub struct RoutingDecision {
     /// the resolver picked an active-set mode to avoid. A HARD structural
     /// requirement for nodal.
     pub opamp_active_set: bool,
+    /// Whether the rail mode resolved to `BoyleDiodes`: the catch diodes
+    /// hang off each op-amp's internal gain node, which only the nodal solver
+    /// builds. A HARD structural requirement for nodal.
+    pub opamp_boyle_diodes: bool,
     /// Whether an op-amp card sets `AOL_TRANSIENT_CAP` below its AOL. The cap
     /// is applied to the transient matrices by the nodal IR builder only; the
     /// DK kernel is built from the uncapped `G`, so DK would ignore it.
@@ -132,6 +136,8 @@ pub fn auto_route(
             resolved_rail,
             OpampRailMode::ActiveSet | OpampRailMode::ActiveSetBe
         );
+
+    let opamp_boyle_diodes = resolved_rail == OpampRailMode::BoyleDiodes;
 
     let opamp_transient_aol_cap = mna.opamps.iter().any(|oa| oa.aol_transient_cap < oa.aol);
 
@@ -262,6 +268,13 @@ pub fn auto_route(
              DK can only clamp the output)"
                 .to_string(),
         )
+    } else if opamp_boyle_diodes {
+        (
+            SolverRoute::Nodal,
+            "op-amp rail mode boyle-diodes (the catch diodes hang off the op-amp's internal \
+             gain node, which only the nodal solver builds)"
+                .to_string(),
+        )
     } else if opamp_transient_aol_cap {
         (
             SolverRoute::Nodal,
@@ -287,6 +300,7 @@ pub fn auto_route(
         saturating_inductor,
         opamp_rail_mode: resolved_rail,
         opamp_active_set,
+        opamp_boyle_diodes,
         opamp_transient_aol_cap,
         reason,
     }

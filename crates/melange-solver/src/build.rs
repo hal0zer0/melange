@@ -268,6 +268,25 @@ pub fn build(
         apply_pot_overrides(&mut netlist, overrides, &|m| report!(out, "{m}"))?;
     }
 
+    // `--opamp-rail-mode boyle-diodes`: the catch diodes (and each op-amp's
+    // internal gain node and output buffer) are part of the circuit, so they
+    // join the netlist here, before the MNA is assembled; every later step
+    // (ports, `.inject`, reductions, DC OP, internal-node expansion) sees them
+    // once. The rail mode is read on the circuit WITHOUT the catch diodes on
+    // purpose: they exist because of that choice, so resolving it on the
+    // augmented circuit would be circular. Do not move the resolution after
+    // the augmentation.
+    let probe = MnaSystem::from_netlist(&netlist).with_context(|| "Failed to build MNA system")?;
+    if crate::codegen::ir::resolve_opamp_rail_mode(&probe, opamp_rail_mode).mode
+        == crate::codegen::OpampRailMode::BoyleDiodes
+    {
+        netlist = crate::codegen::ir::augment_netlist_with_boyle_diodes(&netlist, &probe);
+        report!(
+            out,
+            "  Op-amp rail mode boyle-diodes: catch diodes added to the netlist"
+        );
+    }
+
     // Step 2: Build MNA system
     report!(out, "Step 2: Building MNA system...");
     let mut mna =
@@ -1102,6 +1121,12 @@ pub fn forced_dk_hard_blocker(
              picked because an op-amp output is capacitor-coupled downstream) — pinning a \
              railed output and re-solving the circuit is nodal-only, and DK can only clamp \
              the output, which corrupts the downstream capacitor history"
+                .to_string(),
+        )
+    } else if routing.opamp_boyle_diodes {
+        Some(
+            "the op-amp rail mode is boyle-diodes — the catch diodes hang off each op-amp's \
+             internal gain node, which only the nodal solver builds"
                 .to_string(),
         )
     } else if routing.opamp_transient_aol_cap {
