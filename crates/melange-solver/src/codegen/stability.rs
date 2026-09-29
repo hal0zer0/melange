@@ -293,7 +293,7 @@ pub fn log_be_post_promotion_check(
             stability.dominant_sign
         );
     } else {
-        log::warn!(
+        crate::diag_warn!(
             "{label}: backward Euler does NOT stabilize this circuit — \
              spectral_radius(S_be*A_neg_be) = {:.4} (dominant_sign {:+.0}) is still > 1 \
              after promotion. A positive dominant sign is a real growing pole (a \

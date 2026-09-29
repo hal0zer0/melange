@@ -1563,7 +1563,7 @@ impl CircuitIR {
         let sys = match crate::codegen::ring::RingSystem::from_ir(ir) {
             Ok(sys) => sys,
             Err(e) => {
-                log::warn!("Trapezoidal kept without a ring check: {e}");
+                crate::diag_warn!("Trapezoidal kept without a ring check: {e}");
                 ir.integration_reason = format!("ring predicate not evaluated: {}", e.0);
                 return Ok(None);
             }
@@ -1578,7 +1578,7 @@ impl CircuitIR {
             // One plain sentence by default; the eigenvalue detail is for
             // whoever asks for it. A first-time user sees this on a five-line
             // diode clipper and needs to know whether to act (they do not).
-            log::warn!(
+            crate::diag_warn!(
                 "Using backward Euler integration: the trapezoidal rule would ring or grow at \
                  Nyquist on this circuit. BE is stable, at the cost of slightly damping the top \
                  octave (oversampling reduces that). No action needed; RUST_LOG=info for the \
@@ -2278,7 +2278,7 @@ impl CircuitIR {
         let v_prev_ic_seed = dc_op::solve_ic_seeded_operating_point(mna, &device_slots, &dc_op_config)
             .map(|ic_result| {
                 if !ic_result.converged {
-                    log::warn!(
+                    crate::diag_warn!(
                         "IC= initial-state solve did not converge (method: {:?}); v_prev seed uses best estimate",
                         ic_result.method
                     );
@@ -2297,7 +2297,7 @@ impl CircuitIR {
         };
 
         if !dc_result.converged && m > 0 {
-            log::warn!(
+            crate::diag_warn!(
                 "nonlinear DC OP solver did not converge (method: {:?}), using best estimate",
                 dc_result.method
             );
@@ -2907,7 +2907,7 @@ impl CircuitIR {
         solver_config.subsample_fire =
             config.subsample_fire != crate::codegen::SubsampleFireMode::Off && has_glow;
         if config.subsample_fire == crate::codegen::SubsampleFireMode::On && !has_glow {
-            log::warn!(
+            crate::diag_warn!(
                 "--subsample-fire on: circuit has no latched (glow) device; the flag is inert."
             );
         }
@@ -2991,7 +2991,7 @@ impl CircuitIR {
         let v_prev_ic_seed = dc_op::solve_ic_seeded_operating_point(mna, &device_slots, &dc_op_config)
             .map(|ic_result| {
                 if !ic_result.converged {
-                    log::warn!(
+                    crate::diag_warn!(
                         "IC= initial-state solve did not converge (method: {:?}); v_prev seed uses best estimate",
                         ic_result.method
                     );
@@ -3361,7 +3361,7 @@ impl CircuitIR {
                                 };
                                 if k < 0.9995 {
                                     let k_air = floor / ((1.0 - k) + floor);
-                                    log::warn!(
+                                    crate::diag_warn!(
                                         "Saturating shared core ({}): coupling k = {k} is looser than real \
                                          audio iron (1 - k ~ 1e-5..1e-4); the implied coupling in \
                                          deep saturation is k_air = {k_air:.3}.",
@@ -3390,13 +3390,13 @@ impl CircuitIR {
                             } else {
                                 format!("inductor {}", ind.name)
                             };
-                            log::warn!(
+                            crate::diag_warn!(
                                 "Saturating {what}: no LAIR= or CORE= given, so {whose} \
                                  (rule-of-thumb for ungapped steel). Set LAIR=<fraction> from a \
                                  measured or core-data value, or CORE=gapped|steel|nickel."
                             );
                         } else if lair == 0.0 {
-                            log::warn!(
+                            crate::diag_warn!(
                                 "Saturating inductor {}: LAIR=0 gives a zero final slope; driven far \
                                  past ISAT (beyond ~10x) its current is set by a numerical, not a \
                                  physical, floor.",
@@ -3453,7 +3453,7 @@ impl CircuitIR {
                 .iter()
                 .any(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite());
         if rails_into_core && config.oversampling_factor < 4 {
-            log::warn!(
+            crate::diag_warn!(
                 "An op-amp that can rail drives a saturating inductor: at 1x, the \
                  inductor's internal current can overshoot by up to ~13 % where the \
                  op-amp rails into the core (output H1 is unaffected); 4x is accurate. \
@@ -3472,7 +3472,7 @@ impl CircuitIR {
                 .any(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite())
             && config.oversampling_factor == 1;
         if railing_at_1x {
-            log::warn!(
+            crate::diag_warn!(
                 "An op-amp here can rail (rail mode active-set, chosen automatically). \
                  Rail clipping makes harmonics above Nyquist, which alias at 1x: on a \
                  single-supply overdrive, a 16 kHz tone at 48 kHz put a 66 Hz alias on \
@@ -3627,7 +3627,7 @@ impl CircuitIR {
                             // lossy and NOT safe under signal: the collector
                             // swing modulates qb, which this compile-time
                             // decision cannot see. Warn loudly, per device.
-                            log::warn!(
+                            crate::diag_warn!(
                                 "BJT '{}' FORCE-reduced to 1D by --bjt-fa=force despite: {}. Accuracy is NOT guaranteed under signal (~1-2 dB deviation under hard drive for GP/ISE, larger for parasitics). You requested this — remove --bjt-fa=force for the accuracy-exact full-2D model.",
                                 name,
                                 mechanism
@@ -3672,7 +3672,7 @@ impl CircuitIR {
         mna: &crate::mna::MnaSystem,
     ) -> Vec<Vec<usize>> {
         if slots.len() != mna.nonlinear_devices.len() {
-            log::warn!(
+            crate::diag_warn!(
                 "device_slots ({}) and mna.nonlinear_devices ({}) differ in length; \
                  diag_region_exit_count will not be emitted for this circuit",
                 slots.len(),
@@ -3811,7 +3811,7 @@ impl CircuitIR {
             // Explicit user opt-in (`--tube-grid-fa on`). The reduction is
             // accuracy-lossy and NOT safe under signal: warn loudly, per
             // device, naming what is dropped. Mirrors `--bjt-fa force`.
-            log::warn!(
+            crate::diag_warn!(
                 "Pentode '{}' FORCE-reduced to 2D by --tube-grid-fa on (Vgk={:.3}V, \
                  Vg2k={:.3}V frozen, Vpk={:.3}V). Dropped: (1) the live Vg2k = \
                  V(screen) - V(cathode) dimension — its feedback through the cathode \
@@ -3826,7 +3826,7 @@ impl CircuitIR {
                 vpk
             );
             if vgk >= -(tp.vgk_onset + 0.5) {
-                log::warn!(
+                crate::diag_warn!(
                     "Pentode '{}' is NOT biased below grid cutoff at the DC OP \
                      (Vgk={:.3}V, onset {:.2}V): the forced grid-off model drops Ig1 \
                      at a bias where the grid already conducts.",
@@ -4340,7 +4340,7 @@ impl CircuitIR {
                 // SPICE default diode (IS=1e-14, N=1.0) for ngspice parity.
                 // The old fallback was a chimera: 1N4148's IS (2.52e-9) paired
                 // with N=1.0 — matched neither the SPICE default nor a 1N4148.
-                log::warn!(
+                crate::diag_warn!(
                     "Diode model '{}' not in catalog and no IS given — falling back to the SPICE default diode (IS=1e-14, N=1.0)",
                     model
                 );
@@ -4793,7 +4793,7 @@ impl CircuitIR {
         // convention (vp = -VTO). N-channel VTO < 0 already matches — unchanged.
         let vp = match Self::lookup_model_param(netlist, model, "VTO") {
             Some(raw_vto) if is_p_channel && raw_vto < 0.0 => {
-                log::warn!(
+                crate::diag_warn!(
                     "P-channel JFET model '{}': SPICE-convention VTO={} normalized to melange convention vp={} (P-channel pinch-off stored positive; device model flips internally)",
                     model,
                     raw_vto,
@@ -5034,7 +5034,7 @@ impl CircuitIR {
         let Some(onset) =
             tube.grid_voltage_at_current(melange_devices::tube::GRID_START_CRITERION_A)
         else {
-            log::warn!(
+            crate::diag_warn!(
                 "Triode '{model}': grid law (Gg={gg:.4e}, xi={xi}, Cg={cg}) never reaches the \
                  0.3 uA grid-current starting point — the onset check cannot be evaluated."
             );
@@ -5053,13 +5053,13 @@ impl CircuitIR {
             ig_at_zero * 1e6
         );
         match melange_devices::catalog::tubes::grid_start_limit_v(model) {
-            Some(limit) if onset < limit => log::warn!(
+            Some(limit) if onset < limit => crate::diag_warn!(
                 "Triode '{model}': derived grid-current starting point {onset:.3} V is BELOW the \
                  manufacturer limit for this type (Vg(Ig = +0.3 uA) max {limit:.1} V). The fitted \
                  grid law conducts further into the negative-grid region than the type is \
                  specified to."
             ),
-            Some(limit) if onset >= 0.0 => log::warn!(
+            Some(limit) if onset >= 0.0 => crate::diag_warn!(
                 "Triode '{model}': derived grid-current starting point {onset:.3} V is at or \
                  above 0 V, so this grid law has no negative-grid conduction at the 0.3 uA \
                  criterion at all. Every measured 12AX7 starts between -0.27 and -0.38 V, and \
@@ -5906,7 +5906,7 @@ impl CircuitIR {
             defining_keys.iter().any(|k| k.eq_ignore_ascii_case(&upper))
         });
         if !supplied_defining {
-            log::warn!(
+            crate::diag_warn!(
                 ".model {}: name matches no built-in catalog part and no \
                  device-defining parameter was supplied — compiling as {}. A \
                  typo'd model name silently becomes the default device; use an \
@@ -6101,7 +6101,7 @@ fn opamp_rail_reason_with_override(
     } else {
         format!("{} outputs are", at_risk.join(", "))
     };
-    log::warn!(
+    crate::diag_warn!(
         "hard rail mode requested; {who} AC-coupled downstream, where hard corrupts \
          capacitor history; auto would pick active-set"
     );

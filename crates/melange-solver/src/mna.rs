@@ -2959,7 +2959,7 @@ pub(crate) fn invert_small_matrix(a: &[Vec<f64>]) -> Vec<Vec<f64>> {
     for i in 0..n {
         for j in 0..n {
             if !a[i][j].is_finite() {
-                log::warn!(
+                crate::diag_warn!(
                     "Non-finite value in inductance matrix at [{i}][{j}]: {}",
                     a[i][j]
                 );
@@ -2990,7 +2990,7 @@ pub(crate) fn invert_small_matrix(a: &[Vec<f64>]) -> Vec<Vec<f64>> {
             }
         }
         if max_val < 1e-30 {
-            log::warn!(
+            crate::diag_warn!(
                 "Singular inductance matrix in transformer group (pivot {:.2e})",
                 max_val
             );
@@ -3294,7 +3294,7 @@ impl MnaBuilder {
                     let resolved = resolve_opamp_swing(&oa.name, &swing, oa.gbw.is_finite())
                         .map_err(MnaError::InvalidParameter)?;
                     for notice in &resolved.notices {
-                        log::warn!("{notice}");
+                        crate::diag_warn!("{notice}");
                     }
                     oa.vcc = resolved.high;
                     oa.vee = resolved.low;
@@ -3313,7 +3313,7 @@ impl MnaBuilder {
             .map(|oa| oa.name.as_str())
             .collect();
         if !gbw_named.is_empty() {
-            log::warn!(
+            crate::diag_warn!(
                 "Op-amp {}: GBW is not modelled as a bandwidth pole (the gain is AOL at \
                  every frequency). It only sets the default +/-13 V rails when VCC, VEE \
                  and VSAT are absent.",
@@ -4233,7 +4233,7 @@ impl MnaBuilder {
                         min_diag // positive means PD
                     };
                     if det <= 0.0 || !det.is_finite() {
-                        log::warn!(
+                        crate::diag_warn!(
                             "Transformer group '{}' ({} windings) has non-positive-definite inductance matrix. \
                              This means the coupling coefficients are physically inconsistent. \
                              Check that all K values are compatible (all windings on the same core \
@@ -5358,7 +5358,7 @@ impl MnaBuilder {
             if let Some(r_drive) = r_drive {
                 let metric = r_drive * vca.g0;
                 if metric >= 10.0 {
-                    log::warn!(
+                    crate::diag_warn!(
                         "VCA {} voltage-mode with R_drive·G0 ≈ {:.1} ≫ 1: \
                          control-voltage response is suppressed by the source \
                          resistance — did you mean MODE=1 (current-mode)?",

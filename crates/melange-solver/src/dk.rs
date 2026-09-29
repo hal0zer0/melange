@@ -312,7 +312,7 @@ impl DkKernel {
             let norm_s = infinity_norm(&s_2d);
             let cond = norm_a * norm_s;
             if cond > 1e13 {
-                log::warn!(
+                crate::diag_warn!(
                     "A matrix condition number is high ({cond:.2e}); usually benign \
                      — a concern only if the output looks wrong."
                 );
@@ -699,7 +699,7 @@ impl DkKernel {
             let norm_s = infinity_norm(&s_2d);
             let cond = norm_a * norm_s;
             if cond > 1e13 {
-                log::warn!(
+                crate::diag_warn!(
                     "Augmented matrix condition number is high ({cond:.2e}). This is \
                      expected for transformers with near-unity coupling (k→1 shrinks \
                      leakage inductance) and is usually benign — a concern only if the \

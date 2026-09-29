@@ -560,7 +560,7 @@ pub fn collect_thermal_noise_sources(
                 // absorption), or a nodal build that declined the expansion
                 // (min diag(K) < -100; RB/RC/RE stay inside the device).
                 // Honest skip — do not fake an equivalent stamp.
-                log::warn!(
+                crate::diag_warn!(
                     "noise: BJT {} parasitic RB/RC/RE thermal noise skipped — \
                      this build has no internal nodes for it (the DK route, or \
                      a nodal build that keeps RB/RC/RE inside the device \

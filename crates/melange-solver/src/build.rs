@@ -200,6 +200,8 @@ pub fn build(
     out: Reporter<'_>,
     err: Reporter<'_>,
 ) -> Result<Built, BuildError> {
+    // Each model warning once per build, however many steps resolve the model.
+    let _warnings = crate::diag::BuildScope::begin();
     let sample_rate = opts.sample_rate;
     let tolerance = opts.tolerance;
     let output_scale = opts.output_scale;
@@ -1155,7 +1157,7 @@ pub fn resolve_oversampling(explicit_cli: Option<usize>, recommended: Option<usi
     match (explicit_cli, recommended) {
         (Some(cli), Some(rec)) => {
             if cli < rec {
-                log::warn!(
+                crate::diag_warn!(
                     "deck recommends .oversampling >= {rec} for accuracy; building at {cli} < {rec} \
                      by request (--oversampling wins)"
                 );

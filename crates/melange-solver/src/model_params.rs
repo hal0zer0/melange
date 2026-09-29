@@ -16,7 +16,7 @@
 //!
 //! * `codegen::ir::CircuitIr::check_model_params` — hard error on an unknown key
 //!   for a *referenced* device model (unchanged behaviour).
-//! * [`crate::mna`] op-amp / VCA model resolution — `log::warn!` on an unknown
+//! * [`crate::mna`] op-amp / VCA model resolution — a warning on an unknown
 //!   key (unchanged behaviour; the key set is now this table's).
 //! * [`crate::parser`] — `log::warn!` on an unknown key for a `.model` card that
 //!   **no element references**, which nothing checked at all before: an orphan
@@ -207,7 +207,7 @@ pub fn notice_if_unimplemented(model_name: &str, class: ModelClass, key: &str) -
     let Some(effect) = class.unimplemented_note(key) else {
         return false;
     };
-    log::warn!(
+    crate::diag_warn!(
         ".model {}: '{}' is a recognized parameter that melange does not \
          model yet, so it is IGNORED — {}",
         model_name,
@@ -234,7 +234,7 @@ pub fn warn_if_unknown(model_name: &str, class: ModelClass, key: &str) {
     // because refusing to show a deck's node list over one stale key would be
     // the worse trade.
     if let Some(note) = class.retired_note(key) {
-        log::warn!(
+        crate::diag_warn!(
             ".model {}: parameter '{}' is RETIRED and is ignored here (it is a \
              hard error on compile) — {}.",
             model_name,
@@ -248,13 +248,13 @@ pub fn warn_if_unknown(model_name: &str, class: ModelClass, key: &str) {
     // hint, which is nearly all of them.
     let hint = alias_hint(class, key);
     if hint.is_empty() {
-        log::warn!(
+        crate::diag_warn!(
             ".model {}: unrecognized parameter '{}' (ignored)",
             model_name,
             key
         );
     } else {
-        log::warn!(
+        crate::diag_warn!(
             ".model {}: unrecognized parameter '{}' (ignored).{}",
             model_name,
             key,

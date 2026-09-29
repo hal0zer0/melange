@@ -40,6 +40,12 @@ generated state is smaller.
   before the build rather than during code generation. No shipped build used
   `boyle-diodes`.
 
+- **A build logs each model warning once.** A build resolves device
+  parameters and solves operating points at several steps, and each step
+  logged its warnings again: `melange compile` of a one-triode deck printed
+  the same grid-current warning five times. Warnings raised during a build are
+  now collected and each is logged once, when the build ends.
+
 - **A library build validates its configuration on the DK route.** The DK
   route generated through an entry point that skipped the configuration
   checks (oversampling factor, tolerance, Newton budget, input resistance,

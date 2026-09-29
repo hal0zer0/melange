@@ -75,6 +75,7 @@ pub mod build_identity;
 pub mod codegen;
 pub mod dc_op;
 pub mod device_types;
+pub mod diag;
 pub mod dk;
 pub mod eigen;
 pub mod expr;

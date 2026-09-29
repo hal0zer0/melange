@@ -319,7 +319,7 @@ fn evaluate_devices_inner(
             }
             (DeviceType::Bjt, DeviceParams::Bjt(bp)) => {
                 if s + 1 >= v_nl.len() {
-                    log::warn!(
+                    crate::diag_warn!(
                         "DC OP: BJT at start_idx={} needs 2 dims but v_nl.len()={}",
                         s,
                         v_nl.len()
@@ -455,7 +455,7 @@ fn evaluate_devices_inner(
                     // Use canonical KorenTriode from melange-devices.
                     // 2D: Vgk at start_idx, Vpk at start_idx+1.
                     if s + 1 >= v_nl.len() {
-                        log::warn!(
+                        crate::diag_warn!(
                             "DC OP: Triode at start_idx={} needs 2 dims but v_nl.len()={}",
                             s,
                             v_nl.len()
@@ -493,7 +493,7 @@ fn evaluate_devices_inner(
                     // Jacobian to it so this dispatch arm stays declarative and
                     // line-for-line matches the reference math.
                     if s + 2 >= v_nl.len() {
-                        log::warn!(
+                        crate::diag_warn!(
                             "DC OP: Pentode at start_idx={} needs 3 dims but v_nl.len()={}",
                             s,
                             v_nl.len()
@@ -566,7 +566,7 @@ fn evaluate_devices_inner(
                     // submatrix of the full 3×3, since d/dVg2k rows/cols are
                     // absent when Vg2k is not an NR unknown.
                     if s + 1 >= v_nl.len() {
-                        log::warn!(
+                        crate::diag_warn!(
                             "DC OP: Grid-off pentode at start_idx={} needs 2 dims but v_nl.len()={}",
                             s,
                             v_nl.len()
@@ -661,7 +661,7 @@ fn evaluate_devices_inner(
             }
             _ => {
                 // Mismatched type/params — warn instead of silently skipping
-                log::warn!(
+                crate::diag_warn!(
                     "DC OP: unexpected device type/params combination at device index {}",
                     slot.start_idx
                 );
@@ -1476,7 +1476,7 @@ fn apply_junction_corrections(
         _ => {
             // Cannot happen for a full-rank or ridged Gram; keep the legacy
             // per-row behavior rather than dropping the limiting entirely.
-            log::warn!(
+            crate::diag_warn!(
                 "DC NR: joint junction back-projection Gram solve failed (k={}); \
                  falling back to per-row distribution",
                 k
@@ -2033,7 +2033,7 @@ fn nr_dc_solve(
 
         // Check for NaN/Inf in device evaluation
         if i_nl.iter().any(|x| !x.is_finite()) || j_dev.iter().any(|x| !x.is_finite()) {
-            log::warn!("DC NR iter {}: NaN/Inf in device evaluation", iter);
+            crate::diag_warn!("DC NR iter {}: NaN/Inf in device evaluation", iter);
             return (false, iter + 1);
         }
 
@@ -2195,7 +2195,7 @@ fn nr_dc_solve(
         let v_new = match solve_linear(&g_aug, &rhs) {
             Some(v) => v,
             None => {
-                log::warn!(
+                crate::diag_warn!(
                     "DC NR iter {}: Jacobian singular (scale={}, gmin={:.2e})",
                     iter,
                     source_scale,
@@ -3106,7 +3106,7 @@ pub fn solve_dc_operating_point(
             result.i_nl = i_nl;
             result.iterations += iters;
         } else {
-            log::warn!(
+            crate::diag_warn!(
                 "DC OP: the full-AOL finish did not converge; keeping the operating point \
                  solved with op-amp gain capped at {AOL_DC_MAX}. It carries a ~0.1 % \
                  virtual-ground error and is not the transient's equilibrium, so the \
@@ -3204,7 +3204,7 @@ fn report_kcl_residual(
     result.kcl_worst_row = worst.map(|(r, _)| r);
     if let Some((row, f_abs)) = worst {
         if !result.converged {
-            log::warn!(
+            crate::diag_warn!(
                 "DC OP: returning NOT converged ({:?}); KCL residual max |F|={:.3e} A at row {} \
                  ({} row(s) over tolerance)",
                 result.method,
@@ -3354,7 +3354,7 @@ fn pin_railed_opamps(
         let (ok, iters) = nr_dc_solve(&circuit, &mut v_try, &mut v_nl, &mut i_nl, 1.0, 0.0, false);
         if !ok {
             let why = "the pinned re-solve did not converge".to_string();
-            log::warn!(
+            crate::diag_warn!(
                 "DC OP: {why}; keeping the operating point without the pin, so a railed \
                  output's first samples will move"
             );
@@ -3376,13 +3376,13 @@ fn pin_railed_opamps(
         pins = next;
         if pins.iter().all(Option::is_none) {
             let why = "the re-solve released every pin".to_string();
-            log::warn!("DC OP: {why}; keeping the operating point before the pin");
+            crate::diag_warn!("DC OP: {why}; keeping the operating point before the pin");
             result.rail_pin = RailPin::FellBack(why);
             return None;
         }
     }
     let why = format!("the railed op-amp pin set did not settle in {rounds} rounds");
-    log::warn!("DC OP: {why}; keeping the operating point without the pin");
+    crate::diag_warn!("DC OP: {why}; keeping the operating point without the pin");
     result.rail_pin = RailPin::FellBack(why);
     None
 }
@@ -3402,7 +3402,7 @@ fn solve_dc_operating_point_core(
     // Behavioral B-sources have no DC model yet (BEHAVIORAL_SOURCES.md §6
     // follow-up) — be honest about it instead of silently biasing the OP.
     if let Some(msg) = behavioral_dc_op_warning(mna) {
-        log::warn!("{}", msg);
+        crate::diag_warn!("{}", msg);
     }
 
     let n_dc = dc_sys.n_dc;
@@ -3424,7 +3424,7 @@ fn solve_dc_operating_point_core(
     let v_linear = match solve_linear(&dc_sys.g_dc, &dc_sys.b_dc) {
         Some(v) => v,
         None => {
-            log::warn!(
+            crate::diag_warn!(
                 "DC OP: linear DC system is singular (n_dc={}) — G matrix is \
                  structurally defective (floating subcircuit or conflicting \
                  constraints). Returning zeros with converged=false.",
@@ -4243,7 +4243,7 @@ fn solve_dc_operating_point_core(
         .iter()
         .any(|x| !x.is_finite() || x.abs() > DC_OP_MAX_PLAUSIBLE_CURRENT);
     if v_implausible || i_implausible {
-        log::warn!(
+        crate::diag_warn!(
             "DC OP: fallback result exceeds plausibility bounds (max|v|={:.3e}, max|i_nl|={:.3e}) \
              — rejecting and returning zero bias point instead of propagating a runaway-but-finite \
              iterate into DC_NL_I",

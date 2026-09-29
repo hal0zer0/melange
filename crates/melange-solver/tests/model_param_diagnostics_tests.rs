@@ -417,17 +417,16 @@ fn onset_outside_the_per_type_philips_bracket_warns() {
     // Slack turn-on (small CG) pushes the derived 0.3 uA starting point to
     // -1.568 V, past the ECC83's published max of -0.9 V.
     compile_triode(" CG=3").expect("compiles — the check warns, it does not refuse");
-    // One build resolves the device parameters several times and repeats the
-    // warning each time (STATUS.md, Still open); the check is on its text.
-    let mut warns: Vec<String> = warnings()
+    // One build resolves the device parameters at several steps; the warning
+    // is logged once per build all the same.
+    let warns: Vec<String> = warnings()
         .into_iter()
         .filter(|w| w.contains("grid-current starting point"))
         .collect();
-    warns.dedup();
     assert_eq!(
         warns.len(),
         1,
-        "expected exactly one distinct warning text: {warns:?}"
+        "expected the warning exactly once: {warns:?}"
     );
     assert!(
         warns[0].contains("BELOW the manufacturer limit"),
