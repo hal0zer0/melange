@@ -223,6 +223,8 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
   windings whose declarations imply different floors.
 - A circuit with a saturating inductor runs on the **nodal full-LU** sub-path;
   `--nodal-subpath schur` is refused.
+- `.switch` cannot change a saturating inductor or any winding of a
+  saturating core (refused): the flux law is fixed at compile time.
 - **Deep saturation.** With the floor, a core driven to tens of times `ISAT`
   settles on its resistive-plus-air-core limit: a 1 H, 10 mA core behind 100 Ω
   driven at 20 V peaks at V/R with no ring at 1×.

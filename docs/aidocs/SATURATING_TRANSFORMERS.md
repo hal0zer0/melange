@@ -332,6 +332,8 @@ Refused, with a message naming the elements:
 | Authored `LAIR` ≤ `1 − k` on a shared core | The deck's own k already puts that much in leakage. |
 | Datasheet form on a core whose two windings both carry `ISAT` | The agreement check compares authored values. |
 | Datasheet drop the saturable part cannot reach | No `ISAT` produces it. |
+| Datasheet drop below 1e-6, or a converted/referred `ISAT` that is not a finite positive current | Not a rating; would emit `inf`/0. |
+| `.switch` naming a saturating inductor, or any winding `K`-connected to one | The flux law is fixed at compile time and a winding has no branch row after the T-model split; a switched value solved a different device (1 H → 0.1 H: 740 V from 10 mV) or stamped ΔL as a node capacitance. |
 | `LAIR=` with `CORE=`; `L_AT_IDC=` with `ISAT=`/`ISAT_DROP=`; `ISAT_BASIS=` without `ISAT_DROP=`; out-of-range values | Strict parsing. |
 
 Compile notices: default floor (with the reading used on a shared core);
