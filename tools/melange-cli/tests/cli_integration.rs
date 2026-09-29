@@ -1189,6 +1189,38 @@ fn test_schmitt_trigger_switches_at_spice_thresholds() {
     }
 }
 
+/// A DK kernel that fails to build (here a diode straight across a voltage
+/// source: its K diagonal is 0) still feeds the internal-node expansion gate and
+/// the Newton-budget tuner, so the build uses the augmented kernel when it
+/// exists rather than a zero stand-in (every verb, one build).
+#[test]
+fn test_failed_dk_kernel_falls_back_to_the_augmented_kernel() {
+    let cir = write_test_circuit(
+        "k zero\nV1 a 0 DC 0.5\nD1 a 0 DX\nR1 in a2 1k\nC1 a2 0 1u\nR2 a2 out 1k\nD2 out 0 DX\n\
+         .model DX D(IS=1e-14)\n",
+        "dk_fallback_augmented",
+    );
+    let out = std::env::temp_dir().join("melange_cli_test_dk_fallback_augmented.rs");
+    let stdout = run_melange(&[
+        "compile",
+        cir.to_str().unwrap(),
+        "--format",
+        "code",
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_file(&cir);
+    assert!(
+        stdout.contains("DK kernel failed"),
+        "witness premise: {stdout}"
+    );
+    assert!(
+        stdout.contains("Routing analysis uses the augmented kernel"),
+        "the build must fall back to the augmented kernel:\n{stdout}"
+    );
+}
+
 /// Pins the OS4-specific NR damping-floor bug: at `--oversampling 4`
 /// (192 kHz internal rate for a 48 kHz host), the same IC-seeded transient
 /// that converges cleanly at base rate (peak ~1.18 V, `nr_max_iter_count`

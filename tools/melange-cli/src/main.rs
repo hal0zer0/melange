@@ -27,8 +27,8 @@ pub mod sources;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use melange_solver::build::{
-    forced_dk_hard_blocker, format_system_size, preflight_relinearize_bjt_caps,
-    resolve_oversampling,
+    apply_pot_overrides, forced_dk_hard_blocker, format_system_size,
+    preflight_relinearize_bjt_caps, resolve_oversampling,
 };
 use std::path::PathBuf;
 
@@ -2645,244 +2645,6 @@ fn suggest_plugin_project_dir(circuit_source_name: &str) -> String {
     }
 }
 
-/// Apply `--pot NAME=VALUE` overrides to a parsed netlist, then settle every
-/// pot that was NOT overridden onto its `.pot` default.
-///
-/// Shared by `analyze` and `simulate` so a knob position means the same thing
-/// in both. `simulate` gained `--pot` late: it had `--switch` but no `--pot`,
-/// so a distortion pedal's Drive control — which IS the circuit — could be
-/// characterised at any setting by `analyze` and heard at exactly one.
-///
-/// Name resolution for each SPEC:
-///   1. Try `.wiper` labels first. A wiper has two legs (cw/ccw) that co-vary
-///      with a position in 0.0..=1.0; the value is a POSITION and both legs are
-///      set accordingly.
-///   2. Fall back to `.pot` (by label or resistor name). The value is a
-///      RESISTANCE in ohms (engineering suffixes accepted, e.g. "200k"), and
-///      is range-checked against that pot's declared min..max.
-///
-/// `log` receives one line per applied override; callers route it to whichever
-/// stream carries their progress messages (`analyze` writes CSV on stdout, so
-/// it logs to stderr).
-///
-/// Minimum leg resistance (WIPER_MIN_LEG_R) must track the constant in
-/// `parser::expand_wipers`.
-fn apply_pot_overrides(
-    netlist: &mut melange_solver::parser::Netlist,
-    pot_overrides: &[String],
-    log: &dyn Fn(&str),
-) -> Result<()> {
-    const WIPER_MIN_LEG_R: f64 = 10.0;
-
-    let mut overridden_resistors: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
-
-    // First, apply explicit --pot overrides
-    for spec in pot_overrides {
-        let (name, val_str) = spec.split_once('=').ok_or_else(|| {
-            anyhow::anyhow!("Invalid --pot format '{}', expected NAME=VALUE", spec)
-        })?;
-
-        // Try wiper label first (the label on `.wiper` lives on the directive, not
-        // on the expanded PotDirective entries — those have label:None).
-        let wiper_match = netlist.wipers.iter().find(|w| {
-            w.label
-                .as_deref()
-                .map(|l| l.eq_ignore_ascii_case(name))
-                .unwrap_or(false)
-        });
-
-        if let Some(wiper) = wiper_match {
-            // Wiper: interpret value as position 0.0..=1.0
-            let pos = val_str.parse::<f64>().map_err(|_| {
-                anyhow::anyhow!(
-                    "Invalid wiper position '{}' in --pot {} (expected 0.0..=1.0)",
-                    val_str,
-                    spec
-                )
-            })?;
-            if !pos.is_finite() || !(0.0..=1.0).contains(&pos) {
-                anyhow::bail!(
-                    "Wiper position must be in 0.0..=1.0: {} (got {})",
-                    spec,
-                    pos
-                );
-            }
-            let r_total = wiper.total_resistance;
-            let range = r_total - 2.0 * WIPER_MIN_LEG_R;
-            // Matches parser::expand_wipers and plugin_template wiper_assignments.
-            let r_cw = (1.0 - pos) * range + WIPER_MIN_LEG_R;
-            let r_ccw = pos * range + WIPER_MIN_LEG_R;
-            let cw_name = wiper.resistor_cw.clone();
-            let ccw_name = wiper.resistor_ccw.clone();
-
-            for (resistor_name, r_val) in [(&cw_name, r_cw), (&ccw_name, r_ccw)] {
-                let found = netlist.elements.iter_mut().any(|e| {
-                    if let melange_solver::parser::Element::Resistor {
-                        name: n, value: v, ..
-                    } = e
-                    {
-                        if n.eq_ignore_ascii_case(resistor_name) {
-                            *v = r_val;
-                            return true;
-                        }
-                    }
-                    false
-                });
-                if !found {
-                    anyhow::bail!("Wiper resistor '{}' not found in netlist", resistor_name);
-                }
-                for p in netlist.pots.iter_mut() {
-                    if p.resistor_name.eq_ignore_ascii_case(resistor_name) {
-                        p.default_value = Some(r_val);
-                        break;
-                    }
-                }
-                overridden_resistors.insert(resistor_name.to_ascii_uppercase());
-            }
-            log(&format!(
-                "  Wiper override: {} pos={:.3} ({} = {:.1}Ω, {} = {:.1}Ω)",
-                name, pos, cw_name, r_cw, ccw_name, r_ccw,
-            ));
-            continue;
-        }
-
-        // Pot: interpret value as a resistance in ohms
-        let value = melange_solver::parser::parse_value(val_str).map_err(|_| {
-            anyhow::anyhow!("Invalid resistance value '{}' in --pot {}", val_str, spec)
-        })?;
-        if value <= 0.0 || !value.is_finite() {
-            anyhow::bail!("Pot value must be positive and finite: {}", spec);
-        }
-
-        // Match by pot label or resistor name
-        let matched = netlist
-            .pots
-            .iter()
-            .find(|p| {
-                p.label
-                    .as_deref()
-                    .map(|l| l.eq_ignore_ascii_case(name))
-                    .unwrap_or(false)
-                    || p.resistor_name.eq_ignore_ascii_case(name)
-            })
-            .ok_or_else(|| {
-                let mut available: Vec<String> = netlist
-                    .pots
-                    .iter()
-                    .map(|p| {
-                        format!(
-                            "{} ({})",
-                            p.resistor_name,
-                            p.label.as_deref().unwrap_or("no label")
-                        )
-                    })
-                    .collect();
-                for w in &netlist.wipers {
-                    if let Some(label) = &w.label {
-                        available.push(format!("[wiper] {} (pos 0.0..=1.0)", label));
-                    }
-                }
-                anyhow::anyhow!(
-                    "Pot '{}' not found. Available: {}",
-                    name,
-                    available.join(", ")
-                )
-            })?;
-        let resistor_name = matched.resistor_name.clone();
-        let (r_min, r_max) = (matched.min_value, matched.max_value);
-        let display_name = matched
-            .label
-            .clone()
-            .unwrap_or_else(|| matched.resistor_name.clone());
-
-        // REFUSE out of range — do not clamp. The `.pot` min..max IS the real
-        // knob's travel, and it is what the generated plugin's parameter maps
-        // onto. Accepting a value outside it silently characterises a position
-        // the plugin can never produce: on examples/passive-eq1a.cir,
-        // `--pot "LF Boost=1e9"` used to report +14.93 dB at 20 Hz, about 4 dB
-        // past anything the physical control can reach. Switch positions were
-        // already range-checked; pots were not. Refusing (rather than clamping)
-        // keeps the reported response and the requested setting the same thing.
-        if value < r_min || value > r_max {
-            anyhow::bail!(
-                "Pot '{}' value {} out of range ({}..{} ohm). \
-                 The range comes from the `.pot` directive for {} and is the travel of the \
-                 real control, so a value outside it describes a setting the generated plugin \
-                 cannot reach. Pick a value inside the range \
-                 (`melange nodes <circuit>` lists every pot's range and default).",
-                display_name,
-                format_ohms(value),
-                format_ohms(r_min),
-                format_ohms(r_max),
-                resistor_name,
-            );
-        }
-
-        // Update element value
-        let found = netlist.elements.iter_mut().any(|e| {
-            if let melange_solver::parser::Element::Resistor {
-                name: n, value: v, ..
-            } = e
-            {
-                if n.eq_ignore_ascii_case(&resistor_name) {
-                    *v = value;
-                    return true;
-                }
-            }
-            false
-        });
-        if !found {
-            anyhow::bail!(
-                "Resistor '{}' referenced by pot not found in netlist",
-                resistor_name
-            );
-        }
-        // Also update PotDirective.default_value so MNA pot_default_overrides
-        // doesn't override the element value we just set.
-        for p in netlist.pots.iter_mut() {
-            if p.resistor_name.eq_ignore_ascii_case(&resistor_name) {
-                p.default_value = Some(value);
-                break;
-            }
-        }
-        overridden_resistors.insert(resistor_name.to_ascii_uppercase());
-        log(&format!("  Pot override: {} = {:.1}", resistor_name, value));
-    }
-
-    // Apply .pot defaults for pots not explicitly overridden
-    for pot in &netlist.pots {
-        if overridden_resistors.contains(&pot.resistor_name.to_ascii_uppercase()) {
-            continue;
-        }
-        if let Some(default) = pot.default_value {
-            for e in netlist.elements.iter_mut() {
-                if let melange_solver::parser::Element::Resistor {
-                    name: n, value: v, ..
-                } = e
-                {
-                    if n.eq_ignore_ascii_case(&pot.resistor_name) {
-                        *v = default;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Render a resistance the way a netlist author writes it, so a range message
-/// reads like the `.pot` line it came from (`100..10000 ohm`, not `1e2..1e4`).
-fn format_ohms(r: f64) -> String {
-    if r >= 1.0 && r.fract() == 0.0 && r < 1e15 {
-        format!("{}", r as i64)
-    } else {
-        format!("{r}")
-    }
-}
-
 /// Resolve `--switch NAME=POS` specs into `(switch_idx, position)` pairs.
 ///
 /// `NAME` matches a switch label (case-insensitive) or a 0-based index; `POS`
@@ -3126,7 +2888,8 @@ fn simulate_circuit_source(
     // via `set_switch_N`). Exactly the path `analyze` uses, so a knob setting
     // means the same thing whether you are looking at the response or
     // listening to it.
-    apply_pot_overrides(&mut netlist, opts.pot_overrides, &|m| println!("{m}"))?;
+    apply_pot_overrides(&mut netlist, opts.pot_overrides, &|m| println!("{m}"))
+        .map_err(build_error)?;
 
     // Step 3: Build MNA
     println!("Step 2: Building MNA system...");
@@ -3991,7 +3754,7 @@ fn analyze_freq_response(
     // Apply pot overrides (and settle un-overridden pots onto their `.pot`
     // defaults) before building the MNA. Shared with `simulate` so one knob
     // setting means the same thing in both verbs — see `apply_pot_overrides`.
-    apply_pot_overrides(&mut netlist, pot_overrides, &|m| eprintln!("{m}"))?;
+    apply_pot_overrides(&mut netlist, pot_overrides, &|m| eprintln!("{m}")).map_err(build_error)?;
 
     // Keep the netlist at position-0 element values and apply overrides at
     // runtime via `state.set_switch_N(position)` (see `switch_calls` below).
