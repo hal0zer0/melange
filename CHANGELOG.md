@@ -219,14 +219,18 @@ generated state is smaller.
 - **Every op-amp whose output is capacitor-coupled downstream now gets
   `active-set` rail handling by default**, with one backward-Euler sample at
   each pin and release. Circuits the automatic choice used to send to
-  `active-set-be` move: in the regression set, moonladder, sad-bastard,
-  noyce-4558, pipe-shouter, vurli and sus-bus. `active-set-be` solves every
+  `active-set-be` move. In the regression set that is six circuits:
+  - moonladder, sad-bastard, pipe-shouter and vurli run on backward Euler
+    throughout, where the two modes are the same solve; only their reported
+    rail mode changes;
+  - noyce-4558 and sus-bus run trapezoidal, and they change whenever an
+    op-amp rails.
+  `active-set-be` solves every
   rail-engaged sample with backward Euler, which on a single-supply overdrive
   meant 73–96 % of all samples and an output-peak error 2–4× larger at every
   sample rate. It is still available with `--opamp-rail-mode active-set-be`.
-  The six circuits' regression renders are unchanged, because no regression
-  program drives their op-amps into the rails. In use they change whenever an
-  op-amp rails. Two new regression circuits do rail. On one, the peak error
+  The regression renders of all six are unchanged, because no regression
+  program drives their op-amps into the rails. Two new regression circuits do rail. On one, the peak error
   against ngspice fell from 2.2 % to 0.25 % at 48 kHz, 0.5 V. One cost: at 1x
   oversampling, a railing op-amp with top-octave drive aliases about twice as
   much as it did under `active-set-be`. That mode aliased less only because
