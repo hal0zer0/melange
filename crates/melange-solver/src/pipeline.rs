@@ -493,34 +493,41 @@ pub fn auto_tune_max_iter(
     };
     base + stiffness_bonus
 }
-/// Expand parasitic-BJT internal nodes — but only when the Schur reduction will
-/// actually be used.
+/// Expand parasitic-BJT internal nodes (RB/RC/RE as explicit MNA nodes) unless
+/// the expansion gate declines: `min(diag(K)) < -100`. Declined, the resistors
+/// are modelled inside the device (`bjt_with_parasitics`), the circuit keeps
+/// its smaller N, and their thermal noise is not injected (NOISE.md). The gate
+/// is an expansion gate only; it does not choose the nodal Schur or full-LU
+/// sub-path.
 ///
-/// Skipped when `min(diag(K)) < -100`, which routes the emitter to the full
-/// N x N LU path; that path handles parasitics via `bjt_with_parasitics()`
-/// directly, so expanding would inflate N for no benefit. Worse than no
-/// benefit, in fact: Schur NR on an expanded parasitic system DIVERGES where
-/// the same circuit converges unexpanded (measured on `wurli-power-amp` —
-/// Schur + expanded parasitics blows up at the first non-zero input sample,
-/// while full-LU + expanded and Schur unexpanded are both clean).
+/// Only the nodal route calls this (DK never expands). Measured 2026-09-29 by
+/// forcing expansion on every gated corpus deck (pipe-shouter, steve-1073,
+/// wurli-power-amp, wurli-preamp, an RB = 1 kΩ CE stage): no deck held a
+/// sample either way, and expansion removed the 1073's one held sample. The
+/// shipped wurli-power-amp is why the gate stays: expanded, it hits the Newton
+/// ceiling ~1000 times a second (rescued) and sits further from ngspice than
+/// unexpanded (settled residual after gain and delay, 0.1 V drive: −52.7 dB
+/// against −61.5 dB), with ±33 mV errors at the same phases each cycle.
 ///
 /// Returns `true` if expansion was actually applied.
 ///
 /// # Diagnostics
 ///
-/// Reports the declined case only when there was something to decline. Until
-/// 2026-09-22 the K gate was tested first and narrated unconditionally, so
-/// "Skipping BJT internal-node expansion (K ill-conditioned)" printed on the
-/// shipped `passive-eq1a` demo — four tubes, three transformers and not one
-/// BJT — and on any BJT-free pedal. Read cold, "Skipping" plus
-/// "ill-conditioned" on the flagship example says *you broke it*; it is in
-/// fact a routing note about a device class the deck does not contain.
+/// Reports the declined case only when there was something to decline: a BJT
+/// with an expandable internal node. A deck without one (a tube demo, a BJT
+/// with no RB/RC/RE) has nothing the gate could change.
 pub fn expand_internal_nodes_if_conditioned(
     mna: &mut crate::mna::MnaSystem,
     netlist: &crate::parser::Netlist,
     kernel: &crate::dk::DkKernel,
     rep: Reporter<'_>,
 ) -> bool {
+    let device_slots =
+        crate::codegen::ir::CircuitIR::build_device_info_with_mna(netlist, Some(mna))
+            .unwrap_or_default();
+    if mna.expandable_bjt_internal_node_count(&device_slots) == 0 {
+        return false;
+    }
     let k_diag_min = if kernel.m > 0 {
         (0..kernel.m)
             .map(|i| kernel.k[i * kernel.m + i])
@@ -529,37 +536,17 @@ pub fn expand_internal_nodes_if_conditioned(
         0.0
     };
     if k_diag_min < -100.0 {
-        // Narrate only when the deck actually declares BJTs. Deciding on the
-        // stronger condition (a BJT that declares RB/RC/RE) would need a full
-        // device-info build here, which emits model diagnostics of its own and
-        // would emit them a second time; the structural check costs nothing.
-        let declares_bjt = netlist
-            .elements
-            .iter()
-            .any(|e| matches!(e, crate::parser::Element::Bjt { .. }));
-        if declares_bjt {
-            // This is the DK internal-node gate, NOT the nodal
-            // Schur-vs-full-LU sub-path.
-            report!(
-                rep,
-                "  info (normal): parasitic-BJT internal nodes left unexpanded — \
-                 min diag(K) = {:.3e} routes this circuit to the full N x N LU path, \
-                 which models RB/RC/RE inside the device instead of as extra MNA nodes. \
-                 Not an error and not a degradation: on this path expanding them makes \
-                 NR diverge.",
-                k_diag_min
-            );
-        }
+        report!(
+            rep,
+            "  info (normal): parasitic-BJT internal nodes left unexpanded (min diag K = \
+             {:.3e}, below the -100 expansion gate); RB/RC/RE are modelled inside the \
+             device; their thermal noise is not injected (see NOISE.md).",
+            k_diag_min
+        );
         return false;
     }
-    let device_slots =
-        crate::codegen::ir::CircuitIR::build_device_info_with_mna(netlist, Some(mna))
-            .unwrap_or_default();
-    if mna.expandable_bjt_internal_node_count(&device_slots) > 0 {
-        mna.expand_bjt_internal_nodes(&device_slots);
-        return true;
-    }
-    false
+    mna.expand_bjt_internal_nodes(&device_slots);
+    true
 }
 
 /// Would the un-reduced circuit route to the nodal solver?
