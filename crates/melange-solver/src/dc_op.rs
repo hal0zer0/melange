@@ -306,13 +306,15 @@ fn evaluate_devices_inner(
                     i_nl[s] += -dp.ibv * exp_x;
                     j_dev[s * m + s] += dp.ibv / dp.n_vt * exp_x;
                 }
-                // Device-level Gmin: minimum junction conductance (1 TΩ).
-                // Standard SPICE practice (ngspice GMIN default = 1e-12 S).
-                // Without this, reverse-biased diode conductance ≈ 1e-25 S
-                // and NR Jacobian entries are effectively zero, preventing
-                // convergence in precision rectifier circuits.
+                // Newton conditioning, in the Jacobian only: a reverse-biased
+                // diode's conductance is ~1e-25 S, which leaves NR no
+                // direction in precision rectifier circuits. SPICE adds its
+                // GMIN (1e-12 S) to the current too, which moves the fixed
+                // point off the device's; the current stays the diode law
+                // here, the one the transient solves, so the DC operating
+                // point is the transient's own (a reverse diode behind 1G:
+                // 9.99999 V, not 9.99 V).
                 const DIODE_GMIN: f64 = 1e-12;
-                i_nl[s] += DIODE_GMIN * v;
                 j_dev[s * m + s] += DIODE_GMIN;
             }
             (DeviceType::BjtForwardActive, DeviceParams::Bjt(bp)) => {
@@ -4923,11 +4925,12 @@ Cx c3 b4 6n IC=-4\n";
 
         evaluate_devices(&v_nl, &[slot], &mut i_nl, &mut j_dev, m);
 
-        // Compare against DiodeShockley + device Gmin (1e-12 S)
+        // The current is the diode law; the Jacobian carries the 1e-12 S
+        // Newton conditioning, which does not move the fixed point.
         let diode = DiodeShockley::new(is, 1.0, n_vt);
         let gmin = 1e-12;
         let v = 0.6;
-        let expected_i = diode.current_at(v) + gmin * v;
+        let expected_i = diode.current_at(v);
         let expected_g = diode.conductance_at(v) + gmin;
 
         assert!(

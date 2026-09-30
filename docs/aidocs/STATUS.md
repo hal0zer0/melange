@@ -207,7 +207,7 @@ Source: Sowter DWG E-72,658-2 (amp §) + Peerless/Triad winding data.
 - LU with partial pivoting, logarithmic junction-aware voltage limiting, source + Gmin stepping
 - Internal nodes for parasitic BJTs (basePrime/colPrime/emitPrime, ngspice-style)
 - Op-amp seeding + per-iteration rail clamp + AOL=1000 cap in DC G (precision rectifiers)
-- Diode BV/IBV breakdown + device-level Gmin (1e-12 S) — physical reverse bias
+- Diode BV/IBV breakdown; a 1e-12 S Newton-conditioning conductance on the diode Jacobian only (the diode current at the fixed point is the diode law's, as in the transient; node Gmin is still an open item, below)
 - Low-rate DC warmup (200 Hz × 1000 samples) for failed-DC-OP circuits; settled state cached
 - `DC_NL_I` constant initializes `i_nl_prev` in generated code
 

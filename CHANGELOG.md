@@ -561,6 +561,13 @@ generated state is smaller.
   pentode plate law has no lambda term, in the DC operating point or the
   transient. A nonzero value is now refused with that reason. No deck set
   one.
+- **The DC operating point solved a leakier diode than the transient**: its
+  1e-12 S diode GMIN was added to the current as well as the Newton
+  Jacobian, which the transient does not do: a reverse diode fed from 10 V
+  through 1 GΩ read 9.980 V where the diode law gives 9.99999 V. The GMIN
+  now conditions Newton only, so the diode's current at the operating point
+  is its own law. That node now reads 9.990 V: the rest is the DC solve's
+  node Gmin, a separate open item.
 - `melange --version` could name a clean commit for a binary built from
   uncommitted changes, while the code that binary generated said `-dirty`: the
   CLI stamped its own label and only refreshed it when the CLI itself was
