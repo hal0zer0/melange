@@ -3014,6 +3014,19 @@ impl RustEmitter {
                 fmt_f64(crate::codegen::ring::RING_RESIDUE_REL)
             ));
             code.push_str(
+                "/// Runtime BE-latch: backward Euler's worst in-band change of the response,\n\
+                 /// relative to the passband, at the compiled rate (the ring predicate's\n\
+                 /// E_BE). A ring engages the latch only if it is also louder than this: the\n\
+                 /// compile-time choice keeps trapezoidal where BE would do more damage in\n\
+                 /// band than the ring, and the latch applies the same comparison. 0 where\n\
+                 /// the comparison does not hold (a near-marginal linearisation): the ring\n\
+                 /// threshold alone decides, as it does at compile time.\n",
+            );
+            code.push_str(&format!(
+                "pub const BE_LATCH_BE_COST_REL: f64 = {};\n\n",
+                fmt_f64(r.be_cost_rel.unwrap_or(0.0))
+            ));
+            code.push_str(
                 "/// Runtime BE-latch program reference: passband gain (pink-weighted RMS gain\n\
                  /// over 20 Hz-20 kHz, primary input to primary output, at the DC operating\n\
                  /// point).\n\
@@ -5931,7 +5944,9 @@ impl RustEmitter {
              {indent}    // A ring below -60 dB of the program that excited it is one the\n\
              {indent}    // compile-time ring predicate left on trapezoidal: not evidence either.\n\
              {indent}    // (An alternation of amplitude A has power A^2.)\n\
-             {indent}    let be_floor = f64::max(be_tol, BE_LATCH_RING_REL * state.be_ref);\n\
+             {indent}    // Nor is one quieter than backward Euler's own in-band damage: the\n\
+             {indent}    // compile-time choice keeps trapezoidal there, and so does the latch.\n\
+             {indent}    let be_floor = f64::max(be_tol, BE_LATCH_RING_REL.max(BE_LATCH_BE_COST_REL) * state.be_ref);\n\
              {indent}    let out_ring = state.be_pow > be_floor * be_floor\n\
              {indent}        && state.be_r1_num <= be_enter * state.be_pow;\n\
              {indent}    let in_ring = state.be_in_pow > BE_LATCH_POWER_FLOOR\n\

@@ -601,6 +601,15 @@ generated state is smaller.
   before, and the reason says which rule decided. Four corpus decks return
   to trapezoidal (twill-deluxe against ngspice: 0.76 % → 0.16 %); two stay
   on backward Euler.
+- **The runtime backward-Euler latch applies the compile-time comparison.**
+  The compile-time rule keeps trapezoidal integration where a ring is quieter
+  than backward Euler's own in-band damage, but the runtime latch knew only
+  the −60 dB threshold and overrode that choice at the first impulse: a
+  6V6 power stage kept on trapezoidal switched to backward Euler for good
+  after one click at −40 dB. The latch now requires a ring louder than
+  backward Euler's damage too (the same figure, emitted as
+  `BE_LATCH_BE_COST_REL`; the threshold alone where the comparison does not
+  hold, as at compile time).
 - **The runtime backward-Euler latch judges a ring against the program the
   output actually carries.** Its −60 dB floor was referenced to passband gain
   × input amplitude, a linear extrapolation a clipping circuit never

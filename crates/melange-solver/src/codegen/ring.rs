@@ -178,8 +178,9 @@ pub struct RingVerdict {
     /// forever under trapezoidal integration at every rate.
     pub index2: bool,
     /// Backward Euler's worst in-band change of the response, the cost a
-    /// promotion pays; evaluated when the decision needs it (a ring at or
-    /// above the threshold, or growth).
+    /// promotion pays. Always evaluated: the decision needs it for a ring at
+    /// or above the threshold or for growth, and the runtime latch, which
+    /// applies the same comparison, needs it for every build it runs on.
     pub be_error: Option<InbandError>,
     /// The same for the trapezoidal rule, for the notice.
     pub trap_error: Option<InbandError>,
@@ -830,19 +831,13 @@ pub fn analyze(sys: &RingSystem) -> Result<RingVerdict, RingError> {
 
     let rho_be = if growth { Some(rho_be(sys)?) } else { None };
     // What each integrator would cost in band, on the same small-signal
-    // system and in the same currency as the ring level: evaluated where the
-    // decision (or the notice) needs it.
-    let loud_ring = ring_modes
-        .first()
-        .is_some_and(|r| r.residue_rel >= RING_RESIDUE_REL);
-    let (be_error, trap_error) = if loud_ring || growth {
-        (
-            Some(inband_error(sys, &g, &c, &pbs, Rule::BackwardEuler)),
-            Some(inband_error(sys, &g, &c, &pbs, Rule::Trapezoidal)),
-        )
-    } else {
-        (None, None)
-    };
+    // system and in the same currency as the ring level. The decision needs
+    // it for a loud ring or growth; the runtime latch, which applies the
+    // same comparison at run time, needs it for every build.
+    let (be_error, trap_error) = (
+        Some(inband_error(sys, &g, &c, &pbs, Rule::BackwardEuler)),
+        Some(inband_error(sys, &g, &c, &pbs, Rule::Trapezoidal)),
+    );
     // A ring promotes only when trapezoidal's artefact is louder than the
     // damage backward Euler would do in band, where that comparison holds
     // (BE_COMPARISON_VALID_REL). Growth still promotes unconditionally when

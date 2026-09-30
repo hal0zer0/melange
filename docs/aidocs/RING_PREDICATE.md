@@ -245,7 +245,7 @@ have to assume a click period the compiler cannot know. The build's
 −60 dB, measure it: the hostile program's 10–50 ms tails, dB relative to
 impulse amplitude × passband gain, on the forced-trapezoidal build.
 
-## The runtime latch uses the same threshold
+## The runtime latch uses the same rule
 
 The runtime BE-latch (`STATUS.md`, "Runtime BE-latch") engages on an
 alternating mode that dominates the output. Dominance alone is relative to
@@ -253,7 +253,20 @@ the instantaneous output, and in a quiet tail anything dominates, so it used
 to override this rule at the first quiet moment after a transient (it held
 noyce-transformer-triode and wurli-power-amp on BE after their −63 dB and
 −74..−81 dB rings). Its floor is now the larger of the node tolerance and
-`1e-3 × ref`:
+`max(ε_ring, E_BE) × ref`: the ring threshold, and backward Euler's own
+in-band damage, so a ring must be louder than both before backward Euler is
+chosen, as at compile time. `E_BE` is the predicate's own figure at the
+compiled rate, emitted as `BE_LATCH_BE_COST_REL`; where the comparison does
+not hold (`E_BE` above −20 dB, a near-marginal linearisation) it is 0 and
+the threshold alone decides, as it does at compile time. Without it the
+latch overrode a compile-time choice at the first impulse: twill-deluxe is
+kept trapezoidal because its ring (−43.2 dB) is quieter than backward
+Euler's in-band change (−37.0 dB), and the runtime latch then engaged on the
+−52 dB ring after one impulse at −40 dB and held backward Euler for good.
+It no longer does. kt88-pp-stage (`E_BE` −42.4 dB) no longer engages after a
+noise burst either: its ring there is about as loud as backward Euler's
+damage, and at compile time the same comparison keeps it trapezoidal.
+The reference:
 
 ```
 ref_n = min(in_n, env_n)

@@ -32,7 +32,8 @@ fn stiff(cp: &str) -> String {
     )
 }
 
-const FLOOR_LINE: &str = "let be_floor = f64::max(be_tol, BE_LATCH_RING_REL * state.be_ref);";
+const FLOOR_LINE: &str =
+    "let be_floor = f64::max(be_tol, BE_LATCH_RING_REL.max(BE_LATCH_BE_COST_REL) * state.be_ref);";
 const DECAY_LINE: &str =
     "self.be_ref_decay = be_latch_ref_decay(sample_rate * OVERSAMPLING_FACTOR as f64);";
 
@@ -212,6 +213,40 @@ fn a_clipped_program_is_what_the_ring_is_judged_against() {
         latch_after_clicks_at(&input_only, 48000.0, 480, 5.0, "clip_stiff_input_ref"),
         None,
         "witness premise: judged against passband gain x input, the clipped ring is hidden"
+    );
+}
+
+/// The latch carries the ring predicate's own backward-Euler cost (E_BE, the
+/// worst in-band change relative to the passband) and requires a ring louder
+/// than it, as the compile-time choice does; where that comparison does not
+/// hold (E_BE above 10 % of the passband) it carries 0 and the ring threshold
+/// alone decides. The loaded saturating transformer's E_BE is -21.7 dB, inside
+/// the comparison; the stiff node's is far below the -60 dB threshold, so its
+/// floor is unchanged.
+#[test]
+fn the_latch_carries_the_predicates_backward_euler_cost() {
+    let cost = |code: &str| -> f64 {
+        let line = code
+            .lines()
+            .find(|l| l.starts_with("pub const BE_LATCH_BE_COST_REL: f64 = "))
+            .expect("the latch carries BE_LATCH_BE_COST_REL");
+        line.trim_start_matches("pub const BE_LATCH_BE_COST_REL: f64 = ")
+            .trim_end_matches(';')
+            .parse()
+            .unwrap()
+    };
+    let loaded = code_for(SAT_CORE_LOADED, 1);
+    let c = cost(&loaded);
+    assert!(
+        c > melange_solver::codegen::ring::RING_RESIDUE_REL
+            && c <= melange_solver::codegen::ring::BE_COMPARISON_VALID_REL,
+        "sat-core-loaded: E_BE {c:e} should lie inside the comparison and above -60 dB"
+    );
+    let stiff4p = code_for(&stiff("4p"), 1);
+    let c = cost(&stiff4p);
+    assert!(
+        c > 0.0 && c < melange_solver::codegen::ring::RING_RESIDUE_REL,
+        "stiff 4p: E_BE {c:e}"
     );
 }
 

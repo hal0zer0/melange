@@ -218,6 +218,12 @@ pub struct BeLatchReference {
     pub ring_poles: Vec<(f64, f64)>,
     /// An index-2 pole (exactly `z = −1`) rings forever: hold the reference.
     pub hold: bool,
+    /// Backward Euler's worst in-band change relative to the passband (the
+    /// ring predicate's `E_BE`), where the comparison holds (at most
+    /// `ring::BE_COMPARISON_VALID_REL`); `None` where it does not, and the
+    /// latch falls back to the -60 dB threshold alone, as the predicate does.
+    #[serde(default)]
+    pub be_cost_rel: Option<f64>,
 }
 
 /// Why the shipped integration scheme is what it is.
@@ -1763,6 +1769,11 @@ impl CircuitIR {
             passband_gain: verdict.passband_gain,
             ring_poles: verdict.ring_poles.iter().map(|z| (z.re, z.im)).collect(),
             hold: verdict.index2,
+            be_cost_rel: verdict
+                .be_error
+                .as_ref()
+                .map(|be| be.rel)
+                .filter(|&rel| rel <= crate::codegen::ring::BE_COMPARISON_VALID_REL),
         });
         Ok(None)
     }
