@@ -311,15 +311,79 @@ Circuit netlists live in a separate repository (public subset at https://gitlab.
 start in `unstable/`; promotion to `stable/` requires user DAW sign-off (SPICE correlation
 and compilation are necessary but not sufficient).
 
+### Against ngspice under the analytic reference (2026-09-30)
+
+`melange validate` defaults on the 85 circuits-repo decks (`unstable/`,
+`testing/`): 48 kHz, oversampling off, 1 kHz sine at 0.1 V for 1 s, the
+reference driven by the analytic `SIN` (d5822b0), nominal values,
+isothermal, the tube/JFET/linearized/parasitic twins as melange built them,
+and the integrator routes of d9ffa2a.
+
+**41 PASS, 16 FAIL, 28 refused or without a reference.**
+
+**Every validate PASS measured before d5822b0 on a high-gain or
+grid-conducting deck was measured against a reference that shared
+melange's input model**: a PWL of melange's own samples, whose linear
+interpolation the trapezoidal rule integrates exactly. Those figures (the
+per-circuit claims below included) are superseded by this table, not
+deleted. On simple linear decks the honest 1x floor is ~0.17 % (the
+sample-rate interpolation loss at 1 kHz plus warping), where the shared
+model read 0.0286 %. On hypersensitive decks the gap was large:
+noyce-cascaded-triodes read 0.16 %, and is 11.8 % at 1x, converging
+toward the analytic reference with the sample rate (4.6 % at 96 kHz,
+1.33 % at 192 kHz).
+
+- **PASS** (RMS, 1x): el84-single-stage 0.156 %, farfisa-voicing 0.181 %,
+  funkyinduct 0.143 %, gold-press-cab 0.050 %, gold-press-cartridge 0.082 %,
+  gold-press-mastering 0.210 %, gold-press-overdrive 0.039 %, gold-press-riaa
+  0.185 %, jeffreys-tube 0.182 %, jfet-booster 0.176 %, kt88-pp-stage 0.193 %,
+  mosfet-source-follower 0.172 %, noyce-4558 0.172 %, noyce-6bq5 0.171 %,
+  noyce-boiler-room 0.282 %, noyce-carbon-comp-bank 0.029 %, noyce-clean-rc
+  0.098 %, noyce-ef86 0.179 %, noyce-germanium-cluster 0.172 %, noyce-ne5534
+  0.172 %, noyce-smps-ripple 0.172 %, noyce-tape-head 0.202 %,
+  noyce-transformer-triode 0.115 %, noyce-triode-12ax7 0.172 %, passive-eq1a
+  0.118 %, philicorda-voicing 0.213 %, pipe-shouter 0.212 %, pretty-baby
+  0.330 %, rc-lowpass 0.181 %, steve-1073-eq 0.205 %, steve-1073-eqpres
+  0.156 %, steve-1073-output 0.114 %, steve-1073-presence 0.104 %,
+  sympathy-drive 0.095 %, sympathy-frontend 0.192 %, tube-preamp 0.172 %,
+  twas-preamp 0.290 %, twill-deluxe 0.160 %, velvet-elvis 0.078 %,
+  vurli-leveler 0.209 %, wurli-power-amp 0.158 %.
+- **FAIL, 1x discretization** (the error falls with the sample rate toward
+  the reference; the rate sweep will classify each): noyce-cascaded-triodes
+  11.8 %, noyce-amp-at-idle 2.43 % (0.18 % at 192 kHz), noyce-cascade-idle
+  2.91 %, warpony 0.87 %, moonladder 0.47 %, mosfet-choke-load 0.40 %;
+  backward Euler pinned by the deck (`.integrator be`, first order):
+  wurli-preamp 0.50 % (-0.046/-0.018/-0.004 dB at 1/2/4x), tungsten-glow
+  0.51 %.
+- **FAIL, open:** steve-1073-preamp 1.80 % (`.integrator be`; 0.59 % at
+  96 kHz but 1.00 % at 192 kHz: non-monotonic, not traced);
+  noyce-zener-junction (the THD gate on a 2.6 µV reference; RMS 0.17 %).
+- **FAIL, no meaningful comparison:** farfisa-se15-reverb (reference peak
+  nV), wurli-preamp-okona (reference exactly 0), radio-am / radio-fm,
+  philicorda-master (a free-running oscillator: correlation is phase);
+  philicorda-voicing-coupled 14.3 % (the phili work is parked).
+- **Refused or no reference:** devices ngspice cannot simulate (VCA, LDR:
+  4kbuscomp, 4kbuscomp-audiopath, gravity, gravity-stereo, farfisa-mtb,
+  farfisa-swell, farfisa-se15-preamp, six philicorda note boards); no `in` /
+  `out` node (farfisa-fa10, -fd10, farfisa-g10-ref, -3key, wurli-tremolo and
+  the three `*-detailed` libraries); a dangling node (philicorda-divider); a
+  variable-mu pentode (6k7-varimu-stage, no twin); ngspice abandons the
+  transient (axe-15, clean on melange's side at 0.03/0.1/0.3 V; champ-5f1;
+  rexi-mockup); a `.linearize`d cathode follower driven out of its region
+  (basic-bitch, sad-bastard: both pass as drawn, 0.060 % / 0.044 %; the deck
+  owners have the numbers).
+
+### Per-circuit notes
+
 - **Passive tube EQ** (passive-eq1a): 4 tubes, 3 transformers, 7 pots, 3 switches, global NFB. Amp § from Sowter DWG E-72,658-2. N=52, M=8; ~21× RT on nodal full LU. Flat ±1 dB 20Hz–15kHz, 21 dB differential NFB.
-- **Wurlitzer 200A preamp** (wurli-preamp): N=11, M=3–5 FA, 2N5089 Ebers-Moll. SPICE-validated 6-nines, 3.2% RMS.
+- **Wurlitzer 200A preamp** (wurli-preamp): N=11, M=3–5 FA, 2N5089 Ebers-Moll. ~~SPICE-validated 6-nines, 3.2% RMS~~ (superseded: see the analytic-reference table above).
 - **Wurlitzer 200A power amp** (wurli-power-amp): N=20, M=9–16 FA, quasi-complementary class AB. DK codegen 0.4× RT, nodal 0.04×.
 - **Tweed-style 2-stage 12AX7 preamp** (twas-preamp): N=13, M=4. 50 mV → 549 mV (+20.8 dB). Zero NR divergence.
 - **SSL bus compressor** (4kbuscomp): 12 op-amps, 2 VCAs, 6 diodes, 2 pots, 2 switches. DC OP basin trap FIXED 2026-04-17 (`b771512`, post-fallback refinement NR). Transient chord-NR false convergence PARTIAL FIX 2026-04-17 (`c3d3eae`, residual check on ActiveSetBe/ActiveSet) — stable at `d ≤ 2 s` all amps on the original netlist. `d = 5 s` closes only with the netlist-side `.model OA_TL074 VSAT=11 → 13.5` fix (TL07x on ±15 V swings to ±13.5 V per TI datasheet); that diff is currently uncommitted in `melange-circuits/unstable/dynamics/4kbuscomp.cir`. See DEBUGGING.md "ActiveSetBe Chord-NR False Convergence" and "Precision Rectifier DC OP Convergence".
 - **VCR audio ALC compressor**: N=21, M=3, nodal full-LU ~42× RT. Key: 100Ω Rdecouple between VCA sig- and I-V converter fixes positive K diagonal.
 - **4-op-amp overdrive with diode clipper**: verified bounded under ActiveSetBe at amp=[0.01..0.50]; auto now resolves ActiveSet, not re-run on this deck. BoyleDiodes opt-in only (heavy-clip divergence at amp ≥ 0.05 unsolved — not a blocker, see DEBUGGING.md).
 - **Tube-Screamer-style overdrive** / guitar pedals: stable.
-- **Pentode stages**: EL84 single stage, Tweed Deluxe (6V6GT beam tetrode), 6K7 varimu (no ngspice twin; see Deferred), Plexi (4×EL34; grid-off M=18→14 only under `--tube-grid-fa on` — full 3D by default routes it nodal). ngspice-validated full-3D (2026-09-04): twill-deluxe 0.063%, el84-single-stage 0.233%, noyce-6bq5 0.060%, noyce-ef86 0.060%.
+- **Pentode stages**: EL84 single stage, Tweed Deluxe (6V6GT beam tetrode), 6K7 varimu (no ngspice twin; see Deferred), Plexi (4×EL34; grid-off M=18→14 only under `--tube-grid-fa on` — full 3D by default routes it nodal). ngspice-validated full-3D (2026-09-04, measured against a reference that shared the input model; superseded): twill-deluxe 0.063%, el84-single-stage 0.233%, noyce-6bq5 0.060%, noyce-ef86 0.060%. Under the analytic reference: 0.160 %, 0.156 %, 0.171 %, 0.179 %.
 - **Uniquorn v2**: 16-stage cascade + push-pull power. ⚠️ The dimensions and throughput figures
   once quoted here (N=64/M=12/~3× RT; N=23/M=6/~15× RT) are UNSUPPORTED and have been
   removed: no `uniquorn*.cir` exists in melange-circuits, so there is no deck to attribute
