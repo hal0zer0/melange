@@ -34,10 +34,6 @@
 //!   fixed point is defined by the (pinned) intrinsic `bjt_evaluate`. They
 //!   use different damping/iteration schedules by design. Pinned only via
 //!   the RB=RC=RE=0 exact-reduction test below.
-//! - Triode RGI helpers (`tube_solve_vgk_int` / `*_with_rgi`): RGI exists
-//!   only in the template/emitters — the devices crate KorenTriode has no
-//!   grid-stopper solve. Pinned only at RGI=0 (exact reduction to the base
-//!   triode path, which IS pinned).
 //! - `fast_exp` / `fast_ln` polynomial approximations themselves (the
 //!   non-precise cfg) are an accuracy question, not a twin-sync question,
 //!   and are not compared against libm here.
@@ -1429,6 +1425,38 @@ fn tube_harness_rows() -> &'static Vec<(String, Vec<f64>)> {
             ));
         }
 
+        // Triode behind a grid resistance (RGI > 0): the inner grid solve and
+        // the terminal currents/Jacobian, from far below cutoff to a grid
+        // driven 40 V positive, where a step-limited solve stopped short.
+        {
+            let (mu, ex, kg1, kp, kvb, gg, xi, cg, lambda) = (
+                100.0f64,
+                1.4f64,
+                1060.0f64,
+                600.0f64,
+                300.0f64,
+                melange_devices::tube::DEFAULT_GG,
+                melange_devices::tube::DEFAULT_XI,
+                melange_devices::tube::DEFAULT_CG,
+                2e-4f64,
+            );
+            main_body.push_str(&format!(
+                "for rgi in [100.0f64, 2e3, 1e6] {{\n\
+    let mut vgk = -6.0f64;\n\
+    while vgk <= 40.0 {{\n\
+        for vpk in [0.5f64, 90.0, 250.0] {{\n\
+            let vi = tube_solve_vgk_int(vgk, {gg:?}, {xi:?}, {cg:?}, rgi);\n\
+            let (ip, ig, j) = tube_evaluate_with_rgi(vgk, vpk, {mu:?}, {ex:?}, {kg1:?}, {kp:?}, {kvb:?}, {gg:?}, {xi:?}, {cg:?}, {lambda:?}, rgi);\n\
+            print!(\"triode_rgi {{:.17e}} {{:.17e}} {{:.17e}} {{:.17e}} {{:.17e}} {{:.17e}}\", vgk, vpk, rgi, vi, ip, ig);\n\
+            for x in j {{ print!(\" {{:.17e}}\", x); }}\n\
+            println!();\n\
+        }}\n\
+        vgk += 0.37;\n\
+    }}\n\
+}}\n"
+            ));
+        }
+
         // Pentode families (one block per equation family / screen form).
         main_body.push_str(&pent_block_sharp("pent_rat", "pentode", &P_EL84));
         main_body.push_str(&pent_block_sharp("pent_exp", "beam_tetrode", &P_6L6GC));
@@ -1508,8 +1536,7 @@ const TUBE_ABS: f64 = 1e-14;
 /// class behind the July 2026 +39 dB series-of-tubes regression (×2 present
 /// in the devices crate, absent from the template for months).
 ///
-/// Not pinned here (no canonical twin): RGI > 0 — the grid-stopper inner NR
-/// exists only in the template/emitters.
+/// RGI > 0 is pinned by `template_triode_rgi_matches_devices_crate`.
 #[test]
 fn template_triode_matches_devices_crate() {
     for (set, lambda) in [(0u32, 0.0f64), (1u32, 2e-4f64)] {
@@ -1608,6 +1635,66 @@ fn template_triode_matches_devices_crate() {
             "{label}: grid barely conducts ({conducting})"
         );
     }
+}
+
+/// The generated grid-stopper solve (`tube_solve_vgk_int`,
+/// `tube_evaluate_with_rgi`) must match the devices crate's
+/// `KorenTriode::internal_grid_voltage` / `evaluate_with_rgi`, which the DC
+/// operating point uses: the transient and the DC OP solve one equation. The
+/// grid reaches 40 V positive, where the old 8-iteration, 1 V step-limited
+/// solve stopped up to 17 V short of the root at RGI = 2k.
+#[test]
+fn template_triode_rgi_matches_devices_crate() {
+    let dev = KorenTriode::with_all_params(
+        100.0,
+        1.4,
+        1060.0,
+        600.0,
+        300.0,
+        melange_devices::tube::DEFAULT_GG,
+        melange_devices::tube::DEFAULT_XI,
+        melange_devices::tube::DEFAULT_CG,
+        2e-4,
+    );
+    let mut n = 0u32;
+    let mut far = 0u32;
+    for (l, v) in tube_harness_rows()
+        .iter()
+        .filter(|(l, _)| l == "triode_rgi")
+    {
+        assert_eq!(v.len(), 10, "bad {l} row width");
+        let (vgk, vpk, rgi) = (v[0], v[1], v[2]);
+        let ctx = format!("{l} at vgk={vgk:.3} vpk={vpk:.1} rgi={rgi}");
+        let vi = dev.internal_grid_voltage(vgk, rgi);
+        // The root, not just agreement: the residual of v + rgi*Ig(v) = vgk.
+        let resid = vi + rgi * dev.grid_current(vi) - vgk;
+        assert!(
+            resid.abs() <= 1e-9 * vgk.abs().max(1.0),
+            "{ctx}: residual {resid:e}"
+        );
+        let (ip, ig, jac) = dev.evaluate_with_rgi(vgk, vpk, rgi);
+        assert_close(&format!("{ctx} Vgk_int"), v[3], vi, TUBE_REL, TUBE_ABS);
+        assert_close(&format!("{ctx} Ip"), v[4], ip, TUBE_REL, TUBE_ABS);
+        assert_close(&format!("{ctx} Ig"), v[5], ig, TUBE_REL, TUBE_ABS);
+        for k in 0..4 {
+            assert_close(
+                &format!("{ctx} jac[{k}]"),
+                v[6 + k],
+                jac[k],
+                TUBE_REL,
+                TUBE_ABS,
+            );
+        }
+        n += 1;
+        if vgk - vi > 1.0 {
+            far += 1;
+        }
+    }
+    assert!(n > 1000, "too few RGI rows ({n})");
+    assert!(
+        far > 100,
+        "the grid is rarely far from its terminal ({far})"
+    );
 }
 
 /// Absolute anchor for the Koren ×2: at the RCA typical-operation point

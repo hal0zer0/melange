@@ -568,6 +568,19 @@ generated state is smaller.
   variable-mu law, at an operating point solved without it. A nonzero value is
   now refused. Variable-mu stays modelled for pentodes and beam tetrodes; no
   deck set these keys on a triode.
+- **A triode's `RGI` was missing from the DC operating point**: the transient
+  evaluates the tube at its internal grid, behind RGI, and the DC operating
+  point evaluated it at the terminal. With the grid conducting, the generated
+  code started away from its own rest point (grid +3 V through 22k with
+  RGI = 2k: 76 mV at the grid, 0.70 V at the plate) and relaxed toward it. The
+  DC operating point now solves the same equation. No deck sets RGI.
+- **A triode's internal-grid solve stopped short with the grid driven hard
+  positive**: the generated code took at most eight Newton steps of at most
+  1 V each, so past about +9.5 V at the grid terminal (RGI = 2k) the grid and
+  plate currents were computed at the wrong internal grid voltage, 17 V off at
+  +35 V, with no signal of it. The step limit is gone (the equation is
+  monotone and convex, so Newton cannot overshoot) and it converges in at
+  most 10 steps from -100 V to +300 V.
 - **The DC operating point solved a leakier diode than the transient**: its
   1e-12 S diode GMIN was added to the current as well as the Newton
   Jacobian, which the transient does not do: a reverse diode fed from 10 V

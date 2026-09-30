@@ -447,17 +447,17 @@ fn evaluate_devices_inner(
                     let vgk = v_nl[s];
                     let vpk = v_nl[s + 1];
 
-                    // Plate current (dimension 0) and grid current (dimension 1)
-                    i_nl[s] = tube.plate_current(vgk, vpk);
-                    i_nl[s + 1] = tube.grid_current(vgk);
-
-                    // Jacobian: [[dIp/dVgk, dIp/dVpk], [dIg/dVgk, 0]]
-                    use melange_devices::NonlinearDevice;
-                    let plate_jac = tube.jacobian(&[vgk, vpk]);
-                    j_dev[s * m + s] = plate_jac[0]; // dIp/dVgk
-                    j_dev[s * m + (s + 1)] = plate_jac[1]; // dIp/dVpk
-                    j_dev[(s + 1) * m + s] = tube.grid_current_jacobian(vgk); // dIg/dVgk
-                    j_dev[(s + 1) * m + (s + 1)] = 0.0; // dIg/dVpk = 0
+                    // Plate current (dimension 0) and grid current (dimension 1),
+                    // both at the internal grid behind RGI (the terminal grid
+                    // when RGI = 0), as the transient's tube_evaluate_with_rgi.
+                    // Jacobian: [[dIp/dVgk, dIp/dVpk], [dIg/dVgk, 0]].
+                    let (ip, ig, jac) = tube.evaluate_with_rgi(vgk, vpk, tp.rgi);
+                    i_nl[s] = ip;
+                    i_nl[s + 1] = ig;
+                    j_dev[s * m + s] = jac[0];
+                    j_dev[s * m + (s + 1)] = jac[1];
+                    j_dev[(s + 1) * m + s] = jac[2];
+                    j_dev[(s + 1) * m + (s + 1)] = jac[3];
                 }
                 TubeKind::SharpPentode => {
                     // Reefman "Derk" §4.4 pentode (3D NR block).

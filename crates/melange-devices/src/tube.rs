@@ -414,7 +414,59 @@ impl KorenTriode {
         let v = (self.cg * s).exp_m1().ln() / self.cg;
         v.is_finite().then_some(v)
     }
+
+    /// Grid-cathode voltage at the internal grid behind the grid resistance
+    /// `rgi` (the card's `RGI`), given the terminal `vgk`: the root of
+    ///
+    /// ```text
+    /// f(v) = v + rgi * Ig(v) - vgk = 0
+    /// ```
+    ///
+    /// `Ig` is increasing and convex, so `f` is too, and the root lies at or
+    /// below `vgk` (`Ig >= 0`). Newton from `v = vgk` therefore approaches it
+    /// from the right without overshoot, and needs no step limit: measured at
+    /// most 10 iterations for terminal voltages from -100 V to +300 V and
+    /// `rgi` from 100 Ohm to 1 MOhm. The generated `tube_solve_vgk_int` is this
+    /// function.
+    pub fn internal_grid_voltage(&self, vgk: f64, rgi: f64) -> f64 {
+        if rgi <= 0.0 {
+            return vgk;
+        }
+        let mut v = vgk;
+        for _ in 0..GRID_STOPPER_MAX_ITER {
+            let f = v + rgi * self.grid_current(v) - vgk;
+            let fp = 1.0 + rgi * self.grid_current_jacobian(v);
+            let delta = f / fp;
+            v -= delta;
+            if delta.abs() <= 1e-12 * v.abs().max(1.0) {
+                break;
+            }
+        }
+        v
+    }
+
+    /// Plate and grid current seen at the terminals when the grid carries the
+    /// internal resistance `rgi`, with the Jacobian
+    /// `[dIp/dVgk, dIp/dVpk, dIg/dVgk, dIg/dVpk]` in terminal voltages. Both
+    /// currents are evaluated at the internal grid voltage, and the `Vgk`
+    /// column carries `dVgk_int/dVgk = 1 / (1 + rgi * dIg/dVgk_int)`.
+    pub fn evaluate_with_rgi(&self, vgk: f64, vpk: f64, rgi: f64) -> (f64, f64, [f64; 4]) {
+        let vi = self.internal_grid_voltage(vgk, rgi);
+        let dig = self.grid_current_jacobian(vi);
+        let chain = 1.0 / (1.0 + rgi.max(0.0) * dig);
+        let plate = self.jacobian(&[vi, vpk]);
+        (
+            self.plate_current(vi, vpk),
+            self.grid_current(vi),
+            [plate[0] * chain, plate[1], dig * chain, 0.0],
+        )
+    }
 }
+
+/// Iteration cap of [`KorenTriode::internal_grid_voltage`] and the generated
+/// `tube_solve_vgk_int`: a ceiling five times the measured worst case, which a
+/// monotone Newton never reaches.
+pub const GRID_STOPPER_MAX_ITER: usize = 50;
 
 impl KorenTriode {
     /// Contribution of one Koren section to `(Ip_koren, dIp_koren/dVgk,

@@ -337,13 +337,14 @@ Uses `DeviceSlot` params from `codegen::ir`:
   - `Ic = sign * IS * (exp(Vbe_eff/VT) - exp(Vbc_eff/VT)) - sign * (IS/BR) * (exp(Vbc_eff/VT) - 1)`
   - `Ib = sign * (IS/BF) * (exp(Vbe_eff/VT) - 1) + sign * (IS/BR) * (exp(Vbc_eff/VT) - 1)`
 - **JFET**: 2D Shichman-Hodges with triode + saturation regions, channel-length modulation (lambda)
-  - `Id = sign * IDSS * f(Vgs, Vds, Vp) * (1 + lambda*|Vds|)`, `Ig ≈ 0`
+  - `Id = sign * IDSS * f(Vgs, Vds, Vp) * (1 + lambda*|Vds|)`; `Ig` = the gate-source and gate-drain junctions, `IS*(exp(V/(N*Vt)) - 1)` each
   - N-channel (sign=+1) / P-channel (sign=-1)
 - **MOSFET**: 2D Level 1 SPICE with triode + saturation regions, channel-length modulation (lambda)
   - `Id = sign * KP * f(Vgs, Vds, Vt) * (1 + lambda*|Vds|)`, `Ig = 0`
   - N-channel (sign=+1) / P-channel (sign=-1)
-- **Tube**: 2D Koren plate current (with Early-effect lambda) + Leach grid current
-  - `Ip = Ip_koren * (1 + lambda*Vpk)` where `Ip_koren = E1^ex / Kg1`; `Ig = Gg * (softplus(Cg*vgk)/Cg)^xi` (D&Z eq. 11, conducts at every vgk)
+- **Tube**: 2D Koren plate current (with Early-effect lambda) + Dempwolf & Zölzer grid current
+  - `Ip = Ip_koren * (1 + lambda*Vpk)` where `Ip_koren = 2 * E1^ex / Kg1`; `Ig = Gg * (softplus(Cg*vgk)/Cg)^xi` (D&Z eq. 11, conducts at every vgk)
+  - With `RGI`, both are evaluated at the internal grid, the root of `v + RGI*Ig(v) = Vgk` (`KorenTriode::evaluate_with_rgi`, the transient's `tube_evaluate_with_rgi`)
 - **Clamping**: `safe_exp(x) = x.clamp(-40, 40).exp()` matching codegen/runtime
 
 ## API

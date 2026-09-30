@@ -336,7 +336,6 @@ pub fn apply_linearize_reductions(
                         continue;
                     }
 
-                    use melange_devices::NonlinearDevice;
                     let triode = melange_devices::KorenTriode {
                         mu: tp.mu,
                         ex: tp.ex,
@@ -351,7 +350,8 @@ pub fn apply_linearize_reductions(
                         svar: tp.svar,
                         ex_b: tp.ex_b,
                     };
-                    let jac = triode.jacobian(&[vgk, vpk]);
+                    // Through RGI, as the DC OP and the transient evaluate it.
+                    let (_, _, jac) = triode.evaluate_with_rgi(vgk, vpk, tp.rgi);
                     let gm = jac[0]; // dIp/dVgk
                     let gp = jac[1]; // dIp/dVpk = 1/rp
 

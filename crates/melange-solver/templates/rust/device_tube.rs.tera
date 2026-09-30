@@ -131,21 +131,22 @@ fn tube_jacobian(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f
     [dip_koren_dvgk * lambda_factor, if vpk_held { 0.0 } else { dip_koren_dvpk * lambda_factor + ip_koren * lambda }, dig_dvgk, 0.0]
 }
 
-/// Solve for internal Vgk when RGI > 0: Vgk_int = Vgk_ext - Ig(Vgk_int) * RGI.
-/// Uses 1D Newton-Raphson with step limiting.
+/// Internal Vgk behind RGI: the root of Vgk_int + Ig(Vgk_int) * RGI = Vgk_ext.
+/// Ig is increasing and convex, so Newton from Vgk_ext approaches the root from
+/// above without overshoot and needs no step limit (at most 10 iterations
+/// measured, -100..+300 V, RGI 100 Ohm..1 MOhm). Mirrors the devices crate's
+/// `KorenTriode::internal_grid_voltage`, which the DC operating point uses.
 #[inline(always)]
 fn tube_solve_vgk_int(vgk_ext: f64, gg: f64, xi: f64, cg: f64, rgi: f64) -> f64 {
     let mut vgk_int = vgk_ext;
-    for _ in 0..8 {
+    for _ in 0..50 {
         let ig = tube_ig_dz(vgk_int, gg, xi, cg);
         let dig = tube_ig_dz_deriv(vgk_int, gg, xi, cg);
-        // f(vgk_int) = vgk_int + ig * rgi - vgk_ext
         let f = vgk_int + ig * rgi - vgk_ext;
         let fp = 1.0 + dig * rgi;
-        let mut delta = f / fp;
-        delta = delta.clamp(-1.0, 1.0);
+        let delta = f / fp;
         vgk_int -= delta;
-        if delta.abs() < 1e-10 { break; }
+        if delta.abs() <= 1e-12 * vgk_int.abs().max(1.0) { break; }
     }
     vgk_int
 }

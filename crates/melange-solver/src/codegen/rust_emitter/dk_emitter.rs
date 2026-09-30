@@ -3443,6 +3443,8 @@ impl RustEmitter {
                     svar: tp.svar,
                     ex_b: tp.ex_b,
                 };
+                // The tube's own gm, at its internal grid behind RGI.
+                let vgk = triode.internal_grid_voltage(vgk, tp.rgi);
                 let h = 1e-3;
                 let gm = (triode.plate_current(vgk + h, vpk) - triode.plate_current(vgk - h, vpk))
                     / (2.0 * h);

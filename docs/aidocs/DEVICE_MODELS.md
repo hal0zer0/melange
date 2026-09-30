@@ -523,7 +523,9 @@ GG=5.911e-4 XI=1.358 CG=11.76)` emits `DEVICE_n_GG` / `XI` / `CG` for the RSD-2
 row; a deck that omits them gets RSD-1.
 
 Overridable keys: `MU EX KG1 KP KVB LAMBDA GG XI CG` (sharp triode);
-`CCG CGP CCP` (inter-electrode caps); `RGI` (grid internal resistance). The
+`CCG CGP CCP` (inter-electrode caps); `RGI` (grid internal resistance: the
+plate and grid currents are evaluated at the internal grid, the root of
+`v + RGI*Ig(v) = Vgk`, in the DC operating point and the transient alike). The
 triode is sharp-cutoff: `MU_B SVAR EX_B` (Reefman variable-μ) are refused on a
 triode card when nonzero, and modelled for pentodes and beam tetrodes only. All are validated
 positive-finite (LAMBDA/caps non-negative) at resolve time.

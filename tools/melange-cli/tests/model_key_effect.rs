@@ -685,12 +685,7 @@ const COLD: &str = "the DC operating point is the cold power-on state; self-heat
 /// DC keys the operating point does not see today: defects, each queued for
 /// its fix. The test requires them to STILL not move it, so a fix removes
 /// its entry here.
-const KNOWN_DC_DEFECTS: &[(ModelClass, &str, &str)] = &[(
-    ModelClass::Triode,
-    "RGI",
-    "the DC OP has no grid stopper; the transient solves through it (5.1 pA of grid \
-         current at this bias)",
-)];
+const KNOWN_DC_DEFECTS: &[(ModelClass, &str, &str)] = &[];
 
 /// Node voltages and device voltages/currents of `melange dc-op --format
 /// json` (full precision), in a stable order.
