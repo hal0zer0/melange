@@ -1013,6 +1013,11 @@ pub fn run_transient_with_thevenin_pwl(
     // JFET. See jfet_translate.rs.
     let translated =
         crate::jfet_translate::translate_jfets_for_ngspice(&translated, netlist_content)?;
+    // Diode/BJT thermal keys: RTH/CTH dropped (validate runs melange
+    // isothermal), TAMB as each instance's temperature. See
+    // thermal_translate.rs.
+    let translated =
+        crate::thermal_translate::translate_thermal_for_ngspice(&translated, netlist_content)?;
     // Melange-only element parameters: a saturating inductor becomes its own
     // flux law, a K-coupled saturating core and a resistor's KF=/AF= are
     // stripped with a stated notice. See sat_inductor_translate.rs.

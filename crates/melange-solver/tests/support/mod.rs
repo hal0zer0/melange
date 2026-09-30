@@ -497,6 +497,7 @@ pub fn try_build_shipped_with(
         resolve_taps: true,
         inject_runtime: true,
         disable_unit_variation: false,
+        disable_self_heating: false,
         allow_unconverged_dc_op: false,
         dc_op_max_iterations: None,
         output_clamp_auto: false,

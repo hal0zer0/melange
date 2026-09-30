@@ -56,6 +56,7 @@ pub(crate) mod opamp_translate;
 pub(crate) mod pentode_translate;
 mod sat_inductor_translate;
 pub mod spice_runner;
+mod thermal_translate;
 pub(crate) mod tube_translate;
 pub mod visualizer;
 
@@ -288,6 +289,31 @@ pub fn validate_circuit(
         config,
         &options,
     )
+}
+
+/// The result-line note for a deck whose devices self-heat: validate runs
+/// them isothermal (`BuildOptions::disable_self_heating`), naming each card
+/// that sets `RTH`. `None` when none does, or the deck does not parse.
+fn thermal_note(netlist: &str) -> Option<String> {
+    let parsed = melange_solver::parser::Netlist::parse(netlist).ok()?;
+    let cards: Vec<String> = parsed
+        .models
+        .iter()
+        .filter_map(|m| {
+            m.params
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("RTH"))
+                .filter(|(_, v)| v.is_finite())
+                .map(|(_, v)| format!("{} RTH={v}", m.name))
+        })
+        .collect();
+    (!cards.is_empty()).then(|| {
+        format!(
+            "self-heating disabled for comparison ({}): ngspice's diode and BJT, and the triode \
+             twin, have no thermal model; TAMB still sets each device's static temperature",
+            cards.join(", ")
+        )
+    })
 }
 
 /// Refuse a port name the circuit does not have, listing the circuit's
@@ -530,6 +556,7 @@ pub fn validate_circuit_with_options(
     // seed that was therefore not exercised. `None` — and so no added output —
     // for every deck without them.
     report.unit_variation_note = deck_guard::unit_variation_note(&netlist_str);
+    report.thermal_note = thermal_note(&stripped_netlist);
     // The reference is the deck plus melange's parasitic caps when it had no
     // capacitance: say so, since a reader running ngspice on the deck alone
     // would get a different answer.
@@ -949,6 +976,9 @@ fn run_melange_build(
         resolve_taps: false,
         inject_runtime: false,
         disable_unit_variation: true,
+        // Isothermal too: ngspice's diode and BJT, and the triode twin, have
+        // no thermal model (ruled; see `ParseOptions::disable_self_heating`).
+        disable_self_heating: true,
         // A build that starts from an unconverged operating point is refused:
         // comparing it against ngspice would measure the wrong start.
         allow_unconverged_dc_op: false,

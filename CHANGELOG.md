@@ -573,6 +573,13 @@ generated state is smaller.
   variable-mu law, at an operating point solved without it. A nonzero value is
   now refused. Variable-mu stays modelled for pentodes and beam tetrodes; no
   deck set these keys on a triode.
+- **`melange validate` on a self-heating deck** now compares a circuit both
+  engines can express: ngspice's diode and BJT have no `RTH`/`CTH`/`TAMB`
+  (the reference used to ignore them with a warning, and the triode twin has
+  no thermal model), so the melange side is built isothermal and the
+  reference places each device at its card's `TAMB`, which keeps its static
+  role on both sides. The status line says so. The three corpus decks
+  refused for these keys now pass (0.038–0.23 %).
 - **`.linearize` could be silently overridden or fail every sample**: a
   triode near its grid's conduction onset at its operating point was kept
   nonlinear with a warning, against the directive; a name that was not a BJT

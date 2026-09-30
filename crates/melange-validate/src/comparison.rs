@@ -321,6 +321,12 @@ pub struct ComparisonReport {
     /// above a number does not retract it.
     pub unit_variation_note: Option<String>,
 
+    /// Qualifier for the PASSED/FAILED line when the deck's devices
+    /// self-heat and this comparison ran them isothermal (ngspice's diode and
+    /// BJT, and the triode twin, have no thermal model). Filled by
+    /// `validate_circuit_with_options`; `None` when no card sets `RTH`.
+    pub thermal_note: Option<String>,
+
     /// Set when the melange side was built with `--oversampling {2|4}`, naming
     /// the factor, the internal rate, and the half-band round trip the
     /// REFERENCE was put through so the filters' known response is inside the
@@ -367,6 +373,22 @@ pub struct ComparisonReport {
 }
 
 impl ComparisonReport {
+    /// What the verdict on the status line was measured WITHOUT (unit
+    /// variation, self-heating), as ` (a; b)`, or empty. It rides on that
+    /// line because a footnote elsewhere would not qualify the verdict.
+    pub fn status_qualifier(&self) -> String {
+        let notes: Vec<&str> = [&self.unit_variation_note, &self.thermal_note]
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .collect();
+        if notes.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", notes.join("; "))
+        }
+    }
+
     /// Generate a summary string of the comparison results
     pub fn summary(&self) -> String {
         let mut summary = format!(
@@ -407,10 +429,7 @@ impl ComparisonReport {
             } else {
                 "FAILED ✗"
             },
-            match &self.unit_variation_note {
-                Some(note) => format!(" ({note})"),
-                None => String::new(),
-            }
+            self.status_qualifier()
         ));
 
         summary.push_str("Time-Domain Metrics:\n");
@@ -613,6 +632,7 @@ pub fn compare_signals(
         absolute_errors: None,
         relative_errors: None,
         unit_variation_note: None,
+        thermal_note: None,
     };
 
     if len == 0 {
@@ -884,6 +904,7 @@ pub fn compare_signals(
         ),
         // Set by the caller, which is the only layer that has the deck.
         unit_variation_note: None,
+        thermal_note: None,
         // Set by the caller, which is the only layer that knows the build.
         oversampling_note: None,
         // Set by the caller, which is the layer that does the alignment.

@@ -75,7 +75,20 @@ recorded correlation/RMS values.
    bias-dependent). A card with `N` other than 1 is refused: ngspice's
    level-1 JFET has no emission coefficient.
 
-7. **Gives the reference each `.linearize`d device as melange built it**
+7. **Runs self-heating devices isothermal** (`ParseOptions::
+   disable_self_heating`, `thermal_translate.rs`). ngspice's diode and BJT
+   have no `RTH`/`CTH`/`TAMB` (and the triode twin has no thermal model), so
+   validate builds melange with `RTH` not applied, the reference drops the
+   three keys, and each instance of a card whose `TAMB` is not TNOM is placed
+   at that temperature with ngspice's instance `temp=`: `TAMB`'s static role
+   (IS and N·Vt scaled from TNOM) is kept on both sides. The status line says
+   so ("self-heating disabled for comparison (…)"), next to the
+   unit-variation qualifier; self-heating's own correctness is covered by its
+   analytic tests. A self-heating clipper at 320 K witnesses both halves
+   (`thermal_twin_tests.rs`: 1.5 % NRMSE with melange self-heating, 6.5 %
+   without the instance temperature).
+
+8. **Gives the reference each `.linearize`d device as melange built it**
    (`linearize_twin.rs`): the element line is replaced by the small-signal
    model at the DC operating point (`G` sources for the terminal-current
    Jacobian, an `I` source for the constant that puts the operating point
@@ -88,7 +101,7 @@ recorded correlation/RMS values.
    run, saying so. A device inside a subcircuit is refused (its element line
    is not the deck's own).
 
-8. **Gives the reference melange's parasitic caps** (`with_parasitic_caps`,
+9. **Gives the reference melange's parasitic caps** (`with_parasitic_caps`,
    `melange validate` / `validate_circuit_with_options`). A capacitor-free
    nonlinear deck is built with 10 pF across each device junction (see
    DEVICE_MODELS.md "Parasitic Cap Auto-Insertion"), recorded by node name in

@@ -162,6 +162,9 @@ pub struct BuildOptions {
     /// Parse with `.tolerance` / `.mismatch` jitter off (validate: the reference
     /// deck carries the values as written).
     pub disable_unit_variation: bool,
+    /// Parse isothermal: no device self-heating (validate: the reference has
+    /// no thermal model). `TAMB` still sets static device temperatures.
+    pub disable_self_heating: bool,
     /// Build even when the DC operating point did not converge
     /// (`--allow-unconverged-dc-op`). By default such a build is refused: its
     /// generated code would start from a state that is not a solution.
@@ -281,6 +284,7 @@ pub fn assemble(
     report!(out, "Step 1: Parsing SPICE netlist...");
     let parse_options = crate::parser::ParseOptions {
         disable_unit_variation: opts.disable_unit_variation,
+        disable_self_heating: opts.disable_self_heating,
     };
     let mut netlist = Netlist::parse_with_options(netlist_str, parse_options)
         .with_context(|| "Failed to parse SPICE netlist")?;

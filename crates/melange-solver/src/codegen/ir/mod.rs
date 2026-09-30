@@ -4032,6 +4032,17 @@ impl CircuitIR {
     /// deterministically from the (seed, device, param) triple. When the
     /// tolerance is zero this is a pure pass-through — the return value
     /// is bit-identical to `nominal`.
+    /// A model's thermal resistance `RTH`: infinite (self-heating off) when
+    /// the card does not set it, or when the netlist was parsed isothermal
+    /// (`ParseOptions::disable_self_heating`, `melange validate`). `TAMB`
+    /// keeps its static role either way.
+    fn resolve_rth(netlist: &Netlist, model: &str) -> f64 {
+        if netlist.self_heating_disabled {
+            return f64::INFINITY;
+        }
+        Self::lookup_model_param(netlist, model, "RTH").unwrap_or(f64::INFINITY)
+    }
+
     fn apply_mismatch(
         netlist: &Netlist,
         device_name: &str,
@@ -4516,7 +4527,7 @@ impl CircuitIR {
         // Self-heating parameters (optional). Defaults match BjtParams so
         // `.model D(RTH=50)` with everything else implicit gives a sensible
         // silicon diode with 1 ms thermal memory.
-        let rth = Self::lookup_model_param(netlist, model, "RTH").unwrap_or(f64::INFINITY);
+        let rth = Self::resolve_rth(netlist, model);
         if rth.is_finite() && rth <= 0.0 {
             return Err(CodegenError::InvalidConfig(format!(
                 "diode model RTH must be positive (or infinite to disable), got {rth}"
@@ -4783,7 +4794,7 @@ impl CircuitIR {
         }
 
         // Self-heating parameters (optional)
-        let rth = Self::lookup_model_param(netlist, model, "RTH").unwrap_or(f64::INFINITY);
+        let rth = Self::resolve_rth(netlist, model);
         if rth.is_finite() && rth <= 0.0 {
             return Err(CodegenError::InvalidConfig(format!(
                 "BJT model RTH must be positive (or infinite to disable), got {rth}"
@@ -5283,7 +5294,7 @@ impl CircuitIR {
         // resolver still accepts the params so pentode circuits don't trip
         // the unrecognized-param warning, but the emitter won't use them
         // until pentode screen-dissipation is wired.
-        let rth = Self::lookup_model_param(netlist, model, "RTH").unwrap_or(f64::INFINITY);
+        let rth = Self::resolve_rth(netlist, model);
         if rth.is_finite() && rth <= 0.0 {
             return Err(CodegenError::InvalidConfig(format!(
                 "tube model RTH must be positive (or infinite to disable), got {rth}"

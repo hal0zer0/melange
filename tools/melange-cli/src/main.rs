@@ -1914,6 +1914,7 @@ fn compile_circuit_source(
         resolve_taps: true,
         inject_runtime: true,
         disable_unit_variation: false,
+        disable_self_heating: false,
         allow_unconverged_dc_op,
         dc_op_max_iterations,
         output_clamp_auto: false,
@@ -2722,10 +2723,7 @@ fn validate_circuit_source(
     // in a preamble would leave this line reading as a verdict on the unit the
     // deck describes, which it is not. Empty for a deck with no jitter
     // directive, which is every shipped validation deck.
-    let qualifier = match &result.report.unit_variation_note {
-        Some(note) => format!(" ({note})"),
-        None => String::new(),
-    };
+    let qualifier = result.report.status_qualifier();
     if result.report.passed {
         println!("Validation PASSED{}", qualifier);
         Ok(())
@@ -3155,6 +3153,7 @@ fn simulate_circuit_source(
         resolve_taps: false,
         inject_runtime: true,
         disable_unit_variation: false,
+        disable_self_heating: false,
         allow_unconverged_dc_op: opts.allow_unconverged_dc_op,
         dc_op_max_iterations: opts.dc_op_max_iterations,
         output_clamp_auto: false,
@@ -3645,6 +3644,7 @@ fn analyze_freq_response(
         resolve_taps: false,
         inject_runtime: false,
         disable_unit_variation: false,
+        disable_self_heating: false,
         allow_unconverged_dc_op,
         dc_op_max_iterations,
         output_clamp_auto: false,
@@ -4734,6 +4734,7 @@ fn run_dc_op(circuit_source: &circuits::CircuitSource, opts: &DcOpOptions<'_>) -
         resolve_taps: true,
         inject_runtime: true,
         disable_unit_variation: false,
+        disable_self_heating: false,
         allow_unconverged_dc_op: opts.allow_unconverged_dc_op,
         dc_op_max_iterations: opts.dc_op_max_iterations,
         output_clamp_auto: false,

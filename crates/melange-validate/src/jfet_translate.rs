@@ -76,6 +76,7 @@ pub(crate) fn translate_jfets_for_ngspice(
         source,
         ParseOptions {
             disable_unit_variation: true,
+            disable_self_heating: true,
         },
     )
     .map_err(|e| err(e.to_string()))?;

@@ -165,6 +165,11 @@ pub struct Netlist {
     /// circuits and blame the gap on the solver. `compile` / `simulate` /
     /// `analyze` leave this `false` and jitter as documented.
     pub unit_variation_disabled: bool,
+    /// Every device is resolved without self-heating (`RTH` infinite; `TAMB`
+    /// still sets the static device temperature). Set only via
+    /// [`ParseOptions::disable_self_heating`]; the one consumer is `melange
+    /// validate`, whose reference simulator has no thermal model.
+    pub self_heating_disabled: bool,
     /// Integration-scheme preference (`.integrator trap` / `.integrator be`).
     /// `None` (default) leaves the choice to the CLI flags and the automatic
     /// spectral-radius promotion. `Some(Be)` pins backward Euler at compile
@@ -238,6 +243,14 @@ pub struct ParseOptions {
     /// The directives stay recorded on the returned [`Netlist`] so the caller
     /// can name which ones it disabled.
     pub disable_unit_variation: bool,
+    /// Resolve every device isothermal: a card's `RTH` (and so `CTH`) is not
+    /// applied, while `TAMB` still sets the device's static temperature.
+    ///
+    /// `melange validate` sets this. ngspice's diode, BJT and the triode twin
+    /// have no thermal model, so a self-heating melange side would compare a
+    /// different circuit; self-heating's own correctness is covered by its
+    /// analytic tests (`Tj_ss = TAMB + P·RTH`, `tau = RTH·CTH`).
+    pub disable_self_heating: bool,
 }
 
 /// Deterministic uniform `[-1, 1]` draw from `(seed, class_tag, name)`.
@@ -538,6 +551,7 @@ impl Netlist {
             tolerance_c: 0.0,
             tolerance_l: 0.0,
             unit_variation_disabled: false,
+            self_heating_disabled: false,
             integrator: None,
             recommended_oversampling: None,
             element_lines: std::collections::HashMap::new(),
@@ -1921,6 +1935,7 @@ impl Parser {
         // (`apply_passive_tolerance` below, `mismatch_tol_for` at codegen) see
         // it no matter what the deck contains.
         netlist.unit_variation_disabled = options.disable_unit_variation;
+        netlist.self_heating_disabled = options.disable_self_heating;
 
         while let Some(line) = self.next_line() {
             let line = line.trim().to_string();
@@ -8176,6 +8191,7 @@ U1 0 inv out opamp
             spice,
             ParseOptions {
                 disable_unit_variation: true,
+                disable_self_heating: false,
             },
         )
         .expect("parse");
