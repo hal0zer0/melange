@@ -250,6 +250,21 @@ linearises at `vcrit` with the nodes still at the guess, and on parasitic BJTs
 (whose pnjlim the DC loop skips) that first step is unbounded. The Wurlitzer
 preamp went from DirectNr 8 to Failed. See STATUS.md, Deferred.
 
+**A `.linearize`d circuit starts from its bias point instead.** `.linearize`
+solves the full circuit first, extracts the flagged devices' small-signal
+parameters there, and rebuilds them linear with Norton constants from that
+point, so that point satisfies the linearized system's DC equations exactly.
+`apply_linearize_reductions` records it by node name
+(`MnaSystem::linearize_bias_nodes`, only when the bias solve converged),
+`dc_op_config` passes it as `DcOpConfig::seed_nodes`, and Direct NR starts
+there with no junction clamp (auxiliary rows and parasitic-BJT internal nodes
+keep their usual initialisation). Measured on a FET limiter whose output stage
+has a Darlington-equivalent NF = 2 transistor: from the clamped linear guess
+the linearized solve failed every strategy (KCL 0.357 A) while the bias solve
+had converged; seeded, Direct NR in 2 iterations. Corpus `.linearize` decks
+keep their operating point (≤ 1e-15 V) in fewer iterations (18 → 2 typical;
+decks with parasitic-BJT internal nodes 10 → 9, 31 → 21).
+
 ### 2. Source Stepping (DcOpMethod::SourceStepping)
 
 Scale all DC sources from 0 → full value in `source_steps` stages (default 50).

@@ -544,6 +544,7 @@ fn test_singular_matrix_error_path() {
         vcas: vec![],
         bjt_internal_nodes: vec![],
         linearized_bjts: vec![],
+        linearize_bias_nodes: None,
         linearized_triodes: vec![],
         pot_default_overrides: HashMap::new(),
         switch_default_overrides: HashMap::new(),

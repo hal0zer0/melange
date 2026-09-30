@@ -997,6 +997,7 @@ pub fn dc_op_config(mna: &MnaSystem, request: impl Into<DcOpRequest>) -> DcOpCon
     let request = request.into();
     let mut config = DcOpConfig {
         rail: dc_rail_for(resolve_opamp_rail_mode(mna, request.opamp_rail_mode).mode),
+        seed_nodes: mna.linearize_bias_nodes.clone(),
         ..DcOpConfig::default()
     };
     if let Some(n) = request.max_iterations {

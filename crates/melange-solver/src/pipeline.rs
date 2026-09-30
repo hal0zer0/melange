@@ -398,6 +398,18 @@ pub fn apply_linearize_reductions(
     // Rebuild MNA with all three reduction classes combined (FA +
     // linearized + grid-off). This supersedes any prior FA-only or
     // grid-off-only rebuild the caller performed.
+    // The point the devices were linearized at, by node name (the rebuild may
+    // renumber): the linearized system's DC operating point starts there.
+    let bias_nodes: Option<std::collections::BTreeMap<String, f64>> =
+        dc_result.converged.then(|| {
+            mna.node_map
+                .iter()
+                .filter(|&(_, &idx)| idx > 0)
+                .filter_map(|(name, &idx)| {
+                    dc_result.v_node.get(idx - 1).map(|&v| (name.clone(), v))
+                })
+                .collect()
+        });
     *mna = crate::mna::MnaSystem::from_netlist_with_all_reductions(
         netlist,
         forward_active,
@@ -407,6 +419,7 @@ pub fn apply_linearize_reductions(
     )
     .map_err(|e| PipelineError::DcOp(format!("rebuild MNA with linearized devices: {e}")))?;
     stamp_ports(mna, port_stamps);
+    mna.linearize_bias_nodes = bias_nodes;
 
     // Stamp linearized g-parameters into G. Must precede the junction-cap
     // re-stamp so `build_device_info_with_mna` can skip linearized devices

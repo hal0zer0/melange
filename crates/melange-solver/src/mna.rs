@@ -113,6 +113,11 @@ pub struct MnaSystem {
     /// Linearized triodes: small-signal gm + 1/rp stamped into G.
     /// These triodes are NOT in the nonlinear device list (M reduced by 2 each).
     pub linearized_triodes: Vec<LinearizedTriodeInfo>,
+    /// The operating point `.linearize` extracted its small-signal parameters
+    /// at, by node name. It satisfies this system's DC equations by
+    /// construction (the linearized devices' Norton constants come from it), so
+    /// the DC operating point starts there. `None` when nothing is linearized.
+    pub linearize_bias_nodes: Option<std::collections::BTreeMap<String, f64>>,
     /// Pot default overrides: resistor name (uppercase) → default resistance.
     /// When a .pot has a default value, the G matrix is stamped at this value
     /// (not the component declaration value). Empty for circuits without .pot defaults.
@@ -1142,6 +1147,7 @@ impl MnaSystem {
             vcas: Vec::new(),
             bjt_internal_nodes: Vec::new(),
             linearized_bjts: Vec::new(),
+            linearize_bias_nodes: None,
             linearized_triodes: Vec::new(),
             pot_default_overrides: HashMap::new(),
             switch_default_overrides: HashMap::new(),

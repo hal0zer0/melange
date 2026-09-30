@@ -471,6 +471,12 @@ generated state is smaller.
 - A local circuit source added with a relative path broke from any other
   directory, with "Failed to fetch URL" and an empty cause. Local sources are
   now stored absolute, and an unreachable one says why.
+- **A `.linearize`d circuit could fail its DC operating point** although the
+  point it was linearized at is, by construction, a solution. Its DC solve
+  restarted from the linear guess instead; on a FET limiter with a
+  high-Vbe output transistor it failed every strategy. It now starts from the
+  bias point and converges in about 2 iterations. Operating points are
+  unchanged elsewhere (regression renders move by round-off).
 - **Tube circuits could leave samples unsolved where a plate was driven below
   its cathode.** Below their voltage guards (pentode plate below the cathode or
   screen below 1 mV, triode plate below 1 mV) the tube models hold their

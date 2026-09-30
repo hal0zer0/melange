@@ -48,6 +48,11 @@ pub struct DcOpConfig {
     /// saturation the transient's rail mode applies (set by the codegen
     /// builder from its resolved rail mode).
     pub rail: DcRail,
+    /// A known operating point by node name, from which direct Newton starts
+    /// instead of the junction-clamped linear guess: the point `.linearize`
+    /// linearized at (see [`MnaSystem::linearize_bias_nodes`]). Nodes it does
+    /// not name keep the linear guess. The fallback strategies are unchanged.
+    pub seed_nodes: Option<std::collections::BTreeMap<String, f64>>,
 }
 
 /// The saturation a railed op-amp output gets at the DC operating point,
@@ -75,6 +80,7 @@ impl Default for DcOpConfig {
             gmin_steps: 10,
             max_rail_pin_rounds: 8,
             rail: DcRail::LoadLine,
+            seed_nodes: None,
         }
     }
 }
@@ -3696,7 +3702,18 @@ fn solve_dc_operating_point_core(
     // extreme forward bias (which causes exp() saturation and NR divergence).
     // For multi-stage direct-coupled BJT circuits, the linear guess often has
     // junction voltages of several volts because the BJT is not conducting.
-    let mut v_clamped = clamp_junction_voltages(mna, device_slots, &v_linear);
+    let mut v_clamped = match &config.seed_nodes {
+        Some(seed) => {
+            let mut v = v_linear.clone();
+            for (name, &idx) in &mna.node_map {
+                if let (true, Some(&x)) = (idx > 0 && idx <= mna.n, seed.get(name)) {
+                    v[idx - 1] = x;
+                }
+            }
+            v
+        }
+        None => clamp_junction_voltages(mna, device_slots, &v_linear),
+    };
     // Extend to n_dc if internal nodes were added
     v_clamped.resize(n_dc, 0.0);
 
