@@ -239,6 +239,10 @@ pub fn apply_linearize_reductions(
                     // and RB/RC/RE folded in through the terminal-pair solve.
                     let (_, _, jac) = crate::dc_op::bjt_eval(bp, vbe0, vbc0, bp.has_parasitics());
                     let [dic_dvbe, dic_dvbc, dib_dvbe, dib_dvbc] = jac;
+                    // Junction capacitances at the bias point's terminal
+                    // voltages, as `MnaSystem::relinearize_bjt_caps_at_dc_op`
+                    // evaluates an unlinearized 2D BJT.
+                    let (cbe, cbc) = bp.linearized_junction_caps(vbe0, vbc0, ic);
                     report!(
                         rep,
                         "  Linearized {}: dIc/dVbe={:.4e} dIc/dVbc={:.4e} dIb/dVbe={:.4e} \
@@ -260,6 +264,8 @@ pub fn apply_linearize_reductions(
                         dic_dvbc,
                         dib_dvbe,
                         dib_dvbc,
+                        cbe,
+                        cbc,
                         ic_dc: ic,
                         ib_dc: ib,
                         vbe0,

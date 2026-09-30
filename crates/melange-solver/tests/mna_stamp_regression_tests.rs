@@ -389,6 +389,8 @@ Q1 c b e QN
         dic_dvbc: -1e-9,
         dib_dvbe: gpi,
         dib_dvbc: 1e-9,
+        cbe: 0.0,
+        cbc: 0.0,
         ic_dc: ic,
         ib_dc: ib,
         vbe0: v_at(nb) - v_at(ne),

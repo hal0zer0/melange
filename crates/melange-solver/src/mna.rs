@@ -584,6 +584,11 @@ pub struct LinearizedBjtInfo {
     pub dic_dvbc: f64,
     pub dib_dvbe: f64,
     pub dib_dvbc: f64,
+    /// B-E and B-C capacitances at the DC OP (depletion plus the B-E
+    /// diffusion term, `BjtParams::linearized_junction_caps`), stamped
+    /// between the external terminals.
+    pub cbe: f64,
+    pub cbc: f64,
     /// DC bias currents
     pub ic_dc: f64,
     pub ib_dc: f64,
@@ -1262,7 +1267,8 @@ impl MnaSystem {
     /// - base:      dIb/dVbe·Vbe + dIb/dVbc·Vbc
     /// - emitter:   -(collector + base)
     ///
-    /// plus DC bias currents as current source injections.
+    /// plus its junction capacitances into C and DC bias currents as current
+    /// source injections.
     pub fn stamp_linearized_bjts(&mut self) {
         for bjt in &self.linearized_bjts.clone() {
             let nc = bjt.nc; // 1-indexed
@@ -1291,6 +1297,13 @@ impl MnaSystem {
                     }
                 }
             }
+
+            // Junction capacitances, between the external terminals as the
+            // route that does not expand parasitic-BJT internal nodes places
+            // them (RB/RC/RE in series with a junction cap put its pole in
+            // the MHz range).
+            self.stamp_capacitor_raw(nb, ne, bjt.cbe);
+            self.stamp_capacitor_raw(nb, nc, bjt.cbc);
 
             // DC bias injections — proper Norton companion constants.
             //

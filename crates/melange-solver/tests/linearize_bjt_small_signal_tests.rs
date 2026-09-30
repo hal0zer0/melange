@@ -13,7 +13,14 @@
 //! Oracle: the central difference of the nonlinear DC operating point in the
 //! drive voltage, against the exact slope of the linearized circuit. No
 //! reference simulator involved: a linearization is a derivative.
+//!
+//! Its charge storage too: a linearized BJT's junction capacitances were
+//! never stamped (the cap re-stamp after the rebuild skips linearized
+//! devices), so a CJC = 100 pF stage lost its Miller pole. Oracle: the
+//! linearized circuit's capacitance matrix equals the full circuit's after
+//! the full circuit's caps are re-linearized at the same DC operating point.
 
+use melange_solver::build::preflight_relinearize_bjt_caps;
 use melange_solver::codegen::ir::{dc_op_config, CircuitIR};
 use melange_solver::codegen::OpampRailMode;
 use melange_solver::dc_op::{solve_dc_operating_point, DcOpConfig};
@@ -141,4 +148,74 @@ fn nr_2_forward_bc_junction_linearizes_to_its_own_derivative() {
 #[test]
 fn gummel_poon_pnp_linearizes_to_its_own_derivative() {
     assert_small_signal_matches(GP_PNP);
+}
+
+/// Depletion caps at both junctions plus B-E diffusion charge, no ohmic
+/// parasitics (which would move the full device's caps to internal nodes).
+const CAPS_NPN: &str = "common emitter with charge storage
+.model QC NPN(IS=1.5e-14 BF=200 VAF=50 CJE=20p CJC=100p TF=1n)
+VCC vcc 0 DC 12
+VD d 0 DC 0
+Rs d b 10k
+R1 vcc b 100k
+R2 b 0 22k
+RC vcc c 4.7k
+Q1 c b e QC
+RE e 0 1k
+CE e 0 10u
+.linearize Q1
+";
+
+fn assert_linearized_caps_match(deck: &str) {
+    let netlist = Netlist::parse(deck).unwrap();
+
+    // Full device: zero-bias caps, re-linearized at the DC OP, as the build does.
+    let mut full = MnaSystem::from_netlist(&netlist).unwrap();
+    let slots = CircuitIR::build_device_info_with_mna(&netlist, Some(&full)).unwrap();
+    full.stamp_device_junction_caps(&slots);
+    let dc = preflight_relinearize_bjt_caps(&mut full, &netlist, OpampRailMode::Auto.into())
+        .expect("a BJT to re-linearize");
+    assert!(dc.converged);
+
+    let mut lin = MnaSystem::from_netlist(&netlist).unwrap();
+    apply_linearize_reductions(
+        &mut lin,
+        &netlist,
+        &Default::default(),
+        &Default::default(),
+        &[],
+        OpampRailMode::Auto.into(),
+        &|_| {},
+    )
+    .unwrap();
+    assert_eq!(lin.m, 0);
+    assert_eq!(full.node_map, lin.node_map);
+
+    let b = full.node_map["b"] - 1;
+    let c = full.node_map["c"] - 1;
+    assert!(
+        -full.c[b][c] > 20e-12,
+        "the fixture's C_bc is not negligible"
+    );
+    for (i, (rf, rl)) in full.c.iter().zip(&lin.c).enumerate() {
+        for (j, (&f, &l)) in rf.iter().zip(rl).enumerate() {
+            assert!(
+                (f - l).abs() <= 1e-9 * f.abs().max(1e-15),
+                "C[{i}][{j}]: full {f:e}, linearized {l:e}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_linearized_npn_keeps_its_junction_caps() {
+    assert_linearized_caps_match(CAPS_NPN);
+}
+
+#[test]
+fn a_linearized_pnp_keeps_its_junction_caps() {
+    let pnp = CAPS_NPN
+        .replace("NPN(", "PNP(")
+        .replace("VCC vcc 0 DC 12", "VCC vcc 0 DC -12");
+    assert_linearized_caps_match(&pnp);
 }

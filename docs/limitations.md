@@ -386,9 +386,11 @@ times.
   operating point: NF/NR, Gummel-Poon Early effect and high injection, ISE/ISC
   leakage and RB/RC/RE all enter it. A triode is stamped as g_m and 1/r_p
 - A linearized BJT's junction and diffusion capacitances (CJE, CJC, TF) are
-  not stamped [OPEN]. Measured on a common-emitter stage with CJC = 100 pF
-  from a 1 Ω source: the linearized circuit misses 1.8° of phase at 20 kHz
-  that the full circuit and ngspice show; the error grows with source impedance
+  evaluated at the DC operating point, as the unlinearized device's are, and
+  stamped between its external terminals. A card with RB/RC/RE on a route
+  that expands internal nodes places the unlinearized device's caps on the
+  internal nodes instead; the ohmic resistance in series puts that
+  difference's pole in the MHz range
 
 ## Numerical Limitations
 
