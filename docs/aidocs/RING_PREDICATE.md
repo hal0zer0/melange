@@ -288,10 +288,12 @@ z(fs) = (1 + λ/(2fs)) / (1 − λ/(2fs))        (the trapezoidal map, at the ru
   clipper in front of a stiff node latches on the same click-train ring at
   0.3 V and at 5 V of drive (`be_latch_entry_tests.rs`); referenced to
   H_pink·|u| alone the 5 V case never latched. On the 60 s hostile program
-  over the 31 latch-carrying corpus and golden builds this adds one engagement
-  and removes none: kt88-pp-stage at 1 V, after a noise burst, on a
-  trapezoidal ring of about −40 dB of the program (80.7 mV at Nyquist against
-  backward Euler's 0.34 mV).
+  over the 31 latch-carrying corpus and golden builds its only effect is on
+  kt88-pp-stage at 1 V after a noise burst: a trapezoidal ring of about
+  −40 dB of the program (80.7 mV at Nyquist against backward Euler's
+  0.34 mV) that the linear reference hid. The backward-Euler comparison above
+  then keeps that build trapezoidal, as the compile-time rule does, since the
+  ring is about as loud as backward Euler's own in-band damage.
 - Its memory is the slowest ring the circuit can carry: a ring cannot outlive
   the reference of the program that excited it. A memory at the ε_ring rate
   (−60 dB in 10 ms) is always outlived by a lasting ring, by definition.
