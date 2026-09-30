@@ -806,26 +806,35 @@ pub(crate) fn substitute_dynamic_element_defaults(deck: &str) -> String {
     out
 }
 
-/// Inject a Thevenin-equivalent PWL source into a netlist string
-///
-/// Creates a modified netlist with a voltage source + series resistance matching
-/// melange's 1-ohm Thevenin input model. If an existing voltage source is found
-/// with n+ matching `input_node`, it is replaced; otherwise the pair is inserted.
-///
-/// The intermediate node `in_mlg_src` avoids collisions with existing node names.
-pub(crate) fn inject_thevenin_pwl(
-    original_content: &str,
-    input_node: &str,
-    pwl_data: &[(f64, f64)],
-    series_resistance: f64,
-) -> Result<ModifiedNetlist, SpiceError> {
-    use std::io::Write;
-
+/// `PWL(t v ...)` for a voltage source.
+pub(crate) fn pwl_source(pwl_data: &[(f64, f64)]) -> String {
     let pwl_string: String = pwl_data
         .iter()
         .map(|(t, v)| format!("{} {}", format_scientific(*t), format_scientific(*v)))
         .collect::<Vec<_>>()
         .join(" ");
+    format!("PWL({pwl_string})")
+}
+
+/// Inject a Thevenin-equivalent source into a netlist string: a voltage
+/// source with specification `source` (`PWL(...)`, `SIN(...)`) behind a series
+/// resistance matching melange's 1-ohm Thevenin input model. If an existing
+/// voltage source is found with n+ matching `input_node`, it is replaced;
+/// otherwise the pair is inserted.
+///
+/// The intermediate node `in_mlg_src` avoids collisions with existing node names.
+/// A `source` of the form `V=<expr>` is a behavioural source (a B element),
+/// for a stimulus with a closed form in `time` that no V source spells (a
+/// chirp); it replaces an existing input source under the name `B_mlg_in`.
+pub(crate) fn inject_thevenin_source(
+    original_content: &str,
+    input_node: &str,
+    source: &str,
+    series_resistance: f64,
+) -> Result<ModifiedNetlist, SpiceError> {
+    use std::io::Write;
+
+    let behavioural = source.trim_start().starts_with("V=");
 
     let input_upper = input_node.to_uppercase();
     let mut modified_lines = Vec::new();
@@ -857,11 +866,12 @@ pub(crate) fn inject_thevenin_pwl(
             if parts.len() >= 3 && parts[1].to_uppercase() == input_upper {
                 // Found voltage source at input node — replace with Thevenin pair
                 // Preserve original source name to avoid breaking I(Vname) references
-                let original_name = parts[0];
+                // A behavioural drive (`V=...`) must be a B element.
+                let original_name = if behavioural { "B_mlg_in" } else { parts[0] };
                 let n_minus = parts[2];
                 modified_lines.push(format!(
-                    "{} in_mlg_src {} PWL({})",
-                    original_name, n_minus, pwl_string
+                    "{} in_mlg_src {} {}",
+                    original_name, n_minus, source
                 ));
                 modified_lines.push(format!(
                     "R_mlg_src in_mlg_src {} {}",
@@ -878,7 +888,8 @@ pub(crate) fn inject_thevenin_pwl(
     // If no source was found at the input node, insert Thevenin pair before .END
     // Use V_mlg_in (not VIN) to avoid name collisions with existing sources
     if !source_replaced {
-        let thevenin_v = format!("V_mlg_in in_mlg_src 0 PWL({})", pwl_string);
+        let name = if behavioural { "B_mlg_in" } else { "V_mlg_in" };
+        let thevenin_v = format!("{name} in_mlg_src 0 {}", source);
         let thevenin_r = format!("R_mlg_src in_mlg_src {} {}", input_node, series_resistance);
 
         let mut insert_idx = modified_lines.len();
@@ -920,6 +931,29 @@ pub fn run_transient_with_thevenin_pwl(
     tstop: f64,
     input_node: &str,
     pwl_data: &[(f64, f64)],
+    series_resistance: f64,
+    nodes_to_capture: &[String],
+) -> Result<SpiceData, SpiceError> {
+    run_transient_with_thevenin_drive(
+        netlist_content,
+        tstep,
+        tstop,
+        input_node,
+        &pwl_source(pwl_data),
+        series_resistance,
+        nodes_to_capture,
+    )
+}
+
+/// [`run_transient_with_thevenin_pwl`] with any voltage-source specification
+/// as the drive: an analytic `SIN(...)` for a sine stimulus, or a `PWL(...)`
+/// of the continuous stimulus (see `reconstruction`).
+pub fn run_transient_with_thevenin_drive(
+    netlist_content: &str,
+    tstep: f64,
+    tstop: f64,
+    input_node: &str,
+    source: &str,
     series_resistance: f64,
     nodes_to_capture: &[String],
 ) -> Result<SpiceData, SpiceError> {
@@ -1044,7 +1078,7 @@ pub fn run_transient_with_thevenin_pwl(
         }
     }
 
-    let modified = inject_thevenin_pwl(&translated, input_node, pwl_data, series_resistance)?;
+    let modified = inject_thevenin_source(&translated, input_node, source, series_resistance)?;
     let spice_data = run_transient(modified.netlist_path.as_path(), tstep, tstop, &capture)?;
     crate::opamp_translate::check_rail_probes(&rail_probes, &spice_data.voltages, tstep)?;
     Ok(spice_data)

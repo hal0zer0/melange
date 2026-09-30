@@ -2674,6 +2674,11 @@ fn validate_circuit_source(
         backward_euler: reductions.backward_euler,
         force_trap: reductions.force_trap,
         oversampling,
+        // The test signal's closed form: the reference is driven by it.
+        analytic_stimulus: Some(melange_validate::AnalyticStimulus::Sine {
+            amplitude,
+            frequency: VALIDATE_STIMULUS_HZ,
+        }),
         ..Default::default()
     };
 

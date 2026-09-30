@@ -54,6 +54,7 @@ mod jfet_translate;
 pub mod linearize_twin;
 pub(crate) mod opamp_translate;
 pub(crate) mod pentode_translate;
+mod reconstruction;
 mod sat_inductor_translate;
 pub mod spice_runner;
 mod thermal_translate;
@@ -67,7 +68,8 @@ pub use alignment::{
 pub use comparison::{batch_compare, compare_signals, ComparisonConfig, ComparisonReport, Signal};
 pub use deck_guard::{format_refusal, scan_deck, unit_variation_note, DeckHazard};
 pub use spice_runner::{
-    run_transient, run_transient_with_pwl, run_transient_with_thevenin_pwl, SpiceData, SpiceError,
+    run_transient, run_transient_with_pwl, run_transient_with_thevenin_drive,
+    run_transient_with_thevenin_pwl, SpiceData, SpiceError,
 };
 pub use visualizer::{generate_csv, generate_html_report, generate_json_report};
 
@@ -211,7 +213,79 @@ pub struct ValidationOptions {
     /// phase therefore stays inside the number, where it belongs; no tolerance
     /// widens for it.
     pub oversampling: usize,
+    /// The analytic signal `input_signal` is samples of, when there is one.
+    /// The reference is then driven by it (a `SIN` source), which is the
+    /// continuous stimulus melange's samples are exact samples of. `None`:
+    /// the reference is driven by the samples' band-limited reconstruction
+    /// (`reconstruction::band_limited`, 16 points per sample), never by a PWL
+    /// at the sample rate, whose images fold back on decks with gain rising
+    /// toward fs.
+    pub analytic_stimulus: Option<AnalyticStimulus>,
 }
+
+/// A stimulus with a closed form, which the reference can be driven by.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AnalyticStimulus {
+    /// `amplitude * sin(2*pi*frequency*t)`, starting at t = 0.
+    Sine { amplitude: f64, frequency: f64 },
+    /// A linear sweep from `f_start` to `f_end` over `duration`:
+    /// `amplitude * sin(2*pi*(f_start*t + (f_end - f_start)*t^2/(2*duration)))`.
+    LinearChirp {
+        amplitude: f64,
+        f_start: f64,
+        f_end: f64,
+        duration: f64,
+    },
+}
+
+impl AnalyticStimulus {
+    /// Its value at `t`.
+    pub fn at(&self, t: f64) -> f64 {
+        match *self {
+            AnalyticStimulus::Sine {
+                amplitude,
+                frequency,
+            } => amplitude * (2.0 * std::f64::consts::PI * frequency * t).sin(),
+            AnalyticStimulus::LinearChirp {
+                amplitude,
+                f_start,
+                f_end,
+                duration,
+            } => {
+                amplitude
+                    * (2.0
+                        * std::f64::consts::PI
+                        * (f_start * t + (f_end - f_start) * t * t / (2.0 * duration)))
+                        .sin()
+            }
+        }
+    }
+
+    /// The ngspice voltage-source specification.
+    fn spice_source(&self) -> String {
+        match *self {
+            AnalyticStimulus::Sine {
+                amplitude,
+                frequency,
+            } => format!("SIN(0 {amplitude:e} {frequency:e})"),
+            // A behavioural source in ngspice's `time`: the chirp's phase in
+            // closed form.
+            AnalyticStimulus::LinearChirp {
+                amplitude,
+                f_start,
+                f_end,
+                duration,
+            } => format!(
+                "V={amplitude:e}*sin(6.283185307179586*({f_start:e}*time+{:e}*time*time))",
+                (f_end - f_start) / (2.0 * duration)
+            ),
+        }
+    }
+}
+
+/// Points per sample of the band-limited reconstruction that drives the
+/// reference when the stimulus has no declared closed form.
+const RECONSTRUCTION_FACTOR: usize = 16;
 
 impl Default for ValidationOptions {
     fn default() -> Self {
@@ -230,6 +304,7 @@ impl Default for ValidationOptions {
             backward_euler: false,
             force_trap: false,
             oversampling: 1,
+            analytic_stimulus: None,
         }
     }
 }
@@ -440,12 +515,45 @@ pub fn validate_circuit_with_options(
     let duration = input_signal.len() as f64 / sample_rate;
     let tstep = options.tstep.unwrap_or(1.0 / sample_rate);
 
-    // Build PWL data from input signal
-    let pwl_data: Vec<(f64, f64)> = input_signal
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| (i as f64 / sample_rate, v))
-        .collect();
+    // The reference's drive: the continuous stimulus melange's input samples
+    // are samples of. An analytic stimulus is checked against the samples
+    // first, so the two cannot describe different signals.
+    let (drive, reference_note) = match options.analytic_stimulus {
+        Some(stim) => {
+            let scale = input_signal
+                .iter()
+                .fold(0.0f64, |m, v| m.max(v.abs()))
+                .max(1e-300);
+            if let Some((n, &x)) = input_signal
+                .iter()
+                .enumerate()
+                .find(|&(n, &x)| (x - stim.at(n as f64 / sample_rate)).abs() > 1e-9 * scale)
+            {
+                return Err(ValidationError::InvalidInput(format!(
+                    "the input signal is not samples of the declared stimulus {stim:?}: sample \
+                     {n} is {x}, the stimulus there is {}",
+                    stim.at(n as f64 / sample_rate)
+                )));
+            }
+            let source = stim.spice_source();
+            let note = format!("driven by the analytic stimulus, {source}");
+            (source, note)
+        }
+        None => {
+            let fine = reconstruction::band_limited(input_signal, RECONSTRUCTION_FACTOR);
+            let dt = 1.0 / (sample_rate * RECONSTRUCTION_FACTOR as f64);
+            let pwl: Vec<(f64, f64)> = fine
+                .iter()
+                .enumerate()
+                .map(|(m, &v)| (m as f64 * dt, v))
+                .collect();
+            let note = format!(
+                "driven by the input samples' band-limited reconstruction (windowed sinc, \
+                 {RECONSTRUCTION_FACTOR} points per sample)"
+            );
+            (spice_runner::pwl_source(&pwl), note)
+        }
+    };
 
     // Run SPICE simulation with Thevenin PWL (matched 1-ohm source impedance)
     let mut nodes_to_capture = vec![output_node.to_string()];
@@ -473,12 +581,12 @@ pub fn validate_circuit_with_options(
         &linearized,
     )?;
 
-    let spice_data = spice_runner::run_transient_with_thevenin_pwl(
+    let spice_data = spice_runner::run_transient_with_thevenin_drive(
         &reference_deck,
         tstep,
         duration,
         input_node,
-        &pwl_data,
+        &drive,
         1.0, // 1 ohm series resistance matching melange's Thevenin model
         &nodes_to_capture,
     )?;
@@ -556,6 +664,7 @@ pub fn validate_circuit_with_options(
     // seed that was therefore not exercised. `None` — and so no added output —
     // for every deck without them.
     report.unit_variation_note = deck_guard::unit_variation_note(&netlist_str);
+    report.reference_note = Some(reference_note);
     report.thermal_note = thermal_note(&stripped_netlist);
     // The reference is the deck plus melange's parasitic caps when it had no
     // capacitance: say so, since a reader running ngspice on the deck alone

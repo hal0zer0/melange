@@ -43,10 +43,27 @@ recorded correlation/RMS values.
 2. **Replaces `.TRAN`** with `tstep = 1.0 / sample_rate` (e.g., 2.083e-5
    for 48 kHz) and the tstop derived from the input signal.
 
-3. **Replaces the input source with a Thevenin PWL pair** (`inject_thevenin_pwl`):
+3. **Replaces the input source with a Thevenin pair** (`inject_thevenin_source`):
    the deck's voltage source whose n+ terminal is the input node (`in`) is
-   replaced by `V... in_mlg_src ... PWL(...)` + `R_mlg_src in_mlg_src in 1`,
-   matching melange's 1-ohm Thevenin input model.
+   replaced by the drive behind `R_mlg_src in_mlg_src in 1`, matching
+   melange's 1-ohm Thevenin input model. The drive is the continuous stimulus
+   melange's input samples are samples of:
+   - an analytic stimulus the caller declares
+     (`ValidationOptions::analytic_stimulus`) drives the reference directly:
+     `SIN(...)` for a sine (`melange validate`'s 1 kHz test signal), a
+     behavioural `B` source in `time` for a linear chirp. The samples are
+     checked against it first;
+   - otherwise the samples' band-limited reconstruction, a windowed sinc
+     evaluated 16 points per sample (`reconstruction.rs`, within 1e-7 of a
+     sine between samples up to 20 kHz at 48 kHz), as a PWL.
+   Never a PWL at the sample rate: linear interpolation carries sinc² images
+   around every multiple of fs, which a deck whose gain rises toward fs
+   amplifies and the reference's 48 kHz output sampling folds back. On
+   noyce-transformer-triode (1 MOhm into a 100 mH primary) that biased the
+   reference 1 % low at the plate while ngspice `.ac` and melange agreed to
+   0.001 dB; with the analytic drive the deck passes at 0.12 %. The CI gate's
+   `input_pwl.txt` files are sparse PWL definitions, which melange samples:
+   there the PWL is the continuous stimulus, and it is used as written.
 
 4. **Strips melange-only directives** so ngspice can parse the deck:
    `.pot`, `.switch`, `.input_impedance`, `.wiper`, `.gang`, `.runtime`,

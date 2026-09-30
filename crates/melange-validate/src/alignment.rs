@@ -129,7 +129,7 @@ impl DelayFit {
 }
 
 /// Modified Bessel function of the first kind, order 0 — for the Kaiser window.
-fn bessel_i0(x: f64) -> f64 {
+pub(crate) fn bessel_i0(x: f64) -> f64 {
     let half = x / 2.0;
     let mut term = 1.0f64;
     let mut sum = 1.0f64;
@@ -144,7 +144,7 @@ fn bessel_i0(x: f64) -> f64 {
     sum
 }
 
-fn sinc(x: f64) -> f64 {
+pub(crate) fn sinc(x: f64) -> f64 {
     if x.abs() < 1e-12 {
         1.0
     } else {

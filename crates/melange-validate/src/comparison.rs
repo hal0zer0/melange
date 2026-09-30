@@ -370,6 +370,11 @@ pub struct ComparisonReport {
     /// `linearize_twin`), not the full devices. Filled by
     /// `validate_circuit_with_options`; reported, not graded.
     pub linearize_note: Option<String>,
+
+    /// How the reference was driven: by the declared analytic stimulus, or by
+    /// the input samples' band-limited reconstruction. Filled by
+    /// `validate_circuit_with_options`; reported, not graded.
+    pub reference_note: Option<String>,
 }
 
 impl ComparisonReport {
@@ -418,6 +423,9 @@ impl ComparisonReport {
         }
         if let Some(note) = &self.linearize_note {
             summary.push_str(&format!("Circuit: {}\n", note));
+        }
+        if let Some(note) = &self.reference_note {
+            summary.push_str(&format!("Reference: {}\n", note));
         }
         // The unit-variation qualifier rides ON the status line, not above it:
         // this line is the run's verdict, and a footnote elsewhere would not
@@ -629,6 +637,7 @@ pub fn compare_signals(
         alignment_note: None,
         parasitic_note: None,
         linearize_note: None,
+        reference_note: None,
         absolute_errors: None,
         relative_errors: None,
         unit_variation_note: None,
@@ -912,6 +921,7 @@ pub fn compare_signals(
         // Set by the caller, which is the only layer that knows the build.
         parasitic_note: None,
         linearize_note: None,
+        reference_note: None,
     }
 }
 

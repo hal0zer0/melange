@@ -573,6 +573,16 @@ generated state is smaller.
   variable-mu law, at an operating point solved without it. A nonzero value is
   now refused. Variable-mu stays modelled for pentodes and beam tetrodes; no
   deck set these keys on a triode.
+- **`melange validate`'s reference is driven by the continuous stimulus, not
+  a PWL of melange's samples**: linear interpolation at the sample rate
+  carries images around every multiple of it, which a deck whose gain rises
+  toward fs amplified and the reference's output sampling folded back onto
+  the test tone. A transformer-coupled triode read 1–2 % against its
+  reference while ngspice's own AC analysis agreed with melange to 0.001 dB.
+  The 1 kHz test signal now drives the reference as `SIN(...)` (a declared
+  chirp as a behavioural source in `time`); other sample sequences as their
+  band-limited reconstruction (16 points per sample). The report says which
+  on a `Reference:` line. The deck now passes at 0.12 %.
 - **`melange validate`'s triode reference dropped the card's inter-electrode
   capacitances and grid resistance**: `CCG`/`CGP`/`CCP` and `RGI` never
   reached ngspice (tube cards are consumed by the translation, so the
