@@ -518,7 +518,13 @@ impl NonlinearDevice<2> for KorenTriode {
         // dIp/dVpk = dIp_koren/dVpk * (1 + lambda*Vpk) + Ip_koren * lambda
         [
             dip_koren_dvgk * lambda_factor,
-            dip_koren_dvpk * lambda_factor + ip_koren * self.lambda,
+            // Below the soft floor the current is held at its floor value,
+            // so it does not change with Vpk.
+            if v[1] < 1e-3 {
+                0.0
+            } else {
+                dip_koren_dvpk * lambda_factor + ip_koren * self.lambda
+            },
         ]
     }
 }
@@ -1182,10 +1188,8 @@ impl KorenPentode {
     /// - `[2][1] = [2][2] = 0` (Ig1 depends only on Vgk)
     ///
     /// Safety guards mirror [`plate_current_classical`] and
-    /// [`screen_current_classical`]: `Vg2k ≥ 1e-3`, `Vpk ≥ 0` (the
-    /// `arctan` derivative at clamped `Vpk=0` gives `1/Kvb`, the
-    /// tangent slope at the origin — consistent with the clamped
-    /// plate current at the same input).
+    /// [`screen_current_classical`]: `Vg2k ≥ 1e-3`, `Vpk ≥ 0`. The guard
+    /// columns are zeroed by [`jacobian_3x3`](Self::jacobian_3x3).
     fn jacobian_3x3_classical(&self, vgk: f64, vpk: f64, vg2k: f64) -> [[f64; 3]; 3] {
         let vg2k_safe = vg2k.max(1e-3);
         let vpk_safe = vpk.max(0.0);
@@ -1266,10 +1270,31 @@ impl KorenPentode {
     /// `Ip0_v = (1 − svar)·Ip0_a + svar·Ip0_b` and its gradient is the
     /// weighted sum of per-section `(dIp0/dE1)·(dE1/d·)` chains. F(Vp),
     /// H(Vp), dF/dVp, dH/dVp are unchanged (orthogonal to variable-mu).
+    ///
+    /// Below the guards (`Vpk < 0`, `Vg2k < 1e-3`) the currents are those at
+    /// the guard, constant in that voltage, so its column is zero: the
+    /// Jacobian is the derivative of the function evaluated, or Newton
+    /// converges only linearly there.
     pub fn jacobian_3x3(&self, vgk: f64, vpk: f64, vg2k: f64) -> [[f64; 3]; 3] {
-        if matches!(self.screen_form, ScreenForm::Classical) {
-            return self.jacobian_3x3_classical(vgk, vpk, vg2k);
+        let mut jac = if matches!(self.screen_form, ScreenForm::Classical) {
+            self.jacobian_3x3_classical(vgk, vpk, vg2k)
+        } else {
+            self.jacobian_3x3_derk(vgk, vpk, vg2k)
+        };
+        for row in &mut jac {
+            if vpk < 0.0 {
+                row[1] = 0.0;
+            }
+            if vg2k < 1e-3 {
+                row[2] = 0.0;
+            }
         }
+        jac
+    }
+
+    /// [`jacobian_3x3`](Self::jacobian_3x3) for the Derk forms, before the
+    /// guard columns are applied.
+    fn jacobian_3x3_derk(&self, vgk: f64, vpk: f64, vg2k: f64) -> [[f64; 3]; 3] {
         let vg2k_safe = vg2k.max(1e-3);
         let vpk_safe = vpk.max(0.0);
 
@@ -1312,11 +1337,6 @@ impl KorenPentode {
         let dig2_dvgk = dip0_dvgk * h;
         let dig2_dvpk = ip0_v * dh_dvpk;
         let dig2_dvg2k = dip0_dvg2k * h;
-
-        // If NR probed Vpk < 0, the F/H derivatives w.r.t. Vpk are computed
-        // with vpk_safe (clamped to 0), so dIp/dVpk and dIg2/dVpk reduce to
-        // the values at Vpk = 0. That mirrors what plate_current/screen_current
-        // return on the same input, keeping FD comparisons consistent.
 
         [
             [dip_dvgk, dip_dvpk, dip_dvg2k],
@@ -1840,6 +1860,82 @@ mod tests {
                     jac[row][col]
                 );
             }
+        }
+    }
+
+    /// Below its guards (`Vpk < 0`, `Vg2k < 1e-3`) a pentode's currents are
+    /// held at the guard's value, so the analytic Jacobian must match their
+    /// finite difference there: zero in the guarded column, not the slope at
+    /// the guard. A nonzero column is a wrong Jacobian, and Newton then only
+    /// converges linearly (measured: a push-pull output stage whose plate is
+    /// driven below its cathode took over 100 iterations; 4 with the column
+    /// zeroed). Every screen form, and the variable-mu blend.
+    #[test]
+    fn test_pentode_jacobian_matches_finite_difference_below_the_guards() {
+        let mut var_mu = KorenPentode::el84();
+        var_mu.mu_b = 3.4;
+        var_mu.svar = 0.083;
+        var_mu.ex_b = 1.223;
+        let tubes = [
+            ("el84", KorenPentode::el84()),
+            ("6l6gc", KorenPentode::tetrode_6l6gc()),
+            ("kt88", KorenPentode::kt88()),
+            ("el84 var-mu", var_mu),
+        ];
+        // (Vgk, Vpk, Vg2k) and the columns checked: plate below the cathode
+        // (every column), then screen below its guard (its column; at
+        // Vg2k = 1e-3 the classical form is too steep in Vgk for this step).
+        // Both with cathode current flowing, the stencil clear of the
+        // grid-current onset at Vgk = 0.
+        let points: [((f64, f64, f64), &[usize]); 2] = [
+            ((-2.0, -3.84, 250.0), &[0, 1, 2]),
+            ((-2e-4, 200.0, -0.5), &[2]),
+        ];
+        let h = 1e-4;
+        for (name, t) in &tubes {
+            let f = |v: [f64; 3]| {
+                [
+                    t.plate_current(v[0], v[1], v[2]),
+                    t.screen_current(v[0], v[1], v[2]),
+                    t.grid_current(v[0]),
+                ]
+            };
+            for &((vgk, vpk, vg2k), cols) in &points {
+                let v = [vgk, vpk, vg2k];
+                assert!(
+                    f(v)[0] > 0.0 || f(v)[1] > 0.0,
+                    "{name}: no current at {v:?}"
+                );
+                let jac = t.jacobian_3x3(vgk, vpk, vg2k);
+                for &col in cols {
+                    let (mut hi, mut lo) = (v, v);
+                    hi[col] += h;
+                    lo[col] -= h;
+                    for row in 0..3 {
+                        let fd = (f(hi)[row] - f(lo)[row]) / (2.0 * h);
+                        let tol = 1e-5 * fd.abs().max(jac[row][col].abs()) + 1e-15;
+                        assert!(
+                            (jac[row][col] - fd).abs() <= tol,
+                            "{name} at {v:?}: jac[{row}][{col}] = {:e}, finite difference {fd:e}",
+                            jac[row][col]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Below its soft floor (`Vpk < 1e-3`) a triode's plate current is held,
+    /// so dIp/dVpk is zero there.
+    #[test]
+    fn test_triode_jacobian_matches_finite_difference_below_the_floor() {
+        let t = KorenTriode::ecc83();
+        let h = 1e-5;
+        for &(vgk, vpk) in &[(0.5, -2.0), (0.0, 5e-4)] {
+            let jac = t.jacobian(&[vgk, vpk]);
+            let fd = (t.current(&[vgk, vpk + h]) - t.current(&[vgk, vpk - h])) / (2.0 * h);
+            assert_eq!(fd, 0.0, "the current is not held at ({vgk}, {vpk})");
+            assert_eq!(jac[1], 0.0, "dIp/dVpk at ({vgk}, {vpk})");
         }
     }
 

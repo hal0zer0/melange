@@ -78,6 +78,17 @@ fn tube_ig_deriv(vgk: f64, ig_max: f64, vgk_onset: f64) -> f64 {
     if vgk <= 0.0 { 0.0 }
     else { ig_max * 1.5 * (vgk / vgk_onset).sqrt() / vgk_onset }
 }
+
+/// A pentode's guarded voltages hold its currents below the guard (`Vpk < 0`,
+/// `Vg2k < 1e-3`: the currents are those at the guard), so their Jacobian
+/// columns are zero there. The derivative at the guard instead is a wrong
+/// Jacobian, and Newton converges only linearly.
+#[inline(always)]
+fn tube_pentode_guard_columns(mut jac: [f64; 9], vpk: f64, vg2k: f64) -> [f64; 9] {
+    if vpk < 0.0 { jac[1] = 0.0; jac[4] = 0.0; jac[7] = 0.0; }
+    if vg2k < 1e-3 { jac[2] = 0.0; jac[5] = 0.0; jac[8] = 0.0; }
+    jac
+}
 {% endif %}
 
 /// Triode Jacobian: [dIp/dVgk, dIp/dVpk, dIg/dVgk, dIg/dVpk]
@@ -91,6 +102,7 @@ fn tube_jacobian(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f
     let dig_dvgk = tube_ig_dz_deriv(vgk, gg, xi, cg);
 
     // Plate current Jacobian
+    let vpk_held = vpk < 1e-3;
     let vpk = vpk.max(1e-3); // Soft floor: matches tube_ip
 
     let s = (kvb + vpk * vpk).sqrt();
@@ -116,7 +128,7 @@ fn tube_jacobian(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f
     let dip_koren_dvgk = dip_de1 * de1_dvgk;
     let dip_koren_dvpk = dip_de1 * de1_dvpk;
 
-    [dip_koren_dvgk * lambda_factor, dip_koren_dvpk * lambda_factor + ip_koren * lambda, dig_dvgk, 0.0]
+    [dip_koren_dvgk * lambda_factor, if vpk_held { 0.0 } else { dip_koren_dvpk * lambda_factor + ip_koren * lambda }, dig_dvgk, 0.0]
 }
 
 /// Solve for internal Vgk when RGI > 0: Vgk_int = Vgk_ext - Ig(Vgk_int) * RGI.
@@ -180,6 +192,7 @@ fn tube_evaluate(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f
     let ig = tube_ig_dz(vgk, gg, xi, cg);
     let dig_dvgk = tube_ig_dz_deriv(vgk, gg, xi, cg);
 
+    let vpk_held = vpk < 1e-3;
     let vpk = vpk.max(1e-3);
     let s = (kvb + vpk * vpk).sqrt();
     let inner = kp * (1.0 / mu + vgk / s);
@@ -211,7 +224,7 @@ fn tube_evaluate(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f
     let dip_koren_dvpk = dip_de1 * de1_dvpk;
 
     (ip, ig, [dip_koren_dvgk * lambda_factor,
-              dip_koren_dvpk * lambda_factor + ip_koren * lambda,
+              if vpk_held { 0.0 } else { dip_koren_dvpk * lambda_factor + ip_koren * lambda },
               dig_dvgk, 0.0])
 }
 
@@ -293,6 +306,7 @@ fn tube_jacobian_pentode(vgk: f64, vpk: f64, vg2k: f64,
                          alpha_s: f64, a_factor: f64, beta_factor: f64,
                          ig_max: f64, vgk_onset: f64) -> [f64; 9] {
     let dig1_dvgk = tube_ig_deriv(vgk, ig_max, vgk_onset);
+    let (vpk_in, vg2k_in) = (vpk, vg2k);
     let vpk = vpk.max(0.0);
     let vg2k = vg2k.max(1e-3);
     let s = (kvb + vg2k * vg2k).sqrt();
@@ -305,9 +319,9 @@ fn tube_jacobian_pentode(vgk: f64, vpk: f64, vg2k: f64,
                               };
     let e1 = (vg2k / kp) * softplus;
     if e1 <= 1e-30 {
-        return [0.0, 0.0, 0.0,
+        return tube_pentode_guard_columns([0.0, 0.0, 0.0,
                 0.0, 0.0, 0.0,
-                dig1_dvgk, 0.0, 0.0];
+                dig1_dvgk, 0.0, 0.0], vpk_in, vg2k_in);
     }
     let e1_pow_ex = e1.powf(ex);
     let dip0_de1 = ex * e1_pow_ex / e1;        // = Ex * E1^(Ex-1)
@@ -335,9 +349,9 @@ fn tube_jacobian_pentode(vgk: f64, vpk: f64, vg2k: f64,
     let dig2_dvpk = e1_pow_ex * dh_dvpk;
     let dig2_dvg2k = common_vg2k * h_factor;
 
-    [dip_dvgk, dip_dvpk, dip_dvg2k,
+    tube_pentode_guard_columns([dip_dvgk, dip_dvpk, dip_dvg2k,
      dig2_dvgk, dig2_dvpk, dig2_dvg2k,
-     dig1_dvgk, 0.0, 0.0]
+     dig1_dvgk, 0.0, 0.0], vpk_in, vg2k_in)
 }
 
 /// Combined pentode evaluation: returns (Ip, Ig2, Ig1, [9-element row-major Jacobian]).
@@ -352,6 +366,7 @@ fn tube_evaluate_pentode(vgk: f64, vpk: f64, vg2k: f64,
     let ig1 = tube_ig(vgk, ig_max, vgk_onset);
     let dig1_dvgk = tube_ig_deriv(vgk, ig_max, vgk_onset);
 
+    let (vpk_in, vg2k_in) = (vpk, vg2k);
     let vpk = vpk.max(0.0);
     let vg2k = vg2k.max(1e-3);
     let s = (kvb + vg2k * vg2k).sqrt();
@@ -365,9 +380,9 @@ fn tube_evaluate_pentode(vgk: f64, vpk: f64, vg2k: f64,
     let e1 = (vg2k / kp) * softplus;
     if e1 <= 1e-30 {
         return (0.0, 0.0, ig1,
-                [0.0, 0.0, 0.0,
+                tube_pentode_guard_columns([0.0, 0.0, 0.0,
                  0.0, 0.0, 0.0,
-                 dig1_dvgk, 0.0, 0.0]);
+                 dig1_dvgk, 0.0, 0.0], vpk_in, vg2k_in));
     }
     let e1_pow_ex = e1.powf(ex);
 
@@ -392,9 +407,9 @@ fn tube_evaluate_pentode(vgk: f64, vpk: f64, vg2k: f64,
     let common_vg2k = dip0_de1 * de1_dvg2k;
 
     (ip, ig2, ig1,
-     [common_vgk * f_factor, e1_pow_ex * df_dvpk, common_vg2k * f_factor,
+     tube_pentode_guard_columns([common_vgk * f_factor, e1_pow_ex * df_dvpk, common_vg2k * f_factor,
       common_vgk * h_factor, e1_pow_ex * dh_dvpk, common_vg2k * h_factor,
-      dig1_dvgk, 0.0, 0.0])
+      dig1_dvgk, 0.0, 0.0], vpk_in, vg2k_in))
 }
 {% endif %}
 {% if any_beam_tetrode %}
@@ -477,6 +492,7 @@ fn tube_jacobian_beam_tetrode(vgk: f64, vpk: f64, vg2k: f64,
                               alpha_s: f64, a_factor: f64, beta_factor: f64,
                               ig_max: f64, vgk_onset: f64) -> [f64; 9] {
     let dig1_dvgk = tube_ig_deriv(vgk, ig_max, vgk_onset);
+    let (vpk_in, vg2k_in) = (vpk, vg2k);
     let vpk = vpk.max(0.0);
     let vg2k = vg2k.max(1e-3);
     let s = (kvb + vg2k * vg2k).sqrt();
@@ -489,9 +505,9 @@ fn tube_jacobian_beam_tetrode(vgk: f64, vpk: f64, vg2k: f64,
                               };
     let e1 = (vg2k / kp) * softplus;
     if e1 <= 1e-30 {
-        return [0.0, 0.0, 0.0,
+        return tube_pentode_guard_columns([0.0, 0.0, 0.0,
                 0.0, 0.0, 0.0,
-                dig1_dvgk, 0.0, 0.0];
+                dig1_dvgk, 0.0, 0.0], vpk_in, vg2k_in);
     }
     let e1_pow_ex = e1.powf(ex);
     let dip0_de1 = ex * e1_pow_ex / e1;
@@ -523,9 +539,9 @@ fn tube_jacobian_beam_tetrode(vgk: f64, vpk: f64, vg2k: f64,
     let dig2_dvpk = e1_pow_ex * dh_dvpk;
     let dig2_dvg2k = common_vg2k * h_factor;
 
-    [dip_dvgk, dip_dvpk, dip_dvg2k,
+    tube_pentode_guard_columns([dip_dvgk, dip_dvpk, dip_dvg2k,
      dig2_dvgk, dig2_dvpk, dig2_dvg2k,
-     dig1_dvgk, 0.0, 0.0]
+     dig1_dvgk, 0.0, 0.0], vpk_in, vg2k_in)
 }
 
 /// Combined beam tetrode evaluation: returns (Ip, Ig2, Ig1, [9-element row-major Jacobian]).
@@ -540,6 +556,7 @@ fn tube_evaluate_beam_tetrode(vgk: f64, vpk: f64, vg2k: f64,
     let ig1 = tube_ig(vgk, ig_max, vgk_onset);
     let dig1_dvgk = tube_ig_deriv(vgk, ig_max, vgk_onset);
 
+    let (vpk_in, vg2k_in) = (vpk, vg2k);
     let vpk = vpk.max(0.0);
     let vg2k = vg2k.max(1e-3);
     let s = (kvb + vg2k * vg2k).sqrt();
@@ -553,9 +570,9 @@ fn tube_evaluate_beam_tetrode(vgk: f64, vpk: f64, vg2k: f64,
     let e1 = (vg2k / kp) * softplus;
     if e1 <= 1e-30 {
         return (0.0, 0.0, ig1,
-                [0.0, 0.0, 0.0,
+                tube_pentode_guard_columns([0.0, 0.0, 0.0,
                  0.0, 0.0, 0.0,
-                 dig1_dvgk, 0.0, 0.0]);
+                 dig1_dvgk, 0.0, 0.0], vpk_in, vg2k_in));
     }
     let e1_pow_ex = e1.powf(ex);
 
@@ -582,9 +599,9 @@ fn tube_evaluate_beam_tetrode(vgk: f64, vpk: f64, vg2k: f64,
     let common_vg2k = dip0_de1 * de1_dvg2k;
 
     (ip, ig2, ig1,
-     [common_vgk * f_factor, e1_pow_ex * df_dvpk, common_vg2k * f_factor,
+     tube_pentode_guard_columns([common_vgk * f_factor, e1_pow_ex * df_dvpk, common_vg2k * f_factor,
       common_vgk * h_factor, e1_pow_ex * dh_dvpk, common_vg2k * h_factor,
-      dig1_dvgk, 0.0, 0.0])
+      dig1_dvgk, 0.0, 0.0], vpk_in, vg2k_in))
 }
 {% endif %}
 {% if any_variable_mu_pentode %}
@@ -667,6 +684,7 @@ fn tube_jacobian_pentode_v(vgk: f64, vpk: f64, vg2k: f64,
                            ig_max: f64, vgk_onset: f64,
                            mu_b: f64, svar: f64, ex_b: f64) -> [f64; 9] {
     let dig1_dvgk = tube_ig_deriv(vgk, ig_max, vgk_onset);
+    let (vpk_in, vg2k_in) = (vpk, vg2k);
     let vpk = vpk.max(0.0);
     let vg2k = vg2k.max(1e-3);
     let s = (kvb + vg2k * vg2k).sqrt();
@@ -704,9 +722,9 @@ fn tube_jacobian_pentode_v(vgk: f64, vpk: f64, vg2k: f64,
     } else { (0.0, 0.0, 0.0) };
     let ip0_v = (1.0 - svar) * ip0_a + svar * ip0_b;
     if ip0_v <= 1e-30 {
-        return [0.0, 0.0, 0.0,
+        return tube_pentode_guard_columns([0.0, 0.0, 0.0,
                 0.0, 0.0, 0.0,
-                dig1_dvgk, 0.0, 0.0];
+                dig1_dvgk, 0.0, 0.0], vpk_in, vg2k_in);
     }
     let dip0v_dvgk = (1.0 - svar) * dip0a_dvgk + svar * dip0b_dvgk;
     let dip0v_dvg2k = (1.0 - svar) * dip0a_dvg2k + svar * dip0b_dvg2k;
@@ -719,9 +737,9 @@ fn tube_jacobian_pentode_v(vgk: f64, vpk: f64, vg2k: f64,
     let h_factor = (1.0 + alpha_s / denom) / kg2;
     let dh_dvpk = -beta_factor * alpha_s / (kg2 * denom2);
 
-    [dip0v_dvgk * f_factor, ip0_v * df_dvpk, dip0v_dvg2k * f_factor,
+    tube_pentode_guard_columns([dip0v_dvgk * f_factor, ip0_v * df_dvpk, dip0v_dvg2k * f_factor,
      dip0v_dvgk * h_factor, ip0_v * dh_dvpk, dip0v_dvg2k * h_factor,
-     dig1_dvgk, 0.0, 0.0]
+     dig1_dvgk, 0.0, 0.0], vpk_in, vg2k_in)
 }
 
 #[inline(always)]
@@ -819,6 +837,7 @@ fn tube_jacobian_beam_tetrode_v(vgk: f64, vpk: f64, vg2k: f64,
                                 ig_max: f64, vgk_onset: f64,
                                 mu_b: f64, svar: f64, ex_b: f64) -> [f64; 9] {
     let dig1_dvgk = tube_ig_deriv(vgk, ig_max, vgk_onset);
+    let (vpk_in, vg2k_in) = (vpk, vg2k);
     let vpk = vpk.max(0.0);
     let vg2k = vg2k.max(1e-3);
     let s = (kvb + vg2k * vg2k).sqrt();
@@ -854,9 +873,9 @@ fn tube_jacobian_beam_tetrode_v(vgk: f64, vpk: f64, vg2k: f64,
     } else { (0.0, 0.0, 0.0) };
     let ip0_v = (1.0 - svar) * ip0_a + svar * ip0_b;
     if ip0_v <= 1e-30 {
-        return [0.0, 0.0, 0.0,
+        return tube_pentode_guard_columns([0.0, 0.0, 0.0,
                 0.0, 0.0, 0.0,
-                dig1_dvgk, 0.0, 0.0];
+                dig1_dvgk, 0.0, 0.0], vpk_in, vg2k_in);
     }
     let dip0v_dvgk = (1.0 - svar) * dip0a_dvgk + svar * dip0b_dvgk;
     let dip0v_dvg2k = (1.0 - svar) * dip0a_dvg2k + svar * dip0b_dvg2k;
@@ -871,9 +890,9 @@ fn tube_jacobian_beam_tetrode_v(vgk: f64, vpk: f64, vg2k: f64,
     let h_factor = (1.0 + alpha_s * ex_factor) / kg2;
     let dh_dvpk = alpha_s * dex_dvpk / kg2;
 
-    [dip0v_dvgk * f_factor, ip0_v * df_dvpk, dip0v_dvg2k * f_factor,
+    tube_pentode_guard_columns([dip0v_dvgk * f_factor, ip0_v * df_dvpk, dip0v_dvg2k * f_factor,
      dip0v_dvgk * h_factor, ip0_v * dh_dvpk, dip0v_dvg2k * h_factor,
-     dig1_dvgk, 0.0, 0.0]
+     dig1_dvgk, 0.0, 0.0], vpk_in, vg2k_in)
 }
 
 #[inline(always)]
@@ -973,6 +992,7 @@ fn tube_jacobian_pentode_classical(vgk: f64, vpk: f64, vg2k: f64,
                                    kp: f64, kvb: f64,
                                    ig_max: f64, vgk_onset: f64) -> [f64; 9] {
     let dig1_dvgk = tube_ig_deriv(vgk, ig_max, vgk_onset);
+    let (vpk_in, vg2k_in) = (vpk, vg2k);
     let vpk_safe = vpk.max(0.0);
     let vg2k_safe = vg2k.max(1e-3);
 
@@ -997,9 +1017,9 @@ fn tube_jacobian_pentode_classical(vgk: f64, vpk: f64, vg2k: f64,
     if e1 <= 1e-30 {
         // Ip row zeroed; screen row still has its Vgk / Vg2k contributions
         // (they don't depend on E1, only on x = Vg2k/μ + Vgk).
-        return [0.0,       0.0, 0.0,
+        return tube_pentode_guard_columns([0.0,       0.0, 0.0,
                 dig2_dvgk, 0.0, dig2_dvg2k,
-                dig1_dvgk, 0.0, 0.0];
+                dig1_dvgk, 0.0, 0.0], vpk_in, vg2k_in);
     }
 
     // Ip chain rule.
@@ -1026,9 +1046,9 @@ fn tube_jacobian_pentode_classical(vgk: f64, vpk: f64, vg2k: f64,
     let dip_dvpk  = ip0 * dg_dvpk;
     let dip_dvg2k = dip0_de1 * de1_dvg2k * g;
 
-    [dip_dvgk,  dip_dvpk,  dip_dvg2k,
+    tube_pentode_guard_columns([dip_dvgk,  dip_dvpk,  dip_dvg2k,
      dig2_dvgk, 0.0,       dig2_dvg2k,
-     dig1_dvgk, 0.0,       0.0]
+     dig1_dvgk, 0.0,       0.0], vpk_in, vg2k_in)
 }
 
 /// Combined Classical Koren pentode evaluation:
@@ -1045,6 +1065,7 @@ fn tube_evaluate_pentode_classical(vgk: f64, vpk: f64, vg2k: f64,
     let ig1 = tube_ig(vgk, ig_max, vgk_onset);
     let dig1_dvgk = tube_ig_deriv(vgk, ig_max, vgk_onset);
 
+    let (vpk_in, vg2k_in) = (vpk, vg2k);
     let vpk_safe = vpk.max(0.0);
     let vg2k_safe = vg2k.max(1e-3);
 
@@ -1068,9 +1089,9 @@ fn tube_evaluate_pentode_classical(vgk: f64, vpk: f64, vg2k: f64,
     let e1 = (vg2k_safe / kp) * softplus;
     if e1 <= 1e-30 {
         return (0.0, ig2, ig1,
-                [0.0,       0.0, 0.0,
+                tube_pentode_guard_columns([0.0,       0.0, 0.0,
                  dig2_dvgk, 0.0, dig2_dvg2k,
-                 dig1_dvgk, 0.0, 0.0]);
+                 dig1_dvgk, 0.0, 0.0], vpk_in, vg2k_in));
     }
 
     // Shared: E1^Ex once, derive E1^(Ex-1) as E1^Ex / E1.
@@ -1091,9 +1112,9 @@ fn tube_evaluate_pentode_classical(vgk: f64, vpk: f64, vg2k: f64,
     let dip_dvg2k = dip0_de1 * de1_dvg2k * g;
 
     (ip, ig2, ig1,
-     [dip_dvgk,  dip_dvpk,  dip_dvg2k,
+     tube_pentode_guard_columns([dip_dvgk,  dip_dvpk,  dip_dvg2k,
       dig2_dvgk, 0.0,       dig2_dvg2k,
-      dig1_dvgk, 0.0,       0.0])
+      dig1_dvgk, 0.0,       0.0], vpk_in, vg2k_in))
 }
 {% endif %}
 {% if any_grid_off_pentode %}

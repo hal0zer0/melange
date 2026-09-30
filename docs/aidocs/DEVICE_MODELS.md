@@ -655,6 +655,20 @@ inner overflow clamp: { inner if inner > 20, 0 if inner < -20, softplus otherwis
 E1 <= 1e-30:                  // deep cutoff — return zero currents and zero Jacobian
 ```
 
+Below a guard the currents are those AT the guard, so they do not change with
+that voltage: the Jacobian's Vpk column is zero for `Vpk < 0` and its Vg2k
+column is zero for `Vg2k < 1e-3` (`tube_pentode_guard_columns` in the
+template, `KorenPentode::jacobian_3x3` in `melange-devices`). The derivative
+evaluated AT the guard instead is a wrong Jacobian: Newton then converges only
+linearly. Measured on a push-pull EL84 stage whose plate the output transformer
+drives below its cathode: over 100 full-step iterations at ~1 % residual
+reduction each (5779 of 48000 samples never solved at 0.1 V, 1 kHz); 4
+iterations with the column zeroed, none unsolved. The same holds for the
+triode's `Vpk >= 1e-3` soft floor (dIp/dVpk = 0 below it). What remains at the
+guard is a genuine derivative jump (slope 0 below `Vpk = 0`, finite above): a
+root just above it can make Newton cycle between the two sides; the sub-step
+ladder resolves those (6 samples on the same render).
+
 ### Catalog Parameters (from Reefman TubeLib.inc 2016-01-23)
 
 | Tube | μ | Ex | Kg1 | Kg2 | Kp | Kvb | αs | A | β | Source |

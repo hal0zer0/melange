@@ -471,6 +471,15 @@ generated state is smaller.
 - A local circuit source added with a relative path broke from any other
   directory, with "Failed to fetch URL" and an empty cause. Local sources are
   now stored absolute, and an unreachable one says why.
+- **Tube circuits could leave samples unsolved where a plate was driven below
+  its cathode.** Below their voltage guards (pentode plate below the cathode or
+  screen below 1 mV, triode plate below 1 mV) the tube models hold their
+  currents at the guard's value, but reported the guard's slope as their
+  derivative. With that wrong Jacobian Newton converged only linearly: a
+  push-pull EL84 output stage left 5779 of 48000 samples unsolved at 0.1 V.
+  The derivative is now zero below each guard; the same stage solves every
+  sample. Converged results elsewhere are unchanged (regression renders move
+  by at most 1e-5 dB); generated code changes for every tube circuit.
 - **`validate` billed a phantom last sample as peak error.** Resampling
   melange's output to the reference rate added one sample past the end,
   holding the last value, so the output's slope over a whole step was counted

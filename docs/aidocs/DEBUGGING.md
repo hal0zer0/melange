@@ -225,6 +225,29 @@ Using addition causes NR divergence. See `DC_OP.md` for the mathematical derivat
 | DC OP source_steps | 10 | Source stepping stages |
 | DC OP voltage_limit | logarithmic (Vt-scaled) | Junction-aware: `sign * Vt * ln(\|delta\|/Vt + 1)` |
 
+## Newton Converging Linearly (Full Steps, ~1 % per Iteration)
+
+**Signature:** samples exhaust `MAX_ITER` (`diag_nr_max_iter_count`, often
+held), yet a per-iteration trace shows every step taken in full (no limiter,
+`global_alpha = 1`) and the residual falling by a steady ~1 % per iteration.
+Newton with the right Jacobian is quadratic near a root; a steady linear rate
+means the Jacobian is not the derivative of the function being solved.
+`--max-iter 500` making every sample converge is the same tell.
+
+**Check:** at the stalled iterate, compare each device's analytic Jacobian
+with a finite difference of the currents it returns. Guards are the usual
+culprit: a clamp such as `vpk.max(0.0)` makes the current constant below it,
+but a Jacobian evaluated at the clamped value reports the slope at the guard.
+
+**Instance (fixed 2026-09-29):** pentode `Vpk < 0` and `Vg2k < 1e-3`, and the
+triode `Vpk < 1e-3` floor. A push-pull EL84 output stage drove a plate below
+its cathode: 5779 of 48000 samples unsolved at 0.1 V; zero after the guarded
+columns were zeroed. See DEVICE_MODELS.md, pentode "NR-Stability Guards".
+
+**Related, not the same:** residual alternating between two values
+(period-2) with full steps is Newton straddling a genuine derivative jump
+(the root sits next to a kink); the sub-step ladder resolves those.
+
 ## Transformer-Coupled Circuit Failure Signatures
 
 | Symptom | Cause | Fix |
