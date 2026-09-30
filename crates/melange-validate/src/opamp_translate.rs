@@ -172,7 +172,9 @@ impl OpampParams {
 /// starting with "U…" would otherwise read as an op-amp, the same trap
 /// `tube_translate` guards.
 fn is_opamp_line(line: &str) -> bool {
-    let t = line.trim();
+    // The parser reads `U1 a b c OA ; note` as five tokens; so must the twin,
+    // or the line reaches ngspice untranslated.
+    let t = crate::deck_guard::strip_inline_comment(line).trim();
     if t.is_empty() || t.starts_with('*') || t.starts_with('.') {
         return false;
     }
@@ -315,7 +317,9 @@ pub(crate) fn translate_opamps_for_ngspice(
             continue;
         }
         if is_opamp_line(line) {
-            let toks: Vec<&str> = line.split_whitespace().collect();
+            let toks: Vec<&str> = crate::deck_guard::strip_inline_comment(line)
+                .split_whitespace()
+                .collect();
             let (name, np, nm, no, model) = (toks[0], toks[1], toks[2], toks[3], toks[4]);
             let model_uc = model.to_ascii_uppercase();
             let params = match models.get(&model_uc) {
@@ -597,6 +601,19 @@ mod tests {
         // Untouched lines survive verbatim.
         assert!(out.contains("R2 inv out 100k"));
         assert!(out.contains("Cstab out 0 1p"));
+    }
+
+    /// An inline comment on the `U` line (`U1 0 inv out OA1 ; note`) is not a
+    /// token: the parser drops it, so the twin must too, or the line reaches
+    /// ngspice untranslated ("can't find model").
+    #[test]
+    fn an_inline_comment_does_not_hide_an_opamp() {
+        for tail in [" ; src=SCHEM + input == node A", " $ note"] {
+            let deck = DECK.replace("U1 0 inv out OA1", &format!("U1 0 inv out OA1{tail}"));
+            let out = translate_opamps_for_ngspice(&deck, &deck).unwrap();
+            assert!(out.contains("GOA_U1 out 0 inv 0 "), "{tail}: {out}");
+            assert!(!out.lines().skip(1).any(is_opamp_line), "{tail}: {out}");
+        }
     }
 
     /// The emitted twin must reproduce melange's own numbers, so the shipped

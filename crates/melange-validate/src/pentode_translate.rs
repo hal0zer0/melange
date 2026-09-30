@@ -303,7 +303,7 @@ impl PentodeParams {
 /// Is `line` a pentode element card (`P<name> plate grid cath screen [supp] model`,
 /// 6 or 7 tokens)? The caller must exclude the title line (line 0).
 fn is_pentode_line(line: &str) -> bool {
-    let t = line.trim();
+    let t = crate::deck_guard::strip_inline_comment(line).trim();
     if t.is_empty() || t.starts_with('*') || t.starts_with('.') {
         return false;
     }
@@ -373,7 +373,9 @@ pub(crate) fn translate_pentodes_for_ngspice(
         }
 
         if is_pentode_line(line) {
-            let toks: Vec<&str> = line.split_whitespace().collect();
+            let toks: Vec<&str> = crate::deck_guard::strip_inline_comment(line)
+                .split_whitespace()
+                .collect();
             // Plate-first node order: name plate grid cath screen [supp] model.
             let name = toks[0];
             let (plate, grid, cath, screen) = (toks[1], toks[2], toks[3], toks[4]);
@@ -438,6 +440,21 @@ mod tests {
         Vcc vcc 0 DC 250\n\
         .model EF86 VP()\n\
         .end\n";
+
+    /// An inline comment on the `P` line is not a token (see the op-amp twin).
+    #[test]
+    fn an_inline_comment_does_not_hide_a_pentode() {
+        let line = RATIONAL_DECK
+            .lines()
+            .find(|l| l.trim_start().starts_with("P1 "))
+            .expect("pentode line");
+        let deck = RATIONAL_DECK.replace(line, &format!("{line} ; V2"));
+        let out = translate_pentodes_for_ngspice(&deck, &deck).unwrap();
+        assert!(
+            out.contains("XP1 plate grid cathode screen MELANGE_PENTODE_EF86"),
+            "{out}"
+        );
+    }
 
     #[test]
     fn rewrites_pentode_to_subckt_call() {

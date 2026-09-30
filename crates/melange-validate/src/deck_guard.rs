@@ -177,7 +177,7 @@ fn value_hazard(token: &str) -> Option<(f64, f64)> {
 ///
 /// Mirrors the netlist parser's own `strip_inline_comment` so this scan sees
 /// exactly the text the parser sees.
-fn strip_inline_comment(line: &str) -> &str {
+pub(crate) fn strip_inline_comment(line: &str) -> &str {
     let mut in_quote = false;
     for (i, c) in line.char_indices() {
         match c {

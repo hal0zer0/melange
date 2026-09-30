@@ -157,7 +157,7 @@ impl TriodeParams {
 /// The caller must exclude the title line (line 0) — a 5-word title beginning
 /// with "T…" would otherwise look like a triode.
 fn is_triode_line(line: &str) -> bool {
-    let t = line.trim();
+    let t = crate::deck_guard::strip_inline_comment(line).trim();
     if t.is_empty() || t.starts_with('*') || t.starts_with('.') {
         return false;
     }
@@ -219,7 +219,9 @@ pub(crate) fn translate_tubes_for_ngspice(content: &str) -> Result<String, Spice
         }
 
         if is_triode_line(line) {
-            let toks: Vec<&str> = line.split_whitespace().collect();
+            let toks: Vec<&str> = crate::deck_guard::strip_inline_comment(line)
+                .split_whitespace()
+                .collect();
             let (name, g, p, k, model) = (toks[0], toks[1], toks[2], toks[3], toks[4]);
             let model_uc = model.to_ascii_uppercase();
             if !tube_models.contains_key(&model_uc) {
@@ -281,6 +283,20 @@ mod tests {
         Vcc vcc 0 DC 250\n\
         .model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)\n\
         .end\n";
+
+    /// An inline comment on the `T` line is not a token (see the op-amp twin).
+    #[test]
+    fn an_inline_comment_does_not_hide_a_triode() {
+        let deck = DECK.replace(
+            "T1 grid plate cathode 12AX7",
+            "T1 grid plate cathode 12AX7 ; V1A",
+        );
+        let out = translate_tubes_for_ngspice(&deck).unwrap();
+        assert!(
+            out.contains("XT1 grid plate cathode MELANGE_TRIODE_12AX7"),
+            "{out}"
+        );
+    }
 
     #[test]
     fn rewrites_triode_to_subckt_call() {
