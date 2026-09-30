@@ -60,8 +60,13 @@ recorded correlation/RMS values.
    `ValidationOptions::reference_bound` overrides it). Halving `TMAX` alone
    is not enough: where ngspice's own error control already keeps its steps
    shorter than `TMAX`, halving it changes nothing and two identical runs
-   "agree". A reference that runs out of refinements refuses the verdict
-   (`ValidationError::ReferenceNotConverged`). The accepted figure is
+   "agree". Where ngspice cannot run the tighter `reltol` (it gives up at
+   the start of the transient, "timestep too small", because every Newton
+   solve must meet the tighter test), the tolerance refinement tightens
+   `trtol` (the factor on the truncation-error estimate, the step control
+   alone) tenfold instead, provided Newton's `reltol` is already under the
+   bound; the self-check line says so. A reference that runs out of
+   refinements refuses the verdict (`ValidationError::ReferenceNotConverged`). The accepted figure is
    printed under the RMS error ("reference self-check …") and carried in
    the JSON report. A `reltol` tighter than the default is appended after
    the deck's own `.OPTIONS`, so it wins over a deck author's `reltol`.
@@ -242,7 +247,19 @@ their stated thresholds (`rate_sweep.rs` constants):
   - the ratios agree and the error still falls, but the fit puts a floor at
     half the finest error or more.
   The last two add the `8fs` render and decide on the three finest; still
-  ambiguous, the verdict stays UNRESOLVED.
+  ambiguous, the verdict stays UNRESOLVED. An edge-dominated verdict also
+  prints each rate's unaligned error next to validate's aligned one.
+
+**Alignment on edges a sample wide.** validate aligns the reference to the
+render by one least-squares fractional delay (see `alignment`), applied
+with a band-limited interpolator. Across an edge that spans one or two
+samples, that interpolator ripples the reference at the sample rate (Gibbs)
+for a few samples after the edge. The delay still lowers the error, as
+designed: steve-1073-preamp at 48 kHz reads 2.07 % aligned against 2.39 %
+unaligned, with a ±20–40 mV ripple on an 18 V edge (0.0072-sample delay).
+It is a limit of the harness, not an error in either engine: a post-edge
+alternation in an edge-dominated deck's error is not evidence of a ring in
+the render until the render itself is checked.
 
 PLATEAU, DIVERGES and UNRESOLVED fail. Measured 2026-09-30: rc-lowpass PASS,
 converging at order 2.00 to a model error of 0.0002 % (reference self-check

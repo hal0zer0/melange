@@ -2885,9 +2885,22 @@ fn run_rate_sweep(
         Unresolved::EdgeDominated { grid, all } => format!(
             "edge-dominated: the finest render's error is {:.4} % over every sample but {:.4} % \
              at the instants the renders share (more than {EDGE_RATIO}x apart), so the error \
-             lives between those instants and no fit is made on them",
+             lives between those instants and no fit is made on them. Per rate, unaligned \
+             against validate's aligned figure: {}. On edges a sample or two wide the \
+             alignment's fractional delay also ripples the reference (see SPICE_VALIDATION.md)",
             100.0 * all,
-            100.0 * grid
+            100.0 * grid,
+            sweep
+                .rows
+                .iter()
+                .map(|r| format!(
+                    "{:.0} Hz {:.4} % / {:.4} %",
+                    r.sample_rate,
+                    100.0 * r.error,
+                    100.0 * r.own_error
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         Unresolved::PreAsymptotic { ratios } => format!(
             "pre-asymptotic: the error falls {:.2}x then {:.2}x per halving of the step (more \

@@ -14,8 +14,12 @@
 //! tolerance graded, in validate). Halving the step alone is not enough:
 //! where ngspice's own error control already keeps its steps shorter than
 //! the maximum, halving the maximum changes nothing, and two identical runs
-//! would "agree" at whatever error the tolerance allows. A reference that
-//! runs out of refinements refuses the verdict. The figure it settled at is
+//! would "agree" at whatever error the tolerance allows. Where ngspice
+//! cannot run a tighter `reltol` (it gives up at the start of the transient,
+//! where every Newton solve must meet the tighter test), the tolerance axis
+//! tightens `trtol`, which scales the step control alone, provided Newton's
+//! own `reltol` is already under the bound; the self-check line says so. A
+//! reference that runs out of refinements refuses the verdict. The figure it settled at is
 //! reported next to melange's error.
 
 use crate::comparison::ComparisonReport;
@@ -49,6 +53,21 @@ fn tighten_reltol(step: ReferenceStep) -> Option<ReferenceStep> {
     })
 }
 
+/// The smallest truncation-error factor tried: two decades under ngspice's
+/// default.
+const FINEST_TRTOL: f64 = 0.07;
+
+/// The tolerance axis where ngspice cannot run a tighter `reltol` (it gives
+/// up at the start of the transient, where every Newton solve must meet the
+/// tighter test): `trtol` scales the step control alone, which is what the
+/// axis checks.
+fn tighten_trtol(step: ReferenceStep) -> Option<ReferenceStep> {
+    (step.trtol > FINEST_TRTOL * 1.5).then_some(ReferenceStep {
+        trtol: step.trtol / 10.0,
+        ..step
+    })
+}
+
 /// How the reference showed it was converged.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReferenceConvergence {
@@ -59,6 +78,9 @@ pub struct ReferenceConvergence {
     pub self_check: f64,
     /// The bound that difference met: [`SETTLED_FRACTION`] of the tolerance.
     pub bound: f64,
+    /// Set when the tolerance axis ran on `trtol` because ngspice could not
+    /// run a tighter `reltol`: why, and the Newton tolerance kept.
+    pub substitution: Option<String>,
 }
 
 impl ReferenceConvergence {
@@ -66,10 +88,14 @@ impl ReferenceConvergence {
     pub fn note(&self) -> String {
         format!(
             "reference self-check {:.4} % (at {}, against half the step and a tenth of the \
-             tolerance; bound {:.4} %)",
+             tolerance; bound {:.4} %){}",
             self.self_check * 100.0,
             self.step,
-            self.bound * 100.0
+            self.bound * 100.0,
+            self.substitution
+                .as_ref()
+                .map(|s| format!("; {s}"))
+                .unwrap_or_default()
         )
     }
 
@@ -134,17 +160,18 @@ where
     let mut step = ReferenceStep::default();
     let mut current = run(step)?;
     // A refinement ngspice cannot run (it abandons the transient at a tight
-    // tolerance) is the end of the refinements, not a failed validation.
-    let mut refine = |step: ReferenceStep, tried: &mut Vec<String>| {
-        run(step).map_err(|e| {
-            tried.push(format!("{step}: ngspice could not run it ({e})"));
-        })
+    // tolerance) is the end of that refinement, not a failed validation.
+    let mut attempt = |step: ReferenceStep, tried: &mut Vec<String>| {
+        run(step)
+            .map_err(|e| tried.push(format!("{step}: ngspice could not run it ({e})")))
+            .ok()
     };
+    let mut substitution: Option<String> = None;
     loop {
         // Halve the step; where that settles, tighten the tolerance.
         let (next, d_step) = match halve_tmax(step) {
             Some(finer) => {
-                let Ok(data) = refine(finer, &mut tried) else {
+                let Some(data) = attempt(finer, &mut tried) else {
                     break;
                 };
                 let d = diff(&data, &current)?;
@@ -160,16 +187,44 @@ where
             continue;
         }
         // The step settled, or can go no finer: the tolerance, from the
-        // finest run so far.
+        // finest run so far. `reltol` first; where ngspice cannot run it,
+        // `trtol`, provided Newton's own tolerance is already under the
+        // bound (it stays at the current `reltol`).
         let (base_step, base) = match next {
             Some((finer, data)) => (finer, data),
             None => (step, current),
         };
-        let Some(tighter) = tighten_reltol(base_step) else {
-            break;
-        };
-        let Ok(data) = refine(tighter, &mut tried) else {
-            break;
+        let mut tighter_run = None;
+        if substitution.is_none() {
+            let Some(tighter) = tighten_reltol(base_step) else {
+                break;
+            };
+            match attempt(tighter, &mut tried) {
+                Some(data) => tighter_run = Some((tighter, data)),
+                None if base_step.reltol <= bound => {
+                    substitution = Some(format!(
+                        "the tolerance refinement is on trtol: ngspice could not run reltol = \
+                         {:.0e}; Newton converges to reltol = {:.0e} ({:.4} % relative), under \
+                         the bound",
+                        tighter.reltol,
+                        base_step.reltol,
+                        base_step.reltol * 100.0
+                    ))
+                }
+                None => break,
+            }
+        }
+        let (tighter, data) = match tighter_run {
+            Some(run) => run,
+            None => {
+                let Some(tighter) = tighten_trtol(base_step) else {
+                    break;
+                };
+                let Some(data) = attempt(tighter, &mut tried) else {
+                    break;
+                };
+                (tighter, data)
+            }
         };
         let d_tol = diff(&data, &base)?;
         tried.push(format!("{tighter}: {:.4} %", d_tol * 100.0));
@@ -180,6 +235,7 @@ where
                     step: tighter,
                     self_check: d_step.unwrap_or(0.0).max(d_tol),
                     bound,
+                    substitution,
                 },
             ));
         }
@@ -273,6 +329,47 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// ngspice gives up at reltol = 1e-5: the tolerance axis moves to trtol,
+    /// said on the self-check line, when reltol = 1e-4 is under the bound.
+    #[test]
+    fn where_reltol_cannot_run_the_tolerance_axis_is_trtol() {
+        let log = std::cell::RefCell::new(Vec::new());
+        let mut inner = fake(|s: ReferenceStep| 1e-6 * s.trtol, &log);
+        let run = |s: ReferenceStep| {
+            if s.reltol < 1e-4 {
+                Err(SpiceError::SimulationFailed("timestep too small".into()))
+            } else {
+                inner(s)
+            }
+        };
+        let (_, c) = converged_reference(run, "out", 0.0, 5e-4).unwrap();
+        assert!((c.step.trtol - 0.7).abs() < 1e-12, "{:?}", c.step);
+        assert!(c.step.reltol == 1e-4, "{:?}", c.step);
+        let note = c.note();
+        assert!(
+            note.contains("trtol") && note.contains("could not run reltol = 1e-5"),
+            "{note}"
+        );
+    }
+
+    /// Newton's own tolerance above the bound: trtol cannot stand in.
+    #[test]
+    fn trtol_does_not_stand_in_when_reltol_exceeds_the_bound() {
+        let log = std::cell::RefCell::new(Vec::new());
+        let mut inner = fake(|s: ReferenceStep| 1e-6 * s.trtol, &log);
+        let run = |s: ReferenceStep| {
+            if s.reltol < 1e-4 {
+                Err(SpiceError::SimulationFailed("timestep too small".into()))
+            } else {
+                inner(s)
+            }
+        };
+        assert!(matches!(
+            converged_reference(run, "out", 0.0, 5e-5),
+            Err(ValidationError::ReferenceNotConverged(_))
+        ));
     }
 
     #[test]

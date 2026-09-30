@@ -326,7 +326,10 @@ pub fn run_transient_stepped(
     // `reltol` as well as over the injected default: it is a property of
     // how finely the reference is solved, not of the circuit.
     if step.reltol != DEFAULT_REFERENCE_RELTOL {
-        modified_content.push_str(&format!(".OPTIONS reltol={:e}\n", step.reltol));
+        modified_content.push_str(&format!(".OPTIONS reltol={:.0e}\n", step.reltol));
+    }
+    if step.trtol != DEFAULT_REFERENCE_TRTOL {
+        modified_content.push_str(&format!(".OPTIONS trtol={:.0e}\n", step.trtol));
     }
 
     // Ensure .END is present
@@ -433,12 +436,18 @@ pub const REFERENCE_STEP_DIVISOR: f64 = 16.0;
 /// ngspice's relative tolerance for the reference (its default is 1e-3).
 pub const DEFAULT_REFERENCE_RELTOL: f64 = 1e-4;
 
+/// ngspice's truncation-error factor for the reference (its default).
+pub const DEFAULT_REFERENCE_TRTOL: f64 = 7.0;
+
 /// How finely ngspice solves a reference: its maximum internal step is
-/// `tstep / tmax_divisor`, and its relative tolerance `reltol`.
+/// `tstep / tmax_divisor`, its relative tolerance `reltol` (Newton's
+/// convergence test and the step control), and `trtol` the factor its local
+/// truncation error estimate is scaled by (the step control alone).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ReferenceStep {
     pub tmax_divisor: f64,
     pub reltol: f64,
+    pub trtol: f64,
 }
 
 impl Default for ReferenceStep {
@@ -446,6 +455,7 @@ impl Default for ReferenceStep {
         ReferenceStep {
             tmax_divisor: REFERENCE_STEP_DIVISOR,
             reltol: DEFAULT_REFERENCE_RELTOL,
+            trtol: DEFAULT_REFERENCE_TRTOL,
         }
     }
 }
@@ -454,9 +464,13 @@ impl std::fmt::Display for ReferenceStep {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "TMAX = tstep/{}, reltol = {:e}",
+            "TMAX = tstep/{}, reltol = {:.0e}",
             self.tmax_divisor, self.reltol
-        )
+        )?;
+        if self.trtol != DEFAULT_REFERENCE_TRTOL {
+            write!(f, ", trtol = {}", self.trtol)?;
+        }
+        Ok(())
     }
 }
 

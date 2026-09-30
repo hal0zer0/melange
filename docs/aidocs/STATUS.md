@@ -321,8 +321,12 @@ until both refinements move it by at most 0.05 %, a tenth of the 0.5 % RMS
 tolerance), nominal values, isothermal, the tube/JFET/linearized/parasitic
 twins as melange built them. Measured at 1fd6761.
 
-**43 PASS, 9 FAIL, 7 reference not converged, 26 refused or without a
-reference.**
+**46 PASS, 10 FAIL, 2 reference not converged, 1 timed out, 26 refused or
+without a reference.** Where ngspice cannot run a tighter `reltol` at the
+start of the transient, the tolerance refinement is on `trtol` (the step
+control alone) with Newton kept at `reltol = 1e-4`, under the bound; the
+self-check line says so (kt88-pp-stage, mosfet-choke-load, rexi-mockup,
+warpony).
 
 - **PASS** (RMS, 1x): funkyinduct 0.029 %, el84-single-stage 0.029 %,
   farfisa-voicing 0.073 %, gold-press-cab 0.029 %, gold-press-cartridge
@@ -339,11 +343,13 @@ reference.**
   steve-1073-eqpres 0.029 %, steve-1073-output 0.029 %, steve-1073-presence
   0.029 %, sympathy-drive 0.029 %, sympathy-frontend 0.029 %, tube-preamp
   0.038 %, twas-preamp 0.141 %, twill-deluxe 0.030 %, velvet-elvis 0.029 %,
-  vurli-leveler 0.421 %, wurli-power-amp 0.077 %. Reference self-checks
-  0.0001–0.02 %.
+  vurli-leveler 0.421 %, wurli-power-amp 0.077 %, kt88-pp-stage 0.029 %,
+  mosfet-choke-load 0.325 %, warpony 0.283 %. Reference self-checks
+  0.0001–0.022 %.
   Twenty-six of these read 0.0285–0.0287 %, from an RC network to tube
   stages: a figure that independent of the circuit belongs to the harness
-  or the 1 kHz test signal, not to the decks. Not yet traced.
+  or the 1 kHz test signal, not to the decks. Not yet traced. It is the
+  smallest error validate resolves at these settings.
 - **FAIL, backward Euler pinned by the deck** (`.integrator be`, first
   order): wurli-preamp 0.675 %, tungsten-glow 0.611 %, steve-1073-preamp
   2.05 %. steve-1073-preamp clips into pulses with ~18 V edges; 95–99.5 % of
@@ -351,18 +357,15 @@ reference.**
   output leaves its flat top between samples. Its trace is open (see
   SPICE_VALIDATION.md, rate sweep).
 - **FAIL, open:** noyce-cascade-idle 2.95 % (THD −12.8 dB, heavily clipped;
-  untraced).
+  untraced); rexi-mockup 3.65 % (reference self-check 0.027 %; untraced).
 - **FAIL, no meaningful comparison:** noyce-zener-junction (the THD gate on
   a nanovolt-level output; RMS 0.033 %), wurli-preamp-okona, radio-am,
   radio-fm (reference exactly 0), philicorda-voicing-coupled 13.7 % (the
   phili work is parked).
-- **Reference not converged** (no verdict given): ngspice cannot run the
-  `reltol = 1e-5` refinement ("timestep too small" in the first 0.1 µs)
-  after the step refinement settled, on kt88-pp-stage (0.0005 %),
-  mosfet-choke-load (0.0008 %), rexi-mockup (0.027 %), warpony (0.022 %;
-  ngspice stops at 3.9 ms) and champ-5f1; philicorda-master is a
+- **Reference not converged** (no verdict given): philicorda-master is a
   free-running oscillator whose phase moves between refinements;
-  farfisa-se15-reverb's output is at the nanovolt level.
+  farfisa-se15-reverb's output is at the nanovolt level. champ-5f1's
+  reference was still refining when the run hit its one-hour limit.
 - **Refused or no reference:** devices ngspice cannot simulate (VCA, LDR:
   4kbuscomp, 4kbuscomp-audiopath, gravity, gravity-stereo, farfisa-mtb,
   farfisa-swell, farfisa-se15-preamp, six philicorda note boards); no `in` /

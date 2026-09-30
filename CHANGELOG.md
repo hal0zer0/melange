@@ -614,8 +614,10 @@ generated state is smaller.
   against it and reads 0.156 % against a converged one. Each reference now
   starts at a maximum step of a sixteenth of the output step and is refined,
   halving the step and tightening ngspice's `reltol` tenfold in turn, until
-  both refinements move it by at most a tenth of the RMS tolerance graded;
-  a reference that cannot get there is refused, not graded against. The
+  both refinements move it by at most a tenth of the RMS tolerance graded
+  (where ngspice cannot start at the tighter `reltol`, the step control's
+  `trtol` is tightened instead, and the report says so); a reference that
+  cannot get there is refused, not graded against. The
   figure it settled at is printed under the RMS error ("reference
   self-check") and is in the JSON report. The CI SPICE gate uses the same
   rule.
