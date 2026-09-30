@@ -2651,9 +2651,11 @@ fn validate_circuit_source(
             // We need to reconstruct signals from the report info to write CSV.
             // Re-run would be expensive, so only rely on the library's CSV if it wrote one.
             if let Some(lib_csv) = &result.csv_path {
-                // Copy the library-generated CSV to the user-specified path
+                // Move the library-generated CSV to the user-specified path (a
+                // copy left a second full-size CSV beside it).
                 std::fs::copy(lib_csv, csv_path)
                     .with_context(|| format!("Failed to copy CSV to {}", csv_path.display()))?;
+                let _ = std::fs::remove_file(lib_csv);
                 println!("CSV written to: {}", csv_path.display());
             }
         } else if result.csv_path.is_some() {

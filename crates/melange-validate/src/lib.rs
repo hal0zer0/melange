@@ -286,6 +286,19 @@ pub fn validate_circuit(
     )
 }
 
+/// The base name of the report files `validate` writes into `output_dir`:
+/// the circuit's final path component and the verdict. The circuit name is
+/// the deck's full path for a local file (or a URL), and joining an absolute
+/// path onto `output_dir` replaces it: every report landed next to its deck,
+/// in the user's circuit tree, whatever directory was asked for.
+fn report_base_name(circuit_name: &str, passed: bool) -> String {
+    let name = std::path::Path::new(circuit_name)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| circuit_name.replace(['/', '\\'], "_"));
+    format!("{}_{}", name, if passed { "passed" } else { "failed" })
+}
+
 /// Validate a circuit with detailed options
 ///
 /// This is the full-featured version of `validate_circuit` that allows
@@ -501,11 +514,7 @@ pub fn validate_circuit_with_options(
 
         std::fs::create_dir_all(&output_dir)?;
 
-        let base_name = format!(
-            "{}_{}",
-            report.circuit_name,
-            if report.passed { "passed" } else { "failed" }
-        );
+        let base_name = report_base_name(&report.circuit_name, report.passed);
 
         if should_generate_html {
             let html_path = output_dir.join(format!("{}.html", base_name));
@@ -1221,6 +1230,26 @@ impl ValidationBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A local deck's circuit name is its full path; the report files must
+    /// land in `output_dir`, not next to the deck.
+    #[test]
+    fn report_files_are_named_inside_the_output_dir() {
+        let dir = std::path::Path::new("/tmp/reports");
+        for (name, want) in [
+            ("/home/u/circuits/pedals/fuzz.cir", "fuzz.cir_failed"),
+            ("https://example.org/decks/fuzz.cir", "fuzz.cir_failed"),
+            ("builtin:fuzz", "builtin:fuzz_failed"),
+        ] {
+            let base = report_base_name(name, false);
+            assert_eq!(base, want, "{name}");
+            assert_eq!(
+                dir.join(&base).parent(),
+                Some(dir),
+                "{name} escapes the output dir"
+            );
+        }
+    }
 
     /// The "node not found" diagnostic used to list the available nodes by
     /// `HashMap` iteration, so the same failing run printed a different list
