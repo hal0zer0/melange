@@ -25,21 +25,20 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use melange_solver::parser::{Element, Model, Netlist};
+use melange_solver::codegen::ir::CircuitIR;
+use melange_solver::device_types::{DeviceParams, TubeParams};
+use melange_solver::mna::MnaSystem;
+use melange_solver::parser::{Element, Netlist, ParseOptions};
 
 use crate::spice_runner::SpiceError;
 
 /// Melange triode `.model` types (any of these prefix a Koren triode).
 const TRIODE_MODEL_TYPES: [&str; 3] = ["TRIODE", "VT", "TUBE"];
 
-/// Default grid-current parameters, mirroring `melange_devices::tube`
-/// (`DEFAULT_GG` / `DEFAULT_XI` / `DEFAULT_CG`) — Dempwolf & Zölzer DAFx-11
-/// Table 1 row RSD-1.
-const DEFAULT_GG: f64 = melange_devices::tube::DEFAULT_GG;
-const DEFAULT_XI: f64 = melange_devices::tube::DEFAULT_XI;
-const DEFAULT_CG: f64 = melange_devices::tube::DEFAULT_CG;
-
-/// Resolved Koren triode parameters for one `.model`.
+/// A triode `.model` as melange resolved it (card, catalog, defaults), for
+/// the reference: the Koren plate law, the D&Z grid law, the grid's internal
+/// resistance and the inter-electrode capacitances.
+#[derive(PartialEq)]
 struct TriodeParams {
     mu: f64,
     ex: f64,
@@ -50,58 +49,47 @@ struct TriodeParams {
     gg: f64,
     xi: f64,
     cg: f64,
+    rgi: f64,
+    ccg: f64,
+    cgp: f64,
+    ccp: f64,
 }
 
 impl TriodeParams {
-    fn from_model(m: &Model) -> Result<Self, SpiceError> {
-        let get = |key: &str| {
-            m.params
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(key))
-                .map(|(_, v)| *v)
-        };
-        let require = |key: &str| {
-            get(key).ok_or_else(|| {
-                SpiceError::ParseError(format!(
-                    "tube translation: triode model '{}' is missing required Koren \
-                     parameter {} — specify MU, EX, KG1, KP and KVB on the .model card",
-                    m.name, key
-                ))
-            })
-        };
-        Ok(Self {
-            mu: require("MU")?,
-            ex: require("EX")?,
-            kg1: require("KG1")?,
-            kp: require("KP")?,
-            kvb: require("KVB")?,
-            // LAMBDA (Early effect) defaults to 0 in melange. The D&Z grid
-            // parameters follow the same fallback the codegen resolver uses:
-            // explicit `.model` value, else the shipped RSD-1 row.
-            lambda: get("LAMBDA").unwrap_or(0.0),
-            gg: get("GG").unwrap_or(DEFAULT_GG),
-            xi: get("XI").unwrap_or(DEFAULT_XI),
-            cg: get("CG").unwrap_or(DEFAULT_CG),
-        })
+    fn from_resolved(tp: &TubeParams) -> Self {
+        Self {
+            mu: tp.mu,
+            ex: tp.ex,
+            kg1: tp.kg1,
+            kp: tp.kp,
+            kvb: tp.kvb,
+            lambda: tp.lambda,
+            gg: tp.gg,
+            xi: tp.xi,
+            cg: tp.cg,
+            rgi: tp.rgi,
+            ccg: tp.ccg,
+            cgp: tp.cgp,
+            ccp: tp.ccp,
+        }
     }
 
     /// Emit the `.subckt` for this triode model. Port order `g p k` mirrors the
     /// `T` element's node order (grid-plate-cathode), so the `X` call binds
     /// `n_grid n_plate n_cathode` positionally.
     ///
-    /// `add_parasitics` mirrors `DkKernel::from_mna`, which auto-inserts 10 pF
-    /// junction caps ONLY when the circuit's C matrix is all zeros (a purely
-    /// resistive nonlinear circuit that needs regularization). For any circuit
-    /// carrying a real cap or inductor, melange inserts nothing, so the twin
-    /// must not either — an unconditional 10 pF was a spurious mismatch,
-    /// negligible on low-Z resistive plate loads (triode_cc: 0.10% → 0.0035%
-    /// once removed) but material on high-Z cap-loaded nodes.
-    fn subckt(&self, model_name: &str, add_parasitics: bool) -> String {
+    /// With `RGI`, both currents are evaluated at an internal grid `gi` behind
+    /// a resistor `RGI` from the terminal, which is melange's model (the root
+    /// of `v + RGI*Ig(v) = Vgk`). The inter-electrode capacitances sit between
+    /// the terminals, as melange stamps them. Parasitic caps melange adds to a
+    /// capacitor-free deck come from its build record
+    /// (`with_parasitic_caps`), not from here.
+    fn subckt(&self, model_name: &str) -> String {
         // Vpk floored at 1e-3 (mirrors tube.rs `plate_current`).
         let vpk = "max(V(p,k),1e-3)";
         // inner = KP*(1/MU + Vgk/sqrt(KVB + Vpk^2))
         let inner = format!(
-            "{kp}*(1/{mu}+V(g,k)/sqrt({kvb}+{vpk}*{vpk}))",
+            "{kp}*(1/{mu}+V(gi,k)/sqrt({kvb}+{vpk}*{vpk}))",
             kp = self.kp,
             mu = self.mu,
             kvb = self.kvb,
@@ -132,22 +120,32 @@ impl TriodeParams {
         // while probing a large trial Vgk — a bare exp(Cg*Vgk) blows up past
         // Vgk ~ 71 V at the default Cg. `pwr` is |x|^y and the argument is
         // non-negative by construction.
-        let x = format!("{cg}*V(g,k)", cg = self.cg);
+        let x = format!("{cg}*V(gi,k)", cg = self.cg);
         let softplus = format!("(max({x},0)+ln(1+exp(-abs({x}))))/{cg}", cg = self.cg);
         let grid = format!("{gg}*pwr({softplus},{xi})", gg = self.gg, xi = self.xi,);
-        // Only mirror from_mna's 10 pF junction parasitics for purely resistive
-        // nonlinear circuits (see `add_parasitics` doc).
-        let parasitics = if add_parasitics {
-            "Cgk g k 10p\nCpk p k 10p\n"
+        // The internal grid: behind RGI, or the terminal itself.
+        let grid_stopper = if self.rgi > 0.0 {
+            format!("RGI g gi {:e}\n", self.rgi)
         } else {
-            ""
+            "VGI g gi DC 0\n".to_string()
         };
+        let mut caps = String::new();
+        for (label, a, b, c) in [
+            ("CCG", "k", "g", self.ccg),
+            ("CGP", "g", "p", self.cgp),
+            ("CCP", "k", "p", self.ccp),
+        ] {
+            if c > 0.0 {
+                caps.push_str(&format!("{label} {a} {b} {c:e}\n"));
+            }
+        }
         format!(
             "* Koren B-source twin of `.model {name} (TRIODE|VT|TUBE)` — self-consistent with melange/tube.rs.\n\
              .subckt MELANGE_TRIODE_{name} g p k\n\
+             {grid_stopper}\
              BP p k I={plate}\n\
-             BG g k I={grid}\n\
-             {parasitics}.ends\n",
+             BG gi k I={grid}\n\
+             {caps}.ends\n",
             name = model_name,
         )
     }
@@ -177,29 +175,65 @@ pub(crate) fn translate_tubes_for_ngspice(content: &str) -> Result<String, Spice
         return Ok(content.to_string());
     }
 
-    // Parse to resolve model parameters (defaults applied by TriodeParams).
-    let netlist = Netlist::parse(content)
-        .map_err(|e| SpiceError::ParseError(format!("tube translation: {e}")))?;
-
-    let mut tube_models: HashMap<String, TriodeParams> = HashMap::new();
-    for m in &netlist.models {
-        if TRIODE_MODEL_TYPES
-            .iter()
-            .any(|t| m.model_type.eq_ignore_ascii_case(t))
-        {
-            tube_models.insert(m.name.to_ascii_uppercase(), TriodeParams::from_model(m)?);
-        }
-    }
-
-    // Mirror from_mna's parasitic-cap rule: melange auto-inserts 10 pF junction
-    // caps ONLY when the C matrix is all zeros (no reactive element). A cap or
-    // inductor anywhere in the deck means melange inserts none, so the twin
-    // must not either.
-    let has_reactive = netlist
-        .elements
+    // Each triode model as melange resolved it (card, catalog, defaults;
+    // nominal, as the validate build is), through the same resolver the
+    // build uses.
+    let err = |e: String| SpiceError::ParseError(format!("tube translation: {e}"));
+    let mut netlist = Netlist::parse_with_options(
+        content,
+        ParseOptions {
+            disable_unit_variation: true,
+            disable_self_heating: true,
+        },
+    )
+    .map_err(|e| err(e.to_string()))?;
+    netlist
+        .expand_subcircuits()
+        .map_err(|e| err(e.to_string()))?;
+    let mna = MnaSystem::from_netlist(&netlist).map_err(|e| err(e.to_string()))?;
+    let slots = CircuitIR::build_device_info_with_mna(&netlist, Some(&mna))
+        .map_err(|e| err(e.to_string()))?;
+    // Every triode-type card is dropped (ngspice cannot parse the type), used
+    // or not: a card whose triodes are all `.linearize`d has no X call left.
+    let triode_cards: BTreeSet<String> = netlist
+        .models
         .iter()
-        .any(|e| matches!(e, Element::Capacitor { .. } | Element::Inductor { .. }));
-    let add_parasitics = !has_reactive;
+        .filter(|m| {
+            TRIODE_MODEL_TYPES
+                .iter()
+                .any(|t| m.model_type.eq_ignore_ascii_case(t))
+        })
+        .map(|m| m.name.to_ascii_uppercase())
+        .collect();
+    let mut tube_models: HashMap<String, TriodeParams> = HashMap::new();
+    for (dev, slot) in mna.nonlinear_devices.iter().zip(&slots) {
+        let DeviceParams::Tube(tp) = &slot.params else {
+            continue;
+        };
+        if tp.is_pentode() {
+            continue;
+        }
+        let Some(model) = netlist.elements.iter().find_map(|e| match e {
+            Element::Triode { name, model, .. } if name.eq_ignore_ascii_case(&dev.name) => {
+                Some(model.to_ascii_uppercase())
+            }
+            _ => None,
+        }) else {
+            return Err(err(format!(
+                "{} is not a triode element of the deck",
+                dev.name
+            )));
+        };
+        let params = TriodeParams::from_resolved(tp);
+        if let Some(prev) = tube_models.get(&model) {
+            if *prev != params {
+                return Err(err(format!(
+                    "model {model} resolves to two different triodes"
+                )));
+            }
+        }
+        tube_models.insert(model, params);
+    }
 
     let mut out = String::with_capacity(content.len() + 256);
     let mut used: BTreeSet<String> = BTreeSet::new(); // deterministic subckt order
@@ -214,7 +248,7 @@ pub(crate) fn translate_tubes_for_ngspice(content: &str) -> Result<String, Spice
 
         // Drop tube `.model` cards — ngspice cannot parse type TRIODE/VT/TUBE,
         // and the generated .subckt replaces them.
-        if is_tube_model_line(line, &tube_models) {
+        if is_tube_model_line(line, &triode_cards) {
             continue;
         }
 
@@ -243,7 +277,7 @@ pub(crate) fn translate_tubes_for_ngspice(content: &str) -> Result<String, Spice
 
     // Append one subckt per distinct triode model actually used.
     for model_uc in &used {
-        out.push_str(&tube_models[model_uc].subckt(model_uc, add_parasitics));
+        out.push_str(&tube_models[model_uc].subckt(model_uc));
     }
 
     Ok(out)
@@ -252,7 +286,7 @@ pub(crate) fn translate_tubes_for_ngspice(content: &str) -> Result<String, Spice
 /// Is `line` a `.model <name> <TRIODE|VT|TUBE>(...)` card for a known triode
 /// model? Matched by name against the resolved model set so we only drop cards
 /// the translator is replacing.
-fn is_tube_model_line(line: &str, tube_models: &HashMap<String, TriodeParams>) -> bool {
+fn is_tube_model_line(line: &str, triode_cards: &BTreeSet<String>) -> bool {
     let t = line.trim();
     // `.get(..6)` (not `t[..6]`) — a byte slice panics when byte 6 falls inside
     // a multibyte char (e.g. an em-dash in a comment/header, common in real
@@ -265,7 +299,7 @@ fn is_tube_model_line(line: &str, tube_models: &HashMap<String, TriodeParams>) -
     // `.model <name> <type>...` — the name is token 1.
     let toks: Vec<&str> = t.split_whitespace().collect();
     toks.get(1)
-        .is_some_and(|name| tube_models.contains_key(&name.to_ascii_uppercase()))
+        .is_some_and(|name| triode_cards.contains(&name.to_ascii_uppercase()))
 }
 
 #[cfg(test)]
@@ -313,33 +347,28 @@ mod tests {
         }));
         assert!(out.contains(".subckt MELANGE_TRIODE_12AX7 g p k"));
         assert!(out.contains("BP p k I="));
-        assert!(out.contains("BG g k I="));
-        // DECK has a real cap (Cin) → melange inserts no parasitics, so the twin
-        // must not either (matches from_mna's C-all-zeros rule).
-        assert!(!out.contains("Cgk g k 10p"));
-        assert!(!out.contains("Cpk p k 10p"));
+        assert!(out.contains("BG gi k I="));
+        // No RGI: the internal grid is the terminal.
+        assert!(out.contains("VGI g gi DC 0"));
+        // No parasitic caps here: melange's are added from its build record.
+        assert!(!out.contains("10p"));
         assert!(out.contains(".ends"));
         // Baked Koren params appear in the plate expression.
         assert!(out.contains("/1060")); // KG1
         assert!(out.contains("1/100")); // 1/MU
     }
 
+    /// The card's inter-electrode capacitances and grid resistance reach the
+    /// reference, as melange stamps and solves them (they used to be dropped:
+    /// a CGP = 1.7 pF two-stage preamp read 2.7 % against its reference).
     #[test]
-    fn resistive_only_tube_deck_gets_parasitics() {
-        // No cap/inductor → melange's C matrix is all zeros → from_mna auto-inserts
-        // 10 pF junction caps → the twin must mirror them.
-        let deck = "resistive tube\n\
-            VIN in 0 DC 0\n\
-            Rg in grid 1Meg\n\
-            T1 grid plate cathode 12AX7\n\
-            Rk cathode 0 1.5k\n\
-            Rp vcc plate 100k\n\
-            Vcc vcc 0 DC 250\n\
-            .model 12AX7 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)\n\
-            .end\n";
-        let out = translate_tubes_for_ngspice(deck).unwrap();
-        assert!(out.contains("Cgk g k 10p"));
-        assert!(out.contains("Cpk p k 10p"));
+    fn caps_and_rgi_reach_the_reference() {
+        let deck = DECK.replace("KVB=300)", "KVB=300 CCG=1.6p CGP=1.7p CCP=0.46p RGI=2k)");
+        let out = translate_tubes_for_ngspice(&deck).unwrap();
+        assert!(out.contains("RGI g gi 2e3\n"), "{out}");
+        assert!(out.contains("CCG k g 1.6e-12\n"), "{out}");
+        assert!(out.contains("CGP g p 1.69999"), "{out}");
+        assert!(out.contains("CCP k p 4.6000"), "{out}");
     }
 
     #[test]
@@ -355,11 +384,16 @@ mod tests {
         assert_eq!(translate_tubes_for_ngspice(deck).unwrap(), deck);
     }
 
+    /// A card without the Koren parameters gets melange's resolved values,
+    /// as the build does, rather than a reference of its own.
     #[test]
-    fn missing_koren_param_errors_clearly() {
-        let deck = "bad\nT1 g p k M\n.model M TRIODE(MU=100 EX=1.4 KG1=1060)\n.end\n";
-        let err = translate_tubes_for_ngspice(deck).unwrap_err();
-        assert!(format!("{err}").contains("KP"));
+    fn an_underspecified_card_gets_the_resolved_values() {
+        let deck = DECK.replace(
+            "TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)",
+            "TRIODE(MU=100 EX=1.4 KG1=1060)",
+        );
+        let out = translate_tubes_for_ngspice(&deck).unwrap();
+        assert!(out.contains("/1060"), "{out}");
     }
 
     #[test]

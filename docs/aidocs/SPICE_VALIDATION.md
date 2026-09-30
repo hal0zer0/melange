@@ -68,7 +68,15 @@ recorded correlation/RMS values.
    (`ignored_parameters`). Where melange reads a key ngspice lacks, the
    reference gets a translation (below) or the run is refused.
 
-6. **Gives the reference each JFET as melange resolved it**
+6. **Gives the reference each triode as melange resolved it**
+   (`tube_translate.rs`): the Koren/D&Z B-source subckt takes its parameters
+   from melange's resolver (card, catalog, defaults), with the
+   inter-electrode capacitances between the terminals and the currents
+   evaluated at an internal grid behind `RGI`. Until 2026-09-30 the twin read
+   the card itself and dropped `CCG`/`CGP`/`CCP` and `RGI` (twas-preamp:
+   2.7 % against 0.12 % with them).
+
+6b. **Gives the reference each JFET as melange resolved it**
    (`jfet_translate.rs`): `BETA = IDSS/VP²` (ngspice has no `IDSS`),
    catalog and default values, the SPICE sign for a P-channel `VTO`, and the
    gate capacitances as the constant capacitors melange stamps (ngspice's are

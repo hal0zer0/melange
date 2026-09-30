@@ -573,6 +573,15 @@ generated state is smaller.
   variable-mu law, at an operating point solved without it. A nonzero value is
   now refused. Variable-mu stays modelled for pentodes and beam tetrodes; no
   deck set these keys on a triode.
+- **`melange validate`'s triode reference dropped the card's inter-electrode
+  capacitances and grid resistance**: `CCG`/`CGP`/`CCP` and `RGI` never
+  reached ngspice (tube cards are consumed by the translation, so the
+  ignored-parameter refusal could not see it). A two-stage preamp with
+  CGP = 1.7 pF read 2.7 % against its reference; with the capacitances in it
+  passes at 0.12 %. The reference's triodes now come from melange's resolved
+  parameters (card, catalog, defaults) with the capacitances and the
+  internal grid behind `RGI`, and its own copy of the parasitic-capacitor
+  rule is gone (those capacitors come from the build's record).
 - **`melange validate` on a self-heating deck** now compares a circuit both
   engines can express: ngspice's diode and BJT have no `RTH`/`CTH`/`TAMB`
   (the reference used to ignore them with a warning, and the triode twin has
