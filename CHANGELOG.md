@@ -579,10 +579,13 @@ generated state is smaller.
   shrinks, so melange models the circuit and the rate is the cost:
   reports the extrapolated model error and the rate needed for 1 % and
   0.1 %); or PLATEAU / DIVERGES (a model or harness mismatch, which
-  fails). Every rate is graded against one reference, the finest, which
-  must itself be accurate to a third of the smallest error it grades or the
-  verdict is UNRESOLVED. Each rate's integrator is shown, and a deck not yet
-  in its asymptotic range is fitted on its error figures and says so.
+  fails), or UNRESOLVED, saying why: the reference is not accurate enough
+  to grade the finest render, the error lives in edges between the
+  instants the fit uses, or three rates are ambiguous (an `8fs` render is
+  then added, and decides if it can). Every rate is graded over all its
+  samples against one reference, the finest. PLATEAU means the error has
+  actually stopped falling. Each rate's integrator is shown, and a deck
+  fitted on its error figures rather than its waveform says so.
 - **Automatic backward Euler weighed only the trapezoidal ring, never its
   own cost**: a build was promoted whenever a stiff mode rang at −60 dB of
   the passband, however much accuracy backward Euler (first order) then

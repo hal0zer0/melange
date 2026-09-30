@@ -205,40 +205,50 @@ retired; the four remaining dead `circuit_no_vin.cir` files were deleted
 A deck that fails at its rate may be modelled exactly and merely integrated
 coarsely. `melange validate --rate-sweep` (library:
 `melange_validate::rate_sweep`) renders the deck at `fs`, `2fs` and `4fs`
-with oversampling off, the analytic stimulus sampled at each rate, and
-grades all three against ONE reference: the `4fs` run's converged ngspice
-output, taken at each render's rate and DC-blocked there as the render is
-(one blocker at `4fs` for every rate would leave the blocker's own
-first-order discretization, 3e-4 of gain at 1 kHz and 48 kHz, in the
-errors). Errors are compared at the instants the three rates share (the `fs`
-grid). The asymptote is extrapolated on the error waveform `e_k = y_k −
-ref_k` (least-squares ratio `r = Σ(e1−e2)(e2−e4)/Σ(e2−e4)²`, order
-`p = log2 r`, `e∞ = e4 + (e4−e2)/(2^p−1)`, model error `‖e∞‖/‖ref‖`), with
-Aitken on the three error figures as a cross-check and as the fallback when
-the waveform fit has no answer (a deck short of its asymptotic range), which
-the verdict then says. Verdicts:
+with oversampling off, the analytic stimulus sampled at each rate, and adds
+`8fs` when three rates are ambiguous. Every render is graded against ONE
+reference: the finest run's converged ngspice output, taken at each
+render's rate (an exact subsample) and DC-blocked there as the render is
+(one blocker at the finest rate would leave the blocker's own first-order
+discretization, 3e-4 of gain at 1 kHz and 48 kHz, in the errors). Each
+rate's error is over ALL its samples.
+
+The asymptote is extrapolated from the three finest renders, on the error
+waveform `e_k = y_k − ref_k` at the instants they share (the coarsest one's
+grid): least-squares ratio `r = Σ(e1−e2)(e2−e4)/Σ(e2−e4)²`, order
+`p = log2 r`, `e∞ = e4 + (e4−e2)/(2^p−1)`, model error `‖e∞‖/‖ref‖`. Aitken
+on the three error figures is the cross-check, and the fallback when the
+waveform fit has no answer, which the verdict then says. Verdicts, with
+their stated thresholds (`rate_sweep.rs` constants):
 
 - **PASS** at the requested rate;
 - **CONVERGES**: the error falls toward ngspice; reported with the order,
-  the model error and the rate the fit needs for 1 % and 0.1 %;
-- **PLATEAU**: the errors are not monotone, or the model error is at least
-  half the finest error;
+  the model error and the rate the fit needs for 1 % and 0.1 %
+  (extrapolated from the finest rate still above the tolerance, capped at
+  the first rate that meets it);
+- **PLATEAU**: the error has stopped falling, the finest ratio `e2/e4`
+  below 1.5 (`PLATEAU_RATIO`);
 - **DIVERGES**: the error rises with the rate by more than 5 %;
-- **UNRESOLVED**: the finest reference's self-check is not below a third of
-  the smallest error graded (`RESOLUTION_FRACTION`). The reference is first
-  refined once to that bound (`ValidationOptions::reference_bound`); a
-  reference that cannot get there leaves the verdict unresolved.
+- **UNRESOLVED**, with the reason:
+  - the finest reference's self-check is not below a third of the finest
+    error (`RESOLUTION_FRACTION`), after one refinement to that bound;
+  - edge-dominated: the finest render's error on the shared grid and over
+    all its samples differ by more than 1.5x (`EDGE_RATIO`). The grid
+    samples the finest render at one instant in four, so an error that
+    lives in edges a few samples wide is invisible to it, and no fit is
+    made on it;
+  - pre-asymptotic: the two successive error ratios differ by more than
+    20 % (`RATIO_AGREEMENT`);
+  - the ratios agree and the error still falls, but the fit puts a floor at
+    half the finest error or more.
+  The last two add the `8fs` render and decide on the three finest; still
+  ambiguous, the verdict stays UNRESOLVED.
 
 PLATEAU, DIVERGES and UNRESOLVED fail. Measured 2026-09-30: rc-lowpass PASS,
 converging at order 2.00 to a model error of 0.0002 % (reference self-check
-0.0002 %). Do not sweep with `--oversampling`: its half-band filters' phase
-enters the comparison.
-
-Known limit: the `fs` grid samples a `4fs` render's error at one instant in
-four. On a hard-clipping deck whose edges span a few samples at `4fs`, the
-edge-timing error is mostly between those instants, and the sweep's figures
-understate it (steve-1073-preamp at 192 kHz: 0.28 % on the grid, 1.03 % on
-every sample against the same reference).
+0.0002 %); steve-1073-preamp UNRESOLVED, edge-dominated (192 kHz: 1.02 % on
+every sample, 0.28 % on the grid). Do not sweep with `--oversampling`: its
+half-band filters' phase enters the comparison.
 
 ### DC blocking and settle windows
 
