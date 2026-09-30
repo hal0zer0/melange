@@ -3408,29 +3408,18 @@ impl CircuitIR {
                 // matching the switch row mapping); no separate counter needed.
                 for (i, ind) in mna.inductors.iter().enumerate() {
                     if let Some(isat) = ind.isat {
-                        let (lair, lair_source) = match ind.shared_core_k {
+                        let (lair, lair_source) = match &ind.shared_core {
                             // Single inductor: the floor is a fraction of its own L.
                             None => {
                                 let (lair, src) = crate::parser::resolve_air_floor(ind.air_floor);
                                 (lair, src.to_string())
                             }
-                            // Shared core: this is the magnetizing branch, value
-                            // k·L_ref. Its floor is read against the coupling
-                            // (see mna::magnetizing_air_floor) and expressed as a
-                            // fraction of this branch.
-                            Some(k) => {
-                                let floor = crate::mna::magnetizing_air_floor(ind.air_floor, k);
-                                let reading = match ind.air_floor {
-                                    Some(crate::parser::SatFloor::Explicit(_)) => {
-                                        "LAIR=, total air-core self-inductance less leakage 1-k"
-                                            .to_string()
-                                    }
-                                    other => format!(
-                                        "{}; magnetizing air floor, leakage from K",
-                                        crate::parser::resolve_air_floor(other).1
-                                    ),
-                                };
-                                if k < 0.9995 {
+                            // Shared core: this is the magnetizing branch. Its
+                            // floor was resolved against the whole core when the
+                            // group was built (mna.rs), as a fraction of this branch.
+                            Some(core) => {
+                                if let Some(k) = core.implicit_k.filter(|&k| k < 0.9995) {
+                                    let floor = core.floor_frac * k;
                                     let k_air = floor / ((1.0 - k) + floor);
                                     crate::diag_warn!(
                                         "Saturating shared core ({}): coupling k = {k} is looser than real \
@@ -3439,14 +3428,14 @@ impl CircuitIR {
                                         ind.name
                                     );
                                 }
-                                (floor / k, reading)
+                                (core.floor_frac, core.floor_reading.clone())
                             }
                         };
                         // Never silent: a default is announced, and so is an
                         // explicit zero floor.
                         if ind.air_floor.is_none() {
                             let d = crate::parser::DEFAULT_AIR_FLOOR;
-                            let whose = if ind.shared_core_k.is_some() {
+                            let whose = if ind.shared_core.is_some() {
                                 format!(
                                     "the core's magnetizing inductance floors at {d:e} of the \
                                      reference winding's inductance"
@@ -3456,7 +3445,7 @@ impl CircuitIR {
                                     "its saturated inductance floors at {d:e} of its inductance"
                                 )
                             };
-                            let what = if ind.shared_core_k.is_some() {
+                            let what = if ind.shared_core.is_some() {
                                 format!("shared core ({})", ind.name)
                             } else {
                                 format!("inductor {}", ind.name)

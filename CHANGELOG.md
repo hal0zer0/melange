@@ -552,6 +552,19 @@ generated state is smaller.
   and, on a shared core, the coupling; a drop the core cannot reach is
   refused. The model's `ISAT` itself is the tanh scale current, which is
   1.6-3× a typical datasheet rating.
+- **Saturating transformers of any number of windings.** A shared core is
+  `λ = LM(φ)·n nᵀ·i + L_leak·i`: one saturating magnetizing term and linear
+  leakage, which may be shared between windings. State it with `TURNS=` on
+  every winding and `LM=` (the core's magnetizing inductance seen from that
+  winding) on one; declaring `LM=` declares that every winding links the one
+  core loop. The leakage `L − LM·n nᵀ` must be positive-definite. Two windings
+  may still leave the core implicit (unchanged), and can now state one the
+  implicit form cannot, such as leakage shared between windings. Three or more
+  windings without a stated core are refused; for three the message prints
+  the diagonal-leakage split of the deck's inductance matrix, to adopt
+  knowingly. Air-core declarations on several windings that imply different
+  floors within 3× of each other use the least, with a notice; farther apart
+  they are refused (they were refused on any difference).
 - `--cpu-baseline {x86-64-v3|x86-64-v2|x86-64}` on `compile --format plugin`.
   The default stays `x86-64-v3` (AVX2, Haswell 2013+, fastest), but a plugin
   built at that baseline crashes on load on an older CPU, and the only way out

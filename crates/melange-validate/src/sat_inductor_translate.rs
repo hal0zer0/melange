@@ -33,13 +33,15 @@ use melange_solver::parser::{resolve_air_floor, Element, Netlist};
 use crate::spice_runner::SpiceError;
 
 /// Inductor-line keys that exist only in melange.
-const SAT_KEYS: [&str; 6] = [
+const SAT_KEYS: [&str; 8] = [
     "ISAT=",
     "ISAT_DROP=",
     "ISAT_BASIS=",
     "L_AT_IDC=",
     "LAIR=",
     "CORE=",
+    "TURNS=",
+    "LM=",
 ];
 /// Resistor-line keys ngspice's resistor rejects.
 const NOISE_KEYS: [&str; 2] = ["KF=", "AF="];

@@ -58,7 +58,7 @@ Cc emit 0 100p
 **Syntax:**
 ```
 Lname n+ n- value [ISAT=current [ISAT_DROP=d [ISAT_BASIS=incremental|apparent]] | L_AT_IDC=L,I]
-                  [LAIR=fraction | CORE=class]
+                  [LAIR=fraction | CORE=class] [TURNS=t] [LM=henries]
 ```
 
 **Parameters:**
@@ -73,6 +73,8 @@ Lname n+ n- value [ISAT=current [ISAT_DROP=d [ISAT_BASIS=incremental|apparent]] 
 | `L_AT_IDC` | (Optional, instead of `ISAT`) `L_AT_IDC=L,I` (no spaces): the inductance is `L` at DC bias `I`, the "L at rated DC" rating of chokes and single-ended output transformers. With `value` as the unbiased inductance it is an incremental drop of `1 − L/value` at `I`. Needs `L < value`. |
 | `LAIR` | (Optional, needs `ISAT` or `L_AT_IDC`) Air-core floor as a fraction of `value`, `0 ≤ LAIR < 1`; a measured saturated-to-unsaturated inductance ratio is best. `LAIR=0` is accepted with a notice: the slope then goes to zero in deep saturation. |
 | `CORE` | (Optional, needs `ISAT` or `L_AT_IDC`, not with `LAIR`) Rule-of-thumb floor by core class: `gapped` 1e-3, `steel` 3e-4, `nickel` 3e-5. With neither `LAIR` nor `CORE`, 3e-4 (ungapped steel) is used and a notice is printed. |
+| `TURNS` | (Saturating shared core only) The winding's relative turns count, > 0. Given on **every** winding of the core or on none. |
+| `LM` | (Saturating shared core only, with `TURNS`) The core's magnetizing inductance seen from this winding, in henries: the part of the winding's inductance that links the core, roughly its open-circuit inductance less its leakage. On **exactly one** winding. Declaring it declares one core loop linking every winding. |
 
 **Examples:**
 ```spice
@@ -82,6 +84,13 @@ Lcore a b 100m ISAT=20m CORE=steel ; saturating inductor
 Lchoke a b 5 ISAT=20m LAIR=1e-3     ; saturating choke, explicit floor
 Lpsu vcc bplus 10 L_AT_IDC=7,100m CORE=gapped   ; PSU choke rated 7 H at 100 mA DC
 Lsmd a b 100u ISAT=2 ISAT_DROP=0.3 CORE=gapped  ; choke datasheet: Isat 2 A at 30 % drop
+* three-winding saturating core, stated: LM on the primary, relative turns on each
+Lp p 0 1.0 ISAT=10m CORE=steel TURNS=1 LM=0.99
+Ls1 s1 0 0.2515 TURNS=0.5
+Ls2 s2 0 4.01 TURNS=2
+K12 Lp Ls1 0.991031
+K13 Lp Ls2 0.987267
+K23 Ls1 Ls2 0.986808
 ```
 
 **Where the numbers come from:**
@@ -90,7 +99,9 @@ Lsmd a b 100u ISAT=2 ISAT_DROP=0.3 CORE=gapped  ; choke datasheet: Isat 2 A at 3
 
 **Notes on saturating inductors:**
 - Solved inside the Newton loop on the nodal full-LU sub-path; `--nodal-subpath schur` is refused
-- On a two-winding coupled pair, `ISAT` on one winding saturates the shared core (see `docs/limitations.md`). There the floor has two readings. `CORE=` (or the default) is the core's **magnetizing** air floor, `class × L_ref` (`L_ref` = the larger winding); the leakage comes from the pair's `K`. An authored `LAIR=` is the winding's **total** air-core self-inductance, for example a core-removed measurement; the leakage `1 − K` is part of it, so the magnetizing floor is `(LAIR − (1 − K)) × L_ref`, and `LAIR ≤ 1 − K` is refused. A `K` looser than real audio iron (`1 − K` above ~1e-4) gets a notice with the implied deep-saturation coupling
+- On a `K`-coupled group, `ISAT` saturates the shared core (see `docs/limitations.md`). The core is `λ = LM(φ)·n nᵀ·i + L_leak·i`: one saturating magnetizing term, `n` the turns referred to the `LM` winding, and linear leakage `L_leak = L − LM·n nᵀ`, where `L` is the ordinary inductance matrix from the values and `K` lines. It must be positive-definite (refused otherwise, naming the direction). Two windings may leave the core implicit (`LM = K·L_ref` on the larger winding, turns `√(L_i/L_ref)`, leakage `(1 − K)·L_i` on each winding); three or more must state it with `TURNS=` and `LM=`, because their `L` does not fix how much of it is the core. The refusal prints the diagonal-leakage (star) split of a three-winding `L` when it exists, to adopt knowingly. On two windings, `TURNS=`/`LM=` states a core the implicit form cannot, such as leakage shared between windings.
+- On a two-winding pair with the implicit core the floor has two readings. `CORE=` (or the default) is the core's **magnetizing** air floor, `class × L_ref` (`L_ref` = the larger winding); the leakage comes from the pair's `K`. An authored `LAIR=` is the winding's **total** air-core self-inductance, for example a core-removed measurement; the leakage `1 − K` is part of it, so the magnetizing floor is `(LAIR − (1 − K)) × L_ref`, and `LAIR ≤ 1 − K` is refused. A `K` looser than real audio iron (`1 − K` above ~1e-4) gets a notice with the implied deep-saturation coupling
+- With a stated core, the magnetizing floor is `class × L` of the `LM` winding for `CORE=` (or the default), and `(LAIR·L_i − L_leak,ii)/n_i²` for an authored `LAIR` on winding `i`. Declarations on several windings each imply a floor; within a factor of 3 of each other the least is used, with a notice, and farther apart the deck is refused
 - See `docs/limitations.md` → Saturating Inductors for accuracy and what is refused
 
 ---
@@ -1487,9 +1498,9 @@ The following SPICE features are **not supported** by melange-solver:
 
 ### Nonlinear Reactive Components
 - Nonlinear capacitors (`C` with nonlinear expression)
-- Nonlinear inductors with arbitrary expressions (note: `ISAT=` saturation IS supported for single inductors and two-winding shared cores)
+- Nonlinear inductors with arbitrary expressions (note: `ISAT=` saturation IS supported for single inductors and for shared cores of any number of windings)
 - Nonlinear magnetic core models (SPICE `.model CORE` syntax)
-- Saturating coupled groups with three or more windings, or with coupling k ≤ 0.8 (both refused; two-winding shared cores are supported)
+- Saturating coupled groups with coupling k ≤ 0.8, and saturating groups of three or more windings that do not state their core with `TURNS=`/`LM=` (both refused)
 
 ### Transmission Lines
 - Lossless transmission lines

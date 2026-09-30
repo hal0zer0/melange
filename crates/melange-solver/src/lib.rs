@@ -85,6 +85,7 @@ pub mod mna;
 pub mod model_params;
 pub mod parser;
 pub mod pipeline;
+mod saturating_core;
 
 // Keep the old solver module for backward compatibility during transition.
 // It re-exports LinearSolver and SolverError from linear_solver.

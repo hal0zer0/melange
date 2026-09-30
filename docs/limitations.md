@@ -232,15 +232,25 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
   3e-4 (ungapped steel) and a notice. `LAIR=0` is accepted, with a notice: the
   pure tanh law's slope goes to zero, and driven far past `ISAT` the current is
   then limited by a numerical floor, not a physical one.
-- **Two-winding transformers saturate as a shared core**: `ISAT=` on one winding
-  of a coupled pair puts the saturation on the magnetizing branch of a T-model
-  (the load current's flux cancels, as in real iron). Refused, not
-  approximated: a saturating group with coupling k ≤ 0.8 (no shared core),
-  three or more windings, or conflicting `ISAT=` values. On a shared core
-  `CORE=` (and the default) is the core's magnetizing air floor, while an
-  authored `LAIR=` is the winding's total air-core self-inductance including
-  the leakage `1 − k`; an authored `LAIR ≤ 1 − k` is refused, and so are two
-  windings whose declarations imply different floors.
+- **Transformers saturate as a shared core**: `ISAT=` on a winding of a
+  coupled group puts the saturation on one magnetizing branch behind ideal
+  couplings (the load current's flux cancels, as in real iron), with linear
+  leakage `L − LM·n nᵀ`, a full matrix when windings share leakage. Two
+  windings may leave the core implicit; three or more state it with `TURNS=`
+  on every winding and `LM=` on one, which also declares that every winding
+  links the one core loop. Refused, not approximated: coupling k ≤ 0.8 (no
+  shared core), three or more windings with no stated core, a stated core
+  whose leakage is not positive-definite, an incomplete or repeated
+  statement, and conflicting `ISAT=` values. `CORE=` (and the default) is the
+  core's magnetizing air floor, while an authored `LAIR=` is the winding's
+  total air-core self-inductance including its leakage; an authored `LAIR`
+  that leaves no floor is refused, and so are declarations whose implied
+  floors are more than 3× apart (within that the least is used, with a
+  notice).
+- **Not modeled: a core with more than one flux path** (three-phase or
+  multi-leg cores, a winding on an outer leg of an EI) needs a reluctance
+  network with several saturating branches. melange has one core loop per
+  group, which `LM=` declares.
 - A circuit with a saturating inductor runs on the **nodal full-LU** sub-path;
   `--nodal-subpath schur` is refused.
 - `.switch` cannot change a saturating inductor or any winding of a

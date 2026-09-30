@@ -3,8 +3,8 @@
 Reference for melange's iron-core saturation: the flux law, the shared-core
 T-model, authoring (`ISAT=`, `LAIR=`/`CORE=`, datasheet ratings), how it is
 solved, what is refused, how it is checked, and what is open. Read it before
-touching `SaturatingInductorIR`, `mna::magnetizing_air_floor`,
-`mna::isat_from_datasheet`, the T-model decomposition in `mna.rs`, or the
+touching `SaturatingInductorIR`, `saturating_core.rs` (the core split),
+`mna::isat_from_datasheet`, the shared-core build in `mna.rs`, or the
 `emit_sat_ind_*` stamps in `nodal_emitter.rs`.
 
 User-facing: [spice-grammar.md](../spice-grammar.md) (the inductor keywords,
@@ -21,9 +21,10 @@ Related: [MNA.md](MNA.md) (augmented MNA, inductor branch currents),
 ## 1. What ships
 
 - **Single saturating inductor:** `L1 a b 1 ISAT=10m [LAIR=f | CORE=class]`.
-- **Two-winding shared core:** `ISAT=` on either winding of a `K`-coupled pair
-  with k > 0.8. The pair is realized as a T-model whose one magnetizing branch
-  carries the saturation (§2.2).
+- **Shared core, any number of windings:** `ISAT=` on a winding of a
+  `K`-coupled group with k > 0.8. One magnetizing branch carries the
+  saturation behind ideal couplings, with linear leakage (§2.2). Two windings
+  may leave the core implicit; three or more state it with `TURNS=` and `LM=`.
 - **Anhysteretic and stateless.** No hysteresis, core loss or remanence (§7).
 - **Solved as a flux device inside the nodal full-LU Newton loop**, at every
   Newton site, at that site's own integrator coefficient, so trapezoidal and
@@ -78,8 +79,8 @@ Saturation keyed on any one winding's current is therefore wrong: it saturates
 a loaded core that should stay linear, and misses the magnetizing current that
 actually saturates it.
 
-melange realizes a saturating two-winding group as (`mna.rs`, the
-ideal-transformer decomposition):
+melange realizes a saturating two-winding group with no stated core as
+(`mna.rs`, the shared-core build):
 
 - per winding, a **linear leakage** inductor `(1 − k)·Lᵢ` from the winding's
   node to a new internal node;
@@ -106,13 +107,50 @@ k = 0.99999 and 0.999999.
 
 **ISAT referral.** Current refers inversely to turns (`N ∝ √L`), so an `ISAT`
 authored on winding `a` becomes `ISAT·√(L_a/L_ref)` on the magnetizing branch.
+On a stated core the turns are stated, and the referral is the MMF:
+`ISAT·n_a`.
 On a step-up transformer the reference winding is the secondary, and an
 unreferred primary `ISAT` would saturate the core `n×` too late.
 
-**Where the T-model is used.** Only for saturating groups (the gate is
-`group_saturating && max_k > 0.8`). Non-saturating coupled groups stay on the
-exact coupled-inductor `[L]` path; `IDEAL_XFMR_L_THRESHOLD = 1e30` keeps the
-T-model off for them. The ideal couplings form algebraic loops that DK and
+**Any number of windings: the stated core.** One magnetic loop whose flux
+links every winding (analog-EE review; true of an audio shell EI with every
+winding on the centre leg, and of a single-loop C-core) gives
+
+```
+λ = Lm(φ)·n nᵀ·i + L_leak·i
+```
+
+with `n` the turns vector referred to one winding (`n_ref = 1`), `Lm` the
+magnetizing inductance seen from that winding, and `L_leak` the air leakage, a
+full constant symmetric matrix. Saturation lives in the rank-1 core term only.
+It is exact under the same assumption as the T-model: the core is one path, the
+leakage is air and linear. The linear `[L]` does not fix the split (for two
+windings only the short-circuit inductance is pinned; for three the
+diagonal-leakage "star" split is unique but its diagonal assumption decides
+where saturation sits), so the deck states it: `TURNS=` on every winding and
+`LM=` on one (`saturating_core.rs::CoreSplit::explicit`):
+
+```
+n_i = TURNS_i / TURNS_a      (a = the LM winding, the reference)
+L_leak = L − LM·n nᵀ         (L from the values and K lines)
+```
+
+`L_leak` is air-flux energy, so it must be positive-definite; a stated core
+that leaves it otherwise is refused, naming the least eigenvalue and its
+direction over the windings. This also bounds `LM` from above for given
+couplings, the N-winding analogue of `LAIR > 1 − k`. The realization is the
+T-model's with the leakage generalized: per winding a leakage branch to an
+internal node, the magnetizing inductor `LM` on the reference winding's
+internal node, ideal couplings `n_i` to the others. A diagonal `L_leak` is one
+linear inductor per winding; a coupled one is an exact `[L]` group
+(`TransformerGroupInfo`) on those branches. The implicit two-winding form is
+the special case `LM = k·L_ref`, `n_i = √(L_i/L_ref)`, whose leakage comes out
+diagonal (`(1 − k)·L_i`): a deck that states exactly that builds the same
+system. Declaring `LM=` declares the single loop; a core with more than one
+flux path (§7) cannot be stated.
+
+**Where the T-model is used.** Only for saturating groups. Non-saturating
+coupled groups stay on the exact coupled-inductor `[L]` path. The ideal couplings form algebraic loops that DK and
 nodal Schur cannot take, but saturating circuits run on nodal full-LU (§4),
 which solves the coupling constraint directly each sample. That includes
 negative feedback through the iron: a scratch `ISAT` on the passive EQ's
@@ -124,15 +162,23 @@ bounded with no NaN or Newton starvation up to 8 V.
 A winding's air-core self-inductance splits into the fixed air-path leakage,
 which the T-model already carries as `(1 − k)·L`, and the air-core mutual part.
 The two ways of stating a floor therefore read differently on a shared core
-(`mna::magnetizing_air_floor`):
+(resolved with the core in `mna.rs`; the floor saturates only the rank-1 core
+term, `Lm → Lm_floor`, so the saturated `[L]` stays positive-definite):
 
 | Declaration | Reading | Magnetizing floor F (× L_ref) |
 |---|---|---|
 | `CORE=<class>` or none | the core's magnetizing air floor; leakage comes from K | `class` (never refuses) |
 | `LAIR=<f>` | the winding's **total** air-core self-inductance (e.g. measured with the core removed) | `f − (1 − k)`; refused if ≤ 0 |
 
-- Declarations on both windings must imply the same F (to 1e-12 relative), or
-  the deck is refused.
+- On a stated core the same two readings hold per winding `i`: `CORE=` gives
+  `class·L_a` (the `LM` winding's self-inductance), an authored `LAIR_i` gives
+  `Lm_floor = (LAIR_i·L_ii − L_leak,ii)/n_i²`, refused if ≤ 0, and the floor
+  must lie below `LM`.
+- Declarations on several windings each imply a floor. They are estimates good
+  to the class estimate's own band, `L_air/L0 ≈ g/µ_eff` with geometry factor
+  g = 1..3 (analog-EE review): within a factor of 3 the least is used, with a
+  notice listing each; farther apart, the deck is refused
+  (`FLOOR_AGREEMENT_BAND`).
 - The IR expresses F as a fraction of the magnetizing branch (`F/k`).
 - For k < 0.9995 a notice says the coupling is looser than real audio iron and
   gives the implied deep-saturation coupling `k_air = F/((1 − k) + F)` (0.029 for
@@ -156,8 +202,10 @@ apparent:     L/L0 = (1 − k) + F + (k − F)·tanh(x)/x
 
 `k = 1` and `F = LAIR` for a single inductor. The rated drop fixes `x`, and
 `ISAT = I/x`. A drop larger than the saturable part `k − F` can reach is
-refused. On a shared core the rating is converted against the pair's k and F on
-the rated winding, then referred (§2.2); a datasheet form on a core where both
+refused. On a shared core the rating is converted against the rated winding's
+own terminal law, with `k` its magnetizing fraction `LM·n_i²/L_i` (the pair's k
+on the implicit form) and `F` the floor seen from it, `Lm_floor·n_i²/L_i`, then
+referred (§2.2); a datasheet form on a core where both
 windings carry `ISAT` is refused, because the agreement check compares authored
 values. At LAIR 3e-4 the model's `ISAT` is 3.05 / 2.08 / 1.63 × the rated
 current at a 10 / 20 / 30 % incremental drop, and 1.71 / 1.13 / 0.84 × apparent.
@@ -360,9 +408,13 @@ Refused, with a message naming the elements:
 | Case | Why |
 |---|---|
 | Saturating coupled group with largest k ≤ 0.8 | A closed iron core has k > 0.99. k ≤ 0.8 is either no shared core (give each inductor its own `ISAT` and drop the `K`) or a deliberate leakage path whose flux itself saturates (ballast, neon and welding transformers), which is out of scope. Permanent. |
-| Saturating group with 3 or more windings | The two-winding T-model does not generalize by averaging couplings (4 dB at 20 Hz in a 3-winding test). §8. |
+| Saturating group with 3 or more windings and no stated core | Its `[L]` does not fix the split into core and leakage (the old average-coupling T-model was 4 dB off at 20 Hz in a 3-winding test). The refusal prints the star split of a three-winding `[L]` when one exists, to adopt knowingly. |
+| `TURNS=` on some windings of a core but not all; `TURNS=` without `LM=`; `LM=` on more than one winding | The turns vector needs every winding; one core has one magnetizing inductance, stated once. |
+| A stated core whose leakage `L − LM·n nᵀ` is not positive-definite | Leakage is air-flux energy. The message names the least eigenvalue and its direction. |
+| `TURNS=`/`LM=` on a group with no `ISAT`, or on an inductor with no `K` | They state a saturating core. |
+| A magnetizing floor not below `LM` | Nothing is left to saturate. |
 | Two windings of one core with different referred `ISAT` | One core has one saturation current. |
-| Two windings implying different magnetizing floors | One core has one floor. |
+| Windings implying magnetizing floors more than 3× apart | One core has one floor; within 3× the least is used, with a notice. |
 | Authored `LAIR` ≤ `1 − k` on a shared core | The deck's own k already puts that much in leakage. |
 | Datasheet form on a core whose two windings both carry `ISAT` | The agreement check compares authored values. |
 | Datasheet drop the saturable part cannot reach | No `ISAT` produces it. |
@@ -396,6 +448,14 @@ below 4× oversampling.
     recurrence; H2 flips with the bias sign and crosses H3 near a/6.
 - `saturating_group_refusal_tests.rs` — every refusal in §5 on the MNA side,
   plus covered groups still building.
+- `saturating_core_tests.rs` — the stated core. A two-winding core stated as
+  the implicit one builds the same system; the realized circuit's linear
+  response equals ngspice's K-coupled `[L]` (and melange's exact `[L]` path) at
+  20 Hz, 1 kHz and 20 kHz for 2, 3 and 4 windings with coupled leakage, and
+  fails with the leakage's off-diagonal terms zeroed; a three-winding core and
+  a two-winding core with shared leakage follow an independent W-dimensional
+  trapezoidal recurrence of the flux law at 1× and 1024× (C1's gates); a
+  loaded three-winding core stays linear; the stated-core refusals.
 - `isat_datasheet_tests.rs` — the converted `ISAT` reproduces the rated drop to
   1e-12 (single and shared cores, both bases); the published factors;
   `L_AT_IDC` equals the matching `ISAT_DROP`; parse strictness.
@@ -454,15 +514,9 @@ be datasheet ratings read as tanh scale currents, which saturates the core
 
 ## 8. Open
 
-1. **Three-winding shared cores.** Physics (analog-EE review): one saturating
-   magnetizing branch with fixed linear leakages is correct. The star form is
-   exact for W = 3: per-winding `cᵢ` with `k_ij = cᵢ·c_j`, leakage
-   `(1 − cᵢ²)·Lᵢ`, magnetizing `c_ref²·L_ref`. Refuse when some `cᵢ ≥ 1` (a
-   sandwiched winding gives a negative leakage). W ≥ 4 is not a star in
-   general, so its refusal stays. Not built; three windings are refused today.
-2. **Knee re-solve for a railing op-amp at 1×** (§3.4): parked.
-3. **A second-order L-stable integrator** (BDF2) for magnetics: held pending
+1. **Knee re-solve for a railing op-amp at 1×** (§3.4): parked.
+2. **A second-order L-stable integrator** (BDF2) for magnetics: held pending
    physics.
-4. **Hysteresis** — justified, if any target needs it, by loss, phase lag and
+3. **Hysteresis** — justified, if any target needs it, by loss, phase lag and
    LF/level-dependent distortion, not by H2 (§2.5). Chan (Hc/Br/Bs) is the
    reference to cite.

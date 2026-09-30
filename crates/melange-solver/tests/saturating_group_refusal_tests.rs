@@ -7,8 +7,10 @@
 //!   MMFs cancel), and absent altogether on the full-LU path. A closed iron core
 //!   has k > 0.99; k <= 0.8 is no shared core or a shunted (ballast-type) core
 //!   whose leakage flux itself saturates — out of scope, permanently.
-//! - W >= 3 windings: the T-model used a per-winding average coupling, a 4 dB
-//!   linear error at 20 Hz with k = (0.95, 0.6, 0.6).
+//! - W >= 3 windings with no stated core: the T-model used a per-winding
+//!   average coupling, a 4 dB linear error at 20 Hz with k = (0.95, 0.6, 0.6).
+//!   The linear [L] does not fix the split into core and leakage, so the deck
+//!   states it (TURNS= on every winding, LM= on one).
 //! - Several ISATs on one core: the first silently won.
 
 mod support;
@@ -60,15 +62,24 @@ fn conflicting_saturation_currents_on_one_core_are_refused() {
 /// On a shared core an authored LAIR is the winding's TOTAL air-core
 /// self-inductance, of which the leakage (1 - k) is already declared by K; a
 /// CORE= class (or the default) is the core's MAGNETIZING floor directly.
-/// Declarations on both windings must imply the same magnetizing floor.
+/// Declarations on both windings each imply a magnetizing floor. They are
+/// estimates good to a factor of 3 (the class estimate's own band): within
+/// it the least is used, with a notice; beyond it the deck is refused.
 #[test]
 fn conflicting_air_core_floors_on_one_core_are_refused() {
-    // k = 0.9999: LAIR=1e-3 leaves 9e-4, CORE=steel gives 3e-4.
+    // k = 0.9999, L_ref = 400m: LAIR=2e-3 leaves 1.9e-3, CORE=steel gives 3e-4,
+    // 6.3x apart.
     let e = mna_err(
-        "conflict\nR1 in a 100\nL1 a 0 100m ISAT=20m LAIR=1e-3\nL2 b 0 400m ISAT=10m CORE=steel\n\
+        "conflict\nR1 in a 100\nL1 a 0 100m ISAT=20m LAIR=2e-3\nL2 b 0 400m ISAT=10m CORE=steel\n\
          K1 L1 L2 0.9999\nR2 b 0 1k\n",
     );
-    assert!(e.contains("different air-core floors"), "{e}");
+    assert!(e.contains("more than 3x apart"), "{e}");
+    // LAIR=6e-4 leaves 5e-4 against 3e-4: within the band, the least is used.
+    let floor = mag_floor_frac(
+        "within\nR1 in a 100\nL1 a 0 100m ISAT=20m LAIR=6e-4\nL2 b 0 400m ISAT=10m CORE=steel\n\
+         K1 L1 L2 0.9999\nR2 b 0 1k\n",
+    );
+    assert!((floor - 3e-4 / 0.9999).abs() < 1e-12, "{floor}");
     // LAIR=4e-4 leaves 3e-4 = CORE=steel: one core, one floor.
     mna_ok(
         "same\nR1 in a 100\nL1 a 0 100m ISAT=20m LAIR=4e-4\nL2 b 0 400m ISAT=10m CORE=steel\n\
@@ -78,6 +89,16 @@ fn conflicting_air_core_floors_on_one_core_are_refused() {
         "one\nR1 in a 100\nL1 a 0 100m ISAT=20m CORE=gapped\nL2 b 0 400m ISAT=10m\n\
          K1 L1 L2 0.99\nR2 b 0 1k\n",
     );
+}
+
+/// The magnetizing branch's air floor, as a fraction of that branch.
+fn mag_floor_frac(spice: &str) -> f64 {
+    let netlist = Netlist::parse(spice).expect("parse");
+    let mna = MnaSystem::from_netlist(&netlist).expect("must build");
+    mna.inductors
+        .iter()
+        .find_map(|l| l.shared_core.as_ref().map(|c| c.floor_frac))
+        .expect("a magnetizing branch")
 }
 
 /// An authored LAIR no larger than the leakage 1 - k contradicts the deck's

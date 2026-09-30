@@ -914,7 +914,7 @@ pub enum Element {
         ic: Option<f64>,
     },
     /// Inductor: Lname n+ n- value [ISAT=value [ISAT_DROP=d [ISAT_BASIS=b]] |
-    /// L_AT_IDC=L,I] [LAIR=fraction | CORE=class]
+    /// L_AT_IDC=L,I] [LAIR=fraction | CORE=class] [TURNS=t] [LM=henries]
     Inductor {
         name: String,
         n_plus: String,
@@ -930,6 +930,13 @@ pub enum Element {
         /// authored (`LAIR=` or `CORE=`); `None` takes the default. Resolve
         /// with [`resolve_air_floor`].
         air_floor: Option<SatFloor>,
+        /// Relative turns of this winding of a saturating shared core
+        /// (`TURNS=`); given on every winding of the group or none.
+        turns: Option<f64>,
+        /// The core's magnetizing inductance seen from this winding (`LM=`),
+        /// on exactly one winding of a saturating shared core. Declaring it
+        /// declares one core loop linking every winding.
+        lm: Option<f64>,
     },
     /// Voltage source: Vname n+ n- [DC value] [AC mag phase]
     VoltageSource {
@@ -1369,6 +1376,8 @@ impl Element {
                 isat,
                 isat_spec,
                 air_floor,
+                turns,
+                lm,
             } => Element::Inductor {
                 name: prefixed(name),
                 n_plus: remap(n_plus),
@@ -1377,6 +1386,8 @@ impl Element {
                 isat: *isat,
                 isat_spec: *isat_spec,
                 air_floor: *air_floor,
+                turns: *turns,
+                lm: *lm,
             },
             Element::VoltageSource {
                 name,
@@ -4614,7 +4625,7 @@ impl Parser {
             parts,
             4,
             "Lname n+ n- value [ISAT=value [ISAT_DROP=d [ISAT_BASIS=incremental|apparent]] | \
-             L_AT_IDC=L,I] [LAIR=fraction | CORE=gapped|steel|nickel]",
+             L_AT_IDC=L,I] [LAIR=fraction | CORE=gapped|steel|nickel] [TURNS=t] [LM=henries]",
         )?;
         self.check_self_connection(parts[1], parts[2], parts[0])?;
         let value = self.parse_positive_value(parts[3], "Inductor")?;
@@ -4624,6 +4635,8 @@ impl Parser {
         let mut drop = None;
         let mut basis = None;
         let mut l_at_idc = None;
+        let mut turns = None;
+        let mut lm = None;
         // Keyword matched case-insensitively; the value keeps its case so SPICE
         // suffixes parse exactly as elsewhere.
         let key = |part: &str, k: &str| -> Option<String> {
@@ -4693,6 +4706,28 @@ impl Parser {
                     )));
                 }
                 l_at_idc = Some((l, i));
+            } else if let Some(stripped) = key(part, "TURNS=") {
+                let v = parse_value(&stripped)
+                    .map_err(|_| self.error(format!("Invalid TURNS value: {}", stripped)))?;
+                if !(v > 0.0 && v.is_finite()) {
+                    return Err(self.error(format!(
+                        "Inductor '{}': TURNS is the winding's relative turns count, positive \
+                         and finite, got {}",
+                        parts[0], stripped
+                    )));
+                }
+                turns = Some(v);
+            } else if let Some(stripped) = key(part, "LM=") {
+                let v = parse_value(&stripped)
+                    .map_err(|_| self.error(format!("Invalid LM value: {}", stripped)))?;
+                if !(v > 0.0 && v.is_finite()) {
+                    return Err(self.error(format!(
+                        "Inductor '{}': LM is the core's magnetizing inductance seen from this \
+                         winding, positive and finite, got {}",
+                        parts[0], stripped
+                    )));
+                }
+                lm = Some(v);
             } else if let Some(stripped) = key(part, "CORE=") {
                 core = Some(match stripped.to_ascii_uppercase().as_str() {
                     "GAPPED" => CoreClass::Gapped,
@@ -4708,7 +4743,7 @@ impl Parser {
             } else {
                 return Err(self.error(format!(
                     "Inductor '{}': unrecognized trailing token '{}' (supported: ISAT=, \
-                     ISAT_DROP=, ISAT_BASIS=, L_AT_IDC=, LAIR=, CORE=)",
+                     ISAT_DROP=, ISAT_BASIS=, L_AT_IDC=, LAIR=, CORE=, TURNS=, LM=)",
                     parts[0], part
                 )));
             }
@@ -4781,6 +4816,8 @@ impl Parser {
             isat,
             isat_spec,
             air_floor,
+            turns,
+            lm,
         })
     }
 

@@ -171,13 +171,16 @@ pub struct IdealTransformerCoupling {
     pub turns_ratio: f64,
 }
 
-/// Threshold: transformer groups with max(L) above this use ideal decomposition.
-/// Currently disabled (1e30) — ideal transformer decomposition creates algebraic loops
-/// in circuits with global feedback through transformers (e.g. Pultec NFB).
-/// The DK method requires at least one sample of reactive delay in every feedback loop.
-const IDEAL_XFMR_L_THRESHOLD: f64 = 1e30;
-/// Threshold: transformer groups with max(k) above this use ideal decomposition.
+/// A saturating shared core needs a coupling above this (a closed iron core
+/// puts k above 0.99); at or below it the group is refused.
 const IDEAL_XFMR_K_THRESHOLD: f64 = 0.8;
+
+/// Per-winding air-core declarations of one core each imply a magnetizing
+/// floor. They are estimates good to the class estimate's own band,
+/// `L_air/L0 ≈ g/µ_eff` with geometry factor g = 1..3 (analog-EE review,
+/// SATURATING_TRANSFORMERS.md §2.3): floors within this factor take the
+/// least, with a notice; farther apart, the deck is refused.
+const FLOOR_AGREEMENT_BAND: f64 = 3.0;
 
 /// Capacitor with an explicit `IC=` initial condition (SPICE `.IC`/UIC
 /// semantics). Used only to build the one-off initial-state solve that
@@ -207,10 +210,22 @@ pub struct InductorElement {
     /// The authored air-core floor of a saturating inductor (`LAIR=`/`CORE=`);
     /// `None` = the default. Meaningless without `isat`.
     pub air_floor: Option<crate::parser::SatFloor>,
-    /// `Some(k)` on the magnetizing branch of a shared saturating core (the
-    /// T-model's `{ref}_mag`), whose floor is read against the pair's
-    /// coupling: see [`magnetizing_air_floor`]. `None` for a single inductor.
-    pub shared_core_k: Option<f64>,
+    /// The magnetizing branch of a shared saturating core (`{ref}_mag`): its
+    /// floor, resolved against the whole core when the group is built.
+    /// `None` for a single inductor.
+    pub shared_core: Option<SharedCore>,
+}
+
+/// A shared saturating core's magnetizing floor, resolved from every
+/// winding's declaration (see the coupled-group build in `MnaBuilder`).
+#[derive(Debug, Clone)]
+pub struct SharedCore {
+    /// The air floor as a fraction of the magnetizing branch's inductance.
+    pub floor_frac: f64,
+    /// Which reading of the declarations applied, for the generated code.
+    pub floor_reading: String,
+    /// The pair's coupling, for the implicit two-winding form (no `LM=`).
+    pub implicit_k: Option<f64>,
 }
 
 /// Why `name` belongs to saturating iron, if it does: it carries `ISAT=` (or a
@@ -350,13 +365,6 @@ pub fn isat_from_datasheet(
         )));
     }
     Ok(isat)
-}
-
-pub fn magnetizing_air_floor(floor: Option<crate::parser::SatFloor>, k: f64) -> f64 {
-    match floor {
-        Some(crate::parser::SatFloor::Explicit(lair)) => lair - (1.0 - k),
-        other => crate::parser::resolve_air_floor(other).0,
-    }
 }
 
 /// Coupled inductor pair info for transformer companion model.
@@ -3590,6 +3598,26 @@ impl MnaBuilder {
         // inductors connected by multiple K directives) use TransformerGroupInfo.
         let mut coupled_inductor_names = std::collections::HashSet::new();
 
+        // TURNS=/LM= state a winding of a saturating shared core, so the
+        // inductor must be K-coupled.
+        for e in &netlist.elements {
+            if let Element::Inductor {
+                name, turns, lm, ..
+            } = e
+            {
+                let coupled = netlist.couplings.iter().any(|c| {
+                    c.inductor1_name.eq_ignore_ascii_case(name)
+                        || c.inductor2_name.eq_ignore_ascii_case(name)
+                });
+                if (turns.is_some() || lm.is_some()) && !coupled {
+                    return Err(MnaError::TopologyError(format!(
+                        "{name}: TURNS= and LM= state a winding of a saturating shared core, \
+                         but {name} is not K-coupled to anything."
+                    )));
+                }
+            }
+        }
+
         // Collect all inductor info referenced by K directives
         struct InductorRef {
             name: String,
@@ -3599,6 +3627,8 @@ impl MnaBuilder {
             isat: Option<f64>,
             isat_spec: Option<crate::parser::IsatSpec>,
             air_floor: Option<crate::parser::SatFloor>,
+            turns: Option<f64>,
+            lm: Option<f64>,
         }
         let mut inductor_refs: std::collections::HashMap<String, InductorRef> =
             std::collections::HashMap::new();
@@ -3608,7 +3638,7 @@ impl MnaBuilder {
                 if inductor_refs.contains_key(&lower) {
                     continue;
                 }
-                if let Some(Element::Inductor { name, n_plus, n_minus, value, isat, isat_spec, air_floor }) =
+                if let Some(Element::Inductor { name, n_plus, n_minus, value, isat, isat_spec, air_floor, turns, lm }) =
                     netlist.elements.iter().find(|e| {
                         matches!(e, Element::Inductor { name, .. } if name.eq_ignore_ascii_case(ind_name))
                     })
@@ -3630,6 +3660,8 @@ impl MnaBuilder {
                         isat: *isat,
                         isat_spec: *isat_spec,
                         air_floor: *air_floor,
+                        turns: *turns,
+                        lm: *lm,
                     });
                 }
             }
@@ -3708,12 +3740,7 @@ impl MnaBuilder {
                 coupled_inductor_names.insert(m.clone());
             }
 
-            // Check if this group qualifies for ideal transformer decomposition:
-            // large inductances + tight coupling → companion model creates ill-conditioning.
-            let max_l = members
-                .iter()
-                .map(|m| inductor_refs[m].value)
-                .fold(0.0_f64, f64::max);
+            // The group's tightest coupling (a saturating core needs k > 0.8).
             let max_k = netlist
                 .couplings
                 .iter()
@@ -3725,27 +3752,31 @@ impl MnaBuilder {
                 .map(|c| c.coupling)
                 .fold(0.0_f64, f64::max);
 
-            // Phase 2 (saturating transformers): a group carrying ISAT on any
-            // winding is a shared-core SATURATING transformer. Route it through the
-            // T-model so saturation attaches to the single {ref}_mag magnetizing
-            // inductor (whose branch current IS the net magnetizing current), not
-            // a per-winding saturation (physically wrong, and removed). This is
-            // ADDITIVE: non-saturating groups are unaffected (still gated by the
-            // 1e30 L threshold, i.e. currently never). Saturating groups force the
-            // full-LU nodal path (Phase 1 routing), where the ideal-coupling
-            // algebraic constraint is resolved by direct LU each sample — the
-            // reactive-delay requirement that motivated the 1e30 disable is a
-            // DK/Schur limitation, not a full-LU one. Still requires tight coupling
-            // (max_k > 0.8) for the leakage/magnetizing split to be well-posed.
+            // A group carrying ISAT on any winding is a SATURATING shared core:
+            // one saturating magnetizing branch (its current is the net
+            // magnetizing current) behind ideal couplings, and linear leakage,
+            // `λ = Lm(φ)·n nᵀ·i + L_leak·i` (saturating_core.rs). Non-saturating
+            // groups take the exact coupled-inductor [L] path below.
             let group_saturating = members.iter().any(|m| inductor_refs[m].isat.is_some());
+            // Windings as the deck spells them, for messages.
+            let spelled: Vec<&str> = members
+                .iter()
+                .map(|m| inductor_refs[m].name.as_str())
+                .collect();
+            let names = spelled.join(", ");
+            let declares_core = members
+                .iter()
+                .any(|m| inductor_refs[m].turns.is_some() || inductor_refs[m].lm.is_some());
+            if declares_core && !group_saturating {
+                return Err(MnaError::TopologyError(format!(
+                    "coupled inductors {{{names}}} carry TURNS= or LM=, which state a saturating \
+                     shared core, but no winding carries ISAT. Add ISAT to the core, or remove \
+                     TURNS=/LM= to simulate the group linearly."
+                )));
+            }
             if group_saturating {
                 // Saturating coupled groups the shared-core model does not cover
-                // are refused, not approximated. Each was silently wrong before:
-                // the old per-winding path was a no-op without a pot, per-winding
-                // (physically wrong) with one, and absent on full-LU; the T-model
-                // used a per-winding average coupling for W >= 3 (4 dB linear
-                // error at uneven k); and with several ISATs the first one won.
-                let names = members.join(", ");
+                // are refused, not approximated.
                 if max_k <= IDEAL_XFMR_K_THRESHOLD {
                     return Err(MnaError::TopologyError(format!(
                         "coupled inductors {{{names}}} carry ISAT (a saturating shared core) \
@@ -3757,308 +3788,333 @@ impl MnaBuilder {
                          saturates, which melange does not model."
                     )));
                 }
-                if members.len() > 2 {
-                    return Err(MnaError::TopologyError(format!(
-                        "saturating transformer {{{names}}} has {} windings. The \
-                         shared-core saturation model is exact for 2 windings only; for \
-                         more it would use an average coupling per winding, which is \
-                         wrong for unequal couplings (4 dB at 20 Hz in a 3-winding \
-                         test). Remove ISAT to simulate it linearly with the exact \
-                         coupled-inductor model.",
-                        members.len()
-                    )));
-                }
-                // One shared core has one saturation current. Refer every
-                // authored ISAT to the largest-L winding and require agreement.
-                let l_ref = max_l;
-                let referred: Vec<(String, f64)> = members
-                    .iter()
-                    .filter_map(|m| {
-                        let ind = &inductor_refs[m];
-                        ind.isat
-                            .map(|i| (m.clone(), i * (ind.value / l_ref).sqrt()))
-                    })
-                    .collect();
-                if let Some((first_name, first)) = referred.first() {
-                    if let Some((name, other)) = referred
-                        .iter()
-                        .find(|(_, v)| (v - first).abs() > 1e-9 * first.abs().max(v.abs()))
-                    {
-                        return Err(MnaError::TopologyError(format!(
-                            "coupled inductors {{{names}}} share one core but carry \
-                             different saturation currents: {first_name} and {name} refer \
-                             to {first:e} A and {other:e} A on the larger winding. A core \
-                             has one saturation current; put ISAT on one winding only."
-                        )));
-                    }
-                }
-            }
-            if (max_l > IDEAL_XFMR_L_THRESHOLD || group_saturating)
-                && max_k > IDEAL_XFMR_K_THRESHOLD
-            {
-                // Decompose into: leakage inductors + ideal transformer couplings + magnetizing inductance.
-                //
-                // Standard T-model equivalent circuit per winding:
-                //   original_node_p ── L_leak ── internal_node ── (ideal xfmr) ── ref internal nodes
-                //   original_node_n ─────────────────────────────/
-                //
-                // The leakage inductor provides the reactive delay needed for the DK
-                // method's trapezoidal integration — without it, the ideal transformer
-                // creates an algebraic loop that produces positive K diagonals.
-                //
-                // For each winding i:
-                //   - Leakage: L_leak_i = (1 - k) × L_i
-                //   - Magnetizing (once, on the reference winding): k × L_ref
-                // Only saturating two-winding groups reach this point (three or
-                // more are refused above, and non-saturating groups are held off
-                // by IDEAL_XFMR_L_THRESHOLD), so k is the pair's one coupling.
-                //
-                // The leakage inductor connects from the original positive node to a new
-                // internal node. The original negative node is shared. The ideal transformer
-                // connects between the internal nodes.
-
-                // Pick reference winding (largest inductance).
-                // total_cmp is NaN-safe; parser already rejects non-finite L
-                // at parse_positive_value, but programmatic construction could
-                // still produce NaN and panic partial_cmp().unwrap().
-                let ref_idx = members
-                    .iter()
-                    .enumerate()
-                    .max_by(|(_, a), (_, b)| {
-                        inductor_refs[*a].value.total_cmp(&inductor_refs[*b].value)
-                    })
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                let ref_ind = &inductor_refs[&members[ref_idx]];
-                let l_ref = ref_ind.value;
-
-                // Compute average coupling per winding
                 let w = members.len();
-                let mut k_avg = vec![0.0f64; w];
-                let mut k_count = vec![0usize; w];
-                for coupling in &netlist.couplings {
-                    let a = coupling.inductor1_name.to_ascii_lowercase();
-                    let b = coupling.inductor2_name.to_ascii_lowercase();
+                let refs: Vec<&InductorRef> = members.iter().map(|m| &inductor_refs[m]).collect();
+
+                // The linear inductance matrix: self-inductances and K lines.
+                let mut l_mat = vec![vec![0.0; w]; w];
+                for i in 0..w {
+                    l_mat[i][i] = refs[i].value;
+                }
+                for c in &netlist.couplings {
+                    let a = c.inductor1_name.to_ascii_lowercase();
+                    let b = c.inductor2_name.to_ascii_lowercase();
                     if let (Some(ia), Some(ib)) = (
                         members.iter().position(|m| *m == a),
                         members.iter().position(|m| *m == b),
                     ) {
-                        k_avg[ia] += coupling.coupling;
-                        k_count[ia] += 1;
-                        k_avg[ib] += coupling.coupling;
-                        k_count[ib] += 1;
-                    }
-                }
-                for i in 0..w {
-                    if k_count[i] > 0 {
-                        k_avg[i] /= k_count[i] as f64;
+                        let m_ab = c.coupling * (refs[ia].value * refs[ib].value).sqrt();
+                        l_mat[ia][ib] = m_ab;
+                        l_mat[ib][ia] = m_ab;
                     }
                 }
 
-                // Create internal nodes for each winding.
-                // Track the next available node index across all groups.
-                let mut internal_nodes_p = Vec::with_capacity(w);
-                for (i, m) in members.iter().enumerate() {
-                    let ind = &inductor_refs[m];
-                    let k_i = k_avg[i];
-                    // Exact primary-referred T-model leakage split: L_leak = (1−k)·L,
-                    // magnetizing = k·L_ref (added below). The earlier (1−k²) form
-                    // realized k_eff = 1/(2−k²) ≈ 0.98 for a specified k=0.99 (~0.8%
-                    // transfer error, growing with frequency) — verified against an
-                    // ngspice coupled-inductor twin built from the realized [L] matrix.
-                    // Exact for 2 windings (the only case that reaches here).
-                    // No minimum: this path is nodal full-LU only (DK refuses
-                    // saturating circuits), where a small leakage is an
-                    // inductor branch row tending to a 0 V source, which is
-                    // well-posed. A floor of 1e-4·L here silently realized
-                    // k_eff = 0.9999 for any authored k above that.
-                    let l_leak = (1.0 - k_i) * ind.value;
-
-                    // Allocate internal node (1-indexed). Use next_internal_node counter
-                    // that starts at n+1 and increments across all groups.
-                    let internal_p = next_internal_node;
-                    next_internal_node += 1;
-                    internal_nodes_p.push(internal_p);
-
-                    // Add leakage inductor: original_node_p → internal_node_p
-                    self.inductors.push(InductorElement {
-                        name: format!("{}_leak", ind.name),
-                        node_i: ind.node_i,
-                        node_j: internal_p,
-                        value: l_leak,
-                        isat: None,
-                        air_floor: None,
-                        shared_core_k: None,
-                    });
-                }
-
-                // Add magnetizing inductance between reference winding's internal nodes.
-                // Shared-core saturation attaches HERE and nowhere else: {ref}_mag's
-                // branch current is the net magnetizing current by construction (the
-                // ideal couplings reflect winding load current out), so a single
-                // saturating flux law on this one inductor is physically correct
-                // shared-core saturation. Leakage inductors stay strictly linear
-                // (air path). ISAT is a PER-WINDING saturation current — the
-                // current at which the winding it is authored on drives the core
-                // into saturation. The magnetizing element is referred to the
-                // reference (largest-L) winding, so ISAT MUST be referred to the
-                // same side, or the core saturates by the turns ratio too late/
-                // early. Note the reference winding is NOT necessarily the primary:
-                // for a step-UP transformer (L_sec > L_pri, e.g. 1073 LO1166 at
-                // 1:1.68) the SECONDARY is the reference, and a primary-authored
-                // ISAT left unreferred makes the core saturate n× too late.
-                // Current refers inversely to turns, N ∝ √L:
-                //   Isat_ref = Isat_authored · √(L_authored / L_ref)
-                // ISAT-on-reference is the common case and referral is then a no-op
-                // (√1 = 1). Windings whose referred ISATs disagree were refused
-                // above, so the first one carrying ISAT speaks for the core.
-                let core_isat = members.iter().find_map(|m| {
-                    let ind = &inductor_refs[m];
-                    ind.isat.map(|isat| isat * (ind.value / l_ref).sqrt())
-                });
-                // One core, one magnetizing air floor. Each declaration is read
-                // against the pair's coupling (see `magnetizing_air_floor`): an
-                // authored LAIR is the winding's total air-core self-inductance
-                // and must exceed the leakage (1 - k) the deck already declares;
-                // declarations on both windings must imply the same floor.
-                let k_core = k_avg[ref_idx];
-                let mut core_air_floor = None;
-                let mut core_floor_value: Option<(&String, f64)> = None;
-                if core_isat.is_some() {
-                    for m in members.iter() {
-                        let Some(f) = inductor_refs[m].air_floor else {
-                            continue;
-                        };
-                        let value = magnetizing_air_floor(Some(f), k_core);
-                        if let crate::parser::SatFloor::Explicit(lair) = f {
-                            if value <= 0.0 {
-                                return Err(MnaError::TopologyError(format!(
-                                    "{m}: LAIR={lair:e} is the winding's total air-core \
-                                     inductance, but its coupling k = {k_core} already puts \
-                                     1 - k = {:.3e} of it in leakage, leaving no magnetizing \
-                                     air floor. Real audio iron has 1 - k ~ 1e-5..1e-4. Give \
-                                     LAIR > {:.3e}, or CORE= to set the core's magnetizing \
-                                     floor directly.",
-                                    1.0 - k_core,
-                                    1.0 - k_core
-                                )));
-                            }
+                // The split into core and leakage: stated (TURNS= on every
+                // winding, LM= on one), or the implicit two-winding form.
+                let split = if declares_core {
+                    let missing: Vec<&str> = (0..w)
+                        .filter(|&i| refs[i].turns.is_none())
+                        .map(|i| spelled[i])
+                        .collect();
+                    if !missing.is_empty() {
+                        return Err(MnaError::TopologyError(format!(
+                            "saturating core {{{names}}}: TURNS= is given on some windings but \
+                             not on {}. The core's turns vector needs every winding's relative \
+                             turns.",
+                            missing.join(", ")
+                        )));
+                    }
+                    let with_lm: Vec<usize> = (0..w).filter(|&i| refs[i].lm.is_some()).collect();
+                    match with_lm.as_slice() {
+                        [a] => {
+                            let turns: Vec<f64> =
+                                refs.iter().map(|r| r.turns.unwrap_or_default()).collect();
+                            crate::saturating_core::CoreSplit::explicit(
+                                &l_mat,
+                                &turns,
+                                *a,
+                                refs[*a].lm.unwrap_or_default(),
+                            )
                         }
-                        match core_floor_value {
-                            None => {
-                                core_floor_value = Some((m, value));
-                                core_air_floor = Some(f);
-                            }
-                            Some((first, v))
-                                if (v - value).abs() > 1e-12 * v.abs().max(value.abs()) =>
-                            {
-                                return Err(MnaError::TopologyError(format!(
-                                    "coupled inductors {{{}}} share one core but carry \
-                                     different air-core floors: {first} implies a magnetizing \
-                                     floor of {v:e} and {m} one of {value:e} (of the reference \
-                                     winding's inductance). A core has one; put LAIR= or CORE= \
-                                     on one winding only.",
-                                    members.join(", ")
-                                )));
-                            }
-                            Some(_) => {}
+                        [] => {
+                            return Err(MnaError::TopologyError(format!(
+                                "saturating core {{{names}}} gives TURNS= but no LM=. State the \
+                                 core's magnetizing inductance, seen from one winding, with LM= \
+                                 on that winding."
+                            )))
                         }
-                    }
-                }
-                // A datasheet rating converts against the core: its coupling and
-                // magnetizing floor are in the winding's terminal law. The
-                // agreement check above compares authored values, so a datasheet
-                // form is accepted on one winding only.
-                let rated: Vec<&String> = members
-                    .iter()
-                    .filter(|m| inductor_refs[m.as_str()].isat.is_some())
-                    .collect();
-                if rated.len() > 1
-                    && rated
-                        .iter()
-                        .any(|m| inductor_refs[m.as_str()].isat_spec.is_some())
-                {
-                    return Err(MnaError::TopologyError(format!(
-                        "coupled inductors {{{}}} share one core, and more than one carries \
-                         ISAT with a datasheet form (ISAT_DROP= or L_AT_IDC=). Rate the core \
-                         on one winding only.",
-                        members.join(", ")
-                    )));
-                }
-                let floor_frac = core_floor_value
-                    .map(|(_, v)| v)
-                    .unwrap_or_else(|| magnetizing_air_floor(None, k_core));
-                let core_isat = match rated.first() {
-                    Some(m) => {
-                        let ind = &inductor_refs[m.as_str()];
-                        let authored = ind.isat.unwrap_or_default();
-                        let model = match ind.isat_spec {
-                            Some(spec) => isat_from_datasheet(
-                                m, authored, spec, ind.value, k_core, floor_frac,
-                            )?,
-                            None => authored,
-                        };
-                        let referred = model * (ind.value / l_ref).sqrt();
-                        if !(referred.is_finite() && referred > 0.0) {
-                            return Err(MnaError::InvalidParameter(format!(
-                                "{m}: ISAT {model:e} A referred to the reference winding \
-                                 (x sqrt({:e}/{l_ref:e})) is {referred:e}, not a usable \
-                                 saturation current.",
-                                ind.value
+                        many => {
+                            let on: Vec<&str> = many.iter().map(|&i| spelled[i]).collect();
+                            return Err(MnaError::TopologyError(format!(
+                                "saturating core {{{names}}} gives LM= on {}. One core has one \
+                                 magnetizing inductance: give LM= on one winding only.",
+                                on.join(" and ")
                             )));
                         }
-                        Some(referred)
                     }
-                    None => core_isat,
+                } else if w == 2 {
+                    crate::saturating_core::CoreSplit::implicit_pair(
+                        [refs[0].value, refs[1].value],
+                        max_k,
+                    )
+                } else {
+                    let hint = match crate::saturating_core::star_decomposition(&l_mat) {
+                        Some((a, lm, turns)) => format!(
+                            " The diagonal-leakage (star) decomposition of this [L] is LM={lm:.6e} \
+                             on {} with {}. Add these to accept that assumption, which decides \
+                             where saturation sits, or state your core.",
+                            spelled[a],
+                            spelled
+                                .iter()
+                                .zip(&turns)
+                                .map(|(m, t)| format!("TURNS={t:.6e} on {m}"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                        None if w == 3 => " This [L] has no diagonal-leakage (star) \
+                                           decomposition (a winding sits between the other two, \
+                                           or a coupling is missing), so the core must be stated."
+                            .to_string(),
+                        None => String::new(),
+                    };
+                    return Err(MnaError::TopologyError(format!(
+                        "saturating transformer {{{names}}} has {w} windings, and its linear [L] \
+                         does not fix how much of it is the saturating core. State the core: \
+                         TURNS= (relative turns) on every winding and LM= (the core's \
+                         magnetizing inductance seen from that winding) on one. Declaring LM= \
+                         declares one core loop linking every winding.{hint}"
+                    )));
                 };
-                let ref_internal_p = internal_nodes_p[ref_idx];
-                let ref_neg = inductor_refs[&members[ref_idx]].node_j;
-                // Exact magnetizing inductance is k·L_ref (primary-referred), not
-                // L_ref — pairs with the (1−k)·L leakage above to realize the
-                // specified coupling exactly. ISAT (the core's, referred to the
-                // reference winding) applies to this branch's net magnetizing
-                // current; the flux law Φ(i) = L_mag·Isat·tanh(i/Isat) + L_air·i
-                // splits this branch's k·L_ref into the saturable L_mag and the
-                // air-core floor L_air.
-                let l_mag = k_avg[ref_idx] * l_ref;
-                self.inductors.push(InductorElement {
-                    name: format!("{}_mag", ref_ind.name),
-                    node_i: ref_internal_p,
-                    node_j: ref_neg,
-                    value: l_mag,
-                    isat: core_isat,
-                    air_floor: core_air_floor,
-                    shared_core_k: core_isat.map(|_| k_core),
-                });
+                if let Err((value, vector)) = split.leakage_positive_definite() {
+                    let direction: Vec<String> = spelled
+                        .iter()
+                        .zip(&vector)
+                        .map(|(m, v)| format!("{v:+.3} {m}"))
+                        .collect();
+                    return Err(MnaError::TopologyError(format!(
+                        "saturating core {{{names}}}: the leakage L - LM*n*n^T left by the stated \
+                         core is not positive-definite (eigenvalue {value:.3e} H along \
+                         [{}]). Leakage is air-flux energy and must be positive in every \
+                         direction: LM is too large for the couplings, or TURNS= disagrees with \
+                         the self-inductances and K.",
+                        direction.join(", ")
+                    )));
+                }
+                let a = split.ref_idx;
+                let l_aa = l_mat[a][a];
+                let n2 = |i: usize| split.n[i] * split.n[i];
 
-                // For each non-reference winding: add ideal transformer coupling
-                // between internal nodes (after leakage inductors).
-                for (i, m) in members.iter().enumerate() {
-                    if i == ref_idx {
+                // One core, one magnetizing air floor, in henries on the
+                // reference winding. An authored LAIR is its winding's TOTAL
+                // air-core self-inductance, less that winding's leakage; CORE=
+                // and the default are the magnetizing floor itself, a class
+                // fraction of the reference winding's inductance.
+                let mut floors: Vec<(usize, f64, crate::parser::SatFloor)> = Vec::new();
+                for (i, r) in refs.iter().enumerate() {
+                    let Some(f) = r.air_floor else {
                         continue;
+                    };
+                    let value = match f {
+                        crate::parser::SatFloor::Explicit(lair) => {
+                            let v = (lair * r.value - split.l_leak[i][i]) / n2(i);
+                            if v <= 0.0 {
+                                let leak = split.l_leak[i][i] / r.value;
+                                return Err(MnaError::TopologyError(format!(
+                                    "{}: LAIR={lair:e} is the winding's total air-core \
+                                     inductance, but its leakage already is {leak:.3e} of it, \
+                                     leaving no magnetizing air floor. Real audio iron has \
+                                     leakage ~ 1e-5..1e-4. Give LAIR > {leak:.3e}, or CORE= to \
+                                     set the core's magnetizing floor directly.",
+                                    spelled[i]
+                                )));
+                            }
+                            v
+                        }
+                        other => crate::parser::resolve_air_floor(Some(other)).0 * l_aa,
+                    };
+                    floors.push((i, value, f));
+                }
+                let (floor_h, core_air_floor) =
+                    match floors.iter().min_by(|x, y| x.1.total_cmp(&y.1)).copied() {
+                        None => (crate::parser::resolve_air_floor(None).0 * l_aa, None),
+                        Some((_, least, f)) => {
+                            let most = floors.iter().map(|x| x.1).fold(0.0_f64, f64::max);
+                            let listing = || {
+                                floors
+                                    .iter()
+                                    .map(|(i, v, _)| format!("{} {:.3e} H", spelled[*i], v))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            };
+                            if most > FLOOR_AGREEMENT_BAND * least {
+                                return Err(MnaError::TopologyError(format!(
+                                "coupled inductors {{{names}}} share one core but their air-core \
+                                 declarations imply magnetizing floors more than \
+                                 {FLOOR_AGREEMENT_BAND}x apart ({}). A core has one floor, and \
+                                 the declarations are good to that band at best: put LAIR= or \
+                                 CORE= on one winding only, or reconcile them.",
+                                listing()
+                            )));
+                            }
+                            if most > least * (1.0 + 1e-12) {
+                                crate::diag_warn!(
+                                "Saturating shared core {{{names}}}: the air-core declarations \
+                                 imply different magnetizing floors ({}), within the {}x band \
+                                 they are good to; using the least, {least:.3e} H.",
+                                listing(),
+                                FLOOR_AGREEMENT_BAND
+                            );
+                            }
+                            (least, Some(f))
+                        }
+                    };
+                if floor_h >= split.lm {
+                    return Err(MnaError::TopologyError(format!(
+                        "saturating core {{{names}}}: the magnetizing air floor {floor_h:.3e} H is \
+                         not below the core's magnetizing inductance {:.3e} H, so nothing is \
+                         left to saturate.",
+                        split.lm
+                    )));
+                }
+                let floor_reading = match core_air_floor {
+                    Some(crate::parser::SatFloor::Explicit(_)) => {
+                        "LAIR=, total air-core self-inductance less leakage".to_string()
                     }
-                    let ind = &inductor_refs[m];
-                    let n_turns = (ind.value / l_ref).sqrt();
+                    other => format!(
+                        "{}; magnetizing air floor, leakage from K",
+                        crate::parser::resolve_air_floor(other).1
+                    ),
+                };
 
-                    mna.ideal_transformers.push(IdealTransformerCoupling {
-                        name: format!("ideal_{}_{}", ref_ind.name, ind.name),
-                        pri_node_p: ref_internal_p,
-                        pri_node_n: ref_neg,
-                        sec_node_p: internal_nodes_p[i],
-                        sec_node_n: ind.node_j,
-                        turns_ratio: n_turns,
-                    });
+                // One shared core has one saturation current. A datasheet
+                // rating converts against its winding's own terminal law (its
+                // magnetizing fraction LM*n_i^2/L_i and floor), and every ISAT
+                // refers to the reference winding by turns: an MMF, n_i*I.
+                let rated: Vec<usize> = (0..w).filter(|&i| refs[i].isat.is_some()).collect();
+                if rated.len() > 1 && rated.iter().any(|&i| refs[i].isat_spec.is_some()) {
+                    return Err(MnaError::TopologyError(format!(
+                        "coupled inductors {{{names}}} share one core, and more than one carries \
+                         ISAT with a datasheet form (ISAT_DROP= or L_AT_IDC=). Rate the core on \
+                         one winding only."
+                    )));
+                }
+                let mut referred: Vec<(usize, f64)> = Vec::new();
+                for &i in &rated {
+                    let r = refs[i];
+                    let authored = r.isat.unwrap_or_default();
+                    let model = match r.isat_spec {
+                        Some(spec) => isat_from_datasheet(
+                            spelled[i],
+                            authored,
+                            spec,
+                            r.value,
+                            split.lm * n2(i) / r.value,
+                            floor_h * n2(i) / r.value,
+                        )?,
+                        None => authored,
+                    };
+                    let v = model * split.n[i];
+                    if !(v.is_finite() && v > 0.0) {
+                        return Err(MnaError::InvalidParameter(format!(
+                            "{}: ISAT {model:e} A referred to the reference winding (x {:e}) is \
+                             {v:e}, not a usable saturation current.",
+                            spelled[i], split.n[i]
+                        )));
+                    }
+                    referred.push((i, v));
+                }
+                let (first_i, core_isat) = referred[0];
+                if let Some((i, other)) = referred
+                    .iter()
+                    .find(|(_, v)| (v - core_isat).abs() > 1e-9 * core_isat.abs().max(v.abs()))
+                {
+                    return Err(MnaError::TopologyError(format!(
+                        "coupled inductors {{{names}}} share one core but carry different \
+                         saturation currents: {} and {} refer to {core_isat:e} A and {other:e} A \
+                         on the reference winding. A core has one saturation current; put ISAT \
+                         on one winding only.",
+                        spelled[first_i], spelled[*i]
+                    )));
                 }
 
+                // Realization. Per winding, leakage from its node to an internal
+                // node; the magnetizing inductor on the reference winding's
+                // internal node; ideal couplings (turns n_i) to the others.
+                let mut internal_nodes_p = Vec::with_capacity(w);
+                for _ in 0..w {
+                    internal_nodes_p.push(next_internal_node);
+                    next_internal_node += 1;
+                }
+                if split.leakage_is_diagonal() {
+                    // No leakage minimum: this path is nodal full-LU only, where
+                    // a small leakage is an inductor branch row tending to a 0 V
+                    // source, which is well-posed.
+                    for (i, r) in refs.iter().enumerate() {
+                        self.inductors.push(InductorElement {
+                            name: format!("{}_leak", r.name),
+                            node_i: r.node_i,
+                            node_j: internal_nodes_p[i],
+                            value: split.l_leak[i][i],
+                            isat: None,
+                            air_floor: None,
+                            shared_core: None,
+                        });
+                    }
+                } else {
+                    let inductances: Vec<f64> = (0..w).map(|i| split.l_leak[i][i]).collect();
+                    let coupling_matrix = (0..w)
+                        .map(|i| {
+                            (0..w)
+                                .map(|j| {
+                                    split.l_leak[i][j] / (inductances[i] * inductances[j]).sqrt()
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    mna.transformer_groups.push(TransformerGroupInfo {
+                        name: format!("{}_leakage", refs[a].name),
+                        num_windings: w,
+                        winding_names: refs.iter().map(|r| format!("{}_leak", r.name)).collect(),
+                        winding_node_i: refs.iter().map(|r| r.node_i).collect(),
+                        winding_node_j: internal_nodes_p.clone(),
+                        inductances,
+                        coupling_matrix,
+                    });
+                }
+                self.inductors.push(InductorElement {
+                    name: format!("{}_mag", refs[a].name),
+                    node_i: internal_nodes_p[a],
+                    node_j: refs[a].node_j,
+                    value: split.lm,
+                    isat: Some(core_isat),
+                    air_floor: core_air_floor,
+                    shared_core: Some(SharedCore {
+                        floor_frac: floor_h / split.lm,
+                        floor_reading,
+                        implicit_k: (!declares_core).then_some(max_k),
+                    }),
+                });
+                for i in (0..w).filter(|&i| i != a) {
+                    mna.ideal_transformers.push(IdealTransformerCoupling {
+                        name: format!("ideal_{}_{}", refs[a].name, refs[i].name),
+                        pri_node_p: internal_nodes_p[a],
+                        pri_node_n: refs[a].node_j,
+                        sec_node_p: internal_nodes_p[i],
+                        sec_node_n: refs[i].node_j,
+                        turns_ratio: split.n[i],
+                    });
+                }
                 log::info!(
-                    "Ideal transformer decomposition: {} windings, L_ref={:.3}H, {} couplings, {} internal nodes",
-                    members.len(),
-                    l_ref,
-                    members.len() - 1,
-                    w
+                    "Saturating shared core {{{names}}}: {w} windings, LM={:.3e} H on {}, {} \
+                     leakage",
+                    split.lm,
+                    spelled[a],
+                    if split.leakage_is_diagonal() {
+                        "diagonal"
+                    } else {
+                        "coupled"
+                    }
                 );
-
-                // Don't add to coupled_inductors or transformer_groups — replaced by ideal model.
                 continue;
             }
 
@@ -4398,7 +4454,7 @@ impl MnaBuilder {
         // non-power-conserving, non-symmetric [L] that made the T-model's transfer
         // ~5% high (growing with frequency), verified against the exact [L]-matrix
         // solve and ngspice. This was latent while the T-model was disabled
-        // (IDEAL_XFMR_L_THRESHOLD=1e30); enabling it for saturating transformers
+        // (non-saturating groups never take it); enabling it for saturating transformers
         // exposed it.
         // KVL row k: G[k][sec+]=+1, G[k][sec-]=-1, G[k][pri+]=-n, G[k][pri-]=+n
         // Current col k: G[sec+][k]=+1, G[sec-][k]=-1, G[pri+][k]=-n, G[pri-][k]=+n
@@ -5457,6 +5513,9 @@ impl MnaBuilder {
                 isat,
                 isat_spec,
                 air_floor,
+                // TURNS=/LM= are checked with the coupled groups.
+                turns: _,
+                lm: _,
             } => {
                 let node_i = self.node_map[n_plus];
                 let node_j = self.node_map[n_minus];
@@ -5487,7 +5546,7 @@ impl MnaBuilder {
                         (i, _) => i,
                     },
                     air_floor: *air_floor,
-                    shared_core_k: None,
+                    shared_core: None,
                 });
             }
             Element::VoltageSource {
