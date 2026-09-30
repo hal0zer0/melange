@@ -617,6 +617,15 @@ generated state is smaller.
   circuits were judged against a program 20 dB louder than the real one. The
   reference is now the smaller of that and the output's own excursion from
   its operating point. Golden renders are identical.
+- **`melange validate` compares on the clock it asked for.** The reference's
+  sample rate was inferred from ngspice's printed times, which carry seven
+  significant digits (48000.0077 Hz for 48 kHz), so the render was resampled
+  onto a slightly wrong clock: a phase drift a constant-delay alignment cannot
+  remove, which put a floor of 0.0286 % at 48 kHz (0.057 % at 96 kHz) under
+  every result, a resistive divider included. The reference now takes the
+  requested rate; the printed times are checked against that grid, a final
+  point ngspice adds at an off-grid stop time is dropped, and any other
+  mismatch is refused. A divider now reads 0.0002 %.
 - **The output clamp is in the generated file's provenance.** `--output-clamp`
   changes the emitted DSP (the `scaled.clamp(...)` bound) but was recorded in
   neither the `// Build:` line nor the `// provenance:` JSON, so a regeneration

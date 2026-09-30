@@ -347,9 +347,12 @@ warpony).
   mosfet-choke-load 0.325 %, warpony 0.283 %. Reference self-checks
   0.0001–0.022 %.
   Twenty-six of these read 0.0285–0.0287 %, from an RC network to tube
-  stages: a figure that independent of the circuit belongs to the harness
-  or the 1 kHz test signal, not to the decks. Not yet traced. It is the
-  smallest error validate resolves at these settings.
+  stages: that figure was the harness's, not the decks'. The reference's
+  sample rate was read from ngspice's printed times (seven digits), so the
+  render was resampled onto a clock off by parts in 1e7 before grading; a
+  resistive divider read 0.0286 %. With the requested clock a divider reads
+  0.0002 % and those decks read 0.0002-0.0004 %; the list above has not been
+  re-measured since, and every figure in it carries the 0.0286 % term.
 - **FAIL, backward Euler pinned by the deck** (`.integrator be`, first
   order): wurli-preamp 0.675 %, tungsten-glow 0.611 %, steve-1073-preamp
   2.05 %. steve-1073-preamp clips into pulses with ~18 V edges; 95–99.5 % of

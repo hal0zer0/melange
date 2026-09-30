@@ -409,9 +409,46 @@ pub fn run_transient_stepped(
     }
 
     // Parse the printed output (not raw file - the .PRINT output goes to stdout)
-    let spice_data = parse_printed_output(&stdout, nodes_to_capture)?;
+    let mut spice_data = parse_printed_output(&stdout, nodes_to_capture)?;
+    on_requested_clock(&mut spice_data, tstep)?;
 
     Ok(spice_data)
+}
+
+/// Put the reference on the clock it was requested at.
+///
+/// `.OPTIONS INTERP` makes ngspice print at exact multiples of `tstep`, but it
+/// prints the times to about seven significant digits, so a rate inferred
+/// from the printed spacing is off by parts in 1e7 (48000.0077 Hz for
+/// 48 kHz). That was not harmless: a comparison then resampled the render
+/// onto the wrong clock, a drift of 1e-3 rad at 1 kHz over a second, which a
+/// constant-delay alignment cannot remove. Every validated deck read at
+/// least 0.0286 % at 48 kHz from it (0.057 % at 96 kHz), a resistive divider
+/// included. The printed times are checked against the requested grid to
+/// their own precision instead, and the reference takes the requested rate.
+fn on_requested_clock(data: &mut SpiceData, tstep: f64) -> Result<(), SpiceError> {
+    // A printed time carries ~7 significant digits.
+    let t0 = data.time.first().copied().unwrap_or(0.0);
+    let on_grid =
+        move |k: usize, t: f64| (t - t0 - k as f64 * tstep).abs() <= 1e-6 * t.abs() + 1e-4 * tstep;
+    let n = data.time.len();
+    // ngspice ends the run with a point at tstop itself, which is off the
+    // grid when tstop is not a multiple of tstep: not a sample on this clock.
+    if n >= 2 && !on_grid(n - 1, data.time[n - 1]) {
+        data.time.truncate(n - 1);
+        for v in data.voltages.values_mut().chain(data.currents.values_mut()) {
+            v.truncate(n - 1);
+        }
+    }
+    if let Some((k, &t)) = data.time.iter().enumerate().find(|&(k, &t)| !on_grid(k, t)) {
+        return Err(SpiceError::ParseError(format!(
+            "ngspice printed sample {k} at t = {t:e} s, off the requested {tstep:e} s grid; the \
+             reference is not on the comparison's clock (is .OPTIONS INTERP in effect?)"
+        )));
+    }
+    data.actual_tstep = tstep;
+    data.sample_rate = 1.0 / tstep;
+    Ok(())
 }
 
 /// ngspice's internal steps per output step at the start of the reference's
@@ -1463,6 +1500,35 @@ Index   time            v(out)
         assert_eq!(format_scientific(1e-6), "1e-6");
         assert_eq!(format_scientific(0.0), "0");
         assert!(format_scientific(1.5e-3).contains('e'));
+    }
+
+    #[test]
+    fn the_reference_takes_the_requested_clock() {
+        // Printed to seven digits, as ngspice does at 48 kHz.
+        let mut data = SpiceData {
+            time: (0..4800)
+                .map(|k| format!("{:.6e}", k as f64 / 48000.0).parse().unwrap())
+                .collect(),
+            ..SpiceData::default()
+        };
+        on_requested_clock(&mut data, 1.0 / 48000.0).unwrap();
+        assert_eq!(data.sample_rate, 48000.0);
+        let mut off = SpiceData {
+            time: (0..4800).map(|k| k as f64 / 44100.0).collect(),
+            ..SpiceData::default()
+        };
+        assert!(on_requested_clock(&mut off, 1.0 / 48000.0).is_err());
+        // A final point at a tstop off the grid is dropped, with its samples.
+        let mut tail = SpiceData {
+            time: (0..480)
+                .map(|k| k as f64 / 48000.0)
+                .chain(std::iter::once(0.00998))
+                .collect(),
+            ..SpiceData::default()
+        };
+        tail.voltages.insert("out".into(), vec![0.0; 481]);
+        on_requested_clock(&mut tail, 1.0 / 48000.0).unwrap();
+        assert_eq!((tail.time.len(), tail.voltages["out"].len()), (480, 480));
     }
 
     #[test]
