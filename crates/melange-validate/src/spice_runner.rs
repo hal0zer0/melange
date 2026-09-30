@@ -910,6 +910,13 @@ pub fn run_transient_with_thevenin_pwl(
     // shipped decks that hand-expanded their op-amps. See opamp_translate.rs.
     let translated =
         crate::opamp_translate::translate_opamps_for_ngspice(&translated, netlist_content)?;
+    // Melange-only element parameters: a saturating inductor becomes its own
+    // flux law, a K-coupled saturating core and a resistor's KF=/AF= are
+    // stripped with a stated notice. See sat_inductor_translate.rs.
+    let translated = crate::sat_inductor_translate::translate_melange_params_for_ngspice(
+        &translated,
+        netlist_content,
+    )?;
 
     // The VCCS twin is LINEAR: it has no VCC/VEE rail clamp and no SR slew
     // clamp. Watch each such op-amp's output node on the reference trace so a

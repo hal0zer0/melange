@@ -51,6 +51,7 @@ pub mod comparison;
 pub mod deck_guard;
 pub(crate) mod opamp_translate;
 pub(crate) mod pentode_translate;
+mod sat_inductor_translate;
 pub mod spice_runner;
 pub(crate) mod tube_translate;
 pub mod visualizer;
