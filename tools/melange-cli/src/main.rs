@@ -30,10 +30,10 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "melange")]
 #[command(about = "Circuit modeling toolkit - from SPICE to real-time DSP")]
-// Version carries the build commit (baked by build.rs into MELANGE_VERSION) so
-// `melange --version` disambiguates a released tag, an unreleased main, and a
-// local build that otherwise all print the same bare CARGO_PKG_VERSION.
-#[command(version = env!("MELANGE_VERSION"))]
+// Version carries the build commit (`version_label`) so `melange --version`
+// disambiguates a released tag, an unreleased main, and a local build that
+// otherwise all print the same bare CARGO_PKG_VERSION.
+#[command(version = version_label())]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -988,12 +988,26 @@ enum ImportFormat {
 
 mod kicad_import;
 
+/// `<crate version> (<commit>[-dirty])`: the commit label is the solver's
+/// `build_identity::GIT_COMMIT`, the one the generated-code header carries, so
+/// the two cannot disagree.
+fn version_label() -> &'static str {
+    static LABEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    LABEL.get_or_init(|| {
+        format!(
+            "{} ({})",
+            env!("CARGO_PKG_VERSION"),
+            melange_solver::build_identity::GIT_COMMIT
+        )
+    })
+}
+
 /// `--version` text: the clap static `<version> (<commit>[-dirty])` pointer plus
 /// the exact runtime exe hash (`exe <16-hex FNV-1a-64>`). Matches the digest a
 /// peer computes over the binary on disk, so a build can be identified from its
 /// own output alone.
 fn full_version_string() -> String {
-    let base = env!("MELANGE_VERSION");
+    let base = version_label();
     match melange_solver::build_identity::current_exe_hash() {
         // Algorithm-qualified: `fnv1a64:` states the digest so a reader cannot
         // compare it against a different hash of the same file (thread 184).

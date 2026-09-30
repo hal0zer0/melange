@@ -1823,3 +1823,41 @@ fn test_input_beyond_the_limit_is_refused_unless_allowed() {
     );
     run_melange(&ana("50"));
 }
+
+/// `melange --version` and the header of the code it generates carry one
+/// commit label, `build_identity::GIT_COMMIT` (with `-dirty` on an edited
+/// tree): they once disagreed, the CLI reading clean on a dirty build.
+#[test]
+fn version_and_generated_header_carry_one_commit_label() {
+    let label = melange_solver::build_identity::GIT_COMMIT;
+    let out = Command::new(melange_bin())
+        .arg("--version")
+        .output()
+        .expect("run");
+    let version = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        version.contains(&format!("({label})")),
+        "{version} vs {label}"
+    );
+
+    let cir = write_test_circuit("rc\nR1 in out 1k\nC1 out 0 10n\n", "version_label");
+    let rs = std::env::temp_dir().join("melange_cli_test_version_label.rs");
+    let out = Command::new(melange_bin())
+        .args(["compile", cir.to_str().unwrap(), "-o", rs.to_str().unwrap()])
+        .output()
+        .expect("run");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let code = std::fs::read_to_string(&rs).unwrap();
+    let header = code
+        .lines()
+        .find(|l| l.starts_with("// melange:"))
+        .expect("header");
+    assert!(
+        header.contains(&format!("({label})")),
+        "{header} vs {label}"
+    );
+}

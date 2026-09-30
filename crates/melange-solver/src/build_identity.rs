@@ -23,6 +23,16 @@
 
 use std::sync::OnceLock;
 
+/// `<short commit>[-dirty]` of the source this crate was built from, or
+/// "unknown" without git: the best-effort pointer that the generated-code
+/// header and `melange --version` both print. One definition, stamped by
+/// `build.rs` from `build_git.rs`; "dirty" means a tracked change vs HEAD in
+/// anything the binaries are built from.
+pub const GIT_COMMIT: &str = match option_env!("MELANGE_GIT_COMMIT") {
+    Some(id) => id,
+    None => "unknown",
+};
+
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 

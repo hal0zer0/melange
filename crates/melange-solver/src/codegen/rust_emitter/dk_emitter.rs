@@ -672,12 +672,12 @@ impl RustEmitter {
             .collect();
         ctx.insert("title", &sanitized_title);
 
-        // Build-provenance identity (oomox thread 214). Version is the melange
-        // crate version at *melange* build time; commit is captured by build.rs
-        // (falls back to "unknown" for a packaged crate / no git). Local builds
-        // between tags are normal, so both are recorded.
+        // Build-provenance identity. Version is the melange crate version at
+        // *melange* build time; commit is `build_identity::GIT_COMMIT` (the
+        // same label `melange --version` prints). Local builds between tags
+        // are normal, so both are recorded.
         let melange_version = env!("CARGO_PKG_VERSION");
-        let melange_commit = option_env!("MELANGE_GIT_COMMIT").unwrap_or("unknown");
+        let melange_commit = crate::build_identity::GIT_COMMIT;
         ctx.insert("melange_version", melange_version);
         ctx.insert("melange_commit", melange_commit);
         // Exact identity of the emitting binary (see provenance_json). Masked in
