@@ -316,51 +316,50 @@ and compilation are necessary but not sufficient).
 `melange validate` defaults on the 85 circuits-repo decks (`unstable/`,
 `testing/`): 48 kHz, oversampling off, 1 kHz sine at 0.1 V for 1 s, the
 reference driven by the analytic `SIN` and shown converged before anything
-is graded against it (`reference.rs`: refined in maximum step and `reltol`
-until both refinements move it by at most 0.05 %, a tenth of the 0.5 % RMS
-tolerance), nominal values, isothermal, the tube/JFET/linearized/parasitic
-twins as melange built them. Measured at 1fd6761.
+is graded against it (`reference.rs`: refined in maximum step and `reltol`,
+or `trtol` where ngspice cannot start at a tighter `reltol`, until both
+refinements move it by at most 0.05 %, a tenth of the 0.5 % RMS tolerance),
+compared on the requested clock, nominal values, isothermal, the
+tube/JFET/linearized/parasitic twins as melange built them. Measured at
+f36e99c.
 
-**46 PASS, 10 FAIL, 2 reference not converged, 1 timed out, 26 refused or
-without a reference.** Where ngspice cannot run a tighter `reltol` at the
-start of the transient, the tolerance refinement is on `trtol` (the step
-control alone) with Newton kept at `reltol = 1e-4`, under the bound; the
-self-check line says so (kt88-pp-stage, mosfet-choke-load, rexi-mockup,
-warpony).
+**48 PASS, 10 FAIL, 2 reference not converged, 1 timed out, 24 refused or
+without a reference.**
 
-- **PASS** (RMS, 1x): funkyinduct 0.029 %, el84-single-stage 0.029 %,
-  farfisa-voicing 0.073 %, gold-press-cab 0.029 %, gold-press-cartridge
-  0.029 %, gold-press-mastering 0.029 %, gold-press-overdrive 0.038 %,
-  gold-press-riaa 0.123 %, jeffreys-tube 0.252 %, jfet-booster 0.029 %,
-  moonladder 0.288 %, mosfet-source-follower 0.029 %, noyce-4558 0.029 %,
-  noyce-6bq5 0.029 %, noyce-amp-at-idle 0.216 %, noyce-boiler-room 0.394 %,
-  noyce-carbon-comp-bank 0.034 %, noyce-cascaded-triodes 0.156 %,
-  noyce-clean-rc 0.029 %, noyce-ef86 0.029 %, noyce-germanium-cluster
-  0.029 %, noyce-ne5534 0.029 %, noyce-smps-ripple 0.029 %, noyce-tape-head
-  0.030 %, noyce-transformer-triode 0.208 %, noyce-triode-12ax7 0.029 %,
-  passive-eq1a 0.030 %, philicorda-voicing 0.186 %, pipe-shouter 0.255 %,
-  pretty-baby 0.251 %, rc-lowpass 0.145 %, steve-1073-eq 0.029 %,
-  steve-1073-eqpres 0.029 %, steve-1073-output 0.029 %, steve-1073-presence
-  0.029 %, sympathy-drive 0.029 %, sympathy-frontend 0.029 %, tube-preamp
-  0.038 %, twas-preamp 0.141 %, twill-deluxe 0.030 %, velvet-elvis 0.029 %,
-  vurli-leveler 0.421 %, wurli-power-amp 0.077 %, kt88-pp-stage 0.029 %,
-  mosfet-choke-load 0.325 %, warpony 0.283 %. Reference self-checks
-  0.0001–0.022 %.
-  Twenty-six of these read 0.0285–0.0287 %, from an RC network to tube
-  stages: that figure was the harness's, not the decks'. The reference's
-  sample rate was read from ngspice's printed times (seven digits), so the
-  render was resampled onto a clock off by parts in 1e7 before grading; a
-  resistive divider read 0.0286 %. With the requested clock a divider reads
-  0.0002 % and those decks read 0.0002-0.0004 %; the list above has not been
-  re-measured since, and every figure in it carries the 0.0286 % term.
+- **PASS** (RMS, 1x): gold-press-cab 0.0001 %, steve-1073-presence 0.0001 %,
+  sympathy-drive 0.0001 %, noyce-4558 0.0002 %, noyce-ne5534 0.0002 %,
+  sympathy-frontend 0.0002 %, jfet-booster 0.0003 %, gold-press-mastering
+  0.0004 %, mosfet-source-follower 0.0004 %, noyce-clean-rc 0.0004 %,
+  noyce-triode-12ax7 0.0004 %, noyce-smps-ripple 0.0005 %, el84-single-stage
+  0.0006 %, steve-1073-output 0.0006 %, gold-press-cartridge 0.0007 %,
+  noyce-6bq5 0.0008 %, kt88-pp-stage 0.0009 %, twill-deluxe 0.0016 %,
+  funkyinduct 0.0019 %, noyce-germanium-cluster 0.0022 %, passive-eq1a
+  0.0044 %, steve-1073-eq 0.0047 %, steve-1073-eqpres 0.0047 %, velvet-elvis
+  0.0064 %, noyce-tape-head 0.0068 %, noyce-ef86 0.0088 %,
+  noyce-carbon-comp-bank 0.015 %, sad-bastard 0.021 %, tube-preamp 0.022 %,
+  gold-press-overdrive 0.022 %, farfisa-voicing 0.064 %, wurli-power-amp
+  0.071 %, noyce-cascaded-triodes 0.094 %, basic-bitch 0.115 %,
+  gold-press-riaa 0.117 %, twas-preamp 0.135 %, rc-lowpass 0.139 %,
+  philicorda-voicing 0.181 %, noyce-transformer-triode 0.209 %,
+  noyce-amp-at-idle 0.210 %, pretty-baby 0.242 %, pipe-shouter 0.247 %,
+  jeffreys-tube 0.247 %, warpony 0.285 %, moonladder 0.290 %,
+  mosfet-choke-load 0.321 %, noyce-boiler-room 0.391 %, vurli-leveler
+  0.417 %. Reference self-checks 0.0001–0.022 %.
 - **FAIL, backward Euler pinned by the deck** (`.integrator be`, first
   order): wurli-preamp 0.675 %, tungsten-glow 0.611 %, steve-1073-preamp
   2.05 %. steve-1073-preamp clips into pulses with ~18 V edges; 95–99.5 % of
   its error sits on edge samples, mostly one sample per edge where the
   output leaves its flat top between samples. Its trace is open (see
   SPICE_VALIDATION.md, rate sweep).
-- **FAIL, open:** noyce-cascade-idle 2.95 % (THD −12.8 dB, heavily clipped;
-  untraced); rexi-mockup 3.65 % (reference self-check 0.027 %; untraced).
+- **FAIL, 1x discretization:** noyce-cascade-idle 2.95 % (THD −12.8 dB,
+  heavily clipped). With a stimulus incommensurate with the rate (1001 Hz)
+  its error falls monotonically, 4.28 / 1.33 / 0.81 / 0.26 % at 48 / 96 /
+  192 / 384 kHz, unaligned equal to aligned: it converges; at exactly 1 kHz
+  the clipping corners fall at a fixed sub-sample phase per rate and the
+  rate sweep reads a false PLATEAU.
+- **FAIL, open:** rexi-mockup 3.67 % (reference self-check 0.027 % via
+  `trtol`; at 96 and 192 kHz ngspice cannot start at either tighter
+  tolerance, so the rate sweep has no converged reference).
 - **FAIL, no meaningful comparison:** noyce-zener-junction (the THD gate on
   a nanovolt-level output; RMS 0.033 %), wurli-preamp-okona, radio-am,
   radio-fm (reference exactly 0), philicorda-voicing-coupled 13.7 % (the
@@ -368,7 +367,8 @@ warpony).
 - **Reference not converged** (no verdict given): philicorda-master is a
   free-running oscillator whose phase moves between refinements;
   farfisa-se15-reverb's output is at the nanovolt level. champ-5f1's
-  reference was still refining when the run hit its one-hour limit.
+  reference was still refining after half an hour (an hour in an earlier
+  run), and the run was stopped.
 - **Refused or no reference:** devices ngspice cannot simulate (VCA, LDR:
   4kbuscomp, 4kbuscomp-audiopath, gravity, gravity-stereo, farfisa-mtb,
   farfisa-swell, farfisa-se15-preamp, six philicorda note boards); no `in` /
