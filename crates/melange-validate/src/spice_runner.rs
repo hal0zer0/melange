@@ -676,12 +676,29 @@ pub(crate) fn substitute_dynamic_element_defaults(deck: &str) -> String {
         }
     }
 
-    if overrides.is_empty() {
+    // A bare `.runtime <name> <min> <max> as <field>` scalar is a free
+    // parameter of the B-source expressions; melange's generated code starts
+    // it at `min` (ScalarRuntimeIR::default). ngspice has no `.runtime`, so the
+    // reference gets it as a `.param` at that value, or the expressions read
+    // an undefined parameter.
+    let scalar_params: Vec<String> = netlist
+        .runtime_scalars
+        .iter()
+        .map(|r| format!(".param {}={}", r.name, format_scientific(r.min_value)))
+        .collect();
+
+    if overrides.is_empty() && scalar_params.is_empty() {
         return deck.to_string();
     }
 
     let mut out = String::with_capacity(deck.len() + 32);
-    for line in deck.lines() {
+    for (i, line) in deck.lines().enumerate() {
+        if i == 1 {
+            for p in &scalar_params {
+                out.push_str(p);
+                out.push('\n');
+            }
+        }
         let trimmed = line.trim_start();
         // Only rewrite two-terminal passive element lines: `<R|C|L>name n+ n- value`.
         // Comments, directives, sources and everything else are copied verbatim.
@@ -917,6 +934,9 @@ pub fn run_transient_with_thevenin_pwl(
         &translated,
         netlist_content,
     )?;
+    // Behavioral-source functions ngspice lacks (idt, atan2). See
+    // behavioral_translate.rs.
+    let translated = crate::behavioral_translate::translate_behavioral_for_ngspice(&translated);
 
     // The VCCS twin is LINEAR: it has no VCC/VEE rail clamp and no SR slew
     // clamp. Watch each such op-amp's output node on the reference trace so a
@@ -1361,6 +1381,16 @@ Index   time            v(out)
         let ccw = element_value(&out, "R_ccw").expect("R_ccw line missing");
         assert!((cw - 15007.0).abs() < 1e-6, "R_cw={cw}; deck:\n{out}");
         assert!((ccw - 84993.0).abs() < 1e-6, "R_ccw={ccw}; deck:\n{out}");
+    }
+
+    #[test]
+    fn a_runtime_scalar_becomes_a_param_at_its_starting_value() {
+        // melange starts a bare `.runtime` scalar at its minimum; the reference
+        // needs it defined, or a B-source reading it is undefined in ngspice.
+        let deck = "radio\n.runtime f_offset 100 5000 as f_offset\nR1 in out 1k\n\
+                    B1 out 0 V={ 1e-3*f_offset }\n.end\n";
+        let out = substitute_dynamic_element_defaults(deck);
+        assert_eq!(out.lines().nth(1), Some(".param f_offset=1e2"), "{out}");
     }
 
     #[test]

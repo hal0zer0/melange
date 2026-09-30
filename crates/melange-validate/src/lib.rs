@@ -47,6 +47,7 @@ use std::path::Path;
 use thiserror::Error;
 
 pub mod alignment;
+mod behavioral_translate;
 pub mod comparison;
 pub mod deck_guard;
 pub(crate) mod opamp_translate;
