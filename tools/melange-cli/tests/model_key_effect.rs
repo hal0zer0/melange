@@ -20,6 +20,13 @@
 //! `--noise full`. Recognised-but-unimplemented keys are checked separately:
 //! they must compile and print a notice naming the cost.
 //!
+//! A key can change the generated code and still not change the answer: a
+//! JFET's `RS=` once reached only the Newton Jacobian (its constants were in
+//! the code), so the converged circuit was the device without it. So each
+//! key is also required to move the DC operating point (`melange dc-op`)
+//! on its witness card, unless it is listed in [`DC_INERT`] with the reason
+//! it cannot (charge storage, time constants, noise, slew).
+//!
 //! Glow lamps are not swept.
 
 use melange_solver::model_params::ModelClass;
@@ -53,6 +60,9 @@ struct Case {
     keys: &'static [(&'static str, &'static str, &'static str, Witness)],
     /// Keys left off the rich card: aliases, or keys that conflict with it.
     alone_only: &'static [&'static str],
+    /// The DC operating-point witness when `deck` has no DC excitation that
+    /// lets the device's keys act (empty = `deck`).
+    dc_deck: &'static str,
 }
 
 const CASES: &[Case] = &[
@@ -77,6 +87,7 @@ const CASES: &[Case] = &[
             ("TAMB", "", "320", Alone),
         ],
         alone_only: &["TAMB"],
+        dc_deck: "diode dc\nRin in 0 1k\nVs a 0 DC 1\nR1 a out 1k\nD1 out 0 DX\n{CARD}\n",
     },
     Case {
         class: ModelClass::Bjt,
@@ -124,6 +135,7 @@ const CASES: &[Case] = &[
             ("JBR", "", "0.001", Alone),
         ],
         alone_only: &["TAMB", "VT", "VA", "VB", "JBF", "JBR"],
+        dc_deck: "",
     },
     Case {
         class: ModelClass::Jfet,
@@ -143,6 +155,7 @@ const CASES: &[Case] = &[
             ("IDSS", "", "4e-3", Alone),
         ],
         alone_only: &["IDSS"],
+        dc_deck: "",
     },
     Case {
         class: ModelClass::Mosfet,
@@ -162,6 +175,8 @@ const CASES: &[Case] = &[
             ("VT", "", "1.5", Alone),
         ],
         alone_only: &["VT"],
+        dc_deck: "mosfet dc\nRin in 0 1k\nRg1 vcc g 1Meg\nRg2 g 0 470k\nM1 d g s 0 MX\n\
+                  Rd vcc d 10k\nRs s 0 1k\nVcc vcc 0 DC 12\n{CARD}\n",
     },
     Case {
         class: ModelClass::Triode,
@@ -194,6 +209,7 @@ const CASES: &[Case] = &[
             ("SHOT_GAMMA2", "0.5", "0.8", Noise),
         ],
         alone_only: &[],
+        dc_deck: "",
     },
     Case {
         class: ModelClass::Pentode,
@@ -227,6 +243,7 @@ const CASES: &[Case] = &[
             ("AF", "1", "1.3", Noise),
         ],
         alone_only: &[],
+        dc_deck: "",
     },
     Case {
         class: ModelClass::Opamp,
@@ -255,6 +272,11 @@ const CASES: &[Case] = &[
             ("GBW", "", "3e6", Alone),
         ],
         alone_only: &["VSAT", "GBW"],
+        // Two stages driven into opposite rails, so the rail keys act at DC;
+        // capacitor-coupled so the auto rail mode is active-set (R_SAG acts).
+        dc_deck: "opamp dc\nRin in 0 1k\nVp p 0 DC 1\nVn n 0 DC -1\nR1 p i1 10k\nR2 i1 o1 200k\n\
+                  U1 0 i1 o1 OX\nRl1 o1 0 10k\nR3 n i2 10k\nR4 i2 o2 200k\nU2 0 i2 o2 OX\n\
+                  Rl2 o2 0 10k\nCc1 o1 x1 1u\nRx1 x1 0 10k\nCc2 o2 x2 1u\nRx2 x2 0 10k\n{CARD}\n",
     },
     Case {
         class: ModelClass::Vca,
@@ -268,6 +290,8 @@ const CASES: &[Case] = &[
             ("MODE", "0", "1", Rich),
         ],
         alone_only: &[],
+        dc_deck: "vca dc\nRin in 0 1k\nVs s0 0 DC 1\nR1 s0 a 10k\nY1 a sum cv 0 VX\nRs sum 0 10k\n\
+                  Vcv cv 0 DC 0.1\n{CARD}\n",
     },
     Case {
         class: ModelClass::Ldr,
@@ -282,6 +306,8 @@ const CASES: &[Case] = &[
             ("TAU_R", "0.05", "0.1", Rich),
         ],
         alone_only: &[],
+        dc_deck: "ldr dc\nRin in 0 1k\nVs s0 0 DC 1\nR1 s0 a 10k\nO1 a out lfo 0 LX\n\
+                  Rload out 0 100k\nVlfo lfo 0 DC 0.5\n{CARD}\n",
     },
 ];
 
@@ -508,4 +534,238 @@ fn an_unknown_key_is_refused() {
         );
     }
     let _ = std::fs::remove_dir_all(scratch("unknown"));
+}
+
+/// Keys that legitimately leave the DC operating point unchanged on their
+/// witness card, each with the reason. Everything else must move it.
+const DC_INERT: &[(ModelClass, &str, &str)] = &[
+    (ModelClass::Diode, "CJO", CHARGE),
+    (
+        ModelClass::Diode,
+        "CTH",
+        "thermal capacitance: a time constant",
+    ),
+    (ModelClass::Diode, "RTH", COLD),
+    (ModelClass::Diode, "XTI", COLD),
+    (ModelClass::Diode, "EG", COLD),
+    (
+        ModelClass::Diode,
+        "BV",
+        "acts only in reverse breakdown, which neither witness reaches",
+    ),
+    (ModelClass::Bjt, "CJE", CHARGE),
+    (ModelClass::Bjt, "CJC", CHARGE),
+    (ModelClass::Bjt, "VJE", CHARGE),
+    (ModelClass::Bjt, "MJE", CHARGE),
+    (ModelClass::Bjt, "VJC", CHARGE),
+    (ModelClass::Bjt, "MJC", CHARGE),
+    (ModelClass::Bjt, "FC", CHARGE),
+    (ModelClass::Bjt, "TF", CHARGE),
+    (
+        ModelClass::Bjt,
+        "CTH",
+        "thermal capacitance: a time constant",
+    ),
+    (ModelClass::Bjt, "RTH", COLD),
+    (ModelClass::Bjt, "XTI", COLD),
+    (ModelClass::Bjt, "XTB", COLD),
+    (ModelClass::Bjt, "EG", COLD),
+    (
+        ModelClass::Bjt,
+        "NR",
+        "the witness's B-C junction is reverse biased; exp(Vbc/(NR*Vt)) is below f64 there",
+    ),
+    (
+        ModelClass::Bjt,
+        "NC",
+        "the witness's B-C junction is reverse biased; exp(Vbc/(NC*Vt)) is below f64 there",
+    ),
+    (ModelClass::Jfet, "CGS", CHARGE),
+    (ModelClass::Jfet, "CGD", CHARGE),
+    (ModelClass::Mosfet, "CGS", CHARGE),
+    (ModelClass::Mosfet, "CGD", CHARGE),
+    (ModelClass::Triode, "CCG", CHARGE),
+    (ModelClass::Triode, "CGP", CHARGE),
+    (ModelClass::Triode, "CCP", CHARGE),
+    (
+        ModelClass::Triode,
+        "CTH",
+        "thermal capacitance: a time constant",
+    ),
+    (ModelClass::Triode, "RTH", COLD),
+    (ModelClass::Triode, "VBIAS_ALPHA", COLD),
+    (ModelClass::Triode, "TAMB", COLD),
+    (ModelClass::Pentode, "CCG", CHARGE),
+    (ModelClass::Pentode, "CGP", CHARGE),
+    (ModelClass::Pentode, "CCP", CHARGE),
+    (
+        ModelClass::Pentode,
+        "IG_MAX",
+        "control-grid current is exactly 0 at the witness's negative grid bias",
+    ),
+    (
+        ModelClass::Pentode,
+        "VGK_ONSET",
+        "control-grid current is exactly 0 at the witness's negative grid bias",
+    ),
+    (
+        ModelClass::Pentode,
+        "RGI",
+        "acts through control-grid current, exactly 0 at the witness's negative grid bias",
+    ),
+    (
+        ModelClass::Opamp,
+        "SR",
+        "slew rate: acts only on the transient",
+    ),
+    (
+        ModelClass::Opamp,
+        "AOL_TRANSIENT_CAP",
+        "the transient's AOL; the DC operating point keeps the full AOL by design",
+    ),
+    (
+        ModelClass::Ldr,
+        "RMIN",
+        "the DC operating point is the dark seed (RMAX); the light state develops in the transient",
+    ),
+    (
+        ModelClass::Ldr,
+        "GAMMA",
+        "the DC operating point is the dark seed (RMAX); the light state develops in the transient",
+    ),
+    (ModelClass::Ldr, "TAU_A", "a time constant"),
+    (ModelClass::Ldr, "TAU_R", "a time constant"),
+];
+
+const CHARGE: &str = "charge storage: acts only on the transient";
+const COLD: &str = "the DC operating point is the cold power-on state; self-heating develops in the transient over RTH*CTH (XTI/EG/XTB/VBIAS_ALPHA/TAMB act here only through it)";
+
+/// DC keys the operating point does not see today: defects, each queued for
+/// its fix. The test requires them to STILL not move it, so a fix removes
+/// its entry here.
+const KNOWN_DC_DEFECTS: &[(ModelClass, &str, &str)] = &[
+    (
+        ModelClass::Triode,
+        "MU_B",
+        "the DC OP evaluates the triode sharp (KorenTriode::with_all_params sets svar = 0) \
+         while the transient applies variable-mu",
+    ),
+    (ModelClass::Triode, "SVAR", "as MU_B"),
+    (ModelClass::Triode, "EX_B", "as MU_B"),
+    (
+        ModelClass::Triode,
+        "RGI",
+        "the DC OP has no grid stopper; the transient solves through it (5.1 pA of grid \
+         current at this bias)",
+    ),
+    (
+        ModelClass::Pentode,
+        "LAMBDA",
+        "accepted and stored, read by neither the DC OP nor the transient",
+    ),
+];
+
+/// Node voltages and device voltages/currents of `melange dc-op --format
+/// json` (full precision), in a stable order.
+fn dc_op(deck: &str, test: &str) -> Result<Vec<(String, f64)>, String> {
+    let stem = format!("d{}", SEQ.fetch_add(1, Ordering::Relaxed));
+    let cir = scratch(test).join(format!("{stem}.cir"));
+    std::fs::write(&cir, deck).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_melange"))
+        .args(["dc-op", "--format", "json"])
+        .arg(&cir)
+        .output()
+        .expect("run melange");
+    let _ = std::fs::remove_file(&cir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let Some(line) = stdout.lines().find(|l| l.trim_start().starts_with('{')) else {
+        return Err(format!("{stdout}{}", String::from_utf8_lossy(&out.stderr)));
+    };
+    let json: serde_json::Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
+    let mut v: Vec<(String, f64)> = Vec::new();
+    for (k, x) in json["nodes"].as_object().into_iter().flatten() {
+        v.push((format!("v({k})"), x.as_f64().unwrap_or(f64::NAN)));
+    }
+    for (k, d) in json["devices"].as_object().into_iter().flatten() {
+        v.push((format!("{k}.v"), d["v_nl"].as_f64().unwrap_or(f64::NAN)));
+        v.push((format!("{k}.i"), d["i_nl"].as_f64().unwrap_or(f64::NAN)));
+    }
+    v.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(v)
+}
+
+#[test]
+fn every_dc_key_changes_the_operating_point() {
+    let jobs: Vec<(&Case, &str, &str, &str, Witness)> = CASES
+        .iter()
+        .flat_map(|c| c.keys.iter().map(move |&(k, a, b, w)| (c, k, a, b, w)))
+        .filter(|(_, _, _, _, w)| !matches!(w, Noise))
+        .collect();
+    let next = AtomicUsize::new(0);
+    let failures = std::sync::Mutex::new(Vec::<String>::new());
+    let stale = std::sync::Mutex::new(Vec::<String>::new());
+    std::thread::scope(|s| {
+        for _ in 0..8 {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(&(case, key, a, b, w)) = jobs.get(i) else {
+                    break;
+                };
+                let listed = |list: &[(ModelClass, &str, &str)]| {
+                    list.iter()
+                        .any(|(c, k, _)| *c == case.class && k.eq_ignore_ascii_case(key))
+                };
+                let inert = listed(DC_INERT) || listed(KNOWN_DC_DEFECTS);
+                // Moves on the code-effect card, or on the DC card when there is one.
+                let mut moved = false;
+                let mut error = None;
+                for deck in [case.deck, case.dc_deck]
+                    .into_iter()
+                    .filter(|d| !d.is_empty())
+                {
+                    let dc_case = Case {
+                        class: case.class,
+                        deck,
+                        card: case.card,
+                        keys: case.keys,
+                        alone_only: case.alone_only,
+                        dc_deck: "",
+                    };
+                    let (d1, d2, _) = witness_pair(&dc_case, key, a, b, w);
+                    match (dc_op(&d1, "dc"), dc_op(&d2, "dc")) {
+                        (Ok(x), Ok(y)) => moved |= x != y,
+                        (Err(e), _) | (_, Err(e)) => error = Some(e),
+                    }
+                }
+                if let (false, Some(e)) = (moved, error) {
+                    failures.lock().unwrap().push(format!(
+                        "{} / {key}: dc-op failed: {}",
+                        case.class.label(),
+                        e.lines().last().unwrap_or("")
+                    ));
+                    continue;
+                }
+                let label = format!("{} / {key}", case.class.label());
+                match (moved, inert) {
+                    (false, false) => failures.lock().unwrap().push(label),
+                    (true, true) => stale.lock().unwrap().push(label),
+                    _ => {}
+                }
+            });
+        }
+    });
+    let _ = std::fs::remove_dir_all(scratch("dc"));
+    let failures = failures.into_inner().unwrap();
+    let stale = stale.into_inner().unwrap();
+    assert!(
+        failures.is_empty(),
+        "keys that change the generated code but not the DC operating point on their witness \
+         card (a DC key the solution ignores, or one to list in DC_INERT with its reason): \
+         {failures:?}"
+    );
+    assert!(
+        stale.is_empty(),
+        "DC_INERT / KNOWN_DC_DEFECTS keys that DO move the operating point (drop them from \
+         the list; a fixed defect leaves KNOWN_DC_DEFECTS): {stale:?}"
+    );
 }

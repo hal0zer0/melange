@@ -4753,12 +4753,14 @@ fn run_dc_op(circuit_source: &circuits::CircuitSource, opts: &DcOpOptions<'_>) -
     }
 
     if format == "json" {
-        // JSON output for machine consumption
+        // JSON output for machine consumption, every number in its shortest
+        // exact (round-trip) form: a consumer comparing two operating points
+        // must not see a real difference rounded away.
         print!("{{");
         print!("\"converged\":{},", result.converged);
         print!("\"method\":\"{:?}\",", result.method);
         print!("\"iterations\":{},", result.iterations);
-        print!("\"kcl_residual_max\":{:.6e},", result.kcl_residual_max);
+        print!("\"kcl_residual_max\":{:e},", result.kcl_residual_max);
         print!(
             "\"kcl_worst_row\":{},",
             match result.kcl_worst_row {
@@ -4788,7 +4790,7 @@ fn run_dc_op(circuit_source: &circuits::CircuitSource, opts: &DcOpOptions<'_>) -
                     print!(",");
                 }
                 first = false;
-                print!("\"{}\":{:.6e}", name, result.v_node[idx - 1]);
+                print!("\"{}\":{:e}", name, result.v_node[idx - 1]);
             }
         }
         print!("}}");
@@ -4811,7 +4813,7 @@ fn run_dc_op(circuit_source: &circuits::CircuitSource, opts: &DcOpOptions<'_>) -
                         }
                         first = false;
                         print!(
-                            "\"{}[{}]\":{{\"v_nl\":{:.6e},\"i_nl\":{:.6e}}}",
+                            "\"{}[{}]\":{{\"v_nl\":{:e},\"i_nl\":{:e}}}",
                             dev_name,
                             d,
                             result.v_nl[s + d],

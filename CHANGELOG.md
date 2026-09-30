@@ -554,6 +554,9 @@ generated state is smaller.
   `IS=0` gives the old model). Every JFET circuit gains them; one biased
   normally, with its gate reversed, changes by the junctions' ~1e-14 A
   leakage.
+- `melange dc-op --format json` prints every number in its shortest exact
+  (round-trip) form instead of 7 significant digits, so two operating points
+  can be compared without rounding a real difference away.
 - `melange --version` could name a clean commit for a binary built from
   uncommitted changes, while the code that binary generated said `-dirty`: the
   CLI stamped its own label and only refreshed it when the CLI itself was
@@ -874,6 +877,14 @@ generated state is smaller.
 
 ### Tests
 
+- `model_key_effect.rs`: every `.model` key must now also move the DC
+  operating point on a biased witness card, not only change the generated
+  code (a JFET's RS once changed the code and not the answer). Exemptions
+  carry their reason (charge storage, time constants, slew, the cold power-on
+  state). Three defects it found are held as still-failing until fixed: the
+  DC operating point treats a triode as sharp where the transient applies
+  variable-mu, has no grid stopper (RGI), and a pentode's LAMBDA is read by
+  nothing.
 - `charge_form_c_switch_tests.rs`: a `.switch` that changes a capacitor
   mid-render does not carry the old capacitor current. Scrambling `q_dot` at
   the switch leaves every later sample bit-identical on both nodal sub-paths,
