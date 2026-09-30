@@ -457,7 +457,9 @@ P2 plate2 grid2 cath2 scr2 sup2 EF86
   `T` element's grid-plate-cathode order. Use the order that matches
   your tube: `T` for existing triode netlists, `P` for new pentode work.
 - 9 fitted Derk parameters per tube: μ, Ex, Kg1, Kg2, Kp, Kvb, αs, A, β
-  (plus optional `IG_MAX`, `VGK_ONSET`, `CCG`, `CGP`, `CCP`, `RGI`).
+  (plus optional `IG_MAX`, `VGK_ONSET`, `CCG`, `CGP`, `CCP`). `RGI` is a
+  triode key: on a pentode card it is refused; put the grid stopper in the
+  netlist as a resistor in series with the grid.
   NOTE: `IG_MAX` / `VGK_ONSET` are pentode-only now — the pentode control
   grid keeps the Leach law, while a triode's `IG_MAX` / `VGK_ONSET` are
   RETIRED and refused. See `docs/aidocs/DEVICE_MODELS.md`.
@@ -759,7 +761,7 @@ Level 1 SPICE model with triode + saturation regions. When `GAMMA` > 0, body eff
 | `CCG` | 0 F | Cathode-grid capacitance |
 | `CGP` | 0 F | Grid-plate capacitance |
 | `CCP` | 0 F | Cathode-plate capacitance |
-| `RGI` | 0 Ω | Grid internal resistance |
+| `RGI` | 0 Ω | Grid internal resistance: the currents are evaluated at the internal grid behind it |
 
 Uses the Koren plate current model (soft-knee saturation) with the Dempwolf &
 Zölzer DAFx-11 eq. (11) grid current, `Ig = GG*(ln(1+e^(CG*Vgk))/CG)^XI`. The

@@ -231,7 +231,6 @@ const CASES: &[Case] = &[
             ("CCG", "2e-12", "3e-12", Rich),
             ("CGP", "1e-12", "2e-12", Rich),
             ("CCP", "5e-12", "6e-12", Rich),
-            ("RGI", "1000", "2000", Rich),
             ("MU_B", "10", "8", Rich),
             ("SVAR", "0.5", "0.3", Rich),
             ("EX_B", "1.4", "1.3", Rich),
@@ -547,8 +546,9 @@ fn a_refused_key_is_refused_with_its_reason() {
         }
     }
     assert!(
-        seen >= 8,
-        "expected RD/RS on JFET and MOSFET, pentode LAMBDA and triode MU_B/SVAR/EX_B, saw {seen}"
+        seen >= 9,
+        "expected RD/RS on JFET and MOSFET, pentode LAMBDA/RGI and triode MU_B/SVAR/EX_B, \
+         saw {seen}"
     );
     let _ = std::fs::remove_dir_all(scratch("refused"));
 }
@@ -649,11 +649,6 @@ const DC_INERT: &[(ModelClass, &str, &str)] = &[
         ModelClass::Pentode,
         "VGK_ONSET",
         "control-grid current is exactly 0 at the witness's negative grid bias",
-    ),
-    (
-        ModelClass::Pentode,
-        "RGI",
-        "acts through control-grid current, exactly 0 at the witness's negative grid bias",
     ),
     (
         ModelClass::Opamp,

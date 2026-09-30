@@ -584,7 +584,6 @@ const PENTODE_HONORED: &[&str] = &[
     "CCG",
     "CGP",
     "CCP",
-    "RGI",
     "MU_B",
     "SVAR",
     "EX_B",
@@ -594,12 +593,23 @@ const PENTODE_HONORED: &[&str] = &[
 
 /// A pentode card's LAMBDA was stored and read by nothing: the pentode plate
 /// law has no lambda term, in the DC operating point or the transient.
-const PENTODE_REFUSED: &[(&str, &str)] = &[(
-    "LAMBDA",
-    "the pentode plate law has no LAMBDA term, and it was accepted but read nowhere. \
-     Remove LAMBDA= from the card; the plate's dependence on Vpk is the law's own \
-     (ALPHA_S, A_FACTOR, BETA_FACTOR)",
-)];
+///
+/// A pentode card's RGI was likewise emitted and never read: the pentode has no
+/// internal-grid solve (the triode does). A grid stopper is an explicit
+/// resistor in series with the grid, which models it exactly.
+const PENTODE_REFUSED: &[(&str, &str)] = &[
+    (
+        "LAMBDA",
+        "the pentode plate law has no LAMBDA term, and it was accepted but read nowhere. \
+         Remove LAMBDA= from the card; the plate's dependence on Vpk is the law's own \
+         (ALPHA_S, A_FACTOR, BETA_FACTOR)",
+    ),
+    (
+        "RGI",
+        "the pentode has no internal grid resistance, and it was accepted but read nowhere. \
+         Model the grid stopper as an explicit resistor in series with the grid",
+    ),
+];
 
 const PENTODE_DEFINING: &[&str] = &[
     "MU",
@@ -618,7 +628,6 @@ const PENTODE_DEFINING: &[&str] = &[
     "CCG",
     "CGP",
     "CCP",
-    "RGI",
     "MU_B",
     "SVAR",
     "EX_B",

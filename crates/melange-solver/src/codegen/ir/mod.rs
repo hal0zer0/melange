@@ -5466,12 +5466,9 @@ impl CircuitIR {
                 "pentode model CCP must be non-negative and finite, got {ccp}"
             )));
         }
-        let rgi = Self::lookup_model_param(netlist, model, "RGI").unwrap_or(0.0);
-        if rgi < 0.0 || !rgi.is_finite() {
-            return Err(CodegenError::InvalidConfig(format!(
-                "pentode model RGI must be non-negative and finite, got {rgi}"
-            )));
-        }
+        // The pentode has no internal-grid solve: a card's RGI is refused
+        // (model_params PENTODE_REFUSED), and the field stays 0.
+        let rgi = 0.0;
 
         Self::check_model_params(netlist, model, ModelClass::Pentode)?;
         Self::warn_unresolved_model(

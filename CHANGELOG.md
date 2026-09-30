@@ -561,6 +561,11 @@ generated state is smaller.
   pentode plate law has no lambda term, in the DC operating point or the
   transient. A nonzero value is now refused with that reason. No deck set
   one.
+- **A pentode card's `RGI` was accepted and read by nothing**: it was
+  emitted as a constant that no pentode code path called, and the pentode
+  has no internal-grid solve. A nonzero value is now refused; a grid stopper
+  is an explicit resistor in series with the grid, which models it exactly.
+  No deck set one.
 - **A triode card's `MU_B`, `SVAR` and `EX_B` were accepted and never reached
   the solution**: the triode's DC operating point and transient both evaluate
   the sharp Koren law, so a variable-mu triode card compiled as a sharp one
