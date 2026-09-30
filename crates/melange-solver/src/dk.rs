@@ -223,8 +223,8 @@ impl From<crate::mna::MnaError> for DkError {
 /// generated code size and compile time grow with M. Measured 2026-09-30 on a
 /// synthetic M = 32 deck (Ryzen 9 7950X, `rustc -O`, x86-64-v3, one codegen
 /// unit): DK 547 kB of source, 0.70 s to compile, 9.9 µs/sample; nodal Schur
-/// 918 kB, 5.7 s, 10.3 µs; nodal full-LU 677 kB, 3.5 s, 8.9 µs. A 1176-style
-/// FET limiter is M = 25.
+/// 918 kB, 5.7 s, 10.3 µs; nodal full-LU 677 kB, 3.5 s, 8.9 µs. A full
+/// FET-limiter compressor is M = 25.
 pub const MAX_M: usize = 32;
 
 /// The refusal for a circuit above [`MAX_M`], with its reason.

@@ -373,11 +373,12 @@ pub(super) fn device_param_template_data(ir: &CircuitIR) -> Vec<DeviceParamTempl
                             field_suffix: "cg".into(),
                             const_suffix: "CG".into(),
                         });
+                        // The triode's Early term; the pentode plate law has none.
+                        entries.push(DeviceParamEntry {
+                            field_suffix: "lambda".into(),
+                            const_suffix: "LAMBDA".into(),
+                        });
                     }
-                    entries.push(DeviceParamEntry {
-                        field_suffix: "lambda".into(),
-                        const_suffix: "LAMBDA".into(),
-                    });
                     ("Tube".to_string(), entries)
                 }
                 DeviceParams::Vca(_) => (

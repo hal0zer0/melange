@@ -1330,7 +1330,10 @@ impl RustEmitter {
                     // Precomputed critical voltage for SPICE pnjlim (both Vbe and Vbc junctions)
                     let vcrit = bp.vt * (bp.vt / (std::f64::consts::SQRT_2 * bp.is)).ln();
                     emit_device_const(&mut code, dev_num, "VCRIT", vcrit);
-                    if bp.has_parasitics() {
+                    // Read by K_eff (DK) or bjt_with_parasitics (the DC-OP
+                    // recompute, nodal without internal nodes). A device with
+                    // internal nodes carries RB/RC/RE as conductances in G.
+                    if bp.has_parasitics() && !slot.has_internal_mna_nodes {
                         emit_device_const(&mut code, dev_num, "RB", bp.rb);
                         emit_device_const(&mut code, dev_num, "RC", bp.rc);
                         emit_device_const(&mut code, dev_num, "RE", bp.re);
@@ -1374,14 +1377,6 @@ impl RustEmitter {
                     if mp.has_body_effect() {
                         emit_device_const(&mut code, dev_num, "GAMMA", mp.gamma);
                         emit_device_const(&mut code, dev_num, "PHI", mp.phi);
-                        code.push_str(&format!(
-                            "const DEVICE_{}_SOURCE_NODE: usize = {};\n",
-                            dev_num, mp.source_node
-                        ));
-                        code.push_str(&format!(
-                            "const DEVICE_{}_BULK_NODE: usize = {};\n",
-                            dev_num, mp.bulk_node
-                        ));
                     }
                     let sign = if mp.is_p_channel { -1.0 } else { 1.0 };
                     code.push_str(&format!(
@@ -1413,7 +1408,10 @@ impl RustEmitter {
                         emit_device_const(&mut code, dev_num, "XI", tp.xi);
                         emit_device_const(&mut code, dev_num, "CG", tp.cg);
                     }
-                    emit_device_const(&mut code, dev_num, "LAMBDA", tp.lambda);
+                    // The triode's Early term; the pentode plate law has none.
+                    if !tp.is_pentode() {
+                        emit_device_const(&mut code, dev_num, "LAMBDA", tp.lambda);
+                    }
                     if tp.has_rgi() {
                         emit_device_const(&mut code, dev_num, "RGI", tp.rgi);
                     }
@@ -5405,20 +5403,16 @@ pub(super) fn parasitic_r_p_dk(ir: &CircuitIR, i: usize, j: usize) -> f64 {
 /// context). Returns an empty string when no slot qualifies.
 fn k_eff_adjust_stmts(ir: &CircuitIR, var: &str, indent: &str) -> String {
     let mut out = String::new();
-    for slot in &ir.device_slots {
+    for (d, slot) in ir.device_slots.iter().enumerate() {
         if let DeviceParams::Bjt(bp) = &slot.params {
             if bp.has_parasitics() && !slot.has_internal_mna_nodes && slot.dimension == 2 {
                 let s = slot.start_idx;
                 let s1 = s + 1;
                 out.push_str(&format!(
-                    "{indent}{var}[{s}][{s}] -= {re};\n\
-                     {indent}{var}[{s}][{s1}] -= {rb_re};\n\
-                     {indent}{var}[{s1}][{s}] -= {neg_rc};\n\
-                     {indent}{var}[{s1}][{s1}] -= {rb};\n",
-                    re = fmt_f64(bp.re),
-                    rb_re = fmt_f64(bp.rb + bp.re),
-                    neg_rc = fmt_f64(-bp.rc),
-                    rb = fmt_f64(bp.rb),
+                    "{indent}{var}[{s}][{s}] -= DEVICE_{d}_RE;\n\
+                     {indent}{var}[{s}][{s1}] -= DEVICE_{d}_RB + DEVICE_{d}_RE;\n\
+                     {indent}{var}[{s1}][{s}] -= -DEVICE_{d}_RC;\n\
+                     {indent}{var}[{s1}][{s1}] -= DEVICE_{d}_RB;\n",
                 ));
             }
         }

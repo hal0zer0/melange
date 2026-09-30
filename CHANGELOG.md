@@ -644,7 +644,7 @@ generated state is smaller.
 ### Changed
 
 - **Circuits of up to 32 nonlinear dimensions build** (was 24), on every
-  route. A full 1176-style FET limiter is 25. The limit bounds generated code
+  route. A full FET-limiter compressor is 25. The limit bounds generated code
   size and compile time (the Newton solve is emitted as fully unrolled
   elimination), not accuracy, and the refusal above it now says so. At 32 the
   generated source is 0.5–0.9 MB and compiles in 0.7–5.7 s depending on the
@@ -921,6 +921,16 @@ generated state is smaller.
 
 ### Tests
 
+- `model_key_effect.rs`: every per-device parameter the build emits must be
+  read. The rich card of each device class, compiled on the DK and nodal
+  routes, may not declare a `DEVICE_n_*` constant or a `device_n_*` state
+  field that nothing reads: that is a key accepted and silently ignored, the
+  class of a pentode's LAMBDA and RGI and a triode's variable-mu keys, found
+  one at a time before. Its first run found only stale declarations of
+  parameters applied another way, now no longer emitted: a BJT's RB/RC/RE on
+  a build that carries them as internal-node conductances (the `K_eff`
+  absorption now reads the constants instead of repeating them as literals),
+  a MOSFET's source and bulk node indices, and a pentode's LAMBDA.
 - `model_key_effect.rs`: every `.model` key must now also move the DC
   operating point on a biased witness card, not only change the generated
   code (a JFET's RS once changed the code and not the answer). Exemptions

@@ -27,6 +27,11 @@
 //! on its witness card, unless it is listed in [`DC_INERT`] with the reason
 //! it cannot (charge storage, time constants, noise, slew).
 //!
+//! And the converse: every per-device parameter the build emits must be read
+//! (`every_emitted_device_parameter_is_read`). A `DEVICE_n_*` constant or
+//! `device_n_*` state field that is declared and never read changes the
+//! generated code, so it passes the effect check above, and changes nothing.
+//!
 //! Glow lamps are not swept.
 
 use melange_solver::model_params::ModelClass;
@@ -459,6 +464,158 @@ fn every_accepted_key_changes_the_generated_code() {
         failures.is_empty(),
         "accepted .model keys that did not change the compiled circuit in their \
          witness context: {failures:?}"
+    );
+}
+
+/// Identifiers in `line` with the byte offset just past each.
+fn identifiers(line: &str) -> Vec<(&str, usize)> {
+    let b = line.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i].is_ascii_alphabetic() || b[i] == b'_' {
+            let start = i;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            // Not the tail of a number literal such as `1e3` or `0_f64`.
+            if start == 0 || !b[start - 1].is_ascii_digit() {
+                out.push((&line[start..i], i));
+            }
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// `DEVICE_<n>_<KEY>` / `device_<n>_<key>`.
+fn is_device_param(id: &str, prefix: &str) -> bool {
+    id.strip_prefix(prefix)
+        .and_then(|rest| rest.split_once('_'))
+        .is_some_and(|(n, key)| {
+            !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()) && !key.is_empty()
+        })
+}
+
+/// The per-device parameters `code` declares and never reads: a
+/// `DEVICE_n_*` constant named nowhere but its declaration, and a
+/// `device_n_*` state field that is only ever written (declared,
+/// initialised, assigned).
+fn unread_device_params(code: &[String]) -> Vec<String> {
+    let lines: Vec<&str> = code
+        .iter()
+        .map(|l| l.split_once("//").map_or(l.as_str(), |(c, _)| c))
+        .collect();
+    let mut consts: Vec<&str> = Vec::new();
+    let mut fields: Vec<&str> = Vec::new();
+    let mut uses: std::collections::HashMap<&str, usize> = Default::default();
+    let mut field_reads: HashSet<&str> = HashSet::new();
+    for line in &lines {
+        let ids = identifiers(line);
+        for (k, &(id, end)) in ids.iter().enumerate() {
+            if is_device_param(id, "DEVICE_") {
+                *uses.entry(id).or_default() += 1;
+                if k > 0 && ids[k - 1].0 == "const" {
+                    consts.push(id);
+                }
+            }
+            if is_device_param(id, "device_") {
+                let rest = line[end..].trim_start();
+                let dotted = line[..end - id.len()].ends_with('.');
+                if !dotted && rest.starts_with(':') && !rest.starts_with("::") {
+                    // `pub device_0_mu: f64` or `device_0_mu: DEVICE_0_MU,`
+                    if line.trim_start().starts_with("pub ") {
+                        fields.push(id);
+                    }
+                } else if dotted {
+                    // `x.device_0_mu = ..` writes; anything else reads it
+                    // (`+=` included).
+                    let write = rest.starts_with('=') && !rest.starts_with("==");
+                    if !write {
+                        field_reads.insert(id);
+                    }
+                }
+            }
+        }
+    }
+    let mut unread: Vec<String> = consts
+        .into_iter()
+        .filter(|c| uses.get(c).copied().unwrap_or(0) < 2)
+        .map(|c| format!("const {c}"))
+        .collect();
+    unread.extend(
+        fields
+            .into_iter()
+            .filter(|f| !field_reads.contains(f))
+            .map(|f| format!("state.{f}")),
+    );
+    unread.sort();
+    unread.dedup();
+    unread
+}
+
+#[test]
+fn the_scan_finds_a_declared_and_unread_parameter() {
+    let code: Vec<String> = [
+        "const DEVICE_0_MU: f64 = 100.0;",
+        "const DEVICE_0_MU_B: f64 = 60.0;",
+        "const DEVICE_0_EX: f64 = 1.4;",
+        "pub device_0_mu: f64,",
+        "pub device_0_lambda: f64,",
+        "device_0_mu: DEVICE_0_MU,",
+        "device_0_lambda: 0.0, // state.device_0_lambda * 2.0",
+        "self.device_0_lambda = DEVICE_0_EX;",
+        "let ip = tube_ip(vgk, state.device_0_mu);",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    assert_eq!(
+        unread_device_params(&code),
+        vec!["const DEVICE_0_MU_B", "state.device_0_lambda"]
+    );
+}
+
+/// A parameter the build emits and nothing reads is a key accepted and
+/// silently ignored, the class behind a pentode's LAMBDA and RGI and a
+/// triode's MU_B/SVAR/EX_B, each found one at a time. Every class's rich card
+/// (every key at once, noise on), on the DK and nodal routes, must read every
+/// `DEVICE_n_*` constant and `device_n_*` state field it declares.
+#[test]
+fn every_emitted_device_parameter_is_read() {
+    let mut failures = Vec::new();
+    for case in CASES {
+        let rich: Vec<(&str, &str)> = case
+            .keys
+            .iter()
+            .filter(|(k, ..)| !case.alone_only.contains(k))
+            .map(|(k, v, ..)| (*k, *v))
+            .collect();
+        let deck = card(case, &rich);
+        for route in ["dk", "nodal"] {
+            let args = ["--noise", "full", "--noise-seed", "1", "--solver", route];
+            match compile(&deck, &args, "unread") {
+                Ok(code) => {
+                    for p in unread_device_params(&code) {
+                        failures.push(format!("{} ({route}): {p}", case.class.label()));
+                    }
+                }
+                // DK refuses some classes (active-set op-amps); nodal must build.
+                Err(e) if route == "dk" && e.contains("--solver nodal") => {}
+                Err(e) => failures.push(format!(
+                    "{} ({route}): compile failed: {}",
+                    case.class.label(),
+                    e.lines().last().unwrap_or("")
+                )),
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(scratch("unread"));
+    assert!(
+        failures.is_empty(),
+        "device parameters emitted and never read (an accepted key the circuit \
+         ignores): {failures:#?}"
     );
 }
 
