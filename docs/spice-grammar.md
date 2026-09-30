@@ -461,6 +461,8 @@ P2 plate2 grid2 cath2 scr2 sup2 EF86
   NOTE: `IG_MAX` / `VGK_ONSET` are pentode-only now — the pentode control
   grid keeps the Leach law, while a triode's `IG_MAX` / `VGK_ONSET` are
   RETIRED and refused. See `docs/aidocs/DEVICE_MODELS.md`.
+- `LAMBDA` is a triode key. On a pentode card a nonzero value is refused: the
+  pentode plate law has no lambda term (its Vpk dependence is αs, A, β).
 - **αs must be strictly positive** — Derk with αs=0 degenerates to
   Ip=0 identically. The validator rejects `.model … VP(ALPHA_S=0)`.
 - Catalog aliases (use these instead of inline `.model VP(...)` for

@@ -5375,7 +5375,9 @@ impl CircuitIR {
         let vgk_onset = Self::lookup_model_param(netlist, model, "VGK_ONSET")
             .or_else(|| cat.map(|c| c.vgk_onset))
             .unwrap_or(0.7);
-        let lambda = Self::lookup_model_param(netlist, model, "LAMBDA").unwrap_or(0.0);
+        // The pentode plate law has no lambda term: a card's LAMBDA is refused
+        // (model_params PENTODE_REFUSED), and the field stays 0.
+        let lambda = 0.0;
 
         // Reefman §5 variable-mu (remote-cutoff) parameters. Resolution order
         // matches every other field: explicit `.model` > catalog > default 0.0.
@@ -5441,12 +5443,6 @@ impl CircuitIR {
                 )));
             }
         }
-        if !lambda.is_finite() || lambda < 0.0 {
-            return Err(CodegenError::InvalidConfig(format!(
-                "pentode model LAMBDA must be non-negative and finite, got {lambda}"
-            )));
-        }
-
         // Reefman §5 variable-mu constraints (mirrors `TubeParams::validate()`).
         // Surfacing them at the resolver level gives a clearer error site than
         // the downstream `params.validate()` call.

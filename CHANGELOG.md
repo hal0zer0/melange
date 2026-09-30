@@ -557,6 +557,10 @@ generated state is smaller.
 - `melange dc-op --format json` prints every number in its shortest exact
   (round-trip) form instead of 7 significant digits, so two operating points
   can be compared without rounding a real difference away.
+- **A pentode card's `LAMBDA` was accepted and read by nothing**: the
+  pentode plate law has no lambda term, in the DC operating point or the
+  transient. A nonzero value is now refused with that reason. No deck set
+  one.
 - `melange --version` could name a clean commit for a binary built from
   uncommitted changes, while the code that binary generated said `-dirty`: the
   CLI stamped its own label and only refreshed it when the CLI itself was

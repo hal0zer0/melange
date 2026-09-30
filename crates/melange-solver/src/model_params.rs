@@ -181,6 +181,7 @@ impl ModelClass {
         match self {
             ModelClass::Jfet => JFET_REFUSED,
             ModelClass::Mosfet => MOSFET_REFUSED,
+            ModelClass::Pentode => PENTODE_REFUSED,
             _ => &[],
         }
     }
@@ -569,7 +570,6 @@ const PENTODE_HONORED: &[&str] = &[
     "SCREEN_FORM",
     "IG_MAX",
     "VGK_ONSET",
-    "LAMBDA",
     "CCG",
     "CGP",
     "CCP",
@@ -580,6 +580,15 @@ const PENTODE_HONORED: &[&str] = &[
     "KF",
     "AF",
 ];
+
+/// A pentode card's LAMBDA was stored and read by nothing: the pentode plate
+/// law has no lambda term, in the DC operating point or the transient.
+const PENTODE_REFUSED: &[(&str, &str)] = &[(
+    "LAMBDA",
+    "the pentode plate law has no LAMBDA term, and it was accepted but read nowhere. \
+     Remove LAMBDA= from the card; the plate's dependence on Vpk is the law's own \
+     (ALPHA_S, A_FACTOR, BETA_FACTOR)",
+)];
 
 const PENTODE_DEFINING: &[&str] = &[
     "MU",
@@ -595,7 +604,6 @@ const PENTODE_DEFINING: &[&str] = &[
     "SCREEN_FORM",
     "IG_MAX",
     "VGK_ONSET",
-    "LAMBDA",
     "CCG",
     "CGP",
     "CCP",

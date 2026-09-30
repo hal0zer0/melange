@@ -231,7 +231,6 @@ const CASES: &[Case] = &[
             ("SCREEN_FORM", "0", "1", Rich),
             ("IG_MAX", "2e-3", "4e-3", Rich),
             ("VGK_ONSET", "0.5", "0.7", Rich),
-            ("LAMBDA", "0.001", "0.002", Rich),
             ("CCG", "2e-12", "3e-12", Rich),
             ("CGP", "1e-12", "2e-12", Rich),
             ("CCP", "5e-12", "6e-12", Rich),
@@ -511,6 +510,52 @@ fn unimplemented_keys_compile_with_a_costed_notice() {
     let _ = std::fs::remove_dir_all(scratch("notice"));
 }
 
+/// A known key that is not in the solution is refused with its reason when
+/// nonzero, never accepted and ignored (FET RD/RS, pentode LAMBDA).
+#[test]
+fn a_refused_key_is_refused_with_its_reason() {
+    let mut seen = 0;
+    for case in CASES {
+        for (key, note) in case.class.refused() {
+            seen += 1;
+            let rich: Vec<(&str, &str)> = case
+                .keys
+                .iter()
+                .filter(|(k, ..)| !case.alone_only.contains(k))
+                .map(|(k, v, ..)| (*k, *v))
+                .chain(std::iter::once((*key, "10")))
+                .collect();
+            let Err(err) = compile(&card(case, &rich), &[], "refused") else {
+                panic!(
+                    "{} / {key}: a card carrying it compiled",
+                    case.class.label()
+                );
+            };
+            let head: String = note.chars().take(40).collect();
+            assert!(
+                err.contains(&format!("{key}=10 is refused")) && err.contains(&head),
+                "{} / {key}: must be refused with its reason:\n{err}",
+                case.class.label()
+            );
+            let zero: Vec<(&str, &str)> = rich
+                .iter()
+                .map(|&(k, v)| if k == *key { (k, "0") } else { (k, v) })
+                .collect();
+            if let Err(e) = compile(&card(case, &zero), &[], "refused") {
+                panic!(
+                    "{} / {key}=0 (the model without it) must build: {e}",
+                    case.class.label()
+                );
+            }
+        }
+    }
+    assert!(
+        seen >= 5,
+        "expected RD/RS on JFET and MOSFET and pentode LAMBDA, saw {seen}"
+    );
+    let _ = std::fs::remove_dir_all(scratch("refused"));
+}
+
 #[test]
 fn an_unknown_key_is_refused() {
     for case in CASES {
@@ -657,11 +702,6 @@ const KNOWN_DC_DEFECTS: &[(ModelClass, &str, &str)] = &[
         "RGI",
         "the DC OP has no grid stopper; the transient solves through it (5.1 pA of grid \
          current at this bias)",
-    ),
-    (
-        ModelClass::Pentode,
-        "LAMBDA",
-        "accepted and stored, read by neither the DC OP nor the transient",
     ),
 ];
 
