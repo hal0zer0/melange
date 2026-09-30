@@ -89,6 +89,11 @@ fn latch_after_stop(code: &str, amp: f64, tag: &str) -> Option<usize> {
 /// of 1 V every `period` samples (`0` = one click), all at host rate `fs`;
 /// report the sample after the first click at which the latch engaged.
 fn latch_after_clicks(code: &str, fs: f64, period: usize, tag: &str) -> Option<usize> {
+    latch_after_clicks_at(code, fs, period, 1.0, tag)
+}
+
+/// [`latch_after_clicks`] with the sine and the clicks at `amp` volts.
+fn latch_after_clicks_at(code: &str, fs: f64, period: usize, amp: f64, tag: &str) -> Option<usize> {
     let main = format!(
         "fn main() {{
     let fs: f64 = {fs:?};
@@ -96,14 +101,14 @@ fn latch_after_clicks(code: &str, fs: f64, period: usize, tag: &str) -> Option<u
     s.set_sample_rate(fs);
     for _ in 0..(0.1 * fs) as usize {{ let _ = process_sample(0.0, &mut s); }}
     for i in 0..(0.2 * fs) as usize {{
-        let u = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / fs).sin();
+        let u = {amp:?} * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / fs).sin();
         let _ = process_sample(u, &mut s);
     }}
     for _ in 0..(0.1 * fs) as usize {{ let _ = process_sample(0.0, &mut s); }}
     let period = {period}usize;
     let mut at = -1i64;
     for i in 0..(0.5 * fs) as usize {{
-        let click = if (period == 0 && i == 0) || (period > 0 && i % period == 0) {{ 1.0 }} else {{ 0.0 }};
+        let click = if (period == 0 && i == 0) || (period > 0 && i % period == 0) {{ {amp:?} }} else {{ 0.0 }};
         let _ = process_sample(click, &mut s);
         if s.be_latched && at < 0 {{ at = i as i64; }}
     }}
@@ -180,6 +185,33 @@ fn coherent_even_period_clicks_accumulate_and_latch() {
     assert!(
         at.is_some(),
         "the accumulated ring did not engage the latch"
+    );
+}
+
+/// A clipper in front of the stiff node: the output carries at most ~0.6 V
+/// whatever the drive. The program reference is the program the output
+/// actually carries, the smaller of passband gain x input and the output's own
+/// excursion, so the same click-train ring latches at the same sample whether
+/// the clipper is quiet (0.3 V) or clipping hard (5 V). Referenced to passband
+/// gain x input alone, the 5 V case was judged against an 8x larger program
+/// and the ring never latched.
+#[test]
+fn a_clipped_program_is_what_the_ring_is_judged_against() {
+    const CLIP_STIFF: &str = "clipper into a stiff node\nR1 in a 1k\nD1 a 0 DX\nD2 0 a DX\n\
+                              R_s a out 1k\nC_p out 0 2p\nR_l out 0 100k\n\
+                              .model DX D(IS=2.52n N=1.752)\n";
+    const REF_LINE: &str = "state.be_ref = state.be_ref_in.min(state.be_env);";
+    let code = code_for(CLIP_STIFF, 1);
+    assert!(code.contains(REF_LINE), "the latch's program reference");
+    let quiet = latch_after_clicks_at(&code, 48000.0, 480, 0.3, "clip_stiff_quiet");
+    let loud = latch_after_clicks_at(&code, 48000.0, 480, 5.0, "clip_stiff_loud");
+    assert!(quiet.is_some(), "the unclipped click-train ring must latch");
+    assert_eq!(loud, quiet, "clipping must not hide the same ring");
+    let input_only = code.replace(REF_LINE, "state.be_ref = state.be_ref_in;");
+    assert_eq!(
+        latch_after_clicks_at(&input_only, 48000.0, 480, 5.0, "clip_stiff_input_ref"),
+        None,
+        "witness premise: judged against passband gain x input, the clipped ring is hidden"
     );
 }
 

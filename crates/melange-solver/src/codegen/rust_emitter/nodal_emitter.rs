@@ -3987,10 +3987,13 @@ impl RustEmitter {
             code.push_str("    pub be_in_r1_num: f64,\n");
             code.push_str("    pub be_in_pow: f64,\n");
             code.push_str(
-                "    /// Runtime BE-latch program reference (passband gain x input amplitude,\n\
-                 \x20   /// decaying at be_ref_decay per sample) and its per-sample decay at the\n\
-                 \x20   /// running rate (set by set_sample_rate).\n",
+                "    /// Runtime BE-latch program reference: the smaller of the passband gain x\n\
+                 \x20   /// input amplitude (be_ref_in) and the output's own excursion from its\n\
+                 \x20   /// operating point (be_env), each held decaying at be_ref_decay per\n\
+                 \x20   /// sample; and that decay at the running rate (set by set_sample_rate).\n",
             );
+            code.push_str("    pub be_ref_in: f64,\n");
+            code.push_str("    pub be_env: f64,\n");
             code.push_str("    pub be_ref: f64,\n");
             code.push_str("    pub be_ref_decay: f64,\n");
             code.push_str(
@@ -4426,6 +4429,8 @@ impl RustEmitter {
             ] {
                 code.push_str(&format!("            {f}: 0.0,\n"));
             }
+            code.push_str("            be_ref_in: 0.0,\n");
+            code.push_str("            be_env: 0.0,\n");
             code.push_str("            be_ref: 0.0,\n");
             code.push_str(
                 "            be_ref_decay: be_latch_ref_decay(SAMPLE_RATE * OVERSAMPLING_FACTOR as f64),\n",
@@ -4713,6 +4718,8 @@ impl RustEmitter {
             ] {
                 code.push_str(&format!("        self.{f} = 0.0;\n"));
             }
+            code.push_str("        self.be_ref_in = 0.0;\n");
+            code.push_str("        self.be_env = 0.0;\n");
             code.push_str("        self.be_ref = 0.0;\n");
             code.push_str("        self.be_latched = false;\n");
         }
@@ -5900,9 +5907,16 @@ impl RustEmitter {
              {indent}    state.be_pow += be_ema * (be_x * be_x - state.be_pow);\n\
              {indent}    state.be_x_prev = be_x;\n\
              {indent}    let be_u = if input.is_finite() {{ input }} else {{ 0.0 }};\n\
-             {indent}    // Program reference on the ring predicate's scale (passband gain x\n\
-             {indent}    // input amplitude), remembered as long as this circuit's slowest ring.\n\
-             {indent}    state.be_ref = (BE_LATCH_PASSBAND_GAIN * be_u.abs()).max(state.be_ref * state.be_ref_decay);\n\
+             {indent}    // Program reference: the program the output actually carries. On the\n\
+             {indent}    // ring predicate's scale that is passband gain x input amplitude, but a\n\
+             {indent}    // circuit that clips never delivers that linear extrapolation, so it is\n\
+             {indent}    // bounded by the output's own excursion from its operating point. Each\n\
+             {indent}    // is remembered as long as this circuit's slowest ring. (A ring sits in\n\
+             {indent}    // the output envelope too, but where it matters it is small against the\n\
+             {indent}    // program.)\n\
+             {indent}    state.be_ref_in = (BE_LATCH_PASSBAND_GAIN * be_u.abs()).max(state.be_ref_in * state.be_ref_decay);\n\
+             {indent}    state.be_env = (v[OUTPUT_NODES[0]] - state.dc_operating_point[OUTPUT_NODES[0]]).abs().max(state.be_env * state.be_ref_decay);\n\
+             {indent}    state.be_ref = state.be_ref_in.min(state.be_env);\n\
              {indent}    state.be_in_x_mean += be_ema * (be_u - state.be_in_x_mean);\n\
              {indent}    let be_u = be_u - state.be_in_x_mean;\n\
              {indent}    state.be_in_r1_num += be_ema * (be_u * state.be_in_x_prev - state.be_in_r1_num);\n\

@@ -601,6 +601,16 @@ generated state is smaller.
   before, and the reason says which rule decided. Four corpus decks return
   to trapezoidal (twill-deluxe against ngspice: 0.76 % → 0.16 %); two stay
   on backward Euler.
+- **The runtime backward-Euler latch judges a ring against the program the
+  output actually carries.** Its −60 dB floor was referenced to passband gain
+  × input amplitude, a linear extrapolation a clipping circuit never
+  delivers (146 V against a 15 V output on one preamp), so rings on clipping
+  circuits were judged against a program 20 dB louder than the real one. The
+  reference is now the smaller of that and the output's own excursion from
+  its operating point. On a 60 s hostile program over the 31 corpus and
+  golden builds that carry the latch, one new engagement (a genuine
+  trapezoidal ring after a noise burst on a push-pull tube stage) and none
+  lost; golden renders are identical.
 - **The output clamp is in the generated file's provenance.** `--output-clamp`
   changes the emitted DSP (the `scaled.clamp(...)` bound) but was recorded in
   neither the `// Build:` line nor the `// provenance:` JSON, so a regeneration

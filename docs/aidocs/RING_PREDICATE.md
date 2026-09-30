@@ -256,14 +256,29 @@ noyce-transformer-triode and wurli-power-amp on BE after their −63 dB and
 `1e-3 × ref`:
 
 ```
-ref_n = max(H_pink · |u_n|,  d · ref_{n-1})
+ref_n = min(in_n, env_n)
+in_n  = max(H_pink · |u_n|,              d · in_{n-1})
+env_n = max(|y_n − y_dc|,                d · env_{n-1})      (y_dc: the output's operating point)
 d     = max over BE_LATCH_RING_POLES of the Nyquist-side |z(fs)|, floored at 1e-3^(1/(0.01·fs))
 z(fs) = (1 + λ/(2fs)) / (1 − λ/(2fs))        (the trapezoidal map, at the running internal rate)
 ```
 
-- The reference is on this rule's scale: passband gain × input amplitude.
-  An output-peak reference sits far above it on transformer-triode (its
-  impulse-response peak is 0.6 against a 1 kHz gain of 0.053).
+- The reference is the program the output actually carries, bounded on both
+  sides. On this rule's scale that is passband gain × input amplitude, and an
+  output-peak reference alone sits far above it on transformer-triode (its
+  impulse-response peak is 0.6 against a 1 kHz gain of 0.053), where the min
+  picks the input side. A circuit that clips never delivers the linear
+  extrapolation (steve-1073-preamp: 146 V of H_pink·|u| against a 15 V
+  output), and there the min picks the output side, so a ring is judged
+  against the program it actually rides on. The ring itself sits in the
+  output envelope, but where it matters it is small against the program. A
+  clipper in front of a stiff node latches on the same click-train ring at
+  0.3 V and at 5 V of drive (`be_latch_entry_tests.rs`); referenced to
+  H_pink·|u| alone the 5 V case never latched. On the 60 s hostile program
+  over the 31 latch-carrying corpus and golden builds this adds one engagement
+  and removes none: kt88-pp-stage at 1 V, after a noise burst, on a
+  trapezoidal ring of about −40 dB of the program (80.7 mV at Nyquist against
+  backward Euler's 0.34 mV).
 - Its memory is the slowest ring the circuit can carry: a ring cannot outlive
   the reference of the program that excited it. A memory at the ε_ring rate
   (−60 dB in 10 ms) is always outlived by a lasting ring, by definition.
