@@ -5143,14 +5143,11 @@ impl CircuitIR {
             .or_else(|| cat.map(|c| c.lambda))
             .unwrap_or(0.0);
 
-        // Reefman §5 variable-mu (remote-cutoff) parameters. Optional — default
-        // 0.0 means sharp single-section Koren. The triode catalog
-        // (`TubeCatalogEntry`) does NOT carry these fields in phase 1c, so the
-        // only source is the `.model` directive; callers who want a variable-mu
-        // triode must spell `MU_B`/`SVAR`/`EX_B` explicitly.
-        let mu_b = Self::lookup_model_param(netlist, model, "MU_B").unwrap_or(0.0);
-        let svar = Self::lookup_model_param(netlist, model, "SVAR").unwrap_or(0.0);
-        let ex_b = Self::lookup_model_param(netlist, model, "EX_B").unwrap_or(0.0);
+        // The triode is sharp-cutoff: its DC operating point and transient
+        // evaluate the single-section Koren law. A card's MU_B/SVAR/EX_B is
+        // refused (model_params TRIODE_REFUSED), and the fields stay 0, so every
+        // estimate built from these params is of the tube as built.
+        let (mu_b, svar, ex_b) = (0.0, 0.0, 0.0);
 
         validate_positive_finite(mu, "tube model MU")?;
         validate_positive_finite(ex, "tube model EX")?;
@@ -5166,28 +5163,6 @@ impl CircuitIR {
             return Err(CodegenError::InvalidConfig(format!(
                 "tube model LAMBDA must be non-negative and finite, got {lambda}"
             )));
-        }
-
-        // Reefman §5 variable-mu constraints (mirrors `TubeParams::validate()`).
-        // Surfacing them at the resolver level gives a clearer error site than
-        // the downstream `params.validate()` call, and lets us mention the
-        // `.model` directive name in the diagnostic.
-        if !svar.is_finite() || !(0.0..=1.0).contains(&svar) {
-            return Err(CodegenError::InvalidConfig(format!(
-                "tube model SVAR must be in [0, 1] and finite, got {svar}"
-            )));
-        }
-        if svar > 0.0 {
-            if !mu_b.is_finite() || mu_b <= 0.0 {
-                return Err(CodegenError::InvalidConfig(format!(
-                    "variable-mu tube MU_B must be positive and finite when SVAR>0, got {mu_b}"
-                )));
-            }
-            if !ex_b.is_finite() || ex_b <= 0.0 {
-                return Err(CodegenError::InvalidConfig(format!(
-                    "variable-mu tube EX_B must be positive and finite when SVAR>0, got {ex_b}"
-                )));
-            }
         }
 
         // Inter-electrode capacitances (optional, default 0.0)

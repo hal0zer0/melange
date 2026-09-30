@@ -181,6 +181,7 @@ impl ModelClass {
         match self {
             ModelClass::Jfet => JFET_REFUSED,
             ModelClass::Mosfet => MOSFET_REFUSED,
+            ModelClass::Triode => TRIODE_REFUSED,
             ModelClass::Pentode => PENTODE_REFUSED,
             _ => &[],
         }
@@ -499,9 +500,6 @@ const TRIODE_HONORED: &[&str] = &[
     "CGP",
     "CCP",
     "RGI",
-    "MU_B",
-    "SVAR",
-    "EX_B",
     "KF",
     "AF",
     "RTH",
@@ -512,8 +510,21 @@ const TRIODE_HONORED: &[&str] = &[
 ];
 
 const TRIODE_DEFINING: &[&str] = &[
-    "MU", "EX", "KG1", "KP", "KVB", "GG", "XI", "CG", "LAMBDA", "CCG", "CGP", "CCP", "RGI", "MU_B",
-    "SVAR", "EX_B",
+    "MU", "EX", "KG1", "KP", "KVB", "GG", "XI", "CG", "LAMBDA", "CCG", "CGP", "CCP", "RGI",
+];
+
+/// A triode card's variable-mu keys never reached the solution: the triode's
+/// DC operating point and transient both evaluate the sharp Koren law. Only a
+/// `.linearize`d triode's small-signal gm read them, at an operating point
+/// solved without them. Variable-mu is modelled for pentodes and beam tetrodes.
+const TRIODE_VARMU_NOTE: &str = "the triode plate law is sharp-cutoff in the DC operating point \
+     and the transient, and this key reached neither. Variable-mu (MU_B, SVAR, EX_B) is \
+     modelled for pentodes and beam tetrodes only; remove it from the triode card";
+
+const TRIODE_REFUSED: &[(&str, &str)] = &[
+    ("MU_B", TRIODE_VARMU_NOTE),
+    ("SVAR", TRIODE_VARMU_NOTE),
+    ("EX_B", TRIODE_VARMU_NOTE),
 ];
 
 /// Retired triode grid-current keys.

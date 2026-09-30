@@ -197,9 +197,6 @@ const CASES: &[Case] = &[
             ("CGP", "1.7e-12", "2e-12", Rich),
             ("CCP", "0.5e-12", "1e-12", Rich),
             ("RGI", "1000", "2000", Rich),
-            ("MU_B", "60", "50", Rich),
-            ("SVAR", "0.5", "0.3", Rich),
-            ("EX_B", "1.4", "1.3", Rich),
             ("KF", "1e-16", "1e-14", Noise),
             ("AF", "1", "1.3", Noise),
             ("RTH", "500", "600", Rich),
@@ -550,8 +547,8 @@ fn a_refused_key_is_refused_with_its_reason() {
         }
     }
     assert!(
-        seen >= 5,
-        "expected RD/RS on JFET and MOSFET and pentode LAMBDA, saw {seen}"
+        seen >= 8,
+        "expected RD/RS on JFET and MOSFET, pentode LAMBDA and triode MU_B/SVAR/EX_B, saw {seen}"
     );
     let _ = std::fs::remove_dir_all(scratch("refused"));
 }
@@ -688,22 +685,12 @@ const COLD: &str = "the DC operating point is the cold power-on state; self-heat
 /// DC keys the operating point does not see today: defects, each queued for
 /// its fix. The test requires them to STILL not move it, so a fix removes
 /// its entry here.
-const KNOWN_DC_DEFECTS: &[(ModelClass, &str, &str)] = &[
-    (
-        ModelClass::Triode,
-        "MU_B",
-        "the DC OP evaluates the triode sharp (KorenTriode::with_all_params sets svar = 0) \
-         while the transient applies variable-mu",
-    ),
-    (ModelClass::Triode, "SVAR", "as MU_B"),
-    (ModelClass::Triode, "EX_B", "as MU_B"),
-    (
-        ModelClass::Triode,
-        "RGI",
-        "the DC OP has no grid stopper; the transient solves through it (5.1 pA of grid \
+const KNOWN_DC_DEFECTS: &[(ModelClass, &str, &str)] = &[(
+    ModelClass::Triode,
+    "RGI",
+    "the DC OP has no grid stopper; the transient solves through it (5.1 pA of grid \
          current at this bias)",
-    ),
-];
+)];
 
 /// Node voltages and device voltages/currents of `melange dc-op --format
 /// json` (full precision), in a stable order.

@@ -561,6 +561,13 @@ generated state is smaller.
   pentode plate law has no lambda term, in the DC operating point or the
   transient. A nonzero value is now refused with that reason. No deck set
   one.
+- **A triode card's `MU_B`, `SVAR` and `EX_B` were accepted and never reached
+  the solution**: the triode's DC operating point and transient both evaluate
+  the sharp Koren law, so a variable-mu triode card compiled as a sharp one
+  without a word. A `.linearize`d triode took its small-signal gm from the
+  variable-mu law, at an operating point solved without it. A nonzero value is
+  now refused. Variable-mu stays modelled for pentodes and beam tetrodes; no
+  deck set these keys on a triode.
 - **The DC operating point solved a leakier diode than the transient**: its
   1e-12 S diode GMIN was added to the current as well as the Newton
   Jacobian, which the transient does not do: a reverse diode fed from 10 V
@@ -892,10 +899,10 @@ generated state is smaller.
   operating point on a biased witness card, not only change the generated
   code (a JFET's RS once changed the code and not the answer). Exemptions
   carry their reason (charge storage, time constants, slew, the cold power-on
-  state). Three defects it found are held as still-failing until fixed: the
-  DC operating point treats a triode as sharp where the transient applies
-  variable-mu, has no grid stopper (RGI), and a pentode's LAMBDA is read by
-  nothing.
+  state). It found three defects: a triode card's variable-mu keys and a
+  pentode card's LAMBDA reached neither the DC operating point nor the
+  transient (both now refused), and the DC operating point has no grid
+  stopper (RGI), held as still-failing until fixed.
 - `charge_form_c_switch_tests.rs`: a `.switch` that changes a capacitor
   mid-render does not carry the old capacitor current. Scrambling `q_dot` at
   the switch leaves every later sample bit-identical on both nodal sub-paths,

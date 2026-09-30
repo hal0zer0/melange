@@ -523,8 +523,9 @@ GG=5.911e-4 XI=1.358 CG=11.76)` emits `DEVICE_n_GG` / `XI` / `CG` for the RSD-2
 row; a deck that omits them gets RSD-1.
 
 Overridable keys: `MU EX KG1 KP KVB LAMBDA GG XI CG` (sharp triode);
-`MU_B SVAR EX_B` (Reefman variable-μ, off by default); `CCG CGP CCP` (inter-
-electrode caps); `RGI` (grid internal resistance). All are validated
+`CCG CGP CCP` (inter-electrode caps); `RGI` (grid internal resistance). The
+triode is sharp-cutoff: `MU_B SVAR EX_B` (Reefman variable-μ) are refused on a
+triode card when nonzero, and modelled for pentodes and beam tetrodes only. All are validated
 positive-finite (LAMBDA/caps non-negative) at resolve time.
 
 ### RETIRED: `IG_MAX` / `VGK_ONSET`
