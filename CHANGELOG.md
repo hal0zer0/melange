@@ -605,7 +605,7 @@ generated state is smaller.
   converged.** ngspice integrated the reference with a maximum step equal to
   the output step, the same step as the melange render it judged, so its own
   error was charged to melange: a cascaded triode deck read 11.8 % at 48 kHz
-  against it and reads 0.18 % against a converged one. Each reference now
+  against it and reads 0.156 % against a converged one. Each reference now
   starts at a maximum step of a sixteenth of the output step and is refined,
   halving the step and tightening ngspice's `reltol` tenfold in turn, until
   both refinements move it by at most a tenth of the RMS tolerance graded;

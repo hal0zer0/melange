@@ -425,8 +425,9 @@ pub fn run_transient_stepped(
 /// warping, and worse on stiff nonlinear decks. Measured at the default: the
 /// reference moved 0.72 % (noyce-amp-at-idle) and 2.9 %
 /// (noyce-cascaded-triodes) between its 96 and 192 kHz runs, and 48 kHz
-/// validate read 2.4 % and 11.8 %. At `tstep/16`: 0.009 % and 0.071 %, and
-/// validate reads 0.21 % and 0.18 %.
+/// validate read 2.4 % and 11.8 %. At `tstep/16` those moves are 0.009 %
+/// and 0.071 %; noyce-cascaded-triodes needs `tstep/64` and `reltol = 1e-5`
+/// before its reference holds still (0.019 %), and then reads 0.156 %.
 pub const REFERENCE_STEP_DIVISOR: f64 = 16.0;
 
 /// ngspice's relative tolerance for the reference (its default is 1e-3).

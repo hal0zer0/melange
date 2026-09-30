@@ -51,7 +51,7 @@ recorded correlation/RMS values.
    rate had one every sample, which kept older references fine by
    accident), so an unconverged reference was integrating at melange's own
    step and its error was charged to melange: noyce-cascaded-triodes read
-   11.8 % at 48 kHz against it, 0.18 % against a converged one. From
+   11.8 % at 48 kHz against it, 0.156 % against a converged one. From
    `TMAX = tstep/16, reltol = 1e-4` the reference is refined in both
    parameters in turn, halving `TMAX` (to `tstep/256`) and tightening
    `reltol` tenfold (to `1e-6`), and is accepted when both refinements move

@@ -5,7 +5,7 @@
 //! and a smooth analytic drive, it integrated with the same step as the
 //! melange render it judged, and its error was charged to melange: 2.4 %
 //! and 11.8 % at 48 kHz on two tube decks whose converged references put
-//! melange at 0.21 % and 0.18 %. So no reference is used until it has shown
+//! melange at 0.216 % and 0.156 %. So no reference is used until it has shown
 //! it is converged, in both of the parameters that set its accuracy: the
 //! maximum internal step and the relative tolerance ngspice's step control
 //! works to. From a starting point, the step is halved and the tolerance
