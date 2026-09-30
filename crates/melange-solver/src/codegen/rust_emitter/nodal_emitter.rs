@@ -8990,14 +8990,12 @@ impl RustEmitter {
                 code.push_str("        let delta1 = inv_det * (-j1_0 * f0 + j0_0 * f1);\n\n");
                 emit_schur_nr_limit_and_converge(code, ir, 2, "        ", site.k);
             }
-            3..=24 => {
+            3..=crate::dk::MAX_M => {
                 Self::generate_schur_gauss_elim_k(code, ir, m, site.k);
             }
             _ => {
-                return Err(CodegenError::UnsupportedTopology(format!(
-                    "M={} not supported (max {})",
+                return Err(CodegenError::UnsupportedTopology(crate::dk::max_m_refusal(
                     m,
-                    crate::dk::MAX_M
                 )));
             }
         }

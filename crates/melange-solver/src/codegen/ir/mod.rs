@@ -1765,10 +1765,8 @@ impl CircuitIR {
             resolve_integrator_pref(config, netlist.integrator);
 
         if m > crate::dk::MAX_M {
-            return Err(CodegenError::UnsupportedTopology(format!(
-                "code generation supports at most M={} nonlinear dimensions, got M={}",
-                crate::dk::MAX_M,
-                m
+            return Err(CodegenError::UnsupportedTopology(crate::dk::max_m_refusal(
+                m,
             )));
         }
 
@@ -2542,11 +2540,7 @@ impl CircuitIR {
             resolve_integrator_pref(config, netlist.integrator);
 
         if m > dk::MAX_M {
-            return Err(CodegenError::InvalidConfig(format!(
-                "Nonlinear dimension M={} exceeds MAX_M={}",
-                m,
-                dk::MAX_M
-            )));
+            return Err(CodegenError::InvalidConfig(dk::max_m_refusal(m)));
         }
 
         // Build augmented G/C matrices (includes inductor branch variables)

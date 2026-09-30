@@ -200,7 +200,7 @@ Supported devices: resistors, capacitors, inductors (including saturating with `
 | Plugin produces silence | Wrong input/output node names | Check with `melange nodes`; use `--input-node` / `--output-node` |
 | Output is very quiet | Input level too low | Increase Input Level param in the plugin UI |
 | NaN / oscillation | DC operating point failed | Check biasing network; try `--backward-euler` |
-| "M exceeds MAX_M" error | Too many nonlinear devices for DK | Use `--solver nodal` |
+| "exceeds MAX_M" error | More than 32 nonlinear dimensions: a melange limit on generated code size, and every solver route refuses | No solver flag avoids it; see "Nonlinear System Size" in `docs/limitations.md` |
 | Compilation slow | Large circuit with nodal solver | Expected for N>30 circuits; runtime is still fast |
 
 ## Next Steps

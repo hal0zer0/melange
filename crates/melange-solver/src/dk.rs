@@ -218,16 +218,23 @@ impl From<crate::mna::MnaError> for DkError {
 
 /// Maximum supported nonlinear dimension (sum of all device dimensions).
 ///
-/// Circuits with more than MAX_M nonlinear dimensions are rejected to prevent
-/// unbounded allocation and O(M^3) NR solve cost.
-///
-/// M=24 supports the heaviest circuits in the stable catalog: Uniquorn v2's
-/// 8-stage active-NR cascade + CF buffer + clipper (M=20) with headroom for
-/// v3's additions and future split-band saturation designs. Circuits at
-/// M≥10 typically route to the nodal full-LU path via the `|K|>1e8` /
-/// `ρ(S·A_neg)>0.999` / positive-K-diagonal guards — MAX_M bounds the
-/// kernel-build hard reject, not which solver path actually runs.
-pub const MAX_M: usize = 24;
+/// A resource bound, not an accuracy limit: every route emits its Newton
+/// solve as fully unrolled Gaussian elimination (about M³/3 statements), so
+/// generated code size and compile time grow with M. Measured 2026-09-30 on a
+/// synthetic M = 32 deck (Ryzen 9 7950X, `rustc -O`, x86-64-v3, one codegen
+/// unit): DK 547 kB of source, 0.70 s to compile, 9.9 µs/sample; nodal Schur
+/// 918 kB, 5.7 s, 10.3 µs; nodal full-LU 677 kB, 3.5 s, 8.9 µs. A 1176-style
+/// FET limiter is M = 25.
+pub const MAX_M: usize = 32;
+
+/// The refusal for a circuit above [`MAX_M`], with its reason.
+pub fn max_m_refusal(m: usize) -> String {
+    format!(
+        "nonlinear dimension M={m} exceeds MAX_M={MAX_M}: the Newton solve is generated as \
+         fully unrolled Gaussian elimination (about M^3/3 statements), and above M={MAX_M} \
+         the generated code size and compile time are beyond what melange supports"
+    )
+}
 
 /// Maximum supported system dimension (total rows/columns in the A/S matrices).
 ///
@@ -282,10 +289,7 @@ impl DkKernel {
         let m = mna.m;
 
         if m > MAX_M {
-            return Err(DkError::InvalidParameter(format!(
-                "nonlinear dimension m={} exceeds MAX_M={}",
-                m, MAX_M
-            )));
+            return Err(DkError::InvalidParameter(max_m_refusal(m)));
         }
 
         if n > MAX_N {
@@ -620,10 +624,7 @@ impl DkKernel {
         let m = mna.m;
 
         if m > MAX_M {
-            return Err(DkError::InvalidParameter(format!(
-                "nonlinear dimension m={} exceeds MAX_M={}",
-                m, MAX_M
-            )));
+            return Err(DkError::InvalidParameter(max_m_refusal(m)));
         }
 
         // Count inductor winding variables

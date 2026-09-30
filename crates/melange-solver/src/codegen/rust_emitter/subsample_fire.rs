@@ -468,15 +468,13 @@ fn emit_substep_solve(
             ));
             emit_schur_nr_limit_and_converge(code, ir, 2, &i2, "state.ssf_lru[ssf_cur].k");
         }
-        3..=24 => {
+        3..=crate::dk::MAX_M => {
             // Fixed 8-space indent inside the helper (cosmetic only).
             RustEmitter::generate_schur_gauss_elim_k(code, ir, m, "state.ssf_lru[ssf_cur].k");
         }
         _ => {
-            return Err(CodegenError::UnsupportedTopology(format!(
-                "M={} not supported (max {})",
+            return Err(CodegenError::UnsupportedTopology(crate::dk::max_m_refusal(
                 m,
-                crate::dk::MAX_M
             )));
         }
     }

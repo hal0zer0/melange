@@ -527,6 +527,14 @@ generated state is smaller.
 
 ### Changed
 
+- **Circuits of up to 32 nonlinear dimensions build** (was 24), on every
+  route. A full 1176-style FET limiter is 25. The limit bounds generated code
+  size and compile time (the Newton solve is emitted as fully unrolled
+  elimination), not accuracy, and the refusal above it now says so. At 32 the
+  generated source is 0.5–0.9 MB and compiles in 0.7–5.7 s depending on the
+  route. `--solver nodal` never avoided this error, as the troubleshooting
+  table claimed; it is corrected.
+
 - **A circuit whose DC operating point does not converge is refused.** Its
   generated code would start from a state that is not a solution, with only a
   warning to say so. Every verb now refuses it; `--allow-unconverged-dc-op`

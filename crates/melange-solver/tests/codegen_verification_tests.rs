@@ -1612,81 +1612,57 @@ fn test_inductor_shipped_build_is_augmented() {
 }
 
 // ==========================================================================
-// Test: M > MAX_M rejection at DK kernel build time
+// Test: the MAX_M ceiling
 // ==========================================================================
 
-/// Verify that M=25 is rejected at DK kernel build time (MAX_M=24).
-#[test]
-fn test_m_gt_max_rejected() {
-    // 25 diodes → M=25 which exceeds MAX_M=24
-    let spice = "\
-Twenty-five Diodes
-Rin in 0 1k
-D1 in m1 D1N4148
-D2 m1 m2 D1N4148
-D3 m2 m3 D1N4148
-D4 m3 m4 D1N4148
-D5 m4 m5 D1N4148
-D6 m5 m6 D1N4148
-D7 m6 m7 D1N4148
-D8 m7 m8 D1N4148
-D9 m8 m9 D1N4148
-D10 m9 m10 D1N4148
-D11 m10 m11 D1N4148
-D12 m11 m12 D1N4148
-D13 m12 m13 D1N4148
-D14 m13 m14 D1N4148
-D15 m14 m15 D1N4148
-D16 m15 m16 D1N4148
-D17 m16 m17 D1N4148
-D18 m17 m18 D1N4148
-D19 m18 m19 D1N4148
-D20 m19 m20 D1N4148
-D21 m20 m21 D1N4148
-D22 m21 m22 D1N4148
-D23 m22 m23 D1N4148
-D24 m23 m24 D1N4148
-D25 m24 out D1N4148
-R1 m1 0 10k
-R2 m2 0 10k
-R3 m3 0 10k
-R4 m4 0 10k
-R5 m5 0 10k
-R6 m6 0 10k
-R7 m7 0 10k
-R8 m8 0 10k
-R9 m9 0 10k
-R10 m10 0 10k
-R11 m11 0 10k
-R12 m12 0 10k
-R13 m13 0 10k
-R14 m14 0 10k
-R15 m15 0 10k
-R16 m16 0 10k
-R17 m17 0 10k
-R18 m18 0 10k
-R19 m19 0 10k
-R20 m20 0 10k
-R21 m21 0 10k
-R22 m22 0 10k
-R23 m23 0 10k
-R24 m24 0 10k
-C1 out 0 1u
-.model D1N4148 D(IS=1e-15)
-";
-
-    let netlist = Netlist::parse(spice).expect("failed to parse netlist");
-    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
-
-    // M=25 exceeds MAX_M=24, so kernel build should fail
-    let result = DkKernel::from_mna(&mna, 44100.0);
-    assert!(
-        result.is_err(),
-        "M=25 should be rejected at DK kernel build time (MAX_M=24)"
-    );
+/// A chain of `m` diodes (nonlinear dimension M = m).
+fn diode_chain(m: usize) -> String {
+    let mut s = format!("{m} diodes\nRin in 0 1k\n");
+    let node = |k: usize| {
+        if k == 0 {
+            "in".to_string()
+        } else if k == m {
+            "out".to_string()
+        } else {
+            format!("m{k}")
+        }
+    };
+    for k in 1..=m {
+        s.push_str(&format!("D{k} {} {} D1N4148\n", node(k - 1), node(k)));
+        if k < m {
+            s.push_str(&format!("R{k} m{k} 0 10k\n"));
+        }
+    }
+    s.push_str("C1 out 0 1u\n.model D1N4148 D(IS=1e-15)\n");
+    s
 }
 
-/// Verify that M=10 (10 diodes) succeeds with MAX_M=24.
+/// One dimension above MAX_M is refused at kernel build, and the refusal says
+/// why (the unrolled elimination's code size), not just "unsupported".
+#[test]
+fn test_m_gt_max_rejected() {
+    let spice = diode_chain(melange_solver::MAX_M + 1);
+    let netlist = Netlist::parse(&spice).expect("failed to parse netlist");
+    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
+    assert_eq!(mna.m, melange_solver::MAX_M + 1);
+    let err = match DkKernel::from_mna(&mna, 44100.0) {
+        Ok(_) => panic!("M = MAX_M + 1 must be refused at kernel build"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("unrolled Gaussian elimination"), "{err}");
+}
+
+/// Exactly MAX_M builds and generates code.
+#[test]
+fn test_m_at_max_accepted() {
+    let spice = diode_chain(melange_solver::MAX_M);
+    let netlist = Netlist::parse(&spice).expect("failed to parse netlist");
+    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
+    assert_eq!(mna.m, melange_solver::MAX_M);
+    DkKernel::from_mna(&mna, 44100.0).expect("M = MAX_M must build");
+}
+
+/// Verify that M=10 (10 diodes) succeeds.
 #[test]
 fn test_m10_accepted() {
     let spice = "\

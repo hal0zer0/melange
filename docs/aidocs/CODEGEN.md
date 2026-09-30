@@ -502,8 +502,8 @@ rhs += history;
 ### Linear Solve by M Size
 - M=1: Direct division
 - M=2: Cramer's rule (explicit 2x2 inverse)
-- M=3..24: Inline Gaussian elimination with partial pivoting
-- M>24: Not supported (MAX_M=24)
+- M=3..32: Inline Gaussian elimination with partial pivoting
+- M>32: Refused on every route (MAX_M=32; the unrolled elimination's code size)
 
 ### Chord Persistence in Full-LU Nodal Path
 The `emit_nodal_process_sample` full-LU path keeps the chord LU factorisation

@@ -220,14 +220,12 @@ impl RustEmitter {
                     code.push_str("        let delta1 = inv_det * (-j1_0 * f0 + j0_0 * f1);\n\n");
                     emit_nr_limit_and_converge(code, ir, 2, "        ");
                 }
-                3..=24 => {
+                3..=crate::dk::MAX_M => {
                     Self::generate_gauss_elim(code, ir, m);
                 }
                 _ => {
-                    return Err(CodegenError::UnsupportedTopology(format!(
-                        "M={} nonlinear dimensions not supported (max {})",
+                    return Err(CodegenError::UnsupportedTopology(crate::dk::max_m_refusal(
                         m,
-                        crate::dk::MAX_M
                     )));
                 }
             }
@@ -258,7 +256,7 @@ impl RustEmitter {
         Ok(())
     }
 
-    /// Generate inline Gaussian elimination for M=3..=24.
+    /// Generate inline Gaussian elimination for M=3..=MAX_M.
     /// Shared Gauss-elimination body: augmented-matrix build + forward
     /// elimination + back substitution. The two NR-solve emitters differ only
     /// in the singularity-threshold token, the two explanatory comments, and

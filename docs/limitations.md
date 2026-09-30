@@ -402,10 +402,13 @@ is handled separately by routing (below), not by this warning.
 
 ### Nonlinear System Size
 
-Codegen supports up to M=24 nonlinear device dimensions (`MAX_M=24`,
-`crates/melange-solver/src/dk.rs:230`). M=1 is solved directly, M=2 by Cramer's
-rule, M=3..24 by Gaussian elimination with partial pivoting on a block-diagonal
-Jacobian.
+Codegen supports up to M=32 nonlinear device dimensions on every route
+(`MAX_M`, `crates/melange-solver/src/dk.rs`). M=1 is solved directly, M=2 by
+Cramer's rule, M=3..32 by Gaussian elimination with partial pivoting on a
+block-diagonal Jacobian, emitted fully unrolled. The bound is on generated code
+size and compile time, not accuracy: at M=32 the generated source is 0.5 to
+0.9 MB and takes 0.7 to 5.7 s to compile with `rustc -O`, depending on the
+route.
 
 Three mechanisms reduce M, and none is on by default:
 
@@ -573,7 +576,7 @@ Noise limitations:
   be expressible -- note that the predicate is "no NR loop", not `M == 0`, since
   a behavioral `B` source routes nodal and gets Newton regardless of M. That was
   6 of 41 corpus circuits: too small a subset to be worth a backend.
-- **M > 24**: iterative/sparse NR for very large nonlinear systems (MAX_M=24)
+- **M > 32**: a loop-based elimination (or iterative/sparse NR) for very large nonlinear systems (MAX_M=32)
 - **Ideal transformer formulation**: dependent sources + explicit leakage/magnetizing L
 
 ## Validation

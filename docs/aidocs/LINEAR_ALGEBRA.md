@@ -84,7 +84,7 @@ M-dimensional NR Jacobian. The shape of the emitted code depends on the routing
 mode:
 
 - **DK Schur path** — `generate_gauss_elim` emits a fully-unrolled M×M solver
-  (M ≤ 24, MAX_M). Used when the kernel has small M and the K matrix is well-conditioned.
+  (M ≤ 32, MAX_M). Used when the kernel has small M and the K matrix is well-conditioned.
 - **Nodal Schur path** — `generate_schur_gauss_elim` emits a slightly different
   structure that consumes the precomputed `S = A^{-1}` and solves the M×M system
   via the same Gaussian elimination shape.
@@ -209,9 +209,9 @@ flatten_matrix(M, r, c)    2D -> 1D row-major (index = row * cols + col)
 |---|--------|----------|
 | 1 | Direct division | Codegen template |
 | 2 | Cramer's rule | Codegen template |
-| 3-24 | Gaussian elimination (unrolled) | Codegen template |
-| Any (full LU path) | Sparse LU + chord refactor | `lu.rs` + codegen-emitted straight-line code |
-| >24 | Not supported (DK/Nodal Schur paths) | MAX_M = 24 |
+| 3-32 | Gaussian elimination (unrolled) | Codegen template |
+| ≤ 32 (full LU path) | Sparse LU + chord refactor | `lu.rs` + codegen-emitted straight-line code |
+| >32 | Refused on every route, full LU included | MAX_M = 32 |
 
 ## Singularity Thresholds by Context
 
