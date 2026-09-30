@@ -365,7 +365,8 @@ Stamps `PARASITIC_CAP = 10e-12 F` across each device junction:
 | MOSFET | gate-source + gate-drain |
 | Tube | grid-cathode + plate-cathode |
 
-Caps across junctions (not to ground). Emits `log::warn!` when triggered.
+Caps across junctions (not to ground). The condition is `needs_parasitic_caps()`; the
+build warns when it inserts them and records them in `CodegenMeta::parasitic_caps`.
 
 ## Helper Functions
 

@@ -2470,8 +2470,56 @@ impl MnaSystem {
     ///
     /// Uses [`PARASITIC_CAP`] (10pF) and [`stamp_capacitor_raw`](Self::stamp_capacitor_raw).
     pub fn add_parasitic_caps(&mut self) {
-        // Collect junction node pairs first to avoid borrowing self immutably
-        // (nonlinear_devices) and mutably (stamp_capacitor_raw) at the same time.
+        for (name, node_a, node_b) in self.parasitic_junctions() {
+            self.stamp_capacitor_raw(node_a, node_b, PARASITIC_CAP);
+            log::debug!(
+                "Parasitic cap {}: node({})-node({}) = {:.0e} F",
+                name,
+                node_a,
+                node_b,
+                PARASITIC_CAP,
+            );
+        }
+    }
+
+    /// Whether a build adds [`PARASITIC_CAP`] across every device junction:
+    /// the circuit has nonlinear devices and no capacitance at all, so the
+    /// trapezoidal `A = G + (2/T)C` would be `G` and the integrator would
+    /// have no state. The one test every build path uses.
+    pub fn needs_parasitic_caps(&self) -> bool {
+        self.m > 0 && !self.c.iter().any(|row| row.iter().any(|&v| v != 0.0))
+    }
+
+    /// The capacitors [`add_parasitic_caps`](Self::add_parasitic_caps)
+    /// stamps, by device and node name: what a SPICE twin of the deck needs
+    /// to simulate the same circuit.
+    ///
+    /// Device terminals are always netlist nodes (internal-node expansion
+    /// does not rewrite them), so every name is the netlist's own.
+    pub fn parasitic_caps(&self) -> Vec<ParasiticCap> {
+        let name = |idx: usize| -> String {
+            if idx == 0 {
+                return "0".to_string();
+            }
+            self.node_map
+                .iter()
+                .find(|(_, &i)| i == idx)
+                .map(|(n, _)| n.clone())
+                .unwrap_or_default()
+        };
+        self.parasitic_junctions()
+            .into_iter()
+            .map(|(device, a, b)| ParasiticCap {
+                device,
+                node_a: name(a),
+                node_b: name(b),
+            })
+            .collect()
+    }
+
+    /// Junctions that receive a parasitic cap: (device, node, node), node
+    /// indices 1-based with 0 = ground.
+    fn parasitic_junctions(&self) -> Vec<(String, usize, usize)> {
         let mut junctions: Vec<(String, usize, usize)> = Vec::new();
 
         for dev in &self.nonlinear_devices {
@@ -2588,16 +2636,7 @@ impl MnaSystem {
             }
         }
 
-        for (name, node_a, node_b) in &junctions {
-            self.stamp_capacitor_raw(*node_a, *node_b, PARASITIC_CAP);
-            log::debug!(
-                "Parasitic cap {}: node({})-node({}) = {:.0e} F",
-                name,
-                node_a,
-                node_b,
-                PARASITIC_CAP,
-            );
-        }
+        junctions
     }
 
     /// Append one augmented voltage-source row/column per `IC=`-bearing
@@ -2821,6 +2860,19 @@ impl MnaSystem {
 /// NOT used for voltage sources or VCVS — those use augmented MNA (extra variables
 /// for source currents, enforcing V_plus - V_minus = V_dc exactly).
 pub const DC_SHORT_CONDUCTANCE: f64 = 1e3;
+
+/// A [`PARASITIC_CAP`] a build adds across a device junction of a
+/// capacitor-free nonlinear circuit ([`MnaSystem::needs_parasitic_caps`]). It
+/// is part of the simulated circuit, so a SPICE twin of the deck needs it too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParasiticCap {
+    /// The device whose junction carries it.
+    pub device: String,
+    /// One terminal node, by name ("0" for ground).
+    pub node_a: String,
+    /// The other terminal node.
+    pub node_b: String,
+}
 
 /// Parasitic junction capacitance for nonlinear device stabilization [F].
 ///

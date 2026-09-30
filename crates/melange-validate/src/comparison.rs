@@ -348,6 +348,16 @@ pub struct ComparisonReport {
     /// nothing else: no gain is fitted, so a scale error stays in the
     /// residual where a gain gate can see it.
     pub alignment_note: Option<String>,
+
+    /// Set when melange auto-inserted parasitic junction capacitors (a
+    /// capacitor-free nonlinear deck) and the reference was given the same
+    /// ones, naming them. `None` for every deck with capacitance of its own.
+    /// Filled by `validate_circuit_with_options`.
+    ///
+    /// Reported, not graded: both engines simulate the same circuit, but not
+    /// the deck as written, and a reader who runs ngspice on the deck alone
+    /// gets a different answer.
+    pub parasitic_note: Option<String>,
 }
 
 impl ComparisonReport {
@@ -374,6 +384,9 @@ impl ComparisonReport {
         // are, not in a footnote.
         if let Some(note) = &self.alignment_note {
             summary.push_str(&format!("Aligned: {}\n", note));
+        }
+        if let Some(note) = &self.parasitic_note {
+            summary.push_str(&format!("Circuit: {}\n", note));
         }
         // The unit-variation qualifier rides ON the status line, not above it:
         // this line is the run's verdict, and a footnote elsewhere would not
@@ -586,6 +599,7 @@ pub fn compare_signals(
         config: *config,
         oversampling_note: None,
         alignment_note: None,
+        parasitic_note: None,
         absolute_errors: None,
         relative_errors: None,
         unit_variation_note: None,
@@ -864,6 +878,8 @@ pub fn compare_signals(
         oversampling_note: None,
         // Set by the caller, which is the layer that does the alignment.
         alignment_note: None,
+        // Set by the caller, which is the only layer that knows the build.
+        parasitic_note: None,
     }
 }
 

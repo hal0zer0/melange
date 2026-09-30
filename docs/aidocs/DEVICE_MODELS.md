@@ -1360,13 +1360,20 @@ inserts 10pF (`PARASITIC_CAP = 10e-12`) across each physical device junction:
 | BJT | base-emitter (Cje) + base-collector (Cjc) |
 | JFET | gate-source (Cgs) + gate-drain (Cgd) |
 | MOSFET | gate-source (Cgs) + gate-drain (Cgd) |
-| Tube | grid-cathode (Cgk) + plate-cathode (Cpk) |
+| Triode | grid-cathode (Cgk) + plate-cathode (Cpk) |
+| Pentode | Cgk, Cgp, Cpk, screen-cathode, screen-plate (grid-off: Cgk, Cgp, Cpk) |
+| VCA / LDR / glow | across the signal or resistance path |
 
 Caps are stamped *across junctions* (not node-to-ground) to model physical junction
 capacitance. This ensures the C matrix is non-trivial, preventing the trapezoidal-rule
 A matrix from becoming singular for purely resistive nonlinear circuits.
 
-A `log::warn!` is emitted when auto-insertion occurs.
+The condition is `MnaSystem::needs_parasitic_caps()` (nonlinear devices and an all-zero
+C), used by every build path. The caps change the circuit, so the build warns, naming
+each one (`J1 g-0, J1 g-out`), and records them by node name in
+`CodegenMeta::parasitic_caps`. `melange validate` gives its ngspice reference the same
+capacitors (`melange_validate::with_parasitic_caps`), so both engines simulate the
+circuit melange built; a SPICE run of the deck alone lacks them.
 
 ## Jacobian Contributions to NR System
 

@@ -269,7 +269,7 @@ impl DkKernel {
         // nonlinear devices. Without capacitors, A = G and the trapezoidal
         // integrator degenerates (no energy storage → no dynamics).
         let patched_mna;
-        let mna = if mna.m > 0 && !mna.c.iter().any(|row| row.iter().any(|&v| v != 0.0)) {
+        let mna = if mna.needs_parasitic_caps() {
             log::info!(
                 "C matrix is all zeros with M={} nonlinear devices; auto-inserting parasitic caps",
                 mna.m
@@ -604,7 +604,7 @@ impl DkKernel {
         // nonlinear devices. Without capacitors, A = G and the trapezoidal
         // integrator degenerates (no energy storage → no dynamics).
         let patched_mna;
-        let mna = if mna.m > 0 && !mna.c.iter().any(|row| row.iter().any(|&v| v != 0.0)) {
+        let mna = if mna.needs_parasitic_caps() {
             log::info!(
                 "C matrix is all zeros with M={} nonlinear devices; auto-inserting parasitic caps",
                 mna.m

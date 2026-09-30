@@ -423,23 +423,11 @@ pub fn validate_circuit_with_options(
     let mut nodes_to_capture = vec![output_node.to_string()];
     nodes_to_capture.extend(options.additional_nodes.clone());
 
-    let spice_data = spice_runner::run_transient_with_thevenin_pwl(
-        &netlist_str,
-        tstep,
-        duration,
-        input_node,
-        &pwl_data,
-        1.0, // 1 ohm series resistance matching melange's Thevenin model
-        &nodes_to_capture,
-    )?;
-
-    // Extract the output signal from SPICE results
-    let spice_output = spice_data
-        .get_node_voltage(output_node)
-        .map_err(ValidationError::from)?;
-
-    // Run melange solver on stripped netlist (VIN removed)
-    let melange_output = run_melange_solver_from_str(
+    // Run melange solver on stripped netlist (VIN removed). First, because
+    // the reference must simulate the circuit melange built: a
+    // capacitor-free nonlinear deck gets 10 pF parasitic caps across its
+    // junctions, and the reference gets the same ones.
+    let (melange_output, parasitic_caps) = run_melange_build(
         &stripped_netlist,
         input_signal,
         sample_rate,
@@ -452,6 +440,22 @@ pub fn validate_circuit_with_options(
         options.oversampling,
         None,
     )?;
+    let reference_deck = with_parasitic_caps(&netlist_str, &parasitic_caps)?;
+
+    let spice_data = spice_runner::run_transient_with_thevenin_pwl(
+        &reference_deck,
+        tstep,
+        duration,
+        input_node,
+        &pwl_data,
+        1.0, // 1 ohm series resistance matching melange's Thevenin model
+        &nodes_to_capture,
+    )?;
+
+    // Extract the output signal from SPICE results
+    let spice_output = spice_data
+        .get_node_voltage(output_node)
+        .map_err(ValidationError::from)?;
 
     // Apply DC blocking to SPICE output to match melange's internal DC blocker (5 Hz HPF)
     let mut spice_output_blocked = spice_output.to_vec();
@@ -521,6 +525,21 @@ pub fn validate_circuit_with_options(
     // seed that was therefore not exercised. `None` — and so no added output —
     // for every deck without them.
     report.unit_variation_note = deck_guard::unit_variation_note(&netlist_str);
+    // The reference is the deck plus melange's parasitic caps when it had no
+    // capacitance: say so, since a reader running ngspice on the deck alone
+    // would get a different answer.
+    report.parasitic_note = (!parasitic_caps.is_empty()).then(|| {
+        format!(
+            "the deck has no capacitors, so both engines carry the {} x 10 pF parasitic \
+             junction capacitors melange adds ({})",
+            parasitic_caps.len(),
+            parasitic_caps
+                .iter()
+                .map(|c| format!("{} {}-{}", c.device, c.node_a, c.node_b))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    });
     // Say on the report which build was validated. A correlation number for an
     // oversampled build is not comparable to a 1x one, and a reader who is not
     // told will assume it is.
@@ -809,6 +828,39 @@ pub fn run_melange_solver_from_str(
     oversampling: usize,
     main_code: Option<&str>,
 ) -> Result<Vec<f64>, ValidationError> {
+    run_melange_build(
+        netlist_str,
+        input_signal,
+        sample_rate,
+        output_node_name,
+        input_node_name,
+        bjt_fa_mode,
+        tube_grid_fa,
+        backward_euler,
+        force_trap,
+        oversampling,
+        main_code,
+    )
+    .map(|(output, _)| output)
+}
+
+/// [`run_melange_solver_from_str`], also returning the parasitic caps the
+/// build auto-inserted (empty unless the deck is capacitor-free and
+/// nonlinear), which the reference needs to simulate the same circuit.
+#[allow(clippy::too_many_arguments)]
+fn run_melange_build(
+    netlist_str: &str,
+    input_signal: &[f64],
+    sample_rate: f64,
+    output_node_name: &str,
+    input_node_name: &str,
+    bjt_fa_mode: melange_solver::codegen::BjtFaMode,
+    tube_grid_fa: &str,
+    backward_euler: bool,
+    force_trap: bool,
+    oversampling: usize,
+    main_code: Option<&str>,
+) -> Result<(Vec<f64>, Vec<melange_solver::mna::ParasiticCap>), ValidationError> {
     use melange_solver::codegen::CodegenConfig;
 
     if !matches!(oversampling, 1 | 2 | 4) {
@@ -882,7 +934,56 @@ pub fn run_melange_solver_from_str(
         .map_err(|e| ValidationError::Solver(e.to_string()))?;
     let generated = built.generated;
 
-    run_generated_solver(&generated.code, input_signal, main_code)
+    let output = run_generated_solver(&generated.code, input_signal, main_code)?;
+    Ok((output, generated.meta.parasitic_caps))
+}
+
+/// `netlist` with melange's auto-inserted parasitic caps added as SPICE
+/// capacitors, so a reference simulator runs the circuit melange built.
+/// Inserted before `.end` (appended when there is none); unchanged when
+/// `caps` is empty. Node names are the build's own, which for a subcircuit's
+/// internal node is the `X1.node` form ngspice also resolves.
+///
+/// Refuses a cap whose node has no name: it could not be placed, and the
+/// reference would silently be a different circuit.
+pub fn with_parasitic_caps(
+    netlist: &str,
+    caps: &[melange_solver::mna::ParasiticCap],
+) -> Result<String, ValidationError> {
+    if caps.is_empty() {
+        return Ok(netlist.to_string());
+    }
+    let mut lines = String::new();
+    for (k, c) in caps.iter().enumerate() {
+        if c.node_a.is_empty() || c.node_b.is_empty() {
+            return Err(ValidationError::InvalidInput(format!(
+                "melange added a parasitic capacitor across {} at a node with no netlist name; \
+                 the reference cannot carry it. Put the circuit's capacitances in the netlist.",
+                c.device
+            )));
+        }
+        lines.push_str(&format!(
+            "C_melange_parasitic_{} {} {} {:e}\n",
+            k + 1,
+            c.node_a,
+            c.node_b,
+            melange_solver::mna::PARASITIC_CAP
+        ));
+    }
+    let mut out = String::with_capacity(netlist.len() + lines.len());
+    let mut placed = false;
+    for line in netlist.lines() {
+        if !placed && line.trim().eq_ignore_ascii_case(".end") {
+            out.push_str(&lines);
+            placed = true;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if !placed {
+        out.push_str(&lines);
+    }
+    Ok(out)
 }
 
 /// Compile generated circuit code with the validation driver, run it on

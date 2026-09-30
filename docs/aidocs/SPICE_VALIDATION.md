@@ -62,6 +62,19 @@ recorded correlation/RMS values.
    a deck predating that needs re-running. See
    `docs/aidocs/UNIT_VARIATION.md` "Validation Implications".
 
+5. **Gives the reference melange's parasitic caps** (`with_parasitic_caps`,
+   `melange validate` / `validate_circuit_with_options`). A capacitor-free
+   nonlinear deck is built with 10 pF across each device junction (see
+   DEVICE_MODELS.md "Parasitic Cap Auto-Insertion"), recorded by node name in
+   `CodegenMeta::parasitic_caps`. The melange side now runs first, and the
+   deck handed to ngspice gets those capacitors as `C_melange_parasitic_k`
+   lines before `.end`; the report says so on a `Circuit:` line. Without them
+   the two engines simulated different circuits: a JFET resistor with its gate
+   held through 1 MΩ measured 1.9e-2 normalized rms error, 3.9e-4 with them
+   (`parasitic_twin_tests.rs`). The CI gate (`tests/spice_validation.rs`)
+   calls ngspice itself and has no capacitor-free nonlinear deck; one that
+   adds such a deck must route its reference through `with_parasitic_caps`.
+
 ### Netlist Structure — SINGLE deck, strip-VIN protocol
 
 Each test data dir carries ONE `circuit.cir` used by BOTH engines:

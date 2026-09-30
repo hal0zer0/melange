@@ -2133,8 +2133,12 @@ fn compile_circuit_source(
                 meta.dc_op_method, meta.dc_op_iterations
             );
         }
-        if meta.parasitic_caps_inserted {
-            println!("    Parasitic caps: auto-inserted (no capacitors in circuit)");
+        if !meta.parasitic_caps.is_empty() {
+            println!(
+                "    Parasitic caps: {} x 10 pF auto-inserted across device junctions (no \
+                 capacitors in circuit)",
+                meta.parasitic_caps.len()
+            );
         }
     }
     if meta_rail_pin_shown(&generated.meta.dc_op_rail_pin) {

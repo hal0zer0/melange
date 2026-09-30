@@ -807,8 +807,9 @@ pub struct GeneratedCode {
 pub struct PreparedIr {
     /// The IR.
     pub ir: CircuitIR,
-    /// Whether parasitic caps were auto-inserted before the IR was built.
-    pub parasitic_caps_inserted: bool,
+    /// The parasitic caps auto-inserted before the IR was built (empty when
+    /// the circuit has capacitance of its own).
+    pub parasitic_caps: Vec<crate::mna::ParasiticCap>,
 }
 
 /// Metadata about decisions made during code generation.
@@ -857,8 +858,11 @@ pub struct CodegenMeta {
     /// drove the sparse-LU decision. 0.0 when not applicable (DK path or
     /// M=0 circuits, where no pattern is computed).
     pub sparse_lu_density: f64,
-    /// Whether parasitic caps were auto-inserted.
-    pub parasitic_caps_inserted: bool,
+    /// The 10 pF parasitic caps auto-inserted across device junctions of a
+    /// capacitor-free nonlinear circuit, by device and node name; empty when
+    /// the circuit has capacitance of its own. Part of the simulated circuit:
+    /// `melange validate` adds them to its SPICE reference.
+    pub parasitic_caps: Vec<crate::mna::ParasiticCap>,
     /// Which nodal sub-path the emitter actually generated, reported BY the
     /// emitter. `None` on the DK path (no sub-path applies).
     ///
@@ -889,7 +893,7 @@ pub struct CodegenMeta {
 #[cfg(feature = "codegen")]
 fn build_codegen_meta(
     ir: &CircuitIR,
-    parasitic_caps_inserted: bool,
+    parasitic_caps: &[crate::mna::ParasiticCap],
     nodal_sub_path: Option<NodalSubPath>,
     nodal_full_lu_trigger: Option<&'static str>,
 ) -> CodegenMeta {
@@ -911,7 +915,7 @@ fn build_codegen_meta(
         dc_op_rail_pin: ir.dc_op_rail_pin.clone(),
         sparse_lu_enabled: ir.sparsity.lu.is_some(),
         sparse_lu_density: ir.sparsity.g_aug_density,
-        parasitic_caps_inserted,
+        parasitic_caps: parasitic_caps.to_vec(),
         nodal_sub_path,
         nodal_spectral_radius: if nodal_sub_path.is_some() {
             ir.matrices.spectral_radius_s_aneg
@@ -926,26 +930,37 @@ fn build_codegen_meta(
 /// has nonlinear devices (A = G otherwise degenerates the trapezoidal
 /// integrator — no energy storage, no dynamics). The caller owns `patched`
 /// storage so the returned borrow can outlive this call. Returns the MNA to
-/// use and whether caps were inserted.
+/// use and the caps inserted.
+///
+/// The caps change the circuit, so the build says so: a SPICE run of the
+/// same deck does not have them, and an author reading a difference between
+/// the two would otherwise look for it in the solver.
 #[cfg(feature = "codegen")]
 fn maybe_insert_parasitic_caps<'a>(
     mna: &'a MnaSystem,
     patched: &'a mut Option<MnaSystem>,
-    ctx: &str,
-) -> (&'a MnaSystem, bool) {
-    let inserted = mna.m > 0 && !mna.c.iter().any(|row| row.iter().any(|&v| v != 0.0));
-    if inserted {
-        log::info!(
-            "{ctx}: C matrix is all zeros with M={} nonlinear devices; auto-inserting parasitic caps",
-            mna.m
-        );
-        let mut m = mna.clone();
-        m.add_parasitic_caps();
-        *patched = Some(m);
-        (patched.as_ref().unwrap(), true)
-    } else {
-        (mna, false)
+) -> (&'a MnaSystem, Vec<crate::mna::ParasiticCap>) {
+    if !mna.needs_parasitic_caps() {
+        return (mna, Vec::new());
     }
+    let caps = mna.parasitic_caps();
+    let across: Vec<String> = caps
+        .iter()
+        .map(|c| format!("{} {}-{}", c.device, c.node_a, c.node_b))
+        .collect();
+    crate::diag_warn!(
+        "Capacitor-free nonlinear circuit: melange adds a {:.0} pF capacitor across each device \
+         junction ({}), since without capacitance the solver has no state. They are part of the \
+         simulated circuit (10 pF is a pole at 1.6 MHz through 10 kOhm, 16 kHz through 1 MOhm), \
+         and a SPICE run of this deck lacks them; `melange validate` adds them to its reference. \
+         Put the circuit's own capacitances in the netlist to replace them.",
+        crate::mna::PARASITIC_CAP * 1e12,
+        across.join(", ")
+    );
+    let mut m = mna.clone();
+    m.add_parasitic_caps();
+    *patched = Some(m);
+    (patched.as_ref().unwrap(), caps)
 }
 
 /// Code generator for circuit solvers
@@ -1102,14 +1117,10 @@ impl CodeGenerator {
         // so these must include the parasitic caps (matching the kernel, which also
         // auto-inserts them in from_mna/from_mna_augmented).
         let mut patched_mna = None;
-        let (mna, parasitic_caps_inserted) =
-            maybe_insert_parasitic_caps(mna, &mut patched_mna, "Codegen");
+        let (mna, parasitic_caps) = maybe_insert_parasitic_caps(mna, &mut patched_mna);
 
         let ir = CircuitIR::from_kernel_with_dc_op(kernel, mna, netlist, &self.config, dc_op)?;
-        Ok(PreparedIr {
-            ir,
-            parasitic_caps_inserted,
-        })
+        Ok(PreparedIr { ir, parasitic_caps })
     }
 
     /// Emit the code of a prepared IR, after checking its output ports.
@@ -1148,7 +1159,7 @@ impl CodeGenerator {
             m: ir.topology.m,
             meta: build_codegen_meta(
                 ir,
-                prepared.parasitic_caps_inserted,
+                &prepared.parasitic_caps,
                 nodal_sub_path,
                 nodal_full_lu_trigger,
             ),
@@ -1308,14 +1319,10 @@ impl CodeGenerator {
         // nonlinear devices. Without capacitors, A = G and the trapezoidal
         // integrator degenerates (no energy storage → no dynamics).
         let mut patched_mna = None;
-        let (mna, parasitic_caps_inserted) =
-            maybe_insert_parasitic_caps(mna, &mut patched_mna, "Codegen nodal");
+        let (mna, parasitic_caps) = maybe_insert_parasitic_caps(mna, &mut patched_mna);
 
         let ir = CircuitIR::from_mna_with_dc_op(mna, netlist, &self.config, dc_op)?;
-        Ok(PreparedIr {
-            ir,
-            parasitic_caps_inserted,
-        })
+        Ok(PreparedIr { ir, parasitic_caps })
     }
 }
 

@@ -157,7 +157,8 @@ This stamps 10pF (`PARASITIC_CAP = 10e-12`) across each physical device junction
 
 These are physically realistic values for small-signal semiconductor packages. Caps
 are stamped across junctions (not node-to-ground) to avoid introducing artificial
-ground coupling. A `log::warn!` is emitted when auto-insertion occurs.
+ground coupling. The build warns when it inserts them, naming each (see
+[DEVICE_MODELS.md](DEVICE_MODELS.md#parasitic-cap-auto-insertion)).
 
 With parasitic caps present, the C matrix is non-trivial, `A` has proper frequency
 dependence via `(2/T)*C`, and `H*v_prev + q_dot` carries the junction

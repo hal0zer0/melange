@@ -573,6 +573,14 @@ generated state is smaller.
   variable-mu law, at an operating point solved without it. A nonzero value is
   now refused. Variable-mu stays modelled for pentodes and beam tetrodes; no
   deck set these keys on a triode.
+- **A capacitor-free nonlinear circuit was validated against a different
+  circuit**: melange builds such a deck with 10 pF across each device junction,
+  which ngspice's run of the deck did not have. `melange validate` now gives
+  the reference the same capacitors and names them on a `Circuit:` line. On a
+  JFET resistor with its gate held through 1 MΩ the difference charged to
+  melange fell from 1.9e-2 to 3.9e-4 normalized rms error. The build now also
+  warns when it inserts them, naming each; it used to say so only at
+  `RUST_LOG=info` and in a one-line summary.
 - **A triode's `RGI` was missing from the DC operating point**: the transient
   evaluates the tube at its internal grid, behind RGI, and the DC operating
   point evaluated it at the terminal. With the grid conducting, the generated
