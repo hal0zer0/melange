@@ -298,11 +298,14 @@ impl BjtParams {
     /// collapses to `(CJE, CJC)` and the diffusion term drops out, which
     /// matches the previous zero-bias behaviour exactly.
     ///
-    /// `ic` is signed; the diffusion term uses `|ic|` so PNP/NPN sign
-    /// conventions are handled uniformly.
+    /// `vbe` and `vbc` are the terminal differences V(b) − V(e) and
+    /// V(b) − V(c), as the DC OP reports them for either polarity; the
+    /// depletion formula takes the junction's forward voltage, so a PNP's
+    /// are negated here. `ic` is signed; the diffusion term uses `|ic|`.
     pub fn linearized_junction_caps(&self, vbe: f64, vbc: f64, ic: f64) -> (f64, f64) {
-        let cbe_depl = spice_depletion_cap(self.cje, self.vje, self.mje, self.fc, vbe);
-        let cbc_depl = spice_depletion_cap(self.cjc, self.vjc, self.mjc, self.fc, vbc);
+        let sign = if self.is_pnp { -1.0 } else { 1.0 };
+        let cbe_depl = spice_depletion_cap(self.cje, self.vje, self.mje, self.fc, sign * vbe);
+        let cbc_depl = spice_depletion_cap(self.cjc, self.vjc, self.mjc, self.fc, sign * vbc);
         let cbe_diff = if self.tf > 0.0 && self.vt > 0.0 {
             self.tf * ic.abs() / self.vt
         } else {

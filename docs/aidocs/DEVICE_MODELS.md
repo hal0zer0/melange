@@ -352,6 +352,11 @@ Cj = CJ0 / (1-FC)^(1+MJ) * (1 - FC*(1+MJ) + MJ*Vj/VJ)   for Vj >= FC * VJ
 ```
 Where FC = 0.5 (forward-bias coefficient for linear extension).
 
+`Vj` is the junction's FORWARD voltage: Vbe and Vbc for an NPN, −Vbe and −Vbc
+for a PNP. `BjtParams::linearized_junction_caps` takes the terminal differences
+V(b) − V(e) and V(b) − V(c), as the DC OP reports them, and applies the
+polarity itself.
+
 #### Diffusion Capacitance
 ```
 Cd = TF * |Ic| / VT
