@@ -552,7 +552,7 @@ Noise limitations:
 - Op-amp `EN_FC`/`IN_FC` (1/f corner) are accepted with a compile notice but **not modelled** — Phase 4 is white-band only
 - BJT parasitic RB/RC/RE thermal noise (rbb′) is skipped (logged as a `warn!`) on the **DK codegen path**, which keeps RB/RC/RE inside the device model. Every nodal build expands the BJT internal nodes and includes it
 - Diode `RS` and tube `RGI` parasitic resistances are not yet thermal-noise sources
-- Setting `KF`/`AF` on resistors breaks ngspice parity — strip before SPICE-validating. (`.mismatch`/`.tolerance` jitter does not need stripping: `melange validate` disables it on melange's side automatically and says so on the result line)
+- Resistor `KF`/`AF` need no stripping before SPICE-validating: `melange validate` strips them from the ngspice reference (validate renders noise-free on both sides). Likewise `.mismatch`/`.tolerance` jitter: `melange validate` disables it on melange's side automatically and says so on the result line
 - **Tube microphonics** (Phase 6) is research only, not implemented
 
 ## Not Implemented [DEFERRED]
@@ -605,6 +605,16 @@ Noise limitations:
   reference trace crosses a declared rail, because the linear stand-in cannot
   clamp and the two engines would be running different circuits from that
   sample on.
+- A single saturating inductor (`ISAT=`) is translated into its own flux law
+  with the current as a state (`dx/dt = v / (L_mag/cosh²(x/ISAT) + L_air)`,
+  branch current `x`), from melange's resolved `ISAT` and floor. A **K-coupled**
+  saturating core has no ngspice twin here: the reference models that core as
+  LINEAR and `validate` says so, so a difference past the knee is not a melange
+  error.
+- The behavioral functions ngspice's `B` source lacks are rewritten: `idt(x)`
+  becomes an integrator node (unit capacitor from 0, 1e15 Ω leak) and
+  `atan2(y, x)` a quadrant-correct `atan`. Runtime scalars (`.runtime`) enter
+  the reference at their declared minimum.
 - `VCA`, `LDR` and `NEON` still have no oracle and are refused by `validate`;
   they are checked with `compile`/`analyze`/`simulate` instead.
 - `melange validate` does not read the deck's `.oversampling` recommendation;
@@ -618,8 +628,9 @@ Noise limitations:
   5.64e-6 at 2x, 6.25e-6 at 4x. See [OVERSAMPLING.md](OVERSAMPLING.md) for
   what that means in practice, and `docs/aidocs/OVERSAMPLING.md` for the filter
   internals.
-- Resistor `KF`/`AF` noise breaks ngspice parity (validate compiles with
-  `NoiseMode::Off`, so it is simply absent from the comparison)
+- Resistor `KF`/`AF` (flicker noise) are stripped from the ngspice reference,
+  which rejects them, with a notice; validate renders noise-free on both sides,
+  so the comparison is unchanged. No deck edit is needed
 - `.mismatch` / `.tolerance` jitter is **disabled automatically** on melange's
   side for a validate run, which names the disabled directives and the
   unexercised seed on its PASSED/FAILED line. Nominal is compared against

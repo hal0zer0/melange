@@ -471,6 +471,25 @@ generated state is smaller.
 - A local circuit source added with a relative path broke from any other
   directory, with "Failed to fetch URL" and an empty cause. Local sources are
   now stored absolute, and an unreachable one says why.
+- **`validate` billed a phantom last sample as peak error.** Resampling
+  melange's output to the reference rate added one sample past the end,
+  holding the last value, so the output's slope over a whole step was counted
+  as error; on some decks that one sample was the reported peak (93.6 mV where
+  the true peak error was 1.9 mV). Resampling now covers only the source's own
+  time span.
+- **`validate --csv` on a local deck wrote a full-size CSV beside the deck**
+  as well as the requested one, and two concurrent runs of one deck raced on
+  it. Report files are now written only to the requested location.
+- **More decks get an ngspice reference.** `validate` failed in ngspice, not in
+  melange, on decks that use melange-only features: a saturating inductor
+  (`ISAT=`), resistor flicker noise (`KF=`/`AF=`), a `.runtime` scalar, the
+  `idt`/`atan2` behavioral functions, or an op-amp, triode or pentode line with
+  an inline comment. Each is now translated for the reference or stripped with
+  a notice; see `docs/limitations.md` (SPICE Validation Scope) for what the
+  reference then models.
+- **`validate` on a deck without the input or output node it was given** is
+  refused before ngspice runs, naming the circuit's nodes and the flag to use,
+  instead of failing inside ngspice with "no data saved".
 
 ### Added
 
