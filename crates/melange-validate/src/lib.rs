@@ -261,8 +261,9 @@ impl AnalyticStimulus {
         }
     }
 
-    /// The ngspice voltage-source specification.
-    fn spice_source(&self) -> String {
+    /// The ngspice voltage-source specification (`SIN(...)`, or `V=...` for
+    /// a behavioural source).
+    pub fn spice_source(&self) -> String {
         match *self {
             AnalyticStimulus::Sine {
                 amplitude,

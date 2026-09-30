@@ -1529,96 +1529,74 @@ fn test_rc_lowpass_step_response() {
     );
 }
 
-/// Test: RC Lowpass Chirp (Multi-Frequency)
-///
-/// Linear chirp from 100 Hz to 10 kHz over 100ms tests wideband accuracy
-/// and error accumulation across 4800 samples. The chirp exercises the filter
-/// from well below cutoff (1.59 kHz) to well above it.
+/// A linear chirp from 100 Hz to 10 kHz over 100 ms through an RC lowpass
+/// (fc 1.59 kHz), against the analytic chirp. Trapezoidal integration warps
+/// frequency at 48 kHz (10 kHz lands ~17 % off), so the content of this test
+/// is that the error CONVERGES at second order with the step, not a
+/// threshold at one rate:
+/// - error(48k)/error(96k) >= 3 and error(96k)/error(192k) >= 2 (second order
+///   predicts ~4; the lower bounds leave room for a floor at 192 kHz;
+///   measured 4.95 and 2.2);
+/// - error(192k) below 0.3 %, a stated bound (measured 0.19 %).
+/// The 48 kHz error is reported, not gated (measured 2.08 %). An integrator
+/// regression breaks the order; a model regression breaks the bound.
 #[test]
 #[ignore] // requires ngspice
 fn test_rc_lowpass_chirp() {
     assert!(is_ngspice_available(), "ngspice not found");
 
-    println!("\n=== RC Lowpass Chirp (100 Hz → 10 kHz, 100 ms) ===");
-
-    let duration = 0.1; // 100ms
-    let num_samples = (SAMPLE_RATE * duration) as usize;
-    let f_start = 100.0;
-    let f_end = 10_000.0;
-
-    // Linear chirp: phase = 2π * (f0*t + (f1-f0)*t²/(2*T))
-    let input: Vec<f64> = (0..num_samples)
-        .map(|i| {
-            let t = i as f64 / SAMPLE_RATE;
-            let phase = 2.0
-                * std::f64::consts::PI
-                * (f_start * t + (f_end - f_start) * t * t / (2.0 * duration));
-            phase.sin()
-        })
-        .collect();
-
+    let duration = 0.1;
+    let (f_start, f_end) = (100.0, 10_000.0);
     let netlist_path = test_data_dir().join("rc_lowpass").join("circuit.cir");
-
-    // Relaxed vs pure-sine: chirp exercises high frequencies where trapezoidal
-    // bilinear warping at 48 kHz moves the response (10 kHz lands ~17 % off in
-    // frequency). Against the analytic chirp the measured error is 2.08 % RMS
-    // (corr 0.99979) at 48 kHz, 0.42 % at 96 kHz and 0.19 % at 192 kHz: the
-    // discretization, converging with the step. The gate sits just above the
-    // 48 kHz value. (It was 2 % / 0.9999 against a 48 kHz PWL reference, whose
-    // linear interpolation itself rolled off 1.3 dB at 10 kHz.)
+    let stimulus = melange_validate::AnalyticStimulus::LinearChirp {
+        amplitude: 1.0,
+        f_start,
+        f_end,
+        duration,
+    };
+    // Only the error is used; no gate of the comparison's own.
     let config = ComparisonConfig {
-        rms_error_tolerance: 0.022,  // 2.2% — measured 2.08%, trapezoidal warping
-        peak_error_tolerance: 0.2,   // 200mV — instantaneous phase error near Nyquist
-        max_relative_tolerance: 1e4, // near zero-crossings, relative error is huge
-        correlation_min: 0.9997,     // measured 0.99979
-        thd_error_tolerance_db: 5.0,
-        skip_thd: true, // chirp has no meaningful THD
+        rms_error_tolerance: 1.0,
+        peak_error_tolerance: 10.0,
+        max_relative_tolerance: 1e9,
+        correlation_min: 0.0,
+        thd_error_tolerance_db: 1e3,
+        skip_thd: true,
         settle_time_s: 0.0,
         peak_error_relative: None,
     };
-
-    // The chirp has a closed form: the reference is driven by it.
-    let options = melange_validate::ValidationOptions {
-        analytic_stimulus: Some(melange_validate::AnalyticStimulus::LinearChirp {
-            amplitude: 1.0,
-            f_start,
-            f_end,
-            duration,
-        }),
-        ..Default::default()
+    let error_at = |fs: f64| -> f64 {
+        let n = (fs * duration) as usize;
+        let input: Vec<f64> = (0..n).map(|i| stimulus.at(i as f64 / fs)).collect();
+        let options = melange_validate::ValidationOptions {
+            analytic_stimulus: Some(stimulus),
+            ..Default::default()
+        };
+        melange_validate::validate_circuit_with_options(
+            &netlist_path,
+            &input,
+            fs,
+            "out",
+            &config,
+            &options,
+        )
+        .expect("chirp validation ran")
+        .report
+        .normalized_rms_error
     };
-    let result = melange_validate::validate_circuit_with_options(
-        &netlist_path,
-        &input,
-        SAMPLE_RATE,
-        "out",
-        &config,
-        &options,
-    )
-    .expect("Chirp validation failed");
-
+    let (e48, e96, e192) = (error_at(48_000.0), error_at(96_000.0), error_at(192_000.0));
     println!(
-        "  Samples: {} ({:.0} ms)",
-        result.report.sample_count,
-        1000.0 * num_samples as f64 / SAMPLE_RATE
+        "  RC lowpass chirp, normalized RMS error: 48k {:.4}%, 96k {:.4}%, 192k {:.4}% \
+         (ratios {:.2}, {:.2})",
+        e48 * 100.0,
+        e96 * 100.0,
+        e192 * 100.0,
+        e48 / e96,
+        e96 / e192
     );
-    println!("  RMS Error: {:.6e}", result.report.rms_error);
-    println!(
-        "  Normalized RMS: {:.6} ({:.4}%)",
-        result.report.normalized_rms_error,
-        result.report.normalized_rms_error * 100.0
-    );
-    println!("  Peak Error: {:.6e}", result.report.peak_error);
-    println!(
-        "  Correlation: {:.8}",
-        result.report.correlation_coefficient
-    );
-
-    assert!(
-        result.report.passed,
-        "RC lowpass chirp validation failed:\n{}",
-        result.report.summary()
-    );
+    assert!(e48 / e96 >= 3.0, "48k -> 96k ratio {:.2} < 3", e48 / e96);
+    assert!(e96 / e192 >= 2.0, "96k -> 192k ratio {:.2} < 2", e96 / e192);
+    assert!(e192 < 0.003, "192 kHz error {:.4}% >= 0.3 %", e192 * 100.0);
 }
 
 /// Test: Diode Clipper Silence-to-Signal Transition
@@ -1862,9 +1840,16 @@ fn test_tube_screamer_wiper_vs_spice() {
 /// `set_pot_0(...)`.
 fn run_pot_validation(
     ngspice_deck: &str,
-    input_signal: &[f64],
+    stimulus: melange_validate::AnalyticStimulus,
+    num_samples: usize,
     main_code: &str,
 ) -> (Vec<f64>, Vec<f64>) {
+    // melange gets samples of the stimulus; the reference is driven by the
+    // stimulus itself, the continuous signal those are samples of.
+    let input_signal: Vec<f64> = (0..num_samples)
+        .map(|i| stimulus.at(i as f64 / SAMPLE_RATE))
+        .collect();
+    let input_signal = &input_signal[..];
     let data_dir = test_data_dir().join("pot_modulation");
     let ngspice_netlist = std::fs::read_to_string(data_dir.join(ngspice_deck))
         .expect("Failed to read ngspice pot deck");
@@ -1873,18 +1858,12 @@ fn run_pot_validation(
 
     let duration = input_signal.len() as f64 / SAMPLE_RATE;
     let tstep = 1.0 / SAMPLE_RATE;
-    let pwl_data: Vec<(f64, f64)> = input_signal
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| (i as f64 / SAMPLE_RATE, v))
-        .collect();
-
-    let spice_data = run_transient_with_thevenin_pwl(
+    let spice_data = melange_validate::run_transient_with_thevenin_drive(
         &ngspice_netlist,
         tstep,
         duration,
         "in",
-        &pwl_data,
+        &stimulus.spice_source(),
         1.0,
         &["out".to_string()],
     )
@@ -1921,8 +1900,12 @@ fn test_pot_static_offnominal_vs_spice() {
 
     // 500 Hz, 1 V, 20 ms — clips positive half on D1, divider on negative half
     let num_samples = (SAMPLE_RATE * 0.020) as usize;
+    let stimulus = melange_validate::AnalyticStimulus::Sine {
+        amplitude: 1.0,
+        frequency: 500.0,
+    };
     let input: Vec<f64> = (0..num_samples)
-        .map(|i| (2.0 * std::f64::consts::PI * 500.0 * i as f64 / SAMPLE_RATE).sin())
+        .map(|i| stimulus.at(i as f64 / SAMPLE_RATE))
         .collect();
 
     let main_code = r#"
@@ -1945,7 +1928,7 @@ fn main() {
 "#;
 
     let (spice_output, melange_output) =
-        run_pot_validation("circuit_static.cir", &input, main_code);
+        run_pot_validation("circuit_static.cir", stimulus, num_samples, main_code);
 
     // Measured 2026-07-18 (first arming): rms 0.0374%, peak 4.06e-3 V,
     // corr 0.99999995, THD err 0.01 dB — the off-nominal rebuild is exactly
@@ -1999,8 +1982,12 @@ fn test_pot_modulation_vs_spice() {
 
     // 500 Hz, 1 V, 50 ms signal; R modulated 1k..10k at 5 kHz (per the deck)
     let num_samples = (SAMPLE_RATE * 0.050) as usize;
+    let stimulus = melange_validate::AnalyticStimulus::Sine {
+        amplitude: 1.0,
+        frequency: 500.0,
+    };
     let input: Vec<f64> = (0..num_samples)
-        .map(|i| (2.0 * std::f64::consts::PI * 500.0 * i as f64 / SAMPLE_RATE).sin())
+        .map(|i| stimulus.at(i as f64 / SAMPLE_RATE))
         .collect();
 
     let main_code = r#"
@@ -2028,7 +2015,8 @@ fn main() {
 }
 "#;
 
-    let (spice_output, melange_output) = run_pot_validation("circuit.cir", &input, main_code);
+    let (spice_output, melange_output) =
+        run_pot_validation("circuit.cir", stimulus, num_samples, main_code);
 
     // Gates measured 2026-07-18 (midpoint R evaluation, see doc comment):
     // rms 1.28%, peak 3.93e-2 V, corr 0.99991763. Dynamic-R comparison is
