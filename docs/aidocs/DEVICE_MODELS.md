@@ -1060,15 +1060,21 @@ Cutoff (Vgst <= 0): Id = 0
 
 ### Gate Current
 ```
-Ig ≈ 0  (insulated gate approximation)
+Ig = 0  at every bias (no gate junction is modelled)
 ```
+A JFET gate is a pn junction to the channel, not an insulated gate: SPICE
+models the gate-source and gate-drain diodes with `IS` and `N`, and forward
+biased they conduct at about +0.5 to 0.7 V and clamp the gate. melange has
+neither junction (generated `jfet_ig` returns 0 with zero partials, and the DC
+OP matches it), so a forward-driven gate is unclamped; `IS`/`N` on a JFET card
+are refused. Costed in `docs/limitations.md` (JFET / MOSFET).
 
 ### Device Jacobian (2x2)
 ```
 [dId/dVgs  dId/dVds]
 [dIg/dVgs  dIg/dVds]
 ```
-dIg/dVgs and dIg/dVds are effectively zero.
+dIg/dVgs and dIg/dVds are zero.
 
 ### Sign Convention
 - N-channel (NJ): sign=+1.0, default VTO=-2.0, Vp negative
