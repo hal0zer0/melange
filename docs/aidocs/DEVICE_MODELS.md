@@ -359,8 +359,14 @@ polarity itself.
 
 #### Diffusion Capacitance
 ```
-Cd = TF * |Ic| / VT
+Cd = TF * d(I_F/qb)/dVbe,   I_F = IS * (exp(Vbe/(NF*VT)) - 1)
+   = TF * (dI_F/dVbe - (I_F/qb) * dqb/dVbe) / qb     for Vbe > 0
+   = TF * dI_F/dVbe                                  for Vbe <= 0
 ```
+ngspice `bjtload.c` with XTF = 0: `capbe = tf*gbe`. It carries NF and the
+Gummel-Poon base charge qb (Early effect, high injection); qb = 1 on an
+Ebers-Moll card. The charge's dependence on Vbc through qb (ngspice's `geqcb`
+transcapacitance, of order NF·VT/VAF relative to Cd) is not stamped.
 
 #### Parameters
 ```

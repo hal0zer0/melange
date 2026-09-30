@@ -11,7 +11,7 @@
 
 use crate::device_types::{DeviceParams, DeviceSlot, DeviceType, TubeKind};
 use crate::mna::{inject_rhs_current, MnaSystem};
-use melange_devices::bjt::{BjtEbersMoll, BjtGummelPoon, BjtPolarity};
+use melange_devices::bjt::{BjtEbersMoll, BjtGummelPoon};
 use melange_devices::diode::{DiodeShockley, DiodeWithRs};
 use melange_devices::tube::{KorenPentode, KorenTriode};
 use melange_primitives::nr::{fetlim, pn_vcrit, pnjlim};
@@ -663,11 +663,6 @@ pub(crate) fn bjt_eval(
     vbc: f64,
     through_parasitics: bool,
 ) -> (f64, f64, [f64; 4]) {
-    let polarity = if bp.is_pnp {
-        BjtPolarity::Pnp
-    } else {
-        BjtPolarity::Npn
-    };
     // Leakage diodes (ISE/NE, ISC/NC): the transient runtime's
     // `bjt_evaluate` (device_bjt.rs.tera) always includes these
     // terms in Ib and its Jacobian. The DC OP must carry the same
@@ -675,19 +670,11 @@ pub(crate) fn bjt_eval(
     // converge to a different fixed point than the transient —
     // for a 2N3904 at Vbe≈0.65 the leakage term exceeds the ideal
     // Ib, which is volts of error through MΩ-class bias networks.
-    let em = BjtEbersMoll::new(bp.is, bp.vt, bp.beta_f, bp.beta_r, polarity)
-        .with_nf(bp.nf)
-        .with_nr(bp.nr)
-        .with_leakage(bp.ise, bp.ne, bp.isc, bp.nc);
     // Gummel-Poon wraps the SAME leakage-carrying Ebers-Moll core:
     // GP modulates only the transport (collector) current by qb;
     // Ib and its Jacobian delegate to the base Ebers-Moll model —
     // exactly the composition of the runtime `bjt_evaluate`.
-    let gp = if bp.is_gummel_poon() {
-        Some(BjtGummelPoon::new(em, bp.vaf, bp.var, bp.ikf, bp.ikr))
-    } else {
-        None
-    };
+    let (em, gp) = bp.device_models();
     if through_parasitics {
         bjt_with_parasitics_dc(&em, gp.as_ref(), vbe, vbc, bp.rb, bp.rc, bp.re, bp.vt)
     } else {
@@ -4536,6 +4523,7 @@ mod tests {
     use super::*;
     use crate::device_types::{BjtParams, DiodeParams};
     use crate::parser::Netlist;
+    use melange_devices::bjt::BjtPolarity;
 
     // ── Finite-but-implausible fallback guard ────────────────────────
     //

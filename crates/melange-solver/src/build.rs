@@ -785,7 +785,7 @@ pub fn assemble(
 
     // BJT junction-cap preflight: solve DC OP on the fully-reduced MNA and
     // re-linearize CJE/CJC at Vbe_op/Vbc_op, then add the diffusion-cap
-    // contribution `TF · |Ic| / Vt`. No-op when every BJT uses the SPICE
+    // contribution `TF · d(I_F/qb)/dVbe`. No-op when every BJT uses the SPICE
     // defaults (TF = 0, CJE = CJC = 0, etc.). See the SPICE validation
     // harness for the matching call site — the two paths must agree so a
     // plugin built from `melange compile` behaves like the validated one.
@@ -1376,7 +1376,7 @@ pub fn preflight_relinearize_bjt_caps(
         &crate::codegen::ir::dc_op_config(mna, dc_request),
     );
     if dc.converged {
-        mna.relinearize_bjt_caps_at_dc_op(&device_slots, &dc.v_nl, &dc.i_nl);
+        mna.relinearize_bjt_caps_at_dc_op(&device_slots, &dc.v_nl, &dc.v_node);
     }
     Some(dc)
 }

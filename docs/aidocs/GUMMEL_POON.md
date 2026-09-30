@@ -238,7 +238,7 @@ Junction caps evaluated at DC operating point, stamped into MNA C matrix:
 ```
 Depletion: Cj = CJ0 / (1 - Vj/VJ)^MJ           for Vj < FC*VJ
            Cj = CJ0/(1-FC)^(1+MJ) * (1-FC*(1+MJ)+MJ*Vj/VJ)  for Vj >= FC*VJ
-Diffusion: Cd = TF * |Ic| / VT
+Diffusion: Cd = TF * d(I_F/qb)/dVbe,  I_F = IS*(exp(Vbe/(NF*VT)) - 1)
 
 B-E cap: CJE_linearized + Cd  stamped across base-emitter
 B-C cap: CJC_linearized       stamped across base-collector

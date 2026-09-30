@@ -312,7 +312,7 @@ When BJT charge storage parameters are specified (CJE, CJC, TF), the junction
 capacitances are evaluated at the DC operating point and stamped into the MNA C matrix:
 
 - **Depletion cap**: `Cj = CJ0 / (1 - Vj/VJ)^MJ` (with FC=0.5 linear extension for forward bias)
-- **Diffusion cap**: `Cd = TF * |Ic| / VT`
+- **Diffusion cap**: `Cd = TF · d(I_F/qb)/dVbe`, `I_F = IS·(exp(Vbe/(NF·VT)) − 1)` (ngspice's `capbe = tf*gbe`; qb = 1 without Gummel-Poon parameters). A forward-active (1D) BJT's Vbc for the depletion cap comes from the node voltages
 - Total B-E cap: `CJE_linearized + Cd` stamped across base-emitter nodes
 - Total B-C cap: `CJC_linearized` stamped across base-collector nodes
 

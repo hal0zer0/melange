@@ -273,6 +273,16 @@ impl BjtEbersMoll {
         // Apply chain rule for polarity
         (s * s * d_ic_d_vbe, s * s * d_ic_d_vbc)
     }
+
+    /// B-E diffusion capacitance `TF·dI_F/dVbe`, `I_F = IS·(exp(Vbe/(NF·VT)) - 1)`
+    /// (Gummel-Poon with qb = 1; see
+    /// [`BjtGummelPoon::forward_diffusion_capacitance`]). `vbe` is the
+    /// terminal difference; polarity is applied here.
+    pub fn forward_diffusion_capacitance(&self, tf: f64, vbe: f64) -> f64 {
+        let nf_vt = self.nf * self.vt;
+        let dexp_be = safeguards::junction_exp(self.sign() * vbe / nf_vt, self.is).1;
+        tf * self.is / nf_vt * dexp_be
+    }
 }
 
 impl NonlinearDevice<2> for BjtEbersMoll {
@@ -371,6 +381,68 @@ impl BjtGummelPoon {
         q1 * (1.0 + (1.0 + 4.0 * q2).max(0.0).sqrt()) / 2.0
     }
 
+    /// `(qb, dqb/dVbe, dqb/dVbc)` at the polarity-normalised junction
+    /// voltages. Same function as [`Self::qb`]; the partials go to the
+    /// Jacobian and the diffusion capacitance.
+    fn qb_with_partials(&self, vbe_eff: f64, vbc_eff: f64) -> (f64, f64, f64) {
+        let is = self.base.is;
+        let nf_vt = self.base.nf * self.base.vt;
+        let nr_vt = self.base.nr * self.base.vt;
+        let (exp_be, dexp_be) = safeguards::junction_exp(vbe_eff / nf_vt, is);
+        let (exp_bc, dexp_bc) = safeguards::junction_exp(vbc_eff / nr_vt, is);
+
+        // Base charge factor q1 (matches qb() singularity handling)
+        let q1_denom = 1.0 - vbe_eff / self.var - vbc_eff / self.vaf;
+        let (q1, dq1_dvbe, dq1_dvbc) = if q1_denom <= 0.0 || q1_denom.abs() < 1e-30 {
+            (1.0, 0.0, 0.0) // matches qb() fallback
+        } else {
+            let q1 = 1.0 / q1_denom;
+            (q1, q1 * q1 / self.var, q1 * q1 / self.vaf)
+        };
+
+        // High injection q2 matches ngspice bjtload.c:571:
+        //     q2 = cbe/IKF + cbc/IKR
+        //     cbe = IS*(exp(Vbe/(NF*VT)) - 1), cbc = IS*(exp(Vbc/(NR*VT)) - 1)
+        let cbe = is * (exp_be - 1.0);
+        let cbc = is * (exp_bc - 1.0);
+        let q2 = cbe / self.ikf + cbc / self.ikr;
+        let dq2_dvbe = (is / (nf_vt * self.ikf)) * dexp_be;
+        let dq2_dvbc = (is / (nr_vt * self.ikr)) * dexp_bc;
+
+        // Discriminant D = sqrt(1 + 4*q2)
+        let disc = (1.0 + 4.0 * q2).max(0.0);
+        let d = disc.sqrt();
+        let dd_dvbe = if d > 1e-15 { 2.0 * dq2_dvbe / d } else { 0.0 };
+        let dd_dvbc = if d > 1e-15 { 2.0 * dq2_dvbc / d } else { 0.0 };
+
+        // qb = q1 * (1 + D) / 2
+        let qb = q1 * (1.0 + d) / 2.0;
+        let dqb_dvbe = dq1_dvbe * (1.0 + d) / 2.0 + q1 * dd_dvbe / 2.0;
+        let dqb_dvbc = dq1_dvbc * (1.0 + d) / 2.0 + q1 * dd_dvbc / 2.0;
+        (qb, dqb_dvbe, dqb_dvbc)
+    }
+
+    /// B-E diffusion capacitance `dQ_de/dVbe` for forward transit time `tf`,
+    /// with `Q_de = TF·I_F/qb` and `I_F = IS·(exp(Vbe/(NF·VT)) - 1)`.
+    ///
+    /// ngspice bjtload.c (XTF = 0): `capbe = tf*gbe`, where for `Vbe > 0`
+    /// `gbe = (dI_F/dVbe - (I_F/qb)·dqb/dVbe)/qb`, and for `Vbe <= 0`
+    /// `gbe = dI_F/dVbe` (the qb division applies to forward bias only).
+    /// `vbe`, `vbc` are terminal differences; polarity is applied here.
+    pub fn forward_diffusion_capacitance(&self, tf: f64, vbe: f64, vbc: f64) -> f64 {
+        let s = self.base.sign();
+        let (vbe_eff, vbc_eff) = (s * vbe, s * vbc);
+        let nf_vt = self.base.nf * self.base.vt;
+        let (exp_be, dexp_be) = safeguards::junction_exp(vbe_eff / nf_vt, self.base.is);
+        let i_f = self.base.is * (exp_be - 1.0);
+        let g_f = self.base.is / nf_vt * dexp_be;
+        if vbe_eff <= 0.0 {
+            return tf * g_f;
+        }
+        let (qb, dqb_dvbe, _) = self.qb_with_partials(vbe_eff, vbc_eff);
+        tf * (g_f - i_f / qb * dqb_dvbe) / qb
+    }
+
     /// Base current — ngspice bjtload.c:618 exactly.
     ///
     /// `Ib = Is/BF * (exp(Vbe/(NF*VT)) - 1) + Is/BR * (exp(Vbc/(NR*VT)) - 1)`
@@ -426,35 +498,7 @@ impl NonlinearDevice<2> for BjtGummelPoon {
         let dicc_dvbe = is / nf_vt * dexp_be;
         let dicc_dvbc = -is / nr_vt * dexp_bc;
 
-        // Base charge factor q1 (matches qb() singularity handling)
-        let q1_denom = 1.0 - vbe_eff / self.var - vbc_eff / self.vaf;
-        let (q1, dq1_dvbe, dq1_dvbc) = if q1_denom <= 0.0 || q1_denom.abs() < 1e-30 {
-            (1.0, 0.0, 0.0) // matches qb() fallback
-        } else {
-            let q1 = 1.0 / q1_denom;
-            (q1, q1 * q1 / self.var, q1 * q1 / self.vaf)
-        };
-
-        // High injection q2 matches ngspice bjtload.c:571:
-        //     q2 = cbe/IKF + cbc/IKR
-        //     cbe = IS*(exp(Vbe/(NF*VT)) - 1), cbc = IS*(exp(Vbc/(NR*VT)) - 1)
-        // Reuse the NF*VT / NR*VT exponentials already computed above.
-        let cbe = is * (exp_be - 1.0);
-        let cbc = is * (exp_bc - 1.0);
-        let q2 = cbe / self.ikf + cbc / self.ikr;
-        let dq2_dvbe = (is / (nf_vt * self.ikf)) * dexp_be;
-        let dq2_dvbc = (is / (nr_vt * self.ikr)) * dexp_bc;
-
-        // Discriminant D = sqrt(1 + 4*q2)
-        let disc = (1.0 + 4.0 * q2).max(0.0);
-        let d = disc.sqrt();
-        let dd_dvbe = if d > 1e-15 { 2.0 * dq2_dvbe / d } else { 0.0 };
-        let dd_dvbc = if d > 1e-15 { 2.0 * dq2_dvbc / d } else { 0.0 };
-
-        // qb = q1 * (1 + D) / 2
-        let qb = q1 * (1.0 + d) / 2.0;
-        let dqb_dvbe = dq1_dvbe * (1.0 + d) / 2.0 + q1 * dd_dvbe / 2.0;
-        let dqb_dvbc = dq1_dvbc * (1.0 + d) / 2.0 + q1 * dd_dvbc / 2.0;
+        let (qb, dqb_dvbe, dqb_dvbc) = self.qb_with_partials(vbe_eff, vbc_eff);
 
         // Ic_eff = Icc/qb - Is/βr * (exp(Vbc_eff/Vt) - 1)
         // d(Icc/qb)/dV = (dIcc/dV * qb - Icc * dqb/dV) / qb^2  (quotient rule)
@@ -1855,6 +1899,47 @@ mod tests {
                 (j - fd).abs() <= 1e-5 * fd.abs(),
                 "Vbe {v}: dIc/dVbe {j} vs finite difference {fd}"
             );
+        }
+    }
+
+    /// C_de = TF·d(I_F/qb)/dVbe against a central difference of the charge,
+    /// with Early and high injection both live, for both polarities.
+    #[test]
+    fn diffusion_capacitance_is_the_derivative_of_the_diffusion_charge() {
+        let tf = 1e-9;
+        for polarity in [BjtPolarity::Npn, BjtPolarity::Pnp] {
+            let em = BjtEbersMoll::new(1.5e-14, 0.025864, 200.0, 4.0, polarity).with_nf(1.3);
+            let gp = BjtGummelPoon::new(em, 50.0, 20.0, 5e-3, 0.1);
+            let s = em.sign();
+            let q = |vbe: f64, vbc: f64| {
+                let (vbe_eff, vbc_eff) = (s * vbe, s * vbc);
+                let i_f =
+                    em.is * (safeguards::junction_exp(vbe_eff / (1.3 * em.vt), em.is).0 - 1.0);
+                tf * i_f / gp.qb_with_partials(vbe_eff, vbc_eff).0
+            };
+            for vbe_mag in [0.55, 0.7, 0.85] {
+                let (vbe, vbc) = (s * vbe_mag, s * -4.0);
+                let h = 1e-6;
+                // dQ/dVbe in the polarity-normalised voltage.
+                let fd = s * (q(vbe + h, vbc) - q(vbe - h, vbc)) / (2.0 * h);
+                let c = gp.forward_diffusion_capacitance(tf, vbe, vbc);
+                assert!(
+                    (c - fd).abs() <= 1e-6 * fd.abs(),
+                    "{polarity:?} Vbe {vbe_mag}: C_de {c:e} vs dQ/dVbe {fd:e}"
+                );
+            }
+            // qb = 1 reduces to TF·dI_F/dVbe, the Ebers-Moll value.
+            let plain = BjtGummelPoon::new(
+                em,
+                f64::INFINITY,
+                f64::INFINITY,
+                f64::INFINITY,
+                f64::INFINITY,
+            );
+            let (vbe, vbc) = (s * 0.7, s * -4.0);
+            let a = plain.forward_diffusion_capacitance(tf, vbe, vbc);
+            let b = em.forward_diffusion_capacitance(tf, vbe);
+            assert!((a - b).abs() <= 1e-12 * b, "{a:e} vs {b:e}");
         }
     }
 }

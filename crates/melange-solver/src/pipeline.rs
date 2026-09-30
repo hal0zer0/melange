@@ -242,7 +242,7 @@ pub fn apply_linearize_reductions(
                     // Junction capacitances at the bias point's terminal
                     // voltages, as `MnaSystem::relinearize_bjt_caps_at_dc_op`
                     // evaluates an unlinearized 2D BJT.
-                    let (cbe, cbc) = bp.linearized_junction_caps(vbe0, vbc0, ic);
+                    let (cbe, cbc) = bp.linearized_junction_caps(vbe0, vbc0);
                     report!(
                         rep,
                         "  Linearized {}: dIc/dVbe={:.4e} dIc/dVbc={:.4e} dIb/dVbe={:.4e} \

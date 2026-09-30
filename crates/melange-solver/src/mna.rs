@@ -1660,7 +1660,7 @@ impl MnaSystem {
     /// For each BJT with a non-trivial charge-storage profile (any of
     /// `CJE`, `CJC`, `TF` non-zero, or `VJE`/`MJE`/`VJC`/`MJC`/`FC` deviating
     /// from SPICE defaults) this computes the voltage-dependent depletion
-    /// cap at `Vbe_op`/`Vbc_op` plus the diffusion cap `TF·|Ic_op|/Vt`, and
+    /// cap at `Vbe_op`/`Vbc_op` plus the diffusion cap `TF·d(I_F/qb)/dVbe`, and
     /// stamps the *delta* relative to the zero-bias baseline into `self.c`.
     ///
     /// Delta stamping lets us avoid a clear-and-restamp pass — the C matrix
@@ -1675,16 +1675,16 @@ impl MnaSystem {
     /// appropriate node-difference voltages (it is `N_v · v_node`), so no
     /// node-vector re-indexing is needed.
     ///
-    /// `v_nl` is the M-vector of nonlinear controlling voltages (from
-    /// `DcOpResult::v_nl`). `i_nl` is the M-vector of nonlinear currents.
-    /// For 2D BJTs `v_nl[start_idx] = Vbe` and `v_nl[start_idx+1] = Vbc`;
-    /// for forward-active (1D) BJTs only Vbe is tracked and Vbc is treated
-    /// as zero for the depletion formula.
+    /// `v_nl` is the M-vector of nonlinear controlling voltages and `v_node`
+    /// the node voltages (from `DcOpResult`). For 2D BJTs
+    /// `v_nl[start_idx] = Vbe` and `v_nl[start_idx+1] = Vbc`; a
+    /// forward-active (1D) BJT tracks only Vbe, so its Vbc is read from
+    /// the node voltages: its caps are evaluated at the bias it sits at.
     pub fn relinearize_bjt_caps_at_dc_op(
         &mut self,
         device_slots: &[crate::device_types::DeviceSlot],
         v_nl: &[f64],
-        i_nl: &[f64],
+        v_node: &[f64],
     ) {
         use crate::device_types::{DeviceParams, DeviceType};
 
@@ -1699,15 +1699,6 @@ impl MnaSystem {
                 continue;
             }
 
-            let vbe_op = v_nl.get(slot.start_idx).copied().unwrap_or(0.0);
-            let vbc_op = match slot.device_type {
-                DeviceType::BjtForwardActive => 0.0,
-                _ => v_nl.get(slot.start_idx + 1).copied().unwrap_or(0.0),
-            };
-            let ic_op = i_nl.get(slot.start_idx).copied().unwrap_or(0.0);
-
-            let (cbe_eff, cbc_eff) = bp.linearized_junction_caps(vbe_op, vbc_op, ic_op);
-
             // node_indices: [c, b, e] (1-indexed, 0 = ground). If parasitic-R
             // internal nodes were expanded, junction caps live between the
             // primed nodes instead.
@@ -1716,6 +1707,21 @@ impl MnaSystem {
                 dev_info.node_indices[1],
                 dev_info.node_indices[2],
             );
+            let v_at = |idx: usize| {
+                if idx > 0 {
+                    v_node.get(idx - 1).copied().unwrap_or(0.0)
+                } else {
+                    0.0
+                }
+            };
+
+            let vbe_op = v_nl.get(slot.start_idx).copied().unwrap_or(0.0);
+            let vbc_op = match slot.device_type {
+                DeviceType::BjtForwardActive => v_at(nb) - v_at(nc),
+                _ => v_nl.get(slot.start_idx + 1).copied().unwrap_or(0.0),
+            };
+
+            let (cbe_eff, cbc_eff) = bp.linearized_junction_caps(vbe_op, vbc_op);
             let int = self
                 .bjt_internal_nodes
                 .iter()

@@ -151,10 +151,10 @@ pub struct BjtParams {
     #[serde(default)]
     pub cjc: f64,
     /// Forward transit time [s] (0.0 = disabled). Adds diffusion capacitance
-    /// `Cd_be = TF · |Ic_op| / Vt` to the base-emitter small-signal cap at
-    /// the DC operating point. Typical silicon small-signal BJT: 400 ps –
-    /// 10 ns. Matters for high-frequency rolloff in audio amplifier stages
-    /// (e.g. Neve 1073 output transformer drive).
+    /// `Cd_be = TF · d(I_F/qb)/dVbe` to the base-emitter small-signal cap at
+    /// the DC operating point (see `linearized_junction_caps`). Typical
+    /// silicon small-signal BJT: 400 ps – 10 ns. Matters for high-frequency
+    /// rolloff in audio amplifier stages (e.g. an output-transformer driver).
     #[serde(default)]
     pub tf: f64,
     /// Base-emitter junction built-in potential [V] (SPICE default 0.75).
@@ -237,6 +237,31 @@ pub struct BjtParams {
 }
 
 impl BjtParams {
+    /// The device models this card evaluates to: the leakage-carrying
+    /// Ebers-Moll core and, for a Gummel-Poon card, the qb-modulated wrapper
+    /// around it (the composition of the generated runtime's `bjt_evaluate`).
+    pub fn device_models(
+        &self,
+    ) -> (
+        melange_devices::bjt::BjtEbersMoll,
+        Option<melange_devices::bjt::BjtGummelPoon>,
+    ) {
+        use melange_devices::bjt::{BjtEbersMoll, BjtGummelPoon, BjtPolarity};
+        let polarity = if self.is_pnp {
+            BjtPolarity::Pnp
+        } else {
+            BjtPolarity::Npn
+        };
+        let em = BjtEbersMoll::new(self.is, self.vt, self.beta_f, self.beta_r, polarity)
+            .with_nf(self.nf)
+            .with_nr(self.nr)
+            .with_leakage(self.ise, self.ne, self.isc, self.nc);
+        let gp = self
+            .is_gummel_poon()
+            .then(|| BjtGummelPoon::new(em, self.vaf, self.var, self.ikf, self.ikr));
+        (em, gp)
+    }
+
     /// Returns true if any Gummel-Poon parameter is finite.
     pub fn is_gummel_poon(&self) -> bool {
         self.vaf.is_finite() || self.var.is_finite() || self.ikf.is_finite() || self.ikr.is_finite()
@@ -289,25 +314,30 @@ impl BjtParams {
     /// ```text
     /// Cj(V) = CJ · (1 - V/VJ)^(-MJ)                         for V < FC·VJ
     /// Cj(V) = CJ / (1-FC)^(1+MJ) · (1 - FC·(1+MJ) + MJ·V/VJ)  for V >= FC·VJ
-    /// Cd_be = TF · |Ic| / Vt      (diffusion cap on the BE junction only)
+    /// Cd_be = TF · d(I_F/qb)/dVbe  (diffusion cap on the BE junction only)
     /// ```
     ///
+    /// with `I_F = IS·(exp(Vbe/(NF·VT)) - 1)` and qb the Gummel-Poon base
+    /// charge (1 for an Ebers-Moll card): ngspice's `capbe = tf*gbe`, see
+    /// `BjtGummelPoon::forward_diffusion_capacitance`.
+    ///
     /// Returns `(Cbe_eff, Cbc_eff)`. When `CJE == CJC == TF == 0` the result
-    /// is `(0, 0)` so disabled caps stay disabled. When the bias point is
-    /// zero (all DC OP voltages / currents zero), the depletion formula
-    /// collapses to `(CJE, CJC)` and the diffusion term drops out, which
-    /// matches the previous zero-bias behaviour exactly.
+    /// is `(0, 0)` so disabled caps stay disabled. At zero bias the
+    /// depletion formula collapses to `(CJE, CJC)` and the diffusion term
+    /// to `TF·IS/(NF·VT)`, negligible.
     ///
     /// `vbe` and `vbc` are the terminal differences V(b) − V(e) and
     /// V(b) − V(c), as the DC OP reports them for either polarity; the
-    /// depletion formula takes the junction's forward voltage, so a PNP's
-    /// are negated here. `ic` is signed; the diffusion term uses `|ic|`.
-    pub fn linearized_junction_caps(&self, vbe: f64, vbc: f64, ic: f64) -> (f64, f64) {
+    /// junction formulas take forward voltage, so a PNP's are negated.
+    pub fn linearized_junction_caps(&self, vbe: f64, vbc: f64) -> (f64, f64) {
         let sign = if self.is_pnp { -1.0 } else { 1.0 };
         let cbe_depl = spice_depletion_cap(self.cje, self.vje, self.mje, self.fc, sign * vbe);
         let cbc_depl = spice_depletion_cap(self.cjc, self.vjc, self.mjc, self.fc, sign * vbc);
-        let cbe_diff = if self.tf > 0.0 && self.vt > 0.0 {
-            self.tf * ic.abs() / self.vt
+        let cbe_diff = if self.tf > 0.0 {
+            match self.device_models() {
+                (_, Some(gp)) => gp.forward_diffusion_capacitance(self.tf, vbe, vbc),
+                (em, None) => em.forward_diffusion_capacitance(self.tf, vbe),
+            }
         } else {
             0.0
         };
@@ -1323,13 +1353,13 @@ mod bjt_charge_storage_tests {
     }
 
     /// At zero bias, the depletion formula gives `Cj(0) = CJ · 1^(-MJ) = CJ`,
-    /// and the diffusion term vanishes because `|Ic| = 0`. The
+    /// and the diffusion term is `TF·IS/(NF·VT)`, ~1e-22 F here. The
     /// re-linearization must therefore return exactly the zero-bias values
     /// the legacy stamp uses — no silent drift for circuits at rest.
     #[test]
     fn zero_bias_returns_cje_cjc_exactly() {
         let bp = base_params();
-        let (cbe, cbc) = bp.linearized_junction_caps(0.0, 0.0, 0.0);
+        let (cbe, cbc) = bp.linearized_junction_caps(0.0, 0.0);
         assert!((cbe - bp.cje).abs() < 1e-18, "cbe(0) should equal CJE");
         assert!((cbc - bp.cjc).abs() < 1e-18, "cbc(0) should equal CJC");
     }
@@ -1340,11 +1370,12 @@ mod bjt_charge_storage_tests {
     /// `VJE = 0.75` → knee at Vbe = 0.375.
     #[test]
     fn depletion_cap_continuous_at_fc_knee() {
-        let bp = base_params();
+        let mut bp = base_params();
+        bp.tf = 0.0; // depletion only
         let v_knee = bp.fc * bp.vje;
         let eps = 1e-6;
-        let (cbe_lo, _) = bp.linearized_junction_caps(v_knee - eps, 0.0, 0.0);
-        let (cbe_hi, _) = bp.linearized_junction_caps(v_knee + eps, 0.0, 0.0);
+        let (cbe_lo, _) = bp.linearized_junction_caps(v_knee - eps, 0.0);
+        let (cbe_hi, _) = bp.linearized_junction_caps(v_knee + eps, 0.0);
         let expected = bp.cje * (1.0 - bp.fc).powf(-bp.mje);
         assert!((cbe_lo - expected).abs() < 1e-15, "analytic side at knee");
         assert!((cbe_hi - expected).abs() < 1e-9, "tangent side at knee");
@@ -1359,10 +1390,10 @@ mod bjt_charge_storage_tests {
     /// junction with the defaults.
     #[test]
     fn depletion_cap_analytic_region() {
-        let bp = base_params();
+        let mut bp = base_params();
+        bp.tf = 0.0; // the BE cap is pure depletion
         let v = 0.2;
-        let (cbe, _) = bp.linearized_junction_caps(v, 0.0, 0.0);
-        // Diffusion is 0 because Ic = 0; the BE cap is pure depletion.
+        let (cbe, _) = bp.linearized_junction_caps(v, 0.0);
         let expected = bp.cje * (1.0 - v / bp.vje).powf(-bp.mje);
         assert!(
             (cbe - expected).abs() < 1e-18,
@@ -1370,23 +1401,36 @@ mod bjt_charge_storage_tests {
         );
     }
 
-    /// The diffusion term `Cd = TF·|Ic|/Vt` is added only to the BE cap.
-    /// A collector current of 1 mA with TF = 500 ps, Vt = 25.85 mV should
-    /// add about 19.3 pF to Cbe_eff.
+    /// The diffusion term `Cd = TF·dI_F/dVbe` (Ebers-Moll card, qb = 1) is
+    /// added only to the BE cap, and carries NF: at NF = 1.5 it is TF·gm,
+    /// two thirds of the `TF·|Ic|/Vt` an NF-blind formula gives.
     #[test]
     fn diffusion_cap_added_to_be_only() {
-        let bp = base_params();
-        let ic = 1.0e-3;
-        let (cbe, cbc) = bp.linearized_junction_caps(0.0, 0.0, ic);
-        let diffusion = bp.tf * ic.abs() / bp.vt;
-        assert!(
-            (cbe - (bp.cje + diffusion)).abs() < 1e-18,
-            "BE cap should include diffusion at Ic"
-        );
-        assert!(
-            (cbc - bp.cjc).abs() < 1e-18,
-            "BC cap should have no diffusion term"
-        );
+        for nf in [1.0, 1.5] {
+            let mut bp = base_params();
+            bp.nf = nf;
+            let vbe = 0.65 * nf;
+            let (cbe, cbc) = bp.linearized_junction_caps(vbe, -5.0);
+            let x = vbe / (nf * bp.vt);
+            let gm = bp.is / (nf * bp.vt) * x.exp();
+            let depl = bp.cje
+                * (1.0 - bp.fc).powf(-(1.0 + bp.mje))
+                * (1.0 - bp.fc * (1.0 + bp.mje) + bp.mje * vbe / bp.vje);
+            let diffusion = cbe - depl;
+            assert!(
+                (diffusion - bp.tf * gm).abs() <= 1e-9 * bp.tf * gm,
+                "NF {nf}: diffusion {diffusion:e}, TF·gm {:e}",
+                bp.tf * gm
+            );
+            let ic = bp.is * (x.exp() - 1.0);
+            assert!(((bp.tf * ic / bp.vt) / diffusion - nf).abs() < 1e-6);
+            let (_, cbc_no_tf) = {
+                let mut b = bp.clone();
+                b.tf = 0.0;
+                b.linearized_junction_caps(vbe, -5.0)
+            };
+            assert_eq!(cbc, cbc_no_tf, "BC cap has no diffusion term");
+        }
     }
 
     /// A BJT with CJE = CJC = TF = 0 must return zero caps regardless of
@@ -1398,7 +1442,7 @@ mod bjt_charge_storage_tests {
         bp.cje = 0.0;
         bp.cjc = 0.0;
         bp.tf = 0.0;
-        let (cbe, cbc) = bp.linearized_junction_caps(0.4, -5.0, 1.0e-3);
+        let (cbe, cbc) = bp.linearized_junction_caps(0.4, -5.0);
         assert_eq!(cbe, 0.0);
         assert_eq!(cbc, 0.0);
     }
@@ -1414,7 +1458,7 @@ mod bjt_charge_storage_tests {
         let sweep = [-10.0, -5.0, -1.0, -0.1, 0.0];
         let mut prev = 0.0_f64;
         for v in sweep {
-            let (_, cbc) = bp.linearized_junction_caps(0.0, v, 0.0);
+            let (_, cbc) = bp.linearized_junction_caps(0.0, v);
             assert!(
                 cbc > prev,
                 "Cbc must grow as Vbc rises toward 0; v = {v} gave {cbc}, prev = {prev}"
@@ -1423,7 +1467,7 @@ mod bjt_charge_storage_tests {
             prev = cbc;
         }
         // At exactly V = 0, cap equals CJC.
-        let (_, cbc_zero) = bp.linearized_junction_caps(0.0, 0.0, 0.0);
+        let (_, cbc_zero) = bp.linearized_junction_caps(0.0, 0.0);
         assert!((cbc_zero - bp.cjc).abs() < 1e-18);
     }
 }
