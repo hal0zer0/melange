@@ -764,6 +764,20 @@ pub fn assemble(
         dc_request,
         out,
     )?;
+    if let Some(what) = &linearize_outcome.bias_unconverged {
+        if opts.allow_unconverged_dc_op {
+            report!(
+                err,
+                "  WARNING: {what}. Building anyway (--allow-unconverged-dc-op): the linearized \
+                 devices' small-signal parameters come from a point that is not a solution."
+            );
+        } else {
+            bail!(
+                "{what}: the linearized devices' small-signal parameters would come from a \
+                 point that is not a solution. --allow-unconverged-dc-op builds it anyway."
+            );
+        }
+    }
 
     // NOTE: Internal node expansion for parasitic BJTs is deferred until after
     // solver routing. The DK path handles parasitics via bjt_with_parasitics() inner NR.

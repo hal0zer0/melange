@@ -265,6 +265,12 @@ had converged; seeded, Direct NR in 2 iterations. Corpus `.linearize` decks
 keep their operating point (≤ 1e-15 V) in fewer iterations (18 → 2 typical;
 decks with parasitic-BJT internal nodes 10 → 9, 31 → 21).
 
+A bias solve that did not converge is refused (`--allow-unconverged-dc-op`
+overrides, and the provenance then records `"linearize_bias_unconverged":true`).
+The unconverged-operating-point refusal cannot catch it: the linearized
+circuit's own DC operating point solves cleanly, around small-signal
+parameters and Norton constants taken from a non-solution.
+
 ### 2. Source Stepping (DcOpMethod::SourceStepping)
 
 Scale all DC sources from 0 → full value in `source_steps` stages (default 50).

@@ -541,6 +541,12 @@ generated state is smaller.
   route. `--solver nodal` never avoided this error, as the troubleshooting
   table claimed; it is corrected.
 
+- **A `.linearize` whose bias point did not converge is refused.** The
+  linearized devices' parameters would come from a point that is not a
+  solution, and the linearized circuit would then solve cleanly around them,
+  so nothing else caught it. `--allow-unconverged-dc-op` builds it anyway and
+  the generated code's provenance records it.
+
 - **A circuit whose DC operating point does not converge is refused.** Its
   generated code would start from a state that is not a solution, with only a
   warning to say so. Every verb now refuses it; `--allow-unconverged-dc-op`

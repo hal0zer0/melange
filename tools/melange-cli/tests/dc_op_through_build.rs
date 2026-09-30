@@ -237,6 +237,77 @@ fn an_unconverged_operating_point_is_refused_unless_allowed() {
     assert_eq!(json["converged"], false);
 }
 
+/// A high-Vbe stage into a linearized emitter follower.
+const LINEARIZED_FOLLOWER: &str = "high-Vbe stage into a linearized follower
+.model QHI NPN(IS=2.2e-12 NF=2 BF=1000 VAF=100)
+.model QF NPN(IS=1e-14 BF=200 VAF=100)
+VCC vcc 0 DC 30
+Rin in b1 10k
+Rb1 vcc b1 220k
+Rb2 b1 0 47k
+Q1 c1 b1 e1 QHI
+Rc1 vcc c1 4.7k
+Re1 e1 0 470
+Q2 vcc c1 e2 QF
+Re2 e2 0 2.2k
+Co e2 out 10u
+Rl out 0 10k
+.linearize Q2
+";
+
+/// `.linearize` takes its small-signal parameters from a bias solve. One that
+/// did not converge (starved here by the test-only budget) is refused, since
+/// the linearized circuit's own DC operating point would then solve cleanly
+/// around parameters from a non-solution; under `--allow-unconverged-dc-op`
+/// the provenance records it.
+#[test]
+fn an_unconverged_linearize_bias_point_is_refused_unless_allowed() {
+    let deck = write_deck("linearize_bias", LINEARIZED_FOLLOWER);
+    let rs = deck.with_extension("rs");
+    let starved = ["--dc-op-max-iterations", "1"];
+    let refused = melange(
+        &[
+            &["compile", "--format", "code", "-o", rs.to_str().unwrap()][..],
+            &starved,
+        ]
+        .concat(),
+        &deck,
+    );
+    assert!(!refused.status.success(), "compile must refuse");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("the .linearize bias solve did not converge")
+            && stderr.contains("--allow-unconverged-dc-op"),
+        "{stderr}"
+    );
+
+    let code_of = |extra: &[&str]| {
+        let out = melange(
+            &[
+                &["compile", "--format", "code", "-o", rs.to_str().unwrap()][..],
+                extra,
+            ]
+            .concat(),
+            &deck,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::read_to_string(&rs).unwrap()
+    };
+    let allowed = code_of(&[&["--allow-unconverged-dc-op"][..], &starved].concat());
+    let normal = code_of(&[]);
+    let _ = std::fs::remove_file(&deck);
+    let _ = std::fs::remove_file(&rs);
+    assert!(
+        allowed.contains(r#""linearize_bias_unconverged":true"#),
+        "the provenance must record it"
+    );
+    assert!(!normal.contains("linearize_bias_unconverged"));
+}
+
 /// `compile`'s two DC flags reach their own options (they are adjacent bool
 /// parameters; a swap once dropped `recompute_dc_op` from every build that
 /// asked for it).

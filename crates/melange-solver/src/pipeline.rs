@@ -88,10 +88,14 @@ impl std::fmt::Display for PipelineError {
 
 impl std::error::Error for PipelineError {}
 
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Default, Debug, Clone)]
 pub struct LinearizeOutcome {
     pub bjts_linearized: usize,
     pub triodes_linearized: usize,
+    /// When the bias solve the small-signal parameters came from did not
+    /// converge: what it reached (method, iterations, residual). The build
+    /// refuses it unless `--allow-unconverged-dc-op`.
+    pub bias_unconverged: Option<String>,
 }
 
 /// Stamp each `(node, conductance)` to ground into `mna.g`: every input port
@@ -398,6 +402,24 @@ pub fn apply_linearize_reductions(
     // Rebuild MNA with all three reduction classes combined (FA +
     // linearized + grid-off). This supersedes any prior FA-only or
     // grid-off-only rebuild the caller performed.
+    // A bias solve that did not converge is not a point to linearize at: the
+    // linearized circuit's own DC operating point would then solve cleanly
+    // around parameters taken from a non-solution. Described here, while the
+    // pre-rebuild node names still index its residual; the build refuses it.
+    let bias_unconverged = (!dc_result.converged).then(|| {
+        let names = mna.node_names_in_index_order();
+        let worst = dc_result
+            .kcl_worst_row
+            .and_then(|row| names.get(row + 1).copied())
+            .filter(|n| !n.is_empty())
+            .map(|n| format!(" at v({n})"))
+            .unwrap_or_default();
+        format!(
+            "the .linearize bias solve did not converge ({:?}, {} iterations; KCL residual \
+             {:.3e} A{worst})",
+            dc_result.method, dc_result.iterations, dc_result.kcl_residual_max
+        )
+    });
     // The point the devices were linearized at, by node name (the rebuild may
     // renumber): the linearized system's DC operating point starts there.
     let bias_nodes: Option<std::collections::BTreeMap<String, f64>> =
@@ -455,6 +477,7 @@ pub fn apply_linearize_reductions(
     Ok(LinearizeOutcome {
         bjts_linearized: linearized_bjts_set.len(),
         triodes_linearized: linearized_triodes_set.len(),
+        bias_unconverged,
     })
 }
 

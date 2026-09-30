@@ -116,7 +116,9 @@ pub struct MnaSystem {
     /// The operating point `.linearize` extracted its small-signal parameters
     /// at, by node name. It satisfies this system's DC equations by
     /// construction (the linearized devices' Norton constants come from it), so
-    /// the DC operating point starts there. `None` when nothing is linearized.
+    /// the DC operating point starts there. `None` when nothing is linearized,
+    /// or when the bias solve did not converge (a build refuses that unless
+    /// `--allow-unconverged-dc-op`).
     pub linearize_bias_nodes: Option<std::collections::BTreeMap<String, f64>>,
     /// Pot default overrides: resistor name (uppercase) → default resistance.
     /// When a .pot has a default value, the G matrix is stamped at this value

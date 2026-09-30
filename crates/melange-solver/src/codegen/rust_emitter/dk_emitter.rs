@@ -572,6 +572,9 @@ fn provenance_json(
             ir.dc_op_rail_pin.replace('\\', "\\\\").replace('"', "\\\"")
         ));
     }
+    if ir.linearize_bias_unconverged {
+        s.push_str("\"linearize_bias_unconverged\":true,");
+    }
     s.push_str(&format!(
         "\"oversampling\":{},",
         ir.solver_config.oversampling_factor

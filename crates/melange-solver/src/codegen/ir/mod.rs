@@ -112,6 +112,11 @@ pub struct CircuitIR {
     /// Whether the nonlinear DC OP solver converged
     #[serde(default)]
     pub dc_op_converged: bool,
+    /// `.linearize` took its small-signal parameters from a bias solve that
+    /// did not converge (a build only gets here with
+    /// `--allow-unconverged-dc-op`); recorded in the provenance.
+    #[serde(default)]
+    pub linearize_bias_unconverged: bool,
     /// DC OP convergence method name (e.g. "DirectNR", "SourceStepping").
     #[serde(default)]
     pub dc_op_method: String,
@@ -993,6 +998,14 @@ impl From<&crate::codegen::CodegenConfig> for DcOpRequest {
 /// detectors, the `.linearize` bias point, the capacitance preflight) uses
 /// these, so they all solve the same problem. A railed op-amp sits where the
 /// build's rail mode puts it.
+/// Devices are linearized but no bias point was recorded: the bias solve they
+/// were linearized at did not converge (see
+/// [`MnaSystem::linearize_bias_nodes`]).
+fn linearize_bias_unconverged(mna: &MnaSystem) -> bool {
+    (!mna.linearized_bjts.is_empty() || !mna.linearized_triodes.is_empty())
+        && mna.linearize_bias_nodes.is_none()
+}
+
 pub fn dc_op_config(mna: &MnaSystem, request: impl Into<DcOpRequest>) -> DcOpConfig {
     let request = request.into();
     let mut config = DcOpConfig {
@@ -2452,6 +2465,7 @@ impl CircuitIR {
             dc_nl_currents_ic_seed,
             q_dot_ic_seed,
             dc_op_converged,
+            linearize_bias_unconverged: linearize_bias_unconverged(mna),
             dc_op_method,
             dc_op_rail_pin,
             dc_op_iterations,
@@ -3216,6 +3230,7 @@ impl CircuitIR {
             dc_nl_currents_ic_seed,
             q_dot_ic_seed,
             dc_op_converged,
+            linearize_bias_unconverged: linearize_bias_unconverged(mna),
             dc_op_method,
             dc_op_rail_pin,
             dc_op_iterations,
