@@ -615,6 +615,8 @@ Noise limitations:
   becomes an integrator node (unit capacitor from 0, 1e15 Ω leak) and
   `atan2(y, x)` a quadrant-correct `atan`. Runtime scalars (`.runtime`) enter
   the reference at their declared minimum.
+- Variable-mu pentodes (`SVAR > 0`) have no ngspice twin yet and are refused
+  by `validate` rather than compared as sharp pentodes.
 - `VCA`, `LDR` and `NEON` still have no oracle and are refused by `validate`;
   they are checked with `compile`/`analyze`/`simulate` instead.
 - `melange validate` does not read the deck's `.oversampling` recommendation;
