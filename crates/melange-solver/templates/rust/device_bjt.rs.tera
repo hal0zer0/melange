@@ -1,9 +1,30 @@
 // Canonical source: melange-devices/src/bjt.rs (BjtEbersMoll, BjtGummelPoon)
 // Duplicated here because generated code must be self-contained.
 
-/// Safe exponential using fast_exp (clamp to prevent overflow, matches runtime [-40, 40] range)
+/// Forward-current ceiling of the extended junction exponential [A].
+const BJT_MAX_FWD_I: f64 = 1e3;
+
+/// `(value, d value/dx)` of a junction law's exponential `I = IS·e^x`
+/// (canonical form: `melange_devices::safeguards::junction_exp`). Up to 40
+/// this is `fast_exp` for both. Above it the true exponential continues until
+/// the current `IS·e^x` reaches BJT_MAX_FWD_I, then extends linearly with a
+/// matching slope, so a small-IS card is not current-limited at `IS·e^40` and
+/// the slope is the value's own.
 #[inline(always)]
-fn safe_exp(x: f64) -> f64 { fast_exp(x) }
+fn bjt_junction_exp(x: f64, is: f64) -> (f64, f64) {
+    if x <= 40.0 {
+        let e = fast_exp(x);
+        return (e, e);
+    }
+    let x_max = 40.0f64.max(BJT_MAX_FWD_I.ln() - is.ln());
+    if x <= x_max {
+        let e = x.exp();
+        (e, e)
+    } else {
+        let e = x_max.exp();
+        (e * (1.0 + (x - x_max)), e)
+    }
+}
 
 /// Combined BJT evaluation: returns (Ic, Ib, [dIc/dVbe, dIc/dVbc, dIb/dVbe, dIb/dVbc]).
 ///
@@ -21,21 +42,21 @@ fn bjt_evaluate(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, nr: f64,
     let nr_vt = nr * vt;
 
     // Shared exponentials (computed once)
-    let exp_be = safe_exp(vbe_eff / nf_vt);
-    let exp_bc = safe_exp(vbc_eff / nr_vt);
+    let (exp_be, dexp_be) = bjt_junction_exp(vbe_eff / nf_vt, is);
+    let (exp_bc, dexp_bc) = bjt_junction_exp(vbc_eff / nr_vt, is);
 
     // ISE leakage exponential (computed once, only when needed)
-    let exp_be_leak = if ise > 0.0 {
-        safe_exp(vbe_eff / (ne * vt))
+    let (exp_be_leak, dexp_be_leak) = if ise > 0.0 {
+        bjt_junction_exp(vbe_eff / (ne * vt), ise)
     } else {
-        0.0
+        (0.0, 0.0)
     };
 
     // ISC leakage exponential (computed once, only when needed)
-    let exp_bc_leak = if isc > 0.0 {
-        safe_exp(vbc_eff / (nc * vt))
+    let (exp_bc_leak, dexp_bc_leak) = if isc > 0.0 {
+        bjt_junction_exp(vbc_eff / (nc * vt), isc)
     } else {
-        0.0
+        (0.0, 0.0)
     };
 
     // === Collector current ===
@@ -48,15 +69,15 @@ fn bjt_evaluate(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, nr: f64,
     let ib_leak_bc = if isc > 0.0 { isc * (exp_bc_leak - 1.0) } else { 0.0 };
 
     // === Base current Jacobian (EM components) ===
-    let dib_fwd_dvbe = (is / (beta_f * nf_vt)) * exp_be;
-    let dib_rev_dvbc = (is / (beta_r * nr_vt)) * exp_bc;
+    let dib_fwd_dvbe = (is / (beta_f * nf_vt)) * dexp_be;
+    let dib_rev_dvbc = (is / (beta_r * nr_vt)) * dexp_bc;
     let dib_leak_dvbe = if ise > 0.0 {
-        (ise / (ne * vt)) * exp_be_leak
+        (ise / (ne * vt)) * dexp_be_leak
     } else {
         0.0
     };
     let dib_leak_dvbc = if isc > 0.0 {
-        (isc / (nc * vt)) * exp_bc_leak
+        (isc / (nc * vt)) * dexp_bc_leak
     } else {
         0.0
     };
@@ -65,8 +86,8 @@ fn bjt_evaluate(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, nr: f64,
         // Ebers-Moll
         let ic = sign * (i_cc - is / beta_r * (exp_bc - 1.0));
         let ib = sign * (ib_fwd + ib_rev + ib_leak_be + ib_leak_bc);
-        let dic_dvbe = is / nf_vt * exp_be;
-        let dic_dvbc = -(is / nr_vt) * exp_bc - (is / (beta_r * nr_vt)) * exp_bc;
+        let dic_dvbe = is / nf_vt * dexp_be;
+        let dic_dvbc = -(is / nr_vt) * dexp_bc - (is / (beta_r * nr_vt)) * dexp_bc;
         return (ic, ib, [dic_dvbe, dic_dvbc, dib_fwd_dvbe + dib_leak_dvbe, dib_rev_dvbc + dib_leak_dvbc]);
     }
 
@@ -86,8 +107,8 @@ fn bjt_evaluate(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, nr: f64,
     let cbe = is * (exp_be - 1.0);
     let cbc = is * (exp_bc - 1.0);
     let q2 = cbe / ikf + cbc / ikr;
-    let dq2_dvbe = (is / (nf_vt * ikf)) * exp_be;
-    let dq2_dvbc = (is / (nr_vt * ikr)) * exp_bc;
+    let dq2_dvbe = (is / (nf_vt * ikf)) * dexp_be;
+    let dq2_dvbc = (is / (nr_vt * ikr)) * dexp_bc;
 
     // Discriminant D = sqrt(1 + 4*q2)
     let disc = (1.0 + 4.0 * q2).max(0.0);
@@ -106,12 +127,12 @@ fn bjt_evaluate(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, nr: f64,
     let ib = sign * (ib_fwd + ib_rev + ib_leak_be + ib_leak_bc);
 
     // Quotient rule for dIc: d(Icc/qb)/dV = (dIcc/dV * qb - Icc * dqb/dV) / qb^2
-    let dicc_dvbe = is / nf_vt * exp_be;
-    let dicc_dvbc = -is / nr_vt * exp_bc;
+    let dicc_dvbe = is / nf_vt * dexp_be;
+    let dicc_dvbc = -is / nr_vt * dexp_bc;
     let qb2 = (qb * qb).max(1e-30);
     let quotient_dvbe = (dicc_dvbe * qb - i_cc * dqb_dvbe) / qb2;
     let quotient_dvbc = (dicc_dvbc * qb - i_cc * dqb_dvbc) / qb2;
-    let d_bc_term_dvbc = is / (beta_r * nr_vt) * exp_bc;
+    let d_bc_term_dvbc = is / (beta_r * nr_vt) * dexp_bc;
 
     // dIb Jacobian = pure Ebers-Moll (ngspice bjtload.c:627-628: gpi/gmu are
     // not modulated by qb — GP's modulation affects transport current only).

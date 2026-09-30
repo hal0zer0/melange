@@ -158,8 +158,8 @@ impl BjtEbersMoll {
         let vbc_eff = s * vbc;
 
         // Transport current (forward uses NF*VT, reverse uses NR*VT)
-        let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
-        let exp_bc = safeguards::safe_exp(vbc_eff / nr_vt);
+        let exp_be = safeguards::junction_exp(vbe_eff / nf_vt, self.is).0;
+        let exp_bc = safeguards::junction_exp(vbc_eff / nr_vt, self.is).0;
         let i_cc = self.is * (exp_be - exp_bc);
 
         // Collector current: Ic = I_cc - Is/βr * (exp(Vbc/(NR*Vt)) - 1)
@@ -181,8 +181,8 @@ impl BjtEbersMoll {
         let vbe_eff = s * vbe;
         let vbc_eff = s * vbc;
 
-        let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
-        let exp_bc = safeguards::safe_exp(vbc_eff / nr_vt);
+        let exp_be = safeguards::junction_exp(vbe_eff / nf_vt, self.is).0;
+        let exp_bc = safeguards::junction_exp(vbc_eff / nr_vt, self.is).0;
 
         // Ideal base current terms (forward uses NF*VT, reverse uses NR*VT)
         let ib_fwd = self.is * self.inv_beta_f * (exp_be - 1.0);
@@ -190,12 +190,12 @@ impl BjtEbersMoll {
 
         // Leakage terms
         let ib_leak_be = if self.ise > 0.0 {
-            self.ise * (safeguards::safe_exp(vbe_eff / (self.ne * self.vt)) - 1.0)
+            self.ise * (safeguards::junction_exp(vbe_eff / (self.ne * self.vt), self.ise).0 - 1.0)
         } else {
             0.0
         };
         let ib_leak_bc = if self.isc > 0.0 {
-            self.isc * (safeguards::safe_exp(vbc_eff / (self.nc * self.vt)) - 1.0)
+            self.isc * (safeguards::junction_exp(vbc_eff / (self.nc * self.vt), self.isc).0 - 1.0)
         } else {
             0.0
         };
@@ -208,7 +208,7 @@ impl BjtEbersMoll {
         let s = self.sign();
         let nf_vt = self.nf * self.vt;
         let vbe_eff = s * vbe;
-        let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
+        let exp_be = safeguards::junction_exp(vbe_eff / nf_vt, self.is).1;
 
         // ∂Ib/∂Vbe = (Is/(βf*NF*Vt)) * exp(Vbe/(NF*Vt))
         let mut dib_dvbe = self.is * self.inv_beta_f / nf_vt * exp_be;
@@ -216,7 +216,7 @@ impl BjtEbersMoll {
         // Leakage derivative: ∂Ib_leak_be/∂Vbe = ISE/(NE*VT) * exp(Vbe/(NE*VT))
         if self.ise > 0.0 {
             let ne_vt = self.ne * self.vt;
-            let exp_leak_be = safeguards::safe_exp(vbe_eff / ne_vt);
+            let exp_leak_be = safeguards::junction_exp(vbe_eff / ne_vt, self.ise).1;
             dib_dvbe += self.ise / ne_vt * exp_leak_be;
         }
 
@@ -229,7 +229,7 @@ impl BjtEbersMoll {
         let s = self.sign();
         let nr_vt = self.nr * self.vt;
         let vbc_eff = s * vbc;
-        let exp_bc = safeguards::safe_exp(vbc_eff / nr_vt);
+        let exp_bc = safeguards::junction_exp(vbc_eff / nr_vt, self.is).1;
 
         // ∂Ib/∂Vbc = (Is/(βr*NR*Vt)) * exp(Vbc/(NR*Vt))
         let mut dib_dvbc = self.is * self.inv_beta_r / nr_vt * exp_bc;
@@ -237,7 +237,7 @@ impl BjtEbersMoll {
         // Leakage derivative: ∂Ib_leak_bc/∂Vbc = ISC/(NC*VT) * exp(Vbc/(NC*VT))
         if self.isc > 0.0 {
             let nc_vt = self.nc * self.vt;
-            let exp_leak_bc = safeguards::safe_exp(vbc_eff / nc_vt);
+            let exp_leak_bc = safeguards::junction_exp(vbc_eff / nc_vt, self.isc).1;
             dib_dvbc += self.isc / nc_vt * exp_leak_bc;
         }
 
@@ -261,8 +261,8 @@ impl BjtEbersMoll {
         let vbe_eff = s * vbe;
         let vbc_eff = s * vbc;
 
-        let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
-        let exp_bc = safeguards::safe_exp(vbc_eff / nr_vt);
+        let exp_be = safeguards::junction_exp(vbe_eff / nf_vt, self.is).1;
+        let exp_bc = safeguards::junction_exp(vbc_eff / nr_vt, self.is).1;
 
         // ∂Ic/∂Vbe = (Is/(NF*Vt)) * exp(Vbe/(NF*Vt))
         let d_ic_d_vbe = (self.is / nf_vt) * exp_be;
@@ -362,8 +362,8 @@ impl BjtGummelPoon {
 
         // High-level injection: q2 = cbe/IKF + cbc/IKR
         //     cbe = IS*(exp(Vbe/(NF*VT)) - 1), cbc = IS*(exp(Vbc/(NR*VT)) - 1)
-        let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
-        let exp_bc = safeguards::safe_exp(vbc_eff / nr_vt);
+        let exp_be = safeguards::junction_exp(vbe_eff / nf_vt, self.base.is).0;
+        let exp_bc = safeguards::junction_exp(vbc_eff / nr_vt, self.base.is).0;
         let cbe = self.base.is * (exp_be - 1.0);
         let cbc = self.base.is * (exp_bc - 1.0);
         let q2 = cbe / self.ikf + cbc / self.ikr;
@@ -392,8 +392,8 @@ impl BjtGummelPoon {
         let vbe_eff = s * vbe;
         let vbc_eff = s * vbc;
 
-        let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
-        let exp_bc = safeguards::safe_exp(vbc_eff / nr_vt);
+        let exp_be = safeguards::junction_exp(vbe_eff / nf_vt, self.base.is).0;
+        let exp_bc = safeguards::junction_exp(vbc_eff / nr_vt, self.base.is).0;
 
         let i_cc = self.base.is * (exp_be - exp_bc);
         let qb = self.qb(vbe, vbc);
@@ -418,13 +418,13 @@ impl NonlinearDevice<2> for BjtGummelPoon {
         let nr_vt = self.base.nr * vt;
         let is = self.base.is;
 
-        let exp_be = safeguards::safe_exp(vbe_eff / nf_vt);
-        let exp_bc = safeguards::safe_exp(vbc_eff / nr_vt);
+        let (exp_be, dexp_be) = safeguards::junction_exp(vbe_eff / nf_vt, is);
+        let (exp_bc, dexp_bc) = safeguards::junction_exp(vbc_eff / nr_vt, is);
 
         // Transport current and derivatives (forward uses NF*VT, reverse uses NR*VT)
         let icc = is * (exp_be - exp_bc);
-        let dicc_dvbe = is / nf_vt * exp_be;
-        let dicc_dvbc = -is / nr_vt * exp_bc;
+        let dicc_dvbe = is / nf_vt * dexp_be;
+        let dicc_dvbc = -is / nr_vt * dexp_bc;
 
         // Base charge factor q1 (matches qb() singularity handling)
         let q1_denom = 1.0 - vbe_eff / self.var - vbc_eff / self.vaf;
@@ -442,8 +442,8 @@ impl NonlinearDevice<2> for BjtGummelPoon {
         let cbe = is * (exp_be - 1.0);
         let cbc = is * (exp_bc - 1.0);
         let q2 = cbe / self.ikf + cbc / self.ikr;
-        let dq2_dvbe = (is / (nf_vt * self.ikf)) * exp_be;
-        let dq2_dvbc = (is / (nr_vt * self.ikr)) * exp_bc;
+        let dq2_dvbe = (is / (nf_vt * self.ikf)) * dexp_be;
+        let dq2_dvbc = (is / (nr_vt * self.ikr)) * dexp_bc;
 
         // Discriminant D = sqrt(1 + 4*q2)
         let disc = (1.0 + 4.0 * q2).max(0.0);
@@ -463,7 +463,7 @@ impl NonlinearDevice<2> for BjtGummelPoon {
         let quotient_dvbe = (dicc_dvbe * qb - icc * dqb_dvbe) / qb2_safe;
         let quotient_dvbc = (dicc_dvbc * qb - icc * dqb_dvbc) / qb2_safe;
 
-        let d_bc_term_dvbc = is * self.base.inv_beta_r / nr_vt * exp_bc;
+        let d_bc_term_dvbc = is * self.base.inv_beta_r / nr_vt * dexp_bc;
 
         // Polarity: dIc/dVbe = s * dIc_eff/dVbe_eff * s = dIc_eff/dVbe_eff (s² = 1)
         [quotient_dvbe, quotient_dvbc - d_bc_term_dvbc]
@@ -1831,5 +1831,30 @@ mod tests {
             rel < 1e-9,
             "guard-region Ic must keep (1+D)/2: got {ic:.6e}, expected {expected:.6e}, rel={rel:.2e}"
         );
+    }
+    /// A small-IS card follows its own law past the old fixed clamp: at
+    /// IS = 1e-19 the clamp capped every current at IS·e^40 = 23.5 mA. The
+    /// junction exponential continues it, and the Jacobian is the
+    /// derivative of the current it goes with.
+    #[test]
+    fn a_small_is_card_is_not_current_limited() {
+        let dev = BjtEbersMoll::new(1e-19, 0.025852, 1000.0, 1.0, BjtPolarity::Npn);
+        // Where the law gives 50 mA: Vbe = Vt·ln(I/IS).
+        let vbe = 0.025852 * (0.05f64 / 1e-19).ln();
+        let ic = dev.collector_current(vbe, -5.0);
+        assert!(
+            (ic - 0.05).abs() < 1e-3 * 0.05,
+            "Ic = {ic} A, the law gives 50 mA"
+        );
+        for &v in &[0.9, vbe, 1.2, 1.4, 1.6] {
+            let h = 1e-6;
+            let fd = (dev.collector_current(v + h, -5.0) - dev.collector_current(v - h, -5.0))
+                / (2.0 * h);
+            let (j, _) = dev.collector_jacobian(v, -5.0);
+            assert!(
+                (j - fd).abs() <= 1e-5 * fd.abs(),
+                "Vbe {v}: dIc/dVbe {j} vs finite difference {fd}"
+            );
+        }
     }
 }

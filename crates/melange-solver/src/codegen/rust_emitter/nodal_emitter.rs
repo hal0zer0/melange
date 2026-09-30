@@ -6254,9 +6254,9 @@ impl RustEmitter {
             (DeviceType::BjtForwardActive, DeviceParams::Bjt(_bp)) => {
                 code.push_str(&format!(
                     "{indent}let vbe_{d} = v_d{s} * DEVICE_{d}_SIGN;\n\
-                     {indent}let exp_be_{d} = fast_exp(vbe_{d} / (DEVICE_{d}_NF * state.device_{d}_vt));\n\
+                     {indent}let (exp_be_{d}, dexp_be_{d}) = bjt_junction_exp(vbe_{d} / (DEVICE_{d}_NF * state.device_{d}_vt), state.device_{d}_is);\n\
                      {indent}let i_dev{s} = state.device_{d}_is * (exp_be_{d} - 1.0) * DEVICE_{d}_SIGN;\n\
-                     {indent}let jdev_{s}_{s} = state.device_{d}_is / (DEVICE_{d}_NF * state.device_{d}_vt) * exp_be_{d};\n"
+                     {indent}let jdev_{s}_{s} = state.device_{d}_is / (DEVICE_{d}_NF * state.device_{d}_vt) * dexp_be_{d};\n"
                 ));
             }
             (DeviceType::Jfet, DeviceParams::Jfet(jp)) => {
@@ -10070,9 +10070,9 @@ impl RustEmitter {
                     code.push_str(&format!(
                         "{indent}{{ // BJT {dev_num} forward-active (1D)\n\
                          {indent}    let vbe = v_nl[{s}] * DEVICE_{dev_num}_SIGN;\n\
-                         {indent}    let exp_be = fast_exp(vbe / (DEVICE_{dev_num}_NF * state.device_{dev_num}_vt));\n\
+                         {indent}    let (exp_be, dexp_be) = bjt_junction_exp(vbe / (DEVICE_{dev_num}_NF * state.device_{dev_num}_vt), state.device_{dev_num}_is);\n\
                          {indent}    i_nl[{s}] = state.device_{dev_num}_is * (exp_be - 1.0) * DEVICE_{dev_num}_SIGN;\n\
-                         {indent}    j_dev[{jd_ss}] = state.device_{dev_num}_is / (DEVICE_{dev_num}_NF * state.device_{dev_num}_vt) * exp_be;\n\
+                         {indent}    j_dev[{jd_ss}] = state.device_{dev_num}_is / (DEVICE_{dev_num}_NF * state.device_{dev_num}_vt) * dexp_be;\n\
                          {indent}}}\n"
                     ));
                 }
@@ -10388,7 +10388,7 @@ impl RustEmitter {
                     // 1D forward-active BJT: only Vbe→Ic
                     code.push_str(&format!(
                         "{indent}{{ let vbe = v_nl_final[{s}] * DEVICE_{dev_num}_SIGN;\n\
-                         {indent}  let exp_be = fast_exp(vbe / (DEVICE_{dev_num}_NF * state.device_{dev_num}_vt));\n\
+                         {indent}  let exp_be = bjt_junction_exp(vbe / (DEVICE_{dev_num}_NF * state.device_{dev_num}_vt), state.device_{dev_num}_is).0;\n\
                          {indent}  i_nl[{s}] = state.device_{dev_num}_is * (exp_be - 1.0) * DEVICE_{dev_num}_SIGN;\n\
                          {indent}}}\n"
                     ));

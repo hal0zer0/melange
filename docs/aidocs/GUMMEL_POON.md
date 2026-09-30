@@ -75,7 +75,9 @@ diverge from ngspice by several percent at forward bias above the IKF knee.
 Singularity guards:
 - `q1_denom <= 0.0 || |q1_denom| < 1e-30` -> qb = 1.0 (prevents sign-flip near Early voltage)
 - `(1 + 4*q2).max(0.0)` -> discriminant floored at 0 (prevents sqrt of negative)
-- `safe_exp()` clamps exponent to [-40, 40]
+- every exponential is `safeguards::junction_exp` (value and slope): floored at
+  -40, and above 40 the IS-aware extension of DEVICE_MODELS.md "Junction
+  exponential", not a clamp
 
 When GP is disabled (all params infinite): `qb = 1.0` (Ebers-Moll identity).
 

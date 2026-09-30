@@ -471,6 +471,16 @@ generated state is smaller.
 - A local circuit source added with a relative path broke from any other
   directory, with "Failed to fetch URL" and an empty cause. Local sources are
   now stored absolute, and an unreachable one says why.
+- **A BJT with a small IS could not carry the current its model gives.**
+  Every BJT exponential was clamped at 40·NF·Vt, capping the current at
+  IS·e^40: 23.5 mA at IS = 1e-19, 68 µA at IS = 2.9e-22 (the scale of a
+  one-transistor Darlington equivalent). A follower needing more either
+  failed its DC operating point or settled with the transistor nearly off,
+  silently. It now uses the diode's IS-aware extension (the true exponential
+  up to 1 kA, then linear), everywhere a BJT is evaluated; above the old
+  clamp the Jacobian is also the current's own slope again. Such circuits now
+  match ngspice; for IS ≥ 4.3e-15 the operating range is unchanged, and
+  regression renders are identical.
 - **A `.linearize`d circuit could fail its DC operating point** although the
   point it was linearized at is, by construction, a solution. Its DC solve
   restarted from the linear guess instead; on a FET limiter with a

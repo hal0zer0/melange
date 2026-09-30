@@ -184,13 +184,13 @@ pub(super) fn emit_dk_device_evaluation(
                     "{indent}let vbe_{d} = v_d{s} * DEVICE_{d}_SIGN;\n"
                 ));
                 code.push_str(&format!(
-                    "{indent}let exp_be_{d} = fast_exp(vbe_{d} / (DEVICE_{d}_NF * state.device_{d}_vt));\n"
+                    "{indent}let (exp_be_{d}, dexp_be_{d}) = bjt_junction_exp(vbe_{d} / (DEVICE_{d}_NF * state.device_{d}_vt), state.device_{d}_is);\n"
                 ));
                 code.push_str(&format!(
                     "{indent}let i_dev{s} = state.device_{d}_is * (exp_be_{d} - 1.0) * DEVICE_{d}_SIGN;\n"
                 ));
                 code.push_str(&format!(
-                    "{indent}let jdev_{s}_{s} = state.device_{d}_is / (DEVICE_{d}_NF * state.device_{d}_vt) * exp_be_{d};\n"
+                    "{indent}let jdev_{s}_{s} = state.device_{d}_is / (DEVICE_{d}_NF * state.device_{d}_vt) * dexp_be_{d};\n"
                 ));
             }
             DeviceType::Jfet => {

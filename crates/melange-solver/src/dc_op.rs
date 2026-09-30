@@ -320,9 +320,10 @@ fn evaluate_devices_inner(
                 let sign = if bp.is_pnp { -1.0 } else { 1.0 };
                 let vbe = v_nl[s];
                 let vbe_eff = sign * vbe;
-                let exp_be = (vbe_eff / (bp.nf * bp.vt)).clamp(-40.0, 40.0).exp();
+                let (exp_be, dexp_be) =
+                    melange_devices::safeguards::junction_exp(vbe_eff / (bp.nf * bp.vt), bp.is);
                 i_nl[s] = sign * bp.is * (exp_be - 1.0);
-                j_dev[s * m + s] = bp.is / (bp.nf * bp.vt) * exp_be;
+                j_dev[s * m + s] = bp.is / (bp.nf * bp.vt) * dexp_be;
             }
             (DeviceType::Bjt, DeviceParams::Bjt(bp)) => {
                 if s + 1 >= v_nl.len() {

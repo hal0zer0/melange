@@ -234,8 +234,11 @@ pub fn apply_linearize_reductions(
                     let vbe_eff = sign * vbe;
                     let vbc_eff = sign * vbc;
                     let nf_vt = bp.nf * bp.vt;
-                    let exp_be = (vbe_eff / nf_vt).clamp(-40.0, 40.0).exp();
-                    let exp_bc = (vbc_eff / bp.vt).clamp(-40.0, 40.0).exp();
+                    // Slopes of the junction laws (see `safeguards::junction_exp`).
+                    let exp_be =
+                        melange_devices::safeguards::junction_exp(vbe_eff / nf_vt, bp.is).1;
+                    let exp_bc =
+                        melange_devices::safeguards::junction_exp(vbc_eff / bp.vt, bp.is).1;
 
                     let gm = bp.is / nf_vt * exp_be;
                     let gmu = (bp.is / bp.vt * exp_bc + bp.is / (bp.beta_r * bp.vt) * exp_bc).abs();

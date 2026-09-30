@@ -275,6 +275,22 @@ Ib = IS/beta_F * (exp(Vbe/VT) - 1) + IS/beta_R * (exp(Vbc/VT) - 1)
 [dIb/dVbe  dIb/dVbc] = [IS/(beta_F*VT) * exp(Vbe/VT)           IS/(beta_R*VT) * exp(Vbc/VT)           ]
 ```
 
+### Junction exponential (the diode's IS-aware extension)
+Every BJT exponential (`exp(Vbe/(NF·VT))`, `exp(Vbc/(NR·VT))`, the ISE/ISC
+leakage terms) is `safeguards::junction_exp(x, IS)`, which returns the value
+and its slope. It is the diode's extended exponential (see "Clamping" above)
+in factor form: `e^x` up to `x = 40` (unchanged); above, the true
+exponential continues until the current `IS·e^x` reaches 1 kA
+(`x_max = max(40, ln(1e3/IS))`), then extends linearly with a matching slope.
+A fixed clamp at 40 capped the current at `IS·e^40` (23.5 mA at IS = 1e-19,
+68 µA at IS = 2.9e-22, the scale of a one-transistor Darlington equivalent)
+and, above the clamp, reported a slope while the value stayed flat. Currents
+use the value, Jacobian entries the slope. The same form is in the device
+models, the DC operating point (the 1D forward-active path), `.linearize`'s
+g-parameters and the generated code (`bjt_junction_exp`, which the inline
+forward-active emissions call); a template sync test holds them equal over
+x and IS. For IS ≥ 4.3e-15 the boundary is unchanged.
+
 ### Gummel-Poon (more accurate)
 Uses charge control model with Early effect. Jacobian computed via quotient
 rule through qb() function. Available in `crates/melange-devices/src/bjt.rs`.

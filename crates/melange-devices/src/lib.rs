@@ -118,6 +118,33 @@ pub mod safeguards {
     /// the legacy clamp boundary is unchanged.
     pub const MAX_DIODE_FWD_I: f64 = 1e3;
 
+    /// The exponential of a junction law `I = IS·e^x`, extended like the
+    /// diode's (`DiodeShockley::current_at`): `(value, d value/dx)`.
+    ///
+    /// Up to `MAX_EXP_V` this is `safe_exp(x)` for both (unchanged). Above it
+    /// the true exponential continues until the current `IS·e^x` reaches
+    /// `MAX_DIODE_FWD_I`, then extends linearly with a matching slope. A fixed
+    /// clamp at `MAX_EXP_V` would cap the junction's current at `IS·e^40`
+    /// (23 mA at IS = 1e-19) and report a slope the value does not have. For
+    /// `IS ≥ e^-40·MAX_DIODE_FWD_I ≈ 4.3e-15` the boundary stays at
+    /// `MAX_EXP_V`. Every BJT exponential in melange (device models, DC
+    /// operating point, `.linearize`, generated code) is this function.
+    #[inline(always)]
+    pub fn junction_exp(x: f64, is: f64) -> (f64, f64) {
+        if x <= MAX_EXP_V {
+            let e = safe_exp(x);
+            return (e, e);
+        }
+        let x_max = MAX_EXP_V.max(MAX_DIODE_FWD_I.ln() - is.ln());
+        if x <= x_max {
+            let e = x.exp();
+            (e, e)
+        } else {
+            let e = x_max.exp();
+            (e * (1.0 + (x - x_max)), e)
+        }
+    }
+
     /// Limit voltage for safe exponential calculation.
     #[inline(always)]
     pub fn limit_exp_v(v: f64, vt: f64) -> f64 {

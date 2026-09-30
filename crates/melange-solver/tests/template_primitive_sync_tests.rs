@@ -121,6 +121,9 @@ mod tpl {
     pub fn diode_eval_with_rs_tpl(v_d: f64, is: f64, n_vt: f64, rs: f64) -> (f64, f64) {
         diode_eval_with_rs(v_d, is, n_vt, rs)
     }
+    pub fn bjt_junction_exp_tpl(x: f64, is: f64) -> (f64, f64) {
+        bjt_junction_exp(x, is)
+    }
     #[allow(clippy::too_many_arguments)]
     pub fn bjt_evaluate_tpl(
         vbe: f64,
@@ -572,6 +575,30 @@ fn template_diode_eval_with_rs_is_bitwise_identical_to_split_pair() {
 // BJT (Ebers-Moll + Gummel-Poon incl. q2/qb)
 // ============================================================================
 
+/// The template's junction exponential (every BJT exponential in generated
+/// code, including the inline forward-active devices) is the device crate's
+/// `safeguards::junction_exp`, in the legacy range, the extended exact range
+/// of a small-IS card and the linear extension beyond it.
+#[test]
+fn template_bjt_junction_exp_matches_devices_crate() {
+    for &is in &[1e-12, 1e-14, 4.3e-15, 1e-19, 2.9e-22, 1e-30] {
+        let mut x = -60.0;
+        while x <= 120.0 {
+            let (e_t, de_t) = tpl::bjt_junction_exp_tpl(x, is);
+            let (e_d, de_d) = melange_devices::safeguards::junction_exp(x, is);
+            assert_close(&format!("value at x={x}, IS={is:e}"), e_t, e_d, 1e-12, 0.0);
+            assert_close(
+                &format!("slope at x={x}, IS={is:e}"),
+                de_t,
+                de_d,
+                1e-12,
+                0.0,
+            );
+            x += 0.37;
+        }
+    }
+}
+
 /// Template `bjt_evaluate` in Ebers-Moll mode must match the canonical
 /// melange_devices::BjtEbersMoll (currents + full 2x2 Jacobian), including
 /// ISE/NE + ISC/NC leakage terms and PNP polarity.
@@ -618,6 +645,32 @@ fn template_bjt_ebers_moll_matches_devices_crate() {
             0.0,
             1.0,
             BjtPolarity::Pnp,
+        ),
+        // Small-IS cards: the extended exponential's exact stretch above
+        // x = 40 (a Darlington equivalent at NF = 2, and IS = 1e-19).
+        (
+            2.9e-22,
+            1000.0,
+            1.0,
+            2.0,
+            1.0,
+            0.0,
+            1.5,
+            0.0,
+            2.0,
+            BjtPolarity::Npn,
+        ),
+        (
+            1e-19,
+            1000.0,
+            1.0,
+            1.0,
+            1.0,
+            0.0,
+            1.5,
+            0.0,
+            2.0,
+            BjtPolarity::Npn,
         ),
     ];
     for &(is, bf, br, nf, nr, ise, ne, isc, nc, pol) in variants {
