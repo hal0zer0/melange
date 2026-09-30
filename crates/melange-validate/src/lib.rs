@@ -692,6 +692,21 @@ pub fn validate_circuit_with_options(
 
     // Compare signals
     let mut report = compare_signals(&spice_signal, &melange_signal, config);
+    // The same comparison without the alignment, reported next to it: a
+    // constant delay fitted at 1x can absorb a real phase error, and the pair
+    // shows how much of the residual the fit removed.
+    report.unaligned_normalized_rms_error = Some(
+        compare_signals(
+            &Signal::new(
+                spice_output_blocked.clone(),
+                spice_data.sample_rate,
+                "spice_unaligned",
+            ),
+            &melange_signal,
+            config,
+        )
+        .normalized_rms_error,
+    );
     report.circuit_name = options.circuit_name.clone().unwrap_or_else(|| {
         netlist_path
             .file_stem()

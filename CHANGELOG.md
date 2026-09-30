@@ -617,6 +617,14 @@ generated state is smaller.
   circuits were judged against a program 20 dB louder than the real one. The
   reference is now the smaller of that and the output's own excursion from
   its operating point. Golden renders are identical.
+- **`melange validate` prints the unaligned error next to the aligned one**
+  on every result, and `--rate-sweep` drives the deck at 997.3 Hz. validate
+  lines the reference up with the render by one fitted delay; at 1x that fit
+  can absorb a real phase error, so the unaligned figure is now reported
+  beside it. The rate sweep's stimulus is incommensurate with every rate it
+  renders: at 1 kHz a clipping deck's corners fall at the same sub-sample
+  phase each period, a different one at each rate, and that fixed phase
+  twice produced a PLATEAU / DIVERGES verdict on a deck that converges.
 - **A pot move or a resistor-switch flip no longer spends a sample on
   backward Euler.** Every `set_pot_*` and `set_switch_*` routed the next
   sample through the backward-Euler matrices, a fix for a double-counted
@@ -769,6 +777,18 @@ generated state is smaller.
   CLI stamped its own label and only refreshed it when the CLI itself was
   edited. Both now print one label, refreshed on an edit to any source that
   goes into the binaries (the exe hash stays the exact identity).
+### Known issues
+
+- **A self-starting two-transistor astable is refused.** A textbook
+  multivibrator with an unstable operating point (ideal-ish transistors hard
+  saturated through 1 kΩ / 47 kΩ) builds on the nodal solver, which cannot yet
+  solve its first regenerative switching edge; the render stops with an
+  unsolved-sample error under either integrator. 0.1.11 built it on the DK
+  solver and matched ngspice's period, but committed about 7 % of its samples
+  unsolved, with a 1.3 V overshoot; this release refuses instead. Astables whose
+  transistors carry series resistance and Early effect oscillate correctly. See
+  `docs/limitations.md`.
+
 ### Added
 
 - Saturating inductors take datasheet saturation ratings directly.

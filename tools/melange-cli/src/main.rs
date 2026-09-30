@@ -2437,6 +2437,12 @@ fn compile_circuit_source(
 
 /// `melange validate`'s stimulus: a sine at this frequency.
 const VALIDATE_STIMULUS_HZ: f64 = 1000.0;
+/// The rate sweep's stimulus. Incommensurate with every rate it renders: at a
+/// frequency that divides the sample rate, a clipping deck's corners fall at the
+/// same sub-sample phase every period, a different one at each rate, and that
+/// fixed phase has twice forged a PLATEAU / DIVERGES verdict on a converging
+/// deck. Stated, not derived.
+const RATE_SWEEP_STIMULUS_HZ: f64 = 997.3;
 /// Stimulus periods left out of every metric at the start of a validate render.
 const VALIDATE_SETTLE_PERIODS: f64 = 20.0;
 /// The default profile's peak bound, relative to the reference's peak over the
@@ -2807,16 +2813,19 @@ fn run_rate_sweep(
         rate_sweep, Fit, RateFor, SweepVerdict, Unresolved, EDGE_RATIO, PLATEAU_RATIO,
         RATIO_AGREEMENT,
     };
-    println!("Step 4: Rate sweep (oversampling off, the reference driven by the analytic sine)...");
+    println!(
+        "Step 4: Rate sweep (oversampling off, the reference driven by the analytic sine at \
+         {RATE_SWEEP_STIMULUS_HZ} Hz, incommensurate with the rates)..."
+    );
     let sweep = rate_sweep(
         netlist_path,
         melange_validate::AnalyticStimulus::Sine {
             amplitude,
-            frequency: VALIDATE_STIMULUS_HZ,
+            frequency: RATE_SWEEP_STIMULUS_HZ,
         },
         duration,
         // validate's own settle window: 20 stimulus periods.
-        20.0 / VALIDATE_STIMULUS_HZ,
+        20.0 / RATE_SWEEP_STIMULUS_HZ,
         sample_rate,
         output_node,
         config,

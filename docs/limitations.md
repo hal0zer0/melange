@@ -369,21 +369,25 @@ conditioning problem and the number melange prints should not be trusted.
 Changing a conductance mid-run changes `A = G + (2/T)C` only. The generated
 integrator's history is `(2/T)C·v_prev + q_dot` (the charge form, see
 [COMPANION_MODELS.md](aidocs/COMPANION_MODELS.md)), which carries no
-conductance, so a swap is not counted twice, and a capacitor-free node has no
-history to carry a residual. On a trapezoidal build each `set_switch_*` /
-`set_pot_*` call additionally solves the next sample on backward Euler
-(breakpoint-BE), which re-seeds `q_dot` on the new component values and damps
-the mode the step excited. `.runtime R` does not arm it.
+conductance, so a pot move or a resistor-only switch flip is exact on the next
+sample: a resistive divider node obeys `node − ratio·other` to below 1e-9 at
+and after the flip. A switch that swaps a capacitor or an inductor solves its
+next sample on backward Euler (breakpoint-BE), because the carried capacitor
+currents were built on the old value.
 
-The artifacts recorded for this event on 2026-08-15 — a swap sample deflecting
-exactly 2.000× the physical value, a `z = -1` ring of ~1000 samples on
-capacitive nodes, and a persistent residual on capless nodes held off-default
-(1.44% on a resistive divider, versus -3.5e-13 under `--backward-euler`) — were
-measured under the whole-system trapezoidal form, whose history matrix was
-`(2/T)C - G`. Re-measuring swaps under the charge form, with and without
-breakpoint-BE, is open work (`STATUS.md`, Pending Work). The oracle for that
-measurement: a resistive divider node obeys `node - ratio·other ≈ 0` at all
-times.
+### Self-starting two-transistor astables [OPEN]
+
+A classic two-transistor astable multivibrator whose DC operating point is
+unstable (it starts by itself) is built on the nodal solver, and melange
+cannot yet solve its regenerative switching edge: at the first edge every
+Newton path fails, under trapezoidal integration or `--backward-euler`, and
+from there every sample is refused as unsolved (the render stops with an
+error; `--allow-nr-hold` writes the frozen output anyway). The witness is a
+textbook NPN astable (1 kΩ collectors, 47 kΩ bases, 100 nF cross-coupling),
+which ngspice runs at its 6.667 ms period. Circuits whose devices carry series
+resistance and Early effect under moderate bias (a PNP divider astable with
+RB/RC/RE/VAF, for one) cross their edges and oscillate correctly. Tracked as
+(iv) in `docs/aidocs/STATUS.md`.
 
 ### Device Linearization
 - `.linearize Q9` or `.linearize T1` removes a BJT or **triode** from the NR

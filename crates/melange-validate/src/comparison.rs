@@ -383,6 +383,10 @@ pub struct ComparisonReport {
     /// `validate_circuit_with_options`.
     pub reference_self_check: Option<f64>,
     pub reference_self_check_note: Option<String>,
+
+    /// The normalized RMS error with no alignment at all, next to the aligned
+    /// one. Reported, not graded. Filled by `validate_circuit_with_options`.
+    pub unaligned_normalized_rms_error: Option<f64>,
 }
 
 impl ComparisonReport {
@@ -450,9 +454,12 @@ impl ComparisonReport {
 
         summary.push_str("Time-Domain Metrics:\n");
         summary.push_str(&format!(
-            "  RMS Error:        {:.6e} ({:.4}%)\n",
+            "  RMS Error:        {:.6e} ({:.4}%{})\n",
             self.rms_error,
-            self.normalized_rms_error * 100.0
+            self.normalized_rms_error * 100.0,
+            self.unaligned_normalized_rms_error
+                .map(|u| format!("; unaligned {:.4}%", u * 100.0))
+                .unwrap_or_default()
         ));
         if let Some(note) = &self.reference_self_check_note {
             summary.push_str(&format!("                    {note}\n"));
@@ -651,6 +658,7 @@ pub fn compare_signals(
         reference_note: None,
         reference_self_check: None,
         reference_self_check_note: None,
+        unaligned_normalized_rms_error: None,
         absolute_errors: None,
         relative_errors: None,
         unit_variation_note: None,
@@ -937,6 +945,7 @@ pub fn compare_signals(
         reference_note: None,
         reference_self_check: None,
         reference_self_check_note: None,
+        unaligned_normalized_rms_error: None,
     }
 }
 
