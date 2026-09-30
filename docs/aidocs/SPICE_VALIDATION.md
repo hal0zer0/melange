@@ -177,6 +177,34 @@ The historical two-netlist protocol (`circuit_no_vin.cir` variants) is
 retired; the four remaining dead `circuit_no_vin.cir` files were deleted
 2026-07-18.
 
+### Rate sweep: discretization or model error (`--rate-sweep`)
+
+A deck that fails at its rate may be modelled exactly and merely integrated
+coarsely. `melange validate --rate-sweep` (library:
+`melange_validate::rate_sweep`) runs the comparison at `fs`, `2fs` and
+`4fs` with oversampling off, the analytic stimulus sampled at each rate,
+and prints each rate's error and integrator, then a verdict:
+
+- **PASS** at the requested rate;
+- **CONVERGES**: the error falls toward ngspice. Reported: the order
+  `p = log2((e1−e2)/(e2−e4))`, the Richardson/Aitken asymptote
+  `e∞ = e4 − (e2−e4)/(2^p − 1)` (the MODEL error, clamped at 0), and the
+  rate the fitted convergence needs for 1 % and 0.1 %. Melange models the
+  circuit; the rate is the cost;
+- **PLATEAU**: the error stops falling (not monotone, or `e∞` at least half
+  the finest error; a constant floor cancels in the differences, so the
+  asymptote is what detects it);
+- **DIVERGES**: the error rises with the rate.
+
+PLATEAU and DIVERGES fail: melange converges to something other than the
+reference, a model or harness mismatch, which is what the (a) triage list
+is for. Measured 2026-09-30: rc-lowpass PASS; noyce-amp-at-idle CONVERGES
+(order 1.63, model error ~0, 1 % at 83 kHz; under backward Euler order 1.57,
+the same asymptote); noyce-cascaded-triodes CONVERGES pre-asymptotically
+(order 1.13, 1 % at 424 kHz); steve-1073-preamp DIVERGES (1.80, 0.59,
+1.00 % at 48/96/192 kHz). Do not sweep with `--oversampling`: its
+half-band filters' phase enters the comparison.
+
 ### DC blocking and settle windows
 
 - Generated melange code runs with `dc_block: true` (5 Hz HPF seeded from

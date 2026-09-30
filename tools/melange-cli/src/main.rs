@@ -457,6 +457,15 @@ enum Commands {
         /// recommendation: validate reports what it was asked to measure.
         #[arg(long, default_value = "1", value_name = "N")]
         oversampling: usize,
+
+        /// Validate at the sample rate, twice and four times it (oversampling
+        /// off) and classify the deck: PASS at the rate; CONVERGES (the
+        /// error falls with the step toward ngspice: melange models the
+        /// circuit and the rate is the cost; reports the asymptotic model
+        /// error and the rate needed for 1 % and 0.1 %); PLATEAU or DIVERGES
+        /// (the error stops falling or rises: a model or harness mismatch).
+        #[arg(long)]
+        rate_sweep: bool,
     },
 
     /// Simulate circuit with input signal
@@ -1258,6 +1267,7 @@ fn main() -> Result<()> {
             backward_euler,
             force_trap,
             oversampling,
+            rate_sweep,
         } => {
             // Validate numeric CLI parameters
             if sample_rate <= 0.0 || !sample_rate.is_finite() {
@@ -1265,6 +1275,11 @@ fn main() -> Result<()> {
             }
             if !matches!(oversampling, 1 | 2 | 4) {
                 anyhow::bail!("oversampling must be 1, 2, or 4, got {}", oversampling);
+            }
+            if rate_sweep && oversampling != 1 {
+                anyhow::bail!(
+                    "--rate-sweep sets the rate itself with oversampling off; drop --oversampling"
+                );
             }
             if !matches!(bjt_fa.as_str(), "auto" | "off" | "force") {
                 anyhow::bail!(
@@ -1311,6 +1326,7 @@ fn main() -> Result<()> {
                         force_trap,
                     },
                     oversampling,
+                    rate_sweep,
                 },
             )
         }
@@ -2475,6 +2491,7 @@ struct ValidateOptions<'a> {
     tol: ToleranceOverrides,
     reductions: ReductionModes<'a>,
     oversampling: usize,
+    rate_sweep: bool,
 }
 
 fn validate_circuit_source(
@@ -2492,6 +2509,7 @@ fn validate_circuit_source(
         tol,
         reductions,
         oversampling,
+        rate_sweep,
     } = opts;
     // Match parse-time node normalization (lowercase, gnd→0).
     let input_node_owned = melange_solver::parser::normalize_node_name(input_node);
@@ -2682,6 +2700,18 @@ fn validate_circuit_source(
         ..Default::default()
     };
 
+    if rate_sweep {
+        return run_rate_sweep(
+            &netlist_path,
+            amplitude,
+            duration,
+            sample_rate,
+            output_node,
+            &config,
+            &options,
+        );
+    }
+
     // Step 5: Run validation
     println!("Step 4: Running validation (ngspice + melange solver)...");
     let result = validate_circuit_with_options(
@@ -2757,6 +2787,73 @@ fn validate_circuit_source(
             result.report.failures.len(),
             next_step
         );
+    }
+}
+
+/// `melange validate --rate-sweep`: the deck at `fs`, `2fs`, `4fs`, the
+/// verdict, and the rates the fitted convergence needs for 1 % and 0.1 %.
+/// PLATEAU and DIVERGES fail: melange converges to something other than the
+/// reference there.
+fn run_rate_sweep(
+    netlist_path: &std::path::Path,
+    amplitude: f64,
+    duration: f64,
+    sample_rate: f64,
+    output_node: &str,
+    config: &melange_validate::comparison::ComparisonConfig,
+    options: &melange_validate::ValidationOptions,
+) -> Result<()> {
+    use melange_validate::rate_sweep::{rate_sweep, SweepVerdict};
+    println!("Step 4: Rate sweep (oversampling off, the reference driven by the analytic sine)...");
+    let sweep = rate_sweep(
+        netlist_path,
+        melange_validate::AnalyticStimulus::Sine {
+            amplitude,
+            frequency: VALIDATE_STIMULUS_HZ,
+        },
+        duration,
+        sample_rate,
+        output_node,
+        config,
+        options,
+    )
+    .with_context(|| "Rate sweep failed")?;
+    for row in &sweep.rows {
+        println!(
+            "  {:>7.0} Hz  {:<40}  {:.4} %  {}",
+            row.sample_rate,
+            row.integrator,
+            100.0 * row.error,
+            if row.passed { "PASS" } else { "FAIL" }
+        );
+    }
+    let rate = |tol: f64| match sweep.rate_for(tol) {
+        Some(fs) => format!("{:.0} Hz", fs),
+        None => "not reachable (model error at or above it)".to_string(),
+    };
+    match sweep.verdict {
+        SweepVerdict::Pass => {
+            println!("Verdict: PASS at {:.0} Hz", sample_rate);
+            Ok(())
+        }
+        SweepVerdict::Converges { order, model_error } => {
+            println!(
+                "Verdict: CONVERGES (order {order:.2}): model error {:.4} %; 1 % needs {}, \
+                 0.1 % needs {}",
+                100.0 * model_error,
+                rate(0.01),
+                rate(0.001)
+            );
+            Ok(())
+        }
+        SweepVerdict::Plateau { order } => anyhow::bail!(
+            "Verdict: PLATEAU (order {order:.2}): the error stops falling with the step, so \
+             melange converges to something other than the reference. A model or harness \
+             mismatch."
+        ),
+        SweepVerdict::Diverges => anyhow::bail!(
+            "Verdict: DIVERGES: the error rises with the rate. A model or harness mismatch."
+        ),
     }
 }
 

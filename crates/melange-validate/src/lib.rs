@@ -54,6 +54,7 @@ mod jfet_translate;
 pub mod linearize_twin;
 pub(crate) mod opamp_translate;
 pub(crate) mod pentode_translate;
+pub mod rate_sweep;
 mod reconstruction;
 mod sat_inductor_translate;
 pub mod spice_runner;
@@ -144,6 +145,8 @@ pub struct ValidationResult {
     pub csv_path: Option<std::path::PathBuf>,
     /// Path to generated JSON report (if created)
     pub json_path: Option<std::path::PathBuf>,
+    /// The integrator the melange build used (`IntegratorSelection::label`).
+    pub integrator: &'static str,
 }
 
 impl ValidationResult {
@@ -564,7 +567,12 @@ pub fn validate_circuit_with_options(
     // the reference must simulate the circuit melange built: a
     // capacitor-free nonlinear deck gets 10 pF parasitic caps across its
     // junctions, and the reference gets the same ones.
-    let (melange_output, parasitic_caps, linearized) = run_melange_build(
+    let MelangeRun {
+        output: melange_output,
+        parasitic_caps,
+        linearized,
+        integrator,
+    } = run_melange_build(
         &stripped_netlist,
         input_signal,
         sample_rate,
@@ -755,6 +763,7 @@ pub fn validate_circuit_with_options(
         html_report_path,
         csv_path,
         json_path,
+        integrator,
     })
 }
 
@@ -997,7 +1006,15 @@ pub fn run_melange_solver_from_str(
         oversampling,
         main_code,
     )
-    .map(|(output, ..)| output)
+    .map(|run| run.output)
+}
+
+/// A melange render and what its build put in the circuit.
+struct MelangeRun {
+    output: Vec<f64>,
+    parasitic_caps: Vec<melange_solver::mna::ParasiticCap>,
+    linearized: Vec<linearize_twin::LinearizedTwin>,
+    integrator: &'static str,
 }
 
 /// [`run_melange_solver_from_str`], also returning what the build put in the
@@ -1018,14 +1035,7 @@ fn run_melange_build(
     force_trap: bool,
     oversampling: usize,
     main_code: Option<&str>,
-) -> Result<
-    (
-        Vec<f64>,
-        Vec<melange_solver::mna::ParasiticCap>,
-        Vec<linearize_twin::LinearizedTwin>,
-    ),
-    ValidationError,
-> {
+) -> Result<MelangeRun, ValidationError> {
     use melange_solver::codegen::CodegenConfig;
 
     if !matches!(oversampling, 1 | 2 | 4) {
@@ -1104,7 +1114,12 @@ fn run_melange_build(
 
     let linearized = linearize_twin::linearized_twins(&built.mna);
     let output = run_generated_solver(&generated.code, input_signal, main_code)?;
-    Ok((output, generated.meta.parasitic_caps, linearized))
+    Ok(MelangeRun {
+        output,
+        parasitic_caps: generated.meta.parasitic_caps,
+        linearized,
+        integrator: generated.meta.integrator_selection.label(),
+    })
 }
 
 /// `netlist` with melange's auto-inserted parasitic caps added as SPICE

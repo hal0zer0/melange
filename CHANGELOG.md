@@ -573,6 +573,13 @@ generated state is smaller.
   variable-mu law, at an operating point solved without it. A nonzero value is
   now refused. Variable-mu stays modelled for pentodes and beam tetrodes; no
   deck set these keys on a triode.
+- **`melange validate --rate-sweep`** runs the comparison at the sample
+  rate, twice and four times it (oversampling off) and classifies the
+  deck: PASS; CONVERGES (the error falls toward ngspice as the step
+  shrinks, so melange models the circuit and the rate is the cost:
+  reports the extrapolated model error and the rate needed for 1 % and
+  0.1 %); or PLATEAU / DIVERGES (a model or harness mismatch, which
+  fails). Each rate's integrator is shown.
 - **Automatic backward Euler weighed only the trapezoidal ring, never its
   own cost**: a build was promoted whenever a stiff mode rang at −60 dB of
   the passband, however much accuracy backward Euler (first order) then
