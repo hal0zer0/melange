@@ -573,6 +573,25 @@ generated state is smaller.
   variable-mu law, at an operating point solved without it. A nonzero value is
   now refused. Variable-mu stays modelled for pentodes and beam tetrodes; no
   deck set these keys on a triode.
+- **A `.linearize`d device driven out of its small-signal region was
+  silently a different circuit**: it went on answering from its
+  linearization however far the drive took it. A linearized cathode follower
+  idling at tens of µA, with the summed output of four gain stages on its
+  grid, passed a sine the real tube cuts off on every negative swing (the
+  full deck has 34 % second harmonic there, the linearized one 0.45 %). Each
+  sample now checks every linearized device against its region: a triode's
+  linear plate current at or above zero and its grid below the conduction
+  onset; a BJT forward active (collector current of its forward sign, B-C
+  reverse biased). A sample outside is a reduced-model exit, counted as
+  unsolved, and every verb refuses the render, as for a forward-active or
+  grid-off reduced device.
+- **A `.linearize`d triode lost its inter-electrode capacitances**: `CCG`,
+  `CGP` and `CCP` were dropped when the triode was linearized, so a stage
+  with CGP = 100 pF behind 100 kΩ read flat to 20 kHz where the full deck
+  rolls off through its Miller pole (−3.5 dB at 20 kHz). They are now
+  stamped with the linearized model, as a linearized BJT's junction
+  capacitances already were. No deck linearizes a triode whose card sets
+  them.
 - **A capacitor-free nonlinear circuit was validated against a different
   circuit**: melange builds such a deck with 10 pF across each device junction,
   which ngspice's run of the deck did not have. `melange validate` now gives

@@ -395,6 +395,7 @@ Q1 c b e QN
         ib_dc: ib,
         vbe0: v_at(nb) - v_at(ne),
         vbc0: v_at(nb) - v_at(nc),
+        is_pnp: false,
     }];
     mna_lin.stamp_linearized_bjts();
 
@@ -483,6 +484,10 @@ T1 g p k 12AX7
         ig_dc,
         vgk0: v_at(ng) - v_at(nk),
         vpk0: v_at(np) - v_at(nk),
+        ccg: 0.0,
+        cgp: 0.0,
+        ccp: 0.0,
+        grid_onset: 0.0,
     }];
     mna_lin.stamp_linearized_triodes();
 

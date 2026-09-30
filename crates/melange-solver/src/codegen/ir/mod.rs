@@ -432,6 +432,12 @@ pub struct Topology {
     /// without making K = N_V * S * N_I ill-conditioned.
     #[serde(default)]
     pub num_linearized_devices: usize,
+    /// The region each `.linearize`d device's small-signal model is valid
+    /// in, checked on every sample. A linearized device is a reduced model:
+    /// outside that region the answer comes from a model that no longer
+    /// describes the device, so the sample counts as a reduced-model exit.
+    #[serde(default)]
+    pub linearized_checks: Vec<LinearizedCheck>,
     /// Rows whose history is zeroed in every history matrix (`A_neg`,
     /// `A_neg_be`, the sub-step and sub-sample-fire twins): the algebraic
     /// augmented rows `n_nodes..n_aug` (voltage sources, VCVS, ideal
@@ -998,6 +1004,78 @@ impl From<&crate::codegen::CodegenConfig> for DcOpRequest {
 /// detectors, the `.linearize` bias point, the capacitance preflight) uses
 /// these, so they all solve the same problem. A railed op-amp sits where the
 /// build's rail mode puts it.
+/// A `.linearize`d device's validity region (see
+/// [`Topology::linearized_checks`]). Node indices are MNA 1-based (0 =
+/// ground); the currents and slopes are the linearization's own.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LinearizedCheck {
+    /// Valid while the linear plate current `ip_dc + gm·(vgk − vgk0) +
+    /// gp·(vpk − vpk0)` stays at or above zero (a triode's plate current
+    /// cannot reverse: below zero the tube is cut off) and the grid below its
+    /// conduction onset `grid_onset` (the grid law's 0.3 uA starting point).
+    Triode {
+        name: String,
+        ng: usize,
+        np: usize,
+        nk: usize,
+        ip_dc: f64,
+        gm: f64,
+        gp: f64,
+        vgk0: f64,
+        vpk0: f64,
+        grid_onset: f64,
+    },
+    /// Valid in the forward-active region: the linear collector current
+    /// `ic_dc + dic_dvbe·(vbe − vbe0) + dic_dvbc·(vbc − vbc0)` keeps its
+    /// forward sign (at zero the transistor is cut off) and the B-C junction
+    /// stays reverse biased (`vbc_eff <= 0`, the forward-active reduction's
+    /// own criterion; forward is saturation).
+    Bjt {
+        name: String,
+        nc: usize,
+        nb: usize,
+        ne: usize,
+        ic_dc: f64,
+        dic_dvbe: f64,
+        dic_dvbc: f64,
+        vbe0: f64,
+        vbc0: f64,
+        is_pnp: bool,
+    },
+}
+
+/// One [`LinearizedCheck`] per linearized device of `mna`.
+fn linearized_checks(mna: &MnaSystem) -> Vec<LinearizedCheck> {
+    let triodes = mna
+        .linearized_triodes
+        .iter()
+        .map(|t| LinearizedCheck::Triode {
+            name: t.name.clone(),
+            ng: t.ng,
+            np: t.np,
+            nk: t.nk,
+            ip_dc: t.ip_dc,
+            gm: t.gm,
+            gp: t.gp,
+            vgk0: t.vgk0,
+            vpk0: t.vpk0,
+            grid_onset: t.grid_onset,
+        });
+    let bjts = mna.linearized_bjts.iter().map(|b| LinearizedCheck::Bjt {
+        name: b.name.clone(),
+        nc: b.nc,
+        nb: b.nb,
+        ne: b.ne,
+        ic_dc: b.ic_dc,
+        dic_dvbe: b.dic_dvbe,
+        dic_dvbc: b.dic_dvbc,
+        vbe0: b.vbe0,
+        vbc0: b.vbc0,
+        is_pnp: b.is_pnp,
+    });
+    triodes.chain(bjts).collect()
+}
+
 /// Devices are linearized but no bias point was recorded: the bias solve they
 /// were linearized at did not converge (see
 /// [`MnaSystem::linearize_bias_nodes`]).
@@ -1826,6 +1904,7 @@ impl CircuitIR {
             n_aug: mna.n_aug,
             augmented_inductors,
             num_linearized_devices: mna.linearized_triodes.len() + mna.linearized_bjts.len(),
+            linearized_checks: linearized_checks(mna),
             history_zero_rows: history_zero_rows(n, n_nodes, mna.n_aug, &mna.bjt_internal_nodes),
         };
 
@@ -2749,6 +2828,7 @@ impl CircuitIR {
             n_aug,
             augmented_inductors: true,
             num_linearized_devices: mna.linearized_triodes.len() + mna.linearized_bjts.len(),
+            linearized_checks: linearized_checks(mna),
             history_zero_rows: history_zero_rows(n, n_nodes, n_aug, &mna.bjt_internal_nodes),
         };
 

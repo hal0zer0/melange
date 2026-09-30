@@ -1538,9 +1538,7 @@ pub(super) fn emit_pentode_nr_dk_stamp(
 pub(super) fn emit_region_exit_lines(ir: &CircuitIR, indent: &str) -> String {
     use crate::codegen::ir::DeviceType;
 
-    if ir.device_node_indices.len() != ir.device_slots.len() {
-        return String::new();
-    }
+    let slots_indexed = ir.device_node_indices.len() == ir.device_slots.len();
     let vnode = |n: usize| -> String {
         if n == 0 {
             "0.0".to_string()
@@ -1550,7 +1548,12 @@ pub(super) fn emit_region_exit_lines(ir: &CircuitIR, indent: &str) -> String {
     };
     let mut lines = String::new();
     let mut any_reduced = false;
-    for (slot, nodes) in ir.device_slots.iter().zip(ir.device_node_indices.iter()) {
+    let indexed_slots = if slots_indexed {
+        &ir.device_slots[..]
+    } else {
+        &[]
+    };
+    for (slot, nodes) in indexed_slots.iter().zip(ir.device_node_indices.iter()) {
         let reduced = is_reduced_slot(slot);
         let on_exit = if reduced {
             any_reduced = true;
@@ -1581,6 +1584,68 @@ pub(super) fn emit_region_exit_lines(ir: &CircuitIR, indent: &str) -> String {
             _ => {}
         }
     }
+    // `.linearize`d devices: each is a reduced model, checked against the
+    // region its small-signal model assumes (`LinearizedCheck`).
+    for check in &ir.topology.linearized_checks {
+        any_reduced = true;
+        let on_exit = "state.diag_region_exit_count += 1; reduced_exit = true;";
+        match check {
+            crate::codegen::ir::LinearizedCheck::Triode {
+                name,
+                ng,
+                np,
+                nk,
+                ip_dc,
+                gm,
+                gp,
+                vgk0,
+                vpk0,
+                grid_onset,
+            } => {
+                let (vg, vp, vk) = (vnode(*ng), vnode(*np), vnode(*nk));
+                lines.push_str(&format!(
+                    "{indent}{{ // {name} (linearized): plate cut off, or grid past its onset\n\
+                     {indent}    let vgk = {vg} - {vk};\n\
+                     {indent}    let ip = {} + {} * (vgk - {}) + {} * ({vp} - {vk} - {});\n\
+                     {indent}    if ip < 0.0 || vgk > {} {{ {on_exit} }}\n\
+                     {indent}}}\n",
+                    fmt_f64(*ip_dc),
+                    fmt_f64(*gm),
+                    fmt_f64(*vgk0),
+                    fmt_f64(*gp),
+                    fmt_f64(*vpk0),
+                    fmt_f64(*grid_onset),
+                ));
+            }
+            crate::codegen::ir::LinearizedCheck::Bjt {
+                name,
+                nc,
+                nb,
+                ne,
+                ic_dc,
+                dic_dvbe,
+                dic_dvbc,
+                vbe0,
+                vbc0,
+                is_pnp,
+            } => {
+                let (vc, vb, ve) = (vnode(*nc), vnode(*nb), vnode(*ne));
+                let sign = if *is_pnp { "-1.0" } else { "1.0" };
+                lines.push_str(&format!(
+                    "{indent}{{ // {name} (linearized): cut off, or B-C forward (saturation)\n\
+                     {indent}    let (vbe, vbc) = ({vb} - {ve}, {vb} - {vc});\n\
+                     {indent}    let ic = {} + {} * (vbe - {}) + {} * (vbc - {});\n\
+                     {indent}    if {sign} * ic <= 0.0 || {sign} * vbc > 0.0 {{ {on_exit} }}\n\
+                     {indent}}}\n",
+                    fmt_f64(*ic_dc),
+                    fmt_f64(*dic_dvbe),
+                    fmt_f64(*vbe0),
+                    fmt_f64(*dic_dvbc),
+                    fmt_f64(*vbc0),
+                ));
+            }
+        }
+    }
     if lines.is_empty() {
         return lines;
     }
@@ -1593,8 +1658,9 @@ pub(super) fn emit_region_exit_lines(ir: &CircuitIR, indent: &str) -> String {
         // A REDUCED device outside its region is an answer from a model that
         // no longer describes it: the sample is not a solution (design review).
         out.push_str(&format!(
-            "{indent}// A reduced device (forward-active BJT, grid-off pentode) that\n\
-             {indent}// leaves its region makes the sample unsolved.\n\
+            "{indent}// A reduced device (forward-active BJT, grid-off pentode,\n\
+             {indent}// `.linearize`d device) that leaves its region makes the sample\n\
+             {indent}// unsolved.\n\
              {indent}let mut reduced_exit = false;\n"
         ));
     }
@@ -1626,8 +1692,9 @@ pub(super) fn is_reduced_slot(slot: &crate::device_types::DeviceSlot) -> bool {
 /// True when the build carries a region-restricted reduced device, and so
 /// `diag_reduced_model_exit_count`.
 pub(super) fn has_reduced_device(ir: &CircuitIR) -> bool {
-    ir.device_node_indices.len() == ir.device_slots.len()
-        && ir.device_slots.iter().any(is_reduced_slot)
+    !ir.topology.linearized_checks.is_empty()
+        || (ir.device_node_indices.len() == ir.device_slots.len()
+            && ir.device_slots.iter().any(is_reduced_slot))
 }
 
 // ============================================================================

@@ -270,6 +270,7 @@ pub fn apply_linearize_reductions(
                         ib_dc: ib,
                         vbe0,
                         vbc0,
+                        is_pnp: bp.is_pnp,
                     });
                 }
             }
@@ -398,6 +399,10 @@ pub fn apply_linearize_reductions(
                         ig_dc,
                         vgk0,
                         vpk0,
+                        ccg: tp.ccg,
+                        cgp: tp.cgp,
+                        ccp: tp.ccp,
+                        grid_onset: onset,
                     });
                 }
             }

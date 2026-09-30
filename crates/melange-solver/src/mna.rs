@@ -609,6 +609,9 @@ pub struct LinearizedBjtInfo {
     /// circuit's DC fixed point drifts away from the operating point.
     pub vbe0: f64,
     pub vbc0: f64,
+    /// PNP: the forward-active region's signs flip (`vbc_eff = -Vbc`,
+    /// collector current negative).
+    pub is_pnp: bool,
 }
 
 /// Linearized triode info: small-signal conductances stamped into G at DC OP.
@@ -638,6 +641,16 @@ pub struct LinearizedTriodeInfo {
     /// I0 - g·v0 — see `LinearizedBjtInfo::vbe0` for the invariant.
     pub vgk0: f64,
     pub vpk0: f64,
+    /// Inter-electrode capacitances (`CCG` cathode-grid, `CGP` grid-plate,
+    /// `CCP` cathode-plate): linear, so they stay in the circuit unchanged
+    /// when the plate law is linearized.
+    pub ccg: f64,
+    pub cgp: f64,
+    pub ccp: f64,
+    /// Grid-cathode voltage at which the grid starts to conduct (the
+    /// manufacturers' 0.3 uA starting point of the grid law), the edge of the
+    /// region the linearization assumes.
+    pub grid_onset: f64,
 }
 
 /// Voltage source information for extended MNA.
@@ -1469,6 +1482,14 @@ impl MnaSystem {
                     dc_value: i_lin_k + tube.ip_dc + tube.ig_dc,
                 });
             }
+
+            // Inter-electrode capacitances: the rebuild's junction-cap pass
+            // covers only the devices left in the nonlinear system, so a
+            // linearized triode's are stamped here (same orientation as
+            // `stamp_device_junction_caps`).
+            self.stamp_capacitor_raw(nk, ng, tube.ccg);
+            self.stamp_capacitor_raw(ng, np, tube.cgp);
+            self.stamp_capacitor_raw(nk, np, tube.ccp);
         }
     }
 
@@ -7854,6 +7875,10 @@ Y1 sp sn cp cn vca1
             ig_dc: 0.0,
             vgk0: -1.5,
             vpk0: 150.0,
+            ccg: 0.0,
+            cgp: 0.0,
+            ccp: 0.0,
+            grid_onset: 0.0,
         }];
         mna.stamp_linearized_triodes();
 
@@ -7943,6 +7968,10 @@ Y1 sp sn cp cn vca1
             ig_dc,
             vgk0,
             vpk0,
+            ccg: 0.0,
+            cgp: 0.0,
+            ccp: 0.0,
+            grid_onset: 0.0,
         }];
         mna.stamp_linearized_triodes();
 

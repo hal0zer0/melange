@@ -707,14 +707,14 @@ When `RB`, `RC`, or `RE` are non-zero, internal nodes (basePrime, collectorPrime
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `VTO` | -2.0 V (NJF), +2.0 V (PJF) | Pinch-off voltage |
-| `IDSS` | BETA·VTO² | Saturation drain current |
+| `IDSS` | BETA·VTO² | Saturation drain current (not an ngspice key; `melange validate` gives its reference the equivalent `BETA`) |
 | `BETA` | 1e-4 A/V² | Transconductance parameter (converted: IDSS = BETA * VTO²) |
 | `LAMBDA` | 0 V⁻¹ | Channel-length modulation |
 | `RD`, `RS` | 0 Ω | Drain/source series resistance: only 0 is accepted. A nonzero value is refused (not implemented in the solution); model it as an explicit resistor |
-| `CGS` | 0 F | Gate-source capacitance |
-| `CGD` | 0 F | Gate-drain capacitance |
+| `CGS` | 0 F | Gate-source capacitance, held constant at every bias (SPICE's is a depletion capacitance) |
+| `CGD` | 0 F | Gate-drain capacitance, held constant at every bias |
 | `IS` | 1e-14 A | Gate junction saturation current (gate-source and gate-drain diodes; 0 disables them) |
-| `N` | 1 | Gate junction emission coefficient |
+| `N` | 1 | Gate junction emission coefficient (ngspice's level-1 JFET has none; a value other than 1 cannot be validated against it) |
 
 Either `IDSS` or `BETA` may be specified. If both are present, `IDSS` takes priority. If only `BETA` is given, it is converted to IDSS = BETA * VTO².
 
@@ -1211,6 +1211,7 @@ Removes a nonlinear device from the Newton-Raphson system and replaces it with s
 - Triodes: reduces M by 2 per device (stamps g_m, 1/r_p into G)
 - The device still affects the circuit via its linearized conductances
 - The linearization is computed from the DC operating point, so it is only accurate for small signals around that point
+- **Driven out of that region, the render is refused.** Every sample checks each linearized device against the region its small-signal model assumes: a triode's linear plate current must stay at or above zero (below, the tube is cut off) and its grid below the conduction onset; a BJT must stay forward active (collector current of its forward sign, B-C junction reverse biased). A sample outside counts as a reduced-model exit and an unsolved sample (`diag_reduced_model_exit_count`, `diag_unsolved_sample_count`), and every verb refuses the render. A stage that clips at the drive you use is not a small-signal stage: remove `.linearize` for it, or lower the drive
 
 ---
 

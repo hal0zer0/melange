@@ -395,6 +395,11 @@ times.
 - A linearized BJT is stamped as its own terminal-current Jacobian at the DC
   operating point: NF/NR, Gummel-Poon Early effect and high injection, ISE/ISC
   leakage and RB/RC/RE all enter it. A triode is stamped as g_m and 1/r_p
+- A linearized triode keeps its inter-electrode capacitances (CCG, CGP, CCP).
+- A linearized device driven out of its small-signal region (triode cut off
+  or grid past its conduction onset; BJT cut off or saturated) makes the
+  sample unsolved, and every verb refuses the render. melange does not fall
+  back to the full device for those samples.
 - A linearized BJT's junction and diffusion capacitances (CJE, CJC, TF) are
   evaluated at the DC operating point, as the unlinearized device's are, and
   stamped between its external terminals. A card with RB/RC/RE on a route
