@@ -358,6 +358,12 @@ pub struct ComparisonReport {
     /// the deck as written, and a reader who runs ngspice on the deck alone
     /// gets a different answer.
     pub parasitic_note: Option<String>,
+
+    /// Set when the deck `.linearize`s devices, naming them: the reference
+    /// runs the same small-signal models melange built (see
+    /// `linearize_twin`), not the full devices. Filled by
+    /// `validate_circuit_with_options`; reported, not graded.
+    pub linearize_note: Option<String>,
 }
 
 impl ComparisonReport {
@@ -386,6 +392,9 @@ impl ComparisonReport {
             summary.push_str(&format!("Aligned: {}\n", note));
         }
         if let Some(note) = &self.parasitic_note {
+            summary.push_str(&format!("Circuit: {}\n", note));
+        }
+        if let Some(note) = &self.linearize_note {
             summary.push_str(&format!("Circuit: {}\n", note));
         }
         // The unit-variation qualifier rides ON the status line, not above it:
@@ -600,6 +609,7 @@ pub fn compare_signals(
         oversampling_note: None,
         alignment_note: None,
         parasitic_note: None,
+        linearize_note: None,
         absolute_errors: None,
         relative_errors: None,
         unit_variation_note: None,
@@ -880,6 +890,7 @@ pub fn compare_signals(
         alignment_note: None,
         // Set by the caller, which is the only layer that knows the build.
         parasitic_note: None,
+        linearize_note: None,
     }
 }
 

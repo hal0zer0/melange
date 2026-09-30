@@ -51,6 +51,7 @@ mod behavioral_translate;
 pub mod comparison;
 pub mod deck_guard;
 mod jfet_translate;
+pub mod linearize_twin;
 pub(crate) mod opamp_translate;
 pub(crate) mod pentode_translate;
 mod sat_inductor_translate;
@@ -428,7 +429,7 @@ pub fn validate_circuit_with_options(
     // the reference must simulate the circuit melange built: a
     // capacitor-free nonlinear deck gets 10 pF parasitic caps across its
     // junctions, and the reference gets the same ones.
-    let (melange_output, parasitic_caps) = run_melange_build(
+    let (melange_output, parasitic_caps, linearized) = run_melange_build(
         &stripped_netlist,
         input_signal,
         sample_rate,
@@ -441,7 +442,10 @@ pub fn validate_circuit_with_options(
         options.oversampling,
         None,
     )?;
-    let reference_deck = with_parasitic_caps(&netlist_str, &parasitic_caps)?;
+    let reference_deck = linearize_twin::with_linearized_devices(
+        &with_parasitic_caps(&netlist_str, &parasitic_caps)?,
+        &linearized,
+    )?;
 
     let spice_data = spice_runner::run_transient_with_thevenin_pwl(
         &reference_deck,
@@ -529,6 +533,20 @@ pub fn validate_circuit_with_options(
     // The reference is the deck plus melange's parasitic caps when it had no
     // capacitance: say so, since a reader running ngspice on the deck alone
     // would get a different answer.
+    report.linearize_note = (!linearized.is_empty()).then(|| {
+        format!(
+            "both engines run the small-signal models melange linearized ({}); a drive that \
+             takes one out of its region is refused, not compared",
+            linearized
+                .iter()
+                .map(|d| match d {
+                    linearize_twin::LinearizedTwin::Triode { name, .. }
+                    | linearize_twin::LinearizedTwin::Bjt { name, .. } => name.as_str(),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    });
     report.parasitic_note = (!parasitic_caps.is_empty()).then(|| {
         format!(
             "the deck has no capacitors, so both engines carry the {} x 10 pF parasitic \
@@ -842,12 +860,14 @@ pub fn run_melange_solver_from_str(
         oversampling,
         main_code,
     )
-    .map(|(output, _)| output)
+    .map(|(output, ..)| output)
 }
 
-/// [`run_melange_solver_from_str`], also returning the parasitic caps the
-/// build auto-inserted (empty unless the deck is capacitor-free and
-/// nonlinear), which the reference needs to simulate the same circuit.
+/// [`run_melange_solver_from_str`], also returning what the build put in the
+/// circuit that the deck text does not say, which the reference needs to
+/// simulate the same circuit: the parasitic caps it auto-inserted (empty
+/// unless the deck is capacitor-free and nonlinear) and the small-signal
+/// models of its `.linearize`d devices.
 #[allow(clippy::too_many_arguments)]
 fn run_melange_build(
     netlist_str: &str,
@@ -861,7 +881,14 @@ fn run_melange_build(
     force_trap: bool,
     oversampling: usize,
     main_code: Option<&str>,
-) -> Result<(Vec<f64>, Vec<melange_solver::mna::ParasiticCap>), ValidationError> {
+) -> Result<
+    (
+        Vec<f64>,
+        Vec<melange_solver::mna::ParasiticCap>,
+        Vec<linearize_twin::LinearizedTwin>,
+    ),
+    ValidationError,
+> {
     use melange_solver::codegen::CodegenConfig;
 
     if !matches!(oversampling, 1 | 2 | 4) {
@@ -935,8 +962,9 @@ fn run_melange_build(
         .map_err(|e| ValidationError::Solver(e.to_string()))?;
     let generated = built.generated;
 
+    let linearized = linearize_twin::linearized_twins(&built.mna);
     let output = run_generated_solver(&generated.code, input_signal, main_code)?;
-    Ok((output, generated.meta.parasitic_caps))
+    Ok((output, generated.meta.parasitic_caps, linearized))
 }
 
 /// `netlist` with melange's auto-inserted parasitic caps added as SPICE
@@ -1042,6 +1070,7 @@ pub fn run_generated_solver(
         "diag_input_clamp_count",
         "diag_input_nan_count",
         "diag_clamp_count",
+        "diag_reduced_model_exit_count",
     ] {
         if code.contains(&format!("pub {f}: ")) {
             let key = f.strip_prefix("diag_").unwrap_or(f);
@@ -1151,6 +1180,7 @@ pub fn run_generated_solver(
     // comparison — a validation number without them hides a starved or
     // out-of-region solve.
     let (mut held, mut clamped, mut nan, mut out_clamped) = (0u64, 0u64, 0u64, 0u64);
+    let mut reduced = 0u64;
     for line in String::from_utf8_lossy(&result.stderr).lines() {
         if let Some(diag) = line.strip_prefix("DIAG:") {
             eprintln!("  melange {}", diag.replacen('=', ": ", 1));
@@ -1165,6 +1195,9 @@ pub fn run_generated_solver(
             }
             if let Some(v) = diag.strip_prefix("clamp_count=") {
                 out_clamped = v.trim().parse().unwrap_or(0);
+            }
+            if let Some(v) = diag.strip_prefix("reduced_model_exit_count=") {
+                reduced = v.trim().parse().unwrap_or(0);
             }
         }
     }
@@ -1197,6 +1230,25 @@ pub fn run_generated_solver(
     // number is meaningless: on those samples melange emitted the PREVIOUS
     // state, not an answer to the circuit. Fail here rather than let a
     // confident correlation be computed from a frozen render (design review).
+    // A reduced device out of its region is counted as unsolved too, but the
+    // Newton solve succeeded there: say which, since the remedies differ.
+    if reduced > 0 {
+        let newton = held.saturating_sub(reduced);
+        let also = if newton > 0 {
+            format!(" A further {newton} sample(s) were never solved by Newton.")
+        } else {
+            String::new()
+        };
+        return Err(ValidationError::Solver(format!(
+            "{reduced} sample(s) were solved on a REDUCED device model outside its region: a \
+             `.linearize`d device driven out of its small-signal region (a triode cut off or \
+             its grid past the conduction onset, a BJT cut off or saturated), a forward-active \
+             BJT that saturated, or a grid-off pentode whose grid conducted. Those samples are \
+             not a solution to the circuit. Remove `.linearize` for a stage that leaves its \
+             region at this drive, or lower the drive (--bjt-fa off / --tube-grid-fa off for \
+             the other two).{also}"
+        )));
+    }
     if held > 0 {
         return Err(ValidationError::Solver(format!(
             "{held} sample(s) were never solved: every Newton path failed and the previous \

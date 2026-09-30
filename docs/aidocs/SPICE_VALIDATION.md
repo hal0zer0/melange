@@ -75,7 +75,20 @@ recorded correlation/RMS values.
    bias-dependent). A card with `N` other than 1 is refused: ngspice's
    level-1 JFET has no emission coefficient.
 
-7. **Gives the reference melange's parasitic caps** (`with_parasitic_caps`,
+7. **Gives the reference each `.linearize`d device as melange built it**
+   (`linearize_twin.rs`): the element line is replaced by the small-signal
+   model at the DC operating point (`G` sources for the terminal-current
+   Jacobian, an `I` source for the constant that puts the operating point
+   back, the kept capacitances as `C`), and a `Circuit:` line names the
+   devices. Against the full device a linearized common-emitter stage at
+   0.3 V failed on the real transistor's distortion (0.107 % RMS, THD
+   −59.9 dB against melange's −189 dB); with the twin it matches to 0.029 %.
+   Whether the linearization holds at the drive is the build's question: a
+   device out of its region is a reduced-model exit and validate refuses the
+   run, saying so. A device inside a subcircuit is refused (its element line
+   is not the deck's own).
+
+8. **Gives the reference melange's parasitic caps** (`with_parasitic_caps`,
    `melange validate` / `validate_circuit_with_options`). A capacitor-free
    nonlinear deck is built with 10 pF across each device junction (see
    DEVICE_MODELS.md "Parasitic Cap Auto-Insertion"), recorded by node name in

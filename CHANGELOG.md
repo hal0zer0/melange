@@ -573,6 +573,15 @@ generated state is smaller.
   variable-mu law, at an operating point solved without it. A nonzero value is
   now refused. Variable-mu stays modelled for pentodes and beam tetrodes; no
   deck set these keys on a triode.
+- **`melange validate` compared a `.linearize`d device against the full
+  device**: the reference ran it nonlinear while melange ran its
+  small-signal model, so the difference between the two models was charged
+  to the solver. The reference now runs the same model (the terminal-current
+  Jacobian, the operating-point constant and the kept capacitances, as
+  ngspice elements) and the report names the devices. A render in which a
+  linearized device leaves its region is refused by validate and simulate as
+  a reduced-model exit, and the message now says so instead of reporting a
+  Newton failure.
 - **`melange validate` compared against a reference that had ignored part of
   the deck**: ngspice warns `unrecognized parameter (…) - ignored` and
   simulates on without it, and validate never read the warning. A run whose

@@ -3479,10 +3479,13 @@ fn simulate_circuit_source(
             eprintln!();
             eprintln!(
                 "ERROR: {reduced} sample(s){of} were solved on a REDUCED device model outside \
-                 its region: a forward-active BJT that saturated, or a grid-off pentode whose \
-                 grid conducted. The reduction (--bjt-fa / --tube-grid-fa) assumes the device \
-                 never goes there, so those samples are not a solution to this circuit. \
-                 Rebuild without the reduction (--bjt-fa off / --tube-grid-fa off)."
+                 its region: a `.linearize`d device driven out of its small-signal region (a \
+                 triode cut off or its grid past the conduction onset, a BJT cut off or \
+                 saturated), a forward-active BJT that saturated, or a grid-off pentode whose \
+                 grid conducted. The reduction assumes the device never goes there, so those \
+                 samples are not a solution to this circuit. Remove `.linearize` for a stage \
+                 that leaves its region at this drive, or lower the drive; for the other two, \
+                 rebuild without the reduction (--bjt-fa off / --tube-grid-fa off)."
             );
         }
         if committed > 0 {
