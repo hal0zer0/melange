@@ -65,6 +65,9 @@ pub enum SweepVerdict {
 pub struct RateSweep {
     pub rows: Vec<RateRow>,
     pub verdict: SweepVerdict,
+    /// The three errors' classification whether or not the requested rate
+    /// passed: what the rate for a tolerance is read from.
+    pub convergence: SweepVerdict,
 }
 
 impl RateSweep {
@@ -77,7 +80,7 @@ impl RateSweep {
         if base.error <= tol {
             return Some(base.sample_rate);
         }
-        match self.verdict {
+        match self.convergence {
             SweepVerdict::Converges { order, model_error } if model_error < tol => {
                 let factor = ((base.error - model_error) / (tol - model_error)).powf(1.0 / order);
                 Some(base.sample_rate * factor.max(1.0))
@@ -140,12 +143,17 @@ pub fn rate_sweep(
             integrator: result.integrator,
         });
     }
+    let convergence = classify([rows[0].error, rows[1].error, rows[2].error]);
     let verdict = if rows[0].passed {
         SweepVerdict::Pass
     } else {
-        classify([rows[0].error, rows[1].error, rows[2].error])
+        convergence.clone()
     };
-    Ok(RateSweep { rows, verdict })
+    Ok(RateSweep {
+        rows,
+        verdict,
+        convergence,
+    })
 }
 
 #[cfg(test)]
@@ -201,6 +209,7 @@ mod tests {
                 },
             ],
             verdict: classify([0.0301, 0.0076, 0.001975]),
+            convergence: classify([0.0301, 0.0076, 0.001975]),
         };
         // 3 % * (48k/fs)^2 = 0.99 % -> fs = 48k * sqrt(3/0.99)
         let fs = sweep.rate_for(0.01).unwrap();

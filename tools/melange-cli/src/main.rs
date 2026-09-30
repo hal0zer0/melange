@@ -2834,6 +2834,15 @@ fn run_rate_sweep(
     match sweep.verdict {
         SweepVerdict::Pass => {
             println!("Verdict: PASS at {:.0} Hz", sample_rate);
+            if let SweepVerdict::Converges { order, model_error } = sweep.convergence {
+                println!(
+                    "  (converging at order {order:.2}, model error {:.4} %: 1 % needs {}, \
+                     0.1 % needs {})",
+                    100.0 * model_error,
+                    rate(0.01),
+                    rate(0.001)
+                );
+            }
             Ok(())
         }
         SweepVerdict::Converges { order, model_error } => {
