@@ -545,13 +545,14 @@ pub struct SolverConfig {
     #[serde(default)]
     pub runtime_be_latch: bool,
     /// Emit event-triggered *breakpoint backward-Euler* on a trapezoidal build
-    /// with `.switch`/`.pot` parameters.
+    /// with a `.switch` that swaps a capacitor or an inductor (or a glow device).
     ///
-    /// A mid-run component change (a `.switch` toggle or a `.pot` step) leaves
-    /// the carried charge derivative `q_dot` built on the old values: after a
-    /// capacitor change, `alpha·C_new·v_prev` meets a `q_dot` built on `C_old`.
+    /// A mid-run reactance change leaves the carried charge derivative `q_dot`
+    /// built on the old value: after a capacitor change, `alpha·C_new·v_prev`
+    /// meets a `q_dot` built on `C_old`. A conductance change (a pot, a
+    /// resistor-only switch) does not: the charge-form history carries no `G`.
     ///
-    /// When `true`, `set_switch_*`/`set_pot_*` (and a lit glow device) arm a one-sample countdown
+    /// When `true`, such a `set_switch_*` (and a lit glow device) arms a one-sample countdown
     /// (`BREAKPOINT_BE_SAMPLES = 1`) that routes the next sample through the
     /// L-stable backward-Euler matrices. The BE sample does not read `q_dot`,
     /// re-seeds it from its own capacitor currents, and damps the mode the step
@@ -3056,7 +3057,17 @@ impl CircuitIR {
         // emit machinery nothing ever arms. Gate the flag on switches or a
         // *knob* pot (runtime_field == None), so runtime-R-only circuits stay
         // byte-identical.
-        let has_knob_pot = mna.pots.iter().any(|p| p.runtime_field.is_none());
+        // Only a switch that swaps a capacitor or an inductor needs it: under
+        // the charge form the history carries q_dot = C·dx/dt and no G term,
+        // so a conductance change (a pot, a resistor-only switch) leaves the
+        // carried state consistent, and a backward-Euler sample there only
+        // costs first-order accuracy. A reactance change leaves q_dot built on
+        // the old value.
+        let has_reactive_switch = mna.switches.iter().any(|sw| {
+            sw.components
+                .iter()
+                .any(|c| matches!(c.component_type, 'C' | 'L'))
+        });
         // A glow-discharge device is a runtime conductance swap of the same
         // kind (RS lit <-> ROFF dark, ~1e5 step) that fires on its own latch
         // instead of on a setter. On the nodal route the lit phase is held on
@@ -3074,7 +3085,7 @@ impl CircuitIR {
         // difference across the edge (measured: it no longer lowers the
         // residual and costs output accuracy).
         solver_config.breakpoint_be =
-            !solver_config.backward_euler && (!mna.switches.is_empty() || has_knob_pot || has_glow);
+            !solver_config.backward_euler && (has_reactive_switch || has_glow);
 
         // Sub-sample fire: variable-dt breakpoint re-solve at a glow strike.
         // Nodal route only (this builder), latched device required; the

@@ -5532,13 +5532,8 @@ impl RustEmitter {
 
             code.push_str(&format!("        self.pot_{}_resistance = r;\n", idx));
             code.push_str("        self.matrices_dirty = true;\n");
-            // Arm breakpoint-BE for a discrete pot step (a knob move is a
-            // conductance swap that can excite z=-1 on a capless node). NOT for
-            // `.runtime R` (audio-rate, continuous): arming every sample would
-            // pin BE permanently, and its tiny per-sample Δg self-corrects.
-            if ir.solver_config.breakpoint_be && pot.runtime_field.is_none() {
-                code.push_str("        self.breakpoint_be = BREAKPOINT_BE_SAMPLES;\n");
-            }
+            // A pot changes a conductance only, which the charge-form history
+            // (q_dot = C·dx/dt, no G term) does not carry: no breakpoint-BE.
 
             // Authentic-noise coefficient refresh (Step 2 / Phase 1.5).
             // Keeps `state.noise_thermal_sqrt_inv_r[k]` in sync with the
@@ -5725,10 +5720,17 @@ impl RustEmitter {
                 idx
             ));
             code.push_str("        self.matrices_dirty = true;\n");
-            // A switch flip is a discrete conductance swap — arm breakpoint-BE
-            // so the swap sample is solved on the L-stable BE matrices (removes
-            // the 2× first sample and the excited z=-1 mode).
-            if ir.solver_config.breakpoint_be {
+            // A switch that swaps a capacitor or an inductor leaves q_dot built
+            // on the old value: arm breakpoint-BE so the swap sample is solved on
+            // the backward-Euler matrices, which re-seed q_dot from their own
+            // capacitor currents. A resistor-only switch is a conductance change
+            // the charge-form history does not carry: no breakpoint.
+            if ir.solver_config.breakpoint_be
+                && sw
+                    .components
+                    .iter()
+                    .any(|c| matches!(c.component_type, 'C' | 'L'))
+            {
                 code.push_str("        self.breakpoint_be = BREAKPOINT_BE_SAMPLES;\n");
             }
 

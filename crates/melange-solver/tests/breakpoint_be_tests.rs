@@ -1,18 +1,17 @@
 //! Breakpoint-BE regression tests — event-triggered backward-Euler on a
-//! `.switch`/`.pot` conductance swap.
+//! `.switch` that swaps a capacitor or an inductor.
 //!
-//! A mid-run conductance swap stamps `Δg` into both the forward matrix `A` and
-//! the trapezoidal history `A_neg = (2/T)C − G`, so on the swap sample `Δg` is
-//! double-counted (output 2×) and the kick excites trap's marginal `z=−1`
-//! eigenmode — which never decays on a capless node. The fix routes exactly one
-//! sample through the L-stable BE matrices (`A_neg = (1/T)C`, no `G` term): no
-//! double-count, and BE damps `z=−1` at the source.
-//!
-//! The end-to-end runtime proof (a mid-run `set_switch` on a capless divider:
-//! residual 145% → ~1e-15; and Farfisa G10 `--switch Key=1 --force-trap`
-//! settling correctly instead of collapsing) is a compile-and-run harness;
-//! these tests pin the codegen surface, including the load-bearing "exactly one
-//! BE sample" — a second sample over-damps and collapses the G10 astable.
+//! Under the charge form the trapezoidal history is `A_neg·v_prev + q_dot`
+//! with `A_neg = (2/T)C` and `q_dot = C·dx/dt`: no `G` term. A conductance
+//! change (a pot, a resistor-only switch) therefore leaves the carried state
+//! consistent and needs no special sample; a backward-Euler sample there would
+//! only cost first-order accuracy. (Under the old whole-system form,
+//! `A_neg = (2/T)C − G`, a swap double-counted `Δg` on its sample; that is
+//! what breakpoint-BE was first built for.) A reactance change still leaves
+//! `q_dot` built on the old value, so a C- or L-switch routes exactly one
+//! sample through the backward-Euler matrices, which re-seed `q_dot` from
+//! their own capacitor currents. Exactly one: a second sample over-damps and
+//! can knock a marginal self-oscillator into the wrong equilibrium.
 
 mod support;
 
@@ -38,6 +37,27 @@ Cmid mid 0 100n
 Rk mid out 1e9
 Rload out 0 22k
 .switch Rk 1e9 1.0 \"Key\"
+";
+
+// The same clipper with its capacitor switched.
+const SWITCH_CAP_CLIPPER: &str = "\
+Diode clipper with a switched capacitor
+Rin in mid 1k
+D1 mid out D1N4148
+D2 out mid D1N4148
+Rload out 0 100k
+C1 out 0 10n
+.switch C1 10n 100n \"Cap\"
+.model D1N4148 D(IS=2.52e-9 N=1.752)
+";
+
+// Linear divider with a switched capacitor.
+const SWITCH_CAP_DIVIDER: &str = "\
+Linear divider with a switched capacitor
+Rs in out 10k
+Cout out 0 100n
+Rload out 0 22k
+.switch Cout 100n 1u \"Cap\"
 ";
 
 // Nonlinear clipper with a knob `.pot`.
@@ -83,8 +103,8 @@ fn generate_nodal(spice: &str, mut tweak: impl FnMut(&mut CodegenConfig)) -> Str
 }
 
 #[test]
-fn switch_trap_build_emits_breakpoint_be() {
-    let code = generate_nodal(SWITCH_CLIPPER, |_| {});
+fn reactive_switch_trap_build_emits_breakpoint_be() {
+    let code = generate_nodal(SWITCH_CAP_CLIPPER, |_| {});
     assert!(
         code.contains("pub breakpoint_be: u32"),
         "trap switch build must carry the breakpoint_be countdown field"
@@ -110,7 +130,7 @@ fn breakpoint_be_is_exactly_one_sample() {
     // Load-bearing: a SECOND BE sample over-damps and knocks a marginal
     // self-oscillator (Farfisa G10 divider under --force-trap) into the wrong
     // equilibrium. One BE sample already removes both the 2× and the z=-1 mode.
-    let code = generate_nodal(SWITCH_CLIPPER, |_| {});
+    let code = generate_nodal(SWITCH_CAP_CLIPPER, |_| {});
     assert!(
         code.contains("pub const BREAKPOINT_BE_SAMPLES: u32 = 1;"),
         "breakpoint-BE must be exactly ONE sample — do not raise it"
@@ -121,7 +141,7 @@ fn breakpoint_be_is_exactly_one_sample() {
 fn linear_switch_build_emits_m0_be_override() {
     // The m=0 (linear, no NR) path has no BE fallback to reuse, so it carries an
     // explicit BE re-solve branch guarded on the countdown.
-    let code = generate_nodal(SWITCH_DIVIDER, |_| {});
+    let code = generate_nodal(SWITCH_CAP_DIVIDER, |_| {});
     assert!(
         code.contains("if state.breakpoint_be > 0 {"),
         "linear switch build must emit the m=0 breakpoint-BE override branch"
@@ -133,11 +153,57 @@ fn linear_switch_build_emits_m0_be_override() {
 }
 
 #[test]
-fn pot_knob_build_arms_breakpoint_be() {
-    let code = generate_nodal(POT_CLIPPER, |_| {});
+fn conductance_only_builds_omit_breakpoint_be() {
+    for (deck, tag) in [
+        (POT_CLIPPER, "knob pot"),
+        (SWITCH_CLIPPER, "resistor switch"),
+        (SWITCH_DIVIDER, "linear resistor switch"),
+    ] {
+        let code = generate_nodal(deck, |_| {});
+        assert!(
+            !code.contains("breakpoint_be"),
+            "{tag}: a conductance change needs no breakpoint-BE under the charge form"
+        );
+    }
+}
+
+/// The runtime proof for a conductance-only switch: the capless divider's
+/// switched node `out` is algebraic, `out = mid·Rload/(Rk + Rload)`, at every
+/// sample, including the swap sample and the ones after it, on a plain
+/// trapezoidal build with no breakpoint sample. Under the old whole-system form
+/// the swap sample read 2x and `out` rang at fs/2.
+#[test]
+fn a_resistor_switch_is_exact_without_breakpoint_be() {
+    let code = generate_nodal(SWITCH_DIVIDER, |_| {});
+    let mna = melange_solver::mna::MnaSystem::from_netlist(
+        &melange_solver::parser::Netlist::parse(SWITCH_DIVIDER).unwrap(),
+    )
+    .unwrap();
+    let mid = mna.node_map["mid"] - 1;
+    let out = mna.node_map["out"] - 1;
+    let main = format!(
+        "fn main() {{
+    let mut s = CircuitState::default();
+    s.set_sample_rate(48000.0);
+    let mut worst = 0.0f64;
+    for k in 0..4800usize {{
+        if k == 2400 {{ s.set_switch_0(1); }}
+        let u = (2.0 * std::f64::consts::PI * 1000.0 * k as f64 / 48000.0).sin();
+        let _ = process_sample(u, &mut s);
+        let rk = if k >= 2400 {{ 1.0 }} else {{ 1e9 }};
+        let want = s.v_prev[{mid}] * 22000.0 / (rk + 22000.0);
+        let got = s.v_prev[{out}];
+        worst = worst.max((got - want).abs() / s.v_prev[{mid}].abs().max(1e-3));
+    }}
+    println!(\"worst={{:e}}\", worst);
+}}"
+    );
+    let worst = support::compile_and_run(&code, &main, "bp_r_switch_exact")
+        .parse_kv("worst")
+        .unwrap();
     assert!(
-        code.contains("self.breakpoint_be = BREAKPOINT_BE_SAMPLES;"),
-        "a knob .pot step must arm breakpoint-BE (a swap can excite z=-1)"
+        worst < 1e-9,
+        "capless out left its algebraic value by {worst:e}"
     );
 }
 

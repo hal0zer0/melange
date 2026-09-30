@@ -44,16 +44,17 @@ solution, which is within basin for any realistic per-sample delta.
 
 A pot touches `A` and `S` only: the history matrix `A_neg = alpha*C` (charge
 form, `COMPANION_MODELS.md`) carries no `G` term, so a conductance change never
-enters the history. On a trapezoidal build with a `.switch` or a knob `.pot`,
-each `set_switch_*` / `set_pot_*` call arms **breakpoint-BE**
-(`SolverConfig::breakpoint_be`, `BREAKPOINT_BE_SAMPLES = 1`): the next sample
-is solved on the backward-Euler matrices. That sample does not read the
-carried `q_dot` (capacitor currents built on the old component values),
-re-seeds it from its own capacitor currents, and damps the mode the step
-excited; trap resumes on the sample after. Exactly one sample — a second one
-over-damps. `.runtime R` does not arm it. Whether breakpoint-BE still earns
-its keep under the charge form is pending re-measurement (`STATUS.md` Pending
-Work).
+enters the history, and a pot move or a resistor-only switch flip is exact on
+the next sample with no special handling (a capless node's two-node residual
+stays below 1e-9). A switch that swaps a capacitor or an inductor is
+different: the carried `q_dot` was built on the old value. Its `set_switch_*`
+arms **breakpoint-BE** (`SolverConfig::breakpoint_be`,
+`BREAKPOINT_BE_SAMPLES = 1`): the next sample is solved on the backward-Euler
+matrices, which do not read `q_dot` and re-seed it from their own capacitor
+currents; trap resumes on the sample after. Exactly one sample — a second one
+over-damps. Pots and `.runtime R` never arm it: on a knob sweep against
+converged ngspice, arming it on every pot move cost 0.1059 % against 0.0057 %
+without (5 Hz sweep).
 
 For preset recalls, MIDI program changes, or any *unsmoothed* large R
 jump, callers should follow with `recompute_dc_op()`:

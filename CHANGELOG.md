@@ -617,6 +617,17 @@ generated state is smaller.
   circuits were judged against a program 20 dB louder than the real one. The
   reference is now the smaller of that and the output's own excursion from
   its operating point. Golden renders are identical.
+- **A pot move or a resistor-switch flip no longer spends a sample on
+  backward Euler.** Every `set_pot_*` and `set_switch_*` routed the next
+  sample through the backward-Euler matrices, a fix for a double-counted
+  conductance that the charge form no longer has. On a knob sweep that cost
+  first-order accuracy on every move: against a converged ngspice reference,
+  a diode stage whose resistor is swept at 5 Hz read 0.106 % error with it and
+  0.006 % without (0.078 % and 0.014 % at 50 Hz). A switch that swaps a
+  capacitor or an inductor still gets the one backward-Euler sample, since
+  the carried capacitor current was built on the old value. Generated code
+  for decks with only pots or resistor switches no longer carries the
+  breakpoint machinery.
 - **`melange validate` compares on the clock it asked for.** The reference's
   sample rate was inferred from ngspice's printed times, which carry seven
   significant digits (48000.0077 Hz for 48 kHz), so the render was resampled

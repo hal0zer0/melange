@@ -169,12 +169,13 @@ fn a_pinned_render_converges_to_the_high_rate_render() {
 }
 
 /// A linear (M=0) inverting stage railing at +/-9 V, capacitor-coupled to its
-/// load, with a pot so the breakpoint machinery is emitted. Linear circuits
+/// load, with a switched capacitor so the breakpoint machinery is emitted
+/// (a reactance change is what arms it). Linear circuits
 /// have their own solve on each sub-path; the rail resolve there must run on
 /// the breakpoint sample's own (BE) matrices.
 const LINEAR_RAILING: &str = "linear inverting stage railing into a cap-coupled load\n\
 R_in in nm 10k\nR_f nm oa 100k\nU1 0 nm oa OA1\nC_c oa y 1u\nR_y y out 1k\n\
-C_y out 0 10n\nR_l out 0 100k\n.pot R_l 50k 200k\n.model OA1 OA(AOL=200000 VCC=9 VEE=-9)\n";
+C_y out 0 10n\nR_l out 0 100k\n.switch C_y 10n 22n \"Cy\"\n.model OA1 OA(AOL=200000 VCC=9 VEE=-9)\n";
 
 /// Render 0.25 s of a 1 kHz, 2 V sine from `reset()` at the baked DC OP, printing
 /// `out`. `force_be` solves every sample on the breakpoint path.

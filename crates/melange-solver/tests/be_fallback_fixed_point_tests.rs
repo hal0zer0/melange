@@ -33,7 +33,11 @@ use melange_solver::parser::Netlist;
 /// One triode stage with a switched grid-side resistor. The anode carries no
 /// capacitor to ground, so it lies in `null(C)` and rings at exactly `z = -1`
 /// under trap once anything kicks it. Mirrors the B20b stage of
-/// philicorda-voicing-coupled (Ra 47k, Rk 1k bypassed, +250 V rail).
+/// philicorda-voicing-coupled (Ra 47k, Rk 1k bypassed, +250 V rail). The switch
+/// also swaps a small grid capacitor: under the charge form only a reactance
+/// change arms breakpoint-BE, and the flip must still take one BE sample for
+/// these tests to exercise it. A capacitance change does not move the DC
+/// operating point, so the fixed-point premise is unchanged.
 const SWITCHED_TRIODE: &str = "\
 Triode stage with switched grid divider
 VHT hp 0 DC 250
@@ -44,7 +48,8 @@ T1 g anode cath ECC83
 Rin in g1 100k
 Rsw g1 g 0.01
 Rg g 0 27k
-.switch Rsw 0.01 1e9 \"SK\"
+Cg g 0 10p
+.switch Rsw,Cg 0.01/10p 1e9/20p \"SK\"
 .model ECC83 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)
 ";
 
