@@ -3,7 +3,8 @@
 //! `codegen::ring` decides it on the charge propagator linearised at the DC
 //! operating point: promote on a lasting Nyquist-side pole (still above
 //! −60 dB after 10 ms) whose input-to-output residue is at least −60 dB of
-//! the passband gain, or on growth that backward Euler removes. The verdict
+//! the passband gain AND louder than backward Euler's own worst in-band
+//! change of the response, or on growth that backward Euler removes. The verdict
 //! is recorded in the IR (`integration_reason`) and in the provenance JSON.
 
 mod support;
@@ -80,8 +81,64 @@ fn a_linear_stiff_node_is_promoted() {
     assert_eq!(m, 0);
     assert_eq!(provenance_source(&code), "auto-promoted");
     assert!(
-        code.contains("rings from the input at fs/2: backward Euler"),
+        code.contains(
+            "rings from the input at fs/2, louder than backward Euler's own in-band change"
+        ),
         "the verdict is recorded"
+    );
+}
+
+/// An output transformer (k = 0.999) driven through 100 kOhm, at 192 kHz: a
+/// stiff mode rings at -56.2 dB of the passband, above the -60 dB threshold,
+/// but backward Euler would change the in-band response by -43.3 dB (its
+/// first-order error at the primary's 318 Hz corner). A ring quieter than
+/// backward Euler's own damage stays trapezoidal: promoting it made the
+/// 1 kHz response 28x less accurate (0.463 % against 0.0165 % vs ngspice).
+const TRANSFORMER: &str = "output transformer
+Ra in top 100k
+R_pri top lo 500
+L_pri lo 0 50
+L_sec sl 0 0.78
+R_sec sl sec 50
+K1 L_pri L_sec 0.999
+Cout sec out 100n
+Rload out 0 1Meg
+";
+
+#[test]
+fn a_ring_quieter_than_backward_eulers_cost_stays_trapezoidal() {
+    let config = support::config_for_spice(TRANSFORMER, 192000.0);
+    let (code, _, _) = support::generate_circuit_code_nodal(TRANSFORMER, &config);
+    assert_eq!(provenance_source(&code), "trap");
+    assert!(
+        code.contains(
+            "at or above the -60 dB ring threshold but quieter than backward Euler's own \
+             in-band change"
+        ),
+        "the verdict is recorded"
+    );
+}
+
+/// A BJT Schmitt trigger (emitter-coupled) at 192 kHz: its stiff mode rings
+/// at -15 dB of the passband, and backward Euler would change the
+/// small-signal response by +1.5 dB, more than the passband itself: the
+/// linearisation at a regenerative circuit's operating point is
+/// near-marginal, and says nothing about its switching edges. The cost
+/// comparison does not hold there; the ring threshold decides, and says so.
+/// (Kept trapezoidal, the switching thresholds were 0.05 V off ngspice's.)
+const SCHMITT: &str = "BJT Schmitt trigger\nVcc vcc 0 DC 12\nE1 bx 0 in 0 1\nVb b1 bx DC 3\n\
+Rb1 b1 base1 1k\nQ1 c1 base1 e NX\nRc1 vcc c1 4.7k\nR1 c1 base2 10k\nR2 base2 0 10k\n\
+Q2 out base2 e NX\nRc2 vcc out 2.2k\nRe e 0 1k\nCm out 0 100p\n\
+.model NX NPN(IS=1e-14 BF=200 VAF=100 CJE=5p CJC=3p TF=0.4n)\n";
+
+#[test]
+fn a_regenerative_circuit_falls_back_to_the_ring_threshold_and_says_so() {
+    let config = support::config_for_spice(SCHMITT, 192000.0);
+    let (code, _, _) = support::generate_circuit_code_nodal(SCHMITT, &config);
+    assert_eq!(provenance_source(&code), "auto-promoted");
+    assert!(
+        code.contains("The small-signal comparison is not valid here"),
+        "the fallback is announced"
     );
 }
 

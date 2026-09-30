@@ -44,11 +44,15 @@ const CLIPPER: &str = "diode clipper\nR1 in mid 1k\nC1 mid 0 10n\nD1 mid out DX\
                        .model DX D(IS=2.52n N=1.752 RS=0.568 CJO=4p TT=20n)\n";
 
 /// A common-emitter stage whose nodal build expands RB, RC and RE into
-/// internal nodes (driven 0.3 V, into clipping).
+/// internal nodes (driven 0.3 V, into clipping). Pinned to backward Euler,
+/// the scheme this witness was built and gated under: the ring rule now keeps
+/// it trapezoidal (its -49 dB ring is quieter than backward Euler's -26 dB
+/// in-band change), and under trapezoidal its stiff mode leaves the 64x/256x
+/// reference 6.6 % of the T/2 error apart, outside the 5 % the gate needs.
 const CE: &str = "parasitic-RB common emitter\n\
 Vcc vcc 0 DC 9\nC_in in b 1u\nR_b1 vcc b 100k\nR_b2 b 0 22k\nQ1 c b e NPN1\n\
 R_c vcc c 4.7k\nR_e e 0 1k\nC_e e 0 10u\nC_o c out 1u\nR_l out 0 100k\n\
-.model NPN1 NPN(IS=1e-14 BF=200 RB=100 RC=10 RE=1 CJE=10p CJC=5p)\n";
+.model NPN1 NPN(IS=1e-14 BF=200 RB=100 RC=10 RE=1 CJE=10p CJC=5p)\n.integrator be\n";
 
 /// The integrator a build solves under; the comparison builds are pinned to
 /// the rescued build's, since the ladder's sub-steps run under it.

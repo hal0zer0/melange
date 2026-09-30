@@ -1728,11 +1728,23 @@ impl CircuitIR {
             // One plain sentence by default; the eigenvalue detail is for
             // whoever asks for it. A first-time user sees this on a five-line
             // diode clipper and needs to know whether to act (they do not).
+            let cost = match (&verdict.be_error, &verdict.trap_error) {
+                (Some(be), Some(tr)) => format!(
+                    "It changes the in-band response by up to {:.2} % of the passband level at \
+                     {:.0} Hz ({:.1} dB), where the trapezoidal rule would change it by {:.3} % \
+                     ({:.1} dB)",
+                    100.0 * be.rel,
+                    be.hz,
+                    be.db(),
+                    100.0 * tr.rel,
+                    tr.db()
+                ),
+                _ => "Its in-band cost was not evaluated".to_string(),
+            };
             crate::diag_warn!(
                 "Using backward Euler integration: the trapezoidal rule would ring or grow at \
-                 Nyquist on this circuit. BE is stable, at the cost of slightly damping the top \
-                 octave (oversampling reduces that). No action needed; RUST_LOG=info for the \
-                 numbers."
+                 Nyquist on this circuit, louder than backward Euler's own error. {cost}; \
+                 oversampling reduces both. RUST_LOG=info for the numbers."
             );
             log::info!("Auto-enabling backward Euler: {reason}");
             let mut config_be = config.clone();

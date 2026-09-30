@@ -573,6 +573,21 @@ generated state is smaller.
   variable-mu law, at an operating point solved without it. A nonzero value is
   now refused. Variable-mu stays modelled for pentodes and beam tetrodes; no
   deck set these keys on a triode.
+- **Automatic backward Euler weighed only the trapezoidal ring, never its
+  own cost**: a build was promoted whenever a stiff mode rang at −60 dB of
+  the passband, however much accuracy backward Euler (first order) then
+  lost in band. Raising the sample rate lifts such a residue, so an output
+  transformer crossed −60 dB at 192 kHz and was switched to an integrator
+  28× less accurate at 1 kHz. Promotion now also requires the ring to be
+  louder than backward Euler's own worst in-band change of the response,
+  computed on the same small-signal system, and the notice states both
+  integrators' in-band change instead of "slightly damping the top octave".
+  The comparison holds only where backward Euler's change is under 10 % of
+  the passband; on a regenerative circuit (an astable, a Schmitt trigger)
+  the linearisation is near-marginal and the ring threshold decides, as
+  before, and the reason says which rule decided. Four corpus decks return
+  to trapezoidal (twill-deluxe against ngspice: 0.76 % → 0.16 %); two stay
+  on backward Euler.
 - **`melange validate`'s reference is driven by the continuous stimulus, not
   a PWL of melange's samples**: linear interpolation at the sample rate
   carries images around every multiple of it, which a deck whose gain rises

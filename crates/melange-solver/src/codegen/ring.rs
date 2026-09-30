@@ -67,6 +67,14 @@ pub const RING_PERSISTENCE_SECONDS: f64 = 0.01;
 /// A ring whose modal residue, relative to the passband gain, is at or above
 /// this starts loud (−60 dB).
 pub const RING_RESIDUE_REL: f64 = 1e-3;
+/// The cost comparison (ring against backward Euler's in-band change) holds
+/// only where backward Euler's change is a genuine perturbation of the
+/// small-signal response: under 10 % of the passband (−20 dB). Stated, not
+/// derived. Above it the linearisation is near-marginal (typical of
+/// regenerative circuits at their DC operating point: any `s`-mapping moves
+/// the response by more than the passband itself), says nothing about what
+/// happens on switching edges, and the ring threshold alone decides.
+pub const BE_COMPARISON_VALID_REL: f64 = 0.1;
 /// Lower edge of the band the passband gain is averaged over, Hz.
 pub const PASSBAND_LO_HZ: f64 = 20.0;
 /// Upper edge of the passband-gain band, Hz.
@@ -169,6 +177,28 @@ pub struct RingVerdict {
     /// A pole at `z = −1` exactly (to 1e-12): an index-2 structure. It rings
     /// forever under trapezoidal integration at every rate.
     pub index2: bool,
+    /// Backward Euler's worst in-band change of the response, the cost a
+    /// promotion pays; evaluated when the decision needs it (a ring at or
+    /// above the threshold, or growth).
+    pub be_error: Option<InbandError>,
+    /// The same for the trapezoidal rule, for the notice.
+    pub trap_error: Option<InbandError>,
+}
+
+/// An integration rule's worst in-band change of the small-signal response:
+/// `max |H_rule(e^{jωT}) − H(jω)|` over 20 Hz to min(20 kHz, 0.45·fs),
+/// relative to the passband gain, the currency the ring level is in.
+#[derive(Debug, Clone, Copy)]
+pub struct InbandError {
+    pub rel: f64,
+    /// Where the worst change is, Hz.
+    pub hz: f64,
+}
+
+impl InbandError {
+    pub fn db(&self) -> f64 {
+        20.0 * self.rel.max(1e-300).log10()
+    }
 }
 
 impl RingVerdict {
@@ -210,8 +240,37 @@ impl RingVerdict {
                     r.tau_s,
                     r.residue_db(),
                 );
-                if self.promote {
-                    format!("{mode}; rings from the input at fs/2: backward Euler")
+                let costs = match (&self.be_error, &self.trap_error) {
+                    (Some(be), Some(tr)) => format!(
+                        "; backward Euler would change the in-band response by up to {:.1} dB \
+                         rel the passband ({:.0} Hz), trapezoidal by {:.1} dB ({:.0} Hz)",
+                        be.db(),
+                        be.hz,
+                        tr.db(),
+                        tr.hz
+                    ),
+                    _ => String::new(),
+                };
+                let comparison_valid = self
+                    .be_error
+                    .is_some_and(|be| be.rel <= BE_COMPARISON_VALID_REL);
+                if self.promote && !comparison_valid && self.be_error.is_some() {
+                    format!(
+                        "{mode}; rings from the input at fs/2{costs}. The small-signal \
+                         comparison is not valid here (backward Euler's change is not a \
+                         perturbation: a near-marginal linearisation, typical of regenerative \
+                         circuits), so the ring threshold decides: backward Euler"
+                    )
+                } else if self.promote {
+                    format!(
+                        "{mode}; rings from the input at fs/2, louder than backward Euler's own \
+                         in-band change{costs}: backward Euler"
+                    )
+                } else if r.residue_rel >= RING_RESIDUE_REL {
+                    format!(
+                        "{mode}; at or above the -60 dB ring threshold but quieter than backward \
+                         Euler's own in-band change{costs}: trapezoidal"
+                    )
                 } else {
                     format!(
                         "{mode}; below the -60 dB ring threshold: trapezoidal. A single event \
@@ -510,6 +569,83 @@ fn gain_at(g: &[f64], c: &[f64], n: usize, inp: (usize, f64), out: usize, f: f64
     x[out].abs()
 }
 
+/// `H(s)` from input port `inp` to output `out` of the linearised network,
+/// `(G + s·C)⁻¹` at the output row, driven by the port's source conductance.
+fn response_at(
+    g: &[f64],
+    c: &[f64],
+    n: usize,
+    inp: (usize, f64),
+    out: usize,
+    s: Complex,
+) -> Complex {
+    let mut m: Vec<Complex> = g
+        .iter()
+        .zip(c)
+        .map(|(&gv, &cv)| Complex::real(gv) + s * cv)
+        .collect();
+    let mut b = vec![Complex::ZERO; n];
+    b[inp.0] = Complex::real(inp.1);
+    let piv = eigen::lu_factor(&mut m, n, 1e-300);
+    let x = eigen::lu_solve(&m, &piv, n, &b);
+    x[out]
+}
+
+/// An integration rule as the `s` it substitutes at `z = e^{jωT}`.
+#[derive(Clone, Copy)]
+enum Rule {
+    BackwardEuler,
+    Trapezoidal,
+}
+
+impl Rule {
+    fn s(self, w: f64, t: f64) -> Complex {
+        // z^-1 = e^{-jωT}
+        let zi = Complex::new((w * t).cos(), -(w * t).sin());
+        let one = Complex::real(1.0);
+        match self {
+            Rule::BackwardEuler => (one - zi) * (1.0 / t),
+            Rule::Trapezoidal => (one - zi) / (one + zi) * (2.0 / t),
+        }
+    }
+}
+
+/// The rule's worst in-band change of the response over every input/output
+/// pair, relative to that pair's passband gain `pbs`.
+fn inband_error(
+    sys: &RingSystem,
+    g: &[f64],
+    c: &[f64],
+    pbs: &[Vec<f64>],
+    rule: Rule,
+) -> InbandError {
+    const POINTS: usize = 481;
+    let t = 1.0 / sys.rate;
+    let hi = PASSBAND_HI_HZ.min(0.45 * sys.rate);
+    let (l0, l1) = (PASSBAND_LO_HZ.log10(), hi.log10());
+    let mut worst = InbandError { rel: 0.0, hz: 0.0 };
+    for k in 0..POINTS {
+        let f = 10f64.powf(l0 + (l1 - l0) * k as f64 / (POINTS - 1) as f64);
+        let w = 2.0 * std::f64::consts::PI * f;
+        let s_rule = rule.s(w, t);
+        for (ii, &inp) in sys.inputs.iter().enumerate() {
+            for (oi, &out) in sys.outputs.iter().enumerate() {
+                let pb = pbs[ii][oi];
+                if !(pb.is_finite() && pb > 0.0) {
+                    continue;
+                }
+                let exact = response_at(g, c, sys.n, inp, out, Complex::new(0.0, w));
+                let discrete = response_at(g, c, sys.n, inp, out, s_rule);
+                let rel = (discrete - exact).abs() / pb;
+                if rel > worst.rel {
+                    worst = InbandError { rel, hz: f };
+                }
+            }
+        }
+    }
+    worst
+}
+
 /// The passband gain: the pink-weighted RMS gain,
 /// `sqrt(mean |H|²)` over a 481-point log-spaced grid from
 /// [`PASSBAND_LO_HZ`] to [`PASSBAND_HI_HZ`] — the output RMS for a unit
@@ -693,11 +829,34 @@ pub fn analyze(sys: &RingSystem) -> Result<RingVerdict, RingError> {
     ring_modes.sort_by(|a, b| b.residue_rel.total_cmp(&a.residue_rel));
 
     let rho_be = if growth { Some(rho_be(sys)?) } else { None };
+    // What each integrator would cost in band, on the same small-signal
+    // system and in the same currency as the ring level: evaluated where the
+    // decision (or the notice) needs it.
+    let loud_ring = ring_modes
+        .first()
+        .is_some_and(|r| r.residue_rel >= RING_RESIDUE_REL);
+    let (be_error, trap_error) = if loud_ring || growth {
+        (
+            Some(inband_error(sys, &g, &c, &pbs, Rule::BackwardEuler)),
+            Some(inband_error(sys, &g, &c, &pbs, Rule::Trapezoidal)),
+        )
+    } else {
+        (None, None)
+    };
+    // A ring promotes only when trapezoidal's artefact is louder than the
+    // damage backward Euler would do in band, where that comparison holds
+    // (BE_COMPARISON_VALID_REL). Growth still promotes unconditionally when
+    // backward Euler removes it.
     let promote = match rho_be {
         Some(rb) => rb <= BE_POST_PROMOTION_LIMIT,
-        None => ring_modes
-            .first()
-            .is_some_and(|r| r.residue_rel >= RING_RESIDUE_REL),
+        None => ring_modes.first().is_some_and(|r| {
+            r.residue_rel >= RING_RESIDUE_REL
+                && be_error.is_none_or(|be| {
+                    // The comparison, where it holds; the threshold alone
+                    // where it does not (announced in the reason).
+                    be.rel > BE_COMPARISON_VALID_REL || r.residue_rel > be.rel
+                })
+        }),
     };
     // Poles that can ring at fs/2 at host rates down to fs/4: map each
     // non-algebraic eigenvalue back through the bilinear transform,
@@ -733,6 +892,8 @@ pub fn analyze(sys: &RingSystem) -> Result<RingVerdict, RingError> {
         passband_gain,
         ring_poles,
         index2,
+        be_error,
+        trap_error,
     })
 }
 

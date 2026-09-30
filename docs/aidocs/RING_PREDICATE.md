@@ -19,7 +19,26 @@ promote to BE  iff  growth: rho(P) > 1.002, and backward Euler removes it
                       Re z < 0                                  (Nyquist side)
                       |z|^(0.01·fs) >= 1e-3                     (still above −60 dB after 10 ms: it lasts)
                       |residue from the input| >= 1e-3 · H_pink        (it starts loud: −60 dB)
+                      |residue from the input| >  E_BE                 (louder than BE's own damage)
+                        — the last condition only where E_BE <= 0.1 (−20 dB)
 ```
+
+- `E_BE` is backward Euler's worst in-band change of the response, in the
+  same currency: `max |H_BE(e^{jωT}) − H(jω)| / H_pink` over the passband
+  grid below `min(20 kHz, 0.45·fs)`, on the same linearised system
+  ("Backward Euler's cost", below). A ring promotes only when trapezoidal's
+  artefact is louder than the damage backward Euler would do.
+- The comparison holds only where backward Euler's change is a genuine
+  perturbation of the small-signal response, `E_BE <= 0.1` (−20 dB,
+  `BE_COMPARISON_VALID_REL`, stated, not derived). A regenerative circuit's
+  linearisation at its DC operating point has near-marginal in-band poles:
+  any `s`-mapping then moves the response by more than the passband itself
+  (a PNP astable: `E_BE` +13 dB, `E_trap` +17.6 dB; a BJT Schmitt trigger at
+  192 kHz: `E_BE` +1.5 dB), which says nothing about its switching edges.
+  There the ring threshold alone decides, and the reason says so ("the
+  small-signal comparison is not valid here"). Kept trapezoidal by the
+  comparison, the astable blew up and the Schmitt thresholds were 0.05 V
+  off ngspice's.
 
 - `P` is the trapezoidal **charge propagator** (below) linearised at the DC
   operating point, at the internal (oversampled) rate.
@@ -54,6 +73,36 @@ knowable at compile time. It belongs to the runtime BE-latch
 (`STATUS.md`, "Runtime BE-latch"), which measures actual output alternation.
 A ring driven by the solver's own accepted Newton residual is a solver
 defect, fixed at the residual, and is not a routing criterion.
+
+## Backward Euler's cost
+
+Backward Euler is first order: its in-band error is `O(ωT/2)`, about 1.6 %
+in `s` at 1 kHz at 192 kHz, and it shows at full size near any in-band pole.
+Under the ring rule alone that produced a perverse route: raising the
+sample rate lifts a stiff mode's residue about 6 dB per octave, so an output
+transformer (k = 0.999, 100 kΩ into a 50 H primary) crossed −60 dB at
+192 kHz and was switched to an integrator 28× less accurate in band (0.463 %
+against 0.0165 % vs ngspice at 1 kHz; the error is BE's at the primary's
+318 Hz corner, reproduced on a bare RL: −0.470 % computed, 0.459 %
+measured).
+
+`ring::inband_error` evaluates, on the linearised `(G_l, C_l)`, input
+column and output row the ring rule uses, over the 481-point log grid from
+20 Hz to `min(20 kHz, 0.45·fs)`:
+
+```
+H(jω)                      the continuous response
+H(s_BE),   s_BE   = (1 − z⁻¹)/T              at z = e^{jωT}
+H(s_trap), s_trap = (2/T)(1 − z⁻¹)/(1 + z⁻¹)
+E_rule = max |H(s_rule) − H(jω)| / H_pink    (and the frequency where it is)
+```
+
+It is exact for the small-signal path (both rules are exactly those
+substitutions on a linear system) and costs one complex `N`-solve per point.
+It runs only where the decision or the notice needs it (a ring at or above
+−60 dB, or growth). Both numbers go into `integration_reason` (so the
+provenance) and into the backward-Euler notice, which states BE's worst
+in-band change and the trapezoidal rule's.
 
 ## The operator
 
@@ -139,21 +188,34 @@ promoting pole, and there it is the LAPACK reference that is off: 50-digit
 arithmetic gives −0.9961868486952391, `eigen.rs` −0.9961868486952, numpy
 −0.9961868482626 (its `inv(A)`, condition 5e8, is the less accurate of the two).
 
-## Corpus verdict (2026-09-29, 42 decks, internal rate)
+## Corpus verdict (2026-09-30, circuits corpus + golden decks, internal rate)
 
-Decks with a lasting Nyquist-side pole; every other deck has none:
+Decks whose loudest lasting pole is at or above −60 dB (every other deck
+stays trapezoidal on the threshold alone):
 
-| Deck | Loudest lasting pole | Input residue (rel H_pink) | Verdict |
+| Deck | Input residue (rel H_pink) | BE's in-band change | Verdict |
 |---|---|---|---|
-| noyce-amp-at-idle | −0.99033 (τ 2 ms) | −39.3 dB | BE |
-| sat-core-open | −0.99619 (τ 5 ms) | −48.2 dB | BE |
-| noyce-transformer-triode | −0.99997 (τ 0.70 s) | −77.7 dB | trap |
-| wurli-power-amp | −0.99896 | −105.0 dB | trap |
-| passive-eq1a | −0.98655 | −119.2 dB | trap |
-| steve-1073-preamp | −0.99082 | −120.6 dB | trap |
-| noyce-tape-head | −0.99985 | −168.0 dB | trap |
-| basic-bitch, sad-bastard | −0.99994 | < −190 dB | trap |
-| champ-5f1, sat-core-loaded, noyce-smps-ripple | −1 (index-2) | < −200 dB | trap |
+| axe-15 | −36.5 dB | −35.9 dB | trap (was BE) |
+| noyce-amp-at-idle | −39.3 dB | −37.8 dB | trap (was BE) |
+| twill-deluxe | −43.2 dB | −37.0 dB | trap (was BE) |
+| kt88-pp-stage | −44.3 dB | −42.4 dB | trap (was BE) |
+| gold-press-overdrive | −43.7 dB | −46.6 dB | BE |
+| sat-core-open | −48.2 dB | −49.8 dB | BE |
+
+Against ngspice driven by the analytic 1 kHz sine at 48 kHz, BE → trap:
+twill-deluxe 0.76 % → 0.16 %; kt88-pp-stage 0.18 % → 0.19 %;
+noyce-amp-at-idle 2.32 % → 2.43 % (its 1× error is the input
+discretization, either way); axe-15 has no reference (ngspice aborts). A
+1 kHz tone misses where BE's worst change sits (up to 20 kHz), so these
+tone numbers understate what the route change fixes; the golden render of
+noyce-amp-at-idle moved +0.06 dB across the band (BE's damping removed).
+
+Earlier table (2026-09-29, the threshold alone): noyce-amp-at-idle −39.3 dB
+BE; sat-core-open −48.2 dB BE; noyce-transformer-triode −77.7 dB,
+wurli-power-amp −105.0 dB, passive-eq1a −119.2 dB, steve-1073-preamp
+−120.6 dB, noyce-tape-head −168.0 dB, basic-bitch and sad-bastard
+< −190 dB, champ-5f1 / sat-core-loaded / noyce-smps-ripple (index-2)
+< −200 dB: trap.
 
 No deck grows at its DC operating point (largest ρ = 1 to rounding: the
 index-2 and DC modes). The three candidate passband gains give the same
