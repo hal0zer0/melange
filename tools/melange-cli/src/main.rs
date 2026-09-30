@@ -394,7 +394,8 @@ enum Commands {
         #[arg(long, value_name = "PCT")]
         rms_tolerance: Option<f64>,
 
-        /// Override peak-error tolerance, in volts (absolute).
+        /// Override peak-error tolerance, in volts (absolute). Without it the
+        /// default profile's bound is 1 % of the reference's peak (floor 1 µV).
         #[arg(long, value_name = "V")]
         peak_tolerance: Option<f64>,
 
@@ -2399,6 +2400,18 @@ fn compile_circuit_source(
     Ok(())
 }
 
+/// `melange validate`'s stimulus: a sine at this frequency.
+const VALIDATE_STIMULUS_HZ: f64 = 1000.0;
+/// Stimulus periods left out of every metric at the start of a validate render.
+const VALIDATE_SETTLE_PERIODS: f64 = 20.0;
+/// The default profile's peak bound, relative to the reference's peak over the
+/// compared window. A stated bound (a 1 % peak error on the reference's own
+/// scale), not a derived one. Measured 2026-09-29 over 85 local-corpus decks,
+/// both sides with the settle window, against the absolute 20 mV: +2 passes, 0
+/// regressions, the nearest passing deck at 0.90 %; at 0.5 %, +1 pass and 3
+/// regressions (decks at 0.59-0.77 %).
+const VALIDATE_PEAK_RELATIVE: f64 = 0.01;
+
 /// Optional per-metric tolerance overrides from the CLI, applied on top of the
 /// --relaxed/strict base profile. `None` fields keep the profile value.
 #[derive(Default)]
@@ -2570,6 +2583,18 @@ fn validate_circuit_source(
             }
         };
 
+    // The first VALIDATE_SETTLE_PERIODS stimulus periods are left out of every
+    // metric: the sine starts at t = 0 with a step in its derivative, and the
+    // two engines' onset transients differ on a scale set by the stimulus.
+    let settle_time_s = VALIDATE_SETTLE_PERIODS / VALIDATE_STIMULUS_HZ;
+    if settle_time_s >= duration {
+        anyhow::bail!(
+            "--duration {duration} s is inside the settle window ({VALIDATE_SETTLE_PERIODS} \
+             periods of the {VALIDATE_STIMULUS_HZ} Hz stimulus = {settle_time_s} s), so nothing \
+             would be compared; use a longer --duration"
+        );
+    }
+
     // Step 3: Generate test input signal (1kHz sine)
     println!(
         "Step 3: Generating test signal ({:.1}s, {:.3}V amplitude, 1kHz sine)...",
@@ -2577,7 +2602,10 @@ fn validate_circuit_source(
     );
     let num_samples = (duration * sample_rate) as usize;
     let input_signal: Vec<f64> = (0..num_samples)
-        .map(|i| amplitude * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / sample_rate).sin())
+        .map(|i| {
+            amplitude
+                * (2.0 * std::f64::consts::PI * VALIDATE_STIMULUS_HZ * i as f64 / sample_rate).sin()
+        })
         .collect();
     println!("  {} samples", input_signal.len());
 
@@ -2597,8 +2625,13 @@ fn validate_circuit_source(
     if let Some(pct) = tol.rms_pct {
         config.rms_error_tolerance = pct / 100.0;
     }
-    if let Some(v) = tol.peak_v {
-        config.peak_error_tolerance = v;
+    config.settle_time_s = settle_time_s;
+    // With no --peak-tolerance, the default profile's peak bound is relative
+    // to the reference (an explicit tolerance, and --relaxed, stay absolute).
+    match tol.peak_v {
+        Some(v) => config.peak_error_tolerance = v,
+        None if !relaxed => config.peak_error_relative = Some(VALIDATE_PEAK_RELATIVE),
+        None => {}
     }
     if let Some(pct) = tol.max_rel_pct {
         config.max_relative_tolerance = pct / 100.0;

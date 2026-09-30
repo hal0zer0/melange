@@ -521,6 +521,20 @@ generated state is smaller.
   (compile, simulate, analyze, dc-op) builds it anyway. No circuit in the
   regression corpus is affected.
 
+- **`melange validate` leaves the start-up out and scales its default peak
+  gate to the circuit.** The first 20 periods of the 1 kHz stimulus (20 ms)
+  are excluded from every metric and from the alignment fit: the sine starts
+  with a step in its derivative, and the two engines' onset transients are not
+  what the comparison is for. A `--duration` inside that window is refused.
+  Without `--peak-tolerance`, the peak bound is 1 % of the reference's peak
+  (floor 1 µV) instead of a fixed 20 mV, so a 40 V output is not held to the
+  bound of a 100 mV one, and a 1 mV output is no longer excused an error
+  twenty times its size. `--peak-tolerance` and `--relaxed` stay absolute.
+  The 1 % is a stated bound, not a derived one. Over 85 local-corpus decks the
+  window alone turns two failures into passes (both onset-only), and the
+  relative bound two more, with no pass turned into a failure; five decks that
+  already failed now fail the peak gate too.
+
 - **`melange dc-op` needs an input port, like `compile`.** It solved the bias
   point with no input port when the deck had no node named `in`; no build has
   that circuit (every build stamps its input's source impedance). A deck

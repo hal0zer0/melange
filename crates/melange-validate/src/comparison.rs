@@ -180,7 +180,18 @@ pub struct ComparisonConfig {
     /// explicit per test — each test that wants an exclusion must opt in
     /// with a window it can justify against its own signal length.
     pub settle_time_s: f64,
+    /// When `Some(k)`, the peak gate is relative to the reference's own scale:
+    /// the tolerance is `max(k * ref_peak, 1 µV)`, `ref_peak` taken over the
+    /// compared window, and `peak_error_tolerance` is ignored. The resolved
+    /// bound is what the report's `config.peak_error_tolerance` carries.
+    ///
+    /// `None` (every built-in profile) keeps the absolute bound.
+    pub peak_error_relative: Option<f64>,
 }
+
+/// The floor of a relative peak tolerance, so a silent reference does not
+/// demand an exact zero.
+pub const PEAK_RELATIVE_FLOOR_V: f64 = 1e-6;
 
 impl Default for ComparisonConfig {
     fn default() -> Self {
@@ -201,6 +212,7 @@ impl Default for ComparisonConfig {
             thd_error_tolerance_db: 1.5,  // 1.5 dB
             skip_thd: false,
             settle_time_s: 0.0,
+            peak_error_relative: None,
         }
     }
 }
@@ -216,6 +228,7 @@ impl ComparisonConfig {
             thd_error_tolerance_db: 0.1, // 0.1 dB
             skip_thd: false,
             settle_time_s: 0.0,
+            peak_error_relative: None,
         }
     }
 
@@ -229,6 +242,7 @@ impl ComparisonConfig {
             thd_error_tolerance_db: 3.0, // 3 dB
             skip_thd: false,
             settle_time_s: 0.0,
+            peak_error_relative: None,
         }
     }
 }
@@ -581,12 +595,17 @@ pub fn compare_signals(
         return empty_report("Empty signals".to_string());
     }
     if settle_skip >= len {
-        return empty_report(format!(
+        // A signal cut short is the defect to report, not the window.
+        let mut report = empty_report(format!(
             "Settle window ({} samples, {:.1} ms) consumes the entire signal ({} samples)",
             settle_skip,
             config.settle_time_s * 1000.0,
             len
         ));
+        if let Some(f) = length_failure {
+            report.failures.insert(0, f);
+        }
+        return report;
     }
 
     let ref_slice = &reference.samples[settle_skip..len];
@@ -633,6 +652,13 @@ pub fn compare_signals(
     //    peak_error, which stay strictly pointwise.
     const MAX_REL_ALIGN_WINDOW: usize = 2;
     let ref_peak = ref_slice.iter().map(|r| r.abs()).fold(0.0_f64, f64::max);
+    // A relative peak gate resolves to an absolute bound on this window; the
+    // report carries the resolved bound.
+    let mut resolved = *config;
+    if let Some(k) = config.peak_error_relative {
+        resolved.peak_error_tolerance = (k * ref_peak).max(PEAK_RELATIVE_FLOOR_V);
+    }
+    let config = &resolved;
     let max_aligned_abs_error = act_slice
         .iter()
         .enumerate()
@@ -1333,5 +1359,74 @@ mod tests {
             report.correlation_coefficient
         );
         assert!(!report.passed, "flatlined actual must fail");
+    }
+
+    #[test]
+    fn a_relative_peak_gate_scales_with_the_reference() {
+        // A 10 V sine with a single-sample error: 50 mV fails the 20 mV
+        // absolute default but is inside 1 % of the reference's 10 V peak;
+        // 150 mV is outside it. The report carries the resolved bound.
+        let fs = 48000.0;
+        let reference: Vec<f64> = (0..4800)
+            .map(|i| 10.0 * (2.0 * PI * 1000.0 * i as f64 / fs).sin())
+            .collect();
+        let with_error = |e: f64| {
+            let mut a = reference.clone();
+            a[2400] += e;
+            Signal::new(a, fs, "actual")
+        };
+        let r = Signal::new(reference.clone(), fs, "reference");
+        let absolute = ComparisonConfig {
+            skip_thd: true,
+            ..ComparisonConfig::default()
+        };
+        let relative = ComparisonConfig {
+            peak_error_relative: Some(0.01),
+            ..absolute
+        };
+        assert!(!compare_signals(&r, &with_error(0.05), &absolute).passed);
+        let inside = compare_signals(&r, &with_error(0.05), &relative);
+        assert!(inside.passed, "{:?}", inside.failures);
+        assert!((inside.config.peak_error_tolerance - 0.1).abs() < 1e-9);
+        let outside = compare_signals(&r, &with_error(0.15), &relative);
+        assert!(
+            outside.failures.iter().any(|f| f.starts_with("Peak error")),
+            "{:?}",
+            outside.failures
+        );
+    }
+
+    #[test]
+    fn a_relative_peak_gate_has_a_floor() {
+        // A silent reference resolves to the 1 µV floor, not to zero.
+        let r = Signal::new(vec![0.0; 1000], 44100.0, "reference");
+        let a = Signal::new(vec![0.0; 1000], 44100.0, "actual");
+        let config = ComparisonConfig {
+            skip_thd: true,
+            peak_error_relative: Some(0.01),
+            ..ComparisonConfig::default()
+        };
+        let report = compare_signals(&r, &a, &config);
+        assert_eq!(report.config.peak_error_tolerance, PEAK_RELATIVE_FLOOR_V);
+        assert!(report.passed, "{:?}", report.failures);
+    }
+
+    #[test]
+    fn a_short_signal_inside_the_settle_window_reports_its_length() {
+        // A reference that stops early (ngspice gave up) is shorter than the
+        // settle window; the failure must still name the length mismatch.
+        let r = Signal::new(vec![0.0; 23], 48000.0, "reference");
+        let a = Signal::new(vec![0.0; 48000], 48000.0, "actual");
+        let config = ComparisonConfig {
+            settle_time_s: 0.02,
+            ..ComparisonConfig::default()
+        };
+        let report = compare_signals(&r, &a, &config);
+        assert!(!report.passed);
+        assert!(
+            report.failures[0].starts_with("Signal length mismatch"),
+            "{:?}",
+            report.failures
+        );
     }
 }

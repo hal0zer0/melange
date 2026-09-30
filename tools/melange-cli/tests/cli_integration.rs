@@ -335,6 +335,25 @@ fn test_validate_oversampling_flag_is_range_checked() {
     let _ = std::fs::remove_file(&cir);
 }
 
+/// A validate render no longer than the settle window (20 periods of the 1 kHz
+/// stimulus) is refused before anything runs, rather than comparing nothing.
+#[test]
+fn test_validate_refuses_a_render_inside_the_settle_window() {
+    let cir = write_test_circuit(TEST_DIODE_CLIPPER, "val_settle");
+    let out = Command::new(melange_bin())
+        .args(["validate", cir.to_str().unwrap(), "--duration", "0.02"])
+        .current_dir(project_root())
+        .output()
+        .expect("run melange");
+    assert!(!out.status.success(), "a 20 ms render must be refused");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("inside the settle window"),
+        "expected the settle-window message, got: {stderr}"
+    );
+    let _ = std::fs::remove_file(&cir);
+}
+
 // ============================================================================
 // simulate command
 // ============================================================================

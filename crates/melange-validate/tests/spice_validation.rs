@@ -96,6 +96,7 @@ fn strict_linear_config() -> ComparisonConfig {
         thd_error_tolerance_db: 0.1, // 0.1 dB
         skip_thd: false,
         settle_time_s: 0.0,
+        peak_error_relative: None,
     }
 }
 
@@ -133,6 +134,7 @@ fn nonlinear_config() -> ComparisonConfig {
         thd_error_tolerance_db: 1.0, // was 3.0; worst measured 0.04 dB → 25x headroom
         skip_thd: false,
         settle_time_s: 0.0,
+        peak_error_relative: None,
     }
 }
 
@@ -169,6 +171,7 @@ fn bjt_config() -> ComparisonConfig {
         // tau is ~32 ms, but both sides use first-sample/DC-OP-seeded
         // blockers, so only a short residual remains.)
         settle_time_s: 0.003,
+        peak_error_relative: None,
     }
 }
 
@@ -190,6 +193,7 @@ fn wurli_config() -> ComparisonConfig {
         // 10 ms settle on a 50 ms signal: comfortably excludes the residual
         // startup region while keeping 80% of the window.
         settle_time_s: 0.010,
+        peak_error_relative: None,
     }
 }
 
@@ -221,6 +225,7 @@ fn neve_output_config() -> ComparisonConfig {
         thd_error_tolerance_db: 5.0,
         skip_thd: true,
         settle_time_s: 0.010,
+        peak_error_relative: None,
     }
 }
 
@@ -246,6 +251,7 @@ fn neve_preamp_config() -> ComparisonConfig {
         thd_error_tolerance_db: 5.0,
         skip_thd: true,
         settle_time_s: 0.064,
+        peak_error_relative: None,
     }
 }
 
@@ -902,6 +908,7 @@ fn test_jfet_common_source_vs_spice() {
         thd_error_tolerance_db: 5.0, // DK method produces different harmonics than SPICE
         skip_thd: false,
         settle_time_s: 0.0,
+        peak_error_relative: None,
     };
 
     let result =
@@ -942,6 +949,7 @@ fn test_mosfet_common_source_vs_spice() {
         thd_error_tolerance_db: 5.0,
         skip_thd: true, // small-signal linear region: THD too low to measure reliably
         settle_time_s: 0.0,
+        peak_error_relative: None,
     };
 
     let result =
@@ -1495,6 +1503,7 @@ fn test_rc_lowpass_step_response() {
         thd_error_tolerance_db: 5.0,
         skip_thd: true, // square wave THD is not meaningful
         settle_time_s: 0.0,
+        peak_error_relative: None,
     };
 
     let result = validate_circuit(&netlist_path, &input, SAMPLE_RATE, "out", &config)
@@ -1560,6 +1569,7 @@ fn test_rc_lowpass_chirp() {
         thd_error_tolerance_db: 5.0,
         skip_thd: true, // chirp has no meaningful THD
         settle_time_s: 0.0,
+        peak_error_relative: None,
     };
 
     let result = validate_circuit(&netlist_path, &input, SAMPLE_RATE, "out", &config)
@@ -2012,6 +2022,7 @@ fn main() {
         thd_error_tolerance_db: 5.0,
         skip_thd: true, // modulation sidebands, not harmonics — THD is meaningless
         settle_time_s: 0.0,
+        peak_error_relative: None,
     };
     let (spice_signal, melange_signal, fit) =
         aligned_signals(&spice_output, &melange_output, &input, &config);
@@ -2077,6 +2088,7 @@ fn test_triode_cc_vs_spice() {
         thd_error_tolerance_db: 5.0,
         skip_thd: true, // small-signal triode: solver-parity test, not distortion
         settle_time_s: 0.02,
+        peak_error_relative: None,
     };
 
     let result = validate_circuit(&netlist_path, &input, SAMPLE_RATE, "out", &config)
@@ -2153,6 +2165,7 @@ fn test_triode_cc_overdrive_vs_spice() {
         thd_error_tolerance_db: 5.0,
         skip_thd: true, // overdriven triode: solver-parity test, not distortion
         settle_time_s: 0.1,
+        peak_error_relative: None,
     };
 
     let result = validate_circuit(&netlist_path, &input, SAMPLE_RATE, "out", &config)
