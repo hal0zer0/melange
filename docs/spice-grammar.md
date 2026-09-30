@@ -703,14 +703,12 @@ When `RB`, `RC`, or `RE` are non-zero, internal nodes (basePrime, collectorPrime
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `VTO` | -2.0 V (NJF), +2.0 V (PJF) | Pinch-off voltage |
-| `IDSS` | 2e-3 A | Saturation drain current |
-| `BETA` | — | Transconductance parameter (converted: IDSS = BETA * VTO²) |
-| `LAMBDA` | 0.001 V⁻¹ | Channel-length modulation |
-| `RD` | 0 Ω | Drain ohmic resistance |
-| `RS` | 0 Ω | Source ohmic resistance |
+| `IDSS` | BETA·VTO² | Saturation drain current |
+| `BETA` | 1e-4 A/V² | Transconductance parameter (converted: IDSS = BETA * VTO²) |
+| `LAMBDA` | 0 V⁻¹ | Channel-length modulation |
+| `RD`, `RS` | 0 Ω | Drain/source series resistance: only 0 is accepted. A nonzero value is refused (not implemented in the solution); model it as an explicit resistor |
 | `CGS` | 0 F | Gate-source capacitance |
 | `CGD` | 0 F | Gate-drain capacitance |
-| `PB` | 1.0 V | Gate junction potential |
 
 Either `IDSS` or `BETA` may be specified. If both are present, `IDSS` takes priority. If only `BETA` is given, it is converted to IDSS = BETA * VTO².
 
@@ -724,13 +722,12 @@ Either `IDSS` or `BETA` may be specified. If both are present, `IDSS` takes prio
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `VTO` | 2.0 V (NMOS), -2.0 V (PMOS) | Threshold voltage |
+| `VTO` | 0 V | Threshold voltage |
 | `KP` | 2e-5 A/V² | Transconductance parameter |
-| `LAMBDA` | 0.01 V⁻¹ | Channel-length modulation |
+| `LAMBDA` | 0 V⁻¹ | Channel-length modulation |
 | `GAMMA` | 0 V¹/² | Body effect parameter |
 | `PHI` | 0.6 V | Surface potential |
-| `RD` | 0 Ω | Drain ohmic resistance |
-| `RS` | 0 Ω | Source ohmic resistance |
+| `RD`, `RS` | 0 Ω | Drain/source series resistance: only 0 is accepted. A nonzero value is refused (not implemented in the solution); model it as an explicit resistor |
 | `CGS` | 0 F | Gate-source capacitance |
 | `CGD` | 0 F | Gate-drain capacitance |
 

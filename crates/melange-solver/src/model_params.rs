@@ -174,6 +174,25 @@ impl ModelClass {
         }
     }
 
+    /// Keys this class knows but does not put in the solution: a nonzero
+    /// value is REFUSED with its note (zero, the model without it, passes).
+    /// Unlike a retired key, it may be implemented later.
+    pub fn refused(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            ModelClass::Jfet => JFET_REFUSED,
+            ModelClass::Mosfet => MOSFET_REFUSED,
+            _ => &[],
+        }
+    }
+
+    /// The refusal message for `key`, if this class refuses it.
+    pub fn refused_note(self, key: &str) -> Option<&'static str> {
+        self.refused()
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .map(|(_, note)| *note)
+    }
+
     /// The retirement message for `key`, if this class has retired it.
     pub fn retired_note(self, key: &str) -> Option<&'static str> {
         self.retired()
@@ -415,18 +434,48 @@ const BJT_DEFINING: &[&str] = &[
     "XTB",
 ];
 
-const JFET_HONORED: &[&str] = &[
-    "VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "RD", "RS", "KF", "AF",
-];
+const JFET_HONORED: &[&str] = &["VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "KF", "AF"];
 
-const JFET_DEFINING: &[&str] = &["VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "RD", "RS"];
+const JFET_DEFINING: &[&str] = &["VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD"];
+
+/// A FET card's series resistance is not in the solution. It used to reach
+/// only the Newton Jacobian, so the converged answer was the device without
+/// it (a JFET with RS = 1k biased at 4.57 V where ngspice gives 8.40 V).
+const JFET_REFUSED: &[(&str, &str)] = &[
+    (
+        "RD",
+        "JFET drain series resistance is not implemented in the solution. Model it \
+         as an explicit resistor in series with the drain terminal, and remove RD= \
+         from the card",
+    ),
+    (
+        "RS",
+        "JFET source series resistance is not implemented in the solution. Model it \
+         as an explicit resistor in series with the source terminal, and remove RS= \
+         from the card",
+    ),
+];
 
 const MOSFET_HONORED: &[&str] = &[
-    "KP", "VTO", "VT", "LAMBDA", "CGS", "CGD", "RD", "RS", "GAMMA", "PHI", "KF", "AF",
+    "KP", "VTO", "VT", "LAMBDA", "CGS", "CGD", "GAMMA", "PHI", "KF", "AF",
 ];
 
-const MOSFET_DEFINING: &[&str] = &[
-    "KP", "VTO", "VT", "LAMBDA", "CGS", "CGD", "RD", "RS", "GAMMA", "PHI",
+const MOSFET_DEFINING: &[&str] = &["KP", "VTO", "VT", "LAMBDA", "CGS", "CGD", "GAMMA", "PHI"];
+
+/// As [`JFET_REFUSED`].
+const MOSFET_REFUSED: &[(&str, &str)] = &[
+    (
+        "RD",
+        "MOSFET drain series resistance is not implemented in the solution. Model \
+         it as an explicit resistor in series with the drain terminal, and remove \
+         RD= from the card",
+    ),
+    (
+        "RS",
+        "MOSFET source series resistance is not implemented in the solution. Model \
+         it as an explicit resistor in series with the source terminal, and remove \
+         RS= from the card",
+    ),
 ];
 
 /// `SHOT_GAMMA2` is consumed by `codegen::ir::noise` (shot-noise Gamma-squared

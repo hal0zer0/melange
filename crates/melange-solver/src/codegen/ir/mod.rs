@@ -4903,20 +4903,6 @@ impl CircuitIR {
             )));
         }
 
-        // Ohmic drain/source resistances (optional, default 0.0)
-        let rd = Self::lookup_model_param(netlist, model, "RD").unwrap_or(0.0);
-        if rd < 0.0 || !rd.is_finite() {
-            return Err(CodegenError::InvalidConfig(format!(
-                "JFET model RD must be non-negative and finite, got {rd}"
-            )));
-        }
-        let rs = Self::lookup_model_param(netlist, model, "RS").unwrap_or(0.0);
-        if rs < 0.0 || !rs.is_finite() {
-            return Err(CodegenError::InvalidConfig(format!(
-                "JFET model RS must be non-negative and finite, got {rs}"
-            )));
-        }
-
         Self::check_model_params(netlist, model, ModelClass::Jfet)?;
         Self::warn_unresolved_model(
             netlist,
@@ -4933,8 +4919,6 @@ impl CircuitIR {
             is_p_channel,
             cgs,
             cgd,
-            rd,
-            rs,
         })
     }
 
@@ -4998,20 +4982,6 @@ impl CircuitIR {
             )));
         }
 
-        // Ohmic drain/source resistances (optional, default 0.0)
-        let rd = Self::lookup_model_param(netlist, model, "RD").unwrap_or(0.0);
-        if rd < 0.0 || !rd.is_finite() {
-            return Err(CodegenError::InvalidConfig(format!(
-                "MOSFET model RD must be non-negative and finite, got {rd}"
-            )));
-        }
-        let rs = Self::lookup_model_param(netlist, model, "RS").unwrap_or(0.0);
-        if rs < 0.0 || !rs.is_finite() {
-            return Err(CodegenError::InvalidConfig(format!(
-                "MOSFET model RS must be non-negative and finite, got {rs}"
-            )));
-        }
-
         // Body effect parameters (optional, default 0.0 = disabled)
         let gamma = Self::lookup_model_param(netlist, model, "GAMMA").unwrap_or(0.0);
         let phi = Self::lookup_model_param(netlist, model, "PHI").unwrap_or(0.6);
@@ -5043,8 +5013,6 @@ impl CircuitIR {
             is_p_channel,
             cgs,
             cgd,
-            rd,
-            rs,
             gamma,
             phi,
             source_node: 0,
@@ -5886,10 +5854,18 @@ impl CircuitIR {
         else {
             return Ok(());
         };
-        for (key, _) in &m.params {
+        for (key, value) in &m.params {
             let upper = key.to_ascii_uppercase();
             if honored.iter().any(|k| k.eq_ignore_ascii_case(&upper)) {
                 continue;
+            }
+            if let Some(note) = class.refused_note(&upper) {
+                if *value == 0.0 {
+                    continue;
+                }
+                return Err(CodegenError::InvalidConfig(format!(
+                    ".model {model_name}: {upper}={value} is refused: {note}."
+                )));
             }
             if crate::model_params::notice_if_unimplemented(model_name, class, &upper) {
                 continue;

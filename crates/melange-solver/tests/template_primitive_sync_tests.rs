@@ -38,9 +38,6 @@
 //!   only in the template/emitters — the devices crate KorenTriode has no
 //!   grid-stopper solve. Pinned only at RGI=0 (exact reduction to the base
 //!   triode path, which IS pinned).
-//! - `jfet_jacobian_with_rd_rs` / `mosfet_jacobian_with_rd_rs`: the ohmic
-//!   closed-form correction has no devices-crate twin; pinned only at
-//!   RD=RS=0 (exact reduction) plus the pinned underlying Jacobian.
 //! - `fast_exp` / `fast_ln` polynomial approximations themselves (the
 //!   non-precise cfg) are an accuracy question, not a twin-sync question,
 //!   and are not compared against libm here.
@@ -195,19 +192,6 @@ mod tpl {
     ) -> [f64; 4] {
         jfet_jacobian(vgs, vds, idss, vp, lambda, sign)
     }
-    #[allow(clippy::too_many_arguments)]
-    pub fn jfet_jacobian_with_rd_rs_tpl(
-        vgs: f64,
-        vds: f64,
-        idss: f64,
-        vp: f64,
-        lambda: f64,
-        sign: f64,
-        rd: f64,
-        rs: f64,
-    ) -> [f64; 4] {
-        jfet_jacobian_with_rd_rs(vgs, vds, idss, vp, lambda, sign, rd, rs)
-    }
     pub fn mosfet_id_tpl(vgs: f64, vds: f64, kp: f64, vt: f64, lambda: f64, sign: f64) -> f64 {
         mosfet_id(vgs, vds, kp, vt, lambda, sign)
     }
@@ -220,19 +204,6 @@ mod tpl {
         sign: f64,
     ) -> [f64; 4] {
         mosfet_jacobian(vgs, vds, kp, vt, lambda, sign)
-    }
-    #[allow(clippy::too_many_arguments)]
-    pub fn mosfet_jacobian_with_rd_rs_tpl(
-        vgs: f64,
-        vds: f64,
-        kp: f64,
-        vt: f64,
-        lambda: f64,
-        sign: f64,
-        rd: f64,
-        rs: f64,
-    ) -> [f64; 4] {
-        mosfet_jacobian_with_rd_rs(vgs, vds, kp, vt, lambda, sign, rd, rs)
     }
     pub fn vca_current_tpl(v_sig: f64, v_ctrl: f64, g0: f64, vscale: f64, thd: f64) -> f64 {
         vca_current(v_sig, v_ctrl, g0, vscale, thd)
@@ -943,11 +914,6 @@ fn template_jfet_matches_devices_crate() {
                     0.0,
                     "{ctx} template Ig must be identically 0 (matches dc_op.rs Ig ≡ 0)"
                 );
-                // RD=RS=0 exact reduction of the ohmic-corrected Jacobian.
-                let jac_rr =
-                    tpl::jfet_jacobian_with_rd_rs_tpl(vgs, vds, idss, vp, lambda, sign, 0.0, 0.0);
-                assert_eq!(jac_rr[0].to_bits(), jac_t[0].to_bits(), "{ctx} rd/rs=0 gm");
-                assert_eq!(jac_rr[1].to_bits(), jac_t[1].to_bits(), "{ctx} rd/rs=0 gds");
                 // Region bookkeeping for grid honesty.
                 if id_d.abs() > 1e-6 {
                     if sign * vds >= 0.0 {
@@ -1009,11 +975,6 @@ fn template_mosfet_matches_devices_crate() {
                 assert_close(&format!("{ctx} dId/dVds"), jac_t[1], gds_d, 1e-9, 1e-24);
                 assert_eq!(jac_t[2], 0.0, "{ctx} dIg/dVgs must be 0");
                 assert_eq!(jac_t[3], 0.0, "{ctx} dIg/dVds must be 0");
-                // RD=RS=0 exact reduction of the ohmic-corrected Jacobian.
-                let jac_rr =
-                    tpl::mosfet_jacobian_with_rd_rs_tpl(vgs, vds, kp, vt, lambda, sign, 0.0, 0.0);
-                assert_eq!(jac_rr[0].to_bits(), jac_t[0].to_bits(), "{ctx} rd/rs=0 gm");
-                assert_eq!(jac_rr[1].to_bits(), jac_t[1].to_bits(), "{ctx} rd/rs=0 gds");
                 if id_d.abs() > 1e-6 {
                     on += 1;
                 } else {

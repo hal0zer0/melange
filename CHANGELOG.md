@@ -541,6 +541,12 @@ generated state is smaller.
   at NF = 1.5, 20 % lower with IKF = 5 mA at 1.4 mA. A forward-active
   (`--bjt-fa`) BJT's B-C capacitance was taken at zero bias whatever its
   bias (1.77× at Vbc = −3.5 V); it is now taken at its bias.
+- **A JFET or MOSFET card's `RD=`/`RS=` had no effect on the answer**, silently.
+  It reached only the Newton Jacobian, so the converged solution was the
+  device without it: a JFET with RS = 1 kΩ biased at 4.57 V where ngspice
+  gives 8.40 V. A nonzero value is now refused, naming the fix, an explicit
+  resistor in series with the drain or source, which matches ngspice. No
+  corpus card set one.
 - `melange --version` could name a clean commit for a binary built from
   uncommitted changes, while the code that binary generated said `-dirty`: the
   CLI stamped its own label and only refreshed it when the CLI itself was

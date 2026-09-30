@@ -6259,21 +6259,15 @@ impl RustEmitter {
                      {indent}let jdev_{s}_{s} = state.device_{d}_is / (DEVICE_{d}_NF * state.device_{d}_vt) * dexp_be_{d};\n"
                 ));
             }
-            (DeviceType::Jfet, DeviceParams::Jfet(jp)) => {
+            (DeviceType::Jfet, DeviceParams::Jfet(_)) => {
                 let s1 = s + 1;
                 code.push_str(&format!(
                     "{indent}let i_dev{s} = jfet_id(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n\
                      {indent}let i_dev{s1} = jfet_ig(v_d{s1}, DEVICE_{d}_SIGN);\n"
                 ));
-                if jp.has_rd_rs() {
-                    code.push_str(&format!(
-                        "{indent}let jfet{d}_jac = jfet_jacobian_with_rd_rs(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN, DEVICE_{d}_RD, DEVICE_{d}_RS);\n"
-                    ));
-                } else {
-                    code.push_str(&format!(
-                        "{indent}let jfet{d}_jac = jfet_jacobian(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
-                    ));
-                }
+                code.push_str(&format!(
+                    "{indent}let jfet{d}_jac = jfet_jacobian(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
+                ));
                 code.push_str(&format!(
                     "{indent}let jdev_{s}_{s} = jfet{d}_jac[1];\n\
                      {indent}let jdev_{s}_{s1} = jfet{d}_jac[0];\n\
@@ -6281,21 +6275,15 @@ impl RustEmitter {
                      {indent}let jdev_{s1}_{s1} = jfet{d}_jac[2];\n"
                 ));
             }
-            (DeviceType::Mosfet, DeviceParams::Mosfet(mp)) => {
+            (DeviceType::Mosfet, DeviceParams::Mosfet(_)) => {
                 let s1 = s + 1;
                 code.push_str(&format!(
                     "{indent}let i_dev{s} = mosfet_id(v_d{s1}, v_d{s}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n\
                      {indent}let i_dev{s1} = mosfet_ig(v_d{s1}, DEVICE_{d}_SIGN);\n"
                 ));
-                if mp.has_rd_rs() {
-                    code.push_str(&format!(
-                        "{indent}let mos{d}_jac = mosfet_jacobian_with_rd_rs(v_d{s1}, v_d{s}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN, DEVICE_{d}_RD, DEVICE_{d}_RS);\n"
-                    ));
-                } else {
-                    code.push_str(&format!(
-                        "{indent}let mos{d}_jac = mosfet_jacobian(v_d{s1}, v_d{s}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
-                    ));
-                }
+                code.push_str(&format!(
+                    "{indent}let mos{d}_jac = mosfet_jacobian(v_d{s1}, v_d{s}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
+                ));
                 code.push_str(&format!(
                     "{indent}let jdev_{s}_{s} = mos{d}_jac[1];\n\
                      {indent}let jdev_{s}_{s1} = mos{d}_jac[0];\n\
@@ -10076,20 +10064,14 @@ impl RustEmitter {
                          {indent}}}\n"
                     ));
                 }
-                (DeviceType::Jfet, DeviceParams::Jfet(jp)) => {
+                (DeviceType::Jfet, DeviceParams::Jfet(_)) => {
                     let s1 = s + 1;
                     let jd_01 = s * m + s1;
                     let jd_10 = s1 * m + s;
                     let jd_11 = s1 * m + s1;
-                    let jac_fn = if jp.has_rd_rs() {
-                        format!(
-                            "jfet_jacobian_with_rd_rs(vgs, vds, state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, sign, DEVICE_{dev_num}_RD, DEVICE_{dev_num}_RS)"
-                        )
-                    } else {
-                        format!(
+                    let jac_fn = format!(
                             "jfet_jacobian(vgs, vds, state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, sign)"
-                        )
-                    };
+                    );
                     // jac = [dId/dVgs, dId/dVds, dIg/dVgs, dIg/dVds] but the
                     // NR dims are (s = Vds, s+1 = Vgs), so the columns swap:
                     //   j_dev[s][s]   = dId/dVds = jac[1]
@@ -10145,15 +10127,9 @@ impl RustEmitter {
                         code.push_str(&format!("{indent}{{ // MOSFET {dev_num}\n"));
                         format!("state.device_{dev_num}_vt")
                     };
-                    let jac_fn = if mp.has_rd_rs() {
-                        format!(
-                            "mosfet_jacobian_with_rd_rs(vgs, vds, state.device_{dev_num}_kp, {vt_expr}, state.device_{dev_num}_lambda, sign, DEVICE_{dev_num}_RD, DEVICE_{dev_num}_RS)"
-                        )
-                    } else {
-                        format!(
+                    let jac_fn = format!(
                             "mosfet_jacobian(vgs, vds, state.device_{dev_num}_kp, {vt_expr}, state.device_{dev_num}_lambda, sign)"
-                        )
-                    };
+                    );
                     // jac = [dId/dVgs, dId/dVds, dIg/dVgs, dIg/dVds]; NR dims
                     // are (s = Vds, s+1 = Vgs) — column swap, same as JFET
                     // above and emit_dk_device_eval_for_nodal_schur_indented.

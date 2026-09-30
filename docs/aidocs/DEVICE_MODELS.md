@@ -23,9 +23,10 @@ cards (dumped 2026-09-29); these are also the SPICE3 manual's values.
 | BJT | XTB, XTI, EG | 0, 3, 1.11 | same |
 | JFET | VTO | −2 (N; P stored +2 in melange's convention) | −2 |
 | JFET | BETA | 1e-4 A/V² (IDSS = BETA·VTO²) | 1e-4 |
-| JFET | LAMBDA, RD, RS, CGS, CGD | 0 | same |
+| JFET | LAMBDA, CGS, CGD | 0 | same |
+| JFET, MOSFET | RD, RS | 0; nonzero refused (not in the solution) | 0 |
 | MOSFET (level 1) | VTO, KP, LAMBDA | 0, 2e-5 A/V² (W = L), 0 | same |
-| MOSFET (level 1) | GAMMA, PHI, RD, RS | 0, 0.6, 0, 0 | same |
+| MOSFET (level 1) | GAMMA, PHI | 0, 0.6 | same |
 | All | thermal voltage | kT/q at TNOM = 27 °C (300.15 K, `VT_ROOM`) | same |
 
 One row differs: the diode junction capacitance, which melange holds constant at CJO where SPICE follows

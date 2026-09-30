@@ -484,19 +484,6 @@ pub struct JfetParams {
     /// Gate-drain junction capacitance [F] (0.0 = disabled)
     #[serde(default)]
     pub cgd: f64,
-    /// Drain ohmic resistance [Ohms] (0.0 = disabled)
-    #[serde(default)]
-    pub rd: f64,
-    /// Source ohmic resistance [Ohms] (0.0 = disabled)
-    #[serde(default)]
-    pub rs: f64,
-}
-
-impl JfetParams {
-    /// Returns true if either drain or source resistance is enabled.
-    pub fn has_rd_rs(&self) -> bool {
-        self.rd > 0.0 || self.rs > 0.0
-    }
 }
 
 /// MOSFET model parameters (Level 1 SPICE, triode + saturation).
@@ -520,12 +507,6 @@ pub struct MosfetParams {
     /// Gate-drain capacitance [F] (0.0 = disabled)
     #[serde(default)]
     pub cgd: f64,
-    /// Drain ohmic resistance [Ohms] (0.0 = disabled)
-    #[serde(default)]
-    pub rd: f64,
-    /// Source ohmic resistance [Ohms] (0.0 = disabled)
-    #[serde(default)]
-    pub rs: f64,
     /// Body effect coefficient GAMMA [V^0.5] (0.0 = disabled)
     #[serde(default)]
     pub gamma: f64,
@@ -541,10 +522,6 @@ pub struct MosfetParams {
 }
 
 impl MosfetParams {
-    /// Returns true if either drain or source resistance is enabled.
-    pub fn has_rd_rs(&self) -> bool {
-        self.rd > 0.0 || self.rs > 0.0
-    }
     /// Returns true if body effect is enabled.
     pub fn has_body_effect(&self) -> bool {
         self.gamma > 0.0

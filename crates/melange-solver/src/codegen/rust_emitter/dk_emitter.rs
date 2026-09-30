@@ -1351,10 +1351,6 @@ impl RustEmitter {
                     emit_device_const(&mut code, dev_num, "IDSS", jp.idss);
                     emit_device_const(&mut code, dev_num, "VP", jp.vp);
                     emit_device_const(&mut code, dev_num, "LAMBDA", jp.lambda);
-                    if jp.has_rd_rs() {
-                        emit_device_const(&mut code, dev_num, "RD", jp.rd);
-                        emit_device_const(&mut code, dev_num, "RS", jp.rs);
-                    }
                     let sign = if jp.is_p_channel { -1.0 } else { 1.0 };
                     code.push_str(&format!(
                         "const DEVICE_{}_SIGN: f64 = {:.1};\n\n",
@@ -1366,10 +1362,6 @@ impl RustEmitter {
                     emit_device_const(&mut code, dev_num, "KP", mp.kp);
                     emit_device_const(&mut code, dev_num, "VT", mp.vt);
                     emit_device_const(&mut code, dev_num, "LAMBDA", mp.lambda);
-                    if mp.has_rd_rs() {
-                        emit_device_const(&mut code, dev_num, "RD", mp.rd);
-                        emit_device_const(&mut code, dev_num, "RS", mp.rs);
-                    }
                     if mp.has_body_effect() {
                         emit_device_const(&mut code, dev_num, "GAMMA", mp.gamma);
                         emit_device_const(&mut code, dev_num, "PHI", mp.phi);

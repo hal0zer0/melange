@@ -197,15 +197,12 @@ pub(super) fn emit_dk_device_evaluation(
                 let s = slot.start_idx;
                 let s1 = s + 1;
                 let d = dev_num;
-                let jp = match &slot.params {
-                    DeviceParams::Jfet(jp) => jp,
-                    other => {
-                        return Err(CodegenError::InvalidDevice(format!(
-                            "device_type=Jfet but params={:?}",
-                            other
-                        )))
-                    }
-                };
+                if !matches!(&slot.params, DeviceParams::Jfet(_)) {
+                    return Err(CodegenError::InvalidDevice(format!(
+                        "device_type=Jfet but params={:?}",
+                        slot.params
+                    )));
+                }
                 // IDSS, VP, LAMBDA from state; SIGN stays as const.
                 // N_v ordering: dim s = Vds, dim s+1 = Vgs.
                 // Functions expect (vgs, vds), so pass (v_d{s1}, v_d{s}).
@@ -215,15 +212,9 @@ pub(super) fn emit_dk_device_evaluation(
                 code.push_str(&format!(
                     "{indent}let i_dev{s1} = jfet_ig(v_d{s1}, DEVICE_{d}_SIGN);\n"
                 ));
-                if jp.has_rd_rs() {
-                    code.push_str(&format!(
-                        "{indent}let jfet{d}_jac = jfet_jacobian_with_rd_rs(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN, DEVICE_{d}_RD, DEVICE_{d}_RS);\n"
-                    ));
-                } else {
-                    code.push_str(&format!(
-                        "{indent}let jfet{d}_jac = jfet_jacobian(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
-                    ));
-                }
+                code.push_str(&format!(
+                    "{indent}let jfet{d}_jac = jfet_jacobian(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
+                ));
                 // In dim-space (dim0=Vds, dim1=Vgs):
                 //   jdev_s_s   = dId/dVds = jac[1]
                 //   jdev_s_s1  = dId/dVgs = jac[0]
@@ -238,15 +229,12 @@ pub(super) fn emit_dk_device_evaluation(
                 let s = slot.start_idx;
                 let s1 = s + 1;
                 let d = dev_num;
-                let mp = match &slot.params {
-                    DeviceParams::Mosfet(mp) => mp,
-                    other => {
-                        return Err(CodegenError::InvalidDevice(format!(
-                            "device_type=Mosfet but params={:?}",
-                            other
-                        )))
-                    }
-                };
+                if !matches!(&slot.params, DeviceParams::Mosfet(_)) {
+                    return Err(CodegenError::InvalidDevice(format!(
+                        "device_type=Mosfet but params={:?}",
+                        slot.params
+                    )));
+                }
                 // KP, VT, LAMBDA from state; SIGN stays as const.
                 // N_v ordering: dim s = Vds, dim s+1 = Vgs.
                 // Functions expect (vgs, vds), so pass (v_d{s1}, v_d{s}).
@@ -256,15 +244,9 @@ pub(super) fn emit_dk_device_evaluation(
                 code.push_str(&format!(
                     "{indent}let i_dev{s1} = mosfet_ig(v_d{s1}, DEVICE_{d}_SIGN);\n"
                 ));
-                if mp.has_rd_rs() {
-                    code.push_str(&format!(
-                        "{indent}let mos{d}_jac = mosfet_jacobian_with_rd_rs(v_d{s1}, v_d{s}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN, DEVICE_{d}_RD, DEVICE_{d}_RS);\n"
-                    ));
-                } else {
-                    code.push_str(&format!(
-                        "{indent}let mos{d}_jac = mosfet_jacobian(v_d{s1}, v_d{s}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
-                    ));
-                }
+                code.push_str(&format!(
+                    "{indent}let mos{d}_jac = mosfet_jacobian(v_d{s1}, v_d{s}, state.device_{d}_kp, state.device_{d}_vt, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
+                ));
                 code.push_str(&format!("{indent}let jdev_{s}_{s} = mos{d}_jac[1];\n"));
                 code.push_str(&format!("{indent}let jdev_{s}_{s1} = mos{d}_jac[0];\n"));
                 code.push_str(&format!("{indent}let jdev_{s1}_{s} = mos{d}_jac[3];\n"));

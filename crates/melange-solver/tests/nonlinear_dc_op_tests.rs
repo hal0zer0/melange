@@ -1105,8 +1105,6 @@ fn test_dc_op_mosfet_body_effect_parity() {
             is_p_channel: false,
             cgs: 0.0,
             cgd: 0.0,
-            rd: 0.0,
-            rs: 0.0,
             gamma,
             phi: 0.7,
             // 1-based MNA node indices: source = node 1, bulk = node 2.
@@ -1595,8 +1593,6 @@ C1 in gate 10u
             is_p_channel: false,
             cgs: 0.0,
             cgd: 0.0,
-            rd: 0.0,
-            rs: 0.0,
         }),
         has_internal_mna_nodes: false,
         vg2k_frozen: 0.0,

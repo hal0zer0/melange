@@ -126,6 +126,12 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
 - No substrate current or avalanche breakdown
 
 ### JFET / MOSFET
+- Card series resistance `RD=`/`RS=` is refused when nonzero: it is not in the
+  solution (it used to reach only the Newton Jacobian, so the answer was the
+  device without it, with no notice: a JFET with RS = 1 kΩ biased at 4.57 V
+  where ngspice gives 8.40 V). Model it as an explicit resistor in series with
+  the drain or source, which matches ngspice. Internal drain/source nodes are
+  queued.
 - JFET gate junctions are not modelled [OPEN]. A real JFET gate is a pn
   junction to the channel (SPICE `IS`, `N`); melange has neither the
   gate-source nor the gate-drain diode, so Ig = 0 at every bias, and a card
