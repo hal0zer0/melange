@@ -303,6 +303,48 @@ C1 out 0 100n
         "Build: missing dc-block=: {build}"
     );
     assert!(build.contains("noise="), "Build: missing noise=: {build}");
+    // The output clamp changes the emitted DSP; it is disclosed at its default.
+    assert!(
+        build.contains("output-clamp=±10 V"),
+        "Build: missing output-clamp=: {build}"
+    );
+    let json = code
+        .lines()
+        .find(|l| l.contains("// provenance:"))
+        .unwrap_or("");
+    assert!(
+        json.contains("\"output_clamp_v\":10,"),
+        "provenance: missing output_clamp_v: {json}"
+    );
+}
+
+/// A non-default `--output-clamp` reaches both lines and matches the emitted
+/// clamp.
+#[test]
+fn provenance_carries_a_non_default_output_clamp() {
+    let spice = "Clamp\nR1 in out 10k\nC1 out 0 100n\n";
+    let mna = MnaSystem::from_netlist(&Netlist::parse(spice).expect("parse")).expect("mna");
+    let cfg = CodegenConfig {
+        circuit_name: "clamp_test".to_string(),
+        sample_rate: 44100.0,
+        input_node: mna.node_map["in"] - 1,
+        output_nodes: vec![mna.node_map["out"] - 1],
+        input_resistance: 1.0,
+        output_clamp_v: 24.0,
+        ..CodegenConfig::default()
+    };
+    let code = support::build_as_shipped(spice, &cfg, "dk").0;
+    let build = code.lines().find(|l| l.contains("// Build:")).unwrap_or("");
+    let json = code
+        .lines()
+        .find(|l| l.contains("// provenance:"))
+        .unwrap_or("");
+    assert!(build.contains("output-clamp=±24 V"), "{build}");
+    assert!(json.contains("\"output_clamp_v\":24,"), "{json}");
+    assert!(
+        code.contains("clamp(-2.4e1, 2.4e1)"),
+        "the emitted clamp is 24 V"
+    );
 }
 
 #[test]

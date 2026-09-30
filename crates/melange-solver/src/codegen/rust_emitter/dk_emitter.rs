@@ -446,6 +446,11 @@ fn resolved_build_flags(ir: &CircuitIR, glow: &GlowProvenance) -> String {
     ));
     // Noise mode (off/thermal/shot/full) — resolved from --noise + per-device KF.
     build.push_str(&format!(", noise={}", ir.noise.mode.as_str()));
+    // The output clamp bound: it changes the emitted DSP, default or flag.
+    build.push_str(&format!(
+        ", output-clamp=±{} V",
+        ir.solver_config.output_clamp_v
+    ));
     // Op-amp rail saturation strategy — only meaningful when a clamped op-amp is
     // present (ir.opamps is populated only for finite-VSAT op-amps).
     if !ir.opamps.is_empty() {
@@ -580,6 +585,12 @@ fn provenance_json(
         ir.solver_config.oversampling_factor
     ));
     s.push_str(&format!("\"dc_block\":{},", ir.dc_block));
+    // The output clamp bound, whether from `--output-clamp` or the default: a
+    // consumer asserts it here instead of parsing the emitted clamp literal.
+    s.push_str(&format!(
+        "\"output_clamp_v\":{},",
+        ir.solver_config.output_clamp_v
+    ));
     s.push_str(&format!("\"noise\":\"{}\"", ir.noise.mode.as_str()));
     if !ir.opamps.is_empty() {
         s.push_str(&format!(

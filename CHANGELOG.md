@@ -601,6 +601,12 @@ generated state is smaller.
   before, and the reason says which rule decided. Four corpus decks return
   to trapezoidal (twill-deluxe against ngspice: 0.76 % → 0.16 %); two stay
   on backward Euler.
+- **The output clamp is in the generated file's provenance.** `--output-clamp`
+  changes the emitted DSP (the `scaled.clamp(...)` bound) but was recorded in
+  neither the `// Build:` line nor the `// provenance:` JSON, so a regeneration
+  that dropped the flag went unnoticed until an audit a month later. Both now
+  carry it, whether it came from the flag or the default:
+  `output-clamp=±10 V` and `"output_clamp_v":10`.
 - **`melange validate` grades only against a reference shown to be
   converged.** ngspice integrated the reference with a maximum step equal to
   the output step, the same step as the melange render it judged, so its own
