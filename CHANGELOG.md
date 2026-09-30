@@ -923,7 +923,8 @@ generated state is smaller.
 
 - `model_key_effect.rs`: every per-device parameter the build emits must be
   read. The rich card of each device class, compiled on the DK and nodal
-  routes, may not declare a `DEVICE_n_*` constant or a `device_n_*` state
+  routes, with and without the runtime DC-OP recompute and as a plugin
+  project, may not declare a `DEVICE_n_*` constant or a `device_n_*` state
   field that nothing reads: that is a key accepted and silently ignored, the
   class of a pentode's LAMBDA and RGI and a triode's variable-mu keys, found
   one at a time before. Its first run found only stale declarations of

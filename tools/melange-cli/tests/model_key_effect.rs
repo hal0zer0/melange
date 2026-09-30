@@ -329,11 +329,18 @@ fn card(case: &Case, params: &[(&str, &str)]) -> String {
 
 /// Compile `deck` and return the generated code without comments and
 /// without lines naming the scratch file; `Err` carries the CLI output.
+/// With `--format plugin` the code is the project's `src/circuit.rs` and
+/// `src/lib.rs`.
 fn compile(deck: &str, args: &[&str], test: &str) -> Result<Vec<String>, String> {
     let stem = format!("k{}", SEQ.fetch_add(1, Ordering::Relaxed));
     let dir = scratch(test);
     let cir = dir.join(format!("{stem}.cir"));
-    let rs = dir.join(format!("{stem}.rs"));
+    let plugin = args.windows(2).any(|w| w == ["--format", "plugin"]);
+    let rs = if plugin {
+        dir.join(&stem)
+    } else {
+        dir.join(format!("{stem}.rs"))
+    };
     std::fs::write(&cir, deck).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_melange"))
         .arg("compile")
@@ -350,9 +357,19 @@ fn compile(deck: &str, args: &[&str], test: &str) -> Result<Vec<String>, String>
             String::from_utf8_lossy(&out.stderr)
         ));
     }
-    let code = std::fs::read_to_string(&rs).unwrap();
+    let code = if plugin {
+        let src = rs.join("src");
+        let code = std::fs::read_to_string(src.join("circuit.rs")).unwrap()
+            + "\n"
+            + &std::fs::read_to_string(src.join("lib.rs")).unwrap();
+        let _ = std::fs::remove_dir_all(&rs);
+        code
+    } else {
+        let code = std::fs::read_to_string(&rs).unwrap();
+        let _ = std::fs::remove_file(&rs);
+        code
+    };
     let _ = std::fs::remove_file(&cir);
-    let _ = std::fs::remove_file(&rs);
     Ok(code
         .lines()
         .map(str::trim)
@@ -580,8 +597,9 @@ fn the_scan_finds_a_declared_and_unread_parameter() {
 /// A parameter the build emits and nothing reads is a key accepted and
 /// silently ignored, the class behind a pentode's LAMBDA and RGI and a
 /// triode's MU_B/SVAR/EX_B, each found one at a time. Every class's rich card
-/// (every key at once, noise on), on the DK and nodal routes, must read every
-/// `DEVICE_n_*` constant and `device_n_*` state field it declares.
+/// (every key at once, noise on), on the DK and nodal routes, with and
+/// without the runtime DC-OP recompute, and as a plugin project, must read
+/// every `DEVICE_n_*` constant and `device_n_*` state field it declares.
 #[test]
 fn every_emitted_device_parameter_is_read() {
     let mut failures = Vec::new();
@@ -593,18 +611,40 @@ fn every_emitted_device_parameter_is_read() {
             .map(|(k, v, ..)| (*k, *v))
             .collect();
         let deck = card(case, &rich);
-        for route in ["dk", "nodal"] {
-            let args = ["--noise", "full", "--noise-seed", "1", "--solver", route];
+        let builds: [(&str, &[&str]); 5] = [
+            ("dk", &["--solver", "dk"]),
+            ("nodal", &["--solver", "nodal"]),
+            (
+                "dk recompute",
+                &["--solver", "dk", "--emit-dc-op-recompute"],
+            ),
+            (
+                "nodal recompute",
+                &["--solver", "nodal", "--emit-dc-op-recompute"],
+            ),
+            ("plugin", &["--format", "plugin", "--emit-dc-op-recompute"]),
+        ];
+        for (build, extra) in builds {
+            let mut args = vec!["--noise", "full", "--noise-seed", "1"];
+            args.extend_from_slice(extra);
             match compile(&deck, &args, "unread") {
                 Ok(code) => {
+                    let recompute = code.iter().any(|l| l.contains("fn recompute_dc_op"));
+                    if recompute != extra.contains(&"--emit-dc-op-recompute") {
+                        failures.push(format!(
+                            "{} ({build}): the build is not the one asked for \
+                             (recompute_dc_op present: {recompute})",
+                            case.class.label()
+                        ));
+                    }
                     for p in unread_device_params(&code) {
-                        failures.push(format!("{} ({route}): {p}", case.class.label()));
+                        failures.push(format!("{} ({build}): {p}", case.class.label()));
                     }
                 }
                 // DK refuses some classes (active-set op-amps); nodal must build.
-                Err(e) if route == "dk" && e.contains("--solver nodal") => {}
+                Err(e) if build.starts_with("dk") && e.contains("--solver nodal") => {}
                 Err(e) => failures.push(format!(
-                    "{} ({route}): compile failed: {}",
+                    "{} ({build}): compile failed: {}",
                     case.class.label(),
                     e.lines().last().unwrap_or("")
                 )),
