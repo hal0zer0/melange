@@ -76,8 +76,19 @@ impl Signal {
             return self.clone();
         }
 
-        let duration = self.duration();
-        let new_len = (duration * target_rate).ceil() as usize;
+        // Only times the source covers: the last output sample is at or before
+        // the last input sample (`(len - 1) / rate`). Sizing by `ceil(duration *
+        // target_rate)` produced one sample past the source's end when the
+        // target rate was a hair above the source's (ngspice's printed step
+        // gives 48000.0077 Hz), filled by holding the last value: compared
+        // against a reference sample one step later, it billed the output's
+        // slope over a whole step as error at the final sample (94 mV on a
+        // 1 V, 1 kHz output).
+        if self.samples.is_empty() {
+            return Signal::new(Vec::new(), target_rate, format!("{}_resampled", self.name));
+        }
+        let span_in_target = (self.samples.len() - 1) as f64 * target_rate / self.sample_rate;
+        let new_len = (span_in_target + 1e-9).floor() as usize + 1;
         let mut new_samples = Vec::with_capacity(new_len);
 
         let ratio = self.sample_rate / target_rate;
@@ -1198,6 +1209,35 @@ mod tests {
         assert!((resampled.duration() - signal.duration()).abs() < 0.001);
         // Length should be roughly halved
         assert_eq!(resampled.len(), 50);
+    }
+
+    /// A reference one sample longer at a rate a hair above the actual's (the
+    /// shape ngspice's output takes: both endpoints, step printed to 7 digits)
+    /// compares over the time both cover. The final sample used to pair the
+    /// actual's last value with the reference one step later.
+    #[test]
+    fn resampling_never_extrapolates_past_the_source() {
+        let f = 1000.0;
+        let rate_ref = 48000.00768;
+        let reference: Vec<f64> = (0..48001)
+            .map(|i| (2.0 * PI * f * i as f64 / rate_ref).sin())
+            .collect();
+        let actual: Vec<f64> = (0..48000)
+            .map(|i| (2.0 * PI * f * i as f64 / 48000.0).sin())
+            .collect();
+        let resampled = Signal::new(actual.clone(), 48000.0, "a").resample(rate_ref);
+        let last_time = (resampled.len() - 1) as f64 / rate_ref;
+        assert!(
+            last_time <= 47999.0 / 48000.0 + 1e-12,
+            "extrapolated to t = {last_time}"
+        );
+        let report = compare_signals(
+            &Signal::new(reference, rate_ref, "r"),
+            &Signal::new(actual, 48000.0, "a"),
+            &ComparisonConfig::default(),
+        );
+        // Same waveform; the only differences are the resampling's own.
+        assert!(report.peak_error < 1e-3, "peak error {}", report.peak_error);
     }
 
     #[test]
