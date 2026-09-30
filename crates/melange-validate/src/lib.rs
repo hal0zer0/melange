@@ -288,6 +288,36 @@ pub fn validate_circuit(
     )
 }
 
+/// Refuse a port name the circuit does not have, listing the circuit's
+/// nodes in index order (the message melange's own solve would give). A deck
+/// melange cannot parse is left to the solve, which reports why.
+fn check_ports_exist(netlist: &str, ports: &[(&str, &str)]) -> Result<(), ValidationError> {
+    let Ok(mut parsed) = melange_solver::parser::Netlist::parse(netlist) else {
+        return Ok(());
+    };
+    if parsed.expand_subcircuits().is_err() {
+        return Ok(());
+    }
+    let Ok(mna) = melange_solver::mna::MnaSystem::from_netlist(&parsed) else {
+        return Ok(());
+    };
+    for (role, node) in ports {
+        if !mna.node_map.contains_key(*node) {
+            let names: Vec<&str> = mna.node_names_in_index_order();
+            return Err(ValidationError::Solver(format!(
+                "{role} node '{node}' not found in circuit. Available: {names:?}. \
+                 Name it with {}.",
+                if *role == "Output" {
+                    "-n/--output-node"
+                } else {
+                    "-i/--input-node"
+                }
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// The base name of the report files `validate` writes into `output_dir`:
 /// the circuit's final path component and the verdict. The circuit name is
 /// the deck's full path for a local file (or a URL), and joining an absolute
@@ -369,6 +399,14 @@ pub fn validate_circuit_with_options(
             );
         }
     }
+
+    // A missing input or output node is refused here, before ngspice runs:
+    // otherwise ngspice fails first ("can't parse 'out'", "no data saved"),
+    // which reads as a simulator problem when it is a node name.
+    check_ports_exist(
+        &stripped_netlist,
+        &[("Output", output_node), ("Input", input_node)],
+    )?;
 
     // Calculate timing parameters
     let duration = input_signal.len() as f64 / sample_rate;
@@ -1232,6 +1270,22 @@ impl ValidationBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A deck without the named port is refused before ngspice runs, with
+    /// the circuit's nodes listed and the flag to use.
+    #[test]
+    fn a_missing_port_is_refused_by_name() {
+        let deck = "bank\nR1 p3 p12 10k\nC1 p12 0 10n\n";
+        assert!(check_ports_exist(deck, &[("Output", "p12"), ("Input", "p3")]).is_ok());
+        let err = check_ports_exist(deck, &[("Output", "out"), ("Input", "p3")])
+            .expect_err("no node out")
+            .to_string();
+        assert!(err.contains("Output node 'out' not found"), "{err}");
+        assert!(
+            err.contains("\"p12\"") && err.contains("-n/--output-node"),
+            "{err}"
+        );
+    }
 
     /// A local deck's circuit name is its full path; the report files must
     /// land in `output_dir`, not next to the deck.
