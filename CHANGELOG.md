@@ -519,6 +519,28 @@ generated state is smaller.
   refused before ngspice runs, naming the circuit's nodes and the flag to use,
   instead of failing inside ngspice with "no data saved".
 
+- **A `.linearize`d BJT was not the device it replaced.** Its small-signal
+  model was rebuilt from bare Ebers-Moll formulas: the B-C junction at Vt
+  instead of NR·Vt, no Gummel-Poon Early effect or high injection, no ISE/ISC
+  leakage, no RB/RC/RE, and B-C conductances in rows the device does not
+  draw them from. A bypassed common-emitter stage with a Gummel-Poon card read
+  0.71 dB hot; an NR = 2 stage with its B-C junction forward read 16.7 dB low.
+  It is now the device's own Jacobian at the bias point, and it keeps its
+  junction capacitances, which were never stamped (a CJC = 100 pF stage from a
+  10 kΩ source had no Miller rolloff: +12.3 dB at 20 kHz). Linearized, full
+  and ngspice now agree.
+- **A PNP's junction capacitances were evaluated at the wrong polarity**, on
+  every route: its reverse-biased B-C junction as forward biased, 8.2× the
+  capacitance ngspice gives. A PNP common-emitter stage with CJC = CJE = 20 pF
+  read 10 dB low at 10 kHz, where its NPN mirror and ngspice agree. Every
+  circuit with a PNP card carrying CJE/CJC moves at high frequency; the
+  regression power amplifier moved toward ngspice (RMS error 0.092 % →
+  0.079 %).
+- **The BJT diffusion capacitance ignored NF and the Gummel-Poon base charge.**
+  It was TF·|Ic|/Vt; it is now TF·d(I_F/qb)/dVbe, ngspice's `capbe`: 1.5× lower
+  at NF = 1.5, 20 % lower with IKF = 5 mA at 1.4 mA. A forward-active
+  (`--bjt-fa`) BJT's B-C capacitance was taken at zero bias whatever its
+  bias (1.77× at Vbc = −3.5 V); it is now taken at its bias.
 ### Added
 
 - Saturating inductors take datasheet saturation ratings directly.
@@ -871,6 +893,11 @@ generated state is smaller.
   shown as %) and lists the whole generated project; the grammar reference no
   longer documents SIN/PULSE sources melange refuses, and its "complete,
   parseable" example no longer contains a source that silences it.
+- The JFET models neither gate junction: its gate draws no current at any
+  bias, so a gate driven into forward bias is not clamped (a gate driven to
+  +2 V through 100 kΩ sits at 2.000 V where ngspice clamps it at 0.546 V).
+  `IS=`/`N=` on a JFET card are refused. Now stated in `limitations.md` with
+  that measurement.
 
 ## [0.1.11] - 2026-09-27
 
