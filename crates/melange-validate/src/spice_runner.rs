@@ -378,10 +378,38 @@ pub fn run_transient(
         }
     }
 
+    if let Some(reason) = transient_abort(&stdout, &stderr) {
+        return Err(SpiceError::SimulationFailed(reason));
+    }
+
     // Parse the printed output (not raw file - the .PRINT output goes to stdout)
     let spice_data = parse_printed_output(&stdout, nodes_to_capture)?;
 
     Ok(spice_data)
+}
+
+/// ngspice's reason when it abandoned a transient part-way. Such a run still
+/// prints the samples it reached and can exit 0, so the comparison would see
+/// only a short reference; the caller reports this instead.
+fn transient_abort(stdout: &str, stderr: &str) -> Option<String> {
+    const SIGNATURES: &[&str] = &["timestep too small", "simulation(s) aborted"];
+    let combined = format!("{stdout}\n{stderr}");
+    let lc = combined.to_lowercase();
+    let sig = SIGNATURES.iter().find(|s| lc.contains(**s))?;
+    let detail: String = combined
+        .lines()
+        .filter(|l| {
+            let ll = l.to_lowercase();
+            SIGNATURES.iter().any(|s| ll.contains(s)) || ll.contains("trouble with")
+        })
+        .map(str::trim)
+        .take(4)
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(format!(
+        "ngspice abandoned the transient ({sig}), so there is no reference past that point. \
+         ngspice said: {detail}"
+    ))
 }
 
 /// Run ngspice with a PWL (piecewise linear) input source
@@ -1381,6 +1409,18 @@ Index   time            v(out)
         let ccw = element_value(&out, "R_ccw").expect("R_ccw line missing");
         assert!((cw - 15007.0).abs() < 1e-6, "R_cw={cw}; deck:\n{out}");
         assert!((ccw - 84993.0).abs() < 1e-6, "R_ccw={ccw}; deck:\n{out}");
+    }
+
+    #[test]
+    fn an_abandoned_transient_is_reported_with_ngspice_s_reason() {
+        // ngspice's own text from a run that stopped at 3.57 ms of 1 s.
+        let out = "Circuit: t\n\ndoAnalyses: TRAN:  Timestep too small; time = 0.00356872, \
+                   timestep = 2.60417e-17: trouble with node \"pi_p\"\n\n\
+                   run simulation(s) aborted\n";
+        let reason = transient_abort(out, "").expect("abort not detected");
+        assert!(reason.contains("timestep too small"), "{reason}");
+        assert!(reason.contains("trouble with node \"pi_p\""), "{reason}");
+        assert!(transient_abort("Circuit: t\nNo. of Data Rows : 48001\n", "").is_none());
     }
 
     #[test]

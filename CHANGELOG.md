@@ -496,6 +496,9 @@ generated state is smaller.
   an inline comment. Each is now translated for the reference or stripped with
   a notice; see `docs/limitations.md` (SPICE Validation Scope) for what the
   reference then models.
+- **`validate` reports why ngspice stopped** when it abandons its transient
+  part-way ("timestep too small"), naming the node ngspice had trouble with,
+  instead of failing on a short reference with no reason given.
 - **`validate` on a deck without the input or output node it was given** is
   refused before ngspice runs, naming the circuit's nodes and the flag to use,
   instead of failing inside ngspice with "no data saved".
