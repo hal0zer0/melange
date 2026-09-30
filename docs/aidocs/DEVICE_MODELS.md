@@ -1077,7 +1077,9 @@ Cutoff (Vgst <= 0): Id = 0
 
 ### Gate Junctions
 The gate is a pn junction to the channel, source side and drain side (SPICE
-level-1 JFET gate diodes, `IS` default 1e-14 A, `N` default 1):
+level-1 JFET gate diodes, `IS` default 1e-14 A; `N` default 1, which ngspice's
+level-1 JFET does not have and fixes at 1, so a card's `N` is a PSpice-style
+extension with no ngspice twin):
 ```
 Igs = IS·(exp(σ·Vgs/(N·Vt)) − 1)·σ          σ = +1 N-channel, −1 P-channel
 Igd = IS·(exp(σ·Vgd/(N·Vt)) − 1)·σ          Vgd = Vgs − Vds

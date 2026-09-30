@@ -4,7 +4,8 @@
 //! gate driven into forward bias was not clamped (driven to +2 V through
 //! 100 kΩ it sat at 2.000 V where ngspice clamps it at 0.546 V). The
 //! junctions are SPICE's level-1 JFET gate diodes, `IS·(exp(V/(N·Vt)) − 1)`
-//! at Vgs and Vgd, with the ngspice defaults IS = 1e-14, N = 1.
+//! at Vgs and Vgd, with the ngspice default IS = 1e-14 and N = 1 (ngspice's
+//! level-1 JFET has no N; its junction is fixed at 1).
 //!
 //! References: ngspice .op / .tran on the same decks with GMIN off
 //! (`gmin=1e-25`, tight tolerances). ngspice adds 1e-12 S across each gate

@@ -50,6 +50,7 @@ pub mod alignment;
 mod behavioral_translate;
 pub mod comparison;
 pub mod deck_guard;
+mod jfet_translate;
 pub(crate) mod opamp_translate;
 pub(crate) mod pentode_translate;
 mod sat_inductor_translate;

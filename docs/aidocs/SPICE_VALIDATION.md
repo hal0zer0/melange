@@ -62,7 +62,20 @@ recorded correlation/RMS values.
    a deck predating that needs re-running. See
    `docs/aidocs/UNIT_VARIATION.md` "Validation Implications".
 
-5. **Gives the reference melange's parasitic caps** (`with_parasitic_caps`,
+5. **Refuses a reference that ignored part of the deck.** ngspice warns
+   `unrecognized parameter (…) - ignored` and simulates on without it; a run
+   with such a warning is refused, naming each parameter and its card
+   (`ignored_parameters`). Where melange reads a key ngspice lacks, the
+   reference gets a translation (below) or the run is refused.
+
+6. **Gives the reference each JFET as melange resolved it**
+   (`jfet_translate.rs`): `BETA = IDSS/VP²` (ngspice has no `IDSS`),
+   catalog and default values, the SPICE sign for a P-channel `VTO`, and the
+   gate capacitances as the constant capacitors melange stamps (ngspice's are
+   bias-dependent). A card with `N` other than 1 is refused: ngspice's
+   level-1 JFET has no emission coefficient.
+
+7. **Gives the reference melange's parasitic caps** (`with_parasitic_caps`,
    `melange validate` / `validate_circuit_with_options`). A capacitor-free
    nonlinear deck is built with 10 pF across each device junction (see
    DEVICE_MODELS.md "Parasitic Cap Auto-Insertion"), recorded by node name in

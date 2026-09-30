@@ -573,6 +573,21 @@ generated state is smaller.
   variable-mu law, at an operating point solved without it. A nonzero value is
   now refused. Variable-mu stays modelled for pentodes and beam tetrodes; no
   deck set these keys on a triode.
+- **`melange validate` compared against a reference that had ignored part of
+  the deck**: ngspice warns `unrecognized parameter (…) - ignored` and
+  simulates on without it, and validate never read the warning. A run whose
+  reference ignored a parameter is now refused, naming each parameter and
+  its card. Across the circuits corpus it reclassifies four decks, all for a
+  diode's self-heating keys (`RTH`, `CTH`, `TAMB`), which ngspice's diode
+  does not have.
+- **A JFET card with `IDSS=` was validated against a different JFET**:
+  ngspice's level-1 JFET has no `IDSS` and ran its default `BETA`, 65 µA at
+  Vgs = 0 where melange ran 600 µA (the jfet-booster example read 458 % RMS
+  error at correlation 0.9998). validate's reference now gets each JFET as
+  melange resolved it (`BETA = IDSS/VP²`, catalog and default values, the
+  SPICE sign for P-channel) with its gate capacitances as the constant
+  capacitors melange stamps; jfet-booster passes at 0.029 %. A card with
+  `N` other than 1 is refused, since ngspice's level-1 JFET has none.
 - **A `.linearize`d device driven out of its small-signal region was
   silently a different circuit**: it went on answering from its
   linearization however far the drive took it. A linearized cathode follower

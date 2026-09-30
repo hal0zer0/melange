@@ -382,6 +382,10 @@ pub fn run_transient(
         return Err(SpiceError::SimulationFailed(reason));
     }
 
+    if let Some(reason) = ignored_parameters(&stdout, &stderr) {
+        return Err(SpiceError::DeckNotComparable(reason));
+    }
+
     // Parse the printed output (not raw file - the .PRINT output goes to stdout)
     let spice_data = parse_printed_output(&stdout, nodes_to_capture)?;
 
@@ -409,6 +413,55 @@ fn transient_abort(stdout: &str, stderr: &str) -> Option<String> {
     Some(format!(
         "ngspice abandoned the transient ({sig}), so there is no reference past that point. \
          ngspice said: {detail}"
+    ))
+}
+
+/// The model parameters ngspice ignored, as a refusal. ngspice warns
+/// `unrecognized parameter (idss) - ignored` and simulates the device without
+/// it: the reference is then a different circuit from the deck (a JFET card's
+/// `IDSS=`, which ngspice's level-1 JFET does not have, left the reference at
+/// its default BETA, 65 uA where melange ran 600 uA). A comparison against it
+/// measures the difference in the decks, not the solvers, so it is refused
+/// with each ignored parameter and the model line ngspice named.
+fn ignored_parameters(stdout: &str, stderr: &str) -> Option<String> {
+    let combined = format!("{stdout}\n{stderr}");
+    let lines: Vec<&str> = combined.lines().collect();
+    let mut found: Vec<String> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let lc = line.to_lowercase();
+        let Some(at) = lc.find("unrecognized parameter") else {
+            continue;
+        };
+        let param = lc[at..]
+            .split_once('(')
+            .and_then(|(_, rest)| rest.split_once(')'))
+            .map_or("?", |(p, _)| p.trim());
+        // ngspice prints the offending card above its warnings (one per
+        // ignored parameter).
+        let card = lines[..i]
+            .iter()
+            .rev()
+            .take(8)
+            .map(|l| l.trim())
+            .find(|l| l.starts_with('.'))
+            .unwrap_or("");
+        let item = if card.is_empty() {
+            param.to_string()
+        } else {
+            format!("{param} (in `{card}`)")
+        };
+        if !found.contains(&item) {
+            found.push(item);
+        }
+    }
+    if found.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "ngspice ignored model parameter(s) {}, so the reference simulates a different \
+         circuit from the deck. Write each in a form ngspice reads (or report the \
+         translation melange's reference is missing).",
+        found.join(", ")
     ))
 }
 
@@ -955,6 +1008,11 @@ pub fn run_transient_with_thevenin_pwl(
     // shipped decks that hand-expanded their op-amps. See opamp_translate.rs.
     let translated =
         crate::opamp_translate::translate_opamps_for_ngspice(&translated, netlist_content)?;
+    // JFET cards as melange resolved them (IDSS -> BETA, catalog/defaults,
+    // P-channel sign), with its constant gate capacitances. No-op without a
+    // JFET. See jfet_translate.rs.
+    let translated =
+        crate::jfet_translate::translate_jfets_for_ngspice(&translated, netlist_content)?;
     // Melange-only element parameters: a saturating inductor becomes its own
     // flux law, a K-coupled saturating core and a resistor's KF=/AF= are
     // stripped with a stated notice. See sat_inductor_translate.rs.
@@ -1395,6 +1453,29 @@ Index   time            v(out)
             (v - 2.7e-7).abs() < 1e-15,
             "switch pos-0 not substituted (got {v}); deck:\n{out}"
         );
+    }
+
+    #[test]
+    fn ignored_model_parameters_are_refused() {
+        // ngspice-45's own text for a JFET card carrying IDSS.
+        let out = "Circuit: idss test\n\nWarning: Model issue on line 5 :\n  \
+                   .model jx njf(idss=6e-4 vto=-0.8 lambda=0.004) ...\n\
+                   unrecognized parameter (idss) - ignored\n";
+        let reason = ignored_parameters(out, "").expect("must refuse");
+        assert!(
+            reason.contains("idss (in `.model jx njf(idss=6e-4"),
+            "{reason}"
+        );
+        // Two parameters on one card: both name the card.
+        let two = "Warning: Model issue on line 7 :\n  .model d1 d(is=2e-9 rth=500 cth=2e-4) ...\n\
+                   unrecognized parameter (rth) - ignored\n\
+                   unrecognized parameter (cth) - ignored\n";
+        let reason = ignored_parameters(two, "").unwrap();
+        assert!(
+            reason.contains("rth (in `.model d1") && reason.contains("cth (in `.model d1"),
+            "{reason}"
+        );
+        assert!(ignored_parameters("Circuit: clean\nNo. of Data Rows : 10\n", "").is_none());
     }
 
     #[test]
