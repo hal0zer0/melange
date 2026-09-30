@@ -136,6 +136,8 @@ const CASES: &[Case] = &[
             ("LAMBDA", "0.01", "0.02", Rich),
             ("CGS", "2e-12", "4e-12", Rich),
             ("CGD", "1e-12", "2e-12", Rich),
+            ("IS", "1e-14", "1e-13", Rich),
+            ("N", "1", "1.5", Rich),
             ("KF", "1e-16", "1e-14", Noise),
             ("AF", "1", "1.3", Noise),
             ("IDSS", "", "4e-3", Alone),

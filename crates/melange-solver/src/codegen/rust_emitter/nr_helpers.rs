@@ -184,7 +184,7 @@ pub(super) fn emit_dk_device_evaluation(
                     "{indent}let vbe_{d} = v_d{s} * DEVICE_{d}_SIGN;\n"
                 ));
                 code.push_str(&format!(
-                    "{indent}let (exp_be_{d}, dexp_be_{d}) = bjt_junction_exp(vbe_{d} / (DEVICE_{d}_NF * state.device_{d}_vt), state.device_{d}_is);\n"
+                    "{indent}let (exp_be_{d}, dexp_be_{d}) = junction_exp(vbe_{d} / (DEVICE_{d}_NF * state.device_{d}_vt), state.device_{d}_is);\n"
                 ));
                 code.push_str(&format!(
                     "{indent}let i_dev{s} = state.device_{d}_is * (exp_be_{d} - 1.0) * DEVICE_{d}_SIGN;\n"
@@ -207,13 +207,7 @@ pub(super) fn emit_dk_device_evaluation(
                 // N_v ordering: dim s = Vds, dim s+1 = Vgs.
                 // Functions expect (vgs, vds), so pass (v_d{s1}, v_d{s}).
                 code.push_str(&format!(
-                    "{indent}let i_dev{s} = jfet_id(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
-                ));
-                code.push_str(&format!(
-                    "{indent}let i_dev{s1} = jfet_ig(v_d{s1}, DEVICE_{d}_SIGN);\n"
-                ));
-                code.push_str(&format!(
-                    "{indent}let jfet{d}_jac = jfet_jacobian(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
+                    "{indent}let (i_dev{s}, i_dev{s1}, jfet{d}_jac) = jfet_evaluate(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_IS, DEVICE_{d}_N_VT, DEVICE_{d}_SIGN);\n"
                 ));
                 // In dim-space (dim0=Vds, dim1=Vgs):
                 //   jdev_s_s   = dId/dVds = jac[1]
@@ -346,6 +340,42 @@ pub(super) fn emit_nr_singular_fallback(code: &mut String, dim: usize, indent: &
 /// damping to maintain current-space NR consistency.
 ///
 /// Assumes `delta0..delta{dim-1}` and `v_d0..v_d{dim-1}` are in scope.
+/// JFET voltage limiting, in ngspice's order: Vgs by pnjlim on its
+/// gate-source junction, then fetlim around pinch-off; Vds through the
+/// gate-drain junction, pnjlim on `Vgd = Vgs − Vds` with Vds taken back from
+/// the proposed Vgs, then fetlim. pnjlim works in the device's polarity and is
+/// inert unless a junction steps far into forward bias, and `IS = 0` makes
+/// `GATE_VCRIT` `f64::MAX`, so a reverse-biased gate limits exactly as
+/// fetlim alone. `d` is the dimension (0 = Vds, 1 = Vgs); the rest are the
+/// emitter's expressions for the proposed and current Vds/Vgs.
+pub(super) fn jfet_limit_expr(
+    dev_num: usize,
+    d: usize,
+    new_ds: &str,
+    old_ds: &str,
+    new_gs: &str,
+    old_gs: &str,
+) -> String {
+    let junction = |vnew: &str, vold: &str| {
+        format!(
+            "DEVICE_{dev_num}_SIGN * pnjlim(DEVICE_{dev_num}_SIGN * ({vnew}), \
+             DEVICE_{dev_num}_SIGN * ({vold}), DEVICE_{dev_num}_N_VT, DEVICE_{dev_num}_GATE_VCRIT)"
+        )
+    };
+    if d == 0 {
+        let vgd = junction(
+            &format!("({new_gs}) - ({new_ds})"),
+            &format!("({old_gs}) - ({old_ds})"),
+        );
+        format!("fetlim(({new_gs}) - {vgd}, {old_ds}, 0.0)")
+    } else {
+        format!(
+            "fetlim({}, {old_gs}, state.device_{dev_num}_vp)",
+            junction(new_gs, old_gs)
+        )
+    }
+}
+
 pub(super) fn emit_nr_limit_and_converge(
     code: &mut String,
     ir: &CircuitIR,
@@ -395,17 +425,18 @@ pub(super) fn emit_nr_limit_and_converge(
                         "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vt, DEVICE_{dev_num}_VCRIT);\n"
                     ));
                 }
-                (DeviceType::Jfet, 0) => {
-                    // dim 0 = Vds — generous limiting
-                    code.push_str(&format!(
-                        "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, 0.0);\n"
-                    ));
-                }
                 (DeviceType::Jfet, _) => {
-                    // dim 1 = Vgs — limit around pinch-off voltage
-                    code.push_str(&format!(
-                        "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vp);\n"
-                    ));
+                    // dim 0 = Vds, dim 1 = Vgs: fetlim plus the gate junctions.
+                    let (s, s1) = (slot.start_idx, slot.start_idx + 1);
+                    let lim = jfet_limit_expr(
+                        dev_num,
+                        d,
+                        &format!("v_d{s} + dv{s}"),
+                        &format!("v_d{s}"),
+                        &format!("v_d{s1} + dv{s1}"),
+                        &format!("v_d{s1}"),
+                    );
+                    code.push_str(&format!("{indent}    let v_lim = {lim};\n"));
                 }
                 (DeviceType::Mosfet, 0) => {
                     // dim 0 = Vds — generous limiting
@@ -608,8 +639,17 @@ pub(super) fn emit_schur_nr_limit_and_converge(
                 (DeviceType::Bjt, _) | (DeviceType::BjtForwardActive, _) => format!(
                     "pnjlim(v_trial{i}, v_d{i}, state.device_{dev_num}_vt, DEVICE_{dev_num}_VCRIT)"
                 ),
-                (DeviceType::Jfet, 0) => format!("fetlim(v_trial{i}, v_d{i}, 0.0)"),
-                (DeviceType::Jfet, _) => format!("fetlim(v_trial{i}, v_d{i}, state.device_{dev_num}_vp)"),
+                (DeviceType::Jfet, _) => {
+                    let (s, s1) = (slot.start_idx, slot.start_idx + 1);
+                    jfet_limit_expr(
+                        dev_num,
+                        d,
+                        &format!("v_trial{s}"),
+                        &format!("v_d{s}"),
+                        &format!("v_trial{s1}"),
+                        &format!("v_d{s1}"),
+                    )
+                }
                 (DeviceType::Mosfet, 0) => format!("fetlim(v_trial{i}, v_d{i}, 0.0)"),
                 (DeviceType::Mosfet, _) => format!("fetlim(v_trial{i}, v_d{i}, state.device_{dev_num}_vt)"),
                 (DeviceType::Tube, 0) | (DeviceType::Tube, 2) => {

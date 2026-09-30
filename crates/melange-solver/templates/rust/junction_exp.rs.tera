@@ -1,0 +1,29 @@
+// Canonical source: melange-devices/src/lib.rs (safeguards::junction_exp)
+// Duplicated here because generated code must be self-contained. One copy,
+// shared by every junction law in the generated code (BJT, JFET gate).
+
+/// Forward-current ceiling of the extended junction exponential [A].
+const JUNCTION_MAX_FWD_I: f64 = 1e3;
+
+/// `(value, d value/dx)` of a junction law's exponential `I = IS·e^x`
+/// (canonical form: `melange_devices::safeguards::junction_exp`). Up to 40
+/// this is `fast_exp` for both. Above it the true exponential continues until
+/// the current `IS·e^x` reaches JUNCTION_MAX_FWD_I, then extends linearly with a
+/// matching slope, so a small-IS card is not current-limited at `IS·e^40` and
+/// the slope is the value's own.
+#[inline(always)]
+fn junction_exp(x: f64, is: f64) -> (f64, f64) {
+    if x <= 40.0 {
+        let e = fast_exp(x);
+        return (e, e);
+    }
+    let x_max = 40.0f64.max(JUNCTION_MAX_FWD_I.ln() - is.ln());
+    if x <= x_max {
+        let e = x.exp();
+        (e, e)
+    } else {
+        let e = x_max.exp();
+        (e * (1.0 + (x - x_max)), e)
+    }
+}
+

@@ -132,16 +132,10 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
   where ngspice gives 8.40 V). Model it as an explicit resistor in series with
   the drain or source, which matches ngspice. Internal drain/source nodes are
   queued.
-- JFET gate junctions are not modelled [OPEN]. A real JFET gate is a pn
-  junction to the channel (SPICE `IS`, `N`); melange has neither the
-  gate-source nor the gate-drain diode, so Ig = 0 at every bias, and a card
-  that sets `IS` or `N` is refused rather than ignored. A gate driven into
-  forward bias is not clamped, and the channel is evaluated at the unclamped
-  Vgs. Measured: a gate driven to +2 V through 100 kΩ sits at 2.000 V where
-  ngspice clamps it at 0.546 V with 14.5 µA into the gate, and the drain
-  draws 6.41 mA against ngspice's 5.98 mA. Reverse biased, where a normal
-  JFET stage stays, the missing current is leakage of order 1e-12 A. (A
-  MOSFET gate is an insulated oxide; Ig = 0 is correct there.)
+- JFET gate junctions follow SPICE's level-1 diodes (`IS`, `N`; ngspice
+  defaults), without SPICE's 1e-12 S GMIN across them, so ngspice agreement is
+  measured with its GMIN off. `IS` is not temperature-scaled (a JFET card has
+  no TAMB/XTI/EG).
 - Subthreshold: hardcoded 2xVT slope (real devices: 60-120 mV/decade)
 - MOSFET Level 1 only (no BSIM3/4)
 

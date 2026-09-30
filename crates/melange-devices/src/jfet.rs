@@ -23,8 +23,11 @@ pub struct Jfet {
     pub idss: f64,
     /// Channel length modulation [1/V]
     pub lambda: f64,
-    /// Gate saturation current [A]
+    /// Gate junction saturation current [A] (SPICE `IS`, default 1e-14);
+    /// 0 disables both gate junctions.
     pub is: f64,
+    /// Gate junction emission coefficient (SPICE `N`, default 1).
+    pub n: f64,
 }
 
 impl Jfet {
@@ -41,6 +44,7 @@ impl Jfet {
             idss,
             lambda: 0.001,
             is: 1e-14,
+            n: 1.0,
         }
     }
 
@@ -213,21 +217,40 @@ impl Jfet {
         }
     }
 
-    /// Gate current (very small, only conducts when forward biased).
-    pub fn gate_current(&self, vgs: f64) -> f64 {
-        // Gate-source diode
-        let vgs_eff = match self.channel {
-            JfetChannel::N => vgs,  // Forward bias when Vgs > 0
-            JfetChannel::P => -vgs, // Forward bias when Vgs < 0
-        };
-
-        if vgs_eff > 0.0 {
-            // Forward biased
-            self.is * (safeguards::safe_exp(vgs_eff / VT_ROOM) - 1.0)
-        } else {
-            // Reverse biased
-            -self.is
+    /// The gate's pn junctions to the channel, source and drain side:
+    /// `(Igs, Igd, g_gs, g_gd)`, each `IS·(exp(V/(N·Vt)) − 1)` at
+    /// `Vgs` and `Vgd = Vgs − Vds` in the device's polarity, currents flowing
+    /// into the gate. SPICE level-1 JFET gate diodes, without SPICE's GMIN
+    /// conditioning term (the fixed point is the device's). The exponential is
+    /// the IS-aware [`safeguards::junction_exp`].
+    pub fn gate_junctions(&self, vgs: f64, vds: f64) -> (f64, f64, f64, f64) {
+        if self.is == 0.0 {
+            return (0.0, 0.0, 0.0, 0.0);
         }
+        let s = self.sign();
+        let n_vt = self.n * VT_ROOM;
+        let junction = |v: f64| {
+            let (e, de) = safeguards::junction_exp(s * v / n_vt, self.is);
+            (s * self.is * (e - 1.0), self.is / n_vt * de)
+        };
+        let (igs, g_gs) = junction(vgs);
+        let (igd, g_gd) = junction(vgs - vds);
+        (igs, igd, g_gs, g_gd)
+    }
+
+    /// Terminal currents and Jacobian of the whole device at `(Vgs, Vds)`:
+    /// `(I_drain, I_gate, [dId/dVgs, dId/dVds, dIg/dVgs, dIg/dVds])`, the
+    /// channel plus both gate junctions. The drain loses the gate-drain
+    /// junction's current, the gate carries both, the source the rest.
+    pub fn evaluate(&self, vgs: f64, vds: f64) -> (f64, f64, [f64; 4]) {
+        let id = self.drain_current(vgs, vds);
+        let (gm, gds) = self.jacobian_partial(vgs, vds);
+        let (igs, igd, g_gs, g_gd) = self.gate_junctions(vgs, vds);
+        (
+            id - igd,
+            igs + igd,
+            [gm - g_gd, gds + g_gd, g_gs + g_gd, -g_gd],
+        )
     }
 }
 
@@ -713,6 +736,47 @@ mod tests {
                 gds_pos,
                 gds_neg
             );
+        }
+    }
+
+    /// The whole-device Jacobian (channel plus both gate junctions) is the
+    /// derivative of its currents, both polarities, with each junction
+    /// forward and reverse.
+    #[test]
+    fn evaluate_jacobian_is_the_derivative_of_its_currents() {
+        for (channel, vp) in [(JfetChannel::N, -2.0), (JfetChannel::P, 2.0)] {
+            let mut j = Jfet::new(channel, vp, 4e-3);
+            j.lambda = 0.01;
+            j.n = 1.3;
+            let s = j.sign();
+            for &(vgs, vds) in &[
+                (0.55, 1.0),
+                (-1.0, 3.0),
+                (0.3, -0.4),
+                (-0.5, -1.2),
+                (0.6, 0.05),
+            ] {
+                let (vgs, vds) = (s * vgs, s * vds);
+                let (_, _, jac) = j.evaluate(vgs, vds);
+                let h = 1e-7;
+                let fd = |dg: f64, dd: f64| {
+                    let (a0, a1, _) = j.evaluate(vgs + dg, vds + dd);
+                    let (b0, b1, _) = j.evaluate(vgs - dg, vds - dd);
+                    ((a0 - b0) / (2.0 * h), (a1 - b1) / (2.0 * h))
+                };
+                let (did_dvgs, dig_dvgs) = fd(h, 0.0);
+                let (did_dvds, dig_dvds) = fd(0.0, h);
+                for (k, (an, num)) in jac
+                    .iter()
+                    .zip([did_dvgs, did_dvds, dig_dvgs, dig_dvds])
+                    .enumerate()
+                {
+                    assert!(
+                        (an - num).abs() <= 1e-5 * num.abs().max(1e-9),
+                        "{channel:?} ({vgs}, {vds}) jac[{k}]: {an:e} vs {num:e}"
+                    );
+                }
+            }
         }
     }
 }

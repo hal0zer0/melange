@@ -3070,7 +3070,18 @@ fn test_jfet_codegen_generates_correct_functions() {
 
     // Should contain JFET device functions
     assert!(code.contains("jfet_id("), "Should contain jfet_id function");
-    assert!(code.contains("jfet_ig("), "Should contain jfet_ig function");
+    assert!(
+        code.contains("jfet_evaluate("),
+        "Should contain jfet_evaluate (channel plus gate junctions)"
+    );
+    assert!(
+        code.contains("DEVICE_0_IS"),
+        "Should have the gate junction IS"
+    );
+    assert!(
+        code.contains("DEVICE_0_N_VT"),
+        "Should have the gate junction N*Vt"
+    );
     assert!(
         code.contains("jfet_jacobian("),
         "Should contain jfet_jacobian function"
@@ -3087,14 +3098,10 @@ fn test_jfet_codegen_generates_correct_functions() {
 
     // Should call JFET functions in NR loop with state fields for IDSS/VP/LAMBDA, const for SIGN.
     // N_v ordering: dim 0 = Vds (v_d0), dim 1 = Vgs (v_d1).
-    // Functions expect (vgs, vds), so the call is jfet_id(v_d1, v_d0, ...).
+    // Functions expect (vgs, vds), so the call is jfet_evaluate(v_d1, v_d0, ...).
     assert!(
-        code.contains("jfet_id(v_d1, v_d0, state.device_0_idss, state.device_0_vp, state.device_0_lambda, DEVICE_0_SIGN)"),
-        "NR loop should call jfet_id(v_d1, v_d0, ...) — dim0=Vds, dim1=Vgs"
-    );
-    assert!(
-        code.contains("jfet_ig(v_d1, DEVICE_0_SIGN)"),
-        "NR loop should call jfet_ig(v_d1, ...) — dim1=Vgs"
+        code.contains("jfet_evaluate(v_d1, v_d0, state.device_0_idss, state.device_0_vp, state.device_0_lambda, DEVICE_0_IS, DEVICE_0_N_VT, DEVICE_0_SIGN)"),
+        "NR loop should call jfet_evaluate(v_d1, v_d0, ...) — dim0=Vds, dim1=Vgs"
     );
 }
 

@@ -4903,6 +4903,20 @@ impl CircuitIR {
             )));
         }
 
+        // Gate junctions (SPICE IS, N; ngspice defaults). IS = 0 disables them.
+        let is = Self::lookup_model_param(netlist, model, "IS").unwrap_or(1e-14);
+        if is < 0.0 || !is.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "JFET model IS must be non-negative and finite, got {is}"
+            )));
+        }
+        let n = Self::lookup_model_param(netlist, model, "N").unwrap_or(1.0);
+        if n <= 0.0 || !n.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "JFET model N must be positive and finite, got {n}"
+            )));
+        }
+
         Self::check_model_params(netlist, model, ModelClass::Jfet)?;
         Self::warn_unresolved_model(
             netlist,
@@ -4919,6 +4933,8 @@ impl CircuitIR {
             is_p_channel,
             cgs,
             cgd,
+            is,
+            n,
         })
     }
 

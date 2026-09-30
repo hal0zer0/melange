@@ -41,10 +41,6 @@
 //! - `fast_exp` / `fast_ln` polynomial approximations themselves (the
 //!   non-precise cfg) are an accuracy question, not a twin-sync question,
 //!   and are not compared against libm here.
-//! - JFET gate current: the template's `jfet_ig` is identically 0 and
-//!   `dc_op.rs:280` deliberately matches (Ig ≡ 0). The devices crate's
-//!   `Jfet::gate_current` diode-leakage helper is NOT consumed by the solver
-//!   and is intentionally not the twin.
 
 use std::process::Command;
 use std::sync::OnceLock;
@@ -78,6 +74,10 @@ mod tpl {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/templates/rust/device_diode.rs.tera"
+    ));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/templates/rust/junction_exp.rs.tera"
     ));
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -118,8 +118,8 @@ mod tpl {
     pub fn diode_eval_with_rs_tpl(v_d: f64, is: f64, n_vt: f64, rs: f64) -> (f64, f64) {
         diode_eval_with_rs(v_d, is, n_vt, rs)
     }
-    pub fn bjt_junction_exp_tpl(x: f64, is: f64) -> (f64, f64) {
-        bjt_junction_exp(x, is)
+    pub fn junction_exp_tpl(x: f64, is: f64) -> (f64, f64) {
+        junction_exp(x, is)
     }
     #[allow(clippy::too_many_arguments)]
     pub fn bjt_evaluate_tpl(
@@ -179,8 +179,18 @@ mod tpl {
     pub fn jfet_id_tpl(vgs: f64, vds: f64, idss: f64, vp: f64, lambda: f64, sign: f64) -> f64 {
         jfet_id(vgs, vds, idss, vp, lambda, sign)
     }
-    pub fn jfet_ig_tpl(vgs: f64, sign: f64) -> f64 {
-        jfet_ig(vgs, sign)
+    #[allow(clippy::too_many_arguments)]
+    pub fn jfet_evaluate_tpl(
+        vgs: f64,
+        vds: f64,
+        idss: f64,
+        vp: f64,
+        lambda: f64,
+        is: f64,
+        n_vt: f64,
+        sign: f64,
+    ) -> (f64, f64, [f64; 4]) {
+        jfet_evaluate(vgs, vds, idss, vp, lambda, is, n_vt, sign)
     }
     pub fn jfet_jacobian_tpl(
         vgs: f64,
@@ -551,11 +561,11 @@ fn template_diode_eval_with_rs_is_bitwise_identical_to_split_pair() {
 /// `safeguards::junction_exp`, in the legacy range, the extended exact range
 /// of a small-IS card and the linear extension beyond it.
 #[test]
-fn template_bjt_junction_exp_matches_devices_crate() {
+fn template_junction_exp_matches_devices_crate() {
     for &is in &[1e-12, 1e-14, 4.3e-15, 1e-19, 2.9e-22, 1e-30] {
         let mut x = -60.0;
         while x <= 120.0 {
-            let (e_t, de_t) = tpl::bjt_junction_exp_tpl(x, is);
+            let (e_t, de_t) = tpl::junction_exp_tpl(x, is);
             let (e_d, de_d) = melange_devices::safeguards::junction_exp(x, is);
             assert_close(&format!("value at x={x}, IS={is:e}"), e_t, e_d, 1e-12, 0.0);
             assert_close(
@@ -909,11 +919,23 @@ fn template_jfet_matches_devices_crate() {
                 assert_close(&format!("{ctx} dId/dVds"), jac_t[1], gds_d, 1e-9, 1e-24);
                 assert_eq!(jac_t[2], 0.0, "{ctx} dIg/dVgs must be 0");
                 assert_eq!(jac_t[3], 0.0, "{ctx} dIg/dVds must be 0");
-                assert_eq!(
-                    tpl::jfet_ig_tpl(vgs, sign),
-                    0.0,
-                    "{ctx} template Ig must be identically 0 (matches dc_op.rs Ig ≡ 0)"
-                );
+                // Channel plus both gate junctions against Jfet::evaluate
+                // (which the DC OP uses), with the junctions on and off.
+                for (is, n) in [(1e-14, 1.0), (1e-14, 1.5), (0.0, 1.0)] {
+                    let mut full = dev;
+                    full.is = is;
+                    full.n = n;
+                    let (id_e, ig_e, jac_e) = full.evaluate(vgs, vds);
+                    let n_vt = n * melange_devices::VT_ROOM;
+                    let (id_te, ig_te, jac_te) =
+                        tpl::jfet_evaluate_tpl(vgs, vds, idss, vp, lambda, is, n_vt, sign);
+                    let c = format!("{ctx} IS={is:e} N={n}");
+                    assert_close(&format!("{c} I_drain"), id_te, id_e, 1e-9, 1e-24);
+                    assert_close(&format!("{c} I_gate"), ig_te, ig_e, 1e-9, 1e-24);
+                    for (k, (t, d)) in jac_te.iter().zip(&jac_e).enumerate() {
+                        assert_close(&format!("{c} jac[{k}]"), *t, *d, 1e-9, 1e-24);
+                    }
+                }
                 // Region bookkeeping for grid honesty.
                 if id_d.abs() > 1e-6 {
                     if sign * vds >= 0.0 {

@@ -37,6 +37,7 @@ const TMPL_CONSTANTS: &str = include_str!("../../../templates/rust/constants.rs.
 const TMPL_STATE: &str = include_str!("../../../templates/rust/state.rs.tera");
 const TMPL_DEVICE_DIODE: &str = include_str!("../../../templates/rust/device_diode.rs.tera");
 const TMPL_DEVICE_BJT: &str = include_str!("../../../templates/rust/device_bjt.rs.tera");
+const TMPL_JUNCTION_EXP: &str = include_str!("../../../templates/rust/junction_exp.rs.tera");
 const TMPL_DEVICE_JFET: &str = include_str!("../../../templates/rust/device_jfet.rs.tera");
 const TMPL_DEVICE_MOSFET: &str = include_str!("../../../templates/rust/device_mosfet.rs.tera");
 const TMPL_DEVICE_TUBE: &str = include_str!("../../../templates/rust/device_tube.rs.tera");
@@ -65,6 +66,7 @@ impl RustEmitter {
             ("state", TMPL_STATE),
             ("device_diode", TMPL_DEVICE_DIODE),
             ("device_bjt", TMPL_DEVICE_BJT),
+            ("junction_exp", TMPL_JUNCTION_EXP),
             ("device_jfet", TMPL_DEVICE_JFET),
             ("device_mosfet", TMPL_DEVICE_MOSFET),
             ("device_tube", TMPL_DEVICE_TUBE),

@@ -2761,8 +2761,24 @@ impl Parser {
                 });
             }
 
+            // A JFET's IS is its gate junctions' saturation current: 0 disables
+            // them (the model without gate junctions), so only negative is
+            // unphysical there.
+            let jfet = crate::model_params::ModelClass::from_model_type(&model.model_type)
+                == Some(crate::model_params::ModelClass::Jfet);
             // Parameters that must be strictly positive
             match key_upper.as_str() {
+                "IS" if jfet => {
+                    if *value < 0.0 {
+                        return Err(ParseError {
+                            line: self.line_of_model(&model.name),
+                            message: format!(
+                                ".model '{}': {} must be >= 0, got {}",
+                                model.name, key, value
+                            ),
+                        });
+                    }
+                }
                 "IS" | "IDSS" | "G0" => {
                     if *value <= 0.0 {
                         return Err(ParseError {

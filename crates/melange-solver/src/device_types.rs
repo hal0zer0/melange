@@ -466,7 +466,8 @@ pub struct StatefulSpec {
 /// JFET model parameters (resolved from `.model` directive or defaults).
 ///
 /// Codegen uses 2D Shichman-Hodges: Vgs and Vds control Id (triode + saturation regions).
-/// Gate current Ig (dimension 2) is effectively zero for reverse-biased gate.
+/// Gate current Ig (dimension 2) flows through the gate-source and gate-drain
+/// junctions (`is`, `n`).
 /// This matches the MNA stamping where JFET is 2D (dimension=2, controlling voltages=Vgs, Vds).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JfetParams {
@@ -484,6 +485,29 @@ pub struct JfetParams {
     /// Gate-drain junction capacitance [F] (0.0 = disabled)
     #[serde(default)]
     pub cgd: f64,
+    /// Gate junction saturation current [A] (SPICE `IS`, default 1e-14);
+    /// 0 disables the gate-source and gate-drain junctions.
+    #[serde(default = "default_jfet_is")]
+    pub is: f64,
+    /// Gate junction emission coefficient (SPICE `N`, default 1).
+    #[serde(default = "default_jfet_n")]
+    pub n: f64,
+}
+
+fn default_jfet_is() -> f64 {
+    1e-14
+}
+
+fn default_jfet_n() -> f64 {
+    1.0
+}
+
+impl JfetParams {
+    /// `N·Vt` of the gate junctions [V], at TNOM: the JFET carries no
+    /// temperature (no XTI/EG/TAMB), so IS is not temperature-scaled.
+    pub fn gate_n_vt(&self) -> f64 {
+        self.n * melange_devices::VT_ROOM
+    }
 }
 
 /// MOSFET model parameters (Level 1 SPICE, triode + saturation).

@@ -434,9 +434,11 @@ const BJT_DEFINING: &[&str] = &[
     "XTB",
 ];
 
-const JFET_HONORED: &[&str] = &["VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "KF", "AF"];
+const JFET_HONORED: &[&str] = &[
+    "VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "IS", "N", "KF", "AF",
+];
 
-const JFET_DEFINING: &[&str] = &["VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD"];
+const JFET_DEFINING: &[&str] = &["VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "IS", "N"];
 
 /// A FET card's series resistance is not in the solution. It used to reach
 /// only the Newton Jacobian, so the converged answer was the device without

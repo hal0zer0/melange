@@ -709,6 +709,8 @@ When `RB`, `RC`, or `RE` are non-zero, internal nodes (basePrime, collectorPrime
 | `RD`, `RS` | 0 Ω | Drain/source series resistance: only 0 is accepted. A nonzero value is refused (not implemented in the solution); model it as an explicit resistor |
 | `CGS` | 0 F | Gate-source capacitance |
 | `CGD` | 0 F | Gate-drain capacitance |
+| `IS` | 1e-14 A | Gate junction saturation current (gate-source and gate-drain diodes; 0 disables them) |
+| `N` | 1 | Gate junction emission coefficient |
 
 Either `IDSS` or `BETA` may be specified. If both are present, `IDSS` takes priority. If only `BETA` is given, it is converted to IDSS = BETA * VTO².
 

@@ -1351,6 +1351,15 @@ impl RustEmitter {
                     emit_device_const(&mut code, dev_num, "IDSS", jp.idss);
                     emit_device_const(&mut code, dev_num, "VP", jp.vp);
                     emit_device_const(&mut code, dev_num, "LAMBDA", jp.lambda);
+                    // Gate junctions: IS, N*Vt and the pnjlim critical voltage.
+                    emit_device_const(&mut code, dev_num, "IS", jp.is);
+                    emit_device_const(&mut code, dev_num, "N_VT", jp.gate_n_vt());
+                    let vcrit = if jp.is > 0.0 {
+                        melange_primitives::nr::pn_vcrit(jp.gate_n_vt(), jp.is)
+                    } else {
+                        f64::MAX
+                    };
+                    emit_device_const(&mut code, dev_num, "GATE_VCRIT", vcrit);
                     let sign = if jp.is_p_channel { -1.0 } else { 1.0 };
                     code.push_str(&format!(
                         "const DEVICE_{}_SIGN: f64 = {:.1};\n\n",
@@ -1550,6 +1559,10 @@ impl RustEmitter {
 
         if has_diode {
             code.push_str(&self.render("device_diode", &Context::new())?);
+        }
+        // The one junction exponential shared by the BJT and the JFET gate.
+        if has_bjt || has_jfet {
+            code.push_str(&self.render("junction_exp", &Context::new())?);
         }
         if has_bjt {
             code.push_str(&self.render("device_bjt", &Context::new())?);

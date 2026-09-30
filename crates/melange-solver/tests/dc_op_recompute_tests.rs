@@ -444,9 +444,9 @@ fn e4_diode_flag_on_emits_device_eval() {
     );
 }
 
-/// JFET flag-on: recompute_dc_op delegates to the shared `jfet_id` /
-/// `jfet_jacobian` helpers (2D block) and produces a full 2×2 Jacobian
-/// pack into j_dev.
+/// JFET flag-on: recompute_dc_op delegates to the shared `jfet_evaluate`
+/// helper (channel plus gate junctions, 2D block) and produces a full 2×2
+/// Jacobian pack into j_dev.
 #[test]
 fn e4_jfet_flag_on_emits_jfet_evaluate() {
     let code = generate_dk(JFET_NETLIST, true);
@@ -458,15 +458,13 @@ fn e4_jfet_flag_on_emits_jfet_evaluate() {
     let body = &code[body_start..window_end];
 
     assert!(
-        body.contains("jfet_id(v_d1, v_d0, state.device_0_idss"),
-        "E.4: JFET slot must reuse the shared jfet_id helper \
+        body.contains(
+            "let (i_dev0, i_dev1, jfet0_jac) = jfet_evaluate(v_d1, v_d0, state.device_0_idss"
+        ),
+        "E.4: JFET slot must reuse the shared jfet_evaluate helper \
          (args are (vgs=v_d1, vds=v_d0, ...)).\n\
          body preview (first 1500 chars):\n{}",
         &body[..body.len().min(1500)]
-    );
-    assert!(
-        body.contains("let jfet0_jac = jfet_jacobian(v_d1, v_d0"),
-        "E.4: JFET slot must compute the 2x2 jfet_jacobian"
     );
     for (r, c) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
         assert!(

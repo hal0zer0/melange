@@ -24,6 +24,7 @@ cards (dumped 2026-09-29); these are also the SPICE3 manual's values.
 | JFET | VTO | −2 (N; P stored +2 in melange's convention) | −2 |
 | JFET | BETA | 1e-4 A/V² (IDSS = BETA·VTO²) | 1e-4 |
 | JFET | LAMBDA, CGS, CGD | 0 | same |
+| JFET | IS, N (gate junctions) | 1e-14 A, 1 | same |
 | JFET, MOSFET | RD, RS | 0; nonzero refused (not in the solution) | 0 |
 | MOSFET (level 1) | VTO, KP, LAMBDA | 0, 2e-5 A/V² (W = L), 0 | same |
 | MOSFET (level 1) | GAMMA, PHI | 0, 0.6 | same |
@@ -138,7 +139,8 @@ At TAMB = TNOM every factor is exactly 1. Gated against ngspice-42 `.op` at
 `.temp 60` and `.temp 27` (`tools/melange-cli/tests/device_temperature.rs`,
 agreement ~1 µV). Not scaled: the junction capacitances (SPICE scales CJO,
 CJE, CJC and VJ with temperature), RS/RB/RC/RE, BV, and the JFET and MOSFET
-(no temperature law). Behavioural models (op-amp, VCA, tubes) have none; a
+(no temperature law; in particular the JFET gate junctions' `IS` is used at its
+card value, with `N·Vt` at TNOM, since a JFET card carries no XTI/EG/TAMB). Behavioural models (op-amp, VCA, tubes) have none; a
 triode's `TAMB` is only its self-heating ambient.
 
 ### Self-Heating (Shared With BJT)
@@ -288,7 +290,7 @@ A fixed clamp at 40 capped the current at `IS·e^40` (23.5 mA at IS = 1e-19,
 and, above the clamp, reported a slope while the value stayed flat. Currents
 use the value, Jacobian entries the slope. The same form is in the device
 models, the DC operating point (the 1D forward-active path), `.linearize`'s
-g-parameters and the generated code (`bjt_junction_exp`, which the inline
+g-parameters and the generated code (`junction_exp`, shared with the JFET gate junctions, which the inline
 forward-active emissions call); a template sync test holds them equal over
 x and IS. For IS ≥ 4.3e-15 the boundary is unchanged.
 
@@ -1070,23 +1072,33 @@ Saturation (|Vds| >= |Vgst|):
 Cutoff (Vgst <= 0): Id = 0
 ```
 
-### Gate Current
+### Gate Junctions
+The gate is a pn junction to the channel, source side and drain side (SPICE
+level-1 JFET gate diodes, `IS` default 1e-14 A, `N` default 1):
 ```
-Ig = 0  at every bias (no gate junction is modelled)
+Igs = IS·(exp(σ·Vgs/(N·Vt)) − 1)·σ          σ = +1 N-channel, −1 P-channel
+Igd = IS·(exp(σ·Vgd/(N·Vt)) − 1)·σ          Vgd = Vgs − Vds
+I_drain = Id_channel − Igd                   (dim 0)
+I_gate  = Igs + Igd                          (dim 1)
+I_source = −(Id_channel + Igs)
 ```
-A JFET gate is a pn junction to the channel, not an insulated gate: SPICE
-models the gate-source and gate-drain diodes with `IS` and `N`, and forward
-biased they conduct at about +0.5 to 0.7 V and clamp the gate. melange has
-neither junction (generated `jfet_ig` returns 0 with zero partials, and the DC
-OP matches it), so a forward-driven gate is unclamped; `IS`/`N` on a JFET card
-are refused. Costed in `docs/limitations.md` (JFET / MOSFET).
+Forward biased they conduct at about +0.5 to 0.7 V and clamp the gate; reverse
+biased each leaks −IS. The exponential is the IS-aware `junction_exp` (one copy,
+shared with the BJT). `IS=0` disables both junctions, the model without them.
+No GMIN term: SPICE adds 1e-12 S across each junction as conditioning, which
+moves the fixed point, so ngspice references are taken with GMIN off.
+Canonical: `melange_devices::jfet::Jfet::evaluate`; generated `jfet_evaluate`
+(held equal by the template sync test); the DC OP calls `Jfet::evaluate`.
+
+Limiting follows ngspice: pnjlim on Vgs and on Vgd (in the device's polarity,
+inert unless a junction steps far forward), then fetlim; Vds is taken back
+from the limited Vgd (`nr_helpers::jfet_limit_expr`, and the DC OP's copy).
 
 ### Device Jacobian (2x2)
 ```
-[dId/dVgs  dId/dVds]
-[dIg/dVgs  dIg/dVds]
+[dId/dVgs  dId/dVds]      [gm − g_gd     gds + g_gd]
+[dIg/dVgs  dIg/dVds]  =   [g_gs + g_gd   −g_gd     ]
 ```
-dIg/dVgs and dIg/dVds are zero.
 
 ### Sign Convention
 - N-channel (NJ): sign=+1.0, default VTO=-2.0, Vp negative

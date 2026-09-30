@@ -361,22 +361,19 @@ fn evaluate_devices_inner(
                 };
                 let mut jfet = melange_devices::jfet::Jfet::new(channel, jp.vp, jp.idss);
                 jfet.lambda = jp.lambda;
+                jfet.is = jp.is;
+                jfet.n = jp.n;
                 let vds = v_nl[s]; // dim 0 = Vds
                 let vgs = v_nl[s + 1]; // dim 1 = Vgs
-                i_nl[s] = jfet.drain_current(vgs, vds); // Id (dim 0 current)
-                                                        // Ig ≡ 0: the transient runtime's `jfet_ig` returns exactly 0
-                                                        // (device_jfet.rs.tera) with zero partials. Evaluating a real
-                                                        // exponential gate diode here while zeroing its Jacobian gives
-                                                        // an exponential residual with no Newton direction (wrecks DC
-                                                        // NR at forward gate bias) AND disagrees with the transient
-                                                        // contract. DC OP must not lead the runtime — real gate-
-                                                        // junction wiring is a transient-side follow-up.
-                i_nl[s + 1] = 0.0; // Ig (dim 1 current)
-                let (gm, gds) = jfet.jacobian_partial(vgs, vds);
-                j_dev[s * m + s] = gds; // dId/dVds (dim0 curr, dim0 volt)
-                j_dev[s * m + (s + 1)] = gm; // dId/dVgs (dim0 curr, dim1 volt)
-                j_dev[(s + 1) * m + s] = 0.0; // dIg/dVds = 0
-                j_dev[(s + 1) * m + (s + 1)] = 0.0; // dIg/dVgs = 0
+                                       // Channel plus both gate junctions, the same device as the
+                                       // generated `jfet_evaluate` (device_jfet.rs.tera).
+                let (i_d, i_g, jac) = jfet.evaluate(vgs, vds);
+                i_nl[s] = i_d; // drain current (dim 0)
+                i_nl[s + 1] = i_g; // gate current (dim 1)
+                j_dev[s * m + s] = jac[1]; // dId/dVds (dim0 curr, dim0 volt)
+                j_dev[s * m + (s + 1)] = jac[0]; // dId/dVgs (dim0 curr, dim1 volt)
+                j_dev[(s + 1) * m + s] = jac[3]; // dIg/dVds
+                j_dev[(s + 1) * m + (s + 1)] = jac[2]; // dIg/dVgs
             }
             (DeviceType::Mosfet, DeviceParams::Mosfet(mp)) => {
                 // 2D MOSFET: dim 0 = Vds (at start_idx), dim 1 = Vgs (at start_idx+1)
@@ -2379,18 +2376,30 @@ fn nr_dc_solve_pinned(
                 // negative for N-channel JFETs, mp.vt negative for PMOS —
                 // exactly the value the transient path passes as
                 // `state.device_N_vp` / `state.device_N_vt`; no polarity flip).
+                // JFET: the transient's jfet_limit_expr (nr_helpers.rs):
+                // pnjlim on the gate-source and gate-drain junctions (inert
+                // unless one steps far forward), then fetlim.
                 (DeviceType::Jfet, DeviceParams::Jfet(jp)) => {
-                    let ds_idx = slot.start_idx;
-                    let v_lim_ds = fetlim(v_nl_new[ds_idx], v_nl[ds_idx], 0.0);
-                    if (v_lim_ds - v_nl_new[ds_idx]).abs() > 1e-15 {
-                        limited_junctions.push((ds_idx, v_lim_ds - v_nl_new[ds_idx]));
+                    let (ds_idx, gs_idx) = (slot.start_idx, slot.start_idx + 1);
+                    let sign = if jp.is_p_channel { -1.0 } else { 1.0 };
+                    let n_vt = jp.gate_n_vt();
+                    let vcrit = if jp.is > 0.0 {
+                        pn_vcrit(n_vt, jp.is)
+                    } else {
+                        f64::MAX
+                    };
+                    let junction =
+                        |vnew: f64, vold: f64| sign * pnjlim(sign * vnew, sign * vold, n_vt, vcrit);
+                    let (ds_new, ds_old) = (v_nl_new[ds_idx], v_nl[ds_idx]);
+                    let (gs_new, gs_old) = (v_nl_new[gs_idx], v_nl[gs_idx]);
+                    let vgd = junction(gs_new - ds_new, gs_old - ds_old);
+                    let v_lim_ds = fetlim(gs_new - vgd, ds_old, 0.0);
+                    if (v_lim_ds - ds_new).abs() > 1e-15 {
+                        limited_junctions.push((ds_idx, v_lim_ds - ds_new));
                     }
-                    if slot.dimension > 1 {
-                        let gs_idx = slot.start_idx + 1;
-                        let v_lim_gs = fetlim(v_nl_new[gs_idx], v_nl[gs_idx], jp.vp);
-                        if (v_lim_gs - v_nl_new[gs_idx]).abs() > 1e-15 {
-                            limited_junctions.push((gs_idx, v_lim_gs - v_nl_new[gs_idx]));
-                        }
+                    let v_lim_gs = fetlim(junction(gs_new, gs_old), gs_old, jp.vp);
+                    if (v_lim_gs - gs_new).abs() > 1e-15 {
+                        limited_junctions.push((gs_idx, v_lim_gs - gs_new));
                     }
                 }
                 (DeviceType::Mosfet, DeviceParams::Mosfet(mp)) => {

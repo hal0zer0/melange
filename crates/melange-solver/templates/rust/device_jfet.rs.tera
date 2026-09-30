@@ -1,7 +1,8 @@
 // Canonical source: melange-devices/src/jfet.rs (Jfet)
 // Duplicated here because generated code must be self-contained.
 // 2D Shichman-Hodges model: triode + saturation regions, with channel-length modulation.
-// Dimension 0: Id (drain current), Dimension 1: Ig (gate leakage current ≈ 0).
+// Dimension 0: Id (drain current), Dimension 1: Ig (gate current through the
+// gate-source and gate-drain junctions, see jfet_evaluate).
 //
 // SPICE-style mode handling: for vds_eff >= 0 (normal mode) the source-referenced
 // overdrive Vgs - Vp governs. For vds_eff < 0 (reverse mode) the drain acts as the
@@ -47,12 +48,6 @@ fn jfet_id(vgs: f64, vds: f64, idss: f64, vp: f64, lambda: f64, sign: f64) -> f6
         let ratio = vgst / vp_abs;
         sign * m * idss * ratio * ratio * clm
     }
-}
-
-/// JFET gate leakage current (effectively zero for reverse-biased gate).
-#[inline(always)]
-fn jfet_ig(_vgs: f64, _sign: f64) -> f64 {
-    0.0
 }
 
 /// JFET 2x2 Jacobian: [dId/dVgs, dId/dVds, dIg/dVgs, dIg/dVds]
@@ -112,4 +107,26 @@ fn jfet_jacobian(vgs: f64, vds: f64, idss: f64, vp: f64, lambda: f64, sign: f64)
 
     // Gate current derivatives are zero (no gate leakage in this model)
     [d_id_d_vgs, d_id_d_vds, 0.0, 0.0]
+}
+
+/// JFET terminal currents and Jacobian, channel plus both gate junctions:
+/// `(I_drain, I_gate, [dId/dVgs, dId/dVds, dIg/dVgs, dIg/dVds])`.
+/// Gate junctions `IS·(exp(V/n_vt) − 1)` at Vgs and Vgd = Vgs − Vds in the
+/// device's polarity; the drain loses the gate-drain junction's current.
+/// `is = 0` disables them. Canonical: melange-devices `Jfet::evaluate`.
+#[inline(always)]
+fn jfet_evaluate(vgs: f64, vds: f64, idss: f64, vp: f64, lambda: f64, is: f64, n_vt: f64,
+                 sign: f64) -> (f64, f64, [f64; 4]) {
+    let id = jfet_id(vgs, vds, idss, vp, lambda, sign);
+    let jac = jfet_jacobian(vgs, vds, idss, vp, lambda, sign);
+    if is == 0.0 {
+        return (id, 0.0, jac);
+    }
+    let (e_gs, de_gs) = junction_exp(sign * vgs / n_vt, is);
+    let (e_gd, de_gd) = junction_exp(sign * (vgs - vds) / n_vt, is);
+    let i_gs = sign * is * (e_gs - 1.0);
+    let i_gd = sign * is * (e_gd - 1.0);
+    let g_gs = is / n_vt * de_gs;
+    let g_gd = is / n_vt * de_gd;
+    (id - i_gd, i_gs + i_gd, [jac[0] - g_gd, jac[1] + g_gd, g_gs + g_gd, -g_gd])
 }

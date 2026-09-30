@@ -213,7 +213,7 @@ Source: Sowter DWG E-72,658-2 (amp §) + Peerless/Triad winding data.
 
 ### Device Models
 - **BJT**: Gummel-Poon (VAF/VAR/IKF/IKR, CJE/CJC, NF/ISE/NE) matching ngspice `bjtload.c` line-for-line; Ebers-Moll fallback; device temperature `TAMB` (SPICE `.temp`: IS/BF/BR/ISE/ISC/VT scaled from TNOM, ngspice-gated); self-heating (RTH/CTH/TAMB); RB/RC/RE parasitic R
-- **JFET/MOSFET**: 2D Shichman-Hodges / Level 1; CGS/CGD junction caps; MOSFET body effect (GAMMA/PHI). Card RD/RS are refused: not in the solution (internal drain/source nodes queued)
+- **JFET/MOSFET**: 2D Shichman-Hodges / Level 1; JFET gate-source and gate-drain junctions (IS, N); CGS/CGD junction caps; MOSFET body effect (GAMMA/PHI). Card RD/RS are refused: not in the solution (internal drain/source nodes queued)
 - **Diode**: Shockley + RS + CJO + BV/IBV Zener; device temperature `TAMB` (SPICE `.temp`: IS and N·VT scaled from TNOM, ngspice-gated); optional self-heating (RTH/CTH/XTI/EG/TAMB) using the same quasi-static electrothermal model as BJT, with `IS(T) = IS_amb·(Tj/TAMB)^(XTI/N)·exp(EG/(N·VT_amb)·(1−TAMB/Tj))` and `N·VT(T) = (N·VT)_amb·(Tj/TAMB)`. Pipe-shouter (TS-808) uses RTH=500 CTH=2e-4 on the 1N4148 clippers; sad-bastard uses RTH=1200 CTH=1e-4 EG=0.67 on the 1N34A Ge clippers. Dead code when RTH=∞ (default).
 - **Tube (triode)**: Koren plate + Dempwolf & Zölzer grid current, early-effect lambda, CCG/CGP/CCP junction caps, RGI grid-stop
 - **Tube (pentode)**: 3 screen-current equation families — Rational (Reefman §4.4), Exponential (DerkE §4.5), Classical Koren. `--tube-grid-fa {auto,on,off}`: `on` reduces 3D→2D (warned, not accuracy-neutral); `auto` == `off` == full 3D (2026-09-04). `diag_region_exit_count` counts grid-conduction / BJT-saturation samples on every path

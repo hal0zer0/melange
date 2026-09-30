@@ -547,6 +547,13 @@ generated state is smaller.
   gives 8.40 V. A nonzero value is now refused, naming the fix, an explicit
   resistor in series with the drain or source, which matches ngspice. No
   corpus card set one.
+- **A JFET's gate drew no current at any bias**, so a gate driven into
+  forward bias was not clamped: driven to +2 V through 100 kΩ it sat at
+  2.000 V where ngspice clamps it at 0.546 V. The gate-source and gate-drain
+  junctions are now modelled (SPICE's `IS`, `N`, defaults 1e-14 A and 1;
+  `IS=0` gives the old model). Every JFET circuit gains them; one biased
+  normally, with its gate reversed, changes by the junctions' ~1e-14 A
+  leakage.
 - `melange --version` could name a clean commit for a binary built from
   uncommitted changes, while the code that binary generated said `-dirty`: the
   CLI stamped its own label and only refreshed it when the CLI itself was

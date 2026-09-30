@@ -318,7 +318,8 @@ when all charge params are 0 (default).
 ### JFET (2D per device)
 ```rust
 fn jfet_id(vgs: f64, vds: f64, idss: f64, vp: f64, lambda: f64, sign: f64) -> f64;  // Shichman-Hodges Id
-fn jfet_ig(vgs: f64, sign: f64) -> f64;                                                // Gate current (≈0)
+fn jfet_evaluate(vgs, vds, idss, vp, lambda, is, n_vt, sign) -> (f64, f64, [f64; 4]); // Id, Ig (gate junctions), 2x2 Jacobian
+fn junction_exp(x: f64, is: f64) -> (f64, f64);                                      // Shared IS-aware junction exponential (BJT, JFET gate)
 fn jfet_jacobian(vgs: f64, vds: f64, idss: f64, vp: f64, lambda: f64, sign: f64) -> [f64; 4];  // [dId/dVgs, dId/dVds, dIg/dVgs, dIg/dVds]
 ```
 

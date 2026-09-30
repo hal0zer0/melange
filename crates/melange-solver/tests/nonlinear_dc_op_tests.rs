@@ -1593,6 +1593,8 @@ C1 in gate 10u
             is_p_channel: false,
             cgs: 0.0,
             cgd: 0.0,
+            is: 1e-14,
+            n: 1.0,
         }),
         has_internal_mna_nodes: false,
         vg2k_frozen: 0.0,

@@ -1,31 +1,6 @@
 // Canonical source: melange-devices/src/bjt.rs (BjtEbersMoll, BjtGummelPoon)
 // Duplicated here because generated code must be self-contained.
 
-/// Forward-current ceiling of the extended junction exponential [A].
-const BJT_MAX_FWD_I: f64 = 1e3;
-
-/// `(value, d value/dx)` of a junction law's exponential `I = IS·e^x`
-/// (canonical form: `melange_devices::safeguards::junction_exp`). Up to 40
-/// this is `fast_exp` for both. Above it the true exponential continues until
-/// the current `IS·e^x` reaches BJT_MAX_FWD_I, then extends linearly with a
-/// matching slope, so a small-IS card is not current-limited at `IS·e^40` and
-/// the slope is the value's own.
-#[inline(always)]
-fn bjt_junction_exp(x: f64, is: f64) -> (f64, f64) {
-    if x <= 40.0 {
-        let e = fast_exp(x);
-        return (e, e);
-    }
-    let x_max = 40.0f64.max(BJT_MAX_FWD_I.ln() - is.ln());
-    if x <= x_max {
-        let e = x.exp();
-        (e, e)
-    } else {
-        let e = x_max.exp();
-        (e * (1.0 + (x - x_max)), e)
-    }
-}
-
 /// Combined BJT evaluation: returns (Ic, Ib, [dIc/dVbe, dIc/dVbc, dIb/dVbe, dIb/dVbc]).
 ///
 /// Computes exp(Vbe/(NF*VT)) and exp(Vbc/(NR*VT)) once and shares them across current
@@ -42,19 +17,19 @@ fn bjt_evaluate(vbe: f64, vbc: f64, is: f64, vt: f64, nf: f64, nr: f64,
     let nr_vt = nr * vt;
 
     // Shared exponentials (computed once)
-    let (exp_be, dexp_be) = bjt_junction_exp(vbe_eff / nf_vt, is);
-    let (exp_bc, dexp_bc) = bjt_junction_exp(vbc_eff / nr_vt, is);
+    let (exp_be, dexp_be) = junction_exp(vbe_eff / nf_vt, is);
+    let (exp_bc, dexp_bc) = junction_exp(vbc_eff / nr_vt, is);
 
     // ISE leakage exponential (computed once, only when needed)
     let (exp_be_leak, dexp_be_leak) = if ise > 0.0 {
-        bjt_junction_exp(vbe_eff / (ne * vt), ise)
+        junction_exp(vbe_eff / (ne * vt), ise)
     } else {
         (0.0, 0.0)
     };
 
     // ISC leakage exponential (computed once, only when needed)
     let (exp_bc_leak, dexp_bc_leak) = if isc > 0.0 {
-        bjt_junction_exp(vbc_eff / (nc * vt), isc)
+        junction_exp(vbc_eff / (nc * vt), isc)
     } else {
         (0.0, 0.0)
     };

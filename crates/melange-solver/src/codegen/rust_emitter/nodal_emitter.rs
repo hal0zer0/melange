@@ -6254,7 +6254,7 @@ impl RustEmitter {
             (DeviceType::BjtForwardActive, DeviceParams::Bjt(_bp)) => {
                 code.push_str(&format!(
                     "{indent}let vbe_{d} = v_d{s} * DEVICE_{d}_SIGN;\n\
-                     {indent}let (exp_be_{d}, dexp_be_{d}) = bjt_junction_exp(vbe_{d} / (DEVICE_{d}_NF * state.device_{d}_vt), state.device_{d}_is);\n\
+                     {indent}let (exp_be_{d}, dexp_be_{d}) = junction_exp(vbe_{d} / (DEVICE_{d}_NF * state.device_{d}_vt), state.device_{d}_is);\n\
                      {indent}let i_dev{s} = state.device_{d}_is * (exp_be_{d} - 1.0) * DEVICE_{d}_SIGN;\n\
                      {indent}let jdev_{s}_{s} = state.device_{d}_is / (DEVICE_{d}_NF * state.device_{d}_vt) * dexp_be_{d};\n"
                 ));
@@ -6262,11 +6262,7 @@ impl RustEmitter {
             (DeviceType::Jfet, DeviceParams::Jfet(_)) => {
                 let s1 = s + 1;
                 code.push_str(&format!(
-                    "{indent}let i_dev{s} = jfet_id(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n\
-                     {indent}let i_dev{s1} = jfet_ig(v_d{s1}, DEVICE_{d}_SIGN);\n"
-                ));
-                code.push_str(&format!(
-                    "{indent}let jfet{d}_jac = jfet_jacobian(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_SIGN);\n"
+                    "{indent}let (i_dev{s}, i_dev{s1}, jfet{d}_jac) = jfet_evaluate(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_IS, DEVICE_{d}_N_VT, DEVICE_{d}_SIGN);\n"
                 ));
                 code.push_str(&format!(
                     "{indent}let jdev_{s}_{s} = jfet{d}_jac[1];\n\
@@ -10058,7 +10054,7 @@ impl RustEmitter {
                     code.push_str(&format!(
                         "{indent}{{ // BJT {dev_num} forward-active (1D)\n\
                          {indent}    let vbe = v_nl[{s}] * DEVICE_{dev_num}_SIGN;\n\
-                         {indent}    let (exp_be, dexp_be) = bjt_junction_exp(vbe / (DEVICE_{dev_num}_NF * state.device_{dev_num}_vt), state.device_{dev_num}_is);\n\
+                         {indent}    let (exp_be, dexp_be) = junction_exp(vbe / (DEVICE_{dev_num}_NF * state.device_{dev_num}_vt), state.device_{dev_num}_is);\n\
                          {indent}    i_nl[{s}] = state.device_{dev_num}_is * (exp_be - 1.0) * DEVICE_{dev_num}_SIGN;\n\
                          {indent}    j_dev[{jd_ss}] = state.device_{dev_num}_is / (DEVICE_{dev_num}_NF * state.device_{dev_num}_vt) * dexp_be;\n\
                          {indent}}}\n"
@@ -10069,9 +10065,6 @@ impl RustEmitter {
                     let jd_01 = s * m + s1;
                     let jd_10 = s1 * m + s;
                     let jd_11 = s1 * m + s1;
-                    let jac_fn = format!(
-                            "jfet_jacobian(vgs, vds, state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, sign)"
-                    );
                     // jac = [dId/dVgs, dId/dVds, dIg/dVgs, dIg/dVds] but the
                     // NR dims are (s = Vds, s+1 = Vgs), so the columns swap:
                     //   j_dev[s][s]   = dId/dVds = jac[1]
@@ -10084,9 +10077,9 @@ impl RustEmitter {
                          {indent}    let vds = v_nl[{s}];\n\
                          {indent}    let vgs = v_nl[{s1}];\n\
                          {indent}    let sign = DEVICE_{dev_num}_SIGN;\n\
-                         {indent}    i_nl[{s}] = jfet_id(vgs, vds, state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, sign);\n\
-                         {indent}    i_nl[{s1}] = jfet_ig(vgs, sign);\n\
-                         {indent}    let jac = {jac_fn};\n\
+                         {indent}    let (i_d, i_g, jac) = jfet_evaluate(vgs, vds, state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, DEVICE_{dev_num}_IS, DEVICE_{dev_num}_N_VT, sign);\n\
+                         {indent}    i_nl[{s}] = i_d;\n\
+                         {indent}    i_nl[{s1}] = i_g;\n\
                          {indent}    j_dev[{jd_ss}] = jac[1];\n\
                          {indent}    j_dev[{jd_01}] = jac[0];\n\
                          {indent}    j_dev[{jd_10}] = jac[3];\n\
@@ -10364,7 +10357,7 @@ impl RustEmitter {
                     // 1D forward-active BJT: only Vbe→Ic
                     code.push_str(&format!(
                         "{indent}{{ let vbe = v_nl_final[{s}] * DEVICE_{dev_num}_SIGN;\n\
-                         {indent}  let exp_be = bjt_junction_exp(vbe / (DEVICE_{dev_num}_NF * state.device_{dev_num}_vt), state.device_{dev_num}_is).0;\n\
+                         {indent}  let exp_be = junction_exp(vbe / (DEVICE_{dev_num}_NF * state.device_{dev_num}_vt), state.device_{dev_num}_is).0;\n\
                          {indent}  i_nl[{s}] = state.device_{dev_num}_is * (exp_be - 1.0) * DEVICE_{dev_num}_SIGN;\n\
                          {indent}}}\n"
                     ));
@@ -10372,8 +10365,7 @@ impl RustEmitter {
                 (DeviceType::Jfet, DeviceParams::Jfet(_jp)) => {
                     let s1 = s + 1;
                     code.push_str(&format!(
-                        "{indent}i_nl[{s}] = jfet_id(v_nl_final[{s1}], v_nl_final[{s}], state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, DEVICE_{dev_num}_SIGN);\n\
-                         {indent}i_nl[{s1}] = jfet_ig(v_nl_final[{s1}], DEVICE_{dev_num}_SIGN);\n"
+                        "{indent}{{ let (i_d, i_g, _) = jfet_evaluate(v_nl_final[{s1}], v_nl_final[{s}], state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, DEVICE_{dev_num}_IS, DEVICE_{dev_num}_N_VT, DEVICE_{dev_num}_SIGN); i_nl[{s}] = i_d; i_nl[{s1}] = i_g; }}\n"
                     ));
                 }
                 (DeviceType::Mosfet, DeviceParams::Mosfet(mp)) => {
@@ -10528,15 +10520,36 @@ impl RustEmitter {
                             "{indent}        let v_lim = pnjlim(v_nl_proposed, v_nl_current, state.device_{dev_num}_vt, DEVICE_{dev_num}_VCRIT);\n"
                         ));
                     }
-                    (DeviceType::Jfet, 0) => {
-                        code.push_str(&format!(
-                            "{indent}        let v_lim = fetlim(v_nl_proposed, v_nl_current, 0.0);\n"
-                        ));
-                    }
                     (DeviceType::Jfet, _) => {
-                        code.push_str(&format!(
-                            "{indent}        let v_lim = fetlim(v_nl_proposed, v_nl_current, state.device_{dev_num}_vp);\n"
+                        // Both gate junctions need the other dimension's voltage.
+                        let (s, s1) = (slot.start_idx, slot.start_idx + 1);
+                        let other = if d == 0 { s1 } else { s };
+                        code.push_str(&emit_sparse_nv_dot(
+                            ir,
+                            other,
+                            "v_nl_proposed_other",
+                            "v_new",
+                            &format!("{indent}        "),
                         ));
+                        let (new_ds, old_ds, new_gs, old_gs) = if d == 0 {
+                            (
+                                "v_nl_proposed".to_string(),
+                                "v_nl_current".to_string(),
+                                "v_nl_proposed_other".to_string(),
+                                format!("v_nl[{s1}]"),
+                            )
+                        } else {
+                            (
+                                "v_nl_proposed_other".to_string(),
+                                format!("v_nl[{s}]"),
+                                "v_nl_proposed".to_string(),
+                                "v_nl_current".to_string(),
+                            )
+                        };
+                        let lim = super::nr_helpers::jfet_limit_expr(
+                            dev_num, d, &new_ds, &old_ds, &new_gs, &old_gs,
+                        );
+                        code.push_str(&format!("{indent}        let v_lim = {lim};\n"));
                     }
                     (DeviceType::Mosfet, 0) => {
                         code.push_str(&format!(
