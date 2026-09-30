@@ -2803,7 +2803,7 @@ fn run_rate_sweep(
     config: &melange_validate::comparison::ComparisonConfig,
     options: &melange_validate::ValidationOptions,
 ) -> Result<()> {
-    use melange_validate::rate_sweep::{rate_sweep, SweepVerdict};
+    use melange_validate::rate_sweep::{rate_sweep, Fit, RateFor, SweepVerdict};
     println!("Step 4: Rate sweep (oversampling off, the reference driven by the analytic sine)...");
     let sweep = rate_sweep(
         netlist_path,
@@ -2812,56 +2812,104 @@ fn run_rate_sweep(
             frequency: VALIDATE_STIMULUS_HZ,
         },
         duration,
+        // validate's own settle window: 20 stimulus periods.
+        20.0 / VALIDATE_STIMULUS_HZ,
         sample_rate,
         output_node,
         config,
         options,
     )
     .with_context(|| "Rate sweep failed")?;
+    println!(
+        "  (error against the finest-rate reference at common instants; validate's own \
+         per-rate number in brackets)"
+    );
     for row in &sweep.rows {
         println!(
-            "  {:>7.0} Hz  {:<40}  {:.4} %  {}",
+            "  {:>7.0} Hz  {:<40}  {:.4} %  [{:.4} % {}]",
             row.sample_rate,
             row.integrator,
             100.0 * row.error,
+            100.0 * row.own_error,
             if row.passed { "PASS" } else { "FAIL" }
         );
     }
+    println!(
+        "  finest reference's self-check: {:.4} %{}",
+        100.0 * sweep.reference_self_check,
+        if sweep.reference_refined {
+            " (refined to resolve the smallest error graded)"
+        } else {
+            ""
+        }
+    );
+    let cross = match sweep.model_error_metric {
+        Some(m) => format!("{:.4} % from the error metrics", 100.0 * m),
+        None => "none from the error metrics (not monotone)".to_string(),
+    };
     let rate = |tol: f64| match sweep.rate_for(tol) {
-        Some(fs) => format!("{:.0} Hz", fs),
-        None => "not reachable (model error at or above it)".to_string(),
+        RateFor::At(fs) => format!("{:.0} Hz", fs),
+        RateFor::Unreachable => "not reachable (model error at or above it)".to_string(),
+        RateFor::Unresolved => "not resolved (the reference is not accurate enough)".to_string(),
+    };
+    let fit_line = |order: f64, model_error: f64, fit: Fit| {
+        let source = match fit {
+            Fit::Waveform => format!("from the extrapolated waveform ({cross})"),
+            Fit::ErrorMetric => "from the error metrics: the waveform fit has no answer, the \
+                                 deck is not yet in its asymptotic range, so the order is not \
+                                 the integrator's and the rates below are optimistic"
+                .to_string(),
+        };
+        format!(
+            "order {order:.2}, model error {:.4} % {source}: 1 % needs {}, 0.1 % needs {}",
+            100.0 * model_error,
+            rate(0.01),
+            rate(0.001)
+        )
+    };
+    let unresolved = |self_check: f64, error: f64| {
+        format!(
+            "the finest reference's self-check ({:.4} %) is not below a third of the smallest \
+             error it grades ({:.4} %), so how the error falls with the step is not measured",
+            100.0 * self_check,
+            100.0 * error
+        )
     };
     match sweep.verdict {
         SweepVerdict::Pass => {
             println!("Verdict: PASS at {:.0} Hz", sample_rate);
-            if let SweepVerdict::Converges { order, model_error } = sweep.convergence {
-                println!(
-                    "  (converging at order {order:.2}, model error {:.4} %: 1 % needs {}, \
-                     0.1 % needs {})",
-                    100.0 * model_error,
-                    rate(0.01),
-                    rate(0.001)
-                );
+            match sweep.convergence {
+                SweepVerdict::Converges {
+                    order,
+                    model_error,
+                    fit,
+                } => println!("  (converging: {})", fit_line(order, model_error, fit)),
+                SweepVerdict::Unresolved { self_check, error } => {
+                    println!("  ({})", unresolved(self_check, error))
+                }
+                _ => {}
             }
             Ok(())
         }
-        SweepVerdict::Converges { order, model_error } => {
-            println!(
-                "Verdict: CONVERGES (order {order:.2}): model error {:.4} %; 1 % needs {}, \
-                 0.1 % needs {}",
-                100.0 * model_error,
-                rate(0.01),
-                rate(0.001)
-            );
+        SweepVerdict::Converges {
+            order,
+            model_error,
+            fit,
+        } => {
+            println!("Verdict: CONVERGES ({})", fit_line(order, model_error, fit));
             Ok(())
         }
+        SweepVerdict::Unresolved { self_check, error } => {
+            anyhow::bail!("Verdict: UNRESOLVED: {}.", unresolved(self_check, error))
+        }
         SweepVerdict::Plateau { order } => anyhow::bail!(
-            "Verdict: PLATEAU (order {order:.2}): the error stops falling with the step, so \
-             melange converges to something other than the reference. A model or harness \
-             mismatch."
+            "Verdict: PLATEAU (order {order:.2}; {cross}): the error stops falling with the \
+             step, so melange converges to something other than the reference. A model or \
+             harness mismatch."
         ),
         SweepVerdict::Diverges => anyhow::bail!(
-            "Verdict: DIVERGES: the error rises with the rate. A model or harness mismatch."
+            "Verdict: DIVERGES: the error against the finest reference rises with the rate. A \
+             model or harness mismatch."
         ),
     }
 }

@@ -41,7 +41,30 @@ recorded correlation/RMS values.
    options appearing later override the injected ones for the same keyword.
 
 2. **Replaces `.TRAN`** with `tstep = 1.0 / sample_rate` (e.g., 2.083e-5
-   for 48 kHz) and the tstop derived from the input signal.
+   for 48 kHz), the tstop derived from the input signal, and a maximum
+   internal step `TMAX` (`ReferenceStep`, starting at `tstep/16`).
+
+2b. **Shows the reference is converged before grading against it**
+   (`reference.rs`, `converged_reference`). The reference is a numerical
+   solution too. ngspice's default `TMAX` is the output step, and a smooth
+   analytic drive has no breakpoints to shorten it (a PWL at the sample
+   rate had one every sample, which kept older references fine by
+   accident), so an unconverged reference was integrating at melange's own
+   step and its error was charged to melange: noyce-cascaded-triodes read
+   11.8 % at 48 kHz against it, 0.18 % against a converged one. From
+   `TMAX = tstep/16, reltol = 1e-4` the reference is refined in both
+   parameters in turn, halving `TMAX` (to `tstep/256`) and tightening
+   `reltol` tenfold (to `1e-6`), and is accepted when both refinements move
+   it by at most the bound: normalized RMS, DC-blocked, after the settle
+   window, at most 10 % of the RMS tolerance graded (`SETTLED_FRACTION`;
+   `ValidationOptions::reference_bound` overrides it). Halving `TMAX` alone
+   is not enough: where ngspice's own error control already keeps its steps
+   shorter than `TMAX`, halving it changes nothing and two identical runs
+   "agree". A reference that runs out of refinements refuses the verdict
+   (`ValidationError::ReferenceNotConverged`). The accepted figure is
+   printed under the RMS error ("reference self-check …") and carried in
+   the JSON report. A `reltol` tighter than the default is appended after
+   the deck's own `.OPTIONS`, so it wins over a deck author's `reltol`.
 
 3. **Replaces the input source with a Thevenin pair** (`inject_thevenin_source`):
    the deck's voltage source whose n+ terminal is the input node (`in`) is
@@ -181,29 +204,41 @@ retired; the four remaining dead `circuit_no_vin.cir` files were deleted
 
 A deck that fails at its rate may be modelled exactly and merely integrated
 coarsely. `melange validate --rate-sweep` (library:
-`melange_validate::rate_sweep`) runs the comparison at `fs`, `2fs` and
-`4fs` with oversampling off, the analytic stimulus sampled at each rate,
-and prints each rate's error and integrator, then a verdict:
+`melange_validate::rate_sweep`) renders the deck at `fs`, `2fs` and `4fs`
+with oversampling off, the analytic stimulus sampled at each rate, and
+grades all three against ONE reference: the `4fs` run's converged ngspice
+output, taken at each render's rate and DC-blocked there as the render is
+(one blocker at `4fs` for every rate would leave the blocker's own
+first-order discretization, 3e-4 of gain at 1 kHz and 48 kHz, in the
+errors). Errors are compared at the instants the three rates share (the `fs`
+grid). The asymptote is extrapolated on the error waveform `e_k = y_k −
+ref_k` (least-squares ratio `r = Σ(e1−e2)(e2−e4)/Σ(e2−e4)²`, order
+`p = log2 r`, `e∞ = e4 + (e4−e2)/(2^p−1)`, model error `‖e∞‖/‖ref‖`), with
+Aitken on the three error figures as a cross-check and as the fallback when
+the waveform fit has no answer (a deck short of its asymptotic range), which
+the verdict then says. Verdicts:
 
 - **PASS** at the requested rate;
-- **CONVERGES**: the error falls toward ngspice. Reported: the order
-  `p = log2((e1−e2)/(e2−e4))`, the Richardson/Aitken asymptote
-  `e∞ = e4 − (e2−e4)/(2^p − 1)` (the MODEL error, clamped at 0), and the
-  rate the fitted convergence needs for 1 % and 0.1 %. Melange models the
-  circuit; the rate is the cost;
-- **PLATEAU**: the error stops falling (not monotone, or `e∞` at least half
-  the finest error; a constant floor cancels in the differences, so the
-  asymptote is what detects it);
-- **DIVERGES**: the error rises with the rate.
+- **CONVERGES**: the error falls toward ngspice; reported with the order,
+  the model error and the rate the fit needs for 1 % and 0.1 %;
+- **PLATEAU**: the errors are not monotone, or the model error is at least
+  half the finest error;
+- **DIVERGES**: the error rises with the rate by more than 5 %;
+- **UNRESOLVED**: the finest reference's self-check is not below a third of
+  the smallest error graded (`RESOLUTION_FRACTION`). The reference is first
+  refined once to that bound (`ValidationOptions::reference_bound`); a
+  reference that cannot get there leaves the verdict unresolved.
 
-PLATEAU and DIVERGES fail: melange converges to something other than the
-reference, a model or harness mismatch, which is what the (a) triage list
-is for. Measured 2026-09-30: rc-lowpass PASS; noyce-amp-at-idle CONVERGES
-(order 1.63, model error ~0, 1 % at 83 kHz; under backward Euler order 1.57,
-the same asymptote); noyce-cascaded-triodes CONVERGES pre-asymptotically
-(order 1.13, 1 % at 424 kHz); steve-1073-preamp DIVERGES (1.80, 0.59,
-1.00 % at 48/96/192 kHz). Do not sweep with `--oversampling`: its
-half-band filters' phase enters the comparison.
+PLATEAU, DIVERGES and UNRESOLVED fail. Measured 2026-09-30: rc-lowpass PASS,
+converging at order 2.00 to a model error of 0.0002 % (reference self-check
+0.0002 %). Do not sweep with `--oversampling`: its half-band filters' phase
+enters the comparison.
+
+Known limit: the `fs` grid samples a `4fs` render's error at one instant in
+four. On a hard-clipping deck whose edges span a few samples at `4fs`, the
+edge-timing error is mostly between those instants, and the sweep's figures
+understate it (steve-1073-preamp at 192 kHz: 0.28 % on the grid, 1.03 % on
+every sample against the same reference).
 
 ### DC blocking and settle windows
 

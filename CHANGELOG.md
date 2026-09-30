@@ -579,7 +579,10 @@ generated state is smaller.
   shrinks, so melange models the circuit and the rate is the cost:
   reports the extrapolated model error and the rate needed for 1 % and
   0.1 %); or PLATEAU / DIVERGES (a model or harness mismatch, which
-  fails). Each rate's integrator is shown.
+  fails). Every rate is graded against one reference, the finest, which
+  must itself be accurate to a third of the smallest error it grades or the
+  verdict is UNRESOLVED. Each rate's integrator is shown, and a deck not yet
+  in its asymptotic range is fitted on its error figures and says so.
 - **Automatic backward Euler weighed only the trapezoidal ring, never its
   own cost**: a build was promoted whenever a stiff mode rang at −60 dB of
   the passband, however much accuracy backward Euler (first order) then
@@ -595,6 +598,18 @@ generated state is smaller.
   before, and the reason says which rule decided. Four corpus decks return
   to trapezoidal (twill-deluxe against ngspice: 0.76 % → 0.16 %); two stay
   on backward Euler.
+- **`melange validate` grades only against a reference shown to be
+  converged.** ngspice integrated the reference with a maximum step equal to
+  the output step, the same step as the melange render it judged, so its own
+  error was charged to melange: a cascaded triode deck read 11.8 % at 48 kHz
+  against it and reads 0.18 % against a converged one. Each reference now
+  starts at a maximum step of a sixteenth of the output step and is refined,
+  halving the step and tightening ngspice's `reltol` tenfold in turn, until
+  both refinements move it by at most a tenth of the RMS tolerance graded;
+  a reference that cannot get there is refused, not graded against. The
+  figure it settled at is printed under the RMS error ("reference
+  self-check") and is in the JSON report. The CI SPICE gate uses the same
+  rule.
 - **`melange validate`'s reference is driven by the continuous stimulus, not
   a PWL of melange's samples**: linear interpolation at the sample rate
   carries images around every multiple of it, which a deck whose gain rises

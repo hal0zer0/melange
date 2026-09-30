@@ -56,6 +56,7 @@ pub(crate) mod opamp_translate;
 pub(crate) mod pentode_translate;
 pub mod rate_sweep;
 mod reconstruction;
+pub mod reference;
 mod sat_inductor_translate;
 pub mod spice_runner;
 mod thermal_translate;
@@ -104,6 +105,11 @@ pub enum ValidationError {
     #[error("Invalid input: {0}")]
     InvalidInput(String),
 
+    /// The reference did not show that it is converged (see
+    /// [`reference::converged_reference`]), so no verdict is given against it.
+    #[error("{0}")]
+    ReferenceNotConverged(String),
+
     /// Comparison failed (signals differ beyond tolerance)
     #[error("Comparison failed: {0}")]
     ComparisonFailed(String),
@@ -147,6 +153,12 @@ pub struct ValidationResult {
     pub json_path: Option<std::path::PathBuf>,
     /// The integrator the melange build used (`IntegratorSelection::label`).
     pub integrator: &'static str,
+    /// The reference as simulated (before DC blocking and alignment), at
+    /// `reference_rate`, and melange's output before any comparison step:
+    /// the raw pair a rate sweep compares at common instants.
+    pub reference_raw: Vec<f64>,
+    pub melange_raw: Vec<f64>,
+    pub reference_rate: f64,
 }
 
 impl ValidationResult {
@@ -224,6 +236,12 @@ pub struct ValidationOptions {
     /// at the sample rate, whose images fold back on decks with gain rising
     /// toward fs.
     pub analytic_stimulus: Option<AnalyticStimulus>,
+    /// How closely the reference must agree with its next-coarser rung
+    /// before it is used (normalized RMS; see
+    /// [`reference::converged_reference`]). `None`: `SETTLED_FRACTION` of
+    /// the comparison's RMS tolerance. The rate sweep tightens it to resolve
+    /// the errors it grades.
+    pub reference_bound: Option<f64>,
 }
 
 /// A stimulus with a closed form, which the reference can be driven by.
@@ -309,6 +327,7 @@ impl Default for ValidationOptions {
             force_trap: false,
             oversampling: 1,
             analytic_stimulus: None,
+            reference_bound: None,
         }
     }
 }
@@ -590,14 +609,26 @@ pub fn validate_circuit_with_options(
         &linearized,
     )?;
 
-    let spice_data = spice_runner::run_transient_with_thevenin_drive(
-        &reference_deck,
-        tstep,
-        duration,
-        input_node,
-        &drive,
-        1.0, // 1 ohm series resistance matching melange's Thevenin model
-        &nodes_to_capture,
+    // The reference must show it is converged before anything is graded
+    // against it (see `reference`).
+    let (spice_data, convergence) = reference::converged_reference(
+        |step| {
+            spice_runner::run_transient_with_thevenin_drive_stepped(
+                &reference_deck,
+                tstep,
+                duration,
+                input_node,
+                &drive,
+                1.0, // 1 ohm series resistance matching melange's Thevenin model
+                &nodes_to_capture,
+                step,
+            )
+        },
+        output_node,
+        config.settle_time_s,
+        options
+            .reference_bound
+            .unwrap_or(reference::SETTLED_FRACTION * config.rms_error_tolerance),
     )?;
 
     // Extract the output signal from SPICE results
@@ -608,6 +639,8 @@ pub fn validate_circuit_with_options(
     // Apply DC blocking to SPICE output to match melange's internal DC blocker (5 Hz HPF)
     let mut spice_output_blocked = spice_output.to_vec();
     dc_block_signal(&mut spice_output_blocked, spice_data.sample_rate);
+    let reference_raw = spice_output.to_vec();
+    let melange_raw = melange_output.clone();
 
     // Align the reference to the melange output by ONE best-fit constant
     // delay, in EVERY mode including 1x, and compare against that unfiltered
@@ -674,6 +707,7 @@ pub fn validate_circuit_with_options(
     // for every deck without them.
     report.unit_variation_note = deck_guard::unit_variation_note(&netlist_str);
     report.reference_note = Some(reference_note);
+    convergence.attach(&mut report);
     report.thermal_note = thermal_note(&stripped_netlist);
     // The reference is the deck plus melange's parasitic caps when it had no
     // capacitance: say so, since a reader running ngspice on the deck alone
@@ -764,6 +798,9 @@ pub fn validate_circuit_with_options(
         csv_path,
         json_path,
         integrator,
+        reference_raw,
+        melange_raw,
+        reference_rate: spice_data.sample_rate,
     })
 }
 

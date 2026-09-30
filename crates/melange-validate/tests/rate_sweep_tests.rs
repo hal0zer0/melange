@@ -22,6 +22,7 @@ fn an_exactly_modelled_deck_converges_to_no_model_error() {
             frequency: 1000.0,
         },
         0.2,
+        0.02,
         48000.0,
         "out",
         &ComparisonConfig::strict(),

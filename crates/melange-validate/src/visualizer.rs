@@ -409,6 +409,7 @@ struct Metrics {
     thd_spice: f64,
     thd_melange: f64,
     thd_error_db: f64,
+    reference_self_check: Option<f64>,
 }
 
 impl From<&ComparisonReport> for SerializableReport {
@@ -430,6 +431,7 @@ impl From<&ComparisonReport> for SerializableReport {
                 thd_spice: r.thd_spice,
                 thd_melange: r.thd_melange,
                 thd_error_db: r.thd_error_db,
+                reference_self_check: r.reference_self_check,
             },
             failures: r.failures.clone(),
         }

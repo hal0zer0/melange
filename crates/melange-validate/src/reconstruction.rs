@@ -76,10 +76,10 @@ mod tests {
             .collect();
         let y = band_limited(&x, 16);
         // Away from the edges (the kernel's half-width).
-        for m in (256 * 16)..(y.len() - 256 * 16) {
+        for (m, &v) in y.iter().enumerate().take(y.len() - 256 * 16).skip(256 * 16) {
             let t = m as f64 / (16.0 * fs);
             let want = (2.0 * std::f64::consts::PI * f * t).sin();
-            assert!((y[m] - want).abs() < 1e-7, "m {m}: {} vs {want}", y[m]);
+            assert!((v - want).abs() < 1e-7, "m {m}: {v} vs {want}");
         }
         // Exact at the samples.
         for k in 256..(x.len() - 256) {

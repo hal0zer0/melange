@@ -32,8 +32,10 @@ use std::path::PathBuf;
 use melange_validate::{
     align_reference,
     comparison::{compare_signals, ComparisonConfig, Signal},
-    dc_block_signal,
-    spice_runner::{is_ngspice_available, run_transient_with_thevenin_pwl},
+    dc_block_signal, reference,
+    spice_runner::{
+        is_ngspice_available, pwl_source, run_transient_with_thevenin_drive_stepped, SpiceData,
+    },
     strip_vin_source, validate_circuit,
     visualizer::generate_html_report,
     AlignmentRequest, DelayFit, ValidationError,
@@ -41,8 +43,6 @@ use melange_validate::{
 
 /// Sample rate used for all validation tests (48 kHz audio standard)
 const SAMPLE_RATE: f64 = 48_000.0;
-
-/// Atomic counter for unique temp file names in codegen compilation
 
 /// Get path to test data directory
 fn test_data_dir() -> PathBuf {
@@ -298,6 +298,40 @@ fn aligned_signals(
     )
 }
 
+/// The ngspice reference for `deck` on `output_node`, driven by `source`
+/// behind the 1-ohm Thevenin pair and refined until it is converged to a
+/// tenth of `config`'s RMS tolerance, as `melange validate` does (see
+/// `melange_validate::reference`). A reference that cannot show it is
+/// converged fails the test: nothing is graded against it.
+fn converged_reference(
+    deck: &str,
+    duration: f64,
+    source: &str,
+    output_node: &str,
+    config: &ComparisonConfig,
+) -> Result<SpiceData, ValidationError> {
+    let nodes = [output_node.to_string()];
+    let (data, convergence) = reference::converged_reference(
+        |step| {
+            run_transient_with_thevenin_drive_stepped(
+                deck,
+                1.0 / SAMPLE_RATE,
+                duration,
+                "in",
+                source,
+                1.0,
+                &nodes,
+                step,
+            )
+        },
+        output_node,
+        config.settle_time_s,
+        reference::SETTLED_FRACTION * config.rms_error_tolerance,
+    )?;
+    eprintln!("  {}", convergence.note());
+    Ok(data)
+}
+
 /// Run validation for a circuit and return the result
 ///
 /// This helper function:
@@ -330,17 +364,14 @@ fn run_validation(
 
     // Determine simulation parameters from PWL data
     let duration = pwl_data.last().map(|(t, _)| *t).unwrap_or(0.01);
-    let tstep = 1.0 / SAMPLE_RATE;
 
     // Run ngspice with Thevenin PWL (1-ohm series R matching melange)
-    let spice_data = run_transient_with_thevenin_pwl(
+    let spice_data = converged_reference(
         &netlist_str,
-        tstep,
         duration,
-        "in",
-        &pwl_data,
-        1.0,
-        &[output_node.to_string()],
+        &pwl_source(&pwl_data),
+        output_node,
+        config,
     )?;
 
     // Extract SPICE output
@@ -664,16 +695,13 @@ fn test_bjt_common_emitter_vs_spice() {
     let netlist_str = std::fs::read_to_string(&netlist_path).expect("Failed to read netlist");
     let pwl_data = load_pwl_file(&input_pwl_path).expect("Failed to load PWL");
     let duration = pwl_data.last().map(|(t, _)| *t).unwrap_or(0.01);
-    let tstep = 1.0 / SAMPLE_RATE;
 
-    let spice_data = run_transient_with_thevenin_pwl(
+    let spice_data = converged_reference(
         &netlist_str,
-        tstep,
         duration,
-        "in",
-        &pwl_data,
-        1.0,
-        &["out".to_string()],
+        &pwl_source(&pwl_data),
+        "out",
+        &bjt_config(),
     )
     .expect("ngspice failed");
 
@@ -995,17 +1023,14 @@ fn test_wurli_preamp_vs_spice() {
     let netlist_str = std::fs::read_to_string(&netlist_path).expect("Failed to read netlist");
     let pwl_data = load_pwl_file(&input_pwl_path).expect("Failed to load PWL");
     let duration = pwl_data.last().map(|(t, _)| *t).unwrap_or(0.01);
-    let tstep = 1.0 / SAMPLE_RATE;
 
     // --- Run ngspice ---
-    let spice_data = run_transient_with_thevenin_pwl(
+    let spice_data = converged_reference(
         &netlist_str,
-        tstep,
         duration,
-        "in",
-        &pwl_data,
-        1.0,
-        &["out".to_string()],
+        &pwl_source(&pwl_data),
+        "out",
+        &wurli_config(),
     )
     .expect("ngspice failed");
 
@@ -1111,17 +1136,14 @@ fn test_neve_1073_output_vs_spice() {
     let netlist_str = std::fs::read_to_string(&netlist_path).expect("Failed to read netlist");
     let pwl_data = load_pwl_file(&input_pwl_path).expect("Failed to load PWL");
     let duration = pwl_data.last().map(|(t, _)| *t).unwrap_or(0.01);
-    let tstep = 1.0 / SAMPLE_RATE;
 
     // --- Run ngspice ---
-    let spice_data = run_transient_with_thevenin_pwl(
+    let spice_data = converged_reference(
         &netlist_str,
-        tstep,
         duration,
-        "in",
-        &pwl_data,
-        1.0,
-        &["out".to_string()],
+        &pwl_source(&pwl_data),
+        "out",
+        &neve_output_config(),
     )
     .expect("ngspice failed");
 
@@ -1225,17 +1247,14 @@ fn test_neve_1073_preamp_vs_spice() {
     let netlist_str = std::fs::read_to_string(&netlist_path).expect("Failed to read netlist");
     let pwl_data = load_pwl_file(&input_pwl_path).expect("Failed to load PWL");
     let duration = pwl_data.last().map(|(t, _)| *t).unwrap_or(0.01);
-    let tstep = 1.0 / SAMPLE_RATE;
 
     // --- Run ngspice ---
-    let spice_data = run_transient_with_thevenin_pwl(
+    let spice_data = converged_reference(
         &netlist_str,
-        tstep,
         duration,
-        "in",
-        &pwl_data,
-        1.0,
-        &["out".to_string()],
+        &pwl_source(&pwl_data),
+        "out",
+        &neve_preamp_config(),
     )
     .expect("ngspice failed");
 
@@ -1534,11 +1553,11 @@ fn test_rc_lowpass_step_response() {
 /// frequency at 48 kHz (10 kHz lands ~17 % off), so the content of this test
 /// is that the error CONVERGES at second order with the step, not a
 /// threshold at one rate:
-/// - error(48k)/error(96k) >= 3 and error(96k)/error(192k) >= 2 (second order
-///   predicts ~4; the lower bounds leave room for a floor at 192 kHz;
-///   measured 4.95 and 2.2);
-/// - error(192k) below 0.3 %, a stated bound (measured 0.19 %).
-/// The 48 kHz error is reported, not gated (measured 2.08 %). An integrator
+/// - error(48k)/error(96k) and error(96k)/error(192k) both >= 3.5 (second
+///   order predicts 4; measured 4.03 and 4.04 against converged references);
+/// - error(192k) below 0.2 %, a stated bound (measured 0.16 %).
+///
+/// The 48 kHz error is reported, not gated (measured 2.68 %). An integrator
 /// regression breaks the order; a model regression breaks the bound.
 #[test]
 #[ignore] // requires ngspice
@@ -1594,9 +1613,13 @@ fn test_rc_lowpass_chirp() {
         e48 / e96,
         e96 / e192
     );
-    assert!(e48 / e96 >= 3.0, "48k -> 96k ratio {:.2} < 3", e48 / e96);
-    assert!(e96 / e192 >= 2.0, "96k -> 192k ratio {:.2} < 2", e96 / e192);
-    assert!(e192 < 0.003, "192 kHz error {:.4}% >= 0.3 %", e192 * 100.0);
+    assert!(e48 / e96 >= 3.5, "48k -> 96k ratio {:.2} < 3.5", e48 / e96);
+    assert!(
+        e96 / e192 >= 3.5,
+        "96k -> 192k ratio {:.2} < 3.5",
+        e96 / e192
+    );
+    assert!(e192 < 0.002, "192 kHz error {:.4}% >= 0.2 %", e192 * 100.0);
 }
 
 /// Test: Diode Clipper Silence-to-Signal Transition
@@ -1843,6 +1866,7 @@ fn run_pot_validation(
     stimulus: melange_validate::AnalyticStimulus,
     num_samples: usize,
     main_code: &str,
+    config: &ComparisonConfig,
 ) -> (Vec<f64>, Vec<f64>) {
     // melange gets samples of the stimulus; the reference is driven by the
     // stimulus itself, the continuous signal those are samples of.
@@ -1857,15 +1881,12 @@ fn run_pot_validation(
         .expect("Failed to read melange pot deck");
 
     let duration = input_signal.len() as f64 / SAMPLE_RATE;
-    let tstep = 1.0 / SAMPLE_RATE;
-    let spice_data = melange_validate::run_transient_with_thevenin_drive(
+    let spice_data = converged_reference(
         &ngspice_netlist,
-        tstep,
         duration,
-        "in",
         &stimulus.spice_source(),
-        1.0,
-        &["out".to_string()],
+        "out",
+        config,
     )
     .expect("ngspice failed on pot deck");
 
@@ -1927,14 +1948,18 @@ fn main() {
 }
 "#;
 
-    let (spice_output, melange_output) =
-        run_pot_validation("circuit_static.cir", stimulus, num_samples, main_code);
-
     // Measured 2026-07-18 (first arming): rms 0.0374%, peak 4.06e-3 V,
     // corr 0.99999995, THD err 0.01 dB — the off-nominal rebuild is exactly
     // as tight as the nominal-position diode tests, so nonlinear_config
     // (rms 2%, peak 0.05 V, corr 0.9999, THD 1 dB) applies unchanged.
     let config = nonlinear_config();
+    let (spice_output, melange_output) = run_pot_validation(
+        "circuit_static.cir",
+        stimulus,
+        num_samples,
+        main_code,
+        &config,
+    );
     let (spice_signal, melange_signal, fit) =
         aligned_signals(&spice_output, &melange_output, &input, &config);
     let mut report = compare_signals(&spice_signal, &melange_signal, &config);
@@ -2015,9 +2040,6 @@ fn main() {
 }
 "#;
 
-    let (spice_output, melange_output) =
-        run_pot_validation("circuit.cir", stimulus, num_samples, main_code);
-
     // Gates measured 2026-07-18 (midpoint R evaluation, see doc comment):
     // rms 1.28%, peak 3.93e-2 V, corr 0.99991763. Dynamic-R comparison is
     // inherently looser than static: melange's per-sample zero-order hold of
@@ -2034,6 +2056,8 @@ fn main() {
         settle_time_s: 0.0,
         peak_error_relative: None,
     };
+    let (spice_output, melange_output) =
+        run_pot_validation("circuit.cir", stimulus, num_samples, main_code, &config);
     let (spice_signal, melange_signal, fit) =
         aligned_signals(&spice_output, &melange_output, &input, &config);
     let mut report = compare_signals(&spice_signal, &melange_signal, &config);
@@ -2256,17 +2280,14 @@ fn test_railfree_version_of_the_railed_deck_validates() {
 
     let pwl = load_pwl_file(&test_data_dir().join("opamp_railed").join("input_pwl.txt"))
         .expect("read pwl");
-    let tstep = 1.0 / SAMPLE_RATE;
     let duration = pwl.last().map(|(t, _)| *t).unwrap_or(0.01);
 
-    let spice_data = run_transient_with_thevenin_pwl(
+    let spice_data = converged_reference(
         &railfree,
-        tstep,
         duration,
-        "in",
-        &pwl,
-        1.0,
-        &["out".to_string()],
+        &pwl_source(&pwl),
+        "out",
+        &strict_linear_config(),
     )
     .expect("rail-free deck must reach the reference run");
 

@@ -192,6 +192,24 @@ pub fn run_transient(
     tstop: f64,
     nodes_to_capture: &[String],
 ) -> Result<SpiceData, SpiceError> {
+    run_transient_stepped(
+        netlist_path,
+        tstep,
+        tstop,
+        ReferenceStep::default(),
+        nodes_to_capture,
+    )
+}
+
+/// [`run_transient`] with ngspice's internal step and tolerance set by
+/// `step`.
+pub fn run_transient_stepped(
+    netlist_path: &Path,
+    tstep: f64,
+    tstop: f64,
+    step: ReferenceStep,
+    nodes_to_capture: &[String],
+) -> Result<SpiceData, SpiceError> {
     use std::io::Write;
 
     // Check if ngspice is available
@@ -224,7 +242,9 @@ pub fn run_transient(
         if first_line {
             modified_content.push_str(line);
             modified_content.push('\n');
-            modified_content.push_str(".OPTIONS INTERP reltol=1e-4\n");
+            modified_content.push_str(&format!(
+                ".OPTIONS INTERP reltol={DEFAULT_REFERENCE_RELTOL:e}\n"
+            ));
             // Mirror melange's global gmin regularization in the ngspice
             // reference: melange stamps GMIN_REGULARISATION = 1e-12 S on every
             // node diagonal (codegen/ir/mod.rs), and rshunt=1e12 adds the
@@ -251,11 +271,7 @@ pub fn run_transient(
             // Replace with uniform timestep for sample-accurate comparison
             // Use the specified tstep and tstop instead of netlist values
             has_tran = true;
-            modified_content.push_str(&format!(
-                ".TRAN {} {}\n",
-                format_scientific(tstep),
-                format_scientific(tstop)
-            ));
+            modified_content.push_str(&tran_card(tstep, tstop, step));
         } else if trimmed_upper.starts_with(".OPTIONS") {
             // Keep deck-author .OPTIONS lines: ngspice merges multiple
             // .OPTIONS statements, so author options coexist with the
@@ -293,11 +309,7 @@ pub fn run_transient(
     // supplied. The rewrite branches above take precedence when the deck *does*
     // declare its own.
     if !has_tran {
-        modified_content.push_str(&format!(
-            ".TRAN {} {}\n",
-            format_scientific(tstep),
-            format_scientific(tstop)
-        ));
+        modified_content.push_str(&tran_card(tstep, tstop, step));
     }
     if !has_print {
         modified_content.push_str(&format!(
@@ -308,6 +320,13 @@ pub fn run_transient(
                 .collect::<Vec<_>>()
                 .join(" ")
         ));
+    }
+
+    // A tightened tolerance goes last, so it wins over a deck author's own
+    // `reltol` as well as over the injected default: it is a property of
+    // how finely the reference is solved, not of the circuit.
+    if step.reltol != DEFAULT_REFERENCE_RELTOL {
+        modified_content.push_str(&format!(".OPTIONS reltol={:e}\n", step.reltol));
     }
 
     // Ensure .END is present
@@ -390,6 +409,65 @@ pub fn run_transient(
     let spice_data = parse_printed_output(&stdout, nodes_to_capture)?;
 
     Ok(spice_data)
+}
+
+/// ngspice's internal steps per output step at the start of the reference's
+/// convergence ladder: its maximum internal step is
+/// `tstep / REFERENCE_STEP_DIVISOR`. Stated, not derived; each run's own
+/// self-check (`reference::converged_reference`) decides whether it was fine
+/// enough.
+///
+/// ngspice's default maximum step is the output step. A PWL drive at the
+/// sample rate used to force a breakpoint every sample (and ngspice cuts its
+/// step after each), which kept the reference internally fine; a smooth
+/// analytic drive forces none, and ngspice then integrates with the same
+/// step size as the melange render it is judging: its own trapezoidal
+/// warping, and worse on stiff nonlinear decks. Measured at the default: the
+/// reference moved 0.72 % (noyce-amp-at-idle) and 2.9 %
+/// (noyce-cascaded-triodes) between its 96 and 192 kHz runs, and 48 kHz
+/// validate read 2.4 % and 11.8 %. At `tstep/16`: 0.009 % and 0.071 %, and
+/// validate reads 0.21 % and 0.18 %.
+pub const REFERENCE_STEP_DIVISOR: f64 = 16.0;
+
+/// ngspice's relative tolerance for the reference (its default is 1e-3).
+pub const DEFAULT_REFERENCE_RELTOL: f64 = 1e-4;
+
+/// How finely ngspice solves a reference: its maximum internal step is
+/// `tstep / tmax_divisor`, and its relative tolerance `reltol`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReferenceStep {
+    pub tmax_divisor: f64,
+    pub reltol: f64,
+}
+
+impl Default for ReferenceStep {
+    fn default() -> Self {
+        ReferenceStep {
+            tmax_divisor: REFERENCE_STEP_DIVISOR,
+            reltol: DEFAULT_REFERENCE_RELTOL,
+        }
+    }
+}
+
+impl std::fmt::Display for ReferenceStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "TMAX = tstep/{}, reltol = {:e}",
+            self.tmax_divisor, self.reltol
+        )
+    }
+}
+
+/// The reference's `.TRAN` card: output every `tstep`, internal steps no
+/// longer than `tstep / step.tmax_divisor`.
+fn tran_card(tstep: f64, tstop: f64, step: ReferenceStep) -> String {
+    format!(
+        ".TRAN {} {} 0 {}\n",
+        format_scientific(tstep),
+        format_scientific(tstop),
+        format_scientific(tstep / step.tmax_divisor)
+    )
 }
 
 /// ngspice's reason when it abandoned a transient part-way. Such a run still
@@ -807,7 +885,7 @@ pub(crate) fn substitute_dynamic_element_defaults(deck: &str) -> String {
 }
 
 /// `PWL(t v ...)` for a voltage source.
-pub(crate) fn pwl_source(pwl_data: &[(f64, f64)]) -> String {
+pub fn pwl_source(pwl_data: &[(f64, f64)]) -> String {
     let pwl_string: String = pwl_data
         .iter()
         .map(|(t, v)| format!("{} {}", format_scientific(*t), format_scientific(*v)))
@@ -957,6 +1035,31 @@ pub fn run_transient_with_thevenin_drive(
     series_resistance: f64,
     nodes_to_capture: &[String],
 ) -> Result<SpiceData, SpiceError> {
+    run_transient_with_thevenin_drive_stepped(
+        netlist_content,
+        tstep,
+        tstop,
+        input_node,
+        source,
+        series_resistance,
+        nodes_to_capture,
+        ReferenceStep::default(),
+    )
+}
+
+/// [`run_transient_with_thevenin_drive`] with ngspice's internal step and
+/// tolerance set by `step`.
+#[allow(clippy::too_many_arguments)]
+pub fn run_transient_with_thevenin_drive_stepped(
+    netlist_content: &str,
+    tstep: f64,
+    tstop: f64,
+    input_node: &str,
+    source: &str,
+    series_resistance: f64,
+    nodes_to_capture: &[String],
+    step: ReferenceStep,
+) -> Result<SpiceData, SpiceError> {
     // Masking-risk guardrail: rshunt=1e12 (injected into the reference deck)
     // silently regularizes floating cap-only DC islands so ngspice's DC solve no
     // longer goes singular. That is the intended behavior for genuine
@@ -1079,7 +1182,13 @@ pub fn run_transient_with_thevenin_drive(
     }
 
     let modified = inject_thevenin_source(&translated, input_node, source, series_resistance)?;
-    let spice_data = run_transient(modified.netlist_path.as_path(), tstep, tstop, &capture)?;
+    let spice_data = run_transient_stepped(
+        modified.netlist_path.as_path(),
+        tstep,
+        tstop,
+        step,
+        &capture,
+    )?;
     crate::opamp_translate::check_rail_probes(&rail_probes, &spice_data.voltages, tstep)?;
     Ok(spice_data)
 }
@@ -1343,8 +1452,10 @@ Index   time            v(out)
 
     #[test]
     fn test_spice_data_getters() {
-        let mut data = SpiceData::default();
-        data.time = vec![0.0, 1e-6, 2e-6];
+        let mut data = SpiceData {
+            time: vec![0.0, 1e-6, 2e-6],
+            ..SpiceData::default()
+        };
         data.voltages.insert("out".to_string(), vec![0.0, 0.5, 1.0]);
 
         assert_eq!(data.len(), 3);

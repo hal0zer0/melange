@@ -375,6 +375,14 @@ pub struct ComparisonReport {
     /// the input samples' band-limited reconstruction. Filled by
     /// `validate_circuit_with_options`; reported, not graded.
     pub reference_note: Option<String>,
+
+    /// The reference's own convergence: its normalized RMS difference from
+    /// the next-coarser reference (`reference::converged_reference`), and a
+    /// note naming the rung and the bound. Printed next to the error, since a
+    /// verdict is only as good as its reference. Filled by
+    /// `validate_circuit_with_options`.
+    pub reference_self_check: Option<f64>,
+    pub reference_self_check_note: Option<String>,
 }
 
 impl ComparisonReport {
@@ -446,6 +454,9 @@ impl ComparisonReport {
             self.rms_error,
             self.normalized_rms_error * 100.0
         ));
+        if let Some(note) = &self.reference_self_check_note {
+            summary.push_str(&format!("                    {note}\n"));
+        }
         summary.push_str(&format!("  Peak Error:       {:.6e}\n", self.peak_error));
         summary.push_str(&format!(
             "  Mean Abs Error:   {:.6e}\n",
@@ -638,6 +649,8 @@ pub fn compare_signals(
         parasitic_note: None,
         linearize_note: None,
         reference_note: None,
+        reference_self_check: None,
+        reference_self_check_note: None,
         absolute_errors: None,
         relative_errors: None,
         unit_variation_note: None,
@@ -922,6 +935,8 @@ pub fn compare_signals(
         parasitic_note: None,
         linearize_note: None,
         reference_note: None,
+        reference_self_check: None,
+        reference_self_check_note: None,
     }
 }
 
