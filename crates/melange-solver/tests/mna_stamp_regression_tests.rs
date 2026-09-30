@@ -358,7 +358,7 @@ Q1 c b e QN
     let ib = dc_nl.i_nl[s + 1];
     assert!(ic > 1e-5, "CE stage should be biased active, Ic = {}", ic);
 
-    // Plausible small-signal conductances. The fixed-point invariant holds
+    // Plausible small-signal Jacobian. The fixed-point invariant holds
     // for any values — only the Norton constant matters.
     let bp = match &slots[0].params {
         DeviceParams::Bjt(bp) => bp,
@@ -366,8 +366,6 @@ Q1 c b e QN
     };
     let gm = ic / (bp.nf * bp.vt);
     let gpi = gm / bp.beta_f;
-    let gmu = 1e-9;
-    let go = 1e-9;
 
     // Linearized rebuild + stamp (mirrors the CLI .linearize flow).
     let mut lin_set = HashSet::new();
@@ -387,10 +385,10 @@ Q1 c b e QN
         nc,
         nb,
         ne,
-        gm,
-        gpi,
-        gmu,
-        go,
+        dic_dvbe: gm,
+        dic_dvbc: -1e-9,
+        dib_dvbe: gpi,
+        dib_dvbc: 1e-9,
         ic_dc: ic,
         ib_dc: ib,
         vbe0: v_at(nb) - v_at(ne),

@@ -334,45 +334,17 @@ fn evaluate_devices_inner(
                     );
                     continue;
                 }
-                let polarity = if bp.is_pnp {
-                    BjtPolarity::Pnp
-                } else {
-                    BjtPolarity::Npn
-                };
-                // Leakage diodes (ISE/NE, ISC/NC): the transient runtime's
-                // `bjt_evaluate` (device_bjt.rs.tera) always includes these
-                // terms in Ib and its Jacobian. The DC OP must carry the same
-                // params or the bias point (and the baked DC_NL_I seeds)
-                // converge to a different fixed point than the transient —
-                // for a 2N3904 at Vbe≈0.65 the leakage term exceeds the ideal
-                // Ib, which is volts of error through MΩ-class bias networks.
-                let em = BjtEbersMoll::new(bp.is, bp.vt, bp.beta_f, bp.beta_r, polarity)
-                    .with_nf(bp.nf)
-                    .with_nr(bp.nr)
-                    .with_leakage(bp.ise, bp.ne, bp.isc, bp.nc);
-                // Gummel-Poon wraps the SAME leakage-carrying Ebers-Moll core:
-                // GP modulates only the transport (collector) current by qb;
-                // Ib and its Jacobian delegate to the base Ebers-Moll model —
-                // exactly the composition of the runtime `bjt_evaluate`.
-                let gp = if bp.is_gummel_poon() {
-                    Some(BjtGummelPoon::new(em, bp.vaf, bp.var, bp.ikf, bp.ikr))
-                } else {
-                    None
-                };
-                let vbe = v_nl[s];
-                let vbc = v_nl[s + 1];
-
                 // If the BJT has parasitic resistances and we're NOT using
-                // internal junction nodes, solve for the internal junction
-                // voltages with the same damped 2D Newton the generated
-                // runtime uses (`bjt_with_parasitics`). When internal_junctions
-                // is true, v_nl already contains the correct internal voltages
-                // from dc_n_v.
-                let (ic, ib, jac) = if bp.has_parasitics() && !internal_junctions {
-                    bjt_with_parasitics_dc(&em, gp.as_ref(), vbe, vbc, bp.rb, bp.rc, bp.re, bp.vt)
-                } else {
-                    bjt_eval_intrinsic(&em, gp.as_ref(), vbe, vbc)
-                };
+                // internal junction nodes, v_nl holds the terminal-pair
+                // voltages and the junction voltages are solved through RB/RC/RE.
+                // When internal_junctions is true, v_nl already contains the
+                // correct internal voltages from dc_n_v.
+                let (ic, ib, jac) = bjt_eval(
+                    bp,
+                    v_nl[s],
+                    v_nl[s + 1],
+                    bp.has_parasitics() && !internal_junctions,
+                );
                 i_nl[s] = ic;
                 i_nl[s + 1] = ib;
                 j_dev[s * m + s] = jac[0]; // dIc/dVbe
@@ -675,6 +647,51 @@ fn evaluate_devices_inner(
                 );
             }
         }
+    }
+}
+
+/// Evaluate a BJT as the DC OP does: `(Ic, Ib, [dIc/dVbe, dIc/dVbc,
+/// dIb/dVbe, dIb/dVbc])` at `(vbe, vbc)`.
+///
+/// With `through_parasitics`, `(vbe, vbc)` are the EXTERNAL terminal-pair
+/// voltages and the junction voltages are solved through RB/RC/RE (see
+/// [`bjt_with_parasitics_dc`]), so the Jacobian is the external one. Without
+/// it they are the junction voltages themselves.
+pub(crate) fn bjt_eval(
+    bp: &crate::device_types::BjtParams,
+    vbe: f64,
+    vbc: f64,
+    through_parasitics: bool,
+) -> (f64, f64, [f64; 4]) {
+    let polarity = if bp.is_pnp {
+        BjtPolarity::Pnp
+    } else {
+        BjtPolarity::Npn
+    };
+    // Leakage diodes (ISE/NE, ISC/NC): the transient runtime's
+    // `bjt_evaluate` (device_bjt.rs.tera) always includes these
+    // terms in Ib and its Jacobian. The DC OP must carry the same
+    // params or the bias point (and the baked DC_NL_I seeds)
+    // converge to a different fixed point than the transient —
+    // for a 2N3904 at Vbe≈0.65 the leakage term exceeds the ideal
+    // Ib, which is volts of error through MΩ-class bias networks.
+    let em = BjtEbersMoll::new(bp.is, bp.vt, bp.beta_f, bp.beta_r, polarity)
+        .with_nf(bp.nf)
+        .with_nr(bp.nr)
+        .with_leakage(bp.ise, bp.ne, bp.isc, bp.nc);
+    // Gummel-Poon wraps the SAME leakage-carrying Ebers-Moll core:
+    // GP modulates only the transport (collector) current by qb;
+    // Ib and its Jacobian delegate to the base Ebers-Moll model —
+    // exactly the composition of the runtime `bjt_evaluate`.
+    let gp = if bp.is_gummel_poon() {
+        Some(BjtGummelPoon::new(em, bp.vaf, bp.var, bp.ikf, bp.ikr))
+    } else {
+        None
+    };
+    if through_parasitics {
+        bjt_with_parasitics_dc(&em, gp.as_ref(), vbe, vbc, bp.rb, bp.rc, bp.re, bp.vt)
+    } else {
+        bjt_eval_intrinsic(&em, gp.as_ref(), vbe, vbc)
     }
 }
 

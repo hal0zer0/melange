@@ -565,10 +565,11 @@ pub struct BjtTransientInternalNodes {
     pub int_emitter: Option<usize>,
 }
 
-/// Linearized BJT info: small-signal conductances stamped into G at DC OP.
+/// Linearized BJT info: the device's small-signal Jacobian stamped into G at DC OP.
 ///
 /// The BJT is removed from the nonlinear system (M reduced by 2) and its
-/// behavior captured by g-parameters and DC bias currents in the linear system.
+/// behavior captured by its terminal-current Jacobian and DC bias currents in
+/// the linear system.
 #[derive(Debug, Clone)]
 pub struct LinearizedBjtInfo {
     pub name: String,
@@ -576,18 +577,20 @@ pub struct LinearizedBjtInfo {
     pub nc: usize,
     pub nb: usize,
     pub ne: usize,
-    /// Small-signal conductances (computed from DC OP Jacobian)
-    pub gm: f64, // dIc/dVbe (transconductance)
-    pub gpi: f64, // dIb/dVbe (input conductance)
-    pub gmu: f64, // dIc/dVbc (feedback conductance)
-    pub go: f64,  // dIb/dVbc (reverse base conductance)
+    /// Terminal-current Jacobian at the DC OP, against the EXTERNAL
+    /// terminal-pair voltages (Vbe = V(nb) - V(ne), Vbc = V(nb) - V(nc)).
+    /// Ic and Ib are the currents into the collector and base terminals.
+    pub dic_dvbe: f64,
+    pub dic_dvbc: f64,
+    pub dib_dvbe: f64,
+    pub dib_dvbc: f64,
     /// DC bias currents
     pub ic_dc: f64,
     pub ib_dc: f64,
     /// Operating-point controlling voltages in EXTERNAL node space
     /// (Vbe0 = V(nb) - V(ne), Vbc0 = V(nb) - V(nc) at the DC OP).
     /// Required so `stamp_linearized_bjts` can inject the proper Norton
-    /// constant I0 - g·v0: the small-signal conductances are stamped
+    /// constant I0 - J·v0: the small-signal Jacobian is stamped
     /// against FULL node voltages, so the companion current source must
     /// subtract the linear-model current at the OP or the linearized
     /// circuit's DC fixed point drifts away from the operating point.
@@ -1250,86 +1253,51 @@ impl MnaSystem {
         builder.build(netlist)
     }
 
-    /// Stamp linearized BJT small-signal conductances into G matrix.
+    /// Stamp linearized BJT small-signal Jacobians into G matrix.
     ///
-    /// Must be called AFTER DC OP computation provides the g-parameters.
-    /// Each linearized BJT gets:
-    /// - gm (VCCS): Ic = gm * Vbe, current flows C→E controlled by B-E
-    /// - gpi (conductance): dIb/dVbe between B and E
-    /// - gmu (conductance): dIc/dVbc between B and C
-    /// - go (conductance): dIb/dVbc between B and C
-    /// - DC bias currents as current source injections
+    /// Must be called AFTER DC OP computation provides the Jacobian.
+    /// Each linearized BJT's terminal currents are linear in
+    /// (Vbe, Vbc) = (Vb - Ve, Vb - Vc):
+    /// - collector: dIc/dVbe·Vbe + dIc/dVbc·Vbc
+    /// - base:      dIb/dVbe·Vbe + dIb/dVbc·Vbc
+    /// - emitter:   -(collector + base)
+    ///
+    /// plus DC bias currents as current source injections.
     pub fn stamp_linearized_bjts(&mut self) {
         for bjt in &self.linearized_bjts.clone() {
             let nc = bjt.nc; // 1-indexed
             let nb = bjt.nb;
             let ne = bjt.ne;
 
-            // gpi: conductance between B and E (dIb/dVbe)
-            if bjt.gpi.abs() > 1e-30 {
-                if nb > 0 && ne > 0 {
-                    let b = nb - 1;
-                    let e = ne - 1;
-                    self.g[b][b] += bjt.gpi;
-                    self.g[e][e] += bjt.gpi;
-                    self.g[b][e] -= bjt.gpi;
-                    self.g[e][b] -= bjt.gpi;
-                } else if nb > 0 {
-                    self.g[nb - 1][nb - 1] += bjt.gpi;
-                } else if ne > 0 {
-                    self.g[ne - 1][ne - 1] += bjt.gpi;
+            // Current drawn out of each terminal's node, per volt of Vbe and Vbc.
+            let terminals = [
+                (nc, bjt.dic_dvbe, bjt.dic_dvbc),
+                (nb, bjt.dib_dvbe, bjt.dib_dvbc),
+                (
+                    ne,
+                    -(bjt.dic_dvbe + bjt.dib_dvbe),
+                    -(bjt.dic_dvbc + bjt.dib_dvbc),
+                ),
+            ];
+            for &(row, d_vbe, d_vbc) in &terminals {
+                if row == 0 {
+                    continue;
                 }
-            }
-
-            // gm: VCCS — Ic = gm * Vbe, current flows from C to E, controlled by B-E
-            // Stamp: G[c][b] += gm, G[c][e] -= gm, G[e][b] -= gm, G[e][e] += gm
-            if bjt.gm.abs() > 1e-30 {
-                if nc > 0 && nb > 0 {
-                    self.g[nc - 1][nb - 1] += bjt.gm;
+                // ∂/∂Vb = d_vbe + d_vbc, ∂/∂Ve = -d_vbe, ∂/∂Vc = -d_vbc;
+                // a ground column drops out (its voltage is 0).
+                for (col, val) in [(nb, d_vbe + d_vbc), (ne, -d_vbe), (nc, -d_vbc)] {
+                    if col > 0 {
+                        self.g[row - 1][col - 1] += val;
+                    }
                 }
-                if nc > 0 && ne > 0 {
-                    self.g[nc - 1][ne - 1] -= bjt.gm;
-                }
-                if ne > 0 && nb > 0 {
-                    self.g[ne - 1][nb - 1] -= bjt.gm;
-                }
-                if ne > 0 {
-                    self.g[ne - 1][ne - 1] += bjt.gm;
-                }
-            }
-
-            // gmu: conductance between B and C (dIc/dVbc)
-            if bjt.gmu.abs() > 1e-30 {
-                if nb > 0 && nc > 0 {
-                    let b = nb - 1;
-                    let c = nc - 1;
-                    self.g[b][b] += bjt.gmu;
-                    self.g[c][c] += bjt.gmu;
-                    self.g[b][c] -= bjt.gmu;
-                    self.g[c][b] -= bjt.gmu;
-                } else if nb > 0 {
-                    self.g[nb - 1][nb - 1] += bjt.gmu;
-                } else if nc > 0 {
-                    self.g[nc - 1][nc - 1] += bjt.gmu;
-                }
-            }
-
-            // go: conductance between B and C (dIb/dVbc)
-            if bjt.go.abs() > 1e-30 && nb > 0 && nc > 0 {
-                let b = nb - 1;
-                let c = nc - 1;
-                self.g[b][b] += bjt.go;
-                self.g[c][c] += bjt.go;
-                self.g[b][c] -= bjt.go;
-                self.g[c][b] -= bjt.go;
             }
 
             // DC bias injections — proper Norton companion constants.
             //
-            // The conductance stamps above implement a linear terminal-current
-            // model I_lin(v) evaluated against FULL node voltages, not
-            // deviations from the operating point. The exact companion of
-            // I(v) ≈ I0 + g·(v − v0) therefore needs the constant injection
+            // The stamps above implement a linear terminal-current model
+            // I_lin(v) evaluated against FULL node voltages, not deviations
+            // from the operating point. The exact companion of
+            // I(v) ≈ I0 + J·(v − v0) therefore needs the constant injection
             // I_lin(v0) − I0 at each terminal (current INTO the node), so
             // that v = v0 is exactly the DC fixed point of the linearized
             // circuit. Injecting raw ±I0 alone (the pre-2026-07 behavior)
@@ -1337,45 +1305,13 @@ impl MnaSystem {
             // against Vbe0 ≈ 0.65 V produced multi-mA KCL error at the
             // collector row and tens of volts of bias shift.
             //
-            // I_lin per terminal mirrors the stamp blocks above, including
-            // their per-terminal ground guards (a grounded terminal has
-            // v = 0, so the vbe0/vbc0 node-difference forms stay exact for
-            // the diagonal-only fallback stamps). `go` is only stamped when
-            // BOTH base and collector are non-ground, so its OP term follows
-            // the same condition.
+            // vbe0/vbc0 are node differences with a grounded terminal at
+            // 0 V, so I_lin(v0) is exact whichever terminals are grounded.
             let vbe0 = bjt.vbe0;
             let vbc0 = bjt.vbc0;
-            let mut i_lin_b = 0.0;
-            let mut i_lin_c = 0.0;
-            let mut i_lin_e = 0.0;
-            if bjt.gpi.abs() > 1e-30 {
-                if nb > 0 {
-                    i_lin_b += bjt.gpi * vbe0;
-                }
-                if ne > 0 {
-                    i_lin_e -= bjt.gpi * vbe0;
-                }
-            }
-            if bjt.gm.abs() > 1e-30 {
-                if nc > 0 {
-                    i_lin_c += bjt.gm * vbe0;
-                }
-                if ne > 0 {
-                    i_lin_e -= bjt.gm * vbe0;
-                }
-            }
-            if bjt.gmu.abs() > 1e-30 {
-                if nb > 0 {
-                    i_lin_b += bjt.gmu * vbc0;
-                }
-                if nc > 0 {
-                    i_lin_c -= bjt.gmu * vbc0;
-                }
-            }
-            if bjt.go.abs() > 1e-30 && nb > 0 && nc > 0 {
-                i_lin_b += bjt.go * vbc0;
-                i_lin_c -= bjt.go * vbc0;
-            }
+            let i_lin_c = bjt.dic_dvbe * vbe0 + bjt.dic_dvbc * vbc0;
+            let i_lin_b = bjt.dib_dvbe * vbe0 + bjt.dib_dvbc * vbc0;
+            let i_lin_e = -(i_lin_c + i_lin_b);
 
             // Terminal DC currents drawn OUT of each node by the real device:
             // collector ic_dc, base ib_dc, emitter -(ic_dc + ib_dc).

@@ -372,7 +372,13 @@ times.
   (`crates/melange-solver/src/pipeline.rs:146-156`)
 - Replaced with small-signal conductances at DC operating point
 - Reduces nonlinear dimension M (BJT: M-2, triode: M-2 per device)
-- Device still affects the circuit via linearized g_m, g_pi, r_o stamps in G
+- A linearized BJT is stamped as its own terminal-current Jacobian at the DC
+  operating point: NF/NR, Gummel-Poon Early effect and high injection, ISE/ISC
+  leakage and RB/RC/RE all enter it. A triode is stamped as g_m and 1/r_p
+- A linearized BJT's junction and diffusion capacitances (CJE, CJC, TF) are
+  not stamped [OPEN]. Measured on a common-emitter stage with CJC = 100 pF
+  from a 1 Ω source: the linearized circuit misses 1.8° of phase at 20 kHz
+  that the full circuit and ngspice show; the error grows with source impedance
 
 ## Numerical Limitations
 

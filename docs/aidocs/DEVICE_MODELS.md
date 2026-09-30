@@ -220,7 +220,7 @@ changes its NR dimension:
 |---------|--------|--------|----------|
 | `Bjt` (default) | netlist | 2 | Full Ebers-Moll / Gummel-Poon, both junctions in NR |
 | `BjtForwardActive` | DC OP detects strong forward bias | 1 | Only Vbe→Ic in NR; `Ib = Ic / β_F` derived from Ic |
-| `linearized_bjts` (`mna.linearized_bjts`) | DC OP detects fully-biased linear region | 0 | Removed from NR entirely; small-signal `g_m`/`g_pi`/`r_o` stamped into G after DC OP |
+| `linearized_bjts` (`mna.linearized_bjts`) | `.linearize` directive | 0 | Removed from NR entirely; the device's own 2×2 terminal-current Jacobian (dIc, dIb over dVbe, dVbc, external terminals) stamped into G after DC OP |
 
 With the reduction requested, 8 BJTs start at 16 NR dimensions and each one
 detected forward-active drops to 1D (7 detected: `16 - 7 = 9`). Linearized BJTs

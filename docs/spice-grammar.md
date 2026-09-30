@@ -1193,7 +1193,7 @@ Removes a nonlinear device from the Newton-Raphson system and replaces it with s
 
 **Notes:**
 - `.linearize` is a **semantic** tool, not a CPU optimization. For small-signal stages that stay in their linear region, NR already converges in 0–1 iterations, so linearizing produces negligible CPU savings. The real reason to use it is to **force small-signal mode** — removing a device that happens to traverse a nonlinear knee from its DC bias but musically should not (e.g. a Vbe-multiplier BJT in a power amp, a clean cathode-bypass stage in a preamp). A linearized device cannot clip.
-- BJTs: reduces M by 2 per device (stamps g_m, g_pi, r_o into G)
+- BJTs: reduces M by 2 per device (stamps the device's small-signal Jacobian into G: gain, input conductance, Early output resistance, B-C feedback)
 - Triodes: reduces M by 2 per device (stamps g_m, 1/r_p into G)
 - The device still affects the circuit via its linearized conductances
 - The linearization is computed from the DC operating point, so it is only accurate for small signals around that point

@@ -216,54 +216,50 @@ pub fn apply_linearize_reductions(
                             0.0
                         }
                     };
-                    let vbe = dc_result.v_nl.get(s).copied().unwrap_or(0.0);
+                    // Bias currents are the ones the bias solve balanced KCL with.
                     let ic = dc_result.i_nl.get(s).copied().unwrap_or(0.0);
                     // Guard on slot.dimension: for an FA-reduced (1D) BJT,
-                    // v_nl[s+1]/i_nl[s+1] belong to the NEXT device's slot.
-                    // FA contract: Vbc from node voltages, Ib = Ic / BF.
-                    let (vbc, ib) = if slot.dimension == 2 {
-                        (
-                            dc_result.v_nl.get(s + 1).copied().unwrap_or(0.0),
-                            dc_result.i_nl.get(s + 1).copied().unwrap_or(0.0),
-                        )
+                    // i_nl[s+1] belongs to the NEXT device's slot.
+                    // FA contract: Ib = Ic / BF.
+                    let ib = if slot.dimension == 2 {
+                        dc_result.i_nl.get(s + 1).copied().unwrap_or(0.0)
                     } else {
-                        (v_at(nb) - v_at(nc), ic / bp.beta_f)
+                        ic / bp.beta_f
                     };
 
-                    let sign = if bp.is_pnp { -1.0 } else { 1.0 };
-                    let vbe_eff = sign * vbe;
-                    let vbc_eff = sign * vbc;
-                    let nf_vt = bp.nf * bp.vt;
-                    // Slopes of the junction laws (see `safeguards::junction_exp`).
-                    let exp_be =
-                        melange_devices::safeguards::junction_exp(vbe_eff / nf_vt, bp.is).1;
-                    let exp_bc =
-                        melange_devices::safeguards::junction_exp(vbc_eff / bp.vt, bp.is).1;
-
-                    let gm = bp.is / nf_vt * exp_be;
-                    let gmu = (bp.is / bp.vt * exp_bc + bp.is / (bp.beta_r * bp.vt) * exp_bc).abs();
-                    let gpi = bp.is / (bp.beta_f * nf_vt) * exp_be;
-                    let go = bp.is / (bp.beta_r * bp.vt) * exp_bc;
-
                     // Norton operating-point voltages in EXTERNAL node space
-                    // (the linearized conductances are stamped between the
-                    // external terminals, so the I0 - g·v0 constant must use
-                    // external node differences — see LinearizedBjtInfo docs).
+                    // (the linearized device is stamped between the external
+                    // terminals, so the I0 - J·v0 constant must use external
+                    // node differences — see LinearizedBjtInfo docs).
                     let vbe0 = v_at(nb) - v_at(ne);
                     let vbc0 = v_at(nb) - v_at(nc);
-                    report!(rep,
-                        "  Linearized {}: gm={:.4e} gpi={:.4e} gmu={:.4e} Ic_dc={:.4e} Ib_dc={:.4e}",
-                        dev.name, gm, gpi, gmu, ic, ib
+                    // The small-signal model is the device's own Jacobian at the
+                    // bias point, from the evaluator the bias solve used: NF/NR,
+                    // Gummel-Poon qb (Early, high injection), ISE/ISC leakage,
+                    // and RB/RC/RE folded in through the terminal-pair solve.
+                    let (_, _, jac) = crate::dc_op::bjt_eval(bp, vbe0, vbc0, bp.has_parasitics());
+                    let [dic_dvbe, dic_dvbc, dib_dvbe, dib_dvbc] = jac;
+                    report!(
+                        rep,
+                        "  Linearized {}: dIc/dVbe={:.4e} dIc/dVbc={:.4e} dIb/dVbe={:.4e} \
+                         dIb/dVbc={:.4e} Ic_dc={:.4e} Ib_dc={:.4e}",
+                        dev.name,
+                        dic_dvbe,
+                        dic_dvbc,
+                        dib_dvbe,
+                        dib_dvbc,
+                        ic,
+                        ib
                     );
                     bjt_lin_infos.push(crate::mna::LinearizedBjtInfo {
                         name: dev.name.clone(),
                         nc,
                         nb,
                         ne,
-                        gm,
-                        gpi,
-                        gmu,
-                        go,
+                        dic_dvbe,
+                        dic_dvbc,
+                        dib_dvbe,
+                        dib_dvbc,
                         ic_dc: ic,
                         ib_dc: ib,
                         vbe0,

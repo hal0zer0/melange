@@ -126,7 +126,7 @@ remains in the solver crate as a fallback for purely linear circuits.
 | Diode | 1D | Shockley + RS + BV |
 | BJT | 2D (Vbe→Ic, Vbc→Ib) | Gummel-Poon / Ebers-Moll |
 | BJT (forward-active flagged) | 1D (Vbe→Ic, Ib = Ic/βF) | Auto-detected at DC OP |
-| BJT (linearized) | 0D (removed from NR) | Small-signal `g`s stamped into G after DC OP |
+| BJT (linearized) | 0D (removed from NR) | Device Jacobian at the DC OP stamped into G |
 | JFET | 2D | Shichman-Hodges |
 | MOSFET | 2D | Level 1 SPICE |
 | Tube (triode) | 2D (Vgk→Ip, Vpk→Ig) | Koren plate + Dempwolf & Zölzer grid |
