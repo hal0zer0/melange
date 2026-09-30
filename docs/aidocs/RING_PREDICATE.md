@@ -289,6 +289,58 @@ engages (four of them are DK builds, which carry no latch; their absolute
 whose accumulated ring passes −60 dB of the program do
 (`tests/be_latch_entry_tests.rs`).
 
+## A ring under a loud program: the trial latch (evaluated 2026-09-30, rejected)
+
+**The gap.** The latch's entry test is the lag-1 ratio of the output. Under
+a loud program that ratio is the power-weighted mean of the program's and
+the ring's factors, so a ring at −22 dB of a 15 V program still reads
+about +0.98 and never enters. steve-1073-preamp unpinned (trapezoidal) is
+the witness: every onset from quiet excites a Nyquist-rate ring on the flat
+tops of its clipped output (1.0 V against backward Euler's 86 mV at 48 kHz;
+2.1 V against 0.14 mV at 96 kHz, where it persists and costs 11.4 % RMS
+against a converged reference, against 1.31 % pinned). The latch never
+engages.
+
+**What was evaluated.** Offline, on latch-free trapezoidal renders (the
+generated code with the latch flag owned by a driver):
+
+- A Nyquist estimator: the output demodulated by (−1)ⁿ, first-differenced
+  and low-passed to ±1 kHz of fs/2, its power over 0.5 ms; excused by the
+  input's own Nyquist content times the circuit's gain there; above the
+  program floor; held for 2 ms. (A plain second difference is a high-pass,
+  not a Nyquist detector: a 10 kHz tone at 48 kHz gives 37 % of its
+  amplitude.)
+- No estimator of the output can separate a trapezoidal ring from content
+  the circuit forces at fs/2: a hard-clipping common-emitter stage at 1 and
+  5 kHz carries 22 and 280 mV at Nyquist that backward Euler reproduces to
+  0.1 mV. So the discriminator was a mechanism test, a **trial latch**: on
+  a trip, run backward Euler for 3 ms; if the estimate falls to a third or
+  less, the content was trapezoidal's and the latch holds; otherwise
+  release to trapezoidal and do not re-trial for 1 s.
+
+| round | change | steve 48k | steve 96k | clippers (CE, diode, sweeps) | glitch on forced content |
+|---|---|---|---|---|---|
+| 1 | trial latch | released (0.19 → 0.14 V: edges dominate the band) | latched at +10 ms; then equal to pinned BE to 0.004 % | CE trips and releases, 0.3 % of samples on BE | −14 / −10 dB under the floor (CE) |
+| 2 | + edge gate (10 % of the program reference) | released | latched | no trips | — |
+| 3 | + program reference = min(H_pink·\|u\|, output envelope) | latched at +5 ms | latched at +5 ms | no trips | **wurli-power-amp: 0.28 V ≈ −39 dB of the program** |
+
+Round 3 separated every case, including the in-slow witnesses above. It is
+rejected on the glitch: a trip inside wurli-power-amp's large-signal
+start-up transient (program at full level from t = 0) put 3 ms of backward
+Euler into the transient, which bent the trajectory by 0.28 V peak on a
+25 V output (a smooth offset, not a ring), decaying over ~50 ms, although
+the trial itself correctly released the content as forced. A trial that is
+audible on a real deck is itself an artefact.
+
+**Reopen condition.** A trial-scheduling rule *derived* from the circuit
+(for example from its own settling time), not a constant chosen after
+seeing this failure, that keeps trials out of large-signal transients.
+
+**Limitation that stands.** On edge-dominated decks at 1x, the runtime
+latch cannot separate a flat-top trapezoidal ring from the clipping edges'
+own Nyquist-band content. Such a deck needs a static pin
+(`.integrator be`); steve-1073-preamp keeps its pin for this reason.
+
 ## Limitation: the verdict is taken at the compiled rate
 
 The trap-versus-BE verdict uses the compiled internal rate. A host rate
