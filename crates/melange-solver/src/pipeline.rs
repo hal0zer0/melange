@@ -75,6 +75,10 @@ pub enum PipelineError {
     /// An MNA rebuild for a dimension reduction (forward-active / grid-off)
     /// failed.
     Mna(String),
+    /// A `.linearize` directive that cannot hold: a device outside the
+    /// region its small-signal model assumes at its own operating point, or a
+    /// name that is not a BJT or triode.
+    Linearize(String),
 }
 
 impl std::fmt::Display for PipelineError {
@@ -82,6 +86,7 @@ impl std::fmt::Display for PipelineError {
         match self {
             Self::DcOp(m) => write!(f, "linearize: DC operating point failed: {m}"),
             Self::Mna(m) => write!(f, "{m}"),
+            Self::Linearize(m) => write!(f, ".linearize: {m}"),
         }
     }
 }
@@ -167,11 +172,9 @@ pub fn apply_linearize_reductions(
         for name in &linearize_names {
             let upper = name.to_ascii_uppercase();
             if !linearized_bjts_set.contains(&upper) && !linearized_triodes_set.contains(&upper) {
-                report!(
-                    rep,
-                    "  Warning: .linearize device '{}' is not a BJT or triode (ignored)",
-                    name
-                );
+                return Err(PipelineError::Linearize(format!(
+                    "'{name}' is not a BJT or triode of this deck; only those can be linearized"
+                )));
             }
         }
     }
@@ -233,6 +236,30 @@ pub fn apply_linearize_reductions(
                     // node differences — see LinearizedBjtInfo docs).
                     let vbe0 = v_at(nb) - v_at(ne);
                     let vbc0 = v_at(nb) - v_at(nc);
+                    // The small-signal model assumes forward active, and the
+                    // runtime check (LinearizedCheck::Bjt) refuses every sample
+                    // outside it; a device already outside at its own
+                    // operating point is refused here, with the evidence.
+                    let sign = if bp.is_pnp { -1.0 } else { 1.0 };
+                    if sign * vbc0 > 0.0 {
+                        return Err(PipelineError::Linearize(format!(
+                            "{} is saturated at its own operating point (Vbc = {vbc0:+.3} V, \
+                             B-C junction forward): its small-signal model assumes forward \
+                             active, so the linearization is invalid here",
+                            dev.name
+                        )));
+                    }
+                    // Cut off: the B-E junction not forward biased (a real
+                    // device's leakage keeps Ic of the forward sign even
+                    // there), or no forward collector current at all.
+                    if sign * vbe0 <= 0.0 || sign * ic <= 0.0 {
+                        return Err(PipelineError::Linearize(format!(
+                            "{} is cut off at its own operating point (Vbe = {vbe0:+.3} V, \
+                             Ic = {ic:e} A): its small-signal model assumes forward active, so \
+                             the linearization is invalid here",
+                            dev.name
+                        )));
+                    }
                     // The small-signal model is the device's own Jacobian at the
                     // bias point, from the evaluator the bias solve used: NF/NR,
                     // Gummel-Poon qb (Early, high injection), ISE/ISC leakage,
@@ -277,10 +304,9 @@ pub fn apply_linearize_reductions(
         }
     }
 
-    // Extract triode small-signal params (gm, rp=1/gp) at DC bias. Skip
-    // (and drop from the linearize set) when the grid is conducting or
-    // Vgk is near the onset — the small-signal linearization is invalid
-    // in the grid-current regime.
+    // Extract triode small-signal params (gm, rp=1/gp) at DC bias. A triode
+    // cut off or with its grid past the conduction onset at its own operating
+    // point is outside the region the linearization assumes: refused.
     let mut triode_lin_infos = Vec::new();
     for slot in &device_slots {
         if let crate::codegen::ir::DeviceParams::Tube(tp) = &slot.params {
@@ -299,19 +325,9 @@ pub fn apply_linearize_reductions(
                     let ip_dc = dc_result.i_nl.get(s).copied().unwrap_or(0.0);
                     let ig_dc = dc_result.i_nl.get(s + 1).copied().unwrap_or(0.0);
 
-                    if ig_dc.abs() > 1e-9 {
-                        report!(rep,
-                            "  Warning: triode '{}' has Ig={:.4e} at DC OP (grid conducting), skipping linearization",
-                            dev.name, ig_dc
-                        );
-                        linearized_triodes_set.remove(&dev.name.to_ascii_uppercase());
-                        continue;
-                    }
-                    // "Near grid conduction onset" now means near the onset
-                    // the fitted D&Z grid law actually implies (the Vgk at
-                    // which Ig reaches the manufacturers' +0.3 uA starting-
-                    // point criterion), not the retired VGK_ONSET parameter,
-                    // which was never the onset. Same half-volt guard band.
+                    // The grid's conduction onset: the Vgk at which the fitted
+                    // D&Z grid law reaches the manufacturers' +0.3 uA
+                    // starting-point criterion.
                     let onset = melange_devices::KorenTriode {
                         mu: tp.mu,
                         ex: tp.ex,
@@ -328,13 +344,26 @@ pub fn apply_linearize_reductions(
                     }
                     .grid_voltage_at_current(melange_devices::tube::GRID_START_CRITERION_A)
                     .unwrap_or(0.0);
-                    if vgk > onset - 0.5 {
-                        report!(rep,
-                            "  Warning: triode '{}' has Vgk={:.2}V (near grid conduction onset {:.2}V), skipping linearization",
-                            dev.name, vgk, onset
-                        );
-                        linearized_triodes_set.remove(&dev.name.to_ascii_uppercase());
-                        continue;
+                    // The region's edges, as the runtime check
+                    // (LinearizedCheck::Triode) enforces them: a device outside
+                    // at its own operating point is refused with the evidence,
+                    // never silently kept nonlinear against the directive.
+                    if vgk > onset {
+                        return Err(PipelineError::Linearize(format!(
+                            "{}'s grid is past its conduction onset at its own operating \
+                             point (Vgk = {vgk:+.3} V, onset {onset:+.3} V, Ig = {ig_dc:e} A): \
+                             its small-signal model assumes a non-conducting grid, so the \
+                             linearization is invalid here",
+                            dev.name
+                        )));
+                    }
+                    if ip_dc <= 0.0 {
+                        return Err(PipelineError::Linearize(format!(
+                            "{} is cut off at its own operating point (Ip = {ip_dc:e} A): its \
+                             small-signal model needs plate current, so the linearization is \
+                             invalid here",
+                            dev.name
+                        )));
                     }
 
                     let triode = melange_devices::KorenTriode {

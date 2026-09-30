@@ -8,7 +8,8 @@
 //! into rows the device does not draw them from. Measured at 1 kHz against
 //! ngspice `.ac`, a bypassed common-emitter stage with a Gummel-Poon card read
 //! +0.71 dB hot, and an NR = 2 stage with its B-C junction forward read
-//! 16.7 dB low.
+//! 16.7 dB low (a BJT saturated at its operating point is now refused by
+//! `.linearize` instead).
 //!
 //! Oracle: the central difference of the nonlinear DC operating point in the
 //! drive voltage, against the exact slope of the linearized circuit. No
@@ -44,14 +45,16 @@ RE e 0 100
 .linearize Q1
 ";
 
-/// NR = 2 with the base overdriven, so the B-C junction is forward biased
-/// and its slope carries the stage.
-const NR2_SATURATED: &str = "nr=2 overdriven stage
+/// NR = 2, forward active (Vc about 2.9 V). The same card with the base
+/// overdriven (RB = 100k) saturates, B-C forward, where the B-C slope at
+/// NR·Vt carried the stage; `.linearize` now refuses a device saturated at
+/// its own operating point (`linearize_refusal_tests.rs`).
+const NR2_FORWARD: &str = "nr=2 stage
 .model QNR NPN(IS=1e-14 BF=100 NF=1 BR=5 NR=2)
 VCC vcc 0 DC 5
 VD d 0 DC 0
 Rs d b 100k
-RB vcc b 100k
+RB vcc b 2Meg
 RC vcc c 10k
 Q1 c b 0 QNR
 .linearize Q1
@@ -141,8 +144,8 @@ fn gummel_poon_npn_with_parasitics_linearizes_to_its_own_derivative() {
 }
 
 #[test]
-fn nr_2_forward_bc_junction_linearizes_to_its_own_derivative() {
-    assert_small_signal_matches(NR2_SATURATED);
+fn nr_2_linearizes_to_its_own_derivative() {
+    assert_small_signal_matches(NR2_FORWARD);
 }
 
 #[test]

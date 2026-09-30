@@ -387,9 +387,10 @@ times.
 
 ### Device Linearization
 - `.linearize Q9` or `.linearize T1` removes a BJT or **triode** from the NR
-  system. Only those two element kinds are eligible; any other name is warned
-  about and ignored, not rejected
-  (`crates/melange-solver/src/pipeline.rs:146-156`)
+  system. Only those two element kinds are eligible; any other name is
+  refused. So is a device already outside its small-signal region at its own
+  operating point (a BJT saturated or cut off, a triode cut off or with its
+  grid past the conduction onset), with the operating-point evidence
 - Replaced with small-signal conductances at DC operating point
 - Reduces nonlinear dimension M (BJT: M-2, triode: M-2 per device)
 - A linearized BJT is stamped as its own terminal-current Jacobian at the DC

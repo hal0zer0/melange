@@ -573,6 +573,16 @@ generated state is smaller.
   variable-mu law, at an operating point solved without it. A nonzero value is
   now refused. Variable-mu stays modelled for pentodes and beam tetrodes; no
   deck set these keys on a triode.
+- **`.linearize` could be silently overridden or fail every sample**: a
+  triode near its grid's conduction onset at its operating point was kept
+  nonlinear with a warning, against the directive; a name that was not a BJT
+  or triode was ignored with a warning; and a BJT saturated at its own
+  operating point was linearized and then out of its region on every
+  sample. All three are now refused at compile time, naming the evidence (a
+  BJT saturated or cut off, a triode cut off or with its grid past the
+  conduction onset, at its own operating point). A triode inside its region
+  is now linearized as asked, where the old half-volt guard band below the
+  onset kept some nonlinear. No deck in the corpus was affected.
 - **`melange validate` compared a `.linearize`d device against the full
   device**: the reference ran it nonlinear while melange ran its
   small-signal model, so the difference between the two models was charged
