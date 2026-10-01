@@ -314,8 +314,7 @@ any topology where an op-amp gets DC-railed regardless of VSAT correctness.
 
 With the solver-side residual check alone, 4kbuscomp is stable at `d ≤ 2 s`
 at all amps (zero NR/BE events), but `d = 5 s` still diverges with 82,899
-NR max-iter hits — see `memory/project_4kbuscomp_chord_false_convergence.md`
-for the remaining open tail and four ranked candidate next steps. With the
+NR max-iter hits (the remaining open tail). With the
 netlist-side VSAT=13.5 fix combined, 4kbuscomp is stable at `d = 5 s` across
 `amp ∈ {0.01, 0.1, 0.5}` with zero NR max-iter hits and zero BE fallbacks.
 
@@ -377,9 +376,8 @@ steps: tighter RELTOL, adaptive refactor on `|j_dev/chord_j_dev| > 1.5`,
 KCL-consistent active-set resolve that stamps device Jacobian into `g_as`,
 or every-iter refactor when a rail is engaged).
 
-See also `memory/project_4kbuscomp_chord_false_convergence.md` for the
-investigation trail and `memory/project_4kbuscomp_basin_trap.md` for the
-DC-OP basin-trap entry — different bug class (DC solver), same circuit.
+See [DEBUGGING_HISTORY.md](DEBUGGING_HISTORY.md) for the DC-OP basin-trap
+entry — a different bug class (DC solver) on the same circuit.
 
 ### Positive Definiteness Rule for Transformer Coupling
 All windings on the same core must have coupling coefficients that form a positive-definite
@@ -521,7 +519,7 @@ The shipped fix is a **post-fallback refinement NR** (gated on `has_sidechain_re
 The infrastructure for AOL continuation (Strategy 4 `AolStepping`, `patch_g_dc_for_aol`,
 `dc_opamp_is_sidechain_rectifier` / Rule D' DC-OP reimplementation, `aol_cont_mode`
 rail-widening in `nr_dc_solve`) is all present and exercised; the refinement tail is what
-actually finds the correct basin. Post-fix values in `memory/project_4kbuscomp_basin_trap.md`:
+actually finds the correct basin. Post-fix values:
 v(rect_a_inv)=−12.01 V, v(rect_a_out)=−12.41 V, D1/D3 forward at ~16–32 µA.
 
 Also added in the same commit: op-amp `.model OA(IB=… RIN=…)` input-stage parasitics

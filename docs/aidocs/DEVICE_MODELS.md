@@ -257,8 +257,7 @@ whether freezing it is safe depends on the runtime drive amplitude, which a
 compile-time decision cannot see. Expect up to ~1–2 dB deviation under hard
 drive for GP/ISE (larger for parasitic-carded devices), concentrated in the
 harmonics. This is why `force` is an explicit, warned opt-in and never
-auto-selected. (See `memory/fa_reduction_gp_bjt_verdict.md` for the full
-analysis.) **Self-heating BJTs are excluded even under `force`** — that is a
+auto-selected. **Self-heating BJTs are excluded even under `force`** — that is a
 *structural* limit, not an accuracy one: the thermal update reads the 2D
 `(Ic, Ib)` slot pair, and a 1D slot would alias the next device's slot.
 
@@ -795,7 +794,7 @@ Ig2    = (Vg2k/μ + Vgk)^Ex / Kg2                  // Vp-INDEPENDENT
 
 (Cohen-Hélie 2010 Eq 3 in the published paper is missing the `/Kg2` divisor;
 the corrected form — matching Norman Koren's 1996 original — is what melange
-implements. See `memory/pentode_equations.md` for the verification.)
+implements.)
 
 Uses only 6 parameters: **μ, Ex, Kg1, Kg2, Kp, Kvb**. The `alpha_s/a_factor/
 beta_factor` fields on `TubeParams` are ignored when `screen_form == Classical`.

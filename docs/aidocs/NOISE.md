@@ -1040,61 +1040,7 @@ Even before shot / 1/f / en-in ship, melange thermal noise:
 Phase 1 is already the best-in-class analog-noise baseline. Phases 2–5 pull
 further ahead.
 
-## Next phase starting points (for a fresh agent)
-
-> **Status:** items 1, 2 and 4 below have shipped (nodal noise injection in
-> both nodal process_sample paths; pot/switch/runtime-R resistor noise via
-> `pot_slot` / `switch_slot` in `codegen/ir/noise.rs`; shot noise, Phase 2
-> above). They are kept as the record of how each was scoped. Item 3 is not
-> re-checked here.
-
-Pick one. Each is independently shippable.
-
-### 1. Nodal codegen path (tube-amp circuits)
-
-**Why**: passive-eq, multi-pentode power amps, 4kbuscomp, the steve-1073 decks, etc. route to the nodal
-codegen path (`emit_nodal` in `rust_emitter/nodal_emitter/mod.rs`). Without this
-hook-up, `--noise thermal` on those circuits is a silent no-op.
-
-**Where**: `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter/`
-(`schur.rs` and `full_lu.rs`). Two process_sample paths (Schur and full-LU); both build RHS inline rather
-than calling a separate `build_rhs` function. Inject the noise stamp right
-after RHS construction, before the first NR evaluation — one sample per
-audio-sample, NOT per NR iteration.
-
-**Re-use**: `build_noise_emission(ir)` already produces
-`noise.rhs_stamp` — a self-contained code fragment that mutates `rhs` and
-`state.noise_rng`. The same string drops into nodal paths unchanged if you
-emit the RNG helpers + state fields once (via the existing
-`noise.top_level` + the state-template wiring), then inject
-`noise.rhs_stamp` inline in each nodal process_sample variant. Expect
-30-60 LOC of template/emitter plumbing, not new math.
-
-**Test**: add a passive-eq `--noise thermal` test that asserts NOISE_THERMAL_N
-matches resistor count, same as the DK test.
-
-### 2. Dynamic-resistor noise (`.pot` / `.switch`)
-
-**Why**: Phase 1 skips `.pot`-marked resistors because their R is runtime-
-variable and the coefficient `sqrt(1/R)` baked at codegen time is stale
-after a pot change. Users with potted circuits (an op-amp overdrive's drive pot, the passive EQ)
-currently get no noise contribution from their pots.
-
-**Where**: `collect_thermal_noise_sources` in `codegen/ir/noise.rs`; the emitted
-`set_pot_N` / `set_switch_N` methods in `dk_emitter.rs`.
-
-**Recipe**:
-1. Don't skip pot/switch resistors in the collector — add them with their
-   default R, plus a flag `is_dynamic: bool`.
-2. For each dynamic source, emit a per-source `noise_thermal_sqrt_inv_r[k]`
-   state field (instead of const array entry).
-3. In `set_pot_N(&mut self, r: f64)`, after any existing matrix rebuild,
-   recompute `self.noise_thermal_sqrt_inv_r[k] = (1.0/r).sqrt()` for the
-   affected source.
-4. Add a test that verifies `set_pot_0` changes the thermal-noise
-   coefficient.
-
-### 3. Trap-rule + DC-blocker Nyquist sustain
+## Open item: Nyquist sustain after noise is disabled
 
 **Why**: Noted under "Known Phase 1 observations" — a persistent Nyquist-
 rate component of order 0.1-2 mV lingers for ~30 ms after `set_noise_enabled(false)`. Not noise-specific but amplified by it.
@@ -1109,23 +1055,10 @@ before multiplying by the noise coefficient. Targets fs/4, trades very-HF
 fidelity (which is physically questionable at audio rates anyway) for
 clean time-domain decay.
 
-### 4. Phase 2 (shot noise)
-
-**Why**: Shot noise is the killer differentiator — current-dependent noise
-amplitude means loud passages produce more noise, modulated through the
-correct Jacobian-shaped transfer function.
-
-**Where**: Extend `NoiseIR` with `shot_sources: Vec<ShotNoiseSource>`.
-Populate by scanning `ir.device_slots` for diode/BJT/JFET/MOSFET/tube
-device slots. Each device contributes one or two shot sources
-(see "Shot (Junction) Noise — Phase 2" section above).
-
-**Per-sample amplitude**: `sqrt(2·q·|I_prev|·fs)` where `I_prev` comes
-from `state.i_nl_prev[slot_idx]`. Inject at the device's Norton-equivalent
-nodes (anode/cathode, collector/emitter, etc.).
-
-**Gotcha**: use `|I|` (magnitude) — shot noise doesn't care about current
-direction.
+**Status**: observed under the whole-system trapezoidal form, before the
+charge-form companion model (see COMPANION_MODELS.md), which removed the
+capless-row z = −1 memory. Re-check whether it still reproduces before
+working on it.
 
 ## Gotchas recorded from Phase 1 (do not re-hit)
 
