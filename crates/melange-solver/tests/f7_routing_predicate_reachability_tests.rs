@@ -8,7 +8,7 @@
 //!     kernel.k[i*m+i] >= 0.0
 //!     && mna.n_i.iter().any(|row| row[i].abs() >= 1e-30)
 //!
-//! nodal_emitter.rs (has_positive_k_with_current):
+//! nodal_emitter/mod.rs (`emit_nodal`, has_positive_k_with_current):
 //!     ir.matrices.k[i*m+i] > 0.0          (spelled `if k_ii <= 0.0 { false }`)
 //!     && ir.sparsity.n_i.nz_by_row.iter().any(|row| row.contains(&i))
 //!                                          (nz built at SPARSITY_THRESHOLD = 1e-20)
@@ -239,7 +239,7 @@ fn f7_predicate_threshold_reachability_across_the_library() {
         "TRIPWIRE: the number of dimensions with K[i][i] == 0.0 and a live N_i \
          column changed ({} now, {EXPECTED_ZERO_K_DIMS} when measured). That \
          count is the evidence that routing.rs's `>= 0.0` and \
-         nodal_emitter.rs's `> 0.0` must NOT be harmonised — it is how many \
+         the nodal emitter's `> 0.0` must NOT be harmonised — it is how many \
          dimensions would newly trip if they were. Re-derive the argument \
          before changing either predicate.\nNow: {:#?}",
         zero_k_hits.len(),

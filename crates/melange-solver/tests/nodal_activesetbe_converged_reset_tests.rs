@@ -3,8 +3,8 @@
 //!
 //! ## The bug
 //!
-//! `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs`, the
-//! full-LU nodal `process_sample` (`emit_nodal_process_sample`), emits a
+//! `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter/full_lu.rs`,
+//! the full-LU nodal `process_sample` (`emit_nodal_process_sample`), emits a
 //! Backward-Euler fallback that is entered either when the primary trap/BE NR
 //! failed (`!converged`) OR, in `ActiveSetBe` mode, when an op-amp output
 //! engaged its rail on an otherwise-converged primary solve

@@ -5,8 +5,8 @@
 //!
 //! Reference provenance is mixed and each file's `generator` field is
 //! authoritative:
-//! - most goldens were recorded by `record_golden_refs.rs` from the
-//!   (since deleted) runtime solver;
+//! - most goldens were recorded from the (since deleted) runtime solver by
+//!   `tests/record_golden_refs.rs` (see commit 356b146, which retired both);
 //! - `opamp_inverting_sine_1k.json`, `opamp_noninverting_sine_1k.json`
 //!   and `triode_cc_small_sine_500hz.json` hold NGSPICE output
 //!   (review-round-2 H1 fix: goldens re-recorded from melange's own
@@ -26,7 +26,7 @@ use melange_solver::codegen::CodegenConfig;
 
 const SR: f64 = 48000.0;
 
-// ── Circuit definitions (same as record_golden_refs.rs) ────────────────
+// ── Circuit definitions (the ones the goldens were recorded from) ──────
 
 const RC_LOWPASS: &str = "\
 RC Lowpass
@@ -283,7 +283,7 @@ fn golden_triode_cc_small_sine_500hz() {
 /// `-- --include-ignored record_triode`, then commit the regenerated file.
 ///
 /// History: the original recording came from the (since deleted) runtime
-/// CircuitSolver via record_golden_refs.rs. It was re-recorded 2026-07-18
+/// CircuitSolver (recorder: see commit 356b146). It was re-recorded 2026-07-18
 /// after restoring the missing ×2 in the Koren triode plate-current
 /// equation (Ip = 2·E1^EX/KG1); the old file asserted the halved currents.
 /// Re-recorded again 2026-09-24 for the Dempwolf & Zölzer grid-current law

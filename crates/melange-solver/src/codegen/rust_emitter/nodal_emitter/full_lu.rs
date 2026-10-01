@@ -175,10 +175,6 @@ impl RustEmitter {
                 Self::emit_nodal_rhs(code, ir, noise, site, NoiseMode::Draw);
                 code.push_str("    // Linear circuit: direct LU solve (no NR needed)\n");
                 code.push_str(&format!("    let mut g_aug = {};\n", site.a));
-                code.push_str(
-                    "    // Gmin regularization: improves conditioning for high-gain VCCS (op-amps)\n",
-                );
-                code.push_str("    for i in 0..N_NODES { g_aug[i][i] += 1e-12; }\n");
                 code.push_str("    let mut v = rhs;\n");
                 code.push_str("    if !lu_solve(&mut g_aug, &mut v) {\n");
                 code.push_str("        v = state.v_prev;\n");

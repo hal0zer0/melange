@@ -128,7 +128,7 @@ fn stamp_ports(mna: &mut crate::mna::MnaSystem, port_stamps: &[(usize, f64)]) {
 /// returns `LinearizeOutcome::default()` without modifying `mna`.
 ///
 /// **Skipping this step changes which solver sub-path the emitter picks.** The
-/// `linearized_bypass` gate in `nodal_emitter.rs` is the only thing routing
+/// `linearized_bypass` gate in `emit_nodal` (`nodal_emitter/mod.rs`) is the only thing routing
 /// some circuits to full-LU; without a linearized device they get Schur NR
 /// instead, which on an expanded-parasitic system diverges. That is precisely
 /// how `melange validate` came to report 1319% RMS error on a circuit the
@@ -579,8 +579,8 @@ pub fn auto_tune_max_iter(
 /// Every nodal build expands. A gate at `min(diag(K)) < -100` used to decline
 /// it, derived from one deck's divergence. Measured 2026-09-29 on every gated
 /// corpus deck, once the nodal convergence checks covered the internal rows
-/// (`4219abb`): no deck held a sample expanded, expansion removed the 1073's
-/// held sample, and the shipped wurli-power-amp expanded agrees with its
+/// (`4219abb`): no deck held a sample expanded, expansion removed a transformer-coupled
+/// console preamp's held sample, and the shipped wurli-power-amp expanded agrees with its
 /// unexpanded render to -176 dB, equals it against ngspice, and runs 2.3-2.7x
 /// faster (the unexpanded device runs its own inner Newton for RB/RC/RE).
 ///

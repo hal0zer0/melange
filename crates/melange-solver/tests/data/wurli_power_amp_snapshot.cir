@@ -1,6 +1,7 @@
-* Wurlitzer 200A Power Amplifier
-* author: melange-audio
+Reed-bar electric piano power amplifier — Wurlitzer 200A-style
+* author: melange
 * description: Push-pull transistor power amplifier
+* status: active (2026-09-02 triage — sync-locked to a downstream consumer by tools/wurli_sync.py FILE_MAP; wurli_sync guard passing)
 * ===============================
 * Quasi-complementary Class AB push-pull, ~20W into 8 ohms.
 * Topology from verified 200A schematic (#203720-S-3).
@@ -33,7 +34,7 @@ R27   in_ac  0       15K
 * --- Differential pair (TR-7, TR-8: PNP 2N5087) ---
 * R-28 (10K): tail current source for diff pair (emitters to +Vcc).
 * Schematic note: "select R28 for 0V DC at point [16]"
-R28   emit_pair  vp    10K
+R28   emit_pair  vreg15    10K
 Q7    coll7    in_ac     emit_pair   Q2N5087
 Q8    coll8    fb_inv    emit_pair   Q2N5087
 
@@ -84,6 +85,8 @@ R35   bias_mid  drv_bot    220
 Q10   base11   vas_out   nodeC    QMPSA06
 Q11   nodeC    base11    vp       QTIP36C
 R36   base11   vp        270
+* C-13: 100 pF across TR-10 collector-base (drawn).
+C13   base11   vas_out   100P
 
 * --- Bottom Sziklai: TR-12 (PNP driver) + TR-13 (NPN output TIP35C) ---
 * TR-12: B=drv_bot, C=base13, E=nodeD
@@ -91,12 +94,18 @@ R36   base11   vp        270
 Q12   base13   drv_bot   nodeD    QMPSA56
 Q13   nodeD    base13    vn       QTIP35C
 R39   base13   vn        270
+* C-14: 100 pF across TR-12 collector-base (drawn).
+C14   base13   drv_bot   100P
 
 * --- Output emitter resistors ---
 * nodeC -> R37 -> output -> R38 -> nodeD
 * (Fuses F-1 and F-2 omitted in simulation)
 R37   nodeC   out   0.47
 R38   nodeD   out   0.47
+
+* --- Output Zobel (drawn): R-40 12 ohm + C-15 0.1 uF, output to ground ---
+R40   out     zob   12
+C15   zob     0     0.1U
 
 * --- Speaker load (8 ohm = two 16-ohm in parallel) ---
 R_load out   0   8
@@ -111,6 +120,12 @@ V1    vp   0   DC 22.5
 .runtime V1 as v_rail_pos_offset
 V2    0    vn  DC 22.5
 .runtime V2 as v_rail_neg_offset
+
+* +15 V REGULATED rail (drawn). R-28, the diff-pair tail, is the only
+* power-amp part on it. Vreg15 is an ideal source standing in for the IC-1
+* regulator; being regulated it is deliberately STATIC and does not follow
+* the .runtime rail sag on V1/V2.
+Vreg15 vreg15 0 DC 15
 
 * --- Device models (full Gummel-Poon from SPICE validation) ---
 
@@ -149,6 +164,6 @@ V2    0    vn  DC 22.5
 * use), measured 3x CPU win (M=14 0.554s vs M=16 1.638s per 0.5s audio,
 * 2026-07-25). Compatible with .runtime rail sag: sag clipping character
 * lives in the active output devices; a real Vbe multiplier holds a
-* near-constant spread regardless. openwurli's copy still lacks this line
-* (their file predates the settlement; adopting it is their pending half).
+* near-constant spread regardless.
 .linearize Q9
+.END

@@ -28,11 +28,10 @@ use crate::codegen::ir::{CircuitIR, LuOp};
 /// 2. Therefore an entry that is zero in both `G` and `C` and that no setter
 ///    writes stays exactly zero forever — for every `alpha`, hence for every
 ///    sample rate. `set_sample_rate` changes only `alpha`, never a position.
-/// 3. The remaining writes are the per-sample stamps: the gmin diagonal, the
-///    block-diagonal device Jacobian `N_i·J_dev·N_v`, and the saturating
-///    inductor's augmented-row diagonal. The first and third are covered by
-///    including every diagonal; the second is the device envelope unioned in
-///    below.
+/// 3. The remaining writes are the per-sample stamps: the block-diagonal
+///    device Jacobian `N_i·J_dev·N_v` and the saturating inductor's
+///    augmented-row diagonal. The second is covered by including every
+///    diagonal; the first is the device envelope unioned in below.
 /// 4. The active-set op-amp resolve only *zeroes* entries and writes a
 ///    diagonal, so it cannot leave a nonzero outside the pattern.
 ///
@@ -119,8 +118,8 @@ pub(super) fn build_equil_pattern(
     }
     // (2) every position the emitted setters write.
     set.extend(stamps.iter().copied());
-    // (3) every diagonal: covers the gmin regularization, the saturating
-    // inductor augmented-row Jacobian, and the active-set pin's `= 1.0`.
+    // (3) every diagonal: covers the saturating inductor augmented-row
+    // Jacobian and the active-set pin's `= 1.0`.
     for i in 0..n {
         set.insert((i, i));
     }

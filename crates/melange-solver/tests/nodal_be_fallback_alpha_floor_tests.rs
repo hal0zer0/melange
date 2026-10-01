@@ -3,7 +3,8 @@
 //!
 //! ## The bug
 //!
-//! `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs` emits a
+//! The nodal emitter (`codegen/rust_emitter/nodal_emitter/full_lu_newton.rs`,
+//! `emit_nodal_newton`) emits a
 //! "global node voltage damping" layer (both in the primary trap/BE-primary
 //! NR loop and in the Backward Euler fallback loop) that caps the worst-case
 //! per-iteration node voltage step at a threshold (`damp_thresh`, or a fixed
@@ -55,7 +56,7 @@
 //! full-nonlinear Vbe-multiplier topology is why it was linearized). Simpler
 //! nodal circuits don't ill-condition the crossover the same way, so they stay
 //! bounded with or without the floor (a false guard). The behavioral test below
-//! drives the real circuit through the built `melange` binary.
+//! builds the real circuit through `build::build`.
 //!
 //! ## The fix
 //!
@@ -63,8 +64,7 @@
 //! (uncapped division). This keeps the worst-case per-iteration node step
 //! at exactly `damp_thresh` regardless of how large the raw delta is,
 //! matching the layer's documented intent ("Global node voltage damping").
-//! Applied to both the primary-loop damping and the BE-fallback damping in
-//! `emit_nodal` (`nodal_emitter.rs`).
+//! Applied to both the primary-loop damping and the BE-fallback damping.
 //!
 //! ## Tests here
 //!
@@ -73,11 +73,11 @@
 //!    `nodal_emitter_regression_tests.rs`): the emitted damping must divide
 //!    uncapped and the `.max(0.01)` floor must be absent from both loops. Fast,
 //!    runs everywhere.
-//! 2. `..._internal_peak_stays_physical` — the behavioral guard, `#[ignore]`d
-//!    (needs the built `melange` binary; run with `-- --ignored`). Drives the
-//!    embedded wurli-power-amp snapshot at 88.2 kHz across the divergent
-//!    amplitudes and asserts the internal peak stays < 200 V. Genuinely fails
-//!    pre-fix (~28 kV) and passes post-fix (~32 V).
+//! 2. `..._internal_peak_stays_physical` — the behavioral guard. Builds the
+//!    embedded wurli-power-amp snapshot as `melange simulate` does, drives it
+//!    at 88.2 kHz across the once-divergent amplitudes and asserts the
+//!    internal peak stays < 200 V (it peaks at ~32 V). It no longer fails with
+//!    the floor restored (see its doc), so test 1 is what guards the fix.
 
 mod support;
 
@@ -139,90 +139,100 @@ fn test_nodal_full_lu_node_damping_has_no_ratio_floor() {
     );
 }
 
-/// Behavioral regression test — the REAL one, with teeth.
+/// Behavioral guard on the real circuit.
 ///
-/// A library-level stand-in does not work: a simple nodal circuit (e.g. a 12 V
-/// BJT common-emitter, even hammered far past clipping) does not ill-condition
-/// its Newton Jacobian the way the wurli-power-amp class-AB crossover does, so
-/// it stays bounded with OR without the floor — a false guard. The blowup needs
-/// the exact M=14 topology, which the `.linearize` DC-OP preflight produces
-/// (`pipeline::apply_linearize_reductions`, `crates/melange-solver/src/pipeline.rs`,
-/// run by `build::build`). This drives the actual circuit
-/// through the built `melange` binary and asserts the internal peak stays
-/// physical (`max_abs_v_prev`). It genuinely fails pre-fix (internal peak
-/// ~16-28 kV) and passes post-fix (~32 V, at the ±22.5 V rails).
+/// A library-level stand-in circuit does not work: a simple nodal circuit (e.g.
+/// a 12 V BJT common-emitter, even hammered far past clipping) does not
+/// ill-condition its Newton Jacobian the way the wurli-power-amp class-AB
+/// crossover does, so it stays bounded with OR without the floor — a false
+/// guard. The blowup needed the exact M=14 topology, which the `.linearize`
+/// DC-OP preflight produces (`pipeline::apply_linearize_reductions`, run by
+/// `build::build`). This builds the actual circuit as `melange simulate` does
+/// (`build::build` with simulate's options), drives it with simulate's 1 kHz
+/// test tone and asserts the internal peak stays physical: the largest
+/// `|v_prev|` over every sample, the measurand behind simulate's
+/// `max_abs_v_prev`. On the 2026-08-03 solver it failed with the floor
+/// (internal peak ~16-28 kV) and passed without it (~32 V, at the ±22.5 V
+/// rails).
 ///
-/// `#[ignore]` because it needs `melange` on the target path (build it with
-/// `cargo build -p melange-cli`); run with `-- --ignored`, same as the SPICE
-/// validation suite. Uses an embedded netlist snapshot (not the external
-/// melange-circuits copy) so it is self-contained and immune to sync-drift.
+/// It no longer discriminates the floor: on the current solver, patching
+/// `.max(0.01)` back into this build's emitted damping leaves every peak
+/// bit-identical (measured 2026-10-01, amplitudes 0.05-2.0). The code-string
+/// pin above is what guards the fix; this test guards the physical bound.
+///
+/// Uses an embedded netlist snapshot (not the external melange-circuits copy)
+/// so it is self-contained and immune to sync-drift.
 #[test]
-#[ignore = "requires the melange binary (cargo build -p melange-cli)"]
 fn test_wurli_power_amp_internal_peak_stays_physical() {
-    // Embedded snapshot of wurli-power-amp.cir (functionally identical across the
-    // melange-circuits / openwurli copies as of 2026-08-03). `.linearize Q9` is
-    // load-bearing: the un-linearized M=16 form does not converge at all.
+    // Embedded snapshot of melange-circuits testing/amp/wurli-power-amp.cir as
+    // of 2026-10-01. The 2026-08-03 snapshot (R-28 tied to the +22.5 V rail, no
+    // C-13/C-14/Zobel) is refused by today's build: its DC operating point does
+    // not converge. `.linearize Q9` is load-bearing: the un-linearized M=16
+    // form does not converge at all.
     const WPA: &str = include_str!("data/wurli_power_amp_snapshot.cir");
-
-    // Locate the workspace `melange` binary (debug or release).
-    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let target = manifest.join("../../target");
-    let bin = ["debug/melange", "release/melange"]
-        .iter()
-        .map(|p| target.join(p))
-        .find(|p| p.exists())
-        .unwrap_or_else(|| {
-            panic!("melange binary not found under {target:?} — run `cargo build -p melange-cli`")
-        });
-
-    let dir = support::scratch_dir();
-    let cir = dir.join(format!("wpa_regress_{}.cir", std::process::id()));
-    let wav = dir.join(format!("wpa_regress_{}.wav", std::process::id()));
-    std::fs::write(&cir, WPA).expect("write netlist");
-
     // 88.2 kHz native rate — the blowup is convergence-path-dependent and only
-    // manifests at the amp's design rate (at 48 kHz none of these diverge). Pre-
-    // fix, amplitudes 0.05 / 1.0 / 2.0 each diverge to 16-28 kV internal while
-    // 0.10-0.50 stay physical; sweeping the divergent set means the guard does
-    // not hinge on any single convergence path.
-    let mut worst = 0.0f64;
-    for amp in ["0.05", "1.0", "2.0"] {
-        let out = std::process::Command::new(&bin)
-            .args([
-                "simulate",
-                cir.to_str().unwrap(),
-                "-o",
-                wav.to_str().unwrap(),
-                "-s",
-                "88200",
-                "-d",
-                "0.5",
-                "--amplitude",
-                amp,
-            ])
-            .output()
-            .expect("run melange simulate");
-        let text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let peak: f64 = text
-            .lines()
-            .find(|l| l.contains("max_abs_v_prev:"))
-            .and_then(|l| l.split(':').nth(1))
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or_else(|| panic!("no max_abs_v_prev at amp {amp} in output:\n{text}"));
-        worst = worst.max(peak);
-    }
-    let _ = std::fs::remove_file(&cir);
-    let _ = std::fs::remove_file(&wav);
+    // manifests at the amp's design rate (at 48 kHz none of these diverge).
+    const WPA_SR: f64 = 88200.0;
 
-    // ±22.5 V rails. Post-fix all amplitudes stay ≈ 22-32 V; pre-fix (floored
-    // damping) diverges to 16-28 kV on the divergent amplitudes.
+    // `melange simulate`'s build: auto route, DC kept, ±10 V output clamp,
+    // the auto-tuned Newton budget, no forward-active BJT reduction.
+    let config = support::config_for_spice(WPA, WPA_SR);
+    let built = support::try_build_shipped_with(WPA, &config, "auto", |o| {
+        o.tolerance = 1e-9;
+        o.output_scale = 1.0;
+        o.output_clamp = 10.0;
+        o.dc_block = false;
+        o.max_iter = None;
+        o.bjt_fa_mode = melange_solver::codegen::BjtFaMode::Off;
+        o.pot_overrides = Some(Vec::new());
+        o.resolve_taps = false;
+    })
+    .unwrap_or_else(|e| panic!("wurli-power-amp build failed: {e}"));
     assert!(
-        worst < 200.0,
-        "wurli-power-amp internal peak reached {worst:.3e} V — node-step damping \
-         regression (the floored ratio lets a huge crossover NR delta through)?"
+        built.linearize_outcome.bjts_linearized > 0,
+        "`.linearize Q9` must apply: the blowup needs the linearized M=14 topology"
+    );
+    assert_eq!(built.solver_label, "nodal");
+
+    // With the floor (2026-08-03), amplitudes 0.05 / 1.0 / 2.0 each diverged to
+    // 16-28 kV internal while 0.10-0.50 stayed physical; sweeping that set
+    // means the guard does not hinge on any single convergence path. 0.5 s
+    // each, a fresh state per amplitude.
+    let main = format!(
+        "fn main() {{
+    let sr: f64 = {WPA_SR:.1};
+    let n = (sr * 0.5) as usize;
+    for amp in [0.05f64, 1.0, 2.0] {{
+        let mut state = CircuitState::default();
+        state.set_sample_rate(sr);
+        let mut peak = 0.0f64;
+        for i in 0..n {{
+            let x = amp * (2.0 * std::f64::consts::PI * 1000.0 * (i as f64) / sr).sin();
+            let _ = process_sample(x, &mut state);
+            for &v in &state.v_prev {{
+                peak = peak.max(v.abs());
+            }}
+        }}
+        println!(\"{{amp}} {{peak:e}}\");
+    }}
+}}"
+    );
+    let out = support::compile_and_run(&built.generated.code, &main, "wpa_peak").stdout;
+    let peaks: Vec<(f64, f64)> = out
+        .lines()
+        .map(|l| {
+            let v: Vec<f64> = l.split_whitespace().map(|t| t.parse().unwrap()).collect();
+            (v[0], v[1])
+        })
+        .collect();
+    assert_eq!(peaks.len(), 3, "one peak per amplitude, got:\n{out}");
+    let worst = peaks.iter().map(|p| p.1).fold(0.0f64, f64::max);
+
+    // ±22.5 V rails: every amplitude peaks at 22-32 V. A non-finite peak fails
+    // too.
+    assert!(
+        worst.is_finite() && worst < 200.0 && peaks.iter().all(|p| p.1.is_finite()),
+        "wurli-power-amp internal peak reached {worst:.3e} V ({peaks:?}) — node-step \
+         damping regression (the floored ratio lets a huge crossover NR delta through)?"
     );
 }

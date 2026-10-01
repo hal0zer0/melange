@@ -167,7 +167,8 @@ pub fn auto_route(
     // NFB circuit could otherwise sail through to DkSchur and diverge.
     // Dimensions with an all-zero N_i column (MOSFET insulated gate, VCA
     // control port) have K[i][i] = 0 by construction and are benign.
-    // ⚠ DO NOT harmonise this `>= 0.0` with nodal_emitter.rs's `> 0.0`, and do
+    // ⚠ DO NOT harmonise this `>= 0.0` with the `> 0.0` of `emit_nodal`'s
+    // `has_positive_k_with_current` (`nodal_emitter/mod.rs`), and do
     // not collapse the two predicates into one shared value. They read
     // DIFFERENT matrices — this one sees the DK kernel and the pre-expansion
     // `MnaSystem`, the emitter's sees the IR built after

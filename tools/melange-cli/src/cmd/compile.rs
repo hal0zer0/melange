@@ -99,12 +99,17 @@ fn print_compile_route_detail(d: &RouteDetail<'_>) {
             }
         }
     }
+    // The budget the emitted `MAX_ITER` carries (the provenance `Build:`
+    // line's `max_iter`), not the requested one.
     if d.max_iter_pinned {
         println!("    Max NR iterations: {} (--max-iter)", d.max_iter);
     } else {
         println!(
-            "    Max NR iterations: {} (auto-tuned from M={}, ρ={:.2})",
-            d.max_iter, d.m, d.routing.spectral_radius
+            "    Max NR iterations: {} (auto-tuned from M={}, ρ={:.2}{})",
+            d.max_iter,
+            d.m,
+            d.routing.spectral_radius,
+            nodal_floor_note(d.solver_label)
         );
     }
     if d.routing.k_ill_conditioned {
@@ -118,6 +123,19 @@ fn print_compile_route_detail(d: &RouteDetail<'_>) {
             "    Linearized devices: {} (K/S magnitude guards bypassed)",
             d.n_linearized
         );
+    }
+}
+
+/// The auto-tuned budget's note on the nodal route, which never ships less
+/// than its floor.
+fn nodal_floor_note(solver_label: &str) -> String {
+    if solver_label == "nodal" {
+        format!(
+            "; nodal builds ship at least {}",
+            melange_solver::codegen::policy::NODAL_MAX_ITER_FLOOR
+        )
+    } else {
+        String::new()
     }
 }
 

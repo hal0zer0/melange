@@ -7,8 +7,8 @@
 //!     error from 2·V·G instead of (V+V_prev)·G" signature).
 //!  2. Full-LU sub-step `alpha_sub` tracks the RUNTIME sample rate instead
 //!     of a literal baked at codegen time.
-//!  3. Full-LU sub-step Gmin is 1e-12 (was 1e-6 — 6 orders stronger than
-//!     every other Gmin stamp in the emitter).
+//!  3. No nodal solve adds a Gmin of its own (the sub-step's was once 1e-6);
+//!     the only node Gmin is the one baked into `G`.
 //!  4. BE-primary builds must not re-add the trap-midpoint `N_I·i_nl_prev`
 //!     stamp in the BE-fallback RHS (trap-primary keeps it per the
 //!     2026-05-28 restoration).
@@ -219,7 +219,7 @@ fn step_response_dk_vs_nodal_matches() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Fix 2 + 3 — full-LU sub-step alpha_sub / Gmin
+// Fix 2 + 3 — full-LU sub-step alpha_sub / no second Gmin
 // ═══════════════════════════════════════════════════════════════════════
 
 #[test]
@@ -244,18 +244,29 @@ fn full_lu_alpha_sub_tracks_runtime_rate() {
     );
 }
 
+/// The only node Gmin is the one baked into the emitted `G`
+/// (`GMIN_REGULARISATION`). No solve adds a second one to its matrix: the
+/// sub-step's used to (once 1e-6, which skewed high-impedance nodes on
+/// sub-stepped samples), and with the chord, M=0 and active-set pin solves
+/// doing the same, a sub-stepped or pinned sample solved a different circuit
+/// than a plain one.
 #[test]
-fn full_lu_substep_gmin_matches_other_stamps() {
-    let code = nodal_code(CLIPPER_FULL_LU);
-    find(
-        &code,
-        "a_sub[i][i] += 1e-12;",
-        "sub-step Gmin must be 1e-12 like every other Gmin stamp",
-    );
-    assert!(
-        !code.contains("a_sub[i][i] += 1e-6;"),
-        "sub-step Gmin of 1e-6 skews high-impedance nodes on sub-stepped samples"
-    );
+fn nodal_solves_add_no_second_gmin() {
+    for spice in [CLIPPER, CLIPPER_FULL_LU] {
+        let code = nodal_code(spice);
+        find(
+            &code,
+            "a_sub[i][j] = ",
+            "the sub-step matrix is still built (else this test proves nothing)",
+        );
+        for matrix in ["a_sub", "chord_lu", "g_aug", "g_as"] {
+            let add = format!("{matrix}[i][i] +=");
+            assert!(
+                !code.contains(&add),
+                "`{add}`: a second node Gmin on top of the one baked into G"
+            );
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════

@@ -196,7 +196,8 @@ pub struct Assembled {
     /// `"nodal"` or `"DK"`.
     pub solver_label: &'static str,
     pub solver_reason: String,
-    /// The Newton budget that ships.
+    /// The Newton budget that ships: the emitted `MAX_ITER`
+    /// ([`crate::codegen::ir::CircuitIR::effective_max_iter`]).
     pub max_iter: usize,
     pub oversampling: usize,
     pub input_node_idx: usize,
@@ -223,7 +224,8 @@ pub struct Built {
     /// `"nodal"` or `"DK"`.
     pub solver_label: &'static str,
     pub solver_reason: String,
-    /// The Newton budget that ships.
+    /// The Newton budget that ships: the emitted `MAX_ITER`
+    /// ([`crate::codegen::ir::CircuitIR::effective_max_iter`]).
     pub max_iter: usize,
     pub oversampling: usize,
     pub input_node_idx: usize,
@@ -1032,6 +1034,9 @@ pub fn assemble(
         "dk" => false,
         _ => routing.route == crate::codegen::routing::SolverRoute::Nodal,
     };
+    if use_nodal_codegen {
+        refuse_max_iter_below_nodal_floor(user_max_iter)?;
+    }
     let mut solver_label = if use_nodal_codegen { "nodal" } else { "DK" };
     let mut solver_reason = if solver_override == "nodal" || solver_override == "dk" {
         // Forced route: still surface what the auto-router decided so the pinned
@@ -1076,6 +1081,7 @@ pub fn assemble(
             Err(crate::codegen::CodegenError::SelfStartingOscillator(why))
                 if solver_override != "dk" =>
             {
+                refuse_max_iter_below_nodal_floor(user_max_iter)?;
                 report!(out, "  Using nodal solver codegen: {why}");
                 solver_label = "nodal";
                 solver_reason = format!("self-starting oscillator: {why}");
@@ -1120,6 +1126,11 @@ pub fn assemble(
         }
     }
 
+    // The budget the emitted `MAX_ITER` carries (the nodal floor and a
+    // backward-Euler promotion's budget applied), so the console reports what
+    // the provenance `Build:` line and the code say.
+    let max_iter = prepared.ir.effective_max_iter();
+
     Ok(Assembled {
         config,
         prepared,
@@ -1141,6 +1152,26 @@ pub fn assemble(
         linearize_outcome,
         injection_specs,
     })
+}
+
+/// Refuse a `--max-iter` pin below the nodal Newton budget floor
+/// ([`crate::codegen::policy::NODAL_MAX_ITER_FLOOR`]). The nodal route would
+/// raise it to the floor anyway, so the pin would not be the budget that ships;
+/// an auto-tuned budget is raised silently, as it always was.
+fn refuse_max_iter_below_nodal_floor(user_max_iter: Option<usize>) -> Result<(), BuildError> {
+    let floor = crate::codegen::policy::NODAL_MAX_ITER_FLOOR;
+    match user_max_iter {
+        // 0 is refused on every route by `CodegenConfig::validate`.
+        Some(n) if (1..floor).contains(&n) => bail!(
+            "--max-iter {n} is below the nodal solver's Newton budget floor of {floor} \
+             iterations per sample. The nodal Newton is globalized by an Armijo line \
+             search, which crosses a device's saturation knee in many short steps; \
+             with fewer, a full-scale transient can end a sample unsolved, so a nodal \
+             build never ships less. Pass --max-iter {floor} or more, or omit it \
+             (auto-tuned)."
+        ),
+        _ => Ok(()),
+    }
 }
 
 /// The nodal route's tail: expand the parasitic-BJT internal nodes, solve the

@@ -204,15 +204,14 @@ fn follower_trace(code: &str, tag: &str) -> Vec<(f64, f64)> {
 }
 
 /// TRIPWIRE, not a certificate. DK and the nodal paths should solve the same
-/// discrete circuit, and today they do not quite: they differ by ~1e-6 at the
-/// follower's gate and ~2e-5 at its output, whatever the Newton tolerance. The
-/// cause is not body effect but node Gmin: the nodal G carries 1e-12 S to
-/// ground on every node, full-LU adds a second 1e-12 through its Jacobian
-/// regularisation (in the matrix but not the RHS, so it moves the fixed
-/// point), and a third, unidentified contribution holds the nodal gate at the
-/// DC solve's leaky value. The target is every path equal to ngspice (no
-/// shunt) and cross-path agreement to 1e-9; until that lands these bounds sit
-/// 2.5-5x above what is measured, to catch a NEW divergence.
+/// discrete circuit, and today they do not quite: they differ by ~9e-7 at the
+/// follower's gate and ~6e-6 at its output (Schur and full-LU alike), whatever
+/// the Newton tolerance. The cause is not body effect but node Gmin: the nodal
+/// G carries 1e-12 S to ground on every node and DK's transient carries none,
+/// and a further, unidentified contribution holds the nodal gate at the DC
+/// solve's leaky value. The target is every path equal to ngspice (no shunt)
+/// and cross-path agreement to 1e-9; until that lands these bounds sit
+/// 3-5x above what is measured, to catch a NEW divergence.
 #[test]
 fn follower_paths_agree_within_the_node_gmin_tripwire() {
     let config = support::config_for_spice(FOLLOWER, 48000.0);
@@ -240,7 +239,7 @@ fn follower_paths_agree_within_the_node_gmin_tripwire() {
         };
         let (gate, out) = (rel(|p| p.0), rel(|p| p.1));
         assert!(
-            gate <= 5e-6 && out <= 5e-5,
+            gate <= 5e-6 && out <= 2e-5,
             "{name} vs DK: gate {gate:.2e}, out {out:.2e} relative. The node-Gmin fixed-point \
              item (regularisation must not move the fixed point) has not landed, and something \
              else has made the paths diverge further"

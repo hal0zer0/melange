@@ -4,8 +4,8 @@
 //! parse → MNA → codegen → compile → run → measure frequency response.
 //!
 //! Test coverage:
-//! - HPF (B182): rolloff slope, switch positions change cutoff
-//! - LF/HF bridge (B205): opposing coupling passes signal, shelf shape, boost vs flat
+//! - Inductor HPF: rolloff slope, switch positions change cutoff
+//! - Coupled-inductor LF/HF bridge: opposing coupling passes signal, shelf shape, boost vs flat
 //! - Coupled inductor switching: compiles, positions produce different responses
 //! - Full EQ chain: HPF + bridge + amp combined
 
@@ -30,7 +30,7 @@ fn parse_kv(output: &str, key: &str) -> f64 {
 /// (same path as `melange compile`).
 fn codegen_from_spice(spice: &str, input_r: f64) -> String {
     let mut config = support::config_for_spice(spice, 48000.0);
-    config.circuit_name = "neve_1073_eq_test".to_string();
+    config.circuit_name = "inductor_eq_test".to_string();
     config.input_resistance = input_r;
     support::build_as_shipped(spice, &config, "dk").0
 }
@@ -85,10 +85,10 @@ fn main() {{
 
 // ── HPF Tests ───────────────────────────────────────────────────────
 
-/// HPF only (B182 board) — standalone netlist for testing.
+/// Inductor HPF only — standalone netlist for testing.
 fn hpf_spice() -> &'static str {
     "\
-HPF B182
+Inductor HPF
 R_source in hp_in 600
 C_hp1 hp_in hp_mid 220N
 R_hdamp hp_mid 0 10K
@@ -110,7 +110,7 @@ R_hterm out 0 5.1K
 /// switch-controlled components are stamped at the pos-0 baseline. This test
 /// specifically exercises the pos-2 frequency response described in the comment.
 #[test]
-fn test_neve_1073_hpf_rolloff() {
+fn test_inductor_hpf_rolloff() {
     let code = codegen_from_spice(hpf_spice(), 600.0);
     let main_code = make_freq_main(
         &[30.0, 100.0, 1000.0, 5000.0],
@@ -149,7 +149,7 @@ fn test_neve_1073_hpf_rolloff() {
 /// Position 0 (1µF/10H) = ~50 Hz cutoff → passes 100 Hz
 /// Position 3 (100nF/1.3H) = ~300 Hz cutoff → attenuates 100 Hz
 #[test]
-fn test_neve_1073_hpf_switch_changes_cutoff() {
+fn test_inductor_hpf_switch_changes_cutoff() {
     let code = codegen_from_spice(hpf_spice(), 600.0);
 
     // Position 0: low cutoff (~50 Hz)
@@ -179,12 +179,12 @@ fn test_neve_1073_hpf_switch_changes_cutoff() {
     );
 }
 
-// ── B205 LF Bridge Tests ────────────────────────────────────────────
+// ── Coupled-Inductor LF Bridge Tests ────────────────────────────────
 
-/// B205 bridge with opposing coupling + amp — full boost.
-fn b205_boost_spice() -> &'static str {
+/// Coupled-inductor bridge with opposing coupling + amp — full boost.
+fn bridge_boost_spice() -> &'static str {
     "\
-B205 Bridge Boost
+Coupled-Inductor Bridge Boost
 R_src in bridge_in 600
 R39 bridge_in 0 39K
 R_lf620 bridge_in node_l 620
@@ -218,11 +218,11 @@ R_load out 0 5.1K
 "
 }
 
-/// B205 bridge with AIDING coupling (the WRONG direction) — should show
+/// Coupled-inductor bridge with AIDING coupling (the WRONG direction) — should show
 /// massive HF attenuation because common-mode sees L+M ≈ 6H.
-fn b205_aiding_spice() -> &'static str {
+fn bridge_aiding_spice() -> &'static str {
     "\
-B205 Bridge Aiding
+Coupled-Inductor Bridge Aiding
 R_src in bridge_in 600
 R39 bridge_in 0 39K
 R_lf620 bridge_in node_l 620
@@ -256,17 +256,17 @@ R_load out 0 5.1K
 "
 }
 
-/// B205 bridge with opposing coupling compiles and produces signal at 1 kHz.
+/// Coupled-inductor bridge with opposing coupling compiles and produces signal at 1 kHz.
 /// This is the critical test: opposing coupling passes signal through the bridge,
 /// while aiding coupling would kill the passband.
 #[test]
-fn test_neve_1073_b205_opposing_coupling_passes_signal() {
-    let code_opposing = codegen_from_spice(b205_boost_spice(), 600.0);
+fn test_coupled_inductor_bridge_opposing_coupling_passes_signal() {
+    let code_opposing = codegen_from_spice(bridge_boost_spice(), 600.0);
     let main_code = make_freq_main(&[1000.0], 0.01, &[]);
-    let output = compile_and_run(&code_opposing, &main_code, "b205_opposing");
+    let output = compile_and_run(&code_opposing, &main_code, "bridge_opposing");
     let g1k = parse_kv(&output, "freq_1000=");
 
-    eprintln!("B205 opposing coupling at 1kHz: {g1k:+.1} dB");
+    eprintln!("Bridge opposing coupling at 1kHz: {g1k:+.1} dB");
 
     // With opposing coupling, 1 kHz should pass with reasonable gain
     // (amp provides ~16 dB, bridge passes signal)
@@ -276,16 +276,16 @@ fn test_neve_1073_b205_opposing_coupling_passes_signal() {
     );
 }
 
-/// B205 aiding coupling kills the passband — signal at 1 kHz is much lower.
+/// Bridge aiding coupling kills the passband — signal at 1 kHz is much lower.
 /// This verifies that the opposing coupling fix is essential.
 #[test]
-fn test_neve_1073_b205_aiding_coupling_kills_passband() {
-    let code_aiding = codegen_from_spice(b205_aiding_spice(), 600.0);
+fn test_coupled_inductor_bridge_aiding_coupling_kills_passband() {
+    let code_aiding = codegen_from_spice(bridge_aiding_spice(), 600.0);
     let main_code = make_freq_main(&[1000.0], 0.01, &[]);
-    let output = compile_and_run(&code_aiding, &main_code, "b205_aiding");
+    let output = compile_and_run(&code_aiding, &main_code, "bridge_aiding");
     let g1k = parse_kv(&output, "freq_1000=");
 
-    eprintln!("B205 aiding coupling at 1kHz: {g1k:+.1} dB");
+    eprintln!("Bridge aiding coupling at 1kHz: {g1k:+.1} dB");
 
     // With aiding coupling, common-mode sees L+M ≈ 6H → massive attenuation
     assert!(
@@ -294,21 +294,21 @@ fn test_neve_1073_b205_aiding_coupling_kills_passband() {
     );
 }
 
-/// B205 bridge at full boost: LF shelf shape.
+/// Coupled-inductor bridge at full boost: LF shelf shape.
 /// The response should show a shelf: passband near 1-5 kHz is higher than at 50 Hz
 /// (because the HPF is not present, but the bridge still has frequency-dependent behavior).
 #[test]
-fn test_neve_1073_b205_shelf_shape() {
-    let code = codegen_from_spice(b205_boost_spice(), 600.0);
+fn test_coupled_inductor_bridge_shelf_shape() {
+    let code = codegen_from_spice(bridge_boost_spice(), 600.0);
     let main_code = make_freq_main(&[50.0, 200.0, 1000.0, 5000.0], 0.01, &[]);
-    let output = compile_and_run(&code, &main_code, "b205_shelf");
+    let output = compile_and_run(&code, &main_code, "bridge_shelf");
 
     let g50 = parse_kv(&output, "freq_50=");
     let g200 = parse_kv(&output, "freq_200=");
     let g1k = parse_kv(&output, "freq_1000=");
     let g5k = parse_kv(&output, "freq_5000=");
 
-    eprintln!("B205 shelf: 50Hz={g50:+.1}, 200Hz={g200:+.1}, 1kHz={g1k:+.1}, 5kHz={g5k:+.1}");
+    eprintln!("Bridge shelf: 50Hz={g50:+.1}, 200Hz={g200:+.1}, 1kHz={g1k:+.1}, 5kHz={g5k:+.1}");
 
     // All outputs should be finite and produce signal
     for (f, g) in [(50, g50), (200, g200), (1000, g1k), (5000, g5k)] {
@@ -356,7 +356,7 @@ R_out out 0 100K
 
 /// Circuit with coupled inductors in .switch compiles through nodal codegen.
 #[test]
-fn test_neve_1073_coupled_switch_codegen_compiles() {
+fn test_coupled_inductor_switch_codegen_compiles() {
     let code = codegen_from_spice(coupled_switch_spice(), 600.0);
     let main_code = make_freq_main(&[200.0], 0.01, &[]);
     let output = compile_and_run(&code, &main_code, "coupled_sw_compile");
@@ -370,7 +370,7 @@ fn test_neve_1073_coupled_switch_codegen_compiles() {
 /// Position 0: 3H/47nF (lower frequency)
 /// Position 1: 1.3H/15nF (higher frequency)
 #[test]
-fn test_neve_1073_coupled_switch_positions_differ() {
+fn test_coupled_inductor_switch_positions_differ() {
     let code = codegen_from_spice(coupled_switch_spice(), 600.0);
 
     // Position 0 (3H, 47nF)

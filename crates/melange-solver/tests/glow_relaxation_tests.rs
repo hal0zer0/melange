@@ -768,7 +768,7 @@ fn generate_nodal_code_subpath(
 }
 
 #[test]
-#[ignore = "KNOWN GAP: full-LU section-glow NDR root-selection diverges from Schur; needs design review + real-rig validation (see comment above)"]
+#[ignore = "KNOWN GAP: the build refuses a section glow on full-LU (test_glow_sections_on_full_lu_is_refused), so this fails at the build before any parity comparison; acceptance gate for the deferred full-LU section-glow fix (see comment above)"]
 fn test_glow_sections_route_portable_schur_vs_full_lu() {
     use melange_solver::codegen::NodalSubPathOverride;
     let deck = relax_deck_sections(170.0);

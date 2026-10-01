@@ -1335,7 +1335,7 @@ fn e7_series_of_tubes_stage_converges_under_pot_jitter() {
 /// 1× 2D triode, no voltage sources (linear supply modeled inside the VCCS).
 /// Adds coverage for diode-feedback clipping topology that tube-based tests
 /// don't exercise.
-const TS808_CLIPPING_NETLIST: &str = "\
+const OVERDRIVE_CLIPPING_NETLIST: &str = "\
 Overdrive op-amp clipping stage — Phase E.7 DK validation
 Cin in n1 0.047u
 R_pull n1 0 1Meg
@@ -1360,10 +1360,10 @@ R_out out 0 1Meg
 /// op-amp VCCS in the same DC network — a common pedal-clipping topology
 /// distinct from the tube preamp case.
 #[test]
-fn e7_ts808_clipping_stage_converges_at_nominal() {
+fn e7_overdrive_clipping_stage_converges_at_nominal() {
     use std::io::Write;
 
-    let code = generate_dk(TS808_CLIPPING_NETLIST, true);
+    let code = generate_dk(OVERDRIVE_CLIPPING_NETLIST, true);
 
     let main = "\n\nfn main() {\n\
         let mut state = CircuitState::default();\n\
@@ -1387,8 +1387,8 @@ fn e7_ts808_clipping_stage_converges_at_nominal() {
 
     let full = format!("{}{}", code, main);
     let tmp = support::scratch_dir();
-    let src = tmp.join("melange_dc_op_recompute_e7_ts808_nominal.rs");
-    let bin = tmp.join("melange_dc_op_recompute_e7_ts808_nominal");
+    let src = tmp.join("melange_dc_op_recompute_e7_overdrive_nominal.rs");
+    let bin = tmp.join("melange_dc_op_recompute_e7_overdrive_nominal");
     std::fs::File::create(&src)
         .unwrap()
         .write_all(full.as_bytes())

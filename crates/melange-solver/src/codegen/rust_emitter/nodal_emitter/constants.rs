@@ -1,7 +1,7 @@
 //! Nodal constants emission.
 
 use crate::codegen::ir::CircuitIR;
-use crate::codegen::rust_emitter::dk_emitter::{effective_max_iter, emit_inject_tap_constants};
+use crate::codegen::rust_emitter::dk_emitter::emit_inject_tap_constants;
 use crate::codegen::rust_emitter::helpers::{
     fmt_f64, format_matrix_rows, has_latched_device, recommended_warmup_samples, section_banner,
     warmup_estimate_capped,
@@ -56,19 +56,14 @@ impl RustEmitter {
              pub const INPUT_LIMIT_V: f64 = 100.0;\n\n",
         );
         code.push_str("/// Maximum NR iterations per sample\n");
-        // Budget CEILING, not a target: a sample that converges in 8 iterations
-        // still exits at 8, so raising the ceiling costs nothing on converging
-        // samples. The floor of 100 gives the Armijo line search on stiff
-        // high-gain feedback amplifiers enough iterations to crawl a full-scale
-        // transient's operating-point move through the saturation knee within a
-        // single sample (measured: a 0->10 V step on the 1073 output stage needs
-        // ~230 iterations, but realistic bandlimited drive converges well under
-        // 100). Auto-tuned budgets already above 100 are left untouched. The
-        // floor lives in `effective_max_iter` so the provenance `Build:` line and
-        // JSON report the same value this const emits.
+        // Budget CEILING, not a target, floored at `NODAL_MAX_ITER_FLOOR`
+        // (`codegen::policy`, where the reason is). Auto-tuned budgets already
+        // above it are left untouched. The floor lives in
+        // `CircuitIR::effective_max_iter` so the provenance `Build:` line, the
+        // JSON and the console report the same value this const emits.
         code.push_str(&format!(
             "pub const MAX_ITER: usize = {};\n\n",
-            effective_max_iter(ir)
+            ir.effective_max_iter()
         ));
         // The sub-step ladder runs wherever a Newton solve can fail: every
         // full-LU build, and a Schur build with devices. Emitting the bound

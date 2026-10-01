@@ -88,15 +88,19 @@ pub(crate) fn print_run_route_detail(
     if !meta.integration_reason.is_empty() {
         emit(&format!("    ({})", meta.integration_reason));
     }
-    emit(&format!(
-        "  Max NR iterations: {}{}",
-        built.max_iter,
-        if max_iter_pinned {
-            " (--max-iter)"
-        } else {
-            " (auto-tuned)"
-        }
-    ));
+    // The budget the emitted `MAX_ITER` carries (the provenance `Build:`
+    // line's `max_iter`), not the requested one.
+    let how = if max_iter_pinned {
+        " (--max-iter)".to_string()
+    } else if built.solver_label == "nodal" {
+        format!(
+            " (auto-tuned; nodal builds ship at least {})",
+            melange_solver::codegen::policy::NODAL_MAX_ITER_FLOOR
+        )
+    } else {
+        " (auto-tuned)".to_string()
+    };
+    emit(&format!("  Max NR iterations: {}{how}", built.max_iter));
 }
 
 /// Diagnostic lit sub-step multiplier (`MELANGE_LIT_FACTOR` env var) for the

@@ -266,6 +266,8 @@ pub(crate) fn simulate_circuit_source(
     let generated = built.generated;
     let netlist = built.netlist;
     let oversampling = built.oversampling;
+    // The budget the generated `MAX_ITER` carries.
+    let max_iter = built.max_iter;
 
     // Map `--inject FIELD=SPEC` to injection indices (by field name).
     let mut inject_driven: Vec<(usize, codegen_runner::InjectSource)> = Vec::new();
@@ -491,16 +493,13 @@ pub(crate) fn simulate_circuit_source(
         let internal_samples = samples.saturating_mul(oversampling as u64).max(1);
         let frac = nr_fail as f64 / internal_samples as f64;
         if frac > 0.20 {
-            let max_iter_disp = opts
-                .max_iter
-                .map_or_else(|| "default".to_string(), |m| m.to_string());
             eprintln!(
                 "WARNING: Newton-Raphson hit its iteration ceiling {} times across {} internal \
                  samples ({:.0}%; a sample can fail both its trapezoidal and BE-fallback solve, so \
                  this can exceed 100%). The solver is failing to converge on a large fraction of \
                  samples — the output can latch at a DC-ish value that looks like a physical steady \
                  state while being numerically meaningless. Verify the result. A larger \
-                 --max-iter (current {}) can let a slow but non-regenerative solve converge; on an \
+                 --max-iter (current {max_iter}) can let a slow but non-regenerative solve converge; on an \
                  oscillator or switching circuit it can instead let Newton settle on a spurious \
                  oscillation of the discrete step equations, with no unsolved sample to show it, \
                  so it is not a supported way past unsolved samples there (docs/limitations.md, \
@@ -508,7 +507,6 @@ pub(crate) fn simulate_circuit_source(
                 nr_fail,
                 internal_samples,
                 frac * 100.0,
-                max_iter_disp,
             );
         }
     }

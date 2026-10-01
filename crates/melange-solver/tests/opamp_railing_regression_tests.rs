@@ -575,10 +575,10 @@ fn dc_operating_point_uses_the_full_open_loop_gain() {
 }
 
 /// A zero-input render from the baked operating point stays put: no fs/2
-/// ring on the op-amp output and no latch. 1e-5 V is the interim bound: the
-/// remaining 1.1 µV comes from full-LU's node Gmin, which sits in its
-/// Jacobian but not its RHS and so moves the transient's fixed point away
-/// from the DC solve's (an open item; with it removed the ring is 2.5e-13 V).
+/// ring on the op-amp output and no latch. The transient and the DC solve
+/// carry the same node Gmin (the one baked into G), so the start is their
+/// common fixed point; a second Gmin on the transient's matrices moved it
+/// and rang at 1.1 µV.
 #[test]
 fn railing_choke_stage_starts_at_its_own_equilibrium() {
     let mut config = support::config_for_spice(RAILING_INTO_CHOKE, 48000.0);
@@ -611,7 +611,7 @@ fn railing_choke_stage_starts_at_its_own_equilibrium() {
         "the BE-latch fired at zero input: the start is not an equilibrium"
     );
     assert!(
-        v[0] <= 1e-5,
+        v[0] <= 1e-12,
         "fs/2 content on the op-amp output at zero input: {:.3e} V",
         v[0]
     );

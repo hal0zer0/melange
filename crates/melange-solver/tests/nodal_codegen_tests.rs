@@ -503,7 +503,7 @@ fn test_nodal_state_reset_bounds_finite_runaway() {
     let code = generate_nodal(TUBE_TRANSFORMER_WITH_POT, "in", "out");
 
     // The plausibility bound constant must be emitted and match the value
-    // justified in constants.rs.tera / nodal_emitter.rs (~2000x the highest
+    // justified in constants.rs.tera / nodal_emitter/constants.rs (~2000x the highest
     // real supply rail in the melange-circuits corpus, 480 V).
     assert!(
         code.contains("pub const STATE_MAX_PLAUSIBLE_MAGNITUDE: f64 = 1e6;"),

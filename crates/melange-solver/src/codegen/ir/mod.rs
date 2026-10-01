@@ -27,7 +27,10 @@ use matrix_helpers::*;
 /// Gmin regularisation conductance added to every node diagonal of the
 /// augmented MNA matrix before NR. Prevents singular Jacobians on floating
 /// nodes. The DC operating-point solver (`dc_op::build_dc_system`) stamps the
-/// same value as its node-diagonal floor.
+/// same value as its node-diagonal floor. It is the nodal route's only node
+/// Gmin: every emitted solve's matrix (main, sub-step, chord, active-set pin,
+/// M=0 direct solve) is built from this `G` and adds none of its own, so they
+/// all solve the circuit the DC operating point was solved on.
 pub(crate) const GMIN_REGULARISATION: f64 = 1e-12;
 
 /// Pivot magnitude below which the local Gaussian-elimination routine
@@ -1684,6 +1687,20 @@ struct Promotion {
 }
 
 impl CircuitIR {
+    /// The Newton budget the emitted `MAX_ITER` carries, so provenance and the
+    /// console never disagree with the const they describe: the configured
+    /// budget, raised to [`crate::codegen::policy::NODAL_MAX_ITER_FLOOR`] on the
+    /// nodal route. DK is deliberately not floored.
+    pub fn effective_max_iter(&self) -> usize {
+        match self.solver_mode {
+            SolverMode::Nodal => self
+                .solver_config
+                .max_iterations
+                .max(crate::codegen::policy::NODAL_MAX_ITER_FLOOR),
+            SolverMode::Dk => self.solver_config.max_iterations,
+        }
+    }
+
     /// Decide whether a finished IR ships as built (`None`, with the verdict
     /// recorded in `integration_reason`) or is rebuilt with backward Euler,
     /// by the ring predicate (`codegen::ring`) on the
@@ -2913,7 +2930,7 @@ impl CircuitIR {
             integrator_selection = IntegratorSelection::BeAuto;
             // Recompute rho on BE matrices for the emitter's Schur-vs-full-LU
             // gate (`spectral_radius_s_aneg`, consumed by
-            // `nodal_emitter.rs`'s `schur_unstable`). This power iteration is
+            // `emit_nodal`'s `schur_unstable`, `nodal_emitter/mod.rs`). This power iteration is
             // intentionally the coarse, un-deflected, fixed-100-iteration
             // form — it is the historically-calibrated value the emitter
             // gate thresholds (1.002/1.05/1.0) were tuned against (see

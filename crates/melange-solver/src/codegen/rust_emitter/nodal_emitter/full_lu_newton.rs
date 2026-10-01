@@ -146,8 +146,6 @@ impl RustEmitter {
         code.push_str("        if need_refactor {\n");
         code.push_str("            chord_j_dev = j_dev;\n");
         code.push_str(&format!("            chord_lu = {};\n", site.a));
-        code.push_str("            // Gmin regularization\n");
-        code.push_str("            for i in 0..N_NODES { chord_lu[i][i] += 1e-12; }\n");
         {
             // Build transpose of N_i sparsity: for each device dim i, which nodes a are nonzero
             emit_nodal_jacobian_stamp(code, ir, m, "chord_lu", "            ");

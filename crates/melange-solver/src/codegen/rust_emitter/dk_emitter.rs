@@ -325,23 +325,6 @@ fn bjt_fa_resolution(ir: &CircuitIR) -> (usize, usize) {
     (fa, full)
 }
 
-/// The `MAX_ITER` value the emitted code ACTUALLY uses, so provenance never
-/// disagrees with the const it describes.
-///
-/// The nodal path (full-LU + Schur) floors the auto-tuned budget at 100 — a
-/// ceiling, not a target: a sample converging in 8 iterations still exits at 8,
-/// so converging samples pay nothing, while the Armijo line search gets enough
-/// headroom to crawl a full-scale transient's operating-point move through the
-/// saturation knee within one sample. The DK path is deliberately NOT floored.
-/// Mirror of the `MAX_ITER` const emission in `nodal_emitter.rs` — keep the two
-/// in lockstep.
-pub(super) fn effective_max_iter(ir: &CircuitIR) -> usize {
-    match ir.solver_mode {
-        crate::codegen::ir::SolverMode::Nodal => ir.solver_config.max_iterations.max(100),
-        crate::codegen::ir::SolverMode::Dk => ir.solver_config.max_iterations,
-    }
-}
-
 /// Glow sub-sample-fire provenance, emitted UNCONDITIONALLY for every
 /// glow-bearing deck (not by-presence) so an artifact self-reports WHY the
 /// variable-dt glow-strike re-solve is or isn't active — including `dk-route`
@@ -435,7 +418,7 @@ fn resolved_build_flags(ir: &CircuitIR, glow: &GlowProvenance) -> String {
     let mut build = format!(
         "integration={}, max_iter={}, oversampling={}x",
         ir.integrator_selection.label(),
-        effective_max_iter(ir),
+        ir.effective_max_iter(),
         ir.solver_config.oversampling_factor
     );
     // DC blocking is a fourth (5 Hz) output highpass that is otherwise invisible
@@ -570,7 +553,7 @@ fn provenance_json(
         "\"backward_euler\":{},",
         ir.integrator_selection.is_backward_euler()
     ));
-    s.push_str(&format!("\"max_iter\":{},", effective_max_iter(ir)));
+    s.push_str(&format!("\"max_iter\":{},", ir.effective_max_iter()));
     if !ir.dc_op_rail_pin.is_empty() && ir.dc_op_rail_pin != "none" {
         s.push_str(&format!(
             "\"dc_op_rail_pin\":\"{}\",",
@@ -2553,7 +2536,8 @@ impl RustEmitter {
         // Used for the final output clamp, the diag_clamp_count threshold,
         // and the NaN-recovery return path. High-voltage circuits (e.g. the
         // Wurlitzer power amp at ±30 V) set this above the default; the
-        // nodal emitter already honors it (nodal_emitter.rs) — this threads
+        // nodal emitter already honors it (`nodal_emitter/`: full_lu.rs,
+        // schur.rs, reset.rs, state.rs) — this threads
         // it into the DK template as well.
         ctx.insert(
             "output_clamp_v",

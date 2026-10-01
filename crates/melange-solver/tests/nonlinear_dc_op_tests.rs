@@ -1067,8 +1067,9 @@ fn test_diode_rs_dc_op_matches_devices_crate() {
 
 // ── DC/runtime parity: MOSFET body effect ────────────────────────────
 
-/// The generated runtime shifts VT per-sample from Vsb (dk_emitter.rs
-/// body_effect_update, nodal_emitter.rs vt_eff — channel-signed
+/// The generated runtime shifts VT per Newton iterate from Vsb
+/// (helpers::emit_body_effect_at_iterate on DK and nodal Schur,
+/// nodal_emitter/device_eval.rs vt_eff on nodal full-LU — channel-signed
 /// magnitude-space GAMMA/PHI formula). The DC OP must evaluate the SAME
 /// body-shifted device, not the nominal-VT one.
 #[test]

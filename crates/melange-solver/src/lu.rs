@@ -132,7 +132,7 @@ pub fn compute_g_aug_pattern(
 
     // MOSFET body effect: Id also depends on V(source) and V(bulk) through
     // the threshold, so its injection rows get those two columns too. This
-    // must mirror `nodal_emitter::emit_body_gmb_stamp`. The source column is
+    // must mirror `emit_body_gmb_stamp` (`nodal_emitter/stamps.rs`). The source column is
     // usually already present (it is in Vds and Vgs); the bulk column is not,
     // unless the bulk is grounded.
     for slot in device_slots {
@@ -151,7 +151,7 @@ pub fn compute_g_aug_pattern(
     }
 
     // Behavioral B-source Jacobian stamp positions. This must mirror
-    // `nodal_emitter::emit_behavioral_jacobian` exactly, which stamps:
+    // `emit_behavioral_jacobian` (`nodal_emitter/behavioral.rs`) exactly, which stamps:
     //
     //   V={} (constraint row r = aug_row):
     //     chord_lu[r][col] -= ∂f/∂V(k)     for every non-ground referenced

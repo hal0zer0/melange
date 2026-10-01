@@ -199,8 +199,9 @@ const DC_OP_MAX_PLAUSIBLE_CURRENT: f64 = 1e7;
 /// gate asks "is the iterate a root of the circuit equations". A collapsed
 /// Newton step at a non-root (e.g. two parallel same-direction diodes driven
 /// into deep reverse by summed pnjlim corrections) passes the first and must
-/// fail the second. Same floor as the transient `kcl_residual` gate
-/// (`nodal_emitter.rs`), which is also 1e-9 A.
+/// fail the second. Same floor as the transient KCL residual gate
+/// (`codegen/rust_emitter/nodal_emitter/residual.rs`, `emit_kcl_residual_fns`),
+/// which is also 1e-9 A.
 pub const DC_OP_KCL_ABSTOL_AMPS: f64 = 1e-9;
 
 /// NaN-safe "x exceeds bound" for the KCL gate: `!(x <= bound)`, so a NaN
@@ -385,10 +386,12 @@ fn evaluate_devices_inner(
                     melange_devices::mosfet::ChannelType::N
                 };
                 // Body effect (GAMMA/PHI): the DC OP must evaluate the SAME
-                // device the transient runtime evaluates. Both generated
-                // paths adjust VT from Vsb per iteration/sample:
-                //   dk_emitter.rs ~L2200 (body_effect_update, from v_pred)
-                //   nodal_emitter.rs ~L7325/L3806 (vt_eff, each NR iteration)
+                // device the transient runtime evaluates. Every generated
+                // path adjusts VT from Vsb at each Newton iterate:
+                //   DK and nodal Schur: `rust_emitter::helpers::
+                //     emit_body_effect_at_iterate` (v = v_pred + S_NI·i_nl)
+                //   nodal full-LU: `nodal_emitter/device_eval.rs`,
+                //     `emit_nodal_device_evaluation_body` (vt_eff)
                 // with the channel-signed magnitude-space formula
                 //   vsb    = sign · (V(source) − V(bulk))     (sign = −1 PMOS)
                 //   vt_eff = VT + sign · GAMMA · (√(PHI + max(vsb,0)) − √PHI)
@@ -1572,8 +1575,8 @@ fn lu_decompose_in_place(mut lu: Vec<Vec<f64>>) -> Option<(Vec<Vec<f64>>, Vec<us
 /// 1e-6 S), so partial-pivoting LU enters factorisation with `cond(A) >= 1e6`
 /// and loses ~6 digits of f64 precision before solving anything.
 ///
-/// Keep in sync with `nodal_emitter::emit_nodal_lu_factor` — the generated
-/// nodal path uses the same algorithm.
+/// Keep in sync with `emit_nodal_lu_factor` (`nodal_emitter/lu.rs`) — the
+/// generated nodal path uses the same algorithm.
 fn equilibrate(a: &mut [Vec<f64>]) -> (Vec<f64>, Vec<f64>) {
     let n = a.len();
     let mut dr = vec![1.0; n];

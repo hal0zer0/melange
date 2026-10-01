@@ -219,8 +219,7 @@ pub(super) fn emit_sparse_ni_matvec_add(
 ///   - `setter_stamps` — every `(row,col)` a `.pot`/`.switch`/`.wiper`/`.runtime`
 ///     setter writes, so a switch entry that is open (≈0, below threshold) at the
 ///     codegen position but closed (large) at another position is still summed.
-///   - the diagonal `(i,i)` — gmin regularization and the saturating-inductor
-///     augmented-row term.
+///   - the diagonal `(i,i)` — the saturating-inductor augmented-row term.
 /// This mirrors `build_equil_pattern` parts (1)-(3), which ship byte-identical on
 /// these decks (incl. the sat-inductor `steve-1073-output`). Part (4), the device
 /// Jacobian envelope, is intentionally omitted: the raw `amat` carries no device

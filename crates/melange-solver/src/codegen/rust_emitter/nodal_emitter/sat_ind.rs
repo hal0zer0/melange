@@ -201,7 +201,7 @@ fn strip_outer_parens(expr: &str) -> &str {
 /// ## Three numerical choices, all load-bearing
 ///
 /// * **The `alpha·L0·v[k]` self term is removed analytically, not by
-///   subtraction.** `alpha·L0` reaches ~2.6e5 on a 1073 output transformer
+///   subtraction.** `alpha·L0` reaches ~2.6e5 on a console-preamp output transformer
 ///   while the row's actual content is volts; folding `A[k][k]·v[k]` into the
 ///   sum and relying on the later terms to cancel it would discard ~11
 ///   significant digits. `A[k][k] = g[k][k] + alpha·C[k][k]` and

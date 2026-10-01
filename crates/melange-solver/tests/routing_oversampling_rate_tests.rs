@@ -32,8 +32,9 @@ use melange_solver::dk::DkKernel;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
 
-/// The exact g10 repro netlist (verbatim copy of
-/// `melange-circuits/local-docs/g10-osc-sq2-repro.cir` as of 2026-08-14).
+/// The oscillator repro netlist (a copy of
+/// `melange-circuits/local-docs/g10-osc-sq2-repro.cir` as of 2026-08-14, its
+/// `.runtime` field renamed).
 /// Embedded rather than read from the sibling repo so this test is
 /// self-contained (the melange-circuits checkout may not be present, e.g.
 /// in CI). A combo-organ master LC oscillator (Ge PNP,
@@ -41,11 +42,11 @@ use melange_solver::parser::Netlist;
 /// stage. This topology is genuinely unstable at its DC-OP linearization by
 /// design (that's what makes it oscillate) — see the netlist's own hazard
 /// notes.
-const G10_OSCILLATOR: &str = "\
+const LC_MASTER_OSCILLATOR: &str = "\
 Combo-organ reference chain (master osc + squarer + divider + keying)
 Vrail rail 0 DC 8
 Vvib vterm 0 DC 8
-.runtime Vvib as v_g10_vterm
+.runtime Vvib as v_osc_vterm
 C_kick in b1 1n
 R_e18 rail node_a 1.8k
 C_e25 rail node_a 25u
@@ -71,7 +72,7 @@ R_fbleed term_f 0 100k
 ";
 
 fn build_mna(input_node_name: &str) -> (Netlist, MnaSystem, usize) {
-    let netlist = Netlist::parse(G10_OSCILLATOR).expect("parse");
+    let netlist = Netlist::parse(LC_MASTER_OSCILLATOR).expect("parse");
     let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
     let input_node = mna.node_map[input_node_name] - 1;
     mna.g[input_node][input_node] += 1.0;

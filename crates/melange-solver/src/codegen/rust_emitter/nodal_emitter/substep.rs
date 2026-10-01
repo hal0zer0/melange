@@ -142,10 +142,8 @@ impl RustEmitter {
                     lo, hi
                 ));
             }
-            // Gmin on A_sub — 1e-12, matching every other Gmin stamp in the
-            // nodal emitter (1e-6 was strong enough to skew high-impedance
-            // nodes by an audible amount on sub-stepped samples).
-            code.push_str("                for i in 0..N_NODES { a_sub[i][i] += 1e-12; }\n");
+            // No Gmin added here: `g_src` already carries the one baked into G
+            // (`GMIN_REGULARISATION`, codegen/ir), as every nodal solve does.
             code.push_str("                built_pow = h_pow;\n");
             code.push_str("            }\n");
             code.push_str(

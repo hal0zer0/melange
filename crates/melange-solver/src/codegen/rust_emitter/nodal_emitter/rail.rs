@@ -343,7 +343,6 @@ impl RustEmitter {
         }
         code.push_str(&format!(
             "{it}let mut g_as = {matrix_name};\n\
-             {it}for i in 0..{n_nodes} {{ g_as[i][i] += 1e-12; }}\n\
              {it}let mut rhs_as = {rhs_name};\n"
         ));
         if m > 0 {

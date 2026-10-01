@@ -63,7 +63,8 @@ pub(crate) enum Commands {
 
         /// Maximum NR iterations per sample. Defaults to an auto-tuned budget
         /// (scales with M, solver route, and trap spectral radius); setting it
-        /// pins that exact budget.
+        /// pins that exact budget. A nodal build never ships less than 100 and
+        /// refuses a pin below it.
         #[arg(help_heading = EXPERT_HEADING, long)]
         max_iter: Option<usize>,
 
@@ -598,7 +599,8 @@ pub(crate) enum Commands {
 
         /// Maximum NR iterations per sample. Defaults to the same auto-tuned
         /// budget `compile` uses (scales with M, solver route, and trap
-        /// spectral radius).
+        /// spectral radius). A nodal build never ships less than 100 and
+        /// refuses a pin below it.
         #[arg(help_heading = EXPERT_HEADING, long)]
         max_iter: Option<usize>,
 
@@ -806,7 +808,8 @@ pub(crate) enum Commands {
 
         /// Maximum NR iterations per sample. Defaults to the same auto-tuned
         /// budget `compile` uses (scales with M, solver route, and trap
-        /// spectral radius).
+        /// spectral radius). A nodal build never ships less than 100 and
+        /// refuses a pin below it.
         #[arg(help_heading = EXPERT_HEADING, long)]
         max_iter: Option<usize>,
 

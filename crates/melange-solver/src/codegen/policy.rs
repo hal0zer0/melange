@@ -45,3 +45,19 @@ pub const DC_BLOCK_CUTOFF_HZ: f64 = 5.0;
 pub fn dc_block_cutoff_hz_literal() -> String {
     format!("{:?}", DC_BLOCK_CUTOFF_HZ)
 }
+
+/// Least Newton budget (`MAX_ITER`, iterations per sample) a nodal build ships.
+///
+/// The nodal Newton (Schur and full-LU) is globalized by an Armijo line search
+/// that shortens a step instead of accepting an overshoot. On a stiff high-gain
+/// feedback amplifier that means a full-scale transient's operating-point move
+/// through a device's saturation knee is crawled across in many short steps
+/// inside one sample; with too small a budget the sample ends unsolved and the
+/// state is held. 100 is the budget that carries realistic band-limited drive
+/// (measured on a transformer-coupled output stage: such drive converges well
+/// under 100; only a 0->10 V step needs ~230).
+///
+/// It is a ceiling, not a target: a sample converging in 8 iterations exits at
+/// 8, so converging samples pay nothing. An auto-tuned nodal budget below it is
+/// raised to it; a `--max-iter` pin below it is refused. DK has no floor.
+pub const NODAL_MAX_ITER_FLOOR: usize = 100;
