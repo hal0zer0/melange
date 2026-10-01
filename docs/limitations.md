@@ -379,15 +379,39 @@ currents were built on the old value.
 
 A classic two-transistor astable multivibrator whose DC operating point is
 unstable (it starts by itself) is built on the nodal solver, and melange
-cannot yet solve its regenerative switching edge: at the first edge every
-Newton path fails, under trapezoidal integration or `--backward-euler`, and
-from there every sample is refused as unsolved (the render stops with an
-error; `--allow-nr-hold` writes the frozen output anyway). The witness is a
-textbook NPN astable (1 kΩ collectors, 47 kΩ bases, 100 nF cross-coupling),
-which ngspice runs at its 6.667 ms period. Circuits whose devices carry series
-resistance and Early effect under moderate bias (a PNP divider astable with
-RB/RC/RE/VAF, for one) cross their edges and oscillate correctly. Tracked as
-(iv) in `docs/aidocs/STATUS.md`.
+cannot yet reliably solve its regenerative switching edges. The witness is a
+textbook NPN astable (9 V, 1 kΩ collectors, 47 kΩ bases, 100 nF
+cross-coupling, NPN `IS=1e-14 BF=100 CJE=10p CJC=4p TF=0.3n`), which ngspice
+runs at a converged 6.667 ms period with the collectors inside 0–9 V.
+
+- **At the default Newton budget the render is refused, and that is the
+  supported outcome today.** At the first edge every Newton path fails, under
+  trapezoidal integration or `--backward-euler`, and every later sample is
+  refused as unsolved: the render stops with an error (`--allow-nr-hold` writes
+  the frozen output anyway).
+- **Raising `--max-iter` is not a way past that refusal.**
+  - On the witness, `--max-iter 1000` solves every sample and exits cleanly.
+  - The result is a spurious oscillation 4–6 samples long (a 0.08–0.13 ms
+    period, a collector reaching 10.7–12.1 V on the 9 V supply).
+  - It is the same on both nodal sub-paths: a genuine solution of the discrete
+    step equations, not of the circuit, and no counter shows it.
+  - It appears with the transit-time (`TF`) diffusion capacitance. With the
+    junction capacitances alone (`CJE`/`CJC`) the same cycle still leaves some
+    samples unsolved, so the render is refused.
+  - The same astable with no junction or transit-time capacitance does solve
+    correctly at `--max-iter 1000` (6.687 ms against ngspice's 6.693 ms). There
+    is no way to tell from the output which case you are in.
+  - (A `TF`-only variant has no settled reference: ngspice's own period on it
+    ranges from 0.008 to 6.5 ms with its step and tolerance settings. The claim
+    rests on the full witness.)
+- **This is new in 0.1.12.** 0.1.11 built the witness on the DK solver, where it
+  ran near ngspice's period with about 7 % of its samples unsolved at the
+  default budget. Its nodal path failed loudly. 0.1.12 refuses this deck on DK
+  (its operating point has a growing pole) and builds it on nodal.
+
+Circuits whose devices carry series resistance and Early effect under moderate
+bias (a PNP divider astable with RB/RC/RE/VAF, for one) cross their edges and
+oscillate correctly. Tracked as (iv) in `docs/aidocs/STATUS.md`.
 
 ### Device Linearization
 - `.linearize Q9` or `.linearize T1` removes a BJT or **triode** from the NR

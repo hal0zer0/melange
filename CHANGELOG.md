@@ -788,6 +788,12 @@ generated state is smaller.
   unsolved, with a 1.3 V overshoot; this release refuses instead. Astables whose
   transistors carry series resistance and Early effect oscillate correctly. See
   `docs/limitations.md`.
+- **Do not raise `--max-iter` to get past that refusal.** On the same astable
+  with junction and transit-time capacitance, `--max-iter 1000` solves every
+  sample and exits cleanly, but renders a spurious oscillation 4–6 samples long
+  with a collector above the supply rail. This is new in 0.1.12: 0.1.11's nodal
+  path failed loudly there. The refusal at the default budget is the supported
+  outcome.
 
 ### Added
 
@@ -825,6 +831,20 @@ generated state is smaller.
   the line and element they came from.
 
 ### Changed
+
+- **`compile --format plugin` refuses to overwrite an existing project.** When
+  the output directory already has a `src/lib.rs` or `Cargo.toml`, it used to
+  replace them without a word, although `lib.rs` is documented as yours to
+  edit. The refusal gives the `--format code -o <dir>/src/circuit.rs` command
+  that updates only the DSP.
+
+- **`simulate`'s solver summary no longer calls a failed render normal.** It
+  said "N were recovered by a sub-step or backward-Euler retry. Normal on hard
+  transients" directly above the error saying those samples were never solved.
+  The number counted retries run, not samples saved; the line now gives the
+  unsolved count when there is one. The iteration-ceiling WARNING no longer
+  suggests `--max-iter 1000` as a remedy: on an oscillator or switching circuit
+  a larger budget can settle on a spurious oscillation (see Known issues).
 
 - **Circuits of up to 32 nonlinear dimensions build** (was 24), on every
   route. A full FET-limiter compressor is 25. The limit bounds generated code

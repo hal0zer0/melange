@@ -366,9 +366,10 @@ it does not warn — it takes the host DAW down with it, on their machine, in a
 way that looks like your plugin is broken. Perfectly fine for a plugin you build
 for your own rig; a decision you should make deliberately for one you ship.
 
-To build for older machines, regenerate with `--cpu-baseline x86-64` (or
-`x86-64-v2`), or delete the `[target.…]` section matching the target you are
-building. The generated DSP is **bit-for-bit identical** either
+To build for older machines, generate the project into a new directory with
+`--cpu-baseline x86-64` (or `x86-64-v2`; `compile` will not overwrite an
+existing project), or delete the `[target.…]` section matching the target you
+are building. The generated DSP is **bit-for-bit identical** either
 way — Rust never contracts `a*b + c` into an FMA on its own, so the flag changes
 instruction selection, not results. What you give up is throughput: the uplift
 is documented at roughly 5–13% on matvec-heavy circuits in

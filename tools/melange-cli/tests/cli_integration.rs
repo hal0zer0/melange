@@ -1471,6 +1471,43 @@ fn test_simulate_refuses_a_typoed_node_and_names_it() {
 }
 
 #[test]
+fn test_compile_plugin_refuses_to_overwrite_an_existing_project() {
+    // `src/lib.rs` is the user's; generating the project again replaced it
+    // without a word.
+    let cir = write_test_circuit(TEST_RC_LOWPASS, "plugin_overwrite");
+    let dir = std::env::temp_dir().join(format!(
+        "melange_cli_test_plugin_overwrite_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let args = [
+        "compile",
+        cir.to_str().unwrap(),
+        "--format",
+        "plugin",
+        "-o",
+        dir.to_str().unwrap(),
+    ];
+    run_melange(&args);
+    let lib = dir.join("src/lib.rs");
+    let mut edited = std::fs::read_to_string(&lib).unwrap();
+    edited.push_str("// my edit\n");
+    std::fs::write(&lib, &edited).unwrap();
+    let stderr = run_melange_fail(&args);
+    assert!(
+        stderr.contains("refusing to overwrite") && stderr.contains("--format code"),
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&lib).unwrap(),
+        edited,
+        "lib.rs was touched"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&cir);
+}
+
+#[test]
 fn test_compile_refuses_a_typoed_node_in_every_format() {
     // The defect is equally real in a plugin, which never renders anything that
     // could betray it.

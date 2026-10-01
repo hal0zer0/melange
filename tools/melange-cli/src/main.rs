@@ -25,7 +25,7 @@ pub mod sources;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use melange_solver::build::format_system_size;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "melange")]
@@ -1821,6 +1821,9 @@ fn compile_circuit_source(
         clap_id_override,
         cpu_baseline,
     } = opts;
+    if format == OutputFormat::Plugin {
+        refuse_existing_plugin_project(&plugin_project_dir(output), &circuit_source.name())?;
+    }
     // Netlist node names are normalized (lowercase, gnd→0) at parse time;
     // fold the CLI-provided names the same way so lookups match.
     // Parse comma-separated input nodes (multi-input ports), mirroring the
@@ -2235,11 +2238,7 @@ fn compile_circuit_source(
         }
         OutputFormat::Plugin => {
             // Generate complete plugin project
-            let project_dir = if output.extension().is_some() {
-                output.with_extension("")
-            } else {
-                output.to_path_buf()
-            };
+            let project_dir = plugin_project_dir(output);
 
             // Get a sanitized circuit name
             let circuit_name: String = project_dir
@@ -3086,6 +3085,39 @@ fn parse_subsample_fire_mode(s: &str) -> Result<melange_solver::codegen::Subsamp
     })
 }
 
+/// The project root `--format plugin` writes for `--output`: the path with
+/// any extension dropped.
+fn plugin_project_dir(output: &Path) -> PathBuf {
+    if output.extension().is_some() {
+        output.with_extension("")
+    } else {
+        output.to_path_buf()
+    }
+}
+
+/// Refuse to generate a plugin project over an existing one. `src/lib.rs` is
+/// the user's (README: "Yes — it's yours"), and regenerating the project
+/// replaced it, and any `Cargo.toml` edits, without a word.
+fn refuse_existing_plugin_project(project_dir: &Path, circuit: &str) -> Result<()> {
+    let existing: Vec<&str> = ["src/lib.rs", "Cargo.toml"]
+        .into_iter()
+        .filter(|f| project_dir.join(f).exists())
+        .collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "refusing to overwrite the plugin project in {dir}: it already has {files}, which \
+         are yours to edit, and generating the project again would replace them.\n\
+         To update only the DSP, leaving your edits alone:\n  \
+         melange compile {circuit} --format code -o {circuit_rs}\n\
+         To start the project over, delete or move {dir} first.",
+        dir = project_dir.display(),
+        files = existing.join(" and "),
+        circuit_rs = project_dir.join("src/circuit.rs").display(),
+    )
+}
+
 /// A plausible project DIRECTORY name for the `--format plugin` hint.
 ///
 /// Derived from the circuit, never from the `--format code` output path: that
@@ -3570,6 +3602,12 @@ fn simulate_circuit_source(
     // One line saying what the block above amounts to. The counters are
     // meaningful to a maintainer and opaque to everyone else, and a list of
     // numbers with no verdict trains people to skip it.
+    //
+    // `recoveries` counts retries RUN, not samples they saved: when any sample
+    // stayed unsolved the line says so, rather than reassuring above the ERROR.
+    let held = nr_hold_count.unwrap_or(0);
+    let committed = nr_commit_count.unwrap_or(0);
+    let total = unsolved_count.unwrap_or(held + committed);
     if printed_header {
         let capped = nr_max_iter_count.unwrap_or(0);
         if resets > 0 {
@@ -3577,10 +3615,16 @@ fn simulate_circuit_source(
                 "    -> {resets} NaN/magnitude reset(s): the solve blew up and was reset. \
                  Treat this output as suspect."
             );
+        } else if total > 0 {
+            println!(
+                "    -> {capped} sample(s) hit the iteration ceiling; the sub-step and \
+                 backward-Euler retries ran {recoveries} time(s) and {total} sample(s) were \
+                 still never solved (see the ERROR below)."
+            );
         } else if capped > 0 && recoveries > 0 {
             println!(
-                "    -> {capped} sample(s) hit the iteration ceiling and {recoveries} were \
-                 recovered by a sub-step or backward-Euler retry. Normal on hard transients."
+                "    -> {capped} sample(s) hit the iteration ceiling and a sub-step or \
+                 backward-Euler retry solved each of them. Normal on hard transients."
             );
         } else if capped > 0 {
             println!("    -> {capped} sample(s) hit the iteration ceiling.");
@@ -3614,8 +3658,12 @@ fn simulate_circuit_source(
                  samples ({:.0}%; a sample can fail both its trapezoidal and BE-fallback solve, so \
                  this can exceed 100%). The solver is failing to converge on a large fraction of \
                  samples — the output can latch at a DC-ish value that looks like a physical steady \
-                 state while being numerically meaningless. Verify the result; if it looks wrong, \
-                 re-run with a larger --max-iter (current {}; try 1000).",
+                 state while being numerically meaningless. Verify the result. A larger \
+                 --max-iter (current {}) can let a slow but non-regenerative solve converge; on an \
+                 oscillator or switching circuit it can instead let Newton settle on a spurious \
+                 oscillation of the discrete step equations, with no unsolved sample to show it, \
+                 so it is not a supported way past unsolved samples there (docs/limitations.md, \
+                 \"Self-starting two-transistor astables\").",
                 nr_fail,
                 internal_samples,
                 frac * 100.0,
@@ -3659,9 +3707,6 @@ fn simulate_circuit_source(
     //
     // Fail, do not warn. The whole failure mode is that it looks fine
     // (design review).
-    let held = nr_hold_count.unwrap_or(0);
-    let committed = nr_commit_count.unwrap_or(0);
-    let total = unsolved_count.unwrap_or(held + committed);
     if total > 0 {
         let of = diag_samples
             .map(|s| format!(" of {s} output samples"))
