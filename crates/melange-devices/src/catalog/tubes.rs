@@ -1,6 +1,13 @@
-//! Tube/triode catalog entries with Koren model parameters.
+//! Vacuum-tube catalog entries.
 //!
-//! All parameters are for triode-mode operation (pentodes are triode-connected).
+//! Two tables:
+//! - [`CATALOG`] — triode-equation Koren parameters plus the Dempwolf & Zölzer
+//!   grid law. Every entry is triode-mode: true triodes, and power pentodes /
+//!   beam tetrodes (EL84, EL34, 6L6, 6V6) taken as triode-connected.
+//! - [`PENTODE_CATALOG`] — true pentode / beam-tetrode parameters for the
+//!   three-current model: Reefman §4.4 / §4.5 fits (including §5 variable-mu
+//!   entries) and Classical Koren entries (KT88, 6550).
+//!
 //! Sources are cited per entry for traceability.
 
 use crate::tube::ScreenForm;
@@ -328,16 +335,27 @@ pub fn lookup(name: &str) -> Option<&'static TubeCatalogEntry> {
         .find(|entry| entry.names.iter().any(|n| n.eq_ignore_ascii_case(name)))
 }
 
-/// Catalog entry for a sharp-cutoff pentode using Reefman Derk §4.4 math.
+/// Catalog entry for a true pentode or beam tetrode (three-current model).
 ///
-/// Parameters are fitted by Derk Reefman (Reefman TubeLib.inc, 2016) using the
-/// ExtractModel tool. The model uses αs/A/β extensions to Koren's pentode equation
-/// to capture screen-grid current and the knee region.
+/// [`screen_form`](Self::screen_form) selects the equation family:
+/// - [`ScreenForm::Rational`] — Reefman "Derk" §4.4.
+/// - [`ScreenForm::Exponential`] — Reefman "DerkE" §4.5.
+/// - [`ScreenForm::Classical`] — Norman Koren's 1996 pentode equation (KT88 /
+///   6550, parameters from Cohen-Hélie 2010); the αs/A/β fields are unused.
 ///
-/// **Naming convention**: True-pentode entries use a `-P` suffix (e.g. `EL84-P`,
-/// `EL34-P`) to avoid colliding with the existing triode-connected catalog entries
-/// (`EL84`, `EL34`). Small-signal pentodes with no triode-connected counterpart
-/// (e.g. `EF86`) use the plain part number.
+/// A nonzero [`svar`](Self::svar) enables the Reefman §5 variable-mu
+/// (remote-cutoff) two-section blend (6K7, EF89, EF85); all other entries are
+/// single-mu (sharp-cutoff).
+///
+/// The Reefman entries were fitted by Derk Reefman (Reefman TubeLib.inc, 2016)
+/// using the ExtractModel tool; the αs/A/β extensions to Koren's pentode
+/// equation capture screen-grid current and the knee region.
+///
+/// **Naming convention**: entries whose part number also exists in the
+/// triode-connected [`CATALOG`] carry a suffix — `-P` for pentodes (e.g.
+/// `EL84-P`, `EL34-P`), `-T` for beam tetrodes (e.g. `6L6-T`, `6V6-T`). Types
+/// with no triode-connected counterpart (e.g. `EF86`, `KT88`) use the plain
+/// part number.
 #[derive(Debug, Clone, Copy)]
 pub struct PentodeCatalogEntry {
     /// Part number aliases (e.g., ["EL84-P", "EL84P", "6BQ5-P"])
@@ -381,7 +399,8 @@ pub struct PentodeCatalogEntry {
     pub source: &'static str,
 }
 
-/// The pentode / beam-tetrode catalog (Reefman Derk §4.4 and DerkE §4.5 fits).
+/// The pentode / beam-tetrode catalog: Reefman Derk §4.4 and DerkE §4.5 fits
+/// (including §5 variable-mu entries) and Classical Koren entries.
 pub const PENTODE_CATALOG: &[PentodeCatalogEntry] = &[
     // EL84 / 6BQ5 — small power pentode (true pentode mode).
     // Reefman TubeLib.inc BTetrodeD fit (§4.4).

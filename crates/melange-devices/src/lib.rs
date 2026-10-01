@@ -11,9 +11,9 @@
 //! | BJT | [`BjtEbersMoll`], [`BjtGummelPoon`] | 2D (Vbe, Vbc) | Ebers-Moll / Gummel-Poon |
 //! | JFET | [`Jfet`] | 2D (Vgs, Vds) | Shichman-Hodges |
 //! | MOSFET | [`Mosfet`] | 2D (Vgs, Vds) | Level 1 SPICE |
-//! | Triode | [`KorenTriode`] | 2D (Vgk, Vpk) | Koren + Leach grid current |
+//! | Triode | [`KorenTriode`] | 2D (Vgk, Vpk) | Koren + Dempwolf & Zölzer grid current |
 //! | VCA | [`Vca`] | 2D (Vsig, Vctrl) | THAT 2180 exponential |
-//! | Op-amp | [`SimpleOpamp`], [`IdealOpamp`] | linear | Boyle VCCS macromodel |
+//! | Op-amp | [`SimpleOpamp`], [`IdealOpamp`] | linear | ideal / single-pole (codegen stamps op-amps as a VCCS) |
 //! | LDR | [`CdsLdr`] | — | VTL5C3/4, NSL-32 photocell |
 //!
 //! # Traits
