@@ -1,6 +1,6 @@
 //! Netlist topology checks — the wiring defects a solver cannot see.
 //!
-//! This pass runs on the parsed [`Netlist`](crate::parser::Netlist) *before*
+//! This pass runs on the parsed [`Netlist`] *before*
 //! anything is built, and answers one question the MNA/DK layer structurally
 //! cannot: **is this the circuit the author meant to write?**
 //!

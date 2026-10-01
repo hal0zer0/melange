@@ -127,7 +127,13 @@ for case in "${CASES[@]}"; do
     echo "FAIL: $name has no Circuit Noise parameter"
     fail=1
   fi
-  if ! (cd "$WORK/$name" && cargo check --quiet --lib); then
+  # nih-plug's VST3 export macro (vst3_com, at the pinned rev) trips the
+  # future-incompatibility lint semicolon_in_expressions_from_non_local_macros
+  # on Rust >= 1.99; CI's -Dwarnings would turn that upstream warning into a
+  # failure of every generated project. Allow that one lint here only, so the
+  # check still fails on any warning from code melange generates. Remove when
+  # the nih-plug pin moves past the fix.
+  if ! (cd "$WORK/$name" && RUSTFLAGS="${RUSTFLAGS:-} -A semicolon_in_expressions_from_non_local_macros" cargo check --quiet --lib); then
     echo "FAIL: cargo check $name"
     fail=1
   fi
