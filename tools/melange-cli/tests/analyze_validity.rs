@@ -254,6 +254,9 @@ fn thd_band_stops_at_20_khz() {
             "1",
             "--harmonics",
             "5",
+            // H3 of the 8 kHz point (24 kHz) must sit below Nyquist.
+            "--sample-rate",
+            "96000",
         ],
     );
     let err = stderr(&out);

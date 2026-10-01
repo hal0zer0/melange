@@ -1303,6 +1303,7 @@ fn test_lc_master_oscillator_default_routing_is_bounded() {
     // this is exactly what a plugin build with default flags ships.
     let stdout = run_melange(&[
         "simulate",
+        "-v", // the counters / route lines asserted below are -v detail
         cir.to_str().unwrap(),
         "--input-node",
         "in",
@@ -1437,6 +1438,7 @@ fn test_ic_seeded_astable_stays_bounded_at_os1() {
 
     let stdout = run_melange(&[
         "simulate",
+        "-v", // the counters / route lines asserted below are -v detail
         cir.to_str().unwrap(),
         "--output-node",
         "out",
@@ -1483,6 +1485,7 @@ fn test_ic_seeded_astable_schur_period_matches_spice() {
     // Fails (non-zero exit) on any unsolved sample: no --allow-nr-hold here.
     let stdout = run_melange(&[
         "simulate",
+        "-v", // the counters / route lines asserted below are -v detail
         cir.to_str().unwrap(),
         "--output-node",
         "out",
@@ -1544,7 +1547,8 @@ fn simulate_probe(deck: &str, tag: &str, probe: &str, args: &[&str]) -> (String,
     let cir = write_test_circuit(deck, tag);
     let wav = std::env::temp_dir().join(format!("melange_cli_test_{tag}.wav"));
     let csv = std::env::temp_dir().join(format!("melange_cli_test_{tag}.csv"));
-    let mut all: Vec<&str> = vec!["simulate", cir.to_str().unwrap()];
+    // `-v`: the counters the callers assert on are -v detail.
+    let mut all: Vec<&str> = vec!["simulate", "-v", cir.to_str().unwrap()];
     all.extend_from_slice(args);
     all.extend_from_slice(&["--probe", probe, "--probe-csv", csv.to_str().unwrap()]);
     all.extend_from_slice(&["--output", wav.to_str().unwrap()]);
@@ -1723,6 +1727,7 @@ fn test_failed_dk_kernel_falls_back_to_the_augmented_kernel() {
     let out = std::env::temp_dir().join("melange_cli_test_dk_fallback_augmented.rs");
     let stdout = run_melange(&[
         "compile",
+        "-v", // the counters / route lines asserted below are -v detail
         cir.to_str().unwrap(),
         "--format",
         "code",
@@ -1768,6 +1773,7 @@ fn test_ic_seeded_astable_stays_bounded_at_os4() {
 
     let stdout = run_melange(&[
         "simulate",
+        "-v", // the counters / route lines asserted below are -v detail
         cir.to_str().unwrap(),
         "--output-node",
         "out",
@@ -2400,4 +2406,227 @@ fn version_and_generated_header_carry_one_commit_label() {
         header.contains(&format!("({label})")),
         "{header} vs {label}"
     );
+}
+
+// ============================================================================
+// Default output: the route, what was written, the level, and warnings only
+// ============================================================================
+
+/// Run melange, returning (success, stdout, stderr).
+fn run_melange_both(args: &[&str]) -> (bool, String, String) {
+    let output = Command::new(melange_bin())
+        .args(args)
+        .current_dir(project_root())
+        .output()
+        .expect("failed to run melange binary");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
+}
+
+/// `simulate` prints the solver line, a one-line verdict, the output level
+/// and where the WAV went; the build steps, matrix sizes, rail-mode
+/// resolution and the full counter list are `-v` detail, and `-v` still
+/// prints all of it.
+#[test]
+fn test_simulate_default_output_is_the_summary_and_v_keeps_the_detail() {
+    let cir = write_test_circuit(TEST_DIODE_CLIPPER, "default_output");
+    let wav = std::env::temp_dir().join("melange_cli_test_default_output.wav");
+    let _cleanup = RemoveOnDrop(vec![cir.clone(), wav.clone()]);
+    let args = [
+        "simulate",
+        cir.to_str().unwrap(),
+        "-o",
+        wav.to_str().unwrap(),
+    ];
+    let quiet = run_melange(&args);
+    for detail in [
+        "Step 1: Parsing",
+        "Matrix dimensions",
+        "Op-amp rail mode",
+        "Input resistance:",
+        "lines of code",
+        "samples: ",
+        "max_abs_v_prev",
+        "Resolved circuit:",
+    ] {
+        assert!(!quiet.contains(detail), "{detail:?} is -v detail:\n{quiet}");
+    }
+    for summary in [
+        "Solver: ",
+        "nothing to flag",
+        "Output peak: ",
+        "dBFS",
+        "Output written to:",
+    ] {
+        assert!(quiet.contains(summary), "{summary:?} missing:\n{quiet}");
+    }
+    let mut loud_args = args.to_vec();
+    loud_args.push("-v");
+    let loud = run_melange(&loud_args);
+    for detail in [
+        "Step 1: Parsing SPICE netlist",
+        "Matrix dimensions",
+        "Op-amp rail mode",
+        "samples: ",
+        "max_abs_v_prev: ",
+        "unsolved_sample_count: 0",
+        "nothing to flag",
+        "Output peak: ",
+    ] {
+        assert!(loud.contains(detail), "-v must print {detail:?}:\n{loud}");
+    }
+}
+
+/// Unsolved samples on the DK route name the nodal route as the first remedy,
+/// and on a deck without op-amps the message does not blame an op-amp pin.
+#[test]
+fn test_simulate_dk_unsolved_samples_suggest_the_nodal_route() {
+    let cir = write_test_circuit(IC_VCVS_ASTABLE, "dk_unsolved_remedy");
+    let wav = std::env::temp_dir().join("melange_cli_test_dk_unsolved_remedy.wav");
+    let _cleanup = RemoveOnDrop(vec![cir.clone(), wav.clone()]);
+    let (ok, stdout, stderr) = run_melange_both(&[
+        "simulate",
+        cir.to_str().unwrap(),
+        "--output-node",
+        "out",
+        "--amplitude",
+        "1e-9",
+        "--duration",
+        "0.05",
+        "-o",
+        wav.to_str().unwrap(),
+    ]);
+    assert!(
+        !ok,
+        "the DK render leaves samples unsolved:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("Solver: DK"),
+        "premise: DK route:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("never solved") && stderr.contains("Try `--solver nodal` first"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("--allow-nr-hold"),
+        "render-anyway option kept: {stderr}"
+    );
+    assert!(
+        !stderr.contains("op-amp"),
+        "no op-amps in this deck: {stderr}"
+    );
+}
+
+/// `analyze` defaults to the 48 kHz `compile` ships, `--freq` measures one
+/// frequency (one row) and conflicts with the sweep flags, dBc figures below
+/// the floor print as `-inf`, and the raw `DIAG:` counters are `-v` detail.
+#[test]
+fn test_analyze_single_freq_default_rate_and_dbc_floor() {
+    let cir = write_test_circuit(TEST_DIODE_CLIPPER, "analyze_single_freq");
+    let _cleanup = RemoveOnDrop(vec![cir.clone()]);
+    let path = cir.to_str().unwrap();
+    let (ok, stdout, stderr) = run_melange_both(&[
+        "analyze",
+        path,
+        "--freq",
+        "1000",
+        "--amplitude",
+        "1",
+        "--harmonics",
+        "4",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(stderr.contains("1 frequency point: 1000 Hz"), "{stderr}");
+    assert!(stderr.contains("48000 Hz sample rate"), "{stderr}");
+    assert!(
+        !stderr.contains("DIAG:"),
+        "raw counters are -v detail: {stderr}"
+    );
+    let rows: Vec<&str> = stdout.lines().skip(1).collect();
+    assert_eq!(rows.len(), 1, "one frequency, one row:\n{stdout}");
+    // A symmetric clipper has no even harmonics: H2/H4 sit at the rounding
+    // floor and print as -inf, H3 is real distortion.
+    let cols: Vec<&str> = rows[0].split(',').collect();
+    assert_eq!(cols[0], "1000.00", "{stdout}");
+    assert_eq!(cols[4], "-inf", "h2_dbc below the floor:\n{stdout}");
+    assert_eq!(cols[6], "-inf", "h4_dbc below the floor:\n{stdout}");
+    let h3: f64 = cols[5].parse().expect("h3_dbc is a number");
+    assert!(h3 > -60.0, "H3 is real distortion: {h3}");
+    for col in &cols {
+        assert!(
+            col.parse::<f64>().is_ok(),
+            "CSV stays machine-readable: {col:?}"
+        );
+    }
+
+    let err = run_melange_fail(&["analyze", path, "--freq", "1000", "--start-freq", "50"]);
+    assert!(err.contains("cannot be used with"), "{err}");
+}
+
+/// An unknown `.model` parameter names the card and the netlist line it is
+/// on, rather than reading as a code-generation failure.
+#[test]
+fn test_unknown_model_parameter_names_the_card_line() {
+    let cir = write_test_circuit(
+        "bogus key\nD1 in out DX\nR1 out 0 1k\n.model DX D(IS=2.52e-9 N=1.752\n+ BOGUS=3)\n",
+        "bogus_model_key",
+    );
+    let rs = std::env::temp_dir().join("melange_cli_test_bogus_model_key.rs");
+    let _cleanup = RemoveOnDrop(vec![cir.clone(), rs.clone()]);
+    let stderr = run_melange_fail(&["compile", cir.to_str().unwrap(), "-o", rs.to_str().unwrap()]);
+    assert!(
+        stderr.contains("Invalid .model card 'DX' at line 4"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("unknown parameter 'BOGUS'"), "{stderr}");
+    assert!(!stderr.contains("Code generation failed"), "{stderr}");
+}
+
+/// `nodes` lists op-amps (they are not nonlinear devices) and shows a
+/// `.wiper` as one control with its halves under it.
+#[test]
+fn test_nodes_lists_opamps_and_a_wiper_as_one_control() {
+    let cir = write_test_circuit(
+        "od\nVcc vcc 0 DC 9\nR_b1 vcc vb 100k\nR_b2 vb 0 100k\nC_in in np 100n\n\
+         R_in np vb 1meg\nU1 np nm opout TL072\nR_f opout nm 100k\nR_g nm 0 4.7k\n\
+         R_vol_a opout out 50k\nR_vol_b out 0 50k\n.wiper R_vol_a R_vol_b 100k \"Volume\"\n\
+         .model TL072 OA(AOL=200000 ROUT=50 VCC=9 VEE=0)\n",
+        "nodes_opamp_wiper",
+    );
+    let _cleanup = RemoveOnDrop(vec![cir.clone()]);
+    let stdout = run_melange(&["nodes", cir.to_str().unwrap()]);
+    assert!(stdout.contains("Op-amps:"), "{stdout}");
+    assert!(
+        stdout.contains("U1: model TL072 (+in np, -in nm, out opout)"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("wiper   \"Volume\""), "{stdout}");
+    assert!(
+        !stdout.contains("pot     \"R_vol_a\""),
+        "a wiper half is not its own knob:\n{stdout}"
+    );
+    assert!(stdout.contains("its two halves: cw R_vol_a"), "{stdout}");
+}
+
+/// `dc-op` says which route it used in one line; the system size and the
+/// router's reason are `-v` detail.
+#[test]
+fn test_dc_op_route_reason_is_verbose_detail() {
+    let (ok, _, quiet) = run_melange_both(&["dc-op", "passive-eq1a"]);
+    assert!(ok, "{quiet}");
+    assert!(
+        quiet.contains("Solver: nodal, chosen automatically"),
+        "{quiet}"
+    );
+    assert!(!quiet.contains("unstable"), "{quiet}");
+    assert!(!quiet.contains("Step 1:"), "{quiet}");
+    let (ok, _, loud) = run_melange_both(&["dc-op", "passive-eq1a", "-v"]);
+    assert!(ok, "{loud}");
+    assert!(loud.contains("N=40 (40 circuit nodes"), "{loud}");
+    assert!(loud.contains("DK K matrix unstable"), "{loud}");
+    assert!(loud.contains("not a warning"), "{loud}");
 }

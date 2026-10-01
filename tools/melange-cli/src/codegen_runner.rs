@@ -653,6 +653,11 @@ fn main() {{
 /// up to Nyquist.
 pub const ANALYZE_THD_BAND_HZ: f64 = 20_000.0;
 
+/// The depth below which `analyze` prints a dBc column (`hN_dbc`,
+/// `nyquist_dbc`) as `-inf`: floating-point rounding residue, not circuit
+/// content. Stated in `analyze --help`.
+pub const ANALYZE_DBC_FLOOR: f64 = -200.0;
+
 /// Relative agreement two successive measurements of one point must reach
 /// before `analyze` calls it steady state: the complex fundamental (gain AND
 /// phase) within 0.1 % of itself (~0.009 dB, ~0.06°), and the harmonic vector
@@ -711,7 +716,7 @@ pub struct AnalyzeMain<'a> {
 /// to the fundamental. This catches trap-rule numerical limit cycles and any
 /// other persistent sample-rate alternation that sits above every usable
 /// harmonic bin. `nan` means the fundamental is too small to make a ratio
-/// meaningful.
+/// meaningful. Any dBc column below [`ANALYZE_DBC_FLOOR`] prints as `-inf`.
 ///
 /// Steady state: each point is driven at its own frequency and amplitude for
 /// at least `preroll_secs` (whole DFT windows) before the window it
@@ -819,6 +824,8 @@ fn main() {{
     const SETTLE_FLOOR: f64 = {settle_floor:e};
     // THD sums harmonics below this AND below Nyquist.
     const THD_BAND_HZ: f64 = {thd_band:.1};
+    // A dBc column below this prints as `-inf` (rounding residue, not content).
+    const DBC_FLOOR: f64 = {dbc_floor:.1};
 
     let mut state = CircuitState::default();
 {noise_enable_line}{pot_lines}{switch_lines}    state.set_sample_rate({sample_rate:.1});
@@ -1039,10 +1046,10 @@ fn main() {{
             // DFT bins there is no matching sine term (sin(π·n) ≡ 0), so the
             // peak-amplitude scaling is |sum|/N rather than 2·|sum|/N.
             let nyq_mag = sum_nyquist.abs() / n;
-            let nyquist_dbc = if h1 > 1e-30 && nyq_mag > 1e-30 {{
+            let nyquist_dbc = if h1 > 1e-30 {{
                 20.0 * (nyq_mag / h1).log10()
             }} else {{
-                f64::NEG_INFINITY
+                f64::NAN
             }};
 
             print!("{{:.2}},{{:.4}},{{:.2}}", freq, gain_db, phase_diff);
@@ -1051,20 +1058,25 @@ fn main() {{
             }} else {{
                 print!(",nan");
             }}
+            // A dBc figure: `nan` = not measurable, `-inf` = below DBC_FLOOR.
+            let print_dbc = |dbc: f64| {{
+                if dbc.is_nan() {{
+                    print!(",nan");
+                }} else if dbc < DBC_FLOOR {{
+                    print!(",-inf");
+                }} else {{
+                    print!(",{{:.2}}", dbc);
+                }}
+            }};
             for k in 2..=HARMONICS {{
                 let m = mags[k - 1];
                 if !m.is_finite() || h1 <= 1e-30 {{
-                    print!(",nan");
+                    print_dbc(f64::NAN);
                 }} else {{
-                    let dbc = 20.0 * (m / h1).log10();
-                    print!(",{{:.2}}", dbc);
+                    print_dbc(20.0 * (m / h1).log10());
                 }}
             }}
-            if nyquist_dbc.is_finite() {{
-                print!(",{{:.2}}", nyquist_dbc);
-            }} else {{
-                print!(",nan");
-            }}
+            print_dbc(nyquist_dbc);
             println!();
             let thd_text = if thd_pct.is_finite() {{
                 format!("{{:.3}}%", thd_pct)
@@ -1082,6 +1094,7 @@ fn main() {{
         settle_tol = ANALYZE_SETTLE_TOL,
         settle_floor = ANALYZE_SETTLE_FLOOR,
         thd_band = ANALYZE_THD_BAND_HZ,
+        dbc_floor = ANALYZE_DBC_FLOOR,
     )
 }
 

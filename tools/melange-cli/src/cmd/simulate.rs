@@ -1,7 +1,9 @@
 use crate::args::utf8_path_arg;
 use crate::common::{
-    build_error, declares_state_field, diag_lit_factor, load_circuit_text, print_run_route_detail,
-    refuse_on_input_diag, resolve_switch_overrides, route_summary, INPUT_DIAG_FIELDS,
+    build_error_in, declares_state_field, diag_lit_factor, dk_unsolved_remedy, has_opamps,
+    is_build_detail, load_circuit_text, print_run_route_detail, refuse_on_input_diag,
+    report_build_line, resolve_switch_overrides, route_summary, unconverged_commit_source,
+    INPUT_DIAG_FIELDS,
 };
 use crate::{circuits, codegen_runner};
 use anyhow::{Context, Result};
@@ -175,6 +177,70 @@ fn silent_output_warning(
     msg
 }
 
+/// Counters that describe how hard the solve worked, not whether its result
+/// can be trusted: the default output leaves them to `-v` and lets the verdict
+/// line summarize them. Every other counter prints by default when nonzero
+/// (an unsolved sample, a reset, a clamp, a missed sub-sample fire, and any
+/// counter added later until it is classified here).
+const EXPLANATORY_DIAGS: [&str; 16] = [
+    "samples",
+    "probes_written",
+    "peak",
+    "max_abs_v_prev",
+    "nr_max_iter_count",
+    "substep_count",
+    "be_fallback_count",
+    "region_exit_count",
+    "warm_start_fallback_count",
+    "subsample_fire_count",
+    "subsample_fire_detected",
+    "subsample_fire_resolved",
+    "subsample_fire_unresolved_gridpoint",
+    "subsample_fire_segments",
+    "subsample_fire_schur_builds",
+    "subsample_fire_schur_reuses",
+];
+
+/// Whether a `DIAG:` line prints without `-v`: a note (non-numeric value)
+/// always does; a counter does when it is nonzero and not explanatory.
+fn diag_shown_by_default(key: &str, value: &str) -> bool {
+    match value.trim().parse::<f64>() {
+        Ok(v) => v != 0.0 && !EXPLANATORY_DIAGS.contains(&key),
+        Err(_) => true,
+    }
+}
+
+/// `s` with its first letter upper-cased.
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().chain(c).collect(),
+        None => String::new(),
+    }
+}
+
+/// The rendered output's level, in volts and in dBFS (the WAV maps 1 V to
+/// full scale).
+fn output_level_line(peak: f64) -> String {
+    if !peak.is_finite() {
+        return format!("Output peak: {peak} (not a number: see the counters above)");
+    }
+    let a = peak.abs();
+    let volts = if (1e-3..1e4).contains(&a) {
+        format!("{a:.4} V")
+    } else {
+        format!("{a:.3e} V")
+    };
+    if a > 0.0 {
+        format!(
+            "Output peak: {volts} ({:.1} dBFS; the WAV's full scale is 1 V)",
+            20.0 * a.log10()
+        )
+    } else {
+        format!("Output peak: {volts} (the WAV's full scale is 1 V)")
+    }
+}
+
 pub(crate) fn simulate_circuit_source(
     circuit_source: &circuits::CircuitSource,
     opts: &SimulateOptions,
@@ -196,7 +262,12 @@ pub(crate) fn simulate_circuit_source(
     println!("  Source: {}", circuit_source.name());
     println!();
 
-    let netlist_str = load_circuit_text(circuit_source, &|l| println!("{l}"))?;
+    let verbose = opts.verbose;
+    let netlist_str = load_circuit_text(circuit_source, &|l| {
+        if verbose || !is_build_detail(l) {
+            println!("{l}")
+        }
+    })?;
 
     // The one build every verb ships (melange_solver::build). Output layout:
     // [primary, probe_1, probe_2, ...]. The generated `process_sample` returns
@@ -240,27 +311,31 @@ pub(crate) fn simulate_circuit_source(
         dc_op_max_iterations: opts.dc_op_max_iterations,
         output_clamp_auto: false,
     };
-    let built =
-        melange_solver::build::build(&netlist_str, &build_opts, &|a| println!("{a}"), &|a| {
-            eprintln!("{a}")
-        })
-        .map_err(build_error)?;
-    if opts.verbose {
+    let built = melange_solver::build::build(
+        &netlist_str,
+        &build_opts,
+        &|a| report_build_line(verbose, a, |l| println!("{l}")),
+        &|a| eprintln!("{a}"),
+    )
+    .map_err(|e| build_error_in(e, &netlist_str))?;
+    let route_is_dk = built.solver_label == "DK";
+    let circuit_has_opamps = has_opamps(&built.netlist);
+    let summary = route_summary(
+        built.solver_label,
+        opts.solver,
+        built.generated.meta.nodal_sub_path,
+        built.generated.meta.integrator_selection,
+    );
+    if verbose {
+        // The one-line summary, then the detail behind it.
+        println!("  {}", summary.trim_end_matches(" (-v for why)"));
         println!(
             "  Sample rate: {} Hz ({})",
             opts.sample_rate, opts.sample_rate_source
         );
         print_run_route_detail(&built, opts.max_iter.is_some(), &|l| println!("{l}"));
     } else {
-        println!(
-            "  {}",
-            route_summary(
-                built.solver_label,
-                opts.solver,
-                built.generated.meta.nodal_sub_path,
-                built.generated.meta.integrator_selection,
-            )
-        );
+        println!("  {summary}");
     }
     let injection_specs = built.injection_specs;
     let generated = built.generated;
@@ -299,12 +374,16 @@ pub(crate) fn simulate_circuit_source(
         }
     }
 
-    println!("  {} lines of code", generated.code.lines().count());
+    if verbose {
+        println!("  {} lines of code", generated.code.lines().count());
+    }
 
-    // Step 5 (the build printed 1-4): append simulate main, compile, run.
-    // Probe names map 1:1 to `output_nodes[1..]`. The generated main uses
+    // Step 5 (the build printed 1-4 under -v): append simulate main, compile,
+    // run. Probe names map 1:1 to `output_nodes[1..]`. The generated main uses
     // them for the CSV header; the runtime argv[3] supplies the CSV path.
-    println!("Step 5: Compiling and running...");
+    if verbose {
+        println!("Step 5: Compiling and running...");
+    }
     let probe_names: Vec<&str> = opts.probes.iter().map(|s| s.as_str()).collect();
     // Resolve --switch NAME=POS and apply at runtime via set_switch_N (same as
     // the generated plugin / `analyze`): keeps the netlist at position-0 values
@@ -362,10 +441,12 @@ pub(crate) fn simulate_circuit_source(
     let compiled = binary_cache
         .compile(&full_source, "simulate")
         .with_context(|| "Compilation failed")?;
-    if compiled.cached {
-        println!("  Using cached binary");
-    } else {
-        println!("  Compiled successfully");
+    if verbose {
+        if compiled.cached {
+            println!("  Using cached binary");
+        } else {
+            println!("  Compiled successfully");
+        }
     }
 
     // Run the binary. argv layout:
@@ -410,22 +491,21 @@ pub(crate) fn simulate_circuit_source(
     // interpret: is `region_exit_count: 0` good? is 5 bad? Nothing said.
     let mut recoveries: u64 = 0;
     let mut resets: u64 = 0;
-    let mut printed_header = false;
+    // Every `DIAG:<key>=<value>` line, in order. `-v` prints them all; the
+    // default prints only the ones that need attention (see
+    // `diag_shown_by_default`) under the verdict.
+    let mut diag_lines: Vec<(&str, &str)> = Vec::new();
     for line in stderr.lines() {
         if let Some(diag) = line.strip_prefix("DIAG:") {
             let parts: Vec<&str> = diag.splitn(2, '=').collect();
             if parts.len() == 2 {
-                if !printed_header {
-                    println!("  Solver diagnostics:");
-                    printed_header = true;
-                }
                 let v: u64 = parts[1].trim().parse().unwrap_or(0);
                 match parts[0] {
                     "substep_count" | "be_fallback_count" => recoveries += v,
                     "nan_reset_count" | "magnitude_reset_count" => resets += v,
                     _ => {}
                 }
-                println!("    {}: {}", parts[0], parts[1]);
+                diag_lines.push((parts[0], parts[1]));
                 match parts[0] {
                     "nr_max_iter_count" => nr_max_iter_count = parts[1].trim().parse().ok(),
                     // Both mean "not a solution"; see nr_commit_count above.
@@ -441,16 +521,48 @@ pub(crate) fn simulate_circuit_source(
             }
         }
     }
+    let printed_header = !diag_lines.is_empty();
+    if printed_header {
+        if verbose {
+            println!("  Solver diagnostics:");
+            for (key, value) in &diag_lines {
+                println!("    {key}: {value}");
+            }
+            println!(
+                "    (peak and max_abs_v_prev are volts: the output's largest |sample|, and the \
+                 largest |node voltage| anywhere in the circuit)"
+            );
+        } else {
+            println!("  Solver diagnostics (-v lists every counter):");
+            for (key, value) in diag_lines
+                .iter()
+                .filter(|(k, v)| diag_shown_by_default(k, v))
+            {
+                println!("    {key}: {value}");
+            }
+        }
+    }
 
-    // One line saying what the block above amounts to. The counters are
-    // meaningful to a maintainer and opaque to everyone else, and a list of
-    // numbers with no verdict trains people to skip it.
+    // One line saying what the counters amount to. They are meaningful to a
+    // maintainer and opaque to everyone else, and a list of numbers with no
+    // verdict trains people to skip it.
     //
     // `recoveries` counts retries RUN, not samples they saved: when any sample
     // stayed unsolved the line says so, rather than reassuring above the ERROR.
     let held = nr_hold_count.unwrap_or(0);
     let committed = nr_commit_count.unwrap_or(0);
     let total = unsolved_count.unwrap_or(held + committed);
+    // DK has no sub-step ladder; its only retry is backward Euler.
+    let retries = if route_is_dk {
+        "backward-Euler retries"
+    } else {
+        "sub-step and backward-Euler retries"
+    };
+    let a_retry = if route_is_dk {
+        "a backward-Euler retry"
+    } else {
+        "a sub-step or backward-Euler retry"
+    };
     if printed_header {
         let capped = nr_max_iter_count.unwrap_or(0);
         if resets > 0 {
@@ -460,20 +572,23 @@ pub(crate) fn simulate_circuit_source(
             );
         } else if total > 0 {
             println!(
-                "    -> {capped} sample(s) hit the iteration ceiling; the sub-step and \
-                 backward-Euler retries ran {recoveries} time(s) and {total} sample(s) were \
-                 still never solved (see the ERROR below)."
+                "    -> {capped} sample(s) hit the iteration ceiling; the {retries} ran \
+                 {recoveries} time(s) and {total} sample(s) were still never solved (see the \
+                 ERROR below)."
             );
         } else if capped > 0 && recoveries > 0 {
             println!(
-                "    -> {capped} sample(s) hit the iteration ceiling and a sub-step or \
-                 backward-Euler retry solved each of them. Normal on hard transients."
+                "    -> {capped} sample(s) hit the iteration ceiling and {a_retry} solved each \
+                 of them. Normal on hard transients."
             );
         } else if capped > 0 {
             println!("    -> {capped} sample(s) hit the iteration ceiling.");
         } else {
             println!("    -> nothing to flag: no iteration-ceiling hits, no resets.");
         }
+    }
+    if let Some(peak) = diag_peak {
+        println!("  {}", output_level_line(peak));
     }
 
     // Validity warning: if Newton-Raphson hit its iteration ceiling on a large
@@ -580,17 +695,33 @@ pub(crate) fn simulate_circuit_source(
         if committed > 0 {
             eprintln!();
             eprintln!(
-                "ERROR: {committed} sample(s){of} were never solved. The final Newton solve (an \
-                 op-amp rail pin, or the DK solve) ended unconverged, and the solver committed \
-                 that iterate as the output. Those samples are not a solution to this circuit, \
-                 and a bounded, smooth render does not show it."
+                "ERROR: {committed} sample(s){of} were never solved. {} ended unconverged, and \
+                 the solver committed that iterate as the output. Those samples are not a \
+                 solution to this circuit, and a bounded, smooth render does not show it.",
+                capitalize(unconverged_commit_source(route_is_dk, circuit_has_opamps))
             );
+        }
+        // On DK, the route itself is the first thing to change: the nodal
+        // route has the sub-step rescue DK lacks.
+        let dk_remedy = if committed > 0 {
+            dk_unsolved_remedy(route_is_dk)
+        } else {
+            None
+        };
+        if let Some(remedy) = dk_remedy {
+            eprintln!("\n{remedy}");
         }
         eprintln!(
             "\nThe WAV was still written, so you can listen to what it did. Do not treat it as \
              this circuit's output. Re-run with --allow-nr-hold to accept it anyway."
         );
         if !opts.allow_nr_hold {
+            if dk_remedy.is_some() {
+                anyhow::bail!(
+                    "{total} sample(s) were never solved on the DK route (try --solver nodal; \
+                     --allow-nr-hold to accept the render anyway)"
+                );
+            }
             anyhow::bail!("{total} sample(s) were never solved (--allow-nr-hold to override)");
         }
         eprintln!("(--allow-nr-hold given: continuing.)");

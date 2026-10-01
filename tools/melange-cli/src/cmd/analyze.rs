@@ -1,6 +1,8 @@
 use crate::common::{
-    build_error, declares_state_field, diag_lit_factor, load_circuit_text, print_run_route_detail,
-    refuse_on_input_diag, resolve_switch_overrides, route_summary, INPUT_DIAG_FIELDS,
+    build_error_in, declares_state_field, diag_lit_factor, dk_unsolved_remedy, has_opamps,
+    is_build_detail, load_circuit_text, print_run_route_detail, refuse_on_input_diag,
+    report_build_line, resolve_switch_overrides, route_summary, unconverged_commit_source,
+    INPUT_DIAG_FIELDS,
 };
 use crate::{circuits, codegen_runner};
 use anyhow::{Context, Result};
@@ -13,6 +15,8 @@ pub(crate) struct AnalyzeOptions<'a> {
     pub(crate) start_freq: f64,
     pub(crate) end_freq: f64,
     pub(crate) points_per_decade: usize,
+    /// `--freq`: measure this one frequency instead of the log sweep.
+    pub(crate) single_freq: Option<f64>,
     pub(crate) amplitude: f64,
     pub(crate) sample_rate: f64,
     pub(crate) input_resistance_flag: Option<f64>,
@@ -67,6 +71,7 @@ pub(crate) fn analyze_freq_response(
         start_freq,
         end_freq,
         points_per_decade,
+        single_freq,
         amplitude,
         sample_rate,
         input_resistance_flag,
@@ -100,7 +105,11 @@ pub(crate) fn analyze_freq_response(
     eprintln!("melange analyze (frequency response)");
 
     // Analyze writes its CSV to stdout, so the loader's lines go to stderr.
-    let netlist_str = load_circuit_text(circuit_source, &|l| eprintln!("{l}"))?;
+    let netlist_str = load_circuit_text(circuit_source, &|l| {
+        if verbose || !is_build_detail(l) {
+            eprintln!("{l}")
+        }
+    })?;
 
     // The one build every verb ships (melange_solver::build). Analyze writes
     // its CSV to stdout, so every build line goes to stderr.
@@ -142,23 +151,27 @@ pub(crate) fn analyze_freq_response(
         dc_op_max_iterations,
         output_clamp_auto: false,
     };
-    let built =
-        melange_solver::build::build(&netlist_str, &build_opts, &|a| eprintln!("{a}"), &|a| {
-            eprintln!("{a}")
-        })
-        .map_err(build_error)?;
+    let built = melange_solver::build::build(
+        &netlist_str,
+        &build_opts,
+        &|a| report_build_line(verbose, a, |l| eprintln!("{l}")),
+        &|a| eprintln!("{a}"),
+    )
+    .map_err(|e| build_error_in(e, &netlist_str))?;
+    let route_is_dk = built.solver_label == "DK";
+    let circuit_has_opamps = has_opamps(&built.netlist);
+    let summary = route_summary(
+        built.solver_label,
+        solver,
+        built.generated.meta.nodal_sub_path,
+        built.generated.meta.integrator_selection,
+    );
     if verbose {
+        // The one-line summary, then the detail behind it.
+        eprintln!("  {}", summary.trim_end_matches(" (-v for why)"));
         print_run_route_detail(&built, max_iter.is_some(), &|l| eprintln!("{l}"));
     } else {
-        eprintln!(
-            "  {}",
-            route_summary(
-                built.solver_label,
-                solver,
-                built.generated.meta.nodal_sub_path,
-                built.generated.meta.integrator_selection,
-            )
-        );
+        eprintln!("  {summary}");
     }
     let has_inductors = !built.mna.inductors.is_empty()
         || !built.mna.coupled_inductors.is_empty()
@@ -172,13 +185,23 @@ pub(crate) fn analyze_freq_response(
     let switch_runtime_overrides = resolve_switch_overrides(&netlist, switch_overrides)?;
 
     // Generate frequency list
-    let frequencies = generate_log_frequencies(start_freq, end_freq, points_per_decade);
-    eprintln!(
-        "  {} frequency points from {:.0} Hz to {:.0} Hz",
-        frequencies.len(),
-        start_freq,
-        end_freq
-    );
+    let frequencies = match single_freq {
+        Some(f) => {
+            eprintln!("  1 frequency point: {f} Hz, at a {sample_rate} Hz sample rate");
+            vec![f]
+        }
+        None => {
+            let frequencies = generate_log_frequencies(start_freq, end_freq, points_per_decade);
+            eprintln!(
+                "  {} frequency points from {:.0} Hz to {:.0} Hz, at a {} Hz sample rate",
+                frequencies.len(),
+                start_freq,
+                end_freq,
+                sample_rate
+            );
+            frequencies
+        }
+    };
     // A constant delay is a phase slope, and the half-band filters add one:
     // tens of degrees by a few kHz. Someone comparing this sweep against a 1×
     // one sees phase_deg move a long way and reasonably concludes the circuit's
@@ -216,13 +239,18 @@ pub(crate) fn analyze_freq_response(
         } else {
             preroll_max_secs
         };
+    // The settle method is `-v` detail while the check runs (the summary after
+    // the sweep says whether every point settled); with the check off, say so,
+    // since nothing after the sweep will.
     if preroll_max_secs > 0.0 {
-        eprintln!(
-            "  Each point: driven at its own frequency and amplitude for >= {preroll_secs} s, \
-             then re-measured every {preroll_secs} s until two measurements agree to {:.1} % \
-             (or {preroll_max_secs} s at drive).",
-            codegen_runner::ANALYZE_SETTLE_TOL * 100.0
-        );
+        if verbose {
+            eprintln!(
+                "  Each point: driven at its own frequency and amplitude for >= {preroll_secs} s, \
+                 then re-measured every {preroll_secs} s until two measurements agree to {:.1} % \
+                 (or {preroll_max_secs} s at drive).",
+                codegen_runner::ANALYZE_SETTLE_TOL * 100.0
+            );
+        }
     } else {
         eprintln!(
             "  Each point: driven at its own frequency and amplitude for >= {preroll_secs} s \
@@ -277,7 +305,7 @@ pub(crate) fn analyze_freq_response(
     let compiled = binary_cache
         .compile(&full_source, "analyze")
         .with_context(|| "Compilation failed")?;
-    if compiled.cached {
+    if compiled.cached && verbose {
         eprintln!("  Using cached binary");
     }
 
@@ -293,19 +321,29 @@ pub(crate) fn analyze_freq_response(
     let stdout = String::from_utf8_lossy(&result.stdout);
 
     // Print per-frequency lines from stderr; the machine lines (`DIAGPT:`,
-    // `SETTLEPT:`) are read below and reported in words instead.
+    // `SETTLEPT:`) are read below and reported in words instead, and the
+    // end-of-run `DIAG:` counters are `-v` detail (a nonzero input counter is
+    // refused below in words).
     let stderr = String::from_utf8_lossy(&result.stderr);
     for line in stderr.lines() {
-        if !line.starts_with("DIAGPT:") && !line.starts_with("SETTLEPT:") {
-            eprintln!("{}", line);
+        if line.starts_with("DIAGPT:") || line.starts_with("SETTLEPT:") {
+            continue;
         }
+        if !verbose && is_numeric_diag_line(line) {
+            continue;
+        }
+        eprintln!("{}", line);
     }
     report_settle(&stderr, preroll_max_secs);
     refuse_on_unsolved_points(
         &stderr,
-        sample_rate,
-        oversampling,
-        settle_secs,
+        &PointRun {
+            sample_rate,
+            oversampling,
+            settle_secs,
+            route_is_dk,
+            has_opamps: circuit_has_opamps,
+        },
         allow_nr_hold,
     )?;
     refuse_on_input_diag(&stderr, allow_input_clamp)?;
@@ -332,6 +370,13 @@ pub(crate) fn analyze_freq_response(
     }
 
     Ok(())
+}
+
+/// A `DIAG:<key>=<number>` line (a counter, as opposed to a `DIAG:note=` text).
+fn is_numeric_diag_line(line: &str) -> bool {
+    line.strip_prefix("DIAG:")
+        .and_then(|d| d.split_once('='))
+        .is_some_and(|(_, v)| v.trim().parse::<f64>().is_ok())
 }
 
 fn generate_log_frequencies(start: f64, end: f64, points_per_decade: usize) -> Vec<f64> {
@@ -412,6 +457,53 @@ fn parse_point_counts(stderr: &str) -> Vec<(String, Vec<(String, u64)>)> {
     out
 }
 
+/// The one-line steady-state verdict: whether every point settled before the
+/// `--preroll-max-secs` cap, and if not, which points reached the cap still
+/// moving. A point that settled on the last check the cap allows says so, so a
+/// drive time equal to the cap never reads as either outcome.
+fn settle_summary(points: &[SettlePoint], preroll_max_secs: f64) -> String {
+    let unsettled: Vec<&str> = points
+        .iter()
+        .filter(|p| p.status == 0)
+        .map(|p| p.label.as_str())
+        .collect();
+    let cap = format!("the --preroll-max-secs cap of {preroll_max_secs} s");
+    if !unsettled.is_empty() {
+        return format!(
+            "Steady state: {}/{} point(s) settled before {cap}; {} reached the cap still \
+             moving: {} Hz (see the WARNING below).",
+            points.len() - unsettled.len(),
+            points.len(),
+            unsettled.len(),
+            unsettled.join(" Hz, ")
+        );
+    }
+    let slowest = points
+        .iter()
+        .max_by(|a, b| a.drive_secs.total_cmp(&b.drive_secs))
+        .expect("non-empty");
+    let at_cap = slowest.drive_secs >= preroll_max_secs * (1.0 - 1e-9);
+    let when = if at_cap {
+        format!(
+            "settled on the last check the cap allows ({:.2} s at drive)",
+            slowest.drive_secs
+        )
+    } else {
+        format!("settled after {:.2} s at drive", slowest.drive_secs)
+    };
+    if points.len() == 1 {
+        return format!(
+            "Steady state: the {} Hz point {when}, within {cap}.",
+            slowest.label
+        );
+    }
+    format!(
+        "Steady state: all {} points settled within {cap}; the slowest, {} Hz, {when}.",
+        points.len(),
+        slowest.label
+    )
+}
+
 /// Report points that did not reach steady state within the cap. A warning,
 /// not a refusal: the samples are solutions, and some circuits have no steady
 /// state at a given drive at all (an oscillator, a limit cycle).
@@ -421,17 +513,7 @@ fn report_settle(stderr: &str, preroll_max_secs: f64) {
         return;
     }
     let unsettled: Vec<&SettlePoint> = points.iter().filter(|p| p.status == 0).collect();
-    let longest = points
-        .iter()
-        .max_by(|a, b| a.drive_secs.total_cmp(&b.drive_secs))
-        .expect("non-empty");
-    eprintln!(
-        "  Steady state: {}/{} point(s) settled; longest at drive {:.2} s ({} Hz).",
-        points.len() - unsettled.len(),
-        points.len(),
-        longest.drive_secs,
-        longest.label
-    );
+    eprintln!("  {}", settle_summary(&points, preroll_max_secs));
     if unsettled.is_empty() {
         return;
     }
@@ -463,13 +545,27 @@ fn report_settle(stderr: &str, preroll_max_secs: f64) {
 /// covers all three where the build declares it). `allow` is
 /// `--allow-nr-hold`. NaN/magnitude resets are reported as suspect, as
 /// `simulate` reports them.
-fn refuse_on_unsolved_points(
-    stderr: &str,
+/// What [`refuse_on_unsolved_points`] needs to know about the run and build.
+struct PointRun {
     sample_rate: f64,
     oversampling: usize,
+    /// The zero-drive settle before the first point (seconds).
     settle_secs: f64,
-    allow: bool,
-) -> Result<()> {
+    /// The build is on the DK route (its remedy for unsolved samples is the
+    /// nodal route).
+    route_is_dk: bool,
+    /// The circuit has op-amps (an unconverged commit can be a rail pin).
+    has_opamps: bool,
+}
+
+fn refuse_on_unsolved_points(stderr: &str, run: &PointRun, allow: bool) -> Result<()> {
+    let PointRun {
+        sample_rate,
+        oversampling,
+        settle_secs,
+        route_is_dk,
+        has_opamps,
+    } = *run;
     let points = parse_point_counts(stderr);
     let settle = parse_settle_points(stderr);
     // Internal solves a label's counters were counted over.
@@ -560,8 +656,9 @@ fn refuse_on_unsolved_points(
     }
     if any_committed {
         eprintln!(
-            "  nr_unconverged_commit_count: the final Newton solve (an op-amp rail pin, or the \
-             DK solve) ended unconverged and that iterate was committed."
+            "  nr_unconverged_commit_count: the final Newton solve ({}) ended unconverged and \
+             that iterate was committed.",
+            unconverged_commit_source(route_is_dk, has_opamps)
         );
     }
     eprintln!(
@@ -569,7 +666,22 @@ fn refuse_on_unsolved_points(
          circuit; the waveform stays bounded and smooth, so nothing in the numbers shows it. \
          `melange simulate` refuses the same render."
     );
+    let dk_remedy = if any_committed {
+        dk_unsolved_remedy(route_is_dk)
+    } else {
+        None
+    };
+    if let Some(remedy) = dk_remedy {
+        eprintln!("  {remedy}");
+    }
     if !allow {
+        if dk_remedy.is_some() {
+            anyhow::bail!(
+                "{} analyze point(s) were not a solution on the DK route (try --solver nodal; \
+                 --allow-nr-hold to report them anyway)",
+                bad.len()
+            );
+        }
         anyhow::bail!(
             "{} analyze point(s) were not a solution (--allow-nr-hold to report them anyway)",
             bad.len()
@@ -593,6 +705,59 @@ SETTLEPT:1002.09:2.000000:0:1.5e-2:NaN
 DIAGPT:2000.00:nan_reset_count=1
 ";
 
+    const RUN: PointRun = PointRun {
+        sample_rate: 48000.0,
+        oversampling: 1,
+        settle_secs: 0.5,
+        route_is_dk: false,
+        has_opamps: false,
+    };
+
+    /// An unconverged commit on the DK route is refused with the nodal route
+    /// as the first remedy; off DK the refusal does not suggest it.
+    #[test]
+    fn a_dk_unconverged_commit_points_at_the_nodal_route() {
+        let stderr = "DIAGPT:1000.00:nr_unconverged_commit_count=4\n\
+                      DIAGPT:1000.00:unsolved_sample_count=4\n";
+        let dk = PointRun {
+            route_is_dk: true,
+            ..RUN
+        };
+        let err = refuse_on_unsolved_points(stderr, &dk, false).unwrap_err();
+        assert!(err.to_string().contains("--solver nodal"), "{err}");
+        assert!(err.to_string().contains("--allow-nr-hold"), "{err}");
+        let err = refuse_on_unsolved_points(stderr, &RUN, false).unwrap_err();
+        assert!(!err.to_string().contains("--solver nodal"), "{err}");
+    }
+
+    #[test]
+    fn settle_summary_says_whether_every_point_beat_the_cap() {
+        let p = |label: &str, drive_secs: f64, status: u8| SettlePoint {
+            label: label.to_string(),
+            drive_secs,
+            status,
+            fund_rel: 0.0,
+            harm_rel: 0.0,
+        };
+        let all = settle_summary(&[p("20.00", 1.5, 1), p("200.00", 0.5, 1)], 2.0);
+        assert!(all.contains("all 2 points settled within"), "{all}");
+        assert!(all.contains("20.00 Hz, settled after 1.50 s"), "{all}");
+        // Settled on the final check: drive time == cap, and it says so.
+        let edge = settle_summary(&[p("20.00", 2.0, 1)], 2.0);
+        assert!(edge.contains("last check the cap allows (2.00 s"), "{edge}");
+        assert!(edge.contains("the 20.00 Hz point settled"), "{edge}");
+        // Hit the cap: named, and not called settled.
+        let hit = settle_summary(
+            &[p("20.00", 2.0, 0), p("30.00", 2.0, 0), p("1000.00", 0.5, 1)],
+            2.0,
+        );
+        assert!(hit.contains("1/3 point(s) settled"), "{hit}");
+        assert!(
+            hit.contains("2 reached the cap still moving: 20.00 Hz, 30.00 Hz"),
+            "{hit}"
+        );
+    }
+
     #[test]
     fn settle_lines_parse() {
         let p = parse_settle_points(STDERR);
@@ -614,27 +779,19 @@ DIAGPT:2000.00:nan_reset_count=1
 
     #[test]
     fn an_unsolved_point_is_refused_unless_allowed() {
-        let err = refuse_on_unsolved_points(STDERR, 48000.0, 1, 0.5, false).unwrap_err();
+        let err = refuse_on_unsolved_points(STDERR, &RUN, false).unwrap_err();
         assert!(err.to_string().contains("--allow-nr-hold"), "{err}");
-        refuse_on_unsolved_points(STDERR, 48000.0, 1, 0.5, true).unwrap();
+        refuse_on_unsolved_points(STDERR, &RUN, true).unwrap();
     }
 
     #[test]
     fn resets_alone_warn_but_do_not_refuse() {
-        refuse_on_unsolved_points("DIAGPT:50.00:nan_reset_count=3\n", 48000.0, 1, 0.5, false)
-            .unwrap();
+        refuse_on_unsolved_points("DIAGPT:50.00:nan_reset_count=3\n", &RUN, false).unwrap();
     }
 
     /// A build without the unified counter still refuses on its parts.
     #[test]
     fn hold_without_the_unified_counter_is_refused() {
-        assert!(refuse_on_unsolved_points(
-            "DIAGPT:50.00:nr_hold_count=2\n",
-            48000.0,
-            1,
-            0.5,
-            false
-        )
-        .is_err());
+        assert!(refuse_on_unsolved_points("DIAGPT:50.00:nr_hold_count=2\n", &RUN, false).is_err());
     }
 }

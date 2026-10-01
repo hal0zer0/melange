@@ -29,6 +29,9 @@ impl CircuitIR {
         class: ModelClass,
     ) -> Result<(), CodegenError> {
         let honored = class.honored();
+        // Every refusal names the card and its device class; `melange` adds
+        // the card's netlist line (line numbers are not carried past parsing).
+        let card = format!(".model {model_name} ({} card)", class.label());
         let Some(m) = netlist
             .models
             .iter()
@@ -46,7 +49,7 @@ impl CircuitIR {
                     continue;
                 }
                 return Err(CodegenError::InvalidConfig(format!(
-                    ".model {model_name}: {upper}={value} is refused: {note}."
+                    "{card}: {upper}={value} is refused: {note}."
                 )));
             }
             if crate::model_params::notice_if_unimplemented(model_name, class, &upper) {
@@ -57,15 +60,14 @@ impl CircuitIR {
             // law melange no longer has.
             if let Some(note) = class.retired_note(&upper) {
                 return Err(CodegenError::InvalidConfig(format!(
-                    ".model {model_name}: parameter '{key}' is RETIRED — {note}. \
+                    "{card}: parameter '{key}' is RETIRED — {note}. \
                      Accepted for this device: {}",
                     honored.join(", ")
                 )));
             }
             let hint = crate::model_params::alias_hint(class, &upper);
             return Err(CodegenError::InvalidConfig(format!(
-                ".model {model_name}: unknown parameter '{key}'.{hint} Accepted \
-                 for this device: {}",
+                "{card}: unknown parameter '{key}'.{hint} Accepted for this device: {}",
                 honored.join(", ")
             )));
         }

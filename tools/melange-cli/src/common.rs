@@ -64,6 +64,95 @@ pub(crate) fn route_summary(
     format!("Solver: {solver}, {chosen_by}; {integration}. (-v for why)")
 }
 
+/// The build's own progress lines that are solver internals: the numbered
+/// steps, matrix sizes, the op-amp rail-mode resolution, which codegen ran,
+/// automatic reductions. They explain how melange built the circuit, not
+/// anything the user has to act on, so the verbs print them only under `-v`.
+/// Matched by exact prefix against the lines `melange_solver::build` and
+/// `melange_solver::pipeline` emit; anything not listed here (warnings,
+/// hints, refusals, `--pot` echoes, any line added later) prints by default.
+const BUILD_DETAIL_PREFIXES: &[&str] = &[
+    "Step 1: Parsing SPICE netlist",
+    "Step 2: Building MNA system",
+    "Step 3: Creating DK kernel",
+    "Step 4: Generating Rust code",
+    "  \u{2713} Parsed ",
+    "  \u{2713} Expanded ",
+    "  \u{2713} Matrix dimensions: ",
+    "  Input resistance: ",
+    "  Input ports: ",
+    "  Injection '",
+    "  Tap '",
+    "  Using augmented MNA for inductors",
+    "  DK kernel failed: ",
+    "  Auto-selecting nodal solver",
+    "  Routing analysis uses the augmented kernel",
+    "  Op-amp rail mode",
+    "  Using DK codegen with augmented MNA",
+    "  Forward-active BJTs: ",
+    "  Grid-off pentodes: ",
+    "  Linearized ",
+    "  Using builtin circuit: ",
+];
+
+/// Whether a build/loader line is `-v` detail (see [`BUILD_DETAIL_PREFIXES`]).
+pub(crate) fn is_build_detail(line: &str) -> bool {
+    if BUILD_DETAIL_PREFIXES.iter().any(|p| line.starts_with(p)) {
+        return true;
+    }
+    // The bare route line is detail; the self-starting-oscillator fallback
+    // ("  Using nodal solver codegen: <why>") says why in plain words and
+    // prints by default.
+    if line == "  Using nodal solver codegen" {
+        return true;
+    }
+    // Step 2's "  ✓ 10 nodes, 2 nonlinear devices".
+    line.strip_prefix("  \u{2713} ")
+        .is_some_and(|rest| rest.contains(" nodes, ") && rest.ends_with(" nonlinear devices"))
+}
+
+/// Route one build line to `emit`, dropping `-v` detail unless `verbose`.
+pub(crate) fn report_build_line(verbose: bool, line: std::fmt::Arguments<'_>, emit: fn(&str)) {
+    let line = line.to_string();
+    if verbose || !is_build_detail(&line) {
+        emit(&line);
+    }
+}
+
+/// What `nr_unconverged_commit_count` counted on this build: a DK Newton solve
+/// that ended unconverged, and/or an op-amp rail pin that did. Names the op-amp
+/// pin only when the circuit has op-amps.
+pub(crate) fn unconverged_commit_source(route_is_dk: bool, has_opamps: bool) -> &'static str {
+    match (route_is_dk, has_opamps) {
+        (true, false) => "the DK Newton solve",
+        (true, true) => "the DK Newton solve (or an op-amp rail pin)",
+        (false, true) => "an op-amp rail-pin solve",
+        (false, false) => "the final Newton solve",
+    }
+}
+
+/// The remedy to offer first when a DK-route build left samples unsolved: the
+/// nodal route, whose sub-step ladder (DK has only a backward-Euler retry)
+/// crosses the regenerative switching edges of oscillators and hard-switching
+/// stages. `None` off the DK route.
+pub(crate) fn dk_unsolved_remedy(route_is_dk: bool) -> Option<&'static str> {
+    route_is_dk.then_some(
+        "This build is on the DK solver route, whose only retry is a backward-Euler \
+         re-solve. Try `--solver nodal` first: the nodal route adds a sub-step ladder that \
+         crosses regenerative switching edges (oscillators, hard-switching stages), which is \
+         what usually leaves DK samples unsolved. See \"Circuits with no audio input \
+         (oscillators)\" in docs/NETLIST_GUIDE.md.",
+    )
+}
+
+/// Whether the netlist has an op-amp element.
+pub(crate) fn has_opamps(netlist: &melange_solver::parser::Netlist) -> bool {
+    netlist
+        .elements
+        .iter()
+        .any(|e| matches!(e, melange_solver::parser::Element::Opamp { .. }))
+}
+
 /// The `simulate -v` / `analyze -v` routing detail, through `emit` (stdout for
 /// `simulate`, stderr for `analyze`, whose stdout is the CSV).
 pub(crate) fn print_run_route_detail(
@@ -126,6 +215,58 @@ pub(crate) fn build_error(e: melange_solver::build::BuildError) -> anyhow::Error
         Some(c) => err.context(c),
         None => err,
     }
+}
+
+/// [`build_error`] for a build of `netlist`. A `.model` card refusal (an
+/// unknown, retired or refused parameter) is raised after parsing, where line
+/// numbers are no longer carried, and its context read "Code generation
+/// failed"; here the context names the card and the netlist line it starts on
+/// instead, the way a parse error does.
+pub(crate) fn build_error_in(e: melange_solver::build::BuildError, netlist: &str) -> anyhow::Error {
+    // `e` displays as "<context>: <source>".
+    let card = model_card_in_error(&e.to_string())
+        .and_then(|name| model_card_line(netlist, &name).map(|line| (name, line)));
+    let Some((name, line)) = card else {
+        return build_error(e);
+    };
+    let (_, source) = e.into_parts();
+    anyhow::anyhow!(source).context(format!(
+        "Invalid .model card '{name}' at line {line} of the netlist"
+    ))
+}
+
+/// The card a `.model` refusal names: the message (after an optional
+/// `Label: ` prefix) starts `.model <NAME>`.
+fn model_card_in_error(msg: &str) -> Option<String> {
+    let at = msg.find(".model ")?;
+    if at != 0 && !msg[..at].ends_with(": ") {
+        return None;
+    }
+    let name: String = msg[at + ".model ".len()..]
+        .chars()
+        .take_while(|c| !c.is_whitespace() && *c != ':')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+/// The 1-based netlist line a `.model <name>` card starts on (first match,
+/// case-insensitive, as the parser resolves model names).
+fn model_card_line(netlist: &str, name: &str) -> Option<usize> {
+    netlist
+        .lines()
+        .position(|line| {
+            let mut words = line.split_whitespace();
+            words
+                .next()
+                .is_some_and(|w| w.eq_ignore_ascii_case(".model"))
+                && words.next().is_some_and(|n| {
+                    // `.model NAME D(...)` or `.model NAME(...)`-less forms alike.
+                    n.split('(')
+                        .next()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(name))
+                })
+        })
+        .map(|i| i + 1)
 }
 
 /// Whether generated code DECLARES `field` on its state struct.
@@ -326,6 +467,22 @@ fn fetch_remote_circuit(src: &circuits::CircuitSource, report: &dyn Fn(&str)) ->
             cache.get_sync(&fresh, false)
         }
         Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod model_card_error_tests {
+    use super::{model_card_in_error, model_card_line};
+
+    #[test]
+    fn a_model_card_refusal_is_located_in_the_netlist() {
+        let msg = "Invalid config: .model 1N4148 (diode card): unknown parameter 'BOGUS'.";
+        assert_eq!(model_card_in_error(msg).as_deref(), Some("1N4148"));
+        let deck = "* t\nD1 in out 1N4148\nR1 out 0 1k\n.MODEL 1n4148 D(IS=1e-14\n+ BOGUS=3)\n";
+        assert_eq!(model_card_line(deck, "1N4148"), Some(4));
+        assert_eq!(model_card_line(deck, "1N914"), None);
+        // A message that only mentions a card mid-sentence is not a card refusal.
+        assert_eq!(model_card_in_error("see the .model card"), None);
     }
 }
 

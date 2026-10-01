@@ -81,6 +81,33 @@ pub(crate) fn list_nodes_source(circuit_source: &circuits::CircuitSource) -> Res
         }
     }
 
+    // Op-amps are stamped into the linear system (rail limits applied on top),
+    // so they are not among the nonlinear devices above; list them on their
+    // own so a deck's op-amp is visibly there.
+    let opamps: Vec<String> = netlist
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            melange_solver::parser::Element::Opamp {
+                name,
+                n_plus,
+                n_minus,
+                n_out,
+                model,
+            } => Some(format!(
+                "  {name}: model {model} (+in {n_plus}, -in {n_minus}, out {n_out})"
+            )),
+            _ => None,
+        })
+        .collect();
+    if !opamps.is_empty() {
+        println!();
+        println!("Op-amps:");
+        for line in &opamps {
+            println!("{line}");
+        }
+    }
+
     // Controls: the names a user needs for --pot / --switch. Either the
     // human-readable label OR the component name is accepted, so print both.
     if !netlist.pots.is_empty()
@@ -90,23 +117,31 @@ pub(crate) fn list_nodes_source(circuit_source: &circuits::CircuitSource) -> Res
     {
         println!();
         println!("Controls (name or label works with --pot / --switch):");
-        // A `.wiper` emits two pots — the halves of its track — and they are
-        // real setters in the generated API, so hiding them would mislead a
-        // plugin author. Listing them as if they were two independent knobs
-        // misleads everyone else. Name the relationship instead.
-        let wiper_half = |r: &str| -> Option<String> {
-            netlist.wipers.iter().find_map(|w| {
-                let label = w.label.as_deref().unwrap_or(&w.resistor_cw);
-                if w.resistor_cw == r {
-                    Some(format!("cw half of wiper \"{label}\""))
-                } else if w.resistor_ccw == r {
-                    Some(format!("ccw half of wiper \"{label}\""))
-                } else {
-                    None
-                }
-            })
+        // A `.wiper` emits two pots — the halves of its track. The plugin
+        // makes the wiper ONE knob, so it is listed as one control, with its
+        // halves under it: they are real setters in the generated API (and
+        // `--pot` takes either half in ohms), so hiding them would mislead a
+        // plugin author.
+        let is_wiper_half = |r: &str| {
+            netlist
+                .wipers
+                .iter()
+                .any(|w| w.resistor_cw == r || w.resistor_ccw == r)
         };
-        for pot in &netlist.pots {
+        // "R_vol_a (10..99990 ohm)", or the bare name if it has no pot entry.
+        let half = |r: &str| {
+            netlist
+                .pots
+                .iter()
+                .find(|p| p.resistor_name == r)
+                .map(|p| format!("{r} ({:.0}..{:.0} ohm)", p.min_value, p.max_value))
+                .unwrap_or_else(|| r.to_string())
+        };
+        for pot in netlist
+            .pots
+            .iter()
+            .filter(|p| !is_wiper_half(&p.resistor_name))
+        {
             let label = pot.label.as_deref().unwrap_or(&pot.resistor_name);
             // No explicit default means the resistor's own declared value —
             // `mna.rs` resolves it with `default_value.unwrap_or(*value)`. The
@@ -126,27 +161,28 @@ pub(crate) fn list_nodes_source(circuit_source: &circuits::CircuitSource) -> Res
                 })
                 .map(|d| format!("{d:.0}"))
                 .unwrap_or_else(|| "nominal".to_string());
-            let note = wiper_half(&pot.resistor_name)
-                .map(|w| format!("  ({w})"))
-                .unwrap_or_default();
             println!(
-                "  pot     {:<26} [{}]  {:.0}..{:.0} ohm, default {}{}",
+                "  pot     {:<26} [{}]  {:.0}..{:.0} ohm, default {}",
                 format!("\"{label}\""),
                 pot.resistor_name,
                 pot.min_value,
                 pot.max_value,
                 default,
-                note
             );
         }
         for wiper in &netlist.wipers {
             let label = wiper.label.as_deref().unwrap_or(&wiper.resistor_cw);
             println!(
-                "  wiper   {:<26} [{}/{}]  total {:.0} ohm, position 0..1",
+                "  wiper   {:<26} [{}/{}]  total {:.0} ohm, position 0..1 (one knob)",
                 format!("\"{label}\""),
                 wiper.resistor_cw,
                 wiper.resistor_ccw,
                 wiper.total_resistance
+            );
+            println!(
+                "          its two halves: cw {}, ccw {}; each also takes --pot <half>=<ohms>",
+                half(&wiper.resistor_cw),
+                half(&wiper.resistor_ccw),
             );
         }
         for sw in &netlist.switches {

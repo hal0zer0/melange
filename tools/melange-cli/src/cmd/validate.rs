@@ -1,6 +1,6 @@
 use crate::args::parse_bjt_fa_mode;
 use crate::circuits;
-use crate::common::load_circuit_text;
+use crate::common::{is_build_detail, load_circuit_text};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
@@ -67,6 +67,8 @@ pub(crate) struct ValidateOptions<'a> {
     pub(crate) reductions: ReductionModes<'a>,
     pub(crate) oversampling: usize,
     pub(crate) rate_sweep: bool,
+    /// `-v/--verbose`: print the progress steps.
+    pub(crate) verbose: bool,
 }
 
 pub(crate) fn validate_circuit_source(
@@ -85,6 +87,7 @@ pub(crate) fn validate_circuit_source(
         reductions,
         oversampling,
         rate_sweep,
+        verbose,
     } = opts;
     // Match parse-time node normalization (lowercase, gnd→0).
     let input_node_owned = melange_solver::parser::normalize_node_name(input_node);
@@ -154,7 +157,9 @@ pub(crate) fn validate_circuit_source(
     }
 
     // Step 1: Check ngspice availability
-    println!("Step 1: Checking ngspice...");
+    if verbose {
+        println!("Step 1: Checking ngspice...");
+    }
     if !is_ngspice_available() {
         anyhow::bail!(
             "ngspice is not installed or not found in PATH.\n\
@@ -162,14 +167,18 @@ pub(crate) fn validate_circuit_source(
              or: brew install ngspice (macOS)"
         );
     }
-    println!("  ngspice found");
+    if verbose {
+        println!("  ngspice found");
+    }
 
     // Step 2: Get circuit netlist as a file path
     // validate_circuit needs a file path. For local files, use directly.
     // For builtins/URLs, write to a secure temp file (random name, auto-cleanup on drop).
     // Uses tempfile::NamedTempFile to avoid TOCTOU/symlink clobber attacks from
     // predictable PID-based paths on shared hosts.
-    println!("Step 2: Loading circuit...");
+    if verbose {
+        println!("Step 2: Loading circuit...");
+    }
     use std::io::Write as _;
     let (netlist_path, _temp_file): (std::path::PathBuf, Option<tempfile::NamedTempFile>) =
         match circuit_source {
@@ -183,7 +192,11 @@ pub(crate) fn validate_circuit_source(
             src @ (circuits::CircuitSource::Builtin { .. }
             | circuits::CircuitSource::Url { .. }
             | circuits::CircuitSource::Friendly { .. }) => {
-                let content = load_circuit_text(src, &|l| println!("{l}"))?;
+                let content = load_circuit_text(src, &|l| {
+                    if verbose || !is_build_detail(l) {
+                        println!("{l}")
+                    }
+                })?;
                 // melange-validate reads the deck from a path. The file is
                 // removed when `tmp` drops; a killed run cannot drop it, so
                 // it lives in a scratch dir of its own that every run sweeps
@@ -207,10 +220,12 @@ pub(crate) fn validate_circuit_source(
         };
 
     // Step 3: Generate test input signal (1kHz sine)
-    println!(
-        "Step 3: Generating test signal ({}s, {:.3}V amplitude, 1kHz sine)...",
-        duration, amplitude
-    );
+    if verbose {
+        println!(
+            "Step 3: Generating test signal ({}s, {:.3}V amplitude, 1kHz sine)...",
+            duration, amplitude
+        );
+    }
     let num_samples = (duration * sample_rate) as usize;
     let input_signal: Vec<f64> = (0..num_samples)
         .map(|i| {
@@ -218,7 +233,9 @@ pub(crate) fn validate_circuit_source(
                 * (2.0 * std::f64::consts::PI * VALIDATE_STIMULUS_HZ * i as f64 / sample_rate).sin()
         })
         .collect();
-    println!("  {} samples", input_signal.len());
+    if verbose {
+        println!("  {} samples", input_signal.len());
+    }
 
     // Configure comparison
     let mut config = if relaxed {
@@ -287,7 +304,9 @@ pub(crate) fn validate_circuit_source(
     }
 
     // Step 4: Run validation
-    println!("Step 4: Running validation (ngspice + melange solver)...");
+    if verbose {
+        println!("Step 4: Running validation (ngspice + melange solver)...");
+    }
     let result = validate_circuit_with_options(
         &netlist_path,
         &input_signal,

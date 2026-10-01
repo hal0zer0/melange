@@ -1,6 +1,8 @@
 use crate::args::parse_bjt_fa_mode;
 use crate::cli::OutputFormat;
-use crate::common::{build_error, diag_lit_factor, load_circuit_text, route_summary};
+use crate::common::{
+    build_error_in, diag_lit_factor, is_build_detail, load_circuit_text, route_summary,
+};
 use crate::{circuits, plugin_template};
 use anyhow::{Context, Result};
 use melange_solver::build::format_system_size;
@@ -269,7 +271,11 @@ pub(crate) fn compile_circuit_source(
     println!("  Sample rate: {} Hz", sample_rate);
     println!();
 
-    let netlist_str = load_circuit_text(circuit_source, &|l| println!("{l}"))?;
+    let netlist_str = load_circuit_text(circuit_source, &|l| {
+        if verbose || !is_build_detail(l) {
+            println!("{l}")
+        }
+    })?;
 
     // --mono is incompatible with multiple output nodes: a multi-output
     // plugin takes mono input and routes each output node to its own audio
@@ -325,6 +331,7 @@ pub(crate) fn compile_circuit_source(
         circuit_name
     };
 
+    let build_printed = std::cell::Cell::new(false);
     // The one build every verb ships (melange_solver::build).
     let build_opts = melange_solver::build::BuildOptions {
         sample_rate,
@@ -380,10 +387,24 @@ pub(crate) fn compile_circuit_source(
         grid_off_pentodes,
         linearize_outcome,
         ..
-    } = melange_solver::build::build(&netlist_str, &build_opts, &|a| println!("{a}"), &|a| {
-        eprintln!("{a}")
-    })
-    .map_err(build_error)?;
+    } = melange_solver::build::build(
+        &netlist_str,
+        &build_opts,
+        &|a| {
+            // Whether anything printed between the header and the summary,
+            // which then gets a blank line of its own.
+            let line = a.to_string();
+            if verbose || !is_build_detail(&line) {
+                build_printed.set(true);
+                println!("{line}");
+            }
+        },
+        &|a| {
+            build_printed.set(true);
+            eprintln!("{a}")
+        },
+    )
+    .map_err(|e| build_error_in(e, &netlist_str))?;
 
     // A single output node makes a mono plugin, `--mono` or not, unless
     // `--stereo` asks for the template's other single-output layout: one
@@ -395,6 +416,7 @@ pub(crate) fn compile_circuit_source(
                 "  Auto-selecting mono (single output node). For stereo, pass two output \
              nodes or --stereo."
             );
+            build_printed.set(true);
             true
         } else {
             mono
@@ -405,18 +427,25 @@ pub(crate) fn compile_circuit_source(
             "  Stereo: two independent copies of the circuit, one per channel \
              (about twice the CPU of the mono plugin)."
         );
+        build_printed.set(true);
     }
 
     let line_count = generated.code.lines().count();
-    println!("  ✓ Generated {} lines of Rust code", line_count);
+    if verbose {
+        println!("  ✓ Generated {} lines of Rust code", line_count);
+    }
 
     // Compilation summary: report all auto-detected decisions in one place.
-    println!();
+    if build_printed.get() {
+        println!();
+    }
     println!("  Summary:");
-    println!(
-        "    System: {}",
-        format_system_size(generated.n, mna.n, generated.m)
-    );
+    if verbose {
+        println!(
+            "    System: {}",
+            format_system_size(generated.n, mna.n, generated.m)
+        );
+    }
     if verbose {
         print_compile_route_detail(&RouteDetail {
             solver_label,
@@ -549,8 +578,10 @@ pub(crate) fn compile_circuit_source(
     println!("    Generated: {} lines of Rust", line_count);
     println!();
 
-    // Step 5 (the build printed 1-4): write output
-    println!("Step 5: Writing output...");
+    // Step 5 (the build printed 1-4 under -v): write output
+    if verbose {
+        println!("Step 5: Writing output...");
+    }
 
     match format {
         OutputFormat::Code => {

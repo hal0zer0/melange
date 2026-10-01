@@ -1,6 +1,8 @@
 use crate::args::parse_bjt_fa_mode;
 use crate::circuits;
-use crate::common::{build_error, diag_lit_factor, load_circuit_text};
+use crate::common::{
+    build_error_in, diag_lit_factor, is_build_detail, load_circuit_text, report_build_line,
+};
 use anyhow::Result;
 use melange_solver::build::format_system_size;
 
@@ -30,6 +32,8 @@ pub(crate) struct DcOpOptions<'a> {
     pub(crate) allow_unconverged_dc_op: bool,
     /// Test-only DC-OP Newton budget (hidden `--dc-op-max-iterations`).
     pub(crate) dc_op_max_iterations: Option<usize>,
+    /// `-v/--verbose`: print the build steps, system size and routing reason.
+    pub(crate) verbose: bool,
 }
 
 /// `melange dc-op`: the operating point the build ships. The circuit is
@@ -42,8 +46,18 @@ pub(crate) fn run_dc_op(
 ) -> Result<()> {
     use melange_solver::codegen::ir::CircuitIR;
 
+    let verbose = opts.verbose;
+    let human = opts.format != "json";
+    if human {
+        eprintln!("melange dc-op");
+        eprintln!("  Source: {}", circuit_source.name());
+    }
     // stdout is the report (JSON-clean), so the loader's lines go to stderr.
-    let netlist_str = load_circuit_text(circuit_source, &|l| eprintln!("{l}"))?;
+    let netlist_str = load_circuit_text(circuit_source, &|l| {
+        if verbose || !is_build_detail(l) {
+            eprintln!("{l}")
+        }
+    })?;
 
     let d = melange_solver::codegen::CodegenConfig::default();
     let build_opts = melange_solver::build::BuildOptions {
@@ -89,11 +103,13 @@ pub(crate) fn run_dc_op(
         output_clamp_auto: false,
     };
     // The build's own lines go to stderr: stdout is the report (JSON-clean).
-    let assembled =
-        melange_solver::build::assemble(&netlist_str, &build_opts, &|a| eprintln!("{a}"), &|a| {
-            eprintln!("{a}")
-        })
-        .map_err(build_error)?;
+    let assembled = melange_solver::build::assemble(
+        &netlist_str,
+        &build_opts,
+        &|a| report_build_line(verbose, a, |l| eprintln!("{l}")),
+        &|a| eprintln!("{a}"),
+    )
+    .map_err(|e| build_error_in(e, &netlist_str))?;
     let format = opts.format;
     let result = &assembled.dc_op;
     let mna = &assembled.mna;
@@ -184,10 +200,27 @@ pub(crate) fn run_dc_op(
 
         println!("}}");
     } else {
-        // Human-readable output
-        eprintln!("melange dc-op");
-        eprintln!("  {}", format_system_size(mna.n, mna.n, mna.m));
-        eprintln!("  Solver: {route} ({})", assembled.solver_reason);
+        // Human-readable output (the banner printed before the build).
+        if verbose {
+            eprintln!("  {}", format_system_size(mna.n, mna.n, mna.m));
+            eprintln!("  Solver: {route} ({})", assembled.solver_reason);
+            if route != "DK" {
+                // The router's reasons are written for maintainers ("DK K
+                // matrix unstable"); on the default route they explain the
+                // choice, they do not report a fault.
+                eprintln!(
+                    "    (routing information, not a warning: the reason says why the DK \
+                     route was not the fit for this circuit)"
+                );
+            }
+        } else {
+            let chosen_by = if opts.solver == "auto" {
+                "chosen automatically".to_string()
+            } else {
+                format!("forced by --solver {}", opts.solver)
+            };
+            eprintln!("  Solver: {route}, {chosen_by}. (-v for why)");
+        }
         eprintln!(
             "  Converged: {} ({:?}, {} iterations)",
             result.converged, result.method, result.iterations

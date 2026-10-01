@@ -206,7 +206,9 @@ fn main() -> Result<()> {
             }
 
             let circuit_source = circuits::resolve(&input)?;
-            println!("Resolved circuit: {}", circuit_source.name());
+            if verbose {
+                println!("Resolved circuit: {}", circuit_source.name());
+            }
             // Validate tube-grid-fa mode.
             if !matches!(tube_grid_fa.as_str(), "auto" | "on" | "off") {
                 anyhow::bail!(
@@ -322,7 +324,9 @@ fn main() -> Result<()> {
             }
 
             let circuit_source = circuits::resolve(&input)?;
-            println!("Resolved circuit: {}", circuit_source.name());
+            if verbose {
+                println!("Resolved circuit: {}", circuit_source.name());
+            }
             validate_circuit_source(
                 &circuit_source,
                 ValidateOptions {
@@ -348,6 +352,7 @@ fn main() -> Result<()> {
                     },
                     oversampling,
                     rate_sweep,
+                    verbose,
                 },
             )
         }
@@ -435,7 +440,9 @@ fn main() -> Result<()> {
                     )
                 })?;
             let circuit_source = circuits::resolve(&input)?;
-            println!("Resolved circuit: {}", circuit_source.name());
+            if verbose {
+                println!("Resolved circuit: {}", circuit_source.name());
+            }
             // Default probe CSV: derive from output WAV (foo.wav → foo.probes.csv).
             // Only consulted when --probe is non-empty.
             let probe_csv_path: Option<PathBuf> = if probes.is_empty() {
@@ -505,6 +512,7 @@ fn main() -> Result<()> {
             start_freq,
             end_freq,
             points_per_decade,
+            freq,
             amplitude,
             sample_rate,
             input_resistance,
@@ -556,6 +564,17 @@ fn main() -> Result<()> {
             if points_per_decade == 0 {
                 anyhow::bail!("points-per-decade must be at least 1");
             }
+            if let Some(f) = freq {
+                if !(f > 0.0 && f.is_finite() && f < sample_rate / 2.0) {
+                    anyhow::bail!(
+                        "--freq must be positive and below Nyquist ({} Hz at --sample-rate {}), \
+                         got {}",
+                        sample_rate / 2.0,
+                        sample_rate,
+                        f
+                    );
+                }
+            }
             if !matches!(tube_grid_fa.as_str(), "auto" | "on" | "off") {
                 anyhow::bail!(
                     "Unknown --tube-grid-fa '{}'. Valid values: auto, on, off",
@@ -604,6 +623,7 @@ fn main() -> Result<()> {
                     start_freq,
                     end_freq,
                     points_per_decade,
+                    single_freq: freq,
                     amplitude,
                     sample_rate,
                     input_resistance_flag: input_resistance,
@@ -683,7 +703,9 @@ fn main() -> Result<()> {
                     )
                 })?;
             let circuit_source = circuits::resolve(&input)?;
-            eprintln!("Resolved circuit: {}", circuit_source.name());
+            if verbose {
+                eprintln!("Resolved circuit: {}", circuit_source.name());
+            }
             run_dc_op(
                 &circuit_source,
                 &DcOpOptions {
@@ -699,12 +721,15 @@ fn main() -> Result<()> {
                     pot_overrides: &pot_overrides,
                     allow_unconverged_dc_op,
                     dc_op_max_iterations,
+                    verbose,
                 },
             )
         }
         Commands::Nodes { input } => {
             let circuit_source = circuits::resolve(&input)?;
-            println!("Resolved circuit: {}", circuit_source.name());
+            if verbose {
+                println!("Resolved circuit: {}", circuit_source.name());
+            }
             list_nodes_source(&circuit_source)
         }
         Commands::Index { dir, check } => index_cmd::run(&dir, check),

@@ -10,10 +10,9 @@ use std::path::PathBuf;
 // otherwise all print the same bare CARGO_PKG_VERSION.
 #[command(version = version_label())]
 pub(crate) struct Cli {
-    /// Print the solver-routing detail (why the route and integrator were
-    /// chosen, kernel measurements, iteration budget). Without it, `compile`,
-    /// `simulate` and `analyze` say which route and integrator they used in
-    /// one line; warnings and refusals print either way.
+    /// Print solver and build detail: progress steps, matrix sizes, why the
+    /// solver route and integrator were chosen, and every solver counter.
+    /// Warnings and refusals print either way.
     #[arg(short, long, global = true)]
     pub(crate) verbose: bool,
 
@@ -80,12 +79,13 @@ pub(crate) enum Commands {
         #[arg(long, default_value = "1.0")]
         output_scale: f64,
 
-        /// Post-DC-block output limiter ceiling in volts. The generated code emits
-        /// `scaled.clamp(-V, V)` after DC blocking and `diag_clamp_count` increments
-        /// above this threshold. Default 10.0 V preserves the historical "Signal Level
-        /// Contract" (see docs/aidocs/SIGNAL_LEVELS.md). Raise for circuits with rails
-        /// above ±10 V (e.g. a power amp at ±22 V rails needs 30 or higher). Ignored
-        /// when DC blocking is disabled.
+        /// Post-DC-block output limiter ceiling in volts. The generated code
+        /// returns volts at the output node, DC-blocks them, scales them by
+        /// --output-scale, then hard-clamps to ±V (`diag_clamp_count` counts
+        /// the samples that hit it). Default 10.0 V. Raise for circuits that
+        /// legitimately swing past ±10 V (e.g. a power amp at ±22 V rails needs
+        /// 30 or higher). Ignored when DC blocking is disabled. See "Levels" in
+        /// docs/CODE_API.md.
         #[arg(long, default_value = "10.0")]
         output_clamp: f64,
 
@@ -718,12 +718,22 @@ pub(crate) enum Commands {
         #[arg(long, default_value = "10")]
         points_per_decade: usize,
 
+        /// Measure exactly one frequency (Hz): one CSV row, instead of the
+        /// log sweep set by --start-freq/--end-freq/--points-per-decade.
+        #[arg(
+            long,
+            value_name = "HZ",
+            conflicts_with_all = ["start_freq", "end_freq", "points_per_decade"]
+        )]
+        freq: Option<f64>,
+
         /// Input signal amplitude in volts (peak), applied to the input node
         #[arg(long, default_value = "0.1")]
         amplitude: f64,
 
-        /// Sample rate in Hz
-        #[arg(short, long, default_value = "96000")]
+        /// Sample rate in Hz. The default matches `compile` and `simulate`, so
+        /// a bare `analyze` measures the build `compile` ships.
+        #[arg(short, long, default_value = "48000")]
         sample_rate: f64,
 
         /// Override input resistance (ohms)
@@ -743,12 +753,22 @@ pub(crate) enum Commands {
         switch_overrides: Vec<String>,
 
         /// Measure up to N harmonics per frequency point (0 = fundamental only,
-        /// the legacy CSV). When >0, appends `thd_pct, h2_dbc, ..., hN_dbc`
-        /// columns. Harmonics above Nyquist are reported as `nan`. `thd_pct`
-        /// sums H2..HN BELOW 20 kHz (and below Nyquist), the common audio
-        /// definition (use 13 for H2..H13); it is `nan` for a point at or
-        /// above 10 kHz, where no harmonic is in that band. The hN_dbc
-        /// columns still report every harmonic up to Nyquist.
+        /// the legacy CSV). When >0, appends `thd_pct, h2_dbc, ..., hN_dbc,
+        /// nyquist_dbc` columns. Harmonics above Nyquist are reported as
+        /// `nan`. `thd_pct` sums H2..HN BELOW 20 kHz (and below Nyquist), the
+        /// common audio definition (use 13 for H2..H13); it is `nan` for a
+        /// point at or above 10 kHz, where no harmonic is in that band. The
+        /// hN_dbc columns still report every harmonic up to Nyquist.
+        ///
+        /// A dBc value below -200 dBc is printed as `-inf`: at that depth the
+        /// figure is floating-point rounding residue, not circuit content (the
+        /// even harmonics of a symmetric clipper land there).
+        ///
+        /// `nyquist_dbc` is the content at exactly half the sample rate,
+        /// relative to the fundamental. It detects a numerical limit cycle (a
+        /// sample-to-sample alternation the integrator can sustain). It is NOT
+        /// an aliasing measure: aliased harmonics fold to other frequencies
+        /// and do not show in it. A healthy circuit reads very low or `-inf`.
         #[arg(long, default_value = "0")]
         harmonics: usize,
 
