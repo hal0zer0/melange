@@ -313,12 +313,25 @@ const CASES: &[Case] = &[
 
 static SEQ: AtomicUsize = AtomicUsize::new(0);
 
+fn scratch_path(test: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("melange_key_effect_{}_{test}", std::process::id()))
+}
+
 /// A scratch directory per test (tests in one binary run concurrently).
 fn scratch(test: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("melange_key_effect_{}_{test}", std::process::id()));
+    let dir = scratch_path(test);
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+/// Removes a test's scratch directory when the test ends, whether it passed
+/// or panicked.
+struct ScratchCleanup(&'static str);
+
+impl Drop for ScratchCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(scratch_path(self.0));
+    }
 }
 
 fn card(case: &Case, params: &[(&str, &str)]) -> String {
@@ -444,6 +457,7 @@ fn every_swept_class_lists_every_accepted_key() {
 
 #[test]
 fn every_accepted_key_changes_the_generated_code() {
+    let _cleanup = ScratchCleanup("effect");
     let jobs: Vec<(&Case, &str, &str, &str, Witness)> = CASES
         .iter()
         .flat_map(|c| c.keys.iter().map(move |&(k, a, b, w)| (c, k, a, b, w)))
@@ -475,7 +489,6 @@ fn every_accepted_key_changes_the_generated_code() {
             });
         }
     });
-    let _ = std::fs::remove_dir_all(scratch("effect"));
     let failures = failures.into_inner().unwrap();
     assert!(
         failures.is_empty(),
@@ -602,6 +615,7 @@ fn the_scan_finds_a_declared_and_unread_parameter() {
 /// every `DEVICE_n_*` constant and `device_n_*` state field it declares.
 #[test]
 fn every_emitted_device_parameter_is_read() {
+    let _cleanup = ScratchCleanup("unread");
     let mut failures = Vec::new();
     for case in CASES {
         let rich: Vec<(&str, &str)> = case
@@ -651,7 +665,6 @@ fn every_emitted_device_parameter_is_read() {
             }
         }
     }
-    let _ = std::fs::remove_dir_all(scratch("unread"));
     assert!(
         failures.is_empty(),
         "device parameters emitted and never read (an accepted key the circuit \
@@ -661,6 +674,7 @@ fn every_emitted_device_parameter_is_read() {
 
 #[test]
 fn unimplemented_keys_compile_with_a_costed_notice() {
+    let _cleanup = ScratchCleanup("notice");
     for case in CASES {
         for (key, _) in case.class.unimplemented() {
             let rich: Vec<(&str, &str)> = case
@@ -700,13 +714,13 @@ fn unimplemented_keys_compile_with_a_costed_notice() {
             );
         }
     }
-    let _ = std::fs::remove_dir_all(scratch("notice"));
 }
 
 /// A known key that is not in the solution is refused with its reason when
 /// nonzero, never accepted and ignored (FET RD/RS, pentode LAMBDA).
 #[test]
 fn a_refused_key_is_refused_with_its_reason() {
+    let _cleanup = ScratchCleanup("refused");
     let mut seen = 0;
     for case in CASES {
         for (key, note) in case.class.refused() {
@@ -747,11 +761,11 @@ fn a_refused_key_is_refused_with_its_reason() {
         "expected RD/RS on JFET and MOSFET, pentode LAMBDA/RGI and triode MU_B/SVAR/EX_B, \
          saw {seen}"
     );
-    let _ = std::fs::remove_dir_all(scratch("refused"));
 }
 
 #[test]
 fn an_unknown_key_is_refused() {
+    let _cleanup = ScratchCleanup("unknown");
     for case in CASES {
         let rich: Vec<(&str, &str)> = case
             .keys
@@ -772,7 +786,6 @@ fn an_unknown_key_is_refused() {
             case.class.label()
         );
     }
-    let _ = std::fs::remove_dir_all(scratch("unknown"));
 }
 
 /// Keys that legitimately leave the DC operating point unchanged on their
@@ -910,6 +923,7 @@ fn dc_op(deck: &str, test: &str) -> Result<Vec<(String, f64)>, String> {
 
 #[test]
 fn every_dc_key_changes_the_operating_point() {
+    let _cleanup = ScratchCleanup("dc");
     let jobs: Vec<(&Case, &str, &str, &str, Witness)> = CASES
         .iter()
         .flat_map(|c| c.keys.iter().map(move |&(k, a, b, w)| (c, k, a, b, w)))
@@ -968,7 +982,6 @@ fn every_dc_key_changes_the_operating_point() {
             });
         }
     });
-    let _ = std::fs::remove_dir_all(scratch("dc"));
     let failures = failures.into_inner().unwrap();
     let stale = stale.into_inner().unwrap();
     assert!(

@@ -35,6 +35,17 @@ C1 out 0 1n
 .switch Rsw 10k 100k \"Load\"
 ";
 
+/// Removes the listed files when a test ends, whether it passed or panicked.
+struct RemoveOnDrop(Vec<PathBuf>);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 /// Write a test circuit to a temp file and return the path.
 fn write_test_circuit(content: &str, name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("melange_cli_test_{}.cir", name));
@@ -2131,8 +2142,9 @@ fn test_a_declaration_elsewhere_does_not_excuse_the_typo() {
 #[test]
 fn test_input_beyond_the_limit_is_refused_unless_allowed() {
     let cir = write_test_circuit("rc\nR1 in out 1k\nC1 out 0 100n\n", "input_limit");
-    let cir = cir.to_str().unwrap();
     let wav = std::env::temp_dir().join("melange_cli_test_input_limit.wav");
+    let _cleanup = RemoveOnDrop(vec![cir.clone(), wav.clone()]);
+    let cir = cir.to_str().unwrap();
     let wav = wav.to_str().unwrap();
     let sim = |amp: &'static str| {
         vec![
@@ -2196,6 +2208,7 @@ fn version_and_generated_header_carry_one_commit_label() {
 
     let cir = write_test_circuit("rc\nR1 in out 1k\nC1 out 0 10n\n", "version_label");
     let rs = std::env::temp_dir().join("melange_cli_test_version_label.rs");
+    let _cleanup = RemoveOnDrop(vec![cir.clone(), rs.clone()]);
     let out = Command::new(melange_bin())
         .args(["compile", cir.to_str().unwrap(), "-o", rs.to_str().unwrap()])
         .output()

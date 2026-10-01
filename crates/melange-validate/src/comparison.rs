@@ -892,15 +892,22 @@ pub fn compare_signals(
         && thd_melange <= thd_spice
         && thd_spice < THD_CLEAN_FLOOR_DB;
 
-    if !config.skip_thd
-        && !thd_exempt
-        && (!thd_error_db.is_finite() || thd_error_db.abs() > config.thd_error_tolerance_db)
-    {
-        failures.push(format!(
-            "THD error {:.2} dB exceeds tolerance {:.2} dB",
-            thd_error_db.abs(),
-            config.thd_error_tolerance_db
-        ));
+    if !config.skip_thd && !thd_exempt {
+        if !thd_error_db.is_finite() {
+            failures.push(thd_unmeasurable_failure(
+                thd_spice,
+                thd_melange,
+                len,
+                ref_rms,
+                act_rms,
+            ));
+        } else if thd_error_db.abs() > config.thd_error_tolerance_db {
+            failures.push(format!(
+                "THD error {:.2} dB exceeds tolerance {:.2} dB",
+                thd_error_db.abs(),
+                config.thd_error_tolerance_db
+            ));
+        }
     }
 
     let passed = failures.is_empty();
@@ -946,6 +953,62 @@ pub fn compare_signals(
         reference_self_check: None,
         reference_self_check_note: None,
         unaligned_normalized_rms_error: None,
+    }
+}
+
+/// The failure line for a THD comparison that produced no number, naming
+/// which side could not be measured and why, instead of `THD error NaN dB`.
+///
+/// `compute_thd` returns NaN for exactly two reasons: fewer than 64 samples,
+/// or no spectral peak between 20 Hz and 20 kHz. The RMS tells the second
+/// case apart into a silent output and one that carries only DC or
+/// out-of-band content.
+fn thd_unmeasurable_failure(
+    thd_ref: f64,
+    thd_act: f64,
+    len: usize,
+    ref_rms: f64,
+    act_rms: f64,
+) -> String {
+    const MIN_THD_SAMPLES: usize = 64;
+    // Matches the silent-reference floor in `compare_signals`.
+    const SILENT_RMS: f64 = 1e-6;
+    if len < MIN_THD_SAMPLES {
+        return format!(
+            "THD not measurable: only {len} samples were compared, at least \
+             {MIN_THD_SAMPLES} are needed"
+        );
+    }
+    let no_tone = |rms: f64| {
+        if rms <= SILENT_RMS {
+            format!("is silent (RMS {rms:.3e} V)")
+        } else {
+            format!(
+                "has no tone between 20 Hz and 20 kHz (RMS {rms:.3e} V, DC or out-of-band only)"
+            )
+        }
+    };
+    match (thd_ref.is_nan(), thd_act.is_nan()) {
+        (true, true) => format!(
+            "THD not measurable: both outputs lack a fundamental \u{2014} the reference {}, \
+             melange {}",
+            no_tone(ref_rms),
+            no_tone(act_rms)
+        ),
+        (true, false) => format!(
+            "THD not measurable: the reference {}, while melange measures {thd_act:.2} dB THD",
+            no_tone(ref_rms)
+        ),
+        (false, true) => format!(
+            "THD not measurable: melange's output {}, while the reference measures \
+             {thd_ref:.2} dB THD",
+            no_tone(act_rms)
+        ),
+        // Neither is NaN, so one is infinite: zero harmonic power gives -inf dB.
+        (false, false) => format!(
+            "THD not comparable: reference {thd_ref:.2} dB, melange {thd_act:.2} dB \
+             (an infinite THD means zero harmonic power)"
+        ),
     }
 }
 
@@ -1283,6 +1346,56 @@ mod tests {
             summary.contains("  THD Error:        "),
             "graded THD line must keep its original shape:\n{summary}"
         );
+    }
+
+    /// Two silent outputs give no THD on either side. The failure must say
+    /// that, not print `THD error NaN dB`.
+    #[test]
+    fn unmeasurable_thd_says_which_side_and_why() {
+        let fs = 48000.0;
+        let n = 4096;
+        let tone: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = 2.0 * PI * 1000.0 * i as f64 / fs;
+                t.sin() + 0.01 * (3.0 * t).sin()
+            })
+            .collect();
+        let thd_failures = |reference: Vec<f64>, actual: Vec<f64>| -> Vec<String> {
+            let r = Signal::new(reference, fs, "reference");
+            let a = Signal::new(actual, fs, "actual");
+            compare_signals(&r, &a, &ComparisonConfig::strict())
+                .failures
+                .into_iter()
+                .filter(|f| f.contains("THD"))
+                .collect()
+        };
+
+        let both = thd_failures(vec![0.0; n], vec![0.0; n]);
+        assert_eq!(both.len(), 1, "{both:?}");
+        assert!(
+            both[0].contains("both outputs lack a fundamental")
+                && both[0].contains("reference is silent")
+                && both[0].contains("melange is silent"),
+            "{both:?}"
+        );
+
+        let ref_silent = thd_failures(vec![0.0; n], tone.clone());
+        assert!(
+            ref_silent[0].contains("the reference is silent")
+                && ref_silent[0].contains("melange measures"),
+            "{ref_silent:?}"
+        );
+
+        let melange_silent = thd_failures(tone, vec![0.0; n]);
+        assert!(
+            melange_silent[0].contains("melange's output is silent")
+                && melange_silent[0].contains("reference measures"),
+            "{melange_silent:?}"
+        );
+
+        for f in both.iter().chain(&ref_silent).chain(&melange_silent) {
+            assert!(!f.contains("NaN"), "no NaN in the failure text: {f}");
+        }
     }
 
     #[test]

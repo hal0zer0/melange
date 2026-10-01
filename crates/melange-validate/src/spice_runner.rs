@@ -5,12 +5,8 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::process::{Command, Stdio};
 use thiserror::Error;
-
-/// Thread-safe counter for unique temp file names
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Errors that can occur when running SPICE simulations
 #[derive(Debug, Error, Clone)]
@@ -210,15 +206,30 @@ pub fn run_transient_stepped(
     step: ReferenceStep,
     nodes_to_capture: &[String],
 ) -> Result<SpiceData, SpiceError> {
+    let original_content = std::fs::read_to_string(netlist_path)?;
+    run_transient_deck(&original_content, tstep, tstop, step, nodes_to_capture)
+}
+
+/// [`run_transient_stepped`] on a deck held in memory.
+///
+/// The rewritten deck goes to ngspice on stdin (`ngspice -b` with no file
+/// argument reads the deck from stdin, with identical output). Nothing is
+/// written to disk, so nothing is left behind when ngspice fails to start or
+/// the process is killed mid-simulation — an interrupted `validate` is the
+/// common case, and no drop guard runs on a signal.
+fn run_transient_deck(
+    original_content: &str,
+    tstep: f64,
+    tstop: f64,
+    step: ReferenceStep,
+    nodes_to_capture: &[String],
+) -> Result<SpiceData, SpiceError> {
     use std::io::Write;
 
     // Check if ngspice is available
     if Command::new("ngspice").arg("--version").output().is_err() {
         return Err(SpiceError::NgspiceNotFound);
     }
-
-    // Read original netlist
-    let original_content = std::fs::read_to_string(netlist_path)?;
 
     // Create modified netlist with updated .TRAN and .PRINT statements
     let mut modified_content = String::new();
@@ -335,26 +346,30 @@ pub fn run_transient_stepped(
     // Ensure .END is present
     modified_content.push_str(".END\n");
 
-    // Write to temp file
-    let temp_dir = std::env::temp_dir();
-    let temp_path = temp_dir.join(format!(
-        "melange_tran_{}_{}.cir",
-        std::process::id(),
-        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    {
-        let mut file = std::fs::File::create(&temp_path)?;
-        file.write_all(modified_content.as_bytes())?;
-    }
-
-    // Run ngspice on the modified netlist
-    let output = Command::new("ngspice")
+    // Run ngspice in batch mode on the modified netlist, fed on stdin. The
+    // deck is written from its own thread so a deck larger than the pipe
+    // buffer cannot deadlock against ngspice filling its stdout pipe.
+    let mut child = Command::new("ngspice")
         .arg("-b") // Batch mode
-        .arg(&temp_path)
-        .output()?;
-
-    // Clean up temp file
-    let _ = std::fs::remove_file(&temp_path);
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stdin = child.stdin.take().expect("ngspice stdin is piped");
+    let writer = std::thread::spawn(move || stdin.write_all(modified_content.as_bytes()));
+    let output = child.wait_with_output()?;
+    // A broken pipe means ngspice stopped reading early (it exits on a deck
+    // error); its own output says why, and is examined below. Any other write
+    // failure means ngspice never received the whole deck.
+    match writer.join() {
+        Ok(Err(e)) if e.kind() != std::io::ErrorKind::BrokenPipe => return Err(e.into()),
+        Ok(_) => {}
+        Err(_) => {
+            return Err(SpiceError::IoError(
+                "the thread writing the deck to ngspice panicked".to_string(),
+            ))
+        }
+    }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -606,13 +621,13 @@ pub fn run_transient_with_pwl(
     pwl_data: &[(f64, f64)], // (time, voltage) pairs
     nodes_to_capture: &[String],
 ) -> Result<SpiceData, SpiceError> {
-    // Create a temporary netlist with the PWL source
     let modified_netlist = inject_pwl_source(netlist_path, pwl_source_name, pwl_data)?;
 
-    run_transient(
-        modified_netlist.netlist_path.as_path(),
+    run_transient_deck(
+        &modified_netlist,
         tstep,
         tstop,
+        ReferenceStep::default(),
         nodes_to_capture,
     )
 }
@@ -626,9 +641,7 @@ fn inject_pwl_source(
     original_netlist: &Path,
     source_name: &str,
     pwl_data: &[(f64, f64)],
-) -> Result<ModifiedNetlist, SpiceError> {
-    use std::io::Write;
-
+) -> Result<String, SpiceError> {
     // Build PWL string
     let pwl_string: String = pwl_data
         .iter()
@@ -715,29 +728,7 @@ fn inject_pwl_source(
         modified_lines.join("\n")
     };
 
-    let temp_dir = std::env::temp_dir();
-    let modified_path = temp_dir.join(format!(
-        "melange_pwl_{}_{}.cir",
-        std::process::id(),
-        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-
-    let mut file = std::fs::File::create(&modified_path)?;
-    file.write_all(modified_content.as_bytes())?;
-
-    Ok(ModifiedNetlist {
-        netlist_path: modified_path,
-    })
-}
-
-pub(crate) struct ModifiedNetlist {
-    pub(crate) netlist_path: std::path::PathBuf,
-}
-
-impl Drop for ModifiedNetlist {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.netlist_path);
-    }
+    Ok(modified_content)
 }
 
 /// Check if a line is a melange-specific directive that ngspice doesn't understand
@@ -961,9 +952,7 @@ pub(crate) fn inject_thevenin_source(
     input_node: &str,
     source: &str,
     series_resistance: f64,
-) -> Result<ModifiedNetlist, SpiceError> {
-    use std::io::Write;
-
+) -> Result<String, SpiceError> {
     let behavioural = source.trim_start().starts_with("V=");
 
     let input_upper = input_node.to_uppercase();
@@ -1033,21 +1022,7 @@ pub(crate) fn inject_thevenin_source(
         modified_lines.insert(insert_idx + 1, thevenin_r);
     }
 
-    let content = modified_lines.join("\n");
-
-    let temp_dir = std::env::temp_dir();
-    let modified_path = temp_dir.join(format!(
-        "melange_thev_{}_{}.cir",
-        std::process::id(),
-        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-
-    let mut file = std::fs::File::create(&modified_path)?;
-    file.write_all(content.as_bytes())?;
-
-    Ok(ModifiedNetlist {
-        netlist_path: modified_path,
-    })
+    Ok(modified_lines.join("\n"))
 }
 
 /// Run ngspice with a Thevenin-equivalent PWL input source
@@ -1234,13 +1209,7 @@ pub fn run_transient_with_thevenin_drive_stepped(
     }
 
     let modified = inject_thevenin_source(&translated, input_node, source, series_resistance)?;
-    let spice_data = run_transient_stepped(
-        modified.netlist_path.as_path(),
-        tstep,
-        tstop,
-        step,
-        &capture,
-    )?;
+    let spice_data = run_transient_deck(&modified, tstep, tstop, step, &capture)?;
     crate::opamp_translate::check_rail_probes(&rail_probes, &spice_data.voltages, tstep)?;
     Ok(spice_data)
 }

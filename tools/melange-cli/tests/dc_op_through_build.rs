@@ -9,13 +9,35 @@
 use std::collections::HashMap;
 use std::process::Command;
 
-fn write_deck(tag: &str, deck: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "melange_dc_op_build_{tag}_{}.cir",
-        std::process::id()
-    ));
+/// A deck written into its own temp directory. Everything a test writes next
+/// to it (the `.rs` it compiles to) goes in that directory, which is removed
+/// when the test ends, whether it passed or panicked.
+struct Deck {
+    path: std::path::PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl std::ops::Deref for Deck {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl AsRef<std::path::Path> for Deck {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+fn write_deck(tag: &str, deck: &str) -> Deck {
+    let dir = tempfile::Builder::new()
+        .prefix("melange_dc_op_build_")
+        .tempdir()
+        .unwrap();
+    let path = dir.path().join(format!("{tag}.cir"));
     std::fs::write(&path, deck).unwrap();
-    path
+    Deck { path, _dir: dir }
 }
 
 fn melange(args: &[&str], deck: &std::path::Path) -> std::process::Output {
