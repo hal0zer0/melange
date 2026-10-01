@@ -472,6 +472,32 @@ f36e99c.
 - **Multi-language codegen**: `Emitter` trait + `CircuitIR` are language-agnostic by design. Only Rust is emitted today. Planned: C++ (the next roadmap target), then Python/NumPy, MATLAB/Octave. **FAUST: explored, ruled out (2026-09-02)** — FAUST's generated code is not Turing-complete by design, so a data-dependent NR iteration count is inexpressible; only circuits emitting no NR loop at all would work (6 of 41 corpus circuits). Note the predicate is "no NR loop emitted", NOT `M == 0`: behavioural B-sources route nodal and get Newton regardless of M.
 
 ### Deferred
+- **Measurement policy for `analyze` (agreed 2026-10-01; post-release work).**
+  Drift between overlapping measurement tools has come from definitions, not
+  duplicated code (`thd_pct` once summed to Nyquist; `nyquist_dbc` was quoted
+  as an aliasing figure). The plan:
+  1. **Scope line.** `analyze` characterises the circuit's response to its own
+     stimulus (gain, phase, THD vs frequency) and refuses points that are not
+     solutions; it adds no instrument-class meters (aliasing, loudness, IMD,
+     decay, noise floor, level of an arbitrary capture), which belong to a bench
+     instrument. State this in `analyze --help` and the user docs.
+  2. **Definitions are canonical in melange's public docs**, stated
+     explicitly: THD = harmonics H2..H13 that fall below 20 kHz (and below
+     Nyquist), each in dBc of the fundamental.
+  3. **Agreement test.** Checked-in fixture renders plus an external bench
+     instrument's JSON for them (keyed on its source and exe hashes; a missing
+     or renamed key fails, never passes); `analyze` must agree within: THD
+     |Δ| ≤ max(0.1 % relative, 0.002 percentage points); each harmonic above
+     −80 dBc |Δ| ≤ 0.05 dB; harmonics below −80 dBc reported, not gated.
+     Fixtures are refreshed only deliberately.
+  4. **Optional external-analyzer hook** (only if a headless analyzer binary
+     is distributed): configured explicitly (no auto-detect), every figure
+     labelled with its instrument, refused if requested and missing, and no
+     figure ever derived from both instruments' numbers.
+  5. **Rename `nyquist_dbc`** to a name that says what it measures (a
+     limit-cycle detector at exactly fs/2, e.g. `fs2_limit_cycle_dbc`), with
+     the old name a deprecated alias for one release; correct any doc that
+     quoted it as aliasing in the same change.
 - **Generated terms are chosen by exact zero, by design.** Codegen emits a
   matrix term whenever its constant is not exactly 0.0, so a ~1e-19 entry left
   by roundoff becomes one extra multiply-add (seen on farfisa-se15-preamp's
