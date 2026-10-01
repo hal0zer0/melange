@@ -33,11 +33,17 @@ fn load(name: &str) -> serde_json::Value {
     serde_json::from_str(&std::fs::read_to_string(&path).expect(&path)).unwrap()
 }
 
+/// Numbers, or exact round-trip strings (parsed by `str::parse`, which
+/// rounds correctly; serde_json's number parser can be off by an ulp, and a
+/// regression matrix can depend on its last bit).
 fn f64s(v: &serde_json::Value) -> Vec<f64> {
     v.as_array()
         .unwrap()
         .iter()
-        .map(|x| x.as_f64().unwrap())
+        .map(|x| match x.as_str() {
+            Some(s) => s.parse().unwrap(),
+            None => x.as_f64().unwrap(),
+        })
         .collect()
 }
 
@@ -97,7 +103,21 @@ fn db(ratio: f64) -> f64 {
 
 #[test]
 fn eigenvalues_and_residues_match_lapack() {
-    let data = load("eigen_reference.json");
+    check_eigen_cases("eigen_reference.json");
+}
+
+/// Real propagators on which an earlier QR stalled. Each carries 30 columns
+/// that are exactly zero (the algebraic directions), so the zero eigenvalue
+/// comes in long defective chains; the iteration cycled there with 49 and 54
+/// eigenvalues unresolved, at any sweep budget. Isolating the eigenvalues the
+/// sparsity pattern exposes takes them out before QR runs.
+#[test]
+fn stalled_propagators_converge_and_match_lapack() {
+    check_eigen_cases("eigen_regression.json");
+}
+
+fn check_eigen_cases(file: &str) {
+    let data = load(file);
     for case in data["cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
         let n = case["n"].as_u64().unwrap() as usize;

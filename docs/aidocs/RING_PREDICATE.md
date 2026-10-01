@@ -157,8 +157,16 @@ column-equilibrated QR basis moved noyce-amp-at-idle's ring pole by 1e-3.
 
 `crates/melange-solver/src/eigen.rs`, no linear-algebra dependency:
 
-- all eigenvalues: balancing by powers of 2 (EISPACK `balanc`), reduction to
-  Hessenberg form (`elmhes`), Francis double-shift QR (`hqr`);
+- all eigenvalues: the eigenvalues the sparsity pattern isolates exactly (a
+  row or column with no off-diagonal entries, `balanc`'s permutation stage)
+  are taken out first; the rest go through balancing by powers of 2
+  (EISPACK `balanc`), reduction to Hessenberg form (`elmhes`) and Francis
+  double-shift QR (`hqr`). The isolation is needed, not an optimisation: the
+  algebraic directions are zero columns, and the defective zero eigenvalue
+  they form made QR cycle without converging, at any sweep budget, on a
+  57×57 backward-Euler propagator (a divider-chain deck, 30 zero columns,
+  48 and 44.1 kHz). Whether QR got through depended on the last bit of the
+  entries.
 - vectors, only for the lasting Nyquist-side poles: inverse iteration in
   complex arithmetic on the balanced matrix, mapped back
   (`r = D·r_b`, `l = D⁻¹·l_b`).
@@ -179,8 +187,10 @@ written by `tests/data/gen_ring_reference.py`:
 
 Committed: 15 synthetic matrices (dense to n = 120, three poles within 1e-7
 of each other near −1, near-defective pairs, complex pairs near −1,
-similarities scaled over 1e12, a propagator-like spectrum) and the 5 in-repo
-golden decks. On demand (`MELANGE_RING_DIR`, `--ignored`): the 42 corpus
+similarities scaled over 1e12, a propagator-like spectrum), the 5 in-repo
+golden decks, and the two stalled backward-Euler propagators
+(`tests/data/eigen_regression.json`, entries stored as exact round-trip
+strings because the stall depends on their last bit). On demand (`MELANGE_RING_DIR`, `--ignored`): the 42 corpus
 decks. Measured 2026-09-29: all pass. Relative error on eigenvalues with
 `|z| ≥ 0.9` ≤ 4.3e-10, except a close pair near +0.9998 on warpony (1.5e-7,
 κ = 8e5, never read by the ring rule). The 4.3e-10 is sat-core-open's

@@ -7,6 +7,11 @@
 //! Matrices are small (a few hundred rows at most) and dense.
 //!
 //! Method (EISPACK `rg` without vectors, then inverse iteration):
+//! 0. [`isolate`]: the eigenvalues the sparsity pattern exposes exactly (a
+//!    row or column with no off-diagonal entries; `balanc`'s permutation
+//!    stage) are taken out first, and steps 1–3 run on the remaining core.
+//!    The propagator's algebraic directions are such columns, and the QR
+//!    iteration can cycle on the defective zero eigenvalue they form.
 //! 1. [`balance`]: diagonal similarity by powers of 2 (exact in floating
 //!    point) so row and column norms are comparable. The propagator mixes
 //!    dimensionless blocks with blocks in siemens and amperes, so this
@@ -458,13 +463,53 @@ fn hqr(a: &mut Mat1) -> Result<Vec<Complex>, EigenError> {
 /// particular order. Complex eigenvalues come in conjugate pairs.
 pub fn eigenvalues(a: &[f64], n: usize) -> Result<Vec<Complex>, EigenError> {
     assert_eq!(a.len(), n * n, "eigenvalues: matrix is not n x n");
-    if n == 0 {
-        return Ok(Vec::new());
+    let (mut out, core) = isolate(a, n);
+    if core.is_empty() {
+        return Ok(out);
     }
-    let mut m = Mat1::from_row_major(a, n);
+    let k = core.len();
+    let mut reduced = Vec::with_capacity(k * k);
+    for &i in &core {
+        for &j in &core {
+            reduced.push(a[i * n + j]);
+        }
+    }
+    let mut m = Mat1::from_row_major(&reduced, k);
     let _ = balance(&mut m);
     hessenberg(&mut m);
-    hqr(&mut m)
+    out.extend(hqr(&mut m)?);
+    Ok(out)
+}
+
+/// The eigenvalues the sparsity pattern exposes exactly (the permutation
+/// stage of EISPACK `balanc` / LAPACK `dgebal`). A row or column whose
+/// off-diagonal entries are all zero makes the matrix block-triangular under a
+/// permutation, so its diagonal entry is an eigenvalue and the rest of the
+/// spectrum is that of the matrix with that row and column removed. Repeated
+/// until no such row or column is left. Returns the isolated eigenvalues and
+/// the indices of the remaining core, in order.
+///
+/// Exact, and needed: a charge propagator's algebraic directions are zero
+/// columns, and the zero eigenvalue they make comes in long defective chains
+/// on which the QR iteration can cycle without converging (it did, at any
+/// sweep budget, on a 57x57 backward-Euler propagator with 30 such columns).
+fn isolate(a: &[f64], n: usize) -> (Vec<Complex>, Vec<usize>) {
+    let mut core: Vec<usize> = (0..n).collect();
+    let mut found = Vec::new();
+    loop {
+        let pos = core.iter().position(|&k| {
+            let row = core.iter().all(|&j| j == k || a[k * n + j] == 0.0);
+            let col = core.iter().all(|&i| i == k || a[i * n + k] == 0.0);
+            row || col
+        });
+        match pos {
+            Some(p) => {
+                let k = core.remove(p);
+                found.push(Complex::new(a[k * n + k], 0.0));
+            }
+            None => return (found, core),
+        }
+    }
 }
 
 /// Solve `M·x = b` in place for the complex matrix `m` (row-major, `n × n`),

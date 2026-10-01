@@ -9,6 +9,21 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A circuit whose ring-predicate eigenvalue solve stalled no longer fails
+  to build.** A self-oscillating divider chain that 0.1.11 built was refused
+  by `compile` and `dc-op` with "ring predicate: QR iteration did not
+  converge" at 48 and 44.1 kHz. The backward-Euler propagator the rule
+  checks has 30 exactly-zero columns (the circuit's algebraic directions),
+  and the QR iteration cycled on the defective zero eigenvalue they form, at
+  any iteration budget. Those eigenvalues are now isolated exactly before QR
+  runs (the permutation stage of LAPACK's balancing). The other eigenvalues
+  match LAPACK to about 1e-13. The deck builds and routes by the stated rule:
+  backward Euler at 48 kHz (trapezoidal grows, ρ 1.160; backward Euler
+  removes it, ρ 0.9998), trapezoidal at 96 kHz (a real growing pole both
+  keep).
+
 ## [0.1.13] - 2026-09-30
 
 A patch over 0.1.12 whose CI test job failed after the tag. **Rendered audio
