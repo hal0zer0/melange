@@ -9,19 +9,29 @@
 //! ## Module structure
 //!
 //! - `dc_op_emitter` — runtime DC operating-point recompute (`recompute_dc_op`)
-//! - `helpers` — template data structs, formatting utils, pentode/oversampling helpers
+//! - `device_models` — device model functions emitted into every build
 //! - `dk_emitter` — DK-path emit methods (constants, state, process_sample, etc.)
 //! - `dk_solver` — DK NR solver generation (solve_nonlinear, Gauss elimination)
-//! - `nr_helpers` — shared NR helper functions (voltage limiting, convergence)
+//! - `header` — file header, build flags and provenance JSON
+//! - `helpers` — template data structs, formatting utils, pentode/oversampling helpers
+//! - `inject_tap` — `.inject` / `.tap` constants, RHS stamps and warmup
 //! - `nodal_emitter` — nodal-path emit methods (Schur + full-LU)
+//! - `noise_emitter` — circuit noise emission (thermal, shot, flicker, op-amp)
+//! - `nr_helpers` — shared NR helper functions (voltage limiting, convergence)
+//! - `oversampler` — polyphase half-band oversampler and its wrappers
 //! - `subsample_fire` — nodal-Schur variable-dt glow-strike breakpoint re-solve
 
 mod dc_op_emitter;
+mod device_models;
 mod dk_emitter;
 mod dk_solver;
+mod header;
 mod helpers;
+mod inject_tap;
 mod nodal_emitter;
+mod noise_emitter;
 mod nr_helpers;
+mod oversampler;
 mod subsample_fire;
 
 use tera::{Context, Tera};
