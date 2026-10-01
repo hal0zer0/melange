@@ -3550,7 +3550,7 @@ impl RustEmitter {
             code.push('\n');
         }
 
-        // NODE_NAMES parallel array + dc_op_by_name lookup (openfarf thread 218).
+        // NODE_NAMES parallel array + dc_op_by_name lookup.
         // Carried by the nodal path identically to the DK path. NODE_NAMES is a
         // complete parallel of DC_OP (one entry per row, "" for unnamed rows);
         // dc_op_by_name is emitted only when DC_OP exists.

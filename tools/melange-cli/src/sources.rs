@@ -297,7 +297,7 @@ impl SourcesConfig {
     /// Resolve a circuit name against a source's published index, falling back
     /// to a flat layout when the source publishes none.
     ///
-    /// The protocol (agreed with melange-circuits, thread 587; spec in
+    /// The protocol (agreed with melange-circuits; spec in
     /// `docs/CIRCUIT_INDEX.md`) is deliberately generic — any repository can
     /// serve one, and melange special-cases nobody:
     ///

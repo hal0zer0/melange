@@ -1036,8 +1036,8 @@ pub fn assemble(
     let mut solver_label = if use_nodal_codegen { "nodal" } else { "DK" };
     let mut solver_reason = if solver_override == "nodal" || solver_override == "dk" {
         // Forced route: still surface what the auto-router decided so the pinned
-        // sub-path is visible, not masked by the override reason (melange-circuits
-        // t469 — a measuring verb must see the route it is actually on).
+        // sub-path is visible, not masked by the override reason (a measuring
+        // verb must see the route it is actually on).
         format!(
             "--solver {} (user override; auto would pick: {})",
             solver_override, routing.reason

@@ -20,7 +20,7 @@ That's not a missing feature. That's the whole design.
 
 > **Status: early alpha.** "Netlist goes in, plugin comes out" is exactly the kind of claim that should make you narrow your eyes, so here is precisely how far it actually goes today:
 >
-> - **Compiles + agrees with ngspice** — several classic circuits (a Pultec-style passive EQ, Wurlitzer 200A, tweed preamp, a Tube-Screamer-style overdrive) compile, run, and track ngspice at the SPICE level.
+> - **Compiles + agrees with ngspice** — several classic circuits (a passive tube program EQ, the Wurlitzer 200A preamp, a tweed preamp, an op-amp diode-clipper overdrive) compile, run, and track ngspice at the SPICE level.
 > - **Checked against real hardware** — the Wurlitzer 200A preamp, against measured hardware. One circuit. Exactly one.
 > - **Proven oracle-free** — the solver's numerics and the device models are verified to machine precision *without* another simulator (Tellegen power-balance, convergence-order, canonical device equations).
 >
@@ -256,14 +256,14 @@ A sample of what it handles, with **measured** single-core throughput:
 
 | Circuit | What it is | Devices | Throughput\* | ns/sample |
 |---------|-----------|---------|--------------|-----------|
-| Bus compressor (SSL-class) | VCA + op-amp sidechain | 12 op-amps + 2 VCAs | 7.5× | 2777 |
-| Germanium diode network | 6-diode germanium clipping | 6 Ge diodes | 12.0× | 1736 |
-| Tweed guitar amp (5F1 Champ-class) | preamp + power stage + output transformer | 12AX7 (2 triodes) + 6V6 pentode | 19.0× | 1095 |
-| Passive tube EQ (Pultec-style) | 7 pots, 3 switches, global NFB (N=52, M=8) | 4 tubes, 3 transformers | 20.3× | 1028 |
-| Wurlitzer 200A preamp | 2-stage BJT preamp (full Gummel-Poon) | 2 BJTs + 1 diode | 45.9× | 454 |
-| 12AX7 gain stage | single triode stage | 1 triode | 158.8× | 131 |
+| Bus compressor | VCA + op-amp sidechain | 12 op-amps + 2 VCAs | 6.6× | 3176 |
+| Germanium diode network | 6-diode germanium clipping | 6 Ge diodes | 11.9× | 1747 |
+| Tweed guitar amp (single-ended) | preamp + power stage + output transformer | 12AX7 (2 triodes) + 6V6 pentode | 16.7× | 1248 |
+| Passive tube program EQ | 7 pots, 3 switches, global NFB (N=52, M=8) | 4 tubes, 3 transformers | 18.4× | 1134 |
+| Wurlitzer 200A preamp | 2-stage BJT preamp (full Gummel-Poon) | 2 BJTs + 1 diode | 46.1× | 452 |
+| 12AX7 gain stage | single triode stage | 1 triode | 156.0× | 134 |
 
-\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), best of 7 × 2M samples. Measured on an AMD Ryzen 9 7950X pinned to one CCD, with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh). Re-measured 2026-09-27 on an idle machine; run-to-run spread was under 2 % on every row. Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass runs at 2960× (7.0 ns/sample).
+\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), best of 7 × 2M samples. Measured on an AMD Ryzen 9 7950X pinned to one CCD, with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh). Re-measured 2026-09-30 on an idle machine; the best and median of the seven runs agree within 1 % on every row. Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass runs at 2930× (7.1 ns/sample).
 
 **The triode rows pay for grid current.** The Dempwolf & Zölzer grid-current law evaluates a softplus on the grid dimension at every Newton iteration, where a hard-zero law would skip it; that is what modelling the negative-grid region costs. The CHANGELOG has the before/after figures.
 
@@ -275,7 +275,7 @@ Each row names the deck it was measured on, so the numbers have an address. **Th
 | Germanium diode network | `unstable/gimmicks/noyce-germanium-cluster.cir` |
 | Passive tube EQ | `testing/filters/passive-eq1a.cir` |
 | Tweed guitar amp | `unstable/amp/champ-5f1.cir` |
-| Wurlitzer 200A preamp | `unstable/preamp/wurli-preamp.cir` |
+| Wurlitzer 200A preamp | `testing/preamp/wurli-preamp.cir` |
 | 12AX7 gain stage | `unstable/gimmicks/noyce-triode-12ax7.cir` |
 
 The circuits repository holds the full catalog with per-circuit status:
@@ -286,12 +286,12 @@ It is a filtered set — 43 circuits, not everything that exists locally. Of the
 
 ## Spotlight: Passive Tube EQ
 
-A **Pultec-style passive program EQ**, and one of the hardest topologies melange solves end to end — coupled transformers with global feedback wrapped around four nonlinear tubes. Read this as a demonstration of the *solver*, not as a fidelity claim — the distinction matters and I'll get to it in a second:
+A **passive tube program EQ**, and one of the hardest topologies melange solves end to end — coupled transformers with global feedback wrapped around four nonlinear tubes. Read this as a demonstration of the *solver*, not as a fidelity claim — the distinction matters and I'll get to it in a second:
 
 - **4 vacuum tubes** (2× 12AX7, 2× 12AU7), **3 transformers** (HS-56 input, HS-29 coupling/phase-splitter, S-217-D output with a tertiary feedback winding)
 - **21 dB of global negative feedback** via differential cathode injection
 - **40 circuit nodes (N=52 MNA unknowns), 8 nonlinear dimensions**
-- **All 7 EQ bands function**, including the simultaneous boost + cut trick, with **zero NR failures** at 1V input, at roughly 21× realtime on one core
+- **All 7 EQ bands function**, including the simultaneous boost + cut trick, with **zero NR failures** at 1V input, at about 18× realtime on one core
 
 Global feedback wrapped around four tubes and three transformers is the configuration where naive solvers give up, oscillate, or quietly return garbage. This one converges every sample.
 

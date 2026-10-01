@@ -384,8 +384,8 @@ pub struct NamedConstantsIR {
     /// Every non-ground node's ORIGINAL (un-sanitized) name paired with its
     /// 0-based index — the SAME index space as `DC_OP`/`dc_operating_point`.
     /// Emitted as the `NODE_NAMES: [&str; N]` parallel array + `dc_op_by_name`
-    /// lookup so reading a node's operating point is a lookup, not N recompiles
-    /// (openfarf thread 218). Unlike `nodes`, this includes solver-internal
+    /// lookup so reading a node's operating point is a lookup, not N recompiles.
+    /// Unlike `nodes`, this includes solver-internal
     /// nodes (BJT `basePrime`, transformer branches) so the array is a complete
     /// parallel of `DC_OP`; rows with no node name (augmented VS/inductor
     /// branch-current rows) are left `""`.

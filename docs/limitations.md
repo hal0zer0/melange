@@ -570,25 +570,19 @@ that must run at several host rates has to be compiled per rate.
 
 ### Performance Benchmarks
 
-Measured 2026-09-24 on an AMD Ryzen 9 7950X pinned to one CCD, single core,
-noiseless, `-C target-cpu=x86-64-v3` (best of 7 × 2M samples via
+Measured 2026-09-30 on an idle AMD Ryzen 9 7950X pinned to one CCD, single
+core, noiseless, `-C target-cpu=x86-64-v3` (best of 7 × 2M samples via
 `tools/perf-harness/bench.sh`); throughput is host-dependent.
 
-- Light nonlinear circuits: 12AX7 gain stage ~159× realtime
-- Germanium diode network (6 Ge diodes) ~12.0× realtime
-- Typical multi-device circuits: Wurlitzer preamp ~46×, tweed-style guitar amp ~19× realtime
-- Heaviest measured: a passive tube EQ (nodal full-LU, chord + sparse LU, N=52, M=8) ~20×, a bus compressor (12 op-amps + 2 VCAs) ~7.5× realtime
+- Light nonlinear circuits: 12AX7 gain stage ~156× realtime
+- Germanium diode network (6 Ge diodes) ~11.9× realtime
+- Typical multi-device circuits: Wurlitzer preamp ~46×, tweed-style guitar amp ~16.7× realtime
+- Heaviest measured: a passive tube EQ (nodal Schur, N=52, M=8) ~18.4×, a bus compressor (12 op-amps + 2 VCAs) ~6.6× realtime
 
-Four of those seven moved at this re-measurement. The three triode rows are
-14–29 % slower than they were in 0.1.9 because the Dempwolf & Zölzer
-grid-current law (`30915fb`) evaluates a softplus on the grid dimension at
-every Newton iteration, where the old law short-circuited to zero for
-Vgk ≤ 0; measured against the immediately preceding commit on the same box,
-12AX7 stage 216.7× → 153.2×, tweed amp 22.3× → 18.3×, passive EQ 24.0× → 20.6×.
-The Wurlitzer row fell because the DECK was revised on 2026-09-16, not
-because anything in melange got slower: the pre-revision deck still measures
-52.9× on the same 0.1.5 binary the 56× was published from. Re-running that
-binary today reproduces the other published rows within −6 % to +2 %.
+The triode rows carry the cost of the Dempwolf & Zölzer grid-current law
+(`30915fb`), which evaluates a softplus on the grid dimension at every Newton
+iteration: measured against the commit before it on the same box, 12AX7 stage
+216.7× → 153.2×, tweed amp 22.3× → 18.3×, passive EQ 24.0× → 20.6×.
 
 Every figure above names the circuit it came from, deliberately. Perf numbers in
 this repository from before 2026-08-25 were fabricated or stale -- a row nobody

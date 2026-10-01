@@ -481,7 +481,7 @@ unexercised seed on its PASSED/FAILED line. See the
 [Circuit Noise Guide](NOISE_GUIDE.md) for the full per-device coverage table,
 the runtime API, level calibration, and worked examples.
 
-## Worked Example: Fender-Style Tone Stack
+## Worked Example: Guitar-Amp Tone Stack
 
 Here's a complete netlist for a passive tone stack (the kind found in guitar amps):
 
@@ -499,7 +499,7 @@ Here's a complete netlist for a passive tone stack (the kind found in guitar amp
 ```
 
 ```spice
-* Passive Tone Stack (Fender style)
+* Passive Tone Stack
 R1 in mid 100k
 C1 in mid 250p
 C2 mid tone_out 22n

@@ -32,7 +32,7 @@ We will acknowledge receipt within 7 days.
   (`std::arch::x86_64::_mm_setcsr`) to enable the CPU's FTZ/DAZ denormal-flush
   mode for real-time performance — the only `unsafe` in any melange output.
 - **Input validation** — parser rejects negative, zero, NaN, and infinite component values; rejects self-connected components
-- **Resource limits** — MAX_M=24 (DK path), MAX_N=256 nodes, MAX_ELEMENTS=10,000 after expansion, 8-level subcircuit nesting
+- **Resource limits** — MAX_M=32 nonlinear dimensions (every solver route), MAX_N=256 nodes, MAX_ELEMENTS=10,000 after expansion, 8-level subcircuit nesting
 - **Bounded iteration** — Newton-Raphson capped at `max_iter` (default 50); DC operating point has source stepping and Gmin stepping fallbacks with finite iteration counts
 - **Real-time safe** — generated audio callbacks have zero heap allocation; all buffers pre-allocated at construction
 - **Temp file cleanup** — SPICE validation temp files are removed after each run

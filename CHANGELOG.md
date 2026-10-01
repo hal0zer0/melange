@@ -9,18 +9,165 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
-A cold first-user run against the public on-ramp produced one blocker and one
-silent failure. Both are fixed here, along with most of what else it found.
-Fixing a message about op-amp rails turned up two solver-level defects in how
-railed op-amps are handled; those are fixed too.
+## [0.1.12] - 2026-09-30
 
-**Six corpus circuits change solver route** (DK → nodal) — every one whose
-op-amp can rail into a capacitor-coupled output. They now run the rail handling
-their resolver chose instead of a clamp, which matters once an op-amp actually
-rails; below the rails the two routes agree (the golden renders of the three in
-the regression set move by at most 1.1 µV). Every other circuit renders
-identically. Every generated file gains two constants, and nodal circuits'
-generated state is smaller.
+**This release changes rendered audio. Regenerate every plugin built with
+0.1.11**; generated code changes for every circuit.
+
+The largest change is the integrator. The trapezoidal rule now carries the
+capacitor currents as state (the charge, or companion, form), every source
+enters once, at the new sample, and Kirchhoff's current law holds at every
+committed sample. Backward Euler is now chosen by a rule that weighs the
+trapezoidal ring against backward Euler's own in-band cost, and many circuits
+it used to promote return to the trapezoidal rule. Device models move toward
+SPICE: PNP junction capacitances at the right polarity, SPICE's diffusion
+capacitance, BJT exponentials without the clamp at 40·NF·Vt, JFET gate
+junctions, MOSFET body effect in the transient, the thermal voltage at 27 °C,
+`TAMB` as the device temperature, SPICE defaults for omitted card parameters,
+and op-amp outputs that stop short of their supply and sag under load. A
+first-user run against the public on-ramp found one blocker (oversampled
+plugin projects did not compile) and one silent failure (a voltage source on
+the input node rendered silence); both are fixed.
+
+Six corpus circuits change solver route from DK to nodal. Several decks that
+compiled under 0.1.11 are now refused, each with the reason and the fix. One
+astable that 0.1.11 rendered, with about 7 % of its samples unsolved, is now
+refused; see *Known issues*.
+
+Against the 0.1.11 regression baseline (38 circuits, 168 renders): 8 renders
+are identical, 84 within the negligible band, 62 changed across 17 circuits,
+and 14 changed across 3 circuits whose netlists were edited in the circuits
+library. Every changed circuit traces to an entry below; five of them also had
+their regression stimulus level or output clamp set differently (see *Tests*).
+Five coverage circuits are new. No render has an unsolved sample.
+
+### Summary: what changes generated DSP or rendered audio
+
+Each item is described in full under *Fixed* or *Changed*.
+
+- **Integration.** The charge-form trapezoidal integrator. Automatic
+  backward-Euler promotion by the ring predicate, and only where the ring is
+  louder than backward Euler's own in-band cost. An op-amp rail pin or release
+  takes no backward-Euler sample (the transition sample is retired). The
+  runtime backward-Euler latch engages only on a ring that outlasts its
+  averaging window, reaches −60 dB of the program that excited it, judged
+  against the output's actual excursion (so a clipping circuit is judged by
+  the level it reaches), and is louder than backward Euler's in-band cost.
+  A pot move or a resistor-only switch takes no backward-Euler sample; only a
+  switch that changes a capacitor or an inductor does.
+- **Solvers.** DK never edits a solved sample. Nodal: the sub-step rescue
+  bisects the failing sub-step and runs on both sub-paths; the Schur Newton
+  starts from the previous sample; a chord-accepted full-LU sample takes one
+  exact-Jacobian step; the full-LU sub-step uses the current knob positions;
+  every nodal build expands a BJT's `RB`/`RC`/`RE` into nodes, and the
+  convergence checks cover them. Six circuits route nodal instead of DK
+  (active-set rail handling), and a self-starting oscillator builds nodal.
+- **Devices.** PNP junction-capacitance polarity. BJT diffusion capacitance
+  as SPICE's `capbe`; a forward-active BJT's B-C capacitance at its bias. The
+  IS-aware BJT exponential. `.linearize` as the device's own Jacobian plus its
+  junction capacitances (a linearized triode keeps `CCG`/`CGP`/`CCP`). JFET
+  gate junctions. MOSFET body effect in the transient and the DC operating
+  point. Tube Jacobians zero below their voltage guards; a triode's `RGI` in
+  the DC operating point, and its internal-grid solve converging past +9.5 V.
+  Thermal voltage at 300.15 K, `TAMB` as the device temperature, SPICE
+  defaults for omitted card parameters.
+- **Op-amps.** Output limit `VCC − VOH_DROP` / `VEE + VOL_DROP` (1.0 V drops
+  when a card sets only the rails), a railed output that sags through `R_SAG`
+  (default 200 Ω), `ROUT` default 75 Ω (was 1 Ω). No automatic transient AOL
+  cap. `active-set` instead of `active-set-be` as the automatic mode for a
+  capacitor-coupled output, and the pinned solve is Newton on the pinned
+  system. `boyle-diodes` catches at the limit and builds the full circuit.
+- **DC operating point.** The op-amp rail is an active set inside every
+  Newton solve; the point is finished at full op-amp gain; the input port is
+  counted once; the Newton start clamps a junction whose emitter or cathode
+  is grounded; the diode GMIN conditions Newton only; a circuit whose only DC
+  quantity is an inductor current gets its operating point baked; the runtime
+  recompute keeps a railed op-amp on its rail.
+- **Magnetics.** Saturating inductors bottom out at an air-core inductance
+  (`LAIR=`, `CORE=`, default 3e-4 of L0); flux convergence at 1e-5 of each
+  sample's change; a Newton step limit across the knee; a saturating
+  transformer realizes its stated coupling exactly; the backward-Euler safety
+  net covers saturating circuits.
+- **Netlist and plugin.** A `.wiper` with no position starts where its legs
+  put it. A `.inject` source survives `.linearize` and the device reductions.
+  An oversampled plugin reports its latency through `set_latency_samples()`
+  (3 samples at 2× and 4×), and the wet/dry dry path is delayed to match.
+
+### Throughput
+
+Re-measured on the README's host (idle 7950X, one CCD, best of 7 × 2M
+samples): the bus compressor, tweed amp and passive tube EQ rows are 9–13 %
+slower than 0.1.11's published figures (7.5× → 6.6×, 19.0× → 16.7×,
+20.3× → 18.4×). The germanium network, Wurlitzer preamp and 12AX7 rows are
+within the bench's −6 % to +2 % spread. The slowdown has not been attributed
+to individual changes.
+
+### Summary: new refusals
+
+A deck or invocation that 0.1.11 accepted is refused, naming the reason and
+the fix, when it has:
+
+- a nonzero `RD`/`RS` on a JFET or MOSFET card; an unknown key on an op-amp
+  card; `LAMBDA` or `RGI` on a pentode card; `MU_B`, `SVAR` or `EX_B` on a
+  triode card;
+- `.linearize` on a device that is outside its region at its own operating
+  point, on a name that is not a BJT or triode, or whose bias solve did not
+  converge;
+- a DC operating point that does not converge (`--allow-unconverged-dc-op`
+  builds it anyway);
+- `--solver dk` on a self-starting oscillator, an op-amp whose rail mode
+  resolves to active-set, an `AOL_TRANSIENT_CAP` card, or `boyle-diodes`;
+- active-set rail handling together with a behavioral source;
+- a voltage source from an input port to ground (`compile`, `simulate`,
+  `analyze`; `nodes` and `dc-op` warn);
+- `compile --format plugin` into a directory that already holds a project;
+- `.wiper` legs that do not add up to the total within 1 %; a `.pot` with no
+  default whose resistor value is outside its range;
+- an op-amp card with `VSAT` and `VCC`/`VEE`, or a drop without its rail;
+- saturating magnetics the shared-core model does not cover (coupling
+  k ≤ 0.8, three or more windings without a stated core, windings of one core
+  with different saturation currents), a `.switch` on a saturating inductor
+  or winding, a saturation drop below 1e-6 or one the core cannot reach, an
+  authored `LAIR` no larger than `1 − K`, air-core floors more than 3× apart,
+  and NaN values;
+- `melange dc-op` with no input port.
+
+At render time, `simulate`, `validate` and the regression harness refuse a
+render with any unsolved sample (`diag_unsolved_sample_count`, which now
+includes a reduced or linearized device leaving its region), and `simulate`
+and `analyze` refuse one whose input was clamped or carried NaN
+(`--allow-input-clamp` overrides; `validate` always refuses).
+
+### Summary: measurement changes in `validate` and `analyze`
+
+These change reported figures, not generated code.
+
+- `validate` grades only against a reference shown to be converged: the
+  reference starts at a sixteenth of the output step and is refined (step
+  halved, `reltol` tightened, `trtol` as a fallback) until it stops moving; a
+  reference that cannot get there is refused. The CI SPICE gate uses the same
+  rule.
+- `validate` compares on the clock it asked for. The reference's rate used to
+  be inferred from ngspice's seven-digit times, which left a 0.0286 % floor
+  under every result at 48 kHz.
+- `validate --rate-sweep` (new) separates discretization error from model
+  error, driving at 997.3 Hz; every result prints the unaligned error beside
+  the aligned one.
+- `analyze`'s `nyquist_dbc` uses an even window (an odd one read the
+  fundamental as Nyquist content).
+- `validate`'s reference is driven by the continuous stimulus; carries the
+  triode card's capacitances and `RGI`, each `.linearize`d device as melange
+  built it, each JFET as melange resolved it, and melange's parasitic
+  capacitors; runs self-heating decks isothermal; is refused when ngspice
+  ignored a parameter; and is never extrapolated past its last sample. The
+  first 20 ms are excluded from every metric, and the default peak gate is
+  1 % of the reference's peak.
+
+For anyone working from the solver conventions: the documented trapezoidal
+right-hand side is now `RHS_CONST + A_neg·v_prev + q_dot + V_in(n+1)·G_in`,
+with the input stamped once and no `−G` term in `A_neg` (`CLAUDE.md`,
+`docs/aidocs/COMPANION_MODELS.md`). Code that writes `v_prev` directly must
+also set `q_dot`.
 
 ### Fixed
 
@@ -344,16 +491,14 @@ generated state is smaller.
   `SINE(` gets it too instead of "Invalid DC value".
 - **`--opamp-rail-mode active-set` left a persistent error behind a railing
   op-amp.** Pinning an op-amp to its rail, and releasing it, swaps an equation,
-  and the trapezoidal step across the swap left a residual that never decays on
-  a node with no capacitor, such as the diode node of a clipper after the
-  output coupling cap. Each pin and release added to it. On a single-supply
+  and the old trapezoidal step across the swap left a residual that never
+  decays on a node with no capacitor, such as the diode node of a clipper after
+  the output coupling cap. Each pin and release added to it. On a single-supply
   overdrive at 0.5 V the diode node was out of balance by 105 µA at 48 kHz and
-  2.6 mA at 192 kHz, against a diode current of about 4 mA. The sample after
-  each pin or release is now solved with backward Euler, the same one-sample
-  treatment a `.switch` or `.pot` change already gets. The residual is now
-  0.3–1.9 µA, and the output-peak error falls below `active-set-be`'s at every
-  rate. `diag_transition_be_count` counts these samples, and the build header
-  says `transition-be`. The automatic choice of rail mode is unchanged.
+  2.6 mA at 192 kHz, against a diode current of about 4 mA. The charge-form
+  integrator (see *Changed*) carries no such residual: that node now sits at
+  0.29–0.43 µA, the Newton acceptance floor, at 48, 96 and 192 kHz and at 0.1
+  and 0.5 V, with no backward-Euler sample at the pin or release.
 - **A linear circuit with active-set rail handling and a knob did not
   compile** on the nodal Schur path. The rail resolve read a right-hand side
   that the knob's one-sample backward-Euler branch had scoped away. Each branch
@@ -777,6 +922,55 @@ generated state is smaller.
   CLI stamped its own label and only refreshed it when the CLI itself was
   edited. Both now print one label, refreshed on an edit to any source that
   goes into the binaries (the exe hash stays the exact identity).
+- **Every nodal build carries a transistor's `RB`, `RC` and `RE` as circuit
+  nodes, and its convergence checks cover them.** On a nodal build those
+  internal nodes sit among the augmented rows, and the KCL residual, the
+  sub-step's step test and the line search covered only the circuit's own
+  nodes, so an iterate with the internal nodes out of balance could be
+  accepted. Every check now runs over every KCL row. A gate that kept the
+  resistances inside the device on some nodal builds (a K diagonal below
+  −100), on the evidence of one deck that diverged expanded, is gone with it.
+  Three regression circuits move: a BJT power amplifier's renders agree with
+  its unexpanded form to −176 dB, and two others change only in their silence
+  renders (start-up residues of a few µV). The resistances' thermal noise is
+  now injected on every nodal build; only DK builds skip it.
+- **A saturating transformer realizes the coupling its deck states.** The
+  saturating shared-core model floored each winding's leakage at 1e-4 of its
+  inductance, so any coupling tighter than k = 0.9999 was built as 0.9999,
+  where real audio iron sits at 1 − k of about 1e-5 to 1e-4. On a 1 H : 16 H
+  step-up at k = 0.99999 the floor put the response 0.015, 0.058 and 0.149 dB
+  above the exact model at 4.47, 9.41 and 20 kHz. The leakage is now exactly
+  (1 − k)·L, and the saturating model agrees with the linear one to 1e-4 dB
+  at small signal. Transformers without saturation take another path and
+  were not affected.
+- **A saturating inductor driven across its knee no longer stalls Newton.**
+  Nothing limited the Newton step on the inductor's flux row, so from deep
+  saturation a step across the knee landed far on the other side and Newton
+  cycled: a saturating RL driven by a ±20 V square hit the iteration ceiling
+  on 398 samples per second, each rescued by sub-steps, and committed a
+  current 3.3 % off the circuit's own solution. A step that crosses the knee
+  is now limited, at every site that commits a sample. Those witnesses now
+  converge without sub-steps; on the runs measured where Newton already
+  converged, the result is bit-identical.
+- **A nodal full-LU sub-step solved the circuit at its default knob
+  settings.** When a sample fell back to sub-steps, they were built from the
+  compile-time matrices, not the current pot and switch positions, and
+  checked convergence against the same matrices, so the sample was committed
+  as solved. A saturating RL with its series pot moved from 99 Ω to 50 Ω
+  then held 47,200 of 96,000 samples with the inductor current frozen. The
+  sub-step now reads the same matrices as the main solve. Only samples that
+  reach the sub-step with a knob off its default change; no regression
+  program does.
+- **Saturating-inductor decks that compiled silently wrong are refused.** A
+  `.switch` on a saturating inductor moved only its linear inductance while
+  the saturation law kept the old one (switched from 1 H to 0.1 H, a 10 mV
+  input peaked at 740 V); a `.switch` on any winding of a saturating core was
+  stamped as a negative capacitance. Both are refused. An `ISAT` from a
+  datasheet conversion or a shared-core referral must be a finite positive
+  current (`ISAT_DROP=1e-17` gave an infinite `ISAT` and generated code that
+  did not build), and drops below 1e-6 are refused. `nanmeg` and `infmeg` no
+  longer parse as values, and a NaN coupling is refused.
+
 ### Known issues
 
 - **A self-starting two-transistor astable is refused.** A textbook
@@ -1059,9 +1253,8 @@ generated state is smaller.
     because the history is `alpha*C*v_prev + q_dot` (see `docs/CODE_API.md`).
     `reset()` and `set_dc_operating_point()` do this for you.
 - **Every op-amp whose output is capacitor-coupled downstream now gets
-  `active-set` rail handling by default**, with one backward-Euler sample at
-  each pin and release. Circuits the automatic choice used to send to
-  `active-set-be` move. In the regression set that is six circuits:
+  `active-set` rail handling by default.** Circuits the automatic choice used
+  to send to `active-set-be` move. In the regression set that is six circuits:
   - moonladder, sad-bastard, pipe-shouter and vurli run on backward Euler
     throughout, where the two modes are the same solve; only their reported
     rail mode changes;
@@ -1069,11 +1262,14 @@ generated state is smaller.
     op-amp rails.
   `active-set-be` solves every
   rail-engaged sample with backward Euler, which on a single-supply overdrive
-  meant 73–96 % of all samples and an output-peak error 2–4× larger at every
-  sample rate. It is still available with `--opamp-rail-mode active-set-be`.
-  The regression renders of all six are unchanged, because no regression
-  program drives their op-amps into the rails. Two new regression circuits do rail. On one, the peak error
-  against ngspice fell from 2.2 % to 0.25 % at 48 kHz, 0.5 V. One cost: at 1x
+  meant 73–96 % of all samples. It is still available with
+  `--opamp-rail-mode active-set-be`. The regression renders of all six are
+  unchanged, because no regression program drives their op-amps into the
+  rails. Two new regression circuits do rail. Against an ngspice reference of
+  that overdrive at 0.5 V and 48 kHz, `active-set` is 9.74 mV rms from the
+  reference with a worst cycle peak 2.17 % off, where `active-set-be` is
+  14.03 mV and 3.60 %; `active-set` is the closer of the two at 48, 96 and
+  192 kHz and at both drive levels measured. One cost: at 1x
   oversampling, a railing op-amp with top-octave drive aliases about twice as
   much as it did under `active-set-be`. That mode aliased less only because
   backward Euler smears the rail edges. Both are clean at 4x. Compile now says
@@ -1109,8 +1305,8 @@ generated state is smaller.
   trapezoidal rule falls into a sample-to-sample ringing it cannot damp, the
   solver switches that instance to backward Euler for the rest of the stream;
   saturating circuits had been excluded, a leftover from a saturation update
-  that no longer exists. So is the single backward-Euler step at a pot or
-  switch change. Once latched, the output matches a `--backward-euler` build
+  that no longer exists. They now also get the single backward-Euler sample
+  after a switch that changes a capacitor or an inductor. Once latched, the output matches a `--backward-euler` build
   of the same circuit to 1e-10. On the golden set it fires once, on an open
   transformer driven into saturation by a 5 V step, and removes a 6 mV
   sample-to-sample ring. On a core with no air-core floor (`LAIR=0`), deep
@@ -1137,9 +1333,12 @@ generated state is smaller.
   junction conducted. It fired on no corpus circuit under any drive tried, so
   no render changes; the sub-step matrices it carried are gone from every
   nodal circuit's generated state.
-- The six circuits above run on nodal. Below the rails their output matches
-  the DK build to within 1.1 µV on the regression renders; when an op-amp
-  rails, it now gets the pin-and-resolve instead of a clamp.
+- Six corpus circuits now run on nodal instead of DK, because their op-amp
+  rail handling resolves to an active-set mode (see *Fixed*): vurli-leveler,
+  gold-press-mastering, noyce-4558, noyce-ne5534, sympathy-drive and
+  sympathy-frontend. Below the rails their output matches the DK build to
+  within 1.1 µV on the regression renders; when an op-amp rails, it now gets
+  the pin-and-resolve instead of a clamp.
 - The automatic backward-Euler notice is one plain sentence; the eigenvalue
   detail is under `RUST_LOG=info`.
 - `simulate`, `analyze` and `compile` `--help` list the solver-override flags
@@ -1168,8 +1367,9 @@ generated state is smaller.
   carry their reason (charge storage, time constants, slew, the cold power-on
   state). It found three defects: a triode card's variable-mu keys and a
   pentode card's LAMBDA reached neither the DC operating point nor the
-  transient (both now refused), and the DC operating point has no grid
-  stopper (RGI), held as still-failing until fixed.
+  transient (both now refused), and the DC operating point had no grid
+  stopper (RGI), now fixed (see *Fixed*). Its list of known DC defects is
+  empty.
 - `charge_form_c_switch_tests.rs`: a `.switch` that changes a capacitor
   mid-render does not carry the old capacitor current. Scrambling `q_dot` at
   the switch leaves every later sample bit-identical on both nodal sub-paths,
@@ -1181,8 +1381,7 @@ generated state is smaller.
   positive witness is a stiff node (1 kOhm into 10 pF), which trapezoidal
   integration still rings after a stop. The tolerance-floor witness excites
   that node through `q_dot`, at 1x and 4x oversampling.
-- `opamp_pin_tests.rs` replaces `transition_be_tests.rs`. A railing op-amp takes
-  no backward-Euler sample and the clipper node sits at the Newton floor
+- `opamp_pin_tests.rs`: a railing op-amp takes no backward-Euler sample and the clipper node sits at the Newton floor
   (0.29 uA). At 96 kHz the render is 0.32 mV rms from a 768 kHz render at the
   op-amp output, and 4.1 mV rms at `out`. The chord-exit-step witness no
   longer sees a carried residual: 1.09 uA per sample without the exit step,
@@ -1191,16 +1390,13 @@ generated state is smaller.
   output clamp, unless its entry declares that the clamp is intended and why.
   On clamped samples the recording measures the clamp, not the circuit. The
   mic-preamp circuit now runs at 1 mV instead of 0.1 V. At 0.1 V its output
-  was clipped on 15 % of the 1 kHz render. Five more circuits still trip and
-  are with their owner.
+  was clipped on 15 % of the 1 kHz render. Five more circuits were set by
+  their owner: a phono stage at 5 mV, an amplifier whose program is
+  incidental at 10 mV, and three high-voltage stages given a 100 or 150 V
+  output clamp. No render in the regression set now reaches its clamp.
 - Two regression circuits pin an op-amp at its rail every half cycle, one per
   rail mode the automatic choice used to pick. Until now no regression program
   drove an op-amp into its rails, so a change to rail handling could not show.
-- `transition_be_tests.rs`: on both nodal sub-paths the transition count
-  equals the pin changes, and the diode node's residual stays under 5 µA,
-  while a copy with the arming removed reads about 200 µA. On a linear
-  railing stage, a forced backward-Euler sample matches the backward-Euler
-  build bit for bit.
 - Saturation is now tested at its knee. The regression corpus exercised the
   saturation code but never drove any inductor past 37 % of its saturation
   current. New tests drive a saturating RL and a shared-core transformer at
@@ -1220,11 +1416,6 @@ generated state is smaller.
   shown as %) and lists the whole generated project; the grammar reference no
   longer documents SIN/PULSE sources melange refuses, and its "complete,
   parseable" example no longer contains a source that silences it.
-- The JFET models neither gate junction: its gate draws no current at any
-  bias, so a gate driven into forward bias is not clamped (a gate driven to
-  +2 V through 100 kΩ sits at 2.000 V where ngspice clamps it at 0.546 V).
-  `IS=`/`N=` on a JFET card are refused. Now stated in `limitations.md` with
-  that measurement.
 
 ## [0.1.11] - 2026-09-27
 
@@ -2694,7 +2885,8 @@ measured real hardware. Everything else is unproven against hardware. See
   KiCad file; no effect on netlist compilation, generated code, or shipped plugins. The
   fix (`quick-xml >= 0.41`) is tracked for 0.1.1.
 
-[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.11...HEAD
+[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.12...HEAD
+[0.1.12]: https://github.com/hal0zer0/melange/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/hal0zer0/melange/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/hal0zer0/melange/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/hal0zer0/melange/compare/v0.1.8...v0.1.9

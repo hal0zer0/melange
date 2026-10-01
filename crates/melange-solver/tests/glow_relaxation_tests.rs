@@ -322,7 +322,7 @@ fn main() {
 
 /// Supply-sensitivity: the relaxation period MUST depend on the rail voltage.
 /// This is schematic extraction's falsification criterion for the ZA1001 divider bracket
-/// (thread 162, off the AG7500 service manual §6): Philips regulated the +1
+/// (off the AG7500 service manual §6): Philips regulated the +1
 /// rail specifically because "the correct oscillation frequency of the divider
 /// sections depends on the supply voltage." A model whose dividers are
 /// insensitive to Vb is wrong regardless of how well any single point locks.

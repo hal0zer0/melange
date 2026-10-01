@@ -840,7 +840,7 @@ fn normalize_provenance_header(code: &str) -> String {
         } else if trimmed.starts_with("// provenance:") {
             let masked = mask_json_field(line, "melange", "<version>");
             let masked = mask_json_field(&masked, "commit", "<commit>");
-            // The exe hash is a runtime build identity (thread 288): exact, but
+            // The exe hash is a runtime build identity: exact, but
             // it changes on every rebuild at one commit. Mask it like the version
             // /commit stamp so a byte-diff reflects only real codegen changes.
             let masked = mask_json_field(&masked, "exe_fnv1a64", "<exe>");

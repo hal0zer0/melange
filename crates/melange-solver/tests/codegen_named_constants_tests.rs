@@ -192,7 +192,7 @@ Rb vcc mid 1Meg
 
 #[test]
 fn node_names_array_parallels_dc_op() {
-    // NODE_NAMES is the string-name parallel of DC_OP (openfarf thread 218).
+    // NODE_NAMES is the string-name parallel of DC_OP.
     let spice = "\
 Node Names Array
 R1 in out 10k
@@ -389,7 +389,7 @@ fn integration_source_maps_reason_not_just_scheme() {
     assert_eq!(IS::TrapDefault.integration_source(), "trap");
     assert_eq!(IS::TrapCliFlag.integration_source(), "trap");
     assert_eq!(IS::TrapDirective.integration_source(), "trap");
-    // The whole point of the field (oomox thread 234): explicit BE and
+    // The whole point of the field: explicit BE and
     // auto-promoted BE, which collapse to the same `integration`/`backward_euler`
     // JSON, are distinguishable here.
     assert_ne!(

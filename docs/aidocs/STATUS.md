@@ -2,26 +2,17 @@
 
 Quick-reference for AI agents. For math details see other aidocs. For architecture see CLAUDE.md.
 
-> **Latest release: v0.1.11 (2026-09-27)** — a same-night patch over v0.1.10, whose test suite
-> did not compile (test-harness code only; shipped behaviour is byte-identical). v0.1.10 was
-> the never-silently-wrong release. Nodal full-LU could
-> commit an unsolved sample and then freeze on it, giving a 22 dB-wrong render that reported a
-> healthy −0.50 dBFS peak; the fix cuts the timestep to 64× and honours the pinned integrator, and
-> two zero-threshold counters now fail every verb rather than reporting a reassuring number. Triode
-> grid current became Dempwolf & Zölzer eq. (11) — which **fails** its Philips ECC83 acceptance test
-> 15/15 and ships as the less-wrong model, replacing a law that was further out in the same
-> direction; see Pending Work for the specified fix. See CHANGELOG and `docs/aidocs/DEBUGGING.md`.
+> **Latest release: v0.1.12 (2026-09-30)** — changes rendered audio. The trapezoidal integrator
+> carries the capacitor currents as state (the charge form; sources enter once, at n+1), automatic
+> backward-Euler promotion follows the ring predicate, transition-BE is retired, breakpoint-BE
+> fires only where a reactance changes, and the BJT, JFET and op-amp models move toward SPICE (PNP
+> junction-cap polarity, `capbe` diffusion capacitance, the IS-aware exponential, JFET gate
+> junctions, op-amp output swing and sag). Six corpus circuits route nodal instead of DK. Several
+> decks that compiled under 0.1.11 are now refused, each with its reason. See CHANGELOG.
 >
-> **UNRELEASED work sits on local `main`, 8 commits ahead of `origin/main`** (a push to origin/main
-> IS a release, so it is held). Headline: the **Dempwolf & Zölzer triode grid-current law**
-> (`30915fb`) — `Ig = Gg·(softplus(Cg·Vgk)/Cg)^ξ`, evaluated for ALL Vgk. **This changes generated
-> DSP for every circuit containing a triode**, and `VGK_ONSET`/`IG_MAX` are now REFUSED on triode
-> `.model` cards (still honoured on pentodes). Costs 14–29 % throughput on triode decks. Also:
-> `analyze`'s `phase_deg` sign fix, a codegen warning fix, and a full performance re-measurement.
->
-> **The grid law is shipped but ungraded** — the out-of-sample ECC83 `V_o` acceptance run and the
-> per-tube-type onset WARN are specified in `.claude/release-docs/FOLLOWUPS.md` and NOT started.
-> It is a better-founded law that nothing has yet falsified; that is not the same as a validated one.
+> Triode grid current is still the Dempwolf & Zölzer eq. (11) law released in v0.1.10, which
+> **fails** its Philips ECC83 acceptance test 15/15 and ships as the less-wrong model, replacing a
+> law that was further out in the same direction; see Pending Work for the specified fix.
 
 > **2026-07-18 accuracy campaign (commits `3e246cb`, `5159b8c`, `fde289a`, `b421358`, `8056f95` — all six review chunks complete):** a
 > full-codebase accuracy review fixed, among others: op-amp VCCS polarity (was
@@ -280,10 +271,10 @@ Source: Sowter DWG E-72,658-2 (amp §) + Peerless/Triad winding data.
 
 ## Performance
 
-**Re-measured 2026-09-27** on an AMD Ryzen 9 7950X pinned to one CCD (single core, noiseless, `-C target-cpu=x86-64-v3`, via `tools/perf-harness/bench.sh`); host-dependent. Figures predating 2026-08-25 were largely fabricated/stale — see `memory/perf_numbers_measured_2026_08_25.md`. Measured: nonlinear audio circuits ≈7.5–46× RT; light stages ~159× (single 12AX7); trivial linear ~2960× (7.0 ns/sample).
+**Re-measured 2026-09-30** on an idle AMD Ryzen 9 7950X pinned to one CCD (single core, noiseless, `-C target-cpu=x86-64-v3`, via `tools/perf-harness/bench.sh`); host-dependent. Figures predating 2026-08-25 were largely fabricated/stale — see `memory/perf_numbers_measured_2026_08_25.md`. Measured: nonlinear audio circuits ≈6.6–46× RT; light stages ~156× (single 12AX7); trivial linear ~2930× (7.1 ns/sample).
 
-- Passive EQ (N=52, M=8, 3 xfmrs, nodal full LU): **~20.3×** realtime (1028 ns/sample)
-- Wurlitzer preamp (2 BJT, full GP): ~45.9× · Tweed 5F1 amp: ~19.0× · Ge diode network: ~12.0× · bus comp (full, 12 op-amps + 2 VCAs): **~7.5×** · 12AX7 stage: ~158.8×
+- Passive EQ (N=52, M=8, 3 xfmrs, nodal Schur): **~18.4×** realtime (1134 ns/sample)
+- Wurlitzer preamp (2 BJT, full GP): ~46.1× · Tweed 5F1 amp: ~16.7× · Ge diode network: ~11.9× · bus comp (full, 12 op-amps + 2 VCAs): **~6.6×** · 12AX7 stage: ~156.0×
 - ⚠️ The **"overdrive pedal ~60.3×"** row was DELETED 2026-09-27: no deck in any repo matches its "op-amp + 2 diodes" description, so it has been unreproducible since 2026-09-02 and shipped twice unverified. Do not reinstate it without a named deck.
 - **What moved since the 2026-09-03 table**, all attributed on the same box: the three TRIODE rows lost 14–29 % to the Dempwolf & Zölzer grid-current law (`30915fb`) — 12AX7 216.7→153.2, tweed 22.3→18.3, passive EQ 24.0→20.6, each measured against the commit immediately before it. The Wurlitzer row (56→43.8) is a DECK revision of 2026-09-16, not a compiler regression: the pre-revision deck still reads 52.9× on the 0.1.5 binary that published the 56×. Everything else reproduces within −6 % to +2 % on the old binary, which is this bench's honest width on this host.
 - **Full-LU exit step (2026-09-28).** A chord-accepted full-LU sample with a node residual above 1e-9 A takes one refactored Newton step (see the capless-row item under Pending Work). Measured before/after on the same 7950X, same session (`bench.sh`, x86-64-v3, best of 7 × 2M; box not idle, load ~2.7, so absolute figures read a few % below the idle table): bus compressor 2901 → 3136 ns/sample (7.18× → 6.64×, **−7.5 %**); 12AX7, tweed, passive EQ, Ge network and Wurlitzer preamp within −1.0 % to +0.5 %. **The published bus-compressor row predates this change and must be re-measured on an idle box at the next release.** Corpus full-LU decks (golden `circuit.rs`, 48 kHz, one core, best of 3, `target-cpu=native`, ad hoc): at silence every deck is within noise of before (the gate keeps the chord's reuse); on a 0.1 V 1 kHz sine moonladder +32 %, steve-1073-preamp +11 %, gravity +11 %, sad-bastard +10 %, 4kbuscomp-audiopath +6 %, wurli-power-amp +3 %, the rest within noise. The cost is paid only on samples whose accepted chord step left a node residual.

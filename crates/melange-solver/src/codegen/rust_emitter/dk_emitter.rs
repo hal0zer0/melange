@@ -535,7 +535,7 @@ fn provenance_json(
     // so a deck can ASSERT its numerical sub-path: a silent Schur↔full-LU flip
     // (turned by conditioning — any resistor, inductor, or rate — not just a
     // flag) otherwise reaches a consumer only as an unread stderr WARN and has
-    // been read as device behaviour (design review, melange-circuits t469).
+    // been read as device behaviour (design review).
     if let Some(sp) = nodal_sub_path {
         s.push_str(&format!("\"nodal_subpath\":\"{sp}\","));
     }
@@ -788,7 +788,7 @@ impl RustEmitter {
         );
         ctx.insert("named_pots", &named_const_entries(&ir.named_constants.pots));
 
-        // NODE_NAMES parallel array + dc_op_by_name lookup (openfarf thread 218).
+        // NODE_NAMES parallel array + dc_op_by_name lookup.
         // `node_names_values` is the `[&str; N]` body; `has_dc_op` gates the
         // lookup fn (needs the DC_OP const, emitted in state.rs.tera).
         ctx.insert(

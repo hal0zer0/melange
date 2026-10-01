@@ -1019,7 +1019,7 @@ fn full_version_string() -> String {
     let base = version_label();
     match melange_solver::build_identity::current_exe_hash() {
         // Algorithm-qualified: `fnv1a64:` states the digest so a reader cannot
-        // compare it against a different hash of the same file (thread 184).
+        // compare it against a different hash of the same file.
         Some(hash) => format!("melange {base} exe fnv1a64:{hash}"),
         None => format!("melange {base}"),
     }

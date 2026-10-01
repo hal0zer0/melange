@@ -112,7 +112,7 @@ resistors occupy real internal nodes it can inject a Norton current across.
 On the **DK path** (K_eff absorption, no internal nodes) there is no node pair
 to stamp across, so the source is honestly skipped and codegen logs a
 `log::warn!` naming the device. If you have a multi-BJT circuit where rbb′ hiss
-matters (Neve/Wurlitzer-class output stages when they route DK), compile it with
+matters (transformer-coupled and Wurlitzer-class output stages when they route DK), compile it with
 `--solver nodal` to include that contribution. See
 [`docs/aidocs/NOISE.md`](aidocs/NOISE.md) "BJT parasitic-R thermal noise".
 

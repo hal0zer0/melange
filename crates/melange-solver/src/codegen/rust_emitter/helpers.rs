@@ -1921,7 +1921,7 @@ pub(super) fn oversampling_info(factor: usize) -> OversamplingInfo {
 /// `ir.named_constants.node_names` (ORIGINAL, un-sanitized, in DC_OP index
 /// space); rows with no node name (augmented VS / inductor branch-current rows)
 /// are `""`. Length is `topology.n` (= `N`). Shared by the DK and nodal paths so
-/// the two carry byte-identical maps (openfarf thread 218).
+/// the two carry byte-identical maps.
 pub(super) fn node_names_array_body(ir: &CircuitIR) -> String {
     let n = ir.topology.n;
     let mut names: Vec<String> = vec![String::new(); n];
