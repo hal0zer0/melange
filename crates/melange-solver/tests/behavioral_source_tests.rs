@@ -353,7 +353,7 @@ Rin in 0 1meg
         panic!("an undefined parameter must be refused");
     };
     assert!(
-        format!("{err}").to_lowercase().contains("mystery"),
+        err.to_string().to_lowercase().contains("mystery"),
         "unexpected: {err}"
     );
 }

@@ -7,7 +7,7 @@ pub struct MosfetCatalogEntry {
     pub names: &'static [&'static str],
     /// Transconductance parameter KP [A/V^2]
     pub kp: f64,
-    /// Threshold voltage VT [V] (positive for N-ch, negative for P-ch)
+    /// Threshold voltage VT \[V\] (positive for N-ch, negative for P-ch)
     pub vt: f64,
     /// Channel-length modulation LAMBDA [1/V]
     pub lambda: f64,

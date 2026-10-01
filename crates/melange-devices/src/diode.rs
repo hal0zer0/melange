@@ -13,11 +13,11 @@ use crate::{safeguards, NonlinearDevice, VT_ROOM};
 /// - Vt: Thermal voltage (~26 mV at room temperature)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DiodeShockley {
-    /// Saturation current [A]
+    /// Saturation current \[A\]
     pub is: f64,
     /// Ideality factor (emission coefficient)
     pub n: f64,
-    /// Thermal voltage [V]
+    /// Thermal voltage \[V\]
     pub vt: f64,
     /// n * vt (precomputed)
     n_vt: f64,
@@ -138,7 +138,7 @@ impl NonlinearDevice<1> for DiodeShockley {
 pub struct DiodeWithRs {
     /// Base diode model
     pub diode: DiodeShockley,
-    /// Series resistance [Ohms]
+    /// Series resistance \[Ohms\]
     pub rs: f64,
 }
 
@@ -222,7 +222,7 @@ impl NonlinearDevice<1> for DiodeWithRs {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Led {
     diode: DiodeShockley,
-    /// Forward voltage drop at the design operating current [V]
+    /// Forward voltage drop at the design operating current \[V\]
     pub vf: f64,
 }
 

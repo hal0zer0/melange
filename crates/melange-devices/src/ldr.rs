@@ -12,17 +12,17 @@ use crate::NonlinearDevice;
 /// with asymmetric attack and release times.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CdsLdr {
-    /// Minimum resistance (brightest light) [Ohms]
+    /// Minimum resistance (brightest light) \[Ohms\]
     pub r_min: f64,
-    /// Maximum resistance (dark) [Ohms]
+    /// Maximum resistance (dark) \[Ohms\]
     pub r_max: f64,
     /// Power law exponent (typically 0.5-1.0)
     pub gamma: f64,
-    /// Attack time constant (resistance decreasing) [seconds]
+    /// Attack time constant (resistance decreasing) \[seconds\]
     pub attack_tau: f64,
-    /// Release time constant (resistance increasing) [seconds]
+    /// Release time constant (resistance increasing) \[seconds\]
     pub release_tau: f64,
-    /// Sample rate [Hz]
+    /// Sample rate \[Hz\]
     pub sample_rate: f64,
     /// Current resistance state
     r_state: f64,

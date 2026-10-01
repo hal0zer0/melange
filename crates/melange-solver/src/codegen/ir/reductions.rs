@@ -193,7 +193,7 @@ impl CircuitIR {
     /// to the DC-OP-converged `Vg2k = V[screen] - V[cathode]` that the
     /// reduced 2D device freezes. The caller passes the map to
     /// [`MnaSystem::from_netlist_with_grid_off`] (rebuilds with
-    /// `dimension: 2` pentode slots); [`build_device_info_with_mna`] then
+    /// `dimension: 2` pentode slots); [`build_device_info_with_mna`](Self::build_device_info_with_mna) then
     /// sets `TubeParams.kind = SharpPentodeGridOff` and `vg2k_frozen` from
     /// the reduced MNA.
     ///
@@ -221,7 +221,7 @@ impl CircuitIR {
     /// full 3D model. `force_all == true` (`--tube-grid-fa on`) reduces
     /// every non-variable-mu pentode and warns per device.
     ///
-    /// Mirrors [`detect_forward_active_bjts`] for the BJT case.
+    /// Mirrors [`detect_forward_active_bjts`](Self::detect_forward_active_bjts) for the BJT case.
     pub fn detect_grid_off_pentodes(
         mna: &crate::mna::MnaSystem,
         netlist: &Netlist,

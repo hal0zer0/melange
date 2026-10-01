@@ -31,7 +31,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
-      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
   format:
     name: Format
@@ -85,4 +85,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.85.0
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
-      - run: cargo check --workspace
+      - run: cargo check --workspace --all-targets
+
+  docs:
+    name: Rustdoc (library crates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps -p melange-primitives -p melange-devices -p melange-solver -p melange-validate
+        env:
+          RUSTDOCFLAGS: -Dwarnings

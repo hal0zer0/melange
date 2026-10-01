@@ -152,7 +152,7 @@ fn opamp_has_ac_coupled_downstream(
 ///
 /// # Explicit user overrides
 ///
-/// Any explicit mode (anything other than [`OpampRailMode::Auto`]) is
+/// Any explicit mode (anything other than [`OpampRailMode::Auto`](crate::codegen::OpampRailMode::Auto)) is
 /// returned verbatim with [`OpampRailModeReason::UserRequested`]. The
 /// resolver NEVER silently upgrades a user's explicit choice — even
 /// `None` on a circuit that would otherwise pick `ActiveSet` is honored,
@@ -275,7 +275,7 @@ fn boyle_catch_offset(limit: f64) -> f64 {
 }
 
 /// Augment a parsed netlist with the Boyle-style internal-gain-node op-amp
-/// model (catch diodes + output buffer), returning a fresh [`Netlist`] that
+/// model (catch diodes + output buffer), returning a fresh [`Netlist`](crate::parser::Netlist) that
 /// contains the original elements plus the synthesized internal-node
 /// scaffolding.
 ///
@@ -315,7 +315,7 @@ fn boyle_catch_offset(limit: f64) -> f64 {
 /// - For each finite rail, a reference node `_boyle_hi_{name}` /
 ///   `_boyle_lo_{name}` pinned one catch-diode drop inside the op-amp's swing
 ///   limit (`oa.vcc` / `oa.vee`, i.e. `VCC − VOH_DROP` / `VEE + VOL_DROP`;
-///   see [`boyle_catch_offset`]) by a
+///   see `boyle_catch_offset`) by a
 ///   synthesized DC voltage source, and a catch diode between
 ///   **`_oa_int_{name}`** and that reference node. The diodes are placed
 ///   on the internal node — NOT on the original output — so they only have

@@ -974,6 +974,8 @@ fn test_floating_transformer_codegen_compiles() {
     assert_compiles(&code, "floating_transformer");
 }
 
+// Matrix arithmetic reads clearest with explicit row/column indices.
+#[allow(clippy::needless_range_loop)]
 #[test]
 fn test_floating_transformer_a_matrix_symmetric() {
     // When inductors have no grounded terminals, the mutual stamp

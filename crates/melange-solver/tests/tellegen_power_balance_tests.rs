@@ -109,8 +109,8 @@ fn augmented_residual(spice: &str, x: &[f64], i_nl_ss: &[f64], dc_input: f64) ->
     let mut r = vec![0.0_f64; n_aug];
     for k in 0..n_aug {
         let mut acc = 0.0;
-        for j in 0..n_aug {
-            acc += mna.g[k][j] * x[j];
+        for (j, &xj) in x.iter().enumerate() {
+            acc += mna.g[k][j] * xj;
         }
         // − N_i·i_nl (augmented/VS rows carry no device stamps → row absent or 0)
         if k < mna.n_i.len() {

@@ -1735,137 +1735,6 @@ pub(super) struct OversamplingInfo {
     pub(super) num_sections_outer: usize,
 }
 
-#[cfg(test)]
-mod stateful_interface_tests {
-    //! Phase 0c Stage 1a — device-agnostic stateful-device interface.
-    //!
-    //! These tests exercise the shared emission scaffolding on a HYPOTHETICAL
-    //! glow-discharge–shaped device WITHOUT any netlist device existing: a
-    //! `state_size = 2` block (two thresholds), a 4-terminal node list, and TWO
-    //! foreign driving nodes spanning two rails. Nothing in the emitters is
-    //! specialized to CdsLdr (N=1, 2 terminals, 1 driving node) — the glow shape
-    //! goes through the identical code, which is the concrete, in-code proof
-    //! that the interface "survives GlowDischarge without a rebuild".
-    //!
-    //! The DK-vs-nodal *generated-code* byte-identity of these blocks is
-    //! guaranteed by construction (both emitters splice the SAME functions
-    //! below); the end-to-end netlist-reachable string-identity test lands in
-    //! Stage 1c once CdsLdr makes a stateful device reachable from a `.cir`.
-    use super::*;
-    use crate::device_types::{DeviceSlot, DeviceType, DiodeParams, StatefulSpec};
-
-    /// A glow-shaped spec: 2 state slots, 4 terminals, 2 driving nodes (one of
-    /// which is ground, to exercise the `0 → 0.0` path).
-    fn glow_spec() -> StatefulSpec {
-        StatefulSpec {
-            state_size: 2,
-            state_seed: vec![1.0, 2.0],
-            terminal_nodes: vec![1, 2, 3, 4],
-            driving_nodes: vec![5, 0], // node 5 and ground
-        }
-    }
-
-    #[test]
-    fn empty_slice_emits_nothing() {
-        // Byte-identity guarantee for non-stateful decks: every emitter is "".
-        let devs: Vec<StatefulDeviceData> = Vec::new();
-        assert_eq!(emit_stateful_state_fields(&devs), "");
-        assert_eq!(emit_stateful_default_fields(&devs), "");
-        assert_eq!(emit_stateful_state_restore(&devs, "self."), "");
-        assert_eq!(emit_stateful_state_restore(&devs, "state."), "");
-        assert_eq!(emit_stateful_update(&devs), "");
-        assert_eq!(emit_stateful_update_fns(&devs, &[], false), "");
-    }
-
-    #[test]
-    fn glow_shape_state_block_is_opaque_n() {
-        let spec = glow_spec();
-        let devs = vec![StatefulDeviceData {
-            dev_num: 0,
-            spec: &spec,
-            is_latched: true,
-        }];
-        // Opaque [f64; N], N device-declared — never a bool.
-        assert!(emit_stateful_state_fields(&devs).contains("pub device_0_state: [f64; 2],"));
-        // Default / reset / NaN-recovery all restore the full 2-slot seed.
-        assert!(emit_stateful_default_fields(&devs).contains("device_0_state: [1"));
-        let reset = emit_stateful_state_restore(&devs, "self.");
-        assert!(reset.starts_with("        self.device_0_state = ["));
-        let nan = emit_stateful_state_restore(&devs, "state.");
-        assert!(nan.starts_with("        state.device_0_state = ["));
-    }
-
-    #[test]
-    fn glow_shape_update_call_threads_two_driving_nodes_and_reserved_v_prev() {
-        let spec = glow_spec();
-        let devs = vec![StatefulDeviceData {
-            dev_num: 0,
-            spec: &spec,
-            is_latched: true,
-        }];
-        let call = emit_stateful_update(&devs);
-        // Two driving nodes → [f64; 2] arrays; node 5 → index 4, ground → 0.0.
-        assert!(call.contains("let v_prev_drive: [f64; 2] = [state.v_prev[4], 0.0];"));
-        assert!(call.contains("let v_conv_drive: [f64; 2] = [v[4], 0.0];"));
-        // Reserved v_prev is threaded through the fixed signature, and the
-        // reserved return is discarded at the call site (Stage 3 will apply it).
-        assert!(call.contains(
-            "let _ = stateful_update_dev0(&mut state.device_0_state, &v_prev_drive, &v_conv_drive, dt);"
-        ));
-        // dt is the internal (oversampled) period from the LIVE rate.
-        assert!(call.contains("state.current_sample_rate * OVERSAMPLING_FACTOR as f64"));
-    }
-
-    #[test]
-    fn glow_shape_update_fn_signature_is_device_agnostic() {
-        let spec = glow_spec();
-        let devs = vec![StatefulDeviceData {
-            dev_num: 0,
-            spec: &spec,
-            is_latched: true,
-        }];
-        // A throwaway slot to satisfy the body dispatch (params irrelevant to
-        // the Phase-1a scaffold body).
-        let slot = DeviceSlot {
-            device_type: DeviceType::Diode,
-            start_idx: 0,
-            dimension: 1,
-            params: crate::device_types::DeviceParams::Diode(DiodeParams {
-                is: 1e-14,
-                n_vt: 0.026,
-                cjo: 0.0,
-                rs: 0.0,
-                bv: f64::INFINITY,
-                ibv: 1e-3,
-                rth: f64::INFINITY,
-                cth: 1e-3,
-                xti: 3.0,
-                eg: 1.11,
-                tamb: 300.15,
-            }),
-            has_internal_mna_nodes: false,
-            vg2k_frozen: 0.0,
-            stateful: Some(spec.clone()),
-        };
-        let fns = emit_stateful_update_fns(&devs, std::slice::from_ref(&slot), false);
-        // The exact reserved-v_prev + reserved-return signature, generic over N/D.
-        assert!(fns.contains(
-            "fn stateful_update_dev0(state: &mut [f64; 2], v_prev: &[f64; 2], v_converged: &[f64; 2], dt: f64) -> StatefulUpdate"
-        ));
-        // The reserved return type is emitted exactly once, ahead of the hooks.
-        assert!(fns.contains("struct StatefulUpdate {"));
-        assert_eq!(fns.matches("struct StatefulUpdate {").count(), 1);
-        // Scaffold body yields the no-op default return.
-        assert!(fns.contains("StatefulUpdate::default()"));
-    }
-
-    #[test]
-    fn reserved_return_type_dormant_for_non_stateful() {
-        // No stateful device → no StatefulUpdate type, no hooks: byte-identical.
-        assert_eq!(emit_stateful_update_fns(&[], &[], false), "");
-    }
-}
-
 /// Get oversampling configuration for a given factor.
 pub(super) fn oversampling_info(factor: usize) -> OversamplingInfo {
     match factor {
@@ -2070,4 +1939,135 @@ pub(super) fn body_effect_jacobian_term(ir: &CircuitIR, i: usize, j: usize, s_ni
         col(mp.source_node),
         col(mp.bulk_node)
     )
+}
+
+#[cfg(test)]
+mod stateful_interface_tests {
+    //! Phase 0c Stage 1a — device-agnostic stateful-device interface.
+    //!
+    //! These tests exercise the shared emission scaffolding on a HYPOTHETICAL
+    //! glow-discharge–shaped device WITHOUT any netlist device existing: a
+    //! `state_size = 2` block (two thresholds), a 4-terminal node list, and TWO
+    //! foreign driving nodes spanning two rails. Nothing in the emitters is
+    //! specialized to CdsLdr (N=1, 2 terminals, 1 driving node) — the glow shape
+    //! goes through the identical code, which is the concrete, in-code proof
+    //! that the interface "survives GlowDischarge without a rebuild".
+    //!
+    //! The DK-vs-nodal *generated-code* byte-identity of these blocks is
+    //! guaranteed by construction (both emitters splice the SAME functions
+    //! below); the end-to-end netlist-reachable string-identity test lands in
+    //! Stage 1c once CdsLdr makes a stateful device reachable from a `.cir`.
+    use super::*;
+    use crate::device_types::{DeviceSlot, DeviceType, DiodeParams, StatefulSpec};
+
+    /// A glow-shaped spec: 2 state slots, 4 terminals, 2 driving nodes (one of
+    /// which is ground, to exercise the `0 → 0.0` path).
+    fn glow_spec() -> StatefulSpec {
+        StatefulSpec {
+            state_size: 2,
+            state_seed: vec![1.0, 2.0],
+            terminal_nodes: vec![1, 2, 3, 4],
+            driving_nodes: vec![5, 0], // node 5 and ground
+        }
+    }
+
+    #[test]
+    fn empty_slice_emits_nothing() {
+        // Byte-identity guarantee for non-stateful decks: every emitter is "".
+        let devs: Vec<StatefulDeviceData> = Vec::new();
+        assert_eq!(emit_stateful_state_fields(&devs), "");
+        assert_eq!(emit_stateful_default_fields(&devs), "");
+        assert_eq!(emit_stateful_state_restore(&devs, "self."), "");
+        assert_eq!(emit_stateful_state_restore(&devs, "state."), "");
+        assert_eq!(emit_stateful_update(&devs), "");
+        assert_eq!(emit_stateful_update_fns(&devs, &[], false), "");
+    }
+
+    #[test]
+    fn glow_shape_state_block_is_opaque_n() {
+        let spec = glow_spec();
+        let devs = vec![StatefulDeviceData {
+            dev_num: 0,
+            spec: &spec,
+            is_latched: true,
+        }];
+        // Opaque [f64; N], N device-declared — never a bool.
+        assert!(emit_stateful_state_fields(&devs).contains("pub device_0_state: [f64; 2],"));
+        // Default / reset / NaN-recovery all restore the full 2-slot seed.
+        assert!(emit_stateful_default_fields(&devs).contains("device_0_state: [1"));
+        let reset = emit_stateful_state_restore(&devs, "self.");
+        assert!(reset.starts_with("        self.device_0_state = ["));
+        let nan = emit_stateful_state_restore(&devs, "state.");
+        assert!(nan.starts_with("        state.device_0_state = ["));
+    }
+
+    #[test]
+    fn glow_shape_update_call_threads_two_driving_nodes_and_reserved_v_prev() {
+        let spec = glow_spec();
+        let devs = vec![StatefulDeviceData {
+            dev_num: 0,
+            spec: &spec,
+            is_latched: true,
+        }];
+        let call = emit_stateful_update(&devs);
+        // Two driving nodes → [f64; 2] arrays; node 5 → index 4, ground → 0.0.
+        assert!(call.contains("let v_prev_drive: [f64; 2] = [state.v_prev[4], 0.0];"));
+        assert!(call.contains("let v_conv_drive: [f64; 2] = [v[4], 0.0];"));
+        // Reserved v_prev is threaded through the fixed signature, and the
+        // reserved return is discarded at the call site (Stage 3 will apply it).
+        assert!(call.contains(
+            "let _ = stateful_update_dev0(&mut state.device_0_state, &v_prev_drive, &v_conv_drive, dt);"
+        ));
+        // dt is the internal (oversampled) period from the LIVE rate.
+        assert!(call.contains("state.current_sample_rate * OVERSAMPLING_FACTOR as f64"));
+    }
+
+    #[test]
+    fn glow_shape_update_fn_signature_is_device_agnostic() {
+        let spec = glow_spec();
+        let devs = vec![StatefulDeviceData {
+            dev_num: 0,
+            spec: &spec,
+            is_latched: true,
+        }];
+        // A throwaway slot to satisfy the body dispatch (params irrelevant to
+        // the Phase-1a scaffold body).
+        let slot = DeviceSlot {
+            device_type: DeviceType::Diode,
+            start_idx: 0,
+            dimension: 1,
+            params: crate::device_types::DeviceParams::Diode(DiodeParams {
+                is: 1e-14,
+                n_vt: 0.026,
+                cjo: 0.0,
+                rs: 0.0,
+                bv: f64::INFINITY,
+                ibv: 1e-3,
+                rth: f64::INFINITY,
+                cth: 1e-3,
+                xti: 3.0,
+                eg: 1.11,
+                tamb: 300.15,
+            }),
+            has_internal_mna_nodes: false,
+            vg2k_frozen: 0.0,
+            stateful: Some(spec.clone()),
+        };
+        let fns = emit_stateful_update_fns(&devs, std::slice::from_ref(&slot), false);
+        // The exact reserved-v_prev + reserved-return signature, generic over N/D.
+        assert!(fns.contains(
+            "fn stateful_update_dev0(state: &mut [f64; 2], v_prev: &[f64; 2], v_converged: &[f64; 2], dt: f64) -> StatefulUpdate"
+        ));
+        // The reserved return type is emitted exactly once, ahead of the hooks.
+        assert!(fns.contains("struct StatefulUpdate {"));
+        assert_eq!(fns.matches("struct StatefulUpdate {").count(), 1);
+        // Scaffold body yields the no-op default return.
+        assert!(fns.contains("StatefulUpdate::default()"));
+    }
+
+    #[test]
+    fn reserved_return_type_dormant_for_non_stateful() {
+        // No stateful device → no StatefulUpdate type, no hooks: byte-identical.
+        assert_eq!(emit_stateful_update_fns(&[], &[], false), "");
+    }
 }

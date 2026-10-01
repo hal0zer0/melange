@@ -7,12 +7,12 @@
 //! Matrices are small (a few hundred rows at most) and dense.
 //!
 //! Method (EISPACK `rg` without vectors, then inverse iteration):
-//! 0. [`isolate`]: the eigenvalues the sparsity pattern exposes exactly (a
+//! 0. `isolate`: the eigenvalues the sparsity pattern exposes exactly (a
 //!    row or column with no off-diagonal entries; `balanc`'s permutation
 //!    stage) are taken out first, and steps 1–3 run on the remaining core.
 //!    The propagator's algebraic directions are such columns, and the QR
 //!    iteration can cycle on the defective zero eigenvalue they form.
-//! 1. [`balance`]: diagonal similarity by powers of 2 (exact in floating
+//! 1. `balance`: diagonal similarity by powers of 2 (exact in floating
 //!    point) so row and column norms are comparable. The propagator mixes
 //!    dimensionless blocks with blocks in siemens and amperes, so this
 //!    matters.

@@ -196,7 +196,7 @@ pub struct WiperDirective {
 pub struct SwitchDirective {
     /// Component names controlled by this switch (e.g. ["C_hfb", "L_hfb"])
     pub component_names: Vec<String>,
-    /// Position values: positions[pos][comp] = value for that component at that position
+    /// Position values: `positions[pos][comp]` = value for that component at that position
     pub positions: Vec<Vec<f64>>,
     /// Optional human-readable label (e.g. "Bright")
     pub label: Option<String>,

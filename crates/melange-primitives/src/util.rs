@@ -187,7 +187,7 @@ pub fn thermal_voltage(temp_c: f64) -> f64 {
     K_BOLTZMANN * temp_k / Q_ELECTRON
 }
 
-/// SPICE's nominal temperature, TNOM = 27 °C [K]: the temperature a vendor
+/// SPICE's nominal temperature, TNOM = 27 °C \[K\]: the temperature a vendor
 /// SPICE card's parameters are extracted at, and melange's `TAMB` default.
 pub const T_NOM: f64 = 300.15;
 

@@ -326,7 +326,7 @@ fn test_opamp_drop_without_its_rail_is_refused() {
     ] {
         let spice = format!("Drop Without Rail\nR1 in inv 10k\nR2 inv out 100k\nU1 0 inv out oa\n.model oa {card}\n");
         let netlist = Netlist::parse(&spice).unwrap();
-        let err = MnaSystem::from_netlist(&netlist).err().expect(card);
+        let err = MnaSystem::from_netlist(&netlist).expect_err(card);
         assert!(
             format!("{err:?}").contains("is the drop from"),
             "{card}: {err:?}"
@@ -379,7 +379,7 @@ U1 0 inv out oa
 .model oa OA(AOL=200000 VSAT=13 VCC=9 VEE=0)
 "#;
     let netlist = Netlist::parse(spice).unwrap();
-    let err = MnaSystem::from_netlist(&netlist).err().expect("refused");
+    let err = MnaSystem::from_netlist(&netlist).expect_err("refused");
     assert!(
         format!("{err:?}").contains("VSAT sets the swing limit"),
         "{err:?}"

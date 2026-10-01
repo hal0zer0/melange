@@ -126,6 +126,13 @@
 //! [`Finding::severity`]). A deck that declares its pins HAS said where its
 //! edges are, so [`Ports::with_deck_pins`] hands `dc-op` that knowledge and it
 //! refuses like everything else.
+//!
+//! [`Severity::Refuse`]: crate::topology::Severity::Refuse
+//! [`Severity::Warn`]: crate::topology::Severity::Warn
+//! [`Ports::unknown`]: crate::topology::Ports::unknown
+//! [`Ports::inputs_only`]: crate::topology::Ports::inputs_only
+//! [`Ports::with_deck_pins`]: crate::topology::Ports::with_deck_pins
+//! [`Finding::severity`]: crate::topology::Finding::severity
 
 use crate::parser::{Element, Netlist};
 use std::collections::{BTreeMap, BTreeSet};

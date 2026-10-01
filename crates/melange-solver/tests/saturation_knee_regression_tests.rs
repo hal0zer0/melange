@@ -838,10 +838,13 @@ fn c2_shared_core_saturates_on_magnetizing_not_winding_current() {
 // only as an average over each step, alternates ±a·ωL0·Isat from sample to
 // sample for the whole render.
 
+/// (Idc/Isat, H2/H1 dB, H3/H1 dB) at one bias point.
+type KneePoint = (f64, f64, f64);
+
 /// (a, [(Idc/Isat, H2/H1 dB, H3/H1 dB)]) from exact flux drive, LAIR = 3e-4.
 /// a = 0.3 stops at Idc/Isat = 0.5: at 1.0 the flux would pass saturation
 /// (φ0 + a > 1), which is not flux drive any more.
-const C3_REF: [(f64, &[(f64, f64, f64)]); 2] = [
+const C3_REF: [(f64, &[KneePoint]); 2] = [
     (
         0.1,
         &[

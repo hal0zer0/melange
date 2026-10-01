@@ -29,8 +29,8 @@
 //! - op-amp NI/INV (golden circuits @ 0.1 V): exact linear-algebra
 //!   solution of the VCCS network including the 1 Ω input Thevenin:
 //!   NI +10.999395 → 20.8274 dB, INV −9.989461 → 19.9908 dB; measured
-//!   melange 20.8299 / 19.9934 dB (Δ ≈ 0.0026 dB = 1 kHz vs DC analytic
-//!   + 5 Hz blocker residue). The same circuits' full waveforms are
+//!   melange 20.8299 / 19.9934 dB (Δ ≈ 0.0026 dB = 1 kHz vs DC analytic +
+//!   5 Hz blocker residue). The same circuits' full waveforms are
 //!   ngspice-pinned to 1.3e-8 V in the goldens.
 //! - pentode (EL84 bench @ 20 mV): NO independent reference exists —
 //!   ngspice has no pentode Koren twin and building a B-source

@@ -144,6 +144,9 @@ fn a_stated_pair_equal_to_the_implicit_one_builds_the_same_system() {
 
 /// Output voltage phasor for a 1 V phasor behind melange's 1 Ω input, from
 /// the built system's own `G + jωC`.
+// Row elimination reads row `col` while writing row `r` of the same matrix;
+// indices keep that readable without a split borrow.
+#[allow(clippy::needless_range_loop)]
 fn ac(sys: &MnaSystem, out: &str, f: f64) -> (f64, f64) {
     let aug = sys.build_augmented_matrices();
     let n = aug.n_nodal;
@@ -194,6 +197,8 @@ fn rel(z: (f64, f64), r: (f64, f64)) -> f64 {
 }
 
 /// ngspice `.ac` of the linear decks (K-coupled [L]), 1 V behind 1 Ω.
+// Literals are ngspice's printed output, kept verbatim.
+#[allow(clippy::excessive_precision)]
 const NGSPICE: [(&str, f64, (f64, f64)); 9] = [
     ("w2", 20.0, (2.597168306787500e-01, 1.366988784542052e-01)),
     ("w2", 1000.0, (3.191173439830309e-01, -6.32827506006796e-02)),

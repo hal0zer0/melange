@@ -162,12 +162,12 @@ fn be_with_oversampling_bakes_be_matrices_at_internal_rate() {
         }
     }
     let s_expected = invert_dense(&a_be, n);
-    for i in 0..n * n {
+    for (i, &expected) in s_expected.iter().enumerate() {
         assert!(
-            (ir.matrices.s[i] - s_expected[i]).abs() <= 1e-6 * s_expected[i].abs().max(1e-6),
+            (ir.matrices.s[i] - expected).abs() <= 1e-6 * expected.abs().max(1e-6),
             "S[{i}] = {}, expected BE-at-internal-rate inverse {}",
             ir.matrices.s[i],
-            s_expected[i]
+            expected
         );
     }
 

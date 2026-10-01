@@ -51,7 +51,7 @@ const LU_PIVOT_EPSILON: f64 = 1e-30;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SolverMode {
     /// DK method: precompute S=A⁻¹, NR in M-dimensional current space.
-    /// Fast (O(N²+M³) per sample) but requires well-conditioned A and K[i][i]<0.
+    /// Fast (O(N²+M³) per sample) but requires well-conditioned A and `K[i][i]`<0.
     #[default]
     Dk,
     /// Full-nodal NR: LU solve in N-dimensional voltage space per NR iteration.
@@ -863,7 +863,7 @@ pub struct Matrices {
     pub s: Vec<f64>,
     /// History matrix `alpha·C` (algebraic rows zeroed), N×N row-major, at the
     /// codegen sample rate. Trapezoidal builds use the charge form: this plus
-    /// the carried charge derivative `q_dot`, see [`charge_form_history`].
+    /// the carried charge derivative `q_dot`, see `charge_form_history`.
     /// Backward-Euler builds: `(1/T)·C`.
     pub a_neg: Vec<f64>,
     /// Nonlinear kernel K = N_v * S * N_i, M×M row-major (default for codegen sample rate)
@@ -952,13 +952,13 @@ pub struct OpampIR {
     /// no cap (or one at or above AOL).
     pub gm_delta: f64,
     /// Transconductance of the VCCS as stamped in the transient matrices,
-    /// `min(AOL, AOL_TRANSIENT_CAP) / ROUT` [S].
+    /// `min(AOL, AOL_TRANSIENT_CAP) / ROUT` \[S\].
     #[serde(default)]
     pub gm: f64,
-    /// `1 / ROUT` [S]: the linear model's output conductance.
+    /// `1 / ROUT` \[S\]: the linear model's output conductance.
     #[serde(default)]
     pub g_out: f64,
-    /// `1 / R_SAG` [S]: the saturated output's conductance to its swing limit.
+    /// `1 / R_SAG` \[S\]: the saturated output's conductance to its swing limit.
     #[serde(default)]
     pub g_sag: f64,
 }
@@ -1258,7 +1258,7 @@ pub struct SwitchComponentIR {
     /// Nominal value from netlist
     pub nominal_value: f64,
     /// For 'L' components: row index in the augmented C matrix where the
-    /// inductance value lives (c_work[k][k] = L). None for non-inductors.
+    /// inductance value lives (`c_work[k][k]` = L). None for non-inductors.
     #[serde(default)]
     pub augmented_row: Option<usize>,
 }
@@ -1286,7 +1286,7 @@ pub struct SwitchIR {
     pub label: String,
     /// Components controlled by this switch
     pub components: Vec<SwitchComponentIR>,
-    /// Position values: positions[pos][comp] = value
+    /// Position values: `positions[pos][comp]` = value
     pub positions: Vec<Vec<f64>>,
     /// Number of positions
     pub num_positions: usize,
@@ -1314,7 +1314,7 @@ pub struct SaturatingInductorIR {
     /// Saturation current (amps), the tanh scale current:
     /// L_diff = L_mag/cosh²(1) + L_air ≈ 0.42·L_mag + L_air at i = isat.
     pub isat: f64,
-    /// Row index in the augmented system (C[aug_row][aug_row] = L)
+    /// Row index in the augmented system (`C[aug_row][aug_row]` = L)
     pub aug_row: usize,
     /// Index into the uncoupled/coupled/transformer inductor arrays for
     /// identifying which inductor this is (for naming constants).
@@ -1900,7 +1900,7 @@ impl CircuitIR {
         Ok(ir)
     }
 
-    /// Access S matrix element S[i][j]
+    /// Access S matrix element `S[i][j]`
     pub fn s(&self, i: usize, j: usize) -> f64 {
         let n = self.topology.n;
         debug_assert!(
@@ -1914,7 +1914,7 @@ impl CircuitIR {
         self.matrices.s[i * n + j]
     }
 
-    /// Access K matrix element K[i][j]
+    /// Access K matrix element `K[i][j]`
     pub fn k(&self, i: usize, j: usize) -> f64 {
         let m = self.topology.m;
         debug_assert!(
@@ -1928,7 +1928,7 @@ impl CircuitIR {
         self.matrices.k[i * m + j]
     }
 
-    /// Access N_v matrix element N_v[i][j] (M×N storage: device × node)
+    /// Access N_v matrix element `N_v[i][j]` (M×N storage: device × node)
     pub fn n_v(&self, i: usize, j: usize) -> f64 {
         let n = self.topology.n;
         debug_assert!(
@@ -1942,7 +1942,7 @@ impl CircuitIR {
         self.matrices.n_v[i * n + j]
     }
 
-    /// Access N_i matrix element N_i[i][j] (N×M storage: node × device)
+    /// Access N_i matrix element `N_i[i][j]` (N×M storage: node × device)
     pub fn n_i(&self, i: usize, j: usize) -> f64 {
         let m = self.topology.m;
         debug_assert!(
@@ -1956,7 +1956,7 @@ impl CircuitIR {
         self.matrices.n_i[i * m + j]
     }
 
-    /// Access A_neg matrix element A_neg[i][j]
+    /// Access A_neg matrix element `A_neg[i][j]`
     pub fn a_neg(&self, i: usize, j: usize) -> f64 {
         let n = self.topology.n;
         debug_assert!(
@@ -1970,7 +1970,7 @@ impl CircuitIR {
         self.matrices.a_neg[i * n + j]
     }
 
-    /// Access G matrix element G[i][j]
+    /// Access G matrix element `G[i][j]`
     pub fn g(&self, i: usize, j: usize) -> f64 {
         let n = self.topology.n;
         debug_assert!(
@@ -1984,7 +1984,7 @@ impl CircuitIR {
         self.matrices.g_matrix[i * n + j]
     }
 
-    /// Access C matrix element C[i][j]
+    /// Access C matrix element `C[i][j]`
     pub fn c(&self, i: usize, j: usize) -> f64 {
         let n = self.topology.n;
         debug_assert!(
@@ -1998,7 +1998,7 @@ impl CircuitIR {
         self.matrices.c_matrix[i * n + j]
     }
 
-    /// Access A matrix element A[i][j] (trapezoidal, nodal mode only)
+    /// Access A matrix element `A[i][j]` (trapezoidal, nodal mode only)
     pub fn a_matrix(&self, i: usize, j: usize) -> f64 {
         let n = self.topology.n;
         debug_assert!(
@@ -2012,7 +2012,7 @@ impl CircuitIR {
         self.matrices.a_matrix[i * n + j]
     }
 
-    /// Access A_be matrix element A_be[i][j] (backward Euler, nodal mode only)
+    /// Access A_be matrix element `A_be[i][j]` (backward Euler, nodal mode only)
     pub fn a_matrix_be(&self, i: usize, j: usize) -> f64 {
         let n = self.topology.n;
         debug_assert!(
@@ -2026,7 +2026,7 @@ impl CircuitIR {
         self.matrices.a_matrix_be[i * n + j]
     }
 
-    /// Access A_neg_be matrix element A_neg_be[i][j] (backward Euler history, nodal mode only)
+    /// Access A_neg_be matrix element `A_neg_be[i][j]` (backward Euler history, nodal mode only)
     pub fn a_neg_be(&self, i: usize, j: usize) -> f64 {
         let n = self.topology.n;
         debug_assert!(
@@ -2040,12 +2040,12 @@ impl CircuitIR {
         self.matrices.a_neg_be[i * n + j]
     }
 
-    /// Access S_be matrix element S_be[i][j] (backward Euler, nodal Schur)
+    /// Access S_be matrix element `S_be[i][j]` (backward Euler, nodal Schur)
     pub fn s_be(&self, i: usize, j: usize) -> f64 {
         self.matrices.s_be[i * self.topology.n + j]
     }
 
-    /// Access K_be matrix element K_be[i][j] (backward Euler, nodal Schur)
+    /// Access K_be matrix element `K_be[i][j]` (backward Euler, nodal Schur)
     pub fn k_be(&self, i: usize, j: usize) -> f64 {
         self.matrices.k_be[i * self.topology.m + j]
     }

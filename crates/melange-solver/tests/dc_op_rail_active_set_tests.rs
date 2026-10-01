@@ -61,10 +61,13 @@ fn node(built: &melange_solver::build::Built, name: &str) -> f64 {
     built.dc_op.v_node[built.mna.node_map[name] - 1]
 }
 
+/// (deck, mode, [(node, ngspice volts, tolerance)])
+type RailCase<'a> = (&'a str, OpampRailMode, &'a [(&'a str, f64, f64)]);
+
 #[test]
 fn a_railed_output_beside_a_junction_settles_on_each_rail_law() {
     // (deck, mode, [(node, ngspice volts, tolerance)])
-    let cases: [(&str, OpampRailMode, &[(&str, f64, f64)]); 6] = [
+    let cases: [RailCase<'_>; 6] = [
         (
             RAILED_BESIDE_A_DIODE,
             OpampRailMode::Hard,

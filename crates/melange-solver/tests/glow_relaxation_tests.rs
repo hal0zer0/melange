@@ -187,7 +187,7 @@ fn assert_relax_fixed(route: &str, out: &str) {
         "[{route}] expected sustained oscillation, got {strikes} strikes"
     );
     assert!(
-        vmax >= 133.0 && vmax <= 137.0,
+        (133.0..=137.0).contains(&vmax),
         "[{route}] peak should strike near VO=135, got vmax={vmax}"
     );
     // The emergent reset floor lands at the maintaining-line intercept region

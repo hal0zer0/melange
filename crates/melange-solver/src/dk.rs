@@ -640,7 +640,7 @@ impl DkKernel {
     /// Build DK kernel from MNA using augmented MNA for inductors.
     ///
     /// Each inductor winding adds an extra variable (branch current j_L) with
-    /// inductance L in the C matrix. This gives A[k][k] = 2L/T (well-conditioned)
+    /// inductance L in the C matrix. This gives `A[k][k]` = 2L/T (well-conditioned)
     /// instead of the companion model's T/(2L) (ill-conditioned for large L).
     ///
     /// The resulting kernel has `n = n_nodal = n_aug + total_inductor_windings`.
@@ -923,31 +923,31 @@ impl DkKernel {
         })
     }
 
-    /// Access S matrix element S[i][j]
+    /// Access S matrix element `S[i][j]`
     #[inline(always)]
     pub fn s(&self, i: usize, j: usize) -> f64 {
         self.s[i * self.n + j]
     }
 
-    /// Access K matrix element K[i][j]
+    /// Access K matrix element `K[i][j]`
     #[inline(always)]
     pub fn k(&self, i: usize, j: usize) -> f64 {
         self.k[i * self.m + j]
     }
 
-    /// Access N_v matrix element N_v[i][j]
+    /// Access N_v matrix element `N_v[i][j]`
     #[inline(always)]
     pub fn n_v(&self, i: usize, j: usize) -> f64 {
         self.n_v[i * self.n + j]
     }
 
-    /// Access N_i matrix element N_i[i][j]
+    /// Access N_i matrix element `N_i[i][j]`
     #[inline(always)]
     pub fn n_i(&self, i: usize, j: usize) -> f64 {
         self.n_i[i * self.m + j]
     }
 
-    /// Access A_neg matrix element A_neg[i][j]
+    /// Access A_neg matrix element `A_neg[i][j]`
     #[inline(always)]
     pub fn a_neg(&self, i: usize, j: usize) -> f64 {
         self.a_neg[i * self.n + j]
@@ -1192,7 +1192,7 @@ impl DkKernel {
     /// Update multi-winding transformer group companion model state.
     ///
     /// For each group with W windings, uses the NxN admittance matrix Y:
-    ///   i_k_new = i_k_prev + sum_j Y[k][j] * (v_j_prev + v_j_new)
+    ///   i_k_new = i_k_prev + sum_j `Y[k][j]` * (v_j_prev + v_j_new)
     ///   i_k_hist = 2 * i_k_new
     ///
     /// See [`update_inductors`](Self::update_inductors) for why the

@@ -145,7 +145,7 @@ pub enum Element {
         n_minus: String,
         model: String,
     },
-    /// BJT: Qname nc nb ne [ns] modelname
+    /// BJT: Qname nc nb ne \[ns\] modelname
     Bjt {
         name: String,
         nc: String,
@@ -198,7 +198,7 @@ pub enum Element {
         /// Model name (references .model with TUBE type)
         model: String,
     },
-    /// Pentode (or beam tetrode): Pname n_plate n_grid n_cathode n_screen [n_suppressor] modelname
+    /// Pentode (or beam tetrode): Pname n_plate n_grid n_cathode n_screen \[n_suppressor\] modelname
     ///
     /// Node order is **plate-grid-cathode-screen** (LTspice/PSpice/Ayumi convention).
     /// Note this differs from the existing `Triode` (`T`) element which uses
@@ -236,7 +236,7 @@ pub enum Element {
     /// path; 1 NR dimension, `I = (V(r+)−V(r-)) / r_state`). `ctrl+ ctrl-` are
     /// the foreign brightness-control node pair that drives the after-solve
     /// state update — `V(ctrl+) − V(ctrl-)` is the normalized brightness in
-    /// [0,1] (0 = dark → RMAX, 1 = bright → RMIN), clamped inside `update()`.
+    /// \[0,1\] (0 = dark → RMAX, 1 = bright → RMIN), clamped inside `update()`.
     /// The LED is NOT modeled inside the device (a physically-driven
     /// optocoupler is future composition: a `D` + behavioral B-source feeding
     /// the brightness node). References a `.model` of type `LDR`.
@@ -403,7 +403,7 @@ impl Element {
     /// physical connection (the controlling voltage is sensed there), so it is
     /// included alongside the output pair.
     ///
-    /// The node list must stay in lockstep with [`super::normalize_element_nodes`] —
+    /// The node list must stay in lockstep with `super::normalize_element_nodes` —
     /// any variant that carries a node there must yield it here.
     pub fn nodes(&self) -> Vec<&str> {
         match self {

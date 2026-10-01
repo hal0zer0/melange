@@ -154,7 +154,7 @@ fn power_iterate_rho_sign(
 ///
 /// `s` and `a_neg` are flat row-major `n × n` matrices (`s[i*n + j]`).
 /// Iterates to a relative-change tolerance on the growth (norm-ratio)
-/// estimate (see [`power_iterate_rho_sign`]) instead of a fixed iteration
+/// estimate (see `power_iterate_rho_sign`) instead of a fixed iteration
 /// count — the old fixed-20 scheme carried ~0.5-1% bias when a subdominant
 /// eigenvalue sat close to the dominant one, while the promotion
 /// thresholds (0.999 / 1.002) are only 0.3% apart.

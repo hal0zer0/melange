@@ -378,9 +378,9 @@ pub struct PentodeCatalogEntry {
     pub a_factor: f64,
     /// β — Reefman §4.4 beta factor
     pub beta_factor: f64,
-    /// Maximum grid current [A]
+    /// Maximum grid current \[A\]
     pub ig_max: f64,
-    /// Grid current onset voltage [V]
+    /// Grid current onset voltage \[V\]
     pub vgk_onset: f64,
     /// Screen-current functional form:
     /// - [`ScreenForm::Rational`] — Reefman §4.4 (`1/(1+β·Vp)`), true pentodes.

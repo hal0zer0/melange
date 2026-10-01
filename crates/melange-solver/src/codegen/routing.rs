@@ -51,7 +51,7 @@ pub struct RoutingDecision {
     /// (positive feedback in the DK Schur NR — e.g. single-transformer NFB
     /// circuits built via `from_mna_augmented`, which only warns).
     /// Dimensions whose N_i column is all zeros (MOSFET gate, VCA control)
-    /// have K[i][i] = 0 by construction and are excluded.
+    /// have `K[i][i]` = 0 by construction and are excluded.
     pub k_diag_unsafe: bool,
     /// Whether S matrix is ill-conditioned (max|S| > 1e6).
     pub s_ill_conditioned: bool,

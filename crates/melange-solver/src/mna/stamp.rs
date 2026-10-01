@@ -5,7 +5,7 @@ use super::*;
 impl MnaSystem {
     /// Stamp a resistor between two nodes.
     ///
-    /// G[i,i] += g, G[j,j] += g, G[i,j] -= g, G[j,i] -= g
+    /// `G[i,i]` += g, `G[j,j]` += g, `G[i,j]` -= g, `G[j,i]` -= g
     #[deprecated(
         since = "0.1.14",
         note = "unused: the MNA builder does not call it (its indices are raw 0-based \

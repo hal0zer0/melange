@@ -726,7 +726,7 @@ pub fn apply_forward_active_reduction(
 ///
 /// `tube_grid_fa` is the `--tube-grid-fa` mode: `on` reduces every
 /// non-variable-mu pentode (warned per device — the reduction is not
-/// accuracy-neutral, see [`CircuitIR::detect_grid_off_pentodes`]); `off`
+/// accuracy-neutral, see [`CircuitIR::detect_grid_off_pentodes`](crate::codegen::ir::CircuitIR::detect_grid_off_pentodes)); `off`
 /// and `auto` both keep the full 3D model. `auto` is reserved for a
 /// reduction that is provably neutral; none exists today.
 ///
@@ -871,7 +871,7 @@ impl std::error::Error for TopologyRefusal {}
 /// `melange nodes` and `melange dc-op` call this too and are never refused by
 /// it, because neither takes an `-o` and so both pass
 /// [`crate::topology::Ports::unknown`] — a dangling finding cannot reach
-/// [`Severity::Refuse`] without port knowledge to rest on (see
+/// [`Severity::Refuse`](crate::topology::Severity::Refuse) without port knowledge to rest on (see
 /// [`crate::topology::Finding::severity`]). The exemption is a property of what
 /// those verbs know, not a list of names to keep in sync.
 pub fn topology_gate(

@@ -484,7 +484,7 @@ pub struct CodegenConfig {
     /// Ignored when `backward_euler` is already `true`.
     pub force_trap: bool,
     /// Which nodal sub-path to emit — see [`NodalSubPath`]. Default
-    /// [`NodalSubPath::Auto`], which is the shipping behaviour.
+    /// [`NodalSubPathOverride::Auto`], which is the shipping behaviour.
     ///
     /// Tests that need to exercise the full-LU emitter historically abused a
     /// dummy behavioral source (`B_frc frc 0 V={0}`) as a routing lever; this

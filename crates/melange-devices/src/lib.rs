@@ -110,7 +110,7 @@ pub mod safeguards {
     /// Minimum conductance to prevent divide-by-zero.
     pub const MIN_CONDUCTANCE: f64 = 1e-15;
 
-    /// Forward-current ceiling for the extended diode exponential region [A].
+    /// Forward-current ceiling for the extended diode exponential region \[A\].
     /// Beyond `MAX_EXP_V`, the diode I-V curve continues as a true exponential
     /// (in ln-current space) until forward current reaches this ceiling, then
     /// extends linearly. Lets extreme-IS models (wide-bandgap junctions,

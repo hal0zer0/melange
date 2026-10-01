@@ -306,6 +306,8 @@ fn test_nv_ni_consistency_both_floating() {
 /// - All S diagonal elements are positive.
 /// - S * A approximately equals the identity matrix (S = A^{-1}).
 #[test]
+// Matrix arithmetic reads clearest with explicit row/column indices.
+#[allow(clippy::needless_range_loop)]
 fn test_s_matrix_positive_diagonal() {
     let circuits = [
         (

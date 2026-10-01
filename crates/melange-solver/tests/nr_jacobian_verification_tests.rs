@@ -15,6 +15,8 @@ use melange_solver::parser::Netlist;
 
 /// Compute the DK residual: F(v) = v - p - K * i(v)
 /// where p is the prediction and K is the DK kernel matrix.
+// Matrix arithmetic reads clearest with explicit row/column indices.
+#[allow(clippy::needless_range_loop)]
 fn dk_residual(
     kernel: &DkKernel,
     v_nl: &[f64],
@@ -33,6 +35,8 @@ fn dk_residual(
 }
 
 /// Compute the analytical Jacobian J = I - K * J_dev (block-diagonal).
+// Matrix arithmetic reads clearest with explicit row/column indices.
+#[allow(clippy::needless_range_loop)]
 fn analytical_jacobian(kernel: &DkKernel, j_dev: &[Vec<f64>]) -> Vec<Vec<f64>> {
     let m = kernel.m;
     // K * J_dev
@@ -300,11 +304,11 @@ fn test_jacobian_at_dc_op_is_near_identity_residual() {
     let p = vec![0.0; dk.m]; // Zero prediction (no input)
     let residual = dk_residual(&dk, &v_nl, &p, &i_fn);
 
-    for i in 0..dk.m {
+    for (i, &r) in residual.iter().enumerate() {
         assert!(
-            residual[i].abs() < 1e-10,
+            r.abs() < 1e-10,
             "residual[{i}] = {:.6e} should be ~0 at equilibrium",
-            residual[i]
+            r
         );
     }
     let _ = mna;

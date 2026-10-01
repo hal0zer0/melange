@@ -92,7 +92,7 @@ pub enum DeckHazard {
 /// (`T G K M U N P F`, where a bare `M` is **milli**) — then discard every
 /// remaining character. `10kohm` is 10 k, `4k7` is 4 k, `2M2` is 2 m.
 ///
-/// The expectations in [`tests::ngspice_reading_matches_measured_ngspice`] were
+/// The expectations in `tests::ngspice_reading_matches_measured_ngspice` were
 /// measured against system ngspice 42, not derived from this function.
 pub fn ngspice_reading(token: &str) -> Option<f64> {
     let b = token.as_bytes();

@@ -2666,8 +2666,7 @@ C1 out 0 1u
     let mna = MnaSystem::from_netlist(&netlist).expect("mna");
     let kernel = DkKernel::from_mna(&mna, 44100.0).expect("kernel");
     let err = CircuitIR::from_kernel(&kernel, &mna, &netlist, &default_config())
-        .err()
-        .expect("a companion-model kernel must be refused");
+        .expect_err("a companion-model kernel must be refused");
     assert!(
         err.to_string().contains("DkKernel::from_mna_augmented"),
         "{err}"
@@ -6576,8 +6575,7 @@ fn test_empty_output_nodes_rejected() {
         ..shipped_config(RC_CIRCUIT_SPICE, "test_circuit")
     };
     let err = try_shipped(RC_CIRCUIT_SPICE, &config)
-        .err()
-        .expect("the build must refuse a config with no outputs");
+        .expect_err("the build must refuse a config with no outputs");
     assert!(err.contains("output_nodes must not be empty"), "{err}");
 
     let (netlist, mna, kernel) = build_pipeline(RC_CIRCUIT_SPICE);

@@ -35,7 +35,7 @@ pub struct RuntimeSourceInfo {
 pub struct SwitchInfo {
     /// Components controlled by this switch
     pub components: Vec<SwitchComponentInfo>,
-    /// Position values: positions[pos][comp] = value for that position
+    /// Position values: `positions[pos][comp]` = value for that position
     pub positions: Vec<Vec<f64>>,
     /// Optional human-readable label from the `.switch` directive (e.g. "Oboe 8").
     /// Emitted as `SWITCH_LABELS` so consumers can assert their own enum against

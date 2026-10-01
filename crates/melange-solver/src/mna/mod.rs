@@ -240,7 +240,7 @@ impl MnaSystem {
     }
 }
 
-/// Large conductance for modeling short circuits at DC [S].
+/// Large conductance for modeling short circuits at DC \[S\].
 ///
 /// Used only in the DC operating-point solver to stamp inductors as short circuits.
 /// NOT used for voltage sources or VCVS — those use augmented MNA (extra variables

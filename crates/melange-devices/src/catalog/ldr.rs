@@ -10,15 +10,15 @@
 pub struct LdrCatalogEntry {
     /// Part-number aliases (case-insensitive).
     pub names: &'static [&'static str],
-    /// Minimum resistance (brightest light) [Ω].
+    /// Minimum resistance (brightest light) \[Ω\].
     pub r_min: f64,
-    /// Maximum (dark) resistance [Ω].
+    /// Maximum (dark) resistance \[Ω\].
     pub r_max: f64,
     /// Power-law exponent (brightness → resistance).
     pub gamma: f64,
-    /// Attack time constant [s] (resistance decreasing / getting brighter).
+    /// Attack time constant \[s\] (resistance decreasing / getting brighter).
     pub attack_tau: f64,
-    /// Release time constant [s] (resistance increasing / getting darker).
+    /// Release time constant \[s\] (resistance increasing / getting darker).
     pub release_tau: f64,
     /// Source citation.
     pub source: &'static str,

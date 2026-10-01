@@ -5,9 +5,9 @@
 pub struct JfetCatalogEntry {
     /// Part number aliases
     pub names: &'static [&'static str],
-    /// Saturation drain current IDSS [A]
+    /// Saturation drain current IDSS \[A\]
     pub idss: f64,
-    /// Pinch-off voltage VP [V] (negative for N-channel, positive for P-channel)
+    /// Pinch-off voltage VP \[V\] (negative for N-channel, positive for P-channel)
     pub vp: f64,
     /// Channel-length modulation LAMBDA [1/V]
     pub lambda: f64,

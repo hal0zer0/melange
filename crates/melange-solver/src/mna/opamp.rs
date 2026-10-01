@@ -16,25 +16,25 @@ pub struct OpampInfo {
     pub n_out_idx: usize,
     /// Open-loop gain (default 200,000)
     pub aol: f64,
-    /// Open-loop small-signal output resistance [Ω] (`ROUT`, default
+    /// Open-loop small-signal output resistance \[Ω\] (`ROUT`, default
     /// [`OPAMP_DEFAULT_ROUT_OHM`]). The linear model's output impedance; in
     /// closed loop it is divided by the loop gain.
     pub r_out: f64,
-    /// Saturated output sag [Ω] (`R_SAG`, default [`OPAMP_DEFAULT_R_SAG_OHM`]):
+    /// Saturated output sag \[Ω\] (`R_SAG`, default [`OPAMP_DEFAULT_R_SAG_OHM`]):
     /// a railed output sits at `limit − R_SAG·I_load`. A different mechanism
     /// from `r_out` (output-stage series resistance plus drive starvation at
     /// clip), 2–4× larger on the audio parts.
     pub r_sag: f64,
-    /// Highest output voltage the op-amp can drive [V] — its upper swing
+    /// Highest output voltage the op-amp can drive \[V\] — its upper swing
     /// limit, the level every rail mode clamps or pins at (default +inf =
     /// none). Resolved from the card by [`resolve_opamp_swing`]:
     /// `VCC − VOH_DROP`, or `+VSAT`, or +13 V when only `GBW` is given.
     pub vcc: f64,
-    /// Lowest output voltage the op-amp can drive [V] — its lower swing limit
+    /// Lowest output voltage the op-amp can drive \[V\] — its lower swing limit
     /// (default −inf = none): `VEE + VOL_DROP`, or `−VSAT`, or −13 V when
     /// only `GBW` is given.
     pub vee: f64,
-    /// Gain-bandwidth product [Hz] (default: infinity = no dominant pole).
+    /// Gain-bandwidth product \[Hz\] (default: infinity = no dominant pole).
     /// When finite, a dominant pole capacitor C = AOL / (2π × GBW × ROUT)
     /// is stamped at an internal Boyle gain node.
     /// Typical NE5534: 10e6. TL074: 3e6.
@@ -52,7 +52,7 @@ pub struct OpampInfo {
     /// without `SR=` in their .model get byte-identical generated code to the
     /// pre-slew-rate behaviour.
     pub sr: f64,
-    /// Input bias current [A] (default 0 = ideal, no bias).
+    /// Input bias current \[A\] (default 0 = ideal, no bias).
     ///
     /// Models the small DC current that flows into (or out of) each op-amp
     /// input pin on real hardware. Parsed from `.model OA(IB=...)`; typical
@@ -75,7 +75,7 @@ pub struct OpampInfo {
     /// failure mode of melange-emitted transient NR on circuits like the
     /// sidechain integrator of a bus compressor.
     pub ib: f64,
-    /// Input resistance [Ω] from each input pin to ground (default +∞ = no
+    /// Input resistance \[Ω\] from each input pin to ground (default +∞ = no
     /// leakage path, ideal). Typical values: TL074 (JFET) = 1e12, LM358
     /// (bipolar) = 1e6 to 1e7, NE5532 = 3e5.
     ///
@@ -130,26 +130,26 @@ pub struct OpampInfo {
 }
 
 /// Drop from a supply rail to the op-amp's zero-load swing limit when the card
-/// sets `VCC`/`VEE` without `VOH_DROP`/`VOL_DROP` [V]. The load sag is
+/// sets `VCC`/`VEE` without `VOH_DROP`/`VOL_DROP` \[V\]. The load sag is
 /// `R_SAG·I_load` on top, so this is the zero-load intercept of the
 /// datasheet V_OM-versus-load line at ±15 V: vintage TL072 1.06 V (TI SLOS080
 /// rev D), 741 0.73 V (SLOS094 rev B), 4558 0.82 V (SLOS073 rev H), NE5532
 /// 1.27 V (Philips 1997). A modern TL072 die is about 0.2 V.
 pub const OPAMP_DEFAULT_RAIL_DROP_V: f64 = 1.0;
 
-/// Open-loop output resistance when the card sets no `ROUT` [Ω]: the 741's
+/// Open-loop output resistance when the card sets no `ROUT` \[Ω\]: the 741's
 /// documented r_o (TI SLOS094 rev B, note 5). A new TL07x die is 125 Ω at
 /// 1 MHz (SLOS080 rev W), an NE5532 about 10 Ω.
 pub const OPAMP_DEFAULT_ROUT_OHM: f64 = 75.0;
 
-/// Saturated output sag when the card sets no `R_SAG` [Ω]: the slope of the
+/// Saturated output sag when the card sets no `R_SAG` \[Ω\]: the slope of the
 /// datasheet V_OM-versus-load line at ±15 V, 10 kΩ to 2 kΩ. Vintage TL072
 /// 323 Ω (SLOS080 rev D), 741 196 Ω (SLOS094 rev B), 4558 55 Ω (rev H) or
 /// 196 Ω (rev G), NE5532 34 Ω (2 kΩ to 600 Ω, Philips 1997). A linear fit;
 /// not valid near the output's current limit.
 pub const OPAMP_DEFAULT_R_SAG_OHM: f64 = 200.0;
 
-/// Swing limit an op-amp card with `GBW` but no `VCC`/`VEE`/`VSAT` gets [V].
+/// Swing limit an op-amp card with `GBW` but no `VCC`/`VEE`/`VSAT` gets \[V\].
 pub const OPAMP_GBW_DEFAULT_SWING_V: f64 = 13.0;
 
 /// The swing-related keys of an op-amp `.model` card, as written.
@@ -251,7 +251,7 @@ pub fn resolve_opamp_swing(
 }
 
 /// Effective output resistance for the
-/// [`OpampRailMode::BoyleDiodes`] internal gain node (Ω).
+/// [`OpampRailMode::BoyleDiodes`](crate::codegen::OpampRailMode::BoyleDiodes) internal gain node (Ω).
 ///
 /// Both `Gm_int = AOL / R_BOYLE_INT_LOAD` and `Go_int = 1 / R_BOYLE_INT_LOAD`
 /// are derived from this single value, so the open-loop voltage gain

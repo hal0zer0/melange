@@ -16,7 +16,7 @@ pub enum ChannelType {
 pub struct Mosfet {
     /// Channel type (N or P)
     pub channel: ChannelType,
-    /// Threshold voltage [V]
+    /// Threshold voltage \[V\]
     pub vt: f64,
     /// Transconductance parameter [A/V²]
     pub kp: f64,

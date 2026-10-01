@@ -207,7 +207,7 @@ pub struct ParasiticCap {
     pub node_b: String,
 }
 
-/// Parasitic junction capacitance for nonlinear device stabilization [F].
+/// Parasitic junction capacitance for nonlinear device stabilization \[F\].
 ///
 /// 10pF is representative of small-signal semiconductor junction capacitances
 /// (typical Cj = 2-10pF for diodes, Cbc = 2-8pF for BJTs). At audio

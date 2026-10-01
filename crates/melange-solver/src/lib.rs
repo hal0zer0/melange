@@ -31,10 +31,10 @@
 //!
 //! # Key Types
 //!
-//! - [`Netlist`](parser::Netlist) — parsed SPICE netlist (elements, models, directives)
-//! - [`MnaSystem`](mna::MnaSystem) — Modified Nodal Analysis matrices (G, C, N_v, N_i)
-//! - [`DkKernel`](dk::DkKernel) — reduced M×M kernel for fast real-time solving
-//! - [`LinearSolver`](linear_solver::LinearSolver) — runtime linear solver (M=0 only);
+//! - [`Netlist`] — parsed SPICE netlist (elements, models, directives)
+//! - [`MnaSystem`] — Modified Nodal Analysis matrices (G, C, N_v, N_i)
+//! - [`DkKernel`] — reduced M×M kernel for fast real-time solving
+//! - [`LinearSolver`] — runtime linear solver (M=0 only);
 //!   deprecated in 0.1.14, removed in the next release
 //! - [`CircuitIR`] — language-agnostic intermediate representation for code generation
 //! - [`Emitter`] — trait for generating code in different languages (Rust implemented)

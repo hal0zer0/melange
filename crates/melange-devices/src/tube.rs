@@ -618,7 +618,7 @@ struct TriodeSection {
 /// `Vgk/sqrt(Kvb+Vg2²)`) and a fundamentally different plate-knee shape.
 ///
 /// Duplicated locally in `melange-devices`; the matching solver-side enum is
-/// [`melange_solver::device_types::ScreenForm`] and is kept in sync by the
+/// `melange_solver::device_types::ScreenForm` and is kept in sync by the
 /// codegen path that builds `KorenPentode` from `TubeParams`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScreenForm {
@@ -695,9 +695,9 @@ pub struct KorenPentode {
     pub a_factor: f64,
     /// Plate-knee curvature (β in the Reefman paper).
     pub beta_factor: f64,
-    /// Maximum control-grid current [A] at `Vgk = vgk_onset` (Leach model).
+    /// Maximum control-grid current \[A\] at `Vgk = vgk_onset` (Leach model).
     pub ig_max: f64,
-    /// Control-grid current onset voltage [V] (Leach model).
+    /// Control-grid current onset voltage \[V\] (Leach model).
     pub vgk_onset: f64,
     /// Screen-current functional form: Rational (§4.4) or Exponential (§4.5).
     pub screen_form: ScreenForm,
@@ -1118,7 +1118,7 @@ impl KorenPentode {
 
     /// Screen-grid current `Ig2(Vgk, Vpk, Vg2k)`.
     ///
-    /// Uses the same variable-mu `Ip0_v` as [`plate_current`], with H(Vp)
+    /// Uses the same variable-mu `Ip0_v` as [`plate_current`](Self::plate_current), with H(Vp)
     /// unchanged (Eq 37). Variable-mu is orthogonal to `screen_form`.
     pub fn screen_current(&self, vgk: f64, vpk: f64, vg2k: f64) -> f64 {
         if matches!(self.screen_form, ScreenForm::Classical) {
@@ -1539,6 +1539,11 @@ struct FHShape {
 mod tests {
     use super::*;
 
+    /// A pentode current as a function of (Vgk, Vpk, Vg2k).
+    type CurrentFn<'a> = &'a dyn Fn(f64, f64, f64) -> f64;
+    /// An operating point (Vgk, Vpk, Vg2k) and the Jacobian columns checked there.
+    type ProbePoint<'a> = ((f64, f64, f64), &'a [usize]);
+
     #[test]
     fn test_triode_cutoff() {
         let tube = KorenTriode::ecc83();
@@ -1816,12 +1821,10 @@ mod tests {
             (f(p[0], p[1], p[2]) - f(m[0], m[1], m[2])) / (2.0 * eps)
         };
 
-        let row_specs: [(usize, &str, &dyn Fn(f64, f64, f64) -> f64); 2] =
-            [(0, "Ip", &plate), (1, "Ig2", &screen)];
+        let row_specs: [(usize, &str, CurrentFn<'_>); 2] = [(0, "Ip", &plate), (1, "Ig2", &screen)];
 
         for (row, name, f) in row_specs {
-            for col in 0..3 {
-                let analytic = jac[row][col];
+            for (col, &analytic) in jac[row].iter().enumerate() {
                 let numerical = fd(f, col);
                 let rel_err = if numerical.abs() > 1e-15 {
                     (analytic - numerical).abs() / numerical.abs()
@@ -1877,14 +1880,14 @@ mod tests {
             "Ig2 must be finite: {}",
             ig2
         );
-        for row in 0..3 {
-            for col in 0..3 {
+        for (row, jac_row) in jac.iter().enumerate() {
+            for (col, &j) in jac_row.iter().enumerate() {
                 assert!(
-                    jac[row][col].is_finite() && !jac[row][col].is_nan(),
+                    j.is_finite() && !j.is_nan(),
                     "jacobian_3x3[{}][{}] must be finite: {}",
                     row,
                     col,
-                    jac[row][col]
+                    j
                 );
             }
         }
@@ -1902,14 +1905,14 @@ mod tests {
             "Ig2 must be finite: {}",
             ig2
         );
-        for row in 0..3 {
-            for col in 0..3 {
+        for (row, jac_row) in jac.iter().enumerate() {
+            for (col, &j) in jac_row.iter().enumerate() {
                 assert!(
-                    jac[row][col].is_finite() && !jac[row][col].is_nan(),
+                    j.is_finite() && !j.is_nan(),
                     "jacobian_3x3[{}][{}] must be finite: {}",
                     row,
                     col,
-                    jac[row][col]
+                    j
                 );
             }
         }
@@ -1939,7 +1942,7 @@ mod tests {
         // Vg2k = 1e-3 the classical form is too steep in Vgk for this step).
         // Both with cathode current flowing, the stencil clear of the
         // grid-current onset at Vgk = 0.
-        let points: [((f64, f64, f64), &[usize]); 2] = [
+        let points: [ProbePoint<'_>; 2] = [
             ((-2.0, -3.84, 250.0), &[0, 1, 2]),
             ((-2e-4, 200.0, -0.5), &[2]),
         ];
@@ -1963,13 +1966,13 @@ mod tests {
                     let (mut hi, mut lo) = (v, v);
                     hi[col] += h;
                     lo[col] -= h;
-                    for row in 0..3 {
+                    for (row, jac_row) in jac.iter().enumerate() {
                         let fd = (f(hi)[row] - f(lo)[row]) / (2.0 * h);
-                        let tol = 1e-5 * fd.abs().max(jac[row][col].abs()) + 1e-15;
+                        let tol = 1e-5 * fd.abs().max(jac_row[col].abs()) + 1e-15;
                         assert!(
-                            (jac[row][col] - fd).abs() <= tol,
+                            (jac_row[col] - fd).abs() <= tol,
                             "{name} at {v:?}: jac[{row}][{col}] = {:e}, finite difference {fd:e}",
-                            jac[row][col]
+                            jac_row[col]
                         );
                     }
                 }
@@ -2530,12 +2533,10 @@ mod tests {
             (f(p[0], p[1], p[2]) - f(m[0], m[1], m[2])) / (2.0 * eps)
         };
 
-        let row_specs: [(usize, &str, &dyn Fn(f64, f64, f64) -> f64); 2] =
-            [(0, "Ip", &plate), (1, "Ig2", &screen)];
+        let row_specs: [(usize, &str, CurrentFn<'_>); 2] = [(0, "Ip", &plate), (1, "Ig2", &screen)];
 
         for (row, name, f) in row_specs {
-            for col in 0..3 {
-                let analytic = jac[row][col];
+            for (col, &analytic) in jac[row].iter().enumerate() {
                 let numerical = fd(f, col);
                 let rel_err = if numerical.abs() > 1e-15 {
                     (analytic - numerical).abs() / numerical.abs()
@@ -2590,15 +2591,15 @@ mod tests {
                 vpk,
                 ig2
             );
-            for row in 0..3 {
-                for col in 0..3 {
+            for (row, jac_row) in jac.iter().enumerate() {
+                for (col, &j) in jac_row.iter().enumerate() {
                     assert!(
-                        jac[row][col].is_finite() && !jac[row][col].is_nan(),
+                        j.is_finite() && !j.is_nan(),
                         "DerkE jacobian_3x3[{}][{}] must be finite at Vpk={}: {}",
                         row,
                         col,
                         vpk,
-                        jac[row][col]
+                        j
                     );
                 }
             }

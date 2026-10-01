@@ -17,13 +17,13 @@ pub enum JfetChannel {
 pub struct Jfet {
     /// Channel type
     pub channel: JfetChannel,
-    /// Pinch-off voltage [V] (always negative for N-channel)
+    /// Pinch-off voltage \[V\] (always negative for N-channel)
     pub vp: f64,
-    /// Saturation current [A] (IDSS)
+    /// Saturation current \[A\] (IDSS)
     pub idss: f64,
     /// Channel length modulation [1/V]
     pub lambda: f64,
-    /// Gate junction saturation current [A] (SPICE `IS`, default 1e-14);
+    /// Gate junction saturation current \[A\] (SPICE `IS`, default 1e-14);
     /// 0 disables both gate junctions.
     pub is: f64,
     /// Gate junction emission coefficient (SPICE `N`, default 1).

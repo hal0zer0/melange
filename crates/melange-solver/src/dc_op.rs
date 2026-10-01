@@ -38,7 +38,7 @@ pub struct DcOpConfig {
     pub gmin_end: f64,
     /// Number of Gmin stepping stages
     pub gmin_steps: usize,
-    /// Active-set rounds allowed when [`pin_railed_opamps`] pins the railed
+    /// Active-set rounds allowed when `pin_railed_opamps` pins the railed
     /// op-amp outputs of an operating point no full-gain Newton solve
     /// produced. Each round is a Newton re-solve; the pin set usually settles
     /// in one or two. Exceeding it keeps the point unpinned, recorded in
@@ -117,7 +117,7 @@ pub struct DcOpResult {
 }
 
 /// Outcome of placing railed op-amp outputs on their load line
-/// ([`pin_railed_opamps`]).
+/// (`pin_railed_opamps`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum RailPin {
     /// No op-amp is railed at the operating point (or it did not converge).
@@ -5218,7 +5218,13 @@ Cx c3 b4 6n IC=-4\n";
         for (idx, slot) in slots.iter().enumerate() {
             let mut i_single = vec![0.0; m];
             let mut j_single = vec![0.0; m * m];
-            evaluate_devices(&v_nl, &[slot.clone()], &mut i_single, &mut j_single, m);
+            evaluate_devices(
+                &v_nl,
+                std::slice::from_ref(slot),
+                &mut i_single,
+                &mut j_single,
+                m,
+            );
             assert!(
                 (i_nl[idx] - i_single[idx]).abs() < 1e-20,
                 "device {idx}: current differs when evaluated together vs alone"

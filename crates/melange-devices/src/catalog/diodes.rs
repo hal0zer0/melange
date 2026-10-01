@@ -7,7 +7,7 @@
 pub struct DiodeCatalogEntry {
     /// Part number aliases
     pub names: &'static [&'static str],
-    /// Saturation current IS [A]
+    /// Saturation current IS \[A\]
     pub is: f64,
     /// Ideality factor N
     pub n: f64,

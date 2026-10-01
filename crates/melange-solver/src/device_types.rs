@@ -38,19 +38,19 @@ pub struct DiodeParams {
     pub is: f64,
     /// Ideality factor * thermal voltage
     pub n_vt: f64,
-    /// Zero-bias junction capacitance [F] (0.0 = disabled)
+    /// Zero-bias junction capacitance \[F\] (0.0 = disabled)
     #[serde(default)]
     pub cjo: f64,
-    /// Series resistance [Ohms] (0.0 = disabled)
+    /// Series resistance \[Ohms\] (0.0 = disabled)
     #[serde(default)]
     pub rs: f64,
-    /// Reverse breakdown voltage [V] (infinity = disabled)
+    /// Reverse breakdown voltage \[V\] (infinity = disabled)
     #[serde(
         default = "default_infinity",
         deserialize_with = "deserialize_f64_or_infinity"
     )]
     pub bv: f64,
-    /// Reverse breakdown current [A] (default 1e-3, the SPICE3f5 default)
+    /// Reverse breakdown current \[A\] (default 1e-3, the SPICE3f5 default)
     #[serde(default = "default_ibv")]
     pub ibv: f64,
     /// Thermal resistance [K/W] (inf = disabled, default).
@@ -72,10 +72,10 @@ pub struct DiodeParams {
     /// IS temperature exponent (default 3.0).
     #[serde(default = "default_xti")]
     pub xti: f64,
-    /// Bandgap energy [eV] (default 1.11, silicon).
+    /// Bandgap energy \[eV\] (default 1.11, silicon).
     #[serde(default = "default_eg")]
     pub eg: f64,
-    /// Ambient temperature [K] (default 300.15 = 27 °C).
+    /// Ambient temperature \[K\] (default 300.15 = 27 °C).
     #[serde(default = "default_tamb")]
     pub tamb: f64,
 }
@@ -113,31 +113,31 @@ pub struct BjtParams {
     /// True if PNP (false = NPN)
     #[serde(default)]
     pub is_pnp: bool,
-    /// Forward Early voltage [V] (inf = no Early effect)
+    /// Forward Early voltage \[V\] (inf = no Early effect)
     #[serde(
         default = "default_infinity",
         deserialize_with = "deserialize_f64_or_infinity"
     )]
     pub vaf: f64,
-    /// Reverse Early voltage [V] (inf = no Early effect)
+    /// Reverse Early voltage \[V\] (inf = no Early effect)
     #[serde(
         default = "default_infinity",
         deserialize_with = "deserialize_f64_or_infinity"
     )]
     pub var: f64,
-    /// Forward knee current [A] (inf = no high injection)
+    /// Forward knee current \[A\] (inf = no high injection)
     #[serde(
         default = "default_infinity",
         deserialize_with = "deserialize_f64_or_infinity"
     )]
     pub ikf: f64,
-    /// Reverse knee current [A] (inf = no high injection)
+    /// Reverse knee current \[A\] (inf = no high injection)
     #[serde(
         default = "default_infinity",
         deserialize_with = "deserialize_f64_or_infinity"
     )]
     pub ikr: f64,
-    /// Base-emitter zero-bias junction capacitance [F] (0.0 = disabled).
+    /// Base-emitter zero-bias junction capacitance \[F\] (0.0 = disabled).
     /// The depletion-cap linearization at the DC operating point uses
     /// `Cje_eff = CJE · (1 - Vbe/VJE)^(-MJE)` below `FC·VJE` and a tangent
     /// extension above (ngspice `bjtcap.c`). With default `VJE = 0.75`,
@@ -145,25 +145,25 @@ pub struct BjtParams {
     /// path matches the previous behaviour.
     #[serde(default)]
     pub cje: f64,
-    /// Base-collector zero-bias junction capacitance [F] (0.0 = disabled).
+    /// Base-collector zero-bias junction capacitance \[F\] (0.0 = disabled).
     /// Same depletion formula as `cje`, evaluated at `Vbc_op` with
     /// `vjc`/`mjc`/`fc`.
     #[serde(default)]
     pub cjc: f64,
-    /// Forward transit time [s] (0.0 = disabled). Adds diffusion capacitance
+    /// Forward transit time \[s\] (0.0 = disabled). Adds diffusion capacitance
     /// `Cd_be = TF · d(I_F/qb)/dVbe` to the base-emitter small-signal cap at
     /// the DC operating point (see `linearized_junction_caps`). Typical
     /// silicon small-signal BJT: 400 ps – 10 ns. Matters for high-frequency
     /// rolloff in audio amplifier stages (e.g. an output-transformer driver).
     #[serde(default)]
     pub tf: f64,
-    /// Base-emitter junction built-in potential [V] (SPICE default 0.75).
+    /// Base-emitter junction built-in potential \[V\] (SPICE default 0.75).
     #[serde(default = "default_vj")]
     pub vje: f64,
     /// Base-emitter junction grading coefficient (SPICE default 0.33).
     #[serde(default = "default_mj")]
     pub mje: f64,
-    /// Base-collector junction built-in potential [V] (SPICE default 0.75).
+    /// Base-collector junction built-in potential \[V\] (SPICE default 0.75).
     #[serde(default = "default_vj")]
     pub vjc: f64,
     /// Base-collector junction grading coefficient (SPICE default 0.33).
@@ -177,7 +177,7 @@ pub struct BjtParams {
     /// Forward emission coefficient (1.0 = ideal, default)
     #[serde(default = "default_one")]
     pub nf: f64,
-    /// B-E leakage saturation current [A] (0.0 = disabled, default)
+    /// B-E leakage saturation current \[A\] (0.0 = disabled, default)
     #[serde(default)]
     pub ise: f64,
     /// B-E leakage emission coefficient (default 1.5)
@@ -186,19 +186,19 @@ pub struct BjtParams {
     /// Reverse emission coefficient (1.0 = ideal, default)
     #[serde(default = "default_one")]
     pub nr: f64,
-    /// B-C leakage saturation current [A] (0.0 = disabled, default)
+    /// B-C leakage saturation current \[A\] (0.0 = disabled, default)
     #[serde(default)]
     pub isc: f64,
     /// B-C leakage emission coefficient (default 2.0)
     #[serde(default = "default_nc")]
     pub nc: f64,
-    /// Base series resistance [Ohms] (0.0 = disabled)
+    /// Base series resistance \[Ohms\] (0.0 = disabled)
     #[serde(default)]
     pub rb: f64,
-    /// Collector series resistance [Ohms] (0.0 = disabled)
+    /// Collector series resistance \[Ohms\] (0.0 = disabled)
     #[serde(default)]
     pub rc: f64,
-    /// Emitter series resistance [Ohms] (0.0 = disabled)
+    /// Emitter series resistance \[Ohms\] (0.0 = disabled)
     #[serde(default)]
     pub re: f64,
     /// Thermal resistance [K/W] (inf = disabled, default)
@@ -228,10 +228,10 @@ pub struct BjtParams {
     /// silently discarded as an unrecognized parameter.
     #[serde(default)]
     pub xtb: f64,
-    /// Bandgap energy [eV] (default 1.11, silicon)
+    /// Bandgap energy \[eV\] (default 1.11, silicon)
     #[serde(default = "default_eg")]
     pub eg: f64,
-    /// Ambient temperature [K] (default 300.15 = 27C)
+    /// Ambient temperature \[K\] (default 300.15 = 27C)
     #[serde(default = "default_tamb")]
     pub tamb: f64,
 }
@@ -443,21 +443,21 @@ pub struct StatefulSpec {
 /// This matches the MNA stamping where JFET is 2D (dimension=2, controlling voltages=Vgs, Vds).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JfetParams {
-    /// Saturation current IDSS [A]
+    /// Saturation current IDSS \[A\]
     pub idss: f64,
-    /// Pinch-off voltage [V] (negative for N-channel, positive for P-channel)
+    /// Pinch-off voltage \[V\] (negative for N-channel, positive for P-channel)
     pub vp: f64,
     /// Channel length modulation [1/V]
     pub lambda: f64,
     /// True if P-channel (false = N-channel)
     pub is_p_channel: bool,
-    /// Gate-source junction capacitance [F] (0.0 = disabled)
+    /// Gate-source junction capacitance \[F\] (0.0 = disabled)
     #[serde(default)]
     pub cgs: f64,
-    /// Gate-drain junction capacitance [F] (0.0 = disabled)
+    /// Gate-drain junction capacitance \[F\] (0.0 = disabled)
     #[serde(default)]
     pub cgd: f64,
-    /// Gate junction saturation current [A] (SPICE `IS`, default 1e-14);
+    /// Gate junction saturation current \[A\] (SPICE `IS`, default 1e-14);
     /// 0 disables the gate-source and gate-drain junctions.
     #[serde(default = "default_jfet_is")]
     pub is: f64,
@@ -475,7 +475,7 @@ fn default_jfet_n() -> f64 {
 }
 
 impl JfetParams {
-    /// `N·Vt` of the gate junctions [V], at TNOM: the JFET carries no
+    /// `N·Vt` of the gate junctions \[V\], at TNOM: the JFET carries no
     /// temperature (no XTI/EG/TAMB), so IS is not temperature-scaled.
     pub fn gate_n_vt(&self) -> f64 {
         self.n * melange_devices::VT_ROOM
@@ -491,22 +491,22 @@ impl JfetParams {
 pub struct MosfetParams {
     /// Transconductance parameter KP [A/V²]
     pub kp: f64,
-    /// Threshold voltage VT [V] (positive for N-channel, negative for P-channel)
+    /// Threshold voltage VT \[V\] (positive for N-channel, negative for P-channel)
     pub vt: f64,
     /// Channel length modulation [1/V]
     pub lambda: f64,
     /// True if P-channel (false = N-channel)
     pub is_p_channel: bool,
-    /// Gate-source capacitance [F] (0.0 = disabled)
+    /// Gate-source capacitance \[F\] (0.0 = disabled)
     #[serde(default)]
     pub cgs: f64,
-    /// Gate-drain capacitance [F] (0.0 = disabled)
+    /// Gate-drain capacitance \[F\] (0.0 = disabled)
     #[serde(default)]
     pub cgd: f64,
     /// Body effect coefficient GAMMA [V^0.5] (0.0 = disabled)
     #[serde(default)]
     pub gamma: f64,
-    /// Surface potential PHI [V] (default 0.6)
+    /// Surface potential PHI \[V\] (default 0.6)
     #[serde(default = "default_phi")]
     pub phi: f64,
     /// Source node index in N-dimensional system (needed for body effect Vsb computation)
@@ -675,7 +675,7 @@ pub struct TubeParams {
     pub kp: f64,
     /// Kvb coefficient (triode: softplus denominator; pentode: arctan knee in Ip)
     pub kvb: f64,
-    /// **Pentode control grid only** — Leach-law maximum grid current [A].
+    /// **Pentode control grid only** — Leach-law maximum grid current \[A\].
     ///
     /// Triodes do not use this: their grid law is Dempwolf & Zölzer eq. (11)
     /// ([`gg`](Self::gg) / [`xi`](Self::xi) / [`cg`](Self::cg)). The pentode
@@ -687,7 +687,7 @@ pub struct TubeParams {
     /// than papered over here.
     pub ig_max: f64,
     /// **Pentode control grid only** — Leach-law grid current onset voltage
-    /// [V]. See [`ig_max`](Self::ig_max).
+    /// \[V\]. See [`ig_max`](Self::ig_max).
     pub vgk_onset: f64,
     /// Triode grid perveance `Gg` [A/V^xi] — Dempwolf & Zölzer DAFx-11 eq. (11).
     /// Ignored for pentodes.
@@ -703,16 +703,16 @@ pub struct TubeParams {
     /// Channel-length modulation coefficient [1/V]. 0.0 = disabled (default).
     #[serde(default)]
     pub lambda: f64,
-    /// Cathode-grid capacitance [F] (0.0 = disabled)
+    /// Cathode-grid capacitance \[F\] (0.0 = disabled)
     #[serde(default)]
     pub ccg: f64,
-    /// Grid-plate capacitance [F] (0.0 = disabled)
+    /// Grid-plate capacitance \[F\] (0.0 = disabled)
     #[serde(default)]
     pub cgp: f64,
-    /// Cathode-plate capacitance [F] (0.0 = disabled)
+    /// Cathode-plate capacitance \[F\] (0.0 = disabled)
     #[serde(default)]
     pub ccp: f64,
-    /// Grid internal resistance [Ohms] (0.0 = disabled)
+    /// Grid internal resistance \[Ohms\] (0.0 = disabled)
     #[serde(default)]
     pub rgi: f64,
     /// Kg2: pentode screen-grid current sensitivity (inversely proportional).
@@ -804,7 +804,7 @@ pub struct TubeParams {
     /// but it has no effect on the tube current.
     #[serde(default)]
     pub vbias_alpha: f64,
-    /// Ambient temperature [K]. Default 300.15 (≈ 27 °C). Also the reference
+    /// Ambient temperature \[K\]. Default 300.15 (≈ 27 °C). Also the reference
     /// at which the Koren fit is assumed valid: the Vgk bias shift is
     /// `VBIAS_ALPHA · (Tp - TAMB)`, so Tp = TAMB is the zero-drift point.
     #[serde(default = "default_tamb")]
@@ -1047,15 +1047,15 @@ pub enum DeviceType {
 /// card (explicit params or an empty-parens catalog lookup on the model name).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LdrParams {
-    /// Minimum resistance (brightest light) [Ω].
+    /// Minimum resistance (brightest light) \[Ω\].
     pub r_min: f64,
-    /// Maximum (dark) resistance [Ω]. Also the state-block seed (cold = dark).
+    /// Maximum (dark) resistance \[Ω\]. Also the state-block seed (cold = dark).
     pub r_max: f64,
     /// Power-law exponent shaping brightness → resistance (typically 0.5–1.0).
     pub gamma: f64,
-    /// Attack time constant [s] — resistance decreasing (getting brighter).
+    /// Attack time constant \[s\] — resistance decreasing (getting brighter).
     pub attack_tau: f64,
-    /// Release time constant [s] — resistance increasing (getting darker).
+    /// Release time constant \[s\] — resistance increasing (getting darker).
     pub release_tau: f64,
 }
 
@@ -1089,9 +1089,9 @@ pub struct LdrParams {
 ///   in-NR eval inverts `g(i)=v_d` by a warm-started scalar inner Newton.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlowParams {
-    /// Strike / breakdown (ignition) voltage [V] — dark→lit when `V(a)−V(k) ≥ vo`.
+    /// Strike / breakdown (ignition) voltage \[V\] — dark→lit when `V(a)−V(k) ≥ vo`.
     pub vo: f64,
-    /// INTERCEPT of the lit maintaining line `V(a)−V(k) = v0 + rs·i` [V] — the
+    /// INTERCEPT of the lit maintaining line `V(a)−V(k) = v0 + rs·i` \[V\] — the
     /// anode–cathode voltage the conducting tube extrapolates to at zero current.
     /// DERIVED, not authored: `v0 = VM − RS·IK`, where `VM` is the datasheet
     /// static maintaining voltage measured at rated current `IK`. Decoupling the
@@ -1102,22 +1102,22 @@ pub struct GlowParams {
     /// discharges toward `v0` (NOT toward ground). Extinction is on holding
     /// current (`ihold`), not a bare voltage threshold.
     pub v0: f64,
-    /// Maintaining-line slope [Ω] — the soft POSITIVE dynamic resistance of the
+    /// Maintaining-line slope \[Ω\] — the soft POSITIVE dynamic resistance of the
     /// lit glow (a voltage source with a slope, not a resistor to ground).
     /// Datasheet-sourced (ZA1004 form-transfer ≈ 2.5–4.25 kΩ over 0.2–3 mA).
     /// Sets the reset floor via the derived intercept `v0 = VM − rs·IK`.
     pub rs: f64,
-    /// Dark (extinguished) resistance [Ω] — very high, effectively open
+    /// Dark (extinguished) resistance \[Ω\] — very high, effectively open
     /// (datasheet insulation ≥ 300 MΩ).
     pub roff: f64,
-    /// Holding / maintaining current [A]. The lit→dark transition fires when the
+    /// Holding / maintaining current \[A\]. The lit→dark transition fires when the
     /// conduction current `(V(a)−V(k) − v0)/rs` falls below this. Physically the
     /// gas de-ionizes when it can no longer sustain the discharge; a starved
     /// oscillator (charging current < ihold) extinguishes, while a rail with
     /// enough sustaining current stays lit (regulator behaviour) — one model
     /// covers both. The reset floor lands at `v0 + rs·ihold`.
     pub ihold: f64,
-    /// DC asymptote of the lit maintaining line [Ω] — the resistance the glow
+    /// DC asymptote of the lit maintaining line \[Ω\] — the resistance the glow
     /// relaxes toward at DC (Benson & Bradshaw `R_T`, ≈0 for normal glow).
     /// Used ONLY by the relaxing-section lit branch (`has_sections()`); the
     /// static no-section branch uses `rs`. Parsed from the `RT` key; defaults
@@ -1125,19 +1125,19 @@ pub struct GlowParams {
     /// historical static model.
     #[serde(default)]
     pub r_t: f64,
-    /// Per-section delayed-overvoltage coefficient `k_i` [volts]:
+    /// Per-section delayed-overvoltage coefficient `k_i` \[volts\]:
     /// `V_i = k_i·ln(max(i,ifloor)/Ī_i)`. Parsed from `K1..K4`; default 0
     /// (section disabled — the term and its Jacobian contribution both vanish
     /// with no special-casing). At least one non-zero entry selects the
     /// relaxing lit branch.
     #[serde(default)]
     pub k: [f64; 4],
-    /// Per-section current-lag time constant `τ_i` [seconds] for
+    /// Per-section current-lag time constant `τ_i` \[seconds\] for
     /// `dĪ_i/dt = (i − Ī_i)/τ_i`. Parsed from `TAU1..TAU4`; must be > 0 when
     /// the matching `k` is non-zero.
     #[serde(default)]
     pub tau: [f64; 4],
-    /// Log-domain current clamp / section current-lag seed floor [A]. Parsed
+    /// Log-domain current clamp / section current-lag seed floor \[A\]. Parsed
     /// from the `IFLOOR` key; default = `ihold`. It is the analog of the diode
     /// `safe_exp` clamp for the section `ln`/reciprocal, AND a live edge knob
     /// (the 559A gate sweeps it 1 µA–200 µA). Used only by the relaxing-section
@@ -1153,11 +1153,11 @@ pub struct GlowParams {
     /// / Meissner 1941: κ ≈ 2.0 V/e-fold for the 0.1 % Ar class.
     #[serde(default)]
     pub ksub: f64,
-    /// Anchor current [A] for the subnormal term (`= I_K`, the rated current where
+    /// Anchor current \[A\] for the subnormal term (`= I_K`, the rated current where
     /// the lit branch passes through `V_m`). Only meaningful when `ksub ≠ 0`.
     #[serde(default)]
     pub i_n: f64,
-    /// Ignition-depression amplitude `D_AMP` [volts]. Parsed from `D_AMP`;
+    /// Ignition-depression amplitude `D_AMP` \[volts\]. Parsed from `D_AMP`;
     /// default 0 → the ignition-depression mechanism is OFF (`has_d()` false),
     /// and codegen emits the historical plain `cv ≥ VO` strike test. When
     /// non-zero, the effective strike voltage is depressed by residual
@@ -1165,16 +1165,16 @@ pub struct GlowParams {
     /// `D = clamp(D_AMP·ln(D_TKNEE/max(t_off, D_THOLD)), 0, VO−VM)`.
     #[serde(default)]
     pub d_amp: f64,
-    /// Ignition-depression knee time `D_TKNEE` [seconds] — the off-time at
+    /// Ignition-depression knee time `D_TKNEE` \[seconds\] — the off-time at
     /// which `D` reaches zero (`ln(D_TKNEE/D_TKNEE)=0`). Parsed from `D_TKNEE`.
     #[serde(default)]
     pub d_tknee: f64,
-    /// Ignition-depression hold time `D_THOLD` [seconds] — `D` is held at its
+    /// Ignition-depression hold time `D_THOLD` \[seconds\] — `D` is held at its
     /// `t_off = D_THOLD` value for shorter off-times (the curve plateaus below
     /// the measured floor). Parsed from `D_THOLD`.
     #[serde(default)]
     pub d_thold: f64,
-    /// Hard cap on the ignition depression [volts] = `VO − VM` (derived, not
+    /// Hard cap on the ignition depression \[volts\] = `VO − VM` (derived, not
     /// authored). `V_s,eff` can never fall below the maintaining voltage `VM`.
     #[serde(default)]
     pub d_cap: f64,
@@ -1185,7 +1185,7 @@ impl GlowParams {
     /// transit is below any audio-rate sub-step and is dropped).
     pub const MAX_SECTIONS: usize = 4;
 
-    /// Cold-start `t_off` seed [seconds] — a large value so a fresh device
+    /// Cold-start `t_off` seed \[seconds\] — a large value so a fresh device
     /// strikes at the full `VO` (`D≈0`) until it has actually extinguished once.
     pub const T_OFF_SEED: f64 = 1.0e9;
 
@@ -1197,7 +1197,7 @@ impl GlowParams {
     }
 
     /// True when the ignition-depression mechanism is active (`D_AMP ≠ 0`).
-    /// Independent of [`has_sections`]; a card may have sections, D, both, or
+    /// Independent of [`has_sections`](Self::has_sections); a card may have sections, D, both, or
     /// neither. Neither → state layout and emitted code are today's exactly.
     pub fn has_d(&self) -> bool {
         self.d_amp != 0.0

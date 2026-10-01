@@ -24,7 +24,7 @@ pub const SPARSITY_THRESHOLD: f64 = 1e-20;
 pub struct LuSparsity {
     /// Straight-line elimination operations (original indices, AMD emission order).
     pub ops: Vec<LuOp>,
-    /// AMD elimination order: elim_order[step] = original column eliminated at that step.
+    /// AMD elimination order: `elim_order[step]` = original column eliminated at that step.
     pub elim_order: Vec<usize>,
     /// Row swaps applied before elimination (for zero diagonals).
     pub row_swaps: Vec<(usize, usize)>,

@@ -18,13 +18,13 @@ pub enum BjtPolarity {
 /// This is the simplified transport version which is numerically
 /// better behaved than the injection version.
 ///
-/// Terminal voltages: v[0] = Vbe (base-emitter), v[1] = Vbc (base-collector)
+/// Terminal voltages: `v[0]` = Vbe (base-emitter), `v[1]` = Vbc (base-collector)
 /// Current returned: Collector current (positive into collector for NPN)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BjtEbersMoll {
-    /// Saturation current [A]
+    /// Saturation current \[A\]
     pub is: f64,
-    /// Thermal voltage [V]
+    /// Thermal voltage \[V\]
     pub vt: f64,
     /// Forward current gain (beta_f)
     pub beta_f: f64,
@@ -36,11 +36,11 @@ pub struct BjtEbersMoll {
     /// Reverse emission coefficient (NR). Default 1.0.
     /// Reverse exponential uses exp(Vbc / (NR * VT)).
     pub nr: f64,
-    /// Base-emitter leakage saturation current [A]. Default 0.0 (disabled).
+    /// Base-emitter leakage saturation current \[A\]. Default 0.0 (disabled).
     pub ise: f64,
     /// Base-emitter leakage emission coefficient. Default 1.5.
     pub ne: f64,
-    /// Base-collector leakage saturation current [A]. Default 0.0 (disabled).
+    /// Base-collector leakage saturation current \[A\]. Default 0.0 (disabled).
     pub isc: f64,
     /// Base-collector leakage emission coefficient. Default 1.0.
     pub nc: f64,
@@ -310,13 +310,13 @@ impl NonlinearDevice<2> for BjtEbersMoll {
 pub struct BjtGummelPoon {
     /// Base Ebers-Moll model
     pub base: BjtEbersMoll,
-    /// Forward Early voltage [V]
+    /// Forward Early voltage \[V\]
     pub vaf: f64,
-    /// Reverse Early voltage [V]
+    /// Reverse Early voltage \[V\]
     pub var: f64,
-    /// High-current knee current [A]
+    /// High-current knee current \[A\]
     pub ikf: f64,
-    /// Reverse high-current knee current [A]
+    /// Reverse high-current knee current \[A\]
     pub ikr: f64,
 }
 

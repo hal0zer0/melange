@@ -7,9 +7,9 @@
 pub struct BjtCatalogEntry {
     /// Part number aliases (e.g., ["2N2222", "2N2222A", "PN2222A"])
     pub names: &'static [&'static str],
-    /// Saturation current IS [A]
+    /// Saturation current IS \[A\]
     pub is: f64,
-    /// Thermal voltage VT [V]
+    /// Thermal voltage VT \[V\]
     pub vt: f64,
     /// Forward current gain BF
     pub beta_f: f64,
@@ -17,13 +17,13 @@ pub struct BjtCatalogEntry {
     pub beta_r: f64,
     /// True if PNP
     pub is_pnp: bool,
-    /// Forward Early voltage [V] (infinity = pure Ebers-Moll)
+    /// Forward Early voltage \[V\] (infinity = pure Ebers-Moll)
     pub vaf: f64,
-    /// Reverse Early voltage [V]
+    /// Reverse Early voltage \[V\]
     pub var: f64,
-    /// Forward high-injection knee current [A]
+    /// Forward high-injection knee current \[A\]
     pub ikf: f64,
-    /// Reverse high-injection knee current [A]
+    /// Reverse high-injection knee current \[A\]
     pub ikr: f64,
     /// Source citation
     pub source: &'static str,
