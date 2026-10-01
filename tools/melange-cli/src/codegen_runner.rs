@@ -646,6 +646,52 @@ fn main() {{
     )
 }
 
+/// Upper edge of the band `analyze`'s `thd_pct` sums over: harmonic k of a
+/// point at f enters THD only when k·f is below this AND below Nyquist. The
+/// common audio definition (H2..H13 below 20 kHz) that Sensor Array and
+/// melange-circuits use; the per-harmonic `hN_dbc` columns are still reported
+/// up to Nyquist.
+pub const ANALYZE_THD_BAND_HZ: f64 = 20_000.0;
+
+/// Relative agreement two successive measurements of one point must reach
+/// before `analyze` calls it steady state: the complex fundamental (gain AND
+/// phase) within 0.1 % of itself (~0.009 dB, ~0.06°), and the harmonic vector
+/// H2..HN within 0.1 % of its own magnitude.
+pub const ANALYZE_SETTLE_TOL: f64 = 1e-3;
+
+/// Absolute floor of the harmonic-vector agreement, relative to the
+/// fundamental (-100 dBc, a THD resolution of 0.001 percentage points). Keeps
+/// a near-linear point from chasing numerical noise in harmonics that sit
+/// at the solver's tolerance.
+pub const ANALYZE_SETTLE_FLOOR: f64 = 1e-5;
+
+/// What [`generate_analyze_main`] emits (named, so two same-typed options
+/// cannot be passed in each other's place).
+pub struct AnalyzeMain<'a> {
+    pub frequencies: &'a [f64],
+    pub amplitude: f64,
+    pub sample_rate: f64,
+    /// Zero-drive settle, once, before the first point (seconds).
+    pub settle_secs: f64,
+    /// Minimum drive-level pre-roll per point, and the spacing between the
+    /// point's successive settle-check measurements (seconds).
+    pub preroll_secs: f64,
+    /// Cap on drive-level time per point while the settle check repeats.
+    /// `0` = no settle check: one measurement after the pre-roll.
+    pub preroll_max_secs: f64,
+    pub pot_calls: &'a [String],
+    pub switch_calls: &'a [String],
+    pub harmonics: usize,
+    pub noise_enabled: bool,
+    /// `CircuitState` u64 counters printed once as `DIAG:<name>=<v>` at the
+    /// end of the run (the caller presence-filters them per build).
+    pub diag_counters: &'a [&'a str],
+    /// `CircuitState` u64 counters whose per-point increments are printed as
+    /// `DIAGPT:<freq>:<name>=<delta>` (only nonzero ones), so the caller can
+    /// refuse a point whose render was not a solution. Presence-filtered.
+    pub point_counters: &'a [&'a str],
+}
+
 /// Generate a `fn main()` for the `analyze` command.
 ///
 /// The binary runs a frequency sweep internally and outputs CSV to stdout.
@@ -657,7 +703,8 @@ fn main() {{
 /// using the same single-bin DFT. The CSV reports the snapped frequency (it
 /// can differ from the requested log-spaced value by up to half a sample's
 /// worth of period). Bins at or above Nyquist are reported as `nan` rather
-/// than aliased.
+/// than aliased. `thd_pct` sums H2..HN below [`ANALYZE_THD_BAND_HZ`] (and
+/// Nyquist); `nan` when no harmonic lies in that band.
 ///
 /// When `harmonics>0` an extra `nyquist_dbc` column is appended, reporting the
 /// peak amplitude at exactly SR/2 (correlated against `(-1)^n`) in dB relative
@@ -665,19 +712,29 @@ fn main() {{
 /// other persistent sample-rate alternation that sits above every usable
 /// harmonic bin. `nan` means the fundamental is too small to make a ratio
 /// meaningful.
-pub fn generate_analyze_main(
-    frequencies: &[f64],
-    amplitude: f64,
-    sample_rate: f64,
-    settle_secs: f64,
-    pot_calls: &[String],
-    switch_calls: &[String],
-    harmonics: usize,
-    noise_enabled: bool,
-    // `CircuitState` u64 counters to print as `DIAG:<name without diag_>=<v>`
-    // at the end of the run (the caller presence-filters them per build).
-    diag_counters: &[&str],
-) -> String {
+///
+/// Steady state: each point is driven at its own frequency and amplitude for
+/// at least `preroll_secs` (whole DFT windows) before the window it
+/// measures, then measured again after another such stretch, until two
+/// successive measurements agree ([`ANALYZE_SETTLE_TOL`]) or
+/// `preroll_max_secs` is reached. Each point prints
+/// `SETTLEPT:<freq>:<secs at drive>:<status>:<fund rel diff>:<harm rel diff>`
+/// (status 1 = settled, 0 = cap reached, 2 = unchecked) for the caller.
+pub fn generate_analyze_main(main: AnalyzeMain<'_>) -> String {
+    let AnalyzeMain {
+        frequencies,
+        amplitude,
+        sample_rate,
+        settle_secs,
+        preroll_secs,
+        preroll_max_secs,
+        pot_calls,
+        switch_calls,
+        harmonics,
+        noise_enabled,
+        diag_counters,
+        point_counters,
+    } = main;
     let diag_lines: String = diag_counters
         .iter()
         .map(|f| {
@@ -685,6 +742,17 @@ pub fn generate_analyze_main(
             format!("    eprintln!(\"DIAG:{key}={{}}\", state.{f});\n")
         })
         .collect();
+    let npc = point_counters.len();
+    let point_counter_names: String = point_counters
+        .iter()
+        .map(|f| format!("\"{}\"", f.strip_prefix("diag_").unwrap_or(f)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let point_counter_reads: String = point_counters
+        .iter()
+        .map(|f| format!("state.{f}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let pot_lines: String = pot_calls.iter().map(|c| format!("    {c};\n")).collect();
     let switch_lines: String = switch_calls.iter().map(|c| format!("    {c};\n")).collect();
     // See `generate_simulate_main`'s comment: `--noise <mode>` bakes in the
@@ -703,8 +771,7 @@ pub fn generate_analyze_main(
         .collect::<Vec<_>>()
         .join(", ");
 
-    // Header extras. When harmonics==0 the CSV is byte-identical
-    // to the pre-feature version.
+    // Header extras. When harmonics==0 the CSV header is the legacy one.
     let extra_header: String = if harmonics == 0 {
         String::new()
     } else {
@@ -718,6 +785,27 @@ pub fn generate_analyze_main(
 
     format!(
         r#"
+// Per-point counter increments, printed as `DIAGPT:<label>:<name>=<delta>`
+// (nonzero only). Returns a human summary of them ("" when all zero).
+fn analyze_report_point_counters(label: &str, before: &[u64], after: &[u64]) -> String {{
+    const NAMES: [&str; {npc}] = [{point_counter_names}];
+    let mut summary = String::new();
+    for (k, name) in NAMES.iter().enumerate() {{
+        let delta = after[k].saturating_sub(before[k]);
+        if delta > 0 {{
+            eprintln!("DIAGPT:{{}}:{{}}={{}}", label, name, delta);
+            if !summary.is_empty() {{ summary.push_str(", "); }}
+            summary.push_str(&format!("{{}} +{{}}", name, delta));
+        }}
+    }}
+    summary
+}}
+
+fn analyze_point_counters(state: &CircuitState) -> [u64; {npc}] {{
+    let _ = state;
+    [{point_counter_reads}]
+}}
+
 fn main() {{
     // Number of sine cycles integrated per frequency point for the 1-bin
     // DFT. 10 gives ~40 dB SNR on a settled linear response — plenty for
@@ -726,6 +814,11 @@ fn main() {{
     // needs lower noise floor at a particular frequency band.
     const DFT_CYCLES: usize = 10;
     const HARMONICS: usize = {harmonics};
+    // Steady-state check (see `ANALYZE_SETTLE_TOL` / `_FLOOR` in the CLI).
+    const SETTLE_TOL: f64 = {settle_tol:e};
+    const SETTLE_FLOOR: f64 = {settle_floor:e};
+    // THD sums harmonics below this AND below Nyquist.
+    const THD_BAND_HZ: f64 = {thd_band:.1};
 
     let mut state = CircuitState::default();
 {noise_enable_line}{pot_lines}{switch_lines}    state.set_sample_rate({sample_rate:.1});
@@ -733,27 +826,28 @@ fn main() {{
     let freqs: &[f64] = &[{freq_list}];
     let amplitude: f64 = {amplitude:.17e};
     let sr = {sample_rate:.1};
-    let settle_samples = ({settle_secs:.1} * sr) as usize;
+    let settle_samples = ({settle_secs:.6} * sr) as usize;
+    let preroll_secs: f64 = {preroll_secs:.17e};
+    let preroll_max_secs: f64 = {preroll_max_secs:.17e};
 
-    // Settle once, outside the frequency loop. The state carries over
-    // between frequency points; each point then pre-rolls one full DFT
-    // window at its own drive (see below) so the broadband switch
-    // transient decays before measurement, and the integer-cycle window
-    // rejects DC exactly. Circuits with time constants longer than the
-    // DFT window would still bias the result, so if a future circuit
-    // needs per-point cold-start settle, expose a `--cold-start` flag on
-    // `melange analyze` and re-introduce `state = base_state.clone()`
-    // plus an inner settle loop here.
+    // Zero-drive settle, once, before the first point: lets the bias network
+    // move off the embedded DC operating point (and inductor currents
+    // settle) before any drive is applied. Its unsolved samples are reported
+    // like a point's, under the label `settle`.
+    let c0 = analyze_point_counters(&state);
     for _ in 0..settle_samples {{
         process_sample(0.0, &mut state);
     }}
+    let _ = analyze_report_point_counters("settle", &c0, &analyze_point_counters(&state));
 
     println!("frequency_hz,gain_db,phase_deg{extra_header}");
     // Per-harmonic DFT accumulators; index 0 = fundamental, k-1 = Hk.
-    // Allocated once, zeroed per frequency point.
+    // `prev_*` holds the point's previous measurement for the settle check.
     let max_bins = if HARMONICS == 0 {{ 1 }} else {{ HARMONICS }};
     let mut sum_cos = vec![0.0f64; max_bins];
     let mut sum_sin = vec![0.0f64; max_bins];
+    let mut prev_cos = vec![0.0f64; max_bins];
+    let mut prev_sin = vec![0.0f64; max_bins];
     for &freq in freqs {{
         // Measure: single-bin DFT over `DFT_CYCLES` integer cycles of the
         // fundamental. Harmonic k has k*DFT_CYCLES cycles in that window —
@@ -770,50 +864,118 @@ fn main() {{
         // linear circuits. The snapped value is used everywhere below: drive,
         // correlation kernels, and the CSV frequency column.
         let freq = (DFT_CYCLES as f64) * sr / (measure_samples as f64);
-
-        // Pre-roll one full window at the new drive before accumulating.
-        // Switching frequency launches a broadband circuit transient that is
-        // NOT bin-aligned, so the DFT does not reject it (it floored h2..hN
-        // around −60 dBc on pure linear circuits). The pre-roll spans exactly
-        // DFT_CYCLES cycles of the snapped frequency, so the drive phase is
-        // continuous into the measurement loop below (i and i+measure_samples
-        // share the same phase mod 2π).
-        for i in 0..measure_samples {{
-            let t = i as f64 / sr;
-            let phase = 2.0 * std::f64::consts::PI * freq * t;
-            process_sample(amplitude * phase.sin(), &mut state);
-        }}
-
-        for s in sum_cos.iter_mut() {{ *s = 0.0; }}
-        for s in sum_sin.iter_mut() {{ *s = 0.0; }}
-        let mut sum_in_cos = 0.0f64;
-        let mut sum_in_sin = 0.0f64;
-        // Correlation of output against (-1)^n — the exact DFT bin at SR/2.
-        // Used only when HARMONICS>0 to report `nyquist_dbc`, but accumulated
-        // unconditionally since a branch inside the sample loop is worse than
-        // an unused f64 add.
-        let mut sum_nyquist = 0.0f64;
-        for i in 0..measure_samples {{
-            let t = i as f64 / sr;
-            let phase = 2.0 * std::f64::consts::PI * freq * t;
-            let input = amplitude * phase.sin();
-            let out = process_sample(input, &mut state);
-            let output = out[0];
-
-            sum_in_cos += input * phase.cos();
-            sum_in_sin += input * phase.sin();
-
-            let sign = if i & 1 == 0 {{ 1.0 }} else {{ -1.0 }};
-            sum_nyquist += output * sign;
-
-            for k in 1..=max_bins {{
-                let kphase = (k as f64) * phase;
-                sum_cos[k - 1] += output * kphase.cos();
-                sum_sin[k - 1] += output * kphase.sin();
-            }}
-        }}
-
+        let nyquist = sr * 0.5;
         let n = measure_samples as f64;
+
+        // Steady state at THIS drive. A point is measured only after the
+        // circuit has been driven at its own frequency and amplitude for at
+        // least `preroll_secs`: the previous point's drive, the frequency
+        // switch's broadband transient, and slow bias movement under drive
+        // (a sagging RC rail, bypass caps re-centring) all decay first. The
+        // drive is run in chunks of whole DFT windows (so its phase is
+        // continuous: i and i+measure_samples share the same phase mod 2π),
+        // the last window of each chunk is measured, and chunks repeat until
+        // two successive measurements agree or `preroll_max_secs` is spent.
+        // The reported values are the last measurement's.
+        let windows_per_chunk =
+            ((preroll_secs * sr / measure_samples as f64).ceil() as usize).max(1);
+        let chunk_secs = (windows_per_chunk * measure_samples) as f64 / sr;
+        let max_chunks = if preroll_max_secs <= 0.0 {{
+            1
+        }} else {{
+            ((preroll_max_secs / chunk_secs - 1e-9).ceil() as usize).max(2)
+        }};
+        let counters_before = analyze_point_counters(&state);
+        let mut chunks = 0usize;
+        // 2 = unchecked (single measurement), 1 = settled, 0 = cap reached.
+        let mut status = if max_chunks == 1 {{ 2 }} else {{ 0 }};
+        let mut fund_rel = f64::NAN;
+        let mut harm_rel = f64::NAN;
+        let mut sum_in_cos: f64;
+        let mut sum_in_sin: f64;
+        // Correlation of output against (-1)^n — the exact DFT bin at SR/2.
+        let mut sum_nyquist: f64;
+        loop {{
+            for _ in 1..windows_per_chunk {{
+                for i in 0..measure_samples {{
+                    let t = i as f64 / sr;
+                    let phase = 2.0 * std::f64::consts::PI * freq * t;
+                    process_sample(amplitude * phase.sin(), &mut state);
+                }}
+            }}
+
+            for s in sum_cos.iter_mut() {{ *s = 0.0; }}
+            for s in sum_sin.iter_mut() {{ *s = 0.0; }}
+            sum_in_cos = 0.0;
+            sum_in_sin = 0.0;
+            sum_nyquist = 0.0;
+            for i in 0..measure_samples {{
+                let t = i as f64 / sr;
+                let phase = 2.0 * std::f64::consts::PI * freq * t;
+                let input = amplitude * phase.sin();
+                let out = process_sample(input, &mut state);
+                let output = out[0];
+
+                sum_in_cos += input * phase.cos();
+                sum_in_sin += input * phase.sin();
+
+                let sign = if i & 1 == 0 {{ 1.0 }} else {{ -1.0 }};
+                sum_nyquist += output * sign;
+
+                for k in 1..=max_bins {{
+                    let kphase = (k as f64) * phase;
+                    sum_cos[k - 1] += output * kphase.cos();
+                    sum_sin[k - 1] += output * kphase.sin();
+                }}
+            }}
+            chunks += 1;
+
+            if chunks > 1 {{
+                // Complex differences: the windows start at the same drive
+                // phase, so a settled circuit repeats each bin exactly.
+                let h1 = (sum_cos[0] * sum_cos[0] + sum_sin[0] * sum_sin[0]).sqrt();
+                let d1 = ((sum_cos[0] - prev_cos[0]).powi(2)
+                    + (sum_sin[0] - prev_sin[0]).powi(2))
+                .sqrt();
+                let mut dist = 0.0f64;
+                let mut dd = 0.0f64;
+                for k in 2..=HARMONICS {{
+                    if (k as f64) * freq < nyquist {{
+                        dist += sum_cos[k - 1] * sum_cos[k - 1] + sum_sin[k - 1] * sum_sin[k - 1];
+                        dd += (sum_cos[k - 1] - prev_cos[k - 1]).powi(2)
+                            + (sum_sin[k - 1] - prev_sin[k - 1]).powi(2);
+                    }}
+                }}
+                let (dist, dd) = (dist.sqrt(), dd.sqrt());
+                fund_rel = if h1 > 0.0 {{ d1 / h1 }} else if d1 == 0.0 {{ 0.0 }} else {{ f64::INFINITY }};
+                harm_rel = if dist > 0.0 {{ dd / dist }} else if dd == 0.0 {{ 0.0 }} else {{ f64::INFINITY }};
+                if d1 <= SETTLE_TOL * h1 && dd <= SETTLE_TOL * dist + SETTLE_FLOOR * h1 {{
+                    status = 1;
+                    break;
+                }}
+            }}
+            if chunks >= max_chunks {{
+                break;
+            }}
+            prev_cos.copy_from_slice(&sum_cos);
+            prev_sin.copy_from_slice(&sum_sin);
+        }}
+        let drive_secs = chunks as f64 * chunk_secs;
+        eprintln!(
+            "SETTLEPT:{{:.2}}:{{:.6}}:{{}}:{{:e}}:{{:e}}",
+            freq, drive_secs, status, fund_rel, harm_rel
+        );
+        let point_label = format!("{{:.2}}", freq);
+        let unsolved =
+            analyze_report_point_counters(&point_label, &counters_before, &analyze_point_counters(&state));
+        let mut note = String::new();
+        if !unsolved.is_empty() {{
+            note.push_str(&format!("  <-- counters: {{}}", unsolved));
+        }}
+        if status == 0 {{
+            note.push_str(&format!("  <-- not settled after {{:.2}} s", drive_secs));
+        }}
+
         // Fundamental = bin 0.
         let out_mag = ((2.0 * sum_cos[0] / n).powi(2) + (2.0 * sum_sin[0] / n).powi(2)).sqrt();
         let in_mag = ((2.0 * sum_in_cos / n).powi(2) + (2.0 * sum_in_sin / n).powi(2)).sqrt();
@@ -836,13 +998,12 @@ fn main() {{
 
         if HARMONICS == 0 {{
             println!("{{:.2}},{{:.4}},{{:.2}}", freq, gain_db, phase_diff);
-            eprintln!("  {{:.1}} Hz: {{:.2}} dB, {{:.1}}°", freq, gain_db, phase_diff);
+            eprintln!("  {{:.1}} Hz: {{:.2}} dB, {{:.1}}°{{}}", freq, gain_db, phase_diff, note);
         }} else {{
             // Magnitudes per harmonic. `h1_mag` is the fundamental (bin 0).
             // A harmonic above Nyquist has no physical content — the discrete
             // cosine/sine at (k*f) hits aliased bins and the computed "mag" is
             // meaningless. Report `nan` so downstream tooling can skip it.
-            let nyquist = sr * 0.5;
             let mut mags = vec![0.0f64; HARMONICS];
             for k in 1..=HARMONICS {{
                 let fk = (k as f64) * freq;
@@ -855,13 +1016,23 @@ fn main() {{
                 }}
             }}
             let h1 = mags[0];
-            // THD = sqrt(sum k>=2 of Hk^2) / H1; NaN-valued harmonics drop out.
+            // THD = sqrt(sum of Hk^2, k>=2, k*f below THD_BAND_HZ and Nyquist)
+            // / H1. No harmonic in that band (f >= THD_BAND_HZ/2) = no THD:
+            // `nan`, not a reassuring 0.
             let mut sq_sum = 0.0f64;
+            let mut in_band = 0usize;
             for k in 2..=HARMONICS {{
                 let m = mags[k - 1];
-                if m.is_finite() {{ sq_sum += m * m; }}
+                if (k as f64) * freq < THD_BAND_HZ && m.is_finite() {{
+                    sq_sum += m * m;
+                    in_band += 1;
+                }}
             }}
-            let thd_pct = if h1 > 1e-30 {{ (sq_sum.sqrt() / h1) * 100.0 }} else {{ f64::NAN }};
+            let thd_pct = if h1 > 1e-30 && in_band > 0 {{
+                (sq_sum.sqrt() / h1) * 100.0
+            }} else {{
+                f64::NAN
+            }};
 
             // Nyquist bin — correlation of output with (-1)^n recovers the
             // peak amplitude of any component at exactly SR/2. Unlike interior
@@ -875,7 +1046,11 @@ fn main() {{
             }};
 
             print!("{{:.2}},{{:.4}},{{:.2}}", freq, gain_db, phase_diff);
-            print!(",{{:.4}}", thd_pct);
+            if thd_pct.is_finite() {{
+                print!(",{{:.4}}", thd_pct);
+            }} else {{
+                print!(",nan");
+            }}
             for k in 2..=HARMONICS {{
                 let m = mags[k - 1];
                 if !m.is_finite() || h1 <= 1e-30 {{
@@ -891,14 +1066,22 @@ fn main() {{
                 print!(",nan");
             }}
             println!();
+            let thd_text = if thd_pct.is_finite() {{
+                format!("{{:.3}}%", thd_pct)
+            }} else {{
+                "n/a".to_string()
+            }};
             eprintln!(
-                "  {{:.1}} Hz: {{:.2}} dB, {{:.1}}°, THD={{:.3}}%",
-                freq, gain_db, phase_diff, thd_pct
+                "  {{:.1}} Hz: {{:.2}} dB, {{:.1}}°, THD={{}}{{}}",
+                freq, gain_db, phase_diff, thd_text, note
             );
         }}
     }}
 {diag_lines}}}
 "#,
+        settle_tol = ANALYZE_SETTLE_TOL,
+        settle_floor = ANALYZE_SETTLE_FLOOR,
+        thd_band = ANALYZE_THD_BAND_HZ,
     )
 }
 

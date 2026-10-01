@@ -1078,11 +1078,11 @@ fn test_compile_missing_node() {
 /// ~40 kV (`nr_max_iter_count` in the thousands). Routing to nodal (which
 /// has the full-LU NR fallback) converges cleanly to a bounded, physical
 /// oscillation.
-const G10_OSCILLATOR: &str = "\
+const LC_MASTER_OSCILLATOR: &str = "\
 Farfisa Compact G10 reference chain (master osc + squarer + divider + keying)
 Vrail rail 0 DC 8
 Vvib vterm 0 DC 8
-.runtime Vvib as v_g10_vterm
+.runtime Vvib as v_osc_vterm
 C_kick in b1 1n
 R_e18 rail node_a 1.8k
 C_e25 rail node_a 25u
@@ -1123,7 +1123,7 @@ fn parse_summary_value(stdout: &str, key: &str) -> f64 {
 
 #[test]
 fn test_g10_oscillator_default_routing_is_bounded() {
-    let cir = write_test_circuit(G10_OSCILLATOR, "g10_osc_default");
+    let cir = write_test_circuit(LC_MASTER_OSCILLATOR, "g10_osc_default");
     let tmp_wav = std::env::temp_dir().join("melange_cli_test_g10_osc_default.wav");
 
     // Deliberately NO --solver / --backward-euler / --force-trap override —
@@ -1183,7 +1183,7 @@ fn test_g10_oscillator_default_routing_is_bounded() {
 /// why, and a forced `--solver dk` fails with the reason.
 #[test]
 fn test_g10_self_starting_oscillator_is_refused_on_dk() {
-    let cir = write_test_circuit(G10_OSCILLATOR, "g10_self_starting");
+    let cir = write_test_circuit(LC_MASTER_OSCILLATOR, "g10_self_starting");
     let out = std::env::temp_dir().join("melange_cli_test_g10_self_starting.rs");
     let path = cir.to_str().unwrap();
     let stdout = run_melange(&[

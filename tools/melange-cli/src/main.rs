@@ -523,8 +523,22 @@ fn main() -> Result<()> {
             force_trap,
             max_iter,
             allow_input_clamp,
+            allow_nr_hold,
+            preroll_secs,
+            preroll_max_secs,
         } => {
             // Validate numeric CLI parameters
+            if !(preroll_secs >= 0.0 && preroll_secs.is_finite()) {
+                anyhow::bail!("--preroll-secs must be zero or positive and finite");
+            }
+            if !(preroll_max_secs == 0.0
+                || (preroll_max_secs >= preroll_secs && preroll_max_secs.is_finite()))
+            {
+                anyhow::bail!(
+                    "--preroll-max-secs must be 0 (settle check off) or at least --preroll-secs \
+                     ({preroll_secs}), got {preroll_max_secs}"
+                );
+            }
             if start_freq <= 0.0 || !start_freq.is_finite() {
                 anyhow::bail!("start-freq must be positive and finite");
             }
@@ -607,6 +621,9 @@ fn main() -> Result<()> {
                     force_trap,
                     max_iter,
                     allow_input_clamp,
+                    allow_nr_hold,
+                    preroll_secs,
+                    preroll_max_secs,
                     verbose,
                 },
             )

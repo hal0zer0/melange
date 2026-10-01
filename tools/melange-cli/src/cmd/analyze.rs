@@ -39,6 +39,15 @@ pub(crate) struct AnalyzeOptions<'a> {
     pub(crate) max_iter: Option<usize>,
     /// `--allow-input-clamp`: report even when the input was clamped or NaN.
     pub(crate) allow_input_clamp: bool,
+    /// `--allow-nr-hold`: report even when a point's render was not a
+    /// solution (held, unconverged-committed, or reduced-model-exit samples).
+    pub(crate) allow_nr_hold: bool,
+    /// `--preroll-secs`: minimum drive-level pre-roll per point, and the
+    /// spacing between its settle-check measurements.
+    pub(crate) preroll_secs: f64,
+    /// `--preroll-max-secs`: cap on drive-level time per point; 0 = no
+    /// settle check.
+    pub(crate) preroll_max_secs: f64,
     /// `-v/--verbose`: print the routing detail.
     pub(crate) verbose: bool,
 }
@@ -77,6 +86,9 @@ pub(crate) fn analyze_freq_response(
         force_trap,
         max_iter,
         allow_input_clamp,
+        allow_nr_hold,
+        preroll_secs,
+        preroll_max_secs,
         verbose,
     } = *opts;
     // Match parse-time node normalization (lowercase, gnd→0).
@@ -185,8 +197,45 @@ pub(crate) fn analyze_freq_response(
         eprintln!("        response has not changed. See docs/OVERSAMPLING.md.");
     }
 
-    // Determine settle time
+    // Zero-drive settle, once, before the first point: moves the bias off the
+    // embedded DC operating point (and lets inductor currents settle) before
+    // any drive. It does NOT make a point steady state — each point's own
+    // drive-level pre-roll below does that.
     let settle_secs = if has_inductors { 5.0 } else { 0.5 };
+
+    // `--noise` makes successive windows differ by the noise itself, so the
+    // agreement check would chase it to the cap on every point. Keep the
+    // fixed pre-roll, drop the check, and say so.
+    let preroll_max_secs =
+        if noise_mode != melange_solver::codegen::NoiseMode::Off && preroll_max_secs > 0.0 {
+            eprintln!(
+                "  NOTE: --noise is on, so the per-point settle check is off (noisy windows never \
+             agree); each point gets the fixed {preroll_secs} s pre-roll only."
+            );
+            0.0
+        } else {
+            preroll_max_secs
+        };
+    if preroll_max_secs > 0.0 {
+        eprintln!(
+            "  Each point: driven at its own frequency and amplitude for >= {preroll_secs} s, \
+             then re-measured every {preroll_secs} s until two measurements agree to {:.1} % \
+             (or {preroll_max_secs} s at drive).",
+            codegen_runner::ANALYZE_SETTLE_TOL * 100.0
+        );
+    } else {
+        eprintln!(
+            "  Each point: driven at its own frequency and amplitude for >= {preroll_secs} s \
+             before it is measured (settle check off)."
+        );
+    }
+    if harmonics > 0 {
+        eprintln!(
+            "  thd_pct band: H2..H{harmonics} below {:.0} kHz (and below Nyquist); hN_dbc \
+             columns are reported up to Nyquist.",
+            codegen_runner::ANALYZE_THD_BAND_HZ / 1000.0
+        );
+    }
 
     // Append analyze main, compile, run.
     //
@@ -198,21 +247,29 @@ pub(crate) fn analyze_freq_response(
         .iter()
         .map(|(idx, pos)| format!("state.set_switch_{idx}({pos})"))
         .collect();
-    let analyze_main = codegen_runner::generate_analyze_main(
-        &frequencies,
-        amplitude,
-        sample_rate,
-        settle_secs,
-        &[], // pot calls (already baked into netlist)
-        &switch_calls,
-        harmonics,
-        noise_mode != melange_solver::codegen::NoiseMode::Off,
-        &INPUT_DIAG_FIELDS
+    let declared = |fields: &[&'static str]| -> Vec<&'static str> {
+        fields
             .iter()
             .copied()
             .filter(|f| declares_state_field(&generated.code, f))
-            .collect::<Vec<&str>>(),
-    );
+            .collect()
+    };
+    let diag_counters = declared(&INPUT_DIAG_FIELDS);
+    let point_counters = declared(&POINT_DIAG_FIELDS);
+    let analyze_main = codegen_runner::generate_analyze_main(codegen_runner::AnalyzeMain {
+        frequencies: &frequencies,
+        amplitude,
+        sample_rate,
+        settle_secs,
+        preroll_secs,
+        preroll_max_secs,
+        pot_calls: &[], // already baked into netlist
+        switch_calls: &switch_calls,
+        harmonics,
+        noise_enabled: noise_mode != melange_solver::codegen::NoiseMode::Off,
+        diag_counters: &diag_counters,
+        point_counters: &point_counters,
+    });
     let full_source = format!("{}\n{}", generated.code, analyze_main);
 
     let binary_cache =
@@ -235,11 +292,22 @@ pub(crate) fn analyze_freq_response(
 
     let stdout = String::from_utf8_lossy(&result.stdout);
 
-    // Print per-frequency diagnostics from stderr
+    // Print per-frequency lines from stderr; the machine lines (`DIAGPT:`,
+    // `SETTLEPT:`) are read below and reported in words instead.
     let stderr = String::from_utf8_lossy(&result.stderr);
     for line in stderr.lines() {
-        eprintln!("{}", line);
+        if !line.starts_with("DIAGPT:") && !line.starts_with("SETTLEPT:") {
+            eprintln!("{}", line);
+        }
     }
+    report_settle(&stderr, preroll_max_secs);
+    refuse_on_unsolved_points(
+        &stderr,
+        sample_rate,
+        oversampling,
+        settle_secs,
+        allow_nr_hold,
+    )?;
     refuse_on_input_diag(&stderr, allow_input_clamp)?;
 
     // Output CSV.
@@ -277,4 +345,296 @@ fn generate_log_frequencies(start: f64, end: f64, points_per_decade: usize) -> V
             10.0_f64.powf(log_f)
         })
         .collect()
+}
+
+/// `CircuitState` counters whose per-point increments `analyze` reads
+/// (presence-filtered per build): the unsolved-sample family `simulate`
+/// refuses on, plus the NaN/magnitude resets it calls suspect.
+const POINT_DIAG_FIELDS: [&str; 6] = [
+    "diag_unsolved_sample_count",
+    "diag_nr_hold_count",
+    "diag_nr_unconverged_commit_count",
+    "diag_reduced_model_exit_count",
+    "diag_nan_reset_count",
+    "diag_magnitude_reset_count",
+];
+
+/// One `SETTLEPT:` line: a point's drive-level time and settle verdict.
+#[derive(Debug, PartialEq)]
+struct SettlePoint {
+    label: String,
+    drive_secs: f64,
+    /// 1 = settled, 0 = cap reached, 2 = unchecked.
+    status: u8,
+    fund_rel: f64,
+    harm_rel: f64,
+}
+
+fn parse_settle_points(stderr: &str) -> Vec<SettlePoint> {
+    stderr
+        .lines()
+        .filter_map(|l| l.strip_prefix("SETTLEPT:"))
+        .filter_map(|rest| {
+            let f: Vec<&str> = rest.split(':').collect();
+            if f.len() != 5 {
+                return None;
+            }
+            Some(SettlePoint {
+                label: f[0].to_string(),
+                drive_secs: f[1].parse().ok()?,
+                status: f[2].parse().ok()?,
+                fund_rel: f[3].parse().unwrap_or(f64::NAN),
+                harm_rel: f[4].parse().unwrap_or(f64::NAN),
+            })
+        })
+        .collect()
+}
+
+/// `DIAGPT:<label>:<counter>=<delta>` lines grouped by label, in the order
+/// the labels first appear (`settle`, then each point's frequency).
+fn parse_point_counts(stderr: &str) -> Vec<(String, Vec<(String, u64)>)> {
+    let mut out: Vec<(String, Vec<(String, u64)>)> = Vec::new();
+    for rest in stderr.lines().filter_map(|l| l.strip_prefix("DIAGPT:")) {
+        let Some((label, kv)) = rest.split_once(':') else {
+            continue;
+        };
+        let Some((name, v)) = kv.split_once('=') else {
+            continue;
+        };
+        let Ok(v) = v.trim().parse::<u64>() else {
+            continue;
+        };
+        match out.iter_mut().find(|(l, _)| l == label) {
+            Some((_, counts)) => counts.push((name.to_string(), v)),
+            None => out.push((label.to_string(), vec![(name.to_string(), v)])),
+        }
+    }
+    out
+}
+
+/// Report points that did not reach steady state within the cap. A warning,
+/// not a refusal: the samples are solutions, and some circuits have no steady
+/// state at a given drive at all (an oscillator, a limit cycle).
+fn report_settle(stderr: &str, preroll_max_secs: f64) {
+    let points = parse_settle_points(stderr);
+    if points.is_empty() || preroll_max_secs <= 0.0 {
+        return;
+    }
+    let unsettled: Vec<&SettlePoint> = points.iter().filter(|p| p.status == 0).collect();
+    let longest = points
+        .iter()
+        .max_by(|a, b| a.drive_secs.total_cmp(&b.drive_secs))
+        .expect("non-empty");
+    eprintln!(
+        "  Steady state: {}/{} point(s) settled; longest at drive {:.2} s ({} Hz).",
+        points.len() - unsettled.len(),
+        points.len(),
+        longest.drive_secs,
+        longest.label
+    );
+    if unsettled.is_empty() {
+        return;
+    }
+    eprintln!();
+    eprintln!(
+        "WARNING: {} point(s) did not reach steady state within --preroll-max-secs \
+         ({preroll_max_secs} s at drive). Their rows report the last measurement, which is \
+         still moving:",
+        unsettled.len()
+    );
+    for p in &unsettled {
+        eprintln!(
+            "  {} Hz: the last two measurements differ by {:.3} % (fundamental) and {:.3} % \
+             (harmonics)",
+            p.label,
+            p.fund_rel * 100.0,
+            p.harm_rel * 100.0
+        );
+    }
+    eprintln!(
+        "  Raise --preroll-max-secs if the circuit is still settling, or the circuit has no \
+         steady state at this drive (an oscillator, a limit cycle, a subharmonic response)."
+    );
+}
+
+/// Refuse any point whose render was not a solution, the way `simulate`
+/// refuses a render: held samples, unconverged commits, and samples solved on
+/// a reduced device model outside its region (`unsolved_sample_count`
+/// covers all three where the build declares it). `allow` is
+/// `--allow-nr-hold`. NaN/magnitude resets are reported as suspect, as
+/// `simulate` reports them.
+fn refuse_on_unsolved_points(
+    stderr: &str,
+    sample_rate: f64,
+    oversampling: usize,
+    settle_secs: f64,
+    allow: bool,
+) -> Result<()> {
+    let points = parse_point_counts(stderr);
+    let settle = parse_settle_points(stderr);
+    // Internal solves a label's counters were counted over.
+    let solves = |label: &str| -> Option<u64> {
+        let secs = if label == "settle" {
+            Some(settle_secs)
+        } else {
+            settle
+                .iter()
+                .find(|p| p.label == label)
+                .map(|p| p.drive_secs)
+        }?;
+        Some((secs * sample_rate).round() as u64 * oversampling as u64)
+    };
+    let get = |counts: &[(String, u64)], key: &str| -> Option<u64> {
+        counts.iter().find(|(n, _)| n == key).map(|(_, v)| *v)
+    };
+    let where_ = |label: &str| -> String {
+        if label == "settle" {
+            "the zero-drive settle before the first point".to_string()
+        } else {
+            format!("{label} Hz")
+        }
+    };
+    let mut bad: Vec<(String, String, String)> = Vec::new();
+    let (mut any_reduced, mut any_held, mut any_committed) = (false, false, false);
+    for (label, counts) in &points {
+        let resets = get(counts, "nan_reset_count").unwrap_or(0)
+            + get(counts, "magnitude_reset_count").unwrap_or(0);
+        if resets > 0 {
+            eprintln!(
+                "WARNING: {}: {resets} NaN/magnitude reset(s): the solve blew up and was reset. \
+                 Treat this point as suspect.",
+                where_(label)
+            );
+        }
+        let held = get(counts, "nr_hold_count").unwrap_or(0);
+        let committed = get(counts, "nr_unconverged_commit_count").unwrap_or(0);
+        let reduced = get(counts, "reduced_model_exit_count").unwrap_or(0);
+        let total = get(counts, "unsolved_sample_count").unwrap_or(held + committed);
+        if total == 0 {
+            continue;
+        }
+        any_reduced |= reduced > 0;
+        any_held |= held > 0;
+        any_committed |= committed > 0;
+        let detail = counts
+            .iter()
+            .filter(|(n, _)| !n.ends_with("reset_count"))
+            .map(|(n, v)| format!("{n} {v}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let of = solves(label)
+            .map(|n| format!(" of {n}"))
+            .unwrap_or_default();
+        bad.push((where_(label), format!("{total}{of}"), detail));
+    }
+    if bad.is_empty() {
+        return Ok(());
+    }
+    let os_note = if oversampling > 1 {
+        format!(" (counted per internal solve, {oversampling} per host sample)")
+    } else {
+        String::new()
+    };
+    eprintln!();
+    eprintln!(
+        "ERROR: {} point(s) measured samples that are not a solution to this circuit{os_note}:",
+        bad.len()
+    );
+    for (at, total, detail) in &bad {
+        eprintln!("  {at}: {total} sample(s) unsolved [{detail}]");
+    }
+    if any_reduced {
+        eprintln!(
+            "  reduced_model_exit_count: samples solved on a REDUCED device model outside its \
+             region: a `.linearize`d device driven out of its small-signal region (a triode cut \
+             off or its grid past the conduction onset, a BJT cut off or saturated), or a \
+             grid-off pentode (--tube-grid-fa on) whose grid conducted. Remove `.linearize` for \
+             a stage that leaves its region at this drive, or lower --amplitude."
+        );
+    }
+    if any_held {
+        eprintln!(
+            "  nr_hold_count: every Newton path failed and the solver committed the PREVIOUS \
+             state as the output."
+        );
+    }
+    if any_committed {
+        eprintln!(
+            "  nr_unconverged_commit_count: the final Newton solve (an op-amp rail pin, or the \
+             DK solve) ended unconverged and that iterate was committed."
+        );
+    }
+    eprintln!(
+        "  A gain or THD read from those samples describes the solver's fallback, not the \
+         circuit; the waveform stays bounded and smooth, so nothing in the numbers shows it. \
+         `melange simulate` refuses the same render."
+    );
+    if !allow {
+        anyhow::bail!(
+            "{} analyze point(s) were not a solution (--allow-nr-hold to report them anyway)",
+            bad.len()
+        );
+    }
+    eprintln!("(--allow-nr-hold given: reporting them anyway.)");
+    Ok(())
+}
+
+#[cfg(test)]
+mod point_diag_tests {
+    use super::*;
+
+    const STDERR: &str = "\
+  1000.0 Hz: 12.88 dB, 13.4°, THD=5.972%
+DIAGPT:settle:nr_hold_count=0
+SETTLEPT:100.00:0.500000:1:2.1e-5:3.4e-4
+DIAGPT:1002.09:reduced_model_exit_count=6497
+DIAGPT:1002.09:unsolved_sample_count=6497
+SETTLEPT:1002.09:2.000000:0:1.5e-2:NaN
+DIAGPT:2000.00:nan_reset_count=1
+";
+
+    #[test]
+    fn settle_lines_parse() {
+        let p = parse_settle_points(STDERR);
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[0].label, "100.00");
+        assert_eq!(p[0].status, 1);
+        assert_eq!(p[1].status, 0);
+        assert!((p[1].drive_secs - 2.0).abs() < 1e-12);
+        assert!(p[1].harm_rel.is_nan());
+    }
+
+    #[test]
+    fn point_counts_group_by_label_in_order() {
+        let c = parse_point_counts(STDERR);
+        let labels: Vec<&str> = c.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, ["settle", "1002.09", "2000.00"]);
+        assert_eq!(c[1].1.len(), 2);
+    }
+
+    #[test]
+    fn an_unsolved_point_is_refused_unless_allowed() {
+        let err = refuse_on_unsolved_points(STDERR, 48000.0, 1, 0.5, false).unwrap_err();
+        assert!(err.to_string().contains("--allow-nr-hold"), "{err}");
+        refuse_on_unsolved_points(STDERR, 48000.0, 1, 0.5, true).unwrap();
+    }
+
+    #[test]
+    fn resets_alone_warn_but_do_not_refuse() {
+        refuse_on_unsolved_points("DIAGPT:50.00:nan_reset_count=3\n", 48000.0, 1, 0.5, false)
+            .unwrap();
+    }
+
+    /// A build without the unified counter still refuses on its parts.
+    #[test]
+    fn hold_without_the_unified_counter_is_refused() {
+        assert!(refuse_on_unsolved_points(
+            "DIAGPT:50.00:nr_hold_count=2\n",
+            48000.0,
+            1,
+            0.5,
+            false
+        )
+        .is_err());
+    }
 }

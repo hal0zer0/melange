@@ -149,7 +149,7 @@ const SELF_STARTING_OSCILLATOR: &str =
     "Transistor-organ master oscillator (LC tank, regenerative feedback) + squarer
 Vrail rail 0 DC 8
 Vvib vterm 0 DC 8
-.runtime Vvib as v_g10_vterm
+.runtime Vvib as v_osc_vterm
 C_kick in b1 1n
 R_e18 rail node_a 1.8k
 C_e25 rail node_a 25u

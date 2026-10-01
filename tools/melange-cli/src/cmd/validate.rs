@@ -184,10 +184,19 @@ pub(crate) fn validate_circuit_source(
             | circuits::CircuitSource::Url { .. }
             | circuits::CircuitSource::Friendly { .. }) => {
                 let content = load_circuit_text(src, &|l| println!("{l}"))?;
+                // melange-validate reads the deck from a path. The file is
+                // removed when `tmp` drops; a killed run cannot drop it, so
+                // it lives in a scratch dir of its own that every run sweeps
+                // of leftovers (see `sweep_stale_netlists`).
+                let scratch = std::env::temp_dir().join("melange-validate-netlists");
+                std::fs::create_dir_all(&scratch).with_context(|| {
+                    format!("Failed to create scratch dir {}", scratch.display())
+                })?;
+                sweep_stale_netlists(&scratch, STALE_NETLIST_AGE);
                 let mut tmp = tempfile::Builder::new()
                     .prefix("melange_validate_")
                     .suffix(".cir")
-                    .tempfile()
+                    .tempfile_in(&scratch)
                     .context("Failed to create temp netlist file")?;
                 tmp.write_all(content.as_bytes())
                     .context("Failed to write temp netlist")?;
@@ -199,7 +208,7 @@ pub(crate) fn validate_circuit_source(
 
     // Step 3: Generate test input signal (1kHz sine)
     println!(
-        "Step 3: Generating test signal ({:.1}s, {:.3}V amplitude, 1kHz sine)...",
+        "Step 3: Generating test signal ({}s, {:.3}V amplitude, 1kHz sine)...",
         duration, amplitude
     );
     let num_samples = (duration * sample_rate) as usize;
@@ -518,5 +527,61 @@ fn run_rate_sweep(
             "Verdict: DIVERGES: the error against the finest reference rises with the rate. A \
              model or harness mismatch."
         ),
+    }
+}
+
+/// Age past which a netlist left in the validate scratch dir is a killed
+/// run's leftover. A live run reads its netlist within seconds of writing it.
+const STALE_NETLIST_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Remove `melange_validate_*.cir` files older than `age` from `dir`: the
+/// netlists of validate runs killed before their temp file could drop.
+/// Best effort; a file another process is still using is never that old.
+fn sweep_stale_netlists(dir: &std::path::Path, age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with("melange_validate_") && name.ends_with(".cir")) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|d| d > age);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+#[cfg(test)]
+mod sweep_tests {
+    use super::sweep_stale_netlists;
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn removes_only_old_validate_netlists() {
+        let dir = tempfile::tempdir().unwrap();
+        let put = |name: &str, age_s: u64| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, "x").unwrap();
+            let f = std::fs::File::options().write(true).open(&p).unwrap();
+            f.set_modified(SystemTime::now() - Duration::from_secs(age_s))
+                .unwrap();
+            p
+        };
+        let old = put("melange_validate_a.cir", 7200);
+        let young = put("melange_validate_b.cir", 10);
+        let foreign = put("other.cir", 7200);
+        sweep_stale_netlists(dir.path(), Duration::from_secs(3600));
+        assert!(!old.exists());
+        assert!(young.exists());
+        assert!(foreign.exists());
     }
 }

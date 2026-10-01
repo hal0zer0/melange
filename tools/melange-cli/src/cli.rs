@@ -727,9 +727,40 @@ pub(crate) enum Commands {
 
         /// Measure up to N harmonics per frequency point (0 = fundamental only,
         /// the legacy CSV). When >0, appends `thd_pct, h2_dbc, ..., hN_dbc`
-        /// columns. Harmonics above Nyquist are reported as `nan`.
+        /// columns. Harmonics above Nyquist are reported as `nan`. `thd_pct`
+        /// sums H2..HN BELOW 20 kHz (and below Nyquist), the common audio
+        /// definition (use 13 for H2..H13); it is `nan` for a point at or
+        /// above 10 kHz, where no harmonic is in that band. The hN_dbc
+        /// columns still report every harmonic up to Nyquist.
         #[arg(long, default_value = "0")]
         harmonics: usize,
+
+        /// Drive-level pre-roll per point, in seconds. Each point is driven at
+        /// its own frequency and amplitude for at least this long (whole
+        /// 10-cycle DFT windows) before the window it measures, so the
+        /// reading is the steady state at that drive, not the sweep's history
+        /// (a sagging supply rail, bypass caps re-centring, the previous
+        /// point's level). The point is then measured again after another
+        /// stretch of this length, repeating until two successive
+        /// measurements agree (fundamental gain and phase, and the harmonic
+        /// vector, each within 0.1 %) or --preroll-max-secs is spent. The
+        /// default 0.25 s covers time constants up to ~50 ms outright
+        /// (5 tau); slower ones are caught by the agreement check. A time
+        /// constant many times longer than this spacing can move less than
+        /// the tolerance between two checks while still far from settled:
+        /// for such a circuit raise --preroll-secs (and --preroll-max-secs).
+        /// The zero-drive settle before the first point (0.5 s, 5 s with
+        /// inductors) is separate and unchanged.
+        #[arg(long, value_name = "SECS", default_value = "0.25")]
+        preroll_secs: f64,
+
+        /// Cap on drive-level time per point while the settle check repeats,
+        /// in seconds. A point that has not settled by then is reported with
+        /// a WARNING naming it (its row is the last measurement). 0 turns the
+        /// check off: one measurement after --preroll-secs. Otherwise must be
+        /// at least --preroll-secs. Off automatically with --noise.
+        #[arg(long, value_name = "SECS", default_value = "2.0")]
+        preroll_max_secs: f64,
 
         /// Pentode grid-off dimension reduction mode: auto, on, off.
         /// Mirrors `compile --tube-grid-fa`. See `simulate --tube-grid-fa` for
@@ -820,6 +851,16 @@ pub(crate) enum Commands {
         /// default, because the output then answers a different question.
         #[arg(help_heading = EXPERT_HEADING, long)]
         allow_input_clamp: bool,
+
+        /// Report points whose render was not a solution. A point where any
+        /// sample was held (every Newton path failed), committed unconverged,
+        /// or solved on a reduced device model outside its region (a
+        /// `.linearize`d stage driven out of its small-signal region) is
+        /// refused by default, naming the point and the counter, the way
+        /// `simulate` refuses the same render: its gain and THD describe the
+        /// solver's fallback, not the circuit.
+        #[arg(help_heading = EXPERT_HEADING, long)]
+        allow_nr_hold: bool,
     },
 
     /// Compute DC operating point and print node voltages
