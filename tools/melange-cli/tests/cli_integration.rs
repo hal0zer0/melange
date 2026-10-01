@@ -1063,7 +1063,7 @@ fn test_compile_missing_node() {
 // ============================================================================
 
 /// Verbatim copy of `melange-circuits/local-docs/g10-osc-sq2-repro.cir`
-/// (2026-08-14) — a Farfisa Compact G10 master LC oscillator (Ge PNP,
+/// (2026-08-14) — an organ's master LC oscillator (Ge PNP,
 /// transformer-coupled regenerative feedback). Embedded so this test does
 /// not depend on the sibling `melange-circuits` checkout being present.
 ///
@@ -1079,7 +1079,7 @@ fn test_compile_missing_node() {
 /// has the full-LU NR fallback) converges cleanly to a bounded, physical
 /// oscillation.
 const LC_MASTER_OSCILLATOR: &str = "\
-Farfisa Compact G10 reference chain (master osc + squarer + divider + keying)
+Organ master LC oscillator chain (master osc + squarer + divider + keying)
 Vrail rail 0 DC 8
 Vvib vterm 0 DC 8
 .runtime Vvib as v_osc_vterm
@@ -1122,7 +1122,7 @@ fn parse_summary_value(stdout: &str, key: &str) -> f64 {
 }
 
 #[test]
-fn test_g10_oscillator_default_routing_is_bounded() {
+fn test_lc_master_oscillator_default_routing_is_bounded() {
     let cir = write_test_circuit(LC_MASTER_OSCILLATOR, "g10_osc_default");
     let tmp_wav = std::env::temp_dir().join("melange_cli_test_g10_osc_default.wav");
 
@@ -1182,7 +1182,7 @@ fn test_g10_oscillator_default_routing_is_bounded() {
 /// ~1.015): the DK build refuses it, the default route builds nodal and says
 /// why, and a forced `--solver dk` fails with the reason.
 #[test]
-fn test_g10_self_starting_oscillator_is_refused_on_dk() {
+fn test_lc_master_oscillator_self_starting_is_refused_on_dk() {
     let cir = write_test_circuit(LC_MASTER_OSCILLATOR, "g10_self_starting");
     let out = std::env::temp_dir().join("melange_cli_test_g10_self_starting.rs");
     let path = cir.to_str().unwrap();
@@ -1229,14 +1229,14 @@ fn test_g10_self_starting_oscillator_is_refused_on_dk() {
 
 /// The reported IC=/VCVS blowup repro (melange-circuits
 /// `local-docs/repro-ic-vcvs-blowup.cir`, verbatim), embedded so this test
-/// is self-contained. G10-divider astable: two cross-coupled PNP stages,
+/// is self-contained. Divider astable: two cross-coupled PNP stages,
 /// `IC=-4` on the cross-coupling cap `C_x1` kicks the circuit off its
 /// degenerate symmetric DC fixed point. Routes DK Schur (N=13, M=4),
 /// trapezoidal — NOT the nodal-routing bug pinned by
-/// `test_g10_oscillator_default_routing_is_bounded` above (different
+/// `test_lc_master_oscillator_default_routing_is_bounded` above (different
 /// circuit, different mechanism).
 const IC_VCVS_ASTABLE: &str = "\
-G10 divider lab v3 (internal PULSE drive)
+Divider astable lab v3 (internal PULSE drive)
 Vrail rail 0 DC 8
 R_green green 0 2.7k
 E_amp drvsrc 0 in 0 8

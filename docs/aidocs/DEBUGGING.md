@@ -593,7 +593,7 @@ hit this — no known circuit triggers both conditions simultaneously.
 On a stiff hard-switching sample a positive-feedback junction can pin to v/vt≈300
 with `i_dev` at the `safe_exp` ceiling, leaving the trap Jacobian ill-conditioned
 and the NR residual stuck flat → the sample hits `MAX_ITER` and falls to the BE
-fallback ("NR starvation", e.g. ~2–3% of samples on the Farfisa G10 divider).
+fallback ("NR starvation", e.g. ~2–3% of samples on the G10 organ divider deck).
 
 It is tempting to fix this by porting the DC-OP solver's **Gmin stepping**
 (DC_OP.md) into the per-sample solve — add `gmin` to the node diagonals, ramp

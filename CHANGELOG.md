@@ -127,7 +127,11 @@ internal restructuring with byte-identical generated code.
   `test_neve_1073_preamp_vs_spice` -> `test_three_bjt_preamp_vs_spice`,
   `test_tube_screamer_vs_spice` -> `test_overdrive_pedal_vs_spice`,
   `test_tube_screamer_wiper_vs_spice` -> `test_overdrive_pedal_wiper_vs_spice`
-  (data directories likewise); `neve_1073_eq_tests` -> `inductor_eq_section_tests`.
+  (data directories likewise); `neve_1073_eq_tests` -> `inductor_eq_section_tests`;
+  `test_g10_oscillator_default_routing_is_bounded` ->
+  `test_lc_master_oscillator_default_routing_is_bounded`,
+  `test_g10_self_starting_oscillator_is_refused_on_dk` ->
+  `test_lc_master_oscillator_self_starting_is_refused_on_dk`.
 - **Source layout:** the CLI's `main.rs` and the solver's `nodal_emitter.rs`,
   `codegen/ir/mod.rs`, `mna.rs` and `parser.rs` are split into module
   directories. Moves only; public paths and generated code are unchanged.

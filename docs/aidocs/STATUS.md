@@ -130,7 +130,7 @@ astable seeded by `IC=`, a flip-flop) has a stable DC operating point and is
 caught at runtime by `diag_unsolved_sample_count` (present on every build;
 refused by `simulate`/`validate`/golden), not here. Witness: the G10 master
 oscillator fixture (ρ 1.0149 at 48 kHz),
-`cli_integration::test_g10_self_starting_oscillator_is_refused_on_dk`.
+`cli_integration::test_lc_master_oscillator_self_starting_is_refused_on_dk`.
 
 ## Circuit Library Status
 
