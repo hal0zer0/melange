@@ -47,6 +47,17 @@ internal restructuring with byte-identical generated code.
   removes it, ρ 0.9998), trapezoidal at 96 kHz (a real growing pole both
   keep).
 
+- **A transistor with parasitic resistances gets its junction clamp again,
+  and a `.linearize`d circuit's internal nodes start at their terminals.**
+  Since 0.1.12 every nodal build expands a BJT's RB/RC/RE into internal nodes;
+  the DC operating point's junction clamp then moved those internal nodes,
+  which the start-up initialisation overwrote, so such transistors started
+  from raw linear-solve voltages. A power amplifier with a `.linearize`d stage
+  that built before 0.1.12 failed its DC operating point (a residual of 87 A);
+  it now converges to ngspice's operating point (within 6e-7 V) in 3
+  iterations. On a seeded start each internal emitter also started 0.65 V
+  below its base instead of at its terminal. Six corpus circuits' operating
+  points move by at most 8e-11 V from the corrected start.
 - **`analyze` measures each point at steady state.** Each point settled at
   zero drive and was measured after 10 cycles, so on a circuit with a slowly
   sagging supply the reading was the sweep's history: two back-to-back 1 kHz

@@ -123,11 +123,11 @@ bash build.sh   # bundles CLAP+VST3; see generated README.md for nih-plug setup
 The drive level decides whether you hear a clipper at all. The diodes sit at
 `mid`, behind a divider, so at low levels they barely conduct and the circuit
 is just a 280 Hz low-pass (`Rin` + `Rload` into `Cout`). Measured around
-1 kHz at 48 kHz: THD is 0.0001 % at 0.1 V, 0.13 % at 1 V, 4.2 % at 2 V and
+1 kHz at 48 kHz: THD is 0.0001 % at 0.1 V, 0.13 % at 1 V, 4.1 % at 2 V and
 8 % at 3 V, where H3 is at −22 dBc. To see it yourself:
 
 ```bash
-melange analyze clipper.cir -s 48000 --harmonics 5 --amplitude 3 --start-freq 900 --end-freq 1100
+melange analyze clipper.cir -s 48000 --harmonics 5 --amplitude 3 --start-freq 1000 --end-freq 1001 --points-per-decade 1
 ```
 
 `analyze` measures each frequency point in the steady state at that point's

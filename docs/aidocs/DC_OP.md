@@ -232,7 +232,12 @@ starts:
   to `sign·0.65 V` when the emitter is ground. Unlike the diode clamp this also
   raises a cut-off Vbe, a deliberate pre-bias that keeps a feedback amplifier
   out of its all-off solution (skipping reverse Vbe measured +1 iteration on
-  the Wurlitzer power amp and no gain anywhere).
+  the Wurlitzer power amp and no gain anywhere). The clamp acts on the
+  device's external terminals (`nonlinear_devices[k].node_indices`), also for a
+  BJT whose parasitic RB/RC/RE are expanded into internal nodes: its N_v rows
+  then name b′/e′, which the internal-node initialisation overwrites, so a
+  clamp read from those rows would move nothing
+  (`dc_op_parasitic_bjt_seed_tests.rs` pins it).
 
 The dependent node (cathode, emitter) moves whenever it is a solution
 variable, including when a voltage source fixes it (a supply rail): the guess
@@ -257,13 +262,16 @@ point, so that point satisfies the linearized system's DC equations exactly.
 `apply_linearize_reductions` records it by node name
 (`MnaSystem::linearize_bias_nodes`, only when the bias solve converged),
 `dc_op_config` passes it as `DcOpConfig::seed_nodes`, and Direct NR starts
-there with no junction clamp (auxiliary rows and parasitic-BJT internal nodes
-keep their usual initialisation). Measured on a FET limiter whose output stage
+there with no junction clamp. Auxiliary rows keep their usual initialisation;
+parasitic-BJT internal nodes b′, c′, e′ start at their external terminals,
+because the seed already satisfies the device at sub-mV parasitic drops and a
+fixed `b′ ∓ 0.65 V` across a fraction-of-an-ohm RE would put amperes of KCL
+error into it. Measured on a FET limiter whose output stage
 has a Darlington-equivalent NF = 2 transistor: from the clamped linear guess
 the linearized solve failed every strategy (KCL 0.357 A) while the bias solve
 had converged; seeded, Direct NR in 2 iterations. Corpus `.linearize` decks
 keep their operating point (≤ 1e-15 V) in fewer iterations (18 → 2 typical;
-decks with parasitic-BJT internal nodes 10 → 9, 31 → 21).
+decks with parasitic-BJT internal nodes 10 → 4, 31 → 3).
 
 A bias solve that did not converge is refused (`--allow-unconverged-dc-op`
 overrides, and the provenance then records `"linearize_bias_unconverged":true`).
