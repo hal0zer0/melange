@@ -1756,18 +1756,31 @@ fn clamp_junction_voltages(
                 let is_pnp = matches!(&slot.params, DeviceParams::Bjt(bp) if bp.is_pnp);
                 let sign: f64 = if is_pnp { -1.0 } else { 1.0 };
 
+                // The clamp acts on the terminals as the circuit sees them.
+                // A BJT whose RB/RC/RE were expanded into MNA internal nodes
+                // has its N_v rows on b'/c'/e', which the internal-node init
+                // overwrites from the external terminals after this clamp;
+                // read the external terminals for it instead.
+                let external = external_bjt_terminals(mna, slot.start_idx);
+
                 // Find base and emitter nodes from Vbe N_v row
-                let nv_vbe = &mna.n_v[vbe_idx];
-                let mut base_node = None;
-                let mut emitter_node = None;
-                for j in 0..n_aug {
-                    if nv_vbe[j] > 0.5 {
-                        base_node = Some(j);
+                let (base_node, emitter_node) = match external {
+                    Some(t) => junction_terminals(t.base, t.emitter),
+                    None => {
+                        let nv_vbe = &mna.n_v[vbe_idx];
+                        let mut base_node = None;
+                        let mut emitter_node = None;
+                        for j in 0..n_aug {
+                            if nv_vbe[j] > 0.5 {
+                                base_node = Some(j);
+                            }
+                            if nv_vbe[j] < -0.5 {
+                                emitter_node = Some(j);
+                            }
+                        }
+                        (base_node, emitter_node)
                     }
-                    if nv_vbe[j] < -0.5 {
-                        emitter_node = Some(j);
-                    }
-                }
+                };
 
                 // Bring Vbe to sign * 0.65 V (positive for NPN, negative for
                 // PNP): move the emitter, or the base when the emitter is ground.
@@ -1794,13 +1807,19 @@ fn clamp_junction_voltages(
 
                 // Find collector node from Vbc N_v row
                 if slot.dimension > 1 {
-                    let nv_vbc = &mna.n_v[vbc_idx];
-                    let mut collector_node = None;
-                    for j in 0..n_aug {
-                        if nv_vbc[j] < -0.5 {
-                            collector_node = Some(j);
+                    let collector_node = match external {
+                        Some(t) => junction_terminals(t.base, t.collector).1,
+                        None => {
+                            let nv_vbc = &mna.n_v[vbc_idx];
+                            let mut collector_node = None;
+                            for j in 0..n_aug {
+                                if nv_vbc[j] < -0.5 {
+                                    collector_node = Some(j);
+                                }
+                            }
+                            collector_node
                         }
-                    }
+                    };
 
                     // Set collector for forward-active mode: Vbc reverse biased.
                     // NPN: collector ABOVE base (Vbc < 0). PNP: collector BELOW base (Vbc > 0).
@@ -1928,6 +1947,176 @@ fn clamp_junction_voltages(
     }
 
     v
+}
+
+/// A BJT's external terminals as 0-indexed matrix rows (`None` = ground).
+#[derive(Clone, Copy)]
+struct BjtTerminals {
+    collector: Option<usize>,
+    base: Option<usize>,
+    emitter: Option<usize>,
+}
+
+/// The external terminals of the BJT at `start_idx` when the MNA expanded its
+/// parasitic RB/RC/RE into internal nodes (`mna.bjt_internal_nodes`), whose
+/// N_v rows then name b'/c'/e' instead of the terminals; `None` when it did
+/// not, and the N_v rows name the terminals.
+fn external_bjt_terminals(mna: &MnaSystem, start_idx: usize) -> Option<BjtTerminals> {
+    if !mna
+        .bjt_internal_nodes
+        .iter()
+        .any(|n| n.start_idx == start_idx)
+    {
+        return None;
+    }
+    let dev = mna
+        .nonlinear_devices
+        .iter()
+        .find(|d| d.start_idx == start_idx)
+        .filter(|d| d.node_indices.len() >= 3)?;
+    let row = |k: usize| Some(dev.node_indices[k]).filter(|&i| i > 0).map(|i| i - 1);
+    Some(BjtTerminals {
+        collector: row(0),
+        base: row(1),
+        emitter: row(2),
+    })
+}
+
+/// The (+, −) nodes of the junction between terminals `p` and `n` as a scan of
+/// its N_v row finds them: terminals that share a node give a zero row (no
+/// node update can bias that junction), so neither is reported.
+fn junction_terminals(p: Option<usize>, n: Option<usize>) -> (Option<usize>, Option<usize>) {
+    if p == n {
+        (None, None)
+    } else {
+        (p, n)
+    }
+}
+
+/// Start values for the BJT internal nodes b'/c'/e' — the MNA-expanded ones
+/// (`mna.bjt_internal_nodes`) and the DC-local ones (`dc_bjt_internal`) —
+/// from the external terminals already in `v`.
+///
+/// From a junction-clamped linear guess (`seeded == false`) b' and c' start
+/// at their external terminals and e' one junction drop from b'
+/// (`b' ∓ 0.65 V`), pre-biasing the intrinsic junction.
+///
+/// From a seeded start (`DcOpConfig::seed_nodes`, the `.linearize` bias
+/// point) every internal node starts at its external terminal (0 V for a
+/// grounded one). The seed is a solution at the external nodes, and the drop
+/// across RB/RC/RE there is the terminal current times a parasitic R; placing
+/// e' at `b' ∓ 0.65 V` instead puts the difference between the seeded Vbe and
+/// 0.65 V across RE (tenths of a volt across fractions of an ohm), a start
+/// with amperes of KCL error at the emitter.
+fn init_bjt_internal_nodes(
+    v: &mut [f64],
+    mna: &MnaSystem,
+    device_slots: &[DeviceSlot],
+    dc_bjt_internal: &[BjtInternalNodes],
+    seeded: bool,
+) {
+    let at = |v: &[f64], ext: usize| if ext > 0 { v[ext - 1] } else { 0.0 };
+    for bjt in dc_bjt_internal {
+        let Some(slot) = device_slots.iter().find(|s| s.start_idx == bjt.start_idx) else {
+            continue;
+        };
+        let DeviceParams::Bjt(bp) = &slot.params else {
+            continue;
+        };
+        if seeded {
+            // R > 0 is a fresh internal row; R = 0 maps onto the terminal.
+            for (r, int, ext) in [
+                (bp.rb, bjt.int_base, bjt.ext_base),
+                (bp.rc, bjt.int_collector, bjt.ext_collector),
+                (bp.re, bjt.int_emitter, bjt.ext_emitter),
+            ] {
+                if let (true, Some(i)) = (r > 0.0, int) {
+                    v[i] = at(v, ext);
+                }
+            }
+            continue;
+        }
+        if bp.rb > 0.0 && bjt.ext_base > 0 {
+            if let Some(ib) = bjt.int_base {
+                v[ib] = v[bjt.ext_base - 1];
+            }
+        }
+        if bp.rc > 0.0 && bjt.ext_collector > 0 {
+            if let Some(ic) = bjt.int_collector {
+                v[ic] = v[bjt.ext_collector - 1];
+            }
+        }
+        if bp.re > 0.0 && bjt.ext_emitter > 0 {
+            if let Some(ie) = bjt.int_emitter {
+                let base_v = if bp.rb > 0.0 {
+                    bjt.int_base.map(|ib| v[ib]).unwrap_or(0.0)
+                } else if bjt.ext_base > 0 {
+                    v[bjt.ext_base - 1]
+                } else {
+                    0.0
+                };
+                let sign = if bp.is_pnp { -1.0 } else { 1.0 };
+                v[ie] = base_v - sign * 0.65;
+            }
+        }
+    }
+
+    for mna_bjt in &mna.bjt_internal_nodes {
+        let Some(slot) = device_slots
+            .iter()
+            .find(|s| s.start_idx == mna_bjt.start_idx)
+        else {
+            continue;
+        };
+        let DeviceParams::Bjt(bp) = &slot.params else {
+            continue;
+        };
+        let Some(dev) = mna
+            .nonlinear_devices
+            .iter()
+            .find(|d| d.start_idx == mna_bjt.start_idx)
+        else {
+            continue;
+        };
+        let ext_c = dev.node_indices[0]; // 1-indexed
+        let ext_b = dev.node_indices[1];
+        let ext_e = dev.node_indices[2];
+        if seeded {
+            for (int, ext) in [
+                (mna_bjt.int_base, ext_b),
+                (mna_bjt.int_collector, ext_c),
+                (mna_bjt.int_emitter, ext_e),
+            ] {
+                if let Some(i) = int.filter(|&i| i < v.len()) {
+                    v[i] = at(v, ext);
+                }
+            }
+            continue;
+        }
+        if let Some(ib) = mna_bjt.int_base {
+            if ext_b > 0 && ib < v.len() {
+                v[ib] = v[ext_b - 1];
+            }
+        }
+        if let Some(ic) = mna_bjt.int_collector {
+            if ext_c > 0 && ic < v.len() {
+                v[ic] = v[ext_c - 1];
+            }
+        }
+        if let Some(ie) = mna_bjt.int_emitter {
+            if ext_e > 0 && ie < v.len() {
+                let base_v = if let Some(ib) = mna_bjt.int_base {
+                    v[ib]
+                } else if ext_b > 0 {
+                    v[ext_b - 1]
+                } else {
+                    0.0
+                };
+                let sign = if bp.is_pnp { -1.0 } else { 1.0 };
+                v[ie] = base_v - sign * 0.65;
+            }
+        }
+    }
 }
 
 /// Run Newton-Raphson DC operating point solve.
@@ -3746,81 +3935,15 @@ fn solve_dc_operating_point_core(
 
     seed_opamp_outputs(&mut v_clamped, mna);
     seed_sr_feedback_diodes(&mut v_clamped, mna);
-    // Initialize internal node voltages from clamped external nodes
-    for bjt in &dc_sys.bjt_internal {
-        if let Some(slot) = device_slots.iter().find(|s| s.start_idx == bjt.start_idx) {
-            if let DeviceParams::Bjt(bp) = &slot.params {
-                if bp.rb > 0.0 && bjt.ext_base > 0 {
-                    if let Some(ib) = bjt.int_base {
-                        v_clamped[ib] = v_clamped[bjt.ext_base - 1];
-                    }
-                }
-                if bp.rc > 0.0 && bjt.ext_collector > 0 {
-                    if let Some(ic) = bjt.int_collector {
-                        v_clamped[ic] = v_clamped[bjt.ext_collector - 1];
-                    }
-                }
-                if bp.re > 0.0 && bjt.ext_emitter > 0 {
-                    if let Some(ie) = bjt.int_emitter {
-                        let base_v = if bp.rb > 0.0 {
-                            bjt.int_base.map(|ib| v_clamped[ib]).unwrap_or(0.0)
-                        } else if bjt.ext_base > 0 {
-                            v_clamped[bjt.ext_base - 1]
-                        } else {
-                            0.0
-                        };
-                        let sign = if bp.is_pnp { -1.0 } else { 1.0 };
-                        v_clamped[ie] = base_v - sign * 0.65;
-                    }
-                }
-            }
-        }
-    }
-
-    // Also initialize MNA-level internal nodes (from expand_bjt_internal_nodes)
-    for mna_bjt in &mna.bjt_internal_nodes {
-        if let Some(slot) = device_slots
-            .iter()
-            .find(|s| s.start_idx == mna_bjt.start_idx)
-        {
-            if let DeviceParams::Bjt(bp) = &slot.params {
-                // Find external node indices from MNA nonlinear device info
-                let dev_info = mna
-                    .nonlinear_devices
-                    .iter()
-                    .find(|d| d.start_idx == mna_bjt.start_idx);
-                if let Some(dev) = dev_info {
-                    let ext_c = dev.node_indices[0]; // 1-indexed
-                    let ext_b = dev.node_indices[1];
-                    let ext_e = dev.node_indices[2];
-
-                    if let Some(ib) = mna_bjt.int_base {
-                        if ext_b > 0 && ib < v_clamped.len() {
-                            v_clamped[ib] = v_clamped[ext_b - 1];
-                        }
-                    }
-                    if let Some(ic) = mna_bjt.int_collector {
-                        if ext_c > 0 && ic < v_clamped.len() {
-                            v_clamped[ic] = v_clamped[ext_c - 1];
-                        }
-                    }
-                    if let Some(ie) = mna_bjt.int_emitter {
-                        if ext_e > 0 && ie < v_clamped.len() {
-                            let base_v = if let Some(ib) = mna_bjt.int_base {
-                                v_clamped[ib]
-                            } else if ext_b > 0 {
-                                v_clamped[ext_b - 1]
-                            } else {
-                                0.0
-                            };
-                            let sign = if bp.is_pnp { -1.0 } else { 1.0 };
-                            v_clamped[ie] = base_v - sign * 0.65;
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // Initialize internal node voltages from the external nodes of the start
+    // (junction-clamped linear guess, or the seed).
+    init_bjt_internal_nodes(
+        &mut v_clamped,
+        mna,
+        device_slots,
+        &dc_sys.bjt_internal,
+        config.seed_nodes.is_some(),
+    );
 
     let mut v = v_clamped.clone();
     let mut v_nl = vec![0.0; m];
@@ -3993,79 +4116,7 @@ fn solve_dc_operating_point_core(
     v.resize(n_dc, 0.0);
     seed_opamp_outputs(&mut v, mna);
     // Initialize internal nodes for Gmin stepping too
-    for bjt in &dc_sys.bjt_internal {
-        if let Some(slot) = device_slots.iter().find(|s| s.start_idx == bjt.start_idx) {
-            if let DeviceParams::Bjt(bp) = &slot.params {
-                if bp.rb > 0.0 && bjt.ext_base > 0 {
-                    if let Some(ib) = bjt.int_base {
-                        v[ib] = v[bjt.ext_base - 1];
-                    }
-                }
-                if bp.rc > 0.0 && bjt.ext_collector > 0 {
-                    if let Some(ic) = bjt.int_collector {
-                        v[ic] = v[bjt.ext_collector - 1];
-                    }
-                }
-                if bp.re > 0.0 && bjt.ext_emitter > 0 {
-                    if let Some(ie) = bjt.int_emitter {
-                        let base_v = if bp.rb > 0.0 {
-                            bjt.int_base.map(|ib| v[ib]).unwrap_or(0.0)
-                        } else if bjt.ext_base > 0 {
-                            v[bjt.ext_base - 1]
-                        } else {
-                            0.0
-                        };
-                        let sign = if bp.is_pnp { -1.0 } else { 1.0 };
-                        v[ie] = base_v - sign * 0.65;
-                    }
-                }
-            }
-        }
-    }
-    // Also init MNA-level internal nodes for Gmin stepping
-    for mna_bjt in &mna.bjt_internal_nodes {
-        if let Some(slot) = device_slots
-            .iter()
-            .find(|s| s.start_idx == mna_bjt.start_idx)
-        {
-            if let DeviceParams::Bjt(bp) = &slot.params {
-                if let Some(dev) = mna
-                    .nonlinear_devices
-                    .iter()
-                    .find(|d| d.start_idx == mna_bjt.start_idx)
-                {
-                    let (ext_c, ext_b, ext_e) = (
-                        dev.node_indices[0],
-                        dev.node_indices[1],
-                        dev.node_indices[2],
-                    );
-                    if let Some(ib) = mna_bjt.int_base {
-                        if ext_b > 0 && ib < v.len() {
-                            v[ib] = v[ext_b - 1];
-                        }
-                    }
-                    if let Some(ic) = mna_bjt.int_collector {
-                        if ext_c > 0 && ic < v.len() {
-                            v[ic] = v[ext_c - 1];
-                        }
-                    }
-                    if let Some(ie) = mna_bjt.int_emitter {
-                        if ext_e > 0 && ie < v.len() {
-                            let base_v = mna_bjt.int_base.map(|ib| v[ib]).unwrap_or_else(|| {
-                                if ext_b > 0 {
-                                    v[ext_b - 1]
-                                } else {
-                                    0.0
-                                }
-                            });
-                            let sign = if bp.is_pnp { -1.0 } else { 1.0 };
-                            v[ie] = base_v - sign * 0.65;
-                        }
-                    }
-                }
-            }
-        }
-    }
+    init_bjt_internal_nodes(&mut v, mna, device_slots, &dc_sys.bjt_internal, false);
     let mut total_iters = 0;
     let mut gmin_converged = true;
 
@@ -5555,5 +5606,65 @@ Rin in mid 1Meg\n";
             f_shipped > 1e-6,
             "the shipped G must expose the mis-stamp: residual {f_shipped:.3e} A"
         );
+    }
+
+    /// The junction clamp of the linear guess acts on the terminals as the
+    /// circuit sees them. Expanded parasitic BJTs have N_v rows on b'/c'/e',
+    /// which the internal-node init overwrites from the externals; a clamp
+    /// read from those rows left every external emitter at its linear-solve
+    /// value (the PNP diff pair's at the +22.5 V rail, 22 V of reverse Vbe)
+    /// and put the difference across RE. Witness: the power amp of
+    /// `tests/data/wurli_power_amp_2026_08_03.cir`, unseeded.
+    #[test]
+    fn junction_clamp_moves_the_external_terminals_of_expanded_bjts() {
+        let deck = include_str!("../tests/data/wurli_power_amp_2026_08_03.cir");
+        let mut netlist = Netlist::parse(deck).expect("parse");
+        netlist.expand_subcircuits().expect("subcircuits");
+        let mut mna = MnaSystem::from_netlist(&netlist).expect("mna");
+        let i_in = mna.node_map["in"] - 1;
+        mna.g[i_in][i_in] += 1.0;
+        assert!(crate::pipeline::expand_internal_nodes(&mut mna, &netlist));
+        let slots = crate::codegen::ir::CircuitIR::build_device_info_with_mna(&netlist, Some(&mna))
+            .expect("device slots");
+        assert!(mna.bjt_internal_nodes.len() >= 8, "every BJT has RB/RC/RE");
+
+        let dc_sys = build_dc_system(&mna, &slots);
+        let v_linear = solve_linear(&dc_sys.g_dc, &dc_sys.b_dc).expect("linear guess");
+        let mut v = clamp_junction_voltages(&mna, &slots, &v_linear);
+        v.resize(dc_sys.n_dc, 0.0);
+        init_bjt_internal_nodes(&mut v, &mna, &slots, &dc_sys.bjt_internal, false);
+
+        let at = |i: usize| if i > 0 { v[i - 1] } else { 0.0 };
+        for ib in &mna.bjt_internal_nodes {
+            let slot = slots.iter().find(|s| s.start_idx == ib.start_idx).unwrap();
+            let DeviceParams::Bjt(bp) = &slot.params else {
+                unreachable!()
+            };
+            let sign = if bp.is_pnp { -1.0 } else { 1.0 };
+            let dev = mna
+                .nonlinear_devices
+                .iter()
+                .find(|d| d.start_idx == ib.start_idx)
+                .unwrap();
+            let (b, e) = (dev.node_indices[1], dev.node_indices[2]);
+            let vbe_ext = at(b) - at(e);
+            assert!(
+                (vbe_ext - sign * 0.65).abs() <= 0.1 + 1e-12,
+                "{}: external Vbe {vbe_ext} V in the start, not clamped to {} V",
+                dev.name,
+                sign * 0.65
+            );
+            // The intrinsic junction starts at the same bias: b' and e' are
+            // placed from the clamped terminals.
+            let mut vbe_int = 0.0;
+            for (j, &x) in mna.n_v[ib.start_idx].iter().enumerate() {
+                vbe_int += x * v[j];
+            }
+            assert!(
+                (vbe_int - sign * 0.65).abs() <= 0.1 + 1e-12,
+                "{}: intrinsic Vbe {vbe_int} V in the start",
+                dev.name
+            );
+        }
     }
 }
