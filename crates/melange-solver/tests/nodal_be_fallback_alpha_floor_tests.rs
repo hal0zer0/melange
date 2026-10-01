@@ -68,16 +68,18 @@
 //!
 //! ## Tests here
 //!
-//! 1. `..._no_ratio_floor` — a code-string pin on the full-LU nodal path
+//! 1. `..._no_ratio_floor` — THE guard for the fix: a code-string pin on the full-LU nodal path
 //!    (forced via the inert behavioral-B-source trick from
 //!    `nodal_emitter_regression_tests.rs`): the emitted damping must divide
 //!    uncapped and the `.max(0.01)` floor must be absent from both loops. Fast,
 //!    runs everywhere.
-//! 2. `..._internal_peak_stays_physical` — the behavioral guard. Builds the
-//!    embedded wurli-power-amp snapshot as `melange simulate` does, drives it
+//! 2. `..._internal_peak_stays_physical` — a physical-bound check, NOT a
+//!    witness of the floor bug. Builds the embedded wurli-power-amp netlist as `melange simulate` does, drives it
 //!    at 88.2 kHz across the once-divergent amplitudes and asserts the
-//!    internal peak stays < 200 V (it peaks at ~32 V). It no longer fails with
-//!    the floor restored (see its doc), so test 1 is what guards the fix.
+//!    internal peak stays < 200 V (it peaks at ~32 V). It passes with the
+//!    floor restored too (see its doc); no cheap behavioural witness of the
+//!    floor is known on the current solver, so test 1 stands alone as the
+//!    guard.
 
 mod support;
 
@@ -139,7 +141,9 @@ fn test_nodal_full_lu_node_damping_has_no_ratio_floor() {
     );
 }
 
-/// Behavioral guard on the real circuit.
+/// Physical-bound check on the real circuit. It does NOT witness the
+/// `.max(0.01)` alpha-floor bug (see the last paragraph); the code-string pin
+/// `test_nodal_full_lu_node_damping_has_no_ratio_floor` is the guard for that.
 ///
 /// A library-level stand-in circuit does not work: a simple nodal circuit (e.g.
 /// a 12 V BJT common-emitter, even hammered far past clipping) does not
