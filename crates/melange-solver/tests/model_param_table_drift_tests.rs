@@ -80,6 +80,28 @@ fn normalized(rel: &str) -> String {
     read_normalized(&src_dir().join(rel))
 }
 
+/// A module's normalized source, whether it is one file (`src/<module>.rs`) or
+/// a directory (every `.rs` under `src/<module>/`, in path order), so the
+/// probes survive a module being split across files.
+fn normalized_module(module: &str) -> String {
+    let file = src_dir().join(format!("{module}.rs"));
+    if file.is_file() {
+        return read_normalized(&file);
+    }
+    let dir = src_dir().join(module);
+    let mut files: Vec<PathBuf> = rust_files()
+        .into_iter()
+        .filter(|p| p.starts_with(&dir))
+        .collect();
+    assert!(!files.is_empty(), "module {module:?} not found under src/");
+    files.sort();
+    files
+        .iter()
+        .map(|p| read_normalized(p))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 // ---------------------------------------------------------------------------
 // Textual probes
 // ---------------------------------------------------------------------------
@@ -189,7 +211,7 @@ const RESOLVERS: &[(&str, ModelClass)] = &[
 
 #[test]
 fn every_key_a_resolver_reads_is_in_that_class_table() {
-    let ir = normalized("codegen/ir/mod.rs");
+    let ir = normalized_module("codegen/ir");
     for (func, class) in RESOLVERS {
         let body = fn_body(&ir, func);
         let keys = literals_after(body, "lookup_model_param(netlist, model, \"");
@@ -217,7 +239,7 @@ fn every_key_the_mna_opamp_and_vca_loops_assign_is_in_the_table() {
     // The op-amp is 0D (a linear VCCS stamped straight into G), so its model
     // card is resolved in mna.rs, not by a codegen resolver. Same for the VCA's
     // MODE flag. Those match arms are the readers; the table must cover them.
-    let mna = normalized("mna.rs");
+    let mna = normalized_module("mna");
     for (start_anchor, end_anchor, class) in [
         (
             "if m.model_type != \"OA\"",
@@ -232,7 +254,7 @@ fn every_key_the_mna_opamp_and_vca_loops_assign_is_in_the_table() {
     ] {
         let start = mna
             .find(start_anchor)
-            .unwrap_or_else(|| panic!("anchor {start_anchor:?} not found in mna.rs"));
+            .unwrap_or_else(|| panic!("anchor {start_anchor:?} not found in the mna module"));
         let end = mna[start..]
             .find(end_anchor)
             .unwrap_or_else(|| panic!("anchor {end_anchor:?} not found after {start_anchor:?}"))
@@ -388,7 +410,7 @@ fn every_model_type_the_parser_accepts_maps_to_a_class() {
     }
     // Keep the parser's own list in view: if a type is added there, this test's
     // list must grow with it.
-    let parser = normalized("parser.rs");
+    let parser = normalized_module("parser");
     for token in [
         "\"D\"",
         "\"NPN\"",
