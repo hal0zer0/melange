@@ -62,7 +62,7 @@ Status legend:
 
 | Plugin | Generated file (oomox) | Netlist (melange-circuits) | Extra flags | Status | Solver | N | M | Pots | Sw | RtR | Noise |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| basic-bitch | `plugins/basic-bitch/src/circuit.rs` | `unstable/pedals/basic-bitch.cir` | `--noise thermal` | DRIFT (header) | nodal | 33 | 8 | 8 | 0 | 2 | thermal |
+| basic-bitch | `plugins/basic-bitch/src/circuit.rs` | `unstable/examples/split-band-triode-drive.cir` | `--noise thermal` | DRIFT (header) | nodal | 33 | 8 | 8 | 0 | 2 | thermal |
 | five-watt-freddie | `plugins/five-watt-freddie/src/circuit.rs` | `unstable/amp/champ-5f1.cir` | `--noise thermal` | DRIFT (header) | nodal | 24 | 6 | 2 | 0 | 0 | thermal |
 | funkyinduct | `plugins/funkyinduct/src/circuit.rs` | `unstable/filters/funkyinduct.cir` | `--noise shot` | DRIFT (hdr+shot) | nodal | 73 | 2 | 32 | 0 | 0 | shot |
 | gold-press | `plugins/gold-press/src/cab.rs` | `unstable/filters/gold-press-cab.cir` | `--oversampling 4 --noise full --emit-dc-op-recompute` | DRIFT (header) | dk | 4 | 0 | 0 | 1 | 0 | full |
@@ -87,7 +87,7 @@ Status legend:
 | pipe-shouter | `plugins/pipe-shouter/src/circuit.rs` | `unstable/pedals/pipe-shouter.cir` | `--noise shot` | DRIFT (hdr+shot) | nodal | 26 | 6 | 5 | 0 | 0 | shot |
 | pretty-baby | `plugins/pretty-baby/src/circuit.rs` | `unstable/pedals/pretty-baby.cir` | `--noise shot` | DRIFT (hdr+shot) | nodal | 41 | 8 | 10 | 0 | 0 | shot |
 | qapla-1a | `plugins/qapla-1a/src/circuit.rs` | `unstable/filters/passive-eq1a.cir` | `--noise shot --emit-dc-op-recompute` | DRIFT (hdr+shot+rows) | nodal | 46 | 8 | 7 | 3 | 0 | shot |
-| sad-bastard | `plugins/sad-bastard/src/circuit.rs` | `unstable/pedals/sad-bastard.cir` | `--noise thermal` | DRIFT (header) | nodal | 45 | 14 | 8 | 0 | 5 | thermal |
+| sad-bastard | `plugins/sad-bastard/src/circuit.rs` | `unstable/examples/split-band-ge-clamp.cir` | `--noise thermal` | DRIFT (header) | nodal | 45 | 14 | 8 | 0 | 5 | thermal |
 | series-of-tubes | `plugins/series-of-tubes/src/circuit.rs` | `unstable/dynamics/series-of-tubes-stage.cir` | `--noise shot --emit-dc-op-recompute` | DRIFT (hdr+shot) | dk | 13 | 2 | 3 | 0 | 0 | shot |
 | series-of-tubes | `plugins/series-of-tubes/src/warmth.rs` | `unstable/dynamics/series-of-tubes-warmth.cir` | `--noise shot --emit-dc-op-recompute` | DRIFT (hdr+shot) | dk | 8 | 2 | 0 | 0 | 0 | shot |
 | subspace | `plugins/subspace/src/circuits/radio_am.rs` | `unstable/gimmicks/radio-am.cir` | `--noise full` | DRIFT (header) | nodal | 17 | 0 | 0 | 0 | 2 | full |
@@ -102,7 +102,7 @@ Status legend:
 | vcr-audio | `plugins/vcr-audio/src/circuit.rs` | `unstable/dynamics/vcr-audio-alc.cir` | `--noise shot --emit-dc-op-recompute` | DRIFT (hdr+shot) | dk | 18 | 3 | 1 | 2 | 0 | shot |
 | velvet-elvis | `plugins/velvet-elvis/src/circuit.rs` | `unstable/dynamics/velvet-elvis.cir` | `--noise shot --emit-dc-op-recompute` | DRIFT (hdr+shot) | dk | 13 | 4 | 1 | 0 | 0 | shot |
 | vurli | `plugins/vurli/src/comp/circuit.rs` | `unstable/dynamics/vurli-leveler.cir` | `--emit-dc-op-recompute` | DRIFT (header) | dk | 10 | 2 | 1 | 0 | 0 | — |
-| warpony | `plugins/warpony/src/circuit.rs` | `unstable/pedals/warpony.cir` | `--noise shot` | DRIFT (hdr+shot) | nodal | 30 | 14 | 6 | 0 | 0 | shot |
+| warpony | `plugins/warpony/src/circuit.rs` | `unstable/examples/seven-triode-cascade.cir` | `--noise shot` | DRIFT (hdr+shot) | nodal | 30 | 14 | 6 | 0 | 0 | shot |
 
 Counts: 42 generated files across 22 plugin trees — 9 EXACT, 32 DRIFT-EXPLAINED, 1 UNRESOLVED (at e53573c; germanium-cluster and tape-head flipped EXACT→DRIFT under the NR globalization). The table omits the-kicker (one DRIFT row): that circuit never worked, its netlist was pruned 2026-09-02, and nothing it rendered is evidence.
 

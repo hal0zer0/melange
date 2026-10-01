@@ -5,7 +5,7 @@
   "compile_cmd_cwd": "~/dev/oomox (repo root); netlists referenced as ../melange-circuits/<cir>",
   "verification_protocol": "Each compile_cmd was executed into scratch space and diffed byte-for-byte against the checked-in oomox file. EXACT = byte-identical. DRIFT-EXPLAINED = every diff hunk attributable to known post-regen melange commits AND anchors (N, M, OVERSAMPLING_FACTOR, INPUT_NODE, OUTPUT_NODES, OUTPUT_SCALES, INPUT_RESISTANCE, SAMPLE_RATE, full setter list, noise fns) verified identical. No hand-edited generated files were found. Known post-regen drift commits: 146d51b (emitted clippy-allow header); a472807 (two-draw shot noise); 49ecaa4 (deterministic coupled-inductor augmented-row ordering); AND correctness-sweep NR globalization 0c70d44 + 83bf48d + e53573c (nodal Newton globalized with a KCL residual gate + Armijo line search; emits new kcl_residual/kcl_residual_inl fns + v_nl_final block, replaces the old adaptive sub-stepping fallback, and raises the emitted MAX_ITER cap to 100 on every deck carrying an inner nodal/behavioral NR loop; e53573c makes a line-search FAILURE fall through instead of bailing to the removed fallback \u2014 this fixed the tungsten-thunder-horse idle-collapse regression that the 83bf48d baseline carried, re-converging it to main/ngspice). Two other correctness-sweep DSP-capable commits produced NO drift in THIS corpus, verified by content diff at e53573c: 63cee6e (DC-OP candidate retention) changed zero DC_OP/DC_NL_I constants here (no corpus circuit hit the leaky-gate degenerate case); be7be88 (independent current-source sign) is inert here (no corpus deck has an explicit `I` element).",
   "melange_circuits_repo_state": {
-    "head": "4516519 (2026-09-23, branch main): clean working tree. Pin advanced from 5270e67 at the 7443a5c re-baseline. 12 of the 38 corpus netlists changed content between 5270e67 and 4516519: testing/dynamics/4kbuscomp-audiopath.cir, unstable/amp/champ-5f1.cir, testing/amp/wurli-power-amp.cir, unstable/filters/funkyinduct.cir, unstable/filters/gold-press-mastering.cir, unstable/filters/moonladder.cir, unstable/gimmicks/noyce-ef86.cir, unstable/examples/mosfet-source-follower.cir, unstable/pedals/basic-bitch.cir, unstable/examples/jfet-booster.cir, unstable/pedals/sad-bastard.cir, unstable/pedals/warpony.cir. Only 4 of those moved audio (basic-bitch, five-watt-freddie/champ-5f1, sad-bastard, wurli-power-amp); the other 8 edits are output-inert.",
+    "head": "4516519 (2026-09-23, branch main): clean working tree. Pin advanced from 5270e67 at the 7443a5c re-baseline. 12 of the 38 corpus netlists changed content between 5270e67 and 4516519: testing/dynamics/4kbuscomp-audiopath.cir, unstable/amp/champ-5f1.cir, testing/amp/wurli-power-amp.cir, unstable/filters/funkyinduct.cir, unstable/filters/gold-press-mastering.cir, unstable/filters/moonladder.cir, unstable/gimmicks/noyce-ef86.cir, unstable/examples/mosfet-source-follower.cir, unstable/examples/split-band-triode-drive.cir, unstable/examples/jfet-booster.cir, unstable/examples/split-band-ge-clamp.cir, unstable/examples/seven-triode-cascade.cir. Only 4 of those moved audio (basic-bitch, five-watt-freddie/champ-5f1, sad-bastard, wurli-power-amp); the other 8 edits are output-inert.",
     "note": "Re-baselined at melange 7443a5c against this circuits state (2026-09-23). Prior pin: 5270e67 at melange cd133c6. CAVEAT ON PROVENANCE: golden-baselines/7443a5c/metadata.json records manifest_sha256 475f73b908391e4d6758315b652276ac2bf0b762523104b8d964af5e4114ee12, which is this file BEFORE this pin update -- the capture ran first, then the pin was written to record what was actually captured. No circuit entry, compile_cmd or anchor changed; the edit is documentation-only. DIVERGENT COPY: local-docs/golden-baseline-manifest.json is a gitignored, untracked, FROZEN 2026-07-21 snapshot pinned at melange 8945b67 / circuits b655adf with 42 circuits (it still lists the 11 decks pruned by 6b4acd5 and lacks the 7 coverage decks added by 91aaa48, and carries the pre-move qapla-1a path unstable/filters/passive-eq1a.cir). It is NOT a live twin of this file and was not used. Reconciling or deleting it is a separate decision, not taken here."
   },
   "correctness_sweep_2026_08_30": {
@@ -61,8 +61,8 @@
     {
       "plugin": "basic-bitch",
       "circuit_rs": "plugins/basic-bitch/src/circuit.rs",
-      "cir": "unstable/pedals/basic-bitch.cir",
-      "compile_cmd": "melange compile ../melange-circuits/unstable/pedals/basic-bitch.cir --format code --noise thermal -o plugins/basic-bitch/src/circuit.rs",
+      "cir": "unstable/examples/split-band-triode-drive.cir",
+      "compile_cmd": "melange compile ../melange-circuits/unstable/examples/split-band-triode-drive.cir --format code --noise thermal -o plugins/basic-bitch/src/circuit.rs",
       "verify_status": "DRIFT-EXPLAINED",
       "anchors": {
         "n": 33,
@@ -618,8 +618,8 @@
     {
       "plugin": "sad-bastard",
       "circuit_rs": "plugins/sad-bastard/src/circuit.rs",
-      "cir": "unstable/pedals/sad-bastard.cir",
-      "compile_cmd": "melange compile ../melange-circuits/unstable/pedals/sad-bastard.cir --format code --noise thermal -o plugins/sad-bastard/src/circuit.rs",
+      "cir": "unstable/examples/split-band-ge-clamp.cir",
+      "compile_cmd": "melange compile ../melange-circuits/unstable/examples/split-band-ge-clamp.cir --format code --noise thermal -o plugins/sad-bastard/src/circuit.rs",
       "verify_status": "DRIFT-EXPLAINED",
       "anchors": {
         "n": 45,
@@ -797,8 +797,8 @@
     {
       "plugin": "warpony",
       "circuit_rs": "plugins/warpony/src/circuit.rs",
-      "cir": "unstable/pedals/warpony.cir",
-      "compile_cmd": "melange compile ../melange-circuits/unstable/pedals/warpony.cir --format code --noise shot --output-clamp 150 -o plugins/warpony/src/circuit.rs",
+      "cir": "unstable/examples/seven-triode-cascade.cir",
+      "compile_cmd": "melange compile ../melange-circuits/unstable/examples/seven-triode-cascade.cir --format code --noise shot --output-clamp 150 -o plugins/warpony/src/circuit.rs",
       "verify_status": "DRIFT-EXPLAINED",
       "anchors": {
         "n": 30,
