@@ -789,23 +789,6 @@ fn lookup_model_param(netlist: &Netlist, model_name: &str, param_name: &str) -> 
 }
 
 // =============================================================================
-// Power amplifier DC OP (internal nodes for parasitic BJTs)
-// =============================================================================
-
-// Power amp and pentode DC OP circuit-file tests removed — circuits migrated
-// to melange-audio/circuits repo.
-//
-// Removed tests:
-//   - test_power_amp_dc_op_converges
-//   - test_pentode_dc_op_el84_single_stage_circuit
-//   - test_pentode_dc_op_ac15_convergence
-//   - test_pentode_dc_op_tweed_deluxe_convergence
-//   - test_pentode_dc_op_6k7_varimu_stage
-// Removed helpers (only used by those tests):
-//   - build_pentode_circuit_pipeline()
-//   - node_idx()
-
-// =============================================================================
 // Regression tests: DC OP must solve the SAME device models as the transient
 // runtime (2026-07-18 fixes: BJT ISE/ISC leakage, diode RS junction solve,
 // damped parasitic-BJT internal Newton, JFET Ig ≡ 0).

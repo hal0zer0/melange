@@ -26,12 +26,7 @@ use std::io::Write;
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn build_pipeline(spice: &str) -> (Netlist, MnaSystem, DkKernel) {
-    let netlist = Netlist::parse(spice).expect("failed to parse netlist");
-    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("failed to build DK kernel");
-    (netlist, mna, kernel)
-}
+use support::build_pipeline;
 
 /// Bypasses the production pipeline on purpose: tests the DC operating point
 /// `CircuitIR` computes from a kernel, below any build. The input port is
@@ -80,7 +75,7 @@ fn assert_compiles(code: &str, label: &str) {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let src = tmp_dir.join(format!("melange_dcop_test_{}.rs", id));
     let lib = tmp_dir.join(format!("melange_dcop_test_{}.rlib", id));
 
@@ -661,7 +656,7 @@ fn test_dc_op_all_finite() {
 }
 
 /// Test DC OP for a circuit with a voltage source and transformer (coupled inductors).
-/// This is the minimal reproduction of the Pultec DC OP failure.
+/// This is the minimal reproduction of the passive tube-EQ DC OP failure.
 #[test]
 fn test_dc_op_vs_plus_transformer() {
     use melange_solver::dc_op;
@@ -721,7 +716,7 @@ K1 L1 L2 0.95\n";
 }
 
 /// Test DC OP: VS + 3-winding transformer + resistor network.
-/// Minimal reproduction of Pultec-like topology.
+/// Minimal reproduction of a passive tube-EQ topology.
 #[test]
 fn test_dc_op_vs_3winding_transformer() {
     use melange_solver::dc_op;
@@ -770,7 +765,7 @@ Rload2 sec2 0 10k\n";
 }
 
 /// Test LU decomposition with augmented rows that have zero diagonal.
-/// This tests the specific pattern that fails in the Pultec DC OP.
+/// This tests the specific pattern that fails in the passive tube-EQ DC OP.
 #[test]
 fn test_lu_decompose_augmented_zero_diagonal() {
     use melange_solver::dc_op;

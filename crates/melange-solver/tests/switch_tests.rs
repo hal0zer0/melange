@@ -19,7 +19,7 @@ fn generate(spice: &str) -> String {
 }
 
 fn compile_and_run(code: &str, test_name: &str) {
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let src_path = tmp_dir.join(format!("melange_switch_{}.rs", test_name));
     let bin_path = tmp_dir.join(format!("melange_switch_{}", test_name));
     {

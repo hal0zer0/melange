@@ -1,15 +1,15 @@
-//! Regression test for the routing-rate bug (2026-08-14).
+//! Routing reads the kernel at the rate the solver runs at (regression test,
+//! 2026-08-14).
 //!
 //! `routing::auto_route`'s spectral-radius / K-conditioning checks are
-//! computed on whatever `DkKernel` they are handed. Before this fix, the
-//! CLI (`tools/melange-cli/src/main.rs`) built that kernel at the BASE
-//! (host) sample rate even when `--oversampling N` was requested, while
-//! codegen ships matrices built at the INTERNAL rate
-//! (`sample_rate * oversampling_factor`). `rho(S*A_neg)` is strongly rate-
-//! dependent (see `memory/passive_lc_auto_be_fix.md`), so a circuit that
-//! looks trap-stable at the base rate can be genuinely trap-unstable at the
-//! internal rate the generated solver actually runs at — and the router,
-//! never having looked at that rate, ships it on DK Schur anyway.
+//! computed on whatever `DkKernel` they are handed. Codegen ships matrices
+//! built at the INTERNAL rate (`sample_rate * oversampling_factor`), so the
+//! routing kernel must be built at that rate too (`routing_rate` in
+//! `crates/melange-solver/src/build.rs`). `rho(S*A_neg)` is strongly rate-
+//! dependent, so a circuit that looks trap-stable at the base (host) rate can
+//! be genuinely trap-unstable at the internal rate the generated solver
+//! actually runs at — a router reading the base-rate kernel ships it on DK
+//! Schur anyway.
 //!
 //! This was diagnosed on a Ge regenerative-LC-oscillator circuit
 //! (`melange-circuits/local-docs/g10-osc-sq2-repro.cir`): at 48 kHz the
@@ -25,8 +25,7 @@
 //! This test pins the underlying mechanism `routing::auto_route` depends
 //! on: the SAME topology routes differently depending on which rate its
 //! kernel was built at. `tools/melange-cli/tests/cli_integration.rs` pins
-//! the actual CLI fix (build the routing kernel at the internal rate)
-//! end-to-end.
+//! the CLI behaviour (the routing kernel at the internal rate) end-to-end.
 
 use melange_solver::codegen::routing::{self, SolverRoute};
 use melange_solver::dk::DkKernel;
@@ -37,13 +36,13 @@ use melange_solver::parser::Netlist;
 /// `melange-circuits/local-docs/g10-osc-sq2-repro.cir` as of 2026-08-14).
 /// Embedded rather than read from the sibling repo so this test is
 /// self-contained (the melange-circuits checkout may not be present, e.g.
-/// in CI). A Farfisa Compact G10 master LC oscillator (Ge PNP,
+/// in CI). A combo-organ master LC oscillator (Ge PNP,
 /// transformer-coupled regenerative feedback via `K1`) plus one squarer
 /// stage. This topology is genuinely unstable at its DC-OP linearization by
 /// design (that's what makes it oscillate) — see the netlist's own hazard
 /// notes.
 const G10_OSCILLATOR: &str = "\
-Farfisa Compact G10 reference chain (master osc + squarer + divider + keying)
+Combo-organ reference chain (master osc + squarer + divider + keying)
 Vrail rail 0 DC 8
 Vvib vterm 0 DC 8
 .runtime Vvib as v_g10_vterm

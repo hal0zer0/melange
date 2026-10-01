@@ -2,7 +2,7 @@
 //!
 //! 1. `CodegenConfig::output_clamp_v` threaded into the DK process_sample
 //!    template (was hardcoded ±10 V in the clamp, the diag threshold, and
-//!    the NaN-recovery path — the Wurlitzer power amp at ±22 V rails needs
+//!    the NaN-recovery path — an electric-piano power amp at ±22 V rails needs
 //!    ±30 V; the nodal emitter already honored it).
 //! 2. Op-amp slew-rate limiting reads the runtime sample rate
 //!    (`state.current_sample_rate`) instead of the baked `SAMPLE_RATE`

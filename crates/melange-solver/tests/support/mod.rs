@@ -21,7 +21,7 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{LazyLock, Mutex};
 
@@ -29,10 +29,112 @@ use melange_solver::codegen::CodegenConfig;
 use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
 
+// ── Scratch directory ──────────────────────────────────────────────────
+
+/// Name prefix of the per-process scratch directories under the system temp
+/// directory: `melange-test-<pid>`.
+const SCRATCH_PREFIX: &str = "melange-test-";
+
+/// This process's scratch directory, created (and the dead processes' swept)
+/// on first use.
+static SCRATCH_DIR: LazyLock<PathBuf> = LazyLock::new(init_scratch_dir);
+
+/// The directory every compiled test binary, its source, and any other
+/// scratch file of this test process goes in: `<temp>/melange-test-<pid>/`.
+///
+/// A test binary has no exit hook (statics are never dropped), so the
+/// directory of a finished process is reclaimed by the next test process: on
+/// first use, every sibling `melange-test-<pid>` whose process is gone is
+/// removed, together with the per-file leftovers of the layout that preceded
+/// this one. What a run leaves behind is therefore bounded by the processes
+/// still alive plus the last one to finish.
+pub fn scratch_dir() -> PathBuf {
+    let dir = SCRATCH_DIR.clone();
+    // Cheap, and recreates the directory should a concurrent sweep have raced
+    // the PID check of a process that started with a recycled PID.
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+fn init_scratch_dir() -> PathBuf {
+    let tmp = std::env::temp_dir();
+    sweep_dead_scratch(&tmp);
+    let dir = tmp.join(format!("{SCRATCH_PREFIX}{}", std::process::id()));
+    // A leftover from a dead process that had this PID.
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)
+        .unwrap_or_else(|e| panic!("create scratch dir {}: {e}", dir.display()));
+    dir
+}
+
+/// Whether process `pid` is alive. Only answerable where `/proc` exists.
+#[cfg(target_os = "linux")]
+fn pid_alive(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
+/// The PID in a pre-scratch-dir temp file name, `<prefix><tag>_<pid>_<id>`
+/// with an optional `.rs`, for the prefixes this crate's tests used.
+fn legacy_temp_pid(name: &str) -> Option<u32> {
+    const LEGACY_PREFIXES: &[&str] = &[
+        "melange_cached_",
+        "melange_test_",
+        "melange_befp_",
+        "melange_full_lu_",
+        "melange_glow_",
+        "melange_neve_",
+        "melange_railmode_",
+        "melange_ssf_",
+        "melange_vcactrl_",
+        "melange_vcr_",
+    ];
+    let rest = LEGACY_PREFIXES.iter().find_map(|p| name.strip_prefix(p))?;
+    let rest = rest.strip_suffix(".rs").unwrap_or(rest);
+    let mut fields = rest.rsplitn(3, '_');
+    let id = fields.next()?;
+    let pid = fields.next()?;
+    fields.next()?; // the tag
+    id.parse::<u32>().ok()?;
+    pid.parse().ok()
+}
+
+/// Remove the scratch directories, and the legacy per-file temp leftovers, of
+/// test processes that are no longer alive. A no-op where liveness cannot be
+/// checked.
+fn sweep_dead_scratch(tmp: &Path) {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(entries) = std::fs::read_dir(tmp) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if let Some(pid) = name
+                .strip_prefix(SCRATCH_PREFIX)
+                .and_then(|p| p.parse::<u32>().ok())
+            {
+                if kind.is_dir() && !pid_alive(pid) {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            } else if let Some(pid) = legacy_temp_pid(name) {
+                if kind.is_file() && !pid_alive(pid) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = tmp;
+}
+
 // ── Compilation cache ──────────────────────────────────────────────────
 
-/// Global compilation cache: source code hash → binary path on disk.
-/// Tests sharing the same generated circuit code compile once.
+/// Global compilation cache: source code hash → binary path on disk (in
+/// [`scratch_dir`]). Tests sharing the same generated circuit code compile once.
 static BINARY_CACHE: LazyLock<Mutex<HashMap<u64, PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -141,11 +243,10 @@ pub fn compile_and_run(code: &str, main_code: &str, tag: &str) -> RunOutput {
 
 /// Compile full source (with main) and run, passing optional argv to the binary.
 fn compile_source_and_run(source: &str, tag: &str, args: &[&str]) -> RunOutput {
-    let tmp_dir = std::env::temp_dir();
-    let pid = std::process::id();
+    let tmp_dir = scratch_dir();
     let id = next_id();
-    let src_path = tmp_dir.join(format!("melange_test_{tag}_{pid}_{id}.rs"));
-    let bin_path = tmp_dir.join(format!("melange_test_{tag}_{pid}_{id}"));
+    let src_path = tmp_dir.join(format!("run_{tag}_{id}.rs"));
+    let bin_path = tmp_dir.join(format!("run_{tag}_{id}"));
 
     // Write source
     {
@@ -202,11 +303,10 @@ fn compile_and_run_with_stdin(
     args: &[&str],
     stdin_data: &str,
 ) -> RunOutput {
-    let tmp_dir = std::env::temp_dir();
-    let pid = std::process::id();
+    let tmp_dir = scratch_dir();
     let id = next_id();
-    let src_path = tmp_dir.join(format!("melange_test_{tag}_{pid}_{id}.rs"));
-    let bin_path = tmp_dir.join(format!("melange_test_{tag}_{pid}_{id}"));
+    let src_path = tmp_dir.join(format!("run_{tag}_{id}.rs"));
+    let bin_path = tmp_dir.join(format!("run_{tag}_{id}"));
 
     {
         let mut f = std::fs::File::create(&src_path).expect("create source file");
@@ -527,11 +627,10 @@ fn compile_circuit_code(code: &str, tag: &str) -> PathBuf {
     }
 
     // Compile
-    let tmp_dir = std::env::temp_dir();
-    let pid = std::process::id();
+    let tmp_dir = scratch_dir();
     let id = next_id();
-    let src_path = tmp_dir.join(format!("melange_cached_{tag}_{pid}_{id}.rs"));
-    let bin_path = tmp_dir.join(format!("melange_cached_{tag}_{pid}_{id}"));
+    let src_path = tmp_dir.join(format!("cached_{tag}_{id}.rs"));
+    let bin_path = tmp_dir.join(format!("cached_{tag}_{id}"));
 
     {
         let mut f = std::fs::File::create(&src_path).expect("create source file");
@@ -735,6 +834,20 @@ pub fn run_sine_full(
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
     }
+}
+
+// ── Raw-MNA kernel pipeline ────────────────────────────────────────────
+
+/// Parse → MNA → DK kernel at 44.1 kHz, straight from the raw MNA: no input
+/// conductance stamped, no subcircuit expansion, none of the shipped build's
+/// reductions. For tests that assert on the kernel or the MNA itself; a test
+/// of what ships uses [`build_shipped`].
+pub fn build_pipeline(spice: &str) -> (Netlist, MnaSystem, melange_solver::dk::DkKernel) {
+    let netlist = Netlist::parse(spice).expect("failed to parse netlist");
+    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
+    let kernel =
+        melange_solver::dk::DkKernel::from_mna(&mna, 44100.0).expect("failed to build DK kernel");
+    (netlist, mna, kernel)
 }
 
 // ── Codegen config helpers ─────────────────────────────────────────────

@@ -152,7 +152,7 @@ Rb vcc mid 1Meg
     }\n";
     let full = format!("{}{}", code, main);
 
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join("melange_named_const_roundtrip.rs");
     let bin = tmp.join("melange_named_const_roundtrip");
     std::fs::File::create(&src)
@@ -240,7 +240,7 @@ R2 vcc out 100k
         let _ = NODE_NAMES;\n\
     }\n";
     let full = format!("{}{}", code, main);
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join("melange_dc_op_by_name_roundtrip.rs");
     let bin = tmp.join("melange_dc_op_by_name_roundtrip");
     std::fs::File::create(&src)

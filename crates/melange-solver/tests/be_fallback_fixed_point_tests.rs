@@ -217,7 +217,7 @@ fn main() {
 "#;
 
 fn compile_and_run(code: &str, tag: &str) -> String {
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let id = std::process::id();
     let counter = COUNTER.fetch_add(1, Ordering::SeqCst);
     let src_path = tmp_dir.join(format!("melange_befp_{tag}_{id}_{counter}.rs"));

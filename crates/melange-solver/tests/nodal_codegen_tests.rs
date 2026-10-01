@@ -54,7 +54,7 @@ fn generate_nodal(spice: &str, in_name: &str, out_name: &str) -> String {
 fn assert_compiles(code: &str, label: &str) {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let src = tmp_dir.join(format!("melange_nodal_test_{id}.rs"));
     let lib = tmp_dir.join(format!("melange_nodal_test_{id}.rlib"));
 

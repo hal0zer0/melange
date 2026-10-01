@@ -5,9 +5,7 @@
 //! with `A_neg = (2/T)C` and `q_dot = C·dx/dt`: no `G` term. A conductance
 //! change (a pot, a resistor-only switch) therefore leaves the carried state
 //! consistent and needs no special sample; a backward-Euler sample there would
-//! only cost first-order accuracy. (Under the old whole-system form,
-//! `A_neg = (2/T)C − G`, a swap double-counted `Δg` on its sample; that is
-//! what breakpoint-BE was first built for.) A reactance change still leaves
+//! only cost first-order accuracy. A reactance change still leaves
 //! `q_dot` built on the old value, so a C- or L-switch routes exactly one
 //! sample through the backward-Euler matrices, which re-seed `q_dot` from
 //! their own capacitor currents. Exactly one: a second sample over-damps and
@@ -128,7 +126,7 @@ fn reactive_switch_trap_build_emits_breakpoint_be() {
 #[test]
 fn breakpoint_be_is_exactly_one_sample() {
     // Load-bearing: a SECOND BE sample over-damps and knocks a marginal
-    // self-oscillator (Farfisa G10 divider under --force-trap) into the wrong
+    // self-oscillator (an organ-divider flip-flop under --force-trap) into the wrong
     // equilibrium. One BE sample already removes both the 2× and the z=-1 mode.
     let code = generate_nodal(SWITCH_CAP_CLIPPER, |_| {});
     assert!(
@@ -170,8 +168,9 @@ fn conductance_only_builds_omit_breakpoint_be() {
 /// The runtime proof for a conductance-only switch: the capless divider's
 /// switched node `out` is algebraic, `out = mid·Rload/(Rk + Rload)`, at every
 /// sample, including the swap sample and the ones after it, on a plain
-/// trapezoidal build with no breakpoint sample. Under the old whole-system form
-/// the swap sample read 2x and `out` rang at fs/2.
+/// trapezoidal build with no breakpoint sample. A history carrying a `−G` term
+/// would double-count the swap's `Δg`: the swap sample would read 2x and `out`
+/// would ring at fs/2.
 #[test]
 fn a_resistor_switch_is_exact_without_breakpoint_be() {
     let code = generate_nodal(SWITCH_DIVIDER, |_| {});

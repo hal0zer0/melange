@@ -1079,7 +1079,7 @@ fn main() {{
 /// node is therefore effectively resistor-only at Nyquist, single-draw shot
 /// injection excites the trap z=-1 pole into an fs/2 limit cycle, and the
 /// breakdown exponential rectifies it into the audio band. Symptoms (Noyce
-/// Zener source, reported by the oomox agent 2026-07-19):
+/// Zener source, reported downstream 2026-07-19):
 ///   - lag-1 autocorrelation ≈ -1.0 (pure Nyquist)
 ///   - σ depends on the RNG seed by 13-17 dB (rectification is amplitude-dep.)
 ///   - output ~46 dB hotter than the physical sqrt(4·q·I·fs)·Rz prediction

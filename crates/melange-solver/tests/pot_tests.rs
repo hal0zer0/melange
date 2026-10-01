@@ -14,20 +14,12 @@ use std::io::Write;
 
 use melange_solver::codegen::ir::CircuitIR;
 use melange_solver::codegen::CodegenConfig;
-use melange_solver::dk::DkKernel;
-use melange_solver::mna::MnaSystem;
-use melange_solver::parser::Netlist;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn build_pipeline(spice: &str) -> (Netlist, MnaSystem, DkKernel) {
-    let netlist = Netlist::parse(spice).expect("failed to parse netlist");
-    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("failed to build DK kernel");
-    (netlist, mna, kernel)
-}
+use support::build_pipeline;
 
 fn default_config() -> CodegenConfig {
     CodegenConfig {
@@ -53,7 +45,7 @@ fn assert_compiles(code: &str, label: &str) {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let src = tmp_dir.join(format!("melange_pot_test_{}.rs", id));
     let lib = tmp_dir.join(format!("melange_pot_test_{}.rlib", id));
 
@@ -473,7 +465,7 @@ fn test_grounded_pot_codegen() {
 // tests and sm_pot_sweep_tests.rs.)
 
 // ===========================================================================
-// NEW TESTS: Filling coverage gaps identified by multi-agent review
+// Coverage-gap tests
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
@@ -919,7 +911,7 @@ fn main() {
 "#;
     let full = format!("{}{}", code, main);
 
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join("melange_log_taper_sweep.rs");
     let bin = tmp.join("melange_log_taper_sweep");
     std::fs::File::create(&src)

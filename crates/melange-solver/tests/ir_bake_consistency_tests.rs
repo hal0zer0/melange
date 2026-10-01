@@ -1,11 +1,11 @@
-//! Regression tests for the 2026-07 IR-bake / stability-analysis fix batch:
+//! IR-bake and stability-analysis consistency:
 //!
 //! 1. BE + oversampling must bake backward-Euler matrices at the internal
 //!    rate (previously the os>1 branch unconditionally baked trapezoidal
 //!    matrices while the emitter used BE semantics — mixed integrator,
 //!    wrong DC fixed point, silent convention swap on first rebuild).
-//! 2. The DK auto-BE discriminator must evaluate the internal-rate
-//!    (S, A_neg) pair it actually ships, not the base-rate kernel pair.
+//! 2. The ring predicate (the integrator promotion rule) must evaluate the
+//!    shipped IR at the internal (oversampled) rate, not the base rate.
 //! 5. The DK path must NOT rail-clamp the baked DC_OP against unclamped
 //!    DC_NL_I (v_prev / i_nl_prev consistency — nodal-path policy).
 //! 6. Inverted op-amp rails (VCC <= VEE, both finite) must hard-error at

@@ -236,7 +236,7 @@ Vctrl ctrl 0 DC 0
     }\n";
     let full = format!("{}{}", code, main);
 
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join("melange_runtime_drive.rs");
     let bin = tmp.join("melange_runtime_drive");
     std::fs::File::create(&src)
@@ -704,7 +704,7 @@ Rbias out 0 10k
     }\n";
     let full = format!("{}{}", code, main);
 
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join("melange_runtime_r_sweep.rs");
     let bin = tmp.join("melange_runtime_r_sweep");
     std::fs::File::create(&src)

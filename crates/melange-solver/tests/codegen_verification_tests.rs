@@ -20,15 +20,10 @@ use std::io::Write;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// The raw MNA and DK kernel of `spice` (no input stamp, no pipeline steps).
-/// For the IR- and kernel-level tests, and for the tests of the generator's
-/// own config validation, which a build (ports by name) cannot reach.
-fn build_pipeline(spice: &str) -> (Netlist, MnaSystem, DkKernel) {
-    let netlist = Netlist::parse(spice).expect("failed to parse netlist");
-    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("failed to build DK kernel");
-    (netlist, mna, kernel)
-}
+// The raw MNA and DK kernel of `spice` (no input stamp, no pipeline steps),
+// for the IR- and kernel-level tests and for the tests of the generator's own
+// config validation, which a build (ports by name) cannot reach.
+use support::build_pipeline;
 
 /// The IR-level tests' config: input circuit node 0, output node 1.
 fn default_config() -> CodegenConfig {
@@ -983,7 +978,7 @@ fn test_generated_code_compiles() {
         let (code, _netlist, _mna, _kernel) = generate_code(spice);
 
         // Write to a temp file
-        let tmp_dir = std::env::temp_dir();
+        let tmp_dir = support::scratch_dir();
         let tmp_path = tmp_dir.join(format!("melange_codegen_test_{}.rs", name));
 
         {
@@ -1502,7 +1497,7 @@ fn test_heterogeneous_diode_models() {
 fn test_heterogeneous_diode_models_compile() {
     let (code, _netlist, _mna, _kernel) = generate_code(TWO_DIFFERENT_DIODES_SPICE);
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_hetero_diodes.rs");
 
     {
@@ -2503,7 +2498,9 @@ fn test_generated_code_compiles_and_set_sample_rate_works() {
     );
 
     // Write to temp file and compile
-    let path = std::path::Path::new("/tmp/melange_sample_rate_test.rs");
+    let src_buf = support::scratch_dir().join("melange_sample_rate_test.rs");
+    let bin_buf = support::scratch_dir().join("melange_sample_rate_test");
+    let path = src_buf.as_path();
     let mut f = std::fs::File::create(path).expect("create temp file");
     f.write_all(test_harness.as_bytes())
         .expect("write temp file");
@@ -2512,12 +2509,13 @@ fn test_generated_code_compiles_and_set_sample_rate_works() {
         .args([
             path.to_str().unwrap(),
             "-o",
-            "/tmp/melange_sample_rate_test",
+            bin_buf.to_str().unwrap(),
             "--edition",
             "2021",
         ])
         .output()
         .expect("run rustc");
+    let _ = std::fs::remove_file(&src_buf);
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2528,9 +2526,10 @@ fn test_generated_code_compiles_and_set_sample_rate_works() {
     }
 
     // Run the compiled binary
-    let run_output = std::process::Command::new("/tmp/melange_sample_rate_test")
+    let run_output = std::process::Command::new(&bin_buf)
         .output()
         .expect("run compiled test");
+    let _ = std::fs::remove_file(&bin_buf);
 
     if !run_output.status.success() {
         let stderr = String::from_utf8_lossy(&run_output.stderr);
@@ -2583,7 +2582,9 @@ fn test_nonlinear_circuit_set_sample_rate_compiles() {
          }}\n"
     );
 
-    let path = std::path::Path::new("/tmp/melange_sr_nonlinear_test.rs");
+    let src_buf = support::scratch_dir().join("melange_sr_nonlinear_test.rs");
+    let bin_buf = support::scratch_dir().join("melange_sr_nonlinear_test");
+    let path = src_buf.as_path();
     let mut f = std::fs::File::create(path).expect("create temp file");
     f.write_all(test_harness.as_bytes())
         .expect("write temp file");
@@ -2592,12 +2593,13 @@ fn test_nonlinear_circuit_set_sample_rate_compiles() {
         .args([
             path.to_str().unwrap(),
             "-o",
-            "/tmp/melange_sr_nonlinear_test",
+            bin_buf.to_str().unwrap(),
             "--edition",
             "2021",
         ])
         .output()
         .expect("run rustc");
+    let _ = std::fs::remove_file(&src_buf);
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2607,9 +2609,10 @@ fn test_nonlinear_circuit_set_sample_rate_compiles() {
         );
     }
 
-    let run_output = std::process::Command::new("/tmp/melange_sr_nonlinear_test")
+    let run_output = std::process::Command::new(&bin_buf)
         .output()
         .expect("run compiled test");
+    let _ = std::fs::remove_file(&bin_buf);
 
     if !run_output.status.success() {
         let stderr = String::from_utf8_lossy(&run_output.stderr);
@@ -2728,7 +2731,9 @@ C1 out 0 100n
         result.code
     );
 
-    let path = std::path::Path::new("/tmp/melange_pot_sr_test.rs");
+    let src_buf = support::scratch_dir().join("melange_pot_sr_test.rs");
+    let bin_buf = support::scratch_dir().join("melange_pot_sr_test");
+    let path = src_buf.as_path();
     let mut f = std::fs::File::create(path).expect("create temp file");
     f.write_all(test_harness.as_bytes())
         .expect("write temp file");
@@ -2737,12 +2742,13 @@ C1 out 0 100n
         .args([
             path.to_str().unwrap(),
             "-o",
-            "/tmp/melange_pot_sr_test",
+            bin_buf.to_str().unwrap(),
             "--edition",
             "2021",
         ])
         .output()
         .expect("run rustc");
+    let _ = std::fs::remove_file(&src_buf);
 
     if !output.status.success() {
         panic!(
@@ -2751,9 +2757,10 @@ C1 out 0 100n
         );
     }
 
-    let run_output = std::process::Command::new("/tmp/melange_pot_sr_test")
+    let run_output = std::process::Command::new(&bin_buf)
         .output()
         .expect("run test");
+    let _ = std::fs::remove_file(&bin_buf);
     if !run_output.status.success() {
         panic!(
             "Pot set_sample_rate test failed:\nstdout: {}\nstderr: {}",
@@ -2870,7 +2877,7 @@ fn test_codegen_m5_compiles() {
     let (code, _netlist, _mna, kernel) = generate_code(FIVE_DIODE_SPICE);
     assert_eq!(kernel.m, 5);
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_m5.rs");
     {
         let mut f = std::fs::File::create(&tmp_path).unwrap();
@@ -2940,7 +2947,7 @@ fn test_codegen_m6_compiles() {
     let (code, _netlist, _mna, kernel) = generate_code(SIX_DIODE_SPICE);
     assert_eq!(kernel.m, 6);
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_m6.rs");
     {
         let mut f = std::fs::File::create(&tmp_path).unwrap();
@@ -3025,7 +3032,7 @@ fn test_codegen_m8_compiles() {
     let (code, _netlist, _mna, kernel) = generate_code(EIGHT_DIODE_SPICE);
     assert_eq!(kernel.m, 8);
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_m8.rs");
     {
         let mut f = std::fs::File::create(&tmp_path).unwrap();
@@ -3145,7 +3152,7 @@ fn test_jfet_codegen_compiles() {
     let (code, _netlist, _mna, kernel) = generate_code(JFET_CS_SPICE);
     assert_eq!(kernel.m, 2);
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_jfet.rs");
     {
         let mut f = std::fs::File::create(&tmp_path).unwrap();
@@ -3199,7 +3206,7 @@ Cs src 0 10u
     assert!(code.contains("DEVICE_0_IDSS"), "JFET at device 0");
     assert!(code.contains("DEVICE_1_IS"), "Diode at device 1");
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_jfet_diode.rs");
     {
         let mut f = std::fs::File::create(&tmp_path).unwrap();
@@ -3265,7 +3272,7 @@ fn test_jfet_codegen_compiles_and_runs() {
         result.code
     );
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let src_path = tmp_dir.join("melange_jfet_run_test.rs");
     let bin_path = tmp_dir.join("melange_jfet_run_test");
     {
@@ -3370,7 +3377,7 @@ C1 out 0 100n
         result.code
     );
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let src_path = tmp_dir.join("melange_pjfet_run_test.rs");
     let bin_path = tmp_dir.join("melange_pjfet_run_test");
     {
@@ -3547,7 +3554,7 @@ fn test_oversampling_2x_diode_clipper_compiles() {
     };
     let result = shipped(DIODE_CLIPPER_SPICE, &config);
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_os2x_diode.rs");
 
     {
@@ -3584,7 +3591,7 @@ fn test_oversampling_2x_rc_linear_compiles() {
     };
     let result = shipped(RC_CIRCUIT_SPICE, &config);
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_os2x_rc.rs");
 
     {
@@ -3621,7 +3628,7 @@ fn test_oversampling_2x_bjt_compiles() {
     };
     let result = shipped(BJT_SPICE, &config);
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_os2x_bjt.rs");
 
     {
@@ -3667,7 +3674,7 @@ fn test_oversampling_4x_diode_clipper_compiles() {
     assert!(code.contains("OS_COEFFS_OUTER"));
     assert!(code.contains("fn os_halfband_outer("));
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_os4x_diode.rs");
 
     {
@@ -3879,7 +3886,7 @@ fn main() {
 "#
     );
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let src_path = tmp_dir.join("melange_os2x_measure_test.rs");
     let bin_path = tmp_dir.join("melange_os2x_measure_test");
     {
@@ -4032,7 +4039,7 @@ fn test_codegen_bjt_gummel_poon_compiles() {
     };
     let result = shipped(BJT_GP_SPICE, &config);
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_gp_bjt.rs");
 
     {
@@ -4557,7 +4564,7 @@ V1 vcc 0 DC 250
     // still round-trips through rustc. Catches template-syntax errors in
     // the post-sample update block, NaN-recovery guard, and NR bias
     // injection that pure string-contains assertions miss.
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_triode_thermal.rs");
     {
         let mut f = std::fs::File::create(&tmp_path).unwrap();
@@ -4607,7 +4614,7 @@ fn test_codegen_triode_compiles() {
     let (code, _netlist, _mna, kernel) = generate_code(TRIODE_CC_SPICE);
     assert_eq!(kernel.m, 2);
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_triode.rs");
     {
         let mut f = std::fs::File::create(&tmp_path).unwrap();
@@ -4674,7 +4681,7 @@ fn test_codegen_triode_compiles_and_runs() {
         result.code
     );
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let src_path = tmp_dir.join("melange_triode_run_test.rs");
     let bin_path = tmp_dir.join("melange_triode_run_test");
     {
@@ -4758,7 +4765,7 @@ fn test_codegen_two_triode_preamp_compiles_and_runs() {
         result.code
     );
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let src_path = tmp_dir.join("melange_triode_preamp_test.rs");
     let bin_path = tmp_dir.join("melange_triode_preamp_test");
     {
@@ -4902,7 +4909,7 @@ fn test_codegen_pentode_compiles() {
         &shipped_config(PENTODE_CC_SPICE, "test_circuit"),
     );
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_pentode.rs");
     {
         let mut f = std::fs::File::create(&tmp_path).unwrap();
@@ -5108,7 +5115,7 @@ fn test_codegen_beam_tetrode_emits_helpers() {
 fn test_codegen_beam_tetrode_compiles() {
     let (code, _ir) = build_ir_force_exponential(BEAM_TETRODE_CC_SPICE);
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_beam_tetrode.rs");
     {
         let mut f = std::fs::File::create(&tmp_path).unwrap();
@@ -5409,7 +5416,7 @@ fn test_codegen_classical_pentode_compiles() {
         .primary()
         .to_string();
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_classical_pentode.rs");
     {
         let mut f = std::fs::File::create(&tmp_path).unwrap();
@@ -5639,8 +5646,8 @@ fn emit_grid_off_code(spice: &str, grid_off_names: &[&str], vg2k: f64) -> (Strin
     use melange_solver::codegen::ir::DeviceParams;
 
     let netlist = Netlist::parse(spice).expect("parse grid-off netlist");
-    // The MNA agent's in-progress API takes a per-pentode `HashMap<String,
-    // f64>` where the value is the DC-OP-converged `Vg2k` to freeze. For
+    // The grid-off API takes a per-pentode `HashMap<String, f64>` where the
+    // value is the DC-OP-converged `Vg2k` to freeze. For
     // these codegen tests we don't exercise the DC-OP path, so we just
     // populate the map with the same `vg2k` value for every name and then
     // re-stamp `DeviceSlot.vg2k_frozen` after IR build (for belt-and-braces
@@ -5756,7 +5763,7 @@ fn test_codegen_grid_off_pentode_emits_helpers() {
 fn test_codegen_grid_off_pentode_compiles() {
     let (code, _) = emit_grid_off_code(PENTODE_CC_SPICE, &["P1"], 280.0);
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let tmp_path = tmp_dir.join("melange_codegen_test_grid_off_pentode.rs");
     {
         let mut f = std::fs::File::create(&tmp_path).unwrap();
@@ -6296,7 +6303,7 @@ fn test_mosfet_codegen_compiles_and_runs() {
         result.code
     );
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let src_path = tmp_dir.join("melange_mosfet_run_test.rs");
     let bin_path = tmp_dir.join("melange_mosfet_run_test");
     {
@@ -6398,7 +6405,7 @@ VCC vcc 0 DC 12
         result.code
     );
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let src_path = tmp_dir.join("melange_pmos_run_test.rs");
     let bin_path = tmp_dir.join("melange_pmos_run_test");
     {
@@ -6516,7 +6523,7 @@ C2 out 0 100n
         code
     );
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let src_path = tmp_dir.join("melange_multi_output_test.rs");
     let bin_path = tmp_dir.join("melange_multi_output_test");
     {
@@ -6698,7 +6705,7 @@ fn test_vccs_codegen_compiles_and_runs() {
         result.code
     );
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let src_path = tmp_dir.join("melange_vccs_run_test.rs");
     let bin_path = tmp_dir.join("melange_vccs_run_test");
     {
@@ -6776,7 +6783,7 @@ fn test_vcvs_codegen_compiles_and_runs() {
         result.code
     );
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let src_path = tmp_dir.join("melange_vcvs_run_test.rs");
     let bin_path = tmp_dir.join("melange_vcvs_run_test");
     {
@@ -6860,7 +6867,7 @@ fn test_vccs_with_diode_codegen_compiles_and_runs() {
         result.code
     );
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let src_path = tmp_dir.join("melange_vccs_diode_run_test.rs");
     let bin_path = tmp_dir.join("melange_vccs_diode_run_test");
     {
@@ -7328,7 +7335,7 @@ fn test_runtime_device_params_compile_and_run_diode() {
         result.code
     );
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let src_path = tmp_dir.join("melange_runtime_params_diode_test.rs");
     let bin_path = tmp_dir.join("melange_runtime_params_diode_test");
     {
@@ -7438,7 +7445,7 @@ Rload out 0 100k
         result.code
     );
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let src_path = tmp_dir.join("melange_runtime_params_bjt_test.rs");
     let bin_path = tmp_dir.join("melange_runtime_params_bjt_test");
     {
@@ -7524,7 +7531,7 @@ fn test_vca_codegen_compiles_and_runs() {
         result.code
     );
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let src_path = tmp_dir.join("melange_vca_run_test.rs");
     let bin_path = tmp_dir.join("melange_vca_run_test");
     {
@@ -8452,7 +8459,7 @@ fn noise_nodal_generated_code_compiles() {
     };
     let code = generate_nodal_code_with_config(RC_CIRCUIT_SPICE, config);
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let pid = std::process::id();
     let src = tmp_dir.join(format!("noise_nodal_compiles_{}.rs", pid));
     let rlib = tmp_dir.join(format!("noise_nodal_compiles_{}.rlib", pid));
@@ -8875,7 +8882,7 @@ fn noise_full_r_flicker_generated_code_compiles() {
     };
     let code = generate_code_with_config(R_FLICKER_SPICE, config);
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let pid = std::process::id();
     let src = tmp_dir.join(format!("noise_r_flicker_compiles_{}.rs", pid));
     let rlib = tmp_dir.join(format!("noise_r_flicker_compiles_{}.rlib", pid));
@@ -9126,31 +9133,24 @@ Vdd vdd 0 DC 12
     assert!((vt0 - 1.0).abs() / 1.0 <= 0.05, "VT within tol");
 }
 
-/// Passive linear LC circuits (M=0) must NOT get auto-promoted to backward
-/// Euler, regardless of spectral radius measured on `S·A_neg`. Bilinear
-/// trap discretization preserves unit-circle poles for imaginary eigenvalues
-/// (passive LC is always marginally stable in the continuous-time domain);
-/// any `rho > 1` from the power iteration is LU round-off, not physical
-/// stiffness. Promoting to BE over-damps the resonance peak — this is what
-/// killed the MM-cartridge ~10 kHz bump at fs ∈ {88.2k, 96k, 150k, 300k,
-/// 384k} before the `m > 0` gate landed in codegen::ir::CircuitIR::new.
+/// A passive linear LC network (M=0) stays trapezoidal: the ring predicate
+/// (`codegen::ring`) finds no Nyquist-side ring in it to promote on, and
+/// backward Euler would over-damp the resonance (the ~10 kHz bump of a
+/// moving-magnet cartridge into its cable capacitance).
 ///
-/// The guard: at 96 kHz host rate, the generated code for a passive LC
-/// cartridge must emit ALPHA = 2·fs (trap, 192e3) rather than ALPHA = fs
-/// (backward Euler, 96e3). Fails immediately if anyone ever softens the
-/// `m > 0` gate or drops the Nyquist exclusion.
+/// The guard: at a 96 kHz host rate, the generated code for the cartridge
+/// emits ALPHA = 2·fs (trapezoidal, 192e3), not ALPHA = fs (backward Euler,
+/// 96e3).
 #[test]
-fn test_passive_lc_no_auto_be_promotion() {
+fn test_passive_lc_stays_trapezoidal_under_ring_predicate() {
     const SPICE: &str = "\
-MM Cartridge (Shure M97xE)
+MM Cartridge
 L_coil   in        coil_out  500m
 R_coil   coil_out  out       660
 C_cable  out       0         200p
 R_load   out       0         47k
 .end
 ";
-    // fs=96k was the broken rate: power iteration measured rho ≈ 1.017 on
-    // the DK Schur kernel's S·A_neg, tripping the auto-BE gate.
     let config = CodegenConfig {
         circuit_name: "passive_lc_no_be".to_string(),
         sample_rate: 96_000.0,
@@ -9165,8 +9165,8 @@ R_load   out       0         47k
     let be_alpha = fs;
     assert!(
         (alpha - trap_alpha).abs() < 1.0,
-        "passive LC at fs=96 kHz was auto-promoted to backward Euler (ALPHA={alpha:.1}, expected trap ALPHA={trap_alpha:.1}, BE ALPHA={be_alpha:.1}).\n\
-         Check codegen::ir::CircuitIR::new auto_be gate — the `m > 0` guard must stay in place for passive LC resonance fidelity."
+        "passive LC at fs=96 kHz was promoted to backward Euler (ALPHA={alpha:.1}, expected trap ALPHA={trap_alpha:.1}, BE ALPHA={be_alpha:.1}).\n\
+         Check the ring predicate (codegen::ring): a passive LC resonance must stay trapezoidal."
     );
 }
 

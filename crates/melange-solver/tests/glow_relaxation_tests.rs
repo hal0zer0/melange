@@ -13,9 +13,6 @@
 //!    anti-alias validation (design review ruling on sub-sample edges — OS is the
 //!    anti-alias; output BLEP rejected; breakpoint re-solve deferred).
 
-use std::io::Write;
-use std::sync::atomic::{AtomicU32, Ordering};
-
 mod support;
 
 use melange_solver::codegen::{CodegenConfig, SubsampleFireMode};
@@ -40,8 +37,6 @@ Rin in 0 1G
 "
     )
 }
-
-static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// A test config for a glow deck: input `in`, output the reservoir `osc`.
 fn glow_config(spice: &str, sample_rate: f64, name: &str) -> CodegenConfig {
@@ -79,45 +74,7 @@ fn generate_glow_code_os(spice: &str, sample_rate: f64, os: usize) -> String {
 }
 
 fn compile_and_run(code: &str, main_code: &str, tag: &str) -> String {
-    let tmp_dir = std::env::temp_dir();
-    let id = std::process::id();
-    let counter = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let src_path = tmp_dir.join(format!("melange_glow_{tag}_{id}_{counter}.rs"));
-    let bin_path = tmp_dir.join(format!("melange_glow_{tag}_{id}_{counter}"));
-
-    let full_code = format!("{code}\n\n{main_code}\n");
-    std::fs::File::create(&src_path)
-        .unwrap()
-        .write_all(full_code.as_bytes())
-        .unwrap();
-
-    let compile = std::process::Command::new("rustc")
-        .arg(&src_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .arg("--edition=2024")
-        .arg("-O")
-        .output()
-        .expect("rustc");
-    let _ = std::fs::remove_file(&src_path);
-    if !compile.status.success() {
-        let _ = std::fs::remove_file(&bin_path);
-        panic!(
-            "Compilation failed for {tag}:\n{}",
-            String::from_utf8_lossy(&compile.stderr)
-        );
-    }
-
-    let run = std::process::Command::new(&bin_path).output().expect("run");
-    let _ = std::fs::remove_file(&bin_path);
-    if !run.status.success() {
-        panic!(
-            "Binary failed for {tag}:\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&run.stdout),
-            String::from_utf8_lossy(&run.stderr)
-        );
-    }
-    String::from_utf8_lossy(&run.stdout).to_string()
+    support::compile_and_run(code, main_code, tag).stdout
 }
 
 fn parse_kv(output: &str, key: &str) -> f64 {
@@ -775,7 +732,7 @@ Rin in k 100k
 // VERDICT: the full-LU CONVERGENCE fix is DEFERRED behind phili (design review).
 // Section glows stay Schur-only in the interim and a compiler WARN says so; do
 // NOT force section decks onto Schur (routing is a conditioning decision —
-// forcing Schur on a positive-k deck reproduces the thread-296 failure). When
+// forcing Schur on a positive-k deck reproduces a known failure). When
 // scheduled, validate on the REAL rig at a real rate (read nr_max_iter_count +
 // the route line beside every number), NOT this synthetic deck.
 //

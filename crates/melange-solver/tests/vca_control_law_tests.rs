@@ -22,9 +22,6 @@
 
 mod support;
 
-use std::io::Write;
-use std::sync::atomic::{AtomicU32, Ordering};
-
 /// VCA isolation deck. `{MODE}` and `{VCTRL}` are substituted per run.
 /// Control voltage is applied directly to the VCA control node so V_ctrl equals
 /// the DC value exactly (the control input is ideal high-Z, drawing no current).
@@ -43,8 +40,6 @@ Rload out 0 47K
 .END
 ";
 
-static COUNTER: AtomicU32 = AtomicU32::new(0);
-
 fn build_deck(mode: u32, vctrl: f64) -> String {
     VCA_DECK_TEMPLATE
         .replace("{MODE}", &mode.to_string())
@@ -58,48 +53,7 @@ fn generate_nodal_code(spice: &str, sample_rate: f64) -> String {
 }
 
 fn compile_and_run(code: &str, main_code: &str, tag: &str) -> String {
-    let tmp_dir = std::env::temp_dir();
-    let id = std::process::id();
-    let counter = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let src_path = tmp_dir.join(format!("melange_vcactrl_{tag}_{id}_{counter}.rs"));
-    let bin_path = tmp_dir.join(format!("melange_vcactrl_{tag}_{id}_{counter}"));
-
-    let full_code = format!("{code}\n\n{main_code}\n");
-    {
-        let mut f = std::fs::File::create(&src_path).unwrap();
-        f.write_all(full_code.as_bytes()).unwrap();
-    }
-
-    let compile = std::process::Command::new("rustc")
-        .arg(&src_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .arg("--edition=2024")
-        .arg("-O")
-        .output()
-        .expect("rustc");
-
-    let _ = std::fs::remove_file(&src_path);
-
-    if !compile.status.success() {
-        let _ = std::fs::remove_file(&bin_path);
-        panic!(
-            "Compilation failed for {tag}:\n{}",
-            String::from_utf8_lossy(&compile.stderr)
-        );
-    }
-
-    let run = std::process::Command::new(&bin_path).output().expect("run");
-    let _ = std::fs::remove_file(&bin_path);
-    if !run.status.success() {
-        panic!(
-            "Binary failed for {tag}:\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&run.stdout),
-            String::from_utf8_lossy(&run.stderr)
-        );
-    }
-
-    String::from_utf8_lossy(&run.stdout).to_string()
+    support::compile_and_run(code, main_code, tag).stdout
 }
 
 fn parse_kv(output: &str, key: &str) -> f64 {

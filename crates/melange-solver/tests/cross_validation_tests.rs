@@ -102,7 +102,7 @@ fn compile_and_run_codegen_with_amplitude(
     amplitude: f64,
     tag: &str,
 ) -> Vec<f64> {
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let id = std::process::id();
     let src_path = tmp_dir.join(format!("melange_xval_{tag}_{id}.rs"));
     let bin_path = tmp_dir.join(format!("melange_xval_{tag}_{id}"));

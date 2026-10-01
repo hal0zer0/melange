@@ -13,7 +13,7 @@
 //! self-heating and drifted `IS` with junction temperature via `XTI`, while
 //! current gain stayed fixed — a transistor could heat up and its beta would not
 //! move. `XTB` appears on real vendor cards in the library (the TIP35C/TIP36C
-//! output pair in the Wurlitzer power amp among others) and was being discarded
+//! output pair in the electric-piano power amp among others) and was being discarded
 //! as an unrecognized parameter.
 
 mod support;

@@ -217,7 +217,7 @@ fn pinned_gain_opamp_inverting() {
 /// review-round-2). This gate cannot adjudicate correctness — it exists
 /// so a pentode calibration change is LOUD instead of silent. If it
 /// fires on an intended model fix, that fix must ship with the §7 impact
-/// list (el84/ac15/tweed/kt88-pp/plexi plugins) and, ideally, the
+/// list (the downstream pentode amp plugins) and, ideally, the
 /// still-missing independent pentode reference.
 #[test]
 fn pinned_gain_pentode_el84_head_tripwire() {

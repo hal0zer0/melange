@@ -126,7 +126,7 @@ C1 out 0 100n
     }\n";
     let full = format!("{}{}", code, main);
 
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join("melange_warmup_samples.rs");
     let bin = tmp.join("melange_warmup_samples");
     std::fs::File::create(&src)

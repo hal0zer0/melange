@@ -1,4 +1,4 @@
-//! Neve 1073 EQ section validation tests.
+//! Console-preamp EQ section validation tests (inductor HPF, coupled-inductor shelf).
 //!
 //! These tests verify the EQ circuit netlists through the full codegen pipeline:
 //! parse → MNA → codegen → compile → run → measure frequency response.
@@ -11,56 +11,11 @@
 
 mod support;
 
-use std::io::Write;
-
-static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
 // ── Helpers ──────────────────────────────────────────────────────────
 
 /// Compile and run generated code with a custom main, return stdout.
 fn compile_and_run(code: &str, main_code: &str, tag: &str) -> String {
-    let tmp_dir = std::env::temp_dir();
-    let id = std::process::id();
-    let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let src_path = tmp_dir.join(format!("melange_neve_{tag}_{id}_{counter}.rs"));
-    let bin_path = tmp_dir.join(format!("melange_neve_{tag}_{id}_{counter}"));
-
-    let full_code = format!("{code}\n\n{main_code}\n");
-    {
-        let mut f = std::fs::File::create(&src_path).unwrap();
-        f.write_all(full_code.as_bytes()).unwrap();
-    }
-
-    let compile = std::process::Command::new("rustc")
-        .arg(&src_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .arg("--edition=2024")
-        .arg("-O")
-        .output()
-        .expect("rustc");
-
-    let _ = std::fs::remove_file(&src_path);
-
-    if !compile.status.success() {
-        let _ = std::fs::remove_file(&bin_path);
-        panic!(
-            "Compilation failed for {tag}:\n{}",
-            String::from_utf8_lossy(&compile.stderr)
-        );
-    }
-
-    let run = std::process::Command::new(&bin_path).output().expect("run");
-    let _ = std::fs::remove_file(&bin_path);
-    if !run.status.success() {
-        panic!(
-            "Binary failed for {tag}:\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&run.stdout),
-            String::from_utf8_lossy(&run.stderr)
-        );
-    }
-
-    String::from_utf8_lossy(&run.stdout).to_string()
+    support::compile_and_run(code, main_code, tag).stdout
 }
 
 fn parse_kv(output: &str, key: &str) -> f64 {

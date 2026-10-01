@@ -25,7 +25,7 @@ fn assert_warning_free(code: &str, tag: &str) {
 }
 
 fn assert_warning_free_with(code: &str, main: &str, tag: &str) {
-    let dir = std::env::temp_dir();
+    let dir = support::scratch_dir();
     let id = format!("{tag}_{}", std::process::id());
     let src = dir.join(format!("melange_warn_{id}.rs"));
     let bin = dir.join(format!("melange_warn_{id}"));

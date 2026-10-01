@@ -127,7 +127,7 @@ fn flag_on_compiles_and_method_callable() {
     }\n";
     let full = format!("{}{}", code, main);
 
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join("melange_dc_op_recompute_flag_on.rs");
     let bin = tmp.join("melange_dc_op_recompute_flag_on");
     std::fs::File::create(&src)
@@ -263,7 +263,7 @@ fn flag_on_pot_compiles_and_runs_after_jitter() {
     }\n";
     let full = format!("{}{}", code, main);
 
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join("melange_dc_op_recompute_pot.rs");
     let bin = tmp.join("melange_dc_op_recompute_pot");
     std::fs::File::create(&src)
@@ -323,7 +323,7 @@ fn flag_on_switch_compiles_and_runs_at_each_position() {
     }\n";
     let full = format!("{}{}", code, main);
 
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join("melange_dc_op_recompute_switch.rs");
     let bin = tmp.join("melange_dc_op_recompute_switch");
     std::fs::File::create(&src)
@@ -530,7 +530,7 @@ fn e4_diode_flag_on_compiles_and_runs() {
     }\n";
     let full = format!("{}{}", code, main);
 
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join("melange_dc_op_recompute_e4_diode.rs");
     let bin = tmp.join("melange_dc_op_recompute_e4_diode");
     std::fs::File::create(&src)
@@ -617,7 +617,7 @@ fn e5_linear_converges_to_dc_op_at_nominal() {
     }\n";
 
     let full = format!("{}{}", code, main);
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join("melange_dc_op_recompute_e5_linear.rs");
     let bin = tmp.join("melange_dc_op_recompute_e5_linear");
     std::fs::File::create(&src)
@@ -694,7 +694,7 @@ fn e5_diode_converges_to_dc_op_at_nominal() {
     }\n";
 
     let full = format!("{}{}", code, main);
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join("melange_dc_op_recompute_e5_diode.rs");
     let bin = tmp.join("melange_dc_op_recompute_e5_diode");
     std::fs::File::create(&src)
@@ -780,7 +780,7 @@ fn e5_diode_vcc_converges_within_tolerance() {
     }\n";
 
     let full = format!("{}{}", code, main);
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join("melange_dc_op_recompute_e5_diode_vcc.rs");
     let bin = tmp.join("melange_dc_op_recompute_e5_diode_vcc");
     std::fs::File::create(&src)
@@ -860,7 +860,7 @@ fn e5_linear_moves_on_pot_jitter() {
     }\n";
 
     let full = format!("{}{}", code, main);
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join("melange_dc_op_recompute_e5_pot.rs");
     let bin = tmp.join("melange_dc_op_recompute_e5_pot");
     std::fs::File::create(&src)
@@ -917,7 +917,7 @@ fn e4_jfet_flag_on_compiles_and_runs() {
     }\n";
     let full = format!("{}{}", code, main);
 
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join("melange_dc_op_recompute_e4_jfet.rs");
     let bin = tmp.join("melange_dc_op_recompute_e4_jfet");
     std::fs::File::create(&src)
@@ -1001,7 +1001,7 @@ fn e6_dc_block_seeded_at_dc_output() {
     }\n";
 
     let full = format!("{}{}", code, main);
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join("melange_dc_op_recompute_e6_dc_block.rs");
     let bin = tmp.join("melange_dc_op_recompute_e6_dc_block");
     std::fs::File::create(&src)
@@ -1071,7 +1071,7 @@ fn e6_pot_resistance_prev_synced_after_recompute() {
     }\n";
 
     let full = format!("{}{}", code, main);
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join("melange_dc_op_recompute_e6_pot_prev.rs");
     let bin = tmp.join("melange_dc_op_recompute_e6_pot_prev");
     std::fs::File::create(&src)
@@ -1196,7 +1196,7 @@ fn e7_series_of_tubes_stage_converges_at_nominal() {
     }\n";
 
     let full = format!("{}{}", code, main);
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join("melange_dc_op_recompute_e7_sot_nominal.rs");
     let bin = tmp.join("melange_dc_op_recompute_e7_sot_nominal");
     std::fs::File::create(&src)
@@ -1289,7 +1289,7 @@ fn e7_series_of_tubes_stage_converges_under_pot_jitter() {
     }\n";
 
     let full = format!("{}{}", code, main);
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join("melange_dc_op_recompute_e7_sot_jitter.rs");
     let bin = tmp.join("melange_dc_op_recompute_e7_sot_jitter");
     std::fs::File::create(&src)
@@ -1329,14 +1329,14 @@ fn e7_series_of_tubes_stage_converges_under_pot_jitter() {
     );
 }
 
-/// TS808 (Tube Screamer) non-inverting clipping stage: op-amp VCCS + feedback
+/// Overdrive-pedal non-inverting clipping stage: op-amp VCCS + feedback
 /// antiparallel diodes + AC-coupled input/output + passive tone network.
 /// Different class of DK circuit from SoT — op-amp + 2× 1D diodes instead of
 /// 1× 2D triode, no voltage sources (linear supply modeled inside the VCCS).
 /// Adds coverage for diode-feedback clipping topology that tube-based tests
 /// don't exercise.
 const TS808_CLIPPING_NETLIST: &str = "\
-Tube Screamer TS808 clipping stage — Phase E.7 DK validation
+Overdrive op-amp clipping stage — Phase E.7 DK validation
 Cin in n1 0.047u
 R_pull n1 0 1Meg
 G1 0 n_clip n1 n_inv 2666.667
@@ -1354,7 +1354,7 @@ R_out out 0 1Meg
 .model D1N4148 D(IS=2.52e-9 RS=0.568 N=1.752)
 ";
 
-/// TS808 at its natural quiescent point (no input, no .pot — every parameter
+/// The clipping stage at its natural quiescent point (no input, no .pot — every parameter
 /// is baked): `recompute_dc_op` from a wrong `v_prev` must reach the compile-
 /// time `DC_OP` within tolerance. Exercises antiparallel feedback diodes and
 /// op-amp VCCS in the same DC network — a common pedal-clipping topology
@@ -1379,14 +1379,14 @@ fn e7_ts808_clipping_stage_converges_at_nominal() {
             let denom = after[i].abs().max(before[i].abs()).max(1.0);\n\
             let rel = (after[i] - before[i]).abs() / denom;\n\
             assert!(rel < 1e-6,\n\
-                \"TS808 node {} rel error too large: before={} after={} rel={}\",\n\
+                \"clipping-stage node {} rel error too large: before={} after={} rel={}\",\n\
                 i, before[i], after[i], rel);\n\
         }\n\
         println!(\"ok\");\n\
     }\n";
 
     let full = format!("{}{}", code, main);
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join("melange_dc_op_recompute_e7_ts808_nominal.rs");
     let bin = tmp.join("melange_dc_op_recompute_e7_ts808_nominal");
     std::fs::File::create(&src)
@@ -1534,7 +1534,7 @@ fn e8_nodal_flag_on_stub_compiles_and_is_callable() {
     }\n";
 
     let full = format!("{}{}", code, main);
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join("melange_dc_op_recompute_e8_nodal_stub.rs");
     let bin = tmp.join("melange_dc_op_recompute_e8_nodal_stub");
     std::fs::File::create(&src)
@@ -1577,7 +1577,7 @@ fn e8_nodal_flag_on_stub_compiles_and_is_callable() {
 // -----------------------------------------------------------------------------
 // settle_dc_op — recompute-with-warmup-fallback wrapper
 //
-// Oomox agent requested a melange-emitted helper that does:
+// A melange-emitted helper for plugin hosts that does:
 //   1. recompute_dc_op() first
 //   2. fall back to WARMUP_SAMPLES_RECOMMENDED silence on failure
 // so plugin host code doesn't have to reimplement the counter-watch pattern.
@@ -1653,7 +1653,7 @@ fn settle_dk_path_no_fallback_on_successful_recompute() {
     }\n";
 
     let full = format!("{}{}", code, main);
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join("melange_settle_dk_success.rs");
     let bin = tmp.join("melange_settle_dk_success");
     std::fs::File::create(&src)
@@ -1737,7 +1737,7 @@ fn settle_nodal_path_falls_back_to_warmup() {
     }\n";
 
     let full = format!("{}{}", code, main);
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join("melange_settle_nodal_fallback.rs");
     let bin = tmp.join("melange_settle_nodal_fallback");
     std::fs::File::create(&src)
@@ -1821,7 +1821,7 @@ fn compile_and_run(code: &str, main: &str, tag: &str) {
     use std::io::Write;
 
     let full = format!("{}{}", code, main);
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join(format!("melange_dc_op_recompute_{tag}.rs"));
     let bin = tmp.join(format!("melange_dc_op_recompute_{tag}"));
     std::fs::File::create(&src)

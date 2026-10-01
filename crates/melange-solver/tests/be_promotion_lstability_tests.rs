@@ -1,15 +1,12 @@
-//! Regression tests for the BE post-promotion diagnostic revision
-//! (2026-08-14, "Bug 2" of `memory/dk_backward_euler_ignored_trap_unstable.md`).
+//! Backward Euler after a promotion: the spectral radius it achieves.
 //!
-//! Before this fix, both the nodal and (newly added) DK post-BE-promotion
-//! checks asserted "BE is L-stable by construction; rho > 1 means the
-//! matrix builder has a stamping bug" unconditionally. That premise is only
-//! true for a circuit whose *linearization* is itself continuum-stable
-//! (every mode has `Re(lambda) <= 0`). A circuit that is genuinely unstable
-//! at its DC operating point — a regenerative oscillator sitting on an
-//! unstable bias point by design — has a real growing mode that NO
-//! consistent integrator, backward Euler included, can force to `rho <= 1`
-//! without falsifying the circuit's own physics.
+//! "BE is L-stable, so `rho > 1` after promotion means the matrix builder has
+//! a stamping bug" holds only for a circuit whose *linearization* is itself
+//! continuum-stable (every mode has `Re(lambda) <= 0`). A circuit that is
+//! genuinely unstable at its DC operating point — a regenerative oscillator
+//! sitting on an unstable bias point by design — has a real growing mode
+//! that NO consistent integrator, backward Euler included, can force to
+//! `rho <= 1` without falsifying the circuit's own physics.
 //!
 //! `dissipative_circuit_achieves_rho_below_one_under_be` pins the
 //! dissipative side: a stiff diode-clamped node (1 kOhm into 10 pF) that the

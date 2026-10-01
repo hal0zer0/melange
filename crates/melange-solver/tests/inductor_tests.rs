@@ -13,23 +13,15 @@
 
 mod support;
 
-use melange_solver::dk::DkKernel;
-use melange_solver::mna::MnaSystem;
-use melange_solver::parser::Netlist;
 use std::io::Write;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// The raw MNA and companion-model DK kernel (the runtime `LinearSolver`'s
-/// form), for the MNA- and kernel-level tests.
-fn build_pipeline(spice: &str) -> (Netlist, MnaSystem, DkKernel) {
-    let netlist = Netlist::parse(spice).expect("failed to parse netlist");
-    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("failed to build DK kernel");
-    (netlist, mna, kernel)
-}
+// The raw MNA and companion-model DK kernel (the runtime `LinearSolver`'s
+// form), for the MNA- and kernel-level tests.
+use support::build_pipeline;
 
 /// The shipped build of `spice` (inductors as augmented branch rows).
 fn generate_code(spice: &str) -> String {
@@ -43,7 +35,7 @@ fn assert_compiles(code: &str, label: &str) {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let src = tmp_dir.join(format!("melange_ind_test_{}.rs", id));
     let lib = tmp_dir.join(format!("melange_ind_test_{}.rlib", id));
 

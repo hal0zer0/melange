@@ -112,7 +112,7 @@ fn generate_nodal(spice: &str, rail_mode: OpampRailMode) -> String {
 }
 
 fn compile_and_run(code: &str, main_code: &str, tag: &str) -> String {
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let id = std::process::id();
     let counter = COUNTER.fetch_add(1, Ordering::SeqCst);
     let src_path = tmp_dir.join(format!("melange_railmode_{tag}_{id}_{counter}.rs"));
@@ -197,7 +197,7 @@ const UNBOUNDED_FLOOR: f64 = 20.0;
 // ─── Fix 1 + 2: full-LU NR path ─────────────────────────────────────
 
 /// None mode on the full-LU NR path: raw output exceeds the rails (the
-/// Klon-style raw diagnostic). Before the fix, the per-iteration clamps ran
+/// raw diagnostic). Before the fix, the per-iteration clamps ran
 /// in ALL modes and silently bounded this at ±12 V.
 #[test]
 fn full_lu_nr_none_mode_output_is_unbounded() {

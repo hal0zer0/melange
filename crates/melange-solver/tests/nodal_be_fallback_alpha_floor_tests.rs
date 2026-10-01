@@ -1,5 +1,5 @@
 //! Regression test for the nodal full-LU BE-fallback alpha-floor bug
-//! (2026-08-03, dr-debuggenshmirtz investigation).
+//! (2026-08-03).
 //!
 //! ## The bug
 //!
@@ -48,15 +48,14 @@
 //! and `diag_nr_max_iter_count`/`diag_be_fallback_count` both dropped by
 //! 10-70x (bad state no longer cascades into subsequent samples' NR).
 //!
-//! A *library-level* repro is not possible: `.linearize` reduction requires
-//! the CLI's `apply_linearize_reductions` DC-OP preflight
-//! (`tools/melange-cli/src/main.rs`), not exposed to library tests, and the
+//! The blowup needs the `.linearize`d topology: the `.linearize` reduction is
+//! the DC-OP preflight `pipeline::apply_linearize_reductions`
+//! (`crates/melange-solver/src/pipeline.rs`, run by `build::build`), and the
 //! un-linearized M=16 variant doesn't converge at all in melange (Q9's
 //! full-nonlinear Vbe-multiplier topology is why it was linearized). Simpler
 //! nodal circuits don't ill-condition the crossover the same way, so they stay
 //! bounded with or without the floor (a false guard). The behavioral test below
-//! therefore drives the real circuit through the built `melange` binary, where
-//! the CLI does the linearize.
+//! drives the real circuit through the built `melange` binary.
 //!
 //! ## The fix
 //!
@@ -146,8 +145,9 @@ fn test_nodal_full_lu_node_damping_has_no_ratio_floor() {
 /// BJT common-emitter, even hammered far past clipping) does not ill-condition
 /// its Newton Jacobian the way the wurli-power-amp class-AB crossover does, so
 /// it stays bounded with OR without the floor — a false guard. The blowup needs
-/// the exact M=14 topology, which requires the CLI-only `.linearize` DC-OP
-/// preflight (`tools/melange-cli/src/main.rs`). So this drives the actual circuit
+/// the exact M=14 topology, which the `.linearize` DC-OP preflight produces
+/// (`pipeline::apply_linearize_reductions`, `crates/melange-solver/src/pipeline.rs`,
+/// run by `build::build`). This drives the actual circuit
 /// through the built `melange` binary and asserts the internal peak stays
 /// physical (`max_abs_v_prev`). It genuinely fails pre-fix (internal peak
 /// ~16-28 kV) and passes post-fix (~32 V, at the ±22.5 V rails).
@@ -175,7 +175,7 @@ fn test_wurli_power_amp_internal_peak_stays_physical() {
             panic!("melange binary not found under {target:?} — run `cargo build -p melange-cli`")
         });
 
-    let dir = std::env::temp_dir();
+    let dir = support::scratch_dir();
     let cir = dir.join(format!("wpa_regress_{}.cir", std::process::id()));
     let wav = dir.join(format!("wpa_regress_{}.wav", std::process::id()));
     std::fs::write(&cir, WPA).expect("write netlist");

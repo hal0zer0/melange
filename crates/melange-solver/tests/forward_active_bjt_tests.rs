@@ -131,7 +131,7 @@ fn assert_compiles(code: &str, label: &str) {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
 
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let src = tmp_dir.join(format!("melange_fa_test_{id}.rs"));
     let lib = tmp_dir.join(format!("melange_fa_test_{id}.rlib"));
 
@@ -166,7 +166,7 @@ fn compile_and_run(
     amplitude: f64,
     tag: &str,
 ) -> Vec<f64> {
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let pid = std::process::id();
     let src_path = tmp_dir.join(format!("melange_fa_run_{tag}_{pid}.rs"));
     let bin_path = tmp_dir.join(format!("melange_fa_run_{tag}_{pid}"));
@@ -761,7 +761,6 @@ fn test_stamp_forward_active_single_dimension() {
 
 /// Generated code for forward-active CE amp should compile.
 #[test]
-#[ignore] // requires rustc
 fn test_codegen_forward_active_compiles() {
     let (code, m, fa) = generate_with_forward_active(CE_FORWARD_ACTIVE);
 
@@ -844,7 +843,6 @@ fn test_codegen_forward_active_exp_be_only() {
 
 /// Forward-active codegen compiles and produces non-zero output.
 #[test]
-#[ignore] // requires rustc compilation and execution
 fn test_codegen_forward_active_produces_output() {
     let (code, m, fa) = generate_with_forward_active(CE_FORWARD_ACTIVE);
     assert!(fa.contains("Q1"));

@@ -26,7 +26,7 @@ fn generate_nodal(spice: &str, output: &str) -> String {
 /// Compile `code` (with an appended `main`), run it, return stdout.
 fn compile_and_run(code: &str, main: &str, label: &str) -> String {
     let full = format!("{code}\n\n{main}");
-    let tmp = std::env::temp_dir();
+    let tmp = support::scratch_dir();
     let src = tmp.join(format!("melange_bsrc_{label}.rs"));
     let bin = tmp.join(format!("melange_bsrc_{label}"));
     std::fs::File::create(&src)

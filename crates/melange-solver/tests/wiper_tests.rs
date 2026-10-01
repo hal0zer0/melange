@@ -3,20 +3,13 @@
 mod support;
 
 use melange_solver::codegen::CodegenConfig;
-use melange_solver::dk::DkKernel;
-use melange_solver::mna::MnaSystem;
 use melange_solver::parser::Netlist;
 
 // ============================================================
 // Helpers
 // ============================================================
 
-fn build_pipeline(spice: &str) -> (Netlist, MnaSystem, DkKernel) {
-    let netlist = Netlist::parse(spice).expect("failed to parse netlist");
-    let mna = MnaSystem::from_netlist(&netlist).expect("failed to build MNA");
-    let kernel = DkKernel::from_mna(&mna, 44100.0).expect("failed to build DK kernel");
-    (netlist, mna, kernel)
-}
+use support::build_pipeline;
 
 fn default_config() -> CodegenConfig {
     CodegenConfig {

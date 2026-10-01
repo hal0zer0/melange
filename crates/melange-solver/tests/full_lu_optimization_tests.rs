@@ -8,8 +8,6 @@
 
 mod support;
 
-use std::io::Write;
-
 // ── Circuit definitions ──────────────────────────────────────────────
 
 /// Simple diode clipper (N=2, M=1) — routes to full LU via K ill-conditioned
@@ -71,51 +69,8 @@ fn generate_nodal_code(spice: &str, sample_rate: f64) -> String {
 /// Compile and run generated code with a custom main function.
 /// Returns stdout as string.
 fn compile_and_run(code: &str, main_code: &str, tag: &str) -> String {
-    let tmp_dir = std::env::temp_dir();
-    let id = std::process::id();
-    let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let src_path = tmp_dir.join(format!("melange_full_lu_{tag}_{id}_{counter}.rs"));
-    let bin_path = tmp_dir.join(format!("melange_full_lu_{tag}_{id}_{counter}"));
-
-    let full_code = format!("{code}\n\n{main_code}\n");
-    {
-        let mut f = std::fs::File::create(&src_path).unwrap();
-        f.write_all(full_code.as_bytes()).unwrap();
-    }
-
-    let compile = std::process::Command::new("rustc")
-        .arg(&src_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .arg("--edition=2024")
-        .arg("-O") // release mode for realistic perf
-        .output()
-        .expect("rustc");
-
-    let _ = std::fs::remove_file(&src_path);
-
-    if !compile.status.success() {
-        let _ = std::fs::remove_file(&bin_path);
-        panic!(
-            "Codegen compilation failed for {tag}:\n{}",
-            String::from_utf8_lossy(&compile.stderr)
-        );
-    }
-
-    let run = std::process::Command::new(&bin_path).output().expect("run");
-    let _ = std::fs::remove_file(&bin_path);
-    if !run.status.success() {
-        panic!(
-            "Codegen binary failed for {tag}:\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&run.stdout),
-            String::from_utf8_lossy(&run.stderr)
-        );
-    }
-
-    String::from_utf8_lossy(&run.stdout).to_string()
+    support::compile_and_run(code, main_code, tag).stdout
 }
-
-static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// Parse output lines as f64 values.
 fn parse_f64_lines(output: &str) -> Vec<f64> {

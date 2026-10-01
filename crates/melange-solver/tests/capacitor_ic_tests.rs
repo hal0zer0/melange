@@ -378,7 +378,7 @@ fn compiled_ic_circuit_compiles_dk_and_nodal() {
 //    was seeded from the IC-perturbed point. That KCL-inconsistent pair fed
 //    into the first trapezoidal step and NR quietly diverged tens to
 //    hundreds of samples later — reproduced on a cross-coupled-BJT astable
-//    (the "G10 divider" circuit) with peaks up to ~57,000 V on an 8 V rail.
+//    (the organ-divider circuit) with peaks up to ~57,000 V on an 8 V rail.
 //    The mismatch is not VCVS-specific — any circuit where the IC-seeded
 //    operating point differs materially from the plain one (which is the
 //    entire purpose of IC=) can trigger it once nonlinear devices are
@@ -568,7 +568,7 @@ fn codegen_dk_no_ic_omits_dc_nl_i_ic_seed() {
 // ---------------------------------------------------------------------------
 // 6. End-to-end: the reported blowup circuit stays bounded.
 //
-// A cross-coupled-BJT astable ("G10 divider") kicked off its degenerate
+// A cross-coupled-BJT astable (an organ divider) kicked off its degenerate
 // symmetric fixed point by an IC=-bearing capacitor, with a VCVS driving
 // the trigger input. Before the fix: peak ~5053 V (this exact netlist) /
 // ~48000 V (VCVS-free variant) on an 8 V rail. After the fix: bounded,
@@ -578,7 +578,7 @@ fn codegen_dk_no_ic_omits_dc_nl_i_ic_seed() {
 /// Reported repro (melange-circuits): two cross-coupled PNP stages, a VCVS
 /// driving the trigger network, IC=-4 on the cross-coupling cap C_x1.
 const ASTABLE_IC_AND_E: &str = "\
-G10 divider lab v3 (internal PULSE drive)
+Organ divider lab v3 (internal PULSE drive)
 Vrail rail 0 DC 8
 R_green green 0 2.7k
 E_amp drvsrc 0 in 0 8
@@ -603,7 +603,7 @@ R_bleed out green 100k
 /// node name for `config_for_spice` auto-detection) — isolates the IC=
 /// effect from the VCVS.
 const ASTABLE_IC_ONLY: &str = "\
-G10 divider lab v3 (no VCVS)
+Organ divider lab v3 (no VCVS)
 Vrail rail 0 DC 8
 R_green green 0 2.7k
 R_trig in trigmid 10k
@@ -626,7 +626,7 @@ R_bleed out green 100k
 /// Same topology with the VCVS, no IC= — the plain quiescent circuit
 /// (control for "does the VCVS alone cause the blowup").
 const ASTABLE_E_ONLY: &str = "\
-G10 divider lab v3 (no IC)
+Organ divider lab v3 (no IC)
 Vrail rail 0 DC 8
 R_green green 0 2.7k
 E_amp drvsrc 0 in 0 8
@@ -649,7 +649,7 @@ R_bleed out green 100k
 
 /// Neither VCVS nor IC= — plain control.
 const ASTABLE_NEITHER: &str = "\
-G10 divider lab v3 (neither)
+Organ divider lab v3 (neither)
 Vrail rail 0 DC 8
 R_green green 0 2.7k
 R_trig in trigmid 10k
@@ -669,8 +669,8 @@ R_bleed out green 100k
 .model SFT352 PNP(IS=3e-7 BF=90 VAF=50 RB=40 RC=4 RE=1 CJE=80p CJC=30p TF=1n)
 ";
 
-/// The rail is 8 V. This circuit is a genuine astable multivibrator (a
-/// "G10 divider") — the IC=-4V seed kicks it off its degenerate symmetric
+/// The rail is 8 V. This circuit is a genuine astable multivibrator (an
+/// organ divider) — the IC=-4V seed kicks it off its degenerate symmetric
 /// DC fixed point into real switching dynamics, not a settle back to a flat
 /// DC point. Once the DK per-iteration NR voltage-limiting floors were also
 /// fixed (`nr_helpers.rs::emit_nr_limit_and_converge`, see

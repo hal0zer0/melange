@@ -11,11 +11,10 @@ mod support;
 
 use melange_solver::codegen::ir::IntegratorSelection;
 
-/// Three 12AX7 stages cap-coupled (gain ~3800). Under the whole-system
-/// trapezoidal form an accepted-residual walk on the algebraic rows made a
-/// 28 mV fs/2 limit cycle at the output, and auto-BE suppressed it. The
-/// charge form has no such mode: the build stays trapezoidal and the output
-/// rests quietly.
+/// Three 12AX7 stages cap-coupled (gain ~3800). The charge form carries no
+/// accepted Newton residual forward on the algebraic rows, so there is no
+/// fs/2 limit cycle for the ring predicate to answer: the build stays
+/// trapezoidal and the output rests quietly.
 const CASCADE: &str = "Cap-coupled triode cascade\n\
 R_iso in g1 1Meg\nRg1 g1 0 1Meg\nT1 g1 p1 k1 12AX7\nRa1 vcc p1 100k\nRk1 k1 0 1.5k\n\
 Cint12 p1 g2 100n\nRg2 g2 0 1Meg\nT2 g2 p2 k2 12AX7\nRa2 vcc p2 100k\nRk2 k2 0 1.5k\n\

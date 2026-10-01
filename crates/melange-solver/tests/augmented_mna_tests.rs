@@ -9,7 +9,7 @@
 //! - Correct RL step response (shape and steady state)
 //! - Inductor branch currents are accessible and physically correct
 //! - Coupled inductor (transformer) energy transfer
-//! - Large inductor stability (130H, the Pultec regime)
+//! - Large inductor stability (130H, the passive tube-EQ regime)
 //! - System dimensions are correct for all inductor types
 //! - NR converges for linear circuits (no max-iter or NaN)
 //! - No-inductor circuits are unaffected (near-exact match between DK and nodal codegen)

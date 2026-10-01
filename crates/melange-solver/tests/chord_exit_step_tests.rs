@@ -14,8 +14,7 @@
 //! accepted chord steps through the swing. Measured under the charge form:
 //! 1.09 µA residual on the accepted samples with chord acceptance, 0.390 µA
 //! with the exit step, the same as the Schur sub-path, whose M-dimensional
-//! Newton refactors every iteration. (Under the whole-system trapezoidal form
-//! the capless row also carried each sample's residual forward: 3.48 µA.)
+//! Newton refactors every iteration.
 
 mod support;
 

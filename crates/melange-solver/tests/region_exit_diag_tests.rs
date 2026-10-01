@@ -205,7 +205,7 @@ fn assert_counter_plumbed(code: &str, label: &str) {
 /// Compile with rustc, drive a 1 kHz sine, return the final
 /// `diag_region_exit_count`.
 fn compile_and_count(code: &str, num_samples: usize, amplitude: f64, tag: &str) -> u64 {
-    let tmp_dir = std::env::temp_dir();
+    let tmp_dir = support::scratch_dir();
     let pid = std::process::id();
     let src_path = tmp_dir.join(format!("melange_region_exit_{tag}_{pid}.rs"));
     let bin_path = tmp_dir.join(format!("melange_region_exit_{tag}_{pid}"));
@@ -441,7 +441,6 @@ fn test_nodal_counter_emitted_for_pentode_and_bjt_absent_for_triode() {
 /// Grid driven through 0 V: the full 3D model AND the forced grid-off
 /// model both count the positive half-cycles.
 #[test]
-#[ignore] // requires rustc
 fn test_runtime_pentode_grid_conduction_counted_3d_and_grid_off() {
     let (code_3d, _) = generate_dk(&pentode_grid_driven(), "auto");
     let n3 = compile_and_count(&code_3d, 4800, 2.0, "pent3d");
@@ -466,7 +465,6 @@ fn test_runtime_pentode_grid_conduction_counted_3d_and_grid_off() {
 /// Pure-EM CE stage driven into saturation: the FA-reduced model reports
 /// the region it is wrong in.
 #[test]
-#[ignore] // requires rustc
 fn test_runtime_fa_bjt_saturation_counted() {
     let (code, mna) = generate_dk(CE_SATURATING, "auto");
     assert_eq!(mna.m, 1, "FA-reduced");
