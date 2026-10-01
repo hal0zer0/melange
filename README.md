@@ -424,6 +424,9 @@ Every subcommand has `--help`. The flags worth knowing about up front:
 | `--noise-seed <u64>` | compile/simulate/analyze | Master noise seed; `0` = entropy from the system clock, nonzero = deterministic |
 | `--pot "Name=Value"` | analyze/simulate | Set pot value (repeatable). Value is in ohms and must sit inside the range `melange nodes` prints; out-of-range values are refused |
 | `--switch "Name=Pos"` | analyze/simulate | Set switch position (repeatable) |
+| `--harmonics N` | analyze | Also measure H2..HN at each point. `thd_pct` sums the harmonics below 20 kHz (and below Nyquist), so it is `nan` for a point at or above 10 kHz; the `hN_dbc` columns run to Nyquist |
+| `--preroll-secs`, `--preroll-max-secs` | analyze | Each point is driven at its own frequency and level for at least `--preroll-secs` (default 0.25 s), then re-measured until two measurements agree within 0.1 %, for at most `--preroll-max-secs` (default 2 s; 0 = one measurement, no check). A point that does not settle is named in a warning. With `--noise` the check is off |
+| `--allow-nr-hold` | simulate/analyze | Report a render (`simulate`) or a sweep point (`analyze`) that contains samples the solver did not solve. Refused by default |
 | `--input-audio file.wav` | simulate | Use a WAV file instead of a test tone; the circuit is built at the file's sample rate |
 | `--no-ear-protection` | compile | Disable soft limiter (measurement only) |
 

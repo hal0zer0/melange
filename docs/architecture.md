@@ -123,6 +123,18 @@ The core. Depends on primitives and devices.
 - Const-generic matrix sizes, inlined NR, precomputed matrices as `const` arrays
 - Tera templates for device-specific codegen
 
+**Source layout** (`crates/melange-solver/src/`): `parser/` (netlist types,
+elements, directive and element parsers, subcircuit expansion, validation);
+`mna/` (the info types, stamping, augmented matrices, BJT internal nodes; the
+builder and its `from_netlist*` entry points in `mna/builder/`); `dk.rs`;
+`dc_op.rs`; `build.rs` and `pipeline.rs` (the one build every verb runs); and
+`codegen/`, with `ir/` split by build route and device class (`build_dk.rs`,
+`build_nodal.rs`, `reductions.rs`, `device_info.rs`, and the parameter
+resolvers `semiconductor_params.rs`, `tube_params.rs`, `aux_params.rs`,
+`model_card.rs`) and `rust_emitter/` (`dk_emitter.rs`, and `nodal_emitter/`
+split by concern: `schur.rs`, `full_lu.rs` / `full_lu_newton.rs`, `substep.rs`,
+`rail.rs`, `device_eval.rs`, `state.rs` and helpers).
+
 ### melange-validate (Layer 4)
 Depends on solver. Requires ngspice installed on the system.
 

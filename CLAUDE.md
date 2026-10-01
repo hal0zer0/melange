@@ -119,7 +119,7 @@ Audio input = voltage source with 1Ω series resistance:
 Too-high R_in (e.g. 10k) causes signal attenuation through coupling caps.
 
 ### DC Voltage Sources (e.g. VCC)
-Augmented MNA: `VoltageSourceInfo.ext_idx` points to an extension row carrying the algebraic constraint `B^T · x = v_dc`. No conductance stamping. See `mna.rs` (`VoltageSourceInfo`) and `dc_op.rs` (`solve_dc_op`).
+Augmented MNA: `VoltageSourceInfo.ext_idx` points to an extension row carrying the algebraic constraint `B^T · x = v_dc`. No conductance stamping. See `mna/sources.rs` (`VoltageSourceInfo`) and `dc_op.rs` (`solve_dc_operating_point`).
 
 ### Real-Time Safety
 No alloc/locks/syscalls in audio processing. All buffers pre-allocated in solver constructors.

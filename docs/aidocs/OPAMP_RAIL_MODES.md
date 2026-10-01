@@ -27,7 +27,7 @@ heavy-clip convergence bug documented below.
 |---|---|---|
 | Op-amp output capacitor-coupled downstream (overdrive into a clipper, a compressor sidechain, a line stage) | `ActiveSet` | Pin at the rail and re-solve keeps the coupling cap's history consistent (see "A pin or release takes no backward-Euler sample", below) |
 | Op-amp outputs only DC-coupled downstream | `Hard` | A post-solve clamp has no cap history to corrupt |
-| `.model OA(GBW=…)` with no VCC/VEE/VSAT | a **clamped** mode (`Hard`/`ActiveSet` by coupling) | GBW triggers the ±13 V auto-default rails (`mna.rs`, priority VCC/VEE > VSAT > GBW-default), so the op-amp is NOT rail-free. Caveat: the default applies per side — a single-supply card like `OA(VCC=9 GBW=3MEG)` gets an asymmetric 9 V / −13 V clamp window, not 9 V / 0 V |
+| `.model OA(GBW=…)` with no VCC/VEE/VSAT | a **clamped** mode (`Hard`/`ActiveSet` by coupling) | GBW triggers the ±13 V auto-default rails (`resolve_opamp_swing`, `mna/opamp.rs`, priority VCC/VEE > VSAT > GBW-default), so the op-amp is NOT rail-free. Caveat: the default applies per side — a single-supply card like `OA(VCC=9 GBW=3MEG)` gets an asymmetric 9 V / −13 V clamp window, not 9 V / 0 V |
 | Truly infinite rails (no VCC, no VEE, no VSAT, **and no GBW**) | `None` | Linear VCCS, no clamping needed |
 
 The auto-detector is `codegen::ir::resolve_opamp_rail_mode` (`crates/melange-solver/src/codegen/ir/opamp_rail.rs`). It checks each clamped op-amp's output for a capacitor coupling into a node other than its own inverting input. `ActiveSetBe` and `BoyleDiodes` are explicit modes only. Whether the op-amp drives a nonlinear device through resistors (a sidechain) or only through the coupling cap does not change the choice.
@@ -116,10 +116,10 @@ When the rail mode resolves to `BoyleDiodes`, the build (`build::build`, before 
 
 The internal node therefore rests on the swing limit at 10× overdrive and moves about 60 mV per decade around it (the reference current's |limit| is floored at 1 V so a 0 V limit has a defined operating point). The output adds the buffer's `ROUT·I_load`, so Boyle's saturated sag is `ROUT·I_load` rather than the active-set modes' `R_SAG·I_load`: a documented difference of this explicit-only mode. Measured numbers for every mode are in DEVICE_MODELS.md "Output Swing Limits and Saturated Sag".
 
-The MNA dispatcher in `mna.rs:2871` auto-detects `_oa_int_{safe_name}` in `node_map` and stamps `Gm_int = AOL / R_BOYLE_INT_LOAD` and `Go_int = 1 / R_BOYLE_INT_LOAD` at the internal node row INSTEAD of the user's output node. The output buffer chain is purely linear and is built from the augmented netlist.
+The MNA dispatcher in `MnaBuilder::build` (`mna/builder/mod.rs`) auto-detects `_oa_int_{safe_name}` in `node_map` and stamps `Gm_int = AOL / R_BOYLE_INT_LOAD` and `Go_int = 1 / R_BOYLE_INT_LOAD` at the internal node row INSTEAD of the user's output node. The output buffer chain is purely linear and is built from the augmented netlist.
 
 ```
-R_BOYLE_INT_LOAD = 1.0e6     (mna.rs:374)
+R_BOYLE_INT_LOAD = 1.0e6     (mna/opamp.rs)
 Gm_int = AOL / 1e6 = 0.2 S   (for AOL = 200 000)
 Go_int = 1e-6 S
 ```
@@ -147,7 +147,7 @@ At heavy clip, `v_diff = v[vbias] - v[sum_out] ≈ -12 V`, so the VCCS sources `
 v[41] ≈ 2.4 A / 1e-6 S = 2.4 × 10⁶ V
 ```
 
-The chord LU produces a step of ~2.4 million volts, the global `damp_thresh = 10.0 V` step cap (`nodal_emitter.rs`, grep `damp_thresh`) clips it to ±10 V from the previous iterate, and the clipped step lands in a regime where the diode either far-forward-biases or stays off — producing the **apparent** "bistable" 7 V ↔ 17 V cycle that earlier sessions misdiagnosed as two chord-LU fixed points. There is one chord LU; its predicted step is wrong by 6 OOM; the damping cap masks the magnitude error as a 2-cycle.
+The chord LU produces a step of ~2.4 million volts, the global `damp_thresh = 10.0 V` step cap (`nodal_emitter/full_lu_newton.rs`, grep `damp_thresh`) clips it to ±10 V from the previous iterate, and the clipped step lands in a regime where the diode either far-forward-biases or stays off — producing the **apparent** "bistable" 7 V ↔ 17 V cycle that earlier sessions misdiagnosed as two chord-LU fixed points. There is one chord LU; its predicted step is wrong by 6 OOM; the damping cap masks the magnitude error as a 2-cycle.
 
 The fundamental problem: row 41's diagonal (`Go_int = 1e-6`) is too small relative to its off-diagonal sources (`Gm = 0.2 S`) for any chord LU to produce a sensible step when the catch diode is in the wrong linearization regime.
 
@@ -192,7 +192,7 @@ Step 3 used to be ONE linear solve with the unpinned solve's device currents fro
 
 The difference from plain ActiveSet is that every rail-engaged sample is solved on backward Euler, which damps high-frequency content in the cap-coupled output path. That was introduced for a Nyquist-rate ring on an overdrive whose output coupling cap follows a tone network. The ring was the whole-system trapezoidal form's `z = −1` walk on capless rows (`COMPANION_MODELS.md`), excited at the pin and release. Transition-BE removed it with one BE sample per event instead of BE across the whole plateau; the charge form does not carry that walk at all.
 
-Code: search `rust_emitter/nodal_emitter.rs` for `emit_nodal_active_set_resolve`.
+Code: `emit_nodal_active_set_resolve` in `rust_emitter/nodal_emitter/rail.rs`.
 
 ## How `ActiveSet` differs from `ActiveSetBe`
 
@@ -274,18 +274,17 @@ See `opamp_rail_clamp_bug.md` for the full history. This mode is kept in the enu
 
 ## Code references
 
-| File | Lines | What |
+| File | Where | What |
 |---|---|---|
-| `crates/melange-solver/src/codegen/mod.rs` | 84-128 | `OpampRailMode` enum, parser, Display |
+| `crates/melange-solver/src/codegen/mod.rs` | `OpampRailMode` | The enum, parser, Display |
 | `crates/melange-solver/src/codegen/ir/opamp_rail.rs` | `resolve_opamp_rail_mode` | Auto-detector |
-| `crates/melange-solver/src/codegen/ir/opamp_rail.rs` | — | `augment_netlist_with_boyle_diodes` (BoyleDiodes scaffolding; called by `build::build`) |
-| `crates/melange-solver/src/mna.rs` | 374 | `R_BOYLE_INT_LOAD = 1e6` (the R1 value) |
-| `crates/melange-solver/src/mna.rs` | 2847-2964 | Op-amp stamping dispatch (BoyleDiodes detection + non-Boyle linear path) |
-| `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs` | grep `trap_rail` | Trap-path mode dispatch (post-NR rail handling) |
-| `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs` | grep `be_rail` | BE-fallback mode dispatch |
-| `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs` | grep `residual_check` | Residual check (BoyleDiodes-gated) |
-| `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs` | grep `adaptive_refactor` | Adaptive refactor trigger (BoyleDiodes-gated) |
-| `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs` | grep `damp_thresh` | `damp_thresh = 10.0_f64.max(max_v * 0.05)` (the global step cap that masks BoyleDiodes overshoot) |
+| `crates/melange-solver/src/codegen/ir/opamp_rail.rs` | `augment_netlist_with_boyle_diodes` | BoyleDiodes scaffolding; called by `build::build` |
+| `crates/melange-solver/src/mna/opamp.rs` | `R_BOYLE_INT_LOAD` | `R_BOYLE_INT_LOAD = 1e6` (the R1 value); also `resolve_opamp_swing` |
+| `crates/melange-solver/src/mna/builder/mod.rs` | grep `_oa_int_` | Op-amp stamping dispatch (BoyleDiodes detection + non-Boyle linear path), inside `MnaBuilder::build` |
+| `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter/rail.rs` | `emit_nodal_active_set_resolve`, `emit_nodal_active_set_check`, `emit_nodal_m0_rail_handling` | Pin-and-resolve, the post-convergence rail check, and the M=0 dispatch |
+| `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter/schur.rs` | `emit_schur_rail_handling` | Schur post-NR mode dispatch (primary and BE instances) |
+| `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter/full_lu_newton.rs` | `emit_nodal_newton` | Full-LU: the `Hard`-only per-iteration clamp (`emit_hard_rail_clamp`, `stamps.rs`), the device residual check (every rail mode), the adaptive chord refactor (every rail mode), and the post-NR active-set check/resolve |
+| `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter/full_lu_newton.rs` | grep `damp_thresh` | `damp_thresh = 10.0_f64.max(max_v * 0.05)` (the global step cap that masks BoyleDiodes overshoot; the sub-step ladder in `substep.rs` applies the same cap) |
 
 ## Investigation history
 

@@ -17,7 +17,7 @@ any GP parameter (VAF, VAR, IKF, IKR) is finite.
 | `bjt_ic()` codegen template | `crates/melange-solver/templates/rust/device_bjt.rs.tera` |
 | `bjt_jacobian()` codegen template | `crates/melange-solver/templates/rust/device_bjt.rs.tera` |
 | DC OP integration (qb-aware solve) | `crates/melange-solver/src/dc_op.rs` |
-| Parameter resolution (`resolve_bjt_params`) | `crates/melange-solver/src/codegen/ir/mod.rs` |
+| Parameter resolution (`resolve_bjt_params`) | `crates/melange-solver/src/codegen/ir/semiconductor_params.rs` |
 
 Line numbers omitted intentionally — they drift with every refactor. Grep
 the symbol name (`BjtParams`, `is_gummel_poon`, `bjt_qb`, etc.) to locate

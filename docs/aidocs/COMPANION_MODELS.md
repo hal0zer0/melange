@@ -144,7 +144,8 @@ sources) carries none, because its RHS never reads it.
 The `IC=` seed exists because the IC solve holds each `IC=` capacitor with a
 voltage source, so the start point is not at rest: that source's current
 is the capacitor's current at `t = 0`, and `Q_DOT_IC_SEED` is KCL evaluated
-there (`CircuitIR::q_dot_ic_seed`, `crates/melange-solver/src/codegen/ir/mod.rs`).
+there (`CircuitIR::q_dot_ic_seed`, computed in `build_dk` / `build_nodal`,
+`crates/melange-solver/src/codegen/ir/build_dk.rs` and `build_nodal.rs`).
 
 **Saturating inductor branch rows.** The charge on a branch row is the flux
 `Φ(i)`, not `L0·i`. The history swap `alpha·L0·i_n → alpha·Φ(i_n)` applies to

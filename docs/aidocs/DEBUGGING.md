@@ -307,7 +307,8 @@ op-amp is **not** DC-railed. In melange with VSAT=11 it *is* DC-railed at
 This change lives in `melange-circuits/unstable/dynamics/4kbuscomp.cir` and
 as of 2026-04-17 is uncommitted in the working tree of that repo.
 
-**Solver-side (general hardening)**: the residual check in `nodal_emitter.rs`
+**Solver-side (general hardening)**: the residual check in the full-LU Newton
+(`emit_nodal_newton`, `codegen/rust_emitter/nodal_emitter/full_lu_newton.rs`)
 shipped in `c3d3eae` — see "Residual check" below. This is load-bearing for
 any topology where an op-amp gets DC-railed regardless of VSAT correctness.
 
@@ -321,8 +322,9 @@ netlist-side VSAT=13.5 fix combined, 4kbuscomp is stable at `d = 5 s` across
 ### Mechanism (when the op-amp really is DC-railed)
 
 1. Generated NR emits `if v_new[n_out] < -VSAT { v_new[n_out] = -VSAT }` after
-   every LU back-solve (`nodal_emitter.rs`, "Per-iteration op-amp output rail
-   clamp"). This is ALWAYS emitted in the trap path, regardless of rail mode.
+   every LU back-solve (`nodal_emitter/full_lu_newton.rs`, "Per-iteration op-amp
+   output rail clamp"). At the time this was emitted in the trap path regardless
+   of rail mode; it is now emitted in `Hard` mode only.
 2. With `v[rect_a_out]` pinned at exactly `-VSAT`, a forward-biased feedback
    diode (e.g. 4kbuscomp D2, anode=rect_a_out, cathode=jct_b) sees
    `V_d = -VSAT − v[jct_b]`. If the physical operating point of the cathode
@@ -358,8 +360,10 @@ netlist-side VSAT=13.5 fix combined, 4kbuscomp is stable at `d = 5 s` across
 
 ### Residual check (shipped 2026-04-17 commit `c3d3eae`, load-bearing)
 
-The BoyleDiodes residual check in `nodal_emitter.rs` is extended to
-`BoyleDiodes | ActiveSetBe | ActiveSet`. After the damped NR step,
+The BoyleDiodes residual check in the full-LU Newton was extended to
+`BoyleDiodes | ActiveSetBe | ActiveSet` (it is now emitted on every full-LU
+build with M > 0, whatever the rail mode, as DK's always was; `emit_nodal_newton`,
+`nodal_emitter/full_lu_newton.rs`). After the damped NR step,
 re-evaluate `i_nl_fresh` from device equations at post-step `v` and set
 `max_step_exceeded = true` if any device current differs from the chord's
 `i_nl` by more than `1e-3 · max(|fresh|, |chord|, 1e-9) + 1e-12`.

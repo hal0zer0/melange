@@ -51,7 +51,9 @@ Two flags, accepted on `melange compile`, `melange simulate`, and
 ```
 
 For a plugin, `--noise` on `compile` is the one that matters. `simulate --noise`
-is handy for auditioning the floor to a WAV before you build.
+is handy for auditioning the floor to a WAV before you build. `analyze --noise`
+turns off its per-point steady-state check (noisy windows never agree), so
+each point gets the fixed `--preroll-secs` only.
 
 | Mode | Mechanisms emitted |
 |------|--------------------|

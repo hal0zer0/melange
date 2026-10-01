@@ -1009,7 +1009,7 @@ had. `simulate` and `validate` print it (`region_exit_count`). It is not
 a guard; nothing switches on it.
 
 **BJT forward-active: the region is assumed, not enforced (open).**
-`detect_forward_active_bjts` (`ir/mod.rs`) classifies each BJT from the
+`detect_forward_active_bjts` (`codegen/ir/reductions.rs`) classifies each BJT from the
 quiescent bias; nothing rechecks it per sample. The dropped term is
 `exp(Vbc/Vt)` — about 2e-17 at Vbc = −1 V, so "exact" is fair while Vbc
 stays reverse. **Saturation is where it stops being true**: the reduced

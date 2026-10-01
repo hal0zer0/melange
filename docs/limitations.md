@@ -38,7 +38,7 @@ Melange supports the following SPICE elements:
 | O | LDR / photoresistor | `CdsLdr` model, `.model NAME LDR()` |
 | N | Glow discharge / neon lamp | **EXPERIMENTAL.** `.model NAME NEON(...)`; the `N` letter and the `NEON` model type are provisional and may change |
 | B | Behavioral source | `V={expr}` / `I={expr}`, nodal path only -- see below |
-| X | Subcircuit instance | Recursive expansion, max nesting depth 8 (`MAX_NESTING_DEPTH` in `Netlist::expand_subcircuits`, `crates/melange-solver/src/parser.rs`) |
+| X | Subcircuit instance | Recursive expansion, max nesting depth 8 (`MAX_NESTING_DEPTH` in `Netlist::expand_subcircuits`, `crates/melange-solver/src/parser/subckt.rs`) |
 
 ### Missing Element Types [DEFERRED]
 
@@ -70,7 +70,7 @@ generated `// provenance:` header:
   (`"nodal_subpath":"full-lu"`). `--nodal-subpath schur` is refused outright,
   because the Schur reduction cannot express node-space stamping and forcing it
   would silently drop the nonlinearity (the `--nodal-subpath` override in
-  `emit_nodal`, `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs`).
+  `emit_nodal`, `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter/mod.rs`).
 - Integration is forced to **backward Euler**
   (`"integration_source":"behavioral"`), so a B-source circuit gives up
   second-order trapezoidal accuracy.
@@ -277,7 +277,7 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
 ### Glow Discharge / Neon (`N`) [EXPERIMENTAL]
 - `N1 anode cathode MODEL` + `.model MODEL NEON(VO VM IK RS IHOLD ROFF)`. The
   element letter and model type are explicitly provisional
-  (`Element::Glow` in `crates/melange-solver/src/parser.rs`)
+  (`Element::Glow` in `crates/melange-solver/src/parser/element.rs`)
 - `--subsample-fire {auto,on,off}` splits a firing sample at the crossing
   fraction so the strike instant is not quantised to the sample grid. It is a
   **nodal-Schur-only** feature: `on` is refused on the DK route and on the nodal
@@ -335,12 +335,14 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
 
 Newton-Raphson has a per-sample iteration budget (`--max-iter`; by default an
 auto-tuned value that scales with M, the solver route and the trapezoidal
-spectral radius; an explicit value pins it, except that nodal builds floor
-every budget at 100, and the generated file's `Build:` line shows the value
-the code runs). A sample that exhausts it is retried: on the nodal routes by
-a local sub-step ladder (down to T/2^12, at most 64 attempts), then, on a
-trapezoidal build, by a backward-Euler solve. A sample one of those retries
-solves is a converged solution by another consistent scheme; it is first-order
+spectral radius, raised to 100 on a nodal build; an explicit value pins it,
+and a nodal build refuses a pin below 100, because its Armijo-globalized
+Newton needs that headroom to cross a saturation knee within a sample; the
+generated file's `Build:` line and `-v` show the budget the code runs). A
+sample that exhausts it is retried: on the nodal routes by a local sub-step
+ladder (down to T/2^12, at most 64 attempts), then, on a trapezoidal build,
+by a backward-Euler solve. A sample one of those retries solves is a converged
+solution by another consistent scheme; it is first-order
 on that sample when backward Euler solved it, and the sub-step ladder has no
 truncation-error control.
 
@@ -349,8 +351,10 @@ state (or, where the final solve is an op-amp pin or the DK solve, the
 unconverged iterate), and counts it in `diag_unsolved_sample_count`. A held
 value is bounded and smooth, so the rendered audio cannot show it.
 `melange simulate`, `validate` and the golden harness **refuse** a render with
-any unsolved sample (`--allow-nr-hold` writes it anyway). A compiled plugin
-has no such gate: the counters are public fields on the generated state, and
+any unsolved sample, and `melange analyze` refuses each sweep point (and the
+zero-drive settle before the first) that has one, naming the point and the
+counter (`--allow-nr-hold` on `simulate` and `analyze` reports it anyway). A
+compiled plugin has no such gate: the counters are public fields on the generated state, and
 a plugin that does not check them will not notice.
 
 `simulate` also warns when more than 20 % of internal samples hit the
@@ -362,7 +366,8 @@ discrete step equations with every sample "solved" (see the astable section
 below). And on a free-running oscillator, a budget that starves Newton on some
 samples can shift its period with no unsolved sample (3.8 % flat at
 `--max-iter 70` against `--max-iter 1000` on a germanium-PNP divider astable,
-measured before the local sub-step ladder existed and not re-measured since).
+measured before the local sub-step ladder existed and not re-measured since; a
+nodal build refuses a pin below 100).
 Compare an oscillator's period at two budgets before trusting it.
 
 ### Conductance swaps (`.switch`, `.pot`, `.runtime R`)
@@ -527,7 +532,7 @@ structural row are hard requirements: `--solver dk` is **rejected**, not
 downgraded (`forced_dk_hard_blocker`, `crates/melange-solver/src/build.rs`).
 
 **Stage 2 -- nodal Schur vs nodal full LU**
-(`emit_nodal`, `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs`).
+(`emit_nodal`, `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter/mod.rs`).
 Nodal Schur costs O(N²+M³)/sample; full LU factors the whole augmented N×N system
 every NR iteration at O(N³)/sample. Full LU is selected when the circuit
 structurally requires it (saturating inductor, behavioral source) or on
@@ -717,6 +722,23 @@ Noise limitations:
   nonlinear touches the inputs, so the build refuses rather than emit a silently
   wrong plugin (`assemble`, `crates/melange-solver/src/build.rs`). The consequence is that the
   nonlinear-mixing case the feature exists for is currently unreachable
+
+### `melange analyze` measurement limits
+
+- **Steady state is judged by agreement, not proven.** Each point is re-measured
+  every `--preroll-secs` (default 0.25 s) until two measurements agree within
+  0.1 %. A time constant many times longer than that spacing can move less
+  than 0.1 % between two checks while still far from settled; for such a
+  circuit raise `--preroll-secs` (and `--preroll-max-secs`, default 2 s).
+- A circuit with no steady state at a point (a free-running oscillator, a
+  drive that keeps a rail moving) reaches the cap: the point is named in a
+  warning and its row is the last measurement. With `--noise` the check is
+  off and every point gets the fixed pre-roll only.
+- `thd_pct` is the audio-band figure: H2..HN below 20 kHz and below Nyquist,
+  `nan` when no harmonic is in that band. It is not an aliasing measurement,
+  and neither is `nyquist_dbc`, which sees only a component at exactly half
+  the sample rate (a limit-cycle signature). See
+  [OVERSAMPLING.md](OVERSAMPLING.md) for how to measure aliasing.
 
 ### Parser Hardening
 

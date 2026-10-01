@@ -147,7 +147,7 @@ Setter body is structurally identical to `set_pot_N` since the
 2026-04-20 reseed strip — the remaining difference is API shape (the
 field-named setter, a read-only `state.<field>()` accessor, no
 nih-plug knob). Emitted by both DK (`dk_emitter.rs`) and nodal
-(`nodal_emitter.rs`) paths; the plugin generator (`tools/melange-cli/src/cmd/compile.rs`)
+(`nodal_emitter/state.rs`) paths; the plugin generator (`tools/melange-cli/src/cmd/compile.rs`)
 filters runtime-R entries out of the plugin's pot parameters so no `FloatParam` is
 generated.
 
@@ -687,7 +687,7 @@ Diagnostics route through a `Reporter` callback rather than `println!`: the CLI
 passes `&|a| println!("{a}")`, library callers pass `pipeline::silent`.
 
 **Skipping `apply_linearize_reductions` changes which solver sub-path you get.**
-The `linearized_bypass` gate in `nodal_emitter.rs` is the only thing routing some
+The `linearized_bypass` gate in `emit_nodal` (`nodal_emitter/mod.rs`) is the only thing routing some
 circuits to full-LU; without a linearized device they get Schur NR instead.
 
 # Numerical-policy constants (`melange_solver::codegen::policy`)
@@ -710,6 +710,18 @@ Sites that *emit* the value as source text must interpolate it as a literal —
 generated code has no path to `crate::codegen::policy`. Use
 `dc_block_cutoff_hz_literal()`, which uses `Debug` formatting because that keeps
 the decimal point (`5.0`, not `5`).
+
+`NODAL_MAX_ITER_FLOOR = 100` is the least Newton budget a nodal build ships.
+The nodal Newton (Schur and full-LU) is globalized by an Armijo line search,
+which crosses a device's saturation knee in many short steps inside one sample,
+so a smaller budget can end a full-scale transient sample unsolved. It is a
+ceiling, not a target: a converging sample exits early and pays nothing. An
+auto-tuned nodal budget below it is raised to it
+(`CircuitIR::effective_max_iter`, which the emitted `MAX_ITER`, the provenance
+`Build:` line and the console all report); a `--max-iter` pin below it is
+refused (`refuse_max_iter_below_nodal_floor`, `build.rs`), on the nodal route
+and when an auto-routed DK build re-routes to nodal (a self-starting
+oscillator). DK has no floor.
 
 Still to enumerate: Armijo `c=1e-4`, `CHORD_REFACTOR=5`, the BE-latch thresholds,
 xoshiro salts, `STATE_MAX_PLAUSIBLE_MAGNITUDE=1e6`, and ~35 others.

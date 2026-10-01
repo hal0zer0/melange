@@ -9,7 +9,7 @@ codegen-emitted templates.
 > **Note on runtime removal.** The runtime `solver.rs:gauss_solve_inplace`,
 > `solve_md`, and `CircuitSolver` paths have been deleted. Live linear-algebra
 > code now lives in `dk.rs` (DK kernel inversion), `dc_op.rs` (DC OP LU),
-> `lu.rs` (sparse + chord LU for codegen), `mna.rs` (small-matrix utilities),
+> `lu.rs` (sparse + chord LU for codegen), `mna/helpers.rs` (small-matrix utilities),
 > and the `templates/rust/state.rs.tera` template (`invert_n` for runtime
 > sample-rate rebuilds).
 
@@ -17,7 +17,7 @@ codegen-emitted templates.
 
 ```
 SINGULARITY_THRESHOLD = 1e-15  (dk.rs, codegen)
-LU singularity pivot  = 1e-30  (dc_op.rs, mna.rs, state.rs.tera)
+LU singularity pivot  = 1e-30  (dc_op.rs, mna/helpers.rs, state.rs.tera)
 Condition warning     = 1e13   (dk.rs)
 ```
 
@@ -98,7 +98,7 @@ fall through to a "best guess" return at `SINGULARITY_THRESHOLD = 1e-15`.
 **When to use**: not callable directly — emitted automatically by the codegen
 based on the circuit's routing decision (`--solver auto|dk|nodal`).
 
-### 4. Gauss-Jordan Inversion — `mna.rs:invert_small_matrix()`
+### 4. Gauss-Jordan Inversion — `mna/helpers.rs:invert_small_matrix()`
 
 Small matrix inversion for multi-winding transformer inductance matrices.
 
@@ -164,7 +164,7 @@ For circuits routed to the nodal full-LU path (structural: saturating
 inductor or behavioral source; or by conditioning: K≈0, a positive K
 diagonal, ill-conditioned K or S, or an unstable Schur prediction — the
 whole-system `spectral_radius_s_aneg` above 1.002 on a well-conditioned K;
-see `emit_nodal` in `rust_emitter/nodal_emitter.rs`), the codegen emits a
+see `emit_nodal` in `rust_emitter/nodal_emitter/mod.rs`), the codegen emits a
 per-iteration N×N LU solve.
 Three optimizations stack to keep this real-time:
 
@@ -184,7 +184,8 @@ Three optimizations stack to keep this real-time:
    ~22973 dense (43× reduction). See `chord_method.md` in memory.
 
 Source: `crates/melange-solver/src/lu.rs` and the emit sites in
-`crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs`.
+`crates/melange-solver/src/codegen/rust_emitter/nodal_emitter/` (`lu.rs` for the
+emitted factor and back-solve, `full_lu_newton.rs` for the chord loop).
 
 ## Condition Number Estimation
 
@@ -225,6 +226,6 @@ flatten_matrix(M, r, c)    2D -> 1D row-major (index = row * cols + col)
 | DC OP LU decomposition (`dc_op.rs:lu_decompose`) | 1e-30 | None (try next strategy) |
 | Codegen NR Gauss elimination | 1e-15 | Return current best guess |
 | Sparse LU (codegen full-LU path) | 1e-15 | NaN reset, restore from DC OP |
-| Transformer inversion (`mna.rs:invert_small_matrix`) | 1e-30 | Identity matrix + warning |
+| Transformer inversion (`mna/helpers.rs:invert_small_matrix`) | 1e-30 | Error: a singular or non-finite inductance matrix is refused (`DkError::SingularMatrix` / `MnaError::TopologyError`) |
 | Codegen sample-rate rebuild (`state.rs.tera:invert_n`) | 1e-30 | Identity matrix + flag |
 | SM denominator | 1e-15 | scale = 0 (no correction) |

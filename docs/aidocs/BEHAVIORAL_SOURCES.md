@@ -275,13 +275,14 @@ Pure, self-contained, fully unit-tested (`cargo test -p melange-solver expr::`):
 
 ## Implemented: parsing + MNA representation
 
-- **Parser** (`parser.rs`): `Element::BSource { name, n_plus, n_minus, kind,
+- **Parser** (`parser/element.rs`, parsed in `parser/element_parse.rs`): `Element::BSource { name, n_plus, n_minus, kind,
   expr }` with `BSourceKind::{Voltage, Current}`. Dispatched on `'B'` from the
   **raw line** (the braced body contains spaces the whitespace splitter would
   shred); brace-matched expression capture. Node-reference validation checks
   the terminals *and* every `V()` node in the expression. Subcircuit expansion
   remaps expression identifiers via `Expr::remap_idents`.
-- **MNA** (`mna.rs`): `BehavioralSourceInfo { name, kind, n_plus/n_minus(+idx),
+- **MNA** (`BehavioralSourceInfo` in `mna/sources.rs`; `categorize_element` and
+  `collect_nodes` in `mna/builder/elements.rs`): `BehavioralSourceInfo { name, kind, n_plus/n_minus(+idx),
   referenced_node_indices: BTreeMap<name,idx>, expr (slots assigned),
   v_ext_idx: Option<usize> }`, stored on `MnaSystem.behavioral_sources`.
   `categorize_element` resolves node indices, assigns ddt/idt slots from the
@@ -309,7 +310,7 @@ without a `B` source are **byte-identical** to today's output (acceptance #4).
 - **Remaining**: force `SolverMode::Nodal` when `behavioral_sources` is
   non-empty, and remove the `CodeGenerator::generate` guard at that point.
 
-### 2. Augmented rows for `V={}` (`mna.rs` build)
+### 2. Augmented rows for `V={}` (`mna/builder/` build)
 - Add `num_behavioral_v = behavioral_sources.iter().filter(|b| b.v_ext_idx.is_some()).count()`
   to the `n_aug` computation. Each `V={}` source gets a branch-current row at
   `n_base + (existing aug count) + v_ext_idx`. Stamp the **linear** part of the
@@ -331,15 +332,16 @@ without a `B` source are **byte-identical** to today's output (acceptance #4).
   field, `.param` → a baked constant. Reuse the name tables the named-constant /
   pot emission already builds.
 
-### 4. Nodal NR stamping (`nodal_emitter.rs::emit_nodal_process_sample`)
+### 4. Nodal NR stamping (`nodal_emitter/full_lu.rs::emit_nodal_process_sample`)
 Inside the trapezoidal NR loop, alongside the device evaluation:
 - **`I={}`** — evaluate `i = expr.to_rust(resolver@v)`; residual:
   `rhs_work[n+] -= i; rhs_work[n-] += i` (companion form: subtract the frozen
-  `J·v` linearization to match the LU factor, mirroring the device `i_comp` at
-  ~`nodal_emitter.rs:5319`). Jacobian: for each referenced node `k`,
+  `J·v` linearization to match the LU factor, mirroring the device `i_comp`;
+  as built, `emit_behavioral_rhs` in `nodal_emitter/behavioral.rs`, called from
+  `emit_nodal_newton` in `full_lu_newton.rs`). Jacobian: for each referenced node `k`,
   `∂i/∂V(k) = expr.diff(Node(k)).simplify().to_rust(resolver@v)`, stamped into
   `chord_lu[n+][k] -= ∂i/∂V(k); chord_lu[n-][k] += ∂i/∂V(k)` in the
-  `need_refactor` block (~`nodal_emitter.rs:5260`). **Behavioral Jacobian
+  `need_refactor` block (as built, `emit_behavioral_jacobian`, same files). **Behavioral Jacobian
   entries are not frozen device blocks**, so either (a) force a refactor every
   iteration when behavioral sources are present, or (b) treat them with the
   same chord-companion correction as devices. Start with (a) for correctness;

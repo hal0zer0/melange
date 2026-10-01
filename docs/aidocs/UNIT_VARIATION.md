@@ -16,11 +16,11 @@ deck that carries them is still validatable — see
 
 | Directive    | Parser                                                                             | Apply site                                                      |
 |--------------|------------------------------------------------------------------------------------|-----------------------------------------------------------------|
-| `.seed`      | `parser.rs::parse_directive`                                                       | Stored on `Netlist::seed`                                       |
-| `.mismatch`  | `parser.rs::parse_mismatch_directive` → `MismatchSpec`                             | `codegen/ir/mod.rs::build_device_info_with_mna` via `apply_mismatch` |
-| `.tolerance` | `parser.rs::parse_tolerance_directive`                                             | `parser.rs::Netlist::apply_passive_tolerance` at end of parse    |
+| `.seed`      | `parser/directive_parse.rs::parse_directive`                                       | Stored on `Netlist::seed`                                       |
+| `.mismatch`  | `parser/directive_parse.rs::parse_mismatch_directive` → `MismatchSpec`             | `codegen/ir/device_info.rs::build_device_info_with_mna` via `apply_mismatch` |
+| `.tolerance` | `parser/directive_parse.rs::parse_tolerance_directive`                             | `parser/netlist.rs::Netlist::apply_passive_tolerance` at end of parse |
 
-Shared RNG: `parser.rs::deterministic_draw(seed, class_tag, name)` →
+Shared RNG: `parser/netlist.rs::deterministic_draw(seed, class_tag, name)` →
 FNV-64 → SplitMix64 finalizer → uniform `[-1, 1]`.
 
 ## `.seed` — RNG Master Seed
@@ -116,7 +116,7 @@ silently ignored (pass through as pure nominal).
 Classes: `R`, `C`, `L`. Tolerances are dimensionless fractions in
 `[0, 1)`. Applied once at the end of `Netlist::parse()` so MNA and
 everything downstream sees already-jittered values — no code in
-`mna.rs`, `dk.rs`, or `codegen/` needs to change.
+`mna/`, `dk.rs`, or `codegen/` needs to change.
 
 ### Skip Set
 
@@ -243,8 +243,8 @@ opposite sides of the pipeline:
 
 | Site | What the switch does |
 |------|----------------------|
-| `parser.rs::Netlist::apply_passive_tolerance` | early-returns, so `.tolerance` never scales an R/C/L |
-| `codegen/ir/mod.rs::CircuitIR::mismatch_tol_for` | returns `0.0`, which makes `apply_mismatch` a bit-identical pass-through |
+| `parser/netlist.rs::Netlist::apply_passive_tolerance` | early-returns, so `.tolerance` never scales an R/C/L |
+| `codegen/ir/device_info.rs::CircuitIR::mismatch_tol_for` | returns `0.0`, which makes `apply_mismatch` a bit-identical pass-through |
 
 Both read `Netlist::unit_variation_disabled`, set by
 `Netlist::parse_with_options(deck, ParseOptions { disable_unit_variation: true })`.
@@ -262,8 +262,8 @@ a reference engine *at the same component values*. Jitter changes values, not
 the solver. Whether the *draw itself* is right is a unit-test question ngspice
 cannot answer, and it is answered by:
 
-- `melange-solver/src/parser.rs::tests::tolerance_draw_matches_nominal_times_one_plus_tol_u`
-- `melange-solver/src/parser.rs::tests::deterministic_draw_matches_independent_reimplementation`
+- `melange-solver/src/parser/tests.rs::tolerance_draw_matches_nominal_times_one_plus_tol_u`
+- `melange-solver/src/parser/tests.rs::deterministic_draw_matches_independent_reimplementation`
 - `melange-solver/tests/codegen_verification_tests.rs::mismatch_draw_matches_nominal_times_one_plus_tol_u`
 
 Each asserts `applied = nominal · (1 + tol · u)` against a `u` derived from an
@@ -282,8 +282,8 @@ noise floors.
 The regression guard for "absent = byte-identical" is:
 
 - `crates/melange-solver/tests/codegen_verification_tests.rs::test_no_mismatch_is_byte_identical`
-- `crates/melange-solver/src/parser.rs::tests::test_tolerance_absent_is_no_op`
-- `crates/melange-solver/src/parser.rs::tests::test_mismatch_absent_is_no_op`
+- `crates/melange-solver/src/parser/tests.rs::test_tolerance_absent_is_no_op`
+- `crates/melange-solver/src/parser/tests.rs::test_mismatch_absent_is_no_op`
 
 If any of those start failing, the no-op path has drifted.
 

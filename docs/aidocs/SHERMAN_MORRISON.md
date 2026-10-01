@@ -25,8 +25,8 @@ A_neg, and S*N_i via the Sherman-Morrison formula at O(N^2) cost.
 | Component | File |
 |-----------|------|
 | `PotKernelData` struct (topology + range; the SM vectors are gone) | `crates/melange-solver/src/dk.rs` |
-| `PotInfo` struct | `crates/melange-solver/src/mna.rs` |
-| `PotDirective` parser struct | `crates/melange-solver/src/parser.rs` |
+| `PotInfo` struct | `crates/melange-solver/src/mna/dynamic.rs` |
+| `PotDirective` parser struct | `crates/melange-solver/src/parser/directives.rs` |
 | `PotentiometerIR` struct (topology + range) | `crates/melange-solver/src/codegen/ir/mod.rs` |
 | Per-block rebuild + sample-rate rebuild | `crates/melange-solver/templates/rust/state.rs.tera` |
 

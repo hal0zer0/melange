@@ -151,7 +151,9 @@ The 0.01 floor prevents pathological backward steps.
 
 Beyond the per-device alpha above, the nodal full-LU emitter applies a second,
 global limit on the maximum *node-voltage* change per NR iteration — in both the
-primary loop and the Backward Euler fallback (`nodal_emitter.rs`):
+primary loop and the Backward Euler fallback (`emit_nodal_newton`,
+`codegen/rust_emitter/nodal_emitter/full_lu_newton.rs`; the sub-step ladder in
+`substep.rs` applies the same cap):
 
 ```
 if max_node_dv > damp_thresh {          // damp_thresh = 10.0.max(0.05 * max_v)
@@ -168,8 +170,11 @@ so a pathological LU delta (observed 3.8e7 V at a device-state transition on
 wurli-power-amp) sailed past the ≤`damp_thresh` cap as a multi-kV jump and
 false-converged on a nonphysical operating point. Uncapped division bounds every
 iteration's worst-case node step at exactly `damp_thresh` regardless of the raw
-delta's magnitude. See DEBUGGING.md (2026-08-03) and
-`nodal_be_fallback_alpha_floor_tests.rs`. **Do not reintroduce a floor here** —
+delta's magnitude. See DEBUGGING_HISTORY.md (2026-08-03) and
+`nodal_be_fallback_alpha_floor_tests.rs`, whose code-string pin
+(`test_nodal_full_lu_node_damping_has_no_ratio_floor`) is the guard: its
+wurli-power-amp peak test is a physical-bound check that passes with the floor
+restored too, and no cheap behavioural witness of the floor is known. **Do not reintroduce a floor here** —
 if NR stalls, the fix is elsewhere (limiter/vcrit), not a bigger minimum step.
 
 ## DK Per-Sample Containment (not a Newton limit)

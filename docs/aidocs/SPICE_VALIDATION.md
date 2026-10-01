@@ -418,12 +418,32 @@ comparison, validate refuses the render when:
 `validate_refusal_tests.rs` has a witness for each of the three, including a
 real full-LU build forced to `MAX_ITER = 1` for the unsolved-sample case.
 
-## Thread Safety
+A THD comparison that cannot be measured fails with the reason rather than a
+NaN error (`thd_unmeasurable_failure`, `comparison.rs`): fewer than 64 compared
+samples, or a side with no fundamental, named as silent (RMS at or below 1 µV)
+or as having no tone between 20 Hz and 20 kHz (DC or out-of-band content only).
 
-When running validation tests concurrently:
-- Use unique temp file names per thread
-- Use `AtomicU64` counter for temp file naming
-- Avoid race conditions where tests overwrite each other's netlists
+## Temporary files and concurrency
+
+- **ngspice decks are never written to disk.** `spice_runner` builds each
+  rewritten deck (and its Thevenin-input variant) in memory and pipes it to
+  `ngspice -b` on stdin from a writer thread, so concurrent runs cannot collide
+  on a deck file and an interrupted run leaves nothing behind.
+- **The generated melange solver** is written and compiled in the system temp
+  directory as `melange_val_<pid>_<n>.rs` and its binary (a per-process atomic
+  counter keeps concurrent calls apart); a drop guard removes both on every
+  path, including a failed `rustc` spawn or a failed run.
+- **`melange validate` on a builtin, URL or source circuit** writes the deck to
+  a temporary netlist in `<temp>/melange-validate-netlists/`, removed when the
+  run ends; each run also removes that directory's netlists older than an hour,
+  which only a killed run leaves.
+- **Solver test binaries** (`crates/melange-solver/tests/support`) compile into
+  a per-process scratch directory, `<temp>/melange-test-<pid>/`, and delete
+  each source after compiling. A test binary has no exit hook, so on first use
+  each test process removes the scratch directories (and the older per-file
+  `melange_cached_*`-style leftovers) of processes that are no longer running;
+  what a run leaves behind is bounded by the processes still alive plus the
+  last one to finish. The sweep needs `/proc` (Linux); elsewhere it is a no-op.
 
 ## References
 - ngspice manual: https://ngspice.sourceforge.io/docs.html
@@ -453,12 +473,14 @@ build to a validation path.**
 
 Why it matters: each step can change the system that is solved. `.linearize`
 is the only thing routing some decks to full-LU (the `linearized_bypass` gate
-in `nodal_emitter.rs`); without it the emitter picks Schur NR, which on an
+in `emit_nodal`, `nodal_emitter/mod.rs`); without it the emitter picks Schur NR, which on an
 expanded-parasitic power-amp deck diverged at the first nonzero input sample
 (1319 % RMS against 0.246 % through the shipped build). A fixed `MAX_ITER`
 in place of `auto_tune_max_iter` cuts both ways: `auto_tune_max_iter` has no
-floor of 100, so a harness at 100 is stricter than the shipped build on stiff
-decks and more permissive on decks the tuner gives 50-70.
+floor of its own (the nodal route raises its result to 100,
+`NODAL_MAX_ITER_FLOOR`; DK ships it as tuned), so a harness at 100 is stricter
+than the shipped build on stiff decks and more permissive on DK decks the tuner
+gives 50-70.
 
 Provenance: before `6bc3ef1` (2026-09-02) validate skipped `.linearize`,
 `auto_tune_max_iter` and the gated expansion, and before 2026-09-03 it applied

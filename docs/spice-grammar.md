@@ -829,7 +829,7 @@ An unrecognized parameter on an `OA` card is a **hard error** raised during code
 
 #### Swing limits, and the op-amp that cannot clip
 
-`VCC`/`VEE` are the supply rails; the output stops a drop short of each. The two swing limits resolve independently (`resolve_opamp_swing` in `crates/melange-solver/src/mna.rs`), and every rail mode clamps, pins or catches at them:
+`VCC`/`VEE` are the supply rails; the output stops a drop short of each. The two swing limits resolve independently (`resolve_opamp_swing` in `crates/melange-solver/src/mna/opamp.rs`), and every rail mode clamps, pins or catches at them:
 
 ```
 upper limit:  VCC − VOH_DROP  |  +VSAT  |  +13.0 V if GBW is finite  |  none

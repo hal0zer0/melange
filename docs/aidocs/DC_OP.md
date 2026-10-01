@@ -445,7 +445,7 @@ Two phases:
    solver from any residual mismatch and pulls high-gain op-amp circuits into the
    physically correct basin of attraction.
 
-Emitted from `nodal_emitter.rs` (grep `warmup`). The DK path (`dk_emitter.rs`)
+Emitted from `codegen/rust_emitter/nodal_emitter/state.rs` (grep `warmup`). The DK path (`dk_emitter.rs`)
 only emits the standard 50-sample warmup (DK circuits have well-conditioned DC OP).
 
 ## Expected DC OP Values (Verification)

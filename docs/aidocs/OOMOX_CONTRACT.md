@@ -772,7 +772,7 @@ Two more campaign fix families — both mathematically **verified correct** in
 the round-2 audit — moved the baked `DC_OP` / `DC_NL_I` constants fleet-wide,
 and were not on the declared 4-item change list:
 
-1. **`.linearize` Norton companion constants** (`mna.rs`
+1. **`.linearize` Norton companion constants** (`mna/reduce.rs`
    `stamp_linearized_bjts` / `stamp_linearized_triodes`): DC injections
    changed from raw `±I0` to the proper Norton constant `I_lin(v0) − I0` per
    terminal; the old form left the `g·v0` term uncancelled (multi-mA KCL

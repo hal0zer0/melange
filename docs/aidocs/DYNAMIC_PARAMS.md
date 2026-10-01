@@ -9,10 +9,10 @@ DK kernel build.
 
 | Directive | Parser | MNA struct | Codegen IR |
 |-----------|--------|-----------|------------|
-| `.pot`    | `crates/melange-solver/src/parser.rs` (`parse_pot_directive`) | `PotInfo` in `mna.rs` | `PotentiometerIR` in `codegen/ir/mod.rs` |
-| `.wiper`  | `parser.rs` (`parse_wiper_directive`) | `WiperGroupInfo` in `mna.rs` | `WiperGroupIR` in `codegen/ir/mod.rs` |
-| `.gang`   | `parser.rs` (`parse_gang_directive`) | `GangGroupInfo` in `mna.rs` | `GangGroupIR` in `codegen/ir/mod.rs` |
-| `.switch` | `parser.rs` (`parse_switch_directive`) | `SwitchInfo` in `mna.rs` | (rebuilt at codegen time) |
+| `.pot`    | `crates/melange-solver/src/parser/directive_parse.rs` (`parse_pot_directive`) | `PotInfo` in `mna/dynamic.rs` | `PotentiometerIR` in `codegen/ir/mod.rs` |
+| `.wiper`  | `parser/directive_parse.rs` (`parse_wiper_directive`) | `WiperGroupInfo` in `mna/dynamic.rs` | `WiperGroupIR` in `codegen/ir/mod.rs` |
+| `.gang`   | `parser/directive_parse.rs` (`parse_gang_directive`) | `GangGroupInfo` in `mna/dynamic.rs` | `GangGroupIR` in `codegen/ir/mod.rs` |
+| `.switch` | `parser/directive_parse.rs` (`parse_switch_directive`) | `SwitchInfo` in `mna/dynamic.rs` | (rebuilt at codegen time) |
 
 Plugin generation: `tools/melange-cli/src/plugin_template.rs` emits one
 `FloatParam` per `.pot`, one `FloatParam` per `.wiper`, one `FloatParam`
@@ -68,7 +68,7 @@ On nodal circuits `recompute_dc_op()` is a stub today (Phase E handoff
 — body deferred); NR catches up on its own over roughly
 `WARMUP_SAMPLES_RECOMMENDED` samples. See `set_pot_N` emission in
 `rust_emitter/dk_emitter.rs` (DK Schur) and
-`rust_emitter/nodal_emitter.rs` (nodal paths).
+`rust_emitter/nodal_emitter/state.rs` (nodal paths).
 
 **Historical note.** A prior iteration of `set_pot_N` applied a warm
 DC-OP re-init when `|r - r_prev| / r_prev > 0.20` (Batch D Phase 2,

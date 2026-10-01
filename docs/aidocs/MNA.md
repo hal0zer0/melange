@@ -13,7 +13,9 @@ and the codegen pipeline.
 
 ## Source File
 
-All stamping in `crates/melange-solver/src/mna.rs`.
+All stamping in `crates/melange-solver/src/mna/`: the element stamps in
+`stamp.rs`, the builder (`MnaBuilder::build`, the `from_netlist*` entry points)
+in `builder/mod.rs`, element categorisation in `builder/elements.rs`.
 
 ## Matrices
 
@@ -83,7 +85,7 @@ This creates ill-conditioned A matrices (cond ~ 1e9+). See augmented MNA below.
 Every build uses augmented MNA for inductors (Ho et al. 1975; DK through
 `DkKernel::from_mna_augmented`): each inductor winding adds an extra variable (branch current j_L) with
 inductance L in the C matrix. Built by `MnaSystem::build_augmented_matrices` in
-`crates/melange-solver/src/mna.rs`.
+`crates/melange-solver/src/mna/augmented.rs`.
 
 ```
 For inductor between nodes i, j with inductance L, at augmented index k:
@@ -122,10 +124,10 @@ Inductor rows (n_aug..n_nodal) keep their values (they have real history).
 > Zeroing them discards real capacitor history; under the whole-system form it
 > made the DC OP not a trapezoidal fixed point and kicked the capacitor-less
 > collector row into a `z = −1` limit cycle. See
-> `MnaSystem::n_aug`'s doc comment (`mna.rs`), the `is_bjt_internal` mask, and
+> `MnaSystem::n_aug`'s doc comment (`mna/mod.rs`), the `is_bjt_internal` mask, and
 > the DEBUGGING.md failure-signature row for the 63× noise inflation this caused.
 > This page previously stated the blanket rule, which is how one implementation
-> came to do it; the spec was right in `mna.rs` and wrong here.
+> came to do it; the spec was right in the MNA source and wrong here.
 
 **DC OP**: The DC OP solver uses its own augmented inductor system with the same
 variable ordering. v_node from DC OP includes inductor DC branch currents at
@@ -321,7 +323,7 @@ N_i[emitter, idx+1]  = +1   (Ib injected into emitter)
 ```
 
 **Forward-active BJT variant** (`NonlinearDeviceType::BjtForwardActive` in
-`crates/melange-solver/src/mna.rs`): when DC OP detects strong forward bias,
+`crates/melange-solver/src/mna/devices.rs`): when DC OP detects strong forward bias,
 the BJT is given **dimension 1** instead of 2. Only the Vbe→Ic NR row is
 kept; Ib is computed algebraically from Ic via `Ib = Ic / β_F` after the NR
 converges. The Vbc junction is not in the NR system.
@@ -331,8 +333,9 @@ detects the BJT is in the forward-active linear region, it can be removed
 from the nonlinear system entirely. After DC OP, the small-signal `g_m`,
 `g_π`, and `r_o` are stamped into G as a four-terminal small-signal model,
 and the BJT is dropped from `nonlinear_devices`. M decreases by 2 per
-linearized BJT. Grep `linearized_bjts` and `LinearizedBjtInfo` in `mna.rs`
-for the dispatch.
+linearized BJT. `LinearizedBjtInfo` is in `mna/devices.rs` and the stamp
+(`stamp_linearized_bjts`) in `mna/reduce.rs`; grep `linearized_bjts` under
+`mna/` for the dispatch.
 
 ### JFET (2D: Id at idx, Ig at idx+1)
 

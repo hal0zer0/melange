@@ -4,8 +4,9 @@ Reference for melange's iron-core saturation: the flux law, the shared-core
 T-model, authoring (`ISAT=`, `LAIR=`/`CORE=`, datasheet ratings), how it is
 solved, what is refused, how it is checked, and what is open. Read it before
 touching `SaturatingInductorIR`, `saturating_core.rs` (the core split),
-`mna::isat_from_datasheet`, the shared-core build in `mna.rs`, or the
-`emit_sat_ind_*` stamps in `nodal_emitter.rs`.
+`mna::isat_from_datasheet` (`mna/magnetics.rs`), the shared-core build in
+`mna/builder/mod.rs`, or the `emit_sat_ind_*` stamps in
+`codegen/rust_emitter/nodal_emitter/sat_ind.rs`.
 
 User-facing: [spice-grammar.md](../spice-grammar.md) (the inductor keywords,
 what `ISAT` means, where each class of part's numbers come from) and
@@ -80,7 +81,7 @@ a loaded core that should stay linear, and misses the magnetizing current that
 actually saturates it.
 
 melange realizes a saturating two-winding group with no stated core as
-(`mna.rs`, the shared-core build):
+(`mna/builder/mod.rs`, the shared-core build):
 
 - per winding, a **linear leakage** inductor `(1 − k)·Lᵢ` from the winding's
   node to a new internal node;
@@ -162,7 +163,7 @@ bounded with no NaN or Newton starvation up to 8 V.
 A winding's air-core self-inductance splits into the fixed air-path leakage,
 which the T-model already carries as `(1 − k)·L`, and the air-core mutual part.
 The two ways of stating a floor therefore read differently on a shared core
-(resolved with the core in `mna.rs`; the floor saturates only the rank-1 core
+(resolved with the core in `mna/builder/mod.rs`; the floor saturates only the rank-1 core
 term, `Lm → Lm_floor`, so the saturated `[L]` stays positive-definite):
 
 | Declaration | Reading | Magnetizing floor F (× L_ref) |
@@ -252,7 +253,7 @@ the correct residual/Jacobian split was taken instead.
 
 ### 3.2 Stamps
 
-Augmented row `k` between nodes `i, j` (`mna.rs::build_augmented_matrices`):
+Augmented row `k` between nodes `i, j` (`mna/augmented.rs::build_augmented_matrices`):
 
 ```
 G:  g[i][k] += 1 ;  g[j][k] -= 1        KCL: branch current enters i, exits j

@@ -130,6 +130,25 @@ is just a 280 Hz low-pass (`Rin` + `Rload` into `Cout`). Measured around
 melange analyze clipper.cir -s 48000 --harmonics 5 --amplitude 3 --start-freq 900 --end-freq 1100
 ```
 
+`analyze` measures each frequency point in the steady state at that point's
+own drive. It drives the circuit at the point's frequency and amplitude for at
+least `--preroll-secs` (default 0.25 s), then measures again after each further
+stretch of that length until two successive measurements agree within 0.1 %
+(the fundamental's gain and phase, and the harmonics), for at most
+`--preroll-max-secs` (default 2 s) at drive. A point that has not settled by
+then is reported with a warning naming it; `--preroll-max-secs 0` takes one
+measurement with no check, and `--noise` turns the check off because noisy
+windows never agree. Before the first point the circuit also runs at zero
+drive (0.5 s, or 5 s when it has inductors) to move off the embedded DC
+operating point. With `--harmonics N`, `thd_pct` sums H2..HN below 20 kHz (and
+below Nyquist), so it is `nan` for a point at or above 10 kHz; the `hN_dbc`
+columns are reported up to Nyquist.
+
+A point whose render contains samples the solver did not solve (held, committed
+unconverged, or solved on a `.linearize`d model outside its region) is refused,
+naming the point and the counter, as `simulate` refuses such a render;
+`--allow-nr-hold` reports it anyway.
+
 ## Adding Controls
 
 Mark resistors as pots and capacitors as switches in your netlist:
@@ -219,7 +238,7 @@ Key flags for `melange compile`:
 | `--mono` | off | Changes nothing today: one output node always builds a 1-in/1-out plugin, two build a 2-in/2-out plugin, and `--mono` with more than one output node (either format) is refused rather than drop a node |
 | `--cpu-baseline x86-64-v3\|x86-64-v2\|x86-64` | `x86-64-v3` | x86_64 instruction set for the plugin. v3 is fastest but crashes on pre-2013 CPUs; `x86-64` runs everywhere (plugin format only) |
 | `--backward-euler` | off | Use backward Euler (unconditionally stable) |
-| `--max-iter` | auto | Newton iterations per sample. Unset, melange tunes the budget per circuit; any value pins it, except that nodal-routed builds floor the budget at 100. The generated file's `Build:` header line shows the value the code runs |
+| `--max-iter` | auto | Newton iterations per sample. Unset, melange tunes the budget per circuit, and a nodal-routed build never ships less than 100. Any value pins it, but a nodal build refuses a pin below 100: its Newton is globalized by an Armijo line search, which needs that headroom to cross a device's saturation knee within one sample. DK has no floor. `-v` and the generated file's `Build:` header line show the budget the code runs |
 | `--tube-grid-fa auto\|on\|off` | `auto` | Pentode grid-off dimension reduction: opt-in (`on`, warned, not accuracy-neutral); `auto` keeps the full 3D model |
 | `--opamp-rail-mode` | `auto` | Op-amp rail saturation strategy |
 | `--vendor` | `"Melange"` | Plugin vendor name (plugin format only) |

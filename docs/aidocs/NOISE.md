@@ -1042,16 +1042,22 @@ further ahead.
 
 ## Next phase starting points (for a fresh agent)
 
+> **Status:** items 1, 2 and 4 below have shipped (nodal noise injection in
+> both nodal process_sample paths; pot/switch/runtime-R resistor noise via
+> `pot_slot` / `switch_slot` in `codegen/ir/noise.rs`; shot noise, Phase 2
+> above). They are kept as the record of how each was scoped. Item 3 is not
+> re-checked here.
+
 Pick one. Each is independently shippable.
 
 ### 1. Nodal codegen path (tube-amp circuits)
 
 **Why**: passive-eq, multi-pentode power amps, 4kbuscomp, the steve-1073 decks, etc. route to the nodal
-codegen path (`emit_nodal` in `rust_emitter/nodal_emitter.rs`). Without this
+codegen path (`emit_nodal` in `rust_emitter/nodal_emitter/mod.rs`). Without this
 hook-up, `--noise thermal` on those circuits is a silent no-op.
 
-**Where**: `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs`.
-Two process_sample paths (Schur and full-LU); both build RHS inline rather
+**Where**: `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter/`
+(`schur.rs` and `full_lu.rs`). Two process_sample paths (Schur and full-LU); both build RHS inline rather
 than calling a separate `build_rhs` function. Inject the noise stamp right
 after RHS construction, before the first NR evaluation — one sample per
 audio-sample, NOT per NR iteration.
