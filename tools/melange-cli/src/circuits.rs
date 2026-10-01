@@ -233,8 +233,13 @@ fn is_bare_name(circuit_ref: &str) -> bool {
 fn parse_friendly_ref(circuit_ref: &str) -> Option<(String, String)> {
     // Handle source:circuit format (preferred)
     if let Some((source, circuit)) = circuit_ref.split_once(':') {
-        // Make sure it's not a Windows path like C:\file.txt
-        if source.len() > 1 || !source.chars().next().unwrap().is_ascii_alphabetic() {
+        // Make sure it's not a Windows path like C:\file.txt (a single ASCII
+        // letter before the colon), and that there IS a source: `:foo` names
+        // none, so it is not a friendly reference.
+        let mut chars = source.chars();
+        let drive_letter =
+            matches!((chars.next(), chars.next()), (Some(c), None) if c.is_ascii_alphabetic());
+        if !source.is_empty() && !drive_letter {
             return Some((source.to_string(), circuit.to_string()));
         }
     }
@@ -309,6 +314,30 @@ mod tests {
         // Windows paths like C:\file.txt should not be parsed as friendly refs
         let result = parse_friendly_ref("C:\\file.txt");
         assert_eq!(result, None);
+    }
+
+    /// `:foo` has nothing before the colon. It used to panic (`unwrap` on the
+    /// first char of an empty source); it is simply not a friendly reference.
+    #[test]
+    fn test_parse_friendly_ref_empty_source_does_not_panic() {
+        assert_eq!(parse_friendly_ref(":foo"), None);
+        assert_eq!(parse_friendly_ref(":"), None);
+        // An empty source before the colon does not hide an `@` form.
+        assert_eq!(
+            parse_friendly_ref(":foo@src"),
+            Some(("src".to_string(), ":foo".to_string()))
+        );
+        // A multi-byte single-character source is still a source, not a drive.
+        assert_eq!(
+            parse_friendly_ref("\u{e9}:foo"),
+            Some(("\u{e9}".to_string(), "foo".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_resolve_empty_source_ref_is_an_error_not_a_panic() {
+        let err = resolve(":foo").unwrap_err().to_string();
+        assert!(err.contains("Cannot resolve circuit reference"), "{err}");
     }
 
     #[test]

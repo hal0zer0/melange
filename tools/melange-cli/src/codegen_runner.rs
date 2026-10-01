@@ -9,8 +9,9 @@ use anyhow::{Context, Result};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, SystemTime};
 
 /// A CLI-supplied drive source for a `.inject` field (`--inject FIELD=SPEC`).
 /// The value produced is CIRCUIT VOLTS injected at the `.inject` node through
@@ -71,10 +72,78 @@ pub struct CompiledBinary {
     pub cached: bool,
 }
 
+/// Environment variable capping the binary cache, in MiB; `0` = no limit.
+pub const BINARY_CACHE_MAX_ENV: &str = "MELANGE_BINARY_CACHE_MAX_MB";
+
+/// The binary cache's default cap: 2 GiB. Each binary is a few MB, and every
+/// distinct deck × flags × pot setting is a new one, so without a cap the
+/// directory only grows (one machine reached 23-27 GB).
+pub const DEFAULT_BINARY_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// A `_tmp_` file older than this is a crashed compile's leftover, not one in
+/// flight in another process, and eviction may remove it.
+const STALE_TMP_AGE: Duration = Duration::from_secs(60 * 60);
+
+/// The binary cache's cap in bytes from [`BINARY_CACHE_MAX_ENV`]; `None` = no
+/// limit. An unparseable value warns and keeps the default.
+pub fn binary_cache_cap() -> Option<u64> {
+    let raw = std::env::var(BINARY_CACHE_MAX_ENV).ok();
+    let (cap, warning) = parse_binary_cache_cap(raw.as_deref());
+    if let Some(w) = warning {
+        eprintln!("warning: {w}");
+    }
+    cap
+}
+
+/// [`binary_cache_cap`] without the environment: the cap for a raw env value,
+/// and the warning to print for a value that is not a whole number of MiB.
+fn parse_binary_cache_cap(raw: Option<&str>) -> (Option<u64>, Option<String>) {
+    let Some(raw) = raw else {
+        return (Some(DEFAULT_BINARY_CACHE_MAX_BYTES), None);
+    };
+    match raw.trim().parse::<u64>() {
+        Ok(0) => (None, None),
+        Ok(mib) => (Some(mib.saturating_mul(1024 * 1024)), None),
+        Err(_) => (
+            Some(DEFAULT_BINARY_CACHE_MAX_BYTES),
+            Some(format!(
+                "{BINARY_CACHE_MAX_ENV}='{raw}' is not a whole number of MiB; using the \
+                 default {} MiB",
+                DEFAULT_BINARY_CACHE_MAX_BYTES / (1024 * 1024)
+            )),
+        ),
+    }
+}
+
+/// A cap for display: its size, or "none".
+pub fn format_cap(cap: Option<u64>) -> String {
+    match cap {
+        Some(bytes) => CacheStats {
+            total_files: 0,
+            total_bytes: bytes,
+        }
+        .formatted_size(),
+        None => "none".to_string(),
+    }
+}
+
+/// What one eviction pass removed.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Evicted {
+    pub files: usize,
+    pub bytes: u64,
+}
+
 /// Binary cache for compiled circuit code.
 ///
 /// Stores compiled binaries in `~/.cache/melange/binaries/` keyed by
 /// hash of the source code. Same circuit+config = skip compilation.
+///
+/// Size-capped, least recently used first: a cache hit refreshes the binary's
+/// mtime, and after each new binary is placed the oldest are removed until the
+/// directory is under [`binary_cache_cap`]. Eviction is best-effort — a
+/// failure warns and never fails the command — and never removes the binary
+/// just built.
 pub struct BinaryCache {
     cache_dir: PathBuf,
 }
@@ -91,6 +160,12 @@ impl BinaryCache {
         })?;
 
         Ok(Self { cache_dir })
+    }
+
+    /// A cache rooted at `cache_dir` (tests).
+    #[cfg(test)]
+    fn with_dir(cache_dir: PathBuf) -> Self {
+        Self { cache_dir }
     }
 
     /// Where compiled simulate/analyze binaries are kept.
@@ -121,6 +196,8 @@ impl BinaryCache {
 
         // Check cache
         if bin_path.exists() {
+            // Mark it used, so eviction keeps the binaries people run.
+            touch(&bin_path);
             return Ok(CompiledBinary {
                 path: bin_path,
                 cached: true,
@@ -168,10 +245,78 @@ impl BinaryCache {
             }
         }
 
+        if let Some(cap) = binary_cache_cap() {
+            if let Err(e) = self.evict_to(cap, &bin_path) {
+                eprintln!(
+                    "warning: could not trim the binary cache at {} ({e}); `melange cache \
+                     clear --binaries` empties it",
+                    self.cache_dir.display()
+                );
+            }
+        }
+
         Ok(CompiledBinary {
             path: bin_path,
             cached: false,
         })
+    }
+
+    /// Remove the least recently used binaries (oldest mtime first) until the
+    /// cache holds at most `cap` bytes. `keep` is never removed, even when it
+    /// alone exceeds the cap. A `_tmp_` file is removed only once it is older
+    /// than [`STALE_TMP_AGE`]: a younger one may be another process's compile
+    /// in flight. Only `melange_*` files are touched.
+    fn evict_to(&self, cap: u64, keep: &Path) -> std::io::Result<Evicted> {
+        let now = SystemTime::now();
+        let mut total = 0u64;
+        let mut candidates: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
+        for entry in std::fs::read_dir(&self.cache_dir)? {
+            let Ok(entry) = entry else { continue };
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if !name.starts_with("melange_") {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            total += meta.len();
+            let path = entry.path();
+            if path == keep {
+                continue;
+            }
+            let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            if name.contains("_tmp_")
+                && now.duration_since(mtime).unwrap_or(Duration::ZERO) < STALE_TMP_AGE
+            {
+                continue;
+            }
+            candidates.push((mtime, meta.len(), path));
+        }
+        let mut evicted = Evicted::default();
+        if total <= cap {
+            return Ok(evicted);
+        }
+        candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
+        for (_, len, path) in candidates {
+            if total <= cap {
+                break;
+            }
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    evicted.files += 1;
+                    evicted.bytes += len;
+                    total = total.saturating_sub(len);
+                }
+                // Another process removed it first: the space is free either way.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    total = total.saturating_sub(len);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(evicted)
     }
 
     /// Remove all cached binaries.
@@ -222,6 +367,15 @@ impl CacheStats {
         } else {
             format!("{:.1} MB", self.total_bytes as f64 / (1024.0 * 1024.0))
         }
+    }
+}
+
+/// Refresh a cached binary's mtime (its "last used" time for eviction).
+/// Best-effort: opened read-only, so a binary another process is executing
+/// can still be touched; a failure only makes the binary look older.
+fn touch(path: &Path) {
+    if let Ok(f) = std::fs::File::open(path) {
+        let _ = f.set_modified(SystemTime::now());
     }
 }
 
@@ -746,4 +900,111 @@ fn main() {{
 {diag_lines}}}
 "#,
     )
+}
+
+#[cfg(test)]
+mod binary_cache_eviction_tests {
+    use super::*;
+
+    /// A file of `len` bytes whose mtime is `age_s` seconds in the past.
+    fn put(dir: &Path, name: &str, len: usize, age_s: u64) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, vec![0u8; len]).unwrap();
+        let f = std::fs::File::options().write(true).open(&path).unwrap();
+        f.set_modified(SystemTime::now() - Duration::from_secs(age_s))
+            .unwrap();
+        path
+    }
+
+    #[test]
+    fn evicts_least_recently_used_until_under_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = BinaryCache::with_dir(tmp.path().to_path_buf());
+        let oldest = put(tmp.path(), "melange_simulate_a", 100, 300);
+        let middle = put(tmp.path(), "melange_simulate_b", 100, 200);
+        let newest = put(tmp.path(), "melange_simulate_c", 100, 100);
+        let just_built = put(tmp.path(), "melange_simulate_d", 100, 0);
+
+        let evicted = cache.evict_to(250, &just_built).unwrap();
+        assert_eq!(
+            evicted,
+            Evicted {
+                files: 2,
+                bytes: 200
+            }
+        );
+        assert!(!oldest.exists() && !middle.exists());
+        assert!(newest.exists() && just_built.exists());
+    }
+
+    #[test]
+    fn under_cap_removes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = BinaryCache::with_dir(tmp.path().to_path_buf());
+        let a = put(tmp.path(), "melange_analyze_a", 100, 300);
+        let b = put(tmp.path(), "melange_analyze_b", 100, 0);
+        assert_eq!(cache.evict_to(200, &b).unwrap(), Evicted::default());
+        assert!(a.exists() && b.exists());
+    }
+
+    /// The binary just built survives even when it is the oldest file and
+    /// alone exceeds the cap: the command is about to run it.
+    #[test]
+    fn never_evicts_the_just_built_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = BinaryCache::with_dir(tmp.path().to_path_buf());
+        let keep = put(tmp.path(), "melange_simulate_keep", 500, 1000);
+        let other = put(tmp.path(), "melange_simulate_other", 100, 10);
+        cache.evict_to(50, &keep).unwrap();
+        assert!(keep.exists());
+        assert!(!other.exists());
+    }
+
+    /// A young `_tmp_` file may be another process's compile in flight; an old
+    /// one is a crash leftover. Files that are not melange's are never touched.
+    #[test]
+    fn spares_in_flight_temp_files_and_foreign_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = BinaryCache::with_dir(tmp.path().to_path_buf());
+        let in_flight = put(tmp.path(), "melange_simulate_x_tmp_42.rs", 100, 60);
+        let stale = put(tmp.path(), "melange_simulate_y_tmp_7", 100, 2 * 3600);
+        let foreign = put(tmp.path(), "notes.txt", 100, 5000);
+        let keep = put(tmp.path(), "melange_simulate_z", 100, 0);
+        cache.evict_to(0, &keep).unwrap();
+        assert!(in_flight.exists(), "an in-flight compile must survive");
+        assert!(!stale.exists(), "a crash leftover is evictable");
+        assert!(foreign.exists(), "only melange_* files are the cache's");
+        assert!(keep.exists());
+    }
+
+    /// A cache hit refreshes the mtime, so a binary in use is not the next
+    /// one evicted.
+    #[test]
+    fn touch_marks_a_binary_recently_used() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = BinaryCache::with_dir(tmp.path().to_path_buf());
+        let hit = put(tmp.path(), "melange_simulate_hit", 100, 500);
+        let cold = put(tmp.path(), "melange_simulate_cold", 100, 100);
+        touch(&hit);
+        let keep = put(tmp.path(), "melange_simulate_new", 100, 0);
+        cache.evict_to(200, &keep).unwrap();
+        assert!(hit.exists(), "the touched binary is the most recently used");
+        assert!(!cold.exists());
+    }
+
+    #[test]
+    fn cap_from_env_value() {
+        let default = Some(DEFAULT_BINARY_CACHE_MAX_BYTES);
+        assert_eq!(parse_binary_cache_cap(None), (default, None));
+        assert_eq!(parse_binary_cache_cap(Some("0")), (None, None));
+        assert_eq!(
+            parse_binary_cache_cap(Some(" 512 ")),
+            (Some(512 * 1024 * 1024), None)
+        );
+        let (cap, warning) = parse_binary_cache_cap(Some("2GB"));
+        assert_eq!(cap, default);
+        assert!(warning.unwrap().contains(BINARY_CACHE_MAX_ENV));
+        assert_eq!(format_cap(None), "none");
+        assert_eq!(format_cap(Some(2 * 1024 * 1024 * 1024)), "2048.0 MB");
+    }
 }

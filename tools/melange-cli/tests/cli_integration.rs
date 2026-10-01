@@ -179,6 +179,69 @@ fn test_compile_circuit_file() {
     let _ = std::fs::remove_file(&cir);
 }
 
+/// The default compile summary names the route and integrator in one plain
+/// line; the router's reasons and kernel measurements are `-v` detail. The
+/// generated code is the same either way.
+#[test]
+fn test_compile_route_detail_only_with_verbose() {
+    let cir = write_test_circuit(TEST_DIODE_CLIPPER, "compile_verbose");
+    let quiet_rs = std::env::temp_dir().join("melange_cli_test_compile_quiet.rs");
+    let loud_rs = std::env::temp_dir().join("melange_cli_test_compile_loud.rs");
+    let args = |out: &std::path::Path| {
+        vec![
+            "compile".to_string(),
+            cir.to_str().unwrap().to_string(),
+            "--output".to_string(),
+            out.to_str().unwrap().to_string(),
+        ]
+    };
+    let quiet_args = args(&quiet_rs);
+    let quiet = run_melange(&quiet_args.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    let mut loud_args = args(&loud_rs);
+    loud_args.push("-v".to_string());
+    let loud = run_melange(&loud_args.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+
+    let route_line = |out: &str| {
+        out.lines()
+            .filter(|l| l.trim_start().starts_with("Solver: "))
+            .count()
+    };
+    assert_eq!(route_line(&quiet), 1, "one plain route line:\n{quiet}");
+    assert!(quiet.contains("integration"), "{quiet}");
+    for detail in [
+        "normal routing output",
+        "Integration: ",
+        "Max NR iterations",
+        "spectral radius",
+    ] {
+        assert!(!quiet.contains(detail), "{detail:?} is -v detail:\n{quiet}");
+    }
+    assert!(loud.contains("normal routing output"), "{loud}");
+    assert!(loud.contains("Integration: "), "{loud}");
+    assert!(loud.contains("Max NR iterations"), "{loud}");
+
+    let quiet_code = std::fs::read_to_string(&quiet_rs).unwrap();
+    let loud_code = std::fs::read_to_string(&loud_rs).unwrap();
+    assert_eq!(
+        quiet_code, loud_code,
+        "-v must not change the generated code"
+    );
+
+    let _ = std::fs::remove_file(&quiet_rs);
+    let _ = std::fs::remove_file(&loud_rs);
+    let _ = std::fs::remove_file(&cir);
+}
+
+/// A mistyped `--solver` is refused before anything is built.
+#[test]
+fn test_solver_typo_is_refused() {
+    let stderr = run_melange_fail(&["compile", "nope.cir", "-o", "x.rs", "--solver", "nodel"]);
+    assert!(
+        stderr.contains("invalid value 'nodel'") && stderr.contains("nodal"),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn test_compile_produces_compilable_rust() {
     let cir = write_test_circuit(TEST_DIODE_CLIPPER, "compiles");
@@ -836,7 +899,7 @@ fn test_g10_oscillator_default_routing_is_bounded() {
     let _ = std::fs::remove_file(&cir);
 
     assert!(
-        stdout.contains("solver route = nodal"),
+        stdout.contains("Solver: nodal"),
         "default routing must select nodal for this circuit (trap-unstable at the \
          192 kHz internal rate) — DK Schur has no full-LU NR rescue for the ensuing \
          divergence. Full stdout:\n{stdout}"
@@ -881,8 +944,10 @@ fn test_g10_self_starting_oscillator_is_refused_on_dk() {
         "--output-node",
         "term_f",
     ]);
+    // The build's own line says why in plain words; the router's reason
+    // ("self-starting oscillator") is `-v` detail in the summary.
     assert!(
-        stdout.contains("self-starting oscillator"),
+        stdout.contains("oscillates on its own"),
         "the default build must say why it left DK:\n{stdout}"
     );
     let code = std::fs::read_to_string(&out).unwrap();
@@ -1301,7 +1366,7 @@ fn test_ic_seeded_astable_stays_bounded_at_os4() {
     let _ = std::fs::remove_file(&cir);
 
     assert!(
-        stdout.contains("solver route = DK"),
+        stdout.contains("Solver: DK"),
         "expected this circuit to route DK Schur (not the nodal-routing bug \
          pinned elsewhere) — full stdout:\n{stdout}"
     );

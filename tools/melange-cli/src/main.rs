@@ -3,7 +3,7 @@
 //! Usage:
 //!   melange compile input.cir --output circuit.rs
 //!   melange validate input.cir --output-node out
-//!   melange simulate input.cir --input input.wav --output output.wav
+//!   melange simulate input.cir --input-audio input.wav --output output.wav
 //!   melange sources list
 //!   melange builtins
 
@@ -35,6 +35,13 @@ use std::path::{Path, PathBuf};
 // otherwise all print the same bare CARGO_PKG_VERSION.
 #[command(version = version_label())]
 struct Cli {
+    /// Print the solver-routing detail (why the route and integrator were
+    /// chosen, kernel measurements, iteration budget). Without it, `compile`,
+    /// `simulate` and `analyze` say which route and integrator they used in
+    /// one line; warnings and refusals print either way.
+    #[arg(short, long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -43,6 +50,11 @@ struct Cli {
 /// out of the main list so `--help` leads with what a new user needs.
 const EXPERT_HEADING: &str =
     "Solver overrides (melange chooses these; set them to pin or debug a route)";
+
+/// The values `--solver` accepts, checked at parse time. The build treats any
+/// value other than `dk` or `nodal` as auto, so an unchecked typo (`--solver
+/// nodel`) silently built the auto route.
+const SOLVER_VALUES: [&str; 3] = ["auto", "dk", "nodal"];
 
 #[derive(Subcommand)]
 enum Commands {
@@ -72,9 +84,11 @@ enum Commands {
         #[arg(short = 'n', long, default_value = "out")]
         output_node: String,
 
-        /// Maximum NR iterations
-        #[arg(help_heading = EXPERT_HEADING, long, default_value = "50")]
-        max_iter: usize,
+        /// Maximum NR iterations per sample. Defaults to an auto-tuned budget
+        /// (scales with M, solver route, and trap spectral radius); setting it
+        /// pins that exact budget.
+        #[arg(help_heading = EXPERT_HEADING, long)]
+        max_iter: Option<usize>,
 
         /// Convergence tolerance
         #[arg(help_heading = EXPERT_HEADING, long, default_value = "1e-9")]
@@ -97,11 +111,22 @@ enum Commands {
         #[arg(long, default_value = "10.0")]
         output_clamp: f64,
 
-        /// Add Input Level and Output Level parameters to the plugin (default: true)
-        #[arg(long, default_value = "true")]
+        /// Add Input Level and Output Level parameters to the plugin (default:
+        /// true). `--with-level-params=false` leaves them out, as does
+        /// `--no-level-params`.
+        #[arg(
+            long,
+            value_name = "BOOL",
+            default_value_t = true,
+            action = clap::ArgAction::Set,
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = "true"
+        )]
         with_level_params: bool,
 
-        /// Generate plugin without Input/Output Level parameters
+        /// Generate plugin without Input/Output Level parameters (same as
+        /// `--with-level-params=false`)
         #[arg(long)]
         no_level_params: bool,
 
@@ -120,10 +145,17 @@ enum Commands {
         #[arg(long)]
         oversampling: Option<usize>,
 
-        /// Solver type: auto (default), dk, nodal.
-        /// Auto selects DK for most circuits, nodal for multi-transformer.
-        /// Use nodal for large M circuits where DK NR doesn't converge.
-        #[arg(help_heading = EXPERT_HEADING, long, default_value = "auto")]
+        /// Solver: auto (default), dk, nodal.
+        ///
+        /// auto measures the circuit and picks the DK solver unless the
+        /// circuit needs the nodal one: behavioral B-sources, saturating
+        /// inductors, more than one transformer, M of 10 or more, positive
+        /// feedback or a trapezoidal instability in the DK kernel, an
+        /// ill-conditioned kernel, a self-starting oscillator, or an op-amp
+        /// feature only nodal implements (active-set or boyle-diodes rail
+        /// handling, AOL_TRANSIENT_CAP). `-v` prints the reason. dk and nodal
+        /// force a route; dk is refused where it cannot represent the circuit.
+        #[arg(help_heading = EXPERT_HEADING, long, default_value = "auto", value_parser = SOLVER_VALUES)]
         solver: String,
 
         /// Use backward Euler integration instead of trapezoidal.
@@ -144,8 +176,9 @@ enum Commands {
         ///
         /// When a pentode's grid is biased well below cutoff at DC-OP, the
         /// Ig1 NR dimension can be dropped and Vg2k frozen, reducing M by 1
-        /// per grid-off tube. This enables DK Schur for circuits that would
-        /// otherwise exceed the M=16 cap (e.g. 4×EL34 Plexi: M=18 → M=14).
+        /// per grid-off tube. A smaller M is a cheaper Newton solve, and can
+        /// bring a circuit under M=10 (from which auto routes nodal) or under
+        /// the M=32 limit every route has.
         ///
         /// Valid values:{n}{n}
         /// * auto (default) — reserved for reductions that are provably
@@ -216,12 +249,12 @@ enum Commands {
         ///   when bisecting issues.{n}{n}
         /// * none — no clamping at all (op-amp output is unbounded). Use only
         ///   for verified-linear circuits.{n}{n}
-        /// * hard — post-NR v[out].clamp(VEE, VCC). Cheapest, matches
-        ///   pre-2026-04 behavior. Breaks KCL for AC-coupled downstream caps
-        ///   (see Klon investigation).{n}{n}
+        /// * hard — post-NR v[out].clamp(VEE, VCC). Cheapest. Breaks KCL for
+        ///   AC-coupled downstream caps: the clamped node no longer agrees
+        ///   with the charge the next cap holds.{n}{n}
         /// * active-set — post-NR constrained re-solve. KCL-consistent hard
-        ///   clip. Fixes Klon-class cap-history corruption. Still produces
-        ///   square-wave harmonics.{n}{n}
+        ///   clip, so a cap downstream of a railed op-amp keeps a correct
+        ///   history. Still produces square-wave harmonics.{n}{n}
         /// * active-set-be — active-set, plus a backward-Euler step on any
         ///   sample where the clamp engages. L-stable across the clamp
         ///   transition, so it does not ring the way trapezoidal does when a
@@ -377,7 +410,7 @@ enum Commands {
         #[arg(long, default_value = "0.1")]
         amplitude: f64,
 
-        /// Input node name (for informational display)
+        /// Input node the test signal drives
         #[arg(short = 'i', short_alias = 'I', long, default_value = "in")]
         input_node: String,
 
@@ -481,7 +514,10 @@ enum Commands {
         #[arg(short, long)]
         output: PathBuf,
 
-        /// Sample rate in Hz (used when no input audio provided)
+        /// Sample rate in Hz the circuit is built for: the solver route,
+        /// integrator and oversampling are chosen at this rate, and the test
+        /// tone is rendered at it. With --input-audio the WAV plays at its
+        /// own rate, so set this to match it.
         #[arg(short, long, default_value = "48000")]
         sample_rate: f64,
 
@@ -506,9 +542,9 @@ enum Commands {
         #[arg(long)]
         input_resistance: Option<f64>,
 
-        /// Solver type: auto (default), dk (DK method), nodal (full-nodal NR).
-        /// Auto selects nodal for nonlinear circuits with inductors, dk otherwise.
-        #[arg(help_heading = EXPERT_HEADING, long, default_value = "auto")]
+        /// Solver: auto (default), dk, nodal. Mirrors `compile --solver`
+        /// (see `melange compile --help` for how auto chooses).
+        #[arg(help_heading = EXPERT_HEADING, long, default_value = "auto", value_parser = SOLVER_VALUES)]
         solver: String,
 
         /// Nodal Schur-vs-full-LU sub-path: auto, schur, full-lu. Mirrors
@@ -717,9 +753,9 @@ enum Commands {
         #[arg(help_heading = EXPERT_HEADING, long, default_value = "auto")]
         tube_grid_fa: String,
 
-        /// Solver type: auto (default), dk (DK method), nodal (full-nodal NR).
-        /// Mirrors `compile --solver`.
-        #[arg(help_heading = EXPERT_HEADING, long, default_value = "auto")]
+        /// Solver: auto (default), dk, nodal. Mirrors `compile --solver`
+        /// (see `melange compile --help` for how auto chooses).
+        #[arg(help_heading = EXPERT_HEADING, long, default_value = "auto", value_parser = SOLVER_VALUES)]
         solver: String,
 
         /// Oversampling factor (1=none, 2=2x, 4=4x). Mirrors
@@ -834,7 +870,7 @@ enum Commands {
         oversampling: Option<usize>,
 
         /// Solver: auto (default), dk, nodal — as for `compile`.
-        #[arg(help_heading = EXPERT_HEADING, long, default_value = "auto")]
+        #[arg(help_heading = EXPERT_HEADING, long, default_value = "auto", value_parser = SOLVER_VALUES)]
         solver: String,
 
         /// Op-amp rail mode, as for `compile`.
@@ -964,8 +1000,13 @@ enum CacheAction {
     /// Show cache contents
     List,
 
-    /// Clear all cached files
-    Clear,
+    /// Clear cached circuits and compiled binaries
+    Clear {
+        /// Clear only the compiled simulate/analyze binaries, keeping the
+        /// downloaded circuits
+        #[arg(long)]
+        binaries: bool,
+    },
 
     /// Show cache statistics
     Stats,
@@ -1069,6 +1110,7 @@ fn main() -> Result<()> {
     }
 
     let cli = Cli::parse();
+    let verbose = cli.verbose;
 
     match cli.command {
         Commands::Compile {
@@ -1123,7 +1165,7 @@ fn main() -> Result<()> {
             if tolerance <= 0.0 || !tolerance.is_finite() {
                 anyhow::bail!("Tolerance must be positive and finite, got {}", tolerance);
             }
-            if max_iter == 0 {
+            if max_iter == Some(0) {
                 anyhow::bail!("max-iter must be at least 1, got 0");
             }
             if let Some(n) = oversampling {
@@ -1245,6 +1287,7 @@ fn main() -> Result<()> {
                     vst3_id_override: vst3_id.as_deref(),
                     clap_id_override: clap_id.as_deref(),
                     cpu_baseline,
+                    verbose,
                 },
             )
         }
@@ -1457,6 +1500,7 @@ fn main() -> Result<()> {
                     pot_overrides: &pot_overrides,
                     switch_overrides: &switch_overrides,
                     inject_drives: &inject_drives,
+                    verbose,
                 },
             )
         }
@@ -1571,6 +1615,7 @@ fn main() -> Result<()> {
                     force_trap,
                     max_iter,
                     allow_input_clamp,
+                    verbose,
                 },
             )
         }
@@ -1691,6 +1736,192 @@ fn format_route_info(route_label: &str, reason: &str) -> String {
     )
 }
 
+/// The integrator a build used, in words (with what pinned it, if anything).
+fn integration_words(integrator: melange_solver::codegen::ir::IntegratorSelection) -> &'static str {
+    use melange_solver::codegen::ir::IntegratorSelection as Sel;
+    match integrator {
+        Sel::TrapDefault => "trapezoidal integration",
+        Sel::TrapCliFlag => "trapezoidal integration (--force-trap)",
+        Sel::TrapDirective => "trapezoidal integration (.integrator directive)",
+        Sel::BeCliFlag => "backward-Euler integration (--backward-euler)",
+        Sel::BeDirective => "backward-Euler integration (.integrator directive)",
+        Sel::BeBehavioral => "backward-Euler integration (required by behavioral sources)",
+        Sel::BeAuto => "backward-Euler integration (chosen automatically)",
+    }
+}
+
+/// The default (non-verbose) route line: which solver and which integrator the
+/// build used, in words a newcomer can read. The reasons and the kernel
+/// measurements behind them are `-v` detail; see [`format_route_info`].
+fn route_summary(
+    solver_label: &str,
+    solver_flag: &str,
+    sub_path: Option<melange_solver::codegen::NodalSubPath>,
+    integrator: melange_solver::codegen::ir::IntegratorSelection,
+) -> String {
+    let mut solver = solver_label.to_string();
+    if let Some(sp) = sub_path {
+        solver.push_str(&format!(" ({sp} sub-path)"));
+    }
+    let chosen_by = if solver_flag == "auto" {
+        "chosen automatically".to_string()
+    } else {
+        format!("forced by --solver {solver_flag}")
+    };
+    let integration = integration_words(integrator);
+    format!("Solver: {solver}, {chosen_by}; {integration}. (-v for why)")
+}
+
+/// What `compile -v` prints about the route (see [`print_compile_route_detail`]).
+struct RouteDetail<'a> {
+    solver_label: &'a str,
+    solver_reason: &'a str,
+    routing: &'a melange_solver::codegen::routing::RoutingDecision,
+    meta: &'a melange_solver::codegen::CodegenMeta,
+    max_iter: usize,
+    /// `--max-iter` was given (the budget is the user's, not auto-tuned).
+    max_iter_pinned: bool,
+    m: usize,
+    n_linearized: usize,
+}
+
+/// The `compile -v` routing detail: the router's reason, the kernel
+/// measurements behind it, the integrator's reason and the Newton budget.
+fn print_compile_route_detail(d: &RouteDetail<'_>) {
+    // "(normal)" because the reason strings carry maintainer words like
+    // "unstable" / "ill-conditioned" that read as warnings — see
+    // `format_route_info`.
+    println!(
+        "    Solver: {} \u{2014} normal routing output, not a warning ({})",
+        d.solver_label, d.solver_reason
+    );
+    // Non-negative K diagonal note, printed ONCE here (the low-level kernel
+    // builder logs it at debug only — it is rebuilt several times per compile).
+    // Informative when a transformer-coupled NFB circuit routes to nodal for a
+    // different primary reason (e.g. trap instability) but ALSO has a positive
+    // K diagonal the author may want to know about.
+    if d.routing.k_diag_unsafe {
+        println!(
+            "    Note: non-negative K diagonal (positive DK-Schur feedback, \
+             expected for transformer-coupled NFB) — handled by nodal full-NR."
+        );
+    }
+    // Which nodal sub-path the emitter actually took. Reported by the emitter,
+    // not re-derived here.
+    //
+    // "Nodal NR sub-path" — explicitly the nodal Newton implementation (Schur
+    // reduction vs full-LU), distinct from the DK kernel's BJT internal-node
+    // expansion, which also says "full LU" (see pipeline.rs). Name the
+    // predicate that ACTUALLY fired, as the emitter reported it: rho is
+    // context, labelled as context, not the deciding value.
+    if let Some(sp) = d.meta.nodal_sub_path {
+        match d.meta.nodal_full_lu_trigger {
+            Some(trigger) => println!(
+                "    Nodal NR sub-path: {sp} (nodal Newton; not DK node-expansion; \
+                 trigger: {trigger}; nodal spectral radius {:.4})",
+                d.meta.nodal_spectral_radius
+            ),
+            None => println!(
+                "    Nodal NR sub-path: {sp} (nodal Newton; not DK node-expansion; \
+                 nodal spectral radius {:.4})",
+                d.meta.nodal_spectral_radius
+            ),
+        }
+    }
+    if d.routing.spectral_radius > 0.0 {
+        // DK-kernel trap operator (routing::compute_spectral_radius) — this is
+        // NOT the value that chose a nodal sub-path (see the line above).
+        println!(
+            "    DK-kernel spectral radius: {:.4}",
+            d.routing.spectral_radius
+        );
+    }
+    // Integration line: printed from the codegen-recorded selection so the
+    // stated reason is the actual one (a `.integrator be` pin is NOT
+    // "auto-selected").
+    {
+        use melange_solver::codegen::ir::IntegratorSelection as Sel;
+        match d.meta.integrator_selection {
+            Sel::BeAuto => {
+                println!("    Integration: Backward Euler (auto-selected)");
+                println!("      ({})", d.meta.integration_reason);
+            }
+            Sel::TrapDefault => {
+                println!("    Integration: Trapezoidal");
+                if !d.meta.integration_reason.is_empty() {
+                    println!("      ({})", d.meta.integration_reason);
+                }
+            }
+            Sel::TrapCliFlag => println!("    Integration: Trapezoidal (pinned by --force-trap)"),
+            Sel::TrapDirective => {
+                println!("    Integration: Trapezoidal (pinned by .integrator directive)");
+            }
+            Sel::BeCliFlag => println!("    Integration: Backward Euler (--backward-euler)"),
+            Sel::BeDirective => {
+                println!("    Integration: Backward Euler (pinned by .integrator directive)");
+            }
+            Sel::BeBehavioral => {
+                println!("    Integration: Backward Euler (required by behavioral B-sources)");
+            }
+        }
+    }
+    if d.max_iter_pinned {
+        println!("    Max NR iterations: {} (--max-iter)", d.max_iter);
+    } else {
+        println!(
+            "    Max NR iterations: {} (auto-tuned from M={}, ρ={:.2})",
+            d.max_iter, d.m, d.routing.spectral_radius
+        );
+    }
+    if d.routing.k_ill_conditioned {
+        println!("    K matrix: ill-conditioned (max|K| > 1e8, routed to nodal)");
+    }
+    if d.routing.s_ill_conditioned {
+        println!("    S matrix: ill-conditioned (max|S| > 1e6, cap-only nodes)");
+    }
+    if d.n_linearized > 0 {
+        println!(
+            "    Linearized devices: {} (K/S magnitude guards bypassed)",
+            d.n_linearized
+        );
+    }
+}
+
+/// The `simulate -v` / `analyze -v` routing detail, through `emit` (stdout for
+/// `simulate`, stderr for `analyze`, whose stdout is the CSV).
+fn print_run_route_detail(
+    built: &melange_solver::build::Built,
+    max_iter_pinned: bool,
+    emit: &dyn Fn(&str),
+) {
+    emit(&format_route_info(built.solver_label, &built.solver_reason));
+    // Non-negative K diagonal note, printed ONCE (kernel builder logs it at
+    // debug only — it is rebuilt several times per run). See compile summary.
+    if built.routing.k_diag_unsafe {
+        emit(
+            "  Note: non-negative K diagonal (positive DK-Schur feedback, \
+             expected for transformer-coupled NFB) — handled by nodal full-NR.",
+        );
+    }
+    let meta = &built.generated.meta;
+    emit(&format!(
+        "  Integration: {}",
+        integration_words(meta.integrator_selection)
+    ));
+    if !meta.integration_reason.is_empty() {
+        emit(&format!("    ({})", meta.integration_reason));
+    }
+    emit(&format!(
+        "  Max NR iterations: {}{}",
+        built.max_iter,
+        if max_iter_pinned {
+            " (--max-iter)"
+        } else {
+            " (auto-tuned)"
+        }
+    ));
+}
+
 /// Parse the `--bjt-fa` string into a [`melange_solver::codegen::BjtFaMode`].
 /// Assumes the value was already validated (`auto` | `off` | `force`); an
 /// unrecognized value falls back to `Off`, the default.
@@ -1713,7 +1944,8 @@ fn meta_rail_pin_shown(label: &str) -> bool {
 /// design review demand-3 sweep / lock-margin gate (cross-project review).
 /// Deliberately an env var, not a CLI flag — a throwaway diagnostic knob. The
 /// resolved value is recorded in the provenance manifest (`lit_factor`), so a
-/// swept measurement carries its own build identity. Default 0.5 (= tau/2).
+/// swept measurement carries its own build identity. Default 1.0 (= tau, the
+/// last tested-safe point; `--subsample-lit-factor`'s help says the same).
 fn diag_lit_factor() -> f64 {
     std::env::var("MELANGE_LIT_FACTOR")
         .ok()
@@ -1740,7 +1972,7 @@ struct CompileOptions<'a> {
     sample_rate: f64,
     input_node: &'a str,
     output_node: &'a str,
-    max_iter: usize,
+    max_iter: Option<usize>,
     tolerance: f64,
     output_scale: f64,
     output_clamp: f64,
@@ -1775,6 +2007,8 @@ struct CompileOptions<'a> {
     vst3_id_override: Option<&'a str>,
     clap_id_override: Option<&'a str>,
     cpu_baseline: plugin_template::CpuBaseline,
+    /// `-v/--verbose`: print the routing detail in the summary.
+    verbose: bool,
 }
 
 fn compile_circuit_source(
@@ -1786,7 +2020,7 @@ fn compile_circuit_source(
         sample_rate,
         input_node,
         output_node,
-        max_iter,
+        max_iter: max_iter_flag,
         tolerance,
         output_scale,
         output_clamp,
@@ -1820,6 +2054,7 @@ fn compile_circuit_source(
         vst3_id_override,
         clap_id_override,
         cpu_baseline,
+        verbose,
     } = opts;
     if format == OutputFormat::Plugin {
         refuse_existing_plugin_project(&plugin_project_dir(output), &circuit_source.name())?;
@@ -1850,18 +2085,7 @@ fn compile_circuit_source(
     println!("  Sample rate: {} Hz", sample_rate);
     println!();
 
-    // Get circuit content
-    let netlist_str = match circuit_source {
-        circuits::CircuitSource::Builtin { content, name } => {
-            println!("  Using builtin circuit: {}", name);
-            content.clone()
-        }
-        circuits::CircuitSource::Local { path } => std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read local file: {}", path.display()))?,
-        src @ (circuits::CircuitSource::Url { .. } | circuits::CircuitSource::Friendly { .. }) => {
-            fetch_remote_circuit(src)?
-        }
-    };
+    let netlist_str = load_circuit_text(circuit_source, &|l| println!("{l}"))?;
 
     // --mono is incompatible with multiple output nodes: a multi-output
     // plugin takes mono input and routes each output node to its own audio
@@ -1906,8 +2130,8 @@ fn compile_circuit_source(
         circuit_name,
         input_nodes: input_node_names_owned.clone(),
         output_nodes: output_node_names.iter().map(|s| s.to_string()).collect(),
-        // `--max-iter 50` (the default value) means "not explicitly set".
-        max_iter: if max_iter == 50 { None } else { Some(max_iter) },
+        // `None` (no `--max-iter`) lets the build auto-tune the budget.
+        max_iter: max_iter_flag,
         tolerance,
         output_scale,
         output_clamp,
@@ -1980,111 +2204,27 @@ fn compile_circuit_source(
         "    System: {}",
         format_system_size(generated.n, mna.n, generated.m)
     );
-    // "(normal)" because the reason strings carry maintainer words like
-    // "unstable" / "ill-conditioned" that read as warnings — see
-    // `format_route_info`.
-    println!(
-        "    Solver: {} \u{2014} normal routing output, not a warning ({})",
-        solver_label, solver_reason
-    );
-    // Non-negative K diagonal note, printed ONCE here (the low-level kernel
-    // builder logs it at debug only — it is rebuilt several times per compile).
-    // Informative when a transformer-coupled NFB circuit routes to nodal for a
-    // different primary reason (e.g. trap instability) but ALSO has a positive
-    // K diagonal the author may want to know about.
-    if routing.k_diag_unsafe {
+    if verbose {
+        print_compile_route_detail(&RouteDetail {
+            solver_label,
+            solver_reason: &solver_reason,
+            routing: &routing,
+            meta: &generated.meta,
+            max_iter,
+            max_iter_pinned: max_iter_flag.is_some(),
+            m: kernel.m,
+            n_linearized: mna.linearized_triodes.len() + mna.linearized_bjts.len(),
+        });
+    } else {
         println!(
-            "    Note: non-negative K diagonal (positive DK-Schur feedback, \
-             expected for transformer-coupled NFB) — handled by nodal full-NR."
+            "    {}",
+            route_summary(
+                solver_label,
+                solver_override,
+                generated.meta.nodal_sub_path,
+                generated.meta.integrator_selection,
+            )
         );
-    }
-    // Which nodal sub-path the emitter actually took. Reported by the emitter,
-    // not re-derived here. Without this a deck authored to reach full-LU could
-    // silently sit on Schur with nothing to reveal it.
-    if let Some(sp) = generated.meta.nodal_sub_path {
-        // "Nodal NR sub-path" — explicitly the nodal Newton implementation
-        // (Schur reduction vs full-LU), distinct from the DK kernel's BJT
-        // internal-node expansion, which also says "full LU" (see pipeline.rs).
-        //
-        // Name the predicate that ACTUALLY fired, as the emitter reported it.
-        // This line used to assert "route decided by nodal spectral radius
-        // {rho}" for every full-LU route — which was false whenever a different
-        // predicate fired first, and on `steve-1073-preamp` it named rho = 0.9879
-        // as the deciding value when the trigger was `s-ill-conditioned`
-        // (max|S| = 5.00e8) and 0.9879 is below every rho threshold. A confident
-        // wrong reason is worse than no reason: the line was added to stop a
-        // reader mis-attributing a route (design review) and then mis-attributed
-        // one itself (design review). rho stays, as context, labelled as context.
-        match generated.meta.nodal_full_lu_trigger {
-            Some(trigger) => println!(
-                "    Nodal NR sub-path: {sp} (nodal Newton; not DK node-expansion; \
-                 trigger: {trigger}; nodal spectral radius {:.4})",
-                generated.meta.nodal_spectral_radius
-            ),
-            None => println!(
-                "    Nodal NR sub-path: {sp} (nodal Newton; not DK node-expansion; \
-                 nodal spectral radius {:.4})",
-                generated.meta.nodal_spectral_radius
-            ),
-        }
-    }
-    if routing.spectral_radius > 0.0 {
-        // DK-kernel trap operator (routing::compute_spectral_radius) — this is
-        // NOT the value that chose a nodal sub-path (see the line above).
-        println!(
-            "    DK-kernel spectral radius: {:.4}",
-            routing.spectral_radius
-        );
-    }
-    // Integration line: printed from the codegen-recorded selection so the
-    // stated reason is the actual one (a `.integrator be` pin is NOT
-    // "auto-selected").
-    {
-        use melange_solver::codegen::ir::IntegratorSelection as Sel;
-        match generated.meta.integrator_selection {
-            Sel::BeAuto => {
-                println!("    Integration: Backward Euler (auto-selected)");
-                println!("      ({})", generated.meta.integration_reason);
-            }
-            Sel::TrapDefault => {
-                println!("    Integration: Trapezoidal");
-                if !generated.meta.integration_reason.is_empty() {
-                    println!("      ({})", generated.meta.integration_reason);
-                }
-            }
-            Sel::TrapCliFlag => println!("    Integration: Trapezoidal (pinned by --force-trap)"),
-            Sel::TrapDirective => {
-                println!("    Integration: Trapezoidal (pinned by .integrator directive)");
-            }
-            Sel::BeCliFlag => println!("    Integration: Backward Euler (--backward-euler)"),
-            Sel::BeDirective => {
-                println!("    Integration: Backward Euler (pinned by .integrator directive)");
-            }
-            Sel::BeBehavioral => {
-                println!("    Integration: Backward Euler (required by behavioral B-sources)");
-            }
-        }
-    }
-    if max_iter != 50 {
-        println!(
-            "    Max NR iterations: {} (auto-tuned from M={}, ρ={:.2})",
-            max_iter, kernel.m, routing.spectral_radius
-        );
-    }
-    if routing.k_ill_conditioned {
-        println!("    K matrix: ill-conditioned (max|K| > 1e8, routed to nodal)");
-    }
-    if routing.s_ill_conditioned {
-        println!("    S matrix: ill-conditioned (max|S| > 1e6, cap-only nodes)");
-    }
-    {
-        let n_lin = mna.linearized_triodes.len() + mna.linearized_bjts.len();
-        if n_lin > 0 {
-            println!(
-                "    Linearized devices: {} (K/S magnitude guards bypassed)",
-                n_lin
-            );
-        }
     }
     println!("    Oversampling: {}×", oversampling);
     // A nonlinear circuit generates harmonics above Nyquist, and at 1x they
@@ -2196,7 +2336,7 @@ fn compile_circuit_source(
     println!("    Generated: {} lines of Rust", line_count);
     println!();
 
-    // Step 5: Write output
+    // Step 5 (the build printed 1-4): write output
     println!("Step 5: Writing output...");
 
     match format {
@@ -2209,8 +2349,8 @@ fn compile_circuit_source(
             println!();
             println!("Generated code written to: {}", output.display());
             println!("This code can be used with:");
-            println!("  - melange-plugin for VST/AU/CLAP plugins");
             println!("  - Standalone integration in your own projects");
+            println!("  - A CLAP/VST3 plugin project, generated with `--format plugin` (below)");
             println!();
             // The emitted file is the default output of `compile`, and its
             // caller-facing API (Default constructor, free `process_sample`,
@@ -2610,22 +2750,10 @@ fn validate_circuit_source(
                 }
                 (path.clone(), None)
             }
-            circuits::CircuitSource::Builtin { content, name } => {
-                println!("  Using builtin circuit: {}", name);
-                let mut tmp = tempfile::Builder::new()
-                    .prefix("melange_validate_")
-                    .suffix(".cir")
-                    .tempfile()
-                    .context("Failed to create temp netlist file")?;
-                tmp.write_all(content.as_bytes())
-                    .context("Failed to write temp netlist")?;
-                tmp.flush().context("Failed to flush temp netlist")?;
-                let path = tmp.path().to_path_buf();
-                (path, Some(tmp))
-            }
-            src @ (circuits::CircuitSource::Url { .. }
+            src @ (circuits::CircuitSource::Builtin { .. }
+            | circuits::CircuitSource::Url { .. }
             | circuits::CircuitSource::Friendly { .. }) => {
-                let content = fetch_remote_circuit(src)?;
+                let content = load_circuit_text(src, &|l| println!("{l}"))?;
                 let mut tmp = tempfile::Builder::new()
                     .prefix("melange_validate_")
                     .suffix(".cir")
@@ -2653,7 +2781,7 @@ fn validate_circuit_source(
         .collect();
     println!("  {} samples", input_signal.len());
 
-    // Step 4: Configure comparison
+    // Configure comparison
     let mut config = if relaxed {
         ComparisonConfig::relaxed()
     } else {
@@ -2719,7 +2847,7 @@ fn validate_circuit_source(
         );
     }
 
-    // Step 5: Run validation
+    // Step 4: Run validation
     println!("Step 4: Running validation (ngspice + melange solver)...");
     let result = validate_circuit_with_options(
         &netlist_path,
@@ -2733,11 +2861,11 @@ fn validate_circuit_source(
     // _temp_file drops here, auto-cleaning the NamedTempFile on function exit.
     let result = result.with_context(|| "Validation failed")?;
 
-    // Step 6: Print report
+    // Print report
     println!();
     println!("{}", result.report.summary());
 
-    // Step 7: Write CSV if requested
+    // Write CSV if requested
     if let Some(csv_path) = csv_output {
         // The validate library may have already written CSV if output_dir matched,
         // but if the user specified a specific path, write it explicitly
@@ -3010,6 +3138,8 @@ struct SimulateOptions<'a> {
     switch_overrides: &'a [String],
     /// `--inject FIELD=SPEC` specs; drive `.inject` fields from the CLI.
     inject_drives: &'a [String],
+    /// `-v/--verbose`: print the routing detail.
+    verbose: bool,
 }
 
 /// Options bundle for `melange analyze` — mirrors [`SimulateOptions`].
@@ -3045,6 +3175,8 @@ struct AnalyzeOptions<'a> {
     max_iter: Option<usize>,
     /// `--allow-input-clamp`: report even when the input was clamped or NaN.
     allow_input_clamp: bool,
+    /// `-v/--verbose`: print the routing detail.
+    verbose: bool,
 }
 
 /// Whether generated code DECLARES `field` on its state struct.
@@ -3240,6 +3372,20 @@ fn resolve_switch_overrides(
     Ok(resolved)
 }
 
+/// A path as the UTF-8 argument the generated simulate binary reads
+/// (`std::env::args`). A path that is not UTF-8 is refused, naming the flag:
+/// substituting a default name (`output.wav`) wrote somewhere the user never
+/// asked for.
+fn utf8_path_arg<'p>(path: &'p Path, flag: &str) -> Result<&'p str> {
+    path.to_str().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{flag} path is not valid UTF-8: {}. simulate hands its paths to the rendering \
+             binary as UTF-8 arguments; rename the file or pick a UTF-8 path.",
+            path.display()
+        )
+    })
+}
+
 /// Output peak, in volts, below which `simulate` calls a rendered WAV silent.
 ///
 /// Why a threshold rather than `peak == 0.0`: an output that lands on 1e-300 V
@@ -3339,23 +3485,24 @@ fn simulate_circuit_source(
     circuit_source: &circuits::CircuitSource,
     opts: &SimulateOptions,
 ) -> Result<()> {
+    // The rendering binary takes its paths as UTF-8 arguments. Checked before
+    // the build, so a path it cannot be handed fails here, not after the
+    // compile — and never silently becomes `output.wav` in the working dir.
+    let input_audio_arg = opts
+        .input_audio
+        .map(|p| utf8_path_arg(p, "--input-audio"))
+        .transpose()?;
+    let output_arg = utf8_path_arg(opts.output, "--output")?;
+    let probe_csv_arg = opts
+        .probe_csv
+        .map(|p| utf8_path_arg(p, "--probe-csv"))
+        .transpose()?;
+
     println!("melange simulate");
     println!("  Source: {}", circuit_source.name());
     println!();
 
-    // Step 1: Get circuit content
-    let netlist_str = match circuit_source {
-        circuits::CircuitSource::Builtin { content, name } => {
-            println!("  Using builtin circuit: {}", name);
-            content.clone()
-        }
-        circuits::CircuitSource::Local { path } => std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read: {}", path.display()))?,
-        circuits::CircuitSource::Url { url } | circuits::CircuitSource::Friendly { url, .. } => {
-            println!("  Fetching: {}", url);
-            cache::Cache::new()?.get_sync(url, false)?
-        }
-    };
+    let netlist_str = load_circuit_text(circuit_source, &|l| println!("{l}"))?;
 
     // The one build every verb ships (melange_solver::build). Output layout:
     // [primary, probe_1, probe_2, ...]. The generated `process_sample` returns
@@ -3404,20 +3551,18 @@ fn simulate_circuit_source(
             eprintln!("{a}")
         })
         .map_err(build_error)?;
-    println!(
-        "{}",
-        format_route_info(built.solver_label, &built.solver_reason)
-    );
-    // Non-negative K diagonal note, printed ONCE (kernel builder logs it at
-    // debug only — it is rebuilt several times per run). See compile summary.
-    if built.routing.k_diag_unsafe {
+    if opts.verbose {
+        print_run_route_detail(&built, opts.max_iter.is_some(), &|l| println!("{l}"));
+    } else {
         println!(
-            "  Note: non-negative K diagonal (positive DK-Schur feedback, \
-             expected for transformer-coupled NFB) — handled by nodal full-NR."
+            "  {}",
+            route_summary(
+                built.solver_label,
+                opts.solver,
+                built.generated.meta.nodal_sub_path,
+                built.generated.meta.integrator_selection,
+            )
         );
-    }
-    if built.max_iter != 100 {
-        println!("  Max NR iterations: {}", built.max_iter);
     }
     let injection_specs = built.injection_specs;
     let generated = built.generated;
@@ -3456,7 +3601,7 @@ fn simulate_circuit_source(
 
     println!("  {} lines of code", generated.code.lines().count());
 
-    // Step 6: Append simulate main, compile, run.
+    // Step 5 (the build printed 1-4): append simulate main, compile, run.
     // Probe names map 1:1 to `output_nodes[1..]`. The generated main uses
     // them for the CSV header; the runtime argv[3] supplies the CSV path.
     println!("Step 5: Compiling and running...");
@@ -3528,14 +3673,10 @@ fn simulate_circuit_source(
     //   [2] output.wav
     //   [3] probes.csv  (only present when probes were baked in)
     let mut cmd = std::process::Command::new(&compiled.path);
-    if let Some(audio_path) = opts.input_audio {
-        cmd.arg(audio_path.to_str().unwrap_or("input.wav"));
-    } else {
-        cmd.arg("--tone");
-    }
-    cmd.arg(opts.output.to_str().unwrap_or("output.wav"));
-    if let Some(csv_path) = opts.probe_csv {
-        cmd.arg(csv_path.to_str().unwrap_or("probes.csv"));
+    cmd.arg(input_audio_arg.unwrap_or("--tone"));
+    cmd.arg(output_arg);
+    if let Some(csv_path) = probe_csv_arg {
+        cmd.arg(csv_path);
     }
 
     let result = cmd
@@ -3734,11 +3875,10 @@ fn simulate_circuit_source(
                 "ERROR: {reduced} sample(s){of} were solved on a REDUCED device model outside \
                  its region: a `.linearize`d device driven out of its small-signal region (a \
                  triode cut off or its grid past the conduction onset, a BJT cut off or \
-                 saturated), a forward-active BJT that saturated, or a grid-off pentode whose \
-                 grid conducted. The reduction assumes the device never goes there, so those \
+                 saturated), or a grid-off pentode (--tube-grid-fa on) whose grid conducted. The reduction assumes the device never goes there, so those \
                  samples are not a solution to this circuit. Remove `.linearize` for a stage \
-                 that leaves its region at this drive, or lower the drive; for the other two, \
-                 rebuild without the reduction (--bjt-fa off / --tube-grid-fa off)."
+                 that leaves its region at this drive, or lower the drive; for a grid-off \
+                 pentode, run without the reduction (--tube-grid-fa off)."
             );
         }
         if committed > 0 {
@@ -3841,6 +3981,7 @@ fn analyze_freq_response(
         force_trap,
         max_iter,
         allow_input_clamp,
+        verbose,
     } = *opts;
     // Match parse-time node normalization (lowercase, gnd→0).
     let input_node_owned = melange_solver::parser::normalize_node_name(input_node_name);
@@ -3850,18 +3991,8 @@ fn analyze_freq_response(
 
     eprintln!("melange analyze (frequency response)");
 
-    // Get circuit content
-    let netlist_str = match circuit_source {
-        circuits::CircuitSource::Builtin { content, name } => {
-            eprintln!("  Using builtin circuit: {}", name);
-            content.clone()
-        }
-        circuits::CircuitSource::Local { path } => std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read: {}", path.display()))?,
-        circuits::CircuitSource::Url { url } | circuits::CircuitSource::Friendly { url, .. } => {
-            cache::Cache::new()?.get_sync(url, false)?
-        }
-    };
+    // Analyze writes its CSV to stdout, so the loader's lines go to stderr.
+    let netlist_str = load_circuit_text(circuit_source, &|l| eprintln!("{l}"))?;
 
     // The one build every verb ships (melange_solver::build). Analyze writes
     // its CSV to stdout, so every build line goes to stderr.
@@ -3908,12 +4039,18 @@ fn analyze_freq_response(
             eprintln!("{a}")
         })
         .map_err(build_error)?;
-    eprintln!(
-        "{}",
-        format_route_info(built.solver_label, &built.solver_reason)
-    );
-    if built.max_iter != 100 {
-        eprintln!("  Max NR iterations: {}", built.max_iter);
+    if verbose {
+        print_run_route_detail(&built, max_iter.is_some(), &|l| eprintln!("{l}"));
+    } else {
+        eprintln!(
+            "  {}",
+            route_summary(
+                built.solver_label,
+                solver,
+                built.generated.meta.nodal_sub_path,
+                built.generated.meta.integrator_selection,
+            )
+        );
     }
     let has_inductors = !built.mna.inductors.is_empty()
         || !built.mna.coupled_inductors.is_empty()
@@ -4731,16 +4868,7 @@ fn list_nodes_source(circuit_source: &circuits::CircuitSource) -> Result<()> {
     println!("  Source: {}", circuit_source.name());
     println!();
 
-    // Get circuit content
-    let netlist_str = match circuit_source {
-        circuits::CircuitSource::Builtin { content, .. } => content.clone(),
-        circuits::CircuitSource::Local { path } => std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read local file: {}", path.display()))?,
-        circuits::CircuitSource::Url { url } | circuits::CircuitSource::Friendly { url, .. } => {
-            let cache = cache::Cache::new()?;
-            cache.get_sync(url, false)?
-        }
-    };
+    let netlist_str = load_circuit_text(circuit_source, &|l| println!("{l}"))?;
 
     let mut netlist =
         Netlist::parse(&netlist_str).with_context(|| "Failed to parse SPICE netlist")?;
@@ -4939,16 +5067,8 @@ struct DcOpOptions<'a> {
 fn run_dc_op(circuit_source: &circuits::CircuitSource, opts: &DcOpOptions<'_>) -> Result<()> {
     use melange_solver::codegen::ir::CircuitIR;
 
-    // Get circuit content
-    let netlist_str = match circuit_source {
-        circuits::CircuitSource::Builtin { content, .. } => content.clone(),
-        circuits::CircuitSource::Local { path } => std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read local file: {}", path.display()))?,
-        circuits::CircuitSource::Url { url } | circuits::CircuitSource::Friendly { url, .. } => {
-            let cache = cache::Cache::new()?;
-            cache.get_sync(url, false)?
-        }
-    };
+    // stdout is the report (JSON-clean), so the loader's lines go to stderr.
+    let netlist_str = load_circuit_text(circuit_source, &|l| eprintln!("{l}"))?;
 
     let d = melange_solver::codegen::CodegenConfig::default();
     let build_opts = melange_solver::build::BuildOptions {
@@ -5333,12 +5453,18 @@ fn handle_cache(action: CacheAction) -> Result<()> {
             );
             Ok(())
         }
-        CacheAction::Clear => {
-            let cache = Cache::new()?;
-            cache.clear()?;
+        CacheAction::Clear { binaries } => {
+            if !binaries {
+                let cache = Cache::new()?;
+                cache.clear()?;
+            }
             let bin_cache = BinaryCache::new()?;
             bin_cache.clear()?;
-            println!("Cache cleared (circuits + compiled binaries).");
+            if binaries {
+                println!("Compiled binaries cleared (downloaded circuits kept).");
+            } else {
+                println!("Cache cleared (circuits + compiled binaries).");
+            }
             Ok(())
         }
         CacheAction::Stats => {
@@ -5351,10 +5477,19 @@ fn handle_cache(action: CacheAction) -> Result<()> {
             let bin_cache = BinaryCache::new()?;
             let bin_stats = bin_cache.stats();
             println!();
-            println!("Binary cache (compiled simulate/analyze runs; `melange cache clear` empties both):");
+            println!(
+                "Binary cache (compiled simulate/analyze runs; `melange cache clear --binaries` \
+                 empties it, `melange cache clear` empties both):"
+            );
             println!("  Location: {}", bin_cache.cache_dir().display());
             println!("  Files: {}", bin_stats.total_files);
             println!("  Size: {}", bin_stats.formatted_size());
+            println!(
+                "  Limit: {} (oldest-used binaries are removed past it; {} sets it in MiB, 0 = \
+                 no limit)",
+                codegen_runner::format_cap(codegen_runner::binary_cache_cap()),
+                codegen_runner::BINARY_CACHE_MAX_ENV
+            );
             Ok(())
         }
     }
@@ -5495,6 +5630,136 @@ mod tests {
         assert_eq!(suggest_plugin_project_dir(""), "melange-plugin");
     }
 
+    /// An unknown `--solver` value is a parse error on every verb that takes
+    /// it. The build reads anything but `dk`/`nodal` as auto, so a typo used
+    /// to build the auto route without a word.
+    #[test]
+    fn solver_typo_is_rejected_on_every_verb() {
+        let verbs: [&[&str]; 4] = [
+            &["melange", "compile", "x.cir", "-o", "x.rs"],
+            &["melange", "simulate", "x.cir", "-o", "x.wav"],
+            &["melange", "analyze", "x.cir"],
+            &["melange", "dc-op", "x.cir"],
+        ];
+        for verb in verbs {
+            for bad in ["nodel", "DK", "Auto", ""] {
+                let mut args = verb.to_vec();
+                args.extend(["--solver", bad]);
+                let err = match Cli::try_parse_from(&args) {
+                    Ok(_) => panic!("{args:?} must be refused"),
+                    Err(e) => e,
+                };
+                assert_eq!(
+                    err.kind(),
+                    clap::error::ErrorKind::InvalidValue,
+                    "{args:?}: {err}"
+                );
+            }
+            for good in SOLVER_VALUES {
+                let mut args = verb.to_vec();
+                args.extend(["--solver", good]);
+                assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
+            }
+        }
+    }
+
+    /// `--with-level-params` was a flag that could only ever say true.
+    #[test]
+    fn with_level_params_can_be_set_false() {
+        let level = |extra: &[&str]| -> (bool, bool) {
+            let mut args = vec!["melange", "compile", "x.cir", "-o", "x.rs"];
+            args.extend_from_slice(extra);
+            match Cli::try_parse_from(&args).unwrap().command {
+                Commands::Compile {
+                    with_level_params,
+                    no_level_params,
+                    ..
+                } => (with_level_params, no_level_params),
+                _ => unreachable!(),
+            }
+        };
+        assert_eq!(level(&[]), (true, false), "default on");
+        assert_eq!(level(&["--with-level-params"]), (true, false));
+        assert_eq!(level(&["--with-level-params=true"]), (true, false));
+        assert_eq!(level(&["--with-level-params=false"]), (false, false));
+        assert_eq!(level(&["--no-level-params"]), (true, true));
+        // A bare flag must not swallow the next argument as its value.
+        let mut args = vec!["melange", "compile", "--with-level-params", "x.cir"];
+        args.extend(["-o", "x.rs"]);
+        assert!(Cli::try_parse_from(&args).is_ok());
+    }
+
+    #[test]
+    fn verbose_is_global_and_off_by_default() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args).unwrap().verbose;
+        assert!(!parse(&["melange", "analyze", "x.cir"]));
+        assert!(parse(&["melange", "-v", "analyze", "x.cir"]));
+        assert!(parse(&["melange", "analyze", "x.cir", "--verbose"]));
+    }
+
+    /// Without `--max-iter` the build auto-tunes; with it, the value is pinned
+    /// exactly — including 50, which used to be read as "not set".
+    #[test]
+    fn compile_max_iter_50_is_a_real_value() {
+        let max_iter = |extra: &[&str]| -> Option<usize> {
+            let mut args = vec!["melange", "compile", "x.cir", "-o", "x.rs"];
+            args.extend_from_slice(extra);
+            match Cli::try_parse_from(&args).unwrap().command {
+                Commands::Compile { max_iter, .. } => max_iter,
+                _ => unreachable!(),
+            }
+        };
+        assert_eq!(max_iter(&[]), None);
+        assert_eq!(max_iter(&["--max-iter", "50"]), Some(50));
+    }
+
+    #[test]
+    fn cache_clear_binaries_flag() {
+        let binaries = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
+            Commands::Cache {
+                action: CacheAction::Clear { binaries },
+            } => binaries,
+            _ => unreachable!(),
+        };
+        assert!(!binaries(&["melange", "cache", "clear"]));
+        assert!(binaries(&["melange", "cache", "clear", "--binaries"]));
+    }
+
+    /// A path the rendering binary cannot receive is refused, naming the flag,
+    /// instead of silently becoming `output.wav`.
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_simulate_path_is_refused() {
+        use std::os::unix::ffi::OsStrExt;
+        let bad = Path::new(std::ffi::OsStr::from_bytes(b"/tmp/out\xff.wav"));
+        let err = utf8_path_arg(bad, "--output").unwrap_err().to_string();
+        assert!(err.contains("--output") && err.contains("UTF-8"), "{err}");
+        assert_eq!(
+            utf8_path_arg(Path::new("/tmp/out.wav"), "--output").unwrap(),
+            "/tmp/out.wav"
+        );
+    }
+
+    #[test]
+    fn route_summary_is_one_plain_line() {
+        use melange_solver::codegen::ir::IntegratorSelection as Sel;
+        use melange_solver::codegen::NodalSubPath;
+        let dk = route_summary("DK", "auto", None, Sel::TrapDefault);
+        assert_eq!(
+            dk,
+            "Solver: DK, chosen automatically; trapezoidal integration. (-v for why)"
+        );
+        let nodal = route_summary("nodal", "nodal", Some(NodalSubPath::FullLu), Sel::BeAuto);
+        assert!(nodal.starts_with("Solver: nodal (full-lu sub-path), forced by --solver nodal;"));
+        assert!(nodal.contains("backward-Euler integration (chosen automatically)"));
+        for line in [&dk, &nodal] {
+            assert!(!line.contains('\n'));
+            for jargon in ["unstable", "ill-conditioned", "spectral", "K matrix"] {
+                assert!(!line.contains(jargon), "{line}");
+            }
+        }
+    }
+
     #[test]
     fn test_cli_parse() {
         // Test that CLI parsing works
@@ -5569,6 +5834,23 @@ RK cath 0 130
     }
 }
 
+/// A resolved circuit's netlist text, however it was referenced: builtin,
+/// local file, or remote (with [`fetch_remote_circuit`]'s stale-index
+/// self-heal). The one loader every verb uses.
+fn load_circuit_text(src: &circuits::CircuitSource, report: &dyn Fn(&str)) -> Result<String> {
+    match src {
+        circuits::CircuitSource::Builtin { content, name } => {
+            report(&format!("  Using builtin circuit: {}", name));
+            Ok(content.clone())
+        }
+        circuits::CircuitSource::Local { path } => std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read local file: {}", path.display())),
+        circuits::CircuitSource::Url { .. } | circuits::CircuitSource::Friendly { .. } => {
+            fetch_remote_circuit(src, report)
+        }
+    }
+}
+
 /// Fetch a resolved circuit's content, self-healing a stale index.
 ///
 /// A 404 on a path an index gave us means the cached index is stale — the deck
@@ -5577,9 +5859,10 @@ RK cath 0 130
 /// for indexed sources: an unindexed one re-resolves to the same flat URL and
 /// returns the same 404 without a wasted index request.
 ///
-/// Shared by every command that reads a remote circuit, so `compile`,
-/// `simulate` and `validate` cannot drift into disagreeing about it.
-fn fetch_remote_circuit(src: &circuits::CircuitSource) -> Result<String> {
+/// Reached only through [`load_circuit_text`], which every verb reads its
+/// circuit with, so no verb can drift into skipping the self-heal. `report`
+/// carries the progress lines (stderr for verbs whose stdout is data).
+fn fetch_remote_circuit(src: &circuits::CircuitSource, report: &dyn Fn(&str)) -> Result<String> {
     let (url, indexed) = match src {
         circuits::CircuitSource::Url { url } => (url, None),
         circuits::CircuitSource::Friendly {
@@ -5589,7 +5872,7 @@ fn fetch_remote_circuit(src: &circuits::CircuitSource) -> Result<String> {
         } => (url, Some((source, circuit))),
         _ => anyhow::bail!("fetch_remote_circuit called on a non-remote source"),
     };
-    println!("  Fetching from URL: {}", url);
+    report(&format!("  Fetching from URL: {}", url));
     let cache = cache::Cache::new()?;
     match cache.get_sync(url, false) {
         Ok(c) => Ok(c),
@@ -5602,7 +5885,7 @@ fn fetch_remote_circuit(src: &circuits::CircuitSource) -> Result<String> {
             if &fresh == url {
                 return Err(e);
             }
-            println!("  Index was stale; refetched: {}", fresh);
+            report(&format!("  Index was stale; refetched: {}", fresh));
             cache.get_sync(&fresh, false)
         }
         Err(e) => Err(e),
