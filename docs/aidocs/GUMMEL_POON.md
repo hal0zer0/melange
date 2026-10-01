@@ -17,7 +17,7 @@ any GP parameter (VAF, VAR, IKF, IKR) is finite.
 | `bjt_ic()` codegen template | `crates/melange-solver/templates/rust/device_bjt.rs.tera` |
 | `bjt_jacobian()` codegen template | `crates/melange-solver/templates/rust/device_bjt.rs.tera` |
 | DC OP integration (qb-aware solve) | `crates/melange-solver/src/dc_op.rs` |
-| Parameter resolution | `crates/melange-solver/src/codegen/ir.rs` |
+| Parameter resolution (`resolve_bjt_params`) | `crates/melange-solver/src/codegen/ir/mod.rs` |
 
 Line numbers omitted intentionally — they drift with every refactor. Grep
 the symbol name (`BjtParams`, `is_gummel_poon`, `bjt_qb`, etc.) to locate
@@ -69,7 +69,7 @@ qb = q1 * (1 + sqrt(1 + 4*q2)) / 2
 each exponential has the `-1` term. Melange historically computed `q2 =
 IS*exp(Vbe/Vt)/IKF + IS*exp(Vbc/Vt)/IKR` using bare VT and no `-1`; that was
 wrong and has been fixed. Any BJT `.model` card with `NF != 1` (e.g. BC547 at
-NF = 1.008, or vintage Neve cards at NF ≈ 1.02) would otherwise silently
+NF = 1.008, or vintage console-transistor cards at NF ≈ 1.02) would otherwise silently
 diverge from ngspice by several percent at forward bias above the IKF knee.
 
 Singularity guards:

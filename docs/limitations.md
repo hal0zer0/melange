@@ -38,7 +38,7 @@ Melange supports the following SPICE elements:
 | O | LDR / photoresistor | `CdsLdr` model, `.model NAME LDR()` |
 | N | Glow discharge / neon lamp | **EXPERIMENTAL.** `.model NAME NEON(...)`; the `N` letter and the `NEON` model type are provisional and may change |
 | B | Behavioral source | `V={expr}` / `I={expr}`, nodal path only -- see below |
-| X | Subcircuit instance | Recursive expansion, max nesting depth 8 (`MAX_NESTING_DEPTH`, `crates/melange-solver/src/parser.rs:588`) |
+| X | Subcircuit instance | Recursive expansion, max nesting depth 8 (`MAX_NESTING_DEPTH` in `Netlist::expand_subcircuits`, `crates/melange-solver/src/parser.rs`) |
 
 ### Missing Element Types [DEFERRED]
 
@@ -69,8 +69,8 @@ generated `// provenance:` header:
 - The circuit is pinned to the **nodal full-LU sub-path**
   (`"nodal_subpath":"full-lu"`). `--nodal-subpath schur` is refused outright,
   because the Schur reduction cannot express node-space stamping and forcing it
-  would silently drop the nonlinearity
-  (`crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs:1739`).
+  would silently drop the nonlinearity (the `--nodal-subpath` override in
+  `emit_nodal`, `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs`).
 - Integration is forced to **backward Euler**
   (`"integration_source":"behavioral"`), so a B-source circuit gives up
   second-order trapezoidal accuracy.
@@ -105,7 +105,7 @@ fallback. Only numeric values with scale suffixes are accepted there.
 
 ### Temperature Dependencies [PARTIAL]
 
-Temperature coefficients (TC1, TC2) on resistors are ignored, and there is no global temperature sweep (`.temp`). Device self-heating (Rth, Cth, XTI, EG, TAMB) is available via a quasi-static thermal RC model with SPICE3f5 IS(T) scaling for **diodes, BJTs, and triodes** (default disabled, Rth=infinity → dead code). Base device models otherwise run at a fixed nominal 27C.
+Temperature coefficients (TC1, TC2) on resistors are not modelled, and there is no global temperature (`.temp` is ignored with a warning). Device temperature is set per `.model` instead: on a **diode or BJT** card, `TAMB` (in kelvin; default 300.15 K, SPICE's TNOM of 27 °C) moves the device off TNOM with the SPICE3 law — IS through `XTI` and `EG`, the thermal voltage in proportion, and on a BJT BF/BR through `XTB` and ISE/ISC through both. TNOM itself is fixed at 27 °C. Device self-heating (RTH, CTH) is available via a quasi-static thermal RC model with SPICE3f5 IS(T) scaling for **diodes, BJTs, and triodes** (default disabled, RTH = infinity → dead code). JFETs, MOSFETs and tubes without self-heating run at 27 °C.
 
 Separately, the authentic-noise feature carries a runtime-settable noise temperature (`set_temperature_k`, default 290 K), which scales only thermal noise — it does not affect the deterministic device equations. See the Circuit Noise section below.
 
@@ -126,12 +126,10 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
 - No substrate current or avalanche breakdown
 
 ### JFET / MOSFET
-- Card series resistance `RD=`/`RS=` is refused when nonzero: it is not in the
-  solution (it used to reach only the Newton Jacobian, so the answer was the
-  device without it, with no notice: a JFET with RS = 1 kΩ biased at 4.57 V
-  where ngspice gives 8.40 V). Model it as an explicit resistor in series with
-  the drain or source, which matches ngspice. Internal drain/source nodes are
-  queued.
+- Card series resistance `RD=`/`RS=` is refused when nonzero: the solution
+  has no internal drain/source nodes to put it on. Model it as an explicit
+  resistor in series with the drain or source, which matches ngspice. Internal
+  drain/source nodes are queued.
 - JFET gate junctions follow SPICE's level-1 diodes (`IS`, `N`; ngspice
   defaults), without SPICE's 1e-12 S GMIN across them, so ngspice agreement is
   measured with its GMIN off. `IS` is not temperature-scaled (a JFET card has
@@ -183,7 +181,7 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
 - 5 equation families: Rational (Derk), Exponential (DerkE), Classical (Koren/Cohen-Helie), plus variable-mu variants
 - 29 catalog models (EL84, EL34, EF86, 6L6, 6V6, KT88, 6550, 6K7, EF89, and more)
 - Grid-off dimension reduction (3D to 2D) exists but is **opt-in only**:
-  `--tube-grid-fa on`. Since 2026-09-04 `auto` behaves as `off` and keeps the
+  `--tube-grid-fa on`. `auto` behaves as `off` and keeps the
   full 3D model, because the reduction is **not** accuracy-neutral -- it drops
   the cathode/screen-referenced Vg2k feedback (measured +2% to +12% small-signal
   gain error on cathode-biased stages) and all grid current for Vgk > 0. `on`
@@ -197,10 +195,11 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
 - VCC/VEE asymmetric supply rail clamping
 - Slew-rate limiting via `SR=` in V/us (per-sample clamp, all 3 codegen paths)
 - Rail mode selection: `--opamp-rail-mode {auto,none,hard,active-set,active-set-be,boyle-diodes}`
-  (`active-set-be` is accepted but is not listed in `--help`)
 - `auto` resolves only to `none` / `hard` / `active-set`: `active-set` for any
-  op-amp whose output is capacitor-coupled downstream, where the sample after
-  each rail pin or release is solved on backward Euler. It **never** selects
+  op-amp whose output is capacitor-coupled downstream, which pins the railed
+  output and re-solves the circuit on the build's own integrator (a pin or
+  release takes no backward-Euler sample; see `docs/aidocs/OPAMP_RAIL_MODES.md`).
+  It **never** selects
   `active-set-be` (backward Euler on every rail-engaged sample: 2-4x the
   output-peak error on a railing overdrive) or `boyle-diodes` (validated for
   light clip, diverges at heavy clip); both stay opt-in (see
@@ -278,7 +277,7 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
 ### Glow Discharge / Neon (`N`) [EXPERIMENTAL]
 - `N1 anode cathode MODEL` + `.model MODEL NEON(VO VM IK RS IHOLD ROFF)`. The
   element letter and model type are explicitly provisional
-  (`crates/melange-solver/src/parser.rs:870`)
+  (`Element::Glow` in `crates/melange-solver/src/parser.rs`)
 - `--subsample-fire {auto,on,off}` splits a firing sample at the crossing
   fraction so the strike instant is not quantised to the sample grid. It is a
   **nodal-Schur-only** feature: `on` is refused on the DK route and on the nodal
@@ -332,37 +331,37 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
   that re-init clicks at envelope-follower rates. No nih-plug knob is generated
 - `.runtime R` members are rejected inside `.gang` at parse time
 
-### Known Defect: NR can cap out and still report a healthy-looking output [OPEN]
+### Newton-Raphson failures: what is refused and what is not
 
-Newton-Raphson has a per-sample iteration cap (`max_iter`, 100 by default). When
-it reaches that cap it emits the last iterate and continues. That iterate is not
-a converged solve, and **nothing in the output makes it obvious** — the level can
-look entirely normal.
+Newton-Raphson has a per-sample iteration budget (`--max-iter`; by default an
+auto-tuned value that scales with M, the solver route and the trapezoidal
+spectral radius). A sample that exhausts it is retried: on the nodal routes by
+a local sub-step ladder (down to T/2^12, at most 64 attempts), then, on a
+trapezoidal build, by a backward-Euler solve. A sample one of those retries
+solves is a converged solution by another consistent scheme; it is first-order
+on that sample when backward Euler solved it, and the sub-step ladder has no
+truncation-error control.
 
-A deck in the golden corpus does this on every sample after a step edge:
+A sample that no path solves is **unsolved**: the solver commits the previous
+state (or, where the final solve is an op-amp pin or the DK solve, the
+unconverged iterate), and counts it in `diag_unsolved_sample_count`. A held
+value is bounded and smooth, so the rendered audio cannot show it.
+`melange simulate`, `validate` and the golden harness **refuse** a render with
+any unsolved sample (`--allow-nr-hold` writes it anyway). A compiled plugin
+has no such gate: the counters are public fields on the generated state, and
+a plugin that does not check them will not notice.
 
-```
-frames                    48000    (edge at sample 4800 -> 43200 samples after it)
-diag_nr_max_iter_count    43200    every post-edge sample hits the cap
-diag_be_fallback_count    43199
-diag_ls_fail_count      2246353    ~52 line-search failures per sample
-diag_refactor_count     4190402    ~97 full LU refactors per sample
-diag_peak_output         0.9439 V  peak -0.50 dBFS — nothing looks wrong
-```
+`simulate` also warns when more than 20 % of internal samples hit the
+iteration ceiling, rescued or not.
 
-Whether the capped iterate differs audibly from a converged solve on that deck is
-**not yet established**; the investigation is open. What is established is that
-melange will not tell you when this happens.
-
-**How to check your own circuit.** `melange simulate` prints these counters. If
-`nr_max_iter_count` is a large fraction of your sample count, the solver did not
-converge on those samples and the output is not trustworthy, whatever the level
-looks like. A healthy circuit shows a count near zero — the same deck's sine
-program, over more samples, shows 31.
-
-Mitigations worth trying: raise the NR budget, soften the stimulus edge, or
-`--backward-euler`. If the counter stays pinned, the circuit is hitting a genuine
-conditioning problem and the number melange prints should not be trusted.
+**What no counter catches [OPEN].** A raised `--max-iter` on an oscillator or
+switching circuit can let Newton settle on a spurious oscillation of the
+discrete step equations with every sample "solved" (see the astable section
+below). And on a free-running oscillator, a budget that starves Newton on some
+samples can shift its period with no unsolved sample (3.8 % flat at
+`--max-iter 70` against `--max-iter 1000` on a germanium-PNP divider astable,
+measured before the local sub-step ladder existed and not re-measured since).
+Compare an oscillator's period at two budgets before trusting it.
 
 ### Conductance swaps (`.switch`, `.pot`, `.runtime R`)
 
@@ -404,10 +403,9 @@ runs at a converged 6.667 ms period with the collectors inside 0–9 V.
   - (A `TF`-only variant has no settled reference: ngspice's own period on it
     ranges from 0.008 to 6.5 ms with its step and tolerance settings. The claim
     rests on the full witness.)
-- **This is new in 0.1.12.** 0.1.11 built the witness on the DK solver, where it
-  ran near ngspice's period with about 7 % of its samples unsolved at the
-  default budget. Its nodal path failed loudly. 0.1.12 refuses this deck on DK
-  (its operating point has a growing pole) and builds it on nodal.
+- It is built on nodal because its DC operating point has a growing pole,
+  which the DK route refuses (a self-starting oscillator); DK has no
+  unsolved-sample containment at a switching edge.
 
 Circuits whose devices carry series resistance and Early effect under moderate
 bias (a PNP divider astable with RB/RC/RE/VAF, for one) cross their edges and
@@ -456,7 +454,7 @@ change -- an intermediate inside one sample's solve can still go denormal.
 
 Condition number is estimated during DK kernel build as
 `||A||_inf · ||A^-1||_inf`. A `log::warn!` fires above **1e13**
-(`crates/melange-solver/src/dk.rs:299-315`) -- the threshold was raised from 1e12
+(`DkKernel::from_mna` / `from_mna_augmented`, `crates/melange-solver/src/dk.rs`),
 because high conditioning is common and usually benign (tight component-value
 spreads, near-unity transformer coupling). Ill-conditioned circuits still produce
 results, possibly with reduced accuracy. A genuinely ill-conditioned `K` or `S`
@@ -491,7 +489,7 @@ Three mechanisms reduce M, and none is on by default:
 
 Independent voltage sources (V elements) use **augmented MNA**: each source adds a branch-current unknown plus a KVL constraint row (`B^T · x = v_dc`). There is no high-conductance Norton stamp. See `VoltageSourceInfo` in `crates/melange-solver/src/mna.rs` and `solve_dc_op` in `crates/melange-solver/src/dc_op.rs`.
 
-The **audio input** is a separate mechanism and does not go through that path: it is a Thevenin source stamped as a conductance `G_in` at the input node (default 1 Ω, or the `.input_impedance` directive / `--input-resistance` override), with RHS `(V(n+1) + V(n)) · G_in`.
+The **audio input** is a separate mechanism and does not go through that path: it is a Thevenin source stamped as a conductance `G_in` at the input node (default 1 Ω, or the `.input_impedance` directive / `--input-resistance` override), entering the RHS once per sample as `V_in(n+1) · G_in`; the capacitor history is carried by `q_dot` (see [COMPANION_MODELS.md](aidocs/COMPANION_MODELS.md)).
 
 ### Solver Routing
 
@@ -510,16 +508,24 @@ these holds:
 | Multiple transformer groups | > 1 coupled-inductor / transformer group |
 | DK kernel build failed | -- |
 | Trapezoidal instability | spectral radius of the whole-system operator `S·((2/T)C - G)` > 1.002 |
+| Positive feedback in the Schur Newton | a non-negative `K` diagonal with a live `N_i` column (e.g. transformer-coupled negative feedback) |
 | `K` ill-conditioned | max\|K\| > 1e8 (`K_ILL_COND_MAX`) |
 | `S` ill-conditioned | max\|S\| > 1e6 (`S_ILL_COND_MAX`) |
 | Behavioral `B` source | structural -- DK cannot stamp in node space |
 | Saturating inductor (`ISAT=`) | structural -- the flux law is solved by Newton on the inductor's augmented row each sample; DK bakes `S = A^-1` and has no such row |
+| Op-amp rail mode `active-set`/`active-set-be`/`boyle-diodes`, or an `AOL_TRANSIENT_CAP` card | structural -- only nodal pins a railed output and re-solves, builds the Boyle internal node, or applies the cap |
+| Self-starting oscillator | the DC operating point has a growing pole; a DK build of it is refused and the auto route rebuilds on nodal |
 
-The last two are hard structural requirements: `--solver dk` is **rejected**, not
-downgraded.
+The routing estimate of trapezoidal instability uses the whole-system operator;
+it decides only the route. Whether a build integrates with backward Euler is
+decided separately, by the ring predicate (see Design Decisions below).
+
+Multiple transformer groups, the positive-feedback `K` diagonal, and every
+structural row are hard requirements: `--solver dk` is **rejected**, not
+downgraded (`forced_dk_hard_blocker`, `crates/melange-solver/src/build.rs`).
 
 **Stage 2 -- nodal Schur vs nodal full LU**
-(`crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs:1730-1810`).
+(`emit_nodal`, `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs`).
 Nodal Schur costs O(N²+M³)/sample; full LU factors the whole augmented N×N system
 every NR iteration at O(N³)/sample. Full LU is selected when the circuit
 structurally requires it (saturating inductor, behavioral source) or on
@@ -557,12 +563,8 @@ Matrix recomputation is O(N^3) and occurs at:
   when the value actually changes; batched into one rebuild per sample via a
   `matrices_dirty` flag on the nodal path)
 
-There is no current benchmark for pot-rebuild latency. A `~250 us at N=37` figure
-appeared here from 2026-04 with no reproducible source and no deck attribution,
-so it has been removed rather than carried forward -- see the note under
-Performance Benchmarks about what happened to the rest of the unattributed
-numbers. If you need this figure, measure it on your own target with
-`tools/perf-harness/bench.sh`.
+There is no current benchmark for pot-rebuild latency. If you need this
+figure, measure it on your own target with `tools/perf-harness/bench.sh`.
 
 `set_sample_rate()` cannot change the *route*. Stage-1/stage-2 routing and
 sub-sample-fire activation are compile-time structural decisions, so a plugin
@@ -579,16 +581,13 @@ core, noiseless, `-C target-cpu=x86-64-v3` (best of 7 × 2M samples via
 - Typical multi-device circuits: Wurlitzer preamp ~46×, tweed-style guitar amp ~16.7× realtime
 - Heaviest measured: a passive tube EQ (nodal Schur, N=52, M=8) ~18.4×, a bus compressor (12 op-amps + 2 VCAs) ~6.6× realtime
 
-The triode rows carry the cost of the Dempwolf & Zölzer grid-current law
-(`30915fb`), which evaluates a softplus on the grid dimension at every Newton
-iteration: measured against the commit before it on the same box, 12AX7 stage
-216.7× → 153.2×, tweed amp 22.3× → 18.3×, passive EQ 24.0× → 20.6×.
+The triode rows include the cost of the Dempwolf & Zölzer grid-current law,
+which evaluates a softplus on the grid dimension at every Newton iteration
+(14–29 % on these three rows, measured with and without it on the same host).
 
-Every figure above names the circuit it came from, deliberately. Perf numbers in
-this repository from before 2026-08-25 were fabricated or stale -- a row nobody
-can map to a circuit is a row nobody can check, which is how an 18× claim
-survived for a deck that measures 12×. Treat any ×-realtime number without an
-attributed circuit and a named host as unverified.
+Every figure above names the circuit it came from, deliberately: a row nobody
+can map to a circuit is a row nobody can check. Treat any ×-realtime number
+without an attributed circuit and a named host as unverified.
 
 ## Circuit Noise [PARTIAL]
 
@@ -623,9 +622,9 @@ Noise limitations:
   full-LU and backward Euler; or `.runtime R` / `.runtime V` host-driven
   modulation, which keeps the normal routing. Prefer `.runtime` unless the
   modulator genuinely has to live inside the circuit.
-- **Temperature sweep**: no `.temp` directive or global temperature sweep (device self-heating is available per-device, see Temperature Dependencies above)
-- **Multi-language codegen**: C++ in progress; Python/NumPy and MATLAB targets
-  planned. **FAUST was explored and determined impractical** — its generated code
+- **Temperature sweep**: no `.temp` directive or global temperature sweep (device temperature `TAMB` and self-heating are per-`.model`, see Temperature Dependencies above)
+- **Multi-language codegen**: only Rust is emitted. A C++ backend is the next
+  planned target; Python/NumPy and MATLAB are planned after it. **FAUST was explored and determined impractical** — its generated code
   is intentionally not Turing-complete (it computes each sample in a fixed number
   of operations), so a Newton-Raphson solve whose iteration count depends on the
   data cannot be expressed. Only circuits that emit **no NR loop at all** would
@@ -633,7 +632,10 @@ Noise limitations:
   a behavioral `B` source routes nodal and gets Newton regardless of M. That was
   6 of 41 corpus circuits: too small a subset to be worth a backend.
 - **M > 32**: a loop-based elimination (or iterative/sparse NR) for very large nonlinear systems (MAX_M=32)
-- **Ideal transformer formulation**: dependent sources + explicit leakage/magnetizing L
+- **Ideal-transformer formulation for linear windings**: linear coupled
+  inductors use the exact `[L]` coupled-inductor path. The ideal-transformer
+  T-model (ideal couplings + leakage + one magnetizing branch) is built only for
+  saturating cores, on nodal full LU
 
 ## Validation
 
@@ -703,10 +705,10 @@ Noise limitations:
 ### Other Scope Restrictions
 
 - **Multi-input decks** are restricted to linear (M=0) circuits, `--format code`,
-  and `--oversampling 1`. Each is a hard error, not a warning: superposition
-  across input ports is exact only when nothing nonlinear touches the inputs, so
-  the CLI refuses rather than emit a silently wrong plugin
-  (`tools/melange-cli/src/main.rs:1720-1745`). The consequence is that the
+  `--oversampling 1`, and no `--emit-dc-op-recompute`. Each is a hard error, not
+  a warning: superposition across input ports is exact only when nothing
+  nonlinear touches the inputs, so the build refuses rather than emit a silently
+  wrong plugin (`assemble`, `crates/melange-solver/src/build.rs`). The consequence is that the
   nonlinear-mixing case the feature exists for is currently unreachable
 
 ### Parser Hardening
@@ -730,10 +732,12 @@ These are intentional trade-offs, not bugs:
 3. **Trapezoidal default, backward Euler where stability demands it**:
    trapezoidal for second-order accuracy. BE arrives four ways, and the
    `// provenance:` header's `integration_source` field says which:
-   `explicit` (`--backward-euler` or `.integrator be`), `auto-promoted` (the trap
-   propagation operator's spectral radius exceeds 1.002, or the BE-promotion
-   discriminator fires), `behavioral` (forced by a `B` source), or `trap` for
-   trapezoidal. `--force-trap` and `.integrator trap` opt out of auto-promotion.
+   `explicit` (`--backward-euler` or `.integrator be`), `auto-promoted` (the
+   ring predicate fires: the trapezoidal charge propagator, linearised at the DC
+   operating point, has a growing pole that backward Euler removes, or a lasting,
+   loud Nyquist-side ring that costs more than backward Euler's own in-band
+   error; see `docs/aidocs/RING_PREDICATE.md`), `behavioral` (forced by a `B`
+   source), or `trap` for trapezoidal. `--force-trap` and `.integrator trap` opt out of auto-promotion.
    Nodal trapezoidal builds additionally carry a **runtime BE-latch**: if the
    solver falls into a self-sustaining Nyquist limit cycle at a large-signal
    operating point that the compile-time quiescent analysis cannot see, that
@@ -750,7 +754,6 @@ These are intentional trade-offs, not bugs:
 
 ---
 
-*Last updated: 2026-09-22. Audited against the source tree at
-`0a3dacb` and `docs/aidocs/STATUS.md` (v0.1.8). Where this file and
-`docs/aidocs/STATUS.md` disagree, STATUS.md is the maintained reference --
-except for the performance figures, which were last re-measured here.*
+*Where this file and `docs/aidocs/STATUS.md` disagree, STATUS.md is the
+maintained reference -- except for the performance figures, which were last
+re-measured here.*

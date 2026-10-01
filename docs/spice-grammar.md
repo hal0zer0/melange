@@ -451,7 +451,7 @@ P2 plate2 grid2 cath2 scr2 sup2 EF86
   `Ip0 = E1^Ex/2·(1+sgn(E1))` built from `E1 = (Vg2k/Kp)·softplus(Kp·(1/μ + Vgk/sqrt(Kvb+Vg2k²)))`,
   then `Ip = Ip0·F(Vpk)` and `Ig2 = Ip0·H(Vpk)` with the Vp-dependent
   F/H factors parametrized by `αs, A, β`. The control grid keeps the
-  Leach power-law, which triodes no longer use.
+  Leach power-law (triodes use Dempwolf & Zölzer eq. (11) instead).
 - Terminal order is **plate-grid-cathode-screen**, which matches the
   LTspice / PSpice / Ayumi convention and deliberately differs from the
   `T` element's grid-plate-cathode order. Use the order that matches
@@ -494,28 +494,28 @@ P2 plate2 grid2 cath2 scr2 sup2 EF86
   a `.model` without a catalog alias; the default is `0` (Rational).
   Catalog entries carry the correct form automatically, so a bare
   `.model KT88 VP()` gets Classical behavior via the catalog lookup.
-- **Grid-off reduction (phase 1b)**: the solver auto-detects when a
-  pentode is biased in grid-cutoff (`Vgk < −(vgk_onset + 0.5)`) and
-  reduces its NR dimension from 3 to 2 — drops the `Ig1` dimension
-  entirely and freezes `Vg2k` at the DC-OP-converged value. Controlled
-  by `--tube-grid-fa {auto,on,off}` on `melange simulate` and
-  `melange compile`:
-  - `auto` (default): detect and reduce where Vgk is in cutoff
-  - `on`: force grid-off on every pentode regardless of bias (testing)
-  - `off`: never reduce, always full 3D NR block (pre-phase-1b parity)
+- **Grid-off reduction (opt-in)**: `--tube-grid-fa on` reduces every
+  non-variable-mu pentode's NR dimension from 3 to 2 — it drops the `Ig1`
+  dimension and freezes `Vg2k` at the DC-OP-converged value — with a
+  per-device warning. Controlled by `--tube-grid-fa {auto,on,off}` on
+  `melange compile`, `simulate`, `analyze`, `validate` and `dc-op`:
+  - `auto` (default): reserved for reductions that are provably neutral;
+    none exists, so `auto` keeps the full 3D model (same as `off`)
+  - `on`: reduce every non-variable-mu pentode (warned)
+  - `off`: never reduce, always the full 3D NR block
 
-  Grid-off is a physics approximation — the screen voltage is held
-  constant, so under hard plate clipping the real tube's screen-current
-  rise isn't tracked. Audible error is 0.5–2 dB on affected harmonics,
-  similar in character to Classical Koren's Vp-independent screen.
-  For users who care, `--tube-grid-fa off` restores full fidelity at
-  5–10× slowdown on Plexi-class amps. Triode grid-off is structurally
-  impossible (both Vgk and Vpk drive Ip) — only pentodes reduce.
+  Grid-off is not accuracy-neutral: `Vg2k` is cathode-referenced, so an
+  unbypassed cathode resistor or screen stop makes it move with signal, and
+  freezing it discards that local feedback (measured +2 % to +12 %
+  small-signal gain error on cathode-biased stages); it also drops all grid
+  current for Vgk > 0. Use `on` to attribute a residual to the reduction, not
+  to ship. Triode grid-off is structurally impossible (both Vgk and Vpk drive
+  Ip) — only pentodes reduce.
 
 - **Not yet supported**:
-  - 6386 / 6BC8 / 6BA6 datasheet-refit entries for varimu compressor
-    targets (Fairchild 670, Sta-Level, Altec 436). Math path is ready
-    (phase 1c variable-mu §5), just waiting on the datasheet fit work.
+  - 6386 / 6BC8 / 6BA6 datasheet-refit entries for variable-mu
+    compressor tubes. Math path is ready (phase 1c variable-mu §5), just
+    waiting on the datasheet fit work.
   - Independent suppressor dynamics on true 5-element pentodes —
     suppressor is always electrically tied to cathode.
 
@@ -1294,8 +1294,8 @@ impl CircuitState {
 
     pub fn set_runtime_R_bias_r_L1(&mut self, resistance: f64) {
         // clamp, skip if unchanged, mark matrices dirty
-        // Body is structurally identical to `set_pot_N` since the 2026-04-20
-        // reseed strip — only the setter name + read-only accessor differ.
+        // Body is structurally identical to `set_pot_N` — only the setter
+        // name + read-only accessor differ.
     }
 }
 ```

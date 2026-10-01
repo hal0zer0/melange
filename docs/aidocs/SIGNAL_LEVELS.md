@@ -67,8 +67,8 @@ to work around simulation errors.
 **The default ±10 V is only safe for a circuit that physically cannot swing past
 ±10 V.** Most line-level gear can: a TL07x-class op-amp on ±15 V rails swings to
 about ±13.5 V (VCC − 1.5 V; melange's own 4kbuscomp TL074 card uses `VSAT=13.5`,
-per the TI datasheet — see `STATUS.md` and `DEBUGGING.md`), and a 1073-class
-console output is specified above +26 dBu = ±21.8 V peak. For those circuits the
+per the TI datasheet — see `STATUS.md` and `DEBUGGING.md`), and a transformer-coupled
+console output stage is specified above +26 dBu = ±21.8 V peak. For those circuits the
 default clamps *before* the hardware does (±10 V = 7.07 Vrms = +19.2 dBu, roughly
 2–3 dB below a ±15 V op-amp and ~7 dB below a 1073), introducing distortion that
 is not in the real device. A circuit with rails above ±10 V should set the clamp

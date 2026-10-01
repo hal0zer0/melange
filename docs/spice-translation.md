@@ -21,7 +21,7 @@ Field manual for debugging mismatches between ngspice and Rust DSP.
 - **VCCS direction:** Verify transconductance sign convention matches SPICE
 
 ### 2. Discretization Errors
-- **Companion conductance in G:** `g_c = 2C/T` must be in G, not separate
+- **Companion conductance in A:** `g_c = 2C/T` belongs in the system matrix `A = G + (2/T)C`, not added separately to the RHS
 - **History update order:** Update AFTER solve, BEFORE next timestep
 - **Trapezoidal consistency:** charge form — `A_neg` has no G, and `q_dot` is committed with `v_prev`; whole-system form — `A` and `A_neg` share the same G
 
@@ -29,7 +29,7 @@ Field manual for debugging mismatches between ngspice and Rust DSP.
 - **Hz vs rad/s:** `ω = 2πf` — SPICE uses Hz, code may use either
 - **Conductance vs resistance:** MNA uses Siemens (`g = 1/R`)
 - **Capacitance units:** `4.7 MFD = 4.7e-6 F`, `100pF = 100e-12 F`
-- **Vt temperature:** SPICE default 27°C → Vt ≈ 25.85mV
+- **Vt temperature:** SPICE's TNOM, 27 °C (300.15 K) → Vt ≈ 25.865 mV (melange's `VT_ROOM`)
 
 ### 4. Topology Errors
 - **Missing components:** Grep SPICE netlist, verify each in Rust
@@ -41,7 +41,7 @@ Field manual for debugging mismatches between ngspice and Rust DSP.
 ### Bug: Cin-R1 Companion Conductance
 **Symptom:** HF response wrong  
 **Root cause:** `A_neg` built from `G_dc` (excluding `g_cin`), but `A` included it  
-**Fix:** Both use same G (including `g_cin`); add `cin_rhs_prev` for trapezoidal average
+**Fix (in OpenWurli's hand-written whole-system discretization):** both matrices use the same G (including `g_cin`). This applies only to that form: melange's generated code uses the charge form, where `A_neg` carries no G and no source term is averaged over two samples ([COMPANION_MODELS.md](aidocs/COMPANION_MODELS.md)).
 
 ### Bug: Constant-GBW Assumption
 **Symptom:** Trem-bright bandwidth 5.2 kHz (should be ~10 kHz)  

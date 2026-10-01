@@ -109,9 +109,10 @@ L-stable integrator). There is no single setting correct for both.
 a flag named for the *mechanism* (not the circuit), and default to the broadest
 safety envelope. Examples: `--solver`, `--backward-euler`, `--oversampling`,
 `--opamp-rail-mode`, `--tube-grid-fa`, `--noise`. Auto-detection is preferred
-wherever a property can be measured safely (e.g. spectral radius > 1 auto-selects
-backward-Euler); a manual flag is the fallback when auto-detection cannot be made
-sound.
+wherever a property can be measured safely (e.g. the ring predicate promotes a
+build to backward Euler when the trapezoidal rule would leave a lasting, audible
+Nyquist-side ring; see `docs/aidocs/RING_PREDICATE.md`); a manual flag is the
+fallback when auto-detection cannot be made sound.
 
 **Consequences.** No circuit is silently sacrificed to another, and every mode is
 inspectable and documented. The discipline that keeps this from becoming flag
@@ -123,10 +124,11 @@ the physics.
 other circuit degrade; or worse, tweaking component values to dodge the
 conflict — which corrupts the model to flatter the solver (see ADR-005).
 
-**Status.** Accepted, and actively applied — the most recent addition,
-`--bjt-fa`, exposes an opt-in forward-active reduction that has no safe
-auto-detector, precisely because auto-detecting it wrong would be
-silently lossy.
+**Status.** Accepted, and applied. Example: `--bjt-fa` defaults to `off`.
+Its `auto` mode reduces only pure Ebers-Moll BJTs that are forward-active at
+the DC operating point, where the 1-D model is exact, and a sample on which a
+reduced BJT leaves that region is counted unsolved and refused — because a
+reduction that is wrong without notice is silently lossy.
 
 ---
 
@@ -252,8 +254,15 @@ components.
 conditioning and the machine-precision verification targets (ADR-006) leave no
 room for single precision. Integrate with the **trapezoidal** rule by default
 (2nd-order accurate, energy-conserving), and switch to **backward-Euler**
-(L-stable, 1st-order) only where stability requires it — auto-detected when the
-companion system's spectral radius exceeds 1, or forced with `--backward-euler`.
+(L-stable, 1st-order) only where stability requires it — auto-detected by the
+ring predicate, or forced with `--backward-euler` or `.integrator be`. The
+predicate examines the trapezoidal charge propagator linearised at the DC
+operating point and promotes when it has a growing pole that backward Euler
+removes, or a Nyquist-side pole that is still above −60 dB after 10 ms, is
+excited at or above −60 dB of the passband gain, and costs more than backward
+Euler's own in-band error (`docs/aidocs/RING_PREDICATE.md`,
+`crates/melange-solver/src/codegen/ring.rs`). Signal-dependent rings are left
+to the runtime BE-latch on nodal builds.
 
 **Consequences.** The common case gets the accurate integrator; the stiff,
 high-gain feedback case gets the stable one, chosen by measurement rather than by

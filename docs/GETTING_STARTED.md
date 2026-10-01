@@ -203,7 +203,7 @@ Key flags for `melange compile`:
 | `--mono` | off | Force a 1-in/1-out plugin. One output node already gets that layout automatically; two output nodes (`-n a,b`) get 2-in/2-out |
 | `--cpu-baseline x86-64-v3\|x86-64-v2\|x86-64` | `x86-64-v3` | x86_64 instruction set for the plugin. v3 is fastest but crashes on pre-2013 CPUs; `x86-64` runs everywhere (plugin format only) |
 | `--backward-euler` | off | Use backward Euler (unconditionally stable) |
-| `--tube-grid-fa auto\|on\|off` | `auto` | Pentode grid-off dimension reduction |
+| `--tube-grid-fa auto\|on\|off` | `auto` | Pentode grid-off dimension reduction: opt-in (`on`, warned, not accuracy-neutral); `auto` keeps the full 3D model |
 | `--opamp-rail-mode` | `auto` | Op-amp rail saturation strategy |
 | `--vendor` | `"Melange"` | Plugin vendor name (plugin format only) |
 | `--vendor-url` / `--email` | melange repo / empty | Publisher URL and support contact the DAW shows |
@@ -239,6 +239,7 @@ Supported devices: resistors, capacitors, inductors (including saturating with `
 | NaN / oscillation | DC operating point failed | Check biasing network; try `--backward-euler` |
 | "exceeds MAX_M" error | More than 32 nonlinear dimensions: a melange limit on generated code size, and every solver route refuses | No solver flag avoids it; see "Nonlinear System Size" in `docs/limitations.md` |
 | Compilation slow | Large circuit with nodal solver | Expected for N>30 circuits; runtime is still fast |
+| `Input node 'in' not found` on an oscillator | The circuit has no audio input, but every build drives one | Add a dummy `in` node and run with `--amplitude 0`; see "Circuits with no audio input" in [NETLIST_GUIDE.md](NETLIST_GUIDE.md) |
 
 ## Next Steps
 

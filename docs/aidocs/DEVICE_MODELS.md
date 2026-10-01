@@ -80,7 +80,7 @@ and not reported:
 ### Current
 ```
 i_d = IS * (exp(v_d / (N*VT)) - 1)
-VT = 26mV @ room temp (25C)
+VT = kT/q at TNOM = 300.15 K (27 °C) = 25.865 mV  (VT_ROOM, melange-primitives util.rs)
 ```
 
 ### Conductance
@@ -89,7 +89,7 @@ g_d = di/dv = (IS/(N*VT)) * exp(v_d/(N*VT))
             = (i_d + IS) / (N*VT)
 ```
 
-### Clamping (prevent overflow) — IS-aware since 2026-06-09
+### Clamping (prevent overflow) — IS-aware
 ```
 x = v_d / (N*VT)
 x ≤ 40:  legacy path, i = IS*(exp(max(x, -40)) - 1)      (bit-exact pre-fix)
@@ -927,14 +927,14 @@ or Sta-Level schematic requires either:
 - An author contribution (Reefman accepts pull-model fits via
   ExtractModel — see his uTracer website)
 
-### Grid-Off Reduction (Phase 1b) — opt-in only since 2026-09-04
+### Grid-Off Reduction (Phase 1b) — opt-in only
 
 The reduction drops a pentode from 3D (Vgk/Vpk/Vg2k → Ip/Ig2/Ig1) to 2D
 (Vgk/Vpk → Ip/Ig2): the `Ig1` output is dropped and `Vg2k` is frozen at
 its DC-OP value, stored per slot on `DeviceSlot.vg2k_frozen`. It was
-built for Plexi-class amps (4×EL34 + 3×12AX7 = M 18 → 14, back under the
-DK Schur cap) and used to be selected automatically from the DC operating
-point (`Vgk < -(vgk_onset + 0.5)`).
+built to bring large multi-pentode power amps under the DK Schur cap
+(4×EL34 + 3×12AX7: M 18 → 14). It runs only under `--tube-grid-fa on`;
+`auto` keeps the full 3D model.
 
 **It is not accuracy-neutral, and no compile-time test can make it so.**
 Measured against ngspice on four corpus decks (validate default 0.1 V,

@@ -211,7 +211,7 @@ Every one of these is a real published model with real published equations, impl
 | JFET | Shichman-Hodges (triode + saturation) | N-channel and P-channel |
 | MOSFET | SPICE Level 1 | Body effect, channel-length modulation |
 | Vacuum Triode | Norman Koren plate + Dempwolf & Zölzer grid current ([onset runs late](docs/limitations.md#triode)) | 12AX7, 12AU7, 12AT7, 6SN7, 6SL7, and more |
-| Vacuum Pentode | 5 equation families, 29 models | EL84, EL34, EF86, 6L6, 6V6, KT88, 6550, and 22 more. Auto grid-off optimization for cutoff |
+| Vacuum Pentode | 5 equation families, 29 models | EL84, EL34, EF86, 6L6, 6V6, KT88, 6550, and 22 more. Opt-in grid-off reduction (`--tube-grid-fa on`) |
 | Op-Amp | Boyle VCCS macromodel | slew-rate limiting, asymmetric VCC/VEE rails, 4 clamping strategies; no bandwidth pole (`GBW` only defaults the rails) |
 | VCA | THAT 2180 exponential | Current-mode with gain-dependent THD |
 | CdS LDR (opto) | VTL5C3/4, NSL-32 | Placed with the `O` element (`O1 rphoto+ rphoto- led+ led- MODEL`); attack/release photocell dynamics on the stateful-device codegen path. No ngspice twin — SPICE has no LDR model, so there is nothing to compare against |
@@ -427,7 +427,7 @@ SPICE Netlist ─┐
 KiCad XML ─────┘
 ```
 
-`CircuitIR` is language-agnostic and serializable. The current emitter targets Rust; a C++ backend is in progress. FAUST was explored and ruled out: FAUST's generated code is deliberately not Turing-complete, so it cannot express a Newton-Raphson solve with a data-dependent iteration count — which is melange's inner loop. The `Emitter` trait is public, so if you need a target that isn't on that list, the door is open and nobody is stopping you — though be aware the Rust emitter is ~20k lines, so it is a real project rather than an afternoon.
+`CircuitIR` is language-agnostic and serializable. The current emitter targets Rust; a C++ backend is the next planned target. FAUST was explored and ruled out: FAUST's generated code is deliberately not Turing-complete, so it cannot express a Newton-Raphson solve with a data-dependent iteration count — which is melange's inner loop. The `Emitter` trait is public, so if you need a target that isn't on that list, the door is open and nobody is stopping you — though be aware the Rust emitter is ~20k lines, so it is a real project rather than an afternoon.
 
 ```
 crates/
@@ -435,7 +435,6 @@ crates/
   melange-devices/      Component models (diode, BJT, JFET, MOSFET, tube, opamp, VCA, LDR)
   melange-solver/       MNA/DK engine + codegen — the core
   melange-validate/     SPICE validation pipeline (ngspice comparison)
-  melange-plugin/       nih-plug helpers (parameter mapping)
 
 tools/
   melange-cli/          Command-line front-end

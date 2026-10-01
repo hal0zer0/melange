@@ -160,8 +160,12 @@ su = S * u
 
 ## Chord Method + Sparse LU (Nodal Full-LU Path)
 
-For circuits routed to the nodal full-LU path (K≈0, ill-conditioned K, or
-spectral radius > 0.999), the codegen emits a per-iteration N×N LU solve.
+For circuits routed to the nodal full-LU path (structural: saturating
+inductor or behavioral source; or by conditioning: K≈0, a positive K
+diagonal, ill-conditioned K or S, or an unstable Schur prediction — the
+whole-system `spectral_radius_s_aneg` above 1.002 on a well-conditioned K;
+see `emit_nodal` in `rust_emitter/nodal_emitter.rs`), the codegen emits a
+per-iteration N×N LU solve.
 Three optimizations stack to keep this real-time:
 
 1. **Chord method** — `lu_factor` runs only every `CHORD_REFACTOR=5` NR

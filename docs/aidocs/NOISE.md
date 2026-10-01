@@ -272,7 +272,7 @@ pub struct CircuitState {
 ```
 
 Memory: 32 bytes per stream + 9 bytes of cache-flag per stream + ~40 bytes of
-scalars. ~1-2 KB per `CircuitState` for a Pultec-class circuit (~100 sources
+scalars. ~1-2 KB per `CircuitState` for a passive tube EQ (~100 sources
 with all phases enabled). Trivial.
 
 ### Runtime controls
@@ -814,8 +814,8 @@ the model card:
   RB/RC/RE inside the device model: there is no node pair to inject across with the existing Norton
   machinery, so the source is **skipped** and codegen logs
   `log::warn!("noise: BJT <name> parasitic RB/RC/RE thermal noise skipped …")`.
-  This is an honest under-modeling of rbb′ hiss on those builds (wurli/Neve
-  class when they route DK). A faithful equivalent
+  This is an honest under-modeling of rbb′ hiss on those builds (the Wurlitzer
+  and 3-BJT preamp class when they route DK). A faithful equivalent
   (base-side voltage noise → current injection across (base, emitter) scaled
   by the small-signal loop admittance at the OP) needs the loop Jacobian at
   codegen time; do it properly or not at all — do not fake a magnitude.
@@ -1046,7 +1046,7 @@ Pick one. Each is independently shippable.
 
 ### 1. Nodal codegen path (tube-amp circuits)
 
-**Why**: passive-eq, Plexi, 4kbuscomp, Neve 1073, etc. all route to the nodal
+**Why**: passive-eq, multi-pentode power amps, 4kbuscomp, the steve-1073 decks, etc. route to the nodal
 codegen path (`emit_nodal` in `rust_emitter/nodal_emitter.rs`). Without this
 hook-up, `--noise thermal` on those circuits is a silent no-op.
 
@@ -1071,10 +1071,10 @@ matches resistor count, same as the DK test.
 
 **Why**: Phase 1 skips `.pot`-marked resistors because their R is runtime-
 variable and the coefficient `sqrt(1/R)` baked at codegen time is stale
-after a pot change. Users with potted circuits (tube-screamer-style overdrive, the passive EQ)
+after a pot change. Users with potted circuits (an op-amp overdrive's drive pot, the passive EQ)
 currently get no noise contribution from their pots.
 
-**Where**: `collect_thermal_noise_sources` in `codegen/ir.rs`; the emitted
+**Where**: `collect_thermal_noise_sources` in `codegen/ir/noise.rs`; the emitted
 `set_pot_N` / `set_switch_N` methods in `dk_emitter.rs`.
 
 **Recipe**:

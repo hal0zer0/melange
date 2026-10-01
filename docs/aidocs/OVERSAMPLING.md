@@ -403,7 +403,7 @@ intermodulation changes. A single tone cannot show this, which is why a
 single-tone residual must not be attributed to it. 19 kHz + 20 kHz is the
 conventional aliasing pair and the informative one here; 1 kHz + 1.1 kHz is the
 musically relevant control, and it shows the up leg doing nothing measurable
-where a Tube Screamer is actually played.
+where a guitar overdrive is actually played.
 
 Also unremoved: residual imaging/aliasing, and the solver's own change of answer
 from running at a finer timestep, which is a genuine improvement rather than an

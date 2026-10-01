@@ -2,7 +2,7 @@
 
 **What we can prove about melange's correctness, what we cannot, and how each
 claim was established.** This is the honest ledger: every row states its
-evidence *and* its reach. Initial content: 2026-08-03.
+evidence *and* its reach.
 
 ---
 
@@ -37,12 +37,14 @@ no external oracle at all.
 | **1 — Numerical** | The solver solves the discretized equations correctly | Closed-form / invariant checks, oracle-free | **Proven** to 1e-11…1e-16 |
 | **2 — Device models** | Device equations match their canonical published forms | Hand-computed anchors + physics invariants vs. textbook models, independent of ngspice | **Proven** to 1e-12 |
 | **3 — Circuit fidelity** | A specific netlist reproduces the real unit | Measured/published hardware references | **Anchored for one circuit** (Wurlitzer 200A preamp), hobbyist-grade |
-| Cross-sim | Generated code tracks ngspice on 13 decks | ngspice waveform correlation (CI) | Pre-existing; peer agreement, not ground truth |
+| Cross-sim | Generated code tracks ngspice | ngspice waveform correlation: the SPICE-validation suite (CI) and `melange validate` on the circuits corpus | Peer agreement, not ground truth |
 
-Prior to this effort, essentially *all* device correctness in melange grounded
-out in ngspice waveform correlation — a circular check (a shared model error
-would pass). Tiers 1 and 2 break that circularity: their references are
-mathematics and published model equations, not another simulator.
+Without Tiers 1 and 2, device correctness would ground out in ngspice waveform
+correlation — a circular check (a shared model error would pass). Tiers 1 and 2
+break that circularity: their references are mathematics and published model
+equations, not another simulator. The current cross-simulator results are in
+`docs/aidocs/STATUS.md` ("SPICE Validation Results" and "Validated Circuits");
+the method is in `docs/aidocs/SPICE_VALIDATION.md`.
 
 ---
 
@@ -60,8 +62,8 @@ successively halved timesteps and checking the error quarters:
 - Resonant RLC (couples L- and C-history): ratios **3.997, 4.000** → order 2.
 - Ideal voltage divider: settles to the exact series-divider ratio to **1e-12**.
 
-The pre-existing companion tests compare against the *discrete* recurrence and
-are blind to integration order by construction; these compare against physical
+The companion unit tests compare against the *discrete* recurrence and are
+blind to integration order by construction; these compare against physical
 truth. *(commit `9bf1b7d`)*
 
 ### 3.2 Power balance (Tellegen) — `crates/melange-solver/tests/tellegen_power_balance_tests.rs`
@@ -106,7 +108,7 @@ Files: `crates/melange-devices/tests/canonical_conformance.rs`,
 | MOSFET | Shichman-Hodges L1 | hand-computed triode/sat/cutoff points, triode↔sat continuity, `Id ∝ Vov²` (ratio=4), exact λ modulation |
 | JFET | Shichman-Hodges | same, plus the defining `Id = IDSS at Vgs=0` |
 | Diode | Shockley | 6 bias points, and ΔV=N·VT ⇒ ×e exactly |
-| Diode breakdown | Zener exponential | `I(−BV) = −IBV` exact, ×e steepness, ±40 clamp (was **zero** tests) |
+| Diode breakdown | Zener exponential | `I(−BV) = −IBV` exact, ×e steepness, ±40 clamp |
 | BJT | SPICE Gummel-Poon | reduces to Ebers-Moll (β=BF) at ∞ params; Ic & Ib vs SGP across high injection; **β·qb = BF** (qb modulates collector, not base current) |
 | VCA | Blackmer (THAT 2180) | `gain=G0·exp(−Vc/VSCALE)`, dB-linear (6.1 mV/dB ⇒ −1 dB exactly) |
 | Pentode | Reefman "Derk" | **Ip/Ig2 independent of Vgk** (shared Koren current cancels; 8.97174024 across Vgk ∈ {−5…−40}), plate flatness, monotonic grid control, cutoff |
@@ -138,7 +140,7 @@ real-hardware sources — schematic #203720-S-3 annotations and GroupDIY multime
 readings on a real unit — plus Brad Avenson's measured gain and EP-Forum tremolo
 measurements. **Grade: published-spec + hobbyist-multimeter, not lab-grade.**
 
-**DC operating point** (`melange dc-op`):
+**DC operating point** (`melange dc-op`, measured 2026-08-03):
 
 | Node | Real hardware | melange | Δ |
 |------|---------------|---------|---|
@@ -156,8 +158,8 @@ only self-consistent to ~19% (they violate KCL as written). Per the peer's
 ruling, this discrepancy is non-load-bearing — gain/Miller/clipping key off Ic
 and Vce, which match. **Pass surface: TR‑2 nodes + stage-1 Zin + gain.**
 
-**Closed-loop gain** (`melange analyze`) — the load-bearing metric, and it passes
-cleanly:
+**Closed-loop gain** (`melange analyze`, measured 2026-08-03) — the load-bearing
+metric, and it passes cleanly:
 
 | Shunt (R_ldr) | melange @1kHz | reference |
 |---------------|---------------|-----------|
@@ -186,8 +188,7 @@ overclaiming:
 2. **No lab-grade hardware measurements exist** for the ecosystem's circuits. No
    swept frequency-response or THD-vs-level of a real unit is available; those
    tables in the docs are SPICE-derived (cross-simulator, not ground truth).
-3. **Cross-simulator agreement (ngspice, 13 decks in CI) is a peer check, not
-   ground truth.** ngspice can be wrong too, and the comparison DC-blocks both
+3. **Cross-simulator agreement (ngspice) is a peer check, not ground truth.** ngspice can be wrong too, and the comparison DC-blocks both
    sides and hardcodes the same Thevenin input — shared assumptions cancel.
 4. **THD/harmonic character is not a validated metric for feedback-linearized
    stages** (e.g. the Wurli preamp: its character is the pickup, not the preamp).
@@ -198,32 +199,7 @@ circuit, not inferred.
 
 ---
 
-## 7. The process works — bugs it surfaced
-
-Evidence that the validation net has teeth: building it shook out real defects.
-
-- **Netlist sync-drift** — the Wurli preamp's `.cir` had forked between
-  melange-circuits and openwurli (a stripped constant-β card vs. the full
-  Gummel-Poon card). Surfaced by the DC anchor; fixed downstream
-  (melange-circuits `327ad86`).
-- **Parser rejected `ISC=0` / `ISE=0`** — valid SPICE (disables leakage; also
-  melange's own default), so a standard card couldn't be written. Fixed
-  (`49bd4bc`).
-- **Codegen `clippy::manual_swap`** — nodal emitter emitted a manual element
-  swap; now emits `x.swap()` (`49bd4bc`).
-- **Power-amp overdrive robustness** — the Wurli power amp's internal node
-  voltages diverge erratically under drive (convergence-path-dependent, not
-  drive-gated). Under active investigation; delivered output is bounded only by
-  the output clamp. *(open)*
-
-A methodological lesson also logged: **verify against the canonical/primary
-source before acting.** The DC anchor's first pass ran a drifted netlist copy
-and produced a wrong conclusion, corrected only after checking the canonical
-card — the same discipline this document is built on.
-
----
-
-## 8. Reproducing the validations
+## 7. Reproducing the validations
 
 ```bash
 # Tier 1 — numerical (oracle-free)
@@ -235,16 +211,17 @@ cargo test -p melange-devices --test canonical_conformance
 cargo test -p melange-solver --test diode_breakdown_conformance
 
 # Tier 3 — Wurli fidelity anchors (need the netlist)
-melange dc-op  ../melange-circuits/unstable/preamp/wurli-preamp.cir     # DC bias
+melange dc-op  ../melange-circuits/testing/preamp/wurli-preamp.cir      # DC bias
 melange analyze <wurli-preamp with R_ldr=13k> --start-freq 200 --end-freq 5000  # gain
 
-# Pre-existing cross-sim (needs ngspice, runs in CI)
+# Cross-sim (needs ngspice, runs in CI)
 cargo test -p melange-validate --test spice_validation -- --include-ignored
 ```
 
 The Tier-3 checks are kept as **documented anchors** rather than committed tests:
-they run against the openwurli-synced netlist, and a frozen test copy would only
-risk re-introducing the sync-drift this effort just fixed.
+they run against the canonical, openwurli-synced netlist, and a frozen test copy
+would drift from it. Run them on the canonical card: a drifted copy of a netlist
+gives a confident wrong answer.
 
 ---
 

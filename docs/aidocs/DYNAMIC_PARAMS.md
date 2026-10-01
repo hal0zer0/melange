@@ -9,9 +9,9 @@ DK kernel build.
 
 | Directive | Parser | MNA struct | Codegen IR |
 |-----------|--------|-----------|------------|
-| `.pot`    | `crates/melange-solver/src/parser.rs` (`parse_pot_directive`) | `PotInfo` in `mna.rs` | `PotentiometerIR` in `codegen/ir.rs` |
-| `.wiper`  | `parser.rs` (`parse_wiper_directive`) | `WiperGroupInfo` in `mna.rs` | `WiperGroupIR` in `codegen/ir.rs` |
-| `.gang`   | `parser.rs` (`parse_gang_directive`) | `GangGroupInfo` in `mna.rs` | `GangGroupIR` in `codegen/ir.rs` |
+| `.pot`    | `crates/melange-solver/src/parser.rs` (`parse_pot_directive`) | `PotInfo` in `mna.rs` | `PotentiometerIR` in `codegen/ir/mod.rs` |
+| `.wiper`  | `parser.rs` (`parse_wiper_directive`) | `WiperGroupInfo` in `mna.rs` | `WiperGroupIR` in `codegen/ir/mod.rs` |
+| `.gang`   | `parser.rs` (`parse_gang_directive`) | `GangGroupInfo` in `mna.rs` | `GangGroupIR` in `codegen/ir/mod.rs` |
 | `.switch` | `parser.rs` (`parse_switch_directive`) | `SwitchInfo` in `mna.rs` | (rebuilt at codegen time) |
 
 Plugin generation: `tools/melange-cli/src/plugin_template.rs` emits one
@@ -88,19 +88,17 @@ is mathematically exact (same K' as full rebuild, to 1e-9 float
 noise) — the real root cause was DC-OP seed staleness, now fixed at
 the correct layer by `recompute_dc_op()` (see
 `dc_op_recompute_tests.rs::e5_diode_vcc_converges_within_tolerance`).
-`SHERMAN_MORRISON.md` remains as math reference; the SM
-precomputation (`su`, `usu`, `nv_su`, `u_ni`) still runs at codegen
-time but is currently unused by the Tera templates.
+`SHERMAN_MORRISON.md` remains as math reference; the SM precomputation
+(`su`, `usu`, `nv_su`, `u_ni`) and its emission were deleted (only topology
+and range remain in `PotKernelData` / `PotentiometerIR`).
 
 **Deferred performance work (Phase 5).** Per-sample `set_pot_N` calls
 still cost one full O(N^3) matrix rebuild per changing sample, which
 pegs CPU during knob drags. If that cost ever blocks a shipping
-plugin, revive Sherman-Morrison rank-1 updates — the precomputed
-vectors and ctx inserts are already in `rust_emitter.rs:2229-2256`;
-only the Tera template hookup (~80 LOC) is missing. See
-`batch_d_phase1_phase2.md` and `batch_d_research_swarm.md`. Do not
-pre-emptively land it — the click fix is orthogonal and landed first
-on its own merits.
+plugin, revive Sherman-Morrison rank-1 updates: the precomputation
+(`SHERMAN_MORRISON.md`) and its emission would have to be rebuilt, since
+both were deleted. Do not pre-emptively land it — the click fix is
+orthogonal and landed first on its own merits.
 
 ### Constraints
 - Maximum 64 combined `.pot` + `.wiper` legs per circuit (each `.wiper`
@@ -158,7 +156,7 @@ R_right in_r out_r 100k
 .pot R_left  10k 1Meg
 .pot R_right 10k 1Meg
 .gang "Stereo Volume" R_left R_right             ; both pots, same direction
-.gang "Klon Gain" R_gain_a !R_gain_b 0.5         ; one inverted, default 0.5
+.gang "Gain" R_gain_a !R_gain_b 0.5              ; one inverted, default 0.5
 ```
 
 ### Semantics
@@ -168,8 +166,8 @@ position (0.0–1.0) drives all members in lock-step.
 
 The `!` prefix on a member name **inverts** that member's response — when
 the gang position is at 1.0, the inverted member sees 0.0, and vice
-versa. This is how dual-gang pots with reverse-log tapers (Klon "Gain"
-control, passive dual-section EQ) are modeled: one section sweeps
+versa. This is how dual-gang pots with reverse-log tapers (an overdrive's
+crossfading gain control, a passive dual-section EQ) are modeled: one section sweeps
 clean→clipped while the gang-mate sweeps clipped→clean to crossfade
 between paths.
 

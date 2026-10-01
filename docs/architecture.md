@@ -38,8 +38,8 @@ The solver generates Rust code with:
 
 The generated code should be indistinguishable in performance from hand-written code.
 
-### Boundary 5: Rust → Plugin (nih-plug / melange-plugin)
-Handled by nih-plug for the plugin shell. melange-plugin provides helpers for voice management, oversampling decisions, and parameter mapping from physical component values to user-facing controls.
+### Boundary 5: Rust → Plugin (nih-plug)
+Handled by nih-plug for the plugin shell. `melange compile --format plugin` writes a complete nih-plug project around the generated solver: parameters for `.pot`/`.wiper`/`.switch` controls, optional oversampling, and input/output level parameters (see [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md)).
 
 ## Crate Architecture
 
@@ -146,11 +146,6 @@ Depends on solver. Requires ngspice installed on the system.
 **Test Generators:**
 - Given SPICE reference data, emit `#[test]` functions with tolerance assertions
 - Three-tier methodology: circuit-only, voice-model, full-plugin
-
-### melange-plugin (Layer 5)
-Depends on solver. nih-plug integration helpers — `ParamMapping` from physical
-component values to user-facing controls, plus re-exports of primitives/solver
-for the generated plugin to build against.
 
 ### melange-cli
 The command-line interface for working with circuits.

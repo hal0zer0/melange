@@ -378,7 +378,6 @@ fn build_rhs(input: f64, state: &CircuitState) -> [f64; N] {
     // RHS_CONST (DC sources, if any; x1 on every row)
     // + A_neg * v_prev  (A_neg = alpha*C: capacitor history)
     // + q_dot           (carried charge derivative; trapezoidal builds)
-    // + inductor companion history (DK companion path only)
     // + input / INPUT_RESISTANCE  (V_in(n+1) * G_in, once)
     // + .inject / .runtime sources at n+1
 }
@@ -653,8 +652,8 @@ in `crates/melange-solver/src/linear_solver.rs`.
 | Capability | How it's emitted |
 |------------|-----------------|
 | NR Jacobian | Block-diagonal `jdev_` entries, `J[i][j] = δ_ij - Σ_k jdev_{ik} * K[k][j]` |
-| Linear solve | M=1 direct, M=2 Cramer's, M=3..24 unrolled Gauss; full LU for nodal full-LU path |
-| Device coverage | Diode (1D), BJT (1D forward-active or 2D), JFET (2D), MOSFET (2D), Tube (2D), VCA (2D), Op-amp (linear) |
+| Linear solve | M=1 direct, M=2 Cramer's, M=3..32 unrolled Gauss (`MAX_M` = 32); full LU for nodal full-LU path |
+| Device coverage | Diode (1D), BJT (2D; 1D forward-active only under opt-in `--bjt-fa auto\|force`), JFET (2D), MOSFET (2D), Triode (2D), Pentode (3D; 2D only under opt-in `--tube-grid-fa on`), VCA (2D), Op-amp (linear) |
 | DC OP init | `DC_NL_I` constant automatically initializes `i_nl_prev` |
 | Oversampling | 2× / 4× cascaded polyphase half-band IIR |
 | Sparsity | Zero entries skipped in emission (per-matrix `SparseInfo`) |

@@ -20,8 +20,15 @@ The generated solver uses the charge (companion) form: `H` has no `-G`
 term, and the carried capacitor currents `q_dot = C*dx/dt` complete the
 history. Derivation, update rules and the reason for this form:
 `COMPANION_MODELS.md` "Charge (Companion) Form". The library `DkKernel`
-still builds the whole-system `a_neg = alpha*C - G`, which the stability
-discriminators evaluate (`S*(alpha*C - G)`).
+still builds the whole-system `a_neg = alpha*C - G`. Its spectral radius
+`rho(S*(alpha*C - G))` feeds two routing estimates only: the DK-versus-nodal
+"trapezoidal unstable" trigger (`codegen/routing.rs`) and the nodal
+Schur-versus-full-LU gate (`spectral_radius_s_aneg`, `codegen/stability.rs`).
+It does not decide the integrator: backward-Euler promotion is the ring
+predicate on the charge-form propagator linearised at the DC operating
+point (`RING_PREDICATE.md`). The whole-system operator puts every algebraic
+direction at `z = -1`, which is why it is the wrong operator to judge
+ringing on.
 
 ### S Matrix (Inverse System Matrix)
 ```

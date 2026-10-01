@@ -178,11 +178,11 @@ system via DK reduction).
    `i_nl_fresh − i_nl_chord` (mirrors the DK Schur path's gate), plus an
    adaptive refactor trigger (>50 % relative `j_dev` change). Both work
    for single-diode engagement (**light clipping**, amp ≤ 0.03 V on
-   Klon) but **fail at heavy clipping**. The prior "bistable chord-LU
+   the 4-op-amp overdrive deck) but **fail at heavy clipping**. The prior "bistable chord-LU
    fixed points" and "PTC empirically fails because of static sparse
    pivots" diagnoses have both been **retracted** (verified 2026-04-08
    fourth session by three parallel verification agents). Three fix
-   candidates were then empirically tested against Klon BoyleDiodes at
+   candidates were then empirically tested against that deck's BoyleDiodes build at
    amp = [0.01, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.30, 0.50] V,
    measuring `state.v_prev[OUTPUT_NODES[0]]` (raw output node,
    pre-clamp) to avoid the `output[i].clamp(-10.0, 10.0)` safety rail

@@ -9,10 +9,10 @@
 > the generated code they produced had been dead (no template referenced
 > it) since the Batch D per-block `rebuild_matrices` shipped, and it
 > referenced state fields that no longer exist. Pot changes are handled by
-> per-block O(N³) rebuild (see memory: batch_d_phase1_phase2). SM survives
-> **only** in the saturating-inductor rank-1 update
-> (docs/aidocs/… see `saturating_inductors` memory). The math below is kept
-> as reference for that use and for historical context.
+> per-block O(N³) rebuild (`DYNAMIC_PARAMS.md`). SM survives **only** in the
+> saturating-inductor rank-1 core term (`SATURATING_TRANSFORMERS.md`,
+> `saturating_core.rs`). The math below is kept as reference for that use and
+> for historical context.
 
 ## Purpose
 
@@ -24,15 +24,16 @@ A_neg, and S*N_i via the Sherman-Morrison formula at O(N^2) cost.
 
 | Component | File |
 |-----------|------|
-| `SmPotData` struct + DK precomputation | `crates/melange-solver/src/dk.rs` |
+| `PotKernelData` struct (topology + range; the SM vectors are gone) | `crates/melange-solver/src/dk.rs` |
 | `PotInfo` struct | `crates/melange-solver/src/mna.rs` |
 | `PotDirective` parser struct | `crates/melange-solver/src/parser.rs` |
-| `PotentiometerIR` struct | `crates/melange-solver/src/codegen/ir.rs` |
-| SM scale helper + sequential corrections | `crates/melange-solver/src/codegen/rust_emitter/dk_emitter.rs` |
-| State fields + sample-rate rebuild | `crates/melange-solver/templates/rust/state.rs.tera` |
+| `PotentiometerIR` struct (topology + range) | `crates/melange-solver/src/codegen/ir/mod.rs` |
+| Per-block rebuild + sample-rate rebuild | `crates/melange-solver/templates/rust/state.rs.tera` |
 
-Line numbers omitted — grep the symbol name (`SmPotData`, `PotInfo`,
-`PotDirective`, `PotentiometerIR`) to locate the current definition.
+The DK precomputation (`SmPotData`) and the dk_emitter SM correction
+functions no longer exist. Line numbers omitted — grep the symbol name
+(`PotKernelData`, `PotInfo`, `PotDirective`, `PotentiometerIR`) to locate the
+current definition.
 
 ## Netlist Syntax
 

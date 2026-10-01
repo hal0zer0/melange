@@ -17,7 +17,7 @@ deck that carries them is still validatable — see
 | Directive    | Parser                                                                             | Apply site                                                      |
 |--------------|------------------------------------------------------------------------------------|-----------------------------------------------------------------|
 | `.seed`      | `parser.rs::parse_directive`                                                       | Stored on `Netlist::seed`                                       |
-| `.mismatch`  | `parser.rs::parse_mismatch_directive` → `MismatchSpec`                             | `codegen/ir.rs::build_device_info_with_mna` via `apply_mismatch` |
+| `.mismatch`  | `parser.rs::parse_mismatch_directive` → `MismatchSpec`                             | `codegen/ir/mod.rs::build_device_info_with_mna` via `apply_mismatch` |
 | `.tolerance` | `parser.rs::parse_tolerance_directive`                                             | `parser.rs::Netlist::apply_passive_tolerance` at end of parse    |
 
 Shared RNG: `parser.rs::deterministic_draw(seed, class_tag, name)` →

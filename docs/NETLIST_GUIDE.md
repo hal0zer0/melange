@@ -88,6 +88,66 @@ A `.port` naming a node the deck does not have is refused, with the same "did
 you mean" suggestion, so the declaration cannot become a new hiding place for a
 typo.
 
+### Circuits with no audio input (oscillators)
+
+Every build drives an input node, so `simulate` and `compile` need one even
+when the circuit generates its own signal. Without it the run stops at
+`Error: Input node 'in' not found in circuit.` The current recipe is a dummy
+input: give the deck an `in` node that terminates in a resistor and touches
+nothing else, and run with `--amplitude 0`. melange stamps its 1 Ω input
+source on that node, which is isolated from the circuit, so the oscillator is
+undisturbed.
+
+```spice
+PNP astable multivibrator (free-running; no audio input)
+* melange drives node "in"; this circuit has no use for it, so it ends in a load.
+R_in_dummy in 0 1k
+Vrail rail 0 DC 8
+R_gnd green 0 2.7k
+Q1 c3 b3 rail SFT352
+Q2 c4 b4 rail SFT352
+R_b3 b3 green 150k
+R_b4 b4 green 150k
+R_c4 c4 green 56k
+R_c3 c3 ntap 2.7k
+R_ntap ntap green 27k
+* The IC kicks the circuit off its symmetric DC point.
+C_x1 c3 b4 6n IC=-4
+C_x2 c4 b3 6.8n
+C_out ntap out 1u
+R_bleed out green 100k
+.model SFT352 PNP(IS=3e-7 BF=90 VAF=50 RB=40 RC=4 RE=1 CJE=80p CJC=30p TF=1n)
+```
+
+```bash
+melange simulate astable.cir --amplitude 0 --duration 2 --solver nodal -o astable.wav
+melange compile astable.cir --solver nodal -o circuit.rs
+```
+
+Three things to know before trusting the result:
+
+- **An oscillator needs a perturbation to start.** A symmetric circuit
+  simulated without noise or an initial condition can sit at its equilibrium
+  forever, or run for a few tens of milliseconds and park there. Give it an
+  `IC=` on a capacitor (as above), compile with `--noise thermal`, or, if the
+  input node is coupled into the circuit instead of isolated, drive a tiny
+  keep-alive amplitude (`--amplitude 1e-9`). A deterministic reference wants
+  `IC=` or the keep-alive; noise makes every render different.
+- **Switching oscillators need the nodal solver today.** The deck above is
+  routed to DK by default, and DK has no recovery at a regenerative switching
+  edge: the default build leaves samples unsolved and `simulate` refuses it.
+  `--solver nodal` solves every sample (its sub-step ladder crosses the edges);
+  `simulate` prints `unsolved_sample_count: 0` when it did. Close relatives of
+  this deck are checked against ngspice's period in the CLI test suite
+  (`test_ic_seeded_astable_base_rate_solves_every_sample` and
+  `test_ic_seeded_astable_schur_period_matches_spice` in
+  `tools/melange-cli/tests/cli_integration.rs`).
+- **A self-starting two-transistor astable with hard-saturating transistors
+  is not yet solved reliably.** See "Self-starting two-transistor astables" in
+  [limitations.md](limitations.md) before raising `--max-iter` to get past a
+  refusal: on that class a larger budget can settle on a spurious oscillation
+  with every sample counted as solved.
+
 ## From Schematic to Netlist
 
 ### Step 1: Label every node

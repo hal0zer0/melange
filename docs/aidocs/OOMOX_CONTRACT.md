@@ -310,7 +310,7 @@ Two idioms (both break identically, the second is harder to grep):
 |---|---|---|---|---|
 | basic-bitch | `VOLTAGE` | `VoltageRef::GUITAR` | `src/lib.rs:93` | input drive domain |
 | | `OUTPUT_TRIM` | `0.0330` | `src/lib.rs:105` | defaults level, re-pin via `tests::gain_staging_at_defaults` |
-| five-watt-freddie | `OUTPUT_TRIM` | `0.003397` | `src/lib.rs:83` | Champ output level vs jlbrock.wav |
+| five-watt-freddie | `OUTPUT_TRIM` | `0.003397` | `src/lib.rs:83` | output level vs jlbrock.wav |
 | gold-press | `OUTPUT_TRIM` | `1.0` | `src/lib.rs:169` | pinned 2026-05-11 via `tests/live_gain_staging.rs` (presets peak −10.6/−8.4/−6.9 dBFS) |
 | | click/pop/scratch/hiss volts | `0.015 / 0.045 / 0.018 / 0.004 / 0.012` | `click.rs:58`, `needle_drop.rs:31,34`, `surface_noise.rs:21,38` | **injection amplitudes in circuit-input volts** — scale with cartridge/RIAA chain gain |
 | | tonearm `FORCING_RMS_AT_MAX_MOTOR_VOLTS` | `0.005` | `tonearm.rs:50` | resonator level post-RIAA |
@@ -320,7 +320,7 @@ Two idioms (both break identically, the second is harder to grep):
 | | `NOISE_GAIN` | `1.0` all sources | same | physical honesty pin |
 | | `SMPS_AMPLITUDE_V` | `5.0` (35 kHz saw into `smps_v`) | `smps_ripple/mod.rs` | ripple drive volts |
 | periodic-pedal | `VOLTAGE`; `OUTPUT_TRIM` | `LINE`; `0.923` | `src/lib.rs:63,70` | calibrated 2026-06-09, −9 dBFS midpoint |
-| pipe-shouter | `OUTPUT_TRIM`; `MID_BOOST_GAIN_DB` | `0.147167` (=−16.64 dB); `4.0` @700 Hz | `src/lib.rs:45,103` | TS808 level + plugin-side mid restore |
+| pipe-shouter | `OUTPUT_TRIM`; `MID_BOOST_GAIN_DB` | `0.147167` (=−16.64 dB); `4.0` @700 Hz | `src/lib.rs:45,103` | reference pedal level + plugin-side mid restore |
 | pretty-baby | `OUTPUT_TRIM` | `0.7079` (−3 dB) | `src/lib.rs:34` | gain-staging standard |
 | qapla-1a | `VOLTAGE`; `OUTPUT_TRIM` | `LINE`; `1.0` | `src/lib.rs:33,40` | unity vs current EQ makeup stage |
 | sad-bastard | `OUTPUT_TRIM`; `TONE_GAIN_DELIVERED_DB` | `0.172`; `12.0` | `src/lib.rs:76,156` | re-pinned when BP node ran +5 dB vs circuit V2.2 |

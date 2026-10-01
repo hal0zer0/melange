@@ -40,7 +40,6 @@ crates/
   melange-devices/      # Layer 2: Component models (diode, BJT, JFET, MOSFET, tube, opamp, VCA)
   melange-solver/       # Layer 3: MNA/DK solver + codegen (CORE)
   melange-validate/     # Layer 4: SPICE validation against ngspice
-  melange-plugin/       # Layer 5: nih-plug integration (stub)
 tools/
   melange-cli/          # CLI tool
 docs/aidocs/            # Detailed math reference docs — READ THESE before changing core math
@@ -69,7 +68,8 @@ docs/aidocs/            # Detailed math reference docs — READ THESE before cha
 | `RING_PREDICATE.md` | Changing auto-BE promotion (the ring predicate), the charge propagator, or `eigen.rs` |
 | `SIGNAL_LEVELS.md` | Changing signal levels, DC blocking, output scaling |
 | `NOISE.md` | Changing thermal/shot/1f noise generation |
-| `DEBUGGING.md` | **Diagnosing solver output issues, known failure signatures, historical fix catalog** |
+| `DEBUGGING.md` | **Diagnosing solver output issues, known failure signatures** |
+| `DEBUGGING_HISTORY.md` | Historical catalog of fixed failure signatures (commit-hash-linked) — "have we seen this before?" |
 | `SPICE_VALIDATION.md` | Running or modifying SPICE validation tests |
 | `STATUS.md` | **Feature inventory, device support, solver routing, validated circuits, pending work** |
 | `TUNGSTEN_MATERIAL.md` | Modeling tungsten-based components (Schottky diodes, cat's whisker, WSe2/WS2) |
@@ -101,7 +101,7 @@ reintroduce any of its terms. See `docs/aidocs/COMPANION_MODELS.md`.
 - BJTs: 2D per device (Vbe→Ic at start_idx, Vbc→Ib at start_idx+1)
 - JFETs/MOSFETs: 2D per device (Vds→Id at start_idx, Vgs→Ig at start_idx+1)
 - Triodes: 2D per device (Vgk→Ip at start_idx, Vpk→Ig at start_idx+1)
-- Pentodes: 3D per device (Vgk→Ip, Vpk→Ig2, Vg2k→Ig1). 2D when grid-off FA fires (`TubeParams.kind = SharpPentodeGridOff`, auto-detected when Vgk<cutoff, `--tube-grid-fa` override).
+- Pentodes: 3D per device (Vgk→Ip, Vpk→Ig2, Vg2k→Ig1). 2D only under the opt-in grid-off reduction (`--tube-grid-fa on`, warned: `TubeParams.kind = SharpPentodeGridOff` where Vgk < cutoff at the DC OP); `auto` (default) keeps full 3D.
 - VCAs: 2D per device (Vsig→Isig at start_idx, Vctrl→Ictrl at start_idx+1)
 - Op-amps: 0D (linear VCCS model, stamped into G directly)
 - Device map built from netlist element order, mirrors MNA builder. Codegen uses `jdev_i_k` naming for block-diagonal Jacobian entries.
@@ -142,5 +142,5 @@ Tests compare melange output against ngspice (`crates/melange-validate/`). See `
 | BJT output wrong | DC operating point not initialized — `DC_NL_I` should be non-zero |
 | DC OP NR diverges | Wrong Jacobian sign — must be `G_aug = G_dc - N_i·J_dev·N_v` (**subtraction**) |
 
-For the full historical failure catalog (commit-hash-linked fixes, circuit-specific regressions), see `docs/aidocs/DEBUGGING.md` "Historical Failure Signatures".
+For the full historical failure catalog (commit-hash-linked fixes, circuit-specific regressions), see `docs/aidocs/DEBUGGING_HISTORY.md`.
 

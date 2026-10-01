@@ -31,11 +31,14 @@ AI agent consumption: dense equations, code patterns, cross-references, no narra
 | Changing oversampling or anti-alias filters | [OVERSAMPLING.md](OVERSAMPLING.md) |
 | Changing generated code structure | [CODEGEN.md](CODEGEN.md) |
 | Changing trapezoidal integration or companions | [COMPANION_MODELS.md](COMPANION_MODELS.md) |
+| [RING_PREDICATE.md](RING_PREDICATE.md) | Reference | When a build is promoted to backward Euler: the charge propagator, ring persistence/residue thresholds, BE's cost |
+| [SATURATING_TRANSFORMERS.md](SATURATING_TRANSFORMERS.md) | Comprehensive | Saturating inductors and shared-core transformers: flux law, air-core floor, T-model, Newton sites, refusals |
 | Changing when a build is promoted to backward Euler (auto-BE), the charge propagator or `eigen.rs` | [RING_PREDICATE.md](RING_PREDICATE.md) |
 | Changing augmented MNA inductor handling | [MNA.md](MNA.md) (augmented MNA section) |
 | Saturating inductors and two-winding shared-core transformers (flux law + air floor, T-model, datasheet ratings, Newton sites, refusals) | [SATURATING_TRANSFORMERS.md](SATURATING_TRANSFORMERS.md) |
 | Changing the netlist topology checks (dangling nodes, cap-only DC islands, which terminals conduct at DC) | `crates/melange-solver/src/topology.rs` (module docs) |
 | Debugging solver output issues | [DEBUGGING.md](DEBUGGING.md) |
+| Checking whether a failure signature has been seen and fixed before (historical catalog, commit-linked) | [DEBUGGING_HISTORY.md](DEBUGGING_HISTORY.md) |
 | Changing signal levels or DC blocking | [SIGNAL_LEVELS.md](SIGNAL_LEVELS.md) |
 | Running SPICE validation tests | [SPICE_VALIDATION.md](SPICE_VALIDATION.md) |
 | Checking project status, validation results, routing | [STATUS.md](STATUS.md) |
@@ -147,6 +150,7 @@ K' = K - scale * (N_v * su) * (su^T * N_i)
 | [COMPANION_MODELS.md](COMPANION_MODELS.md) | Reference | Trapezoidal companion for C and L; charge (companion) form of the generated integrator, `q_dot` rules, z = -1 walk |
 | [BEHAVIORAL_SOURCES.md](BEHAVIORAL_SOURCES.md) | Reference | SPICE3 `B` arbitrary-expression V/I sources, expression engine, ddt/idt, FM discriminator |
 | [DEBUGGING.md](DEBUGGING.md) | Reference | Bug signatures, diagnostic patterns, verified values |
+| [DEBUGGING_HISTORY.md](DEBUGGING_HISTORY.md) | Reference | Historical catalog of fixed and closed failure signatures, with fix commits |
 | [SIGNAL_LEVELS.md](SIGNAL_LEVELS.md) | Reference | DC blocking, output scaling, plugin levels |
 | [SPICE_VALIDATION.md](SPICE_VALIDATION.md) | Reference | ngspice setup, correlation benchmarks |
 | [STATUS.md](STATUS.md) | Reference | What's implemented, validated circuits, codegen routing |

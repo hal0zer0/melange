@@ -11,7 +11,7 @@ Measured 2026-07-18 (HEAD b421358, ngspice-42, reltol=1e-4 reference):
 |--------------|-------------|-----------|-------|
 | Linear (RC, RL) | > 0.999999 (6 nines) | < 0.1% | Should match almost exactly |
 | Nonlinear (diodes) | > 0.999999 (6 nines) | < 0.15% | Includes off-nominal `.pot` positions |
-| BJT circuits | > 0.9996 | < 5% | BJT CE is the loosest (GP model gain ratio 1.024); wurli/neve are at 0.03-0.25% |
+| BJT circuits | > 0.9996 | < 5% | BJT CE is the loosest (GP model gain ratio 1.024); the Wurlitzer and 3-BJT preamp decks are at 0.03-0.25% |
 | Op-amp (linear) | ~1.0 | ~0% | VCCS macromodel matches ngspice |
 | JFET circuits | > 0.9994 | < 4% | Shichman-Hodges 2D, ngspice BETA→IDSS |
 | MOSFET circuits | > 0.99999 | < 0.1% | Level 1 SPICE |
@@ -274,13 +274,13 @@ half-band filters' phase enters the comparison.
   dc_block_signal` — the single shared implementation, seeded from the
   signal's first sample — to the ngspice output ONCE. Never DC-block the
   melange output again in a test: it is already blocked inside the generated
-  binary (a double-block inflated the neve-preamp error 15x until
-  2026-07-18).
+  binary (a double block inflates the error, 15x on the 3-BJT preamp
+  deck).
 - `ComparisonConfig.settle_time_s` (default 0.0) symmetrically excludes the
   first N seconds of both signals before any metric is computed, so
   steady-state gates can be tightened without widening them to cover startup
   residue. Tests opt in per-signal-length (e.g. 64 ms = 2x the 5 Hz blocker
-  tau on the 500 ms neve-preamp signal; 3 ms on the 10 ms BJT CE signal).
+  tau on the 500 ms 3-BJT preamp signal; 3 ms on the 10 ms BJT CE signal).
 
 ## Melange Solver Setup
 
