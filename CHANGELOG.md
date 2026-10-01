@@ -9,6 +9,29 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+A cleanup and bug-fix release. **What changes generated code or rendered
+audio:** nodal builds drop a second 1e-12 S node conductance they added on top
+of the one already in G (four silence renders in the regression corpus move at
+the microvolt level; every signal render by 1e-5 dB or less), and generated
+comments now describe the current integrator. Everything else is a refusal of
+something that used to be silently wrong, a CLI or measurement fix, or
+internal restructuring with byte-identical generated code.
+
+### Summary: new refusals
+
+- `compile --format plugin` with more than two output nodes (every node after
+  the second used to be dropped silently).
+- A pinned `--max-iter` below 100 on a nodal build (it was raised to 100
+  silently while the console printed the pinned value).
+- A pentode whose suppressor (5th node) is wired anywhere but its cathode (it
+  was modelled as cathode-tied silently).
+- `simulate --sample-rate` that differs from the input WAV's rate.
+- `analyze` points whose render was not a solution (unsolved samples, a
+  reduced model outside its region); `--allow-nr-hold` reports them anyway.
+- An invalid `--solver` value on any verb (it fell back to auto), a non-UTF-8
+  `--input-audio`/`--output`/`--probe-csv` path (it was replaced with a
+  default file name), and a source index newer than schema 1.
+
 ### Fixed
 
 - **A circuit whose ring-predicate eigenvalue solve stalled no longer fails
@@ -23,6 +46,101 @@ codegen output, CLI flags, and netlist semantics may all change.
   backward Euler at 48 kHz (trapezoidal grows, ρ 1.160; backward Euler
   removes it, ρ 0.9998), trapezoidal at 96 kHz (a real growing pole both
   keep).
+
+- **`analyze` measures each point at steady state.** Each point settled at
+  zero drive and was measured after 10 cycles, so on a circuit with a slowly
+  sagging supply the reading was the sweep's history: two back-to-back 1 kHz
+  points read 55.8 % and 51.7 %. Each point is now driven at its own
+  frequency and level for `--preroll-secs` (default 0.25 s) and re-measured
+  until two windows agree within 0.1 %, up to `--preroll-max-secs` (default
+  2 s; a point that does not settle is named). Against a settled 4 s render
+  measured independently: a triode drive stage at 0.1 V reads 48.720 %
+  (reference 48.713 %, was 44.09 %); a germanium clamp at 30 mV 43.234 %
+  (reference 43.223 %, was 46.69 %). Sweeps take longer.
+- **`analyze` refuses points that are not solutions.** A point whose render
+  held or ran a reduced model outside its region was reported as a
+  measurement (one deck at 0.5 V printed 5.97 % THD on a render a third of
+  whose samples were unsolved).
+- **`analyze`'s `thd_pct` sums harmonics below 20 kHz.** It summed them up to
+  Nyquist, so above about 1.5 kHz it disagreed with the usual definition.
+- **`simulate` builds at the input WAV's sample rate.** It built at
+  `--sample-rate` (default 48 kHz) and ran the binary at the WAV's rate; the
+  route and integrator verdict are not portable across rates. An explicit
+  `--sample-rate` that disagrees with the WAV is refused.
+- **`simulate` reads WAVE_FORMAT_EXTENSIBLE input** (float32 and 24-bit WAVs
+  written that way by common tools were refused).
+- **A plugin with more than two output nodes is refused** instead of
+  generating a two-channel plugin that dropped the rest.
+- **A pinned `--max-iter` is never silently overridden.** On a nodal build a
+  value below the 100-iteration floor (the Armijo-globalized Newton's
+  headroom to cross a saturation knee within a sample) is refused, and the
+  console reports the budget the code ships. `compile --max-iter 50` can now
+  be pinned (50 was a hidden "not set" value).
+- **Nodal solves add no second node Gmin.** The nodal emitter added 1e-12 S to
+  every node diagonal on its M=0 direct solve, sub-step, chord and op-amp pin
+  paths, on top of the 1e-12 S already in G. Measured on the corpus it had no
+  conditioning role and moved the solution: a stage-1 triode plate at rest
+  moves by 2.5e-5 V (1e-12 S x 222 V x 100 kOhm).
+- **A pentode suppressor not tied to the cathode is refused.**
+- **A singular transformer inductance matrix is an error** in the library
+  companion path, not an identity matrix used as its inverse.
+- **The CLI no longer panics on a circuit reference with an empty source**
+  (`:name`), and every verb loads circuits through one loader, so all get the
+  stale source-index self-heal.
+- **The compiled-binary cache is capped** (default 2 GiB, least recently used
+  first; `MELANGE_BINARY_CACHE_MAX_MB`, 0 = unlimited);
+  `melange cache clear --binaries` empties only binaries. One machine had
+  reached 23 GB.
+- **No test or validate run leaves files in the temp directory.** The solver
+  tests left every compiled test binary in /tmp (one machine accumulated
+  129 GB); each test process now uses a scratch directory reclaimed by the
+  next run. `validate` pipes its ngspice decks over stdin, so an interrupted
+  run leaves nothing behind.
+- **ngspice-dependent tests are ignored without ngspice instead of passing
+  vacuously,** and the SPICE CI job runs them all.
+- **An unmeasurable THD comparison in `validate` says which side is silent**
+  instead of "THD error NaN dB".
+- **Help text and documentation describe the current solver**: the ring
+  predicate (not a spectral-radius rule) decides backward Euler; MAX_M is 32;
+  VT is kT/q at 300.15 K; the forward-active and grid-off reductions are
+  opt-in.
+
+### Changed
+
+- **Default CLI output is one plain route line;** `-v`/`--verbose` prints the
+  full route and stability detail. Warnings, refusals and DC-OP failures
+  always print.
+- **`--with-level-params=false`** works (the flag could never be false).
+- **Brand-free test names:** `test_neve_1073_output_vs_spice` ->
+  `test_three_bjt_transformer_output_amp_vs_spice`,
+  `test_neve_1073_preamp_vs_spice` -> `test_three_bjt_preamp_vs_spice`,
+  `test_tube_screamer_vs_spice` -> `test_overdrive_pedal_vs_spice`,
+  `test_tube_screamer_wiper_vs_spice` -> `test_overdrive_pedal_wiper_vs_spice`
+  (data directories likewise); `neve_1073_eq_tests` -> `inductor_eq_section_tests`.
+- **Source layout:** the CLI's `main.rs` and the solver's `nodal_emitter.rs`,
+  `codegen/ir/mod.rs`, `mna.rs` and `parser.rs` are split into module
+  directories. Moves only; public paths and generated code are unchanged.
+
+### Deprecated
+
+- **The library companion-inductor solver:** `LinearSolver`, the `solver`
+  module, `InductorInfo`, `CoupledInductorState`, `TransformerGroupState` and
+  their update functions, the companion inductor/transformer stamps, and
+  `MnaSystem::stamp_resistor`. No build uses them; their discretisation
+  (whole-system trapezoidal) differs from the shipped charge-form codegen.
+  They will be removed in the next release.
+
+### Removed
+
+- The `melange-plugin` crate (four parameter-mapping helpers nothing used;
+  generated plugins build against nih-plug directly).
+- Config fields that did nothing: `CodegenConfig::include_dc_op` and
+  `pot_settle_samples` (old IR JSON carrying them still loads).
+- Unused API: `MnaSystem::from_netlist_with_linearized`,
+  `BjtParams::has_nf/has_nr/has_isc/r_p_matrix`,
+  `MnaSystem::stamp_pentode_grid_off`; `melange-validate`'s
+  `skip_if_no_ngspice`/`should_skip_no_ngspice`; the CLI's uncompilable
+  `async` feature and its unused loaders.
 
 ## [0.1.13] - 2026-09-30
 
