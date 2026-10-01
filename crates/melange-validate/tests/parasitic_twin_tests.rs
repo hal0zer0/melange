@@ -47,11 +47,12 @@ const VVR: &str = "jfet vvr, no capacitors\nR1 in out 1k\nJ1 out g 0 JX\nRG g 0 
                    .model JX NJF(VTO=-2 BETA=1e-3)\n.end\n";
 
 #[test]
+#[ignore = "requires ngspice"]
 fn a_capacitor_free_deck_validates_against_the_same_circuit() {
-    if !is_ngspice_available() {
-        eprintln!("ngspice not available; skipping");
-        return;
-    }
+    assert!(
+        is_ngspice_available(),
+        "ngspice not found: this test needs it (run without --include-ignored to skip)"
+    );
     const FS: f64 = 48000.0;
     let dir = std::env::temp_dir().join(format!("melange_parasitic_twin_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

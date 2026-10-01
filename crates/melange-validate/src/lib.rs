@@ -1317,6 +1317,9 @@ pub fn run_generated_solver(
     let pid = std::process::id();
     let src = tmp_dir.join(format!("melange_val_{pid}_{id}.rs"));
     let bin = tmp_dir.join(format!("melange_val_{pid}_{id}"));
+    // Both files are removed when this function returns, on every path:
+    // a failed rustc spawn, spawn of the binary, or wait included.
+    let _cleanup = TempFiles(vec![src.clone(), bin.clone()]);
 
     std::fs::write(&src, &full_source)
         .map_err(|e| ValidationError::Solver(format!("Write: {}", e)))?;
@@ -1329,10 +1332,8 @@ pub fn run_generated_solver(
         .arg("-O")
         .output()
         .map_err(|e| ValidationError::Solver(format!("rustc: {}", e)))?;
-    let _ = std::fs::remove_file(&src);
 
     if !compile.status.success() {
-        let _ = std::fs::remove_file(&bin);
         return Err(ValidationError::Solver(format!(
             "Compilation failed:\n{}",
             String::from_utf8_lossy(&compile.stderr)
@@ -1373,7 +1374,6 @@ pub fn run_generated_solver(
         .wait_with_output()
         .map_err(|e| ValidationError::Solver(format!("Wait: {}", e)))?;
     let _ = writer.join();
-    let _ = std::fs::remove_file(&bin);
 
     if !result.status.success() {
         return Err(ValidationError::Solver(format!(
@@ -1469,6 +1469,17 @@ pub fn run_generated_solver(
         .lines()
         .filter_map(|l| l.trim().parse().ok())
         .collect())
+}
+
+/// Temporary files removed when the guard is dropped.
+struct TempFiles(Vec<std::path::PathBuf>);
+
+impl Drop for TempFiles {
+    fn drop(&mut self) {
+        for p in &self.0 {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 }
 
 /// Check if ngspice is available. Returns `true` if the test should be skipped.

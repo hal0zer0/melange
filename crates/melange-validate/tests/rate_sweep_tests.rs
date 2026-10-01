@@ -8,11 +8,12 @@ use melange_validate::spice_runner::is_ngspice_available;
 use melange_validate::{AnalyticStimulus, ComparisonConfig, ValidationOptions};
 
 #[test]
+#[ignore = "requires ngspice"]
 fn an_exactly_modelled_deck_converges_to_no_model_error() {
-    if !is_ngspice_available() {
-        eprintln!("ngspice not available; skipping");
-        return;
-    }
+    assert!(
+        is_ngspice_available(),
+        "ngspice not found: this test needs it (run without --include-ignored to skip)"
+    );
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/rc_lowpass/circuit.cir");
     let sweep = rate_sweep(

@@ -22,11 +22,12 @@ Rl out 0 100k
 ";
 
 #[test]
+#[ignore = "requires ngspice"]
 fn a_self_heating_deck_validates_isothermal_at_its_tamb() {
-    if !is_ngspice_available() {
-        eprintln!("ngspice not available; skipping");
-        return;
-    }
+    assert!(
+        is_ngspice_available(),
+        "ngspice not found: this test needs it (run without --include-ignored to skip)"
+    );
     const FS: f64 = 48000.0;
     let dir = std::env::temp_dir().join(format!("melange_thermal_twin_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

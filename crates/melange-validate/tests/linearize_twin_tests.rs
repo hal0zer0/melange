@@ -26,11 +26,12 @@ Rl out 0 100k
 ";
 
 #[test]
+#[ignore = "requires ngspice"]
 fn a_linearized_stage_validates_against_the_same_model() {
-    if !is_ngspice_available() {
-        eprintln!("ngspice not available; skipping");
-        return;
-    }
+    assert!(
+        is_ngspice_available(),
+        "ngspice not found: this test needs it (run without --include-ignored to skip)"
+    );
     const FS: f64 = 48000.0;
     let dir = std::env::temp_dir().join(format!("melange_linearize_twin_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -75,11 +76,12 @@ fn a_linearized_stage_validates_against_the_same_model() {
 /// the negative swings. validate refuses it, naming the reduced model, not a
 /// Newton failure (the Newton solve succeeded on those samples).
 #[test]
+#[ignore = "requires ngspice"]
 fn a_linearized_stage_out_of_its_region_is_refused_as_such() {
-    if !is_ngspice_available() {
-        eprintln!("ngspice not available; skipping");
-        return;
-    }
+    assert!(
+        is_ngspice_available(),
+        "ngspice not found: this test needs it (run without --include-ignored to skip)"
+    );
     const FS: f64 = 48000.0;
     let deck = "linearized cathode follower
 VCC vcc 0 DC 250
