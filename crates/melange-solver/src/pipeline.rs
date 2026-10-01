@@ -776,7 +776,7 @@ pub fn apply_grid_off_reduction(
         // already applied. Rebuilding from the netlist with only the grid-off
         // map would silently discard FA (the compile summary would still print
         // the FA line while the shipped MNA had full-dimension BJT blocks) —
-        // plexi-class circuits need both.
+        // a circuit with both BJT bias stages and power pentodes needs both.
         *mna = MnaSystem::from_netlist_with_grid_off_and_fa(
             netlist,
             forward_active,

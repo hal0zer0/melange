@@ -96,7 +96,7 @@ pub struct MnaSystem {
     pub pots: Vec<PotInfo>,
     /// Runtime voltage sources (resolved from `.runtime` directives).
     /// Each entry carries the VS's aug-MNA row (for RHS stamping) plus the
-    /// Rust field name codegen should emit on CircuitState. See Oomox P1.
+    /// Rust field name codegen should emit on CircuitState.
     pub runtime_sources: Vec<RuntimeSourceInfo>,
     /// Switch info (resolved from .switch directives)
     pub switches: Vec<SwitchInfo>,
@@ -777,7 +777,7 @@ pub struct OpampInfo {
     /// ideal op-amp with no IB and infinite input impedance winds up
     /// unbounded when the upstream network imposes a DC offset — a known
     /// failure mode of melange-emitted transient NR on circuits like the
-    /// SSL 4kbuscomp sidechain integrator.
+    /// sidechain integrator of a bus compressor.
     pub ib: f64,
     /// Input resistance [Ω] from each input pin to ground (default +∞ = no
     /// leakage path, ideal). Typical values: TL074 (JFET) = 1e12, LM358
@@ -1245,7 +1245,8 @@ impl MnaSystem {
 
     /// Build MNA system with both BJT forward-active and pentode grid-off reductions.
     ///
-    /// Used by circuits (e.g. Plexi-class amps) that simultaneously benefit
+    /// Used by circuits (e.g. a guitar amp with a BJT-biased front end and a
+    /// pentode power stage) that simultaneously benefit
     /// from FA-reduced biasing BJTs and grid-off-reduced power pentodes.
     pub fn from_netlist_with_grid_off_and_fa(
         netlist: &Netlist,
@@ -2923,7 +2924,7 @@ pub const PARASITIC_CAP: f64 = 10e-12;
 /// branch currents, VCVS augmented rows, inductor branch variables — when the
 /// DK kernel is built (prevents O(N^3) blowup from matrix inversion).
 ///
-/// N=256 is generous for any real audio circuit (Pultec EQP-1A is ~41 nodes).
+/// N=256 is generous for any real audio circuit (a passive tube EQ is ~41 nodes).
 pub const MAX_N: usize = 256;
 
 /// Error type for MNA assembly.
@@ -4412,12 +4413,8 @@ impl MnaBuilder {
                 mna.g.push(vec![0.0; n_aug]);
                 mna.c.push(vec![0.0; n_aug]);
             }
-            // Expand N_i rows by appending zeros (column count stays m)
-            for row in &mut mna.n_i {
-                // N_i is n×m; we add n_aug-n more zero rows
-                let _ = row; // row width is m, not n — no resize needed
-            }
-            // Add zero rows for augmented variables in N_i
+            // N_i is n×m: its row width stays m; add n_aug-n zero rows for the
+            // augmented variables.
             for _ in n_base..n_aug {
                 mna.n_i.push(vec![0.0; mna.m]);
             }
@@ -4685,7 +4682,7 @@ impl MnaBuilder {
 
             // Input-stage parasitics (IB + RIN): tiny effects that matter for
             // circuits where the op-amp input node is a high-impedance
-            // integrator (e.g. SSL 4kbuscomp sidechain U10 where a 3.3 MΩ /
+            // integrator (e.g. a bus-compressor sidechain where a 3.3 MΩ /
             // 10 pF integrator winds up unboundedly under any DC offset
             // without a bleed path to ground). Default IB=0 / RIN=+∞
             // preserves ideal-op-amp behavior byte-identically.

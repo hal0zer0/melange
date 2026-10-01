@@ -142,7 +142,7 @@ impl RustEmitter {
         }
 
         if has_nonlinear {
-            // Device currents and Jacobian entries (shared with Phase E
+            // Device currents and Jacobian entries (shared with the
             // runtime DC-OP recompute — see `nr_helpers::emit_dk_device_evaluation`).
             // use_k_eff=true: state.k holds K - R_p, so parasitic BJT R drops are
             // absorbed into the controlling-voltage map and bjt_evaluate (intrinsic)

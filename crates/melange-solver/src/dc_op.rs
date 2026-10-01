@@ -4412,7 +4412,7 @@ fn solve_dc_operating_point_core(
     //
     // Run direct NR from this seed. For precision-rectifier circuits this
     // pulls the state into the correct basin in ~10-20 iterations (verified
-    // on SSL 4kbuscomp), giving DC_OP / DC_NL_I enough KCL fidelity that the
+    // on a bus-compressor sidechain), giving DC_OP / DC_NL_I enough KCL fidelity that the
     // transient warmup can pick up and settle to steady state instead of
     // diverging from a KCL-inconsistent start.
     //

@@ -86,7 +86,7 @@ fn select_emitter() -> Result<Box<dyn Emitter>, CodegenError> {
 /// - [`ActiveSet`](OpampRailMode::ActiveSet): post-NR constrained re-solve.
 ///   After NR converges, any clamped node is pinned via row replacement and
 ///   the rest of the network is re-solved to match. KCL-consistent. Fixes
-///   the Klon-class cap-history corruption. Cost: one extra LU back-solve
+///   the cap-history corruption of an AC-coupled op-amp clipper. Cost: one extra LU back-solve
 ///   (O(N²)) on samples where clamping is active. Still produces hard-clip
 ///   harmonics — fine for utility clamping, not ideal for distortion pedals.
 ///
@@ -95,7 +95,7 @@ fn select_emitter() -> Result<Box<dyn Emitter>, CodegenError> {
 ///   and `VEE + VOL_DROP`. Matches the Boyle macromodel used by every
 ///   commercial SPICE and produces the soft exponential knee characteristic
 ///   of real op-amp output stages. Most accurate for distortion circuits
-///   (Klon, Tube Screamer, etc.). Cost: +2 N and +2 M per op-amp, plus the
+///   (op-amp diode-clipper overdrives and the like). Cost: +2 N and +2 M per op-amp, plus the
 ///   synthesized voltage sources' augmented rows.
 /// A *request* for which nodal sub-path to emit — the user's override knob.
 ///
@@ -472,9 +472,9 @@ pub struct CodegenConfig {
     /// Set to false for circuits with output coupling caps or when the downstream
     /// pipeline handles DC offset. Removes the 5Hz HPF and its settling time.
     pub dc_block: bool,
-    /// Number of silent samples to process after pot-triggered matrix rebuild.
-    /// Settles the NR to the new nonlinear DC operating point. Default 64.
-    /// Set to 0 for zero-latency pot changes (may glitch on large pot swings).
+    /// Currently unused: no emitter reads it, and the generated code runs no
+    /// silent settle after a pot change. Copied into
+    /// `SolverConfig::pot_settle_samples`. Default 64.
     pub pot_settle_samples: usize,
     /// Use backward Euler integration instead of trapezoidal.
     /// Unconditionally stable (L-stable) — fixes divergence in high-gain feedback
@@ -525,7 +525,7 @@ pub struct CodegenConfig {
     /// this via SplitMix64, reproducible across runs. Ignored when
     /// `noise_mode == NoiseMode::Off`.
     pub noise_master_seed: u64,
-    /// Emit `CircuitState::recompute_dc_op()` (Oomox plugin roadmap P6).
+    /// Emit `CircuitState::recompute_dc_op()` (runtime DC operating-point re-solve).
     ///
     /// When enabled, the generated code includes a runtime DC operating point
     /// solver so plugins can re-solve the bias after changing pot/switch values

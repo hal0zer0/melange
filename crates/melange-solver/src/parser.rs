@@ -88,8 +88,7 @@ pub struct Netlist {
     /// Each entry marks an existing voltage source whose value the plugin
     /// host will update every sample. Codegen emits `pub <field>: f64` on
     /// CircuitState and stamps `rhs[VSOURCE_<NAME>_RHS_ROW] += state.<field>`
-    /// in both trapezoidal and backward-Euler RHS builders. See Oomox
-    /// roadmap P1.
+    /// in both trapezoidal and backward-Euler RHS builders.
     pub runtime_sources: Vec<RuntimeDirective>,
     /// Runtime resistor directives (.runtime R1 min max as field_name).
     /// Audio-rate resistor modulation for envelope-linked bias (Latinum §5(b)).

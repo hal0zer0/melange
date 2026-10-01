@@ -98,8 +98,8 @@ fn flag_on_emits_recompute_dc_op_signature() {
     // code — updating these assertions then is a deliberate synchronization
     // point.
     assert!(
-        code.contains("Phase E MVP (Oomox P6)"),
-        "flag ON should emit the Phase E header comment"
+        code.contains("Runtime DC operating-point recompute: direct Newton-Raphson."),
+        "flag ON should emit the recompute header comment"
     );
     assert!(
         code.contains("let mut g_aug: [[f64; N]; N] = G;"),
@@ -1500,8 +1500,8 @@ fn e8_nodal_flag_on_emits_stub_signature() {
         "nodal stub body must bump diag counter to signal no-op"
     );
     assert!(
-        code.contains("deferred") && code.contains("warmup loop"),
-        "nodal stub must carry explanatory deferral comment pointing at warmup fallback"
+        code.contains("no runtime DC OP recompute") && code.contains("warmup loop"),
+        "nodal stub must carry an explanatory comment pointing at the warmup fallback"
     );
 }
 

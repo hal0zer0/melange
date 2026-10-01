@@ -775,7 +775,7 @@ impl RustEmitter {
         insert_inject_ctx(&mut ctx, ir);
         ctx.insert("has_dc_sources", &ir.has_dc_sources);
 
-        // Named topology constants (Oomox P2 + P3). Always inserted so the
+        // Named topology constants. Always inserted so the
         // template can unconditionally reference `named_nodes`, `named_vsources`,
         // `named_pots` — empty lists produce no emission.
         ctx.insert(
@@ -803,8 +803,8 @@ impl RustEmitter {
         // `runtime_sources | length > 0` guards unconditionally.
         ctx.insert("runtime_sources", &ir.runtime_sources);
 
-        // WARMUP_SAMPLES_RECOMMENDED (Oomox P5): 5τ_max at the internal sample
-        // rate, rounded up, minimum 1. Plugins driving per-instance parameter
+        // WARMUP_SAMPLES_RECOMMENDED: 5τ_max in host-rate samples, rounded
+        // up, minimum 1. Plugins driving per-instance parameter
         // jitter (e.g. SeriesOfTubes) use this to size the silent warmup loop.
         ctx.insert(
             "warmup_samples_recommended",
@@ -1138,7 +1138,7 @@ impl RustEmitter {
         ctx.insert("switch_indices", &switch_indices);
         // Generate pot/switch methods procedurally (rebuild_matrices, set_pot_N, set_switch_N)
         if num_switches > 0 || num_pots > 0 {
-            let switch_methods = self.emit_switch_methods(ir, noise);
+            let switch_methods = self.emit_switch_methods(ir, noise)?;
             ctx.insert("switch_methods", &switch_methods);
         }
 
@@ -1190,7 +1190,7 @@ impl RustEmitter {
         // emits the per-sample `rhs[row] += state.<field>` stamps.
         ctx.insert("runtime_sources", &ir.runtime_sources);
 
-        // Named nodes for the dc_op_dump() pretty printer (Oomox P4).
+        // Named nodes for the dc_op_dump() pretty printer.
         ctx.insert(
             "named_nodes",
             &named_const_entries(&ir.named_constants.nodes),
@@ -1226,9 +1226,9 @@ impl RustEmitter {
         };
         ctx.insert("k_be_eff_adjust_lines", &k_be_eff_fragment);
 
-        // Runtime DC operating point recompute (Oomox P6 / Phase E). The
-        // template renders a stub body when this flag is on; full device
-        // eval + NR loop emission is layered on in subsequent commits.
+        // Runtime DC operating point recompute. When this flag is on the
+        // template renders `recompute_dc_op` with the body built by
+        // `dc_op_emitter::emit_recompute_dc_op_body_dk`.
         let emit_dc_op_recompute = ir.solver_config.emit_dc_op_recompute;
         ctx.insert("emit_dc_op_recompute", &emit_dc_op_recompute);
         if emit_dc_op_recompute {
@@ -1794,7 +1794,11 @@ impl RustEmitter {
     }
 
     /// Generate switch setter methods and rebuild_matrices() procedurally.
-    fn emit_switch_methods(&self, ir: &CircuitIR, noise: &NoiseEmission) -> String {
+    fn emit_switch_methods(
+        &self,
+        ir: &CircuitIR,
+        noise: &NoiseEmission,
+    ) -> Result<String, CodegenError> {
         let m = ir.topology.m;
         let num_pots = ir.pots.len();
         let mut code = String::new();
@@ -2026,20 +2030,23 @@ impl RustEmitter {
                         ));
                     }
                     'L' => {
-                        if let Some(aug_row) = comp.augmented_row {
-                            // Augmented MNA: L value lives on diagonal of branch variable row
-                            code.push_str(&format!(
-                                "            let delta_l = new_val - {};\n\
-                                 \x20           c_eff[{}][{}] += delta_l;\n",
-                                nominal, aug_row, aug_row,
-                            ));
-                        } else {
-                            // DK companion model: handled in inductor companion stamp below
-                            code.push_str(
-                                "            // Inductor: handled in companion model stamp below\n",
-                            );
-                            code.push_str("            let _ = new_val;\n");
-                        }
+                        // Augmented MNA: L value lives on diagonal of branch variable row.
+                        // Every generated inductor is a branch row (`build_dk` refuses a
+                        // companion-model kernel); an L component without one has nothing
+                        // the switch could change, so refuse rather than emit a switch
+                        // that silently does nothing.
+                        let Some(aug_row) = comp.augmented_row else {
+                            return Err(CodegenError::InvalidConfig(format!(
+                                ".switch '{}': inductor {} has no branch row in this build, so \
+                                 the switch cannot change it.",
+                                sw.label, comp.name
+                            )));
+                        };
+                        code.push_str(&format!(
+                            "            let delta_l = new_val - {};\n\
+                             \x20           c_eff[{}][{}] += delta_l;\n",
+                            nominal, aug_row, aug_row,
+                        ));
                     }
                     _ => {}
                 }
@@ -2274,7 +2281,7 @@ impl RustEmitter {
         // rate change in set_sample_rate(), plus reset()'s blocker reseed.)
 
         code.push_str("    }\n");
-        code
+        Ok(code)
     }
 
     fn emit_pot_constants(&self, ir: &CircuitIR) -> String {
@@ -4466,12 +4473,10 @@ impl RustEmitter {
             ));
             default_stmts.push_str(
                 "        // identical calibration to junction flicker (same Kellett cascade,\n\
-                 \x20       // same Norton RHS stamp through the same trap/BE kernel — the old\n\
-                 \x20       // claim that r-flicker bypasses the (A − A_neg) = 2G companion\n\
-                 \x20       // gain was false), so output PSD lands at S_i = KF·I_R^AF/f\n\
-                 \x20       // one-sided, fs/OS-invariant. Field name `noise_r_flicker_sqrt_fs`\n\
-                 \x20       // is legacy (pre-2026-07-18 it held sqrt(fs)); it now carries the\n\
-                 \x20       // fs-independent scale constant.\n",
+                 \x20       // same Norton RHS stamp through the same trap/BE kernel), so\n\
+                 \x20       // output PSD lands at S_i = KF·I_R^AF/f one-sided, fs/OS-invariant.\n\
+                 \x20       // `noise_r_flicker_sqrt_fs` carries this fs-independent scale\n\
+                 \x20       // constant (the name notwithstanding).\n",
             );
             default_stmts.push_str(&format!(
                 "        let noise_r_flicker_sqrt_fs = {};\n",

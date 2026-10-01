@@ -170,7 +170,7 @@ pub struct CircuitState {
 {% for default in pot_defaults %}
     /// Potentiometer {{ loop.index0 }} current resistance (ohms)
     pub pot_{{ loop.index0 }}_resistance: f64,
-    /// Potentiometer {{ loop.index0 }} previous timestep resistance (for trapezoidal A_neg correction)
+    /// Potentiometer {{ loop.index0 }} resistance at the last committed sample (kept in step with `pot_{{ loop.index0 }}_resistance`; not read by the solver)
     pub pot_{{ loop.index0 }}_resistance_prev: f64,
 {% endfor %}
 {% if oversampling_factor > 1 %}
@@ -235,12 +235,12 @@ impl Default for CircuitState {
         // first processed sample doesn't see a spurious startup thump from the
         // blocker's own history mismatch. V_PREV_IC_SEED when the circuit has
         // IC=-bearing caps (their prescribed initial voltage IS the t=0 state),
-        // else the plain DC operating point. Mirrors Phase E's
-        // recompute_dc_op() reseed contract.
+        // else the plain DC operating point. Mirrors the reseed contract of
+        // the runtime DC operating-point recompute (`recompute_dc_op`).
 {% else %}        // Seed the DC blocker's x[n-1] with the output-node DC operating point.
         // Starting from 0 while v_prev = DC_OP injects a deterministic startup
         // thump of ~DC_OP[out]*SCALE decaying at the 5 Hz blocker pole
-        // (tau ~ 32 ms). Mirrors Phase E's recompute_dc_op() reseed contract.
+        // (tau ~ 32 ms). Mirrors recompute_dc_op()'s reseed contract.
 {% endif %}        let mut dc_block_x_seed = [0.0f64; NUM_OUTPUTS];
 {% if has_cap_ic %}        for k in 0..NUM_OUTPUTS { dc_block_x_seed[k] = V_PREV_IC_SEED[OUTPUT_NODES[k]]; }
 {% else %}        for k in 0..NUM_OUTPUTS { dc_block_x_seed[k] = DC_OP[OUTPUT_NODES[k]]; }
@@ -466,8 +466,7 @@ impl CircuitState {
         &self.dc_operating_point
     }
 {% if emit_dc_op_recompute %}
-    /// Re-solve the DC operating point at the current pot/switch values
-    /// (Oomox plugin roadmap P6).
+    /// Re-solve the DC operating point at the current pot/switch values.
     ///
     /// Call once after applying per-instance pot/switch jitter (or a preset
     /// change) and before processing audio, to skip the
@@ -478,7 +477,7 @@ impl CircuitState {
     /// microseconds. Call from plugin initialization or parameter-change
     /// callbacks, not inside `process_sample`.
     ///
-    /// # MVP limitations (Phase E)
+    /// # Limitations
     ///
     /// - Direct Newton-Raphson only; no source or Gmin stepping. If the NR
     ///   fails to converge (e.g. after a massive pot swing on a basin-trap
@@ -815,13 +814,9 @@ fn stamp_conductance(mat: &mut [[f64; N]; N], node_i: usize, node_j: usize, g: f
 /// matrix is returned as a safe fallback; the caller should record the event
 /// via `diag_singular_matrix_count`.
 ///
-/// Previously used in-place Gauss-Jordan on an augmented `[A | I]` matrix
-/// (N × 2N, ~2N³ ops, ~28 KB stack at N = 42). The LU path factors `A = LU`
-/// in place (N × N, ~N³/3 ops) and solves `N` back-substitutions
-/// (~N³ total), reducing work and stack use while producing identical
-/// mathematical output for well-conditioned inputs. Singular-pivot behavior
-/// matches the prior implementation byte-for-byte (same 1e-30 threshold,
-/// same identity fallback).
+/// Factors `A = LU` in place (N × N, ~N³/3 ops) and solves `N`
+/// back-substitutions (~N³ total). A pivot below 1e-30 is singular and
+/// returns the identity.
 fn invert_n(a: [[f64; N]; N]) -> ([[f64; N]; N], bool) {
     // --- 1. LU factorization in place with partial pivoting ---
     //

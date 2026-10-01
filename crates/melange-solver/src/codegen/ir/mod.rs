@@ -155,12 +155,11 @@ pub struct CircuitIR {
     pub noise: NoiseIR,
     /// Named topology constants emitted into generated code so plugins can
     /// reference nodes, VS rows, and pots by name instead of by numeric index.
-    /// See Oomox plugin roadmap P2 + P3.
     #[serde(default)]
     pub named_constants: NamedConstantsIR,
     /// `.runtime`-bound voltage sources. Codegen emits one `pub <field>: f64`
     /// on `CircuitState` per entry and stamps `rhs[vs_row] += state.<field>`
-    /// in both trapezoidal and backward-Euler RHS builders. See Oomox P1.
+    /// in both trapezoidal and backward-Euler RHS builders.
     #[serde(default)]
     pub runtime_sources: Vec<RuntimeSourceIR>,
     /// Behavioral (`B`) arbitrary-expression sources. Stamped directly into the
@@ -525,7 +524,8 @@ pub struct SolverConfig {
     /// [`CodegenConfig::output_clamp_v`] for full docs.
     #[serde(default = "default_output_clamp_v")]
     pub output_clamp_v: f64,
-    /// Silent samples to process after pot-triggered matrix rebuild (default 64).
+    /// Currently unused: no emitter reads it (copied from
+    /// [`crate::codegen::CodegenConfig::pot_settle_samples`], default 64).
     #[serde(default = "default_pot_settle_samples")]
     pub pot_settle_samples: usize,
     /// Use backward Euler integration (unconditionally stable, first-order).
@@ -559,7 +559,7 @@ pub struct SolverConfig {
     /// re-seeds it from its own capacitor currents, and damps the mode the step
     /// excited. Exactly one
     /// sample: a second BE sample over-damps and can knock a marginal
-    /// self-oscillator (Farfisa G10 divider under `--force-trap`) into the wrong
+    /// self-oscillator (an organ frequency-divider stage under `--force-trap`) into the wrong
     /// equilibrium. Byte-neutral for runs that never call a setter (e.g. golden
     /// fixtures at their default position).
     ///
@@ -599,8 +599,8 @@ pub struct SolverConfig {
     #[serde(default)]
     pub opamp_rail_mode_reason: String,
     /// Emit `CircuitState::recompute_dc_op()` for runtime DC operating-point
-    /// re-solve (Oomox roadmap P6 / Phase E). Default `false` → output is
-    /// byte-identical to pre-Phase-E codegen. Threaded from
+    /// re-solve. Default `false` → no `recompute_dc_op` / `settle_dc_op`
+    /// methods are emitted. Threaded from
     /// [`CodegenConfig::emit_dc_op_recompute`].
     ///
     /// [`CodegenConfig::emit_dc_op_recompute`]: crate::codegen::CodegenConfig::emit_dc_op_recompute
@@ -1551,10 +1551,12 @@ fn q_dot_at(matrices: &Matrices, n: usize, m: usize, x: &[f64], i_nl: &[f64]) ->
         .collect()
 }
 
-/// Build the DK trapezoidal (A, A_neg) pair from raw G/C at an arbitrary
-/// rate. Used for the oversampled internal rate: the pair returned here is
-/// both what the generated solver ships AND what the auto-BE discriminator
-/// must evaluate (rho(S·A_neg) is strongly rate-dependent).
+/// Build the DK trapezoidal `A = G + alpha·C` and the whole-system
+/// `alpha·C − G` (algebraic rows zeroed) from raw G/C at an arbitrary rate.
+/// The only caller is the oversampled build, which ships `S = A⁻¹` at the
+/// internal rate and discards the second matrix: the shipped history is the
+/// charge-form `alpha·C` (`charge_form_history`), and the integrator is
+/// decided by the ring predicate (`codegen::ring`), not by this pair.
 #[allow(clippy::too_many_arguments)]
 fn build_dk_trap_matrices_at_rate(
     g_matrix: &[f64],
@@ -6455,7 +6457,8 @@ mod opamp_rail_mode_tests {
     fn resolver_auto_cap_from_out_to_downstream_picks_active_set() {
         // Op-amp out=3, nm=2, np=1. Output coupling cap from node 3 to a
         // downstream node 4 (which is not the inverting input). This is
-        // the Klon-C15 pattern — must trigger ActiveSet.
+        // the output-coupling-cap pattern of an op-amp overdrive — must
+        // trigger ActiveSet.
         let opamps = vec![opamp_at_nodes(1, 2, 3, 9.0, 0.0)];
         let mna = mna_with_opamps_and_caps(
             4,
@@ -6517,7 +6520,7 @@ mod opamp_rail_mode_tests {
     #[test]
     fn opamp_with_ac_coupled_downstream_picks_active_set() {
         // Synthetic: op-amp with AC-coupled downstream stage.
-        // Exercises the same AcCoupledDownstream path as Klon's topology.
+        // Exercises the same AcCoupledDownstream path as an op-amp overdrive's topology.
         let spice = "\
 Opamp AC-Coupled Downstream Test
 R1 in sum 4.7k
@@ -6534,7 +6537,7 @@ U1 0 sum out OA1
 
     #[test]
     fn circuit_without_opamps_picks_none() {
-        // Synthetic: tubes and passives, no op-amps. Same path as Pultec.
+        // Synthetic: tubes and passives, no op-amps. Same path as a passive tube EQ.
         let spice = "\
 No Op-Amp Test
 R1 in grid 68k
@@ -6722,7 +6725,7 @@ U2 0 sum2 out OA1
     #[test]
     fn multi_opamp_ac_coupled_picks_active_set() {
         // Synthetic: 3 op-amps with AC-coupled downstream stages.
-        // Exercises the same path as VCR ALC topology.
+        // Exercises the same path as a multi-op-amp leveling-amplifier topology.
         let spice = "\
 Multi Op-Amp AC-Coupled Test
 R1 in sum1 10k

@@ -721,7 +721,7 @@ pub fn assemble(
     //   (b) auto-routing will send this circuit to Nodal because the
     //       un-reduced DK kernel is trap-unstable or fails to build.
     // Motivation: the FA-reduced DC-OP can converge to a parasitic
-    // equilibrium on push-pull topologies (see memory/wurli_power_amp_...).
+    // equilibrium on push-pull topologies (observed on a push-pull power amp).
     // Since Nodal handles full-dim BJTs natively, FA is unnecessary there.
     let forward_active = crate::pipeline::apply_forward_active_reduction(
         &mut mna,
@@ -823,8 +823,7 @@ pub fn assemble(
     // Build at the INTERNAL (oversampled) rate — the routing decision below
     // must see the same S/A_neg the generated solver will actually ship.
     // Building at the base host rate can miss trap/BE instability that only
-    // appears once oversampling raises alpha (see
-    // memory/dk_backward_euler_ignored_trap_unstable.md). For os=1 this is
+    // appears once oversampling raises alpha. For os=1 this is
     // identical to `sample_rate` (no behavior change).
     let routing_rate = sample_rate * oversampling as f64;
     let kernel_result = if has_inductors_compile {

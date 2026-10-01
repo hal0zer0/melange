@@ -19,7 +19,7 @@ use crate::codegen::CodegenError;
 /// Shared between:
 ///   * [`super::dk_solver::RustEmitter::generate_solve_nonlinear`] — Schur
 ///     M-dim current-space NR (transient process_sample).
-///   * [`super::dc_op_emitter::emit_recompute_dc_op_body_dk`] — Phase E
+///   * [`super::dc_op_emitter::emit_recompute_dc_op_body_dk`] — the
 ///     runtime DC-OP recompute (N-dim node-voltage NR). The same per-slot
 ///     dispatch applies because the device physics is identical; only the
 ///     surrounding NR loop shape differs.
@@ -151,7 +151,7 @@ pub(super) fn emit_dk_device_evaluation(
                 };
                 if bp.has_parasitics() && !slot.has_internal_mna_nodes && !use_k_eff {
                     // Inner 2D NR for parasitic resistances. Used by the
-                    // Phase E DC-OP recompute path where v_d holds external
+                    // runtime DC-OP recompute path where v_d holds external
                     // terminal voltages and parasitics aren't absorbed into K.
                     code.push_str(&format!(
                         "{indent}let (i_dev{s}, i_dev{s1}, bjt{d}_jac) = bjt_with_parasitics(v_d{s}, v_d{s1}, state.device_{d}_is, state.device_{d}_vt, DEVICE_{d}_NF, DEVICE_{d}_NR, state.device_{d}_bf, state.device_{d}_br, DEVICE_{d}_SIGN, DEVICE_{d}_USE_GP, DEVICE_{d}_VAF, DEVICE_{d}_VAR, DEVICE_{d}_IKF, DEVICE_{d}_IKR, DEVICE_{d}_ISE, DEVICE_{d}_NE, DEVICE_{d}_ISC, DEVICE_{d}_NC, DEVICE_{d}_RB, DEVICE_{d}_RC, DEVICE_{d}_RE);\n"

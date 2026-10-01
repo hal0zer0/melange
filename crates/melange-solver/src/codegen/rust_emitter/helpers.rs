@@ -61,8 +61,7 @@ pub(super) fn named_const_entries(pairs: &[(String, usize)]) -> Vec<NamedConstEn
 /// clamped to a small floor to avoid zero-length warmups.
 ///
 /// Fast O(n) scan. Not a replacement for a proper eigen-analysis of
-/// `C⁻¹G` for tightly-coupled RC chains — see the Phase 5 plan in
-/// [oomox_missing_functionality_roadmap.md] — but adequate for the common
+/// `C⁻¹G` for tightly-coupled RC chains, but adequate for the common
 /// "one dominant pole somewhere" case that covers most audio circuits.
 pub(super) fn estimate_settle_time_seconds(ir: &CircuitIR) -> f64 {
     // Effectively-floating node floor. A node whose total conductance to the
@@ -685,7 +684,7 @@ pub(super) fn emit_stateful_state_fields(devs: &[StatefulDeviceData]) -> String 
     if devs.is_empty() {
         return String::new();
     }
-    let mut s = String::from("    // --- Stateful-device opaque state blocks (Phase 0c) ---\n");
+    let mut s = String::from("    // --- Stateful-device opaque state blocks ---\n");
     for d in devs {
         let n = d.dev_num;
         let sz = d.spec.state_size;
@@ -774,8 +773,8 @@ pub(super) fn emit_stateful_update(devs: &[StatefulDeviceData]) -> String {
              \x20       let v_conv_drive: [f64; {dcount}] = [{conv}];\n\
              \x20       // The returned StatefulUpdate is RESERVED (sub-sample fractional-fire\n\
              \x20       // signal for a future within-sample-firing device). No v1 device sets\n\
-             \x20       // it and the caller-side correction is not applied yet (Stage 3), so\n\
-             \x20       // it is discarded here — reserving the slot without a signature rebuild.\n\
+             \x20       // it and no caller-side correction is applied, so it is discarded\n\
+             \x20       // here — reserving the slot without a signature rebuild.\n\
              \x20       let _ = stateful_update_dev{n}(&mut state.device_{n}_state, &v_prev_drive, &v_conv_drive, dt);\n\
              \x20   }}\n"
         ));
@@ -846,7 +845,7 @@ fn stateful_update_return_type(subsample_fire: bool) -> &'static str {
         // EITHER latch flip with its linear crossing fraction, and the caller's
         // event loop splits the step there. Emitted only on such decks, so every
         // other stateful deck keeps the reserved-slot form below byte-for-byte.
-        return "/// Return of a stateful device's `update()` hook (Phase 0c), sub-sample\n\
+        return "/// Return of a stateful device's `update()` hook, sub-sample\n\
                 /// fire form: a latch flip inside the step it was evaluated over, with the\n\
                 /// linear crossing fraction `alpha` of the flip threshold. The caller\n\
                 /// (nodal-Schur sub-sample fire) re-solves the step at `alpha`.\n\
@@ -861,13 +860,13 @@ fn stateful_update_return_type(subsample_fire: bool) -> &'static str {
                 \x20   alpha: f64,\n\
                 }\n\n";
     }
-    "/// Reserved return of a stateful device's `update()` hook (Phase 0c).\n\
+    "/// Reserved return of a stateful device's `update()` hook.\n\
      ///\n\
      /// v1 devices return `StatefulUpdate::default()` (no sub-sample firing).\n\
      /// Reserved so a within-sample-firing device (glow-discharge) can later\n\
      /// report a BLEP-style fractional-fire signal (`alpha` + `fired`) that the\n\
      /// caller applies to sample n+1 in-flight, with no signature rebuild. The\n\
-     /// caller-side correction is NOT applied yet (Stage 3).\n\
+     /// caller-side correction is not applied.\n\
      #[derive(Clone, Copy, Default)]\n\
      #[allow(dead_code)]\n\
      struct StatefulUpdate {\n\
@@ -1186,7 +1185,8 @@ fn stateful_update_body(
         }
     }
     match &slot.params {
-        // CdsLdr — mirrors `melange-devices/src/ldr.rs::update` (lines 82-97).
+        // CdsLdr — mirrors `melange_devices::ldr::CdsLdr::update` (the
+        // per-sample coefficient `exp(-1/(tau·fs))` is `CdsLdr::new`'s).
         // The control signal V(ctrl+)−V(ctrl-) is the normalized brightness in
         // [0,1] (clamped INSIDE here so an out-of-range control node degrades
         // gracefully, never errors); resistance chases the power-law target

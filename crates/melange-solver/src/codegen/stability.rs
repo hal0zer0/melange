@@ -258,8 +258,7 @@ fn apply_s_a_neg(s: &[f64], a_neg: &[f64], n: usize, x: &[f64]) -> Vec<f64> {
 /// and more likely indicates a genuine matrix-builder defect (logged as an
 /// error).
 ///
-/// Verified 2026-08-14 on a Ge regenerative-LC-oscillator repro
-/// (`memory/dk_backward_euler_ignored_trap_unstable.md`): two independently
+/// Verified 2026-08-14 on a Ge regenerative-LC-oscillator repro: two independently
 /// coded BE builders (DK's `build_dk_be_matrices_at_rate` and nodal's inline
 /// build in `CircuitIR::from_mna`) agree on the deflated rho to 6
 /// significant figures (1.347488, dominant_sign +1) on the identical

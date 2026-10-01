@@ -43,8 +43,8 @@
 //! invocation, while which pins EXIST is a property of the circuit. `.port`
 //! records the second one in the deck, where the check can see it.
 //!
-//! The directive is **direction-neutral on purpose**: `farfisa-voicing`'s
-//! undriven `in16`/`in4`/`fd_p11` are INPUT pins left unconnected in a build
+//! The directive is **direction-neutral on purpose**: an organ voicing
+//! deck's undriven `in16`/`in4`/`fd_p11` are INPUT pins left unconnected in a build
 //! that drives a different one, and they need exactly the same cover as an
 //! output tap. It is a pin declaration, not an output list.
 //!
@@ -1157,7 +1157,7 @@ mod tests {
 
     #[test]
     fn a_declared_pin_is_direction_neutral() {
-        // farfisa-voicing's `in16`/`in4`: INPUT pins this build leaves
+        // An organ voicing deck's `in16`/`in4`: INPUT pins this build leaves
         // undriven. One directive has to cover them exactly as it covers an
         // output tap — `.port` declares a pin, not an output.
         let deck = "voicing\n\

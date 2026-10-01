@@ -244,8 +244,9 @@ fn tube_evaluate_with_rgi(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f6
 
 // =============================================================================
 // Pentode (Reefman "Derk" §4.4) — 3D NR block: Vgk → Ip, Vpk → Ig2, Vg2k → Ig1
-// Math reference: memory/pentode_equations.md (Derk equation set + analytic 3x3
-// Jacobian, EL84/EL34/EF86 fits from Reefman TubeLib.inc).
+// Math reference: docs/aidocs/DEVICE_MODELS.md, "Pentode / Beam Tetrode"
+// (Derk equation set + analytic 3x3 Jacobian, EL84/EL34/EF86 fits from
+// Reefman TubeLib.inc).
 // Grid current Ig1 reuses the existing tube_ig / tube_ig_deriv triode helpers.
 // =============================================================================
 

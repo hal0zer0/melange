@@ -1986,7 +1986,7 @@ fn emit_equilibration(code: &mut String, pat: Option<&EquilPattern>, dr_guarded:
             "        dc[j] = if col_max > 1e-30 { 1.0 / col_max } else { 1.0 };\n",
         )
     };
-    let Some(pat) = pat else {
+    if pat.is_none() {
         code.push_str("    // Row scaling: dr[i] = 1/max_j(|A[i][j]|)\n");
         code.push_str("    for i in 0..N {\n");
         code.push_str("        let mut row_max = 0.0f64;\n");
@@ -2010,7 +2010,7 @@ fn emit_equilibration(code: &mut String, pat: Option<&EquilPattern>, dr_guarded:
         code.push_str("        for j in 0..N { a[i][j] *= dc[j]; }\n");
         code.push_str("    }\n\n");
         return;
-    };
+    }
     // Sparsity-aware form. Structural zeros contribute nothing to either max
     // (0.0 never exceeds a non-negative running max) and are unchanged by the
     // scaling (0.0 * d == 0.0), so the result is byte-identical.
@@ -2049,7 +2049,6 @@ fn emit_equilibration(code: &mut String, pat: Option<&EquilPattern>, dr_guarded:
     code.push_str(
         "    for &(i, j) in EQUIL_PAT.iter() { a[i as usize][j as usize] *= dc[j as usize]; }\n\n",
     );
-    let _ = pat;
 }
 
 /// Emit the `EQUIL_PAT` table consumed by the sparse equilibration.
@@ -2079,9 +2078,8 @@ fn emit_equil_pattern_table(pat: &EquilPattern) -> String {
 /// `indent` is the indent prefix of the outer `if` line (usually `"    "`).
 /// `is_full_lu` selects the full-LU-only chord-LU invalidation.
 ///
-/// Augmented MNA stores inductor branch currents in `v_prev` (no separate
-/// companion history), so the DK-template's `ind_i_prev`/`ci_*_prev`/xfmr
-/// group reset is not needed here.
+/// Augmented MNA stores inductor branch currents in `v_prev` (their history
+/// is in `q_dot`), so there is no separate inductor state to reset.
 fn emit_nodal_nan_reset(
     code: &mut String,
     ir: &CircuitIR,
@@ -2431,7 +2429,7 @@ impl RustEmitter {
         // matrix naturally bounds step size, and converges on the same
         // circuit. Threshold 1e3: K*i_nl with mA currents gives 1 V/step, the
         // edge of where device `safe_exp` clamping still gives physical
-        // results. See memory/wurli_power_amp_phase2_recheck.md.
+        // results.
         // Near-marginal trapezoidal stability with many coupled NR dims and
         // high-magnitude K pushes Schur NR into the oscillate-between-wrong-
         // branches pattern. Full-LU NR operates in v-space where the
@@ -2452,7 +2450,6 @@ impl RustEmitter {
         //     compounds (basic-bitch at M=8 has max|K|=6e4 and is fine)
         //   - rho > 0.995: marginal trap/BE stability means any NR
         //     over-correction persists through several samples
-        // See memory/wurli_power_amp_phase2_recheck.md.
         let k_large_magnitude_with_linearization = linearized_bypass
             && k_max_abs > 1.0e3
             && m >= 10
@@ -2932,12 +2929,13 @@ impl RustEmitter {
         if ir.solver_config.breakpoint_be {
             code.push_str(
                 "/// Breakpoint-BE: number of samples solved on the backward-Euler matrices\n\
-                 /// after a .switch/.pot swap or an op-amp rail pin/release. Exactly ONE: a\n\
-                 /// single BE sample does not read the carried q_dot (built on the old\n\
-                 /// component values), re-seeds it from its own capacitor currents, and\n\
-                 /// damps the mode the step excited (BE is L-stable); then trap resumes.\n\
+                 /// after a .switch swaps a capacitor or an inductor (a glow device also\n\
+                 /// holds the countdown while lit). Exactly ONE: a single BE sample does\n\
+                 /// not read the carried q_dot (built on the old component values),\n\
+                 /// re-seeds it from its own capacitor currents, and damps the mode the\n\
+                 /// step excited (BE is L-stable); then trap resumes.\n\
                  /// Do NOT raise this — a second BE sample over-damps and can knock a\n\
-                 /// marginal self-oscillator (e.g. the Farfisa G10 divider under\n\
+                 /// marginal self-oscillator (e.g. an organ frequency-divider stage under\n\
                  /// --force-trap) into the wrong equilibrium.\n",
             );
             code.push_str("pub const BREAKPOINT_BE_SAMPLES: u32 = 1;\n\n");
@@ -3199,10 +3197,11 @@ impl RustEmitter {
         // text with constants.rs.tera via emit_inject_tap_constants.
         code.push_str(&emit_inject_tap_constants(ir));
 
-        // WARMUP_SAMPLES_RECOMMENDED (Oomox P5) — see constants.rs.tera doc.
+        // WARMUP_SAMPLES_RECOMMENDED — see constants.rs.tera doc.
         code.push_str(
-            "/// Recommended silent-warmup sample count (5τ_max at internal rate, ≥1).\n\
-             /// See Oomox plugin roadmap P5.\n",
+            "/// Recommended silent-warmup sample count (5τ_max in host-rate samples, ≥1).\n\
+             /// Loop `process_sample(0.0, &mut state)` this many times after applying\n\
+             /// per-instance pot/switch jitter to reach the jittered equilibrium.\n",
         );
         code.push_str(&format!(
             "pub const WARMUP_SAMPLES_RECOMMENDED: usize = {};\n\n",
@@ -3519,14 +3518,14 @@ impl RustEmitter {
             code.push('\n');
         }
 
-        // Named topology constants (Oomox P2 + P3). Emitted so plugin code
+        // Named topology constants. Emitted so plugin code
         // can refer to nodes, VS rows, and pots by name rather than by
         // position-dependent numeric index.
         let nc = &ir.named_constants;
         if !nc.nodes.is_empty() || !nc.vsources.is_empty() || !nc.pots.is_empty() {
             code.push_str(
                 "// -----------------------------------------------------------------------------\n\
-                 // Named topology constants (Oomox plugin roadmap P2 + P3).\n\
+                 // Named topology constants.\n\
                  //\n\
                  // Plugin code references these instead of hard-coding numeric indices that\n\
                  // shift when a netlist revision adds or reorders components.\n\
@@ -3893,7 +3892,8 @@ impl RustEmitter {
              \x20   /// Worse, the hold is a FIXED POINT under constant input: the next\n\
              \x20   /// sample re-poses the bit-identical problem from the same `v_prev` and\n\
              \x20   /// fails identically, so one hard sample can freeze the circuit until\n\
-             \x20   /// the input changes. Measured on a Neve-1073-style input block: 43199\n\
+             \x20   /// the input changes. Measured on a transformer-coupled preamp input\n\
+             \x20   /// block: 43199\n\
              \x20   /// consecutive held samples, output 22 dB adrift, peak a healthy\n\
              \x20   /// -0.50 dBFS (design review).\n\
              \x20   ///\n\
@@ -4020,16 +4020,18 @@ impl RustEmitter {
             code.push_str("    pub be_latched: bool,\n\n");
         }
 
-        // Breakpoint-BE countdown (trapezoidal builds with .switch/.pot). Armed
-        // by set_switch_*/set_pot_* to a small const; while > 0 the sample is
+        // Breakpoint-BE countdown (trapezoidal builds with a capacitor/inductor
+        // .switch, or a glow device). Armed by such a set_switch_* (held while a
+        // glow is lit) to a small const; while > 0 the sample is
         // solved with the L-stable BE matrices (re-seeds q_dot on the new
         // component values, damps the excited mode), then decremented. Zero at
         // rest → byte-inert.
         if ir.solver_config.breakpoint_be {
             code.push_str(
                 "    /// Breakpoint-BE: samples remaining to solve on the backward-Euler\n\
-                 \x20   /// matrices after a .switch/.pot change (armed by set_switch_*/set_pot_*)\n\
-                 \x20   /// or while a glow device is lit, decremented per sample, cleared by\n\
+                 \x20   /// matrices after a .switch swaps a capacitor or an inductor (armed by\n\
+                 \x20   /// set_switch_*) or while a glow device is lit, decremented per sample,\n\
+                 \x20   /// cleared by\n\
                  \x20   /// reset().\n",
             );
             code.push_str("    pub breakpoint_be: u32,\n\n");
@@ -4202,7 +4204,8 @@ impl RustEmitter {
             code.push_str(&format!(
                 "    /// Potentiometer {}: current resistance (ohms)\n\
                  \x20   pub pot_{}_resistance: f64,\n\
-                 \x20   /// Potentiometer {}: previous timestep resistance (trapezoidal A_neg)\n\
+                 \x20   /// Potentiometer {}: resistance at the last committed sample (kept in\n\
+                 \x20   /// step with the current resistance; not read by the solver)\n\
                  \x20   pub pot_{}_resistance_prev: f64,\n",
                 idx, idx, idx, idx
             ));
@@ -4925,7 +4928,7 @@ impl RustEmitter {
         }
         code.push_str("    }\n\n");
 
-        // dc_op() accessor — P4 from the Oomox plugin roadmap. Lets plugins
+        // dc_op() accessor. Lets plugins
         // read the baked DC bias point without reaching into the dynamic
         // `v_prev` field (which carries per-sample updates).
         code.push_str("    /// Read the baked DC operating point for this circuit.\n");
@@ -4944,30 +4947,28 @@ impl RustEmitter {
         code.push_str("        &self.dc_operating_point\n");
         code.push_str("    }\n\n");
 
-        // recompute_dc_op() — Oomox P6 / Phase E. Nodal path ships a
-        // permanent stub: emits the method surface uniformly with the DK
+        // recompute_dc_op(). The nodal route ships a
+        // stub: emits the method surface uniformly with the DK
         // path but the body only bumps `diag_nr_max_iter_count` and
-        // returns. Nodal-routed plugins continue using the
+        // returns. Nodal-routed plugins use the
         // `WARMUP_SAMPLES_RECOMMENDED` silence loop (the documented path
-        // for nodal circuits). The full nodal NR body is deferred
-        // indefinitely — see `emit_recompute_dc_op_body_nodal` in
+        // for nodal circuits). A nodal NR body is not implemented — see `emit_recompute_dc_op_body_nodal` in
         // `dc_op_emitter.rs` for the rationale. Feature-gated so the
         // default codegen path stays byte-identical.
         if ir.solver_config.emit_dc_op_recompute {
             let body = super::dc_op_emitter::emit_recompute_dc_op_body_nodal(ir)
                 .expect("nodal stub body must be infallible");
             code.push_str(
-                "    /// Re-solve the DC operating point at the current pot/switch values\n\
-                 \x20   /// (Oomox plugin roadmap P6).\n\
+                "    /// Re-solve the DC operating point at the current pot/switch values.\n\
                  \x20   ///\n\
                  \x20   /// **Not audio-thread safe.** Intended for plugin initialization\n\
                  \x20   /// after applying per-instance pot/switch jitter.\n\
                  \x20   ///\n\
-                 \x20   /// # Nodal full-LU path: stub only\n\
+                 \x20   /// # Nodal route: stub only\n\
                  \x20   ///\n\
                  \x20   /// The runtime DC OP solve is shipped on the DK path only. Nodal\n\
-                 \x20   /// circuits (passive-eq, 4kbuscomp, VCR ALC, wurli power amp) continue\n\
-                 \x20   /// using the `WARMUP_SAMPLES_RECOMMENDED` silence loop — this is\n\
+                 \x20   /// circuits (Schur and full-LU alike) use the\n\
+                 \x20   /// `WARMUP_SAMPLES_RECOMMENDED` silence loop — this is\n\
                  \x20   /// the documented path for nodal circuits, not a placeholder. The\n\
                  \x20   /// warmup loop runs the full per-sample NR and is guaranteed to\n\
                  \x20   /// converge to the physically correct DC OP.\n\
@@ -4980,7 +4981,7 @@ impl RustEmitter {
                  \x20   /// so plugin host code doesn't need a solver-path branch.\n\
                  \x20   ///\n\
                  \x20   /// See `docs/aidocs/DC_OP.md` \"Runtime DC OP recompute\" for the\n\
-                 \x20   /// DK-path semantics and the deferral rationale.\n\
+                 \x20   /// DK-path semantics.\n\
                  \x20   pub fn recompute_dc_op(&mut self) {\n",
             );
             code.push_str(&body);
@@ -5141,7 +5142,9 @@ impl RustEmitter {
             code.push_str(
                 "            // exhibits the same staleness pattern), but it shifts the\n",
             );
-            code.push_str("            // first-iteration NR state for VCR ALC and other\n");
+            code.push_str(
+                "            // first-iteration NR state for leveling-amplifier and other\n",
+            );
             code.push_str("            // attack-timing-sensitive control circuits, so we gate\n");
             code.push_str("            // the reset on BoyleDiodes mode only.\n");
             code.push_str("            self.chord_valid = false;\n");
@@ -5396,7 +5399,7 @@ impl RustEmitter {
         // Neither setter reseeds NR state. Callers that need a fresh NR
         // seed (preset recall, raw unsmoothed jumps) must follow with
         // `recompute_dc_op()`. On the nodal path `recompute_dc_op()` is a
-        // stub today (see Phase E handoff); nodal preset recall falls back
+        // stub (see `emit_recompute_dc_op_body_nodal`); nodal preset recall falls back
         // to WARMUP_SAMPLES_RECOMMENDED samples of NR catch-up.
         for (idx, pot) in ir.pots.iter().enumerate() {
             let np = pot.node_p;
@@ -5438,7 +5441,8 @@ impl RustEmitter {
                 "        if !resistance.is_finite() {{ return; }}\n\
                  \x20       let r = resistance.clamp({min_const}, {max_const});\n\
                  \x20       if (r - self.pot_{}_resistance).abs() < 1e-12 {{ return; }}\n\n\
-                 \x20       // Delta conductance: stamp into A, A_neg, A_be (NOT A_neg_be: no G term)\n\
+                 \x20       // Delta conductance: stamp into A and A_be (the history matrices\n\
+                 \x20       // A_neg = alpha*C and A_neg_be = C/T carry no G term)\n\
                  \x20       let delta_g = 1.0 / r - 1.0 / self.pot_{}_resistance;\n",
                 idx, idx
             ));
@@ -5490,7 +5494,7 @@ impl RustEmitter {
             };
 
             {
-                // Delta stamp A/A_neg/A_be directly (fast path)
+                // Delta stamp A and A_be directly (fast path)
                 let emit_delta_stamp = |code: &mut String, matrix: &str, sign: &str| {
                     if np > 0 {
                         code.push_str(&format!(
@@ -5569,7 +5573,7 @@ impl RustEmitter {
             // raw unsmoothed jumps) should follow with `recompute_dc_op()`.
             // Nodal circuits route through the stub body — falls back to
             // WARMUP_SAMPLES_RECOMMENDED if a full nodal recompute is ever
-            // needed (see Phase E handoff).
+            // needed (see `emit_recompute_dc_op_body_nodal`).
             code.push_str("    }\n\n");
         }
 
@@ -6978,8 +6982,8 @@ impl RustEmitter {
             has_be_instance(ir) || ir.solver_config.breakpoint_be,
         );
         if m == 0 && !has_behavioral && !has_sat_ind {
-            // A breakpoint sample (a .switch/.pot swap, a rail pin/release)
-            // solves the same direct LU on the BE matrices, as the BE build does.
+            // A breakpoint sample (a capacitor/inductor .switch swap, a lit
+            // glow) solves the same direct LU on the BE matrices, as the BE build does.
             let linear_solve = |code: &mut String, site: &NewtonSite, sat_alpha: &str| {
                 Self::emit_nodal_rhs(code, ir, noise, site, NoiseMode::Draw);
                 code.push_str("    // Linear circuit: direct LU solve (no NR needed)\n");
@@ -7891,21 +7895,9 @@ impl RustEmitter {
         } else {
             n
         };
-        let multi_input = ir.solver_config.num_inputs() > 1;
         let has_behavioral = !ir.behavioral_sources.is_empty();
         let has_sat_ind = !ir.saturating_inductors.is_empty();
-        let inject_or_tap = ir.solver_config.has_inject_or_tap();
         let use_line_search = m > 0;
-        let _ = (
-            n,
-            m,
-            n_nodes,
-            multi_input,
-            has_behavioral,
-            has_sat_ind,
-            inject_or_tap,
-            use_line_search,
-        );
         let active_set_be_mode_full_lu = matches!(
             ir.solver_config.opamp_rail_mode,
             crate::codegen::OpampRailMode::ActiveSetBe
@@ -8640,7 +8632,7 @@ impl RustEmitter {
 
         if m == 0 {
             // Linear circuit: v_pred is the answer. A breakpoint sample (after a
-            // .switch/.pot swap) takes the BE solve: a_neg_be = (1/T)C has no G
+            // capacitor/inductor .switch swap) takes the BE solve: a_neg_be = (1/T)C has no G
             // term, so the swapped conductance is not double-counted, and BE
             // damps trap's z=-1 mode at the source.
             code.push_str("    // Linear circuit: v = v_pred (no NR needed)\n");
@@ -8872,11 +8864,7 @@ impl RustEmitter {
         site: &SchurSite,
         declare: bool,
     ) -> Result<(), CodegenError> {
-        let n = ir.topology.n;
         let m = ir.topology.m;
-        let multi_input = ir.solver_config.num_inputs() > 1;
-        let inject_or_tap = ir.solver_config.has_inject_or_tap();
-        let _ = (n, m, multi_input, inject_or_tap);
         // Step 3: Extract device voltages p = N_v * v_pred (O(M*N))
         code.push_str("    // Step 3: Extract device voltages p = N_v * v_pred (sparse)\n");
         code.push_str("    let mut p = [0.0f64; M];\n");

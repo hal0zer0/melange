@@ -119,7 +119,7 @@ pub const INPUT_LIMIT_V: f64 = 100.0;
 /// circuit time, so the count does NOT scale with the oversampling factor.
 /// Plugins applying per-instance pot/switch jitter to CircuitState before
 /// audio starts should loop `process_sample(0.0, &mut state)` this many
-/// times to reach the jittered equilibrium. See Oomox plugin roadmap P5.
+/// times to reach the jittered equilibrium.
 pub const WARMUP_SAMPLES_RECOMMENDED: usize = {{ warmup_samples_recommended }};
 
 /// True if WARMUP_SAMPLES_RECOMMENDED hit the sanity cap: the per-node settle
@@ -177,7 +177,7 @@ pub const S_NI_DEFAULT: [[f64; M]; N] = [
 {% if named_nodes | length > 0 or named_vsources | length > 0 or named_pots | length > 0 %}
 
 // -----------------------------------------------------------------------------
-// Named topology constants (Oomox plugin roadmap P2 + P3).
+// Named topology constants.
 //
 // Plugin code references these instead of hard-coding numeric indices that
 // shift when a netlist revision adds or reorders components.

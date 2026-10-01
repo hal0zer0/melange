@@ -359,7 +359,7 @@ fn boyle_catch_offset(limit: f64) -> f64 {
 ///    has to balance ~1 µS (the internal load), not ~4000 S (Gm of the
 ///    original linear VCCS). Produces the smooth exponential knee that
 ///    matches measured TL072 saturation and reproduces the "mid drive
-///    crunch" of guitar overdrive pedals like the Klon Centaur. NR
+///    crunch" of op-amp guitar overdrive pedals. NR
 ///    converges where the naive on-output placement diverged.
 ///
 /// # Contract
@@ -505,7 +505,7 @@ pub fn augment_netlist_with_boyle_diodes(
         //
         // The VCVS form (not VCCS + shunt-to-ground) is essential: a
         // shunt-to-ground at the output would fight the op-amp's DC bias
-        // for any circuit without a hard pull-up (e.g. Klon biases its
+        // for any circuit without a hard pull-up (e.g. a pedal that biases its
         // op-amps via a high-Z divider at vbias=4.5V — a 50Ω shunt would
         // dump 90 mA into ground at idle). The series-R topology adds
         // real source impedance WITHOUT creating any DC sink to ground.

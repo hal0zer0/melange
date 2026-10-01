@@ -1,12 +1,12 @@
-//! Runtime DC operating-point recompute emission (Oomox P6, Phase E).
+//! Runtime DC operating-point recompute emission.
 //!
 //! Emits `CircuitState::recompute_dc_op()` into generated plugin code so that
 //! plugins with per-instance pot/switch jitter can re-solve the DC bias at
 //! construction time, skipping the `WARMUP_SAMPLES_RECOMMENDED` silence loop.
 //!
-//! ## Phase E scope
+//! ## Scope
 //!
-//! **MVP — Direct Newton-Raphson only**, starting from `self.v_prev` (which is
+//! **Direct Newton-Raphson only**, starting from `self.v_prev` (which is
 //! a physically valid state from the prior solve). No source/Gmin stepping,
 //! no basin-trap handling. Circuits that only converge via stepping in the
 //! codegen-time solver remain reliant on the warmup loop.
@@ -15,30 +15,29 @@
 //! linear op-amp, VCA — i.e. whatever the compile-time DC OP handles today,
 //! minus multi-equilibrium refinements.
 //!
-//! ## Layering (shipped across E.1 → E.6)
+//! ## Layering
 //!
 //! 1. `emit_recompute_dc_op_body_dk` — top-level body assembler (DK path).
 //! 2. `emit_dc_op_build_g_aug_dk` — G_aug base construction from live
-//!    pot/switch state (E.3).
+//!    pot/switch state.
 //! 3. `emit_dc_op_build_b_dc_dk` — DC RHS = `RHS_CONST` +
-//!    `.runtime` voltage source fields (E.5).
+//!    `.runtime` voltage source fields.
 //! 4. `emit_dc_op_extract_v_nl_dk` + `emit_dk_device_evaluation` —
-//!    per-device i_nl + Jacobian evaluator shared with transient NR (E.4).
+//!    per-device i_nl + Jacobian evaluator shared with transient NR.
 //! 5. `emit_dc_op_nr_loop_dk` — Direct NR loop with LU solve, flat
-//!    damping, convergence check (E.5).
+//!    damping, convergence check.
 //! 6. `emit_dc_op_writeback_dk` — write converged `v_node` + `i_nl` back
-//!    to state, seed DC blocker at new DC output, sync pot `_prev`,
-//!    zero oversampler/inductor/transformer history (E.5 + E.6).
-//! 7. `emit_recompute_dc_op_body_nodal` — permanent stub emitter for the
-//!    nodal full-LU path. Emits a method that bumps
+//!    to state, zero `q_dot`, seed the DC blocker at the new DC output,
+//!    sync pot `_prev`, zero oversampler history.
+//! 7. `emit_recompute_dc_op_body_nodal` — stub emitter for every nodal
+//!    build (Schur and full-LU). Emits a method that bumps
 //!    `diag_nr_max_iter_count` and returns, so plugins can install the
-//!    Phase E surface uniformly while nodal-routed circuits continue
-//!    using the `WARMUP_SAMPLES_RECOMMENDED` silence loop (the
-//!    documented path for nodal circuits). The full nodal NR body is
-//!    deferred indefinitely — see the function's doc comment for the
-//!    rationale and the reviver's plan.
+//!    `recompute_dc_op` surface uniformly while nodal-routed circuits
+//!    continue using the `WARMUP_SAMPLES_RECOMMENDED` silence loop (the
+//!    documented path for nodal circuits). A nodal NR body is not
+//!    implemented — see the function's doc comment.
 //!
-//! ## DC fixed-point algebra (E.5 derivation)
+//! ## DC fixed-point algebra
 //!
 //! The per-sample equation (charge form, both integrators) is
 //!
@@ -65,16 +64,11 @@
 //!
 //! with `b_dc = RHS_CONST`.
 //!
-//! This converges to the exact compile-time DC OP for inductor-free
-//! circuits. Inductor-bearing circuits: the `g_eq = T/(2L)` companion shunt
-//! already baked into `G` differs from the inductor-short augmented row the
-//! compile-time solver uses, so the solved fixed point is only a true
-//! `process_sample(0.0)` equilibrium when `V_L ≈ 0` across every companion
-//! winding (i.e. no DC current through the winding). The writeback guards
-//! this honestly: if any winding sees `|V_L|` above a small tolerance, the
-//! recompute reports failure (bumps `diag_nr_max_iter_count`) instead of
-//! writing back a false equilibrium, and `settle_dc_op` routes to the
-//! `WARMUP_SAMPLES_RECOMMENDED` loop which does reach the true OP.
+//! Inductors, coupled inductors and transformer windings are augmented
+//! branch rows whose `L` sits in `C`. In `G` each such row is the
+//! short-circuit constraint `v_a − v_b = 0`, the same DC short the
+//! compile-time solver stamps (`dc_op.rs`), so the fixed point above holds
+//! with inductors as well.
 
 use crate::codegen::ir::CircuitIR;
 use crate::codegen::CodegenError;
@@ -86,23 +80,23 @@ use super::nr_helpers::emit_dk_device_evaluation;
 ///
 /// Assembles the full Direct-NR runtime DC OP solve:
 ///   1. Build the resistive `g_aug` base matrix from `G` + live pot/switch
-///      state (E.3).
-///   2. Build the DC RHS `b_dc` from `RHS_CONST` (halving node rows) and
-///      any `.runtime` voltage source fields (E.5).
+///      state.
+///   2. Build the DC RHS `b_dc` from `RHS_CONST` (verbatim) and any
+///      `.runtime` voltage source fields.
 ///   3. Direct NR loop: warm-start from `self.v_prev`, extract `v_nl`,
 ///      evaluate per-device currents + Jacobian, LU-solve for the Newton
-///      step, apply flat voltage damping + clamp, check convergence (E.5).
+///      step, apply flat voltage damping + clamp, check convergence.
 ///   4. On convergence, write the solution back to `self.dc_operating_point`,
-///      `self.v_prev`, `self.i_nl_prev` / `i_nl_prev_prev`, and clear the
-///      DC blocker's sample history so it doesn't need seconds to re-settle
-///      from a stale offset (E.5).
+///      `self.v_prev`, `self.i_nl_prev` / `i_nl_prev_prev`, and seed the
+///      DC blocker at the new DC output so it doesn't need seconds to
+///      re-settle from a stale offset.
 ///
 /// Linear-only circuits (`M == 0` or no device slots) short-circuit the NR
 /// loop: a single `invert_n_equilibrated(g_aug)` solve gives the resistive fixed point.
 pub(super) fn emit_recompute_dc_op_body_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
     let mut body = String::new();
     body.push_str(
-        "        // Phase E MVP (Oomox P6) — Direct Newton-Raphson DC OP recompute.\n\
+        "        // Runtime DC operating-point recompute: direct Newton-Raphson.\n\
          \x20       //\n\
          \x20       // Warm-starts from `self.v_prev` (a physically valid prior\n\
          \x20       // equilibrium), rebuilds `g_aug` from live pot/switch state,\n\
@@ -116,15 +110,8 @@ pub(super) fn emit_recompute_dc_op_body_dk(ir: &CircuitIR) -> Result<String, Cod
          \x20       // Scope notes (documented in the method's public docstring):\n\
          \x20       //   * Parasitic-BJT internal nodes (RB/RC/RE > 0) are NOT\n\
          \x20       //     expanded on the DK path — see `docs/aidocs/DC_OP.md`.\n\
-         \x20       //   * Inductor-as-short augmented rows are not re-stamped;\n\
-         \x20       //     `G` carries the companion shunt `g_eq = T/(2L)` instead,\n\
-         \x20       //     so the solved fixed point is only a true equilibrium\n\
-         \x20       //     when V_L ≈ 0 across every companion winding. Windings\n\
-         \x20       //     carrying DC current are detected after convergence and\n\
-         \x20       //     reported as failure (see writeback guard) so callers\n\
-         \x20       //     fall back to the warmup loop rather than accepting a\n\
-         \x20       //     false equilibrium. Inductor-free circuits agree bitwise\n\
-         \x20       //     with `dc_op.rs`.\n\
+         \x20       //   * Inductors are augmented branch rows: in `G` each is the\n\
+         \x20       //     DC short `v_a − v_b = 0` (its `L` sits in `C`).\n\
          \x20       //   * No source / Gmin stepping, no basin-trap handling.\n",
     );
     body.push_str(&emit_dc_op_build_g_aug_dk(ir));
@@ -241,12 +228,12 @@ pub(super) fn emit_recompute_dc_op_body_dk(ir: &CircuitIR) -> Result<String, Cod
 
 /// Emit Rust that constructs a local `g_aug: [[f64; N]; N]` from:
 ///   * the const `G` (input conductance, VS/VCVS rows, opamp VCCS, linearized
-///     triodes, inductor companion shunts — all already baked at codegen time),
+///     triodes, inductor branch rows — all already baked at codegen time),
 ///   * per-pot conductance deltas `1/self.pot_i_resistance - POT_i_G_NOM`,
 ///   * per-switch resistor deltas `1/R_new - 1/R_nominal` (C/L switch
-///     components do not affect `g_aug`; capacitors are open at DC and
-///     inductors are handled by the const-`G` companion shunt — see module
-///     docstring for the MVP simplification).
+///     components do not affect `g_aug`: capacitors are open at DC, and an
+///     inductor's value sits in `C` while its `G` branch row is the DC short
+///     `v_a − v_b = 0` — see the module docstring).
 ///
 /// Mirrors the pot / switch-R stamps in `emit_switch_methods`'
 /// `rebuild_matrices` so the two paths stay consistent. Kept inline (no
@@ -258,16 +245,16 @@ fn emit_dc_op_build_g_aug_dk(ir: &CircuitIR) -> String {
 
     body.push_str(
         "\n        // Start from the const G matrix (input conductance, opamp VCCS,\n\
-         \x20       // linearized-triode stamps, and inductor companion shunts are\n\
-         \x20       // already included).\n\
+         \x20       // linearized-triode stamps, and inductor branch rows (DC shorts)\n\
+         \x20       // are already included).\n\
          \x20       let mut g_aug: [[f64; N]; N] = G;\n",
     );
 
     // --- Switch resistor deltas --------------------------------------------
     //
     // At DC only R-type switch components affect `g_aug`. Capacitors are open
-    // (no G contribution) and inductors are shorts but the companion shunt is
-    // already in G (see module-level note).
+    // (no G contribution) and inductors are shorts, already in G as their
+    // augmented branch rows (see module-level note).
     let has_r_switch = ir
         .switches
         .iter()
@@ -774,12 +761,9 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR, seed: &str) -> Result<String, CodegenEr
 ///     — the DC-blocker IIR's fixed point is `y = 0, x = V_dc`. Setting
 ///     `x_prev` to the raw DC output (not 0) suppresses the step transient
 ///     the blocker would otherwise generate on the first sample.
-///   * `pot_N_resistance_prev = pot_N_resistance` for every pot — the
-///     per-sample A_neg correction uses `_prev` to undo last sample's
-///     conductance contribution. Without this sync the first sample after
-///     recompute would see a phantom pot jump if the user had called
-///     `set_pot_N` earlier (which leaves `_prev` pointing at the pre-jitter
-///     value).
+///   * `pot_N_resistance_prev = pot_N_resistance` for every pot, as every
+///     committed sample leaves it. The generated solver does not read
+///     `_prev`; the sync keeps the public field consistent.
 ///   * Oversampler filter taps zeroed (`os_up_state`, `os_dn_state`,
 ///     and the `_outer` pair for 4× OS). Mid-stream the filter state
 ///     reflects the old DC level and would ring down as the output steps to
@@ -827,13 +811,12 @@ fn emit_dc_op_writeback_dk(ir: &CircuitIR, nonlinear: bool) -> String {
         body.push_str("        self.dc_block_y_prev = [0.0; NUM_OUTPUTS];\n");
     }
 
-    // Pot prev sync — the per-sample A_neg correction uses the previous
-    // timestep's conductance. After recompute we've jumped to a new
-    // equilibrium at the current pot value, so `_prev` must track it too.
+    // Pot prev sync — every committed sample leaves `_prev` equal to the
+    // current resistance; the recompute does the same.
     if !ir.pots.is_empty() {
         body.push_str(
-            "        // Sync pot_N_resistance_prev so the first sample's A_neg\n\
-             \x20       // correction doesn't fire on a phantom conductance delta.\n",
+            "        // Sync pot_N_resistance_prev with the current resistance, as\n\
+             \x20       // every committed sample does.\n",
         );
         for idx in 0..ir.pots.len() {
             body.push_str(&format!(
@@ -866,8 +849,8 @@ fn emit_dc_op_writeback_dk(ir: &CircuitIR, nonlinear: bool) -> String {
     body
 }
 
-/// Emit the body of `CircuitState::recompute_dc_op()` for a nodal full-LU
-/// circuit.
+/// Emit the body of `CircuitState::recompute_dc_op()` for a nodal circuit
+/// (both sub-paths, Schur and full-LU).
 ///
 /// The nodal solver operates on the augmented MNA directly (N = n_aug rather
 /// than the DK path's N = n_nodes + augmented_rows), and its NR device
@@ -876,10 +859,9 @@ fn emit_dc_op_writeback_dk(ir: &CircuitIR, nonlinear: bool) -> String {
 /// recompute would therefore need a nodal-specific parallel of
 /// `emit_dc_op_build_g_aug_dk` / `_build_b_dc_dk` / `_nr_loop_dk`.
 ///
-/// That nodal body is **deferred indefinitely**. Shipping nodal-routed
-/// plugins (passive-eq, 4kbuscomp, VCR Audio ALC, wurli power amp) continue
-/// using the `WARMUP_SAMPLES_RECOMMENDED` silence loop, which is the
-/// documented path for nodal circuits — not a temporary workaround. The
+/// That nodal body is not implemented. Nodal-routed plugins use the
+/// `WARMUP_SAMPLES_RECOMMENDED` silence loop, which is the documented path
+/// for nodal circuits — not a temporary workaround. The
 /// warmup loop runs the full per-sample NR and is guaranteed to converge
 /// to the physically correct DC OP.
 ///
@@ -890,19 +872,18 @@ fn emit_dc_op_writeback_dk(ir: &CircuitIR, nonlinear: bool) -> String {
 /// path's NR-failure branch — callers' fallback logic handles both the
 /// DK-convergence-failure and the nodal-stub-no-op cases uniformly.
 ///
-/// See the `phase_e_handoff_runtime_dc_op` memory + `docs/aidocs/DC_OP.md`
-/// "Runtime DC OP recompute" for the reviver's technical plan if
-/// priorities ever flip.
+/// See `docs/aidocs/DC_OP.md` "Runtime DC OP Recompute" for the DK-path
+/// contract.
 pub(super) fn emit_recompute_dc_op_body_nodal(_ir: &CircuitIR) -> Result<String, CodegenError> {
     Ok(
-        "        // Nodal full-LU path: runtime DC OP recompute is deferred\n\
-        \x20       // indefinitely (warmup loop is the documented path for nodal\n\
-        \x20       // circuits). Bump the NR max-iter diag counter so callers'\n\
-        \x20       // standard fallback pattern (`if counter ticked, run warmup`)\n\
-        \x20       // routes through the `WARMUP_SAMPLES_RECOMMENDED` silence loop.\n\
+        "        // Nodal route: no runtime DC OP recompute (the warmup loop is\n\
+        \x20       // the documented path for nodal circuits). Bump the NR max-iter\n\
+        \x20       // diag counter so callers' standard fallback pattern (`if\n\
+        \x20       // counter ticked, run warmup`) routes through the\n\
+        \x20       // `WARMUP_SAMPLES_RECOMMENDED` silence loop.\n\
         \x20       //\n\
-        \x20       // See `docs/aidocs/DC_OP.md` \"Runtime DC OP recompute\" for\n\
-        \x20       // the rationale and the reviver's plan if priorities change.\n\
+        \x20       // See `docs/aidocs/DC_OP.md` \"Runtime DC OP Recompute\" for\n\
+        \x20       // the DK-path contract.\n\
         \x20       self.diag_nr_max_iter_count += 1;\n"
             .to_string(),
     )
@@ -944,7 +925,7 @@ pub(super) fn emit_settle_dc_op_body(ir: &crate::codegen::ir::CircuitIR) -> Stri
      \x20       // convergence, so they're not failure signals. The DK recompute\n\
      \x20       // increments this counter on every \"state not updated\" outcome\n\
      \x20       // (NR iter exhaustion, singular LU on either the linear or NR\n\
-     \x20       // path, NaN resets, DC-biased winding rejection), and the\n\
+     \x20       // path, NaN resets, an unsettled railed op-amp pin set), and the\n\
      \x20       // nodal stub increments it unconditionally — so this single\n\
      \x20       // field cleanly distinguishes \"ready\" from \"fall back\".\n\
      \x20       let before = self.diag_nr_max_iter_count;\n\

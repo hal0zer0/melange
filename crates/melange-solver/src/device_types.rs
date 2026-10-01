@@ -810,11 +810,10 @@ pub struct TubeParams {
     /// disables self-heating entirely — the per-sample Tp update block is
     /// elided by codegen and the struct stays byte-identical to a non-thermal
     /// build. Finite values activate quasi-static envelope heating driven by
-    /// plate dissipation `P = Ip·Vpk + Ig·Vgk`. See
-    /// `memory/triode_self_heat_ceiling.md` for why this is seasoning rather
-    /// than voice on sharp-cutoff preamps; the infrastructure targets
-    /// power-tube circuits (champ-5f1 6V6, cutter-amp 6L6) where the physics
-    /// ceiling rises above the audibility floor.
+    /// plate dissipation `P = Ip·Vpk + Ig·Vgk`. On sharp-cutoff preamp
+    /// triodes the effect is small (seasoning rather than voice); the
+    /// infrastructure targets power-tube circuits (6V6, 6L6 output stages),
+    /// where the physics ceiling rises above the audibility floor.
     #[serde(default = "default_infinity")]
     #[serde(deserialize_with = "deserialize_f64_or_infinity")]
     pub rth: f64,
@@ -949,7 +948,8 @@ impl TubeParams {
                 ));
             }
             // The Reefman Derk / DerkE variants require αs>0 because αs=0
-            // makes Ip=0 identically (see memory/pentode_equations.md). The
+            // makes Ip=0 identically (docs/aidocs/DEVICE_MODELS.md, "Pentode /
+            // Beam Tetrode"). The
             // Classical Koren variant does not use αs/A/β at all, so those
             // fields are allowed (and expected) to be zero for Classical
             // entries. Skip the Derk-specific invariants when Classical.
