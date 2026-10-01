@@ -2111,10 +2111,10 @@ fn compile_circuit_source(
         );
         println!("          back as aliasing, which the frequency response will not show.");
         println!(
-            "          Measure it:  melange analyze <circuit> --harmonics 5 --amplitude <drive>"
+            "          Measure it:  melange simulate <circuit> --input-audio <tone.wav> at 1× and"
         );
         println!(
-            "                       (compare the worst `nyquist_dbc` against --oversampling 4)"
+            "                       --oversampling 4; compare the spectra (docs/OVERSAMPLING.md)"
         );
         println!(
             "          Set it:      --oversampling {{2|4}}, or `.oversampling N` in the deck."

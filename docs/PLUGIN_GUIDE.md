@@ -108,12 +108,18 @@ state.set_pot_0(r_new);
 state.recompute_dc_op();  // refresh NR seed to the new operating point
 ```
 
+`recompute_dc_op()` (and its wrapper `settle_dc_op()`) exist only if the
+circuit was compiled with `--emit-dc-op-recompute`; without the flag the
+generated `CircuitState` has neither, and the generated `lib.rs` never calls
+them. You add the call yourself.
+
 On DK-path circuits this re-solves the operating point from the new pot
 value and writes `v_prev`/`i_nl_prev` with the converged equilibrium (and
 puts the trapezoidal history `q_dot` at rest). On
-nodal-path circuits `recompute_dc_op()` does nothing yet; NR catches up on
-its own over roughly
-`WARMUP_SAMPLES_RECOMMENDED` samples after the jump.
+nodal-path circuits `recompute_dc_op()` does not re-solve; it only bumps
+`diag_nr_max_iter_count`, and NR catches up on its own over roughly
+`WARMUP_SAMPLES_RECOMMENDED` samples after the jump. `settle_dc_op()` runs
+that warmup as a silence loop for you. Neither method is audio-thread safe.
 
 ### Switch Parameters (from `.switch` directives)
 
@@ -122,7 +128,7 @@ switch_0: IntParam   // range: 0..num_positions-1
 switch_1: IntParam   // ...
 ```
 
-Each `.switch` directive becomes an `IntParam`. Position 0 = first value set, position 1 = second, etc. Switches always update per-block (matrix rebuild on position change). A switch flip is a topology step — call `recompute_dc_op()` afterward on DK circuits to refresh the NR seed (nodal falls back to NR catch-up over `WARMUP_SAMPLES_RECOMMENDED` samples).
+Each `.switch` directive becomes an `IntParam`. Position 0 = first value set, position 1 = second, etc. Switches always update per-block (matrix rebuild on position change). A switch flip is a topology step — call `recompute_dc_op()` (needs `--emit-dc-op-recompute`) afterward on DK circuits to refresh the NR seed (nodal falls back to NR catch-up over `WARMUP_SAMPLES_RECOMMENDED` samples).
 
 ### Wet/Dry Mix (opt-in)
 
@@ -154,17 +160,30 @@ Per sample:
   Read smoothed output_level → compute output_gain
   Read smoothed pot values (interpolated between rebuilds)
 
-  For each channel (stereo: L and R independently):
-    input *= input_gain                          (if level params)
-    dry = input                                  (if wet/dry mix)
-    output = process_sample(input, state)        (circuit DSP)
+  input = first input channel
+  input *= input_gain                            (if level params)
+  dry = input                                    (if wet/dry mix)
+  outputs = process_sample(input, state)         (circuit DSP, one call)
+  For each output channel (one per output node):
     output *= output_gain                        (if level params)
     output = mix * output + (1-mix) * dry        (if wet/dry mix)
     output = ear_protection_limit(output)        (if ear protection on)
     output = clamp to ±1.0 or NaN → 0.0         (safety)
 ```
 
-**Stereo handling:** Each channel gets its own `CircuitState` — left and right are processed independently with no cross-talk. Multi-output circuits (e.g., stereo output nodes) use a single shared state.
+**Channel layout** follows the output nodes:
+
+- **One output node** (the usual case): a mono plugin, 1 input and 1 output,
+  with one `CircuitState`. `melange compile` picks this on its own and prints
+  `Auto-selecting mono (single output node)`.
+- **Two output nodes** (`--output-node a,b`): a stereo plugin, 2 inputs and
+  2 outputs, still one shared `CircuitState`. The circuit is driven from the
+  left input; the right input is ignored. Node `a` goes to the left output and
+  node `b` to the right.
+
+`--mono` forces the 1-in/1-out layout. The command-line tool does not generate
+a plugin that runs two independent copies of a one-output circuit for left and
+right.
 
 ## Customizing Parameters
 
@@ -397,8 +416,7 @@ Requires zig 0.13, cargo-zigbuild, macOS SDK 13.3, and rcodesign.
 | No output / silence | Wrong input/output node names | Check `melange nodes circuit.cir` |
 | Very quiet output | Level params at default (0 dB) but circuit expects hot input | Increase Input Level in the plugin UI |
 | Clicks on parameter changes | Smoothing too short | Increase `.with_smoother(SmoothingStyle::Linear(50.0))` |
-| Clicks on preset/DAW load | NR seed stale after large unsmoothed jump | Call `state.recompute_dc_op()` right after `set_pot_*` / `set_switch_*` (DK path). On nodal circuits the runtime stub just bumps a diagnostic counter — let NR catch up over ~`WARMUP_SAMPLES_RECOMMENDED` samples |
-| Clicks on log-taper knob drags | Audio-taper ratio ≥1000:1 + per-block updates used to trip an internal reseed gate | Already fixed (2026-04-20) — regen the plugin. If you pinned a pre-2026-04-20 melange, upgrade |
+| Clicks on preset/DAW load | NR seed stale after large unsmoothed jump | Compile with `--emit-dc-op-recompute`, then call `state.recompute_dc_op()` right after `set_pot_*` / `set_switch_*` (DK path). On nodal circuits the runtime stub just bumps a diagnostic counter — let NR catch up over ~`WARMUP_SAMPLES_RECOMMENDED` samples |
 | High CPU usage | Nodal solver with many pots | Expected — pots trigger O(N^3) rebuild. Reduce pot count or use DK-compatible circuit |
 | NaN / noise burst | DC operating point wrong | Try `--backward-euler`; check circuit biasing |
 | Ear protection clipping clean signal | Output exceeds 0 dBFS | Reduce Output Level, or disable ear protection for measurement |

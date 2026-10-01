@@ -832,6 +832,18 @@ generated state is smaller.
 
 ### Changed
 
+- **`analyze`'s `nyquist_dbc` no longer reads the fundamental as Nyquist
+  content.** Its window length could be odd, and the `(-1)^n` kernel is
+  orthogonal to the drive only over an even window: a plain RC low-pass read
+  −43.7 dBc at 3.18 kHz. The window is now always even (the same RC reads
+  −156 dBc or below up to 8 kHz). The column measures a component at exactly
+  half the sample rate, the signature of a numerical limit cycle; it was never
+  an aliasing measurement, though the docs and `compile`'s oversampling note
+  used it as one. They now say how to measure aliasing (render a test tone at
+  1× and oversampled, compare the inharmonic content), and the oversampling
+  guide's clipper table is re-measured that way: 4× takes the aliases from
+  −19 dBc to −62 dBc at 3 V of drive, not the 5–7 dB the old table showed.
+
 - **A `.wiper` with no default position starts where its legs put it.** It
   started at 0.5 whatever the netlist said: legs of 10k and 90k on a 100k
   wiper booted at 50k/50k, while a `.pot` boots at its netlist value. With no

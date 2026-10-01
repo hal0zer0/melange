@@ -244,12 +244,16 @@ Y1 sig_p sig_n ctrl_p ctrl_n VCA1   ; VCA: sig+, sig-, ctrl+, ctrl-, model
 A `U` element without a matching `.model` is a parse error
 (`Component 'U1' references model 'TL072' which is not defined`), so you will
 not forget the card. What you can forget is the **rails** — and a rail-less
-op-amp has no output clamp at all:
+op-amp has no output clamp at all. Each side's limit is the first of these the
+card sets:
 
 ```
-upper clamp:  VCC   >  +VSAT  >  +13 V if GBW is finite  >  none
-lower clamp:  VEE   >  −VSAT  >  −13 V if GBW is finite  >  none
+upper clamp:  VCC − VOH_DROP  >  +VSAT  >  +13 V if GBW is finite  >  none
+lower clamp:  VEE + VOL_DROP  >  −VSAT  >  −13 V if GBW is finite  >  none
 ```
+
+`VOH_DROP`/`VOL_DROP` are how far short of each rail the output stops. They
+default to 1 V, and the build warns whenever it assumes that default.
 
 `OA(AOL=1e5 ROUT=75)` therefore models an op-amp with infinite headroom. Drop it
 into a 9 V pedal and the output sails past 9 V to wherever the closed-loop gain
@@ -278,27 +282,47 @@ C_g ng 0 10u
 Save it as `pedal.cir` and check the bias before you check the sound:
 
 ```bash
-melange dc-op pedal.cir        # v(vbias) = 4.5000 V, v(out) = 4.4955 V
-melange simulate pedal.cir --amplitude 0.9 -o pedal.wav   # peak: 9.000000
+melange dc-op pedal.cir        # v(vbias) = 4.5000 V, v(out) = 4.5000 V
+melange simulate pedal.cir --amplitude 0.9 -o pedal.wav   # peak: 8.000000e0
 ```
 
-`peak: 9.000000` is the upper rail, exactly. Three variants of the same deck at
-the same 0.9 V drive, to show what each parameter is actually doing:
+Both commands also print three warnings about the card:
+
+```
+[WARN ] Op-amp U1: zero-load swing limit assumed VCC − 1 V = 8 V (a railed output sags R_SAG·I_load below it); set VOH_DROP (0 for rail-to-rail parts).
+[WARN ] Op-amp U1: zero-load swing limit assumed VEE + 1 V = 1 V (a railed output sags R_SAG·I_load below it); set VOL_DROP (0 for rail-to-rail parts).
+[WARN ] Op-amp U1: GBW is not modelled as a bandwidth pole (the gain is AOL at every frequency). It only sets the default +/-13 V rails when VCC, VEE and VSAT are absent.
+```
+
+`peak: 8.000000e0` is the upper swing limit, not the 9 V rail. Most op-amp
+outputs cannot reach their supply, so with `VCC` set and no `VOH_DROP` melange
+assumes the output stops 1 V short of it, and says so. The drive is 0.9 V times
+a gain of 11, a 9.9 V swing around the 4.5 V bias, so the output hits the
+limit at both ends: 8 V at the top, 1 V at the bottom. The third warning means
+`GBW` does nothing on this card, since `VCC` and `VEE` already set both limits.
+
+The drop belongs to the part you are modelling. Take it from the datasheet's
+output-swing figure at your supply voltage and load, and put it on the card:
+`VOH_DROP=0 VOL_DROP=0` for a rail-to-rail part. The two swing warnings then
+go away. Four variants of the same deck at the same 0.9 V drive, to show what
+each parameter is actually doing:
 
 | Model card | `peak:` |
 |---|---|
-| `OA(AOL=200000 ROUT=50 GBW=3e6 VCC=9 VEE=0)` | 9.000000 — clamped at `VCC` |
-| `OA(AOL=200000 ROUT=50 GBW=3e6)` | 13.000000 — `GBW` alone silently implies ±13 V |
-| `OA(AOL=200000 ROUT=50)` | 14.463231 — no ceiling; it goes wherever the gain takes it |
+| `OA(AOL=200000 ROUT=50 GBW=3e6 VCC=9 VEE=0 VOH_DROP=1.5 VOL_DROP=1.5)` | 7.500000e0 — clamped at `VCC − VOH_DROP` (1.5 V is an illustrative drop) |
+| `OA(AOL=200000 ROUT=50 GBW=3e6 VCC=9 VEE=0)` | 8.000000e0 — clamped at `VCC − 1 V`, the assumed default drop |
+| `OA(AOL=200000 ROUT=50 GBW=3e6)` | 1.300000e1 — `GBW` alone implies ±13 V (the `GBW` warning says so) |
+| `OA(AOL=200000 ROUT=50)` | 1.439999e1 — no ceiling and no warning; 4.5 V bias plus the 9.9 V swing |
 
-Note what the rails do *not* do. Clamping the output to the 0–9 V window is not
+Note what the rails do *not* do. Clamping the output to the 1–8 V window is not
 the same as biasing the signal path — that is the job of `R_b1`/`R_b2` and the
 coupling caps, which are ordinary components like any others. A single-supply
 op-amp card with no bias network around it gives you a clamped output and a
 circuit that still does not work.
 
 The full `OA` parameter set — `SR` (slew rate, in V/µs), `IB`, `RIN`, the noise
-densities `EN`/`IN`, and the Boyle-mode-only `VOH_DROP`/`VOL_DROP` — is
+densities `EN`/`IN`, the saturated-output sag `R_SAG`, and the drops
+`VOH_DROP`/`VOL_DROP` — is
 tabulated in
 [spice-grammar.md](spice-grammar.md#op-amp-parameters-type-oa).
 
@@ -650,10 +674,10 @@ melange compile my-circuit.cir --format plugin -o my-plugin
 - **Use `melange analyze`** to see the frequency response before compiling. It's fast and catches many issues.
 - **Use `melange simulate --amplitude 0.1`** as a quick sanity check — if you hear the circuit working, the netlist is correct.
 - **Model parameters matter.** A BJT with default `IS=1e-16` behaves very differently from one with `IS=1e-14`. Use datasheet values or known SPICE models.
-- **Decompose large circuits when there's no global feedback.** If your circuit has no feedback path between subsystems — e.g. a preamp → tone-stack → power-amp cascade where each stage drives the next through a coupling cap and nothing feeds back — compile each subsystem as a separate `.cir` and chain them in plugin code. This keeps N and M small per kernel (linear in DK cost, cubic in nodal), avoids cross-subsystem matrix conditioning issues, and lets each stage pick its best solver path independently. A 16-stage tube cascade with real global feedback has to be one monolithic netlist; an 8-stage preamp where each stage is capacitively coupled to the next does not.
+- **Decompose large circuits when there's no global feedback.** If your circuit has no feedback path between subsystems — e.g. a preamp → tone-stack → power-amp cascade where each stage drives the next through a coupling cap and nothing feeds back — compile each subsystem as a separate `.cir` and chain them in plugin code. This keeps N and M small per kernel (linear in DK cost, cubic in nodal), avoids cross-subsystem matrix conditioning issues, and lets each stage pick its best solver path independently. A 16-stage tube cascade with real global feedback has to be one monolithic netlist. Splitting is exact only where a stage's output does not depend on what it drives (behind a buffer or cathode/emitter follower whose output impedance is negligible against the next stage's input). A coupling cap does not decouple loading: the next stage's input impedance still loads the previous one, so splitting there drops that loading and changes the answer. When in doubt, keep it one netlist.
 - **Use `.linearize` for semantic control, not CPU savings.** NR converges in 0–1 iterations for devices in their small-signal region, so linearizing produces negligible speedup. The real use case is **forcing a device to stay small-signal** — e.g. a Vbe multiplier that must not clip, a preamp stage that should be clean even at extreme input. Linearized devices cannot clip because they're replaced with small-signal conductances at the DC operating point.
 - **Per-instance parameter jitter needs warmup.** If the plugin sets `state.pot_N_resistance = jittered_value` at construction, loop `process_sample(0.0, &mut state)` `WARMUP_SAMPLES_RECOMMENDED` times before processing audio — the DC_OP constant is baked at nominal values, so jittered circuits need time to settle to their actual equilibrium.
-- **Skip warmup with `recompute_dc_op()` / `settle_dc_op()`.** Pass `--emit-dc-op-recompute` to `melange compile` and the generated `CircuitState` gains two methods. `recompute_dc_op(&mut self)` runs the runtime NR directly — use it when you want explicit control. `settle_dc_op(&mut self)` is the convenience wrapper: it calls `recompute_dc_op` first and falls back to the `WARMUP_SAMPLES_RECOMMENDED` silence loop if the NR fails or the circuit is nodal-routed. Prefer `settle_dc_op` unless you need to observe the recompute-vs-fallback decision yourself — it handles the DK-vs-nodal distinction uniformly so plugin code doesn't need to branch. Neither method is audio-thread safe; call from plugin init or parameter-change callbacks. DK-path circuits (tube preamps, op-amp clippers) get the full NR; nodal full-LU circuits (passive-eq, 4kbuscomp, VCR ALC, wurli power amp) always fall through to warmup — warmup is the supported path for nodal plugins.
+- **Skip warmup with `recompute_dc_op()` / `settle_dc_op()`.** Pass `--emit-dc-op-recompute` to `melange compile` and the generated `CircuitState` gains two methods. `recompute_dc_op(&mut self)` runs the runtime NR directly — use it when you want explicit control. `settle_dc_op(&mut self)` is the convenience wrapper: it calls `recompute_dc_op` first and falls back to the `WARMUP_SAMPLES_RECOMMENDED` silence loop if the NR fails or the circuit is nodal-routed. Prefer `settle_dc_op` unless you need to observe the recompute-vs-fallback decision yourself — it handles the DK-vs-nodal distinction uniformly so plugin code doesn't need to branch. Neither method is audio-thread safe; call from plugin init or parameter-change callbacks. DK-routed circuits get the full NR. On every nodal-routed circuit, Schur and full-LU sub-paths alike, `recompute_dc_op` only bumps `diag_nr_max_iter_count` and `settle_dc_op` always falls through to warmup — warmup is the supported path for nodal plugins. `melange compile` prints the route as `Solver: DK — …` or `Solver: nodal — …`; the built-in `passive-eq1a`, for one, routes nodal.
 - **Runtime-adjustable device model fields** are already emitted as `pub` on `CircuitState`: `device_0_mu`, `device_0_ex`, `device_0_kg1`, etc. for tubes; similar for BJTs, JFETs, MOSFETs. Write them directly from plugin code for per-instance tube aging, transistor matching, or user-exposed model parameters. No codegen changes needed.
 
 ## Further Reading

@@ -649,6 +649,19 @@ fn test_analyze_linear_circuit_harmonics_at_numerical_floor() {
                 i + 2
             );
         }
+        // The Nyquist column too: an odd DFT window leaked the fundamental
+        // into it (−43.7 dBc on this RC at 3.18 kHz).
+        let nyq = cols[8];
+        if nyq != "nan" {
+            let dbc: f64 = nyq
+                .parse()
+                .unwrap_or_else(|_| panic!("unparseable nyquist_dbc {nyq:?} in {line}"));
+            assert!(
+                dbc < -120.0,
+                "nyquist_dbc = {dbc} dBc on a pure linear RC — fundamental leakage \
+                 into the Nyquist bin (odd DFT window?). Row: {line}"
+            );
+        }
     }
     assert!(data_rows >= 3, "expected >= 3 data rows, got:\n{stdout}");
 }

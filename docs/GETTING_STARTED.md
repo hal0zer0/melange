@@ -4,7 +4,10 @@ Melange compiles SPICE circuit netlists into real-time audio DSP code. This guid
 
 ## Prerequisites
 
-- **Rust 1.85+** — [rustup.rs](https://rustup.rs)
+- **Rust 1.85+** — [rustup.rs](https://rustup.rs). Needed at run time, not only
+  to install: `simulate`, `analyze` and `validate` compile the generated code
+  to a native binary with `rustc` (see [The compiled-binary
+  cache](#the-compiled-binary-cache)).
 - **melange CLI** — install it from a checkout of this repository (the
   `--path` below is relative, so you must run it from the repo root):
   ```bash
@@ -108,13 +111,23 @@ Save it as `clipper.cir`, then:
 # Inspect the circuit
 melange nodes clipper.cir
 
-# Quick audio test (no compilation needed)
-melange simulate clipper.cir --amplitude 0.1 -o test.wav
+# Quick audio test: a 1 kHz tone, 1 s long (no plugin build needed)
+melange simulate clipper.cir --amplitude 3 -o test.wav
 
 # Compile to a plugin
 melange compile clipper.cir --format plugin -o my-clipper
 cd my-clipper
 bash build.sh   # bundles CLAP+VST3; see generated README.md for nih-plug setup
+```
+
+The drive level decides whether you hear a clipper at all. The diodes sit at
+`mid`, behind a divider, so at low levels they barely conduct and the circuit
+is just a 280 Hz low-pass (`Rin` + `Rload` into `Cout`). Measured around
+1 kHz at 48 kHz: THD is 0.0001 % at 0.1 V, 0.13 % at 1 V, 4.2 % at 2 V and
+8 % at 3 V, where H3 is at −22 dBc. To see it yourself:
+
+```bash
+melange analyze clipper.cir -s 48000 --harmonics 5 --amplitude 3 --start-freq 900 --end-freq 1100
 ```
 
 ## Adding Controls
@@ -147,6 +160,30 @@ Each `.pot` becomes a knob and each `.switch` becomes a selector in the generate
 | `melange analyze circuit.cir` | AC frequency response |
 | `melange validate circuit.cir` | Compare against ngspice |
 
+### The compiled-binary cache
+
+`simulate` and `analyze` do not interpret the circuit. They generate its Rust
+code, compile it with `rustc -O` into a native binary, and run that. The binary
+is kept, keyed by a hash of the generated source, so an identical re-run skips
+the compile. Any change to the circuit or to an option that ends up in the
+generated program (`--amplitude`, `--pot`, `--sample-rate`, the sweep range)
+makes a new one. A small circuit's binary is about 4.5 MB, and nothing is ever
+evicted, so the cache grows with use.
+
+It lives in the platform cache directory: `~/.cache/melange/binaries` on Linux
+(`$XDG_CACHE_HOME/melange/binaries` if that is set), `~/Library/Caches/melange/binaries`
+on macOS. `melange cache stats` prints the exact location, file count and size.
+
+```bash
+melange cache stats    # location, file count and size of both caches
+melange cache clear    # deletes the compiled binaries AND downloaded circuit files
+```
+
+`cache clear` also empties the circuit cache, the copies of circuits fetched
+from remote sources; they are downloaded again on next use. Deleting the
+`binaries` directory by hand is equally safe. (`validate` compiles to a
+temporary file and removes it; it does not use this cache.)
+
 ## Compile Options
 
 Key flags for `melange compile`:
@@ -163,7 +200,7 @@ Key flags for `melange compile`:
 | `--no-level-params` | off | Omit Input/Output Level knobs |
 | `--no-ear-protection` | off | Disable output soft limiter |
 | `--wet-dry-mix` | off | Add wet/dry mix parameter |
-| `--mono` | off | Generate mono instead of stereo |
+| `--mono` | off | Force a 1-in/1-out plugin. One output node already gets that layout automatically; two output nodes (`-n a,b`) get 2-in/2-out |
 | `--cpu-baseline x86-64-v3\|x86-64-v2\|x86-64` | `x86-64-v3` | x86_64 instruction set for the plugin. v3 is fastest but crashes on pre-2013 CPUs; `x86-64` runs everywhere (plugin format only) |
 | `--backward-euler` | off | Use backward Euler (unconditionally stable) |
 | `--tube-grid-fa auto\|on\|off` | `auto` | Pentode grid-off dimension reduction |
@@ -191,7 +228,7 @@ After `melange compile --format plugin`:
 
 Melange uses a dialect of SPICE — standard SPICE syntax for components and models, plus audio-specific extensions (`.pot`, `.switch`, `.input_impedance`). See [spice-grammar.md](spice-grammar.md) for the full reference.
 
-Supported devices: resistors, capacitors, inductors (including saturating with `ISAT=`), voltage/current sources, diodes (including Zener with BV/IBV), BJTs (Ebers-Moll and Gummel-Poon), JFETs (N/P channel), MOSFETs (Level 1, N/P with body effect), triode tubes (Koren model), pentode/beam tetrode tubes (5 equation families, 29 catalog models), op-amps (Boyle macromodel with GBW, rail clamping, slew rate), VCAs (THAT 2180-style), coupled inductors/transformers, VCVS, VCCS, subcircuits.
+Supported devices: resistors, capacitors, inductors (including saturating with `ISAT=`), voltage/current sources, diodes (including Zener with BV/IBV), BJTs (Ebers-Moll and Gummel-Poon), JFETs (N/P channel), MOSFETs (Level 1, N/P with body effect), triode tubes (Koren model), pentode/beam tetrode tubes (5 equation families, 29 catalog models), op-amps (Boyle VCCS macromodel with rail clamping and slew rate; no bandwidth pole), VCAs (THAT 2180-style), coupled inductors/transformers, VCVS, VCCS, subcircuits.
 
 ## Troubleshooting
 

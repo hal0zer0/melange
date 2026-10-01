@@ -48,7 +48,7 @@ the `cargo install` (or put `target/release` on your `PATH`).
 Then read, in this order:
 
 - **[Getting Started](docs/GETTING_STARTED.md)** — zero to a loadable plugin, following one circuit the whole way.
-- **[Writing SPICE Netlists for Melange](docs/NETLIST_GUIDE.md)** — the netlist dialect: component syntax, `.model` cards, `.pot`/`.switch` controls, unit suffixes, and the six mistakes that bite first. This is the guide for Way In #1 below, and for the netlist any other path produces.
+- **[Writing SPICE Netlists for Melange](docs/NETLIST_GUIDE.md)** — the netlist dialect: component syntax, `.model` cards, `.pot`/`.switch` controls, unit suffixes, and the seven mistakes that bite first. This is the guide for Way In #1 below, and for the netlist any other path produces.
 - **[SPICE Grammar Reference](docs/spice-grammar.md)** — the complete syntax and per-device `.model` parameter tables, for when you need the exact default of something.
 - **[Using the Generated DSP Directly](docs/CODE_API.md)** — the `--format code` API: `CircuitState::default()`, `set_sample_rate()`, `process_sample()`, the constants, and what the output volts mean. Read this if you are wiring the generated file into your own code rather than taking the plugin project.
 
@@ -162,6 +162,14 @@ melange simulate my-circuit.cir --input-audio guitar.wav -o output.wav
 melange analyze my-circuit.cir --pot "Drive=100k" --switch "Mode=2"
 ```
 
+"Without compiling" means without building a plugin. Under the hood `simulate`
+and `analyze` compile the circuit to a native binary with `rustc`, so they need
+a Rust toolchain at run time, and they keep every binary they build (about
+4.5 MB each for a small circuit, never evicted) under the platform cache
+directory, `~/.cache/melange/binaries` on Linux. `melange cache stats` shows
+how much has piled up; `melange cache clear` deletes it, along with any cached
+downloads of remote circuits.
+
 ## What You Get
 
 The generated plugin project has two files, and the division of labor between them is the single most important thing to understand about working with melange:
@@ -207,7 +215,7 @@ Every one of these is a real published model with real published equations, impl
 | Op-Amp | Boyle VCCS macromodel | slew-rate limiting, asymmetric VCC/VEE rails, 4 clamping strategies; no bandwidth pole (`GBW` only defaults the rails) |
 | VCA | THAT 2180 exponential | Current-mode with gain-dependent THD |
 | CdS LDR (opto) | VTL5C3/4, NSL-32 | Placed with the `O` element (`O1 rphoto+ rphoto- led+ led- MODEL`); attack/release photocell dynamics on the stateful-device codegen path. No ngspice twin — SPICE has no LDR model, so there is nothing to compare against |
-| Potentiometer | `.pot` / `.wiper` / `.gang` directives | Per-sample smoothing; `recompute_dc_op()` available for preset-recall NR-seed refresh |
+| Potentiometer | `.pot` / `.wiper` / `.gang` directives | Per-sample smoothing; `recompute_dc_op()` (with `--emit-dc-op-recompute`) for preset-recall NR-seed refresh |
 | Switch | `.switch` directive | Ganged R/C/L component switching |
 
 All device parameters use standard SPICE `.model` syntax, because inventing a new one would have been a choice and not a good one.
@@ -306,13 +314,30 @@ wrong for a distortion:
 
 ```bash
 melange compile mydist.cir --format plugin --oversampling 4 -o mydist
-melange analyze mydist.cir --harmonics 5 --amplitude 1.0   # read nyquist_dbc
 ```
 
-Measure before choosing. On a two-diode clipper, going from 1 V to 3 V of drive
-costs about 14 dB of alias rejection while 4× oversampling gives back about 5 —
-**how hard you drive the nonlinearity matters more than the factor does**, and
-the benefit varies several-fold between circuits.
+Measure before choosing. melange has no aliasing meter of its own yet, so
+render a test tone at 1× and at your candidate factor and compare the two in
+a spectrum analyser:
+
+```bash
+melange simulate mydist.cir --input-audio tone.wav -o os1.wav
+melange simulate mydist.cir --input-audio tone.wav -o os4.wav --oversampling 4
+```
+
+`tone.wav` is one sine at a pitch that does not divide the sample rate (a
+musical pitch such as 4186 Hz, not 1 kHz, whose aliases land exactly on its
+own harmonics and hide). Its level is the drive in volts (full scale = 1 V; a
+32-bit float WAV can go above). Aliases are the components that are not
+multiples of the tone. They drop when the factor goes up, and the harmonics do
+not. (`analyze`'s `nyquist_dbc` column is not this: it detects a component at
+exactly half the sample rate, the signature of a numerical limit cycle.)
+
+On a two-diode clipper with a 4186 Hz tone at 48 kHz, the aliases totalled
+−73 dBc at 0.3 V of drive and −19 dBc at 3 V at 1×. At 4× they were below the
+analyser's −92 dBc floor up to 1 V and −62 dBc at 3 V.
+**Drive sets how much there is to fold, and the factor sets how much of it
+folds**; the numbers vary a lot between circuits, so measure yours.
 
 It is also not a free quality dial: the half-band filters add latency and phase
 dispersion, and an oversampled build actually correlates *worse* against a

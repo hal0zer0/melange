@@ -22,35 +22,47 @@ somewhere to go, then filters them off before decimating back down.
 
 ## How much aliasing you actually have
 
-Do not guess, and do not take a number from this page. `melange analyze
---harmonics N` reports a **`nyquist_dbc`** column — folded-back energy relative
-to the fundamental, so less negative is worse.
+Do not guess, and do not take a number from this page. melange has no aliasing
+meter of its own yet: render a test tone at 1× and at the factor you are
+considering, and compare the two in a spectrum analyser.
 
 ```bash
-melange analyze mycircuit.cir --harmonics 5 --amplitude 1.0 --oversampling 1
-melange analyze mycircuit.cir --harmonics 5 --amplitude 1.0 --oversampling 4
+melange simulate mycircuit.cir --input-audio tone.wav -o os1.wav
+melange simulate mycircuit.cir --input-audio tone.wav -o os2.wav --oversampling 2
+melange simulate mycircuit.cir --input-audio tone.wav -o os4.wav --oversampling 4
 ```
 
-Compare the worst `nyquist_dbc` across each sweep.
+`tone.wav` is a single sine at the plugin's sample rate, at a pitch that does
+not divide that rate. A musical pitch such as 4186 Hz works; 1 kHz or 4 kHz at
+48 kHz does not, because every alias of such a tone lands exactly on one of its
+own harmonics and cannot be told apart. The file's level is the drive in volts
+(full scale = 1 V; a 32-bit float WAV can carry more). In the spectrum, the
+harmonics are the multiples of the tone and should not change with the factor.
+Everything else is aliasing, and it falls as the factor goes up.
 
-A two-diode clipper (`R1 in out 4k7`, `D1 out 0 DX`, `D2 0 out DX`), swept
-20 Hz–20 kHz:
+`analyze`'s `nyquist_dbc` column is a different measurement: the output's
+component at exactly half the sample rate, which is how a numerical limit cycle
+shows up. It does not see aliases, which fold to `fs − k·f`, wherever that lands.
 
-| Input drive | 1× | 4× | Difference |
+A two-diode clipper (`R1 in out 4k7`, `D1 out 0 DX`, `D2 0 out DX`,
+`.model DX D(IS=2.52e-9 N=1.752)`), 4186 Hz at 48 kHz, total level of the
+inharmonic products relative to the fundamental (measured 2026-09-30; "below
+−92" means under the analysis window's own floor):
+
+| Input drive | 1× | 2× | 4× |
 |---|---|---|---|
-| 0.3 V | −41.4 dBc | −48.0 dBc | 6.6 dB |
-| 1.0 V | −41.5 dBc | −46.3 dBc | 4.8 dB |
-| 3.0 V | **−27.8 dBc** | −34.5 dBc | 6.7 dB |
+| 0.3 V | −73.0 dBc | below −92 | below −92 |
+| 1.0 V | −38.6 dBc | −62.2 dBc | below −92 |
+| 3.0 V | **−19.3 dBc** | −44.7 dBc | −61.7 dBc |
 
-**Drive dominates the factor.** Going 1 V → 3 V costs about 14 dB of alias
-rejection; 4× gives back about 5. A circuit that measures clean at a polite
-level can alias badly when someone turns it up, and the steady-state frequency
-response will not show it. **Measure at the drive your users will reach.**
+THD was the same at every factor (0.78 %, 19.1 %, 27.2 %): oversampling changes
+what folds, not the distortion itself.
 
-**And the benefit is circuit-specific.** On an op-amp overdrive stage the same
-1× → 4× comparison measured roughly 19 dB rather than 5. Two nonlinear circuits
-are not interchangeable here; one measurement of yours beats any table of
-someone else's.
+**Drive sets how much there is to fold.** At 1×, 0.3 V → 3 V raises the aliases
+by about 54 dB. A circuit that measures clean at a polite level can alias badly
+when someone turns it up, and the steady-state frequency response will not show
+it. **Measure at the drive your users will reach, with a tone near the top of
+the range they will play**: the higher the tone, the sooner its harmonics fold.
 
 ## What it costs: CPU
 
@@ -155,13 +167,14 @@ questions that decide it:
 
 - **Is the circuit nonlinear at the drive you ship?** If not, 1×. Oversampling a
   linear circuit buys nothing and costs everything above.
-- **What does `nyquist_dbc` say at realistic drive?** That is the only number
-  that reflects your circuit.
+- **How loud are the aliases at realistic drive?** Render and compare as above;
+  that is the only number that reflects your circuit.
 - **Is anything phase-critical downstream?** Parallel dry paths, mid/side work,
   and multi-band splits care about the dispersion above; a standalone distortion
   generally does not.
-- **2× or 4×?** The clipper table shows most of the benefit arriving by 2×.
-  Measure before paying for 4×.
+- **2× or 4×?** On the clipper above, 2× took 24–25 dB off the aliases at 1 V
+  and 3 V; 4× took another 17 dB at 3 V and more than 30 dB at 1 V. Measure
+  your circuit before paying for 4×.
 
 ## Setting it
 

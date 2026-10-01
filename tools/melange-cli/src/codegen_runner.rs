@@ -604,7 +604,11 @@ fn main() {{
         // Measure: single-bin DFT over `DFT_CYCLES` integer cycles of the
         // fundamental. Harmonic k has k*DFT_CYCLES cycles in that window —
         // still integer, so the k-th bin is clean against the others.
-        let measure_samples = ((DFT_CYCLES as f64) * sr / freq).round() as usize;
+        // N is kept EVEN: the Nyquist kernel (-1)^n is orthogonal to every
+        // integer bin only when N/2 is an integer. An odd N leaked the
+        // fundamental into `nyquist_dbc` (a linear RC read -43.7 dBc).
+        let measure_samples =
+            (2.0 * ((DFT_CYCLES as f64) * sr / freq / 2.0).round()).max(2.0) as usize;
         // Snap the drive frequency to the exact DFT bin DFT_CYCLES·sr/N.
         // Rounding N while keeping the requested frequency leaves up to 0.5
         // samples of cycle mismatch — rectangular-window leakage that floors
