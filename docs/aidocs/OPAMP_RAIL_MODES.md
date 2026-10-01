@@ -287,16 +287,13 @@ See `opamp_rail_clamp_bug.md` for the full history. This mode is kept in the enu
 | `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs` | grep `adaptive_refactor` | Adaptive refactor trigger (BoyleDiodes-gated) |
 | `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter.rs` | grep `damp_thresh` | `damp_thresh = 10.0_f64.max(max_v * 0.05)` (the global step cap that masks BoyleDiodes overshoot) |
 
-## Memory cross-references
+## Investigation history
 
-These are the agent-memory files with full session-by-session investigation history. **Read in this order before making any rail-mode change**:
-
-1. `task_12_bistable_oscillation_finding.md` — 535 lines, four sessions of investigation, RETRACTED diagnoses, verified root cause, empirical sweep data, fix-candidate test results
-2. `opamp_rail_clamp_bug.md` — original Hard mode bug history, ActiveSet/ActiveSetBe genesis
-3. `klon_rail_limit_attempts.md` — log of 9+ failed approaches before BoyleDiodes
-4. `boyle_opamp_codegen_fix.md` — Boyle VCCS A_neg row-zeroing fix
-5. `boyle_1974_rebuild_plan.md` — implementation plan from 2026-04-08 fifth session (mostly subsumed by Ro chain commit `f32c804`)
-6. `klon_softrail_implementation_attempt.md` — failed SoftRail device experiment (cleanly reverted)
+The rail-mode investigations (the Hard-mode clamp bug, the bistable-oscillation
+root cause, the failed SoftRail device and the approaches tried before
+BoyleDiodes) are recorded in [DEBUGGING_HISTORY.md](DEBUGGING_HISTORY.md) and the
+commit history (`git log -- crates/melange-solver/src/codegen/ir/opamp_rail.rs`).
+Read them before changing a rail mode.
 
 ## External references
 

@@ -141,10 +141,10 @@ pub(crate) enum Commands {
         #[arg(help_heading = EXPERT_HEADING, long)]
         backward_euler: bool,
 
-        /// Force trapezoidal even when the nodal auto-detector would promote
-        /// to backward Euler (trap propagation operator spectral_radius >
-        /// 1.002 — persistent Nyquist-rate limit cycle in v_prev). Escape
-        /// hatch for bisecting regressions or reproducing legacy output.
+        /// Force trapezoidal even when the ring predicate would promote the
+        /// build to backward Euler (a stiff mode that trapezoidal leaves
+        /// ringing near Nyquist); also turns off the runtime BE-latch. Escape
+        /// hatch for bisecting regressions or reproducing older output.
         /// Ignored when `--backward-euler` is already set.
         #[arg(help_heading = EXPERT_HEADING, long)]
         force_trap: bool,
