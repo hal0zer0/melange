@@ -61,20 +61,38 @@ fn a_tracked_edit_to_a_watched_source_reads_dirty() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Every melange crate the CLI links is watched (source and manifest), so an
-/// edit to any of them re-runs the stamp.
-#[test]
-fn every_crate_the_cli_links_is_watched() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let manifest = std::fs::read_to_string(root.join("tools/melange-cli/Cargo.toml")).unwrap();
-    let deps: Vec<&str> = manifest
+/// The `melange-*` dependencies listed under `[dependencies]` in a manifest.
+fn melange_deps(manifest: &str) -> Vec<String> {
+    manifest
         .lines()
         .skip_while(|l| l.trim() != "[dependencies]")
         .skip(1)
         .take_while(|l| !l.trim_start().starts_with('['))
         .filter_map(|l| l.split('=').next().map(str::trim))
         .filter(|name| name.starts_with("melange-"))
-        .collect();
+        .map(str::to_string)
+        .collect()
+}
+
+/// Every melange crate the CLI links, directly or through another melange
+/// crate, is watched (source and manifest), so an edit to any of them
+/// re-runs the stamp.
+#[test]
+fn every_crate_the_cli_links_is_watched() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let manifest = std::fs::read_to_string(root.join("tools/melange-cli/Cargo.toml")).unwrap();
+    let mut deps: Vec<String> = Vec::new();
+    let mut queue = melange_deps(&manifest);
+    while let Some(dep) = queue.pop() {
+        if deps.contains(&dep) {
+            continue;
+        }
+        let m = std::fs::read_to_string(root.join(format!("crates/{dep}/Cargo.toml")))
+            .unwrap_or_else(|e| panic!("crates/{dep}/Cargo.toml: {e}"));
+        queue.extend(melange_deps(&m));
+        deps.push(dep);
+    }
+    // solver, validate, devices, primitives: the CLI links all four.
     assert!(deps.len() >= 4, "{deps:?}");
     for dep in deps {
         for part in ["src", "Cargo.toml"] {
