@@ -263,6 +263,15 @@ pub(crate) fn compile_circuit_source(
             output_node_names.join(", ")
         );
     }
+    // A plugin's audio layout is 1 channel (one output node) or 2 (two output
+    // nodes, one per channel). With more nodes every one past the second had
+    // no channel and was dropped without a word.
+    if format == OutputFormat::Plugin && output_node_names.len() > 2 {
+        anyhow::bail!(
+            "{}",
+            plugin_output_count_refusal(&output_node_names, &circuit_source.name())
+        );
+    }
 
     let circuit_name = output
         .file_stem()
@@ -346,9 +355,9 @@ pub(crate) fn compile_circuit_source(
     })
     .map_err(build_error)?;
 
-    // Auto-mono: single output node with single-channel circuit → default to mono.
-    // Stereo duplicates the same mono circuit per channel, which is correct but
-    // doubles CPU for no benefit unless the user has a stereo reason (e.g. wet/dry).
+    // A single output node always makes a mono plugin, `--mono` or not. The
+    // template's other single-output layout (one circuit instance per stereo
+    // channel) doubles CPU and has no CLI path to it.
     let mono = if !mono && output_node_indices.len() == 1 && format == OutputFormat::Plugin {
         println!("  Auto-selecting mono (single output node). Use two output nodes for stereo.");
         true
@@ -735,6 +744,26 @@ pub(crate) fn compile_circuit_source(
     }
 
     Ok(())
+}
+
+/// The refusal for `--format plugin` with more than two output nodes.
+fn plugin_output_count_refusal(output_node_names: &[&str], circuit: &str) -> String {
+    let n = output_node_names.len();
+    format!(
+        "--format plugin supports 1 output node (a mono plugin) or 2 (a stereo plugin, \
+         one node per channel); {n} given: {nodes}. A plugin has no channel for the \
+         nodes past the second, so they would be inaudible.\n\
+         Choose two of them:\n  \
+         melange compile {circuit} --format plugin -n <node_a>,<node_b> -o <project-dir>\n\
+         or generate the code, whose process_sample returns all {n} outputs:\n  \
+         melange compile {circuit} --format code -n {joined} -o <file.rs>",
+        nodes = output_node_names
+            .iter()
+            .map(|s| format!("\"{s}\""))
+            .collect::<Vec<_>>()
+            .join(", "),
+        joined = output_node_names.join(","),
+    )
 }
 
 /// The project root `--format plugin` writes for `--output`: the path with

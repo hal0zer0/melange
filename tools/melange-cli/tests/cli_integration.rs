@@ -945,6 +945,61 @@ fn test_compile_mono_with_multiple_outputs_errors() {
 }
 
 #[test]
+fn test_compile_plugin_refuses_more_than_two_output_nodes() {
+    // A plugin's layout is 1 or 2 channels; a third output node had no
+    // channel and was dropped silently. `--format code` keeps all of them.
+    let cir = write_test_circuit(
+        "Three Output Test\nR1 in a 10k\nC1 a 0 10n\nR2 a b 1k\nC2 b 0 10n\nR3 b c 1k\nC3 c 0 10n\n",
+        "three_outputs",
+    );
+    let dir = std::env::temp_dir().join(format!(
+        "melange_cli_test_three_outputs_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let stderr = run_melange_fail(&[
+        "compile",
+        cir.to_str().unwrap(),
+        "--format",
+        "plugin",
+        "-n",
+        "a,b,c",
+        "-o",
+        dir.to_str().unwrap(),
+    ]);
+    assert!(
+        stderr.contains("--format plugin supports 1 output node")
+            && stderr.contains("3 given: \"a\", \"b\", \"c\"")
+            && stderr.contains("-n <node_a>,<node_b>")
+            && stderr.contains("--format code -n a,b,c"),
+        "should refuse with the node list and both ways out: {stderr}"
+    );
+    assert!(!dir.exists(), "refused build must not write the project");
+
+    let rs = std::env::temp_dir().join(format!(
+        "melange_cli_test_three_outputs_{}.rs",
+        std::process::id()
+    ));
+    run_melange(&[
+        "compile",
+        cir.to_str().unwrap(),
+        "--format",
+        "code",
+        "-n",
+        "a,b,c",
+        "-o",
+        rs.to_str().unwrap(),
+    ]);
+    let code = std::fs::read_to_string(&rs).unwrap();
+    assert!(
+        code.contains("pub const NUM_OUTPUTS: usize = 3;"),
+        "--format code must keep all three outputs"
+    );
+    let _ = std::fs::remove_file(&rs);
+    let _ = std::fs::remove_file(&cir);
+}
+
+#[test]
 fn test_compile_missing_file() {
     let stderr = run_melange_fail(&[
         "compile",

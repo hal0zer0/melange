@@ -3,9 +3,12 @@
 # `cargo check` on each against the pinned nih-plug.
 #
 # The unit tests in plugin_template.rs only inspect the generated text; this is
-# the check that the text compiles. Covers each lib.rs skeleton (stereo, mono,
-# multi-output), oversampling at 1x/2x/4x, the wet/dry dry-delay path, and
-# each --cpu-baseline.
+# the check that the text compiles. Covers both lib.rs skeletons the CLI can
+# generate -- mono (one output node) and stereo (two output nodes, one per
+# channel), each with and without parameters -- oversampling at 1x/2x/4x, the
+# wet/dry dry-delay path on both, and each --cpu-baseline. Not covered: the
+# template's one-circuit-per-channel stereo layout for a single output node,
+# which the CLI never generates (one output node always makes a mono plugin).
 #
 # Usage: tools/check-generated-plugins.sh [path/to/melange]
 # Env:   CARGO_BUILD_JOBS is honoured, as for any cargo invocation.
@@ -32,6 +35,21 @@ Cout out 0 100n
 .end
 EOF
 
+cat > "$WORK/stereo.cir" <<'EOF'
+* Diode clipper with a drive pot and two outputs
+Rin in mid 4.7k
+Rdrive mid clip 10k
+D1 clip 0 1N4148
+D2 0 clip 1N4148
+Rlo clip lo 1k
+Clo lo 0 100n
+Chi clip hi 100n
+Rhi hi 0 1k
+.model 1N4148 D(IS=2.52e-9 N=1.752)
+.pot Rdrive 1k 100k "Drive"
+.end
+EOF
+
 cat > "$WORK/split.cir" <<'EOF'
 * Diode clipper with two outputs
 Rin in mid 4.7k
@@ -46,12 +64,17 @@ Rhi hi 0 1k
 EOF
 
 # name | deck | extra compile flags
+# One output node makes a mono plugin, two make a stereo one. Ear protection is
+# a parameter too, so the "noparams" cases turn it and the level knobs off to
+# reach the parameter-less loop.
 CASES=(
-  "stereo-1x|clipper.cir|--oversampling 1"
-  "stereo-2x|clipper.cir|--oversampling 2"
-  "stereo-4x-wetdry|clipper.cir|--oversampling 4 --wet-dry-mix"
+  "mono-1x|clipper.cir|--oversampling 1"
   "mono-4x-wetdry|clipper.cir|--oversampling 4 --mono --wet-dry-mix"
-  "multiout-2x|split.cir|--oversampling 2 --output-node lo,hi"
+  "mono-noparams|split.cir|--output-node lo --no-level-params --no-ear-protection"
+  "stereo-1x|stereo.cir|--oversampling 1 --output-node lo,hi"
+  "stereo-2x|stereo.cir|--oversampling 2 --output-node lo,hi"
+  "stereo-4x-wetdry|stereo.cir|--oversampling 4 --wet-dry-mix --output-node lo,hi"
+  "stereo-noparams-2x|split.cir|--oversampling 2 --output-node lo,hi --no-level-params --no-ear-protection"
   "portable-v2|clipper.cir|--cpu-baseline x86-64-v2"
   "portable-x86-64|clipper.cir|--cpu-baseline x86-64"
 )

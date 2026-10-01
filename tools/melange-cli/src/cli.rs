@@ -55,7 +55,9 @@ pub(crate) enum Commands {
         #[arg(short, long, default_value = "in")]
         input_node: String,
 
-        /// Output node name(s), comma-separated for multi-output (e.g., "out_l,out_r")
+        /// Output node name(s), comma-separated for multi-output (e.g., "out_l,out_r").
+        /// `--format plugin` takes one (mono plugin) or two (stereo plugin, one
+        /// node per channel); `--format code` takes any number.
         #[arg(short = 'n', long, default_value = "out")]
         output_node: String,
 
@@ -296,8 +298,9 @@ pub(crate) enum Commands {
         /// Emit `CircuitState::recompute_dc_op()` for runtime DC operating
         /// point re-solve after pot/switch changes.
         ///
-        /// Default OFF: generated code is byte-identical to pre-Phase-E output.
-        /// When ON, plugins with per-instance component jitter can call
+        /// Default OFF: the method is not emitted and the generated code is
+        /// unchanged by this flag. When ON, plugins with per-instance
+        /// component jitter can call
         /// `state.recompute_dc_op()` to jump to the jittered equilibrium
         /// without a warmup loop. See docs/aidocs/DC_OP.md for MVP scope
         /// (Direct-NR only, no basin-trap handling).
@@ -308,7 +311,11 @@ pub(crate) enum Commands {
         #[arg(long)]
         name: Option<String>,
 
-        /// Generate mono (1-channel) plugin instead of stereo
+        /// Ask for a mono (1-in/1-out) plugin. This changes nothing today: a
+        /// plugin built from one output node is always mono, and one built
+        /// from two output nodes is stereo (one node per channel), where
+        /// `--mono` is refused rather than drop a node. Also refused with
+        /// several output nodes under `--format code`.
         #[arg(long)]
         mono: bool,
 
