@@ -3,15 +3,18 @@
 # `cargo check` on each against the pinned nih-plug.
 #
 # The unit tests in plugin_template.rs only inspect the generated text; this is
-# the check that the text compiles. Covers both lib.rs skeletons the CLI can
-# generate -- mono (one output node) and stereo (two output nodes, one per
-# channel), each with and without parameters -- oversampling at 1x/2x/4x, the
-# wet/dry dry-delay path on both, and each --cpu-baseline. Not covered: the
-# template's one-circuit-per-channel stereo layout for a single output node,
-# which the CLI never generates (one output node always makes a mono plugin).
+# the check that the text compiles. Covers all three lib.rs skeletons the CLI
+# can generate -- mono (one output node), stereo from two output nodes (one per
+# channel), and stereo from one output node run as two circuit instances
+# (--stereo, with per-channel noise seeding) -- each with and without
+# parameters, oversampling at 1x/2x/4x, the wet/dry dry-delay path, every
+# control kind (pot, wiper, gang, switch) on the two-instance layout, and each
+# --cpu-baseline.
 #
 # Usage: tools/check-generated-plugins.sh [path/to/melange]
 # Env:   CARGO_BUILD_JOBS is honoured, as for any cargo invocation.
+#        ONLY=<regex> runs only the cases whose name matches (bash =~).
+#        The work directory comes from mktemp, so TMPDIR places it.
 set -euo pipefail
 
 MELANGE="$(realpath "${1:-target/release/melange}")"
@@ -63,8 +66,31 @@ Rhi hi 0 1k
 .end
 EOF
 
+cat > "$WORK/controls.cir" <<'EOF'
+* Diode clipper with every control kind
+Rin in mid 4.7k
+Rdrive mid clip 10k
+D1 clip 0 1N4148
+D2 0 clip 1N4148
+Rga clip a 10k
+Rgb a 0 10k
+Rtop a out 5k
+Rbot out 0 5k
+Cout out 0 100n
+Rsw out 0 100k
+.model 1N4148 D(IS=2.52e-9 N=1.752)
+.pot Rdrive 1k 100k "Drive"
+.pot Rga 1k 20k
+.pot Rgb 1k 20k
+.gang "Balance" Rga !Rgb
+.wiper Rtop Rbot 10k "Volume"
+.switch Rsw 100k 10k "Load"
+.end
+EOF
+
 # name | deck | extra compile flags
-# One output node makes a mono plugin, two make a stereo one. Ear protection is
+# One output node makes a mono plugin, or with --stereo a stereo one of two
+# circuit instances; two output nodes make a stereo one. Ear protection is
 # a parameter too, so the "noparams" cases turn it and the level knobs off to
 # reach the parameter-less loop.
 CASES=(
@@ -75,6 +101,9 @@ CASES=(
   "stereo-2x|stereo.cir|--oversampling 2 --output-node lo,hi"
   "stereo-4x-wetdry|stereo.cir|--oversampling 4 --wet-dry-mix --output-node lo,hi"
   "stereo-noparams-2x|split.cir|--oversampling 2 --output-node lo,hi --no-level-params --no-ear-protection"
+  "stereo-dual-1x|controls.cir|--stereo --oversampling 1 --noise thermal --noise-seed 7"
+  "stereo-dual-2x-wetdry|controls.cir|--stereo --oversampling 2 --wet-dry-mix --noise thermal"
+  "stereo-dual-noparams|split.cir|--stereo --output-node lo --no-level-params --no-ear-protection"
   "portable-v2|clipper.cir|--cpu-baseline x86-64-v2"
   "portable-x86-64|clipper.cir|--cpu-baseline x86-64"
 )
@@ -82,6 +111,7 @@ CASES=(
 fail=0
 for case in "${CASES[@]}"; do
   IFS='|' read -r name deck flags <<<"$case"
+  if [ -n "${ONLY:-}" ] && ! [[ $name =~ $ONLY ]]; then continue; fi
   echo "=== $name ($deck $flags)"
   # shellcheck disable=SC2086
   "$MELANGE" compile "$WORK/$deck" --format plugin $flags --name "check-$name" \

@@ -136,6 +136,10 @@ pub struct PluginOptions<'a> {
     pub plugin_name: Option<&'a str>,
     /// Generate mono (1-channel) plugin instead of stereo.
     pub mono: bool,
+    /// One-output stereo (one circuit instance per channel, `--stereo`) only:
+    /// the circuit code has runtime noise, so give each channel's instance its
+    /// own noise seed. Ignored by every other layout.
+    pub per_channel_noise_seeds: bool,
     /// Add a wet/dry mix parameter to the generated plugin.
     pub wet_dry_mix: bool,
     /// Add ear-protection soft limiter on final output (default: true).
@@ -1371,6 +1375,54 @@ fn generate_process_loop(
     )
 }
 
+/// Per-channel noise seeding for the one-output stereo layout (`--stereo` with
+/// runtime noise). Emitted at crate root of the generated lib.rs.
+const CHANNEL_NOISE_SEED_FNS: &str = r#"
+/// Give each channel's copy of the circuit its own noise. Two physical copies
+/// of a circuit do not share their noise, so neither may these. Channel 0
+/// keeps the circuit's seed (`--noise-seed`, baked into circuit.rs as
+/// `NOISE_MASTER_SEED_DEFAULT`), so under a fixed seed the left channel's
+/// noise is the mono plugin's; every other channel gets a seed derived from
+/// it. Seed 0 means "seed from the clock": the clock is read once per call and
+/// each channel's seed derived from that one read, so no two channels share a
+/// stream even when two clock reads would return the same value.
+///
+/// Called from initialize() and reset(). Only the noise differs between the
+/// channels: component values, `.tolerance` and `.mismatch` are baked into
+/// circuit.rs and identical in every copy (one circuit duplicated, not two
+/// units).
+fn seed_channel_noise(states: &mut [CircuitState]) {
+    let base = match circuit::NOISE_MASTER_SEED_DEFAULT {
+        0 => std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x0123_4567_89AB_CDEF),
+        seed => seed,
+    };
+    for (ch, state) in states.iter_mut().enumerate() {
+        state.set_seed(channel_noise_seed(base, ch as u64));
+    }
+}
+
+/// The noise seed of channel `ch`: `base` for channel 0, otherwise the
+/// SplitMix64 finalizer of `base` XOR a per-channel odd multiple. The circuit
+/// XORs fixed salts into its seed to split it into per-phase streams, so a
+/// channel seed made by XORing `base` with a constant could reproduce another
+/// channel's stream (`base ^ NOISE_SHOT_SALT` is channel 0's shot-noise seed);
+/// a hashed seed has no such relation to `base`. Never 0, which would mean
+/// "seed from the clock".
+fn channel_noise_seed(base: u64, ch: u64) -> u64 {
+    if ch == 0 {
+        return base;
+    }
+    let mut z = base ^ ch.wrapping_mul(0xD6E8_FEB8_6659_FD93);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    if z == 0 { 1 } else { z }
+}
+"#;
+
 const LEVEL_PARAM_FIELDS: &str = r#"    #[id = "input_level"]
     pub input_level: FloatParam,
     #[id = "output_level"]
@@ -1666,7 +1718,15 @@ fn generate_lib_rs(
                 .to_string(),
         )
     } else {
-        // Single output: per-channel state duplication (stereo from mono)
+        // Single output, stereo (`--stereo`): one circuit instance per channel.
+        // Their noise must be independent, as two physical copies' is; the
+        // re-seed follows every `reset()` so a clock seed (`--noise-seed 0`)
+        // is fresh each time, as the mono plugin's is.
+        let seed_call = if options.per_channel_noise_seeds {
+            "        seed_channel_noise(&mut self.circuit_states);\n"
+        } else {
+            ""
+        };
         (
             "use circuit::{process_sample, CircuitState};".to_string(),
             "pub struct CircuitPlugin {\n\
@@ -1701,15 +1761,17 @@ fn generate_lib_rs(
                  \x20           let mut s = CircuitState::default();\n\
                  \x20           s.set_sample_rate(buffer_config.sample_rate as f64);\n\
                  \x20           s\n\
-                 \x20       }).collect();\n\
-                 \x20       true\n\
+                 \x20       }).collect();\n"
+                + seed_call
+                + "\x20       true\n\
                  \x20   }",
             "    fn reset(&mut self) {\n\
                  \x20       for state in &mut self.circuit_states {\n\
                  \x20           state.reset();\n\
-                 \x20       }\n\
-                 \x20   }"
-                .to_string(),
+                 \x20       }\n"
+                .to_string()
+                + seed_call
+                + "\x20   }",
             "    fn deactivate(&mut self) {\n\
                  \x20       for state in &mut self.circuit_states {\n\
                  \x20           state.reset();\n\
@@ -1819,6 +1881,12 @@ fn generate_lib_rs(
         init_method
     };
 
+    let channel_noise_fn = if num_outputs <= 1 && !options.mono && options.per_channel_noise_seeds {
+        CHANNEL_NOISE_SEED_FNS
+    } else {
+        ""
+    };
+
     let ear_protection_fn = if options.ear_protection {
         r#"
 /// Ear-protection soft limiter: transparent below 0.9, smoothly limits to ±1.0.
@@ -1875,7 +1943,7 @@ use std::sync::Arc;
 
 mod circuit;
 {circuit_import}
-{ear_protection_fn}
+{channel_noise_fn}{ear_protection_fn}
 {plugin_struct}
 
 {plugin_default}
@@ -3201,6 +3269,59 @@ mod tests {
             lib.contains("\"Gain\",\n                1.0,"),
             "gang default 1.0 must emit a float literal (E0308 otherwise):\n{lib}"
         );
+    }
+
+    // === One-output stereo (`--stereo`) noise seeding ===
+
+    #[test]
+    fn stereo_dual_instance_seeds_each_channel_when_noise_is_compiled_in() {
+        let opts = PluginOptions {
+            per_channel_noise_seeds: true,
+            wet_dry_mix: true,
+            ..Default::default()
+        };
+        // Oversampled + wet/dry: the latency and dry-delay patches anchor on
+        // the end of initialize()/the start of reset(); the seeding must
+        // survive both.
+        let lib = generate_lib_rs("test", false, &[], &[], &[], &[], 1, 2, &opts);
+        assert!(lib.contains("fn seed_channel_noise(states: &mut [CircuitState])"));
+        assert!(lib.contains("fn channel_noise_seed(base: u64, ch: u64) -> u64"));
+        assert!(lib.contains("circuit::NOISE_MASTER_SEED_DEFAULT"));
+        assert_eq!(
+            lib.matches("        seed_channel_noise(&mut self.circuit_states);\n")
+                .count(),
+            2,
+            "initialize() and reset() must each re-seed:\n{lib}"
+        );
+        let init = &lib[lib.find("fn initialize(").unwrap()..lib.find("fn reset(").unwrap()];
+        assert!(
+            init.find("seed_channel_noise").unwrap() > init.find(".collect();").unwrap(),
+            "seed after the states are built:\n{init}"
+        );
+        assert!(init.contains("context.set_latency_samples(3);"));
+        assert!(init.contains("self.dry_delay = vec![vec![0.0f32; 3]; self.circuit_states.len()];"));
+        let reset = &lib[lib.find("fn reset(").unwrap()..lib.find("fn deactivate(").unwrap()];
+        assert!(
+            reset.find("seed_channel_noise").unwrap() > reset.find("state.reset();").unwrap(),
+            "re-seed after the states reset (reset() re-derives from its own seed):\n{reset}"
+        );
+    }
+
+    #[test]
+    fn channel_noise_seeding_only_in_the_dual_instance_layout() {
+        let seed = |mono: bool, num_outputs: usize, per_channel: bool| {
+            let opts = PluginOptions {
+                mono,
+                per_channel_noise_seeds: per_channel,
+                ..Default::default()
+            };
+            generate_lib_rs("test", false, &[], &[], &[], &[], num_outputs, 1, &opts)
+                .contains("seed_channel_noise")
+        };
+        assert!(seed(false, 1, true));
+        assert!(!seed(false, 1, false), "no set_seed to call without noise");
+        assert!(!seed(true, 1, true), "mono: one instance");
+        assert!(!seed(false, 2, true), "two output nodes: one instance");
     }
 
     // === Wet/dry + oversampling dry-delay tests ===

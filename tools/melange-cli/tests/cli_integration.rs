@@ -1010,6 +1010,179 @@ fn test_compile_plugin_refuses_more_than_two_output_nodes() {
     let _ = std::fs::remove_file(&cir);
 }
 
+/// `--stereo` is refused anywhere but a one-output `--format plugin` build,
+/// each time saying what to do instead, and before anything is written.
+#[test]
+fn test_compile_stereo_refusals() {
+    let cir = write_test_circuit(
+        "Stereo Refusal Test\nR1 in out 10k\nC1 out 0 10n\nR2 out out2 1k\nC2 out2 0 10n\n",
+        "stereo_refusals",
+    );
+    let dir = std::env::temp_dir().join(format!(
+        "melange_cli_test_stereo_refusals_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let c = cir.to_str().unwrap();
+    let d = dir.to_str().unwrap();
+
+    let code = run_melange_fail(&["compile", c, "-o", d, "--stereo"]);
+    assert!(
+        code.contains("--stereo applies to --format plugin only")
+            && code.contains("one CircuitState per channel")
+            && code.contains("--format plugin --stereo"),
+        "--format code: {code}"
+    );
+    let mono = run_melange_fail(&["compile", c, "-f", "plugin", "-o", d, "--stereo", "--mono"]);
+    assert!(
+        mono.contains("--stereo and --mono contradict each other"),
+        "--mono: {mono}"
+    );
+    let two = run_melange_fail(&[
+        "compile", c, "-f", "plugin", "-o", d, "--stereo", "-n", "out,out2",
+    ]);
+    assert!(
+        two.contains("--stereo cannot be combined with multiple output nodes")
+            && two.contains("2 given: \"out, out2\"")
+            && two.contains("already make a stereo plugin"),
+        "two output nodes: {two}"
+    );
+    assert!(!dir.exists(), "a refused build must not write the project");
+    let _ = std::fs::remove_file(&cir);
+}
+
+/// `--stereo` makes the one-output circuit a 2-in/2-out plugin of two circuit
+/// instances whose noise is independent: compiled and run, the generated
+/// seeding gives the left and right channels different noise, the left the
+/// mono plugin's under a fixed seed, and the same noise again after reset().
+/// With seed 0 (clock) the channels still differ. Without `--stereo` the
+/// plugin stays mono; without noise no seeding is emitted.
+#[test]
+fn test_compile_stereo_plugin_noise_is_per_channel() {
+    let cir = write_test_circuit(TEST_RC_LOWPASS, "stereo_noise");
+    let base = std::env::temp_dir().join(format!(
+        "melange_cli_test_stereo_noise_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let gen = |name: &str, extra: &[&str]| -> PathBuf {
+        let dir = base.join(name);
+        let mut args = vec![
+            "compile",
+            cir.to_str().unwrap(),
+            "-f",
+            "plugin",
+            "-o",
+            dir.to_str().unwrap(),
+        ];
+        args.extend_from_slice(extra);
+        run_melange(&args);
+        dir
+    };
+    let lib = |dir: &PathBuf| std::fs::read_to_string(dir.join("src/lib.rs")).unwrap();
+
+    // Default for one output node: mono, no seeding.
+    let mono = lib(&gen("mono", &["--noise", "thermal", "--noise-seed", "42"]));
+    assert!(mono.contains("main_input_channels: NonZeroU32::new(1)"));
+    assert!(!mono.contains("seed_channel_noise"));
+    // --stereo without noise: two instances, no set_seed to call.
+    let quiet = lib(&gen("quiet", &["--stereo"]));
+    assert!(quiet.contains("main_output_channels: NonZeroU32::new(2)"));
+    assert!(quiet.contains("circuit_states: vec![CircuitState::default(); 2]"));
+    assert!(!quiet.contains("seed_channel_noise"));
+
+    let run = |dir: &PathBuf| -> String {
+        let lib = lib(dir);
+        for anchor in [
+            "s\n        }).collect();\n        seed_channel_noise(&mut self.circuit_states);\n        true\n",
+            "            state.reset();\n        }\n        seed_channel_noise(&mut self.circuit_states);\n    }",
+        ] {
+            assert!(lib.contains(anchor), "initialize()/reset() must seed: {lib}");
+        }
+        let start = lib.find("fn seed_channel_noise(").expect("seeding fn");
+        let tail = &lib[lib.find("fn channel_noise_seed(").expect("seed fn")..];
+        let end = lib.len() - tail.len() + tail.find("\n}\n").unwrap() + 3;
+        let main = format!(
+            "#[path = {circuit:?}]\nmod circuit;\nuse circuit::{{process_sample, CircuitState}};\n\
+             {fns}\n\
+             fn fresh() -> CircuitState {{\n\
+                 let mut s = CircuitState::default();\n\
+                 s.set_sample_rate(48000.0);\n\
+                 s\n\
+             }}\n\
+             fn render(s: &mut CircuitState) -> Vec<f64> {{\n\
+                 s.set_noise_enabled(true);\n\
+                 (0..2000).map(|_| process_sample(0.0, s)[0]).collect()\n\
+             }}\n\
+             fn main() {{\n\
+                 let mut st: Vec<CircuitState> = (0..2).map(|_| fresh()).collect();\n\
+                 seed_channel_noise(&mut st);\n\
+                 let l = render(&mut st[0]);\n\
+                 let r = render(&mut st[1]);\n\
+                 let mono = render(&mut fresh());\n\
+                 for s in st.iter_mut() {{ s.reset(); }}\n\
+                 seed_channel_noise(&mut st);\n\
+                 let l2 = render(&mut st[0]);\n\
+                 let r2 = render(&mut st[1]);\n\
+                 println!(\"nonzero_l={{}}\", l.iter().filter(|v| **v != 0.0).count());\n\
+                 println!(\"same_lr={{}}\", l.iter().zip(&r).filter(|(a, b)| a == b).count());\n\
+                 println!(\"l_is_mono={{}}\", l == mono);\n\
+                 println!(\"reset_repeats={{}}\", l == l2 && r == r2);\n\
+             }}\n",
+            circuit = dir.join("src/circuit.rs").to_str().unwrap(),
+            fns = &lib[start..end],
+        );
+        let main_rs = dir.join("noise_check.rs");
+        let exe = dir.join("noise_check");
+        std::fs::write(&main_rs, main).unwrap();
+        let out = Command::new("rustc")
+            .args(["--edition=2021", "-O", "-o"])
+            .arg(&exe)
+            .arg(&main_rs)
+            .output()
+            .expect("rustc");
+        assert!(
+            out.status.success(),
+            "noise check must compile:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let out = Command::new(&exe).output().expect("run noise check");
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    let fixed = run(&gen(
+        "seed42",
+        &["--stereo", "--noise", "thermal", "--noise-seed", "42"],
+    ));
+    assert!(
+        !fixed.contains("nonzero_l=0\n"),
+        "noise must be on: {fixed}"
+    );
+    assert!(
+        fixed.contains("same_lr=0\n"),
+        "L and R share noise: {fixed}"
+    );
+    assert!(fixed.contains("l_is_mono=true\n"), "{fixed}");
+    assert!(fixed.contains("reset_repeats=true\n"), "{fixed}");
+
+    let clock = run(&gen("seed0", &["--stereo", "--noise", "thermal"]));
+    assert!(
+        !clock.contains("nonzero_l=0\n"),
+        "noise must be on: {clock}"
+    );
+    assert!(
+        clock.contains("same_lr=0\n"),
+        "L and R share noise: {clock}"
+    );
+    // A fresh clock read per reset(): the noise is not replayed.
+    assert!(clock.contains("reset_repeats=false\n"), "{clock}");
+
+    let _ = std::fs::remove_dir_all(&base);
+    let _ = std::fs::remove_file(&cir);
+}
+
 #[test]
 fn test_compile_missing_file() {
     let stderr = run_melange_fail(&[

@@ -179,6 +179,9 @@ pub(crate) struct CompileOptions<'a> {
     pub(crate) dc_op_max_iterations: Option<usize>,
     pub(crate) plugin_name: Option<&'a str>,
     pub(crate) mono: bool,
+    /// `--stereo`: a 1-output circuit as a stereo plugin, one circuit
+    /// instance per channel.
+    pub(crate) stereo: bool,
     pub(crate) wet_dry_mix: bool,
     pub(crate) ear_protection: bool,
     pub(crate) vendor: Option<&'a str>,
@@ -226,6 +229,7 @@ pub(crate) fn compile_circuit_source(
         dc_op_max_iterations,
         plugin_name,
         mono,
+        stereo,
         wet_dry_mix,
         ear_protection,
         vendor,
@@ -272,6 +276,14 @@ pub(crate) fn compile_circuit_source(
     // channel, so a 1-channel layout can't represent it. Erroring beats
     // silently generating a plugin whose second output node is inaudible.
     let output_node_names: Vec<&str> = output_node.split(',').map(|s| s.trim()).collect();
+    if stereo {
+        refuse_stereo_misuse(
+            format == OutputFormat::Code,
+            mono,
+            &output_node_names,
+            &circuit_source.name(),
+        )?;
+    }
     if mono && output_node_names.len() > 1 {
         anyhow::bail!(
             "--mono cannot be combined with multiple output nodes ({} given: \"{}\"). \
@@ -373,15 +385,27 @@ pub(crate) fn compile_circuit_source(
     })
     .map_err(build_error)?;
 
-    // A single output node always makes a mono plugin, `--mono` or not. The
-    // template's other single-output layout (one circuit instance per stereo
-    // channel) doubles CPU and has no CLI path to it.
-    let mono = if !mono && output_node_indices.len() == 1 && format == OutputFormat::Plugin {
-        println!("  Auto-selecting mono (single output node). Use two output nodes for stereo.");
-        true
-    } else {
-        mono
-    };
+    // A single output node makes a mono plugin, `--mono` or not, unless
+    // `--stereo` asks for the template's other single-output layout: one
+    // circuit instance per stereo channel, at twice the CPU. Guitar pedals are
+    // mono, so stereo is opt-in.
+    let mono =
+        if !mono && !stereo && output_node_indices.len() == 1 && format == OutputFormat::Plugin {
+            println!(
+                "  Auto-selecting mono (single output node). For stereo, pass two output \
+             nodes or --stereo."
+            );
+            true
+        } else {
+            mono
+        };
+    // `--stereo` was refused above unless this is a 1-output plugin build.
+    if stereo {
+        println!(
+            "  Stereo: two independent copies of the circuit, one per channel \
+             (about twice the CPU of the mono plugin)."
+        );
+    }
 
     let line_count = generated.code.lines().count();
     println!("  ✓ Generated {} lines of Rust code", line_count);
@@ -717,6 +741,9 @@ pub(crate) fn compile_circuit_source(
             let plugin_options = plugin_template::PluginOptions {
                 plugin_name,
                 mono,
+                // Two instances of one circuit need their own noise streams;
+                // only a circuit with runtime noise has `set_seed` to call.
+                per_channel_noise_seeds: stereo && circuit_has_runtime_noise(&generated.code),
                 wet_dry_mix,
                 ear_protection,
                 vendor,
@@ -762,6 +789,51 @@ pub(crate) fn compile_circuit_source(
     }
 
     Ok(())
+}
+
+/// Refuse `--stereo` anywhere but a one-output `--format plugin` build, saying
+/// what to do instead.
+fn refuse_stereo_misuse(
+    code_format: bool,
+    mono: bool,
+    output_node_names: &[&str],
+    circuit: &str,
+) -> Result<()> {
+    if code_format {
+        anyhow::bail!(
+            "--stereo applies to --format plugin only: it makes the plugin run two copies \
+             of the circuit, one per channel. Generated code has no channels; for stereo, \
+             create one CircuitState per channel yourself (with --noise, give each its own \
+             nonzero set_seed so their noise is independent), or generate the plugin:\n  \
+             melange compile {circuit} --format plugin --stereo -o <project-dir>"
+        );
+    }
+    if mono {
+        anyhow::bail!(
+            "--stereo and --mono contradict each other: --stereo makes a 2-channel plugin \
+             by running two copies of the circuit, --mono a 1-channel one. Pass one of them."
+        );
+    }
+    if output_node_names.len() > 1 {
+        anyhow::bail!(
+            "--stereo cannot be combined with multiple output nodes ({} given: \"{}\"). \
+             Two output nodes already make a stereo plugin, one node per channel; \
+             --stereo is for a circuit with ONE output node, which it runs twice. \
+             Drop --stereo, or pass a single --output-node.",
+            output_node_names.len(),
+            output_node_names.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// Whether generated circuit code carries runtime noise, i.e. has the
+/// `CircuitState::set_seed` that `--stereo` calls to give each channel its own
+/// noise. Codegen emits it exactly when `--noise` is on and the circuit has a
+/// noise source.
+fn circuit_has_runtime_noise(code: &str) -> bool {
+    code.contains("pub const NOISE_MASTER_SEED_DEFAULT: u64")
+        && code.contains("pub fn set_seed(&mut self, master: u64)")
 }
 
 /// The refusal for `--format plugin` with more than two output nodes.

@@ -313,12 +313,29 @@ pub(crate) enum Commands {
         name: Option<String>,
 
         /// Ask for a mono (1-in/1-out) plugin. This changes nothing today: a
-        /// plugin built from one output node is always mono, and one built
-        /// from two output nodes is stereo (one node per channel), where
-        /// `--mono` is refused rather than drop a node. Also refused with
-        /// several output nodes under `--format code`.
+        /// plugin built from one output node is mono unless `--stereo` is
+        /// given, and one built from two output nodes is stereo (one node per
+        /// channel), where `--mono` is refused rather than drop a node. Also
+        /// refused with several output nodes under `--format code`, and with
+        /// `--stereo`.
         #[arg(long)]
         mono: bool,
+
+        /// Make a stereo (2-in/2-out) plugin from a circuit with ONE output
+        /// node by running two independent copies of it, one per channel.
+        /// Without it such a plugin is mono. Costs about twice the CPU.
+        ///
+        /// Both copies have the same component values, `.tolerance` and
+        /// `.mismatch` included: it is one circuit duplicated, not two units.
+        /// Every knob and switch moves both. Their circuit noise is
+        /// independent, as two physical copies' is: the left channel uses the
+        /// `--noise-seed`, the right a seed derived from it (with seed 0, from
+        /// a clock read at every initialize/reset).
+        ///
+        /// `--format plugin` only. Refused with `--mono` and with two output
+        /// nodes, which already make a stereo plugin (one node per channel).
+        #[arg(long)]
+        stereo: bool,
 
         /// Add wet/dry mix parameter to generated plugin
         #[arg(long)]
