@@ -912,8 +912,6 @@ dependencies = [
  "env_logger",
  "hound",
  "log",
- "melange-devices",
- "melange-primitives",
  "melange-solver",
  "melange-validate",
  "quick-xml",

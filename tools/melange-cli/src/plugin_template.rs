@@ -210,7 +210,10 @@ fn escape_rust_string_literal(s: &str) -> String {
     s.chars().flat_map(|c| c.escape_default()).collect()
 }
 
-/// Generate a complete plugin project
+/// Generate a complete plugin project with default options (1x oversampling).
+/// Test-only convenience: the CLI calls
+/// [`generate_plugin_project_with_oversampling`] directly.
+#[cfg(test)]
 pub fn generate_plugin_project(
     output_dir: &Path,
     circuit_code: &str,
@@ -2000,20 +2003,20 @@ mod tests {
 
     #[test]
     fn display_name_simple() {
-        let lib = test_generate_lib_rs("screamer", false, &[]);
-        assert!(lib.contains("const NAME: &'static str = \"Screamer\""));
+        let lib = test_generate_lib_rs("overdrive", false, &[]);
+        assert!(lib.contains("const NAME: &'static str = \"Overdrive\""));
     }
 
     #[test]
     fn display_name_hyphenated() {
-        let lib = test_generate_lib_rs("tube-screamer", false, &[]);
-        assert!(lib.contains("const NAME: &'static str = \"Tube Screamer\""));
+        let lib = test_generate_lib_rs("tube-overdrive", false, &[]);
+        assert!(lib.contains("const NAME: &'static str = \"Tube Overdrive\""));
     }
 
     #[test]
     fn display_name_multi_hyphen() {
-        let lib = test_generate_lib_rs("big-muff-pi", false, &[]);
-        assert!(lib.contains("const NAME: &'static str = \"Big Muff Pi\""));
+        let lib = test_generate_lib_rs("big-fuzz-box", false, &[]);
+        assert!(lib.contains("const NAME: &'static str = \"Big Fuzz Box\""));
     }
 
     #[test]
@@ -2625,8 +2628,8 @@ mod tests {
     #[test]
     fn lib_without_custom_name_uses_auto() {
         let opts = PluginOptions::default();
-        let lib = generate_lib_rs("tube-screamer", false, &[], &[], &[], &[], 1, 1, &opts);
-        assert!(lib.contains("const NAME: &'static str = \"Tube Screamer\""));
+        let lib = generate_lib_rs("tube-overdrive", false, &[], &[], &[], &[], 1, 1, &opts);
+        assert!(lib.contains("const NAME: &'static str = \"Tube Overdrive\""));
     }
 
     // === --mono flag tests ===
@@ -2821,8 +2824,8 @@ mod tests {
 
     #[test]
     fn readme_uses_auto_name_when_no_custom() {
-        let readme = generate_readme("tube-screamer", None, CpuBaseline::default());
-        assert!(readme.contains("# Tube Screamer"));
+        let readme = generate_readme("tube-overdrive", None, CpuBaseline::default());
+        assert!(readme.contains("# Tube Overdrive"));
     }
 
     // === Combined flag tests ===

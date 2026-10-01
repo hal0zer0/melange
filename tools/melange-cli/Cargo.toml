@@ -11,8 +11,6 @@ name = "melange"
 path = "src/main.rs"
 
 [dependencies]
-melange-primitives = { workspace = true }
-melange-devices = { workspace = true }
 melange-solver = { workspace = true, features = ["codegen"] }
 melange-validate = { workspace = true }
 clap = { version = "4", features = ["derive"] }
@@ -27,7 +25,3 @@ dirs = "5.0"
 ureq = "2.9"
 quick-xml = "0.41"
 tempfile = "3.10"
-
-[features]
-default = []
-async = []

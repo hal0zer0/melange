@@ -12,9 +12,37 @@ use std::collections::HashMap;
 /// ignored by design so the format can grow without breaking older clients.
 #[derive(Debug, Deserialize)]
 pub struct CircuitIndex {
-    #[allow(dead_code)]
+    /// Format version. Required; an index newer than [`INDEX_SCHEMA`] is
+    /// refused by [`CircuitIndex::parse`].
     pub schema: u32,
     pub circuits: HashMap<String, CircuitIndexEntry>,
+}
+
+/// The `circuits-index.json` format version this melange reads.
+pub const INDEX_SCHEMA: u32 = 1;
+
+impl CircuitIndex {
+    /// Parse an index, refusing one written for a newer format.
+    ///
+    /// Unknown keys are ignored so the format can grow compatibly; a bump of
+    /// `schema` is the publisher saying the growth is NOT compatible. Reading
+    /// such an index as schema 1 could resolve names to the wrong decks, so it
+    /// is an error, not a warning. `origin` (a path or URL) prefixes the
+    /// messages when known.
+    pub fn parse(raw: &str, origin: Option<&str>) -> Result<Self> {
+        let at = origin.map(|o| format!("{o}: ")).unwrap_or_default();
+        let index: CircuitIndex = serde_json::from_str(raw).with_context(|| {
+            format!("{at}not a valid circuits-index.json (see docs/CIRCUIT_INDEX.md)")
+        })?;
+        if index.schema > INDEX_SCHEMA {
+            anyhow::bail!(
+                "{at}this source index is schema {}; this melange reads schema {INDEX_SCHEMA} \
+                 — upgrade melange",
+                index.schema
+            );
+        }
+        Ok(index)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -238,8 +266,7 @@ impl SourcesConfig {
                 Err(e) => return Err(e),
             }
         };
-        let index: CircuitIndex = serde_json::from_str(&raw)
-            .with_context(|| "not a valid circuits-index.json (see docs/CIRCUIT_INDEX.md)")?;
+        let index = CircuitIndex::parse(&raw, None)?;
         let mut entries: Vec<(String, CircuitIndexEntry)> = index.circuits.into_iter().collect();
         entries.sort_by(|(an, ae), (bn, be)| {
             (ae.category.as_deref().unwrap_or(""), an.as_str())
@@ -259,12 +286,7 @@ impl SourcesConfig {
         let index_path = dir.join("circuits-index.json");
 
         if let Ok(raw) = std::fs::read_to_string(&index_path) {
-            let index: CircuitIndex = serde_json::from_str(&raw).with_context(|| {
-                format!(
-                    "{}: not a valid circuits-index.json (see docs/CIRCUIT_INDEX.md)",
-                    index_path.display()
-                )
-            })?;
+            let index = CircuitIndex::parse(&raw, Some(&index_path.display().to_string()))?;
             return match index.circuits.get(name) {
                 Some(e) => Ok(dir.join(e.path.trim_start_matches('/'))),
                 None => {
@@ -334,9 +356,7 @@ impl SourcesConfig {
             Err(e) => return Err(e),
         };
 
-        let index: CircuitIndex = serde_json::from_str(&raw).with_context(|| {
-            format!("{index_url}: not a valid circuits-index.json (see docs/CIRCUIT_INDEX.md)")
-        })?;
+        let index = CircuitIndex::parse(&raw, Some(&index_url))?;
         let name = circuit.strip_suffix(".cir").unwrap_or(circuit);
 
         match index.circuits.get(name) {
@@ -517,6 +537,41 @@ mod tests {
         .unwrap();
         let got = SourcesConfig::resolve_local(d.path(), "fuzz-pedal").unwrap();
         assert_eq!(got, d.path().join("fuzz/fuzz-pedal.cir"));
+    }
+
+    /// An index written for a newer format is refused loudly, never read as
+    /// schema 1; schema 1 loads; an index without `schema` (a required field
+    /// since the format existed) stays refused as invalid.
+    #[test]
+    fn index_schema_newer_than_supported_is_refused() {
+        let body = |schema: &str| format!(r#"{{{schema}"circuits":{{"rc":{{"path":"rc.cir"}}}}}}"#);
+        let e = CircuitIndex::parse(&body(r#""schema":2,"#), Some("idx.json"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("this source index is schema 2; this melange reads schema 1")
+                && e.contains("upgrade melange")
+                && e.starts_with("idx.json: "),
+            "{e}"
+        );
+
+        let ok = CircuitIndex::parse(&body(r#""schema":1,"#), None).unwrap();
+        assert_eq!(ok.schema, 1);
+        assert_eq!(ok.circuits["rc"].path, "rc.cir");
+
+        let e = CircuitIndex::parse(&body(""), None)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("not a valid circuits-index.json"), "{e}");
+
+        // Through the resolver, not just the parser.
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("rc.cir"), "* x\n").unwrap();
+        std::fs::write(d.path().join("circuits-index.json"), body(r#""schema":2,"#)).unwrap();
+        let e = SourcesConfig::resolve_local(d.path(), "rc")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("schema 2"), "{e}");
     }
 
     /// No index: flat layout, same fallback the remote path uses.

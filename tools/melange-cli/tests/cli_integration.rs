@@ -179,6 +179,29 @@ fn test_compile_circuit_file() {
     let _ = std::fs::remove_file(&cir);
 }
 
+/// The `--format code` usage hint shows the rate the code was compiled at,
+/// not a hard-coded 48 kHz.
+#[test]
+fn test_compile_code_hint_names_the_compiled_rate() {
+    let cir = write_test_circuit(TEST_RC_LOWPASS, "compile_hint_rate");
+    let tmp = std::env::temp_dir().join("melange_cli_test_compile_hint_rate.rs");
+    let stdout = run_melange(&[
+        "compile",
+        cir.to_str().unwrap(),
+        "--output",
+        tmp.to_str().unwrap(),
+        "--sample-rate",
+        "44100",
+    ]);
+    let _ = std::fs::remove_file(&tmp);
+    let _ = std::fs::remove_file(&cir);
+    assert!(
+        stdout.contains("state.set_sample_rate(44100.0);"),
+        "hint names the compiled rate: {stdout}"
+    );
+    assert!(!stdout.contains("48_000.0"), "{stdout}");
+}
+
 /// The default compile summary names the route and integrator in one plain
 /// line; the router's reasons and kernel measurements are `-v` detail. The
 /// generated code is the same either way.
@@ -454,26 +477,102 @@ fn test_simulate_sine_tone() {
 }
 
 /// Write a short mono 16-bit PCM sine WAV at `rate` Hz for `--input-audio`
-/// tests. 16-bit mono, because hound writes that as plain PCM (format 1); its
-/// float32 output is WAVE_FORMAT_EXTENSIBLE, which the rendering binary's
-/// reader does not accept.
+/// tests (hound writes 16-bit mono as plain PCM, format tag 1).
 fn write_test_input_wav(name: &str, rate: u32) -> PathBuf {
+    write_test_input_wav_as(name, rate, 16, hound::SampleFormat::Int)
+}
+
+/// The same 50 ms, 0.1-amplitude 1 kHz sine as [`write_test_input_wav`], in
+/// any sample format hound writes.
+fn write_test_input_wav_as(
+    name: &str,
+    rate: u32,
+    bits_per_sample: u16,
+    sample_format: hound::SampleFormat,
+) -> PathBuf {
     let path = std::env::temp_dir().join(format!("melange_cli_test_{name}.wav"));
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate: rate,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
+        bits_per_sample,
+        sample_format,
     };
     let mut w = hound::WavWriter::create(&path, spec).expect("create input WAV");
     for i in 0..(rate / 20) {
         let t = i as f64 / rate as f64;
         let v = 0.1 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();
-        w.write_sample((v * 32767.0) as i16)
-            .expect("write input WAV sample");
+        match (sample_format, bits_per_sample) {
+            (hound::SampleFormat::Float, _) => w.write_sample(v as f32),
+            (hound::SampleFormat::Int, 16) => w.write_sample((v * 32767.0) as i16),
+            (hound::SampleFormat::Int, 24) => w.write_sample((v * 8_388_607.0) as i32),
+            other => panic!("unsupported test WAV format {other:?}"),
+        }
+        .expect("write input WAV sample");
     }
     w.finalize().expect("finalize input WAV");
     path
+}
+
+/// Render `in_wav` through the RC lowpass and return the output samples.
+fn simulate_wav_samples(in_wav: &std::path::Path, tag: &str) -> Vec<f32> {
+    let cir = write_test_circuit(TEST_RC_LOWPASS, tag);
+    let out_wav = std::env::temp_dir().join(format!("melange_cli_test_{tag}_out.wav"));
+    run_melange(&[
+        "simulate",
+        cir.to_str().unwrap(),
+        "--input-audio",
+        in_wav.to_str().unwrap(),
+        "--output",
+        out_wav.to_str().unwrap(),
+    ]);
+    let samples: Vec<f32> = hound::WavReader::open(&out_wav)
+        .expect("output WAV")
+        .into_samples::<f32>()
+        .map(|s| s.expect("output sample"))
+        .collect();
+    let _ = std::fs::remove_file(&cir);
+    let _ = std::fs::remove_file(&out_wav);
+    samples
+}
+
+/// hound (and many other tools) write float32 and 24-bit WAVs as
+/// WAVE_FORMAT_EXTENSIBLE (tag 0xFFFE, real format in the SubFormat GUID).
+/// The rendering binary's reader used to refuse them ("format=65534"). Each
+/// must render the same as the 16-bit PCM copy of the same sine, to within
+/// 16-bit quantisation — a decode that only "succeeds" is not enough.
+#[test]
+fn test_simulate_accepts_wave_format_extensible_input() {
+    let reference_in = write_test_input_wav("wav_ext_ref_in", 48_000);
+    let reference = simulate_wav_samples(&reference_in, "wav_ext_ref");
+    let _ = std::fs::remove_file(&reference_in);
+    assert!(!reference.is_empty());
+
+    for (tag, bits, fmt) in [
+        ("wav_ext_f32", 32, hound::SampleFormat::Float),
+        ("wav_ext_i24", 24, hound::SampleFormat::Int),
+    ] {
+        let in_wav = write_test_input_wav_as(&format!("{tag}_in"), 48_000, bits, fmt);
+        let bytes = std::fs::read(&in_wav).expect("read input WAV");
+        // fmt chunk directly after the 12-byte RIFF header: tag at byte 20.
+        assert_eq!(&bytes[12..16], b"fmt ");
+        assert_eq!(
+            u16::from_le_bytes([bytes[20], bytes[21]]),
+            0xFFFE,
+            "{tag}: hound must write this as EXTENSIBLE for the test to mean anything"
+        );
+        let got = simulate_wav_samples(&in_wav, tag);
+        let _ = std::fs::remove_file(&in_wav);
+        assert_eq!(got.len(), reference.len(), "{tag}: frame count");
+        let worst = got
+            .iter()
+            .zip(&reference)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst < 1e-3,
+            "{tag}: differs from the PCM16 render by {worst}"
+        );
+    }
 }
 
 /// The build rate and the rate the WAV renders at must be one rate: the route

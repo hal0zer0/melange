@@ -1,8 +1,15 @@
 // Minimal WAV reader/writer — embedded in generated simulate binaries.
-// No external dependencies. Supports 16-bit int, 24-bit int, 32-bit float.
+// No external dependencies. Supports 16-bit int, 24-bit int, 32-bit float,
+// with either the plain format tag or WAVE_FORMAT_EXTENSIBLE (0xFFFE).
 
 const PCM_16_MAX: f64 = 32768.0;   // 2^15
 const PCM_24_MAX: f64 = 8388608.0; // 2^23
+
+// WAVE_FORMAT_EXTENSIBLE carries the real format tag in the first two bytes of
+// its SubFormat GUID; the other 14 bytes are the fixed KSDATAFORMAT base.
+const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
+const KSDATAFORMAT_GUID_TAIL: [u8; 14] =
+    [0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71];
 
 fn read_wav(path: &str) -> (Vec<f64>, f64) {
     let data = std::fs::read(path).unwrap_or_else(|e| {
@@ -33,6 +40,18 @@ fn read_wav(path: &str) -> (Vec<f64>, f64) {
             num_channels = u16::from_le_bytes([data[pos+2], data[pos+3]]);
             sample_rate = u32::from_le_bytes([data[pos+4], data[pos+5], data[pos+6], data[pos+7]]);
             bits_per_sample = u16::from_le_bytes([data[pos+14], data[pos+15]]);
+            // EXTENSIBLE (hound and many tools write float32, >2 ch and 24-bit
+            // this way): the SubFormat GUID sits at fmt offset 24..40. Its
+            // first two bytes are the plain tag (1 = PCM, 3 = IEEE float);
+            // bits_per_sample above is the container size, handled as for the
+            // plain tags. An unrecognised GUID keeps 0xFFFE and is refused.
+            if audio_format == WAVE_FORMAT_EXTENSIBLE
+                && chunk_size >= 40
+                && pos + 40 <= data.len()
+                && data[pos+26..pos+40] == KSDATAFORMAT_GUID_TAIL
+            {
+                audio_format = u16::from_le_bytes([data[pos+24], data[pos+25]]);
+            }
         } else if chunk_id == b"data" {
             data_start = pos;
             data_size = chunk_size;

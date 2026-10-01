@@ -6,7 +6,7 @@
 //! - Direct URLs: Full HTTP(S) URLs
 //! - Local files: Path resolution
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::PathBuf;
 
 /// Resolved circuit source information
@@ -36,34 +36,6 @@ impl CircuitSource {
             } => format!("{}:{}", source, circuit),
             CircuitSource::Url { url } => url.clone(),
             CircuitSource::Local { path } => path.display().to_string(),
-        }
-    }
-
-    /// Get the circuit content as a string
-    ///
-    /// For remote sources (Url, Friendly), this requires fetching from network.
-    pub fn content_sync(&self) -> Result<String> {
-        match self {
-            CircuitSource::Builtin { content, .. } => Ok(content.clone()),
-            CircuitSource::Local { path } => std::fs::read_to_string(path)
-                .with_context(|| format!("Failed to read local circuit file: {}", path.display())),
-            CircuitSource::Url { .. } | CircuitSource::Friendly { .. } => {
-                anyhow::bail!(
-                    "Remote circuit sources require async content fetching. Use content_async() or the cache module."
-                )
-            }
-        }
-    }
-
-    /// Get the circuit content (async version for remote sources)
-    #[cfg(feature = "async")]
-    pub async fn content_async(&self, cache: &crate::cache::Cache) -> Result<String> {
-        match self {
-            CircuitSource::Builtin { content, .. } => Ok(content.clone()),
-            CircuitSource::Local { path } => std::fs::read_to_string(path)
-                .with_context(|| format!("Failed to read local circuit file: {}", path.display())),
-            CircuitSource::Url { url } => cache.get(url, false).await,
-            CircuitSource::Friendly { url, .. } => cache.get(url, false).await,
         }
     }
 }
@@ -259,26 +231,6 @@ pub fn list_builtins() -> Vec<(&'static str, &'static str)> {
         "passive-eq1a",
         "Passive tube EQ — 4 tubes, 3 transformers, global NFB (demo)",
     )]
-}
-
-/// Fetch circuit content synchronously using blocking HTTP client
-///
-/// This is a convenience function for simple use cases.
-/// For production use with caching, use the cache module.
-pub fn fetch_url_sync(url: &str) -> Result<String> {
-    use std::io::Read;
-
-    let response = ureq::get(url)
-        .call()
-        .with_context(|| format!("Failed to fetch URL: {}", url))?;
-
-    let mut content = String::new();
-    response
-        .into_reader()
-        .read_to_string(&mut content)
-        .with_context(|| "Failed to read response body")?;
-
-    Ok(content)
 }
 
 #[cfg(test)]
