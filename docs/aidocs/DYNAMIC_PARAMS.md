@@ -115,7 +115,7 @@ on its own merits.
 ```spice
 R_top  in    wiper 50k       ; CW leg (top → wiper)
 R_bot  wiper 0     50k       ; CCW leg (wiper → bottom)
-.wiper R_top R_bot 100k                          ; total resistance 100k
+.wiper R_top R_bot 100k                          ; total 100k; starts where the legs put it (0.5)
 .wiper R_top R_bot 100k 0.5 "Volume"             ; default position + label
 ```
 

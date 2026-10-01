@@ -1077,7 +1077,7 @@ Models a 3-terminal pot (top, wiper, bottom) as two resistors sharing a wiper no
 | `R_cw` | Name of the clockwise (top-to-wiper) leg resistor |
 | `R_ccw` | Name of the counter-clockwise (wiper-to-bottom) leg resistor |
 | `total_R` | Total pot resistance in ohms |
-| `default_pos` | (Optional) Default wiper position, 0.0-1.0. Default: 0.5 |
+| `default_pos` | (Optional) Default wiper position, 0.0-1.0. When omitted, the position the two legs' netlist values give, as a `.pot` defaults to its netlist value; the legs must then add up to `total_R` (within 1 %), or the netlist is refused |
 | `"Label"` | (Optional) Quoted parameter label for plugin UI |
 
 **Example:**

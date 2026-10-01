@@ -112,6 +112,33 @@ fn test_parse_wiper_default_position() {
     assert!((r_ccw - 6996.0).abs() < 0.1);
 }
 
+/// With no explicit position the knob starts where the netlist puts it, as a
+/// `.pot` does: legs of 1k (cw) and 9k (ccw) on a 10k wiper are position 0.9,
+/// and the expanded legs reproduce the written values.
+#[test]
+fn test_parse_wiper_default_position_comes_from_the_legs() {
+    let spice = "Test\nR_a 1 2 1k\nR_b 2 0 9k\n.wiper R_a R_b 10k\n";
+    let netlist = Netlist::parse(spice).unwrap();
+    let pos = netlist.wipers[0].default_position.unwrap();
+    assert!(
+        (pos - (9000.0 - 10.0) / (10000.0 - 20.0)).abs() < 1e-12,
+        "{pos}"
+    );
+    assert!((netlist.pots[0].default_value.unwrap() - 1000.0).abs() < 1e-6);
+    assert!((netlist.pots[1].default_value.unwrap() - 9000.0).abs() < 1e-6);
+}
+
+/// Legs that do not add up to the total have no single position: refused.
+#[test]
+fn test_parse_wiper_legs_off_the_total_are_refused() {
+    let spice = "Test\nR_a 1 2 5k\nR_b 2 0 6k\n.wiper R_a R_b 10k\n";
+    let err = Netlist::parse(spice).unwrap_err().to_string();
+    assert!(err.contains("add up") && err.contains("11000"), "{err}");
+    // An explicit position states the start, so the legs are not consulted.
+    let spice = "Test\nR_a 1 2 5k\nR_b 2 0 6k\n.wiper R_a R_b 10k 0.5\n";
+    assert!(Netlist::parse(spice).is_ok());
+}
+
 #[test]
 fn test_parse_wiper_with_label() {
     let spice = "Test\nR1 1 2 5k\nR2 2 0 5k\n.wiper R1 R2 10k \"HF Cut\"\n";

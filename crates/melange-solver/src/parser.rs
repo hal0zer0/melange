@@ -459,7 +459,8 @@ pub struct WiperDirective {
     pub resistor_ccw: String,
     /// Total resistance (R_cw + R_ccw = total)
     pub total_resistance: f64,
-    /// Default wiper position (0.0–1.0). None means 0.5.
+    /// Default wiper position (0.0–1.0). When omitted, parsing sets it from
+    /// the legs' netlist values (as a `.pot` defaults to its netlist value).
     pub default_position: Option<f64>,
     /// Optional human-readable label (e.g. "Tone")
     pub label: Option<String>,
@@ -3843,6 +3844,55 @@ impl Parser {
         /// Must be ≥10Ω for Sherman-Morrison numerical stability at extreme positions.
         /// Real pots have 1–50Ω contact resistance; 10Ω is conservative.
         const MIN_LEG_R: f64 = 10.0;
+
+        // With no explicit default position, the knob starts where the netlist
+        // puts it: the two legs' values, as for a `.pot`. (It started at 0.5
+        // whatever the legs said.) Legs that do not add up to the total have no
+        // single position, so that is refused rather than guessed.
+        let resistance = |netlist: &Netlist, name: &str| {
+            netlist.elements.iter().find_map(|e| match e {
+                Element::Resistor { name: n, value, .. } if n.eq_ignore_ascii_case(name) => {
+                    Some(*value)
+                }
+                _ => None,
+            })
+        };
+        for i in 0..netlist.wipers.len() {
+            let wiper = &netlist.wipers[i];
+            if wiper.default_position.is_some() {
+                continue;
+            }
+            let (Some(r_cw), Some(r_ccw)) = (
+                resistance(netlist, &wiper.resistor_cw),
+                resistance(netlist, &wiper.resistor_ccw),
+            ) else {
+                continue; // a missing leg is reported by validation
+            };
+            let r_total = wiper.total_resistance;
+            if ((r_cw + r_ccw) - r_total).abs() > 0.01 * r_total {
+                return Err(ParseError {
+                    line: 0,
+                    message: format!(
+                        ".wiper {} {}: the legs are {} + {} = {} ohm, but the wiper's total is {} \
+                         ohm, so they give no single default position. Make the legs add up \
+                         to the total, or give the position explicitly: \
+                         `.wiper {} {} {} <0..1>`.",
+                        wiper.resistor_cw,
+                        wiper.resistor_ccw,
+                        r_cw,
+                        r_ccw,
+                        r_cw + r_ccw,
+                        r_total,
+                        wiper.resistor_cw,
+                        wiper.resistor_ccw,
+                        r_total,
+                    ),
+                });
+            }
+            // Inverse of the leg mapping below.
+            let pos = ((r_ccw - MIN_LEG_R) / (r_total - 2.0 * MIN_LEG_R)).clamp(0.0, 1.0);
+            netlist.wipers[i].default_position = Some(pos);
+        }
 
         for wiper in &netlist.wipers {
             let pos = wiper.default_position.unwrap_or(0.5);

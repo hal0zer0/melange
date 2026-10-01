@@ -1680,8 +1680,8 @@ fn format_route_info(route_label: &str, reason: &str) -> String {
         ")"
     } else {
         " \"unstable\" / \"ill-conditioned\" say\n\
-         \x20                 why the DK route was not the fit here \u{2014} nothing is wrong with \
-         the netlist.)"
+         \x20                 why the DK route was not the fit here; they are not a verdict on the \
+         netlist.)"
     };
     format!(
         "  info (normal): solver route = {route_label} \u{2014} {reason}\n\

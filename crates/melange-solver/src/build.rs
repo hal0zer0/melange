@@ -614,25 +614,24 @@ pub fn assemble(
             report!(err, "");
             report!(
                 err,
-                "  WARNING: Passive EQ topology detected with {:.0}Ω source impedance.",
+                "  WARNING: pot(s) {} sit within one component of the input, which is driven \
+                 from a {:.0}Ω source.",
+                connected_pots.join(", "),
                 input_resistance
             );
             report!(
                 err,
-                "  Pots connected to input: {}",
-                connected_pots.join(", ")
+                "  A passive network's response depends on the impedance driving it, and a \
+                 near-ideal source can leave its pots with little effect."
             );
             report!(
                 err,
-                "  A low source impedance overwhelms passive EQ networks, making pots inert."
+                "  If the real circuit is driven from something else (a 600Ω line output, a \
+                 tube plate of tens of kΩ), set that impedance:"
             );
             report!(
                 err,
-                "  Consider adding to your netlist:  .input_impedance 600"
-            );
-            report!(
-                err,
-                "  Or use the CLI flag:              --input-resistance 600"
+                "    .input_impedance <ohms>   (in the netlist)   or   --input-resistance <ohms>"
             );
             report!(err, "");
         }
@@ -685,7 +684,7 @@ pub fn assemble(
             );
         } else if has_large_input_r {
             report!(out,
-                "  Hint: Large resistor on input node. Consider --input-resistance 10k or .input_impedance 10k"
+                "  Hint: a resistor over 10kΩ sits on the input node, driven from a near-ideal source. If the real circuit is driven from a higher impedance, set it to the driver's output impedance: .input_impedance <ohms> or --input-resistance <ohms>"
             );
         }
     }

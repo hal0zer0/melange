@@ -832,6 +832,21 @@ generated state is smaller.
 
 ### Changed
 
+- **A `.wiper` with no default position starts where its legs put it.** It
+  started at 0.5 whatever the netlist said: legs of 10k and 90k on a 100k
+  wiper booted at 50k/50k, while a `.pot` boots at its netlist value. With no
+  explicit position the legs now set it, and legs that do not add up to the
+  wiper's total (within 1 %) are refused, naming both fixes. An explicit
+  position is unchanged. Every `.wiper` in the circuit library gives one, so no
+  library circuit moves.
+
+- **The input-impedance hints no longer contradict each other or overclaim.**
+  A tone stack driven from the default 1 Ω source got a WARNING naming a pot
+  "connected to input" that sat one component away, recommending 600 Ω, and a
+  hint recommending 10 kΩ for the same input. Both now say what they detect
+  and ask for the real driver's output impedance. The routing note no longer
+  says "nothing is wrong with the netlist", which it cannot know.
+
 - **`compile --format plugin` refuses to overwrite an existing project.** When
   the output directory already has a `src/lib.rs` or `Cargo.toml`, it used to
   replace them without a word, although `lib.rs` is documented as yours to
