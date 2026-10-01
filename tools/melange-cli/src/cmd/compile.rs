@@ -775,6 +775,9 @@ pub(crate) fn compile_circuit_source(
                 // Two instances of one circuit need their own noise streams;
                 // only a circuit with runtime noise has `set_seed` to call.
                 per_channel_noise_seeds: stereo && circuit_has_runtime_noise(&generated.code),
+                // `--noise` asked for noise: give the plugin its on/off switch
+                // (otherwise the circuit's noise stays off, silent).
+                circuit_noise_param: circuit_has_runtime_noise(&generated.code),
                 wet_dry_mix,
                 ear_protection,
                 vendor,
@@ -860,11 +863,13 @@ fn refuse_stereo_misuse(
 
 /// Whether generated circuit code carries runtime noise, i.e. has the
 /// `CircuitState::set_seed` that `--stereo` calls to give each channel its own
-/// noise. Codegen emits it exactly when `--noise` is on and the circuit has a
-/// noise source.
+/// noise and the `set_noise_enabled` the plugin's "Circuit Noise" parameter
+/// calls. Codegen emits both exactly when `--noise` is on and the circuit has
+/// a noise source.
 fn circuit_has_runtime_noise(code: &str) -> bool {
     code.contains("pub const NOISE_MASTER_SEED_DEFAULT: u64")
         && code.contains("pub fn set_seed(&mut self, master: u64)")
+        && code.contains("pub fn set_noise_enabled(&mut self, on: bool)")
 }
 
 /// The refusal for `--format plugin` with more than two output nodes.

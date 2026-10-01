@@ -140,6 +140,11 @@ pub struct PluginOptions<'a> {
     /// the circuit code has runtime noise, so give each channel's instance its
     /// own noise seed. Ignored by every other layout.
     pub per_channel_noise_seeds: bool,
+    /// The circuit code has runtime noise (`--noise`): add a "Circuit Noise"
+    /// on/off parameter, default on, that switches the noise of every circuit
+    /// instance. Without it the circuit's noise stays at its compiled-in
+    /// default, off, and the plugin is silent of it.
+    pub circuit_noise_param: bool,
     /// Add a wet/dry mix parameter to the generated plugin.
     pub wet_dry_mix: bool,
     /// Add ear-protection soft limiter on final output (default: true).
@@ -872,6 +877,7 @@ fn generate_params_struct(
     switches: &[SwitchParamInfo],
     wet_dry_mix: bool,
     ear_protection: bool,
+    circuit_noise: bool,
 ) -> String {
     let has_any_params = with_level_params
         || !pots.is_empty()
@@ -879,7 +885,8 @@ fn generate_params_struct(
         || !gangs.is_empty()
         || !switches.is_empty()
         || wet_dry_mix
-        || ear_protection;
+        || ear_protection
+        || circuit_noise;
     if !has_any_params {
         return "#[derive(Params, Default)]\npub struct CircuitParams {}".to_string();
     }
@@ -900,6 +907,11 @@ fn generate_params_struct(
     if ear_protection {
         fields.push_str(EAR_PROTECTION_PARAM_FIELD);
         defaults.push_str(EAR_PROTECTION_PARAM_DEFAULT);
+    }
+
+    if circuit_noise {
+        fields.push_str(CIRCUIT_NOISE_PARAM_FIELD);
+        defaults.push_str(CIRCUIT_NOISE_PARAM_DEFAULT);
     }
 
     let pot_fields = pot_field_names(pots);
@@ -1470,6 +1482,28 @@ const MIX_PARAM_DEFAULT: &str = r#"            mix: FloatParam::new(
             .with_string_to_value(Arc::new(|s| s.trim_end_matches('%').trim().parse::<f32>().ok().map(|v| v / 100.0))),
 "#;
 
+const CIRCUIT_NOISE_PARAM_FIELD: &str = r#"    #[id = "circuit_noise"]
+    pub circuit_noise: BoolParam,
+"#;
+
+const CIRCUIT_NOISE_PARAM_DEFAULT: &str = r#"            // The circuit was compiled with --noise; this switches it at run
+            // time. On by default: noise was asked for at compile time.
+            circuit_noise: BoolParam::new(
+                "Circuit Noise",
+                true,
+            ),
+"#;
+
+/// Opens the generated `impl CircuitPlugin` holding `apply_circuit_noise`.
+const CIRCUIT_NOISE_APPLY_DOC: &str = "\
+impl CircuitPlugin {
+    /// Switch the circuit's noise on or off to match the \"Circuit Noise\"
+    /// parameter, on every circuit instance. `set_noise_enabled` only stores
+    /// a flag (no allocation, no lock), so this is safe on the audio thread.
+    /// Off skips every noise draw from the next sample on; the circuit's
+    /// reset() keeps the setting.
+";
+
 const EAR_PROTECTION_PARAM_FIELD: &str = r#"    #[id = "ear_protection"]
     pub ear_protection: BoolParam,
 "#;
@@ -1562,6 +1596,7 @@ fn generate_lib_rs(
         switches,
         options.wet_dry_mix,
         options.ear_protection,
+        options.circuit_noise_param,
     );
     let process_loop = generate_process_loop(
         with_level_params,
@@ -1781,6 +1816,27 @@ fn generate_lib_rs(
         )
     };
 
+    // Runtime noise: initialize() switches the freshly built states to the
+    // "Circuit Noise" parameter, and reset() re-applies it after the states
+    // reset (which keeps the setting; applied anyway so the two cannot drift).
+    let (init_method, reset_method) = if options.circuit_noise_param {
+        let patched_init = init_method.replace(
+            "        true\n    }",
+            "        self.apply_circuit_noise();\n        true\n    }",
+        );
+        let patched_reset = match reset_method.strip_suffix("    }") {
+            Some(body) => format!("{body}        self.apply_circuit_noise();\n    }}"),
+            None => reset_method.clone(),
+        };
+        debug_assert!(
+            patched_init != init_method && patched_reset != reset_method,
+            "circuit-noise patch anchors must match the generated initialize()/reset()"
+        );
+        (patched_init, patched_reset)
+    } else {
+        (init_method, reset_method)
+    };
+
     // Wet/dry + oversampling: patch the struct/default/init/reset skeletons
     // with a per-channel dry-path delay ring matching the decimator group
     // delay reported to the host. Allocation happens in initialize(), and
@@ -1881,6 +1937,31 @@ fn generate_lib_rs(
         init_method
     };
 
+    // The "Circuit Noise" switch: applied at the top of every process()
+    // block (the parameter is not sample-accurate) and from initialize() /
+    // reset() above.
+    let (noise_control_impl, process_loop) = if options.circuit_noise_param {
+        let apply = if num_outputs > 1 {
+            "        self.circuit_state.set_noise_enabled(on);\n"
+        } else {
+            "        for state in self.circuit_states.iter_mut() {\n\
+             \x20           state.set_noise_enabled(on);\n\
+             \x20       }\n"
+        };
+        (
+            format!(
+                "{CIRCUIT_NOISE_APPLY_DOC}    fn apply_circuit_noise(&mut self) {{\n\
+                 \x20       let on = self.params.circuit_noise.value();\n\
+                 {apply}\
+                 \x20   }}\n\
+                 }}\n\n"
+            ),
+            format!("        self.apply_circuit_noise();\n{process_loop}"),
+        )
+    } else {
+        (String::new(), process_loop)
+    };
+
     let channel_noise_fn = if num_outputs <= 1 && !options.mono && options.per_channel_noise_seeds {
         CHANNEL_NOISE_SEED_FNS
     } else {
@@ -1948,7 +2029,7 @@ mod circuit;
 
 {plugin_default}
 
-{params_struct}
+{noise_control_impl}{params_struct}
 
 impl Plugin for CircuitPlugin {{
     const NAME: &'static str = "{display_name}";
@@ -3322,6 +3403,63 @@ mod tests {
         assert!(!seed(false, 1, false), "no set_seed to call without noise");
         assert!(!seed(true, 1, true), "mono: one instance");
         assert!(!seed(false, 2, true), "two output nodes: one instance");
+    }
+
+    // === "Circuit Noise" parameter (runtime noise compiled in) ===
+
+    #[test]
+    fn circuit_noise_param_switches_every_instance_in_every_layout() {
+        // (mono, num_outputs, per-instance line); ear protection off so the
+        // parameter-less process loop is covered too: the switch is then the
+        // only parameter.
+        for (mono, num_outputs, per_instance) in [
+            (true, 1, "            state.set_noise_enabled(on);\n"),
+            (false, 1, "            state.set_noise_enabled(on);\n"),
+            (
+                false,
+                2,
+                "        self.circuit_state.set_noise_enabled(on);\n",
+            ),
+        ] {
+            for ear_protection in [true, false] {
+                let opts = PluginOptions {
+                    mono,
+                    per_channel_noise_seeds: !mono && num_outputs == 1,
+                    circuit_noise_param: true,
+                    ear_protection,
+                    ..Default::default()
+                };
+                let lib = generate_lib_rs("test", false, &[], &[], &[], &[], num_outputs, 1, &opts);
+                let case = format!("mono={mono} outputs={num_outputs} ep={ear_protection}");
+                assert!(
+                    lib.contains("#[derive(Params)]\npub struct CircuitParams {")
+                        && lib.contains(CIRCUIT_NOISE_PARAM_FIELD)
+                        && lib.contains(CIRCUIT_NOISE_PARAM_DEFAULT),
+                    "{case}:\n{lib}"
+                );
+                assert!(lib.contains(per_instance), "{case}:\n{lib}");
+                assert_eq!(
+                    lib.matches("self.apply_circuit_noise();").count(),
+                    3,
+                    "{case}: initialize(), reset() and process():\n{lib}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn circuit_noise_param_only_with_runtime_noise() {
+        for (mono, num_outputs) in [(true, 1), (false, 1), (false, 2)] {
+            let opts = PluginOptions {
+                mono,
+                ..Default::default()
+            };
+            let lib = generate_lib_rs("test", false, &[], &[], &[], &[], num_outputs, 1, &opts);
+            assert!(
+                !lib.contains("circuit_noise") && !lib.contains("set_noise_enabled"),
+                "mono={mono} outputs={num_outputs}:\n{lib}"
+            );
+        }
     }
 
     // === Wet/dry + oversampling dry-delay tests ===

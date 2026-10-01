@@ -242,6 +242,13 @@ pub struct ValidationOptions {
     /// the comparison's RMS tolerance. The rate sweep tightens it to resolve
     /// the errors it grades.
     pub reference_bound: Option<f64>,
+    /// Echo every counter the generated solver reports (`melange validate
+    /// -v`). Off: only the counters that need attention print — a nonzero
+    /// count of unsolved, clamped or NaN-replaced samples or of reduced-model
+    /// exits. `nr_max_iter_count` and `region_exit_count` describe how hard
+    /// the solve worked, not whether its result can be trusted, and print
+    /// only here, as `melange simulate` treats them.
+    pub verbose_diagnostics: bool,
 }
 
 /// A stimulus with a closed form, which the reference can be driven by.
@@ -328,6 +335,7 @@ impl Default for ValidationOptions {
             oversampling: 1,
             analytic_stimulus: None,
             reference_bound: None,
+            verbose_diagnostics: false,
         }
     }
 }
@@ -603,6 +611,7 @@ pub fn validate_circuit_with_options(
         options.force_trap,
         options.oversampling,
         None,
+        options.verbose_diagnostics,
     )?;
     let reference_deck = linearize_twin::with_linearized_devices(
         &with_parasitic_caps(&netlist_str, &parasitic_caps)?,
@@ -1057,6 +1066,7 @@ pub fn run_melange_solver_from_str(
         force_trap,
         oversampling,
         main_code,
+        false,
     )
     .map(|run| run.output)
 }
@@ -1087,6 +1097,7 @@ fn run_melange_build(
     force_trap: bool,
     oversampling: usize,
     main_code: Option<&str>,
+    verbose_diagnostics: bool,
 ) -> Result<MelangeRun, ValidationError> {
     use melange_solver::codegen::CodegenConfig;
 
@@ -1165,7 +1176,12 @@ fn run_melange_build(
     let generated = built.generated;
 
     let linearized = linearize_twin::linearized_twins(&built.mna);
-    let output = run_generated_solver(&generated.code, input_signal, main_code)?;
+    let output = run_generated_solver_reporting(
+        &generated.code,
+        input_signal,
+        main_code,
+        verbose_diagnostics,
+    )?;
     Ok(MelangeRun {
         output,
         parasitic_caps: generated.meta.parasitic_caps,
@@ -1230,10 +1246,39 @@ pub fn with_parasitic_caps(
 /// forced to 1) through the exact driver and refusals validate uses. Each
 /// refusal (unsolved samples, clamped input, clamped output) needs a witness
 /// that fails if it goes dead: they were once dead together.
+///
+/// Echoes only the solver counters that need attention (see
+/// [`ValidationOptions::verbose_diagnostics`]).
 pub fn run_generated_solver(
     code: &str,
     input_signal: &[f64],
     main_code: Option<&str>,
+) -> Result<Vec<f64>, ValidationError> {
+    run_generated_solver_reporting(code, input_signal, main_code, false)
+}
+
+/// Counters the driver reports that describe how hard the solve worked, not
+/// whether its result can be trusted: echoed only when verbose, as `melange
+/// simulate` classifies them. Every other counter is echoed by default when
+/// nonzero, including any counter added later until it is classified here.
+const EXPLANATORY_DIAGS: [&str; 2] = ["nr_max_iter_count", "region_exit_count"];
+
+/// Whether the driver's `DIAG:<key>=<value>` line is echoed without
+/// `verbose_diagnostics`: a nonzero counter that is not explanatory, or a
+/// value that is not a number.
+fn diag_shown_by_default(key: &str, value: &str) -> bool {
+    match value.trim().parse::<f64>() {
+        Ok(v) => v != 0.0 && !EXPLANATORY_DIAGS.contains(&key),
+        Err(_) => true,
+    }
+}
+
+/// [`run_generated_solver`], echoing every counter when `verbose_diagnostics`.
+fn run_generated_solver_reporting(
+    code: &str,
+    input_signal: &[f64],
+    main_code: Option<&str>,
+    verbose_diagnostics: bool,
 ) -> Result<Vec<f64>, ValidationError> {
     use std::io::Write;
 
@@ -1383,14 +1428,20 @@ pub fn run_generated_solver(
     }
 
     // Echo the driver's `DIAG:` lines so `melange validate` reports the
-    // generated solver's counters (NR max-iter, region exits) next to the
-    // comparison — a validation number without them hides a starved or
-    // out-of-region solve.
+    // generated solver's counters next to the comparison — a validation
+    // number without them hides a starved or out-of-region solve. By default
+    // only the ones that need attention (see `diag_shown_by_default`); all of
+    // them when verbose. A blank line closes the block when anything printed.
     let (mut held, mut clamped, mut nan, mut out_clamped) = (0u64, 0u64, 0u64, 0u64);
     let mut reduced = 0u64;
+    let mut echoed = false;
     for line in String::from_utf8_lossy(&result.stderr).lines() {
         if let Some(diag) = line.strip_prefix("DIAG:") {
-            eprintln!("  melange {}", diag.replacen('=', ": ", 1));
+            let (key, value) = diag.split_once('=').unwrap_or((diag, ""));
+            if verbose_diagnostics || diag_shown_by_default(key, value) {
+                eprintln!("  melange {}", diag.replacen('=', ": ", 1));
+                echoed = true;
+            }
             if let Some(v) = diag.strip_prefix("nr_hold_count=") {
                 held = v.trim().parse().unwrap_or(0);
             }
@@ -1407,6 +1458,9 @@ pub fn run_generated_solver(
                 reduced = v.trim().parse().unwrap_or(0);
             }
         }
+    }
+    if echoed {
+        eprintln!();
     }
 
     // ngspice was driven with the requested input; a melange render whose
@@ -1610,6 +1664,31 @@ impl ValidationBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_output_echoes_only_counters_that_need_attention() {
+        // Zero: nothing to say.
+        for key in ["nr_hold_count", "input_clamp_count", "nr_max_iter_count"] {
+            assert!(!diag_shown_by_default(key, "0"), "{key}");
+        }
+        // Nonzero and about trust in the result: always.
+        for key in [
+            "nr_hold_count",
+            "input_clamp_count",
+            "input_nan_count",
+            "clamp_count",
+            "reduced_model_exit_count",
+            "some_future_count",
+        ] {
+            assert!(diag_shown_by_default(key, "3"), "{key}");
+        }
+        // Nonzero but describing effort, not trust: only verbose.
+        for key in EXPLANATORY_DIAGS {
+            assert!(!diag_shown_by_default(key, "3"), "{key}");
+        }
+        // Not a number: a note, always.
+        assert!(diag_shown_by_default("note", "something happened"));
+    }
 
     /// A deck without the named port is refused before ngspice runs, with
     /// the circuit's nodes listed and the flag to use.

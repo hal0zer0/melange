@@ -8,8 +8,9 @@
 # channel), and stereo from one output node run as two circuit instances
 # (--stereo, with per-channel noise seeding) -- each with and without
 # parameters, oversampling at 1x/2x/4x, the wet/dry dry-delay path, every
-# control kind (pot, wiper, gang, switch) on the two-instance layout, and each
-# --cpu-baseline.
+# control kind (pot, wiper, gang, switch) on the two-instance layout, each
+# --cpu-baseline, and the "Circuit Noise" switch a --noise build gets, on every
+# layout (once as the only parameter).
 #
 # Usage: tools/check-generated-plugins.sh [path/to/melange]
 # Env:   CARGO_BUILD_JOBS is honoured, as for any cargo invocation.
@@ -92,15 +93,19 @@ EOF
 # One output node makes a mono plugin, or with --stereo a stereo one of two
 # circuit instances; two output nodes make a stereo one. Ear protection is
 # a parameter too, so the "noparams" cases turn it and the level knobs off to
-# reach the parameter-less loop.
+# reach the parameter-less loop. A --noise case must also carry the
+# "circuit_noise" parameter.
 CASES=(
   "mono-1x|clipper.cir|--oversampling 1"
   "mono-4x-wetdry|clipper.cir|--oversampling 4 --mono --wet-dry-mix"
   "mono-noparams|split.cir|--output-node lo --no-level-params --no-ear-protection"
+  "mono-noise|clipper.cir|--noise thermal --noise-seed 7"
+  "mono-noise-only-param|split.cir|--output-node lo --no-level-params --no-ear-protection --noise thermal"
   "stereo-1x|stereo.cir|--oversampling 1 --output-node lo,hi"
   "stereo-2x|stereo.cir|--oversampling 2 --output-node lo,hi"
   "stereo-4x-wetdry|stereo.cir|--oversampling 4 --wet-dry-mix --output-node lo,hi"
   "stereo-noparams-2x|split.cir|--oversampling 2 --output-node lo,hi --no-level-params --no-ear-protection"
+  "stereo-noise-2x|stereo.cir|--oversampling 2 --output-node lo,hi --noise thermal"
   "stereo-dual-1x|controls.cir|--stereo --oversampling 1 --noise thermal --noise-seed 7"
   "stereo-dual-2x-wetdry|controls.cir|--stereo --oversampling 2 --wet-dry-mix --noise thermal"
   "stereo-dual-noparams|split.cir|--stereo --output-node lo --no-level-params --no-ear-protection"
@@ -117,6 +122,11 @@ for case in "${CASES[@]}"; do
   "$MELANGE" compile "$WORK/$deck" --format plugin $flags --name "check-$name" \
     -o "$WORK/$name" >"$WORK/$name.log" 2>&1 \
     || { cat "$WORK/$name.log"; echo "FAIL: compile $name"; fail=1; continue; }
+  if [[ " $flags " == *" --noise "* ]] \
+    && ! grep -q '#\[id = "circuit_noise"\]' "$WORK/$name/src/lib.rs"; then
+    echo "FAIL: $name has no Circuit Noise parameter"
+    fail=1
+  fi
   if ! (cd "$WORK/$name" && cargo check --quiet --lib); then
     echo "FAIL: cargo check $name"
     fail=1

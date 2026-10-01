@@ -1094,9 +1094,13 @@ fn test_compile_stereo_plugin_noise_is_per_channel() {
 
     let run = |dir: &PathBuf| -> String {
         let lib = lib(dir);
+        // Seeded after the states are built or reset, then switched to the
+        // "Circuit Noise" parameter.
         for anchor in [
-            "s\n        }).collect();\n        seed_channel_noise(&mut self.circuit_states);\n        true\n",
-            "            state.reset();\n        }\n        seed_channel_noise(&mut self.circuit_states);\n    }",
+            "s\n        }).collect();\n        seed_channel_noise(&mut self.circuit_states);\n        \
+             self.apply_circuit_noise();\n        true\n",
+            "            state.reset();\n        }\n        seed_channel_noise(&mut self.circuit_states);\n        \
+             self.apply_circuit_noise();\n    }",
         ] {
             assert!(lib.contains(anchor), "initialize()/reset() must seed: {lib}");
         }
@@ -1178,6 +1182,129 @@ fn test_compile_stereo_plugin_noise_is_per_channel() {
     );
     // A fresh clock read per reset(): the noise is not replayed.
     assert!(clock.contains("reset_repeats=false\n"), "{clock}");
+
+    let _ = std::fs::remove_dir_all(&base);
+    let _ = std::fs::remove_file(&cir);
+}
+
+/// A plugin compiled with `--noise` gets a "Circuit Noise" switch, default on,
+/// that sets the noise of every circuit instance in every layout: at the top
+/// of each process() block, after initialize() builds the states and after
+/// reset(). Without `--noise` the circuit has no noise to switch and the
+/// plugin has no such parameter.
+#[test]
+fn test_compile_plugin_circuit_noise_param() {
+    let cir = write_test_circuit(
+        "Two-output RC fixture\nR1 in out 10k\nC1 out 0 10n\nR2 out hi 10k\nC2 hi 0 10n\n",
+        "circuit_noise_param",
+    );
+    let base = std::env::temp_dir().join(format!(
+        "melange_cli_test_circuit_noise_param_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let lib = |name: &str, extra: &[&str]| -> String {
+        let dir = base.join(name);
+        let mut args = vec![
+            "compile",
+            cir.to_str().unwrap(),
+            "-f",
+            "plugin",
+            "-o",
+            dir.to_str().unwrap(),
+        ];
+        args.extend_from_slice(extra);
+        run_melange(&args);
+        std::fs::read_to_string(dir.join("src/lib.rs")).unwrap()
+    };
+    let section = |lib: &str, from: &str, to: &str| -> String {
+        let start = lib
+            .find(from)
+            .unwrap_or_else(|| panic!("no {from}:\n{lib}"));
+        let rest = &lib[start..];
+        rest[..rest.find(to).unwrap_or_else(|| panic!("no {to}:\n{rest}"))].to_string()
+    };
+
+    for (name, extra, per_instance) in [
+        (
+            "mono",
+            &["-n", "hi", "--noise", "thermal"][..],
+            "        for state in self.circuit_states.iter_mut() {\n            \
+             state.set_noise_enabled(on);\n        }\n",
+        ),
+        (
+            "dual",
+            &[
+                "-n",
+                "hi",
+                "--stereo",
+                "--noise",
+                "thermal",
+                "--oversampling",
+                "2",
+                "--wet-dry-mix",
+            ][..],
+            "        for state in self.circuit_states.iter_mut() {\n            \
+             state.set_noise_enabled(on);\n        }\n",
+        ),
+        (
+            "two-out",
+            &["-n", "out,hi", "--noise", "thermal"][..],
+            "        self.circuit_state.set_noise_enabled(on);\n",
+        ),
+    ] {
+        let lib = lib(name, extra);
+        assert!(
+            lib.contains("    #[id = \"circuit_noise\"]\n    pub circuit_noise: BoolParam,\n"),
+            "{name}: param field:\n{lib}"
+        );
+        assert!(
+            lib.contains("circuit_noise: BoolParam::new(\n                \"Circuit Noise\",\n                true,\n"),
+            "{name}: named param, default on:\n{lib}"
+        );
+        let apply = section(&lib, "    fn apply_circuit_noise(&mut self) {", "\n    }\n");
+        assert!(
+            apply.contains("let on = self.params.circuit_noise.value();")
+                && apply.contains(per_instance.trim_end()),
+            "{name}: every instance switched:\n{apply}"
+        );
+        let init = section(&lib, "fn initialize(", "fn reset(");
+        let built = init
+            .rfind("CircuitState::default()")
+            .expect("initialize() builds the states");
+        let applied = init
+            .find("self.apply_circuit_noise();")
+            .expect("initialize applies");
+        assert!(
+            applied > built,
+            "{name}: applied after the states are built:\n{init}"
+        );
+        let reset = section(&lib, "fn reset(", "fn deactivate(");
+        assert!(
+            reset
+                .find("self.apply_circuit_noise();")
+                .expect("reset applies")
+                > reset.rfind("reset();").unwrap(),
+            "{name}: applied after the states reset:\n{reset}"
+        );
+        let process = section(&lib, "fn process(", "ProcessStatus::Normal");
+        assert!(
+            process.contains(") -> ProcessStatus {\n        self.apply_circuit_noise();\n"),
+            "{name}: applied at the top of every block:\n{process}"
+        );
+    }
+    for (name, extra) in [
+        ("mono-quiet", &["-n", "hi"][..]),
+        ("dual-quiet", &["-n", "hi", "--stereo"][..]),
+        ("two-out-quiet", &["-n", "out,hi"][..]),
+    ] {
+        let lib = lib(name, extra);
+        assert!(
+            !lib.contains("circuit_noise") && !lib.contains("set_noise_enabled"),
+            "{name}: no noise to switch:\n{lib}"
+        );
+    }
 
     let _ = std::fs::remove_dir_all(&base);
     let _ = std::fs::remove_file(&cir);

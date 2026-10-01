@@ -67,7 +67,7 @@ pub(crate) struct ValidateOptions<'a> {
     pub(crate) reductions: ReductionModes<'a>,
     pub(crate) oversampling: usize,
     pub(crate) rate_sweep: bool,
-    /// `-v/--verbose`: print the progress steps.
+    /// `-v/--verbose`: print the progress steps and every solver counter.
     pub(crate) verbose: bool,
 }
 
@@ -288,6 +288,9 @@ pub(crate) fn validate_circuit_source(
             amplitude,
             frequency: VALIDATE_STIMULUS_HZ,
         }),
+        // Every solver counter with -v; only the ones that need attention
+        // without it.
+        verbose_diagnostics: verbose,
         ..Default::default()
     };
 
@@ -319,8 +322,8 @@ pub(crate) fn validate_circuit_source(
     // _temp_file drops here, auto-cleaning the NamedTempFile on function exit.
     let result = result.with_context(|| "Validation failed")?;
 
-    // Print report
-    println!();
+    // Print report. The solver counters printed above it, if any, end with
+    // their own blank line; the header's closes the block otherwise.
     println!("{}", result.report.summary());
 
     // Write CSV if requested
