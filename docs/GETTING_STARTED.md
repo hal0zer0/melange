@@ -122,13 +122,23 @@ bash build.sh   # bundles CLAP+VST3; see generated README.md for nih-plug setup
 
 The drive level decides whether you hear a clipper at all. The diodes sit at
 `mid`, behind a divider, so at low levels they barely conduct and the circuit
-is just a 280 Hz low-pass (`Rin` + `Rload` into `Cout`). Measured around
-1 kHz at 48 kHz: THD is 0.0001 % at 0.1 V, 0.13 % at 1 V, 4.1 % at 2 V and
-8 % at 3 V, where H3 is at −22 dBc. To see it yourself:
+is just a 280 Hz low-pass (`Rin` + `Rload` into `Cout`). Measured at 1 kHz
+and 48 kHz: THD is 0.0001 % at 0.1 V, 0.13 % at 1 V, 4.1 % at 2 V and 8 % at
+3 V, where H3 is at −22 dBc. To see it yourself:
 
 ```bash
-melange analyze clipper.cir -s 48000 --harmonics 5 --amplitude 3 --start-freq 1000 --end-freq 1001 --points-per-decade 1
+melange analyze clipper.cir --harmonics 5 --amplitude 3 --freq 1000
 ```
+
+`--freq` measures one frequency; without it `analyze` sweeps `--start-freq` to
+`--end-freq` (default 20 Hz to 20 kHz) at `--points-per-decade` (default 10).
+It runs at 48 kHz unless `-s` says otherwise, the same default as `compile`
+and `simulate`, so a bare `analyze` measures the build `compile` ships. The
+CSV goes to stdout (or `-o FILE`); the summary above it goes to stderr.
+
+`analyze` characterises the circuit's response to its own stimulus; for
+instrument measurements (aliasing, loudness, IMD, decay, noise floor) use a
+bench instrument.
 
 `analyze` measures each frequency point in the steady state at that point's
 own drive. It drives the circuit at the point's frequency and amplitude for at
@@ -136,13 +146,19 @@ least `--preroll-secs` (default 0.25 s), then measures again after each further
 stretch of that length until two successive measurements agree within 0.1 %
 (the fundamental's gain and phase, and the harmonics), for at most
 `--preroll-max-secs` (default 2 s) at drive. A point that has not settled by
-then is reported with a warning naming it; `--preroll-max-secs 0` takes one
-measurement with no check, and `--noise` turns the check off because noisy
-windows never agree. Before the first point the circuit also runs at zero
+then is reported with a warning naming it, and the closing `Steady state:`
+line says whether every point settled within the cap; `--preroll-max-secs 0`
+takes one measurement with no check, and `--noise` turns the check off because
+noisy windows never agree. Before the first point the circuit also runs at zero
 drive (0.5 s, or 5 s when it has inductors) to move off the embedded DC
 operating point. With `--harmonics N`, `thd_pct` sums H2..HN below 20 kHz (and
 below Nyquist), so it is `nan` for a point at or above 10 kHz; the `hN_dbc`
-columns are reported up to Nyquist.
+columns are reported up to Nyquist, and a value below −200 dBc prints as
+`-inf` (at that depth it is floating-point residue, not circuit content: the
+even harmonics of this symmetric clipper read `-inf`). The last column,
+`nyquist_dbc`, is the content at exactly half the sample rate: it detects a
+numerical limit cycle and is not an aliasing measure (aliases fold to other
+frequencies). A healthy circuit reads very low or `-inf` there.
 
 A point whose render contains samples the solver did not solve (held, committed
 unconverged, or solved on a `.linearize`d model outside its region) is refused,
@@ -171,7 +187,7 @@ Each `.pot` becomes a knob and each `.switch` becomes a selector in the generate
 | `melange sources list` | List configured circuit sources |
 | `melange sources show <name>` | List the circuits a source publishes |
 | `melange index <dir>` | Write a `circuits-index.json` for a folder of circuits |
-| `melange nodes circuit.cir` | Show nodes and devices |
+| `melange nodes circuit.cir` | Show nodes, nonlinear devices, op-amps and controls (pots, switches, a `.wiper` as one knob) |
 | `melange compile circuit.cir -f plugin -o dir` | Generate plugin project |
 | `melange compile circuit.cir -f code -o file.rs` | Generate standalone Rust code |
 | `melange simulate circuit.cir --amplitude 0.1 -o out.wav` | Process test tone |
@@ -179,10 +195,28 @@ Each `.pot` becomes a knob and each `.switch` becomes a selector in the generate
 | `melange analyze circuit.cir` | Frequency response (a sine per frequency through the compiled circuit) |
 | `melange validate circuit.cir` | Compare against ngspice |
 
-`compile`, `simulate` and `analyze` print one line naming the solver route and
-integrator they chose. Add `-v` (`--verbose`, before or after the subcommand)
-for the detail behind it: why that route, the kernel measurements, the
-Newton iteration budget. Warnings and refusals print either way.
+By default the commands are brief: `compile`, `simulate` and `analyze` print
+one line naming the solver route and integrator they chose and what they
+wrote; `simulate` adds the output peak in volts and dBFS (the WAV's full scale
+is 1 V); a solver counter is printed only when it is worth a warning. For the
+clipper above, `simulate` prints:
+
+```
+melange simulate
+  Source: clipper.cir
+
+  Solver: nodal (schur sub-path), chosen automatically; trapezoidal integration. (-v for why)
+  Solver diagnostics (-v lists every counter):
+    -> nothing to flag: no iteration-ceiling hits, no resets.
+  Output peak: 0.5159 V (-5.7 dBFS; the WAV's full scale is 1 V)
+
+Output written to: test.wav
+```
+
+Add `-v` (`--verbose`, before or after the subcommand) for everything else:
+build steps, matrix sizes, why that route and integrator, the Newton
+iteration budget, op-amp rail-mode detail and every solver counter. Warnings
+and refusals print either way.
 
 `simulate --input-audio` builds the circuit at the WAV's own sample rate, since
 the solver route and integrator are chosen per rate; an explicit
@@ -230,15 +264,17 @@ Key flags for `melange compile`:
 | `--oversampling 1\|2\|4` | 1 | Anti-aliasing oversampling factor |
 | `--input-node` | `in` | Input node name in netlist |
 | `--output-node`, `-n` | `out` | Output node name(s), comma-separated. `--format plugin` takes one (mono plugin) or two (stereo, one node per channel) and refuses more; `--format code` takes any number |
+| `--stereo` | off | Plugin format, one output node: a 2-in/2-out plugin running one copy of the circuit per channel (about twice the CPU; identical component values, every control moves both). Refused with `--format code`, `--mono`, or two output nodes. See [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md) |
 | `--solver auto\|dk\|nodal` | `auto` | Solver selection (auto picks the best) |
 | `--no-dc-block` | off | Disable 5Hz DC blocking filter |
 | `--no-level-params` | off | Omit Input/Output Level knobs (same as `--with-level-params=false`) |
 | `--no-ear-protection` | off | Disable output soft limiter |
 | `--wet-dry-mix` | off | Add wet/dry mix parameter |
-| `--mono` | off | Changes nothing today: one output node always builds a 1-in/1-out plugin, two build a 2-in/2-out plugin, and `--mono` with more than one output node (either format) is refused rather than drop a node |
+| `--mono` | off | Changes nothing today: one output node builds a 1-in/1-out plugin unless `--stereo` is given, two build a 2-in/2-out plugin, and `--mono` with more than one output node (either format) or with `--stereo` is refused |
+| `--noise off\|thermal\|shot\|full` | `off` | Compile in the circuit's own noise; the plugin gets a "Circuit Noise" on/off parameter (on by default). See [NOISE_GUIDE.md](NOISE_GUIDE.md) |
 | `--cpu-baseline x86-64-v3\|x86-64-v2\|x86-64` | `x86-64-v3` | x86_64 instruction set for the plugin. v3 is fastest but crashes on pre-2013 CPUs; `x86-64` runs everywhere (plugin format only) |
 | `--backward-euler` | off | Use backward Euler (unconditionally stable) |
-| `--max-iter` | auto | Newton iterations per sample. Unset, melange tunes the budget per circuit, and a nodal-routed build never ships less than 100. Any value pins it, but a nodal build refuses a pin below 100: its Newton is globalized by an Armijo line search, which needs that headroom to cross a device's saturation knee within one sample. DK has no floor. `-v` and the generated file's `Build:` header line show the budget the code runs |
+| `--max-iter` | auto | The most solver iterations allowed per sample. Leave it unset: melange picks the budget per circuit. A value pins it, but a nodal-routed build refuses anything below 100, because its solver shortens its steps through a device's sharp knee (a diode turning on, a transistor saturating) and needs that many to get through it within one sample. DK has no floor. `-v` and the generated file's `Build:` header line show the budget the code runs |
 | `--tube-grid-fa auto\|on\|off` | `auto` | Pentode grid-off dimension reduction: opt-in (`on`, warned, not accuracy-neutral); `auto` keeps the full 3D model |
 | `--opamp-rail-mode` | `auto` | Op-amp rail saturation strategy |
 | `--vendor` | `"Melange"` | Plugin vendor name (plugin format only) |

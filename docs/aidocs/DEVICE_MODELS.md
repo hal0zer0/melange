@@ -1004,8 +1004,11 @@ and a BJT whose converged `vbc_eff > 0` (saturation). It is instrumented
 on the FULL models as well as the reduced ones: under the full-3D default
 it characterizes how often a deck enters the regions the reductions
 assume are never entered — the data the old automatic selection never
-had. `simulate` and `validate` print it (`region_exit_count`). It is not
-a guard; nothing switches on it.
+had. `simulate -v` and `validate -v` print it (`region_exit_count`); the
+default output omits it, because it describes how hard the solve worked, not
+whether the result can be trusted (`EXPLANATORY_DIAGS` in
+`tools/melange-cli/src/cmd/simulate.rs` and `crates/melange-validate/src/lib.rs`).
+It is not a guard; nothing switches on it.
 
 **BJT forward-active: the region is assumed, not enforced (open).**
 `detect_forward_active_bjts` (`codegen/ir/reductions.rs`) classifies each BJT from the

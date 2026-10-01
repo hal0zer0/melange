@@ -725,6 +725,9 @@ Noise limitations:
 
 ### `melange analyze` measurement limits
 
+- **Scope.** `analyze` characterises the circuit's response to its own
+  stimulus (gain, phase, THD against frequency). For instrument measurements
+  (aliasing, loudness, IMD, decay, noise floor) use a bench instrument.
 - **Steady state is judged by agreement, not proven.** Each point is re-measured
   every `--preroll-secs` (default 0.25 s) until two measurements agree within
   0.1 %. A time constant many times longer than that spacing can move less
@@ -739,6 +742,8 @@ Noise limitations:
   and neither is `nyquist_dbc`, which sees only a component at exactly half
   the sample rate (a limit-cycle signature). See
   [OVERSAMPLING.md](OVERSAMPLING.md) for how to measure aliasing.
+- A dBc value below −200 dBc prints as `-inf`: at that depth the figure is
+  floating-point residue, not circuit content.
 
 ### Parser Hardening
 

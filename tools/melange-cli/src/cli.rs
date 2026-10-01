@@ -694,6 +694,11 @@ pub(crate) enum Commands {
     },
 
     /// Analyze circuit frequency response
+    ///
+    /// `analyze` characterises the circuit's response to its own stimulus
+    /// (gain, phase and THD versus frequency) and refuses points whose render
+    /// is not a solution. For instrument measurements of a render (aliasing,
+    /// loudness, IMD, decay, noise floor) use a bench instrument.
     Analyze {
         /// Input SPICE netlist file or circuit reference
         input: String,

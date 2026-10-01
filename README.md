@@ -162,6 +162,11 @@ melange simulate my-circuit.cir --input-audio guitar.wav -o output.wav
 melange analyze my-circuit.cir --pot "Drive=100k" --switch "Mode=2"
 ```
 
+`analyze` drives the circuit with its own sine at each point and reports gain,
+phase and (with `--harmonics N`) THD. It characterises the circuit's response
+to its own stimulus; for instrument measurements (aliasing, loudness, IMD,
+decay, noise floor) use a bench instrument.
+
 "Without compiling" means without building a plugin. Under the hood `simulate`
 and `analyze` compile the circuit to a native binary with `rustc`, so they need
 a Rust toolchain at run time, and they keep the binaries they build (about
@@ -402,7 +407,7 @@ melange compile <circuit> -o <dir>        Compile to Rust code or plugin project
 melange simulate <circuit> -o <file.wav>  Process audio through a circuit
 melange analyze <circuit>                 Frequency response sweep
 melange validate <circuit>                Compare against ngspice
-melange nodes <circuit>                   List nodes and devices, pots, switches
+melange nodes <circuit>                   List nodes, devices, op-amps and controls
 melange dc-op <circuit>                   DC operating point: node voltages + KCL residual
 melange cache list|clear|stats            Circuit cache and compiled-binary cache
 melange import <file.xml> -o <file.cir>   Import KiCad XML to Melange format
@@ -415,16 +420,18 @@ Every subcommand has `--help`. The flags worth knowing about up front:
 
 | Flag | On | Does |
 |------|----|------|
-| `-v`, `--verbose` | global | Print the solver-routing detail (why this route and integrator, kernel measurements, iteration budget). Without it, `compile`/`simulate`/`analyze` name the route and integrator in one line; warnings and refusals print either way |
+| `-v`, `--verbose` | global | Print the build and solver detail: progress steps, matrix sizes, why this route and integrator, op-amp rail-mode detail, every solver counter. Without it a command prints a one-line solver summary, what it wrote, `simulate`'s output peak (in V and dBFS), and only the counters worth a warning; warnings and refusals print either way |
 | `--format plugin` | compile | Emit a full nih-plug project (default: raw code). One output node makes a mono plugin, two (`-n a,b`) a stereo one; more are refused (`--format code` returns any number) |
+| `--stereo` | compile | With `--format plugin` and one output node: a 2-in/2-out plugin running one copy of the circuit per channel (about twice the CPU). Same component values in both copies, every control moves both, independent noise seeds. Refused with `--format code`, `--mono`, or two or more output nodes |
 | `--solver auto\|dk\|nodal` | compile/simulate/analyze/dc-op | Override solver selection; any other value is an error |
 | `--oversampling 1\|2\|4` | compile/simulate/analyze/validate | 2× or 4× polyphase half-band IIR antialiasing. It is compile-time DSP, so `validate` takes it too — otherwise you would validate the 1× code and ship the 2× code |
 | `--backward-euler` | compile | L-stable integration for high-gain feedback circuits |
-| `--noise off\|thermal\|shot\|full` | compile/simulate/analyze | Inject authentic circuit noise (thermal → +shot → +1/f, op-amp en/in, pentode partition); off by default |
+| `--noise off\|thermal\|shot\|full` | compile/simulate/analyze | Inject authentic circuit noise (thermal → +shot → +1/f, op-amp en/in, pentode partition); off by default. A plugin built with it gets a "Circuit Noise" on/off parameter, on by default |
 | `--noise-seed <u64>` | compile/simulate/analyze | Master noise seed; `0` = entropy from the system clock, nonzero = deterministic |
 | `--pot "Name=Value"` | analyze/simulate | Set pot value (repeatable). Value is in ohms and must sit inside the range `melange nodes` prints; out-of-range values are refused |
 | `--switch "Name=Pos"` | analyze/simulate | Set switch position (repeatable) |
-| `--harmonics N` | analyze | Also measure H2..HN at each point. `thd_pct` sums the harmonics below 20 kHz (and below Nyquist), so it is `nan` for a point at or above 10 kHz; the `hN_dbc` columns run to Nyquist |
+| `--freq <Hz>` | analyze | Measure one frequency instead of the log sweep (`--start-freq`/`--end-freq`/`--points-per-decade`). `analyze` runs at 48 kHz unless `-s` says otherwise, the same default as `compile` |
+| `--harmonics N` | analyze | Also measure H2..HN at each point. `thd_pct` sums the harmonics below 20 kHz (and below Nyquist), so it is `nan` for a point at or above 10 kHz; the `hN_dbc` columns run to Nyquist, and a value below −200 dBc prints as `-inf` |
 | `--preroll-secs`, `--preroll-max-secs` | analyze | Each point is driven at its own frequency and level for at least `--preroll-secs` (default 0.25 s), then re-measured until two measurements agree within 0.1 %, for at most `--preroll-max-secs` (default 2 s; 0 = one measurement, no check). A point that does not settle is named in a warning. With `--noise` the check is off |
 | `--allow-nr-hold` | simulate/analyze | Report a render (`simulate`) or a sweep point (`analyze`) that contains samples the solver did not solve. Refused by default |
 | `--input-audio file.wav` | simulate | Use a WAV file instead of a test tone; the circuit is built at the file's sample rate |
@@ -504,7 +511,7 @@ The list I'd want to read before adopting somebody else's circuit compiler:
 - **Transformers use a constant coupling coefficient, and core saturation is anhysteretic.** `ISAT=` saturates a single inductor, or a two-winding transformer as one shared core: the saturation follows the magnetizing current, so a loaded core stays linear the way real iron does. A saturating transformer with three or more windings is refused. Magnetic hysteresis, core loss and remanence are not modeled anywhere — so the part of transformer character that comes from the core remembering where it's been, melange does not have.
 - **Tube models: no space-charge or transit-time effects.**
 - **Op-amps: Boyle macromodel.** Adequate for audio, not a transistor-level simulation, and I would rather say so here than have you discover it at 2 a.m.
-- Scope boundaries element by element and device by device are in [**Known Limitations**](docs/limitations.md), where `[DEFERRED]` marks the ones that are deliberate. [`docs/aidocs/STATUS.md`](docs/aidocs/STATUS.md) covers the same territory from the maintainer's side — feature inventory, solver routing, per-circuit validation state — and is the one kept current release by release, so it wins where the two disagree.
+- Scope boundaries element by element and device by device are in [**Known Limitations**](docs/limitations.md), where `[DEFERRED]` marks the ones that are deliberate. That is the reference for users. [`docs/aidocs/STATUS.md`](docs/aidocs/STATUS.md) is the maintainer's working inventory of the same territory — feature table, solver routing, per-circuit validation state, pending work — in more detail and in maintainer shorthand. If the two ever disagree, that is a documentation bug; please report it.
 
 ## Origin
 

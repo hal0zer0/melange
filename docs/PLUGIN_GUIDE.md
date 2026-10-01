@@ -56,7 +56,7 @@ Contains the nih-plug boilerplate that wraps `circuit.rs`:
 
 ## Parameter Types
 
-The generated plugin can have up to five kinds of parameters:
+The generated plugin can have up to six kinds of parameters:
 
 ### Level Parameters (default: on)
 
@@ -146,12 +146,28 @@ ear_protection: BoolParam   // default: true (on)
 
 A transparent soft limiter that engages near 0 dBFS. Protects speakers and hearing during development. Users can toggle it off in the plugin UI for measurement. Disable generation entirely with `--no-ear-protection`.
 
+### Circuit Noise (only with `--noise`)
+
+```rust
+circuit_noise: BoolParam   // "Circuit Noise", id "circuit_noise", default: true (on)
+```
+
+Present only when the circuit was compiled with `--noise thermal|shot|full`,
+which gives the generated `CircuitState` its runtime noise API; a plugin
+compiled without `--noise` has no such parameter and is unchanged. The
+switch calls `set_noise_enabled` on every circuit instance, in every channel
+layout, at `initialize()`, at `reset()` and at the top of each `process()`
+block, so it is block-accurate, not sample-accurate. `set_noise_enabled` only
+stores a flag, so toggling is real-time safe. See [Circuit Noise](#circuit-noise) below for the
+rest of the noise API.
+
 ## Audio Processing Flow
 
 The generated `process()` method follows this flow:
 
 ```
 Per block:
+  Apply the Circuit Noise switch                 (if compiled with --noise)
   Read switch positions → rebuild matrices if changed
   Read pot values → rebuild matrices if changed (O(N^3))
 
@@ -160,11 +176,11 @@ Per sample:
   Read smoothed output_level → compute output_gain
   Read smoothed pot values (interpolated between rebuilds)
 
-  input = first input channel
+  input = first input channel                    (each channel's own with --stereo)
   input *= input_gain                            (if level params)
   dry = input                                    (if wet/dry mix)
-  outputs = process_sample(input, state)         (circuit DSP, one call)
-  For each output channel (one per output node):
+  outputs = process_sample(input, state)         (circuit DSP, one call per instance)
+  For each output channel (one per output node, or one per instance):
     output *= output_gain                        (if level params)
     output = mix * output + (1-mix) * dry        (if wet/dry mix)
     output = ear_protection_limit(output)        (if ear protection on)
@@ -175,20 +191,36 @@ Per sample:
 
 - **One output node** (the usual case): a mono plugin, 1 input and 1 output,
   with one `CircuitState`. `melange compile` picks this on its own and prints
-  `Auto-selecting mono (single output node)`.
+  `Auto-selecting mono (single output node). For stereo, pass two output nodes
+  or --stereo.`
+- **One output node with `--stereo`**: a stereo plugin, 2 inputs and 2
+  outputs, running two copies of the circuit, one `CircuitState` per channel.
+  Each channel's input drives its own copy, so this costs about twice the CPU
+  of the mono plugin. It is one circuit duplicated, not two units: both copies
+  have the same component values, `.tolerance` and `.mismatch` draws included,
+  and every knob and switch moves both. Their circuit noise (with `--noise`) is
+  independent, as two physical copies' would be: the left channel uses the
+  `--noise-seed` (so under a fixed seed it matches the mono plugin), the right
+  channel a seed derived from it. With seed 0 the clock is read at every
+  initialize and reset, and each channel's seed is derived from that read, so
+  the channels get different seeds.
 - **Two output nodes** (`--output-node a,b`): a stereo plugin, 2 inputs and
   2 outputs, still one shared `CircuitState`. The circuit is driven from the
   left input; the right input is ignored. Node `a` goes to the left output and
   node `b` to the right.
-
 - **Three or more output nodes**: refused before anything is written, since a
   plugin has no channel for the nodes past the second. Pick two with `-n a,b`,
   or use `--format code`, whose `process_sample` returns every output.
 
-`--mono` changes nothing today: a one-output circuit is already mono, and with
-more than one output node it is refused rather than drop a node. The command-line tool
-does not generate a plugin that runs two independent copies of a one-output
-circuit for left and right.
+`--stereo` is refused with `--format code` (generated code has no channels:
+create one `CircuitState` per channel yourself, giving each its own nonzero
+`set_seed` if the circuit has noise), with `--mono`, and with two or more
+output nodes, which already make a stereo plugin. Each refusal names the
+alternative.
+
+`--mono` changes nothing today: a one-output circuit is already mono unless
+`--stereo` is given, and with more than one output node `--mono` is refused
+rather than drop a node.
 
 ## Customizing Parameters
 
@@ -280,7 +312,9 @@ Cost: CPU scales roughly linearly with the oversampling factor.
 
 ## Circuit Noise
 
-If the circuit was compiled with `--noise {thermal|shot|full}`, `CircuitState`
+If the circuit was compiled with `--noise {thermal|shot|full}`, the generated
+plugin gets the **Circuit Noise** on/off parameter described
+[above](#circuit-noise-only-with---noise), on by default, and `CircuitState`
 gains a runtime noise API. These methods exist **only** in noise-enabled builds
 (and each is emitted only when its mechanism is present in the circuit):
 

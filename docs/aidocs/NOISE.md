@@ -296,6 +296,16 @@ impl CircuitState {
 `noise_enabled` / `*_gain` / `temperature_k` alone (they are user preferences,
 not transient state).
 
+`CircuitState` starts with `noise_enabled = false`. The `--format plugin`
+wrapper exposes it as a "Circuit Noise" `BoolParam` (id `circuit_noise`,
+default on), emitted whenever the generated code has this API and applied to
+every circuit instance at `initialize()`, `reset()` and the top of each
+`process()` block (`tools/melange-cli/src/plugin_template.rs`,
+`CIRCUIT_NOISE_PARAM_*`). A `--stereo` plugin also re-seeds each channel's copy
+with its own seed (`seed_channel_noise`: channel 0 keeps the master seed,
+later channels a SplitMix64-mixed derivative) so the channels' noise is
+independent.
+
 ### Zero-cost when off
 
 Three levels of disable:
@@ -1039,26 +1049,6 @@ Even before shot / 1/f / en-in ship, melange thermal noise:
 
 Phase 1 is already the best-in-class analog-noise baseline. Phases 2–5 pull
 further ahead.
-
-## Open item: Nyquist sustain after noise is disabled
-
-**Why**: Noted under "Known Phase 1 observations" — a persistent Nyquist-
-rate component of order 0.1-2 mV lingers for ~30 ms after `set_noise_enabled(false)`. Not noise-specific but amplified by it.
-
-**Where**: First investigate — may not be noise's fault. Repro with a
-signal-path broadband transient on the same circuit. If it reproduces
-without noise, the fix lives in the DC blocker / trap-rule path, not the
-noise stamp.
-
-**Possible fix (noise-specific)**: 1-pole lowpass on the Gaussian output
-before multiplying by the noise coefficient. Targets fs/4, trades very-HF
-fidelity (which is physically questionable at audio rates anyway) for
-clean time-domain decay.
-
-**Status**: observed under the whole-system trapezoidal form, before the
-charge-form companion model (see COMPANION_MODELS.md), which removed the
-capless-row z = −1 memory. Re-check whether it still reproduces before
-working on it.
 
 ## Gotchas recorded from Phase 1 (do not re-hit)
 

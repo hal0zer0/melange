@@ -662,7 +662,7 @@ companion-model inductors) is not the charge form generated code ships. See
 | Oversampling | 2× / 4× cascaded polyphase half-band IIR |
 | Sparsity | Zero entries skipped in emission (per-matrix `SparseInfo`) |
 | Sample rate | `set_sample_rate()` recomputes S, A_neg, K, S_NI from emitted G+C |
-| Multi-output | Any number of output nodes in `--format code` (`process_sample` returns one value per node); `--format plugin` takes 1 (mono) or 2 (stereo) and refuses more |
+| Multi-output | Any number of output nodes in `--format code` (`process_sample` returns one value per node); `--format plugin` takes 1 (mono; with `--stereo`, one circuit instance per channel) or 2 (stereo, one node per channel) and refuses more. The plugin wrapper is `tools/melange-cli/src/plugin_template.rs`; `circuit.rs` is the same for every layout |
 | Potentiometers | Per-block matrix rebuild on `set_pot` (Sherman-Morrison removed) |
 | Switches | Per-position matrix rebuild on `set_switch` |
 

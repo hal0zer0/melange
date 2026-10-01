@@ -108,9 +108,9 @@ The circuit did not change — its gain is identical in all three. The extra 40�
 and 52° are the filter delay expressed as phase, exactly as a plot of a delayed
 signal should look.
 
-⚠️ `analyze` defaults to a **96 kHz** sample rate, so a phase figure read from
-it is not the one your 48 kHz plugin produces. Pass `--sample-rate` to match
-what you ship.
+`analyze` defaults to 48 kHz, the same as `compile`. If you ship at another
+rate, pass `--sample-rate` to match it: a phase figure read at one rate is not
+the one a plugin running at another produces.
 
 So when comparing phase across oversampling factors, subtract the delay above,
 or compare gain only. `analyze` reports what the built plugin actually does,

@@ -825,7 +825,7 @@ outside the tube type's published manufacturer limit.
 
 Linear device — does not add nonlinear dimensions to the solver. Modeled as Boyle VCCS macromodel with output resistance. Input impedance is infinite unless you set `RIN`.
 
-An unrecognized parameter on an `OA` card is a **hard error** raised during code generation, as for every other device class — `.model TL072: unknown parameter 'VOHDROP'. Accepted for this device: AOL, ROUT, …` — so `compile`, `simulate` and `analyze` all refuse the deck. `melange nodes` stops short of code generation and warns instead.
+An unrecognized parameter on an `OA` card is a **hard error** raised during code generation, as for every other device class. The error names the card, its device class and its netlist line — `Invalid .model card 'TL072' at line 8 of the netlist`, caused by `.model TL072 (op-amp card): unknown parameter 'VOHDROP'. Accepted for this device: AOL, ROUT, …` — so `compile`, `simulate` and `analyze` all refuse the deck. `melange nodes` stops short of code generation and warns instead (`.model TL072: unrecognized parameter 'VOHDROP' (ignored)`).
 
 #### Swing limits, and the op-amp that cannot clip
 

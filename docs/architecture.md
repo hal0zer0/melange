@@ -166,9 +166,9 @@ The command-line interface for working with circuits.
 **Subcommands:**
 - `melange compile <netlist>` — parse netlist, generate optimized Rust code or plugin project
 - `melange simulate <netlist>` — compile and run circuit, output WAV
-- `melange analyze <netlist>` — frequency response, measured by driving the compiled circuit with a sine per frequency
+- `melange analyze <netlist>` — frequency response, measured by driving the compiled circuit with a sine per frequency (the circuit's response to its own stimulus; aliasing, loudness, IMD, decay and noise floor are for a bench instrument)
 - `melange validate <netlist>` — compare against ngspice, report deltas
-- `melange nodes <netlist>` — show circuit nodes and devices
+- `melange nodes <netlist>` — show circuit nodes, nonlinear devices, op-amps and controls
 - `melange dc-op <netlist>` — the DC operating point the build ships
 - `melange sources list|add|remove|show` — manage circuit source repositories
 - `melange index <dir>` — write or check a `circuits-index.json`

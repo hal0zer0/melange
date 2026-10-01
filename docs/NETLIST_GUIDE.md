@@ -136,8 +136,10 @@ Three things to know before trusting the result:
 - **Switching oscillators need the nodal solver today.** The deck above is
   routed to DK by default, and DK has no recovery at a regenerative switching
   edge: the default build leaves samples unsolved and `simulate` refuses it.
-  `--solver nodal` solves every sample (its sub-step ladder crosses the edges);
-  `simulate` prints `unsolved_sample_count: 0` when it did. Close relatives of
+  `--solver nodal` solves every sample (its sub-step ladder crosses the edges).
+  `simulate` refuses a render with any unsolved sample, with an `ERROR:` naming
+  the count, so a render that finishes without one solved every sample (`-v`
+  lists the counters, `unsolved_sample_count: 0` among them). Close relatives of
   this deck are checked against ngspice's period in the CLI test suite
   (`test_ic_seeded_astable_base_rate_solves_every_sample` and
   `test_ic_seeded_astable_schur_period_matches_spice` in
@@ -147,6 +149,19 @@ Three things to know before trusting the result:
   [limitations.md](limitations.md) before raising `--max-iter` to get past a
   refusal: on that class a larger budget can settle on a spurious oscillation
   with every sample counted as solved.
+
+**Checking that it oscillates, and at roughly what frequency.** `analyze` does
+not apply: it drives the circuit with its own sine and measures the response,
+and an oscillator has no input to respond to. Render it instead. With
+`--amplitude 0` nothing drives the circuit, so the `Output peak:` line
+`simulate` prints is the circuit's own output; on the deck above it reads
+about 4.4 V. A nonzero peak alone is not proof, because a circuit settling
+from its initial condition also produces one, so look at the waveform: open
+the WAV (or the `--probe <node>` CSV, which records any internal node) in an
+audio editor or plotting tool and read the period off the trace, or use the
+editor's spectrum view. Render long enough (`--duration`) to see it is still
+running at the end rather than parked at an equilibrium. melange has no
+built-in oscillation-frequency readout.
 
 ## From Schematic to Netlist
 
@@ -731,8 +746,8 @@ melange compile my-circuit.cir --format plugin -o my-plugin
 - **Start simple.** Get a basic circuit working, then add complexity.
 - **Name nodes descriptively.** `plate1`, `grid2`, `bias_node` are easier to debug than `1`, `2`, `3`.
 - **Check terminal order.** The most common mistake is swapping BJT collector/emitter or diode anode/cathode.
-- **Use `melange analyze`** to see the frequency response before building a plugin. It catches many issues.
-- **Use `melange simulate --amplitude 0.1`** as a quick sanity check — if you hear the circuit working, the netlist is correct.
+- **Use `melange analyze`** to see the frequency response before building a plugin. It catches many issues: a gain or corner frequency far from what the schematic implies often points to a wrong value, unit suffix or terminal order. Add `--harmonics 5 --amplitude <V>` to check distortion against what the circuit should do at that level.
+- **Use `melange simulate --amplitude 0.1`** as a quick check that the circuit runs: no refusal, and an `Output peak:` of a plausible size. Hearing it work does not mean the netlist is right; a swapped terminal or a wrong value often still makes sound. Compare against the schematic's expected gain with `analyze`, and against ngspice with `melange validate` when you have it.
 - **Model parameters matter.** A BJT with default `IS=1e-16` behaves very differently from one with `IS=1e-14`. Use datasheet values or known SPICE models.
 - **Decompose large circuits when there's no global feedback.** If your circuit has no feedback path between subsystems — e.g. a preamp → tone-stack → power-amp cascade where each stage drives the next through a coupling cap and nothing feeds back — compile each subsystem as a separate `.cir` and chain them in plugin code. This keeps N and M small per kernel (linear in DK cost, cubic in nodal), avoids cross-subsystem matrix conditioning issues, and lets each stage pick its best solver path independently. A 16-stage tube cascade with real global feedback has to be one monolithic netlist. Splitting is exact only where a stage's output does not depend on what it drives (behind a buffer or cathode/emitter follower whose output impedance is negligible against the next stage's input). A coupling cap does not decouple loading: the next stage's input impedance still loads the previous one, so splitting there drops that loading and changes the answer. When in doubt, keep it one netlist.
 - **Use `.linearize` for semantic control, not CPU savings.** NR converges in 0–1 iterations for devices in their small-signal region, so linearizing produces negligible speedup. The real use case is **forcing a device to stay small-signal** — e.g. a Vbe multiplier that must not clip, a preamp stage that should be clean even at extreme input. Linearized devices cannot clip because they're replaced with small-signal conductances at the DC operating point.

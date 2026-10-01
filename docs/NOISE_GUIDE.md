@@ -81,6 +81,11 @@ Compile it into a plugin with a fixed, reproducible floor:
 melange compile clipper.cir --noise full --noise-seed 12345 --format plugin -o my-clipper
 ```
 
+A plugin compiled with `--noise` gets a **Circuit Noise** on/off parameter
+(id `circuit_noise`, on by default) that switches the noise of every circuit
+instance, in every channel layout. A plugin compiled without `--noise` has no
+such parameter. See [Plugin Development Guide](PLUGIN_GUIDE.md#circuit-noise-only-with---noise).
+
 ## What each device contributes
 
 Thermal noise needs no opt-in — every resistor is a source the moment you pass
@@ -200,6 +205,10 @@ smoothing factor — `1.0` restores bare full-shot.
 ## The generated runtime API
 
 When you compile with `--noise ≠ off`, `CircuitState` gains a set of methods.
+A bare `CircuitState::default()` starts with noise **off**
+(`noise_enabled = false`): with `--format code`, call
+`state.set_noise_enabled(true)` yourself. The generated plugin does this
+through its Circuit Noise parameter.
 **These exist only in noise-enabled builds** — call them from `#[cfg]`-gated or
 feature-gated code, or simply always compile with noise on. The core setters
 (`set_noise_enabled`, `set_noise_gain`, `set_thermal_gain`, `set_shot_gain`,
@@ -277,7 +286,9 @@ from the master seed via SplitMix64, with per-phase salts so thermal, shot, and
 flicker streams never share a prefix). That independence is physically correct
 — thermal noise in one resistor is uncorrelated with thermal noise in another —
 and it means stereo decorrelation is as simple as running two states with two
-different seeds.
+different seeds. `compile --format plugin --stereo` does exactly that for a
+one-output circuit: the left channel uses the `--noise-seed`, the right a seed
+derived from it (see [Plugin Development Guide](PLUGIN_GUIDE.md)).
 
 `set_seed(master)` at runtime re-derives every stream, so a plugin can offer a
 reproducible "Seed" control and a re-roll button that just increments it.
