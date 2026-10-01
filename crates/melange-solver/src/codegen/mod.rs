@@ -466,16 +466,10 @@ pub struct CodegenConfig {
     /// Ignored when DC blocking is disabled — the scaled output is still
     /// NaN-guarded but not clamped.
     pub output_clamp_v: f64,
-    /// Include DC operating point in generated code
-    pub include_dc_op: bool,
     /// Include DC blocking filter on outputs (default true).
     /// Set to false for circuits with output coupling caps or when the downstream
     /// pipeline handles DC offset. Removes the 5Hz HPF and its settling time.
     pub dc_block: bool,
-    /// Currently unused: no emitter reads it, and the generated code runs no
-    /// silent settle after a pot change. Copied into
-    /// `SolverConfig::pot_settle_samples`. Default 64.
-    pub pot_settle_samples: usize,
     /// Use backward Euler integration instead of trapezoidal.
     /// Unconditionally stable (L-stable) — fixes divergence in high-gain feedback
     /// amplifiers where trapezoidal's imaginary-axis preservation causes oscillation.
@@ -689,9 +683,7 @@ impl Default for CodegenConfig {
             oversampling_factor: 1,
             output_scales: vec![1.0],
             output_clamp_v: 10.0,
-            include_dc_op: true,
             dc_block: true,
-            pot_settle_samples: 64,
             backward_euler: false,
             force_trap: false,
             nodal_sub_path_override: NodalSubPathOverride::Auto,

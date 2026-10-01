@@ -1401,6 +1401,41 @@ fn test_ir_json_is_valid() {
     assert!(parsed.get("solver_config").is_some());
 }
 
+/// IR JSON written before 0.1.14 carries `solver_config.pot_settle_samples`
+/// (a field nothing ever read, removed in 0.1.14). It must still load, and
+/// the field must change nothing: the IR loaded from it emits the same code
+/// as the same JSON without the field (both go through the same JSON float
+/// round-trip, so the comparison is exact).
+#[test]
+fn test_ir_json_with_removed_pot_settle_samples_loads() {
+    let ir = build_ir(DIODE_CLIPPER_SPICE);
+    let mut value = serde_json::to_value(&ir).expect("serialize failed");
+    let new_json = serde_json::to_string_pretty(&value).expect("serialize failed");
+    let solver_config = value
+        .get_mut("solver_config")
+        .and_then(|v| v.as_object_mut())
+        .expect("solver_config object");
+    assert!(
+        !solver_config.contains_key("pot_settle_samples"),
+        "0.1.14 no longer writes pot_settle_samples"
+    );
+    solver_config.insert("pot_settle_samples".to_string(), serde_json::json!(64));
+    let old_json = serde_json::to_string_pretty(&value).expect("re-serialize failed");
+
+    let ir2: CircuitIR =
+        serde_json::from_str(&old_json).expect("IR JSON with pot_settle_samples must load");
+
+    let ir_new: CircuitIR = serde_json::from_str(&new_json).expect("deserialize failed");
+
+    let emitter = RustEmitter::new().unwrap();
+    let from_new = emitter.emit(&ir_new).expect("emit").primary().to_string();
+    let from_old = emitter.emit(&ir2).expect("emit").primary().to_string();
+    assert!(
+        from_new == from_old,
+        "the ignored pot_settle_samples field changed the emitted code"
+    );
+}
+
 // ==========================================================================
 // Test: Heterogeneous device models get per-device parameters
 // ==========================================================================
@@ -8281,19 +8316,20 @@ VCC vcc 0 300
 
 #[test]
 fn shot_flicker_ports_match_pentode_5node_element() {
-    // Pentode with explicit suppressor terminal (5th node). Pre-fix the
-    // shot stamp landed at (plate, suppressor); the cathode is `nodes[2]`
-    // either way.
+    // Pentode with explicit suppressor terminal (5th node), so the device's
+    // node list has five entries; the shot port must still be
+    // (plate, cathode = `nodes[2]`). The suppressor is on the cathode node:
+    // the only wiring melange accepts (any other is refused at MNA build,
+    // `mna::tests::test_pentode_suppressor_off_cathode_refused`).
     assert_device_shot_ports_match_elements(
         "\
 Pentode 5-node shot/flicker ports
 Rin in g 1k
 Rg g 0 1Meg
-P1 p g k scr supp EL84
+P1 p g k scr k EL84
 Rk k 0 150
 Rp vcc p 100k
 Rscr vcc scr 1k
-Rsupp supp 0 0.001
 VCC vcc 0 300
 .model EL84 PENTODE(MU=20 KG1=1500 KP=200 KVB=300 EX=1.4 KG2=4500 KF=1e-15 AF=1.0)
 ",

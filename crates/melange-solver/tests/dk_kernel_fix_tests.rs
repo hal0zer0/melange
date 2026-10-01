@@ -44,6 +44,7 @@ fn test_nan_in_g_matrix_errors_loudly() {
 // ───────────── F6: near-singular transformer group is a hard error ─────────
 
 #[test]
+#[allow(deprecated)] // exercises the deprecated companion-inductor path
 fn test_transformer_group_k_near_one_hard_errors() {
     // Three mutually coupled windings with k → 1: the inductance matrix is
     // singular (rank 1). invert_small_matrix's absolute 1e-30 pivot check

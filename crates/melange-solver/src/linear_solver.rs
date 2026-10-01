@@ -4,10 +4,26 @@
 //! Uses the DK method with pre-computed S=A⁻¹ for O(N²) per sample.
 //!
 //! All processing uses pre-allocated buffers — no heap allocation in the audio thread.
+//!
+//! **Deprecated (0.1.14):** [`LinearSolver`] is a second, library-only linear
+//! solver. Its discretisation is the whole-system trapezoidal form
+//! (`A_neg = αC − G`, sources summed at `n` and `n+1`, inductors as
+//! companion models), which differs from the charge form every generated
+//! solver ships (`docs/aidocs/COMPANION_MODELS.md`). No build uses it. It will
+//! be removed in the next release; use `melange_solver::build::build` and
+//! code generation.
+// The whole module is the deprecated unit; its internal uses of its own
+// deprecated items are not news.
+#![allow(deprecated)]
 
 use crate::dk::DkKernel;
 
 /// Error type for solver construction and validation.
+#[deprecated(
+    since = "0.1.14",
+    note = "the error type of the deprecated `LinearSolver`; nothing returns it. It will be \
+            removed in the next release."
+)]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum SolverError {
@@ -90,6 +106,14 @@ fn reset_transformer_groups(groups: &mut [crate::dk::TransformerGroupState]) {
 /// For circuits with M=0 (no nonlinear devices), the DK method reduces to
 /// a simple matrix-vector multiply: `v[n+1] = S * (rhs_const + A_neg * v[n])`.
 /// No Newton-Raphson iteration needed.
+#[deprecated(
+    since = "0.1.14",
+    note = "a second, library-only linear solver whose discretisation (whole-system \
+            trapezoidal: A_neg = alpha*C - G, sources summed at n and n+1, inductor companion \
+            models) differs from the charge form every generated solver ships. No build uses \
+            it. It will be removed in the next release; use `melange_solver::build::build` \
+            and code generation."
+)]
 pub struct LinearSolver {
     kernel: DkKernel,
     v_prev: Vec<f64>,
@@ -146,6 +170,11 @@ impl LinearSolver {
     }
 
     /// Set the input conductance (1/R_in) for proper Thevenin source modeling.
+    #[deprecated(
+        since = "0.1.14",
+        note = "part of the deprecated `LinearSolver`; it will be removed in the next release. \
+                Use `melange_solver::build::build` and code generation."
+    )]
     pub fn set_input_conductance(&mut self, g: f64) {
         self.input_conductance = g;
     }
@@ -277,6 +306,11 @@ impl LinearSolver {
     }
 
     /// Process multiple samples (batch).
+    #[deprecated(
+        since = "0.1.14",
+        note = "part of the deprecated `LinearSolver`; it will be removed in the next release. \
+                Use `melange_solver::build::build` and code generation."
+    )]
     pub fn process_samples(&mut self, input: &[f64], output: &mut [f64]) {
         for (i, &inp) in input.iter().enumerate() {
             output[i] = self.process_sample(inp);

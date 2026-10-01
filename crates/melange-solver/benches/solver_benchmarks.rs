@@ -9,24 +9,20 @@
 //!
 //! Nonlinear circuits run only as generated code, so their per-sample
 //! throughput is not a library measurement: it is measured on the generated
-//! solver (`bench.sh`). The benchmarks below that drove the runtime
-//! `CircuitSolver` measure a solver deleted in `356b146`; they are compiled
-//! out (`cfg(any())`) and kept pending a decision on their removal.
+//! solver (`bench.sh`).
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use melange_devices::{BjtEbersMoll, DiodeShockley};
 use melange_primitives::nr::{nr_solve_1d, nr_solve_2d, pn_vcrit, pnjlim};
+// `LinearSolver` is deprecated (0.1.14) and leaves with its benchmark in the
+// next release.
+#[allow(deprecated)]
+use melange_solver::LinearSolver;
 use melange_solver::{
     codegen::{CodeGenerator, CodegenConfig},
     dk::DkKernel,
     mna::MnaSystem,
     parser::Netlist,
-    solver::LinearSolver,
-};
-#[cfg(any())]
-use {
-    criterion::BenchmarkId,
-    melange_solver::solver::{CircuitSolver, DeviceEntry},
 };
 
 // =============================================================================
@@ -45,21 +41,11 @@ R1 out 0 1k
 .model D1N4148 D(IS=1e-15)
 "#;
 
-// Used only by the retired `CircuitSolver` benchmark below.
-#[cfg(any())]
-const BJT_AMP_SPICE: &str = r#"Common Emitter
-Q1 coll base emit 2N2222
-Rc coll vcc 10k
-R1 base 0 100k
-Re emit 0 1k
-Rbias vcc 0 10k
-.model 2N2222 NPN(IS=1e-15 BF=200)
-"#;
-
 // =============================================================================
 // Benchmark 1: process_sample Throughput
 // =============================================================================
 
+#[allow(deprecated)]
 fn benchmark_rc_lowpass(c: &mut Criterion) {
     let netlist = Netlist::parse(RC_LOWPASS_SPICE).unwrap();
     let mna = MnaSystem::from_netlist(&netlist).unwrap();
@@ -84,77 +70,6 @@ fn benchmark_rc_lowpass(c: &mut Criterion) {
             }
         })
     });
-
-    group.finish();
-}
-
-// Retired: drives the runtime `CircuitSolver` deleted in `356b146`.
-#[cfg(any())]
-fn benchmark_diode_clipper(c: &mut Criterion) {
-    let netlist = Netlist::parse(DIODE_CLIPPER_SPICE).unwrap();
-    let mna = MnaSystem::from_netlist(&netlist).unwrap();
-    let kernel = DkKernel::from_mna(&mna, 48000.0).unwrap();
-
-    let diode = DiodeShockley::silicon();
-    let devices = vec![DeviceEntry::new_diode(diode, 0)];
-
-    let mut solver = CircuitSolver::new(kernel, devices, 0, 1).unwrap();
-
-    let mut group = c.benchmark_group("process_sample/diode_clipper");
-    group.throughput(Throughput::Elements(1));
-    group.measurement_time(std::time::Duration::from_secs(5));
-
-    // Test with different input levels
-    for &input_level in &[0.01, 0.1, 0.5, 1.0] {
-        group.bench_with_input(
-            BenchmarkId::new("single_sample", format!("input_{:.2}", input_level)),
-            &input_level,
-            |b, &level| {
-                solver.reset();
-                b.iter(|| solver.process_sample(black_box(level)))
-            },
-        );
-    }
-
-    group.finish();
-}
-
-// Retired: drives the runtime `CircuitSolver` deleted in `356b146`.
-#[cfg(any())]
-fn benchmark_bjt_amp(c: &mut Criterion) {
-    let netlist = Netlist::parse(BJT_AMP_SPICE).unwrap();
-    let mna = MnaSystem::from_netlist(&netlist).unwrap();
-    let kernel = DkKernel::from_mna(&mna, 48000.0).unwrap();
-
-    // Skip if kernel dimensions don't match BJT (2D)
-    if kernel.m != 2 {
-        println!(
-            "Skipping BJT benchmark: kernel.m = {}, expected 2",
-            kernel.m
-        );
-        return;
-    }
-
-    let bjt = BjtEbersMoll::npn_2n2222a();
-    let devices = vec![DeviceEntry::new_bjt(bjt, 0)];
-
-    let mut solver = CircuitSolver::new(kernel, devices, 0, 0).unwrap();
-
-    let mut group = c.benchmark_group("process_sample/bjt_amp");
-    group.throughput(Throughput::Elements(1));
-    group.measurement_time(std::time::Duration::from_secs(5));
-
-    // Test with DC bias + small AC signal
-    for &input_level in &[0.0, 0.1, 0.5, 1.0] {
-        group.bench_with_input(
-            BenchmarkId::new("single_sample", format!("input_{:.2}", input_level)),
-            &input_level,
-            |b, &level| {
-                solver.reset();
-                b.iter(|| solver.process_sample(black_box(level)))
-            },
-        );
-    }
 
     group.finish();
 }
@@ -395,38 +310,6 @@ fn benchmark_kernel_contribution(c: &mut Criterion) {
     group.finish();
 }
 
-// Retired: drives the runtime `CircuitSolver` deleted in `356b146`.
-#[cfg(any())]
-fn benchmark_rhs_construction(c: &mut Criterion) {
-    let netlist = Netlist::parse(DIODE_CLIPPER_SPICE).unwrap();
-    let mna = MnaSystem::from_netlist(&netlist).unwrap();
-    let kernel = DkKernel::from_mna(&mna, 48000.0).unwrap();
-
-    let diode = DiodeShockley::silicon();
-    let devices = vec![DeviceEntry::new_diode(diode, 0)];
-
-    let mut solver = CircuitSolver::new(kernel, devices, 0, 1).unwrap();
-
-    // Prime the solver
-    for _ in 0..10 {
-        solver.process_sample(0.1);
-    }
-
-    let mut group = c.benchmark_group("matrix/rhs_construction");
-    group.measurement_time(std::time::Duration::from_secs(5));
-
-    group.bench_function("build_rhs", |b| {
-        b.iter(|| {
-            // Access internal method through a test interface or simulate
-            // Since build_rhs is private, we test the full prediction step
-            // which includes RHS construction
-            black_box(solver.process_sample(0.1));
-        })
-    });
-
-    group.finish();
-}
-
 // =============================================================================
 // Benchmark 4: Device Evaluation
 // =============================================================================
@@ -522,35 +405,6 @@ fn benchmark_device_array_vs_vec(c: &mut Criterion) {
             }
         })
     });
-
-    group.finish();
-}
-
-// =============================================================================
-// Benchmark 5: Comparison Across Sample Rates
-// =============================================================================
-
-// Retired: drives the runtime `CircuitSolver` deleted in `356b146`.
-#[cfg(any())]
-fn benchmark_sample_rate_comparison(c: &mut Criterion) {
-    let netlist = Netlist::parse(DIODE_CLIPPER_SPICE).unwrap();
-    let mna = MnaSystem::from_netlist(&netlist).unwrap();
-
-    let mut group = c.benchmark_group("comparison/sample_rate");
-    group.measurement_time(std::time::Duration::from_secs(5));
-
-    for &sample_rate in &[44100.0, 48000.0, 88200.0, 96000.0, 192000.0] {
-        let kernel = DkKernel::from_mna(&mna, sample_rate).unwrap();
-        let diode = DiodeShockley::silicon();
-        let devices = vec![DeviceEntry::new_diode(diode, 0)];
-        let mut solver = CircuitSolver::new(kernel, devices, 0, 1).unwrap();
-
-        group.bench_with_input(
-            BenchmarkId::from_parameter(sample_rate as u64),
-            &sample_rate,
-            |b, _| b.iter(|| solver.process_sample(black_box(0.5))),
-        );
-    }
 
     group.finish();
 }

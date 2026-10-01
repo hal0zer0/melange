@@ -1207,22 +1207,6 @@ impl MnaSystem {
         builder.build(netlist)
     }
 
-    /// Build MNA system with forward-active and linearized BJTs.
-    ///
-    /// Linearized BJTs are completely removed from the nonlinear system (M reduced
-    /// by 2 per device). Their small-signal conductances must be stamped separately
-    /// via `stamp_linearized_bjts()` after DC OP computation.
-    pub fn from_netlist_with_linearized(
-        netlist: &Netlist,
-        forward_active: &std::collections::HashSet<String>,
-        linearized: &std::collections::HashSet<String>,
-    ) -> Result<Self, MnaError> {
-        let mut builder = MnaBuilder::new();
-        builder.forward_active_bjts = forward_active.clone();
-        builder.linearized_bjts = linearized.clone();
-        builder.build(netlist)
-    }
-
     /// Build MNA system with specified pentodes using grid-off (2D) reduction.
     ///
     /// Pentodes whose names appear as keys in `grid_off` are modeled as 2D
@@ -1494,9 +1478,6 @@ impl MnaSystem {
         }
     }
 
-    /// Stamp a resistor between two nodes.
-    ///
-    /// G[i,i] += g, G[j,j] += g, G[i,j] -= g, G[j,i] -= g
     /// Check if this MNA system has any inductors (uncoupled, coupled pairs, or transformer groups).
     pub fn has_inductors(&self) -> bool {
         !self.inductors.is_empty()
@@ -1504,6 +1485,14 @@ impl MnaSystem {
             || !self.transformer_groups.is_empty()
     }
 
+    /// Stamp a resistor between two nodes.
+    ///
+    /// G[i,i] += g, G[j,j] += g, G[i,j] -= g, G[j,i] -= g
+    #[deprecated(
+        since = "0.1.14",
+        note = "unused: the MNA builder does not call it (its indices are raw 0-based \
+                matrix rows, with no ground handling). It will be removed in the next release."
+    )]
     pub fn stamp_resistor(&mut self, i: usize, j: usize, resistance: f64) {
         if resistance == 0.0 {
             return; // Short circuit - handled differently
@@ -2212,52 +2201,6 @@ impl MnaSystem {
         self.n_i[nk][start_idx + 1] += 1.0; // Ig exits cathode
     }
 
-    /// Stamp grid-off reduced pentode nonlinear matrices (2D).
-    ///
-    /// Phase 1b reduction: when DC-OP confirms the pentode is biased in
-    /// grid-cutoff (`Vgk < 0` with margin), the control-grid current `Ig1`
-    /// is identically zero and the screen voltage `Vg2k` is approximately
-    /// held constant by external bypass caps. Drop the `Ig1` NR dimension
-    /// entirely; the screen voltage is passed into the device math as a
-    /// per-slot constant stored in `DeviceSlot.vg2k_frozen` (written by
-    /// DC-OP detection).
-    ///
-    /// N_v: two rows
-    ///   - Row start_idx:     Vgk  = V[grid]  − V[cathode]
-    ///   - Row start_idx + 1: Vpk  = V[plate] − V[cathode]
-    /// N_i: two columns
-    ///   - Col start_idx:     Ip  enters plate, exits cathode
-    ///   - Col start_idx + 1: Ig2 enters screen, exits cathode
-    ///
-    /// Note that Ig1 is dropped (grid-cutoff) and the Vg2k probe is ALSO
-    /// dropped — the device math reads Vg2k from the frozen constant, not
-    /// from an N_v row.
-    pub fn stamp_pentode_grid_off(
-        &mut self,
-        start_idx: usize,
-        n_plate: usize,
-        n_grid: usize,
-        n_cathode: usize,
-        n_screen: usize,
-    ) {
-        // Accumulate (`+=`) so tied terminals cancel — see `stamp_nonlinear_2terminal`.
-        // Row start_idx: Vgk
-        self.n_v[start_idx][n_grid] += 1.0;
-        self.n_v[start_idx][n_cathode] += -1.0;
-
-        // Row start_idx + 1: Vpk
-        self.n_v[start_idx + 1][n_plate] += 1.0;
-        self.n_v[start_idx + 1][n_cathode] += -1.0;
-
-        // Col start_idx: Ip (plate current — flows plate → cathode through the device)
-        self.n_i[n_plate][start_idx] += -1.0;
-        self.n_i[n_cathode][start_idx] += 1.0;
-
-        // Col start_idx + 1: Ig2 (screen current — flows screen → cathode through the device)
-        self.n_i[n_screen][start_idx + 1] += -1.0;
-        self.n_i[n_cathode][start_idx + 1] += 1.0;
-    }
-
     /// Build a discretized system matrix from G and C with inductor companion models.
     ///
     /// Computes `result[i][j] = g_sign * G[i][j] + alpha * C[i][j]` for each element,
@@ -2269,6 +2212,16 @@ impl MnaSystem {
     /// For augmented MNA (voltage sources/VCVS present), rows n..n_aug-1 are algebraic
     /// constraints with no capacitance. In A_neg (g_sign < 0), those rows must be ALL
     /// ZEROS because there is no trapezoidal history for algebraic constraints.
+    ///
+    /// **Deprecated (0.1.14):** the inductor, coupled-inductor and transformer
+    /// companion stamps below serve only the deprecated
+    /// [`crate::LinearSolver`], a second, library-only linear solver whose
+    /// whole-system trapezoidal discretisation differs from the charge form
+    /// every generated solver ships (generated code carries inductors as
+    /// augmented branch rows, [`crate::dk::DkKernel::from_mna_augmented`]). No
+    /// build uses them; they will be removed in the next release. Use
+    /// `melange_solver::build::build` and code generation. The G/C part of this
+    /// function is live.
     #[allow(clippy::needless_range_loop)]
     fn build_discretized_matrix(
         &self,
@@ -2341,6 +2294,14 @@ impl MnaSystem {
             }
         }
 
+        // Deprecated (0.1.14), with everything down to the end of this
+        // function: companion-model inductor stamps for the deprecated
+        // `LinearSolver` only; removed in the next release (see the doc
+        // comment). The transformer group's builder-side "positive-
+        // definiteness" check (`build`, multi-winding K groups) is not a PD
+        // test: it checks that the minimum diagonal of L^-1 is > 0, which a
+        // non-PD matrix can pass.
+        //
         // Inductor companion model conductances: g_eq = T/(2L).
         // In A (g_sign=+1) inductors add +g_eq (like a resistor).
         // In A_neg (g_sign=-1) inductors add -g_eq (opposite sign).
@@ -2465,6 +2426,9 @@ impl MnaSystem {
     ///
     /// A = G + (2/T)*C (includes inductor companion model conductances)
     ///
+    /// **Deprecated (0.1.14):** the inductor companion conductances serve only
+    /// the deprecated [`crate::LinearSolver`]; see `build_discretized_matrix`.
+    ///
     /// Returns `Err(MnaError::InvalidParameter)` if `sample_rate` is not positive and finite.
     pub fn get_a_matrix(&self, sample_rate: f64) -> Result<Vec<Vec<f64>>, MnaError> {
         self.build_discretized_matrix(sample_rate, 1.0)
@@ -2473,6 +2437,9 @@ impl MnaSystem {
     /// Get the A_neg matrix for history term (trapezoidal discretization).
     ///
     /// A_neg = (2/T)*C - G (includes inductor companion model)
+    ///
+    /// **Deprecated (0.1.14):** the inductor companion conductances serve only
+    /// the deprecated [`crate::LinearSolver`]; see `build_discretized_matrix`.
     ///
     /// Returns `Err(MnaError::InvalidParameter)` if `sample_rate` is not positive and finite.
     pub fn get_a_neg_matrix(&self, sample_rate: f64) -> Result<Vec<Vec<f64>>, MnaError> {
@@ -2494,8 +2461,8 @@ impl MnaSystem {
     /// - **Triode** (Tube, dim=2): grid-cathode (Cgk) + plate-cathode (Cpk)
     /// - **Pentode** (Tube, dim=3): grid-cathode (Cgk) + grid-plate (Cgp,
     ///   Miller cap) + plate-cathode (Cpk) + screen-cathode (Csk) +
-    ///   screen-plate (Csp). Suppressor (if present) is treated as cathode-tied
-    ///   in phase 1a and contributes no extra parasitic caps. TODO(phase 1b):
+    ///   screen-plate (Csp). Suppressor (if present) is cathode-tied (any other
+    ///   wiring is refused) and contributes no extra parasitic caps. TODO(phase 1b):
     ///   honor user-provided explicit Cgk/Cgp/Cpk/Csk/Csp from `.model`.
     ///
     /// Uses [`PARASITIC_CAP`] (10pF) and [`stamp_capacitor_raw`](Self::stamp_capacitor_raw).
@@ -4275,6 +4242,11 @@ impl MnaBuilder {
                 // Validate: check that the inductance matrix is positive definite.
                 // A non-PD matrix means the coupling coefficients are physically
                 // inconsistent (e.g., k_ab=0.95, k_bc=0.95, k_ac=0.50 is impossible).
+                //
+                // NOTE: for w >= 3 this is NOT a positive-definiteness test. "Min
+                // diagonal of the inverse > 0" is necessary for PD, not
+                // sufficient: an indefinite L can pass it. Known, and left
+                // unfixed in 0.1.14 (the w == 2 branch is an exact determinant).
                 {
                     let mut l_mat = vec![vec![0.0f64; w]; w];
                     for i in 0..w {
@@ -5187,14 +5159,13 @@ impl MnaBuilder {
                         // DC-OP solver consume this exact ordering — do NOT
                         // reshuffle it without updating those consumers.
                         //
-                        // Phase 1a: the optional suppressor node (node_indices[4],
-                        // when present) is treated as electrically tied to the
-                        // cathode. We do not stamp any N_v / N_i entries for it.
-                        // This is the universal case for audio power tubes
-                        // (6L6/6V6/KT88 beam tetrodes, EL84/EL34 strapped pentodes,
-                        // and EF86 whose suppressor is wired to cathode externally).
-                        // TODO(phase 1b): if a user ever wires the suppressor to
-                        // a non-cathode node we silently model it as cathode-tied.
+                        // The optional suppressor node (node_indices[4], when
+                        // present) is tied to the cathode: `categorize_element`
+                        // refuses any other wiring, and no N_v / N_i entries are
+                        // stamped for it. This is the universal case for audio
+                        // power tubes (6L6/6V6/KT88 beam tetrodes, EL84/EL34
+                        // strapped pentodes, and EF86 whose suppressor is wired
+                        // to cathode externally).
                         if node_indices.len() >= 4 {
                             let p_raw = node_indices[0];
                             let g_raw = node_indices[1];
@@ -5939,6 +5910,19 @@ impl MnaBuilder {
                     self.node_map[n_screen],
                 ];
                 if let Some(ns) = n_suppressor {
+                    // The suppressor (g3) is modelled as tied to the cathode:
+                    // no N_v / N_i entries are stamped for it. A suppressor
+                    // on any other node would be simulated as cathode-tied,
+                    // silently, so that wiring is refused.
+                    if self.node_map[ns] != self.node_map[n_cathode] {
+                        return Err(MnaError::TopologyError(format!(
+                            "pentode '{name}': its suppressor (5th node) is wired to node \
+                             '{ns}', not to its cathode node '{n_cathode}'. melange models \
+                             the suppressor as tied to the cathode and does not support any \
+                             other suppressor wiring. Tie the suppressor to the cathode node, \
+                             or omit the 5th node."
+                        )));
+                    }
                     nodes.push(ns.clone());
                     node_indices.push(self.node_map[ns]);
                 }
@@ -7232,8 +7216,8 @@ Y1 sp sn cp cn vca1
     //   row/col 0: Ip   ↔ Vgk
     //   row/col 1: Ig2  ↔ Vpk
     //   row/col 2: Ig1  ↔ Vg2k
-    // Phase 1a treats the suppressor (n_suppressor) as cathode-tied; no
-    // N_v/N_i entries are stamped for it.
+    // The suppressor (n_suppressor) must be on the cathode node (any other
+    // wiring is refused); no N_v/N_i entries are stamped for it.
 
     /// EL84 model directive used by the pentode tests below.
     /// Beam-tetrode-friendly Reefman params (matches parser.rs unit tests).
@@ -7334,11 +7318,11 @@ Y1 sp sn cp cn vca1
     }
 
     #[test]
-    fn test_pentode_ignores_suppressor() {
-        // Build the same circuit two ways: with and without an explicit
-        // suppressor node. In phase 1a the suppressor is electrically silent,
-        // so the resulting N_v / N_i blocks must be byte-identical for the
-        // 4 "real" pentode terminals (plate / grid / cath / screen).
+    fn test_pentode_cathode_tied_suppressor_matches_4_node() {
+        // Build the same circuit two ways: without a suppressor node, and
+        // with the suppressor named explicitly and wired to the cathode (the
+        // only suppressor wiring melange accepts). The suppressor stamps
+        // nothing, so the N_v / N_i blocks must be identical.
         let spice4 = format!(
             "4-node pentode\n\
              P1 plate grid cath screen EL84\n\
@@ -7349,17 +7333,15 @@ Y1 sp sn cp cn vca1
              {}\n",
             EL84_MODEL
         );
-        // Same circuit but with `sup` as an explicit 5th terminal.
-        // We add an R from sup to ground so it has somewhere to live in the
-        // node map; the stamping itself must NOT mention `sup`.
+        // Same circuit with the suppressor as an explicit 5th terminal,
+        // tied to the cathode node.
         let spice5 = format!(
-            "5-node pentode (suppressor explicit)\n\
-             P1 plate grid cath screen sup EL84\n\
+            "5-node pentode (suppressor on the cathode)\n\
+             P1 plate grid cath screen cath EL84\n\
              V1 plate 0 250\n\
              R1 grid 0 1Meg\n\
              R2 screen 0 470k\n\
              R3 cath 0 130\n\
-             Rsup sup 0 1\n\
              {}\n",
             EL84_MODEL
         );
@@ -7373,9 +7355,8 @@ Y1 sp sn cp cn vca1
         assert_eq!(mna4.m, 3);
         assert_eq!(mna5.m, 3);
 
-        // Look up the four "real" pentode nodes in BOTH MNAs and verify the
-        // N_v / N_i entries match exactly. The 5-node case adds an extra
-        // node (`sup`) but no additional N_v / N_i contributions.
+        // Look up the four pentode nodes in BOTH MNAs and verify the
+        // N_v / N_i entries match exactly.
         let p4 = *mna4.node_map.get("plate").unwrap() - 1;
         let g4 = *mna4.node_map.get("grid").unwrap() - 1;
         let k4 = *mna4.node_map.get("cath").unwrap() - 1;
@@ -7413,24 +7394,58 @@ Y1 sp sn cp cn vca1
                 col
             );
         }
+        assert_eq!(mna4.n_v, mna5.n_v, "whole N_v identical");
+        assert_eq!(mna4.n_i, mna5.n_i, "whole N_i identical");
+    }
 
-        // The suppressor row in the 5-node case should be electrically silent
-        // — no N_v / N_i contributions tied to it.
-        let sup5 = *mna5.node_map.get("sup").unwrap() - 1;
-        for row in 0..3 {
-            assert_eq!(
-                mna5.n_v[row][sup5], 0.0,
-                "suppressor must not appear in N_v row {}",
-                row
+    #[test]
+    fn test_pentode_suppressor_off_cathode_refused() {
+        // A suppressor wired anywhere but the cathode would be simulated as
+        // cathode-tied (melange stamps nothing for it), silently. It is
+        // refused, naming the device, the node and the supported wiring.
+        for (supp, extra) in [("sup", "Rsup sup 0 1\n"), ("0", ""), ("screen", "")] {
+            let spice = format!(
+                "5-node pentode, suppressor off the cathode\n\
+                 P1 plate grid cath screen {supp} EL84\n\
+                 V1 plate 0 250\n\
+                 R1 grid 0 1Meg\n\
+                 R2 screen 0 470k\n\
+                 R3 cath 0 130\n\
+                 {extra}\
+                 {EL84_MODEL}\n"
+            );
+            let netlist = Netlist::parse(&spice).unwrap();
+            let err = match MnaSystem::from_netlist(&netlist) {
+                Ok(_) => panic!("suppressor on '{supp}' must be refused"),
+                Err(e) => e.to_string(),
+            };
+            assert!(err.contains("pentode 'P1'"), "names the device: {err}");
+            assert!(
+                err.contains(&format!("node '{supp}'")),
+                "names the node: {err}"
+            );
+            assert!(
+                err.contains("cathode node 'cath'"),
+                "names the cathode: {err}"
+            );
+            assert!(
+                err.contains("Tie the suppressor to the cathode node, or omit the 5th node"),
+                "states the supported wiring: {err}"
             );
         }
-        for col in 0..3 {
-            assert_eq!(
-                mna5.n_i[sup5][col], 0.0,
-                "suppressor must not appear in N_i col {}",
-                col
-            );
-        }
+
+        // A suppressor and cathode on the same node by another name (both
+        // grounded) is the cathode-tied wiring and builds.
+        let spice = format!(
+            "grounded cathode, grounded suppressor\n\
+             P1 plate grid 0 screen 0 EL84\n\
+             V1 plate 0 250\n\
+             R1 grid 0 1Meg\n\
+             R2 screen 0 470k\n\
+             {EL84_MODEL}\n"
+        );
+        let netlist = Netlist::parse(&spice).unwrap();
+        MnaSystem::from_netlist(&netlist).expect("suppressor on the cathode node builds");
     }
 
     #[test]
@@ -7534,32 +7549,33 @@ Y1 sp sn cp cn vca1
     // The resulting N_v has 4 nonzero entries; N_i has 4 nonzero entries.
 
     #[test]
-    fn test_stamp_pentode_grid_off_shape() {
-        // Build an empty-ish MnaSystem with 4 real nodes (+ ground) and 2
-        // NR dimensions, then stamp a grid-off pentode directly. The test
-        // verifies ONLY the N_v / N_i shape — no device math, no netlist.
-        //
-        // We use `from_netlist` to get a consistent allocation; the circuit
-        // has 4 resistors so the node map has 4 real indices (1..=4).
-        let spice = "grid-off shape rig\n\
-                     R1 plate 0 1\n\
-                     R2 grid 0 1\n\
-                     R3 cath 0 1\n\
-                     R4 screen 0 1\n";
-        let netlist = Netlist::parse(spice).unwrap();
-        let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
-
-        // Re-size the nonlinear matrices to have M=2 (grid-off block).
-        mna.m = 2;
-        mna.n_v = vec![vec![0.0; mna.n]; 2];
-        mna.n_i = vec![vec![0.0; 2]; mna.n];
+    fn test_grid_off_pentode_stamp_shape() {
+        // Pins the N_v / N_i shape the MNA builder stamps for a grid-off
+        // pentode (the live path: `from_netlist_with_grid_off`), not a
+        // stand-alone helper. Every terminal sits on its own node so no
+        // entry cancels.
+        let spice = format!(
+            "grid-off stamp shape\n\
+             P1 plate grid cath screen EL84\n\
+             V1 plate 0 250\n\
+             R1 grid 0 1Meg\n\
+             R2 screen 0 470k\n\
+             R3 cath 0 130\n\
+             {}\n",
+            EL84_MODEL
+        );
+        let netlist = Netlist::parse(&spice).unwrap();
+        let mut grid_off = std::collections::HashMap::new();
+        grid_off.insert("P1".to_string(), 250.0);
+        let mna = MnaSystem::from_netlist_with_grid_off(&netlist, &grid_off).unwrap();
+        assert_eq!(mna.m, 2, "grid-off pentode is a 2D block");
+        let start = mna.nonlinear_devices[0].start_idx;
+        assert_eq!(start, 0);
 
         let p = *mna.node_map.get("plate").unwrap() - 1;
         let g = *mna.node_map.get("grid").unwrap() - 1;
         let k = *mna.node_map.get("cath").unwrap() - 1;
         let s = *mna.node_map.get("screen").unwrap() - 1;
-
-        mna.stamp_pentode_grid_off(0, p, g, k, s);
 
         // ----- N_v rows -----
         // Row 0 = Vgk

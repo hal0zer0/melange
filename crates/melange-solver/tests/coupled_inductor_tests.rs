@@ -593,6 +593,7 @@ C1 out 0 100p
 // ===========================================================================
 
 #[test]
+#[allow(deprecated)] // exercises the deprecated companion-inductor path
 fn test_dk_coupled_inductor_conductances() {
     let (_, _, kernel) = build_pipeline(SIMPLE_COUPLED);
 
@@ -632,6 +633,7 @@ fn test_dk_coupled_inductor_conductances() {
 }
 
 #[test]
+#[allow(deprecated)] // exercises the deprecated companion-inductor path
 fn test_dk_coupled_inductor_initial_state() {
     let (_, _, kernel) = build_pipeline(SIMPLE_COUPLED);
     let ci = &kernel.coupled_inductors[0];
@@ -645,6 +647,7 @@ fn test_dk_coupled_inductor_initial_state() {
 }
 
 #[test]
+#[allow(deprecated)] // exercises the deprecated companion-inductor path
 fn test_dk_coupled_inductor_names() {
     let (_, _, kernel) = build_pipeline(SIMPLE_COUPLED);
     let ci = &kernel.coupled_inductors[0];
@@ -658,6 +661,7 @@ fn test_dk_coupled_inductor_names() {
 }
 
 #[test]
+#[allow(deprecated)] // exercises the deprecated companion-inductor path
 fn test_dk_no_coupled_inductors_in_uncoupled_list() {
     let (_, _, kernel) = build_pipeline(SIMPLE_COUPLED);
     assert_eq!(
@@ -668,6 +672,7 @@ fn test_dk_no_coupled_inductors_in_uncoupled_list() {
 }
 
 #[test]
+#[allow(deprecated)] // exercises the deprecated companion-inductor path
 fn test_dk_mixed_inductors() {
     let (_, _, kernel) = build_pipeline(MIXED_INDUCTORS);
     assert_eq!(kernel.coupled_inductors.len(), 1, "1 coupled pair");
@@ -1103,6 +1108,7 @@ C2 b 0 1n
 // ===========================================================================
 
 #[test]
+#[allow(deprecated)] // exercises the deprecated companion-inductor path
 fn test_near_degenerate_coupling() {
     // k=0.999 should work but produce large conductances
     let spice = "\
@@ -1147,6 +1153,7 @@ C3 out 0 100p
 // ===========================================================================
 
 #[test]
+#[allow(deprecated)] // exercises the deprecated companion-inductor path
 fn test_two_coupled_pairs_mna() {
     let spice = "\
 Two Transformers

@@ -3319,9 +3319,6 @@ pub(super) struct NoiseEmission {
     pub methods: String,
     /// `true` when any code is emitted (for template `{% if noise_enabled %}`).
     pub enabled: bool,
-    /// Count of thermal sources. Kept for debug logging.
-    #[allow(dead_code)]
-    pub thermal_n: usize,
     /// Per-family source counts, so a consumer outside this module can emit the
     /// replay into its own RHS buffer (see `emit_noise_replay_body`).
     pub replay_counts: NoiseReplayCounts,
@@ -5360,7 +5357,6 @@ impl RustEmitter {
             set_sample_rate_body: ssr_body,
             methods,
             enabled: true,
-            thermal_n,
             replay_counts,
             pot_to_noise_slot,
             switch_comp_to_noise_slot,

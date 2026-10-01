@@ -266,21 +266,9 @@ impl BjtParams {
     pub fn is_gummel_poon(&self) -> bool {
         self.vaf.is_finite() || self.var.is_finite() || self.ikf.is_finite() || self.ikr.is_finite()
     }
-    /// Returns true if non-ideal emission coefficient (NF != 1.0) is active.
-    pub fn has_nf(&self) -> bool {
-        (self.nf - 1.0).abs() > 1e-15
-    }
     /// Returns true if B-E leakage current (ISE) is enabled.
     pub fn has_ise(&self) -> bool {
         self.ise > 0.0
-    }
-    /// Returns true if non-ideal reverse emission coefficient (NR != 1.0) is active.
-    pub fn has_nr(&self) -> bool {
-        (self.nr - 1.0).abs() > 1e-15
-    }
-    /// Returns true if B-C leakage current (ISC) is enabled.
-    pub fn has_isc(&self) -> bool {
-        self.isc > 0.0
     }
     /// Returns true if any parasitic resistance (RB/RC/RE) is enabled.
     pub fn has_parasitics(&self) -> bool {
@@ -289,22 +277,6 @@ impl BjtParams {
     /// Returns true if self-heating is enabled (RTH is finite).
     pub fn has_self_heating(&self) -> bool {
         self.rth.is_finite()
-    }
-    /// Returns the 2x2 parasitic R coupling matrix R_p for K_eff = K - R_p.
-    ///
-    /// Layout: `[R_p[be,be], R_p[be,bc], R_p[bc,be], R_p[bc,bc]]`
-    /// where be = Vbe→Ic dimension (start_idx), bc = Vbc→Ib dimension (start_idx+1).
-    ///
-    /// The DK NR residual with parasitic absorption is:
-    ///   f(i) = i - i_device(p + K_eff * i)
-    /// where K_eff = K_original - R_p, and i_device uses the intrinsic model.
-    pub fn r_p_matrix(&self) -> [f64; 4] {
-        [
-            self.re,           // R_p[be,be]: Vbe drop from Ic * RE
-            self.rb + self.re, // R_p[be,bc]: Vbe drop from Ib * (RB + RE)
-            -self.rc,          // R_p[bc,be]: Vbc drop from -Ic * RC
-            self.rb,           // R_p[bc,bc]: Vbc drop from Ib * RB
-        ]
     }
 
     /// Compute linearized base-emitter and base-collector junction

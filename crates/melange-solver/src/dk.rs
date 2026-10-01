@@ -15,6 +15,14 @@ use crate::mna::{inject_rhs_current, invert_small_matrix, MnaSystem};
 use std::sync::Arc;
 
 /// Information about an inductor for companion model.
+#[deprecated(
+    since = "0.1.14",
+    note = "companion-model inductor state for the deprecated `LinearSolver`: a \
+            whole-system trapezoidal discretisation that differs from the charge form every \
+            generated solver ships (generated code carries inductors as augmented branch rows, \
+            `DkKernel::from_mna_augmented`). No build uses it. It will be removed in the next \
+            release; use `melange_solver::build::build` and code generation."
+)]
 #[derive(Debug, Clone)]
 pub struct InductorInfo {
     pub name: Arc<str>,
@@ -32,6 +40,14 @@ pub struct InductorInfo {
 }
 
 /// Information about a coupled inductor pair for companion model.
+#[deprecated(
+    since = "0.1.14",
+    note = "companion-model inductor state for the deprecated `LinearSolver`: a \
+            whole-system trapezoidal discretisation that differs from the charge form every \
+            generated solver ships (generated code carries inductors as augmented branch rows, \
+            `DkKernel::from_mna_augmented`). No build uses it. It will be removed in the next \
+            release; use `melange_solver::build::build` and code generation."
+)]
 #[derive(Debug, Clone)]
 pub struct CoupledInductorState {
     pub name: String,
@@ -65,6 +81,14 @@ pub struct CoupledInductorState {
 }
 
 /// Multi-winding transformer group state for NxN companion model.
+#[deprecated(
+    since = "0.1.14",
+    note = "companion-model inductor state for the deprecated `LinearSolver`: a \
+            whole-system trapezoidal discretisation that differs from the charge form every \
+            generated solver ships (generated code carries inductors as augmented branch rows, \
+            `DkKernel::from_mna_augmented`). No build uses it. It will be removed in the next \
+            release; use `melange_solver::build::build` and code generation."
+)]
 #[derive(Debug, Clone)]
 pub struct TransformerGroupState {
     pub name: String,
@@ -147,10 +171,37 @@ pub struct DkKernel {
     /// Constant sources contribution to RHS (N)
     pub rhs_const: Vec<f64>,
     /// Inductor companion model info (uncoupled)
+    #[deprecated(
+        since = "0.1.14",
+        note = "companion-model inductor state for the deprecated `LinearSolver`: a \
+                whole-system trapezoidal discretisation that differs from the charge form every \
+                generated solver ships (generated code carries inductors as augmented branch rows, \
+                `DkKernel::from_mna_augmented`). No build uses it. It will be removed in the next \
+                release; use `melange_solver::build::build` and code generation."
+    )]
+    #[allow(deprecated)] // the field's own (deprecated) type
     pub inductors: Vec<InductorInfo>,
     /// Coupled inductor pair companion model info (2-winding)
+    #[deprecated(
+        since = "0.1.14",
+        note = "companion-model inductor state for the deprecated `LinearSolver`: a \
+                whole-system trapezoidal discretisation that differs from the charge form every \
+                generated solver ships (generated code carries inductors as augmented branch rows, \
+                `DkKernel::from_mna_augmented`). No build uses it. It will be removed in the next \
+                release; use `melange_solver::build::build` and code generation."
+    )]
+    #[allow(deprecated)] // the field's own (deprecated) type
     pub coupled_inductors: Vec<CoupledInductorState>,
     /// Multi-winding transformer group companion model info (3+ windings)
+    #[deprecated(
+        since = "0.1.14",
+        note = "companion-model inductor state for the deprecated `LinearSolver`: a \
+                whole-system trapezoidal discretisation that differs from the charge form every \
+                generated solver ships (generated code carries inductors as augmented branch rows, \
+                `DkKernel::from_mna_augmented`). No build uses it. It will be removed in the next \
+                release; use `melange_solver::build::build` and code generation."
+    )]
+    #[allow(deprecated)] // the field's own (deprecated) type
     pub transformer_groups: Vec<TransformerGroupState>,
     /// Potentiometer codegen data (topology + range; no SM vectors)
     pub pots: Vec<PotKernelData>,
@@ -247,10 +298,18 @@ impl DkKernel {
     /// [`crate::LinearSolver`] steps. Code generation does not accept such a
     /// kernel: it needs [`DkKernel::from_mna_augmented`] for an inductor deck.
     ///
+    /// **Deprecated (0.1.14):** building a kernel for an inductor deck here
+    /// (the companion-model fields and their whole-system trapezoidal stamps
+    /// in [`MnaSystem::get_a_matrix`] / [`MnaSystem::get_a_neg_matrix`]) serves
+    /// only the deprecated [`crate::LinearSolver`] and will be removed in the
+    /// next release. `from_mna` itself stays: builds use it for every deck
+    /// without inductors.
+    ///
     /// # Errors
     /// Returns an error if `sample_rate` is not positive and finite, if the
     /// A matrix is singular, if any inductor has non-positive inductance,
     /// or if the total nonlinear dimension exceeds [`MAX_M`].
+    #[allow(deprecated)] // fills the deprecated companion-inductor fields
     pub fn from_mna(mna: &MnaSystem, sample_rate: f64) -> Result<Self, DkError> {
         if !(sample_rate > 0.0 && sample_rate.is_finite()) {
             return Err(DkError::InvalidParameter(format!(
@@ -590,6 +649,7 @@ impl DkKernel {
     /// are left empty — A_neg handles all trapezoidal inductor history automatically.
     ///
     /// Use this for circuits with large inductors (transformers) and nonlinear devices.
+    #[allow(deprecated)] // leaves the deprecated companion-inductor fields empty
     pub fn from_mna_augmented(mna: &MnaSystem, sample_rate: f64) -> Result<Self, DkError> {
         if !(sample_rate > 0.0 && sample_rate.is_finite()) {
             return Err(DkError::InvalidParameter(format!(
@@ -1022,6 +1082,15 @@ impl DkKernel {
     /// (verified: RL highpass tracks the exact-2L response to ~6e-3 while
     /// deviating 3.4e-1 from the true response; the 2*i[n-1] form matches
     /// the exact trapezoidal reference to <1e-12).
+    #[deprecated(
+        since = "0.1.14",
+        note = "companion-model inductor state for the deprecated `LinearSolver`: a \
+                whole-system trapezoidal discretisation that differs from the charge form every \
+                generated solver ships (generated code carries inductors as augmented branch rows, \
+                `DkKernel::from_mna_augmented`). No build uses it. It will be removed in the next \
+                release; use `melange_solver::build::build` and code generation."
+    )]
+    #[allow(deprecated)] // the deprecated companion-inductor state it steps
     pub fn update_inductors(&mut self, v_node: &[f64]) {
         for ind in &mut self.inductors {
             // Get voltage across inductor at current timestep
@@ -1068,6 +1137,15 @@ impl DkKernel {
     /// trapezoidal KCL needs `i[n] + i[n-1]` per winding, and the
     /// `Y*(v[n] + v[n-1])` part is already carried by the conductance
     /// stamps in A / A_neg, leaving `2*i[n-1]` to inject.
+    #[deprecated(
+        since = "0.1.14",
+        note = "companion-model inductor state for the deprecated `LinearSolver`: a \
+                whole-system trapezoidal discretisation that differs from the charge form every \
+                generated solver ships (generated code carries inductors as augmented branch rows, \
+                `DkKernel::from_mna_augmented`). No build uses it. It will be removed in the next \
+                release; use `melange_solver::build::build` and code generation."
+    )]
+    #[allow(deprecated)] // the deprecated companion-inductor state it steps
     pub fn update_coupled_inductors(&mut self, v_node: &[f64]) {
         for ci in &mut self.coupled_inductors {
             let v1i = if ci.l1_node_i > 0 {
@@ -1119,6 +1197,15 @@ impl DkKernel {
     ///
     /// See [`update_inductors`](Self::update_inductors) for why the
     /// doubled-trapezoidal history is `2*i[n-1]` per winding.
+    #[deprecated(
+        since = "0.1.14",
+        note = "companion-model inductor state for the deprecated `LinearSolver`: a \
+                whole-system trapezoidal discretisation that differs from the charge form every \
+                generated solver ships (generated code carries inductors as augmented branch rows, \
+                `DkKernel::from_mna_augmented`). No build uses it. It will be removed in the next \
+                release; use `melange_solver::build::build` and code generation."
+    )]
+    #[allow(deprecated)] // the deprecated companion-inductor state it steps
     pub fn update_transformer_groups(&mut self, v_node: &[f64]) {
         for group in &mut self.transformer_groups {
             let w = group.num_windings;
@@ -1544,9 +1631,8 @@ fn infinity_norm(a: &[Vec<f64>]) -> f64 {
 
 /// Matrix-vector multiplication: y = A * x
 ///
-/// Only used by in-crate verification tests since the SM pot vector
-/// precomputation was removed.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Test helper for the in-crate verification tests.
+#[cfg(test)]
 #[allow(clippy::needless_range_loop)]
 pub(crate) fn mat_vec_mul(a: &[Vec<f64>], x: &[f64]) -> Vec<f64> {
     let m = a.len();

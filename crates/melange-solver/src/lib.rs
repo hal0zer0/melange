@@ -34,7 +34,8 @@
 //! - [`Netlist`](parser::Netlist) — parsed SPICE netlist (elements, models, directives)
 //! - [`MnaSystem`](mna::MnaSystem) — Modified Nodal Analysis matrices (G, C, N_v, N_i)
 //! - [`DkKernel`](dk::DkKernel) — reduced M×M kernel for fast real-time solving
-//! - [`LinearSolver`](linear_solver::LinearSolver) — runtime linear solver (M=0 only)
+//! - [`LinearSolver`](linear_solver::LinearSolver) — runtime linear solver (M=0 only);
+//!   deprecated in 0.1.14, removed in the next release
 //! - [`CircuitIR`] — language-agnostic intermediate representation for code generation
 //! - [`Emitter`] — trait for generating code in different languages (Rust implemented)
 //!
@@ -60,7 +61,7 @@
 //! - [`ParseError`] — netlist syntax errors
 //! - [`MnaError`] — invalid circuit topology (floating nodes, singular matrix)
 //! - [`DkError`] — kernel build failure (M > MAX_M, singular matrix)
-//! - [`SolverError`] — solver construction issues
+//! - [`SolverError`] — `LinearSolver` errors (deprecated with it)
 //! - [`CodegenError`] — code generation configuration errors (requires `codegen` feature)
 //!
 //! All error types are `#[non_exhaustive]` — new variants may be added in minor versions.
@@ -87,8 +88,13 @@ pub mod parser;
 pub mod pipeline;
 mod saturating_core;
 
-// Keep the old solver module for backward compatibility during transition.
-// It re-exports LinearSolver and SolverError from linear_solver.
+// The old solver module: re-exports LinearSolver and SolverError from
+// linear_solver. Deprecated with them (0.1.14); removed in the next release.
+#[deprecated(
+    since = "0.1.14",
+    note = "re-exports the deprecated `LinearSolver` / `SolverError`; it will be removed in \
+            the next release. Use `melange_solver::build::build` and code generation."
+)]
 pub mod solver;
 
 /// Netlist topology checks (dangling nodes, cap-only DC islands).
@@ -111,6 +117,7 @@ pub use device_types::{
     ScreenForm, TubeKind, TubeParams, VcaParams,
 };
 pub use dk::{DkError, DkKernel, MAX_M};
+#[allow(deprecated)]
 pub use linear_solver::{LinearSolver, SolverError};
 pub use mna::{MnaError, MnaSystem};
 pub use parser::{Netlist, ParseError};

@@ -1324,7 +1324,7 @@ pub(super) struct PentodeDispatch {
     /// `v_d{s}, v_d{s1}, v_d{s2}`; for grid-off (2D) helpers it's the same
     /// three-voltage signature but the third argument is always
     /// `DEVICE_{d}_VG2K_FROZEN` (emitted at the call site) rather than a
-    /// live NR state — see [`PentodeDispatch::dim_count`] for how dispatch
+    /// live NR state — see [`PentodeDispatch::is_grid_off`] for how dispatch
     /// sites decide how many NR dimensions to stamp.
     pub(super) eval_args: String,
     /// Full argument list for `tube_ip_{suffix}(..)` calls from the nodal
@@ -1333,14 +1333,6 @@ pub(super) struct PentodeDispatch {
     /// Full argument list for `tube_is_{suffix}(..)` calls from the nodal
     /// full-LU final `i_nl` stamping pass.
     pub(super) is_args: String,
-    /// Number of NR dimensions this slot contributes: 3 for sharp pentodes
-    /// (Vgk→Ip, Vpk→Ig2, Vg2k→Ig1), 2 for grid-off reduced pentodes
-    /// (Vgk→Ip, Vpk→Ig2; Ig1 dropped, Vg2k frozen). Dispatch sites use
-    /// [`PentodeDispatch::is_grid_off`] directly for the two-way branch;
-    /// this field is kept alongside for call sites that need the numeric
-    /// dimension count (e.g. generic jdev-loop emission paths).
-    #[allow(dead_code)]
-    pub(super) dim_count: usize,
     /// True if this is a grid-off reduced pentode (`TubeKind::
     /// SharpPentodeGridOff`). Signals dispatch sites to:
     ///   - use `DEVICE_{d}_VG2K_FROZEN` as the third voltage argument in
@@ -1445,13 +1437,11 @@ pub(super) fn pentode_dispatch(
         }
     };
 
-    let dim_count = if is_grid_off { 2 } else { 3 };
     PentodeDispatch {
         suffix,
         eval_args,
         ip_args,
         is_args,
-        dim_count,
         is_grid_off,
     }
 }

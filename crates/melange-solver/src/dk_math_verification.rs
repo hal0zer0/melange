@@ -698,6 +698,7 @@ Vdd vdd 0 DC 12
     /// March the kernel's companion path for `steps` samples of `input`,
     /// with G_in = 1.0 stamped at `input_idx` (0-based). Returns node
     /// voltage history (steps × n_nodes).
+    #[allow(deprecated)] // exercises the deprecated companion-inductor path
     fn march_companion_kernel(
         kernel: &mut DkKernel,
         input: &[f64],

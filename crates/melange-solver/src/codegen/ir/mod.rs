@@ -524,10 +524,6 @@ pub struct SolverConfig {
     /// [`CodegenConfig::output_clamp_v`] for full docs.
     #[serde(default = "default_output_clamp_v")]
     pub output_clamp_v: f64,
-    /// Currently unused: no emitter reads it (copied from
-    /// [`crate::codegen::CodegenConfig::pot_settle_samples`], default 64).
-    #[serde(default = "default_pot_settle_samples")]
-    pub pot_settle_samples: usize,
     /// Use backward Euler integration (unconditionally stable, first-order).
     #[serde(default)]
     pub backward_euler: bool,
@@ -537,9 +533,12 @@ pub struct SolverConfig {
     /// anti-correlation detector on the output; if the solver falls into a
     /// self-sustaining Nyquist (`(-1)^n`) limit cycle — the trapezoidal
     /// artifact that a *large-signal* operating point can reach even though
-    /// the compile-time quiescent-OP spectral-radius analysis found trap
-    /// stable — it latches to the L-stable backward-Euler path for the rest
-    /// of the stream (cleared by `reset()`). Set `false` for backward-Euler
+    /// the compile-time ring predicate (`codegen::ring`, evaluated on the
+    /// linearised rest state; `docs/aidocs/RING_PREDICATE.md`) kept the build
+    /// trapezoidal — it latches to the L-stable backward-Euler path for the
+    /// rest of the stream (cleared by `reset()`). The latch's floor applies
+    /// the same rule: a ring must be louder than both the ring threshold and
+    /// backward Euler's own in-band change before it engages. Set `false` for backward-Euler
     /// builds (nothing to catch) and whenever trap is force-pinned
     /// (`--force-trap` / `.integrator trap`), which opts out of the net.
     /// Only the nodal codegen path emits it today.
@@ -630,10 +629,6 @@ pub struct SolverConfig {
     /// pre-feature emitter.
     #[serde(default)]
     pub subsample_fire: bool,
-}
-
-fn default_pot_settle_samples() -> usize {
-    64
 }
 
 fn default_output_nodes() -> Vec<usize> {
@@ -1551,39 +1546,19 @@ fn q_dot_at(matrices: &Matrices, n: usize, m: usize, x: &[f64], i_nl: &[f64]) ->
         .collect()
 }
 
-/// Build the DK trapezoidal `A = G + alpha·C` and the whole-system
-/// `alpha·C − G` (algebraic rows zeroed) from raw G/C at an arbitrary rate.
-/// The only caller is the oversampled build, which ships `S = A⁻¹` at the
-/// internal rate and discards the second matrix: the shipped history is the
-/// charge-form `alpha·C` (`charge_form_history`), and the integrator is
-/// decided by the ring predicate (`codegen::ring`), not by this pair.
-#[allow(clippy::too_many_arguments)]
-fn build_dk_trap_matrices_at_rate(
-    g_matrix: &[f64],
-    c_matrix: &[f64],
-    n: usize,
-    n_nodes: usize,
-    mna_n_aug: usize,
-    bjt_internal: &[crate::mna::BjtTransientInternalNodes],
-    rate: f64,
-) -> (Vec<f64>, Vec<f64>) {
+/// Build the DK trapezoidal forward matrix `A = G + alpha·C`
+/// (`alpha = 2·rate`) from raw G/C at an arbitrary rate. The oversampled
+/// build ships `S = A⁻¹` at the internal rate; its history is the
+/// charge-form `alpha·C` (`charge_form_history`).
+fn build_dk_trap_a_at_rate(g_matrix: &[f64], c_matrix: &[f64], n: usize, rate: f64) -> Vec<f64> {
     let alpha = 2.0 * rate;
-
-    // Build A = G + alpha*C, A_neg = alpha*C - G
     let mut a_flat = vec![0.0f64; n * n];
-    let mut a_neg_flat = vec![0.0f64; n * n];
     for i in 0..n {
         for j in 0..n {
-            let g = g_matrix[i * n + j];
-            let c = c_matrix[i * n + j];
-            a_flat[i * n + j] = g + alpha * c;
-            a_neg_flat[i * n + j] = alpha * c - g;
+            a_flat[i * n + j] = g_matrix[i * n + j] + alpha * c_matrix[i * n + j];
         }
     }
-
-    zero_augmented_history_rows(&mut a_neg_flat, n, n_nodes, mna_n_aug, bjt_internal);
-
-    (a_flat, a_neg_flat)
+    a_flat
 }
 
 /// Build the DK backward-Euler (S, A_neg, rhs_const) set from raw G/C at an
@@ -1912,18 +1887,20 @@ impl CircuitIR {
         // as the build makes every inductor kernel): L lives in C on rows
         // n_aug..n. A companion-model kernel (DkKernel::from_mna on an inductor
         // deck, the runtime LinearSolver's form) has no codegen path.
-        if !kernel.inductors.is_empty()
-            || !kernel.coupled_inductors.is_empty()
-            || !kernel.transformer_groups.is_empty()
-        {
+        // The companion fields are deprecated (0.1.14) along with `LinearSolver`.
+        #[allow(deprecated)]
+        let companion = (
+            kernel.inductors.len(),
+            kernel.coupled_inductors.len(),
+            kernel.transformer_groups.len(),
+        );
+        if companion != (0, 0, 0) {
             return Err(CodegenError::UnsupportedTopology(format!(
                 "a DK kernel with {} companion-modelled inductor(s), {} coupled pair(s) \
                  and {} transformer group(s) cannot be code-generated: inductors are \
                  generated as augmented-MNA branch rows. Build the kernel with \
                  DkKernel::from_mna_augmented (as melange_solver::build::build does).",
-                kernel.inductors.len(),
-                kernel.coupled_inductors.len(),
-                kernel.transformer_groups.len(),
+                companion.0, companion.1, companion.2,
             )));
         }
         let augmented_inductors = kernel.n > mna.n_aug;
@@ -1963,18 +1940,9 @@ impl CircuitIR {
         // When oversampling, the shipped trap matrices are rebuilt at the
         // internal (oversampled) rate. Skipped when BE ships (forced, or this
         // is the promoted rebuild) — no trap pair is shipped then.
-        let os_trap_pair = if os_factor > 1 && !cfg_backward_euler && promoted.is_none() {
-            let (a_flat, a_neg_flat) = build_dk_trap_matrices_at_rate(
-                &g_matrix,
-                &c_matrix,
-                n,
-                n_nodes,
-                mna.n_aug,
-                &mna.bjt_internal_nodes,
-                internal_rate,
-            );
-            let s = invert_flat_matrix(&a_flat, n)?;
-            Some((s, a_neg_flat))
+        let os_trap_s = if os_factor > 1 && !cfg_backward_euler && promoted.is_none() {
+            let a_flat = build_dk_trap_a_at_rate(&g_matrix, &c_matrix, n, internal_rate);
+            Some(invert_flat_matrix(&a_flat, n)?)
         } else {
             None
         };
@@ -2028,7 +1996,6 @@ impl CircuitIR {
             oversampling_factor: os_factor,
             output_scales: config.output_scales.clone(),
             output_clamp_v: config.output_clamp_v,
-            pot_settle_samples: config.pot_settle_samples,
             backward_euler: be,
             // DK codegen path does not emit the runtime BE-latch net yet.
             runtime_be_latch: false,
@@ -2108,10 +2075,9 @@ impl CircuitIR {
                 spectral_radius_s_aneg: 0.0,
             }
         } else if os_factor > 1 {
-            // Trapezoidal + oversampling: the internal-rate pair was already
+            // Trapezoidal + oversampling: the internal-rate S was already
             // built above.
-            let (s, a_neg_flat) =
-                os_trap_pair.expect("internal-rate trap pair built when os>1 and trap ships");
+            let s = os_trap_s.expect("internal-rate trap S built when os>1 and trap ships");
 
             // Compute K = N_v * S * N_i
             let k = compute_k_from_s(&s, &kernel.n_v, &kernel.n_i, n, m);
@@ -2134,9 +2100,7 @@ impl CircuitIR {
                 (Vec::new(), Vec::new(), Vec::new(), Vec::new())
             };
 
-            // Charge form: history `alpha·C`, DC ×1. The whole-system
-            // `a_neg_flat` was the discriminator's operator only.
-            let _ = a_neg_flat;
+            // Charge form: history `alpha·C`, DC ×1.
             Matrices {
                 s,
                 a_neg: charge_form_history(
@@ -2750,42 +2714,12 @@ impl CircuitIR {
             }
         }
 
-        // Build rhs_const: trapezoidal (node rows ×2, VS rows ×1) or BE (all ×1)
-        let mut rhs_const = if be {
-            // BE: current sources ×1 (not ×2), VS ×1
-            let mut rc = vec![0.0f64; n];
-            for src in &mna.current_sources {
-                crate::mna::inject_rhs_current(&mut rc, src.n_plus_idx, src.dc_value);
-                crate::mna::inject_rhs_current(&mut rc, src.n_minus_idx, -src.dc_value);
-            }
-            for vs in &mna.voltage_sources {
-                let k = mna.n + vs.ext_idx;
-                if k < n {
-                    rc[k] = vs.dc_value;
-                }
-            }
-            rc
-        } else {
-            let rhs_const_base = dk::build_rhs_const(mna);
-            let mut rc = vec![0.0f64; n];
-            for i in 0..n_aug {
-                rc[i] = rhs_const_base[i];
-            }
-            rc
-        };
-
-        // Build BE rhs_const (node rows ×1, VS rows ×1) — for fallback
-        let mut rhs_const_be = vec![0.0f64; n];
-        for src in &mna.current_sources {
-            crate::mna::inject_rhs_current(&mut rhs_const_be, src.n_plus_idx, src.dc_value);
-            crate::mna::inject_rhs_current(&mut rhs_const_be, src.n_minus_idx, -src.dc_value);
-        }
-        for vs in &mna.voltage_sources {
-            let k = mna.n + vs.ext_idx;
-            if k < n {
-                rhs_const_be[k] = vs.dc_value;
-            }
-        }
+        // DC sources at ×1 on every row (current sources on node rows, V_dc
+        // on voltage-source rows). Both integrators enter each source once,
+        // at n+1, so this one vector is the shipped `rhs_const` (trapezoidal
+        // charge form, forced or promoted BE) and the BE fallback's
+        // `rhs_const_be`.
+        let rhs_const_be = rhs_const_1x(mna, n);
 
         // Op-amp transient AOL cap, from the card's `AOL_TRANSIENT_CAP` only:
         // the VCCS stamp's excess Gm is removed from G for the transient
@@ -2889,7 +2823,6 @@ impl CircuitIR {
             oversampling_factor: config.oversampling_factor,
             output_scales: config.output_scales.clone(),
             output_clamp_v: config.output_clamp_v,
-            pot_settle_samples: config.pot_settle_samples,
             backward_euler: be,
             // Resolved after the auto-BE promotion block below (needs the
             // final `solver_config.backward_euler`).
@@ -2973,7 +2906,6 @@ impl CircuitIR {
             alpha = alpha_be;
             a_flat = a_be_flat.clone();
             a_neg_flat = a_neg_be_flat.clone();
-            rhs_const = rhs_const_be.clone();
             s_flat = s_be_flat.clone();
             k_flat = k_be_flat.clone();
             solver_config.backward_euler = true;
@@ -3112,14 +3044,12 @@ impl CircuitIR {
         // The whole-system `alpha·C − G` built above is what the stability
         // discriminators were calibrated against, so it is replaced only here,
         // after they ran.
-        let (a_neg_flat, rhs_const) = if solver_config.backward_euler {
-            (a_neg_flat, rhs_const)
+        let a_neg_flat = if solver_config.backward_euler {
+            a_neg_flat
         } else {
-            (
-                charge_form_history(&c_matrix, n, alpha, &topology.history_zero_rows),
-                rhs_const_be.clone(),
-            )
+            charge_form_history(&c_matrix, n, alpha, &topology.history_zero_rows)
         };
+        let rhs_const = rhs_const_be.clone();
         let matrices = Matrices {
             s: s_flat,
             k: k_flat,

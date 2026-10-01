@@ -349,6 +349,7 @@ fn test_inductor_mna_stamping() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[allow(deprecated)] // exercises the deprecated companion-inductor path
 fn test_inductor_dk_kernel() {
     let (_, _, kernel) = build_pipeline(RL_LOWPASS_SPICE);
 

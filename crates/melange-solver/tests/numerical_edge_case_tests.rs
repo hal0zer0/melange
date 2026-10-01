@@ -424,6 +424,7 @@ fn test_diode_ideality_factor_3() {
 // ============================================================================
 
 #[test]
+#[allow(deprecated)] // exercises the deprecated companion-inductor path
 fn test_very_small_inductor() {
     let spice = "Small L\nR1 in out 1k\nL1 out 0 1u\nC1 out 0 100p\n";
     let netlist = Netlist::parse(spice).unwrap();

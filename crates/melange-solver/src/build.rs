@@ -873,6 +873,7 @@ pub fn assemble(
                 } else {
                     let m = mna.m;
                     let n = mna.n_aug;
+                    #[allow(deprecated)] // the companion-inductor fields stay empty
                     let dummy = DkKernel {
                         n,
                         m,
@@ -992,7 +993,6 @@ pub fn assemble(
         tolerance,
         output_scales,
         output_clamp_v: output_clamp,
-        include_dc_op: true,
         input_resistance,
         oversampling_factor: oversampling,
         dc_block: !no_dc_block,
