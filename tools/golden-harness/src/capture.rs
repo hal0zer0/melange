@@ -418,10 +418,11 @@ fn capture_circuit(
     }
 
     // 3. Build driver binaries.
+    let call = process_call(&code);
     let std_bin = work.join(format!("{id}_std"));
     if let Err(e) = build_driver(
         &code,
-        &std_main(rep.noise_api_detected && rep.seed_api_detected, &diag),
+        &std_main(rep.noise_api_detected && rep.seed_api_detected, &diag, call),
         work,
         &format!("{id}_std"),
         &std_bin,
@@ -440,6 +441,7 @@ fn capture_circuit(
                 &rep.pot_setters_detected,
                 total,
                 &diag,
+                call,
             ),
             work,
             &format!("{id}_pot"),
@@ -625,10 +627,22 @@ fn seed_block(pin_noise: bool) -> &'static str {
     }
 }
 
+/// The statement that runs one sample and binds `out` to the outputs. A deck
+/// with `.inject` or `.tap` emits `process_sample(input, &injections, &mut
+/// state) -> (outputs, taps)`, even with no `.inject` field; its injections are
+/// driven at 0 (undriven, as `simulate` leaves them) and the taps are dropped.
+fn process_call(code: &str) -> &'static str {
+    if code.contains("pub fn process_sample(input: f64, injections_inner:") {
+        "let (out, _taps) = process_sample(input, &[[0.0f64; NUM_INJECT]; OVERSAMPLING_FACTOR], &mut state);"
+    } else {
+        "let out = process_sample(input, &mut state);"
+    }
+}
+
 /// Standard driver: one f64 sample per stdin line, all output channels per
 /// stdout line. Mirrors melange-validate's driver (buffered IO added for
 /// throughput; formatting `{:.17e}` is an exact f64 round-trip).
-fn std_main(pin_noise: bool, diag: &str) -> String {
+fn std_main(pin_noise: bool, diag: &str, call: &str) -> String {
     format!(
         r#"
 #[allow(dead_code)]
@@ -645,7 +659,7 @@ fn main() {{
         line.clear();
         if reader.read_line(&mut line).unwrap() == 0 {{ break; }}
         if let Ok(input) = line.trim().parse::<f64>() {{
-            let out = process_sample(input, &mut state);
+            {call}
             for (i, v) in out.iter().enumerate() {{
                 if i > 0 {{ w.write_all(b" ").unwrap(); }}
                 write!(w, "{{:.17e}}", v).unwrap();
@@ -658,6 +672,7 @@ fn main() {{
 "#,
         seed = seed_block(pin_noise),
         diag = diag,
+        call = call,
     )
 }
 
@@ -666,7 +681,13 @@ fn main() {{
 /// triangle 0 -> 1 -> 0 position profile over the whole render, mapped
 /// linearly into each pot's [MIN_R, MAX_R]. Exercises the setter /
 /// matrices_dirty / rebuild lifecycle the way a host automation pass does.
-fn pot_main(pin_noise: bool, pots: &[usize], total_frames: usize, diag: &str) -> String {
+fn pot_main(
+    pin_noise: bool,
+    pots: &[usize],
+    total_frames: usize,
+    diag: &str,
+    call: &str,
+) -> String {
     let interval = programs::POT_UPDATE_INTERVAL;
     let mut setters = String::new();
     for idx in pots {
@@ -697,7 +718,7 @@ fn main() {{
                 let t = n as f64 / SWEEP_TOTAL_FRAMES as f64;
                 let pos = if t < 0.5 {{ 2.0 * t }} else {{ 2.0 * (1.0 - t) }};
 {setters}            }}
-            let out = process_sample(input, &mut state);
+            {call}
             for (i, v) in out.iter().enumerate() {{
                 if i > 0 {{ w.write_all(b" ").unwrap(); }}
                 write!(w, "{{:.17e}}", v).unwrap();
@@ -711,6 +732,7 @@ fn main() {{
 "#,
         seed = seed_block(pin_noise),
         diag = diag,
+        call = call,
     )
 }
 
