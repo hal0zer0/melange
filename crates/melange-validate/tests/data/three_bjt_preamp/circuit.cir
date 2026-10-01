@@ -1,4 +1,4 @@
-* Neve 1073 Preamp (BA283 AV) — SPICE Validation
+* Three-BJT preamp — SPICE Validation
 * Class A, 3 BJTs: TR4/TR5/TR6 (all BC184C). No output transformer.
 * Topology: CE input (TR4) -> DC-coupled CE (TR5) -> EF buffer (TR6)
 

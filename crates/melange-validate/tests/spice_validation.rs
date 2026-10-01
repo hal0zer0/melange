@@ -22,8 +22,8 @@
 //! | `test_rc_lowpass_chirp` | Linear RC | 0 | Strict |
 //! | `test_diode_clipper_silence_to_signal` | Diode clipper | 2 diodes | Default |
 //! | `test_wurli_preamp_vs_spice` | Wurli 200A preamp | 2 BJTs + 1 diode | Wurli |
-//! | `test_neve_1073_output_vs_spice` | Neve BA283 AM | 3 BJTs + transformer | Neve output |
-//! | `test_neve_1073_preamp_vs_spice` | Neve BA283 AV | 3 BJTs | Neve preamp |
+//! | `test_three_bjt_transformer_output_amp_vs_spice` | 3-BJT output amp | 3 BJTs + transformer | 3-BJT output amp |
+//! | `test_three_bjt_preamp_vs_spice` | 3-BJT preamp | 3 BJTs | 3-BJT preamp |
 //! | `test_pot_static_offnominal_vs_spice` | Off-nominal `.pot` | 1 diode | Nonlinear |
 //! | `test_pot_modulation_vs_spice` | Audio-rate `.pot` vs B-source | 1 diode + R(t) | Custom |
 
@@ -111,18 +111,18 @@ fn strict_linear_config() -> ComparisonConfig {
 /// across the direct users of this config:
 ///   diode_clipper        rms 0.069%  peak 1.6e-3 V  corr 0.99999991  THD err 0.00 dB
 ///   antiparallel_diodes  rms 0.059%  peak 1.2e-3 V  corr 0.99999983  THD err 0.03 dB
-///   tube_screamer        rms 0.442%  peak 9.9e-3 V  corr 0.99999032  THD err 0.04 dB
+///   overdrive_pedal      rms 0.442%  peak 9.9e-3 V  corr 0.99999032  THD err 0.04 dB
 ///   diode silence→signal rms 0.125%  peak 1.43e-2 V corr 0.99999934  THD err <0.1 dB
 /// Gates below sit ~3.5-10x above the worst measured user per metric
-/// (rms: tube_screamer; peak: silence→signal onset; corr: tube_screamer).
-/// tube_screamer_wiper overrides rms/corr with its own cited numbers.
+/// (rms: overdrive_pedal; peak: silence→signal onset; corr: overdrive_pedal).
+/// overdrive_pedal_wiper overrides rms/corr with its own cited numbers.
 ///
 /// Re-measured 2026-09-23, after this harness was put on the same best-fit
 /// delay alignment the `melange validate` CLI uses (it previously compared an
 /// unaligned reference, so its numbers were not commensurable with the CLI's):
 ///   diode_clipper        rms 0.0687%  peak 1.61e-3 V  corr 0.99999991  fit +0.001 samp
 ///   antiparallel_diodes  rms 0.0585%  peak 1.15e-3 V  corr 0.99999984  fit -0.002 samp
-///   tube_screamer        rms 0.3606%  peak 1.10e-2 V  corr 0.99999359  fit +0.023 samp
+///   overdrive_pedal      rms 0.3606%  peak 1.10e-2 V  corr 0.99999359  fit +0.023 samp
 ///   diode silence->signal unchanged (that test already went through `validate_circuit`)
 /// Every gate below is UNCHANGED; headroom only grew.
 fn nonlinear_config() -> ComparisonConfig {
@@ -197,7 +197,7 @@ fn wurli_config() -> ComparisonConfig {
     }
 }
 
-/// Neve 1073 output amp (BA283 AM) tolerances (test_neve_1073_output_vs_spice).
+/// Three-BJT output amp tolerances (`test_three_bjt_transformer_output_amp_vs_spice`).
 ///
 /// Armed 2026-07-18 — this test previously ran everything and asserted
 /// nothing. STATUS.md recorded corr 0.9961 / rms 14.4% ("marginal") from
@@ -216,7 +216,7 @@ fn wurli_config() -> ComparisonConfig {
 /// Re-measured 2026-09-23 under the shared delay alignment: rms 0.0876%,
 /// peak 8.95e-5 V, corr 0.99999971, fitted delay +0.005 samples.
 /// Gates UNCHANGED.
-fn neve_output_config() -> ComparisonConfig {
+fn three_bjt_output_amp_config() -> ComparisonConfig {
     ComparisonConfig {
         rms_error_tolerance: 0.01,     // measured 0.107% → 9.3x headroom
         peak_error_tolerance: 0.005,   // measured 1.06e-4 V → 47x headroom
@@ -229,7 +229,7 @@ fn neve_output_config() -> ComparisonConfig {
     }
 }
 
-/// Neve 1073 preamp (BA283 AV) tolerances (test_neve_1073_preamp_vs_spice).
+/// Three-BJT preamp tolerances (`test_three_bjt_preamp_vs_spice`).
 ///
 /// Armed 2026-07-18 — this test previously ran everything and asserted
 /// nothing. Historical record: corr 0.99999 / rms 0.53% (STATUS "5-nines").
@@ -242,7 +242,7 @@ fn neve_output_config() -> ComparisonConfig {
 /// output was DC-blocked TWICE (once inside the generated code, once in
 /// the test) while the SPICE side was blocked once. Removing the second
 /// application dropped rms 0.508% → 0.0346% and corr 0.99998710 → ~1.0.
-fn neve_preamp_config() -> ComparisonConfig {
+fn three_bjt_preamp_config() -> ComparisonConfig {
     ComparisonConfig {
         rms_error_tolerance: 0.005,    // measured 0.0346% → 14x headroom
         peak_error_tolerance: 0.002,   // measured 1.12e-4 V → 18x headroom
@@ -1116,20 +1116,20 @@ fn test_wurli_preamp_vs_spice() {
     );
 }
 
-/// Neve 1073 Output Amplifier (BA283 AM) vs ngspice
+/// Three-BJT transformer-coupled output amplifier vs ngspice
 ///
 /// Class A output stage: 3 BJTs (2× BC184C + 1× 2N3055), LO1166 output transformer.
 /// CE input → Darlington CE → transformer. NFB via C4 through R1 to emitter.
 /// Uses NodalSolver (augmented MNA for coupled inductors).
 #[test]
 #[ignore] // requires ngspice
-fn test_neve_1073_output_vs_spice() {
+fn test_three_bjt_transformer_output_amp_vs_spice() {
     assert!(is_ngspice_available(), "ngspice not found");
 
-    println!("\n=== Neve 1073 Output Amplifier Validation ===");
-    println!("Circuit: BA283 AM, 3 BJTs + LO1166 transformer, N=14, M=6");
+    println!("\n=== Three-BJT Transformer-Coupled Output Amplifier Validation ===");
+    println!("Circuit: 3 BJTs + LO1166 transformer, N=14, M=6");
 
-    let data_dir = test_data_dir().join("neve_1073_output");
+    let data_dir = test_data_dir().join("three_bjt_transformer_output_amp");
     let netlist_path = data_dir.join("circuit.cir");
     let input_pwl_path = data_dir.join("input_pwl.txt");
 
@@ -1143,7 +1143,7 @@ fn test_neve_1073_output_vs_spice() {
         duration,
         &pwl_source(&pwl_data),
         "out",
-        &neve_output_config(),
+        &three_bjt_output_amp_config(),
     )
     .expect("ngspice failed");
 
@@ -1158,11 +1158,11 @@ fn test_neve_1073_output_vs_spice() {
         .expect("melange codegen failed");
 
     // --- Compare ---
-    let config = neve_output_config();
+    let config = three_bjt_output_amp_config();
     let (spice_signal, melange_signal, fit) =
         aligned_signals(&spice_output, &melange_output, &input_signal, &config);
     let mut report = compare_signals(&spice_signal, &melange_signal, &config);
-    report.circuit_name = "neve_1073_output".to_string();
+    report.circuit_name = "three_bjt_transformer_output_amp".to_string();
     report.node_name = "out".to_string();
     report.alignment_note = Some(fit.note(SAMPLE_RATE));
 
@@ -1209,10 +1209,10 @@ fn test_neve_1073_output_vs_spice() {
 
     // --- Gates (armed 2026-07-18; this test previously asserted nothing) ---
     // Measured: corr 0.99999952, rms 0.107%, gain ratio 1.0000 — see
-    // neve_output_config() for the full measurement citation.
+    // three_bjt_output_amp_config() for the full measurement citation.
     assert!(
         result.report.passed,
-        "Neve 1073 output validation failed:\n{}\nReport saved to: {:?}",
+        "Three-BJT output amp validation failed:\n{}\nReport saved to: {:?}",
         result.report.summary(),
         result.html_report_path
     );
@@ -1227,20 +1227,20 @@ fn test_neve_1073_output_vs_spice() {
     );
 }
 
-/// Neve 1073 Preamp (BA283 AV) vs ngspice
+/// Three-BJT preamp vs ngspice
 ///
 /// Class A preamp: 3× BC184C. CE(TR4) → DC-coupled CE(TR5) → EF(TR6).
 /// R11+R12 series collector load, R10 inter-stage DC feedback, R17 AC NFB.
 /// Uses CircuitSolver (DK path, no inductors). N=14, M=6.
 #[test]
 #[ignore] // requires ngspice
-fn test_neve_1073_preamp_vs_spice() {
+fn test_three_bjt_preamp_vs_spice() {
     assert!(is_ngspice_available(), "ngspice not found");
 
-    println!("\n=== Neve 1073 Preamp (BA283 AV) Validation ===");
+    println!("\n=== Three-BJT Preamp Validation ===");
     println!("Circuit: 3× BC184C, CE→CE→EF, N=14, M=6");
 
-    let data_dir = test_data_dir().join("neve_1073_preamp");
+    let data_dir = test_data_dir().join("three_bjt_preamp");
     let netlist_path = data_dir.join("circuit.cir");
     let input_pwl_path = data_dir.join("input_pwl.txt");
 
@@ -1254,7 +1254,7 @@ fn test_neve_1073_preamp_vs_spice() {
         duration,
         &pwl_source(&pwl_data),
         "out",
-        &neve_preamp_config(),
+        &three_bjt_preamp_config(),
     )
     .expect("ngspice failed");
 
@@ -1275,11 +1275,11 @@ fn test_neve_1073_preamp_vs_spice() {
     // introducing an asymmetric LF error that was a harness artifact.
 
     // --- Compare ---
-    let config = neve_preamp_config();
+    let config = three_bjt_preamp_config();
     let (spice_signal, melange_signal, fit) =
         aligned_signals(&spice_output, &melange_output, &input_signal, &config);
     let mut report = compare_signals(&spice_signal, &melange_signal, &config);
-    report.circuit_name = "neve_1073_preamp".to_string();
+    report.circuit_name = "three_bjt_preamp".to_string();
     report.node_name = "out".to_string();
     report.alignment_note = Some(fit.note(SAMPLE_RATE));
 
@@ -1326,10 +1326,10 @@ fn test_neve_1073_preamp_vs_spice() {
 
     // --- Gates (armed 2026-07-18; this test previously asserted nothing) ---
     // Measured: corr 1.00000000, rms 0.0346%, gain ratio 0.9996 — see
-    // neve_preamp_config() for the full measurement citation.
+    // three_bjt_preamp_config() for the full measurement citation.
     assert!(
         result.report.passed,
-        "Neve 1073 preamp validation failed:\n{}\nReport saved to: {:?}",
+        "Three-BJT preamp validation failed:\n{}\nReport saved to: {:?}",
         result.report.summary(),
         result.html_report_path
     );
@@ -1713,9 +1713,9 @@ fn test_comparison_config_levels() {
     );
 }
 
-/// Test: Tube Screamer TS808 (Op-amp + Diode Clipping)
+/// Test: overdrive pedal (Op-amp + Diode Clipping)
 ///
-/// Tests the classic TS808 inverting op-amp with antiparallel diode
+/// Tests the classic overdrive-pedal inverting op-amp with antiparallel diode
 /// feedback clipping. Op-amp modeled as VCCS + Rout (same model in
 /// both ngspice and melange). 0.5V input drives diodes into soft
 /// clipping at ~0.6V.
@@ -1726,20 +1726,20 @@ fn test_comparison_config_levels() {
 /// Expected: Soft-clipped output ~0.17V peak
 #[test]
 #[ignore] // requires ngspice
-fn test_tube_screamer_vs_spice() {
+fn test_overdrive_pedal_vs_spice() {
     assert!(is_ngspice_available(), "ngspice not found");
 
-    println!("\n=== Tube Screamer TS808 Validation ===");
+    println!("\n=== Overdrive Pedal Validation ===");
     println!("Circuit: Op-amp inverting + antiparallel diode clipping");
 
-    let result = run_validation("tube_screamer", "out", &nonlinear_config())
+    let result = run_validation("overdrive_pedal", "out", &nonlinear_config())
         .expect("Failed to run validation");
 
     print_validation_metrics(&result);
 
     assert!(
         result.report.passed,
-        "Tube Screamer validation failed:\n{}\nReport saved to: {:?}",
+        "Overdrive pedal validation failed:\n{}\nReport saved to: {:?}",
         result.report.summary(),
         result.html_report_path
     );
@@ -1754,7 +1754,7 @@ fn test_tube_screamer_vs_spice() {
 /// The README's advertised overdrive pedal — op-amp gain stage + diode clipper
 /// — written the way a user writes it, with a `U` element and a `.model … OA`.
 ///
-/// Same circuit as `tube_screamer`, which hand-expands the op-amp. The two are
+/// Same circuit as `overdrive_pedal`, which hand-expands the op-amp. The two are
 /// NOT expected to be bit-identical: with a real `U` element melange's DC
 /// operating-point solver caps the op-amp's open-loop gain at
 /// `AOL_DC_MAX = 1000` (`dc_op.rs`) for NR stability, which a hand-written
@@ -1768,7 +1768,7 @@ fn test_overdrive_pedal_native_u_vs_spice() {
     println!("\n=== Overdrive pedal (native U element) Validation ===");
     println!("Circuit: U1 + .model OA(AOL=200k ROUT=75) + antiparallel diode clipping");
 
-    let result = run_validation("tube_screamer_u", "out", &nonlinear_config())
+    let result = run_validation("overdrive_pedal_native_u", "out", &nonlinear_config())
         .expect("Failed to run validation");
 
     print_validation_metrics(&result);
@@ -1789,10 +1789,10 @@ fn test_overdrive_pedal_native_u_vs_spice() {
 
 #[test]
 #[ignore] // Requires ngspice
-fn test_tube_screamer_wiper_vs_spice() {
+fn test_overdrive_pedal_wiper_vs_spice() {
     assert!(is_ngspice_available(), "ngspice not found");
 
-    println!("\n=== Tube Screamer TS808 (Wiper Volume) Validation ===");
+    println!("\n=== Overdrive Pedal (Wiper Volume) Validation ===");
     println!("Circuit: Same clipping + tone as original, with 100K wiper volume at pos=0.85");
 
     // Volume pot attenuation (pos=0.85 → 15% loss) pushes zero-crossings closer to zero,
@@ -1801,7 +1801,7 @@ fn test_tube_screamer_wiper_vs_spice() {
     // rms/corr overrides vs the (tightened) base nonlinear_config, measured
     // 2026-07-18: rms 5.71%, corr 0.99838696. The wiper variant's divider +
     // deliberately simplified tone network give it a genuinely larger
-    // time-domain offset than the clipping-only tube_screamer (see the
+    // time-domain offset than the clipping-only overdrive_pedal (see the
     // correlation assert comment below); the THD match (0.11 dB) is the
     // sonically meaningful gate. rms 0.10 = 1.75x over measured (was
     // effectively 0.20 before the base config tightening — this is still a
@@ -1815,7 +1815,7 @@ fn test_tube_screamer_wiper_vs_spice() {
     // divider/tone offset"; the fit says it is literally a constant time
     // offset, and removing it accounts for four fifths of the residual. The
     // offset itself is NOT explained — a resistive divider should not delay
-    // anything, and the clipping-only `tube_screamer` fits only +0.023
+    // anything, and the clipping-only `overdrive_pedal` fits only +0.023
     // samples. Gates and the 0.997 assert below are UNCHANGED; the cited
     // 5.71% / 0.99838696 figures are the pre-alignment measurement.
     let config = ComparisonConfig {
@@ -1826,19 +1826,19 @@ fn test_tube_screamer_wiper_vs_spice() {
     };
 
     let result =
-        run_validation("tube_screamer_wiper", "out", &config).expect("Failed to run validation");
+        run_validation("overdrive_pedal_wiper", "out", &config).expect("Failed to run validation");
 
     print_validation_metrics(&result);
 
     assert!(
         result.report.passed,
-        "Tube Screamer Wiper validation failed:\n{}\nReport saved to: {:?}",
+        "Overdrive pedal wiper validation failed:\n{}\nReport saved to: {:?}",
         result.report.summary(),
         result.html_report_path
     );
 
-    // 3 nines correlation. The 5-nines figure in ts808 validation history is for
-    // the clipping-stage-only `tube_screamer`; this wiper variant adds a volume
+    // 3 nines correlation. The 5-nines figure in the validation history is for
+    // the clipping-stage-only `overdrive_pedal`; this wiper variant adds a volume
     // divider + a deliberately simplified tone network, so its time-domain match
     // is ~0.998 (vs the clipping stage's 0.99999). The harmonic content — what the
     // pedal actually sounds like — still matches ngspice to 0.11 dB THD, so the

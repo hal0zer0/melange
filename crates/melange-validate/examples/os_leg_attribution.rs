@@ -47,7 +47,7 @@
 
 use melange_validate::{alignment, dc_block_signal, run_melange_solver_from_str};
 
-const DECK: &str = "crates/melange-validate/tests/data/tube_screamer_u/circuit.cir";
+const DECK: &str = "crates/melange-validate/tests/data/overdrive_pedal_native_u/circuit.cir";
 const SAMPLE_RATE: f64 = 48_000.0;
 const OVERSAMPLING: usize = 2;
 /// Samples dropped from the front of every metric window. The ideal legs delay
@@ -305,7 +305,7 @@ fn test_b(stripped: &str, n: usize, amplitude: f64) {
 
     // Two pairs, and the reason for each:
     //
-    // 1 kHz + 1.1 kHz is where a Tube Screamer is actually played, but it sits
+    // 1 kHz + 1.1 kHz is where an overdrive pedal is actually played, but it sits
     // deep inside the half-band's flat, near-linear-phase region, so if the up
     // leg's dispersion mattered anywhere it would matter least here. It is the
     // musically relevant control.

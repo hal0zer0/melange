@@ -5,13 +5,9 @@
 //! argument. `.tap <node>` returns the RAW inner-rate node voltage. See
 //! `local-docs/inject-directive-plan.md`.
 //!
-//! These tests compile generated code with `rustc` and run it, so — like the
-//! ngspice tests in `spice_validation.rs` — they are `#[ignore]`d from the
-//! default `cargo test`. Run with:
-//!
-//! ```text
-//! cargo test -p melange-validate --test inject_oracle -- --include-ignored
-//! ```
+//! These tests compile generated code with `rustc` and run it. They need only
+//! `rustc` (no ngspice) and take well under a second, so they run in the
+//! default `cargo test`.
 //!
 //! Gates (from the plan's §Gates):
 //!   * (a) a constant injection behind `R` == a literal DC source behind the
@@ -134,7 +130,6 @@ Cpar nx 0 1p
 /// (a) A constant injection behind `R` produces the same raw node voltage as a
 /// literal DC voltage source behind the same `R`.
 #[test]
-#[ignore] // compiles + runs generated code (needs rustc); heavy
 fn inject_constant_equals_literal_source_behind_r() {
     // Deck A: `.inject nx fb R=1k`, driven at constant 1.0 V.
     let deck_a = RC_NODE.to_string();
@@ -198,7 +193,6 @@ fn main() {
 /// loop gain — including the sign of `k` (negative feedback) and the marginal
 /// near-unity case. A flipped stamp sign or wrong `R` would fail this.
 #[test]
-#[ignore]
 fn inject_closed_loop_tracks_analytic_sign_and_impedance() {
     let main = "
 fn run(k: f64, c: f64) -> f64 {
@@ -262,7 +256,6 @@ fn main() {
 /// cap z≈−1 artifact. If the injection went through the up-filter this stopband
 /// tone would be ~−60 dB; the raw tap shows it at full amplitude.
 #[test]
-#[ignore]
 fn inject_inner_rate_tone_reaches_tap_unfiltered() {
     const TONE_NODE: &str = "\
 * node whose RC pole (~80 kHz) passes 48 kHz but is below 96 kHz inner-Nyquist
@@ -318,7 +311,6 @@ fn main() {
 /// instantaneous `rhs += val` produces HALF the correct amplitude (empirically
 /// 0.2524 vs 0.4955); the trapezoidal `rhs += val + val_prev` matches exactly.
 #[test]
-#[ignore]
 fn inject_norton_varying_equals_current_source_behind_shunt() {
     // Deck N: Norton current inject I(t) at nx, shunt R0 = 1 kΩ.
     const NORTON_DECK: &str = "\

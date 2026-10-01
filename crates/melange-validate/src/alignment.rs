@@ -558,7 +558,7 @@ mod tests {
     /// measured against the analytic answer for tones across the band. This is
     /// the floor under every aligned number the harness reports, so it is
     /// pinned rather than assumed: it has to sit far below the residuals being
-    /// measured (order 1e-3 relative on `tube_screamer_u`).
+    /// measured (order 1e-3 relative on `overdrive_pedal_native_u`).
     ///
     /// Measured 2026-09-23 on a unit-amplitude tone: 7.9e-7 at 100 Hz,
     /// 7.1e-9 at 1 kHz, 1.8e-7 at 5 kHz, 1.7e-6 at 15 kHz — three orders

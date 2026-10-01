@@ -1482,38 +1482,6 @@ impl Drop for TempFiles {
     }
 }
 
-/// Check if ngspice is available. Returns `true` if the test should be skipped.
-///
-/// Useful for tests that require ngspice to be installed.
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use melange_validate::should_skip_no_ngspice;
-///
-/// #[test]
-/// fn test_validation() {
-///     if should_skip_no_ngspice() {
-///         return;
-///     }
-///     // ... rest of test
-/// }
-/// ```
-pub fn should_skip_no_ngspice() -> bool {
-    if !spice_runner::is_ngspice_available() {
-        log::warn!("Skipping test: ngspice not available");
-        return true;
-    }
-    false
-}
-
-/// Deprecated: use `should_skip_no_ngspice()` instead.
-/// This function does NOT actually skip the test — it only prints a message.
-#[deprecated(note = "Use should_skip_no_ngspice() which returns bool")]
-pub fn skip_if_no_ngspice() {
-    let _ = should_skip_no_ngspice();
-}
-
 /// Builder for validation runs
 ///
 /// Provides a fluent API for configuring and running validations.

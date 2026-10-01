@@ -1,4 +1,4 @@
-* Neve 1073 Output Amplifier (BA283 AM) — SPICE Validation
+* Three-BJT transformer-coupled output amplifier — SPICE Validation
 * Class A, 3 BJTs: TR1/TR2 (BC184C) + TR3 (2N3055), LO1166 output transformer.
 * CE input (TR1) -> Darlington CE (TR2+TR3) -> LO1166 transformer.
 

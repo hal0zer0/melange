@@ -1,5 +1,5 @@
 Overdrive pedal (op-amp gain stage + diode clipper) - native U element
-* Same TS808-topology circuit as ../tube_screamer, written in melange's own
+* Same TS808-topology circuit as ../overdrive_pedal, written in melange's own
 * `U` syntax instead of hand-expanding the op-amp macromodel. This is the
 * circuit class the README's performance table advertises ("Overdrive pedal |
 * op-amp gain + diode clipper") and the one a first-user actually writes.
