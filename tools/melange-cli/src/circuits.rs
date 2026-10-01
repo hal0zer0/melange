@@ -2,7 +2,7 @@
 //!
 //! Supports multiple circuit sources:
 //! - Builtins: Embedded circuits shipped with melange
-//! - Friendly sources: `source:circuit` pattern (e.g., melange:tube-screamer)
+//! - Friendly sources: `source:circuit` pattern (e.g., melange:overdrive)
 //! - Direct URLs: Full HTTP(S) URLs
 //! - Local files: Path resolution
 
@@ -82,10 +82,10 @@ impl CircuitSource {
 /// use melange_cli::circuits::resolve;
 ///
 /// // Builtin circuit
-/// let source = resolve("tube-screamer").unwrap();
+/// let source = resolve("overdrive").unwrap();
 ///
 /// // Friendly source
-/// let source = resolve("melange:tube-screamer").unwrap();
+/// let source = resolve("melange:overdrive").unwrap();
 ///
 /// // Direct URL
 /// let source = resolve("https://example.com/circuit.cir").unwrap();
@@ -139,7 +139,7 @@ pub fn resolve(circuit_ref: &str) -> Result<CircuitSource> {
 
     // Bare circuit name → fall back to the configured default source. This is
     // the documented intent of `melange builtins`' usage examples
-    // ("melange compile tube-screamer …" with no source prefix).
+    // ("melange compile overdrive …" with no source prefix).
     if is_bare_name(circuit_ref) {
         let config = crate::sources::SourcesConfig::load()?;
         if let Some(default) = config.default_source.clone() {
@@ -188,7 +188,7 @@ pub fn resolve(circuit_ref: &str) -> Result<CircuitSource> {
     )
 }
 
-/// The one builtin demo circuit: a Pultec-style passive tube EQ. Embedded at
+/// The one builtin demo circuit: a passive tube EQ. Embedded at
 /// compile time (`include_str!` from `examples/`, so the builtin and the
 /// bundled example are the same bytes — one source of truth). This gives
 /// melange a way to compile/simulate/demo itself with zero network and no
@@ -257,7 +257,7 @@ fn parse_friendly_ref(circuit_ref: &str) -> Option<(String, String)> {
 pub fn list_builtins() -> Vec<(&'static str, &'static str)> {
     vec![(
         "passive-eq1a",
-        "Pultec-style passive tube EQ — 4 tubes, 3 transformers, global NFB (demo)",
+        "Passive tube EQ — 4 tubes, 3 transformers, global NFB (demo)",
     )]
 }
 
@@ -287,19 +287,19 @@ mod tests {
 
     #[test]
     fn test_parse_friendly_ref_colon() {
-        let result = parse_friendly_ref("melange:tube-screamer");
+        let result = parse_friendly_ref("melange:overdrive");
         assert_eq!(
             result,
-            Some(("melange".to_string(), "tube-screamer".to_string()))
+            Some(("melange".to_string(), "overdrive".to_string()))
         );
     }
 
     #[test]
     fn test_parse_friendly_ref_at() {
-        let result = parse_friendly_ref("tube-screamer@melange");
+        let result = parse_friendly_ref("overdrive@melange");
         assert_eq!(
             result,
-            Some(("melange".to_string(), "tube-screamer".to_string()))
+            Some(("melange".to_string(), "overdrive".to_string()))
         );
     }
 
@@ -358,11 +358,11 @@ mod tests {
 
     #[test]
     fn test_is_bare_name() {
-        assert!(is_bare_name("tube-screamer"));
+        assert!(is_bare_name("overdrive"));
         assert!(is_bare_name("rc_lowpass"));
         assert!(!is_bare_name(""));
-        assert!(!is_bare_name("melange:tube-screamer"));
-        assert!(!is_bare_name("tube-screamer@melange"));
+        assert!(!is_bare_name("melange:overdrive"));
+        assert!(!is_bare_name("overdrive@melange"));
         assert!(!is_bare_name("./local/file.cir"));
         assert!(!is_bare_name("C:\\file.txt"));
         assert!(!is_bare_name("https://example.com/a.cir"));
@@ -374,7 +374,7 @@ mod tests {
         // everything else resolves through configured sources.
         assert!(get_builtin("passive-eq1a").is_some());
         assert!(get_builtin("passive-eq").is_some());
-        assert!(get_builtin("tube-screamer").is_none());
+        assert!(get_builtin("overdrive").is_none());
         assert!(get_builtin("nonexistent").is_none());
     }
 

@@ -186,13 +186,13 @@ mod tests {
 
     #[test]
     fn flat_and_nested_both_index() {
-        let d = tree(&["rc.cir", "fuzz/big-muff.cir"]);
+        let d = tree(&["rc.cir", "fuzz/fuzz-pedal.cir"]);
         let s = render(scan(d.path()).unwrap()).unwrap();
         assert!(
             s.contains("\"rc\": {\n      \"path\": \"rc.cir\"\n    }"),
             "{s}"
         );
-        assert!(s.contains("\"path\": \"fuzz/big-muff.cir\""), "{s}");
+        assert!(s.contains("\"path\": \"fuzz/fuzz-pedal.cir\""), "{s}");
     }
 
     /// The byte contract: sorted names, 2-space indent, trailing newline,

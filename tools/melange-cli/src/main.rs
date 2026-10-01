@@ -516,10 +516,12 @@ enum Commands {
 
         /// Sample rate in Hz the circuit is built for: the solver route,
         /// integrator and oversampling are chosen at this rate, and the test
-        /// tone is rendered at it. With --input-audio the WAV plays at its
-        /// own rate, so set this to match it.
-        #[arg(short, long, default_value = "48000")]
-        sample_rate: f64,
+        /// tone is rendered at it. Default 48000. With --input-audio and no
+        /// --sample-rate, the circuit is built at the WAV's own rate; a
+        /// --sample-rate that differs from the WAV's rate is refused (a build
+        /// for one rate does not carry over to another).
+        #[arg(short, long)]
+        sample_rate: Option<f64>,
 
         /// Input node name
         #[arg(short = 'i', short_alias = 'I', long, default_value = "in")]
@@ -909,7 +911,7 @@ enum Commands {
     /// Generate or check a circuit repository's `circuits-index.json`.
     ///
     /// Publishing one lets anyone resolve your circuits by SHORT NAME
-    /// (`yourrepo:big-muff`) instead of by path, which means you can reorganise
+    /// (`yourrepo:fuzz-pedal`) instead of by path, which means you can reorganise
     /// — promote a deck between tiers, rename a directory — without breaking
     /// every consumer. Format spec: docs/CIRCUIT_INDEX.md.
     Index {
@@ -1425,6 +1427,21 @@ fn main() -> Result<()> {
                     tube_grid_fa
                 );
             }
+            let wav_rate = input_audio
+                .as_deref()
+                .map(|p| {
+                    hound::WavReader::open(p)
+                        .map(|r| r.spec().sample_rate)
+                        .with_context(|| {
+                            format!(
+                                "Failed to read the --input-audio WAV header: {}",
+                                p.display()
+                            )
+                        })
+                })
+                .transpose()?;
+            let (sample_rate, sample_rate_source) =
+                resolve_simulate_sample_rate(sample_rate, wav_rate)?;
             let subsample_fire_mode = parse_subsample_fire_mode(&subsample_fire)?;
             let rail_mode = melange_solver::codegen::OpampRailMode::parse(&opamp_rail_mode)
                 .ok_or_else(|| {
@@ -1475,6 +1492,7 @@ fn main() -> Result<()> {
                     input_audio: input_audio.as_deref(),
                     output: &output,
                     sample_rate,
+                    sample_rate_source,
                     input_node: &input_node,
                     output_node: &output_node,
                     duration,
@@ -3095,6 +3113,9 @@ struct SimulateOptions<'a> {
     input_audio: Option<&'a std::path::Path>,
     output: &'a PathBuf,
     sample_rate: f64,
+    /// Where `sample_rate` came from (see [`resolve_simulate_sample_rate`]);
+    /// printed under `-v`.
+    sample_rate_source: &'static str,
     input_node: &'a str,
     output_node: &'a str,
     duration: f64,
@@ -3372,6 +3393,35 @@ fn resolve_switch_overrides(
     Ok(resolved)
 }
 
+/// The rate `simulate` builds the circuit at, and where it came from.
+///
+/// The build (solver route, integrator verdict, oversampling) is taken at one
+/// rate and the rendering binary runs at the input WAV's own rate, which
+/// `set_sample_rate` does not re-route. So with an input WAV the two must be
+/// the same rate: absent `--sample-rate` the WAV's rate is used, and an
+/// explicit `--sample-rate` that differs is refused rather than rendered at a
+/// rate the build was not made for. Without a WAV: the flag, else 48 kHz.
+fn resolve_simulate_sample_rate(
+    flag: Option<f64>,
+    wav_rate: Option<u32>,
+) -> Result<(f64, &'static str)> {
+    let (rate, source) = match (flag, wav_rate) {
+        (Some(sr), Some(wav)) if sr != wav as f64 => anyhow::bail!(
+            "--sample-rate {sr} Hz does not match the --input-audio WAV's {wav} Hz. The \
+             circuit is built for one rate (solver route, integrator, oversampling) and the \
+             WAV would be rendered at the other. Omit --sample-rate to build at the WAV's \
+             {wav} Hz, or resample the WAV to {sr} Hz."
+        ),
+        (Some(sr), _) => (sr, "--sample-rate"),
+        (None, Some(wav)) => (wav as f64, "from the --input-audio WAV"),
+        (None, None) => (48_000.0, "default"),
+    };
+    if rate <= 0.0 || !rate.is_finite() {
+        anyhow::bail!("sample rate must be positive and finite, got {rate}");
+    }
+    Ok((rate, source))
+}
+
 /// A path as the UTF-8 argument the generated simulate binary reads
 /// (`std::env::args`). A path that is not UTF-8 is refused, naming the flag:
 /// substituting a default name (`output.wav`) wrote somewhere the user never
@@ -3552,6 +3602,10 @@ fn simulate_circuit_source(
         })
         .map_err(build_error)?;
     if opts.verbose {
+        println!(
+            "  Sample rate: {} Hz ({})",
+            opts.sample_rate, opts.sample_rate_source
+        );
         print_run_route_detail(&built, opts.max_iter.is_some(), &|l| println!("{l}"));
     } else {
         println!(
@@ -5608,6 +5662,38 @@ mod silent_output_tests {
 mod tests {
     use super::*;
 
+    #[test]
+    fn simulate_sample_rate_follows_the_input_wav() {
+        // No WAV: the flag, else 48 kHz.
+        assert_eq!(
+            resolve_simulate_sample_rate(None, None).unwrap(),
+            (48_000.0, "default")
+        );
+        assert_eq!(
+            resolve_simulate_sample_rate(Some(96_000.0), None).unwrap(),
+            (96_000.0, "--sample-rate")
+        );
+        // WAV, no flag: the WAV's rate.
+        assert_eq!(
+            resolve_simulate_sample_rate(None, Some(44_100)).unwrap(),
+            (44_100.0, "from the --input-audio WAV")
+        );
+        // WAV and a matching flag: fine.
+        assert_eq!(
+            resolve_simulate_sample_rate(Some(44_100.0), Some(44_100)).unwrap(),
+            (44_100.0, "--sample-rate")
+        );
+        // WAV and a mismatching flag: refused, naming both rates.
+        let err = resolve_simulate_sample_rate(Some(48_000.0), Some(44_100))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("48000 Hz"), "{err}");
+        assert!(err.contains("44100 Hz"), "{err}");
+        // Nonsense rates are refused rather than built.
+        assert!(resolve_simulate_sample_rate(Some(0.0), None).is_err());
+        assert!(resolve_simulate_sample_rate(None, Some(0)).is_err());
+    }
+
     /// The `--format plugin` hint must name a DIRECTORY derived from the
     /// circuit, never echo back the `--format code` output FILE.
     #[test]
@@ -5774,7 +5860,7 @@ mod tests {
     /// via `from_netlist_with_grid_off` with an EMPTY forward-active set,
     /// silently discarding the FA BJT reduction the caller had already
     /// applied (while the compile summary still printed the FA line).
-    /// Plexi-class circuits need both reductions composed.
+    /// Circuits with both pentodes and forward-active BJTs need both reductions composed.
     #[test]
     fn grid_off_rebuild_preserves_forward_active_reduction() {
         use melange_solver::mna::MnaSystem;

@@ -509,14 +509,14 @@ mod tests {
     fn local_source_resolves_through_its_index() {
         let d = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(d.path().join("fuzz")).unwrap();
-        std::fs::write(d.path().join("fuzz/big-muff.cir"), "* x\n").unwrap();
+        std::fs::write(d.path().join("fuzz/fuzz-pedal.cir"), "* x\n").unwrap();
         std::fs::write(
             d.path().join("circuits-index.json"),
-            r#"{"schema":1,"circuits":{"big-muff":{"path":"fuzz/big-muff.cir"}}}"#,
+            r#"{"schema":1,"circuits":{"fuzz-pedal":{"path":"fuzz/fuzz-pedal.cir"}}}"#,
         )
         .unwrap();
-        let got = SourcesConfig::resolve_local(d.path(), "big-muff").unwrap();
-        assert_eq!(got, d.path().join("fuzz/big-muff.cir"));
+        let got = SourcesConfig::resolve_local(d.path(), "fuzz-pedal").unwrap();
+        assert_eq!(got, d.path().join("fuzz/fuzz-pedal.cir"));
     }
 
     /// No index: flat layout, same fallback the remote path uses.
@@ -535,16 +535,16 @@ mod tests {
     #[test]
     fn local_missing_name_suggests_instead_of_guessing() {
         let d = tempfile::tempdir().unwrap();
-        std::fs::write(d.path().join("big-muff.cir"), "* x\n").unwrap();
+        std::fs::write(d.path().join("fuzz-pedal.cir"), "* x\n").unwrap();
         std::fs::write(
             d.path().join("circuits-index.json"),
-            r#"{"schema":1,"circuits":{"big-muff":{"path":"big-muff.cir"}}}"#,
+            r#"{"schema":1,"circuits":{"fuzz-pedal":{"path":"fuzz-pedal.cir"}}}"#,
         )
         .unwrap();
-        let e = SourcesConfig::resolve_local(d.path(), "bigmuff")
+        let e = SourcesConfig::resolve_local(d.path(), "fuzzpedal")
             .unwrap_err()
             .to_string();
-        assert!(e.contains("Did you mean: big-muff?"), "{e}");
+        assert!(e.contains("Did you mean: fuzz-pedal?"), "{e}");
     }
 
     /// A relative local source that does not resolve from here says so,
@@ -611,9 +611,9 @@ mod tests {
 
         // Without extension
         let url = config
-            .resolve_circuit("tonestack", "fender-bassman")
+            .resolve_circuit("tonestack", "bass-amp-tonestack")
             .unwrap();
-        assert!(url.ends_with("fender-bassman.cir"));
+        assert!(url.ends_with("bass-amp-tonestack.cir"));
 
         // With extension
         let url = config.resolve_circuit("tonestack", "test.cir").unwrap();

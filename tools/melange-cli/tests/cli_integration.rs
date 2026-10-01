@@ -453,6 +453,91 @@ fn test_simulate_sine_tone() {
     let _ = std::fs::remove_file(&cir);
 }
 
+/// Write a short mono 16-bit PCM sine WAV at `rate` Hz for `--input-audio`
+/// tests. 16-bit mono, because hound writes that as plain PCM (format 1); its
+/// float32 output is WAVE_FORMAT_EXTENSIBLE, which the rendering binary's
+/// reader does not accept.
+fn write_test_input_wav(name: &str, rate: u32) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("melange_cli_test_{name}.wav"));
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut w = hound::WavWriter::create(&path, spec).expect("create input WAV");
+    for i in 0..(rate / 20) {
+        let t = i as f64 / rate as f64;
+        let v = 0.1 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();
+        w.write_sample((v * 32767.0) as i16)
+            .expect("write input WAV sample");
+    }
+    w.finalize().expect("finalize input WAV");
+    path
+}
+
+/// The build rate and the rate the WAV renders at must be one rate: the route
+/// and integrator verdict are taken at the build rate and `set_sample_rate`
+/// does not re-route. With no `--sample-rate`, a 44.1 kHz WAV builds at 44.1 kHz.
+#[test]
+fn test_simulate_input_wav_sets_build_rate() {
+    let cir = write_test_circuit(TEST_RC_LOWPASS, "sim_wav_rate");
+    let in_wav = write_test_input_wav("sim_wav_rate_in", 44_100);
+    let out_wav = std::env::temp_dir().join("melange_cli_test_sim_wav_rate_out.wav");
+    let stdout = run_melange(&[
+        "-v",
+        "simulate",
+        cir.to_str().unwrap(),
+        "--input-audio",
+        in_wav.to_str().unwrap(),
+        "--output",
+        out_wav.to_str().unwrap(),
+    ]);
+    let out_rate = hound::WavReader::open(&out_wav)
+        .expect("output WAV")
+        .spec()
+        .sample_rate;
+    let _ = std::fs::remove_file(&cir);
+    let _ = std::fs::remove_file(&in_wav);
+    let _ = std::fs::remove_file(&out_wav);
+    assert!(
+        stdout.contains("Sample rate: 44100 Hz (from the --input-audio WAV)"),
+        "builds at the WAV's rate: {stdout}"
+    );
+    assert_eq!(out_rate, 44_100);
+}
+
+/// An explicit `--sample-rate` that differs from the input WAV's rate is
+/// refused, naming both rates and both remedies, before anything is rendered.
+#[test]
+fn test_simulate_refuses_sample_rate_mismatching_input_wav() {
+    let cir = write_test_circuit(TEST_RC_LOWPASS, "sim_wav_mismatch");
+    let in_wav = write_test_input_wav("sim_wav_mismatch_in", 44_100);
+    let out_wav = std::env::temp_dir().join("melange_cli_test_sim_wav_mismatch_out.wav");
+    let _ = std::fs::remove_file(&out_wav);
+    let stderr = run_melange_fail(&[
+        "simulate",
+        cir.to_str().unwrap(),
+        "--input-audio",
+        in_wav.to_str().unwrap(),
+        "--sample-rate",
+        "48000",
+        "--output",
+        out_wav.to_str().unwrap(),
+    ]);
+    let rendered = out_wav.exists();
+    let _ = std::fs::remove_file(&cir);
+    let _ = std::fs::remove_file(&in_wav);
+    let _ = std::fs::remove_file(&out_wav);
+    assert!(
+        stderr.contains("--sample-rate 48000 Hz does not match the --input-audio WAV's 44100 Hz"),
+        "names both rates: {stderr}"
+    );
+    assert!(stderr.contains("Omit --sample-rate"), "{stderr}");
+    assert!(stderr.contains("resample the WAV"), "{stderr}");
+    assert!(!rendered, "a refused run must not render");
+}
+
 #[test]
 fn test_simulate_switch_selects_position() {
     // `simulate --switch NAME=POS` reaches non-rest switch positions at runtime
