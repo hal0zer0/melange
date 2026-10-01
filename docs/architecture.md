@@ -15,7 +15,7 @@ Schematic → Netlist → MNA Matrices → DK Kernel → Optimized Rust → Plug
 ```
 
 ### Boundary 1: Schematic → Netlist (Human)
-Reading a schematic and producing a correct netlist requires domain expertise that cannot be fully automated. Schematic ambiguities (wrong component values, revision mismatches, topology misidentification) have been responsible for the worst bugs in real projects. Melange assists with OCR and validation tools, but a human must verify the topology.
+Reading a schematic and producing a correct netlist requires domain expertise that cannot be fully automated. Schematic ambiguities (wrong component values, revision mismatches, topology misidentification) have been responsible for the worst bugs in real projects. Melange checks what it can mechanically (it refuses a node that touches only one terminal of a two-terminal element and reports DC islands; `melange nodes`, `dc-op` and `validate` help you inspect the result), but a human must verify the topology.
 
 ### Boundary 2: Netlist → MNA Matrices (melange-solver)
 Purely mechanical. Each component stamps its contribution into G (conductance) and C (capacitance) matrices following deterministic rules. A resistor R between nodes i and j stamps +1/R on diagonals (i,i) and (j,j), and -1/R on off-diagonals (i,j) and (j,i). Capacitors stamp into C identically. Voltage sources add rows/columns. This is the easiest part to automate and the most tedious to do by hand.
@@ -34,7 +34,7 @@ The solver generates Rust code with:
 - Inlined NR iteration with the specific Jacobian structure
 - Precomputed constant matrices as `const` arrays
 - Per-block matrix rebuild for time-varying elements (pots, switches)
-- Companion model update functions
+- Charge-form history update (`q_dot`, committed with `v_prev`)
 
 The generated code should be indistinguishable in performance from hand-written code.
 
@@ -90,7 +90,7 @@ pub trait NonlinearDevice<const N: usize> {
 - `KorenPentode { … }` — vacuum pentode / beam tetrode (N=3)
 - `Vca { vscale, thd, … }` — VCA (THAT 2180 style, N=2)
 - `CdsLdr { r_min, r_max, gamma, attack_tau, release_tau }` — photoresistor (N=1; placed in a netlist via the `O` element on the stateful-device codegen path)
-- `BoyleOpamp` / `SimpleOpamp` — operational amplifier models (linear, no NR dimension)
+- `SimpleOpamp` (clamped linear gain) / `IdealOpamp` — library op-amp models. The solver does not use them: codegen stamps each op-amp itself as a VCCS into G (no NR dimension; rail handling per `--opamp-rail-mode`). `BoyleOpamp` is a doc-hidden placeholder parameter struct with no device implementation, used by nothing.
 
 **SPICE Model Card Import:**
 - Parse `.model` statements from SPICE netlists
@@ -113,7 +113,7 @@ The core. Depends on primitives and devices.
 - Augmented MNA for inductors (branch current variables)
 
 **DK Kernel / Nodal Solver:**
-- `DkKernel::from_mna(&mna, sample_rate)` → DK kernel with K matrix
+- `DkKernel::from_mna(&mna, sample_rate)` (decks without inductors) or `DkKernel::from_mna_augmented` (inductors as branch rows) → DK kernel with K matrix
 - Three codegen paths: DK Schur, Nodal Schur, Nodal Full LU (auto-selected)
 - Per-block matrix rebuild for `.pot`/`.wiper` elements on value change
 
@@ -126,26 +126,27 @@ The core. Depends on primitives and devices.
 ### melange-validate (Layer 4)
 Depends on solver. Requires ngspice installed on the system.
 
-**ngspice Runner:**
-- Generate transient/AC/DC analysis netlists from circuit descriptions
-- Invoke ngspice, parse raw binary or ASCII output
-- Extract node voltages, branch currents, frequency response
+Transient comparison of a melange build against ngspice on the same deck.
+`melange validate` is its command-line front end; `docs/aidocs/SPICE_VALIDATION.md`
+is the protocol.
 
-**Comparison Engine:**
-- `compare_dc(spice_op, rust_op, tolerance)` — DC operating point validation
-- `compare_ac(spice_sweep, rust_sweep, freq_range, db_tolerance)` — frequency response
-- `compare_thd(spice_harmonics, rust_harmonics, tolerance)` — harmonic distortion
-- `compare_transient(spice_wav, rust_wav, time_range, tolerance)` — waveform comparison
-
-**Measurement Routines:**
-- `measure_gain(dut, freq, amplitude)` — sine-through-DUT gain
-- `measure_sweep(dut, f_start, f_end, points)` — frequency sweep
-- `measure_harmonics(dut, freq, amplitude, num_harmonics)` — THD analysis
-- `measure_centroid(signal, fs)` — spectral centroid tracking
-
-**Test Generators:**
-- Given SPICE reference data, emit `#[test]` functions with tolerance assertions
-- Three-tier methodology: circuit-only, voice-model, full-plugin
+- `validate_circuit` / `validate_circuit_with_options` — build the deck through
+  `melange_solver::build::build` (the build `compile` ships), run the generated
+  solver, run ngspice, compare
+- `spice_runner` — run ngspice transients (PWL and Thevenin drives) and parse
+  the output; `is_ngspice_available()`
+- Reference twins for devices ngspice lacks or models differently: triode and
+  pentode B-source subcircuits, the linear op-amp VCCS, JFET, behavioral,
+  saturating-inductor, thermal-key and `.linearize` translations
+- `reference` — checks the ngspice reference is itself converged
+- `alignment` — best-fit constant-delay alignment before every comparison
+- `comparison::compare_signals` → `ComparisonReport` (RMS, peak, max-relative
+  and normalized error, correlation, SNR, THD), with strict and relaxed
+  `ComparisonConfig` profiles
+- `rate_sweep` — validate at 1×, 2× and 4× the rate to separate
+  discretization error from model error (`melange validate --rate-sweep`)
+- `deck_guard` — refuses runs the two engines cannot honestly compare
+- `visualizer` — HTML, CSV and JSON reports
 
 ### melange-cli
 The command-line interface for working with circuits.
@@ -153,12 +154,18 @@ The command-line interface for working with circuits.
 **Subcommands:**
 - `melange compile <netlist>` — parse netlist, generate optimized Rust code or plugin project
 - `melange simulate <netlist>` — compile and run circuit, output WAV
-- `melange analyze <netlist>` — AC frequency response analysis
+- `melange analyze <netlist>` — frequency response, measured by driving the compiled circuit with a sine per frequency
 - `melange validate <netlist>` — compare against ngspice, report deltas
 - `melange nodes <netlist>` — show circuit nodes and devices
+- `melange dc-op <netlist>` — the DC operating point the build ships
 - `melange sources list|add|remove|show` — manage circuit source repositories
+- `melange index <dir>` — write or check a `circuits-index.json`
+- `melange cache list|clear|stats` — the circuit cache and the compiled-binary cache
 - `melange import <kicad_netlist>` — import KiCad netlist to .cir format
 - `melange builtins` — list built-in example circuits
+
+The CLI lives in `tools/melange-cli/src/`: `cli.rs` (the clap definitions),
+`args.rs`, `common.rs`, and one module per subcommand in `cmd/`.
 
 ## The Generality vs. Performance Problem
 

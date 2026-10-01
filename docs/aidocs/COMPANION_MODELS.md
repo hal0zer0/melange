@@ -154,9 +154,9 @@ the linear `alpha·L0·(i_{n+1} − i_n)` becomes `alpha·(Φ(i_{n+1}) − Φ(i_
 **Inductors are augmented branch rows.** Generated code carries every
 inductor, coupled pair and transformer winding as a branch row whose `L` sits
 in `C`, so its history is part of `H` and `q_dot`. Code generation refuses a
-companion-model kernel (`DkKernel::from_mna` on an inductor deck); the library
-`DkKernel` and runtime `LinearSolver` keep the whole-system companion
-(`DK_METHOD.md`).
+companion-model kernel (`DkKernel::from_mna` on an inductor deck); only the
+deprecated library `LinearSolver` path keeps the whole-system companion
+(`DK_METHOD.md`; see the last section).
 
 ### Equivalence with the whole-system form
 
@@ -230,9 +230,8 @@ Promotion to backward Euler is decided on the charge-form propagator
 (`codegen/stability.rs`) is still the nodal emitter's Schur-versus-full-LU
 input (`spectral_radius_s_aneg`), and the router's DK-kernel estimate still
 selects DK or nodal; neither decides the integrator. The library `DkKernel`
-(`crates/melange-solver/src/dk.rs`) and the runtime `LinearSolver` built on
-it (`crates/melange-solver/src/linear_solver.rs`, linear circuits only, where
-the forms coincide) keep the whole-system matrices.
+(`crates/melange-solver/src/dk.rs`) keeps the whole-system `a_neg`, and the
+deprecated `LinearSolver` built on it renders with it (last section).
 
 ## Key Insight
 Trapezoidal rule is implicit: solution at t[n] depends on itself. Companion model makes this explicit by converting differential equation to algebraic equation with equivalent conductance.
@@ -244,3 +243,25 @@ Trapezoidal rule is implicit: solution at t[n] depends on itself. Companion mode
 ## References
 - http://circsimproj.blogspot.com/2009/07/companion-models.html
 - Pillage & Rohrer, "Electronic Circuit and System Simulation Methods"
+
+## Deprecated: the library companion-inductor solver
+
+Deprecated in 0.1.14, removed in the next release. No build uses any of it;
+generated code carries every inductor as an augmented branch row in the
+charge form above.
+
+- `LinearSolver` and `SolverError` (`crates/melange-solver/src/linear_solver.rs`,
+  re-exported at the crate root) and the `melange_solver::solver` module that
+  re-exports them. `LinearSolver` is an M=0 library solver whose
+  discretisation is the whole-system form (`A_neg = alpha·C − G`, sources
+  summed at `n` and `n+1`, companion-model inductors), not the charge form.
+- The companion inductor state on `DkKernel`: `InductorInfo`,
+  `CoupledInductorState`, `TransformerGroupState`, the `inductors` /
+  `coupled_inductors` / `transformer_groups` fields and
+  `update_inductors` / `update_coupled_inductors` /
+  `update_transformer_groups` (`crates/melange-solver/src/dk.rs`).
+- The companion stamps `MnaSystem::get_a_matrix` / `get_a_neg_matrix` apply
+  to an inductor deck (`g_eq = T/(2L)` in both, `MNA.md`). `DkKernel::from_mna`
+  itself stays: builds use it for every deck without inductors, and
+  `DkKernel::from_mna_augmented` for decks with them.
+- `MnaSystem::stamp_resistor` (unused by the MNA builder).

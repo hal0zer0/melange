@@ -3,11 +3,12 @@
 Agent research library for melange circuit simulation. Each doc is optimized for
 AI agent consumption: dense equations, code patterns, cross-references, no narrative.
 
-> **Architecture note (2026-04).** The runtime solvers (`CircuitSolver`,
-> `NodalSolver`, `DeviceEntry`, `solve_md`, `initialize_dc_op`) have been
-> removed. `crates/melange-solver/src/solver.rs` is now an 8-line stub
-> re-exporting `LinearSolver` only. **All circuit processing flows through
-> the codegen pipeline** (`Netlist → MNA → DkKernel → CircuitIR → Emitter →
+> **Architecture note.** There is no runtime circuit solver (`CircuitSolver`,
+> `NodalSolver`, `DeviceEntry`, `solve_md`, `initialize_dc_op` are gone).
+> `crates/melange-solver/src/solver.rs` re-exports `LinearSolver` only, and
+> both the module and `LinearSolver` are deprecated since 0.1.14 and removed
+> in the next release (`COMPANION_MODELS.md`, last section). **All circuit
+> processing flows through the codegen pipeline** (`Netlist → MNA → DkKernel → CircuitIR → Emitter →
 > generated Rust code`). If you find docs or examples that reference a
 > "runtime solver", treat them as historical and prefer the codegen-equivalent
 > path. The math is the same — only the entry point differs.

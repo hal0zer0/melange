@@ -127,7 +127,7 @@ a_neg = alpha*C          // Correct — no G term; trap adds q_dot
 The library `MnaSystem::get_a_neg_matrix` / `DkKernel` still return the
 whole-system `alpha*C - G` (used by the routing estimates — the DK/nodal
 "trapezoidal unstable" trigger and the nodal Schur-vs-full-LU gate — and by
-the runtime `LinearSolver`; backward-Euler promotion is the ring predicate,
+the deprecated library `LinearSolver`; backward-Euler promotion is the ring predicate,
 `RING_PREDICATE.md`, not this operator). Mixing terms of the two forms double-counts a source.
 
 ### Check No Separate History

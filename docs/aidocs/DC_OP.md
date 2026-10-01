@@ -475,7 +475,7 @@ V(coll) ≈ 1.73V  (12 - 1.51e-3 * 6800)
 | PNP BJT wrong polarity | Missing sign parameter | Check `is_pnp` flag in DeviceParams |
 | BJT oscillation in transient | Mixed integration mismatch | Fixed: DK now uses trapezoidal for nonlinear currents |
 
-## Runtime DC OP Recompute (Oomox P6, Phase E)
+## Runtime DC OP Recompute
 
 The compile-time DC OP baked into the generated code (`DC_OP` / `DC_NL_I`
 constants) is computed at **nominal** pot/switch values. Plugins that apply
@@ -486,8 +486,8 @@ point. Without intervention the solver has to silence-warm for `5 · τ_max`
 to drift into the jittered equilibrium — seconds of silent output for
 circuits with large coupling caps.
 
-Phase E adds an opt-in runtime DC-OP recompute so plugins can jump to the
-jittered equilibrium in tens of microseconds instead:
+The opt-in runtime DC-OP recompute lets a plugin jump to the jittered
+equilibrium in tens of microseconds instead:
 
 ```rust
 let mut state = CircuitState::default();
@@ -514,7 +514,6 @@ audio-thread safe** — intended for plugin init / parameter-change callbacks.
 | `dc_block_y_prev` | `[0.0; NUM_OUTPUTS]` — DC blocker's fixed point |
 | `pot_N_resistance_prev` | `pot_N_resistance` (kept in step with the current value) |
 | `os_up_state`, `os_dn_state` (+ `_outer`) | Zeroed — stale DC trajectory discarded |
-| `ind_*_prev`, `ci_*_prev`, `xfmr_*_prev`, `*_i_hist` | Zeroed (DK MVP companion-shunt equilibrium has `V_L = I_L = 0`) |
 | `noise_rng_state` | **Preserved** — resetting would repeat the same noise after every param change |
 | `pot_N_resistance`, `switch_N_position` | **Preserved** — they're the INPUT to this solve |
 | `device_N_*` runtime params, `device_N_tj` | **Preserved** |
@@ -566,21 +565,15 @@ model: a comparator railed at rest landed at 8989 V on a 15 V supply
   stay on the warmup loop.
 - **No parasitic-BJT internal-node expansion on the DK path** (those
   nodes are ill-conditioning risks outside the MVP).
-- **DC-carrying inductors (plate chokes, DC-biased transformer windings)
-  are refused, not approximated.** The recompute converges to the exact
-  compile-time `DC_OP` for inductor-free circuits — and for windings that
-  carry no DC current, where `|V_L| < 1 mV` — matching bitwise. But a
-  winding with a nonzero DC voltage drop has no self-consistent state
-  under the const-`G` companion shunt (`g_eq = T/(2L)`, baked into `G`),
-  so the writeback guard in `dc_op_emitter.rs`
-  (`emit_dc_op_writeback_dk`) checks every winding's `|V_L|` after
-  convergence: on any `|V_L| > 1 mV` it bumps `diag_nr_max_iter_count`
-  and returns with state **untouched**, rather than writing back a false
-  "settled" state that would slew audibly. Callers then fall back to the
-  `WARMUP_SAMPLES_RECOMMENDED` loop, which lets the true companion
-  history build up over the warmup window.
-- **Nodal full-LU path** (passive-eq, 4kbuscomp, VCR ALC, wurli power amp)
-  ships a stub body that bumps `diag_nr_max_iter_count` and returns —
+- **Inductors need no special case.** Inductors, coupled inductors and
+  transformer windings are augmented branch rows whose `L` sits in `C`; in
+  `G` each row is the short `v_a − v_b = 0`, the same DC short `dc_op.rs`
+  stamps. The branch currents are entries of `v_node`, written back with
+  it; in trapezoidal builds the zeroed `q_dot` sets their `dΦ/dt` to zero. A DC-carrying
+  choke recomputes to the baked `DC_OP`
+  (`dc_op_recompute_tests.rs::fix3_dc_biased_choke_shipped_recompute_reaches_inductor_short_op`).
+- **Nodal path, Schur and full-LU alike** (passive-eq, 4kbuscomp, VCR ALC,
+  wurli power amp) ships a stub body that bumps `diag_nr_max_iter_count` and returns —
   **this is the permanent path for nodal-routed circuits**, not a
   temporary placeholder. The method surface is uniform across DK and
   nodal so host code doesn't need a solver-path branch, but on nodal

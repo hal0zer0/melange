@@ -16,7 +16,7 @@ codegen-emitted templates.
 ## Constants
 
 ```
-SINGULARITY_THRESHOLD = 1e-15  (dk.rs, solver.rs, codegen)
+SINGULARITY_THRESHOLD = 1e-15  (dk.rs, codegen)
 LU singularity pivot  = 1e-30  (dc_op.rs, mna.rs, state.rs.tera)
 Condition warning     = 1e13   (dk.rs)
 ```
@@ -202,7 +202,7 @@ Used in `dk.rs` after computing S = A^{-1}. Not a hard error; diagnostic only.
 
 ```
 mat_mul(A, B) -> C         C[i][j] = sum_k A[i][k] * B[k][j]
-mat_vec_mul(A, x) -> y     y[i] = sum_j A[i][j] * x[j]
+mat_vec_mul(A, x) -> y     y[i] = sum_j A[i][j] * x[j]   (test-only)
 infinity_norm(A) -> f64    max absolute row sum
 flatten_matrix(M, r, c)    2D -> 1D row-major (index = row * cols + col)
 ```

@@ -429,7 +429,7 @@ Pname n_plate n_grid n_cathode n_screen [n_suppressor] modelname
 | `n_grid` | Control grid (g1) terminal node |
 | `n_cathode` | Cathode terminal node |
 | `n_screen` | Screen grid (g2) terminal node |
-| `n_suppressor` | *Optional* suppressor grid (g3) node. When omitted, the suppressor is electrically strapped to the cathode (the universal case for audio beam tetrodes and strapped pentodes). Phase 1a models a provided suppressor as cathode-tied as well. |
+| `n_suppressor` | *Optional* suppressor grid (g3) node. The suppressor is modelled as tied to the cathode (the universal case for audio beam tetrodes and strapped pentodes). When given, it must be the cathode node itself; any other node is refused, naming the node. Omitting it means the same thing. |
 | `modelname` | Name of `.model` definition (type: VP) |
 
 **Examples:**
@@ -437,8 +437,8 @@ Pname n_plate n_grid n_cathode n_screen [n_suppressor] modelname
 * EL84 with suppressor strapped to cathode (4-terminal form)
 P1 plate1 grid1 cath1 scr1 EL84-P
 
-* EF86 with explicit suppressor (5-terminal form, g3 phase-1a: tied to cath)
-P2 plate2 grid2 cath2 scr2 sup2 EF86
+* EF86 with explicit suppressor (5-terminal form: the 5th node must be the cathode)
+P2 plate2 grid2 cath2 scr2 cath2 EF86
 
 .model EL84-P VP(MU=23.36 EX=1.138 KG1=117.4 KG2=1275 KP=152.4 KVB=4015.8
 +                ALPHA_S=7.66 A_FACTOR=4.344e-4 BETA_FACTOR=0.148)
@@ -516,8 +516,8 @@ P2 plate2 grid2 cath2 scr2 sup2 EF86
   - 6386 / 6BC8 / 6BA6 datasheet-refit entries for variable-mu
     compressor tubes. Math path is ready (phase 1c variable-mu §5), just
     waiting on the datasheet fit work.
-  - Independent suppressor dynamics on true 5-element pentodes —
-    suppressor is always electrically tied to cathode.
+  - A suppressor wired anywhere but the cathode (refused): independent
+    suppressor dynamics on true 5-element pentodes are not modelled.
 
 ---
 

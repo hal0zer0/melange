@@ -51,7 +51,7 @@ C[i,j] -= C,  C[j,i] -= C
 
 Stamped into the C matrix, NOT G. The DK method combines them: `A = G + (2/T)*C`.
 
-### Inductor (Companion Model — DK/LinearSolver/Codegen)
+### Inductor (Companion Model — deprecated library path)
 
 Trapezoidal companion: inductor becomes conductance `g_eq = T/(2L)`.
 
@@ -67,18 +67,21 @@ Stamped directly into the discretized matrices during `build_discretized_matrix(
 not into G or C separately. History current i_hist injected into RHS each sample.
 
 This is the library `MnaSystem` / `DkKernel` / `LinearSolver` form (whole-system
-history, `i_hist = 2*i_L[n]`). Generated code uses the charge form: the `g_eq`
-stamp goes into `A` only, and `i_hist = i_L[n] + g_eq*v_L[n]` carries the whole
-known current (`COMPANION_MODELS.md`, "Charge (Companion) Form"). The CLI never
-takes this path — it always builds inductors as augmented branch rows.
+history, `i_hist = 2*i_L[n]`), deprecated in 0.1.14 and removed in the next
+release with `LinearSolver` (`COMPANION_MODELS.md`, last section). In the
+charge form the equivalent companion would put `g_eq` in `A` only, with
+`i_hist = i_L[n] + g_eq*v_L[n]` carrying the whole known current
+(`COMPANION_MODELS.md`, "Charge (Companion) Form"), but no build uses a
+companion inductor: every build carries inductors as augmented branch rows
+(next section), and code generation refuses a companion-model kernel.
 
 **Limitation**: For large inductors (L > ~1H at audio rates), g_eq ≈ 8e-8 S.
 This creates ill-conditioned A matrices (cond ~ 1e9+). See augmented MNA below.
 
-### Inductor (Augmented MNA — Nodal Codegen Path)
+### Inductor (Augmented MNA — every build, DK and nodal)
 
-The codegen "nodal" routing path uses augmented MNA for inductors (Ho et al.
-1975): each inductor winding adds an extra variable (branch current j_L) with
+Every build uses augmented MNA for inductors (Ho et al. 1975; DK through
+`DkKernel::from_mna_augmented`): each inductor winding adds an extra variable (branch current j_L) with
 inductance L in the C matrix. Built by `MnaSystem::build_augmented_matrices` in
 `crates/melange-solver/src/mna.rs`.
 
@@ -222,6 +225,10 @@ KVL constraint (row k):
 
 ### Coupled Inductors (2-Winding Transformer)
 
+Companion stamps below are the deprecated library path, like the single
+inductor above; builds carry windings as augmented branch rows ("Inductor (Augmented MNA)"
+above).
+
 Mutual inductance M = k * sqrt(L1 * L2), where k is coupling coefficient.
 
 ```
@@ -252,6 +259,13 @@ y_ij = g_sign * (T/2) * Y_raw[i][j]
 Stamp all diagonal and off-diagonal entries using
 stamp_conductance and stamp_mutual_conductance.
 ```
+
+A singular or non-finite `L_mat` is an error from `invert_small_matrix`: the
+companion stamp refuses it, naming the group. The MNA builder (every build)
+warns when a group's inductance matrix is not positive-definite. For two
+windings the test is the exact determinant; for three or more it is
+`min_i inv(L_mat)[i][i] > 0`, which is necessary for positive-definiteness
+but not sufficient, so an indefinite matrix can pass. Known, not fixed.
 
 ### Ideal Transformer (Augmented MNA)
 

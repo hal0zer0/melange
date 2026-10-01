@@ -322,7 +322,7 @@ but only as the twin-drift guard's subject and the source of the analytic seed.
 
 ### What an oversampled build costs, measured
 
-`tube_screamer_u`, 48 kHz, 0.3 V, 1 kHz tone, re-baselined 2026-09-23 against an
+`overdrive_pedal_native_u`, 48 kHz, 0.3 V, 1 kHz tone, re-baselined 2026-09-23 against an
 unfiltered delay-aligned reference. The 20 ms window is transient-dominated
 (`C_out` 0.1 µF into 1 MΩ gives τ = 0.1 s; the DC blocker's τ is 32 ms), so the
 500 ms rows are the ones to read:
@@ -355,7 +355,7 @@ taps, constant 32-host-sample group delay), so the only thing a swap removes is
 that leg's *dispersion*. Its shipped/shipped variant reproduces the generated
 `process_sample` bit for bit (asserted) before any swap is measured.
 
-`tube_screamer_u`, 48 kHz, 0.3 V, 1 kHz, 2x, 500 ms, delay-aligned, 256-sample
+`overdrive_pedal_native_u`, 48 kHz, 0.3 V, 1 kHz, 2x, 500 ms, delay-aligned, 256-sample
 window skip:
 
 | build | nRMS | 1−ρ |

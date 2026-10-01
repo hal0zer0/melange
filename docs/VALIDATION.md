@@ -214,8 +214,10 @@ cargo test -p melange-solver --test diode_breakdown_conformance
 melange dc-op  ../melange-circuits/testing/preamp/wurli-preamp.cir      # DC bias
 melange analyze <wurli-preamp with R_ldr=13k> --start-freq 200 --end-freq 5000  # gain
 
-# Cross-sim (needs ngspice, runs in CI)
-cargo test -p melange-validate --test spice_validation -- --include-ignored
+# Cross-sim (needs ngspice; CI's SPICE job runs exactly this)
+cargo test -p melange-validate --test spice_validation --test rate_sweep_tests \
+  --test thermal_twin_tests --test parasitic_twin_tests --test linearize_twin_tests \
+  -- --include-ignored
 ```
 
 The Tier-3 checks are kept as **documented anchors** rather than committed tests:

@@ -147,8 +147,8 @@ Setter body is structurally identical to `set_pot_N` since the
 2026-04-20 reseed strip — the remaining difference is API shape (the
 field-named setter, a read-only `state.<field>()` accessor, no
 nih-plug knob). Emitted by both DK (`dk_emitter.rs`) and nodal
-(`nodal_emitter.rs`) paths; plugin template (`main.rs` in melange-cli)
-filters runtime-R entries out of `pot_params` so no `FloatParam` is
+(`nodal_emitter.rs`) paths; the plugin generator (`tools/melange-cli/src/cmd/compile.rs`)
+filters runtime-R entries out of the plugin's pot parameters so no `FloatParam` is
 generated.
 
 `.gang` members must be `.pot`/`.wiper`; a `.runtime R` resistor listed
@@ -194,7 +194,7 @@ Heuristic only — tightly-coupled RC networks where the slowest mode is
 orthogonal to every node's individual τ can still fool it. Eigen upgrade
 is deferred; the cheap per-node scan covers the common case.
 
-#### `recompute_dc_op()` (Phase E: P6)
+#### `recompute_dc_op()`
 
 Opt-in runtime DC-OP solver that replaces the `WARMUP_SAMPLES_RECOMMENDED`
 silence loop above:
@@ -214,21 +214,22 @@ module. Not audio-thread safe (hundreds of microseconds per call — call
 from init or parameter-change callbacks).
 
 **DK path**: full runtime NR with LU solve + flat damping + convergence.
-Converges to `DC_OP` bitwise for inductor-free circuits; inductor-bearing
-circuits converge to the `process_sample(0.0)` steady state instead
-(companion-shunt equilibrium differs from `dc_op.rs`'s inductor-short
-equilibrium — see `docs/aidocs/DC_OP.md`).
+Its fixed point is the compile-time `dc_op.rs` equation
+`G·v = RHS_CONST + N_i·i_nl`. Inductors, coupled inductors and transformer
+windings are augmented branch rows, a DC short in `G` exactly as `dc_op.rs`
+stamps them, so the recompute reaches the baked `DC_OP` with inductors too
+(pinned for a DC-biased choke by
+`dc_op_recompute_tests.rs::fix3_dc_biased_choke_shipped_recompute_reaches_inductor_short_op`).
+See `docs/aidocs/DC_OP.md`.
 
-**Nodal full-LU path**: ships a stub that bumps `diag_nr_max_iter_count`
-and returns without touching state — **this is the permanent path for
-nodal circuits**, not a placeholder. The surface matches the DK path so
-plugin host code doesn't need a solver-path branch, but plugins on the
-nodal route must watch the counter and fall back to the warmup-silence
-loop. The full nodal body is deferred indefinitely; no shipping plugin
-blocks on it, and the warmup loop already uses the per-sample NR which
-converges to the physically correct DC OP. See
-`docs/aidocs/DC_OP.md` and the `phase_e_handoff_runtime_dc_op` memory
-for the reviver's plan if priorities change.
+**Nodal path (Schur and full-LU)**: ships a stub that bumps
+`diag_nr_max_iter_count` and returns without touching state — **this is the
+permanent path for nodal circuits**, not a placeholder. The surface matches
+the DK path so plugin host code doesn't need a solver-path branch, but
+plugins on the nodal route must watch the counter and fall back to the
+warmup-silence loop. A nodal NR body is not implemented; the warmup loop
+runs the per-sample NR, which converges to the physically correct DC OP. See
+`docs/aidocs/DC_OP.md`.
 
 **`settle_dc_op()` wrapper**: also emitted behind the flag. Calls
 `recompute_dc_op` first; on NR failure or nodal stub tick, falls back
@@ -242,8 +243,8 @@ noise RNG, pot/switch values, device runtime params, and diag counters):
 `dc_operating_point`, `v_prev`, `q_dot` (zeroed), `input_prev`, `i_nl_prev`/`i_nl_prev_prev`,
 `dc_block_x_prev` (seeded at new DC output, not 0),
 `pot_N_resistance_prev` (synced to `pot_N_resistance`),
-oversampler taps zeroed, inductor / coupled-inductor / transformer history
-zeroed. See `docs/aidocs/DC_OP.md` "Runtime DC OP recompute" for the full
+oversampler taps zeroed (inductor branch currents are rows of `v_prev` and
+are written with it; there is no separate inductor history). See `docs/aidocs/DC_OP.md` "Runtime DC OP recompute" for the full
 contract and derivation.
 
 ### State (Runtime, Per-Channel)
@@ -627,7 +628,7 @@ impl CircuitState {
         // Recompute A_neg = alpha*C (charge-form history; q_dot is kept)
         // Recompute K = N_v * S * N_i
         // Recompute S_NI = S * N_i (for final voltage computation)
-        // Recompute inductor g_eq and pot SM vectors if applicable
+        // (inductors are branch rows: their L sits in C, nothing extra to recompute)
     }
 }
 ```
@@ -644,10 +645,13 @@ DK kernel to auto-insert 10pF across each device junction. See
 
 ## Codegen-Only Pipeline
 
-The runtime `CircuitSolver` / `NodalSolver` / `DeviceEntry` paths have been
-removed. All circuit processing now flows through the codegen pipeline. The
-only runtime type that survives is `LinearSolver` (M=0 linear-only fallback)
-in `crates/melange-solver/src/linear_solver.rs`.
+There is no runtime circuit solver: all circuit processing flows through the
+codegen pipeline. The library `LinearSolver` (M=0 only,
+`crates/melange-solver/src/linear_solver.rs`) is **deprecated since 0.1.14 and
+removed in the next release**: no build uses it, and its whole-system
+discretisation (`A_neg = alpha·C − G`, sources summed at `n` and `n+1`,
+companion-model inductors) is not the charge form generated code ships. See
+`COMPANION_MODELS.md` "Deprecated: the library companion-inductor solver".
 
 | Capability | How it's emitted |
 |------------|-----------------|
@@ -658,7 +662,7 @@ in `crates/melange-solver/src/linear_solver.rs`.
 | Oversampling | 2× / 4× cascaded polyphase half-band IIR |
 | Sparsity | Zero entries skipped in emission (per-matrix `SparseInfo`) |
 | Sample rate | `set_sample_rate()` recomputes S, A_neg, K, S_NI from emitted G+C |
-| Multi-output | Stereo / multi-output supported via multiple output nodes |
+| Multi-output | Any number of output nodes in `--format code` (`process_sample` returns one value per node); `--format plugin` takes 1 (mono) or 2 (stereo) and refuses more |
 | Potentiometers | Per-block matrix rebuild on `set_pot` (Sherman-Morrison removed) |
 | Switches | Per-position matrix rebuild on `set_switch` |
 
@@ -673,9 +677,11 @@ Everything a consumer must do between parsing a netlist and generating code:
   (DK keeps RB/RC/RE inside the device)
 * `auto_tune_max_iter` — the NR iteration budget
 
-**Every consumer must call these.** They lived in `tools/melange-cli/src/main.rs`
-until `6bc3ef1`, and `melange validate` — which had its own copy — did none of
-the three. See `SPICE_VALIDATION.md` for what that cost.
+**Every consumer must run these.** Every CLI verb (`tools/melange-cli/src/cmd/*.rs`)
+and the validate harness reach them through one entry point,
+`melange_solver::build::build`, rather than calling them piecemeal; a consumer
+that skipped one built a different circuit than `compile` ships. See
+`SPICE_VALIDATION.md` "One build for every consumer".
 
 Diagnostics route through a `Reporter` callback rather than `println!`: the CLI
 passes `&|a| println!("{a}")`, library callers pass `pipeline::silent`.
@@ -691,11 +697,11 @@ determines them, and changing one changes the sound of every emitted plugin.
 
 Two reasons they live in one module:
 
-1. **One source of truth.** `DC_BLOCK_CUTOFF_HZ` was spelled out at **six**
-   sites (two emitters, two template positions, one nodal reset emission, and
-   `linear_solver.rs` — the *runtime* solver's own copy, which every survey
-   missed because they were all looking at codegen). The implementation plan
-   recorded it as one site; review corrected that to five; it was six.
+1. **One source of truth.** `DC_BLOCK_CUTOFF_HZ` is read from `policy` by
+   both emitters (as a value and, via `dc_block_cutoff_hz_literal()`, as
+   template text) and by the deprecated `linear_solver.rs`. A local copy at
+   any one of them can drift unseen, and the library-only site is the
+   easiest to miss.
 2. **They are a published contract.** A second-language backend cannot
    recompute these from the IR. A C++ emitter that picks its own 5 Hz-equivalent
    ships a plugin that measurably differs while every structural test passes.

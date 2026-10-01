@@ -157,8 +157,20 @@ Each `.pot` becomes a knob and each `.switch` becomes a selector in the generate
 | `melange compile circuit.cir -f code -o file.rs` | Generate standalone Rust code |
 | `melange simulate circuit.cir --amplitude 0.1 -o out.wav` | Process test tone |
 | `melange simulate circuit.cir --input-audio audio.wav -o out.wav` | Process audio file |
-| `melange analyze circuit.cir` | AC frequency response |
+| `melange analyze circuit.cir` | Frequency response (a sine per frequency through the compiled circuit) |
 | `melange validate circuit.cir` | Compare against ngspice |
+
+`compile`, `simulate` and `analyze` print one line naming the solver route and
+integrator they chose. Add `-v` (`--verbose`, before or after the subcommand)
+for the detail behind it: why that route, the kernel measurements, the
+Newton iteration budget. Warnings and refusals print either way.
+
+`simulate --input-audio` builds the circuit at the WAV's own sample rate, since
+the solver route and integrator are chosen per rate; an explicit
+`--sample-rate` that differs from the file's rate is refused. Without
+`--input-audio` it renders a 1 kHz test tone at `--sample-rate` (default
+48000). It reads 16- and 24-bit PCM and 32-bit float WAVs, plain or
+WAVE_FORMAT_EXTENSIBLE, and uses the first channel of a multichannel file.
 
 ### The compiled-binary cache
 
@@ -167,20 +179,24 @@ code, compile it with `rustc -O` into a native binary, and run that. The binary
 is kept, keyed by a hash of the generated source, so an identical re-run skips
 the compile. Any change to the circuit or to an option that ends up in the
 generated program (`--amplitude`, `--pot`, `--sample-rate`, the sweep range)
-makes a new one. A small circuit's binary is about 4.5 MB, and nothing is ever
-evicted, so the cache grows with use.
+makes a new one. A small circuit's binary is about 4.5 MB. The cache is capped
+at 2 GiB by default: after each new binary, the least recently used ones are
+removed until it fits (a cache hit counts as a use). Set
+`MELANGE_BINARY_CACHE_MAX_MB` to change the cap, in MiB; `0` means no limit.
 
 It lives in the platform cache directory: `~/.cache/melange/binaries` on Linux
 (`$XDG_CACHE_HOME/melange/binaries` if that is set), `~/Library/Caches/melange/binaries`
-on macOS. `melange cache stats` prints the exact location, file count and size.
+on macOS. `melange cache stats` prints the exact location, file count, size
+and cap.
 
 ```bash
-melange cache stats    # location, file count and size of both caches
-melange cache clear    # deletes the compiled binaries AND downloaded circuit files
+melange cache stats             # location, file count and size of both caches, and the cap
+melange cache clear --binaries  # deletes only the compiled binaries
+melange cache clear             # deletes the compiled binaries AND downloaded circuit files
 ```
 
-`cache clear` also empties the circuit cache, the copies of circuits fetched
-from remote sources; they are downloaded again on next use. Deleting the
+Plain `cache clear` also empties the circuit cache, the copies of circuits
+fetched from remote sources; they are downloaded again on next use. Deleting the
 `binaries` directory by hand is equally safe. (`validate` compiles to a
 temporary file and removes it; it does not use this cache.)
 
@@ -194,15 +210,16 @@ Key flags for `melange compile`:
 | `--sample-rate` | 48000 | Design sample rate (Hz) |
 | `--oversampling 1\|2\|4` | 1 | Anti-aliasing oversampling factor |
 | `--input-node` | `in` | Input node name in netlist |
-| `--output-node` | `out` | Output node name(s), comma-separated for stereo |
+| `--output-node`, `-n` | `out` | Output node name(s), comma-separated. `--format plugin` takes one (mono plugin) or two (stereo, one node per channel) and refuses more; `--format code` takes any number |
 | `--solver auto\|dk\|nodal` | `auto` | Solver selection (auto picks the best) |
 | `--no-dc-block` | off | Disable 5Hz DC blocking filter |
-| `--no-level-params` | off | Omit Input/Output Level knobs |
+| `--no-level-params` | off | Omit Input/Output Level knobs (same as `--with-level-params=false`) |
 | `--no-ear-protection` | off | Disable output soft limiter |
 | `--wet-dry-mix` | off | Add wet/dry mix parameter |
-| `--mono` | off | Force a 1-in/1-out plugin. One output node already gets that layout automatically; two output nodes (`-n a,b`) get 2-in/2-out |
+| `--mono` | off | Changes nothing today: one output node always builds a 1-in/1-out plugin, two build a 2-in/2-out plugin, and `--mono` with more than one output node (either format) is refused rather than drop a node |
 | `--cpu-baseline x86-64-v3\|x86-64-v2\|x86-64` | `x86-64-v3` | x86_64 instruction set for the plugin. v3 is fastest but crashes on pre-2013 CPUs; `x86-64` runs everywhere (plugin format only) |
 | `--backward-euler` | off | Use backward Euler (unconditionally stable) |
+| `--max-iter` | auto | Newton iterations per sample. Unset, melange tunes the budget per circuit; any value pins it, except that nodal-routed builds floor the budget at 100. The generated file's `Build:` header line shows the value the code runs |
 | `--tube-grid-fa auto\|on\|off` | `auto` | Pentode grid-off dimension reduction: opt-in (`on`, warned, not accuracy-neutral); `auto` keeps the full 3D model |
 | `--opamp-rail-mode` | `auto` | Op-amp rail saturation strategy |
 | `--vendor` | `"Melange"` | Plugin vendor name (plugin format only) |

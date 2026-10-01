@@ -65,7 +65,7 @@ input_level: FloatParam   // -24 to +24 dB, default 0 dB
 output_level: FloatParam  // -24 to +24 dB, default 0 dB
 ```
 
-Applied as linear gain before/after `process_sample()`. Smoothed over 50ms to avoid clicks. Disable with `--no-level-params` if your circuit handles its own gain staging.
+Applied as linear gain before/after `process_sample()`. Smoothed over 50ms to avoid clicks. Disable with `--no-level-params` (or `--with-level-params=false`) if your circuit handles its own gain staging.
 
 ### Pot Parameters (from `.pot` directives)
 
@@ -181,9 +181,14 @@ Per sample:
   left input; the right input is ignored. Node `a` goes to the left output and
   node `b` to the right.
 
-`--mono` forces the 1-in/1-out layout. The command-line tool does not generate
-a plugin that runs two independent copies of a one-output circuit for left and
-right.
+- **Three or more output nodes**: refused before anything is written, since a
+  plugin has no channel for the nodes past the second. Pick two with `-n a,b`,
+  or use `--format code`, whose `process_sample` returns every output.
+
+`--mono` changes nothing today: a one-output circuit is already mono, and with
+more than one output node it is refused rather than drop a node. The command-line tool
+does not generate a plugin that runs two independent copies of a one-output
+circuit for left and right.
 
 ## Customizing Parameters
 

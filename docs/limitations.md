@@ -187,7 +187,7 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
   gain error on cathode-biased stages) and all grid current for Vgk > 0. `on`
   warns per device. An exact reduction is deferred; until one exists, `auto`
   will not reduce.
-- No independent suppressor dynamics (suppressor always cathode-tied)
+- No independent suppressor dynamics: the suppressor is modelled as cathode-tied, and a 5th node on anything but the cathode is refused
 - 6386/6BA6/6BC8 datasheet fits for variable-mu compressors deferred (phase 1d)
 
 ### Op-amp
@@ -335,7 +335,9 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
 
 Newton-Raphson has a per-sample iteration budget (`--max-iter`; by default an
 auto-tuned value that scales with M, the solver route and the trapezoidal
-spectral radius). A sample that exhausts it is retried: on the nodal routes by
+spectral radius; an explicit value pins it, except that nodal builds floor
+every budget at 100, and the generated file's `Build:` line shows the value
+the code runs). A sample that exhausts it is retried: on the nodal routes by
 a local sub-step ladder (down to T/2^12, at most 64 attempts), then, on a
 trapezoidal build, by a backward-Euler solve. A sample one of those retries
 solves is a converged solution by another consistent scheme; it is first-order
@@ -687,7 +689,7 @@ Noise limitations:
   the melange output by one best-fit constant delay (the same alignment every
   mode gets, 1x included), so the half-bands' frequency-dependent phase stays
   inside the number — it ships, so it is reported rather than compensated away.
-  Measured on `tube_screamer_u` (48 kHz, 0.3 V, 500 ms): 1-rho 1.00e-6 at 1x,
+  Measured on `overdrive_pedal_native_u` (48 kHz, 0.3 V, 500 ms): 1-rho 1.00e-6 at 1x,
   5.64e-6 at 2x, 6.25e-6 at 4x. See [OVERSAMPLING.md](OVERSAMPLING.md) for
   what that means in practice, and `docs/aidocs/OVERSAMPLING.md` for the filter
   internals.
@@ -699,6 +701,11 @@ Noise limitations:
   unexercised seed on its PASSED/FAILED line. Nominal is compared against
   nominal; the draw itself is covered by unit tests, not by ngspice. No deck
   edit is needed. See `docs/aidocs/UNIT_VARIATION.md`
+- The parameter check is one-sided. `validate` refuses a deck when ngspice
+  reports a `.model` parameter it ignores, but a parameter **melange** ignores
+  (it warns at build time, e.g. BJT `TR`, reverse transit time) does not stop
+  the run: ngspice models it and melange does not, so the two engines compare
+  different circuits. Read the build warnings before reading the number.
 - SPICE correlation is **necessary but not sufficient** for promoting a circuit;
   a listening test is required on top
 

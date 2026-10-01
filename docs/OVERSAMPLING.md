@@ -32,8 +32,9 @@ melange simulate mycircuit.cir --input-audio tone.wav -o os2.wav --oversampling 
 melange simulate mycircuit.cir --input-audio tone.wav -o os4.wav --oversampling 4
 ```
 
-`tone.wav` is a single sine at the plugin's sample rate, at a pitch that does
-not divide that rate. A musical pitch such as 4186 Hz works; 1 kHz or 4 kHz at
+`tone.wav` is a single sine at the plugin's sample rate (`simulate` builds the
+circuit at the WAV's own rate, so the file's rate is the rate you measure), at
+a pitch that does not divide that rate. A musical pitch such as 4186 Hz works; 1 kHz or 4 kHz at
 48 kHz does not, because every alias of such a tone lands exactly on one of its
 own harmonics and cannot be told apart. The file's level is the drive in volts
 (full scale = 1 V; a 32-bit float WAV can carry more). In the spectrum, the

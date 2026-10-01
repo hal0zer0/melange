@@ -42,7 +42,7 @@ Location: `circuits-index.json` at the repository root, so it is served at
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema` | integer | Format version. Currently `1`. |
+| `schema` | integer | Format version. Currently `1`. melange refuses an index with a higher `schema` ("upgrade melange") rather than guess at it: a bump is the publisher saying the change is not backward-compatible. |
 | `circuits` | object | Map of circuit **name** to entry. |
 | `circuits[name].path` | string | Path to the `.cir`, **relative to the index file**. |
 
@@ -52,6 +52,7 @@ pick a winner.
 
 **Optional extras** are allowed and readers **must ignore keys they do not
 recognise** — that is what lets the format grow without breaking older clients.
+A change older readers cannot safely ignore bumps `schema` instead.
 melange-circuits publishes `tier` and `category`; melange reads neither.
 
 ```json

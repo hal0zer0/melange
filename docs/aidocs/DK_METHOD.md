@@ -122,8 +122,10 @@ companion-model kernel.
 
 Capacitor-free rows (null(C)) carry no history under the charge form: their
 equation each sample is KCL at `n+1`, so no period-2 mode lives there. The
-library `DkKernel::from_mna` / `LinearSolver` companion-model inductors in the
-whole-system form (`g_eq = T/(2L)` in both `A` and `a_neg`,
+deprecated library companion path (`DkKernel::from_mna` on an inductor deck,
+used only by `LinearSolver`; removed in the next release, `COMPANION_MODELS.md`
+last section) companion-models inductors
+in the whole-system form (`g_eq = T/(2L)` in both `A` and `a_neg`,
 `i_hist = 2*i_L[n]`), verified against an exact trapezoidal reference in
 `dk_math_verification.rs`.
 

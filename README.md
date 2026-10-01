@@ -164,11 +164,20 @@ melange analyze my-circuit.cir --pot "Drive=100k" --switch "Mode=2"
 
 "Without compiling" means without building a plugin. Under the hood `simulate`
 and `analyze` compile the circuit to a native binary with `rustc`, so they need
-a Rust toolchain at run time, and they keep every binary they build (about
-4.5 MB each for a small circuit, never evicted) under the platform cache
-directory, `~/.cache/melange/binaries` on Linux. `melange cache stats` shows
-how much has piled up; `melange cache clear` deletes it, along with any cached
-downloads of remote circuits.
+a Rust toolchain at run time, and they keep the binaries they build (about
+4.5 MB each for a small circuit) under the platform cache directory,
+`~/.cache/melange/binaries` on Linux. The cache is capped at 2 GiB by default
+and drops the least recently used binaries past it; set
+`MELANGE_BINARY_CACHE_MAX_MB` to change the cap (`0` = no limit). `melange
+cache stats` shows the size and the cap; `melange cache clear --binaries`
+empties it, and plain `melange cache clear` also deletes cached downloads of
+remote circuits.
+
+With `--input-audio`, `simulate` builds the circuit at the WAV's own sample
+rate (the solver route and integrator are chosen per rate), and refuses a
+`--sample-rate` that disagrees with the file. It reads 16- and 24-bit PCM and
+32-bit float, including the WAVE_FORMAT_EXTENSIBLE layout many tools write;
+a multichannel file contributes its first channel.
 
 ## What You Get
 
@@ -395,7 +404,7 @@ melange analyze <circuit>                 Frequency response sweep
 melange validate <circuit>                Compare against ngspice
 melange nodes <circuit>                   List nodes and devices, pots, switches
 melange dc-op <circuit>                   DC operating point: node voltages + KCL residual
-melange cache list|clear|stats            Manage the circuit cache
+melange cache list|clear|stats            Circuit cache and compiled-binary cache
 melange import <file.xml> -o <file.cir>   Import KiCad XML to Melange format
 melange builtins                          List embedded demo circuits (ships with passive-eq1a)
 melange sources list|add|remove|show      Manage circuit sources (`show` lists a source's circuits)
@@ -406,15 +415,16 @@ Every subcommand has `--help`. The flags worth knowing about up front:
 
 | Flag | On | Does |
 |------|----|------|
-| `--format plugin` | compile | Emit a full nih-plug project (default: raw code) |
-| `--solver auto\|dk\|nodal` | compile/simulate | Override solver selection |
+| `-v`, `--verbose` | global | Print the solver-routing detail (why this route and integrator, kernel measurements, iteration budget). Without it, `compile`/`simulate`/`analyze` name the route and integrator in one line; warnings and refusals print either way |
+| `--format plugin` | compile | Emit a full nih-plug project (default: raw code). One output node makes a mono plugin, two (`-n a,b`) a stereo one; more are refused (`--format code` returns any number) |
+| `--solver auto\|dk\|nodal` | compile/simulate/analyze/dc-op | Override solver selection; any other value is an error |
 | `--oversampling 1\|2\|4` | compile/simulate/analyze/validate | 2× or 4× polyphase half-band IIR antialiasing. It is compile-time DSP, so `validate` takes it too — otherwise you would validate the 1× code and ship the 2× code |
 | `--backward-euler` | compile | L-stable integration for high-gain feedback circuits |
 | `--noise off\|thermal\|shot\|full` | compile/simulate/analyze | Inject authentic circuit noise (thermal → +shot → +1/f, op-amp en/in, pentode partition); off by default |
 | `--noise-seed <u64>` | compile/simulate/analyze | Master noise seed; `0` = entropy from the system clock, nonzero = deterministic |
 | `--pot "Name=Value"` | analyze/simulate | Set pot value (repeatable). Value is in ohms and must sit inside the range `melange nodes` prints; out-of-range values are refused |
 | `--switch "Name=Pos"` | analyze/simulate | Set switch position (repeatable) |
-| `--input-audio file.wav` | simulate | Use a WAV file instead of a test tone |
+| `--input-audio file.wav` | simulate | Use a WAV file instead of a test tone; the circuit is built at the file's sample rate |
 | `--no-ear-protection` | compile | Disable soft limiter (measurement only) |
 
 Each subcommand's own `--help` is authoritative for its flags. For the prose versions: the [Plugin Development Guide](docs/PLUGIN_GUIDE.md) covers `compile` and the generated project; [Using the Generated DSP Directly](docs/CODE_API.md) covers `compile --format code` (the default format) and the API of the file it emits; [Getting Started](docs/GETTING_STARTED.md) covers `simulate`, `analyze`, and the compile-flag table.
@@ -475,9 +485,12 @@ cargo build --release -p melange-cli    # -> target/release/melange
 # Test suite, for contributors — ~1900 fast tests (SPICE truth-comparison gated below)
 cargo test --workspace
 
-# SPICE truth-comparison suite — gated behind --include-ignored
-# because it needs ngspice on PATH. CI runs this on every PR.
-cargo test -p melange-validate --test spice_validation -- --include-ignored
+# SPICE truth-comparison suite and the ngspice twin tests — #[ignore]d
+# without --include-ignored because they need ngspice on PATH. CI runs
+# exactly this on every PR.
+cargo test -p melange-validate --test spice_validation --test rate_sweep_tests \
+  --test thermal_twin_tests --test parasitic_twin_tests --test linearize_twin_tests \
+  -- --include-ignored
 ```
 
 ## Known Limitations
