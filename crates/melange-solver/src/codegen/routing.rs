@@ -14,10 +14,10 @@ use crate::mna::MnaSystem;
 
 /// max|K| above which the DK Schur NR operates in a numerically hostile space;
 /// route to nodal full-LU (which avoids K entirely).
-const K_ILL_COND_MAX: f64 = 1e8;
+pub(crate) const K_ILL_COND_MAX: f64 = 1e8;
 /// max|S| above which cap-only nodes lack resistive paths and Schur prediction
 /// is unreliable; route to nodal.
-const S_ILL_COND_MAX: f64 = 1e6;
+pub(crate) const S_ILL_COND_MAX: f64 = 1e6;
 
 /// Which codegen solver path to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

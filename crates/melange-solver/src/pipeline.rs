@@ -188,7 +188,7 @@ pub fn apply_linearize_reductions(
     // point for small-signal g-parameter extraction.
     let device_slots =
         crate::codegen::ir::CircuitIR::build_device_info_with_mna(netlist, Some(mna))
-            .unwrap_or_default();
+            .map_err(|e| PipelineError::DcOp(format!("device models: {e}")))?;
     let dc_result = crate::dc_op::solve_dc_operating_point(
         mna,
         &device_slots,
@@ -508,7 +508,11 @@ pub fn apply_linearize_reductions(
 
     // Re-stamp junction caps against the reduced-dimension MNA.
     let ds = crate::codegen::ir::CircuitIR::build_device_info_with_mna(netlist, Some(mna))
-        .unwrap_or_default();
+        .map_err(|e| {
+            PipelineError::Mna(format!(
+                "device models after the .linearize MNA rebuild: {e}"
+            ))
+        })?;
     if !ds.is_empty() {
         mna.stamp_device_junction_caps(&ds);
     }
@@ -704,7 +708,11 @@ pub fn apply_forward_active_reduction(
         // FA-reduced BJT dimensions are reflected, giving the correct
         // `start_idx` for junction-cap stamping.
         let device_slots =
-            CircuitIR::build_device_info_with_mna(netlist, Some(&*mna)).unwrap_or_default();
+            CircuitIR::build_device_info_with_mna(netlist, Some(&*mna)).map_err(|e| {
+                PipelineError::Mna(format!(
+                    "device models after the forward-active MNA rebuild: {e}"
+                ))
+            })?;
         if !device_slots.is_empty() {
             mna.stamp_device_junction_caps(&device_slots);
         }
@@ -781,7 +789,9 @@ pub fn apply_grid_off_reduction(
         })?;
         stamp_ports(mna, port_stamps);
         let device_slots =
-            CircuitIR::build_device_info_with_mna(netlist, Some(&*mna)).unwrap_or_default();
+            CircuitIR::build_device_info_with_mna(netlist, Some(&*mna)).map_err(|e| {
+                PipelineError::Mna(format!("device models after the grid-off MNA rebuild: {e}"))
+            })?;
         if !device_slots.is_empty() {
             mna.stamp_device_junction_caps(&device_slots);
         }

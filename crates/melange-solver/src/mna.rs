@@ -2412,8 +2412,16 @@ impl MnaSystem {
                         * (group.inductances[i] * group.inductances[j]).sqrt();
                 }
             }
-            // Invert: Y_raw = inv(L)
-            let y_raw = invert_small_matrix(&l_mat);
+            // Invert: Y_raw = inv(L). A singular or non-finite L has no
+            // companion admittance; refuse rather than stamp a stand-in.
+            let y_raw = invert_small_matrix(&l_mat).map_err(|reason| {
+                MnaError::TopologyError(format!(
+                    "Transformer group '{}' ({} windings): cannot invert the \
+                     inductance matrix: {}. Check the winding inductances and \
+                     that the K coefficients are not all 1.",
+                    group.name, w, reason
+                ))
+            })?;
             // Scale by T/2 and apply sign
             let scale = g_sign * g_eq_factor;
             // Stamp admittance entries
@@ -2907,8 +2915,15 @@ pub struct ParasiticCap {
 /// physical junction capacitance without introducing artificial ground coupling.
 pub const PARASITIC_CAP: f64 = 10e-12;
 
-/// Maximum circuit node count. Prevents unbounded allocation from pathological netlists.
-/// 256 is generous for any real audio circuit (Pultec EQP-1A uses ~41 nodes).
+/// Maximum supported system dimension.
+///
+/// One bound, checked twice: against the circuit node count when the MNA is
+/// assembled (prevents unbounded allocation from pathological netlists), and
+/// against the full augmented dimension — circuit nodes, voltage-source
+/// branch currents, VCVS augmented rows, inductor branch variables — when the
+/// DK kernel is built (prevents O(N^3) blowup from matrix inversion).
+///
+/// N=256 is generous for any real audio circuit (Pultec EQP-1A is ~41 nodes).
 pub const MAX_N: usize = 256;
 
 /// Error type for MNA assembly.
@@ -2960,22 +2975,23 @@ impl From<crate::parser::ParseError> for MnaError {
 
 /// Invert a small NxN matrix using Gaussian elimination with partial pivoting.
 /// Used for multi-winding transformer inductance matrix inversion.
-/// Returns identity matrix as fallback if singular (with log warning).
-pub(crate) fn invert_small_matrix(a: &[Vec<f64>]) -> Vec<Vec<f64>> {
+///
+/// Returns `Err` with a description when the matrix holds a non-finite entry
+/// or a pivot falls below `1e-30` (singular). The `1e-30` threshold is
+/// absolute, so it catches exact singularity only: a near-singular matrix
+/// (coupling k → 1) can still come back as a large, inaccurate inverse.
+/// Callers that need a scale-relative check (the DK kernel build) apply
+/// their own residual test on the result.
+pub(crate) fn invert_small_matrix(a: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, String> {
     let n = a.len();
     // Guard: NaN/Inf bypass the pivot < 1e-30 singularity check
     for i in 0..n {
         for j in 0..n {
             if !a[i][j].is_finite() {
-                crate::diag_warn!(
-                    "Non-finite value in inductance matrix at [{i}][{j}]: {}",
+                return Err(format!(
+                    "non-finite value {} in inductance matrix at [{i}][{j}]",
                     a[i][j]
-                );
-                let mut result = vec![vec![0.0; n]; n];
-                for k in 0..n {
-                    result[k][k] = 1.0;
-                }
-                return result;
+                ));
             }
         }
     }
@@ -2998,16 +3014,10 @@ pub(crate) fn invert_small_matrix(a: &[Vec<f64>]) -> Vec<Vec<f64>> {
             }
         }
         if max_val < 1e-30 {
-            crate::diag_warn!(
-                "Singular inductance matrix in transformer group (pivot {:.2e})",
+            return Err(format!(
+                "singular inductance matrix (pivot {:.2e} in column {col})",
                 max_val
-            );
-            // Return identity as fallback
-            let mut result = vec![vec![0.0; n]; n];
-            for i in 0..n {
-                result[i][i] = 1.0;
-            }
-            return result;
+            ));
         }
         if max_row != col {
             aug.swap(col, max_row);
@@ -3033,7 +3043,7 @@ pub(crate) fn invert_small_matrix(a: &[Vec<f64>]) -> Vec<Vec<f64>> {
             result[i][j] = aug[i][n + j];
         }
     }
-    result
+    Ok(result)
 }
 
 /// Stamp a conductance `g` between two nodes that may be grounded (index 0).
@@ -4278,15 +4288,18 @@ impl MnaBuilder {
                         l_mat[0][0] * l_mat[1][1] - l_mat[0][1] * l_mat[1][0]
                     } else {
                         // Use the invert_small_matrix helper — if it returns near-zero
-                        // diagonal entries, the matrix is singular or non-PD.
-                        let inv = invert_small_matrix(&l_mat);
-                        // Check: all diagonal entries of inv should be positive for PD
-                        let min_diag: f64 = inv
-                            .iter()
-                            .enumerate()
-                            .map(|(i, row)| row[i])
-                            .fold(f64::INFINITY, f64::min);
-                        min_diag // positive means PD
+                        // diagonal entries, the matrix is singular or non-PD. A matrix
+                        // it cannot invert (singular, non-finite) is not PD either:
+                        // report 0.0 so the warning below fires.
+                        match invert_small_matrix(&l_mat) {
+                            // Check: all diagonal entries of inv should be positive for PD
+                            Ok(inv) => inv
+                                .iter()
+                                .enumerate()
+                                .map(|(i, row)| row[i])
+                                .fold(f64::INFINITY, f64::min),
+                            Err(_) => 0.0,
+                        }
                     };
                     if det <= 0.0 || !det.is_finite() {
                         crate::diag_warn!(

@@ -24,10 +24,11 @@ pub use opamp_rail::*;
 mod matrix_helpers;
 use matrix_helpers::*;
 
-/// Gmin regularisation conductance added to every diagonal of the augmented
-/// MNA matrix before NR. Prevents singular Jacobians on floating nodes;
-/// matches the runtime `NodalSolver` gmin stamp.
-const GMIN_REGULARISATION: f64 = 1e-12;
+/// Gmin regularisation conductance added to every node diagonal of the
+/// augmented MNA matrix before NR. Prevents singular Jacobians on floating
+/// nodes. The DC operating-point solver (`dc_op::build_dc_system`) stamps the
+/// same value as its node-diagonal floor.
+pub(crate) const GMIN_REGULARISATION: f64 = 1e-12;
 
 /// Pivot magnitude below which the local Gaussian-elimination routine
 /// declares the matrix singular and aborts codegen with a "missing ground
@@ -897,8 +898,13 @@ pub struct Matrices {
     /// K_be = N_v * S_be * N_i, M×M row-major (backward Euler kernel for BE fallback)
     #[serde(default)]
     pub k_be: Vec<f64>,
-    /// Spectral radius of S * A_neg (trapezoidal feedback operator).
-    /// Values > 1 mean the Schur path is unstable. Only computed for nodal path.
+    /// Spectral radius of S * A_neg on the pair the build carries: the
+    /// trapezoidal whole-system pair (`A_neg = alpha·C − G`, measured before
+    /// the charge-form history replaces it), or the backward-Euler pair on a
+    /// BE build (flag, directive, behavioral forcing, or auto-promotion, where
+    /// it is recomputed on the BE matrices). Read by the nodal emitter's
+    /// Schur-vs-full-LU gate: values > 1 mean the Schur linear prediction
+    /// amplifies errors. Only computed for nodal path.
     #[serde(default)]
     pub spectral_radius_s_aneg: f64,
 }
@@ -1643,7 +1649,7 @@ fn build_dk_be_matrices_at_rate(
 ///
 /// Precedence: an explicit CLI flag (`--backward-euler` / `--force-trap`)
 /// always wins over the directive; the directive wins over the automatic
-/// spectral-radius promotion. `.integrator be` ⇒ `backward_euler = true`;
+/// promotion (the ring predicate, `codegen::ring`). `.integrator be` ⇒ `backward_euler = true`;
 /// `.integrator trap` ⇒ `force_trap = true` (suppresses auto-promotion and,
 /// downstream, the runtime BE-latch safety net).
 ///
@@ -2666,18 +2672,19 @@ impl CircuitIR {
         let n = aug.n_nodal;
 
         // Gmin regularization: prevent singular Jacobians on floating nodes.
-        // Matches runtime NodalSolver (solver.rs Gmin stamping).
+        // The same floor the DC operating-point solver stamps
+        // (`dc_op::build_dc_system`).
         for i in 0..n_nodes {
             aug.g[i][i] += GMIN_REGULARISATION;
         }
 
         let sample_rate = config.sample_rate;
         let internal_rate = sample_rate * config.oversampling_factor as f64;
-        // Provisional integrator. If the nodal auto-detector decides the trap
-        // propagation operator `S*A_neg` is unstable (spectral_radius > 1.002,
-        // matching the `schur_unstable` gate in `nodal_emitter.rs`), the
-        // promotion block below swaps in the BE matrices already built as the
-        // transient fallback and flips `be`/`alpha`/`solver_config` in place.
+        // Provisional integrator. When the ring predicate (`codegen::ring`)
+        // promotes a default-trapezoidal build, this builder runs again with
+        // `promoted` set (see `CircuitIR::ring_promotion`), and the promotion
+        // block below swaps in the BE matrices already built as the transient
+        // fallback and flips `alpha`/`solver_config` in place.
         let mut alpha = if cfg_backward_euler {
             internal_rate
         } else {
@@ -2916,14 +2923,15 @@ impl CircuitIR {
         };
 
         // Compute spectral radius of S * A_neg to detect Schur instability.
-        // When rho(S * A_neg) > 1, the trapezoidal feedback v_pred = S*(A_neg*v_prev + ...)
-        // amplifies errors exponentially. Route to full LU NR instead.
+        // When rho(S * A_neg) > 1, the linear prediction v_pred = S*(A_neg*v_prev + ...)
+        // amplifies errors exponentially, and the nodal emitter's
+        // `schur_unstable` gate routes to full LU NR instead.
         //
-        // Discriminate Nyquist-marginal (eigenvalue near -1) from slow LF
-        // (eigenvalue near +1) — see `crate::codegen::stability` for the
-        // power-iteration sign analysis. The Nyquist case at rho ≈ 0.999
-        // promotes to BE; the slow LF case stays on trap (bilinear
-        // preserves those poles exactly).
+        // This measurement does not decide backward-Euler promotion: that is
+        // the ring predicate (`codegen::ring`, see `CircuitIR::ring_promotion`),
+        // on the charge-form propagator. The power-iteration analysis
+        // (including the dominant-eigenvalue sign) is in
+        // `crate::codegen::stability`.
         let trap_stability = crate::codegen::stability::analyze_trap_stability_deflated(
             &s_flat,
             &a_neg_flat,
@@ -3044,19 +3052,15 @@ impl CircuitIR {
         solver_config.runtime_be_latch =
             !solver_config.backward_euler && !cfg_force_trap && (m > 0 || has_saturating);
 
-        // Event-triggered breakpoint backward-Euler for `.switch`/`.pot` swaps.
-        // Independent of `cfg_force_trap` (a targeted correctness fix at an
-        // explicit event, not the Nyquist-latch heuristic that force-trap
-        // disables). Emitted only when the circuit actually has a discrete
-        // conductance-swap parameter and runs on trap; the machinery is
-        // byte-inert until a `set_switch_*`/`set_pot_*` call arms it, so golden
-        // fixtures (which never toggle) are unaffected. Gated off for BE builds
-        // (nothing to fix).
-        // Armed only by discrete swaps (set_switch_*/set_pot_*), never by the
-        // per-sample `.runtime R` setter — so a `.runtime R`-only circuit would
-        // emit machinery nothing ever arms. Gate the flag on switches or a
-        // *knob* pot (runtime_field == None), so runtime-R-only circuits stay
-        // byte-identical.
+        // Event-triggered breakpoint backward-Euler at a reactive `.switch`
+        // swap or a glow-discharge strike. Independent of `cfg_force_trap` (a
+        // targeted correctness fix at an explicit event, not the Nyquist-latch
+        // heuristic that force-trap disables). Emitted only when the circuit
+        // has such an event and runs on trap; the machinery is byte-inert
+        // until a `set_switch_*` call on a C/L switch or a glow strike arms
+        // it, so golden fixtures (which never toggle) are unaffected. Gated
+        // off for BE builds (nothing to fix). Pot setters and the per-sample
+        // `.runtime R` setter never arm it.
         // Only a switch that swaps a capacitor or an inductor needs it: under
         // the charge form the history carries q_dot = C·dx/dt and no G term,
         // so a conductance change (a pot, a resistor-only switch) leaves the

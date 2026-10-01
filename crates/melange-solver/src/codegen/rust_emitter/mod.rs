@@ -8,6 +8,7 @@
 //!
 //! ## Module structure
 //!
+//! - `dc_op_emitter` — runtime DC operating-point recompute (`recompute_dc_op`)
 //! - `helpers` — template data structs, formatting utils, pentode/oversampling helpers
 //! - `dk_emitter` — DK-path emit methods (constants, state, process_sample, etc.)
 //! - `dk_solver` — DK NR solver generation (solve_nonlinear, Gauss elimination)

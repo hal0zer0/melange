@@ -1,7 +1,7 @@
 //! DK Newton-Raphson solver generation.
 //!
 //! Contains `generate_solve_nonlinear`, `generate_gauss_elim`, and
-//! `generate_schur_gauss_elim` — the procedural NR solver code that is
+//! `generate_schur_gauss_elim_k` — the procedural NR solver code that is
 //! too deeply conditional for Tera templates.
 
 use super::helpers::{
@@ -337,10 +337,11 @@ impl RustEmitter {
         code.push_str("        }\n");
     }
 
-    /// [`Self::generate_schur_gauss_elim`] against an arbitrary K matrix
-    /// expression (the sub-sample fire re-solve solves on a scratch Schur
-    /// triple, `ssf_sub.k`). The default `"state.k"` reproduces the original
-    /// emission byte-for-byte.
+    /// Gaussian elimination for the Schur NR against the K matrix named by
+    /// `k_matrix_expr`: each nodal Schur NR site passes its own K, and the
+    /// sub-sample fire re-solve passes its scratch Schur triple's
+    /// (`state.ssf_lru[ssf_cur].k`). Limiting and convergence come from
+    /// `emit_schur_nr_limit_and_converge`.
     pub(super) fn generate_schur_gauss_elim_k(
         code: &mut String,
         ir: &CircuitIR,

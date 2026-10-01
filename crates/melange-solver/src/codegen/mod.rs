@@ -481,15 +481,14 @@ pub struct CodegenConfig {
     /// amplifiers where trapezoidal's imaginary-axis preservation causes oscillation.
     /// Trades second-order accuracy for first-order, giving slight HF rolloff.
     pub backward_euler: bool,
-    /// Escape hatch: force trapezoidal integration even when the nodal
-    /// auto-detector would promote to backward Euler (trap propagation
-    /// operator `S*A_neg` has spectral radius > 1.002, which seeds a
-    /// persistent Nyquist-rate limit cycle in `v_prev`). For bisecting
-    /// regressions or reproducing legacy output only — auto-promoted BE
-    /// is the correct default on circuits where trap is unstable.
+    /// Escape hatch: force trapezoidal integration even when the ring
+    /// predicate (`codegen::ring`, `docs/aidocs/RING_PREDICATE.md`) would
+    /// promote a default build to backward Euler. Also opts out of the
+    /// runtime BE-latch. For bisecting regressions or reproducing legacy
+    /// output only — auto-promoted BE is the correct default on circuits
+    /// the predicate promotes.
     /// Ignored when `backward_euler` is already `true`.
     pub force_trap: bool,
-    /// Test/debug only: force the nodal full-LU solver path even when the
     /// Which nodal sub-path to emit — see [`NodalSubPath`]. Default
     /// [`NodalSubPath::Auto`], which is the shipping behaviour.
     ///

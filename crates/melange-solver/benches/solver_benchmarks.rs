@@ -1,19 +1,32 @@
-//! Criterion benchmark suite for melange-solver hot paths.
+//! Criterion benchmark suite for melange-solver library hot paths.
 //!
 //! Measures performance of:
-//! - process_sample throughput (samples/second)
+//! - `LinearSolver::process_sample` throughput (linear circuits)
+//! - Code generation for a nonlinear circuit (`CodeGenerator::generate`)
 //! - NR solver convergence (iterations, time per iteration)
 //! - Matrix operations (S * rhs, K * i_nl)
 //! - Device evaluation (diode/BJT current and jacobian)
+//!
+//! Nonlinear circuits run only as generated code, so their per-sample
+//! throughput is not a library measurement: it is measured on the generated
+//! solver (`bench.sh`). The benchmarks below that drove the runtime
+//! `CircuitSolver` measure a solver deleted in `356b146`; they are compiled
+//! out (`cfg(any())`) and kept pending a decision on their removal.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use melange_devices::{BjtEbersMoll, DiodeShockley};
 use melange_primitives::nr::{nr_solve_1d, nr_solve_2d, pn_vcrit, pnjlim};
 use melange_solver::{
+    codegen::{CodeGenerator, CodegenConfig},
     dk::DkKernel,
     mna::MnaSystem,
     parser::Netlist,
-    solver::{CircuitSolver, DeviceEntry, LinearSolver},
+    solver::LinearSolver,
+};
+#[cfg(any())]
+use {
+    criterion::BenchmarkId,
+    melange_solver::solver::{CircuitSolver, DeviceEntry},
 };
 
 // =============================================================================
@@ -32,6 +45,8 @@ R1 out 0 1k
 .model D1N4148 D(IS=1e-15)
 "#;
 
+// Used only by the retired `CircuitSolver` benchmark below.
+#[cfg(any())]
 const BJT_AMP_SPICE: &str = r#"Common Emitter
 Q1 coll base emit 2N2222
 Rc coll vcc 10k
@@ -73,6 +88,8 @@ fn benchmark_rc_lowpass(c: &mut Criterion) {
     group.finish();
 }
 
+// Retired: drives the runtime `CircuitSolver` deleted in `356b146`.
+#[cfg(any())]
 fn benchmark_diode_clipper(c: &mut Criterion) {
     let netlist = Netlist::parse(DIODE_CLIPPER_SPICE).unwrap();
     let mna = MnaSystem::from_netlist(&netlist).unwrap();
@@ -102,6 +119,8 @@ fn benchmark_diode_clipper(c: &mut Criterion) {
     group.finish();
 }
 
+// Retired: drives the runtime `CircuitSolver` deleted in `356b146`.
+#[cfg(any())]
 fn benchmark_bjt_amp(c: &mut Criterion) {
     let netlist = Netlist::parse(BJT_AMP_SPICE).unwrap();
     let mna = MnaSystem::from_netlist(&netlist).unwrap();
@@ -137,6 +156,39 @@ fn benchmark_bjt_amp(c: &mut Criterion) {
         );
     }
 
+    group.finish();
+}
+
+/// Code generation for a nonlinear circuit: DC operating point, IR build and
+/// emission of the generated solver source (`CodeGenerator::generate`), from
+/// a kernel built once outside the measurement.
+fn benchmark_codegen(c: &mut Criterion) {
+    let netlist = Netlist::parse(DIODE_CLIPPER_SPICE).unwrap();
+    let mut mna = MnaSystem::from_netlist(&netlist).unwrap();
+    let input_node = mna.node_map["in"] - 1;
+    let output_node = mna.node_map["out"] - 1;
+    // Thevenin input conductance, stamped before the kernel is built.
+    mna.g[input_node][input_node] += 1.0;
+    let config = CodegenConfig {
+        circuit_name: "bench_diode_clipper".to_string(),
+        sample_rate: 48000.0,
+        input_node,
+        output_nodes: vec![output_node],
+        ..CodegenConfig::default()
+    };
+    let kernel = DkKernel::from_mna(&mna, config.sample_rate).unwrap();
+    let generator = CodeGenerator::new(config);
+
+    let mut group = c.benchmark_group("codegen/diode_clipper");
+    group.bench_function("generate", |b| {
+        b.iter(|| {
+            black_box(
+                generator
+                    .generate(black_box(&kernel), &mna, &netlist)
+                    .unwrap(),
+            )
+        })
+    });
     group.finish();
 }
 
@@ -343,6 +395,8 @@ fn benchmark_kernel_contribution(c: &mut Criterion) {
     group.finish();
 }
 
+// Retired: drives the runtime `CircuitSolver` deleted in `356b146`.
+#[cfg(any())]
 fn benchmark_rhs_construction(c: &mut Criterion) {
     let netlist = Netlist::parse(DIODE_CLIPPER_SPICE).unwrap();
     let mna = MnaSystem::from_netlist(&netlist).unwrap();
@@ -476,6 +530,8 @@ fn benchmark_device_array_vs_vec(c: &mut Criterion) {
 // Benchmark 5: Comparison Across Sample Rates
 // =============================================================================
 
+// Retired: drives the runtime `CircuitSolver` deleted in `356b146`.
+#[cfg(any())]
 fn benchmark_sample_rate_comparison(c: &mut Criterion) {
     let netlist = Netlist::parse(DIODE_CLIPPER_SPICE).unwrap();
     let mna = MnaSystem::from_netlist(&netlist).unwrap();
@@ -507,8 +563,8 @@ criterion_group!(
     benches,
     // Process sample throughput
     benchmark_rc_lowpass,
-    benchmark_diode_clipper,
-    benchmark_bjt_amp,
+    // Code generation
+    benchmark_codegen,
     // NR solver convergence
     benchmark_nr_1d_convergence,
     benchmark_nr_2d_convergence,
@@ -516,13 +572,10 @@ criterion_group!(
     benchmark_matrix_prediction,
     benchmark_matrix_correction,
     benchmark_kernel_contribution,
-    benchmark_rhs_construction,
     // Device evaluation
     benchmark_diode_evaluation,
     benchmark_bjt_evaluation,
     benchmark_device_array_vs_vec,
-    // Comparisons
-    benchmark_sample_rate_comparison,
 );
 
 criterion_main!(benches);

@@ -340,7 +340,8 @@ pub(super) enum NoiseMode {
 /// `H·v_prev` with `H = alpha·C` (`a_neg`), and every source enters once, at
 /// `n+1`. A trapezoidal solve (`trap`) adds the carried charge derivative
 /// `q_dot`. With KCL exact at `n`, this equals the whole-system trapezoidal RHS
-/// `(alpha·C − G)·v_n + N_i·i_nl(n) + b(n) + b(n+1)`. When the accepted solve
+/// `2·RHS_CONST + (alpha·C − G)·v_n + N_i·i_nl(n) + b(n) + b(n+1)` on the
+/// charge-carrying rows (`COMPANION_MODELS.md`). When the accepted solve
 /// leaves a KCL residual, the whole-system form feeds it back into the next
 /// sample on the algebraic rows as a z = −1 memory; this form does not. The
 /// nonlinear current enters through the Newton solve at `n+1` alone.
@@ -2326,8 +2327,9 @@ impl RustEmitter {
         // damps the marginal mode — the DK path uses identical matrices and
         // works fine. When rho > 1.0, the linear prediction genuinely amplifies
         // errors. With well-conditioned K (negative diagonal, not degenerate),
-        // the Schur NR still handles rho slightly above 1.0 (up to ~1.002,
-        // matching the DK auto-BE threshold). Only route to full-LU when K
+        // the Schur NR still handles rho slightly above 1.0 (up to
+        // TRAP_BE_PROMOTION_RHO = 1.002, the growth margin on a spectral
+        // radius). Only route to full-LU when K
         // itself is pathological OR spectral radius indicates true instability
         // that even the Schur NR can't damp.
         //
@@ -2338,7 +2340,7 @@ impl RustEmitter {
         // extreme, J_dev*K >> I and the 16×16 Gauss elimination is hopelessly
         // ill-conditioned. The full LU NR avoids K entirely by stamping device
         // Jacobians into G_aug directly.
-        let k_ill_conditioned = m > 0 && k_max_abs > 1e8;
+        let k_ill_conditioned = m > 0 && k_max_abs > crate::codegen::routing::K_ILL_COND_MAX;
         // S matrix check: nodes connected only through caps and device junctions
         // (no resistive path) produce extreme S = A^{-1} entries. This is
         // invariant to FA reduction — FA changes N_V/N_I/K but not A/S. When
@@ -2354,7 +2356,7 @@ impl RustEmitter {
         } else {
             0.0
         };
-        let s_ill_conditioned = s_max_abs > 1e6;
+        let s_ill_conditioned = s_max_abs > crate::codegen::routing::S_ILL_COND_MAX;
 
         // Linearized device bypass: when triodes/BJTs are linearized at DC OP,
         // their small-signal conductances (gm, 1/rp) stamp into G, creating
@@ -2404,7 +2406,8 @@ impl RustEmitter {
             && !s_ill_conditioned
             && k_diag_min > -1e12;
         // Spectral radius thresholds:
-        // - k_well_conditioned: 1.002 (DK auto-BE threshold, tight)
+        // - k_well_conditioned: TRAP_BE_PROMOTION_RHO = 1.002 (the growth
+        //   margin on a spectral radius, tight)
         // - linearized_bypass: 1.05 (relaxed — the Schur NR corrects the
         //   linear prediction every sample via M-dim NR, and the runtime
         //   BE fallback catches any sample where trapezoidal diverges.
@@ -2412,7 +2415,7 @@ impl RustEmitter {
         //   corrected by the first NR iteration)
         // - pathological K (no bypass): 1.0 (strict — unknown K structure)
         let schur_unstable = if k_well_conditioned {
-            ir.matrices.spectral_radius_s_aneg > 1.002
+            ir.matrices.spectral_radius_s_aneg > crate::codegen::stability::TRAP_BE_PROMOTION_RHO
         } else if linearized_bypass {
             ir.matrices.spectral_radius_s_aneg > 1.05
         } else {

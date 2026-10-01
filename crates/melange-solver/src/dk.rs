@@ -236,14 +236,8 @@ pub fn max_m_refusal(m: usize) -> String {
     )
 }
 
-/// Maximum supported system dimension (total rows/columns in the A/S matrices).
-///
-/// Includes circuit nodes, voltage source branch currents, VCVS augmented rows,
-/// and inductor branch variables. Prevents O(N^3) blowup from matrix inversion
-/// on pathologically large circuits.
-///
-/// N=256 is generous for any real audio circuit (Pultec EQP-1A is ~41 nodes).
-pub const MAX_N: usize = 256;
+/// Maximum supported system dimension; defined in [`crate::mna::MAX_N`].
+pub use crate::mna::MAX_N;
 
 impl DkKernel {
     /// Build DK kernel from MNA system.
@@ -492,13 +486,17 @@ impl DkKernel {
                 }
             }
             // Compute Y = (T/2) * inv(L)
-            let y_raw = invert_small_matrix(&l_mat);
-            // Guard: invert_small_matrix falls back to identity (with only a
-            // warn) on singular/near-singular input, and its absolute 1e-30
-            // pivot threshold is meaningless against O(1e-3..1e2) inductance
-            // entries — a coupling k→1 group can produce garbage Y silently.
-            // Validate the inverse scale-relatively and hard-error like the
-            // 2-winding det<=0 path does.
+            let y_raw = invert_small_matrix(&l_mat).map_err(|reason| {
+                DkError::SingularMatrix(format!(
+                    "Transformer group '{}': cannot invert inductance matrix: {}",
+                    group.name, reason
+                ))
+            })?;
+            // Guard: invert_small_matrix refuses only exact singularity — its
+            // absolute 1e-30 pivot threshold is meaningless against
+            // O(1e-3..1e2) inductance entries, so a coupling k→1 group can
+            // come back as a garbage Y. Validate the inverse scale-relatively
+            // and hard-error like the 2-winding det<=0 path does.
             {
                 let mut max_resid = 0.0_f64;
                 for i in 0..w {
@@ -1354,8 +1352,8 @@ pub(crate) fn invert_matrix(a: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, String> {
     // Step 0: Non-finite guard. NaN comparisons are always false, so a NaN
     // entry sails through the pivot magnitude checks below and silently
     // poisons S (and everything derived from it: K, S*N_i, the condition
-    // estimate). Mirror mna::invert_small_matrix's guard, but as a hard
-    // error — callers map this to DkError::SingularMatrix.
+    // estimate). Same guard as mna::invert_small_matrix: a hard error —
+    // callers map this to DkError::SingularMatrix.
     for (i, row) in a.iter().enumerate() {
         for (j, &v) in row.iter().enumerate() {
             if !v.is_finite() {

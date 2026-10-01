@@ -1149,8 +1149,9 @@ fn build_dc_system(mna: &MnaSystem, device_slots: &[DeviceSlot]) -> DcSystemInfo
         }
     }
 
-    // Regularize: Gmin on all circuit nodes AND internal nodes
-    let gmin_floor = 1e-12;
+    // Regularize: Gmin on all circuit nodes AND internal nodes (the same
+    // value the nodal transient stamps on its node diagonals).
+    let gmin_floor = crate::codegen::ir::GMIN_REGULARISATION;
     for i in 0..n {
         g_dc[i][i] += gmin_floor;
     }
@@ -2047,6 +2048,14 @@ fn nr_dc_solve(
     (ok, iters)
 }
 
+/// DC NR global damping: when the largest voltage-row step exceeds this (V),
+/// every voltage-row step is scaled by `DC_NR_DAMPING_STEP_V / max_step`.
+const DC_NR_DAMPING_STEP_V: f64 = 10.0;
+
+/// DC NR flat clamp on each voltage-row step after damping (V). Branch-current
+/// rows are exempt (they are in amperes).
+const DC_NR_MAX_VOLTAGE_STEP_V: f64 = 50.0;
+
 /// [`nr_dc_solve`], also returning the rail pin set of the returned iterate's
 /// system (one entry per op-amp, `Some(limit)` when pinned).
 fn nr_dc_solve_pinned(
@@ -2456,7 +2465,7 @@ fn nr_dc_solve_pinned(
         // flat clamp would stall convergence whenever a branch current
         // legitimately exceeds 50 A (or trigger phantom damping from large
         // current steps).
-        let v_max_step = 50.0;
+        let v_max_step = DC_NR_MAX_VOLTAGE_STEP_V;
         let mut max_delta = 0.0_f64;
         for i in 0..n_dc {
             if circuit.is_voltage_row[i] {
@@ -2464,8 +2473,8 @@ fn nr_dc_solve_pinned(
                 max_delta = max_delta.max(delta);
             }
         }
-        let damping = if max_delta > 10.0 {
-            (10.0 / max_delta).max(0.1)
+        let damping = if max_delta > DC_NR_DAMPING_STEP_V {
+            (DC_NR_DAMPING_STEP_V / max_delta).max(0.1)
         } else {
             1.0
         };
@@ -3132,7 +3141,6 @@ fn patch_g_dc_for_aol(base_g_dc: &[Vec<f64>], mna: &MnaSystem, aol_step: f64) ->
     // uniform gain levels — if only SR op-amps are reduced, the remaining
     // high-gain op-amps (AOL=1000) still create large NR steps that push the
     // SR op-amp outputs to the wrong rail via resistive feedback paths.
-    const AOL_DC_MAX: f64 = 1000.0;
 
     for oa in &mna.opamps {
         let out = oa.n_out_idx;
@@ -4164,7 +4172,6 @@ fn solve_dc_operating_point_core(
         // AOL continuation steps: start very low, ramp geometrically to AOL_DC_MAX.
         // The first step uses source stepping from v=0. Each subsequent step
         // warm-starts from the previous converged solution.
-        const AOL_DC_MAX: f64 = 1000.0;
         let aol_steps: &[f64] = &[1.0, 3.0, 10.0, 30.0, 100.0, 300.0, AOL_DC_MAX];
 
         let mut aol_total_iters = 0;
@@ -5234,7 +5241,6 @@ Cx c3 b4 6n IC=-4\n";
 
         // build_dc_system bakes the AOL_DC_MAX=1000 cap into base g_dc.
         let dc_sys = build_dc_system(&mna, &[]);
-        const AOL_DC_MAX: f64 = 1000.0; // must match dc_op.rs constants
         let gm_capped = AOL_DC_MAX / r_out;
         assert!(
             (dc_sys.g_dc[2][0] - (-gm_capped - g_fb_np)).abs() < 1e-9,

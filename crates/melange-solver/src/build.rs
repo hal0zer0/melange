@@ -701,8 +701,8 @@ pub fn assemble(
     // Stamp junction capacitances BEFORE FA detection (caps affect DC OP).
     // Internal node expansion happens AFTER FA detection to avoid disrupting it.
     {
-        let device_slots =
-            crate::codegen::ir::CircuitIR::build_device_info(&netlist).unwrap_or_default();
+        let device_slots = crate::codegen::ir::CircuitIR::build_device_info(&netlist)
+            .with_context(|| "Code generation failed")?;
         if !device_slots.is_empty() {
             mna.stamp_device_junction_caps(&device_slots);
         }
