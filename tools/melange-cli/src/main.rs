@@ -2569,6 +2569,20 @@ fn validate_circuit_source(
     }
     println!();
 
+    // The first VALIDATE_SETTLE_PERIODS stimulus periods are left out of every
+    // metric: the sine starts at t = 0 with a step in its derivative, and the
+    // two engines' onset transients differ on a scale set by the stimulus.
+    // Checked first: it depends only on the arguments, so a render too short to
+    // compare is refused before anything about the environment is.
+    let settle_time_s = VALIDATE_SETTLE_PERIODS / VALIDATE_STIMULUS_HZ;
+    if settle_time_s >= duration {
+        anyhow::bail!(
+            "--duration {duration} s is inside the settle window ({VALIDATE_SETTLE_PERIODS} \
+             periods of the {VALIDATE_STIMULUS_HZ} Hz stimulus = {settle_time_s} s), so nothing \
+             would be compared; use a longer --duration"
+        );
+    }
+
     // Step 1: Check ngspice availability
     println!("Step 1: Checking ngspice...");
     if !is_ngspice_available() {
@@ -2624,18 +2638,6 @@ fn validate_circuit_source(
                 (path, Some(tmp))
             }
         };
-
-    // The first VALIDATE_SETTLE_PERIODS stimulus periods are left out of every
-    // metric: the sine starts at t = 0 with a step in its derivative, and the
-    // two engines' onset transients differ on a scale set by the stimulus.
-    let settle_time_s = VALIDATE_SETTLE_PERIODS / VALIDATE_STIMULUS_HZ;
-    if settle_time_s >= duration {
-        anyhow::bail!(
-            "--duration {duration} s is inside the settle window ({VALIDATE_SETTLE_PERIODS} \
-             periods of the {VALIDATE_STIMULUS_HZ} Hz stimulus = {settle_time_s} s), so nothing \
-             would be compared; use a longer --duration"
-        );
-    }
 
     // Step 3: Generate test input signal (1kHz sine)
     println!(

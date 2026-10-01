@@ -2,7 +2,7 @@
 
 Quick-reference for AI agents. For math details see other aidocs. For architecture see CLAUDE.md.
 
-> **Latest release: v0.1.12 (2026-09-30)** — changes rendered audio. The trapezoidal integrator
+> **Latest release: v0.1.13 (2026-09-30)**, a test-and-harness patch over v0.1.12 (same audio). **v0.1.12** changes rendered audio. The trapezoidal integrator
 > carries the capacitor currents as state (the charge form; sources enter once, at n+1), automatic
 > backward-Euler promotion follows the ring predicate, transition-BE is retired, breakpoint-BE
 > fires only where a reactance changes, and the BJT, JFET and op-amp models move toward SPICE (PNP

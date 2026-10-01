@@ -9,6 +9,32 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-09-30
+
+A patch over 0.1.12 whose CI test job failed after the tag. **Rendered audio
+is identical to 0.1.12, and generated code differs only in its version and
+provenance header**: nothing here touches the solver, the device models or code
+generation.
+
+### Fixed
+
+- **`validate` refuses a render too short to compare before it checks for
+  ngspice.** The check depends only on `--duration`, but ran after the ngspice
+  check, so without ngspice a 20 ms render got "ngspice is not installed"
+  instead of the reason it can never be compared. CI's test runner has no
+  ngspice, and the test for this refusal failed there.
+
+### Tests
+
+- The regression harness covers OpenWurli's tremolo oscillator, the only
+  generated circuit in OpenWurli's default build, built with the flags
+  OpenWurli uses. The harness can now drive a deck with `.tap` or `.inject`,
+  which emits a different `process_sample` signature. It could not capture any
+  such deck before.
+- `tools/ci-test-gate.sh` runs the workspace tests as CI's test job does,
+  environment included: ngspice hidden from `PATH`, warnings as errors, and
+  every test binary run even after one fails.
+
 ## [0.1.12] - 2026-09-30
 
 **This release changes rendered audio. Regenerate every plugin built with
