@@ -10,12 +10,21 @@ codegen output, CLI flags, and netlist semantics may all change.
 ## [Unreleased]
 
 A cleanup and bug-fix release. **What changes generated code or rendered
-audio:** nodal builds drop a second 1e-12 S node conductance they added on top
-of the one already in G (four silence renders in the regression corpus move at
-the microvolt level; every signal render by 1e-5 dB or less), and generated
-comments now describe the current integrator. Everything else is a refusal of
-something that used to be silently wrong, a CLI or measurement fix, or
-internal restructuring with byte-identical generated code.
+audio:**
+- Nodal builds drop a second 1e-12 S node conductance they added on top of
+  the one already in G (four silence renders in the regression corpus move
+  at the microvolt level; every signal render by 1e-5 dB or less).
+- The DC operating point of circuits with parasitic-resistance transistors
+  starts from the corrected junction clamp; six corpus circuits' operating
+  points (and the constants derived from them) move by at most 8e-11 V.
+- Plugins compiled with `--noise` now produce their circuit noise by
+  default (a "Circuit Noise" switch); before, it was compiled in and
+  silent.
+- Generated comments describe the current integrator.
+
+Everything else is a refusal of something that used to be silently wrong, a
+CLI or measurement fix, or internal restructuring with byte-identical
+generated code.
 
 ### Summary: new refusals
 
@@ -28,6 +37,8 @@ internal restructuring with byte-identical generated code.
 - `simulate --sample-rate` that differs from the input WAV's rate.
 - `analyze` points whose render was not a solution (unsolved samples, a
   reduced model outside its region); `--allow-nr-hold` reports them anyway.
+- `compile --stereo` with `--format code`, with `--mono`, or with more than
+  one output node.
 - An invalid `--solver` value on any verb (it fell back to auto), a non-UTF-8
   `--input-audio`/`--output`/`--probe-csv` path (it was replaced with a
   default file name), and a source index newer than schema 1.
@@ -116,11 +127,34 @@ internal restructuring with byte-identical generated code.
   VT is kT/q at 300.15 K; the forward-active and grid-off reductions are
   opt-in.
 
+### Added
+
+- **`compile --stereo`** makes a one-output circuit a dual-instance stereo
+  plugin: one copy of the circuit per channel, every control moving both,
+  identical component values (including `.tolerance`/`.mismatch` draws) and
+  independent noise per channel. A one-output circuit is still a mono plugin
+  by default.
+- **A "Circuit Noise" parameter** in plugins compiled with `--noise`
+  (default on). The noise model used to be compiled in but left disabled,
+  so a generated plugin was silent until its author edited it.
+- **`analyze --freq <Hz>`** measures a single frequency.
+- **`nodes` lists op-amps** with their model, and shows a `.wiper` as one
+  control.
+
 ### Changed
 
 - **Default CLI output is one plain route line;** `-v`/`--verbose` prints the
   full route and stability detail. Warnings, refusals and DC-OP failures
   always print.
+- **`analyze` defaults to 48 kHz**, like `compile` and `simulate` (it was
+  96 kHz, so a bare `analyze` measured a different build from the one
+  shipped; pass `-s 96000` for the old behaviour). dBc values below -200
+  print as `-inf`.
+- **Quieter `simulate`, `validate` and `dc-op`:** solver counters print by
+  default only when nonzero and worth a warning; the output peak is given
+  in V and dBFS. An unsolved DK render suggests `--solver nodal` before
+  `--allow-nr-hold`. An unknown `.model` parameter names the card and its
+  netlist line.
 - **`--with-level-params=false`** works (the flag could never be false).
 - **Brand-free test names:** `test_neve_1073_output_vs_spice` ->
   `test_three_bjt_transformer_output_amp_vs_spice`,
