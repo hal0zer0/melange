@@ -26,7 +26,7 @@
 //!
 //! `melange simulate` has warned at exactly this fraction since 2026-08-15,
 //! when a Ge astable cascade starved at `--max-iter 70`, latched every node,
-//! and read as real physics for half a day (see `tools/melange-cli/src/main.rs`).
+//! and read as real physics for half a day (see `tools/melange-cli/src/cmd/simulate.rs`).
 //! That threshold was set where it is because a *healthy* run of that same
 //! circuit still shows ~5% onset-only max-iter samples, so 5% cries wolf.
 //! Reusing it is deliberate: a second, differently-tuned line in a sibling tool
