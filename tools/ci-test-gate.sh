@@ -12,7 +12,8 @@
 #
 # Usage: tools/ci-test-gate.sh [extra cargo test args...]
 # Env:   GATE_CPUS (default 0-23), GATE_JOBS (default 24),
-#        GATE_TEST_THREADS (default 12). Runs at idle priority.
+#        GATE_TEST_THREADS (default 12). Runs at idle priority. If GATE_CPUS
+#        names no CPU this machine has, or taskset is missing, runs unpinned.
 #
 # If ci.yml's Test job changes what it installs, update HIDE below to match.
 set -euo pipefail
@@ -47,7 +48,24 @@ for h in "${HIDE[@]}"; do
 done
 echo "ci-test-gate: hidden from PATH: ${HIDE[*]}; RUSTFLAGS=-Dwarnings; --no-fail-fast" >&2
 
+# CPU pinning and idle I/O are etiquette, not part of the gate. taskset
+# silently drops CPUs this machine lacks, so it only fails when none of
+# GATE_CPUS exist (or the list does not parse); taskset/ionice are also absent
+# off Linux. In those cases run without them rather than fail the gate.
+prefix=()
+if command -v taskset >/dev/null 2>&1 && taskset -c "$CPUS" true 2>/dev/null; then
+    prefix+=(taskset -c "$CPUS")
+else
+    echo "ci-test-gate: cannot pin to CPUs '$CPUS' on this machine ($(nproc 2>/dev/null || echo '?') CPUs); running unpinned" >&2
+fi
+prefix+=(nice -n 19)
+if command -v ionice >/dev/null 2>&1 && ionice -c 3 true 2>/dev/null; then
+    prefix+=(ionice -c 3)
+else
+    echo "ci-test-gate: ionice unavailable; running without idle I/O class" >&2
+fi
+
 cd "$(dirname "$0")/.."
 PATH="$farm" RUSTFLAGS=-Dwarnings \
-    taskset -c "$CPUS" nice -n 19 ionice -c 3 \
+    "${prefix[@]}" \
     cargo test --workspace -j "$JOBS" --no-fail-fast "$@" -- --test-threads "$THREADS"

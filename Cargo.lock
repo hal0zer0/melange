@@ -932,14 +932,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "melange-plugin"
-version = "0.1.13"
-dependencies = [
- "melange-primitives",
- "melange-solver",
-]
-
-[[package]]
 name = "melange-primitives"
 version = "0.1.13"
 

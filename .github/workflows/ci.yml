@@ -67,7 +67,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev ngspice
-      - run: cargo test -p melange-validate --test spice_validation -- --include-ignored
+      # Every ngspice-dependent test target; each is #[ignore]d in the Test job.
+      - run: >-
+          cargo test -p melange-validate
+          --test spice_validation
+          --test rate_sweep_tests
+          --test thermal_twin_tests
+          --test parasitic_twin_tests
+          --test linearize_twin_tests
+          -- --include-ignored
 
   msrv:
     name: MSRV (Rust 1.85)

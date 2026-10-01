@@ -5,7 +5,6 @@ members = [
     "crates/melange-devices",
     "crates/melange-solver",
     "crates/melange-validate",
-    "crates/melange-plugin",
     "tools/melange-cli",
     "tools/golden-harness",
 ]
@@ -31,7 +30,6 @@ melange-primitives = { path = "crates/melange-primitives" }
 melange-devices = { path = "crates/melange-devices" }
 melange-solver = { path = "crates/melange-solver" }
 melange-validate = { path = "crates/melange-validate" }
-melange-plugin = { path = "crates/melange-plugin" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 log = "0.4"
