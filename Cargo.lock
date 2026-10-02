@@ -576,7 +576,7 @@ dependencies = [
 
 [[package]]
 name = "golden-harness"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "serde",
  "serde_json",
@@ -904,7 +904,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "melange-cli"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "clap",
@@ -924,18 +924,18 @@ dependencies = [
 
 [[package]]
 name = "melange-devices"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "melange-primitives",
 ]
 
 [[package]]
 name = "melange-primitives"
-version = "0.1.14"
+version = "0.1.15"
 
 [[package]]
 name = "melange-solver"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "criterion",
  "log",
@@ -948,7 +948,7 @@ dependencies = [
 
 [[package]]
 name = "melange-validate"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "csv",
  "log",

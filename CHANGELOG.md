@@ -9,6 +9,49 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+## [0.1.15] - 2026-10-02
+
+A bug-fix release. **What changes generated code or rendered audio:** decks
+with `.inject` at `--oversampling 2` or `4`, whose injections now default to
+host rate (band-limited and delay-matched like the input). Nothing changes at
+1x, and decks without `.inject` or `.tap` are unchanged.
+
+### Fixed
+
+- **An audio signal fed through `.inject` is band-limited and delay-matched
+  like the input under oversampling.** At `--oversampling 2`/`4` the input
+  passed through a half-band up-filter while `.inject` values went straight
+  to the inner solve each sub-step, so the same signal through the input and
+  through an injection differed by -1.6 dB at 18 kHz with a delay mismatch,
+  and a `simulate --inject` drive led the `--amplitude` tone by 11.8 degrees
+  at 1 kHz. Each injection now declares its rate:
+  `.inject <node> <field> R=<ohms>|RSHUNT=<ohms> [rate=host|inner]`, default
+  `host`.
+  - `rate=host`: an audio-rate input, supplied once per host sample through
+    its own up-filter (the input's filter and group delay).
+  - `rate=inner`: supplied per inner sub-step with the caller owning
+    band-limiting; the form for a `.tap` -> `.inject` feedback loop closed in
+    host code (a host-rate injection carries the up-filter's group delay).
+  Measured: the same signal through the input and a host-rate injection now
+  agrees exactly at 1x, 2x and 4x.
+
+### Changed
+
+- **Generated API (0.x break):** for a deck with `.inject` or `.tap`,
+  `process_sample(input, injections_host: &[f64; NUM_INJECT_HOST],
+  injections_inner: &[[f64; NUM_INJECT_INNER]; OVERSAMPLING_FACTOR], state)`
+  takes both kinds as separate arrays (empty for a kind the deck lacks) and
+  still returns raw per-inner-sample taps. New constants
+  `NUM_INJECT_HOST`/`NUM_INJECT_INNER`, `INJECT_HOST_*`/`INJECT_INNER_*` and
+  `INJECT_IS_HOST`; the existing `NUM_INJECT`/`INJECT_*` remain. A taps-only
+  call site changes from `process_sample(x, &NO_INJECT, s)` to
+  `process_sample(x, &[], &NO_INJECT, s)`. Decks with neither keep
+  `process_sample(input, state)`.
+- **`.inject` parsing is strict:** an unknown `rate=` value or any trailing
+  token after the impedance is a parse error (trailing tokens were ignored).
+- **`simulate --inject`** drives a host-rate field once per host sample
+  through the up-filter, an inner-rate field per sub-step.
+
 ## [0.1.14] - 2026-10-01
 
 A cleanup and bug-fix release. **What changes generated code or rendered
@@ -3095,7 +3138,8 @@ measured real hardware. Everything else is unproven against hardware. See
   KiCad file; no effect on netlist compilation, generated code, or shipped plugins. The
   fix (`quick-xml >= 0.41`) is tracked for 0.1.1.
 
-[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.14...HEAD
+[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.15...HEAD
+[0.1.15]: https://github.com/hal0zer0/melange/compare/v0.1.14...v0.1.15
 [0.1.14]: https://github.com/hal0zer0/melange/compare/v0.1.13...v0.1.14
 [0.1.13]: https://github.com/hal0zer0/melange/compare/v0.1.12...v0.1.13
 [0.1.12]: https://github.com/hal0zer0/melange/compare/v0.1.11...v0.1.12
