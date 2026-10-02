@@ -484,9 +484,20 @@ pub struct InjectionSpec {
     /// for Norton). Conductance `1/resistance` is stamped into the diagonal.
     pub resistance: f64,
     /// `true` = Norton (runtime value is a CURRENT: `rhs[node] += val`).
-    /// `false` = Thevenin (runtime value is a VOLTAGE:
-    /// `rhs[node] += (val + val_prev) * G` for trap, `val * G` for BE).
+    /// `false` = Thevenin (runtime value is a VOLTAGE: `rhs[node] += val * G`,
+    /// at n+1 under both integrators).
     pub norton: bool,
+    /// `true` = `rate=host` (supplied once per host sample and upsampled
+    /// through its own copy of the audio input's half-band up-filter);
+    /// `false` = `rate=inner` (supplied per inner sub-step, straight to the
+    /// inner solve). Identical at `OVERSAMPLING_FACTOR == 1`.
+    #[serde(default = "default_inject_host_rate")]
+    pub host_rate: bool,
+}
+
+/// `rate=host` is the `.inject` default.
+fn default_inject_host_rate() -> bool {
+    true
 }
 
 /// A resolved `.tap` raw inner-rate probe.
@@ -670,6 +681,22 @@ impl SolverConfig {
     /// Number of `.inject` runtime feedback sources.
     pub fn num_inject(&self) -> usize {
         self.injections.len()
+    }
+
+    /// Indices (into [`Self::injections`]) of the `rate=host` injections, in
+    /// directive order — the order of `process_sample`'s `injections_host`.
+    pub fn inject_host_indices(&self) -> Vec<usize> {
+        (0..self.injections.len())
+            .filter(|&k| self.injections[k].host_rate)
+            .collect()
+    }
+
+    /// Indices (into [`Self::injections`]) of the `rate=inner` injections, in
+    /// directive order — the order of `process_sample`'s `injections_inner`.
+    pub fn inject_inner_indices(&self) -> Vec<usize> {
+        (0..self.injections.len())
+            .filter(|&k| !self.injections[k].host_rate)
+            .collect()
     }
 
     /// Number of `.tap` raw inner-rate probes.

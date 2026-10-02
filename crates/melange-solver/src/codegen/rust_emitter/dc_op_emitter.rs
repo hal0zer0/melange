@@ -844,6 +844,9 @@ fn emit_dc_op_writeback_dk(ir: &CircuitIR, nonlinear: bool) -> String {
                 size = os.state_size_outer,
             ));
         }
+        body.push_str(&super::inject_tap::emit_inject_os_state_reset(
+            ir, "self", "        ",
+        ));
     }
 
     body

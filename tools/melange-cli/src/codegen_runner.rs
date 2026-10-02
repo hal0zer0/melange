@@ -24,6 +24,19 @@ pub enum InjectSource {
     Dc { v: f64 },
 }
 
+/// One `--inject` drive resolved against the deck's `.inject` fields.
+#[derive(Debug, Clone, Copy)]
+pub struct InjectDrive {
+    /// The field is `rate=host`: driven once per host sample (the generated
+    /// `process_sample` upsamples it exactly like the audio input).
+    /// `false` = `rate=inner`: evaluated at every inner sub-step time.
+    pub host_rate: bool,
+    /// Index within its rate's argument (`injections_host[k]` or
+    /// `injections_inner[j][k]`), i.e. into `INJECT_HOST_*` / `INJECT_INNER_*`.
+    pub index: usize,
+    pub source: InjectSource,
+}
+
 /// Parse one `--inject FIELD=SPEC` value into `(field_name, source)`.
 /// SPEC is `sine:<freq>:<amp>` or `dc:<v>`.
 pub fn parse_inject_drive(s: &str) -> Result<(String, InjectSource)> {
@@ -399,7 +412,8 @@ pub struct SimulateMain<'a> {
     pub duration_secs: f64,
     pub probe_names: &'a [&'a str],
     pub noise_enabled: bool,
-    pub inject_driven: &'a [(usize, InjectSource)],
+    pub inject_driven: &'a [InjectDrive],
+    /// Total `.inject` count; nonzero selects the injection-API call shape.
     pub num_inject: usize,
     pub extra_diag_counters: &'a [&'a str],
     /// `--pcm16`: write 16-bit signed PCM instead of the default IEEE float32.
@@ -522,36 +536,59 @@ pub fn generate_simulate_main(main: SimulateMain<'_>) -> String {
     };
 
     // `.inject` drive: when the deck has injections (NUM_INJECT>0), every
-    // process_sample call takes an injection array. Fill it per inner
-    // (oversampled) sample from the `--inject` sources; undriven fields stay 0.
-    let driven_lines: String = inject_driven
+    // process_sample call takes a host-rate and an inner-rate injection array.
+    // A `rate=host` field is evaluated once per host sample, at the host
+    // sample time (the same expression the inner sub-step 0 uses, so a 1x
+    // render is unchanged), and the generated code upsamples it like the
+    // input. A `rate=inner` field is evaluated at each inner sub-step time and
+    // reaches the inner solve as given. Undriven fields stay 0.
+    let host_lines: String = inject_driven
         .iter()
-        .map(|(idx, src)| match src {
-            InjectSource::Sine { freq, amp } => format!(
-                "            melange_inj[j][{idx}] = {amp:.17e} * (2.0 * std::f64::consts::PI * {freq:.17e} * ti).sin();\n"
-            ),
-            InjectSource::Dc { v } => format!("            melange_inj[j][{idx}] = {v:.17e};\n"),
+        .filter(|d| d.host_rate)
+        .map(|d| {
+            let idx = d.index;
+            match d.source {
+                InjectSource::Sine { freq, amp } => format!(
+                    "        melange_inj_host[{idx}] = {amp:.17e} * (2.0 * std::f64::consts::PI * {freq:.17e} * ((i as f64) / sr)).sin();\n"
+                ),
+                InjectSource::Dc { v } => format!("        melange_inj_host[{idx}] = {v:.17e};\n"),
+            }
+        })
+        .collect();
+    let inner_lines: String = inject_driven
+        .iter()
+        .filter(|d| !d.host_rate)
+        .map(|d| {
+            let idx = d.index;
+            match d.source {
+                InjectSource::Sine { freq, amp } => format!(
+                    "            melange_inj[j][{idx}] = {amp:.17e} * (2.0 * std::f64::consts::PI * {freq:.17e} * ti).sin();\n"
+                ),
+                InjectSource::Dc { v } => format!("            melange_inj[j][{idx}] = {v:.17e};\n"),
+            }
         })
         .collect();
     let uses_ti = inject_driven
         .iter()
-        .any(|(_, s)| matches!(s, InjectSource::Sine { .. }));
+        .any(|d| !d.host_rate && matches!(d.source, InjectSource::Sine { .. }));
     let inject_fill: String = if num_inject > 0 {
         let ti = if uses_ti { "ti" } else { "_ti" };
         format!(
-            "        let mut melange_inj = [[0.0f64; NUM_INJECT]; OVERSAMPLING_FACTOR];\n\
+            "        let mut melange_inj_host = [0.0f64; NUM_INJECT_HOST];\n\
+             {host_lines}\
+             \x20       let mut melange_inj = [[0.0f64; NUM_INJECT_INNER]; OVERSAMPLING_FACTOR];\n\
              \x20       for j in 0..OVERSAMPLING_FACTOR {{\n\
              \x20           let {ti} = (i as f64) / sr + (j as f64) / (sr * OVERSAMPLING_FACTOR as f64);\n\
-             {driven_lines}        }}\n"
+             {inner_lines}        }}\n"
         )
     } else {
         String::new()
     };
-    // An `.inject`/`.tap` deck's process_sample takes the injection array and
-    // returns `(outputs, taps)`; a plain deck takes only the input and returns
-    // the outputs array. Bind `out` to the outputs either way.
+    // An `.inject`/`.tap` deck's process_sample takes the two injection arrays
+    // and returns `(outputs, taps)`; a plain deck takes only the input and
+    // returns the outputs array. Bind `out` to the outputs either way.
     let process_stmt: &str = if num_inject > 0 {
-        "let (out, _melange_taps) = process_sample(s, &melange_inj, &mut state);"
+        "let (out, _melange_taps) = process_sample(s, &melange_inj_host, &melange_inj, &mut state);"
     } else {
         "let out = process_sample(s, &mut state);"
     };

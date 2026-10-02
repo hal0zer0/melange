@@ -22,8 +22,13 @@
 //!     stamp with a flipped SIGN or wrong `R` changes `H` and is CAUGHT,
 //!     most visibly at the marginal (near-unity) operating point.
 //!   * (5) an inner-rate injection tone appears at the tap UN-band-limited
-//!     (asserts the injection bypasses the anti-alias up-filter and the tap
-//!     bypasses the decimator).
+//!     (asserts a `rate=inner` injection bypasses the anti-alias up-filter
+//!     and the tap bypasses the decimator).
+//!   * (host) a `rate=host` injection IS the audio input: two identical
+//!     nonlinear paths, one driven through `input`, one through a `rate=host`
+//!     injection behind the same 1 Ω, agree to the last bit at 1x, 2x and 4x
+//!     on every route (Thevenin and Norton); the same drive declared
+//!     `rate=inner` and fed per-sub-step repeats does not.
 
 mod support;
 
@@ -31,12 +36,14 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
-/// A resolved injection for the test harness: (node name, field, ohms, norton).
+/// A resolved injection for the test harness: (node name, field, ohms,
+/// norton, declared rate — `"host"` or `"inner"`).
 struct Inj<'a> {
     node: &'a str,
     field: &'a str,
     ohms: f64,
     norton: bool,
+    rate: &'a str,
 }
 
 /// Generate code for `netlist_str` with the given injections + taps, append
@@ -44,8 +51,7 @@ struct Inj<'a> {
 ///
 /// Builds through `melange_solver::build::build`, the build `melange compile`
 /// ships: the injections and taps are written into the deck as `.inject` /
-/// `.tap` directives (in `injects` order, the order `process_sample` takes
-/// them), and the build stamps `G_in` and every injection conductance, routes
+/// `.tap` directives (in `injects` order, each with its declared `rate=`), and the build stamps `G_in` and every injection conductance, routes
 /// DK/nodal, and resolves the specs itself.
 #[allow(clippy::too_many_arguments)]
 fn gen_and_run(
@@ -58,6 +64,33 @@ fn gen_and_run(
     oversampling: usize,
     main_body: &str,
 ) -> String {
+    gen_and_run_with(
+        netlist_str,
+        input_name,
+        input_resistance,
+        &[output_node],
+        injects,
+        taps,
+        oversampling,
+        main_body,
+        |_| {},
+    )
+}
+
+/// [`gen_and_run`] with several output nodes and a hook that adjusts the
+/// build options (solver route) before the build.
+#[allow(clippy::too_many_arguments)]
+fn gen_and_run_with(
+    netlist_str: &str,
+    input_name: &str,
+    input_resistance: f64,
+    output_nodes: &[&str],
+    injects: &[Inj],
+    taps: &[&str],
+    oversampling: usize,
+    main_body: &str,
+    tweak: impl FnOnce(&mut melange_solver::build::BuildOptions),
+) -> String {
     let mut deck: String = netlist_str
         .lines()
         .filter(|l| !l.trim().eq_ignore_ascii_case(".end"))
@@ -66,8 +99,8 @@ fn gen_and_run(
     for inj in injects {
         let kind = if inj.norton { "RSHUNT" } else { "R" };
         deck.push_str(&format!(
-            ".inject {} {} {kind}={}\n",
-            inj.node, inj.field, inj.ohms
+            ".inject {} {} {kind}={} rate={}\n",
+            inj.node, inj.field, inj.ohms, inj.rate
         ));
     }
     for t in taps {
@@ -75,13 +108,14 @@ fn gen_and_run(
     }
     deck.push_str(".end\n");
 
-    let opts = melange_solver::build::BuildOptions {
+    let mut opts = melange_solver::build::BuildOptions {
         circuit_name: "inject_oracle".to_string(),
         input_resistance: Some(input_resistance),
         oversampling: Some(oversampling),
         dc_block: false, // raw DC comparison — no 5 Hz HPF on the output
-        ..support::options(48000.0, input_name, &[output_node])
+        ..support::options(48000.0, input_name, output_nodes)
     };
+    tweak(&mut opts);
     let built = support::build(&deck, &opts);
     let names: Vec<&str> = built
         .injection_specs
@@ -136,9 +170,9 @@ fn inject_constant_equals_literal_source_behind_r() {
     let main = "
 fn main() {
     let mut state = CircuitState::default();
-    let inj = [[1.0f64; NUM_INJECT]; OVERSAMPLING_FACTOR];
+    let inj = [[1.0f64; NUM_INJECT_INNER]; OVERSAMPLING_FACTOR];
     let mut tap = 0.0;
-    for _ in 0..300_000 { let (_o, t) = process_sample(0.0, &inj, &mut state); tap = t[0][0]; }
+    for _ in 0..300_000 { let (_o, t) = process_sample(0.0, &[], &inj, &mut state); tap = t[0][0]; }
     println!(\"{tap:.6}\");
 }";
     let a = gen_and_run(
@@ -151,6 +185,7 @@ fn main() {
             field: "fb",
             ohms: 1000.0,
             norton: false,
+            rate: "inner",
         }],
         &["nx"],
         1,
@@ -170,9 +205,9 @@ Rfb fsrc nx 1k
     let main_b = "
 fn main() {
     let mut state = CircuitState::default();
-    let inj = [[0.0f64; NUM_INJECT]; OVERSAMPLING_FACTOR]; // NUM_INJECT == 0
+    let inj = [[0.0f64; NUM_INJECT_INNER]; OVERSAMPLING_FACTOR]; // NUM_INJECT == 0
     let mut tap = 0.0;
-    for _ in 0..300_000 { let (_o, t) = process_sample(0.0, &inj, &mut state); tap = t[0][0]; }
+    for _ in 0..300_000 { let (_o, t) = process_sample(0.0, &[], &inj, &mut state); tap = t[0][0]; }
     println!(\"{tap:.6}\");
 }";
     let b = gen_and_run(deck_b, "in", 1.0, "nx", &[], &["nx"], 1, main_b);
@@ -200,8 +235,8 @@ fn run(k: f64, c: f64) -> f64 {
     let mut fb = 0.0f64; let mut tap = 0.0;
     for _ in 0..500_000 {
         let val = k * fb + c;
-        let inj = [[val; NUM_INJECT]; OVERSAMPLING_FACTOR];
-        let (_o, t) = process_sample(0.0, &inj, &mut state);
+        let inj = [[val; NUM_INJECT_INNER]; OVERSAMPLING_FACTOR];
+        let (_o, t) = process_sample(0.0, &[], &inj, &mut state);
         tap = t[0][0]; fb = tap;
     }
     tap
@@ -219,6 +254,7 @@ fn main() {
             field: "fb",
             ohms: 1000.0,
             norton: false,
+            rate: "inner",
         }],
         &["nx"],
         1,
@@ -268,10 +304,10 @@ Cpar nx 0 4n
 fn main() {
     let mut state = CircuitState::default();
     // OVERSAMPLING_FACTOR == 4: period-4 inner tone at 48 kHz (up-filter stopband).
-    let inj: [[f64; NUM_INJECT]; OVERSAMPLING_FACTOR] = [[1.0],[1.0],[-1.0],[-1.0]];
+    let inj: [[f64; NUM_INJECT_INNER]; OVERSAMPLING_FACTOR] = [[1.0],[1.0],[-1.0],[-1.0]];
     let (mut mn, mut mx) = (f64::MAX, f64::MIN);
     for n in 0..40_000 {
-        let (_o, t) = process_sample(0.0, &inj, &mut state);
+        let (_o, t) = process_sample(0.0, &[], &inj, &mut state);
         if n > 30_000 { for k in 0..OVERSAMPLING_FACTOR { let v = t[k][0]; mn = mn.min(v); mx = mx.max(v); } }
     }
     println!(\"{:.6}\", mx - mn);
@@ -286,6 +322,7 @@ fn main() {
             field: "fb",
             ohms: 1000.0,
             norton: false,
+            rate: "inner",
         }],
         &["nx"],
         4,
@@ -340,8 +377,8 @@ fn main() {{
     let mut out = String::new();
     for n in 0..{NSAMP} {{
         let i = {AMP} * (2.0*std::f64::consts::PI*3000.0*(n as f64)/48000.0).sin();
-        let inj = [[i; NUM_INJECT]; OVERSAMPLING_FACTOR];
-        let (_o, t) = process_sample(0.0, &inj, &mut state);
+        let inj = [[i; NUM_INJECT_INNER]; OVERSAMPLING_FACTOR];
+        let (_o, t) = process_sample(0.0, &[], &inj, &mut state);
         if n >= {NSAMP} - 400 {{ out.push_str(&format!(\"{{:.9}} \", t[0][0])); }}
     }}
     println!(\"{{}}\", out.trim());
@@ -354,8 +391,8 @@ fn main() {{
     let mut out = String::new();
     for n in 0..{NSAMP} {{
         let v = {AMP} * {R0}_f64 * (2.0*std::f64::consts::PI*3000.0*(n as f64)/48000.0).sin();
-        let inj = [[0.0; NUM_INJECT]; OVERSAMPLING_FACTOR];
-        let (_o, t) = process_sample(v, &inj, &mut state);
+        let inj = [[0.0; NUM_INJECT_INNER]; OVERSAMPLING_FACTOR];
+        let (_o, t) = process_sample(v, &[], &inj, &mut state);
         if n >= {NSAMP} - 400 {{ out.push_str(&format!(\"{{:.9}} \", t[0][0])); }}
     }}
     println!(\"{{}}\", out.trim());
@@ -371,6 +408,7 @@ fn main() {{
             field: "fb",
             ohms: R0,
             norton: true,
+            rate: "inner",
         }],
         &["nx"],
         1,
@@ -402,4 +440,132 @@ fn main() {{
         "Norton varying inject deviates from current-source-behind-shunt reference: \
          max_abs_diff={max_abs_diff} (peak {peak}) — Norton trap form wrong?"
     );
+}
+
+/// Two identical antiparallel-diode clippers. Path A hangs off the audio input
+/// `in` (melange stamps its 1 Ω Thevenin); path B hangs off `in2`, driven by a
+/// `.inject in2 drv R=1` (or `RSHUNT=1`) — the same 1 Ω source. Nothing
+/// couples the two paths, so with the same signal into both they must agree.
+const TWIN_CLIPPERS: &str = "\
+* twin diode clippers: A via the input, B via .inject
+R1 in a 1k
+D1 a 0 DM
+D2 0 a DM
+C1 a 0 10n
+R2 in2 b 1k
+D3 b 0 DM
+D4 0 b DM
+C2 b 0 10n
+.model DM D(IS=2.52n N=1.752 RS=0.568)
+.end
+";
+
+/// Drive `x` into the input and into the injection (host-rate argument, or
+/// the same `x` repeated across every inner sub-step), clipping hard (2 V
+/// peak, 5 kHz). Prints `max|A − B|` and A's peak.
+fn twin_main(host: bool) -> String {
+    let (host_arg, inner_arg) = if host {
+        (
+            "&[x; NUM_INJECT_HOST]",
+            "&[[0.0; NUM_INJECT_INNER]; OVERSAMPLING_FACTOR]",
+        )
+    } else {
+        (
+            "&[0.0; NUM_INJECT_HOST]",
+            "&[[x; NUM_INJECT_INNER]; OVERSAMPLING_FACTOR]",
+        )
+    };
+    format!(
+        "
+fn main() {{
+    let mut state = CircuitState::default();
+    let (mut maxd, mut peak) = (0.0f64, 0.0f64);
+    for n in 0..24_000 {{
+        let x = 2.0 * (2.0 * std::f64::consts::PI * 5000.0 * (n as f64) / 48000.0).sin();
+        let (o, _t) = process_sample(x, {host_arg}, {inner_arg}, &mut state);
+        maxd = maxd.max((o[0] - o[1]).abs());
+        peak = peak.max(o[0].abs());
+    }}
+    println!(\"{{maxd:e}} {{peak:e}}\");
+}}"
+    )
+}
+
+/// Run [`TWIN_CLIPPERS`] with path B driven by an injection of the given kind
+/// and rate; returns `(max|A − B|, peak of A)`.
+fn run_twin(oversampling: usize, route: &str, norton: bool, rate: &str) -> (f64, f64) {
+    let out = gen_and_run_with(
+        TWIN_CLIPPERS,
+        "in",
+        1.0,
+        &["a", "b"],
+        &[Inj {
+            node: "in2",
+            field: "drv",
+            ohms: 1.0,
+            norton,
+            rate,
+        }],
+        &[],
+        oversampling,
+        &twin_main(rate == "host"),
+        |o| match route {
+            "dk" => o.solver = "dk".to_string(),
+            "schur" => {
+                o.solver = "nodal".to_string();
+                o.nodal_sub_path_override = melange_solver::codegen::NodalSubPathOverride::Schur;
+            }
+            "full-lu" => {
+                o.solver = "nodal".to_string();
+                o.nodal_sub_path_override = melange_solver::codegen::NodalSubPathOverride::FullLu;
+            }
+            other => panic!("unknown route {other}"),
+        },
+    );
+    let v: Vec<f64> = out
+        .split_whitespace()
+        .map(|t| t.parse().expect("parse"))
+        .collect();
+    (v[0], v[1])
+}
+
+/// (host) A `rate=host` injection behind 1 Ω is the audio input: the twin
+/// clippers agree to the last bit at 1x, 2x and 4x, on DK, nodal Schur and
+/// nodal full-LU, for both source kinds (a Norton current `I` behind
+/// `RSHUNT=1` is the Thevenin `V = I` behind 1 Ω). Before `rate=host` an
+/// injection skipped the input's up-filter, so B led A by the filter's group
+/// delay and was not band-limited.
+#[test]
+fn inject_host_rate_matches_audio_input_bit_for_bit() {
+    for route in ["dk", "schur", "full-lu"] {
+        for os in [1, 2, 4] {
+            for norton in [false, true] {
+                let (maxd, peak) = run_twin(os, route, norton, "host");
+                assert!(peak > 0.3, "{route} {os}x: no signal (peak {peak})");
+                assert!(
+                    maxd <= 1e-12 * peak,
+                    "{route} {os}x norton={norton}: host-rate injection differs from the \
+                     audio input by {maxd:e} (peak {peak})"
+                );
+            }
+        }
+    }
+}
+
+/// The witness above has teeth: the same drive declared `rate=inner` and fed
+/// naive per-sub-step repeats (no up-filter) differs from the audio input by a
+/// large fraction of the signal at 2x and 4x, and is identical only at 1x,
+/// where the two rates are the same thing.
+#[test]
+fn inject_inner_rate_naive_repeats_differ_from_audio_input() {
+    let (maxd1, _) = run_twin(1, "dk", false, "inner");
+    assert_eq!(maxd1, 0.0, "1x: rate=inner must equal rate=host");
+    for os in [2, 4] {
+        let (maxd, peak) = run_twin(os, "dk", false, "inner");
+        assert!(
+            maxd > 0.1 * peak,
+            "{os}x: naive inner repeats should NOT match the up-filtered input \
+             (max diff {maxd:e}, peak {peak})"
+        );
+    }
 }

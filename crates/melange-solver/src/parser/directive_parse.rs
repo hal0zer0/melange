@@ -1104,14 +1104,17 @@ impl Parser {
     }
 
     /// Parse `.inject <node> <field> R=<ohms>` (Thevenin) or
-    /// `.inject <node> <field> RSHUNT=<ohms>` (Norton).
+    /// `.inject <node> <field> RSHUNT=<ohms>` (Norton), optionally followed by
+    /// `rate=host|inner` (default `host`).
     ///
     /// Impedance is MANDATORY — a directive with neither `R=` nor `RSHUNT=`
     /// is rejected (an ideal source would clamp the injection node and destroy
     /// the dry path; this is the single most important guardrail). Node
     /// existence is validated later against `node_map` at MNA/CLI resolution.
+    /// Keys and the rate value are case-insensitive, like every other SPICE
+    /// keyword; any other trailing token is refused.
     fn parse_inject_directive(&self, parts: &[&str]) -> Result<InjectDirective, ParseError> {
-        // .inject <node> <field> R=<ohms>|RSHUNT=<ohms>
+        // .inject <node> <field> R=<ohms>|RSHUNT=<ohms> [rate=host|inner]
         self.require_parts(
             parts,
             4,
@@ -1152,10 +1155,42 @@ impl Parser {
                 )));
             }
         };
+        // Optional trailing `rate=host|inner`. Anything else is refused: a
+        // misspelt rate must not silently fall back to the default.
+        let mut rate: Option<InjectRate> = None;
+        for tok in &parts[4..] {
+            let Some((k, v)) = tok.split_once('=') else {
+                return Err(self.error(format!(
+                    ".inject: unexpected token '{tok}' (the only option after the \
+                     impedance is rate=host|inner)"
+                )));
+            };
+            if !k.eq_ignore_ascii_case("rate") {
+                return Err(self.error(format!(
+                    ".inject: unknown option '{k}' (the only option after the \
+                     impedance is rate=host|inner)"
+                )));
+            }
+            if rate.is_some() {
+                return Err(self.error(".inject: rate= given more than once"));
+            }
+            rate = Some(match v.to_ascii_lowercase().as_str() {
+                "host" => InjectRate::Host,
+                "inner" => InjectRate::Inner,
+                _ => {
+                    return Err(self.error(format!(
+                        ".inject rate '{v}' must be 'host' (an audio-rate input, \
+                         supplied per host sample and upsampled like the audio input) \
+                         or 'inner' (supplied per inner oversampled sub-step)"
+                    )));
+                }
+            });
+        }
         Ok(InjectDirective {
             node,
             field_name,
             impedance,
+            rate: rate.unwrap_or_default(),
         })
     }
 

@@ -183,7 +183,7 @@ pub struct CircuitState {
     pub os_up_state_outer: [f64; {{ os_state_size_outer }}],
     /// 4x oversampler outer downsampling filter state (per output)
     pub os_dn_state_outer: [[f64; {{ os_state_size_outer }}]; NUM_OUTPUTS],
-{% endif %}
+{% endif %}{{ inject_os_fields }}
 {% if num_switches > 0 %}
 {% for idx in switch_indices %}
     /// Switch {{ idx }} current position (0-indexed)
@@ -307,7 +307,7 @@ impl Default for CircuitState {
 {% endif %}{% if oversampling_4x %}
             os_up_state_outer: [0.0; {{ os_state_size_outer }}],
             os_dn_state_outer: [[0.0; {{ os_state_size_outer }}]; NUM_OUTPUTS],
-{% endif %}
+{% endif %}{{ inject_os_init }}
 {% if num_switches > 0 %}
 {% for idx in switch_indices %}
             switch_{{ idx }}_position: 0,
@@ -415,7 +415,7 @@ impl CircuitState {
 {% endif %}{% if oversampling_4x %}
         self.os_up_state_outer = [0.0; {{ os_state_size_outer }}];
         self.os_dn_state_outer = [[0.0; {{ os_state_size_outer }}]; NUM_OUTPUTS];
-{% endif %}
+{% endif %}{{ inject_os_reset_self }}
 {% if num_device_params > 0 %}
 {% for dev in device_params %}{% for p in dev.params %}
         self.device_{{ dev.dev_num }}_{{ p.field_suffix }} = DEVICE_{{ dev.dev_num }}_{{ p.const_suffix }};
@@ -608,7 +608,7 @@ impl CircuitState {
         self.os_dn_state = [[0.0; {{ os_state_size }}]; NUM_OUTPUTS];
 {% endif %}{% if oversampling_4x %}        self.os_up_state_outer = [0.0; {{ os_state_size_outer }}];
         self.os_dn_state_outer = [[0.0; {{ os_state_size_outer }}]; NUM_OUTPUTS];
-{% endif %}
+{% endif %}{{ inject_os_reset_self }}
 {% else %}
 
         // If same as codegen sample rate, restore rate-dependent defaults
@@ -768,7 +768,7 @@ impl CircuitState {
 {% endif %}{% if oversampling_4x %}
         self.os_up_state_outer = [0.0; {{ os_state_size_outer }}];
         self.os_dn_state_outer = [[0.0; {{ os_state_size_outer }}]; NUM_OUTPUTS];
-{% endif %}
+{% endif %}{{ inject_os_reset_self }}
 
         // Recompute DC blocking coefficient for new sample rate
         {% if oversampling_factor > 1 %}

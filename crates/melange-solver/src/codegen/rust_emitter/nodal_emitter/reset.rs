@@ -6,6 +6,7 @@ use crate::codegen::rust_emitter::dk_emitter::NoiseEmission;
 use crate::codegen::rust_emitter::helpers::{
     carries_q_dot, emit_stateful_state_restore, oversampling_info, stateful_device_data,
 };
+use crate::codegen::rust_emitter::inject_tap::emit_inject_os_state_reset;
 
 /// Emit the DC-blocker history reseed shared by `reset()`, `set_sample_rate`
 /// (both the same-rate fast path and the full-rebuild path), and the NaN
@@ -205,6 +206,7 @@ pub(super) fn emit_nodal_nan_reset(
                 os_info.state_size_outer, os_info.state_size_outer
             ));
         }
+        code.push_str(&emit_inject_os_state_reset(ir, "state", &body));
     }
 
     // Full-LU-only: invalidate the cross-timestep chord LU factorization.

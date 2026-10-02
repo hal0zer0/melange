@@ -687,8 +687,12 @@ pub(crate) enum Commands {
 
         /// Drive a `.inject` field: `--inject FIELD=sine:<freq_hz>:<amp_volts>`
         /// or `FIELD=dc:<volts>`. The value is CIRCUIT VOLTS injected at the
-        /// `.inject` node through its declared impedance. May be repeated;
-        /// `.inject` fields with no `--inject` default to 0 (undriven).
+        /// `.inject` node through its declared impedance. A `rate=host` field
+        /// (the default) is sampled once per host sample and upsampled like
+        /// the audio input; a `rate=inner` field is sampled at every
+        /// oversampled sub-step and reaches the solve unfiltered. May be
+        /// repeated; `.inject` fields with no `--inject` default to 0
+        /// (undriven).
         #[arg(long = "inject", value_name = "FIELD=SPEC")]
         inject_drives: Vec<String>,
     },

@@ -12,6 +12,9 @@ use crate::codegen::rust_emitter::helpers::{
     fmt_f64, history_zero_row_ranges, oversampling_info, q_dot_start, section_banner,
     self_heating_device_data, stateful_device_data,
 };
+use crate::codegen::rust_emitter::inject_tap::{
+    emit_inject_os_state_fields, emit_inject_os_state_init, emit_inject_os_state_reset,
+};
 use crate::codegen::rust_emitter::RustEmitter;
 
 impl RustEmitter {
@@ -728,6 +731,7 @@ impl RustEmitter {
                     os_info.state_size_outer, os_info.state_size_outer
                 ));
             }
+            code.push_str(&emit_inject_os_state_fields(ir));
         }
 
         // Runtime voltage sources (.runtime directive): host-driven values,
@@ -1031,6 +1035,7 @@ impl RustEmitter {
                     os_info.state_size_outer, os_info.state_size_outer
                 ));
             }
+            code.push_str(&emit_inject_os_state_init(ir));
         }
 
         // Runtime voltage sources (.runtime directive): init to 0.
@@ -1240,6 +1245,7 @@ impl RustEmitter {
                     os_info.state_size_outer, os_info.state_size_outer
                 ));
             }
+            code.push_str(&emit_inject_os_state_reset(ir, "self", "        "));
         }
         // Runtime voltage sources: clear field to 0 so the VS contributes no
         // RHS stamp until the host writes a new value.
@@ -1678,6 +1684,7 @@ impl RustEmitter {
                     os_info.state_size_outer, os_info.state_size_outer
                 ));
             }
+            code.push_str(&emit_inject_os_state_reset(ir, "self", "        "));
         }
 
         code.push_str("    }\n\n");

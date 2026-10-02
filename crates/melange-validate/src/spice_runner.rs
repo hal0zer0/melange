@@ -775,8 +775,9 @@ fn is_melange_directive(line: &str) -> bool {
 /// carries a real element (see below); a bare strip would compare two
 /// different circuits.
 ///
-/// `.inject <node> <field> R=<ohms>|RSHUNT=<ohms>` declares an audio-rate
-/// injection port. melange stamps a conductance G=1/R from `<node>` to ground as
+/// `.inject <node> <field> R=<ohms>|RSHUNT=<ohms> [rate=host|inner]` declares
+/// a runtime injection port (`rate=` is runtime-only and does not change the
+/// at-rest element). melange stamps a conductance G=1/R from `<node>` to ground as
 /// the at-rest injection impedance — present in its DC-OP and every solve — with
 /// the injection source held at 0 at rest. The faithful ngspice equivalent is
 /// therefore a real resistor of value R from `<node>` to ground. Both `R=`
@@ -1532,6 +1533,15 @@ Index   time            v(out)
         assert_eq!(
             translate_melange_directive(".inject tank_ret wet_return RSHUNT=470k"),
             Some(Some("R_minj_wet_return tank_ret 0 470k".to_string()))
+        );
+        // The `rate=` option is runtime-only: the at-rest element is the same.
+        assert_eq!(
+            translate_melange_directive(".inject n2 f2 R=1k rate=inner"),
+            Some(Some("R_minj_f2 n2 0 1k".to_string()))
+        );
+        assert_eq!(
+            translate_melange_directive(".inject n2 f2 RSHUNT=1k rate=host"),
+            Some(Some("R_minj_f2 n2 0 1k".to_string()))
         );
 
         // Simulate the deck-translation line filter on a small deck and confirm

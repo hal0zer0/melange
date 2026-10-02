@@ -361,6 +361,24 @@ pub(crate) fn simulate_circuit_source(
             })?;
         inject_driven.push((idx, source));
     }
+    // Each driven field's position within its rate's `process_sample`
+    // argument (directive order within the rate, as the generated
+    // `INJECT_HOST_*` / `INJECT_INNER_*` constants list them).
+    let inject_drives: Vec<codegen_runner::InjectDrive> = inject_driven
+        .iter()
+        .map(|&(idx, source)| {
+            let host_rate = injection_specs[idx].host_rate;
+            let index = injection_specs[..idx]
+                .iter()
+                .filter(|s| s.host_rate == host_rate)
+                .count();
+            codegen_runner::InjectDrive {
+                host_rate,
+                index,
+                source,
+            }
+        })
+        .collect();
     // Warn on any `.inject` field left undriven (it injects 0 V) — only once the
     // user has supplied at least one `--inject`, so an unrelated run stays quiet.
     if !opts.inject_drives.is_empty() {
@@ -427,7 +445,7 @@ pub(crate) fn simulate_circuit_source(
         duration_secs: opts.duration,
         probe_names: &probe_names,
         noise_enabled: opts.noise_mode != melange_solver::codegen::NoiseMode::Off,
-        inject_driven: &inject_driven,
+        inject_driven: &inject_drives,
         num_inject: injection_specs.len(),
         // Build-conditional counters: only present in the generated state when
         // the emitter resolved the feature active (auto = glow on nodal-Schur).

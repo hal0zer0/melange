@@ -2757,3 +2757,92 @@ fn test_dc_op_route_reason_is_verbose_detail() {
     assert!(loud.contains("DK K matrix unstable"), "{loud}");
     assert!(loud.contains("not a warning"), "{loud}");
 }
+
+// ============================================================================
+// `.inject rate=host`: a `--inject` drive is the audio input
+// ============================================================================
+
+/// Twin diode clippers: path A hangs off the audio input `in`, path B off
+/// `in2`, driven by `.inject in2 drv R=1 rate=<RATE>` — the same 1 Ω Thevenin
+/// source melange stamps for the input.
+const TWIN_CLIPPERS_INJECT: &str = "\
+* twin diode clippers: A via the input, B via .inject
+R1 in a 1k
+D1 a 0 DM
+D2 0 a DM
+C1 a 0 10n
+R2 in2 b 1k
+D3 b 0 DM
+D4 0 b DM
+C2 b 0 10n
+.model DM D(IS=2.52n N=1.752 RS=0.568)
+.inject in2 drv R=1 rate=RATE
+.end
+";
+
+/// `simulate --oversampling 2` with the 1 kHz `--amplitude 0.5` tone on the
+/// input and `--inject drv=sine:1000:0.5` on the injection; returns
+/// `max |V(a) - V(b)|` over the probe CSV and the peak of `V(a)`.
+fn twin_inject_max_diff(rate: &str) -> (f64, f64) {
+    let tag = format!("inject_rate_{rate}");
+    let cir = write_test_circuit(&TWIN_CLIPPERS_INJECT.replace("RATE", rate), &tag);
+    let wav = std::env::temp_dir().join(format!("melange_cli_test_{tag}.wav"));
+    let csv = std::env::temp_dir().join(format!("melange_cli_test_{tag}.csv"));
+    let _cleanup = RemoveOnDrop(vec![cir.clone(), wav.clone(), csv.clone()]);
+    run_melange(&[
+        "simulate",
+        cir.to_str().unwrap(),
+        "-i",
+        "in",
+        "-n",
+        "a",
+        "--oversampling",
+        "2",
+        "--amplitude",
+        "0.5",
+        "--inject",
+        "drv=sine:1000:0.5",
+        "--duration",
+        "0.05",
+        "--probe",
+        "a",
+        "--probe",
+        "b",
+        "--probe-csv",
+        csv.to_str().unwrap(),
+        "--output",
+        wav.to_str().unwrap(),
+    ]);
+    let text = std::fs::read_to_string(&csv).unwrap();
+    let mut max_diff = 0.0f64;
+    let mut peak = 0.0f64;
+    for l in text.lines().skip(1) {
+        let f: Vec<f64> = l.split(',').skip(2).map(|v| v.parse().unwrap()).collect();
+        max_diff = max_diff.max((f[0] - f[1]).abs());
+        peak = peak.max(f[0].abs());
+    }
+    (max_diff, peak)
+}
+
+/// A `rate=host` `--inject` drive reaches the circuit exactly as the
+/// `--amplitude` tone does at 2x oversampling: same samples, same up-filter,
+/// same group delay. (Before `rate=host` existed the injection skipped the
+/// up-filter and led the tone by 11.8 degrees at 1 kHz.) The same drive on a
+/// `rate=inner` field — evaluated per sub-step, no up-filter — does not match,
+/// which is what keeps this witness honest.
+#[test]
+fn test_simulate_host_rate_inject_matches_input_tone() {
+    let (host_diff, host_peak) = twin_inject_max_diff("host");
+    assert!(host_peak > 0.2, "no signal at a (peak {host_peak})");
+    assert!(
+        host_diff <= 1e-9,
+        "rate=host --inject must equal the --amplitude tone sample for sample \
+         at 2x; max |V(a)-V(b)| = {host_diff:e}"
+    );
+    let (inner_diff, _) = twin_inject_max_diff("inner");
+    assert!(
+        inner_diff > 0.01,
+        "rate=inner --inject is evaluated per sub-step without the up-filter and \
+         should differ from the tone; max |V(a)-V(b)| = {inner_diff:e}"
+    );
+}

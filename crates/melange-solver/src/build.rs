@@ -542,19 +542,22 @@ pub fn assemble(
             } else {
                 "Thevenin R"
             };
+            let host_rate = inj.rate == crate::parser::InjectRate::Host;
             report!(
                 out,
-                "  Injection '{}' at node '{}' ({}={} ohm)",
+                "  Injection '{}' at node '{}' ({}={} ohm, rate={})",
                 inj.field_name,
                 inj.node,
                 kind,
-                resistance
+                resistance,
+                if host_rate { "host" } else { "inner" }
             );
             injection_specs.push(crate::codegen::ir::InjectionSpec {
                 node: idx,
                 name: inj.field_name.clone(),
                 resistance,
                 norton,
+                host_rate,
             });
         }
         for tap in netlist.taps.iter().filter(|_| opts.resolve_taps) {

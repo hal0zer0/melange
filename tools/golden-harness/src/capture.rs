@@ -628,12 +628,13 @@ fn seed_block(pin_noise: bool) -> &'static str {
 }
 
 /// The statement that runs one sample and binds `out` to the outputs. A deck
-/// with `.inject` or `.tap` emits `process_sample(input, &injections, &mut
-/// state) -> (outputs, taps)`, even with no `.inject` field; its injections are
-/// driven at 0 (undriven, as `simulate` leaves them) and the taps are dropped.
+/// with `.inject` or `.tap` emits `process_sample(input, &injections_host,
+/// &injections_inner, &mut state) -> (outputs, taps)`, even with no `.inject`
+/// field; its injections (both rates) are driven at 0 (undriven, as
+/// `simulate` leaves them) and the taps are dropped.
 fn process_call(code: &str) -> &'static str {
-    if code.contains("pub fn process_sample(input: f64, injections_inner:") {
-        "let (out, _taps) = process_sample(input, &[[0.0f64; NUM_INJECT]; OVERSAMPLING_FACTOR], &mut state);"
+    if code.contains("pub fn process_sample(input: f64, injections_host:") {
+        "let (out, _taps) = process_sample(input, &[0.0f64; NUM_INJECT_HOST], &[[0.0f64; NUM_INJECT_INNER]; OVERSAMPLING_FACTOR], &mut state);"
     } else {
         "let out = process_sample(input, &mut state);"
     }

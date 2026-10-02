@@ -92,12 +92,31 @@ pub enum InjectImpedance {
     Norton(f64),
 }
 
-/// A `.inject <node> <field> R=<ohms>` / `RSHUNT=<ohms>` directive.
+/// The rate at which a `.inject` source is supplied (`rate=host|inner`).
 ///
-/// Declares a runtime feedback source the plugin host drives per (inner)
-/// sample. The source value is known at sample start, so it enters the
-/// per-sample RHS as an ordinary constant — the NR loop never sees it. Reuses
-/// the multi-input RHS-stamp machinery. Single-ended (node-to-ground) only.
+/// Only matters under oversampling; at `OVERSAMPLING_FACTOR == 1` the two
+/// are the same thing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InjectRate {
+    /// `rate=host` (the default): an audio-rate circuit input, supplied once
+    /// per HOST sample and upsampled through its own copy of the half-band
+    /// up-filter the audio input uses (same coefficients, same group delay).
+    #[default]
+    Host,
+    /// `rate=inner`: supplied per inner (oversampled) sub-step and routed
+    /// straight to the inner solve. The caller owns band-limiting. The rate
+    /// for a feedback loop closed from a `.tap` at the inner rate.
+    Inner,
+}
+
+/// A `.inject <node> <field> R=<ohms>|RSHUNT=<ohms> [rate=host|inner]`
+/// directive.
+///
+/// Declares a runtime source the host drives per sample — per host sample
+/// (`rate=host`, the default) or per inner sub-step (`rate=inner`). The
+/// source value is known at sample start, so it enters the per-sample RHS as
+/// an ordinary constant — the NR loop never sees it. Reuses the multi-input
+/// RHS-stamp machinery. Single-ended (node-to-ground) only.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InjectDirective {
     /// Injection node (normalized name). Must be a non-ground circuit node.
@@ -108,6 +127,8 @@ pub struct InjectDirective {
     pub field_name: String,
     /// Mandatory source impedance (Thevenin `R=` or Norton `RSHUNT=`).
     pub impedance: InjectImpedance,
+    /// Declared supply rate (`rate=host|inner`; `host` when omitted).
+    pub rate: InjectRate,
 }
 
 /// A `.tap <node> [name]` directive.

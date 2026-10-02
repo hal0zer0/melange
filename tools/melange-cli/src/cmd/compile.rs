@@ -604,7 +604,16 @@ pub(crate) fn compile_circuit_source(
             println!("  let mut state = circuit::CircuitState::default();");
             // The rate the code was compiled at, as a Rust f64 literal.
             println!("  state.set_sample_rate({sample_rate:?});");
-            println!("  let out = circuit::process_sample(input, &mut state); // free fn -> [f64; NUM_OUTPUTS], volts");
+            if generated
+                .code
+                .contains("pub fn process_sample(input: f64, injections_host:")
+            {
+                // `.inject`/`.tap` decks: host-rate and inner-rate injection
+                // arrays in, `(outputs, raw taps)` out.
+                println!("  let (out, taps) = circuit::process_sample(input, &injections_host, &injections_inner, &mut state); // .inject/.tap API: see its doc comment");
+            } else {
+                println!("  let out = circuit::process_sample(input, &mut state); // free fn -> [f64; NUM_OUTPUTS], volts");
+            }
             println!();
             // Suggest a DIRECTORY, not this file path. `--format plugin`
             // treats --output as the project root; echoing back

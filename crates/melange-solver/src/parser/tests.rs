@@ -2124,6 +2124,58 @@ fn test_inject_zero_impedance_rejected() {
 }
 
 #[test]
+fn test_inject_rate_defaults_to_host() {
+    let spice = "Inj\nR1 a 0 1k\n.inject a fb R=47k\n.end\n";
+    let n = Netlist::parse(spice).expect("parse");
+    assert_eq!(n.injections[0].rate, InjectRate::Host);
+}
+
+#[test]
+fn test_inject_rate_host_and_inner_parse_case_insensitively() {
+    let spice = "Inj\nR1 a 0 1k\nR2 b 0 1k\nR3 c 0 1k\n\
+                 .inject a fa R=1k rate=inner\n\
+                 .inject b fb RSHUNT=1k RATE=Host\n\
+                 .inject c fc R=1k Rate=INNER\n.end\n";
+    let n = Netlist::parse(spice).expect("parse");
+    let rates: Vec<InjectRate> = n.injections.iter().map(|i| i.rate).collect();
+    assert_eq!(
+        rates,
+        vec![InjectRate::Inner, InjectRate::Host, InjectRate::Inner]
+    );
+    assert_eq!(n.injections[1].impedance, InjectImpedance::Norton(1_000.0));
+}
+
+#[test]
+fn test_inject_unknown_rate_rejected_with_line() {
+    // A misspelt rate must not silently fall back to the default.
+    let spice = "Inj\nR1 a 0 1k\n.inject a fb R=1k rate=sample\n.end\n";
+    let err = Netlist::parse(spice).expect_err("must reject an unknown rate");
+    assert!(
+        err.message.contains("rate 'sample'") && err.message.contains("host"),
+        "error should name the bad rate and the valid ones, got: {}",
+        err.message
+    );
+    assert_eq!(err.line, 3, "error should carry the directive's line");
+}
+
+#[test]
+fn test_inject_unknown_trailing_token_rejected() {
+    for extra in ["rte=host", "host", "rate=", "R=1k"] {
+        let spice = format!("Inj\nR1 a 0 1k\n.inject a fb R=1k {extra}\n.end\n");
+        assert!(
+            Netlist::parse(&spice).is_err(),
+            "trailing '{extra}' must be refused"
+        );
+    }
+}
+
+#[test]
+fn test_inject_duplicate_rate_rejected() {
+    let spice = "Inj\nR1 a 0 1k\n.inject a fb R=1k rate=host rate=inner\n.end\n";
+    assert!(Netlist::parse(spice).is_err());
+}
+
+#[test]
 fn test_tap_parses_with_and_without_name() {
     let spice = "T\nR1 a 0 1k\nR2 b 0 1k\n.tap a\n.tap b tankdrive\n.end\n";
     let n = Netlist::parse(spice).expect("parse");
