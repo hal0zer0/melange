@@ -1365,6 +1365,98 @@ Error: netlist topology: 3 defects that would silently produce the wrong circuit
 
 ---
 
+### .inject / .tap — Runtime Injection Sources and Raw Inner-Rate Taps
+
+`.inject` declares a single-ended (node-to-ground) source whose value the caller
+supplies on every `process_sample` call. `.tap` declares a node whose raw voltage
+`process_sample` returns at every inner (oversampled) sub-step. Uses: a second
+audio input into a nonlinear deck (comma-separated `-i` ports are for linear
+decks only), and a feedback loop that host code closes around the circuit —
+read a `.tap`, compute, write the result back through an `.inject`.
+
+**Syntax:**
+```
+.inject <node> <field> R=<ohms>       [rate=host|inner]   ; Thevenin: the value is a VOLTAGE behind series R
+.inject <node> <field> RSHUNT=<ohms>  [rate=host|inner]   ; Norton: the value is a CURRENT in amperes, with shunt R to ground
+.tap <node> [name]                                        ; name defaults to the node name
+```
+
+**Requirements:**
+- The impedance is **mandatory**. An ideal source would clamp the node and
+  destroy the circuit path through it. `R=`/`RSHUNT=` must be positive and finite.
+- `<node>` must exist and must not be ground (unknown nodes are refused with a
+  nearest-name suggestion).
+- `<field>` is a Rust identifier, unique among the deck's `.inject` lines. It is
+  not a `CircuitState` field: it names the injection in the generated
+  `INJECT_*_NAMES` constants. `.tap` names are unique among taps.
+- `rate=` is optional and given at most once; key and value are
+  case-insensitive; the default is `host`. Any other token after the impedance
+  is a parse error, so a misspelt rate cannot silently fall back to the default:
+  ```
+  Parse error at line 7: .inject rate 'fast' must be 'host' (an audio-rate input, supplied per host sample and upsampled like the audio input) or 'inner' (supplied per inner oversampled sub-step)
+  Parse error at line 7: .inject: unexpected token 'extra' (the only option after the impedance is rate=host|inner)
+  ```
+- `--format code` only: `--format plugin` refuses a deck with `.inject` or
+  `.tap` (the plugin wrapper does not route them). The deck takes a single
+  `-i` input node.
+
+**The two rates.** The rate says what the caller hands over, and so what the
+generated code must do with it before the inner solve:
+
+| `rate=` | Supplied | Path to the inner solve | Use it for |
+|---------|----------|-------------------------|------------|
+| `host` (default) | once per host sample, in `injections_host[k]` | through its own copy of the half-band up-filter the audio input uses (same coefficients, same two-stage cascade at 4x, reset together with it), so it is band-limited and carries the same group delay as the input | an audio-rate input: a second channel, a sidechain, any signal produced at the host rate |
+| `inner` | once per inner sub-step, in `injections_inner[j][k]` | straight to the solve, no filter; the caller owns band-limiting | a feedback loop closed from a `.tap` at the inner rate |
+
+A signal fed through a `rate=host` injection and the same signal fed through the
+audio input reach the circuit identically. At `--oversampling 1` there is no
+up-filter, so the two rates are the same thing and render identically.
+
+Two rules for a feedback loop. The injected value must come from a **previous**
+sample's tap — the API gives at least one sample of delay by construction. And a
+loop closed from a `.tap` at the inner rate must declare `rate=inner`: a
+`rate=host` injection would put the up-filter's group delay inside the loop. A
+loop closed in host code is invisible to the compiler, so `rate=host` is not
+refused there; declaring the rate correctly is the deck author's job.
+
+**What is stamped:** `1/R` (or `1/RSHUNT`) is added to `G[node][node]` before
+the kernel is built, so the source impedance is part of `S` and of the DC
+operating point, exactly like the input port's `G_in`. The runtime value enters
+the per-sample RHS at n+1 — `val / R` for Thevenin, `val` for Norton — under
+either integrator, and the Newton loop never sees it. NaN/Inf values are
+replaced by 0 and counted in `diag_input_nan_count`; there is no magnitude
+clamp. A `.tap` is read after the solve and before the output pipeline: no DC
+block, no `--output-scale`, no clamp, no decimation. It is emitted separately
+from the output nodes even when it names the same node.
+
+**Example** (complete; compiles with `melange compile demo.cir --oversampling 2 -o demo.rs`):
+```spice
+Injection and tap demo
+R1   in   mid  10k
+R2   ret  mid  10k
+R3   ch2  mid  10k
+C1   mid  0    10n
+Rout mid  out  1k
+Cout out  0    1n
+.inject ch2 aux R=1                     ; rate=host (default): a second audio input
+.inject ret fb  RSHUNT=100k rate=inner  ; supplied per inner sub-step, e.g. from a tap
+.tap mid
+.end
+```
+
+The generated `process_sample` then takes both injection kinds and returns the
+taps alongside the outputs:
+
+```rust
+pub fn process_sample(input: f64, injections_host: &[f64; NUM_INJECT_HOST], injections_inner: &[[f64; NUM_INJECT_INNER]; OVERSAMPLING_FACTOR], state: &mut CircuitState) -> ([f64; NUM_OUTPUTS], [[f64; NUM_TAP]; OVERSAMPLING_FACTOR])
+```
+
+The call conventions, the emitted constants, and the migration from the
+single-array form are in [CODE_API.md](CODE_API.md#inject-and-tap-decks).
+`melange simulate --inject FIELD=SPEC` drives a field from the command line.
+
+---
+
 ### .oversampling — Recommended Oversampling Factor
 
 Declares the oversampling factor a deck needs to keep aliasing from its nonlinear

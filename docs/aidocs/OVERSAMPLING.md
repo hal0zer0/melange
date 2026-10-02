@@ -22,7 +22,8 @@ external dependencies, suitable for generated real-time code.
 |-----------|------|
 | Core filter library (`HalfBandFilter`, `AllpassSection`, `coefficients::HB_*`) | `crates/melange-primitives/src/oversampling.rs` |
 | Codegen coefficient tables + `OversamplingInfo` (state sizes) | `crates/melange-solver/src/codegen/rust_emitter/helpers.rs` |
-| Codegen emission of allpass/halfband functions and process_sample wrapper | `crates/melange-solver/src/codegen/rust_emitter/dk_emitter.rs` (shared by the nodal emitter) |
+| Codegen emission of allpass/halfband functions and process_sample wrapper | `crates/melange-solver/src/codegen/rust_emitter/oversampler.rs` (shared by the DK and nodal emitters) |
+| `.inject` up-filter state, constants and resets | `crates/melange-solver/src/codegen/rust_emitter/inject_tap.rs` |
 | Generated state fields (`os_up_state`, `os_dn_state`, etc.) | `crates/melange-solver/templates/rust/state.rs.tera` |
 | Generated `process_sample` wrapper | `crates/melange-solver/templates/rust/process_sample.rs.tera` |
 | `OVERSAMPLING_FACTOR` and `INTERNAL_SAMPLE_RATE` constants | `crates/melange-solver/templates/rust/constants.rs.tera` |
@@ -160,6 +161,37 @@ process_sample(input, state) -> [f64; NUM_OUTPUTS]:
   result = os_halfband_down_outer(inner_out0, inner_out1, OS_COEFFS_OUTER, os_dn_state_outer)
 ```
 
+## `.inject` sources under oversampling
+
+A deck with `.inject`/`.tap` takes injections in two kinds (`process_sample`
+signature in [CODEGEN.md](CODEGEN.md#process_sample)), and the kind decides
+whether the up-filter applies:
+
+- **`rate=host`** (the default) — one value per host sample. Each injection has
+  its own copy of the input's up-filter: same coefficients, the same two-stage
+  cascade at 4x clocked in the same order (outer stage once per host sample,
+  inner stage just before each inner pair is processed), zeroed beside every
+  `os_up_state` reset. The same signal fed through a host-rate injection and
+  through `input` comes out of the up-filter bit-identical (only `input` is
+  clamped at `INPUT_LIMIT_V`), so the injection is band-limited and carries the
+  input's group delay.
+- **`rate=inner`** — one value per inner sample, routed to `process_sample_inner`
+  with no filter. The caller owns band-limiting.
+
+```
+2x, per host sample:
+  (up_even, up_odd)   = os_halfband(input, OS_COEFFS, os_up_state)
+  for k in host injections:
+    (h_even[k], h_odd[k]) = os_halfband(injections_host[k], OS_COEFFS, os_inj_up_state[k])
+  out_even = process_sample_inner(up_even, inject_assemble(h_even, injections_inner[0]))
+  out_odd  = process_sample_inner(up_odd,  inject_assemble(h_odd,  injections_inner[1]))
+```
+
+The group delay is why a feedback loop closed from a `.tap` at the inner rate
+must declare `rate=inner`: a host-rate injection would place the up-filter's
+delay inside the loop. Taps are always raw inner-rate values, never decimated.
+At factor 1 there is no filter and the two kinds are identical.
+
 ## State Fields (CircuitState)
 
 ```rust
@@ -171,6 +203,10 @@ os_dn_state: [[f64; STATE_SIZE]; NUM_OUTPUTS],        // Per-output chains
 // 4x only (outer stage, steep 7-section): STATE_SIZE_OUTER = 14
 os_up_state_outer: [f64; STATE_SIZE_OUTER],
 os_dn_state_outer: [[f64; STATE_SIZE_OUTER]; NUM_OUTPUTS],
+
+// .inject/.tap builds only: one up-filter copy per rate=host injection
+os_inj_up_state: [[f64; STATE_SIZE]; NUM_INJECT_HOST],
+os_inj_up_state_outer: [[f64; STATE_SIZE_OUTER]; NUM_INJECT_HOST],  // 4x only
 ```
 
 State sizes: `2 * num_sections` per filter instance, plumbed from
@@ -209,8 +245,8 @@ The codegen emits:
 
 All filter coefficients are compile-time constants (`{:.17e}`). No runtime
 allocation. The generated code is fully self-contained (no dependency on
-melange-primitives). `emit_oversampler` lives in `dk_emitter.rs` and is reused
-by the nodal emitter — one fix covers both solver paths.
+melange-primitives). `emit_oversampler` lives in `rust_emitter/oversampler.rs`
+and is used by both the DK and nodal emitters — one fix covers both solver paths.
 
 ## Testing
 

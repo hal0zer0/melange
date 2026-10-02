@@ -78,12 +78,13 @@ pub struct RuntimeScalarDirective {
 ///
 /// Impedance is MANDATORY on `.inject` (rejected at parse if absent): an ideal
 /// source with no series/shunt conductance would clamp the injection node and
-/// destroy the dry signal path. See `local-docs/inject-directive-plan.md`.
+/// destroy the dry signal path.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InjectImpedance {
     /// `R=<ohms>` — Thevenin source: the runtime value is a VOLTAGE behind
     /// series resistance `R`. Stamp `G = 1/R` into `g[node][node]` before the
-    /// kernel; `rhs[node] += (val + val_prev) * G` (trap) / `val * G` (BE).
+    /// kernel; `rhs[node] += val * G`, the value entering once at n+1 (the
+    /// charge form carries the history, as for the audio input).
     Thevenin(f64),
     /// `RSHUNT=<ohms>` — Norton source: the runtime value is a CURRENT injected
     /// at the node with shunt resistance `RSHUNT`. Stamp `G = 1/RSHUNT` into the

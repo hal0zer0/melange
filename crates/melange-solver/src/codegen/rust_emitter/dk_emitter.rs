@@ -32,8 +32,7 @@ use crate::codegen::CodegenError;
 /// `multi_input` gates every input-related emission divergence; when it is
 /// false (the single-input case) the templates emit the historical single-input
 /// code byte-for-byte. Called for every local context whose template references
-/// these variables (constants, state, build_rhs, process_sample). See
-/// `local-docs/multi-input-ports-plan.md`.
+/// these variables (constants, state, build_rhs, process_sample).
 fn insert_multi_input_ctx(ctx: &mut Context, ir: &CircuitIR) {
     let num_inputs = ir.solver_config.num_inputs();
     ctx.insert("multi_input", &(num_inputs > 1));

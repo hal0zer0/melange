@@ -251,7 +251,7 @@ pub(crate) fn compile_circuit_source(
     // comma-separated output-node handling below. Port 0 (the first name) is the
     // "primary" input; any extras drive additional ports for M=0 (linear)
     // circuits. A single input name collapses to the historical single-input
-    // path (byte-identical generated code). See `local-docs/multi-input-ports-plan.md`.
+    // path (byte-identical generated code).
     let input_node_names_owned: Vec<String> = input_node
         .split(',')
         .map(|s| melange_solver::parser::normalize_node_name(s.trim()))

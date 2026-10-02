@@ -54,8 +54,8 @@ pub struct Netlist {
     pub runtime_scalars: Vec<RuntimeScalarDirective>,
     /// Runtime feedback-injection sources (`.inject <node> <field>
     /// R=/RSHUNT=`). Each stamps a Thevenin/Norton source at a circuit node,
-    /// driven per (inner) sample by a `process_sample` argument. See
-    /// `local-docs/inject-directive-plan.md`.
+    /// driven by a `process_sample` argument at its declared rate (host or
+    /// inner).
     pub injections: Vec<InjectDirective>,
     /// Raw inner-rate tap probes (`.tap <node> [name]`). `process_sample`
     /// returns per-inner-sample tap values so a feedback caller can run its

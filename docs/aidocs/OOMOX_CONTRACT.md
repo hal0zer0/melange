@@ -96,6 +96,7 @@ re-signaturing, or changing emission conditions is an API break.
 |---|---|---|
 | `CircuitState` | struct, constructed via `CircuitState::default()` | All. Boxed (`Box<CircuitState>`) in most wrappers to keep nih-plug structs small. Default state = baked DC OP at nominal pots, **codegen-time sample rate (usually 48 kHz)** — wrappers must call `set_sample_rate` after construction (normative in `docs/best-patterns.md`). |
 | `process_sample` | `pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS]` | All. **Free function, not a method.** Audio thread, per sample. Input in circuit volts; output in circuit volts, DC-blocked (5 Hz) and scaled by `OUTPUT_SCALES`. Uniform signature in all 42 files — any variation is a break. |
+| `process_sample` (`.inject`/`.tap` decks) | `pub fn process_sample(input: f64, injections_host: &[f64; NUM_INJECT_HOST], injections_inner: &[[f64; NUM_INJECT_INNER]; OVERSAMPLING_FACTOR], state: &mut CircuitState) -> ([f64; NUM_OUTPUTS], [[f64; NUM_TAP]; OVERSAMPLING_FACTOR])` | Emitted instead of the plain form when a deck declares any `.inject` or `.tap` (`--format code` only), at every oversampling factor. `injections_host[k]` = `rate=host` values (the default rate), one per host sample, upsampled through a per-injection copy of the input's half-band up-filter (same group delay as `input`); `injections_inner[j][k]` = `rate=inner` values per inner sample, unfiltered (caller band-limits). A kind the deck lacks is a zero-length array (`&[]`). Second return = raw per-inner-sample taps. Values in circuit units (volts Thevenin, amperes Norton); NaN/Inf → 0 + `diag_input_nan_count`, no magnitude clamp. A tap→inject loop at the inner rate must use `rate=inner` and a prior call's taps. **Shape changed in 0.1.15** (was one `&[[f64; NUM_INJECT]; OVERSAMPLING_FACTOR]` array, unfiltered): regenerating changes call sites, e.g. taps-only `process_sample(x, &NO_INJECT, s)` → `process_sample(x, &[], &NO_INJECT, s)`; an `.inject` meant to keep the old per-inner-sample contract needs `rate=inner` in the `.cir`. |
 | `reset()` | method | All. Audio-thread-safe "factory state": restores baked `DC_OP`, `DC_NL_I`, nominal pot/switch values *together* (coherence), zeroes input_prev/history. **Intentionally discards a runtime-recomputed OP** — wrappers that recall presets re-apply pots then `recompute_dc_op()`/warmup after reset. Noyce calls `reset()` then `set_noise_enabled(true)` (reset does not preserve the noise toggle path re-arm). |
 | `set_sample_rate(f64)` | method | All. Called in nih-plug `initialize()` (and per best-patterns in `reset()` flow), NOT audio thread. Semantics wrappers rely on: (a) invalid/non-finite rate = silent no-op; (b) **same-rate call is a click-free no-op reconfiguration** — restores baked matrices only if ALL pots/switches at default, else `rebuild_matrices()` at live values, transient state preserved; (c) genuine rate change rebuilds matrices, recomputes noise scales, **re-seeds DC blocker from `dc_operating_point[OUTPUT_NODES[k]]` and resets oversampler history**. |
 | `warmup()` | method, 18+ files | Fixed **50-sample** zero-input loop. Some wrappers/tests call it; most implement their own longer warmup (see §3.1). Not the same thing as `WARMUP_SAMPLES_RECOMMENDED`. |
@@ -142,6 +143,12 @@ warmup**, see §3.2), `DC_OP`, `DC_NL_I`, `DC_OP_CONVERGED`, `DC_BLOCK_R`,
 `POT_*_INDEX` (subspace static asserts), `POT_N_MIN_R/MAX_R`,
 `RUNTIME_R_*_MIN/MAX` (static asserts), `NOISE_THERMAL_N/SHOT_N/FLICKER_N`
 (noyce docs/tests), `NOISE_MASTER_SEED_DEFAULT`, `T_ROOM_K`.
+`.inject`/`.tap` decks add `NUM_INJECT`, `INJECT_{NODES,NAMES,RESISTANCES,IS_NORTON}`
+and `INJECT_IS_HOST` (all injections, directive order), the per-rate families
+`NUM_INJECT_{HOST,INNER}` / `INJECT_{HOST,INNER}_{INDEX,NAMES,NODES,RESISTANCES,IS_NORTON}`
+(`process_sample` argument order; `INDEX` maps to directive order), and
+`NUM_TAP` / `TAP_{NODES,NAMES}`. Names come from the `.cir`; renaming an
+`.inject` field or `.tap` breaks name-based lookups.
 
 ### 1.5 Public state fields poked directly
 
@@ -857,7 +864,9 @@ know" means go measure (golden harness) or go read the oomox file cited above.
     `diag_nr_max_iter_count`)?
 14. Is `process_sample`'s free-function signature and `[f64; NUM_OUTPUTS]`
     return preserved in every topology (including OS=4, multi-output,
-    behavioral, coupled-L)?
+    behavioral, coupled-L)? For `.inject`/`.tap` decks: the two-array
+    injection signature, the `(outputs, taps)` return, and the `rate=` default
+    (`host`)?
 
 **Codegen structure:**
 15. Do all 42 inventory files still compile? (Includes orphan vcr-audio,

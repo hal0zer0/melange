@@ -449,7 +449,7 @@ fn test_very_small_inductor() {
 // 11. Extreme-IS (wide-bandgap) diode in op-amp feedback clipper
 // ============================================================================
 
-/// Minimal repro from local-docs/extreme-is-diode-opamp-clipper-nr-failure-2026-06-09.md.
+/// Minimal repro of an extreme-IS diode op-amp clipper Newton failure (2026-06-09).
 ///
 /// SiC-class diode card (IS=1e-30 N=2.0, Vf ≈ 3.2 V) in an op-amp feedback
 /// clipper at gain 48. The conduction knee sits above the legacy 40·n_vt exp

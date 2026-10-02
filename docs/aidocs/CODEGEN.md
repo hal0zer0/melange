@@ -433,16 +433,55 @@ let f_i = i_nl[i] - i_dev_i;
 ### process_sample
 ```rust
 // Without oversampling (factor=1):
-pub fn process_sample(input: f64, state: &mut CircuitState) -> f64 { ... }
+pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] { ... }
 
 // With oversampling (factor=2):
-fn process_sample_inner(input: f64, state: &mut CircuitState) -> f64 { ... }
-pub fn process_sample(input: f64, state: &mut CircuitState) -> f64 {
-    // Upsample: [input, halfband_up(input)]
+fn process_sample_inner(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] { ... }
+pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {
+    // Upsample: os_halfband(input) -> (up_even, up_odd)
     // Process both samples through process_sample_inner
-    // Downsample: halfband_dn(out0) → return out1
+    // Downsample: os_halfband_down(out_even, out_odd) per output
 }
 ```
+
+**`.inject` / `.tap` decks** (`SolverConfig::has_inject_or_tap()`) get a
+different public signature at every factor, 1x included (`INJECT_API_SIGNATURE`
+in `rust_emitter/oversampler.rs`; the 1x adapter is `emit_inject_wrapper_1x`):
+
+```rust
+pub fn process_sample(input: f64,
+    injections_host: &[f64; NUM_INJECT_HOST],                         // rate=host, one per host sample
+    injections_inner: &[[f64; NUM_INJECT_INNER]; OVERSAMPLING_FACTOR], // rate=inner, one per inner sample
+    state: &mut CircuitState) -> ([f64; NUM_OUTPUTS], [[f64; NUM_TAP]; OVERSAMPLING_FACTOR])
+fn process_sample_inner(input: f64, injections: [f64; NUM_INJECT], state: &mut CircuitState)
+    -> ([f64; NUM_OUTPUTS], [f64; NUM_TAP])
+```
+
+- Each `rate=host` value is sanitized (NaN/Inf → 0, `diag_input_nan_count`) and
+  run through its own copy of the input's up-filter
+  (`state.os_inj_up_state[k]`, plus `os_inj_up_state_outer[k]` at 4x), clocked in
+  the same order as `os_up_state`, so it carries the input's group delay. These
+  states are zeroed beside every `os_up_state` reset (`reset`,
+  `set_sample_rate`, NaN recovery, DC-OP recompute).
+- `rate=inner` values bypass the filter.
+- `inject_assemble(host, inner)` merges one inner sample's two kinds into the
+  directive-order `[f64; NUM_INJECT]` that `process_sample_inner` stamps:
+  `rhs[INJECT_NODES[k]] += v / INJECT_RESISTANCES[k]` (Thevenin) or `+= v`
+  (Norton), at n+1.
+- Taps are read after the solve, before the output pipeline; returned raw per
+  inner sample (2x `[even, odd]`, 4x `[e0, o0, e1, o1]`).
+- A kind the deck lacks is a zero-length array; a deck with neither directive
+  keeps the plain signature. Internal zero-input calls (warmup, DC-OP settle) use
+  `emit_warmup_call` in `rust_emitter/inject_tap.rs`.
+- Constants (`emit_inject_tap_constants`, shared by DK and nodal):
+  `NUM_INJECT`/`INJECT_{NODES,NAMES,RESISTANCES,IS_NORTON}` (all injections,
+  directive order), `INJECT_IS_HOST`, the per-kind families
+  `NUM_INJECT_{HOST,INNER}` / `INJECT_{HOST,INNER}_{INDEX,NAMES,NODES,RESISTANCES,IS_NORTON}`
+  (`INDEX` maps argument position → directive order), `NUM_TAP`/`TAP_{NODES,NAMES}`.
+
+Plugin builds refuse these decks (`build.rs`); they are `--format code` only and
+single-input. User-facing contract: `docs/CODE_API.md` "`.inject` and `.tap`
+decks".
 
 The inner function contains the standard DK pipeline:
 ```rust
@@ -598,6 +637,9 @@ When factor > 1, the codegen:
 ### State Fields
 - `os_up_state`, `os_dn_state`: allpass filter state for upsample/downsample (2x)
 - `os_up_state_outer`, `os_dn_state_outer`: additional state for outer stage (4x only)
+- `os_inj_up_state: [[f64; _]; NUM_INJECT_HOST]` (+ `os_inj_up_state_outer` at 4x):
+  one up-filter copy per `rate=host` `.inject`; present on `.inject`/`.tap` builds
+  at factor > 1
 - All reset in `reset()` and reinitialized in `set_sample_rate()`
 
 ### `set_sample_rate()` with Oversampling

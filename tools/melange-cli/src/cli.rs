@@ -686,8 +686,9 @@ pub(crate) enum Commands {
         switch_overrides: Vec<String>,
 
         /// Drive a `.inject` field: `--inject FIELD=sine:<freq_hz>:<amp_volts>`
-        /// or `FIELD=dc:<volts>`. The value is CIRCUIT VOLTS injected at the
-        /// `.inject` node through its declared impedance. A `rate=host` field
+        /// or `FIELD=dc:<volts>`. The value is in circuit units: VOLTS for an
+        /// `R=` (Thevenin) field, behind its series resistance, and AMPERES for
+        /// an `RSHUNT=` (Norton) field, injected at the node. A `rate=host` field
         /// (the default) is sampled once per host sample and upsampled like
         /// the audio input; a `rate=inner` field is sampled at every
         /// oversampled sub-step and reaches the solve unfiltered. May be

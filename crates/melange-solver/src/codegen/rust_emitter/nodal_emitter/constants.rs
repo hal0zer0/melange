@@ -331,8 +331,7 @@ impl RustEmitter {
             fmt_f64(ir.solver_config.input_resistance)
         ));
         // Multi-input ports (M=0 only). Emitted only when there is more than one
-        // input port so single-input output stays byte-identical. See
-        // `local-docs/multi-input-ports-plan.md`.
+        // input port so single-input output stays byte-identical.
         if ir.solver_config.num_inputs() > 1 {
             let input_nodes_values = ir
                 .solver_config

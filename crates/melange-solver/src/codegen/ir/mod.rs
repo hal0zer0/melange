@@ -473,7 +473,7 @@ pub struct Topology {
 /// [`SolverConfig::input_node`]). The source conductance `1/resistance` is
 /// stamped into `g[node][node]` before the kernel is built (so it is baked
 /// into `S` and present at the DC operating point), exactly like an input
-/// port. See `local-docs/inject-directive-plan.md`.
+/// port.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InjectionSpec {
     /// 0-indexed MNA node row where the source is stamped.

@@ -2,8 +2,7 @@
 //!
 //! `.inject <node> <field> R=<ohms>` stamps a Thevenin (or `RSHUNT=` Norton)
 //! source at a circuit node, driven per (inner) sample by a `process_sample`
-//! argument. `.tap <node>` returns the RAW inner-rate node voltage. See
-//! `local-docs/inject-directive-plan.md`.
+//! argument. `.tap <node>` returns the RAW inner-rate node voltage.
 //!
 //! These tests compile generated code with `rustc` and run it. They need only
 //! `rustc` (no ngspice) and take well under a second, so they run in the

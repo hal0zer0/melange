@@ -443,8 +443,8 @@ pub struct CodegenConfig {
     /// Additional input node indices for multi-input (M=0) circuits, one per
     /// extra port beyond the primary (port 0). Empty for the single-input case,
     /// in which the generated code is byte-identical to the pre-multi-input
-    /// emitter. Parallel to [`Self::extra_input_resistances`]. See
-    /// `local-docs/multi-input-ports-plan.md`. Multi-input is only valid for
+    /// emitter. Parallel to [`Self::extra_input_resistances`]. Multi-input is
+    /// only valid for
     /// linear (M=0) circuits; M>0 is rejected before codegen.
     pub extra_input_nodes: Vec<usize>,
     /// Per-port Thevenin resistance for each entry in [`Self::extra_input_nodes`]
@@ -553,7 +553,6 @@ pub struct CodegenConfig {
     /// stamp each source's conductance (`1/resistance`) into
     /// `mna.g[node][node]` before building the kernel. Empty for decks without
     /// `.inject` → generated code is byte-identical to the pre-inject emitter.
-    /// See `local-docs/inject-directive-plan.md`.
     pub injections: Vec<crate::codegen::ir::InjectionSpec>,
     /// Raw inner-rate tap probes (`.tap`). Empty when no `.tap` directive.
     pub taps: Vec<crate::codegen::ir::TapSpec>,

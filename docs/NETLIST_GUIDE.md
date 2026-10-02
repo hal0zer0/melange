@@ -52,7 +52,9 @@ shunt, **not** the open that an unlisted node keeps. A deck written for the old
 "compile N times and sum" pattern usually carries hand-added terminations on the
 other ports; those now **double up** with the per-port 1 Ω, so remove them when
 you switch to `-i a,b,c`. Multi-input is `--format code` only and rejects
-nonlinear (M>0) decks (superposition is invalid there).
+nonlinear (M>0) decks (superposition is invalid there). A nonlinear deck takes
+its second audio input as a `rate=host` `.inject` instead (see
+[Step 5](#step-5-add-controls-optional)).
 
 ### Board pins (`.port`)
 
@@ -273,6 +275,34 @@ has **no DC-OP warm re-init** (that snap is what makes `.pot R` click at
 envelope update rates). Also emits `RUNTIME_R_BIAS_R_L1_MIN/_MAX/_NOMINAL`
 consts and a `bias_r_L1()` read accessor. No nih-plug knob is generated —
 the plugin is the driver.
+
+For **a second audio input into a nonlinear deck**, or a **feedback loop that
+host code closes around the circuit**, use `.inject` (a source the caller
+supplies on every `process_sample` call) and `.tap` (a node read raw at every
+inner sub-step):
+
+```spice
+.inject ch2 aux R=1                     ; Thevenin: a voltage behind 1 ohm
+.inject ret fb  RSHUNT=100k rate=inner  ; Norton: a current, 100k shunt
+.tap mid                                ; raw node voltage, every inner sub-step
+```
+
+The impedance is mandatory. `rate=` (default `host`) only matters under
+oversampling:
+
+- `rate=host` — an audio-rate input. The caller supplies one value per host
+  sample and the generated code upsamples it through the same half-band filter
+  as the audio input, so it arrives band-limited and with the same group delay.
+- `rate=inner` — one value per inner sub-step, straight to the solve; the
+  caller owns band-limiting. Use it for a loop closed from a `.tap` at the inner
+  rate, where a host-rate injection would put the up-filter's delay inside the
+  loop.
+
+At `--oversampling 1` the two are identical. An unknown `rate=` value, or any
+other token after the impedance, is a parse error. These decks build with
+`--format code` only. The generated call shape is in
+[CODE_API.md](CODE_API.md#inject-and-tap-decks); the full rules are in
+[spice-grammar.md](spice-grammar.md#inject--tap--runtime-injection-sources-and-raw-inner-rate-taps).
 
 See [spice-grammar.md](spice-grammar.md#5-melange-extensions) for full syntax.
 
