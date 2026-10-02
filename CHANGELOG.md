@@ -9,11 +9,13 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-10-01
+
 A cleanup and bug-fix release. **What changes generated code or rendered
 audio:**
 - Nodal builds drop a second 1e-12 S node conductance they added on top of
   the one already in G (four silence renders in the regression corpus move
-  at the microvolt level; every signal render by 1e-5 dB or less).
+  at the microvolt level; every signal render by 2e-5 dB or less).
 - The DC operating point of circuits with parasitic-resistance transistors
   starts from the corrected junction clamp; six corpus circuits' operating
   points (and the constants derived from them) move by at most 8e-11 V.
@@ -3093,7 +3095,9 @@ measured real hardware. Everything else is unproven against hardware. See
   KiCad file; no effect on netlist compilation, generated code, or shipped plugins. The
   fix (`quick-xml >= 0.41`) is tracked for 0.1.1.
 
-[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.12...HEAD
+[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.14...HEAD
+[0.1.14]: https://github.com/hal0zer0/melange/compare/v0.1.13...v0.1.14
+[0.1.13]: https://github.com/hal0zer0/melange/compare/v0.1.12...v0.1.13
 [0.1.12]: https://github.com/hal0zer0/melange/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/hal0zer0/melange/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/hal0zer0/melange/compare/v0.1.9...v0.1.10
