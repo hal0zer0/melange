@@ -270,14 +270,14 @@ A sample of what it handles, with **measured** single-core throughput:
 
 | Circuit | What it is | Devices | Throughput\* | ns/sample |
 |---------|-----------|---------|--------------|-----------|
-| Bus compressor | VCA + op-amp sidechain | 12 op-amps + 2 VCAs | 6.6× | 3176 |
-| Germanium diode network | 6-diode germanium clipping | 6 Ge diodes | 11.9× | 1747 |
-| Tweed guitar amp (single-ended) | preamp + power stage + output transformer | 12AX7 (2 triodes) + 6V6 pentode | 16.7× | 1248 |
-| Passive tube program EQ | 7 pots, 3 switches, global NFB (N=52, M=8) | 4 tubes, 3 transformers | 18.4× | 1134 |
-| Wurlitzer 200A preamp | 2-stage BJT preamp (full Gummel-Poon) | 2 BJTs + 1 diode | 46.1× | 452 |
-| 12AX7 gain stage | single triode stage | 1 triode | 156.0× | 134 |
+| Bus compressor | VCA + op-amp sidechain | 12 op-amps + 2 VCAs | 6.5× | 3196 |
+| Passive tube program EQ | 7 pots, 3 switches, global NFB (N=52, M=8) | 4 tubes, 3 transformers | 18.1× | 1148 |
+| Single-ended tube amp | preamp + power stage + output transformer into 8 Ω | 12AX7 (2 triodes) + 6V6 pentode | 19.9× | 1047 |
+| Germanium diode network | 3 RC sections, an antiparallel Ge pair at each | 6 Ge diodes | 24.6× | 846 |
+| Wurlitzer 200A preamp | 2-stage BJT preamp (full Gummel-Poon) | 2 BJTs + 1 diode | 45.4× | 459 |
+| 12AX7 gain stage | single triode stage | 1 triode | 150.0× | 139 |
 
-\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), best of 7 × 2M samples. Measured on an AMD Ryzen 9 7950X pinned to one CCD, with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh). Re-measured 2026-09-30 on an idle machine; the best and median of the seven runs agree within 1 % on every row. Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass runs at 2930× (7.1 ns/sample).
+\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), best of 7 × 2M samples. Measured on an AMD Ryzen 9 7950X pinned to one CCD, with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh). Re-measured 2026-10-01 on an idle machine; the best and median of the seven runs agree within 1 % on every row. Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass runs at 3200× (6.5 ns/sample).
 
 **The triode rows pay for grid current.** The Dempwolf & Zölzer grid-current law evaluates a softplus on the grid dimension at every Newton iteration, where a hard-zero law would skip it; that is what modelling the negative-grid region costs. The CHANGELOG has the before/after figures.
 

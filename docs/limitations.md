@@ -579,14 +579,14 @@ that must run at several host rates has to be compiled per rate.
 
 ### Performance Benchmarks
 
-Measured 2026-09-30 on an idle AMD Ryzen 9 7950X pinned to one CCD, single
+Measured 2026-10-01 on an idle AMD Ryzen 9 7950X pinned to one CCD, single
 core, noiseless, `-C target-cpu=x86-64-v3` (best of 7 × 2M samples via
 `tools/perf-harness/bench.sh`); throughput is host-dependent.
 
-- Light nonlinear circuits: 12AX7 gain stage ~156× realtime
-- Germanium diode network (6 Ge diodes) ~11.9× realtime
-- Typical multi-device circuits: Wurlitzer preamp ~46×, tweed-style guitar amp ~16.7× realtime
-- Heaviest measured: a passive tube EQ (nodal Schur, N=52, M=8) ~18.4×, a bus compressor (12 op-amps + 2 VCAs) ~6.6× realtime
+- Light nonlinear circuits: 12AX7 gain stage ~150× realtime
+- Germanium diode network (3 RC sections, an antiparallel Ge pair at each) ~24.6× realtime
+- Typical multi-device circuits: Wurlitzer preamp ~45×, single-ended tube amp ~20× realtime
+- Heaviest measured: a passive tube EQ (nodal Schur, N=52, M=8) ~18.1×, a bus compressor (12 op-amps + 2 VCAs) ~6.5× realtime
 
 The triode rows include the cost of the Dempwolf & Zölzer grid-current law,
 which evaluates a softplus on the grid dimension at every Newton iteration

@@ -3,7 +3,7 @@
 Quick-reference for AI agents. For math details see other aidocs. For architecture see CLAUDE.md.
 Release history lives in `CHANGELOG.md`; this file states what is true now and what is open.
 
-> **Latest release: v0.1.13 (2026-09-30).**
+> **Latest release: v0.1.14 (2026-10-01).**
 >
 > Triode grid current is the Dempwolf & Zölzer eq. (11) law, which **fails** its Philips ECC83
 > acceptance test 15/15 and ships as the less-wrong model, replacing a law that was further out
@@ -390,7 +390,7 @@ f36e99c.
   - **pnjlim is skipped for parasitic BJTs with internal nodes in the DC-OP Newton** (`dc_op.rs`: `if internal_junctions && bp.has_parasitics() { continue }`). The limit's correction, spread back to the nodes through `N_v^T`, pushed the weakly-tied internal base far from the external one, so for these devices the correction is dropped and the parasitic resistances in `G_aug` are left to damp the step. Without the limit a bad start can overshoot a power junction by volts. Measure with and without it on the parasitic-BJT corpus and on the wurli power-amp snapshot (`tests/data/wurli_power_amp_snapshot.cir`, the alpha-floor fixture) before changing it.
   - **The baked node Gmin** (1e-12 S in the nodal `G`, none in DK's): the Deferred item "Baked node Gmin" below, measured the way the emitted second term was before its removal.
   - **validate's reference rungs in parallel**: a future opt-in; see "First-user gaps" below.
-- **Throughput fell 9–13 % over v0.1.11..v0.1.12 on three README rows** (bus compressor 7.5× → 6.6×, tweed amp 19.0× → 16.7×, passive tube EQ 20.3× → 18.4×; idle re-bench 2026-09-30, `bench.sh`). Not attributed to individual changes. Bisect over the v0.1.11..v0.1.12 range with `bench.sh` on those three decks before any perf work claims a win.
+- **Throughput fell 9–13 % over v0.1.11..v0.1.12 on three README rows** (bus compressor 7.5× → 6.6×, tweed amp 19.0× → 16.7×, passive tube EQ 20.3× → 18.4×; idle re-bench 2026-09-30, `bench.sh`). Not attributed to individual changes. Bisect over the v0.1.11..v0.1.12 range with `bench.sh` on those three decks before any perf work claims a win. Measured 2026-10-01 (idle, interleaved, best of 7): v0.1.14 is equal to or faster than v0.1.13 on every README row (bus compressor 3196 vs 3221 ns, passive EQ 1148 vs 1190, Wurlitzer preamp 459 vs 500, single-ended amp 1047 vs 1104), so the loss sits in v0.1.11..v0.1.12 and was not added to since.
 - **No aliasing measurement in melange.** `analyze`'s `nyquist_dbc` detects only a component at exactly fs/2 (a limit-cycle signature); aliases fold to `fs − k·f` anywhere. The docs teach render-and-compare with an incommensurate tone. A first-party inharmonic-product metric would close it.
 - **First-user gaps (fresh-clone passes, 2026-09-30 and 2026-10-01).** Still open:
   - `validate` refuses a vanilla pedal deck on output-peak tolerance; candidate fix is named tolerance presets.
