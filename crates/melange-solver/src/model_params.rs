@@ -436,16 +436,71 @@ const BJT_DEFINING: &[&str] = &[
     "XTB",
 ];
 
+/// `LEVEL` selects the channel law (1 Shichman–Hodges, 2 Parker–Skellern);
+/// `VST`..`PB` are level-2 keys, refused on a level-1 card by the resolver.
 const JFET_HONORED: &[&str] = &[
-    "VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "IS", "N", "KF", "AF",
+    "VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "IS", "N", "KF", "AF", "LEVEL", "VST", "MVST",
+    "P", "Q", "Z", "XI", "MXI", "PB",
 ];
 
-const JFET_DEFINING: &[&str] = &["VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "IS", "N"];
+const JFET_DEFINING: &[&str] = &[
+    "VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "IS", "N", "VST", "MVST", "P", "Q", "Z", "XI",
+    "MXI", "PB",
+];
+
+/// The refusal note of the Parker–Skellern trap-dispersion keys.
+const JFET_DISPERSION_NOTE: &str = "Parker–Skellern trap dispersion (the rate-dependent \
+     threshold and drain feedback) is not implemented; melange's level 2 is the \
+     zero-dispersion law, so remove the key or set it to 0";
 
 /// A FET card's series resistance is not in the solution. It used to reach
 /// only the Newton Jacobian, so the converged answer was the device without
 /// it (a JFET with RS = 1k biased at 4.57 V where ngspice gives 8.40 V).
 const JFET_REFUSED: &[(&str, &str)] = &[
+    ("LFGAM", JFET_DISPERSION_NOTE),
+    ("LFG1", JFET_DISPERSION_NOTE),
+    ("LFG2", JFET_DISPERSION_NOTE),
+    ("HFGAM", JFET_DISPERSION_NOTE),
+    ("HFG1", JFET_DISPERSION_NOTE),
+    ("HFG2", JFET_DISPERSION_NOTE),
+    ("HFETA", JFET_DISPERSION_NOTE),
+    ("HFE1", JFET_DISPERSION_NOTE),
+    ("HFE2", JFET_DISPERSION_NOTE),
+    ("TAUG", JFET_DISPERSION_NOTE),
+    (
+        "DELTA",
+        "Parker–Skellern thermal reduction of the drain current is not implemented; \
+         remove the key or set it to 0",
+    ),
+    (
+        "TAUD",
+        "Parker–Skellern thermal reduction of the drain current is not implemented; \
+         remove the key or set it to 0",
+    ),
+    (
+        "IBD",
+        "the gate junctions' reverse breakdown is not implemented; remove the key or \
+         set it to 0",
+    ),
+    (
+        "VBD",
+        "the gate junctions' reverse breakdown is not implemented; remove the key",
+    ),
+    (
+        "FC",
+        "melange holds CGS and CGD constant at every bias, so the depletion \
+         capacitances' shape keys have no effect; remove the key",
+    ),
+    (
+        "ACGAM",
+        "melange holds CGS and CGD constant at every bias, so the gate charge \
+         model's shape keys have no effect; remove the key",
+    ),
+    (
+        "XC",
+        "melange holds CGS and CGD constant at every bias, so the gate charge \
+         model's shape keys have no effect; remove the key",
+    ),
     (
         "RD",
         "JFET drain series resistance is not implemented in the solution. Model it \

@@ -3,7 +3,7 @@
 use tera::Context;
 
 use super::helpers::{
-    emit_device_const, emit_stateful_update_fns, section_banner, stateful_device_data,
+    emit_device_const, emit_stateful_update_fns, fmt_f64, section_banner, stateful_device_data,
 };
 use super::RustEmitter;
 use crate::codegen::ir::{CircuitIR, DeviceParams};
@@ -16,6 +16,7 @@ impl RustEmitter {
         let mut has_diode = false;
         let mut has_bjt = false;
         let mut has_jfet = false;
+        let mut has_jfet_ps = false;
         let mut has_mosfet = false;
         let mut has_tube = false;
         let mut has_vca = false;
@@ -111,7 +112,20 @@ impl RustEmitter {
                 }
                 DeviceParams::Jfet(jp) => {
                     has_jfet = true;
-                    emit_device_const(&mut code, dev_num, "IDSS", jp.idss);
+                    if let Some(ps) = &jp.ps {
+                        // LEVEL=2: BETA replaces IDSS; the shape keys travel
+                        // as one array, the order `jfet_ps_evaluate` reads.
+                        has_jfet_ps = true;
+                        emit_device_const(&mut code, dev_num, "BETA", ps.beta);
+                        code.push_str(&format!(
+                            "const DEVICE_{dev_num}_PS: [f64; 8] = [{}]; // VST MVST P Q Z XI MXI PB\n",
+                            [ps.vst, ps.mvst, ps.p, ps.q, ps.z, ps.xi, ps.mxi, ps.vbi]
+                                .map(fmt_f64)
+                                .join(", ")
+                        ));
+                    } else {
+                        emit_device_const(&mut code, dev_num, "IDSS", jp.idss);
+                    }
                     emit_device_const(&mut code, dev_num, "VP", jp.vp);
                     emit_device_const(&mut code, dev_num, "LAMBDA", jp.lambda);
                     // Gate junctions: IS, N*Vt and the pnjlim critical voltage.
@@ -327,6 +341,9 @@ impl RustEmitter {
         }
         if has_jfet {
             code.push_str(&self.render("device_jfet", &Context::new())?);
+            if has_jfet_ps {
+                code.push_str(&self.render("device_jfet_ps", &Context::new())?);
+            }
         }
         if has_mosfet {
             code.push_str(&self.render("device_mosfet", &Context::new())?);

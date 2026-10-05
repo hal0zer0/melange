@@ -292,12 +292,21 @@ pub(super) fn device_param_template_data(ir: &CircuitIR) -> Vec<DeviceParamTempl
                         },
                     ],
                 ),
-                DeviceParams::Jfet(_) => (
+                DeviceParams::Jfet(jp) => (
                     "Jfet".to_string(),
                     vec![
-                        DeviceParamEntry {
-                            field_suffix: "idss".into(),
-                            const_suffix: "IDSS".into(),
+                        // LEVEL=2 carries BETA, set independently of VP;
+                        // LEVEL=1 IDSS (BETA = IDSS/VP²).
+                        if jp.ps.is_some() {
+                            DeviceParamEntry {
+                                field_suffix: "beta".into(),
+                                const_suffix: "BETA".into(),
+                            }
+                        } else {
+                            DeviceParamEntry {
+                                field_suffix: "idss".into(),
+                                const_suffix: "IDSS".into(),
+                            }
                         },
                         DeviceParamEntry {
                             field_suffix: "vp".into(),

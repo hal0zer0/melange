@@ -197,17 +197,24 @@ pub(super) fn emit_dk_device_evaluation(
                 let s = slot.start_idx;
                 let s1 = s + 1;
                 let d = dev_num;
-                if !matches!(&slot.params, DeviceParams::Jfet(_)) {
+                let DeviceParams::Jfet(jp) = &slot.params else {
                     return Err(CodegenError::InvalidDevice(format!(
                         "device_type=Jfet but params={:?}",
                         slot.params
                     )));
-                }
-                // IDSS, VP, LAMBDA from state; SIGN stays as const.
+                };
+                // IDSS (BETA at LEVEL=2), VP, LAMBDA from state; SIGN stays as const.
                 // N_v ordering: dim s = Vds, dim s+1 = Vgs.
                 // Functions expect (vgs, vds), so pass (v_d{s1}, v_d{s}).
+                let call = jfet_evaluate_call(
+                    jp,
+                    d,
+                    &format!("v_d{s1}"),
+                    &format!("v_d{s}"),
+                    &format!("DEVICE_{d}_SIGN"),
+                );
                 code.push_str(&format!(
-                    "{indent}let (i_dev{s}, i_dev{s1}, jfet{d}_jac) = jfet_evaluate(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_IS, DEVICE_{d}_N_VT, DEVICE_{d}_SIGN);\n"
+                    "{indent}let (i_dev{s}, i_dev{s1}, jfet{d}_jac) = {call};\n"
                 ));
                 // In dim-space (dim0=Vds, dim1=Vgs):
                 //   jdev_s_s   = dId/dVds = jac[1]
@@ -348,6 +355,28 @@ pub(super) fn emit_nr_singular_fallback(code: &mut String, dim: usize, indent: &
 /// `GATE_VCRIT` `f64::MAX`, so a reverse-biased gate limits exactly as
 /// fetlim alone. `d` is the dimension (0 = Vds, 1 = Vgs); the rest are the
 /// emitter's expressions for the proposed and current Vds/Vgs.
+/// The generated call that evaluates JFET `d` at `(vgs, vds)`, giving
+/// `(I_drain, I_gate, jac)`: `jfet_evaluate` (Shichman–Hodges) or, for a
+/// `LEVEL=2` card, `jfet_ps_evaluate` (Parker–Skellern), whose runtime
+/// parameters are BETA, VP and LAMBDA with the shape keys in `DEVICE_{d}_PS`.
+pub(super) fn jfet_evaluate_call(
+    jp: &crate::codegen::ir::JfetParams,
+    d: usize,
+    vgs: &str,
+    vds: &str,
+    sign: &str,
+) -> String {
+    if jp.ps.is_some() {
+        format!(
+            "jfet_ps_evaluate({vgs}, {vds}, state.device_{d}_beta, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_IS, DEVICE_{d}_N_VT, {sign}, &DEVICE_{d}_PS)"
+        )
+    } else {
+        format!(
+            "jfet_evaluate({vgs}, {vds}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_IS, DEVICE_{d}_N_VT, {sign})"
+        )
+    }
+}
+
 pub(super) fn jfet_limit_expr(
     dev_num: usize,
     d: usize,

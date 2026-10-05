@@ -162,6 +162,33 @@ const CASES: &[Case] = &[
         alone_only: &["IDSS"],
         dc_deck: "",
     },
+    // LEVEL=2 (Parker–Skellern). Its own case: the law keys are refused on
+    // the level-1 card above. A 100k source resistor self-biases the FET about
+    // 0.12 V above pinch-off, where the subthreshold softplus and the shape
+    // keys move the operating point. LEVEL's witness is the bare card at
+    // LEVEL=2 against LEVEL=1.
+    Case {
+        class: ModelClass::Jfet,
+        deck: "jfet level 2\nR1 in g 1k\nRg g 0 1Meg\nJ1 d g s JX\nRd vcc d 10k\nRs s 0 100k\n\
+               Vcc vcc 0 DC 12\nC1 d out 1u\nR3 out 0 100k\n{CARD}\n",
+        card: "JX NJF",
+        keys: &[
+            ("LEVEL", "2", "1", Alone),
+            ("VTO", "-2", "-1.5", Rich),
+            ("BETA", "1e-3", "2e-3", Rich),
+            ("LAMBDA", "0.01", "0.02", Rich),
+            ("VST", "0.05", "0.08", Rich),
+            ("MVST", "0.1", "0.3", Rich),
+            ("P", "2.2", "2.5", Rich),
+            ("Q", "1.9", "1.7", Rich),
+            ("Z", "0.5", "1", Rich),
+            ("XI", "3", "5", Rich),
+            ("MXI", "0.1", "0.3", Rich),
+            ("PB", "0.9", "1.2", Rich),
+        ],
+        alone_only: &[],
+        dc_deck: "",
+    },
     Case {
         class: ModelClass::Mosfet,
         deck: "mosfet\nR1 in g 1k\nRg g 0 1Meg\nM1 d g s 0 MX\nRd vcc d 10k\nRs s 0 1k\n\
@@ -433,13 +460,27 @@ fn witness_pair(
 
 #[test]
 fn every_swept_class_lists_every_accepted_key() {
+    // Coverage is per class, across its cases: a class may need more than one
+    // witness card (a JFET's level-2 keys are refused on its level-1 card).
     let mut missing = Vec::new();
+    let mut classes: Vec<ModelClass> = Vec::new();
     for case in CASES {
-        for key in case.class.honored() {
-            if !case.keys.iter().any(|(k, ..)| k.eq_ignore_ascii_case(key)) {
-                missing.push(format!("{} / {}", case.class.label(), key));
+        if !classes.contains(&case.class) {
+            classes.push(case.class);
+        }
+    }
+    for class in classes {
+        for key in class.honored() {
+            let witnessed = CASES
+                .iter()
+                .filter(|c| c.class == class)
+                .any(|c| c.keys.iter().any(|(k, ..)| k.eq_ignore_ascii_case(key)));
+            if !witnessed {
+                missing.push(format!("{} / {}", class.label(), key));
             }
         }
+    }
+    for case in CASES {
         for (k, ..) in case.keys {
             assert!(
                 case.class.is_honored(k),

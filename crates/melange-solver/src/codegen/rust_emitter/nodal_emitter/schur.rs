@@ -444,10 +444,17 @@ impl RustEmitter {
                      {indent}let jdev_{s}_{s} = state.device_{d}_is / (DEVICE_{d}_NF * state.device_{d}_vt) * dexp_be_{d};\n"
                 ));
             }
-            (DeviceType::Jfet, DeviceParams::Jfet(_)) => {
+            (DeviceType::Jfet, DeviceParams::Jfet(jp)) => {
                 let s1 = s + 1;
+                let call = super::super::nr_helpers::jfet_evaluate_call(
+                    jp,
+                    d,
+                    &format!("v_d{s1}"),
+                    &format!("v_d{s}"),
+                    &format!("DEVICE_{d}_SIGN"),
+                );
                 code.push_str(&format!(
-                    "{indent}let (i_dev{s}, i_dev{s1}, jfet{d}_jac) = jfet_evaluate(v_d{s1}, v_d{s}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_IS, DEVICE_{d}_N_VT, DEVICE_{d}_SIGN);\n"
+                    "{indent}let (i_dev{s}, i_dev{s1}, jfet{d}_jac) = {call};\n"
                 ));
                 code.push_str(&format!(
                     "{indent}let jdev_{s}_{s} = jfet{d}_jac[1];\n\

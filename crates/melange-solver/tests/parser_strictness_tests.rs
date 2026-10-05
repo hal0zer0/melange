@@ -713,3 +713,23 @@ fn pot_refuses_a_netlist_value_its_own_range_cannot_reach() {
     // An explicit in-range default makes the netlist value irrelevant.
     Netlist::parse("T\nR1 in out 10k\nR2 out 0 10k\n.pot R1 20k 50k 25k \"Tone\"\n").unwrap();
 }
+
+#[test]
+fn mismatch_refuses_a_key_its_class_does_not_read() {
+    // A typo'd key would leave the deck unjittered while it reads as jittered.
+    let msg =
+        Netlist::parse("T\nR1 in out 10k\nD1 out 0 DX\n.model DX D\n.mismatch D IS=0.05 NN=0.02\n")
+            .unwrap_err()
+            .message;
+    assert!(
+        msg.contains("unknown parameter 'NN'") && msg.contains("IS, N, RS"),
+        "{msg}"
+    );
+    // A key of another class is unknown here too.
+    let msg = Netlist::parse("T\nR1 in out 10k\n.mismatch Q KG1=0.05\n")
+        .unwrap_err()
+        .message;
+    assert!(msg.contains("unknown parameter 'KG1'"), "{msg}");
+    // Case-insensitive, like every other key.
+    Netlist::parse("T\nR1 in out 10k\n.mismatch j vp=0.05 lambda=0.1\n").unwrap();
+}

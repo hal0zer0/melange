@@ -43,7 +43,7 @@ use std::sync::OnceLock;
 
 use melange_devices::bjt::{BjtEbersMoll, BjtGummelPoon, BjtPolarity};
 use melange_devices::diode::{DiodeShockley, DiodeWithRs};
-use melange_devices::jfet::{Jfet, JfetChannel};
+use melange_devices::jfet::{Jfet, JfetChannel, ParkerSkellern};
 use melange_devices::tube::{KorenPentode, KorenTriode, ScreenForm};
 use melange_devices::{Mosfet, MosfetChannelType};
 use melange_devices::{NonlinearDevice, Vca};
@@ -82,6 +82,10 @@ mod tpl {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/templates/rust/device_jfet.rs.tera"
+    ));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/templates/rust/device_jfet_ps.rs.tera"
     ));
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -187,6 +191,20 @@ mod tpl {
         sign: f64,
     ) -> (f64, f64, [f64; 4]) {
         jfet_evaluate(vgs, vds, idss, vp, lambda, is, n_vt, sign)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn jfet_ps_evaluate_tpl(
+        vgs: f64,
+        vds: f64,
+        beta: f64,
+        vp: f64,
+        lambda: f64,
+        is: f64,
+        n_vt: f64,
+        sign: f64,
+        ps: &[f64; 8],
+    ) -> (f64, f64, [f64; 4]) {
+        jfet_ps_evaluate(vgs, vds, beta, vp, lambda, is, n_vt, sign, ps)
     }
     pub fn jfet_jacobian_tpl(
         vgs: f64,
@@ -949,6 +967,110 @@ fn template_jfet_matches_devices_crate() {
         assert!(
             fwd > 100 && rev > 20 && sub > 100,
             "JFET ({channel:?}) grid missed a region: fwd={fwd} rev={rev} sub={sub}"
+        );
+    }
+}
+
+/// Template Parker–Skellern JFET (`jfet_ps_evaluate`, LEVEL=2) against
+/// `Jfet::evaluate` with `ps` set, which the DC OP uses. The two are the same
+/// operation sequence on the same libm calls, so they must agree exactly,
+/// over a grid that crosses extreme cut-off (exact zero), the softplus, its
+/// linear continuation, both modes and Vds = 0, with and without the gate
+/// junctions.
+#[test]
+fn template_jfet_ps_matches_devices_crate() {
+    let base = ParkerSkellern::with_beta(1.6e-3);
+    // (channel, vp as stored, lambda, law)
+    let variants: &[(JfetChannel, f64, f64, ParkerSkellern)] = &[
+        (JfetChannel::N, -2.5, 0.004, base),
+        (
+            JfetChannel::N,
+            -2.5,
+            0.004,
+            ParkerSkellern { vst: 0.026, ..base },
+        ),
+        (
+            JfetChannel::N,
+            -2.5,
+            0.004,
+            ParkerSkellern {
+                vst: 0.05,
+                mvst: 0.3,
+                p: 2.5,
+                q: 1.8,
+                z: 0.3,
+                xi: 3.0,
+                mxi: 0.2,
+                vbi: 0.8,
+                ..base
+            },
+        ),
+        (
+            JfetChannel::P,
+            1.5,
+            0.01,
+            ParkerSkellern {
+                beta: 2e-3,
+                vst: 0.04,
+                mvst: 0.2,
+                p: 2.2,
+                q: 1.7,
+                z: 0.5,
+                xi: 5.0,
+                mxi: 0.1,
+                vbi: 0.9,
+            },
+        ),
+    ];
+    for &(channel, vp, lambda, law) in variants {
+        let sign = match channel {
+            JfetChannel::N => 1.0,
+            JfetChannel::P => -1.0,
+        };
+        let ps = [
+            law.vst, law.mvst, law.p, law.q, law.z, law.xi, law.mxi, law.vbi,
+        ];
+        let (mut cut, mut on) = (0u32, 0u32);
+        let mut vgs = -4.0;
+        while vgs <= 4.0 {
+            let mut vds = -4.0;
+            while vds <= 4.0 {
+                for (is, n) in [(1e-14, 1.0), (1e-14, 1.5), (0.0, 1.0)] {
+                    let mut dev = Jfet::parker_skellern(channel, vp, law);
+                    dev.lambda = lambda;
+                    dev.is = is;
+                    dev.n = n;
+                    let (id_d, ig_d, jac_d) = dev.evaluate(vgs, vds);
+                    let n_vt = n * melange_devices::VT_ROOM;
+                    let (id_t, ig_t, jac_t) = tpl::jfet_ps_evaluate_tpl(
+                        vgs, vds, law.beta, vp, lambda, is, n_vt, sign, &ps,
+                    );
+                    let ctx = format!(
+                        "PS JFET ({channel:?} vst={}) at vgs={vgs:.3} vds={vds:.3} IS={is:e} N={n}",
+                        law.vst
+                    );
+                    // Exact equality (+0 == -0: the canonical's disabled
+                    // junction negates a zero conductance).
+                    assert!(id_t == id_d, "{ctx} I_drain {id_t:e} vs {id_d:e}");
+                    assert!(ig_t == ig_d, "{ctx} I_gate {ig_t:e} vs {ig_d:e}");
+                    for (k, (t, d)) in jac_t.iter().zip(&jac_d).enumerate() {
+                        assert!(t == d, "{ctx} jac[{k}] {t:e} vs {d:e}");
+                    }
+                    if is == 0.0 {
+                        if id_d == 0.0 {
+                            cut += 1;
+                        } else {
+                            on += 1;
+                        }
+                    }
+                }
+                vds += 0.19;
+            }
+            vgs += 0.19;
+        }
+        assert!(
+            cut > 20 && on > 300,
+            "PS JFET ({channel:?}) grid missed a region: cut={cut} on={on}"
         );
     }
 }

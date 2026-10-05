@@ -9,7 +9,195 @@ pub enum JfetChannel {
     P,
 }
 
-/// JFET model (Shichman-Hodges/SPICE Level 1).
+/// Parker–Skellern drain-current law (SPICE JFET level 2): the parameters
+/// that shape it beyond Shichman–Hodges, with ngspice's defaults.
+///
+/// The law is ngspice's `PSids` (jfet2/psmodel.c) with its trap-dispersion
+/// and thermal-reduction terms at their zero defaults, where they are exact
+/// identities: below pinch-off the gate overdrive is a softplus of scale
+/// `VST·(1 + MVST·Vds)`, the current is a dual power law (`P` in the
+/// triode region, `Q` saturated) with smooth early saturation (`Z`, `XI`,
+/// `MXI`, `VBI`), times `BETA·(1 + LAMBDA·Vds)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParkerSkellern {
+    /// Transconductance parameter BETA \[A/V^Q\]. Replaces `Jfet::idss`.
+    pub beta: f64,
+    /// Subthreshold potential VST \[V\] (0 = hard pinch-off edge). The
+    /// deep-cutoff current e-folds every `VST/Q` volts.
+    pub vst: f64,
+    /// Drain modulation of VST \[1/V\].
+    pub mvst: f64,
+    /// Triode-region power law.
+    pub p: f64,
+    /// Saturated-region power law.
+    pub q: f64,
+    /// Saturation knee curvature.
+    pub z: f64,
+    /// Saturation index.
+    pub xi: f64,
+    /// Gate modulation of the saturation index.
+    pub mxi: f64,
+    /// Gate junction built-in potential (SPICE `PB`) \[V\].
+    pub vbi: f64,
+}
+
+impl ParkerSkellern {
+    /// ngspice's level-2 defaults, at the given BETA.
+    pub fn with_beta(beta: f64) -> Self {
+        Self {
+            beta,
+            vst: 0.0,
+            mvst: 0.0,
+            p: 2.0,
+            q: 2.0,
+            z: 1.0,
+            xi: 1000.0,
+            mxi: 0.0,
+            vbi: 1.0,
+        }
+    }
+
+    /// Normal-mode (`vds >= 0`) channel current and its partials
+    /// `(Id, dId/dVgs, dId/dVds)` for an N-channel device with pinch-off
+    /// `vto` (< 0). A line-for-line transcription of ngspice's `PSids` drain
+    /// block (jfet2/psmodel.c), so the variable names are ngspice's.
+    ///
+    /// The law, in four stages, each feeding the next:
+    /// 1. **Subthreshold**: the gate overdrive `vgst = Vgs − VTO` becomes the
+    ///    softplus `vgt = vst·ln(1 + e^(vgst/vst))`, which is `vgst` well above
+    ///    pinch-off and `vst·e^(vgst/vst)` well below it (the exponential
+    ///    tail). `vst = VST·(1 + MVST·Vds)`.
+    /// 2. **Dual power law**: `vdp = Vds·D3·vgt^(P−Q)` rescales the drain
+    ///    voltage so the triode conductance grows as `vgt^(P−1)` while the
+    ///    saturated current grows as `vgt^Q`.
+    /// 3. **Early saturation**: `vdt` is a smooth minimum of `vdp` and the
+    ///    saturation voltage `vsat` (≤ `vgt`), knee sharpness set by `Z`.
+    /// 4. **Q-law**: `Id = vgt^Q − (vgt − vdt)^Q`, times `BETA·(1 + λ·Vds)`.
+    ///    At P = Q = 2 with no early saturation this is Shichman–Hodges,
+    ///    `2·vgt·Vds − Vds²` below saturation and `vgt²` above.
+    ///
+    /// The partials are carried alongside as `gm = ∂Id/∂(stage input)` and
+    /// `gds = ∂Id/∂(stage drain variable)`, chained back through each stage.
+    pub fn normal_mode(&self, vgs: f64, vds: f64, vto: f64, lambda: f64) -> (f64, f64, f64) {
+        // ngspice's numerical guards on the softplus, in units of `vst`:
+        // below `vgst = FX·vst` the device is in "extreme cut-off" and the
+        // current is set to exactly 0. There `vgt ≈ e^−10·vst ≈ 4.5e-5·vst`,
+        // and the smooth minimum of stage 3 is a difference of two nearly
+        // equal square roots (`rpt − a_rpt`) that would be all rounding error
+        // if `vgt` were let shrink further; the current at the edge is
+        // ~BETA·(4.5e-5·vst)^Q, far below any solver tolerance.
+        const FX: f64 = -10.0;
+        // Above `vgst = MX·vst`, e^(vgst/vst) > e^40 ≈ 2.4e17 exceeds f64's
+        // 2^53 resolution of `1 + e^x`, so the softplus already equals its
+        // asymptote `vgst` to rounding; with a small VST the exponent reaches
+        // the hundreds and `exp` overflows past x ≈ 709. The softplus is
+        // continued linearly instead.
+        const MX: f64 = 40.0;
+        // e^MX, ngspice's literal `EMX`.
+        const EMX: f64 = 2.3538526683702e+17;
+
+        // Per-device constants (ngspice computes these once in
+        // PSinstanceinit; here per call, because VP is a runtime parameter).
+        // `woo`: the gate swing from pinch-off to the junction's built-in
+        // potential, i.e. from a closed to a fully open channel.
+        let woo = self.vbi - vto;
+        // Saturation potential scale: `vsat` departs from `vgt` (velocity
+        // saturation) once `vgt` is a sizeable fraction of XI·woo.
+        let xi_woo = self.xi * woo;
+        // Knee factor of the smooth minimum: makes `dvdt/dvdp = 1` at Vds = 0,
+        // so the triode region starts with exactly the power-law slope.
+        let za = (1.0 + self.z).sqrt() / 2.0;
+        // Scales stage 2 so the triode conductance at Vds = 0 is
+        // P·vgt^(P−1)/woo^(P−Q), the slope of the power law vgt^P/woo^(P−Q);
+        // that law meets the saturated vgt^Q at full opening (`vgt = woo`).
+        let d3 = self.p / self.q / woo.powf(self.p - self.q);
+
+        let vdst = vds;
+        let vgst = vgs - vto;
+        let vst = self.vst * (1.0 + self.mvst * vdst);
+        let (mut idrain, mut gm, mut gds);
+        if vgst > FX * vst {
+            // Stage 1, subthreshold softplus. `subfac = 1 + e^(vgst/vst)`;
+            // its reciprocal later gives the softplus slope.
+            let arg = MX * vst;
+            let (subfac, vgt) = if vgst > arg {
+                // Numerically large: the softplus is its asymptote, joined at
+                // `vgst = MX·vst` with the softplus's own slope EMX/(1+EMX).
+                let subfac = EMX + 1.0;
+                (subfac, (EMX / subfac) * (vgst - arg) + arg)
+            } else {
+                let subfac = 1.0 + (vgst / vst).exp();
+                (subfac, vst * subfac.ln())
+            };
+            // Stage 2, dual power law: the effective drain potential `vdp`.
+            let m_q = self.q;
+            let pmq = self.p - m_q;
+            let dvpd_dvdst = d3 * vgt.powf(pmq); // ∂vdp/∂Vds
+            let vdp = vdst * dvpd_dvdst;
+            // Stage 3, early saturation. `vsat` is `vgt` reduced by velocity
+            // saturation (`vsat → vgt` as XI → ∞).
+            let vsat_fac = vgt / (self.mxi * vgt + xi_woo);
+            let vsat = vgt / (1.0 + vsat_fac);
+            // Smooth minimum of `vdp` and `vsat`:
+            //   vdt = √(aa² + c) − √((aa − vsat)² + c),  aa = za·vdp + vsat/2,
+            //   c = Z·vsat²/4.
+            // It is 0 at vdp = 0, rises with slope 1, and tends to `vsat` as
+            // vdp → ∞; Z → 0 makes it the hard min(vdp, vsat).
+            let aa = za * vdp + vsat / 2.0;
+            let a_aa = aa - vsat;
+            let arg = vsat * vsat * self.z / 4.0;
+            let rpt = (aa * aa + arg).sqrt();
+            let a_rpt = (a_aa * a_aa + arg).sqrt();
+            let vdt = rpt - a_rpt;
+            let dvdt_dvdp = za * (aa / rpt - a_aa / a_rpt);
+            // ∂vdt/∂vgt through `vsat` at fixed `vdp`. `vdt` is homogeneous of
+            // degree 1 in (vdp, vsat), so ∂vdt/∂vsat = (vdt − vdp·∂vdt/∂vdp)/vsat
+            // (Euler), and ∂vsat/∂vgt = (1 + MXI·f²)/(1 + f)² with f = vsat_fac.
+            let dvdt_dvgt = (vdt - vdp * dvdt_dvdp) * (1.0 + self.mxi * vsat_fac * vsat_fac)
+                / (1.0 + vsat_fac)
+                / vgt;
+            // Stage 4, the Q-law Id = vgt^Q − (vgt − vdt)^Q, written as
+            // vdt·x + vgt·(vgt^(Q−1) − x) with x = (vgt − vdt)^(Q−1) so that
+            // x also gives the partials: ∂Id/∂vdt = Q·x and, at fixed vdt,
+            // ∂Id/∂vgt = Q·(vgt^(Q−1) − x).
+            gds = (vgt - vdt).powf(m_q - 1.0);
+            gm = vgt.powf(m_q - 1.0) - gds;
+            idrain = vdt * gds + vgt * gm;
+            gds *= m_q; // ∂Id/∂vdt
+            gm *= m_q; // ∂Id/∂vgt at fixed vdt
+                       // Chain back: vdt depends on vgt (via vsat) and on vdp.
+            gm += gds * dvdt_dvgt;
+            gds *= dvdt_dvdp; // ∂Id/∂vdp
+                              // vdp depends on vgt through vgt^(P−Q): ∂vdp/∂vgt = (P−Q)·vdp/vgt.
+            gm += gds * pmq * vdp / vgt; // ∂Id/∂vgt, complete
+            gds *= dvpd_dvdst; // ∂Id/∂Vds at fixed vgt
+                               // Softplus slope ∂vgt/∂vgst = e^x/(1 + e^x) = 1 − 1/subfac (the
+                               // logistic sigmoid of x = vgst/vst).
+            let arg = 1.0 - 1.0 / subfac;
+            if vst != 0.0 {
+                // MVST makes vst depend on Vds: ∂vgt/∂vst at fixed vgst is
+                // (vgt − vgst·sigmoid)/vst, and ∂vst/∂Vds = VST·MVST.
+                gds += gm * self.vst * self.mvst * (vgt - vgst * arg) / vst;
+            }
+            gm *= arg; // ∂Id/∂Vgs = ∂Id/∂vgt · ∂vgt/∂vgst
+        } else {
+            // Extreme cut-off (see FX): exactly no current and no conductance.
+            idrain = 0.0;
+            gm = 0.0;
+            gds = 0.0;
+        }
+        // Channel-length modulation and BETA: Id·BETA·(1 + λ·Vds), whose Vds
+        // derivative adds BETA·λ·Id.
+        let arg = self.beta * (1.0 + lambda * vdst);
+        gm *= arg;
+        gds = self.beta * lambda * idrain + gds * arg;
+        idrain *= arg;
+        (idrain, gm, gds)
+    }
+}
+
+/// JFET model: Shichman–Hodges (SPICE level 1), or Parker–Skellern
+/// (SPICE level 2) when `ps` is set.
 ///
 /// For N-channel: negative Vgs to control, positive Vds
 /// For P-channel: positive Vgs to control, negative Vds
@@ -28,6 +216,9 @@ pub struct Jfet {
     pub is: f64,
     /// Gate junction emission coefficient (SPICE `N`, default 1).
     pub n: f64,
+    /// Parker–Skellern channel law (level 2). `None` is Shichman–Hodges,
+    /// from `idss`; `Some` replaces it, and `idss` is unused.
+    pub ps: Option<ParkerSkellern>,
 }
 
 impl Jfet {
@@ -45,7 +236,18 @@ impl Jfet {
             lambda: 0.001,
             is: 1e-14,
             n: 1.0,
+            ps: None,
         }
+    }
+
+    /// A Parker–Skellern (level 2) JFET with pinch-off `vto` in melange's
+    /// convention (negative N-channel, positive P-channel), as [`Self::new`].
+    /// `idss` is set to `BETA·VTO²` for display only; the law reads `ps`.
+    pub fn parker_skellern(channel: JfetChannel, vto: f64, ps: ParkerSkellern) -> Self {
+        assert!(ps.beta > 0.0, "JFET BETA must be positive, got {}", ps.beta);
+        let mut j = Self::new(channel, vto, ps.beta * vto * vto);
+        j.ps = Some(ps);
+        j
     }
 
     /// 2N5457 N-channel JFET.
@@ -122,6 +324,9 @@ impl Jfet {
             // Reverse mode: drain acts as source. vgd_eff = vgs_eff - vds_eff.
             (vgs_eff - vds_eff, -vds_eff, -1.0)
         };
+        if let Some(ps) = &self.ps {
+            return s * m * ps.normal_mode(vc, vd, vp_eff, self.lambda).0;
+        }
         let vgst = vc - vp_eff;
 
         if vgst <= 0.0 {
@@ -181,7 +386,10 @@ impl Jfet {
         let vgst = vc - vp_eff;
 
         // (f_c, f_d) = (∂f/∂vc, ∂f/∂vd)
-        let (f_c, f_d) = if vgst <= 0.0 {
+        let (f_c, f_d) = if let Some(ps) = &self.ps {
+            let (_, gm, gds) = ps.normal_mode(vc, vd, vp_eff, self.lambda);
+            (gm, gds)
+        } else if vgst <= 0.0 {
             // Subthreshold: derivative of tanh-gated weak exponential.
             // Matches device_jfet.rs.tera — unconditional, no dead branch.
             let sub = 1e-12 * (vgst / (2.0 * VT_ROOM)).exp().min(1.0);
@@ -777,6 +985,151 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// A Parker–Skellern card exercising every law key (ngspice JFET level 2:
+    /// VTO -2.5, BETA 1.6m, LAMBDA 4m, VST 50m, MVST 0.3, P 2.5, Q 1.8,
+    /// Z 0.3, XI 3, MXI 0.2, PB 0.8).
+    fn ps_card(channel: JfetChannel) -> Jfet {
+        let vto = match channel {
+            JfetChannel::N => -2.5,
+            JfetChannel::P => 2.5,
+        };
+        let mut j = Jfet::parker_skellern(
+            channel,
+            vto,
+            ParkerSkellern {
+                beta: 1.6e-3,
+                vst: 0.05,
+                mvst: 0.3,
+                p: 2.5,
+                q: 1.8,
+                z: 0.3,
+                xi: 3.0,
+                mxi: 0.2,
+                vbi: 0.8,
+            },
+        );
+        j.lambda = 0.004;
+        j.is = 0.0;
+        j
+    }
+
+    /// Drain currents of `ps_card` against ngspice-42's JFET2 (`.op` with the
+    /// gate and drain on ideal sources, IS=0, gmin=0, reltol 1e-9, numdgt 17):
+    /// deep subthreshold, the softplus knee, reverse triode, triode,
+    /// saturation, reverse saturation. Both polarities.
+    #[test]
+    fn parker_skellern_matches_ngspice_jfet2() {
+        let pins: [(f64, f64, f64); 6] = [
+            (-2.9, 1.5, 6.930481155321672e-10),
+            (-2.6, 0.04, 3.525744026332554e-08),
+            (-2.5, -0.3, -7.605577844621228e-05),
+            (-1.0, 0.2, 0.0006092811468108595),
+            (0.0, 6.0, 0.008045275559950653),
+            (-2.7, -2.0, -0.004264138791594062),
+        ];
+        for (channel, s) in [(JfetChannel::N, 1.0), (JfetChannel::P, -1.0)] {
+            let j = ps_card(channel);
+            for &(vgs, vds, id_ng) in &pins {
+                let id = j.drain_current(s * vgs, s * vds);
+                assert!(
+                    (id - s * id_ng).abs() <= 1e-9 * id_ng.abs(),
+                    "{channel:?} Vgs={vgs} Vds={vds}: {id:e} vs ngspice {:e}",
+                    s * id_ng
+                );
+            }
+        }
+    }
+
+    /// Below `vgst = -10·VST` the law is exactly zero (ngspice's extreme
+    /// cut-off), with zero partials; above it, it conducts.
+    #[test]
+    fn parker_skellern_extreme_cutoff_is_exact_zero() {
+        let j = ps_card(JfetChannel::N);
+        // VST at Vds = 1 V is 0.05·1.3 = 65 mV; the edge is 0.65 V below VTO.
+        assert_eq!(j.drain_current(-2.5 - 0.66, 1.0), 0.0);
+        assert_eq!(j.jacobian_partial(-2.5 - 0.66, 1.0), (0.0, 0.0));
+        assert!(j.drain_current(-2.5 - 0.64, 1.0) > 0.0);
+        // VST = 0: the edge is VTO itself, a hard pinch-off.
+        let mut hard = j;
+        hard.ps = Some(ParkerSkellern {
+            vst: 0.0,
+            ..j.ps.unwrap()
+        });
+        assert_eq!(hard.drain_current(-2.5 - 1e-9, 1.0), 0.0);
+        assert!(hard.drain_current(-2.5 + 1e-3, 1.0) > 0.0);
+    }
+
+    /// The Parker–Skellern Jacobian is the derivative of its current in every
+    /// region and mode, both polarities, through the softplus and its linear
+    /// continuation, and with VST = 0.
+    #[test]
+    fn parker_skellern_fd_jacobian() {
+        for channel in [JfetChannel::N, JfetChannel::P] {
+            let s = match channel {
+                JfetChannel::N => 1.0,
+                JfetChannel::P => -1.0,
+            };
+            for vst in [0.05, 0.0] {
+                let mut j = ps_card(channel);
+                j.ps = Some(ParkerSkellern {
+                    vst,
+                    ..j.ps.unwrap()
+                });
+                for &(vgs, vds) in &[
+                    (-2.9, 1.5),
+                    (-2.6, 0.04),
+                    (-2.45, 0.3),
+                    (-1.0, 0.2),
+                    (-1.0, 4.0),
+                    (0.0, 6.0),
+                    (-2.5, -0.3),
+                    (-2.7, -2.0),
+                    (-1.0, -0.05),
+                    (-1.0, 0.01),
+                    (-1.0, -0.01),
+                ] {
+                    let (vgs, vds) = (s * vgs, s * vds);
+                    if vst == 0.0 && j.drain_current(vgs, vds) == 0.0 {
+                        continue;
+                    }
+                    let (gm, gds) = j.jacobian_partial(vgs, vds);
+                    let h = 1e-7;
+                    let fd_gm =
+                        (j.drain_current(vgs + h, vds) - j.drain_current(vgs - h, vds)) / (2.0 * h);
+                    let fd_gds =
+                        (j.drain_current(vgs, vds + h) - j.drain_current(vgs, vds - h)) / (2.0 * h);
+                    for (name, an, fd) in [("gm", gm, fd_gm), ("gds", gds, fd_gds)] {
+                        assert!(
+                            (an - fd).abs() <= 1e-6 * fd.abs().max(1e-12),
+                            "{channel:?} vst={vst} ({vgs}, {vds}) {name}: {an:e} vs fd {fd:e}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Current and partials are continuous across the Vds = 0 mode swap.
+    #[test]
+    fn parker_skellern_continuity_across_vds_zero() {
+        let j = ps_card(JfetChannel::N);
+        let eps = 1e-9;
+        for &vgs in &[0.0, -1.0, -2.4, -2.6, -2.9] {
+            let (a, b) = (j.drain_current(vgs, eps), j.drain_current(vgs, -eps));
+            assert!((a - b).abs() < 1e-10, "Id at Vgs={vgs}: {a:e} vs {b:e}");
+            let (gm_a, gds_a) = j.jacobian_partial(vgs, eps);
+            let (gm_b, gds_b) = j.jacobian_partial(vgs, -eps);
+            assert!(
+                (gm_a - gm_b).abs() < 1e-8,
+                "gm at Vgs={vgs}: {gm_a:e} vs {gm_b:e}"
+            );
+            assert!(
+                (gds_a - gds_b).abs() <= 1e-6 * gds_a.abs(),
+                "gds at Vgs={vgs}: {gds_a:e} vs {gds_b:e}"
+            );
         }
     }
 }

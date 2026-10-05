@@ -33,6 +33,7 @@ mod subckt;
 mod validate;
 mod values;
 
+pub use directive_parse::mismatch_keys;
 pub use directives::*;
 pub use element::*;
 pub use names::*;

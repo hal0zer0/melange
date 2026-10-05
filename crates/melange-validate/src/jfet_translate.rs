@@ -11,7 +11,9 @@
 //! `BETA = IDSS / VP^2` (both engines' square law, `IDSS (1 - Vgs/VP)^2`),
 //! `VTO` in the SPICE sign convention, and melange's `LAMBDA` and `IS`.
 //! ngspice's level-1 gate junction has no emission coefficient (it is 1), so a
-//! card whose `N` is not 1 has no ngspice twin and is refused.
+//! level-1 card whose `N` is not 1 has no ngspice twin and is refused. A
+//! `LEVEL=2` (Parker–Skellern) device becomes an ngspice level-2 card carrying
+//! BETA and every law key melange resolved, and `N` (JFET2 has it).
 //! melange stamps `CGS`/`CGD` as constant capacitors, where ngspice's are
 //! bias-dependent depletion capacitances, so the card carries none and each
 //! device gets explicit constant `C` elements instead: the reference is the
@@ -31,6 +33,30 @@ fn model_card(
     name: &str,
     p: &melange_solver::device_types::JfetParams,
 ) -> Result<String, SpiceError> {
+    let (kind, vto) = if p.is_p_channel {
+        ("PJF", -p.vp)
+    } else {
+        ("NJF", p.vp)
+    };
+    if let Some(ps) = &p.ps {
+        return Ok(format!(
+            ".model {name} {kind}(LEVEL=2 BETA={:e} VTO={:e} LAMBDA={:e} IS={:e} N={:e} \
+             VST={:e} MVST={:e} P={:e} Q={:e} Z={:e} XI={:e} MXI={:e} PB={:e})",
+            ps.beta,
+            vto,
+            p.lambda,
+            p.is,
+            p.n,
+            ps.vst,
+            ps.mvst,
+            ps.p,
+            ps.q,
+            ps.z,
+            ps.xi,
+            ps.mxi,
+            ps.vbi,
+        ));
+    }
     if p.n != 1.0 {
         return Err(SpiceError::DeckNotComparable(format!(
             "JFET model {name} has a gate emission coefficient N={}; ngspice's level-1 JFET \
@@ -38,11 +64,6 @@ fn model_card(
             p.n
         )));
     }
-    let (kind, vto) = if p.is_p_channel {
-        ("PJF", -p.vp)
-    } else {
-        ("NJF", p.vp)
-    };
     Ok(format!(
         ".model {name} {kind}(BETA={:e} VTO={:e} LAMBDA={:e} IS={:e})",
         p.idss / (p.vp * p.vp),

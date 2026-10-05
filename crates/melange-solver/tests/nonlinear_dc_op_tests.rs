@@ -1579,6 +1579,7 @@ C1 in gate 10u
             cgd: 0.0,
             is: 1e-14,
             n: 1.0,
+            ps: None,
         }),
         has_internal_mna_nodes: false,
         vg2k_frozen: 0.0,

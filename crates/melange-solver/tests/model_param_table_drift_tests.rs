@@ -436,3 +436,45 @@ fn every_model_type_the_parser_accepts_maps_to_a_class() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// `.mismatch` keys
+// ---------------------------------------------------------------------------
+
+/// The parser refuses a `.mismatch` key outside `parser::mismatch_keys`, so
+/// that table must be exactly the `(class, key)` pairs the IR's
+/// `apply_mismatch` calls read: a key read but not listed is refused though
+/// honored, and a key listed but not read is accepted and jitters nothing.
+#[test]
+fn mismatch_key_table_matches_the_apply_mismatch_reads() {
+    let mut read = BTreeSet::new();
+    for path in rust_files() {
+        let src = read_normalized(&path);
+        // `apply_mismatch(netlist, <device>, "<KEY>", '<C>', …)`
+        for call in src.split("apply_mismatch(").skip(1) {
+            let mut quoted = call.split('"');
+            let (Some(_), Some(key), Some(rest)) = (quoted.next(), quoted.next(), quoted.next())
+            else {
+                continue;
+            };
+            let class = rest.trim_start_matches([',', ' ']).chars().nth(1);
+            if let Some(class) = class.filter(|c| c.is_ascii_uppercase()) {
+                read.insert((class, key.to_string()));
+            }
+        }
+    }
+    assert!(
+        read.len() > 10,
+        "scan found too few apply_mismatch reads: {read:?}"
+    );
+    let mut listed = BTreeSet::new();
+    for class in ['D', 'Q', 'J', 'M', 'T'] {
+        for key in melange_solver::parser::mismatch_keys(class) {
+            listed.insert((class, key.to_string()));
+        }
+    }
+    assert_eq!(
+        read, listed,
+        "parser::mismatch_keys must list exactly the (class, key) pairs apply_mismatch reads"
+    );
+}

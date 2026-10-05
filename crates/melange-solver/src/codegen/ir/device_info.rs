@@ -113,6 +113,42 @@ impl CircuitIR {
         }
     }
 
+    /// `.mismatch J` strength keys are per channel law: `IDSS` jitters a
+    /// LEVEL=1 JFET, `BETA` a LEVEL=2 one. A key no JFET of the deck reads
+    /// would jitter nothing, so it is refused, naming the key that would.
+    fn check_jfet_mismatch_keys(
+        netlist: &Netlist,
+        slots: &[DeviceSlot],
+    ) -> Result<(), CodegenError> {
+        let jfets = slots.iter().filter_map(|s| match &s.params {
+            DeviceParams::Jfet(jp) => Some(jp.ps.is_some()),
+            _ => None,
+        });
+        let (mut has_l1, mut has_l2) = (false, false);
+        for level2 in jfets {
+            if level2 {
+                has_l2 = true;
+            } else {
+                has_l1 = true;
+            }
+        }
+        if !has_l1 && !has_l2 {
+            return Ok(());
+        }
+        for (key, unread, instead) in [
+            ("IDSS", !has_l1, "BETA (the LEVEL=2 strength)"),
+            ("BETA", !has_l2, "IDSS (the LEVEL=1 strength)"),
+        ] {
+            if unread && Self::mismatch_tol_for(netlist, 'J', key) != 0.0 {
+                return Err(CodegenError::InvalidConfig(format!(
+                    ".mismatch J {key}=: no JFET in this deck has {key} as its strength \
+                     parameter, so it would jitter nothing; use {instead}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Build device info, optionally using MNA device dimensions (for forward-active BJTs).
     pub fn build_device_info_with_mna(
         netlist: &Netlist,
@@ -190,9 +226,18 @@ impl CircuitIR {
                 Element::Jfet { name, model, .. } => {
                     let mut params = Self::resolve_jfet_params(netlist, model)?;
                     // Per-JFET `.mismatch J …` jitter on the core transfer
-                    // parameters. No-op when the directive is absent.
-                    params.idss = Self::apply_mismatch(netlist, name, "IDSS", 'J', params.idss);
+                    // parameters. No-op when the directive is absent. A
+                    // LEVEL=2 device's strength is BETA, set independently
+                    // of VP (IDSS is display only there).
+                    if let Some(ps) = params.ps.as_mut() {
+                        ps.beta = Self::apply_mismatch(netlist, name, "BETA", 'J', ps.beta);
+                    } else {
+                        params.idss = Self::apply_mismatch(netlist, name, "IDSS", 'J', params.idss);
+                    }
                     params.vp = Self::apply_mismatch(netlist, name, "VP", 'J', params.vp);
+                    if let Some(ps) = &params.ps {
+                        params.idss = ps.beta * params.vp * params.vp;
+                    }
                     params.lambda =
                         Self::apply_mismatch(netlist, name, "LAMBDA", 'J', params.lambda);
                     slots.push(DeviceSlot {
@@ -472,6 +517,7 @@ impl CircuitIR {
             Self::resolve_mosfet_nodes(&mut slots, mna);
         }
 
+        Self::check_jfet_mismatch_keys(netlist, &slots)?;
         Ok(slots)
     }
 

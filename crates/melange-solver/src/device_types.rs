@@ -437,7 +437,8 @@ pub struct StatefulSpec {
 
 /// JFET model parameters (resolved from `.model` directive or defaults).
 ///
-/// Codegen uses 2D Shichman-Hodges: Vgs and Vds control Id (triode + saturation regions).
+/// Codegen uses 2D Shichman-Hodges (`LEVEL=1`, the default), or Parker–Skellern
+/// (`LEVEL=2`, `ps`): Vgs and Vds control Id.
 /// Gate current Ig (dimension 2) flows through the gate-source and gate-drain
 /// junctions (`is`, `n`).
 /// This matches the MNA stamping where JFET is 2D (dimension=2, controlling voltages=Vgs, Vds).
@@ -464,6 +465,51 @@ pub struct JfetParams {
     /// Gate junction emission coefficient (SPICE `N`, default 1).
     #[serde(default = "default_jfet_n")]
     pub n: f64,
+    /// Parker–Skellern channel law (`LEVEL=2`). `None` is Shichman–Hodges
+    /// from `idss`; `Some` replaces it, and `idss` is unused.
+    #[serde(default)]
+    pub ps: Option<JfetPsParams>,
+}
+
+/// The Parker–Skellern (`LEVEL=2`) channel parameters of a JFET, as on the
+/// card. Canonical law: `melange_devices::jfet::ParkerSkellern`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct JfetPsParams {
+    /// BETA \[A/V^Q\]
+    pub beta: f64,
+    /// VST \[V\]
+    pub vst: f64,
+    /// MVST \[1/V\]
+    pub mvst: f64,
+    /// P
+    pub p: f64,
+    /// Q
+    pub q: f64,
+    /// Z
+    pub z: f64,
+    /// XI
+    pub xi: f64,
+    /// MXI
+    pub mxi: f64,
+    /// PB (the law's built-in potential VBI) \[V\]
+    pub vbi: f64,
+}
+
+impl JfetPsParams {
+    /// The canonical device law.
+    pub fn law(&self) -> melange_devices::jfet::ParkerSkellern {
+        melange_devices::jfet::ParkerSkellern {
+            beta: self.beta,
+            vst: self.vst,
+            mvst: self.mvst,
+            p: self.p,
+            q: self.q,
+            z: self.z,
+            xi: self.xi,
+            mxi: self.mxi,
+            vbi: self.vbi,
+        }
+    }
 }
 
 fn default_jfet_is() -> f64 {
@@ -479,6 +525,24 @@ impl JfetParams {
     /// temperature (no XTI/EG/TAMB), so IS is not temperature-scaled.
     pub fn gate_n_vt(&self) -> f64 {
         self.n * melange_devices::VT_ROOM
+    }
+
+    /// The canonical device these parameters describe.
+    pub fn device(&self) -> melange_devices::jfet::Jfet {
+        use melange_devices::jfet::{Jfet, JfetChannel};
+        let channel = if self.is_p_channel {
+            JfetChannel::P
+        } else {
+            JfetChannel::N
+        };
+        let mut jfet = match &self.ps {
+            Some(ps) => Jfet::parker_skellern(channel, self.vp, ps.law()),
+            None => Jfet::new(channel, self.vp, self.idss),
+        };
+        jfet.lambda = self.lambda;
+        jfet.is = self.is;
+        jfet.n = self.n;
+        jfet
     }
 }
 

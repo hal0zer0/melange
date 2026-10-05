@@ -357,15 +357,7 @@ fn evaluate_devices_inner(
             }
             (DeviceType::Jfet, DeviceParams::Jfet(jp)) => {
                 // 2D JFET: dim 0 = Vds (at start_idx), dim 1 = Vgs (at start_idx+1)
-                let channel = if jp.is_p_channel {
-                    melange_devices::jfet::JfetChannel::P
-                } else {
-                    melange_devices::jfet::JfetChannel::N
-                };
-                let mut jfet = melange_devices::jfet::Jfet::new(channel, jp.vp, jp.idss);
-                jfet.lambda = jp.lambda;
-                jfet.is = jp.is;
-                jfet.n = jp.n;
+                let jfet = jp.device();
                 let vds = v_nl[s]; // dim 0 = Vds
                 let vgs = v_nl[s + 1]; // dim 1 = Vgs
                                        // Channel plus both gate junctions, the same device as the

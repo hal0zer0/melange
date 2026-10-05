@@ -1,0 +1,135 @@
+// Canonical source: melange-devices/src/jfet.rs (ParkerSkellern::normal_mode, Jfet::evaluate)
+// Duplicated here because generated code must be self-contained.
+// Parker–Skellern channel law (SPICE JFET level 2): ngspice's PSids drain block with
+// its trap-dispersion and thermal terms at their zero defaults, where they are exact
+// identities. Mode handling, gate junctions and the Jacobian layout are jfet_evaluate's.
+// `ps` = [VST, MVST, P, Q, Z, XI, MXI, PB].
+
+/// Normal-mode (vds >= 0) Parker–Skellern channel current and partials
+/// `(Id, dId/dVgs, dId/dVds)`, N-channel equivalent, pinch-off `vto` < 0.
+/// Four stages: (1) the overdrive vgst = Vgs − VTO becomes the softplus
+/// vgt = vst·ln(1 + e^(vgst/vst)), the subthreshold tail; (2) the drain voltage is
+/// rescaled to vdp = Vds·D3·vgt^(P−Q), so triode conduction follows a P power law
+/// and saturation a Q one; (3) vdt = a smooth minimum of vdp and the saturation
+/// voltage vsat, knee set by Z; (4) Id = BETA·(1 + λ·Vds)·(vgt^Q − (vgt − vdt)^Q).
+/// gm/gds are chained back through the stages, as ngspice's PSids does.
+#[inline(always)]
+fn jfet_ps_normal(vgs: f64, vds: f64, beta: f64, vto: f64, lambda: f64, ps: &[f64; 8]) -> (f64, f64, f64) {
+    // ngspice's softplus guards, in units of vst. Below vgst = FX·vst the current
+    // is exactly 0 ("extreme cut-off"): vgt ≈ 4.5e-5·vst there, and the smooth
+    // minimum's difference of square roots would be rounding error below it.
+    const FX: f64 = -10.0;
+    // Above vgst = MX·vst, 1 + e^x rounds to e^x (e^40 > 2^53) and exp would
+    // overflow for a small vst, so the softplus continues linearly.
+    const MX: f64 = 40.0;
+    const EMX: f64 = 2.3538526683702e+17; // e^MX
+    let [vsub, mvst, p, q, z, xi, mxi, vbi] = *ps;
+    // Per-device constants, per call because VP is a runtime parameter.
+    let woo = vbi - vto; // gate swing from pinch-off to the built-in potential
+    let xi_woo = xi * woo; // velocity-saturation scale of vsat
+    let za = (1.0 + z).sqrt() / 2.0; // makes dvdt/dvdp = 1 at Vds = 0
+    // Triode conductance at Vds = 0 becomes P·vgt^(P−1)/woo^(P−Q), the slope of
+    // vgt^P/woo^(P−Q), which meets the saturated vgt^Q at full opening.
+    let d3 = p / q / woo.powf(p - q);
+
+    let vdst = vds;
+    let vgst = vgs - vto;
+    let vst = vsub * (1.0 + mvst * vdst);
+    let (mut idrain, mut gm, mut gds);
+    if vgst > FX * vst {
+        // Stage 1: softplus; subfac = 1 + e^(vgst/vst).
+        let arg = MX * vst;
+        let (subfac, vgt) = if vgst > arg {
+            // Linear continuation, joined with the softplus slope EMX/(1+EMX).
+            let subfac = EMX + 1.0;
+            (subfac, (EMX / subfac) * (vgst - arg) + arg)
+        } else {
+            let subfac = 1.0 + (vgst / vst).exp();
+            (subfac, vst * subfac.ln())
+        };
+        // Stage 2: effective drain potential.
+        let pmq = p - q;
+        let dvpd_dvdst = d3 * vgt.powf(pmq); // ∂vdp/∂Vds
+        let vdp = vdst * dvpd_dvdst;
+        // Stage 3: vsat = vgt reduced by velocity saturation; vdt = smooth min
+        // √(aa² + c) − √((aa − vsat)² + c), aa = za·vdp + vsat/2, c = Z·vsat²/4.
+        let vsat_fac = vgt / (mxi * vgt + xi_woo);
+        let vsat = vgt / (1.0 + vsat_fac);
+        let aa = za * vdp + vsat / 2.0;
+        let a_aa = aa - vsat;
+        let arg = vsat * vsat * z / 4.0;
+        let rpt = (aa * aa + arg).sqrt();
+        let a_rpt = (a_aa * a_aa + arg).sqrt();
+        let vdt = rpt - a_rpt;
+        let dvdt_dvdp = za * (aa / rpt - a_aa / a_rpt);
+        // ∂vdt/∂vgt via vsat: vdt is homogeneous of degree 1 in (vdp, vsat), so
+        // ∂vdt/∂vsat = (vdt − vdp·∂vdt/∂vdp)/vsat; ∂vsat/∂vgt = (1 + MXI·f²)/(1 + f)².
+        let dvdt_dvgt = (vdt - vdp * dvdt_dvdp) * (1.0 + mxi * vsat_fac * vsat_fac)
+            / (1.0 + vsat_fac)
+            / vgt;
+        // Stage 4: Id = vgt^Q − (vgt − vdt)^Q = vdt·x + vgt·(vgt^(Q−1) − x),
+        // x = (vgt − vdt)^(Q−1), which also gives ∂Id/∂vdt and ∂Id/∂vgt.
+        gds = (vgt - vdt).powf(q - 1.0);
+        gm = vgt.powf(q - 1.0) - gds;
+        idrain = vdt * gds + vgt * gm;
+        gds *= q; // ∂Id/∂vdt
+        gm *= q; // ∂Id/∂vgt at fixed vdt
+        gm += gds * dvdt_dvgt;
+        gds *= dvdt_dvdp; // ∂Id/∂vdp
+        gm += gds * pmq * vdp / vgt; // via ∂vdp/∂vgt = (P−Q)·vdp/vgt
+        gds *= dvpd_dvdst; // ∂Id/∂Vds at fixed vgt
+        // Softplus slope ∂vgt/∂vgst = 1 − 1/subfac (the logistic sigmoid).
+        let arg = 1.0 - 1.0 / subfac;
+        if vst != 0.0 {
+            // MVST: vst depends on Vds; ∂vgt/∂vst = (vgt − vgst·sigmoid)/vst.
+            gds += gm * vsub * mvst * (vgt - vgst * arg) / vst;
+        }
+        gm *= arg; // ∂Id/∂Vgs
+    } else {
+        // Extreme cut-off: exactly no current and no conductance.
+        idrain = 0.0;
+        gm = 0.0;
+        gds = 0.0;
+    }
+    // Channel-length modulation and BETA.
+    let arg = beta * (1.0 + lambda * vdst);
+    gm *= arg;
+    gds = beta * lambda * idrain + gds * arg;
+    idrain *= arg;
+    (idrain, gm, gds)
+}
+
+/// Parker–Skellern JFET terminal currents and Jacobian, channel plus both gate
+/// junctions: `(I_drain, I_gate, [dId/dVgs, dId/dVds, dIg/dVgs, dIg/dVds])`, as
+/// `jfet_evaluate`. sign: +1.0 for N-channel, -1.0 for P-channel.
+#[inline(always)]
+fn jfet_ps_evaluate(vgs: f64, vds: f64, beta: f64, vp: f64, lambda: f64, is: f64, n_vt: f64,
+                    sign: f64, ps: &[f64; 8]) -> (f64, f64, [f64; 4]) {
+    let vgs_eff = sign * vgs;
+    let vds_eff = sign * vds;
+    let vp_eff = sign * vp; // Always negative after sign application
+    // Reverse mode (vds_eff < 0): the drain acts as the source, evaluated at
+    // (vgd, -vds) and negated, as ngspice's JFET2load.
+    let (vc, vd, m) = if vds_eff >= 0.0 {
+        (vgs_eff, vds_eff, 1.0)
+    } else {
+        (vgs_eff - vds_eff, -vds_eff, -1.0)
+    };
+    let (f, f_c, f_d) = jfet_ps_normal(vc, vd, beta, vp_eff, lambda, ps);
+    let id = sign * m * f;
+    let (d_id_d_vgs, d_id_d_vds) = if m >= 0.0 {
+        (f_c, f_d)
+    } else {
+        (-f_c, f_c + f_d)
+    };
+    if is == 0.0 {
+        return (id, 0.0, [d_id_d_vgs, d_id_d_vds, 0.0, 0.0]);
+    }
+    let (e_gs, de_gs) = junction_exp(sign * vgs / n_vt, is);
+    let (e_gd, de_gd) = junction_exp(sign * (vgs - vds) / n_vt, is);
+    let i_gs = sign * is * (e_gs - 1.0);
+    let i_gd = sign * is * (e_gd - 1.0);
+    let g_gs = is / n_vt * de_gs;
+    let g_gd = is / n_vt * de_gd;
+    (id - i_gd, i_gs + i_gd, [d_id_d_vgs - g_gd, d_id_d_vds + g_gd, g_gs + g_gd, -g_gd])
+}

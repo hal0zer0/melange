@@ -302,7 +302,18 @@ impl Parser {
                     ".mismatch tolerance must be in [0.0, 1.0), got {tol}"
                 )));
             }
-            params.push((k.to_ascii_uppercase(), tol));
+            let key = k.to_ascii_uppercase();
+            let accepted = mismatch_keys(device_class);
+            if !accepted.contains(&key.as_str()) {
+                // A key nothing reads would leave the deck unjittered while
+                // its author believes it is jittered.
+                return Err(self.error(format!(
+                    ".mismatch {device_class}: unknown parameter '{k}'. Accepted for \
+                     {device_class}: {}",
+                    accepted.join(", ")
+                )));
+            }
+            params.push((key, tol));
         }
         Ok(MismatchSpec {
             device_class,
@@ -1266,5 +1277,20 @@ impl Parser {
         let value = self.parse_positive_value(parts[1], ".input_impedance")?;
         netlist.input_impedance = Some(value);
         Ok(())
+    }
+}
+
+/// The `.mismatch` keys each device class reads, as the codegen IR's
+/// `apply_mismatch` calls read them (held equal by
+/// `model_param_table_drift_tests`). `J` reads `IDSS` on a level-1 JFET and
+/// `BETA` on a level-2 one.
+pub fn mismatch_keys(device_class: char) -> &'static [&'static str] {
+    match device_class {
+        'D' => &["IS", "N", "RS"],
+        'Q' => &["IS", "BF", "BR"],
+        'J' => &["IDSS", "BETA", "VP", "LAMBDA"],
+        'M' => &["KP", "VT", "LAMBDA"],
+        'T' => &["MU", "EX", "KG1", "KP", "KVB", "KG2"],
+        _ => &[],
     }
 }

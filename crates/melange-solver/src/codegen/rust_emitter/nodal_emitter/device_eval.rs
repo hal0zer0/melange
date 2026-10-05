@@ -271,8 +271,11 @@ impl RustEmitter {
                          {indent}}}\n"
                     ));
                 }
-                (DeviceType::Jfet, DeviceParams::Jfet(_)) => {
+                (DeviceType::Jfet, DeviceParams::Jfet(jp)) => {
                     let s1 = s + 1;
+                    let call = super::super::nr_helpers::jfet_evaluate_call(
+                        jp, dev_num, "vgs", "vds", "sign",
+                    );
                     let jd_01 = s * m + s1;
                     let jd_10 = s1 * m + s;
                     let jd_11 = s1 * m + s1;
@@ -288,7 +291,7 @@ impl RustEmitter {
                          {indent}    let vds = v_nl[{s}];\n\
                          {indent}    let vgs = v_nl[{s1}];\n\
                          {indent}    let sign = DEVICE_{dev_num}_SIGN;\n\
-                         {indent}    let (i_d, i_g, jac) = jfet_evaluate(vgs, vds, state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, DEVICE_{dev_num}_IS, DEVICE_{dev_num}_N_VT, sign);\n\
+                         {indent}    let (i_d, i_g, jac) = {call};\n\
                          {indent}    i_nl[{s}] = i_d;\n\
                          {indent}    i_nl[{s1}] = i_g;\n\
                          {indent}    j_dev[{jd_ss}] = jac[1];\n\
@@ -573,10 +576,17 @@ impl RustEmitter {
                          {indent}}}\n"
                     ));
                 }
-                (DeviceType::Jfet, DeviceParams::Jfet(_jp)) => {
+                (DeviceType::Jfet, DeviceParams::Jfet(jp)) => {
                     let s1 = s + 1;
+                    let call = super::super::nr_helpers::jfet_evaluate_call(
+                        jp,
+                        dev_num,
+                        &format!("v_nl_final[{s1}]"),
+                        &format!("v_nl_final[{s}]"),
+                        &format!("DEVICE_{dev_num}_SIGN"),
+                    );
                     code.push_str(&format!(
-                        "{indent}{{ let (i_d, i_g, _) = jfet_evaluate(v_nl_final[{s1}], v_nl_final[{s}], state.device_{dev_num}_idss, state.device_{dev_num}_vp, state.device_{dev_num}_lambda, DEVICE_{dev_num}_IS, DEVICE_{dev_num}_N_VT, DEVICE_{dev_num}_SIGN); i_nl[{s}] = i_d; i_nl[{s1}] = i_g; }}\n"
+                        "{indent}{{ let (i_d, i_g, _) = {call}; i_nl[{s}] = i_d; i_nl[{s1}] = i_g; }}\n"
                     ));
                 }
                 (DeviceType::Mosfet, DeviceParams::Mosfet(mp)) => {

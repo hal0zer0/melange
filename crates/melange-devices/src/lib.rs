@@ -38,7 +38,7 @@ pub mod vca;
 
 pub use bjt::{classify_region, BjtEbersMoll, BjtGummelPoon, BjtPolarity, BjtRegion};
 pub use diode::{DiodeShockley, DiodeWithRs, Led};
-pub use jfet::{Jfet, JfetChannel};
+pub use jfet::{Jfet, JfetChannel, ParkerSkellern};
 pub use ldr::CdsLdr;
 pub use mosfet::{ChannelType as MosfetChannelType, Mosfet};
 pub use opamp::{IdealOpamp, SimpleOpamp};

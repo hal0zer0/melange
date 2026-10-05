@@ -452,12 +452,56 @@ impl CircuitIR {
 
     /// Resolve JFET model parameters from the netlist, with validation.
     ///
-    /// 2D Shichman-Hodges: IDSS, VP, and LAMBDA control triode + saturation regions.
+    /// `LEVEL=1` (default), Shichman–Hodges: IDSS (or BETA), VP and LAMBDA.
+    /// `LEVEL=2`, Parker–Skellern: BETA, VTO, LAMBDA and the law's shape keys,
+    /// at ngspice's defaults; the built-in catalog (IDSS-based datasheet
+    /// entries) is not consulted.
     pub(super) fn resolve_jfet_params(
         netlist: &Netlist,
         model: &str,
     ) -> Result<JfetParams, CodegenError> {
-        let cat = melange_devices::catalog::jfets::lookup(model);
+        let level = Self::lookup_model_param(netlist, model, "LEVEL").unwrap_or(1.0);
+        if level != 1.0 && level != 2.0 {
+            return Err(CodegenError::InvalidConfig(format!(
+                "JFET model '{model}': LEVEL={level} is not supported; LEVEL=1 is \
+                 Shichman–Hodges, LEVEL=2 Parker–Skellern"
+            )));
+        }
+        const PS_KEYS: [&str; 8] = ["VST", "MVST", "P", "Q", "Z", "XI", "MXI", "PB"];
+        let level2 = level == 2.0;
+        if !level2 {
+            if let Some(key) = PS_KEYS
+                .iter()
+                .find(|k| Self::lookup_model_param(netlist, model, k).is_some())
+            {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "JFET model '{model}': {key} is a Parker–Skellern parameter, and this \
+                     card is Shichman–Hodges (LEVEL=1, the default). Add LEVEL=2 to the card"
+                )));
+            }
+        }
+        let catalog = melange_devices::catalog::jfets::lookup(model);
+        if level2 {
+            if Self::lookup_model_param(netlist, model, "IDSS").is_some() {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "JFET model '{model}': IDSS is not a Parker–Skellern (LEVEL=2) \
+                     parameter. The saturated current is BETA·(VGS−VTO)^Q only until Z, XI \
+                     and VST act, so no single BETA reproduces a given IDSS; set BETA and \
+                     VTO instead"
+                )));
+            }
+            if catalog.is_some()
+                && (Self::lookup_model_param(netlist, model, "BETA").is_none()
+                    || Self::lookup_model_param(netlist, model, "VTO").is_none())
+            {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "JFET model '{model}' is LEVEL=2, and the built-in {model} is \
+                     IDSS-based datasheet data with no Parker–Skellern BETA; give BETA and \
+                     VTO on the card"
+                )));
+            }
+        }
+        let cat = if level2 { None } else { catalog };
 
         // Determine channel type first — default VP depends on polarity.
         let is_p_channel = netlist
@@ -497,9 +541,17 @@ impl CircuitIR {
             Some(raw_vto) => raw_vto,
             None => default_vp,
         };
+        let ps = if level2 {
+            Some(Self::resolve_jfet_ps(netlist, model, vp, is_p_channel)?)
+        } else {
+            None
+        };
         // ngspice BETA = IDSS / VP^2, so IDSS = BETA * VP^2.
         // Uses the normalized vp — sign-safe regardless (vp is squared).
-        let idss = if let Some(raw_idss) = Self::lookup_model_param(netlist, model, "IDSS") {
+        // At LEVEL=2 the law reads `ps.beta`; IDSS = BETA·VP² is display only.
+        let idss = if let Some(ps) = &ps {
+            ps.beta * vp * vp
+        } else if let Some(raw_idss) = Self::lookup_model_param(netlist, model, "IDSS") {
             raw_idss
         } else if let Some(beta) = Self::lookup_model_param(netlist, model, "BETA") {
             beta * vp * vp
@@ -570,7 +622,72 @@ impl CircuitIR {
             cgd,
             is,
             n,
+            ps,
         })
+    }
+
+    /// The Parker–Skellern (`LEVEL=2`) channel keys of a JFET card, at
+    /// ngspice's level-2 defaults, validated. `vp` is the resolved pinch-off
+    /// in melange's convention.
+    fn resolve_jfet_ps(
+        netlist: &Netlist,
+        model: &str,
+        vp: f64,
+        is_p_channel: bool,
+    ) -> Result<JfetPsParams, CodegenError> {
+        let d = melange_devices::jfet::ParkerSkellern::with_beta(1e-4);
+        let get = |key: &str, default: f64| {
+            Self::lookup_model_param(netlist, model, key).unwrap_or(default)
+        };
+        let ps = JfetPsParams {
+            beta: get("BETA", d.beta),
+            vst: get("VST", d.vst),
+            mvst: get("MVST", d.mvst),
+            p: get("P", d.p),
+            q: get("Q", d.q),
+            z: get("Z", d.z),
+            xi: get("XI", d.xi),
+            mxi: get("MXI", d.mxi),
+            vbi: get("PB", d.vbi),
+        };
+        let bad = |what: &str, v: f64| {
+            Err(CodegenError::InvalidConfig(format!(
+                "JFET model '{model}': {what}, got {v}"
+            )))
+        };
+        if !(ps.beta.is_finite() && ps.beta > 0.0) {
+            return bad("BETA must be positive and finite", ps.beta);
+        }
+        if !(ps.vst.is_finite() && ps.vst >= 0.0) {
+            return bad("VST must be non-negative and finite", ps.vst);
+        }
+        if !ps.mvst.is_finite() {
+            return bad("MVST must be finite", ps.mvst);
+        }
+        if !(ps.p.is_finite() && ps.p > 0.0) {
+            return bad("P must be positive and finite", ps.p);
+        }
+        if !(ps.q.is_finite() && ps.q > 0.0) {
+            return bad("Q must be positive and finite", ps.q);
+        }
+        if !(ps.z.is_finite() && ps.z >= 0.0) {
+            return bad("Z must be non-negative and finite", ps.z);
+        }
+        if !(ps.xi.is_finite() && ps.xi > 0.0) {
+            return bad("XI must be positive and finite", ps.xi);
+        }
+        if !(ps.mxi.is_finite() && ps.mxi >= 0.0) {
+            return bad("MXI must be non-negative and finite", ps.mxi);
+        }
+        // The law divides by (PB − VTO)^(P−Q) and scales saturation by it.
+        let vto = if is_p_channel { -vp } else { vp };
+        if !(ps.vbi.is_finite() && ps.vbi - vto > 0.0) {
+            return bad(
+                "PB must be finite and above VTO (the law uses PB − VTO)",
+                ps.vbi,
+            );
+        }
+        Ok(ps)
     }
 
     /// Resolve MOSFET model parameters from the netlist, with validation.
