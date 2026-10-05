@@ -31,6 +31,7 @@ cargo test -p melange-solver          # core solver tests
 cargo test -p melange-validate --test spice_validation -- --include-ignored  # needs ngspice
 # CI's SPICE job also runs the ngspice twin targets: add --test rate_sweep_tests
 # --test thermal_twin_tests --test parasitic_twin_tests --test linearize_twin_tests
+# --test jfet2_twin_tests
 cargo run -p melange-cli
 ```
 

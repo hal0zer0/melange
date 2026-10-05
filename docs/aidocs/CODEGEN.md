@@ -322,7 +322,16 @@ fn jfet_id(vgs: f64, vds: f64, idss: f64, vp: f64, lambda: f64, sign: f64) -> f6
 fn jfet_evaluate(vgs, vds, idss, vp, lambda, is, n_vt, sign) -> (f64, f64, [f64; 4]); // Id, Ig (gate junctions), 2x2 Jacobian
 fn junction_exp(x: f64, is: f64) -> (f64, f64);                                      // Shared IS-aware junction exponential (BJT, JFET gate)
 fn jfet_jacobian(vgs: f64, vds: f64, idss: f64, vp: f64, lambda: f64, sign: f64) -> [f64; 4];  // [dId/dVgs, dId/dVds, dIg/dVgs, dIg/dVds]
+// LEVEL=2 (device_jfet_ps.rs.tera, emitted only when a deck has a level-2 JFET):
+fn jfet_ps_normal(vgs, vds, beta, vto, lambda, ps: &[f64; 8]) -> (f64, f64, f64);       // Parker–Skellern Id, gm, gds, Vds >= 0
+fn jfet_ps_evaluate(vgs, vds, beta, vp, lambda, is, n_vt, sign, ps: &[f64; 8]) -> (f64, f64, [f64; 4]); // as jfet_evaluate
 ```
+
+A level-2 JFET emits `DEVICE_{n}_BETA` in place of `DEVICE_{n}_IDSS` (runtime
+field `device_{n}_beta`) and `DEVICE_{n}_PS: [f64; 8]` = `[VST, MVST, P, Q, Z,
+XI, MXI, PB]`; its call sites name `jfet_ps_evaluate`
+(`nr_helpers::jfet_evaluate_call`). A deck with only level-1 JFETs emits
+exactly the level-1 code.
 
 2D Shichman-Hodges model: drain current (Id) at `start_idx`, gate current (Ig) at `start_idx+1`.
 

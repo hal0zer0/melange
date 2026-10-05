@@ -26,7 +26,7 @@ Melange supports the following SPICE elements:
 | I | Current source | Same: DC only, transient specs rejected |
 | D | Diode | Shockley + RS + BV/IBV (Zener) |
 | Q | BJT (NPN/PNP) | Ebers-Moll and Gummel-Poon |
-| J | JFET (NJF/PJF) | Shichman-Hodges |
+| J | JFET (NJF/PJF) | Shichman-Hodges; Parker–Skellern at `LEVEL=2` (trap dispersion and thermal reduction not implemented: those keys are refused) |
 | M | MOSFET (NM/PM) | Level 1 SPICE with body effect (GAMMA/PHI) |
 | T | Triode tube | Koren plate current + Dempwolf & Zölzer grid current |
 | P | Pentode/beam tetrode | 5 equation families, 29 catalog models |

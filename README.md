@@ -222,7 +222,7 @@ Every one of these is a real published model with real published equations, impl
 | R / C / L | Trapezoidal companion; inductors via augmented MNA | Coupled inductors and transformers supported |
 | Diode | Shockley + series resistance + Zener breakdown | LED variant included |
 | BJT | Ebers-Moll or Gummel-Poon | Junction caps, parasitic R, Early effect, high-injection knee. Follows ngspice's `bjtload.c` formulation (the `qb()` base-charge discriminant, high-injection knee) |
-| JFET | Shichman-Hodges (triode + saturation) | N-channel and P-channel |
+| JFET | Shichman-Hodges (triode + saturation); Parker–Skellern with `LEVEL=2` (conducts below pinch-off, ngspice JFET2's law) | N-channel and P-channel |
 | MOSFET | SPICE Level 1 | Body effect, channel-length modulation |
 | Vacuum Triode | Norman Koren plate + Dempwolf & Zölzer grid current ([onset runs late](docs/limitations.md#triode)) | 12AX7, 12AU7, 12AT7, 6SN7, 6SL7, and more |
 | Vacuum Pentode | 5 equation families, 29 models | EL84, EL34, EF86, 6L6, 6V6, KT88, 6550, and 22 more. Opt-in grid-off reduction (`--tube-grid-fa on`) |
@@ -501,7 +501,7 @@ cargo test --workspace
 # exactly this on every PR.
 cargo test -p melange-validate --test spice_validation --test rate_sweep_tests \
   --test thermal_twin_tests --test parasitic_twin_tests --test linearize_twin_tests \
-  -- --include-ignored
+  --test jfet2_twin_tests -- --include-ignored
 ```
 
 ## Known Limitations
@@ -552,6 +552,7 @@ If SPICE is the physics of analog circuit simulation, melange is that physics co
 
 - Hermann Gummel & H.C. Poon — BJT model (Bell Labs, 1970)
 - Jiri Shichman & David Hodges — JFET model (IEEE JSSC, 1968)
+- Anthony Parker & David Skellern (Macquarie University) — the Parker–Skellern FET model; melange's `LEVEL=2` JFET follows ngspice's JFET2 implementation of it
 - Norman Koren — vacuum tube models (1996)
 - Derk Reefman — pentode/beam tetrode models and variable-mu blend (uTracer, TubeLib.inc 2016)
 - Marshall Leach — pentode grid current model

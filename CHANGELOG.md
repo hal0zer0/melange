@@ -9,6 +9,52 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+**What changes generated code or rendered audio:** nothing for an existing
+deck. A JFET card with `LEVEL=2` was refused before and now compiles; a deck
+with only level-1 JFETs generates the same code. Deck forms that compiled and
+are now refused are those whose `.mismatch` key jittered nothing (see Fixed).
+
+### Added
+
+- **JFET `LEVEL=2`: the Parker–Skellern law, which conducts below pinch-off.**
+  Shichman–Hodges (level 1, still the default) has no conduction law below
+  `VTO`, so a JFET biased at pinch-off, such as a voltage-variable resistor in
+  a FET limiter, had a hard edge where real silicon has an exponential tail.
+  `LEVEL=2` is the law of ngspice's JFET level 2 at zero trap dispersion and
+  zero thermal reduction: a subthreshold softplus (`VST`, `MVST`), a dual
+  power law (`P`, `Q`) and smooth early saturation (`Z`, `XI`, `MXI`, `PB`),
+  with `BETA`, `VTO`, `LAMBDA` and the level-1 gate junctions (`IS`, `N`).
+  Deep below pinch-off the current e-folds every `VST/Q` volts, so from a
+  measured slope `S` (V per e-fold) set `VST = Q·S`.
+  - Agreement with ngspice JFET2: the drain and gate currents over gate ×
+    drain grids (a VST/MVST sweep, every law key, both polarities) to 1e-9
+    relative. On an isolated voltage-variable resistor biased to 148.8 kΩ
+    and driven to 39.7 mV, THD matches ngspice's within 0.42 % of its value
+    at VST 26, 50 and 78 mV (0.210 % vs 0.209 % at 26 mV, against 3.94 % for
+    the level-1 hard edge).
+  - Refused at level 2: `IDSS` (no single BETA reproduces it once Z, XI and
+    VST act; set BETA and VTO), and, when nonzero, the keys not implemented:
+    trap dispersion (`LFGAM`, `LFG1`, `LFG2`, `HFGAM`, `HFG1`, `HFG2`,
+    `HFETA`, `HFE1`, `HFE2`, `TAUG`), thermal reduction (`DELTA`, `TAUD`),
+    junction breakdown (`IBD`, `VBD`) and gate-charge shape (`FC`, `ACGAM`,
+    `XC`). The level-2 keys are refused on a level-1 card. The built-in part
+    catalog is not used at level 2.
+  - `.mismatch J BETA=` jitters a level-2 device's strength; a VP mismatch
+    holds BETA at level 2 (IDSS at level 1).
+  - `melange validate` gives its ngspice reference a level-2 card for a
+    level-2 device, including `N` (which JFET2 has).
+  - The ngspice twin target `jfet2_twin_tests` joins the SPICE validation
+    job.
+
+### Fixed
+
+- **A `.mismatch` key that jitters nothing is refused instead of ignored.** A
+  key the device class does not read (a typo such as `.mismatch D NN=0.02`,
+  or another class's key) was accepted and silently left the deck at its
+  nominal values; it is now a parse error naming the class's keys. Likewise
+  a JFET strength key that no JFET of the deck reads: `IDSS` with only
+  level-2 JFETs, or `BETA` with only level-1 ones.
+
 ## [0.1.15] - 2026-10-02
 
 A bug-fix release. **What changes generated code or rendered audio:** decks

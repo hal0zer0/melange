@@ -13,7 +13,7 @@ Instead, the generated output **incorporates substantial copyrighted material**
 from the Melange project:
 
 - **Device model equations** — Shockley diode, Ebers-Moll/Gummel-Poon BJT,
-  Koren triode plate current, Shichman-Hodges JFET, Level 1 MOSFET, and
+  Koren triode plate current, Shichman-Hodges and Parker–Skellern JFET, Level 1 MOSFET, and
   Blackmer/THAT VCA models are emitted verbatim from GPL-licensed Tera
   templates (`crates/melange-solver/templates/rust/device_*.rs.tera`).
 

@@ -21,7 +21,8 @@ Every test that needs ngspice is `#[ignore]`d, so a plain `cargo test` (CI's
 Test job, which has no ngspice) skips it instead of passing it vacuously. They
 run with `cargo test -p melange-validate --test spice_validation --test
 rate_sweep_tests --test thermal_twin_tests --test parasitic_twin_tests --test
-linearize_twin_tests -- --include-ignored` (ngspice on `PATH`), which is what
+linearize_twin_tests --test jfet2_twin_tests -- --include-ignored` (ngspice on
+`PATH`), which is what
 CI's SPICE job runs; the twin targets carry `#[ignore = "requires ngspice"]`
 and assert ngspice is present when run. Each `spice_validation` test calls
 `run_validation()` → `run_melange_codegen()` in
@@ -131,8 +132,11 @@ recorded correlation/RMS values.
    (`jfet_translate.rs`): `BETA = IDSS/VP²` (ngspice has no `IDSS`),
    catalog and default values, the SPICE sign for a P-channel `VTO`, and the
    gate capacitances as the constant capacitors melange stamps (ngspice's are
-   bias-dependent). A card with `N` other than 1 is refused: ngspice's
-   level-1 JFET has no emission coefficient.
+   bias-dependent). A level-1 card with `N` other than 1 is refused:
+   ngspice's level-1 JFET has no emission coefficient. A `LEVEL=2` device
+   becomes an ngspice level-2 (JFET2) card carrying BETA, N and every
+   Parker–Skellern key melange resolved; `jfet2_twin_tests.rs` holds the law
+   to JFET2 over gate × drain grids at 1e-9.
 
 7. **Runs self-heating devices isothermal** (`ParseOptions::
    disable_self_heating`, `thermal_translate.rs`). ngspice's diode and BJT

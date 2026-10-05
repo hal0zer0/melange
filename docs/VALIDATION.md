@@ -217,7 +217,7 @@ melange analyze <wurli-preamp with R_ldr=13k> --start-freq 200 --end-freq 5000  
 # Cross-sim (needs ngspice; CI's SPICE job runs exactly this)
 cargo test -p melange-validate --test spice_validation --test rate_sweep_tests \
   --test thermal_twin_tests --test parasitic_twin_tests --test linearize_twin_tests \
-  -- --include-ignored
+  --test jfet2_twin_tests -- --include-ignored
 ```
 
 The Tier-3 checks are kept as **documented anchors** rather than committed tests:

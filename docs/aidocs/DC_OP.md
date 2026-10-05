@@ -344,7 +344,7 @@ Uses `DeviceSlot` params from `codegen::ir`:
 - **BJT**: Ebers-Moll transport model with polarity sign (+1 NPN, -1 PNP)
   - `Ic = sign * IS * (exp(Vbe_eff/VT) - exp(Vbc_eff/VT)) - sign * (IS/BR) * (exp(Vbc_eff/VT) - 1)`
   - `Ib = sign * (IS/BF) * (exp(Vbe_eff/VT) - 1) + sign * (IS/BR) * (exp(Vbc_eff/VT) - 1)`
-- **JFET**: 2D Shichman-Hodges with triode + saturation regions, channel-length modulation (lambda)
+- **JFET**: 2D Shichman-Hodges with triode + saturation regions, channel-length modulation (lambda); Parker–Skellern for a `LEVEL=2` card (the same `Jfet::evaluate`, see DEVICE_MODELS.md)
   - `Id = sign * IDSS * f(Vgs, Vds, Vp) * (1 + lambda*|Vds|)`; `Ig` = the gate-source and gate-drain junctions, `IS*(exp(V/(N*Vt)) - 1)` each
   - N-channel (sign=+1) / P-channel (sign=-1)
 - **MOSFET**: 2D Level 1 SPICE with triode + saturation regions, channel-length modulation (lambda)

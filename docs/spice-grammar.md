@@ -714,14 +714,30 @@ When `RB`, `RC`, or `RE` are non-zero, internal nodes (basePrime, collectorPrime
 | `CGS` | 0 F | Gate-source capacitance, held constant at every bias (SPICE's is a depletion capacitance) |
 | `CGD` | 0 F | Gate-drain capacitance, held constant at every bias |
 | `IS` | 1e-14 A | Gate junction saturation current (gate-source and gate-drain diodes; 0 disables them) |
-| `N` | 1 | Gate junction emission coefficient (ngspice's level-1 JFET has none; a value other than 1 cannot be validated against it) |
+| `N` | 1 | Gate junction emission coefficient (ngspice's level-1 JFET has none, so a level-1 card with a value other than 1 cannot be validated against it; its level 2 has one) |
 
 Either `IDSS` or `BETA` may be specified. If both are present, `IDSS` takes priority. If only `BETA` is given, it is converted to IDSS = BETA * VTO².
+
+`LEVEL` selects the channel law: absent or `1` is Shichman–Hodges (the table above), `2` is Parker–Skellern, the law of ngspice's JFET level 2, which conducts below pinch-off. A level-2 card takes `VTO`, `BETA`, `LAMBDA`, `IS`, `N`, `CGS`, `CGD`, `KF`, `AF` and:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `VST` | 0 V | Subthreshold potential; 0 is a hard pinch-off edge. Deep below pinch-off the current e-folds every `VST/Q` volts, so from a measured slope `S` (V per e-fold) set `VST = Q·S` |
+| `MVST` | 0 V⁻¹ | Drain modulation of `VST` |
+| `P` | 2 | Power law in the triode region |
+| `Q` | 2 | Power law in saturation |
+| `Z` | 1 | Saturation knee curvature |
+| `XI` | 1000 | Saturation index |
+| `MXI` | 0 | Gate modulation of `XI` |
+| `PB` | 1 V | Gate junction potential, as the law uses it |
+
+At level 2, `IDSS` is refused (set `BETA` and `VTO`), and the built-in part catalog is not used. ngspice's trap-dispersion (`LFGAM`, `LFG1`, `LFG2`, `HFGAM`, `HFG1`, `HFG2`, `HFETA`, `HFE1`, `HFE2`, `TAUG`), thermal (`DELTA`, `TAUD`), breakdown (`IBD`, `VBD`) and gate-charge shape (`FC`, `ACGAM`, `XC`) keys are refused when nonzero: they are not implemented. The level-2 keys are refused on a level-1 card.
 
 **Example:**
 ```spice
 .model J2N5457 NJF(VTO=-1.5 IDSS=2e-3 LAMBDA=0.01)
 .model J175 PJF(VTO=3.0 IDSS=2.5e-3)
+.model JVVR NJF(LEVEL=2 VTO=-2.5 BETA=1.6e-3 LAMBDA=0.004 VST=0.052)
 ```
 
 ### MOSFET Parameters (Types: NMOS, PMOS)

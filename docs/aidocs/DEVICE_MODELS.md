@@ -25,13 +25,16 @@ cards (dumped 2026-09-29); these are also the SPICE3 manual's values.
 | JFET | BETA | 1e-4 A/V² (IDSS = BETA·VTO²) | 1e-4 |
 | JFET | LAMBDA, CGS, CGD | 0 | same |
 | JFET | IS, N (gate junctions) | 1e-14 A, 1 | same |
+| JFET | LEVEL | 1 (Shichman–Hodges); 2 is Parker–Skellern | same |
+| JFET (level 2) | VST, MVST, P, Q, Z, XI, MXI, PB | 0, 0, 2, 2, 1, 1000, 0, 1 | same |
 | JFET, MOSFET | RD, RS | 0; nonzero refused (not in the solution) | 0 |
 | MOSFET (level 1) | VTO, KP, LAMBDA | 0, 2e-5 A/V² (W = L), 0 | same |
 | MOSFET (level 1) | GAMMA, PHI | 0, 0.6 | same |
-| All | thermal voltage | kT/q at TNOM = 27 °C (300.15 K, `VT_ROOM`) | same |
+| All | thermal voltage | kT/q at TNOM = 27 °C (300.15 K, `VT_ROOM`), CODATA 2018 constants | same temperature; ngspice's older constants give a value 2.86e-5 lower |
 
-One row differs: the diode junction capacitance, which melange holds constant at CJO where SPICE follows
-the depletion law (a model feature, not a default). Tubes, VCAs, LDRs and glow lamps have no SPICE counterpart; their
+Two rows differ: the diode junction capacitance, which melange holds constant at CJO where SPICE follows
+the depletion law (a model feature, not a default), and the thermal voltage's physical constants, which move a
+junction's current by 2.86e-5 times V/(N·Vt) relative to ngspice's. Tubes, VCAs, LDRs and glow lamps have no SPICE counterpart; their
 defaults are the documented catalog or model values in their own sections.
 
 ## Model-Card Parameters: What Is Accepted
@@ -1060,9 +1063,14 @@ usage pattern.
   variable-mu §5) is ready; just needs the fit work. User explicitly
   flagged as "big project, not today".
 
-## JFET (Shichman-Hodges)
+## JFET (Shichman-Hodges, level 1; Parker–Skellern, level 2)
 
 M-dimension: 2 per JFET (Vgs,Vds -> Id, Vgs -> Ig)
+
+`LEVEL` on the card selects the channel law: absent or 1, Shichman–Hodges
+(below); 2, Parker–Skellern ([Level 2](#level-2-parker-skellern)). The gate
+junctions, the mode handling at Vds < 0, the Jacobian layout and the NR
+limiting are the same at both levels.
 
 ### Drain Current (2D)
 ```
@@ -1112,6 +1120,58 @@ from the limited Vgd (`nr_helpers::jfet_limit_expr`, and the DC OP's copy).
 - P-channel (PJ): sign=-1.0, default VTO=+2.0, Vp positive
 - Defaults when neither the card nor a catalog part gives them: the SPICE /
   ngspice values BETA = 1e-4 A/V² (IDSS = BETA·VTO²), LAMBDA = 0
+
+### Level 2: Parker–Skellern
+
+`LEVEL=2` is ngspice's JFET level 2 (jfet2, `PSids` in `psmodel.c`) with its
+trap-dispersion and thermal-reduction terms at their zero defaults, where they
+are exact identities. Normal mode (Vds ≥ 0), N-channel equivalent:
+```
+vgst  = Vgs − VTO
+vst   = VST·(1 + MVST·Vds)
+vgt   = vst·ln(1 + exp(vgst/vst))          subthreshold softplus
+        (linear continuation above vgst = 40·vst; Id = 0 exactly below
+         vgst = −10·vst, ngspice's extreme cut-off; VST = 0 is a hard edge)
+vdp   = Vds·D3·vgt^(P−Q)                    D3 = P/Q/(PB − VTO)^(P−Q)
+vsat  = vgt/(1 + vgt/(MXI·vgt + XI·(PB − VTO)))
+vdt   = sqrt(aa² + Z·vsat²/4) − sqrt((aa − vsat)² + Z·vsat²/4),
+        aa = sqrt(1+Z)/2·vdp + vsat/2       smooth early saturation
+Id    = BETA·(1 + LAMBDA·Vds)·[vdt·(vgt − vdt)^(Q−1) + vgt·(vgt^(Q−1) − (vgt − vdt)^(Q−1))]
+```
+Reverse mode is the level-1 swap: the law at (Vgd, −Vds), negated (ngspice's
+`JFET2load`). The analytic gm/gds are ngspice's chain, term for term.
+
+- **VST from a measured slope.** Deep below pinch-off the current goes as
+  `vgt^Q`, so it e-folds every `VST/Q` volts. From a measured subthreshold
+  slope `S` (volts per e-fold), set `VST = Q·S`.
+- **Keys.** VTO, BETA, LAMBDA, IS, N, CGS, CGD, KF, AF and the law's VST, MVST,
+  P, Q, Z, XI, MXI, PB. `IDSS` is refused: the saturated current is
+  BETA·(VGS−VTO)^Q only until Z, XI and VST act, so no single BETA reproduces
+  an IDSS. The built-in catalog (IDSS-based datasheet entries) is not
+  consulted; a level-2 card naming a catalog part must give BETA and VTO.
+  The law keys are refused on a level-1 card. Refused when nonzero (not
+  built): the trap-dispersion keys LFGAM, LFG1, LFG2, HFGAM, HFG1, HFG2,
+  HFETA, HFE1, HFE2, TAUG; the thermal keys DELTA, TAUD; the junction
+  breakdown IBD, VBD; and the gate-charge shape keys FC, ACGAM, XC (CGS and
+  CGD are constant at every bias, as at level 1).
+- **Gate junctions** are the level-1 pair (`IS`, `N`). JFET2 has `N`, so a
+  card with N ≠ 1 has an ngspice twin at level 2. Residuals against ngspice:
+  no GMIN term; no linearization below −10·N·Vt (a difference of IS·e⁻¹⁰);
+  no linear continuation above 40·N·Vt forward; and the thermal-voltage
+  constant (2.86e-5 relative, times V/(N·Vt) of a junction's current).
+- **Runtime parameters and `.mismatch`.** A level-2 device's runtime fields
+  are `beta`, `vp`, `lambda`, each set independently; D3 and XI·(PB − VTO)
+  follow VP per evaluation. `.mismatch J` jitters `BETA`, `VP`, `LAMBDA`, so
+  a VP mismatch holds BETA (as an ngspice card with the jittered VTO does).
+  At level 1 a VP mismatch holds IDSS instead.
+- **No leak.** Below the extreme cut-off the channel contributes exactly zero
+  current and zero conductance. A node reached only through a cut-off channel
+  and capacitors is held by the capacitors in the transient and by the DC
+  OP's 1e-12 S floor.
+- Canonical: `melange_devices::jfet::ParkerSkellern::normal_mode`; generated
+  `jfet_ps_evaluate` (`device_jfet_ps.rs.tera`, emitted only for a deck with a
+  level-2 JFET), held exactly equal by `template_jfet_ps_matches_devices_crate`.
+  Pinned against ngspice JFET2 by `melange-validate/tests/jfet2_twin_tests.rs`.
 
 ## MOSFET (Level 1 SPICE)
 

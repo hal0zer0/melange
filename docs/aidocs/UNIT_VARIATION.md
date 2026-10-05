@@ -88,7 +88,8 @@ Wired parameters:
 | `T`   | `KP`      | `TubeParams.kp`          |
 | `T`   | `KVB`     | `TubeParams.kvb`         |
 | `T`   | `KG2`     | `TubeParams.kg2` (pentode; skipped when 0) |
-| `J`   | `IDSS`    | `JfetParams.idss`        |
+| `J`   | `IDSS`    | `JfetParams.idss` (level 1) |
+| `J`   | `BETA`    | `JfetPsParams.beta` (level 2) |
 | `J`   | `VP`      | `JfetParams.vp`          |
 | `J`   | `LAMBDA`  | `JfetParams.lambda`      |
 | `M`   | `KP`      | `MosfetParams.kp`        |
@@ -101,9 +102,15 @@ drive audible unit-to-unit character. Parasitic fields (junction caps, ohmic
 needs it. Tube jitter is shared by the `Triode` and `Pentode` arms via
 `apply_tube_mismatch`; `KG2` is a no-op on triodes (guarded on `kg2 > 0`).
 
+A JFET's strength key follows its `LEVEL`: `IDSS` jitters a level-1 device
+(VP jitter then holds IDSS), `BETA` a level-2 one (VP jitter holds BETA, as
+an ngspice card with the jittered VTO does). Listing one that no JFET of the
+deck reads is refused, naming the other.
+
 Multiple `.mismatch` directives for the same class are merged; the last
-tolerance wins per-param. Unknown params on a supported class are
-silently ignored (pass through as pure nominal).
+tolerance wins per-param. A param the class does not read (the table above,
+`parser::mismatch_keys`) is refused at parse time, naming the accepted ones:
+a typo'd key would leave the deck unjittered.
 
 ## `.tolerance` — Passive R/C/L Value Jitter
 
