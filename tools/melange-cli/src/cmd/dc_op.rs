@@ -73,6 +73,7 @@ pub(crate) fn run_dc_op(
         output_clamp: d.output_clamp_v,
         input_resistance: opts.input_resistance,
         oversampling: opts.oversampling,
+        oversampling_set: melange_solver::build::OversamplingSet::Off,
         dc_block: true,
         solver: opts.solver.to_string(),
         backward_euler: false,

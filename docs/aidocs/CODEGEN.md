@@ -316,6 +316,16 @@ These caps are linearized at the DC operating point and stamped into the MNA C m
 The DK framework requires linear C, so caps are fixed at DC OP values. Zero overhead
 when all charge params are 0 (default).
 
+### Runtime-selectable oversampling
+
+A build with a runtime set (`.oversampling N allow=...`, `--oversampling-set`) adds
+`OVERSAMPLING_SET`, `MAX_OVERSAMPLING`, the field `oversampling`, `oversampling()`,
+`set_oversampling(f)`, the private `new_at(os)` constructor and `reset_oversampler()`,
+and per-factor constants `NAME_OS{f}` with accessors `name_for(os)`. Its
+`process_sample` dispatches on the running factor; the `.inject`/`.tap` arrays are
+`MAX_OVERSAMPLING` long. See OVERSAMPLING.md, "Runtime-selectable factor". A build
+without a set is unchanged.
+
 ### JFET (2D per device)
 ```rust
 fn jfet_id(vgs: f64, vds: f64, idss: f64, vp: f64, lambda: f64, sign: f64) -> f64;  // Shichman-Hodges Id

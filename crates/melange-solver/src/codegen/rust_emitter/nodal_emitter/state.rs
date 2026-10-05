@@ -70,7 +70,9 @@ impl RustEmitter {
             || has_substep_ladder
             || has_thermal_sr_consumer
             || has_stateful
-            || ir.solver_config.runtime_be_latch;
+            || ir.solver_config.runtime_be_latch
+            // `set_oversampling` rebuilds at the current host rate.
+            || super::super::runtime_os::runtime(ir).is_some();
 
         let mut code = section_banner("STATE STRUCTURE (Nodal solver)");
 
@@ -633,6 +635,7 @@ impl RustEmitter {
             code.push_str("    /// alpha). Matches the DK path's field semantics (API parity).\n");
             code.push_str("    pub current_sample_rate: f64,\n");
         }
+        code.push_str(super::super::runtime_os::state_field_decl(ir));
         if needs_rebuild_state {
             code.push_str(
                 "    /// Lazy rebuild flag: set by set_pot/set_switch, cleared by process_sample\n",
@@ -713,7 +716,9 @@ impl RustEmitter {
 
         // Oversampling state
         let os_factor = ir.solver_config.oversampling_factor;
-        if os_factor > 1 {
+        if super::super::runtime_os::runtime(ir).is_some() {
+            code.push_str(&super::super::runtime_os::os_state_fields(ir));
+        } else if os_factor > 1 {
             let os_info = oversampling_info(os_factor);
             code.push_str(&format!(
                 "\n    /// Oversampler upsampling half-band filter state (single input)\n\
@@ -894,9 +899,11 @@ impl RustEmitter {
             code.push_str("            be_ref_in: 0.0,\n");
             code.push_str("            be_env: 0.0,\n");
             code.push_str("            be_ref: 0.0,\n");
-            code.push_str(
-                "            be_ref_decay: be_latch_ref_decay(SAMPLE_RATE * OVERSAMPLING_FACTOR as f64),\n",
-            );
+            code.push_str(if super::super::runtime_os::runtime(ir).is_some() {
+                "            be_ref_decay: be_latch_ref_decay(SAMPLE_RATE * OVERSAMPLING_FACTOR as f64, OVERSAMPLING_FACTOR),\n"
+            } else {
+                "            be_ref_decay: be_latch_ref_decay(SAMPLE_RATE * OVERSAMPLING_FACTOR as f64),\n"
+            });
             code.push_str("            be_latched: false,\n");
         }
         if ir.solver_config.breakpoint_be {
@@ -986,6 +993,7 @@ impl RustEmitter {
                 ir.solver_config.sample_rate
             ));
         }
+        code.push_str(super::super::runtime_os::state_field_init(ir));
         if needs_rebuild_state {
             code.push_str("            matrices_dirty: false,\n");
         }
@@ -1021,7 +1029,9 @@ impl RustEmitter {
         // Stateful-device state blocks: seed via the shared Default emitter.
         code.push_str(&emit_stateful_default_fields(&stateful_device_data(ir)));
 
-        if os_factor > 1 {
+        if super::super::runtime_os::runtime(ir).is_some() {
+            code.push_str(&super::super::runtime_os::os_state_inits(ir));
+        } else if os_factor > 1 {
             let os_info = oversampling_info(os_factor);
             code.push_str(&format!(
                 "            os_up_state: [0.0; {}],\n\
@@ -1074,8 +1084,10 @@ impl RustEmitter {
             code.push_str("    }\n\n");
         }
 
+        code.push_str(&super::super::runtime_os::emit_methods(ir));
         // reset()
         code.push_str("    /// Reset to DC operating point\n");
+        let restores_from = code.len();
         code.push_str("    pub fn reset(&mut self) {\n");
         if has_cap_ic {
             code.push_str("        self.v_prev = V_PREV_IC_SEED;\n");
@@ -1231,7 +1243,9 @@ impl RustEmitter {
             &stateful_device_data(ir),
             "self.",
         ));
-        if os_factor > 1 {
+        if super::super::runtime_os::runtime(ir).is_some() {
+            code.push_str("        self.reset_oversampler();\n");
+        } else if os_factor > 1 {
             let os_info = oversampling_info(os_factor);
             code.push_str(&format!(
                 "        self.os_up_state = [0.0; {}];\n\
@@ -1296,8 +1310,8 @@ impl RustEmitter {
             emit_matrix_defaults(&mut code, "            ");
             code.push_str("        } else {\n");
             code.push_str(&format!(
-                "            self.rebuild_matrices(self.current_sample_rate * {}.0);\n",
-                ir.solver_config.oversampling_factor
+                "            self.rebuild_matrices(self.current_sample_rate * {});\n",
+                super::super::runtime_os::factor_f64_literal(ir, "self")
             ));
             code.push_str("        }\n");
         } else {
@@ -1348,10 +1362,17 @@ impl RustEmitter {
             code.push_str("            for _ in 0..1000 {\n");
             code.push_str(&emit_warmup_call(ir, "                ", false));
             code.push_str("            }\n");
-            code.push_str(&format!(
-                "            self.rebuild_matrices({:.17e});\n",
-                target_rate,
-            ));
+            // A runtime-oversampling build settles at the running factor.
+            if super::super::runtime_os::runtime(ir).is_some() {
+                code.push_str(
+                    "            self.rebuild_matrices(SAMPLE_RATE * (self.oversampling as f64));\n",
+                );
+            } else {
+                code.push_str(&format!(
+                    "            self.rebuild_matrices({:.17e});\n",
+                    target_rate,
+                ));
+            }
             code.push_str("            // Cache settled state for future resets\n");
             code.push_str("            self.dc_operating_point = self.v_prev;\n");
             code.push_str("            self.settled_i_nl = self.i_nl_prev;\n");
@@ -1515,10 +1536,15 @@ impl RustEmitter {
             code.push_str("        self.current_sample_rate = sample_rate;\n\n");
         }
         if ir.solver_config.runtime_be_latch {
-            code.push_str(
+            let decay = if super::super::runtime_os::runtime(ir).is_some() {
+                "be_latch_ref_decay(sample_rate * self.oversampling as f64, self.oversampling)"
+            } else {
+                "be_latch_ref_decay(sample_rate * OVERSAMPLING_FACTOR as f64)"
+            };
+            code.push_str(&format!(
                 "        // The latch reference's memory follows the ring decay at this rate.\n\
-                 \x20       self.be_ref_decay = be_latch_ref_decay(sample_rate * OVERSAMPLING_FACTOR as f64);\n\n",
-            );
+                 \x20       self.be_ref_decay = {decay};\n\n",
+            ));
         }
         // Stateful-device rate-baked coefficients (Phase 0c). Empty in 1a
         // (CdsLdr recomputes its coefficient live from current_sample_rate).
@@ -1634,22 +1660,23 @@ impl RustEmitter {
             }
             if ir.behavioral_sources.iter().any(|b| b.time_dependent) {
                 code.push_str(&format!(
-                    "            self.bsrc_inv_dt = sample_rate * {}.0;\n\
-                     \x20           self.bsrc_half_dt = 0.5 / (sample_rate * {}.0);\n",
-                    ir.solver_config.oversampling_factor, ir.solver_config.oversampling_factor
+                    "            self.bsrc_inv_dt = sample_rate * {};\n\
+                     \x20           self.bsrc_half_dt = 0.5 / (sample_rate * {});\n",
+                    super::super::runtime_os::factor_f64_literal(ir, "self"),
+                    super::super::runtime_os::factor_f64_literal(ir, "self")
                 ));
             }
             code.push_str(&format!(
-                "            self.rebuild_matrices(sample_rate * {}.0);\n",
-                ir.solver_config.oversampling_factor
+                "            self.rebuild_matrices(sample_rate * {});\n",
+                super::super::runtime_os::factor_f64_literal(ir, "self")
             ));
             code.push_str("            return;\n");
         }
         code.push_str("        }\n\n");
 
         code.push_str(&format!(
-            "        let internal_rate = sample_rate * {}.0;\n",
-            ir.solver_config.oversampling_factor
+            "        let internal_rate = sample_rate * {};\n",
+            super::super::runtime_os::factor_f64_literal(ir, "self")
         ));
         if ir.behavioral_sources.iter().any(|b| b.time_dependent) {
             code.push_str("        self.bsrc_inv_dt = internal_rate;\n");
@@ -1670,7 +1697,9 @@ impl RustEmitter {
             emit_dc_block_history_reseed(&mut code, ir, "        ", "self", false);
         }
 
-        if os_factor > 1 {
+        if super::super::runtime_os::runtime(ir).is_some() {
+            code.push_str("        self.reset_oversampler();\n");
+        } else if os_factor > 1 {
             let os_info = oversampling_info(os_factor);
             code.push_str(&format!(
                 "        self.os_up_state = [0.0; {}];\n\
@@ -1718,6 +1747,7 @@ impl RustEmitter {
             );
             code.push_str("    /// never reads them.\n");
         }
+        super::super::runtime_os::switch_restores(ir, &mut code, restores_from);
         code.push_str("    pub fn rebuild_matrices(&mut self, internal_rate: f64) {\n");
         if ir.solver_config.backward_euler {
             code.push_str("        let alpha = internal_rate; // backward Euler: alpha = 1/T\n");

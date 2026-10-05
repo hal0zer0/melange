@@ -156,6 +156,7 @@ impl CircuitIR {
             extra_input_nodes: config.extra_input_nodes.clone(),
             extra_input_resistances: config.extra_input_resistances.clone(),
             oversampling_factor: os_factor,
+            runtime_oversampling: None,
             output_scales: config.output_scales.clone(),
             output_clamp_v: config.output_clamp_v,
             backward_euler: be,

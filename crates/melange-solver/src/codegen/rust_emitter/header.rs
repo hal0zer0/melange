@@ -121,6 +121,10 @@ fn resolved_build_flags(ir: &CircuitIR, glow: &GlowProvenance) -> String {
         ir.effective_max_iter(),
         ir.solver_config.oversampling_factor
     );
+    if let Some(rt) = &ir.solver_config.runtime_oversampling {
+        let set: Vec<String> = rt.factors.iter().map(|f| format!("{f}x")).collect();
+        build.push_str(&format!(" (runtime: {})", set.join("/")));
+    }
     // DC blocking is a fourth (5 Hz) output highpass that is otherwise invisible
     // in the header — always disclose it.
     build.push_str(&format!(
@@ -267,6 +271,44 @@ fn provenance_json(
         "\"oversampling\":{},",
         ir.solver_config.oversampling_factor
     ));
+    // Runtime-selectable oversampling: `oversampling` above is the default
+    // factor; the set, where it came from, the factors below the deck's
+    // `.oversampling` recommendation, and each factor's ring verdict.
+    if let Some(rt) = &ir.solver_config.runtime_oversampling {
+        let list = |v: &[usize]| {
+            v.iter()
+                .map(|f| f.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let below: Vec<usize> = rt
+            .factors
+            .iter()
+            .copied()
+            .filter(|&f| rt.recommended.is_some_and(|r| f < r))
+            .collect();
+        let reasons: Vec<String> = rt
+            .per_factor
+            .iter()
+            .map(|p| {
+                format!(
+                    "\"{}\":\"{}\"",
+                    p.factor,
+                    p.integration_reason
+                        .replace('\\', "\\\\")
+                        .replace('"', "\\\"")
+                )
+            })
+            .collect();
+        s.push_str(&format!(
+            "\"oversampling_set\":{{\"factors\":[{}],\"default\":{},\"source\":\"{}\",\"below_recommendation\":[{}],\"integration_reason\":{{{}}}}},",
+            list(&rt.factors),
+            rt.default,
+            rt.source,
+            list(&below),
+            reasons.join(",")
+        ));
+    }
     s.push_str(&format!("\"dc_block\":{},", ir.dc_block));
     // The output clamp bound, whether from `--output-clamp` or the default: a
     // consumer asserts it here instead of parsing the emitted clamp literal.

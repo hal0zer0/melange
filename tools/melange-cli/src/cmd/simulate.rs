@@ -286,6 +286,7 @@ pub(crate) fn simulate_circuit_source(
         output_clamp: 10.0,
         input_resistance: opts.input_resistance_flag,
         oversampling: opts.oversampling,
+        oversampling_set: melange_solver::build::OversamplingSet::Off,
         dc_block: false, // preserve DC for accurate WAV output
         solver: opts.solver.to_string(),
         backward_euler: opts.backward_euler,

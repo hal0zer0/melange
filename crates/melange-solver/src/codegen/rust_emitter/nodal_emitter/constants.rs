@@ -227,31 +227,47 @@ impl RustEmitter {
                 "pub const BE_LATCH_RING_HOLD: bool = {};\n\n",
                 r.hold
             ));
-            code.push_str(
+            // In a runtime-oversampling build the ring poles and hold flag are
+            // the running factor's (`os`).
+            let rt = super::super::runtime_os::runtime(ir).is_some();
+            let (sig, hold, poles) = if rt {
+                (
+                    "fn be_latch_ref_decay(fs: f64, os: usize) -> f64",
+                    super::super::runtime_os::baked(ir, "BE_LATCH_RING_HOLD", "os"),
+                    super::super::runtime_os::baked(ir, "BE_LATCH_RING_POLES", "os"),
+                )
+            } else {
+                (
+                    "fn be_latch_ref_decay(fs: f64) -> f64",
+                    "BE_LATCH_RING_HOLD".to_string(),
+                    "BE_LATCH_RING_POLES".to_string(),
+                )
+            };
+            code.push_str(&format!(
                 "/// Per-sample decay of the runtime BE-latch's program reference at internal\n\
                  /// rate `fs`: the slowest Nyquist-side |z| of BE_LATCH_RING_POLES under the\n\
                  /// trapezoidal (bilinear) map z = (1 + lambda/(2 fs))/(1 - lambda/(2 fs)),\n\
                  /// floored at the ring yardstick (-60 dB in 10 ms): anything decaying faster\n\
                  /// than that is not a lasting ring.\n\
-                 fn be_latch_ref_decay(fs: f64) -> f64 {\n\
-                 \x20   if BE_LATCH_RING_HOLD {\n\
+                 {sig} {{\n\
+                 \x20   if {hold} {{\n\
                  \x20       return 1.0;\n\
-                 \x20   }\n\
+                 \x20   }}\n\
                  \x20   let mut d = 1.0e-3f64.powf(1.0 / (0.01 * fs));\n\
                  \x20   let h = 0.5 / fs;\n\
-                 \x20   for p in BE_LATCH_RING_POLES.iter() {\n\
+                 \x20   for p in {poles}.iter() {{\n\
                  \x20       let (nr, ni) = (1.0 + p[0] * h, p[1] * h);\n\
                  \x20       let (dr, di) = (1.0 - p[0] * h, -p[1] * h);\n\
                  \x20       let den = dr * dr + di * di;\n\
                  \x20       let z_re = (nr * dr + ni * di) / den;\n\
                  \x20       let z_abs = ((nr * nr + ni * ni) / den).sqrt();\n\
-                 \x20       if z_re < 0.0 && z_abs > d {\n\
+                 \x20       if z_re < 0.0 && z_abs > d {{\n\
                  \x20           d = z_abs;\n\
-                 \x20       }\n\
-                 \x20   }\n\
+                 \x20       }}\n\
+                 \x20   }}\n\
                  \x20   d.min(1.0)\n\
-                 }\n\n",
-            );
+                 }}\n\n"
+            ));
         }
 
         // Sample rate
@@ -264,6 +280,7 @@ impl RustEmitter {
             ir.solver_config.oversampling_factor
         ));
         code.push_str(&super::super::helpers::opamp_rail_consts(ir));
+        code.push_str(&super::super::runtime_os::emit_consts(ir));
         if ir.solver_config.oversampling_factor > 1 {
             let internal_rate =
                 ir.solver_config.sample_rate * ir.solver_config.oversampling_factor as f64;

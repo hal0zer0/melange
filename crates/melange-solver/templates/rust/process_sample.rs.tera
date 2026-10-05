@@ -2,7 +2,7 @@
 // MAIN PROCESS FUNCTION
 // =============================================================================
 
-{% if oversampling_factor > 1 or inject_or_tap %}/// Process a single sample at the internal (oversampled) rate{% if inject_or_tap %}, with
+{% if oversampling_factor > 1 or inject_or_tap or runtime_os %}/// Process a single sample at the internal (oversampled) rate{% if inject_or_tap %}, with
 /// per-inner-sample `.inject` values and returning raw `.tap` node voltages{% endif %}.
 ///
 /// Called by `process_sample()`{% if oversampling_factor > 1 %} through the oversampling chain{% endif %}.
@@ -261,7 +261,8 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
 {% if td.has_is_scaling %}        state.device_{{ td.dev_num }}_is = DEVICE_{{ td.dev_num }}_IS;
         state.device_{{ td.dev_num }}_{{ td.vt_field_name }} = DEVICE_{{ td.dev_num }}_{{ td.vt_const_name }};
 {% endif %}{% endfor %}{% endif %}{% if has_be_fallback %}        state.be_cooldown = 0;
-{% endif %}{% if oversampling_factor > 1 %}        state.os_up_state = [0.0; {{ os_state_size }}];
+{% endif %}{% if runtime_os %}        state.reset_oversampler();
+{% endif %}{% if os_fixed_states %}        state.os_up_state = [0.0; {{ os_state_size }}];
         state.os_dn_state = [[0.0; {{ os_state_size }}]; NUM_OUTPUTS];
 {% endif %}{% if oversampling_4x %}        state.os_up_state_outer = [0.0; {{ os_state_size_outer }}];
         state.os_dn_state_outer = [[0.0; {{ os_state_size_outer }}]; NUM_OUTPUTS];

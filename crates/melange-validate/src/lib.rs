@@ -1140,6 +1140,7 @@ fn run_melange_build(
         output_clamp: CodegenConfig::default().output_clamp_v,
         input_resistance: Some(1.0),
         oversampling: Some(oversampling),
+        oversampling_set: melange_solver::build::OversamplingSet::Off,
         dc_block: true,
         solver: "auto".to_string(),
         backward_euler,

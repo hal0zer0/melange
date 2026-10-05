@@ -223,6 +223,66 @@ const OVERSAMPLING_FACTOR: usize = 2;    // or 4
 const INTERNAL_SAMPLE_RATE: f64 = 88200.0;  // sample_rate * factor
 ```
 
+## Runtime-selectable factor
+
+`.oversampling N allow=a,b[,c]` (or `compile --oversampling-set a,b,c`) emits one deck
+that runs at any factor of the set, switched off the audio thread with
+`state.set_oversampling(f)`. Contract: **at every factor the runtime code computes
+exactly what that factor's fixed build computes** (with the Newton budget pinned to
+the set's largest, which the runtime build uses at every factor).
+
+**Build.** `build_runtime_oversampling` (`build.rs`) assembles and emits each factor as
+the fixed build it would be, then:
+
+- **Refuses** the set unless their provenance agrees on every key but `oversampling` and
+  `integration_reason`: the runtime code is one solver, so a factor that would route,
+  integrate, latch or reduce differently cannot be one of its settings. The refusal
+  lists every differing key. (A deck whose integrator or route flips across the set is
+  built once per factor instead.)
+- Copies, per factor, every **generated constant whose value differs** between the fixed
+  builds (`generated_consts`: the baked matrices `*_DEFAULT`, `DC_BLOCK_R`, the runtime
+  BE latch's `BE_LATCH_*` reference) as that build's literal (`NAME_OS{f}`, read through
+  `name_for(os)`; an array whose length differs by factor, such as
+  `BE_LATCH_RING_POLES`, is read as a slice). The baked matrices are copied, not
+  rebuilt: a runtime rebuild is a different representation from the baked one, so only
+  the copy is bit-identical. A differing constant the runtime code does not switch is
+  **refused**, naming it (e.g. a time-dependent behavioral source's
+  `BSRC_INV_DT_DEFAULT`), so a newly rate-baked constant cannot silently run at the
+  default factor's value. `OVERSAMPLING_FACTOR`, `INTERNAL_SAMPLE_RATE` and `ALPHA` are
+  the default factor's (the last two are informational; no generated code reads them).
+- Emits the runtime code from **every** factor's IR and **refuses** the set unless the
+  emissions are the same executable text (`executable_text`: comment lines and the
+  `OVERSAMPLING_FACTOR`/`INTERNAL_SAMPLE_RATE`/`ALPHA`/`OS_COEFFS*` items dropped). The
+  emitters skip matrix entries below `SPARSITY_THRESHOLD` (1e-20, `lu.rs`), so an IR's
+  sparsity is rate-dependent: a `K_BE[i][j]` that is 0.0 at 1x and nonzero at 2x leaves
+  no `k_be[i][j] * i_nl[j]` term in code emitted from the 1x IR, which would run without
+  it at 2x. The
+  refusal quotes the first differing line. Provenance and constants alone cannot see
+  this; only the emitted structure can.
+
+**Emission** (`rust_emitter/runtime_os.rs`, `emit_runtime_oversampler`):
+
+- `state.oversampling` is the running factor; every internal-rate product reads it
+  (op-amp slew dt, saturating-inductor rate, sub-step alpha, sub-sample-fire schedule,
+  noise fs, BE-latch detector, matrix rebuilds).
+- Restores (`reset()`, same-rate `set_sample_rate`) load the running factor's baked
+  values. The constructor is `new_at(os)`, `default()` = `new_at(OVERSAMPLING_FACTOR)`.
+- Each factor keeps its own filter states: `os2_*` (one steep stage), `os4_*` (wide
+  inner) and `os4_*_outer` (steep outer), plus `rate=host` injection copies;
+  `reset_oversampler()` zeroes them all wherever a fixed build zeroes its own.
+- `process_sample` validates the input once and dispatches on `state.oversampling`;
+  each arm is the fixed build's wrapper for that factor (1×: the inner solve directly).
+- `set_oversampling(f)`: `*self = new_at(f)`, then `set_sample_rate(host)` if the host
+  rate is not the compile rate.
+
+**Witnesses** (`melange-solver/tests/runtime_oversampling_tests.rs`): bit-identity to
+the fixed builds at 1/2/4× and 48/96 kHz with a pot moved and injections driven,
+hashing every node voltage, on a guard deck carrying every rate-dependent feature
+(saturating inductor, op-amp slew and rails, glow lamp, latch-carrying trapezoidal
+route, `.inject` at both rates and `.tap`, pot), a glow deck with sub-sample fire on
+nodal Schur, and a DK deck; a 2×→4×→2× switch equals a fresh state; the refusal of a
+set that changes solver; provenance.
+
 ## Sample Rate Interaction
 
 `set_sample_rate(sr)` computes `internal_rate = sr * OVERSAMPLING_FACTOR` and

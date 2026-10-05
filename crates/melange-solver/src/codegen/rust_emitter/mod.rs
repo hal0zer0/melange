@@ -32,6 +32,7 @@ mod nodal_emitter;
 mod noise_emitter;
 mod nr_helpers;
 mod oversampler;
+mod runtime_os;
 mod subsample_fire;
 
 use tera::{Context, Tera};
@@ -119,6 +120,7 @@ impl Emitter for RustEmitter {
     fn emit(&self, ir: &CircuitIR) -> Result<super::emitter::EmitOutput, CodegenError> {
         self.validate(ir)?;
         let (code, sub_path, full_lu_trigger) = self.emit_inner(ir)?;
+        let code = runtime_os::finalize(ir, code)?;
         Ok(
             super::emitter::EmitOutput::single("circuit.rs", collapse_blank_lines(&code))
                 .with_nodal_sub_path(sub_path)

@@ -105,6 +105,7 @@ fn main() -> Result<()> {
             no_dc_block,
             input_resistance: input_resistance_flag,
             oversampling,
+            oversampling_set,
             solver,
             backward_euler,
             force_trap,
@@ -240,6 +241,7 @@ fn main() -> Result<()> {
                     with_level_params: level_params,
                     input_resistance_flag,
                     oversampling_cli: oversampling,
+                    oversampling_set: parse_oversampling_set(oversampling_set.as_deref())?,
                     no_dc_block,
                     solver_override: &solver,
                     backward_euler,
@@ -743,6 +745,29 @@ fn main() -> Result<()> {
             from_schematic,
         } => kicad_import::import_kicad(&input, &output, &format, from_schematic),
     }
+}
+
+/// `--oversampling-set FACTORS|off`: absent → the deck's set; `off` → a fixed
+/// build; `1,2,4` → that set.
+fn parse_oversampling_set(
+    arg: Option<&str>,
+) -> anyhow::Result<melange_solver::build::OversamplingSet> {
+    use melange_solver::build::OversamplingSet;
+    let Some(arg) = arg else {
+        return Ok(OversamplingSet::Deck);
+    };
+    if arg.eq_ignore_ascii_case("off") {
+        return Ok(OversamplingSet::Off);
+    }
+    let factors = arg
+        .split(',')
+        .map(|f| {
+            f.trim().parse::<usize>().map_err(|_| {
+                anyhow::anyhow!("--oversampling-set: '{f}' is not a factor (1, 2 or 4), or use off")
+            })
+        })
+        .collect::<anyhow::Result<Vec<usize>>>()?;
+    Ok(OversamplingSet::Set(factors))
 }
 
 #[cfg(test)]

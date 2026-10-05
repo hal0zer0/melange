@@ -585,7 +585,9 @@ impl RustEmitter {
             )?);
         }
 
-        if ir.solver_config.oversampling_factor > 1 {
+        if super::runtime_os::runtime(ir).is_some() {
+            code.push_str(&Self::emit_runtime_oversampler(ir));
+        } else if ir.solver_config.oversampling_factor > 1 {
             code.push_str(&Self::emit_oversampler(ir));
         } else if ir.solver_config.has_inject_or_tap() {
             // No oversampling, but `.inject`/`.tap` still emit a private

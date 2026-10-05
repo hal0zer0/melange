@@ -57,6 +57,13 @@ impl RustEmitter {
         if !ir.solver_config.runtime_be_latch {
             return;
         }
+        // The running factor and the latch reference at it (per factor in a
+        // runtime-oversampling build).
+        let fx = super::super::runtime_os::factor_expr(ir, "state");
+        let gain =
+            super::super::runtime_os::baked(ir, "BE_LATCH_PASSBAND_GAIN", "state.oversampling");
+        let cost =
+            super::super::runtime_os::baked(ir, "BE_LATCH_BE_COST_REL", "state.oversampling");
         code.push_str(&format!(
             "{indent}// Runtime BE-latch. Track the lag-1 ratio of the mean-removed output over\n\
              {indent}// the estimator window; for one mode x = A*z^n it equals z, for a mixture\n\
@@ -67,7 +74,7 @@ impl RustEmitter {
              {indent}// small ring under program, does not qualify. Once engaged, the L-stable\n\
              {indent}// BE path runs for the rest of the stream (cleared by reset()).\n\
              {indent}if !state.be_latched {{\n\
-             {indent}    let be_ema = (1.0 / (BE_LATCH_TAU_S * state.current_sample_rate * OVERSAMPLING_FACTOR as f64)).clamp(1e-4, 0.5);\n\
+             {indent}    let be_ema = (1.0 / (BE_LATCH_TAU_S * state.current_sample_rate * {fx} as f64)).clamp(1e-4, 0.5);\n\
              {indent}    let be_x = v[OUTPUT_NODES[0]];\n\
              {indent}    let be_x = if be_x.is_finite() {{ be_x }} else {{ 0.0 }};\n\
              {indent}    state.be_x_mean += be_ema * (be_x - state.be_x_mean);\n\
@@ -83,7 +90,7 @@ impl RustEmitter {
              {indent}    // is remembered as long as this circuit's slowest ring. (A ring sits in\n\
              {indent}    // the output envelope too, but where it matters it is small against the\n\
              {indent}    // program.)\n\
-             {indent}    state.be_ref_in = (BE_LATCH_PASSBAND_GAIN * be_u.abs()).max(state.be_ref_in * state.be_ref_decay);\n\
+             {indent}    state.be_ref_in = ({gain} * be_u.abs()).max(state.be_ref_in * state.be_ref_decay);\n\
              {indent}    state.be_env = (v[OUTPUT_NODES[0]] - state.dc_operating_point[OUTPUT_NODES[0]]).abs().max(state.be_env * state.be_ref_decay);\n\
              {indent}    state.be_ref = state.be_ref_in.min(state.be_env);\n\
              {indent}    state.be_in_x_mean += be_ema * (be_u - state.be_in_x_mean);\n\
@@ -102,7 +109,7 @@ impl RustEmitter {
              {indent}    // (An alternation of amplitude A has power A^2.)\n\
              {indent}    // Nor is one quieter than backward Euler's own in-band damage: the\n\
              {indent}    // compile-time choice keeps trapezoidal there, and so does the latch.\n\
-             {indent}    let be_floor = f64::max(be_tol, BE_LATCH_RING_REL.max(BE_LATCH_BE_COST_REL) * state.be_ref);\n\
+             {indent}    let be_floor = f64::max(be_tol, BE_LATCH_RING_REL.max({cost}) * state.be_ref);\n\
              {indent}    let out_ring = state.be_pow > be_floor * be_floor\n\
              {indent}        && state.be_r1_num <= be_enter * state.be_pow;\n\
              {indent}    let in_ring = state.be_in_pow > BE_LATCH_POWER_FLOOR\n\
@@ -150,7 +157,7 @@ impl RustEmitter {
         );
 
         // Function signature
-        if os_factor > 1 || inject_or_tap {
+        if os_factor > 1 || inject_or_tap || super::super::runtime_os::runtime(ir).is_some() {
             code.push_str("/// Process a single sample at the internal (oversampled) rate.\n");
             code.push_str("///\n");
             code.push_str("/// Called by `process_sample()` through the oversampling chain.\n");

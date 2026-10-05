@@ -85,7 +85,7 @@ impl RustEmitter {
         ));
 
         // Function signature
-        if os_factor > 1 || inject_or_tap {
+        if os_factor > 1 || inject_or_tap || super::super::runtime_os::runtime(ir).is_some() {
             code.push_str("/// Process a single sample at the internal (oversampled) rate.\n");
             code.push_str("///\n");
             code.push_str("/// Called by `process_sample()` through the oversampling chain.\n");

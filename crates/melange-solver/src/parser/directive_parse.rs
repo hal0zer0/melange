@@ -223,6 +223,51 @@ impl Parser {
                     }
                 }
                 netlist.recommended_oversampling = Some(n);
+                // `.oversampling N allow=a,b[,c]`: the factors the generated
+                // code can switch between at runtime (`set_oversampling`),
+                // N the default. Without `allow=` the factor is fixed.
+                for tok in &parts[2..] {
+                    let Some(list) = tok
+                        .split_once('=')
+                        .filter(|(k, _)| k.eq_ignore_ascii_case("allow"))
+                        .map(|(_, v)| v)
+                    else {
+                        return Err(self.error(format!(
+                            ".oversampling: unexpected '{tok}' (the only option is \
+                             allow=a,b[,c], the factors selectable at runtime)"
+                        )));
+                    };
+                    let mut set = Vec::new();
+                    for f in list.split(',') {
+                        let f: usize = f.trim().parse().map_err(|_| {
+                            self.error(format!(".oversampling allow= value '{f}' is not 1, 2 or 4"))
+                        })?;
+                        if !matches!(f, 1 | 2 | 4) {
+                            return Err(self.error(format!(
+                                ".oversampling allow= factors must be 1, 2 or 4, got {f}"
+                            )));
+                        }
+                        if set.contains(&f) {
+                            return Err(self.error(format!(".oversampling allow= lists {f} twice")));
+                        }
+                        set.push(f);
+                    }
+                    if set.len() < 2 {
+                        return Err(self.error(
+                            ".oversampling allow= needs at least two factors; a single \
+                             factor is `.oversampling N` without allow=",
+                        ));
+                    }
+                    set.sort_unstable();
+                    if let Some(prev) = &netlist.oversampling_set {
+                        if *prev != set {
+                            return Err(self.error(format!(
+                                "conflicting .oversampling allow= sets ({prev:?} and {set:?})"
+                            )));
+                        }
+                    }
+                    netlist.oversampling_set = Some(set);
+                }
             }
             ".end" | ".ends" => {
                 // End of netlist or subcircuit

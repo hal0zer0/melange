@@ -221,6 +221,51 @@ pub struct CircuitIR {
 /// passband gain, and the continuous-time poles that can ring at fs/2, whose
 /// slowest decay (remapped at the host rate) sets how long the reference
 /// remembers the program.
+/// A runtime-selectable oversampling set and the per-factor values of a
+/// build whose route is the same at every factor (the build refuses a set
+/// whose factors would route differently).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeOversampling {
+    /// The selectable factors, ascending.
+    pub factors: Vec<usize>,
+    /// The factor a fresh state runs at.
+    pub default: usize,
+    /// Where the set came from: `"directive"` or `"cli"`.
+    pub source: String,
+    /// The deck's `.oversampling` recommendation, if any: a factor below it is
+    /// allowed and flagged in provenance.
+    pub recommended: Option<usize>,
+    /// What each factor's build settled at its own internal rate, in
+    /// `factors` order.
+    pub per_factor: Vec<FactorSettlement>,
+    /// The emitted constants whose value differs between the factors' fixed
+    /// builds, each with its literal per factor (in `factors` order), copied
+    /// from that build's code so the runtime code switches to exactly the
+    /// values the fixed build bakes.
+    pub per_factor_consts: Vec<PerFactorConst>,
+}
+
+/// What a fixed build at one factor settled that the runtime build reports
+/// per factor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FactorSettlement {
+    pub factor: usize,
+    /// The ring predicate's verdict at this factor's rate.
+    pub integration_reason: String,
+}
+
+/// A generated constant whose value depends on the oversampling factor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PerFactorConst {
+    /// The constant's name in the fixed builds (`S_DEFAULT`).
+    pub name: String,
+    /// Its Rust type in each factor's fixed build (`[[f64; N]; N]`); an
+    /// array's length may differ by factor (`BE_LATCH_RING_POLES`).
+    pub types: Vec<String>,
+    /// Its literal value text in each factor's fixed build.
+    pub values: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BeLatchReference {
     /// Pink-weighted RMS gain over 20 Hz–20 kHz, primary input to primary
@@ -537,9 +582,16 @@ pub struct SolverConfig {
     /// port uses [`Self::input_resistance`].
     #[serde(default)]
     pub extra_input_resistances: Vec<f64>,
-    /// Oversampling factor (1, 2, or 4). Default 1 (no oversampling).
+    /// Oversampling factor (1, 2, or 4). Default 1 (no oversampling). With
+    /// [`Self::runtime_oversampling`], the default factor of the runtime set.
     #[serde(default = "default_oversampling_factor")]
     pub oversampling_factor: usize,
+    /// Runtime-selectable oversampling (`.oversampling N allow=...`): the
+    /// factors the generated code switches between with `set_oversampling`,
+    /// and what each factor's build settled differently. `None`: the factor is
+    /// fixed at build time.
+    #[serde(default)]
+    pub runtime_oversampling: Option<RuntimeOversampling>,
     /// Output scale factors applied after DC blocking (one per output)
     #[serde(default = "default_output_scales")]
     pub output_scales: Vec<f64>,

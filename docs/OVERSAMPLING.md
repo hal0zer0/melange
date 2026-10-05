@@ -192,10 +192,26 @@ a CLI flag overrides:
 .oversampling 4
 ```
 
-⚠️ **The factor is compile-time structural.** `set_sample_rate()` cannot change
-it, and neither can a host — solver routing and sub-sample-fire activation are
-decided at codegen against the internal rate. A plugin that must run at several
-host rates needs compiling per rate.
+To let the plugin choose the factor at runtime (a CPU/quality switch), declare
+the set the code may switch between; the first number is the default:
+
+```
+.oversampling 2 allow=1,2,4
+```
+
+The generated code then has `state.set_oversampling(f)` (off the audio thread;
+re-apply controls and re-warm after it, as after construction). At every factor
+it computes exactly what a build fixed at that factor computes. melange builds
+each factor and refuses the set, saying what differs, when the factors would
+not be the same solver: on some circuits the integrator or solver route chosen
+at one rate is not the one chosen at another, and on some a coupling term that
+is negligible at one rate (below 1e-20) is left out of that rate's code. Build those once
+per factor.
+
+⚠️ **Without `allow=`, the factor is compile-time structural.** `set_sample_rate()`
+cannot change it, and neither can a host — solver routing and sub-sample-fire
+activation are decided at codegen against the internal rate. A plugin that must
+run at several host rates needs compiling per rate.
 
 ⚠️ `melange validate` does **not** read `.oversampling` from the deck. Pass
 `--oversampling` explicitly or you will validate a different build from the one

@@ -9,6 +9,35 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+**What changes generated code or rendered audio:** nothing for an existing
+build. A deck declaring `.oversampling N allow=...`, or a `compile
+--oversampling-set`, gets the new runtime-oversampling code; every other build
+generates the same code as before.
+
+### Added
+
+- **Runtime-selectable oversampling.** `.oversampling N allow=1,2,4` (or
+  `compile --oversampling-set 1,2,4`) emits one deck that runs at any factor of
+  the set: `state.set_oversampling(f)` switches it off the audio thread,
+  `OVERSAMPLING_SET` lists the factors and `N` is the default. At every factor
+  the deck computes exactly what that factor's fixed build computes (Newton
+  budget pinned to the set's largest), with the same half-band cascade and
+  host-rate `.inject` band-limiting. `set_oversampling` leaves exactly the state
+  a fixed build at that factor has after construction and `set_sample_rate`;
+  re-apply controls and re-warm after it. `.inject`/`.tap` arrays are
+  `MAX_OVERSAMPLING` long. Provenance gains `oversampling_set` (factors,
+  default, source, factors below the deck's recommendation, each factor's ring
+  verdict); `oversampling` is the default factor.
+  - Refused, naming what differs: a set whose factors would build different
+    solvers (route, nodal sub-path, integrator, runtime latch, reductions,
+    rail handling), one with a factor-dependent constant the runtime code
+    does not switch (a time-dependent behavioral source's today), and one whose
+    generated code differs by factor (a coupling term below the 1e-20
+    sparsity threshold at one rate is omitted from that rate's code). Such a deck
+    is built once per factor. A default factor outside the set is refused.
+  - `--oversampling-set off` builds one fixed factor from a deck that declares
+    a set.
+
 ## [0.1.16] - 2026-10-05
 
 **What changes generated code or rendered audio:** nothing for an existing

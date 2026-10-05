@@ -20,6 +20,7 @@ pub fn options(sample_rate: f64, input: &str, outputs: &[&str]) -> BuildOptions 
         output_clamp: d.output_clamp_v,
         input_resistance: None,
         oversampling: None,
+        oversampling_set: melange_solver::build::OversamplingSet::Off,
         dc_block: d.dc_block,
         solver: "auto".to_string(),
         backward_euler: false,

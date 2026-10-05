@@ -47,6 +47,18 @@ const INJECT_API_DOC_1X: &str = "///\n\
 /// `diag_input_nan_count`; there is no magnitude clamp. Returns the outputs\n\
 /// plus the RAW `.tap` node voltages `taps_inner[0]`.\n";
 
+/// The first-order allpass cell both cascade emitters use (slice + offset, to
+/// avoid a double `&mut` borrow).
+const OS_ALLPASS_FN: &str = "/// First-order allpass section: y = c*(x - y1) + x1\n\
+     /// State layout: state[base] = x1, state[base+1] = y1\n\
+     #[inline(always)]\n\
+     fn os_allpass(x: f64, c: f64, state: &mut [f64], base: usize) -> f64 {\n\
+     \x20   let y = c * x + state[base] - c * state[base + 1];\n\
+     \x20   state[base] = x;\n\
+     \x20   state[base + 1] = y;\n\
+     \x20   y\n\
+     }\n\n";
+
 impl RustEmitter {
     /// Emit `inject_assemble`: merges one inner sample's host-rate (already
     /// upsampled) and inner-rate injection values into the directive-order
@@ -97,17 +109,7 @@ impl RustEmitter {
         }
 
         // Emit allpass inline function (takes slice + offset to avoid double &mut borrow)
-        code.push_str(
-            "/// First-order allpass section: y = c*(x - y1) + x1\n\
-             /// State layout: state[base] = x1, state[base+1] = y1\n\
-             #[inline(always)]\n\
-             fn os_allpass(x: f64, c: f64, state: &mut [f64], base: usize) -> f64 {\n\
-             \x20   let y = c * x + state[base] - c * state[base + 1];\n\
-             \x20   state[base] = x;\n\
-             \x20   state[base + 1] = y;\n\
-             \x20   y\n\
-             }\n\n",
-        );
+        code.push_str(OS_ALLPASS_FN);
 
         // Emit polyphase interpolator + decimator functions.
         // Upsampler and downsampler use SEPARATE state arrays; each branch of
@@ -470,5 +472,172 @@ impl RustEmitter {
         } else {
             code.push_str("    result\n");
         }
+    }
+
+    /// Emit a runtime-oversampling build's cascade (`.oversampling N
+    /// allow=...`): the half-band coefficients, filters and per-factor wrapper
+    /// of every factor of the set, and a public `process_sample` that runs the
+    /// one `state.oversampling` selects. Each factor's arm is the fixed
+    /// build's wrapper body for that factor, its filters and states renamed
+    /// per factor (`os2_*`, `os4_*`), so it computes what that build computes.
+    pub(super) fn emit_runtime_oversampler(ir: &CircuitIR) -> String {
+        let rt = super::runtime_os::runtime(ir).expect("runtime build");
+        let max = rt.factors.iter().copied().max().unwrap_or(1);
+        let inject_or_tap = ir.solver_config.has_inject_or_tap();
+        let num_outputs = ir.solver_config.output_nodes.len();
+        let mut code = section_banner("OVERSAMPLING (runtime-selectable)");
+        code.push_str(OS_ALLPASS_FN);
+        let coeffs = |v: &[f64]| v.iter().map(|c| fmt_f64(*c)).collect::<Vec<_>>().join(", ");
+        for &f in rt.factors.iter().filter(|&&f| f > 1) {
+            let info = oversampling_info(f);
+            code.push_str(&format!(
+                "/// {f}x half-band coefficients (inner stage).\n\
+                 const OS{f}_COEFFS: [f64; {}] = [{}];\n\n",
+                info.num_sections,
+                coeffs(&info.coeffs)
+            ));
+            Self::emit_halfband_fn(
+                &mut code,
+                &format!("os{f}_halfband"),
+                &info.coeffs,
+                info.state_size,
+            );
+            Self::emit_halfband_down_fn(
+                &mut code,
+                &format!("os{f}_halfband_down"),
+                &info.coeffs,
+                info.state_size,
+            );
+            if f == 4 {
+                code.push_str(&format!(
+                    "/// 4x half-band coefficients (outer stage).\n\
+                     const OS4_COEFFS_OUTER: [f64; {}] = [{}];\n\n",
+                    info.num_sections_outer,
+                    coeffs(&info.coeffs_outer)
+                ));
+                Self::emit_halfband_fn(
+                    &mut code,
+                    "os4_halfband_outer",
+                    &info.coeffs_outer,
+                    info.state_size_outer,
+                );
+                Self::emit_halfband_down_fn(
+                    &mut code,
+                    "os4_halfband_down_outer",
+                    &info.coeffs_outer,
+                    info.state_size_outer,
+                );
+            }
+        }
+        if inject_or_tap {
+            code.push_str(&Self::emit_inject_assemble_fn());
+        }
+        code.push_str(
+            "/// Process a single audio sample through the circuit at the running\n\
+             /// oversampling factor (`state.oversampling()`, one of `OVERSAMPLING_SET`).\n",
+        );
+        if inject_or_tap {
+            code.push_str(INJECT_API_DOC_OS);
+            code.push_str(
+                "///\n\
+                 /// The per-inner-sample arrays are `MAX_OVERSAMPLING` long; entries past\n\
+                 /// `state.oversampling()` are not read (injections) or are zero (taps).\n",
+            );
+        }
+        code.push_str("#[inline]\n");
+        if inject_or_tap {
+            code.push_str(&INJECT_API_SIGNATURE.replace("OVERSAMPLING_FACTOR", "MAX_OVERSAMPLING"));
+        } else {
+            code.push_str(
+                "pub fn process_sample(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS] {\n",
+            );
+        }
+        code.push_str(
+            "    let input = if !input.is_finite() { state.diag_input_nan_count += 1; 0.0 } else if input.abs() > INPUT_LIMIT_V { state.diag_input_clamp_count += 1; input.clamp(-INPUT_LIMIT_V, INPUT_LIMIT_V) } else { input };\n\n",
+        );
+        code.push_str("    match state.oversampling {\n");
+        // Pad a factor's raw taps to the API's MAX_OVERSAMPLING rows.
+        let pad = |taps: &str, n: usize| -> String {
+            let mut rows: Vec<String> = taps.split(", ").map(str::to_string).collect();
+            rows.extend(std::iter::repeat_n("[0.0; NUM_TAP]".to_string(), max - n));
+            rows.join(", ")
+        };
+        for &f in &rt.factors {
+            code.push_str(&format!("        {f} => {{\n"));
+            let mut body = String::new();
+            match f {
+                1 => {
+                    if inject_or_tap {
+                        body.push_str(
+                            "    let (output, tap) = process_sample_inner(input, inject_assemble(injections_host, &injections_inner[0]), state);\n",
+                        );
+                        body.push_str(&format!("    (output, [{}])\n", pad("tap", 1)));
+                    } else {
+                        body.push_str("    process_sample_inner(input, state)\n");
+                    }
+                }
+                2 => {
+                    Self::emit_2x_wrapper(
+                        &mut body,
+                        num_outputs,
+                        ir.dc_block,
+                        ir.solver_config.output_clamp_v,
+                        inject_or_tap,
+                    );
+                    body = super::runtime_os::rename_idents(
+                        &body,
+                        &[
+                            ("os_halfband", "os2_halfband"),
+                            ("os_halfband_down", "os2_halfband_down"),
+                            ("OS_COEFFS", "OS2_COEFFS"),
+                            ("os_up_state", "os2_up_state"),
+                            ("os_dn_state", "os2_dn_state"),
+                            ("os_inj_up_state", "os2_inj_up_state"),
+                        ],
+                    );
+                    body = body.replace(
+                        "(result, [tap_even, tap_odd])",
+                        &format!("(result, [{}])", pad("tap_even, tap_odd", 2)),
+                    );
+                }
+                _ => {
+                    Self::emit_4x_wrapper(
+                        &mut body,
+                        num_outputs,
+                        ir.dc_block,
+                        ir.solver_config.output_clamp_v,
+                        inject_or_tap,
+                    );
+                    body = super::runtime_os::rename_idents(
+                        &body,
+                        &[
+                            ("os_halfband", "os4_halfband"),
+                            ("os_halfband_down", "os4_halfband_down"),
+                            ("os_halfband_outer", "os4_halfband_outer"),
+                            ("os_halfband_down_outer", "os4_halfband_down_outer"),
+                            ("OS_COEFFS", "OS4_COEFFS"),
+                            ("OS_COEFFS_OUTER", "OS4_COEFFS_OUTER"),
+                            ("os_up_state", "os4_up_state"),
+                            ("os_dn_state", "os4_dn_state"),
+                            ("os_up_state_outer", "os4_up_state_outer"),
+                            ("os_dn_state_outer", "os4_dn_state_outer"),
+                            ("os_inj_up_state", "os4_inj_up_state"),
+                            ("os_inj_up_state_outer", "os4_inj_up_state_outer"),
+                        ],
+                    );
+                }
+            }
+            for line in body.lines() {
+                code.push_str(&format!("        {line}\n"));
+            }
+            code.push_str("        }\n");
+        }
+        // The factor field is private; only `set_oversampling` (which refuses
+        // a factor outside the set) writes it.
+        code.push_str(
+            "        _ => unreachable!(\"oversampling factor outside OVERSAMPLING_SET\"),\n",
+        );
+        code.push_str("    }\n}\n\n");
+        code
     }
 }

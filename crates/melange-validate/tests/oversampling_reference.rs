@@ -151,6 +151,7 @@ fn divider_options(oversampling: usize) -> melange_solver::build::BuildOptions {
         circuit_name: "os_ref".to_string(),
         input_resistance: Some(1.0),
         oversampling: Some(oversampling),
+        oversampling_set: melange_solver::build::OversamplingSet::Deck,
         dc_block: false,
         ..support::options(SAMPLE_RATE, "in", &["mid"])
     }

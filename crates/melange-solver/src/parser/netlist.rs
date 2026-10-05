@@ -147,6 +147,11 @@ pub struct Netlist {
     /// base rate regardless of the directive. Values are restricted to {1,2,4}
     /// to match the `--oversampling` cap. `None` (default) means unspecified.
     pub recommended_oversampling: Option<usize>,
+    /// Runtime-selectable oversampling factors (`.oversampling N allow=1,2,4`),
+    /// ascending: the generated code switches between them with
+    /// `set_oversampling`, defaulting to `recommended_oversampling`. `None`: the
+    /// factor is fixed at build time.
+    pub oversampling_set: Option<Vec<usize>>,
     /// 1-based RAW source line each element was declared on, keyed by the
     /// lowercased element name.
     ///
@@ -263,6 +268,7 @@ impl Netlist {
             self_heating_disabled: false,
             integrator: None,
             recommended_oversampling: None,
+            oversampling_set: None,
             element_lines: std::collections::HashMap::new(),
         }
     }

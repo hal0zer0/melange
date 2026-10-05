@@ -150,7 +150,11 @@ pub(super) fn emit_inject_tap_constants(ir: &CircuitIR) -> String {
 /// `NUM_INJECT_HOST` (possibly 0) so the state layout does not depend on the
 /// rate mix.
 fn has_inject_os_state(ir: &CircuitIR) -> bool {
-    ir.solver_config.has_inject_or_tap() && ir.solver_config.oversampling_factor > 1
+    // A runtime-oversampling build carries its injection up-filters with the
+    // other per-factor filter states (`runtime_os`).
+    ir.solver_config.has_inject_or_tap()
+        && ir.solver_config.oversampling_factor > 1
+        && super::runtime_os::runtime(ir).is_none()
 }
 
 /// `CircuitState` fields for the host-rate injection up-filters (4-space
@@ -256,7 +260,12 @@ pub(super) fn emit_warmup_call(ir: &CircuitIR, indent: &str, let_bind: bool) -> 
     let lhs = if let_bind { "let _ = " } else { "" };
     if ir.solver_config.has_inject_or_tap() {
         format!(
-            "{indent}{lhs}process_sample(0.0, &[0.0; NUM_INJECT_HOST], &[[0.0; NUM_INJECT_INNER]; OVERSAMPLING_FACTOR], self);\n"
+            "{indent}{lhs}process_sample(0.0, &[0.0; NUM_INJECT_HOST], &[[0.0; NUM_INJECT_INNER]; {rows}], self);\n",
+            rows = if super::runtime_os::runtime(ir).is_some() {
+                "MAX_OVERSAMPLING"
+            } else {
+                "OVERSAMPLING_FACTOR"
+            }
         )
     } else if ir.solver_config.num_inputs() > 1 {
         format!("{indent}{lhs}process_sample([0.0; NUM_INPUTS], self);\n")

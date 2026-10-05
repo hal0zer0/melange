@@ -123,7 +123,9 @@ impl RustEmitter {
         code.push_str(&self.emit_update_history()?);
         code.push_str(&self.emit_process_sample(ir, &noise)?);
 
-        if ir.solver_config.oversampling_factor > 1 {
+        if super::runtime_os::runtime(ir).is_some() {
+            code.push_str(&Self::emit_runtime_oversampler(ir));
+        } else if ir.solver_config.oversampling_factor > 1 {
             code.push_str(&Self::emit_oversampler(ir));
         } else if ir.solver_config.has_inject_or_tap() {
             // No oversampling, but `.inject`/`.tap` still emit a private
@@ -419,6 +421,7 @@ impl RustEmitter {
             ctx.insert("opamp_slew", &opamp_slew);
         }
 
+        ctx.insert("runtime_os_consts", &super::runtime_os::emit_consts(ir));
         self.render("constants", &ctx)
     }
 
@@ -475,10 +478,19 @@ impl RustEmitter {
 
         let os_factor = ir.solver_config.oversampling_factor;
         ctx.insert("oversampling_factor", &os_factor);
+        // A runtime-oversampling build keeps its filter states per factor
+        // (`runtime_os`), not in the fixed build's `os_*` fields.
+        let runtime_os = super::runtime_os::runtime(ir).is_some();
+        ctx.insert("runtime_os", &runtime_os);
+        ctx.insert("os_fixed_states", &(os_factor > 1 && !runtime_os));
+        ctx.insert(
+            "os_factor_f64",
+            &super::runtime_os::factor_f64_literal(ir, "self"),
+        );
         if os_factor > 1 {
             let os_info = oversampling_info(os_factor);
             ctx.insert("os_state_size", &os_info.state_size);
-            ctx.insert("oversampling_4x", &(os_factor == 4));
+            ctx.insert("oversampling_4x", &(os_factor == 4 && !runtime_os));
             if os_factor == 4 {
                 ctx.insert("os_state_size_outer", &os_info.state_size_outer);
             }
@@ -603,7 +615,26 @@ impl RustEmitter {
             || ir.opamps.iter().any(|oa| oa.sr.is_finite())
             || num_thermal_devices > 0
             || has_stateful;
+        // `set_oversampling` rebuilds at the current host rate.
+        let needs_current_sr = needs_current_sr || super::runtime_os::runtime(ir).is_some();
         ctx.insert("needs_current_sr", &needs_current_sr);
+        ctx.insert(
+            "runtime_os_fields",
+            &format!(
+                "{}{}",
+                super::runtime_os::state_field_decl(ir),
+                super::runtime_os::os_state_fields(ir)
+            ),
+        );
+        ctx.insert(
+            "runtime_os_inits",
+            &format!(
+                "{}{}",
+                super::runtime_os::state_field_init(ir),
+                super::runtime_os::os_state_inits(ir)
+            ),
+        );
+        ctx.insert("runtime_os_methods", &super::runtime_os::emit_methods(ir));
 
         // Backward Euler fallback state fields (for BE fallback in DK NR solver)
         let has_be_fallback = !ir.matrices.s_be.is_empty() && ir.topology.m > 0;
@@ -683,7 +714,11 @@ impl RustEmitter {
             .mul_add(0.05, 2.0);
         ctx.insert("damp_thresh_init", &format!("{:.17e}", damp_thresh_init));
 
-        self.render("state", &ctx)
+        let mut state = self.render("state", &ctx)?;
+        // Restores (`X = NAME;`) load the running factor's baked values; the
+        // constructor's `NAME,` initializers keep the default factor's.
+        super::runtime_os::switch_restores(ir, &mut state, 0);
+        Ok(state)
     }
 
     /// Generate switch setter methods and rebuild_matrices() procedurally.
@@ -1422,10 +1457,19 @@ impl RustEmitter {
         ctx.insert("max_iter", &ir.solver_config.max_iterations);
         let os_factor = ir.solver_config.oversampling_factor;
         ctx.insert("oversampling_factor", &os_factor);
+        // A runtime-oversampling build keeps its filter states per factor
+        // (`runtime_os`), not in the fixed build's `os_*` fields.
+        let runtime_os = super::runtime_os::runtime(ir).is_some();
+        ctx.insert("runtime_os", &runtime_os);
+        ctx.insert("os_fixed_states", &(os_factor > 1 && !runtime_os));
+        ctx.insert(
+            "os_factor_f64",
+            &super::runtime_os::factor_f64_literal(ir, "self"),
+        );
         if os_factor > 1 {
             let os_info = oversampling_info(os_factor);
             ctx.insert("os_state_size", &os_info.state_size);
-            ctx.insert("oversampling_4x", &(os_factor == 4));
+            ctx.insert("oversampling_4x", &(os_factor == 4 && !runtime_os));
             if os_factor == 4 {
                 ctx.insert("os_state_size_outer", &os_info.state_size_outer);
             }

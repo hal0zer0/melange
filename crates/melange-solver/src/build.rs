@@ -115,7 +115,11 @@ pub struct BuildOptions {
     /// Input source resistance; `None` = the deck's `.input_impedance`, else 1 Ω.
     pub input_resistance: Option<f64>,
     /// Explicit oversampling; `None` = the deck's `.oversampling`, else 1.
+    /// With a runtime set, this is the default factor.
     pub oversampling: Option<usize>,
+    /// The runtime-selectable factor set: the deck's `.oversampling ... allow=`,
+    /// none, or one given on the command line.
+    pub oversampling_set: OversamplingSet,
     /// The generated 5 Hz DC blocker.
     pub dc_block: bool,
     /// `"auto"`, `"dk"` or `"nodal"`.
@@ -179,6 +183,37 @@ pub struct BuildOptions {
     pub output_clamp_auto: bool,
 }
 
+/// Which runtime oversampling set a build uses (`set_oversampling`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum OversamplingSet {
+    /// The deck's `.oversampling N allow=...`, if it has one (`compile`).
+    #[default]
+    Deck,
+    /// None: the factor is fixed at build time, whatever the deck declares
+    /// (`--oversampling-set off`; the verbs that run one fixed factor).
+    Off,
+    /// This set, overriding the deck's (`--oversampling-set 1,2,4`).
+    Set(Vec<usize>),
+    /// A runtime build's internal fixed build of one factor of its set: as
+    /// `Off`, and the factor is the set's, not a user's `--oversampling`
+    /// (no "below the recommendation by request" warning).
+    #[doc(hidden)]
+    FactorOfSet,
+}
+
+/// A resolved runtime oversampling set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedOversamplingSet {
+    /// Ascending, at least two.
+    pub factors: Vec<usize>,
+    /// The factor a fresh state runs at; in `factors`.
+    pub default: usize,
+    /// `"directive"` or `"cli"`.
+    pub source: &'static str,
+    /// The deck's `.oversampling` recommendation, if any.
+    pub recommended: Option<usize>,
+}
+
 /// An assembled build: everything [`build`] ships but the emitted code.
 pub struct Assembled {
     /// The codegen configuration the IR was built with.
@@ -200,6 +235,9 @@ pub struct Assembled {
     /// ([`crate::codegen::ir::CircuitIR::effective_max_iter`]).
     pub max_iter: usize,
     pub oversampling: usize,
+    /// The runtime oversampling set, when the build has one (`oversampling`
+    /// is then its default factor).
+    pub oversampling_set: Option<ResolvedOversamplingSet>,
     pub input_node_idx: usize,
     pub input_resistance: f64,
     /// Where the input resistance came from.
@@ -228,6 +266,9 @@ pub struct Built {
     /// ([`crate::codegen::ir::CircuitIR::effective_max_iter`]).
     pub max_iter: usize,
     pub oversampling: usize,
+    /// The runtime oversampling set, when the build has one (`oversampling`
+    /// is then its default factor).
+    pub oversampling_set: Option<ResolvedOversamplingSet>,
     pub input_node_idx: usize,
     pub input_resistance: f64,
     /// Where the input resistance came from.
@@ -293,7 +334,18 @@ pub fn assemble(
 
     // Resolve the effective oversampling factor: explicit --oversampling wins,
     // else the deck's `.oversampling` recommendation, else 1.
-    let oversampling = resolve_oversampling(oversampling_cli, netlist.recommended_oversampling);
+    let oversampling = if opts.oversampling_set == OversamplingSet::FactorOfSet {
+        // One factor of a runtime set: the set chose it, not a user flag.
+        oversampling_cli.unwrap_or(1)
+    } else {
+        resolve_oversampling(oversampling_cli, netlist.recommended_oversampling)
+    };
+    let oversampling_set = resolve_oversampling_set(
+        &opts.oversampling_set,
+        netlist.oversampling_set.as_deref(),
+        oversampling,
+        netlist.recommended_oversampling,
+    )?;
 
     // Expand subcircuit instances (X elements) before MNA
     if !netlist.subcircuits.is_empty() {
@@ -458,6 +510,14 @@ pub fn assemble(
             bail!(
                 "multi-input decks are supported for `--format code` only; the \
                  nih-plug plugin wrapper does not yet route multiple input channels."
+            );
+        }
+        if let Some(set) = &oversampling_set {
+            bail!(
+                "multi-input decks do not yet support oversampling, and this build asks for \
+                 runtime factors {:?} (`.oversampling ... allow=` or --oversampling-set). \
+                 Linear (M=0) circuits do not alias; build with --oversampling-set off.",
+                set.factors
             );
         }
         if oversampling > 1 {
@@ -1146,6 +1206,7 @@ pub fn assemble(
         solver_reason,
         max_iter,
         oversampling,
+        oversampling_set,
         input_node_idx,
         input_resistance,
         input_resistance_source: ir_source,
@@ -1205,6 +1266,9 @@ pub fn build(
     // Each model warning once per build, emission included.
     let _warnings = crate::diag::BuildScope::begin();
     let a = assemble(netlist_str, opts, out, err)?;
+    if let Some(set) = a.oversampling_set.clone() {
+        return build_runtime_oversampling(netlist_str, opts, &set, out, err);
+    }
     let context = if a.solver_label == "nodal" {
         "Nodal code generation failed"
     } else {
@@ -1224,6 +1288,389 @@ pub fn build(
         solver_reason: a.solver_reason,
         max_iter: a.max_iter,
         oversampling: a.oversampling,
+        oversampling_set: None,
+        input_node_idx: a.input_node_idx,
+        input_resistance: a.input_resistance,
+        input_resistance_source: a.input_resistance_source,
+        output_node_indices: a.output_node_indices,
+        forward_active: a.forward_active,
+        grid_off_pentodes: a.grid_off_pentodes,
+        linearize_outcome: a.linearize_outcome,
+        injection_specs: a.injection_specs,
+    })
+}
+
+/// Provenance keys that may differ between the factors of a runtime set:
+/// the factor itself and the ring predicate's per-rate verdict text. Every
+/// other key describes the solver the code is (route, sub-path, integrator,
+/// latch, rail mode, reductions, budget), so it must agree across the set;
+/// a key added later is held to that by default.
+const PER_FACTOR_PROVENANCE_KEYS: [&str; 2] = ["oversampling", "integration_reason"];
+
+/// The top-level `(key, raw value text)` pairs of generated code's
+/// `// provenance: {...}` line, in order. The line is melange's own flat JSON
+/// object (values: strings, numbers, booleans, or nested objects compared as
+/// text), so a quote-and-depth-aware split is exact for it.
+fn provenance_of(code: &str) -> Result<Vec<(String, String)>, BuildError> {
+    let line = code
+        .lines()
+        .find_map(|l| l.strip_prefix("// provenance: "))
+        .ok_or_else(|| err!("generated code carries no provenance line"))?
+        .trim();
+    let body = line
+        .strip_prefix('{')
+        .and_then(|b| b.strip_suffix('}'))
+        .ok_or_else(|| err!("generated provenance is not a JSON object: {line}"))?;
+    // Split at top-level commas: outside strings and nested braces/brackets.
+    let (mut fields, mut cur) = (Vec::new(), String::new());
+    let (mut depth, mut in_str, mut escaped) = (0i32, false, false);
+    for c in body.chars() {
+        if in_str {
+            in_str = !(c == '"' && !escaped);
+            escaped = c == '\\' && !escaped;
+        } else {
+            match c {
+                '"' => in_str = true,
+                '{' | '[' => depth += 1,
+                '}' | ']' => depth -= 1,
+                ',' if depth == 0 => {
+                    fields.push(std::mem::take(&mut cur));
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        cur.push(c);
+    }
+    if !cur.trim().is_empty() {
+        fields.push(cur);
+    }
+    fields
+        .into_iter()
+        .map(|f| {
+            let (k, v) = f
+                .split_once(':')
+                .ok_or_else(|| err!("malformed provenance field: {f}"))?;
+            Ok((k.trim().trim_matches('"').to_string(), v.trim().to_string()))
+        })
+        .collect()
+}
+
+/// Generated constants the runtime code switches per factor: the baked
+/// matrices and DC-blocker coefficient a same-rate restore loads, and the
+/// runtime BE latch's reference. Each is read through a per-factor accessor
+/// wherever the running factor matters.
+pub const SWITCHED_PER_FACTOR: [&str; 15] = [
+    "S_DEFAULT",
+    "A_DEFAULT",
+    "A_NEG_DEFAULT",
+    "K_DEFAULT",
+    "S_NI_DEFAULT",
+    "S_BE_DEFAULT",
+    "A_BE_DEFAULT",
+    "A_NEG_BE_DEFAULT",
+    "K_BE_DEFAULT",
+    "S_NI_BE_DEFAULT",
+    "DC_BLOCK_R",
+    "BE_LATCH_RING_POLES",
+    "BE_LATCH_BE_COST_REL",
+    "BE_LATCH_PASSBAND_GAIN",
+    "BE_LATCH_RING_HOLD",
+];
+
+/// Generated constants that ARE the factor or its filters: the runtime code
+/// replaces them with the running factor and a cascade per factor. The
+/// public `INTERNAL_SAMPLE_RATE` and `ALPHA` (2/T at it) are informational,
+/// read by no generated code; a runtime build's describe its default factor,
+/// the one a fresh state runs at.
+const FACTOR_ITSELF: [&str; 5] = [
+    "OVERSAMPLING_FACTOR",
+    "INTERNAL_SAMPLE_RATE",
+    "ALPHA",
+    "OS_COEFFS",
+    "OS_COEFFS_OUTER",
+];
+
+/// Every `const NAME: TYPE = VALUE;` of generated code, in order, as
+/// `(name, type, value text)`.
+fn generated_consts(code: &str) -> Vec<(String, String, String)> {
+    crate::codegen::const_text::const_items(code)
+        .into_iter()
+        .map(|c| (c.name, c.ty, c.value))
+        .collect()
+}
+
+/// Generated code reduced to what executes, for comparing two factors'
+/// runtime emissions: blank and comment lines dropped (the header carries the factor
+/// and the ring predicate's per-rate verdict) and every [`FACTOR_ITSELF`]
+/// constant dropped (each factor's build describes itself there, and a 1x
+/// build emits no `INTERNAL_SAMPLE_RATE`). Every other byte is the solver.
+fn executable_text(code: &str) -> String {
+    let mut masked = String::with_capacity(code.len());
+    let mut at = 0;
+    for c in crate::codegen::const_text::const_items(code) {
+        if FACTOR_ITSELF.contains(&c.name.as_str()) {
+            masked.push_str(&code[at..c.ty_range.start]);
+            masked.push('_');
+            masked.push_str(&code[c.ty_range.end..c.value_range.start]);
+            masked.push('_');
+            at = c.value_range.end;
+        }
+    }
+    masked.push_str(&code[at..]);
+    masked
+        .lines()
+        .filter(|l| {
+            let item = l.trim_start();
+            let item = item.strip_prefix("pub ").unwrap_or(item);
+            !item.is_empty()
+                && !item.starts_with("//")
+                && !FACTOR_ITSELF
+                    .iter()
+                    .any(|n| item.starts_with(&format!("const {n}: _ = _;")))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The constants whose value differs between the factors' fixed builds
+/// (`codes`, in `factors` order), each with its literal per factor. Refuses a
+/// differing constant the runtime code does not switch per factor: it would
+/// run at the default factor's value at every factor.
+fn per_factor_consts(
+    factors: &[usize],
+    codes: &[String],
+) -> Result<Vec<crate::codegen::ir::PerFactorConst>, BuildError> {
+    let tables: Vec<Vec<(String, String, String)>> =
+        codes.iter().map(|c| generated_consts(c)).collect();
+    let mut names: Vec<String> = Vec::new();
+    for t in &tables {
+        for (n, _, _) in t {
+            if !names.contains(n) {
+                names.push(n.clone());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for name in names {
+        if FACTOR_ITSELF.contains(&name.as_str()) {
+            continue;
+        }
+        let entries: Vec<Option<&(String, String, String)>> = tables
+            .iter()
+            .map(|t| t.iter().find(|(n, _, _)| *n == name))
+            .collect();
+        let present: Vec<&(String, String, String)> = entries.iter().flatten().copied().collect();
+        let same = present.len() == entries.len()
+            && present
+                .windows(2)
+                .all(|w| w[0].1 == w[1].1 && w[0].2 == w[1].2);
+        if same {
+            continue;
+        }
+        if present.len() != entries.len() || !SWITCHED_PER_FACTOR.contains(&name.as_str()) {
+            let at: Vec<String> = factors
+                .iter()
+                .zip(&entries)
+                .map(|(f, e)| match e {
+                    Some((_, _, v)) if v.len() <= 40 => format!("{f}x: {v}"),
+                    Some((_, _, v)) => format!("{f}x: <{}-char literal>", v.len()),
+                    None => format!("{f}x: absent"),
+                })
+                .collect();
+            bail!(
+                "the runtime oversampling set {factors:?} is refused: the generated constant \
+                 `{name}` differs between factors ({}) and the runtime code does not switch it \
+                 per factor, so every factor would run with the default factor's value",
+                at.join(", ")
+            );
+        }
+        out.push(crate::codegen::ir::PerFactorConst {
+            name: name.clone(),
+            types: present.iter().map(|(_, t, _)| t.clone()).collect(),
+            values: present.iter().map(|(_, _, v)| v.clone()).collect(),
+        });
+    }
+    Ok(out)
+}
+
+/// Build a deck whose oversampling factor is selectable at runtime.
+///
+/// Each factor of the set is assembled and emitted as the fixed build it would
+/// be, with the Newton budget pinned to the largest any factor auto-tunes. The
+/// set is refused unless those builds are the same solver (their provenance
+/// agrees on every key but [`PER_FACTOR_PROVENANCE_KEYS`]): the runtime code
+/// is one solver whose rate-dependent values are switched per factor, so a
+/// factor that would route or integrate differently cannot be one of its
+/// settings. The runtime code is emitted from the default factor's build,
+/// carrying each factor's settled values.
+fn build_runtime_oversampling(
+    netlist_str: &str,
+    opts: &BuildOptions,
+    set: &ResolvedOversamplingSet,
+    out: Reporter<'_>,
+    err: Reporter<'_>,
+) -> Result<Built, BuildError> {
+    let quiet: Reporter<'_> = &|_| {};
+    let fixed = |n: usize, max_iter: Option<usize>| BuildOptions {
+        oversampling: Some(n),
+        oversampling_set: OversamplingSet::FactorOfSet,
+        max_iter,
+        ..opts.clone()
+    };
+    let assemble_all = |max_iter: Option<usize>| -> Result<Vec<Assembled>, BuildError> {
+        set.factors
+            .iter()
+            .map(|&n| assemble(netlist_str, &fixed(n, max_iter), quiet, quiet))
+            .collect()
+    };
+    let mut factors = assemble_all(opts.max_iter)?;
+    let budget = factors.iter().map(|a| a.max_iter).max().unwrap_or(0);
+    if factors.iter().any(|a| a.max_iter != budget) {
+        factors = assemble_all(Some(budget))?;
+    }
+    // Each factor as the fixed build it would be; their provenance must agree.
+    let mut provenance = Vec::with_capacity(factors.len());
+    let mut codes = Vec::with_capacity(factors.len());
+    for a in &factors {
+        let code = CodeGenerator::new(a.config.clone())
+            .emit(&a.prepared)
+            .with_context(|| format!("code generation at {}x failed", a.oversampling))?
+            .code;
+        provenance.push(provenance_of(&code)?);
+        codes.push(code);
+    }
+    let get = |p: &[(String, String)], key: &str| {
+        p.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+    };
+    let reference = &provenance[0];
+    for (a, p) in factors.iter().zip(&provenance).skip(1) {
+        let keys: std::collections::BTreeSet<&String> =
+            reference.iter().chain(p.iter()).map(|(k, _)| k).collect();
+        let show = |v: Option<String>| v.unwrap_or_else(|| "absent".to_string());
+        let differences: Vec<String> = keys
+            .into_iter()
+            .filter(|key| !PER_FACTOR_PROVENANCE_KEYS.contains(&key.as_str()))
+            .filter_map(|key| {
+                let (x, y) = (get(reference, key), get(p, key));
+                (x != y).then(|| {
+                    format!(
+                        "{key}: {} at {}x, {} at {}x",
+                        show(x),
+                        set.factors[0],
+                        show(y),
+                        a.oversampling
+                    )
+                })
+            })
+            .collect();
+        if !differences.is_empty() {
+            bail!(
+                "the runtime oversampling set {:?} is refused: one solver cannot serve it, \
+                 because at {}x the build differs from {}x in {}. Drop the factor from \
+                 allow= (or --oversampling-set), or build each factor as its own deck.",
+                set.factors,
+                a.oversampling,
+                set.factors[0],
+                differences.join("; ")
+            );
+        }
+    }
+    let per_factor = factors
+        .iter()
+        .map(|a| crate::codegen::ir::FactorSettlement {
+            factor: a.oversampling,
+            integration_reason: a.prepared.ir.integration_reason.clone(),
+        })
+        .collect();
+    let per_factor_consts = per_factor_consts(&set.factors, &codes)?;
+    let runtime = crate::codegen::ir::RuntimeOversampling {
+        factors: set.factors.clone(),
+        default: set.default,
+        source: set.source.to_string(),
+        recommended: set.recommended,
+        per_factor,
+        per_factor_consts,
+    };
+    // The runtime code is emitted from one factor's IR, so the emission must
+    // not depend on which: an IR whose structure differs by factor (a matrix
+    // entry below SPARSITY_THRESHOLD at one rate, so its term is not emitted)
+    // would run the default factor's structure at every factor. Emit it from every
+    // factor's IR and require the same executable text.
+    let mut emissions = Vec::with_capacity(factors.len());
+    for a in &factors {
+        let mut prepared = a.prepared.clone();
+        prepared.ir.solver_config.runtime_oversampling = Some(runtime.clone());
+        let context = if a.solver_label == "nodal" {
+            "Nodal code generation failed"
+        } else {
+            "Code generation failed"
+        };
+        emissions.push(
+            CodeGenerator::new(a.config.clone())
+                .emit(&prepared)
+                .with_context(|| {
+                    format!("{context} (runtime oversampling, {}x)", a.oversampling)
+                })?,
+        );
+    }
+    let default_idx = set
+        .factors
+        .iter()
+        .position(|&n| n == set.default)
+        .expect("resolve_oversampling_set: the default is in the set");
+    let reference = executable_text(&emissions[default_idx].code);
+    for (a, e) in factors.iter().zip(&emissions) {
+        let text = executable_text(&e.code);
+        if let Some((line, (x, y))) = reference
+            .lines()
+            .zip(text.lines())
+            .enumerate()
+            .find(|(_, (x, y))| x != y)
+            .or_else(|| {
+                (reference.lines().count() != text.lines().count()).then_some((
+                    reference.lines().count().min(text.lines().count()),
+                    ("<end>", "<end>"),
+                ))
+            })
+        {
+            bail!(
+                "the runtime oversampling set {:?} is refused: the solver's structure differs \
+                 between {}x and {}x (the code emitted from each factor's build first differs \
+                 at executable line {}: `{}` against `{}`), so one solver cannot serve both. \
+                 Drop the factor from allow= (or --oversampling-set), or build each factor as \
+                 its own deck.",
+                set.factors,
+                set.default,
+                a.oversampling,
+                line + 1,
+                x.trim(),
+                y.trim()
+            );
+        }
+    }
+    let generated = emissions.swap_remove(default_idx);
+    let a = factors.swap_remove(default_idx);
+    report!(
+        out,
+        "  Oversampling: runtime-selectable {:?} (default {}x, from the {}), one solver at every factor",
+        set.factors,
+        set.default,
+        set.source
+    );
+    let _ = err;
+    Ok(Built {
+        generated,
+        dc_op: a.dc_op,
+        netlist: a.netlist,
+        mna: a.mna,
+        kernel: a.kernel,
+        routing: a.routing,
+        solver_label: a.solver_label,
+        solver_reason: a.solver_reason,
+        max_iter: a.max_iter,
+        oversampling: a.oversampling,
+        oversampling_set: Some(set.clone()),
         input_node_idx: a.input_node_idx,
         input_resistance: a.input_resistance,
         input_resistance_source: a.input_resistance_source,
@@ -1371,6 +1818,54 @@ pub fn resolve_oversampling(explicit_cli: Option<usize>, recommended: Option<usi
         (None, Some(rec)) => rec,
         (None, None) => 1,
     }
+}
+
+/// Resolve the runtime oversampling set (`set_oversampling`): the command
+/// line's, else the deck's `.oversampling N allow=...`, else none. The default
+/// factor must be in the set: a set without a resolvable default is refused,
+/// not guessed.
+pub fn resolve_oversampling_set(
+    choice: &OversamplingSet,
+    deck: Option<&[usize]>,
+    default: usize,
+    recommended: Option<usize>,
+) -> Result<Option<ResolvedOversamplingSet>, BuildError> {
+    let (factors, source) = match (choice, deck) {
+        (OversamplingSet::Off | OversamplingSet::FactorOfSet, _)
+        | (OversamplingSet::Deck, None) => return Ok(None),
+        (OversamplingSet::Deck, Some(d)) => (d.to_vec(), "directive"),
+        (OversamplingSet::Set(cli), deck) => {
+            let mut f = cli.clone();
+            f.sort_unstable();
+            f.dedup();
+            if f.len() < 2 || f.len() != cli.len() || f.iter().any(|n| !matches!(n, 1 | 2 | 4)) {
+                bail!(
+                    "--oversampling-set takes two or three distinct factors from 1, 2, 4, \
+                     got {cli:?}"
+                );
+            }
+            if let Some(d) = deck {
+                if d != f.as_slice() {
+                    crate::diag_warn!(
+                        "--oversampling-set {f:?} overrides the deck's .oversampling allow={d:?}"
+                    );
+                }
+            }
+            (f, "cli")
+        }
+    };
+    if !factors.contains(&default) {
+        bail!(
+            "the default oversampling factor {default} (the deck's .oversampling, or \
+             --oversampling) is not in the runtime set {factors:?}"
+        );
+    }
+    Ok(Some(ResolvedOversamplingSet {
+        factors,
+        default,
+        source,
+        recommended,
+    }))
 }
 
 /// Check if a capacitor is directly connected to the given output node.

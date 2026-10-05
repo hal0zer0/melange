@@ -687,6 +687,15 @@ Noise limitations:
   by `validate` rather than compared as sharp pentodes.
 - `VCA`, `LDR` and `NEON` still have no oracle and are refused by `validate`;
   they are checked with `compile`/`analyze`/`simulate` instead.
+- A runtime-selectable oversampling set (`.oversampling N allow=...`) is refused
+  when its factors would not build one solver (the route, integrator or runtime
+  latch differs between factors, as on decks the ring predicate promotes to
+  backward Euler at 1× only), when a factor-dependent constant is not one the
+  runtime code switches (today: time-dependent behavioral sources), or when the
+  generated code itself differs by factor (a coupling term below the 1e-20
+  sparsity threshold at one rate is omitted from that rate's code). Build such
+  a deck once per factor. `validate`, `simulate`, `analyze` and `dc-op` build
+  the default factor fixed.
 - `melange validate` does not read the deck's `.oversampling` recommendation;
   the factor must be given explicitly as `--oversampling {1|2|4}` (default 1).
   `compile`/`simulate`/`analyze` honour the directive, `validate` reports what it

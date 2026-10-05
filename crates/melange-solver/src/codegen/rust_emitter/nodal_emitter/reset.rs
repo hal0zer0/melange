@@ -192,7 +192,9 @@ pub(super) fn emit_nodal_nan_reset(
 
     // Oversampler filter state (inner polyphase + outer 4× halfband)
     let os_factor = ir.solver_config.oversampling_factor;
-    if os_factor > 1 {
+    if super::super::runtime_os::runtime(ir).is_some() {
+        code.push_str(&format!("{body}state.reset_oversampler();\n"));
+    } else if os_factor > 1 {
         let os_info = oversampling_info(os_factor);
         code.push_str(&format!(
             "{body}state.os_up_state = [0.0; {}];\n\

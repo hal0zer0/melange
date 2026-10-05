@@ -111,6 +111,7 @@ fn gen_and_run_with(
         circuit_name: "inject_oracle".to_string(),
         input_resistance: Some(input_resistance),
         oversampling: Some(oversampling),
+        oversampling_set: melange_solver::build::OversamplingSet::Deck,
         dc_block: false, // raw DC comparison — no 5 Hz HPF on the output
         ..support::options(48000.0, input_name, output_nodes)
     };

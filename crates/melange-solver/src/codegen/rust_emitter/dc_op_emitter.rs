@@ -829,7 +829,12 @@ fn emit_dc_op_writeback_dk(ir: &CircuitIR, nonlinear: bool) -> String {
     // trajectory. Zero them so the new DC doesn't appear as a step that the
     // half-band IIR has to ring down. Sizes are compile-time derived from
     // the oversampling factor (matching `state.rs.tera`'s literal sizing).
-    if ir.solver_config.oversampling_factor > 1 {
+    if super::runtime_os::runtime(ir).is_some() {
+        body.push_str(
+            "        // Reset oversampler half-band filter state (stale DC trajectory).\n\
+             \x20       self.reset_oversampler();\n",
+        );
+    } else if ir.solver_config.oversampling_factor > 1 {
         let os = oversampling_info(ir.solver_config.oversampling_factor);
         body.push_str(&format!(
             "        // Reset oversampler half-band filter state (stale DC trajectory).\n\

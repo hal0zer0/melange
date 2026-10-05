@@ -173,7 +173,7 @@ pub struct CircuitState {
     /// Potentiometer {{ loop.index0 }} resistance at the last committed sample (kept in step with `pot_{{ loop.index0 }}_resistance`; not read by the solver)
     pub pot_{{ loop.index0 }}_resistance_prev: f64,
 {% endfor %}
-{% if oversampling_factor > 1 %}
+{{ runtime_os_fields }}{% if os_fixed_states %}
     /// Oversampler upsampling half-band filter state (single input)
     pub os_up_state: [f64; {{ os_state_size }}],
     /// Oversampler downsampling half-band filter state (per output)
@@ -301,7 +301,7 @@ impl Default for CircuitState {
             pot_{{ loop.index0 }}_resistance: {{ default }},
             pot_{{ loop.index0 }}_resistance_prev: {{ default }},
 {% endfor %}
-{% if oversampling_factor > 1 %}
+{{ runtime_os_inits }}{% if os_fixed_states %}
             os_up_state: [0.0; {{ os_state_size }}],
             os_dn_state: [[0.0; {{ os_state_size }}]; NUM_OUTPUTS],
 {% endif %}{% if oversampling_4x %}
@@ -335,7 +335,7 @@ impl Default for CircuitState {
 }
 
 impl CircuitState {
-    /// Reset to the factory state.
+{{ runtime_os_methods }}    /// Reset to the factory state.
     ///
     /// "Factory state" means everything returns to what codegen baked in:
     /// the DC operating point, the baked nonlinear bias currents, and
@@ -409,7 +409,9 @@ impl CircuitState {
         // nominal pot values restored here.)
         self.matrices_dirty = true;
 {% endif %}
-{% if oversampling_factor > 1 %}
+{% if runtime_os %}
+        self.reset_oversampler();
+{% endif %}{% if os_fixed_states %}
         self.os_up_state = [0.0; {{ os_state_size }}];
         self.os_dn_state = [[0.0; {{ os_state_size }}]; NUM_OUTPUTS];
 {% endif %}{% if oversampling_4x %}
@@ -603,7 +605,8 @@ impl CircuitState {
         for k in 0..NUM_OUTPUTS { self.dc_block_x_prev[k] = self.dc_operating_point[OUTPUT_NODES[k]]; }
         self.dc_block_y_prev = [0.0; NUM_OUTPUTS];
 {% endif %}
-{% if oversampling_factor > 1 %}        // Reset oversampler filter state (old state is incompatible with new rate)
+{% if runtime_os %}        self.reset_oversampler();
+{% endif %}{% if os_fixed_states %}        // Reset oversampler filter state (old state is incompatible with new rate)
         self.os_up_state = [0.0; {{ os_state_size }}];
         self.os_dn_state = [[0.0; {{ os_state_size }}]; NUM_OUTPUTS];
 {% endif %}{% if oversampling_4x %}        self.os_up_state_outer = [0.0; {{ os_state_size_outer }}];
@@ -761,7 +764,9 @@ impl CircuitState {
         self.a_neg_be = a_neg_be;
 {% endif %}
 {# SM vectors removed — per-block rebuild handles pot corrections exactly #}
-{% if oversampling_factor > 1 %}
+{% if runtime_os %}
+        self.reset_oversampler();
+{% endif %}{% if os_fixed_states %}
         // Reset oversampler filter state (old state is incompatible with new rate)
         self.os_up_state = [0.0; {{ os_state_size }}];
         self.os_dn_state = [[0.0; {{ os_state_size }}]; NUM_OUTPUTS];
@@ -771,7 +776,9 @@ impl CircuitState {
 {% endif %}{{ inject_os_reset_self }}
 
         // Recompute DC blocking coefficient for new sample rate
-        {% if oversampling_factor > 1 %}
+        {% if runtime_os %}
+        let internal_rate = sample_rate * {{ os_factor_f64 }};
+        {% elif oversampling_factor > 1 %}
         let internal_rate = sample_rate * {{ oversampling_factor }}.0;
         {% else %}
         let internal_rate = sample_rate;

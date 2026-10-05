@@ -162,6 +162,7 @@ pub(crate) struct CompileOptions<'a> {
     pub(crate) with_level_params: bool,
     pub(crate) input_resistance_flag: Option<f64>,
     pub(crate) oversampling_cli: Option<usize>,
+    pub(crate) oversampling_set: melange_solver::build::OversamplingSet,
     pub(crate) no_dc_block: bool,
     pub(crate) solver_override: &'a str,
     pub(crate) backward_euler: bool,
@@ -213,6 +214,7 @@ pub(crate) fn compile_circuit_source(
         with_level_params,
         input_resistance_flag,
         oversampling_cli,
+        oversampling_set,
         no_dc_block,
         solver_override,
         backward_euler,
@@ -345,6 +347,7 @@ pub(crate) fn compile_circuit_source(
         output_clamp,
         input_resistance: input_resistance_flag,
         oversampling: oversampling_cli,
+        oversampling_set: oversampling_set.clone(),
         dc_block: !no_dc_block,
         solver: solver_override.to_string(),
         backward_euler,
@@ -380,6 +383,7 @@ pub(crate) fn compile_circuit_source(
         solver_reason,
         max_iter,
         oversampling,
+        oversampling_set: runtime_set,
         input_resistance,
         input_resistance_source: ir_source,
         output_node_indices,
@@ -468,7 +472,18 @@ pub(crate) fn compile_circuit_source(
             )
         );
     }
-    println!("    Oversampling: {}×", oversampling);
+    match &runtime_set {
+        Some(set) => println!(
+            "    Oversampling: {}× default, runtime-selectable {}",
+            oversampling,
+            set.factors
+                .iter()
+                .map(|f| format!("{f}×"))
+                .collect::<Vec<_>>()
+                .join("/")
+        ),
+        None => println!("    Oversampling: {}×", oversampling),
+    }
     // A nonlinear circuit generates harmonics above Nyquist, and at 1x they
     // fold back into the audible band as inharmonic alias energy. The steady-
     // state frequency response does not show it, so a first-time author has no

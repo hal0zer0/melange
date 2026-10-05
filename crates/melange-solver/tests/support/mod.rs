@@ -578,6 +578,7 @@ pub fn try_build_shipped_with(
         output_clamp: config.output_clamp_v,
         input_resistance: (config.input_resistance != 1.0).then_some(config.input_resistance),
         oversampling: (config.oversampling_factor != 1).then_some(config.oversampling_factor),
+        oversampling_set: melange_solver::build::OversamplingSet::Deck,
         dc_block: config.dc_block,
         solver: solver.to_string(),
         backward_euler: config.backward_euler,

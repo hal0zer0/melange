@@ -119,9 +119,17 @@ pub(crate) enum Commands {
 
         /// Oversampling factor (1=none, 2=2x, 4=4x). Higher reduces aliasing and improves NR stability.
         /// Overrides the deck's `.oversampling` recommendation when set (even if lower); absent, the
-        /// deck value is used, else 1.
+        /// deck value is used, else 1. With a runtime set (`--oversampling-set`, or the deck's
+        /// `.oversampling N allow=...`), the factor a fresh state starts at.
         #[arg(long)]
         oversampling: Option<usize>,
+
+        /// Factors the generated code can switch between at runtime with `set_oversampling`,
+        /// e.g. `1,2,4`; `off` builds one fixed factor. Overrides the deck's
+        /// `.oversampling N allow=...`. Refused when the factors would build different solvers
+        /// (route, integrator): the build names the factor and what differs.
+        #[arg(long, value_name = "FACTORS|off")]
+        oversampling_set: Option<String>,
 
         /// Solver: auto (default), dk, nodal.
         ///

@@ -124,6 +124,7 @@ pub(crate) fn analyze_freq_response(
         output_clamp: 10.0,
         input_resistance: input_resistance_flag,
         oversampling: oversampling_cli,
+        oversampling_set: melange_solver::build::OversamplingSet::Off,
         dc_block: false,
         solver: solver.to_string(),
         backward_euler,

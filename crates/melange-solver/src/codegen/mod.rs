@@ -15,6 +15,7 @@
 //! - [`rust_emitter::RustEmitter`] — Rust language backend
 
 #[cfg(feature = "codegen")]
+pub(crate) mod const_text;
 pub mod emitter;
 #[cfg(feature = "codegen")]
 pub mod fast_math;
