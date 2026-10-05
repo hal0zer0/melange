@@ -9,6 +9,8 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+## [0.1.16] - 2026-10-05
+
 **What changes generated code or rendered audio:** nothing for an existing
 deck. A JFET card with `LEVEL=2` was refused before and now compiles; a deck
 with only level-1 JFETs generates the same code. Deck forms that compiled and
@@ -26,12 +28,14 @@ are now refused are those whose `.mismatch` key jittered nothing (see Fixed).
   with `BETA`, `VTO`, `LAMBDA` and the level-1 gate junctions (`IS`, `N`).
   Deep below pinch-off the current e-folds every `VST/Q` volts, so from a
   measured slope `S` (V per e-fold) set `VST = Q·S`.
-  - Agreement with ngspice JFET2: the drain and gate currents over gate ×
-    drain grids (a VST/MVST sweep, every law key, both polarities) to 1e-9
-    relative. On an isolated voltage-variable resistor biased to 148.8 kΩ
-    and driven to 39.7 mV, THD matches ngspice's within 0.42 % of its value
-    at VST 26, 50 and 78 mV (0.210 % vs 0.209 % at 26 mV, against 3.94 % for
-    the level-1 hard edge).
+  - Agreement with ngspice JFET2: the drain current over gate × drain grids
+    (a VST/MVST sweep, every law key, both polarities) to 1e-9 relative. The
+    gate junctions agree to the same band plus melange's thermal-voltage
+    offset (its physical constants put Vt 2.86e-5 above ngspice's), as for
+    every melange junction. On an isolated voltage-variable resistor biased
+    to 148.8 kΩ and driven to 39.7 mV, THD matches ngspice's within 0.42 % of
+    its value at VST 26, 50 and 78 mV (0.210 % vs 0.209 % at 26 mV, against
+    3.94 % for the level-1 hard edge).
   - Refused at level 2: `IDSS` (no single BETA reproduces it once Z, XI and
     VST act; set BETA and VTO), and, when nonzero, the keys not implemented:
     trap dispersion (`LFGAM`, `LFG1`, `LFG2`, `HFGAM`, `HFG1`, `HFG2`,
@@ -48,6 +52,10 @@ are now refused are those whose `.mismatch` key jittered nothing (see Fixed).
 
 ### Fixed
 
+- **README: the RC low-pass throughput figure.** It read 3200× realtime
+  (6.5 ns/sample), a number that does not reproduce on any recent build; the
+  measured figure is about 2000× (10.3 ns/sample, `tools/perf-harness/bench.sh`,
+  same machine and settings as the README's throughput table).
 - **A `.mismatch` key that jitters nothing is refused instead of ignored.** A
   key the device class does not read (a typo such as `.mismatch D NN=0.02`,
   or another class's key) was accepted and silently left the deck at its
@@ -3184,7 +3192,8 @@ measured real hardware. Everything else is unproven against hardware. See
   KiCad file; no effect on netlist compilation, generated code, or shipped plugins. The
   fix (`quick-xml >= 0.41`) is tracked for 0.1.1.
 
-[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.15...HEAD
+[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.16...HEAD
+[0.1.16]: https://github.com/hal0zer0/melange/compare/v0.1.15...v0.1.16
 [0.1.15]: https://github.com/hal0zer0/melange/compare/v0.1.14...v0.1.15
 [0.1.14]: https://github.com/hal0zer0/melange/compare/v0.1.13...v0.1.14
 [0.1.13]: https://github.com/hal0zer0/melange/compare/v0.1.12...v0.1.13

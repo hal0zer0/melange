@@ -277,7 +277,7 @@ A sample of what it handles, with **measured** single-core throughput:
 | Wurlitzer 200A preamp | 2-stage BJT preamp (full Gummel-Poon) | 2 BJTs + 1 diode | 45.4× | 459 |
 | 12AX7 gain stage | single triode stage | 1 triode | 150.0× | 139 |
 
-\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), best of 7 × 2M samples. Measured on an AMD Ryzen 9 7950X pinned to one CCD, with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh). Re-measured 2026-10-01 on an idle machine; the best and median of the seven runs agree within 1 % on every row. Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass runs at 3200× (6.5 ns/sample).
+\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), best of 7 × 2M samples. Measured on an AMD Ryzen 9 7950X pinned to one CCD, with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh). Re-measured 2026-10-01 on an idle machine; the best and median of the seven runs agree within 1 % on every row. Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass (`unstable/examples/rc-lowpass.cir` in the circuits repository) runs at about 2000× (10.3 ns/sample, measured 2026-10-05).
 
 **The triode rows pay for grid current.** The Dempwolf & Zölzer grid-current law evaluates a softplus on the grid dimension at every Newton iteration, where a hard-zero law would skip it; that is what modelling the negative-grid region costs. The CHANGELOG has the before/after figures.
 
