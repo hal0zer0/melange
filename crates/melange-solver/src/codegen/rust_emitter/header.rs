@@ -275,6 +275,13 @@ fn provenance_json(
         ir.solver_config.output_clamp_v
     ));
     s.push_str(&format!("\"noise\":\"{}\"", ir.noise.mode.as_str()));
+    // How close the rounding noise outside S's and K's structural pattern came
+    // to its bound before it was set to zero (at most 1; see
+    // `settle_structural_sparsity`).
+    s.push_str(&format!(
+        ",\"sparsity_noise_ratio\":{:.3e}",
+        ir.sparsity.noise_ratio
+    ));
     if !ir.opamps.is_empty() {
         s.push_str(&format!(
             ",\"opamp_rail\":\"{}\"",

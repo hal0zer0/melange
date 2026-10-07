@@ -11,7 +11,7 @@
 //! nodal_emitter/mod.rs (`emit_nodal`, has_positive_k_with_current):
 //!     ir.matrices.k[i*m+i] > 0.0          (spelled `if k_ii <= 0.0 { false }`)
 //!     && ir.sparsity.n_i.nz_by_row.iter().any(|row| row.contains(&i))
-//!                                          (nz built at SPARSITY_THRESHOLD = 1e-20)
+//!                                          (nz = N_i's exact nonzeros)
 //! ```
 //!
 //! **These are NOT duplicates and must never be collapsed into one value.** They

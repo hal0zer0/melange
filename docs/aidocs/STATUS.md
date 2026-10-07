@@ -186,7 +186,7 @@ Source: Sowter DWG E-72,658-2 (amp §) + Peerless/Triad winding data.
 - Codegen for diode, BJT, JFET, MOSFET, tube/triode/pentode (Gaussian elimination M=3..32)
 - Per-device `.model` params (heterogeneous models supported per device)
 - Parasitic cap auto-insertion (10pF junction caps) when nonlinear circuit has no caps
-- Sparsity-aware emission (systematic zero-skipping in A_neg, N_v, K, S*N_i)
+- Sparsity-aware emission (systematic skipping of absent entries in A_neg, N_v, K, S*N_i); K and S patterns are structural, derived from the topology (`structural.rs`), so they do not depend on the sample rate or on rounding; rounding noise outside the pattern is bounded, then set to exactly zero (LINEAR_ALGEBRA.md "Structural Sparsity")
 - Runtime sample rate: `set_sample_rate()` recomputes matrices from G+C (the route does not change; compile per host rate)
 - Inductors are built on augmented MNA rows (`DkKernel::from_mna_augmented`) on every shipped route; `CircuitIR::from_kernel` refuses a kernel carrying companion-modelled inductors
 
@@ -507,13 +507,12 @@ f36e99c.
      limit-cycle detector at exactly fs/2, e.g. `fs2_limit_cycle_dbc`), with
      the old name a deprecated alias for one release; correct any doc that
      quoted it as aliasing in the same change.
-- **Generated terms are chosen by exact zero, by design.** Codegen emits a
-  matrix term whenever its constant is not exactly 0.0, so a ~1e-19 entry left
-  by roundoff becomes one extra multiply-add (seen on farfisa-se15-preamp's
-  `K_BE`). That is the safe choice: a magnitude threshold could silently drop a
-  genuine small coupling. If term count ever matters for CPU, the principled
-  form is structural sparsity (zeros implied by topology, computed
-  symbolically), never a numeric cutoff.
+- **Generated terms are chosen by structure, never by magnitude.** The K and S
+  patterns come from the topology (`structural.rs`; LINEAR_ALGEBRA.md
+  "Structural Sparsity"), so a roundoff entry outside the pattern (~1e-19 on
+  farfisa-se15-preamp's `K_BE`) is set to zero and emits nothing, while a
+  genuine small coupling inside it (gravity-stereo's 1e-24..1e-37 DC-path
+  entries) is always emitted. A numeric cutoff would get both wrong.
 - **Seed parasitic-BJT internal nodes from the `.linearize` bias point.** The linearized circuit's DC solve starts at the bias point by node name, but parasitic-BJT internal nodes (RB/RC/RE) still get their fixed-offset initialisation (emitter at base − 0.65 V), so decks with them converge in more than 2 iterations (wurli-power-amp 9, farfisa-se15-preamp 21, against 2–3 elsewhere). Seeding them from the bias solve's device state would make the seed complete. Low value: those decks already converge.
 - **Loop-based Gaussian elimination above the unrolled range.** `MAX_M` (32) exists only because every route emits its Newton solve as fully unrolled elimination, about M³/3 statements. A loop-based elimination for M above the unrolled range would remove the per-M ceiling, leaving the real cost limits. Input, measured 2026-09-30 on a synthetic diode-pair ladder (Ryzen 9 7950X, `rustc -O`, x86-64-v3, one codegen unit; perf-harness ns/sample): M=24 → M=32 source 346 → 547 kB (DK), 596 → 918 kB (Schur), 466 → 677 kB (full LU); compile 0.48 → 0.70 s, 3.18 → 5.68 s (663 MB peak), 2.54 → 3.53 s; 5.9 → 9.9, 6.3 → 10.3, 6.8 → 8.9 µs/sample. Not queued.
 - **Pentode plate kink at `Vpk = 0` (model question, for analog-EE review).** Below `Vpk = 0` the pentode models hold the plate current at zero; above it the current rises with a finite slope, so the plate current has a derivative jump there. Newton straddling it can cycle between the two sides: on axe-15 (push-pull EL84 whose plate the transformer drives to the cathode), six samples at 0.1 V exhaust the primary Newton in a period-2 cycle with the root at `Vpk ≈ 0.27 V`; the sub-step ladder resolves all six. Whether a real pentode's plate current near `Vpk = 0` should be smoothed (and how) is a device-physics call, not a solver one; nothing changed.

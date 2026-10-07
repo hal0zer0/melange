@@ -104,7 +104,8 @@ impl CircuitIR {
         // is the promoted rebuild) — no trap pair is shipped then.
         let os_trap_s = if os_factor > 1 && !cfg_backward_euler && promoted.is_none() {
             let a_flat = build_dk_trap_a_at_rate(&g_matrix, &c_matrix, n, internal_rate);
-            Some(invert_flat_matrix(&a_flat, n)?)
+            let s = invert_flat_matrix(&a_flat, n)?;
+            Some((a_flat, s))
         } else {
             None
         };
@@ -182,7 +183,9 @@ impl CircuitIR {
             generator_version: env!("CARGO_PKG_VERSION").to_string(),
         };
 
-        let matrices = if os_factor > 1 && be {
+        // Each branch also yields the A its S was inverted from (and the BE
+        // fallback's A_be) for the structural-sparsity rounding bound.
+        let (mut matrices, a_of_s, a_of_s_be) = if os_factor > 1 && be {
             // BE + oversampling: build backward-Euler matrices at the
             // INTERNAL rate, mirroring the os=1 BE branch below. This branch
             // previously did not exist — the oversampled path unconditionally
@@ -195,7 +198,7 @@ impl CircuitIR {
             // first runtime `rebuild_matrices()` silently swapped the
             // convention to consistent BE, stepping the operating point
             // mid-signal.
-            let (s, a_neg_flat, rhs_const_be) = build_dk_be_matrices_at_rate(
+            let (s, a_neg_flat, rhs_const_be, a_of_s) = build_dk_be_matrices_at_rate(
                 &g_matrix,
                 &c_matrix,
                 n,
@@ -217,36 +220,42 @@ impl CircuitIR {
                 &config.input_node_indices(),
             );
             let k = compute_k_from_s(&s, &kernel.n_v, &kernel.n_i, n, m);
-            Matrices {
-                s,
-                a_neg: a_neg_flat,
-                k,
-                n_v: kernel.n_v.clone(),
-                n_i: kernel.n_i.clone(),
-                rhs_const: rhs_const_be,
-                g_matrix,
-                c_matrix,
-                a_matrix: Vec::new(),
-                a_matrix_be: Vec::new(),
-                // Primary integrator is already BE — no BE fallback set
-                // (mirrors the os=1 BE branch).
-                a_neg_be: Vec::new(),
-                rhs_const_be: Vec::new(),
-                s_be: Vec::new(),
-                k_be: Vec::new(),
-                spectral_radius_s_aneg: 0.0,
-            }
+            let a_of_s_be: Option<Vec<f64>> = None;
+            (
+                Matrices {
+                    s,
+                    a_neg: a_neg_flat,
+                    k,
+                    n_v: kernel.n_v.clone(),
+                    n_i: kernel.n_i.clone(),
+                    rhs_const: rhs_const_be,
+                    g_matrix,
+                    c_matrix,
+                    a_matrix: Vec::new(),
+                    a_matrix_be: Vec::new(),
+                    // Primary integrator is already BE — no BE fallback set
+                    // (mirrors the os=1 BE branch).
+                    a_neg_be: Vec::new(),
+                    rhs_const_be: Vec::new(),
+                    s_be: Vec::new(),
+                    k_be: Vec::new(),
+                    spectral_radius_s_aneg: 0.0,
+                },
+                a_of_s,
+                a_of_s_be,
+            )
         } else if os_factor > 1 {
             // Trapezoidal + oversampling: the internal-rate S was already
             // built above.
-            let s = os_trap_s.expect("internal-rate trap S built when os>1 and trap ships");
+            let (a_of_s, s) =
+                os_trap_s.expect("internal-rate trap S built when os>1 and trap ships");
 
             // Compute K = N_v * S * N_i
             let k = compute_k_from_s(&s, &kernel.n_v, &kernel.n_i, n, m);
 
             // Compute BE fallback matrices for adaptive per-sample fallback
             let want_be_fallback = !config.backward_euler && !config.disable_be_fallback && m > 0;
-            let (s_be, k_be, a_neg_be, rhs_const_be) = if want_be_fallback {
+            let (s_be, k_be, a_neg_be, rhs_const_be, a_be) = if want_be_fallback {
                 compute_dk_be_fallback(
                     &g_matrix,
                     &c_matrix,
@@ -259,32 +268,37 @@ impl CircuitIR {
                     mna,
                 )?
             } else {
-                (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
             };
+            let a_of_s_be = want_be_fallback.then_some(a_be);
 
             // Charge form: history `alpha·C`, DC ×1.
-            Matrices {
-                s,
-                a_neg: charge_form_history(
-                    &c_matrix,
-                    n,
-                    2.0 * internal_rate,
-                    &topology.history_zero_rows,
-                ),
-                k,
-                n_v: kernel.n_v.clone(),
-                n_i: kernel.n_i.clone(),
-                rhs_const: rhs_const_1x(mna, n),
-                g_matrix,
-                c_matrix,
-                a_matrix: Vec::new(),
-                a_matrix_be: Vec::new(),
-                a_neg_be,
-                rhs_const_be,
-                s_be,
-                k_be,
-                spectral_radius_s_aneg: 0.0,
-            }
+            (
+                Matrices {
+                    s,
+                    a_neg: charge_form_history(
+                        &c_matrix,
+                        n,
+                        2.0 * internal_rate,
+                        &topology.history_zero_rows,
+                    ),
+                    k,
+                    n_v: kernel.n_v.clone(),
+                    n_i: kernel.n_i.clone(),
+                    rhs_const: rhs_const_1x(mna, n),
+                    g_matrix,
+                    c_matrix,
+                    a_matrix: Vec::new(),
+                    a_matrix_be: Vec::new(),
+                    a_neg_be,
+                    rhs_const_be,
+                    s_be,
+                    k_be,
+                    spectral_radius_s_aneg: 0.0,
+                },
+                a_of_s,
+                a_of_s_be,
+            )
         } else if be {
             // Backward Euler: recompute S, A_neg, K from G/C with alpha = 1/T
             let mut a_flat = vec![0.0f64; n * n];
@@ -312,6 +326,8 @@ impl CircuitIR {
                 &mna.bjt_internal_nodes,
             );
             let s_flat = invert_flat_matrix(&a_flat, n)?;
+            let a_of_s = a_flat;
+            let a_of_s_be: Option<Vec<f64>> = None;
             let k_flat = if m > 0 {
                 compute_k_from_s(&s_flat, &kernel.n_v, &kernel.n_i, n, m)
             } else {
@@ -338,28 +354,32 @@ impl CircuitIR {
                 n,
                 &config.input_node_indices(),
             );
-            Matrices {
-                s: s_flat,
-                a_neg: a_neg_flat,
-                k: k_flat,
-                n_v: kernel.n_v.clone(),
-                n_i: kernel.n_i.clone(),
-                rhs_const: rhs_const_be,
-                g_matrix,
-                c_matrix,
-                a_matrix: Vec::new(),
-                a_matrix_be: Vec::new(),
-                a_neg_be: Vec::new(),
-                rhs_const_be: Vec::new(),
-                s_be: Vec::new(),
-                k_be: Vec::new(),
-                spectral_radius_s_aneg: 0.0,
-            }
+            (
+                Matrices {
+                    s: s_flat,
+                    a_neg: a_neg_flat,
+                    k: k_flat,
+                    n_v: kernel.n_v.clone(),
+                    n_i: kernel.n_i.clone(),
+                    rhs_const: rhs_const_be,
+                    g_matrix,
+                    c_matrix,
+                    a_matrix: Vec::new(),
+                    a_matrix_be: Vec::new(),
+                    a_neg_be: Vec::new(),
+                    rhs_const_be: Vec::new(),
+                    s_be: Vec::new(),
+                    k_be: Vec::new(),
+                    spectral_radius_s_aneg: 0.0,
+                },
+                a_of_s,
+                a_of_s_be,
+            )
         } else {
             // Standard trapezoidal: use kernel matrices directly.
             // Also compute BE fallback matrices for adaptive per-sample fallback.
             let want_be_fallback = !config.disable_be_fallback && m > 0;
-            let (s_be, k_be, a_neg_be, rhs_const_be) = if want_be_fallback {
+            let (s_be, k_be, a_neg_be, rhs_const_be, a_be) = if want_be_fallback {
                 compute_dk_be_fallback(
                     &g_matrix,
                     &c_matrix,
@@ -372,33 +392,41 @@ impl CircuitIR {
                     mna,
                 )?
             } else {
-                (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
             };
+            let a_of_s_be = want_be_fallback.then_some(a_be);
+            // The kernel inverted G + 2·fs·C of this same (patched) MNA at this
+            // rate; the same expression on the stored G and C is that matrix.
+            let a_of_s = build_dk_trap_a_at_rate(&g_matrix, &c_matrix, n, internal_rate);
 
             // Charge form: history `alpha·C`, DC ×1. The whole-system
             // `kernel.a_neg` was the discriminator's operator only.
-            Matrices {
-                s: kernel.s.clone(),
-                a_neg: charge_form_history(
-                    &c_matrix,
-                    n,
-                    2.0 * internal_rate,
-                    &topology.history_zero_rows,
-                ),
-                k: kernel.k.clone(),
-                n_v: kernel.n_v.clone(),
-                n_i: kernel.n_i.clone(),
-                rhs_const: rhs_const_1x(mna, n),
-                g_matrix,
-                c_matrix,
-                a_matrix: Vec::new(),
-                a_matrix_be: Vec::new(),
-                a_neg_be,
-                rhs_const_be,
-                s_be,
-                k_be,
-                spectral_radius_s_aneg: 0.0,
-            }
+            (
+                Matrices {
+                    s: kernel.s.clone(),
+                    a_neg: charge_form_history(
+                        &c_matrix,
+                        n,
+                        2.0 * internal_rate,
+                        &topology.history_zero_rows,
+                    ),
+                    k: kernel.k.clone(),
+                    n_v: kernel.n_v.clone(),
+                    n_i: kernel.n_i.clone(),
+                    rhs_const: rhs_const_1x(mna, n),
+                    g_matrix,
+                    c_matrix,
+                    a_matrix: Vec::new(),
+                    a_matrix_be: Vec::new(),
+                    a_neg_be,
+                    rhs_const_be,
+                    s_be,
+                    k_be,
+                    spectral_radius_s_aneg: 0.0,
+                },
+                a_of_s,
+                a_of_s_be,
+            )
         };
 
         // BE fallback matrices are populated for nonlinear circuits (m>0) unless
@@ -606,7 +634,18 @@ impl CircuitIR {
         // The caller (detect_forward_active_bjts + CLI) handles MNA/kernel rebuild.
         // By the time we get here, kernel/mna already have the correct M dimension.
 
-        // Analyze sparsity patterns for compile-time matrices
+        // Which entries of S and K exist, from the circuit's structure rather
+        // than the computed values (rounding noise in the inverse is set to 0).
+        // The emitted K also carries the parasitic-BJT block (`state.k` holds
+        // K − R_p), whose positions the NR loop must not skip.
+        let structure = settle_structural_sparsity(
+            &mut matrices,
+            n,
+            m,
+            &parasitic_bjt_k_positions(&device_slots),
+            &a_of_s,
+            a_of_s_be.as_deref(),
+        )?;
         let sparsity = SparseInfo {
             a_neg: analyze_matrix_sparsity(&matrices.a_neg, n, n),
             n_v: analyze_matrix_sparsity(&matrices.n_v, m, n),
@@ -621,9 +660,9 @@ impl CircuitIR {
             } else {
                 analyze_matrix_sparsity(&matrices.a_neg_be, n, n)
             },
-            k: analyze_matrix_sparsity(&matrices.k, m, m),
+            k: sparsity_of_pattern(&structure.k),
             k_be: if matrices.k_be.len() == m * m && m > 0 {
-                analyze_matrix_sparsity(&matrices.k_be, m, m)
+                sparsity_of_pattern(&structure.k)
             } else {
                 MatrixSparsity {
                     rows: m,
@@ -634,6 +673,8 @@ impl CircuitIR {
             },
             lu: None, // DK path doesn't use full LU
             g_aug_density: 0.0,
+            a: sparsity_of_pattern(&structure.a),
+            noise_ratio: structure.noise_ratio,
         };
 
         let named_constants = build_named_constants(mna, topology.n_nodes);

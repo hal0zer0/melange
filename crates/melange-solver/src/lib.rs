@@ -87,6 +87,7 @@ pub mod model_params;
 pub mod parser;
 pub mod pipeline;
 mod saturating_core;
+pub(crate) mod structural;
 
 // The old solver module: re-exports LinearSolver and SolverError from
 // linear_solver. Deprecated with them (0.1.14); removed in the next release.
