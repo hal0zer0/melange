@@ -45,8 +45,19 @@ BIN="$WORK/driver"
 LOC=$(wc -l < "$CIRCUIT_RS")
 echo "  [$LABEL] generated circuit.rs: $LOC lines" >&2
 
-# 2. Append the timing driver and compile with the golden-harness regime (-O, edition 2024).
-cat "$CIRCUIT_RS" "$DRIVER_MAIN" > "$DRIVER_RS"
+# 2. Append a call shim for the generated signature, then the timing driver, and
+#    compile with the golden-harness regime (-O, edition 2024). A `.inject` deck's
+#    process_sample takes the host- and inner-rate injection arrays (zero here:
+#    the harness times the solver, not a sidechain) and returns the taps with the
+#    outputs; a runtime-oversampling build sizes the inner array by MAX_OVERSAMPLING.
+if grep -q '^pub const NUM_INJECT_HOST' "$CIRCUIT_RS"; then
+  ROWS=OVERSAMPLING_FACTOR
+  grep -q '^pub const MAX_OVERSAMPLING' "$CIRCUIT_RS" && ROWS=MAX_OVERSAMPLING
+  SHIM="#[inline(always)] fn ps(x: f64, s: &mut CircuitState) -> [f64; NUM_OUTPUTS] { process_sample(x, &[0.0; NUM_INJECT_HOST], &[[0.0; NUM_INJECT_INNER]; $ROWS], s).0 }"
+else
+  SHIM="#[inline(always)] fn ps(x: f64, s: &mut CircuitState) -> [f64; NUM_OUTPUTS] { process_sample(x, s) }"
+fi
+{ cat "$CIRCUIT_RS"; echo "$SHIM"; cat "$DRIVER_MAIN"; } > "$DRIVER_RS"
 # shellcheck disable=SC2086
 rustc "$DRIVER_RS" -o "$BIN" --edition=2024 -O $RUSTFLAGS_EXTRA >&2
 

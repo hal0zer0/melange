@@ -41,6 +41,10 @@ amount. ngspice validation residuals are unchanged.
   outside `K`'s pattern on the DK route.
 
 ### Fixed
+- `tools/perf-harness/bench.sh` benches `.inject` decks again: a call shim
+  chosen from the generated code supplies zero injection arrays (sized by
+  `MAX_OVERSAMPLING` on a runtime-oversampling build). It had failed to compile
+  on every `.inject` deck since 0.1.15's signature change.
 - `CircuitIR::from_kernel` on a capacitor-free nonlinear deck stored G and C
   without the 10 pF parasitic junction caps the DK kernel had already added to
   its own copy, so a rate change through `set_sample_rate` would have rebuilt

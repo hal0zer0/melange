@@ -10,6 +10,9 @@
 // path instead, compile the circuit with `--noise full` and add
 // `state.set_noise_enabled(true); state.set_seed(0xC0FFEE);` after construction.
 //
+// `ps` is the call shim bench.sh writes between the circuit and this driver:
+// it hides whether the generated `process_sample` takes injection arrays.
+//
 // Output: one JSON line on stdout. All other prose goes to stderr.
 fn main() {
     use std::hint::black_box;
@@ -44,14 +47,14 @@ fn main() {
     // Warmup: settle DC/smoothing, warm the branch predictor & i-cache.
     for i in 0..warmup {
         let x = 0.3 * (two_pi * 220.0 * (i as f64) / fs).sin();
-        black_box(process_sample(black_box(x), &mut state));
+        black_box(ps(black_box(x), &mut state));
     }
 
     let mut times: Vec<f64> = Vec::with_capacity(reps);
     for _ in 0..reps {
         let t0 = std::time::Instant::now();
         for &x in &sig {
-            black_box(process_sample(black_box(x), &mut state));
+            black_box(ps(black_box(x), &mut state));
         }
         times.push(t0.elapsed().as_secs_f64());
     }
