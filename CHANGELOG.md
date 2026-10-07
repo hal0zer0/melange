@@ -9,10 +9,16 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
-**What changes generated code or rendered audio:** nothing for an existing
-build. A deck declaring `.oversampling N allow=...`, or a `compile
---oversampling-set`, gets the new runtime-oversampling code; every other build
-generates the same code as before.
+**What changes generated code or rendered audio:** for an existing build,
+the emitted `K`/`K_BE` term set on 5 of 112 corpus decks (14 of 282 builds,
+every change a removal of rounding-noise terms); the baked `S`/`K` constants
+on 38 decks (noise entries now exactly `0.0`); no route, sub-path or
+integrator changes anywhere. Renders move only on the 5 decks that lost terms,
+by at most 1.1e-8 relative, which is the Newton loop's own termination band
+(it stops at `|step| ≤ 1e-3·|v| + 1e-6`): changing any present `K` entry by
+one ULP moves those renders by the same amount. ngspice validation residuals
+are unchanged. A deck declaring `.oversampling N allow=...`, or a `compile
+--oversampling-set`, gets the new runtime-oversampling code.
 
 ### Added
 
@@ -32,11 +38,46 @@ generates the same code as before.
     solvers (route, nodal sub-path, integrator, runtime latch, reductions,
     rail handling), one with a factor-dependent constant the runtime code
     does not switch (a time-dependent behavioral source's today), and one whose
-    generated code differs by factor (a coupling term below the 1e-20
-    sparsity threshold at one rate is omitted from that rate's code). Such a deck
-    is built once per factor. A default factor outside the set is refused.
+    generated code differs by factor in any other way (the emitted matrix terms
+    are chosen by the circuit's structure, the same at every rate, so a term
+    that is small at one rate is not such a difference). Such a deck is built
+    once per factor. A default factor outside the set is refused.
   - `--oversampling-set off` builds one fixed factor from a deck that declares
     a set.
+
+### Changed
+- **Which matrix terms the generated solver emits is decided by the circuit's
+  structure, not by the size of the computed value.** `S = A⁻¹` and
+  `K = N_v·S·N_i` take their pattern from the topology (`structural.rs`: the
+  stamped positions of G and C, the structural inverse by perfect matching
+  and reachability, boolean products), the same at every sample rate. The
+  absolute `1e-20` cutoff is gone. Pivoted inversion leaves rounding noise at
+  positions that are zero in exact arithmetic; those entries are now checked
+  against a derived rounding bound (`c·n·eps·cond∞` of the equilibrated
+  system, `c = 10`) and set to exactly `0.0`, so shipped constants and runtime
+  seeds carry no noise. Provenance gains `sparsity_noise_ratio` (the largest
+  `|entry|/bound` met; at most 1). On the corpus: 261 noise terms dropped
+  across 15 builds; 57 genuine sub-`1e-20` couplings the cutoff had dropped
+  are emitted again (gravity, gravity-stereo: rate-independent DC-path
+  entries). ngspice validation residuals are unchanged. Why now: with a
+  numeric cutoff the emitted structure depended on the rate, which the
+  runtime-selectable oversampling work (next release) cannot allow.
+- **Refused, as a melange bug, with the entry named:** a build whose rounding
+  noise outside the structural pattern exceeds its bound; a dynamic-parameter
+  setter writing a position outside `A`'s pattern; a parasitic-BJT block
+  outside `K`'s pattern on the DK route.
+
+### Fixed
+- `tools/perf-harness/bench.sh` benches `.inject` decks again: a call shim
+  chosen from the generated code supplies zero injection arrays (sized by
+  `MAX_OVERSAMPLING` on a runtime-oversampling build). It had failed to compile
+  on every `.inject` deck since 0.1.15's signature change.
+- `CircuitIR::from_kernel` on a capacitor-free nonlinear deck stored G and C
+  without the 10 pF parasitic junction caps the DK kernel had already added to
+  its own copy, so a rate change through `set_sample_rate` would have rebuilt
+  S without them. The IR builder now adds them itself. Builds through
+  `CodeGenerator` (every CLI verb) already did, so no shipped deck was
+  affected; the structural check found it in the IR round-trip tests.
 
 ## [0.1.16] - 2026-10-05
 

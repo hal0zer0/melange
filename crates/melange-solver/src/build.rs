@@ -1305,7 +1305,14 @@ pub fn build(
 /// other key describes the solver the code is (route, sub-path, integrator,
 /// latch, rail mode, reductions, budget), so it must agree across the set;
 /// a key added later is held to that by default.
-const PER_FACTOR_PROVENANCE_KEYS: [&str; 2] = ["oversampling", "integration_reason"];
+const PER_FACTOR_PROVENANCE_KEYS: [&str; 3] = [
+    "oversampling",
+    "integration_reason",
+    // The largest rounding-noise ratio met while settling the structural
+    // sparsity (LINEAR_ALGEBRA.md "Structural Sparsity"): a property of each
+    // factor's inversion, not of the solver's structure.
+    "sparsity_noise_ratio",
+];
 
 /// The top-level `(key, raw value text)` pairs of generated code's
 /// `// provenance: {...}` line, in order. The line is melange's own flat JSON
@@ -1593,10 +1600,11 @@ fn build_runtime_oversampling(
         per_factor_consts,
     };
     // The runtime code is emitted from one factor's IR, so the emission must
-    // not depend on which: an IR whose structure differs by factor (a matrix
-    // entry below SPARSITY_THRESHOLD at one rate, so its term is not emitted)
-    // would run the default factor's structure at every factor. Emit it from every
-    // factor's IR and require the same executable text.
+    // not depend on which: an IR whose structure differed by factor would run
+    // the default factor's structure at every factor. The emitted matrix
+    // patterns are structural (the same at every rate), so a difference here
+    // is a genuine one that provenance and the switched constants do not see.
+    // Emit it from every factor's IR and require the same executable text.
     let mut emissions = Vec::with_capacity(factors.len());
     for a in &factors {
         let mut prepared = a.prepared.clone();

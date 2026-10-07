@@ -251,14 +251,15 @@ the fixed build it would be, then:
   default factor's value. `OVERSAMPLING_FACTOR`, `INTERNAL_SAMPLE_RATE` and `ALPHA` are
   the default factor's (the last two are informational; no generated code reads them).
 - Emits the runtime code from **every** factor's IR and **refuses** the set unless the
-  emissions are the same executable text (`executable_text`: comment lines and the
-  `OVERSAMPLING_FACTOR`/`INTERNAL_SAMPLE_RATE`/`ALPHA`/`OS_COEFFS*` items dropped). The
-  emitters skip matrix entries below `SPARSITY_THRESHOLD` (1e-20, `lu.rs`), so an IR's
-  sparsity is rate-dependent: a `K_BE[i][j]` that is 0.0 at 1x and nonzero at 2x leaves
-  no `k_be[i][j] * i_nl[j]` term in code emitted from the 1x IR, which would run without
-  it at 2x. The
-  refusal quotes the first differing line. Provenance and constants alone cannot see
-  this; only the emitted structure can.
+  emissions are the same executable text (`executable_text`: blank and comment lines
+  and the `OVERSAMPLING_FACTOR`/`INTERNAL_SAMPLE_RATE`/`ALPHA`/`OS_COEFFS*` items
+  dropped). The emitted matrix patterns are structural (`structural.rs`;
+  LINEAR_ALGEBRA.md "Structural Sparsity"), the same at every rate, so a `K_BE[i][j]`
+  that is rounding noise at one rate and exactly zero at another emits the same term
+  set from either IR. This check therefore fires only on a genuine difference in the
+  emitted solver that provenance and the switched constants do not see; it is the
+  proof that one emission serves every factor. The refusal quotes the first differing
+  line.
 
 **Emission** (`rust_emitter/runtime_os.rs`, `emit_runtime_oversampler`):
 

@@ -692,9 +692,10 @@ Noise limitations:
   latch differs between factors, as on decks the ring predicate promotes to
   backward Euler at 1× only), when a factor-dependent constant is not one the
   runtime code switches (today: time-dependent behavioral sources), or when the
-  generated code itself differs by factor (a coupling term below the 1e-20
-  sparsity threshold at one rate is omitted from that rate's code). Build such
-  a deck once per factor. `validate`, `simulate`, `analyze` and `dc-op` build
+  generated code itself differs by factor in any other way (the emitted matrix
+  terms are chosen by the circuit's structure, the same at every rate, so a
+  term that is small at one rate is not such a difference). Build such a deck
+  once per factor. `validate`, `simulate`, `analyze` and `dc-op` build
   the default factor fixed.
 - `melange validate` does not read the deck's `.oversampling` recommendation;
   the factor must be given explicitly as `--oversampling {1|2|4}` (default 1).

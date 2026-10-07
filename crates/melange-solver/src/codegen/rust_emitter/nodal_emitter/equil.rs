@@ -85,7 +85,6 @@ pub(super) fn build_equil_pattern(
     ir: &CircuitIR,
     stamps: &std::collections::BTreeSet<(usize, usize)>,
 ) -> Option<EquilPattern> {
-    use crate::lu::SPARSITY_THRESHOLD;
     use std::collections::BTreeSet;
 
     let n = ir.topology.n;
@@ -110,8 +109,7 @@ pub(super) fn build_equil_pattern(
     // but not at some other host rate is still covered.
     for i in 0..n {
         for j in 0..n {
-            if g[i * n + j].abs() >= SPARSITY_THRESHOLD || c[i * n + j].abs() >= SPARSITY_THRESHOLD
-            {
+            if g[i * n + j] != 0.0 || c[i * n + j] != 0.0 {
                 set.insert((i, j));
             }
         }
@@ -128,7 +126,7 @@ pub(super) fn build_equil_pattern(
         let mut ni_rows: Vec<Vec<usize>> = vec![Vec::new(); m];
         for a in 0..n {
             for i in 0..m {
-                if ir.matrices.n_i[a * m + i].abs() >= SPARSITY_THRESHOLD {
+                if ir.matrices.n_i[a * m + i] != 0.0 {
                     ni_rows[i].push(a);
                 }
             }
@@ -141,7 +139,7 @@ pub(super) fn build_equil_pattern(
                         continue;
                     }
                     for b in 0..n {
-                        if ir.matrices.n_v[(s + dj) * n + b].abs() >= SPARSITY_THRESHOLD {
+                        if ir.matrices.n_v[(s + dj) * n + b] != 0.0 {
                             for &a in &ni_rows[s + di] {
                                 set.insert((a, b));
                             }

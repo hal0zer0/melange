@@ -25,7 +25,7 @@ AI agent consumption: dense equations, code patterns, cross-references, no narra
 | **Touching op-amp rail handling, Boyle macromodel, ActiveSet/ActiveSetBe** | **[OPAMP_RAIL_MODES.md](OPAMP_RAIL_MODES.md)** |
 | Changing diode/BJT/JFET/MOSFET/tube equations | [DEVICE_MODELS.md](DEVICE_MODELS.md) |
 | Changing Gummel-Poon BJT or qb() function | [GUMMEL_POON.md](GUMMEL_POON.md) |
-| Changing matrix inversion or linear solves | [LINEAR_ALGEBRA.md](LINEAR_ALGEBRA.md) |
+| Changing matrix inversion, linear solves, or which matrix terms are emitted (structural sparsity) | [LINEAR_ALGEBRA.md](LINEAR_ALGEBRA.md) |
 | Changing dynamic potentiometers (math) | [SHERMAN_MORRISON.md](SHERMAN_MORRISON.md) |
 | Adding `.pot` / `.wiper` / `.gang` / `.switch` directives | [DYNAMIC_PARAMS.md](DYNAMIC_PARAMS.md) |
 | Working on behavioral `B`-sources (arbitrary-expression V/I, ddt/idt, FM discriminator) | [BEHAVIORAL_SOURCES.md](BEHAVIORAL_SOURCES.md) |
@@ -143,7 +143,7 @@ K' = K - scale * (N_v * su) * (su^T * N_i)
 | [DEVICE_MODELS.md](DEVICE_MODELS.md) | Comprehensive | Diode, BJT, JFET, MOSFET, tube, op-amp equations |
 | [OPAMP_RAIL_MODES.md](OPAMP_RAIL_MODES.md) | Comprehensive | All 5 rail modes, BoyleDiodes scaffolding, heavy-clip root cause + rejected fixes + next-tier escalations |
 | [GUMMEL_POON.md](GUMMEL_POON.md) | Comprehensive | qb(), Early effect, high injection, GP Jacobian |
-| [LINEAR_ALGEBRA.md](LINEAR_ALGEBRA.md) | Comprehensive | LU, Gauss elim, equilibrated inversion, Sherman-Morrison |
+| [LINEAR_ALGEBRA.md](LINEAR_ALGEBRA.md) | Comprehensive | LU, Gauss elim, equilibrated inversion, Sherman-Morrison, structural sparsity |
 | [SHERMAN_MORRISON.md](SHERMAN_MORRISON.md) | Comprehensive | Rank-1 updates, precomputed vectors, multi-pot |
 | [DYNAMIC_PARAMS.md](DYNAMIC_PARAMS.md) | Reference | `.pot` / `.wiper` / `.gang` / `.switch` directives, plugin param emission |
 | [OVERSAMPLING.md](OVERSAMPLING.md) | Comprehensive | Polyphase allpass half-band, 2x/4x, coefficients |

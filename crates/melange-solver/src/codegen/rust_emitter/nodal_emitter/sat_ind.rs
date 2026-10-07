@@ -293,12 +293,14 @@ pub(super) fn emit_sat_ind_row_residual(
             );
             continue;
         }
-        // Structural nonzeros of row k of A = G + alpha*C, plus every position
-        // a dynamic-parameter setter can write into that row. Exact equality
-        // against 0.0 (not SPARSITY_THRESHOLD) so no small-but-real coupling is
+        // Structural nonzeros of row k of A = G + alpha*C (`sparsity.a`: G's
+        // and C's stamped positions), plus every position a dynamic-parameter
+        // setter can write into that row, so no small-but-real coupling is
         // ever dropped from the residual.
-        let mut cols: Vec<usize> = (0..n)
-            .filter(|&j| j != k && (g[k * n + j] != 0.0 || c[k * n + j] != 0.0))
+        let mut cols: Vec<usize> = ir.sparsity.a.nz_by_row[k]
+            .iter()
+            .copied()
+            .filter(|&j| j != k)
             .collect();
         for &(a, b) in setter_stamps.iter() {
             if a == k && b != k && !cols.contains(&b) {

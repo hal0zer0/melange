@@ -99,6 +99,28 @@ fn dk_q_dot_commit(ir: &CircuitIR, has_be_fallback: bool) -> String {
 impl RustEmitter {
     /// Emit DK-method generated code (original path).
     pub(super) fn emit_dk(&self, ir: &CircuitIR) -> Result<String, CodegenError> {
+        // `state.k` holds K − R_p on each parasitic-absorbed BJT's 2×2 block,
+        // and the NR loop reads K only at its pattern's positions: a block
+        // position outside the pattern would drop the parasitic drop.
+        let m = ir.topology.m;
+        for i in 0..m {
+            for j in 0..m {
+                if parasitic_r_p_dk(ir, i, j) != 0.0
+                    && !ir
+                        .sparsity
+                        .k
+                        .nz_by_row
+                        .get(i)
+                        .is_some_and(|r| r.contains(&j))
+                {
+                    return Err(CodegenError::InvalidConfig(format!(
+                        "structural sparsity: K[{i}][{j}] carries a parasitic BJT resistance \
+                         but is outside K's pattern. This is a melange bug; please report it \
+                         with the deck."
+                    )));
+                }
+            }
+        }
         let mut code = String::new();
         let noise = self.build_noise_emission(ir);
 

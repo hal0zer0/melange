@@ -9,9 +9,6 @@
 use crate::device_types::DeviceSlot;
 use serde::{Deserialize, Serialize};
 
-/// Threshold below which matrix entries are treated as structural zeros.
-pub const SPARSITY_THRESHOLD: f64 = 1e-20;
-
 /// Compile-time sparse LU elimination schedule.
 ///
 /// Computed from the G_aug = A - N_i*J_dev*N_v sparsity pattern. Consumed
@@ -74,13 +71,15 @@ pub struct BehavioralStamp {
 /// Compute sparsity pattern of G_aug = A - N_i * J_dev * N_v (plus behavioral
 /// B-source Jacobian stamps).
 ///
-/// The pattern is the union of A's nonzeros, the device Jacobian stamp
-/// positions, and the behavioral B-source Jacobian stamp positions.
+/// The pattern is the union of A's structural pattern (`a_pattern`: G's and
+/// C's stamped positions, so it does not depend on the rate), the device
+/// Jacobian stamp positions, and the behavioral B-source Jacobian stamp
+/// positions.
 /// This is topology-fixed: pot/switch changes only modify values, not positions.
 ///
 /// Returns per-row sorted lists of nonzero column indices.
 pub fn compute_g_aug_pattern(
-    a_flat: &[f64],
+    a_pattern: &[Vec<bool>],
     n_i_flat: &[f64],
     n_v_flat: &[f64],
     n: usize,
@@ -90,22 +89,16 @@ pub fn compute_g_aug_pattern(
 ) -> Vec<Vec<usize>> {
     use std::collections::BTreeSet;
 
-    // Start with A's nonzero pattern
-    let mut pattern: Vec<BTreeSet<usize>> = (0..n).map(|_| BTreeSet::new()).collect();
-
-    for i in 0..n {
-        for j in 0..n {
-            if a_flat[i * n + j].abs() >= SPARSITY_THRESHOLD {
-                pattern[i].insert(j);
-            }
-        }
-    }
+    // Start with A's structural pattern
+    let mut pattern: Vec<BTreeSet<usize>> = (0..n)
+        .map(|i| (0..n).filter(|&j| a_pattern[i][j]).collect())
+        .collect();
 
     // Add Jacobian stamp positions: N_i[:,dev_i] * N_v[dev_j,:]
     let mut ni_nz_by_dev = vec![Vec::new(); m];
     for a in 0..n {
         for i in 0..m {
-            if n_i_flat[a * m + i].abs() >= SPARSITY_THRESHOLD {
+            if n_i_flat[a * m + i] != 0.0 {
                 ni_nz_by_dev[i].push(a);
             }
         }
@@ -120,7 +113,7 @@ pub fn compute_g_aug_pattern(
             for dj in 0..dim {
                 let dev_j = s + dj;
                 for b in 0..n {
-                    if n_v_flat[dev_j * n + b].abs() >= SPARSITY_THRESHOLD {
+                    if n_v_flat[dev_j * n + b] != 0.0 {
                         for &a in ni_nodes {
                             pattern[a].insert(b);
                         }
@@ -423,7 +416,15 @@ mod tests {
             0.0, 2.0, 0.0, // row 1
             0.0, 0.0, 3.0, // row 2
         ];
-        let pattern = compute_g_aug_pattern(&a_flat, &[], &[], n, m, &[], &[]);
+        let pattern = compute_g_aug_pattern(
+            &crate::structural::nonzero_pattern(&a_flat, n, n),
+            &[],
+            &[],
+            n,
+            m,
+            &[],
+            &[],
+        );
         assert_eq!(pattern.len(), 3);
         assert_eq!(pattern[0], vec![0]);
         assert_eq!(pattern[1], vec![1]);
@@ -469,7 +470,15 @@ mod tests {
             stateful: None,
         }];
 
-        let pattern = compute_g_aug_pattern(&a_flat, &n_i_flat, &n_v_flat, n, m, &slots, &[]);
+        let pattern = compute_g_aug_pattern(
+            &crate::structural::nonzero_pattern(&a_flat, n, n),
+            &n_i_flat,
+            &n_v_flat,
+            n,
+            m,
+            &slots,
+            &[],
+        );
 
         // Node 0 and 1 should connect to each other (from A tridiagonal + device stamps)
         assert!(pattern[0].contains(&0));
@@ -503,7 +512,15 @@ mod tests {
             n_minus_idx: 0,
             referenced_node_indices: vec![2, 3, 0], // cols 1, 2 (+ ground skipped)
         };
-        let pattern = compute_g_aug_pattern(&a_flat, &[], &[], n, 0, &[], &[bsrc_v]);
+        let pattern = compute_g_aug_pattern(
+            &crate::structural::nonzero_pattern(&a_flat, n, n),
+            &[],
+            &[],
+            n,
+            0,
+            &[],
+            &[bsrc_v],
+        );
         // Constraint row gains the ∂f/∂V(k) columns:
         assert!(pattern[4].contains(&1), "aug row must contain ref col 1");
         assert!(pattern[4].contains(&2), "aug row must contain ref col 2");
@@ -521,7 +538,15 @@ mod tests {
             n_minus_idx: 4,                   // matrix row 3
             referenced_node_indices: vec![3], // col 2
         };
-        let pattern_i = compute_g_aug_pattern(&a_flat, &[], &[], n, 0, &[], &[bsrc_i]);
+        let pattern_i = compute_g_aug_pattern(
+            &crate::structural::nonzero_pattern(&a_flat, n, n),
+            &[],
+            &[],
+            n,
+            0,
+            &[],
+            &[bsrc_i],
+        );
         assert!(pattern_i[0].contains(&2), "n+ row must contain ref col");
         assert!(pattern_i[3].contains(&2), "n- row must contain ref col");
         // No aug-row stamps for I={}:

@@ -442,7 +442,7 @@ impl CircuitIR {
             charge_form_history(&c_matrix, n, alpha, &topology.history_zero_rows)
         };
         let rhs_const = rhs_const_be.clone();
-        let matrices = Matrices {
+        let mut matrices = Matrices {
             s: s_flat,
             k: k_flat,
             a_neg: a_neg_flat,
@@ -558,12 +558,17 @@ impl CircuitIR {
         let behavioral_pattern_complete = behavioral_stamp_patterns
             .iter()
             .all(|b| !b.is_voltage || b.aug_row.is_some());
+        // Which entries of S and K exist, from the circuit's structure rather
+        // than the computed values (rounding noise in the inverse is set to 0).
+        let (a_of_s, a_of_s_be) = (matrices.a_matrix.clone(), matrices.a_matrix_be.clone());
+        let structure =
+            settle_structural_sparsity(&mut matrices, n, m, &[], &a_of_s, Some(&a_of_s_be))?;
         let mut g_aug_density = 0.0f64;
         let lu_sparsity = if m > 0 && behavioral_pattern_complete {
             // Compute G_aug = A - N_i*J_dev*N_v sparsity pattern
             // (+ behavioral B-source stamp positions)
             let g_aug_pattern = lu::compute_g_aug_pattern(
-                &matrices.a_matrix,
+                &structure.a,
                 &matrices.n_i,
                 &matrices.n_v,
                 n,
@@ -613,9 +618,9 @@ impl CircuitIR {
             } else {
                 analyze_matrix_sparsity(&matrices.a_neg_be, n, n)
             },
-            k: analyze_matrix_sparsity(&matrices.k, m, m),
+            k: sparsity_of_pattern(&structure.k),
             k_be: if matrices.k_be.len() == m * m && m > 0 {
-                analyze_matrix_sparsity(&matrices.k_be, m, m)
+                sparsity_of_pattern(&structure.k)
             } else {
                 MatrixSparsity {
                     rows: m,
@@ -626,6 +631,8 @@ impl CircuitIR {
             },
             lu: lu_sparsity,
             g_aug_density,
+            a: sparsity_of_pattern(&structure.a),
+            noise_ratio: structure.noise_ratio,
         };
 
         let named_constants = build_named_constants(mna, topology.n_nodes);

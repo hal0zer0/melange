@@ -229,3 +229,74 @@ flatten_matrix(M, r, c)    2D -> 1D row-major (index = row * cols + col)
 | Transformer inversion (`mna/helpers.rs:invert_small_matrix`) | 1e-30 | Error: a singular or non-finite inductance matrix is refused (`DkError::SingularMatrix` / `MnaError::TopologyError`) |
 | Codegen sample-rate rebuild (`state.rs.tera:invert_n`) | 1e-30 | Identity matrix + flag |
 | SM denominator | 1e-15 | scale = 0 (no correction) |
+
+## Structural Sparsity
+
+> `structural.rs` (patterns), `codegen/ir/matrix_helpers.rs::settle_structural_sparsity`
+> (the settlement every IR build runs before `SparseInfo` is filled)
+
+Which entries of the inverse-derived matrices (`S = A⁻¹`, `K = N_v·S·N_i`, and their
+backward-Euler twins) the generated code treats as present is decided from the circuit's
+**topology**, never from the computed values. Pivoted inversion leaves rounding noise
+(1e-35 to 1e-19 against entries near 1e5) at positions that are zero in exact arithmetic,
+and which noise entries clear any magnitude cutoff changes with the sample rate; a cutoff
+can also drop a genuine small coupling. The pattern has neither problem.
+
+```
+A_pat[i][j]  = G[i][j] != 0  or  C[i][j] != 0         (stamped positions; rate-free)
+S_pat        = structural inverse of A_pat:
+                 1. perfect matching of columns to rows (Kuhn), so the permuted
+                    B = P·A has a structural nonzero on every diagonal; the
+                    voltage-source branch rows of MNA have zero diagonals
+                 2. (B⁻¹)[i][k] may be nonzero iff k is reachable from i in the
+                    graph of B  (Gilbert 1994, "Predicting structure in sparse
+                    matrix computations", SIAM J. Matrix Anal. Appl. 15(1))
+                 3. A⁻¹ = B⁻¹·P maps column k back to column row_of_col[k]
+K_pat        = N_v_pat · S_pat · N_i_pat                (boolean products)
+               + the 2×2 block of every parasitic-absorbed BJT on the DK route
+                 (state.k holds K − R_p there)
+```
+
+`S_pat` is an upper bound: an entry it admits may still be zero for particular values,
+never the other way round. A structurally singular `A_pat` (no matching exists) is refused.
+
+**Settlement.** Every entry of S, S_BE, K and K_BE outside its pattern is provably zero,
+so the computed value there is inversion noise. Each is checked against the rounding
+bound below and then set to exactly `0.0`, so shipped constants and runtime seeds carry
+no noise. A value above the bound means the pattern missed a stamped position, a melange
+bug: the build is refused naming the matrix entry. The bound follows how
+`invert_flat_matrix` works (row then column equilibration, then pivoted elimination):
+
+```
+Â = diag(dr)·A·diag(dc)       equilibrated system;  Ŝ = Â⁻¹,  S = diag(dc)·Ŝ·diag(dr)
+E = c·n·eps·cond∞(Â)·max|Ŝ|   per-entry error of the pivoted inverse of Â, c = 10
+                               (STRUCTURAL_NOISE_SAFETY: a stated multiple of the
+                               classical n·eps·cond bound)
+|S[i][j]|  must be ≤ E·dc[i]·dr[j]
+|K[i][j]|  must be ≤ E·(Σ_a |N_v[i][a]|·dc[a])·(Σ_b dr[b]·|N_i[b][j]|)
+```
+
+Each build path passes the `A` its inversion actually used (nodal: `a_matrix`,
+`a_matrix_be`; DK: the trap or BE `A` the branch formed, the BE-fallback `A_be`), so the
+estimate is of that matrix and there is no fallback. The largest `|entry|/bound` met is
+`sparsity_noise_ratio` in provenance (≤ 1 on every build that was not refused; corpus
+2026-10-05, 282 builds: largest 4.2e-4 on `overdrive_pedal` at 4×, 21 builds above 1e-6,
+most below 1e-12).
+
+**Consistency checks (fail loud).** The nodal emitter refuses a build whose recorded
+dynamic-parameter setter positions fall outside `A_pat` (`sparsity.a`); the DK emitter
+refuses one whose parasitic-BJT block falls outside `K_pat`. Every other pattern user
+(`lu::compute_g_aug_pattern`, the equilibration pattern, the KCL residual and the
+saturating-inductor residual) reads `sparsity.a` or exact `!= 0.0` on stamp-assembled
+matrices.
+
+**Measured on the corpus (112 decks × 1/2/4×, 2026-10-05):** K terms 7819 → 7615: 261
+rounding-noise terms dropped (15 builds), 57 genuine sub-1e-20 couplings added (gravity,
+gravity-stereo; rate-independent DC-path entries the old cutoff silently dropped; both are
+full-LU builds, where K's pattern governs no emitted product, so only their baked
+literals changed). No route changed. Renders moved only on the five decks that lost
+terms, by ≤ 1.1e-8 relative: the Newton termination band (`|step| ≤ 1e-3·|v| + 1e-6`),
+reproduced by changing any present K entry by one ULP. The largest-loss deck
+(rexi-mockup, 1096 → 992 terms) benched 4564 → 4395 ns/sample, inside the harness's noise
+width.
+

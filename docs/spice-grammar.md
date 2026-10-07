@@ -1501,12 +1501,14 @@ distinct factors and must include `N`. `compile --oversampling-set a,b,c` gives 
 overrides the set (`--oversampling-set off` builds one fixed factor from the deck), and
 `--oversampling` picks the default within it. The build compiles each factor as the
 fixed build it would be and **refuses the set** when they are not one solver (a
-different route, nodal sub-path, integrator, latch or rail handling, or different
-generated code: a coupling term that is zero, or below the emitter's 1e-20 sparsity
-threshold, at one factor's rate is never emitted, so that factor's code lacks it), naming the factor and the difference;
-build such a deck once per factor instead. At every factor the runtime code computes exactly what that factor's fixed
-build computes, with the Newton budget the largest any factor tunes. A factor below `N`
-is allowed (it is the plugin's CPU/accuracy choice) and flagged in provenance.
+different route, nodal sub-path, integrator, latch or rail handling, or any other
+difference in the generated code; the matrix terms the code carries are chosen by
+the circuit's structure, the same at every rate, so a term that is small at one
+factor's rate does not split a set), naming the factor and the difference; build
+such a deck once per factor instead. At every factor the runtime code computes
+exactly what that factor's fixed build computes, with the Newton budget the
+largest any factor tunes. A factor below `N` is allowed (it is the plugin's
+CPU/accuracy choice) and flagged in provenance.
 
 **Resolution (compile / simulate / analyze — the shipping path):**
 - An explicit `--oversampling` on the command line **always wins**, even when it

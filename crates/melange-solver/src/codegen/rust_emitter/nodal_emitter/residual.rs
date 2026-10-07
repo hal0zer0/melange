@@ -233,24 +233,18 @@ fn emit_sparse_a_residual_matvec(
     rows: &[usize],
     indent: &str,
 ) -> Option<String> {
-    use crate::lu::SPARSITY_THRESHOLD;
     use std::collections::BTreeSet;
     let n = ir.topology.n;
     let a = &ir.matrices.a_matrix;
     let a_be = &ir.matrices.a_matrix_be;
-    if a.len() != n * n || a_be.len() != n * n {
+    if a.len() != n * n || a_be.len() != n * n || ir.sparsity.a.nz_by_row.len() != n {
         return None;
     }
     let mut code = String::new();
     for &i in rows {
-        let mut cols: BTreeSet<usize> = BTreeSet::new();
-        for j in 0..n {
-            if a[i * n + j].abs() >= SPARSITY_THRESHOLD
-                || a_be[i * n + j].abs() >= SPARSITY_THRESHOLD
-            {
-                cols.insert(j);
-            }
-        }
+        // A's structural pattern (G's and C's stamped positions) covers both
+        // the trapezoidal A and the backward-Euler A_be at any rate.
+        let mut cols: BTreeSet<usize> = ir.sparsity.a.nz_by_row[i].iter().copied().collect();
         for &(r, c) in setter_stamps {
             if r == i {
                 cols.insert(c);

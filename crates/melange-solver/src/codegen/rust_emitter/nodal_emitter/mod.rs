@@ -490,6 +490,22 @@ impl RustEmitter {
         let mut setter_stamps: std::collections::BTreeSet<(usize, usize)> =
             std::collections::BTreeSet::new();
         code.push_str(&self.emit_nodal_state(ir, use_full_nodal, &noise, &mut setter_stamps));
+        // The structural pattern of S and K was derived from A's stamped
+        // positions; a setter writing outside them would change entries that
+        // pattern (and every sparse loop built on it) treats as zero.
+        if let Some(&(r, c)) = setter_stamps.iter().find(|&&(r, c)| {
+            !ir.sparsity
+                .a
+                .nz_by_row
+                .get(r)
+                .is_some_and(|row| row.contains(&c))
+        }) {
+            return Err(CodegenError::InvalidConfig(format!(
+                "structural sparsity: a dynamic-parameter setter writes A[{r}][{c}], which is \
+                 outside A's structural pattern (no component is stamped there at its nominal \
+                 value). This is a melange bug; please report it with the deck."
+            )));
+        }
         let equil_pat = build_equil_pattern(ir, &setter_stamps);
         if let Some(p) = &equil_pat {
             log::info!(

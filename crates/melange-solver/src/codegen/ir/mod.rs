@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::dc_op::{self, DcOpConfig};
 use crate::dk::{self, DkKernel};
-use crate::lu::{self, SPARSITY_THRESHOLD};
+use crate::lu;
 pub use crate::lu::{LuOp, LuSparsity};
 use crate::mna::MnaSystem;
 use crate::model_params::ModelClass;
@@ -1415,8 +1415,10 @@ pub use crate::device_types::{
 /// Sparsity pattern for a single matrix.
 ///
 /// Stores per-row lists of nonzero column indices, enabling emitters to
-/// skip structural zeros without ad-hoc `!= 0.0` checks. Entries with
-/// `|x| < SPARSITY_THRESHOLD` are treated as structural zeros.
+/// skip structural zeros without ad-hoc `!= 0.0` checks. Stamp-assembled
+/// matrices list their written positions; the inverse-derived K and K_BE list
+/// their structural pattern (`crate::structural`), which does not depend on
+/// the values or the sample rate.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MatrixSparsity {
     pub rows: usize,
@@ -1446,12 +1448,21 @@ pub struct SparseInfo {
     pub a_neg_be: MatrixSparsity,
     /// K matrix (M×M) — nonlinear kernel
     pub k: MatrixSparsity,
-    /// K_be matrix (M×M) — the backward-Euler kernel, so a trapezoidal Schur
-    /// build's BE solve skips exactly the entries a BE build's `k` pattern
-    /// skips (the threshold drops tiny values, not only zeros). Empty when
+    /// K_be matrix (M×M) — the backward-Euler kernel. The same structural
+    /// pattern as `k` (`G + C/T` has the pattern of `G + alpha·C`). Empty when
     /// there is no BE kernel.
     #[serde(default)]
     pub k_be: MatrixSparsity,
+    /// Structural pattern of the forward matrix `A = G + alpha·C` and its
+    /// backward-Euler twin: the union of G's and C's stamped positions. Every
+    /// position a dynamic-parameter setter writes must lie inside it.
+    #[serde(default)]
+    pub a: MatrixSparsity,
+    /// The largest `|entry| / rounding bound` over the S, S_BE, K and K_BE
+    /// entries outside their structural pattern, which were set to zero (see
+    /// `settle_structural_sparsity`). At most 1; recorded in provenance.
+    #[serde(default)]
+    pub noise_ratio: f64,
     /// Sparse LU elimination schedule for G_aug (full LU path only)
     pub lu: Option<LuSparsity>,
     /// G_aug sparsity-pattern density (0.0..1.0 fraction of nonzeros)
@@ -1462,7 +1473,7 @@ pub struct SparseInfo {
     pub g_aug_density: f64,
 }
 
-// LuSparsity, LuOp, and SPARSITY_THRESHOLD are defined in crate::lu
+// LuSparsity and LuOp are defined in crate::lu
 // and re-imported at the top of this file.
 
 /// Blanket-zero ALL augmented algebraic rows (`n_nodes..mna_n_aug`) in a DK
@@ -1652,7 +1663,7 @@ fn build_dk_trap_a_at_rate(g_matrix: &[f64], c_matrix: &[f64], n: usize, rate: f
     a_flat
 }
 
-/// Build the DK backward-Euler (S, A_neg, rhs_const) set from raw G/C at an
+/// Build the DK backward-Euler (S, A_neg, rhs_const, A) set from raw G/C at an
 /// arbitrary rate. Used by the BE + oversampling bake so the shipped
 /// constants use ONE integrator convention: A = G + (1/T)·C,
 /// A_neg = (1/T)·C (no −G term), rhs_const ×1 — exactly mirroring the
@@ -1669,7 +1680,7 @@ fn build_dk_be_matrices_at_rate(
     mna_n_aug: usize,
     rate: f64,
     mna: &MnaSystem,
-) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), CodegenError> {
+) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>), CodegenError> {
     let alpha = rate; // BE: alpha = 1/T
 
     let mut a_flat = vec![0.0f64; n * n];
@@ -1709,7 +1720,7 @@ fn build_dk_be_matrices_at_rate(
         }
     }
 
-    Ok((s, a_neg_flat, rhs_const_be))
+    Ok((s, a_neg_flat, rhs_const_be, a_flat))
 }
 
 /// Resolve the effective `(backward_euler, force_trap, selection)` triple
@@ -1893,6 +1904,21 @@ impl CircuitIR {
         config: &CodegenConfig,
         dc_op_result: Option<dc_op::DcOpResult>,
     ) -> Result<Self, CodegenError> {
+        // `DkKernel::from_mna` adds the parasitic junction caps to its own copy
+        // of a capacitor-free nonlinear MNA, so its S inverts G + alpha·C with
+        // them. The IR's G and C must be that same system (the generated
+        // code rebuilds S from them on a rate change, and the structural
+        // pattern of S is derived from them), so add them here too. A caller
+        // that already did (`CodeGenerator`) passes an MNA that needs none.
+        let patched;
+        let mna = if mna.needs_parasitic_caps() {
+            let mut m = mna.clone();
+            m.add_parasitic_caps();
+            patched = m;
+            &patched
+        } else {
+            mna
+        };
         let dc_op_result = match dc_op_result {
             Some(dc) => dc,
             None => solve_dc_op(mna, netlist, config)?,

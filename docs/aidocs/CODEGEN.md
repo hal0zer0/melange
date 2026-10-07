@@ -667,8 +667,16 @@ and recomputes all matrices at the internal rate.
 
 ## Sparsity-Aware Emission
 
-The IR includes `SparseInfo` with per-matrix nonzero entry lists (threshold: `|x| < 1e-20` = structural zero).
-The emitter skips zero entries uniformly in:
+The IR includes `SparseInfo` with per-matrix lists of the entries that exist. For a
+matrix assembled from stamps (`A_neg`, `N_v`, `N_i`) that is the set of positions holding
+a value other than exactly `0.0`. For `K` and `K_BE`, which are formed through `S = A⁻¹`,
+it is the **structural pattern** derived from the circuit's topology
+(`crate::structural`, see LINEAR_ALGEBRA.md "Structural Sparsity"): the same at every
+sample rate, independent of the computed values, and never missing a real coupling.
+Entries of S, S_BE, K and K_BE outside that pattern are rounding noise from the inversion;
+they are checked against a bound and set to exactly `0.0` before emission. There is no
+magnitude cutoff anywhere in emission.
+The emitter skips absent entries uniformly in:
 - `build_rhs`: A_neg * v_prev multiplication
 - `extract_controlling_voltages`: N_v * v_pred
 - `solve_nonlinear`: K * i_nl
@@ -721,7 +729,7 @@ companion-model inductors) is not the charge form generated code ships. See
 | Device coverage | Diode (1D), BJT (2D; 1D forward-active only under opt-in `--bjt-fa auto\|force`), JFET (2D), MOSFET (2D), Triode (2D), Pentode (3D; 2D only under opt-in `--tube-grid-fa on`), VCA (2D), Op-amp (linear) |
 | DC OP init | `DC_NL_I` constant automatically initializes `i_nl_prev` |
 | Oversampling | 2× / 4× cascaded polyphase half-band IIR |
-| Sparsity | Zero entries skipped in emission (per-matrix `SparseInfo`) |
+| Sparsity | Absent entries skipped in emission (per-matrix `SparseInfo`; K/K_BE by structural pattern) |
 | Sample rate | `set_sample_rate()` recomputes S, A_neg, K, S_NI from emitted G+C |
 | Multi-output | Any number of output nodes in `--format code` (`process_sample` returns one value per node); `--format plugin` takes 1 (mono; with `--stereo`, one circuit instance per channel) or 2 (stereo, one node per channel) and refuses more. The plugin wrapper is `tools/melange-cli/src/plugin_template.rs`; `circuit.rs` is the same for every layout |
 | Potentiometers | Per-block matrix rebuild on `set_pot` (Sherman-Morrison removed) |

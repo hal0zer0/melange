@@ -204,8 +204,9 @@ re-apply controls and re-warm after it, as after construction). At every factor
 it computes exactly what a build fixed at that factor computes. melange builds
 each factor and refuses the set, saying what differs, when the factors would
 not be the same solver: on some circuits the integrator or solver route chosen
-at one rate is not the one chosen at another, and on some a coupling term that
-is negligible at one rate (below 1e-20) is left out of that rate's code. Build those once
+at one rate is not the one chosen at another. (Which matrix terms the code
+carries is decided by the circuit's structure, the same at every rate, so a
+term that is merely small at one rate does not split a set.) Build those once
 per factor.
 
 ⚠️ **Without `allow=`, the factor is compile-time structural.** `set_sample_rate()`
