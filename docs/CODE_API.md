@@ -246,8 +246,11 @@ could never move does not read as reassurance. Code that must work on any
 build reads the unified count instead.
 
 All three are `u64`, cleared by `reset()`, and free to read on the audio
-thread. They count every sample `process_sample` ran, including the silent
-warm-up samples `CircuitState::default()` and `reset()` run.
+thread. They count inner-rate solves, including the silent warm-up samples
+`CircuitState::default()` and `reset()` run: at oversampling `N` one host
+sample can contribute up to `N`. (`diag_runtime_nan_count`, by contrast,
+counts once per host sample, because the value it counts arrives once per
+host sample; a counter's unit follows the rate of the event it counts.)
 
 Treat nonzero as "this render is not trustworthy", not as "quality degraded".
 It is not a rounding error: measured on one deck, 43199 held samples out of
