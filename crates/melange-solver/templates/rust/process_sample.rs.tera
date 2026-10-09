@@ -40,7 +40,11 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
     // guard catches any runaway.
     let mut injections = injections;
     for v in injections.iter_mut() { *v = if v.is_finite() { *v } else { state.diag_runtime_nan_count += 1; 0.0 }; }
-{% endif %}{{ runtime_sanitize_block }}
+{% endif %}{{ runtime_sanitize_block }}    // Set by any failure mechanism this sample (unconverged commit, reduced-model
+    // exit); the NaN/magnitude reset returns early and counts itself. Counted
+    // ONCE in diag_unsolved_sample_count, whichever mechanisms fired.
+    #[allow(unused_mut)]
+    let mut unsolved_sample = false;
 {% if num_switches > 0 or num_pots > 0 %}
     // Lazy rebuild: process all pot/switch changes in one batch
     if state.matrices_dirty {
@@ -175,7 +179,7 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
 {% if m > 0 %}    let unsolved = state.last_nr_iterations >= MAX_ITER as u32;
     if unsolved {
         state.diag_nr_unconverged_commit_count = state.diag_nr_unconverged_commit_count.saturating_add(1);
-        state.diag_unsolved_sample_count = state.diag_unsolved_sample_count.saturating_add(1);
+        unsolved_sample = true;
     }
 {% else %}    let unsolved = false;
 {% endif %}    let (v, i_nl) = {
@@ -268,6 +272,9 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
 {% endif %}{% if oversampling_4x %}        state.os_up_state_outer = [0.0; {{ os_state_size_outer }}];
         state.os_dn_state_outer = [[0.0; {{ os_state_size_outer }}]; NUM_OUTPUTS];
 {% endif %}{{ inject_os_reset_state }}{% if noise_enabled_emit %}{{ noise_nan_recovery }}{% endif %}{% if stateful_nan_recovery is defined and stateful_nan_recovery != "" %}{{ stateful_nan_recovery }}{% endif %}        if v_is_finite { state.diag_magnitude_reset_count += 1; } else { state.diag_nan_reset_count += 1; }
+        // A reset sample was never solved: its committed state is the operating
+        // point, not a solution. Counted here because this path returns early.
+        state.diag_unsolved_sample_count = state.diag_unsolved_sample_count.saturating_add(1);
         // Return DC operating point output instead of zero to avoid discontinuity
         let mut dc_output = [0.0f64; NUM_OUTPUTS];
         for out_idx in 0..NUM_OUTPUTS {
@@ -304,7 +311,11 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
     }
     {% endif %}
 {% if region_exit_lines is defined and region_exit_lines != "" %}
-{{ region_exit_lines }}{% endif %}
+{{ region_exit_lines }}{% endif %}    // The last failure mechanism of the sample is the reduced-model exit
+    // above; count the sample once, whichever mechanisms fired.
+    if unsolved_sample {
+        state.diag_unsolved_sample_count = state.diag_unsolved_sample_count.saturating_add(1);
+    }
     // Step 9: Extract outputs{% if dc_block %}, apply per-output DC blocking filter{% endif %} and scale
     let mut output = [0.0f64; NUM_OUTPUTS];
     for out_idx in 0..NUM_OUTPUTS {

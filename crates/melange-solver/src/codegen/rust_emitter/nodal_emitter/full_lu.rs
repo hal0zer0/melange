@@ -132,6 +132,7 @@ impl RustEmitter {
         if os_factor == 1 && !inject_or_tap && super::super::runtime_os::runtime(ir).is_none() {
             code.push_str(&super::super::runtime_inputs::sanitize_block(ir, "    "));
         }
+        code.push_str(super::super::runtime_inputs::UNSOLVED_FLAG_DECL);
 
         // Behavioral ddt/idt scaling locals (referenced by the resolver).
         if has_bsrc_time {
@@ -341,6 +342,9 @@ impl RustEmitter {
             code.push_str("    }\n\n");
         }
         code.push_str(&super::super::helpers::emit_region_exit_lines(ir, "    "));
+        // The last failure mechanism of the sample is the reduced-model exit
+        // above; count the sample once, whichever mechanisms fired.
+        code.push_str("    if unsolved_sample { state.diag_unsolved_sample_count += 1; }\n\n");
 
         // Step 4: Extract outputs, apply DC blocking and scaling
         code.push_str("    // Step 4: Extract outputs, DC blocking, and scaling\n");
@@ -598,7 +602,7 @@ impl RustEmitter {
              \x20       // level measurand can see it; diag_nr_hold_count is the witness.\n",
         );
         code.push_str("        state.diag_nr_hold_count += 1;\n");
-        code.push_str("        state.diag_unsolved_sample_count += 1;\n");
+        code.push_str("        unsolved_sample = true;\n");
         code.push_str("        v = state.v_prev;\n");
         if carries_q_dot(ir) {
             code.push_str("        q_sub = Some(state.q_dot);\n");

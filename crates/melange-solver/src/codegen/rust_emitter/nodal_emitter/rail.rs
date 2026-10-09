@@ -491,7 +491,7 @@ impl RustEmitter {
         // failed Newton solve.
         if pin_failure_is_committed(ir, &site) {
             code.push_str(&format!(
-                "{indent}        if !(pin_converged && pin_lu_ok) {{ state.diag_nr_unconverged_commit_count += 1; state.diag_unsolved_sample_count += 1; }}\n"
+                "{indent}        if !(pin_converged && pin_lu_ok) {{ state.diag_nr_unconverged_commit_count += 1; unsolved_sample = true; }}\n"
             ));
         } else {
             code.push_str(&format!(

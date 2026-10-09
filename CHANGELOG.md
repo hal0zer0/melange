@@ -73,6 +73,27 @@ arms. None of it changes a finite render.
   outside `K`'s pattern on the DK route.
 
 ### Fixed
+- **`diag_unsolved_sample_count` counts every sample that was never solved,
+  once.** On the nodal route a sample that hit the NaN or magnitude reset
+  returned before the hold accounting and was never counted as unsolved,
+  although its committed state is the operating point, not a solution; on
+  DK the same sample was counted by the unconverged commit and then reset,
+  so the documented "sum of the mechanism counters" could read two for one
+  sample. Now every failure mechanism (hold, unconverged commit, failed
+  op-amp pin, reduced-model exit, NaN or magnitude reset) marks the sample
+  and the unified counter increments once per sample on every route; the
+  mechanism counters stay as an overlapping breakdown and `docs/CODE_API.md`
+  says so. A nodal deck that resets now reports those samples as unsolved;
+  at the default half-second render no deck in the corpus of 98 resets, so
+  no shipped count moves, and the rule is witnessed by driving a `.runtime`
+  source with a huge finite value on DK, nodal Schur and nodal full-LU.
+- A behavioral expression whose function argument folds to a constant (every
+  name in it a `.param`) compiles again. The lowered constants were untyped
+  float literals, so a method call on an all-constant subtree, such as
+  `sqrt(1 + (f_offset / f_if)^2)` with both parameters fixed, failed rustc's
+  type inference and the deck would not build. Constants are now emitted
+  with an `f64` suffix; generated code changes textually on every behavioral
+  deck and renders bit-identically.
 - **A deck with a behavioral source integrated every capacitor as twice its
   value at the compile rate.** Behavioral sources force backward Euler. The
   build took that decision after choosing the coefficient that bakes the

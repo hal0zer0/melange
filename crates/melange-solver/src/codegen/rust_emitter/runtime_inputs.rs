@@ -23,6 +23,17 @@ use crate::codegen::ir::CircuitIR;
 /// The suffix of the private per-source copy every RHS stamp reads.
 pub(super) const SANITIZED_SUFFIX: &str = "_sanitized";
 
+/// The per-sample flag every failure mechanism sets so that
+/// `diag_unsolved_sample_count` increments once per sample, whichever
+/// mechanisms fired. Declared at the top of every `process_sample` body; the
+/// NaN/magnitude reset returns early and counts itself instead.
+pub(super) const UNSOLVED_FLAG_DECL: &str =
+    "    // Set by any failure mechanism this sample (hold, unconverged commit,\n\
+    \x20   // failed pin, reduced-model exit); the NaN/magnitude reset returns early\n\
+    \x20   // and counts itself. Counted ONCE in diag_unsolved_sample_count.\n\
+    \x20   #[allow(unused_mut)]\n\
+    \x20   let mut unsolved_sample = false;\n";
+
 /// The statements that sanitise every `.runtime V` field into its private
 /// copy, counting a non-finite value once; empty when the deck has none.
 pub(super) fn sanitize_block(ir: &CircuitIR, indent: &str) -> String {

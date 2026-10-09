@@ -1668,7 +1668,7 @@ pub(super) fn emit_region_exit_lines(ir: &CircuitIR, indent: &str) -> String {
         out.push_str(&format!(
             "{indent}if reduced_exit {{\n\
              {indent}    state.diag_reduced_model_exit_count += 1;\n\
-             {indent}    state.diag_unsolved_sample_count += 1;\n\
+             {indent}    unsolved_sample = true;\n\
              {indent}}}\n"
         ));
     }

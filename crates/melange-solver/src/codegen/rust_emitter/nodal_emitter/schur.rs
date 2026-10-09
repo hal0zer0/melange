@@ -204,6 +204,7 @@ impl RustEmitter {
         if os_factor == 1 && !inject_or_tap && super::super::runtime_os::runtime(ir).is_none() {
             code.push_str(&super::super::runtime_inputs::sanitize_block(ir, "    "));
         }
+        code.push_str(super::super::runtime_inputs::UNSOLVED_FLAG_DECL);
 
         // Saturating inductors force the full-LU sub-path (their flux device
         // lives in its NR loop), and every other saturating element is refused
@@ -326,6 +327,9 @@ impl RustEmitter {
         // (NaN check already done before state update)
 
         code.push_str(&super::super::helpers::emit_region_exit_lines(ir, "    "));
+        // The last failure mechanism of the sample is the reduced-model exit
+        // above; count the sample once, whichever mechanisms fired.
+        code.push_str("    if unsolved_sample { state.diag_unsolved_sample_count += 1; }\n\n");
 
         // Output extraction
         code.push_str("    // Extract outputs, DC blocking, and scaling\n");

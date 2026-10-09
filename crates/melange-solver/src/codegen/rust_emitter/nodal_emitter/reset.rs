@@ -237,7 +237,10 @@ pub(super) fn emit_nodal_nan_reset(
     }
 
     code.push_str(&format!(
-        "{body}if v_is_finite {{ state.diag_magnitude_reset_count += 1; }} else {{ state.diag_nan_reset_count += 1; }}\n"
+        "{body}if v_is_finite {{ state.diag_magnitude_reset_count += 1; }} else {{ state.diag_nan_reset_count += 1; }}\n\
+         {body}// A reset sample was never solved: its committed state is the operating\n\
+         {body}// point, not a solution. Counted here because this path returns early.\n\
+         {body}state.diag_unsolved_sample_count += 1;\n"
     ));
 
     // Return DC-OP output (clamped to ±10 V) instead of zero, to minimize the

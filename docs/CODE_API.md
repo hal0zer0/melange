@@ -228,8 +228,13 @@ the solver route (always 0 where no Newton solve exists), and counts every
 sample that was never solved. Assert it is zero; that is the whole check. Read
 it after a render, or poll it per block.
 
-Two mechanism counters carry the detail. Each exists only where its mechanism
-does, and a build can have both; the unified count is their sum:
+A sample counts once, whichever mechanisms fired on it: a Newton hold, an
+unconverged commit, a failed op-amp pin, a reduced-model exit, or a NaN or
+magnitude reset (the committed state after a reset is the operating point,
+not a solution). The mechanism counters below carry the detail as an
+overlapping breakdown; they are not addends of the unified count, and one
+sample can appear in several of them. Each exists only where its mechanism
+does:
 
 | Field | Present on | What a nonzero value means |
 |-------|-----------|----------------------------|
