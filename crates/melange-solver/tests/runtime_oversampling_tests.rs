@@ -179,28 +179,67 @@ fn max_iter_of(code: &str) -> Option<usize> {
         .ok()
 }
 
-/// The runtime build of `spice` at every factor against the fixed build at
-/// that factor (budget pinned), bit for bit, on every node.
+/// The runtime build of `spice`, with each factor of the set as its default,
+/// at every factor against the fixed build at that factor (budget pinned),
+/// bit for bit, on every node. The default is the factor whose build the
+/// runtime code is emitted from, so each one is a different emission.
 fn assert_runtime_equals_fixed(spice: &str, route: (&str, NodalSubPathOverride), tag: &str) {
-    let rt = build(spice, route, 2, OversamplingSet::Set(SET.to_vec()), None)
-        .unwrap_or_else(|e| panic!("{tag}: runtime build refused: {e}"));
-    assert!(rt.contains("pub fn set_oversampling("));
-    let budget = max_iter_of(&rt);
-    let rt_lines = run(&rt, &SET.map(Some), &format!("{tag}_rt"));
-    for f in SET {
-        let fixed = build(spice, route, f, OversamplingSet::Off, budget)
-            .unwrap_or_else(|e| panic!("{tag}: fixed {f}x build refused: {e}"));
-        let fx = run(&fixed, &[None], &format!("{tag}_fx{f}"));
-        let rt_f: Vec<&(String, String)> = rt_lines
-            .iter()
-            .filter(|(k, _)| k.split(' ').nth(1) == Some(&f.to_string()))
-            .collect();
-        assert_eq!(fx.len(), rt_f.len(), "{tag} {f}x: sample counts");
-        for ((kf, hf), (kr, hr)) in fx.iter().zip(rt_f) {
+    let runtime: Vec<String> = SET
+        .iter()
+        .map(|&default| {
+            let rt = build(
+                spice,
+                route,
+                default,
+                OversamplingSet::Set(SET.to_vec()),
+                None,
+            )
+            .unwrap_or_else(|e| {
+                panic!("{tag}: runtime build with default {default}x refused: {e}")
+            });
+            assert!(rt.contains("pub fn set_oversampling("), "{tag}");
             assert!(
-                hf == hr,
-                "{tag} {f}x: the runtime build departs from the fixed build at {kr} (fixed {kf})"
+                rt.contains(&format!(
+                    "pub const OVERSAMPLING_FACTOR: usize = {default};"
+                )),
+                "{tag}: the runtime build's default is {default}x"
             );
+            rt
+        })
+        .collect();
+    // The budget is the set's largest, whichever factor is the default.
+    let budget = max_iter_of(&runtime[0]);
+    assert!(
+        runtime.iter().all(|rt| max_iter_of(rt) == budget),
+        "{tag}: the Newton budget depends on the default factor"
+    );
+    let fixed: Vec<Vec<(String, String)>> = SET
+        .iter()
+        .map(|&f| {
+            let code = build(spice, route, f, OversamplingSet::Off, budget)
+                .unwrap_or_else(|e| panic!("{tag}: fixed {f}x build refused: {e}"));
+            run(&code, &[None], &format!("{tag}_fx{f}"))
+        })
+        .collect();
+    for (default, rt) in SET.iter().zip(&runtime) {
+        let rt_lines = run(rt, &SET.map(Some), &format!("{tag}_rt{default}"));
+        for (f, fx) in SET.iter().zip(&fixed) {
+            let rt_f: Vec<&(String, String)> = rt_lines
+                .iter()
+                .filter(|(k, _)| k.split(' ').nth(1) == Some(&f.to_string()))
+                .collect();
+            assert_eq!(
+                fx.len(),
+                rt_f.len(),
+                "{tag} (default {default}x) {f}x: sample counts"
+            );
+            for ((kf, hf), (kr, hr)) in fx.iter().zip(rt_f) {
+                assert!(
+                    hf == hr,
+                    "{tag} (default {default}x) {f}x: the runtime build departs from the \
+                     fixed build at {kr} (fixed {kf})"
+                );
+            }
         }
     }
 }
@@ -307,6 +346,41 @@ fn the_directive_declares_the_set_and_off_builds_fixed() {
     assert!(code.contains("pub const OVERSAMPLING_SET: [usize; 2] = [1, 2];"));
     let fixed = build(&deck, AUTO, 2, OversamplingSet::Off, None).unwrap();
     assert!(!fixed.contains("set_oversampling") && !fixed.contains("OVERSAMPLING_SET"));
+}
+
+/// Each factor's matrices are settled by its own fixed build, so its
+/// rounding-noise ratio is its own: reported per factor, and not a difference
+/// that splits the set (the top-level key is the default factor's).
+#[test]
+fn the_noise_ratio_is_per_factor_and_does_not_split_the_set() {
+    let code = build(GUARD, AUTO, 2, OversamplingSet::Set(SET.to_vec()), None)
+        .unwrap_or_else(|e| panic!("refused: {e}"));
+    let prov = code
+        .lines()
+        .find_map(|l| l.strip_prefix("// provenance: "))
+        .unwrap();
+    let per_factor = prov
+        .split("\"sparsity_noise_ratio\":{")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no per-factor ratios: {prov}"));
+    let per_factor = &per_factor[..per_factor.find('}').unwrap()];
+    let ratios: Vec<(String, f64)> = per_factor
+        .split(',')
+        .map(|kv| {
+            let (k, v) = kv.split_once(':').unwrap();
+            (k.trim_matches('"').to_string(), v.parse().unwrap())
+        })
+        .collect();
+    let factors: Vec<&str> = ratios.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(factors, ["1", "2", "4"], "{per_factor}");
+    assert!(
+        ratios.iter().any(|(_, r)| *r != ratios[0].1),
+        "the guard deck's ratios agree at every factor, so this witnesses nothing: {per_factor}"
+    );
+    assert!(
+        prov.contains(&format!(",\"sparsity_noise_ratio\":{:.3e}", ratios[1].1)),
+        "{prov}"
+    );
 }
 
 /// Provenance records the set, its default and source, the factors below the

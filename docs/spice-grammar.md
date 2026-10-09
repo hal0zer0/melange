@@ -1274,6 +1274,7 @@ fn build_rhs(input: f64, state: &CircuitState) -> [f64; N] {
 
 **Semantics:**
 - Additive with any DC bias declared on the voltage source itself: `V1 n1 0 DC 5` + `.runtime V1 as foo` ⇒ `5 + state.foo` total.
+- A non-finite value (NaN or ±inf) never reaches the solver: the source reads as 0 for that host sample (the deck's own DC value), the write is counted in `diag_runtime_nan_count` once per host sample while the field stays non-finite, and the field itself is left as written. Assert the counter is zero: without the guard one non-finite write cost every later sample the whole Newton and sub-step budget.
 - `reset()` zeroes each runtime field.
 - Stamp site emitted in both trapezoidal and backward-Euler RHS builders and in the nodal solver's per-sample RHS.
 
@@ -1440,8 +1441,8 @@ the kernel is built, so the source impedance is part of `S` and of the DC
 operating point, exactly like the input port's `G_in`. The runtime value enters
 the per-sample RHS at n+1 — `val / R` for Thevenin, `val` for Norton — under
 either integrator, and the Newton loop never sees it. NaN/Inf values are
-replaced by 0 and counted in `diag_input_nan_count`; there is no magnitude
-clamp. A `.tap` is read after the solve and before the output pipeline: no DC
+replaced by 0 and counted in `diag_runtime_nan_count` (a value the plugin
+wrote, not host audio); there is no magnitude clamp. A `.tap` is read after the solve and before the output pipeline: no DC
 block, no `--output-scale`, no clamp, no decimation. It is emitted separately
 from the output nodes even when it names the same node.
 

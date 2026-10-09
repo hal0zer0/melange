@@ -379,9 +379,10 @@ impl RustEmitter {
             "    /// Diagnostic: input samples clamped to +/-INPUT_LIMIT_V (the circuit\n\
              \x20   /// was driven with a smaller input than requested)\n\
              \x20   pub diag_input_clamp_count: u64,\n\
-             \x20   /// Diagnostic: NaN/Inf input (or injection) samples replaced by 0\n\
+             \x20   /// Diagnostic: NaN/Inf host input samples replaced by 0\n\
              \x20   pub diag_input_nan_count: u64,\n",
         );
+        code.push_str(&super::super::runtime_inputs::counter_field("    "));
         code.push_str(
             "    /// Diagnostic: number of times a finite-but-implausible iterate\n\
              \x20   /// (state magnitude beyond any physically-realizable circuit value)\n\
@@ -744,8 +745,17 @@ impl RustEmitter {
         for rt in &ir.runtime_sources {
             code.push_str(&format!(
                 "    /// Runtime value for voltage source {} (RHS row {}).\n\
-                 \x20   pub {}: f64,\n",
-                rt.vs_name, rt.vs_row, rt.field_name
+                 \x20   /// A non-finite value reads as 0 for that host sample and is counted in\n\
+                 \x20   /// `diag_runtime_nan_count`; the field itself is left as written.\n\
+                 \x20   pub {}: f64,\n\
+                 \x20   /// `{}` as the RHS stamps read it: sanitised once per host sample.\n\
+                 \x20   {}{}: f64,\n",
+                rt.vs_name,
+                rt.vs_row,
+                rt.field_name,
+                rt.field_name,
+                rt.field_name,
+                super::super::runtime_inputs::SANITIZED_SUFFIX
             ));
         }
 
@@ -872,7 +882,7 @@ impl RustEmitter {
         code.push_str("            diag_active_set_pin_count: 0,\n");
         code.push_str("            diag_nan_reset_count: 0,\n");
         code.push_str(
-            "            diag_input_clamp_count: 0,\n            diag_input_nan_count: 0,\n",
+            "            diag_input_clamp_count: 0,\n            diag_input_nan_count: 0,\n            diag_runtime_nan_count: 0,\n",
         );
         code.push_str("            diag_magnitude_reset_count: 0,\n");
         code.push_str("            diag_substep_count: 0,\n");
@@ -1048,9 +1058,15 @@ impl RustEmitter {
             code.push_str(&emit_inject_os_state_init(ir));
         }
 
-        // Runtime voltage sources (.runtime directive): init to 0.
+        // Runtime voltage sources (.runtime directive): init to 0, and so does
+        // the sanitised copy the RHS stamps read.
         for rt in &ir.runtime_sources {
-            code.push_str(&format!("            {}: 0.0,\n", rt.field_name));
+            code.push_str(&format!(
+                "            {}: 0.0,\n            {}{}: 0.0,\n",
+                rt.field_name,
+                rt.field_name,
+                super::super::runtime_inputs::SANITIZED_SUFFIX
+            ));
         }
 
         // Noise: per-source RNG arrays + scalars (matches `state_fields` order).
@@ -1070,7 +1086,10 @@ impl RustEmitter {
         // Plugin-driven scalar param setters (.runtime <name> min max as field).
         for r in &ir.behavioral_scalar_runtimes {
             code.push_str(&format!(
-                "    /// Set plugin scalar `{}` (clamped to [{}, {}]).\n",
+                "    /// Set plugin scalar `{}` (clamped to [{}, {}]).\n\
+                 \x20   ///\n\
+                 \x20   /// A non-finite value is counted in `diag_runtime_nan_count`: ±inf\n\
+                 \x20   /// clamps to the range end, NaN leaves the value unchanged.\n",
                 r.name, r.min, r.max
             ));
             code.push_str(&format!(
@@ -1078,7 +1097,8 @@ impl RustEmitter {
                 r.field_name
             ));
             code.push_str(&format!(
-                "        if value.is_finite() {{ self.{} = value.clamp({:.17e}, {:.17e}); }}\n",
+                "        if !value.is_finite() {{ self.diag_runtime_nan_count += 1; if value.is_nan() {{ return; }} }}\n\
+                 \x20       self.{} = value.clamp({:.17e}, {:.17e});\n",
                 r.field_name, r.min, r.max
             ));
             code.push_str("    }\n\n");
@@ -1086,7 +1106,16 @@ impl RustEmitter {
 
         code.push_str(&super::super::runtime_os::emit_methods(ir));
         // reset()
-        code.push_str("    /// Reset to DC operating point\n");
+        code.push_str(
+            "    /// Reset to the factory state.\n\
+             \x20   ///\n\
+             \x20   /// \"Factory state\" means everything returns to what codegen baked in:\n\
+             \x20   /// the DC operating point, the baked nonlinear bias currents, and\n\
+             \x20   /// nominal pot/switch values — all restored together so they agree.\n\
+             \x20   /// The sample rate is kept (it is not a control; the matrices are\n\
+             \x20   /// rebuilt for it). Controls are the caller's: re-apply pots and\n\
+             \x20   /// switches after `reset()`, as after construction.\n",
+        );
         let restores_from = code.len();
         code.push_str("    pub fn reset(&mut self) {\n");
         if has_cap_ic {
@@ -1169,7 +1198,7 @@ impl RustEmitter {
         code.push_str("        self.diag_active_set_pin_count = 0;\n");
         code.push_str("        self.diag_nan_reset_count = 0;\n");
         code.push_str(
-            "        self.diag_input_clamp_count = 0;\n        self.diag_input_nan_count = 0;\n",
+            "        self.diag_input_clamp_count = 0;\n        self.diag_input_nan_count = 0;\n        self.diag_runtime_nan_count = 0;\n",
         );
         code.push_str("        self.diag_magnitude_reset_count = 0;\n");
         code.push_str("        self.diag_voltage_damp_count = 0;\n");
@@ -1262,9 +1291,14 @@ impl RustEmitter {
             code.push_str(&emit_inject_os_state_reset(ir, "self", "        "));
         }
         // Runtime voltage sources: clear field to 0 so the VS contributes no
-        // RHS stamp until the host writes a new value.
+        // RHS stamp until the host writes a new value; the sanitised copy too.
         for rt in &ir.runtime_sources {
-            code.push_str(&format!("        self.{} = 0.0;\n", rt.field_name));
+            code.push_str(&format!(
+                "        self.{} = 0.0;\n        self.{}{} = 0.0;\n",
+                rt.field_name,
+                rt.field_name,
+                super::super::runtime_inputs::SANITIZED_SUFFIX
+            ));
         }
         // Noise: re-seed RNGs from stored master seed; user prefs untouched.
         if noise.enabled {
@@ -1515,7 +1549,13 @@ impl RustEmitter {
         );
         code.push_str("    /// Rebuilds A, A_neg, A_be, A_neg_be from stored G and C matrices.\n");
         code.push_str("    pub fn set_sample_rate(&mut self, sample_rate: f64) {\n");
-        code.push_str("        if !(sample_rate > 0.0 && sample_rate.is_finite()) {\n");
+        code.push_str("        if !sample_rate.is_finite() {\n");
+        code.push_str(
+            "            self.diag_runtime_nan_count += 1; // counted, nothing changes\n",
+        );
+        code.push_str("            return;\n");
+        code.push_str("        }\n");
+        code.push_str("        if !(sample_rate > 0.0) {\n");
         code.push_str("            return;\n");
         code.push_str("        }\n\n");
         // Noise: refresh thermal_scale at the new fs (and noise_fs cache).

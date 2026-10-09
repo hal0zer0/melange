@@ -505,6 +505,18 @@ impl RustEmitter {
         let runtime_os = super::runtime_os::runtime(ir).is_some();
         ctx.insert("runtime_os", &runtime_os);
         ctx.insert("os_fixed_states", &(os_factor > 1 && !runtime_os));
+        // `.runtime V` fields are sanitised once per HOST sample. The template's
+        // function is the host entry only on a fixed 1× build without `.inject`;
+        // every other build has a wrapper or dispatcher that does it.
+        let is_host_entry = os_factor == 1 && !ir.solver_config.has_inject_or_tap() && !runtime_os;
+        ctx.insert(
+            "runtime_sanitize_block",
+            &if is_host_entry {
+                super::runtime_inputs::sanitize_block(ir, "    ")
+            } else {
+                String::new()
+            },
+        );
         ctx.insert(
             "os_factor_f64",
             &super::runtime_os::factor_f64_literal(ir, "self"),
@@ -870,10 +882,14 @@ impl RustEmitter {
                     code.push_str(&format!(
                         "    /// Set potentiometer {idx} resistance (clamped to [{:.1}..{:.1}] ohms).\n\
                          \x20   ///\n\
+                         \x20   /// A non-finite value is counted in `diag_runtime_nan_count`: ±inf\n\
+                         \x20   /// clamps to the range end, NaN leaves the resistance unchanged.\n\
                          \x20   /// Marks matrices dirty. Rebuild deferred to next `process_sample()`.\n\
                          \x20   /// For preset recall / unsmoothed jumps, follow with `recompute_dc_op()`.\n\
                          \x20   pub fn set_pot_{idx}(&mut self, resistance: f64) {{\n\
-                         \x20       if !resistance.is_finite() {{ return; }}\n\
+                         \x20       // A non-finite argument is counted: ±inf clamps to the range\n\
+                         \x20       // end below, NaN leaves the value unchanged.\n\
+                         \x20       if !resistance.is_finite() {{ self.diag_runtime_nan_count += 1; if resistance.is_nan() {{ return; }} }}\n\
                          \x20       let r = resistance.clamp(POT_{idx}_MIN_R, POT_{idx}_MAX_R);\n\
                          \x20       if (r - self.pot_{idx}_resistance).abs() < 1e-12 {{ return; }}\n\
                          \x20       self.pot_{idx}_resistance = r;\n\
@@ -893,11 +909,15 @@ impl RustEmitter {
                          \x20   pub fn {field}(&self) -> f64 {{ self.pot_{idx}_resistance }}\n\n\
                          \x20   /// Set runtime resistor `{field}` (clamped to [{:.1}..{:.1}] ohms).\n\
                          \x20   ///\n\
+                         \x20   /// A non-finite value is counted in `diag_runtime_nan_count`: ±inf\n\
+                         \x20   /// clamps to the range end, NaN leaves the resistance unchanged.\n\
                          \x20   /// Audio-rate safe: no internal smoothing; caller (plugin-side\n\
                          \x20   /// envelope follower) is the smoother.\n\
                          \x20   /// Marks matrices dirty. Rebuild deferred to next `process_sample()`.\n\
                          \x20   pub fn set_runtime_R_{field}(&mut self, resistance: f64) {{\n\
-                         \x20       if !resistance.is_finite() {{ return; }}\n\
+                         \x20       // A non-finite argument is counted: ±inf clamps to the range\n\
+                         \x20       // end below, NaN leaves the value unchanged.\n\
+                         \x20       if !resistance.is_finite() {{ self.diag_runtime_nan_count += 1; if resistance.is_nan() {{ return; }} }}\n\
                          \x20       let r = resistance.clamp(RUNTIME_R_{field_upper}_MIN, RUNTIME_R_{field_upper}_MAX);\n\
                          \x20       if (r - self.pot_{idx}_resistance).abs() < 1e-12 {{ return; }}\n\
                          \x20       self.pot_{idx}_resistance = r;\n\
@@ -1484,6 +1504,18 @@ impl RustEmitter {
         let runtime_os = super::runtime_os::runtime(ir).is_some();
         ctx.insert("runtime_os", &runtime_os);
         ctx.insert("os_fixed_states", &(os_factor > 1 && !runtime_os));
+        // `.runtime V` fields are sanitised once per HOST sample. The template's
+        // function is the host entry only on a fixed 1× build without `.inject`;
+        // every other build has a wrapper or dispatcher that does it.
+        let is_host_entry = os_factor == 1 && !ir.solver_config.has_inject_or_tap() && !runtime_os;
+        ctx.insert(
+            "runtime_sanitize_block",
+            &if is_host_entry {
+                super::runtime_inputs::sanitize_block(ir, "    ")
+            } else {
+                String::new()
+            },
+        );
         ctx.insert(
             "os_factor_f64",
             &super::runtime_os::factor_f64_literal(ir, "self"),

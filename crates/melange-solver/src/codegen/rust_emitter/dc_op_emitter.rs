@@ -409,11 +409,12 @@ fn emit_dc_op_build_b_dc_dk(ir: &CircuitIR) -> String {
     if !ir.runtime_sources.is_empty() {
         body.push_str(
             "\n        // `.runtime` voltage sources: include their current value so\n\
-             \x20       // recompute converges to the equilibrium the host will drive.\n",
+             \x20       // recompute converges to the equilibrium the host will drive. A\n\
+             \x20       // non-finite value is counted and reads as 0, as in `process_sample`.\n",
         );
         for rt in &ir.runtime_sources {
             body.push_str(&format!(
-                "        b_dc[{row}] += self.{field};\n",
+                "        b_dc[{row}] += if self.{field}.is_finite() {{ self.{field} }} else {{ self.diag_runtime_nan_count += 1; 0.0 }};\n",
                 row = rt.vs_row,
                 field = rt.field_name,
             ));

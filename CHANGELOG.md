@@ -18,7 +18,12 @@ by at most 1.1e-8 relative, which is the Newton loop's own termination band
 (it stops at `|step| ≤ 1e-3·|v| + 1e-6`): changing any present `K` entry by
 one ULP moves those renders by the same amount. ngspice validation residuals
 are unchanged. A deck declaring `.oversampling N allow=...`, or a `compile
---oversampling-set`, gets the new runtime-oversampling code.
+--oversampling-set`, gets the new runtime-oversampling code. Every build gains
+`diag_runtime_nan_count`, a guard line per `.runtime` voltage source and per
+setter argument, four `#![allow]` lines in its header, and (nodal) a longer
+doc comment on `reset()`; a device dimension with no limiter (VCA, LDR, glow)
+takes its trial step directly instead of through a branch with two identical
+arms. None of it changes a finite render.
 
 ### Added
 
@@ -33,7 +38,7 @@ are unchanged. A deck declaring `.oversampling N allow=...`, or a `compile
   re-apply controls and re-warm after it. `.inject`/`.tap` arrays are
   `MAX_OVERSAMPLING` long. Provenance gains `oversampling_set` (factors,
   default, source, factors below the deck's recommendation, each factor's ring
-  verdict); `oversampling` is the default factor.
+  verdict and rounding-noise ratio); `oversampling` is the default factor.
   - Refused, naming what differs: a set whose factors would build different
     solvers (route, nodal sub-path, integrator, runtime latch, reductions,
     rail handling), one with a factor-dependent constant the runtime code
@@ -68,6 +73,69 @@ are unchanged. A deck declaring `.oversampling N allow=...`, or a `compile
   outside `K`'s pattern on the DK route.
 
 ### Fixed
+- **A deck with a behavioral source integrated every capacitor as twice its
+  value at the compile rate.** Behavioral sources force backward Euler. The
+  build took that decision after choosing the coefficient that bakes the
+  default `A` and `A_neg`, so those constants carried the trapezoidal `2/T`
+  under a backward-Euler label, while the runtime rebuild (any other host
+  rate) and the explicit `--backward-euler` flag used the correct `1/T`. A
+  linear RC ladder behind any behavioral source, even an electrically
+  isolated one, read 2.7 dB low at 1 kHz and 7.7 dB low at 10 kHz against
+  the same ladder under the flag, and a plugin sounded different at 48 kHz
+  than at 44.1 kHz. The behavioral-forced build now bakes the backward-Euler
+  matrices and is bit-identical to the flagged build (regression test on
+  the ladder: matrices, render and level). Every behavioral-source deck's
+  render at its compile rate changes, toward the closed form; nothing else
+  moves. In the golden corpus (44 circuits, 192 renders, same decks, same
+  binary but for this fix): radio-fm +2.7 dB level, correlation 0.927
+  against its former render; radio-am +1.0 dB, correlation 0.934 (its
+  sub-200 Hz band falls 6 dB and its 2–20 kHz band rises 1.2 dB, the
+  doubled capacitors' bass lift and treble loss undone); the other 184
+  renders are bit-identical.
+- **A non-finite runtime input never reaches the solver, and is counted.** A
+  `.runtime` voltage-source field was a public value stamped straight into
+  the right-hand side, so one NaN or ±inf written by a plugin's own control
+  path made every later sample exhaust the Newton and sub-step budgets and
+  reset on NaN, for the rest of the session: measured 100× slower per sample
+  on DK and 17,000× on nodal (2.2 ms per sample at 48 kHz), which a host sees
+  as a hang. Now every value the plugin writes is guarded where it enters,
+  the way the audio input already was, and counted in a new
+  `diag_runtime_nan_count` on every build (cleared by `reset()`): a `.runtime`
+  voltage source reads as 0 (the deck's own DC value) for that host sample,
+  counted once per host sample while it stays non-finite, with the public
+  field left as written; a `.inject` value reads as 0 (its count moves from
+  `diag_input_nan_count`, which now means host audio only); a ranged setter
+  (`set_pot_*`, `set_runtime_R_*`, a `.runtime` scalar) clamps ±inf to the
+  range end its doc comment promised and leaves the value unchanged on NaN;
+  the noise setters, `set_temperature_k` and `set_sample_rate` leave the value
+  unchanged on any non-finite argument. The same held for a NaN noise gain,
+  which cost the same spiral. Witnessed on DK, nodal Schur and nodal full-LU
+  at 1× and 2× and on a backward-Euler build: exactly one count per host
+  sample, no NaN reset, finite output bit-identical to the field held at 0,
+  and no per-sample cost over the finite baseline. The backward-Euler
+  fallback's stamp is covered by inspection of the generated code (it reads
+  the sanitised copy) and by the backward-Euler build, not by forcing a
+  fallback at run time. Finite behaviour is unchanged (192 of 192 golden
+  renders bit-identical).
+- The nodal full-LU notice names the deciding reason. A deck whose saturating
+  inductors or behavioral sources require full-LU (the Schur reduction cannot
+  express them) was reported as "K_diag_min ..., ill-conditioned", a
+  conditioning figure that merely also held, which read as a heuristic choice
+  that an override could reverse. It now says the route is required and why.
+- Generated code passes `cargo clippy` again when a baked constant lands on a
+  well-known value: a thermal-noise scale `sqrt(1/R)` at R = 0.5 Ω is √2 to the
+  last digit, which clippy's deny-by-default `approx_constant` rejected, so an
+  untouched generated file failed the lint. The generated header now allows
+  it beside the other lints it silences for the same reason, and also
+  `manual_is_multiple_of` (clippy 1.99), whose suggested replacement needs
+  Rust 1.87 while generated code must build on the 1.85 MSRV.
+- The nodal route's generated `reset()` carries the same doc comment as the DK
+  route's: it restores the baked operating point together with the **nominal
+  pot and switch values**, keeps the sample rate, and leaves re-applying
+  controls to the caller. It said only "Reset to DC operating point", and a
+  wrapper that cached its last switch position skipped the re-apply and ran
+  at nominal controls after every host activation. The contract is now stated
+  in `docs/CODE_API.md` too.
 - `tools/perf-harness/bench.sh` benches `.inject` decks again: a call shim
   chosen from the generated code supplies zero injection arrays (sized by
   `MAX_OVERSAMPLING` on a runtime-oversampling build). It had failed to compile

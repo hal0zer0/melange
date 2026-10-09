@@ -300,13 +300,22 @@ fn provenance_json(
                 )
             })
             .collect();
+        // Each factor's matrices were settled by its own fixed build, so the
+        // noise ratio (the top-level key below is the default factor's) is
+        // reported per factor too.
+        let ratios: Vec<String> = rt
+            .per_factor
+            .iter()
+            .map(|p| format!("\"{}\":{:.3e}", p.factor, p.sparsity_noise_ratio))
+            .collect();
         s.push_str(&format!(
-            "\"oversampling_set\":{{\"factors\":[{}],\"default\":{},\"source\":\"{}\",\"below_recommendation\":[{}],\"integration_reason\":{{{}}}}},",
+            "\"oversampling_set\":{{\"factors\":[{}],\"default\":{},\"source\":\"{}\",\"below_recommendation\":[{}],\"integration_reason\":{{{}}},\"sparsity_noise_ratio\":{{{}}}}},",
             list(&rt.factors),
             rt.default,
             rt.source,
             list(&below),
-            reasons.join(",")
+            reasons.join(","),
+            ratios.join(",")
         ));
     }
     s.push_str(&format!("\"dc_block\":{},", ir.dc_block));

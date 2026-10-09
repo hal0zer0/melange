@@ -32,6 +32,7 @@ mod nodal_emitter;
 mod noise_emitter;
 mod nr_helpers;
 mod oversampler;
+mod runtime_inputs;
 mod runtime_os;
 mod subsample_fire;
 

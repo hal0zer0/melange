@@ -527,7 +527,18 @@ impl RustEmitter {
         }
 
         if use_full_nodal {
-            if has_positive_k_with_current {
+            if structurally_needs_full_lu {
+                // Say the deciding reason, not a conditioning figure that may
+                // also happen to hold: this route is required, not chosen.
+                log::warn!(
+                    "Nodal: using full N×N LU NR (required: {})",
+                    if force_full_lu_sat {
+                        "saturating inductors are stamped as nonlinear devices inside the full-LU NR loop"
+                    } else {
+                        "behavioral B-sources are stamped in node space only on the full-LU path"
+                    }
+                );
+            } else if has_positive_k_with_current {
                 log::warn!(
                     "Nodal: using full N×N LU NR (positive K diagonal with current injection)"
                 );

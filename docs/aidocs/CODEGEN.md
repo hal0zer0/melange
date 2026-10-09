@@ -476,7 +476,7 @@ fn process_sample_inner(input: f64, injections: [f64; NUM_INJECT], state: &mut C
     -> ([f64; NUM_OUTPUTS], [f64; NUM_TAP])
 ```
 
-- Each `rate=host` value is sanitized (NaN/Inf → 0, `diag_input_nan_count`) and
+- Each `rate=host` value is sanitized (NaN/Inf → 0, `diag_runtime_nan_count`) and
   run through its own copy of the input's up-filter
   (`state.os_inj_up_state[k]`, plus `os_inj_up_state_outer[k]` at 4x), clocked in
   the same order as `os_up_state`, so it carries the input's group delay. These

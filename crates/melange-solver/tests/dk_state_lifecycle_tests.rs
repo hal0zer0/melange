@@ -344,14 +344,15 @@ fn runtime_v_source_stamped_in_be_fallback_rhs() {
     // build_rhs stamps the runtime source...
     assert!(
         code.lines()
-            .any(|l| l.trim_start().starts_with("rhs[") && l.contains("+= state.supply_mod;")),
+            .any(|l| l.trim_start().starts_with("rhs[")
+                && l.contains("+= state.supply_mod_sanitized;")),
         "build_rhs must stamp the runtime source"
     );
     // ...and the BE fallback RHS must stamp the SAME row/value (previously
     // dropped on every fallback sample).
     assert!(
-        code.lines()
-            .any(|l| l.trim_start().starts_with("rhs_be[") && l.contains("+= state.supply_mod;")),
+        code.lines().any(|l| l.trim_start().starts_with("rhs_be[")
+            && l.contains("+= state.supply_mod_sanitized;")),
         "BE fallback RHS must stamp the runtime source rows (scheme-independent)"
     );
 }

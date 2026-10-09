@@ -1440,6 +1440,25 @@ fn executable_text(code: &str) -> String {
         .join("\n")
 }
 
+/// The first line at which two factors' executable texts differ: its 1-based
+/// line number and the two lines (`<end>` for the text that has run out).
+/// `None` when they are the same solver.
+fn first_executable_difference<'a>(
+    reference: &'a str,
+    text: &'a str,
+) -> Option<(usize, &'a str, &'a str)> {
+    let (mut r, mut t) = (reference.lines(), text.lines());
+    let mut line = 0;
+    loop {
+        line += 1;
+        match (r.next(), t.next()) {
+            (None, None) => return None,
+            (Some(x), Some(y)) if x == y => {}
+            (x, y) => return Some((line, x.unwrap_or("<end>"), y.unwrap_or("<end>"))),
+        }
+    }
+}
+
 /// The constants whose value differs between the factors' fixed builds
 /// (`codes`, in `factors` order), each with its literal per factor. Refuses a
 /// differing constant the runtime code does not switch per factor: it would
@@ -1588,6 +1607,7 @@ fn build_runtime_oversampling(
         .map(|a| crate::codegen::ir::FactorSettlement {
             factor: a.oversampling,
             integration_reason: a.prepared.ir.integration_reason.clone(),
+            sparsity_noise_ratio: a.prepared.ir.sparsity.noise_ratio,
         })
         .collect();
     let per_factor_consts = per_factor_consts(&set.factors, &codes)?;
@@ -1630,18 +1650,7 @@ fn build_runtime_oversampling(
     let reference = executable_text(&emissions[default_idx].code);
     for (a, e) in factors.iter().zip(&emissions) {
         let text = executable_text(&e.code);
-        if let Some((line, (x, y))) = reference
-            .lines()
-            .zip(text.lines())
-            .enumerate()
-            .find(|(_, (x, y))| x != y)
-            .or_else(|| {
-                (reference.lines().count() != text.lines().count()).then_some((
-                    reference.lines().count().min(text.lines().count()),
-                    ("<end>", "<end>"),
-                ))
-            })
-        {
+        if let Some((line, x, y)) = first_executable_difference(&reference, &text) {
             bail!(
                 "the runtime oversampling set {:?} is refused: the solver's structure differs \
                  between {}x and {}x (the code emitted from each factor's build first differs \
@@ -1651,7 +1660,7 @@ fn build_runtime_oversampling(
                 set.factors,
                 set.default,
                 a.oversampling,
-                line + 1,
+                line,
                 x.trim(),
                 y.trim()
             );
@@ -2162,5 +2171,87 @@ pub fn format_ohms(r: f64) -> String {
         format!("{}", r as i64)
     } else {
         format!("{r}")
+    }
+}
+
+#[cfg(test)]
+mod runtime_oversampling_guard_tests {
+    //! The one-solver check on synthetic emissions. With the emitted matrix
+    //! patterns chosen by the circuit's structure, no in-repo deck emits a
+    //! different solver at a different rate, so the check is exercised here on
+    //! text shaped like two factors' builds.
+    use super::{executable_text, first_executable_difference};
+
+    /// A fixed build at `factor`, reduced to the lines that matter: it
+    /// describes itself in comments and the factor-itself constants, then
+    /// carries the solver (`terms`).
+    fn emission(factor: usize, terms: &[&str]) -> String {
+        let mut s = format!(
+            "// melange: generated\n// provenance: {{\"oversampling\":{factor}}}\n\n\
+             pub const OVERSAMPLING_FACTOR: usize = {factor};\n"
+        );
+        if factor > 1 {
+            s.push_str(&format!(
+                "pub const INTERNAL_SAMPLE_RATE: f64 = {}.0;\n\n\
+                 pub const OS_COEFFS: [f64; 2] = [0.1, 0.2];\n",
+                48000 * factor
+            ));
+        }
+        s.push_str("pub const MAX_ITER: usize = 40;\n    // the Newton step\n");
+        for t in terms {
+            s.push_str(&format!("        {t}\n"));
+        }
+        s
+    }
+
+    #[test]
+    fn executable_text_keeps_only_the_solver() {
+        let text = executable_text(&emission(2, &["v_d[0] += k_be[0][5] * i_nl[5];"]));
+        assert_eq!(
+            text,
+            "pub const MAX_ITER: usize = 40;\n        v_d[0] += k_be[0][5] * i_nl[5];"
+        );
+    }
+
+    #[test]
+    fn factors_that_differ_only_in_describing_themselves_are_one_solver() {
+        let terms = [
+            "v_d[0] += k_be[0][5] * i_nl[5];",
+            "v_d[1] += k_be[1][2] * i_nl[2];",
+        ];
+        let one = executable_text(&emission(1, &terms));
+        for f in [2, 4] {
+            let other = executable_text(&emission(f, &terms));
+            assert_eq!(first_executable_difference(&one, &other), None, "{f}x");
+        }
+    }
+
+    #[test]
+    fn a_term_present_at_one_factor_only_is_named() {
+        let both = [
+            "v_d[0] += k_be[0][5] * i_nl[5];",
+            "v_d[1] += k_be[1][2] * i_nl[2];",
+        ];
+        let one = ["v_d[1] += k_be[1][2] * i_nl[2];"];
+        let a = executable_text(&emission(2, &both));
+        let b = executable_text(&emission(1, &one));
+        assert_eq!(
+            first_executable_difference(&a, &b),
+            Some((
+                2,
+                "        v_d[0] += k_be[0][5] * i_nl[5];",
+                "        v_d[1] += k_be[1][2] * i_nl[2];"
+            ))
+        );
+        // A text that runs out is reported against the other's extra line.
+        let extra = [
+            "v_d[1] += k_be[1][2] * i_nl[2];",
+            "v_d[0] += k_be[0][5] * i_nl[5];",
+        ];
+        let c = executable_text(&emission(1, &extra));
+        assert_eq!(
+            first_executable_difference(&b, &c),
+            Some((3, "<end>", "        v_d[0] += k_be[0][5] * i_nl[5];"))
+        );
     }
 }

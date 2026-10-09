@@ -1519,18 +1519,27 @@ impl RustEmitter {
         methods
             .push_str("    /// Master scalar applied to every noise source (post-per-category).\n");
         methods.push_str(
-            "    pub fn set_noise_gain(&mut self, gain: f64) { self.noise_gain = gain; }\n\n",
+            "    /// A non-finite gain is counted in `diag_runtime_nan_count` and ignored.\n\
+             \x20   pub fn set_noise_gain(&mut self, gain: f64) { if gain.is_finite() { self.noise_gain = gain; } else { self.diag_runtime_nan_count += 1; } }\n\n",
         );
         methods.push_str("    /// Scalar applied only to Johnson-Nyquist thermal sources.\n");
         methods.push_str(
-            "    pub fn set_thermal_gain(&mut self, gain: f64) { self.thermal_gain = gain; }\n\n",
+            "    /// A non-finite gain is counted in `diag_runtime_nan_count` and ignored.\n\
+             \x20   pub fn set_thermal_gain(&mut self, gain: f64) { if gain.is_finite() { self.thermal_gain = gain; } else { self.diag_runtime_nan_count += 1; } }\n\n",
         );
         methods.push_str("    /// Circuit temperature in Kelvin. 290 K is standard (~16.85 °C).\n");
         methods.push_str(
             "    /// Cold gear is quieter: 77 K (liquid N2) ≈ −5.76 dB, 3 K ≈ −19.9 dB.\n",
         );
+        methods.push_str(
+            "    /// A non-finite value is counted in `diag_runtime_nan_count` and ignored;\n",
+        );
+        methods.push_str("    /// a finite value at or below 0 K is ignored.\n");
         methods.push_str("    pub fn set_temperature_k(&mut self, kelvin: f64) {\n");
-        methods.push_str("        if !(kelvin.is_finite() && kelvin > 0.0) { return; }\n");
+        methods.push_str(
+            "        if !kelvin.is_finite() { self.diag_runtime_nan_count += 1; return; }\n",
+        );
+        methods.push_str("        if !(kelvin > 0.0) { return; }\n");
         methods.push_str("        self.temperature_k = kelvin;\n");
         methods.push_str("        // Recompute thermal_scale at the currently-set sample rate.\n");
         methods.push_str(
@@ -1548,7 +1557,8 @@ impl RustEmitter {
             );
             methods.push_str("    /// shot/partition content without touching thermal.\n");
             methods.push_str(
-                "    pub fn set_shot_gain(&mut self, gain: f64) { self.shot_gain = gain; }\n\n",
+                "    /// A non-finite gain is counted in `diag_runtime_nan_count` and ignored.\n\
+                 \x20   pub fn set_shot_gain(&mut self, gain: f64) { if gain.is_finite() { self.shot_gain = gain; } else { self.diag_runtime_nan_count += 1; } }\n\n",
             );
         }
         // Single `set_flicker_gain` covers both Phase 3 (junction flicker)
@@ -1563,7 +1573,8 @@ impl RustEmitter {
                 .push_str("    /// Runtime-settable. Set to `0.0` to mute 1/f without touching\n");
             methods.push_str("    /// thermal or shot.\n");
             methods.push_str(
-                "    pub fn set_flicker_gain(&mut self, gain: f64) { self.flicker_gain = gain; }\n\n",
+                "    /// A non-finite gain is counted in `diag_runtime_nan_count` and ignored.\n\
+                 \x20   pub fn set_flicker_gain(&mut self, gain: f64) { if gain.is_finite() { self.flicker_gain = gain; } else { self.diag_runtime_nan_count += 1; } }\n\n",
             );
         }
         // `set_opamp_input_gain` mutes both en (voltage-noise) and in
@@ -1582,7 +1593,10 @@ impl RustEmitter {
                 "    /// from shot/partition (`set_shot_gain`) which is bias-modulated.\n",
             );
             methods.push_str("    /// Runtime-settable; set to `0.0` to mute op-amp IC hiss.\n");
-            methods.push_str("    pub fn set_opamp_input_gain(&mut self, gain: f64) { self.opamp_input_gain = gain; }\n\n");
+            methods.push_str(
+                "    /// A non-finite gain is counted in `diag_runtime_nan_count` and ignored.\n",
+            );
+            methods.push_str("    pub fn set_opamp_input_gain(&mut self, gain: f64) { if gain.is_finite() { self.opamp_input_gain = gain; } else { self.diag_runtime_nan_count += 1; } }\n\n");
             if opamp_any_dynamic {
                 let is_nodal = matches!(ir.solver_mode, crate::codegen::ir::SolverMode::Nodal);
                 methods.push_str(

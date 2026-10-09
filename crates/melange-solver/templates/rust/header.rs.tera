@@ -14,6 +14,26 @@
 // ============================================================================
 
 #![allow(clippy::excessive_precision)]
+// A baked constant can land on a well-known value by arithmetic alone (a
+// thermal-noise scale `sqrt(1/R)` at R = 0.5 Ω is √2 to the last digit), and
+// `approx_constant` is deny-by-default, so without this an untouched
+// generated file fails `cargo clippy` outright.
+#![allow(clippy::approx_constant)]
+// The sub-sample-fire schedule tests `t % (h << 1) == 0`; clippy 1.99 wants
+// `is_multiple_of`, which needs Rust 1.87 while this code must build on the
+// 1.85 MSRV.
+#![allow(clippy::manual_is_multiple_of)]
+// Matrix coefficients are emitted as literals, so an entry that is exactly −1
+// reads as `x * -1.0e0`; it is a value, not a style choice.
+#![allow(clippy::neg_multiply)]
+// Behavioral-source expressions are emitted as fully parenthesised trees, and
+// their `max(min(x, hi), lo)` is deliberate: `f64::clamp` panics when
+// `lo > hi` and treats NaN differently, so it is not a drop-in replacement.
+#![allow(clippy::double_parens)]
+#![allow(clippy::manual_clamp)]
+// Topology-dependent control flow assigns a `let v;` in whichever branches
+// the deck has.
+#![allow(clippy::needless_late_init)]
 #![allow(clippy::needless_range_loop)]
 #![allow(clippy::too_many_arguments)]
 // NaN-honest convergence predicates are deliberately written as !(a < b) so a

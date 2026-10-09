@@ -195,8 +195,14 @@ impl RustEmitter {
                 "    // Sanitize injections (NaN/Inf → 0). No magnitude clamp: a feedback value\n\
                  \x20   // is arbitrary and the plausibility guard catches any runaway.\n\
                  \x20   let mut injections = injections;\n\
-                 \x20   for v in injections.iter_mut() { *v = if v.is_finite() { *v } else { state.diag_input_nan_count += 1; 0.0 }; }\n\n",
+                 \x20   for v in injections.iter_mut() { *v = if v.is_finite() { *v } else { state.diag_runtime_nan_count += 1; 0.0 }; }\n\n",
             );
+        }
+        // `.runtime V` fields are sanitised once per HOST sample: here only when
+        // this function is the host entry (fixed 1×, no `.inject`); every other
+        // build's wrapper or dispatcher does it before calling the inner function.
+        if os_factor == 1 && !inject_or_tap && super::super::runtime_os::runtime(ir).is_none() {
+            code.push_str(&super::super::runtime_inputs::sanitize_block(ir, "    "));
         }
 
         // Saturating inductors force the full-LU sub-path (their flux device
@@ -760,11 +766,15 @@ impl RustEmitter {
         // Stamped after the DC RHS_CONST and the input stamp so the field value is
         // additive with any DC bias declared on the voltage source itself.
         if !ir.runtime_sources.is_empty() {
-            code.push_str("    // Runtime voltage sources (.runtime directive)\n");
+            code.push_str(
+                "    // Runtime voltage sources (.runtime directive), sanitised copies\n",
+            );
             for rt in &ir.runtime_sources {
                 code.push_str(&format!(
-                    "    rhs[{}] += state.{};\n",
-                    rt.vs_row, rt.field_name
+                    "    rhs[{}] += state.{}{};\n",
+                    rt.vs_row,
+                    rt.field_name,
+                    super::super::runtime_inputs::SANITIZED_SUFFIX
                 ));
             }
             code.push('\n');

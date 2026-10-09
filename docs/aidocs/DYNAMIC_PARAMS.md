@@ -229,11 +229,20 @@ Vctrl ctrl 0 DC 0
 
 ### Semantics
 Binds an existing voltage source to a `pub <field>: f64` on the generated
-`CircuitState`. The plugin writes the field each sample; codegen stamps
-`rhs[VSOURCE_<NAME>_RHS_ROW] += state.<field>` in both trapezoidal and
-backward-Euler RHS builders. Additive with any DC bias declared on the
-voltage source itself, so `V1 n1 0 DC 5` + `.runtime V1 as foo` gives a
-constant 5 V bias plus host-driven modulation.
+`CircuitState`. The plugin writes the field each sample; the host-level
+`process_sample` reads it once per host sample into a private
+`<field>_sanitized` copy (a non-finite value becomes 0, the deck's own DC
+value, and is counted in `diag_runtime_nan_count`; the public field is left
+as written, so a stuck value keeps counting), and every RHS builder stamps
+`rhs[VSOURCE_<NAME>_RHS_ROW] += state.<field>_sanitized`: trapezoidal,
+backward-Euler fallback, the nodal sub-step ladder, the glow sub-sample
+re-solve and the runtime DC recompute (which sanitises and counts on its own
+entry). Additive with any DC bias declared on the voltage source itself, so
+`V1 n1 0 DC 5` + `.runtime V1 as foo` gives a constant 5 V bias plus
+host-driven modulation. The sanitised copy is written at the host entry
+(fixed 1× function, `.inject` wrapper, oversampling wrapper or
+runtime-selectable dispatcher), never in the inner-rate function, so the
+count does not scale with the oversampling factor.
 
 ### When to use it
 Any host-driven per-sample voltage input: sidechain CV for compressors,

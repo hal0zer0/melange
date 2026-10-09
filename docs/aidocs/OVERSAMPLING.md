@@ -234,8 +234,9 @@ the set's largest, which the runtime build uses at every factor).
 **Build.** `build_runtime_oversampling` (`build.rs`) assembles and emits each factor as
 the fixed build it would be, then:
 
-- **Refuses** the set unless their provenance agrees on every key but `oversampling` and
-  `integration_reason`: the runtime code is one solver, so a factor that would route,
+- **Refuses** the set unless their provenance agrees on every key but `oversampling`,
+  `integration_reason` and `sparsity_noise_ratio` (each factor's own inversion; reported
+  per factor): the runtime code is one solver, so a factor that would route,
   integrate, latch or reduce differently cannot be one of its settings. The refusal
   lists every differing key. (A deck whose integrator or route flips across the set is
   built once per factor instead.)
@@ -277,12 +278,15 @@ the fixed build it would be, then:
   rate is not the compile rate.
 
 **Witnesses** (`melange-solver/tests/runtime_oversampling_tests.rs`): bit-identity to
-the fixed builds at 1/2/4× and 48/96 kHz with a pot moved and injections driven,
-hashing every node voltage, on a guard deck carrying every rate-dependent feature
-(saturating inductor, op-amp slew and rails, glow lamp, latch-carrying trapezoidal
-route, `.inject` at both rates and `.tap`, pot), a glow deck with sub-sample fire on
-nodal Schur, and a DK deck; a 2×→4×→2× switch equals a fresh state; the refusal of a
-set that changes solver; provenance.
+the fixed builds at 1/2/4× and 48/96 kHz, with each factor of the set as the default
+(a different emission each), with a pot moved and injections driven, hashing every
+node voltage, on a guard deck carrying every rate-dependent feature (saturating
+inductor, op-amp slew and rails, glow lamp, latch-carrying trapezoidal route,
+`.inject` at both rates and `.tap`, pot), a glow deck with sub-sample fire on nodal
+Schur, and a DK deck; a 2×→4×→2× switch equals a fresh state; the refusal of a set
+that changes solver; a per-factor noise ratio does not split a set; provenance. The
+one-solver text comparison itself is unit-tested on synthetic emissions in `build.rs`
+(no in-repo deck emits a different solver at a different rate any more).
 
 ## Sample Rate Interaction
 

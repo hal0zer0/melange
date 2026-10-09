@@ -32,8 +32,9 @@
             rhs[INJECT_NODES[k]] += injections[k] / INJECT_RESISTANCES[k];
         }
     }
-{% endif %}{% if runtime_sources | length > 0 %}    // Runtime voltage sources (.runtime directive): host-driven per-sample values.
-{% for rt in runtime_sources %}    rhs[{{ rt.vs_row }}] += state.{{ rt.field_name }};
+{% endif %}{% if runtime_sources | length > 0 %}    // Runtime voltage sources (.runtime directive): host-driven per-sample values,
+    // read from the copy sanitised once per host sample (a non-finite write is 0 here).
+{% for rt in runtime_sources %}    rhs[{{ rt.vs_row }}] += state.{{ rt.field_name }}_sanitized;
 {% endfor %}{% endif %}
     rhs
 }

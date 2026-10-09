@@ -320,12 +320,14 @@ fn runtime_v_source_stamped_in_all_rhs_rebuilds() {
         schur.contains("state.ctrl_v"),
         "runtime source field must be consumed"
     );
-    let re_rhs = regex_lite_count(&schur, "rhs[", "state.ctrl_v;");
+    let re_rhs = regex_lite_count(&schur, "rhs[", "state.ctrl_v_sanitized;");
     // The backward-Euler solve is the same routine with its own `rhs`.
     let re_be = schur
         .split("// Backward-Euler solve: the same routine")
         .nth(1)
-        .map_or(0, |be| regex_lite_count(be, "rhs[", "state.ctrl_v;"));
+        .map_or(0, |be| {
+            regex_lite_count(be, "rhs[", "state.ctrl_v_sanitized;")
+        });
     assert!(
         re_rhs >= 1,
         "Schur trap RHS must stamp the runtime V source"
@@ -346,11 +348,11 @@ fn runtime_v_source_stamped_in_all_rhs_rebuilds() {
         "forcing branch must route full-LU"
     );
     assert!(
-        regex_lite_count(&full, "rhs[", "state.ctrl_v;") >= 1,
+        regex_lite_count(&full, "rhs[", "state.ctrl_v_sanitized;") >= 1,
         "full-LU trap RHS must stamp the runtime V source"
     );
     assert!(
-        regex_lite_count(&full, "rhs_s[", "state.ctrl_v;") >= 1,
+        regex_lite_count(&full, "rhs_s[", "state.ctrl_v_sanitized;") >= 1,
         "full-LU sub-step RHS must stamp the runtime V source"
     );
     // On full-LU the backward-Euler solve is the same routine as the primary
@@ -360,7 +362,7 @@ fn runtime_v_source_stamped_in_all_rhs_rebuilds() {
         .nth(1)
     {
         assert!(
-            regex_lite_count(be_solve, "rhs[", "state.ctrl_v;") >= 1,
+            regex_lite_count(be_solve, "rhs[", "state.ctrl_v_sanitized;") >= 1,
             "full-LU BE-solve RHS must stamp the runtime V source"
         );
     }

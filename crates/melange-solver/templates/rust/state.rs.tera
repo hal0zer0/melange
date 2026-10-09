@@ -90,8 +90,16 @@ pub struct CircuitState {
     /// Diagnostic: input samples clamped to +/-INPUT_LIMIT_V (the circuit
     /// was driven with a smaller input than requested)
     pub diag_input_clamp_count: u64,
-    /// Diagnostic: NaN/Inf input (or injection) samples replaced by 0
+    /// Diagnostic: NaN/Inf host input samples replaced by 0
     pub diag_input_nan_count: u64,
+    /// Diagnostic: non-finite (NaN or ±inf) values the plugin wrote: a
+    /// `.runtime` voltage-source field (counted once per host sample while it
+    /// stays non-finite; the source reads as 0 for that sample), a `.inject`
+    /// value (replaced by 0), or a setter argument (`set_pot_*`,
+    /// `set_runtime_*`, the noise setters, `set_temperature_k`,
+    /// `set_sample_rate`: ±inf clamps to a declared range, anything else
+    /// leaves the value unchanged). Cleared by `reset()`.
+    pub diag_runtime_nan_count: u64,
     /// Diagnostic: number of times a finite-but-implausible iterate (state
     /// magnitude beyond any physically-realizable circuit value) triggered
     /// state reset. NaN/Inf is caught by `diag_nan_reset_count`; this counts
@@ -225,7 +233,11 @@ pub struct CircuitState {
     // row of the augmented system. Additive with any DC bias declared on
     // the voltage source itself.
 {% for rt in runtime_sources %}    /// Runtime value for voltage source {{ rt.vs_name }} (RHS row {{ rt.vs_row }}).
+    /// A non-finite value reads as 0 for that host sample and is counted in
+    /// `diag_runtime_nan_count`; the field itself is left as written.
     pub {{ rt.field_name }}: f64,
+    /// `{{ rt.field_name }}` as the RHS stamps read it: sanitised once per host sample.
+    {{ rt.field_name }}_sanitized: f64,
 {% endfor %}{% endif %}
 }
 
@@ -277,6 +289,7 @@ impl Default for CircuitState {
             diag_nan_reset_count: 0,
             diag_input_clamp_count: 0,
             diag_input_nan_count: 0,
+            diag_runtime_nan_count: 0,
             diag_magnitude_reset_count: 0,
             diag_singular_matrix_count: 0,
             diag_voltage_damp_count: 0,
@@ -330,6 +343,7 @@ impl Default for CircuitState {
 {% endfor %}
 {% endif %}
 {% if has_stateful %}{{ stateful_default_fields }}{% endif %}{% if noise_enabled_emit %}{{ noise_default_fields }}{% endif %}{% if runtime_sources | length > 0 %}{% for rt in runtime_sources %}            {{ rt.field_name }}: 0.0,
+            {{ rt.field_name }}_sanitized: 0.0,
 {% endfor %}{% endif %}        }
     }
 }
@@ -344,6 +358,9 @@ impl CircuitState {
     /// intentionally discarded here; callers that want coherence at
     /// *jittered* pot/device values should call `recompute_dc_op()` (or
     /// `settle_dc_op()`) after applying them, not `reset()`.
+    /// The sample rate is kept (it is not a control; the matrices are
+    /// rebuilt for it). Controls are the caller's: re-apply pots and
+    /// switches after `reset()`, as after construction.
     pub fn reset(&mut self) {
 {% if has_dc_op %}        // Restore the baked DC OP so it agrees with the baked bias currents
         // and the nominal pot/switch values restored below (a recomputed OP
@@ -378,6 +395,7 @@ impl CircuitState {
         self.diag_nan_reset_count = 0;
         self.diag_input_clamp_count = 0;
         self.diag_input_nan_count = 0;
+        self.diag_runtime_nan_count = 0;
         self.diag_magnitude_reset_count = 0;
         self.diag_singular_matrix_count = 0;
         self.diag_voltage_damp_count = 0;
@@ -429,6 +447,7 @@ impl CircuitState {
 {% endfor %}
 {% endif %}
 {% if has_stateful %}{{ stateful_reset_body }}{% endif %}{% if noise_enabled_emit %}{{ noise_reset_body }}{% endif %}{% if runtime_sources | length > 0 %}{% for rt in runtime_sources %}        self.{{ rt.field_name }} = 0.0;
+        self.{{ rt.field_name }}_sanitized = 0.0;
 {% endfor %}{% endif %}
     }
 
@@ -545,7 +564,11 @@ impl CircuitState {
     /// (filter and magnetics history) is preserved so a no-op rate call
     /// never clicks.
     pub fn set_sample_rate(&mut self, sample_rate: f64) {
-        if !(sample_rate > 0.0 && sample_rate.is_finite()) {
+        if !sample_rate.is_finite() {
+            self.diag_runtime_nan_count += 1;
+            return; // Non-finite rate: counted, nothing changes
+        }
+        if !(sample_rate > 0.0) {
             return; // Invalid sample rate, keep defaults
         }
 {% if noise_enabled_emit %}{{ noise_set_sample_rate_body }}{% endif %}

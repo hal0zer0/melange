@@ -188,9 +188,9 @@ R2 ctrl 0 100k
 .runtime Vctrl as ctrl_voltage
 ";
     let code = generate_dk(spice);
-    // build_rhs must stamp `rhs[row] += state.ctrl_voltage`.
+    // build_rhs must stamp `rhs[row] += state.ctrl_voltage_sanitized` (the copy sanitised once per host sample).
     assert!(
-        code.contains("+= state.ctrl_voltage;"),
+        code.contains("+= state.ctrl_voltage_sanitized;"),
         "missing rhs stamp for runtime field:\n{}",
         excerpt(&code, "ctrl_voltage")
     );

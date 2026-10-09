@@ -695,9 +695,14 @@ pub(super) fn emit_schur_nr_limit_and_converge(
                 (DeviceType::Glow, _) => format!("v_trial{i}"),
             };
             code.push_str(&format!("{indent}let dv_trial{i} = v_trial{i} - v_d{i};\n"));
-            code.push_str(&format!(
-                "{indent}let v_lim{i} = if dv_trial{i}.abs() > 1e-4 {{ {lim_expr} }} else {{ v_trial{i} }};\n"
-            ));
+            if lim_expr == format!("v_trial{i}") {
+                // No limiter on this dimension: the trial step is the step.
+                code.push_str(&format!("{indent}let v_lim{i} = v_trial{i};\n"));
+            } else {
+                code.push_str(&format!(
+                    "{indent}let v_lim{i} = if dv_trial{i}.abs() > 1e-4 {{ {lim_expr} }} else {{ v_trial{i} }};\n"
+                ));
+            }
         }
     }
 

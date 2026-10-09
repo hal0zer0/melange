@@ -197,11 +197,15 @@ impl RustEmitter {
             // Runtime voltage sources: integration-scheme-independent; every
             // from-scratch RHS rebuild must re-stamp them.
             if !ir.runtime_sources.is_empty() {
-                code.push_str("                // Runtime voltage sources (.runtime directive)\n");
+                code.push_str(
+                    "                // Runtime voltage sources (.runtime directive), sanitised copies\n",
+                );
                 for rt in &ir.runtime_sources {
                     code.push_str(&format!(
-                        "                rhs_s[{}] += state.{};\n",
-                        rt.vs_row, rt.field_name
+                        "                rhs_s[{}] += state.{}{};\n",
+                        rt.vs_row,
+                        rt.field_name,
+                        super::super::runtime_inputs::SANITIZED_SUFFIX
                     ));
                 }
             }

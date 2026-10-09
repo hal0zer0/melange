@@ -159,6 +159,7 @@ impl RustEmitter {
         code.push_str(
             "    let input = if !input.is_finite() { state.diag_input_nan_count += 1; 0.0 } else if input.abs() > INPUT_LIMIT_V { state.diag_input_clamp_count += 1; input.clamp(-INPUT_LIMIT_V, INPUT_LIMIT_V) } else { input };\n\n",
         );
+        code.push_str(&super::runtime_inputs::sanitize_block(ir, "    "));
 
         if factor == 2 {
             Self::emit_2x_wrapper(
@@ -196,6 +197,7 @@ impl RustEmitter {
         code.push_str(
             "    let input = if !input.is_finite() { state.diag_input_nan_count += 1; 0.0 } else if input.abs() > INPUT_LIMIT_V { state.diag_input_clamp_count += 1; input.clamp(-INPUT_LIMIT_V, INPUT_LIMIT_V) } else { input };\n",
         );
+        code.push_str(&super::runtime_inputs::sanitize_block(ir, "    "));
         code.push_str(
             "    let (output, tap) = process_sample_inner(input, inject_assemble(injections_host, &injections_inner[0]), state);\n",
         );
@@ -327,7 +329,7 @@ impl RustEmitter {
                  \x20   let mut inj_host_odd = [0.0f64; NUM_INJECT_HOST];\n\
                  \x20   for k in 0..NUM_INJECT_HOST {\n\
                  \x20       let x = injections_host[k];\n\
-                 \x20       let x = if x.is_finite() { x } else { state.diag_input_nan_count += 1; 0.0 };\n\
+                 \x20       let x = if x.is_finite() { x } else { state.diag_runtime_nan_count += 1; 0.0 };\n\
                  \x20       let (e, o) = os_halfband(x, &OS_COEFFS, &mut state.os_inj_up_state[k]);\n\
                  \x20       inj_host_even[k] = e;\n\
                  \x20       inj_host_odd[k] = o;\n\
@@ -391,7 +393,7 @@ impl RustEmitter {
                  \x20   let mut inj_host_outer = [[0.0f64; 2]; NUM_INJECT_HOST];\n\
                  \x20   for k in 0..NUM_INJECT_HOST {\n\
                  \x20       let x = injections_host[k];\n\
-                 \x20       let x = if x.is_finite() { x } else { state.diag_input_nan_count += 1; 0.0 };\n\
+                 \x20       let x = if x.is_finite() { x } else { state.diag_runtime_nan_count += 1; 0.0 };\n\
                  \x20       let (e, o) = os_halfband_outer(x, &OS_COEFFS_OUTER, &mut state.os_inj_up_state_outer[k]);\n\
                  \x20       inj_host_outer[k] = [e, o];\n\
                  \x20   }\n\n\
@@ -555,6 +557,7 @@ impl RustEmitter {
         code.push_str(
             "    let input = if !input.is_finite() { state.diag_input_nan_count += 1; 0.0 } else if input.abs() > INPUT_LIMIT_V { state.diag_input_clamp_count += 1; input.clamp(-INPUT_LIMIT_V, INPUT_LIMIT_V) } else { input };\n\n",
         );
+        code.push_str(&super::runtime_inputs::sanitize_block(ir, "    "));
         code.push_str("    match state.oversampling {\n");
         // Pad a factor's raw taps to the API's MAX_OVERSAMPLING rows.
         let pad = |taps: &str, n: usize| -> String {

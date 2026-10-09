@@ -118,6 +118,14 @@ Pot and switch setters are cheap themselves but mark the matrices dirty; the
 rebuild (O(N³)) happens inside the next `process_sample`. Drive them per block,
 never per sample.
 
+`reset()` returns the state to what codegen baked in: the DC operating point,
+the bias currents and the **nominal pot and switch values**, restored together
+so they agree. It keeps the sample rate (not a control; the matrices are
+rebuilt for it). Controls are yours, so re-apply every pot and switch after
+`reset()` exactly as after `CircuitState::default()`. A host calls `reset()`
+on every activation; a wrapper that caches "last position sent" and skips the
+re-apply runs the circuit at nominal controls while believing otherwise.
+
 `process_sample` has two variants, both visible at the top of the generated
 file — grep it rather than assuming:
 
@@ -160,7 +168,8 @@ array of `[]`). A deck with neither `.inject` nor `.tap` keeps
 
 The values are circuit units: volts for a Thevenin (`R=`) injection, amperes
 for a Norton (`RSHUNT=`) one. NaN/Inf values become 0 and count in
-`diag_input_nan_count`; there is no magnitude clamp. At `OVERSAMPLING_FACTOR`
+`diag_runtime_nan_count` (they are values your code wrote, not host audio);
+there is no magnitude clamp. At `OVERSAMPLING_FACTOR`
 1 there is no up-filter and the two kinds reach the solve identically.
 
 In a feedback loop the injected value must come from a previous call's taps
@@ -252,10 +261,15 @@ passed. They exist on every route:
 | Field | What a nonzero value means |
 |-------|----------------------------|
 | `diag_input_clamp_count` | Input samples beyond `INPUT_LIMIT_V` (±100 V) were clamped to it. |
-| `diag_input_nan_count` | NaN/Inf input (or `.inject`) samples were replaced by 0 V. |
+| `diag_input_nan_count` | NaN/Inf host input samples were replaced by 0 V. |
+| `diag_runtime_nan_count` | A value your own code wrote was NaN or ±inf: a `.runtime` voltage-source field (counted once per host sample while it stays non-finite; the source reads as 0 for that sample), a `.inject` value (replaced by 0), or a setter argument (`set_pot_*`, `set_runtime_*`, the noise setters, `set_temperature_k`, `set_sample_rate`: ±inf clamps to a declared range, anything else leaves the value unchanged). |
 
-Both are `u64` and cleared by `reset()`. The clamp keeps garbage host input
-from reaching the solver; the counter is how you know it happened.
+All three are `u64` and cleared by `reset()`. The clamp keeps garbage host
+input from reaching the solver, and no non-finite value from any of these
+paths reaches it either; the counters are how you know it happened. The
+runtime counter is worth an assertion of its own: it means your plugin
+computed a non-finite control value, which no amount of output checking can
+see once the guard has replaced it.
 
 If you are surfacing one number to a user, surface whether it is zero.
 

@@ -550,8 +550,10 @@ fn emit_segment_rhs(
     }
     for rt in &ir.runtime_sources {
         code.push_str(&format!(
-            "{indent}{rhs_var}[{}] += state.{};\n",
-            rt.vs_row, rt.field_name
+            "{indent}{rhs_var}[{}] += state.{}{};\n",
+            rt.vs_row,
+            rt.field_name,
+            super::runtime_inputs::SANITIZED_SUFFIX
         ));
     }
     if noise.enabled {

@@ -252,6 +252,10 @@ pub struct FactorSettlement {
     pub factor: usize,
     /// The ring predicate's verdict at this factor's rate.
     pub integration_reason: String,
+    /// How close the rounding noise outside the structural pattern came to
+    /// its bound when this factor's matrices were settled (the fixed build's
+    /// `sparsity_noise_ratio`; the runtime deck bakes that build's matrices).
+    pub sparsity_noise_ratio: f64,
 }
 
 /// A generated constant whose value depends on the oversampling factor.

@@ -175,6 +175,10 @@ file:line, oomox-relative):
 - **`smps_v`** (`.runtime V` field) — noyce smps_ripple writes per-sample.
 - **`last_nr_iterations`** — velvet-elvis `lib.rs:784,814` (runtime health),
   uniquorn perf harness, several perf/diagnostic tests.
+- **`diag_runtime_nan_count`** — every route; counts non-finite values the
+  plugin wrote (`.runtime` fields, `.inject` values, setter arguments). Assert
+  `== 0`; it is the only witness that a plugin's control path went non-finite,
+  since the guard replaces the value before it can show in the output.
 - **`diag_peak_output`, `diag_clamp_count`, `diag_nr_max_iter_count`,
   `diag_nan_reset_count`, `diag_singular_matrix_count`,
   `diag_be_fallback_count`, `diag_voltage_damp_count`** — asserted `== 0` (or
@@ -427,9 +431,19 @@ downstream measures that automatically.
   policy or seeding changes LF response and onset thumps downstream.
 - Input clamp: generated code clamps its input to ±`INPUT_LIMIT_V` (100 V)
   and replaces NaN/Inf by 0, counting each in `diag_input_clamp_count` /
-  `diag_input_nan_count` (every route, single- and multi-input; injections'
-  NaN counts too). A nonzero count means the circuit was not driven with the
-  host's signal; the counters are the plugin-side witness.
+  `diag_input_nan_count` (every route, single- and multi-input). A nonzero
+  count means the circuit was not driven with the host's signal; the counters
+  are the plugin-side witness.
+- Runtime inputs: a non-finite value the PLUGIN writes never reaches the
+  solver and is counted in `diag_runtime_nan_count` (every route): a
+  `.runtime V` field reads as 0 for that host sample (counted once per host
+  sample while it stays non-finite; the field is left as written), a
+  `.inject` value reads as 0, a ranged setter (`set_pot_*`, `set_runtime_*`)
+  clamps ±inf to its range end and ignores NaN, and the noise setters,
+  `set_temperature_k` and `set_sample_rate` ignore any non-finite argument.
+  Assert it is zero: a nonzero count means the plugin's own control path
+  computed a non-finite value. Before the guard, one non-finite control
+  voltage cost ~8.7 ms per sample for the rest of the session.
 - Output clamp: generated ±10 V clamp is melange's safety; plugins add final
   `.clamp(-4.0, 4.0)` or `brickwall_limit` on the f32.
 - Multi-circuit chaining passes **volts directly** between `process_sample`

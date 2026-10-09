@@ -35,11 +35,12 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
     }
 {% else %}    // Validate input: NaN/Inf -> 0 and beyond INPUT_LIMIT_V -> clamped, each counted
     let input = if !input.is_finite() { state.diag_input_nan_count += 1; 0.0 } else if input.abs() > INPUT_LIMIT_V { state.diag_input_clamp_count += 1; input.clamp(-INPUT_LIMIT_V, INPUT_LIMIT_V) } else { input };
-{% endif %}{% if inject_or_tap %}    // Sanitize injections (NaN/Inf → 0). No magnitude clamp: a feedback value
-    // is arbitrary and the Step-7 plausibility guard catches any runaway.
+{% endif %}{% if inject_or_tap %}    // Sanitize injections (NaN/Inf → 0, counted as a plugin-written value). No
+    // magnitude clamp: a feedback value is arbitrary and the Step-7 plausibility
+    // guard catches any runaway.
     let mut injections = injections;
-    for v in injections.iter_mut() { *v = if v.is_finite() { *v } else { state.diag_input_nan_count += 1; 0.0 }; }
-{% endif %}
+    for v in injections.iter_mut() { *v = if v.is_finite() { *v } else { state.diag_runtime_nan_count += 1; 0.0 }; }
+{% endif %}{{ runtime_sanitize_block }}
 {% if num_switches > 0 or num_pots > 0 %}
     // Lazy rebuild: process all pot/switch changes in one batch
     if state.matrices_dirty {
@@ -127,7 +128,7 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
 {% if runtime_sources | length > 0 %}        // Runtime voltage sources (.runtime directive): same rows/values as
         // build_rhs — VS algebraic rows are integration-scheme-independent
         // (×1 for both trap and BE), so a fallback sample must not drop them.
-{% for rt in runtime_sources %}        rhs_be[{{ rt.vs_row }}] += state.{{ rt.field_name }};
+{% for rt in runtime_sources %}        rhs_be[{{ rt.vs_row }}] += state.{{ rt.field_name }}_sanitized;
 {% endfor %}{% endif %}{% if noise_enabled_emit %}{{ noise_rhs_stamp_be }}{% endif %}
         // BE linear prediction: v_pred_be = S_be * rhs_be
         let mut v_pred_be = [0.0f64; N];
