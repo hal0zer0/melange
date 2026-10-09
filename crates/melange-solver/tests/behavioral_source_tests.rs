@@ -564,3 +564,42 @@ Rin in 0 1meg
         "pow(-0.5, 1.5): got {v_out}, expected {expected}"
     );
 }
+
+/// A behavioral expression whose argument folds to a constant (every name a
+/// `.param`) still compiles: the lowered literals are typed, so a method call
+/// on an all-constant subtree is not a call on an untyped `{float}`.
+#[test]
+fn an_all_constant_function_argument_compiles() {
+    let spice = "\
+Behavioral with a constant sqrt argument
+Va a 0 DC 1
+.param strength = 0.5
+.param f_offset = 0
+.param f_if = 2000
+B1 out 0 V={ strength / sqrt(1 + (f_offset / f_if) * (f_offset / f_if)) * V(a) }
+Rout out 0 1
+Cout out 0 1u
+Rin in 0 1meg
+";
+    let code = generate_nodal(spice, "out");
+    assert!(
+        code.contains("_f64"),
+        "constants are emitted with a type suffix"
+    );
+    let main = "fn main() {\n\
+        \x20   let mut s = CircuitState::default();\n\
+        \x20   let mut y = [0.0f64; NUM_OUTPUTS];\n\
+        \x20   for _ in 0..256 { y = process_sample(0.0, &mut s); }\n\
+        \x20   println!(\"{:.9}\", y[0]);\n\
+        }\n";
+    let out = support::compile_and_run(&code, main, "bsrc_const_sqrt");
+    let y: f64 = out
+        .stdout
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("no value:\n{}\n{}", out.stdout, out.stderr));
+    assert!(
+        (y - 0.5).abs() < 1e-6,
+        "V(out) = {y}, expected strength/sqrt(1) = 0.5"
+    );
+}

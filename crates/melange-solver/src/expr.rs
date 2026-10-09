@@ -1336,7 +1336,17 @@ impl Expr {
     pub fn to_rust(&self, r: &dyn ExprResolver) -> String {
         use Expr::*;
         match self {
-            Const(v) => fmt_f64(*v),
+            // Typed at the leaf: a subtree made only of constants (every
+            // `.param` folded) would otherwise be an untyped `{float}`, and a
+            // method call on it (`(x / y).max(0.0).sqrt()`) does not compile.
+            Const(v) => {
+                let s = fmt_f64(*v);
+                if s.starts_with("f64::") {
+                    s
+                } else {
+                    format!("{s}_f64")
+                }
+            }
             Time => r.time(),
             InvDt => r.inv_dt(),
             HalfDt => r.half_dt(),
@@ -2049,7 +2059,7 @@ mod tests {
         );
         assert_eq!(Expr::Const(f64::NAN).to_rust(&r), "f64::NAN");
         // Finite formatting unchanged.
-        assert_eq!(Expr::Const(2.0).to_rust(&r), "2.0");
+        assert_eq!(Expr::Const(2.0).to_rust(&r), "2.0_f64");
     }
 
     #[test]
