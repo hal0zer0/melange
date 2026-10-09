@@ -81,6 +81,16 @@ impl CircuitIR {
             // current-only stamp is simply wrong under trap), so it also
             // overwrites a provisional trap selection.
             integrator_selection = IntegratorSelection::BeBehavioral;
+            // The baked A and A_neg below take their coefficient from `alpha`,
+            // which was chosen from the CLI flag alone. A backward-Euler build
+            // is `A = G + C/T`, `A_neg = C/T` (COMPANION_MODELS.md); with the
+            // trapezoidal 2/T left in place every capacitor integrated as
+            // twice its value at the compile rate (the runtime rebuild uses
+            // 1/T, so only the baked constants were wrong): a linear RC
+            // network behind any behavioral source lost 2.7 dB at 1 kHz and
+            // 7.7 dB at 10 kHz against the same network under
+            // `--backward-euler`.
+            alpha = alpha_be;
         }
         // A/A_neg/A_be/A_neg_be are built ONCE below, after the selective
         // Rule-D' Gm cap has (possibly) modified aug.g. A former pre-cap build
