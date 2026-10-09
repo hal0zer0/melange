@@ -9,21 +9,34 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
-**What changes generated code or rendered audio:** for an existing build,
-the emitted `K`/`K_BE` term set on 5 of 112 corpus decks (14 of 282 builds,
-every change a removal of rounding-noise terms); the baked `S`/`K` constants
-on 38 decks (noise entries now exactly `0.0`); no route, sub-path or
-integrator changes anywhere. Renders move only on the 5 decks that lost terms,
-by at most 1.1e-8 relative, which is the Newton loop's own termination band
-(it stops at `|step| ≤ 1e-3·|v| + 1e-6`): changing any present `K` entry by
-one ULP moves those renders by the same amount. ngspice validation residuals
-are unchanged. A deck declaring `.oversampling N allow=...`, or a `compile
---oversampling-set`, gets the new runtime-oversampling code. Every build gains
-`diag_runtime_nan_count`, a guard line per `.runtime` voltage source and per
-setter argument, four `#![allow]` lines in its header, and (nodal) a longer
-doc comment on `reset()`; a device dimension with no limiter (VCA, LDR, glow)
-takes its trial step directly instead of through a branch with two identical
-arms. None of it changes a finite render.
+## [0.1.17] - 2026-10-09
+
+**What changes rendered audio:** every deck with a behavioral source, at its
+compile rate: those builds integrated every capacitor as twice its value
+(a 2.7 dB loss at 1 kHz on a plain RC network), and now integrate as the
+backward-Euler builds they are labelled; in the golden corpus radio-fm moves
++2.7 dB and radio-am +1.0 dB, toward the closed form. Otherwise renders move
+only on the 5 corpus decks whose emitted `K`/`K_BE` term set lost
+rounding-noise terms, by at most 1.1e-8 relative, which is the Newton loop's
+own termination band. ngspice validation residuals are unchanged.
+
+**What changes generated code without changing a finite render:** the
+emitted `K`/`K_BE` term set on 5 of 112 corpus decks (14 of 282 builds) and
+the baked `S`/`K` constants on 38 decks (noise entries now exactly `0.0`); no
+route, sub-path or integrator changes anywhere. A deck declaring
+`.oversampling N allow=...`, or a `compile --oversampling-set`, gets the new
+runtime-oversampling code. Every build gains `diag_runtime_nan_count`, a
+guard line per `.runtime` voltage source and per setter argument, a
+per-sample flag behind `diag_unsolved_sample_count`, six `#![allow]` lines
+in its header, and (nodal) a longer doc comment on `reset()`; behavioral
+expressions carry `_f64` suffixes on their constants; a device dimension
+with no limiter (VCA, LDR, glow) takes its trial step directly instead of
+through a branch with two identical arms.
+
+**What changes a counter:** a nodal deck that hits the NaN or magnitude
+reset now reports those samples in `diag_unsolved_sample_count` (none in the
+corpus does at the default render); a non-finite `.inject` value counts in
+`diag_runtime_nan_count`, no longer in `diag_input_nan_count`.
 
 ### Added
 
@@ -3351,7 +3364,8 @@ measured real hardware. Everything else is unproven against hardware. See
   KiCad file; no effect on netlist compilation, generated code, or shipped plugins. The
   fix (`quick-xml >= 0.41`) is tracked for 0.1.1.
 
-[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.16...HEAD
+[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.17...HEAD
+[0.1.17]: https://github.com/hal0zer0/melange/compare/v0.1.16...v0.1.17
 [0.1.16]: https://github.com/hal0zer0/melange/compare/v0.1.15...v0.1.16
 [0.1.15]: https://github.com/hal0zer0/melange/compare/v0.1.14...v0.1.15
 [0.1.14]: https://github.com/hal0zer0/melange/compare/v0.1.13...v0.1.14

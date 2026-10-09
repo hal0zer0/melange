@@ -270,33 +270,33 @@ A sample of what it handles, with **measured** single-core throughput:
 
 | Circuit | What it is | Devices | Throughput\* | ns/sample |
 |---------|-----------|---------|--------------|-----------|
-| Bus compressor | VCA + op-amp sidechain | 12 op-amps + 2 VCAs | 6.5× | 3196 |
-| Passive tube program EQ | 7 pots, 3 switches, global NFB (N=52, M=8) | 4 tubes, 3 transformers | 18.1× | 1148 |
-| Single-ended tube amp | preamp + power stage + output transformer into 8 Ω | 12AX7 (2 triodes) + 6V6 pentode | 19.9× | 1047 |
-| Germanium diode network | 3 RC sections, an antiparallel Ge pair at each | 6 Ge diodes | 24.6× | 846 |
-| Wurlitzer 200A preamp | 2-stage BJT preamp (full Gummel-Poon) | 2 BJTs + 1 diode | 45.4× | 459 |
-| 12AX7 gain stage | single triode stage | 1 triode | 150.0× | 139 |
+| Bus compressor | VCA + op-amp sidechain | 12 op-amps + 2 VCAs | 6.6× | 3158 |
+| Passive tube program EQ | 7 pots, 3 switches, global NFB (N=52, M=8) | 4 tubes, 3 transformers | 17.7× | 1180 |
+| Single-ended tube amp | preamp + power stage + output transformer into 8 Ω | 12AX7 (2 triodes) + 6V6 pentode | 20.0× | 1044 |
+| Germanium diode network | 3 RC sections, an antiparallel Ge pair at each | 6 Ge diodes | 25.2× | 827 |
+| Wurlitzer 200A preamp | 2-stage BJT preamp (full Gummel-Poon) | 2 BJTs + 1 diode | 45.5× | 458 |
+| 12AX7 gain stage | single triode stage | 1 triode | 144.3× | 144 |
 
-\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), best of 7 × 2M samples. Measured on an AMD Ryzen 9 7950X pinned to one CCD, with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh). Re-measured 2026-10-01 on an idle machine; the best and median of the seven runs agree within 1 % on every row. Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass (`unstable/examples/rc-lowpass.cir` in the circuits repository) runs at about 2000× (10.3 ns/sample, measured 2026-10-05).
+\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), best of 7 × 2M samples. Measured on an AMD Ryzen 9 7950X pinned to one CCD, with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh). Re-measured 2026-10-09 at a load average of about 1.5 (not fully idle); the best and median of the seven runs agree within about 1 % on every row, and every row is within 4 % of the previous release's figure. Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass (`unstable/examples/rc-lowpass.cir` in the circuits repository) runs at about 2000× (10.6 ns/sample, measured 2026-10-09).
 
 **The triode rows pay for grid current.** The Dempwolf & Zölzer grid-current law evaluates a softplus on the grid dimension at every Newton iteration, where a hard-zero law would skip it; that is what modelling the negative-grid region costs. The CHANGELOG has the before/after figures.
 
-Each row names the deck it was measured on, so the numbers have an address. **Three of the six can be re-measured from a public clone today** — the passive tube EQ also ships in-tree as `examples/passive-eq1a.cir`. The other three are still private; naming them is provenance, not an invitation. The public set is expected to grow, but I am not promising a date.
+Each row names the deck it was measured on, so the numbers have an address, and **every one of the six can be re-measured from a public clone** — the passive tube EQ also ships in-tree as `examples/passive-eq1a.cir`.
 
 | Row | Deck |
 |---|---|
 | Bus compressor | `unstable/dynamics/4kbuscomp.cir` |
-| Germanium diode network | `unstable/gimmicks/noyce-germanium-cluster.cir` |
-| Passive tube EQ | `testing/filters/passive-eq1a.cir` |
-| Tweed guitar amp | `unstable/amp/champ-5f1.cir` |
+| Passive tube program EQ | `testing/filters/passive-eq1a.cir` |
+| Single-ended tube amp | `unstable/examples/se-tube-amp.cir` |
+| Germanium diode network | `unstable/examples/germanium-clipper-ladder.cir` |
 | Wurlitzer 200A preamp | `testing/preamp/wurli-preamp.cir` |
-| 12AX7 gain stage | `unstable/gimmicks/noyce-triode-12ax7.cir` |
+| 12AX7 gain stage | `unstable/examples/triode-gain-stage.cir` |
 
 The circuits repository holds the full catalog with per-circuit status:
 
 **https://gitlab.com/oomox-group/melange-circuits**
 
-It is a filtered set — 43 circuits, not everything that exists locally. Of the six rows above, `4kbuscomp`, `passive-eq1a` and `wurli-preamp` are in it; the other three are not yet, so those three numbers are still ones you take on my word.
+It is a filtered set — 51 circuits, not everything that exists locally — and all six rows above are in it, so none of those numbers is one you have to take on my word.
 
 ## Spotlight: Passive Tube EQ
 

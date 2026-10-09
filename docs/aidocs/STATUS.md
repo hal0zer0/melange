@@ -3,7 +3,7 @@
 Quick-reference for AI agents. For math details see other aidocs. For architecture see CLAUDE.md.
 Release history lives in `CHANGELOG.md`; this file states what is true now and what is open.
 
-> **Latest release: v0.1.16 (2026-10-05).**
+> **Latest release: v0.1.17 (2026-10-09).**
 >
 > Triode grid current is the Dempwolf & Zölzer eq. (11) law, which **fails** its Philips ECC83
 > acceptance test 15/15 and ships as the less-wrong model, replacing a law that was further out
@@ -134,7 +134,7 @@ oscillator fixture (ρ 1.0149 at 48 kHz),
 
 ## Circuit Library Status
 
-Circuits live in a separate repository. **Public: https://gitlab.com/oomox-group/melange-circuits** (43 circuits — a FILTERED set; the full catalog is the private `melange-circuits-private`, checked out locally at `../melange-circuits`). Short names resolve through the repo's `circuits-index.json`; see `docs/CIRCUIT_INDEX.md`.
+Circuits live in a separate repository. **Public: https://gitlab.com/oomox-group/melange-circuits** (51 circuits — a FILTERED set; the full catalog is the private `melange-circuits-private`, checked out locally at `../melange-circuits`). Short names resolve through the repo's `circuits-index.json`; see `docs/CIRCUIT_INDEX.md`.
 All circuits are in `unstable/` until the user manually tests and approves promotion.
 
 The compiler validation status of circuits known to exercise specific solver paths

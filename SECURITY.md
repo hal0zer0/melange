@@ -28,11 +28,13 @@ We will acknowledge receipt within 7 days.
 ## Current Guarantees
 
 - **No `unsafe` code** in the melange library, CLI, or generated solver/DSP code.
-  The sole exception: generated *plugin* projects emit one `unsafe` block
-  (`std::arch::x86_64::_mm_setcsr`) to enable the CPU's FTZ/DAZ denormal-flush
-  mode for real-time performance — the only `unsafe` in any melange output.
+  The sole exception: generated *plugin* projects emit one `unsafe` block per
+  x86 target (`_mm_setcsr`, under `cfg(target_arch = "x86_64")` and its
+  32-bit twin, so exactly one compiles) to enable the CPU's FTZ/DAZ
+  denormal-flush mode for real-time performance — the only `unsafe` in any
+  melange output.
 - **Input validation** — parser rejects negative, zero, NaN, and infinite component values; rejects self-connected components
 - **Resource limits** — MAX_M=32 nonlinear dimensions (every solver route), MAX_N=256 nodes, MAX_ELEMENTS=10,000 after expansion, 8-level subcircuit nesting
-- **Bounded iteration** — Newton-Raphson capped at `max_iter` (default 50); DC operating point has source stepping and Gmin stepping fallbacks with finite iteration counts
+- **Bounded iteration** — Newton-Raphson capped at the budget baked into each build (`MAX_ITER`, auto-tuned per circuit at build time or set with `--max-iter`); the sub-step ladder and backward-Euler retries have fixed attempt counts; DC operating point has source stepping and Gmin stepping fallbacks with finite iteration counts
 - **Real-time safe** — generated audio callbacks have zero heap allocation; all buffers pre-allocated at construction
 - **Temp file cleanup** — SPICE validation temp files are removed after each run
