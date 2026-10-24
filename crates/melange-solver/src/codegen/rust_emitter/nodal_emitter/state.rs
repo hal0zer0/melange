@@ -1956,11 +1956,11 @@ impl RustEmitter {
             code.push_str(&format!(
                 "        if !resistance.is_finite() {{ return; }}\n\
                  \x20       let r = resistance.clamp({min_const}, {max_const});\n\
-                 \x20       if (r - self.pot_{}_resistance).abs() < 1e-12 {{ return; }}\n\n\
+                 \x20       if (r - self.pot_{}_resistance).abs() <= 1e-12 * self.pot_{}_resistance {{ return; }}\n\n\
                  \x20       // Delta conductance: stamp into A and A_be (the history matrices\n\
                  \x20       // A_neg = alpha*C and A_neg_be = C/T carry no G term)\n\
                  \x20       let delta_g = 1.0 / r - 1.0 / self.pot_{}_resistance;\n",
-                idx, idx
+                idx, idx, idx
             ));
 
             // Emit conductance stamp into g_work (full dimension if Boyle, reduced otherwise)

@@ -48,8 +48,9 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
 {% if num_switches > 0 or num_pots > 0 %}
     // Lazy rebuild: process all pot/switch changes in one batch
     if state.matrices_dirty {
-        state.rebuild_matrices();
-        state.matrices_dirty = false;
+{% if rank1_pots %}        state.apply_matrix_changes();
+{% else %}        state.rebuild_matrices();
+{% endif %}        state.matrices_dirty = false;
     }
 {% endif %}
 

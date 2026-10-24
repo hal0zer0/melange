@@ -645,6 +645,38 @@ Rint4 n3 0 22k
         "process_sample must clear the dirty flag after rebuilding:\n{}",
         excerpt(&code, "matrices_dirty")
     );
+
+    // Linear DK: the one consumption site takes the rank-1 path, and K writes
+    // between samples cost exactly K rank-1 updates of S in the next sample
+    // (one per changed pot), never a full rebuild.
+    assert!(
+        code.contains("state.apply_matrix_changes();"),
+        "linear DK pot build consumes the dirty flag via apply_matrix_changes:\n{}",
+        excerpt(&code, "matrices_dirty")
+    );
+    let main = "
+fn main() {
+    let mut s = CircuitState::default(); s.set_sample_rate(44100.0);
+    process_sample(0.0, &mut s); // first consumption is structural (baked matrices)
+    s.set_runtime_R_integ_r_1(10e3); s.set_runtime_R_integ_r_2(11e3);
+    s.set_runtime_R_integ_r_3(12e3); s.set_runtime_R_integ_r_4(13e3);
+    process_sample(0.1, &mut s);
+    let after_four = s.diag_rank1_update_count;
+    process_sample(0.1, &mut s); // nothing changed: nothing consumed
+    println!(\"after_four={after_four} after_idle={} triggers={} fallbacks={}\",
+        s.diag_rank1_update_count, s.diag_rank1_trigger_rebuild_count, s.diag_rank1_fallback_count);
+}
+";
+    let out = support::compile_and_run(&code, main, "runtime_r_batch_rank1");
+    let line = out
+        .stdout
+        .lines()
+        .find(|l| l.starts_with("after_four="))
+        .expect("result line");
+    assert!(
+        line.contains("after_four=4 after_idle=4 triggers=0 fallbacks=0"),
+        "four writes between samples = four rank-1 updates in the next sample, none after: {line}"
+    );
 }
 
 // --- Compile-and-run: sweep R across ±20% on a bias resistor ----------------

@@ -9,6 +9,46 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+**What changes rendered audio:** nothing at rest. On a DK build with no
+nonlinear devices, a pot or `.runtime R` moved mid-render now reaches the
+solver through an exact rank-1 update of the inverse instead of a full
+re-inversion; the two paths differ by rounding only (at most 1.2e-11 V on a
+25 mV signal over three attack/release cycles of two photoresistors on a
+66-node deck; S entrywise within 2e-9 of the full rebuild in the deck's
+ill-conditioned setting with the ratio trigger, 5.7e-6 without it).
+
+**What changes generated code:** every DK build with pots and no nonlinear
+devices gains `apply_matrix_changes`, `rank1_update_s`, the `RANK1_*`
+constants, a `structural_dirty` flag, per-pot bookkeeping fields and three
+counters; its dirty block calls `apply_matrix_changes`. Every pot setter on
+both routes gains the relative deadband. Nonlinear DK builds and nodal builds
+are otherwise unchanged.
+
+### Added
+
+- **Rank-1 (Sherman–Morrison) pot updates on linear DK builds.** A pot or
+  `.runtime R` change on a DK build with no nonlinear devices costs one exact
+  O(N²) update of `S` per changed resistor instead of the O(N³) rebuild, so
+  audio-rate resistor modulation is affordable: on a 66-node deck with two
+  1 kΩ–10 MΩ photoresistors written every sample, the moving sample costs 1.4×
+  the resting one (2.24 vs 1.58 µs) where it cost 136 µs before, 0.15× realtime
+  on one core. Switch moves, sample-rate changes and `reset()` still rebuild in
+  full, as does a pot whose conductance has fallen below a tenth of its largest
+  value since the last full rebuild (the chained update is exact on the matrix
+  it holds, so rounding stamped at high conductance would otherwise grow as the
+  conductance falls) or whose update would divide by a near-zero denominator.
+  Three counters report how changes were applied: `diag_rank1_update_count`,
+  `diag_rank1_trigger_rebuild_count`, `diag_rank1_fallback_count`. Nonlinear
+  DK builds and the nodal route keep the full rebuild for every pot change.
+
+### Changed
+
+- **Pot setter deadband is relative.** `set_pot_*` and `set_runtime_R_*` on
+  both routes ignore a change of at most 1e-12 of the stored resistance. The
+  previous absolute threshold of 1e-12 Ω was below one ulp at megohm values and
+  never fired, so a lag converging toward 10 MΩ rebuilt the matrices every
+  sample for seconds after the control stopped moving.
+
 ## [0.1.17] - 2026-10-09
 
 **What changes rendered audio:** every deck with a behavioral source, at its

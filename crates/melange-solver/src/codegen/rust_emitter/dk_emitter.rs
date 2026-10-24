@@ -535,6 +535,7 @@ impl RustEmitter {
         let pot_defaults: Vec<String> =
             ir.pots.iter().map(|p| fmt_f64(1.0 / p.g_nominal)).collect();
         ctx.insert("pot_defaults", &pot_defaults);
+        ctx.insert("rank1_pots", &rank1_pots(ir));
 
         if ir.has_dc_op {
             let dc_op_values = ir
@@ -763,6 +764,7 @@ impl RustEmitter {
     ) -> Result<String, CodegenError> {
         let m = ir.topology.m;
         let num_pots = ir.pots.len();
+        let rank1 = rank1_pots(ir);
         let mut code = String::new();
 
         // Emit set_switch_N() for each switch (DK path)
@@ -821,6 +823,7 @@ impl RustEmitter {
                  \x20       if self.switch_{}_position == position {{ return; }}\n\
                  \x20       self.switch_{}_position = position;\n\
                  \x20       self.matrices_dirty = true;\n\
+{structural}\
 {noise_update}\
                  \x20   }}\n\n",
                 sw.index,
@@ -829,6 +832,11 @@ impl RustEmitter {
                 sw.index,
                 sw.index,
                 sw.index,
+                structural = if rank1 {
+                    "        self.structural_dirty = true; // topology step: the next dirty consumption rebuilds in full\n"
+                } else {
+                    ""
+                },
             ));
         }
 
@@ -884,6 +892,8 @@ impl RustEmitter {
                          \x20   ///\n\
                          \x20   /// A non-finite value is counted in `diag_runtime_nan_count`: ±inf\n\
                          \x20   /// clamps to the range end, NaN leaves the resistance unchanged.\n\
+                         \x20   /// A change below 1e-12 of the stored value is ignored (scale-free: the\n\
+                         \x20   /// skipped error is one part in 10^12 of the resistance, whatever its size).\n\
                          \x20   /// Marks matrices dirty. Rebuild deferred to next `process_sample()`.\n\
                          \x20   /// For preset recall / unsmoothed jumps, follow with `recompute_dc_op()`.\n\
                          \x20   pub fn set_pot_{idx}(&mut self, resistance: f64) {{\n\
@@ -891,7 +901,7 @@ impl RustEmitter {
                          \x20       // end below, NaN leaves the value unchanged.\n\
                          \x20       if !resistance.is_finite() {{ self.diag_runtime_nan_count += 1; if resistance.is_nan() {{ return; }} }}\n\
                          \x20       let r = resistance.clamp(POT_{idx}_MIN_R, POT_{idx}_MAX_R);\n\
-                         \x20       if (r - self.pot_{idx}_resistance).abs() < 1e-12 {{ return; }}\n\
+                         \x20       if (r - self.pot_{idx}_resistance).abs() <= 1e-12 * self.pot_{idx}_resistance {{ return; }}\n\
                          \x20       self.pot_{idx}_resistance = r;\n\
                          \x20       self.matrices_dirty = true;\n\
 {noise_update}\
@@ -912,14 +922,15 @@ impl RustEmitter {
                          \x20   /// A non-finite value is counted in `diag_runtime_nan_count`: ±inf\n\
                          \x20   /// clamps to the range end, NaN leaves the resistance unchanged.\n\
                          \x20   /// Audio-rate safe: no internal smoothing; caller (plugin-side\n\
-                         \x20   /// envelope follower) is the smoother.\n\
+                         \x20   /// envelope follower) is the smoother. A change below 1e-12 of the\n\
+                         \x20   /// stored value is ignored (scale-free deadband).\n\
                          \x20   /// Marks matrices dirty. Rebuild deferred to next `process_sample()`.\n\
                          \x20   pub fn set_runtime_R_{field}(&mut self, resistance: f64) {{\n\
                          \x20       // A non-finite argument is counted: ±inf clamps to the range\n\
                          \x20       // end below, NaN leaves the value unchanged.\n\
                          \x20       if !resistance.is_finite() {{ self.diag_runtime_nan_count += 1; if resistance.is_nan() {{ return; }} }}\n\
                          \x20       let r = resistance.clamp(RUNTIME_R_{field_upper}_MIN, RUNTIME_R_{field_upper}_MAX);\n\
-                         \x20       if (r - self.pot_{idx}_resistance).abs() < 1e-12 {{ return; }}\n\
+                         \x20       if (r - self.pot_{idx}_resistance).abs() <= 1e-12 * self.pot_{idx}_resistance {{ return; }}\n\
                          \x20       self.pot_{idx}_resistance = r;\n\
                          \x20       self.matrices_dirty = true;\n\
 {noise_update}\
@@ -1236,7 +1247,20 @@ impl RustEmitter {
             );
         }
 
-        // SM pot recomputation removed — per-block rebuild handles pots exactly
+        if rank1 {
+            // A full rebuild embodies every pot at its current value: re-sync the
+            // rank-1 bookkeeping so the next pot-only change updates from here.
+            code.push_str(
+                "\n        // Rank-1 bookkeeping: S now embodies every pot at its current value.\n\
+                 \x20       self.structural_dirty = false;\n",
+            );
+            for idx in 0..num_pots {
+                code.push_str(&format!(
+                    "        self.pot_{idx}_g_stamped = 1.0 / self.pot_{idx}_resistance;\n\
+                     \x20       self.pot_{idx}_g_max = self.pot_{idx}_g_stamped;\n"
+                ));
+            }
+        }
 
         // Intentionally do NOT reset oversampler state or DC blocker state here.
         // rebuild_matrices() is called on every pot/switch change, but pot/switch
@@ -1251,6 +1275,10 @@ impl RustEmitter {
         // rate change in set_sample_rate(), plus reset()'s blocker reseed.)
 
         code.push_str("    }\n");
+
+        if rank1 {
+            code.push_str(&emit_rank1_methods(ir));
+        }
         Ok(code)
     }
 
@@ -1296,6 +1324,26 @@ impl RustEmitter {
                 ));
             }
             code.push('\n');
+        }
+        if rank1_pots(ir) {
+            code.push_str(
+                "// Rank-1 (Sherman-Morrison) pot updates — see `apply_matrix_changes`.\n\
+                 // RANK1_REBUILD_RATIO: a pot whose conductance has fallen below 1/10 of the\n\
+                 // largest value stamped since the last full rebuild forces a full rebuild.\n\
+                 // The chained update is exact on the matrix it holds, so rounding stamped\n\
+                 // while the conductance was high stays as a fixed backward error that\n\
+                 // grows relatively as the conductance falls; a rising conductance is\n\
+                 // benign. 10 was chosen on a 66-node deck with two 1k..10M photoresistors:\n\
+                 // S entrywise error 5.7e-6 untriggered vs 8e-10 at 10 (2.5e-9 at 100) over\n\
+                 // ten attack/release cycles in its ill-conditioned register setting.\n\
+                 const RANK1_REBUILD_RATIO: f64 = 10.0;\n\
+                 // RANK1_DENOM_MIN: |1 + dg*u^T*S*u| below this (or non-finite) means the\n\
+                 // update would divide by a near-zero denominator (the element is almost\n\
+                 // the only path between its nodes and is being removed); fall back to the\n\
+                 // full rebuild instead. Last-resort fail-safe; the ratio trigger above is\n\
+                 // the working guard (denominators stayed >= 0.42 on the reference deck).\n\
+                 const RANK1_DENOM_MIN: f64 = 1e-6;\n\n",
+            );
         }
         code
     }
@@ -1425,6 +1473,7 @@ impl RustEmitter {
         let mut ctx = Context::new();
         insert_multi_input_ctx(&mut ctx, ir);
         insert_inject_ctx(&mut ctx, ir);
+        ctx.insert("rank1_pots", &rank1_pots(ir));
         ctx.insert("noise_enabled_emit", &noise.enabled);
         ctx.insert("noise_rhs_stamp", &noise.rhs_stamp);
         ctx.insert("noise_rhs_stamp_be", &noise.rhs_stamp_be);
@@ -1859,3 +1908,124 @@ fn k_eff_adjust_stmts(ir: &CircuitIR, var: &str, indent: &str) -> String {
 // `super::helpers::emit_thermal_tj_advance` — a single source of truth shared
 // verbatim by the DK and nodal emitters (imported above). See that helper and
 // the `thermal_tj_advance_dk_nodal_string_identity` codegen test.
+
+/// A DK build takes the rank-1 pot path when it has pots and no nonlinear
+/// devices: `S` is then the only matrix a pot change touches (`K` and `S·N_i`
+/// are empty and there is no backward-Euler set), so one exact Sherman–Morrison
+/// update per changed pot replaces the O(N³) inversion. Nonlinear decks keep the
+/// full rebuild until the matching `K` / `S_NI` / BE-set updates land.
+fn rank1_pots(ir: &CircuitIR) -> bool {
+    !ir.pots.is_empty() && ir.topology.m == 0
+}
+
+/// `apply_matrix_changes` (the dirty-flag consumer) and `rank1_update_s` for a
+/// rank-1 pot build. Emitted right after `rebuild_matrices`, which stays the
+/// full path and re-syncs the bookkeeping fields these methods read.
+fn emit_rank1_methods(ir: &CircuitIR) -> String {
+    let mut code = String::new();
+    code.push_str(
+        "\n    /// Consume the dirty flag: bring `s` into line with the pot values.\n\
+         \x20   ///\n\
+         \x20   /// A structural change (switch move, sample-rate change, `reset()`, the\n\
+         \x20   /// first call) takes the full rebuild. A pot-only change takes one exact\n\
+         \x20   /// rank-1 (Sherman–Morrison) update of `s` per changed pot — O(N²) each\n\
+         \x20   /// instead of the O(N³) inversion — unless a pot's conductance has fallen\n\
+         \x20   /// below 1/`RANK1_REBUILD_RATIO` of the largest value stamped since the last\n\
+         \x20   /// full rebuild, or an update's denominator is non-finite or below\n\
+         \x20   /// `RANK1_DENOM_MIN`; both take the full rebuild and are counted\n\
+         \x20   /// (`diag_rank1_trigger_rebuild_count`, `diag_rank1_fallback_count`).\n\
+         \x20   fn apply_matrix_changes(&mut self) {\n\
+         \x20       if self.structural_dirty {\n\
+         \x20           self.rebuild_matrices();\n\
+         \x20           return;\n\
+         \x20       }\n\
+         \x20       // Ratio trigger: a conductance that has fallen an order of magnitude\n\
+         \x20       // below its high-water mark since the last full rebuild.\n\
+         \x20       let want_full =",
+    );
+    for idx in 0..ir.pots.len() {
+        let join = if idx == 0 { "" } else { "\n            ||" };
+        code.push_str(&format!(
+            "{join} (1.0 / self.pot_{idx}_resistance) * RANK1_REBUILD_RATIO < self.pot_{idx}_g_max"
+        ));
+    }
+    code.push_str(
+        ";\n\
+         \x20       if want_full {\n\
+         \x20           self.diag_rank1_trigger_rebuild_count += 1;\n\
+         \x20           self.rebuild_matrices();\n\
+         \x20           return;\n\
+         \x20       }\n",
+    );
+    for (idx, pot) in ir.pots.iter().enumerate() {
+        let (np, nq) = (pot.node_p, pot.node_q);
+        if np == 0 && nq == 0 {
+            // Both terminals grounded: the element is outside the MNA system and
+            // cannot change S. Keep the bookkeeping honest and move on.
+            code.push_str(&format!(
+                "        // Pot {idx}: both terminals grounded, no effect on S.\n\
+                 \x20       self.pot_{idx}_g_stamped = 1.0 / self.pot_{idx}_resistance;\n\
+                 \x20       self.pot_{idx}_g_max = self.pot_{idx}_g_stamped;\n"
+            ));
+            continue;
+        }
+        let call = match (np > 0, nq > 0) {
+            (true, true) => format!("self.rank1_update_s({}, Some({}), dg)", np - 1, nq - 1),
+            (true, false) => format!("self.rank1_update_s({}, None, dg)", np - 1),
+            _ => format!("self.rank1_update_s({}, None, dg)", nq - 1),
+        };
+        code.push_str(&format!(
+            "        {{\n\
+             \x20           let g = 1.0 / self.pot_{idx}_resistance;\n\
+             \x20           let dg = g - self.pot_{idx}_g_stamped;\n\
+             \x20           if dg != 0.0 {{\n\
+             \x20               if !{call} {{\n\
+             \x20                   self.diag_rank1_fallback_count += 1;\n\
+             \x20                   self.rebuild_matrices();\n\
+             \x20                   return;\n\
+             \x20               }}\n\
+             \x20               self.diag_rank1_update_count += 1;\n\
+             \x20               self.pot_{idx}_g_stamped = g;\n\
+             \x20               if g > self.pot_{idx}_g_max {{ self.pot_{idx}_g_max = g; }}\n\
+             \x20           }}\n\
+             \x20       }}\n"
+        ));
+    }
+    code.push_str("    }\n\n");
+    code.push_str(
+        "    /// Exact rank-1 (Sherman–Morrison) update of `s = A⁻¹` for a conductance\n\
+         \x20   /// change `dg` stamped between MNA rows `p` and `q` (`q = None`: between\n\
+         \x20   /// row `p` and ground).\n\
+         \x20   ///\n\
+         \x20   /// The stamp is `A' = A + dg·u·uᵀ` with `u = e_p − e_q` (or `e_p`), so\n\
+         \x20   /// `S' = S − dg·(S u)(uᵀ S) / (1 + dg·uᵀ S u)`: `S u` is column p minus\n\
+         \x20   /// column q of S, `uᵀ S` is row p minus row q, and `uᵀ S u` is the\n\
+         \x20   /// resistance A presents between the two rows. O(N²), stack only.\n\
+         \x20   /// Returns `false` without touching `s` when the denominator is non-finite\n\
+         \x20   /// or below `RANK1_DENOM_MIN`; the caller then rebuilds in full.\n\
+         \x20   fn rank1_update_s(&mut self, p: usize, q: Option<usize>, dg: f64) -> bool {\n\
+         \x20       let mut su = [0.0f64; N];\n\
+         \x20       let mut uts = [0.0f64; N];\n\
+         \x20       for i in 0..N {\n\
+         \x20           su[i] = self.s[i][p] - q.map_or(0.0, |q| self.s[i][q]);\n\
+         \x20           uts[i] = self.s[p][i] - q.map_or(0.0, |q| self.s[q][i]);\n\
+         \x20       }\n\
+         \x20       let utsu = su[p] - q.map_or(0.0, |q| su[q]);\n\
+         \x20       let denom = 1.0 + dg * utsu;\n\
+         \x20       if !denom.is_finite() || denom.abs() < RANK1_DENOM_MIN {\n\
+         \x20           return false;\n\
+         \x20       }\n\
+         \x20       let f = dg / denom;\n\
+         \x20       for i in 0..N {\n\
+         \x20           let a = su[i] * f;\n\
+         \x20           if a != 0.0 {\n\
+         \x20               for j in 0..N {\n\
+         \x20                   self.s[i][j] -= a * uts[j];\n\
+         \x20               }\n\
+         \x20           }\n\
+         \x20       }\n\
+         \x20       true\n\
+         \x20   }\n",
+    );
+    code
+}

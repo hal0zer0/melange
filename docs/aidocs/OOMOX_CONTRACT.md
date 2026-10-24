@@ -109,9 +109,9 @@ re-signaturing, or changing emission conditions is an API break.
 
 | Symbol | Consumers & assumed semantics |
 |---|---|
-| `set_pot_N(resistance: f64)` | 18+ plugins, N up to 31 (funkyinduct). **Units: ohms**, post-taper (oomox owns taper curves via `oomox_core::pots`). Semantics relied on: clamps to `[POT_N_MIN_R, POT_N_MAX_R]`; non-finite = no-op; `<1e-12` delta = no-op early-return; marks dirty, rebuild deferred to next `process_sample`; **reseed-free** (no NR state reset — melange 2026-04-20 setter contract; oomox smooths params and calls per-block). Doc-comment contract: "for preset recall / unsmoothed jumps, follow with `recompute_dc_op()`". Wrappers quantize resistance to 3 sig figs before calling to avoid spurious O(N³) rebuilds from smoother tails (best-patterns §"Quantize"). **Pot index assignment order (netlist order) is load-bearing**: wrappers call `set_pot_3` etc. by bare number; subspace pins indices with compile-time asserts (`lib.rs:60` `radio_fm::POT_R_RECV_INDEX == FM_POT_RECEPTION_INDEX`). Reordering pot indices in codegen silently reroutes knobs everywhere else. |
+| `set_pot_N(resistance: f64)` | 18+ plugins, N up to 31 (funkyinduct). **Units: ohms**, post-taper (oomox owns taper curves via `oomox_core::pots`). Semantics relied on: clamps to `[POT_N_MIN_R, POT_N_MAX_R]`; non-finite = no-op; a change below 1e-12 **of the stored value** = no-op early-return (relative since the rank-1 landing; the old absolute 1e-12 Ω threshold never fired at megohm values); marks dirty, work deferred to next `process_sample` (rank-1 S update on linear DK builds, full rebuild elsewhere); **reseed-free** (no NR state reset — melange 2026-04-20 setter contract; oomox smooths params and calls per-block). Doc-comment contract: "for preset recall / unsmoothed jumps, follow with `recompute_dc_op()`". Wrappers quantize resistance to 3 sig figs before calling to avoid spurious O(N³) rebuilds from smoother tails (best-patterns §"Quantize"). **Pot index assignment order (netlist order) is load-bearing**: wrappers call `set_pot_3` etc. by bare number; subspace pins indices with compile-time asserts (`lib.rs:60` `radio_fm::POT_R_RECV_INDEX == FM_POT_RECEPTION_INDEX`). Reordering pot indices in codegen silently reroutes knobs everywhere else. |
 | `set_switch_N(position: usize)` | basic-bitch, gold-press, periodic-pedal, qapla-1a, sad-bastard, tth. Out-of-range = no-op; same-position = no-op; swaps component values and rebuilds. periodic-pedal masks the transition with a 128-sample mini-warmup (`SWITCH_WARMUP_SAMPLES`). |
-| `set_runtime_R_<field>(ohms)` | basic-bitch, sad-bastard, series-of-tubes, subspace, gold-press, tth, uniquorn. Audio-rate-capable envelope modulation (`.runtime R` directive): **no warm re-init, envelope-safe** — but the generated doc says "Call per-block, not per-sample" for the O(N³) rebuild variants. `RUNTIME_R_*_MIN/MAX` consts are pinned by `const _: () = assert!(...)` in wrappers (best-patterns §TonePad) — changing a runtime-R range breaks compile-time asserts (good) or knob travel (bad, if no assert). |
+| `set_runtime_R_<field>(ohms)` | basic-bitch, sad-bastard, series-of-tubes, subspace, gold-press, tth, uniquorn. Audio-rate-capable envelope modulation (`.runtime R` directive): **no warm re-init, envelope-safe**. On a linear DK build (M = 0) a per-sample write costs one O(N²) rank-1 update of S (openfarf voicing: moving sample 1.4× the resting one); on nonlinear and nodal builds it is still the O(N³) rebuild and the generated doc says "Call per-block, not per-sample". `RUNTIME_R_*_MIN/MAX` consts are pinned by `const _: () = assert!(...)` in wrappers (best-patterns §TonePad) — changing a runtime-R range breaks compile-time asserts (good) or knob travel (bad, if no assert). |
 | `set_runtime_<name>` (non-R runtime params) | subspace calls `set_runtime_strength` / `set_runtime_f_offset` at block rate with change-guards (`lib.rs:457-460,546-547`) — behavioral `.runtime` directives emit setters named after the field, not only `set_runtime_R_*`. Directive-derived identifier stability is contract. |
 | Runtime **voltage** fields (`.runtime V`) | noyce smps_ripple writes `state.smps_v = <sawtooth volts>` per sample (audio thread) then calls `process_sample(0.0, ...)`. Field name derives from the `.cir` directive — renaming breaks noyce. |
 
@@ -186,6 +186,11 @@ file:line, oomox-relative):
   `lib.rs:962-981`); `settle_dc_op`'s fallback detection reads
   `diag_nr_max_iter_count` exclusively. Renaming or repurposing a diag counter
   is an API + test break.
+- **`diag_rank1_update_count`, `diag_rank1_trigger_rebuild_count`,
+  `diag_rank1_fallback_count`** — linear DK builds with pots only: how pot /
+  `.runtime R` changes were applied (rank-1 updates taken; full rebuilds forced
+  by the conductance-ratio trigger; full rebuilds forced by a bad denominator).
+  Trigger rebuilds are expected on wide downward sweeps; fallbacks should be 0.
 - **`diag_unsolved_sample_count` (2026-09-29)**: ONE always-present field on
   every generated build (DK and both nodal sub-paths, any integrator, M = 0
   included, where it is a constant 0): every sample that was never solved,
@@ -464,8 +469,8 @@ downstream measures that automatically.
   (NaN-invalidated) and only call `set_pot_N`/`set_switch_N` on change, with
   `quantize_resistance` (3 sig figs) first. **Exception: moonladder calls
   `set_pot_0/1` every sample with raw resistance and relies solely on the
-  generated no-op guard** (`lib.rs:259-264`) — the `<1e-12` early-return is
-  load-bearing for its CPU budget.
+  generated no-op guard** (`lib.rs:259-264`) — the deadband early-return
+  (1e-12 of the stored value) is load-bearing for its CPU budget.
 - Wrapper comments still encode the legacy contract that a `set_pot` jump
   >~20% of compiled value fires a DC-OP reset (`v_prev = DC_OP`) → click, and
   that any change costs an O(N³) rebuild. The entire ramp/quantize/

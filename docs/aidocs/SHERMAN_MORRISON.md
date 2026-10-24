@@ -1,231 +1,153 @@
 # Sherman-Morrison Rank-1 Updates (Dynamic Potentiometers)
 
-> **STATUS (2026-07-18): REMOVED for pots.** The per-sample SM correction
-> machinery for potentiometers has been fully deleted: the `SmPotData`
-> su/usu/nv_su/u_ni vectors in `dk.rs` (struct now `PotKernelData`,
-> topology + range only), the matching `PotentiometerIR` fields, and the
-> dk_emitter SM emission functions (`emit_sequential_sm_setup`,
-> `emit_a_neg_correction`, `emit_s_correction`, `emit_sni_correction`) —
-> the generated code they produced had been dead (no template referenced
-> it) since the Batch D per-block `rebuild_matrices` shipped, and it
-> referenced state fields that no longer exist. Pot changes are handled by
-> per-block O(N³) rebuild (`DYNAMIC_PARAMS.md`). SM survives **only** in the
-> saturating-inductor rank-1 core term (`SATURATING_TRANSFORMERS.md`,
-> `saturating_core.rs`). The math below is kept as reference for that use and
-> for historical context.
-
-## Purpose
-
-Enable real-time resistance changes without O(N^3) matrix re-inversion. A potentiometer
-change is a rank-1 perturbation to the conductance matrix G, which propagates to S, K,
-A_neg, and S*N_i via the Sherman-Morrison formula at O(N^2) cost.
+A potentiometer or `.runtime R` change is a rank-1 change to the MNA
+conductance matrix, so the inverse `S = A⁻¹` can be updated exactly in O(N²)
+instead of re-inverted in O(N³). The generated code does this on **DK builds
+with no nonlinear devices** (M = 0): the dirty-flag consumer
+`apply_matrix_changes` applies one Sherman–Morrison update of `S` per changed
+pot, chained sample to sample, with two guards that fall back to the full
+rebuild. Every other build (M > 0 on DK, and the nodal route) still rebuilds in
+full on a pot change; `DYNAMIC_PARAMS.md` has the user-facing contract. The
+same formula is used, independently, by the saturating-inductor rank-1 core
+term (`SATURATING_TRANSFORMERS.md`, `saturating_core.rs`).
 
 ## Source Files
 
 | Component | File |
 |-----------|------|
-| `PotKernelData` struct (topology + range; the SM vectors are gone) | `crates/melange-solver/src/dk.rs` |
-| `PotInfo` struct | `crates/melange-solver/src/mna/dynamic.rs` |
-| `PotDirective` parser struct | `crates/melange-solver/src/parser/directives.rs` |
-| `PotentiometerIR` struct (topology + range) | `crates/melange-solver/src/codegen/ir/mod.rs` |
-| Per-block rebuild + sample-rate rebuild | `crates/melange-solver/templates/rust/state.rs.tera` |
-
-The DK precomputation (`SmPotData`) and the dk_emitter SM correction
-functions no longer exist. Line numbers omitted — grep the symbol name
-(`PotKernelData`, `PotInfo`, `PotDirective`, `PotentiometerIR`) to locate the
-current definition.
-
-## Netlist Syntax
-
-```spice
-R1 node_a node_b 10k
-.pot R1 1k 100k           ; marks R1 as variable, range [1k, 100k]
-.pot R2 500 500k Volume   ; optional label for plugin UI
-```
-
-Max 32 pots per circuit.
+| `rank1_pots` gate, `emit_rank1_methods` (`apply_matrix_changes`, `rank1_update_s`), `RANK1_*` constants, setter deadband | `crates/melange-solver/src/codegen/rust_emitter/dk_emitter.rs` |
+| `pot_N_g_stamped` / `pot_N_g_max` / `structural_dirty` / `diag_rank1_*` fields, their reset and sample-rate re-sync | `crates/melange-solver/templates/rust/state.rs.tera` |
+| Dirty-flag consumption site | `crates/melange-solver/templates/rust/process_sample.rs.tera` |
+| `PotentiometerIR` (node_p, node_q, range, g_nominal) | `crates/melange-solver/src/codegen/ir/mod.rs` |
+| Tests | `crates/melange-solver/tests/rank1_pot_update_tests.rs`, `runtime_source_tests.rs::runtime_r_setters_batch_into_one_deferred_rebuild` |
 
 ## Mathematical Foundation
 
-### Sherman-Morrison Formula
-
-Given invertible matrix A with inverse S = A^{-1}, and a rank-1 update
-A' = A + delta_g * u * u^T:
+Given an invertible `A` with inverse `S = A⁻¹`, and a rank-1 update
+`A' = A + dg·u·uᵀ`:
 
 ```
-S' = (A + delta_g * u * u^T)^{-1}
-   = S - (delta_g / (1 + delta_g * u^T * S * u)) * (S*u) * (S*u)^T
-   = S - scale * su * su^T
+S' = (A + dg·u·uᵀ)⁻¹
+   = S − (dg / (1 + dg·uᵀ·S·u)) · (S·u)(uᵀ·S)
 ```
 
-Where:
-```
-u       = node difference vector: u[p] = +1, u[q] = -1 (0 elsewhere)
-su      = S * u                    (N-vector, precomputed)
-usu     = u^T * S * u             (scalar, precomputed)
-delta_g = 1/R_new - 1/R_nom       (conductance change)
-scale   = delta_g / (1 + delta_g * usu)
-```
-
-### Why It Works
-
-Changing a resistor from R_nom to R_new modifies the MNA G matrix by:
-```
-G' = G + delta_g * (e_p - e_q) * (e_p - e_q)^T
-```
-
-where e_p, e_q are standard basis vectors. Since A = G + alpha*C and the
-capacitance matrix C is unchanged, A' = A + delta_g * u * u^T.
-
-## Precomputed Vectors
-
-Computed once during `DkKernel::from_mna()` and stored in `SmPotData`:
+For a resistor between MNA rows `p` and `q` (1-indexed nodes `node_p`,
+`node_q`; 0 = ground, which has no row):
 
 ```
-u[i] = 0 for all i
-if node_p > 0: u[node_p - 1] = 1.0
-if node_q > 0: u[node_q - 1] = -1.0
-
-su    = S * u           (N-vector)
-usu   = u^T * su        (scalar)
-nv_su = N_v * su         (M-vector, for K correction)
-u_ni  = su^T * N_i       (M-vector, for S*N_i correction)
+u        = e_p − e_q            (e_p alone when one terminal is ground)
+dg       = 1/R_new − 1/R_stamped
+S·u      = column p of S minus column q      (N-vector)
+uᵀ·S     = row p of S minus row q            (N-vector; equals (S·u)ᵀ when S is symmetric)
+uᵀ·S·u   = (S·u)[p] − (S·u)[q]               (the resistance A presents between the rows)
+denom    = 1 + dg·uᵀ·S·u
+S'       = S − (dg/denom) · (S·u)(uᵀ·S)
 ```
 
-## Corrections Applied in process_sample
+Changing a resistor modifies `G` by `dg·(e_p − e_q)(e_p − e_q)ᵀ`; `A = G + α·C`
+and `C` is unchanged, so `A' = A + dg·u·uᵀ`. The history matrix `A_neg = α·C`
+(charge form, `COMPANION_MODELS.md`) carries no `G` term, so a conductance
+change touches nothing but `A` and `S`. With M = 0 there is no `K`, no `S·N_i`
+and no backward-Euler set, which is why the linear DK build is the first (and
+so far only) rank-1 build.
 
-### 1. Scale Factor Computation
+## Implementation (linear DK builds)
 
-```rust
-fn sm_scale(state: &CircuitState) -> (f64, f64) {
-    let r = state.pot_resistance.clamp(MIN_R, MAX_R);
-    let delta_g = 1.0 / r - G_NOM;
-    let denom = 1.0 + delta_g * usu;
-    let scale = if |denom| > 1e-15 { delta_g / denom } else { 0.0 };
-    (delta_g, scale)
-}
-```
+`rank1_update_s(p, q, dg)` is the formula above, O(N²), stack only. It
+computes `S·u`, `uᵀ·S` and the denominator first and returns `false` without
+touching `S` if the denominator is non-finite or `|denom| < RANK1_DENOM_MIN`
+(1e-6: the element is nearly the only path between its rows and is being
+removed).
 
-### 2. A_neg Correction (RHS)
+`apply_matrix_changes` runs at the single dirty-flag consumption site (top of
+`process_sample`, unchanged since `c7bb887`):
 
-The conductance change affects the RHS via the A_neg * v_prev term:
-```
-rhs[node_p - 1] -= delta_g * v_prev[node_p - 1]
-rhs[node_q - 1] -= delta_g * v_prev[node_q - 1]
-```
+1. **Structural change** (`structural_dirty`, set by every `set_switch_N`,
+   by `reset()`, and at construction; cleared by every full rebuild and by a
+   same-rate `set_sample_rate` that loads the baked nominal matrices) → full
+   `rebuild_matrices`.
+2. **Ratio trigger**: for any pot, `g_now · RANK1_REBUILD_RATIO < pot_N_g_max`
+   (the largest conductance stamped *since the last full rebuild*, not the
+   value at the last rebuild) → full rebuild, `diag_rank1_trigger_rebuild_count += 1`.
+3. Otherwise, for each pot whose `1/R` differs from `pot_N_g_stamped`: one
+   `rank1_update_s`; on `false` → full rebuild, `diag_rank1_fallback_count += 1`.
+   On success `pot_N_g_stamped` and `pot_N_g_max` advance and
+   `diag_rank1_update_count += 1`.
 
-Note: uses `delta_g` directly (not `scale`) because this corrects the A_neg matrix
-contribution, not the S matrix.
+Every full rebuild re-syncs `pot_N_g_stamped = pot_N_g_max = 1/R` for all pots
+and clears `structural_dirty`. Multiple pots changing in one sample are
+sequential exact updates (each from the matrix the previous one produced); no
+cross-correction is needed because nothing is precomputed.
 
-This correction belongs to the whole-system history `A_neg = alpha*C - G`. The
-generated code's charge-form history `A_neg = alpha*C` (`COMPANION_MODELS.md`)
-has no `G` term, so a conductance change has no RHS correction there.
+### Why the ratio trigger (and why a count-based refresh is not it)
 
-### 3. S Matrix Correction (Linear Prediction)
+The chained update is exact on the matrix it actually holds. Rounding stamped
+while a pot's conductance was high therefore persists as a fixed backward error
+in `S`; when that conductance later falls by orders of magnitude the fixed
+error becomes relatively large. A rising conductance is benign. A refresh every
+K updates does not address this (the error is a function of the conductance
+path, not of the count), and the denominator guard never sees it (denominators
+stayed ≥ 0.42 while it happened). Rebuilding whenever a pot has fallen an order
+of magnitude below its high-water mark bounds the ratio between the stamping
+and the current regime at 10.
 
-After computing v_pred = S * rhs:
-```
-su_dot_rhs = sum_k su[k] * rhs[k]
-factor = scale * su_dot_rhs
-v_pred[k] -= factor * su[k]    for all k
-```
+Measured on a 66-node linear DK deck with two 1 kΩ–10 MΩ photoresistors
+driven every sample through an asymmetric lag (20 ms attack / 150 ms release),
+S entrywise relative error against a full rebuild (entries above 1e-12·max,
+worst over 0.1 s checkpoints, ten attack/release cycles), in the deck's
+ill-conditioned register setting (the two cells hanging on 1 GΩ switch legs):
 
-This applies: v_pred' = (S - scale * su * su^T) * rhs = S' * rhs
+| Trajectory | No trigger | `RANK1_REBUILD_RATIO` = 10 | = 100 |
+|---|---|---|---|
+| Both cells in phase | 5.2e-9 | 1.8e-9 | 1.2e-9 |
+| One attacking while the other releases | 5.7e-6 | 8.0e-10 | 2.5e-9 |
+| 1 kΩ ↔ 10 MΩ snaps | 3.4e-8 | 5.1e-11 | 5.1e-11 |
 
-### 4. K Matrix Correction (NR Jacobian)
+In the well-conditioned setting every variant sits at a flat 1.0e-7 that is
+also present after a single update from a fresh rebuild: it is the
+comparison's floor on the entries just above the 1e-12·max threshold (the
+maximum is set by the 1 GΩ legs), not accumulation. Output difference against
+the full-rebuild path over three cycles: ≤ 1.2e-11 V on a 25 mV peak. No
+denominator fallback occurred in any run (minimum denominator 0.42).
 
-For nonlinear circuits (M > 0), the K matrix used in NR must be corrected:
-```
-K_eff[i][j] = K[i][j] - scale * nv_su[i] * u_ni[j]
-```
+### Cost
 
-This is: K' = N_v * S' * N_i = K - scale * (N_v * su) * (su^T * N_i)
+Same deck, generated code, one core, moving both cells every sample:
 
-### 5. S*N_i Correction (Final Voltages)
+| | per sample |
+|---|---|
+| Resting (no change) | 1.58 µs |
+| Full rebuild (`rebuild_matrices`, N = 66) | 134 µs |
+| Moving, rank-1 path (median) | 2.24 µs — 1.4× resting |
+| Worst 64-sample block, rank-1 path, trigger rebuilds included | 298 µs against a 1333 µs budget |
 
-After NR solve, final voltages include S*N_i*i_nl correction:
-```
-u_ni_dot_inl = sum_j u_ni[j] * i_nl[j]
-sni_factor = scale * u_ni_dot_inl
-v[k] -= sni_factor * su[k]    for all k
-```
+Full-rebuild path for comparison: 136 µs per moving sample (0.15× realtime at
+48 kHz on one core).
 
-## Multi-Pot Sequential Updates
+## Setter deadband
 
-For circuits with multiple pots, corrections are applied **sequentially** with
-cross-correction to prevent compound errors:
+Every pot / `.runtime R` setter (DK and nodal) ignores a change of at most
+`1e-12 × stored value`. The comparison is against the *stored* value, so
+sub-threshold creep accumulates until it stamps and never drifts. The earlier
+absolute `1e-12 Ω` threshold was below one ulp at megohm values and never
+fired, which is what made a converging exponential rebuild for seconds.
 
-```
-For pot k = 0..num_pots:
-  if k == 0:
-    su_c = su_0                     (no prior corrections)
-  else:
-    su_c = su_k
-    for j < k:
-      dot = su_c_j^T * u_k          (cross-coupling)
-      su_c -= scale_c_j * su_c_j * dot
+## History
 
-  usu_c = u_k^T * su_c
-  scale_c = delta_g_k / (1 + delta_g_k * usu_c)
-
-  Similarly cross-correct nv_su and u_ni vectors.
-```
-
-Each pot's SU vector is corrected for the cumulative effect of all prior pots.
-
-## Sample Rate Rebuild
-
-When `set_sample_rate()` is called, a new S matrix is computed from G+C at the
-new rate. All SM vectors must be recomputed from scratch:
-
-```
-su    = new_S * u
-usu   = u^T * su
-nv_su = N_v * su
-u_ni  = su^T * N_i
-```
-
-This happens in the generated `set_sample_rate()` function.
-
-## Generated Constants
-
-Per pot `idx`:
-```rust
-const POT_{idx}_SU: [f64; N] = [...];
-const POT_{idx}_USU: f64 = ...;
-const POT_{idx}_NV_SU: [f64; M] = [...];
-const POT_{idx}_U_NI: [f64; M] = [...];
-const POT_{idx}_G_NOM: f64 = ...;
-const POT_{idx}_MIN_R: f64 = ...;
-const POT_{idx}_MAX_R: f64 = ...;
-const POT_{idx}_NODE_P: usize = ...;
-const POT_{idx}_NODE_Q: usize = ...;
-```
-
-## State Fields
-
-Per pot `idx` in `CircuitState`:
-```rust
-pot_{idx}_resistance: f64,       // Current resistance (set by user)
-pot_{idx}_su: [f64; N],          // S * u (recomputed on sample rate change)
-pot_{idx}_usu: f64,              // u^T * S * u
-pot_{idx}_nv_su: [f64; M],       // N_v * su
-pot_{idx}_u_ni: [f64; M],        // su^T * N_i
-```
-
-## Complexity
-
-| Operation | Without SM | With SM |
-|-----------|-----------|---------|
-| Resistance change | O(N^3) re-invert | O(N^2) rank-1 update |
-| Per-sample overhead | 0 | O(N) per pot (dot products) |
-| Memory | 0 | O(N+M) per pot |
+A 2026-03 scheme corrected `v_pred`, `K` and `S·N_i` per sample from the
+*nominal* matrices with codegen-time precomputed vectors (`su`, `usu`,
+`nv_su`, `u_ni`) and sequential cross-correction across pots. It was removed
+in 2026-04 (`eaee955`) after a 2000:1 wiper broke Newton convergence on a
+nonlinear deck; the cause was later traced to DC-OP seed staleness (fixed by
+`recompute_dc_op()`), not to the update, which is exact. The current scheme
+updates `S` itself, from the value it holds rather than from nominal, and is
+limited to builds where `S` is the only matrix a pot touches.
 
 ## Common Bugs
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| No effect when turning pot | delta_g = 0 | Check R_nom matches netlist |
-| Explosion at extreme R | Denominator near zero | Check clamp to [MIN_R, MAX_R] |
-| Wrong tone after rate change | SM vectors stale | Verify set_sample_rate recomputes |
-| Multi-pot interaction wrong | Missing cross-correction | Check sequential update loop |
+| Pot change has no effect | Setter deadband swallowed it (`|Δr| ≤ 1e-12·r`) or value equals the stored one | Expected; nothing to fix |
+| `diag_rank1_fallback_count` > 0 | Denominator near zero: the element is almost the only path between its rows | Each is a full rebuild, output unaffected; worth checking the deck |
+| Many `diag_rank1_trigger_rebuild_count` | Wide downward conductance sweeps (three per 1 kΩ → 10 MΩ decade sweep is normal) | Expected; each is one O(N³) sample |
+| S differs from a full rebuild by more than ~1e-9 relative | `structural_dirty` not set by a new structural setter, or a full rebuild path that does not re-sync `pot_N_g_stamped` | Both belong in `rebuild_matrices` / the setter; see tests |

@@ -732,7 +732,7 @@ companion-model inductors) is not the charge form generated code ships. See
 | Sparsity | Absent entries skipped in emission (per-matrix `SparseInfo`; K/K_BE by structural pattern) |
 | Sample rate | `set_sample_rate()` recomputes S, A_neg, K, S_NI from emitted G+C |
 | Multi-output | Any number of output nodes in `--format code` (`process_sample` returns one value per node); `--format plugin` takes 1 (mono; with `--stereo`, one circuit instance per channel) or 2 (stereo, one node per channel) and refuses more. The plugin wrapper is `tools/melange-cli/src/plugin_template.rs`; `circuit.rs` is the same for every layout |
-| Potentiometers | Per-block matrix rebuild on `set_pot` (Sherman-Morrison removed) |
+| Potentiometers | Dirty flag consumed at the top of `process_sample`: linear DK builds (M = 0) take one rank-1 (Sherman–Morrison) update of S per changed pot (`apply_matrix_changes`, ratio-trigger and denominator guards fall back to the full rebuild); every other build rebuilds in full |
 | Switches | Per-position matrix rebuild on `set_switch` |
 
 ---

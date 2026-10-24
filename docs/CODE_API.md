@@ -115,8 +115,20 @@ consistently with it (from KCL), or use `reset()` or
 when `v` is an equilibrium.
 
 Pot and switch setters are cheap themselves but mark the matrices dirty; the
-rebuild (O(N³)) happens inside the next `process_sample`. Drive them per block,
-never per sample.
+work happens inside the next `process_sample`. What that work is depends on the
+build. On a DK build with no nonlinear devices, a pot or `.runtime R` change
+costs one exact rank-1 (Sherman–Morrison) update of the inverse per changed
+resistor, O(N²), so audio-rate resistor modulation is affordable: on a 66-node
+deck with two photoresistors moving every sample, the moving sample costs
+1.4× the resting one (measured on the generated code). A switch move, a
+sample-rate change or `reset()` still rebuilds in full, O(N³), as does a pot
+whose conductance has fallen below a tenth of its largest value since the last
+full rebuild (the rank-1 chain is exact on the matrix it holds, so rounding
+stamped at high conductance would otherwise grow relatively as the conductance
+falls) or whose update would divide by a near-zero denominator; the three
+counters below say how often each happened. On every other build (nonlinear
+devices, or the nodal route) a pot change is still the full O(N³) rebuild:
+drive those per block, never per sample.
 
 `reset()` returns the state to what codegen baked in: the DC operating point,
 the bias currents and the **nominal pot and switch values**, restored together
@@ -272,6 +284,15 @@ passed. They exist on every route:
 | `diag_input_nan_count` | NaN/Inf host input samples were replaced by 0 V. |
 | `diag_runtime_nan_count` | A value your own code wrote was NaN or ±inf: a `.runtime` voltage-source field (counted once per host sample while it stays non-finite; the source reads as 0 for that sample), a `.inject` value (replaced by 0), or a setter argument (`set_pot_*`, `set_runtime_*`, the noise setters, `set_temperature_k`, `set_sample_rate`: ±inf clamps to a declared range, anything else leaves the value unchanged). |
 
+A linear DK build with pots (no nonlinear devices) carries three more, all
+`u64`, cleared by `reset()`, describing how pot changes were applied:
+
+| Field | What it counts |
+|-------|----------------|
+| `diag_rank1_update_count` | Rank-1 updates of the inverse taken for pot / `.runtime R` changes (one per changed resistor per sample). |
+| `diag_rank1_trigger_rebuild_count` | Full rebuilds forced because a pot's conductance fell below a tenth of its largest value since the last full rebuild. Expected during a wide downward sweep (three per 1 kΩ → 10 MΩ release); each costs a full O(N³) rebuild on that sample. |
+| `diag_rank1_fallback_count` | Full rebuilds forced because an update's denominator was non-finite or below 1e-6. Zero on every deck measured; nonzero is worth a look. |
+
 All three are `u64` and cleared by `reset()`. The clamp keeps garbage host
 input from reaching the solver, and no non-finite value from any of these
 paths reaches it either; the counters are how you know it happened. The
@@ -330,7 +351,9 @@ jump of the pots — off the audio thread.
 ## Real-time rules
 
 - `process_sample` — audio thread. No allocation, no locks, no syscalls.
-- `set_pot_*` / `set_switch_*` — block rate. Cheap call, expensive next sample.
+- `set_pot_*` / `set_switch_*` — block rate; `set_pot_*` and `set_runtime_R_*`
+  may run per sample on a linear DK build (rank-1 update). Cheap call, the
+  work lands in the next sample.
 - `CircuitState::default()`, `set_sample_rate`, warmup loops — initialization
   only. `set_sample_rate` cannot change the solver route or oversampling, which
   are compile-time structural: to serve a different host rate optimally,

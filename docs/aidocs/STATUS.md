@@ -218,7 +218,7 @@ Source: Sowter DWG E-72,658-2 (amp §) + Peerless/Triad winding data.
 - Full reference: [UNIT_VARIATION.md](UNIT_VARIATION.md).
 
 ### Dynamic Parameters
-- `.pot R min max [default] [label]`: per-block O(N³) rebuild on change; per-sample smoother via `.smoothed.next()`; reseed-free setter — use `recompute_dc_op()` for preset-recall NR refresh (DK only; nodal falls back to NR catch-up)
+- `.pot R min max [default] [label]`: on a linear DK build (M = 0) a change is one exact rank-1 (Sherman–Morrison) update of S, O(N²), audio-rate safe; elsewhere a per-block O(N³) rebuild; per-sample smoother via `.smoothed.next()`; reseed-free setter — use `recompute_dc_op()` for preset-recall NR refresh (DK only; nodal falls back to NR catch-up); setter deadband 1e-12 relative to the stored value
 - `.wiper R_cw R_ccw total [pos] [label]`: two-resistor wiper; position-0..1 UI param
 - `.switch R/C/L pos0 pos1 ...`: up to 16 switches; G/C/L stamped at pos-0 baseline (not static) so initial state is self-consistent
 - `.gang "Label" m1 m2 ...`: links multiple `.pot`/`.wiper` members under one parameter; `!` prefix inverts; `.runtime R` members rejected at parse time (drive multiple setters from one plugin envelope instead)

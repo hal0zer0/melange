@@ -181,6 +181,24 @@ pub struct CircuitState {
     /// Potentiometer {{ loop.index0 }} resistance at the last committed sample (kept in step with `pot_{{ loop.index0 }}_resistance`; not read by the solver)
     pub pot_{{ loop.index0 }}_resistance_prev: f64,
 {% endfor %}
+{% if rank1_pots %}{% for default in pot_defaults %}
+    /// Potentiometer {{ loop.index0 }} conductance that `s` currently embodies (rank-1 bookkeeping)
+    pub pot_{{ loop.index0 }}_g_stamped: f64,
+    /// Largest potentiometer {{ loop.index0 }} conductance stamped since the last full rebuild (ratio-trigger reference)
+    pub pot_{{ loop.index0 }}_g_max: f64,
+{% endfor %}
+    /// A switch move, sample-rate change or `reset()` happened since the last full
+    /// rebuild: the next dirty consumption rebuilds in full instead of taking the
+    /// rank-1 pot path. `true` at construction (the baked matrices are at nominal).
+    pub structural_dirty: bool,
+    /// Diagnostic: rank-1 (Sherman–Morrison) updates of `s` taken for pot changes
+    pub diag_rank1_update_count: u64,
+    /// Diagnostic: full rebuilds forced by the conductance-ratio trigger (a pot fell
+    /// below 1/RANK1_REBUILD_RATIO of its largest conductance since the last full rebuild)
+    pub diag_rank1_trigger_rebuild_count: u64,
+    /// Diagnostic: full rebuilds forced by a non-finite or near-zero rank-1 denominator
+    pub diag_rank1_fallback_count: u64,
+{% endif %}
 {{ runtime_os_fields }}{% if os_fixed_states %}
     /// Oversampler upsampling half-band filter state (single input)
     pub os_up_state: [f64; {{ os_state_size }}],
@@ -314,6 +332,15 @@ impl Default for CircuitState {
             pot_{{ loop.index0 }}_resistance: {{ default }},
             pot_{{ loop.index0 }}_resistance_prev: {{ default }},
 {% endfor %}
+{% if rank1_pots %}{% for default in pot_defaults %}
+            pot_{{ loop.index0 }}_g_stamped: POT_{{ loop.index0 }}_G_NOM,
+            pot_{{ loop.index0 }}_g_max: POT_{{ loop.index0 }}_G_NOM,
+{% endfor %}
+            structural_dirty: true,
+            diag_rank1_update_count: 0,
+            diag_rank1_trigger_rebuild_count: 0,
+            diag_rank1_fallback_count: 0,
+{% endif %}
 {{ runtime_os_inits }}{% if os_fixed_states %}
             os_up_state: [0.0; {{ os_state_size }}],
             os_dn_state: [[0.0; {{ os_state_size }}]; NUM_OUTPUTS],
@@ -426,7 +453,11 @@ impl CircuitState {
         // constants by the noise reset body below, which matches the
         // nominal pot values restored here.)
         self.matrices_dirty = true;
-{% endif %}
+{% if rank1_pots %}        self.structural_dirty = true;
+        self.diag_rank1_update_count = 0;
+        self.diag_rank1_trigger_rebuild_count = 0;
+        self.diag_rank1_fallback_count = 0;
+{% endif %}{% endif %}
 {% if runtime_os %}
         self.reset_oversampler();
 {% endif %}{% if os_fixed_states %}
@@ -599,7 +630,11 @@ impl CircuitState {
                 self.a_neg_be = A_NEG_BE_DEFAULT;
 {% endif %}
 {% if dc_block %}                self.dc_block_r = DC_BLOCK_R;
-{% endif %}
+{% endif %}{% if rank1_pots %}                // The baked S is the nominal-pot inverse: re-sync the rank-1 bookkeeping.
+                self.structural_dirty = false;
+{% for default in pot_defaults %}                self.pot_{{ loop.index0 }}_g_stamped = POT_{{ loop.index0 }}_G_NOM;
+                self.pot_{{ loop.index0 }}_g_max = POT_{{ loop.index0 }}_G_NOM;
+{% endfor %}{% endif %}
                 // POLICY: transient state — oversampler filter history,
                 // inductor / coupled-inductor / transformer standing
                 // currents, DC-blocker history — is PRESERVED here. Only

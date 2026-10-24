@@ -31,11 +31,16 @@ R1 node_a node_b 10k         ; declared resistor
 ### Semantics
 The named resistor becomes a runtime variable. The MNA system stamps the
 nominal conductance (`1/R_nominal` from the netlist value, or the explicit
-default if given). At runtime, changing `pot_resistance` triggers a full
-per-block rebuild of S, K, A_neg, and the S·N_i product via dense
-`invert_n`. The plugin template reads `.smoothed.next()` per sample
-inside the process loop, so rebuilds fire at the smoother's staircase
-rate (bounded by the 10 ms smoother time constant), not per audio sample.
+default if given). At runtime, changing `pot_resistance` marks the matrices
+dirty; the next `process_sample` applies the change. On a DK build with no
+nonlinear devices (M = 0) that is one exact rank-1 (Sherman–Morrison) update
+of `S` per changed pot, O(N²) — see `SHERMAN_MORRISON.md` for the update, its
+guards and the measured cost. On every other build (M > 0, or the nodal
+route) it is a full rebuild of S, K, A_neg and the S·N_i product via dense
+`invert_n`, O(N³). The plugin template reads `.smoothed.next()` per sample
+inside the process loop, so on the full-rebuild builds rebuilds fire at the
+smoother's staircase rate (bounded by the 10 ms smoother time constant), not
+per audio sample.
 
 `set_pot_N` is **reseed-free** — it only updates conductance and flags
 the matrices dirty. For smoothed knob sweeps (the common case) the NR
@@ -81,24 +86,28 @@ drag. Removed 2026-04-20 in favor of the explicit `recompute_dc_op()`
 pattern, which resolves to the *correct* operating point for the new R
 rather than the frozen codegen-time DC_OP.
 
-Sherman-Morrison rank-1 updates were removed in 2026-04-04 (commit
-`eaee955`). The removal was originally motivated by NR max-iter-cap
-hits on wide-range pot jumps, but subsequent research showed that SM
-is mathematically exact (same K' as full rebuild, to 1e-9 float
-noise) — the real root cause was DC-OP seed staleness, now fixed at
-the correct layer by `recompute_dc_op()` (see
-`dc_op_recompute_tests.rs::e5_diode_vcc_converges_within_tolerance`).
-`SHERMAN_MORRISON.md` remains as math reference; the SM precomputation
-(`su`, `usu`, `nv_su`, `u_ni`) and its emission were deleted (only topology
-and range remain in `PotKernelData` / `PotentiometerIR`).
+**Rank-1 updates on linear DK builds.** When M = 0, `S` is the only matrix a
+pot touches (K and S·N_i are empty, there is no backward-Euler set), and the
+generated `apply_matrix_changes` applies each changed pot as one exact
+Sherman–Morrison update of `S` from the value `S` currently embodies
+(`pot_N_g_stamped`), chained sample to sample. Three things send it to the
+full rebuild instead: a structural change (`structural_dirty`: switch move,
+sample-rate change, `reset()`, the first consumption after construction), a
+pot whose conductance has fallen below `1/RANK1_REBUILD_RATIO` (= 1/10) of the
+largest value stamped since the last full rebuild (counted in
+`diag_rank1_trigger_rebuild_count`), and a non-finite or sub-`RANK1_DENOM_MIN`
+(1e-6) denominator (counted in `diag_rank1_fallback_count`). Every full
+rebuild re-syncs the bookkeeping. Updates taken are counted in
+`diag_rank1_update_count`. Nonlinear DK builds keep the full rebuild for
+every pot change (their K / S·N_i / BE-set updates are not built), as does
+the nodal route. Math, guards and measurements: `SHERMAN_MORRISON.md`; tests:
+`rank1_pot_update_tests.rs`.
 
-**Deferred performance work (Phase 5).** Per-sample `set_pot_N` calls
-still cost one full O(N^3) matrix rebuild per changing sample, which
-pegs CPU during knob drags. If that cost ever blocks a shipping
-plugin, revive Sherman-Morrison rank-1 updates: the precomputation
-(`SHERMAN_MORRISON.md`) and its emission would have to be rebuilt, since
-both were deleted. Do not pre-emptively land it — the click fix is
-orthogonal and landed first on its own merits.
+An earlier per-sample scheme corrected from the *nominal* matrices with
+codegen-time precomputed vectors; it was removed in 2026-04 (`eaee955`) after
+a 2000:1 wiper broke Newton convergence on a nonlinear deck. The failure was
+later traced to DC-OP seed staleness (fixed by `recompute_dc_op()`), not to
+the update itself, which is exact.
 
 ### Constraints
 - Maximum 64 combined `.pot` + `.wiper` legs per circuit (each `.wiper`
@@ -129,9 +138,9 @@ R_ccw = pos       * (total - 20) + 10
 `MIN_LEG_R = 10` Ω: the `+10`/`-20` keep both legs ≥ 10 Ω even at the
 extremes (avoids singular matrices when pos = 0 or 1), and the two legs
 always sum to `total`. Direction: `R_cw` uses `(1 - pos)`, matching
-`parser::expand_wipers`. At runtime a wiper change triggers the same
-per-block O(N³) matrix rebuild as a `.pot` change, restamping both legs
-(Sherman-Morrison rank-1 updates were removed 2026-04-04 — see the `.pot`
+`parser::expand_wipers`. At runtime a wiper change is applied like two
+`.pot` changes: two rank-1 updates on a linear DK build, one full O(N³)
+rebuild restamping both legs elsewhere (see the `.pot`
 section above; SM now survives only in the saturating-inductor path).
 
 ### When to use `.wiper` vs `.pot`
@@ -294,8 +303,10 @@ Codegen emits on `CircuitState`:
 - `pub fn <field>(&self) -> f64` — read-only accessor returning the
   current resistance.
 - `pub fn set_runtime_R_<field>(&mut self, r: f64)` — clamps `r` to
-  `[RUNTIME_R_<FIELD>_MIN, RUNTIME_R_<FIELD>_MAX]`, marks matrices dirty,
-  returns. The next `process_sample` rebuilds A/S/K before stepping.
+  `[RUNTIME_R_<FIELD>_MIN, RUNTIME_R_<FIELD>_MAX]`, ignores a change below
+  1e-12 of the stored value (scale-free deadband), marks matrices dirty,
+  returns. The next `process_sample` applies the change before stepping:
+  a rank-1 update of S on a linear DK build, a full A/S/K rebuild elsewhere.
 
 Internally, `.runtime R` reuses the `.pot` machinery (conductance delta
 into G on rebuild), so MNA/kernel/nodal codegen are all unchanged. Since
@@ -306,8 +317,9 @@ to `set_pot_N`; only the name, doc comments, and clamp consts differ.
 stamp the new value and set `matrices_dirty`; the flag is consumed at
 exactly one site, the top of the next `process_sample()` (lazy rebuild,
 commit `c7bb887`). So K runtime-R/pot/switch changes between samples
-cost K O(1) delta stamps + **one** O(N³) rebuild, on all three codegen
-paths. No separate batch API exists or is needed — calling
+cost K O(1) delta stamps + **one** consumption: K rank-1 updates of S on
+a linear DK build, one O(N³) rebuild on every other build. No separate
+batch API exists or is needed — calling
 `set_runtime_R_a(..); set_runtime_R_b(..); set_runtime_R_c(..)` back to
 back already coalesces. Regression guard:
 `runtime_source_tests.rs::runtime_r_setters_batch_into_one_deferred_rebuild`.
