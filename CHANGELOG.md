@@ -9,6 +9,8 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+## [0.1.18] - 2026-10-24
+
 **What changes rendered audio:** nothing at rest. On a DK build with no
 nonlinear devices, a pot or `.runtime R` moved mid-render now reaches the
 solver through an exact rank-1 update of the inverse instead of a full
@@ -48,6 +50,13 @@ are otherwise unchanged.
   previous absolute threshold of 1e-12 Ω was below one ulp at megohm values and
   never fired, so a lag converging toward 10 MΩ rebuilt the matrices every
   sample for seconds after the control stopped moving.
+
+### Security
+
+- Dependency updates in the CLI's HTTPS client stack, each a patch release:
+  rustls 0.23.45 → 0.23.46 (RUSTSEC-2026-0346 through -0349), rustls-webpki
+  0.103.15 → 0.103.16 (RUSTSEC-2026-0382), webpki-roots 1.0.9 → 1.0.11
+  (RUSTSEC-2026-0381). `cargo audit` is clean.
 
 ## [0.1.17] - 2026-10-09
 
@@ -3404,7 +3413,8 @@ measured real hardware. Everything else is unproven against hardware. See
   KiCad file; no effect on netlist compilation, generated code, or shipped plugins. The
   fix (`quick-xml >= 0.41`) is tracked for 0.1.1.
 
-[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.17...HEAD
+[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.18...HEAD
+[0.1.18]: https://github.com/hal0zer0/melange/compare/v0.1.17...v0.1.18
 [0.1.17]: https://github.com/hal0zer0/melange/compare/v0.1.16...v0.1.17
 [0.1.16]: https://github.com/hal0zer0/melange/compare/v0.1.15...v0.1.16
 [0.1.15]: https://github.com/hal0zer0/melange/compare/v0.1.14...v0.1.15

@@ -270,14 +270,14 @@ A sample of what it handles, with **measured** single-core throughput:
 
 | Circuit | What it is | Devices | Throughput\* | ns/sample |
 |---------|-----------|---------|--------------|-----------|
-| Bus compressor | VCA + op-amp sidechain | 12 op-amps + 2 VCAs | 6.6× | 3158 |
-| Passive tube program EQ | 7 pots, 3 switches, global NFB (N=52, M=8) | 4 tubes, 3 transformers | 17.7× | 1180 |
-| Single-ended tube amp | preamp + power stage + output transformer into 8 Ω | 12AX7 (2 triodes) + 6V6 pentode | 20.0× | 1044 |
-| Germanium diode network | 3 RC sections, an antiparallel Ge pair at each | 6 Ge diodes | 25.2× | 827 |
-| Wurlitzer 200A preamp | 2-stage BJT preamp (full Gummel-Poon) | 2 BJTs + 1 diode | 45.5× | 458 |
-| 12AX7 gain stage | single triode stage | 1 triode | 144.3× | 144 |
+| Bus compressor | VCA + op-amp sidechain | 12 op-amps + 2 VCAs | 6.7× | 3126 |
+| Passive tube program EQ | 7 pots, 3 switches, global NFB (N=52, M=8) | 4 tubes, 3 transformers | 18.0× | 1154 |
+| Single-ended tube amp | preamp + power stage + output transformer into 8 Ω | 12AX7 (2 triodes) + 6V6 pentode | 20.3× | 1028 |
+| Germanium diode network | 3 RC sections, an antiparallel Ge pair at each | 6 Ge diodes | 25.0× | 833 |
+| Wurlitzer 200A preamp | 2-stage BJT preamp (full Gummel-Poon) | 2 BJTs + 1 diode | 46.1× | 452 |
+| 12AX7 gain stage | single triode stage | 1 triode | 141.6× | 147 |
 
-\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), best of 7 × 2M samples. Measured on an AMD Ryzen 9 7950X pinned to one CCD, with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh). Re-measured 2026-10-09 at a load average of about 1.5 (not fully idle); the best and median of the seven runs agree within about 1 % on every row, and every row is within 4 % of the previous release's figure. Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass (`unstable/examples/rc-lowpass.cir` in the circuits repository) runs at about 2000× (10.6 ns/sample, measured 2026-10-09).
+\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), best of 7 × 2M samples. Measured on an AMD Ryzen 9 7950X pinned to one CCD, with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh). Re-measured 2026-10-24; every row is within 2.5 % of the previous release's figure. Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass (`unstable/examples/rc-lowpass.cir` in the circuits repository) runs at about 2000× (10.5 ns/sample, measured 2026-10-24).
 
 **The triode rows pay for grid current.** The Dempwolf & Zölzer grid-current law evaluates a softplus on the grid dimension at every Newton iteration, where a hard-zero law would skip it; that is what modelling the negative-grid region costs. The CHANGELOG has the before/after figures.
 

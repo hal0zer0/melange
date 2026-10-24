@@ -3,7 +3,7 @@
 Quick-reference for AI agents. For math details see other aidocs. For architecture see CLAUDE.md.
 Release history lives in `CHANGELOG.md`; this file states what is true now and what is open.
 
-> **Latest release: v0.1.17 (2026-10-09).**
+> **Latest release: v0.1.18 (2026-10-24).**
 >
 > Triode grid current is the Dempwolf & Zölzer eq. (11) law, which **fails** its Philips ECC83
 > acceptance test 15/15 and ships as the less-wrong model, replacing a law that was further out
