@@ -120,8 +120,9 @@ in a single NR step. Adaptive step limits scale with distance from threshold.
 
 The grid `vt` is the grid law's own turn-on width: `1/Cg` for the Dempwolf &
 Zölzer triode law (the adaption factor is a reciprocal voltage, exactly the role
-`n·Vt` plays for a diode — 0.101 V at the shipped default), `vgk_onset/3` for
-the Leach pentode control grid. `DEVICE_n_VCRIT` is derived from the same scale;
+`n·Vt` plays for a diode — 0.101 V at the shipped default; the retarding-field
+tail below the join has the same scale, 92 mV, so one `vt` serves both
+branches), `vgk_onset/3` for the Leach pentode control grid. `DEVICE_n_VCRIT` is derived from the same scale;
 `helpers::tube_grid_vt_expr` emits the matching runtime expression and the two
 must agree.
 

@@ -269,6 +269,7 @@ impl RustEmitter {
                     gg: tp.gg,
                     xi: tp.xi,
                     cg: tp.cg,
+                    vgoff: tp.vgoff,
                     lambda: tp.lambda,
                     mu_b: tp.mu_b,
                     svar: tp.svar,

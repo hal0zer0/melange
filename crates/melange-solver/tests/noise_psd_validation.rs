@@ -3255,6 +3255,7 @@ fn triode_plate_shot_space_charge_smoothing() {
         gg: 0.0,
         xi: melange_devices::tube::DEFAULT_XI,
         cg: melange_devices::tube::DEFAULT_CG,
+        vgoff: 0.0,
         lambda: 0.0,
         mu_b: 0.0,
         svar: 0.0,

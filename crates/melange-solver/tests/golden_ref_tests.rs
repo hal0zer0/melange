@@ -294,6 +294,11 @@ fn golden_triode_cc_small_sine_500hz() {
 /// (`golden_triode_cc_small_sine_500hz`) and the +35.3573 dB pinned-gain
 /// tripwire both still pass unchanged, which is what says the new waveform
 /// is the corrected one and not a drift.
+/// Re-recorded 2026-10-30 for the retarding-field tail and the population
+/// offset (`VGOFF`, default −0.166 V): the grid now conducts 0.2 V earlier,
+/// so at this 0.5 V drive the grid loads Rg sooner on the positive half.
+/// Max |old − new| = 5.74e-2 V at sample 906 of the ±10 V clamped waveform
+/// (0.6 %). The same two ngspice-referenced gates pass unchanged.
 #[test]
 #[ignore]
 fn record_triode_cc_sine_500hz_codegen() {
@@ -306,7 +311,7 @@ fn record_triode_cc_sine_500hz_codegen() {
         TRIODE_CC,
         &output,
         1e-4,
-        "codegen_dk (2026-09-24, D&Z grid-current law)",
+        "codegen_dk (2026-10-30, D&Z grid law + retarding-field tail + VGOFF)",
     );
 }
 

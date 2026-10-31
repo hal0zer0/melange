@@ -360,3 +360,95 @@ fn main() {
         "1e-11 relative change marks dirty: {line}"
     );
 }
+
+/// Asymmetric witness: an op-amp is a VCCS stamp, so `S` is not symmetric, and
+/// a pot inside the op-amp's feedback loop is the case that broke the 2026-03
+/// scheme (it used `(S·u)ᵀ` where the formula needs the row `uᵀ·S`; a passive
+/// RC deck cannot tell the two apart). Linear (M = 0), so it takes the rank-1
+/// path. A second pot sits outside the loop.
+const OPAMP: &str = "Rank-1 pot witness, op-amp feedback loop
+Rin in inv 10k
+Rf inv out 100k
+Cf inv out 47p
+Rl out 0 10k
+Rt out 0 50k
+Ct out 0 10n
+U1 0 inv out oa
+.model oa OA(AOL=200000)
+.pot Rf 1k 1Meg
+.runtime Rt 1k 10Meg as r_tone
+";
+
+#[test]
+fn rank1_path_matches_the_full_rebuild_on_an_asymmetric_opamp_deck() {
+    let code = build(OPAMP, "dk", "rank1_opamp");
+    assert!(
+        code.contains("pub const M: usize = 0;"),
+        "witness must be linear (M = 0)"
+    );
+    assert!(
+        code.contains("fn apply_matrix_changes(&mut self)"),
+        "witness must take the rank-1 path"
+    );
+    let main = format!(
+        "{ENTRYWISE_FN}
+fn asymmetry(s: &[[f64; N]; N]) -> f64 {{
+    let mx = s.iter().flatten().fold(0.0f64, |m, v| m.max(v.abs()));
+    let mut worst = 0.0f64;
+    for i in 0..N {{ for j in 0..N {{ worst = worst.max((s[i][j] - s[j][i]).abs()); }} }}
+    worst / mx
+}}
+fn main() {{
+    let fs = 44100.0;
+    let mut a = CircuitState::default(); a.set_sample_rate(fs);
+    let mut b = CircuitState::default(); b.set_sample_rate(fs);
+    let asym = asymmetry(&a.s);
+    let n = 4000usize;
+    let (mut dy, mut srel, mut peak) = (0.0f64, 0.0f64, 0.0f64);
+    for k in 0..n {{
+        let t = k as f64 / 2000.0;
+        // Feedback pot: two decades down (gain falls), then back up; tone pot the other way.
+        let (rf, rt) = if k < 2000 {{ (1e5 * 0.01f64.powf(t), 5e4 * 100f64.powf(t)) }}
+                       else {{ (1e3 * 100f64.powf(t - 1.0), 5e6 * 0.01f64.powf(t - 1.0)) }};
+        a.set_pot_0(rf); a.set_runtime_R_r_tone(rt); a.structural_dirty = true;
+        b.set_pot_0(rf); b.set_runtime_R_r_tone(rt);
+        let x = 0.2 * (2.0 * std::f64::consts::PI * 1000.0 * k as f64 / fs).sin();
+        let ya = process_sample(x, &mut a)[0];
+        let yb = process_sample(x, &mut b)[0];
+        peak = peak.max(ya.abs()); dy = dy.max((ya - yb).abs());
+        if k % 100 == 99 {{ srel = srel.max(entrywise_rel(&b.s, &a.s)); }}
+    }}
+    println!(\"asym={{asym:e}} peak={{peak:e}} dy={{dy:e}} srel={{srel:e}} updates={{}} triggers={{}} fallbacks={{}}\",
+        b.diag_rank1_update_count, b.diag_rank1_trigger_rebuild_count, b.diag_rank1_fallback_count);
+}}
+"
+    );
+    let out = support::compile_and_run(&code, &main, "rank1_opamp");
+    let line = out
+        .stdout
+        .lines()
+        .find(|l| l.starts_with("asym="))
+        .expect("result line");
+    println!("{line}");
+    assert!(
+        kv(line, "asym") > 1e-3,
+        "witness S must be visibly asymmetric or the test has no teeth: {line}"
+    );
+    assert!(
+        kv(line, "peak") > 1e-2,
+        "witness must produce signal: {line}"
+    );
+    assert!(
+        kv(line, "dy") <= 1e-9 * kv(line, "peak").max(1.0),
+        "rank-1 output must match the full rebuild: {line}"
+    );
+    assert!(
+        kv(line, "srel") <= 1e-8,
+        "rank-1 S must match the full rebuild entrywise on an asymmetric S: {line}"
+    );
+    assert_eq!(kv(line, "fallbacks"), 0.0, "{line}");
+    assert!(
+        kv(line, "triggers") >= 2.0,
+        "each two-decade fall fires the ratio trigger: {line}"
+    );
+}

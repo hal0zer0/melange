@@ -121,7 +121,13 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
 - Q1 Early effect guard: `q1_denom <= 0` clamps to 1.0 (physically near Early voltage limit)
 - Self-heating (RTH/CTH) available but disabled by default (RTH=infinity)
 - Junction capacitances (CJE/CJC) and diffusion capacitance (TF) available,
-  linearized once at the DC operating point: a large signal does not move them
+  linearized once at the DC operating point: a large signal does not move them.
+  This is exact for a stage that stays near its bias and shows at switching
+  edges where a transistor slews through its active region with a large
+  base-collector voltage swing (a Miller slew): measured on a two-transistor
+  squarer, edge times run about 15 % short of ngspice and the oscillator's
+  pitch about 0.4 cents low, while the passive segments agree. ngspice with the
+  same transistors linearised at the DC point reproduces melange to 0.2 %.
 - Parasitic resistances (RB/RC/RE) supported with internal nodes
 - No substrate current or avalanche breakdown
 
@@ -140,42 +146,83 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
 ### Triode
 - Koren model with lambda for finite plate resistance
 - No space-charge or transit-time effects
-- **Grid current FAILS its acceptance test against a real datasheet.** Grid
-  current follows Dempwolf & Zolzer eq. (11). Measured against the Philips
-  ECC83 (January 1970) "As A.F. amplifier" block, row *Output voltage
-  (Ig = 0.3 uA)*, it fails **15 of 15 cells** (3 D&Z Table 1 rows x 5 supply
-  voltages): the modelled grid-current onset is **0.26-0.35 V too late**
-  (-0.26..-0.35 V against the -0.61 V implied by the sheet's own five columns,
-  which agree to sd 0.067 V across a 2x range of Vb and 2.75x of Rk). The
-  previous hard-zero law was 0.61 V late, in the same direction.
+- **Grid-current level is a population parameter; the shipped default is one
+  population's median, and the tail's slope is untested on an ECC83.** Grid
+  current follows Dempwolf & Zolzer eq. (11) above a join voltage and a
+  retarding-field exponential (e-fold 92 mV, cathode ~1070 K after Turvey 1990)
+  below it, joined where eq. (11)'s log-slope equals the thermal one, so the
+  curve and its slope are continuous and never steeper than a thermal cathode.
+  One offset, `VGOFF` (volts), shifts the whole characteristic along Vgk and
+  carries contact potential and prefactor spread together; they cannot be told
+  apart by any grid-current measurement, so no key claims to.
 
-  **Consequence:** stages driven from a high source impedance show grid-current
-  loading *later* than a real ECC83, so maximum clean output is overpredicted
-  (1.16x-1.55x on this block). This is not an inaudible tail — 0.3 uA into a
-  following stage's 680 kOhm grid leak is ~0.2 V of bias shift, which is where
-  blocking and bias-shift distortion begin in cascaded stages.
+  Measured ECC83s differ from one another by about 0.6 V in where they reach
+  the 0.3 uA datasheet criterion: five makers' tubes in Zollner, *Physics of
+  the Electric Guitar* (2007) Fig. 10.11.8 cross it between -0.97 and -0.41 V
+  (median -0.55 V, sd 0.22 V, with only five tubes the centre is uncertain by
+  about +/-0.12 V). The default `VGOFF = -0.166 V` puts the model at that
+  median. `VGOFF = 0` is the three modern-production 12AX7s Dempwolf & Zolzer
+  fitted, which all sit at the positive end of the spread; a tube that has
+  aged can be more negative still (RDH4 records 0.6 V of drift in 3200 h).
+  The grid half of every catalog entry other than the 12AX7 is an
+  extrapolation from the 12AX7, offset included.
+
+  **What has been tested:** the original default (eq. (11) alone at the
+  D&Z level) was scored against the Philips ECC83 (January 1970) "As A.F.
+  amplifier" 220 kOhm block, row *Output voltage (Ig = 0.3 uA)*, and reached
+  the criterion 0.26-0.35 V later than the -0.61 V the block's five columns
+  imply, in 15 of 15 cells. That result stands as history. It is a level miss
+  inside the population spread above, not a falsification of the law's form.
+  The same block is now an in-sample consistency check, because its -0.61 V
+  was known when the median default was chosen. The three blocks melange had
+  not read (47 kOhm, 100 kOhm, phase inverter) were pre-registered at
+  -0.61 +/- 0.11 V and measured blind by the circuits side: the two
+  single-stage blocks land inside the band (-0.545, -0.586 V), so
+  operating-point independence holds for that sample; the phase-inverter
+  block lands outside it (-0.427 V), and as pre-registered that miss puts
+  the population-offset attribution in trouble. The post hoc diagnosis is a
+  second tube draw on that page (its plate side differs from the
+  single-stage blocks' at matched operating points; no tube or circuit
+  mechanism closes the 0.2 V), consistent with the population spread, not
+  evidence for it. Neither the law nor the default changed. Detail in
+  `docs/aidocs/STATUS.md`.
+
+  **What has not:** the tail slope. The 92 mV e-fold is measured on an EB91
+  diode and transferred to the ECC83 by argument; no held ECC83 data reaches
+  the sub-microamp decades where it would show.
+
+  **Knee shape, 1-100 uA (parked, documented).** Tubes also differ in how
+  sharply the thermal tail turns into the conducting law. Four of Zollner's
+  five run 0.33-0.36 V/decade from 1 uA where eq. (11), the fifth tube and
+  D&Z's own measured tube keep the thermal 0.21-0.24 V/decade up to about
+  10 uA; pinned at the 0.3 uA median, those four sit 0.17-0.23 V later than
+  the model at 100 uA. The shipped default tracks the five-tube pointwise
+  median to within 0.05 V at every level from 0.27 to 100 uA (in-sample, five
+  tubes), so no shape change is made. The error is bounded by a +/-0.25 V
+  shift of `VGOFF`, about one tube-to-tube standard deviation; measured on
+  one stage with a single tone, a broad-knee law pinned at the same onset
+  differs from the shipped one by -52 / -41 / -37 dB at 1 / 2 / 4 V peak
+  drive through 47 kOhm (THD within 0.7 % absolute). No published form for
+  the negative-grid knee exists to build from; the table, the bound and the
+  reopen conditions are in `docs/aidocs/STATUS.md`.
+
+  **Consequence:** a stage driven from a high source impedance shows
+  grid-current loading where a median vintage ECC83 would, which can be
+  0.2-0.4 V earlier or later than the particular tube in a given amplifier.
+  0.3 uA into a following stage's 680 kOhm grid leak is ~0.2 V of bias shift,
+  which is where blocking and bias-shift distortion begin in cascaded stages,
+  so this is not an inaudible tail.
 
   The shipped Koren ECC83 plate card independently **over-compresses 1.3x-2.3x**
-  at the same operating points (and runs Ia 2-10% low), which partly *masks*
-  this at the output — the grid-side error is larger than an output-voltage
-  comparison alone shows. Any future grid-current check at these points must
-  report the plate model's share, because the two errors partly cancel.
+  at the Philips operating points (and runs Ia 2-10% low), which partly
+  *masks* grid-side error at the output. Any grid-current check at these
+  points must report the plate model's share, because the two errors partly
+  cancel.
 
-  **Root cause: the tail's SLOPE, not its magnitude.** For `Vgk << 0` eq. (11)
-  tends to a pure exponential of slope `xi*Cg` = 13.0 /V, an *effective* cathode
-  temperature near 890 K. The physical retarding-field law (Maxwellian emission)
-  has slope `e/kT_k` — 7.7 /V at 1500 K, ~10.6-11 /V at 1050-1100 K. eq. (11) is
-  steeper than any physical thermal slope, so a fit made in the mA region falls
-  away too fast when extrapolated three to four decades down to 0.3 uA.
+  Note also that a datasheet grid current is a NET reading - electron current
+  minus gas ionisation, grid primary emission and leakage - while eq. (11) and
+  the tail model the electron term alone.
 
-  Note also that a datasheet grid current is a NET reading — electron current
-  minus gas ionisation, grid primary emission and leakage — while eq. (11)
-  models the electron term alone. The gap above is therefore a lower bound.
-
-  Closing the gap by refitting `Gg` would need 28.7x-257x, where D&Z's own
-  three tubes span 1.89x, so this is not a tube-to-tube parameter spread.
-  No parameter here is fitted to that sheet, which is what keeps it usable as
-  an out-of-sample check.
 
 ### Pentode
 - 5 equation families: Rational (Derk), Exponential (DerkE), Classical (Koren/Cohen-Helie), plus variable-mu variants
@@ -494,7 +541,7 @@ Three mechanisms reduce M, and none is on by default:
 
 ### Voltage Sources
 
-Independent voltage sources (V elements) use **augmented MNA**: each source adds a branch-current unknown plus a KVL constraint row (`B^T · x = v_dc`). There is no high-conductance Norton stamp. See `VoltageSourceInfo` in `crates/melange-solver/src/mna.rs` and `solve_dc_op` in `crates/melange-solver/src/dc_op.rs`.
+Independent voltage sources (V elements) use **augmented MNA**: each source adds a branch-current unknown plus a KVL constraint row (`B^T · x = v_dc`). There is no high-conductance Norton stamp. See `VoltageSourceInfo` in `crates/melange-solver/src/mna/sources.rs` and `solve_dc_op` in `crates/melange-solver/src/dc_op.rs`.
 
 The **audio input** is a separate mechanism and does not go through that path: it is a Thevenin source stamped as a conductance `G_in` at the input node (default 1 Ω, or the `.input_impedance` directive / `--input-resistance` override), entering the RHS once per sample as `V_in(n+1) · G_in`; the capacitor history is carried by `q_dot` (see [COMPANION_MODELS.md](aidocs/COMPANION_MODELS.md)).
 
@@ -638,6 +685,16 @@ Noise limitations:
   be expressible -- note that the predicate is "no NR loop", not `M == 0`, since
   a behavioral `B` source routes nodal and gets Newton regardless of M. That was
   6 of 41 corpus circuits: too small a subset to be worth a backend.
+  **REAPER's JSFX (EEL2) was assessed and is expressible but not scheduled**:
+  EEL2 is Turing-complete with double-precision values, so the NR loop and
+  the matrix solves can be written in it. It lacks `tanh`/`cosh`/`sinh`
+  builtins and any bit-level view of a double (so the fast `exp`/`ln` and
+  the 64-bit noise generator need substitutes), has no structs or arrays
+  (state lowers to flat memory), and its JIT's throughput against native
+  code is unmeasured — on a mid-size circuit that is the difference between
+  realtime and not. It is also REAPER-only, which the CLAP build already
+  covers. If it is ever built it follows the C++ backend's shared layer and a
+  throughput measurement, in that order.
 - **M > 32**: a loop-based elimination (or iterative/sparse NR) for very large nonlinear systems (MAX_M=32)
 - **Ideal-transformer formulation for linear windings**: linear coupled
   inductors use the exact `[L]` coupled-inductor path. The ideal-transformer

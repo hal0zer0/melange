@@ -407,6 +407,28 @@ fn new_grid_keys_are_accepted_and_reach_the_generated_constants() {
         !code.contains("DEVICE_0_IG_MAX"),
         "a triode must not emit a Leach constant"
     );
+    // The grid-characteristic offset and the derived tangent-rule join of the
+    // retarding-field tail: the offset at its default (the five-ECC83 median),
+    // the join computed from this card's XI/CG by the devices crate.
+    assert!(
+        code.contains("const DEVICE_0_VGOFF: f64 = -1.66"),
+        "VGOFF missing or not at the default; emitted: {:?}",
+        code.lines()
+            .filter(|l| l.starts_with("const DEVICE_0_"))
+            .collect::<Vec<_>>()
+    );
+    let vstar = melange_devices::tube::grid_join_voltage(1.358, 11.76).unwrap();
+    assert!(
+        code.contains(&format!("const DEVICE_0_GRID_VSTAR: f64 = {vstar:.17e}")),
+        "GRID_VSTAR missing or not the devices-crate root {vstar:e}"
+    );
+    let ln_sstar = (melange_devices::tube::softplus(11.76 * vstar) / 11.76).ln();
+    assert!(
+        code.contains(&format!(
+            "const DEVICE_0_GRID_LN_SSTAR: f64 = {ln_sstar:.17e}"
+        )),
+        "GRID_LN_SSTAR missing or not ln(softplus(CG*V*)/CG) = {ln_sstar:e}"
+    );
 }
 
 // ── Compile-time grid-current starting-point check ──────────────────────

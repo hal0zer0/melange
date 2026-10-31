@@ -381,6 +381,15 @@ pub(super) fn device_param_template_data(ir: &CircuitIR) -> Vec<DeviceParamTempl
                             field_suffix: "cg".into(),
                             const_suffix: "CG".into(),
                         });
+                        // The grid-characteristic offset: the runtime knob
+                        // for contact-potential drift (tube aging). The join
+                        // voltage DEVICE_n_GRID_VSTAR is NOT a state field —
+                        // it is derived from XI/CG at build (see
+                        // `device_models.rs`).
+                        entries.push(DeviceParamEntry {
+                            field_suffix: "vgoff".into(),
+                            const_suffix: "VGOFF".into(),
+                        });
                         // The triode's Early term; the pentode plate law has none.
                         entries.push(DeviceParamEntry {
                             field_suffix: "lambda".into(),

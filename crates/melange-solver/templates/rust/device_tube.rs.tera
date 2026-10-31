@@ -38,25 +38,86 @@ fn tube_sigmoid(x: f64) -> f64 {
     if x > 0.0 { 1.0 / (1.0 + (-x).exp()) } else { let e = x.exp(); e / (1.0 + e) }
 }
 
-/// TRIODE grid current — Dempwolf & Zölzer, Proc. DAFx-11 (2011), eq. (11):
-///   Ig = Gg * ( ln(1 + e^(Cg*Vgk)) / Cg )^xi
-/// Conducts through and below Vgk = 0 (no onset parameter, no branch); the
+/// Thermal voltage of the triode grid's retarding-field tail, V_T = k*T_c/e
+/// [V] at a cathode temperature of ~1070 K (K. Turvey, Eur. J. Phys. 11 (1990)
+/// 51: 1069 K measured on an EB91 diode at its rated heater; the 88-96 mV
+/// band an oxide cathode spans moves the derived 0.3 uA onset by +/-0.015 V).
+/// A physical constant, not a card key. Canonical: melange-devices
+/// `tube::GRID_TAIL_VT`.
+const TUBE_GRID_TAIL_VT: f64 = 0.0922;
+
+/// Dempwolf & Zölzer, Proc. DAFx-11 (2011), eq. (11), on the offset-free grid
+/// voltage v — the conducting-region law alone:
+///   Ig = Gg * ( ln(1 + e^(Cg*v)) / Cg )^xi
+/// Conducts through and below v = 0 (no onset parameter, no branch); the
 /// paper's additive Ig0 is deliberately dropped.
 #[inline(always)]
-fn tube_ig_dz(vgk: f64, gg: f64, xi: f64, cg: f64) -> f64 {
-    let s = tube_softplus(cg * vgk) / cg;
+fn tube_ig_eq11(v: f64, gg: f64, xi: f64, cg: f64) -> f64 {
+    let s = tube_softplus(cg * v) / cg;
     if s <= 0.0 { return 0.0; }
     gg * s.powf(xi)
 }
 
-/// TRIODE grid current derivative dIg/dVgk = Gg*xi*s^(xi-1)*sigma(Cg*Vgk).
-/// Positive and continuous everywhere, including across turn-on.
+/// dIg/dv of eq. (11) = Gg*xi*s^(xi-1)*sigma(Cg*v). Positive and continuous
+/// everywhere, including across turn-on.
 #[inline(always)]
-fn tube_ig_dz_deriv(vgk: f64, gg: f64, xi: f64, cg: f64) -> f64 {
-    let x = cg * vgk;
+fn tube_ig_eq11_deriv(v: f64, gg: f64, xi: f64, cg: f64) -> f64 {
+    let x = cg * v;
     let s = tube_softplus(x) / cg;
     if s <= 0.0 { return 0.0; }
     gg * xi * s.powf(xi - 1.0) * tube_sigmoid(x)
+}
+
+/// TRIODE grid current and its derivative at the terminal grid voltage, in
+/// one evaluation: eq. (11) above the join voltage `vstar`, the
+/// retarding-field (initial-velocity) exponential below it, the whole law
+/// shifted by the card's grid-characteristic offset VGOFF:
+///   v  = Vgk - VGOFF
+///   Ig = I_t * exp((v - V*)/V_T)     v <  V*     (tail; I_t = eq. (11) at V*)
+///      = eq. (11) at v                v >= V*
+/// V* is the TANGENT-RULE join — where eq. (11)'s log-slope has fallen to
+/// 1/V_T — computed at build by melange-devices `tube::grid_join_voltage` and
+/// emitted as DEVICE_n_GRID_VSTAR (f64::NEG_INFINITY = no join: the card's
+/// XI*CG is never steeper than thermal). Value and first derivative are
+/// continuous at V* by construction; no blend.
+///
+/// The tail is written as ONE exponential: with s* = softplus(Cg*V*)/Cg
+/// (its log emitted as DEVICE_n_GRID_LN_SSTAR), I_t = Gg * s*^xi, so
+///   Ig = Gg * exp(xi * ln(s*) + (v - V*)/V_T),   dIg/dVgk = Ig / V_T.
+/// Algebraically identical to I_t*exp(..) (the devices crate's form), and
+/// cheaper than eq. (11) itself. The live Gg keeps the tail anchored under a
+/// runtime change of GG (or VGOFF); a runtime change of XI or CG leaves V*
+/// and ln(s*) where the build put them (the law stays continuous and
+/// increasing, its slope kinks at the join). Above the join the derivative
+/// Gg*xi*s^(xi-1)*sigma(Cg*v) is taken as Ig*xi*sigma/s so the softplus and
+/// the power are evaluated once for both. Canonical: melange-devices
+/// `KorenTriode::grid_current` / `grid_current_jacobian`.
+#[inline(always)]
+fn tube_ig_dz_pair(vgk: f64, gg: f64, xi: f64, cg: f64, vgoff: f64, vstar: f64,
+                   ln_sstar: f64) -> (f64, f64) {
+    let v = vgk - vgoff;
+    if v < vstar {
+        let ig = gg * (xi * ln_sstar + (v - vstar) / TUBE_GRID_TAIL_VT).exp();
+        return (ig, ig / TUBE_GRID_TAIL_VT);
+    }
+    let x = cg * v;
+    let s = tube_softplus(x) / cg;
+    if s <= 0.0 { return (0.0, 0.0); }
+    let ig = gg * s.powf(xi);
+    (ig, ig * xi * tube_sigmoid(x) / s)
+}
+
+/// TRIODE grid current — see `tube_ig_dz_pair`.
+#[inline(always)]
+fn tube_ig_dz(vgk: f64, gg: f64, xi: f64, cg: f64, vgoff: f64, vstar: f64, ln_sstar: f64) -> f64 {
+    tube_ig_dz_pair(vgk, gg, xi, cg, vgoff, vstar, ln_sstar).0
+}
+
+/// TRIODE grid current derivative dIg/dVgk — see `tube_ig_dz_pair`. Positive
+/// and continuous everywhere, across turn-on and across the join alike.
+#[inline(always)]
+fn tube_ig_dz_deriv(vgk: f64, gg: f64, xi: f64, cg: f64, vgoff: f64, vstar: f64, ln_sstar: f64) -> f64 {
+    tube_ig_dz_pair(vgk, gg, xi, cg, vgoff, vstar, ln_sstar).1
 }
 {% if any_pentode_family %}
 
@@ -97,9 +158,9 @@ fn tube_pentode_guard_columns(mut jac: [f64; 9], vpk: f64, vg2k: f64) -> [f64; 9
 /// Includes Early-effect lambda: Ip = Ip_koren * (1 + lambda * Vpk).
 #[inline(always)]
 fn tube_jacobian(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64,
-                 gg: f64, xi: f64, cg: f64, lambda: f64) -> [f64; 4] {
+                 gg: f64, xi: f64, cg: f64, vgoff: f64, vstar: f64, ln_sstar: f64, lambda: f64) -> [f64; 4] {
     // Grid current Jacobian
-    let dig_dvgk = tube_ig_dz_deriv(vgk, gg, xi, cg);
+    let dig_dvgk = tube_ig_dz_deriv(vgk, gg, xi, cg, vgoff, vstar, ln_sstar);
 
     // Plate current Jacobian
     let vpk_held = vpk < 1e-3;
@@ -132,16 +193,17 @@ fn tube_jacobian(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f
 }
 
 /// Internal Vgk behind RGI: the root of Vgk_int + Ig(Vgk_int) * RGI = Vgk_ext.
-/// Ig is increasing and convex, so Newton from Vgk_ext approaches the root from
+/// Ig is increasing and convex (the tail is an exponential, eq. (11) is a
+/// power >= 1 of a convex function, and the tangent join is C1, so the
+/// composite is convex too), so Newton from Vgk_ext approaches the root from
 /// above without overshoot and needs no step limit (at most 10 iterations
 /// measured, -100..+300 V, RGI 100 Ohm..1 MOhm). Mirrors the devices crate's
 /// `KorenTriode::internal_grid_voltage`, which the DC operating point uses.
 #[inline(always)]
-fn tube_solve_vgk_int(vgk_ext: f64, gg: f64, xi: f64, cg: f64, rgi: f64) -> f64 {
+fn tube_solve_vgk_int(vgk_ext: f64, gg: f64, xi: f64, cg: f64, vgoff: f64, vstar: f64, ln_sstar: f64, rgi: f64) -> f64 {
     let mut vgk_int = vgk_ext;
     for _ in 0..50 {
-        let ig = tube_ig_dz(vgk_int, gg, xi, cg);
-        let dig = tube_ig_dz_deriv(vgk_int, gg, xi, cg);
+        let (ig, dig) = tube_ig_dz_pair(vgk_int, gg, xi, cg, vgoff, vstar, ln_sstar);
         let f = vgk_int + ig * rgi - vgk_ext;
         let fp = 1.0 + dig * rgi;
         let delta = f / fp;
@@ -154,27 +216,27 @@ fn tube_solve_vgk_int(vgk_ext: f64, gg: f64, xi: f64, cg: f64, rgi: f64) -> f64 
 /// Plate current with RGI: evaluate at internal Vgk.
 #[inline(always)]
 fn tube_ip_with_rgi(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64,
-                    lambda: f64, gg: f64, xi: f64, cg: f64, rgi: f64) -> f64 {
-    let vgk_int = tube_solve_vgk_int(vgk, gg, xi, cg, rgi);
+                    lambda: f64, gg: f64, xi: f64, cg: f64, vgoff: f64, vstar: f64, ln_sstar: f64, rgi: f64) -> f64 {
+    let vgk_int = tube_solve_vgk_int(vgk, gg, xi, cg, vgoff, vstar, ln_sstar, rgi);
     tube_ip(vgk_int, vpk, mu, ex, kg1, kp, kvb, lambda)
 }
 
 /// Grid current with RGI: evaluate at internal Vgk.
 #[inline(always)]
-fn tube_ig_dz_with_rgi(vgk: f64, gg: f64, xi: f64, cg: f64, rgi: f64) -> f64 {
-    let vgk_int = tube_solve_vgk_int(vgk, gg, xi, cg, rgi);
-    tube_ig_dz(vgk_int, gg, xi, cg)
+fn tube_ig_dz_with_rgi(vgk: f64, gg: f64, xi: f64, cg: f64, vgoff: f64, vstar: f64, ln_sstar: f64, rgi: f64) -> f64 {
+    let vgk_int = tube_solve_vgk_int(vgk, gg, xi, cg, vgoff, vstar, ln_sstar, rgi);
+    tube_ig_dz(vgk_int, gg, xi, cg, vgoff, vstar, ln_sstar)
 }
 
 /// Jacobian with RGI: correct for the chain rule through the inner NR.
 /// dVgk_int/dVgk_ext = 1 / (1 + dIg/dVgk_int * RGI)
 #[inline(always)]
 fn tube_jacobian_with_rgi(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64,
-                          gg: f64, xi: f64, cg: f64, lambda: f64, rgi: f64) -> [f64; 4] {
-    let vgk_int = tube_solve_vgk_int(vgk, gg, xi, cg, rgi);
-    let jac = tube_jacobian(vgk_int, vpk, mu, ex, kg1, kp, kvb, gg, xi, cg, lambda);
+                          gg: f64, xi: f64, cg: f64, vgoff: f64, vstar: f64, ln_sstar: f64, lambda: f64, rgi: f64) -> [f64; 4] {
+    let vgk_int = tube_solve_vgk_int(vgk, gg, xi, cg, vgoff, vstar, ln_sstar, rgi);
+    let jac = tube_jacobian(vgk_int, vpk, mu, ex, kg1, kp, kvb, gg, xi, cg, vgoff, vstar, ln_sstar, lambda);
     // Chain rule correction: dVgk_int/dVgk_ext = 1/(1 + dIg/dVgk_int * RGI)
-    let dig_dvgk_int = tube_ig_dz_deriv(vgk_int, gg, xi, cg);
+    let dig_dvgk_int = tube_ig_dz_deriv(vgk_int, gg, xi, cg, vgoff, vstar, ln_sstar);
     let dvgk_int_dvgk_ext = 1.0 / (1.0 + dig_dvgk_int * rgi);
     // dIp/dVgk_ext = dIp/dVgk_int * dvgk_int/dvgk_ext
     // dIp/dVpk unchanged (Vpk not affected by RGI)
@@ -189,9 +251,8 @@ fn tube_jacobian_with_rgi(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f6
 /// per tube. Equivalent to calling tube_ip + tube_ig + tube_jacobian separately.
 #[inline(always)]
 fn tube_evaluate(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64,
-                 gg: f64, xi: f64, cg: f64, lambda: f64) -> (f64, f64, [f64; 4]) {
-    let ig = tube_ig_dz(vgk, gg, xi, cg);
-    let dig_dvgk = tube_ig_dz_deriv(vgk, gg, xi, cg);
+                 gg: f64, xi: f64, cg: f64, vgoff: f64, vstar: f64, ln_sstar: f64, lambda: f64) -> (f64, f64, [f64; 4]) {
+    let (ig, dig_dvgk) = tube_ig_dz_pair(vgk, gg, xi, cg, vgoff, vstar, ln_sstar);
 
     let vpk_held = vpk < 1e-3;
     let vpk = vpk.max(1e-3);
@@ -232,11 +293,10 @@ fn tube_evaluate(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f
 /// Combined tube evaluation with RGI: includes internal Vgk solve and chain rule correction.
 #[inline(always)]
 fn tube_evaluate_with_rgi(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64,
-                          gg: f64, xi: f64, cg: f64, lambda: f64, rgi: f64) -> (f64, f64, [f64; 4]) {
-    let vgk_int = tube_solve_vgk_int(vgk, gg, xi, cg, rgi);
-    let (ip, _, jac) = tube_evaluate(vgk_int, vpk, mu, ex, kg1, kp, kvb, gg, xi, cg, lambda);
-    let ig = tube_ig_dz(vgk_int, gg, xi, cg);
-    let dig_dvgk_int = tube_ig_dz_deriv(vgk_int, gg, xi, cg);
+                          gg: f64, xi: f64, cg: f64, vgoff: f64, vstar: f64, ln_sstar: f64, lambda: f64, rgi: f64) -> (f64, f64, [f64; 4]) {
+    let vgk_int = tube_solve_vgk_int(vgk, gg, xi, cg, vgoff, vstar, ln_sstar, rgi);
+    let (ip, _, jac) = tube_evaluate(vgk_int, vpk, mu, ex, kg1, kp, kvb, gg, xi, cg, vgoff, vstar, ln_sstar, lambda);
+    let (ig, dig_dvgk_int) = tube_ig_dz_pair(vgk_int, gg, xi, cg, vgoff, vstar, ln_sstar);
     let dvgk_int_dvgk_ext = 1.0 / (1.0 + dig_dvgk_int * rgi);
     (ip, ig, [jac[0] * dvgk_int_dvgk_ext, jac[1], jac[2] * dvgk_int_dvgk_ext, jac[3]])
 }

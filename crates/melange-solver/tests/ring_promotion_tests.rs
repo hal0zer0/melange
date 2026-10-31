@@ -39,6 +39,15 @@ fn provenance_source(code: &str) -> &str {
     &code[start..start + code[start..].find('"').unwrap()]
 }
 
+/// Rest = the fifth second. The grid law's retarding-field tail passes ~10 pA
+/// at this cascade's −1.5 V bias (eq. (11) alone passed ~0.1 pA), and that
+/// current charges the 1 MΩ grid leaks' coupling caps towards a fixed point a
+/// few µV from the baked DC operating point, so the cascade is still settling
+/// through its 0.1 s leak time constants at 1 s. Measured during that
+/// settle, the 6th-difference detector reads Newton termination jitter
+/// (RELTOL 1e-3 / VNTOL 1e-6: ~4e-8 V at 1 s), not a Nyquist-side pole;
+/// after 4 s it reads 3.4e-13 V with the grid tail and ~0 without an offset.
+/// A limit cycle would not settle, so the detector keeps its 1e-8 V bar.
 #[test]
 fn the_triode_cascade_stays_trapezoidal_and_rests_quietly() {
     let config = support::config_for_spice(CASCADE, 48000.0);
@@ -48,14 +57,14 @@ fn the_triode_cascade_stays_trapezoidal_and_rests_quietly() {
     let main = "fn main() {
     let mut s = CircuitState::default();
     s.set_sample_rate(48000.0);
-    let n = 96000usize;
+    let n = 240000usize;
     let mut worst = 0.0f64;
     let mut hist = [0.0f64; 7];
     for i in 0..n {
         let y = process_sample(0.0, &mut s)[0];
         hist.rotate_left(1);
         hist[6] = y;
-        if i >= n / 2 {
+        if i >= n - 48000 {
             // 6th difference / 64: unity gain at fs/2, -142 dB at 1 kHz.
             let d = hist[6] - 6.0 * hist[5] + 15.0 * hist[4] - 20.0 * hist[3]
                 + 15.0 * hist[2] - 6.0 * hist[1] + hist[0];
@@ -66,8 +75,9 @@ fn the_triode_cascade_stays_trapezoidal_and_rests_quietly() {
 }";
     let out = support::compile_and_run(&code, main, "ring_cascade_rest");
     let nyq = out.parse_kv("nyquist").unwrap();
-    eprintln!("cascade at rest, second second: fs/2 content {nyq:e} V");
-    // Measured 7.3e-10 V (the whole-system form: a 28 mV limit cycle).
+    eprintln!("cascade at rest, fifth second: fs/2 content {nyq:e} V");
+    // Measured 7.3e-10 V in the second second before the grid tail, 3.4e-13 V
+    // in the fifth second with it (the whole-system form: a 28 mV limit cycle).
     assert!(nyq < 1e-8, "fs/2 content at rest {nyq:e} V");
 }
 

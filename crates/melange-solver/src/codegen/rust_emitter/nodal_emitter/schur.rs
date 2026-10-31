@@ -515,11 +515,11 @@ impl RustEmitter {
                     };
                     if tp.has_rgi() {
                         code.push_str(&format!(
-                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate_with_rgi({vgk_expr}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_gg, state.device_{d}_xi, state.device_{d}_cg, state.device_{d}_lambda, DEVICE_{d}_RGI);\n"
+                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate_with_rgi({vgk_expr}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_gg, state.device_{d}_xi, state.device_{d}_cg, state.device_{d}_vgoff, DEVICE_{d}_GRID_VSTAR, DEVICE_{d}_GRID_LN_SSTAR, state.device_{d}_lambda, DEVICE_{d}_RGI);\n"
                         ));
                     } else {
                         code.push_str(&format!(
-                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate({vgk_expr}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_gg, state.device_{d}_xi, state.device_{d}_cg, state.device_{d}_lambda);\n"
+                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate({vgk_expr}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_gg, state.device_{d}_xi, state.device_{d}_cg, state.device_{d}_vgoff, DEVICE_{d}_GRID_VSTAR, DEVICE_{d}_GRID_LN_SSTAR, state.device_{d}_lambda);\n"
                         ));
                     }
                     code.push_str(&format!(

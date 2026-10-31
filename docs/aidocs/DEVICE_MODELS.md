@@ -422,53 +422,111 @@ dIp/dVgk = dIp_koren/dVgk * (1 + lambda * Vpk)
 dIp/dVpk = dIp_koren/dVpk * (1 + lambda * Vpk) + Ip_koren * lambda
 ```
 
-### Grid Current (Dempwolf & Zölzer DAFx-11, eq. 11)
+### Grid Current (Dempwolf & Zölzer eq. (11) + retarding-field tail + offset)
 
 ```
-s  = softplus(Cg * Vgk) / Cg        softplus(x) = ln(1 + e^x)
-Ig = Gg * s^xi                      for ALL Vgk — no branch, no onset parameter
-dIg/dVgk = Gg * xi * s^(xi-1) * sigma(Cg * Vgk)      sigma = logistic sigmoid
+v  = Vgk - VGOFF                                  (one whole-law offset)
+s  = softplus(Cg * v) / Cg                        softplus(x) = ln(1 + e^x)
+Ig = Gg * s^xi                                    for v >= V*   (eq. (11))
+   = I_t * exp((v - V*) / V_T)                    for v <  V*   (tail)
+dIg/dVgk = Gg * xi * s^(xi-1) * sigma(Cg * v)     above V*  (sigma = logistic)
+         = Ig / V_T                               below V*
+V_T = k*T_c/e = 92.2 mV                           (T_c ~ 1070 K, a constant)
+V*  : root of  xi*Cg*sigma(u)/softplus(u) = 1/V_T,  u = Cg*V*   (tangent rule)
+I_t = eq. (11) at V*
 ```
 
-Source: K. Dempwolf & U. Zölzer, "A physically-motivated triode model for
-circuit simulations", Proc. DAFx-11, Paris 2011, eq. (11). Parameter names are
-the paper's (`Gg`, `xi`, `Cg`) so its Table 1 rows transfer with provenance.
+Sources: K. Dempwolf & U. Zölzer, "A physically-motivated triode model for
+circuit simulations", Proc. DAFx-11, Paris 2011, eq. (11) (parameter names
+are the paper's, `Gg`, `xi`, `Cg`, so its Table 1 rows transfer with
+provenance). Tail: the Maxwellian retarding-field current of a thermionic
+cathode (Spangenberg 1948 eq. 4.2; Fairstein 1958, RSI 29:524; Adler & Longo
+1984, JAP 55:4106), `V_T = k·T_c/e` with `T_c` = 1069 K measured by K. Turvey,
+Eur. J. Phys. 11 (1990) 51, on an EB91 diode at its rated 6.15 V heater; an
+oxide cathode's 88–96 mV band moves the derived 0.3 µA onset ±0.015 V.
+
+**Why the tail exists.** Eq. (11) alone tends to `Gg·Cg^-xi·exp(xi·Cg·v)` for
+`v << 0`: a pure exponential of slope `xi·Cg` (13.0 /V for RSD-1, an
+"effective" cathode of ~890 K), steeper than any real oxide cathode's
+`1/V_T` = 10.8 /V. A fit made in the mA region therefore falls away too fast
+when extrapolated three to four decades down. The tangent rule puts the join
+exactly where eq. (11)'s log-slope has fallen to the thermal one, so the
+composite is continuous in value AND first derivative with no blend, and is
+never steeper than thermal anywhere. A join higher up leaves a super-thermal
+stretch of eq. (11) above it; a join lower down anchors on the fit's
+extrapolated part. A card whose `XI·CG ≤ 1/V_T` has no join and keeps eq. (11)
+alone (`DEVICE_n_GRID_VSTAR = f64::NEG_INFINITY`). The slope is **sourced on an
+EB91 and untested on any ECC83**: the only held ECC83 grid data (Zollner,
+five tubes, 1–27 µA) runs 0.33–0.37 V/decade — the knee, not the tail — and
+has no sub-µA decades.
+
+**Why one offset.** Grid-current LEVEL is a population parameter. Five ECC83s
+of different makes (Siemens, Brimar, Valvo, Ultron, Tungsram; M. Zollner,
+*Physics of the Electric Guitar*, 2007, Fig. 10.11.8) reach the 0.3 µA
+criterion between −0.97 and −0.41 V — median −0.552, mean −0.650, sd 0.22 V,
+centre ±0.12 V with n = 5 (linear 0–160 µA axis, quantised 0.27 µA, no
+conditions printed, worth ≤ 0.1 V). `VGOFF` [V] shifts the whole law along
+`Vgk`: it holds contact potential (0.1–0.7 V on oxide cathodes, Fan 1943, JAP
+14:552; 0.9 ± 0.2 V, Turvey 1990; drifting 0.6 V in 3200 h, RDH4 ch. 2) and
+prefactor spread as ONE constant, because in an exponential the two are not
+separable by any grid-current measurement. It is applied after the join, to
+tail and conducting law together, and is the only per-tube level key — a
+28.7×–257× change in `Gg` has no physical reading, a few tenths of a volt do.
+**Default `VGOFF = −0.166 V`** places the shipped RSD-1 row's composite onset
+(−0.386 V) at the five-tube median; `VGOFF = 0` is D&Z's own three 2011 tubes,
+all at the positive end of that spread. RSD-2 / EHX-1 need −0.207 / −0.211 V
+for the same median. The default is set from a **static population datum,
+never from the Philips AF table** that scores the law (see `STATUS.md`).
 
 **The negative-grid region is part of the law.** The grid is a vacuum diode:
-a space-charge power law for positive grid, joined by the initial-velocity
-current that real tubes pass at and below Vgk = 0 (D&Z §5.2). The softplus
-supplies that join with no piecewise branch. Measured 12AX7s pass **12–19 µA at
-Vgk = 0** and reach the datasheet 0.3 µA criterion at **−0.27 to −0.38 V**.
-The retired Leach law returned exactly 0.0 A everywhere below Vgk = 0 for ANY
-parameter values — wrong physics, not a scope boundary.
+a space-charge power law for positive grid, the softplus join of D&Z §5.2
+through `v = 0`, and the thermal tail below `V*`. The retired Leach law
+returned exactly 0.0 A everywhere below Vgk = 0 for ANY parameter values —
+wrong physics, not a scope boundary.
 
 **`Ig0` is deliberately dropped.** The paper adds a constant "due to stability
 reasons". It has zero derivative so it cannot help Newton, and it injects tens
 of nA at the negative grid voltages where the datasheets specify REVERSE grid
 current of the opposite sign. Note when reading D&Z-derived figures elsewhere:
-onsets quoted as −0.38 / −0.27 / −0.31 V are the WITH-`Ig0` values; without it
-the same rows give **−0.353 / −0.264 / −0.296 V**.
+onsets quoted as −0.38 / −0.27 / −0.31 V are the WITH-`Ig0` eq. (11) values;
+without it the same rows give −0.353 / −0.264 / −0.296 V, and with the tail
+−0.386 / −0.346 / −0.342 V (all at `VGOFF = 0`).
 
-**No onset parameter, and none is wanted.** Turn-on sharpness is `1/(xi*Cg)`
-and magnitude is `Gg`; a 2:1 spread in `Gg` moves the 0.3 µA criterion by only
-~50 mV, which is why real 12AX7s are tight in onset and loose (2:1) in
-magnitude. The onset is an OUTPUT of the fit, and melange reports it at compile
-time (below) precisely so an independent datasheet row can score it.
+**No onset parameter, and none is wanted.** Turn-on sharpness is `1/(xi*Cg)`,
+magnitude is `Gg`, level is `VGOFF`. The onset is an OUTPUT of the card, and
+melange reports it at compile time (below) precisely so an independent
+datasheet row can score it.
 
 **Numerics.** `softplus` is the stable two-branch form `x + ln1p(e^-x)` for
 x > 0, `ln1p(e^x)` otherwise, so nothing overflows at any finite Vgk (a bare
-`exp(Cg*Vgk)` is infinite past Vgk ≈ 71 V at the default Cg). The Jacobian is
-analytic, strictly positive and continuous through turn-on — strictly kinder to
-Newton than the retired law, whose conductance was identically zero across the
-whole negative-grid region and had a `sqrt` cusp at the crossing. The generated
-code uses `std` `exp`/`ln_1p` rather than `fast_exp`/`fast_ln` here: `fast_exp`
-clamps to [−40, 40], which would put a spurious floor under the grid current in
-exactly the deep-negative region this law exists to get right.
+`exp(Cg*Vgk)` is infinite past Vgk ≈ 71 V at the default Cg). The tail's
+`exp` underflows cleanly to 0 far below the join. The Jacobian is analytic,
+strictly positive and continuous through turn-on and through the join —
+strictly kinder to Newton than the retired law, whose conductance was
+identically zero across the whole negative-grid region and had a `sqrt` cusp
+at the crossing. The composite is convex (exponential below, a power ≥ 1 of a
+convex function above, C1 at the join), which is what the grid-stopper
+Newton (`RGI`) relies on. The generated code uses `std` `exp`/`ln_1p` rather
+than `fast_exp`/`fast_ln` here: `fast_exp` clamps to [−40, 40], which would
+put a spurious floor under the grid current in exactly the deep-negative
+region this law exists to get right. `V*` is computed once at build by
+`melange_devices::tube::grid_join_voltage` (safeguarded Newton on the
+log-slope equation) and emitted as `DEVICE_n_GRID_VSTAR`, with
+`ln(s*) = ln(softplus(Cg·V*)/Cg)` beside it as `DEVICE_n_GRID_LN_SSTAR`; the
+DC operating point recomputes the join from the same function, so both see
+one join. The generated tail is the single exponential
+`Gg·exp(xi·ln(s*) + (v − V*)/V_T)` — algebraically `I_t·exp(...)`, the
+devices crate's form, agreeing to rounding — so below the join the grid costs
+one `exp` where eq. (11) costs a softplus and a `powf`; value and derivative
+come from one evaluation on both branches. The live `Gg` keeps the tail
+anchored under a runtime change of `GG` (or `VGOFF`); a runtime change of
+`XI` or `CG` leaves `V*` and `ln(s*)` where the build put them (continuous
+and increasing still, the slope kinks there).
 
 ### 12AX7 Parameters
 ```
 mu = 100, Kp = 600, Kvb = 300, Kg1 = 1060, ex = 1.4, lambda = 0.0
-Gg = 6.177e-4, xi = 1.314, Cg = 9.901
+Gg = 6.177e-4, xi = 1.314, Cg = 9.901, VGOFF = -0.166
 ```
 
 Kg1 = 1060 is Norman Koren's published card and is only valid together with
@@ -485,22 +543,44 @@ Cg=11.99`.
 
 What RSD-1 gives, all DERIVED (melange computes them; none is stored or fitted):
 
-| quantity | value |
-|---|---|
-| Ig at Vgk = 0 | 18.76 µA |
-| Vgk at Ig = 0.3 µA (grid-current starting point) | −0.353 V |
-| Vgk at Ig = 2 mA | +2.445 V |
+| quantity | at `VGOFF = 0` (D&Z's tubes) | at the default `VGOFF = −0.166` |
+|---|---|---|
+| tangent-rule join `V*` / `I_t` | −0.079 V / 8.4 µA | −0.245 V / 8.4 µA |
+| Ig at Vgk = 0 | 18.76 µA (eq. (11)) | 66.7 µA |
+| Vgk at Ig = 0.3 µA (grid-current starting point) | −0.386 V (eq. (11) alone: −0.353 V) | −0.552 V |
+| Vgk at Ig = 2 mA | +2.445 V | +2.279 V |
 
-**Every catalog entry carries this same grid row.** D&Z fitted 12AX7s only, and
-no per-type fit of this form exists for the others, so for anything but a 12AX7
-the grid half of a catalog entry is an EXTRAPOLATION FROM A 12AX7. The fields
-are per-entry so a per-type fit can land in one row without disturbing the rest.
+The whole-law shift is the physics of a contact potential and it is what the
+population datum supports at the sub-µA end; its known consequence is the
+Ig(0 V) row. At 0 V Zollner's five tubes pass 7.9 / 19.8 / 47.0 / 74.6 /
+152.8 µA (Tungsram, Ultron, Valvo, Brimar, Siemens; median 47.0 µA); the
+shifted default passes ~67 µA, between the median tube and Brimar, and D&Z's
+own three tubes 12–19 µA. The five-tube range is 0.50–0.56 V wide at every
+level from 0.27 to 100 µA, but the tubes are not parallel to each other: eq.
+(11)'s knee is sharper and later than four of the five tubes' — 0.21–0.22
+V/decade over 1–27 µA (still the thermal slope, up to the join at 8.4 µA)
+against 0.33–0.36 for Siemens, Brimar, Ultron and Tungsram; Valvo's 0.24
+matches, and so does D&Z's own measured tube. A law pinned to one of those
+four at 0.3 µA reaches 27 µA 0.15–0.19 V early and 100 µA 0.17–0.23 V early.
+The default nevertheless tracks the five-tube pointwise MEDIAN to within
+0.05 V at every level from 0.27 to 100 µA (in-sample, n = 5), which is why
+the knee shape is parked as a documented limitation rather than modelled:
+`STATUS.md`, knee shape, has the table, the measured audible bound (about one
+tube-to-tube sd as a level shift) and the reopen triggers.
+
+**Every catalog entry carries this same grid row, offset included.** D&Z
+fitted 12AX7s only and the population datum is ECC83s only, so for anything
+but a 12AX7 the grid half of a catalog entry is an EXTRAPOLATION FROM A 12AX7.
+The fields are per-entry so a per-type fit can land in one row without
+disturbing the rest.
 
 ### Compile-time grid-current starting-point CHECK
 
 Not a parameter — a check, deliberately: a parameter would invite someone to
 fit it. At compile time melange reports the Vgk at which the resolved
-`(Gg, xi, Cg)` reaches the manufacturers' `Ig = +0.3 µA` criterion (Philips
+`(Gg, xi, Cg, VGOFF)` reaches the manufacturers' `Ig = +0.3 µA` criterion
+(inverting the tail or eq. (11), whichever branch holds 0.3 µA), together
+with Ig(0 V), the offset and the join point (Philips
 ECC82 1959 footnote, spelled out in full there; the ECC83 sheet carries the
 same row), and warns when that falls outside the type's own published limit:
 
@@ -516,15 +596,15 @@ would be worse than admitting there is none. Nothing reads this at run time.
 
 ### Overriding via `.model` (all triode params are deck-specifiable)
 
-Every parameter above — including the **grid-current** coefficients `GG`, `XI`
-and `CG` — is overridable per tube on the `.model TRIODE(...)` line, not just
+Every parameter above — including the **grid-current** coefficients `GG`, `XI`,
+`CG` and the offset `VGOFF` — is overridable per tube on the `.model TRIODE(...)` line, not just
 the plate params. The resolver (`CircuitIR::resolve_tube_params`) reads each key
 with the fallback chain **`.model` value → `catalog/tubes.rs` entry → built-in
 default**. So `.model ECC83 TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300
 GG=5.911e-4 XI=1.358 CG=11.76)` emits `DEVICE_n_GG` / `XI` / `CG` for the RSD-2
 row; a deck that omits them gets RSD-1.
 
-Overridable keys: `MU EX KG1 KP KVB LAMBDA GG XI CG` (sharp triode);
+Overridable keys: `MU EX KG1 KP KVB LAMBDA GG XI CG VGOFF` (sharp triode);
 `CCG CGP CCP` (inter-electrode caps); `RGI` (grid internal resistance: the
 plate and grid currents are evaluated at the internal grid, the root of
 `v + RGI*Ig(v) = Vgk`, in the DC operating point and the transient alike). The
@@ -561,7 +641,8 @@ back.
 `pnjlim` on the grid dimension uses the grid law's own turn-on width as its
 `vt`: **`1/Cg`** for the D&Z triode (the adaption factor is a reciprocal
 voltage, exactly the role `n·Vt` plays for a diode — 0.101 V at the default
-`Cg`), and the unchanged `vgk_onset/3` for the Leach pentode control grid.
+`Cg`; the tail's 92 mV is the same scale, so one `vt` serves both branches),
+and the unchanged `vgk_onset/3` for the Leach pentode control grid.
 `DEVICE_n_VCRIT` is derived from the same scale. See `VOLTAGE_LIMITING.md`.
 
 ## Pentode / Beam Tetrode (Reefman "Derk" §4.4)

@@ -33,6 +33,10 @@ pub struct TubeCatalogEntry {
     pub xi: f64,
     /// Dempwolf & Zölzer eq. (11) grid adaption factor `Cg` [1/V].
     pub cg: f64,
+    /// Grid-characteristic offset `VGOFF` \[V\]: the whole grid law (eq. (11)
+    /// plus its retarding-field tail) evaluated at `Vgk - vgoff`. See
+    /// `tube::DEFAULT_VGOFF` for the population it places the row at.
+    pub vgoff: f64,
     /// Channel-length modulation (Early effect) [1/V]
     pub lambda: f64,
     /// Source citation
@@ -82,14 +86,16 @@ pub fn grid_start_limit_v(name: &str) -> Option<f64> {
 
 /// The tube catalog.
 ///
-/// **Grid current**: every entry carries the same `(Gg, xi, Cg)` — Dempwolf &
-/// Zölzer DAFx-11 Table 1 row **RSD-1** (see `tube::DEFAULT_GG`). The paper
-/// fitted 12AX7s only, and no per-type grid fit of this form exists for the
-/// other types here, so for anything but a 12AX7 the grid half of the entry is
-/// an **extrapolation from a 12AX7** and is labelled as such by the
-/// compile-time onset report. The fields are per-entry, not global, precisely
-/// so a per-type fit can land in one row without touching the others. The
-/// plate half (`mu`/`ex`/`kg1`/`kp`/`kvb`) is per-type and unaffected.
+/// **Grid current**: every entry carries the same `(Gg, xi, Cg, VGOFF)` —
+/// Dempwolf & Zölzer DAFx-11 Table 1 row **RSD-1** (see `tube::DEFAULT_GG`)
+/// under the tangent-rule retarding-field tail, offset to the median of five
+/// measured ECC83s (see `tube::DEFAULT_VGOFF`). The paper fitted 12AX7s only
+/// and the population datum is ECC83s only, so for anything but a 12AX7 the
+/// grid half of the entry is an **extrapolation from a 12AX7**, offset
+/// included, and is labelled as such by the compile-time onset report. The
+/// fields are per-entry, not global, precisely so a per-type fit can land in
+/// one row without touching the others. The plate half
+/// (`mu`/`ex`/`kg1`/`kp`/`kvb`) is per-type and unaffected.
 pub const CATALOG: &[TubeCatalogEntry] = &[
     // 12AX7 / ECC83 — high-mu twin triode, the workhorse of guitar amps.
     // Norman Koren's published 1996 card, used with the full Koren equation
@@ -111,6 +117,7 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         gg: crate::tube::DEFAULT_GG,
         xi: crate::tube::DEFAULT_XI,
         cg: crate::tube::DEFAULT_CG,
+        vgoff: crate::tube::DEFAULT_VGOFF,
         lambda: 0.0,
         source: "Koren 1996 published card (Glass Audio 8-5; normankoren.com Table 1)",
     },
@@ -128,6 +135,7 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         gg: crate::tube::DEFAULT_GG,
         xi: crate::tube::DEFAULT_XI,
         cg: crate::tube::DEFAULT_CG,
+        vgoff: crate::tube::DEFAULT_VGOFF,
         lambda: 0.0,
         source: "Koren 1996 Table 1 (original Kg1=1060)",
     },
@@ -148,6 +156,7 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         gg: crate::tube::DEFAULT_GG,
         xi: crate::tube::DEFAULT_XI,
         cg: crate::tube::DEFAULT_CG,
+        vgoff: crate::tube::DEFAULT_VGOFF,
         lambda: 0.0,
         source: "Koren 1996 published card (equals 12AX7; historical Kg1=3000 refit removed)",
     },
@@ -168,6 +177,7 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         gg: crate::tube::DEFAULT_GG,
         xi: crate::tube::DEFAULT_XI,
         cg: crate::tube::DEFAULT_CG,
+        vgoff: crate::tube::DEFAULT_VGOFF,
         lambda: 0.0,
         source: "Koren 1996 original card (12AU7_OLD in Koren's library)",
     },
@@ -187,6 +197,7 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         gg: crate::tube::DEFAULT_GG,
         xi: crate::tube::DEFAULT_XI,
         cg: crate::tube::DEFAULT_CG,
+        vgoff: crate::tube::DEFAULT_VGOFF,
         lambda: 0.0,
         source: "Koren 1996 original card (12AT7_OLD in Koren's library)",
     },
@@ -207,6 +218,7 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         gg: crate::tube::DEFAULT_GG,
         xi: crate::tube::DEFAULT_XI,
         cg: crate::tube::DEFAULT_CG,
+        vgoff: crate::tube::DEFAULT_VGOFF,
         lambda: 0.0,
         source: "Koren-form fit to RCA 6SL7GT datasheet (Ip=2.3mA at Vgk=-2, Vpk=250)",
     },
@@ -226,6 +238,7 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         gg: crate::tube::DEFAULT_GG,
         xi: crate::tube::DEFAULT_XI,
         cg: crate::tube::DEFAULT_CG,
+        vgoff: crate::tube::DEFAULT_VGOFF,
         lambda: 0.0,
         source: "Koren-form fit checked against RCA 6SN7GT datasheet (Ip=9mA at Vgk=-8, Vpk=250)",
     },
@@ -241,6 +254,7 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         gg: crate::tube::DEFAULT_GG,
         xi: crate::tube::DEFAULT_XI,
         cg: crate::tube::DEFAULT_CG,
+        vgoff: crate::tube::DEFAULT_VGOFF,
         lambda: 0.0,
         source: "Same as 6SN7GT (single triode version)",
     },
@@ -263,6 +277,7 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         gg: crate::tube::DEFAULT_GG,
         xi: crate::tube::DEFAULT_XI,
         cg: crate::tube::DEFAULT_CG,
+        vgoff: crate::tube::DEFAULT_VGOFF,
         lambda: 0.0,
         source: "Koren 1996 6L6GC card applied to 6V6 (no published Koren 6V6 card; flagged)",
     },
@@ -283,6 +298,7 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         gg: crate::tube::DEFAULT_GG,
         xi: crate::tube::DEFAULT_XI,
         cg: crate::tube::DEFAULT_CG,
+        vgoff: crate::tube::DEFAULT_VGOFF,
         lambda: 0.0,
         source: "Unsourced Koren-form triode-mode fit (flagged: Philips triode-connected mu~19.5)",
     },
@@ -302,6 +318,7 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         gg: crate::tube::DEFAULT_GG,
         xi: crate::tube::DEFAULT_XI,
         cg: crate::tube::DEFAULT_CG,
+        vgoff: crate::tube::DEFAULT_VGOFF,
         lambda: 0.0,
         source: "Koren 1996 original EL34 card (EL34_OLD in Koren's library)",
     },
@@ -323,6 +340,7 @@ pub const CATALOG: &[TubeCatalogEntry] = &[
         gg: crate::tube::DEFAULT_GG,
         xi: crate::tube::DEFAULT_XI,
         cg: crate::tube::DEFAULT_CG,
+        vgoff: crate::tube::DEFAULT_VGOFF,
         lambda: 0.0,
         source: "Koren 1996 6L6GC card with unpublished Kg1=890 (~2/pi knee fold; flagged)",
     },
@@ -1201,6 +1219,7 @@ mod tests {
             entry.gg,
             entry.xi,
             entry.cg,
+            entry.vgoff,
             entry.lambda,
         )
     }

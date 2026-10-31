@@ -1478,6 +1478,17 @@ fn pent_block_grid_off(label: &str, fn_suffix: &str, p: &PentP, classical: bool)
     )
 }
 
+/// Triode harness sets: `(set, lambda, VGOFF)`. Sets 0/1 are the shipped
+/// default offset without and with the Early term; sets 2/3 push the offset
+/// half a volt either way so the retarding-field tail, the tangent join and
+/// the offset are all exercised against the devices crate.
+const TRIODE_SETS: [(u32, f64, f64); 4] = [
+    (0, 0.0, melange_devices::tube::DEFAULT_VGOFF),
+    (1, 2e-4, melange_devices::tube::DEFAULT_VGOFF),
+    (2, 0.0, 0.5),
+    (3, 0.0, -0.5),
+];
+
 /// Build, compile (rustc), and run the tube-template harness once per test
 /// process; return the parsed (label, values) rows.
 fn tube_harness_rows() -> &'static Vec<(String, Vec<f64>)> {
@@ -1508,8 +1519,10 @@ fn tube_harness_rows() -> &'static Vec<(String, Vec<f64>)> {
         let mut main_body = String::new();
 
         // Triode blocks: 12AX7 card, lambda = 0 and lambda > 0 (Early effect),
-        // plus the RGI=0 exact-reduction columns.
-        for (set, lambda) in [(0u32, 0.0f64), (1u32, 2e-4f64)] {
+        // the grid offset at its default and pushed +/-0.5 V (so the tail,
+        // the join and the offset are all exercised), plus the RGI=0
+        // exact-reduction columns.
+        for (set, lambda, vgoff) in TRIODE_SETS {
             let (mu, ex, kg1, kp, kvb, gg, xi, cg) = (
                 100.0f64,
                 1.4f64,
@@ -1520,6 +1533,8 @@ fn tube_harness_rows() -> &'static Vec<(String, Vec<f64>)> {
                 melange_devices::tube::DEFAULT_XI,
                 melange_devices::tube::DEFAULT_CG,
             );
+            let vstar = melange_devices::tube::grid_join_voltage(xi, cg).unwrap();
+            let ln_sstar = (melange_devices::tube::softplus(cg * vstar) / cg).ln();
             main_body.push_str(&format!(
                 "{{\n\
     let mut vgk = -6.0f64;\n\
@@ -1527,11 +1542,11 @@ fn tube_harness_rows() -> &'static Vec<(String, Vec<f64>)> {
         let mut vpk = -5.0f64;\n\
         while vpk <= 400.0 {{\n\
             let ip = tube_ip(vgk, vpk, {mu:?}, {ex:?}, {kg1:?}, {kp:?}, {kvb:?}, {lambda:?});\n\
-            let ig = tube_ig_dz(vgk, {gg:?}, {xi:?}, {cg:?});\n\
-            let dig = tube_ig_dz_deriv(vgk, {gg:?}, {xi:?}, {cg:?});\n\
-            let j = tube_jacobian(vgk, vpk, {mu:?}, {ex:?}, {kg1:?}, {kp:?}, {kvb:?}, {gg:?}, {xi:?}, {cg:?}, {lambda:?});\n\
-            let (eip, eig, ej) = tube_evaluate(vgk, vpk, {mu:?}, {ex:?}, {kg1:?}, {kp:?}, {kvb:?}, {gg:?}, {xi:?}, {cg:?}, {lambda:?});\n\
-            let (rip, rig, rj) = tube_evaluate_with_rgi(vgk, vpk, {mu:?}, {ex:?}, {kg1:?}, {kp:?}, {kvb:?}, {gg:?}, {xi:?}, {cg:?}, {lambda:?}, 0.0);\n\
+            let ig = tube_ig_dz(vgk, {gg:?}, {xi:?}, {cg:?}, {vgoff:?}, {vstar:?}, {ln_sstar:?});\n\
+            let dig = tube_ig_dz_deriv(vgk, {gg:?}, {xi:?}, {cg:?}, {vgoff:?}, {vstar:?}, {ln_sstar:?});\n\
+            let j = tube_jacobian(vgk, vpk, {mu:?}, {ex:?}, {kg1:?}, {kp:?}, {kvb:?}, {gg:?}, {xi:?}, {cg:?}, {vgoff:?}, {vstar:?}, {ln_sstar:?}, {lambda:?});\n\
+            let (eip, eig, ej) = tube_evaluate(vgk, vpk, {mu:?}, {ex:?}, {kg1:?}, {kp:?}, {kvb:?}, {gg:?}, {xi:?}, {cg:?}, {vgoff:?}, {vstar:?}, {ln_sstar:?}, {lambda:?});\n\
+            let (rip, rig, rj) = tube_evaluate_with_rgi(vgk, vpk, {mu:?}, {ex:?}, {kg1:?}, {kp:?}, {kvb:?}, {gg:?}, {xi:?}, {cg:?}, {vgoff:?}, {vstar:?}, {ln_sstar:?}, {lambda:?}, 0.0);\n\
             print!(\"triode{set} {{:.17e}} {{:.17e}} {{:.17e}} {{:.17e}} {{:.17e}}\", vgk, vpk, ip, ig, dig);\n\
             for x in j {{ print!(\" {{:.17e}}\", x); }}\n\
             print!(\" {{:.17e}} {{:.17e}}\", eip, eig);\n\
@@ -1551,7 +1566,7 @@ fn tube_harness_rows() -> &'static Vec<(String, Vec<f64>)> {
         // the terminal currents/Jacobian, from far below cutoff to a grid
         // driven 40 V positive, where a step-limited solve stopped short.
         {
-            let (mu, ex, kg1, kp, kvb, gg, xi, cg, lambda) = (
+            let (mu, ex, kg1, kp, kvb, gg, xi, cg, vgoff, lambda) = (
                 100.0f64,
                 1.4f64,
                 1060.0f64,
@@ -1560,15 +1575,18 @@ fn tube_harness_rows() -> &'static Vec<(String, Vec<f64>)> {
                 melange_devices::tube::DEFAULT_GG,
                 melange_devices::tube::DEFAULT_XI,
                 melange_devices::tube::DEFAULT_CG,
+                melange_devices::tube::DEFAULT_VGOFF,
                 2e-4f64,
             );
+            let vstar = melange_devices::tube::grid_join_voltage(xi, cg).unwrap();
+            let ln_sstar = (melange_devices::tube::softplus(cg * vstar) / cg).ln();
             main_body.push_str(&format!(
                 "for rgi in [100.0f64, 2e3, 1e6] {{\n\
     let mut vgk = -6.0f64;\n\
     while vgk <= 40.0 {{\n\
         for vpk in [0.5f64, 90.0, 250.0] {{\n\
-            let vi = tube_solve_vgk_int(vgk, {gg:?}, {xi:?}, {cg:?}, rgi);\n\
-            let (ip, ig, j) = tube_evaluate_with_rgi(vgk, vpk, {mu:?}, {ex:?}, {kg1:?}, {kp:?}, {kvb:?}, {gg:?}, {xi:?}, {cg:?}, {lambda:?}, rgi);\n\
+            let vi = tube_solve_vgk_int(vgk, {gg:?}, {xi:?}, {cg:?}, {vgoff:?}, {vstar:?}, {ln_sstar:?}, rgi);\n\
+            let (ip, ig, j) = tube_evaluate_with_rgi(vgk, vpk, {mu:?}, {ex:?}, {kg1:?}, {kp:?}, {kvb:?}, {gg:?}, {xi:?}, {cg:?}, {vgoff:?}, {vstar:?}, {ln_sstar:?}, {lambda:?}, rgi);\n\
             print!(\"triode_rgi {{:.17e}} {{:.17e}} {{:.17e}} {{:.17e}} {{:.17e}} {{:.17e}}\", vgk, vpk, rgi, vi, ip, ig);\n\
             for x in j {{ print!(\" {{:.17e}}\", x); }}\n\
             println!();\n\
@@ -1661,7 +1679,7 @@ const TUBE_ABS: f64 = 1e-14;
 /// RGI > 0 is pinned by `template_triode_rgi_matches_devices_crate`.
 #[test]
 fn template_triode_matches_devices_crate() {
-    for (set, lambda) in [(0u32, 0.0f64), (1u32, 2e-4f64)] {
+    for (set, lambda, vgoff) in TRIODE_SETS {
         let dev = KorenTriode::with_all_params(
             100.0,
             1.4,
@@ -1671,6 +1689,7 @@ fn template_triode_matches_devices_crate() {
             melange_devices::tube::DEFAULT_GG,
             melange_devices::tube::DEFAULT_XI,
             melange_devices::tube::DEFAULT_CG,
+            vgoff,
             lambda,
         );
         let label = format!("triode{set}");
@@ -1776,6 +1795,7 @@ fn template_triode_rgi_matches_devices_crate() {
         melange_devices::tube::DEFAULT_GG,
         melange_devices::tube::DEFAULT_XI,
         melange_devices::tube::DEFAULT_CG,
+        melange_devices::tube::DEFAULT_VGOFF,
         2e-4,
     );
     let mut n = 0u32;
@@ -1835,6 +1855,7 @@ fn template_triode_koren_x2_absolute_anchor() {
         melange_devices::tube::DEFAULT_GG,
         melange_devices::tube::DEFAULT_XI,
         melange_devices::tube::DEFAULT_CG,
+        melange_devices::tube::DEFAULT_VGOFF,
         0.0,
     );
     let ip_dev = dev.plate_current(-2.0, 250.0);

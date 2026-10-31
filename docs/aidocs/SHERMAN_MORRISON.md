@@ -136,12 +136,23 @@ fired, which is what made a converging exponential rebuild for seconds.
 
 A 2026-03 scheme corrected `v_pred`, `K` and `S·N_i` per sample from the
 *nominal* matrices with codegen-time precomputed vectors (`su`, `usu`,
-`nv_su`, `u_ni`) and sequential cross-correction across pots. It was removed
-in 2026-04 (`eaee955`) after a 2000:1 wiper broke Newton convergence on a
-nonlinear deck; the cause was later traced to DC-OP seed staleness (fixed by
-`recompute_dc_op()`), not to the update, which is exact. The current scheme
-updates `S` itself, from the value it holds rather than from nominal, and is
-limited to builds where `S` is the only matrix a pot touches.
+`nv_su`, `u_ni`). It assumed `S` symmetric — the code built `u_ni` from `su`
+with the comment "S is symmetric, so uᵀS = suᵀ" — and so used `(S·u)ᵀ` where
+the formula needs the row `uᵀ·S`. Op-amps are VCCS stamps, so `S` is
+asymmetric on every op-amp deck, and on the overdrive pedal whose Drive pot
+sits inside the op-amp's feedback loop the prediction operator was off by
+10 / 23 / 47 / 122 / 265 % at 400 / 300 / 200 / 100 / 51 kΩ (reconstruction
+of its linear kernel, 2026-10-24), which matches the Newton table that led to
+the removal in 2026-04 (`eaee955`): fine at 400 k, 65 % max-iter hits at
+300 k, broken at 200 k and below. The "K only 27 % of nominal" observed then
+is the physical K at 51 k, not an update error. The removal was attributed at
+the time to conditioning and later to DC-OP seed staleness; the seed
+staleness was a separate defect of the rebuild path (fixed by
+`recompute_dc_op()`) and affected both paths equally.
+
+The current scheme uses the row `uᵀ·S` explicitly, updates `S` itself from
+the value it holds rather than from nominal, and is pinned against a full
+rebuild on an asymmetric (op-amp feedback) deck in `rank1_pot_update_tests.rs`.
 
 ## Common Bugs
 

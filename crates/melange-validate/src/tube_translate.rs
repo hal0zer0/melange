@@ -49,6 +49,14 @@ struct TriodeParams {
     gg: f64,
     xi: f64,
     cg: f64,
+    /// Grid-characteristic offset `VGOFF` \[V\] — the whole grid law is
+    /// evaluated at `V(gi,k) - vgoff`.
+    vgoff: f64,
+    /// The retarding-field tail's anchor `(V*, I_t)` in the offset-free
+    /// frame, from `KorenTriode::grid_tail_anchor` — `None` = no join, eq. (11)
+    /// alone. Derived here from `(xi, cg, gg)` by the same devices-crate
+    /// function the solver and its DC operating point use.
+    tail: Option<(f64, f64)>,
     rgi: f64,
     ccg: f64,
     cgp: f64,
@@ -67,6 +75,11 @@ impl TriodeParams {
             gg: tp.gg,
             xi: tp.xi,
             cg: tp.cg,
+            vgoff: tp.vgoff,
+            tail: melange_devices::tube::KorenTriode::with_all_params(
+                tp.mu, tp.ex, tp.kg1, tp.kp, tp.kvb, tp.gg, tp.xi, tp.cg, tp.vgoff, tp.lambda,
+            )
+            .grid_tail_anchor(),
             rgi: tp.rgi,
             ccg: tp.ccg,
             cgp: tp.cgp,
@@ -112,17 +125,31 @@ impl TriodeParams {
         } else {
             ip
         };
-        // Grid current: Dempwolf & Zölzer DAFx-11 eq. (11),
-        //   Ig = Gg * (softplus(Cg*Vgk)/Cg)^xi.
-        // The softplus is written in the branch-free stable form
+        // Grid current on the offset-free grid voltage v = V(gi,k) - VGOFF:
+        // Dempwolf & Zölzer DAFx-11 eq. (11),
+        //   Ig = Gg * (softplus(Cg*v)/Cg)^xi,
+        // above the tangent-rule join V*, and the retarding-field tail
+        //   Ig = I_t * exp((v - V*)/V_T)
+        // below it, exactly as `KorenTriode::grid_current` and the generated
+        // `tube_ig_dz` (`V_T` = `tube::GRID_TAIL_VT`; (V*, I_t) from
+        // `grid_tail_anchor`). The softplus is written in the branch-free
+        // stable form
         //   softplus(x) = max(x,0) + ln(1 + exp(-|x|)),
         // so the exponent is never positive and ngspice cannot overflow it
         // while probing a large trial Vgk — a bare exp(Cg*Vgk) blows up past
         // Vgk ~ 71 V at the default Cg. `pwr` is |x|^y and the argument is
-        // non-negative by construction.
-        let x = format!("{cg}*V(gi,k)", cg = self.cg);
+        // non-negative by construction. The branch is the B-source ternary.
+        let v = format!("(V(gi,k)-({vgoff:e}))", vgoff = self.vgoff);
+        let x = format!("{cg}*{v}", cg = self.cg);
         let softplus = format!("(max({x},0)+ln(1+exp(-abs({x}))))/{cg}", cg = self.cg);
-        let grid = format!("{gg}*pwr({softplus},{xi})", gg = self.gg, xi = self.xi,);
+        let eq11 = format!("{gg}*pwr({softplus},{xi})", gg = self.gg, xi = self.xi,);
+        let grid = match self.tail {
+            Some((vstar, it)) => format!(
+                "({v} < ({vstar:e}) ? ({it:e})*exp(({v}-({vstar:e}))/{vt:e}) : {eq11})",
+                vt = melange_devices::tube::GRID_TAIL_VT
+            ),
+            None => eq11,
+        };
         // The internal grid: behind RGI, or the terminal itself.
         let grid_stopper = if self.rgi > 0.0 {
             format!("RGI g gi {:e}\n", self.rgi)

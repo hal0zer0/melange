@@ -9,6 +9,100 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+## [0.1.19] - 2026-10-31
+
+**What changes rendered audio:** every circuit containing a triode. The grid
+now conducts earlier: at the shipped default the 0.3 µA grid-current starting
+point moves from −0.353 V to −0.552 V, and the whole grid characteristic
+shifts 0.166 V towards more negative grid voltages, so stages driven from a
+high source impedance show grid-current loading sooner. Nothing else moves.
+
+**What changes generated code:** every triode gains three constants
+(`DEVICE_n_VGOFF`, `DEVICE_n_GRID_VSTAR`, `DEVICE_n_GRID_LN_SSTAR`) and one
+runtime-adjustable state field (`device_n_vgoff`); the grid-current helpers
+take the three extra arguments and return value and derivative from one
+evaluation.
+
+### Changed
+
+- **Triode grid current gains a retarding-field sub-µA tail and a
+  population-level offset.** Below a join voltage the law is the Maxwellian
+  retarding-field current of a thermionic cathode, `I_t·exp((Vgk − V*)/V_T)`
+  with `V_T = 92.2 mV` (cathode ≈ 1070 K, Turvey 1990, EB91 diode), joined to
+  Dempwolf & Zölzer eq. (11) by the tangent rule — at the voltage where eq.
+  (11)'s log-slope has fallen to the thermal one — so value and slope are
+  continuous with no blend and the composite is never steeper than a real
+  cathode. Eq. (11) alone fell away at 13 /V, an "effective" cathode of ~890 K.
+  One new card key, **`VGOFF`** (volts), shifts the whole grid law along `Vgk`
+  and carries contact potential and prefactor spread as one constant.
+
+  **Grid-current level is a population parameter, and the default is now the
+  median of a measured population.** Five ECC83s of different makes (Zollner,
+  *Physics of the Electric Guitar*, 2007, Fig. 10.11.8) reach the 0.3 µA
+  criterion between −0.97 and −0.41 V (median −0.552, sd 0.22 V). The default
+  `VGOFF = −0.166 V` puts the shipped D&Z RSD-1 row there; `VGOFF = 0` is
+  D&Z's own three modern-production 12AX7s, all at the positive end of that
+  spread. The default is set from that static datum, never from the Philips
+  AF-amplifier table that scores the law.
+
+  **The 0.1.10 acceptance result stands as history, not as a verdict on the
+  law:** at the original default the law reached the criterion 0.26–0.35 V
+  later than the Philips ECC83 (January 1970) 220 kΩ block implies, 15/15
+  cells. That gap is inside the population's tube-to-tube spread, and the
+  Philips figure sits inside it. The pre-registered expectation at the new
+  default is an onset of −0.552 V against the block's −0.61 ± 0.07 V, now an
+  in-sample consistency check. The sheet's three unread blocks were
+  pre-registered at −0.61 ± 0.11 V each and measured blind by the circuits
+  side on 2026-10-31. The 47 kΩ and 100 kΩ blocks land inside the band
+  (−0.545, −0.586 V) and the model's output at the criterion matches their
+  printed figures to 1 % on average per block: operating-point independence
+  holds for that sample. The phase-inverter block lands outside it
+  (−0.427 V), and as pre-registered that miss puts the population-offset
+  attribution in trouble. The post hoc diagnosis, recorded in
+  `docs/aidocs/STATUS.md`, is that the inverter page is a second tube draw —
+  its plate side differs from the single-stage blocks' at matched operating
+  points, and no tube or circuit mechanism closes the 0.2 V — which is
+  consistent with level-as-population (about one tube sd), not evidence for
+  it. Neither the law nor the default is changed by it. **What remains untested is
+  the tail's slope**: `V_T` is measured on an EB91 and transferred to the
+  ECC83 by argument; no held ECC83 data reaches the sub-µA decades. Three
+  earlier claims are withdrawn in `docs/limitations.md` and `STATUS.md`: the
+  tail's slope was not the root cause (it moves the onset 0.03–0.08 V, the
+  level 0.23–0.29 V); contact potential is not "~0.1 V" (0.1–0.9 V measured);
+  and the cathode temperature is Turvey's 1069 K, not a 1050–1500 K band.
+
+  Known consequence of shifting the whole law: at `Vgk = 0` the default passes
+  ~67 µA where the D&Z fit passes 18.8 µA and Zollner's five tubes 7.9–74.6 µA
+  — the D&Z knee is sharper and later than four of those five tubes' (0.21 vs
+  0.33–0.36 V/decade over 1–27 µA; the fifth matches). The default tracks the
+  five-tube median to 0.05 V at every level from 0.27 to 100 µA, and the knee
+  shape is parked as a documented limitation (`DEVICE_MODELS.md`, `STATUS.md`)
+  with a measured bound of about one tube-to-tube sd, not tuned around.
+
+  **Triode circuits run faster, not slower:** value and derivative of the grid
+  law now come from one softplus and one `powf` per Newton iteration where
+  they were evaluated twice, and below the join the tail is a single `exp`.
+  Measured 2026-10-31 on the README's bed (AMD Ryzen 9 7950X, one CCD,
+  `-C target-cpu=x86-64-v3`, `bench.sh`, min of 7 × 2M samples), the v0.1.18
+  binary and this one back to back: 12AX7 gain stage 144 → 136 ns/sample,
+  single-ended tube amp 1122 → 889, passive tube EQ 1189 → 1046. Decks
+  without a triode compile to byte-identical code and are unchanged.
+
+  The ngspice B-source twin carries the same composite, the DC operating point
+  and the generated transient compute one join from one function, and the
+  template is pinned against the devices crate at the default offset and at
+  ±0.5 V. The codegen self-recorded clamp golden `triode_cc_sine_500hz` was
+  re-recorded (it moved 57 mV at a sample pinned near the rail by the earlier
+  grid loading); the ngspice-referenced small-signal triode golden and its
+  pinned +35.36 dB gain are unchanged. The pentode control grid is untouched.
+
+- **The rank-1 pot update is pinned on an asymmetric deck.** An op-amp is a
+  VCCS stamp, so `S` is not symmetric; a pot inside an op-amp feedback loop
+  now has a test comparing the rank-1 path against a full rebuild
+  (`rank1_pot_update_tests.rs`). The 2026-03 scheme that was removed in
+  April used `(S·u)ᵀ` where the formula needs the row `uᵀ·S`; the shipped
+  update uses the row. History corrected in `docs/aidocs/SHERMAN_MORRISON.md`.
+
 ## [0.1.18] - 2026-10-24
 
 **What changes rendered audio:** nothing at rest. On a DK build with no
@@ -3413,7 +3507,8 @@ measured real hardware. Everything else is unproven against hardware. See
   KiCad file; no effect on netlist compilation, generated code, or shipped plugins. The
   fix (`quick-xml >= 0.41`) is tracked for 0.1.1.
 
-[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.18...HEAD
+[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.19...HEAD
+[0.1.19]: https://github.com/hal0zer0/melange/compare/v0.1.18...v0.1.19
 [0.1.18]: https://github.com/hal0zer0/melange/compare/v0.1.17...v0.1.18
 [0.1.17]: https://github.com/hal0zer0/melange/compare/v0.1.16...v0.1.17
 [0.1.16]: https://github.com/hal0zer0/melange/compare/v0.1.15...v0.1.16

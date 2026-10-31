@@ -288,12 +288,12 @@ pub(super) fn emit_dk_device_evaluation(
                     if tp.has_rgi() {
                         // RGI: solve for internal Vgk, evaluate at internal voltage
                         code.push_str(&format!(
-                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate_with_rgi({vgk_expr}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_gg, state.device_{d}_xi, state.device_{d}_cg, state.device_{d}_lambda, DEVICE_{d}_RGI);\n"
+                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate_with_rgi({vgk_expr}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_gg, state.device_{d}_xi, state.device_{d}_cg, state.device_{d}_vgoff, DEVICE_{d}_GRID_VSTAR, DEVICE_{d}_GRID_LN_SSTAR, state.device_{d}_lambda, DEVICE_{d}_RGI);\n"
                         ));
                     } else {
                         // Standard tube (no RGI)
                         code.push_str(&format!(
-                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate({vgk_expr}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_gg, state.device_{d}_xi, state.device_{d}_cg, state.device_{d}_lambda);\n"
+                            "{indent}let (i_dev{s}, i_dev{s1}, tube{d}_jac) = tube_evaluate({vgk_expr}, v_d{s1}, state.device_{d}_mu, state.device_{d}_ex, state.device_{d}_kg1, state.device_{d}_kp, state.device_{d}_kvb, state.device_{d}_gg, state.device_{d}_xi, state.device_{d}_cg, state.device_{d}_vgoff, DEVICE_{d}_GRID_VSTAR, DEVICE_{d}_GRID_LN_SSTAR, state.device_{d}_lambda);\n"
                         ));
                     }
                     code.push_str(&format!("{indent}let jdev_{s}_{s} = tube{d}_jac[0];\n"));

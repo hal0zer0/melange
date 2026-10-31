@@ -764,6 +764,14 @@ pub struct TubeParams {
     /// pentodes.
     #[serde(default = "default_cg")]
     pub cg: f64,
+    /// Triode grid-characteristic offset `VGOFF` \[V\]: the whole grid law
+    /// (eq. (11) and its retarding-field tail, after their join) is evaluated
+    /// at `Vgk - vgoff`. Contact potential plus prefactor spread as one
+    /// constant; the default places the shipped row at the median of five
+    /// measured ECC83s (`melange_devices::tube::DEFAULT_VGOFF`). Ignored for
+    /// pentodes.
+    #[serde(default = "default_vgoff")]
+    pub vgoff: f64,
     /// Channel-length modulation coefficient [1/V]. 0.0 = disabled (default).
     #[serde(default)]
     pub lambda: f64,
@@ -1298,6 +1306,10 @@ fn default_cg() -> f64 {
     melange_devices::tube::DEFAULT_CG
 }
 
+fn default_vgoff() -> f64 {
+    melange_devices::tube::DEFAULT_VGOFF
+}
+
 fn default_ne() -> f64 {
     1.5
 }
@@ -1526,6 +1538,7 @@ mod tube_params_tests {
             gg: default_gg(),
             xi: default_xi(),
             cg: default_cg(),
+            vgoff: default_vgoff(),
             lambda: 0.0,
             ccg: 0.0,
             cgp: 0.0,
@@ -1564,6 +1577,7 @@ mod tube_params_tests {
             gg: default_gg(),
             xi: default_xi(),
             cg: default_cg(),
+            vgoff: default_vgoff(),
             lambda: 0.0,
             ccg: 0.0,
             cgp: 0.0,
@@ -1602,6 +1616,7 @@ mod tube_params_tests {
             gg: default_gg(),
             xi: default_xi(),
             cg: default_cg(),
+            vgoff: default_vgoff(),
             lambda: 0.0,
             ccg: 0.0,
             cgp: 0.0,
@@ -1639,6 +1654,7 @@ mod tube_params_tests {
             gg: default_gg(),
             xi: default_xi(),
             cg: default_cg(),
+            vgoff: default_vgoff(),
             lambda: 0.0,
             ccg: 0.0,
             cgp: 0.0,
@@ -1675,6 +1691,7 @@ mod tube_params_tests {
             gg: default_gg(),
             xi: default_xi(),
             cg: default_cg(),
+            vgoff: default_vgoff(),
             lambda: 0.0,
             ccg: 0.0,
             cgp: 0.0,

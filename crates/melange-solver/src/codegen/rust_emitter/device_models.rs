@@ -181,6 +181,33 @@ impl RustEmitter {
                         emit_device_const(&mut code, dev_num, "GG", tp.gg);
                         emit_device_const(&mut code, dev_num, "XI", tp.xi);
                         emit_device_const(&mut code, dev_num, "CG", tp.cg);
+                        // The grid-characteristic offset (card key VGOFF) and
+                        // the tangent-rule join voltage V* of the retarding-
+                        // field tail, derived from XI/CG here at build by the
+                        // same function the DC operating point uses
+                        // (`tube::grid_join_voltage`), so both paths see one
+                        // join. NEG_INFINITY = no join (XI*CG never steeper
+                        // than thermal): the emitted `v < vstar` is then
+                        // never true and eq. (11) stands alone.
+                        emit_device_const(&mut code, dev_num, "VGOFF", tp.vgoff);
+                        let vstar = melange_devices::tube::grid_join_voltage(tp.xi, tp.cg);
+                        emit_device_const(
+                            &mut code,
+                            dev_num,
+                            "GRID_VSTAR",
+                            vstar.unwrap_or(f64::NEG_INFINITY),
+                        );
+                        // ln(s*) with s* = softplus(CG·V*)/CG, so the tail is
+                        // one exponential: Ig = GG·exp(XI·ln(s*) + (v−V*)/V_T).
+                        // 0 when there is no join (never read: v < −∞ is false).
+                        emit_device_const(
+                            &mut code,
+                            dev_num,
+                            "GRID_LN_SSTAR",
+                            vstar
+                                .map(|v| (melange_devices::tube::softplus(tp.cg * v) / tp.cg).ln())
+                                .unwrap_or(0.0),
+                        );
                     }
                     // The triode's Early term; the pentode plate law has none.
                     if !tp.is_pentode() {

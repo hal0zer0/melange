@@ -224,7 +224,7 @@ Every one of these is a real published model with real published equations, impl
 | BJT | Ebers-Moll or Gummel-Poon | Junction caps, parasitic R, Early effect, high-injection knee. Follows ngspice's `bjtload.c` formulation (the `qb()` base-charge discriminant, high-injection knee) |
 | JFET | Shichman-Hodges (triode + saturation); Parker–Skellern with `LEVEL=2` (conducts below pinch-off, ngspice JFET2's law) | N-channel and P-channel |
 | MOSFET | SPICE Level 1 | Body effect, channel-length modulation |
-| Vacuum Triode | Norman Koren plate + Dempwolf & Zölzer grid current ([onset runs late](docs/limitations.md#triode)) | 12AX7, 12AU7, 12AT7, 6SN7, 6SL7, and more |
+| Vacuum Triode | Norman Koren plate + Dempwolf & Zölzer grid current with a retarding-field sub-µA tail ([level is a per-tube population parameter](docs/limitations.md#triode)) | 12AX7, 12AU7, 12AT7, 6SN7, 6SL7, and more |
 | Vacuum Pentode | 5 equation families, 29 models | EL84, EL34, EF86, 6L6, 6V6, KT88, 6550, and 22 more. Opt-in grid-off reduction (`--tube-grid-fa on`) |
 | Op-Amp | Boyle VCCS macromodel | slew-rate limiting, asymmetric VCC/VEE rails, 4 clamping strategies; no bandwidth pole (`GBW` only defaults the rails) |
 | VCA | THAT 2180 exponential | Current-mode with gain-dependent THD |
@@ -270,16 +270,16 @@ A sample of what it handles, with **measured** single-core throughput:
 
 | Circuit | What it is | Devices | Throughput\* | ns/sample |
 |---------|-----------|---------|--------------|-----------|
-| Bus compressor | VCA + op-amp sidechain | 12 op-amps + 2 VCAs | 6.7× | 3126 |
-| Passive tube program EQ | 7 pots, 3 switches, global NFB (N=52, M=8) | 4 tubes, 3 transformers | 18.0× | 1154 |
-| Single-ended tube amp | preamp + power stage + output transformer into 8 Ω | 12AX7 (2 triodes) + 6V6 pentode | 20.3× | 1028 |
-| Germanium diode network | 3 RC sections, an antiparallel Ge pair at each | 6 Ge diodes | 25.0× | 833 |
-| Wurlitzer 200A preamp | 2-stage BJT preamp (full Gummel-Poon) | 2 BJTs + 1 diode | 46.1× | 452 |
-| 12AX7 gain stage | single triode stage | 1 triode | 141.6× | 147 |
+| Bus compressor | VCA + op-amp sidechain | 12 op-amps + 2 VCAs | 6.4× | 3244 |
+| Passive tube program EQ | 7 pots, 3 switches, global NFB (N=52, M=8) | 4 tubes, 3 transformers | 19.9× | 1046 |
+| Single-ended tube amp | preamp + power stage + output transformer into 8 Ω | 12AX7 (2 triodes) + 6V6 pentode | 23.4× | 889 |
+| Germanium diode network | 3 RC sections, an antiparallel Ge pair at each | 6 Ge diodes | 24.6× | 846 |
+| Wurlitzer 200A preamp | 2-stage BJT preamp (full Gummel-Poon) | 2 BJTs + 1 diode | 43.8× | 475 |
+| 12AX7 gain stage | single triode stage | 1 triode | 153.3× | 136 |
 
-\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), best of 7 × 2M samples. Measured on an AMD Ryzen 9 7950X pinned to one CCD, with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh). Re-measured 2026-10-24; every row is within 2.5 % of the previous release's figure. Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass (`unstable/examples/rc-lowpass.cir` in the circuits repository) runs at about 2000× (10.5 ns/sample, measured 2026-10-24).
+\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), best of 7 × 2M samples. Measured on an AMD Ryzen 9 7950X pinned to one CCD, with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh). Re-measured 2026-10-31. The three triode rows are 6–21 % faster than the 0.1.18 binary on the same bed the same hour (grid current is evaluated once per Newton iteration, not twice); the other three rows moved by up to 5 % with byte-identical generated code, which is the width of this bench bed, not a solver change. Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass (`unstable/examples/rc-lowpass.cir` in the circuits repository) runs at about 1950× (10.7 ns/sample, measured 2026-10-31).
 
-**The triode rows pay for grid current.** The Dempwolf & Zölzer grid-current law evaluates a softplus on the grid dimension at every Newton iteration, where a hard-zero law would skip it; that is what modelling the negative-grid region costs. The CHANGELOG has the before/after figures.
+**The triode rows pay for grid current.** The Dempwolf & Zölzer grid-current law evaluates a softplus on the grid dimension at every Newton iteration, where a hard-zero law would skip it (below the join of its retarding-field tail the cost is one `exp`); that is what modelling the negative-grid region costs. The CHANGELOG has the before/after figures.
 
 Each row names the deck it was measured on, so the numbers have an address, and **every one of the six can be re-measured from a public clone** — the passive tube EQ also ships in-tree as `examples/passive-eq1a.cir`.
 
@@ -448,7 +448,7 @@ SPICE Netlist ─┐
 KiCad XML ─────┘
 ```
 
-`CircuitIR` is language-agnostic and serializable. The current emitter targets Rust; a C++ backend is the next planned target. FAUST was explored and ruled out: FAUST's generated code is deliberately not Turing-complete, so it cannot express a Newton-Raphson solve with a data-dependent iteration count — which is melange's inner loop. The `Emitter` trait is public, so if you need a target that isn't on that list, the door is open and nobody is stopping you — though be aware the Rust emitter is ~20k lines, so it is a real project rather than an afternoon.
+`CircuitIR` is language-agnostic and serializable. The current emitter targets Rust; a C++ backend is the next planned target. FAUST was explored and ruled out: FAUST's generated code is deliberately not Turing-complete, so it cannot express a Newton-Raphson solve with a data-dependent iteration count — which is melange's inner loop. REAPER's JSFX (EEL2) was assessed as expressible but is not scheduled — see `docs/limitations.md`. The `Emitter` trait is public, so if you need a target that isn't on that list, the door is open and nobody is stopping you — though be aware the Rust emitter is ~20k lines, so it is a real project rather than an afternoon.
 
 ```
 crates/

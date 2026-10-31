@@ -550,6 +550,7 @@ const TRIODE_HONORED: &[&str] = &[
     "GG",
     "XI",
     "CG",
+    "VGOFF",
     "LAMBDA",
     "CCG",
     "CGP",
@@ -565,7 +566,7 @@ const TRIODE_HONORED: &[&str] = &[
 ];
 
 const TRIODE_DEFINING: &[&str] = &[
-    "MU", "EX", "KG1", "KP", "KVB", "GG", "XI", "CG", "LAMBDA", "CCG", "CGP", "CCP", "RGI",
+    "MU", "EX", "KG1", "KP", "KVB", "GG", "XI", "CG", "VGOFF", "LAMBDA", "CCG", "CGP", "CCP", "RGI",
 ];
 
 /// A triode card's variable-mu keys never reached the solution: the triode's

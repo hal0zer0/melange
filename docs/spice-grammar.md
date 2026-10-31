@@ -774,21 +774,28 @@ Level 1 SPICE model with triode + saturation regions. When `GAMMA` > 0, body eff
 | `GG` | 6.177e-4 | D&Z eq. (11) grid perveance (A/V^XI) |
 | `XI` | 1.314 | D&Z eq. (11) grid exponent |
 | `CG` | 9.901 V⁻¹ | D&Z eq. (11) grid adaption factor (turn-on sharpness) |
+| `VGOFF` | −0.166 V | Grid-characteristic offset: the whole grid law is evaluated at `Vgk − VGOFF` (contact potential + prefactor spread as one constant; default = median of five measured ECC83s, `0` = D&Z's 2011 tubes) |
 | `CCG` | 0 F | Cathode-grid capacitance |
 | `CGP` | 0 F | Grid-plate capacitance |
 | `CCP` | 0 F | Cathode-plate capacitance |
 | `RGI` | 0 Ω | Grid internal resistance: the currents are evaluated at the internal grid behind it |
 
 Uses the Koren plate current model (soft-knee saturation) with the Dempwolf &
-Zölzer DAFx-11 eq. (11) grid current, `Ig = GG*(ln(1+e^(CG*Vgk))/CG)^XI`. The
-five core plate parameters (MU, EX, KG1, KP, KVB) are tube-specific — look up
-values for your specific tube type (12AX7, 12AU7, etc.).
+Zölzer DAFx-11 eq. (11) grid current, `Ig = GG*(ln(1+e^(CG*v))/CG)^XI` with
+`v = Vgk − VGOFF`, joined below a derived voltage to the retarding-field tail
+of a thermionic cathode (e-fold 92 mV) where eq. (11)'s slope would otherwise
+exceed any real cathode's. The five core plate parameters (MU, EX, KG1, KP,
+KVB) are tube-specific — look up values for your specific tube type (12AX7,
+12AU7, etc.).
 
-The grid law **conducts below Vgk = 0**, as real tubes do (12–19 µA at 0 V,
-reaching the 0.3 µA datasheet criterion around −0.3 V), so there is no onset
-parameter: turn-on sharpness is `1/(XI*CG)` and magnitude is `GG`. melange
-reports the derived 0.3 µA starting point at compile time and warns if it falls
-outside the tube type's published manufacturer limit.
+The grid law **conducts below Vgk = 0**, as real tubes do, so there is no
+onset parameter: turn-on sharpness is `1/(XI*CG)`, magnitude is `GG`, and
+level is `VGOFF`. Measured ECC83s reach the 0.3 µA datasheet criterion anywhere
+between about −1.0 and −0.4 V depending on the tube; the default `VGOFF` puts
+the model at the median of five measured tubes (−0.55 V), and `VGOFF=0` gives
+the three modern-production tubes Dempwolf & Zölzer fitted (−0.39 V). melange
+reports the derived 0.3 µA starting point at compile time and warns if it
+falls outside the tube type's published manufacturer limit.
 
 > **RETIRED: `IG_MAX` and `VGK_ONSET`.** They parameterised the older Leach grid
 > law, which began conducting at exactly Vgk = 0 and returned 0 A for every

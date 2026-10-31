@@ -428,7 +428,7 @@ impl RustEmitter {
                             "{indent}{{ // Tube {dev_num} (RGI)\n\
                              {indent}    let vgk = {vgk_init};\n\
                              {indent}    let vpk = v_nl[{s1}];\n\
-                             {indent}    let (ip_t, ig_t, jac) = tube_evaluate_with_rgi(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_gg, state.device_{dev_num}_xi, state.device_{dev_num}_cg, state.device_{dev_num}_lambda, DEVICE_{dev_num}_RGI);\n\
+                             {indent}    let (ip_t, ig_t, jac) = tube_evaluate_with_rgi(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_gg, state.device_{dev_num}_xi, state.device_{dev_num}_cg, state.device_{dev_num}_vgoff, DEVICE_{dev_num}_GRID_VSTAR, DEVICE_{dev_num}_GRID_LN_SSTAR, state.device_{dev_num}_lambda, DEVICE_{dev_num}_RGI);\n\
                              {indent}    i_nl[{s}] = ip_t; i_nl[{s1}] = ig_t;\n\
                              {indent}    j_dev[{jd_ss}] = jac[0];\n\
                              {indent}    j_dev[{jd_01}] = jac[1];\n\
@@ -448,7 +448,7 @@ impl RustEmitter {
                             "{indent}{{ // Tube {dev_num}\n\
                              {indent}    let vgk = {vgk_init};\n\
                              {indent}    let vpk = v_nl[{s1}];\n\
-                             {indent}    let (ip_t, ig_t, jac) = tube_evaluate(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_gg, state.device_{dev_num}_xi, state.device_{dev_num}_cg, state.device_{dev_num}_lambda);\n\
+                             {indent}    let (ip_t, ig_t, jac) = tube_evaluate(vgk, vpk, state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_gg, state.device_{dev_num}_xi, state.device_{dev_num}_cg, state.device_{dev_num}_vgoff, DEVICE_{dev_num}_GRID_VSTAR, DEVICE_{dev_num}_GRID_LN_SSTAR, state.device_{dev_num}_lambda);\n\
                              {indent}    i_nl[{s}] = ip_t; i_nl[{s1}] = ig_t;\n\
                              {indent}    j_dev[{jd_ss}] = jac[0];\n\
                              {indent}    j_dev[{jd_01}] = jac[1];\n\
@@ -649,8 +649,8 @@ impl RustEmitter {
                             format!("v_nl_final[{s}]")
                         };
                         code.push_str(&format!(
-                            "{indent}i_nl[{s}] = tube_ip_with_rgi({vgk_fe}, v_nl_final[{s1}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_lambda, state.device_{dev_num}_gg, state.device_{dev_num}_xi, state.device_{dev_num}_cg, DEVICE_{dev_num}_RGI);\n\
-                             {indent}i_nl[{s1}] = tube_ig_dz_with_rgi({vgk_fe}, state.device_{dev_num}_gg, state.device_{dev_num}_xi, state.device_{dev_num}_cg, DEVICE_{dev_num}_RGI);\n"
+                            "{indent}i_nl[{s}] = tube_ip_with_rgi({vgk_fe}, v_nl_final[{s1}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_lambda, state.device_{dev_num}_gg, state.device_{dev_num}_xi, state.device_{dev_num}_cg, state.device_{dev_num}_vgoff, DEVICE_{dev_num}_GRID_VSTAR, DEVICE_{dev_num}_GRID_LN_SSTAR, DEVICE_{dev_num}_RGI);\n\
+                             {indent}i_nl[{s1}] = tube_ig_dz_with_rgi({vgk_fe}, state.device_{dev_num}_gg, state.device_{dev_num}_xi, state.device_{dev_num}_cg, state.device_{dev_num}_vgoff, DEVICE_{dev_num}_GRID_VSTAR, DEVICE_{dev_num}_GRID_LN_SSTAR, DEVICE_{dev_num}_RGI);\n"
                         ));
                     } else {
                         let vgk_fe = if tp.has_self_heating() {
@@ -662,7 +662,7 @@ impl RustEmitter {
                         };
                         code.push_str(&format!(
                             "{indent}i_nl[{s}] = tube_ip({vgk_fe}, v_nl_final[{s1}], state.device_{dev_num}_mu, state.device_{dev_num}_ex, state.device_{dev_num}_kg1, state.device_{dev_num}_kp, state.device_{dev_num}_kvb, state.device_{dev_num}_lambda);\n\
-                             {indent}i_nl[{s1}] = tube_ig_dz({vgk_fe}, state.device_{dev_num}_gg, state.device_{dev_num}_xi, state.device_{dev_num}_cg);\n"
+                             {indent}i_nl[{s1}] = tube_ig_dz({vgk_fe}, state.device_{dev_num}_gg, state.device_{dev_num}_xi, state.device_{dev_num}_cg, state.device_{dev_num}_vgoff, DEVICE_{dev_num}_GRID_VSTAR, DEVICE_{dev_num}_GRID_LN_SSTAR);\n"
                         ));
                     }
                 }

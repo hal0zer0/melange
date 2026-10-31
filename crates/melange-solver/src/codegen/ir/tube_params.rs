@@ -3,13 +3,15 @@
 use super::*;
 
 impl CircuitIR {
-    /// Report the **grid current starting point** this triode's fitted grid law
+    /// Report the **grid current starting point** this triode's grid law
     /// implies, and warn when it falls outside the manufacturer's per-type
     /// limit for that tube.
     ///
     /// This is a CHECK, deliberately not a parameter: a parameter would invite
     /// someone to fit it, and the whole value of the onset is that it is an
-    /// *output* of `(Gg, xi, Cg)` that an independent datasheet row can score.
+    /// *output* of `(Gg, xi, Cg, VGOFF)` that an independent datasheet row can
+    /// score. (`VGOFF` is a level parameter, set from a static population
+    /// datum — never from the row that scores the law.)
     ///
     /// The criterion is the manufacturers' own: `Ig = +0.3 µA`, positive, into
     /// the grid (Philips ECC82 1959 footnote, spelled out in full there; the
@@ -17,7 +19,14 @@ impl CircuitIR {
     /// that type's own sheet — ECC83 `max -0.9 V`, ECC82 `max -1.3 V` — never
     /// from one global constant, because the types genuinely differ. A type
     /// with no limit on file is reported and not checked.
-    fn report_grid_start_point(model: &str, in_catalog: bool, gg: f64, xi: f64, cg: f64) {
+    fn report_grid_start_point(
+        model: &str,
+        in_catalog: bool,
+        gg: f64,
+        xi: f64,
+        cg: f64,
+        vgoff: f64,
+    ) {
         let tube = melange_devices::KorenTriode {
             mu: 100.0,
             ex: 1.4,
@@ -27,6 +36,7 @@ impl CircuitIR {
             gg,
             xi,
             cg,
+            vgoff,
             lambda: 0.0,
             mu_b: 0.0,
             svar: 0.0,
@@ -36,35 +46,45 @@ impl CircuitIR {
             tube.grid_voltage_at_current(melange_devices::tube::GRID_START_CRITERION_A)
         else {
             crate::diag_warn!(
-                "Triode '{model}': grid law (Gg={gg:.4e}, xi={xi}, Cg={cg}) never reaches the \
-                 0.3 uA grid-current starting point — the onset check cannot be evaluated."
+                "Triode '{model}': grid law (Gg={gg:.4e}, xi={xi}, Cg={cg}, VGOFF={vgoff}) \
+                 never reaches the 0.3 uA grid-current starting point — the onset check \
+                 cannot be evaluated."
             );
             return;
         };
         let ig_at_zero = tube.grid_current(0.0);
+        let join = match tube.grid_tail_anchor() {
+            Some((vstar, it)) => format!(
+                "retarding-field tail below Vgk = {:.3} V ({:.1} uA)",
+                vstar + vgoff,
+                it * 1e6
+            ),
+            None => "no retarding-field tail (XI*CG is not steeper than thermal)".to_string(),
+        };
         let provenance = if in_catalog {
             ""
         } else {
             " [no catalog entry: grid law is the shipped 12AX7 default unless the deck set \
-             GG/XI/CG]"
+             GG/XI/CG/VGOFF]"
         };
         log::info!(
             "Triode '{model}': grid current starts (Ig = +0.3 uA) at Vgk = {onset:.3} V; \
-             Ig(0 V) = {:.2} uA{provenance}",
+             Ig(0 V) = {:.2} uA; VGOFF = {vgoff:+.3} V; {join}{provenance}",
             ig_at_zero * 1e6
         );
         match melange_devices::catalog::tubes::grid_start_limit_v(model) {
             Some(limit) if onset < limit => crate::diag_warn!(
                 "Triode '{model}': derived grid-current starting point {onset:.3} V is BELOW the \
-                 manufacturer limit for this type (Vg(Ig = +0.3 uA) max {limit:.1} V). The fitted \
+                 manufacturer limit for this type (Vg(Ig = +0.3 uA) max {limit:.1} V). The \
                  grid law conducts further into the negative-grid region than the type is \
                  specified to."
             ),
             Some(limit) if onset >= 0.0 => crate::diag_warn!(
                 "Triode '{model}': derived grid-current starting point {onset:.3} V is at or \
                  above 0 V, so this grid law has no negative-grid conduction at the 0.3 uA \
-                 criterion at all. Every measured 12AX7 starts between -0.27 and -0.38 V, and \
-                 the type's own limit is {limit:.1} V. Check GG/XI/CG."
+                 criterion at all. Five measured ECC83s start between -0.97 and -0.41 V, \
+                 D&Z's three 12AX7s between -0.39 and -0.34 V before any offset, and the \
+                 type's own limit is {limit:.1} V. Check GG/XI/CG/VGOFF."
             ),
             Some(_) => {}
             None => log::info!(
@@ -109,6 +129,12 @@ impl CircuitIR {
         let cg = Self::lookup_model_param(netlist, model, "CG")
             .or_else(|| cat.map(|c| c.cg))
             .unwrap_or(melange_devices::tube::DEFAULT_CG);
+        // Grid-characteristic offset [V], signed: the whole grid law is
+        // evaluated at Vgk - VGOFF. Default = the five-ECC83 median
+        // (`tube::DEFAULT_VGOFF`); 0 = D&Z's own tubes.
+        let vgoff = Self::lookup_model_param(netlist, model, "VGOFF")
+            .or_else(|| cat.map(|c| c.vgoff))
+            .unwrap_or(melange_devices::tube::DEFAULT_VGOFF);
         let lambda = Self::lookup_model_param(netlist, model, "LAMBDA")
             .or_else(|| cat.map(|c| c.lambda))
             .unwrap_or(0.0);
@@ -127,6 +153,11 @@ impl CircuitIR {
         validate_positive_finite(gg, "tube model GG")?;
         validate_positive_finite(xi, "tube model XI")?;
         validate_positive_finite(cg, "tube model CG")?;
+        if !vgoff.is_finite() {
+            return Err(CodegenError::InvalidConfig(format!(
+                "tube model VGOFF must be finite, got {vgoff}"
+            )));
+        }
 
         // Validate optional lambda: must be non-negative and finite
         if !lambda.is_finite() || lambda < 0.0 {
@@ -213,7 +244,7 @@ impl CircuitIR {
             "a default 12AX7-class triode",
         );
 
-        Self::report_grid_start_point(model, cat.is_some(), gg, xi, cg);
+        Self::report_grid_start_point(model, cat.is_some(), gg, xi, cg, vgoff);
 
         Ok(TubeParams {
             kind: crate::device_types::TubeKind::SharpTriode,
@@ -228,6 +259,7 @@ impl CircuitIR {
             gg,
             xi,
             cg,
+            vgoff,
             lambda,
             ccg,
             cgp,
@@ -467,6 +499,7 @@ impl CircuitIR {
             gg: melange_devices::tube::DEFAULT_GG,
             xi: melange_devices::tube::DEFAULT_XI,
             cg: melange_devices::tube::DEFAULT_CG,
+            vgoff: 0.0,
             lambda,
             ccg,
             cgp,
