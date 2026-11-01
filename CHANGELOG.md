@@ -104,6 +104,16 @@ shot` 8359 → 6299 (1.33×). The DK rows (single-ended amp, germanium network,
 12AX7 stage) have byte-identical generated code and moved within 2 %.
 
 ### Fixed
+- The dense DK Newton certifies an iterate on the undamped device-voltage
+  correction every iteration, like the nodal path. Its step test used to be
+  skipped whenever a limiter had acted, leaving the current-residual check to
+  certify alone: on the 0.3/3/10 V set about 7.7k samples were certified with
+  the step just taken up to 102 thresholds over (an RIAA stage at 3 V; an
+  idling amp on 61k of its 96k golden silence samples). No render gains a held
+  sample, a ceiling hit, a sub-step or a backward-Euler fallback; 187 of 192
+  golden renders are byte-identical and the idling amp's four plus one JFET
+  sweep move NEGLIGIBLY (at most 21 mV on a 6.6 V sweep, residual −82.5 dB
+  relative), at +0.14 % Newton iterations over the DK set.
 - The generated device laws call libm `exp` and `ln`. melange emitted its own
   `fast_exp` (range reduction + 5th-order polynomial) and `fast_ln` (symmetric
   log series) into every nonlinear build; their pieces did not meet. `fast_ln`

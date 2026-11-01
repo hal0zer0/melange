@@ -212,12 +212,19 @@ const DEVICE_0_VCRIT: f64 = 0.6145;  // from pn_vcrit(vt, is)
 
 ## Convergence Check
 
-After applying the damped step, convergence is checked on the **actual** step size:
+On the dense DK path an iterate is converged when, on the same iteration, the
+**undamped** device-voltage correction is under its threshold on every
+dimension and the current residual is under its tolerance:
 ```
-converged = max_i(|alpha * delta[i]|) < TOLERANCE
+for each i:  |dv[i]| <= 1e-3 * max(|v_d[i]|, |v_d[i] + dv[i]|) + 1e-6   // dv = -K * delta, before alpha
+for each i:  |f[i]|  <= 1e-3 * max(|i_nl[i]|, |i_dev[i]|, 1e-9) + 1e-12
 ```
-
-This means convergence tracks the effective step, not the raw Newton step.
+`dv[i]` is Newton's own estimate of the distance to the root; `alpha` scales
+what is applied, never that estimate. Testing the damped step `alpha·dv`, or
+skipping the test while a limiter was active, certified points whose
+correction was up to two orders over the threshold on the current residual
+alone (see CODEGEN.md "Certification of a nodal iterate"). The nodal full-LU
+path applies the same rule to its node-step test.
 
 ## Common Bugs
 

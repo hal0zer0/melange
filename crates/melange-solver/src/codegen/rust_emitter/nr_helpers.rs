@@ -433,7 +433,6 @@ pub(super) fn emit_nr_limit_and_converge(
 
     // Compute per-dimension damping factor from per-device limiting
     code.push_str(&format!("{indent}let mut alpha = [1.0_f64; {dim}];\n"));
-    code.push_str(&format!("{indent}let mut any_limited = false;\n"));
     for (dev_num, slot) in ir.device_slots.iter().enumerate() {
         for d in 0..slot.dimension {
             let i = slot.start_idx + d;
@@ -530,7 +529,7 @@ pub(super) fn emit_nr_limit_and_converge(
                 "{indent}    let ratio = ((v_lim - v_d{i}) / dv{i}).clamp(0.0, 1.0);\n"
             ));
             code.push_str(&format!(
-                "{indent}    if ratio < alpha[{i}] {{ alpha[{i}] = ratio; if ratio < 1.0 {{ any_limited = true; }} }}\n"
+                "{indent}    if ratio < alpha[{i}] {{ alpha[{i}] = ratio; }}\n"
             ));
             code.push_str(&format!("{indent}}}\n"));
         }
@@ -548,9 +547,6 @@ pub(super) fn emit_nr_limit_and_converge(
         .join(".min(")
         + &")".repeat(dim.saturating_sub(1));
     code.push_str(&format!("{indent}let alpha_scalar = {min_chain};\n"));
-    code.push_str(&format!(
-        "{indent}if alpha_scalar < 1.0 {{ any_limited = true; }}\n"
-    ));
 
     // Current-space backstop: limit maximum current step per iteration.
     // Unlike the old voltage-space backstop (3.5V), this is K-independent.
@@ -589,7 +585,7 @@ pub(super) fn emit_nr_limit_and_converge(
     // the solver from burning iterations when limiting triggers frequently
     // (common with weak K from SM pot corrections).
     code.push_str(&format!(
-        "\n{indent}// Convergence: voltage-step (RELTOL, ungated) + current-residual (always)\n"
+        "\n{indent}// Convergence: undamped voltage-step (RELTOL, every iteration) + current-residual\n"
     ));
     code.push_str(&format!("{indent}{{\n"));
     code.push_str(&format!("{indent}    let mut nr_converged = true;\n"));
@@ -597,14 +593,17 @@ pub(super) fn emit_nr_limit_and_converge(
     // residual reads as NOT converged (mirrors the nodal emitter; a NaN
     // iterate must flow into the BE fallback, not exit NR "converged" and
     // trip the sample-level NaN reset). Do not simplify to `a > b`.
-    // Voltage-step check: only when not limited (step direction is reliable)
-    code.push_str(&format!("{indent}    if !any_limited {{\n"));
+    // Voltage-step test on the UNDAMPED correction `dv{i}`, every iteration,
+    // threshold at its target. The damped step `dv·alpha_scalar` measures how
+    // far this iteration moved, not how far the iterate is from the root; and
+    // an exemption while limited certified iterates whose correction was up to
+    // two orders over the threshold on the current residual alone (the dense
+    // DK twin of the nodal full-LU hole closed in `full_lu_newton.rs`).
     for i in 0..dim {
         code.push_str(&format!(
-            "{indent}        {{ let step = dv{i} * alpha_scalar; let v_new = v_d{i} + step; let v_thr = 1e-3 * v_d{i}.abs().max(v_new.abs()) + 1e-6; if !(step.abs() <= v_thr) {{ nr_converged = false; }} }}\n"
+            "{indent}    {{ let v_new = v_d{i} + dv{i}; let v_thr = 1e-3 * v_d{i}.abs().max(v_new.abs()) + 1e-6; if !(dv{i}.abs() <= v_thr) {{ nr_converged = false; }} }}\n"
         ));
     }
-    code.push_str(&format!("{indent}    }}\n"));
     // Current residual check: always (K-independent, catches cancellation artifacts)
     for i in 0..dim {
         code.push_str(&format!(

@@ -649,9 +649,24 @@ undamped correction on a device node exceeded the threshold, by 1.7 to 810
 thresholds: a seven-triode cascade's grid 0.12 V off at a 0.15 mV threshold
 (output 0.165 V off on that sample), a transformer-coupled triode 12.5 V off
 on 22 samples with `alpha = 0.99`, a choke-loaded MOSFET stage's drain 16 V
-off. The DK path's `emit_nr_limit_and_converge` keeps its `any_limited`
-exemption on the device-voltage step test (its current-residual check is
-always on); whether the same hole exists there is open.
+off. The dense DK path (`emit_nr_limit_and_converge`, the 1×1/2×2 and
+Gaussian-elimination Newton solves) had the same hole with a different trigger:
+its device-voltage step test was skipped whenever `any_limited` was set, and
+`any_limited` was set by roundoff on nearly every full step (see
+VOLTAGE_LIMITING.md "Scalar Damping Factor"), so certification rested on the
+current-residual check alone. Counted before the change, on the 0.3/3/10 V
+sweep: about 7.7k certifications with the step just taken over its threshold,
+up to 102 thresholds (an RIAA stage at 3 V); on golden, 61k of an idling amp's
+96k silence samples. It now tests the undamped `dv` every iteration like the
+nodal path, with no exemption; the current-residual check stays. Measured:
+holds, ceiling hits, sub-steps, backward-Euler fallbacks and unsolved samples
+unchanged on golden and the sweep; 187 of 192 golden renders byte-identical,
+the idling amp's four renders and one JFET sweep NEGLIGIBLE (at most 21 mV on
+a 6.6 V sweep, residual −82.5 dB relative); Newton iterations +0.14 % over the
+DK sweep set and +53 % on the idling amp's silence (one more iteration on the
+samples it used to certify early); throughput within the bench's round-to-round
+spread. The Schur variant (`emit_schur_nr_limit_and_converge`) never certified
+a limited iterate and is unchanged.
 
 The ladder's step test and the node-step test keep their device-node set. Two
 receipts: with the BJT internal rows left out, the wurli power amp with its

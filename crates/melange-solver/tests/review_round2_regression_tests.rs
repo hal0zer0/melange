@@ -139,11 +139,12 @@ fn fix2_dk_nr_convergence_predicate_is_nan_honest() {
         "fix2: DK current-residual convergence check must use the NaN-honest \
          `!(f0.abs() <= i_thr)` form"
     );
-    // The voltage-step check likewise.
+    // The voltage-step check likewise (it reads the undamped correction `dv0`
+    // every iteration; the NaN-honest form is what this pins).
     assert!(
-        code.contains("if !(step.abs() <= v_thr)"),
+        code.contains("if !(dv0.abs() <= v_thr)"),
         "fix2: DK voltage-step convergence check must use the NaN-honest \
-         `!(step.abs() <= v_thr)` form"
+         `!(dv0.abs() <= v_thr)` form"
     );
 
     // And the bare `>` form (pre-fix) must be gone from the NR predicates: a
