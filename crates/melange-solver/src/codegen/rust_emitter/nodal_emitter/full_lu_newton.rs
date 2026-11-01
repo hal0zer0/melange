@@ -385,7 +385,7 @@ impl RustEmitter {
         // step check and be more permissive, the opposite of intended).
         if use_line_search {
             emit_armijo_line_search(
-                code, "        ", "v", "v_new", "alpha", site.a, "rhs", "ls_ok", "i_nl",
+                ir, code, "        ", "v", "v_new", "alpha", site.a, "rhs", "ls_ok", "i_nl",
             );
             code.push_str("        if !ls_ok { state.diag_ls_fail_count += 1; }\n");
             code.push_str("        let limited = alpha < 1.0;\n");
@@ -631,9 +631,10 @@ impl RustEmitter {
             // populated (the `if !max_step_exceeded` branch ran).
             if m > 0 {
                 code.push_str(&format!(
-                        "        let (_, kcl_ok, kcl_inf) = if max_step_exceeded {{ (f64::INFINITY, false, f64::INFINITY) }} else {{ kcl_residual_inl(&v, &rhs, &{}, &i_nl_resid) }};\n\
+                        "        let (_, kcl_ok, kcl_inf) = if max_step_exceeded {{ (f64::INFINITY, false, f64::INFINITY) }} else {{ kcl_residual_inl(&v, &rhs, &{}, &i_nl_resid{}) }};\n\
                          \x20       let converged_check = !max_step_exceeded && kcl_ok;\n\n",
-                        site.a
+                        site.a,
+                        super::behavioral::kcl_residual_inl_state_arg(ir)
                     ));
             } else {
                 code.push_str(&format!(

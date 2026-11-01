@@ -13,7 +13,9 @@ codegen output, CLI flags, and netlist semantics may all change.
 `radio-fm`, `sat-core-open`, `sat-core-loaded`, every stimulus) move by at
 most 2.6e-12 V, from a different static pivot order on nodal builds that now
 take the compile-time sparse schedule; the other 178 are byte-identical to
-v0.1.19.
+v0.1.19. Outside the corpus, a build with a behavioral current source
+(`I={}`) beside nonlinear devices, which held almost every sample before,
+now renders (see Fixed).
 
 **What changes generated code:** every nodal build, full-LU and Schur.
 
@@ -65,6 +67,14 @@ shot` 8359 → 6299 (1.33×). The DK rows (single-ended amp, germanium network,
 
 ### Fixed
 
+- A behavioral current source (`I={}`) beside nonlinear devices now converges.
+  The node-KCL residual that decides convergence and steers the line search
+  read the base matrices, where the source's current only appears as a
+  per-iteration companion, so at the true solution the residual was off by
+  that current and almost every sample was held (one `I={}` source and one
+  diode: 2300 of 2400 samples). Both residual helpers now evaluate the
+  current; the deck renders as its diode-free twin. No golden-corpus deck
+  carries a behavioral current source beside a nonlinear device.
 - A failed dense factorization inside the full-LU Newton loop now marks the
   chord invalid; a half-eliminated matrix could previously be reused as a
   factorization by a later back-solve after a sub-step rescue.

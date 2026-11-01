@@ -35,7 +35,8 @@ pub(super) fn emit_kcl_residual_fns(
     // rhs so the trap (state.a/rhs), sub-step (a_sub/rhs_s) and BE
     // (state.a_be/rhs_be) sites share one implementation. Returns
     // (||F||_2, all-node-rows-within-tolerance) for F = A·v - rhs -
-    // N_i·i_nl(N_v·v) over the KCL rows (`kcl_rows`: circuit nodes and
+    // N_i·i_nl(N_v·v) over the KCL rows (plus the behavioral `I={}`
+    // currents, which are not Newton unknowns: `emit_behavioral_current_residual`) (`kcl_rows`: circuit nodes and
     // parasitic-BJT internal nodes). The ||.||_2 drives the
     // Armijo ratio test; the bool is the always-checked convergence gate.
     code.push_str(
@@ -63,6 +64,7 @@ pub(super) fn emit_kcl_residual_fns(
     let mut tail = String::new();
     tail.push_str("    let mut q = [0.0f64; N];\n");
     tail.push_str(&emit_sparse_ni_matvec_add(ir, "q", "i_nl", "    "));
+    super::behavioral::emit_behavioral_current_residual(&mut tail, ir, "    ");
     tail.push_str("    let mut norm_sq = 0.0f64;\n");
     tail.push_str("    let mut max_abs = 0.0f64;\n");
     tail.push_str("    let mut ok = true;\n");
@@ -115,9 +117,10 @@ pub(super) fn emit_kcl_residual_fns(
          /// bit-identical to `kcl_residual` when `i_nl == i_nl(N_v·v)`.\n",
     );
     code.push_str("#[inline]\n");
-    code.push_str(
-        "fn kcl_residual_inl(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], i_nl: &[f64; M]) -> (f64, bool, f64) {\n",
-    );
+    code.push_str(&format!(
+        "fn kcl_residual_inl(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], i_nl: &[f64; M]{}) -> (f64, bool, f64) {{\n",
+        if super::behavioral::has_behavioral_current_sources(ir) { ", state: &CircuitState" } else { "" }
+    ));
     code.push_str(&tail);
     code
 }
@@ -315,6 +318,7 @@ fn emit_sparse_a_residual_matvec(
 /// damped step alone.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_armijo_line_search(
+    ir: &CircuitIR,
     code: &mut String,
     indent: &str,
     v: &str,
@@ -325,6 +329,7 @@ pub(super) fn emit_armijo_line_search(
     ls_ok: &str,
     inl: &str,
 ) {
+    let state_arg = super::behavioral::kcl_residual_inl_state_arg(ir);
     code.push_str(&format!(
         "{indent}// Armijo backtracking line search on ||F|| along the limited Newton ray.\n\
          {indent}let mut {ls_ok} = true;\n\
@@ -332,7 +337,7 @@ pub(super) fn emit_armijo_line_search(
          {indent}    // r0 = ||F({v})||: reuses the device currents `{inl}` the NR body\n\
          {indent}    // already evaluated at this exact {v} (bit-identical to a fresh\n\
          {indent}    // kcl_residual — same N_v·v, same device fn, no pnjlim on the eval).\n\
-         {indent}    let (r0, _, _) = kcl_residual_inl(&{v}, &{rhs}, &{amat}, &{inl});\n\
+         {indent}    let (r0, _, _) = kcl_residual_inl(&{v}, &{rhs}, &{amat}, &{inl}{state_arg});\n\
          {indent}    if r0.is_finite() && r0 > 1e-9 {{\n\
          {indent}        let mut s = 1.0_f64;\n\
          {indent}        let mut accepted = false;\n\

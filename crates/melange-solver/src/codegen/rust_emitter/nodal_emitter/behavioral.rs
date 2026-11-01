@@ -256,3 +256,73 @@ pub(super) fn behavioral_convergence_nodes(ir: &CircuitIR) -> Vec<usize> {
     nodes.dedup();
     nodes
 }
+
+/// True when any behavioral source is a current source (`I={}`). Its current
+/// is not a Newton unknown, so every KCL residual must evaluate it.
+pub(super) fn has_behavioral_current_sources(ir: &CircuitIR) -> bool {
+    ir.behavioral_sources.iter().any(|b| !b.is_voltage)
+}
+
+/// The trailing `state` argument the emitted `kcl_residual_inl` takes when the
+/// circuit has behavioral current sources (their expressions read `state`), and
+/// nothing otherwise: an unread parameter is a warning in the generated crate.
+pub(super) fn kcl_residual_inl_state_arg(ir: &CircuitIR) -> &'static str {
+    if has_behavioral_current_sources(ir) {
+        ", state"
+    } else {
+        ""
+    }
+}
+
+/// Emit the behavioral `I={}` currents into the KCL residual's device-current
+/// vector `q` (`F = A·v − rhs − q`, `q = N_i·i_nl` on entry), evaluated at the
+/// residual's own `v`.
+///
+/// A current source's current enters the per-iteration solve only through the
+/// companion `emit_behavioral_rhs` stamps into `rhs_work` and the Jacobian
+/// `emit_behavioral_jacobian` stamps into the chord LU; the residual helpers
+/// read the BASE `rhs` and `A`, so without this term the residual at the true
+/// solution is off by `f(v)` on the terminal rows and the convergence gate never
+/// passes on an `M > 0` build (one `I={}` source and one diode: 2300 of 2400
+/// samples held). Same sign as the companion: `f` leaves `n+`, enters `n−`, so
+/// `q[n+] -= f`, `q[n−] += f`. `V={}` sources need nothing here: their branch
+/// current is a Newton unknown already in `A·v`.
+pub(super) fn emit_behavioral_current_residual(code: &mut String, ir: &CircuitIR, indent: &str) {
+    let params = bsrc_param_map(ir);
+    let mut sources: Vec<(usize, String, usize, usize)> = Vec::new();
+    for (si, b) in ir.behavioral_sources.iter().enumerate() {
+        if b.is_voltage {
+            continue;
+        }
+        let res = NodalBsrcResolver {
+            node_idx: &b.referenced_node_indices,
+            params: &params,
+        };
+        let f = strip_outer_parens(&b.expr.simplify().to_rust(&res)).to_string();
+        sources.push((si, f, b.n_plus_idx, b.n_minus_idx));
+    }
+    if sources.is_empty() {
+        return;
+    }
+    code.push_str(&format!(
+        "{indent}// Behavioral I={{}} currents: not Newton unknowns, evaluated at this v.\n"
+    ));
+    // `ddt`/`idt` surfaces read these two locals; bind them only when read.
+    for (local, field) in [
+        ("bsrc_inv_dt", "bsrc_inv_dt"),
+        ("bsrc_half_dt", "bsrc_half_dt"),
+    ] {
+        if sources.iter().any(|(_, f, _, _)| f.contains(local)) {
+            code.push_str(&format!("{indent}let {local} = state.{field};\n"));
+        }
+    }
+    for (si, f, np, nm) in sources {
+        code.push_str(&format!("{indent}let bsrc_{si}_f_resid = {f};\n"));
+        if np > 0 {
+            code.push_str(&format!("{indent}q[{}] -= bsrc_{si}_f_resid;\n", np - 1));
+        }
+        if nm > 0 {
+            code.push_str(&format!("{indent}q[{}] += bsrc_{si}_f_resid;\n", nm - 1));
+        }
+    }
+}

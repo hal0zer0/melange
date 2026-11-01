@@ -341,7 +341,14 @@ Inside the trapezoidal NR loop, alongside the device evaluation:
   `emit_nodal_newton` in `full_lu_newton.rs`). Jacobian: for each referenced node `k`,
   `∂i/∂V(k) = expr.diff(Node(k)).simplify().to_rust(resolver@v)`, stamped into
   `chord_lu[n+][k] -= ∂i/∂V(k); chord_lu[n-][k] += ∂i/∂V(k)` in the
-  `need_refactor` block (as built, `emit_behavioral_jacobian`, same files). **Behavioral Jacobian
+  `need_refactor` block (as built, `emit_behavioral_jacobian`, same files).
+  The KCL residual helpers (`kcl_residual` / `kcl_residual_inl`, emitted when
+  `M > 0`, read by the convergence gate and the Armijo line search) take the
+  BASE `A` and `rhs`, so they evaluate `i` themselves at their own `v` and fold
+  it into the device-current vector `q` (`q[n+] -= i; q[n-] += i`;
+  `emit_behavioral_current_residual`); `kcl_residual_inl` takes `state` for
+  that evaluation whenever a current source exists. A `V={}` source needs no
+  such term: its branch current is a Newton unknown already inside `A·v`. **Behavioral Jacobian
   entries are not frozen device blocks**, so either (a) force a refactor every
   iteration when behavioral sources are present, or (b) treat them with the
   same chord-companion correction as devices. Start with (a) for correctness;

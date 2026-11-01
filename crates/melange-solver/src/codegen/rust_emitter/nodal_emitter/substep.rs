@@ -328,6 +328,7 @@ impl RustEmitter {
                     "                    ",
                 );
                 emit_armijo_line_search(
+                    ir,
                     code,
                     "                    ",
                     "v_sub",
