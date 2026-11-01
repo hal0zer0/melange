@@ -17,7 +17,18 @@ v0.1.19. The Newton line search and gate reading every row (see Fixed) moves
 `mosfet-choke-load` (sine1k, step and sweep) by at most 2.7e-5 V per sample
 and 1.1e-8 dB in level; every other render is byte-identical, and no render
 gains a held sample, a ceiling hit, a line-search failure, a sub-step or a
-backward-Euler fallback. Outside the corpus, a build with a behavioral
+backward-Euler fallback. The node-step test reading the undamped Newton
+correction (see Fixed) moves 6 renders: `warpony` silence by 0.165 V on one
+sample (the sample that was certified 0.2 V from its root; the neighbours
+swing 0.35 V sample to sample) and 5 others by at most 1.4e-6 V, every one
+NEGLIGIBLE (level within 5.4e-5 dB, correlation 1.0000); held samples,
+ceiling hits, sub-steps and backward-Euler fallbacks are unchanged on the
+corpus and on every manifest deck at 0.3, 3 and 10 V. At those drives the
+renders that carried a falsely certified sample move where it sat:
+`noyce-transformer-triode` at 10 V by at most 18 mV on a 72 V peak (22
+samples), `mosfet-choke-load` at 3 V by 12 V on the two samples of a choke
+flyback spike that peaks at 368 V (8 samples over 1 V, re-converged within
+10), level unchanged on both. Outside the corpus, a build with a behavioral
 current source (`I={}`) beside nonlinear devices, which held almost every
 sample before, now renders (see Fixed), as do a rectifier supply that held
 31338 of 48000 samples and a transformer-fed rectifier that held 11.
@@ -72,6 +83,25 @@ shot` 8359 → 6299 (1.33×). The DK rows (single-ended amp, germanium network,
 
 ### Fixed
 
+- A nodal full-LU iterate is certified by the node-step test on the UNDAMPED
+  Newton correction every iteration, beside the device-chord check and the
+  row-residual gate. The step test read the damped step and was skipped on
+  any iteration the line search or the node damping had shrunk the step
+  below the full correction, leaving the residual gate alone to certify
+  such iterates; the gate bounds row residuals, not the distance to the
+  root, so on a flat or ill-conditioned mode a point inside it was certified
+  volts away. Counted on the previous code: 2 samples over the 192 golden
+  renders and 25 over the 129 renders of the 0.3/3/10 V sweep, the certified
+  points 1.7 to 810 step thresholds from Newton's target: a seven-triode
+  cascade's grid 0.12 V off (output 0.165 V off on that sample), a
+  transformer-coupled triode (`noyce-transformer-triode` at 10 V) 12.5 V off
+  on 22 samples with the step damped by 1 %, a choke-loaded MOSFET stage's
+  drain 16 V off. The test now reads `v_new − v` with the threshold at
+  `v_new` and runs whatever the damping; the limiters steer the path and no
+  longer change what gets certified. Every counted sample converges on its
+  root (the cascade's in 3 iterations, a period-2 Newton orbit on
+  `sad-bastard` in 7) and no deck gains a held sample, a ceiling hit, a
+  sub-step or a backward-Euler fallback.
 - The nodal Newton's line search and convergence gate read every row the
   Newton step solves. The residual that steered the Armijo line search and
   decided convergence covered the KCL rows only, so a residual carried by a

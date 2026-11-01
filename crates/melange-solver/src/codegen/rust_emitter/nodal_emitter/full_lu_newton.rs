@@ -377,12 +377,9 @@ impl RustEmitter {
         // `alpha *= s` scaling only runs on acceptance) and CONTINUES — the
         // always-checked residual gate below, not a bail, decides convergence.
         // A line search may only help; its failure must be no worse than not
-        // having it (design review). `limited` records whether pnjlim or
-        // node-damping shrank alpha below 1, gating the voltage-step check (a
-        // limited step's small size is not evidence of convergence — only the
-        // residual gate is). Left as `alpha < 1.0` so a fall-through's natural
-        // value is used unchanged (do NOT force it true — that would SKIP the
-        // step check and be more permissive, the opposite of intended).
+        // having it (design review). Whatever `alpha` ends up as, the step
+        // test below reads the UNDAMPED correction, so damping steers the
+        // path and never changes what gets certified.
         if use_line_search {
             emit_armijo_line_search(
                 ir,
@@ -398,26 +395,42 @@ impl RustEmitter {
                 &site.sat_alpha,
             );
             code.push_str("        if !ls_ok { state.diag_ls_fail_count += 1; }\n");
-            code.push_str("        let limited = alpha < 1.0;\n");
         }
 
-        // Apply damped Newton step and check convergence
-        // Compute step BEFORE updating v, so convergence check sees the actual delta
-        // (the check runs every iteration, including iter 0 — a zero-step
-        // first iteration is a legitimate converged warm start).
-        // Convergence check on nonlinear device nodes only (N_V nonzero columns).
-        // Linearized stages respond linearly and converge passively — checking
-        // all N nodes causes spurious chord refactors when linear coupling
-        // ripple from nonlinear stages hasn't settled to sub-µV precision.
-        code.push_str("        // Compute damped step, check convergence, then apply\n");
+        // Step test, then apply the damped step.
+        //
+        // The test reads the UNDAMPED Newton correction `v_new − v` — Newton's
+        // own estimate of the distance to the root — every iteration, with
+        // the threshold taken at the correction's target `v_new`. The damped
+        // step `alpha·(v_new − v)` is what gets applied; its size says how far
+        // the limiters let the iterate move, not how far the root is. The
+        // test used to read the damped step and to be skipped outright on any
+        // iteration the line search or the node damping had shrunk `alpha`
+        // below 1 ("a limited step's small size is not evidence of
+        // convergence, the residual gate decides"). The gate bounds the row
+        // residuals in amps and volts, not the distance to the root: on a flat
+        // or ill-conditioned mode a point inside the gate can sit volts away.
+        // With the test skipped nothing else measured that distance, and the
+        // device-chord check passed because the applied steps were tiny.
+        // Measured on the code before this test (counter: converged with
+        // `alpha < 1` while the undamped correction on a device node exceeded
+        // the threshold): 2 samples over the 192 golden renders and 25 over
+        // the 129 renders of the 0.3/3/10 V sweep, the certified points 1.7 to
+        // 810 thresholds from Newton's target — a seven-triode cascade's grid
+        // node 0.12 V off at a 0.15 mV threshold, a transformer-coupled triode
+        // 12.5 V off on 22 samples with `alpha = 0.99`, a choke-loaded MOSFET
+        // stage 16 V off at its drain. Certification is now the same three
+        // tests whatever the damping: this step test, the device-chord
+        // consistency check and the row-residual gate.
+        //
+        // Runs every iteration, including iter 0 (a zero correction on the
+        // first iteration is a legitimate converged warm start). Nonlinear
+        // device nodes only (N_V nonzero columns, behavioral nodes, saturating-
+        // inductor branch rows): linearized stages respond linearly and
+        // converge passively, and checking all N nodes caused spurious chord
+        // refactors while linear coupling ripple settled to sub-µV precision.
+        code.push_str("        // Step test on the undamped correction, then apply the damped step\n");
         code.push_str("        let mut max_step_exceeded = false;\n");
-        // DK/Schur convergence contract: the voltage-step check is only
-        // meaningful when the step was NOT limited this iteration. When it
-        // was, the step's small size is an artifact of damping, not
-        // convergence — the always-checked ||F|| residual gate decides.
-        if use_line_search {
-            code.push_str("        if !limited {\n");
-        }
         {
             let mut device_nodes: Vec<usize> = ir
                 .sparsity
@@ -438,15 +451,13 @@ impl RustEmitter {
             }
             device_nodes.sort();
             device_nodes.dedup();
-            let extra = if use_line_search { "    " } else { "" };
             for &node in &device_nodes {
+                // NaN-honest: `!(a < b)` reads a non-finite correction as not
+                // converged. RELTOL 1e-3 with the 1e-6 V floor (SPICE VNTOL).
                 code.push_str(&format!(
-                        "        {extra}{{ let step = alpha * (v_new[{node}] - v[{node}]); let threshold = 1e-3 * v[{node}].abs().max((v[{node}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ max_step_exceeded = true; }} }}\n"
+                        "        {{ let step = v_new[{node}] - v[{node}]; let threshold = 1e-3 * v[{node}].abs().max(v_new[{node}].abs()) + 1e-6; if !(step.abs() < threshold) {{ max_step_exceeded = true; }} }}\n"
                     ));
             }
-        }
-        if use_line_search {
-            code.push_str("        }\n");
         }
         code.push_str("        for i in 0..N { v[i] += alpha * (v_new[i] - v[i]); }\n");
 

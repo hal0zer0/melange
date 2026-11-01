@@ -612,6 +612,39 @@ in its own unit (`nodal_emitter/residual.rs`):
 - Behavioral `V={}` rows as `(v[n+] − v[n−]) − f(v)`, same tolerance.
 - Saturating-inductor rows with the flux residual and its own `1e-5·den` test.
 
+### Certification of a nodal iterate
+
+A full-LU Newton iterate (trapezoidal and backward-Euler sites alike) is
+converged when three tests pass on the same iteration, whatever the damping:
+
+- the **node-step test** on the UNDAMPED correction `v_new − v` over the device
+  nodes (N_V columns, behavioral nodes, saturating-inductor branch rows),
+  `|v_new − v| < 1e-3·max(|v|, |v_new|) + 1e-6 V`, the threshold taken at the
+  correction's target. The damped step `alpha·(v_new − v)` is what gets
+  applied; the undamped correction is Newton's own estimate of the distance
+  to the root, and the limiters (pnjlim, node damping, the Armijo search)
+  scale what is applied, never that estimate;
+- the **device-chord consistency check** (`i_nl(v)` against the chord's
+  prediction, RELTOL 1e-3, 1e-9 A floor, 1e-12 A ABSTOL);
+- the **row-residual gate** (`kcl_residual_inl`, every row, see above).
+
+The step test used to read the damped step and to be skipped on any iteration
+the line search or the node damping had shrunk `alpha` below 1, on the ground
+that a damped step's small size is not evidence of convergence and the gate
+decides. The gate bounds the row residuals in amps and volts, not the distance
+to the root; on a flat or ill-conditioned mode a point inside it can sit volts
+away, and with the step test skipped nothing measured that distance (the
+device-chord check passed because the applied steps were tiny). Counted on the
+code before the change: 2 samples over the 192 golden renders and 25 over the
+129 renders of the 0.3/3/10 V sweep were certified with `alpha < 1` while the
+undamped correction on a device node exceeded the threshold, by 1.7 to 810
+thresholds: a seven-triode cascade's grid 0.12 V off at a 0.15 mV threshold
+(output 0.165 V off on that sample), a transformer-coupled triode 12.5 V off
+on 22 samples with `alpha = 0.99`, a choke-loaded MOSFET stage's drain 16 V
+off. The DK path's `emit_nr_limit_and_converge` keeps its `any_limited`
+exemption on the device-voltage step test (its current-residual check is
+always on); whether the same hole exists there is open.
+
 The ladder's step test and the node-step test keep their device-node set. Two
 receipts: with the BJT internal rows left out, the wurli power amp with its
 internal nodes expanded hit the Newton ceiling ~1000 times a second and sat

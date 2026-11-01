@@ -227,6 +227,48 @@ Using addition causes NR divergence. See `DC_OP.md` for the mathematical derivat
 | DC OP source_steps | 10 | Source stepping stages |
 | DC OP voltage_limit | logarithmic (Vt-scaled) | Junction-aware: `sign * Vt * ln(\|delta\|/Vt + 1)` |
 
+## Certified Volts From the Root (a single-sample step, counters all zero)
+
+**Signature:** one sample's output steps away from its neighbours (0.1 V to
+volts) with `diag_nr_max_iter_count`, `diag_nr_hold_count`, `diag_substep_count`
+all zero; a per-iteration trace shows the search or the node damping shrinking
+`alpha` (down to 1/128, or only to 0.99) while Newton's undamped correction
+`v_new − v` on a device node stays large, and the row-residual gate passing.
+The gate bounds row residuals (amps, volts), not the distance to the root, so
+on a flat or ill-conditioned mode a point inside it can be volts from the
+root. Before 2026-11-01 the node-step test read the damped step and was
+skipped whenever `alpha < 1`, so nothing measured that distance; now it reads
+the undamped correction every iteration (`full_lu_newton.rs`, CODEGEN.md
+"Certification of a nodal iterate"). If the signature reappears, check that
+the step test's node set covers the node that moved, then the DK path
+(`nr_helpers.rs::emit_nr_limit_and_converge` keeps an `any_limited` exemption).
+
+**Instances (counted 2026-11-01 on the code before the change):** warpony
+silence sample 58267, plate 0.2 V and grid 0.12 V from the root at `alpha =
+1/128`..1/32, output 0.165 V off; noyce-transformer-triode at 10 V, 22 samples
+12.5 V off on one node with `alpha = 0.99`; mosfet-choke-load at 3 V, drain
+16.4 V off at `alpha = 0.31`; sad-bastard sweep sample 80093, 57 µV against a
+32.5 µV threshold (a Newton period-2 orbit, below).
+
+## Newton Period-2 Orbit at the Residual Floor (step reverses exactly)
+
+**Signature:** a sample at the ceiling whose per-iteration trace shows the
+correction vector reversing sign exactly every iteration with `||F||` identical
+at both points (sad-bastard sweep sample 80093: plates and the summing chain
+±5..6e-5 V coherently, `||F||_2 = 9.7556e-9` both sides, refactoring every
+iteration, the grid node's 57 µV step against its 32.5 µV threshold). Exact
+Newton on smooth laws converges quadratically from there, so a clean 2-cycle
+means the iteration map has an eigenvalue of −1 along that mode: a stamped
+derivative off by about 2× on some row of the mode, or a kink in a law between
+the two points (an inner-NR tolerance, a clamp, a region switch). Scanned and
+cleared on that deck: the Koren plate law, the D&Z grid law and the RS diode
+law, each against its own Jacobian to 1e-4. **Localizer:** take the orbit step
+`d` and compare `J_stamped·d` with the true `F(v+d) − F(v)` row by row; the
+row where the ratio is about 2, or where ΔF is not linear in `d`, names the
+culprit. Every node moving by about the same amount points at a shared node (a
+rail or common reference). Open as of 2026-11-01; the sub-step recovers the
+sample (output 1.4e-6 V moved, no hold).
+
 ## Newton Converging Linearly (Full Steps, ~1 % per Iteration)
 
 **Signature:** samples exhaust `MAX_ITER` (`diag_nr_max_iter_count`, often
