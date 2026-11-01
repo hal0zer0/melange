@@ -430,6 +430,16 @@ pub(super) fn emit_nr_limit_and_converge(
         }
         code.push_str(");\n");
     }
+    // The proposed point, computed once; `dv{i}` is re-derived from it so that
+    // a limiter which returns its argument unchanged gives
+    // `(v_lim - v_d{i}) / dv{i} == 1.0` exactly (the nodal and Schur emitters
+    // take dv from the proposed point the same way). Before this, `fl(v_d + dv)
+    // - v_d != dv` by an ulp flagged nearly every full step as limited.
+    for i in 0..dim {
+        code.push_str(&format!(
+            "{indent}let v_prop{i} = v_d{i} + dv{i};\n{indent}let dv{i} = v_prop{i} - v_d{i};\n"
+        ));
+    }
 
     // Compute per-dimension damping factor from per-device limiting
     code.push_str(&format!("{indent}let mut alpha = [1.0_f64; {dim}];\n"));
@@ -444,13 +454,13 @@ pub(super) fn emit_nr_limit_and_converge(
             match (&slot.device_type, d) {
                 (DeviceType::Diode, _) => {
                     code.push_str(&format!(
-                        "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_VCRIT);\n"
+                        "{indent}    let v_lim = pnjlim(v_prop{i}, v_d{i}, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_VCRIT);\n"
                     ));
                 }
                 (DeviceType::Bjt, _) | (DeviceType::BjtForwardActive, _) => {
                     // PN junction limiting (Vbe for forward-active, both Vbe/Vbc for full)
                     code.push_str(&format!(
-                        "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vt, DEVICE_{dev_num}_VCRIT);\n"
+                        "{indent}    let v_lim = pnjlim(v_prop{i}, v_d{i}, state.device_{dev_num}_vt, DEVICE_{dev_num}_VCRIT);\n"
                     ));
                 }
                 (DeviceType::Jfet, _) => {
@@ -459,9 +469,9 @@ pub(super) fn emit_nr_limit_and_converge(
                     let lim = jfet_limit_expr(
                         dev_num,
                         d,
-                        &format!("v_d{s} + dv{s}"),
+                        &format!("v_prop{s}"),
                         &format!("v_d{s}"),
-                        &format!("v_d{s1} + dv{s1}"),
+                        &format!("v_prop{s1}"),
                         &format!("v_d{s1}"),
                     );
                     code.push_str(&format!("{indent}    let v_lim = {lim};\n"));
@@ -469,19 +479,19 @@ pub(super) fn emit_nr_limit_and_converge(
                 (DeviceType::Mosfet, 0) => {
                     // dim 0 = Vds — generous limiting
                     code.push_str(&format!(
-                        "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, 0.0);\n"
+                        "{indent}    let v_lim = fetlim(v_prop{i}, v_d{i}, 0.0);\n"
                     ));
                 }
                 (DeviceType::Mosfet, _) => {
                     // dim 1 = Vgs — limit around threshold voltage
                     code.push_str(&format!(
-                        "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, state.device_{dev_num}_vt);\n"
+                        "{indent}    let v_lim = fetlim(v_prop{i}, v_d{i}, state.device_{dev_num}_vt);\n"
                     ));
                 }
                 (DeviceType::Tube, 0) => {
                     let grid_vt = super::helpers::tube_grid_vt_expr(&slot.params, dev_num);
                     code.push_str(&format!(
-                        "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, {grid_vt}, DEVICE_{dev_num}_VCRIT);\n"
+                        "{indent}    let v_lim = pnjlim(v_prop{i}, v_d{i}, {grid_vt}, DEVICE_{dev_num}_VCRIT);\n"
                     ));
                 }
                 (DeviceType::Tube, 2) => {
@@ -490,25 +500,25 @@ pub(super) fn emit_nr_limit_and_converge(
                     // log-junction limiting prevents large NR steps from skipping
                     // the E1 knee. Triodes never reach dim==2 (they are 2D).
                     code.push_str(&format!(
-                        "{indent}    let v_lim = pnjlim(v_d{i} + dv{i}, v_d{i}, {grid_vt}, DEVICE_{dev_num}_VCRIT);\n"
+                        "{indent}    let v_lim = pnjlim(v_prop{i}, v_d{i}, {grid_vt}, DEVICE_{dev_num}_VCRIT);\n"
                     ));
                 }
                 (DeviceType::Tube, _) => {
                     code.push_str(&format!(
-                        "{indent}    let v_lim = fetlim(v_d{i} + dv{i}, v_d{i}, 0.0);\n"
+                        "{indent}    let v_lim = fetlim(v_prop{i}, v_d{i}, 0.0);\n"
                     ));
                 }
                 (DeviceType::Vca, _) => {
                     // VCA: no junction limiting needed — safe_exp already clamps
-                    code.push_str(&format!("{indent}    let v_lim = v_d{i} + dv{i};\n"));
+                    code.push_str(&format!("{indent}    let v_lim = v_prop{i};\n"));
                 }
                 (DeviceType::Ldr, _) => {
                     // LDR: linear resistance path, no junction — no limiting.
-                    code.push_str(&format!("{indent}    let v_lim = v_d{i} + dv{i};\n"));
+                    code.push_str(&format!("{indent}    let v_lim = v_prop{i};\n"));
                 }
                 (DeviceType::Glow, _) => {
                     // Glow: monotone resistance path, no junction — no limiting.
-                    code.push_str(&format!("{indent}    let v_lim = v_d{i} + dv{i};\n"));
+                    code.push_str(&format!("{indent}    let v_lim = v_prop{i};\n"));
                 }
             }
             // Clamp to [0, 1], not `.max(0.01)`: a floored ratio still lets a
@@ -601,7 +611,7 @@ pub(super) fn emit_nr_limit_and_converge(
     // DK twin of the nodal full-LU hole closed in `full_lu_newton.rs`).
     for i in 0..dim {
         code.push_str(&format!(
-            "{indent}    {{ let v_new = v_d{i} + dv{i}; let v_thr = 1e-3 * v_d{i}.abs().max(v_new.abs()) + 1e-6; if !(dv{i}.abs() <= v_thr) {{ nr_converged = false; }} }}\n"
+            "{indent}    {{ let v_new = v_prop{i}; let v_thr = 1e-3 * v_d{i}.abs().max(v_new.abs()) + 1e-6; if !(dv{i}.abs() <= v_thr) {{ nr_converged = false; }} }}\n"
         ));
     }
     // Current residual check: always (K-independent, catches cancellation artifacts)

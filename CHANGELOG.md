@@ -104,6 +104,12 @@ shot` 8359 → 6299 (1.33×). The DK rows (single-ended amp, germanium network,
 12AX7 stage) have byte-identical generated code and moved within 2 %.
 
 ### Fixed
+- The dense DK limiter derives the device-voltage step from the proposed point
+  it hands the limiter, so an unchanged limiter reads a damping ratio of exactly
+  1.0. Taken straight from `K·delta`, the step differed from `fl(v + dv) − v`
+  by an ulp and flagged nearly every full Newton step as limited
+  (`alpha = 1 − 1e-16`). With the step test now independent of that flag the
+  change is arithmetic only: 34 of 192 golden renders move NEGLIGIBLY (at most 8.3e-7 V on gold-press-riaa, 1.5e-8 V on everything else, level within 4e-5 dB), 158 are byte-identical; holds, ceiling hits, sub-steps, backward-Euler fallbacks and unsolved samples unchanged on golden and the 0.3/3/10 V DK set; Newton iterations 5885685 -> 5885588.
 - The dense DK Newton certifies an iterate on the undamped device-voltage
   correction every iteration, like the nodal path. Its step test used to be
   skipped whenever a limiter had acted, leaving the current-residual check to

@@ -135,18 +135,25 @@ A scalar damping factor `alpha` bridges the two:
 1. Compute NR delta in current space: J * delta = residual
 2. For each device dimension i:
    dv[i] = -sum_j K[i][j] * delta[j]       // implied voltage change
-   if |dv[i]| > 1e-15:
-     v_proposed = v_old[i] + dv[i]
-     v_limited = limiter(v_proposed, v_old[i])
-     ratio = (v_limited - v_old[i]) / dv[i]
-     ratio = max(ratio, 0.01)               // prevent backward steps
+   v_prop[i] = v_old[i] + dv[i]             // the proposed point, computed ONCE
+   dv[i] = v_prop[i] - v_old[i]             // re-derived from it (see below)
+   if |dv[i]| > 1e-4:
+     v_limited = limiter(v_prop[i], v_old[i])
+     ratio = clamp((v_limited - v_old[i]) / dv[i], 0.0, 1.0)
      alpha = min(alpha, ratio)
 3. Apply uniformly: i_nl -= alpha * delta    // same alpha for all dimensions
 ```
 
 **Key property**: Alpha is scalar (same for all M dimensions). This preserves
 NR consistency — the step direction is maintained, only the magnitude is reduced.
-The 0.01 floor prevents pathological backward steps.
+There is no floor on the ratio (a floor re-admits a fixed fraction of an
+arbitrarily large raw step; a backward ratio clamps to 0). `dv[i]` is
+re-derived from the proposed point so that a limiter which returns its argument
+unchanged gives a ratio of exactly 1.0: with `dv` taken straight from `K·delta`,
+`fl(v_old + dv) − v_old` differs from `dv` by an ulp and nearly every full step
+read as limited (`alpha = 1 − 1e-16`). The nodal and Schur emitters take `dv`
+from the proposed point the same way. The nodal per-device limiter still
+floors its ratio at 0.01 (`device_eval.rs`); see STATUS.md.
 
 ## Global Node-Step Damping (nodal full-LU, Layer 2)
 
