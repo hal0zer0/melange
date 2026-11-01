@@ -335,10 +335,13 @@ impl RustEmitter {
              \x20   /// clamp count and correlation all read healthy — no level-based check\n\
              \x20   /// can see it. This counter is the only witness.\n\
              \x20   ///\n\
-             \x20   /// Worse, the hold is a FIXED POINT under constant input: the next\n\
-             \x20   /// sample re-poses the bit-identical problem from the same `v_prev` and\n\
-             \x20   /// fails identically, so one hard sample can freeze the circuit until\n\
-             \x20   /// the input changes. Measured on a transformer-coupled preamp input\n\
+             \x20   /// Worse, when the input and every source are constant in time the\n\
+             \x20   /// hold is a FIXED POINT: the next sample re-poses the bit-identical\n\
+             \x20   /// problem from the same `v_prev` and fails identically, so one hard\n\
+             \x20   /// sample can freeze the circuit until the input changes. Under a\n\
+             \x20   /// moving source (a time-dependent behavioral source) the frozen state\n\
+             \x20   /// falls further behind each sample instead, and one failure cascades\n\
+             \x20   /// until the source passes back near it. Measured on a transformer-coupled preamp input\n\
              \x20   /// block: 43199\n\
              \x20   /// consecutive held samples, output 22 dB adrift, peak a healthy\n\
              \x20   /// -0.50 dBFS (design review).\n\

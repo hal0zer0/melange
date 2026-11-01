@@ -634,9 +634,11 @@ pub(crate) enum Commands {
         /// When every Newton path fails on a sample, the solver commits the
         /// PREVIOUS state as that sample's output. It is not a solution, and it
         /// is bounded and smooth, so the peak and the waveform both look
-        /// healthy. Under constant input it is also a fixed point: the next
-        /// sample re-poses the identical problem and fails the same way, so one
-        /// hard sample can freeze the render to its end. `simulate` fails on
+        /// healthy. With the input and every source constant in time it is also
+        /// a fixed point: the next sample re-poses the identical problem and
+        /// fails the same way; under a moving source the frozen state falls
+        /// further behind each sample instead. Either way one hard sample can
+        /// freeze the render to its end. `simulate` fails on
         /// this by default. Per-invocation only — a netlist cannot declare it,
         /// because whether a circuit trips depends on the input level, not the
         /// netlist.

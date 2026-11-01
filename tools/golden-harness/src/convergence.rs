@@ -120,10 +120,12 @@ pub enum Class {
     /// Ranked above [`Class::NotConverged`] because it is a different KIND of
     /// claim, not a worse degree of the same one. A capped-but-recovered sample
     /// is a converged solution reached by another consistent scheme; a held
-    /// sample is not a solution at all. Under constant input the hold is also a
-    /// fixed point — the next sample re-poses the identical problem and fails
-    /// identically — so one hard sample can freeze a render to its end
-    /// (design review).
+    /// sample is not a solution at all. When the input and every source are
+    /// constant in time the hold is also a fixed point — the next sample
+    /// re-poses the identical problem and fails identically — so one hard
+    /// sample can freeze a render to its end; under a moving source the frozen
+    /// state falls further behind each sample and one failure cascades until
+    /// the source passes back near it (design review).
     Held,
 }
 
@@ -489,9 +491,11 @@ pub fn print_section(sets: &[(String, &[Health])]) {
         println!("  ##  Every Newton path failed on those samples and the");
         println!("  ##  PREVIOUS state was committed as the answer. Bounded and");
         println!("  ##  smooth, so peak/RMS/clamp/correlation all read healthy.");
-        println!("  ##  Under constant input the hold is a FIXED POINT: the next");
-        println!("  ##  sample re-poses the identical problem and fails the same");
-        println!("  ##  way, so one hard sample can freeze a render to its end.");
+        println!("  ##  With the input and every source constant in time the hold");
+        println!("  ##  is a FIXED POINT: the next sample re-poses the identical");
+        println!("  ##  problem and fails the same way; under a moving source the");
+        println!("  ##  frozen state falls further behind each sample. Either way");
+        println!("  ##  one hard sample can freeze a render to its end.");
         println!("  ##  THIS FAILS THE GATE. (design review)");
         println!("  ######################################################");
         for (label, h) in &held {

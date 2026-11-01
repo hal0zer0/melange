@@ -694,9 +694,12 @@ pub(crate) fn simulate_circuit_source(
                  solution to this circuit.\n\
                  \n\
                  The rendered file looks healthy — a held value is bounded and smooth, so peak, \
-                 RMS and the waveform cannot show it. Under a held input the hold is also a fixed \
-                 point: the next sample re-poses the identical problem and fails identically, so \
-                 one hard sample can freeze the render to its end."
+                 RMS and the waveform cannot show it. With the input and every source constant in \
+                 time the hold is also a fixed point: the next sample re-poses the identical problem \
+                 and fails identically; under a moving source (a time-dependent behavioral source) \
+                 the frozen state falls further behind each sample instead, and one failure cascades \
+                 until the source passes back near it. Either way one hard sample can freeze the \
+                 render to its end."
             );
         }
         let reduced = reduced_exit_count.unwrap_or(0);
