@@ -10,7 +10,8 @@
 # parameters, oversampling at 1x/2x/4x, the wet/dry dry-delay path, every
 # control kind (pot, wiper, gang, switch) on the two-instance layout, each
 # --cpu-baseline, and the "Circuit Noise" switch a --noise build gets, on every
-# layout (once as the only parameter).
+# layout (once as the only parameter). A behavioral-source deck covers the
+# expression emitter (nodal full-LU, backward Euler).
 #
 # Usage: tools/check-generated-plugins.sh [path/to/melange]
 # Env:   CARGO_BUILD_JOBS is honoured, as for any cargo invocation.
@@ -89,6 +90,18 @@ Rsw out 0 100k
 .end
 EOF
 
+cat > "$WORK/bsource.cir" <<'EOF'
+* Behavioral sources: a V={} with a sqrt derivative and an I={} with exp
+* (full-LU, backward Euler; the expression emitter's let-bindings must be
+* warning-free, as every generated plugin is built under -D warnings)
+Rin in 0 100k
+B_env env 0 V={ sqrt(V(in)*V(in) + 1e-9) }
+Renv env out 1k
+B_i out 0 I={ 1e-6*exp(V(env)) }
+Cout out 0 100n
+.end
+EOF
+
 # name | deck | extra compile flags
 # One output node makes a mono plugin, or with --stereo a stereo one of two
 # circuit instances; two output nodes make a stereo one. Ear protection is
@@ -108,6 +121,7 @@ CASES=(
   "stereo-noise-2x|stereo.cir|--oversampling 2 --output-node lo,hi --noise thermal"
   "stereo-dual-1x|controls.cir|--stereo --oversampling 1 --noise thermal --noise-seed 7"
   "stereo-dual-2x-wetdry|controls.cir|--stereo --oversampling 2 --wet-dry-mix --noise thermal"
+  "mono-bsource-noise|bsource.cir|--noise thermal --noise-seed 7"
   "stereo-dual-noparams|split.cir|--stereo --output-node lo --no-level-params --no-ear-protection"
   "portable-v2|clipper.cir|--cpu-baseline x86-64-v2"
   "portable-x86-64|clipper.cir|--cpu-baseline x86-64"

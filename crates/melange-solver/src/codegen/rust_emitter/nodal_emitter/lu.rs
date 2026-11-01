@@ -133,6 +133,10 @@ impl RustEmitter {
         code.push_str("        }\n");
         code.push_str("        let pivot = a[col][col];\n");
         code.push_str("        for row in (col + 1)..N {\n");
+        code.push_str(
+            "            // A zero multiplier only subtracts ±0 from the row: skip it.\n",
+        );
+        code.push_str("            if a[row][col] == 0.0 { continue; }\n");
         code.push_str("            let factor = a[row][col] / pivot;\n");
         code.push_str("            a[row][col] = factor; // Store L factor\n");
         code.push_str("            for j in (col + 1)..N {\n");
@@ -149,13 +153,17 @@ impl RustEmitter {
         code.push_str("    // Forward substitution (L)\n");
         code.push_str("    for i in 1..N {\n");
         code.push_str("        let mut sum = 0.0;\n");
-        code.push_str("        for j in 0..i { sum += a[i][j] * x[j]; }\n");
+        code.push_str(
+            "        for j in 0..i { let l = a[i][j]; if l != 0.0 { sum += l * x[j]; } }\n",
+        );
         code.push_str("        x[i] -= sum;\n");
         code.push_str("    }\n");
         code.push_str("    // Backward substitution (U)\n");
         code.push_str("    for i in (0..N).rev() {\n");
         code.push_str("        let mut sum = 0.0;\n");
-        code.push_str("        for j in (i + 1)..N { sum += a[i][j] * x[j]; }\n");
+        code.push_str(
+            "        for j in (i + 1)..N { let u = a[i][j]; if u != 0.0 { sum += u * x[j]; } }\n",
+        );
         code.push_str("        if a[i][i].abs() < 1e-30 { return false; }\n");
         code.push_str("        x[i] = (x[i] - sum) / a[i][i];\n");
         code.push_str("    }\n\n");
@@ -174,12 +182,16 @@ impl RustEmitter {
         code.push_str("    // Solve LU * dx = r\n");
         code.push_str("    for i in 1..N {\n");
         code.push_str("        let mut sum = 0.0;\n");
-        code.push_str("        for j in 0..i { sum += a[i][j] * r[j]; }\n");
+        code.push_str(
+            "        for j in 0..i { let l = a[i][j]; if l != 0.0 { sum += l * r[j]; } }\n",
+        );
         code.push_str("        r[i] -= sum;\n");
         code.push_str("    }\n");
         code.push_str("    for i in (0..N).rev() {\n");
         code.push_str("        let mut sum = 0.0;\n");
-        code.push_str("        for j in (i + 1)..N { sum += a[i][j] * r[j]; }\n");
+        code.push_str(
+            "        for j in (i + 1)..N { let u = a[i][j]; if u != 0.0 { sum += u * r[j]; } }\n",
+        );
         code.push_str("        r[i] = (r[i] - sum) / a[i][i];\n");
         code.push_str("    }\n\n");
 
@@ -199,6 +211,30 @@ impl RustEmitter {
     ///
     /// Equilibrates, then LU-factorizes with partial pivoting. The factored matrix,
     /// scaling vector `d`, and permutation `perm` are stored for repeated back-solves.
+    ///
+    /// ## Exact-zero skips (here, in `lu_solve` and in `lu_back_solve`)
+    ///
+    /// The dense kernels skip a row update whose multiplier `a[row][col]` is an
+    /// exact zero, and a substitution term whose L/U entry is an exact zero. Both
+    /// are bit-identical to the unskipped loops for finite data:
+    ///
+    /// - Substitution: `sum` starts at `+0.0` and, in round-to-nearest, is never
+    ///   `-0.0` (`+0 + -0 = +0`, `x + -x = +0`). A skipped term is `±0 · x = ±0`,
+    ///   and adding `±0` to a value that is nonzero or `+0` returns it unchanged.
+    /// - Elimination: a zero multiplier subtracts `±0 · a[col][j] = ±0` from each
+    ///   `a[row][j]`, which changes at most the SIGN of an entry that is already
+    ///   zero; the skipped row also keeps its stored zero instead of `±0 / pivot`.
+    ///   A zero's sign never reaches a nonzero value: zeros enter later products
+    ///   (giving `±0`), the substitution sums above, or the pivot search through
+    ///   `abs()`; a zero pivot is rejected (`< 1e-30`) either way.
+    ///
+    /// The partial-pivoting sequence is therefore unchanged and every factor and
+    /// solution bit is reproduced. The only divergence is with non-finite data
+    /// (`0 · inf = NaN` is not formed): a non-finite entry still makes its own
+    /// unknown non-finite, so the solver's NaN/magnitude reset fires as before.
+    /// The win is the circuit matrix's sparsity, which the dense partial-pivoting
+    /// path otherwise pays for at full `N^3/3` (behavioral and `M = 0` decks have
+    /// no sparse schedule; a rejected sparse factor falls back here).
     pub(super) fn emit_nodal_lu_factor(_ir: &CircuitIR, pat: Option<&EquilPattern>) -> String {
         let mut code = String::new();
 
@@ -237,6 +273,10 @@ impl RustEmitter {
         code.push_str("        }\n");
         code.push_str("        let pivot = a[col][col];\n");
         code.push_str("        for row in (col + 1)..N {\n");
+        code.push_str(
+            "            // A zero multiplier only subtracts ±0 from the row: skip it.\n",
+        );
+        code.push_str("            if a[row][col] == 0.0 { continue; }\n");
         code.push_str("            let factor = a[row][col] / pivot;\n");
         code.push_str("            a[row][col] = factor;\n");
         code.push_str("            for j in (col + 1)..N {\n");
@@ -277,7 +317,9 @@ impl RustEmitter {
         code.push_str("    // Forward substitution (L)\n");
         code.push_str("    for i in 1..N {\n");
         code.push_str("        let mut sum = 0.0;\n");
-        code.push_str("        for j in 0..i { sum += a_lu[i][j] * x[j]; }\n");
+        code.push_str(
+            "        for j in 0..i { let l = a_lu[i][j]; if l != 0.0 { sum += l * x[j]; } }\n",
+        );
         code.push_str("        x[i] -= sum;\n");
         code.push_str("    }\n");
 
@@ -285,7 +327,7 @@ impl RustEmitter {
         code.push_str("    // Backward substitution (U)\n");
         code.push_str("    for i in (0..N).rev() {\n");
         code.push_str("        let mut sum = 0.0;\n");
-        code.push_str("        for j in (i + 1)..N { sum += a_lu[i][j] * x[j]; }\n");
+        code.push_str("        for j in (i + 1)..N { let u = a_lu[i][j]; if u != 0.0 { sum += u * x[j]; } }\n");
         code.push_str("        x[i] = (x[i] - sum) / a_lu[i][i];\n");
         code.push_str("    }\n\n");
 

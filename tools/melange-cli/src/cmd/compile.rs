@@ -468,6 +468,7 @@ pub(crate) fn compile_circuit_source(
                 solver_label,
                 solver_override,
                 generated.meta.nodal_sub_path,
+                nodal_sub_path_override,
                 generated.meta.integrator_selection,
             )
         );

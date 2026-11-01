@@ -45,15 +45,28 @@ fn integration_words(integrator: melange_solver::codegen::ir::IntegratorSelectio
 /// The default (non-verbose) route line: which solver and which integrator the
 /// build used, in words a newcomer can read. The reasons and the kernel
 /// measurements behind them are `-v` detail; see [`format_route_info`].
+///
+/// A nodal sub-path reached through `--nodal-subpath` is named as forced: the
+/// solver may still be the automatic choice, but the sub-path was the user's,
+/// and the line must not credit the conditioning guard with it.
 pub(crate) fn route_summary(
     solver_label: &str,
     solver_flag: &str,
     sub_path: Option<melange_solver::codegen::NodalSubPath>,
+    sub_path_override: melange_solver::codegen::NodalSubPathOverride,
     integrator: melange_solver::codegen::ir::IntegratorSelection,
 ) -> String {
+    use melange_solver::codegen::NodalSubPathOverride;
     let mut solver = solver_label.to_string();
     if let Some(sp) = sub_path {
-        solver.push_str(&format!(" ({sp} sub-path)"));
+        if sub_path_override == NodalSubPathOverride::Auto {
+            solver.push_str(&format!(" ({sp} sub-path)"));
+        } else {
+            solver.push_str(&format!(
+                " ({sp} sub-path, forced by --nodal-subpath {})",
+                sub_path_override.as_str()
+            ));
+        }
     }
     let chosen_by = if solver_flag == "auto" {
         "chosen automatically".to_string()

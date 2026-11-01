@@ -71,9 +71,15 @@ impl RustEmitter {
 
         // Nonlinear-device circuits get the Armijo line search + node-KCL
         // residual convergence gate in all three NR loops (trap / sub-step / BE).
-        // Emitted only for m > 0: with no devices there is no exponential
-        // stiffness to limit-cycle on, and the linear LU solve is already exact,
-        // so m == 0 circuits stay byte-identical.
+        // Emitted only for m > 0. For a circuit with neither devices nor
+        // behavioral sources the LU solve is the exact answer and there is
+        // nothing to gate. Behavioral M = 0 decks are NOT linear: radio-fm runs
+        // about 3.3 Newton iterations per sample through its B-source
+        // Jacobians. They go without the gate today only because
+        // `has_behavioral || has_sat_ind` forces `need_refactor = true`, so
+        // every iteration is a true Newton step on a fresh Jacobian and the
+        // stale-chord false convergence the gate exists for cannot occur. Any
+        // chord reuse on behavioral decks must bring the gate with it.
         let use_line_search = m > 0;
 
         let mut code = String::new();
@@ -301,11 +307,9 @@ impl RustEmitter {
         if m > 0 || has_behavioral || has_sat_ind {
             code.push_str("    state.i_nl_prev_prev = state.i_nl_prev;\n");
             code.push_str("    state.i_nl_prev = i_nl;\n");
-            // Persist chord LU for cross-timestep reuse
-            code.push_str("    state.chord_lu = chord_lu;\n");
-            code.push_str("    state.chord_dr = chord_dr;\n");
-            code.push_str("    state.chord_dc = chord_dc;\n");
-            code.push_str("    state.chord_perm = chord_perm;\n");
+            // Persist the chord's frozen Jacobian and flags for cross-timestep
+            // reuse (the factorization itself lives in `state.chord_lu` & co.
+            // and was updated in place).
             code.push_str("    state.chord_j_dev = chord_j_dev;\n");
             if !body_effect_mosfets(ir).is_empty() {
                 code.push_str("    state.chord_body_gmb = chord_body_gmb;\n");

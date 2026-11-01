@@ -9,6 +9,57 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+**What changes rendered audio:** nothing. All 192 golden renders are
+byte-identical to v0.1.19.
+
+**What changes generated code:** every nodal build, full-LU and Schur.
+
+### Performance
+
+- Nodal full-LU builds factor into and back-solve from the chord storage in
+  `CircuitState` in place. The generated code used to copy the N×N LU factor,
+  its scaling vectors and its permutation into locals at the top of every
+  sample and back at the end, refactored or not: 92 KB of memmove per sample
+  at N = 76, about half of the bus compressor's per-sample time.
+- The dense LU kernels (`lu_solve`, `lu_factor`, `lu_back_solve`) skip
+  exact-zero multipliers and exact-zero L/U entries, which is bit-identical
+  for finite data and recovers the matrix's sparsity on builds that have no
+  compile-time sparse schedule (`M = 0` behavioral decks) or whose schedule
+  is rejected at runtime.
+- The nodal KCL residual keeps its running maximum with a compare instead of
+  `f64::max`. `max` must handle a NaN in either operand and cost several
+  instructions per node row, about twice per sample; the running maximum
+  starts at zero and `abs` never yields a NaN-bearing or negative value, so
+  the result is bit-identical. This was most of the bus compressor's loss
+  over v0.1.11..v0.1.12 (the gated exit step itself never fires there).
+- The nodal-Schur exact Newton start's `k_solve` takes a fixed-bound path
+  when `K` has full rank (every build without a shared controlling voltage),
+  so its loops unroll; the same eliminations in the same order. The rank-
+  deficient case keeps the general path.
+
+Measured 2026-11-01 on an AMD Ryzen 9 7950X, one CCD, `bench.sh` best of 7 ×
+2M samples, two interleaved rounds against the v0.1.19 binary, rendered audio
+byte-identical throughout: bus compressor 3108 → 1566 ns/sample (1.98×),
+passive tube EQ 1011 → 970 (1.04×), Wurlitzer preamp 454 → 433 (1.05×),
+`radio-fm --noise full` 2825 → 1636 (1.73×), `radio-am --noise full` 1452 →
+953 (1.52×), `steve-1073-output` 7046 → 5177 (1.36×), `funkyinduct --noise
+shot` 8359 → 6299 (1.33×). The DK rows (single-ended amp, germanium network,
+12AX7 stage) have byte-identical generated code and moved within 2 %.
+
+### Fixed
+
+- A failed dense factorization inside the full-LU Newton loop now marks the
+  chord invalid; a half-eliminated matrix could previously be reused as a
+  factorization by a later back-solve after a sub-step rescue.
+- Behavioral-source `let` bindings in generated code no longer carry
+  redundant outer parentheses, which failed `-D warnings` builds of
+  `radio-am` and `radio-fm` with `unused_parens`; `tools/check-generated-plugins.sh`
+  gains a behavioral-source case so that gate sees the expression emitter.
+- The full-LU routing message under `--nodal-subpath full-lu` says the route
+  was forced instead of naming a conditioning guard that did not fire, and
+  the one-line `Solver:` route summary names a forced sub-path
+  (`forced by --nodal-subpath full-lu`) instead of calling it automatic.
+
 ## [0.1.19] - 2026-10-31
 
 **What changes rendered audio:** every circuit containing a triode. The grid

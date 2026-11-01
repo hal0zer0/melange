@@ -173,15 +173,42 @@ Three optimizations stack to keep this real-time:
    stale factorization with the saved `chord_j_dev`. This trades a few
    extra NR iterations for ~5× factorization savings.
 
-2. **Cross-timestep persistence** — `chord_lu`, `chord_j_dev`, `chord_valid`
-   live in `CircuitState`. Smooth audio signals reuse the previous sample's
-   factorization across many timesteps, dropping factorizations to near-zero.
+2. **Cross-timestep persistence** — `chord_lu`, `chord_dr`, `chord_dc`,
+   `chord_perm`, `chord_j_dev`, `chord_valid` live in `CircuitState` (the
+   backward-Euler instance has its own `chord_be_*` set). Smooth audio signals
+   reuse the previous sample's factorization across many timesteps, dropping
+   factorizations to near-zero. The Newton loop factors into and back-solves
+   from the state fields **in place** (`NewtonSite::chord` names the prefix);
+   only `chord_j_dev`, the flags and `chord_body_gmb` are loaded into locals
+   per sample. Copying the N×N factor to a local and back every sample was
+   2·8·N² bytes of memmove per sample (92 KB at N = 76) and about half of
+   that circuit's per-sample time. A failed `lu_factor` leaves a
+   half-eliminated matrix in the storage and sets `chord_valid = false`, as
+   does the NaN/magnitude reset, so the next solve refactors before any
+   back-solve reads it.
 
 3. **Compile-time sparse LU** — AMD ordering and symbolic factorization run
    at codegen time. The emitter writes `sparse_lu_factor(a, d)` /
    `sparse_lu_back_solve(a_lu, d, b)` as straight-line code on the original
    indices (no runtime permutation). Passive-EQ example: 536 factor FLOPs vs
-   ~22973 dense (43× reduction). See `chord_method.md` in memory.
+   ~22973 dense (43× reduction). See `chord_method.md` in memory. The
+   schedule is built only for `M > 0` builds (`build_nodal.rs`): an `M = 0`
+   behavioral deck runs the dense kernels on every Newton iteration. Static
+   pivoting can also be rejected at runtime by the growth check on every
+   factorization when the symbolic order pivots on a GMIN-sized diagonal
+   (seen on `steve-1073-output`, where `a[15][15]` is 1e-12 and
+   `find_row_swaps` only moves rows whose diagonal is structurally zero); the
+   deck then pays the sparse attempt and the dense refactor each iteration.
+
+4. **Exact-zero skips in the dense kernels** — `lu_solve`, `lu_factor` and
+   `lu_back_solve` skip a row update whose multiplier `a[row][col]` is an
+   exact zero and a substitution term whose L/U entry is an exact zero. This
+   is bit-identical to the full loops for finite data (the skipped terms are
+   `±0`, which cannot change a nonzero value or a `+0` running sum, and a
+   zero's sign never reaches a nonzero value; the pivot is already rejected
+   below 1e-30 before the elimination), so the circuit matrix's sparsity is
+   recovered even where no symbolic schedule exists. The derivation is in
+   the `emit_nodal_lu_factor` doc comment.
 
 Source: `crates/melange-solver/src/lu.rs` and the emit sites in
 `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter/` (`lu.rs` for the

@@ -39,6 +39,9 @@
 //!     and the DK denormal bias `dc_blocked + 1e-20` on the blocker
 //!     feedback.
 //! 13. Non-finite NR iterates read as NOT converged (negated predicates).
+//! 14. A failed in-place chord `lu_factor` invalidates the chord before
+//!     breaking out (the storage holds a half-eliminated matrix, not a
+//!     factorization, once the factor runs in `state.chord_*` directly).
 
 mod support;
 
@@ -259,7 +262,7 @@ fn nodal_solves_add_no_second_gmin() {
             "a_sub[i][j] = ",
             "the sub-step matrix is still built (else this test proves nothing)",
         );
-        for matrix in ["a_sub", "chord_lu", "g_aug", "g_as"] {
+        for matrix in ["a_sub", "chord_lu", "chord_be_lu", "g_aug", "g_as"] {
             let add = format!("{matrix}[i][i] +=");
             assert!(
                 !code.contains(&add),
@@ -751,4 +754,58 @@ fn full_lu_convergence_predicates_treat_nan_as_not_converged() {
         code.contains("if !(r <= tol)"),
         "residual predicate must be NaN-honest (negated form)"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 14. Failed chord factor → chord invalidated before `break`.
+//
+// The chord factorization runs in place in `state.chord_lu` (and
+// `state.chord_be_lu` for the BE instance). When `lu_factor` rejects a pivot
+// it has already overwritten part of that storage with a half-eliminated
+// matrix. Every emitted `if !lu_factor(&mut state.chord_...)` site must
+// therefore clear `chord_valid` before it breaks out of the NR loop, or a
+// later back-solve (this sample's rescue paths or the next sample's chord
+// reuse) would run against garbage.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fix14_failed_chord_factor_invalidates_chord_at_every_site() {
+    let variants = [
+        ("trap-primary", nodal_code(CLIPPER_FULL_LU)),
+        (
+            "be-primary",
+            nodal_code_with(CLIPPER_FULL_LU, |c| c.backward_euler = true),
+        ),
+    ];
+    for (label, code) in &variants {
+        let needle = "if !lu_factor(&mut state.chord_";
+        let mut sites = 0usize;
+        let mut from = 0usize;
+        while let Some(rel) = code[from..].find(needle) {
+            let start = from + rel;
+            // The failure block is two statements long, so the first `}`
+            // after the `if` line closes it.
+            let close = start
+                + code[start..]
+                    .find('}')
+                    .unwrap_or_else(|| panic!("[{label}] unterminated lu_factor block"));
+            let block = &code[start..close];
+            let invalid = block.find("chord_valid = false;").unwrap_or_else(|| {
+                panic!("[{label}] lu_factor failure block does not invalidate the chord:\n{block}")
+            });
+            let brk = block.find("break;").unwrap_or_else(|| {
+                panic!("[{label}] lu_factor failure block has no break:\n{block}")
+            });
+            assert!(
+                invalid < brk,
+                "[{label}] chord must be invalidated BEFORE the break:\n{block}"
+            );
+            sites += 1;
+            from = close;
+        }
+        assert!(
+            sites >= 1,
+            "[{label}] expected at least one in-place chord lu_factor site"
+        );
+    }
 }

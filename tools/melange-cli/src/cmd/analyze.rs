@@ -165,6 +165,7 @@ pub(crate) fn analyze_freq_response(
         built.solver_label,
         solver,
         built.generated.meta.nodal_sub_path,
+        opts.nodal_sub_path_override,
         built.generated.meta.integrator_selection,
     );
     if verbose {

@@ -55,6 +55,13 @@ pub(super) struct NewtonSite {
     pub(super) rhs_const: Option<&'static str>,
     pub(super) sat_alpha: String,
     pub(super) iter_budget: &'static str,
+    /// Prefix of the state fields holding this site's chord factorization
+    /// (`state.chord_` or `state.chord_be_`). The Newton loop factors into and
+    /// back-solves from `{chord}lu` / `{chord}dr` / `{chord}dc` / `{chord}perm`
+    /// in place. They are O(N^2) and O(N); copying them to locals and back on
+    /// every sample, refactored or not, moved 2·8·N^2 bytes per sample (92 KB
+    /// at N = 76, about half of that circuit's per-sample time).
+    pub(super) chord: &'static str,
 }
 
 const SAT_INT_RATE: &str = "state.current_sample_rate * OVERSAMPLING_FACTOR as f64";
@@ -74,6 +81,7 @@ impl NewtonSite {
                 format!("(2.0 * {SAT_INT_RATE})")
             },
             iter_budget: "MAX_ITER",
+            chord: "state.chord_",
         }
     }
 
@@ -91,6 +99,7 @@ impl NewtonSite {
             } else {
                 "MAX_ITER"
             },
+            chord: "state.chord_be_",
         }
     }
 
@@ -361,8 +370,14 @@ pub(super) fn has_be_instance(ir: &CircuitIR) -> bool {
         && !ir.solver_config.backward_euler
 }
 
-/// The cross-timestep chord cache, as `let mut chord_* = {src}*;` locals
-/// (`src` = `state.chord_` or `state.chord_be_`), or stored back.
+/// The cross-timestep chord cache's per-sample scalars and O(M^2) arrays, as
+/// `let mut chord_* = {src}*;` locals (`src` = `state.chord_` or
+/// `state.chord_be_`), or stored back. The factorization itself (`lu`, `dr`,
+/// `dc`, `perm`) is not cached here: the Newton loop works on it in place
+/// (`NewtonSite::chord`), so it holds whatever the last solve wrote. The one
+/// path that used to discard that work, the NaN/magnitude reset (which returns
+/// before the write-back), sets `{src}valid` false, so the next solve
+/// refactors before reading the factor.
 pub(super) fn emit_chord_cache(
     code: &mut String,
     ir: &CircuitIR,
@@ -370,7 +385,7 @@ pub(super) fn emit_chord_cache(
     indent: &str,
     load: bool,
 ) {
-    let mut fields = vec!["lu", "dr", "dc", "perm", "j_dev"];
+    let mut fields = vec!["j_dev"];
     if !body_effect_mosfets(ir).is_empty() {
         fields.push("body_gmb");
     }
@@ -472,6 +487,21 @@ pub(super) fn emit_k_seed_helpers() -> String {
      \x20   let mut y = [0.0f64; M];\n\
      \x20   let mut bmax = 0.0f64;\n\
      \x20   for i in 0..M { y[i] = b[pr[i]]; bmax = bmax.max(b[i].abs()); }\n\
+     \x20   // Full rank (every K without a shared controlling voltage): the same\n\
+     \x20   // eliminations in the same order as the general path below, with\n\
+     \x20   // compile-time loop bounds so they unroll.\n\
+     \x20   if rank == M {\n\
+     \x20       for c in 0..M { for r in c + 1..M { y[r] -= lu[r][c] * y[c]; } }\n\
+     \x20       let mut z = [0.0f64; M];\n\
+     \x20       for c in (0..M).rev() {\n\
+     \x20           let mut acc = y[c];\n\
+     \x20           for q in c + 1..M { acc -= lu[c][q] * z[q]; }\n\
+     \x20           z[c] = acc / lu[c][c];\n\
+     \x20       }\n\
+     \x20       let mut x = [0.0f64; M];\n\
+     \x20       for i in 0..M { x[pc[i]] = z[i]; }\n\
+     \x20       return Some(x);\n\
+     \x20   }\n\
      \x20   for c in 0..rank { for r in c + 1..M { y[r] -= lu[r][c] * y[c]; } }\n\
      \x20   for r in rank..M { if !(y[r].abs() <= 1e-9 * bmax) { return None; } }\n\
      \x20   let mut z = [0.0f64; M];\n\

@@ -240,7 +240,10 @@ fn c1_gates_catch_a_broken_flux_device() {
     // Main-loop Jacobian stamp removed.
     let no_jacobian: String = code
         .lines()
-        .filter(|l| !l.contains("chord_lu[SAT_IND_0_AUG_ROW][SAT_IND_0_AUG_ROW] +="))
+        .filter(|l| {
+            !l.contains("chord_lu[SAT_IND_0_AUG_ROW][SAT_IND_0_AUG_ROW] +=")
+                && !l.contains("chord_be_lu[SAT_IND_0_AUG_ROW][SAT_IND_0_AUG_ROW] +=")
+        })
         .collect::<Vec<_>>()
         .join("\n");
     assert_ne!(
@@ -282,8 +285,9 @@ fn c1_jacobian_deletion_is_caught_at_every_newton_site() {
     let code = nodal_code(C1, "a");
     let jac = |m: &str| format!("{m}[SAT_IND_0_AUG_ROW][SAT_IND_0_AUG_ROW] +=");
     // Sites in emission order: (Jacobian stamp line, its occurrence index).
-    let (chord, sub) = (jac("chord_lu"), jac("g_s"));
-    let sites = [(&chord, 0usize), (&sub, 0), (&chord, 1), (&sub, 1)];
+    // The trapezoidal and BE instances factor into their own chord storage.
+    let (chord, chord_be, sub) = (jac("state.chord_lu"), jac("state.chord_be_lu"), jac("g_s"));
+    let sites = [(&chord, 0usize), (&sub, 0), (&chord_be, 0), (&sub, 1)];
     // The residual line of each site: (flag, occurrence index).
     let residuals = [
         ("max_step_exceeded", 0usize),

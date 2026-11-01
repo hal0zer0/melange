@@ -942,15 +942,34 @@ mod tests {
     fn route_summary_is_one_plain_line() {
         use melange_solver::codegen::ir::IntegratorSelection as Sel;
         use melange_solver::codegen::NodalSubPath;
-        let dk = route_summary("DK", "auto", None, Sel::TrapDefault);
+        use melange_solver::codegen::NodalSubPathOverride as Ovr;
+        let dk = route_summary("DK", "auto", None, Ovr::Auto, Sel::TrapDefault);
         assert_eq!(
             dk,
             "Solver: DK, chosen automatically; trapezoidal integration. (-v for why)"
         );
-        let nodal = route_summary("nodal", "nodal", Some(NodalSubPath::FullLu), Sel::BeAuto);
+        let nodal = route_summary(
+            "nodal",
+            "nodal",
+            Some(NodalSubPath::FullLu),
+            Ovr::Auto,
+            Sel::BeAuto,
+        );
         assert!(nodal.starts_with("Solver: nodal (full-lu sub-path), forced by --solver nodal;"));
         assert!(nodal.contains("backward-Euler integration (chosen automatically)"));
-        for line in [&dk, &nodal] {
+        // `--nodal-subpath full-lu` on an auto-chosen nodal route: the solver
+        // was automatic, the sub-path was not, and the line must say which.
+        let forced = route_summary(
+            "nodal",
+            "auto",
+            Some(NodalSubPath::FullLu),
+            Ovr::FullLu,
+            Sel::BeAuto,
+        );
+        assert!(forced.starts_with(
+            "Solver: nodal (full-lu sub-path, forced by --nodal-subpath full-lu), chosen automatically;"
+        ));
+        for line in [&dk, &nodal, &forced] {
             assert!(!line.contains('\n'));
             for jargon in ["unstable", "ill-conditioned", "spectral", "K matrix"] {
                 assert!(!line.contains(jargon), "{line}");

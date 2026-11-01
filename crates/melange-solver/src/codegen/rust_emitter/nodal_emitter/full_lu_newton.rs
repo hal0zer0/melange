@@ -143,26 +143,32 @@ impl RustEmitter {
             code.push_str("            }\n");
             code.push_str("        }\n");
         }
+        // The factorization lives in the site's state fields and is written
+        // in place (`site.chord`); see `NewtonSite::chord`.
+        let lu = format!("{}lu", site.chord);
+        let dr = format!("{}dr", site.chord);
+        let dc = format!("{}dc", site.chord);
+        let perm = format!("{}perm", site.chord);
         code.push_str("        if need_refactor {\n");
         code.push_str("            chord_j_dev = j_dev;\n");
-        code.push_str(&format!("            chord_lu = {};\n", site.a));
+        code.push_str(&format!("            {lu} = {};\n", site.a));
         {
             // Build transpose of N_i sparsity: for each device dim i, which nodes a are nonzero
-            emit_nodal_jacobian_stamp(code, ir, m, "chord_lu", "            ");
+            emit_nodal_jacobian_stamp(code, ir, m, &lu, "            ");
         }
         // MOSFET body effect: gmb is part of the factored chord, so it is
         // frozen with it and the companion below uses the same values.
         if !body_effect_mosfets(ir).is_empty() {
             code.push_str("            chord_body_gmb = body_gmb;\n");
-            emit_body_gmb_stamp(code, ir, "chord_lu", "chord_body_gmb", "            ");
+            emit_body_gmb_stamp(code, ir, &lu, "chord_body_gmb", "            ");
         }
         // Saturating-inductor Jacobian: alpha·L0 → alpha·L_diff(v[k]) at [k][k].
         if has_sat_ind {
-            emit_sat_ind_jacobian(code, ir, "chord_lu", "v", &site.sat_alpha, "            ");
+            emit_sat_ind_jacobian(code, ir, &lu, "v", &site.sat_alpha, "            ");
         }
         // Behavioral B-source Jacobian: stamp ∂f/∂V directly into G_aug.
         if has_behavioral {
-            emit_behavioral_jacobian(code, ir, "            ");
+            emit_behavioral_jacobian(code, ir, &lu, "            ");
         }
         // Factor: try sparse LU (if available). The sparse schedule uses
         // STATIC (symbolic) pivoting, which can fail at runtime — a pivot
@@ -170,33 +176,40 @@ impl RustEmitter {
         // inside sparse_lu_factor). On rejection, re-factor DENSE with
         // partial pivoting in the same NR iteration on the saved stamped
         // G_aug; `chord_dense` records which factorization the persisted
-        // chord_lu holds so back-solves (this sample and later ones via
+        // chord LU holds so back-solves (this sample and later ones via
         // cross-timestep persistence) dispatch correctly.
         if ir.sparsity.lu.is_some() {
-            code.push_str("            let g_aug_stamped = chord_lu;\n");
-            code.push_str(
-                "            if sparse_lu_factor(&mut chord_lu, &mut chord_dr, &mut chord_dc) {\n",
-            );
+            code.push_str(&format!("            let g_aug_stamped = {lu};\n"));
+            code.push_str(&format!(
+                "            if sparse_lu_factor(&mut {lu}, &mut {dr}, &mut {dc}) {{\n"
+            ));
             code.push_str("                chord_dense = false;\n");
             code.push_str("            } else {\n");
             code.push_str(
                 "                // Sparse factor rejected (tiny pivot or growth-factor check):\n",
             );
             code.push_str("                // re-factor DENSE with partial pivoting in this same iteration.\n");
-            code.push_str("                chord_lu = g_aug_stamped;\n");
+            code.push_str(&format!("                {lu} = g_aug_stamped;\n"));
             // On failure, break with `converged` false; the pessimistic
             // `last_nr_iterations = MAX_ITER` init means the post-loop
             // diagnostic counts this sample exactly once (no direct
-            // increment here — it would double-count).
-            code.push_str("                if !lu_factor(&mut chord_lu, &mut chord_dr, &mut chord_dc, &mut chord_perm) {\n");
+            // increment here — it would double-count). The storage now
+            // holds a half-eliminated matrix, not a factorization: mark the
+            // chord invalid so no later back-solve (this sample's rescue
+            // paths or the next sample) reuses it.
+            code.push_str(&format!(
+                "                if !lu_factor(&mut {lu}, &mut {dr}, &mut {dc}, &mut {perm}) {{\n"
+            ));
+            code.push_str("                    chord_valid = false;\n");
             code.push_str("                    break;\n");
             code.push_str("                }\n");
             code.push_str("                chord_dense = true;\n");
             code.push_str("            }\n");
         } else {
-            code.push_str(
-                    "            if !lu_factor(&mut chord_lu, &mut chord_dr, &mut chord_dc, &mut chord_perm) {\n",
-                );
+            code.push_str(&format!(
+                "            if !lu_factor(&mut {lu}, &mut {dr}, &mut {dc}, &mut {perm}) {{\n"
+            ));
+            code.push_str("                chord_valid = false;\n");
             code.push_str("                break;\n");
             code.push_str("            }\n");
         }
@@ -234,20 +247,22 @@ impl RustEmitter {
             );
             code.push_str("        let mut v_new = rhs_work;\n");
             code.push_str("        if chord_dense {\n");
-            code.push_str("            lu_back_solve(&chord_lu, &chord_dr, &chord_dc, &chord_perm, &mut v_new);\n");
+            code.push_str(&format!(
+                "            lu_back_solve(&{lu}, &{dr}, &{dc}, &{perm}, &mut v_new);\n"
+            ));
             code.push_str("        } else {\n");
-            code.push_str(
-                "            sparse_lu_back_solve(&chord_lu, &chord_dr, &chord_dc, &mut v_new);\n",
-            );
+            code.push_str(&format!(
+                "            sparse_lu_back_solve(&{lu}, &{dr}, &{dc}, &mut v_new);\n"
+            ));
             code.push_str("        }\n\n");
         } else {
             code.push_str(
                 "        // 2e. Solve with stored LU factors (chord: O(N²) back-solve)\n",
             );
             code.push_str("        let mut v_new = rhs_work;\n");
-            code.push_str(
-                    "        lu_back_solve(&chord_lu, &chord_dr, &chord_dc, &chord_perm, &mut v_new);\n\n",
-                );
+            code.push_str(&format!(
+                "        lu_back_solve(&{lu}, &{dr}, &{dc}, &{perm}, &mut v_new);\n\n"
+            ));
         }
 
         // Op-amp output clamping inside NR loop — prevents physically impossible

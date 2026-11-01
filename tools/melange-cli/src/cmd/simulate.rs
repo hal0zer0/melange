@@ -325,6 +325,7 @@ pub(crate) fn simulate_circuit_source(
         built.solver_label,
         opts.solver,
         built.generated.meta.nodal_sub_path,
+        opts.nodal_sub_path_override,
         built.generated.meta.integrator_selection,
     );
     if verbose {

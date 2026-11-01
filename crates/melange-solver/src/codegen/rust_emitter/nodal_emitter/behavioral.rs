@@ -2,7 +2,7 @@
 
 use crate::codegen::ir::{BehavioralSourceIR, CircuitIR};
 use crate::codegen::rust_emitter::helpers::fmt_f64;
-use crate::expr::{ExprResolver, Var};
+use crate::expr::{strip_outer_parens, ExprResolver, Var};
 
 /// Resolves behavioral-expression leaves to generated-Rust strings against the
 /// nodal NR loop's `v[]` voltage vector. Node indices in
@@ -95,7 +95,10 @@ pub(super) fn emit_behavioral_evals(code: &mut String, ir: &CircuitIR, indent: &
             params: &params,
         };
         let f = b.expr.simplify();
-        code.push_str(&format!("{indent}let bsrc_{si}_f = {};\n", f.to_rust(&res)));
+        code.push_str(&format!(
+            "{indent}let bsrc_{si}_f = {};\n",
+            strip_outer_parens(&f.to_rust(&res))
+        ));
         for (name, col) in bsrc_ref_cols(b) {
             // Lagged Jacobian: ddt is treated as constant (∂ddt/∂v = 0) so the
             // discriminator's inv_dt-scaled partials don't ill-condition the NR.
@@ -104,24 +107,30 @@ pub(super) fn emit_behavioral_evals(code: &mut String, ir: &CircuitIR, indent: &
             let g = b.expr.diff_jacobian(&Var::Node(name.clone())).simplify();
             code.push_str(&format!(
                 "{indent}let bsrc_{si}_g_{col} = {};\n",
-                g.to_rust(&res)
+                strip_outer_parens(&g.to_rust(&res))
             ));
         }
     }
 }
 
-/// Stamp the behavioral Jacobian into `chord_lu` (= G_aug).
+/// Stamp the behavioral Jacobian into `target` (the site's chord LU storage,
+/// = G_aug).
 ///
 /// - `I={}` (current source): `∂f/∂V(k)` adds at row n+, subtracts at row n-.
 /// - `V={}` (voltage constraint `V(n+)-V(n-)=f`): `−∂f/∂V(k)` into the
 ///   augmented constraint row `r` (the `±1` on n+/n- is already in base G).
-pub(super) fn emit_behavioral_jacobian(code: &mut String, ir: &CircuitIR, indent: &str) {
+pub(super) fn emit_behavioral_jacobian(
+    code: &mut String,
+    ir: &CircuitIR,
+    target: &str,
+    indent: &str,
+) {
     for (si, b) in ir.behavioral_sources.iter().enumerate() {
         if b.is_voltage {
             let r = b.aug_row.expect("V={} source must have an aug_row");
             for (_name, col) in bsrc_ref_cols(b) {
                 code.push_str(&format!(
-                    "{indent}chord_lu[{r}][{col}] -= bsrc_{si}_g_{col};\n"
+                    "{indent}{target}[{r}][{col}] -= bsrc_{si}_g_{col};\n"
                 ));
             }
         } else {
@@ -129,13 +138,13 @@ pub(super) fn emit_behavioral_jacobian(code: &mut String, ir: &CircuitIR, indent
             for (_name, col) in bsrc_ref_cols(b) {
                 if np > 0 {
                     code.push_str(&format!(
-                        "{indent}chord_lu[{}][{col}] += bsrc_{si}_g_{col};\n",
+                        "{indent}{target}[{}][{col}] += bsrc_{si}_g_{col};\n",
                         np - 1
                     ));
                 }
                 if nm > 0 {
                     code.push_str(&format!(
-                        "{indent}chord_lu[{}][{col}] -= bsrc_{si}_g_{col};\n",
+                        "{indent}{target}[{}][{col}] -= bsrc_{si}_g_{col};\n",
                         nm - 1
                     ));
                 }
@@ -190,6 +199,7 @@ pub(super) fn emit_behavioral_time_update(code: &mut String, ir: &CircuitIR, ind
         };
         for (slot, is_idt, inner) in b.expr.collect_time_ops() {
             let x = inner.simplify().to_rust(&res);
+            let x = strip_outer_parens(&x);
             code.push_str(&format!("{indent}let bsrc_slot_{slot}_x = {x};\n"));
             if is_idt {
                 code.push_str(&format!(

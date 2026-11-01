@@ -538,9 +538,21 @@ impl RustEmitter {
                         "behavioral B-sources are stamped in node space only on the full-LU path"
                     }
                 );
+            } else if full_lu_trigger == "override" {
+                // Forced by `--nodal-subpath full-lu` on a circuit auto would
+                // route Schur: no conditioning guard fired, so name none.
+                log::warn!(
+                    "Nodal: using full N×N LU NR (forced by --nodal-subpath full-lu; no \
+                     conditioning guard selected it)"
+                );
             } else if has_positive_k_with_current {
                 log::warn!(
                     "Nodal: using full N×N LU NR (positive K diagonal with current injection)"
+                );
+            } else if k_diag_min < -1e12 {
+                log::warn!(
+                    "Nodal: using full N×N LU NR (K_diag_min={:.2e} < -1e12, extreme negative K diagonal)",
+                    k_diag_min
                 );
             } else if k_degenerate {
                 log::warn!(
@@ -569,10 +581,9 @@ impl RustEmitter {
                     k_max_abs
                 );
             } else {
-                log::warn!(
-                    "Nodal: using full N×N LU NR (K_diag_min={:.1}, ill-conditioned)",
-                    k_diag_min
-                );
+                // Not reachable while the branches above mirror `full_lu_trigger`;
+                // kept so a new route condition cannot print a false reason.
+                log::warn!("Nodal: using full N×N LU NR (trigger: {full_lu_trigger})");
             }
             code.push_str(&Self::emit_nodal_lu_solve(ir, equil_pat.as_ref()));
             code.push_str(&Self::emit_nodal_lu_factor(ir, equil_pat.as_ref()));

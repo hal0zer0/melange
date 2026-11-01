@@ -1361,13 +1361,16 @@ impl Expr {
             Div(a, b) => format!("({} / {})", a.to_rust(r), b.to_rust(r)),
             Func1(f, a) => {
                 let x = a.to_rust(r);
+                // The `*Deriv` arms bind `x` with `let`; a parenthesized
+                // binary `x` there is `unused_parens` under `-D warnings`.
+                let bound = strip_outer_parens(&x);
                 match f {
                     // sqrt guarded at 0 (the limiter already adds 1e-9 inside)
                     UnaryFn::Sqrt => format!("({x}).max(0.0).sqrt()"),
                     // Paired derivative of the domain-clamped sqrt: 0 where
                     // the value is flat. Matches interpreter `safe_sqrt_deriv`.
                     UnaryFn::SqrtDeriv => format!(
-                        "({{ let bsx: f64 = {x}; \
+                        "({{ let bsx: f64 = {bound}; \
                          if bsx > 0.0 {{ 0.5 / bsx.sqrt() }} else {{ 0.0 }} }})"
                     ),
                     UnaryFn::Abs => format!("({x}).abs()"),
@@ -1376,14 +1379,14 @@ impl Expr {
                     // Paired derivative of the clamped exp: 0 where the value
                     // is flat. Matches interpreter `safe_exp_deriv`.
                     UnaryFn::ExpDeriv => format!(
-                        "({{ let bsx: f64 = {x}; \
+                        "({{ let bsx: f64 = {bound}; \
                          if bsx >= -40.0 && bsx <= 40.0 {{ bsx.exp() }} else {{ 0.0 }} }})"
                     ),
                     UnaryFn::Ln => format!("({x}).max(1e-300).ln()"),
                     // Paired derivative of the domain-clamped ln: 0 where the
                     // value is flat. Matches interpreter `safe_ln_deriv`.
                     UnaryFn::LnDeriv => format!(
-                        "({{ let bsx: f64 = {x}; \
+                        "({{ let bsx: f64 = {bound}; \
                          if bsx > 1e-300 {{ 1.0 / bsx }} else {{ 0.0 }} }})"
                     ),
                     UnaryFn::Sin => format!("({x}).sin()"),
@@ -1471,6 +1474,36 @@ fn fmt_f64(v: f64) -> String {
     } else {
         format!("{:e}", v)
     }
+}
+
+/// Strip one pair of parentheses that encloses the WHOLE expression string.
+///
+/// `Expr::to_rust` parenthesizes every binary node, so a top-level binary
+/// expression arrives as `(a + b)`. Bound as `let x = (a + b);` that trips
+/// `unused_parens`, which a `-D warnings` build of the generated code (CI's
+/// `RUSTFLAGS`, and any user's) turns into an error. Only an outermost pair
+/// whose `(` matches the final `)` is removed, so `(a) + (b)` is untouched;
+/// the expression tree, and so the arithmetic, is unchanged.
+pub(crate) fn strip_outer_parens(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'(' || bytes[bytes.len() - 1] != b')' {
+        return s;
+    }
+    let mut depth = 0usize;
+    for (i, &c) in bytes.iter().enumerate() {
+        match c {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                // The opening paren closed before the end: not an outer pair.
+                if depth == 0 && i != bytes.len() - 1 {
+                    return s;
+                }
+            }
+            _ => {}
+        }
+    }
+    &s[1..s.len() - 1]
 }
 
 #[cfg(test)]
@@ -2098,5 +2131,22 @@ mod tests {
         assert_eq!(e, Expr::NodeV("a".to_string()));
         let z = parse("V(a) * 0").simplify();
         assert!(z.is_zero());
+    }
+}
+
+#[cfg(test)]
+mod strip_outer_parens_tests {
+    use super::strip_outer_parens;
+
+    #[test]
+    fn removes_only_a_pair_that_encloses_the_whole_string() {
+        assert_eq!(strip_outer_parens("(a + b)"), "a + b");
+        assert_eq!(strip_outer_parens("((a + b) * c)"), "(a + b) * c");
+        // Two sibling groups: the first `(` closes before the end.
+        assert_eq!(strip_outer_parens("(a) + (b)"), "(a) + (b)");
+        assert_eq!(strip_outer_parens("(v[4]).cos()"), "(v[4]).cos()");
+        assert_eq!(strip_outer_parens("x"), "x");
+        assert_eq!(strip_outer_parens(""), "");
+        assert_eq!(strip_outer_parens("()"), "");
     }
 }

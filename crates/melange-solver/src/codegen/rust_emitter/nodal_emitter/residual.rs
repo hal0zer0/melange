@@ -81,7 +81,8 @@ pub(super) fn emit_kcl_residual_fns(
             tail.push_str("            let a = t.abs(); if a > den { den = a; }\n");
             tail.push_str("        }\n");
             tail.push_str("        norm_sq += acc * acc;\n");
-            tail.push_str("        max_abs = max_abs.max(acc.abs());\n");
+            // NaN-free max (see emit_sparse_a_residual_matvec).
+            tail.push_str("        { let a = acc.abs(); if a > max_abs { max_abs = a; } }\n");
             // Per-node relative KCL tolerance: same RELTOL=1e-3 as the
             // device and sat-inductor residual checks, with a 1e-9 A
             // absolute floor so a node carrying ~zero net current does not
@@ -262,7 +263,14 @@ fn emit_sparse_a_residual_matvec(
             ));
         }
         code.push_str(&format!("{indent}    norm_sq += acc * acc;\n"));
-        code.push_str(&format!("{indent}    max_abs = max_abs.max(acc.abs());\n"));
+        // Running max of |acc| as a compare, not `f64::max`: `max` must handle a
+        // NaN in either operand and lowers to several instructions per row
+        // (+8 % instructions per sample on a 70-row full-LU deck). `max_abs`
+        // starts at 0 and is never NaN; a NaN `acc` leaves it unchanged under
+        // both forms, and `abs` never yields -0, so the value is bit-identical.
+        code.push_str(&format!(
+            "{indent}    {{ let a = acc.abs(); if a > max_abs {{ max_abs = a; }} }}\n"
+        ));
         code.push_str(&format!(
             "{indent}    if !(acc.abs() <= 1e-3 * den + 1e-9) {{ ok = false; }}\n"
         ));
