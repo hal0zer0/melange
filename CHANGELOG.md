@@ -93,6 +93,16 @@ shot` 8359 → 6299 (1.33×). The DK rows (single-ended amp, germanium network,
   the rows add in quadrature, and the infinity norm the chord exit step
   reads stays KCL-only. The rectifier supply converges every sample, the
   hard one in 4 iterations; the centre-tapped rectifier holds none.
+- A build whose behavioral source forces backward Euler ships the
+  backward-Euler Newton budget. The budget was tuned before the forcing, for
+  the trapezoidal system, and kept its +200 bonus for a DK-kernel trapezoidal
+  spectral radius above 0.999, an operator the build never runs; so the
+  shipped budget moved with the host rate and the component scale (one
+  rectifier deck: 100 iterations at 48 kHz, 250 at 44.1 kHz, 250 at 100×
+  impedance). Such builds now take the backward-Euler budget exactly as the
+  automatic promotion does (the nodal floor of 100 here); an explicit
+  `--max-iter` still sets it. No golden-corpus deck changes; the two known
+  decks that drop from 250 to 100 render with no held sample.
 - A behavioral current source (`I={}`) beside nonlinear devices now converges.
   The node-KCL residual that decides convergence and steers the line search
   read the base matrices, where the source's current only appears as a

@@ -221,7 +221,24 @@ impl CircuitIR {
             sample_rate,
             alpha,
             tolerance: config.tolerance,
-            max_iterations: config.max_iterations,
+            // The Newton budget matches the integrator that ships. `build.rs`
+            // tunes one budget for the trapezoidal system and one for backward
+            // Euler (`max_iterations_be_promoted`); a behavioral source forces
+            // backward Euler here, after that tuning, so the build takes the
+            // backward-Euler budget exactly as the auto-BE promotion does. The
+            // trapezoidal budget carries a +200 stiffness bonus keyed to the
+            // DK kernel's trapezoidal spectral radius, which a backward-Euler
+            // build never runs; inheriting it made the shipped budget depend
+            // on the host rate and the component scale (100 at 48 kHz, 250 at
+            // 44.1 kHz on one rectifier deck). An explicit `--max-iter` sets
+            // both budgets.
+            max_iterations: if matches!(integrator_selection, IntegratorSelection::BeBehavioral) {
+                config
+                    .max_iterations_be_promoted
+                    .unwrap_or(config.max_iterations)
+            } else {
+                config.max_iterations
+            },
             input_node: config.input_node,
             output_nodes: config.output_nodes.clone(),
             input_resistance: config.input_resistance,
