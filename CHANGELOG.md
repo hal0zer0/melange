@@ -104,6 +104,13 @@ shot` 8359 → 6299 (1.33×). The DK rows (single-ended amp, germanium network,
 12AX7 stage) have byte-identical generated code and moved within 2 %.
 
 ### Fixed
+- The nodal per-device voltage limiter no longer floors its damping ratio at
+  1 %. Every pnjlim/fetlim branch returns a point between the current and the
+  proposed voltage, so the floor only ever bound when a limiter shrank a step
+  by more than 100×, which is exactly a junction overshoot (a +99 V raw step
+  at 0.6 V: pnjlim allows 0.21 V, the floor re-admitted 0.99 V at e^38 times
+  the junction current, for the line search to walk back). The DK and Schur
+  limiters already clamped at 0. golden vs the previous commit 189 of 192 renders byte-identical, 3 NEGLIGIBLE (wurli-power-amp sweep 19 mV with one ceiling hit and one sub-step fewer and 171 fewer line-search failures; wurli-power-amp step 2e-11 V; warpony sweep 8e-7 V); hard-drive set ceiling hits 3836 → 3438 and sub-steps 4236 → 3524, of which −397 / −711 on opamp-pin-control at 10 V, a hold cascade (20949 of 48000 held, 98.5 % via the backward-Euler fallback without a ceiling) whose hold count moves 20949 → 21045 as the cascade re-poses from different states — its first divergence (sample 30) is an iterate 4e-10 V apart on the same ceiling → sub-step path, and at the first hold divergence (sample 128) the floorless run recovers where the floored one holds; steve-1073-preamp 3 V one ceiling hit and one sub-step fewer; no other render moves.
 - The dense DK limiter derives the device-voltage step from the proposed point
   it hands the limiter, so an unchanged limiter reads a damping ratio of exactly
   1.0. Taken straight from `K·delta`, the step differed from `fl(v + dv) − v`

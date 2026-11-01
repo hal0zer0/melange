@@ -152,8 +152,11 @@ re-derived from the proposed point so that a limiter which returns its argument
 unchanged gives a ratio of exactly 1.0: with `dv` taken straight from `K·delta`,
 `fl(v_old + dv) − v_old` differs from `dv` by an ulp and nearly every full step
 read as limited (`alpha = 1 − 1e-16`). The nodal and Schur emitters take `dv`
-from the proposed point the same way. The nodal per-device limiter still
-floors its ratio at 0.01 (`device_eval.rs`); see STATUS.md.
+from the proposed point the same way. The nodal per-device limiter clamps
+its ratio the same way (`device_eval.rs`); every pnjlim/fetlim branch returns
+a point strictly between the current and the proposed voltage, so the ratio
+is in (0, 1] and a floor would only ever overrule a limiter that shrank a
+step by more than 100×, which is pnjlim's job on a junction overshoot.
 
 ## Global Node-Step Damping (nodal full-LU, Layer 2)
 
@@ -238,7 +241,7 @@ path applies the same rule to its node-step test.
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | NR oscillation (period-2) | No voltage limiting | Add pnjlim/fetlim |
-| NR converges but wrong point (per-device) | Alpha floor too high | Check 0.01 minimum |
+| NR path bloats after a junction overshoot | A floor on the per-device damping ratio re-admits ≥1 % of an arbitrarily large raw step | No floor: `clamp(0.0, 1.0)` on every path (fixed 2026-11-01) |
 | Internal nodes diverge to kV, then false-converge | Node-step damping floored (`.max(0.01)`) | Bound the step, not the ratio — divide uncapped (fixed 2026-08-03) |
 | Slow convergence (>50 iters) | Limiting too aggressive | Check vcrit computation |
 | Explosion after removing a device | Missing limiter dispatch | Add case to `limit_voltage()` |

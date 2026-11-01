@@ -816,8 +816,16 @@ impl RustEmitter {
                     }
                 }
 
+                // clamp(0.0, 1.0), not (0.01, 1.0): every branch of pnjlim and fetlim
+                // returns a point strictly between v_nl_current and the proposal, so
+                // the ratio is in (0, 1] and a floor only ever binds when a limiter
+                // shrinks a step by more than 100× — which is pnjlim's job on a
+                // junction overshoot (a +99 V raw step at 0.6 V: pnjlim allows
+                // 0.21 V, a 1 % floor re-admits 0.99 V at e^38 times the current).
+                // The DK and Schur limiters already clamp at 0; see
+                // VOLTAGE_LIMITING.md "Scalar Damping Factor".
                 code.push_str(&format!(
-                    "{indent}        let ratio = ((v_lim - v_nl_current) / dv).clamp(0.01, 1.0);\n\
+                    "{indent}        let ratio = ((v_lim - v_nl_current) / dv).clamp(0.0, 1.0);\n\
                      {indent}        if ratio < alpha {{ alpha = ratio; }}\n\
                      {indent}    }}\n\
                      {indent}}}\n"
