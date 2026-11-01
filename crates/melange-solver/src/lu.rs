@@ -312,6 +312,64 @@ pub fn find_row_swaps(
     swaps
 }
 
+/// Plan the compile-time sparse LU schedule for `pattern`.
+///
+/// The AMD order and the symbolic elimination are computed on `pattern`, the
+/// full set of positions that can hold a value. The static row swaps are
+/// decided on `swap_pattern`, which is `pattern` minus entries that hold a
+/// value but must not be counted on as a pivot: the GMIN floor on a node
+/// diagonal that has no stamp of its own (`build_nodal`). Deciding swaps on
+/// the floored pattern never moves such a row, so the static order pivots on
+/// the 1e-12 floor; tracing the elimination on `swap_pattern` instead would
+/// drop the floor entries the swapped rows still carry.
+///
+/// `swap_pattern` must be a subset of `pattern` (row by row).
+pub fn plan_sparse_lu(pattern: &[Vec<usize>], swap_pattern: &[Vec<usize>], n: usize) -> LuSparsity {
+    debug_assert!(
+        swap_pattern
+            .iter()
+            .zip(pattern)
+            .all(|(s, p)| s.iter().all(|c| p.contains(c))),
+        "swap pattern must be a subset of the elimination pattern"
+    );
+    let elim_order = amd_ordering(pattern, n);
+    let row_swaps = find_row_swaps(swap_pattern, &elim_order, n);
+    symbolic_lu(pattern, &elim_order, &row_swaps, n)
+}
+
+/// Node diagonals that hold nothing but the GMIN floor, for `plan_sparse_lu`'s
+/// swap pattern (`build_nodal`). One flag per node row, matrix-indexed:
+/// - `unstamped`: the G diagonal held no stamp before the floor was applied;
+/// - `floor_value`: it still holds exactly the floor value (nothing was added
+///   to it after the floor);
+/// - `c_stamped`: a capacitor or inductor companion stamps it;
+/// - `setter_stamped`: a pot, wiper, `.runtime R` or switch component can
+///   stamp it. A setter position is a stamp whatever its nominal value: the
+///   runtime value may be anything the setter range allows, so the diagonal
+///   is never floor-only, even when its nominal conductance is zero.
+///
+/// A diagonal is floor-only when it is unstamped, holds the floor value and
+/// has neither a C stamp nor a setter position. Device and behavioral stamps
+/// are not an input here: the caller rebuilds the swap pattern from the A
+/// pattern with these diagonals cleared, and `compute_g_aug_pattern` adds
+/// those stamps back.
+pub fn floor_only_diagonals(
+    unstamped: &[bool],
+    floor_value: &[bool],
+    c_stamped: &[bool],
+    setter_stamped: &[bool],
+) -> Vec<usize> {
+    debug_assert!(
+        unstamped.len() == floor_value.len()
+            && unstamped.len() == c_stamped.len()
+            && unstamped.len() == setter_stamped.len(),
+        "floor-only classification needs one flag per node row in every input"
+    );
+    (0..unstamped.len())
+        .filter(|&i| unstamped[i] && floor_value[i] && !c_stamped[i] && !setter_stamped[i])
+        .collect()
+}
+
 /// Symbolic LU factorization in original index space.
 ///
 /// Traces Gaussian elimination symbolically with AMD ordering to find:
@@ -402,6 +460,27 @@ pub fn symbolic_lu(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A setter position is a stamp whatever its nominal value: a pot whose
+    /// nominal conductance stamps nothing must still keep its diagonal out
+    /// of the floor-only set, or the static order could pivot on a value the
+    /// setter later changes.
+    #[test]
+    fn test_floor_only_diagonals_setter_position_is_a_stamp() {
+        // Row 0: floor-only. Row 1: setter on a nominal-0 diagonal. Row 2: C
+        // stamp. Row 3: stamped before the floor.
+        let unstamped = [true, true, true, false];
+        let floor_value = [true, true, true, false];
+        let c_stamped = [false, false, true, false];
+        let setter = [false, true, false, false];
+        assert_eq!(
+            floor_only_diagonals(&unstamped, &floor_value, &c_stamped, &setter),
+            vec![0]
+        );
+        // A stamp added after the floor (value no longer exactly the floor)
+        // disqualifies the diagonal too.
+        assert!(floor_only_diagonals(&[true], &[false], &[false], &[false]).is_empty());
+    }
     use crate::device_types::{DeviceParams, DeviceType, DiodeParams};
 
     // ── compute_g_aug_pattern tests ──────────────────────────────────
@@ -772,6 +851,152 @@ mod tests {
                 x_dense[i]
             );
         }
+    }
+
+    /// Execute a sparse LU schedule on dense values, mirroring the emitted
+    /// `sparse_lu_factor` / `sparse_lu_back_solve` (without equilibration).
+    /// Returns the solution and the element growth `max |LU| / max |A|`.
+    fn run_schedule(a_orig: &[Vec<f64>], b_orig: &[f64], plan: &LuSparsity) -> (Vec<f64>, f64) {
+        let max_in = a_orig.iter().flatten().fold(0.0f64, |m, v| m.max(v.abs()));
+        let mut a = a_orig.to_vec();
+        for &(r1, r2) in &plan.row_swaps {
+            a.swap(r1, r2);
+        }
+        for op in &plan.ops {
+            match op {
+                LuOp::DivPivot { row, col } => a[*row][*col] /= a[*col][*col],
+                LuOp::SubMul { row, col, j } => a[*row][*j] -= a[*row][*col] * a[*col][*j],
+            }
+        }
+        let growth = a.iter().flatten().fold(0.0f64, |m, v| m.max(v.abs())) / max_in;
+        let mut x = b_orig.to_vec();
+        for &(r1, r2) in &plan.row_swaps {
+            x.swap(r1, r2);
+        }
+        for &(row, col) in &plan.l_nnz {
+            x[row] -= a[row][col] * x[col];
+        }
+        let mut u_by_pivot: std::collections::HashMap<usize, Vec<usize>> =
+            std::collections::HashMap::new();
+        for &(row, col) in &plan.u_nnz {
+            if col != row {
+                u_by_pivot.entry(row).or_default().push(col);
+            }
+        }
+        for &pivot in plan.elim_order.iter().rev() {
+            if let Some(cols) = u_by_pivot.get(&pivot) {
+                for &c in cols {
+                    x[pivot] -= a[pivot][c] * x[c];
+                }
+            }
+            x[pivot] /= a[pivot][pivot];
+        }
+        (x, growth)
+    }
+
+    /// A node whose only diagonal content is the GMIN floor (an unnamed
+    /// shared-core transformer node: G row {GMIN, +1, -1}, no C entry, no
+    /// device column) must not be used as a static pivot.
+    ///
+    /// Shape: row 0 is that node, coupled only to the branch currents 3 and 4;
+    /// rows 3 and 4 are mutually coupled inductor branches (alpha*L diagonal);
+    /// rows 1 and 2 are resistive nodes; row 5 is a voltage-source constraint
+    /// row (structurally zero diagonal). Minimum degree eliminates row 5 and
+    /// then row 0 before any fill reaches row 0's diagonal, so on the floored
+    /// pattern the static order divides by 1e-12 and the multipliers in rows
+    /// 3 and 4 grow to ~1e12 — the emitted growth check (ceiling 1e8) rejects
+    /// that factorization every time. Deciding the swaps on the pattern
+    /// without the floor moves a branch row onto the diagonal instead.
+    #[test]
+    fn test_plan_sparse_lu_gmin_floor_node_is_not_a_static_pivot() {
+        let n = 6;
+        let gmin = 1e-12;
+        #[rustfmt::skip]
+        let a: Vec<Vec<f64>> = vec![
+            vec![gmin, 0.0,  0.0,  1.0, -1.0, 0.0], // floor-only node
+            vec![0.0,  2.0, -1.0, -1.0,  0.0, 1.0], // node a
+            vec![0.0, -1.0,  2.0,  0.0,  1.0, 0.0], // node b
+            vec![-1.0, 1.0,  0.0, -2.0, -0.5, 0.0], // branch 1 (a -> floor node)
+            vec![1.0,  0.0, -1.0, -0.5, -3.0, 0.0], // branch 2 (floor node -> b)
+            vec![0.0,  1.0,  0.0,  0.0,  0.0, 0.0], // VS constraint row
+        ];
+        let pattern: Vec<Vec<usize>> = a
+            .iter()
+            .map(|row| (0..n).filter(|&j| row[j] != 0.0).collect())
+            .collect();
+        let mut unfloored = pattern.clone();
+        unfloored[0].retain(|&c| c != 0);
+
+        // Non-vacuous: the floor-only row is eliminated before fill reaches it.
+        let order = amd_ordering(&pattern, n);
+        assert_eq!(
+            &order[..2],
+            &[5, 0],
+            "fixture must eliminate row 0 early: {order:?}"
+        );
+
+        let floored = plan_sparse_lu(&pattern, &pattern, n);
+        let unfloored_plan = plan_sparse_lu(&pattern, &unfloored, n);
+        assert!(
+            floored.row_swaps.iter().all(|&(r1, r2)| r1 != 0 && r2 != 0),
+            "the floored pattern never moves the floor-only row: {:?}",
+            floored.row_swaps
+        );
+        assert!(
+            unfloored_plan.row_swaps.iter().any(|&(r1, _)| r1 == 0),
+            "the floor-only row must be swapped off the diagonal: {:?}",
+            unfloored_plan.row_swaps
+        );
+        // The elimination is still traced on the full pattern, so it
+        // eliminates the floor entry the swapped row carries.
+        assert_eq!(unfloored_plan.elim_order, floored.elim_order);
+
+        let b: Vec<f64> = (1..=n).map(|i| i as f64).collect();
+        let x_dense = crate::dc_op::solve_linear(&a, &b).unwrap();
+        let (_, growth_floored) = run_schedule(&a, &b, &floored);
+        assert!(
+            growth_floored > 1e8,
+            "pivoting on the floor must blow past the runtime growth ceiling, got {growth_floored:.3e}"
+        );
+        let (x, growth) = run_schedule(&a, &b, &unfloored_plan);
+        assert!(
+            growth < 1e2,
+            "growth under the repaired order: {growth:.3e}"
+        );
+        for i in 0..n {
+            assert!(
+                (x[i] - x_dense[i]).abs() <= 1e-12 * x_dense[i].abs().max(1.0),
+                "x[{i}] = {} vs dense {}",
+                x[i],
+                x_dense[i]
+            );
+        }
+    }
+
+    /// `plan_sparse_lu` with identical patterns is exactly the
+    /// AMD -> find_row_swaps -> symbolic_lu pipeline.
+    #[test]
+    fn test_plan_sparse_lu_same_pattern_matches_pipeline() {
+        let pattern: Vec<Vec<usize>> = vec![
+            vec![0, 4, 5],
+            vec![1, 5],
+            vec![2, 6],
+            vec![3, 7],
+            vec![0],
+            vec![0, 1],
+            vec![2, 6],
+            vec![3, 7],
+        ];
+        let n = 8;
+        let order = amd_ordering(&pattern, n);
+        let swaps = find_row_swaps(&pattern, &order, n);
+        let direct = symbolic_lu(&pattern, &order, &swaps, n);
+        let planned = plan_sparse_lu(&pattern, &pattern, n);
+        assert_eq!(planned.elim_order, direct.elim_order);
+        assert_eq!(planned.row_swaps, direct.row_swaps);
+        assert_eq!(planned.l_nnz, direct.l_nnz);
+        assert_eq!(planned.u_nnz, direct.u_nnz);
+        assert_eq!(planned.factor_flops, direct.factor_flops);
     }
 
     // ── symbolic_lu tests ───────────────────────────────────────────

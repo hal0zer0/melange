@@ -192,13 +192,31 @@ Three optimizations stack to keep this real-time:
    `sparse_lu_back_solve(a_lu, d, b)` as straight-line code on the original
    indices (no runtime permutation). Passive-EQ example: 536 factor FLOPs vs
    ~22973 dense (43× reduction). See `chord_method.md` in memory. The
-   schedule is built only for `M > 0` builds (`build_nodal.rs`): an `M = 0`
-   behavioral deck runs the dense kernels on every Newton iteration. Static
-   pivoting can also be rejected at runtime by the growth check on every
-   factorization when the symbolic order pivots on a GMIN-sized diagonal
-   (seen on `steve-1073-output`, where `a[15][15]` is 1e-12 and
-   `find_row_swaps` only moves rows whose diagonal is structurally zero); the
-   deck then pays the sparse attempt and the dense refactor each iteration.
+   schedule is built for every full-LU build whose stamp geometry is
+   complete (`build_nodal.rs`), `M = 0` behavioral and saturating-inductor
+   builds included; N < 8 or a G_aug density of 40 % or more keeps the
+   dense kernels.
+
+   The static row swaps are decided on the G_aug pattern **without the GMIN
+   floor** (`lu::plan_sparse_lu`). GMIN = 1e-12 sits on every node diagonal,
+   so on the floored pattern no node row looks structurally zero, and a node
+   whose diagonal holds nothing but the floor (an unnamed shared-core
+   transformer node: G row {GMIN, ±1, ±1}, no C entry, no device column, as
+   on `steve-1073-output` rows 15 and 16) becomes a 1e-12 static pivot that
+   the growth check rejects on every factorization. A diagonal counts as
+   floor-only when it held no G stamp before the floor, still holds exactly
+   the floor, has no C stamp and no device or behavioral stamp. The floor
+   stays in the matrix values and the elimination schedule is traced on the
+   full pattern; only the swap decision ignores it. Setter positions (pots,
+   wipers, `.runtime R`, switch components) count as stamps whatever their
+   nominal value, so their diagonals are never floor-only
+   (`lu::floor_only_diagonals`). The swap decision does not trace fill-in,
+   and it must not: a fill-aware variant (swap only a row whose diagonal is
+   still empty at its elimination step) was measured and reproduces the old
+   swap sets, because the structural fill that reaches a floor-only row
+   cancels numerically and the runtime pivot is GMIN again;
+   `steve-1073-output` stays rejected on every factorization under it. The
+   growth check guards every factorization either way.
 
 4. **Exact-zero skips in the dense kernels** — `lu_solve`, `lu_factor` and
    `lu_back_solve` skip a row update whose multiplier `a[row][col]` is an

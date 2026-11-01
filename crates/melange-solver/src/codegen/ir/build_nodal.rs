@@ -28,6 +28,12 @@ impl CircuitIR {
         let mut aug = mna.build_augmented_matrices();
         let n = aug.n_nodal;
 
+        // Node rows whose G diagonal holds no stamp of its own, recorded before
+        // the GMIN floor below fills every node diagonal. The sparse-LU row-swap
+        // planner reads it: a diagonal that carries nothing but GMIN is a
+        // structural zero for pivoting purposes (see `lu_sparsity` below).
+        let node_diag_unstamped: Vec<bool> = (0..n_nodes).map(|i| aug.g[i][i] == 0.0).collect();
+
         // Gmin regularization: prevent singular Jacobians on floating nodes.
         // The same floor the DC operating-point solver stamps
         // (`dc_op::build_dc_system`).
@@ -574,7 +580,11 @@ impl CircuitIR {
         let structure =
             settle_structural_sparsity(&mut matrices, n, m, &[], &a_of_s, Some(&a_of_s_be))?;
         let mut g_aug_density = 0.0f64;
-        let lu_sparsity = if m > 0 && behavioral_pattern_complete {
+        // The schedule is planned for every nodal build whose stamp geometry is
+        // complete, M = 0 included: a behavioral-only or saturating-inductor
+        // deck runs the same chord Newton loop over the same G_aug as a device
+        // deck, and the runtime growth check guards its static pivots alike.
+        let lu_sparsity = if behavioral_pattern_complete {
             // Compute G_aug = A - N_i*J_dev*N_v sparsity pattern
             // (+ behavioral B-source stamp positions)
             let g_aug_pattern = lu::compute_g_aug_pattern(
@@ -598,9 +608,75 @@ impl CircuitIR {
             // Only use sparse LU if matrix is sufficiently sparse (< 40% density)
             // and large enough to benefit (N >= 8)
             if density < 0.4 && n >= 8 {
-                let elim_order = lu::amd_ordering(&g_aug_pattern, n);
-                let row_swaps = lu::find_row_swaps(&g_aug_pattern, &elim_order, n);
-                let lu_plan = lu::symbolic_lu(&g_aug_pattern, &elim_order, &row_swaps, n);
+                // Row swaps are decided on the pattern WITHOUT the GMIN floor.
+                // GMIN puts a value on every node diagonal, so on the floored
+                // pattern no node row ever looks like it needs a swap, and a
+                // node whose only diagonal content is GMIN (an unnamed
+                // shared-core transformer node: G row {GMIN, +-1, +-1}, no C,
+                // no device column) becomes a static pivot of 1e-12 against
+                // unit neighbours, and the runtime growth check rejects every
+                // factorization. A diagonal counts as floor-only when it held
+                // no G stamp before the floor, still holds exactly the floor
+                // (nothing was added to it afterwards) and has no C stamp;
+                // device and behavioral stamps on it are added back by
+                // `compute_g_aug_pattern`. Only the swap decision changes: the
+                // GMIN values stay in the matrix, and the elimination schedule
+                // is traced on the full pattern so the floor entries carried
+                // by swapped rows are eliminated like any other entry.
+                // Setter positions (pots, wipers, `.runtime R`, switch components)
+                // are stamps whatever their nominal value, so their node
+                // diagonals are never floor-only. Node ids are 1-based with
+                // 0 = ground; matrix index = id - 1, as the emitter records
+                // its `setter_stamps`. Every switch component is included,
+                // an L switch too: its augmented row is not a node diagonal,
+                // so over-marking its terminal nodes costs at most a swap.
+                let mut setter_node_diag = vec![false; n_nodes];
+                for (np, nq) in mna.pots.iter().map(|p| (p.node_p, p.node_q)).chain(
+                    mna.switches
+                        .iter()
+                        .flat_map(|sw| sw.components.iter().map(|c| (c.node_p, c.node_q))),
+                ) {
+                    for nd in [np, nq] {
+                        if nd > 0 {
+                            setter_node_diag[nd - 1] = true;
+                        }
+                    }
+                }
+                let floor_value: Vec<bool> = (0..n_nodes)
+                    .map(|i| matrices.g_matrix[i * n + i] == GMIN_REGULARISATION)
+                    .collect();
+                let c_stamped: Vec<bool> = (0..n_nodes)
+                    .map(|i| matrices.c_matrix[i * n + i] != 0.0)
+                    .collect();
+                let floor_only_diag = lu::floor_only_diagonals(
+                    &node_diag_unstamped,
+                    &floor_value,
+                    &c_stamped,
+                    &setter_node_diag,
+                );
+                let swap_pattern = if floor_only_diag.is_empty() {
+                    g_aug_pattern.clone()
+                } else {
+                    log::info!(
+                        "Sparse LU: node diagonals holding only the GMIN floor (not offered \
+                         as static pivots): {:?}",
+                        floor_only_diag
+                    );
+                    let mut a_unfloored = structure.a.clone();
+                    for &i in &floor_only_diag {
+                        a_unfloored[i][i] = false;
+                    }
+                    lu::compute_g_aug_pattern(
+                        &a_unfloored,
+                        &matrices.n_i,
+                        &matrices.n_v,
+                        n,
+                        m,
+                        &device_slots,
+                        &behavioral_stamp_patterns,
+                    )
+                };
+                let lu_plan = lu::plan_sparse_lu(&g_aug_pattern, &swap_pattern, n);
                 Some(lu_plan)
             } else {
                 log::info!(

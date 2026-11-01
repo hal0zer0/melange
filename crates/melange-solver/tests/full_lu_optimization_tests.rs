@@ -856,3 +856,62 @@ R_load out 0 1k
         "step-down ISAT should be unchanged (referral no-op): emitted {dn:.6e}"
     );
 }
+
+/// Shared-core saturating transformer with an open secondary: M = 0, routed
+/// full-LU by the saturating inductor. The shared-core model adds unnamed
+/// nodes whose only diagonal content is the GMIN floor.
+const SAT_CORE_OPEN: &str = "\
+Shared-core saturating transformer, secondary open
+R_p in p 99
+L_pri p 0 1 ISAT=10m CORE=steel
+L_sec s 0 1
+K1 L_pri L_sec 0.99
+R_L s out 1m
+R_load out 0 1MEG
+.END";
+
+/// An M = 0 full-LU build gets the compile-time sparse schedule, and its
+/// static row order is usable: the GMIN-floor nodes are not taken as pivots,
+/// so the runtime growth check accepts every factorization (a rejection
+/// panics here), and the output matches the dense partial-pivoting path.
+#[test]
+fn test_sparse_lu_m0_gmin_floor_nodes_accepted_and_match_dense() {
+    let code = generate_nodal_code(SAT_CORE_OPEN, 48000.0);
+    assert!(
+        code.contains("fn sparse_lu_factor"),
+        "an M = 0 full-LU build must get the sparse schedule"
+    );
+    let marker = "// Sparse factor rejected (tiny pivot or growth-factor check):";
+    assert!(code.contains(marker), "rejection branch marker not found");
+    let strict = code.replace(marker, "panic!(\"sparse LU factorization rejected\");");
+    let dense = code.replace("if sparse_lu_factor(", "if false && sparse_lu_factor(");
+    assert_ne!(code, dense, "dense forcing substitution did not apply");
+
+    // 3 V at 200 Hz through 99 ohm drives the primary well past ISAT = 10 mA.
+    let main = r#"
+fn main() {
+    let mut s = CircuitState::default();
+    for i in 0..4096u32 {
+        let t = i as f64 / 48000.0;
+        let input = 3.0 * (2.0 * std::f64::consts::PI * 200.0 * t).sin();
+        let y = process_sample(input, &mut s);
+        println!("{:.15e}", y[0]);
+    }
+}
+"#;
+    let sparse_v = parse_f64_lines(&compile_and_run(&strict, main, "satcore_sparse"));
+    let dense_v = parse_f64_lines(&compile_and_run(&dense, main, "satcore_dense"));
+    assert_eq!(sparse_v.len(), 4096);
+    assert_eq!(dense_v.len(), 4096);
+    let peak = dense_v.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
+    assert!(peak > 0.1, "output should be non-trivial, peak={peak:.3e}");
+    let max_diff = sparse_v
+        .iter()
+        .zip(&dense_v)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        max_diff < 1e-9,
+        "sparse vs dense mismatch on the M = 0 shared-core deck: {max_diff:.3e}"
+    );
+}

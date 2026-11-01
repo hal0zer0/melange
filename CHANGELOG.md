@@ -9,13 +9,30 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
-**What changes rendered audio:** nothing. All 192 golden renders are
-byte-identical to v0.1.19.
+**What changes rendered audio:** 14 of the 192 golden renders (`radio-am`,
+`radio-fm`, `sat-core-open`, `sat-core-loaded`, every stimulus) move by at
+most 2.6e-12 V, from a different static pivot order on nodal builds that now
+take the compile-time sparse schedule; the other 178 are byte-identical to
+v0.1.19.
 
 **What changes generated code:** every nodal build, full-LU and Schur.
 
 ### Performance
 
+- Nodal full-LU builds without nonlinear devices (`M = 0`: behavioral decks)
+  now take the compile-time sparse LU schedule, and the schedule's row swaps
+  are decided on the stamp pattern without the GMIN regularisation floor. A
+  node whose only diagonal entry is that 1e-12 S floor (an unloaded
+  transformer node, the output rows of a console output stage) used to be a
+  static pivot that the runtime growth check rejected on every factorization,
+  sending the build to the dense fallback. Values keep the floor; setter
+  positions (pots, wipers, runtime resistors, switch components) count as
+  stamps whatever their nominal value; the swap decision stays fill-blind (a
+  fill-aware variant was measured and rejected). Zero sparse rejects across
+  the corpus at 0.3, 3 and 10 V drive; the largest accepted pivot growth is
+  2.1e6 on `sat-core-open` against the 1e8 ceiling, and it does not depend
+  on drive. `steve-1073-output` 2.6×, `radio-am` 1.57×, `radio-fm` 1.46× on
+  top of the gains below.
 - Nodal full-LU builds factor into and back-solve from the chord storage in
   `CircuitState` in place. The generated code used to copy the N×N LU factor,
   its scaling vectors and its permutation into locals at the top of every
