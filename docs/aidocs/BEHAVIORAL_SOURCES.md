@@ -346,9 +346,12 @@ Inside the trapezoidal NR loop, alongside the device evaluation:
   `M > 0`, read by the convergence gate and the Armijo line search) take the
   BASE `A` and `rhs`, so they evaluate `i` themselves at their own `v` and fold
   it into the device-current vector `q` (`q[n+] -= i; q[n-] += i`;
-  `emit_behavioral_current_residual`); `kcl_residual_inl` takes `state` for
-  that evaluation whenever a current source exists. A `V={}` source needs no
-  such term: its branch current is a Newton unknown already inside `A·v`. **Behavioral Jacobian
+  `emit_behavioral_current_residual`); `kcl_residual_inl` takes `state`
+  whenever a behavioral source exists. A `V={}` source's branch current is a
+  Newton unknown already inside `A·v` on the KCL rows; its own constraint row
+  enters the helpers as the true residual `(v[n+] − v[n−]) − f(v)` in volts
+  (`emit_behavioral_voltage_row_residual`), because `A·v − rhs` on that row is
+  the linearisation, not the equation. **Behavioral Jacobian
   entries are not frozen device blocks**, so either (a) force a refactor every
   iteration when behavioral sources are present, or (b) treat them with the
   same chord-companion correction as devices. Start with (a) for correctness;

@@ -261,7 +261,6 @@ pub(super) fn emit_sat_ind_row_residual(
         return;
     }
     let n = ir.topology.n;
-    let m = ir.topology.m;
     let g = &ir.matrices.g_matrix;
     let c = &ir.matrices.c_matrix;
     // Guard: the row enumeration below reads G/C directly, so bail to no check
@@ -284,6 +283,81 @@ pub(super) fn emit_sat_ind_row_residual(
     code.push_str(&format!("{indent}    let sat_al = {sat_al_expr};\n"));
 
     for (idx, si) in ir.saturating_inductors.iter().enumerate() {
+        let inner = format!("{indent}    ");
+        if !emit_sat_ind_row_terms(code, ir, setter_stamps, idx, si, rhs, i_nl, v, mat, &inner) {
+            continue;
+        }
+        code.push_str(&format!(
+            "{indent}        if !(acc.abs() <= (1e-5 * den).max(64.0 * f64::EPSILON * stiff)) {{ {flag} = true; }}\n"
+        ));
+        code.push_str(&format!("{indent}    }}\n"));
+    }
+    code.push_str(&format!("{indent}}}\n\n"));
+}
+
+/// The saturating-inductor rows' flux residuals inside the KCL residual
+/// helpers (`kcl_residual` / `kcl_residual_inl`): the same per-row terms as
+/// [`emit_sat_ind_row_residual`] at the helpers' own `v`, summed into
+/// `norm_sq` (the Armijo merit) and gated by the same `1e-5·den` test into
+/// `ok`, so a flux row the site's inline check would reject also fails the
+/// gate and weighs in the line search. `sat_alpha` is the helpers' parameter
+/// carrying the site's `alpha` (the helpers are shared by the trap, BE and
+/// sub-step sites, whose `alpha` differ). These rows never enter `max_abs`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_sat_ind_merit_rows(
+    code: &mut String,
+    ir: &CircuitIR,
+    setter_stamps: &std::collections::BTreeSet<(usize, usize)>,
+    rhs: &str,
+    i_nl: Option<&str>,
+    v: &str,
+    mat: &str,
+    indent: &str,
+) {
+    if ir.saturating_inductors.is_empty() {
+        return;
+    }
+    let n = ir.topology.n;
+    if ir.matrices.g_matrix.len() != n * n || ir.matrices.c_matrix.len() != n * n {
+        log::warn!("sat-inductor merit rows: unexpected G/C dimensions, rows not emitted");
+        return;
+    }
+    code.push_str(&format!("{indent}let sat_al = sat_alpha;\n"));
+    for (idx, si) in ir.saturating_inductors.iter().enumerate() {
+        if !emit_sat_ind_row_terms(code, ir, setter_stamps, idx, si, rhs, i_nl, v, mat, indent) {
+            continue;
+        }
+        code.push_str(&format!(
+            "{indent}    norm_sq += acc * acc;\n\
+             {indent}    if !(acc.abs() <= (1e-5 * den).max(64.0 * f64::EPSILON * stiff)) {{ ok = false; }}\n\
+             {indent}}}\n"
+        ));
+    }
+}
+
+/// One saturating-inductor row's residual terms: opens a block
+/// `{ // saturating inductor ... }` (the caller closes it), binds `k`, `acc`,
+/// `den` and `stiff` with the paired flux form documented on
+/// [`emit_sat_ind_row_residual`], and leaves the tolerance test to the caller.
+/// Returns `false` (nothing emitted) when the row is out of range.
+#[allow(clippy::too_many_arguments)]
+fn emit_sat_ind_row_terms(
+    code: &mut String,
+    ir: &CircuitIR,
+    setter_stamps: &std::collections::BTreeSet<(usize, usize)>,
+    idx: usize,
+    si: &crate::codegen::ir::SaturatingInductorIR,
+    rhs: &str,
+    i_nl: Option<&str>,
+    v: &str,
+    mat: &str,
+    indent: &str,
+) -> bool {
+    let n = ir.topology.n;
+    let m = ir.topology.m;
+    let g = &ir.matrices.g_matrix;
+    let c = &ir.matrices.c_matrix;
+    {
         let k = si.aug_row;
         if k >= n {
             log::warn!(
@@ -291,7 +365,7 @@ pub(super) fn emit_sat_ind_row_residual(
                 si.name,
                 k
             );
-            continue;
+            return false;
         }
         // Structural nonzeros of row k of A = G + alpha*C (`sparsity.a`: G's
         // and C's stamped positions), plus every position a dynamic-parameter
@@ -310,17 +384,17 @@ pub(super) fn emit_sat_ind_row_residual(
         cols.sort_unstable();
 
         code.push_str(&format!(
-            "{indent}    {{ // saturating inductor {idx} ({name})\n",
+            "{indent}{{ // saturating inductor {idx} ({name})\n",
             name = si.name
         ));
         code.push_str(&format!(
-            "{indent}        let k = SAT_IND_{idx}_AUG_ROW;\n\
-             {indent}        let mut acc = 0.0f64;\n\
-             {indent}        let mut den = 0.0f64;\n"
+            "{indent}    let k = SAT_IND_{idx}_AUG_ROW;\n\
+             {indent}    let mut acc = 0.0f64;\n\
+             {indent}    let mut den = 0.0f64;\n"
         ));
         for j in cols {
             code.push_str(&format!(
-                "{indent}        {{ let t = {mat}[k][{j}] * {v}[{j}]; acc += t; \
+                "{indent}    {{ let t = {mat}[k][{j}] * {v}[{j}]; acc += t; \
                  let a = t.abs(); if a > den {{ den = a; }} }}\n"
             ));
         }
@@ -331,14 +405,14 @@ pub(super) fn emit_sat_ind_row_residual(
             let g_kk = g[k * n + k];
             if g_kk != 0.0 {
                 code.push_str(&format!(
-                    "{indent}        {{ let t = {g_kk:.17e} * {v}[k]; acc += t; \
+                    "{indent}    {{ let t = {g_kk:.17e} * {v}[k]; acc += t; \
                      let a = t.abs(); if a > den {{ den = a; }} }}\n"
                 ));
             }
             // g[k][k] == 0.0: the whole self term vanishes, nothing to emit.
         } else {
             code.push_str(&format!(
-                "{indent}        {{ let t = ({mat}[k][k] - sat_al * SAT_IND_{idx}_L0) * {v}[k]; \
+                "{indent}    {{ let t = ({mat}[k][k] - sat_al * SAT_IND_{idx}_L0) * {v}[k]; \
                  acc += t; let a = t.abs(); if a > den {{ den = a; }} }}\n"
             ));
         }
@@ -359,7 +433,7 @@ pub(super) fn emit_sat_ind_row_residual(
                 for i in 0..m {
                     if ir.matrices.n_i[k * m + i] != 0.0 {
                         code.push_str(&format!(
-                            "{indent}        {{ let t = -N_I[k][{i}] * {i_nl}[{i}]; acc += t; \
+                            "{indent}    {{ let t = -N_I[k][{i}] * {i_nl}[{i}]; acc += t; \
                              let a = t.abs(); if a > den {{ den = a; }} }}\n"
                         ));
                     }
@@ -369,17 +443,13 @@ pub(super) fn emit_sat_ind_row_residual(
         // Flux-change term, kept paired so the stiff alpha*Phi magnitude never
         // reaches `den`; it sets only the rounding floor.
         code.push_str(&format!(
-            "{indent}        let phi = SAT_IND_{idx}_LMAG * SAT_IND_{idx}_ISAT \
+            "{indent}    let phi = SAT_IND_{idx}_LMAG * SAT_IND_{idx}_ISAT \
              * ({v}[k] / SAT_IND_{idx}_ISAT).tanh() + SAT_IND_{idx}_LAIR * {v}[k];\n\
-             {indent}        let ap = sat_al * phi;\n\
-             {indent}        let stiff = ap.abs().max({rhs}[k].abs());\n\
-             {indent}        {{ let t = ap - {rhs}[k]; acc += t; \
+             {indent}    let ap = sat_al * phi;\n\
+             {indent}    let stiff = ap.abs().max({rhs}[k].abs());\n\
+             {indent}    {{ let t = ap - {rhs}[k]; acc += t; \
              let a = t.abs(); if a > den {{ den = a; }} }}\n"
         ));
-        code.push_str(&format!(
-            "{indent}        if !(acc.abs() <= (1e-5 * den).max(64.0 * f64::EPSILON * stiff)) {{ {flag} = true; }}\n"
-        ));
-        code.push_str(&format!("{indent}    }}\n"));
     }
-    code.push_str(&format!("{indent}}}\n\n"));
+    true
 }

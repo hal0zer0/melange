@@ -257,20 +257,81 @@ pub(super) fn behavioral_convergence_nodes(ir: &CircuitIR) -> Vec<usize> {
     nodes
 }
 
-/// True when any behavioral source is a current source (`I={}`). Its current
-/// is not a Newton unknown, so every KCL residual must evaluate it.
-pub(super) fn has_behavioral_current_sources(ir: &CircuitIR) -> bool {
-    ir.behavioral_sources.iter().any(|b| !b.is_voltage)
+/// True when the KCL residual helpers evaluate a behavioral expression (any
+/// behavioral source: `I={}` currents into `q`, `V={}` row residuals), which
+/// reads `state` (`sim_time`, runtime scalars, `bsrc_x_prev`). Then
+/// `kcl_residual_inl` takes `state`; otherwise it does not, because an unread
+/// parameter is a warning in the generated crate.
+pub(super) fn residual_needs_state(ir: &CircuitIR) -> bool {
+    !ir.behavioral_sources.is_empty()
 }
 
-/// The trailing `state` argument the emitted `kcl_residual_inl` takes when the
-/// circuit has behavioral current sources (their expressions read `state`), and
-/// nothing otherwise: an unread parameter is a warning in the generated crate.
+/// The trailing `state` argument the emitted `kcl_residual_inl` takes (see
+/// [`residual_needs_state`]), or nothing.
 pub(super) fn kcl_residual_inl_state_arg(ir: &CircuitIR) -> &'static str {
-    if has_behavioral_current_sources(ir) {
+    if residual_needs_state(ir) {
         ", state"
     } else {
         ""
+    }
+}
+
+/// Every behavioral source's expression as generated Rust at the residual
+/// helpers' own `v`: `(source index, is_voltage, f, n+ index, n− index)`.
+fn bsrc_residual_exprs(ir: &CircuitIR) -> Vec<(usize, bool, String, usize, usize)> {
+    let params = bsrc_param_map(ir);
+    ir.behavioral_sources
+        .iter()
+        .enumerate()
+        .map(|(si, b)| {
+            let res = NodalBsrcResolver {
+                node_idx: &b.referenced_node_indices,
+                params: &params,
+            };
+            let f = strip_outer_parens(&b.expr.simplify().to_rust(&res)).to_string();
+            (si, b.is_voltage, f, b.n_plus_idx, b.n_minus_idx)
+        })
+        .collect()
+}
+
+/// Emit the TRUE residual of every behavioral `V={}` row into the KCL residual
+/// helpers: `F[r] = (v[n+] − v[n−]) − f(v)` in volts, summed into `norm_sq` and
+/// gated at `1e-3·den + 1e-6 V` (`den` = the row's largest term). The base `A`
+/// and `rhs` cannot give this row: the per-iteration solve carries the row as
+/// a linearisation (`−∂f/∂V` in the chord factor, the companion in
+/// `rhs_work`), so `A·v − rhs` on it is neither the linearised nor the true
+/// residual. Reads the `bsrc_inv_dt` / `bsrc_half_dt` locals
+/// [`emit_behavioral_current_residual`] binds, so it is emitted after it.
+/// These rows never enter `max_abs` (the KCL-only infinity norm).
+pub(super) fn emit_behavioral_voltage_row_residual(
+    code: &mut String,
+    ir: &CircuitIR,
+    indent: &str,
+) {
+    for (si, is_voltage, f, np, nm) in bsrc_residual_exprs(ir) {
+        if !is_voltage {
+            continue;
+        }
+        let vp = if np > 0 {
+            format!("v[{}]", np - 1)
+        } else {
+            "0.0_f64".to_string()
+        };
+        let vm = if nm > 0 {
+            format!("v[{}]", nm - 1)
+        } else {
+            "0.0_f64".to_string()
+        };
+        code.push_str(&format!(
+            "{indent}{{ // behavioral V={{}} source {si}: true row residual (V)
+             {indent}    let f = {f};
+             {indent}    let acc = ({vp} - {vm}) - f;
+             {indent}    let den = {vp}.abs().max({vm}.abs()).max(f.abs());
+             {indent}    norm_sq += acc * acc;
+             {indent}    if !(acc.abs() <= 1e-3 * den + 1e-6) {{ ok = false; }}
+             {indent}}}
+"
+        ));
     }
 }
 
@@ -288,34 +349,31 @@ pub(super) fn kcl_residual_inl_state_arg(ir: &CircuitIR) -> &'static str {
 /// `q[n+] -= f`, `q[n−] += f`. `V={}` sources need nothing here: their branch
 /// current is a Newton unknown already in `A·v`.
 pub(super) fn emit_behavioral_current_residual(code: &mut String, ir: &CircuitIR, indent: &str) {
-    let params = bsrc_param_map(ir);
-    let mut sources: Vec<(usize, String, usize, usize)> = Vec::new();
-    for (si, b) in ir.behavioral_sources.iter().enumerate() {
-        if b.is_voltage {
-            continue;
-        }
-        let res = NodalBsrcResolver {
-            node_idx: &b.referenced_node_indices,
-            params: &params,
-        };
-        let f = strip_outer_parens(&b.expr.simplify().to_rust(&res)).to_string();
-        sources.push((si, f, b.n_plus_idx, b.n_minus_idx));
+    let exprs = bsrc_residual_exprs(ir);
+    if exprs.is_empty() {
+        return;
     }
+    // `ddt`/`idt` surfaces read these two locals; bind them only when some
+    // expression (current or voltage row, emitted later) reads them.
+    for (local, field) in [
+        ("bsrc_inv_dt", "bsrc_inv_dt"),
+        ("bsrc_half_dt", "bsrc_half_dt"),
+    ] {
+        if exprs.iter().any(|(_, _, f, _, _)| f.contains(local)) {
+            code.push_str(&format!("{indent}let {local} = state.{field};\n"));
+        }
+    }
+    let sources: Vec<(usize, String, usize, usize)> = exprs
+        .into_iter()
+        .filter(|(_, is_voltage, _, _, _)| !is_voltage)
+        .map(|(si, _, f, np, nm)| (si, f, np, nm))
+        .collect();
     if sources.is_empty() {
         return;
     }
     code.push_str(&format!(
         "{indent}// Behavioral I={{}} currents: not Newton unknowns, evaluated at this v.\n"
     ));
-    // `ddt`/`idt` surfaces read these two locals; bind them only when read.
-    for (local, field) in [
-        ("bsrc_inv_dt", "bsrc_inv_dt"),
-        ("bsrc_half_dt", "bsrc_half_dt"),
-    ] {
-        if sources.iter().any(|(_, f, _, _)| f.contains(local)) {
-            code.push_str(&format!("{indent}let {local} = state.{field};\n"));
-        }
-    }
     for (si, f, np, nm) in sources {
         code.push_str(&format!("{indent}let bsrc_{si}_f_resid = {f};\n"));
         if np > 0 {

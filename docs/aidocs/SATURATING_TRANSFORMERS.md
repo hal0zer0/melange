@@ -324,8 +324,10 @@ saturating RL under a ±20 V 100 Hz square went from 398 MAX_ITER samples/s
 solution) to 0, matching an independent recurrence to 1.2e-6; wherever the
 unlimited build converged, the output is bit-identical. A blanket
 `|Δi| ≤ 2·Isat + 0.5·|i|` was measured and rejected (it throttles converging
-steps and moves converged outputs). The limit is not in the Armijo merit
-(node KCL, in amps); mixing flux rows into it needs its own scaling decision.
+steps and moves converged outputs). The flux rows are in the Armijo merit
+and the convergence gate (`emit_sat_ind_merit_rows`: the same paired residual
+and `1e-5·den` test as the inline check, summed in quadrature with the amp and
+volt rows); the step limit itself stays outside the merit.
 
 **DC operating point.** An inductor is a DC short; the DC branch current seeds
 `v_prev[k]`. A circuit whose DC solution has all node voltages at zero but a

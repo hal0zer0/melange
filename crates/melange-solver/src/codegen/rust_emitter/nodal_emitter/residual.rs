@@ -22,14 +22,64 @@ pub(super) fn row_iter(rows: &[usize], contiguous: &str) -> String {
     }
 }
 
-/// The node-space KCL residual helpers (`kcl_residual`, `kcl_residual_inl`)
-/// the Newton convergence gate and the Armijo line search read: the full-LU
-/// Newton, and the sub-step ladder on both nodal routes. Emitted when M > 0.
+/// The residual helpers (`kcl_residual`, `kcl_residual_inl`) the Newton
+/// convergence gate and the Armijo line search read: the full-LU Newton, and
+/// the sub-step ladder on both nodal routes. Emitted when M > 0.
+///
+/// They cover EVERY row the Newton step solves, each with its true residual
+/// at the helpers' own `v`:
+/// - KCL rows (`kcl_rows`: circuit nodes, parasitic-BJT internal nodes):
+///   `A·v − rhs − q`, `q = N_i·i_nl` plus behavioral `I={}` currents, in amps,
+///   tolerance `1e-3·den + 1e-9 A`. Only these rows feed the returned
+///   infinity norm (`max_abs`, the chord-exit gate's 1e-9 A test).
+/// - Algebraic rows (`n_nodes..n_aug` minus the above: voltage sources, VCVS,
+///   ideal transformers, op-amp internal and VCA rows) and inductor branch
+///   rows (`n_aug..n`): `A·v − rhs − q`, tolerance `1e-3·den + 1e-6`, the
+///   node-step test's floor, in the row's own unit (volts for a source or
+///   branch equation).
+/// - Behavioral `V={}` rows: `(v[n+] − v[n−]) − f(v)` (`A·v − rhs` is neither
+///   the linearised nor the true residual there), same volt tolerance.
+/// - Saturating-inductor rows: the flux residual of `emit_sat_ind_row_residual`
+///   with its own `1e-5·den` test; the helpers take the site's `alpha` as
+///   `sat_alpha` for it.
+/// Every row enters `||F||_2` in its own unit (volts added to amps in
+/// quadrature). A merit over the KCL rows alone left the Newton direction's
+/// first-order decrease at `−||F_kcl||²`; when a source or branch row carried
+/// the residual (a time-stepped behavioral source, a rectifier's first
+/// conduction into an empty reservoir) that was tiny against the full step's
+/// device overshoot, and the line search backtracked a correct step to
+/// `1/32..1/1024` on every iteration: one warm-up sample took 250 Newton
+/// iterations and, held, froze the render for 0.65 s. With every row in the
+/// merit the same sample converges in 4. The gate reading every row closes
+/// the matching hole: after a damped step nothing else certified the source
+/// and branch equations.
 pub(super) fn emit_kcl_residual_fns(
     ir: &CircuitIR,
     setter_stamps: &std::collections::BTreeSet<(usize, usize)>,
 ) -> String {
     let rows = kcl_rows(ir);
+    let has_sat = !ir.saturating_inductors.is_empty();
+    let sat_param = if has_sat { ", sat_alpha: f64" } else { "" };
+    // Rows outside the KCL set that take the plain `A·v − rhs − q` form:
+    // everything but behavioral V={} rows and saturating-inductor rows, which
+    // have their own residual forms below.
+    let aug_rows: Vec<usize> = {
+        let kcl: std::collections::BTreeSet<usize> = rows.iter().copied().collect();
+        let own: std::collections::BTreeSet<usize> = ir
+            .saturating_inductors
+            .iter()
+            .map(|si| si.aug_row)
+            .chain(
+                ir.behavioral_sources
+                    .iter()
+                    .filter(|b| b.is_voltage)
+                    .filter_map(|b| b.aug_row),
+            )
+            .collect();
+        (0..ir.topology.n)
+            .filter(|r| !kcl.contains(r) && !own.contains(r))
+            .collect()
+    };
     let mut code = String::new();
     // Shared node-space KCL residual helper, generic over the A matrix +
     // rhs so the trap (state.a/rhs), sub-step (a_sub/rhs_s) and BE
@@ -40,16 +90,19 @@ pub(super) fn emit_kcl_residual_fns(
     // parasitic-BJT internal nodes). The ||.||_2 drives the
     // Armijo ratio test; the bool is the always-checked convergence gate.
     code.push_str(
-        "/// Node-space KCL residual for the nodal NR convergence gate and\n\
-         /// Armijo line search. `F = A·v - rhs - N_i·i_nl(N_v·v)` over every KCL\n\
-         /// row (circuit nodes and parasitic-BJT internal nodes). Returns\n\
-         /// `(||F||_2, all_rows_within_tol, ||F||_inf)`. Generic over the\n\
-         /// A matrix + rhs so the trap / sub-step / BE sites share one body.\n",
+        "/// Residual of every row the Newton step solves, for the nodal NR\n\
+         /// convergence gate and the Armijo line search: `F = A·v - rhs - q`\n\
+         /// (`q` = device and behavioral currents) on KCL, source and branch\n\
+         /// rows, the true `(v+ - v-) - f(v)` on behavioral V={} rows and the\n\
+         /// flux residual on saturating-inductor rows. Returns `(||F||_2 over\n\
+         /// every row, all_rows_within_tol, ||F||_inf over the KCL rows)`.\n\
+         /// Generic over the A matrix + rhs so the trap / sub-step / BE sites\n\
+         /// share one body.\n",
     );
     code.push_str("#[inline]\n");
-    code.push_str(
-        "fn kcl_residual(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], state: &CircuitState) -> (f64, bool, f64) {\n",
-    );
+    code.push_str(&format!(
+        "fn kcl_residual(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], state: &CircuitState{sat_param}) -> (f64, bool, f64) {{\n",
+    ));
     // Shared residual tail: `q = N_i·i_nl`, then `||F||_2` over node rows
     // with the sparse `A·v` matvec. Emitted verbatim into BOTH residual
     // functions below, so `kcl_residual` (device-evaluating) and
@@ -68,31 +121,34 @@ pub(super) fn emit_kcl_residual_fns(
     tail.push_str("    let mut norm_sq = 0.0f64;\n");
     tail.push_str("    let mut max_abs = 0.0f64;\n");
     tail.push_str("    let mut ok = true;\n");
-    match emit_sparse_a_residual_matvec(ir, setter_stamps, &rows, "    ") {
-        Some(sparse) => tail.push_str(&sparse),
-        None => {
-            tail.push_str(&format!(
-                "    for i in {} {{\n",
-                row_iter(&rows, &format!("0..{}", rows.len()))
-            ));
-            tail.push_str("        let mut acc = -rhs[i] - q[i];\n");
-            tail.push_str("        let mut den = rhs[i].abs().max(q[i].abs());\n");
-            tail.push_str("        for j in 0..N {\n");
-            tail.push_str("            let t = amat[i][j] * v[j];\n");
-            tail.push_str("            acc += t;\n");
-            tail.push_str("            let a = t.abs(); if a > den { den = a; }\n");
-            tail.push_str("        }\n");
-            tail.push_str("        norm_sq += acc * acc;\n");
-            // NaN-free max (see emit_sparse_a_residual_matvec).
-            tail.push_str("        { let a = acc.abs(); if a > max_abs { max_abs = a; } }\n");
-            // Per-node relative KCL tolerance: same RELTOL=1e-3 as the
-            // device and sat-inductor residual checks, with a 1e-9 A
-            // absolute floor so a node carrying ~zero net current does not
-            // demand an unreachable tolerance.
-            tail.push_str("        if !(acc.abs() <= 1e-3 * den + 1e-9) { ok = false; }\n");
-            tail.push_str("    }\n");
-        }
+    // KCL rows: amps, 1e-9 A floor, the only rows in the infinity norm.
+    tail.push_str("    // KCL rows (A)\n");
+    emit_a_residual_rows(ir, setter_stamps, &rows, "1e-9", true, &mut tail, "    ");
+    // Source, constraint and inductor branch rows: 1e-6 floor (the node-step
+    // test's), never in the infinity norm.
+    if !aug_rows.is_empty() {
+        tail.push_str("    // source / constraint / inductor branch rows (V)\n");
+        emit_a_residual_rows(
+            ir,
+            setter_stamps,
+            &aug_rows,
+            "1e-6",
+            false,
+            &mut tail,
+            "    ",
+        );
     }
+    super::behavioral::emit_behavioral_voltage_row_residual(&mut tail, ir, "    ");
+    super::sat_ind::emit_sat_ind_merit_rows(
+        &mut tail,
+        ir,
+        setter_stamps,
+        "rhs",
+        Some("i_nl"),
+        "v",
+        "amat",
+        "    ",
+    );
     tail.push_str("    (norm_sq.sqrt(), ok, max_abs)\n");
     tail.push_str("}\n\n");
 
@@ -118,8 +174,8 @@ pub(super) fn emit_kcl_residual_fns(
     );
     code.push_str("#[inline]\n");
     code.push_str(&format!(
-        "fn kcl_residual_inl(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], i_nl: &[f64; M]{}) -> (f64, bool, f64) {{\n",
-        if super::behavioral::has_behavioral_current_sources(ir) { ", state: &CircuitState" } else { "" }
+        "fn kcl_residual_inl(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], i_nl: &[f64; M]{}{sat_param}) -> (f64, bool, f64) {{\n",
+        if super::behavioral::residual_needs_state(ir) { ", state: &CircuitState" } else { "" }
     ));
     code.push_str(&tail);
     code
@@ -203,6 +259,57 @@ pub(super) fn emit_sparse_ni_matvec_add(
     code
 }
 
+/// Emit the residual rows `rows` of `F = A·v − rhs − q` into `code`: the
+/// sparse form when the forward matrices are available, the dense sweep
+/// otherwise. `abs_floor` is the tolerance's absolute floor as source text
+/// (`1e-9` amps on KCL rows, `1e-6` on source / branch rows); `track_inf`
+/// says whether the rows feed the KCL-only infinity norm `max_abs`.
+#[allow(clippy::too_many_arguments)]
+fn emit_a_residual_rows(
+    ir: &CircuitIR,
+    setter_stamps: &std::collections::BTreeSet<(usize, usize)>,
+    rows: &[usize],
+    abs_floor: &str,
+    track_inf: bool,
+    code: &mut String,
+    indent: &str,
+) {
+    match emit_sparse_a_residual_matvec(ir, setter_stamps, rows, abs_floor, track_inf, indent) {
+        Some(sparse) => code.push_str(&sparse),
+        None => {
+            code.push_str(&format!(
+                "{indent}for i in {} {{\n",
+                row_iter(rows, &format!("0..{}", rows.len()))
+            ));
+            code.push_str(&format!("{indent}    let mut acc = -rhs[i] - q[i];\n"));
+            code.push_str(&format!(
+                "{indent}    let mut den = rhs[i].abs().max(q[i].abs());\n"
+            ));
+            code.push_str(&format!("{indent}    for j in 0..N {{\n"));
+            code.push_str(&format!("{indent}        let t = amat[i][j] * v[j];\n"));
+            code.push_str(&format!("{indent}        acc += t;\n"));
+            code.push_str(&format!(
+                "{indent}        let a = t.abs(); if a > den {{ den = a; }}\n"
+            ));
+            code.push_str(&format!("{indent}    }}\n"));
+            code.push_str(&format!("{indent}    norm_sq += acc * acc;\n"));
+            if track_inf {
+                // NaN-free max (see emit_sparse_a_residual_matvec).
+                code.push_str(&format!(
+                    "{indent}    {{ let a = acc.abs(); if a > max_abs {{ max_abs = a; }} }}\n"
+                ));
+            }
+            // Per-row relative tolerance: same RELTOL=1e-3 as the device and
+            // sat-inductor residual checks, with an absolute floor so a row
+            // carrying ~zero does not demand an unreachable tolerance.
+            code.push_str(&format!(
+                "{indent}    if !(acc.abs() <= 1e-3 * den + {abs_floor}) {{ ok = false; }}\n"
+            ));
+            code.push_str(&format!("{indent}}}\n"));
+        }
+    }
+}
+
 /// Emit the node-space KCL-residual `A·v` matvec, sparsified over the structural
 /// nonzero columns of the raw forward `amat` (state.a / a_sub / state.a_be).
 ///
@@ -235,6 +342,8 @@ fn emit_sparse_a_residual_matvec(
     ir: &CircuitIR,
     setter_stamps: &std::collections::BTreeSet<(usize, usize)>,
     rows: &[usize],
+    abs_floor: &str,
+    track_inf: bool,
     indent: &str,
 ) -> Option<String> {
     use std::collections::BTreeSet;
@@ -271,15 +380,27 @@ fn emit_sparse_a_residual_matvec(
         // (+8 % instructions per sample on a 70-row full-LU deck). `max_abs`
         // starts at 0 and is never NaN; a NaN `acc` leaves it unchanged under
         // both forms, and `abs` never yields -0, so the value is bit-identical.
+        if track_inf {
+            code.push_str(&format!(
+                "{indent}    {{ let a = acc.abs(); if a > max_abs {{ max_abs = a; }} }}\n"
+            ));
+        }
         code.push_str(&format!(
-            "{indent}    {{ let a = acc.abs(); if a > max_abs {{ max_abs = a; }} }}\n"
-        ));
-        code.push_str(&format!(
-            "{indent}    if !(acc.abs() <= 1e-3 * den + 1e-9) {{ ok = false; }}\n"
+            "{indent}    if !(acc.abs() <= 1e-3 * den + {abs_floor}) {{ ok = false; }}\n"
         ));
         code.push_str(&format!("{indent}}}\n"));
     }
     Some(code)
+}
+
+/// The trailing `sat_alpha` argument the residual helpers take when the
+/// circuit has saturating inductors (`, <site alpha>`), or nothing.
+pub(super) fn residual_sat_arg(ir: &CircuitIR, sat_alpha: &str) -> String {
+    if ir.saturating_inductors.is_empty() {
+        String::new()
+    } else {
+        format!(", {sat_alpha}")
+    }
 }
 
 /// Emit an Armijo backtracking line search on the node-space KCL residual for
@@ -328,8 +449,10 @@ pub(super) fn emit_armijo_line_search(
     rhs: &str,
     ls_ok: &str,
     inl: &str,
+    sat_alpha: &str,
 ) {
     let state_arg = super::behavioral::kcl_residual_inl_state_arg(ir);
+    let sat_arg = residual_sat_arg(ir, sat_alpha);
     code.push_str(&format!(
         "{indent}// Armijo backtracking line search on ||F|| along the limited Newton ray.\n\
          {indent}let mut {ls_ok} = true;\n\
@@ -337,14 +460,14 @@ pub(super) fn emit_armijo_line_search(
          {indent}    // r0 = ||F({v})||: reuses the device currents `{inl}` the NR body\n\
          {indent}    // already evaluated at this exact {v} (bit-identical to a fresh\n\
          {indent}    // kcl_residual — same N_v·v, same device fn, no pnjlim on the eval).\n\
-         {indent}    let (r0, _, _) = kcl_residual_inl(&{v}, &{rhs}, &{amat}, &{inl}{state_arg});\n\
+         {indent}    let (r0, _, _) = kcl_residual_inl(&{v}, &{rhs}, &{amat}, &{inl}{state_arg}{sat_arg});\n\
          {indent}    if r0.is_finite() && r0 > 1e-9 {{\n\
          {indent}        let mut s = 1.0_f64;\n\
          {indent}        let mut accepted = false;\n\
          {indent}        while s >= (1.0 / 1024.0) {{\n\
          {indent}            let mut vc = {v};\n\
          {indent}            for i in 0..N {{ vc[i] += ({alpha} * s) * ({new}[i] - {v}[i]); }}\n\
-         {indent}            let (rc, _, _) = kcl_residual(&vc, &{rhs}, &{amat}, state);\n\
+         {indent}            let (rc, _, _) = kcl_residual(&vc, &{rhs}, &{amat}, state{sat_arg});\n\
          {indent}            if rc <= (1.0 - 1e-4 * s) * r0 {{ accepted = true; break; }}\n\
          {indent}            s *= 0.5;\n\
          {indent}        }}\n\

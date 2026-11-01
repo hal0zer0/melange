@@ -13,9 +13,14 @@ codegen output, CLI flags, and netlist semantics may all change.
 `radio-fm`, `sat-core-open`, `sat-core-loaded`, every stimulus) move by at
 most 2.6e-12 V, from a different static pivot order on nodal builds that now
 take the compile-time sparse schedule; the other 178 are byte-identical to
-v0.1.19. Outside the corpus, a build with a behavioral current source
-(`I={}`) beside nonlinear devices, which held almost every sample before,
-now renders (see Fixed).
+v0.1.19. The Newton line search and gate reading every row (see Fixed) moves
+`mosfet-choke-load` (sine1k, step and sweep) by at most 2.7e-5 V per sample
+and 1.1e-8 dB in level; every other render is byte-identical, and no render
+gains a held sample, a ceiling hit, a line-search failure, a sub-step or a
+backward-Euler fallback. Outside the corpus, a build with a behavioral
+current source (`I={}`) beside nonlinear devices, which held almost every
+sample before, now renders (see Fixed), as do a rectifier supply that held
+31338 of 48000 samples and a transformer-fed rectifier that held 11.
 
 **What changes generated code:** every nodal build, full-LU and Schur.
 
@@ -67,6 +72,27 @@ shot` 8359 → 6299 (1.33×). The DK rows (single-ended amp, germanium network,
 
 ### Fixed
 
+- The nodal Newton's line search and convergence gate read every row the
+  Newton step solves. The residual that steered the Armijo line search and
+  decided convergence covered the KCL rows only, so a residual carried by a
+  source, constraint or inductor branch row was invisible to the merit (the
+  Newton direction's first-order decrease shrank to the KCL part) and
+  uncertified by the gate after a damped step. On a rectifier supply whose
+  behavioral mains source steps 0.19 V per sample into an empty reservoir,
+  one warm-up sample took 250 Newton iterations because a correct full step
+  was backtracked to 1/32..1/1024 on every iteration; held at the 100
+  budget, the frozen state fell further behind the moving source each sample
+  and 31338 of 48000 samples were never solved at 48 kHz (0 at 44.1 kHz,
+  where an unrelated budget rule granted 250). A transformer-fed
+  centre-tapped rectifier held 11 samples at 48 kHz × 4 and, on one more,
+  passed the gate with its mains constraint row 0.125 V off against a
+  0.102 V tolerance. Both helpers now carry every row with its true
+  residual: KCL rows in amps (1e-9 A floor), source and branch rows in their
+  own unit (1e-6 floor, the node-step test's), behavioral `V={}` rows as
+  `(v+ − v−) − f(v)`, saturating-inductor rows with their flux residual;
+  the rows add in quadrature, and the infinity norm the chord exit step
+  reads stays KCL-only. The rectifier supply converges every sample, the
+  hard one in 4 iterations; the centre-tapped rectifier holds none.
 - A behavioral current source (`I={}`) beside nonlinear devices now converges.
   The node-KCL residual that decides convergence and steers the line search
   read the base matrices, where the source's current only appears as a

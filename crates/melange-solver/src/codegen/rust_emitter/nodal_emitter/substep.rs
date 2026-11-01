@@ -338,6 +338,7 @@ impl RustEmitter {
                     "rhs_s",
                     "ls_ok",
                     "i_nl",
+                    "alpha_sub",
                 );
                 // Fall-through on Armijo failure (see trap site): take the
                 // un-line-searched limited step and continue; the residual gate
@@ -424,7 +425,10 @@ impl RustEmitter {
                 ""
             };
             if use_line_search {
-                code.push_str(&format!("                    if max_step < TOL + 1e-3{sat_gate} && kcl_residual(&v_sub, &rhs_s, &a_sub, state).1 {{\n"));
+                code.push_str(&format!(
+                    "                    if max_step < TOL + 1e-3{sat_gate} && kcl_residual(&v_sub, &rhs_s, &a_sub, state{}).1 {{\n",
+                    super::residual::residual_sat_arg(ir, "alpha_sub")
+                ));
             } else {
                 code.push_str(&format!(
                     "                    if max_step < TOL + 1e-3{sat_gate} {{\n"

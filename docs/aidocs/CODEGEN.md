@@ -596,17 +596,32 @@ convergence check accepts. **Mitigations** (BoyleDiodes-gated):
 
 ### Rows the nodal convergence checks cover
 
-The KCL residual (`kcl_residual`, the full-LU Newton's and the sub-step
-ladder's acceptance gate and the Armijo line search's merit) and the ladder's
-step test run over every KCL row (`helpers::kcl_rows`): the circuit nodes
-`0..N_NODES` and the parasitic-BJT internal nodes `expand_bjt_internal_nodes`
-appends among the augmented rows (the augmented rows outside
-`history_zero_rows`). Those rows are where an expanded BJT's junction currents
-enter. The algebraic augmented rows and the inductor branch rows are not KCL
-rows. With the internal rows left out, the line search could not see their
-residual: the wurli power amp with its internal nodes expanded hit the Newton
-ceiling ~1000 times a second and sat 51 dB from its unexpanded render;
-covered, it hits it never and the two renders agree to -176 dB.
+The residual helpers (`kcl_residual` / `kcl_residual_inl`: the full-LU
+Newton's and the sub-step ladder's acceptance gate and the Armijo line search's
+merit) run over every row the Newton step solves, each with its true residual
+in its own unit (`nodal_emitter/residual.rs`):
+
+- KCL rows (`helpers::kcl_rows`: the circuit nodes `0..N_NODES` and the
+  parasitic-BJT internal nodes `expand_bjt_internal_nodes` appends among the
+  augmented rows, the augmented rows outside `history_zero_rows`), in amps,
+  tolerance `1e-3·den + 1e-9 A`. These are the only rows in the returned
+  infinity norm, which the chord exit step reads against 1e-9 A.
+- The algebraic augmented rows (voltage sources, VCVS, ideal transformers,
+  op-amp internal and VCA rows) and the inductor branch rows, `A·v − rhs − q`,
+  tolerance `1e-3·den + 1e-6` (the node-step test's floor).
+- Behavioral `V={}` rows as `(v[n+] − v[n−]) − f(v)`, same tolerance.
+- Saturating-inductor rows with the flux residual and its own `1e-5·den` test.
+
+The ladder's step test and the node-step test keep their device-node set. Two
+receipts: with the BJT internal rows left out, the wurli power amp with its
+internal nodes expanded hit the Newton ceiling ~1000 times a second and sat
+51 dB from its unexpanded render; covered, it hits it never and the two
+renders agree to -176 dB. With the source and branch rows left out, a
+rectifier supply whose behavioral mains steps 0.19 V per sample into an empty
+reservoir had one warm-up sample take 250 Newton iterations (the step that
+satisfied the source row was invisible to the merit and backtracked to
+`1/32..1/1024`), was held, and froze 31338 of 48000 samples; covered, that
+sample converges in 4 and no sample is held.
 
 ## Verification Checklist
 - [ ] INPUT_RESISTANCE matches G matrix stamping (default: 1 ohm)
@@ -781,9 +796,15 @@ generated code has no path to `crate::codegen::policy`. Use
 the decimal point (`5.0`, not `5`).
 
 `NODAL_MAX_ITER_FLOOR = 100` is the least Newton budget a nodal build ships.
-The nodal Newton (Schur and full-LU) is globalized by an Armijo line search,
-which crosses a device's saturation knee in many short steps inside one sample,
-so a smaller budget can end a full-scale transient sample unsolved. It is a
+The nodal Newton (Schur and full-LU) is globalized by an Armijo line search
+whose merit is the residual of every row the Newton step solves (KCL rows in
+amps; source, constraint and inductor branch rows in their own unit;
+behavioral `V={}` rows as `(v+ − v−) − f(v)`; saturating-inductor rows with
+the flux residual; `nodal_emitter/residual.rs`). The same residual is the
+convergence gate, so after a damped step every row is certified, not only the
+KCL rows. The search crosses a device's saturation knee in many short steps
+inside one sample, so a smaller budget can end a full-scale transient sample
+unsolved. It is a
 ceiling, not a target: a converging sample exits early and pays nothing. An
 auto-tuned nodal budget below it is raised to it
 (`CircuitIR::effective_max_iter`, which the emitted `MAX_ITER`, the provenance
