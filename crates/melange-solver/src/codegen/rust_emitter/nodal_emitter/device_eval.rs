@@ -90,7 +90,7 @@ impl RustEmitter {
                          \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
                          \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
                          \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
-                         \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
+                         \x20           * safe_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
                          \x20       // Beta temperature dependence (SPICE XTB) — MUST stay in step with\n\
                          \x20       // the DK twin in dk_emitter.rs. XTB defaults to 0.0, so `powf`\n\
                          \x20       // returns exactly 1.0 and this is inert on cards that omit it.\n\
@@ -119,7 +119,7 @@ impl RustEmitter {
                          \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
                          \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
                          \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI / {n_ideality:.17e})\n\
-                         \x20           * fast_exp((DEVICE_{dev_num}_EG / ({n_ideality:.17e} * vt_nom)) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
+                         \x20           * safe_exp((DEVICE_{dev_num}_EG / ({n_ideality:.17e} * vt_nom)) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
                          \x20   }}\n"
                     ));
                 }
@@ -803,7 +803,7 @@ impl RustEmitter {
                         ));
                     }
                     (DeviceType::Vca, _) => {
-                        // VCA: no junction limiting needed — fast_exp already clamps
+                        // VCA: no junction limiting needed — safe_exp already clamps
                         code.push_str(&format!("{indent}        let v_lim = v_nl_proposed;\n"));
                     }
                     (DeviceType::Ldr, _) => {

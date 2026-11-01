@@ -500,7 +500,7 @@ pub(super) fn emit_nr_limit_and_converge(
                     ));
                 }
                 (DeviceType::Vca, _) => {
-                    // VCA: no junction limiting needed — fast_exp already clamps
+                    // VCA: no junction limiting needed — safe_exp already clamps
                     code.push_str(&format!("{indent}    let v_lim = v_d{i} + dv{i};\n"));
                 }
                 (DeviceType::Ldr, _) => {

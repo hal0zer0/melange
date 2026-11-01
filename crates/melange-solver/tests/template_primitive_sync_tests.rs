@@ -24,9 +24,9 @@
 //!   are printed by the harness in round-trippable `{:.17e}` form and parsed
 //!   back, so the two sides always evaluate identical f64 inputs.
 //!
-//! `fast_exp` / `fast_ln` are provided as the precise clamped forms (the
-//! generated code's `--cfg melange_precise_exp` path), so template-vs-devices
-//! comparisons are exact up to f64 rounding / operation-order ULPs.
+//! `safe_exp` is provided exactly as the generated code emits it (libm exp
+//! with the argument clamped to ±40), so template-vs-devices comparisons are
+//! exact up to f64 rounding / operation-order ULPs.
 //!
 //! Honest-test notes — duplicated-math surfaces NOT pinned here, and why:
 //! - `bjt_with_parasitics` (template) and `dc_op.rs::bjt_with_parasitics_dc`
@@ -34,9 +34,6 @@
 //!   fixed point is defined by the (pinned) intrinsic `bjt_evaluate`. They
 //!   use different damping/iteration schedules by design. Pinned only via
 //!   the RB=RC=RE=0 exact-reduction test below.
-//! - `fast_exp` / `fast_ln` polynomial approximations themselves (the
-//!   non-precise cfg) are an accuracy question, not a twin-sync question,
-//!   and are not compared against libm here.
 
 use std::process::Command;
 use std::sync::OnceLock;
@@ -49,18 +46,14 @@ use melange_devices::{Mosfet, MosfetChannelType};
 use melange_devices::{NonlinearDevice, Vca};
 use melange_primitives::VT_ROOM;
 
-/// Template code compiled as-is. `fast_exp`/`fast_ln` are provided as the
-/// precise clamped forms (the generated code's `--cfg melange_precise_exp`
-/// path), so template-vs-devices comparisons are exact up to f64 rounding.
+/// Template code compiled as-is. `safe_exp` is the generated code's own
+/// definition (libm exp, argument clamped to ±40), so template-vs-devices
+/// comparisons are exact up to f64 rounding.
 #[allow(dead_code, clippy::too_many_arguments)]
 mod tpl {
     #[inline(always)]
-    fn fast_exp(x: f64) -> f64 {
+    fn safe_exp(x: f64) -> f64 {
         x.clamp(-40.0, 40.0).exp()
-    }
-    #[inline(always)]
-    fn fast_ln(x: f64) -> f64 {
-        x.ln()
     }
 
     include!(concat!(
@@ -899,7 +892,7 @@ fn template_bjt_with_parasitics_zero_r_reduces_to_intrinsic() {
 /// reverse mode (Vds < 0 for N), and the Vds=0 mode boundary.
 ///
 /// abs_floor 1e-24 absorbs the one known sub-numerical divergence: in deep
-/// subthreshold (vgst/(2VT) < -40) the template's fast_exp clamps at e^-40
+/// subthreshold (vgst/(2VT) < -40) the template's safe_exp clamps at e^-40
 /// while the devices crate evaluates the raw exp — both sides are ≤ 4e-30 A
 /// there, below any solver tolerance.
 #[test]
@@ -1611,11 +1604,9 @@ fn tube_harness_rows() -> &'static Vec<(String, Vec<f64>)> {
 
         let source = format!(
             "#![allow(dead_code, unused_variables, clippy::all)]\n\
-             // Precise fast_exp/fast_ln (the generated code's melange_precise_exp path).\n\
+             // safe_exp exactly as the generated code emits it.\n\
              #[inline(always)]\n\
-             fn fast_exp(x: f64) -> f64 {{ x.clamp(-40.0, 40.0).exp() }}\n\
-             #[inline(always)]\n\
-             fn fast_ln(x: f64) -> f64 {{ x.ln() }}\n\
+             fn safe_exp(x: f64) -> f64 {{ x.clamp(-40.0, 40.0).exp() }}\n\
              {stripped}\n\
              fn main() {{\n{main_body}}}\n"
         );

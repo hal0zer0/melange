@@ -18,7 +18,6 @@
 pub(crate) mod const_text;
 pub mod emitter;
 #[cfg(feature = "codegen")]
-pub mod fast_math;
 #[cfg(feature = "codegen")]
 pub mod ir;
 #[cfg(feature = "codegen")]

@@ -9683,24 +9683,19 @@ M1 drain gate source 0 NMOD_BE
     );
 }
 
-/// The emitted `fast_exp`/`fast_ln` coefficients must be exactly the canonical
-/// ones in `codegen::fast_math`.
+/// The emitted exponential is libm `exp` behind the ±40 clamp, unconditionally.
 ///
-/// These are melange's OWN implementations, not libm, so every backend has to
-/// use bit-identical coefficients or the backends compute different functions.
-/// The canonical constants exist so a second backend does not have to
-/// transcribe digits out of a Rust string literal by hand; this test is what
-/// stops the emitter and the constants from drifting apart, which would
-/// otherwise be invisible — the outputs would merely disagree in the last
-/// places.
+/// melange used to emit its own `fast_exp`/`fast_ln` polynomials. Their pieces
+/// did not meet (a 1.2e-5 value jump in `fast_ln` at every power of two, a
+/// 1.5e-6 jump in `fast_exp` at every half-octave), which removed Newton roots
+/// in some windows and folded the law in others (DEBUGGING.md, "Newton
+/// Period-2 Orbit"). This pins the replacement: one `safe_exp`, libm inside,
+/// and no trace of the polynomial pair or its cfg in the emitted code.
 #[test]
-fn emitted_fast_math_coefficients_are_canonical() {
-    use melange_solver::codegen::fast_math::FAST_MATH_COEFFICIENTS;
-
-    // A diode pulls in fast_exp (and the tube softplus path pulls fast_ln;
-    // both helpers are emitted together).
+fn emitted_exp_is_libm_behind_the_clamp() {
+    // A diode pulls in safe_exp; a tube would pull the softplus `.ln()` too.
     let (code, _, _, _) = generate_code(
-        "Fast math coefficient check\n\
+        "libm exp check\n\
          R1 in out 1k\n\
          D1 out 0 DMOD\n\
          C1 out 0 10n\n\
@@ -9709,21 +9704,13 @@ fn emitted_fast_math_coefficients_are_canonical() {
     );
 
     assert!(
-        code.contains("fn fast_exp("),
-        "expected fast_exp in emitted code for a diode circuit"
+        code.contains("fn safe_exp(x: f64) -> f64 { x.clamp(-40.0, 40.0).exp() }"),
+        "expected the libm safe_exp definition in emitted code for a diode circuit"
     );
-
-    for (name, value, text) in FAST_MATH_COEFFICIENTS {
+    for forbidden in ["fast_exp", "fast_ln", "melange_precise_exp"] {
         assert!(
-            code.contains(text),
-            "emitted code is missing the canonical {name} literal {text:?}"
-        );
-        // And the literal still denotes the constant, so a same-value-different-
-        // text edit cannot slip through either.
-        assert_eq!(
-            text.parse::<f64>().unwrap().to_bits(),
-            value.to_bits(),
-            "{name}: literal {text:?} no longer denotes the canonical value"
+            !code.contains(forbidden),
+            "emitted code still mentions {forbidden}"
         );
     }
 }

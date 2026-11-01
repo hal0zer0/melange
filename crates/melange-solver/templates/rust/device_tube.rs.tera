@@ -17,17 +17,16 @@ fn tube_ip(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64,
     let inner = kp * (1.0 / mu + vgk / s);
     let softplus = if inner > 20.0 { inner }
                    else if inner < -20.0 { 0.0 }
-                   else { fast_ln(1.0 + fast_exp(inner)) };
+                   else { (1.0 + safe_exp(inner)).ln() };
     let e1 = (vpk / kp) * softplus;
     let ip_koren = if e1 <= 0.0 { 0.0 } else { 2.0 * e1.powf(ex) / kg1 };
     ip_koren * (1.0 + lambda * vpk)
 }
 
 /// Numerically stable softplus ln(1 + e^x), and its derivative the logistic
-/// sigmoid. Deliberately NOT built on fast_exp/fast_ln: fast_exp clamps its
-/// argument to [-40, 40], which would put a spurious ~1e-27 A floor under the
-/// grid current exactly in the deep-negative-grid region this law exists to
-/// get right, and there is no fast_ln_1p at all.
+/// sigmoid. Deliberately NOT built on safe_exp: its [-40, 40] clamp would put
+/// a spurious ~1e-27 A floor under the grid current exactly in the
+/// deep-negative-grid region this law exists to get right.
 #[inline(always)]
 fn tube_softplus(x: f64) -> f64 {
     if x > 0.0 { x + (-x).exp().ln_1p() } else { x.exp().ln_1p() }
@@ -172,8 +171,8 @@ fn tube_jacobian(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f
     let (sigmoid, softplus) = if inner > 20.0 { (1.0, inner) }
                               else if inner < -20.0 { (0.0, 0.0) }
                               else {
-                                  let exp_inner = fast_exp(inner);
-                                  (exp_inner / (1.0 + exp_inner), fast_ln(1.0 + exp_inner))
+                                  let exp_inner = safe_exp(inner);
+                                  (exp_inner / (1.0 + exp_inner), (1.0 + exp_inner).ln())
                               };
 
     let e1 = (vpk / kp) * softplus;
@@ -262,8 +261,8 @@ fn tube_evaluate(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f
     let (sigmoid, softplus) = if inner > 20.0 { (1.0, inner) }
                                else if inner < -20.0 { (0.0, 0.0) }
                                else {
-                                   let exp_inner = fast_exp(inner);
-                                   (exp_inner / (1.0 + exp_inner), fast_ln(1.0 + exp_inner))
+                                   let exp_inner = safe_exp(inner);
+                                   (exp_inner / (1.0 + exp_inner), (1.0 + exp_inner).ln())
                                };
 
     let e1 = (vpk / kp) * softplus;
@@ -321,7 +320,7 @@ fn tube_ip_pentode(vgk: f64, vpk: f64, vg2k: f64,
     let inner = kp * (1.0 / mu + vgk / s);
     let softplus = if inner > 20.0 { inner }
                    else if inner < -20.0 { 0.0 }
-                   else { fast_ln(1.0 + fast_exp(inner)) };
+                   else { (1.0 + safe_exp(inner)).ln() };
     let e1 = (vg2k / kp) * softplus;
     if e1 <= 1e-30 { return 0.0; }
     let ip0 = e1.powf(ex);
@@ -346,7 +345,7 @@ fn tube_is_pentode(vgk: f64, vpk: f64, vg2k: f64,
     let inner = kp * (1.0 / mu + vgk / s);
     let softplus = if inner > 20.0 { inner }
                    else if inner < -20.0 { 0.0 }
-                   else { fast_ln(1.0 + fast_exp(inner)) };
+                   else { (1.0 + safe_exp(inner)).ln() };
     let e1 = (vg2k / kp) * softplus;
     if e1 <= 1e-30 { return 0.0; }
     let ip0 = e1.powf(ex);
@@ -376,8 +375,8 @@ fn tube_jacobian_pentode(vgk: f64, vpk: f64, vg2k: f64,
     let (sigmoid, softplus) = if inner > 20.0 { (1.0, inner) }
                               else if inner < -20.0 { (0.0, 0.0) }
                               else {
-                                  let exp_inner = fast_exp(inner);
-                                  (exp_inner / (1.0 + exp_inner), fast_ln(1.0 + exp_inner))
+                                  let exp_inner = safe_exp(inner);
+                                  (exp_inner / (1.0 + exp_inner), (1.0 + exp_inner).ln())
                               };
     let e1 = (vg2k / kp) * softplus;
     if e1 <= 1e-30 {
@@ -436,8 +435,8 @@ fn tube_evaluate_pentode(vgk: f64, vpk: f64, vg2k: f64,
     let (sigmoid, softplus) = if inner > 20.0 { (1.0, inner) }
                                else if inner < -20.0 { (0.0, 0.0) }
                                else {
-                                   let exp_inner = fast_exp(inner);
-                                   (exp_inner / (1.0 + exp_inner), fast_ln(1.0 + exp_inner))
+                                   let exp_inner = safe_exp(inner);
+                                   (exp_inner / (1.0 + exp_inner), (1.0 + exp_inner).ln())
                                };
     let e1 = (vg2k / kp) * softplus;
     if e1 <= 1e-30 {
@@ -497,7 +496,7 @@ fn tube_ip_beam_tetrode(vgk: f64, vpk: f64, vg2k: f64,
     let inner = kp * (1.0 / mu + vgk / s);
     let softplus = if inner > 20.0 { inner }
                    else if inner < -20.0 { 0.0 }
-                   else { fast_ln(1.0 + fast_exp(inner)) };
+                   else { (1.0 + safe_exp(inner)).ln() };
     let e1 = (vg2k / kp) * softplus;
     if e1 <= 1e-30 { return 0.0; }
     let ip0 = e1.powf(ex);
@@ -527,7 +526,7 @@ fn tube_is_beam_tetrode(vgk: f64, vpk: f64, vg2k: f64,
     let inner = kp * (1.0 / mu + vgk / s);
     let softplus = if inner > 20.0 { inner }
                    else if inner < -20.0 { 0.0 }
-                   else { fast_ln(1.0 + fast_exp(inner)) };
+                   else { (1.0 + safe_exp(inner)).ln() };
     let e1 = (vg2k / kp) * softplus;
     if e1 <= 1e-30 { return 0.0; }
     let ip0 = e1.powf(ex);
@@ -562,8 +561,8 @@ fn tube_jacobian_beam_tetrode(vgk: f64, vpk: f64, vg2k: f64,
     let (sigmoid, softplus) = if inner > 20.0 { (1.0, inner) }
                               else if inner < -20.0 { (0.0, 0.0) }
                               else {
-                                  let exp_inner = fast_exp(inner);
-                                  (exp_inner / (1.0 + exp_inner), fast_ln(1.0 + exp_inner))
+                                  let exp_inner = safe_exp(inner);
+                                  (exp_inner / (1.0 + exp_inner), (1.0 + exp_inner).ln())
                               };
     let e1 = (vg2k / kp) * softplus;
     if e1 <= 1e-30 {
@@ -626,8 +625,8 @@ fn tube_evaluate_beam_tetrode(vgk: f64, vpk: f64, vg2k: f64,
     let (sigmoid, softplus) = if inner > 20.0 { (1.0, inner) }
                                else if inner < -20.0 { (0.0, 0.0) }
                                else {
-                                   let exp_inner = fast_exp(inner);
-                                   (exp_inner / (1.0 + exp_inner), fast_ln(1.0 + exp_inner))
+                                   let exp_inner = safe_exp(inner);
+                                   (exp_inner / (1.0 + exp_inner), (1.0 + exp_inner).ln())
                                };
     let e1 = (vg2k / kp) * softplus;
     if e1 <= 1e-30 {
@@ -692,13 +691,13 @@ fn tube_ip_pentode_v(vgk: f64, vpk: f64, vg2k: f64,
     let inner_a = kp * (1.0 / mu + vgk / s);
     let sp_a = if inner_a > 20.0 { inner_a }
                else if inner_a < -20.0 { 0.0 }
-               else { fast_ln(1.0 + fast_exp(inner_a)) };
+               else { (1.0 + safe_exp(inner_a)).ln() };
     let e1_a = (vg2k / kp) * sp_a;
     let ip0_a = if e1_a > 1e-30 { e1_a.powf(ex) } else { 0.0 };
     let inner_b = kp * (1.0 / mu_b + vgk / s);
     let sp_b = if inner_b > 20.0 { inner_b }
                else if inner_b < -20.0 { 0.0 }
-               else { fast_ln(1.0 + fast_exp(inner_b)) };
+               else { (1.0 + safe_exp(inner_b)).ln() };
     let e1_b = (vg2k / kp) * sp_b;
     let ip0_b = if e1_b > 1e-30 { e1_b.powf(ex_b) } else { 0.0 };
     let ip0_v = (1.0 - svar) * ip0_a + svar * ip0_b;
@@ -723,13 +722,13 @@ fn tube_is_pentode_v(vgk: f64, vpk: f64, vg2k: f64,
     let inner_a = kp * (1.0 / mu + vgk / s);
     let sp_a = if inner_a > 20.0 { inner_a }
                else if inner_a < -20.0 { 0.0 }
-               else { fast_ln(1.0 + fast_exp(inner_a)) };
+               else { (1.0 + safe_exp(inner_a)).ln() };
     let e1_a = (vg2k / kp) * sp_a;
     let ip0_a = if e1_a > 1e-30 { e1_a.powf(ex) } else { 0.0 };
     let inner_b = kp * (1.0 / mu_b + vgk / s);
     let sp_b = if inner_b > 20.0 { inner_b }
                else if inner_b < -20.0 { 0.0 }
-               else { fast_ln(1.0 + fast_exp(inner_b)) };
+               else { (1.0 + safe_exp(inner_b)).ln() };
     let e1_b = (vg2k / kp) * sp_b;
     let ip0_b = if e1_b > 1e-30 { e1_b.powf(ex_b) } else { 0.0 };
     let ip0_v = (1.0 - svar) * ip0_a + svar * ip0_b;
@@ -755,8 +754,8 @@ fn tube_jacobian_pentode_v(vgk: f64, vpk: f64, vg2k: f64,
     let (sigmoid_a, sp_a) = if inner_a > 20.0 { (1.0, inner_a) }
                              else if inner_a < -20.0 { (0.0, 0.0) }
                              else {
-                                 let exp_inner = fast_exp(inner_a);
-                                 (exp_inner / (1.0 + exp_inner), fast_ln(1.0 + exp_inner))
+                                 let exp_inner = safe_exp(inner_a);
+                                 (exp_inner / (1.0 + exp_inner), (1.0 + exp_inner).ln())
                              };
     let e1_a = (vg2k / kp) * sp_a;
     let (ip0_a, dip0a_dvgk, dip0a_dvg2k) = if e1_a > 1e-30 {
@@ -771,8 +770,8 @@ fn tube_jacobian_pentode_v(vgk: f64, vpk: f64, vg2k: f64,
     let (sigmoid_b, sp_b) = if inner_b > 20.0 { (1.0, inner_b) }
                              else if inner_b < -20.0 { (0.0, 0.0) }
                              else {
-                                 let exp_inner = fast_exp(inner_b);
-                                 (exp_inner / (1.0 + exp_inner), fast_ln(1.0 + exp_inner))
+                                 let exp_inner = safe_exp(inner_b);
+                                 (exp_inner / (1.0 + exp_inner), (1.0 + exp_inner).ln())
                              };
     let e1_b = (vg2k / kp) * sp_b;
     let (ip0_b, dip0b_dvgk, dip0b_dvg2k) = if e1_b > 1e-30 {
@@ -841,13 +840,13 @@ fn tube_ip_beam_tetrode_v(vgk: f64, vpk: f64, vg2k: f64,
     let inner_a = kp * (1.0 / mu + vgk / s);
     let sp_a = if inner_a > 20.0 { inner_a }
                else if inner_a < -20.0 { 0.0 }
-               else { fast_ln(1.0 + fast_exp(inner_a)) };
+               else { (1.0 + safe_exp(inner_a)).ln() };
     let e1_a = (vg2k / kp) * sp_a;
     let ip0_a = if e1_a > 1e-30 { e1_a.powf(ex) } else { 0.0 };
     let inner_b = kp * (1.0 / mu_b + vgk / s);
     let sp_b = if inner_b > 20.0 { inner_b }
                else if inner_b < -20.0 { 0.0 }
-               else { fast_ln(1.0 + fast_exp(inner_b)) };
+               else { (1.0 + safe_exp(inner_b)).ln() };
     let e1_b = (vg2k / kp) * sp_b;
     let ip0_b = if e1_b > 1e-30 { e1_b.powf(ex_b) } else { 0.0 };
     let ip0_v = (1.0 - svar) * ip0_a + svar * ip0_b;
@@ -874,13 +873,13 @@ fn tube_is_beam_tetrode_v(vgk: f64, vpk: f64, vg2k: f64,
     let inner_a = kp * (1.0 / mu + vgk / s);
     let sp_a = if inner_a > 20.0 { inner_a }
                else if inner_a < -20.0 { 0.0 }
-               else { fast_ln(1.0 + fast_exp(inner_a)) };
+               else { (1.0 + safe_exp(inner_a)).ln() };
     let e1_a = (vg2k / kp) * sp_a;
     let ip0_a = if e1_a > 1e-30 { e1_a.powf(ex) } else { 0.0 };
     let inner_b = kp * (1.0 / mu_b + vgk / s);
     let sp_b = if inner_b > 20.0 { inner_b }
                else if inner_b < -20.0 { 0.0 }
-               else { fast_ln(1.0 + fast_exp(inner_b)) };
+               else { (1.0 + safe_exp(inner_b)).ln() };
     let e1_b = (vg2k / kp) * sp_b;
     let ip0_b = if e1_b > 1e-30 { e1_b.powf(ex_b) } else { 0.0 };
     let ip0_v = (1.0 - svar) * ip0_a + svar * ip0_b;
@@ -907,8 +906,8 @@ fn tube_jacobian_beam_tetrode_v(vgk: f64, vpk: f64, vg2k: f64,
     let (sigmoid_a, sp_a) = if inner_a > 20.0 { (1.0, inner_a) }
                              else if inner_a < -20.0 { (0.0, 0.0) }
                              else {
-                                 let exp_inner = fast_exp(inner_a);
-                                 (exp_inner / (1.0 + exp_inner), fast_ln(1.0 + exp_inner))
+                                 let exp_inner = safe_exp(inner_a);
+                                 (exp_inner / (1.0 + exp_inner), (1.0 + exp_inner).ln())
                              };
     let e1_a = (vg2k / kp) * sp_a;
     let (ip0_a, dip0a_dvgk, dip0a_dvg2k) = if e1_a > 1e-30 {
@@ -922,8 +921,8 @@ fn tube_jacobian_beam_tetrode_v(vgk: f64, vpk: f64, vg2k: f64,
     let (sigmoid_b, sp_b) = if inner_b > 20.0 { (1.0, inner_b) }
                              else if inner_b < -20.0 { (0.0, 0.0) }
                              else {
-                                 let exp_inner = fast_exp(inner_b);
-                                 (exp_inner / (1.0 + exp_inner), fast_ln(1.0 + exp_inner))
+                                 let exp_inner = safe_exp(inner_b);
+                                 (exp_inner / (1.0 + exp_inner), (1.0 + exp_inner).ln())
                              };
     let e1_b = (vg2k / kp) * sp_b;
     let (ip0_b, dip0b_dvgk, dip0b_dvg2k) = if e1_b > 1e-30 {
@@ -1008,7 +1007,7 @@ fn tube_ip_pentode_classical(vgk: f64, vpk: f64, vg2k: f64,
     let inner = kp * (1.0 / mu + vgk / vg2k_safe);
     let softplus = if inner > 20.0 { inner }
                    else if inner < -20.0 { 0.0 }
-                   else { fast_ln(1.0 + fast_exp(inner)) };
+                   else { (1.0 + safe_exp(inner)).ln() };
     let e1 = (vg2k_safe / kp) * softplus;
     if e1 <= 1e-30 { return 0.0; }
     let g = (vpk_safe / kvb).atan();
@@ -1062,8 +1061,8 @@ fn tube_jacobian_pentode_classical(vgk: f64, vpk: f64, vg2k: f64,
     let (sigmoid, softplus) = if inner > 20.0 { (1.0, inner) }
                               else if inner < -20.0 { (0.0, 0.0) }
                               else {
-                                  let exp_inner = fast_exp(inner);
-                                  (exp_inner / (1.0 + exp_inner), fast_ln(1.0 + exp_inner))
+                                  let exp_inner = safe_exp(inner);
+                                  (exp_inner / (1.0 + exp_inner), (1.0 + exp_inner).ln())
                               };
     let e1 = (vg2k_safe / kp) * softplus;
 
@@ -1145,8 +1144,8 @@ fn tube_evaluate_pentode_classical(vgk: f64, vpk: f64, vg2k: f64,
     let (sigmoid, softplus) = if inner > 20.0 { (1.0, inner) }
                                else if inner < -20.0 { (0.0, 0.0) }
                                else {
-                                   let exp_inner = fast_exp(inner);
-                                   (exp_inner / (1.0 + exp_inner), fast_ln(1.0 + exp_inner))
+                                   let exp_inner = safe_exp(inner);
+                                   (exp_inner / (1.0 + exp_inner), (1.0 + exp_inner).ln())
                                };
     let e1 = (vg2k_safe / kp) * softplus;
     if e1 <= 1e-30 {

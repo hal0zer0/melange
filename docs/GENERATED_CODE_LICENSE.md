@@ -24,7 +24,7 @@ from the Melange project:
 - **Matrix operations** — Sparse LU factorization, matrix-vector products, and
   the DK/Schur complement solver structure come directly from GPL source.
 
-- **Numerical infrastructure** — `safe_exp`, `fast_exp`, denormal flushing,
+- **Numerical infrastructure** — `safe_exp`, denormal flushing,
   NaN recovery, DC blocking filters, and oversampling polyphase filters are
   all copied from GPL-licensed Melange primitives and templates.
 

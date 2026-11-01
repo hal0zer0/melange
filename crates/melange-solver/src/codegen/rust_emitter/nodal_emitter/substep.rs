@@ -302,7 +302,7 @@ impl RustEmitter {
             if use_line_search {
                 // pnjlim + node damping (parity with the trap/BE loops): the
                 // sub-step inner NR was previously RAW undamped Newton. On a
-                // stiff junction the raw step overshoots past the fast_exp
+                // stiff junction the raw step overshoots past the safe_exp
                 // clamp where the device Jacobian flattens to ~0, making the
                 // Newton direction non-descent and defeating the line search.
                 // Limiting keeps the iterate where the Jacobian is valid.

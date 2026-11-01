@@ -830,13 +830,13 @@ fn test_codegen_forward_active_exp_be_only() {
 
     // In the 1D forward-active path, only exp_be is computed (no exp_bc)
     // The generated code pattern is:
-    //   let exp_be_N = fast_exp(vbe_N / (DEVICE_N_NF * state.device_N_vt));
+    //   let exp_be_N = safe_exp(vbe_N / (DEVICE_N_NF * state.device_N_vt));
     //   let i_devS = state.device_N_is * (exp_be_N - 1.0) * DEVICE_N_SIGN;
     //   let jdev_S_S = state.device_N_is / (DEVICE_N_NF * state.device_N_vt) * exp_be_N;
 
     // Check for the single-junction eval pattern
     assert!(
-        code.contains("exp_be") || code.contains("fast_exp"),
+        code.contains("exp_be") || code.contains("safe_exp"),
         "Forward-active code should compute exp_be for Vbe junction"
     );
 }

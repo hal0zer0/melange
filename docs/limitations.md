@@ -428,6 +428,20 @@ and after the flip. A switch that swaps a capacitor or an inductor solves its
 next sample on backward Euler (breakpoint-BE), because the carried capacitor
 currents were built on the old value.
 
+### Self-starting oscillators: the start time is not a model prediction
+
+A free-running oscillator simulated from its DC operating point is seeded by
+whatever perturbation the arithmetic supplies, and its start-up delay grows as
+`ln(swing / seed)`. The seed is floating-point roundoff, so the moment the
+oscillation becomes visible moves with operation order, with the platform's
+libm (a macOS or Windows plugin build need not start when a Linux one does)
+and with any change to the solver's arithmetic, while the steady-state waveform
+does not. Measured on the golden `wurli-tremolo` fixture when the emitted
+exponential became libm: full swing at 2.5 s instead of 1.5 s after a cold
+start, steady state identical. The physical seed (a supply ramp, or `--noise`)
+is what gives start-up timing a meaning; without one, treat the first seconds
+of a self-starting oscillator as undefined and pre-roll before listening.
+
 ### Self-starting two-transistor astables [OPEN]
 
 A classic two-transistor astable multivibrator whose DC operating point is

@@ -5,7 +5,7 @@
 /// VCA signal current: I = G0 * exp(-Vc / Vscale) * V_signal (+ cubic THD)
 #[inline(always)]
 fn vca_current(v_sig: f64, v_ctrl: f64, g0: f64, vscale: f64, thd: f64) -> f64 {
-    let gain = g0 * fast_exp(-v_ctrl / vscale);
+    let gain = g0 * safe_exp(-v_ctrl / vscale);
     if thd == 0.0 {
         gain * v_sig
     } else {
@@ -23,7 +23,7 @@ fn vca_ctrl_current() -> f64 {
 /// VCA Jacobian: [dI_sig/dV_sig, dI_sig/dV_ctrl, dI_ctrl/dV_sig, dI_ctrl/dV_ctrl]
 #[inline(always)]
 fn vca_jacobian(v_sig: f64, v_ctrl: f64, g0: f64, vscale: f64, thd: f64) -> [f64; 4] {
-    let gain = g0 * fast_exp(-v_ctrl / vscale);
+    let gain = g0 * safe_exp(-v_ctrl / vscale);
     if thd == 0.0 {
         [gain, -gain * v_sig / vscale, 0.0, 0.0]
     } else {

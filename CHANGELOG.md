@@ -9,7 +9,29 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
-**What changes rendered audio:** 14 of the 192 golden renders (`radio-am`,
+**What changes rendered audio:** every exponential and logarithm in the
+generated device laws is now libm (`exp` behind the ±40 `safe_exp` clamp, and
+`ln`); the emitted `fast_exp`/`fast_ln` polynomials and their
+`melange_precise_exp` cfg are gone (see Fixed). Of the 192 golden renders, 62
+(the decks with no exponential law) are byte-identical, 115 move NEGLIGIBLY (at
+most 1.3e-4 V per sample, level within 5e-4 dB, correlation ≥ 0.99999999), and
+15 are CHANGED: 11 silence renders whose numerical floor dropped
+(`steve-1073-preamp` by 67 dB to a −180 dBFS peak, `vurli` by 94 dB,
+`6k7-varimu-stage` by 14 dB, `noyce-ef86` by 1.5 dB at −74 dBFS, the rest by
+0.2 dB or less, all far below audibility), and the four `wurli-tremolo`
+renders, whose free-running LFO now reaches full swing about 0.5–1 s later
+after a cold start (the polynomial jumps were the numerical kick that started
+it); its steady-state waveform is unchanged (20.82 dBFS, Sensor Array 500 ms
+windows over a 10 s render). The hard-drive set (129 renders at 0.3/3/10 V)
+keeps every count: holds, ceiling hits, sub-steps, backward-Euler fallbacks and
+unsolved samples are identical; on golden, `wurli-power-amp` sweep gains two
+ceiling hits (samples 57768 and 65574, the same limited-step Newton path as
+its three existing ones, each recovered by the sub-step with no hold) and
+`velvet-elvis` step loses its one. Per-sample throughput moved by −9 % to
++4 % on the bench decks (libm faster on two of three; Newton iteration totals
+identical), so plugins are neutral to faster.
+
+**What changes rendered audio (earlier in this release):** 14 of the 192 golden renders (`radio-am`,
 `radio-fm`, `sat-core-open`, `sat-core-loaded`, every stimulus) move by at
 most 2.6e-12 V, from a different static pivot order on nodal builds that now
 take the compile-time sparse schedule; the other 178 are byte-identical to
@@ -82,6 +104,26 @@ shot` 8359 → 6299 (1.33×). The DK rows (single-ended amp, germanium network,
 12AX7 stage) have byte-identical generated code and moved within 2 %.
 
 ### Fixed
+- The generated device laws call libm `exp` and `ln`. melange emitted its own
+  `fast_exp` (range reduction + 5th-order polynomial) and `fast_ln` (symmetric
+  log series) into every nonlinear build; their pieces did not meet. `fast_ln`
+  was exact at a mantissa of 1 and 1.242e-5 low just under 2, a value jump at
+  every power of two, and the Koren plate law's `ln(1 + exp(inner))` crosses
+  2.0 exactly at the bias knee `vgk = −sqrt(kvb + vpk²)/mu`; `fast_exp`'s
+  polynomial disagreed with itself across the range-reduction boundary by
+  1.45e-6 relative at every half-octave, inside every exponential law (diode,
+  BJT, JFET, MOSFET, VCA, every tube). A jump the same way as the law's slope
+  leaves a window with no root: Newton alternated sides with the full jump as
+  its residual on the plate and cathode rows (a two-cycle at a 9.8e-9 floor,
+  `sad-bastard` sweep sample 80093, a 6.9 nA step in 0.275 mA); a jump against
+  the slope folds the law into three roots and converges to a non-unique point
+  that nothing counts. With libm the same sample converges quadratically in 4
+  iterations (residual 1.7e-13) and the deck's Newton iteration count is
+  unchanged. The `melange_precise_exp` cfg is removed with the polynomials: a
+  discontinuous law is correct for no circuit class, so there is no opt-in.
+  The codegen self-recorded golden `triode_cc_sine_500hz.json` was re-recorded
+  (max 2.24e-4 V on a ±10 V waveform); the ngspice-referenced gates pass
+  unchanged.
 
 - A nodal full-LU iterate is certified by the node-step test on the UNDAMPED
   Newton correction every iteration, beside the device-chord check and the

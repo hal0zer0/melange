@@ -119,9 +119,9 @@ precision. *(commits `6ab3f96`, `00c6a4d`, `f968e2c`, `ca2d7e6`)*
 
 Caveats worth stating: the pentode uses physics invariants + structural
 identity rather than a full transcription of the (intricate) Derk equations;
-the diode-breakdown check confirms the *shipping* `fast_exp` (a 5th-order
-minimax polynomial, <0.0004% error) tracks the canonical exponential to that
-accuracy, with the `I(−BV)=−IBV` anchor still exact.
+the diode-breakdown check confirms the *shipping* exponential (libm `exp`
+behind `safe_exp`'s ±40 clamp) tracks the canonical law to f64 rounding, with
+the `I(−BV)=−IBV` anchor exact.
 
 ---
 

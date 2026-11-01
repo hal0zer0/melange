@@ -271,6 +271,14 @@ struct CircuitState {
 
 ## Device Model Functions
 
+Every exponential in the device laws is libm `exp` behind `safe_exp(x) =
+x.clamp(-40.0, 40.0).exp()` (the clamp only prevents overflow; beyond it a
+junction is saturated or cut off), and every logarithm is libm `ln`. The
+stamped Jacobians are the derivatives of exactly these functions. A piecewise
+approximation here must be continuous at its joins to the ulp: a value jump of
+1e-6..1e-5 relative removes Newton roots in some windows and folds the law in
+others (DEBUGGING.md, "Newton Period-2 Orbit").
+
 The codegen generates device-specific functions based on the circuit:
 
 ### Diode (1D per device)
@@ -366,7 +374,7 @@ fn tube_jacobian(vgk: f64, vpk: f64, mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f
 2D model: plate current (Ip) at `start_idx`, grid current (Ig) at `start_idx+1`.
 
 - **Plate current**: Koren model with Early-effect lambda — `Ip = Ip_koren * (1 + lambda * Vpk)` where `Ip_koren = E1^ex / kg1` and `E1 = (vpk/kp) * ln(1 + exp(kp * (1/mu + vgk/sqrt(kvb + vpk^2))))`
-- **Grid current**: on `v = vgk − vgoff`, Dempwolf & Zölzer DAFx-11 eq. (11) `Ig = gg * (softplus(cg*v)/cg)^xi` above the tangent-rule join `vstar` and the retarding-field tail `gg * exp(xi*ln_sstar + (v − vstar)/TUBE_GRID_TAIL_VT)` below it (= `I_t·exp((v−V*)/V_T)` with `I_t = gg·s*^xi`, `s* = softplus(cg·vstar)/cg`), value and derivative from one evaluation (`tube_ig_dz_pair`; `tube_ig_dz` / `tube_ig_dz_deriv` wrap it; `tube_ig_eq11` / `_deriv` are the bare conducting law). `vstar` is `DEVICE_{n}_GRID_VSTAR`, computed at build by `melange_devices::tube::grid_join_voltage(xi, cg)` (`f64::NEG_INFINITY` = no join), `ln_sstar` is `DEVICE_{n}_GRID_LN_SSTAR`; the live `gg` keeps the tail anchored. Uses `std` `exp`/`ln_1p`, NOT `fast_exp`/`fast_ln` — the latter's ±40 clamp would floor the deep-negative tail. `tube_ig` / `tube_ig_deriv` (Leach) still exist but are emitted only for pentode control grids, gated on `any_pentode_family`. Math: `DEVICE_MODELS.md` → Grid Current.
+- **Grid current**: on `v = vgk − vgoff`, Dempwolf & Zölzer DAFx-11 eq. (11) `Ig = gg * (softplus(cg*v)/cg)^xi` above the tangent-rule join `vstar` and the retarding-field tail `gg * exp(xi*ln_sstar + (v − vstar)/TUBE_GRID_TAIL_VT)` below it (= `I_t·exp((v−V*)/V_T)` with `I_t = gg·s*^xi`, `s* = softplus(cg·vstar)/cg`), value and derivative from one evaluation (`tube_ig_dz_pair`; `tube_ig_dz` / `tube_ig_dz_deriv` wrap it; `tube_ig_eq11` / `_deriv` are the bare conducting law). `vstar` is `DEVICE_{n}_GRID_VSTAR`, computed at build by `melange_devices::tube::grid_join_voltage(xi, cg)` (`f64::NEG_INFINITY` = no join), `ln_sstar` is `DEVICE_{n}_GRID_LN_SSTAR`; the live `gg` keeps the tail anchored. Uses `exp`/`ln_1p` directly, not `safe_exp` — its ±40 clamp would floor the deep-negative tail. `tube_ig` / `tube_ig_deriv` (Leach) still exist but are emitted only for pentode control grids, gated on `any_pentode_family`. Math: `DEVICE_MODELS.md` → Grid Current.
 - **Jacobian**: 4-element `[dIp/dVgk, dIp/dVpk, dIg/dVgk, dIg/dVpk]` — dIg/dVpk = 0. With lambda: `dIp/dVgk = dIp_koren/dVgk * (1+lambda*Vpk)`, `dIp/dVpk = dIp_koren/dVpk * (1+lambda*Vpk) + Ip_koren * lambda`
 - Constants: `DEVICE_{n}_MU`, `DEVICE_{n}_EX`, `DEVICE_{n}_KG1`, `DEVICE_{n}_KP`, `DEVICE_{n}_KVB`, `DEVICE_{n}_GG`, `DEVICE_{n}_XI`, `DEVICE_{n}_CG`, `DEVICE_{n}_VGOFF`, `DEVICE_{n}_GRID_VSTAR` and `DEVICE_{n}_GRID_LN_SSTAR` (derived from XI/CG, not card keys), `DEVICE_{n}_LAMBDA` (a pentode gets `IG_MAX`/`VGK_ONSET` in place of the grid-law set — each device emits only the grid law it uses). `vgoff` is a runtime-adjustable state field like the other card values; `GRID_VSTAR` is not.
 - Netlist syntax: `T1 grid plate cathode modelname` with `.model modelname TRIODE(MU=100 EX=1.4 KG1=1060 KP=600 KVB=300)`

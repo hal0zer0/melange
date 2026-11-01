@@ -1679,7 +1679,7 @@ impl RustEmitter {
                              \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
                              \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
                              \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI)\n\
-                             \x20           * fast_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
+                             \x20           * safe_exp((DEVICE_{dev_num}_EG / vt_nom) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
                              \x20       // Beta temperature dependence (SPICE XTB). XTB defaults to 0.0,\n\
                              \x20       // so `powf` returns exactly 1.0 and this is inert on cards that\n\
                              \x20       // omit it — but a self-heating device whose beta never moved was\n\
@@ -1712,7 +1712,7 @@ impl RustEmitter {
                              \x20       let vt_nom = BOLTZMANN_Q * DEVICE_{dev_num}_TAMB;\n\
                              \x20       state.device_{dev_num}_is = DEVICE_{dev_num}_IS_NOM\n\
                              \x20           * t_ratio.powf(DEVICE_{dev_num}_XTI / {n_emission:.17e})\n\
-                             \x20           * fast_exp((DEVICE_{dev_num}_EG / ({n_emission:.17e} * vt_nom)) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
+                             \x20           * safe_exp((DEVICE_{dev_num}_EG / ({n_emission:.17e} * vt_nom)) * (1.0 - DEVICE_{dev_num}_TAMB / state.device_{dev_num}_tj));\n\
                              \x20   }}\n"
                         ));
                 }

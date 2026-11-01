@@ -7,14 +7,14 @@ const JUNCTION_MAX_FWD_I: f64 = 1e3;
 
 /// `(value, d value/dx)` of a junction law's exponential `I = IS·e^x`
 /// (canonical form: `melange_devices::safeguards::junction_exp`). Up to 40
-/// this is `fast_exp` for both. Above it the true exponential continues until
+/// this is `safe_exp` for both. Above it the true exponential continues until
 /// the current `IS·e^x` reaches JUNCTION_MAX_FWD_I, then extends linearly with a
 /// matching slope, so a small-IS card is not current-limited at `IS·e^40` and
 /// the slope is the value's own.
 #[inline(always)]
 fn junction_exp(x: f64, is: f64) -> (f64, f64) {
     if x <= 40.0 {
-        let e = fast_exp(x);
+        let e = safe_exp(x);
         return (e, e);
     }
     let x_max = 40.0f64.max(JUNCTION_MAX_FWD_I.ln() - is.ln());

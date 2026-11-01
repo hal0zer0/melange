@@ -252,22 +252,63 @@ silence sample 58267, plate 0.2 V and grid 0.12 V from the root at `alpha =
 
 ## Newton Period-2 Orbit at the Residual Floor (step reverses exactly)
 
-**Signature:** a sample at the ceiling whose per-iteration trace shows the
-correction vector reversing sign exactly every iteration with `||F||` identical
-at both points (sad-bastard sweep sample 80093: plates and the summing chain
-±5..6e-5 V coherently, `||F||_2 = 9.7556e-9` both sides, refactoring every
-iteration, the grid node's 57 µV step against its 32.5 µV threshold). Exact
-Newton on smooth laws converges quadratically from there, so a clean 2-cycle
-means the iteration map has an eigenvalue of −1 along that mode: a stamped
-derivative off by about 2× on some row of the mode, or a kink in a law between
-the two points (an inner-NR tolerance, a clamp, a region switch). Scanned and
-cleared on that deck: the Koren plate law, the D&Z grid law and the RS diode
-law, each against its own Jacobian to 1e-4. **Localizer:** take the orbit step
-`d` and compare `J_stamped·d` with the true `F(v+d) − F(v)` row by row; the
-row where the ratio is about 2, or where ΔF is not linear in `d`, names the
-culprit. Every node moving by about the same amount points at a shared node (a
-rail or common reference). Open as of 2026-11-01; the sub-step recovers the
-sample (output 1.4e-6 V moved, no hold).
+**Signature:** a sample whose per-iteration trace shows the correction vector
+reversing sign exactly every iteration with `||F||` identical at both points
+(sad-bastard sweep sample 80093 under the retired polynomial `fast_ln`: plates
+and the summing chain ±5..6e-5 V coherently, `||F||_2 = 9.7556e-9` both
+sides, refactoring every iteration, the grid node's 57 µV step against its
+32.5 µV threshold). Exact Newton on smooth laws converges quadratically from
+there, so a clean 2-cycle means the function being solved is not smooth
+between the two points. **Localizer:** take the undamped step `d` and compare
+`J_stamped·d` with the true `F(v+d) − F(v)` row by row, then `Δi_nl` against
+`J_dev·Δv_nl` per device along the same step; a half-step probe
+`2·(F(v+d/2) − F(v))` against `J·d` separates a slope error (the two agree)
+from a jump (they do not).
+
+**Cause (measured 2026-11-01, fixed the same day):** the row localizer put the
+whole mismatch on the two KCL rows of one triode (`lf2_p`, `lf2_k`): ΔF = 2.01×
+the stamped `J·d` from either orbit point, and the device check gave ΔIp =
+2.25× `J_dev·Δv_nl` for that tube alone, every other device 1.000; the
+half-step probe said jump, not slope. The jump was the emitted `fast_ln`'s. Its
+symmetric log series, truncated at u⁷, was exact at a mantissa of 1 and
+1.242e-5 low at a mantissa just under 2 (the dropped u⁹/9 + u¹¹/11 + … at
+u = 1/3), so it jumped 1.242e-5 absolute at every power of two. The Koren
+plate law evaluates `ln(1 + exp(inner))`, and `1 + exp(inner)` crosses 2.0
+exactly where `inner = kp·(1/mu + vgk/sqrt(kvb + vpk²))` crosses zero, i.e. at
+`vgk = −sqrt(kvb + vpk²)/mu` (−2.19386 V at vpk 218.7 V on a 12AX7 card), a
+point a self-biased stage sweeps through routinely. Ip jumped D = 2.51e-5
+relative there (6.90 nA on 0.275 mA: `ex·Δln/ln 2 = 1.4 × 1.79e-5`). With the
+Newton step exact (`J_chord·d = −F0` to 1e-13) and the smooth part linear
+across it, `F1 = F0 + J·d + D = D`, so each orbit point carried the FULL jump
+on the plate and cathode rows (6.83e-9 A each; `||F||_2 = √2·D` = the 9.76e-9
+floor) and the ratio of 2 is `2D/D`. What decides the outcome is the sign of
+the jump against the law's slope along the path: a jump the same way as the
+slope (this one — `fast_ln` stepped up as Ip rose) leaves a window of width
+about D ÷ slope (~9 µV of vgk here) with no root at all, which is the orbit
+and a ceiling hit; a jump against the slope folds the curve and creates three
+roots in a similar window, which converges to a non-unique point that nothing
+counts. The same `fast_ln` wrap recurred at `1 + e^inner` = 4, 8, 16, …
+(+1.26e-5, +8.4e-6, +6.3e-6, … relative in Ip, one every ~0.25 V of grid swing
+in the conducting region), and the emitted `fast_exp` had the same defect in
+smaller measure: its reduced-range polynomial did not match itself across the
+range-reduction boundary (1.79e-6 relative error at f = +ln2/2 against 3.24e-6
+at f = −ln2/2), a 1.45e-6 relative value jump at every half-octave
+`x = (k+½)·ln 2`, inside every exponential law (diode current and conductance,
+BJT `junction_exp`, JFET, MOSFET, VCA, every tube law), plus a 1.2e-7 step at
+the diode law's x = 40 hand-off to the libm cold path. A scan of Ip(vgk) over
+−6..+2 V at that vpk showed 30 such jumps, every one at a kernel boundary.
+
+**Fix:** the generated code calls libm `exp` (behind `safe_exp`'s ±40 clamp)
+and `ln` unconditionally; the polynomial pair and its `melange_precise_exp`
+cfg are gone. Under libm the same sample converges in 4 iterations, residual
+4.4e-3 → 4.7e-7 → 6.9e-8 → 9.3e-9 → 1.5e-9 → 1.7e-13, with the deck's Newton
+iteration sum unchanged over the sweep (522505 against 522513). libm was not
+slower per sample on the bench decks either (warpony −6..−9 %, sus-bus −6..−7 %,
+wurli-power-amp +2..+4 %, with Newton iteration totals identical on sus-bus and
+within 0.03 % on warpony, so the difference is per-call cost). A piecewise fast
+kernel may return only if it is continuous at its joins to the ulp and its
+Jacobian is the derivative of the function actually evaluated; max relative
+error alone is not a sufficient acceptance criterion.
 
 ## Newton Converging Linearly (Full Steps, ~1 % per Iteration)
 

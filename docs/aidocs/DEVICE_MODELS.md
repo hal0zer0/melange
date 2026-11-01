@@ -506,10 +506,10 @@ strictly kinder to Newton than the retired law, whose conductance was
 identically zero across the whole negative-grid region and had a `sqrt` cusp
 at the crossing. The composite is convex (exponential below, a power ≥ 1 of a
 convex function above, C1 at the join), which is what the grid-stopper
-Newton (`RGI`) relies on. The generated code uses `std` `exp`/`ln_1p` rather
-than `fast_exp`/`fast_ln` here: `fast_exp` clamps to [−40, 40], which would
-put a spurious floor under the grid current in exactly the deep-negative
-region this law exists to get right. `V*` is computed once at build by
+Newton (`RGI`) relies on. The generated code uses `exp`/`ln_1p` directly rather
+than `safe_exp` here: `safe_exp` clamps to [−40, 40], which would put a
+spurious floor under the grid current in exactly the deep-negative region
+this law exists to get right. `V*` is computed once at build by
 `melange_devices::tube::grid_join_voltage` (safeguarded Newton on the
 log-slope equation) and emitted as `DEVICE_n_GRID_VSTAR`, with
 `ln(s*) = ln(softplus(Cg·V*)/Cg)` beside it as `DEVICE_n_GRID_LN_SSTAR`; the

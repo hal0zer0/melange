@@ -348,7 +348,7 @@ impl RustEmitter {
 
         // Fast exp() approximation (needed by all nonlinear device models)
         if has_diode || has_bjt || has_jfet || has_mosfet || has_tube || has_vca {
-            code.push_str(&Self::emit_fast_exp());
+            code.push_str(&Self::emit_safe_exp());
         }
 
         // SPICE voltage limiting functions (needed by all nonlinear devices)
@@ -519,70 +519,23 @@ impl RustEmitter {
         Ok(code)
     }
 
-    /// Emit fast exp() approximation function.
+    /// Emit `safe_exp`: libm `exp` with the argument clamped to [−40, 40].
     ///
-    /// Default: polynomial range reduction + 5th-order minimax (~6 cycles, <0.0004% error).
-    /// Opt-in: `--cfg melange_precise_exp` uses hardware/libm exp (~38 cycles).
-    ///
-    /// Accuracy of polynomial path: <0.0004% max relative error over [-40, 40].
-    pub(super) fn emit_fast_exp() -> String {
-        let mut code = String::new();
-        code.push_str(
-            "/// Fast exp() for audio circuit simulation.\n\
-             /// Input clamped to [-40, 40] (matches melange safe_exp convention).\n\
-             ///\n\
-             /// Default: polynomial approximation (<0.0004% error, ~6x faster than libm).\n\
-             /// To use hardware/libm exp, compile with: `--cfg melange_precise_exp`\n\
-             #[inline(always)]\n\
-             fn fast_exp(x: f64) -> f64 {\n\
-             \x20   #[cfg(melange_precise_exp)]\n\
-             \x20   { x.clamp(-40.0, 40.0).exp() }\n\
-             \x20   #[cfg(not(melange_precise_exp))]\n\
-             \x20   {\n\
-             \x20       // Range reduction + 5th-order minimax polynomial. <0.0004% max relative error.\n\
-             \x20       // No lookup tables, no libm dependency, branchless hot path.\n\
-             \x20       let x = x.clamp(-40.0, 40.0);\n\
-             \x20       const LN2_INV: f64 = std::f64::consts::LOG2_E;\n\
-             \x20       const LN2_HI: f64 = 0.6931471803691238;\n\
-             \x20       const LN2_LO: f64 = 1.9082149292705877e-10;\n\
-             \x20       const SHIFT: f64 = 6755399441055744.0; // 2^52 + 2^51\n\
-             \x20       let z = x * LN2_INV + SHIFT;\n\
-             \x20       let n_i64 = z.to_bits() as i64 - SHIFT.to_bits() as i64;\n\
-             \x20       let n = n_i64 as f64;\n\
-             \x20       let f = (x - n * LN2_HI) - n * LN2_LO;\n\
-             \x20       let p = 1.0 + f * (1.0 + f * (0.5 + f * (0.16666666666666607\n\
-             \x20           + f * (0.04166666666665876 + f * 0.008333333333492337))));\n\
-             \x20       let pow2n = f64::from_bits(((1023 + n_i64) as u64) << 52);\n\
-             \x20       p * pow2n\n\
-             \x20   }\n\
-             }\n\n",
-        );
-        // fast_ln: used in tube softplus ln(1+exp(x))
-        code.push_str(
-            "/// Fast ln() for audio circuit simulation.\n\
-             /// Symmetric log series (~0.005% max relative error, ~3x faster than libm).\n\
-             /// Only valid for positive inputs.\n\
-             #[inline(always)]\n\
-             fn fast_ln(x: f64) -> f64 {\n\
-             \x20   #[cfg(melange_precise_exp)]\n\
-             \x20   { x.ln() }\n\
-             \x20   #[cfg(not(melange_precise_exp))]\n\
-             \x20   {\n\
-             \x20       // Extract exponent and mantissa from IEEE 754 double\n\
-             \x20       let bits = x.to_bits();\n\
-             \x20       let e = ((bits >> 52) & 0x7FF) as i64 - 1023;\n\
-             \x20       // Normalize mantissa to [1, 2)\n\
-             \x20       let m_bits = (bits & 0x000F_FFFF_FFFF_FFFF) | 0x3FF0_0000_0000_0000;\n\
-             \x20       let m = f64::from_bits(m_bits);\n\
-             \x20       // Symmetric log series: u = (m-1)/(m+1), ln(m) = 2u(1 + u²/3 + u⁴/5 + u⁶/7)\n\
-             \x20       // For m in [1,2), u in [0,1/3): converges much faster than Taylor.\n\
-             \x20       let u = (m - 1.0) / (m + 1.0);\n\
-             \x20       let u2 = u * u;\n\
-             \x20       let ln_m = 2.0 * u * (1.0 + u2 * (0.3333333333333333 + u2 * (0.2 + u2 * 0.14285714285714285)));\n\
-             \x20       ln_m + (e as f64) * std::f64::consts::LN_2\n\
-             \x20   }\n\
-             }\n\n",
-        );
-        code
+    /// Every exponential device law in the generated code goes through this one
+    /// function, and the stamped Jacobians are its derivatives. It is deliberately
+    /// NOT an approximation: melange once emitted its own `fast_exp`/`fast_ln`
+    /// polynomials here, and their pieces did not meet (a 1.24e-5 value jump in
+    /// `fast_ln` at every power of two, a 1.5e-6 jump in `fast_exp` at every
+    /// half-octave boundary), which removed Newton roots in some windows and
+    /// folded the law in others — see DEBUGGING.md "Newton Period-2 Orbit". libm
+    /// was also no slower per sample on the bench decks.
+    pub(super) fn emit_safe_exp() -> String {
+        "/// exp() with the argument clamped to [-40, 40] (melange's safe_exp\n\
+         /// convention: beyond the clamp a junction is saturated or cut off, and\n\
+         /// the clamp only prevents overflow). Plain libm exp: the device laws'\n\
+         /// Jacobians are the derivatives of exactly this function.\n\
+         #[inline(always)]\n\
+         fn safe_exp(x: f64) -> f64 { x.clamp(-40.0, 40.0).exp() }\n\n"
+            .to_string()
     }
 }

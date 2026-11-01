@@ -299,6 +299,12 @@ fn golden_triode_cc_small_sine_500hz() {
 /// so at this 0.5 V drive the grid loads Rg sooner on the positive half.
 /// Max |old − new| = 5.74e-2 V at sample 906 of the ±10 V clamped waveform
 /// (0.6 %). The same two ngspice-referenced gates pass unchanged.
+/// Re-recorded 2026-11-01 when the emitted `fast_exp`/`fast_ln` polynomials
+/// were replaced by libm `exp`/`ln` (the polynomials had value jumps of
+/// 1.2e-5 and 1.5e-6 relative at their segment joins; DEBUGGING.md "Newton
+/// Period-2 Orbit"). Max |old − new| = 2.24e-4 V at sample 237 of the ±10 V
+/// clamped waveform (0.002 %), just over the 2e-4 gate. The same two
+/// ngspice-referenced gates pass unchanged.
 #[test]
 #[ignore]
 fn record_triode_cc_sine_500hz_codegen() {
@@ -311,7 +317,7 @@ fn record_triode_cc_sine_500hz_codegen() {
         TRIODE_CC,
         &output,
         1e-4,
-        "codegen_dk (2026-10-30, D&Z grid law + retarding-field tail + VGOFF)",
+        "codegen_dk (2026-11-01, libm exp/ln kernels; D&Z grid law + retarding-field tail + VGOFF)",
     );
 }
 
