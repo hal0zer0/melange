@@ -70,14 +70,21 @@ pub const CATALOG: &[JfetCatalogEntry] = &[
         source: "Fairchild / InterFET datasheets: idss = printed IDSS minimum; vp and lambda assumed",
     },
     // 2N5460 — P-channel, general purpose
-    // ON Semi: IDSS=1-5mA (typ 3mA), VP=0.75-6V (typ 2.5V)
+    // Sheet (ON Semiconductor 2N5460/D Rev. 5, March 2006, PDF p. 3; the only
+    // sheet on file): IDSS -1.0 min / -5.0 max mA at VDS 15 V; VGS(off) 0.75
+    // min / 6.0 max V at ID = 1.0 µA; VGS 0.5 min / 4.0 max V at ID = 0.1 mA
+    // (min/max, not a typical); |yfs| 1000 min / 4000 max µmho. The Typ
+    // column is blank for every DC row, so nothing on the sheet anchors a
+    // single value: `idss` 3 mA and `vp` 2.5 V are assumed mid-band values
+    // (gm0 = 2·IDSS/|VP| = 2.4 mS, inside the |yfs| band); `lambda` is
+    // unsourced (|yos| 75 µmho max is the sheet's output admittance).
     JfetCatalogEntry {
         names: &["2N5460"],
         idss: 3e-3,
         vp: 2.5,
         lambda: 0.004,
         is_p_channel: true,
-        source: "ON Semiconductor datasheet (typical values)",
+        source: "ON Semiconductor datasheet: IDSS and VGS bands only (no DC typicals); idss, vp and lambda assumed",
     },
 ];
 
