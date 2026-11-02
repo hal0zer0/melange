@@ -150,3 +150,23 @@ fn dc_op_recompute_code_is_warning_free() {
         assert_warning_free_with(&code, RECOMPUTE_MAIN, &format!("recompute_nodal_{dtag}"));
     }
 }
+
+/// A saturating inductor beside a nonlinear device: the full-LU Newton site
+/// splices its flux-integration rate into the residual helpers' trailing
+/// argument (trapezoidal `2.0 * rate` and backward-Euler `rate` forms), which
+/// once arrived parenthesised and tripped `unused_parens`.
+#[test]
+fn saturating_inductor_code_is_warning_free() {
+    const SAT_DECK: &str = "saturating choke stage\nR1 in a 100\nL1 a out 10m ISAT=10m LAIR=3e-4\n\
+                            R2 out 0 1k\nC1 out 0 100n\nD1 out 0 DX\n.model DX D(IS=1e-14)\n";
+    for backward_euler in [false, true] {
+        let mut c = support::config_for_spice(SAT_DECK, 48000.0);
+        c.backward_euler = backward_euler;
+        let code = support::generate_circuit_code_nodal(SAT_DECK, &c).0;
+        assert!(
+            code.contains("kcl_residual_inl(") && code.contains("SAT_IND_0_AUG_ROW"),
+            "deck must reach the full-LU residual helpers with a saturating inductor"
+        );
+        assert_warning_free(&code, &format!("sat_ind_be{backward_euler}"));
+    }
+}

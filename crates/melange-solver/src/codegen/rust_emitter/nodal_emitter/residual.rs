@@ -395,12 +395,33 @@ fn emit_sparse_a_residual_matvec(
 
 /// The trailing `sat_alpha` argument the residual helpers take when the
 /// circuit has saturating inductors (`, <site alpha>`), or nothing.
+///
+/// A site's `sat_alpha` is parenthesised for the arithmetic it is spliced
+/// into (`{alpha} * (...)` in `sat_ind.rs`). As a bare call argument those
+/// parentheses would trip rustc's `unused_parens` lint in the generated
+/// crate, so one outer pair is peeled here.
 pub(super) fn residual_sat_arg(ir: &CircuitIR, sat_alpha: &str) -> String {
     if ir.saturating_inductors.is_empty() {
-        String::new()
-    } else {
-        format!(", {sat_alpha}")
+        return String::new();
     }
+    let bare = sat_alpha
+        .strip_prefix('(')
+        .and_then(|s| s.strip_suffix(')'))
+        .filter(|inner| {
+            // Only peel when the pair wraps the whole expression: the depth
+            // must never return to zero before the end of `inner`.
+            let mut depth = 0i32;
+            inner.chars().all(|c| {
+                depth += match c {
+                    '(' => 1,
+                    ')' => -1,
+                    _ => 0,
+                };
+                depth >= 0
+            })
+        })
+        .unwrap_or(sat_alpha);
+    format!(", {bare}")
 }
 
 /// Emit an Armijo backtracking line search on the node-space KCL residual for
