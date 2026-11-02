@@ -170,3 +170,44 @@ fn saturating_inductor_code_is_warning_free() {
         assert_warning_free(&code, &format!("sat_ind_be{backward_euler}"));
     }
 }
+
+/// Oversampled builds: the 2x and 4x wrappers (the post-reset re-filter
+/// blocks included) and a runtime-selectable set, on both routes, with the
+/// host-rate injection guard where a deck has one.
+#[test]
+fn oversampled_code_is_warning_free() {
+    const INJECT_DECK: &str = "diode stage with a host injection\nR1 in out 1k\nC1 out 0 100n\nD1 out 0 DX\n\
+                               .inject out side R=10k\n.model DX D(IS=1e-14)\n";
+    const INJECT_MAIN: &str = "fn main() {
+    let mut s = CircuitState::default();
+    for i in 0..64 {
+        let x = (i as f64 * 0.01).sin();
+        let _ = process_sample(x, &[x], &[[0.0; NUM_INJECT_INNER]; OVERSAMPLING_FACTOR], &mut s);
+    }
+}";
+    for (deck, main, dn) in [(DECK, MAIN, "plain"), (INJECT_DECK, INJECT_MAIN, "inject")] {
+        for os in [2usize, 4] {
+            for (sub_path, sp) in [
+                (NodalSubPathOverride::Schur, "schur"),
+                (NodalSubPathOverride::FullLu, "full_lu"),
+            ] {
+                let mut c = support::config_for_spice(deck, 48000.0);
+                c.oversampling_factor = os;
+                c.nodal_sub_path_override = sub_path;
+                let code = support::generate_circuit_code_nodal(deck, &c).0;
+                assert_warning_free_with(&code, main, &format!("os{os}_{dn}_{sp}"));
+            }
+            let mut c = support::config_for_spice(deck, 48000.0);
+            c.oversampling_factor = os;
+            let code = support::generate_circuit_code(deck, &c).0;
+            assert_warning_free_with(&code, main, &format!("os{os}_{dn}_dk"));
+        }
+    }
+    // A runtime-selectable set carries every factor's wrapper in one build.
+    let rt_deck = format!("{DECK}.oversampling 4 allow=1,2,4\n");
+    let c = support::config_for_spice(&rt_deck, 48000.0);
+    let code = support::generate_circuit_code_nodal(&rt_deck, &c).0;
+    assert_warning_free_with(&code, MAIN, "runtime_set_nodal");
+    let code = support::generate_circuit_code(&rt_deck, &c).0;
+    assert_warning_free_with(&code, MAIN, "runtime_set_dk");
+}

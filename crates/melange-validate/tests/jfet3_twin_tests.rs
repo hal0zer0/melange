@@ -3,7 +3,7 @@
 //! transcribing the generated code's formulas (`jfet_translate.rs`). These
 //! twins hold melange's resolved device to that transcription in ngspice: the
 //! DC law over a gate × drain grid (both polarities, two slope factors, the
-//! gate junctions on and off), and a transient `validate` run of the 1176-style
+//! gate junctions on and off), and a transient `validate` run of the FET-limiter-style
 //! voltage-variable resistor. The twin checks melange's solve of the law, not
 //! the law's physics (see DEVICE_MODELS.md, "Level 3").
 //!
@@ -140,7 +140,7 @@ fn assert_twin(model: &str, tag: &str) {
 #[ignore = "requires ngspice"]
 fn level3_law_matches_its_transcription_at_two_slopes() {
     need_ngspice();
-    // The 1176 refit card (n = 1), and the sensitivity value n = 1.2.
+    // The FET limiter's gain-reduction card (n = 1), and the sensitivity value n = 1.2.
     assert_twin(
         ".model JX NJF(LEVEL=3 VTO=-2.5 BETA=1.6e-3 LAMBDA=4e-3 IS=0)",
         "n1",
@@ -173,7 +173,7 @@ fn level3_gate_junctions_match_their_transcription() {
     );
 }
 
-/// A transient twin: the 1176-style voltage-variable resistor, biased 0.1 V
+/// A transient twin: the FET-limiter-style voltage-variable resistor, biased 0.1 V
 /// below pinch-off with its gate fed half the drain swing, driven through the
 /// thermal tail, the knee, conduction and both signs of Vds, whose ngspice
 /// reference is the translator's subcircuit. At 192 kHz, as the level-2 twin

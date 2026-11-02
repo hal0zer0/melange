@@ -453,15 +453,26 @@ impl RustEmitter {
         // the pairs already consumed are re-run and dropped so the inner stage
         // sees the same sequence (outer even, then outer odd) it always sees.
         // `j` = 0 after e0, 1 after o0, 2 after e1; nothing follows o1.
+        // The last block (j = 2) neither re-arms `resets_before` nor rewrites
+        // `outer_odd`: nothing reads either after it, and a dead store is a
+        // rustc warning in the generated crate.
         let refilter = |j: usize| -> String {
             let mut c = String::from(
                 "    if state.diag_nan_reset_count + state.diag_magnitude_reset_count != resets_before {\n\
                  \x20       // The reset zeroed both up-filter stages: the remaining sub-samples\n\
-                 \x20       // take the zeroed filters' response to this host sample.\n\
-                 \x20       resets_before = state.diag_nan_reset_count + state.diag_magnitude_reset_count;\n\
-                 \x20       let (oe, oo) = os_halfband_outer(input, &OS_COEFFS_OUTER, &mut state.os_up_state_outer);\n\
-                 \x20       outer_odd = oo;\n",
+                 \x20       // take the zeroed filters' response to this host sample.\n",
             );
+            if j < 2 {
+                c.push_str(
+                    "        resets_before = state.diag_nan_reset_count + state.diag_magnitude_reset_count;\n",
+                );
+            }
+            c.push_str(
+                "        let (oe, oo) = os_halfband_outer(input, &OS_COEFFS_OUTER, &mut state.os_up_state_outer);\n",
+            );
+            if j < 2 {
+                c.push_str("        outer_odd = oo;\n");
+            }
             c.push_str(match j {
                 0 => "        inner_o0 = os_halfband(oe, &OS_COEFFS, &mut state.os_up_state).1;\n",
                 1 => "        let _ = os_halfband(oe, &OS_COEFFS, &mut state.os_up_state);\n",

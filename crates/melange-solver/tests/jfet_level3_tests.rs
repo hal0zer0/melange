@@ -146,7 +146,7 @@ fn level3_mismatch_is_the_level1_mismatch() {
     assert!(e.contains("BETA") && e.contains("use IDSS"), "{e}");
 }
 
-/// The 1176's gain-reduction element: a voltage-variable resistor biased
+/// A FET limiter's gain-reduction element: a voltage-variable resistor biased
 /// 0.1 V below pinch-off, its gate fed half the drain swing, driven through
 /// the thermal tail, the knee, conduction and both signs of Vds.
 const VVR: &str = "jfet vvr level 3
