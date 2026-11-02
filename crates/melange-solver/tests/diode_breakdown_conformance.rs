@@ -154,10 +154,5 @@ fn breakdown_defining_properties() {
 
     // Clamp boundary: at v_d = −10, x = −(v_d+BV)/n_vt = 88 clamps to 40, so the
     // emitted value saturates near −IBV·e^40 rather than the (huge) unclamped e^88.
-    assert_rel(
-        bd(-10.0),
-        -IBV * 40.0_f64.exp(),
-        TOL_LIBM,
-        "±40 exp clamp",
-    );
+    assert_rel(bd(-10.0), -IBV * 40.0_f64.exp(), TOL_LIBM, "±40 exp clamp");
 }

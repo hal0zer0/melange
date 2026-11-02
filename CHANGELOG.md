@@ -9,11 +9,23 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+## [0.1.20] - 2026-11-01
+
+**Against v0.1.19, over the 192 golden renders:** 40 (15 decks) are
+byte-identical, 137 move NEGLIGIBLY (on the 120 signal renders among them the
+level is within 6.3e-4 dB and the correlation above 0.99999993; the largest
+sample delta is 0.165 V on one `warpony` silence sample, described under Fixed;
+17 silence floors move, `wurli-power-amp` by 85 dB at a −143 dBFS peak), and 15
+are CHANGED: 11 silence renders whose numerical floor dropped and the four
+`wurli-tremolo` renders, both from the libm change next. No render is held, and
+no deck gains a held sample.
+
 **What changes rendered audio:** every exponential and logarithm in the
 generated device laws is now libm (`exp` behind the ±40 `safe_exp` clamp, and
 `ln`); the emitted `fast_exp`/`fast_ln` polynomials and their
-`melange_precise_exp` cfg are gone (see Fixed). Of the 192 golden renders, 62
-(the decks with no exponential law) are byte-identical, 115 move NEGLIGIBLY (at
+`melange_precise_exp` cfg are gone (see Fixed). Against the commit before it,
+of the 192 golden renders 62 (the decks with no exponential law) are
+byte-identical, 115 move NEGLIGIBLY (at
 most 1.3e-4 V per sample, level within 5e-4 dB, correlation ≥ 0.99999999), and
 15 are CHANGED: 11 silence renders whose numerical floor dropped
 (`steve-1073-preamp` by 67 dB to a −180 dBFS peak, `vurli` by 94 dB,
@@ -94,14 +106,18 @@ sample before, now renders (see Fixed), as do a rectifier supply that held
   so its loops unroll; the same eliminations in the same order. The rank-
   deficient case keeps the general path.
 
-Measured 2026-11-01 on an AMD Ryzen 9 7950X, one CCD, `bench.sh` best of 7 ×
-2M samples, two interleaved rounds against the v0.1.19 binary, rendered audio
-byte-identical throughout: bus compressor 3108 → 1566 ns/sample (1.98×),
-passive tube EQ 1011 → 970 (1.04×), Wurlitzer preamp 454 → 433 (1.05×),
-`radio-fm --noise full` 2825 → 1636 (1.73×), `radio-am --noise full` 1452 →
-953 (1.52×), `steve-1073-output` 7046 → 5177 (1.36×), `funkyinduct --noise
-shot` 8359 → 6299 (1.33×). The DK rows (single-ended amp, germanium network,
-12AX7 stage) have byte-identical generated code and moved within 2 %.
+Measured 2026-11-01 at release on an AMD Ryzen 9 7950X, one core,
+`bench.sh` best of 7 × 2M samples, the v0.1.20 binary interleaved with the
+v0.1.19 binary on the same bed (README rows: two rounds, best of both). These
+are the release's net figures over every change in this section, not the
+lossless batch alone: bus compressor 3175 → 1740 ns/sample (1.82×), passive
+tube EQ 1026 → 989 (1.04×), Wurlitzer preamp 457 → 438 (1.04×), `radio-fm
+--noise full` 2879 → 1110 (2.59×), `radio-am --noise full` 1465 → 626 (2.34×),
+`steve-1073-output` 7027 → 2158 (3.26×), `funkyinduct --noise shot` 8507 →
+7284 (1.17×). The DK rows, whose generated code changed in the device laws
+(libm `exp`/`ln`) and the Newton certification (see Fixed): single-ended amp 875 → 810, germanium
+network 836 → 758, 12AX7 stage 135 → 117 (1.08–1.15×); the RC low-pass is
+unchanged at 10.6 ns.
 
 ### Fixed
 - The nodal per-device voltage limiter no longer floors its damping ratio at
@@ -3716,7 +3732,8 @@ measured real hardware. Everything else is unproven against hardware. See
   KiCad file; no effect on netlist compilation, generated code, or shipped plugins. The
   fix (`quick-xml >= 0.41`) is tracked for 0.1.1.
 
-[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.19...HEAD
+[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.20...HEAD
+[0.1.20]: https://github.com/hal0zer0/melange/compare/v0.1.19...v0.1.20
 [0.1.19]: https://github.com/hal0zer0/melange/compare/v0.1.18...v0.1.19
 [0.1.18]: https://github.com/hal0zer0/melange/compare/v0.1.17...v0.1.18
 [0.1.17]: https://github.com/hal0zer0/melange/compare/v0.1.16...v0.1.17

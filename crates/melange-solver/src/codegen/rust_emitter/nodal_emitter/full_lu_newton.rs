@@ -429,7 +429,9 @@ impl RustEmitter {
         // inductor branch rows): linearized stages respond linearly and
         // converge passively, and checking all N nodes caused spurious chord
         // refactors while linear coupling ripple settled to sub-µV precision.
-        code.push_str("        // Step test on the undamped correction, then apply the damped step\n");
+        code.push_str(
+            "        // Step test on the undamped correction, then apply the damped step\n",
+        );
         code.push_str("        let mut max_step_exceeded = false;\n");
         {
             let mut device_nodes: Vec<usize> = ir

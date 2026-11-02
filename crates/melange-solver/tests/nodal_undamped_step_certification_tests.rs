@@ -60,8 +60,14 @@ fn the_step_test_reads_the_undamped_correction_and_is_never_skipped() {
         "the witness deck routes nodal full-LU"
     );
     // The damped-step exemption is gone: no `limited` flag, no skip.
-    assert!(!code.contains("let limited = alpha < 1.0;"), "the `limited` flag is gone");
-    assert!(!code.contains("if !limited {"), "the step test is never skipped");
+    assert!(
+        !code.contains("let limited = alpha < 1.0;"),
+        "the `limited` flag is gone"
+    );
+    assert!(
+        !code.contains("if !limited {"),
+        "the step test is never skipped"
+    );
     // Every step-test line reads `v_new − v` with the threshold at `v_new`,
     // and none of them scales the correction by `alpha`.
     let step_lines: Vec<&str> = code
@@ -95,7 +101,10 @@ fn main() {
 }
 ";
     let out = support::compile_and_run(&code, main, "undamped_step_mosfet_choke");
-    let mut it = out.stdout.split_whitespace().map(|t| t.parse::<u64>().unwrap());
+    let mut it = out
+        .stdout
+        .split_whitespace()
+        .map(|t| t.parse::<u64>().unwrap());
     let (held, unsolved, _ceiling) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
     assert_eq!(held, 0, "held samples:\n{}", out.stderr);
     assert_eq!(unsolved, 0, "unsolved samples:\n{}", out.stderr);
