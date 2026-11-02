@@ -20,14 +20,22 @@ pub struct JfetCatalogEntry {
 /// The JFET catalog.
 pub const CATALOG: &[JfetCatalogEntry] = &[
     // 2N5457 — N-channel, general purpose (audio, switching)
-    // ON Semi: IDSS=1-5mA (typ 3mA), VP=-0.5 to -6.0V (typ -2.5V)
+    // Sheets (ON Semiconductor 2N5457/D Rev. 4, 2003, p. 2; Fairchild 1997,
+    // p. 2): IDSS 1.0 min / 3.0 typ / 5.0 max mA; VGS(off) -0.5 min / -6.0 max
+    // V at ID = 10 nA, NO typical printed; VGS typ -2.5 V at ID = 100 µA,
+    // VDS = 15 V. `vp` -2.5 is that typical VGS used as the pinch-off: an
+    // assumption, not a printed VP. Taking the two typicals together under
+    // Shichman-Hodges gives VP = -2.5 / (1 - sqrt(0.1/3)) ≈ -3.06 V (the only
+    // sheet-consistent inference; typicals of separate parameters need not
+    // describe one device). `lambda` is unsourced (a sheet gives output
+    // admittance, not lambda).
     JfetCatalogEntry {
         names: &["2N5457"],
         idss: 3e-3,
         vp: -2.5,
         lambda: 0.004,
         is_p_channel: false,
-        source: "ON Semiconductor datasheet (typical values)",
+        source: "ON Semiconductor / Fairchild datasheets: typ IDSS; vp = typ VGS at 100 µA, assumed; lambda assumed",
     },
     // J201 — N-channel, low-noise audio JFET
     // ON Semi: IDSS=0.2-1.0mA (typ 0.6mA), VP=-0.3 to -1.5V (typ -0.8V)
@@ -40,14 +48,17 @@ pub const CATALOG: &[JfetCatalogEntry] = &[
         source: "ON Semiconductor datasheet (typical values)",
     },
     // 2N3819 — N-channel, general purpose
-    // ON Semi: IDSS=2-20mA (typ 5mA), VP=-0.5 to -8V (typ -3V)
+    // Sheets (Fairchild 2N3819 Rev. A1, 2002; InterFET IF35039.R00, 2019):
+    // IDSS 2 min / 20 max mA, NO typical printed; VGS -0.5 to -7.5 V at
+    // ID = 200 µA, no typical. `idss` 5 mA and `vp` -3 V are assumed
+    // mid-band values, not sheet figures; `lambda` is unsourced.
     JfetCatalogEntry {
         names: &["2N3819"],
         idss: 2e-3,
         vp: -3.0,
         lambda: 0.005,
         is_p_channel: false,
-        source: "ON Semiconductor datasheet",
+        source: "Fairchild / InterFET datasheets: IDSS and VGS bands only; idss, vp and lambda assumed",
     },
     // 2N5460 — P-channel, general purpose
     // ON Semi: IDSS=1-5mA (typ 3mA), VP=0.75-6V (typ 2.5V)
