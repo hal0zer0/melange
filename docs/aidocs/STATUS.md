@@ -395,7 +395,7 @@ f36e99c.
 
 ## Pending Work
 
-- **Test design: `runtime_input_guard_tests` asserts a 2× timing bound on microsecond windows** (n = 1000 samples per phase, ratio of the non-finite phases' time to the finite baseline's). Under the release gate's 8 test threads it reads 8–24× on the negative-infinity phase in 2 of 8 solo runs and in every gate run on 2026-11-01, on a DK deck whose generated code had not changed. Not a solver regression; the measurement needs a longer window or a median of runs, not a looser bound.
+- **Test design: `runtime_input_guard_tests` asserts a 2× timing bound on microsecond windows** (n = 1000 samples per phase, ratio of the non-finite phases' time to the finite baseline's). Under the release gate's 8 test threads it reads 8–24× on the negative-infinity phase in 2 of 8 solo runs and in every gate run on 2026-11-01, on a DK deck whose generated code had not changed. Not a solver regression; the measurement needs a longer window or a median of runs, not a looser bound. First CI occurrence 2026-11-01 on the v0.1.20 release commit (the nodal-Schur 2× variant, finite phase at 3.4× on the shared runner, every functional assertion passing); the re-run of the unchanged job passed. CI's Test job stops at the first failing binary, so one such flake also hides every later test binary's result.
 - **0.1.20: rank-1 pot updates on nonlinear DK builds (M > 0).** 0.1.18 applies a
   pot / `.runtime R` change as an exact rank-1 update of `S` only when the deck
   has no nonlinear devices; every other build still pays the O(N³) rebuild per
