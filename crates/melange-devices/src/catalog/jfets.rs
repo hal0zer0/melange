@@ -40,14 +40,21 @@ pub const CATALOG: &[JfetCatalogEntry] = &[
         source: "ON Semiconductor / Fairchild datasheets: typ IDSS; vp inferred from typ IDSS and typ VGS at 100 µA (SH); lambda assumed",
     },
     // J201 — N-channel, low-noise audio JFET
-    // ON Semi: IDSS=0.2-1.0mA (typ 0.6mA), VP=-0.3 to -1.5V (typ -0.8V)
+    // Sheet (Fairchild J201/J202, Rev. 1.0.0, January 2008, p. 2; the only
+    // sheet on file, min/max columns only): IDSS 0.2 min / 1.0 max mA at
+    // VDS = 20 V; VGS(off) -0.3 min / -1.5 max V at ID = 10 nA; yfs 500 µmho
+    // min at 1 kHz. NO typical is printed for any row and there is no
+    // "VGS at ID" row, so nothing on the sheet anchors a single value:
+    // `idss` 0.6 mA and `vp` -0.8 V are assumed mid-band values (gm0 =
+    // 2·IDSS/|VP| = 1.5 mS, above the 500 µmho minimum); `lambda` is
+    // unsourced.
     JfetCatalogEntry {
         names: &["J201"],
         idss: 6e-4,
         vp: -0.8,
         lambda: 0.004,
         is_p_channel: false,
-        source: "ON Semiconductor datasheet (typical values)",
+        source: "Fairchild datasheet: IDSS and VGS(off) bands only (no typicals); idss, vp and lambda assumed",
     },
     // 2N3819 — N-channel, general purpose
     // Sheets (Fairchild 2N3819 Rev. A1, 2002; InterFET IF35039.R00, 2019):
