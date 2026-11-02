@@ -176,7 +176,8 @@ fn saturating_inductor_code_is_warning_free() {
 /// host-rate injection guard where a deck has one.
 #[test]
 fn oversampled_code_is_warning_free() {
-    const INJECT_DECK: &str = "diode stage with a host injection\nR1 in out 1k\nC1 out 0 100n\nD1 out 0 DX\n\
+    const INJECT_DECK: &str =
+        "diode stage with a host injection\nR1 in out 1k\nC1 out 0 100n\nD1 out 0 DX\n\
                                .inject out side R=10k\n.model DX D(IS=1e-14)\n";
     const INJECT_MAIN: &str = "fn main() {
     let mut s = CircuitState::default();
