@@ -436,16 +436,17 @@ const BJT_DEFINING: &[&str] = &[
     "XTB",
 ];
 
-/// `LEVEL` selects the channel law (1 Shichman–Hodges, 2 Parker–Skellern);
-/// `VST`..`PB` are level-2 keys, refused on a level-1 card by the resolver.
+/// `LEVEL` selects the channel law (1 Shichman–Hodges, 2 Parker–Skellern,
+/// 3 symmetric subthreshold); `VST`..`PB` are level-2 keys and `NSLOPE` a
+/// level-3 key, each refused on a card of another level by the resolver.
 const JFET_HONORED: &[&str] = &[
     "VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "IS", "N", "KF", "AF", "LEVEL", "VST", "MVST",
-    "P", "Q", "Z", "XI", "MXI", "PB",
+    "P", "Q", "Z", "XI", "MXI", "PB", "NSLOPE",
 ];
 
 const JFET_DEFINING: &[&str] = &[
     "VTO", "BETA", "IDSS", "LAMBDA", "CGS", "CGD", "IS", "N", "VST", "MVST", "P", "Q", "Z", "XI",
-    "MXI", "PB",
+    "MXI", "PB", "NSLOPE",
 ];
 
 /// The refusal note of the Parker–Skellern trap-dispersion keys.

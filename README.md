@@ -501,7 +501,7 @@ cargo test --workspace
 # exactly this on every PR.
 cargo test -p melange-validate --test spice_validation --test rate_sweep_tests \
   --test thermal_twin_tests --test parasitic_twin_tests --test linearize_twin_tests \
-  --test jfet2_twin_tests -- --include-ignored
+  --test jfet2_twin_tests --test jfet3_twin_tests -- --include-ignored
 ```
 
 ## Known Limitations

@@ -9,6 +9,36 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+### Added
+
+- **JFET `LEVEL=3`: the symmetric subthreshold law.** Shichman–Hodges with a
+  thermal tail below pinch-off, source/drain symmetric:
+  `Id = BETA·(1 + LAMBDA·|Vds|)·[G(Vgs − VTO) − G(Vgd − VTO)]`,
+  `G(x) = (2·NSLOPE·Vt·ln(1 + e^(x/(2·NSLOPE·Vt))))²`, `Vt` at 300.15 K. Above
+  pinch-off it is the level-1 law (`IDSS = BETA·VTO²` keeps its meaning, the
+  level-1 keys and part catalog apply); below it the channel conducts a
+  barrier current that e-folds every `NSLOPE·Vt` of gate voltage and stays a
+  resistor over a few `Vt` of drain swing at any depth: a JFET used as a
+  voltage-variable resistor biased at pinch-off keeps its conductance where
+  level 1 switches off at a hard edge and level 2's channel drops out at
+  signal peaks. One new key, `NSLOPE` (≥ 1, default 1; refused on the other
+  levels, as the level-2 keys are on a level-3 card); a level-3 card giving
+  both IDSS and BETA is refused. No mode swap, no cut-off branch, no
+  exponent clamp in the tail. The form is EKV's forward-minus-reverse
+  interpolation applied to the JFET by analogy (`DEVICE_MODELS.md`, Level 3).
+  Generated code for level-1 and level-2 decks is unchanged.
+- **`melange validate` twins a level-3 JFET against a transcription.** ngspice
+  has no such law, so the card is dropped and the element becomes a
+  subcircuit of B-sources carrying melange's channel and junction formulas
+  (the junctions with `junction_exp`'s ±40 clamp, not an ngspice `D`
+  element's cubic reverse form). `jfet3_twin_tests.rs` joins the CI SPICE
+  job: gate × drain grids at 1e-9 relative + 1e-17 A, both polarities, the
+  junctions on and off, and a transient voltage-variable resistor.
+
+### Changed
+
+- The refusal of an unsupported JFET `LEVEL` names all three levels.
+
 ## [0.1.20] - 2026-11-01
 
 **Against v0.1.19, over the 192 golden renders:** 40 (15 decks) are

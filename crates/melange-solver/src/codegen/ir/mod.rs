@@ -1413,7 +1413,7 @@ pub struct SaturatingInductorIR {
 // Re-export device types from the shared module (always compiled, no tera dependency).
 pub use crate::device_types::{
     BjtParams, DeviceParams, DeviceSlot, DeviceType, DiodeParams, JfetParams, JfetPsParams,
-    MosfetParams, ScreenForm, TubeKind, TubeParams, VcaParams,
+    JfetSymParams, MosfetParams, ScreenForm, TubeKind, TubeParams, VcaParams,
 };
 
 /// Sparsity pattern for a single matrix.

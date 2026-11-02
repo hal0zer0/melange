@@ -455,31 +455,73 @@ impl CircuitIR {
     /// `LEVEL=1` (default), Shichman–Hodges: IDSS (or BETA), VP and LAMBDA.
     /// `LEVEL=2`, Parker–Skellern: BETA, VTO, LAMBDA and the law's shape keys,
     /// at ngspice's defaults; the built-in catalog (IDSS-based datasheet
-    /// entries) is not consulted.
+    /// entries) is not consulted. `LEVEL=3`, the symmetric subthreshold law:
+    /// the level-1 keys and catalog, plus the slope factor `NSLOPE`.
     pub(super) fn resolve_jfet_params(
         netlist: &Netlist,
         model: &str,
     ) -> Result<JfetParams, CodegenError> {
         let level = Self::lookup_model_param(netlist, model, "LEVEL").unwrap_or(1.0);
-        if level != 1.0 && level != 2.0 {
+        if level != 1.0 && level != 2.0 && level != 3.0 {
             return Err(CodegenError::InvalidConfig(format!(
                 "JFET model '{model}': LEVEL={level} is not supported; LEVEL=1 is \
-                 Shichman–Hodges, LEVEL=2 Parker–Skellern"
+                 Shichman–Hodges, LEVEL=2 Parker–Skellern, LEVEL=3 the symmetric \
+                 subthreshold law"
             )));
         }
         const PS_KEYS: [&str; 8] = ["VST", "MVST", "P", "Q", "Z", "XI", "MXI", "PB"];
         let level2 = level == 2.0;
+        let level3 = level == 3.0;
         if !level2 {
             if let Some(key) = PS_KEYS
                 .iter()
                 .find(|k| Self::lookup_model_param(netlist, model, k).is_some())
             {
+                let this = if level3 {
+                    "the symmetric subthreshold law (LEVEL=3)"
+                } else {
+                    "Shichman–Hodges (LEVEL=1, the default)"
+                };
                 return Err(CodegenError::InvalidConfig(format!(
                     "JFET model '{model}': {key} is a Parker–Skellern parameter, and this \
-                     card is Shichman–Hodges (LEVEL=1, the default). Add LEVEL=2 to the card"
+                     card is {this}. Add LEVEL=2 to the card"
                 )));
             }
         }
+        let nslope = Self::lookup_model_param(netlist, model, "NSLOPE");
+        if !level3 && nslope.is_some() {
+            let this = if level2 {
+                "Parker–Skellern (LEVEL=2)"
+            } else {
+                "Shichman–Hodges (LEVEL=1, the default)"
+            };
+            return Err(CodegenError::InvalidConfig(format!(
+                "JFET model '{model}': NSLOPE is the symmetric subthreshold law's slope \
+                 factor, and this card is {this}. Add LEVEL=3 to the card"
+            )));
+        }
+        let sym = if level3 {
+            // A level-1 card silently prefers IDSS over BETA; a new level has
+            // no legacy to protect, so both at once is refused.
+            if Self::lookup_model_param(netlist, model, "IDSS").is_some()
+                && Self::lookup_model_param(netlist, model, "BETA").is_some()
+            {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "JFET model '{model}': give IDSS or BETA, not both (at LEVEL=3 they \
+                     are one parameter, IDSS = BETA·VTO²)"
+                )));
+            }
+            let nslope = nslope.unwrap_or(1.0);
+            if !(nslope.is_finite() && nslope >= 1.0) {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "JFET model '{model}': NSLOPE must be finite and at least 1 (the ideal \
+                     subthreshold slope of one e-fold per Vt), got {nslope}"
+                )));
+            }
+            Some(JfetSymParams { nslope })
+        } else {
+            None
+        };
         let catalog = melange_devices::catalog::jfets::lookup(model);
         if level2 {
             if Self::lookup_model_param(netlist, model, "IDSS").is_some() {
@@ -623,6 +665,7 @@ impl CircuitIR {
             is,
             n,
             ps,
+            sym,
         })
     }
 

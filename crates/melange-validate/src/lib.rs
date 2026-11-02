@@ -69,6 +69,7 @@ pub use alignment::{
 };
 pub use comparison::{batch_compare, compare_signals, ComparisonConfig, ComparisonReport, Signal};
 pub use deck_guard::{format_refusal, scan_deck, unit_variation_note, DeckHazard};
+pub use jfet_translate::translate_jfets_for_ngspice;
 pub use spice_runner::{
     run_transient, run_transient_with_pwl, run_transient_with_thevenin_drive,
     run_transient_with_thevenin_pwl, SpiceData, SpiceError,

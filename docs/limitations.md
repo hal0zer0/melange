@@ -26,7 +26,7 @@ Melange supports the following SPICE elements:
 | I | Current source | Same: DC only, transient specs rejected |
 | D | Diode | Shockley + RS + BV/IBV (Zener) |
 | Q | BJT (NPN/PNP) | Ebers-Moll and Gummel-Poon |
-| J | JFET (NJF/PJF) | Shichman-Hodges; Parker–Skellern at `LEVEL=2` (trap dispersion and thermal reduction not implemented: those keys are refused) |
+| J | JFET (NJF/PJF) | Shichman-Hodges; Parker–Skellern at `LEVEL=2` (trap dispersion and thermal reduction not implemented: those keys are refused); the symmetric subthreshold law at `LEVEL=3` (melange's own; no ngspice twin, validated against a transcription) |
 | M | MOSFET (NM/PM) | Level 1 SPICE with body effect (GAMMA/PHI) |
 | T | Triode tube | Koren plate current + Dempwolf & Zölzer grid current |
 | P | Pentode/beam tetrode | 5 equation families, 29 catalog models |
@@ -140,7 +140,11 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
   defaults), without SPICE's 1e-12 S GMIN across them, so ngspice agreement is
   measured with its GMIN off. `IS` is not temperature-scaled (a JFET card has
   no TAMB/XTI/EG).
-- Subthreshold: hardcoded 2xVT slope (real devices: 60-120 mV/decade)
+- Subthreshold: level 1 has no law below pinch-off (a 1e-12 A numerical
+  leak); level 2 is the Parker–Skellern softplus (`VST`); level 3 is a thermal
+  tail with `NSLOPE·Vt` per e-fold (60 mV/decade at NSLOPE 1, 300.15 K), at
+  the card's fixed thermal voltage, uncoupled from the runtime temperature
+  setter. Level 3 has no ngspice law; its reference is a transcription.
 - MOSFET Level 1 only (no BSIM3/4)
 
 ### Triode

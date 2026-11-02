@@ -189,6 +189,25 @@ const CASES: &[Case] = &[
         alone_only: &[],
         dc_deck: "",
     },
+    // LEVEL=3 (symmetric subthreshold). Its own case: NSLOPE is refused on
+    // the other levels. The same self-bias as the level-2 case, about 0.1 V
+    // above pinch-off (two scale lengths), where the slope factor widens
+    // the knee and moves the operating point.
+    Case {
+        class: ModelClass::Jfet,
+        deck: "jfet level 3\nR1 in g 1k\nRg g 0 1Meg\nJ1 d g s JX\nRd vcc d 10k\nRs s 0 100k\n\
+               Vcc vcc 0 DC 12\nC1 d out 1u\nR3 out 0 100k\n{CARD}\n",
+        card: "JX NJF",
+        keys: &[
+            ("LEVEL", "3", "1", Alone),
+            ("VTO", "-2", "-1.5", Rich),
+            ("BETA", "1e-3", "2e-3", Rich),
+            ("LAMBDA", "0.01", "0.02", Rich),
+            ("NSLOPE", "1", "1.3", Rich),
+        ],
+        alone_only: &[],
+        dc_deck: "",
+    },
     Case {
         class: ModelClass::Mosfet,
         deck: "mosfet\nR1 in g 1k\nRg g 0 1Meg\nM1 d g s 0 MX\nRd vcc d 10k\nRs s 0 1k\n\

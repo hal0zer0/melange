@@ -21,7 +21,7 @@ Every test that needs ngspice is `#[ignore]`d, so a plain `cargo test` (CI's
 Test job, which has no ngspice) skips it instead of passing it vacuously. They
 run with `cargo test -p melange-validate --test spice_validation --test
 rate_sweep_tests --test thermal_twin_tests --test parasitic_twin_tests --test
-linearize_twin_tests --test jfet2_twin_tests -- --include-ignored` (ngspice on
+linearize_twin_tests --test jfet2_twin_tests --test jfet3_twin_tests -- --include-ignored` (ngspice on
 `PATH`), which is what
 CI's SPICE job runs; the twin targets carry `#[ignore = "requires ngspice"]`
 and assert ngspice is present when run. Each `spice_validation` test calls
@@ -136,7 +136,13 @@ recorded correlation/RMS values.
    ngspice's level-1 JFET has no emission coefficient. A `LEVEL=2` device
    becomes an ngspice level-2 (JFET2) card carrying BETA, N and every
    Parker–Skellern key melange resolved; `jfet2_twin_tests.rs` holds the law
-   to JFET2 over gate × drain grids at 1e-9.
+   to JFET2 over gate × drain grids at 1e-9. A `LEVEL=3` device (the
+   symmetric subthreshold law, melange's own) has no ngspice law: its card
+   is dropped, its `J` element becomes an `X` call on a generated `.subckt`
+   of B-sources transcribing the generated code (channel and `junction_exp`
+   gate junctions, with the ±40 clamp), and ngspice never sees the level;
+   `jfet3_twin_tests.rs` holds the device to that transcription at 1e-9, so
+   it checks the solve, not the law's physics.
 
 7. **Runs self-heating devices isothermal** (`ParseOptions::
    disable_self_heating`, `thermal_translate.rs`). ngspice's diode and BJT

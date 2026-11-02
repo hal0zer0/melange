@@ -1,0 +1,60 @@
+// Canonical source: melange-devices/src/jfet.rs (SymmetricSubthreshold::channel, Jfet::evaluate)
+// Duplicated here because generated code must be self-contained.
+// Symmetric subthreshold channel law (melange JFET level 3): Shichman–Hodges with a
+// thermal tail below pinch-off,
+//   Id = BETA·(1 + λ|Vds|)·[G(Vgs − VTO) − G(Vgd − VTO)],  G(x) = (a·ln(1 + e^(x/a)))²,
+// a = 2·NSLOPE·Vt (DEVICE_n_SYM_SCALE), BETA = IDSS/VTO². Odd under the source/drain
+// swap, so there is no mode branch, and no cut-off edge. Mode-free evaluation at both
+// signs of Vds; gate junctions and the Jacobian layout are jfet_evaluate's.
+
+/// Channel current and partials `(Id, dId/dVgs, dId/dVds)`, N-channel equivalent,
+/// pinch-off `vto` < 0. Each overdrive (source side u_s = Vgs − VTO, drain side
+/// u_d = u_s − Vds) goes through the squared softplus G and its slope
+/// G'(x) = 2·sp(x)·σ(x/a), σ the logistic sigmoid. sp is a·(max(z, 0) + ln_1p(e^(−|z|)))
+/// with an unclamped exp: e^(−|z|) ≤ 1 cannot overflow, far above pinch-off sp is x
+/// exactly, far below it underflows smoothly. core = G(u_s) − G(u_d) is exactly 0 at
+/// Vds = 0, so the λ|Vds| factor's kink leaves gds continuous there.
+#[inline(always)]
+fn jfet_sym_channel(vgs: f64, vds: f64, vto: f64, beta: f64, lambda: f64, a: f64) -> (f64, f64, f64) {
+    let g = |x: f64| -> (f64, f64) {
+        let z = x / a;
+        let sp = a * (z.max(0.0) + (-z.abs()).exp().ln_1p());
+        let sigma = 1.0 / (1.0 + (-z).exp());
+        (sp * sp, 2.0 * sp * sigma)
+    };
+    let u_s = vgs - vto;
+    let u_d = u_s - vds;
+    let (g_s, dg_s) = g(u_s);
+    let (g_d, dg_d) = g(u_d);
+    let core = g_s - g_d;
+    let clm = 1.0 + lambda * vds.abs();
+    let id = beta * core * clm;
+    let gm = beta * (dg_s - dg_d) * clm;
+    let gds = beta * (dg_d * clm + core * lambda * vds.signum());
+    (id, gm, gds)
+}
+
+/// Symmetric-subthreshold JFET terminal currents and Jacobian, channel plus both
+/// gate junctions: `(I_drain, I_gate, [dId/dVgs, dId/dVds, dIg/dVgs, dIg/dVds])`, as
+/// `jfet_evaluate`. sign: +1.0 for N-channel, -1.0 for P-channel; with sign² = 1 the
+/// channel's partials in its own polarity are the external ones.
+#[inline(always)]
+fn jfet_sym_evaluate(vgs: f64, vds: f64, idss: f64, vp: f64, lambda: f64, is: f64, n_vt: f64,
+                     sign: f64, a: f64) -> (f64, f64, [f64; 4]) {
+    let vgs_eff = sign * vgs;
+    let vds_eff = sign * vds;
+    let vp_eff = sign * vp; // Always negative after sign application
+    let beta = idss / (vp * vp);
+    let (f, d_id_d_vgs, d_id_d_vds) = jfet_sym_channel(vgs_eff, vds_eff, vp_eff, beta, lambda, a);
+    let id = sign * f;
+    if is == 0.0 {
+        return (id, 0.0, [d_id_d_vgs, d_id_d_vds, 0.0, 0.0]);
+    }
+    let (e_gs, de_gs) = junction_exp(sign * vgs / n_vt, is);
+    let (e_gd, de_gd) = junction_exp(sign * (vgs - vds) / n_vt, is);
+    let i_gs = sign * is * (e_gs - 1.0);
+    let i_gd = sign * is * (e_gd - 1.0);
+    let g_gs = is / n_vt * de_gs;
+    let g_gd = is / n_vt * de_gd;
+    (id - i_gd, i_gs + i_gd, [d_id_d_vgs - g_gd, d_id_d_vds + g_gd, g_gs + g_gd, -g_gd])
+}

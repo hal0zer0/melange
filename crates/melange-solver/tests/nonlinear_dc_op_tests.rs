@@ -1580,6 +1580,7 @@ C1 in gate 10u
             is: 1e-14,
             n: 1.0,
             ps: None,
+            sym: None,
         }),
         has_internal_mna_nodes: false,
         vg2k_frozen: 0.0,

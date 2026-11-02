@@ -76,6 +76,7 @@ jobs:
           --test parasitic_twin_tests
           --test linearize_twin_tests
           --test jfet2_twin_tests
+          --test jfet3_twin_tests
           -- --include-ignored
 
   msrv:

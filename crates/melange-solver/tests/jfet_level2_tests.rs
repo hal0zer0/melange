@@ -64,8 +64,8 @@ fn level1_is_shichman_hodges_with_or_without_the_key() {
 
 #[test]
 fn unsupported_level_is_refused() {
-    let e = refusal("NJF(LEVEL=3)");
-    assert!(e.contains("LEVEL=3") && e.contains("LEVEL=2"), "{e}");
+    let e = refusal("NJF(LEVEL=4)");
+    assert!(e.contains("LEVEL=4") && e.contains("LEVEL=2"), "{e}");
 }
 
 #[test]

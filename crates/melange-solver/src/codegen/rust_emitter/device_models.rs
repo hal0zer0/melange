@@ -17,6 +17,7 @@ impl RustEmitter {
         let mut has_bjt = false;
         let mut has_jfet = false;
         let mut has_jfet_ps = false;
+        let mut has_jfet_sym = false;
         let mut has_mosfet = false;
         let mut has_tube = false;
         let mut has_vca = false;
@@ -125,6 +126,13 @@ impl RustEmitter {
                         ));
                     } else {
                         emit_device_const(&mut code, dev_num, "IDSS", jp.idss);
+                    }
+                    if let Some(sym) = &jp.sym {
+                        // LEVEL=3: the law's voltage scale 2·NSLOPE·Vt, the
+                        // one constant `jfet_sym_evaluate` takes beyond the
+                        // level-1 set.
+                        has_jfet_sym = true;
+                        emit_device_const(&mut code, dev_num, "SYM_SCALE", sym.scale());
                     }
                     emit_device_const(&mut code, dev_num, "VP", jp.vp);
                     emit_device_const(&mut code, dev_num, "LAMBDA", jp.lambda);
@@ -370,6 +378,9 @@ impl RustEmitter {
             code.push_str(&self.render("device_jfet", &Context::new())?);
             if has_jfet_ps {
                 code.push_str(&self.render("device_jfet_ps", &Context::new())?);
+            }
+            if has_jfet_sym {
+                code.push_str(&self.render("device_jfet_sym", &Context::new())?);
             }
         }
         if has_mosfet {

@@ -40,7 +40,7 @@ use std::sync::OnceLock;
 
 use melange_devices::bjt::{BjtEbersMoll, BjtGummelPoon, BjtPolarity};
 use melange_devices::diode::{DiodeShockley, DiodeWithRs};
-use melange_devices::jfet::{Jfet, JfetChannel, ParkerSkellern};
+use melange_devices::jfet::{Jfet, JfetChannel, ParkerSkellern, SymmetricSubthreshold};
 use melange_devices::tube::{KorenPentode, KorenTriode, ScreenForm};
 use melange_devices::{Mosfet, MosfetChannelType};
 use melange_devices::{NonlinearDevice, Vca};
@@ -79,6 +79,10 @@ mod tpl {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/templates/rust/device_jfet_ps.rs.tera"
+    ));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/templates/rust/device_jfet_sym.rs.tera"
     ));
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -198,6 +202,20 @@ mod tpl {
         ps: &[f64; 8],
     ) -> (f64, f64, [f64; 4]) {
         jfet_ps_evaluate(vgs, vds, beta, vp, lambda, is, n_vt, sign, ps)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn jfet_sym_evaluate_tpl(
+        vgs: f64,
+        vds: f64,
+        idss: f64,
+        vp: f64,
+        lambda: f64,
+        is: f64,
+        n_vt: f64,
+        sign: f64,
+        a: f64,
+    ) -> (f64, f64, [f64; 4]) {
+        jfet_sym_evaluate(vgs, vds, idss, vp, lambda, is, n_vt, sign, a)
     }
     pub fn jfet_jacobian_tpl(
         vgs: f64,
@@ -1064,6 +1082,80 @@ fn template_jfet_ps_matches_devices_crate() {
         assert!(
             cut > 20 && on > 300,
             "PS JFET ({channel:?}) grid missed a region: cut={cut} on={on}"
+        );
+    }
+}
+
+/// Template symmetric-subthreshold JFET (`jfet_sym_evaluate`, LEVEL=3)
+/// against `Jfet::evaluate` with `sym` set, which the DC OP uses. The two
+/// are the same operation sequence on the same libm calls (exp, ln_1p), so
+/// they must agree exactly, over a grid that crosses the thermal tail, the
+/// knee, strong conduction, both signs of Vds and Vds = 0, both polarities,
+/// at two slope factors, with and without the gate junctions.
+#[test]
+fn template_jfet_sym_matches_devices_crate() {
+    // (channel, vp as stored, idss, lambda, n)
+    let variants: &[(JfetChannel, f64, f64, f64, f64)] = &[
+        (JfetChannel::N, -2.5, 1.6e-3 * 6.25, 0.004, 1.0),
+        (JfetChannel::N, -2.5, 1.6e-3 * 6.25, 0.0, 1.3),
+        (JfetChannel::N, -0.8, 6e-4, 0.01, 1.0),
+        (JfetChannel::P, 1.5, 2e-3 * 2.25, 0.01, 1.2),
+    ];
+    for &(channel, vp, idss, lambda, n) in variants {
+        let sign = match channel {
+            JfetChannel::N => 1.0,
+            JfetChannel::P => -1.0,
+        };
+        let law = SymmetricSubthreshold { n, vt: VT_ROOM };
+        let (mut tail, mut on) = (0u32, 0u32);
+        let mut vgs = -4.0;
+        while vgs <= 4.0 {
+            let mut vds = -4.0;
+            while vds <= 4.0 {
+                for (is, nj) in [(1e-14, 1.0), (1e-14, 1.5), (0.0, 1.0)] {
+                    let mut dev = Jfet::symmetric_subthreshold(channel, vp, idss, law);
+                    dev.lambda = lambda;
+                    dev.is = is;
+                    dev.n = nj;
+                    let (id_d, ig_d, jac_d) = dev.evaluate(vgs, vds);
+                    let n_vt = nj * VT_ROOM;
+                    let (id_t, ig_t, jac_t) = tpl::jfet_sym_evaluate_tpl(
+                        vgs,
+                        vds,
+                        idss,
+                        vp,
+                        lambda,
+                        is,
+                        n_vt,
+                        sign,
+                        law.scale(),
+                    );
+                    let ctx = format!(
+                        "SYM JFET ({channel:?} n={n}) at vgs={vgs:.3} vds={vds:.3} IS={is:e} N={nj}"
+                    );
+                    assert!(id_t == id_d, "{ctx} I_drain {id_t:e} vs {id_d:e}");
+                    assert!(ig_t == ig_d, "{ctx} I_gate {ig_t:e} vs {ig_d:e}");
+                    for (k, (t, d)) in jac_t.iter().zip(&jac_d).enumerate() {
+                        assert!(t == d, "{ctx} jac[{k}] {t:e} vs {d:e}");
+                    }
+                    if is == 0.0 && vds != 0.0 {
+                        // Below pinch-off on the governing side the current
+                        // is the thermal tail: tiny but not zero.
+                        if id_d.abs() < 1e-9 {
+                            tail += 1;
+                        } else {
+                            on += 1;
+                        }
+                        assert!(id_d != 0.0 || vds == 0.0, "{ctx}: no cut-off edge");
+                    }
+                }
+                vds += 0.19;
+            }
+            vgs += 0.19;
+        }
+        assert!(
+            tail > 100 && on > 300,
+            "SYM JFET ({channel:?}) grid missed a region: tail={tail} on={on}"
         );
     }
 }

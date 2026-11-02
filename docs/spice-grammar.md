@@ -718,7 +718,7 @@ When `RB`, `RC`, or `RE` are non-zero, internal nodes (basePrime, collectorPrime
 
 Either `IDSS` or `BETA` may be specified. If both are present, `IDSS` takes priority. If only `BETA` is given, it is converted to IDSS = BETA * VTO².
 
-`LEVEL` selects the channel law: absent or `1` is Shichman–Hodges (the table above), `2` is Parker–Skellern, the law of ngspice's JFET level 2, which conducts below pinch-off. A level-2 card takes `VTO`, `BETA`, `LAMBDA`, `IS`, `N`, `CGS`, `CGD`, `KF`, `AF` and:
+`LEVEL` selects the channel law: absent or `1` is Shichman–Hodges (the table above), `2` is Parker–Skellern, the law of ngspice's JFET level 2, which conducts below pinch-off, and `3` is melange's symmetric subthreshold law (below). melange's levels follow ngspice's numbering; ngspice has no JFET level 3. A level-2 card takes `VTO`, `BETA`, `LAMBDA`, `IS`, `N`, `CGS`, `CGD`, `KF`, `AF` and:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -731,13 +731,22 @@ Either `IDSS` or `BETA` may be specified. If both are present, `IDSS` takes prio
 | `MXI` | 0 | Gate modulation of `XI` |
 | `PB` | 1 V | Gate junction potential, as the law uses it |
 
-At level 2, `IDSS` is refused (set `BETA` and `VTO`), and the built-in part catalog is not used. ngspice's trap-dispersion (`LFGAM`, `LFG1`, `LFG2`, `HFGAM`, `HFG1`, `HFG2`, `HFETA`, `HFE1`, `HFE2`, `TAUG`), thermal (`DELTA`, `TAUD`), breakdown (`IBD`, `VBD`) and gate-charge shape (`FC`, `ACGAM`, `XC`) keys are refused when nonzero: they are not implemented. The level-2 keys are refused on a level-1 card.
+At level 2, `IDSS` is refused (set `BETA` and `VTO`), and the built-in part catalog is not used. ngspice's trap-dispersion (`LFGAM`, `LFG1`, `LFG2`, `HFGAM`, `HFG1`, `HFG2`, `HFETA`, `HFE1`, `HFE2`, `TAUG`), thermal (`DELTA`, `TAUD`), breakdown (`IBD`, `VBD`) and gate-charge shape (`FC`, `ACGAM`, `XC`) keys are refused when nonzero: they are not implemented. The level-2 keys are refused on a level-1 or level-3 card.
+
+Level 3 is Shichman–Hodges with a thermal tail below pinch-off, symmetric in source and drain: `Id = BETA·(1 + LAMBDA·|Vds|)·[G(Vgs − VTO) − G(Vgd − VTO)]` with `G(x) = (2·NSLOPE·Vt·ln(1 + e^(x/(2·NSLOPE·Vt))))²`, `Vt` = 25.865 mV (300.15 K). Above pinch-off it is the level-1 law (`IDSS = BETA·VTO²` keeps its meaning); below it the channel conducts a barrier current that e-folds every `NSLOPE·Vt` of gate voltage and stays a resistor over a few `Vt` of drain swing at any depth, which is what a JFET used as a voltage-variable resistor biased near pinch-off needs. A level-3 card takes the level-1 keys (`IDSS` or `BETA`, not both) and the part catalog, plus:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `NSLOPE` | 1 | Subthreshold slope factor, at least 1: the current below pinch-off e-folds every `NSLOPE·Vt` of gate voltage (60 mV per decade at 1). This is the slope factor itself, not BSIM's `NFACTOR` |
+
+`NSLOPE` is refused on a level-1 or level-2 card. A level-3 device has no ngspice law: `melange validate` gives ngspice a subcircuit of B-sources transcribing melange's formulas, so the comparison checks the solver, not the law (see `docs/aidocs/DEVICE_MODELS.md`).
 
 **Example:**
 ```spice
 .model J2N5457 NJF(VTO=-1.5 IDSS=2e-3 LAMBDA=0.01)
 .model J175 PJF(VTO=3.0 IDSS=2.5e-3)
 .model JVVR NJF(LEVEL=2 VTO=-2.5 BETA=1.6e-3 LAMBDA=0.004 VST=0.052)
+.model JGR NJF(LEVEL=3 VTO=-2.5 BETA=1.6e-3 LAMBDA=0.004)
 ```
 
 ### MOSFET Parameters (Types: NMOS, PMOS)

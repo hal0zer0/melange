@@ -196,8 +196,109 @@ impl ParkerSkellern {
     }
 }
 
-/// JFET model: Shichman–Hodges (SPICE level 1), or Parker–Skellern
-/// (SPICE level 2) when `ps` is set.
+/// Symmetric subthreshold channel law (melange JFET level 3): Shichman–Hodges
+/// with a thermal tail below pinch-off, source/drain symmetric.
+///
+/// ```text
+/// Id = BETA·(1 + LAMBDA·|Vds|)·[G(Vgs − VTO) − G(Vgd − VTO)]
+/// G(x) = (2·n·Vt · ln(1 + e^(x/(2·n·Vt))))²      (a squared softplus)
+/// ```
+///
+/// `G(x)` is `x²` for `x ≫ 2nVt` and `(2nVt)²·e^(x/(nVt))` for `x ≪ −2nVt`,
+/// so above pinch-off the law is Shichman–Hodges (triode `2·Vgst·Vds − Vds²`
+/// where `Vgd > VTO`, saturation `Vgst²` where `Vgd ≤ VTO`, `BETA =
+/// IDSS/VTO²`) and below it the channel conducts by a gate-controlled barrier
+/// current that e-folds every `n·Vt` of gate voltage, forward minus reverse:
+/// a pinched channel stays a resistor over a few `Vt` of drain swing at any
+/// depth, instead of switching off at a hard edge. As `Vt → 0`, `G(x) →
+/// max(x, 0)²` and the law is Shichman–Hodges exactly, for every `n`. The
+/// form is EKV's forward-minus-reverse interpolation (Enz, Krummenacher,
+/// Vittoz 1995, DOI 10.1007/BF01239381) applied to the JFET by analogy: in a
+/// channel between tied gates the barrier is referenced equally to both
+/// ends, so the current is `h(Vgs) − h(Vgd)` and the even-order null of a
+/// half-drain-fed gate stays at one half for any `n`, as in the classical
+/// JFET laws. No held JFET source; see DEVICE_MODELS.md.
+///
+/// The law is odd under the source/drain swap `(Vgs, Vds) → (Vgd, −Vds)`, so
+/// it needs no SPICE mode branch and is evaluated as written at both signs
+/// of `Vds`. There is no cut-off edge or branch: the current below pinch-off
+/// is small and continuous, and underflows to 0 only where `e^(x/(2nVt))`
+/// squared does, some 18 V below pinch-off at `n = 1`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SymmetricSubthreshold {
+    /// Subthreshold slope factor `n` (card `NSLOPE`, ≥ 1; 1 is the ideal
+    /// long-channel slope of one e-fold per `Vt`). This IS `n`; it is not
+    /// BSIM's `NFACTOR`, which is one coefficient inside `n`.
+    pub n: f64,
+    /// Thermal voltage `Vt = kT/q` \[V\] at the device temperature. The JFET
+    /// has no temperature law, so this is [`VT_ROOM`] (300.15 K) as for its
+    /// gate junctions; a field so the `Vt → 0` limit is testable.
+    pub vt: f64,
+}
+
+impl Default for SymmetricSubthreshold {
+    /// Ideal slope (`n = 1`) at [`VT_ROOM`].
+    fn default() -> Self {
+        Self {
+            n: 1.0,
+            vt: VT_ROOM,
+        }
+    }
+}
+
+impl SymmetricSubthreshold {
+    /// The law's voltage scale `2·n·Vt` \[V\]: the softplus argument scale,
+    /// which is also the width of the knee at pinch-off.
+    pub fn scale(&self) -> f64 {
+        2.0 * self.n * self.vt
+    }
+
+    /// Channel current and its partials `(Id, dId/dVgs, dId/dVds)` for an
+    /// N-channel device with pinch-off `vto` (< 0), at the strength
+    /// `beta = IDSS/VTO²` and channel-length modulation `lambda`.
+    ///
+    /// Steps:
+    /// 1. The two gate overdrives, source side `u_s = Vgs − VTO` and drain
+    ///    side `u_d = Vgd − VTO = u_s − Vds`.
+    /// 2. Each through the squared softplus `G` and its derivative `G'(x) =
+    ///    2·sp(x)·σ(x/a)`, `a = 2nVt`, `sp(x) = a·ln(1 + e^(x/a))` and `σ`
+    ///    the logistic sigmoid (the softplus's slope). The softplus is
+    ///    evaluated as `a·(max(z, 0) + ln(1 + e^(−|z|)))`, `z = x/a`, so no
+    ///    exponent overflows: far above pinch-off it is `x` exactly, far
+    ///    below it underflows smoothly toward 0.
+    /// 3. `core = G(u_s) − G(u_d)`, which is odd under the source/drain swap
+    ///    (IEEE subtraction is exactly antisymmetric) and exactly 0 at
+    ///    `Vds = 0`. Its partials: `∂core/∂Vgs = G'(u_s) − G'(u_d)` (both
+    ///    overdrives move with the gate) and `∂core/∂Vds = G'(u_d)` (only
+    ///    `u_d` moves, by `−Vds`).
+    /// 4. `Id = beta·core·(1 + lambda·|Vds|)`, whose `Vds` derivative adds
+    ///    `beta·core·lambda·sign(Vds)`; `core` is 0 at `Vds = 0`, so `gds`
+    ///    is continuous there.
+    pub fn channel(&self, vgs: f64, vds: f64, vto: f64, beta: f64, lambda: f64) -> (f64, f64, f64) {
+        let a = self.scale();
+        // Squared softplus G(x) and its derivative G'(x), see steps 2.
+        let g = |x: f64| -> (f64, f64) {
+            let z = x / a;
+            let sp = a * (z.max(0.0) + (-z.abs()).exp().ln_1p());
+            let sigma = 1.0 / (1.0 + (-z).exp());
+            (sp * sp, 2.0 * sp * sigma)
+        };
+        let u_s = vgs - vto;
+        let u_d = u_s - vds;
+        let (g_s, dg_s) = g(u_s);
+        let (g_d, dg_d) = g(u_d);
+        let core = g_s - g_d;
+        let clm = 1.0 + lambda * vds.abs();
+        let id = beta * core * clm;
+        let gm = beta * (dg_s - dg_d) * clm;
+        let gds = beta * (dg_d * clm + core * lambda * vds.signum());
+        (id, gm, gds)
+    }
+}
+
+/// JFET model: Shichman–Hodges (SPICE level 1), Parker–Skellern (SPICE
+/// level 2) when `ps` is set, or the symmetric subthreshold law (melange
+/// level 3) when `sym` is set.
 ///
 /// For N-channel: negative Vgs to control, positive Vds
 /// For P-channel: positive Vgs to control, negative Vds
@@ -219,6 +320,9 @@ pub struct Jfet {
     /// Parker–Skellern channel law (level 2). `None` is Shichman–Hodges,
     /// from `idss`; `Some` replaces it, and `idss` is unused.
     pub ps: Option<ParkerSkellern>,
+    /// Symmetric subthreshold channel law (level 3), from `idss` and `vp`
+    /// like Shichman–Hodges. Exclusive with `ps`.
+    pub sym: Option<SymmetricSubthreshold>,
 }
 
 impl Jfet {
@@ -237,6 +341,7 @@ impl Jfet {
             is: 1e-14,
             n: 1.0,
             ps: None,
+            sym: None,
         }
     }
 
@@ -247,6 +352,26 @@ impl Jfet {
         assert!(ps.beta > 0.0, "JFET BETA must be positive, got {}", ps.beta);
         let mut j = Self::new(channel, vto, ps.beta * vto * vto);
         j.ps = Some(ps);
+        j
+    }
+
+    /// A symmetric-subthreshold (level 3) JFET: Shichman–Hodges strength
+    /// `idss` at pinch-off `vp` (melange's convention, as [`Self::new`]),
+    /// with `sym`'s thermal tail below pinch-off.
+    pub fn symmetric_subthreshold(
+        channel: JfetChannel,
+        vp: f64,
+        idss: f64,
+        sym: SymmetricSubthreshold,
+    ) -> Self {
+        assert!(
+            sym.n >= 1.0 && sym.n.is_finite(),
+            "JFET NSLOPE must be at least 1, got {}",
+            sym.n
+        );
+        assert!(sym.vt > 0.0, "JFET Vt must be positive, got {}", sym.vt);
+        let mut j = Self::new(channel, vp, idss);
+        j.sym = Some(sym);
         j
     }
 
@@ -316,6 +441,13 @@ impl Jfet {
             JfetChannel::P => -self.vp, // Flip to negative
         };
 
+        // The symmetric law is odd under the source/drain swap: evaluated as
+        // written at either sign of Vds, no mode branch.
+        if let Some(sym) = &self.sym {
+            let beta = self.idss / (self.vp * self.vp);
+            return s * sym.channel(vgs_eff, vds_eff, vp_eff, beta, self.lambda).0;
+        }
+
         // Mode selection: vc = controlling gate overdrive reference,
         // vd = |vds_eff| >= 0, m = polarity of the drain current.
         let (vc, vd, m) = if vds_eff >= 0.0 {
@@ -370,6 +502,14 @@ impl Jfet {
             JfetChannel::N => self.vp,
             JfetChannel::P => -self.vp,
         };
+
+        // Symmetric law: Id = s·f(s·vgs, s·vds), so with s² = 1 the partials
+        // to the external voltages are f's own.
+        if let Some(sym) = &self.sym {
+            let beta = self.idss / (self.vp * self.vp);
+            let (_, gm, gds) = sym.channel(vgs_eff, vds_eff, vp_eff, beta, self.lambda);
+            return (gm, gds);
+        }
 
         // Mode selection — must mirror drain_current exactly.
         // Id = s * m * f(vc, vd), with:
@@ -1131,5 +1271,336 @@ mod tests {
                 "gds at Vgs={vgs}: {gds_a:e} vs {gds_b:e}"
             );
         }
+    }
+
+    /// A FET limiter's gain-reduction element as registered for its refit:
+    /// VTO −2.5, IDSS 10 mA (BETA 1.6e-3), LAMBDA 0.004, n = 1.
+    fn sym_card(channel: JfetChannel) -> Jfet {
+        let vp = match channel {
+            JfetChannel::N => -2.5,
+            JfetChannel::P => 2.5,
+        };
+        let mut j = Jfet::symmetric_subthreshold(
+            channel,
+            vp,
+            1.6e-3 * 6.25,
+            SymmetricSubthreshold::default(),
+        );
+        j.lambda = 0.004;
+        j
+    }
+
+    /// The registered refit freezes the device at 300.15 K, Vt = 25.865 mV;
+    /// the law's default thermal voltage is that value.
+    #[test]
+    fn symmetric_law_default_vt_is_25_865_mv() {
+        let vt = SymmetricSubthreshold::default().vt;
+        assert!((vt - 0.025865).abs() < 5e-7, "Vt = {vt}");
+        assert_eq!(vt, VT_ROOM);
+        assert!((SymmetricSubthreshold::default().scale() - 2.0 * vt).abs() < 1e-18);
+    }
+
+    /// As Vt → 0 the squared softplus is max(x, 0)² and the law is
+    /// Shichman–Hodges exactly, triode and saturation, both polarities,
+    /// for n = 1 and n = 1.3 alike; with LAMBDA.
+    ///
+    /// Pre-registered exclusion: within a few `nVt` of `Vgst = 0` and of
+    /// `Vds = Vgst` the smooth law and SH differ by O(1) relative (G(0) =
+    /// (2nVt·ln 2)² where SH is 0), so every grid point keeps `|Vgst|` and
+    /// `|Vgst − Vds|` at least 1000·nVt (1.3e-4 V at Vt = 1e-7, n = 1.3);
+    /// the closest point below is 0.05 V from either edge.
+    #[test]
+    fn symmetric_law_is_shichman_hodges_as_vt_vanishes() {
+        for channel in [JfetChannel::N, JfetChannel::P] {
+            let s = match channel {
+                JfetChannel::N => 1.0,
+                JfetChannel::P => -1.0,
+            };
+            let sh = {
+                let mut j = Jfet::new(channel, -2.5 * s, 1.6e-3 * 6.25);
+                j.lambda = 0.004;
+                j
+            };
+            for n in [1.0, 1.3] {
+                let mut j = sym_card(channel);
+                j.sym = Some(SymmetricSubthreshold { n, vt: 1e-7 });
+                // Conduction only: Shichman–Hodges below pinch-off is its
+                // own 1e-12 leak, not a limit of this law.
+                for &(vgs, vds) in &[
+                    (0.0, 0.1),
+                    (0.0, 5.0),
+                    (-1.0, 0.2),
+                    (-1.0, 4.0),
+                    (-2.0, 0.3),
+                    (-2.4, 0.05),
+                    (-1.0, -0.2),
+                    (-1.0, -4.0),
+                    (-2.3, -0.1),
+                ] {
+                    let (vgs, vds) = (s * vgs, s * vds);
+                    let (id_a, id_b) = (j.drain_current(vgs, vds), sh.drain_current(vgs, vds));
+                    assert!(
+                        (id_a - id_b).abs() <= 1e-9 * id_b.abs(),
+                        "{channel:?} n={n} ({vgs}, {vds}): {id_a:e} vs SH {id_b:e}"
+                    );
+                    let (gm_a, gds_a) = j.jacobian_partial(vgs, vds);
+                    let (gm_b, gds_b) = sh.jacobian_partial(vgs, vds);
+                    assert!(
+                        (gm_a - gm_b).abs() <= 1e-9 * gm_b.abs().max(1e-12),
+                        "{channel:?} n={n} ({vgs}, {vds}) gm: {gm_a:e} vs SH {gm_b:e}"
+                    );
+                    assert!(
+                        (gds_a - gds_b).abs() <= 1e-9 * gds_b.abs().max(1e-12),
+                        "{channel:?} n={n} ({vgs}, {vds}) gds: {gds_a:e} vs SH {gds_b:e}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The Jacobian is the derivative of the current in every region, both
+    /// polarities, both signs of Vds: strong conduction, the knee, and deep
+    /// below pinch-off where the current is the thermal tail.
+    #[test]
+    fn symmetric_law_fd_jacobian() {
+        for channel in [JfetChannel::N, JfetChannel::P] {
+            let s = match channel {
+                JfetChannel::N => 1.0,
+                JfetChannel::P => -1.0,
+            };
+            for n in [1.0, 1.2] {
+                let mut j = sym_card(channel);
+                j.sym = Some(SymmetricSubthreshold {
+                    n,
+                    ..SymmetricSubthreshold::default()
+                });
+                for &(vgs, vds) in &[
+                    (0.0, 5.0),
+                    (-1.0, 0.2),
+                    (-1.0, 4.0),
+                    (-2.45, 0.3),
+                    (-2.5, 0.04),
+                    (-2.55, 0.02),
+                    (-2.6, 0.04),
+                    (-2.8, 0.1),
+                    (-3.0, 1.5),
+                    (-1.0, -0.05),
+                    (-2.5, -0.3),
+                    (-2.7, -2.0),
+                    (-1.0, 0.01),
+                    (-1.0, -0.01),
+                ] {
+                    let (vgs, vds) = (s * vgs, s * vds);
+                    let (gm, gds) = j.jacobian_partial(vgs, vds);
+                    let h = 1e-7;
+                    let fd_gm =
+                        (j.drain_current(vgs + h, vds) - j.drain_current(vgs - h, vds)) / (2.0 * h);
+                    let fd_gds =
+                        (j.drain_current(vgs, vds + h) - j.drain_current(vgs, vds - h)) / (2.0 * h);
+                    for (name, an, fd) in [("gm", gm, fd_gm), ("gds", gds, fd_gds)] {
+                        assert!(
+                            (an - fd).abs() <= 1e-6 * fd.abs().max(1e-15),
+                            "{channel:?} n={n} ({vgs}, {vds}) {name}: {an:e} vs fd {fd:e}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Source/drain symmetry: `Id(Vgs, Vds) = −Id(Vgd, −Vds)` exactly: the
+    /// same two softplus values subtracted the other way, IEEE subtraction
+    /// being exactly antisymmetric. The grid is dyadic (every Vgs, Vds and
+    /// the pinch-off −2.5 are short binary fractions) so the swapped
+    /// overdrive `(u_s − Vds) + Vds` is `u_s` bit for bit; on a non-dyadic
+    /// grid the swap rounds once and the identity holds to an ulp instead.
+    /// So there is no mode boundary at Vds = 0 and the current there is
+    /// exactly 0.
+    #[test]
+    fn symmetric_law_is_odd_under_the_source_drain_swap() {
+        for channel in [JfetChannel::N, JfetChannel::P] {
+            let j = sym_card(channel);
+            for &vgs in &[0.0, -1.0, -2.375, -2.5, -2.625, -3.0] {
+                for &vds in &[0.0078125, 0.25, 2.0, 5.0] {
+                    let (vgs, vds) = (j.sign() * vgs, j.sign() * vds);
+                    let a = j.drain_current(vgs, vds);
+                    let b = j.drain_current(vgs - vds, -vds);
+                    assert_eq!(a, -b, "{channel:?} ({vgs}, {vds})");
+                }
+                assert_eq!(j.drain_current(j.sign() * vgs, 0.0), 0.0);
+                // gm is 2·BETA·Vds in the triode region, so ±1e-9 V either
+                // side of 0 differ by ~4·BETA·1e-9: an absolute bound.
+                let (gm_a, gds_a) = j.jacobian_partial(j.sign() * vgs, 1e-9);
+                let (gm_b, gds_b) = j.jacobian_partial(j.sign() * vgs, -1e-9);
+                assert!(
+                    (gm_a - gm_b).abs() <= 1e-10,
+                    "gm at {vgs}: {gm_a:e} vs {gm_b:e}"
+                );
+                assert!((gds_a - gds_b).abs() <= 1e-6 * gds_a.abs(), "gds at {vgs}");
+            }
+        }
+    }
+
+    /// Deep below pinch-off the channel is a barrier current: with the gate
+    /// fed half the drain swing (a FET limiter's gate feed) the current is
+    /// `∝ sinh(Vds/(2nVt))`, odd in Vds, and the device stays a resistor:
+    /// its conductance `I/(Vds·g0)` is `sinh(y)/y`, `y = Vds/(2nVt)`, a 10 %
+    /// expansion at ±40 mV (n = 1), rather than switching off (Parker–
+    /// Skellern at the same rest point drops to 0.13 there, Shichman–Hodges
+    /// is a hard edge).
+    #[test]
+    fn symmetric_law_deep_subthreshold_is_a_sinh_resistor() {
+        for n in [1.0, 1.3] {
+            let mut j = sym_card(JfetChannel::N);
+            j.sym = Some(SymmetricSubthreshold {
+                n,
+                ..SymmetricSubthreshold::default()
+            });
+            j.lambda = 0.0;
+            let a = j.sym.unwrap().scale();
+            let vg0 = -2.5 - 0.5; // 0.5 V below pinch-off: e^(−0.5/a) ≈ 6e-5 of the knee
+            let g0 = j.jacobian_partial(vg0, 0.0).1;
+            assert!(g0 > 0.0 && g0.is_finite());
+            let mut ratio0 = None;
+            for &vds in &[-0.04, -0.01, 0.001, 0.01, 0.04] {
+                let id = j.drain_current(vg0 + vds / 2.0, vds);
+                let ratio = id / (vds / a).sinh();
+                let r0 = *ratio0.get_or_insert(ratio);
+                assert!(
+                    (ratio - r0).abs() <= 1e-3 * r0,
+                    "n={n} Vds={vds}: I/sinh = {ratio:e}, at 1 mV {r0:e}"
+                );
+                let conductance = id / (vds * g0);
+                let y = vds / a;
+                let sinh_y_over_y = y.sinh() / y;
+                assert!(
+                    (conductance - sinh_y_over_y).abs() <= 2e-3
+                        && (1.0..1.2).contains(&conductance),
+                    "n={n} Vds={vds}: I/(V·g0) = {conductance}, sinh(y)/y = {sinh_y_over_y}"
+                );
+            }
+        }
+    }
+
+    /// The `(1 + λ|Vds|)` factor has a kink at Vds = 0, but the bracket it
+    /// multiplies is 0 there, so the law is C1: with λ ≠ 0, in conduction
+    /// and below pinch-off, both polarities, the two one-sided difference
+    /// quotients at Vds = 0 straddle the analytic gds by no more than their
+    /// own first-order truncation `(G''/G')·h/2` (`G''/G' ≤ 1.22/(n·Vt)`,
+    /// at the knee), and their mean, the central difference, equals it to
+    /// second order. A jump would separate them by O(gds), independent of h.
+    /// (First written as each quotient within 1e-6 of gds, which the
+    /// truncation alone exceeds at h = 1e-7; the bound, not the claim, was
+    /// wrong.)
+    #[test]
+    fn symmetric_law_gds_is_continuous_at_vds_zero_with_lambda() {
+        for channel in [JfetChannel::N, JfetChannel::P] {
+            let mut j = sym_card(channel);
+            j.lambda = 0.05;
+            let s = j.sign();
+            let n_vt = j.sym.unwrap().n * j.sym.unwrap().vt;
+            for &vgs in &[0.0, -1.0, -2.5, -2.7] {
+                let vgs = s * vgs;
+                let gds = j.jacobian_partial(vgs, 0.0).1;
+                let h = 1e-7;
+                let fwd = (j.drain_current(vgs, h) - j.drain_current(vgs, 0.0)) / h;
+                let bwd = (j.drain_current(vgs, 0.0) - j.drain_current(vgs, -h)) / h;
+                let central = 0.5 * (fwd + bwd);
+                assert!(
+                    (gds - central).abs() <= 1e-7 * gds.abs(),
+                    "{channel:?} Vgs={vgs} gds {gds:e} vs central quotient {central:e}"
+                );
+                let truncation = 2.0 * (h / n_vt) * gds.abs();
+                assert!(
+                    (fwd - bwd).abs() <= truncation,
+                    "{channel:?} Vgs={vgs}: 0+ {fwd:e} and 0- {bwd:e} differ by more than the \
+                     truncation bound {truncation:e}: a jump in gds"
+                );
+                let gds_p = j.jacobian_partial(vgs, 1e-9).1;
+                let gds_m = j.jacobian_partial(vgs, -1e-9).1;
+                assert!(
+                    (gds_p - gds_m).abs() <= 1e-6 * gds.abs(),
+                    "{channel:?} Vgs={vgs}"
+                );
+            }
+        }
+    }
+
+    /// No cut-off edge: far below pinch-off the current is small, positive
+    /// in the drain's direction, finite, and smaller still further down;
+    /// at absurd gate voltages the softplus underflows to exactly 0 with
+    /// no NaN.
+    #[test]
+    fn symmetric_law_has_no_cutoff_edge() {
+        let j = sym_card(JfetChannel::N);
+        let (i1, i2, i3) = (
+            j.drain_current(-3.0, 1.0),
+            j.drain_current(-4.0, 1.0),
+            j.drain_current(-6.0, 1.0),
+        );
+        assert!(i1 > i2 && i2 > i3 && i3 > 0.0, "{i1:e} {i2:e} {i3:e}");
+        assert!(i1 < 1e-9, "0.5 V below pinch-off: {i1:e}");
+        for &(vgs, vds) in &[(-100.0, 10.0), (-100.0, -10.0), (-1000.0, 0.0), (50.0, 5.0)] {
+            let id = j.drain_current(vgs, vds);
+            let (gm, gds) = j.jacobian_partial(vgs, vds);
+            assert!(
+                id.is_finite() && gm.is_finite() && gds.is_finite(),
+                "({vgs}, {vds})"
+            );
+        }
+        assert_eq!(j.drain_current(-1000.0, 1.0), 0.0);
+    }
+
+    /// The whole-device Jacobian (channel plus gate junctions) is the
+    /// derivative of its currents under the symmetric law too.
+    #[test]
+    fn symmetric_law_evaluate_jacobian_is_the_derivative_of_its_currents() {
+        for channel in [JfetChannel::N, JfetChannel::P] {
+            let mut j = sym_card(channel);
+            j.n = 1.3;
+            let s = j.sign();
+            for &(vgs, vds) in &[
+                (0.55, 1.0),
+                (-1.0, 3.0),
+                (0.3, -0.4),
+                (-2.6, 0.05),
+                (-2.5, -1.2),
+            ] {
+                let (vgs, vds) = (s * vgs, s * vds);
+                let (_, _, jac) = j.evaluate(vgs, vds);
+                let h = 1e-7;
+                let fd = |dg: f64, dd: f64| {
+                    let (a0, a1, _) = j.evaluate(vgs + dg, vds + dd);
+                    let (b0, b1, _) = j.evaluate(vgs - dg, vds - dd);
+                    ((a0 - b0) / (2.0 * h), (a1 - b1) / (2.0 * h))
+                };
+                let (did_dvgs, dig_dvgs) = fd(h, 0.0);
+                let (did_dvds, dig_dvds) = fd(0.0, h);
+                for (k, (an, num)) in jac
+                    .iter()
+                    .zip([did_dvgs, did_dvds, dig_dvgs, dig_dvds])
+                    .enumerate()
+                {
+                    assert!(
+                        (an - num).abs() <= 1e-5 * num.abs().max(1e-9),
+                        "{channel:?} ({vgs}, {vds}) jac[{k}]: {an:e} vs {num:e}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "NSLOPE must be at least 1")]
+    fn symmetric_law_rejects_a_sub_thermal_slope() {
+        Jfet::symmetric_subthreshold(
+            JfetChannel::N,
+            -2.5,
+            1e-2,
+            SymmetricSubthreshold {
+                n: 0.9,
+                ..SymmetricSubthreshold::default()
+            },
+        );
     }
 }

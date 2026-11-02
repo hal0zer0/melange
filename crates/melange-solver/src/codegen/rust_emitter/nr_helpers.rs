@@ -358,7 +358,9 @@ pub(super) fn emit_nr_singular_fallback(code: &mut String, dim: usize, indent: &
 /// The generated call that evaluates JFET `d` at `(vgs, vds)`, giving
 /// `(I_drain, I_gate, jac)`: `jfet_evaluate` (Shichman–Hodges) or, for a
 /// `LEVEL=2` card, `jfet_ps_evaluate` (Parker–Skellern), whose runtime
-/// parameters are BETA, VP and LAMBDA with the shape keys in `DEVICE_{d}_PS`.
+/// parameters are BETA, VP and LAMBDA with the shape keys in `DEVICE_{d}_PS`;
+/// or, for a `LEVEL=3` card, `jfet_sym_evaluate` (symmetric subthreshold),
+/// the level-1 parameters plus the law's scale `DEVICE_{d}_SYM_SCALE`.
 pub(super) fn jfet_evaluate_call(
     jp: &crate::codegen::ir::JfetParams,
     d: usize,
@@ -369,6 +371,10 @@ pub(super) fn jfet_evaluate_call(
     if jp.ps.is_some() {
         format!(
             "jfet_ps_evaluate({vgs}, {vds}, state.device_{d}_beta, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_IS, DEVICE_{d}_N_VT, {sign}, &DEVICE_{d}_PS)"
+        )
+    } else if jp.sym.is_some() {
+        format!(
+            "jfet_sym_evaluate({vgs}, {vds}, state.device_{d}_idss, state.device_{d}_vp, state.device_{d}_lambda, DEVICE_{d}_IS, DEVICE_{d}_N_VT, {sign}, DEVICE_{d}_SYM_SCALE)"
         )
     } else {
         format!(

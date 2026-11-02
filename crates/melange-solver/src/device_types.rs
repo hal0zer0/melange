@@ -469,6 +469,36 @@ pub struct JfetParams {
     /// from `idss`; `Some` replaces it, and `idss` is unused.
     #[serde(default)]
     pub ps: Option<JfetPsParams>,
+    /// Symmetric subthreshold channel law (`LEVEL=3`), from `idss` and `vp`
+    /// as Shichman–Hodges is. Exclusive with `ps`.
+    #[serde(default)]
+    pub sym: Option<JfetSymParams>,
+}
+
+/// The symmetric subthreshold (`LEVEL=3`) channel parameter of a JFET, as on
+/// the card. Canonical law: `melange_devices::jfet::SymmetricSubthreshold`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct JfetSymParams {
+    /// Subthreshold slope factor `n` (card `NSLOPE`, ≥ 1): the current below
+    /// pinch-off e-folds every `n·Vt` of gate voltage.
+    pub nslope: f64,
+}
+
+impl JfetSymParams {
+    /// The canonical device law, at the JFET's thermal voltage (`VT_ROOM`,
+    /// as its gate junctions: a JFET card carries no temperature).
+    pub fn law(&self) -> melange_devices::jfet::SymmetricSubthreshold {
+        melange_devices::jfet::SymmetricSubthreshold {
+            n: self.nslope,
+            vt: melange_devices::VT_ROOM,
+        }
+    }
+
+    /// The law's voltage scale `2·NSLOPE·Vt` \[V\], the generated code's
+    /// `DEVICE_n_SYM_SCALE`.
+    pub fn scale(&self) -> f64 {
+        self.law().scale()
+    }
 }
 
 /// The Parker–Skellern (`LEVEL=2`) channel parameters of a JFET, as on the
@@ -535,9 +565,12 @@ impl JfetParams {
         } else {
             JfetChannel::N
         };
-        let mut jfet = match &self.ps {
-            Some(ps) => Jfet::parker_skellern(channel, self.vp, ps.law()),
-            None => Jfet::new(channel, self.vp, self.idss),
+        let mut jfet = match (&self.ps, &self.sym) {
+            (Some(ps), _) => Jfet::parker_skellern(channel, self.vp, ps.law()),
+            (None, Some(sym)) => {
+                Jfet::symmetric_subthreshold(channel, self.vp, self.idss, sym.law())
+            }
+            (None, None) => Jfet::new(channel, self.vp, self.idss),
         };
         jfet.lambda = self.lambda;
         jfet.is = self.is;

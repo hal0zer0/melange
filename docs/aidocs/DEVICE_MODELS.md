@@ -25,8 +25,9 @@ cards (dumped 2026-09-29); these are also the SPICE3 manual's values.
 | JFET | BETA | 1e-4 A/V² (IDSS = BETA·VTO²) | 1e-4 |
 | JFET | LAMBDA, CGS, CGD | 0 | same |
 | JFET | IS, N (gate junctions) | 1e-14 A, 1 | same |
-| JFET | LEVEL | 1 (Shichman–Hodges); 2 is Parker–Skellern | same |
+| JFET | LEVEL | 1 (Shichman–Hodges); 2 is Parker–Skellern, 3 the symmetric subthreshold law | 1 and 2 the same; no level 3 |
 | JFET (level 2) | VST, MVST, P, Q, Z, XI, MXI, PB | 0, 0, 2, 2, 1, 1000, 0, 1 | same |
+| JFET (level 3) | NSLOPE | 1 | — |
 | JFET, MOSFET | RD, RS | 0; nonzero refused (not in the solution) | 0 |
 | MOSFET (level 1) | VTO, KP, LAMBDA | 0, 2e-5 A/V² (W = L), 0 | same |
 | MOSFET (level 1) | GAMMA, PHI | 0, 0.6 | same |
@@ -1144,14 +1145,18 @@ usage pattern.
   variable-mu §5) is ready; just needs the fit work. User explicitly
   flagged as "big project, not today".
 
-## JFET (Shichman-Hodges, level 1; Parker–Skellern, level 2)
+## JFET (Shichman-Hodges, level 1; Parker–Skellern, level 2; symmetric subthreshold, level 3)
 
 M-dimension: 2 per JFET (Vgs,Vds -> Id, Vgs -> Ig)
 
 `LEVEL` on the card selects the channel law: absent or 1, Shichman–Hodges
-(below); 2, Parker–Skellern ([Level 2](#level-2-parker-skellern)). The gate
-junctions, the mode handling at Vds < 0, the Jacobian layout and the NR
-limiting are the same at both levels.
+(below); 2, Parker–Skellern ([Level 2](#level-2-parker-skellern)); 3, the
+symmetric subthreshold law ([Level 3](#level-3-symmetric-subthreshold)).
+melange's JFET levels follow ngspice's numbering, whose 1 and 2 are these
+laws; 3 is melange's own (ngspice has no JFET level 3, and HSPICE's level 3 is
+a different model). The gate junctions, the Jacobian layout and the NR
+limiting are the same at every level; levels 1 and 2 swap source and drain
+at Vds < 0, level 3 is symmetric and needs no swap.
 
 ### Drain Current (2D)
 ```
@@ -1253,6 +1258,89 @@ Reverse mode is the level-1 swap: the law at (Vgd, −Vds), negated (ngspice's
   `jfet_ps_evaluate` (`device_jfet_ps.rs.tera`, emitted only for a deck with a
   level-2 JFET), held exactly equal by `template_jfet_ps_matches_devices_crate`.
   Pinned against ngspice JFET2 by `melange-validate/tests/jfet2_twin_tests.rs`.
+
+### Level 3: symmetric subthreshold
+
+`LEVEL=3` is Shichman–Hodges with a thermal tail below pinch-off, source/drain
+symmetric. It exists for a JFET used as a voltage-variable resistor biased at
+or below pinch-off (a FET limiter's gain-reduction element, whose factory
+bias puts the channel a few millivolts inside pinch-off): there level 1 is a
+hard edge, and level 2's channel drops out at signal peaks (its subthreshold
+overdrive is taken from the source end only and saturates at `vdt ≈ vgt`,
+which deep below VTO shrinks the triode range to a couple of millivolts), so
+the element passes a distortion check by ceasing to be a resistor.
+```
+a    = 2·NSLOPE·Vt                           Vt = kT/q at 300.15 K = 25.865 mV
+G(x) = (a·ln(1 + e^(x/a)))²                  a squared softplus
+Id   = BETA·(1 + LAMBDA·|Vds|)·[G(Vgs − VTO) − G(Vgd − VTO)]       BETA = IDSS/VTO²
+```
+in N-channel-equivalent voltages (a P-channel device through the level-1 sign
+flip). Its properties:
+- **Above pinch-off** (`x ≫ a`) `G(x) = x²`, so the law is Shichman–Hodges:
+  triode `2·Vgst·Vds − Vds²` while `Vgd > VTO`, saturation `Vgst²` once
+  `Vgd ≤ VTO`, and as `Vt → 0` it is Shichman–Hodges exactly for any NSLOPE.
+  `IDSS` keeps its level-1 meaning, defined as `BETA·VTO²`; the law's own
+  saturated current at `Vgs = 0` is `BETA·G(−VTO)`, equal to that for
+  `|VTO| ≫ a` and 0.6 % above it at `|VTO| = 0.3 V` with NSLOPE 1.39.
+- **Below pinch-off** (`x ≪ −a`) `G(x) = a²·e^(x/(NSLOPE·Vt))`: a barrier
+  current that e-folds every `NSLOPE·Vt` of gate voltage, forward minus
+  reverse. With the gate fed half the drain swing the current is
+  `∝ sinh(Vds/a)`: the channel stays a resistor at any depth below pinch-off,
+  conductance `sinh(y)/y` with `y = Vds/a` (a 10 % expansion at ±40 mV for
+  NSLOPE 1, where level 2 at the same rest conductance falls to 0.13).
+- **Symmetric**: odd under `(Vgs, Vds) → (Vgd, −Vds)`, so there is no mode
+  swap, the current is exactly 0 at `Vds = 0`, and the Jacobian is continuous
+  there (the `|Vds|` factor multiplies a bracket that is 0). The even-order
+  null of a half-drain-fed gate is at one half for every NSLOPE, as in
+  Shichman–Hodges and Shockley's law.
+- **No cut-off edge or branch**: the softplus is evaluated as
+  `a·(max(z, 0) + ln_1p(e^(−|z|)))`, `z = x/a`, with an unclamped `exp`
+  (`e^(−|z|) ≤ 1` cannot overflow), so nothing is set to zero; the tail
+  underflows to 0 only some 18 V below pinch-off at NSLOPE 1. A `safe_exp`
+  clamp would put a floor under the tail, as it would under the grid current.
+
+Partials, with `sp(x) = a·ln(1 + e^(x/a))` and `σ` the logistic sigmoid:
+`G'(x) = 2·sp(x)·σ(x/a)`; `gm = BETA·clm·(G'(u_s) − G'(u_d))` (both
+overdrives move with the gate), `gds = BETA·(G'(u_d)·clm + core·LAMBDA·sign(Vds))`
+(only `u_d` moves with the drain), `u_s = Vgs − VTO`, `u_d = u_s − Vds`,
+`clm = 1 + LAMBDA·|Vds|`.
+
+- **Provenance.** The forward-minus-reverse form is EKV's (Enz, Krummenacher,
+  Vittoz, "An analytical MOS transistor model valid in all regions of
+  operation and dedicated to low-voltage and low-current applications",
+  Analog Integrated Circuits and Signal Processing 8, 83–114, 1995,
+  DOI 10.1007/BF01239381), a MOSFET model. Its use for the JFET is a
+  derivation by analogy: a channel between tied gates sees the barrier
+  referenced equally to both ends, so the current is `h(Vgs) − h(Vgd)`. No
+  JFET-specific published source was found. NSLOPE is a pure subthreshold
+  slope factor (the ideal 1 for a gate-surrounded channel; real parts may run
+  slightly above it), not EKV's `n`, which couples the gate through a
+  capacitive divider and would move the even-order null to `k = n/2`; nor
+  BSIM's `NFACTOR`, which is one coefficient inside such an `n`.
+- **Keys.** The level-1 set (VTO, BETA or IDSS, LAMBDA, IS, N, CGS, CGD, KF,
+  AF) and the built-in catalog, plus `NSLOPE` (≥ 1, default 1; a compile-time
+  constant, not jittered). A level-3 card giving both IDSS and BETA is refused
+  (they are one parameter here; level 1 silently prefers IDSS). The level-2
+  keys are refused on a level-3 card and NSLOPE on a level-1 or -2 card.
+  `Vt` is `VT_ROOM` (300.15 K), the gate junctions' thermal voltage: a JFET
+  card has no temperature law, and the channel alone following the runtime
+  temperature setter would be a silent partial model. Limiting, DC-OP seeding,
+  the runtime fields (`idss`, `vp`, `lambda`) and `.mismatch J` (IDSS, VP,
+  LAMBDA) are level 1's.
+- **Validation.** No ngspice law: `melange validate` gives ngspice a
+  `.subckt` of B-sources transcribing the generated code, the channel above
+  and the gate junctions as `junction_exp` (its ±40 exponent clamp and
+  forward continuation; an ngspice `D` element switches to SPICE2's cubic
+  reverse form below −3·N·Vt, which is not melange's law). The twin therefore
+  checks melange's solve of the law, not the law's physics, which rests on the
+  derivation above. Pinned by `melange-validate/tests/jfet3_twin_tests.rs`:
+  gate × drain grids at 1e-9 relative + 1e-17 A with the junctions on and
+  off, both polarities, two slope factors, and a transient voltage-variable
+  resistor.
+- Canonical: `melange_devices::jfet::SymmetricSubthreshold::channel`;
+  generated `jfet_sym_evaluate` (`device_jfet_sym.rs.tera`, emitted only for
+  a deck with a level-3 JFET), held exactly equal by
+  `template_jfet_sym_matches_devices_crate`.
 
 ## MOSFET (Level 1 SPICE)
 
