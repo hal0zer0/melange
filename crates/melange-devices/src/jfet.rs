@@ -1485,10 +1485,12 @@ mod tests {
     /// The `(1 + λ|Vds|)` factor has a kink at Vds = 0, but the bracket it
     /// multiplies is 0 there, so the law is C1: with λ ≠ 0, in conduction
     /// and below pinch-off, both polarities, the two one-sided difference
-    /// quotients at Vds = 0 straddle the analytic gds by no more than their
-    /// own first-order truncation `(G''/G')·h/2` (`G''/G' ≤ 1.22/(n·Vt)`,
-    /// at the knee), and their mean, the central difference, equals it to
-    /// second order. A jump would separate them by O(gds), independent of h.
+    /// quotients at Vds = 0 (h = 1e-7 V) straddle the analytic gds by no
+    /// more than their own first-order truncation `(G''/G')·h/2` (`G''/G' ≤
+    /// 1.22/(n·Vt)`, at the knee), and their mean, the central difference,
+    /// equals it to second order. A jump would separate them by O(gds),
+    /// independent of h; the bound detects a jump only down to its own size,
+    /// so the analytic gds at ±1e-12 V is also held equal to 1e-9 relative.
     /// (First written as each quotient within 1e-6 of gds, which the
     /// truncation alone exceeds at h = 1e-7; the bound, not the claim, was
     /// wrong.)
@@ -1516,11 +1518,13 @@ mod tests {
                     "{channel:?} Vgs={vgs}: 0+ {fwd:e} and 0- {bwd:e} differ by more than the \
                      truncation bound {truncation:e}: a jump in gds"
                 );
-                let gds_p = j.jacobian_partial(vgs, 1e-9).1;
-                let gds_m = j.jacobian_partial(vgs, -1e-9).1;
+                // What Newton consumes: the analytic gds a hair either side of
+                // 0 (no truncation model needed; G''·1e-12 is ~1e-10 relative).
+                let gds_p = j.jacobian_partial(vgs, 1e-12).1;
+                let gds_m = j.jacobian_partial(vgs, -1e-12).1;
                 assert!(
-                    (gds_p - gds_m).abs() <= 1e-6 * gds.abs(),
-                    "{channel:?} Vgs={vgs}"
+                    (gds_p - gds_m).abs() <= 1e-9 * gds.abs(),
+                    "{channel:?} Vgs={vgs}: analytic gds at 0+ {gds_p:e} vs 0- {gds_m:e}"
                 );
             }
         }
