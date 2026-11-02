@@ -3,15 +3,14 @@
 Quick-reference for AI agents. For math details see other aidocs. For architecture see CLAUDE.md.
 Release history lives in `CHANGELOG.md`; this file states what is true now and what is open.
 
-> **Latest release: v0.1.20 (2026-11-01).**
+> **Latest release: v0.1.21 (2026-11-02).**
 >
-> The generated device laws call libm `exp` and `ln`; the emitted `fast_exp`/`fast_ln`
-> polynomials, whose pieces did not meet (a value jump at every power of two and every
-> half-octave, inside every exponential law), are gone. Newton certifies an iterate on the
-> undamped correction every iteration on both routes, and the nodal merit and gate read every
-> row. Nodal full-LU builds factor in place and take the sparse schedule on `M = 0`: the bus
-> compressor is 1.8× faster, behavioral decks 2.3–3.3×. Against v0.1.19, 40 golden renders are
-> byte-identical, 137 negligible, 15 changed (silence floors and the tremolo LFO's start-up).
+> JFET `LEVEL=3`, the symmetric subthreshold law (`NSLOPE`), with a B-source `validate` twin.
+> A `rate=host` injection is clamped like the audio input (`diag_inject_clamp_count`); a failed
+> op-amp pin decides the sample on every nodal route and is never committed
+> (`diag_nr_unconverged_commit_count` is a DK counter); after a reset, the remaining
+> sub-samples re-run the zeroed up-filters. Against v0.1.20, all 192 golden renders are
+> byte-identical.
 
 ## SPICE Validation Results
 

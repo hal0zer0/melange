@@ -9,6 +9,32 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+## [0.1.21] - 2026-11-02
+
+**Against v0.1.20, over the 192 golden renders:** all 192 are byte-identical,
+and no render is held. Generated source differs on 34 of the 44 decks: one
+diagnostic doc comment on every nodal build that declares
+`diag_nr_hold_count` (21 decks change by that comment alone); the failed
+op-amp pin rule on 5 (`gravity`, `moonladder`, `noyce-4558`, `sad-bastard`,
+`sus-bus`: `diag_nr_unconverged_commit_count` is gone from their nodal
+builds, and it read zero on every render of them); the post-reset re-filter on
+the 6 oversampled decks (`gravity` and the five `gold-press` decks); the
+host-rate injection guard on `wurli-tremolo`; and the unparenthesised rate
+argument on `funkyinduct` and `mosfet-choke-load`.
+
+**What can change rendered audio:** a `rate=host` `.inject` value beyond the
+input limit (now clamped, see Fixed); a nodal build whose op-amp pin fails
+(that sample now goes to backward Euler or the hold instead of committing the
+failed iterate); an oversampled build that takes a NaN or magnitude reset (the
+remaining sub-samples of that host sample). A render that hits none of these
+is unchanged. Adding level 3 changes no level-1 or level-2 JFET code.
+
+**Generated fields:** nodal builds no longer declare
+`diag_nr_unconverged_commit_count` (DK builds still do); code outside a
+generated file that reads it from a nodal build must drop the read. Builds
+with a `rate=host` injection declare `diag_inject_clamp_count`. Linear nodal
+builds with an active-set op-amp pin declare `diag_nr_hold_count`.
+
 ### Added
 
 - **JFET `LEVEL=3`: the symmetric subthreshold law.** Shichman–Hodges with a
@@ -3805,7 +3831,8 @@ measured real hardware. Everything else is unproven against hardware. See
   KiCad file; no effect on netlist compilation, generated code, or shipped plugins. The
   fix (`quick-xml >= 0.41`) is tracked for 0.1.1.
 
-[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.20...HEAD
+[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.21...HEAD
+[0.1.21]: https://github.com/hal0zer0/melange/compare/v0.1.20...v0.1.21
 [0.1.20]: https://github.com/hal0zer0/melange/compare/v0.1.19...v0.1.20
 [0.1.19]: https://github.com/hal0zer0/melange/compare/v0.1.18...v0.1.19
 [0.1.18]: https://github.com/hal0zer0/melange/compare/v0.1.17...v0.1.18
