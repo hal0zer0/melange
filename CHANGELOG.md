@@ -9,6 +9,18 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+### Changed
+
+- **Catalogue 2N5457 pinch-off is −3.06 V (was −2.5 V).** Neither datasheet
+  prints a typical VGS(off); −2.5 V is the typical VGS at ID = 100 µA. −3.06 V
+  is the pinch-off that reproduces both printed typicals (IDSS 3 mA; 100 µA at
+  −2.5 V) under the catalogue's Shichman–Hodges law, with gm0 inside the
+  sheet's |Yfs| band. Catalogue values also fill the parameters a `.model`
+  card leaves out when its name is a catalogue part, so a `2N5457` card
+  without `VP`/`VTO` moves with it; a card that states its own values does
+  not. The 2N3819 entry's comment now says its 2 mA is the printed minimum
+  (no typical exists); its values are unchanged.
+
 ## [0.1.21] - 2026-11-02
 
 **Against v0.1.20, over the 192 golden renders:** all 192 are byte-identical,
