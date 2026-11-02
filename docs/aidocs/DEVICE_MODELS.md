@@ -1188,6 +1188,20 @@ biased each leaks −IS. The exponential is the IS-aware `junction_exp` (one cop
 shared with the BJT). `IS=0` disables both junctions, the model without them.
 No GMIN term: SPICE adds 1e-12 S across each junction as conditioning, which
 moves the fixed point, so ngspice references are taken with GMIN off.
+What the junction record rests on: the gate-junction witnesses
+(`jfet_gate_junction_tests.rs`) are node-voltage witnesses at 1e-6 V through
+2.2 k–100 kΩ, not a current-law twin; a 1e-17 A difference in the reverse
+current is below 1e-10 V there. The reverse forms differ: ngspice's level-1
+JFET gate and its `D` element switch to SPICE2's cubic
+`−IS·(1 + (3·N·Vt/(e·V))³)` below −3·N·Vt (`jfetload.c`, `dioload.c`), where
+melange keeps the exponential to its −40 clamp; ngspice's JFET2 gate diode
+(`psmodel.c`) is the exponential for −10 < V/(N·Vt) < 40, a flat −IS below
+−10 (a jump of IS·e⁻¹⁰ there) and linear above 40, where melange stays
+exponential to the 1 kA point. The level-2 twin's grid passes at its 1e-17 A
+floor because IS·e⁻¹⁰ = 4.5e-19 A for IS = 1e-14 and no forward point exceeds
+40·N·Vt; it would not for IS above about 2e-13 A, or on a forward grid past
+40·N·Vt. The level-3 twin transcribes melange's own junction law, so it has no
+such band.
 Canonical: `melange_devices::jfet::Jfet::evaluate`; generated `jfet_evaluate`
 (held equal by the template sync test); the DC OP calls `Jfet::evaluate`.
 
