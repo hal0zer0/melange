@@ -300,8 +300,8 @@ sample, and the stamps go in at every one:
 1. the main loop, `alpha = 2·fs·OS` (trapezoidal) or `fs·OS` (BE);
 2. the adaptive sub-step, `alpha_sub` in the same scheme;
 3. the op-amp active-set pinned Newton. Its start takes `i_L` from `v_prev`: an
-   unpinned iterate 2-cycles on tanh. A pinned solve that fails is counted in
-   `diag_nr_unconverged_commit_count`.
+   unpinned iterate 2-cycles on tanh. A pinned solve that fails decides the
+   sample (backward Euler, then the hold, `diag_nr_hold_count`).
 
 Each site checks the flux row with the same residual
 (`emit_sat_ind_row_residual`): the row's equation evaluated at the accepted

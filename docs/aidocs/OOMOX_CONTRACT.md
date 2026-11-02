@@ -191,6 +191,18 @@ file:line, oomox-relative):
   `.runtime R` changes were applied (rank-1 updates taken; full rebuilds forced
   by the conductance-ratio trigger; full rebuilds forced by a bad denominator).
   Trigger rebuilds are expected on wide downward sweeps; fallbacks should be 0.
+- **Injection guard and pin rule (2026-11-02)**: a `rate=host` `.inject` value is
+  clamped like the audio input ahead of its up-filter (Thevenin ±INPUT_LIMIT_V,
+  Norton ±INPUT_LIMIT_V / RSHUNT) and counted in the new
+  `diag_inject_clamp_count` (present only where a `rate=host` injection
+  exists); `rate=inner` values are not clamped. A failed op-amp pin no longer
+  commits its iterate on any nodal build: it decides the sample (backward
+  Euler, then the hold), so `diag_nr_unconverged_commit_count` is now a DK
+  counter only, and `diag_nr_hold_count` also exists on linear nodal builds
+  with an active-set pin. `diag_unsolved_sample_count == 0` is still the whole
+  check. After a NaN or magnitude reset in one inner sub-sample, the later
+  sub-samples of that host sample take the zeroed up-filters' response to the
+  host value (bit-identical for every render without a reset).
 - **`diag_unsolved_sample_count` (2026-09-29)**: ONE always-present field on
   every generated build (DK and both nodal sub-paths, any integrator, M = 0
   included, where it is a constant 0): every sample that was never solved,

@@ -209,7 +209,7 @@ pub struct CircuitState {
     pub os_up_state_outer: [f64; {{ os_state_size_outer }}],
     /// 4x oversampler outer downsampling filter state (per output)
     pub os_dn_state_outer: [[f64; {{ os_state_size_outer }}]; NUM_OUTPUTS],
-{% endif %}{{ inject_os_fields }}
+{% endif %}{{ inject_os_fields }}{{ inject_clamp_counter_field }}
 {% if num_switches > 0 %}
 {% for idx in switch_indices %}
     /// Switch {{ idx }} current position (0-indexed)
@@ -347,7 +347,7 @@ impl Default for CircuitState {
 {% endif %}{% if oversampling_4x %}
             os_up_state_outer: [0.0; {{ os_state_size_outer }}],
             os_dn_state_outer: [[0.0; {{ os_state_size_outer }}]; NUM_OUTPUTS],
-{% endif %}{{ inject_os_init }}
+{% endif %}{{ inject_os_init }}{{ inject_clamp_counter_init }}
 {% if num_switches > 0 %}
 {% for idx in switch_indices %}
             switch_{{ idx }}_position: 0,
@@ -466,7 +466,7 @@ impl CircuitState {
 {% endif %}{% if oversampling_4x %}
         self.os_up_state_outer = [0.0; {{ os_state_size_outer }}];
         self.os_dn_state_outer = [[0.0; {{ os_state_size_outer }}]; NUM_OUTPUTS];
-{% endif %}{{ inject_os_reset_self }}
+{% endif %}{{ inject_os_reset_self }}{{ inject_clamp_counter_reset }}
 {% if num_device_params > 0 %}
 {% for dev in device_params %}{% for p in dev.params %}
         self.device_{{ dev.dev_num }}_{{ p.field_suffix }} = DEVICE_{{ dev.dev_num }}_{{ p.const_suffix }};

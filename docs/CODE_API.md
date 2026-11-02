@@ -180,9 +180,13 @@ array of `[]`). A deck with neither `.inject` nor `.tap` keeps
 
 The values are circuit units: volts for a Thevenin (`R=`) injection, amperes
 for a Norton (`RSHUNT=`) one. NaN/Inf values become 0 and count in
-`diag_runtime_nan_count` (they are values your code wrote, not host audio);
-there is no magnitude clamp. At `OVERSAMPLING_FACTOR`
-1 there is no up-filter and the two kinds reach the solve identically.
+`diag_runtime_nan_count` (they are values your code wrote, not host audio). A
+`rate=host` value is then guarded like the audio input, ahead of its up-filter:
+a Thevenin value is clamped to ±`INPUT_LIMIT_V`, a Norton value to
+±`INPUT_LIMIT_V / RSHUNT` (the current that puts the limit across its shunt),
+each clamp counted in `diag_inject_clamp_count`. A `rate=inner` value is not
+clamped. At `OVERSAMPLING_FACTOR` 1 there is no up-filter and the two kinds
+reach the solve identically, within the limit.
 
 In a feedback loop the injected value must come from a previous call's taps
 (the API gives at least one sample of delay by construction), and a loop closed
@@ -240,9 +244,9 @@ the solver route (always 0 where no Newton solve exists), and counts every
 sample that was never solved. Assert it is zero; that is the whole check. Read
 it after a render, or poll it per block.
 
-A sample counts once, whichever mechanisms fired on it: a Newton hold, an
-unconverged commit, a failed op-amp pin, a reduced-model exit, or a NaN or
-magnitude reset (the committed state after a reset is the operating point,
+A sample counts once, whichever mechanisms fired on it: a Newton hold (which
+is where a failed op-amp pin ends on a nodal build), a DK unconverged commit,
+a reduced-model exit, or a NaN or magnitude reset (the committed state after a reset is the operating point,
 not a solution). The mechanism counters below carry the detail as an
 overlapping breakdown; they are not addends of the unified count, and one
 sample can appear in several of them. Each exists only where its mechanism
@@ -250,8 +254,8 @@ does:
 
 | Field | Present on | What a nonzero value means |
 |-------|-----------|----------------------------|
-| `diag_nr_hold_count` | nodal builds with a Newton solve (any nonlinear device, behavioral source or saturating inductor), both sub-paths | Every path failed (the solve, the sub-step ladder and, on a trapezoidal build, backward Euler) and the PREVIOUS sample's state was committed as this sample's output. With the input and every source constant in time this is a fixed point: the next sample re-poses the identical problem and fails identically; under a moving source (a time-dependent behavioral source) the frozen state falls further behind each sample instead, and one failure cascades until the source passes back near it. Either way the circuit can stay frozen for a long run of samples. |
-| `diag_nr_unconverged_commit_count` | DK builds with devices; nodal full-LU builds with an active-set op-amp pin; nodal Schur builds with an active-set pin and no devices | The final solve (a DK Newton solve, or an op-amp's pinned solve) ended unconverged and that iterate was committed. The state still moves, so the solver can recover on its own — but those samples were never solved. |
+| `diag_nr_hold_count` | nodal builds with a Newton solve (any nonlinear device, behavioral source or saturating inductor), both sub-paths, and linear nodal builds with an active-set op-amp pin | Every path failed (the solve, the sub-step ladder and, on a trapezoidal build, backward Euler) and the PREVIOUS sample's state was committed as this sample's output. With the input and every source constant in time this is a fixed point: the next sample re-poses the identical problem and fails identically; under a moving source (a time-dependent behavioral source) the frozen state falls further behind each sample instead, and one failure cascades until the source passes back near it. Either way the circuit can stay frozen for a long run of samples. A failed op-amp pin ends here on every nodal route: on a trapezoidal Newton solve it hands the sample to backward Euler first; on a linear build it is held directly. |
+| `diag_nr_unconverged_commit_count` | DK builds with devices | The final solve (a DK Newton solve, or an op-amp's pinned solve) ended unconverged and that iterate was committed. The state still moves, so the solver can recover on its own — but those samples were never solved. |
 
 A mechanism field is absent where its mechanism cannot occur, so a counter that
 could never move does not read as reassurance. Code that must work on any
@@ -282,6 +286,7 @@ passed. They exist on every route:
 |-------|----------------------------|
 | `diag_input_clamp_count` | Input samples beyond `INPUT_LIMIT_V` (±100 V) were clamped to it. |
 | `diag_input_nan_count` | NaN/Inf host input samples were replaced by 0 V. |
+| `diag_inject_clamp_count` | `rate=host` injection values beyond the input limit (Thevenin ±`INPUT_LIMIT_V`, Norton ±`INPUT_LIMIT_V / RSHUNT`) were clamped to it; one count per host sample and value. Present only on a build with a `rate=host` injection. |
 | `diag_runtime_nan_count` | A value your own code wrote was NaN or ±inf: a `.runtime` voltage-source field (counted once per host sample while it stays non-finite; the source reads as 0 for that sample), a `.inject` value (replaced by 0), or a setter argument (`set_pot_*`, `set_runtime_*`, the noise setters, `set_temperature_k`, `set_sample_rate`: ±inf clamps to a declared range, anything else leaves the value unchanged). |
 
 A linear DK build with pots (no nonlinear devices) carries three more, all

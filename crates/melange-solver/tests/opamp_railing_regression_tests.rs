@@ -311,9 +311,12 @@ fn render_choke(code: &str, host_rate: f64, tag: &str) -> Vec<ChokeRow> {
     .into_iter()
     .filter(|f| code.contains(&format!("pub {f}: ")))
     .collect();
+    // A failed pin decides the sample on every nodal route: on a Newton site it
+    // goes to the backward-Euler solve and then the hold, so the hold counter
+    // is the witness (the commit counter no longer exists on nodal builds).
     assert!(
-        counters.contains(&"diag_nr_unconverged_commit_count"),
-        "test premise: a build that can pin an op-amp declares the unsolved-commit counter"
+        counters.contains(&"diag_nr_hold_count"),
+        "test premise: a build that can pin an op-amp declares the hold counter"
     );
     let unsolved = counters
         .iter()

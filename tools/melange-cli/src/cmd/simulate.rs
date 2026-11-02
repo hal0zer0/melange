@@ -428,6 +428,7 @@ pub(crate) fn simulate_circuit_source(
             "diag_nr_unconverged_commit_count",
             "diag_warm_start_fallback_count",
             "diag_reduced_model_exit_count",
+            "diag_inject_clamp_count",
         ])
         .chain(INPUT_DIAG_FIELDS)
         .filter(|f| declares_state_field(&generated.code, f))

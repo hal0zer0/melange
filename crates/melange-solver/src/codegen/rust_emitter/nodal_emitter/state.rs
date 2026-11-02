@@ -2,7 +2,7 @@
 
 use super::reset::emit_dc_block_history_reseed;
 use super::sites::{
-    counts_unconverged_commit, emits_hold, has_be_instance, live_g_c, schur_exact_seed,
+    declares_hold_counter, emits_hold, has_be_instance, live_g_c, schur_exact_seed,
 };
 use crate::codegen::ir::{CircuitIR, DeviceParams};
 use crate::codegen::rust_emitter::dk_emitter::{emit_warmup_call, NoiseEmission};
@@ -13,7 +13,9 @@ use crate::codegen::rust_emitter::helpers::{
     self_heating_device_data, stateful_device_data,
 };
 use crate::codegen::rust_emitter::inject_tap::{
-    emit_inject_os_state_fields, emit_inject_os_state_init, emit_inject_os_state_reset,
+    emit_inject_clamp_counter_field, emit_inject_clamp_counter_init,
+    emit_inject_clamp_counter_reset, emit_inject_os_state_fields, emit_inject_os_state_init,
+    emit_inject_os_state_reset,
 };
 use crate::codegen::rust_emitter::RustEmitter;
 
@@ -323,12 +325,13 @@ impl RustEmitter {
         // solve that can end unsolved would report a permanent, reassuring zero
         // for something that cannot happen, which is the same misleading-
         // diagnostic shape this counter was added to remove.
-        let hold = emits_hold(ir);
+        let hold = declares_hold_counter(ir);
         if hold {
             code.push_str(
                 "    /// Diagnostic: samples on which EVERY Newton path failed (trap +\n\
-             \x20   /// sub-step + BE) and the death-spiral hold committed the PREVIOUS\n\
-             \x20   /// state as this sample's answer.\n\
+             \x20   /// sub-step + BE), or whose op-amp rail pin (the active-set pinned\n\
+             \x20   /// solve) did not converge on a linear build, and the death-spiral\n\
+             \x20   /// hold committed the PREVIOUS state as this sample's answer.\n\
              \x20   ///\n\
              \x20   /// **A nonzero value means this render contains samples that are not\n\
              \x20   /// solutions.** The hold emits a bounded, smooth value, so peak, RMS,\n\
@@ -352,18 +355,6 @@ impl RustEmitter {
             );
             code.push_str("    pub diag_nr_hold_count: u64,\n");
         }
-        // A pinned solve that does not converge is committed, not held, where
-        // no Newton solve takes its outcome (see pin_failure_is_committed).
-        if counts_unconverged_commit(ir, use_full_nodal) {
-            code.push_str(
-                "    /// Diagnostic: samples whose op-amp rail pin (the active-set pinned\n\
-                 \x20   /// Newton) did not converge, or whose pinned system was singular,\n\
-                 \x20   /// and whose iterate was committed anyway. Counted at the failure,\n\
-                 \x20   /// once per internal (oversampled) sample. Nonzero means this render\n\
-                 \x20   /// contains samples that were never solved (design review).\n",
-            );
-            code.push_str("    pub diag_nr_unconverged_commit_count: u64,\n");
-        }
         code.push_str(
             "    /// Diagnostic: number of times the runtime BE-latch engaged (rising\n\
              \x20   /// edges). Nonzero means the solver detected a self-sustaining Nyquist\n\
@@ -386,6 +377,7 @@ impl RustEmitter {
              \x20   pub diag_input_nan_count: u64,\n",
         );
         code.push_str(&super::super::runtime_inputs::counter_field("    "));
+        code.push_str(&emit_inject_clamp_counter_field(ir));
         code.push_str(
             "    /// Diagnostic: number of times a finite-but-implausible iterate\n\
              \x20   /// (state magnitude beyond any physically-realizable circuit value)\n\
@@ -875,11 +867,8 @@ impl RustEmitter {
         }
         code.push_str("            diag_be_fallback_count: 0,\n");
         code.push_str("            diag_unsolved_sample_count: 0,\n");
-        if emits_hold(ir) {
+        if declares_hold_counter(ir) {
             code.push_str("            diag_nr_hold_count: 0,\n");
-        }
-        if counts_unconverged_commit(ir, use_full_nodal) {
-            code.push_str("            diag_nr_unconverged_commit_count: 0,\n");
         }
         code.push_str("            diag_be_latch_count: 0,\n");
         code.push_str("            diag_active_set_pin_count: 0,\n");
@@ -887,6 +876,7 @@ impl RustEmitter {
         code.push_str(
             "            diag_input_clamp_count: 0,\n            diag_input_nan_count: 0,\n            diag_runtime_nan_count: 0,\n",
         );
+        code.push_str(&emit_inject_clamp_counter_init(ir));
         code.push_str("            diag_magnitude_reset_count: 0,\n");
         code.push_str("            diag_substep_count: 0,\n");
         if schur_exact_seed(ir, use_full_nodal) {
@@ -1191,11 +1181,8 @@ impl RustEmitter {
         }
         code.push_str("        self.diag_be_fallback_count = 0;\n");
         code.push_str("        self.diag_unsolved_sample_count = 0;\n");
-        if emits_hold(ir) {
+        if declares_hold_counter(ir) {
             code.push_str("        self.diag_nr_hold_count = 0;\n");
-        }
-        if counts_unconverged_commit(ir, use_full_nodal) {
-            code.push_str("        self.diag_nr_unconverged_commit_count = 0;\n");
         }
         code.push_str("        self.diag_be_latch_count = 0;\n");
         code.push_str("        self.diag_active_set_pin_count = 0;\n");
@@ -1203,6 +1190,7 @@ impl RustEmitter {
         code.push_str(
             "        self.diag_input_clamp_count = 0;\n        self.diag_input_nan_count = 0;\n        self.diag_runtime_nan_count = 0;\n",
         );
+        code.push_str(&emit_inject_clamp_counter_reset(ir));
         code.push_str("        self.diag_magnitude_reset_count = 0;\n");
         code.push_str("        self.diag_voltage_damp_count = 0;\n");
         code.push_str("        self.diag_substep_count = 0;\n");

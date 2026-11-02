@@ -117,11 +117,12 @@ fn the_unified_count_sees_every_mechanism() {
     }
 }
 
-/// The third mechanism: a failed op-amp pin whose iterate is committed (M = 0,
-/// both nodal routes). A comparator that rails on every half cycle, with the
-/// pinned Newton cut to zero iterations.
+/// The third mechanism: a failed op-amp pin on a linear build (M = 0, both
+/// nodal routes), which takes the hold — the direct path has no Newton solve
+/// to hand the pin's outcome to. A comparator that rails on every half cycle,
+/// with the pinned Newton cut to zero iterations.
 #[test]
-fn the_unified_count_sees_a_committed_pin() {
+fn the_unified_count_sees_a_failed_pin_on_a_linear_build() {
     use melange_solver::codegen::OpampRailMode;
     let deck = "comparator\nRleak in 0 1Meg\nU1 in 0 out OX\nRl out 0 10k\n\
                 .model OX OA(AOL=100000 VCC=15 VEE=-15)\n";
@@ -135,8 +136,12 @@ fn the_unified_count_sees_a_committed_pin() {
         c.nodal_sub_path_override = sub_path;
         let code = support::generate_circuit_code_nodal(deck, &c).0;
         assert!(
-            code.contains("pub diag_nr_unconverged_commit_count: "),
-            "{tag}: a committed pin is counted"
+            code.contains("pub diag_nr_hold_count: "),
+            "{tag}: a failed pin on a linear build is held and counted"
+        );
+        assert!(
+            !code.contains("diag_nr_unconverged_commit_count"),
+            "{tag}: no nodal build commits a failed pin"
         );
         let code = code.replace("in 0..MAX_ITER {", "in 0..0usize {");
         let (unified, detail) = counts(&code, &tag);

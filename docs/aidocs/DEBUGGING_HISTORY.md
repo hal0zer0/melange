@@ -145,3 +145,33 @@ Rule D' correctly fires only on `U8` and `U9` (the two sidechain rectifiers, bot
 the change — Rule D' correctly excluded its op-amps despite `vbias = 4.5 V` on `n_plus`
 (Condition 1 passes but Condition 2 fails because its diodes are not in the op-amp
 feedback path).
+
+## Host-rate injection burst: commit spiral after the burst (fixed 2026-11-02)
+
+**Signature:** a stereo compressor (`.inject inr in_r R=1`, 2×, full-LU,
+active-set rails) given a 512-host-sample 1e30 V burst on `input` and the
+injection: holds through the burst, then ~1000 inner samples at the Newton
+ceiling with `diag_nr_unconverged_commit_count` climbing, a sidechain cap node
+ramping ~1 kV per host sample, the right output pinned at the output clamp,
+until the 1e6 V magnitude guard tripped and the render recovered. 0.1.15 held
+instead (20 commits); 464b06b (the per-device limiter floor at 0, correct)
+widened the path to 997.
+
+**Cause, three links:** (1) the injection had no magnitude clamp, and the hold
+never reaches the Step-7 guard, so 1e30 sat in the host-rate half-band
+up-filter for ~1000 host samples (0.028 decades per sample). (2) At ~1e21 V the
+relative KCL row gate is vacuous on the driven row, the unpinned Newton
+certified, the op-amp pin failed, and full-LU committed the failed pin's
+iterate; its capacitor currents poisoned `q_dot` and every later sample
+re-posed the spiral. (3) The first magnitude reset came in the even
+sub-sample; the odd sub-sample reused an injection value computed before the
+reset and committed once more.
+
+**Fix:** `rate=host` injections clamped like the input ahead of the filter
+(`diag_inject_clamp_count`); a failed pin decides the sample on every nodal
+route (backward Euler, then the hold; linear builds hold directly); after a
+reset in one sub-sample, later sub-samples re-filter from zero. Witness: the
+1e30 burst renders bit-identical to the same burst pre-clamped to 100 V, no
+unsolved sample after the burst, 1e3 V: 16 magnitude resets → 0 with only the
+pin rule changed. The KCL row gate was kept (it certifies relative KCL on the
+problem as posed; plausibility is the guard's job).

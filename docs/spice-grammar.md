@@ -1442,8 +1442,16 @@ generated code must do with it before the inner solve:
 | `inner` | once per inner sub-step, in `injections_inner[j][k]` | straight to the solve, no filter; the caller owns band-limiting | a feedback loop closed from a `.tap` at the inner rate |
 
 A signal fed through a `rate=host` injection and the same signal fed through the
-audio input reach the circuit identically. At `--oversampling 1` there is no
-up-filter, so the two rates are the same thing and render identically.
+audio input reach the circuit identically, within ±100 V (`INPUT_LIMIT_V`): a
+`rate=host` value is an audio input and is guarded like one, ahead of its
+up-filter and of every piece of state. A Thevenin value is clamped to
+±INPUT_LIMIT_V; a Norton value is a current, clamped to ±INPUT_LIMIT_V / RSHUNT
+(the current that puts the limit across its shunt); each clamped value is
+counted in `diag_inject_clamp_count`, once per host sample. At
+`--oversampling 1` there is no up-filter, so the two rates are the same thing
+and render identically within ±INPUT_LIMIT_V. A `rate=inner` value is not
+clamped: a loop closed from a `.tap` may legitimately carry more than the input
+limit (a plate node), and the caller owns it.
 
 Two rules for a feedback loop. The injected value must come from a **previous**
 sample's tap — the API gives at least one sample of delay by construction. And a
@@ -1458,7 +1466,8 @@ operating point, exactly like the input port's `G_in`. The runtime value enters
 the per-sample RHS at n+1 — `val / R` for Thevenin, `val` for Norton — under
 either integrator, and the Newton loop never sees it. NaN/Inf values are
 replaced by 0 and counted in `diag_runtime_nan_count` (a value the plugin
-wrote, not host audio); there is no magnitude clamp. A `.tap` is read after the solve and before the output pipeline: no DC
+wrote, not host audio); a `rate=host` value is then clamped like the audio
+input (above), a `rate=inner` value is not. A `.tap` is read after the solve and before the output pipeline: no DC
 block, no `--output-scale`, no clamp, no decimation. It is emitted separately
 from the output nodes even when it names the same node.
 

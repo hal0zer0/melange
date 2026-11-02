@@ -410,17 +410,29 @@ pub(super) fn emits_hold(ir: &CircuitIR) -> bool {
     ir.topology.m > 0 || !ir.behavioral_sources.is_empty() || !ir.saturating_inductors.is_empty()
 }
 
-/// Whether a failed op-amp pin at `site` is committed (and counted in
-/// `diag_nr_unconverged_commit_count`) rather than handed to the sample's
-/// `converged`. See [`RustEmitter::emit_nodal_active_set_resolve`].
-pub(super) fn pin_failure_is_committed(ir: &CircuitIR, site: &PinSite<'_>) -> bool {
-    matches!(site, PinSite::FullLu { .. }) || ir.topology.m == 0
+/// True when the sample's solve is the linear direct one (M = 0 with no
+/// behavioral source and no saturating inductor): no Newton loop, so no
+/// `converged` for a failed op-amp pin to hand its outcome to. The same
+/// condition picks the direct LU path in `emit_nodal_process_sample`.
+pub(super) fn pin_site_is_linear(ir: &CircuitIR) -> bool {
+    ir.topology.m == 0 && ir.behavioral_sources.is_empty() && ir.saturating_inductors.is_empty()
 }
 
-/// True when some pin in this build commits its failure: the build declares
-/// `diag_nr_unconverged_commit_count`.
-pub(super) fn counts_unconverged_commit(ir: &CircuitIR, full_nodal: bool) -> bool {
-    emits_active_set_resolve(ir) && (full_nodal || ir.topology.m == 0)
+/// True when some sample of this build can end in the hold (previous state
+/// committed, `diag_nr_hold_count`): a Newton solve that can end unsolved
+/// ([`emits_hold`]), or a linear build whose active-set op-amp pin can fail
+/// ([`emit_nodal_active_set_resolve`](super::RustEmitter::emit_nodal_active_set_resolve)
+/// holds a failed pin on the direct path). Declares the counter.
+pub(super) fn declares_hold_counter(ir: &CircuitIR) -> bool {
+    emits_hold(ir)
+        || (pin_site_is_linear(ir) && emits_active_set_resolve(ir) && any_clampable_opamp(ir))
+}
+
+/// True when some op-amp of the build has a finite rail to pin to.
+fn any_clampable_opamp(ir: &CircuitIR) -> bool {
+    ir.opamps
+        .iter()
+        .any(|oa| oa.vclamp_hi.is_finite() || oa.vclamp_lo.is_finite())
 }
 
 /// Whether a nodal build can emit the active-set pinned resolve at all.

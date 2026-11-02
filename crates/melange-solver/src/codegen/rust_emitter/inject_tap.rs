@@ -37,6 +37,57 @@ pub(super) fn insert_inject_ctx(ctx: &mut Context, ir: &CircuitIR) {
         "inject_os_reset_state",
         &emit_inject_os_state_reset(ir, "state", "        "),
     );
+    // The host-rate injection clamp counter (declared only where a
+    // `rate=host` injection exists).
+    ctx.insert(
+        "inject_clamp_counter_field",
+        &emit_inject_clamp_counter_field(ir),
+    );
+    ctx.insert(
+        "inject_clamp_counter_init",
+        &emit_inject_clamp_counter_init(ir),
+    );
+    ctx.insert(
+        "inject_clamp_counter_reset",
+        &emit_inject_clamp_counter_reset(ir),
+    );
+}
+
+/// True when the build has a `rate=host` injection, so the public wrapper
+/// clamps it like the audio input and declares `diag_inject_clamp_count`.
+fn has_host_injection(ir: &CircuitIR) -> bool {
+    ir.solver_config.injections.iter().any(|i| i.host_rate)
+}
+
+/// Declaration of `diag_inject_clamp_count` (4-space indent), or nothing.
+pub(super) fn emit_inject_clamp_counter_field(ir: &CircuitIR) -> String {
+    if !has_host_injection(ir) {
+        return String::new();
+    }
+    "    /// Diagnostic: `rate=host` injection values clamped to the input limit\n\
+     \x20   /// (Thevenin |V| <= INPUT_LIMIT_V, Norton |I| <= INPUT_LIMIT_V / RSHUNT),\n\
+     \x20   /// counted once per host sample and value: the circuit was driven with\n\
+     \x20   /// a smaller injection than the plugin wrote. Cleared by `reset()`.\n\
+     \x20   pub diag_inject_clamp_count: u64,\n"
+        .to_string()
+}
+
+/// `Default` initializer for [`emit_inject_clamp_counter_field`] (12-space
+/// indent), or nothing.
+pub(super) fn emit_inject_clamp_counter_init(ir: &CircuitIR) -> String {
+    if !has_host_injection(ir) {
+        return String::new();
+    }
+    "            diag_inject_clamp_count: 0,\n".to_string()
+}
+
+/// The `reset()` line for [`emit_inject_clamp_counter_field`] (8-space
+/// indent), or nothing.
+pub(super) fn emit_inject_clamp_counter_reset(ir: &CircuitIR) -> String {
+    if !has_host_injection(ir) {
+        return String::new();
+    }
+    "        self.diag_inject_clamp_count = 0;\n".to_string()
 }
 
 /// Comma-joined emission helper for one per-injection column.

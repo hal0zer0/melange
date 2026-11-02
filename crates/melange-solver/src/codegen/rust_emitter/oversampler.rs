@@ -27,7 +27,10 @@ const INJECT_API_DOC_OS: &str = "///\n\
 ///   a PRIOR sample's tap (>= 1 sample of delay by construction).\n\
 ///\n\
 /// NaN/Inf injection values are replaced by 0 and counted in\n\
-/// `diag_input_nan_count`; there is no magnitude clamp. Returns the decimated\n\
+/// `diag_runtime_nan_count`. A `rate=host` value is then clamped like the\n\
+/// audio input (Thevenin: |V| <= INPUT_LIMIT_V; Norton: |I| <= INPUT_LIMIT_V /\n\
+/// RSHUNT) and counted in `diag_inject_clamp_count`; a `rate=inner` value is\n\
+/// not clamped. Returns the decimated\n\
 /// outputs plus the RAW per-inner-sample `.tap` node voltages `taps_inner`\n\
 /// (not band-limited, not decimated). Inner-sample order: 2x [even, odd];\n\
 /// 4x [e0, o0, e1, o1].\n";
@@ -44,7 +47,10 @@ const INJECT_API_DOC_1X: &str = "///\n\
 /// from a PRIOR sample's tap (>= 1 sample of delay by construction).\n\
 ///\n\
 /// NaN/Inf injection values are replaced by 0 and counted in\n\
-/// `diag_input_nan_count`; there is no magnitude clamp. Returns the outputs\n\
+/// `diag_runtime_nan_count`. A `rate=host` value is then clamped like the\n\
+/// audio input (Thevenin: |V| <= INPUT_LIMIT_V; Norton: |I| <= INPUT_LIMIT_V /\n\
+/// RSHUNT) and counted in `diag_inject_clamp_count`; a `rate=inner` value is\n\
+/// not clamped. Returns the outputs\n\
 /// plus the RAW `.tap` node voltages `taps_inner[0]`.\n";
 
 /// The first-order allpass cell both cascade emitters use (slice + offset, to
@@ -164,6 +170,7 @@ impl RustEmitter {
         if factor == 2 {
             Self::emit_2x_wrapper(
                 &mut code,
+                ir,
                 num_outputs,
                 ir.dc_block,
                 ir.solver_config.output_clamp_v,
@@ -172,6 +179,7 @@ impl RustEmitter {
         } else if factor == 4 {
             Self::emit_4x_wrapper(
                 &mut code,
+                ir,
                 num_outputs,
                 ir.dc_block,
                 ir.solver_config.output_clamp_v,
@@ -181,6 +189,35 @@ impl RustEmitter {
 
         code.push_str("}\n\n");
         code
+    }
+
+    /// The host-rate injection guard of a public wrapper: every `rate=host`
+    /// value is NaN/Inf-sanitised (counted in `diag_runtime_nan_count`) and
+    /// then clamped like the audio input — a `rate=host` injection is declared
+    /// an audio input and must reach the circuit as one does, within
+    /// ±INPUT_LIMIT_V. A Thevenin value is a voltage, so it takes the limit
+    /// directly; a Norton value is a current, so its limit is the voltage the
+    /// limit would put across its shunt (INPUT_LIMIT_V / RSHUNT); clamping a
+    /// current at INPUT_LIMIT_V amperes would let a 100 kΩ shunt reach 1e7 V.
+    /// Counted in `diag_inject_clamp_count`, once per host sample and value.
+    /// `rate=inner` values are not clamped (a tap-fed loop may legitimately
+    /// carry a plate node's hundreds of volts); their NaN guard is the inner
+    /// sample's. Writes `inj_host_in`. Emitted only when the build has a
+    /// host-rate injection; otherwise the array is the raw (NaN-sanitised)
+    /// values, so a build without one is unchanged.
+    fn emit_host_injection_guard(ir: &CircuitIR, indent: &str) -> String {
+        let has_host = ir.solver_config.injections.iter().any(|i| i.host_rate);
+        let value = if has_host {
+            "if !x.is_finite() { state.diag_runtime_nan_count += 1; 0.0 } else { let lim = if INJECT_HOST_IS_NORTON[k] { INPUT_LIMIT_V / INJECT_HOST_RESISTANCES[k] } else { INPUT_LIMIT_V }; if x.abs() > lim { state.diag_inject_clamp_count += 1; x.clamp(-lim, lim) } else { x } }"
+        } else {
+            "if x.is_finite() { x } else { state.diag_runtime_nan_count += 1; 0.0 }"
+        };
+        format!(
+            "{indent}// Host-rate injections: NaN/Inf -> 0 and beyond the input limit -> clamped\n\
+             {indent}// (both counted), exactly like `input`\n\
+             {indent}let mut inj_host_in = [0.0f64; NUM_INJECT_HOST];\n\
+             {indent}for k in 0..NUM_INJECT_HOST {{ let x = injections_host[k]; inj_host_in[k] = {value}; }}\n"
+        )
     }
 
     /// Emit the 1x public `process_sample` wrapper for a circuit with `.inject`
@@ -198,8 +235,9 @@ impl RustEmitter {
             "    let input = if !input.is_finite() { state.diag_input_nan_count += 1; 0.0 } else if input.abs() > INPUT_LIMIT_V { state.diag_input_clamp_count += 1; input.clamp(-INPUT_LIMIT_V, INPUT_LIMIT_V) } else { input };\n",
         );
         code.push_str(&super::runtime_inputs::sanitize_block(ir, "    "));
+        code.push_str(&Self::emit_host_injection_guard(ir, "    "));
         code.push_str(
-            "    let (output, tap) = process_sample_inner(input, inject_assemble(injections_host, &injections_inner[0]), state);\n",
+            "    let (output, tap) = process_sample_inner(input, inject_assemble(&inj_host_in, &injections_inner[0]), state);\n",
         );
         code.push_str("    (output, [tap])\n");
         code.push_str("}\n\n");
@@ -308,6 +346,7 @@ impl RustEmitter {
     /// Emit the 2x oversampling wrapper body.
     pub(super) fn emit_2x_wrapper(
         code: &mut String,
+        ir: &CircuitIR,
         _num_outputs: usize,
         dc_block: bool,
         clamp_v: f64,
@@ -316,32 +355,55 @@ impl RustEmitter {
         // Upsample: polyphase interpolator, 1 input → 2 internal-rate samples
         code.push_str(
             "    // Upsample: interpolator produces (out[2n], out[2n+1]) at internal rate\n\
-             \x20   let (up_even, up_odd) = os_halfband(input, &OS_COEFFS, &mut state.os_up_state);\n\n",
+             \x20   let (up_even, mut up_odd) = os_halfband(input, &OS_COEFFS, &mut state.os_up_state);\n\n",
         );
 
         // Process both at 2x rate. Host-rate injections take their own copy
         // of the input's up-filter; inner-rate injections bypass it
         // (injections_inner[0]=even, [1]=odd). Taps are raw.
+        //
+        // A reset in the even sub-sample (NaN or implausible magnitude)
+        // discards the state and zeroes every up-filter, so the odd value
+        // computed before it is a response of a state that no longer exists.
+        // The odd sub-sample then takes the zeroed filters' response to this
+        // host sample: the filters are re-run from zero on the same value.
+        // Detected by the reset counters, so the cost lands only on a reset.
         if inject_or_tap {
+            code.push_str(&Self::emit_host_injection_guard(ir, "    "));
             code.push_str(
-                "    // Host-rate injections: sanitized, then upsampled exactly like `input`\n\
+                "    // then upsampled exactly like `input`\n\
                  \x20   let mut inj_host_even = [0.0f64; NUM_INJECT_HOST];\n\
                  \x20   let mut inj_host_odd = [0.0f64; NUM_INJECT_HOST];\n\
                  \x20   for k in 0..NUM_INJECT_HOST {\n\
-                 \x20       let x = injections_host[k];\n\
-                 \x20       let x = if x.is_finite() { x } else { state.diag_runtime_nan_count += 1; 0.0 };\n\
-                 \x20       let (e, o) = os_halfband(x, &OS_COEFFS, &mut state.os_inj_up_state[k]);\n\
+                 \x20       let (e, o) = os_halfband(inj_host_in[k], &OS_COEFFS, &mut state.os_inj_up_state[k]);\n\
                  \x20       inj_host_even[k] = e;\n\
                  \x20       inj_host_odd[k] = o;\n\
                  \x20   }\n\n\
                  \x20   // Process both samples at 2x rate (up_even is the earlier sample)\n\
+                 \x20   let resets_before = state.diag_nan_reset_count + state.diag_magnitude_reset_count;\n\
                  \x20   let (out_even, tap_even) = process_sample_inner(up_even, inject_assemble(&inj_host_even, &injections_inner[0]), state);\n\
+                 \x20   if state.diag_nan_reset_count + state.diag_magnitude_reset_count != resets_before {\n\
+                 \x20       // The even sub-sample reset the state and zeroed the up-filters: the\n\
+                 \x20       // odd sub-sample takes the zeroed filters' response to this host\n\
+                 \x20       // sample, not a value derived from the state just discarded.\n\
+                 \x20       up_odd = os_halfband(input, &OS_COEFFS, &mut state.os_up_state).1;\n\
+                 \x20       for k in 0..NUM_INJECT_HOST {\n\
+                 \x20           inj_host_odd[k] = os_halfband(inj_host_in[k], &OS_COEFFS, &mut state.os_inj_up_state[k]).1;\n\
+                 \x20       }\n\
+                 \x20   }\n\
                  \x20   let (out_odd, tap_odd) = process_sample_inner(up_odd, inject_assemble(&inj_host_odd, &injections_inner[1]), state);\n\n",
             );
         } else {
             code.push_str(
                 "    // Process both samples at 2x rate (up_even is the earlier sample)\n\
+                 \x20   let resets_before = state.diag_nan_reset_count + state.diag_magnitude_reset_count;\n\
                  \x20   let out_even = process_sample_inner(up_even, state);\n\
+                 \x20   if state.diag_nan_reset_count + state.diag_magnitude_reset_count != resets_before {\n\
+                 \x20       // The even sub-sample reset the state and zeroed the up-filter: the\n\
+                 \x20       // odd sub-sample takes the zeroed filter's response to this host\n\
+                 \x20       // sample, not a value derived from the state just discarded.\n\
+                 \x20       up_odd = os_halfband(input, &OS_COEFFS, &mut state.os_up_state).1;\n\
+                 \x20   }\n\
                  \x20   let out_odd = process_sample_inner(up_odd, state);\n\n",
             );
         }
@@ -370,6 +432,7 @@ impl RustEmitter {
     /// Emit the 4x oversampling wrapper body (cascaded 2x stages).
     pub(super) fn emit_4x_wrapper(
         code: &mut String,
+        ir: &CircuitIR,
         _num_outputs: usize,
         dc_block: bool,
         clamp_v: f64,
@@ -378,27 +441,64 @@ impl RustEmitter {
         // Outer upsample: 1 → 2 at 2x rate (steep base-Nyquist filter)
         code.push_str(
             "    // Outer upsample: 1 → 2 samples at 2x rate (steep filter)\n\
-             \x20   let (outer_even, outer_odd) = os_halfband_outer(\n\
+             \x20   let (outer_even, mut outer_odd) = os_halfband_outer(\n\
              \x20       input, &OS_COEFFS_OUTER, &mut state.os_up_state_outer,\n\
              \x20   );\n\n",
         );
+
+        // After a reset in sub-sample j (NaN or implausible magnitude), every
+        // value precomputed for the sub-samples after j came from filter
+        // states the reset discarded. Both stages are re-run from zero on the
+        // same host value and the remaining sub-samples take that response:
+        // the pairs already consumed are re-run and dropped so the inner stage
+        // sees the same sequence (outer even, then outer odd) it always sees.
+        // `j` = 0 after e0, 1 after o0, 2 after e1; nothing follows o1.
+        let refilter = |j: usize| -> String {
+            let mut c = String::from(
+                "    if state.diag_nan_reset_count + state.diag_magnitude_reset_count != resets_before {\n\
+                 \x20       // The reset zeroed both up-filter stages: the remaining sub-samples\n\
+                 \x20       // take the zeroed filters' response to this host sample.\n\
+                 \x20       resets_before = state.diag_nan_reset_count + state.diag_magnitude_reset_count;\n\
+                 \x20       let (oe, oo) = os_halfband_outer(input, &OS_COEFFS_OUTER, &mut state.os_up_state_outer);\n\
+                 \x20       outer_odd = oo;\n",
+            );
+            c.push_str(match j {
+                0 => "        inner_o0 = os_halfband(oe, &OS_COEFFS, &mut state.os_up_state).1;\n",
+                1 => "        let _ = os_halfband(oe, &OS_COEFFS, &mut state.os_up_state);\n",
+                _ => "        let _ = os_halfband(oe, &OS_COEFFS, &mut state.os_up_state);\n        inner_o1 = os_halfband(oo, &OS_COEFFS, &mut state.os_up_state).1;\n",
+            });
+            if inject_or_tap {
+                c.push_str(
+                    "        for k in 0..NUM_INJECT_HOST {\n\
+                     \x20           let (oe, oo) = os_halfband_outer(inj_host_in[k], &OS_COEFFS_OUTER, &mut state.os_inj_up_state_outer[k]);\n\
+                     \x20           inj_host_outer[k] = [oe, oo];\n",
+                );
+                c.push_str(match j {
+                    0 => "            inj_host_o0[k] = os_halfband(oe, &OS_COEFFS, &mut state.os_inj_up_state[k]).1;\n",
+                    1 => "            let _ = os_halfband(oe, &OS_COEFFS, &mut state.os_inj_up_state[k]);\n",
+                    _ => "            let _ = os_halfband(oe, &OS_COEFFS, &mut state.os_inj_up_state[k]);\n            inj_host_o1[k] = os_halfband(oo, &OS_COEFFS, &mut state.os_inj_up_state[k]).1;\n",
+                });
+                c.push_str("        }\n");
+            }
+            c.push_str("    }\n");
+            c
+        };
 
         // Inner upsample + process for each outer sample. Host-rate
         // injections run the same two cascaded stages as `input`, in the same
         // order (each inner stage clocked just before its pair is processed);
         // inner-rate injections bypass both: order [e0, o0, e1, o1]. Taps raw.
         if inject_or_tap {
+            code.push_str(&Self::emit_host_injection_guard(ir, "    "));
             code.push_str(
-                "    // Host-rate injections, outer stage: sanitized, then upsampled like `input`\n\
+                "    // Outer stage, then upsampled like `input`\n\
                  \x20   let mut inj_host_outer = [[0.0f64; 2]; NUM_INJECT_HOST];\n\
                  \x20   for k in 0..NUM_INJECT_HOST {\n\
-                 \x20       let x = injections_host[k];\n\
-                 \x20       let x = if x.is_finite() { x } else { state.diag_runtime_nan_count += 1; 0.0 };\n\
-                 \x20       let (e, o) = os_halfband_outer(x, &OS_COEFFS_OUTER, &mut state.os_inj_up_state_outer[k]);\n\
+                 \x20       let (e, o) = os_halfband_outer(inj_host_in[k], &OS_COEFFS_OUTER, &mut state.os_inj_up_state_outer[k]);\n\
                  \x20       inj_host_outer[k] = [e, o];\n\
                  \x20   }\n\n\
                  \x20   // Inner upsample + process: each 2x sample → 2 samples at 4x rate\n\
-                 \x20   let (inner_e0, inner_o0) = os_halfband(outer_even, &OS_COEFFS, &mut state.os_up_state);\n\
+                 \x20   let (inner_e0, mut inner_o0) = os_halfband(outer_even, &OS_COEFFS, &mut state.os_up_state);\n\
                  \x20   let mut inj_host_e0 = [0.0f64; NUM_INJECT_HOST];\n\
                  \x20   let mut inj_host_o0 = [0.0f64; NUM_INJECT_HOST];\n\
                  \x20   for k in 0..NUM_INJECT_HOST {\n\
@@ -406,16 +506,26 @@ impl RustEmitter {
                  \x20       inj_host_e0[k] = e;\n\
                  \x20       inj_host_o0[k] = o;\n\
                  \x20   }\n\
-                 \x20   let (proc_e0, tap_e0) = process_sample_inner(inner_e0, inject_assemble(&inj_host_e0, &injections_inner[0]), state);\n\
-                 \x20   let (proc_o0, tap_o0) = process_sample_inner(inner_o0, inject_assemble(&inj_host_o0, &injections_inner[1]), state);\n\n",
+                 \x20   let mut resets_before = state.diag_nan_reset_count + state.diag_magnitude_reset_count;\n\
+                 \x20   let (proc_e0, tap_e0) = process_sample_inner(inner_e0, inject_assemble(&inj_host_e0, &injections_inner[0]), state);\n",
             );
+            code.push_str(&refilter(0));
+            code.push_str(
+                "    let (proc_o0, tap_o0) = process_sample_inner(inner_o0, inject_assemble(&inj_host_o0, &injections_inner[1]), state);\n",
+            );
+            code.push_str(&refilter(1));
+            code.push('\n');
         } else {
             code.push_str(
                 "    // Inner upsample + process: each 2x sample → 2 samples at 4x rate\n\
-                 \x20   let (inner_e0, inner_o0) = os_halfband(outer_even, &OS_COEFFS, &mut state.os_up_state);\n\
-                 \x20   let proc_e0 = process_sample_inner(inner_e0, state);\n\
-                 \x20   let proc_o0 = process_sample_inner(inner_o0, state);\n\n",
+                 \x20   let (inner_e0, mut inner_o0) = os_halfband(outer_even, &OS_COEFFS, &mut state.os_up_state);\n\
+                 \x20   let mut resets_before = state.diag_nan_reset_count + state.diag_magnitude_reset_count;\n\
+                 \x20   let proc_e0 = process_sample_inner(inner_e0, state);\n",
             );
+            code.push_str(&refilter(0));
+            code.push_str("    let proc_o0 = process_sample_inner(inner_o0, state);\n");
+            code.push_str(&refilter(1));
+            code.push('\n');
         }
 
         // Inner decimator per-output for first 2x pair (one step per pair)
@@ -427,7 +537,7 @@ impl RustEmitter {
         // Second inner upsample + process pair
         if inject_or_tap {
             code.push_str(
-                "    let (inner_e1, inner_o1) = os_halfband(outer_odd, &OS_COEFFS, &mut state.os_up_state);\n\
+                "    let (inner_e1, mut inner_o1) = os_halfband(outer_odd, &OS_COEFFS, &mut state.os_up_state);\n\
                  \x20   let mut inj_host_e1 = [0.0f64; NUM_INJECT_HOST];\n\
                  \x20   let mut inj_host_o1 = [0.0f64; NUM_INJECT_HOST];\n\
                  \x20   for k in 0..NUM_INJECT_HOST {\n\
@@ -435,15 +545,19 @@ impl RustEmitter {
                  \x20       inj_host_e1[k] = e;\n\
                  \x20       inj_host_o1[k] = o;\n\
                  \x20   }\n\
-                 \x20   let (proc_e1, tap_e1) = process_sample_inner(inner_e1, inject_assemble(&inj_host_e1, &injections_inner[2]), state);\n\
-                 \x20   let (proc_o1, tap_o1) = process_sample_inner(inner_o1, inject_assemble(&inj_host_o1, &injections_inner[3]), state);\n\n",
+                 \x20   let (proc_e1, tap_e1) = process_sample_inner(inner_e1, inject_assemble(&inj_host_e1, &injections_inner[2]), state);\n",
+            );
+            code.push_str(&refilter(2));
+            code.push_str(
+                "    let (proc_o1, tap_o1) = process_sample_inner(inner_o1, inject_assemble(&inj_host_o1, &injections_inner[3]), state);\n\n",
             );
         } else {
             code.push_str(
-                "    let (inner_e1, inner_o1) = os_halfband(outer_odd, &OS_COEFFS, &mut state.os_up_state);\n\
-                 \x20   let proc_e1 = process_sample_inner(inner_e1, state);\n\
-                 \x20   let proc_o1 = process_sample_inner(inner_o1, state);\n\n",
+                "    let (inner_e1, mut inner_o1) = os_halfband(outer_odd, &OS_COEFFS, &mut state.os_up_state);\n\
+                 \x20   let proc_e1 = process_sample_inner(inner_e1, state);\n",
             );
+            code.push_str(&refilter(2));
+            code.push_str("    let proc_o1 = process_sample_inner(inner_o1, state);\n\n");
         }
 
         // Inner decimator per-output for second 2x pair
@@ -571,8 +685,9 @@ impl RustEmitter {
             match f {
                 1 => {
                     if inject_or_tap {
+                        body.push_str(&Self::emit_host_injection_guard(ir, "    "));
                         body.push_str(
-                            "    let (output, tap) = process_sample_inner(input, inject_assemble(injections_host, &injections_inner[0]), state);\n",
+                            "    let (output, tap) = process_sample_inner(input, inject_assemble(&inj_host_in, &injections_inner[0]), state);\n",
                         );
                         body.push_str(&format!("    (output, [{}])\n", pad("tap", 1)));
                     } else {
@@ -582,6 +697,7 @@ impl RustEmitter {
                 2 => {
                     Self::emit_2x_wrapper(
                         &mut body,
+                        ir,
                         num_outputs,
                         ir.dc_block,
                         ir.solver_config.output_clamp_v,
@@ -606,6 +722,7 @@ impl RustEmitter {
                 _ => {
                     Self::emit_4x_wrapper(
                         &mut body,
+                        ir,
                         num_outputs,
                         ir.dc_block,
                         ir.solver_config.output_clamp_v,

@@ -57,15 +57,21 @@ circuit. **Only the nodal solver implements that.** The DK path implements
   active-set modes. At 1× both miss for integrator reasons (backward Euler on
   nearly every railed sample; the trapezoidal ring in deep saturation); those
   cases are recorded, ignored.
-- A pinned solve that does not converge is never shipped silently. On full-LU,
-  and on a Schur build with no devices, its iterate is committed and counted in
-  `diag_nr_unconverged_commit_count` at the failure, per internal sample (a
-  count derived at the end of the host sample would miss every oversampled
-  sample but the last). On a Schur build with devices the pinned outcome is the
-  sample's outcome (`converged`): a failed pin on the trapezoidal solve hands the
-  sample to the backward-Euler solve, and a failed pin there ends in the
-  death-spiral hold (`diag_nr_hold_count`). Both are counted in
-  `diag_unsolved_sample_count`, which every verb refuses on.
+- A pinned solve that does not converge, or whose pinned system is singular,
+  decides the sample on every nodal route; its iterate is never committed. On
+  a Newton solve (both sub-paths) the pinned outcome is the sample's outcome
+  (`converged`): a failed pin on the trapezoidal solve hands the sample to the
+  backward-Euler solve, and a failed pin there ends in the death-spiral hold
+  (`diag_nr_hold_count`). On a linear build (M = 0, the direct LU paths) there
+  is no Newton solve to hand it to, so a failed pin takes the hold directly:
+  previous state kept, `diag_nr_hold_count`. Every case is counted in
+  `diag_unsolved_sample_count`, which every verb refuses on. Committing the
+  failed pin's iterate instead (the full-LU rule through 0.1.20) let one absurd
+  sample seed a commit spiral: the iterate's capacitor currents poisoned
+  `q_dot`, the next sample certified on the same absurd row and failed its pin
+  again, for hundreds of samples until the magnitude guard tripped (measured
+  on a stereo compressor with a 1e30 V host-rate injection: 997 committed
+  samples; holds instead, and recovery at once).
 - Active-set is **refused** on a circuit that also has a behavioral source:
   its Jacobian is stamped in node space and is not diagonal, so the pinned
   system does not include it and could converge to a non-solution. The explicit

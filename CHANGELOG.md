@@ -39,6 +39,49 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 - The refusal of an unsupported JFET `LEVEL` names all three levels.
 
+### Fixed
+
+- **A `rate=host` `.inject` value is guarded like the audio input.** It is
+  NaN-sanitised and then clamped to ±`INPUT_LIMIT_V` ahead of its up-filter
+  and of every piece of state — a Thevenin value as a voltage, a Norton value
+  as the current that puts the limit across its shunt (`INPUT_LIMIT_V /
+  RSHUNT`) — at every oversampling factor, 1× included, and counted in the new
+  `diag_inject_clamp_count` (declared only on a build with a `rate=host`
+  injection; `simulate -v` prints it). A `rate=inner` value is not clamped. A
+  host-rate injection is declared an audio input and now reaches the circuit
+  as one does: a 1e30 V burst renders bit-identically to the same burst
+  pre-clamped to 100 V. Before, the value went into the half-band up-filter
+  unclamped; the solver held through such a burst, so the plausibility guard
+  never fired and the filter rang the absurd value down for ~1000 host
+  samples. A deck written before 0.1.15 that closes a loop from a `.tap` at
+  the inner rate must say `rate=inner`: the rate defaults to `host` since
+  0.1.15, and nothing refuses a host-closed loop.
+- **A failed op-amp pin decides the sample on every nodal route.** The
+  active-set pinned solve that does not converge, or whose pinned system is
+  singular, hands its outcome to `converged` on a Newton solve (the
+  trapezoidal solve goes to backward Euler, backward Euler to the hold) and
+  takes the hold directly on a linear build; its iterate is never committed.
+  Through 0.1.20 the full-LU sub-path and the linear paths committed it and
+  counted `diag_nr_unconverged_commit_count`, which let one absurd sample seed
+  a commit spiral: the committed iterate's capacitor currents poisoned `q_dot`,
+  the next sample certified on the same absurd row and failed its pin again,
+  for hundreds of samples until the magnitude guard tripped (a stereo
+  compressor with a 1e30 V injection: 997 committed samples; with the 0.1.15
+  limiter floor, 20). `diag_nr_unconverged_commit_count` is now a DK counter
+  only; `diag_nr_hold_count` also exists on linear nodal builds with an
+  active-set pin. On the golden corpus no render changes: the counter was zero
+  on every render of every deck that declared it. Measured with only this
+  rule changed: a 1e3 V injection burst that tripped the magnitude guard 16
+  times trips it 0 times.
+- **After a state reset in one inner sub-sample, the later sub-samples of the
+  same host sample take the zeroed up-filters' response to the host value.**
+  The input's and each host-rate injection's up-filters are re-run from zero
+  on the current host sample (both stages at 4×; the runtime-oversampling
+  dispatcher the same); before, those sub-samples used values computed from
+  the filter state the reset had discarded. No render without a reset changes.
+- **Generated code for a saturating-inductor build is `unused_parens`-clean**:
+  the residual helpers' trailing rate argument arrived parenthesised.
+
 ## [0.1.20] - 2026-11-01
 
 **Against v0.1.19, over the 192 golden renders:** 40 (15 decks) are

@@ -1,12 +1,13 @@
 //! Op-amp rail handling: m=0 rail handling, active-set resolve / check,
 //! slew limit and rail clamps.
 
+use super::super::helpers::carries_q_dot;
 use super::residual::emit_sparse_nv_matvec;
 use super::sat_ind::{
     emit_sat_ind_companion, emit_sat_ind_jacobian, emit_sat_ind_row_residual,
     emit_sat_ind_step_limit,
 };
-use super::sites::{pin_failure_is_committed, PinSite};
+use super::sites::{pin_site_is_linear, PinSite};
 use super::stamps::{
     emit_body_gmb_companion, emit_body_gmb_stamp, emit_nodal_companion_rhs,
     emit_nodal_jacobian_stamp,
@@ -484,14 +485,32 @@ impl RustEmitter {
              {indent}        // so every verb refuses it.\n\
              {indent}        state.last_nr_iterations = if pin_converged && pin_lu_ok {{ pin_iters }} else {{ MAX_ITER as u32 }};\n",
         ));
-        // Where the pinned iterate is committed either way (full-LU, and the
-        // Newton-free M = 0 Schur solve), count the failure here. A Schur
-        // Newton hands the pinned outcome to `converged`, so a failed pin goes
-        // to the backward-Euler solve and then the death-spiral hold, like a
-        // failed Newton solve.
-        if pin_failure_is_committed(ir, &site) {
+        // A pin that did not converge, or whose pinned system was singular,
+        // decides the sample on every route: its iterate is no solution. On a
+        // Newton site it hands the outcome to `converged`, so a failed pin on
+        // a trapezoidal solve goes to the backward-Euler solve and a failed
+        // pin on a backward-Euler solve goes to the death-spiral hold, like a
+        // failed Newton solve. On the linear direct path (no Newton, no
+        // `converged`) it takes the hold here: previous state kept, counted.
+        // Committing the iterate instead (the full-LU rule until 0.1.20) let
+        // one absurd sample seed a commit spiral: the committed iterate's
+        // capacitor currents poison `q_dot`, the next sample certifies on the
+        // same absurd row and fails its pin again, for hundreds of samples
+        // until the magnitude guard trips.
+        if pin_site_is_linear(ir) {
             code.push_str(&format!(
-                "{indent}        if !(pin_converged && pin_lu_ok) {{ state.diag_nr_unconverged_commit_count += 1; unsolved_sample = true; }}\n"
+                "{indent}        if !(pin_converged && pin_lu_ok) {{
+\
+                 {indent}            // THIS SAMPLE IS NOT A SOLUTION: keep the previous state.\n\
+                 {indent}            v = state.v_prev;\n"
+            ));
+            if carries_q_dot(ir) {
+                code.push_str(&format!("{indent}            q_sub = Some(state.q_dot);\n"));
+            }
+            code.push_str(&format!(
+                "{indent}            state.diag_nr_hold_count += 1;\n\
+                 {indent}            unsolved_sample = true;\n\
+                 {indent}        }}\n"
             ));
         } else {
             code.push_str(&format!(
