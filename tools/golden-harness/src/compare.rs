@@ -17,6 +17,31 @@
 //! iterate, which is bounded and smooth and therefore IDENTICAL to itself run
 //! after run. `convergence` assesses that separately and prints it as its own
 //! loud category; see that module for why it is deliberately report-only.
+//!
+//! # Solver counter gate
+//!
+//! The audio classes are also blind to HOW an output was produced. A build
+//! that dropped the saturating-inductor stamps rendered `funkyinduct` within
+//! 1.85e-4 of the baseline — NEGLIGIBLE — while its counters showed 38 287
+//! Newton ceilings and 9.5 M line-search failures where the baseline had 35
+//! and 59 408: the rescue paths produced a near-identical output from a wrong
+//! Jacobian. So every counter the capture records (`stats.json`
+//! `diagnostics`) is judged per render, per counter, by its class in
+//! [`COUNTER_CLASSES`]:
+//!
+//! - **failure-path** (a rescue or a refusal fired): ANY increase fails.
+//! - **effort** (how hard the solve was): a move beyond
+//!   [`EFFORT_RELATIVE_BOUND`] of the baseline count, floored at
+//!   [`EFFORT_ABSOLUTE_FLOOR`] counts, fails.
+//! - **informational** (not a count): reported, never gated.
+//! - a key in neither list fails: an unclassified counter is a gate hole.
+//!
+//! The rule is per render, per counter, because totals over cascaded renders
+//! are not monotone (one render's loss hides another's gain). A failing
+//! counter is never waved through on the audio verdict: the change needs a
+//! first-divergence trace (the first sample at which the two builds' Newton
+//! paths part, and why) before it can pass. See `COUNTER GATE` in the
+//! report and `golden-baseline-manifest.md`.
 
 use crate::convergence;
 use crate::stats::{Stats, SILENT_DB};
@@ -47,6 +72,10 @@ struct PairResult {
     frames_b: Option<usize>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     notes: Vec<String>,
+    /// Solver-counter findings for this render (see [`judge_counters`]).
+    /// Non-empty means the render FAILS the counter gate.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    counter_findings: Vec<CounterFinding>,
 }
 
 fn read_pcm(path: &Path) -> Option<Vec<u8>> {
@@ -155,6 +184,332 @@ fn diagnostic_deltas(a: &Option<Stats>, b: &Option<Stats>) -> Vec<(String, f64, 
         }
     }
     out
+}
+
+/// What a recorded solver counter says about a render, which decides how the
+/// gate judges a change in it.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "kebab-case")]
+pub enum CounterClass {
+    /// The counter records a rescue or a refusal: a Newton ceiling, a
+    /// sub-step, a backward-Euler fallback, a hold, a reset, a singular
+    /// matrix, a clamp, an abandoned sub-sample solve. The output after such
+    /// an event is bounded and smooth, so the audio gate cannot see it fire;
+    /// ANY per-render increase fails the gate.
+    FailurePath,
+    /// The counter records how hard a converged solve was (iterations,
+    /// refactors, line-search failures) or a region the circuit entered
+    /// (an op-amp pinned, a device outside its reduction's region). Legitimate
+    /// roundoff-class changes move these by a handful of samples; a change in
+    /// the solver's path moves them by orders of magnitude. A per-render move
+    /// beyond [`EFFORT_RELATIVE_BOUND`] (floored at [`EFFORT_ABSOLUTE_FLOOR`])
+    /// fails the gate.
+    Effort,
+    /// Not a count: a level, or the last sample's iteration index. Reported
+    /// with the other deltas, never gated here (the level is the audio gate's
+    /// measurand; a single sample's iteration index is noise by construction).
+    Informational,
+}
+
+impl CounterClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CounterClass::FailurePath => "failure-path",
+            CounterClass::Effort => "effort",
+            CounterClass::Informational => "informational",
+        }
+    }
+}
+
+/// THE classification of every solver counter the capture can record
+/// (`capture::detect_diag_fields`: every `pub diag_*` field and
+/// `last_nr_iterations` on the generated `CircuitState`). One table; the test
+/// `every_emitted_counter_is_classified` scans the emitters and templates in
+/// `crates/melange-solver` and every stored baseline so a counter added to
+/// codegen cannot reach a compare unclassified — and if one does, the gate
+/// fails on it loudly rather than letting it through.
+///
+/// The meaning of each field is its doc comment on the generated
+/// `CircuitState` (`docs/CODE_API.md` "Did the solver actually solve it?").
+pub const COUNTER_CLASSES: &[(&str, CounterClass)] = &[
+    // ---- failure-path: a rescue or a refusal fired ----
+    // Newton exhausted its iteration ceiling; the capped iterate went on to
+    // the sub-step / BE ladder.
+    ("diag_nr_max_iter_count", CounterClass::FailurePath),
+    // The adaptive sub-step ladder ran on a sample.
+    ("diag_substep_count", CounterClass::FailurePath),
+    // The backward-Euler fallback solve ran (also counts every sample after
+    // the runtime BE latch engaged).
+    ("diag_be_fallback_count", CounterClass::FailurePath),
+    // The runtime BE latch engaged: a self-sustaining Nyquist limit cycle was
+    // detected and the instance switched to backward Euler for good.
+    ("diag_be_latch_count", CounterClass::FailurePath),
+    // Every Newton path failed and the previous state was committed.
+    ("diag_nr_hold_count", CounterClass::FailurePath),
+    // DK: an unconverged final iterate was committed as output.
+    ("diag_nr_unconverged_commit_count", CounterClass::FailurePath),
+    // Every sample that was never solved, whatever the mechanism.
+    ("diag_unsolved_sample_count", CounterClass::FailurePath),
+    // A reduced device model left the region its reduction assumes.
+    ("diag_reduced_model_exit_count", CounterClass::FailurePath),
+    // State reset on a NaN/Inf iterate.
+    ("diag_nan_reset_count", CounterClass::FailurePath),
+    // State reset on a finite but physically impossible iterate.
+    ("diag_magnitude_reset_count", CounterClass::FailurePath),
+    // Matrix inversion found a singular matrix.
+    ("diag_singular_matrix_count", CounterClass::FailurePath),
+    // Full-LU's exact warm start was unreachable; the predictor was used.
+    ("diag_warm_start_fallback_count", CounterClass::FailurePath),
+    // The legacy global voltage-damping net scaled a step.
+    ("diag_voltage_damp_count", CounterClass::FailurePath),
+    // The generated output clamp engaged: on those samples the audio IS the
+    // clamp, so growth beyond the ceiling is invisible to the audio gate.
+    ("diag_clamp_count", CounterClass::FailurePath),
+    // Host-side guards: the circuit was driven with something other than
+    // what the program sent. The programs are fixed, so an increase means
+    // the build accepted less of them.
+    ("diag_input_clamp_count", CounterClass::FailurePath),
+    ("diag_input_nan_count", CounterClass::FailurePath),
+    ("diag_inject_clamp_count", CounterClass::FailurePath),
+    ("diag_runtime_nan_count", CounterClass::FailurePath),
+    // Linear DK with pots: a rank-1 update's denominator was non-finite or
+    // below 1e-6 and a full rebuild was forced.
+    ("diag_rank1_fallback_count", CounterClass::FailurePath),
+    // Sub-sample fire: the sub-step solve was abandoned and the whole-sample
+    // solution kept; a flip left grid-quantised because the breakpoint
+    // budget was spent; a second device latched at another device's
+    // breakpoint instead of its own crossing.
+    ("diag_subsample_fire_abandon_count", CounterClass::FailurePath),
+    (
+        "diag_subsample_fire_unresolved_ceiling",
+        CounterClass::FailurePath,
+    ),
+    (
+        "diag_subsample_fire_unresolved_coincident",
+        CounterClass::FailurePath,
+    ),
+    // ---- effort: how hard a converged solve was, or a region entered ----
+    ("diag_refactor_count", CounterClass::Effort),
+    ("diag_ls_fail_count", CounterClass::Effort),
+    // Samples on which the active-set rail resolve pinned an op-amp output:
+    // the op-amp railing, which is physics, not a rescue.
+    ("diag_active_set_pin_count", CounterClass::Effort),
+    // Device-samples in a region a reduction would not cover; counted on the
+    // full models too (characterization, not a guard).
+    ("diag_region_exit_count", CounterClass::Effort),
+    // Linear DK with pots: rank-1 updates taken, and the full rebuilds a wide
+    // downward sweep is expected to force.
+    ("diag_rank1_update_count", CounterClass::Effort),
+    ("diag_rank1_trigger_rebuild_count", CounterClass::Effort),
+    // Sub-sample fire working: samples re-solved, flips detected and
+    // resolved, extra segments solved, Schur triples built or reused, and
+    // flips left on a segment end within the minimum-segment guard (benign).
+    ("diag_subsample_fire_count", CounterClass::Effort),
+    ("diag_subsample_fire_detected", CounterClass::Effort),
+    ("diag_subsample_fire_resolved", CounterClass::Effort),
+    ("diag_subsample_fire_segments", CounterClass::Effort),
+    ("diag_subsample_fire_schur_builds", CounterClass::Effort),
+    ("diag_subsample_fire_schur_reuses", CounterClass::Effort),
+    ("diag_subsample_fire_unresolved_gridpoint", CounterClass::Effort),
+    // ---- informational: not counts ----
+    // Peak absolute output before the clamp: a level, the audio gate's job.
+    ("diag_peak_output", CounterClass::Informational),
+    // The LAST sample's 0-indexed converging iteration: one sample's reading,
+    // not a render-wide count. `convergence` prints it as context.
+    ("last_nr_iterations", CounterClass::Informational),
+];
+
+/// Class of a recorded counter key, or `None` if the table does not know it.
+pub fn counter_class(key: &str) -> Option<CounterClass> {
+    COUNTER_CLASSES
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, c)| *c)
+}
+
+/// Relative bound on an effort counter's per-render move: `|B − A| / A`.
+///
+/// Set from measured data, not taste. The reciprocal-pivot experiment
+/// (2026-11-03: multiply by a stored 1/pivot in the sparse LU instead of
+/// dividing, one extra unit roundoff per operation, ruled a roundoff-class
+/// change) moved effort counters on 5 of the 192 golden renders, against the
+/// same binary without it (`golden/A` vs `golden/R` of that run, corpus totals
+/// refactors 12 633 376 → 12 633 380, line-search failures 59 408 → 59 413):
+///
+/// ```text
+///   warpony/silence          diag_ls_fail_count    1125 ->   1129   +0.356 %
+///   warpony/silence          diag_refactor_count  23276 ->  23293   +0.073 %
+///   warpony/step             diag_refactor_count  11791 ->  11781   -0.085 %
+///   basic-bitch/sweep        diag_refactor_count 163544 -> 163543   -0.0006 %
+///   warpony/sweep            diag_refactor_count 551937 -> 551936   -0.0002 %
+///   wurli-power-amp/sine1k   diag_ls_fail_count   24173 ->  24174   +0.004 %
+///   wurli-power-amp/sine1k   diag_refactor_count 477820 -> 477819   -0.0002 %
+/// ```
+///
+/// The largest roundoff-class move is +0.36 %. The regression this gate
+/// exists to catch moved `funkyinduct` line-search failures 59 408 → 9.5 M
+/// (+16 000 %) with the audio NEGLIGIBLE. 10 % is 28× the largest legitimate
+/// move and 1/1600 of the regression: a change that only reshuffles rounding
+/// cannot reach it, and a change in the solver's path cannot hide under it.
+///
+/// Where it stands for a change that is NOT roundoff-class: the 0.1.20 cycle
+/// changed the certification itself (the node-step test on the undamped
+/// correction, the libm device laws) and moved `warpony/step` line-search
+/// failures 323 → 441 (+36.5 %) and `warpony/silence` 828 → 1125 (+35.9 %)
+/// between `v0.1.19-rc` and `v0.1.20-rc`. Under this gate such a move fails
+/// until it carries its first-divergence trace, which is the rule: a
+/// certification change is exactly the kind that must be traced, not waved
+/// through on a NEGLIGIBLE audio verdict. (The libm change alone recorded
+/// "Newton iteration totals identical" on the bench decks, CHANGELOG 0.1.20;
+/// no per-render capture of it alone survives, so its own effort moves are
+/// not separable from that cycle's.)
+pub const EFFORT_RELATIVE_BOUND: f64 = 0.10;
+
+/// Absolute floor under [`EFFORT_RELATIVE_BOUND`]: an effort counter may move
+/// by this many counts in either direction whatever its baseline, so a render
+/// whose baseline count is 0 (or a few) is judged on the same count scale as
+/// the rest rather than failing on `1 → 2`. The bound on a render is
+/// `max(EFFORT_RELATIVE_BOUND × A, EFFORT_ABSOLUTE_FLOOR)`.
+///
+/// From the same roundoff-class data: the largest absolute move any effort
+/// counter made was +17 refactors (`warpony/silence`, 23 276 → 23 293) and +4
+/// line-search failures on the same render; 20 sits above both. No
+/// roundoff-class change moved an effort counter from 0 at all, nor did the
+/// `v0.1.18-rc → v0.1.19-rc` or `v0.1.19-rc → v0.1.20-rc` release pairs over
+/// 192 renders each (the smallest baseline that moved was
+/// `noyce-transformer-triode/step` refactors 5 → 4), so the floor is bounded by
+/// the largest small move seen, not by a from-zero datum. Against the
+/// `funkyinduct` regression (+9.4 M) it is five orders of magnitude under.
+pub const EFFORT_ABSOLUTE_FLOOR: f64 = 20.0;
+
+/// Why a counter failed the gate.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "kebab-case")]
+pub enum CounterFindingKind {
+    /// A failure-path counter is higher in B than in A.
+    FailurePathIncrease,
+    /// An effort counter moved beyond the relative bound (or the floor).
+    EffortOutOfBound,
+    /// The key is in neither list of [`COUNTER_CLASSES`].
+    Unclassified,
+}
+
+/// One failing counter on one render.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct CounterFinding {
+    pub counter: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class: Option<CounterClass>,
+    pub kind: CounterFindingKind,
+    /// Recorded value in A; `None` when A's build declared no such counter.
+    pub a: Option<f64>,
+    /// Recorded value in B; `None` when B's build declared no such counter.
+    pub b: Option<f64>,
+    /// The sentence the report prints. Names the counter, both values and
+    /// what has to happen before the change can pass.
+    pub message: String,
+}
+
+fn fmt_val(v: Option<f64>) -> String {
+    match v {
+        Some(x) => format!("{x}"),
+        None => "(absent)".into(),
+    }
+}
+
+/// Judge one render's recorded counters, A (reference) against B.
+///
+/// A key absent on one side reads as 0 on that side: the build did not
+/// declare the mechanism, so it cannot have fired. A failure counter that
+/// appears with a nonzero value is therefore an increase (the route moved AND
+/// the rescue fired), which is exactly a change to trace.
+///
+/// Returns one finding per failing counter; empty means the render passes.
+pub fn judge_counters(
+    a: &BTreeMap<String, f64>,
+    b: &BTreeMap<String, f64>,
+) -> Vec<CounterFinding> {
+    const TRACE: &str =
+        "a first-divergence trace is required before this change can pass";
+    let keys: BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+    let mut out = Vec::new();
+    for k in keys {
+        let va = a.get(k).copied();
+        let vb = b.get(k).copied();
+        let (x, y) = (va.unwrap_or(0.0), vb.unwrap_or(0.0));
+        match counter_class(k) {
+            None => out.push(CounterFinding {
+                counter: k.clone(),
+                class: None,
+                kind: CounterFindingKind::Unclassified,
+                a: va,
+                b: vb,
+                message: format!(
+                    "{k} {} -> {}: counter not in COUNTER_CLASSES (compare.rs); classify it \
+                     as failure-path, effort or informational before this change can pass",
+                    fmt_val(va),
+                    fmt_val(vb)
+                ),
+            }),
+            Some(CounterClass::FailurePath) => {
+                if y > x {
+                    out.push(CounterFinding {
+                        counter: k.clone(),
+                        class: Some(CounterClass::FailurePath),
+                        kind: CounterFindingKind::FailurePathIncrease,
+                        a: va,
+                        b: vb,
+                        message: format!(
+                            "{k} {} -> {} (+{}): a failure-path counter increased; {TRACE}",
+                            fmt_val(va),
+                            fmt_val(vb),
+                            y - x
+                        ),
+                    });
+                }
+            }
+            Some(CounterClass::Effort) => {
+                let delta = y - x;
+                let allowed = (EFFORT_RELATIVE_BOUND * x.abs()).max(EFFORT_ABSOLUTE_FLOOR);
+                if delta.abs() > allowed {
+                    let pct = if x != 0.0 {
+                        format!("{:+.2} %", delta / x * 100.0)
+                    } else {
+                        "from zero".to_string()
+                    };
+                    out.push(CounterFinding {
+                        counter: k.clone(),
+                        class: Some(CounterClass::Effort),
+                        kind: CounterFindingKind::EffortOutOfBound,
+                        a: va,
+                        b: vb,
+                        message: format!(
+                            "{k} {} -> {} ({pct}; |delta| {} > bound {} = max({:.0} % of {}, \
+                             {})): an effort counter moved beyond the bound; {TRACE}",
+                            fmt_val(va),
+                            fmt_val(vb),
+                            delta.abs(),
+                            allowed,
+                            EFFORT_RELATIVE_BOUND * 100.0,
+                            x,
+                            EFFORT_ABSOLUTE_FLOOR
+                        ),
+                    });
+                }
+            }
+            Some(CounterClass::Informational) => {}
+        }
+    }
+    out
+}
+
+/// Counter findings for a render pair from its stats; a side with no stats
+/// contributes an empty map (nothing recorded, nothing declared).
+fn judge_render_counters(a: &Option<Stats>, b: &Option<Stats>) -> Vec<CounterFinding> {
+    let empty = BTreeMap::new();
+    let da = a.as_ref().map(|s| &s.diagnostics).unwrap_or(&empty);
+    let db = b.as_ref().map(|s| &s.diagnostics).unwrap_or(&empty);
+    judge_counters(da, db)
 }
 
 fn read_stats(dir: &Path, plugin: &str, program: &str) -> Option<Stats> {
@@ -289,6 +644,7 @@ fn compare_pair(dir_a: &Path, dir_b: &Path, plugin: &str, program: &str) -> Pair
         frames_a: None,
         frames_b: None,
         notes: Vec::new(),
+        counter_findings: Vec::new(),
     };
 
     let fa = find_pcm(dir_a, plugin, program);
