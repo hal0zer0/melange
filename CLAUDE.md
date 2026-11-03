@@ -1,5 +1,10 @@
 # CLAUDE.md
 
+This file is committed on purpose. It is the standing brief for any AI coding
+agent working on this repository, and it travels with every clone so that work
+done elsewhere follows the same standards. Read it as the project's rules, not
+as a private note.
+
 Melange — Rust toolkit for circuit simulation to real-time audio DSP. Compiles SPICE netlists to optimized Rust code (generated solver → VST/CLAP via thin nih-plug wrapper).
 
 ## CRITICAL: Accuracy beats plugin usability 1000x
