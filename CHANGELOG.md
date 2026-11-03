@@ -11,6 +11,20 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ### Added
 
+- **The provenance line records baked switch overrides.** A `compile --switch`
+  (or `simulate`/`analyze`/`dc-op --switch`) build carries
+  `"switch_overrides":{"<label>":<position>}` in its `// provenance:` JSON,
+  one entry per switch stamped away from the deck's position 0, so a consumer
+  asserts the configuration the artifact ships instead of grepping the state
+  initializer. Absent when nothing is overridden.
+- **`CircuitState::clone_from` copies in place.** The generated state's
+  `Clone` is written out field by field: `clone_from` assigns every field,
+  the cold matrices into the box the target already owns, so a plugin that
+  shares one solve while its channels are identical can split the state on
+  the audio thread without allocating (the derived `clone_from` re-boxed the
+  cold block). Proven on both routes with a counting allocator and a full
+  `Debug` comparison after the copy.
+
 - **The runtime DC operating-point solve on the nodal route.** With
   `--emit-dc-op-recompute`, `recompute_dc_op()` on a nodal build (Schur and
   full-LU) now solves `G·v = b_dc + N_i·i_nl(N_v·v)` on the live working

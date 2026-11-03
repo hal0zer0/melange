@@ -109,6 +109,12 @@ Emitted only when the netlist asks for them:
   a live control change during playback, where the circuit's own transition
   is the behaviour to keep (not enforced). Not audio-thread safe.
 
+`CircuitState` is `Clone` and `Debug`. `clone()` is a full copy (the cold
+matrices in a new box); `clone_from(&source)` copies every field in place,
+the cold block into the box the target already owns, and allocates nothing,
+so it is the way to split a state that two channels shared while their input
+was identical, on the audio thread.
+
 `CircuitState`'s fields are `pub`. Two of them are the integrator's history:
 
 - `v_prev: [f64; N]` — the last committed node voltages (and augmented

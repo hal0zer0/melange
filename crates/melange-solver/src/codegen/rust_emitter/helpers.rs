@@ -1959,6 +1959,147 @@ pub(super) fn body_effect_jacobian_term(ir: &CircuitIR, i: usize, j: usize, s_ni
     )
 }
 
+/// The fields of `struct <name> {` in `code` (`pub` or private), in declaration
+/// order, as `(name, type)`: every `<visibility>? <ident>: <type>,` line between
+/// the struct line and its closing `}` at column 0 (doc comments and attributes
+/// skipped). Empty when the struct is absent.
+fn struct_fields(code: &str, name: &str) -> Vec<(String, String)> {
+    let open_pub = format!("pub struct {name} {{\n");
+    let open_priv = format!("\nstruct {name} {{\n");
+    let body_start = if let Some(i) = code.find(&open_pub) {
+        i + open_pub.len()
+    } else if let Some(i) = code.find(&open_priv) {
+        i + open_priv.len()
+    } else {
+        return Vec::new();
+    };
+    let mut fields = Vec::new();
+    for line in code[body_start..].lines() {
+        if line == "}" {
+            break;
+        }
+        // A field line: an optional visibility, an identifier, a colon, a type
+        // and a trailing comma (a trailing comment allowed). Doc comments,
+        // attributes and blank lines are not.
+        let t = line.split("//").next().unwrap_or("").trim();
+        if t.is_empty() || t.starts_with('#') || !t.ends_with(',') {
+            continue;
+        }
+        let rest = match t.strip_prefix("pub") {
+            Some(r) if r.starts_with('(') => &r[r.find(')').map_or(0, |i| i + 1)..],
+            Some(r) => r,
+            None => t,
+        }
+        .trim_start();
+        if let Some(colon) = rest.find(':') {
+            let ident = rest[..colon].trim();
+            let ty = rest[colon + 1..].trim().trim_end_matches(',').trim();
+            if !ident.is_empty() && ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                fields.push((ident.to_string(), ty.to_string()));
+            }
+        }
+    }
+    fields
+}
+
+/// `[Name; LEN]` where `Name` is a struct declared in `code`: the struct's
+/// fields and the length expression. The one shape in the generated state that
+/// is not plain data or the boxed cold block (the sub-sample-fire memo).
+fn struct_array(code: &str, ty: &str) -> Option<(Vec<(String, String)>, String)> {
+    let inner = ty.strip_prefix('[')?.strip_suffix(']')?;
+    let (elem, len) = inner.split_once(';')?;
+    let elem = elem.trim();
+    if !elem.chars().next()?.is_ascii_uppercase()
+        || !elem.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+    let fields = struct_fields(code, elem);
+    (!fields.is_empty()).then(|| (fields, len.trim().to_string()))
+}
+
+/// Replace the derived `Clone` of the generated `CircuitState` with a
+/// hand-written one whose `clone_from` copies every field in place.
+///
+/// The derived `clone_from` is `*self = source.clone()`, which re-boxes the
+/// cold matrices: a plugin that runs one solve while its two channels are
+/// identical and splits the state at the first divergent sample would then
+/// allocate on the audio thread. Written out, `clone_from` assigns each field
+/// (the cold block's fields into the box the target already owns, a struct
+/// array element by element and field by field, so no element-sized temporary
+/// lands on the stack) and `clone` builds the copy field by field. Every other
+/// field of the state is plain data (`Copy` arrays and scalars), so a field
+/// that is not fails to compile rather than copy silently; and the struct is
+/// also `Debug`, so a test compares the two states' full renderings after a
+/// `clone_from`. No-op when the state carries no derived `Clone`.
+pub(super) fn state_clone_in_place(mut code: String) -> String {
+    const DERIVED: &str = "#[derive(Clone, Debug)]\npub struct CircuitState {\n";
+    if !code.contains(DERIVED) {
+        return code;
+    }
+    let fields = struct_fields(&code, "CircuitState");
+    let cold = struct_fields(&code, "CircuitStateCold");
+    if fields.is_empty() {
+        return code;
+    }
+    code = code.replacen(DERIVED, "#[derive(Debug)]\npub struct CircuitState {\n", 1);
+
+    let mut imp = String::new();
+    imp.push_str(
+        "impl Clone for CircuitState {\n\
+         \x20   /// A fresh copy of every field; the cold block in a new box.\n\
+         \x20   fn clone(&self) -> Self {\n\
+         \x20       Self {\n",
+    );
+    for (f, ty) in &fields {
+        if f == "cold" {
+            imp.push_str("            cold: Box::new(CircuitStateCold {\n");
+            for (c, _) in &cold {
+                imp.push_str(&format!("                {c}: self.cold.{c},\n"));
+            }
+            imp.push_str("            }),\n");
+        } else if struct_array(&code, ty).is_some() {
+            imp.push_str(&format!("            {f}: self.{f}.clone(),\n"));
+        } else {
+            imp.push_str(&format!("            {f}: self.{f},\n"));
+        }
+    }
+    imp.push_str(
+        "        }\n\
+         \x20   }\n\n\
+         \x20   /// Copy every field of `source` into `self` in place, the cold block's\n\
+         \x20   /// fields into the box `self` already owns: no allocation, so a shared\n\
+         \x20   /// state can be split on the audio thread. After it the two states are\n\
+         \x20   /// identical in every field (their `Debug` renderings are equal).\n\
+         \x20   fn clone_from(&mut self, source: &Self) {\n",
+    );
+    for (f, ty) in &fields {
+        if f == "cold" {
+            for (c, _) in &cold {
+                imp.push_str(&format!("        self.cold.{c} = source.cold.{c};\n"));
+            }
+        } else if let Some((elem_fields, len)) = struct_array(&code, ty) {
+            imp.push_str(&format!("        for i in 0..{len} {{\n"));
+            for (e, _) in &elem_fields {
+                imp.push_str(&format!(
+                    "            self.{f}[i].{e} = source.{f}[i].{e};\n"
+                ));
+            }
+            imp.push_str("        }\n");
+        } else {
+            imp.push_str(&format!("        self.{f} = source.{f};\n"));
+        }
+    }
+    imp.push_str("    }\n}\n\n");
+
+    // Place the impl right after the struct's closing brace.
+    let open = "pub struct CircuitState {\n";
+    let start = code.find(open).expect("struct present");
+    let close_rel = code[start..].find("\n}\n").expect("struct closes") + 3;
+    code.insert_str(start + close_rel + 1, &imp);
+    code
+}
+
 #[cfg(test)]
 mod stateful_interface_tests {
     //! Phase 0c Stage 1a — device-agnostic stateful-device interface.

@@ -409,7 +409,11 @@ lifecycle):
   warmed 64-stage Vec is cached in a process-global
   `RwLock<HashMap<(sr,n), Arc<Vec<CircuitState>>>>` (`:132`) and cloned across
   resets/instances — **generated CircuitState must stay `Clone`-safe and
-  deterministic for this cache to be sound**.
+  deterministic for this cache to be sound**. Since 2026-11-03 the state's
+  `Clone` is written out: `clone_from` copies every field in place (the cold
+  block into the box the target owns) and allocates nothing, so a shared
+  state may be split on the audio thread; `clone()` still boxes a fresh cold
+  block.
 - **(B) Silent pot-ramp warmup** — gold-press, uniquorn, basic-bitch,
   five-watt-freddie, sad-bastard, tth: `full_warmup()` (uniquorn `:591`) does
   `default()` → `set_sample_rate` → ramp pots from codegen defaults (read out

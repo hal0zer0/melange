@@ -258,6 +258,29 @@ fn provenance_json(
         ir.integrator_selection.is_backward_euler()
     ));
     s.push_str(&format!("\"max_iter\":{},", ir.effective_max_iter()));
+    // Switch positions baked away from the deck's own position 0 (a `--switch`
+    // override). They change the DSP the artifact ships (the matrices, `DC_OP`,
+    // the state `reset()` returns to), so a consumer asserts them here instead
+    // of grepping the state initializer. Keyed by the switch's label (the
+    // controlled component names joined with `+` when the directive has none).
+    let overrides: Vec<String> = ir
+        .switches
+        .iter()
+        .filter(|sw| sw.default_position != 0)
+        .map(|sw| {
+            format!(
+                "\"{}\":{}",
+                sw.label.replace('\\', "\\\\").replace('"', "\\\""),
+                sw.default_position
+            )
+        })
+        .collect();
+    if !overrides.is_empty() {
+        s.push_str(&format!(
+            "\"switch_overrides\":{{{}}},",
+            overrides.join(",")
+        ));
+    }
     if !ir.dc_op_rail_pin.is_empty() && ir.dc_op_rail_pin != "none" {
         s.push_str(&format!(
             "\"dc_op_rail_pin\":\"{}\",",

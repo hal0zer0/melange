@@ -124,6 +124,9 @@ impl Emitter for RustEmitter {
         self.validate(ir)?;
         let (code, sub_path, full_lu_trigger) = self.emit_inner(ir)?;
         let code = runtime_os::finalize(ir, code)?;
+        // The state's `Clone` is written out field by field so `clone_from`
+        // copies in place (no allocation on a split of a shared state).
+        let code = helpers::state_clone_in_place(code);
         Ok(
             super::emitter::EmitOutput::single("circuit.rs", collapse_blank_lines(&code))
                 .with_nodal_sub_path(sub_path)
