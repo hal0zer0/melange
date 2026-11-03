@@ -66,7 +66,7 @@ jump, callers should follow with `recompute_dc_op()`:
 
 ```rust
 state.set_pot_0(r_new);
-state.recompute_dc_op();  // DK path: solves NR; nodal path: stub
+state.recompute_dc_op();  // both routes solve; some nodal builds refuse (see DC_OP.md)
 ```
 
 The CLI verbs (`compile`, `simulate`, `analyze`, `dc-op`) do not flip switches
@@ -81,9 +81,13 @@ state disagree, so a parameter default of 0 on a state baked at 1 would flip
 the switch on the first block). `dc-op --switch` reports the operating point
 such a build embeds.
 
-On nodal circuits `recompute_dc_op()` is a stub today (Phase E handoff
-— body deferred); NR catches up on its own over roughly
-`WARMUP_SAMPLES_RECOMMENDED` samples. See `set_pot_N` emission in
+On nodal circuits `recompute_dc_op()` solves the augmented system with the
+live working `G` (`nodal_emitter/dc_op.rs`); a behavioral deck, a deck whose
+rail mode clamps a finite op-amp rail, and a glow deck refuse and
+`settle_dc_op()` runs the warmup loop instead. Either way it is for preset
+recall and instantiation with no audio running; during playback NR catches
+up on its own over roughly `WARMUP_SAMPLES_RECOMMENDED` samples, which is the
+circuit's own transition. See `set_pot_N` emission in
 `rust_emitter/dk_emitter.rs` (DK Schur) and
 `rust_emitter/nodal_emitter/state.rs` (nodal paths).
 
@@ -411,10 +415,11 @@ a float subtract + abs + compare; actual matrix rebuilds fire only
 when the smoothed value crosses that threshold.
 
 Switches are not smoothed — flipping a switch is expected to be a
-discrete event. `set_switch_N` is also reseed-free; callers that need a
-fresh NR seed after a switch flip should follow with `recompute_dc_op()`
-on DK circuits (nodal falls back to NR catch-up over
-`WARMUP_SAMPLES_RECOMMENDED` samples).
+discrete event. `set_switch_N` is also reseed-free; callers that flip a
+switch with no audio running (preset recall) follow with
+`recompute_dc_op()`; during playback the bias network's re-settle is the
+hardware's own behaviour and NR catches up over at most
+`WARMUP_SAMPLES_RECOMMENDED` samples.
 
 ## Common Pitfalls
 

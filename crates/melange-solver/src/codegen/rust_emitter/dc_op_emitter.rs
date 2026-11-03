@@ -32,13 +32,13 @@
 //!    to state (the live point and its own currents, `dc_op_i_nl`, as a
 //!    pair), zero `q_dot`, seed the DC blocker at the new DC output,
 //!    sync pot `_prev`, zero oversampler history.
-//! 7. `emit_recompute_dc_op_body_nodal` — stub emitter for every nodal
-//!    build (Schur and full-LU). Emits a method that bumps
-//!    `diag_nr_max_iter_count` and returns, so plugins can install the
-//!    `recompute_dc_op` surface uniformly while nodal-routed circuits
-//!    continue using the `WARMUP_SAMPLES_RECOMMENDED` silence loop (the
-//!    documented path for nodal circuits). A nodal NR body is not
-//!    implemented — see the function's doc comment.
+//! 7. `emit_dc_op_state_methods_dk` — the always-emitted `dc_kcl_residual`,
+//!    `dc_op_writeback` and full `set_dc_operating_point` methods.
+//!
+//! The nodal route's body (`recompute_dc_op` on the augmented MNA with the
+//! transient's own device evaluator, limiter and live matrices) and its
+//! state methods live in `nodal_emitter/dc_op.rs`; `emit_settle_dc_op_body`
+//! below is shared by both routes.
 //!
 //! ## DC fixed-point algebra
 //!
@@ -497,7 +497,10 @@ fn emit_dc_op_linear_solve_dk(_ir: &CircuitIR, _seed: &str) -> String {
          \x20               sum += g_inv[i][j] * b_dc[j];\n\
          \x20           }\n\
          \x20           v_node[i] = sum;\n\
-         \x20       }\n",
+         \x20       }\n\
+         \x20       // No device currents, and no Newton iteration to count.\n\
+         \x20       let i_nl_final: [f64; M] = [0.0; M];\n\
+         \x20       let nr_iters: u32 = 0;\n",
     );
     body
 }
@@ -557,11 +560,8 @@ fn emit_dc_op_nr_loop_dk(
     /// solver's `DC_OP_KCL_ABSTOL_AMPS` (`dc_op.rs`). A separate constant from
     /// the volts step floor `TOL`; the two happen to share a value.
     const KCL_ABSTOL: f64 = 1e-9;
-    const DAMP_THRESHOLD: f64 = 10.0;
-    const CLAMP: f64 = 50.0;
 
     let m = ir.topology.m;
-    let n_v_rows = ir.topology.n_nodes;
     let mut out = String::new();
 
     out.push_str(&format!(
@@ -569,6 +569,8 @@ fn emit_dc_op_nr_loop_dk(
          \x20       let mut v_node: [f64; N] = {seed};\n\
          \x20       let mut i_nl_final: [f64; M] = [0.0; M];\n\
          \x20       let mut nr_converged = false;\n\
+         \x20       // The 0-indexed iteration that converged (`last_nr_iterations`).\n\
+         \x20       let mut nr_iters: u32 = 0;\n\
          \x20       // True when the previous iteration's UNDAMPED Newton correction\n\
          \x20       // passed the step test, so the point this iteration evaluates\n\
          \x20       // the devices at is a candidate for the KCL gate.\n\
@@ -577,10 +579,35 @@ fn emit_dc_op_nr_loop_dk(
          \x20       const TOL: f64 = {TOL:e};\n\
          \x20       const RELTOL: f64 = {RELTOL:e};\n\
          \x20       const KCL_ABSTOL: f64 = {KCL_ABSTOL:e};\n\
-         \x20       for _iter in 0..MAX_ITER {{\n"
+         \x20       for iter in 0..MAX_ITER {{\n"
     ));
 
     let inner = "            ";
+    out.push_str(&emit_dc_op_device_eval_dk(ir, inner)?);
+
+    // v_nl as a dense array for the J·v_nl product below.
+    out.push_str(&format!("{inner}let v_nl: [f64; M] = ["));
+    for i in 0..m {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&format!("v_d{i}"));
+    }
+    out.push_str("];\n\n");
+
+    emit_dc_op_nr_loop_dk_tail(ir, &mut out, inner, vt_restore);
+    Ok(out)
+}
+
+/// Emit, at `indent`, the device evaluation of the DK runtime DC solve at the
+/// node vector `v_node` (a local in scope): the controlling voltages `v_d{i}`,
+/// the body-effect threshold refresh, the shared transient device evaluator
+/// behind a `state: &CircuitState` alias, and the dense `i_nl: [f64; M]` /
+/// `j_dev: [[f64; M]; M]` packs of its flat locals. Shared by the Newton loop
+/// (every iterate) and `set_dc_operating_point` (once, at the given vector).
+fn emit_dc_op_device_eval_dk(ir: &CircuitIR, inner: &str) -> Result<String, CodegenError> {
+    let m = ir.topology.m;
+    let mut out = String::new();
 
     // v_nl extraction — locals `v_d{i}` live inside the loop body.
     out.push_str(&format!(
@@ -667,16 +694,16 @@ fn emit_dc_op_nr_loop_dk(
             }
         }
     }
+    Ok(out)
+}
 
-    // v_nl as a dense array for the J·v_nl product below.
-    out.push_str(&format!("{inner}let v_nl: [f64; M] = ["));
-    for i in 0..m {
-        if i > 0 {
-            out.push_str(", ");
-        }
-        out.push_str(&format!("v_d{i}"));
-    }
-    out.push_str("];\n\n");
+/// The rest of the DK Newton iteration after the device evaluation and the
+/// dense `v_nl`: the KCL gate, the Newton system and solve, the guards, the
+/// step test, the damped step, and the failure return after the loop.
+fn emit_dc_op_nr_loop_dk_tail(ir: &CircuitIR, out: &mut String, inner: &str, vt_restore: &str) {
+    const DAMP_THRESHOLD: f64 = 10.0;
+    const CLAMP: f64 = 50.0;
+    let n_v_rows = ir.topology.n_nodes;
 
     // KCL residual gate at the current iterate, reached by a sub-threshold
     // Newton correction. Devices were just evaluated at this exact v_node, so
@@ -708,6 +735,7 @@ fn emit_dc_op_nr_loop_dk(
          {inner}        // Converged: this point passed both tests, and i_nl is its own.\n\
          {inner}        i_nl_final = i_nl;\n\
          {inner}        nr_converged = true;\n\
+         {inner}        nr_iters = iter as u32;\n\
          {inner}        break;\n\
          {inner}    }}\n\
          {inner}}}\n\n"
@@ -854,85 +882,157 @@ fn emit_dc_op_nr_loop_dk(
          \x20           return;\n\
          \x20       }}\n"
     ));
-    Ok(out)
 }
 
-/// Emit state writeback for a converged DC OP solve.
-///
-/// Writes the converged node voltages to `self.dc_operating_point`, seeds
-/// `self.v_prev`, and (when the circuit has nonlinear devices) both
-/// `self.i_nl_prev` and `self.i_nl_prev_prev` with the converged `i_nl`.
-///
-/// Also touches the following mirror-of-`reset()` state so the first
-/// `process_sample` call after `recompute_dc_op` starts from a consistent
-/// equilibrium instead of the stale pre-recompute trajectory:
-///
-///   * `dc_block_x_prev[k] = v_node[OUTPUT_NODES[k]]`, `dc_block_y_prev[k] = 0`
-///     — the DC-blocker IIR's fixed point is `y = 0, x = V_dc`. Setting
-///     `x_prev` to the raw DC output (not 0) suppresses the step transient
-///     the blocker would otherwise generate on the first sample.
-///   * `pot_N_resistance_prev = pot_N_resistance` for every pot, as every
-///     committed sample leaves it. The generated solver does not read
-///     `_prev`; the sync keeps the public field consistent.
-///   * Oversampler filter taps zeroed (`os_up_state`, `os_dn_state`,
-///     and the `_outer` pair for 4× OS). Mid-stream the filter state
-///     reflects the old DC level and would ring down as the output steps to
-///     the new one; zeroing matches `reset()`.
-///
-/// Deliberately preserved: `noise_rng_state` (footgun — resetting would make
-/// plugins produce identical noise sequences after every parameter change),
-/// pot resistances and switch positions (they're the INPUT to this solve),
-/// runtime voltage sources, device runtime params, BJT junction temperature,
-/// diagnostic counters (caller may be watching them), and `last_nr_iterations`
-/// (the NR loop itself isn't plumbed through this counter in the MVP).
-fn emit_dc_op_writeback_dk(ir: &CircuitIR, nonlinear: bool) -> String {
-    let mut body = String::new();
+/// The recompute's writeback: one call of the always-emitted
+/// `dc_op_writeback` method (see [`emit_dc_op_state_methods_dk`]) with the
+/// converged `v_node`, the device currents evaluated at it and the
+/// converging iteration.
+fn emit_dc_op_writeback_dk(_ir: &CircuitIR, _nonlinear: bool) -> String {
+    "\n        // --- Converged: write back to state -----------------------\n\
+     \x20       self.dc_op_writeback(v_node, i_nl_final, nr_iters);\n"
+        .to_string()
+}
 
-    body.push_str(
-        "\n        // --- Converged: write back to state -----------------------\n\
+/// The DC RHS the residual reads, without the NaN counting of
+/// [`emit_dc_op_build_b_dc_dk`] (a `&self` method cannot count): a non-finite
+/// `.runtime` field reads as 0, as it does in `process_sample`.
+fn emit_dc_op_build_b_dc_dk_readonly(ir: &CircuitIR) -> String {
+    let mut body = String::new();
+    if ir.has_dc_sources {
+        body.push_str("        let mut b_dc: [f64; N] = RHS_CONST;\n");
+    } else {
+        body.push_str("        let mut b_dc: [f64; N] = [0.0; N];\n");
+    }
+    for rt in &ir.runtime_sources {
+        body.push_str(&format!(
+            "        b_dc[{row}] += if self.{field}.is_finite() {{ self.{field} }} else {{ 0.0 }};\n",
+            row = rt.vs_row,
+            field = rt.field_name,
+        ));
+    }
+    if ir.runtime_sources.is_empty() {
+        // Nothing stamps into it: keep the binding immutable.
+        body = body.replace("let mut b_dc", "let b_dc");
+    }
+    body
+}
+
+/// Emit the three `CircuitState` methods every DK build carries, whatever
+/// the recompute flag: `dc_kcl_residual`, `dc_op_writeback` and the full
+/// `set_dc_operating_point`. Rendered into `state.rs.tera` as
+/// `dc_op_state_methods` (4-space method indent).
+///
+/// `set_dc_operating_point(v_dc)` is the writeback `recompute_dc_op` does,
+/// with the device currents from one evaluation at `v_dc`, and it returns
+/// the KCL residual of `v_dc` against the live circuit: the largest
+/// `|F_i|` over the circuit-node rows in amperes and that row's index. It
+/// reports a non-equilibrium vector; it never refuses one.
+///
+/// `dc_op_writeback(v_node, i_nl_final, nr_iters)` writes the live operating
+/// point and its own currents as a pair (`dc_operating_point`, `dc_op_i_nl`),
+/// seeds `v_prev` / `i_nl_prev` / `i_nl_prev_prev` from them, puts the charge
+/// derivative `q_dot` at rest, zeroes the input history, seeds the DC blocker
+/// at its fixed point (`x_prev = V_dc_out`, `y_prev = 0`, so the first sample
+/// sees no step), syncs `pot_N_resistance_prev`, zeroes the oversampler taps
+/// (mid-stream they carry the old DC level and would ring down as the output
+/// steps to the new one) and records `last_nr_iterations`. Deliberately
+/// preserved: the noise RNG (resetting it would repeat the same noise after
+/// every parameter change), pots and switches (the solve's inputs), runtime
+/// sources, device runtime parameters and junction temperatures, and the
+/// diagnostic counters (a caller may be watching them).
+pub(super) fn emit_dc_op_state_methods_dk(ir: &CircuitIR) -> Result<String, CodegenError> {
+    let m = ir.topology.m;
+    let n_v_rows = ir.topology.n_nodes;
+    let multi_input = ir.solver_config.num_inputs() > 1;
+    let linear = m == 0 || ir.device_slots.is_empty();
+    let mut code = String::new();
+
+    // --- dc_kcl_residual ---------------------------------------------------
+    code.push_str(
+        "    /// KCL residual of the node vector `v` with the device currents `i_nl`\n\
+         \x20   /// against the live circuit (current pots and switches): the largest\n\
+         \x20   /// `|F_i|`, `F = G·v − b_dc − N_i·i_nl`, over the circuit-node rows in\n\
+         \x20   /// amperes, and that row's index. The VS/VCVS branch rows are KVL rows\n\
+         \x20   /// in volts and are not part of it. `set_dc_operating_point` returns\n\
+         \x20   /// it; the runtime recompute gates on the same per-row residual.\n\
+         \x20   fn dc_kcl_residual(&self, v: &[f64; N], i_nl: &[f64; M]) -> (f64, usize) {\n",
+    );
+    code.push_str(&emit_dc_op_build_g_aug_dk(ir));
+    code.push_str(&emit_dc_op_build_b_dc_dk_readonly(ir));
+    code.push_str(&format!(
+        "        let mut worst = 0.0_f64;\n\
+         \x20       let mut worst_row = 0usize;\n\
+         \x20       for a in 0..{n_v_rows} {{\n\
+         \x20           let mut q = 0.0_f64;\n\
+         \x20           for i in 0..M {{ q += N_I[a][i] * i_nl[i]; }}\n\
+         \x20           let mut acc = -b_dc[a] - q;\n\
+         \x20           for b in 0..N {{ acc += g_aug[a][b] * v[b]; }}\n\
+         \x20           // NaN-honest: a non-finite residual wins the worst slot.\n\
+         \x20           if !(acc.abs() <= worst) {{ worst = acc.abs(); worst_row = a; }}\n\
+         \x20       }}\n\
+         \x20       (worst, worst_row)\n\
+         \x20   }}\n\n"
+    ));
+
+    // --- dc_op_writeback ---------------------------------------------------
+    code.push_str(
+        "    /// Install `v_node` as the live DC operating point with its own device\n\
+         \x20   /// currents `i_nl_final` (the pair the NaN/magnitude recovery restarts\n\
+         \x20   /// from), and seed every history the first sample reads: `v_prev`,\n\
+         \x20   /// `i_nl_prev` / `i_nl_prev_prev`, the charge derivative at rest, zero\n\
+         \x20   /// input history, the DC blocker at its fixed point, pot `_prev` fields\n\
+         \x20   /// in step, oversampler taps zeroed, `last_nr_iterations`. Preserved:\n\
+         \x20   /// the noise RNG, pots and switches, runtime sources, device runtime\n\
+         \x20   /// parameters and junction temperatures, the diagnostic counters.\n\
+         \x20   fn dc_op_writeback(&mut self, v_node: [f64; N], i_nl_final: [f64; M], nr_iters: u32) {\n\
          \x20       self.dc_operating_point = v_node;\n\
+         \x20       // The live point's own currents, kept beside it for the NaN/\n\
+         \x20       // magnitude recovery (which restarts from the pair).\n\
+         \x20       self.dc_op_i_nl = i_nl_final;\n\
          \x20       self.v_prev = v_node;\n\
-         \x20       self.input_prev = 0.0;\n",
+         \x20       self.i_nl_prev = i_nl_final;\n\
+         \x20       self.i_nl_prev_prev = i_nl_final;\n",
     );
     if carries_q_dot(ir) {
-        body.push_str("        self.q_dot = [0.0; N];\n");
+        code.push_str("        self.q_dot = [0.0; N];\n");
     }
-    if nonlinear && ir.topology.m > 0 {
-        body.push_str(
-            "        self.i_nl_prev = i_nl_final;\n\
-             \x20       self.i_nl_prev_prev = i_nl_final;\n\
-             \x20       // The live point's own currents, kept beside it for the NaN/\n\
-             \x20       // magnitude recovery (which restarts from the pair).\n\
-             \x20       self.dc_op_i_nl = i_nl_final;\n",
-        );
+    if multi_input {
+        code.push_str("        self.inputs_prev = [0.0; NUM_INPUTS];\n");
+    } else {
+        code.push_str("        self.input_prev = 0.0;\n");
     }
+    if ir.solver_config.has_inject_or_tap() {
+        code.push_str("        self.injections_prev = [0.0; NUM_INJECT];\n");
+    }
+    code.push_str("        self.last_nr_iterations = nr_iters;\n");
 
-    // DC blocker: seed x_prev with the converged DC output (not 0.0) so the
-    // next sample's IIR evaluation `raw_out - x_prev + r*y_prev` gives 0,
-    // i.e. the filter starts already at steady state. y_prev stays 0 because
-    // the fixed point of `y = x - x + r*y` is `y*(1-r) = 0 ⇒ y = 0`.
+    // DC blocker: seed x_prev with the DC output (not 0.0) so the next
+    // sample's IIR evaluation `raw_out - x_prev + r*y_prev` gives 0, i.e. the
+    // filter starts already at steady state. y_prev stays 0 because the fixed
+    // point of `y = x - x + r*y` is `y*(1-r) = 0 ⇒ y = 0`.
     if ir.dc_block && !ir.solver_config.output_nodes.is_empty() {
-        body.push_str(
+        code.push_str(
             "        // Seed DC blocker at its steady state (y=0, x=V_dc_out) so it\n\
              \x20       // doesn't generate a step transient on the first sample.\n",
         );
         for (k, &node) in ir.solver_config.output_nodes.iter().enumerate() {
-            body.push_str(&format!(
+            code.push_str(&format!(
                 "        self.dc_block_x_prev[{k}] = v_node[{node}];\n",
             ));
         }
-        body.push_str("        self.dc_block_y_prev = [0.0; NUM_OUTPUTS];\n");
+        code.push_str("        self.dc_block_y_prev = [0.0; NUM_OUTPUTS];\n");
     }
 
     // Pot prev sync — every committed sample leaves `_prev` equal to the
-    // current resistance; the recompute does the same.
+    // current resistance; the writeback does the same.
     if !ir.pots.is_empty() {
-        body.push_str(
+        code.push_str(
             "        // Sync pot_N_resistance_prev with the current resistance, as\n\
              \x20       // every committed sample does.\n",
         );
         for idx in 0..ir.pots.len() {
-            body.push_str(&format!(
+            code.push_str(&format!(
                 "        self.pot_{idx}_resistance_prev = self.pot_{idx}_resistance;\n",
             ));
         }
@@ -943,71 +1043,66 @@ fn emit_dc_op_writeback_dk(ir: &CircuitIR, nonlinear: bool) -> String {
     // half-band IIR has to ring down. Sizes are compile-time derived from
     // the oversampling factor (matching `state.rs.tera`'s literal sizing).
     if super::runtime_os::runtime(ir).is_some() {
-        body.push_str(
+        code.push_str(
             "        // Reset oversampler half-band filter state (stale DC trajectory).\n\
              \x20       self.reset_oversampler();\n",
         );
     } else if ir.solver_config.oversampling_factor > 1 {
         let os = oversampling_info(ir.solver_config.oversampling_factor);
-        body.push_str(&format!(
+        code.push_str(&format!(
             "        // Reset oversampler half-band filter state (stale DC trajectory).\n\
              \x20       self.os_up_state = [0.0; {size}];\n\
              \x20       self.os_dn_state = [[0.0; {size}]; NUM_OUTPUTS];\n",
             size = os.state_size,
         ));
         if ir.solver_config.oversampling_factor == 4 {
-            body.push_str(&format!(
+            code.push_str(&format!(
                 "        self.os_up_state_outer = [0.0; {size}];\n\
                  \x20       self.os_dn_state_outer = [[0.0; {size}]; NUM_OUTPUTS];\n",
                 size = os.state_size_outer,
             ));
         }
-        body.push_str(&super::inject_tap::emit_inject_os_state_reset(
+        code.push_str(&super::inject_tap::emit_inject_os_state_reset(
             ir, "self", "        ",
         ));
     }
+    // The Step-6c containment threshold follows the live point.
+    code.push_str("        self.refresh_damp_thresh();\n    }\n\n");
 
-    body
-}
-
-/// Emit the body of `CircuitState::recompute_dc_op()` for a nodal circuit
-/// (both sub-paths, Schur and full-LU).
-///
-/// The nodal solver operates on the augmented MNA directly (N = n_aug rather
-/// than the DK path's N = n_nodes + augmented_rows), and its NR device
-/// evaluator uses `emit_nodal_device_evaluation_body/_final` — a different
-/// stamping scheme than `emit_dk_device_evaluation`. A correct runtime
-/// recompute would therefore need a nodal-specific parallel of
-/// `emit_dc_op_build_g_aug_dk` / `_build_b_dc_dk` / `_nr_loop_dk`.
-///
-/// That nodal body is not implemented. Nodal-routed plugins use the
-/// `WARMUP_SAMPLES_RECOMMENDED` silence loop, which is the documented path
-/// for nodal circuits — not a temporary workaround. The
-/// warmup loop runs the full per-sample NR and is guaranteed to converge
-/// to the physically correct DC OP.
-///
-/// This stub keeps the `recompute_dc_op` method surface uniform across DK
-/// and nodal circuits (so plugin host code doesn't need a solver-path
-/// branch). It bumps the NR max-iter diagnostic counter and returns
-/// without touching `v_prev` or `dc_operating_point`, matching the DK
-/// path's NR-failure branch — callers' fallback logic handles both the
-/// DK-convergence-failure and the nodal-stub-no-op cases uniformly.
-///
-/// See `docs/aidocs/DC_OP.md` "Runtime DC OP Recompute" for the DK-path
-/// contract.
-pub(super) fn emit_recompute_dc_op_body_nodal(_ir: &CircuitIR) -> Result<String, CodegenError> {
-    Ok(
-        "        // Nodal route: no runtime DC OP recompute (the warmup loop is\n\
-        \x20       // the documented path for nodal circuits). Bump the NR max-iter\n\
-        \x20       // diag counter so callers' standard fallback pattern (`if\n\
-        \x20       // counter ticked, run warmup`) routes through the\n\
-        \x20       // `WARMUP_SAMPLES_RECOMMENDED` silence loop.\n\
-        \x20       //\n\
-        \x20       // See `docs/aidocs/DC_OP.md` \"Runtime DC OP Recompute\" for\n\
-        \x20       // the DK-path contract.\n\
-        \x20       self.diag_nr_max_iter_count += 1;\n"
-            .to_string(),
-    )
+    // --- set_dc_operating_point --------------------------------------------
+    code.push_str(
+        "    /// Install `v_dc` as the DC operating point: the full writeback\n\
+         \x20   /// `recompute_dc_op` does (`dc_op_writeback`), with the device currents\n\
+         \x20   /// from one evaluation at `v_dc`.\n\
+         \x20   ///\n\
+         \x20   /// Returns the KCL residual of `v_dc` against the live circuit: the\n\
+         \x20   /// largest `|F_i|` over the circuit-node rows, in amperes, and that\n\
+         \x20   /// row. A vector that is an equilibrium at the current controls reads\n\
+         \x20   /// ~1e-9 A or less; a node-voltages-only vector of a deck with a\n\
+         \x20   /// DC-carrying winding (its branch-current rows left at zero) shows the\n\
+         \x20   /// winding's current as the residual of the node it feeds. The vector\n\
+         \x20   /// is installed either way; the residual is the caller's to read.\n\
+         \x20   ///\n\
+         \x20   /// For instantiation, `reset()`, preset recall and per-instance jitter,\n\
+         \x20   /// where no audio is running; see `recompute_dc_op` for the usage note.\n\
+         \x20   pub fn set_dc_operating_point(&mut self, v_dc: [f64; N]) -> (f64, usize) {\n\
+         \x20       let v_node = v_dc;\n",
+    );
+    if linear {
+        code.push_str("        let i_nl_final: [f64; M] = [0.0; M];\n");
+    } else {
+        code.push_str("        let i_nl_final: [f64; M] = {\n");
+        code.push_str(&emit_dc_op_device_eval_dk(ir, "            ")?);
+        // The Jacobian is evaluated with the currents and unused here.
+        code.push_str("            let _ = j_dev;\n            i_nl\n        };\n");
+    }
+    code.push_str(
+        "        let (residual, worst_row) = self.dc_kcl_residual(&v_node, &i_nl_final);\n\
+         \x20       self.dc_op_writeback(v_node, i_nl_final, 0);\n\
+         \x20       (residual, worst_row)\n\
+         \x20   }\n",
+    );
+    Ok(code)
 }
 
 /// Emit the body of `CircuitState::settle_dc_op()` — the

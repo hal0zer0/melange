@@ -160,8 +160,9 @@ instead.
 
 ```rust
 impl CircuitState {
-    /// Baked DC operating point (frozen at codegen time at nominal pot/switch
-    /// values). Prefer this over `v_prev` for the *designed* bias point.
+    /// The LIVE DC operating point: the baked `DC_OP` until `recompute_dc_op`
+    /// or `set_dc_operating_point` installs another; `reset()` returns it to
+    /// the factory point. Prefer this over `v_prev` for the bias point.
     pub fn dc_op(&self) -> &[f64; N] { &self.dc_operating_point }
 
     /// Dump each named node's DC voltage to stderr.
@@ -222,30 +223,56 @@ stamps them, so the recompute reaches the baked `DC_OP` with inductors too
 `dc_op_recompute_tests.rs::fix3_dc_biased_choke_shipped_recompute_reaches_inductor_short_op`).
 See `docs/aidocs/DC_OP.md`.
 
-**Nodal path (Schur and full-LU)**: ships a stub that bumps
-`diag_nr_max_iter_count` and returns without touching state — **this is the
-permanent path for nodal circuits**, not a placeholder. The surface matches
-the DK path so plugin host code doesn't need a solver-path branch, but
-plugins on the nodal route must watch the counter and fall back to the
-warmup-silence loop. A nodal NR body is not implemented; the warmup loop
-runs the per-sample NR, which converges to the physically correct DC OP. See
-`docs/aidocs/DC_OP.md`.
+**Nodal path (Schur and full-LU)** (`nodal_emitter/dc_op.rs`): Newton on
+the augmented system `G·v = b_dc + N_i·i_nl(N_v·v)` with the live working
+`G` (the baked node Gmin included) and the per-sample loop's own device
+evaluator, chord stamp and limiter (pnjlim/fetlim on one ray `alpha`, then
+the node-step damping), solved with the dense equilibrated `lu_solve`
+(`invert_n` on a linear Schur build). Every augmented row is an unknown,
+winding currents included. Three classes of build refuse (the method
+advances `diag_nr_max_iter_count` and returns; its doc comment says which):
+behavioral B-source decks, decks whose rail mode clamps a finite op-amp
+rail, and decks with a latched (glow) device. See `docs/aidocs/DC_OP.md`.
+
+Both routes certify an iterate by the compile-time solver's two tests at the
+point written back: the step test on the UNDAMPED Newton correction
+(`1e-6·|v| + 1e-9 V`, every row) and the per-row KCL residual gate
+(`1e-6·scale + 1e-9 A`, circuit-node rows). A body-effect MOSFET's
+`device_N_vt` is refreshed through its field at every iterate and restored
+on failure.
 
 **`settle_dc_op()` wrapper**: also emitted behind the flag. Calls
-`recompute_dc_op` first; on NR failure or nodal stub tick, falls back
+`recompute_dc_op` first; on a refused build or a failed solve, falls back
 to `WARMUP_SAMPLES_RECOMMENDED` iterations of `process_sample(0.0, self)`.
 Uniform API across DK and nodal — plugin code doesn't need a
 solver-path branch. Preferred over writing the recompute+fallback
 pattern by hand on the host side.
 
-State touched by the DK-path method (mirror of `reset()` but preserving
-noise RNG, pot/switch values, device runtime params, and diag counters):
-`dc_operating_point`, `v_prev`, `q_dot` (zeroed), `input_prev`, `i_nl_prev`/`i_nl_prev_prev`,
+**Usage note**: the recompute returns the infinite-time equilibrium at the
+current controls and `tj`. It is for instantiation, `reset()`, preset
+recall and per-instance jitter, where no audio is running; it is not meant
+for a live control change during playback, where it would replace the
+circuit's own transition with the settled point (not enforced).
+
+State touched (the writeback is the private `dc_op_writeback` method on
+every build, shared with `set_dc_operating_point`; preserving noise RNG,
+pot/switch values, device runtime params, and diag counters):
+`dc_operating_point` with `dc_op_i_nl` (the live point and its own currents,
+written as a pair), `v_prev`, `q_dot` (zeroed), `input_prev` /
+`injections_prev`, `i_nl_prev`/`i_nl_prev_prev`, `last_nr_iterations`,
 `dc_block_x_prev` (seeded at new DC output, not 0),
 `pot_N_resistance_prev` (synced to `pot_N_resistance`),
-oversampler taps zeroed (inductor branch currents are rows of `v_prev` and
-are written with it; there is no separate inductor history). See `docs/aidocs/DC_OP.md` "Runtime DC OP recompute" for the full
+oversampler taps zeroed, and on nodal the chord factorisations invalidated
+and the BE latch / breakpoint cleared (inductor branch currents are rows of
+`v_prev` and are written with it; there is no separate inductor history).
+See `docs/aidocs/DC_OP.md` "Runtime DC OP Recompute" for the full
 contract and derivation.
+
+**`set_dc_operating_point(v) -> (f64, usize)`** (every build): the same
+writeback with the currents from one device evaluation at `v`, returning
+the KCL residual of `v` against the live circuit (max `|F_i|` over the
+circuit-node rows in amperes, and the row). A non-equilibrium vector is
+installed and reported, never refused.
 
 ### State (Runtime, Per-Channel)
 ```rust
@@ -256,7 +283,10 @@ struct CircuitState {
     i_nl_prev: [f64; M],     // Previous nonlinear currents (NR predictor seed; init from DC_NL_I)
     input_prev: f64,          // Previous input; read only by the nodal sub-step /
                               // sub-sample-fire input ramp, not by build_rhs
-    dc_operating_point: [f64; N],
+    dc_operating_point: [f64; N],  // The LIVE point: DC_OP until recompute_dc_op /
+                                   // set_dc_operating_point installs another
+    dc_op_i_nl: [f64; M],     // Device currents AT dc_operating_point (DC_NL_I until then);
+                              // the NaN/magnitude recovery restarts from the pair
     last_nr_iterations: u32,
     // Runtime matrices (recomputed by set_sample_rate)
     s: [[f64; N]; N],

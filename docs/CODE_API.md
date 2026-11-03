@@ -65,8 +65,9 @@ Emitted for every circuit:
 | `CircuitState::default()` | `fn() -> CircuitState` | The constructor. Seeds the baked DC operating point. |
 | `process_sample` | `fn(input: f64, state: &mut CircuitState) -> [f64; NUM_OUTPUTS]` | Free function. One call = one host sample (it runs `OVERSAMPLING_FACTOR` internal steps itself). Allocation-free and lock-free. |
 | `CircuitState::set_sample_rate` | `fn(&mut self, sample_rate: f64)` | Rebuilds every rate-dependent matrix. Call off the audio thread; non-finite or non-positive rates are ignored. |
-| `CircuitState::reset` | `fn(&mut self)` | Back to the DC operating point, history cleared. |
-| `CircuitState::dc_op` | `fn(&self) -> &[f64; N]` | The DC operating point baked at codegen time. |
+| `CircuitState::reset` | `fn(&mut self)` | Back to the factory DC operating point (`DC_OP` with its bias currents) and nominal controls, history cleared. |
+| `CircuitState::dc_op` | `fn(&self) -> &[f64; N]` | The live DC operating point: `DC_OP` until `recompute_dc_op` / `set_dc_operating_point` installs another. |
+| `CircuitState::set_dc_operating_point` | `fn(&mut self, v: [f64; N]) -> (f64, usize)` | Install `v` as the operating point (full writeback: `v_prev`, the device currents evaluated at `v`, `q_dot` at rest, input history, DC blocker, oversampler taps) and return its KCL residual against the live circuit: the largest `\|F_i\|` over the circuit-node rows in amperes, and that row. An equilibrium reads ≤ 1e-9 A. The vector is installed either way. |
 
 Constants a caller actually needs:
 
@@ -93,9 +94,20 @@ Emitted only when the netlist asks for them:
   `melange nodes <circuit>`, which lists the pots with their names and ranges in
   the same order as the setter indices.
 - `set_runtime_R_<field>` / `set_runtime_<field>` — `.runtime` controls.
-- `warmup(&mut self)`, `dc_op_by_name(name: &str) -> Option<f64>`,
-  `recompute_dc_op(&mut self)` — present on some routes, absent on others.
-  Check the file before calling.
+- `warmup(&mut self)`, `dc_op_by_name(name: &str) -> Option<f64>` — present
+  on some routes, absent on others. Check the file before calling.
+- `recompute_dc_op(&mut self)` and `settle_dc_op(&mut self)` — only with
+  `--emit-dc-op-recompute`. The recompute solves the DC operating point at the
+  current pot/switch/device values and installs it; `settle_dc_op` runs it and
+  falls back to `WARMUP_SAMPLES_RECOMMENDED` silent samples when it refuses or
+  fails (`diag_nr_max_iter_count` advances). Some nodal builds refuse by
+  construction (behavioral sources, a clampable op-amp, a glow device); the
+  generated method's doc comment says `This build: solved.` or
+  `This build: REFUSED (…)`. Both return the infinite-time equilibrium at the
+  current controls and junction temperatures: for instantiation, `reset()`,
+  preset recall and per-instance jitter, where no audio is running — not for
+  a live control change during playback, where the circuit's own transition
+  is the behaviour to keep (not enforced). Not audio-thread safe.
 
 `CircuitState`'s fields are `pub`. Two of them are the integrator's history:
 
@@ -111,8 +123,14 @@ Writing them is not a control path. The trapezoidal history is
 barely moves the next sample on capacitor-free and small-capacitance nodes and
 leaves the two inconsistent. If you must set state by hand, set `q_dot`
 consistently with it (from KCL), or use `reset()` or
-`set_dc_operating_point(v)` — the latter puts `q_dot` at rest, which is right
-when `v` is an equilibrium.
+`set_dc_operating_point(v)` — the latter puts `q_dot` at rest and evaluates
+the device currents at `v`, which is right when `v` is an equilibrium, and it
+tells you whether it is: the returned `(residual, row)` is the largest KCL
+error of `v` in amperes and the node it sits on. `v` must be the whole
+state vector, source and winding branch currents included (`N` rows, not
+the node count): a node-voltages-only vector with the branch rows left at
+zero is installed but reads a winding's DC current as the residual of the
+node it feeds.
 
 Pot and switch setters are cheap themselves but mark the matrices dirty; the
 work happens inside the next `process_sample`. What that work is depends on the

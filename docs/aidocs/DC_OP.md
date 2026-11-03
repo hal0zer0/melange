@@ -201,8 +201,9 @@ floor alone reads about 1e-12 S × |v| (1.2e-11 A at a 12 V rail).
 Measured before landing (golden corpus + openwurli decks, 41 nonlinear
 decks): 0 flips to non-converged, 0.0 V node-voltage change at reltol 1e-6.
 
-The emitted runtime `recompute_dc_op` (`dc_op_emitter.rs`) still uses the
-step test only — follow-up.
+The emitted runtime `recompute_dc_op` (`dc_op_emitter.rs`,
+`nodal_emitter/dc_op.rs`) gates on the same per-row residual, with the step
+test read on the UNDAMPED Newton correction (see "Runtime DC OP Recompute").
 
 ### Linear System Solve
 
@@ -486,46 +487,96 @@ V(coll) ≈ 1.73V  (12 - 1.51e-3 * 6800)
 ## Runtime DC OP Recompute
 
 The compile-time DC OP baked into the generated code (`DC_OP` / `DC_NL_I`
-constants) is computed at **nominal** pot/switch values. Plugins that apply
-per-instance jitter (e.g. SeriesOfTubes' 50 tube stages each with ±5% on
-Rk/Ra/Rcv, or preset recall that moves a pot by 40% from its codegen
-default) therefore start `CircuitState::default()` at the *wrong* fixed
-point. Without intervention the solver has to silence-warm for `5 · τ_max`
-to drift into the jittered equilibrium — seconds of silent output for
-circuits with large coupling caps.
+constants) is computed at **nominal** pot/switch values. A plugin that applies
+per-instance jitter (e.g. tube stages with ±5% on Rk/Ra/Rcv) or recalls a
+preset that moves a pot by 40% from its codegen default therefore starts
+`CircuitState::default()` at the *wrong* fixed point. Without intervention
+the solver has to silence-warm for `5 · τ_max` to drift into the jittered
+equilibrium — seconds of silent output for circuits with large coupling caps.
 
-The opt-in runtime DC-OP recompute lets a plugin jump to the jittered
-equilibrium in tens of microseconds instead:
+The opt-in runtime recompute solves that equilibrium directly:
 
 ```rust
 let mut state = CircuitState::default();
-state.pot_0_resistance = jittered_rk;
-state.pot_1_resistance = jittered_ra;
-state.recompute_dc_op();   // ← jumps to new fixed point
+state.set_pot_0(jittered_rk);
+state.set_pot_1(jittered_ra);
+state.recompute_dc_op();   // ← jumps to the new fixed point
 // plugin ready to process — no warmup loop needed
 ```
 
 Enabled by the `--emit-dc-op-recompute` CLI flag (default OFF) or
 `CodegenConfig::emit_dc_op_recompute = true` at the API level. **Not
-audio-thread safe** — intended for plugin init / parameter-change callbacks.
+audio-thread safe** — tens to hundreds of microseconds.
+
+### What the method returns, and when to call it
+
+The recompute returns the **infinite-time equilibrium** of the circuit at
+the current controls and the current junction temperatures (`tj` is an
+input to the solve and is left where it is; the point is at that `tj`, not
+at thermal equilibrium). Its intended use is **instantiation, `reset()`,
+preset recall and per-instance jitter** — situations where no audio is
+running and the conventional target is the settled point. It is **not meant
+for a live control change during playback**: called on a switch press it
+would replace the circuit's own transition with the equilibrium the
+hardware reaches only after that transition (a bias network's re-settle
+after a switch press, a release network's 1–2 s tail, are hardware behaviour
+to keep), and on a deck whose open switch is stood in for by a 1 GΩ
+resistor it would jump a floating node to a point the hardware reaches
+after hours. Nothing in the code enforces this; it is the intended usage
+(operator decision, 2026-11-03).
 
 ### Method contract
 
-| State field | After `recompute_dc_op()` |
+| State field | After `recompute_dc_op()` / `set_dc_operating_point(v)` |
 |---|---|
-| `dc_operating_point` | Converged node voltages at current pot/switch values |
-| `v_prev` | Same — next sample starts at equilibrium |
-| `i_nl_prev`, `i_nl_prev_prev` | Converged per-device current vector |
-| `q_dot` (trapezoidal builds) | `[0.0; N]` — the new equilibrium is at rest |
-| `input_prev` | `0.0` (new equilibrium assumes zero input history) |
+| `dc_operating_point` | The installed point: converged node voltages at current pot/switch values, or `v` |
+| `dc_op_i_nl` | The device currents AT that point (converged, or evaluated at `v`). The two are written together: the live pair |
+| `v_prev` | Same point — next sample starts at equilibrium |
+| `i_nl_prev`, `i_nl_prev_prev` | `dc_op_i_nl` |
+| `q_dot` (trapezoidal builds) | `[0.0; N]` — the new equilibrium is at rest (on an inductor or winding row this is `dΦ/dt = 0`; the current is a row of the point) |
+| `input_prev` / `inputs_prev`, `injections_prev` | `0.0` (new equilibrium assumes zero input history) |
 | `dc_block_x_prev[k]` | `v_node[OUTPUT_NODES[k]]` — seeds IIR at steady state |
 | `dc_block_y_prev` | `[0.0; NUM_OUTPUTS]` — DC blocker's fixed point |
 | `pot_N_resistance_prev` | `pot_N_resistance` (kept in step with the current value) |
-| `os_up_state`, `os_dn_state` (+ `_outer`) | Zeroed — stale DC trajectory discarded |
+| `os_up_state`, `os_dn_state` (+ `_outer`, the `.inject` up-filters) | Zeroed — stale DC trajectory discarded |
+| `last_nr_iterations` | The 0-indexed converging iteration (0 for `set_dc_operating_point`) |
+| nodal: `chord_valid`, `chord_be_valid` | `false` — the factorisations were taken at the old point |
+| nodal: BE-latch estimator fields, `be_latched`, `breakpoint_be` | Cleared, as `reset()` clears them |
 | `noise_rng_state` | **Preserved** — resetting would repeat the same noise after every param change |
 | `pot_N_resistance`, `switch_N_position` | **Preserved** — they're the INPUT to this solve |
-| `device_N_*` runtime params, `device_N_tj` | **Preserved** |
+| `device_N_*` runtime params, `device_N_tj` | **Preserved** (a body-effect MOSFET's `device_N_vt` holds the threshold at the installed point) |
 | `diag_*` counters | **Preserved** (caller may be watching) |
+| the factory point `reset()` returns to | **Preserved** (`DC_OP`/`DC_NL_I`, or the low-rate warmup's settled cache `settled_v`/`settled_i_nl` on a build whose compile-time solve did not converge) |
+
+Both routes emit the writeback as one private method, `dc_op_writeback`,
+shared by `recompute_dc_op` and `set_dc_operating_point`.
+
+### The live pair and the factory pair
+
+`dc_operating_point` is the **live** point and `dc_op_i_nl` the device
+currents at it; the two are always written together. The NaN/magnitude
+recovery (`process_sample`, Step 7 on DK, `emit_nodal_nan_reset` on nodal)
+restarts from that pair, so after a recompute at moved pots it restarts
+from a point that satisfies KCL (the live point with the baked `DC_NL_I`
+would not). `reset()` restores the **factory** pair — `DC_OP` with `DC_NL_I`,
+or on a nodal build whose compile-time solve did not converge the pair the
+low-rate warmup settled and cached (`settled_v`, `settled_i_nl`) — together
+with the nominal pot/switch values, so the three agree. A recomputed pair is
+discarded as a pair. `dc_op()` returns the live point.
+
+### `set_dc_operating_point(v_dc) -> (f64, usize)`
+
+Emitted on every build (both routes, with or without the recompute flag):
+the same writeback with the device currents from one evaluation at `v_dc`,
+and it **returns the KCL residual of `v_dc` against the live circuit** — the
+largest `|F_i|` over the circuit-node rows in amperes, and that row — from
+one matrix-vector product with the live `G` (`F = G·v − b_dc − N_i·i_nl`).
+An equilibrium reads ~1e-9 A or less. The vector is installed either way: the
+method reports a non-equilibrium vector, it never refuses one. A caller that
+hands over node voltages only, with the source and winding branch rows left
+at zero, sees the winding's DC current as the residual of the node it feeds
+(a 10 mA primary reads 10 mA at its load node; the transformer witness in
+`dc_op_recompute_nodal_tests.rs`).
 
 ### DC fixed-point algebra
 
@@ -544,22 +595,107 @@ are ×1 on every row; VS rows carry `V_dc`), adds `.runtime` voltage-source
 fields, then Newton-iterates
 `G_aug_nr = g_aug − N_i · J_dev · N_v`,
 `rhs_nr = b_dc + N_i · (i_nl − J_dev · v_nl)`,
-`v_new = G_aug_nr⁻¹ · rhs_nr` to convergence (1e-9 step tolerance).
+`v_new = G_aug_nr⁻¹ · rhs_nr`. `g_aug` is the live `G`: on DK the constant
+`G` plus the pot and switch-resistor deltas, on nodal the working copy the
+setters stamp (`g_work`, carrying the baked 1e-12 S node Gmin like the
+transient; the rate-dependent matrices are rebuilt first if a setter left
+them dirty). Every row of the augmented system is an unknown: node voltages,
+source and constraint rows, inductor and transformer winding currents (their
+rows are the DC short `v_a − v_b = 0`, the same short `dc_op.rs` stamps).
+
+### Certification (both routes)
+
+An iterate is accepted when two tests pass, both at the point written back:
+
+1. the **step test on the UNDAMPED Newton correction** `v_new − v`, per
+   variable over every row, `|Δ| < 1e-6·max(|v|, |v_new|) + 1e-9 V` — Newton's
+   own estimate of the distance to the root, read before any limiter touches
+   the step (the nodal transient's rule, at this solver's tolerances; the
+   applied, damped step's size is not evidence: the transient measured points
+   certified that way 1.7 to 810 thresholds from Newton's target);
+2. the **KCL residual gate** at the point a sub-threshold correction reached,
+   with the devices freshly evaluated there: over the circuit-node rows (and
+   a parasitic BJT's internal nodes on nodal), `|F_i| <= 1e-6·scale_i + 1e-9 A`,
+   `scale_i = max(|b_i|, |(N_i·i_nl)_i|, max_j |G_ij·v_j|)`, NaN-honest.
+
+The step test alone is satisfied at any fixed point of the limiter, root or
+not; the gate alone is vacuous on a weak mode (a node tied to the rest of
+the circuit by nanosiemens passes a 1e-9 A gate anywhere within a fraction
+of a volt). Loop shape: evaluate the devices at `v_k`; if the previous
+correction passed, gate `v_k`; else stamp, solve, test the undamped
+correction, apply the limited step. The accepting evaluation is the next
+iteration's, so certification costs no extra device evaluation.
+
+Limiting: DK applies its flat node damping (`DAMP_THRESHOLD` 10 V, ±50 V
+clamp, voltage rows only). Nodal applies the transient's limiter: pnjlim /
+fetlim on each proposed device voltage shrink one ray `alpha` (Newton's
+direction is kept, never a per-junction back-projection — two devices that
+share a node cannot be summed into a reversed step), then the node-step
+damping at `max(10 V, 5 % of the largest node voltage)`.
+
+A body-effect MOSFET's threshold is refreshed at every iterate through its
+`device_N_vt` field (the only channel into the shared device evaluator); a
+failed recompute puts the pre-solve values back, so failure leaves the state
+untouched.
 
 ### Railed op-amps
 
-A railed op-amp output sits where the transient's rail mode keeps it, as in
-the compile-time DC OP (see "Railed op-amps: an active set inside Newton"). The runtime recompute is
-DK-only, and on DK a clamped op-amp runs hard, so the recompute pins a railed
-output at its zero-load limit at the terminal: an active set (pin every output
-whose linear model `AOL·(v+ − v−)` passes its limit, re-solve with those rows
+DK: a clamped op-amp runs hard, so the recompute pins a railed output at its
+zero-load limit at the terminal — an active set (pin every output whose
+linear model `AOL·(v+ − v−)` passes its limit, re-solve with those rows
 fixed, repeat until the set is unchanged, at most 8 rounds; a held pin stays
 only while its own test holds and otherwise releases, never moving to the
-other rail in one round, the rule of the compile-time active set). A set that does
-not settle is a failed recompute (`diag_nr_max_iter_count`), so `settle_dc_op`
-falls back to the warmup loop. Without the pin the recompute solved the linear
-model: a comparator railed at rest landed at 8989 V on a 15 V supply
+other rail in one round, the rule of the compile-time active set). A set
+that does not settle is a failed recompute (`diag_nr_max_iter_count`), so
+`settle_dc_op` falls back to the warmup loop. Without the pin the recompute
+solved the linear model: a comparator railed at rest landed at 8989 V on a
+15 V supply
 (`opamp_saturated_sag_tests::the_runtime_recompute_keeps_a_railed_output_on_its_rail`).
+
+Nodal: a railed output is never solved through its linear model, and the
+transient's active set is not carried by the runtime solve yet, so a nodal
+deck whose rail mode clamps a finite rail **refuses** (below). BoyleDiodes
+rails are catch diodes the solve sees as devices; `none` applies no rail, so
+the linear model is the transient's own fixed point.
+
+### Refusals (nodal)
+
+Three classes of nodal build get no solve: `recompute_dc_op` advances
+`diag_nr_max_iter_count` and returns with the state untouched, so
+`settle_dc_op` falls back to the warmup loop. Each is a commented early
+return in the generated method, and its doc comment says `This build:
+solved.` or `This build: REFUSED (…)` (`nodal_emitter/dc_op.rs`,
+`recompute_refusals`).
+
+- **Behavioral B-source decks**, classed on `idt()` / `time`: an integrator
+  whose integrand is nonzero at rest advances every sample, so such a deck
+  has no DC operating point and no warmup settles it either. Static and
+  ddt-only expressions do have a fixed point (ddt is exactly 0 there), which
+  beats the baked `DC_OP` (it drops B sources entirely), but no plugin deck
+  needs that branch; building it means seeding `bsrc_x_prev` at the
+  converged inner values (or the first sample sees ddt as an impulse) and
+  landing the same inclusion in `dc_op.rs` so the two points agree. Until
+  then every B-source deck refuses; a later inclusion widens the class, it
+  does not reverse it.
+- **Clampable op-amps** (a finite VCC/VEE under the hard or an active-set
+  rail mode): see above. 4kbuscomp and gravity are the witnesses for the
+  active-set landing; 4kbuscomp's sidechain-rectifier op-amps are also a
+  basin question the compile-time solver scopes out (`seed_sr_feedback_diodes`).
+- **Latched (glow) devices**: the lit/unlit latch is part of the equations;
+  such a deck can have two DC roots or none (a relaxation divider).
+
+### Measured (2026-11-03)
+
+Nodal fixtures (a BJT stage with a diode clamp, a transformer with a 10 mA
+primary, a JFET stage, a switched and a pot diode bias network), `v_prev`
+perturbed ×1.1 and +1 V on the node rows: every one recomputes onto the baked
+`DC_OP` within 1e-9 V (KCL within 1e-9 A) in 2–23 iterations, and the first
+sample afterwards converges at iteration 0 with no hold and no sub-step.
+After `set_switch_0(1)` / `set_pot_0(2200)` the recompute equals the `DC_OP`
+of the deck built at that position / value
+(`dc_op_recompute_nodal_tests.rs`). The 11 DK golden-manifest decks compiled
+with the flag land on the same point under the two-test certification as
+under the old step-only test; none refuses.
 
 ### MVP limitations
 
@@ -572,24 +708,23 @@ model: a comparator railed at rest landed at 8989 V on a 15 V supply
   on the compile-time solver's `seed_sr_feedback_diodes` refinement
   stay on the warmup loop.
 - **No parasitic-BJT internal-node expansion on the DK path** (those
-  nodes are ill-conditioning risks outside the MVP).
+  nodes are ill-conditioning risks outside the MVP). On nodal the internal
+  nodes are real MNA rows and are solved.
 - **Inductors need no special case.** Inductors, coupled inductors and
   transformer windings are augmented branch rows whose `L` sits in `C`; in
   `G` each row is the short `v_a − v_b = 0`, the same DC short `dc_op.rs`
   stamps. The branch currents are entries of `v_node`, written back with
-  it; in trapezoidal builds the zeroed `q_dot` sets their `dΦ/dt` to zero. A DC-carrying
-  choke recomputes to the baked `DC_OP`
+  it; in trapezoidal builds the zeroed `q_dot` sets their `dΦ/dt` to zero. A
+  DC-carrying choke recomputes to the baked `DC_OP`
   (`dc_op_recompute_tests.rs::fix3_dc_biased_choke_shipped_recompute_reaches_inductor_short_op`).
-- **Nodal path, Schur and full-LU alike** (passive-eq, 4kbuscomp, VCR ALC,
-  wurli power amp) ships a stub body that bumps `diag_nr_max_iter_count` and returns —
-  **this is the permanent path for nodal-routed circuits**, not a
-  temporary placeholder. The method surface is uniform across DK and
-  nodal so host code doesn't need a solver-path branch, but on nodal
-  circuits the diagnostic-fallback pattern (check the counter, fall
-  back to `WARMUP_SAMPLES_RECOMMENDED`) is the only viable workflow.
-  The full nodal NR body is deferred indefinitely — no shipping plugin
-  blocks on it, and the warmup loop already uses the per-sample NR
-  which is guaranteed to converge to the physically correct DC OP.
+  A saturating inductor's flux is `Φ(i)` of that current, recomputed from
+  `v_prev` every sample (`emit_sat_ind_history`), so it carries no separate
+  state to seed.
+- **The warmup fallback is not the same answer reached more slowly on every
+  deck.** On a deck whose open switch is a 1 GΩ stand-in, a floating node's
+  time constant can be hours; the recompute lands on that node's equilibrium
+  while `WARMUP_SAMPLES_RECOMMENDED` samples (`5·τ_max`, capped) do not get
+  there. The two differ on such states by design.
 
 ### Real-time safety
 
@@ -618,17 +753,15 @@ pub fn settle_dc_op(&mut self) {
 ```
 
 Identical body on DK and nodal paths — the path-specific behavior
-lives entirely in `recompute_dc_op`. On the DK path, a successful NR
-makes `settle_dc_op` equivalent to a bare `recompute_dc_op` call. On
-the nodal path, the permanent stub ticks the counter and
-`settle_dc_op` always falls through to the warmup loop. Plugin code
-calling `settle_dc_op` doesn't need to branch on the circuit's
+lives entirely in `recompute_dc_op`. A successful solve makes
+`settle_dc_op` equivalent to a bare `recompute_dc_op` call; a refused build
+or a failed solve ticks the counter and the wrapper runs the warmup loop.
+Plugin code calling `settle_dc_op` doesn't need to branch on the circuit's
 routing — the wrapper handles it.
 
 The counter check uses `diag_nr_max_iter_count` exclusively because
-damping and substep counters can increment during *successful* DK
-convergence. The NR path increments this specific counter on
-iter-exhaustion, singular LU, and NaN resets — all "state was not
-updated" outcomes — and the nodal stub increments it unconditionally.
-So this single field cleanly distinguishes "ready to process" from
-"fall back to warmup".
+damping and substep counters can increment during *successful*
+convergence. The recompute increments this specific counter on
+iter-exhaustion, singular LU, NaN resets, an unsettled rail pin set and
+every refusal — all "state was not updated" outcomes — so this single
+field cleanly distinguishes "ready to process" from "fall back to warmup".

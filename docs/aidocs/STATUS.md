@@ -71,6 +71,7 @@ under Validated Circuits below.
   - DC OP diode: a 1e-12 S Newton-conditioning conductance on the diode Jacobian only, not on the current (the diode current at the fixed point is the diode law's, as in the transient)
   - DC OP op-amps: AOL is capped at 1000 in the DC G as a homotopy aid against multi-equilibrium NR in precision rectifiers; the solve finishes at the full AOL from that point (`dc_op.rs`, `AOL_DC_MAX`)
   - DC OP input ports: the DC OP solves the `mna.g` the build stamped (every input port's conductance counted once, as the transient counts it); `DcOpConfig` has no input fields. The reported KCL residual is against the circuit's own G, not the working copy with its solver aids, so it carries the node Gmin leak (~1e-12·|v| A). Witness: a divider tapped through a 1 MΩ port matches ngspice (v(in) 2.992519 V) in the baked `DC_OP`, `recompute_dc_op` and `melange dc-op`
+  - Runtime DC OP recompute (`--emit-dc-op-recompute`, both routes since 2026-11-03): Newton on the live `G` from `v_prev`, certified by the undamped-correction step test AND the per-row KCL gate at the compile-time tolerances; nodal refuses behavioral, clamped-op-amp and glow builds into the warmup fallback. `set_dc_operating_point(v) -> (max KCL residual A, row)` on every build; the live point is paired with its own currents (`dc_op_i_nl`) for the NaN recovery, and `reset()` restores the factory pair on both routes. Intended for instantiation / reset / preset recall / jitter, not a live control change during playback.
   - DC OP failed convergence: low-rate warmup (200 Hz × 1000 samples = 5s circuit time) charges coupling caps before transient NR. Settled state cached for `reset()`. 4kbuscomp: BE fallback <1%, stable at all amplitudes.
   - BJT GP Q1: singularity guard at `q1_denom <= 0` (physically near Early voltage limit)
   - Tube Koren: no space-charge, no transit-time effects
@@ -221,7 +222,7 @@ Source: Sowter DWG E-72,658-2 (amp §) + Peerless/Triad winding data.
 - Full reference: [UNIT_VARIATION.md](UNIT_VARIATION.md).
 
 ### Dynamic Parameters
-- `.pot R min max [default] [label]`: on a linear DK build (M = 0) a change is one exact rank-1 (Sherman–Morrison) update of S, O(N²), audio-rate safe; elsewhere a per-block O(N³) rebuild; per-sample smoother via `.smoothed.next()`; reseed-free setter — use `recompute_dc_op()` for preset-recall NR refresh (DK only; nodal falls back to NR catch-up); setter deadband 1e-12 relative to the stored value
+- `.pot R min max [default] [label]`: on a linear DK build (M = 0) a change is one exact rank-1 (Sherman–Morrison) update of S, O(N²), audio-rate safe; elsewhere a per-block O(N³) rebuild; per-sample smoother via `.smoothed.next()`; reseed-free setter — use `recompute_dc_op()` for preset-recall NR refresh (both routes; three nodal classes refuse into the warmup fallback, see DC_OP.md); setter deadband 1e-12 relative to the stored value
 - `.wiper R_cw R_ccw total [pos] [label]`: two-resistor wiper; position-0..1 UI param
 - `.switch R/C/L pos0 pos1 ...`: up to 16 switches; G/C/L stamped at pos-0 baseline (not static) so initial state is self-consistent
 - `.gang "Label" m1 m2 ...`: links multiple `.pot`/`.wiper` members under one parameter; `!` prefix inverts; `.runtime R` members rejected at parse time (drive multiple setters from one plugin envelope instead)

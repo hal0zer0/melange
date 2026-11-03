@@ -218,8 +218,18 @@ impl RustEmitter {
             "    /// Nonlinear currents from two samples ago i_nl[n-2] (for NR predictor)\n",
         );
         code.push_str("    pub i_nl_prev_prev: [f64; M],\n\n");
-        code.push_str("    /// DC operating point (for reset/sleep/wake)\n");
+        code.push_str("    /// The live DC operating point: the baked `DC_OP` until\n");
+        code.push_str("    /// `recompute_dc_op` or `set_dc_operating_point` installs another;\n");
+        code.push_str("    /// `reset()` returns it to the factory point.\n");
         code.push_str("    pub dc_operating_point: [f64; N],\n\n");
+        code.push_str(
+            "    /// The nonlinear device currents AT `dc_operating_point`: `DC_NL_I` for\n\
+             \x20   /// the baked point, the currents evaluated at the installed point after\n\
+             \x20   /// a recompute or `set_dc_operating_point`. The two are always written\n\
+             \x20   /// together, so the NaN/magnitude recovery and `reset()` restart from a\n\
+             \x20   /// pair that satisfies KCL.\n\
+             \x20   pub dc_op_i_nl: [f64; M],\n\n",
+        );
         code.push_str("    /// Previous input sample for trapezoidal integration\n");
         if multi_input {
             code.push_str("    pub inputs_prev: [f64; NUM_INPUTS],\n\n");
@@ -485,6 +495,12 @@ impl RustEmitter {
         if !ir.dc_op_converged && m > 0 {
             code.push_str("    /// Whether low-rate DC warmup has been completed\n");
             code.push_str("    pub dc_settled: bool,\n");
+            code.push_str(
+                "    /// Settled node voltages from the low-rate warmup: the factory point\n\
+                 \x20   /// `reset()` returns to on this build (replaces DC_OP), kept apart\n\
+                 \x20   /// from the live `dc_operating_point` a recompute may overwrite.\n",
+            );
+            code.push_str("    pub settled_v: [f64; N],\n");
             code.push_str(
                 "    /// Settled nonlinear currents from low-rate warmup (replaces DC_NL_I on reset)\n",
             );
@@ -798,6 +814,11 @@ impl RustEmitter {
         } else {
             code.push_str("            dc_operating_point: [0.0; N],\n");
         }
+        if has_dc_nl {
+            code.push_str("            dc_op_i_nl: DC_NL_I,\n");
+        } else {
+            code.push_str("            dc_op_i_nl: [0.0; M],\n");
+        }
         if multi_input {
             code.push_str("            inputs_prev: [0.0; NUM_INPUTS],\n");
         } else {
@@ -822,6 +843,11 @@ impl RustEmitter {
         }
         if !ir.dc_op_converged && m > 0 {
             code.push_str("            dc_settled: false,\n");
+            if has_dc_op {
+                code.push_str("            settled_v: DC_OP,\n");
+            } else {
+                code.push_str("            settled_v: [0.0; N],\n");
+            }
             if has_dc_nl {
                 code.push_str("            settled_i_nl: DC_NL_I,\n");
             } else {
@@ -1114,6 +1140,27 @@ impl RustEmitter {
         );
         let restores_from = code.len();
         code.push_str("    pub fn reset(&mut self) {\n");
+        // The factory point and its currents, restored together: the baked
+        // pair, or on a build whose compile-time solve did not converge the
+        // pair the low-rate warmup settled and cached. A point a recompute
+        // installed at moved pots is discarded with its currents.
+        code.push_str(
+            "        // The factory point with its own currents, so they agree with the\n\
+             \x20       // nominal pot/switch values restored below.\n",
+        );
+        let factory_v = if has_dc_op { "DC_OP" } else { "[0.0; N]" };
+        let factory_i = if has_dc_nl { "DC_NL_I" } else { "[0.0; M]" };
+        if !ir.dc_op_converged && m > 0 {
+            code.push_str(&format!(
+                "        self.dc_operating_point = if self.dc_settled {{ self.settled_v }} else {{ {factory_v} }};\n\
+                 \x20       self.dc_op_i_nl = if self.dc_settled {{ self.settled_i_nl }} else {{ {factory_i} }};\n"
+            ));
+        } else {
+            code.push_str(&format!(
+                "        self.dc_operating_point = {factory_v};\n\
+                 \x20       self.dc_op_i_nl = {factory_i};\n"
+            ));
+        }
         if has_cap_ic {
             code.push_str("        self.v_prev = V_PREV_IC_SEED;\n");
         } else {
@@ -1404,9 +1451,14 @@ impl RustEmitter {
                     target_rate,
                 ));
             }
-            code.push_str("            // Cache settled state for future resets\n");
-            code.push_str("            self.dc_operating_point = self.v_prev;\n");
+            code.push_str(
+                "            // Cache the settled pair as the factory point for future\n",
+            );
+            code.push_str("            // resets, and install it as the live point.\n");
+            code.push_str("            self.settled_v = self.v_prev;\n");
             code.push_str("            self.settled_i_nl = self.i_nl_prev;\n");
+            code.push_str("            self.dc_operating_point = self.v_prev;\n");
+            code.push_str("            self.dc_op_i_nl = self.i_nl_prev;\n");
             code.push_str("            self.dc_settled = true;\n");
             code.push_str("        }\n");
         }
@@ -1415,70 +1467,82 @@ impl RustEmitter {
         code.push_str("        }\n");
         code.push_str("    }\n\n");
 
-        // set_dc_operating_point()
-        code.push_str("    /// Set DC operating point (call after DC analysis)\n");
-        code.push_str("    pub fn set_dc_operating_point(&mut self, v_dc: [f64; N]) {\n");
-        code.push_str("        self.dc_operating_point = v_dc;\n");
-        code.push_str("        self.v_prev = v_dc;\n");
-        if carries_q_dot(ir) {
-            code.push_str("        self.q_dot = [0.0; N];\n");
-        }
-        code.push_str("    }\n\n");
+        // dc_kcl_residual(), dc_op_writeback(), set_dc_operating_point(): on
+        // every build, whatever the recompute flag.
+        code.push_str(&Self::emit_nodal_dc_op_state_methods(ir, use_full_nodal));
 
-        // dc_op() accessor. Lets plugins
-        // read the baked DC bias point without reaching into the dynamic
-        // `v_prev` field (which carries per-sample updates).
-        code.push_str("    /// Read the baked DC operating point for this circuit.\n");
+        // dc_op() accessor. Lets plugins read the live DC bias point without
+        // reaching into the dynamic `v_prev` field (which carries per-sample
+        // updates).
+        code.push_str("    /// Read the LIVE DC operating point of this state.\n");
         code.push_str("    ///\n");
         code.push_str(
-            "    /// Solution to the nonlinear DC system computed at codegen time (at nominal\n",
-        );
-        code.push_str(
-            "    /// pot/switch values) and frozen into `DC_OP`. Prefer this over `v_prev` when\n",
-        );
-        code.push_str(
-            "    /// you want the *designed* bias point — `v_prev` carries per-sample dynamics.\n",
+            "    /// The baked `DC_OP` (the nonlinear DC system solved at codegen time at\n\
+             \x20   /// nominal pot/switch values) until `recompute_dc_op` or\n\
+             \x20   /// `set_dc_operating_point` installs another; `reset()` returns it to the\n\
+             \x20   /// factory point. Prefer this over `v_prev` for the bias point: `v_prev`\n\
+             \x20   /// carries the per-sample dynamics on top of it.\n",
         );
         code.push_str("    #[inline]\n");
         code.push_str("    pub fn dc_op(&self) -> &[f64; N] {\n");
         code.push_str("        &self.dc_operating_point\n");
         code.push_str("    }\n\n");
 
-        // recompute_dc_op(). The nodal route ships a
-        // stub: emits the method surface uniformly with the DK
-        // path but the body only bumps `diag_nr_max_iter_count` and
-        // returns. Nodal-routed plugins use the
-        // `WARMUP_SAMPLES_RECOMMENDED` silence loop (the documented path
-        // for nodal circuits). A nodal NR body is not implemented — see `emit_recompute_dc_op_body_nodal` in
-        // `dc_op_emitter.rs` for the rationale. Feature-gated so the
-        // default codegen path stays byte-identical.
+        // recompute_dc_op() and settle_dc_op(): behind the flag so the
+        // default codegen path is unchanged.
         if ir.solver_config.emit_dc_op_recompute {
-            let body = super::super::dc_op_emitter::emit_recompute_dc_op_body_nodal(ir)
-                .expect("nodal stub body must be infallible");
+            let body = Self::emit_recompute_dc_op_body_nodal(ir, use_full_nodal);
+            let refusals = super::dc_op::recompute_refusals(ir);
             code.push_str(
-                "    /// Re-solve the DC operating point at the current pot/switch values.\n\
+                "    /// Re-solve the DC operating point at the current pot/switch/device\n\
+                 \x20   /// values and install it (`dc_op_writeback`).\n\
                  \x20   ///\n\
-                 \x20   /// **Not audio-thread safe.** Intended for plugin initialization\n\
-                 \x20   /// after applying per-instance pot/switch jitter.\n\
+                 \x20   /// The result is the infinite-time equilibrium of the circuit at the\n\
+                 \x20   /// current controls and the current junction temperatures (not thermal\n\
+                 \x20   /// equilibrium: `tj` is an input, left as it is). Intended for\n\
+                 \x20   /// instantiation, `reset()`, preset recall and per-instance jitter, where\n\
+                 \x20   /// no audio is running: it replaces the `WARMUP_SAMPLES_RECOMMENDED`\n\
+                 \x20   /// silence loop with one Newton solve. It is not meant for a live control\n\
+                 \x20   /// change during playback: there it would replace the circuit's own\n\
+                 \x20   /// transition (a bias network's re-settle after a switch press is\n\
+                 \x20   /// hardware behaviour to keep) with the equilibrium it reaches only after\n\
+                 \x20   /// that transition. Nothing enforces this; it is the intended usage.\n\
                  \x20   ///\n\
-                 \x20   /// # Nodal route: stub only\n\
+                 \x20   /// Newton on the augmented system with the live matrices and the\n\
+                 \x20   /// per-sample loop's device evaluator and limiter, from `v_prev`, direct\n\
+                 \x20   /// (no source or Gmin stepping). Certification is the compile-time\n\
+                 \x20   /// solver's: the undamped Newton correction under `1e-6·|v| + 1e-9 V` on\n\
+                 \x20   /// every row AND the KCL residual under `1e-6·scale + 1e-9 A` on every\n\
+                 \x20   /// circuit-node row, both at the point written back. On failure the\n\
+                 \x20   /// state is left untouched and `diag_nr_max_iter_count` advances, which\n\
+                 \x20   /// is what `settle_dc_op` reads to fall back to the warmup loop.\n\
                  \x20   ///\n\
-                 \x20   /// The runtime DC OP solve is shipped on the DK path only. Nodal\n\
-                 \x20   /// circuits (Schur and full-LU alike) use the\n\
-                 \x20   /// `WARMUP_SAMPLES_RECOMMENDED` silence loop — this is\n\
-                 \x20   /// the documented path for nodal circuits, not a placeholder. The\n\
-                 \x20   /// warmup loop runs the full per-sample NR and is guaranteed to\n\
-                 \x20   /// converge to the physically correct DC OP.\n\
+                 \x20   /// # Refusals\n\
                  \x20   ///\n\
-                 \x20   /// Calling this method on a nodal-routed circuit bumps\n\
-                 \x20   /// `diag_nr_max_iter_count` and returns without touching\n\
-                 \x20   /// `dc_operating_point` or `v_prev`. The standard fallback\n\
-                 \x20   /// pattern — check the counter, run warmup on tick — handles\n\
-                 \x20   /// both DK-convergence-failure and nodal-stub cases uniformly,\n\
-                 \x20   /// so plugin host code doesn't need a solver-path branch.\n\
-                 \x20   ///\n\
-                 \x20   /// See `docs/aidocs/DC_OP.md` \"Runtime DC OP recompute\" for the\n\
-                 \x20   /// DK-path semantics.\n\
+                 \x20   /// Three classes of build get no solve: the method advances the counter\n\
+                 \x20   /// and returns, so `settle_dc_op` falls back to the warmup loop.\n\
+                 \x20   /// - A behavioral B-source deck (classed on `idt()` / `time`: an\n\
+                 \x20   ///   integrator with a nonzero integrand at rest has no DC operating\n\
+                 \x20   ///   point; every B-source deck refuses in this cut).\n\
+                 \x20   /// - A deck whose op-amp rail mode clamps a finite rail (hard or an\n\
+                 \x20   ///   active-set mode with VCC/VEE): a railed output is never solved\n\
+                 \x20   ///   through its linear model.\n\
+                 \x20   /// - A deck with a latched (glow) device: its lit/unlit state is part of\n\
+                 \x20   ///   the equations, and such a deck can have two DC roots or none.\n\
+                 \x20   ///\n",
+            );
+            code.push_str(&format!(
+                "    /// This build: {}.\n",
+                if refusals.is_empty() {
+                    "solved".to_string()
+                } else {
+                    format!("REFUSED ({})", refusals.join(", "))
+                }
+            ));
+            code.push_str(
+                "    ///\n\
+                 \x20   /// **Not audio-thread safe.** The solve can take tens to hundreds of\n\
+                 \x20   /// microseconds. See `docs/aidocs/DC_OP.md` \"Runtime DC OP Recompute\".\n\
                  \x20   pub fn recompute_dc_op(&mut self) {\n",
             );
             code.push_str(&body);
@@ -1486,24 +1550,19 @@ impl RustEmitter {
 
             // settle_dc_op() — the "recompute + warmup fallback" wrapper.
             // Identical body to the DK path; the path-specific behavior
-            // lives in `recompute_dc_op`. On the nodal path the stub
-            // always ticks the counter, so this always falls through to
-            // the warmup loop — that's the intended contract.
+            // lives in `recompute_dc_op`.
             code.push_str(
                 "    /// Settle to the DC operating point at current pot / switch / device\n\
                  \x20   /// values — the \"recompute with warmup fallback\" convenience wrapper.\n\
                  \x20   ///\n\
                  \x20   /// Calls [`recompute_dc_op`](CircuitState::recompute_dc_op) first;\n\
-                 \x20   /// if the NR failed to update state (detected via\n\
+                 \x20   /// if it refused this build or failed to converge (detected via\n\
                  \x20   /// `diag_nr_max_iter_count` advancing), falls back to\n\
                  \x20   /// `WARMUP_SAMPLES_RECOMMENDED` iterations of `process_sample(0.0, self)`.\n\
                  \x20   /// Always leaves the circuit at a valid equilibrium — either the exact\n\
-                 \x20   /// NR solution or the warmup-loop-converged steady state.\n\
-                 \x20   ///\n\
-                 \x20   /// On this (nodal full-LU) path the runtime NR is a permanent stub,\n\
-                 \x20   /// so this method always falls through to the warmup loop today.\n\
-                 \x20   /// Plugin code doesn't need to branch on path — the contract is\n\
-                 \x20   /// uniform and the wrapper handles the routing.\n\
+                 \x20   /// NR solution or the warmup-loop-converged steady state. Same usage\n\
+                 \x20   /// note as `recompute_dc_op`: for instantiation, reset, preset recall and\n\
+                 \x20   /// jitter, not a live control change during playback.\n\
                  \x20   ///\n\
                  \x20   /// **Not audio-thread safe.** Call from plugin initialization or\n\
                  \x20   /// parameter-change callbacks.\n\
@@ -1912,9 +1971,8 @@ impl RustEmitter {
         //
         // Neither setter reseeds NR state. Callers that need a fresh NR
         // seed (preset recall, raw unsmoothed jumps) must follow with
-        // `recompute_dc_op()`. On the nodal path `recompute_dc_op()` is a
-        // stub (see `emit_recompute_dc_op_body_nodal`); nodal preset recall falls back
-        // to WARMUP_SAMPLES_RECOMMENDED samples of NR catch-up.
+        // `recompute_dc_op()` (`--emit-dc-op-recompute`; see `dc_op.rs`), or
+        // let NR catch up over WARMUP_SAMPLES_RECOMMENDED samples.
         for (idx, pot) in ir.pots.iter().enumerate() {
             let np = pot.node_p;
             let nq = pot.node_q;
@@ -2085,9 +2143,6 @@ impl RustEmitter {
 
             // No NR-state reseed: callers that need one (preset recall,
             // raw unsmoothed jumps) should follow with `recompute_dc_op()`.
-            // Nodal circuits route through the stub body — falls back to
-            // WARMUP_SAMPLES_RECOMMENDED if a full nodal recompute is ever
-            // needed (see `emit_recompute_dc_op_body_nodal`).
             code.push_str("    }\n\n");
         }
 
@@ -2096,15 +2151,17 @@ impl RustEmitter {
             code.push_str(&format!(
                 "    /// Set switch {} position (0-indexed, {} positions).\n\
                  \x20   ///\n\
-                 \x20   /// A switch flip is a topology step — follow with `recompute_dc_op()`\n\
-                 \x20   /// on DK circuits to refresh the NR seed. On nodal (stub recompute)\n\
-                 \x20   /// NR re-converges essentially immediately (typically the next\n\
-                 \x20   /// sample, even across a real topology change). Any residual DC\n\
-                 \x20   /// settle is bounded ABOVE by WARMUP_SAMPLES_RECOMMENDED, but that\n\
-                 \x20   /// is a worst-case FULL-DC-settle bound (max node RC, including\n\
-                 \x20   /// high-impedance nodes off the audio path) — the AUDIBLE settle is\n\
-                 \x20   /// usually far shorter (often ~0 ms). Measure the transient on the\n\
-                 \x20   /// output; do NOT mute or size a fade for the full WARMUP bound.\n",
+                 \x20   /// A switch flip is a topology step. With no audio running (preset\n\
+                 \x20   /// recall, instantiation), follow with `recompute_dc_op()` to refresh\n\
+                 \x20   /// the NR seed. During playback let the circuit settle on its own: NR\n\
+                 \x20   /// re-converges essentially immediately (typically the next sample,\n\
+                 \x20   /// even across a real topology change), and the bias network's\n\
+                 \x20   /// re-settle is hardware behaviour. Any residual DC settle is bounded\n\
+                 \x20   /// ABOVE by WARMUP_SAMPLES_RECOMMENDED, but that is a worst-case\n\
+                 \x20   /// FULL-DC-settle bound (max node RC, including high-impedance nodes\n\
+                 \x20   /// off the audio path) — the AUDIBLE settle is usually far shorter\n\
+                 \x20   /// (often ~0 ms). Measure the transient on the output; do NOT mute or\n\
+                 \x20   /// size a fade for the full WARMUP bound.\n",
                 idx, sw.num_positions
             ));
             code.push_str(&format!(
@@ -2291,9 +2348,8 @@ impl RustEmitter {
 
             // No NR-state reseed: a switch flip is a topology step, but
             // reseeding `v_prev` mid-signal snaps the trajectory to DC_OP
-            // and is audible as a click. Callers should follow with
-            // `recompute_dc_op()` on DK circuits, or accept NR catch-up
-            // on nodal circuits (stub) over WARMUP_SAMPLES_RECOMMENDED.
+            // and is audible as a click. Callers with no audio running follow
+            // with `recompute_dc_op()`; during playback NR catches up.
 
             code.push_str("    }\n\n");
         }

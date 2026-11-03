@@ -75,8 +75,8 @@ pub(super) fn emit_dc_block_history_reseed(
 /// Must stay in sync with the DK-path equivalent in
 /// `templates/rust/process_sample.rs.tera` (Step 7). Reset list:
 ///
-/// - `v_prev`  ← `dc_operating_point`
-/// - `i_nl_prev` / `i_nl_prev_prev` ← `DC_NL_I` or zeros
+/// - `v_prev`  ← `dc_operating_point` (the live point)
+/// - `i_nl_prev` / `i_nl_prev_prev` ← `dc_op_i_nl` (the currents kept beside it)
 /// - `input_prev` ← 0
 /// - `dc_block_x_prev` ← DC OP at the output nodes, `dc_block_y_prev` ← 0
 ///   (when `ir.dc_block`)
@@ -100,7 +100,6 @@ pub(super) fn emit_nodal_nan_reset(
     noise: &NoiseEmission,
 ) {
     let body = format!("{indent}    ");
-    let has_dc_nl = ir.dc_nl_currents.iter().any(|&v| v != 0.0);
     let m = ir.topology.m;
 
     code.push_str(&format!(
@@ -117,18 +116,16 @@ pub(super) fn emit_nodal_nan_reset(
          {indent}if !v_is_finite || v.iter().any(|x| x.abs() > STATE_MAX_PLAUSIBLE_MAGNITUDE) {{\n"
     ));
 
-    // Core NR state
+    // Core NR state: the live operating point with ITS currents (`DC_NL_I`
+    // until a recompute or `set_dc_operating_point`, the currents evaluated
+    // at the installed point after one), so the restart is from a pair that
+    // satisfies KCL.
     code.push_str(&format!("{body}state.v_prev = state.dc_operating_point;\n"));
     if carries_q_dot(ir) {
         code.push_str(&format!("{body}state.q_dot = [0.0; N];\n"));
     }
-    if has_dc_nl {
-        code.push_str(&format!("{body}state.i_nl_prev = DC_NL_I;\n"));
-        code.push_str(&format!("{body}state.i_nl_prev_prev = DC_NL_I;\n"));
-    } else {
-        code.push_str(&format!("{body}state.i_nl_prev = [0.0; M];\n"));
-        code.push_str(&format!("{body}state.i_nl_prev_prev = [0.0; M];\n"));
-    }
+    code.push_str(&format!("{body}state.i_nl_prev = state.dc_op_i_nl;\n"));
+    code.push_str(&format!("{body}state.i_nl_prev_prev = state.dc_op_i_nl;\n"));
     if ir.solver_config.num_inputs() > 1 {
         code.push_str(&format!("{body}state.inputs_prev = [0.0; NUM_INPUTS];\n"));
     } else {

@@ -494,14 +494,7 @@ impl CircuitState {
 {% endfor %}{% endif %}
     }
 
-    /// Set DC operating point (call after DC analysis)
-    pub fn set_dc_operating_point(&mut self, v_dc: [f64; N]) {
-        self.dc_operating_point = v_dc;
-        self.v_prev = v_dc;
-{% if carries_q_dot %}        self.q_dot = [0.0; N];
-{% endif %}        self.refresh_damp_thresh();
-    }
-
+{{ dc_op_state_methods }}
     /// Recompute the cached Step-6c damping threshold from the current DC
     /// operating point. Called wherever `dc_operating_point` is mutated so the
     /// per-sample safety net can read `self.damp_thresh` directly. Mirrors the
@@ -516,13 +509,13 @@ impl CircuitState {
         self.damp_thresh = max_dc.mul_add(0.05, 2.0);
     }
 
-    /// Read the baked DC operating point for this circuit.
+    /// Read the LIVE DC operating point of this state.
     ///
-    /// This is the solution to the nonlinear DC system computed at codegen
-    /// time (at nominal pot/switch values) and frozen into the `DC_OP`
-    /// constant. Prefer this over `v_prev` when you want the *designed*
-    /// bias point — `v_prev` carries per-sample dynamics plus any updates
-    /// from `set_dc_operating_point` / `recompute_dc_op`.
+    /// The baked `DC_OP` (the nonlinear DC system solved at codegen time at
+    /// nominal pot/switch values) until `recompute_dc_op` or
+    /// `set_dc_operating_point` installs another; `reset()` returns it to
+    /// `DC_OP`. Prefer this over `v_prev` for the bias point: `v_prev` carries
+    /// the per-sample dynamics on top of it.
     ///
     /// For per-node access with readable names, see [`dc_op_dump`].
     #[inline]
@@ -530,33 +523,32 @@ impl CircuitState {
         &self.dc_operating_point
     }
 {% if emit_dc_op_recompute %}
-    /// Re-solve the DC operating point at the current pot/switch values.
+    /// Re-solve the DC operating point at the current pot/switch/device
+    /// values and install it (`dc_op_writeback`).
     ///
-    /// Call once after applying per-instance pot/switch jitter (or a preset
-    /// change) and before processing audio, to skip the
-    /// `WARMUP_SAMPLES_RECOMMENDED` silence loop that would otherwise be
-    /// needed for the solver to settle into the jittered equilibrium.
+    /// The result is the infinite-time equilibrium of the circuit at the
+    /// current controls and the current junction temperatures (not thermal
+    /// equilibrium: `tj` is an input, left as it is). Intended for
+    /// instantiation, `reset()`, preset recall and per-instance jitter, where
+    /// no audio is running: it replaces the `WARMUP_SAMPLES_RECOMMENDED`
+    /// silence loop with one Newton solve. It is not meant for a live control
+    /// change during playback: there it would replace the circuit's own
+    /// transition (a bias network's re-settle after a switch press is
+    /// hardware behaviour to keep) with the equilibrium it reaches only after
+    /// that transition. Nothing enforces this; it is the intended usage.
     ///
-    /// **Not audio-thread safe.** The NR solve can take tens to hundreds of
-    /// microseconds. Call from plugin initialization or parameter-change
-    /// callbacks, not inside `process_sample`.
+    /// Certification is the compile-time solver's: the undamped Newton
+    /// correction under `1e-6·|v| + 1e-9 V` on every row AND the KCL residual
+    /// under `1e-6·scale + 1e-9 A` on every circuit-node row, both at the
+    /// point written back. Direct Newton-Raphson from `v_prev` only (no
+    /// source or Gmin stepping). On failure the state is left untouched and
+    /// `diag_nr_max_iter_count` advances, which is what `settle_dc_op` reads
+    /// to fall back to the warmup loop.
     ///
-    /// # Limitations
-    ///
-    /// - Direct Newton-Raphson only; no source or Gmin stepping. If the NR
-    ///   fails to converge (e.g. after a massive pot swing on a basin-trap
-    ///   circuit), state is left unchanged and the caller should fall back
-    ///   to the warmup loop.
-    /// - No handling of multi-equilibrium precision-rectifier topologies.
-    ///
-    /// See `docs/aidocs/DC_OP.md` "Runtime DC OP recompute" for the full
-    /// surface and semantic contract.
+    /// **Not audio-thread safe.** The solve can take tens to hundreds of
+    /// microseconds. See `docs/aidocs/DC_OP.md` "Runtime DC OP Recompute".
     pub fn recompute_dc_op(&mut self) {
-{{ recompute_dc_op_body }}        // Cache refreshed on the converged fall-through path; the non-converged
-        // branch returns early with dc_operating_point unchanged (cache stays
-        // valid). Kept in sync with the Step-6c per-sample read.
-        self.refresh_damp_thresh();
-    }
+{{ recompute_dc_op_body }}    }
 
     /// Settle to the DC operating point at current pot / switch / device
     /// values — the "recompute with warmup fallback" convenience wrapper.
@@ -569,10 +561,11 @@ impl CircuitState {
     /// NR solution or the warmup-loop-converged steady state.
     ///
     /// Plugin hosts should prefer this over calling `recompute_dc_op` and
-    /// the warmup loop separately — the wrapper tracks the DK/nodal path
-    /// distinction automatically (DK path normally succeeds; nodal path
-    /// always falls back today because the runtime NR is deferred — see
-    /// `recompute_dc_op` docs).
+    /// the warmup loop separately: a build whose recompute refuses (see
+    /// `recompute_dc_op`) or fails to converge falls back here without a
+    /// solver-path branch on the host side. Same usage note as
+    /// `recompute_dc_op`: for instantiation, reset, preset recall and jitter,
+    /// not a live control change during playback.
     ///
     /// **Not audio-thread safe.** Both stages are blocking. Call from
     /// plugin initialization or parameter-change callbacks.

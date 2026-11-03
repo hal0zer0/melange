@@ -11,6 +11,57 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ### Added
 
+- **The runtime DC operating-point solve on the nodal route.** With
+  `--emit-dc-op-recompute`, `recompute_dc_op()` on a nodal build (Schur and
+  full-LU) now solves `G·v = b_dc + N_i·i_nl(N_v·v)` on the live working
+  matrix from `v_prev`, with the per-sample loop's own device evaluator and
+  limiter, every augmented row an unknown (winding currents included), and
+  installs the point; it used to be a stub that always fell back to the
+  `WARMUP_SAMPLES_RECOMMENDED` silence loop (0.45 M samples, seconds of CPU
+  on a large limiter at every init and reset). Three classes of nodal build
+  refuse and keep the fallback: behavioral B-source decks, decks whose rail
+  mode clamps a finite op-amp rail, and glow decks; the generated method's
+  doc comment says `This build: solved.` or `This build: REFUSED (…)`.
+  Measured on a BJT stage, a transformer with a DC-carrying primary, a JFET
+  stage, a switched and a pot bias network: from `v_prev` perturbed by ×1.1
+  and +1 V the recompute lands on the baked `DC_OP` within 1e-9 V in 2–23
+  iterations, and after a `set_switch` / `set_pot` it equals the `DC_OP` of
+  the deck built at that value. The result is the infinite-time equilibrium
+  at the current controls and junction temperatures; it is for
+  instantiation, `reset()`, preset recall and per-instance jitter, not for a
+  live control change during playback (the circuit's own transition is the
+  behaviour to keep).
+- **`set_dc_operating_point(v)` returns the KCL residual of `v`.** On every
+  build, both routes, it is now the full writeback the recompute does (the
+  device currents evaluated at `v`, `q_dot` at rest, input history, DC
+  blocker, oversampler taps) and returns `(max |F_i| in amperes, worst row)`
+  against the live circuit, so a caller can tell an equilibrium (≤ 1e-9 A)
+  from a vector that is not one — a node-voltages-only vector with the
+  winding rows left at zero reads the winding's DC current at the node it
+  feeds. The vector is installed either way.
+- **`dc_op_i_nl: [f64; M]`** on every `CircuitState`: the device currents at
+  the live `dc_operating_point`, written with it.
+
+### Changed
+
+- **The runtime recompute certifies like the compile-time solver.** Both
+  routes accept an iterate only when the UNDAMPED Newton correction is under
+  `1e-6·|v| + 1e-9 V` on every row AND the per-row KCL residual is under
+  `1e-6·scale + 1e-9 A` on the circuit-node rows, at the point written back.
+  The DK body used to test the applied (damped, clamped) step alone, which
+  any fixed point of the limiter passes. None of the 11 golden-manifest DK
+  decks compiled with the flag changes its point or refuses.
+- **The NaN/magnitude recovery restarts from the live point with its own
+  currents** (`dc_op_i_nl`), on both routes; it paired the live point with
+  the baked `DC_NL_I`, incoherent after any recompute or
+  `set_dc_operating_point`. Nodal `reset()` restores the factory pair
+  (`DC_OP`/`DC_NL_I`, or the warmup's settled cache on a build whose
+  compile-time solve did not converge) instead of `v_prev` from the live
+  field; a recomputed point is discarded with its currents. `dc_op()`'s doc
+  says it returns the live point.
+- A failed DK recompute on a deck with a body-effect MOSFET restores the
+  pre-solve `device_N_vt` (the loop refreshes it through the field).
+
 - **`compile --switch` and `dc-op --switch`.** The override `simulate` and
   `analyze` take is on the build verbs too: the matrices are stamped and the
   DC operating point is solved at the chosen position, the generated state

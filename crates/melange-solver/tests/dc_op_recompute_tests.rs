@@ -1489,89 +1489,51 @@ fn e8_nodal_flag_off_byte_identical_to_default() {
 }
 
 #[test]
-fn e8_nodal_flag_on_emits_stub_signature() {
+fn e8_nodal_flag_on_emits_the_solve() {
     let code = generate_nodal(NODAL_REGRESSION_NETLIST, true);
     assert!(
         code.contains("pub fn recompute_dc_op(&mut self)"),
         "nodal flag ON must emit `recompute_dc_op` method signature"
     );
     assert!(
-        code.contains("diag_nr_max_iter_count"),
-        "nodal stub body must bump diag counter to signal no-op"
+        code.contains("const DC_OP_KCL_ABSTOL: f64 = 1e-9;")
+            && code.contains("DC_OP_RELTOL * v[a].abs().max(v_new[a].abs()) + DC_OP_TOL"),
+        "the nodal body is the Newton solve certified by the KCL gate and the \
+         undamped-correction step test"
     );
     assert!(
-        code.contains("no runtime DC OP recompute") && code.contains("warmup loop"),
-        "nodal stub must carry an explanatory comment pointing at the warmup fallback"
+        code.contains("state.dc_op_writeback(v, i_nl, nr_iters);"),
+        "a converged solve installs the point through the shared writeback"
+    );
+    assert!(
+        code.contains("/// This build: solved."),
+        "the method doc says whether this build solves or refuses"
     );
 }
 
-/// Flag-on nodal output compiles and the stub is callable without panicking.
-/// Also verifies the no-op contract: `diag_nr_max_iter_count` advances by one
-/// per call (mirrors DK-path convergence-failure fallback) and
-/// `dc_operating_point` is unchanged (we didn't touch state).
+/// Flag-on nodal output compiles and the solve is callable: on this linear,
+/// source-free deck it converges (the counter does not advance) onto the
+/// baked point.
 #[test]
-fn e8_nodal_flag_on_stub_compiles_and_is_callable() {
-    use std::io::Write;
-
+fn e8_nodal_flag_on_compiles_and_converges() {
     let code = generate_nodal(NODAL_REGRESSION_NETLIST, true);
-
     let main = "\n\nfn main() {\n\
         let mut state = CircuitState::default();\n\
         let before: [f64; N] = *state.dc_op();\n\
         let c_before = state.diag_nr_max_iter_count;\n\
+        for i in 0..N { state.v_prev[i] += 1.0; }\n\
         state.recompute_dc_op();\n\
         let after: [f64; N] = *state.dc_op();\n\
-        let c_after = state.diag_nr_max_iter_count;\n\
+        assert_eq!(state.diag_nr_max_iter_count, c_before,\n\
+            \"the solve must converge on a linear deck\");\n\
         for i in 0..N {\n\
-            assert_eq!(before[i], after[i],\n\
-                \"stub must not touch dc_operating_point[{}]: {} -> {}\",\n\
-                i, before[i], after[i]);\n\
+            assert!((before[i] - after[i]).abs() < 1e-9,\n\
+                \"node {}: baked {} recomputed {}\", i, before[i], after[i]);\n\
+            assert_eq!(state.v_prev[i], after[i], \"v_prev seeded at row {}\", i);\n\
         }\n\
-        assert_eq!(c_after, c_before + 1,\n\
-            \"stub must bump diag_nr_max_iter_count exactly once per call: {} -> {}\",\n\
-            c_before, c_after);\n\
         println!(\"ok\");\n\
     }\n";
-
-    let full = format!("{}{}", code, main);
-    let tmp = support::scratch_dir();
-    let src = tmp.join("melange_dc_op_recompute_e8_nodal_stub.rs");
-    let bin = tmp.join("melange_dc_op_recompute_e8_nodal_stub");
-    std::fs::File::create(&src)
-        .unwrap()
-        .write_all(full.as_bytes())
-        .unwrap();
-    let compile = std::process::Command::new("rustc")
-        .args([
-            src.to_str().unwrap(),
-            "-o",
-            bin.to_str().unwrap(),
-            "--edition",
-            "2021",
-        ])
-        .output()
-        .expect("rustc");
-    let _ = std::fs::remove_file(&src);
-    if !compile.status.success() {
-        let _ = std::fs::remove_file(&bin);
-        panic!(
-            "compile failed:\n{}",
-            String::from_utf8_lossy(&compile.stderr)
-        );
-    }
-    let run = std::process::Command::new(&bin).output().expect("run");
-    let _ = std::fs::remove_file(&bin);
-    assert!(
-        run.status.success(),
-        "binary failed:\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&run.stdout),
-        String::from_utf8_lossy(&run.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&run.stdout).contains("ok"),
-        "unexpected output: {}",
-        String::from_utf8_lossy(&run.stdout)
-    );
+    compile_and_run(&code, main, "e8_nodal_converges");
 }
 
 // -----------------------------------------------------------------------------
@@ -1693,88 +1655,46 @@ fn settle_dk_path_no_fallback_on_successful_recompute() {
     );
 }
 
-/// On a nodal circuit, recompute_dc_op is a permanent stub that bumps
-/// `diag_nr_max_iter_count` every call. settle_dc_op must detect that
-/// tick and actually run the warmup loop (which in turn calls
-/// process_sample WARMUP_SAMPLES_RECOMMENDED times). Verify:
-///   1. Counter shows exactly one tick (from the recompute stub, not
-///      multiple — the warmup loop on a linear M=0 circuit shouldn't
-///      advance any diag counters).
-///   2. State is finite afterward.
-///   3. Some process_sample side effect is observable — for a linear
-///      RC circuit, `input_prev` is updated by every process_sample call
-///      (and gets reset to 0.0 by recompute, which isn't called in the
-///      warmup path after recompute). So after settle_dc_op, if the
-///      warmup fallback ran, we should be post-warmup with v_prev
-///      holding the settled steady state.
+/// Nodal path, solved build: settle_dc_op takes the solve and never falls
+/// back (the counter does not advance). A build that refuses (a behavioral
+/// deck here) advances the counter once and settle_dc_op runs the warmup
+/// loop, leaving a finite state.
 #[test]
-fn settle_nodal_path_falls_back_to_warmup() {
-    use std::io::Write;
-
+fn settle_nodal_path_solves_or_falls_back_to_warmup() {
     let code = generate_nodal(NODAL_REGRESSION_NETLIST, true);
+    let main = "\n\nfn main() {\n\
+        let mut state = CircuitState::default();\n\
+        let before = state.diag_nr_max_iter_count;\n\
+        for i in 0..N { state.v_prev[i] += 1.0; }\n\
+        state.settle_dc_op();\n\
+        assert_eq!(state.diag_nr_max_iter_count, before,\n\
+            \"a solved nodal build must not fall back\");\n\
+        println!(\"ok\");\n\
+    }\n";
+    compile_and_run(&code, main, "settle_nodal_solved");
 
+    let behavioral =
+        "behavioral deck, refused\nR1 in a 10k\nC1 a 0 100n\nB1 out 0 I={ tanh(V(a)) }\n\
+                      R2 out 0 1k\n";
+    let code = generate_nodal(behavioral, true);
+    assert!(
+        code.contains("/// This build: REFUSED (behavioral B-source)."),
+        "the method doc names the refusal"
+    );
     let main = "\n\nfn main() {\n\
         let mut state = CircuitState::default();\n\
         let before = state.diag_nr_max_iter_count;\n\
         state.settle_dc_op();\n\
-        // The stub bumps the counter exactly once; the warmup loop on a\n\
-        // linear M=0 circuit shouldn't bump it again (no NR iterations).\n\
         assert_eq!(state.diag_nr_max_iter_count, before + 1,\n\
-            \"nodal settle must tick counter once from the stub recompute, got {} -> {}\",\n\
+            \"a refused build ticks the counter once, got {} -> {}\",\n\
             before, state.diag_nr_max_iter_count);\n\
-        // State must be finite after the warmup fallback.\n\
-        let dc: [f64; N] = *state.dc_op();\n\
-        for (i, &v) in dc.iter().enumerate() {\n\
-            assert!(v.is_finite(), \"non-finite node {} after settle: {}\", i, v);\n\
-        }\n\
         for (i, &v) in state.v_prev.iter().enumerate() {\n\
             assert!(v.is_finite(), \"non-finite v_prev[{}] after settle: {}\", i, v);\n\
         }\n\
-        // Side effect proves the warmup loop actually ran: WARMUP_SAMPLES_RECOMMENDED\n\
-        // must exist as a const (otherwise the generated code wouldn't compile).\n\
         let _ = WARMUP_SAMPLES_RECOMMENDED;\n\
         println!(\"ok\");\n\
     }\n";
-
-    let full = format!("{}{}", code, main);
-    let tmp = support::scratch_dir();
-    let src = tmp.join("melange_settle_nodal_fallback.rs");
-    let bin = tmp.join("melange_settle_nodal_fallback");
-    std::fs::File::create(&src)
-        .unwrap()
-        .write_all(full.as_bytes())
-        .unwrap();
-    let compile = std::process::Command::new("rustc")
-        .args([
-            src.to_str().unwrap(),
-            "-o",
-            bin.to_str().unwrap(),
-            "--edition",
-            "2021",
-        ])
-        .output()
-        .expect("rustc");
-    let _ = std::fs::remove_file(&src);
-    if !compile.status.success() {
-        let _ = std::fs::remove_file(&bin);
-        panic!(
-            "compile failed:\n{}",
-            String::from_utf8_lossy(&compile.stderr)
-        );
-    }
-    let run = std::process::Command::new(&bin).output().expect("run");
-    let _ = std::fs::remove_file(&bin);
-    assert!(
-        run.status.success(),
-        "binary failed:\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&run.stdout),
-        String::from_utf8_lossy(&run.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&run.stdout).contains("ok"),
-        "unexpected output: {}",
-        String::from_utf8_lossy(&run.stdout)
-    );
+    compile_and_run(&code, main, "settle_nodal_refused");
 }
 
 // -----------------------------------------------------------------------------

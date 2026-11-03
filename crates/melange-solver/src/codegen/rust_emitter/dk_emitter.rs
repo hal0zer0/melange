@@ -727,6 +727,12 @@ impl RustEmitter {
         // `dc_op_emitter::emit_recompute_dc_op_body_dk`.
         let emit_dc_op_recompute = ir.solver_config.emit_dc_op_recompute;
         ctx.insert("emit_dc_op_recompute", &emit_dc_op_recompute);
+        // Every DK build carries the KCL residual, the writeback and the full
+        // `set_dc_operating_point`; only the recompute itself is behind the flag.
+        ctx.insert(
+            "dc_op_state_methods",
+            &super::dc_op_emitter::emit_dc_op_state_methods_dk(ir)?,
+        );
         if emit_dc_op_recompute {
             let body = super::dc_op_emitter::emit_recompute_dc_op_body_dk(ir)?;
             ctx.insert("recompute_dc_op_body", &body);

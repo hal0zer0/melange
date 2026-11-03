@@ -7,6 +7,7 @@
 
 mod behavioral;
 mod constants;
+mod dc_op;
 mod device_eval;
 mod equil;
 mod full_lu;

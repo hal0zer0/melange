@@ -141,13 +141,57 @@ fn dc_op_recompute_code_is_warning_free() {
                 &format!("recompute_dk_{dtag}_{mode:?}"),
             );
         }
-        // Nodal (active-set routes nodal; DK refuses it).
+        // Nodal (active-set routes nodal; DK refuses it). A clampable op-amp
+        // refuses the runtime solve, so this compiles the refusal body.
         let mut c = support::config_for_spice(deck, 48000.0);
         c.opamp_rail_mode = OpampRailMode::ActiveSet;
         c.emit_dc_op_recompute = true;
         let code = support::generate_circuit_code_nodal(deck, &c).0;
         assert!(code.contains("pub fn recompute_dc_op"), "{dtag} nodal");
+        assert!(
+            code.contains("This build: REFUSED (clampable op-amp)"),
+            "{dtag} nodal"
+        );
         assert_warning_free_with(&code, RECOMPUTE_MAIN, &format!("recompute_nodal_{dtag}"));
+    }
+    // Nodal builds that SOLVE: a pot + diode bias network (M = 1), a linear
+    // source-free deck (M = 0, the Schur route's `invert_n` solve), and a
+    // body-effect MOSFET follower (the threshold snapshot/restore), on both
+    // sub-paths.
+    let pot = "pot diode bias\nVCC vcc 0 DC 5\nR1 vcc a 1k\n.pot R1 500 10k\nD1 a 0 DX\n\
+               C1 a out 1u\nRl out 0 100k\nRin in a 1Meg\n.model DX D(IS=1e-14)\n";
+    let linear = "rc\nR1 in mid 4.7k\nR2 mid out 22k\nC1 out 0 47n\nR3 out 0 1meg\n";
+    let follower = "mosfet source follower\n\
+                    .model BS170 NMOS(KP=0.05 VTO=2.1 LAMBDA=0.02 GAMMA=0.5 PHI=0.6)\n\
+                    VCC vcc 0 DC 24\nCin in gate_i 1u\nRg gate_i gate 1k\nRb1 vcc gate_i 1MEG\n\
+                    Rb2 gate_i 0 1MEG\nM1 vcc gate src 0 BS170\nRs src 0 4.7k\nCout src out 10u\n\
+                    Rl out 0 100k\n";
+    for (deck, dtag) in [(pot, "pot"), (linear, "linear"), (follower, "follower")] {
+        for (sub_path, sp) in [
+            (NodalSubPathOverride::Schur, "schur"),
+            (NodalSubPathOverride::FullLu, "full_lu"),
+        ] {
+            let mut c = support::config_for_spice(deck, 48000.0);
+            c.emit_dc_op_recompute = true;
+            c.nodal_sub_path_override = sub_path;
+            let code = support::generate_circuit_code_nodal(deck, &c).0;
+            assert!(code.contains("This build: solved."), "{dtag} {sp}");
+            assert_warning_free_with(
+                &code,
+                RECOMPUTE_MAIN,
+                &format!("recompute_nodal_solved_{dtag}_{sp}"),
+            );
+        }
+        // And the DK route with the same flag (the follower exercises its
+        // body-effect snapshot/restore).
+        let mut c = support::config_for_spice(deck, 48000.0);
+        c.emit_dc_op_recompute = true;
+        let code = support::generate_circuit_code(deck, &c).0;
+        assert_warning_free_with(
+            &code,
+            RECOMPUTE_MAIN,
+            &format!("recompute_dk_solved_{dtag}"),
+        );
     }
 }
 

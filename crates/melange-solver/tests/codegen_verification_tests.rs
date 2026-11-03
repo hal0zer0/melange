@@ -5733,7 +5733,7 @@ fn test_codegen_grid_off_pentode_emits_helpers() {
     // the DEVICE_0_VG2K_FROZEN line directly.
     let vg2k_line = code
         .lines()
-        .find(|l| l.contains("DEVICE_0_VG2K_FROZEN"))
+        .find(|l| l.starts_with("const DEVICE_0_VG2K_FROZEN: f64 ="))
         .expect("grid-off codegen should emit DEVICE_0_VG2K_FROZEN constant");
     assert!(
         vg2k_line.contains("2.8"),

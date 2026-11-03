@@ -229,7 +229,7 @@ Every one of these is a real published model with real published equations, impl
 | Op-Amp | Boyle VCCS macromodel | slew-rate limiting, asymmetric VCC/VEE rails, 4 clamping strategies; no bandwidth pole (`GBW` only defaults the rails) |
 | VCA | THAT 2180 exponential | Current-mode with gain-dependent THD |
 | CdS LDR (opto) | VTL5C3/4, NSL-32 | Placed with the `O` element (`O1 rphoto+ rphoto- led+ led- MODEL`); attack/release photocell dynamics on the stateful-device codegen path. No ngspice twin — SPICE has no LDR model, so there is nothing to compare against |
-| Potentiometer | `.pot` / `.wiper` / `.gang` directives | Per-sample smoothing; `recompute_dc_op()` (with `--emit-dc-op-recompute`) for preset-recall NR-seed refresh |
+| Potentiometer | `.pot` / `.wiper` / `.gang` directives | Per-sample smoothing; `recompute_dc_op()` (with `--emit-dc-op-recompute`, both solver routes) for preset-recall NR-seed refresh |
 | Switch | `.switch` directive | Ganged R/C/L component switching |
 
 All device parameters use standard SPICE `.model` syntax, because inventing a new one would have been a choice and not a good one.

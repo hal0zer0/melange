@@ -81,10 +81,11 @@ fn fix1_no_pot_dk_set_sample_rate_applies_k_eff_absorption() {
     let (code, _n, m) = support::generate_circuit_code(DK_PARASITIC_BJT, &config);
 
     // Sanity: this must be the DK no-pot template path (the fix target).
-    // Nodal codegen emits `g_aug` (linear) or the full-LU chord cache; a pot
-    // circuit emits `fn rebuild_matrices`.
+    // Nodal codegen emits the full-LU chord cache or the Schur `invert_n`; a
+    // pot circuit emits `fn rebuild_matrices`. (`g_aug` is no longer a nodal
+    // tell: every DK build's `dc_kcl_residual` builds one.)
     assert!(
-        !code.contains("g_aug") && !code.contains("state.chord_lu"),
+        !code.contains("state.chord_lu") && !code.contains("fn invert_n(a: &[[f64; N]; N])"),
         "fix1: circuit must route to the DK path, not nodal"
     );
     assert!(
