@@ -6,29 +6,23 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2021%20edition-orange.svg)](https://www.rust-lang.org)
 
-You have a circuit. It's in KiCad, or it's a netlist you pulled off a forum, or it's a schematic photographed out of a service manual by someone with a shaky hand and a 2009 flip phone. You want to hear what it sounds like.
+Melange compiles an analog circuit into the real-time DSP engine inside an audio plugin. It reads a SPICE netlist (SPICE is the circuit simulator electronics engineers have used for fifty years; a netlist is the text file that lists a circuit's parts and how they connect) and writes Rust source: the DSP engine, and with `--format plugin` a plugin project around it. That project is not a finished plugin to download: `cargo build` and the project's `build.sh` make the VST3/CLAP.
 
-Right now, that means deriving the MNA matrices by hand, writing a Newton-Raphson solver by hand, validating against SPICE by hand, and then optimizing all of it to survive on the audio thread — also by hand. Four different specialties, and not one of them is "making music."
+> **Is this for you?** There is no plugin here to download. To hear and play an instrument that ships melange-generated code, go to [OpenWurli](https://github.com/hal0zer0/openwurli), a Wurlitzer 200A virtual instrument: watch its [demo video](https://youtu.be/2ELaBTO087I), and get CLAP and VST3 builds for Linux, macOS and Windows from its [releases page](https://github.com/hal0zer0/openwurli/releases). Its shipping plugin runs a melange-generated tremolo oscillator; melange-generated preamp and power-amp solvers are opt-in builds. Turning a schematic into a plugin of your own takes Rust and a terminal; if that is you, [start here](#start-here).
 
-Melange does that part. You do the rest.
-
-And I want to be specific about "the rest," because this is where circuit-modeling tools usually oversell themselves: **melange is not a plugin framework.** It does not generate GUIs. It does not manage presets. It has no opinion about what your plugin looks like and will not develop one. It hands you a DSP engine with exposed parameters, and everything downstream of that is yours. What comes out is a Rust source file — the DSP engine — and, with `--format plugin`, a buildable plugin project around it, not a finished plugin to download: `cargo build` and the project's `build.sh` make the VST3/CLAP.
-
-That's not a missing feature. That's the whole design.
-
-> **In the wild.** [OpenWurli](https://github.com/hal0zer0/openwurli) — a Wurlitzer 200A virtual instrument — ships a plugin whose tremolo oscillator is a melange-generated circuit, with melange-generated preamp and power-amp solvers as opt-in builds. It is the thing to hear and to download: the [demo video](https://youtu.be/2ELaBTO087I) and the [releases page](https://github.com/hal0zer0/openwurli/releases) (CLAP and VST3). (Melange was originally carved out of OpenWurli. The two of them have since developed a codependency; see [Origin](#origin).)
-
-> **Status: early alpha.** "Netlist goes in, plugin comes out" is exactly the kind of claim that should make you narrow your eyes, so here is precisely how far it actually goes today:
+> **Status: early alpha.** "Netlist goes in, plugin project comes out" is exactly the kind of claim that should make you narrow your eyes, so here is precisely how far it actually goes today:
 >
 > - **Compiles + agrees with ngspice** — several classic circuits (a passive tube program EQ, the Wurlitzer 200A preamp, a tweed preamp, an op-amp diode-clipper overdrive) compile, run, and track ngspice at the SPICE level.
 > - **Checked against real hardware** — the Wurlitzer 200A preamp, against measured hardware. One circuit. Exactly one.
 > - **Proven oracle-free** — the solver's numerics and the device models are verified to machine precision *without* another simulator (Tellegen power-balance, convergence-order, canonical device equations).
 >
 > Solving the equations correctly and sounding like the real box are two different achievements, and melange has one of them nailed down considerably harder than the other. See [Correctness & Validation](#correctness--validation) and [Validation & Verification](docs/VALIDATION.md).
-
-> **Ear safety.** Generated plugins ship with a default-on soft limiter. Start with your monitors at zero and come up slowly. You can turn the limiter off with `--no-ear-protection` when you need to measure something, and the flag is deliberately that long and that annoying to type. Bypass it before judging the sound: it is a safety in the plugin wrapper, not part of the circuit.
+>
+> Every melange version so far is 0.x, and every release is marked Pre-release on GitHub. Below 1.0 there is no stability guarantee: the solver, the generated code, the CLI flags and the netlist rules may all change from one release to the next, and the [CHANGELOG](CHANGELOG.md) lists what each one changed. A file melange has already generated does not change with them, because it does not depend on melange: OpenWurli ships one generated by a 0.x build.
 
 ## Start here
+
+You need Rust 1.85 or newer and a terminal. Everything else is optional until you need it: ngspice for `validate`, KiCad 8+ for the schematic path, network access the first time you build a `--format plugin` project ([Requirements](#requirements)).
 
 ```bash
 # Build the CLI. Use --release: a debug build of the solver is slow, and this
@@ -42,6 +36,8 @@ cargo build --release -p melange-cli        # -> target/release/melange
 ./target/release/melange analyze passive-eq1a       # frequency response of the demo circuit
 ```
 
+`passive-eq1a` is the demo circuit built into the binary: a passive program equaliser in the classic 1950s tube topology, with a low band you can boost and cut at the same time, a high boost with a bandwidth knob and a high cut, between transformers and a tube make-up amplifier.
+
 Every other example on this page writes bare `melange`, which assumes you did
 the `cargo install` (or put `target/release` on your `PATH`).
 
@@ -51,6 +47,8 @@ Then read, in this order:
 - **[Writing SPICE Netlists for Melange](docs/NETLIST_GUIDE.md)** — the netlist dialect: component syntax, `.model` cards, `.pot`/`.switch` controls, unit suffixes, and the seven mistakes that bite first. This is the guide for Way In #1 below, and for the netlist any other path produces.
 - **[SPICE Grammar Reference](docs/spice-grammar.md)** — the complete syntax and per-device `.model` parameter tables, for when you need the exact default of something.
 - **[Using the Generated DSP Directly](docs/CODE_API.md)** — the `--format code` API: `CircuitState::default()`, `set_sample_rate()`, `process_sample()`, the constants, and what the output volts mean. Read this if you are wiring the generated file into your own code rather than taking the plugin project.
+
+> **Ear safety.** A plugin built from a generated project has a default-on soft limiter. Start with your monitors at zero and come up slowly. You can turn the limiter off with `--no-ear-protection` when you need to measure something, and the flag is deliberately that long and that annoying to type. Bypass it before judging the sound: it is a safety in the plugin wrapper, not part of the circuit.
 
 ## How it works
 
@@ -66,7 +64,7 @@ KiCad XML ─────┘
 
 The routing thresholds are in [Known Limitations](docs/limitations.md#solver-routing); the reasoning is in [Design Decisions](docs/DESIGN_DECISIONS.md).
 
-Everything below this line is the argument for the tool rather than instructions for using it. [Requirements](#requirements) are near the bottom; the short version is Rust 1.85+, and everything else is optional until you need it (ngspice for `validate`, KiCad 8+ for the schematic path, network access the first time you build a `--format plugin` project).
+Everything below this line is the argument for the tool rather than instructions for using it.
 
 ## The Problem
 
@@ -74,7 +72,15 @@ There is no open-source tool that takes a circuit schematic and produces optimiz
 
 That sentence should be stranger than it is. Analog circuit simulation is fifty years old and extremely solved. Audio DSP is a mature field with excellent literature. Both halves exist, in the open, right now — and the bridge between them is a stack of PhD theses and a whiteboard.
 
-**Melange is the bridge.**
+You have a circuit. It's in KiCad, or it's a netlist you pulled off a forum, or it's a schematic photographed out of a service manual by someone with a shaky hand and a 2009 flip phone. You want to hear what it sounds like.
+
+Right now, that means deriving the MNA matrices by hand, writing a Newton-Raphson solver by hand, validating against SPICE by hand, and then optimizing all of it to survive on the audio thread — also by hand. Four different specialties, and not one of them is "making music."
+
+**Melange is the bridge.** It does that part. You do the rest.
+
+And I want to be specific about "the rest," because this is where circuit-modeling tools usually oversell themselves: **melange is not a plugin framework.** It does not generate GUIs. It does not manage presets. It has no opinion about what your plugin looks like and will not develop one. It hands you a DSP engine with exposed parameters, and everything downstream of that is yours.
+
+That's not a missing feature. That's the whole design.
 
 ## Three Ways In
 
@@ -301,11 +307,11 @@ A sample of what it handles, with **measured** single-core throughput:
 | Bus compressor | VCA + op-amp sidechain | 12 op-amps + 2 VCAs | 12.0× | 1740 |
 | Passive tube program EQ | 7 pots, 3 switches, global NFB (N=52, M=8) | 4 tubes, 3 transformers | 21.1× | 989 |
 | Single-ended tube amp | preamp + power stage + output transformer into 8 Ω | 12AX7 (2 triodes) + 6V6 pentode | 25.7× | 810 |
-| Germanium diode network | 3 RC sections, an antiparallel Ge pair at each | 6 Ge diodes | 27.5× | 758 |
+| Germanium diode network | three-stage diode clipper: 3 RC sections, an antiparallel Ge pair at each | 6 Ge diodes | 27.5× | 758 |
 | Wurlitzer 200A preamp | 2-stage BJT preamp (full Gummel-Poon) | 2 BJTs + 1 diode | 47.6× | 438 |
 | 12AX7 gain stage | single triode stage | 1 triode | 177.9× | 117 |
 
-\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), best of 7 × 2M samples. `12×` means one core runs about twelve instances of that circuit in real time on that host. Measured on an AMD Ryzen 9 7950X pinned to one CCD, with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh). Re-measured 2026-11-01 for v0.1.20, interleaved with the v0.1.19 binary on the same bed the same hour: the bus compressor (nodal full-LU) is 1.8× faster and the other five rows 4–13 % faster (the CHANGELOG names the mechanisms: in-place factorization and a sparse schedule on the nodal path, libm `exp`/`ln` in place of emitted polynomials in the device laws). Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass (`unstable/examples/rc-lowpass.cir` in the circuits repository) runs at about 1960× (10.6 ns/sample, measured 2026-11-01).
+\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), best of 7 × 2M samples. `12×` means one core runs about twelve instances of that circuit in real time on that host. Measured 2026-11-01 (v0.1.20) on an AMD Ryzen 9 7950X pinned to one CCD, with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh); the CHANGELOG has the comparison with the release before. Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass (`unstable/examples/rc-lowpass.cir` in the circuits repository) runs at about 1960× (10.6 ns/sample, measured 2026-11-01).
 
 **The triode rows pay for grid current.** The Dempwolf & Zölzer grid-current law evaluates a softplus on the grid dimension at every Newton iteration, where a hard-zero law would skip it (below the join of its retarding-field tail the cost is one `exp`); that is what modelling the negative-grid region costs. The CHANGELOG has the before/after figures.
 
