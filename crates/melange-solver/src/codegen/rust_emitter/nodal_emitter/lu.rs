@@ -1,6 +1,9 @@
 //! Dense and sparse LU solve / factor / back-solve emitters and `invert_n`.
 
-use super::equil::{build_growth_pattern, emit_equilibration, EquilPattern};
+use super::equil::{
+    build_growth_pattern, emit_equilibration, emit_equilibration_unrolled,
+    emit_growth_check_unrolled, EquilPattern,
+};
 use crate::codegen::ir::{CircuitIR, LuOp};
 use crate::codegen::rust_emitter::helpers::section_banner;
 use crate::codegen::rust_emitter::RustEmitter;
@@ -379,8 +382,14 @@ impl RustEmitter {
         code.push_str("#[inline(always)]\n");
         code.push_str("fn sparse_lu_factor(a: &mut [[f64; N]; N], dr: &mut [f64; N], dc: &mut [f64; N]) -> bool {\n");
 
-        // Step 1: Asymmetric row/column equilibration
-        emit_equilibration(&mut code, pat, false);
+        // Step 1: Asymmetric row/column equilibration. With the structural
+        // pattern it is straight-line code (this routine runs on every chord
+        // refactor, and the table loop was most of its cost); the dense
+        // fallback `lu_factor` and `lu_solve` keep the table loop.
+        match pat {
+            Some(p) => emit_equilibration_unrolled(&mut code, p),
+            None => emit_equilibration(&mut code, pat, false),
+        }
 
         // Static row swaps (for zero diagonals, determined at codegen time)
         if !lu.row_swaps.is_empty() {
@@ -426,23 +435,10 @@ impl RustEmitter {
             // equilibration, so the two stay consistent (and small/dense circuits
             // that keep the dense equilibration keep the dense growth sweep, which
             // vectorizes and wins there).
+            // Straight-line over the pattern (`emit_growth_check_unrolled`).
             Some(p) => {
                 let growth_pat = build_growth_pattern(p, &lu.row_swaps, &lu.ops);
-                let entries = growth_pat
-                    .iter()
-                    .map(|(i, j)| format!("({i},{j})"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                code.push_str(&format!(
-                    "    const GROWTH_PAT: [(u16, u16); {}] = [{}];\n",
-                    growth_pat.len(),
-                    entries
-                ));
-                code.push_str("    let mut growth = 0.0f64;\n");
-                code.push_str("    for &(i, j) in GROWTH_PAT.iter() {\n");
-                code.push_str("        let v = a[i as usize][j as usize].abs();\n");
-                code.push_str("        if v > growth { growth = v; }\n");
-                code.push_str("    }\n");
+                emit_growth_check_unrolled(&mut code, &growth_pat);
             }
             None => {
                 code.push_str("    let mut growth = 0.0f64;\n");

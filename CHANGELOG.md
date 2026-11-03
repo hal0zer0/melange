@@ -100,6 +100,49 @@ codegen output, CLI flags, and netlist semantics may all change.
   own `VTO` does not. The 2N3819 entry's comment now says its 2 mA is the printed minimum
   (no typical exists); its values are unchanged.
 
+### Performance
+
+- Nodal full-LU builds whose sparse LU schedule has the structural
+  equilibration pattern build the factored matrix only at the positions the
+  sparse factor and back-solve read or write, instead of copying all N²
+  entries of `A` into the chord storage and then saving a second N² copy for
+  the dense fallback. A rejected sparse factor rebuilds the full matrix with
+  the same operations before the dense factorization. On an N = 84 FET
+  limiter that refactors on most samples the two copies were 17 % of the
+  cycles.
+- The sparse factor's row/column equilibration and growth-factor check are
+  straight-line code with constant indices instead of loops over an index
+  table (whose running maxima went through memory with two bounds checks per
+  access). Bit-identical: a running maximum does not depend on the order of
+  its inputs, and every entry keeps its two scalings in order.
+- The full-LU Newton loop keeps the accepted Armijo line-search trial: its
+  point is the iterate the step commits, bit for bit, so its device currents
+  and residual stand in for the device-chord check's evaluation and the KCL
+  gate's residual, and, where every device's Newton-body and final current
+  laws are the same (junction devices, JFETs, MOSFETs, VCAs; not tubes), for
+  the next iteration's line-search start; without a body-effect MOSFET the
+  trial also writes the device Jacobian and the next iteration does not
+  evaluate the devices again. `Hard` op-amp rails with an op-amp, behavioral
+  sources and saturating inductors keep every evaluation.
+- The device Jacobian array is no longer zeroed or copied in full each Newton
+  iteration and sample, only its block-diagonal entries (the only ones that
+  are ever nonzero).
+
+None of these changes a rendered sample: the golden corpus is 192/192
+byte-identical to v0.1.21, every diagnostic counter included. Generated code
+changes on nodal full-LU builds only; DK and nodal-Schur builds are
+byte-identical.
+
+Measured 2026-11-03 on an AMD Ryzen 9 7950X, one core, the
+`bench.sh` driver at best of 7 × 500k samples, interleaved with a build of the
+parent commit (two rounds, best of both): bus compressor 1758 → 1527
+ns/sample (1.15×), `wurli-power-amp` 10169 → 6159 (1.65×),
+`steve-1073-output` 2126 → 1555 (1.37×), `radio-fm --noise full` 1097 → 1068
+(1.03×), `radio-am --noise full` 629 → 594 (1.06×), `funkyinduct --noise
+shot` 7292 → 4518 (1.61×). An N = 84 FET limiter at 2× oversampling (one
+JFET, eleven BJTs, three diodes; 1 kHz sine): 10.0 → 6.4 µs per host sample
+at −60 dBFS, 13.4 → 7.7 at −30, 14.9 → 8.5 at −18 (1.57–1.75×).
+
 ## [0.1.21] - 2026-11-02
 
 **Against v0.1.20, over the 192 golden renders:** all 192 are byte-identical,

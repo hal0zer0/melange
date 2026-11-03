@@ -332,3 +332,156 @@ pub(super) fn emit_equil_pattern_table(pat: &EquilPattern) -> String {
     code.push_str("\n];\n\n");
     code
 }
+
+/// Every position of the input matrix that `sparse_lu_factor` and
+/// `sparse_lu_back_solve` read or write, in input (pre-row-swap) coordinates,
+/// row-major sorted.
+///
+/// The Newton loop builds the matrix it hands to `sparse_lu_factor` from
+/// `state.a` (or `state.a_be`) plus the device stamps. Copying only these
+/// positions, instead of all N², feeds the sparse factor and back-solve the
+/// same values at every position they touch, so their results are
+/// bit-identical. Positions outside the set are never read on the sparse path;
+/// they may hold anything (a previous dense factorization, a row the static
+/// swaps moved). The dense fallback does not use this set: it rebuilds the
+/// full matrix before `lu_factor` reads all N².
+///
+/// The set is the union of:
+///   1. `pat` itself (the equilibration sweeps read and scale exactly these
+///      positions, before the row swaps);
+///   2. every position the elimination reads or writes (pivots, L factors,
+///      U-row operands, `SubMul` targets), the growth check reads (`growth`)
+///      and the back-solve reads (`l_nnz`, `u_nnz`, the pivots), all of which
+///      are in post-swap coordinates and are mapped back through the swaps.
+///
+/// Positions in (2) that are not in (1) are structural zeros of the input
+/// (`EquilPattern` is a superset of every input nonzero), so initialising them
+/// from `state.a` writes the same exact `0.0` the full copy did.
+pub(super) fn sparse_lu_touch_pattern(
+    pat: &EquilPattern,
+    lu: &crate::codegen::ir::LuSparsity,
+    growth: &[(usize, usize)],
+) -> Vec<(usize, usize)> {
+    use std::collections::BTreeSet;
+    let n = pat.n;
+    // row_src[i] = input row that sits at row i after the static swaps, which
+    // `sparse_lu_factor` applies in order with `a.swap(r1, r2)`.
+    let mut row_src: Vec<usize> = (0..n).collect();
+    for &(r1, r2) in &lu.row_swaps {
+        row_src.swap(r1, r2);
+    }
+    let mut post: BTreeSet<(usize, usize)> = growth.iter().copied().collect();
+    for op in &lu.ops {
+        match *op {
+            LuOp::DivPivot { row, col } => {
+                post.insert((row, col));
+                post.insert((col, col));
+            }
+            LuOp::SubMul { row, col, j } => {
+                post.insert((row, j));
+                post.insert((row, col));
+                post.insert((col, j));
+            }
+        }
+    }
+    post.extend(lu.l_nnz.iter().copied());
+    post.extend(lu.u_nnz.iter().copied());
+    for &p in &lu.elim_order {
+        post.insert((p, p));
+    }
+    let mut set: BTreeSet<(usize, usize)> = pat.entries.iter().copied().collect();
+    set.extend(post.into_iter().map(|(i, j)| (row_src[i], j)));
+    set.into_iter().collect()
+}
+
+/// Straight-line form of the sparse equilibration in `sparse_lu_factor`:
+/// the same row max, row scale, column max and column scale over `EQUIL_PAT`,
+/// with constant indices instead of a loop over the index table.
+///
+/// Bit-identical to the table loop of [`emit_equilibration`]:
+/// - each scale factor is `1/max` of the same set of `|a|` values. A running
+///   max by `if v > m { m = v; }` from `m = 0` is independent of the order the
+///   values arrive in (a NaN never compares greater and is skipped either way;
+///   `abs` never yields `-0`), so taking a row's or a column's entries
+///   together instead of interleaved with other rows gives the same `m`;
+/// - every scaling is one multiply of one entry by one factor, and each
+///   entry's two multiplies keep their order (row factor, then column
+///   factor), because every column max is taken after every row is scaled.
+///
+/// The table loop kept the running maxima in a stack array indexed through
+/// the table, a store-to-load chain on every entry of a row, plus two bounds
+/// checks per access; here each row's and each column's max is a register.
+pub(super) fn emit_equilibration_unrolled(code: &mut String, pat: &EquilPattern) {
+    let n = pat.n;
+    let mut cols_of_row: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut rows_of_col: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for &(i, j) in &pat.entries {
+        cols_of_row[i].push(j);
+        rows_of_col[j].push(i);
+    }
+    code.push_str(
+        "    // Equilibration over EQUIL_PAT (straight-line) — every entry outside\n\
+         \x20   // it is a structural zero, which cannot raise a max and is unchanged\n\
+         \x20   // by scaling, so this is byte-identical to sweeping all N*N.\n\
+         \x20   // Row scaling: dr[i] = 1/max_j(|A[i][j]|)\n",
+    );
+    for i in 0..n {
+        code.push_str("    {\n        let mut m = 0.0f64;\n");
+        for &j in &cols_of_row[i] {
+            code.push_str(&format!(
+                "        {{ let v = a[{i}][{j}].abs(); if v > m {{ m = v; }} }}\n"
+            ));
+        }
+        code.push_str(&format!(
+            "        dr[{i}] = if m > 1e-30 {{ 1.0 / m }} else {{ 1.0 }};\n"
+        ));
+        for &j in &cols_of_row[i] {
+            code.push_str(&format!("        a[{i}][{j}] *= dr[{i}];\n"));
+        }
+        code.push_str("    }\n");
+    }
+    code.push_str("    // Column scaling: dc[j] = 1/max_i(|A[i][j]|) (after row scaling)\n");
+    for j in 0..n {
+        code.push_str("    {\n        let mut m = 0.0f64;\n");
+        for &i in &rows_of_col[j] {
+            code.push_str(&format!(
+                "        {{ let v = a[{i}][{j}].abs(); if v > m {{ m = v; }} }}\n"
+            ));
+        }
+        code.push_str(&format!(
+            "        dc[{j}] = if m > 1e-30 {{ 1.0 / m }} else {{ 1.0 }};\n"
+        ));
+        for &i in &rows_of_col[j] {
+            code.push_str(&format!("        a[{i}][{j}] *= dc[{j}];\n"));
+        }
+        code.push_str("    }\n");
+    }
+    code.push('\n');
+}
+
+/// Straight-line growth-factor sweep over the factored pattern `growth` (see
+/// [`build_growth_pattern`]), into four running maxima combined at the end.
+///
+/// Bit-identical to the single running max over the table: the max of a set
+/// by `if v > m { m = v; }` from 0 skips NaN and does not depend on order or
+/// grouping, and none of the partial maxima can be NaN. Four independent
+/// chains instead of one shorten the dependency chain of the compares.
+pub(super) fn emit_growth_check_unrolled(code: &mut String, growth: &[(usize, usize)]) {
+    // Every lane must be written, or the generated code carries an unused
+    // `mut`. The pattern holds every diagonal and is only built for N >= 20.
+    assert!(
+        growth.len() >= 4,
+        "growth pattern shorter than its four lanes"
+    );
+    code.push_str("    let (mut g0, mut g1, mut g2, mut g3) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);\n");
+    for (k, &(i, j)) in growth.iter().enumerate() {
+        let lane = k % 4;
+        code.push_str(&format!(
+            "    {{ let v = a[{i}][{j}].abs(); if v > g{lane} {{ g{lane} = v; }} }}\n"
+        ));
+    }
+    code.push_str("    let mut growth = g0;\n");
+    code.push_str("    if g1 > growth { growth = g1; }\n");
+    code.push_str("    if g2 > growth { growth = g2; }\n");
+    code.push_str("    if g3 > growth { growth = g3; }\n");
+}

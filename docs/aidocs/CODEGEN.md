@@ -899,6 +899,25 @@ refused (`refuse_max_iter_below_nodal_floor`, `build.rs`), on the nodal route
 and when an auto-routed DK build re-routes to nodal (a self-starting
 oscillator). DK has no floor.
 
+On the full-LU Newton sites the accepted trial of that search is not
+evaluated again. A trial at fraction `s` is the point `v + (alpha·s)·d`, and
+the step then applied is `v + alpha'·d` with `alpha' = alpha·s`, the same two
+roundings: the committed iterate is the trial point bit for bit. So the
+trial's device currents and its `(||F||, ok, inf)` stand in for the
+device-chord check's evaluation and the KCL gate's residual at that iterate
+(`armijo_trial_reuse`), and, when every device's Newton-body current law is
+the `_final` law (junction devices, JFET, MOSFET, VCA, LDR, glow; not tubes:
+`armijo_r0_reuse`), for the next iteration's Armijo `r0`. Without a
+body-effect MOSFET (which writes its threshold into the state) the trials run
+the Newton body's own device code, Jacobian included, and the next iteration
+starts from the trial's `i_nl` and `j_dev` instead of evaluating the devices
+again (`armijo_jac_reuse`). A `Hard`-rail build with op-amps (its clamp moves
+`v` after the step) and behavioral or saturating-inductor builds (their
+residual reads more than `v`, `rhs`, `A` and the device currents) evaluate
+every time. The predicates and the argument are in
+`nodal_emitter/residual.rs`; `full_lu_lossless_kernel_tests.rs` renders each
+build with the reuse disabled and compares the bits.
+
 Still to enumerate: Armijo `c=1e-4`, `CHORD_REFACTOR=5`, the BE-latch thresholds,
 xoshiro salts, `STATE_MAX_PLAUSIBLE_MAGNITUDE=1e6`, and ~35 others.
 

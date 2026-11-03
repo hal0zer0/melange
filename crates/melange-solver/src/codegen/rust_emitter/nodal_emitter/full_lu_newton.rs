@@ -4,12 +4,16 @@ use super::behavioral::{
     behavioral_convergence_nodes, behavioral_damp_skip_literal, emit_behavioral_evals,
     emit_behavioral_jacobian, emit_behavioral_rhs,
 };
-use super::residual::{emit_armijo_line_search, emit_sparse_nv_matvec};
+use super::equil::{build_equil_pattern, build_growth_pattern, sparse_lu_touch_pattern};
+use super::residual::{
+    armijo_jac_reuse, armijo_r0_reuse, armijo_trial_reuse, emit_armijo_line_search,
+    emit_sparse_nv_matvec,
+};
 use super::sat_ind::{
     emit_sat_ind_companion, emit_sat_ind_jacobian, emit_sat_ind_row_residual,
     emit_sat_ind_step_limit,
 };
-use super::sites::{NewtonSite, PinSite};
+use super::sites::{j_dev_block_entries, NewtonSite, PinSite};
 use super::stamps::{
     emit_body_gmb_companion, emit_body_gmb_stamp, emit_hard_rail_clamp, emit_nodal_companion_rhs,
     emit_nodal_jacobian_stamp,
@@ -52,6 +56,24 @@ impl RustEmitter {
         if chord {
             code.push_str("    let mut exit_step = false;\n");
         }
+        // Accepted-trial reuse (`armijo_trial_reuse`): the line search keeps
+        // the accepted trial's device currents and residual, which are those
+        // of the iterate the step commits.
+        let reuse = use_line_search && armijo_trial_reuse(ir);
+        if reuse {
+            code.push_str("    let mut ls_i_nl = [0.0f64; M];\n");
+            code.push_str("    let mut ls_res = (0.0f64, false, 0.0f64);\n");
+            if armijo_r0_reuse(ir) {
+                code.push_str("    let mut ls_prev_hit = false;\n");
+            }
+        }
+        // The device Jacobian array lives across iterations: the evaluation
+        // writes its block-diagonal entries each iteration (zeroed first, as a
+        // fresh array would be) and nothing ever writes the others, which stay
+        // 0.0 (`j_dev_block_entries`). Zeroing all M² entries per iteration
+        // is the cost this avoids.
+        let jdev_blk = j_dev_block_entries(ir);
+        code.push_str("    let mut j_dev = [0.0f64; M * M];\n");
         // Trapezoidal NR loop
         code.push_str(&format!("    for iter in 0..{} {{\n", site.iter_budget));
 
@@ -73,9 +95,26 @@ impl RustEmitter {
 
         // 2b. Evaluate device currents and Jacobian
         code.push_str("        // 2b. Evaluate device currents and Jacobian (block-diagonal)\n");
-        // i_nl is declared in outer scope (line above NR loop), j_dev is per-iteration
-        code.push_str("        let mut j_dev = [0.0f64; M * M];\n");
-        Self::emit_nodal_device_evaluation_body(code, ir, "        ", "v");
+        // i_nl and j_dev are declared in the outer scope (above the NR loop)
+        let jac_reuse = use_line_search && armijo_jac_reuse(ir);
+        let dev_ind = if jac_reuse {
+            // The previous iteration's accepted trial evaluated the devices,
+            // with this code, at this exact `v`: its currents are in
+            // `ls_i_nl` and its Jacobian block is in `j_dev`.
+            code.push_str("        if ls_prev_hit {\n");
+            code.push_str("            i_nl = ls_i_nl;\n");
+            code.push_str("        } else {\n");
+            "            "
+        } else {
+            "        "
+        };
+        for k in &jdev_blk {
+            code.push_str(&format!("{dev_ind}j_dev[{k}] = 0.0;\n"));
+        }
+        Self::emit_nodal_device_evaluation_body(code, ir, dev_ind, "v");
+        if jac_reuse {
+            code.push_str("        }\n");
+        }
         code.push('\n');
 
         // Behavioral B-source value + partials at the current iterate.
@@ -150,26 +189,56 @@ impl RustEmitter {
         let dc = format!("{}dc", site.chord);
         let perm = format!("{}perm", site.chord);
         code.push_str("        if need_refactor {\n");
-        code.push_str("            chord_j_dev = j_dev;\n");
-        code.push_str(&format!("            {lu} = {};\n", site.a));
-        {
-            // Build transpose of N_i sparsity: for each device dim i, which nodes a are nonzero
-            emit_nodal_jacobian_stamp(code, ir, m, &lu, "            ");
+        // chord_j_dev = j_dev, over the only entries that are not 0.0 in either.
+        for k in &jdev_blk {
+            code.push_str(&format!("            chord_j_dev[{k}] = j_dev[{k}];\n"));
         }
-        // MOSFET body effect: gmb is part of the factored chord, so it is
-        // frozen with it and the companion below uses the same values.
         if !body_effect_mosfets(ir).is_empty() {
+            // MOSFET body effect: gmb is part of the factored chord, so it is
+            // frozen with it and the companion below uses the same values.
             code.push_str("            chord_body_gmb = body_gmb;\n");
-            emit_body_gmb_stamp(code, ir, &lu, "chord_body_gmb", "            ");
         }
-        // Saturating-inductor Jacobian: alpha·L0 → alpha·L_diff(v[k]) at [k][k].
-        if has_sat_ind {
-            emit_sat_ind_jacobian(code, ir, &lu, "v", &site.sat_alpha, "            ");
-        }
-        // Behavioral B-source Jacobian: stamp ∂f/∂V directly into G_aug.
-        if has_behavioral {
-            emit_behavioral_jacobian(code, ir, &lu, "            ");
-        }
+        // G_aug = A - N_i·J_dev·N_v (+ body effect, saturating-inductor and
+        // behavioral Jacobians), built in the chord storage. `full` copies all
+        // N² entries of A; otherwise only the positions the sparse factor and
+        // back-solve touch (`sparse_lu_touch_pattern`). Emitted twice when the
+        // sparse factor can be rejected: the dense fallback rebuilds the
+        // matrix with the same operations instead of restoring a saved copy.
+        let touch: Option<Vec<(usize, usize)>> =
+            match (&ir.sparsity.lu, build_equil_pattern(ir, setter_stamps)) {
+                (Some(slu), Some(pat)) => {
+                    let growth = build_growth_pattern(&pat, &slu.row_swaps, &slu.ops);
+                    Some(sparse_lu_touch_pattern(&pat, slu, &growth))
+                }
+                _ => None,
+            };
+        let emit_g_aug = |code: &mut String, indent: &str, full: bool| {
+            match (&touch, full) {
+                (Some(t), false) => {
+                    code.push_str(&format!(
+                        "{indent}// Only the {} positions the sparse factor and back-solve touch\n",
+                        t.len()
+                    ));
+                    for &(i, j) in t {
+                        code.push_str(&format!("{indent}{lu}[{i}][{j}] = {}[{i}][{j}];\n", site.a));
+                    }
+                }
+                _ => code.push_str(&format!("{indent}{lu} = {};\n", site.a)),
+            }
+            emit_nodal_jacobian_stamp(code, ir, m, &lu, indent);
+            if !body_effect_mosfets(ir).is_empty() {
+                emit_body_gmb_stamp(code, ir, &lu, "chord_body_gmb", indent);
+            }
+            // Saturating-inductor Jacobian: alpha·L0 → alpha·L_diff(v[k]) at [k][k].
+            if has_sat_ind {
+                emit_sat_ind_jacobian(code, ir, &lu, "v", &site.sat_alpha, indent);
+            }
+            // Behavioral B-source Jacobian: stamp ∂f/∂V directly into G_aug.
+            if has_behavioral {
+                emit_behavioral_jacobian(code, ir, &lu, indent);
+            }
+        };
+        emit_g_aug(code, "            ", ir.sparsity.lu.is_none());
         // Factor: try sparse LU (if available). The sparse schedule uses
         // STATIC (symbolic) pivoting, which can fail at runtime — a pivot
         // numerically near zero, or excessive element growth (checked
@@ -179,7 +248,6 @@ impl RustEmitter {
         // chord LU holds so back-solves (this sample and later ones via
         // cross-timestep persistence) dispatch correctly.
         if ir.sparsity.lu.is_some() {
-            code.push_str(&format!("            let g_aug_stamped = {lu};\n"));
             code.push_str(&format!(
                 "            if sparse_lu_factor(&mut {lu}, &mut {dr}, &mut {dc}) {{\n"
             ));
@@ -188,8 +256,11 @@ impl RustEmitter {
             code.push_str(
                 "                // Sparse factor rejected (tiny pivot or growth-factor check):\n",
             );
-            code.push_str("                // re-factor DENSE with partial pivoting in this same iteration.\n");
-            code.push_str(&format!("                {lu} = g_aug_stamped;\n"));
+            code.push_str("                // re-factor DENSE with partial pivoting in this same iteration,\n");
+            code.push_str(
+                "                // on the full stamped matrix rebuilt by the same operations.\n",
+            );
+            emit_g_aug(code, "                ", true);
             // On failure, break with `converged` false; the pessimistic
             // `last_nr_iterations = MAX_ITER` init means the post-loop
             // diagnostic counts this sample exactly once (no direct
@@ -393,6 +464,7 @@ impl RustEmitter {
                 "ls_ok",
                 "i_nl",
                 &site.sat_alpha,
+                reuse,
             );
             code.push_str("        if !ls_ok { state.diag_ls_fail_count += 1; }\n");
         }
@@ -462,6 +534,10 @@ impl RustEmitter {
             }
         }
         code.push_str("        for i in 0..N { v[i] += alpha * (v_new[i] - v[i]); }\n");
+        if reuse && armijo_r0_reuse(ir) {
+            // `v` is now the accepted trial point when `ls_hit`.
+            code.push_str("        ls_prev_hit = ls_hit;\n");
+        }
 
         // Mid-NR op-amp output clamping (VCC/VEE).
         //
@@ -580,6 +656,12 @@ impl RustEmitter {
             code.push_str("        let mut i_nl_resid = [0.0f64; M];\n");
             code.push_str("        if !max_step_exceeded {\n");
             code.push_str("            let i_nl_chord = i_nl;\n");
+            if reuse {
+                // The accepted trial evaluated the devices at this exact `v`.
+                code.push_str("            if ls_hit {\n");
+                code.push_str("                i_nl_resid = ls_i_nl;\n");
+                code.push_str("            } else {\n");
+            }
             // `_final` (i_nl-only, no `j_dev`) rather than the full
             // per-iteration evaluation body: this residual check only
             // ever consumes `i_nl_resid` below, never a Jacobian. The
@@ -589,16 +671,19 @@ impl RustEmitter {
             // `unused_assignments` flagged the last device's last
             // entry — e.g. `j_dev[195] = jac[3];` on wurli-power-amp,
             // M=14 — under `-D warnings`).
-            code.push_str("            let mut v_nl_final = [0.0f64; M];\n");
-            code.push_str(&emit_sparse_nv_matvec(
-                ir,
-                "v_nl_final",
-                "v",
-                "            ",
-            ));
-            code.push_str("            let mut i_nl = [0.0f64; M];\n");
-            Self::emit_nodal_device_evaluation_final(code, ir, "            ", "v");
-            code.push_str("            i_nl_resid = i_nl;\n");
+            let ind = if reuse {
+                "                "
+            } else {
+                "            "
+            };
+            code.push_str(&format!("{ind}let mut v_nl_final = [0.0f64; M];\n"));
+            code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_final", "v", ind));
+            code.push_str(&format!("{ind}let mut i_nl = [0.0f64; M];\n"));
+            Self::emit_nodal_device_evaluation_final(code, ir, ind, "v");
+            code.push_str(&format!("{ind}i_nl_resid = i_nl;\n"));
+            if reuse {
+                code.push_str("            }\n");
+            }
             code.push_str(
                 "            // Tolerance matches DK Schur path: ABSTOL=1e-12, RELTOL=1e-3,\n",
             );
@@ -609,8 +694,8 @@ impl RustEmitter {
                 "            // with i_nl ≈ 0 don't have an unreachably tight tolerance.\n",
             );
             code.push_str("            for i in 0..M {\n");
-            code.push_str("                let r = (i_nl[i] - i_nl_chord[i]).abs();\n");
-            code.push_str("                let tol = 1e-3 * i_nl[i].abs().max(i_nl_chord[i].abs()).max(1e-9) + 1e-12;\n");
+            code.push_str("                let r = (i_nl_resid[i] - i_nl_chord[i]).abs();\n");
+            code.push_str("                let tol = 1e-3 * i_nl_resid[i].abs().max(i_nl_chord[i].abs()).max(1e-9) + 1e-12;\n");
             // Negated form: a NaN residual must read as NOT converged.
             code.push_str("                if !(r <= tol) {\n");
             code.push_str("                    max_step_exceeded = true;\n");
@@ -652,7 +737,14 @@ impl RustEmitter {
             // Reuse it via `kcl_residual_inl` (bit-identical to re-evaluating).
             // `&&` short-circuits, so `i_nl_resid` is only read when it was
             // populated (the `if !max_step_exceeded` branch ran).
-            if m > 0 {
+            if reuse {
+                // The accepted trial's residual is the gate's at this `v`.
+                code.push_str(&format!(
+                        "        let (_, kcl_ok, kcl_inf) = if max_step_exceeded {{ (f64::INFINITY, false, f64::INFINITY) }} else if ls_hit {{ ls_res }} else {{ kcl_residual_inl(&v, &rhs, &{}, &i_nl_resid) }};\n\
+                         \x20       let converged_check = !max_step_exceeded && kcl_ok;\n\n",
+                        site.a,
+                    ));
+            } else if m > 0 {
                 code.push_str(&format!(
                         "        let (_, kcl_ok, kcl_inf) = if max_step_exceeded {{ (f64::INFINITY, false, f64::INFINITY) }} else {{ kcl_residual_inl(&v, &rhs, &{}, &i_nl_resid{}{}) }};\n\
                          \x20       let converged_check = !max_step_exceeded && kcl_ok;\n\n",

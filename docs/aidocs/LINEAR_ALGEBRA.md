@@ -228,6 +228,37 @@ Three optimizations stack to keep this real-time:
    recovered even where no symbolic schedule exists. The derivation is in
    the `emit_nodal_lu_factor` doc comment.
 
+5. **G_aug built on the touched positions only** — a chord refactor that
+   takes the sparse schedule writes `chord_lu` (or `chord_be_lu`) from
+   `state.a` (`state.a_be`) only at the positions `sparse_lu_factor` and
+   `sparse_lu_back_solve` read or write (`equil::sparse_lu_touch_pattern`:
+   the equilibration pattern, plus every pivot, L/U operand and fill target of
+   the elimination, the growth-check pattern and the back-solve's entries,
+   mapped back through the static row swaps), then stamps the device
+   Jacobian. Positions outside that set are never read on the sparse path, so
+   they may hold anything (a previous dense factorization, a row the swaps
+   moved). A rejected sparse factor rebuilds the full N² matrix with the same
+   operations before the dense `lu_factor`, instead of restoring a saved copy.
+   Both are bit-identical to copying all of `state.a` and saving the stamped
+   matrix. The two N² copies cost 17 % of the cycles of an N = 84 build that
+   refactors on most samples. Builds without the structural equilibration
+   pattern (behavioral sources, N < 20, or denser than 18 %) keep the full
+   copy, because their equilibration and growth check sweep all N².
+
+6. **Straight-line equilibration and growth check** — with the structural
+   pattern, `sparse_lu_factor` emits its row/column max-norm equilibration
+   and its growth-factor sweep as straight-line code with constant indices
+   (`equil::emit_equilibration_unrolled`, `emit_growth_check_unrolled`)
+   instead of loops over the `(u16, u16)` index table. Each row's and each
+   column's maximum is a register (the table loop carried it through a stack
+   array, a store-to-load chain per entry, with two bounds checks per
+   access); the growth maximum runs on four independent chains. A running
+   max by `if v > m { m = v; }` from 0 does not depend on the order or
+   grouping of its inputs (NaN is skipped either way), and every entry is
+   still scaled by its row factor and then its column factor, so the factors
+   and the scaled matrix are bit-identical. `lu_factor` and `lu_solve` (the
+   dense fallback and the sub-step and pin solves) keep the table loop.
+
 Source: `crates/melange-solver/src/lu.rs` and the emit sites in
 `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter/` (`lu.rs` for the
 emitted factor and back-solve, `full_lu_newton.rs` for the chord loop).

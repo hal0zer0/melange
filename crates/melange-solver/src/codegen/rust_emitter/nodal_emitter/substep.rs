@@ -339,6 +339,7 @@ impl RustEmitter {
                     "ls_ok",
                     "i_nl",
                     "alpha_sub",
+                    false,
                 );
                 // Fall-through on Armijo failure (see trap site): take the
                 // un-line-searched limited step and continue; the residual gate

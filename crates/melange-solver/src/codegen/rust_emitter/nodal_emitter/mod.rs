@@ -612,7 +612,7 @@ impl RustEmitter {
                 code.push_str(&Self::emit_nodal_lu_solve(ir, equil_pat.as_ref()));
             }
             if ir.topology.m > 0 {
-                code.push_str(&emit_kcl_residual_fns(ir, &setter_stamps));
+                code.push_str(&emit_kcl_residual_fns(ir, &setter_stamps, false));
             }
             if schur_exact_seed(ir, use_full_nodal) {
                 code.push_str(&emit_k_seed_helpers());

@@ -5,8 +5,8 @@ use super::reset::emit_nodal_nan_reset;
 use super::residual::emit_kcl_residual_fns;
 use super::sat_ind::emit_sat_ind_history;
 use super::sites::{
-    emit_chord_cache, emit_history_rhs, emit_q_dot_commit, emit_q_dot_locals, emits_hold,
-    has_be_instance, NewtonSite, NoiseMode, PinSite,
+    emit_chord_cache, emit_chord_j_dev_store, emit_history_rhs, emit_q_dot_commit,
+    emit_q_dot_locals, emits_hold, has_be_instance, NewtonSite, NoiseMode, PinSite,
 };
 use crate::codegen::ir::CircuitIR;
 use crate::codegen::rust_emitter::dk_emitter::{emit_noise_replay_body, NoiseEmission};
@@ -84,7 +84,7 @@ impl RustEmitter {
 
         let mut code = String::new();
         if use_line_search {
-            code.push_str(&emit_kcl_residual_fns(ir, setter_stamps));
+            code.push_str(&emit_kcl_residual_fns(ir, setter_stamps, true));
         }
         code.push_str(&section_banner(
             "PROCESS SAMPLE (Full-nodal NR with LU solve)",
@@ -310,7 +310,7 @@ impl RustEmitter {
             // Persist the chord's frozen Jacobian and flags for cross-timestep
             // reuse (the factorization itself lives in `state.chord_lu` & co.
             // and was updated in place).
-            code.push_str("    state.chord_j_dev = chord_j_dev;\n");
+            emit_chord_j_dev_store(&mut code, ir, "state.chord_", "    ");
             if !body_effect_mosfets(ir).is_empty() {
                 code.push_str("    state.chord_body_gmb = chord_body_gmb;\n");
             }

@@ -370,6 +370,28 @@ pub(super) fn has_be_instance(ir: &CircuitIR) -> bool {
         && !ir.solver_config.backward_euler
 }
 
+/// Flat indices `i·M + j` of the block-diagonal device Jacobian: every
+/// `(i, j)` inside one device slot. The device evaluation writes only these
+/// entries of `j_dev`, and every reader (the Jacobian stamp, the companion
+/// RHS, the refactor trigger's diagonal) reads only these, so every other
+/// entry of `j_dev` / `chord_j_dev` is `0.0` from construction on and is
+/// never touched.
+pub(super) fn j_dev_block_entries(ir: &CircuitIR) -> Vec<usize> {
+    let m = ir.topology.m;
+    let mut out = Vec::new();
+    for slot in &ir.device_slots {
+        let s = slot.start_idx;
+        for di in 0..slot.dimension {
+            for dj in 0..slot.dimension {
+                if s + di < m && s + dj < m {
+                    out.push((s + di) * m + (s + dj));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The cross-timestep chord cache's per-sample scalars and O(M^2) arrays, as
 /// `let mut chord_* = {src}*;` locals (`src` = `state.chord_` or
 /// `state.chord_be_`), or stored back. The factorization itself (`lu`, `dr`,
@@ -394,11 +416,35 @@ pub(super) fn emit_chord_cache(
         fields.push("dense");
     }
     for f in fields {
+        if f == "j_dev" {
+            // Only the block-diagonal entries ever differ from 0.0 (see
+            // `j_dev_block_entries`), so moving those moves the whole array;
+            // the rest of the local starts at the 0.0 the state holds there.
+            let blk = j_dev_block_entries(ir);
+            if load {
+                code.push_str(&format!("{indent}let mut chord_j_dev = [0.0f64; M * M];\n"));
+                for k in &blk {
+                    code.push_str(&format!("{indent}chord_j_dev[{k}] = {src}j_dev[{k}];\n"));
+                }
+            } else {
+                emit_chord_j_dev_store(code, ir, src, indent);
+            }
+            continue;
+        }
         if load {
             code.push_str(&format!("{indent}let mut chord_{f} = {src}{f};\n"));
         } else {
             code.push_str(&format!("{indent}{src}{f} = chord_{f};\n"));
         }
+    }
+}
+
+/// Store the chord-cache local `chord_j_dev` back into `{src}j_dev`: its
+/// block-diagonal entries, the only ones that are not `0.0` (see
+/// [`j_dev_block_entries`]).
+pub(super) fn emit_chord_j_dev_store(code: &mut String, ir: &CircuitIR, src: &str, indent: &str) {
+    for k in j_dev_block_entries(ir) {
+        code.push_str(&format!("{indent}{src}j_dev[{k}] = chord_j_dev[{k}];\n"));
     }
 }
 

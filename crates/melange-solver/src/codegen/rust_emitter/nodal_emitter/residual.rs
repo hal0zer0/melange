@@ -56,6 +56,7 @@ pub(super) fn row_iter(rows: &[usize], contiguous: &str) -> String {
 pub(super) fn emit_kcl_residual_fns(
     ir: &CircuitIR,
     setter_stamps: &std::collections::BTreeSet<(usize, usize)>,
+    full_lu: bool,
 ) -> String {
     let rows = kcl_rows(ir);
     let has_sat = !ir.saturating_inductors.is_empty();
@@ -161,13 +162,11 @@ pub(super) fn emit_kcl_residual_fns(
     RustEmitter::emit_nodal_device_evaluation_final(&mut code, ir, "    ", "v");
     code.push_str(&tail);
 
-    // (2) i_nl-reusing residual for the Armijo r0 only. The main NR body
-    // already evaluated i_nl at this exact v (same N_v·v — no pnjlim on the
-    // eval voltage, limiting is applied to the *step* — and the same
-    // #[inline(always)] device fn as `_final`), so F(v) is bit-identical to
-    // (1) without re-running the per-device parasitic inner-NR. Only r0
-    // qualifies: the convergence gate is at v_new and the backtrack trials
-    // are at v + s·alpha·d, both different v, and keep (1).
+    // (2) i_nl-reusing residual: the residual tail on device currents
+    // already evaluated at this exact v (no pnjlim on the eval voltage,
+    // limiting is applied to the *step*). Used for the Armijo r0 (the NR
+    // body's currents), the convergence gate (the device-chord check's
+    // currents) and, through (3)/(4), the line-search trials.
     code.push_str(
         "/// KCL residual reusing an already-computed `i_nl` (Armijo r0 CSE);\n\
          /// bit-identical to `kcl_residual` when `i_nl == i_nl(N_v·v)`.\n",
@@ -178,7 +177,127 @@ pub(super) fn emit_kcl_residual_fns(
         if super::behavioral::residual_needs_state(ir) { ", state: &CircuitState" } else { "" }
     ));
     code.push_str(&tail);
+
+    // (3) Device-evaluating residual that also hands back the device currents
+    // it evaluated, for the Newton sites' accepted-trial reuse
+    // (`armijo_trial_reuse`). Literally (1): the same `N_v·v` and `_final`
+    // device evaluation, then the same tail via `kcl_residual_inl`. Builds
+    // that take (4) instead do not need it, and only the full-LU Newton
+    // sites call either (`full_lu`).
+    if full_lu && armijo_trial_reuse(ir) && !armijo_jac_reuse(ir) {
+        code.push_str(
+            "/// `kcl_residual`, also returning the device currents it evaluated at `v`\n\
+             /// (the Armijo trial the Newton step keeps; see the Newton loop).\n",
+        );
+        code.push_str("#[inline]\n");
+        code.push_str(
+            "fn kcl_residual_eval(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], state: &CircuitState, i_nl_out: &mut [f64; M]) -> (f64, bool, f64) {\n",
+        );
+        code.push_str("    let mut v_nl_final = [0.0f64; M];\n");
+        code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_final", "v", "    "));
+        code.push_str("    let mut i_nl = [0.0f64; M];\n");
+        RustEmitter::emit_nodal_device_evaluation_final(&mut code, ir, "    ", "v");
+        code.push_str("    *i_nl_out = i_nl;\n");
+        code.push_str("    kcl_residual_inl(v, rhs, amat, &i_nl)\n");
+        code.push_str("}\n\n");
+    }
+    // (4) The same, evaluating the devices with the Newton body's code, which
+    // also writes the device Jacobian (`armijo_jac_reuse`).
+    if full_lu && armijo_jac_reuse(ir) {
+        code.push_str(
+            "/// `kcl_residual`, evaluating the devices with the Newton body's code: also\n\
+             /// returns their currents and writes their Jacobian block into `j_dev`.\n",
+        );
+        code.push_str("#[inline]\n");
+        code.push_str(
+            "fn kcl_residual_eval_jac(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], state: &CircuitState, i_nl_out: &mut [f64; M], j_dev: &mut [f64; M * M]) -> (f64, bool, f64) {\n",
+        );
+        code.push_str("    let mut v_nl = [0.0f64; M];\n");
+        code.push_str(&emit_sparse_nv_matvec(ir, "v_nl", "v", "    "));
+        code.push_str("    let mut i_nl = [0.0f64; M];\n");
+        for k in super::sites::j_dev_block_entries(ir) {
+            code.push_str(&format!("    j_dev[{k}] = 0.0;\n"));
+        }
+        RustEmitter::emit_nodal_device_evaluation_body(&mut code, ir, "    ", "v");
+        code.push_str("    *i_nl_out = i_nl;\n");
+        code.push_str("    kcl_residual_inl(v, rhs, amat, &i_nl)\n");
+        code.push_str("}\n\n");
+    }
     code
+}
+
+/// True when, on top of [`armijo_r0_reuse`], the line-search trials evaluate
+/// the devices with the Newton body's code (currents and Jacobian), so that
+/// after an accepted trial the next iteration starts from the trial's `i_nl`
+/// and `j_dev` instead of evaluating the devices again at the same `v`.
+///
+/// The body evaluation is a function of `v_nl = N_v·v` and of read-only state
+/// only, except for a body-effect MOSFET, which writes its effective
+/// threshold into `state` and a `body_gmb` local; builds with one keep the
+/// separate evaluations. For the classes [`armijo_r0_reuse`] admits, the body
+/// code's currents are the `_final` code's, so the device-chord check and the
+/// gate read the same values either way.
+pub(super) fn armijo_jac_reuse(ir: &CircuitIR) -> bool {
+    armijo_r0_reuse(ir) && crate::codegen::rust_emitter::helpers::body_effect_mosfets(ir).is_empty()
+}
+
+/// True when a full-LU Newton site keeps the accepted Armijo trial's
+/// evaluation instead of repeating it.
+///
+/// On acceptance at fraction `s` the trial point is `v + (alpha·s)·d`, and the
+/// step then applied is `v + alpha'·d` with `alpha' = alpha·s`: the same two
+/// roundings, so the committed iterate IS the trial point, bit for bit. The
+/// device-chord check and the KCL gate that follow evaluate `i_nl` and the
+/// residual at that iterate with the same `_final` device code and the same
+/// residual tail the trial ran (`kcl_residual` is `N_v·v`, `_final`, then the
+/// `kcl_residual_inl` tail), so the trial's `i_nl` and `(||F||, ok, inf)` are
+/// what they would compute. That holds only while nothing moves `v` between
+/// the step and those checks, and while the residual helpers need nothing but
+/// `v`, `rhs`, `A` and the device currents:
+/// - `Hard` op-amp rails clamp `v` after the step (the clamp is emitted only
+///   when some op-amp exists), so a `Hard` build with op-amps keeps the
+///   re-evaluation;
+/// - behavioral sources and saturating inductors add `state` / `sat_alpha`
+///   terms to the residual and refactor every iteration; they keep it too.
+pub(super) fn armijo_trial_reuse(ir: &CircuitIR) -> bool {
+    ir.topology.m > 0
+        && ir.behavioral_sources.is_empty()
+        && ir.saturating_inductors.is_empty()
+        && !(matches!(
+            ir.solver_config.opamp_rail_mode,
+            crate::codegen::OpampRailMode::Hard
+        ) && !ir.opamps.is_empty())
+}
+
+/// True when, on top of [`armijo_trial_reuse`], the next iteration's Armijo
+/// `r0` may be the accepted trial's `||F||`.
+///
+/// `r0` is computed from the device currents the Newton body evaluated at the
+/// iterate (`emit_nodal_device_evaluation_body`); the trial's come from the
+/// `_final` evaluation. For the device classes listed here the two apply the
+/// same current expression to the same `v_nl` (the same helper call, or for an
+/// RS diode `diode_eval_with_rs` whose current is `diode_current_with_rs` by
+/// construction), so they agree bit for bit. Triodes and pentodes are not
+/// listed: their body helper (`tube_evaluate*`) and their `_final` helpers
+/// (`tube_ip*` / `tube_is*`) differ at the plate-current cutoff, so those
+/// builds recompute `r0`. A device class added later stays off this list
+/// until its pair is checked.
+pub(super) fn armijo_r0_reuse(ir: &CircuitIR) -> bool {
+    use crate::codegen::ir::DeviceType;
+    armijo_trial_reuse(ir)
+        && ir.device_slots.iter().all(|slot| {
+            matches!(
+                slot.device_type,
+                DeviceType::Diode
+                    | DeviceType::Bjt
+                    | DeviceType::BjtForwardActive
+                    | DeviceType::Jfet
+                    | DeviceType::Mosfet
+                    | DeviceType::Vca
+                    | DeviceType::Ldr
+                    | DeviceType::Glow
+            )
+        })
 }
 
 // ============================================================================
@@ -471,9 +590,57 @@ pub(super) fn emit_armijo_line_search(
     ls_ok: &str,
     inl: &str,
     sat_alpha: &str,
+    reuse: bool,
 ) {
     let state_arg = super::behavioral::kcl_residual_inl_state_arg(ir);
     let sat_arg = residual_sat_arg(ir, sat_alpha);
+    if reuse {
+        // Newton-site form (`armijo_trial_reuse`): the accepted trial's device
+        // currents and residual are kept in `ls_i_nl` / `ls_res` and `ls_hit`
+        // says they belong to the iterate the step is about to commit. With
+        // `armijo_r0_reuse`, `ls_prev_hit` says the previous iteration's
+        // accepted trial is the current `v`, and its `||F||` is this `r0`.
+        assert!(
+            state_arg.is_empty() && sat_arg.is_empty(),
+            "trial reuse is only emitted for builds whose residual reads v, rhs, A and i_nl"
+        );
+        let trial = if armijo_jac_reuse(ir) {
+            format!("kcl_residual_eval_jac(&vc, &{rhs}, &{amat}, state, &mut ls_i_nl, &mut j_dev)")
+        } else {
+            format!("kcl_residual_eval(&vc, &{rhs}, &{amat}, state, &mut ls_i_nl)")
+        };
+        let r0 = if armijo_r0_reuse(ir) {
+            format!(
+                "if ls_prev_hit {{ ls_res }} else {{ kcl_residual_inl(&{v}, &{rhs}, &{amat}, &{inl}) }}"
+            )
+        } else {
+            format!("kcl_residual_inl(&{v}, &{rhs}, &{amat}, &{inl})")
+        };
+        code.push_str(&format!(
+            "{indent}// Armijo backtracking line search on ||F|| along the limited Newton ray.\n\
+             {indent}let mut {ls_ok} = true;\n\
+             {indent}let mut ls_hit = false;\n\
+             {indent}{{\n\
+             {indent}    // r0 = ||F({v})||: from the device currents `{inl}` the NR body\n\
+             {indent}    // evaluated at this exact {v}, or the previous iteration's accepted\n\
+             {indent}    // trial, which was this {v} (bit-identical to a fresh kcl_residual).\n\
+             {indent}    let (r0, _, _) = {r0};\n\
+             {indent}    if r0.is_finite() && r0 > 1e-9 {{\n\
+             {indent}        let mut s = 1.0_f64;\n\
+             {indent}        let mut accepted = false;\n\
+             {indent}        while s >= (1.0 / 1024.0) {{\n\
+             {indent}            let mut vc = {v};\n\
+             {indent}            for i in 0..N {{ vc[i] += ({alpha} * s) * ({new}[i] - {v}[i]); }}\n\
+             {indent}            let rc = {trial};\n\
+             {indent}            if rc.0 <= (1.0 - 1e-4 * s) * r0 {{ accepted = true; ls_res = rc; break; }}\n\
+             {indent}            s *= 0.5;\n\
+             {indent}        }}\n\
+             {indent}        if accepted {{ {alpha} *= s; ls_hit = true; }} else {{ {ls_ok} = false; }}\n\
+             {indent}    }}\n\
+             {indent}}}\n"
+        ));
+        return;
+    }
     code.push_str(&format!(
         "{indent}// Armijo backtracking line search on ||F|| along the limited Newton ray.\n\
          {indent}let mut {ls_ok} = true;\n\
