@@ -134,7 +134,7 @@ No alloc/locks/syscalls in audio processing. All buffers pre-allocated in solver
 
 Tests compare melange output against ngspice (`crates/melange-validate/`). See `docs/aidocs/SPICE_VALIDATION.md` for full protocol and `STATUS.md` for the latest correlation table.
 
-- Single `circuit.cir` per test: the harness strips the VIN source (matched by n+ == input node) and injects a PWL Thevenin drive for ngspice; melange gets the input via conductance stamping. The old `circuit_no_vin.cir` two-netlist protocol is retired.
+- Single `circuit.cir` per test: the harness strips the VIN source (matched by n+ == input node) and injects a PWL Thevenin drive for ngspice; melange gets the input via conductance stamping.
 - `.OPTIONS INTERP reltol=1e-4` injected automatically (INTERP must come AFTER the title line); deck-author `.OPTIONS` lines survive and win per-keyword.
 
 ### Most common SPICE-validation footguns
