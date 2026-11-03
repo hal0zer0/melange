@@ -20,6 +20,10 @@ pub(crate) struct SimulateOptions<'a> {
     pub(crate) output_node: &'a str,
     pub(crate) duration: f64,
     pub(crate) amplitude: f64,
+    /// `--freq`: test-tone frequency in Hz (default 1000); unused with
+    /// `--input-audio`. Validated positive, finite and below Nyquist of
+    /// `sample_rate` at the call site.
+    pub(crate) freq: f64,
     pub(crate) input_resistance_flag: Option<f64>,
     pub(crate) solver: &'a str,
     pub(crate) opamp_rail_mode: melange_solver::codegen::OpampRailMode,
@@ -338,6 +342,12 @@ pub(crate) fn simulate_circuit_source(
             "  Sample rate: {} Hz ({})",
             opts.sample_rate, opts.sample_rate_source
         );
+        if opts.input_audio.is_none() {
+            println!(
+                "  Test tone: {} Hz sine, {} V peak, {} s",
+                opts.freq, opts.amplitude, opts.duration
+            );
+        }
         print_run_route_detail(&built, opts.max_iter.is_some(), &|l| println!("{l}"));
     } else {
         println!("  {summary}");
@@ -444,7 +454,7 @@ pub(crate) fn simulate_circuit_source(
         } else {
             None
         },
-        freq: 1000.0, // test tone freq
+        freq: opts.freq,
         duration_secs: opts.duration,
         probe_names: &probe_names,
         noise_enabled: opts.noise_mode != melange_solver::codegen::NoiseMode::Off,

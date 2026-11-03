@@ -11,6 +11,9 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ### Added
 
+- **`simulate --freq <Hz>`** sets the test tone's frequency (default 1000,
+  so existing renders are unchanged). Refused unless positive and below
+  Nyquist of the run's sample rate; `-v` prints the tone.
 - **A runtime oversampling set is a plugin parameter.** A `--format plugin`
   build of a circuit with `OVERSAMPLING_SET` (`--oversampling-set 1,2,4` or
   the deck's `allow=`) gets an **Oversampling** parameter over its factors,

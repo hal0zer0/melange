@@ -487,6 +487,78 @@ fn test_simulate_sine_tone() {
     let _ = std::fs::remove_file(&cir);
 }
 
+/// Render the RC fixture's test tone with the given extra `simulate` flags
+/// and return the output samples.
+fn simulate_tone_samples(tag: &str, extra: &[&str]) -> Vec<f32> {
+    let cir = write_test_circuit(TEST_RC_LOWPASS, tag);
+    let out_wav = std::env::temp_dir().join(format!("melange_cli_test_{tag}_out.wav"));
+    let mut args = vec![
+        "simulate",
+        cir.to_str().unwrap(),
+        "--output",
+        out_wav.to_str().unwrap(),
+        "--duration",
+        "0.05",
+    ];
+    args.extend_from_slice(extra);
+    run_melange(&args);
+    let samples: Vec<f32> = hound::WavReader::open(&out_wav)
+        .expect("output WAV")
+        .into_samples::<f32>()
+        .map(|s| s.expect("output sample"))
+        .collect();
+    let _ = std::fs::remove_file(&cir);
+    let _ = std::fs::remove_file(&out_wav);
+    samples
+}
+
+#[test]
+fn test_simulate_freq_sets_the_test_tone() {
+    // `--freq` changes the synthesised tone: a 997 Hz render differs from
+    // the 1 kHz default, and the default is the same with or without the
+    // flag spelled out.
+    let default = simulate_tone_samples("freq_default", &[]);
+    let explicit = simulate_tone_samples("freq_1000", &["--freq", "1000"]);
+    let other = simulate_tone_samples("freq_997", &["--freq", "997"]);
+    assert_eq!(default.len(), other.len());
+    assert_eq!(default, explicit, "--freq 1000 is the default tone");
+    let max_diff = default
+        .iter()
+        .zip(&other)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        max_diff > 1e-3,
+        "--freq 997 must render a different tone than the default (max |diff| {max_diff})"
+    );
+}
+
+#[test]
+fn test_simulate_freq_is_range_checked_against_nyquist() {
+    let cir = write_test_circuit(TEST_RC_LOWPASS, "freq_range");
+    let out_wav = std::env::temp_dir().join("melange_cli_test_freq_range_out.wav");
+    for bad in ["0", "30000"] {
+        let stderr = run_melange_fail(&[
+            "simulate",
+            cir.to_str().unwrap(),
+            "--output",
+            out_wav.to_str().unwrap(),
+            "--duration",
+            "0.05",
+            "--freq",
+            bad,
+        ]);
+        assert!(
+            stderr.contains(
+                "--freq must be positive and below Nyquist (24000 Hz at sample rate 48000)"
+            ) && stderr.contains(&format!("got {bad}")),
+            "--freq {bad} at 48 kHz must be refused with the value:\n{stderr}"
+        );
+    }
+    assert!(!out_wav.exists(), "a refused --freq must not render");
+    let _ = std::fs::remove_file(&cir);
+}
+
 /// Write a short mono 16-bit PCM sine WAV at `rate` Hz for `--input-audio`
 /// tests (hound writes 16-bit mono as plain PCM, format tag 1).
 fn write_test_input_wav(name: &str, rate: u32) -> PathBuf {
@@ -1289,9 +1361,13 @@ fn test_compile_plugin_circuit_noise_param() {
                 > reset.rfind("reset();").unwrap(),
             "{name}: applied after the states reset:\n{reset}"
         );
+        // The first thing process() does with the plugin, after the
+        // per-thread FTZ/DAZ flag (which touches no state), is the switch.
         let process = section(&lib, "fn process(", "ProcessStatus::Normal");
+        let body = &process[process.find(") -> ProcessStatus {").unwrap()..];
         assert!(
-            process.contains(") -> ProcessStatus {\n        self.apply_circuit_noise();\n"),
+            body.find("Flush-to-Zero").unwrap() < body.find("self.").unwrap()
+                && body[body.find("self.").unwrap()..].starts_with("self.apply_circuit_noise();\n"),
             "{name}: applied at the top of every block:\n{process}"
         );
     }

@@ -4,18 +4,28 @@ use std::path::Path;
 
 use anyhow::Result;
 
-/// FTZ (Flush-to-Zero) + DAZ (Denormals-are-Zero) initialization block for generated plugins.
+/// FTZ (Flush-to-Zero) + DAZ (Denormals-are-Zero) block for generated plugins.
 ///
-/// Concatenated via `+` into the generated `lib.rs`, so `{` appears as-is in the output
-/// (no format!() interpolation). Keeps the use-tree braces normal and legible.
+/// Emitted at the top of the generated `process()`, not in `initialize()`: the
+/// MXCSR register is per thread, and the host calls `initialize()` from a
+/// thread of its own choosing, so a flag set there never reaches the audio
+/// thread that runs `process()`. Setting it on every `process()` call is two
+/// cheap instructions and an idempotent OR, and it is the only place that is
+/// guaranteed to be the thread doing the arithmetic. (The generated circuit
+/// code also flushes its own state vectors, so the flag is a performance
+/// measure, not a correctness one.)
+///
+/// Interpolated as a plain `{FTZ_DAZ_BLOCK}` format argument, so the `{`/`}`
+/// of the use-tree appear as-is in the output.
 ///
 /// _mm_setcsr/_mm_getcsr were soft-deprecated in Rust in favor of inline asm, but remain
 /// correct and portable across all x86/x86_64 targets. We wrap in #[allow(deprecated)]
-/// so generated plugins compile cleanly under `-D warnings`. TODO: migrate to inline asm
-/// (stmxcsr/ldmxcsr) or add AArch64 FPCR equivalent when Rust stabilizes a non-deprecated
-/// cross-platform path.
+/// so generated plugins compile cleanly under `-D warnings`. Inline asm (stmxcsr/ldmxcsr)
+/// and an AArch64 FPCR equivalent would be the non-deprecated paths; neither is used yet.
 const FTZ_DAZ_BLOCK: &str = "\
-\x20       // Enable Flush-to-Zero and Denormals-are-Zero for audio performance\n\
+\x20       // Flush-to-Zero + Denormals-are-Zero for audio performance. MXCSR is\n\
+\x20       // per thread, so this runs here on the audio thread (every call; the\n\
+\x20       // OR is idempotent and costs two instructions), not in initialize().\n\
 \x20       #[cfg(target_arch = \"x86_64\")]\n\
 \x20       #[allow(deprecated)]\n\
 \x20       unsafe {\n\
@@ -1931,7 +1941,6 @@ fn generate_lib_rs(
                  \x20       _context: &mut impl InitContext<Self>,\n\
                  \x20   ) -> bool {\n"
                 .to_string()
-                + FTZ_DAZ_BLOCK
                 + "\x20       self.current_sample_rate = buffer_config.sample_rate as f64;\n\
                  \x20       self.circuit_state = CircuitState::default();\n\
                  \x20       self.circuit_state.set_sample_rate(buffer_config.sample_rate as f64);\n"
@@ -1974,7 +1983,6 @@ fn generate_lib_rs(
                  \x20       _context: &mut impl InitContext<Self>,\n\
                  \x20   ) -> bool {\n"
                 .to_string()
-                + FTZ_DAZ_BLOCK
                 + "\x20       self.current_sample_rate = buffer_config.sample_rate as f64;\n"
                 + &smoother_reset_block
                 + "\x20       self.circuit_states = vec![{\n\
@@ -2032,7 +2040,6 @@ fn generate_lib_rs(
                  \x20       _context: &mut impl InitContext<Self>,\n\
                  \x20   ) -> bool {\n"
                 .to_string()
-                + FTZ_DAZ_BLOCK
                 + "\x20       let num_channels = audio_io_layout.main_input_channels\n\
                  \x20           .map(|c| c.get() as usize).unwrap_or(2);\n\
                  \x20       self.current_sample_rate = buffer_config.sample_rate as f64;\n"
@@ -2384,7 +2391,7 @@ impl Plugin for CircuitPlugin {{
         _aux: &mut AuxiliaryBuffers,
         {process_context}: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {{
-{os_swap}{process_loop}
+{FTZ_DAZ_BLOCK}{os_swap}{process_loop}
         ProcessStatus::Normal
     }}
 }}
@@ -2672,6 +2679,43 @@ mod tests {
         let lib = test_generate_lib_rs("test", false, &[]);
         assert!(lib.contains("fn process("));
         assert!(lib.contains("ProcessStatus::Normal"));
+    }
+
+    #[test]
+    fn ftz_daz_is_set_in_process_not_initialize() {
+        // MXCSR is per thread: the flag has to be set on the audio thread,
+        // which is process(), on every call. initialize() runs on whatever
+        // thread the host picks, so a flag set there never reaches the DSP.
+        for (stereo, outputs) in [(false, 1), (true, 1), (false, 2)] {
+            let opts = PluginOptions {
+                oversampling_set: Some(vec![1, 2, 4]),
+                circuit_noise_param: true,
+                ..Default::default()
+            };
+            let lib = generate_lib_rs("test", stereo, &[], &[], &[], &[], 1, outputs, &opts);
+            let init = &lib[lib.find("fn initialize(").unwrap()..lib.find("fn reset(").unwrap()];
+            let process =
+                &lib[lib.find("fn process(").unwrap()..lib.find("ProcessStatus::Normal").unwrap()];
+            assert!(
+                !init.contains("_mm_setcsr") && !init.contains("Flush-to-Zero"),
+                "FTZ/DAZ must not be set in initialize():\n{init}"
+            );
+            assert_eq!(
+                process
+                    .matches("_mm_setcsr(_mm_getcsr() | _MM_FLUSH_ZERO_ON | (1 << 6))")
+                    .count(),
+                2,
+                "x86_64 and x86 FTZ/DAZ blocks at the top of process():\n{process}"
+            );
+            // Before anything else in the body: the first statement of
+            // process() is the flag, ahead of the oversampling swap and the
+            // noise switch.
+            let body = &process[process.find(") -> ProcessStatus {").unwrap()..];
+            assert!(
+                body.find("Flush-to-Zero").unwrap() < body.find("self.").unwrap(),
+                "FTZ/DAZ must be the first thing process() does:\n{body}"
+            );
+        }
     }
 
     #[test]

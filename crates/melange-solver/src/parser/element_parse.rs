@@ -776,13 +776,34 @@ impl Parser {
         // Uname n_plus n_minus n_out modelname
         self.require_parts(parts, 5, "Uname n_plus n_minus n_out modelname")?;
         if parts.len() > 5 {
+            // The hint names the model card the rails belong on. Only the
+            // token in the model-name position can be that name, and only
+            // when it looks like one: a `KEY=value` or `(...)` there means the
+            // name was left out and the extra tokens are the rails themselves.
+            let in_model_position = parts[4];
+            let plausible_name = !in_model_position.contains('=')
+                && !in_model_position.contains('(')
+                && !in_model_position.contains(')');
+            let rails_hint = if plausible_name {
+                format!(
+                    "There are no supply pins: the rails go on the model card \
+                     (`.model {in_model_position} OA(VCC=9 VEE=0)`)."
+                )
+            } else {
+                format!(
+                    "The model name is missing: '{}' sits where the model name goes. \
+                     There are no supply pins; name a model on the card and put the \
+                     rails on it (`{} {} {} {} <modelname>` with \
+                     `.model <modelname> OA(VCC=9 VEE=0)`).",
+                    in_model_position, parts[0], parts[1], parts[2], parts[3]
+                )
+            };
             return Err(self.error(format!(
                 "Op-amp '{}': unexpected trailing token(s): '{}' — expected \
-                 'Uname n_plus n_minus n_out modelname'. There are no supply pins: \
-                 the rails go on the model card (`.model {} OA(VCC=9 VEE=0)`).",
+                 'Uname n_plus n_minus n_out modelname'. {}",
                 parts[0],
                 parts[5..].join(" "),
-                parts[parts.len() - 1]
+                rails_hint
             )));
         }
         Ok(Element::Opamp {

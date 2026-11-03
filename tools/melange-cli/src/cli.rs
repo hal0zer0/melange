@@ -557,6 +557,15 @@ pub(crate) enum Commands {
         #[arg(long, default_value = "0.5")]
         amplitude: f64,
 
+        /// Test-tone frequency in Hz. The default, 1 kHz at 48 kHz, sits on
+        /// a clean FFT bin: right for level and THD checks. An alias check
+        /// wants a tone that does not divide the sample rate (4186 Hz, say),
+        /// or its aliases land on the harmonics and hide; docs/OVERSAMPLING.md
+        /// explains. Must be positive and below Nyquist of the run's sample
+        /// rate. Ignored with --input-audio
+        #[arg(long, value_name = "HZ", default_value = "1000")]
+        freq: f64,
+
         /// Override input resistance (ohms). Default: 1Ω, or from .input_impedance directive.
         #[arg(long)]
         input_resistance: Option<f64>,

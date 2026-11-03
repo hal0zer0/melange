@@ -1343,6 +1343,60 @@ fn test_parse_opamp_model_params() {
 }
 
 #[test]
+fn test_parse_opamp_trailing_tokens_hint_names_the_model_when_one_is_there() {
+    // Supply pins given as extra nodes after a real model name: the hint
+    // points at that model's card.
+    let spice = "Test\nU1 np fb out myoa 9 0\n.model myoa OA(AOL=200000)\n";
+    let err = Netlist::parse(spice).unwrap_err();
+    assert!(
+        err.message.contains("unexpected trailing token(s): '9 0'"),
+        "{}",
+        err.message
+    );
+    assert!(
+        err.message.contains("`.model myoa OA(VCC=9 VEE=0)`"),
+        "{}",
+        err.message
+    );
+    assert!(
+        !err.message.contains("model name is missing"),
+        "{}",
+        err.message
+    );
+}
+
+#[test]
+fn test_parse_opamp_trailing_tokens_hint_does_not_echo_a_rail_as_the_model_name() {
+    // The model name left out and the rails written on the element line:
+    // the token in the model position is `VCC=9`, which is not a name, so
+    // the hint must say the name is missing instead of quoting the typo.
+    let spice = "Test\nU1 np fb out VCC=9 VEE=0\n.model VEE=0 OA(VCC=9 VEE=0)\n";
+    let err = Netlist::parse(spice).unwrap_err();
+    assert!(
+        err.message
+            .contains("unexpected trailing token(s): 'VEE=0'"),
+        "{}",
+        err.message
+    );
+    assert!(
+        err.message
+            .contains("The model name is missing: 'VCC=9' sits where the model name goes."),
+        "{}",
+        err.message
+    );
+    assert!(
+        err.message.contains("`U1 np fb out <modelname>`"),
+        "{}",
+        err.message
+    );
+    assert!(
+        !err.message.contains(".model VEE=0") && !err.message.contains(".model VCC=9"),
+        "{}",
+        err.message
+    );
+}
+
+#[test]
 fn test_parse_opamp_no_model() {
     let spice = "Test\nU1 3 2 6 missing_model\n";
     let result = Netlist::parse(spice);

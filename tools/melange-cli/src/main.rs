@@ -369,6 +369,7 @@ fn main() -> Result<()> {
             output_node,
             duration,
             amplitude,
+            freq,
             input_resistance: input_resistance_flag,
             solver,
             nodal_subpath,
@@ -427,6 +428,17 @@ fn main() -> Result<()> {
                 .transpose()?;
             let (sample_rate, sample_rate_source) =
                 resolve_simulate_sample_rate(sample_rate, wav_rate)?;
+            // The tone is rendered at the run's rate, so Nyquist is checked
+            // against that rate, whichever flag or WAV header set it.
+            if !(freq > 0.0 && freq.is_finite() && freq < sample_rate / 2.0) {
+                anyhow::bail!(
+                    "--freq must be positive and below Nyquist ({} Hz at sample rate {}), \
+                     got {}",
+                    sample_rate / 2.0,
+                    sample_rate,
+                    freq
+                );
+            }
             let subsample_fire_mode = parse_subsample_fire_mode(&subsample_fire)?;
             let rail_mode = melange_solver::codegen::OpampRailMode::parse(&opamp_rail_mode)
                 .ok_or_else(|| {
@@ -484,6 +496,7 @@ fn main() -> Result<()> {
                     output_node: &output_node,
                     duration,
                     amplitude,
+                    freq,
                     input_resistance_flag,
                     solver: &solver,
                     opamp_rail_mode: rail_mode,
