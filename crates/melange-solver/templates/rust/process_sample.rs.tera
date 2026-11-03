@@ -251,13 +251,14 @@ fn process_sample_inner(input: f64{% if inject_or_tap %}, injections: [f64; NUM_
     // propagate into v_prev forever. See STATE_MAX_PLAUSIBLE_MAGNITUDE doc.
     let v_is_finite = v.iter().all(|x| x.is_finite());
     if !v_is_finite || v.iter().any(|x| x.abs() > STATE_MAX_PLAUSIBLE_MAGNITUDE) {
+        // The live operating point with ITS currents (`DC_NL_I` until a
+        // recompute, the converged currents after one): the pair satisfies
+        // KCL, so the restart is from a solution.
         state.v_prev = state.dc_operating_point;
 {% if carries_q_dot %}        state.q_dot = [0.0; N];
-{% endif %}{% if has_dc_nl %}        state.i_nl_prev = DC_NL_I;
-        state.i_nl_prev_prev = DC_NL_I;
-{% else %}        state.i_nl_prev = [0.0; M];
-        state.i_nl_prev_prev = [0.0; M];
-{% endif %}
+{% endif %}        state.i_nl_prev = state.dc_op_i_nl;
+        state.i_nl_prev_prev = state.dc_op_i_nl;
+
 {% if multi_input %}        state.inputs_prev = [0.0; NUM_INPUTS];
 {% else %}        state.input_prev = 0.0;
 {% endif %}{% if inject_or_tap %}        state.injections_prev = [0.0; NUM_INJECT];

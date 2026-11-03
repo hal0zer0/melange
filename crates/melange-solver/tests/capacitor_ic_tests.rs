@@ -530,15 +530,21 @@ fn codegen_dk_pairs_dc_nl_i_ic_seed_with_v_prev_ic_seed() {
         "reset() must restore i_nl_prev from DC_NL_I_IC_SEED, not DC_NL_I"
     );
 
-    // The plain DC_NL_I must still be used by the per-sample magnitude/NaN
-    // reset fallback, paired with dc_operating_point (NOT the IC seed) —
-    // this is the pairing that broke when an earlier fix attempt simply
-    // repointed DC_NL_I at the IC-seeded solve.
+    // The per-sample magnitude/NaN reset fallback restarts from the live
+    // operating point and the currents kept beside it (`dc_op_i_nl`), which
+    // are the plain DC_NL_I until a recompute — never the IC seed. This is
+    // the pairing that broke when an earlier fix attempt simply repointed
+    // DC_NL_I at the IC-seeded solve.
     assert!(
         code.contains("state.v_prev = state.dc_operating_point;")
-            && code.contains("state.i_nl_prev = DC_NL_I;"),
-        "the magnitude/NaN-reset fallback must reset to the plain \
-         (dc_operating_point, DC_NL_I) pair, independent of has_cap_ic"
+            && code.contains("state.i_nl_prev = state.dc_op_i_nl;"),
+        "the magnitude/NaN-reset fallback must reset to the \
+         (dc_operating_point, dc_op_i_nl) pair, independent of has_cap_ic"
+    );
+    assert!(
+        code.contains("dc_op_i_nl: DC_NL_I,") && code.contains("self.dc_op_i_nl = DC_NL_I;"),
+        "the currents beside the baked point are the plain DC_NL_I at construction and \
+         reset(), not the IC seed"
     );
 }
 

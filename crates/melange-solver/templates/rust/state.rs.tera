@@ -53,6 +53,13 @@ pub struct CircuitState {
     /// DC operating point (for reset/sleep/wake)
     pub dc_operating_point: [f64; N],
 
+    /// The nonlinear device currents AT `dc_operating_point`: `DC_NL_I` for
+    /// the baked point, the converged currents after `recompute_dc_op`. The
+    /// two are always written together, so the NaN/magnitude recovery and
+    /// `reset()` restart from a pair that satisfies KCL (the live point with
+    /// the baked currents would not, after a recompute at moved pots).
+    pub dc_op_i_nl: [f64; M],
+
     /// Cached Step-6c damping threshold = max|dc_operating_point[0..n_nodes]|
     /// .mul_add(0.05, 2.0). Loop-invariant between DC-OP changes, so it is
     /// refreshed only when dc_operating_point is mutated (Default, reset,
@@ -284,6 +291,7 @@ impl Default for CircuitState {
 {% else %}            i_nl_prev: [0.0; M],
             i_nl_prev_prev: [0.0; M],
 {% endif %}            dc_operating_point: DC_OP,
+            dc_op_i_nl: {% if has_dc_nl %}DC_NL_I{% else %}[0.0; M]{% endif %},
             damp_thresh: {{ damp_thresh_init }},
 {% else %}            v_prev: {% if has_cap_ic %}V_PREV_IC_SEED{% else %}[0.0; N]{% endif %},
 {% if has_dc_nl_ic_seed %}            i_nl_prev: DC_NL_I_IC_SEED,
@@ -293,6 +301,7 @@ impl Default for CircuitState {
 {% else %}            i_nl_prev: [0.0; M],
             i_nl_prev_prev: [0.0; M],
 {% endif %}            dc_operating_point: [0.0; N],
+            dc_op_i_nl: {% if has_dc_nl %}DC_NL_I{% else %}[0.0; M]{% endif %},
             damp_thresh: 2.0,
 {% endif %}{% if multi_input %}            inputs_prev: [0.0; NUM_INPUTS],
 {% else %}            input_prev: 0.0,
@@ -396,7 +405,10 @@ impl CircuitState {
         self.damp_thresh = {{ damp_thresh_init }};
 {% else %}        self.dc_operating_point = [0.0; N];
         self.damp_thresh = 2.0;
-{% endif %}        self.v_prev = {% if has_cap_ic %}V_PREV_IC_SEED{% else %}self.dc_operating_point{% endif %};
+{% endif %}        // The currents paired with the restored point (the pair the NaN/
+        // magnitude recovery restarts from).
+        self.dc_op_i_nl = {% if has_dc_nl %}DC_NL_I{% else %}[0.0; M]{% endif %};
+        self.v_prev = {% if has_cap_ic %}V_PREV_IC_SEED{% else %}self.dc_operating_point{% endif %};
 {% if carries_q_dot %}        self.q_dot = {{ q_dot_start }};
 {% endif %}{% if has_dc_nl_ic_seed %}        self.i_nl_prev = DC_NL_I_IC_SEED;
         self.i_nl_prev_prev = DC_NL_I_IC_SEED;

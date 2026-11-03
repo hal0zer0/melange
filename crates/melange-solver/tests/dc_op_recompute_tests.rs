@@ -2081,12 +2081,18 @@ fn fix4_reltol_convergence_emitted() {
         "NR loop must define RELTOL = 1e-6 (mirrors dc_op.rs reltol)"
     );
     assert!(
-        body.contains("RELTOL * v_node[a].abs() + TOL"),
-        "convergence must be the per-variable |delta| < RELTOL*|v| + TOL check"
+        body.contains("RELTOL * v_node[a].abs().max(v_new[a].abs()) + TOL"),
+        "the step test is per-variable |v_new − v| < RELTOL·max(|v|, |v_new|) + TOL \
+         on the UNDAMPED correction"
     );
     assert!(
         !body.contains("step_max < TOL"),
         "absolute-only step_max check must be gone"
+    );
+    assert!(
+        body.contains("const KCL_ABSTOL: f64 = 1e-9;")
+            && body.contains("!(acc.abs() <= RELTOL * scale + KCL_ABSTOL)"),
+        "acceptance is also gated on the per-row KCL residual (dc_op.rs's gate)"
     );
 }
 

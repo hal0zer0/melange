@@ -25,9 +25,12 @@
 //! 4. `emit_dc_op_extract_v_nl_dk` + `emit_dk_device_evaluation` —
 //!    per-device i_nl + Jacobian evaluator shared with transient NR.
 //! 5. `emit_dc_op_nr_loop_dk` — Direct NR loop with LU solve, flat
-//!    damping, convergence check.
+//!    damping, and the two-part certification: the step test on the
+//!    undamped Newton correction AND the per-row KCL residual gate at the
+//!    point written back (both at `dc_op.rs` tolerances).
 //! 6. `emit_dc_op_writeback_dk` — write converged `v_node` + `i_nl` back
-//!    to state, zero `q_dot`, seed the DC blocker at the new DC output,
+//!    to state (the live point and its own currents, `dc_op_i_nl`, as a
+//!    pair), zero `q_dot`, seed the DC blocker at the new DC output,
 //!    sync pot `_prev`, zero oversampler history.
 //! 7. `emit_recompute_dc_op_body_nodal` — stub emitter for every nodal
 //!    build (Schur and full-LU). Emits a method that bumps
@@ -100,8 +103,9 @@ pub(super) fn emit_recompute_dc_op_body_dk(ir: &CircuitIR) -> Result<String, Cod
          \x20       //\n\
          \x20       // Warm-starts from `self.v_prev` (a physically valid prior\n\
          \x20       // equilibrium), rebuilds `g_aug` from live pot/switch state,\n\
-         \x20       // and iterates classic companion-linearized NR until the node-\n\
-         \x20       // voltage step falls below the convergence tolerance. On\n\
+         \x20       // and iterates classic companion-linearized NR until an iterate\n\
+         \x20       // passes both the undamped-correction step test and the KCL\n\
+         \x20       // residual gate (the compile-time solver's tolerances). On\n\
          \x20       // convergence the result is written back; on failure, state is\n\
          \x20       // left untouched and `diag_nr_max_iter_count` is bumped so the\n\
          \x20       // caller can fall back to the `WARMUP_SAMPLES_RECOMMENDED`\n\
@@ -116,6 +120,8 @@ pub(super) fn emit_recompute_dc_op_body_dk(ir: &CircuitIR) -> Result<String, Cod
     );
     body.push_str(&emit_dc_op_build_g_aug_dk(ir));
     body.push_str(&emit_dc_op_build_b_dc_dk(ir));
+    let (vt_snapshot, vt_restore) = emit_body_effect_vt_snapshot_dk(ir);
+    body.push_str(&vt_snapshot);
 
     let linear = ir.topology.m == 0 || ir.device_slots.is_empty();
     let pinned: Vec<&crate::codegen::ir::OpampIR> = ir
@@ -129,7 +135,7 @@ pub(super) fn emit_recompute_dc_op_body_dk(ir: &CircuitIR) -> Result<String, Cod
             // Linear circuit: single LU solve. No NR loop needed.
             body.push_str(&emit_dc_op_linear_solve_dk(ir, "self.v_prev"));
         } else {
-            body.push_str(&emit_dc_op_nr_loop_dk(ir, "self.v_prev")?);
+            body.push_str(&emit_dc_op_nr_loop_dk(ir, "self.v_prev", &vt_restore)?);
         }
         body.push_str(&emit_dc_op_writeback_dk(ir, !linear));
         return Ok(body);
@@ -176,7 +182,7 @@ pub(super) fn emit_recompute_dc_op_body_dk(ir: &CircuitIR) -> Result<String, Cod
     if linear {
         body.push_str(&emit_dc_op_linear_solve_dk(ir, "v_seed"));
     } else {
-        body.push_str(&emit_dc_op_nr_loop_dk(ir, "v_seed")?);
+        body.push_str(&emit_dc_op_nr_loop_dk(ir, "v_seed", &vt_restore)?);
     }
     // A held pin stays only while its own test still passes and otherwise
     // releases; it never moves to the other rail in one round (pinned, the
@@ -221,9 +227,44 @@ pub(super) fn emit_recompute_dc_op_body_dk(ir: &CircuitIR) -> Result<String, Cod
          {seed_advance}\
          \x20       }}\n\
          \x20       // The railed op-amp pin set did not settle: a failed recompute.\n\
+         {vt_restore}\
          \x20       self.diag_nr_max_iter_count += 1;\n",
     ));
     Ok(body)
+}
+
+/// The body-effect MOSFET threshold fields the Newton loop writes, and how to
+/// put them back.
+///
+/// The shared device evaluator reads a MOSFET's threshold from
+/// `state.device_{d}_vt`, so the loop refreshes that field at every iterate
+/// (as the transient does per sample). The field is the only channel into the
+/// evaluator, so it cannot be iterated on a local; instead its value before
+/// the solve is kept here and written back on every failure return, which
+/// keeps the method's contract that a failed recompute leaves state untouched.
+/// On success the field holds the threshold at the converged point, which is
+/// the writeback. Returns `(snapshot, restore)`: the `let` bindings to emit
+/// before the solve and the assignments to emit before each failure return;
+/// both empty without body-effect MOSFETs.
+fn emit_body_effect_vt_snapshot_dk(ir: &CircuitIR) -> (String, String) {
+    let mut snapshot = String::new();
+    let mut restore = String::new();
+    for (_k, dev_num, _slot, _mp) in super::helpers::body_effect_mosfets(ir) {
+        if snapshot.is_empty() {
+            snapshot.push_str(
+                "\n        // Body-effect thresholds before the solve: the device evaluator\n\
+                 \x20       // reads `device_{d}_vt`, so the Newton loop writes it at every\n\
+                 \x20       // iterate; a failed recompute puts these back.\n",
+            );
+        }
+        snapshot.push_str(&format!(
+            "        let vt_saved_{dev_num} = self.device_{dev_num}_vt;\n"
+        ));
+        restore.push_str(&format!(
+            "        self.device_{dev_num}_vt = vt_saved_{dev_num};\n"
+        ));
+    }
+    (snapshot, restore)
 }
 
 /// Emit Rust that constructs a local `g_aug: [[f64; N]; N]` from:
@@ -471,20 +512,40 @@ fn emit_dc_op_linear_solve_dk(_ir: &CircuitIR, _seed: &str) -> String {
 ///   4. Builds `rhs_nr = b_dc + N_i · (i_nl − J_dev · v_nl)`.
 ///   5. LU-solves `G_aug_nr · v_new = rhs_nr` via the emitted `invert_n_equilibrated`
 ///      helper (returns `(inv, singular)`).
-///   6. Applies flat global voltage damping when any node-voltage element
+///   6. Tests the UNDAMPED Newton correction `v_new − v_node` per variable,
+///      `|Δ| < RELTOL·max(|v_node|, |v_new|) + TOL`: Newton's own estimate of
+///      the distance to the root, taken before any limiter touches the step
+///      (the rule the nodal transient certifies with, at `dc_op.rs`
+///      tolerances). The applied step is what moves the iterate; its size is
+///      not evidence.
+///   7. Applies flat global voltage damping when any node-voltage element
 ///      of the step exceeds the damping threshold, plus a per-element
 ///      clamp, and advances `v_node`. Damping/clamp sweep VOLTAGE rows
 ///      only (`[0..n_nodes)`); VS/VCVS branch-current rows (amperes) are
 ///      applied undamped, mirroring `dc_op.rs`'s `is_voltage_row`
 ///      classification.
-///   7. Declares convergence when every applied step element satisfies the
-///      SPICE-style per-variable check `|Δ| < RELTOL·|v| + TOL`.
+///   8. At the top of the next iteration, with the devices freshly evaluated
+///      at the point the sub-threshold correction reached, gates acceptance
+///      on the per-row KCL residual `|F_i| <= RELTOL·scale_i + KCL_ABSTOL`
+///      over the voltage rows, `F = g_aug·v − b_dc − N_i·i_nl(N_v·v)` and
+///      `scale_i = max(|b_i|, |(N_i·i_nl)_i|, max_j |g_aug_ij·v_j|)`, as
+///      `dc_op.rs` computes it. The step test alone is satisfied at any fixed
+///      point of the limit/damp map, root or not; the gate alone is vacuous
+///      on a weak mode (at 1e-9 A a node tied to the circuit by nanosiemens
+///      passes anywhere within a fraction of a volt). Convergence needs both,
+///      and both are read at the point that is written back.
 ///
-/// On convergence `v_node` and the final `i_nl` are written back via
-/// `emit_dc_op_writeback_dk`; on max-iter exhaustion `diag_nr_max_iter_count`
-/// is bumped and state is left untouched so the caller can fall back to the
-/// warmup loop.
-fn emit_dc_op_nr_loop_dk(ir: &CircuitIR, seed: &str) -> Result<String, CodegenError> {
+/// On convergence `v_node` and the device currents evaluated AT it are
+/// written back via `emit_dc_op_writeback_dk`; on iteration exhaustion (or a
+/// singular / non-finite solve) `diag_nr_max_iter_count` is bumped, the
+/// body-effect thresholds are put back (`vt_restore`) and the method returns
+/// with every other field untouched so the caller can fall back to the warmup
+/// loop.
+fn emit_dc_op_nr_loop_dk(
+    ir: &CircuitIR,
+    seed: &str,
+    vt_restore: &str,
+) -> Result<String, CodegenError> {
     const MAX_ITER: usize = 200;
     const TOL: f64 = 1e-9;
     /// Relative convergence term, mirroring `dc_op.rs::DcOpConfig::reltol`
@@ -492,10 +553,15 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR, seed: &str) -> Result<String, CodegenEr
     /// false-failing at the LU round-off floor, where an absolute-only 1e-9
     /// check can never be satisfied.
     const RELTOL: f64 = 1e-6;
+    /// Absolute floor of the KCL residual gate, in amperes: the compile-time
+    /// solver's `DC_OP_KCL_ABSTOL_AMPS` (`dc_op.rs`). A separate constant from
+    /// the volts step floor `TOL`; the two happen to share a value.
+    const KCL_ABSTOL: f64 = 1e-9;
     const DAMP_THRESHOLD: f64 = 10.0;
     const CLAMP: f64 = 50.0;
 
     let m = ir.topology.m;
+    let n_v_rows = ir.topology.n_nodes;
     let mut out = String::new();
 
     out.push_str(&format!(
@@ -503,9 +569,14 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR, seed: &str) -> Result<String, CodegenEr
          \x20       let mut v_node: [f64; N] = {seed};\n\
          \x20       let mut i_nl_final: [f64; M] = [0.0; M];\n\
          \x20       let mut nr_converged = false;\n\
+         \x20       // True when the previous iteration's UNDAMPED Newton correction\n\
+         \x20       // passed the step test, so the point this iteration evaluates\n\
+         \x20       // the devices at is a candidate for the KCL gate.\n\
+         \x20       let mut step_ok = false;\n\
          \x20       const MAX_ITER: usize = {MAX_ITER};\n\
          \x20       const TOL: f64 = {TOL:e};\n\
          \x20       const RELTOL: f64 = {RELTOL:e};\n\
+         \x20       const KCL_ABSTOL: f64 = {KCL_ABSTOL:e};\n\
          \x20       for _iter in 0..MAX_ITER {{\n"
     ));
 
@@ -556,7 +627,8 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR, seed: &str) -> Result<String, CodegenEr
             out.push_str(&format!(
                 "{inner}// Refresh body-effect VT from the current iterate (mirrors the\n\
                  {inner}// transient per-sample update; offline dc_op.rs does the same\n\
-                 {inner}// per NR iteration).\n"
+                 {inner}// per NR iteration). The field is the evaluator's only input\n\
+                 {inner}// for it; a failed recompute restores the pre-solve value.\n"
             ));
             out.push_str(&body_effect);
             out.push('\n');
@@ -605,6 +677,41 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR, seed: &str) -> Result<String, CodegenEr
         out.push_str(&format!("v_d{i}"));
     }
     out.push_str("];\n\n");
+
+    // KCL residual gate at the current iterate, reached by a sub-threshold
+    // Newton correction. Devices were just evaluated at this exact v_node, so
+    // the residual costs one matrix-vector product and no extra evaluation.
+    // Voltage rows only ([0..n_nodes); DK expands no internal nodes): the
+    // VS/VCVS branch rows are KVL rows the LU solve satisfies exactly.
+    out.push_str(&format!(
+        "{inner}// KCL residual gate at this iterate (devices evaluated here), when\n\
+         {inner}// the previous iteration's undamped correction passed the step test.\n\
+         {inner}// F_i = (g_aug·v)_i − b_dc_i − (N_i·i_nl)_i over the voltage rows,\n\
+         {inner}// accepted when |F_i| <= RELTOL·scale_i + KCL_ABSTOL with scale_i =\n\
+         {inner}// max(|b_dc_i|, |(N_i·i_nl)_i|, max_j |g_aug_ij·v_j|) (dc_op.rs's gate).\n\
+         {inner}// Written `!(x <= tol)` so a NaN residual fails.\n\
+         {inner}if step_ok {{\n\
+         {inner}    let mut kcl_ok = true;\n\
+         {inner}    for a in 0..{n_v_rows} {{\n\
+         {inner}        let mut q = 0.0_f64;\n\
+         {inner}        for i in 0..M {{ q += N_I[a][i] * i_nl[i]; }}\n\
+         {inner}        let mut acc = -b_dc[a] - q;\n\
+         {inner}        let mut scale = b_dc[a].abs().max(q.abs());\n\
+         {inner}        for b in 0..N {{\n\
+         {inner}            let t = g_aug[a][b] * v_node[b];\n\
+         {inner}            acc += t;\n\
+         {inner}            let ta = t.abs(); if ta > scale {{ scale = ta; }}\n\
+         {inner}        }}\n\
+         {inner}        if !(acc.abs() <= RELTOL * scale + KCL_ABSTOL) {{ kcl_ok = false; }}\n\
+         {inner}    }}\n\
+         {inner}    if kcl_ok {{\n\
+         {inner}        // Converged: this point passed both tests, and i_nl is its own.\n\
+         {inner}        i_nl_final = i_nl;\n\
+         {inner}        nr_converged = true;\n\
+         {inner}        break;\n\
+         {inner}    }}\n\
+         {inner}}}\n\n"
+    ));
 
     // Build G_aug_nr = g_aug − N_i · J_dev · N_v.
     // We use the N_I / N_V consts directly (dense scan). At typical M ≤ 6
@@ -678,15 +785,18 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR, seed: &str) -> Result<String, CodegenEr
          {inner}}}\n\n"
     ));
 
-    // KNOWN GAP: the convergence test emitted below is the per-variable STEP
-    // test only. The compile-time solver (`dc_op.rs::nr_dc_solve`) additionally
-    // gates acceptance on the per-node KCL residual
-    // (`DC_OP_KCL_ABSTOL_AMPS`), because a collapsed Newton step at a
-    // non-root passes the step test. This runtime `recompute_dc_op` does NOT
-    // yet carry that gate, so it can still accept a KCL-violating fixed point
-    // (e.g. parallel same-direction diodes). Mirroring the residual gate here
-    // is a scheduled follow-up; until then callers should treat a runtime
-    // recompute as unverified against KCL.
+    // Step test on the UNDAMPED correction, then the damped, clamped step.
+    //
+    // The test reads `v_new − v_node`, Newton's own estimate of the distance
+    // to the root, per variable against `RELTOL·max(|v_node|, |v_new|) +
+    // TOL` (the threshold at the correction's target, the nodal transient's
+    // rule; `dc_op.rs` tolerances). The test used to read the applied step
+    // after damping and clamping: a limiter's small step is not evidence of
+    // convergence, and the transient measured points certified that way
+    // 1.7 to 810 thresholds from Newton's target. A sub-threshold correction
+    // is also below every limiter's threshold, so the point it reaches is
+    // `v_new` itself; the next iteration evaluates the devices there and
+    // gates it on the KCL residual (above). Convergence needs both tests.
     //
     // Global flat damping + per-element clamp. Matches the simple-form
     // damping used in `dc_op.rs::nr_dc_solve` (scale all deltas by
@@ -696,13 +806,19 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR, seed: &str) -> Result<String, CodegenEr
     // here); rows [n_nodes..N) are VS/VCVS branch currents in AMPERES —
     // sweeping them into the voltage damping scan or the ±50 "V" clamp
     // would stall convergence whenever a branch current legitimately
-    // exceeds the thresholds. Convergence uses the SPICE-style
-    // per-variable check `|Δ| < RELTOL·|v| + TOL` (mirrors dc_op.rs
-    // reltol) so high-voltage circuits (300 V rails) don't false-fail at
-    // the LU round-off floor.
-    let n_v_rows = ir.topology.n_nodes;
+    // exceeds the thresholds.
     out.push_str(&format!(
-        "{inner}// Flat damping + per-element clamp on the Newton step.\n\
+        "{inner}// Step test on the UNDAMPED Newton correction, per variable:\n\
+         {inner}// |v_new − v| < RELTOL·max(|v|, |v_new|) + TOL. Read before any\n\
+         {inner}// limiter: the applied step's size is not evidence (see dc_op.rs\n\
+         {inner}// tolerances; the nodal transient's rule). NaN-honest (`!(a < b)`).\n\
+         {inner}step_ok = true;\n\
+         {inner}for a in 0..N {{\n\
+         {inner}    let delta = v_new[a] - v_node[a];\n\
+         {inner}    let threshold = RELTOL * v_node[a].abs().max(v_new[a].abs()) + TOL;\n\
+         {inner}    if !(delta.abs() < threshold) {{ step_ok = false; }}\n\
+         {inner}}}\n\
+         {inner}// Flat damping + per-element clamp on the Newton step.\n\
          {inner}// Voltage rows only ([0..{n_v_rows}) = circuit nodes); VS/VCVS\n\
          {inner}// branch-current rows are in amperes and are applied undamped\n\
          {inner}// (mirrors dc_op.rs is_voltage_row classification).\n\
@@ -715,9 +831,6 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR, seed: &str) -> Result<String, CodegenEr
          {inner}    ({DAMP_THRESHOLD:.1}_f64 / max_delta).max(0.1)\n\
          {inner}}} else {{ 1.0 }};\n\
          {inner}if damping < 1.0 {{ self.diag_voltage_damp_count += 1; }}\n\
-         {inner}// Per-variable SPICE-style convergence on the APPLIED step:\n\
-         {inner}// |delta| < RELTOL·|v| + TOL (abstol). See dc_op.rs.\n\
-         {inner}let mut all_within_tol = true;\n\
          {inner}for a in 0..N {{\n\
          {inner}    let delta = v_new[a] - v_node[a];\n\
          {inner}    let limited = if a < {n_v_rows} {{\n\
@@ -726,25 +839,21 @@ fn emit_dc_op_nr_loop_dk(ir: &CircuitIR, seed: &str) -> Result<String, CodegenEr
          {inner}        delta\n\
          {inner}    }};\n\
          {inner}    v_node[a] += limited;\n\
-         {inner}    if limited.abs() >= RELTOL * v_node[a].abs() + TOL {{\n\
-         {inner}        all_within_tol = false;\n\
-         {inner}    }}\n\
-         {inner}}}\n\
-         {inner}i_nl_final = i_nl;\n\
-         {inner}if all_within_tol {{\n\
-         {inner}    nr_converged = true;\n\
-         {inner}    break;\n\
          {inner}}}\n\
          \x20       }}\n\n"
     ));
 
-    // Max-iter fallback path.
-    out.push_str(
-        "        if !nr_converged {\n\
+    // Failure path: iteration exhaustion, a singular solve or a non-finite
+    // iterate all arrive here with `nr_converged` false. State is untouched
+    // but for the body-effect thresholds, which are put back.
+    let vt_restore_nested = vt_restore.replace("        self.", "            self.");
+    out.push_str(&format!(
+        "        if !nr_converged {{\n\
+         {vt_restore_nested}\
          \x20           self.diag_nr_max_iter_count += 1;\n\
          \x20           return;\n\
-         \x20       }\n",
-    );
+         \x20       }}\n"
+    ));
     Ok(out)
 }
 
@@ -791,7 +900,10 @@ fn emit_dc_op_writeback_dk(ir: &CircuitIR, nonlinear: bool) -> String {
     if nonlinear && ir.topology.m > 0 {
         body.push_str(
             "        self.i_nl_prev = i_nl_final;\n\
-             \x20       self.i_nl_prev_prev = i_nl_final;\n",
+             \x20       self.i_nl_prev_prev = i_nl_final;\n\
+             \x20       // The live point's own currents, kept beside it for the NaN/\n\
+             \x20       // magnitude recovery (which restarts from the pair).\n\
+             \x20       self.dc_op_i_nl = i_nl_final;\n",
         );
     }
 

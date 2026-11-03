@@ -480,10 +480,16 @@ fn test_codegen_linear_circuit_no_dc_nl_i() {
     config.circuit_name = "rc_linear".to_string();
     let result = support::build_shipped(RC_LOWPASS, &config, "dk").generated;
 
-    // Linear circuit should not have DC_NL_I
+    // Linear circuit should not have DC_NL_I. Guard on the declaration: the
+    // `dc_op_i_nl` field's doc comment names the constant in prose on every
+    // build.
     assert!(
-        !result.code.contains("DC_NL_I"),
+        !result.code.contains("pub const DC_NL_I"),
         "Linear circuit should not have DC_NL_I constant"
+    );
+    assert!(
+        result.code.contains("dc_op_i_nl: [0.0; M],"),
+        "a linear build keeps the paired-currents field at zeros"
     );
 }
 
