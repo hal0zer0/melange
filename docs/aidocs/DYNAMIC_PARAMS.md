@@ -69,6 +69,13 @@ state.set_pot_0(r_new);
 state.recompute_dc_op();  // DK path: solves NR; nodal path: stub
 ```
 
+The CLI verbs (`simulate`, `analyze`) do not flip switches at runtime at
+all: a `--switch` override is baked into the build (`build::apply_switch_overrides`
+sets the directive's `default_position`; the MNA stamps that position and the DC
+operating point is solved there), so an override render is bit-identical to the
+deck written at that position and starts settled. The generated
+`switch_N_position` starts at the baked position and `reset()` returns there.
+
 On nodal circuits `recompute_dc_op()` is a stub today (Phase E handoff
 — body deferred); NR catches up on its own over roughly
 `WARMUP_SAMPLES_RECOMMENDED` samples. See `set_pot_N` emission in

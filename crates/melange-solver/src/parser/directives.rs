@@ -222,6 +222,11 @@ pub struct SwitchDirective {
     pub positions: Vec<Vec<f64>>,
     /// Optional human-readable label (e.g. "Bright")
     pub label: Option<String>,
+    /// The position the build stamps as the static configuration and solves
+    /// the DC operating point at: 0 as written in the deck, or the position a
+    /// `--switch` override selects (`build::apply_switch_overrides`). The
+    /// generated state starts and resets at this position.
+    pub default_position: usize,
 }
 
 /// A gang directive (.gang "Label" member1 member2 ...).

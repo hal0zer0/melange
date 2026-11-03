@@ -293,86 +293,26 @@ pub(crate) fn declares_state_field(code: &str, field: &str) -> bool {
     code.contains(&format!("pub {field}: "))
 }
 
-/// Resolve `--switch NAME=POS` specs into `(switch_idx, position)` pairs.
-///
-/// `NAME` matches a switch label (case-insensitive) or a 0-based index; `POS`
-/// is a 0-based position validated against the switch's `positions`. Shared by
-/// `analyze` and `simulate`: both keep the netlist at position-0 element values
-/// and apply the override at runtime via `state.set_switch_N(position)`, so the
-/// emitted G/C constants stay consistent with `SwitchComponentIR.nominal_value`
-/// (mutating `netlist.elements` up front would double-apply the delta).
+/// Resolve `--switch NAME=POS` specs into `(switch_idx, position)` pairs and
+/// print the mapping. The build bakes the override itself
+/// ([`melange_solver::build::apply_switch_overrides`]: the chosen position is
+/// the configuration the matrices are stamped and the DC operating point is
+/// solved at); this is the same resolution, kept for the verbs' report line.
 pub(crate) fn resolve_switch_overrides(
     netlist: &melange_solver::parser::Netlist,
     switch_overrides: &[String],
 ) -> Result<Vec<(usize, usize)>> {
-    let mut resolved = Vec::with_capacity(switch_overrides.len());
-    for spec in switch_overrides {
-        let (name, pos_str) = spec.split_once('=').ok_or_else(|| {
-            anyhow::anyhow!("Invalid --switch format '{}', expected NAME=POS", spec)
-        })?;
-        let position: usize = pos_str.parse().map_err(|_| {
-            anyhow::anyhow!("Invalid switch position '{}' in --switch {}", pos_str, spec)
-        })?;
-
-        // Match by label, by any controlled component name, or by index. Many
-        // `.switch` directives carry no label (e.g. `.switch Rbyp30 1e9 1.0`),
-        // so component-name matching is what makes those reachable by name
-        // rather than forcing the caller to count indices.
-        let switch_idx = if let Ok(idx) = name.parse::<usize>() {
-            if idx >= netlist.switches.len() {
-                anyhow::bail!(
-                    "Switch index {} out of range (0..{})",
-                    idx,
-                    netlist.switches.len()
-                );
-            }
-            idx
-        } else {
-            netlist
-                .switches
-                .iter()
-                .position(|s| {
-                    s.label
-                        .as_deref()
-                        .map(|l| l.eq_ignore_ascii_case(name))
-                        .unwrap_or(false)
-                        || s.component_names
-                            .iter()
-                            .any(|c| c.eq_ignore_ascii_case(name))
-                })
-                .ok_or_else(|| {
-                    let available: Vec<String> = netlist
-                        .switches
-                        .iter()
-                        .enumerate()
-                        .map(|(i, s)| match s.label.as_deref() {
-                            Some(l) => format!("{}: {} ({})", i, l, s.component_names.join("+")),
-                            None => format!("{}: {}", i, s.component_names.join("+")),
-                        })
-                        .collect();
-                    anyhow::anyhow!(
-                        "Switch '{}' not found. Available: {}",
-                        name,
-                        available.join(", ")
-                    )
-                })?
-        };
-
-        let sw = &netlist.switches[switch_idx];
-        if position >= sw.positions.len() {
-            anyhow::bail!(
-                "Switch '{}' position {} out of range (0..{})",
-                name,
-                position,
-                sw.positions.len()
-            );
-        }
-
-        resolved.push((switch_idx, position));
+    let resolved = melange_solver::build::resolve_switch_overrides(netlist, switch_overrides)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    for (switch_idx, position) in &resolved {
+        let sw = &netlist.switches[*switch_idx];
         eprintln!(
-            "  Switch override: {} = position {}",
-            sw.label.as_deref().unwrap_or(name),
-            position
+            "  --switch: {} -> position {} (of {}), baked into the build",
+            sw.label
+                .clone()
+                .unwrap_or_else(|| sw.component_names.join("+")),
+            position,
+            sw.positions.len()
         );
     }
     Ok(resolved)

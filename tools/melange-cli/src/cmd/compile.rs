@@ -365,6 +365,7 @@ pub(crate) fn compile_circuit_source(
         emit_dc_op_recompute,
         plugin_format: format != OutputFormat::Code,
         pot_overrides: None,
+        switch_overrides: None,
         resolve_taps: true,
         inject_runtime: true,
         disable_unit_variation: false,

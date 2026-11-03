@@ -1158,6 +1158,7 @@ fn run_melange_build(
         emit_dc_op_recompute: false,
         plugin_format: false,
         pot_overrides: None,
+        switch_overrides: None,
         resolve_taps: false,
         inject_runtime: false,
         disable_unit_variation: true,

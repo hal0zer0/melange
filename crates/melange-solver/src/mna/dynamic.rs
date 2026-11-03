@@ -41,6 +41,10 @@ pub struct SwitchInfo {
     /// Emitted as `SWITCH_LABELS` so consumers can assert their own enum against
     /// directive order instead of relying on a silent positional mapping.
     pub label: Option<String>,
+    /// The position stamped as the static configuration (the deck's 0, or a
+    /// `--switch` override): the DC operating point is solved there and the
+    /// generated state starts there.
+    pub default_position: usize,
 }
 
 /// Potentiometer information resolved from .pot directive.

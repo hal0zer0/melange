@@ -156,6 +156,12 @@ pub struct BuildOptions {
     /// ([`apply_pot_overrides`]). `None` leaves the netlist as written (the MNA
     /// applies `.pot` defaults itself).
     pub pot_overrides: Option<Vec<String>>,
+    /// `--switch NAME=POS` overrides, baked into the netlist before the MNA is
+    /// built ([`apply_switch_overrides`]): the selected position becomes the
+    /// switch's static configuration, so the matrices are stamped and the DC
+    /// operating point is solved at it, exactly as a deck written at that
+    /// position. `None` or empty leaves every switch at position 0.
+    pub switch_overrides: Option<Vec<String>>,
     /// Resolve `.tap` probes (they change the generated `process_sample` API).
     pub resolve_taps: bool,
     /// Give the generated code the `.inject` runtime API. Either way every
@@ -379,6 +385,16 @@ pub fn assemble(
     // BEFORE the MNA: pot values are R values that flow into G at codegen time.
     if let Some(overrides) = &opts.pot_overrides {
         apply_pot_overrides(&mut netlist, overrides, &|m| report!(out, "{m}"))?;
+    }
+    // `--switch` overrides, BEFORE the MNA too: the chosen position is the
+    // configuration the build stamps and solves the DC operating point at.
+    // Applying a switch at runtime instead (`set_switch_N` at t = 0, the rule
+    // until 0.1.21) started every override render from the position-0
+    // operating point: a high-impedance bias network then drifted for seconds
+    // and two "identical" configurations, one written and one overridden,
+    // differed until it settled.
+    if let Some(overrides) = &opts.switch_overrides {
+        apply_switch_overrides(&mut netlist, overrides, &|m| report!(out, "{m}"))?;
     }
 
     // `--opamp-rail-mode boyle-diodes`: the catch diodes (and each op-amp's
@@ -1959,6 +1975,112 @@ pub fn has_output_coupling_cap(netlist: &crate::parser::Netlist, output_node_nam
 ///
 /// Minimum leg resistance (WIPER_MIN_LEG_R) must track the constant in
 /// `parser::expand_wipers`.
+/// Resolve `--switch NAME=POS` specs into `(switch_index, position)` pairs.
+///
+/// `NAME` matches the `.switch` label (case-insensitive), any component name
+/// the switch controls, or a 0-based index; `POS` is a 0-based position
+/// checked against the switch's positions. Shared by every verb that takes
+/// `--switch`.
+pub fn resolve_switch_overrides(
+    netlist: &crate::parser::Netlist,
+    switch_overrides: &[String],
+) -> Result<Vec<(usize, usize)>, BuildError> {
+    let mut resolved = Vec::with_capacity(switch_overrides.len());
+    for spec in switch_overrides {
+        let (name, pos_str) = spec
+            .split_once('=')
+            .ok_or_else(|| err!("Invalid --switch format '{}', expected NAME=POS", spec))?;
+        let position: usize = pos_str
+            .parse()
+            .map_err(|_| err!("Invalid switch position '{}' in --switch {}", pos_str, spec))?;
+        // Match by index, by label, or by any controlled component name. Many
+        // `.switch` directives carry no label, so component names are what
+        // make those reachable without counting indices.
+        let switch_idx = if let Ok(idx) = name.parse::<usize>() {
+            if idx >= netlist.switches.len() {
+                bail!(
+                    "Switch index {} out of range (0..{})",
+                    idx,
+                    netlist.switches.len()
+                );
+            }
+            idx
+        } else {
+            netlist
+                .switches
+                .iter()
+                .position(|s| {
+                    s.label
+                        .as_deref()
+                        .map(|l| l.eq_ignore_ascii_case(name))
+                        .unwrap_or(false)
+                        || s.component_names
+                            .iter()
+                            .any(|c| c.eq_ignore_ascii_case(name))
+                })
+                .ok_or_else(|| {
+                    let available: Vec<String> = netlist
+                        .switches
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| match s.label.as_deref() {
+                            Some(l) => format!("{}: {} ({})", i, l, s.component_names.join("+")),
+                            None => format!("{}: {}", i, s.component_names.join("+")),
+                        })
+                        .collect();
+                    err!(
+                        "Switch '{}' not found. Available: {}",
+                        name,
+                        available.join(", ")
+                    )
+                })?
+        };
+        let sw = &netlist.switches[switch_idx];
+        if position >= sw.positions.len() {
+            bail!(
+                "Switch '{}' position {} out of range (0..{})",
+                name,
+                position,
+                sw.positions.len()
+            );
+        }
+        resolved.push((switch_idx, position));
+    }
+    Ok(resolved)
+}
+
+/// Bake `--switch NAME=POS` overrides into the netlist: each named switch's
+/// `default_position` becomes the selected position, so the MNA builder
+/// stamps that position's component values as the static configuration and
+/// the DC operating point is solved there. The generated `switch_N_position`
+/// starts at it and `reset()` returns to it. Nothing is applied at runtime.
+/// A switch named twice takes the last spec.
+pub fn apply_switch_overrides(
+    netlist: &mut crate::parser::Netlist,
+    switch_overrides: &[String],
+    log: &dyn Fn(&str),
+) -> Result<(), BuildError> {
+    for (idx, position) in resolve_switch_overrides(netlist, switch_overrides)? {
+        let sw = &mut netlist.switches[idx];
+        sw.default_position = position;
+        let name = sw
+            .label
+            .clone()
+            .unwrap_or_else(|| sw.component_names.join("+"));
+        let values: Vec<String> = sw
+            .component_names
+            .iter()
+            .zip(&sw.positions[position])
+            .map(|(c, v)| format!("{c}={v:e}"))
+            .collect();
+        log(&format!(
+            "  --switch {name} -> position {position} baked as the static configuration ({})",
+            values.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 pub fn apply_pot_overrides(
     netlist: &mut crate::parser::Netlist,
     pot_overrides: &[String],

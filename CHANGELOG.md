@@ -9,6 +9,21 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`simulate --switch` and `analyze --switch` start from the chosen
+  position's own DC operating point.** A `--switch NAME=POS` override is now
+  baked into the build like `--pot`: the selected position is the static
+  configuration the matrices are stamped and the DC operating point is solved
+  at, so the render is bit-identical to a deck written at that position and
+  starts settled. Before, the override was applied at t = 0 through the
+  runtime setter on the position-0 operating point, and a slow,
+  high-impedance bias network then drifted for seconds (a FET compressor's
+  threshold node sat 2 V from its own DC value at t = 0 and its control node
+  took over 5 s to arrive). The generated state's `switch_N_position` starts
+  at the baked position and `reset()` returns there; a build without an
+  override is unchanged. `NAME` also matches a controlled component's name.
+
 ### Changed
 
 - **Catalogue 2N5457 pinch-off is −3.06 V (was −2.5 V).** Neither datasheet

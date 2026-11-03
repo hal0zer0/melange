@@ -1022,6 +1022,7 @@ impl Parser {
             component_names,
             positions,
             label,
+            default_position: 0,
         })
     }
 

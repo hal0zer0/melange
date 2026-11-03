@@ -1373,6 +1373,11 @@ pub struct SwitchIR {
     pub positions: Vec<Vec<f64>>,
     /// Number of positions
     pub num_positions: usize,
+    /// The position the matrices are stamped at and the DC operating point is
+    /// solved at (the deck's 0, or a `--switch` override). `switch_N_position`
+    /// starts here and `reset()` returns here.
+    #[serde(default)]
+    pub default_position: usize,
     /// Off-diagonal mutual inductance entries that depend on inductor values
     /// in this switch. After diagonal L updates, each entry is recomputed:
     /// `C[a][b] = C[b][a] = k * sqrt(C[a][a] * C[b][b])`.

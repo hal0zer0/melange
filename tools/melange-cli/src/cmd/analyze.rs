@@ -144,6 +144,9 @@ pub(crate) fn analyze_freq_response(
         plugin_format: false,
         // One knob setting means the same thing here as in `simulate`.
         pot_overrides: Some(pot_overrides.to_vec()),
+        // `--switch` is baked the same way: the build stamps the chosen
+        // position and solves the DC operating point there.
+        switch_overrides: Some(switch_overrides.to_vec()),
         resolve_taps: false,
         inject_runtime: false,
         disable_unit_variation: false,
@@ -182,9 +185,9 @@ pub(crate) fn analyze_freq_response(
     let netlist = built.netlist;
     let oversampling = built.oversampling;
 
-    // Keep the netlist at position-0 element values and apply overrides at
-    // runtime via `state.set_switch_N(position)` (see `switch_calls` below).
-    let switch_runtime_overrides = resolve_switch_overrides(&netlist, switch_overrides)?;
+    // `--switch` was baked into the build (`switch_overrides` above); resolved
+    // here only to print the mapping the build applied.
+    resolve_switch_overrides(&netlist, switch_overrides)?;
 
     // Generate frequency list
     let frequencies = match single_freq {
@@ -269,14 +272,10 @@ pub(crate) fn analyze_freq_response(
 
     // Append analyze main, compile, run.
     //
-    // Switch overrides are applied at runtime via `state.set_switch_N(position)`
-    // before the settle loop; the settle loop then converges NR (if M>0) on
-    // the new topology. Pot overrides remain netlist-baked (R-only, flows
-    // into G at codegen time).
-    let switch_calls: Vec<String> = switch_runtime_overrides
-        .iter()
-        .map(|(idx, pos)| format!("state.set_switch_{idx}({pos})"))
-        .collect();
+    // Switch and pot overrides are both baked into the build, so the state
+    // starts at the requested configuration with its own DC operating point;
+    // nothing is set at runtime.
+    let switch_calls: Vec<String> = Vec::new();
     let declared = |fields: &[&'static str]| -> Vec<&'static str> {
         fields
             .iter()

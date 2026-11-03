@@ -304,6 +304,9 @@ pub(crate) fn simulate_circuit_source(
         plugin_format: false,
         // Knob settings mean the same thing here as in `analyze`.
         pot_overrides: Some(opts.pot_overrides.to_vec()),
+        // `--switch` is baked the same way: the build stamps the chosen
+        // position and solves the DC operating point there.
+        switch_overrides: Some(opts.switch_overrides.to_vec()),
         resolve_taps: false,
         inject_runtime: true,
         disable_unit_variation: false,
@@ -405,15 +408,12 @@ pub(crate) fn simulate_circuit_source(
         println!("Step 5: Compiling and running...");
     }
     let probe_names: Vec<&str> = opts.probes.iter().map(|s| s.as_str()).collect();
-    // Resolve --switch NAME=POS and apply at runtime via set_switch_N (same as
-    // the generated plugin / `analyze`): keeps the netlist at position-0 values
-    // so the emitted G/C constants stay consistent with the delta-from-nominal
-    // stamp in set_switch_N.
-    let switch_runtime_overrides = resolve_switch_overrides(&netlist, opts.switch_overrides)?;
-    let switch_calls: Vec<String> = switch_runtime_overrides
-        .iter()
-        .map(|(idx, pos)| format!("state.set_switch_{idx}({pos})"))
-        .collect();
+    // `--switch NAME=POS` was baked into the build (`switch_overrides` above):
+    // the generated state already starts at the chosen position, with its own
+    // DC operating point, so nothing is set at runtime. Resolved here only to
+    // print the mapping the build applied.
+    resolve_switch_overrides(&netlist, opts.switch_overrides)?;
+    let switch_calls: Vec<String> = Vec::new();
     let extra_diag_counters = SUBSAMPLE_FIRE_DIAG_FIELDS
         .iter()
         .copied()

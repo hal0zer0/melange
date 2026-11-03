@@ -688,10 +688,11 @@ pub(crate) enum Commands {
         #[arg(long = "pot", value_name = "NAME=VALUE")]
         pot_overrides: Vec<String>,
 
-        /// Set switch position: "Label=pos" or index=pos (0-indexed, e.g.
-        /// "Voice=3"). May be repeated. Applied at runtime via
-        /// `state.set_switch_N(pos)` before the run — mirrors the generated
-        /// plugin, so `simulate` reaches non-rest positions the plugin uses.
+        /// Set switch position: "Label=pos", "Component=pos" or index=pos
+        /// (0-indexed, e.g. "Voice=3"). May be repeated. Baked into the build
+        /// like `--pot`: the chosen position is the static configuration the
+        /// matrices are stamped and the DC operating point is solved at, so the
+        /// render starts settled, exactly as a deck written at that position.
         #[arg(long = "switch", value_name = "NAME=POS")]
         switch_overrides: Vec<String>,
 
@@ -768,7 +769,9 @@ pub(crate) enum Commands {
         #[arg(long = "pot", value_name = "NAME=VALUE")]
         pot_overrides: Vec<String>,
 
-        /// Set switch position: "Label=pos" or index=pos (0-indexed, e.g. "LF Freq=3")
+        /// Set switch position: "Label=pos", "Component=pos" or index=pos
+        /// (0-indexed, e.g. "LF Freq=3"). Baked into the build like `--pot`: the
+        /// DC operating point is solved at the chosen position.
         #[arg(long = "switch", value_name = "NAME=POS")]
         switch_overrides: Vec<String>,
 

@@ -95,6 +95,7 @@ pub(crate) fn run_dc_op(
         } else {
             Some(opts.pot_overrides.to_vec())
         },
+        switch_overrides: None,
         resolve_taps: true,
         inject_runtime: true,
         disable_unit_variation: false,

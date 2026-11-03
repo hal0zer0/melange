@@ -37,6 +37,7 @@ pub fn options(sample_rate: f64, input: &str, outputs: &[&str]) -> BuildOptions 
         emit_dc_op_recompute: false,
         plugin_format: false,
         pot_overrides: None,
+        switch_overrides: None,
         resolve_taps: true,
         inject_runtime: true,
         disable_unit_variation: false,

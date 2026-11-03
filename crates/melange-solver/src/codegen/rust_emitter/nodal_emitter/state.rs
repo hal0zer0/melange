@@ -1010,7 +1010,10 @@ impl RustEmitter {
         }
 
         for (idx, _sw) in ir.switches.iter().enumerate() {
-            code.push_str(&format!("            switch_{}_position: 0,\n", idx));
+            code.push_str(&format!(
+                "            switch_{}_position: {},\n",
+                idx, ir.switches[idx].default_position
+            ));
         }
 
         for dev in &device_params {
@@ -1242,7 +1245,10 @@ impl RustEmitter {
             ));
         }
         for (idx, _sw) in ir.switches.iter().enumerate() {
-            code.push_str(&format!("        self.switch_{}_position = 0;\n", idx));
+            code.push_str(&format!(
+                "        self.switch_{}_position = {};\n",
+                idx, ir.switches[idx].default_position
+            ));
         }
         for dev in &device_params {
             for p in &dev.params {
@@ -1599,9 +1605,10 @@ impl RustEmitter {
                     "                && (self.pot_{idx}_resistance - {r_nom:.17e}).abs() <= {r_nom:.17e} * 1e-6\n"
                 ));
             }
-            for (idx, _sw) in ir.switches.iter().enumerate() {
+            for (idx, sw) in ir.switches.iter().enumerate() {
                 code.push_str(&format!(
-                    "                && self.switch_{idx}_position == 0\n"
+                    "                && self.switch_{idx}_position == {}\n",
+                    sw.default_position
                 ));
             }
             code.push_str("                ;\n");

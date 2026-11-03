@@ -947,6 +947,7 @@ impl CircuitIR {
                                 .collect(),
                             positions: sw.positions.clone(),
                             num_positions: sw.positions.len(),
+                            default_position: sw.default_position,
                             mutual_entries,
                         }
                     })

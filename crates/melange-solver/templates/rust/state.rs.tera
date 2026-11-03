@@ -350,7 +350,7 @@ impl Default for CircuitState {
 {% endif %}{{ inject_os_init }}{{ inject_clamp_counter_init }}
 {% if num_switches > 0 %}
 {% for idx in switch_indices %}
-            switch_{{ idx }}_position: 0,
+            switch_{{ idx }}_position: {{ switch_default_positions[loop.index0] }},
 {% endfor %}
 {% endif %}
 {% if needs_current_sr %}
@@ -441,7 +441,7 @@ impl CircuitState {
 {% endfor %}
 {% if num_switches > 0 %}
 {% for idx in switch_indices %}
-        self.switch_{{ idx }}_position = 0;
+        self.switch_{{ idx }}_position = {{ switch_default_positions[loop.index0] }};
 {% endfor %}
 {% endif %}
 {% if num_switches > 0 or num_pots > 0 %}
@@ -615,7 +615,7 @@ impl CircuitState {
             // pot setter's unchanged-value early-return would then lock
             // the stale matrices in until the next actual knob motion.
             let all_default = true
-{% for idx in switch_indices %}                && self.switch_{{ idx }}_position == 0
+{% for idx in switch_indices %}                && self.switch_{{ idx }}_position == {{ switch_default_positions[loop.index0] }}
 {% endfor %}{% for default in pot_defaults %}                && (self.pot_{{ loop.index0 }}_resistance - {{ default }}).abs() < 1e-9
 {% endfor %}            ;
             if all_default {

@@ -488,7 +488,9 @@ impl MnaBuilder {
                 // For expanded subcircuit names like "X1.C1", use base name after last dot
                 let base = comp_name.rsplit('.').next().unwrap_or(comp_name);
                 let first_char = base.chars().next().unwrap_or(' ').to_ascii_uppercase();
-                let pos_0 = sw_dir.positions[0][ci];
+                // The static configuration: position 0 as written, or the
+                // position a `--switch` override baked in (`default_position`).
+                let pos_0 = sw_dir.positions[sw_dir.default_position][ci];
                 let (node_p, node_q, static_value) = match first_char {
                     'R' => {
                         let elem = netlist.elements.iter().find(|e| {
@@ -586,6 +588,7 @@ impl MnaBuilder {
                 components,
                 positions: sw_dir.positions.clone(),
                 label: sw_dir.label.clone(),
+                default_position: sw_dir.default_position,
             });
         }
 

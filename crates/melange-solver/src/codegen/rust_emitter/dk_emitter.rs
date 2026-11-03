@@ -608,6 +608,11 @@ impl RustEmitter {
         // Always provide switch_indices (empty when no switches) so template can iterate safely
         let switch_indices: Vec<usize> = (0..num_switches).collect();
         ctx.insert("switch_indices", &switch_indices);
+        // The position each switch is stamped at (0, or a baked `--switch`
+        // override): the state starts and resets there.
+        let switch_default_positions: Vec<usize> =
+            ir.switches.iter().map(|sw| sw.default_position).collect();
+        ctx.insert("switch_default_positions", &switch_default_positions);
         // Generate pot/switch methods procedurally (rebuild_matrices, set_pot_N, set_switch_N)
         if num_switches > 0 || num_pots > 0 {
             let switch_methods = self.emit_switch_methods(ir, noise)?;

@@ -801,3 +801,98 @@ Rload out 0 100k
         "error should name the resistor and the .switch conflict, got: {msg}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `--switch` overrides are baked: the chosen position is the static
+// configuration the MNA stamps (and so the DC operating point is solved at).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_switch_override_is_the_static_configuration() {
+    use melange_solver::build::apply_switch_overrides;
+    let spice = "switch override\nR1 in out 10k\nRsw out 0 10k\nC1 out 0 1n\n.switch Rsw 10k 100k \"Load\"\n";
+    let mut netlist = Netlist::parse(spice).expect("parse");
+    assert_eq!(
+        netlist.switches[0].default_position, 0,
+        "a deck as written sits at position 0"
+    );
+    let baseline = MnaSystem::from_netlist(&netlist).expect("mna");
+    assert_eq!(baseline.switches[0].components[0].nominal_value, 10e3);
+    assert_eq!(baseline.switches[0].default_position, 0);
+
+    // Label, component name and index all select the same switch; the last
+    // spec for a switch wins.
+    for spec in ["Load=1", "rsw=1", "0=1"] {
+        let mut n = netlist.clone();
+        apply_switch_overrides(&mut n, &[spec.to_string()], &|_| {}).expect(spec);
+        assert_eq!(n.switches[0].default_position, 1, "{spec}");
+        let mna = MnaSystem::from_netlist(&n).expect("mna");
+        assert_eq!(
+            mna.switches[0].components[0].nominal_value, 100e3,
+            "{spec}: the stamped (nominal) value is the chosen position's"
+        );
+        assert_eq!(mna.switches[0].default_position, 1, "{spec}");
+        // The stamped conductance at `out` is 1/10k + 1/100k, not 1/10k + 1/10k.
+        let out = mna.node_map["out"] - 1;
+        let g_out = mna.g[out][out];
+        assert!(
+            (g_out - (1.0 / 10e3 + 1.0 / 100e3)).abs() < 1e-12,
+            "{spec}: G[out][out] = {g_out:e}"
+        );
+    }
+    apply_switch_overrides(&mut netlist, &["Load=1".into(), "Load=0".into()], &|_| {}).unwrap();
+    assert_eq!(
+        netlist.switches[0].default_position, 0,
+        "the last spec wins"
+    );
+
+    // Refusals: unknown name (listing what exists), position out of range,
+    // malformed spec.
+    for (spec, needle) in [
+        ("NoSuch=1", "not found"),
+        ("Load=2", "out of range"),
+        ("Load", "NAME=POS"),
+    ] {
+        let mut n = netlist.clone();
+        let e = apply_switch_overrides(&mut n, &[spec.to_string()], &|_| {}).unwrap_err();
+        assert!(e.to_string().contains(needle), "{spec}: {e}");
+    }
+}
+
+/// The generated state starts at the baked position and `reset()` returns
+/// there, on the DK template and the nodal emitter alike: the matrices were
+/// stamped at that position, so a runtime `set_switch_N(0)` from it must
+/// compute its delta from position 1, not from 0.
+#[test]
+fn generated_state_starts_at_the_baked_position() {
+    use melange_solver::build::apply_switch_overrides;
+    use melange_solver::codegen::{CodeGenerator, CodegenConfig};
+    let spice = "switch override codegen\nR1 in out 10k\nRsw out 0 10k\nC1 out 0 1n\nD1 out 0 DX\n.model DX D(IS=1e-14)\n.switch Rsw 10k 100k \"Load\"\n";
+    let mut netlist = Netlist::parse(spice).expect("parse");
+    apply_switch_overrides(&mut netlist, &["Load=1".into()], &|_| {}).unwrap();
+    let mna = MnaSystem::from_netlist(&netlist).expect("mna");
+    let mut config: CodegenConfig = support::config_in_out_or_node1(spice, 48000.0);
+    config.circuit_name = "switch_baked".to_string();
+    for (nodal, tag) in [(false, "dk"), (true, "nodal")] {
+        let code = if nodal {
+            CodeGenerator::new(config.clone()).generate_nodal(&mna, &netlist)
+        } else {
+            let kernel = melange_solver::dk::DkKernel::from_mna(&mna, 48000.0).expect("dk kernel");
+            CodeGenerator::new(config.clone()).generate(&kernel, &mna, &netlist)
+        }
+        .unwrap_or_else(|e| panic!("{tag}: {e}"))
+        .code;
+        assert!(
+            code.contains("switch_0_position: 1,"),
+            "{tag}: state starts at position 1"
+        );
+        assert!(
+            code.contains("self.switch_0_position = 1;"),
+            "{tag}: reset returns to position 1"
+        );
+        assert!(
+            !code.contains("switch_0_position: 0,"),
+            "{tag}: no position-0 start remains"
+        );
+    }
+}

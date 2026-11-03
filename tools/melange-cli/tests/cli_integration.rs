@@ -650,10 +650,11 @@ fn test_simulate_refuses_sample_rate_mismatching_input_wav() {
 
 #[test]
 fn test_simulate_switch_selects_position() {
-    // `simulate --switch NAME=POS` reaches non-rest switch positions at runtime
-    // via `state.set_switch_N(pos)` (mirrors the generated plugin). Before this
-    // feature `simulate` was pinned at position 0, forcing compile-and-run
-    // harness gymnastics to observe any other position (openfarf, 2026-08-15).
+    // `simulate --switch NAME=POS` reaches non-rest switch positions: the
+    // position is baked into the build as the static configuration (the DC
+    // operating point is solved there). Before this feature `simulate` was
+    // pinned at position 0, forcing compile-and-run harness gymnastics to
+    // observe any other position (openfarf, 2026-08-15).
     // Assert: (a) label resolution, (b) component-name resolution, (c) both
     // reach the same position -> byte-identical, and (d) that position differs
     // from the position-0 default (the switch actually restamps).
@@ -2845,4 +2846,67 @@ fn test_simulate_host_rate_inject_matches_input_tone() {
         "rate=inner --inject is evaluated per sub-step without the up-filter and \
          should differ from the tone; max |V(a)-V(b)| = {inner_diff:e}"
     );
+}
+
+/// The divider written at position 1 (`.switch Rsw 100k 10k`: position 0 IS
+/// 100k), for the bit-identity witness below.
+const TEST_SWITCH_DIVIDER_AT_POS1: &str = "\
+Switch Divider Test Fixture, written at the other position
+R1 in out 10k
+Rsw out 0 100k
+C1 out 0 1n
+.switch Rsw 100k 10k \"Load\"
+";
+
+#[test]
+fn test_simulate_switch_override_is_the_deck_written_at_that_position() {
+    // A `--switch` override is baked into the build: the matrices are stamped
+    // and the DC operating point is solved at the chosen position, so the
+    // render is bit-identical to the deck written at that position, from the
+    // first sample, on both solver families. Before 0.1.22 the override was
+    // applied at t = 0 through the runtime setter on the position-0 operating
+    // point, and a slow bias network drifted for seconds.
+    let cir = write_test_circuit(TEST_SWITCH_DIVIDER, "switch_baked");
+    let cir_pos1 = write_test_circuit(TEST_SWITCH_DIVIDER_AT_POS1, "switch_baked_pos1");
+    let mut keep = Vec::new();
+    for solver in ["dk", "nodal"] {
+        let sim = |tag: &str, deck: &PathBuf, extra: &[&str]| -> PathBuf {
+            let wav = std::env::temp_dir()
+                .join(format!("melange_cli_test_switch_baked_{solver}_{tag}.wav"));
+            let mut args = vec![
+                "simulate",
+                deck.to_str().unwrap(),
+                "--input-node",
+                "in",
+                "--output-node",
+                "out",
+                "--amplitude",
+                "0.5",
+                "--duration",
+                "0.02",
+                "--solver",
+                solver,
+                "--output",
+                wav.to_str().unwrap(),
+            ];
+            args.extend_from_slice(extra);
+            run_melange(&args);
+            wav
+        };
+        let overridden = sim("override", &cir, &["--switch", "Load=1"]);
+        let written = sim("written", &cir_pos1, &[]);
+        let pos0 = sim("pos0", &cir, &[]);
+        assert_eq!(
+            wav_pcm_bytes(&overridden),
+            wav_pcm_bytes(&written),
+            "{solver}: --switch Load=1 must render bit-identically to the deck written at position 1"
+        );
+        assert_ne!(
+            wav_pcm_bytes(&overridden),
+            wav_pcm_bytes(&pos0),
+            "{solver}: the override must differ from position 0"
+        );
+        keep.extend([overridden, written, pos0]);
+    }
+    let _cleanup = RemoveOnDrop(keep);
 }
