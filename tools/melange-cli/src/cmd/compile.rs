@@ -829,6 +829,9 @@ pub(crate) fn compile_circuit_source(
                 circuit_noise_param: circuit_has_runtime_noise(&generated.code),
                 wet_dry_mix,
                 ear_protection,
+                // A runtime oversampling set in the circuit code gives the
+                // plugin an "Oversampling" parameter over those factors.
+                oversampling_set: runtime_oversampling_set(&generated.code),
                 vendor,
                 url: vendor_url,
                 email,
@@ -915,6 +918,21 @@ fn refuse_stereo_misuse(
 /// noise and the `set_noise_enabled` the plugin's "Circuit Noise" parameter
 /// calls. Codegen emits both exactly when `--noise` is on and the circuit has
 /// a noise source.
+/// The factors of a runtime oversampling build (`pub const OVERSAMPLING_SET:
+/// [usize; N] = [..];` in the generated code), `None` for a fixed build.
+fn runtime_oversampling_set(code: &str) -> Option<Vec<usize>> {
+    let line = code
+        .lines()
+        .find(|l| l.starts_with("pub const OVERSAMPLING_SET: [usize; "))?;
+    let list = line.split('=').nth(1)?.trim().trim_end_matches(';');
+    let list = list.trim().strip_prefix('[')?.strip_suffix(']')?;
+    let factors: Vec<usize> = list
+        .split(',')
+        .filter_map(|f| f.trim().parse().ok())
+        .collect();
+    (!factors.is_empty()).then_some(factors)
+}
+
 fn circuit_has_runtime_noise(code: &str) -> bool {
     code.contains("pub const NOISE_MASTER_SEED_DEFAULT: u64")
         && code.contains("pub fn set_seed(&mut self, master: u64)")

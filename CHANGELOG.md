@@ -11,6 +11,15 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ### Added
 
+- **A runtime oversampling set is a plugin parameter.** A `--format plugin`
+  build of a circuit with `OVERSAMPLING_SET` (`--oversampling-set 1,2,4` or
+  the deck's `allow=`) gets an **Oversampling** parameter over its factors,
+  defaulting to the build's. A change constructs the states at the new factor
+  on the host's background thread (`set_oversampling` allocates, so it never
+  runs on the audio thread), the audio thread swaps them in when they are
+  ready without blocking, re-reports that factor's latency, and the replaced
+  states are dropped off-thread; `initialize()` builds at the parameter's
+  factor directly. Fixed-factor builds are unchanged.
 - **The provenance line records baked switch overrides.** A `compile --switch`
   (or `simulate`/`analyze`/`dc-op --switch`) build carries
   `"switch_overrides":{"<label>":<position>}` in its `// provenance:` JSON,

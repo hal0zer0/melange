@@ -315,6 +315,20 @@ Oversampling helps with:
 
 Cost: CPU scales roughly linearly with the oversampling factor.
 
+**A runtime set becomes a parameter.** When the circuit was built with a
+runtime oversampling set (`--oversampling-set 1,2,4`, or the deck's
+`.oversampling N allow=...`), the plugin gets an **Oversampling** parameter
+over those factors, defaulting to the build's factor. A change does not run on
+the audio thread: `set_oversampling` constructs a fresh state and allocates,
+so the plugin asks the host's background thread for states at the new factor
+(`OsTask::Build`), the first block that finds them ready swaps them in with a
+non-blocking try-lock, re-reports the latency of the new factor to the host,
+and hands the old states back to the background thread to drop
+(`OsTask::Drop`). The fresh states start at their construction controls and
+pick up the current switch and pot values in that same block; `initialize()`
+builds straight at the parameter's factor. Output is silent for nothing: the
+old states keep running until the swap.
+
 ## Circuit Noise
 
 If the circuit was compiled with `--noise {thermal|shot|full}`, the generated

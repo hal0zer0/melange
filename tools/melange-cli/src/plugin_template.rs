@@ -155,6 +155,12 @@ pub struct PluginOptions<'a> {
     pub wet_dry_mix: bool,
     /// Add ear-protection soft limiter on final output (default: true).
     pub ear_protection: bool,
+    /// The circuit code was built with a runtime oversampling set
+    /// (`OVERSAMPLING_SET`): add an "Oversampling" parameter over those
+    /// factors. A change builds the circuit states at the new factor on the
+    /// host's background thread and the audio thread swaps them in when they
+    /// are ready, re-reporting the latency; `None` for a fixed-factor build.
+    pub oversampling_set: Option<Vec<usize>>,
     /// Plugin vendor name. If `None`, defaults to "Melange".
     pub vendor: Option<&'a str>,
     /// Plugin URL. If `None`, defaults to "https://github.com/hal0zer0/melange".
@@ -885,6 +891,7 @@ fn generate_params_struct(
     wet_dry_mix: bool,
     ear_protection: bool,
     circuit_noise: bool,
+    oversampling_set: Option<&[usize]>,
 ) -> String {
     let has_any_params = with_level_params
         || !pots.is_empty()
@@ -893,7 +900,8 @@ fn generate_params_struct(
         || !switches.is_empty()
         || wet_dry_mix
         || ear_protection
-        || circuit_noise;
+        || circuit_noise
+        || oversampling_set.is_some();
     if !has_any_params {
         return "#[derive(Params, Default)]\npub struct CircuitParams {}".to_string();
     }
@@ -919,6 +927,11 @@ fn generate_params_struct(
     if circuit_noise {
         fields.push_str(CIRCUIT_NOISE_PARAM_FIELD);
         defaults.push_str(CIRCUIT_NOISE_PARAM_DEFAULT);
+    }
+
+    if oversampling_set.is_some() {
+        fields.push_str(OVERSAMPLING_PARAM_FIELD);
+        defaults.push_str(OVERSAMPLING_PARAM_DEFAULT);
     }
 
     let pot_fields = pot_field_names(pots);
@@ -1555,6 +1568,79 @@ const EAR_PROTECTION_PARAM_FIELD: &str = r#"    #[id = "ear_protection"]
     pub ear_protection: BoolParam,
 "#;
 
+const OVERSAMPLING_PARAM_FIELD: &str = "\
+    #[id = \"oversampling\"]\n    pub oversampling: EnumParam<OversamplingChoice>,\n";
+
+const OVERSAMPLING_PARAM_DEFAULT: &str = r#"            // The circuit was built with a runtime oversampling set; this picks
+            // the factor. A change rebuilds the circuit state at the new factor
+            // off the audio thread (see `OsTask`).
+            oversampling: EnumParam::new("Oversampling", OversamplingChoice::DEFAULT),
+"#;
+
+/// Crate-level items of a runtime-oversampling plugin: the parameter's enum
+/// (one variant per factor of the set, the build's default factor as
+/// `DEFAULT`), the background task, the per-factor latency the host is told,
+/// and the off-thread state constructor.
+fn oversampling_items(set: &[usize], default_factor: usize) -> String {
+    let variants: String = set
+        .iter()
+        .map(|f| format!("    #[id = \"x{f}\"]\n    #[name = \"{f}x\"]\n    X{f},\n"))
+        .collect();
+    let default = if set.contains(&default_factor) {
+        default_factor
+    } else {
+        set[0]
+    };
+    let factor_arms: String = set
+        .iter()
+        .map(|f| format!("            OversamplingChoice::X{f} => {f},\n"))
+        .collect();
+    let latency_arms: String = set
+        .iter()
+        .map(|f| format!("        {f} => {},\n", oversampling_latency_samples(*f)))
+        .collect();
+    format!(
+        "/// The oversampling factors this build can run at (`circuit::OVERSAMPLING_SET`).\n\
+         #[derive(Enum, Debug, PartialEq, Eq, Clone, Copy)]\n\
+         pub enum OversamplingChoice {{\n{variants}}}\n\n\
+         impl OversamplingChoice {{\n\
+         \x20   /// The factor the build starts at (`circuit::OVERSAMPLING_FACTOR`).\n\
+         \x20   pub const DEFAULT: Self = Self::X{default};\n\n\
+         \x20   pub fn factor(self) -> usize {{\n\
+         \x20       match self {{\n{factor_arms}\
+         \x20       }}\n\
+         \x20   }}\n\
+         }}\n\n\
+         /// Work the audio thread hands to the host's background thread: building\n\
+         /// the circuit states at another oversampling factor (`set_oversampling`\n\
+         /// constructs a fresh state and allocates, so it never runs on the audio\n\
+         /// thread), and dropping the states it replaced.\n\
+         pub enum OsTask {{\n\
+         \x20   Build {{ factor: usize, channels: usize, sample_rate: f64 }},\n\
+         \x20   Drop(Vec<CircuitState>),\n\
+         }}\n\n\
+         /// The host-rate latency of the oversampler's half-band round trip at each\n\
+         /// factor, in samples: what the host is told when the factor changes.\n\
+         fn os_latency(factor: usize) -> u32 {{\n\
+         \x20   match factor {{\n{latency_arms}\
+         \x20       _ => 0,\n\
+         \x20   }}\n\
+         }}\n\n\
+         /// `channels` fresh circuit states at `factor`, at the host rate: what\n\
+         /// `initialize()` builds, made on the background thread.\n\
+         fn build_states(factor: usize, channels: usize, sample_rate: f64) -> Vec<CircuitState> {{\n\
+         \x20   (0..channels)\n\
+         \x20       .map(|_| {{\n\
+         \x20           let mut s = CircuitState::default();\n\
+         \x20           let _ = s.set_oversampling(factor);\n\
+         \x20           s.set_sample_rate(sample_rate);\n\
+         \x20           s\n\
+         \x20       }})\n\
+         \x20       .collect()\n\
+         }}\n\n"
+    )
+}
+
 const EAR_PROTECTION_PARAM_DEFAULT: &str = r#"            ear_protection: BoolParam::new(
                 "Ear Protection",
                 true,
@@ -1572,6 +1658,117 @@ fn generate_lib_rs(
     oversampling_factor: usize,
     options: &PluginOptions<'_>,
 ) -> String {
+    // Runtime oversampling (see `oversampling_items`): the placeholders the
+    // lib.rs skeleton takes when the build has a set, and their fixed-build
+    // values otherwise.
+    let os_set_items = options
+        .oversampling_set
+        .as_deref()
+        .filter(|s| !s.is_empty());
+    let sync_imports = if os_set_items.is_some() {
+        "{Arc, Mutex}"
+    } else {
+        "Arc"
+    };
+    let oversampling_items = match os_set_items {
+        Some(set) => oversampling_items(set, oversampling_factor),
+        None => String::new(),
+    };
+    let background_task = if os_set_items.is_some() {
+        "OsTask"
+    } else {
+        "()"
+    };
+    let task_executor = if os_set_items.is_some() {
+        "\n    /// The background thread's work: build states at a factor into the\n\
+         \x20   /// hand-off slot, or drop replaced states.\n\
+         \x20   fn task_executor(&mut self) -> TaskExecutor<Self> {\n\
+         \x20       let slot = self.os_slot.clone();\n\
+         \x20       Box::new(move |task| match task {\n\
+         \x20           OsTask::Build { factor, channels, sample_rate } => {\n\
+         \x20               let states = build_states(factor, channels, sample_rate);\n\
+         \x20               if let Ok(mut s) = slot.lock() {\n\
+         \x20                   *s = Some((factor, states));\n\
+         \x20               }\n\
+         \x20           }\n\
+         \x20           OsTask::Drop(states) => drop(states),\n\
+         \x20       })\n\
+         \x20   }\n"
+            .to_string()
+    } else {
+        String::new()
+    };
+    let process_context = if os_set_items.is_some() {
+        "context"
+    } else {
+        "_context"
+    };
+    let os_swap = if os_set_items.is_some() {
+        let multi = num_outputs > 1;
+        let channels = if multi {
+            "1".to_string()
+        } else {
+            "self.circuit_states.len()".to_string()
+        };
+        let swap = if multi {
+            "                    let old = match states.into_iter().next() {\n\
+             \x20                       Some(fresh) => vec![std::mem::replace(&mut self.circuit_state, fresh)],\n\
+             \x20                       None => Vec::new(),\n\
+             \x20                   };\n"
+                .to_string()
+        } else {
+            "                    let old = std::mem::replace(&mut self.circuit_states, states);\n"
+                .to_string()
+        };
+        let reseed = if options.per_channel_noise_seeds {
+            "                    seed_channel_noise(&mut self.circuit_states);\n"
+        } else {
+            ""
+        };
+        let renoise = if options.circuit_noise_param {
+            "                    self.apply_circuit_noise();\n"
+        } else {
+            ""
+        };
+        format!(
+            "        // Runtime oversampling: a changed parameter asks the background thread\n\
+             \x20       // for states at the new factor (`set_oversampling` constructs and\n\
+             \x20       // allocates, never here); the block that finds them ready swaps them\n\
+             \x20       // in without blocking, tells the host the new latency, and hands the\n\
+             \x20       // old states back to be dropped. The fresh states start at their\n\
+             \x20       // construction controls; the switch and pot code below applies the\n\
+             \x20       // current values in this same block.\n\
+             \x20       {{\n\
+             \x20           let want = self.params.oversampling.value().factor();\n\
+             \x20           if want != self.os_running && want != self.os_requested {{\n\
+             \x20               self.os_requested = want;\n\
+             \x20               context.execute_background(OsTask::Build {{\n\
+             \x20                   factor: want,\n\
+             \x20                   channels: {channels},\n\
+             \x20                   sample_rate: self.current_sample_rate,\n\
+             \x20               }});\n\
+             \x20           }}\n\
+             \x20           let ready = match self.os_slot.try_lock() {{\n\
+             \x20               Ok(mut slot) => slot.take(),\n\
+             \x20               Err(_) => None,\n\
+             \x20           }};\n\
+             \x20           if let Some((factor, states)) = ready {{\n\
+             \x20               if factor == self.os_requested && factor != self.os_running {{\n\
+             {swap}\
+             \x20                   self.os_running = factor;\n\
+             \x20                   context.set_latency_samples(os_latency(factor));\n\
+             {reseed}{renoise}\
+             \x20                   context.execute_background(OsTask::Drop(old));\n\
+             \x20               }} else {{\n\
+             \x20                   context.execute_background(OsTask::Drop(states));\n\
+             \x20               }}\n\
+             \x20           }}\n\
+             \x20       }}\n"
+        )
+    } else {
+        String::new()
+    };
+
     let display_name: String = if let Some(name) = options.plugin_name {
         name.to_string()
     } else {
@@ -1644,6 +1841,7 @@ fn generate_lib_rs(
         options.wet_dry_mix,
         options.ear_protection,
         options.circuit_noise_param,
+        options.oversampling_set.as_deref(),
     );
     let process_loop = generate_process_loop(
         with_level_params,
@@ -1863,6 +2061,76 @@ fn generate_lib_rs(
         )
     };
 
+    // Runtime oversampling: the parameter's factor is applied to the states
+    // `initialize()` builds (off the audio thread, like the build itself), the
+    // plugin carries the hand-off slot and the running/requested factors, and
+    // the host is told the latency of the running factor.
+    let os_set = options
+        .oversampling_set
+        .as_deref()
+        .filter(|s| !s.is_empty());
+    let (plugin_struct, plugin_default, init_method) = if os_set.is_some() {
+        let multi = num_outputs > 1;
+        let states_iter = if multi {
+            "std::slice::from_mut(&mut self.circuit_state)"
+        } else {
+            "self.circuit_states.iter_mut()"
+        };
+        let patched_struct = plugin_struct.replace(
+            "    current_sample_rate: f64,\n}",
+            "    current_sample_rate: f64,\n\
+             \x20   /// States built at another oversampling factor by the background\n\
+             \x20   /// thread, waiting for the audio thread to swap them in.\n\
+             \x20   os_slot: Arc<Mutex<Option<(usize, Vec<CircuitState>)>>>,\n\
+             \x20   /// The factor the circuit states run at.\n\
+             \x20   os_running: usize,\n\
+             \x20   /// The factor last asked of the background thread.\n\
+             \x20   os_requested: usize,\n\
+             }",
+        );
+        let patched_default = plugin_default.replace(
+            "            current_sample_rate: 0.0,\n",
+            "            current_sample_rate: 0.0,\n\
+             \x20           os_slot: Arc::new(Mutex::new(None)),\n\
+             \x20           os_running: circuit::OVERSAMPLING_FACTOR,\n\
+             \x20           os_requested: circuit::OVERSAMPLING_FACTOR,\n",
+        );
+        let patched_init = init_method
+            .replace(
+                "_context: &mut impl InitContext<Self>",
+                "context: &mut impl InitContext<Self>",
+            )
+            .replace(
+                "        true\n    }",
+                &format!(
+                    "        // The states were built at the default factor; move them to the\n\
+                     \x20       // parameter's (off the audio thread, as the build is) and tell the\n\
+                     \x20       // host that factor's latency.\n\
+                     \x20       let os = self.params.oversampling.value().factor();\n\
+                     \x20       if os != circuit::OVERSAMPLING_FACTOR {{\n\
+                     \x20           for s in {states_iter} {{\n\
+                     \x20               let _ = s.set_oversampling(os);\n\
+                     \x20               s.set_sample_rate(buffer_config.sample_rate as f64);\n\
+                     \x20           }}\n\
+                     \x20       }}\n\
+                     \x20       self.os_running = os;\n\
+                     \x20       self.os_requested = os;\n\
+                     \x20       context.set_latency_samples(os_latency(os));\n\
+                     \x20       true\n\
+                     \x20   }}"
+                ),
+            );
+        debug_assert!(
+            patched_struct != plugin_struct
+                && patched_default != plugin_default
+                && patched_init != init_method,
+            "runtime-oversampling patch anchors must match the generated plugin skeleton"
+        );
+        (patched_struct, patched_default, patched_init)
+    } else {
+        (plugin_struct, plugin_default, init_method)
+    };
+
     // Runtime noise: initialize() switches the freshly built states to the
     // "Circuit Noise" parameter, and reset() re-applies it after the states
     // reset (which keeps the setting; applied anyway so the two cannot drift).
@@ -1959,7 +2227,7 @@ fn generate_lib_rs(
 
     // Oversampling latency: nih-plug has no `latency()` on `Plugin`; the host
     // is told through the init context, once the plugin knows it is running.
-    let init_method = if oversampling_factor > 1 {
+    let init_method = if oversampling_factor > 1 && os_set.is_none() {
         let latency_samples = oversampling_latency_samples(oversampling_factor);
         let patched = init_method
             .replace(
@@ -2067,11 +2335,11 @@ fn ear_protection_limit(x: f32) -> f32 {
 // =============================================================================
 
 use nih_plug::prelude::*;
-use std::sync::Arc;
+use std::sync::{sync_imports};
 
 mod circuit;
 {circuit_import}
-{channel_noise_fn}{ear_protection_fn}
+{channel_noise_fn}{ear_protection_fn}{oversampling_items}
 {plugin_struct}
 
 {plugin_default}
@@ -2098,8 +2366,8 @@ impl Plugin for CircuitPlugin {{
     const SAMPLE_ACCURATE_AUTOMATION: bool = false;
 
     type SysExMessage = ();
-    type BackgroundTask = ();
-
+    type BackgroundTask = {background_task};
+{task_executor}
     fn params(&self) -> Arc<dyn Params> {{
         self.params.clone()
     }}
@@ -2114,9 +2382,9 @@ impl Plugin for CircuitPlugin {{
         &mut self,
         buffer: &mut Buffer,
         _aux: &mut AuxiliaryBuffers,
-        _context: &mut impl ProcessContext<Self>,
+        {process_context}: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {{
-{process_loop}
+{os_swap}{process_loop}
         ProcessStatus::Normal
     }}
 }}
@@ -2549,6 +2817,57 @@ mod tests {
             lib.contains("self.params.pot_r1.smoothed.reset(self.params.pot_r1.value());"),
             "initialize() must prime the pot smoother with its default; missing from:\n{lib}"
         );
+    }
+
+    #[test]
+    fn runtime_oversampling_set_becomes_a_parameter_switched_off_the_audio_thread() {
+        // A build with OVERSAMPLING_SET gets an "Oversampling" enum parameter
+        // over its factors (default = the build's factor), a background task
+        // that constructs states at another factor, and a swap in process()
+        // that never blocks; a fixed build has none of it.
+        let gen = |set: Option<Vec<usize>>, mono: bool, outputs: usize| {
+            let opts = PluginOptions {
+                mono,
+                oversampling_set: set,
+                ..Default::default()
+            };
+            generate_lib_rs("os", false, &[], &[], &[], &[], outputs, 2, &opts)
+        };
+        for (mono, outputs) in [(false, 1), (true, 1), (false, 2)] {
+            let lib = gen(Some(vec![1, 2, 4]), mono, outputs);
+            assert!(lib.contains("pub oversampling: EnumParam<OversamplingChoice>,"));
+            assert!(lib.contains("EnumParam::new(\"Oversampling\", OversamplingChoice::DEFAULT)"));
+            assert!(lib.contains("pub const DEFAULT: Self = Self::X2;"));
+            assert!(lib.contains("#[id = \"x4\"]\n    #[name = \"4x\"]\n    X4,"));
+            assert!(lib.contains("type BackgroundTask = OsTask;"));
+            assert!(lib.contains("fn task_executor(&mut self) -> TaskExecutor<Self> {"));
+            assert!(lib.contains("context.execute_background(OsTask::Build {"));
+            assert!(lib.contains("self.os_slot.try_lock()"));
+            assert!(lib.contains("context.set_latency_samples(os_latency(factor));"));
+            assert!(lib.contains("context.execute_background(OsTask::Drop(old));"));
+            assert!(lib.contains("use std::sync::{Arc, Mutex};"));
+            // initialize() moves the fresh states to the parameter's factor.
+            assert!(lib.contains("if os != circuit::OVERSAMPLING_FACTOR {"));
+            assert!(lib.contains("context.set_latency_samples(os_latency(os));"));
+            if outputs > 1 {
+                assert!(lib.contains("std::mem::replace(&mut self.circuit_state, fresh)"));
+            } else {
+                assert!(lib.contains("std::mem::replace(&mut self.circuit_states, states)"));
+            }
+        }
+        // The latency table carries each factor's round-trip delay.
+        let lib = gen(Some(vec![1, 2, 4]), false, 1);
+        let l2 = oversampling_latency_samples(2);
+        let l4 = oversampling_latency_samples(4);
+        assert!(lib.contains(&format!("        2 => {l2},\n        4 => {l4},\n")));
+        assert!(lib.contains("        1 => 0,\n"));
+
+        let fixed = gen(None, false, 1);
+        assert!(!fixed.contains("OversamplingChoice"));
+        assert!(!fixed.contains("OsTask"));
+        assert!(fixed.contains("type BackgroundTask = ();"));
+        assert!(fixed.contains("_context: &mut impl ProcessContext<Self>"));
+        assert!(fixed.contains("use std::sync::Arc;"));
     }
 
     #[test]
