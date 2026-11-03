@@ -146,7 +146,11 @@ impl RustEmitter {
         // The certification thresholds the Newton sites and the sub-step
         // ladder read, by name (`thresholds.rs`: one constant each, not
         // configurable).
-        crate::codegen::rust_emitter::thresholds::emit_transient_thresholds(&mut code, true);
+        crate::codegen::rust_emitter::thresholds::emit_transient_thresholds(
+            &mut code,
+            true,
+            !ir.saturating_inductors.is_empty(),
+        );
 
         // Runtime BE-latch detector constants (trapezoidal builds only).
         if ir.solver_config.runtime_be_latch {

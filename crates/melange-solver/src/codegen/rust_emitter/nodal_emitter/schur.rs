@@ -103,7 +103,7 @@ impl RustEmitter {
              {indent}    // An alternation inside the solver's own node tolerance (RELTOL*|v| +\n\
              {indent}    // VNTOL, the Newton node-step test) cannot be told apart from\n\
              {indent}    // convergence noise, so it is not evidence.\n\
-             {indent}    let be_tol = 1e-3 * state.be_x_mean.abs() + 1e-6;\n\
+             {indent}    let be_tol = RELTOL * state.be_x_mean.abs() + VNTOL;\n\
              {indent}    // A ring below -60 dB of the program that excited it is one the\n\
              {indent}    // compile-time ring predicate left on trapezoidal: not evidence either.\n\
              {indent}    // (An alternation of amplitude A has power A^2.)\n\

@@ -217,7 +217,8 @@ fn strip_outer_parens(expr: &str) -> &str {
 ///   are ~1e4 while their difference is the ~10 V the row is actually about.
 ///   Letting the stiff magnitude set the tolerance would make the check
 ///   unfireable — the same stiff-denominator trap the Φ-vs-Φ form falls into.
-/// * **The tolerance is `1e-5·den`, floored at `64·eps` of the stiff pair.**
+/// * **The tolerance is `FLUX_ROW_RELTOL·den` (1e-5), floored at
+///   `FLUX_ROW_ULP_FLOOR·eps` (64 ulp) of the stiff pair** (`thresholds.rs`).
 ///   `den` is the largest term after pairing, i.e. the row's per-sample
 ///   increment (`alpha·ΔΦ`, the volts across the winding), not the flux
 ///   itself. Whatever residual is accepted here is integrated into the flux
@@ -288,7 +289,7 @@ pub(super) fn emit_sat_ind_row_residual(
             continue;
         }
         code.push_str(&format!(
-            "{indent}        if !(acc.abs() <= (1e-5 * den).max(64.0 * f64::EPSILON * stiff)) {{ {flag} = true; }}\n"
+            "{indent}        if !(acc.abs() <= (FLUX_ROW_RELTOL * den).max(FLUX_ROW_ULP_FLOOR * f64::EPSILON * stiff)) {{ {flag} = true; }}\n"
         ));
         code.push_str(&format!("{indent}    }}\n"));
     }
@@ -329,7 +330,7 @@ pub(super) fn emit_sat_ind_merit_rows(
         }
         code.push_str(&format!(
             "{indent}    norm_sq += acc * acc;\n\
-             {indent}    if !(acc.abs() <= (1e-5 * den).max(64.0 * f64::EPSILON * stiff)) {{ ok = false; }}\n\
+             {indent}    if !(acc.abs() <= (FLUX_ROW_RELTOL * den).max(FLUX_ROW_ULP_FLOOR * f64::EPSILON * stiff)) {{ ok = false; }}\n\
              {indent}}}\n"
         ));
     }

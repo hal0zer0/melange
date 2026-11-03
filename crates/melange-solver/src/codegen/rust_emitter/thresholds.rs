@@ -70,10 +70,44 @@ pub const ABSTOL_SCALE_FLOOR: f64 = 1e-9;
 /// only for a largest correction in [1e-3, 1e-3 + 1e-9) V.
 pub const SUBSTEP_ACCEPT_VOLTS: f64 = 1e-3;
 
+/// Relative tolerance of a saturating inductor's flux row, dimensionless:
+/// the row residual is accepted when `|acc| <= FLUX_ROW_RELTOL·den`, `den` the
+/// row's largest term after the stiff pair `alpha·Φ − rhs` is summed (the
+/// per-sample increment, the volts across the winding), floored at
+/// `FLUX_ROW_ULP_FLOOR·eps` of the stiff pair. Its own constant, not RELTOL:
+/// whatever residual the row accepts is integrated into the flux history
+/// with one sign under a DC bias, so it accumulates instead of averaging out;
+/// at 1e-3 a 5 mA biased core drifted by −1.6e-5 A over 2 s, at 1e-5 by
+/// ~1e-10 A for about one more iteration per sample (the measurement in
+/// `sat_ind.rs`). Ruled 2026-11-03 to be named; value unchanged since that
+/// measurement.
+pub const FLUX_ROW_RELTOL: f64 = 1e-5;
+
+/// Floor of the flux-row tolerance, in units of `f64::EPSILON` times the
+/// stiff pair's magnitude: what the pairing cannot remove is rounding in
+/// `alpha·Φ − rhs[k]`, a few ulp of the operands, not of their difference,
+/// and a fixed absolute floor would reopen the drift at small increments.
+/// Ruled 2026-11-03 to be named; value unchanged since the flux-row test was
+/// written.
+pub const FLUX_ROW_ULP_FLOOR: f64 = 64.0;
+
 /// Emit the transient certification thresholds into the generated code as
 /// named module-level constants (both routes). `substep` adds the sub-step
 /// ladder's acceptance, which only the nodal route has.
-pub(super) fn emit_transient_thresholds(code: &mut String, substep: bool) {
+pub(super) fn emit_transient_thresholds(code: &mut String, substep: bool, flux: bool) {
+    if flux {
+        code.push_str(
+            "/// Relative tolerance of a saturating inductor's flux row,\n\
+             /// `|acc| <= FLUX_ROW_RELTOL * den`, `den` the row's largest term after the\n\
+             /// stiff pair is summed; floored at FLUX_ROW_ULP_FLOOR ulp of that pair.\n\
+             /// Its own constant: the accepted residual integrates into the flux.\n",
+        );
+        code.push_str(&format!(
+            "pub const FLUX_ROW_RELTOL: f64 = {FLUX_ROW_RELTOL:e};\n\n\
+             /// Floor of the flux-row tolerance, in ulp of the stiff pair.\n\
+             pub const FLUX_ROW_ULP_FLOOR: f64 = {FLUX_ROW_ULP_FLOOR:?};\n\n"
+        ));
+    }
     code.push_str(
         "/// Relative term of every Newton certification test (SPICE RELTOL): the\n\
          /// node-step test, the per-row KCL residual gate and the device-current\n\
@@ -127,7 +161,7 @@ mod tests {
     #[test]
     fn emitted_literals_are_the_named_values() {
         let mut code = String::new();
-        emit_transient_thresholds(&mut code, true);
+        emit_transient_thresholds(&mut code, true, true);
         for line in [
             "pub const RELTOL: f64 = 1e-3;",
             "pub const VNTOL: f64 = 1e-6;",
@@ -139,7 +173,7 @@ mod tests {
             assert!(code.contains(line), "missing `{line}` in:\n{code}");
         }
         let mut dk = String::new();
-        emit_transient_thresholds(&mut dk, false);
+        emit_transient_thresholds(&mut dk, false, false);
         assert!(!dk.contains("SUBSTEP_ACCEPT_VOLTS"));
         assert_eq!(format!("{DC_OP_RELTOL:e}"), "1e-6");
         assert_eq!(format!("{DC_OP_STEP_ABSTOL_VOLTS:e}"), "1e-9");

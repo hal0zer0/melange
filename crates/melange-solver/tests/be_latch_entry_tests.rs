@@ -303,7 +303,7 @@ const BIASED_REST: &str =
     "biased rest alternation witness\nCin in 0 1u\nD1 in 0 DX\nRin in out 1k\n\
 Vb vb 0 DC 10\nRb vb out 2k\nRload out 0 1k\nCp out 0 10p\n.model DX D(IS=2.52n N=1.752)\n";
 
-const TOL_LINE: &str = "let be_tol = 1e-3 * state.be_x_mean.abs() + 1e-6;";
+const TOL_LINE: &str = "let be_tol = RELTOL * state.be_x_mean.abs() + VNTOL;";
 
 /// Settle at rest, kick the output node's capacitor current so the stiff mode
 /// rings with amplitude `ring` volts, and report whether the latch engaged over
@@ -327,7 +327,7 @@ fn latches_on_rest_ring(code: &str, ring: f64, tag: &str) -> bool {
         == 1.0
 }
 
-/// A ring inside the solver's own node tolerance (1e-3*|v| + 1e-6 V, the
+/// A ring inside the solver's own node tolerance (RELTOL*|v| + VNTOL, the
 /// Newton node-step test) cannot be told apart from convergence noise and
 /// must not engage the latch; the same deck with a larger ring must. Both at
 /// 1x and 4x oversampling (the window is in internal samples).

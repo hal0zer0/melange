@@ -370,6 +370,7 @@ configurable.
 | `KCL_ABSTOL` | 1e-9 A | Floor of the per-row KCL residual gate, `\|F_i\| ≤ RELTOL·den_i + KCL_ABSTOL`, and of the chord exit step |
 | `ABSTOL`, `ABSTOL_SCALE_FLOOR` | 1e-12 A, 1e-9 A | Device-current consistency check on the accepting iteration |
 | `SUBSTEP_ACCEPT_VOLTS` | 1e-3 V | The nodal sub-step ladder's absolute acceptance (looser than the step test below ~1 V, tighter above) |
+| `FLUX_ROW_RELTOL`, `FLUX_ROW_ULP_FLOOR` | 1e-5, 64 ulp | A saturating inductor's flux-row residual, relative to the row's per-sample increment and floored at 64 ulp of the stiff pair (emitted only when the build has one) |
 | `DC_OP_RELTOL`, `DC_OP_TOL`, `DC_OP_KCL_ABSTOL` | 1e-6, 1e-9 V, 1e-9 A | The DC operating-point solve, compile-time and `recompute_dc_op` |
 
 ## Startup
