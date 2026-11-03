@@ -688,12 +688,32 @@ impl RustEmitter {
         // Device parameter state fields (runtime-adjustable)
         let device_params = device_param_template_data(ir);
         if !device_params.is_empty() {
-            code.push_str("\n    // --- Runtime-adjustable device parameters ---\n");
+            code.push_str(
+                "\n    // --- Runtime-adjustable device parameters ---\n\
+                 \x20   // Initialised from the DEVICE_N_* constants and read by every\n\
+                 \x20   // evaluation: write one to change the device (tube aging, transistor\n\
+                 \x20   // matching). Two limits, each stated on the field it applies to: a\n\
+                 \x20   // self-heating device's thermal update rewrites IS and the thermal\n\
+                 \x20   // voltage every sample, and a junction's limiter threshold (pnjlim's\n\
+                 \x20   // critical voltage) is a compile-time constant from the nominal IS.\n",
+            );
             for dev in &device_params {
                 for p in &dev.params {
                     code.push_str(&format!(
-                        "    /// Device {} {} ({}) — runtime adjustable\n",
-                        dev.dev_num, p.const_suffix, dev.device_type
+                        "    /// Device {} {} ({}) — runtime adjustable{}{}\n",
+                        dev.dev_num,
+                        p.const_suffix,
+                        dev.device_type,
+                        if p.thermal_rewritten {
+                            "; rewritten every sample by this device's thermal update, so a direct write is overwritten"
+                        } else {
+                            ""
+                        },
+                        if p.vcrit_frozen {
+                            "; the limiter's critical voltage stays at the nominal value (limiting only, not the solution)"
+                        } else {
+                            ""
+                        },
                     ));
                     code.push_str(&format!(
                         "    pub device_{}_{}: f64,\n",

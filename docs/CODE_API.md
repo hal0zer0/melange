@@ -115,7 +115,15 @@ the cold block into the box the target already owns, and allocates nothing,
 so it is the way to split a state that two channels shared while their input
 was identical, on the audio thread.
 
-`CircuitState`'s fields are `pub`. Two of them are the integrator's history:
+`CircuitState`'s fields are `pub`. The `device_N_*` fields (IS, VT, BF, …) are
+read by every evaluation and may be written to change the device, with two
+limits each field's doc comment states where they apply: on a self-heating
+device the per-sample thermal update rewrites IS and the thermal voltage, so
+a direct write to those is overwritten; and a junction's limiter threshold
+(pnjlim's critical voltage) is a compile-time constant from the nominal IS,
+so a written IS changes the device law but not the limiting threshold.
+
+Two of them are the integrator's history:
 
 - `v_prev: [f64; N]` — the last committed node voltages (and augmented
   branch values). Safe to read per sample.

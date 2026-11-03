@@ -173,6 +173,14 @@ pub(super) struct DeviceParamEntry {
     pub(super) field_suffix: String,
     /// Uppercase const name suffix, e.g. "IS", "N_VT", "BETA_F"
     pub(super) const_suffix: String,
+    /// On a self-heating device the per-sample thermal update rewrites this
+    /// field from the junction temperature, so a direct write to it is
+    /// overwritten on the next sample. Said in the field's doc comment.
+    pub(super) thermal_rewritten: bool,
+    /// The field is a saturation current whose limiter critical voltage
+    /// (pnjlim's `VCRIT`) is a compile-time constant from the nominal value:
+    /// a write changes the device law but not the limiting threshold.
+    pub(super) vcrit_frozen: bool,
 }
 
 /// Data for a device with self-heating enabled (passed to Tera templates).
@@ -264,10 +272,14 @@ pub(super) fn device_param_template_data(ir: &CircuitIR) -> Vec<DeviceParamTempl
                         DeviceParamEntry {
                             field_suffix: "is".into(),
                             const_suffix: "IS".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         },
                         DeviceParamEntry {
                             field_suffix: "n_vt".into(),
                             const_suffix: "N_VT".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         },
                     ],
                 ),
@@ -277,18 +289,26 @@ pub(super) fn device_param_template_data(ir: &CircuitIR) -> Vec<DeviceParamTempl
                         DeviceParamEntry {
                             field_suffix: "is".into(),
                             const_suffix: "IS".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         },
                         DeviceParamEntry {
                             field_suffix: "vt".into(),
                             const_suffix: "VT".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         },
                         DeviceParamEntry {
                             field_suffix: "bf".into(),
                             const_suffix: "BETA_F".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         },
                         DeviceParamEntry {
                             field_suffix: "br".into(),
                             const_suffix: "BETA_R".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         },
                     ],
                 ),
@@ -301,20 +321,28 @@ pub(super) fn device_param_template_data(ir: &CircuitIR) -> Vec<DeviceParamTempl
                             DeviceParamEntry {
                                 field_suffix: "beta".into(),
                                 const_suffix: "BETA".into(),
+                                thermal_rewritten: false,
+                                vcrit_frozen: false,
                             }
                         } else {
                             DeviceParamEntry {
                                 field_suffix: "idss".into(),
                                 const_suffix: "IDSS".into(),
+                                thermal_rewritten: false,
+                                vcrit_frozen: false,
                             }
                         },
                         DeviceParamEntry {
                             field_suffix: "vp".into(),
                             const_suffix: "VP".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         },
                         DeviceParamEntry {
                             field_suffix: "lambda".into(),
                             const_suffix: "LAMBDA".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         },
                     ],
                 ),
@@ -324,14 +352,20 @@ pub(super) fn device_param_template_data(ir: &CircuitIR) -> Vec<DeviceParamTempl
                         DeviceParamEntry {
                             field_suffix: "kp".into(),
                             const_suffix: "KP".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         },
                         DeviceParamEntry {
                             field_suffix: "vt".into(),
                             const_suffix: "VT".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         },
                         DeviceParamEntry {
                             field_suffix: "lambda".into(),
                             const_suffix: "LAMBDA".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         },
                     ],
                 ),
@@ -340,22 +374,32 @@ pub(super) fn device_param_template_data(ir: &CircuitIR) -> Vec<DeviceParamTempl
                         DeviceParamEntry {
                             field_suffix: "mu".into(),
                             const_suffix: "MU".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         },
                         DeviceParamEntry {
                             field_suffix: "ex".into(),
                             const_suffix: "EX".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         },
                         DeviceParamEntry {
                             field_suffix: "kg1".into(),
                             const_suffix: "KG1".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         },
                         DeviceParamEntry {
                             field_suffix: "kp".into(),
                             const_suffix: "KP".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         },
                         DeviceParamEntry {
                             field_suffix: "kvb".into(),
                             const_suffix: "KVB".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         },
                     ];
                     // Grid law, per family — see `tube_grid_vt_expr`.
@@ -363,23 +407,33 @@ pub(super) fn device_param_template_data(ir: &CircuitIR) -> Vec<DeviceParamTempl
                         entries.push(DeviceParamEntry {
                             field_suffix: "ig_max".into(),
                             const_suffix: "IG_MAX".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         });
                         entries.push(DeviceParamEntry {
                             field_suffix: "vgk_onset".into(),
                             const_suffix: "VGK_ONSET".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         });
                     } else {
                         entries.push(DeviceParamEntry {
                             field_suffix: "gg".into(),
                             const_suffix: "GG".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         });
                         entries.push(DeviceParamEntry {
                             field_suffix: "xi".into(),
                             const_suffix: "XI".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         });
                         entries.push(DeviceParamEntry {
                             field_suffix: "cg".into(),
                             const_suffix: "CG".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         });
                         // The grid-characteristic offset: the runtime knob
                         // for contact-potential drift (tube aging). The join
@@ -389,11 +443,15 @@ pub(super) fn device_param_template_data(ir: &CircuitIR) -> Vec<DeviceParamTempl
                         entries.push(DeviceParamEntry {
                             field_suffix: "vgoff".into(),
                             const_suffix: "VGOFF".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         });
                         // The triode's Early term; the pentode plate law has none.
                         entries.push(DeviceParamEntry {
                             field_suffix: "lambda".into(),
                             const_suffix: "LAMBDA".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         });
                     }
                     ("Tube".to_string(), entries)
@@ -404,10 +462,14 @@ pub(super) fn device_param_template_data(ir: &CircuitIR) -> Vec<DeviceParamTempl
                         DeviceParamEntry {
                             field_suffix: "vscale".into(),
                             const_suffix: "VSCALE".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         },
                         DeviceParamEntry {
                             field_suffix: "g0".into(),
                             const_suffix: "G0".into(),
+                            thermal_rewritten: false,
+                            vcrit_frozen: false,
                         },
                     ],
                 ),
@@ -419,6 +481,27 @@ pub(super) fn device_param_template_data(ir: &CircuitIR) -> Vec<DeviceParamTempl
                 // latch is the opaque state block. No CircuitState scalar fields.
                 DeviceParams::Glow(_) => ("Glow".to_string(), vec![]),
             };
+            // The self-heating thermal update rewrites IS and the thermal
+            // voltage every sample on devices that have it; pnjlim's critical
+            // voltage is baked from the nominal IS on every junction device.
+            let thermal = self_heating_device_data(ir)
+                .into_iter()
+                .find(|d| d.dev_num == dev_num && d.has_is_scaling);
+            let junction = matches!(
+                slot.params,
+                DeviceParams::Diode(_) | DeviceParams::Bjt(_) | DeviceParams::Jfet(_)
+            );
+            let params = params
+                .into_iter()
+                .map(|mut p| {
+                    if let Some(t) = &thermal {
+                        p.thermal_rewritten =
+                            p.field_suffix == "is" || p.field_suffix == t.vt_field_name;
+                    }
+                    p.vcrit_frozen = junction && p.field_suffix == "is";
+                    p
+                })
+                .collect();
             DeviceParamTemplateData {
                 dev_num,
                 device_type,

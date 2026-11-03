@@ -235,10 +235,14 @@ pub struct CircuitState {
 {# SM state fields removed — per-block rebuild replaces SM #}
 {% if num_device_params > 0 %}
     // --- Runtime-adjustable device parameters ---
-    // These fields are initialized from the corresponding DEVICE_N_* constants.
-    // Modify them at runtime to change device behavior (e.g. tube aging, transistor matching).
+    // Initialised from the DEVICE_N_* constants and read by every evaluation:
+    // write one to change the device (tube aging, transistor matching). Two
+    // limits, each stated on the field it applies to: a self-heating device's
+    // thermal update rewrites IS and the thermal voltage every sample, and a
+    // junction's limiter threshold (pnjlim's critical voltage) is a
+    // compile-time constant from the nominal IS.
 {% for dev in device_params %}{% for p in dev.params %}
-    /// Device {{ dev.dev_num }} {{ p.const_suffix }} ({{ dev.device_type }}) — runtime adjustable
+    /// Device {{ dev.dev_num }} {{ p.const_suffix }} ({{ dev.device_type }}) — runtime adjustable{% if p.thermal_rewritten %}; rewritten every sample by this device's thermal update, so a direct write is overwritten{% endif %}{% if p.vcrit_frozen %}; the limiter's critical voltage stays at the nominal value (limiting only, not the solution){% endif %}
     pub device_{{ dev.dev_num }}_{{ p.field_suffix }}: f64,
 {% endfor %}{% endfor %}
 {% endif %}
