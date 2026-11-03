@@ -32,6 +32,72 @@ Generated 2026-07-21. Refreshed 2026-08-30 against melange **e53573c** (correctn
 
 Machine-readable twin: `tools/golden-harness/golden-baseline-manifest.json`.
 
+## Compare gate
+
+`golden-harness compare A B` classifies every render pair by its audio
+(IDENTICAL, NEGLIGIBLE, CHANGED, INPUT-CHANGED, MISSING; `src/compare.rs` module
+docs), prints the convergence health of both sides (HELD fails, the capped-sample
+classes are report-only; `src/convergence.rs`), and — since 2026-11-03 — judges
+the solver counters of every render. Default mode passes IDENTICAL and
+NEGLIGIBLE; `--strict` passes only IDENTICAL with every `circuit.rs` matching.
+Exit 0 is the gate passing; 1 is any of the three failing; 4 is a held render.
+
+### Solver counter gate
+
+**Why.** A buggy intermediate build dropped the saturating-inductor stamps.
+Its renders differed from the baseline by at most 1.85e-4 and the compare passed
+them as NEGLIGIBLE — while `funkyinduct`'s counters showed 38 287 Newton
+ceilings and 9.5 M line-search failures where the baseline had 35 and 59 408.
+The output gate is blind to the rescue paths that produced the output: a
+sub-step or a backward-Euler fallback from a wrong Jacobian still lands near
+the right answer. So the counters are gated, not only reported.
+
+**The rule** (ruled 2026-11-03; per render, per counter — totals over cascaded
+renders are not monotone, one render's loss hides another's gain). Every key
+in a render's `stats.json` `diagnostics` has a class in the one table
+`COUNTER_CLASSES` in `src/compare.rs`:
+
+| Class | Counters | Verdict |
+|---|---|---|
+| failure-path (a rescue or a refusal fired) | `diag_nr_max_iter_count`, `diag_substep_count`, `diag_be_fallback_count`, `diag_be_latch_count`, `diag_nr_hold_count`, `diag_nr_unconverged_commit_count`, `diag_unsolved_sample_count`, `diag_reduced_model_exit_count`, `diag_nan_reset_count`, `diag_magnitude_reset_count`, `diag_singular_matrix_count`, `diag_warm_start_fallback_count`, `diag_voltage_damp_count`, `diag_clamp_count`, `diag_input_clamp_count`, `diag_input_nan_count`, `diag_inject_clamp_count`, `diag_runtime_nan_count`, `diag_rank1_fallback_count`, `diag_subsample_fire_abandon_count`, `diag_subsample_fire_unresolved_ceiling`, `diag_subsample_fire_unresolved_coincident` | ANY per-render increase fails. A key absent on one side reads as 0 there (the build declared no such mechanism). |
+| effort (how hard a converged solve was, or a region entered) | `diag_refactor_count`, `diag_ls_fail_count`, `diag_active_set_pin_count`, `diag_region_exit_count`, `diag_rank1_update_count`, `diag_rank1_trigger_rebuild_count`, `diag_subsample_fire_count`, `_detected`, `_resolved`, `_segments`, `_schur_builds`, `_schur_reuses`, `_unresolved_gridpoint` | A move in either direction beyond `max(EFFORT_RELATIVE_BOUND × A, EFFORT_ABSOLUTE_FLOOR)` = `max(10 % of the baseline count, 20 counts)` fails. |
+| informational (not a count) | `diag_peak_output` (a level: the audio gate's measurand), `last_nr_iterations` (the last sample's iteration index) | Reported in the diagnostics-differ notes, never gated. |
+| unclassified | anything else | Fails, even when equal on both sides: a counter the table does not know is a hole in the gate. The unit test `every_emitted_counter_is_classified` scans the emitters, the templates and every stored baseline, so a new codegen counter fails `cargo test -p golden-harness` before it reaches a compare. |
+
+**The bound, from data.** The reciprocal-pivot experiment (multiply by a
+stored 1/pivot in the sparse LU: one extra unit roundoff per operation, ruled a
+roundoff-class change) moved effort counters on 5 of 192 golden renders
+against the same binary without it, the largest by +4 line-search failures on
+1125 (`warpony/silence`, +0.36 %) and +17 refactors on 23 276 (+0.07 %); the
+rest were ±1 refactor on 10⁴–10⁵. The regression the gate exists to catch
+moved `funkyinduct` line-search failures 59 408 → 9.5 M (+16 000 %). 10 % is
+28× the largest roundoff-class move and 1/1600 of the regression. The floor of
+20 counts sits above the largest absolute roundoff-class move (+17) so a
+render whose baseline is 0 or a few is judged on the same count scale; no
+roundoff-class change, nor the `v0.1.18-rc → v0.1.19-rc` or
+`v0.1.19-rc → v0.1.20-rc` release pairs, moved an effort counter from 0. Both
+constants carry this derivation in their doc comments.
+
+Where the bound stands on changes that are NOT roundoff-class: the 0.1.20
+cycle changed the certification itself (node-step test on the undamped
+correction, libm device laws) and moved `warpony/step` line-search failures
+323 → 441 (+36.5 %), `warpony/silence` 828 → 1125 (+35.9 %), and
+`wurli-power-amp/sweep` ceilings 3 → 4 — `compare v0.1.19-rc v0.1.20-rc` fails
+the counter gate on exactly those three renders. That is the rule working: the
+0.1.20 CHANGELOG carries the trace of the two new ceiling hits (samples 57768
+and 65574, recovered by the sub-step), which is what a failing counter needs.
+
+**Trace, don't wave through.** A counter failure is never cleared by the audio
+verdict, by a CHANGELOG sentence saying the audio was NEGLIGIBLE, or by a
+re-capture. It is cleared by a first-divergence trace: the first sample at
+which the two builds' Newton paths part, and why, attributed to the commit.
+There is no bypass flag. If the move is intended (a certification change, a
+new rescue), the trace is the attribution and the new baseline is captured
+after it is written down; if it is not, it is the bug. "Newton iterations" per
+render is not recorded by the capture (only `last_nr_iterations`, a
+last-sample reading), so it is not gated; the corpus totals quoted in perf
+reports come from the bench rig, not from `stats.json`.
+
 ## Compile recipe
 
 All commands run from the **oomox repo root**; netlists live in `../melange-circuits`. Base recipe:

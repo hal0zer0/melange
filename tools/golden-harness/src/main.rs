@@ -62,9 +62,26 @@ NEWTON HOLD (all subcommands):
                    is clean at 0.035 V and frozen at 0.04). A capture made under
                    it writes an ALLOW_NR_HOLD marker into the baseline.
 
+SOLVER COUNTERS (compare, both modes):
+  The audio classes cannot see HOW an output was produced: a build that dropped
+  the saturating-inductor stamps rendered within 1.85e-4 of its baseline
+  (NEGLIGIBLE) while its counters showed 38 287 Newton ceilings and 9.5 M
+  line-search failures against 35 and 59 408. So every recorded counter is
+  judged per render, per counter, by its class (COUNTER_CLASSES in compare.rs):
+    failure-path  (ceiling, sub-step, BE fallback/latch, hold, resets, singular
+                  matrix, clamps, ...)  ANY increase fails.
+    effort        (refactors, line-search failures, pins, region exits, ...)
+                  a move beyond max(10 % of the baseline, 20 counts) fails.
+    informational (peak output, last_nr_iterations)  reported, never gated.
+    unclassified  fails: a counter the table does not know is a gate hole.
+  A failing counter needs a first-divergence trace before the change can pass.
+  There is no bypass flag. Printed as SOLVER COUNTER GATE; `counter_gate` in
+  the JSON report.
+
 EXIT CODES:
   capture: 0 = all circuits captured, 3 = some circuit failed (run completed)
-  compare: 0 = gate passed, 1 = gate failed, 2 = usage error
+  compare: 0 = gate passed, 1 = gate failed (audio class, strict source diff,
+           or solver counter gate), 2 = usage error
   convergence: 0 = no render held, 2 = usage error
   any:     4 = a render shipped samples that are not solutions (see above)
   capture: 5 = a render engaged the output clamp without a declared
@@ -200,7 +217,11 @@ fn main() -> ExitCode {
             }
             let json_out = json_out.unwrap_or_else(|| PathBuf::from("golden-compare-report.json"));
             match compare::run(&positional[0], &positional[1], &json_out, strict) {
-                Ok(compare::Outcome { failures, held }) => {
+                Ok(compare::Outcome {
+                    failures,
+                    held,
+                    counter_failures,
+                }) => {
                     if held != 0 && !allow_nr_hold {
                         eprintln!(
                             "FAIL: {held} render(s) across these baselines contain samples \
@@ -209,7 +230,7 @@ fn main() -> ExitCode {
                              --allow-nr-hold to proceed anyway."
                         );
                         ExitCode::from(4)
-                    } else if failures == 0 {
+                    } else if failures == 0 && counter_failures == 0 {
                         if held != 0 {
                             eprintln!(
                                 "warning: {held} render(s) shipped non-solutions; \
@@ -218,6 +239,18 @@ fn main() -> ExitCode {
                         }
                         ExitCode::SUCCESS
                     } else {
+                        // Its own failing condition, named: the counter gate has no
+                        // bypass flag, because a different Newton path to the same
+                        // output is a regression until traced, not a judgement call.
+                        if counter_failures != 0 {
+                            eprintln!(
+                                "FAIL: {counter_failures} render(s) fail the solver counter gate \
+                                 (see SOLVER COUNTER GATE above): a failure-path counter \
+                                 increased, an effort counter left its bound, or a counter is \
+                                 unclassified. A first-divergence trace is required before \
+                                 this change can pass."
+                            );
+                        }
                         ExitCode::from(1)
                     }
                 }

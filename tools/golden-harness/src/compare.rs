@@ -247,7 +247,10 @@ pub const COUNTER_CLASSES: &[(&str, CounterClass)] = &[
     // Every Newton path failed and the previous state was committed.
     ("diag_nr_hold_count", CounterClass::FailurePath),
     // DK: an unconverged final iterate was committed as output.
-    ("diag_nr_unconverged_commit_count", CounterClass::FailurePath),
+    (
+        "diag_nr_unconverged_commit_count",
+        CounterClass::FailurePath,
+    ),
     // Every sample that was never solved, whatever the mechanism.
     ("diag_unsolved_sample_count", CounterClass::FailurePath),
     // A reduced device model left the region its reduction assumes.
@@ -279,7 +282,10 @@ pub const COUNTER_CLASSES: &[(&str, CounterClass)] = &[
     // solution kept; a flip left grid-quantised because the breakpoint
     // budget was spent; a second device latched at another device's
     // breakpoint instead of its own crossing.
-    ("diag_subsample_fire_abandon_count", CounterClass::FailurePath),
+    (
+        "diag_subsample_fire_abandon_count",
+        CounterClass::FailurePath,
+    ),
     (
         "diag_subsample_fire_unresolved_ceiling",
         CounterClass::FailurePath,
@@ -310,7 +316,10 @@ pub const COUNTER_CLASSES: &[(&str, CounterClass)] = &[
     ("diag_subsample_fire_segments", CounterClass::Effort),
     ("diag_subsample_fire_schur_builds", CounterClass::Effort),
     ("diag_subsample_fire_schur_reuses", CounterClass::Effort),
-    ("diag_subsample_fire_unresolved_gridpoint", CounterClass::Effort),
+    (
+        "diag_subsample_fire_unresolved_gridpoint",
+        CounterClass::Effort,
+    ),
     // ---- informational: not counts ----
     // Peak absolute output before the clamp: a level, the audio gate's job.
     ("diag_peak_output", CounterClass::Informational),
@@ -425,12 +434,8 @@ fn fmt_val(v: Option<f64>) -> String {
 /// the rescue fired), which is exactly a change to trace.
 ///
 /// Returns one finding per failing counter; empty means the render passes.
-pub fn judge_counters(
-    a: &BTreeMap<String, f64>,
-    b: &BTreeMap<String, f64>,
-) -> Vec<CounterFinding> {
-    const TRACE: &str =
-        "a first-divergence trace is required before this change can pass";
+pub fn judge_counters(a: &BTreeMap<String, f64>, b: &BTreeMap<String, f64>) -> Vec<CounterFinding> {
+    const TRACE: &str = "a first-divergence trace is required before this change can pass";
     let keys: BTreeSet<&String> = a.keys().chain(b.keys()).collect();
     let mut out = Vec::new();
     for k in keys {
@@ -484,7 +489,7 @@ pub fn judge_counters(
                         a: va,
                         b: vb,
                         message: format!(
-                            "{k} {} -> {} ({pct}; |delta| {} > bound {} = max({:.0} % of {}, \
+                            "{k} {} -> {} ({pct}; |delta| {} > bound {:.1} = max({:.0} % of {}, \
                              {})): an effort counter moved beyond the bound; {TRACE}",
                             fmt_val(va),
                             fmt_val(vb),
@@ -679,6 +684,9 @@ fn compare_pair(dir_a: &Path, dir_b: &Path, plugin: &str, program: &str) -> Pair
                 // Byte-identical audio does NOT imply identical execution.
                 let sa = read_stats(dir_a, plugin, program);
                 let sb = read_stats(dir_b, plugin, program);
+                // The counter gate judges byte-identical renders too: this is
+                // precisely the case the audio classes cannot see.
+                res.counter_findings = judge_render_counters(&sa, &sb);
                 let dd = diagnostic_deltas(&sa, &sb);
                 if !dd.is_empty() {
                     res.diagnostics_differ = true;
@@ -729,6 +737,7 @@ fn compare_pair(dir_a: &Path, dir_b: &Path, plugin: &str, program: &str) -> Pair
         ));
     }
 
+    res.counter_findings = judge_render_counters(&sa, &sb);
     let dd = diagnostic_deltas(&sa, &sb);
     if !dd.is_empty() {
         res.diagnostics_differ = true;
@@ -818,6 +827,12 @@ fn delta_db(a: f64, b: f64) -> f64 {
 pub struct Outcome {
     pub failures: usize,
     pub held: usize,
+    /// Renders that fail the solver counter gate (a failure-path counter
+    /// increased, an effort counter left its bound, or a counter is
+    /// unclassified). Its own failing condition: "the solver took a different
+    /// path to this output" is a third finding, independent of the audio
+    /// classes and of the hold.
+    pub counter_failures: usize,
 }
 
 /// Compare two baselines.
@@ -881,6 +896,7 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<
                 frames_a: None,
                 frames_b: None,
                 notes: vec!["no renders captured for this circuit in either baseline".into()],
+                counter_findings: Vec::new(),
             });
             continue;
         }
@@ -1078,6 +1094,52 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<
         );
     }
 
+    // ---- solver counter gate ----
+    // Per render, per counter, by class (see COUNTER_CLASSES). Prints
+    // unconditionally so a run in which the section is missing is visibly
+    // different from one in which it passed.
+    let counter_failed: Vec<&PairResult> = results
+        .iter()
+        .filter(|r| !r.counter_findings.is_empty())
+        .collect();
+    let n_counter_failed = counter_failed.len();
+    println!("\n---- SOLVER COUNTER GATE ----");
+    println!(
+        "  rule: failure-path counters may not increase; effort counters may move by at most \
+         max({:.0} % of the baseline, {} counts); unclassified counters fail. Per render, per \
+         counter.",
+        EFFORT_RELATIVE_BOUND * 100.0,
+        EFFORT_ABSOLUTE_FLOOR
+    );
+    if counter_failed.is_empty() {
+        println!("  No render's solver counters left their class's bound.");
+    } else {
+        let n_findings: usize = counter_failed
+            .iter()
+            .map(|r| r.counter_findings.len())
+            .sum();
+        println!("\n  ######################################################");
+        println!(
+            "  ##  {n_counter_failed} RENDER(S) FAIL ON SOLVER COUNTERS ({n_findings} counter(s))"
+        );
+        println!("  ##  The output gate is blind to the rescue paths that produced");
+        println!("  ##  the output. A near-identical render from a different Newton");
+        println!("  ##  path is a regression until it is traced to its first");
+        println!("  ##  divergence. THIS FAILS THE GATE; do not wave it through on");
+        println!("  ##  the audio verdict.");
+        println!("  ######################################################");
+        for r in &counter_failed {
+            println!("  {}/{}  [{}]", r.plugin, r.program, r.class);
+            for f in &r.counter_findings {
+                println!(
+                    "      FAIL  [{}] {}",
+                    f.class.map(CounterClass::as_str).unwrap_or("unclassified"),
+                    f.message
+                );
+            }
+        }
+    }
+
     // ---- convergence health (report-only, per baseline) ----
     // Asks a question the A-vs-B diff structurally cannot: not "did the output
     // change?" but "was the output ever a solution?". Printed for BOTH sides,
@@ -1117,6 +1179,18 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<
         "generated_source_differs": source_differs,
         "generated_source_unavailable": source_missing,
         "diagnostics_differ_count": n_diag_differ,
+        "counter_gate": {
+            "effort_relative_bound": EFFORT_RELATIVE_BOUND,
+            "effort_absolute_floor": EFFORT_ABSOLUTE_FLOOR,
+            "gates_exit_code": true,
+            "failed_render_count": n_counter_failed,
+            "failed": counter_failed.iter().map(|r| serde_json::json!({
+                "plugin": r.plugin,
+                "program": r.program,
+                "class": r.class,
+                "findings": r.counter_findings,
+            })).collect::<Vec<_>>(),
+        },
         "convergence": {
             "nonconverged_fraction_threshold": convergence::NONCONVERGED_FRACTION,
             "gates_exit_code": false,
@@ -1155,10 +1229,337 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<
                 + source_missing.len()
                 + n_diag_differ,
             held,
+            counter_failures: n_counter_failed,
         });
     }
     Ok(Outcome {
         failures: n_changed + n_missing + n_input_changed,
         held,
+        counter_failures: n_counter_failed,
     })
+}
+
+#[cfg(test)]
+mod counter_gate_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn diags(pairs: &[(&str, f64)]) -> BTreeMap<String, f64> {
+        pairs.iter().map(|(k, v)| ((*k).to_string(), *v)).collect()
+    }
+
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    fn walk(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, ext, out);
+            } else if p.extension().is_some_and(|x| x == ext) {
+                out.push(p);
+            }
+        }
+    }
+
+    /// Every `pub diag_*` / `last_nr_iterations` declaration in a source or
+    /// template file, the way the emitters write them (plain, or inside a
+    /// string literal with `\x20` indentation — hence a `find`, not a prefix).
+    fn declared_counters(text: &str) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for line in text.lines() {
+            let mut rest = line;
+            while let Some(pos) = rest.find("pub ") {
+                rest = &rest[pos + 4..];
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                let after = rest[name.len()..].trim_start();
+                if after.starts_with(':')
+                    && (name.starts_with("diag_") || name == "last_nr_iterations")
+                {
+                    out.insert(name);
+                }
+            }
+        }
+        out
+    }
+
+    /// The gate's whole premise: no counter the capture can write is
+    /// unknown to the table. Scans the live emitters and templates (so a
+    /// counter added to codegen fails here before it reaches a baseline) and
+    /// every stored baseline's stats (so keys that older builds recorded stay
+    /// classified too).
+    #[test]
+    fn every_emitted_counter_is_classified() {
+        let root = repo_root();
+        let mut files = Vec::new();
+        walk(
+            &root.join("crates/melange-solver/src/codegen"),
+            "rs",
+            &mut files,
+        );
+        walk(
+            &root.join("crates/melange-solver/templates"),
+            "tera",
+            &mut files,
+        );
+        assert!(
+            files.len() > 10,
+            "codegen scan found {} files under {} — wrong root?",
+            files.len(),
+            root.display()
+        );
+        let mut found = BTreeSet::new();
+        for f in &files {
+            let text = std::fs::read_to_string(f).unwrap();
+            found.extend(declared_counters(&text));
+        }
+        let mut stats_files = Vec::new();
+        walk(&root.join("golden-baselines"), "json", &mut stats_files);
+        for f in stats_files
+            .iter()
+            .filter(|p| p.to_string_lossy().ends_with(".stats.json"))
+        {
+            let Ok(txt) = std::fs::read_to_string(f) else {
+                continue;
+            };
+            if let Ok(st) = serde_json::from_str::<Stats>(&txt) {
+                found.extend(st.diagnostics.keys().cloned());
+            }
+        }
+        assert!(
+            found.len() >= 20,
+            "scan found only {} counters: {found:?}",
+            found.len()
+        );
+        eprintln!(
+            "scan: {} counters declared by codegen/templates or recorded in baselines, \
+             {} entries in COUNTER_CLASSES",
+            found.len(),
+            COUNTER_CLASSES.len()
+        );
+        let unclassified: Vec<&String> = found
+            .iter()
+            .filter(|k| counter_class(k).is_none())
+            .collect();
+        assert!(
+            unclassified.is_empty(),
+            "counters emitted by codegen (or recorded in a baseline) with no class in \
+             COUNTER_CLASSES: {unclassified:?}. Add each to the table in compare.rs as \
+             failure-path, effort or informational."
+        );
+        // The table is one table: no key twice.
+        let mut seen = BTreeSet::new();
+        for (k, _) in COUNTER_CLASSES {
+            assert!(seen.insert(*k), "{k} appears twice in COUNTER_CLASSES");
+        }
+    }
+
+    #[test]
+    fn failure_path_increase_fails_decrease_passes() {
+        let a = diags(&[("diag_nr_max_iter_count", 35.0)]);
+        let b = diags(&[("diag_nr_max_iter_count", 38287.0)]);
+        let f = judge_counters(&a, &b);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].kind, CounterFindingKind::FailurePathIncrease);
+        assert_eq!(f[0].class, Some(CounterClass::FailurePath));
+        assert!(f[0].message.contains("diag_nr_max_iter_count 35 -> 38287"));
+        assert!(f[0].message.contains("first-divergence trace"));
+        // Even one more counts.
+        let b1 = diags(&[("diag_nr_max_iter_count", 36.0)]);
+        assert_eq!(judge_counters(&a, &b1).len(), 1);
+        // A decrease passes; so does equality.
+        let b2 = diags(&[("diag_nr_max_iter_count", 0.0)]);
+        assert!(judge_counters(&a, &b2).is_empty());
+        assert!(judge_counters(&a, &a).is_empty());
+    }
+
+    /// A build that gained the counter AND fired it: an increase from an
+    /// absent key. A build that lost the counter (absent in B) is not.
+    #[test]
+    fn failure_path_absent_counts_as_zero() {
+        let a = diags(&[]);
+        let b = diags(&[("diag_nr_hold_count", 1.0)]);
+        let f = judge_counters(&a, &b);
+        assert_eq!(f.len(), 1);
+        assert!(f[0].message.contains("(absent) -> 1"));
+        let b0 = diags(&[("diag_nr_hold_count", 0.0)]);
+        assert!(judge_counters(&a, &b0).is_empty());
+        assert!(judge_counters(&b, &a).is_empty());
+    }
+
+    /// The measured roundoff-class moves pass; the funkyinduct regression
+    /// and a 20 % move fail; a 9 % move on a large count passes.
+    #[test]
+    fn effort_within_bound_passes_beyond_fails() {
+        let a = diags(&[
+            ("diag_ls_fail_count", 1125.0),
+            ("diag_refactor_count", 23276.0),
+        ]);
+        let b = diags(&[
+            ("diag_ls_fail_count", 1129.0),
+            ("diag_refactor_count", 23293.0),
+        ]);
+        assert!(judge_counters(&a, &b).is_empty());
+
+        let a = diags(&[("diag_ls_fail_count", 59408.0)]);
+        let b = diags(&[("diag_ls_fail_count", 9_500_000.0)]);
+        let f = judge_counters(&a, &b);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].kind, CounterFindingKind::EffortOutOfBound);
+        assert!(f[0].message.contains("diag_ls_fail_count 59408 -> 9500000"));
+        assert!(f[0].message.contains("first-divergence trace"));
+
+        let a = diags(&[("diag_refactor_count", 1_000_000.0)]);
+        assert!(judge_counters(&a, &diags(&[("diag_refactor_count", 1_090_000.0)])).is_empty());
+        assert_eq!(
+            judge_counters(&a, &diags(&[("diag_refactor_count", 1_200_000.0)])).len(),
+            1
+        );
+        // Both directions: a solve that stopped working is also a move.
+        assert_eq!(
+            judge_counters(&a, &diags(&[("diag_refactor_count", 800_000.0)])).len(),
+            1
+        );
+        // Exactly at the bound passes (the bound is inclusive).
+        assert!(judge_counters(&a, &diags(&[("diag_refactor_count", 1_100_000.0)])).is_empty());
+    }
+
+    /// Baseline zero (or a few): the absolute floor decides.
+    #[test]
+    fn effort_from_zero_uses_absolute_floor() {
+        let z = diags(&[("diag_ls_fail_count", 0.0)]);
+        assert!(judge_counters(&z, &diags(&[("diag_ls_fail_count", 20.0)])).is_empty());
+        let f = judge_counters(&z, &diags(&[("diag_ls_fail_count", 21.0)]));
+        assert_eq!(f.len(), 1);
+        assert!(f[0].message.contains("from zero"));
+        // Absent in A reads as zero too.
+        assert!(judge_counters(&diags(&[]), &diags(&[("diag_ls_fail_count", 20.0)])).is_empty());
+        assert_eq!(
+            judge_counters(&diags(&[]), &diags(&[("diag_ls_fail_count", 21.0)])).len(),
+            1
+        );
+        // The recorded small move: noyce-transformer-triode/step refactors 5 -> 4.
+        let a = diags(&[("diag_refactor_count", 5.0)]);
+        assert!(judge_counters(&a, &diags(&[("diag_refactor_count", 4.0)])).is_empty());
+        // The floor stops applying once 10 % of the baseline exceeds it.
+        let a = diags(&[("diag_refactor_count", 300.0)]);
+        assert!(judge_counters(&a, &diags(&[("diag_refactor_count", 330.0)])).is_empty());
+        assert_eq!(
+            judge_counters(&a, &diags(&[("diag_refactor_count", 331.0)])).len(),
+            1
+        );
+    }
+
+    /// An unclassified key fails the gate even when it did not move: the
+    /// table is the gate, and a hole in it is a hole in the gate.
+    #[test]
+    fn unknown_key_fails_even_when_equal() {
+        let a = diags(&[("diag_new_mechanism_count", 3.0)]);
+        let f = judge_counters(&a, &a);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].kind, CounterFindingKind::Unclassified);
+        assert_eq!(f[0].class, None);
+        assert!(f[0].message.contains("COUNTER_CLASSES"));
+    }
+
+    /// A level and a last-sample reading are not counts.
+    #[test]
+    fn informational_never_fails() {
+        let a = diags(&[("diag_peak_output", 0.8235), ("last_nr_iterations", 2.0)]);
+        let b = diags(&[("diag_peak_output", 99.0), ("last_nr_iterations", 100.0)]);
+        assert!(judge_counters(&a, &b).is_empty());
+    }
+
+    /// One render, several counters: one finding each, in key order.
+    #[test]
+    fn several_counters_on_one_render_each_report() {
+        let a = diags(&[
+            ("diag_nr_max_iter_count", 35.0),
+            ("diag_ls_fail_count", 59408.0),
+            ("diag_refactor_count", 100.0),
+        ]);
+        let b = diags(&[
+            ("diag_nr_max_iter_count", 38287.0),
+            ("diag_ls_fail_count", 9_500_000.0),
+            ("diag_refactor_count", 101.0),
+        ]);
+        let f = judge_counters(&a, &b);
+        assert_eq!(f.len(), 2);
+        assert_eq!(f[0].counter, "diag_ls_fail_count");
+        assert_eq!(f[1].counter, "diag_nr_max_iter_count");
+    }
+
+    fn release_baselines() -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> = std::fs::read_dir(repo_root().join("golden-baselines"))
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.is_dir()
+                            && p.file_name()
+                                .and_then(|n| n.to_str())
+                                .is_some_and(|n| n.starts_with('v') && n.ends_with("-rc"))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        dirs.sort();
+        dirs
+    }
+
+    /// End to end on the real reference: a baseline against itself passes
+    /// every gate, counter gate included. Skips (loudly) when the gitignored
+    /// baselines are not on this machine.
+    #[test]
+    fn real_baseline_self_compare_passes_counter_gate() {
+        let dirs = release_baselines();
+        let Some(dir) = dirs.last() else {
+            eprintln!("no golden-baselines/v*-rc directory here; self-compare check skipped");
+            return;
+        };
+        let json = std::env::temp_dir().join(format!(
+            "golden-harness-self-compare-{}.json",
+            std::process::id()
+        ));
+        let out = run(dir, dir, &json, false).expect("compare runs");
+        let _ = std::fs::remove_file(&json);
+        assert_eq!(out.failures, 0, "{}", dir.display());
+        assert_eq!(out.held, 0, "{}", dir.display());
+        assert_eq!(out.counter_failures, 0, "{}", dir.display());
+    }
+
+    /// Two different real baselines: the section is produced and the report
+    /// carries it, whatever the verdict (a release pair may legitimately fail
+    /// this gate — that is the finding to trace, not a panic).
+    #[test]
+    fn real_baselines_cross_compare_produces_counter_section() {
+        let dirs = release_baselines();
+        if dirs.len() < 2 {
+            eprintln!("fewer than two golden-baselines/v*-rc directories; cross-compare skipped");
+            return;
+        }
+        let (a, b) = (&dirs[dirs.len() - 2], &dirs[dirs.len() - 1]);
+        let json = std::env::temp_dir().join(format!(
+            "golden-harness-cross-compare-{}.json",
+            std::process::id()
+        ));
+        let out = run(a, b, &json, false).expect("compare runs");
+        let report: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&json);
+        let gate = &report["counter_gate"];
+        assert_eq!(gate["gates_exit_code"], true);
+        assert_eq!(gate["failed_render_count"], out.counter_failures);
+        assert_eq!(
+            gate["failed"].as_array().map(|v| v.len()),
+            Some(out.counter_failures)
+        );
+    }
 }
