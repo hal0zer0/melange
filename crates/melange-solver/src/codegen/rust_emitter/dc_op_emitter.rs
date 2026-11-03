@@ -516,7 +516,7 @@ fn emit_dc_op_linear_solve_dk(_ir: &CircuitIR, _seed: &str) -> String {
 ///   5. LU-solves `G_aug_nr · v_new = rhs_nr` via the emitted `invert_n_equilibrated`
 ///      helper (returns `(inv, singular)`).
 ///   6. Tests the UNDAMPED Newton correction `v_new − v_node` per variable,
-///      `|Δ| < RELTOL·max(|v_node|, |v_new|) + TOL`: Newton's own estimate of
+///      `|Δ| < DC_OP_RELTOL·max(|v_node|, |v_new|) + DC_OP_TOL`: Newton's own estimate of
 ///      the distance to the root, taken before any limiter touches the step
 ///      (the rule the nodal transient certifies with, at `dc_op.rs`
 ///      tolerances). The applied step is what moves the iterate; its size is
@@ -529,7 +529,7 @@ fn emit_dc_op_linear_solve_dk(_ir: &CircuitIR, _seed: &str) -> String {
 ///      classification.
 ///   8. At the top of the next iteration, with the devices freshly evaluated
 ///      at the point the sub-threshold correction reached, gates acceptance
-///      on the per-row KCL residual `|F_i| <= RELTOL·scale_i + KCL_ABSTOL`
+///      on the per-row KCL residual `|F_i| <= DC_OP_RELTOL·scale_i + DC_OP_KCL_ABSTOL`
 ///      over the voltage rows, `F = g_aug·v − b_dc − N_i·i_nl(N_v·v)` and
 ///      `scale_i = max(|b_i|, |(N_i·i_nl)_i|, max_j |g_aug_ij·v_j|)`, as
 ///      `dc_op.rs` computes it. The step test alone is satisfied at any fixed
@@ -550,16 +550,17 @@ fn emit_dc_op_nr_loop_dk(
     vt_restore: &str,
 ) -> Result<String, CodegenError> {
     const MAX_ITER: usize = 200;
-    const TOL: f64 = 1e-9;
-    /// Relative convergence term, mirroring `dc_op.rs::DcOpConfig::reltol`
-    /// (SPICE-style `|Δ| < reltol·|v| + abstol`). Keeps 300 V circuits from
-    /// false-failing at the LU round-off floor, where an absolute-only 1e-9
-    /// check can never be satisfied.
-    const RELTOL: f64 = 1e-6;
-    /// Absolute floor of the KCL residual gate, in amperes: the compile-time
-    /// solver's `DC_OP_KCL_ABSTOL_AMPS` (`dc_op.rs`). A separate constant from
-    /// the volts step floor `TOL`; the two happen to share a value.
-    const KCL_ABSTOL: f64 = 1e-9;
+    // The compile-time solver's thresholds (`crate::dc_op`, one definition),
+    // emitted under the same `DC_OP_*` names the nodal recompute uses: the
+    // volts floor of the step test, the relative term of the step test and
+    // the KCL gate (`|Δ| < reltol·|v| + abstol`, which keeps 300 V circuits
+    // from false-failing at the LU round-off floor), and the amps floor of
+    // the KCL gate (a separate constant from the volts floor; the two happen
+    // to share a value).
+    use crate::codegen::rust_emitter::thresholds::{
+        DC_OP_KCL_ABSTOL_AMPS as DC_OP_KCL_ABSTOL, DC_OP_RELTOL,
+        DC_OP_STEP_ABSTOL_VOLTS as DC_OP_TOL,
+    };
 
     let m = ir.topology.m;
     let mut out = String::new();
@@ -576,9 +577,9 @@ fn emit_dc_op_nr_loop_dk(
          \x20       // the devices at is a candidate for the KCL gate.\n\
          \x20       let mut step_ok = false;\n\
          \x20       const MAX_ITER: usize = {MAX_ITER};\n\
-         \x20       const TOL: f64 = {TOL:e};\n\
-         \x20       const RELTOL: f64 = {RELTOL:e};\n\
-         \x20       const KCL_ABSTOL: f64 = {KCL_ABSTOL:e};\n\
+         \x20       const DC_OP_TOL: f64 = {DC_OP_TOL:e};\n\
+         \x20       const DC_OP_RELTOL: f64 = {DC_OP_RELTOL:e};\n\
+         \x20       const DC_OP_KCL_ABSTOL: f64 = {DC_OP_KCL_ABSTOL:e};\n\
          \x20       for iter in 0..MAX_ITER {{\n"
     ));
 
@@ -714,7 +715,7 @@ fn emit_dc_op_nr_loop_dk_tail(ir: &CircuitIR, out: &mut String, inner: &str, vt_
         "{inner}// KCL residual gate at this iterate (devices evaluated here), when\n\
          {inner}// the previous iteration's undamped correction passed the step test.\n\
          {inner}// F_i = (g_aug·v)_i − b_dc_i − (N_i·i_nl)_i over the voltage rows,\n\
-         {inner}// accepted when |F_i| <= RELTOL·scale_i + KCL_ABSTOL with scale_i =\n\
+         {inner}// accepted when |F_i| <= DC_OP_RELTOL·scale_i + DC_OP_KCL_ABSTOL with scale_i =\n\
          {inner}// max(|b_dc_i|, |(N_i·i_nl)_i|, max_j |g_aug_ij·v_j|) (dc_op.rs's gate).\n\
          {inner}// Written `!(x <= tol)` so a NaN residual fails.\n\
          {inner}if step_ok {{\n\
@@ -729,7 +730,7 @@ fn emit_dc_op_nr_loop_dk_tail(ir: &CircuitIR, out: &mut String, inner: &str, vt_
          {inner}            acc += t;\n\
          {inner}            let ta = t.abs(); if ta > scale {{ scale = ta; }}\n\
          {inner}        }}\n\
-         {inner}        if !(acc.abs() <= RELTOL * scale + KCL_ABSTOL) {{ kcl_ok = false; }}\n\
+         {inner}        if !(acc.abs() <= DC_OP_RELTOL * scale + DC_OP_KCL_ABSTOL) {{ kcl_ok = false; }}\n\
          {inner}    }}\n\
          {inner}    if kcl_ok {{\n\
          {inner}        // Converged: this point passed both tests, and i_nl is its own.\n\
@@ -816,8 +817,8 @@ fn emit_dc_op_nr_loop_dk_tail(ir: &CircuitIR, out: &mut String, inner: &str, vt_
     // Step test on the UNDAMPED correction, then the damped, clamped step.
     //
     // The test reads `v_new − v_node`, Newton's own estimate of the distance
-    // to the root, per variable against `RELTOL·max(|v_node|, |v_new|) +
-    // TOL` (the threshold at the correction's target, the nodal transient's
+    // to the root, per variable against `DC_OP_RELTOL·max(|v_node|, |v_new|) +
+    // DC_OP_TOL` (the threshold at the correction's target, the nodal transient's
     // rule; `dc_op.rs` tolerances). The test used to read the applied step
     // after damping and clamping: a limiter's small step is not evidence of
     // convergence, and the transient measured points certified that way
@@ -837,13 +838,13 @@ fn emit_dc_op_nr_loop_dk_tail(ir: &CircuitIR, out: &mut String, inner: &str, vt_
     // exceeds the thresholds.
     out.push_str(&format!(
         "{inner}// Step test on the UNDAMPED Newton correction, per variable:\n\
-         {inner}// |v_new − v| < RELTOL·max(|v|, |v_new|) + TOL. Read before any\n\
+         {inner}// |v_new − v| < DC_OP_RELTOL·max(|v|, |v_new|) + DC_OP_TOL. Read before any\n\
          {inner}// limiter: the applied step's size is not evidence (see dc_op.rs\n\
          {inner}// tolerances; the nodal transient's rule). NaN-honest (`!(a < b)`).\n\
          {inner}step_ok = true;\n\
          {inner}for a in 0..N {{\n\
          {inner}    let delta = v_new[a] - v_node[a];\n\
-         {inner}    let threshold = RELTOL * v_node[a].abs().max(v_new[a].abs()) + TOL;\n\
+         {inner}    let threshold = DC_OP_RELTOL * v_node[a].abs().max(v_new[a].abs()) + DC_OP_TOL;\n\
          {inner}    if !(delta.abs() < threshold) {{ step_ok = false; }}\n\
          {inner}}}\n\
          {inner}// Flat damping + per-element clamp on the Newton step.\n\

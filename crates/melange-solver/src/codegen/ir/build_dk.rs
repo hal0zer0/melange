@@ -149,7 +149,6 @@ impl CircuitIR {
         let solver_config = SolverConfig {
             sample_rate: config.sample_rate,
             alpha,
-            tolerance: config.tolerance,
             max_iterations: config.max_iterations,
             input_node: config.input_node,
             output_nodes: config.output_nodes.clone(),

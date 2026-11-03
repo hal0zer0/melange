@@ -39,14 +39,14 @@ use crate::codegen::OpampRailMode;
 /// Newton budget of the runtime DC solve: the compile-time solver's
 /// `DcOpConfig::max_iterations`.
 const DC_OP_MAX_ITER: usize = 200;
-/// Absolute floor of the step test, in volts: `DcOpConfig::tolerance`.
-const DC_OP_TOL: f64 = 1e-9;
-/// Relative term of the step test and of the KCL gate: `DcOpConfig::reltol`.
-const DC_OP_RELTOL: f64 = 1e-6;
-/// Absolute floor of the KCL residual gate, in amperes: the compile-time
-/// solver's `DC_OP_KCL_ABSTOL_AMPS`. A separate constant from the volts
-/// floor; the two happen to share a value.
-const DC_OP_KCL_ABSTOL: f64 = 1e-9;
+// The step test's volts floor (`DcOpConfig::tolerance`), the relative term of
+// the step test and the KCL gate (`DcOpConfig::reltol`), and the KCL gate's
+// amps floor (a separate constant from the volts floor; the two happen to
+// share a value): the compile-time solver's own constants (`crate::dc_op`),
+// one definition, emitted under the `DC_OP_*` names.
+use crate::codegen::rust_emitter::thresholds::{
+    DC_OP_KCL_ABSTOL_AMPS as DC_OP_KCL_ABSTOL, DC_OP_RELTOL, DC_OP_STEP_ABSTOL_VOLTS as DC_OP_TOL,
+};
 
 /// Why a build's `recompute_dc_op` refuses (bumps `diag_nr_max_iter_count` and
 /// returns, so `settle_dc_op` falls back to the warmup loop), in the order the

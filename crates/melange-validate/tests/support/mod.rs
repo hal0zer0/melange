@@ -15,7 +15,6 @@ pub fn options(sample_rate: f64, input: &str, outputs: &[&str]) -> BuildOptions 
         input_nodes: vec![input.to_string()],
         output_nodes: outputs.iter().map(|s| s.to_string()).collect(),
         max_iter: None,
-        tolerance: d.tolerance,
         output_scale: 1.0,
         output_clamp: d.output_clamp_v,
         input_resistance: None,

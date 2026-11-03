@@ -119,7 +119,6 @@ pub(crate) fn analyze_freq_response(
         input_nodes: vec![input_node_name.to_string()],
         output_nodes: vec![output_node_name.to_string()],
         max_iter,
-        tolerance: 1e-9,
         output_scale: 1.0,
         output_clamp: 10.0,
         input_resistance: input_resistance_flag,

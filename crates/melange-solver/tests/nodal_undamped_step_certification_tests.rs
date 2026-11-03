@@ -68,11 +68,14 @@ fn the_step_test_reads_the_undamped_correction_and_is_never_skipped() {
         !code.contains("if !limited {"),
         "the step test is never skipped"
     );
-    // Every step-test line reads `v_new − v` with the threshold at `v_new`,
-    // and none of them scales the correction by `alpha`.
+    // Every step-test line reads `v_new − v` with the threshold at `v_new`
+    // (`RELTOL * ... + VNTOL`, the named constants), and none of them scales
+    // the correction by `alpha`.
     let step_lines: Vec<&str> = code
         .lines()
-        .filter(|l| l.contains("let threshold = 1e-3 *") && l.contains("max_step_exceeded = true"))
+        .filter(|l| {
+            l.contains("let threshold = RELTOL *") && l.contains("max_step_exceeded = true")
+        })
         .collect();
     assert!(!step_lines.is_empty(), "no step-test lines emitted");
     for l in &step_lines {

@@ -182,7 +182,6 @@ fn test_wurli_power_amp_internal_peak_stays_physical() {
     // the auto-tuned Newton budget, no forward-active BJT reduction.
     let config = support::config_for_spice(WPA, WPA_SR);
     let built = support::try_build_shipped_with(WPA, &config, "auto", |o| {
-        o.tolerance = 1e-9;
         o.output_scale = 1.0;
         o.output_clamp = 10.0;
         o.dc_block = false;

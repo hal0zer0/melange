@@ -996,8 +996,9 @@ C1 in base {CIN}
 > effect on code generation. The options below are honored **only** by the
 > ngspice reference deck inside `melange-validate`, which reads them from the
 > raw deck text independently of the parser. Do not rely on `.option` to change
-> melange's own solve (tolerances, temperature, integration method are set via
-> CLI flags / `.model` params, not here).
+> melange's own solve (temperature and the integration method are set via
+> `.model` params / CLI flags; its Newton tolerances are fixed named constants, not
+> options — see docs/CODE_API.md).
 
 **Syntax:**
 ```

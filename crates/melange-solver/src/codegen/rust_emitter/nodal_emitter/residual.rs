@@ -30,13 +30,14 @@ pub(super) fn row_iter(rows: &[usize], contiguous: &str) -> String {
 /// at the helpers' own `v`:
 /// - KCL rows (`kcl_rows`: circuit nodes, parasitic-BJT internal nodes):
 ///   `A·v − rhs − q`, `q = N_i·i_nl` plus behavioral `I={}` currents, in amps,
-///   tolerance `1e-3·den + 1e-9 A`. Only these rows feed the returned
-///   infinity norm (`max_abs`, the chord-exit gate's 1e-9 A test).
+///   tolerance `RELTOL·den + KCL_ABSTOL` (1e-3·den + 1e-9 A). Only these rows
+///   feed the returned infinity norm (`max_abs`, the chord-exit gate's
+///   `KCL_ABSTOL` test).
 /// - Algebraic rows (`n_nodes..n_aug` minus the above: voltage sources, VCVS,
 ///   ideal transformers, op-amp internal and VCA rows) and inductor branch
-///   rows (`n_aug..n`): `A·v − rhs − q`, tolerance `1e-3·den + 1e-6`, the
-///   node-step test's floor, in the row's own unit (volts for a source or
-///   branch equation).
+///   rows (`n_aug..n`): `A·v − rhs − q`, tolerance `RELTOL·den + VNTOL`
+///   (1e-3·den + 1e-6), the node-step test's floor, in the row's own unit
+///   (volts for a source or branch equation).
 /// - Behavioral `V={}` rows: `(v[n+] − v[n−]) − f(v)` (`A·v − rhs` is neither
 ///   the linearised nor the true residual there), same volt tolerance.
 /// - Saturating-inductor rows: the flux residual of `emit_sat_ind_row_residual`
@@ -122,10 +123,18 @@ pub(super) fn emit_kcl_residual_fns(
     tail.push_str("    let mut norm_sq = 0.0f64;\n");
     tail.push_str("    let mut max_abs = 0.0f64;\n");
     tail.push_str("    let mut ok = true;\n");
-    // KCL rows: amps, 1e-9 A floor, the only rows in the infinity norm.
+    // KCL rows: amps, KCL_ABSTOL floor, the only rows in the infinity norm.
     tail.push_str("    // KCL rows (A)\n");
-    emit_a_residual_rows(ir, setter_stamps, &rows, "1e-9", true, &mut tail, "    ");
-    // Source, constraint and inductor branch rows: 1e-6 floor (the node-step
+    emit_a_residual_rows(
+        ir,
+        setter_stamps,
+        &rows,
+        "KCL_ABSTOL",
+        true,
+        &mut tail,
+        "    ",
+    );
+    // Source, constraint and inductor branch rows: VNTOL floor (the node-step
     // test's), never in the infinity norm.
     if !aug_rows.is_empty() {
         tail.push_str("    // source / constraint / inductor branch rows (V)\n");
@@ -133,7 +142,7 @@ pub(super) fn emit_kcl_residual_fns(
             ir,
             setter_stamps,
             &aug_rows,
-            "1e-6",
+            "VNTOL",
             false,
             &mut tail,
             "    ",
@@ -381,7 +390,7 @@ pub(super) fn emit_sparse_ni_matvec_add(
 /// Emit the residual rows `rows` of `F = A·v − rhs − q` into `code`: the
 /// sparse form when the forward matrices are available, the dense sweep
 /// otherwise. `abs_floor` is the tolerance's absolute floor as source text
-/// (`1e-9` amps on KCL rows, `1e-6` on source / branch rows); `track_inf`
+/// (`KCL_ABSTOL` amps on KCL rows, `VNTOL` on source / branch rows); `track_inf`
 /// says whether the rows feed the KCL-only infinity norm `max_abs`.
 #[allow(clippy::too_many_arguments)]
 fn emit_a_residual_rows(
@@ -418,11 +427,11 @@ fn emit_a_residual_rows(
                     "{indent}    {{ let a = acc.abs(); if a > max_abs {{ max_abs = a; }} }}\n"
                 ));
             }
-            // Per-row relative tolerance: same RELTOL=1e-3 as the device and
+            // Per-row relative tolerance: the same RELTOL as the device and
             // sat-inductor residual checks, with an absolute floor so a row
             // carrying ~zero does not demand an unreachable tolerance.
             code.push_str(&format!(
-                "{indent}    if !(acc.abs() <= 1e-3 * den + {abs_floor}) {{ ok = false; }}\n"
+                "{indent}    if !(acc.abs() <= RELTOL * den + {abs_floor}) {{ ok = false; }}\n"
             ));
             code.push_str(&format!("{indent}}}\n"));
         }
@@ -505,7 +514,7 @@ fn emit_sparse_a_residual_matvec(
             ));
         }
         code.push_str(&format!(
-            "{indent}    if !(acc.abs() <= 1e-3 * den + {abs_floor}) {{ ok = false; }}\n"
+            "{indent}    if !(acc.abs() <= RELTOL * den + {abs_floor}) {{ ok = false; }}\n"
         ));
         code.push_str(&format!("{indent}}}\n"));
     }

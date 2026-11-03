@@ -106,8 +106,6 @@ pub struct BuildOptions {
     pub output_nodes: Vec<String>,
     /// The user's Newton budget, or `None` to auto-tune.
     pub max_iter: Option<usize>,
-    /// Newton tolerance.
-    pub tolerance: f64,
     /// Output scale, broadcast to every output.
     pub output_scale: f64,
     /// Output clamp (V).
@@ -300,7 +298,6 @@ pub fn assemble(
     // Each model warning once per build, however many steps resolve the model.
     let _warnings = crate::diag::BuildScope::begin();
     let sample_rate = opts.sample_rate;
-    let tolerance = opts.tolerance;
     let output_scale = opts.output_scale;
     let output_clamp = opts.output_clamp;
     let input_resistance_flag = opts.input_resistance;
@@ -1071,7 +1068,6 @@ pub fn assemble(
         output_nodes: output_node_indices.clone(),
         sample_rate,
         max_iterations: max_iter,
-        tolerance,
         output_scales,
         output_clamp_v: output_clamp,
         input_resistance,

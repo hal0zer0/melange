@@ -159,7 +159,6 @@ pub(crate) struct CompileOptions<'a> {
     /// [`melange_solver::build::apply_switch_overrides`]).
     pub(crate) switch_overrides: &'a [String],
     pub(crate) max_iter: Option<usize>,
-    pub(crate) tolerance: f64,
     pub(crate) output_scale: f64,
     pub(crate) output_clamp: f64,
     pub(crate) format: OutputFormat,
@@ -212,7 +211,6 @@ pub(crate) fn compile_circuit_source(
         output_node,
         switch_overrides,
         max_iter: max_iter_flag,
-        tolerance,
         output_scale,
         output_clamp,
         format,
@@ -347,7 +345,6 @@ pub(crate) fn compile_circuit_source(
         output_nodes: output_node_names.iter().map(|s| s.to_string()).collect(),
         // `None` (no `--max-iter`) lets the build auto-tune the budget.
         max_iter: max_iter_flag,
-        tolerance,
         output_scale,
         output_clamp,
         input_resistance: input_resistance_flag,

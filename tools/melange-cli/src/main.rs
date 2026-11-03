@@ -96,7 +96,6 @@ fn main() -> Result<()> {
             input_node,
             output_node,
             max_iter,
-            tolerance,
             output_scale,
             output_clamp,
             format,
@@ -140,9 +139,6 @@ fn main() -> Result<()> {
                     "Sample rate must be positive and finite, got {}",
                     sample_rate
                 );
-            }
-            if tolerance <= 0.0 || !tolerance.is_finite() {
-                anyhow::bail!("Tolerance must be positive and finite, got {}", tolerance);
             }
             if max_iter == Some(0) {
                 anyhow::bail!("max-iter must be at least 1, got 0");
@@ -236,7 +232,6 @@ fn main() -> Result<()> {
                     output_node: &output_node,
                     switch_overrides: &switch_overrides,
                     max_iter,
-                    tolerance,
                     output_scale,
                     output_clamp,
                     format,

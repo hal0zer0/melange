@@ -236,8 +236,12 @@ rail, and decks with a latched (glow) device. See `docs/aidocs/DC_OP.md`.
 
 Both routes certify an iterate by the compile-time solver's two tests at the
 point written back: the step test on the UNDAMPED Newton correction
-(`1e-6·|v| + 1e-9 V`, every row) and the per-row KCL residual gate
-(`1e-6·scale + 1e-9 A`, circuit-node rows). A body-effect MOSFET's
+(`DC_OP_RELTOL·|v| + DC_OP_TOL` = `1e-6·|v| + 1e-9 V`, every row) and the
+per-row KCL residual gate (`DC_OP_RELTOL·scale + DC_OP_KCL_ABSTOL` =
+`1e-6·scale + 1e-9 A`, circuit-node rows). The three are the compile-time
+solver's own constants (`dc_op::DC_OP_RELTOL`, `DC_OP_STEP_ABSTOL_VOLTS`,
+`DC_OP_KCL_ABSTOL_AMPS`, re-exported by `rust_emitter::thresholds`), emitted
+function-locally under the `DC_OP_*` names. A body-effect MOSFET's
 `device_N_vt` is refreshed through its field at every iterate and restored
 on failure.
 
@@ -642,11 +646,12 @@ in its own unit (`nodal_emitter/residual.rs`):
 - KCL rows (`helpers::kcl_rows`: the circuit nodes `0..N_NODES` and the
   parasitic-BJT internal nodes `expand_bjt_internal_nodes` appends among the
   augmented rows, the augmented rows outside `history_zero_rows`), in amps,
-  tolerance `1e-3·den + 1e-9 A`. These are the only rows in the returned
-  infinity norm, which the chord exit step reads against 1e-9 A.
+  tolerance `RELTOL·den + KCL_ABSTOL` (1e-3·den + 1e-9 A). These are the only
+  rows in the returned infinity norm, which the chord exit step reads against
+  `KCL_ABSTOL`.
 - The algebraic augmented rows (voltage sources, VCVS, ideal transformers,
   op-amp internal and VCA rows) and the inductor branch rows, `A·v − rhs − q`,
-  tolerance `1e-3·den + 1e-6` (the node-step test's floor).
+  tolerance `RELTOL·den + VNTOL` (1e-3·den + 1e-6; the node-step test's floor).
 - Behavioral `V={}` rows as `(v[n+] − v[n−]) − f(v)`, same tolerance.
 - Saturating-inductor rows with the flux residual and its own `1e-5·den` test.
 
@@ -657,14 +662,27 @@ converged when three tests pass on the same iteration, whatever the damping:
 
 - the **node-step test** on the UNDAMPED correction `v_new − v` over the device
   nodes (N_V columns, behavioral nodes, saturating-inductor branch rows),
-  `|v_new − v| < 1e-3·max(|v|, |v_new|) + 1e-6 V`, the threshold taken at the
-  correction's target. The damped step `alpha·(v_new − v)` is what gets
-  applied; the undamped correction is Newton's own estimate of the distance
-  to the root, and the limiters (pnjlim, node damping, the Armijo search)
-  scale what is applied, never that estimate;
+  `|v_new − v| < RELTOL·max(|v|, |v_new|) + VNTOL` (1e-3 relative, 1e-6 V),
+  the threshold taken at the correction's target. The damped step
+  `alpha·(v_new − v)` is what gets applied; the undamped correction is
+  Newton's own estimate of the distance to the root, and the limiters
+  (pnjlim, node damping, the Armijo search) scale what is applied, never that
+  estimate;
 - the **device-chord consistency check** (`i_nl(v)` against the chord's
-  prediction, RELTOL 1e-3, 1e-9 A floor, 1e-12 A ABSTOL);
+  prediction, `RELTOL·max(|i_nl|, |i_chord|, ABSTOL_SCALE_FLOOR) + ABSTOL`:
+  1e-3 relative, 1e-9 A scale floor, 1e-12 A ABSTOL — the DK Newton's
+  current-residual test is the same test);
 - the **row-residual gate** (`kcl_residual_inl`, every row, see above).
+
+Every threshold above is ONE constant in
+`codegen/rust_emitter/thresholds.rs` (`RELTOL`, `VNTOL`, `KCL_ABSTOL`,
+`ABSTOL`, `ABSTOL_SCALE_FLOOR`; `SUBSTEP_ACCEPT_VOLTS` = 1e-3 V for the
+sub-step ladder's acceptance `max_step < SUBSTEP_ACCEPT_VOLTS`, an absolute
+1 mV on every node that is looser than the step test below ~1 V and tighter
+above it), emitted by the same name as a module-level `pub const` on both
+routes and read by name in every emitted test. None is configurable: the
+`--tolerance` flag (emitted `TOL`, read only by the ladder as `TOL + 1e-3`)
+was removed 2026-11-03.
 
 The step test used to read the damped step and to be skipped on any iteration
 the line search or the node damping had shrunk `alpha` below 1, on the ground
@@ -736,7 +754,10 @@ The emitter checks `has_dc_nl = M > 0 && dc_nl_currents.iter().any(|&x| x.abs() 
 - If true: emits `DC_NL_I` constant, initializes `i_nl_prev` from it
 - If false: initializes `i_nl_prev` to `[0.0; M]`
 
-`CodegenConfig` fields: `dc_op_max_iterations` (default 200), `dc_op_tolerance` (default 1e-9).
+`CodegenConfig` field: `dc_op_max_iterations` (`None` = the solver's 200). The
+solve's thresholds are the compile-time solver's constants (`dc_op::DC_OP_RELTOL`
+1e-6, `DC_OP_STEP_ABSTOL_VOLTS` 1e-9 V, `DC_OP_KCL_ABSTOL_AMPS` 1e-9 A), not
+configurable.
 
 ## Oversampling
 

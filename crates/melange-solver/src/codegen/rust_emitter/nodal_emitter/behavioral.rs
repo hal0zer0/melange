@@ -296,7 +296,8 @@ fn bsrc_residual_exprs(ir: &CircuitIR) -> Vec<(usize, bool, String, usize, usize
 
 /// Emit the TRUE residual of every behavioral `V={}` row into the KCL residual
 /// helpers: `F[r] = (v[n+] − v[n−]) − f(v)` in volts, summed into `norm_sq` and
-/// gated at `1e-3·den + 1e-6 V` (`den` = the row's largest term). The base `A`
+/// gated at `RELTOL·den + VNTOL` (1e-3·den + 1e-6 V; `den` = the row's largest
+/// term). The base `A`
 /// and `rhs` cannot give this row: the per-iteration solve carries the row as
 /// a linearisation (`−∂f/∂V` in the chord factor, the companion in
 /// `rhs_work`), so `A·v − rhs` on it is neither the linearised nor the true
@@ -328,7 +329,7 @@ pub(super) fn emit_behavioral_voltage_row_residual(
              {indent}    let acc = ({vp} - {vm}) - f;
              {indent}    let den = {vp}.abs().max({vm}.abs()).max(f.abs());
              {indent}    norm_sq += acc * acc;
-             {indent}    if !(acc.abs() <= 1e-3 * den + 1e-6) {{ ok = false; }}
+             {indent}    if !(acc.abs() <= RELTOL * den + VNTOL) {{ ok = false; }}
              {indent}}}
 "
         ));

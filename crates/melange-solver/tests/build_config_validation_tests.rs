@@ -44,17 +44,6 @@ fn oversampling_factor_three_is_refused_on_both_routes() {
 }
 
 #[test]
-fn non_positive_tolerance_is_refused_on_both_routes() {
-    for solver in ["dk", "nodal"] {
-        let err = refusal(solver, |c| c.tolerance = 0.0);
-        assert!(
-            err.contains("tolerance must be positive and finite"),
-            "--solver {solver}: {err}"
-        );
-    }
-}
-
-#[test]
 fn zero_newton_budget_is_refused_on_both_routes() {
     for solver in ["dk", "nodal"] {
         let err = refusal(solver, |c| c.max_iterations = 0);

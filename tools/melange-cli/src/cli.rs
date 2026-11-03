@@ -67,10 +67,6 @@ pub(crate) enum Commands {
         #[arg(help_heading = EXPERT_HEADING, long)]
         max_iter: Option<usize>,
 
-        /// Convergence tolerance
-        #[arg(help_heading = EXPERT_HEADING, long, default_value = "1e-9")]
-        tolerance: f64,
-
         /// Output format
         #[arg(short = 'f', long, value_enum, default_value = "code")]
         format: OutputFormat,

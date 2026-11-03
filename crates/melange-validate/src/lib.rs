@@ -1136,7 +1136,6 @@ fn run_melange_build(
         input_nodes: vec![input_node_name.to_string()],
         output_nodes: vec![output_node_name.to_string()],
         max_iter: None,
-        tolerance: CodegenConfig::default().tolerance,
         output_scale: 1.0,
         output_clamp: CodegenConfig::default().output_clamp_v,
         input_resistance: Some(1.0),

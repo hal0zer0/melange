@@ -1493,7 +1493,7 @@ impl RustEmitter {
         if ir.solver_config.emit_dc_op_recompute {
             let body = Self::emit_recompute_dc_op_body_nodal(ir, use_full_nodal);
             let refusals = super::dc_op::recompute_refusals(ir);
-            code.push_str(
+            code.push_str(&format!(
                 "    /// Re-solve the DC operating point at the current pot/switch/device\n\
                  \x20   /// values and install it (`dc_op_writeback`).\n\
                  \x20   ///\n\
@@ -1511,8 +1511,8 @@ impl RustEmitter {
                  \x20   /// Newton on the augmented system with the live matrices and the\n\
                  \x20   /// per-sample loop's device evaluator and limiter, from `v_prev`, direct\n\
                  \x20   /// (no source or Gmin stepping). Certification is the compile-time\n\
-                 \x20   /// solver's: the undamped Newton correction under `1e-6·|v| + 1e-9 V` on\n\
-                 \x20   /// every row AND the KCL residual under `1e-6·scale + 1e-9 A` on every\n\
+                 \x20   /// solver's: the undamped Newton correction under `{reltol:e}·|v| + {vtol:e} V` on\n\
+                 \x20   /// every row AND the KCL residual under `{reltol:e}·scale + {itol:e} A` on every\n\
                  \x20   /// circuit-node row, both at the point written back. On failure the\n\
                  \x20   /// state is left untouched and `diag_nr_max_iter_count` advances, which\n\
                  \x20   /// is what `settle_dc_op` reads to fall back to the warmup loop.\n\
@@ -1530,7 +1530,10 @@ impl RustEmitter {
                  \x20   /// - A deck with a latched (glow) device: its lit/unlit state is part of\n\
                  \x20   ///   the equations, and such a deck can have two DC roots or none.\n\
                  \x20   ///\n",
-            );
+                reltol = crate::codegen::rust_emitter::thresholds::DC_OP_RELTOL,
+                vtol = crate::codegen::rust_emitter::thresholds::DC_OP_STEP_ABSTOL_VOLTS,
+                itol = crate::codegen::rust_emitter::thresholds::DC_OP_KCL_ABSTOL_AMPS,
+            ));
             code.push_str(&format!(
                 "    /// This build: {}.\n",
                 if refusals.is_empty() {

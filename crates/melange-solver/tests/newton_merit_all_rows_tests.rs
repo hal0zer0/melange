@@ -165,9 +165,16 @@ fn the_residual_helpers_cover_source_and_branch_rows_beside_the_kcl_rows() {
             body.contains("// source / constraint / inductor branch rows (V)"),
             "{helper} has no source / branch row block"
         );
-        // Amps floor on the KCL rows, the node-step floor on the others.
-        assert!(body.contains("1e-3 * den + 1e-9"), "{helper}: KCL floor");
-        assert!(body.contains("1e-3 * den + 1e-6"), "{helper}: volt floor");
+        // Amps floor on the KCL rows, the node-step floor on the others, by
+        // name (`KCL_ABSTOL` = 1e-9 A, `VNTOL` = 1e-6 V).
+        assert!(
+            body.contains("RELTOL * den + KCL_ABSTOL"),
+            "{helper}: KCL floor"
+        );
+        assert!(
+            body.contains("RELTOL * den + VNTOL"),
+            "{helper}: volt floor"
+        );
         // The infinity norm stays KCL-only: every `max_abs` update precedes
         // the source / branch block.
         let split = body

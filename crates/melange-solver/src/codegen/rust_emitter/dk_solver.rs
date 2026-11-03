@@ -42,6 +42,9 @@ impl RustEmitter {
                  pub const MAX_ITER: usize = {};\n\n",
                 ir.solver_config.max_iterations
             ));
+            // The certification thresholds `solve_nonlinear` reads, by name
+            // (`thresholds.rs`: one constant each, not configurable).
+            super::thresholds::emit_transient_thresholds(code, false);
         }
         code.push_str("/// Solve M×M nonlinear system via Newton-Raphson\n");
         code.push_str("/// \n");
@@ -65,10 +68,6 @@ impl RustEmitter {
                 ir.solver_config.max_iterations
             ));
         }
-        code.push_str(&format!(
-            "    const TOL: f64 = {:.17e};\n",
-            ir.solver_config.tolerance
-        ));
         code.push_str("    const SINGULARITY_THRESHOLD: f64 = 1e-15;\n\n");
 
         // DK keeps the first-order current predictor, where the nodal Schur

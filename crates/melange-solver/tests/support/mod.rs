@@ -573,7 +573,6 @@ pub fn try_build_shipped_with(
             .collect(),
         output_nodes: config.output_nodes.iter().map(|&i| name_of(i)).collect(),
         max_iter: (config.max_iterations != d.max_iterations).then_some(config.max_iterations),
-        tolerance: config.tolerance,
         output_scale: config.output_scales.first().copied().unwrap_or(1.0),
         output_clamp: config.output_clamp_v,
         input_resistance: (config.input_resistance != 1.0).then_some(config.input_resistance),

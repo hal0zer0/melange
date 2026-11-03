@@ -84,8 +84,16 @@ voltage steps are within safe bounds, alpha = 1.0 (full Newton step).
 
 ## Convergence Criteria
 ```
-|delta| < tolerance (1e-9)  or  max_iter (100) reached
+every device dimension i, on the UNDAMPED correction dv_i (v_prop_i = the
+proposed voltage the limiter aims at):
+  |dv_i| <= RELTOL * max(|v_i|, |v_prop_i|) + VNTOL           (1e-3, 1e-6 V)
+AND every device dimension i, the current residual f_i = i_nl_i - i_dev_i(v):
+  |f_i|  <= RELTOL * max(|i_nl_i|, |i_dev_i|, ABSTOL_SCALE_FLOOR) + ABSTOL   (1e-3, 1e-9 A, 1e-12 A)
+or MAX_ITER reached (unsolved; counted, never certified)
 ```
+The thresholds are the named constants of `codegen/rust_emitter/thresholds.rs`,
+emitted by name into the generated code; they are not configurable (the
+`--tolerance` flag, which no certification test read, was removed 2026-11-03).
 
 ## Safety Measures
 

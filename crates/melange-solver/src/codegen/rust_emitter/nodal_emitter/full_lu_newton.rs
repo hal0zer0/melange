@@ -527,9 +527,9 @@ impl RustEmitter {
             device_nodes.dedup();
             for &node in &device_nodes {
                 // NaN-honest: `!(a < b)` reads a non-finite correction as not
-                // converged. RELTOL 1e-3 with the 1e-6 V floor (SPICE VNTOL).
+                // converged. `RELTOL` with the `VNTOL` floor (`thresholds.rs`).
                 code.push_str(&format!(
-                        "        {{ let step = v_new[{node}] - v[{node}]; let threshold = 1e-3 * v[{node}].abs().max(v_new[{node}].abs()) + 1e-6; if !(step.abs() < threshold) {{ max_step_exceeded = true; }} }}\n"
+                        "        {{ let step = v_new[{node}] - v[{node}]; let threshold = RELTOL * v[{node}].abs().max(v_new[{node}].abs()) + VNTOL; if !(step.abs() < threshold) {{ max_step_exceeded = true; }} }}\n"
                     ));
             }
         }
@@ -590,7 +590,7 @@ impl RustEmitter {
                          \x20           // converged — the rest of the network is still consistent\n\
                          \x20           // with the pre-clamp value.\n\
                          \x20           let clamp_delta = (v[{idx}] - v_pre_clamp).abs();\n\
-                         \x20           let clamp_thresh = 1e-3 * v[{idx}].abs().max(v_pre_clamp.abs()) + 1e-6;\n\
+                         \x20           let clamp_thresh = RELTOL * v[{idx}].abs().max(v_pre_clamp.abs()) + VNTOL;\n\
                          \x20           if clamp_delta >= clamp_thresh {{ max_step_exceeded = true; }}\n\
                          \x20       }}\n",
                         idx = oa.n_out_idx,
@@ -685,17 +685,17 @@ impl RustEmitter {
                 code.push_str("            }\n");
             }
             code.push_str(
-                "            // Tolerance matches DK Schur path: ABSTOL=1e-12, RELTOL=1e-3,\n",
+                "            // Tolerance matches the DK current-residual check: RELTOL with the\n",
             );
             code.push_str(
-                "            // with a 1e-9 floor on the magnitude denominator so devices\n",
+                "            // ABSTOL floor, and ABSTOL_SCALE_FLOOR on the magnitude so devices\n",
             );
             code.push_str(
                 "            // with i_nl ≈ 0 don't have an unreachably tight tolerance.\n",
             );
             code.push_str("            for i in 0..M {\n");
             code.push_str("                let r = (i_nl_resid[i] - i_nl_chord[i]).abs();\n");
-            code.push_str("                let tol = 1e-3 * i_nl_resid[i].abs().max(i_nl_chord[i].abs()).max(1e-9) + 1e-12;\n");
+            code.push_str("                let tol = RELTOL * i_nl_resid[i].abs().max(i_nl_chord[i].abs()).max(ABSTOL_SCALE_FLOOR) + ABSTOL;\n");
             // Negated form: a NaN residual must read as NOT converged.
             code.push_str("                if !(r <= tol) {\n");
             code.push_str("                    max_step_exceeded = true;\n");
@@ -775,7 +775,7 @@ impl RustEmitter {
         // one accepted.
         //
         // The gate is the row test's own norm and floor: max over node rows of
-        // |F_row| > 1e-9 A. Below it there is nothing to carry: 1e-9 A per sample
+        // |F_row| > KCL_ABSTOL (1e-9 A). Below it there is nothing to carry: 1e-9 A per sample
         // over a ~100-sample rail plateau is ~1e-7 A, under the ~0.4 µA the
         // exact-Jacobian path itself leaves on the witness. So on quiet signal the
         // chord keeps its reuse across samples and pays no refactor. The gate
@@ -789,7 +789,7 @@ impl RustEmitter {
                 "the chord exit gate reads the node residual, computed when M > 0"
             );
             code.push_str(&format!(
-                "        if converged_check && !need_refactor && !exit_step && kcl_inf > 1e-9 && iter + 1 < {} {{\n\
+                "        if converged_check && !need_refactor && !exit_step && kcl_inf > KCL_ABSTOL && iter + 1 < {} {{\n\
                  \x20           exit_step = true;\n\
                  \x20           continue;\n\
                  \x20       }}\n",

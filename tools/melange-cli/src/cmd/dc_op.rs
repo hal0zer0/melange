@@ -71,7 +71,6 @@ pub(crate) fn run_dc_op(
         // An operating point has no output.
         output_nodes: Vec::new(),
         max_iter: None,
-        tolerance: d.tolerance,
         output_scale: 1.0,
         output_clamp: d.output_clamp_v,
         input_resistance: opts.input_resistance,

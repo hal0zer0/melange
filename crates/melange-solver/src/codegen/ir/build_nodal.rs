@@ -220,7 +220,6 @@ impl CircuitIR {
         let mut solver_config = SolverConfig {
             sample_rate,
             alpha,
-            tolerance: config.tolerance,
             // The Newton budget matches the integrator that ships. `build.rs`
             // tunes one budget for the trapezoidal system and one for backward
             // Euler (`max_iterations_be_promoted`); a behavioral source forces

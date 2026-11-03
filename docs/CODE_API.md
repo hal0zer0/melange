@@ -356,6 +356,22 @@ returns is the voltage the circuit produces, and if that voltage is wrong, the
 bug is in melange. Scale it in *your* code, at the boundary where volts become
 DAW samples.
 
+## Certification thresholds
+
+Every test the generated solver accepts a Newton iterate by is a named
+constant, emitted into the generated code under the same name and defined
+once in `melange_solver::codegen::rust_emitter::thresholds`. None is
+configurable.
+
+| Constant | Value | Certifies |
+|---|---|---|
+| `RELTOL` | 1e-3 | Relative term of the step test, the KCL gate and the device-current check (SPICE RELTOL) |
+| `VNTOL` | 1e-6 V | Floor of the node-step test on the undamped Newton correction, `\|v_new − v\| < RELTOL·max(\|v\|, \|v_new\|) + VNTOL` |
+| `KCL_ABSTOL` | 1e-9 A | Floor of the per-row KCL residual gate, `\|F_i\| ≤ RELTOL·den_i + KCL_ABSTOL`, and of the chord exit step |
+| `ABSTOL`, `ABSTOL_SCALE_FLOOR` | 1e-12 A, 1e-9 A | Device-current consistency check on the accepting iteration |
+| `SUBSTEP_ACCEPT_VOLTS` | 1e-3 V | The nodal sub-step ladder's absolute acceptance (looser than the step test below ~1 V, tighter above) |
+| `DC_OP_RELTOL`, `DC_OP_TOL`, `DC_OP_KCL_ABSTOL` | 1e-6, 1e-9 V, 1e-9 A | The DC operating-point solve, compile-time and `recompute_dc_op` |
+
 ## Startup
 
 `CircuitState::default()` starts from the DC operating point that was solved at

@@ -617,13 +617,13 @@ pub(super) fn emit_nr_limit_and_converge(
     // DK twin of the nodal full-LU hole closed in `full_lu_newton.rs`).
     for i in 0..dim {
         code.push_str(&format!(
-            "{indent}    {{ let v_new = v_prop{i}; let v_thr = 1e-3 * v_d{i}.abs().max(v_new.abs()) + 1e-6; if !(dv{i}.abs() <= v_thr) {{ nr_converged = false; }} }}\n"
+            "{indent}    {{ let v_new = v_prop{i}; let v_thr = RELTOL * v_d{i}.abs().max(v_new.abs()) + VNTOL; if !(dv{i}.abs() <= v_thr) {{ nr_converged = false; }} }}\n"
         ));
     }
     // Current residual check: always (K-independent, catches cancellation artifacts)
     for i in 0..dim {
         code.push_str(&format!(
-            "{indent}    {{ let i_thr = 1e-3 * i_nl[{i}].abs().max(i_dev{i}.abs()).max(1e-9) + 1e-12; if !(f{i}.abs() <= i_thr) {{ nr_converged = false; }} }}\n"
+            "{indent}    {{ let i_thr = RELTOL * i_nl[{i}].abs().max(i_dev{i}.abs()).max(ABSTOL_SCALE_FLOOR) + ABSTOL; if !(f{i}.abs() <= i_thr) {{ nr_converged = false; }} }}\n"
         ));
     }
     code.push_str(&format!("{indent}    if nr_converged {{\n"));
@@ -780,7 +780,7 @@ pub(super) fn emit_schur_nr_limit_and_converge(
 
     // RELTOL convergence check — break from loop (not return)
     code.push_str(&format!(
-        "\n{indent}// Convergence check (SPICE RELTOL=0.001, VNTOL=1e-6)\n"
+        "\n{indent}// Convergence check (SPICE RELTOL / VNTOL, the named constants)\n"
     ));
     code.push_str(&format!("{indent}if !any_limited {{\n"));
     code.push_str(&format!("{indent}    let mut nr_converged = true;\n"));
@@ -788,7 +788,7 @@ pub(super) fn emit_schur_nr_limit_and_converge(
     // step as NOT converged (mirrors the nodal emitter). Do not simplify.
     for i in 0..dim {
         code.push_str(&format!(
-            "{indent}    {{ let dv = dv_trial{i} * global_alpha; let threshold = 1e-3 * v_d{i}.abs().max((v_d{i} + dv).abs()) + 1e-6; if !(dv.abs() <= threshold) {{ nr_converged = false; }} }}\n"
+            "{indent}    {{ let dv = dv_trial{i} * global_alpha; let threshold = RELTOL * v_d{i}.abs().max((v_d{i} + dv).abs()) + VNTOL; if !(dv.abs() <= threshold) {{ nr_converged = false; }} }}\n"
         ));
     }
     code.push_str(&format!("{indent}    if nr_converged {{\n"));

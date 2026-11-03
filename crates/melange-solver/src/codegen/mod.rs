@@ -434,8 +434,6 @@ pub struct CodegenConfig {
     pub sample_rate: f64,
     /// Maximum iterations for Newton-Raphson
     pub max_iterations: usize,
-    /// Convergence tolerance
-    pub tolerance: f64,
     /// Input resistance (Thevenin equivalent) of the primary input port (port 0).
     pub input_resistance: f64,
     /// Input node index of the primary input port (port 0).
@@ -606,12 +604,6 @@ impl CodegenConfig {
                 self.sample_rate
             )));
         }
-        if !(self.tolerance > 0.0 && self.tolerance.is_finite()) {
-            return Err(CodegenError::InvalidConfig(format!(
-                "tolerance must be positive and finite, got {}",
-                self.tolerance
-            )));
-        }
         if self.max_iterations == 0 {
             return Err(CodegenError::InvalidConfig(
                 "max_iterations must be > 0".to_string(),
@@ -673,7 +665,6 @@ impl Default for CodegenConfig {
             circuit_name: "unnamed_circuit".to_string(),
             sample_rate: 44100.0,
             max_iterations: 100,
-            tolerance: 1e-9,
             input_resistance: 1.0, // 1Ω default (near-ideal voltage source)
             input_node: 0,
             extra_input_nodes: Vec::new(),
@@ -1325,7 +1316,6 @@ mod tests {
         let config = CodegenConfig::default();
         assert_eq!(config.sample_rate, 44100.0);
         assert_eq!(config.max_iterations, 100);
-        assert!(config.tolerance > 0.0);
         // Default op-amp rail handling is auto-selection.
         assert_eq!(config.opamp_rail_mode, OpampRailMode::Auto);
     }

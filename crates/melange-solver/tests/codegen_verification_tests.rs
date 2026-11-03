@@ -1431,6 +1431,39 @@ fn test_ir_json_with_removed_pot_settle_samples_loads() {
     );
 }
 
+/// IR JSON written before the `--tolerance` flag was removed carries
+/// `solver_config.tolerance` (the flag's value; the certification thresholds
+/// are named constants, not configurable). It must still load, and the field
+/// must change nothing: the IR loaded from it emits the same code as the same
+/// JSON without the field.
+#[test]
+fn test_ir_json_with_removed_tolerance_loads() {
+    let ir = build_ir(DIODE_CLIPPER_SPICE);
+    let mut value = serde_json::to_value(&ir).expect("serialize failed");
+    let new_json = serde_json::to_string_pretty(&value).expect("serialize failed");
+    let solver_config = value
+        .get_mut("solver_config")
+        .and_then(|v| v.as_object_mut())
+        .expect("solver_config object");
+    assert!(
+        !solver_config.contains_key("tolerance"),
+        "the IR no longer writes tolerance"
+    );
+    solver_config.insert("tolerance".to_string(), serde_json::json!(1e-9));
+    let old_json = serde_json::to_string_pretty(&value).expect("re-serialize failed");
+
+    let ir2: CircuitIR = serde_json::from_str(&old_json).expect("IR JSON with tolerance must load");
+    let ir_new: CircuitIR = serde_json::from_str(&new_json).expect("deserialize failed");
+
+    let emitter = RustEmitter::new().unwrap();
+    let from_new = emitter.emit(&ir_new).expect("emit").primary().to_string();
+    let from_old = emitter.emit(&ir2).expect("emit").primary().to_string();
+    assert!(
+        from_new == from_old,
+        "the ignored tolerance field changed the emitted code"
+    );
+}
+
 // ==========================================================================
 // Test: Heterogeneous device models get per-device parameters
 // ==========================================================================

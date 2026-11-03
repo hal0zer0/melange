@@ -71,8 +71,8 @@ pub enum DcRail {
 impl Default for DcOpConfig {
     fn default() -> Self {
         Self {
-            tolerance: 1e-9,
-            reltol: 1e-6,
+            tolerance: DC_OP_STEP_ABSTOL_VOLTS,
+            reltol: DC_OP_RELTOL,
             max_iterations: 200,
             source_steps: 50,
             gmin_start: 1e-2,
@@ -203,6 +203,24 @@ const DC_OP_MAX_PLAUSIBLE_CURRENT: f64 = 1e7;
 /// (`codegen/rust_emitter/nodal_emitter/residual.rs`, `emit_kcl_residual_fns`),
 /// which is also 1e-9 A.
 pub const DC_OP_KCL_ABSTOL_AMPS: f64 = 1e-9;
+
+/// Relative term of the DC solve's step test and KCL gate, dimensionless:
+/// `DcOpConfig::reltol`'s default, which every build's compile-time solve and
+/// the generated `recompute_dc_op` (`DC_OP_RELTOL` in the generated code) use.
+/// Tighter than the transient's SPICE RELTOL (1e-3) so that low-voltage
+/// circuits keep the absolute-only behaviour while 300 V rails stop
+/// false-failing on the LU round-off floor. Not configurable from the command
+/// line. Ruled 2026-11-03 to be named; value unchanged since the relative
+/// term was added to the DC solve.
+pub const DC_OP_RELTOL: f64 = 1e-6;
+
+/// Absolute floor, in VOLTS, of the DC solve's per-variable step test
+/// (`|delta_v| < DC_OP_RELTOL·max(|v|, |v_new|) + DC_OP_STEP_ABSTOL_VOLTS`):
+/// `DcOpConfig::tolerance`'s default, which the generated `recompute_dc_op`
+/// emits as `DC_OP_TOL`. Separate from `DC_OP_KCL_ABSTOL_AMPS` (see there).
+/// Not configurable from the command line. Ruled 2026-11-03 to be named;
+/// value unchanged since the DC solve was written.
+pub const DC_OP_STEP_ABSTOL_VOLTS: f64 = 1e-9;
 
 /// NaN-safe "x exceeds bound" for the KCL gate: `!(x <= bound)`, so a NaN
 /// residual FAILS the gate (a plain `x > bound` would let NaN pass). The

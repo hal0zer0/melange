@@ -30,7 +30,9 @@ D_2 0 n2 DSIG\nR_t n2 n3 10k\nC_t n3 0 22n\nC_o n3 out 1u\nR_v out 0 100k\n\
 const FS: f64 = 384000.0;
 
 const EXIT: &str = "if converged_check && !need_refactor && !exit_step";
-const GATE: &str = "kcl_inf > 1e-9 &&";
+// The KCL infinity norm against the row test's own floor, by name
+// (`thresholds::KCL_ABSTOL`, 1e-9 A).
+const GATE: &str = "kcl_inf > KCL_ABSTOL &&";
 
 fn code_for(sub_path: NodalSubPathOverride) -> String {
     let mut config = support::config_for_spice(OVERDRIVE, FS);

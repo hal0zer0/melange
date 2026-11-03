@@ -570,7 +570,6 @@ pub struct SolverConfig {
     pub sample_rate: f64,
     /// alpha = 2/T (trapezoidal) or 1/T (backward Euler) at internal sample rate
     pub alpha: f64,
-    pub tolerance: f64,
     pub max_iterations: usize,
     pub input_node: usize,
     /// Output node indices (one per output channel)

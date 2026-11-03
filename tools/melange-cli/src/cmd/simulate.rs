@@ -285,7 +285,6 @@ pub(crate) fn simulate_circuit_source(
         input_nodes: vec![opts.input_node.to_string()],
         output_nodes,
         max_iter: opts.max_iter,
-        tolerance: 1e-9,
         output_scale: 1.0,
         output_clamp: 10.0,
         input_resistance: opts.input_resistance_flag,

@@ -1991,27 +1991,33 @@ fn fix3_dc_biased_choke_shipped_recompute_reaches_inductor_short_op() {
 // --- Fix 4: RELTOL convergence -----------------------------------------------
 
 /// The NR loop must emit the SPICE-style per-variable convergence check
-/// `|delta| < RELTOL * |v| + TOL` with RELTOL mirroring dc_op.rs (1e-6).
+/// `|delta| < DC_OP_RELTOL * |v| + DC_OP_TOL` with the relative term the
+/// compile-time solver's (dc_op.rs, 1e-6), under the same `DC_OP_*` names the
+/// nodal recompute uses.
 #[test]
 fn fix4_reltol_convergence_emitted() {
     let code = generate_dk(SOT_STAGE_NETLIST, true);
     let body = recompute_body(&code);
     assert!(
-        body.contains("const RELTOL: f64 = 1e-6;"),
-        "NR loop must define RELTOL = 1e-6 (mirrors dc_op.rs reltol)"
+        body.contains("const DC_OP_RELTOL: f64 = 1e-6;"),
+        "NR loop must define DC_OP_RELTOL = 1e-6 (the compile-time solver's reltol)"
     );
     assert!(
-        body.contains("RELTOL * v_node[a].abs().max(v_new[a].abs()) + TOL"),
-        "the step test is per-variable |v_new − v| < RELTOL·max(|v|, |v_new|) + TOL \
+        body.contains("const DC_OP_TOL: f64 = 1e-9;"),
+        "NR loop must define DC_OP_TOL = 1e-9 (the compile-time solver's tolerance)"
+    );
+    assert!(
+        body.contains("DC_OP_RELTOL * v_node[a].abs().max(v_new[a].abs()) + DC_OP_TOL"),
+        "the step test is per-variable |v_new − v| < DC_OP_RELTOL·max(|v|, |v_new|) + DC_OP_TOL \
          on the UNDAMPED correction"
     );
     assert!(
-        !body.contains("step_max < TOL"),
+        !body.contains("step_max < TOL") && !body.contains("step_max < DC_OP_TOL"),
         "absolute-only step_max check must be gone"
     );
     assert!(
-        body.contains("const KCL_ABSTOL: f64 = 1e-9;")
-            && body.contains("!(acc.abs() <= RELTOL * scale + KCL_ABSTOL)"),
+        body.contains("const DC_OP_KCL_ABSTOL: f64 = 1e-9;")
+            && body.contains("!(acc.abs() <= DC_OP_RELTOL * scale + DC_OP_KCL_ABSTOL)"),
         "acceptance is also gated on the per-row KCL residual (dc_op.rs's gate)"
     );
 }

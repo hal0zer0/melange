@@ -419,7 +419,7 @@ impl RustEmitter {
         }
         for &node in &step_rows {
             code.push_str(&format!(
-                "{it}{{ let step = alpha * (v_new[{node}] - v_pin[{node}]); let threshold = 1e-3 * v_pin[{node}].abs().max((v_pin[{node}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ pin_step_exceeded = true; }} }}\n"
+                "{it}{{ let step = alpha * (v_new[{node}] - v_pin[{node}]); let threshold = RELTOL * v_pin[{node}].abs().max((v_pin[{node}] + step).abs()) + VNTOL; if !(step.abs() < threshold) {{ pin_step_exceeded = true; }} }}\n"
             ));
         }
         code.push_str(&format!(

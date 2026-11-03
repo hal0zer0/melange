@@ -353,7 +353,7 @@ impl RustEmitter {
                 for si in &ir.saturating_inductors {
                     let k = si.aug_row;
                     code.push_str(&format!(
-                            "                    {{ let step = alpha * (v_new_s[{k}] - v_sub[{k}]); let threshold = 1e-3 * v_sub[{k}].abs().max((v_sub[{k}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ sub_step_exceeded = true; }} }}\n"
+                            "                    {{ let step = alpha * (v_new_s[{k}] - v_sub[{k}]); let threshold = RELTOL * v_sub[{k}].abs().max((v_sub[{k}] + step).abs()) + VNTOL; if !(step.abs() < threshold) {{ sub_step_exceeded = true; }} }}\n"
                         ));
                 }
                 code.push_str("                    for i in 0..N { v_sub[i] += alpha * (v_new_s[i] - v_sub[i]); }\n");
@@ -381,7 +381,7 @@ impl RustEmitter {
                 for si in &ir.saturating_inductors {
                     let k = si.aug_row;
                     code.push_str(&format!(
-                            "                    {{ let step = alpha * (v_new_s[{k}] - v_sub[{k}]); let threshold = 1e-3 * v_sub[{k}].abs().max((v_sub[{k}] + step).abs()) + 1e-6; if !(step.abs() < threshold) {{ sub_step_exceeded = true; }} }}\n"
+                            "                    {{ let step = alpha * (v_new_s[{k}] - v_sub[{k}]); let threshold = RELTOL * v_sub[{k}].abs().max((v_sub[{k}] + step).abs()) + VNTOL; if !(step.abs() < threshold) {{ sub_step_exceeded = true; }} }}\n"
                         ));
                 }
                 if has_sat_ind {
@@ -402,10 +402,11 @@ impl RustEmitter {
             ));
             Self::emit_nodal_device_evaluation_final(code, ir, "                    ", "v_sub");
             code.push_str("                    i_nl_sub = i_nl;\n");
-            // Convergence: raw (undamped) Newton step small AND — the always-
-            // checked precondition of the line search — the true node-KCL
-            // residual within tolerance, so a line-search-shrunk step can
-            // never report a non-root as converged.
+            // Convergence: raw (undamped) Newton step under the ladder's own
+            // absolute acceptance (`SUBSTEP_ACCEPT_VOLTS`, `thresholds.rs`) AND
+            // — the always-checked precondition of the line search — the true
+            // node-KCL residual within tolerance, so a line-search-shrunk step
+            // can never report a non-root as converged.
             if has_sat_ind {
                 emit_sat_ind_row_residual(
                     code,
@@ -427,12 +428,12 @@ impl RustEmitter {
             };
             if use_line_search {
                 code.push_str(&format!(
-                    "                    if max_step < TOL + 1e-3{sat_gate} && kcl_residual(&v_sub, &rhs_s, &a_sub, state{}).1 {{\n",
+                    "                    if max_step < SUBSTEP_ACCEPT_VOLTS{sat_gate} && kcl_residual(&v_sub, &rhs_s, &a_sub, state{}).1 {{\n",
                     super::residual::residual_sat_arg(ir, "alpha_sub")
                 ));
             } else {
                 code.push_str(&format!(
-                    "                    if max_step < TOL + 1e-3{sat_gate} {{\n"
+                    "                    if max_step < SUBSTEP_ACCEPT_VOLTS{sat_gate} {{\n"
                 ));
             }
             code.push_str("                        sub_converged = true;\n");

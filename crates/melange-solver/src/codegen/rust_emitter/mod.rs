@@ -20,6 +20,7 @@
 //! - `nr_helpers` — shared NR helper functions (voltage limiting, convergence)
 //! - `oversampler` — polyphase half-band oversampler and its wrappers
 //! - `subsample_fire` — nodal-Schur variable-dt glow-strike breakpoint re-solve
+//! - `thresholds` — the certification thresholds, one constant each, emitted by name
 
 mod dc_op_emitter;
 mod device_models;
@@ -35,6 +36,7 @@ mod oversampler;
 mod runtime_inputs;
 mod runtime_os;
 mod subsample_fire;
+pub mod thresholds;
 
 use tera::{Context, Tera};
 

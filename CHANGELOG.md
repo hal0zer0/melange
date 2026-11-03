@@ -70,6 +70,24 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ### Changed
 
+- **Breaking: `--tolerance` and `CodegenConfig::tolerance` are removed.** The
+  flag was a dead constant on DK builds and inert at its default on nodal
+  builds, where its only reader was the sub-step ladder's accept test with a
+  1 mV absolute term (`max_step < TOL + 1e-3`; the test now reads
+  `SUBSTEP_ACCEPT_VOLTS` = 1e-3, which differs only for a largest correction
+  in [1e-3, 1e-3 + 1e-9) V; the golden corpus renders identically). The
+  Newton certification thresholds were never configurable: the step test
+  (SPICE RELTOL 1e-3, VNTOL 1e-6 V), the per-row KCL gate (1e-3·den + 1e-9 A),
+  the device-current consistency check (1e-3, ABSTOL 1e-12 A, 1e-9 A scale
+  floor), the ladder's 1 mV and the DC solve's pair (1e-6 relative, 1e-9 V,
+  1e-9 A KCL floor) are now each ONE named constant
+  (`melange_solver::codegen::rust_emitter::thresholds`), emitted by the same
+  name into the generated code (`RELTOL`, `VNTOL`, `KCL_ABSTOL`, `ABSTOL`,
+  `ABSTOL_SCALE_FLOOR`, `SUBSTEP_ACCEPT_VOLTS`; `DC_OP_RELTOL` / `DC_OP_TOL` /
+  `DC_OP_KCL_ABSTOL` in `recompute_dc_op` on both routes), with the same
+  values. A script that passes `--tolerance` now fails on an unknown
+  argument. IR JSON that carries `solver_config.tolerance` still loads; the
+  field is ignored.
 - **The runtime recompute certifies like the compile-time solver.** Both
   routes accept an iterate only when the UNDAMPED Newton correction is under
   `1e-6·|v| + 1e-9 V` on every row AND the per-row KCL residual is under

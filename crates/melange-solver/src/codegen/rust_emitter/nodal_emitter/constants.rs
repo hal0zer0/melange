@@ -143,11 +143,10 @@ impl RustEmitter {
         );
         code.push_str("pub const CHORD_REFACTOR: usize = 5;\n\n");
 
-        code.push_str("/// NR convergence tolerance (VNTOL)\n");
-        code.push_str(&format!(
-            "pub const TOL: f64 = {};\n\n",
-            fmt_f64(ir.solver_config.tolerance)
-        ));
+        // The certification thresholds the Newton sites and the sub-step
+        // ladder read, by name (`thresholds.rs`: one constant each, not
+        // configurable).
+        crate::codegen::rust_emitter::thresholds::emit_transient_thresholds(&mut code, true);
 
         // Runtime BE-latch detector constants (trapezoidal builds only).
         if ir.solver_config.runtime_be_latch {
