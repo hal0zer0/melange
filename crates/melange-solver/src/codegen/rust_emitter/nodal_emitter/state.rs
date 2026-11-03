@@ -1953,7 +1953,7 @@ impl RustEmitter {
 
         // Invalidate the sub-sample-fire Schur-triple LRU — G/C changed, so every
         // cached (rate, be) triple is stale. Covers pot/switch/runtime-R (via
-        // matrices_dirty), set_sample_rate, and the saturating-L resync rebuild.
+        // matrices_dirty) and set_sample_rate.
         if ir.solver_config.subsample_fire {
             code.push_str(
                 "\n        // Drop all sub-sample-fire Schur-triple LRU entries (matrices changed)\n",
