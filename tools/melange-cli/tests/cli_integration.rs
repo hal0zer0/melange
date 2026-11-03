@@ -2910,3 +2910,147 @@ fn test_simulate_switch_override_is_the_deck_written_at_that_position() {
     }
     let _cleanup = RemoveOnDrop(keep);
 }
+
+// A switched bias divider: the two positions have different DC operating
+// points, so a baked `--switch` is visible in the vector the build embeds.
+const TEST_SWITCH_BIAS: &str = "\
+Switch Bias Test Fixture
+VCC vcc 0 DC 10
+R1 vcc out 10k
+Rsw out 0 10k
+Rin in out 100k
+C1 out 0 1n
+.switch Rsw 10k 100k \"Load\"
+";
+
+const TEST_SWITCH_BIAS_AT_POS1: &str = "\
+Switch Bias Test Fixture, written at the other position
+VCC vcc 0 DC 10
+R1 vcc out 10k
+Rsw out 0 100k
+Rin in out 100k
+C1 out 0 1n
+.switch Rsw 100k 10k \"Load\"
+";
+
+/// The `DC_OP` constant block of a generated file.
+fn dc_op_block(code: &str) -> String {
+    let start = code
+        .find("pub const DC_OP:")
+        .expect("generated code embeds DC_OP");
+    let rest = &code[start..];
+    rest[..rest.find("];").unwrap() + 2].to_string()
+}
+
+#[test]
+fn test_compile_switch_override_bakes_the_position() {
+    // `compile --switch` bakes the position: the embedded DC operating point
+    // is the one of the deck written at that position, and the generated
+    // state starts there, on both solver families.
+    let cir = write_test_circuit(TEST_SWITCH_BIAS, "switch_compile");
+    let cir_pos1 = write_test_circuit(TEST_SWITCH_BIAS_AT_POS1, "switch_compile_pos1");
+    let mut keep = Vec::new();
+    for solver in ["dk", "nodal"] {
+        let gen = |tag: &str, deck: &PathBuf, extra: &[&str]| -> (String, PathBuf) {
+            let out = std::env::temp_dir().join(format!(
+                "melange_cli_test_switch_compile_{solver}_{tag}_{}.rs",
+                std::process::id()
+            ));
+            let mut args = vec![
+                "compile",
+                deck.to_str().unwrap(),
+                "-f",
+                "code",
+                "--solver",
+                solver,
+                "-o",
+                out.to_str().unwrap(),
+            ];
+            args.extend_from_slice(extra);
+            run_melange(&args);
+            (std::fs::read_to_string(&out).unwrap(), out)
+        };
+        let (overridden, p1) = gen("override", &cir, &["--switch", "Load=1"]);
+        let (written, p2) = gen("written", &cir_pos1, &[]);
+        let (pos0, p3) = gen("pos0", &cir, &[]);
+        keep.extend([p1, p2, p3]);
+        assert_eq!(
+            dc_op_block(&overridden),
+            dc_op_block(&written),
+            "{solver}: --switch Load=1 must embed the DC OP of the deck written at position 1"
+        );
+        assert_ne!(
+            dc_op_block(&overridden),
+            dc_op_block(&pos0),
+            "{solver}: the two positions have different operating points"
+        );
+        assert!(
+            overridden.contains("switch_0_position: 1,"),
+            "{solver}: the generated state must start at the baked position"
+        );
+        assert!(pos0.contains("switch_0_position: 0,"));
+    }
+    let _cleanup = RemoveOnDrop(keep);
+}
+
+#[test]
+fn test_dc_op_switch_override_is_the_deck_written_at_that_position() {
+    // `dc-op --switch` reports the operating point a `compile --switch` build
+    // embeds: the deck's solution at that position.
+    let cir = write_test_circuit(TEST_SWITCH_BIAS, "switch_dc_op");
+    let cir_pos1 = write_test_circuit(TEST_SWITCH_BIAS_AT_POS1, "switch_dc_op_pos1");
+    let nodes = |report: &str| -> String {
+        report[report
+            .find("\"nodes\":")
+            .expect("json report lists the nodes")..]
+            .to_string()
+    };
+    let c = cir.to_str().unwrap();
+    let overridden = run_melange(&["dc-op", c, "--switch", "Load=1", "-f", "json"]);
+    let written = run_melange(&["dc-op", cir_pos1.to_str().unwrap(), "-f", "json"]);
+    let pos0 = run_melange(&["dc-op", c, "-f", "json"]);
+    assert_eq!(nodes(&overridden), nodes(&written));
+    assert_ne!(nodes(&overridden), nodes(&pos0));
+    // 10 V through 10k into 100k || 100k (Rsw at position 1, Rin to the
+    // 1 Ω input port): 8.33 V; at position 0 (10k || 100k) it is 4.76 V.
+    assert!(overridden.contains("\"out\":8.33"), "{overridden}");
+    assert!(pos0.contains("\"out\":4.76"), "{pos0}");
+}
+
+#[test]
+fn test_compile_plugin_switch_override_sets_the_parameter_default() {
+    // A plugin's switch parameter defaults to the baked position: the wrapper
+    // sets the switch whenever the parameter and the state disagree, so a
+    // parameter default of 0 on a state baked at 1 would flip the switch on
+    // the first block.
+    let cir = write_test_circuit(TEST_SWITCH_BIAS, "switch_plugin");
+    let dir = std::env::temp_dir().join(format!(
+        "melange_cli_test_switch_plugin_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    run_melange(&[
+        "compile",
+        cir.to_str().unwrap(),
+        "-f",
+        "plugin",
+        "-o",
+        dir.to_str().unwrap(),
+        "--switch",
+        "Load=1",
+    ]);
+    let lib = std::fs::read_to_string(dir.join("src/lib.rs")).unwrap();
+    assert!(
+        lib.contains("\"Load\",\n                1,"),
+        "the switch parameter must default to the baked position: {lib}"
+    );
+    let baked = std::fs::read_dir(dir.join("src"))
+        .unwrap()
+        .filter_map(|e| std::fs::read_to_string(e.unwrap().path()).ok())
+        .any(|src| src.contains("switch_0_position: 1,"));
+    assert!(
+        baked,
+        "the generated state must start at the baked position"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

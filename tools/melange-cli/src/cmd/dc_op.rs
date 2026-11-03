@@ -29,6 +29,9 @@ pub(crate) struct DcOpOptions<'a> {
     pub(crate) bjt_fa: &'a str,
     pub(crate) tube_grid_fa: &'a str,
     pub(crate) pot_overrides: &'a [String],
+    /// `--switch NAME=POS` specs: the operating point is solved at that
+    /// position, as a `compile --switch` build embeds it.
+    pub(crate) switch_overrides: &'a [String],
     pub(crate) allow_unconverged_dc_op: bool,
     /// Test-only DC-OP Newton budget (hidden `--dc-op-max-iterations`).
     pub(crate) dc_op_max_iterations: Option<usize>,
@@ -95,7 +98,11 @@ pub(crate) fn run_dc_op(
         } else {
             Some(opts.pot_overrides.to_vec())
         },
-        switch_overrides: None,
+        switch_overrides: if opts.switch_overrides.is_empty() {
+            None
+        } else {
+            Some(opts.switch_overrides.to_vec())
+        },
         resolve_taps: true,
         inject_runtime: true,
         disable_unit_variation: false,
@@ -112,6 +119,11 @@ pub(crate) fn run_dc_op(
         &|a| eprintln!("{a}"),
     )
     .map_err(|e| build_error_in(e, &netlist_str))?;
+    // `--switch` was baked into the build; resolved again only to print the
+    // mapping it applied (to stderr: stdout is the report).
+    if !opts.switch_overrides.is_empty() {
+        crate::common::resolve_switch_overrides(&assembled.netlist, opts.switch_overrides)?;
+    }
     let format = opts.format;
     let result = &assembled.dc_op;
     let mna = &assembled.mna;

@@ -132,6 +132,7 @@ fn main() -> Result<()> {
             vst3_id,
             clap_id,
             cpu_baseline,
+            switch_overrides,
         } => {
             // Validate numeric CLI parameters
             if sample_rate <= 0.0 || !sample_rate.is_finite() {
@@ -233,6 +234,7 @@ fn main() -> Result<()> {
                     sample_rate,
                     input_node: &input_node,
                     output_node: &output_node,
+                    switch_overrides: &switch_overrides,
                     max_iter,
                     tolerance,
                     output_scale,
@@ -664,6 +666,7 @@ fn main() -> Result<()> {
             bjt_fa,
             tube_grid_fa,
             pot_overrides,
+            switch_overrides,
             allow_unconverged_dc_op,
             dc_op_max_iterations,
         } => {
@@ -721,6 +724,7 @@ fn main() -> Result<()> {
                     bjt_fa: &bjt_fa,
                     tube_grid_fa: &tube_grid_fa,
                     pot_overrides: &pot_overrides,
+                    switch_overrides: &switch_overrides,
                     allow_unconverged_dc_op,
                     dc_op_max_iterations,
                     verbose,

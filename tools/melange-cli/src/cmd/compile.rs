@@ -1,7 +1,8 @@
 use crate::args::parse_bjt_fa_mode;
 use crate::cli::OutputFormat;
 use crate::common::{
-    build_error_in, diag_lit_factor, is_build_detail, load_circuit_text, route_summary,
+    build_error_in, diag_lit_factor, is_build_detail, load_circuit_text, resolve_switch_overrides,
+    route_summary,
 };
 use crate::{circuits, plugin_template};
 use anyhow::{Context, Result};
@@ -154,6 +155,9 @@ pub(crate) struct CompileOptions<'a> {
     pub(crate) sample_rate: f64,
     pub(crate) input_node: &'a str,
     pub(crate) output_node: &'a str,
+    /// `--switch NAME=POS` specs, baked into the build (see
+    /// [`melange_solver::build::apply_switch_overrides`]).
+    pub(crate) switch_overrides: &'a [String],
     pub(crate) max_iter: Option<usize>,
     pub(crate) tolerance: f64,
     pub(crate) output_scale: f64,
@@ -206,6 +210,7 @@ pub(crate) fn compile_circuit_source(
         sample_rate,
         input_node,
         output_node,
+        switch_overrides,
         max_iter: max_iter_flag,
         tolerance,
         output_scale,
@@ -365,7 +370,14 @@ pub(crate) fn compile_circuit_source(
         emit_dc_op_recompute,
         plugin_format: format != OutputFormat::Code,
         pot_overrides: None,
-        switch_overrides: None,
+        // Baked into the build: the matrices are stamped and the DC operating
+        // point solved at the chosen position, so the generated state starts
+        // (and resets) settled there.
+        switch_overrides: if switch_overrides.is_empty() {
+            None
+        } else {
+            Some(switch_overrides.to_vec())
+        },
         resolve_taps: true,
         inject_runtime: true,
         disable_unit_variation: false,
@@ -410,6 +422,13 @@ pub(crate) fn compile_circuit_source(
         },
     )
     .map_err(|e| build_error_in(e, &netlist_str))?;
+
+    // `--switch` was baked into the build above; resolved again only to print
+    // the mapping the build applied.
+    if !switch_overrides.is_empty() {
+        resolve_switch_overrides(&netlist, switch_overrides)?;
+        build_printed.set(true);
+    }
 
     // A single output node makes a mono plugin, `--mono` or not, unless
     // `--stereo` asks for the template's other single-output layout: one
@@ -708,6 +727,10 @@ pub(crate) fn compile_circuit_source(
                         format!("Switch {} ({})", idx, sw.component_names.join("+"))
                     }),
                     num_positions: sw.positions.len(),
+                    // The baked position (a `--switch` override, else 0): the
+                    // generated state starts there, so the plugin parameter
+                    // must too, or its first block would flip the switch.
+                    default_position: sw.default_position,
                 })
                 .collect();
 

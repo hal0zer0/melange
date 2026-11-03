@@ -9,6 +9,18 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+### Added
+
+- **`compile --switch` and `dc-op --switch`.** The override `simulate` and
+  `analyze` take is on the build verbs too: the matrices are stamped and the
+  DC operating point is solved at the chosen position, the generated state
+  starts and resets there with nothing to settle, and a `--format plugin`
+  build's switch parameter defaults to that position (it defaulted to 0,
+  which would have flipped a state baked elsewhere on the first block).
+  `dc-op --switch` reports the operating point such a build embeds. A plugin
+  that must start in a non-default switch state no longer needs a silence
+  warmup for the bias network to arrive there.
+
 ### Fixed
 
 - **`simulate --switch` and `analyze --switch` start from the chosen

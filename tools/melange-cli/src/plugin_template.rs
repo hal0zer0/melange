@@ -85,6 +85,12 @@ pub struct SwitchParamInfo {
     pub name: String,
     /// Number of positions
     pub num_positions: usize,
+    /// The position the generated state starts at (the deck's position 0,
+    /// or a `compile --switch` override). The plugin parameter defaults to
+    /// it: the wrapper sets the switch whenever the parameter differs from
+    /// the state, so a default of 0 on a state baked at 1 would flip the
+    /// switch on the first block and re-settle the bias network.
+    pub default_position: usize,
 }
 
 /// x86_64 instruction-set baseline for a generated plugin project.
@@ -825,7 +831,7 @@ fn generate_switch_default(sw: &SwitchParamInfo) -> String {
     format!(
         r#"            switch_{idx}: IntParam::new(
                 "{name}",
-                0,
+                {default},
                 IntRange::Linear {{
                     min: 0,
                     max: {max},
@@ -834,6 +840,7 @@ fn generate_switch_default(sw: &SwitchParamInfo) -> String {
 "#,
         idx = sw.index,
         name = name,
+        default = sw.default_position.min(sw.num_positions.saturating_sub(1)) as i32,
         max = sw.num_positions as i32 - 1,
     )
 }
@@ -2106,6 +2113,22 @@ nih_export_vst3!(CircuitPlugin);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn switch_param_defaults_to_the_baked_position() {
+        // The generated state starts at the baked position; the plugin
+        // parameter must default to the same one.
+        let sw = |default_position: usize| SwitchParamInfo {
+            index: 0,
+            name: "Load".to_string(),
+            num_positions: 2,
+            default_position,
+        };
+        assert!(generate_switch_default(&sw(1)).contains("\"Load\",\n                1,"));
+        assert!(generate_switch_default(&sw(0)).contains("\"Load\",\n                0,"));
+        // Never above the last position, whatever the directive carries.
+        assert!(generate_switch_default(&sw(7)).contains("\"Load\",\n                1,"));
+    }
 
     // === Cargo.toml generation tests ===
 

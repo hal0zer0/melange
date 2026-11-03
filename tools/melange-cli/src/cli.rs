@@ -320,6 +320,15 @@ pub(crate) enum Commands {
         #[arg(long)]
         name: Option<String>,
 
+        /// Set switch position: "Label=pos", "Component=pos" or index=pos
+        /// (0-indexed). May be repeated. Baked into the build like
+        /// `simulate --switch`: the chosen position is the static configuration
+        /// the matrices are stamped and the DC operating point is solved at, so
+        /// the generated state starts and resets there with nothing to settle.
+        /// For `--format plugin` the switch parameter's default is that position.
+        #[arg(long = "switch", value_name = "NAME=POS")]
+        switch_overrides: Vec<String>,
+
         /// Ask for a mono (1-in/1-out) plugin. This changes nothing today: a
         /// plugin built from one output node is mono unless `--stereo` is
         /// given, and one built from two output nodes is stereo (one node per
@@ -977,6 +986,12 @@ pub(crate) enum Commands {
         /// `analyze`. May be repeated.
         #[arg(long = "pot", value_name = "NAME=VALUE")]
         pot_overrides: Vec<String>,
+
+        /// Set switch position: "Label=pos", "Component=pos" or index=pos,
+        /// as for `compile`. May be repeated. The operating point is solved at
+        /// that position: the vector a `compile --switch` build embeds.
+        #[arg(long = "switch", value_name = "NAME=POS")]
+        switch_overrides: Vec<String>,
 
         /// Report the operating point even when it did not converge (every
         /// build refuses that by default).
