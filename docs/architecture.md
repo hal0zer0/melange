@@ -36,10 +36,24 @@ The solver generates Rust code with:
 - Per-block matrix rebuild for time-varying elements (pots, switches)
 - Charge-form history update (`q_dot`, committed with `v_prev`)
 
-The generated code should be indistinguishable in performance from hand-written code.
+Its performance is measured per circuit, not assumed: the README's throughput table names the deck, the host and the date of each row and is re-measured at each release. No hand-written solver of the same circuit exists to compare it against.
 
 ### Boundary 5: Rust → Plugin (nih-plug)
 Handled by nih-plug for the plugin shell. `melange compile --format plugin` writes a complete nih-plug project around the generated solver: parameters for `.pot`/`.wiper`/`.switch` controls, optional oversampling, and input/output level parameters (see [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md)).
+
+## Vocabulary
+
+The terms the routing and integrator sections use, as the code means them:
+
+- **DK Schur** — Yeh's discrete K-method. `S = A⁻¹` is precomputed, `K = N_v·S·N_i`, and Newton iterates only the M nonlinear device dimensions: O(N²+M³) per sample. The default route (`crates/melange-solver/src/dk.rs`).
+- **Nodal route** — taken instead of DK when M ≥ 10, for more than one transformer group, when the whole-system operator is unstable or `K`/`S` ill-conditioned, or for a structure DK cannot stamp: a railed op-amp pinned and re-solved, a behavioral source, a saturating inductor, a self-starting oscillator. Every nodal build expands BJT internal nodes, and a trapezoidal nodal build carries the runtime backward-Euler latch. It has two sub-paths:
+- **Nodal Schur** — the same Schur reduction to M dimensions, built on the nodal route; the sub-path taken unless full LU is required or conditioning rules it out.
+- **Nodal full LU** — the sub-path that factors the whole N×N augmented system at every Newton iteration, O(N³): required for behavioral sources and saturating inductors, chosen on conditioning grounds for a degenerate or ill-conditioned `K`.
+- **Whole-system operator** — `S·((2/T)C − G)`, the trapezoidal step of the entire linear system. Its spectral radius (nodal above 1.002) decides only the route, never the integrator.
+- **Charge form** — the shipped trapezoidal integrator: `A = G + (2/T)C`, with history `(2/T)C·v_prev + q_dot`, where `q_dot = C·dv/dt` (the capacitor currents, `dΦ/dt` on inductor rows) is committed with `v_prev`. KCL holds at every committed sample, and the history carries no conductance, so a pot move is exact on the next sample.
+- **Ring predicate** — the compile-time test that promotes a build to backward Euler: the charge-form propagator linearised at the DC operating point has a growing pole that backward Euler removes, or a Nyquist-side pole still above −60 dB after 10 ms, excited by the input at or above −60 dB of the passband gain, that costs more than backward Euler's own in-band error (`crates/melange-solver/src/codegen/ring.rs`).
+
+The routing thresholds are tabulated in [limitations.md](limitations.md#solver-routing).
 
 ## Crate Architecture
 
@@ -90,7 +104,7 @@ pub trait NonlinearDevice<const N: usize> {
 - `KorenPentode { … }` — vacuum pentode / beam tetrode (N=3)
 - `Vca { vscale, thd, … }` — VCA (THAT 2180 style, N=2)
 - `CdsLdr { r_min, r_max, gamma, attack_tau, release_tau }` — photoresistor (N=1; placed in a netlist via the `O` element on the stateful-device codegen path)
-- `SimpleOpamp` (clamped linear gain) / `IdealOpamp` — library op-amp models. The solver does not use them: codegen stamps each op-amp itself as a VCCS into G (no NR dimension; rail handling per `--opamp-rail-mode`). `BoyleOpamp` is a doc-hidden placeholder parameter struct with no device implementation, used by nothing.
+- `SimpleOpamp` (clamped linear gain) / `IdealOpamp` — library op-amp models. The solver does not use them: codegen stamps each op-amp itself as a linear VCCS into G (no NR dimension), with its rails, slew clamp and rail mode handled per `--opamp-rail-mode`. No bandwidth pole is modelled.
 
 **SPICE Model Card Import:**
 - Parse `.model` statements from SPICE netlists
@@ -139,8 +153,8 @@ split by concern: `schur.rs`, `full_lu.rs` / `full_lu_newton.rs`, `substep.rs`,
 Depends on solver. Requires ngspice installed on the system.
 
 Transient comparison of a melange build against ngspice on the same deck.
-`melange validate` is its command-line front end; `docs/aidocs/SPICE_VALIDATION.md`
-is the protocol.
+`melange validate` is its command-line front end; [VALIDATION.md](VALIDATION.md)
+states what the comparison does and does not establish.
 
 - `validate_circuit` / `validate_circuit_with_options` — build the deck through
   `melange_solver::build::build` (the build `compile` ships), run the generated
@@ -181,11 +195,11 @@ The CLI lives in `tools/melange-cli/src/`: `cli.rs` (the clap definitions),
 
 ## The Generality vs. Performance Problem
 
-The central engineering challenge. A hand-written 8x8 DK solver (like OpenWurli's) fits entirely in CPU registers and runs at a few ns/sample. A generic solver with dynamic matrix sizes would require heap allocation and lose cache locality.
+The central engineering challenge. A generic solver with dynamic matrix sizes would require heap allocation and lose cache locality; a solver specialised to one circuit's sizes keeps its matrices in fixed-size arrays.
 
 **Solution: Compile-time specialization.**
 
-The codegen pipeline emits Rust source code with const-generic sizes. The generated code is compiled by rustc with full optimization — zero overhead vs. hand-written code.
+The codegen pipeline emits Rust source code with const-generic sizes, and rustc compiles it with full optimization. What that achieves is measured per circuit in the README's throughput table; no hand-written solver of the same circuit exists to set a baseline against.
 
 The workflow:
 ```
@@ -200,4 +214,4 @@ The generated `circuit.rs` contains:
 - `set_sample_rate()` for runtime matrix recomputation from G+C
 - `#[inline(always)]` on the hot path
 
-Performance (re-measured 2026-10-01 on an idle AMD Ryzen 9 7950X pinned to one CCD, single core, noiseless, `-C target-cpu=x86-64-v3`, via `tools/perf-harness/bench.sh`; host-dependent): light nonlinear circuits run into the hundreds of × realtime (a single 12AX7 stage ~150×), typical multi-device audio circuits ~20–45× (Wurlitzer preamp ~45×, a germanium diode network ~25×, a single-ended tube amp ~20×), and the heaviest validated circuits ~6.5–18× — a passive tube EQ (nodal Schur, N=52, M=8) at ~18×, a bus compressor at ~6.5×. The triode rows carry the cost of the Dempwolf & Zölzer grid-current law (`30915fb`); `docs/limitations.md` has the figures.
+Throughput is measured per circuit with `tools/perf-harness/bench.sh` and published in the README's throughput table, which names the deck, the host and the date of every row and is re-measured at each release. A ×-realtime figure without an attributed circuit and a named host is unverified.

@@ -462,7 +462,7 @@ P2 plate2 grid2 cath2 scr2 cath2 EF86
   netlist as a resistor in series with the grid.
   NOTE: `IG_MAX` / `VGK_ONSET` are pentode-only now — the pentode control
   grid keeps the Leach law, while a triode's `IG_MAX` / `VGK_ONSET` are
-  RETIRED and refused. See `docs/aidocs/DEVICE_MODELS.md`.
+  RETIRED and refused (the triode section below prints the conversion).
 - `LAMBDA` is a triode key. On a pentode card a nonzero value is refused: the
   pentode plate law has no lambda term (its Vpk dependence is αs, A, β).
 - **αs must be strictly positive** — Derk with αs=0 degenerates to
@@ -549,7 +549,7 @@ R_bias in_pos 0 10k
 
 **Notes:**
 - Linear device (does not add nonlinear dimensions to the solver)
-- Modeled as Boyle VCCS macromodel with output resistance
+- Modeled as a linear VCCS with output resistance, rails and a slew clamp; no bandwidth pole
 - Input impedance is infinite (no input bias current)
 
 ---
@@ -640,7 +640,7 @@ The `.model` statement defines the parameters for semiconductor devices. Paramet
 | `PMOS` | MOSFET | P-channel MOSFET |
 | `TRIODE` | Tube (triode) | Vacuum tube triode (Koren model) |
 | `VP` | Tube (pentode) | Pentode / beam tetrode (Reefman Derk §4.4) |
-| `OA` | Op-Amp | Operational amplifier (Boyle VCCS) |
+| `OA` | Op-Amp | Operational amplifier (linear VCCS with rails and a slew clamp; no bandwidth pole) |
 | `VCA` | VCA | Voltage-controlled amplifier (THAT 2180) |
 
 ### Diode Parameters (Type: D)
@@ -739,7 +739,7 @@ Level 3 is Shichman–Hodges with a thermal tail below pinch-off, symmetric in s
 |-----------|---------|-------------|
 | `NSLOPE` | 1 | Subthreshold slope factor, at least 1: the current below pinch-off e-folds every `NSLOPE·Vt` of gate voltage (60 mV per decade at 1). This is the slope factor itself, not BSIM's `NFACTOR` |
 
-`NSLOPE` is refused on a level-1 or level-2 card. A level-3 device has no ngspice law: `melange validate` gives ngspice a subcircuit of B-sources transcribing melange's formulas, so the comparison checks the solver, not the law (see `docs/aidocs/DEVICE_MODELS.md`).
+`NSLOPE` is refused on a level-1 or level-2 card. A level-3 device has no ngspice law: `melange validate` gives ngspice a subcircuit of B-sources transcribing melange's formulas, so the comparison checks the solver, not the law.
 
 **Example:**
 ```spice
@@ -813,7 +813,7 @@ falls outside the tube type's published manufacturer limit.
 > (11), so `GG = IG_MAX / VGK_ONSET^1.5`, `XI = 1.5`, and a large `CG`
 > (e.g. `1e3`) reproduces the old curve exactly if you want it deliberately.
 > They remain valid on a `PENTODE`/`VP` card, whose control grid still carries
-> the Leach law — see `docs/aidocs/DEVICE_MODELS.md`.
+> the Leach law.
 
 > **Resolution order and a silent-default caveat.** For each parameter the
 > resolver takes, in order: (1) an explicit value on the `.model` card,
@@ -855,7 +855,7 @@ falls outside the tube type's published manufacturer limit.
 | `EN_FC` | — | Voltage-noise 1/f corner. **Accepted, not modelled** (compile notice): op-amp noise is white |
 | `IN_FC` | — | Current-noise 1/f corner. **Accepted, not modelled** (compile notice): op-amp noise is white |
 
-Linear device — does not add nonlinear dimensions to the solver. Modeled as Boyle VCCS macromodel with output resistance. Input impedance is infinite unless you set `RIN`.
+Linear device — does not add nonlinear dimensions to the solver. Modeled as a linear VCCS with output resistance, rails and a slew clamp; no bandwidth pole. Input impedance is infinite unless you set `RIN`.
 
 An unrecognized parameter on an `OA` card is a **hard error** raised during code generation, as for every other device class. The error names the card, its device class and its netlist line — `Invalid .model card 'TL072' at line 8 of the netlist`, caused by `.model TL072 (op-amp card): unknown parameter 'VOHDROP'. Accepted for this device: AOL, ROUT, …` — so `compile`, `simulate` and `analyze` all refuse the deck. `melange nodes` stops short of code generation and warns instead (`.model TL072: unrecognized parameter 'VOHDROP' (ignored)`).
 
@@ -876,7 +876,7 @@ Consequences worth knowing before you write your first card:
 4. **Setting `GBW` alone also sets a ±13 V limit**, because a finite `GBW` implies you meant a real part. That is a deliberate default, but it is a side effect of a parameter about *bandwidth* — and it is `GBW`'s only effect, since no bandwidth pole is modelled.
 5. **An empty swing is a hard error, not a warning.** `OA(VCC=-9 VEE=9)` fails at build time rather than reaching `clamp(min, max)` with `min > max` on the audio thread.
 
-Rail *behavior* — how the clamp interacts with Newton-Raphson — is selected by `--opamp-rail-mode {auto|none|hard|active-set|active-set-be|boyle-diodes}`, not by the model card. See [OPAMP_RAIL_MODES.md](aidocs/OPAMP_RAIL_MODES.md).
+Rail *behavior* — how the clamp interacts with Newton-Raphson — is selected by `--opamp-rail-mode {auto|none|hard|active-set|active-set-be|boyle-diodes}`, not by the model card. What `auto` selects, and which modes stay opt-in, is in [limitations.md](limitations.md#op-amp).
 
 **Examples:**
 ```spice
@@ -1337,8 +1337,6 @@ impl CircuitState {
 - No nih-plug knob is emitted — the plugin is the driver.
 - Setter clamps to `[RUNTIME_R_<FIELD>_MIN, RUNTIME_R_<FIELD>_MAX]`, sets `matrices_dirty = true`, returns. Rebuild of A/S/K is deferred to the next `process_sample`.
 - `<field>()` returns the current resistance; `RUNTIME_R_<FIELD>_NOMINAL` exposes the netlist value for envelope-scale math.
-
-See [DYNAMIC_PARAMS.md](aidocs/DYNAMIC_PARAMS.md#runtime-v--host-driven-voltage-source) for the full reference, including the `.pot R` ↔ `.runtime R` contrast table.
 
 ---
 

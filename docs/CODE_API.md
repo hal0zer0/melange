@@ -125,7 +125,7 @@ was identical, on the audio thread.
 
 Writing them is not a control path. The trapezoidal history is
 `alpha·C·v_prev + q_dot` (the charge form, see
-[COMPANION_MODELS.md](aidocs/COMPANION_MODELS.md)), so writing `v_prev` alone
+[architecture.md](architecture.md#vocabulary)), so writing `v_prev` alone
 barely moves the next sample on capacitor-free and small-capacitance nodes and
 leaves the two inconsistent. If you must set state by hand, set `q_dot`
 consistently with it (from KCL), or use `reset()` or
@@ -384,9 +384,11 @@ jump of the pots — off the audio thread.
   may run per sample on a linear DK build (rank-1 update). Cheap call, the
   work lands in the next sample.
 - `CircuitState::default()`, `set_sample_rate`, warmup loops — initialization
-  only. `set_sample_rate` cannot change the solver route or oversampling, which
-  are compile-time structural: to serve a different host rate optimally,
-  compile for it.
+  only. `set_sample_rate` rebuilds the rate-dependent matrices and the plugin
+  runs correctly at the new rate, but it cannot change the solver route, the
+  integrator verdict (trapezoidal or backward Euler, judged at the compile
+  rate) or the oversampling factor, which are compile-time structural: to
+  serve a different host rate optimally, compile for it.
 - `CircuitState` is `Send` but not shared: one instance per voice or channel.
 
 ## License

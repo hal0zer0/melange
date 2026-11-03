@@ -7,10 +7,6 @@ yet; `[EXPERIMENTAL]` marks a surface whose syntax may still change.
 The bias here is deliberate: over-disclose rather than oversell. A limitation
 stays on this page until it can be *shown* not to hold.
 
-`docs/aidocs/STATUS.md` is the maintainer-side feature inventory and is kept
-current release by release; where the two disagree it wins, except for the
-performance figures below, which were last re-measured here.
-
 ## SPICE Compatibility
 
 ### Supported Element Types
@@ -30,7 +26,7 @@ Melange supports the following SPICE elements:
 | M | MOSFET (NM/PM) | Level 1 SPICE with body effect (GAMMA/PHI) |
 | T | Triode tube | Koren plate current + Dempwolf & Zölzer grid current |
 | P | Pentode/beam tetrode | 5 equation families, 29 catalog models |
-| U | Op-amp | Boyle VCCS macromodel (AOL, ROUT, VCC/VEE rails, SR); `GBW` is not modelled as a pole |
+| U | Op-amp | Linear VCCS with rails, slew clamp and the rail modes (AOL, ROUT, VCC/VEE, SR); `GBW` is not modelled as a pole |
 | Y | VCA | THAT 2180-style exponential gain |
 | E | VCVS | Voltage-controlled voltage source |
 | G | VCCS | Voltage-controlled current source |
@@ -61,7 +57,7 @@ elements are never silently dropped.
 and `.param`/`.runtime` parameters compile and are oracle-validated
 (`behavioral_source_tests.rs`). Not yet supported: branch-current references in
 expressions, and the DK path -- a circuit containing a B-source routes nodal, or
-errors loudly if it cannot. See `docs/aidocs/BEHAVIORAL_SOURCES.md`.
+errors loudly if it cannot.
 
 Two structural consequences a deck author should expect, both visible in the
 generated `// provenance:` header:
@@ -188,8 +184,7 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
   second tube draw on that page (its plate side differs from the
   single-stage blocks' at matched operating points; no tube or circuit
   mechanism closes the 0.2 V), consistent with the population spread, not
-  evidence for it. Neither the law nor the default changed. Detail in
-  `docs/aidocs/STATUS.md`.
+  evidence for it. Neither the law nor the default changed.
 
   **What has not:** the tail slope. The 92 mV e-fold is measured on an EB91
   diode and transferred to the ECC83 by argument; no held ECC83 data reaches
@@ -207,8 +202,7 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
   one stage with a single tone, a broad-knee law pinned at the same onset
   differs from the shipped one by -52 / -41 / -37 dB at 1 / 2 / 4 V peak
   drive through 47 kOhm (THD within 0.7 % absolute). No published form for
-  the negative-grid knee exists to build from; the table, the bound and the
-  reopen conditions are in `docs/aidocs/STATUS.md`.
+  the negative-grid knee exists to build from.
 
   **Consequence:** a stage driven from a high source impedance shows
   grid-current loading where a median vintage ECC83 would, which can be
@@ -242,19 +236,18 @@ Separately, the authentic-noise feature carries a runtime-settable noise tempera
 - 6386/6BA6/6BC8 datasheet fits for variable-mu compressors deferred (phase 1d)
 
 ### Op-amp
-- Boyle VCCS macromodel **without a bandwidth pole**: the gain is `AOL` at every frequency. `GBW` is parsed and prints a notice; its only effect is the default ±13 V rails when `VCC`/`VEE`/`VSAT` are absent. A circuit whose response depends on the op-amp's open-loop rolloff (high closed-loop gain near the top of the audio band, or a low-GBW part) will read flat where the hardware rolls off.
+- A linear VCCS with rails, a slew clamp and the rail modes, **without a bandwidth pole**: the gain is `AOL` at every frequency. `GBW` is parsed and prints a notice; its only effect is the default ±13 V rails when `VCC`/`VEE`/`VSAT` are absent. A circuit whose response depends on the op-amp's open-loop rolloff (high closed-loop gain near the top of the audio band, or a low-GBW part) will read flat where the hardware rolls off.
 - VCC/VEE asymmetric supply rail clamping
 - Slew-rate limiting via `SR=` in V/us (per-sample clamp, all 3 codegen paths)
 - Rail mode selection: `--opamp-rail-mode {auto,none,hard,active-set,active-set-be,boyle-diodes}`
 - `auto` resolves only to `none` / `hard` / `active-set`: `active-set` for any
   op-amp whose output is capacitor-coupled downstream, which pins the railed
   output and re-solves the circuit on the build's own integrator (a pin or
-  release takes no backward-Euler sample; see `docs/aidocs/OPAMP_RAIL_MODES.md`).
+  release takes no backward-Euler sample).
   It **never** selects
   `active-set-be` (backward Euler on every rail-engaged sample: 2-4x the
   output-peak error on a railing overdrive) or `boyle-diodes` (validated for
-  light clip, diverges at heavy clip); both stay opt-in (see
-  `docs/aidocs/OPAMP_RAIL_MODES.md`)
+  light clip, diverges at heavy clip); both stay opt-in
 - A railing op-amp switches rail to rail within a sample. Without oversampling,
   top-octave drive aliases: a 16 kHz tone into a single-supply overdrive at
   48 kHz, 1x, puts 0.44 V at 66 Hz on the output, gone at 4x (0.5 mV).
@@ -424,8 +417,7 @@ Compare an oscillator's period at two budgets before trusting it.
 ### Conductance swaps (`.switch`, `.pot`, `.runtime R`)
 
 Changing a conductance mid-run changes `A = G + (2/T)C` only. The generated
-integrator's history is `(2/T)C·v_prev + q_dot` (the charge form, see
-[COMPANION_MODELS.md](aidocs/COMPANION_MODELS.md)), which carries no
+integrator's history is `(2/T)C·v_prev + q_dot` (the charge form), which carries no
 conductance, so a pot move or a resistor-only switch flip is exact on the next
 sample: a resistive divider node obeys `node − ratio·other` to below 1e-9 at
 and after the flip. A switch that swaps a capacitor or an inductor solves its
@@ -481,7 +473,7 @@ runs at a converged 6.667 ms period with the collectors inside 0–9 V.
 
 Circuits whose devices carry series resistance and Early effect under moderate
 bias (a PNP divider astable with RB/RC/RE/VAF, for one) cross their edges and
-oscillate correctly. Tracked as (iv) in `docs/aidocs/STATUS.md`.
+oscillate correctly.
 
 ### Device Linearization
 - `.linearize Q9` or `.linearize T1` removes a BJT or **triode** from the NR
@@ -561,7 +553,7 @@ Three mechanisms reduce M, and none is on by default:
 
 Independent voltage sources (V elements) use **augmented MNA**: each source adds a branch-current unknown plus a KVL constraint row (`B^T · x = v_dc`). There is no high-conductance Norton stamp. See `VoltageSourceInfo` in `crates/melange-solver/src/mna/sources.rs` and `solve_dc_op` in `crates/melange-solver/src/dc_op.rs`.
 
-The **audio input** is a separate mechanism and does not go through that path: it is a Thevenin source stamped as a conductance `G_in` at the input node (default 1 Ω, or the `.input_impedance` directive / `--input-resistance` override), entering the RHS once per sample as `V_in(n+1) · G_in`; the capacitor history is carried by `q_dot` (see [COMPANION_MODELS.md](aidocs/COMPANION_MODELS.md)).
+The **audio input** is a separate mechanism and does not go through that path: it is a Thevenin source stamped as a conductance `G_in` at the input node (default 1 Ω, or the `.input_impedance` directive / `--input-resistance` override), entering the RHS once per sample as `V_in(n+1) · G_in`; the capacitor history is carried by `q_dot` (the charge form, see [architecture.md](architecture.md#vocabulary)).
 
 ### Solver Routing
 
@@ -638,28 +630,27 @@ Matrix recomputation is O(N^3) and occurs at:
 There is no current benchmark for pot-rebuild latency. If you need this
 figure, measure it on your own target with `tools/perf-harness/bench.sh`.
 
-`set_sample_rate()` cannot change the *route*. Stage-1/stage-2 routing and
-sub-sample-fire activation are compile-time structural decisions, so a plugin
-that must run at several host rates has to be compiled per rate.
+**Sample rate.** `set_sample_rate()` rebuilds every rate-dependent matrix from
+the stored G and C at the new rate and re-seeds the filter state that was built
+at the old one (oversampler, DC blocker); pot and switch values are kept. The
+plugin then runs correctly at the new host rate. Three things it cannot change,
+because they are decided at compile time against the compile rate and are not
+re-evaluated: the solver route (both routing stages, and sub-sample-fire
+activation), the integrator verdict (the ring predicate judges trapezoidal
+against backward Euler at the compiled rate; a host rate above it makes stiff
+rings decay faster, so the verdict is conservative there, and below it slightly
+optimistic), and the oversampling factor (unless the build declares a runtime
+set, `.oversampling N allow=...`, which switches between factors it built). A
+48 kHz build running at 96 kHz is correct, with the integrator chosen for
+48 kHz. Compile per host rate for the optimal build.
 
 ### Performance Benchmarks
 
-Measured 2026-10-01 on an idle AMD Ryzen 9 7950X pinned to one CCD, single
-core, noiseless, `-C target-cpu=x86-64-v3` (best of 7 × 2M samples via
-`tools/perf-harness/bench.sh`); throughput is host-dependent.
-
-- Light nonlinear circuits: 12AX7 gain stage ~150× realtime
-- Germanium diode network (3 RC sections, an antiparallel Ge pair at each) ~24.6× realtime
-- Typical multi-device circuits: Wurlitzer preamp ~45×, single-ended tube amp ~20× realtime
-- Heaviest measured: a passive tube EQ (nodal Schur, N=52, M=8) ~18.1×, a bus compressor (12 op-amps + 2 VCAs) ~6.5× realtime
-
-The triode rows include the cost of the Dempwolf & Zölzer grid-current law,
-which evaluates a softplus on the grid dimension at every Newton iteration
-(14–29 % on these three rows, measured with and without it on the same host).
-
-Every figure above names the circuit it came from, deliberately: a row nobody
-can map to a circuit is a row nobody can check. Treat any ×-realtime number
-without an attributed circuit and a named host as unverified.
+The measured throughput figures live in the README's throughput table, which
+names the deck, the host and the date of every row and is re-measured at each
+release. Every figure there names the circuit it came from, deliberately: a row
+nobody can map to a circuit is a row nobody can check. Treat any ×-realtime
+number without an attributed circuit and a named host as unverified.
 
 ## Circuit Noise [PARTIAL]
 
@@ -670,7 +661,8 @@ Enable with `--noise {off|thermal|shot|full}` (`--noise-seed <u64>` for
 determinism). Runtime controls: `set_noise_enabled`, `set_noise_gain`,
 `set_thermal_gain` / `set_shot_gain` / `set_flicker_gain`, `set_temperature_k`,
 `set_seed`. With `--noise off` (default) the generated code is byte-identical to
-a noiseless build. Full reference: `docs/aidocs/NOISE.md`.
+a noiseless build. The [Circuit Noise Guide](NOISE_GUIDE.md) covers the API,
+level calibration and per-device coverage.
 
 Shipped noise sources:
 - **Thermal (Johnson-Nyquist)** on every fixed and dynamic (`.pot`/`.wiper`/`.runtime R`/`.switch`) resistor
@@ -781,8 +773,7 @@ Noise limitations:
   inside the number — it ships, so it is reported rather than compensated away.
   Measured on `overdrive_pedal_native_u` (48 kHz, 0.3 V, 500 ms): 1-rho 1.00e-6 at 1x,
   5.64e-6 at 2x, 6.25e-6 at 4x. See [OVERSAMPLING.md](OVERSAMPLING.md) for
-  what that means in practice, and `docs/aidocs/OVERSAMPLING.md` for the filter
-  internals.
+  what that means in practice.
 - Resistor `KF`/`AF` (flicker noise) are stripped from the ngspice reference,
   which rejects them, with a notice; validate renders noise-free on both sides,
   so the comparison is unchanged. No deck edit is needed
@@ -790,7 +781,7 @@ Noise limitations:
   side for a validate run, which names the disabled directives and the
   unexercised seed on its PASSED/FAILED line. Nominal is compared against
   nominal; the draw itself is covered by unit tests, not by ngspice. No deck
-  edit is needed. See `docs/aidocs/UNIT_VARIATION.md`
+  edit is needed
 - The parameter check is one-sided. `validate` refuses a deck when ngspice
   reports a `.model` parameter it ignores, but a parameter **melange** ignores
   (it warns at build time, e.g. BJT `TR`, reverse transit time) does not stop
@@ -855,7 +846,7 @@ These are intentional trade-offs, not bugs:
    ring predicate fires: the trapezoidal charge propagator, linearised at the DC
    operating point, has a growing pole that backward Euler removes, or a lasting,
    loud Nyquist-side ring that costs more than backward Euler's own in-band
-   error; see `docs/aidocs/RING_PREDICATE.md`), `behavioral` (forced by a `B`
+   error; see `crates/melange-solver/src/codegen/ring.rs`), `behavioral` (forced by a `B`
    source), or `trap` for trapezoidal. `--force-trap` and `.integrator trap` opt out of auto-promotion.
    Nodal trapezoidal builds additionally carry a **runtime BE-latch**: if the
    solver falls into a self-sustaining Nyquist limit cycle at a large-signal
@@ -870,9 +861,3 @@ These are intentional trade-offs, not bugs:
    `melange import` writes a melange `.cir` from a KiCad netlist or schematic,
    and `melange validate` rewrites a deck for ngspice (VIN strip, PWL Thevenin
    inject, `.OPTIONS INTERP`, pentode model translation).
-
----
-
-*Where this file and `docs/aidocs/STATUS.md` disagree, STATUS.md is the
-maintained reference -- except for the performance figures, which were last
-re-measured here.*

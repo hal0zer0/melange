@@ -111,7 +111,7 @@ safety envelope. Examples: `--solver`, `--backward-euler`, `--oversampling`,
 `--opamp-rail-mode`, `--tube-grid-fa`, `--noise`. Auto-detection is preferred
 wherever a property can be measured safely (e.g. the ring predicate promotes a
 build to backward Euler when the trapezoidal rule would leave a lasting, audible
-Nyquist-side ring; see `docs/aidocs/RING_PREDICATE.md`); a manual flag is the
+Nyquist-side ring; see `crates/melange-solver/src/codegen/ring.rs`); a manual flag is the
 fallback when auto-detection cannot be made sound.
 
 **Consequences.** No circuit is silently sacrificed to another, and every mode is
@@ -260,8 +260,8 @@ predicate examines the trapezoidal charge propagator linearised at the DC
 operating point and promotes when it has a growing pole that backward Euler
 removes, or a Nyquist-side pole that is still above −60 dB after 10 ms, is
 excited at or above −60 dB of the passband gain, and costs more than backward
-Euler's own in-band error (`docs/aidocs/RING_PREDICATE.md`,
-`crates/melange-solver/src/codegen/ring.rs`). Signal-dependent rings are left
+Euler's own in-band error (`crates/melange-solver/src/codegen/ring.rs`, whose
+header states the predicate). Signal-dependent rings are left
 to the runtime BE-latch on nodal builds.
 
 **Consequences.** The common case gets the accurate integrator; the stiff,

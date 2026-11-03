@@ -300,7 +300,7 @@ After `melange compile --format plugin`:
 
 Melange uses a dialect of SPICE — standard SPICE syntax for components and models, plus audio-specific extensions (`.pot`, `.switch`, `.input_impedance`). See [spice-grammar.md](spice-grammar.md) for the full reference.
 
-Supported devices: resistors, capacitors, inductors (including saturating with `ISAT=`), voltage/current sources, diodes (including Zener with BV/IBV), BJTs (Ebers-Moll and Gummel-Poon), JFETs (N/P channel), MOSFETs (Level 1, N/P with body effect), triode tubes (Koren model), pentode/beam tetrode tubes (5 equation families, 29 catalog models), op-amps (Boyle VCCS macromodel with rail clamping and slew rate; no bandwidth pole), VCAs (THAT 2180-style), coupled inductors/transformers, VCVS, VCCS, subcircuits.
+Supported devices: resistors, capacitors, inductors (including saturating with `ISAT=`), voltage/current sources, diodes (including Zener with BV/IBV), BJTs (Ebers-Moll and Gummel-Poon), JFETs (N/P channel), MOSFETs (Level 1, N/P with body effect), triode tubes (Koren model), pentode/beam tetrode tubes (5 equation families, 29 catalog models), op-amps (linear VCCS with rails, slew clamp and the rail modes; no bandwidth pole), VCAs (THAT 2180-style), coupled inductors/transformers, VCVS, VCCS, subcircuits.
 
 ## Troubleshooting
 

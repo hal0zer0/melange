@@ -42,9 +42,11 @@ no external oracle at all.
 Without Tiers 1 and 2, device correctness would ground out in ngspice waveform
 correlation — a circular check (a shared model error would pass). Tiers 1 and 2
 break that circularity: their references are mathematics and published model
-equations, not another simulator. The current cross-simulator results are in
-`docs/aidocs/STATUS.md` ("SPICE Validation Results" and "Validated Circuits");
-the method is in `docs/aidocs/SPICE_VALIDATION.md`.
+equations, not another simulator. The cross-simulator gates are the per-circuit
+tolerances, with their measured margins, in
+`crates/melange-validate/tests/spice_validation.rs`; the README's validation
+table reports three of those circuits, and `melange validate` runs the same
+comparison on any deck.
 
 ---
 

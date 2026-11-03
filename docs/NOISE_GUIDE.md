@@ -10,10 +10,6 @@ they do.
 It is off by default. A build compiled with `--noise off` (the default) is
 byte-for-byte identical to a build with no noise support at all.
 
-For the full physics, calibration derivations, and per-phase implementation
-detail, see [`docs/aidocs/NOISE.md`](aidocs/NOISE.md). This guide is the
-practical layer on top of it.
-
 ## Why this is not filtered hiss
 
 Almost every "analog noise" plugin on the market does one of two things: play
@@ -101,7 +97,7 @@ partition noise are opt-in per device via `.model` parameters.
 | JFET / MOSFET | — | drain-source | opt-in (`KF`) | — | MOS gate shot ≈ 0; JFET gate leakage nonzero |
 | Triode | — | plate, space-charge smoothed | opt-in (`KF`) | — | `SHOT_GAMMA2=` overrides the smoothing factor |
 | Pentode | — | (replaced by partition) | opt-in (`KF`) | yes | `PARTITION_F=` scales the partition variance |
-| Op-amp | — | — | — | — | input-referred `EN`/`IN` only (Boyle macromodel) |
+| Op-amp | — | — | — | — | input-referred `EN`/`IN` only (the op-amp is a linear VCCS) |
 | VCA | — | — | — | — | **no noise emitted** |
 
 Defaults: junction `KF=0` (no flicker) with `AF=1.0`; resistor `KF=0` with
@@ -120,8 +116,7 @@ On the **DK path** (K_eff absorption, no internal nodes) there is no node pair
 to stamp across, so the source is honestly skipped and codegen logs a
 `log::warn!` naming the device. If you have a multi-BJT circuit where rbb′ hiss
 matters (transformer-coupled and Wurlitzer-class output stages when they route DK), compile it with
-`--solver nodal` to include that contribution. See
-[`docs/aidocs/NOISE.md`](aidocs/NOISE.md) "BJT parasitic-R thermal noise".
+`--solver nodal` to include that contribution.
 
 ## Opting in to flicker, op-amp, and pentode noise
 
@@ -308,7 +303,7 @@ Only the first needs an edit. Strip resistor `KF`/`AF` before running the
 comparison. The unit-variation directives are handled for you: `melange
 validate` disables them on melange's side, compares nominal against nominal,
 and names the disabled directives and the unexercised seed on its
-PASSED/FAILED line (`docs/aidocs/UNIT_VARIATION.md`).
+PASSED/FAILED line.
 
 Junction `KF`/`AF` on `.model` cards *are* standard ngspice
 parameters and do not break parity, though ngspice's `.NOISE` analysis is a
@@ -402,18 +397,11 @@ The Zener bench is kept as a regression test. You do not need to do anything —
 it is automatic. It is documented here because it is a good illustration of
 *why* melange injects noise into the solver RHS rather than filtering it
 afterward: the noise inherits both the circuit's correct behavior and the
-integrator's numerical properties, and both have to be handled honestly. Full
-detail in [`docs/aidocs/NOISE.md`](aidocs/NOISE.md) under "Constant derivation"
-and "Whole-system Nyquist history".
+integrator's numerical properties, and both have to be handled honestly.
 
 ## Where to go deeper
 
-- [`docs/aidocs/NOISE.md`](aidocs/NOISE.md) — the authoritative reference:
-  every formula, the calibration derivations, the Kellett pink filter,
-  per-phase validation, and the failure-mode table.
 - [Netlist Writing Guide](NETLIST_GUIDE.md) — the `.model` and per-element
   syntax the noise opt-in parameters attach to.
 - [Plugin Development Guide](PLUGIN_GUIDE.md) — where the runtime API and
   `OUTPUT_TRIM`-style level mapping live in a generated plugin.
-- [`docs/aidocs/STATUS.md`](aidocs/STATUS.md) — the feature inventory, including
-  the current per-phase noise status.

@@ -210,9 +210,10 @@ term that is merely small at one rate does not split a set.) Build those once
 per factor.
 
 ⚠️ **Without `allow=`, the factor is compile-time structural.** `set_sample_rate()`
-cannot change it, and neither can a host — solver routing and sub-sample-fire
-activation are decided at codegen against the internal rate. A plugin that must
-run at several host rates needs compiling per rate.
+cannot change it, and neither can a host — solver routing, the integrator
+verdict and sub-sample-fire activation are decided at codegen against the
+internal rate. A plugin that must run at several host rates needs compiling per
+rate for the optimal build.
 
 ⚠️ `melange validate` does **not** read `.oversampling` from the deck. Pass
 `--oversampling` explicitly or you will validate a different build from the one
@@ -221,6 +222,5 @@ you ship.
 ## Implementation
 
 Polyphase half-band IIR (allpass), after Olli Niemitalo; 4× is a cascade of two
-2× stages. Coefficients, the polyphase decomposition, the generated processing
-flow and the filter's own test corpus are documented for maintainers in
-[`aidocs/OVERSAMPLING.md`](aidocs/OVERSAMPLING.md).
+2× stages. The filter, its coefficients, the polyphase decomposition and its
+tests are in `crates/melange-primitives/src/oversampling.rs`.

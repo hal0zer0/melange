@@ -54,6 +54,9 @@ Contains the nih-plug boilerplate that wraps `circuit.rs`:
 - **Plugin trait impl** — initialize, reset, process, audio layout
 - **nih_export_clap! / nih_export_vst3!** — plugin format exports
 
+The template emits no editor: a host shows the plugin in its generic parameter
+view. A GUI (nih-plug supports VIZIA and iced) is yours to add in `lib.rs`.
+
 ## Parameter Types
 
 The generated plugin can have up to six kinds of parameters:
@@ -82,9 +85,13 @@ Each `.pot` directive in the netlist becomes a `FloatParam` with:
   means *less* of the effect in your circuit (a gain-setting resistor, for
   instance), the knob reads backwards. Flip it in `process()` with
   `let t = 1.0 - t;` — the generated code marks the spot.
-- Taper: linear, which is circuit-true but feels wrong for most Volume/Tone
-  pots (real ones are usually log/audio taper). Reshape `t` at the same spot,
-  e.g. `let t = t * t;`.
+- Taper: linear, deliberately. The knob maps straight onto the circuit-true
+  resistance, which is melange's job; the feel of the knob is the plugin's.
+  A linear knob is not an audio taper, so most Volume/Tone pots (log taper
+  in hardware) do little over the first part of their travel. The generated
+  `lib.rs` marks the one line where `t` is reshaped before it is scaled,
+  e.g. `let t = t * t;` for a rough audio taper — change it there and leave
+  the circuit alone.
 - Default: the explicit `.pot` default if given, otherwise the resistor's
   netlist value.
 - Smoothing: 10ms linear ramp
@@ -291,14 +298,22 @@ const CLAP_ID: &'static str = "com.melange.my-circuit";
 
 ## Sample Rate Changes
 
-When the DAW changes sample rate, the plugin calls `state.set_sample_rate(new_rate)`:
+When the DAW changes sample rate, the plugin calls `state.set_sample_rate(new_rate)`
+from the generated `initialize()` method, off the audio thread.
 
-- All matrices are recomputed from G and C at the new rate
-- Transient state is cleared (brief settling period ~200ms from DC block)
-- Pot/switch state is preserved
-- Takes ~1ms (matrix math, not allocation)
-
-This happens automatically in the generated `initialize()` method.
+`set_sample_rate()` rebuilds every rate-dependent matrix from the stored G and C
+at the new rate and re-seeds the filter state that was built at the old one
+(oversampler, DC blocker); pot and switch values are kept. The plugin then runs
+correctly at the new host rate. Three things it cannot change, because they are
+decided at compile time against the compile rate and are not re-evaluated: the
+solver route (both routing stages, and sub-sample-fire activation), the
+integrator verdict (the ring predicate judges trapezoidal against backward Euler
+at the compiled rate; a host rate above it makes stiff rings decay faster, so
+the verdict is conservative there, and below it slightly optimistic), and the
+oversampling factor (unless the build declares a runtime set, `.oversampling N
+allow=...`, which switches between factors it built). A 48 kHz build running at
+96 kHz is correct, with the integrator chosen for 48 kHz. Compile per host rate
+for the optimal build.
 
 ## Oversampling
 
@@ -313,7 +328,19 @@ Oversampling helps with:
 - Reducing aliasing from nonlinear devices (diodes, tubes, transistors)
 - Improving NR convergence stability (smaller timesteps)
 
-Cost: CPU scales roughly linearly with the oversampling factor.
+Cost: CPU scales roughly linearly with the oversampling factor, and the
+half-band filters add latency, measured as the extra delay over a 1× build of
+the same circuit, in host samples:
+
+| Factor | Added latency | At 48 kHz |
+|---|---|---|
+| 2× | 2.65 samples | 55 µs |
+| 4× | 3.47 samples | 72 µs |
+
+The generated plugin reports this to the host for delay compensation, rounded
+to whole samples: 3 at both 2× and 4×. With `--wet-dry-mix` the dry path is
+delayed by the same 3 samples. [OVERSAMPLING.md](OVERSAMPLING.md) has the
+measurement and the phase cost that comes with it.
 
 **A runtime set becomes a parameter.** When the circuit was built with a
 runtime oversampling set (`--oversampling-set 1,2,4`, or the deck's
@@ -371,6 +398,30 @@ The generated code includes NaN guards. If `process_sample()` produces NaN or in
 
 This prevents a single bad sample from permanently corrupting the plugin state. If you see frequent NaN resets, the circuit likely has a biasing or convergence issue.
 
+## What the plugin does when a sample does not solve
+
+A generated plugin does not crash and does not pass NaN to the host. The
+wrapper's output guard replaces a non-finite output sample with 0.0, and the
+generated code resets its state to the DC operating point on the next sample
+and counts it in `diag_nan_reset_count` (above).
+
+A sample that no Newton path solves is a different case. `process_sample`
+always returns a number: on such a sample the generated code commits the
+previous state (or, on a DK build, the unconverged iterate), which is bounded
+and smooth, so the output looks and sounds healthy while it is not a solution
+of the circuit. The CLI refuses a `simulate`, `validate` or `analyze` result
+that contains one; a plugin has no such gate. The one counter that sees it is
+`diag_unsolved_sample_count`, present on every generated build, cleared by
+`reset()`, free to read on the audio thread. The bare template does not read
+it — a product wrapper should: poll it once per block and surface whether it
+is zero, which is the whole check. [Using the Generated DSP
+Directly](CODE_API.md#did-the-solver-actually-solve-it) explains the counter
+and its per-mechanism breakdown.
+
+A plugin that takes the host down with "Illegal instruction" on another
+machine is not a solver failure; it is the CPU baseline, covered under
+[CPU baseline](#cpu-baseline--read-this-before-you-distribute) below.
+
 ## Diagnostics
 
 `CircuitState` includes diagnostic fields you can read for debugging:
@@ -381,6 +432,7 @@ This prevents a single bad sample from permanently corrupting the plugin state. 
 | `diag_clamp_count` | Times output exceeded the clamp range |
 | `diag_nr_max_iter_count` | Times Newton-Raphson hit max iterations |
 | `diag_nan_reset_count` | Times state was reset due to NaN/inf |
+| `diag_unsolved_sample_count` | Samples no Newton path solved (see above); zero is the only reassuring value |
 | `last_nr_iterations` | Iteration count of the most recent NR solve |
 
 These are informational and don't affect audio output.
@@ -403,6 +455,11 @@ inside another repo must be moved out before it can be bundled (`cargo build
 --release` for the raw library works in place).
 
 Output: `target/bundled/my_plugin.clap` and `target/bundled/my_plugin.vst3`
+
+The project's `.cargo/config.toml` carries sections for the x86_64 Linux,
+macOS and Windows (`-msvc` and `-gnu`) targets. The maintainer builds and
+tests on Linux, and builds macOS bundles from Linux as described below;
+Windows builds are not tested by the maintainer.
 
 ### Plugin file locations by platform
 
