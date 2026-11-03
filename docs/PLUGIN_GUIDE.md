@@ -92,8 +92,13 @@ Each `.pot` directive in the netlist becomes a `FloatParam` with:
 `.wiper` pots are the same shape: a 0..1 wiper position, shown as a percentage.
 
 **Update timing:**
-- **All solvers**: per-block (matrix rebuild O(N^3) on value change)
-- Per-sample smoothing via `.smoothed.next()` interpolates between rebuilds
+- The parameter smoothers advance every sample (a 50 ms ramp is 50 ms).
+- The smoothed values reach the circuit every 32 samples
+  (`CONTROL_APPLY_INTERVAL` in `lib.rs`, 0.67 ms at 48 kHz). A changed value
+  rebuilds a nodal build's matrices (O(N^3)) and drops its chord factor, and
+  on a linear DK build is one rank-1 update; applying every sample while a
+  smoother runs cost more than the solve on a large nodal deck.
+- Switches are applied once per block.
 
 **Preset recall / large unsmoothed jumps.** The `set_pot_N` setter is
 reseed-free — it only updates conductance and flags a rebuild; it does

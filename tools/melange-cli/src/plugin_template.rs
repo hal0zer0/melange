@@ -1252,11 +1252,39 @@ fn generate_process_loop(
         })
         .collect();
 
-    // Per-sample pot updates: reads smoothed pot values, triggers rebuild_matrices only on changes.
-    // Smoother advances in pot_reads (once per sample, outside per-channel loop);
-    // set_pot_N() called in pot_assignments (per channel). set_pot_N() has a
-    // (r - prev).abs() < 1e-12 skip guard so the O(N^3) rebuild only fires on actual changes.
-    let pot_pre_loop = String::new();
+    // The smoothers advance every sample (that is what sets a ramp's length),
+    // but their values reach the circuit every CONTROL_APPLY_INTERVAL samples:
+    // on a nodal build a pot change rebuilds the matrices (O(N^3)) and drops
+    // the chord factorisation, and applied per sample while a 50 ms smoother
+    // runs that took a 27-device limiter from 1.4x to 0.83x realtime (one
+    // core, 48 kHz, 2x). Every 32 samples (0.67 ms) the same ramp costs what
+    // static pots cost, and a resistance step that small is not a zipper. On a
+    // linear DK build a change is a rank-1 update and the gate only saves
+    // work. The circuit's own setters still skip an unchanged value.
+    let has_controls = !pots.is_empty() || !wipers.is_empty() || !gangs.is_empty();
+    let pot_pre_loop = if has_controls {
+        "        // Smoothed pot values are applied to the circuit every this many\n\
+         \x20       // samples: a change rebuilds a nodal build's matrices (O(N^3)) and\n\
+         \x20       // drops its chord factorisation, and per-sample application while a\n\
+         \x20       // smoother runs costs more than the solve (a 27-device limiter fell\n\
+         \x20       // from 1.4x to 0.83x realtime). The smoothers still advance every\n\
+         \x20       // sample, so a ramp is as long as before; 32 samples is 0.67 ms at\n\
+         \x20       // 48 kHz, inaudible as a resistance step.\n\
+         \x20       const CONTROL_APPLY_INTERVAL: usize = 32;\n"
+            .to_string()
+    } else {
+        String::new()
+    };
+    let gate_controls = |assignments: String| -> String {
+        if assignments.is_empty() {
+            assignments
+        } else {
+            format!("                if apply_controls {{\n{assignments}                }}\n")
+        }
+    };
+    let pot_assignments = gate_controls(pot_assignments);
+    let wiper_assignments = gate_controls(wiper_assignments);
+    let gang_assignments = gate_controls(gang_assignments);
 
     // Per-sample wiper updates: wiper smoother advances in wiper_reads (once per sample);
     // set_pot calls in wiper_assignments (per channel). Same skip guard applies.
@@ -1376,18 +1404,30 @@ fn generate_process_loop(
         )
     };
 
+    let (loop_header, apply_gate) = if has_controls {
+        (
+            "        for (frame, channel_samples) in buffer.iter_samples().enumerate() {\n",
+            "            let apply_controls = frame % CONTROL_APPLY_INTERVAL == 0;\n",
+        )
+    } else {
+        (
+            "        for channel_samples in buffer.iter_samples() {\n",
+            "",
+        )
+    };
     format!(
         "{switch_pre_loop}\
          {pot_pre_loop}\
          {wiper_pre_loop}\
          {gang_pre_loop}\
          {ep_read}\
-         \x20       for channel_samples in buffer.iter_samples() {{\n\
+         {loop_header}\
          {gain_reads}\
          {mix_read}\
          {pot_reads}\
          {wiper_reads}\
          {gang_reads}\
+         {apply_gate}\
          {inner_loop}\
          {dry_pos_advance}\
          \x20       }}"
@@ -2512,6 +2552,35 @@ mod tests {
     }
 
     #[test]
+    fn smoothed_pots_reach_the_circuit_every_control_apply_interval() {
+        // The smoother steps per sample; the circuit's setters run on every
+        // CONTROL_APPLY_INTERVAL-th frame only (a nodal build rebuilds its
+        // matrices on each change). A build without controls keeps the plain
+        // loop and declares no gate.
+        let pots = vec![PotParamInfo {
+            index: 0,
+            name: "Drive".to_string(),
+            min_resistance: 1000.0,
+            max_resistance: 100_000.0,
+            default_resistance: 10_000.0,
+        }];
+        let lib = test_generate_lib_rs("gated", false, &pots);
+        assert!(lib.contains("const CONTROL_APPLY_INTERVAL: usize = 32;"));
+        assert!(lib.contains("for (frame, channel_samples) in buffer.iter_samples().enumerate() {"));
+        assert!(lib.contains("let apply_controls = frame % CONTROL_APPLY_INTERVAL == 0;"));
+        assert!(lib.contains("if apply_controls {\n                state.set_pot_0(pot_0_val);"));
+        // The smoother still advances every sample, outside the gate.
+        let read = lib.find("smoothed.next()").expect("per-sample read");
+        let gate = lib.find("if apply_controls {").expect("gate");
+        assert!(read < gate, "the read precedes the gated application");
+
+        let plain = test_generate_lib_rs("plain", false, &[]);
+        assert!(!plain.contains("CONTROL_APPLY_INTERVAL"));
+        assert!(!plain.contains("apply_controls"));
+        assert!(plain.contains("for channel_samples in buffer.iter_samples() {"));
+    }
+
+    #[test]
     fn lib_with_pot_converts_position_to_resistance() {
         let pots = vec![PotParamInfo {
             index: 0,
@@ -3291,7 +3360,7 @@ mod tests {
             &PluginOptions::default(),
         );
         let loop_pos = lib
-            .find("for channel_samples in buffer.iter_samples()")
+            .find("in buffer.iter_samples()")
             .expect("sample loop missing");
         let read_pos = lib
             .find("self.params.gang_0.smoothed.next()")

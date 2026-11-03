@@ -88,6 +88,15 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ### Fixed
 
+- **A generated plugin applies its smoothed pots every 32 samples, not every
+  sample.** The template read each pot's smoother and called the circuit's
+  setter on every sample; on a nodal build every changed value rebuilds the
+  matrices (O(N³)) and drops the chord factorisation, so dragging a knob on a
+  27-device limiter took it from 1.4× to 0.83× realtime (one core, 48 kHz,
+  2x) and the audio stuttered. The smoothers still advance per sample, so a
+  ramp is as long as before; the values reach the circuit on every 32nd frame
+  (0.67 ms at 48 kHz), which costs what static pots cost. Builds without
+  controls are unchanged.
 - **`simulate --switch` and `analyze --switch` start from the chosen
   position's own DC operating point.** A `--switch NAME=POS` override is now
   baked into the build like `--pot`: the selected position is the static
