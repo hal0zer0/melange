@@ -180,6 +180,14 @@ codegen output, CLI flags, and netlist semantics may all change.
 - The device Jacobian array is no longer zeroed or copied in full each Newton
   iteration and sample, only its block-diagonal entries (the only ones that
   are ever nonzero).
+- With the structural equilibration pattern, the sparse chord factor is
+  stored packed: one slot per position the factor and back-solve touch
+  (`LU_SLOTS`, the new `chord_lu_pk` / `chord_be_lu_pk` state fields) instead
+  of an N x N array, with the static row swaps folded into the indices at
+  codegen time. Same operations in the same order: bit-identical. On an
+  N = 84 build the factor's working set drops from a 56 KB array to 3.9 KB.
+  The N x N `chord_lu` remains the dense fallback's storage. Builds with
+  saturating inductors keep the N x N layout (measured slower packed).
 
 None of these changes a rendered sample: the golden corpus is 192/192
 byte-identical to v0.1.21, every diagnostic counter included. Generated code
@@ -195,6 +203,15 @@ ns/sample (1.15×), `wurli-power-amp` 10169 → 6159 (1.65×),
 shot` 7292 → 4518 (1.61×). An N = 84 FET limiter at 2× oversampling (one
 JFET, eleven BJTs, three diodes; 1 kHz sine): 10.0 → 6.4 µs per host sample
 at −60 dBFS, 13.4 → 7.7 at −30, 14.9 → 8.5 at −18 (1.57–1.75×).
+The packed sparse factor, measured the same way against its parent (best of
+two rounds of 7 × 400k samples): bus compressor 1540 → 1413 ns/sample
+(1.09×), `wurli-power-amp` 6212 → 6070 (1.02×); the FET limiter (best of
+three rounds) 6.40 → 6.11 µs per host sample at −60 dBFS, 7.73 → 7.20 at
+−30 and 8.52 → 7.95 at −18 with the Ratio 4 button in, 15.8 → 14.3 at −30
+and 17.4 → 15.6 at −19 with every button out (1.05–1.12×). Builds without
+the structural pattern (`radio-fm`, `radio-am`) and with saturating
+inductors (`funkyinduct`, `steve-1073-output`) generate the same code as
+before.
 
 ## [0.1.21] - 2026-11-02
 

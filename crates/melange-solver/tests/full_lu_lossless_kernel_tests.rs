@@ -12,6 +12,9 @@
 //!   Witness: a build whose `ls_hit` is never set (every one of those
 //!   evaluations runs again) renders the same bits.
 //! - Which builds take the reuse, and how much of it.
+//! - With the structural pattern the sparse factor works on packed storage
+//!   (`LU_SLOTS` slots, the touch pattern) with the static row swaps folded
+//!   into its indices; the N x N array is left to the dense fallback.
 
 mod support;
 
@@ -183,7 +186,14 @@ fn poison_touched_builds(code: &str) -> String {
             let next = lines[k + 1].trim_start();
             let lu = &next[..next.find('[').expect("indexed store after the marker")];
             let indent = &line[..line.len() - line.trim_start().len()];
-            out.push_str(&format!("{indent}{lu} = [[f64::NAN; N]; N];\n"));
+            // The packed sparse storage (`*_lu_pk`) is poisoned whole, and so is
+            // the N x N array the dense fallback shares with it.
+            if let Some(full) = lu.strip_suffix("_pk") {
+                out.push_str(&format!("{indent}{lu} = [f64::NAN; LU_SLOTS];\n"));
+                out.push_str(&format!("{indent}{full} = [[f64::NAN; N]; N];\n"));
+            } else {
+                out.push_str(&format!("{indent}{lu} = [[f64::NAN; N]; N];\n"));
+            }
             hits += 1;
         }
         out.push_str(line);
@@ -287,4 +297,68 @@ fn accepted_trial_reuse_gating() {
     assert!(!hard.contains("ls_hit"));
     let active = full_lu_code(OPAMP_CLIPPER, Some(OpampRailMode::ActiveSet));
     assert!(active.contains("ls_hit"));
+}
+
+/// The sparse factor and back-solve address only the packed slots, never the
+/// N x N array; the static row swaps are folded into the slot indices; the
+/// Newton loop builds, factors and back-solves the packed storage at both
+/// sites and leaves the N x N array to the dense fallback.
+#[test]
+fn sparse_factor_uses_packed_storage() {
+    let code = full_lu_code(BJT_LADDER, None);
+    let body = |name: &str| -> &str {
+        let at = code.find(&format!("fn {name}(")).expect(name);
+        let end = code[at..].find("\n}\n").expect("function end") + at;
+        &code[at..end]
+    };
+    let slots: usize = {
+        let key = "const LU_SLOTS: usize = ";
+        let at = code.find(key).expect("LU_SLOTS") + key.len();
+        code[at..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .unwrap()
+    };
+    let touched = {
+        let key = "// Only the ";
+        let at = code.find(key).expect(key) + key.len();
+        code[at..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse::<usize>()
+            .unwrap()
+    };
+    assert_eq!(slots, touched, "packed slots must be the touch pattern");
+    for name in ["sparse_lu_factor", "sparse_lu_back_solve"] {
+        let b = body(name);
+        assert!(b.contains("[f64; LU_SLOTS]"), "{name} is not packed");
+        // `a[<digits>][` / `a_lu[<digits>][`: a 2-D literal index into the matrix.
+        let two_d = ["a[", "a_lu["].iter().any(|key| {
+            b.match_indices(key).any(|(at, _)| {
+                let tail = &b[at + key.len()..];
+                let digits = tail.chars().take_while(|c| c.is_ascii_digit()).count();
+                digits > 0 && tail[digits..].starts_with("][")
+            })
+        });
+        assert!(!two_d, "{name} still indexes a 2-D array");
+    }
+    assert!(
+        !body("sparse_lu_factor").contains("a.swap("),
+        "row swaps not folded"
+    );
+    assert!(code.contains("sparse_lu_factor(&mut state.chord_lu_pk,"));
+    assert!(code.contains("sparse_lu_back_solve(&state.chord_lu_pk,"));
+    // Between the packed build and the sparse factor call, nothing writes the
+    // N x N array: every stamp went to the packed slots.
+    let start = code
+        .find("positions the sparse factor and back-solve touch, packed")
+        .unwrap();
+    let call = code[start..].find("if sparse_lu_factor(").unwrap() + start;
+    assert!(
+        !code[start..call].contains("state.chord_lu["),
+        "a stamp reached the N x N array instead of the packed factor"
+    );
 }

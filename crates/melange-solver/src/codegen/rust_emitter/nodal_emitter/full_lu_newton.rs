@@ -4,7 +4,7 @@ use super::behavioral::{
     behavioral_convergence_nodes, behavioral_damp_skip_literal, emit_behavioral_evals,
     emit_behavioral_jacobian, emit_behavioral_rhs,
 };
-use super::equil::{build_equil_pattern, build_growth_pattern, sparse_lu_touch_pattern};
+use super::equil::{build_equil_pattern, build_growth_pattern, sparse_lu_touch_pattern, LuPack};
 use super::residual::{
     armijo_jac_reuse, armijo_r0_reuse, armijo_trial_reuse, emit_armijo_line_search,
     emit_sparse_nv_matvec,
@@ -204,39 +204,74 @@ impl RustEmitter {
         // back-solve touch (`sparse_lu_touch_pattern`). Emitted twice when the
         // sparse factor can be rejected: the dense fallback rebuilds the
         // matrix with the same operations instead of restoring a saved copy.
-        let touch: Option<Vec<(usize, usize)>> =
-            match (&ir.sparsity.lu, build_equil_pattern(ir, setter_stamps)) {
-                (Some(slu), Some(pat)) => {
-                    let growth = build_growth_pattern(&pat, &slu.row_swaps, &slu.ops);
-                    Some(sparse_lu_touch_pattern(&pat, slu, &growth))
-                }
-                _ => None,
-            };
+        // With the structural pattern the sparse factor keeps its matrix packed
+        // over the touch pattern (`LuPack`, in `{lu}_pk`); the N x N `{lu}`
+        // stays the dense fallback's storage.
+        let equil_pat = build_equil_pattern(ir, setter_stamps);
+        let pack = LuPack::for_build(ir, equil_pat.as_ref());
+        // A build that has the pattern but keeps the N x N layout still builds
+        // only the touched positions.
+        let touch: Option<Vec<(usize, usize)>> = match (&pack, &ir.sparsity.lu, &equil_pat) {
+            (None, Some(slu), Some(pat)) => {
+                let growth = build_growth_pattern(pat, &slu.row_swaps, &slu.ops);
+                Some(sparse_lu_touch_pattern(pat, slu, &growth))
+            }
+            _ => None,
+        };
+        let lu_pk = format!("{lu}_pk");
         let emit_g_aug = |code: &mut String, indent: &str, full: bool| {
-            match (&touch, full) {
-                (Some(t), false) => {
-                    code.push_str(&format!(
+            let mut g = String::new();
+            match (&pack, full) {
+                (Some(pk), false) => {
+                    g.push_str(&format!(
+                        "{indent}// Only the {} positions the sparse factor and back-solve touch, packed\n",
+                        pk.slots.len()
+                    ));
+                    for (k, &(i, j)) in pk.slots.iter().enumerate() {
+                        g.push_str(&format!("{indent}{lu_pk}[{k}] = {}[{i}][{j}];\n", site.a));
+                    }
+                }
+                (None, false) if touch.is_some() => {
+                    let t = touch.as_ref().expect("checked");
+                    g.push_str(&format!(
                         "{indent}// Only the {} positions the sparse factor and back-solve touch\n",
                         t.len()
                     ));
                     for &(i, j) in t {
-                        code.push_str(&format!("{indent}{lu}[{i}][{j}] = {}[{i}][{j}];\n", site.a));
+                        g.push_str(&format!("{indent}{lu}[{i}][{j}] = {}[{i}][{j}];\n", site.a));
                     }
                 }
-                _ => code.push_str(&format!("{indent}{lu} = {};\n", site.a)),
+                _ => g.push_str(&format!("{indent}{lu} = {};\n", site.a)),
             }
-            emit_nodal_jacobian_stamp(code, ir, m, &lu, indent);
+            let mut st = String::new();
+            emit_nodal_jacobian_stamp(&mut st, ir, m, &lu, indent);
             if !body_effect_mosfets(ir).is_empty() {
-                emit_body_gmb_stamp(code, ir, &lu, "chord_body_gmb", indent);
+                emit_body_gmb_stamp(&mut st, ir, &lu, "chord_body_gmb", indent);
             }
             // Saturating-inductor Jacobian: alpha·L0 → alpha·L_diff(v[k]) at [k][k].
             if has_sat_ind {
-                emit_sat_ind_jacobian(code, ir, &lu, "v", &site.sat_alpha, indent);
+                emit_sat_ind_jacobian(&mut st, ir, &lu, "v", &site.sat_alpha, indent);
             }
             // Behavioral B-source Jacobian: stamp ∂f/∂V directly into G_aug.
             if has_behavioral {
-                emit_behavioral_jacobian(code, ir, &lu, indent);
+                emit_behavioral_jacobian(&mut st, ir, &lu, indent);
             }
+            match (&pack, full) {
+                (Some(pk), false) => {
+                    // The saturating-inductor stamps index by their row constant.
+                    let sat_rows: Vec<(String, usize)> = ir
+                        .saturating_inductors
+                        .iter()
+                        .enumerate()
+                        .map(|(k, si)| (format!("SAT_IND_{k}_AUG_ROW"), si.aug_row))
+                        .collect();
+                    let consts =
+                        |tok: &str| sat_rows.iter().find(|(n, _)| n == tok).map(|&(_, r)| r);
+                    g.push_str(&pk.remap_stamps(&st, &lu, &consts));
+                }
+                _ => g.push_str(&st),
+            }
+            code.push_str(&g);
         };
         emit_g_aug(code, "            ", ir.sparsity.lu.is_none());
         // Factor: try sparse LU (if available). The sparse schedule uses
@@ -248,8 +283,9 @@ impl RustEmitter {
         // chord LU holds so back-solves (this sample and later ones via
         // cross-timestep persistence) dispatch correctly.
         if ir.sparsity.lu.is_some() {
+            let sparse_lu = if pack.is_some() { &lu_pk } else { &lu };
             code.push_str(&format!(
-                "            if sparse_lu_factor(&mut {lu}, &mut {dr}, &mut {dc}) {{\n"
+                "            if sparse_lu_factor(&mut {sparse_lu}, &mut {dr}, &mut {dc}) {{\n"
             ));
             code.push_str("                chord_dense = false;\n");
             code.push_str("            } else {\n");
@@ -322,8 +358,9 @@ impl RustEmitter {
                 "            lu_back_solve(&{lu}, &{dr}, &{dc}, &{perm}, &mut v_new);\n"
             ));
             code.push_str("        } else {\n");
+            let sparse_lu = if pack.is_some() { &lu_pk } else { &lu };
             code.push_str(&format!(
-                "            sparse_lu_back_solve(&{lu}, &{dr}, &{dc}, &mut v_new);\n"
+                "            sparse_lu_back_solve(&{sparse_lu}, &{dr}, &{dc}, &mut v_new);\n"
             ));
             code.push_str("        }\n\n");
         } else {

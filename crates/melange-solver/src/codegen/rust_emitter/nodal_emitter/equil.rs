@@ -411,7 +411,11 @@ pub(super) fn sparse_lu_touch_pattern(
 /// The table loop kept the running maxima in a stack array indexed through
 /// the table, a store-to-load chain on every entry of a row, plus two bounds
 /// checks per access; here each row's and each column's max is a register.
-pub(super) fn emit_equilibration_unrolled(code: &mut String, pat: &EquilPattern) {
+pub(super) fn emit_equilibration_unrolled(
+    code: &mut String,
+    pat: &EquilPattern,
+    at: &dyn Fn(usize, usize) -> String,
+) {
     let n = pat.n;
     let mut cols_of_row: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut rows_of_col: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -429,14 +433,15 @@ pub(super) fn emit_equilibration_unrolled(code: &mut String, pat: &EquilPattern)
         code.push_str("    {\n        let mut m = 0.0f64;\n");
         for &j in &cols_of_row[i] {
             code.push_str(&format!(
-                "        {{ let v = a[{i}][{j}].abs(); if v > m {{ m = v; }} }}\n"
+                "        {{ let v = {}.abs(); if v > m {{ m = v; }} }}\n",
+                at(i, j)
             ));
         }
         code.push_str(&format!(
             "        dr[{i}] = if m > 1e-30 {{ 1.0 / m }} else {{ 1.0 }};\n"
         ));
         for &j in &cols_of_row[i] {
-            code.push_str(&format!("        a[{i}][{j}] *= dr[{i}];\n"));
+            code.push_str(&format!("        {} *= dr[{i}];\n", at(i, j)));
         }
         code.push_str("    }\n");
     }
@@ -445,14 +450,15 @@ pub(super) fn emit_equilibration_unrolled(code: &mut String, pat: &EquilPattern)
         code.push_str("    {\n        let mut m = 0.0f64;\n");
         for &i in &rows_of_col[j] {
             code.push_str(&format!(
-                "        {{ let v = a[{i}][{j}].abs(); if v > m {{ m = v; }} }}\n"
+                "        {{ let v = {}.abs(); if v > m {{ m = v; }} }}\n",
+                at(i, j)
             ));
         }
         code.push_str(&format!(
             "        dc[{j}] = if m > 1e-30 {{ 1.0 / m }} else {{ 1.0 }};\n"
         ));
         for &i in &rows_of_col[j] {
-            code.push_str(&format!("        a[{i}][{j}] *= dc[{j}];\n"));
+            code.push_str(&format!("        {} *= dc[{j}];\n", at(i, j)));
         }
         code.push_str("    }\n");
     }
@@ -466,7 +472,11 @@ pub(super) fn emit_equilibration_unrolled(code: &mut String, pat: &EquilPattern)
 /// by `if v > m { m = v; }` from 0 skips NaN and does not depend on order or
 /// grouping, and none of the partial maxima can be NaN. Four independent
 /// chains instead of one shorten the dependency chain of the compares.
-pub(super) fn emit_growth_check_unrolled(code: &mut String, growth: &[(usize, usize)]) {
+pub(super) fn emit_growth_check_unrolled(
+    code: &mut String,
+    growth: &[(usize, usize)],
+    at: &dyn Fn(usize, usize) -> String,
+) {
     // Every lane must be written, or the generated code carries an unused
     // `mut`. The pattern holds every diagonal and is only built for N >= 20.
     assert!(
@@ -477,11 +487,181 @@ pub(super) fn emit_growth_check_unrolled(code: &mut String, growth: &[(usize, us
     for (k, &(i, j)) in growth.iter().enumerate() {
         let lane = k % 4;
         code.push_str(&format!(
-            "    {{ let v = a[{i}][{j}].abs(); if v > g{lane} {{ g{lane} = v; }} }}\n"
+            "    {{ let v = {}.abs(); if v > g{lane} {{ g{lane} = v; }} }}\n",
+            at(i, j)
         ));
     }
     code.push_str("    let mut growth = g0;\n");
     code.push_str("    if g1 > growth { growth = g1; }\n");
     code.push_str("    if g2 > growth { growth = g2; }\n");
     code.push_str("    if g3 > growth { growth = g3; }\n");
+}
+
+/// Packed storage of the sparse chord factor: one slot per position of
+/// [`sparse_lu_touch_pattern`], in that (row-major, input-coordinate) order.
+///
+/// The sparse factor and back-solve read and write only those positions, so
+/// keeping them in a dense `[f64; LU_SLOTS]` instead of an `N x N` array runs
+/// the same operations, in the same order, on the same values: the results are
+/// bit-identical. What changes is the memory footprint the hot loop walks
+/// (on an N = 84 deck, 488 slots = 3.9 KB against 56 KB for the full array,
+/// which does not fit in L1). The static row swaps become an index remap
+/// fixed at codegen time: after the swaps, position `(i, j)` holds input row
+/// `row_src[i]`.
+pub(super) struct LuPack {
+    /// Slot `k` holds input position `slots[k]`.
+    pub slots: Vec<(usize, usize)>,
+    index: std::collections::BTreeMap<(usize, usize), usize>,
+    row_src: Vec<usize>,
+}
+
+impl LuPack {
+    /// The packing a build takes, or `None` for the N x N layout: packed
+    /// whenever the structural pattern exists, except on builds that stamp
+    /// saturating inductors. There the packed layout measured slower (one
+    /// corpus deck, N = 73 with 16 saturating inductors, +3 % per sample with
+    /// 62 % fewer L1 misses and twice the FP-scheduler stalls; the cause is
+    /// not identified), so those builds keep the N x N array. The exclusion
+    /// is a measurement, not a structural rule: re-measure it before
+    /// carrying it into any change to the flux rows or the pack.
+    pub(super) fn for_build(ir: &CircuitIR, pat: Option<&EquilPattern>) -> Option<Self> {
+        match (&ir.sparsity.lu, pat) {
+            (Some(lu), Some(p)) if ir.saturating_inductors.is_empty() => Some(Self::new(p, lu)),
+            _ => None,
+        }
+    }
+
+    fn new(pat: &EquilPattern, lu: &crate::codegen::ir::LuSparsity) -> Self {
+        let growth = build_growth_pattern(pat, &lu.row_swaps, &lu.ops);
+        let slots = sparse_lu_touch_pattern(pat, lu, &growth);
+        let index = slots.iter().enumerate().map(|(k, &p)| (p, k)).collect();
+        let mut row_src: Vec<usize> = (0..pat.n).collect();
+        for &(r1, r2) in &lu.row_swaps {
+            row_src.swap(r1, r2);
+        }
+        Self {
+            slots,
+            index,
+            row_src,
+        }
+    }
+
+    /// Slot of input (pre-swap) position `(i, j)`. Every position the sparse
+    /// path reads or writes is in the touch pattern; a miss is a codegen bug
+    /// (an entry the factor would silently never see), so it fails loudly.
+    pub(super) fn pre(&self, i: usize, j: usize) -> usize {
+        match self.index.get(&(i, j)) {
+            Some(&k) => k,
+            None => panic!(
+                "packed sparse LU: position ({i}, {j}) is outside the touch pattern; \
+                 this is a melange bug, please report it with the deck"
+            ),
+        }
+    }
+
+    /// Slot of post-swap position `(i, j)` (inside the elimination, the
+    /// growth sweep and the back-solve).
+    pub(super) fn post(&self, i: usize, j: usize) -> usize {
+        self.pre(self.row_src[i], j)
+    }
+
+    /// Rewrite every `{name}[i][j]` in `text` (an emitted stamp block, input
+    /// coordinates) to `{name}_pk[slot]`. An index is a literal or a named
+    /// constant that `consts` resolves (the saturating-inductor branch rows).
+    /// Anything else fails loudly: a stamp left in the N x N array would be
+    /// invisible to the packed factor, a silently wrong Jacobian.
+    pub(super) fn remap_stamps(
+        &self,
+        text: &str,
+        name: &str,
+        consts: &dyn Fn(&str) -> Option<usize>,
+    ) -> String {
+        let needle = format!("{name}[");
+        let index = |tok: &str| -> usize {
+            tok.parse::<usize>()
+                .ok()
+                .or_else(|| consts(tok))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "packed sparse LU: stamp index `{tok}` into `{name}` is neither a literal \
+                     nor a known constant; this is a melange bug, please report it with the deck"
+                    )
+                })
+        };
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(at) = rest.find(&needle) {
+            // A longer identifier ending in `name` is not a match.
+            let boundary = at == 0
+                || !rest[..at]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+            let after = &rest[at + needle.len()..];
+            if !boundary {
+                out.push_str(&rest[..at + needle.len()]);
+                rest = after;
+                continue;
+            }
+            let bad = || -> ! {
+                panic!(
+                    "packed sparse LU: unparseable stamp `{name}[{}` ; this is a melange bug",
+                    &after[..after.len().min(40)]
+                )
+            };
+            let i_end = after.find(']').unwrap_or_else(|| bad());
+            let tail = after[i_end + 1..]
+                .strip_prefix('[')
+                .unwrap_or_else(|| bad());
+            let j_end = tail.find(']').unwrap_or_else(|| bad());
+            let (i, j) = (index(&after[..i_end]), index(&tail[..j_end]));
+            out.push_str(&rest[..at]);
+            out.push_str(&format!("{name}_pk[{}]", self.pre(i, j)));
+            rest = &tail[j_end + 1..];
+        }
+        out.push_str(rest);
+        out
+    }
+}
+
+#[cfg(test)]
+mod lu_pack_tests {
+    use super::LuPack;
+    use std::collections::BTreeMap;
+
+    fn pack() -> LuPack {
+        // Rows 0 and 1 swapped: post-swap (0, j) holds input row 1.
+        let slots = vec![(0, 0), (0, 2), (1, 1), (2, 2)];
+        let index: BTreeMap<_, _> = slots.iter().enumerate().map(|(k, &p)| (p, k)).collect();
+        LuPack {
+            slots,
+            index,
+            row_src: vec![1, 0, 2],
+        }
+    }
+
+    #[test]
+    fn remaps_literal_and_constant_indices() {
+        let pk = pack();
+        let consts = |t: &str| (t == "ROW_TWO").then_some(2);
+        let text = "state.chord_lu[0][2] -= x;\nstate.chord_lu[ROW_TWO][ROW_TWO] += y;\nxstate.chord_lu[0][0] = z;\n";
+        let out = pk.remap_stamps(text, "state.chord_lu", &consts);
+        assert_eq!(
+            out,
+            "state.chord_lu_pk[1] -= x;\nstate.chord_lu_pk[3] += y;\nxstate.chord_lu[0][0] = z;\n"
+        );
+        assert_eq!(pk.post(0, 1), 2, "post-swap row 0 is input row 1");
+    }
+
+    #[test]
+    #[should_panic(expected = "neither a literal nor a known constant")]
+    fn unknown_index_fails_loudly() {
+        pack().remap_stamps("state.chord_lu[K][0] -= x;", "state.chord_lu", &|_| None);
+    }
+
+    #[test]
+    #[should_panic(expected = "outside the touch pattern")]
+    fn position_outside_the_pattern_fails_loudly() {
+        pack().remap_stamps("state.chord_lu[2][0] -= x;", "state.chord_lu", &|_| None);
+    }
 }

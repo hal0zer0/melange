@@ -26,7 +26,7 @@ mod substep;
 use super::RustEmitter;
 use crate::codegen::ir::{CircuitIR, DeviceParams};
 use crate::codegen::CodegenError;
-use equil::{build_equil_pattern, emit_equil_pattern_table};
+use equil::{build_equil_pattern, emit_equil_pattern_table, LuPack};
 use residual::emit_kcl_residual_fns;
 use sites::{emit_k_seed_helpers, schur_exact_seed};
 
@@ -592,7 +592,13 @@ impl RustEmitter {
             // Sparse LU when available (dense kept as fallback)
             if ir.sparsity.lu.is_some() {
                 code.push_str(&Self::emit_sparse_lu_factor(ir, equil_pat.as_ref()));
-                code.push_str(&Self::emit_sparse_lu_back_solve(ir));
+                code.push_str(&Self::emit_sparse_lu_back_solve(ir, equil_pat.as_ref()));
+                // The packed sparse factor's state storage (see `LuPack`). The
+                // state struct is emitted before the pattern is known, so the
+                // fields go in after its `chord_lu` lines.
+                if LuPack::for_build(ir, equil_pat.as_ref()).is_some() {
+                    code = add_packed_lu_fields(code);
+                }
             }
             code.push_str(&Self::emit_nodal_process_sample(ir, &noise, &setter_stamps));
         } else {
@@ -650,4 +656,34 @@ impl RustEmitter {
         };
         Ok((code, sub_path, trigger))
     }
+}
+
+/// Insert the packed sparse-LU chord storage (`chord_lu_pk`, and
+/// `chord_be_lu_pk` when the backward-Euler chord cache exists) next to the
+/// N x N `chord_lu` fields and their initialisers. Every insertion point must
+/// be present exactly once; anything else means the state emitter changed
+/// shape and the packed factor would have no storage.
+fn add_packed_lu_fields(mut code: String) -> String {
+    let edits: [(&str, &str, bool); 4] = [
+        (
+            "    pub chord_lu: [[f64; N]; N],\n",
+            "    /// Sparse chord factor, packed over the positions it touches (`LU_SLOTS`);\n    /// `chord_lu` holds the dense fallback's factor.\n    pub chord_lu_pk: [f64; LU_SLOTS],\n",
+            true,
+        ),
+        ("            chord_lu: [[0.0; N]; N],\n", "            chord_lu_pk: [0.0; LU_SLOTS],\n", true),
+        ("    pub chord_be_lu: [[f64; N]; N],\n", "    pub chord_be_lu_pk: [f64; LU_SLOTS],\n", false),
+        ("            chord_be_lu: [[0.0; N]; N],\n", "            chord_be_lu_pk: [0.0; LU_SLOTS],\n", false),
+    ];
+    for (anchor, add, required) in edits {
+        let n = code.matches(anchor).count();
+        assert!(
+            n == 1 || (n == 0 && !required),
+            "packed sparse LU: expected one `{}` in the emitted state, found {n}",
+            anchor.trim()
+        );
+        if n == 1 {
+            code = code.replacen(anchor, &format!("{anchor}{add}"), 1);
+        }
+    }
+    code
 }

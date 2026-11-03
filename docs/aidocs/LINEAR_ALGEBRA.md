@@ -259,6 +259,29 @@ Three optimizations stack to keep this real-time:
    and the scaled matrix are bit-identical. `lu_factor` and `lu_solve` (the
    dense fallback and the sub-step and pin solves) keep the table loop.
 
+7. **Packed storage of the sparse factor** — with the structural pattern,
+   the sparse factor does not live in the N x N `chord_lu` (`chord_be_lu`)
+   but in `chord_lu_pk` (`chord_be_lu_pk`), a `[f64; LU_SLOTS]` with one
+   slot per touch-pattern position (item 5), in that row-major
+   input-coordinate order (`equil::LuPack`). The G_aug build, the device,
+   body-effect and saturating-inductor stamps, `sparse_lu_factor` and
+   `sparse_lu_back_solve` address the slots; the static row swaps become an
+   index remap fixed at codegen time (after the swaps, position `(i, j)`
+   holds input row `row_src[i]`), so no rows move at runtime. The
+   operations, their order and their operands are unchanged, so every
+   result is bit-identical; what changes is the memory the hot loop walks
+   (an N = 84 build: 488 slots, 3.9 KB, against a 56 KB array that does not
+   fit in L1). The N x N array stays the dense fallback's storage, which a
+   rejected sparse factor rebuilds in full as before. Builds that stamp
+   saturating inductors keep the N x N layout: on the one corpus deck with
+   them (N = 73, 16 saturating inductors, a refactor every iteration) the
+   packed layout measured 3 % slower despite 62 % fewer L1 misses, with the
+   FP-scheduler stalls doubled; the mechanism is not pinned down
+   (`LuPack::for_build`). A stamp whose index is
+   neither a literal nor a known row constant, or that lands outside the
+   touch pattern, panics at codegen instead of going where the factor cannot
+   see it.
+
 Source: `crates/melange-solver/src/lu.rs` and the emit sites in
 `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter/` (`lu.rs` for the
 emitted factor and back-solve, `full_lu_newton.rs` for the chord loop).

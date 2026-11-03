@@ -2,7 +2,7 @@
 
 use super::equil::{
     build_growth_pattern, emit_equilibration, emit_equilibration_unrolled,
-    emit_growth_check_unrolled, EquilPattern,
+    emit_growth_check_unrolled, EquilPattern, LuPack,
 };
 use crate::codegen::ir::{CircuitIR, LuOp};
 use crate::codegen::rust_emitter::helpers::section_banner;
@@ -379,20 +379,42 @@ impl RustEmitter {
         );
         code.push_str("/// against the equilibrated unit max-norm input); the caller re-factors\n");
         code.push_str("/// the same stamped matrix with dense partial-pivoting lu_factor.\n");
-        code.push_str("#[inline(always)]\n");
-        code.push_str("fn sparse_lu_factor(a: &mut [[f64; N]; N], dr: &mut [f64; N], dc: &mut [f64; N]) -> bool {\n");
+        // With the structural pattern the factor works on the packed slots of
+        // the touch pattern (`LuPack`); without it, on the full N x N array.
+        let pack = LuPack::for_build(ir, pat);
+        let pre = |i: usize, j: usize| match &pack {
+            Some(pk) => format!("a[{}]", pk.pre(i, j)),
+            None => format!("a[{i}][{j}]"),
+        };
+        let post = |i: usize, j: usize| match &pack {
+            Some(pk) => format!("a[{}]", pk.post(i, j)),
+            None => format!("a[{i}][{j}]"),
+        };
+        if let Some(pk) = &pack {
+            code.push_str(&format!(
+                "/// Packed storage: the {} positions the factor and back-solve touch\n",
+                pk.slots.len()
+            ));
+            code.push_str("/// (`LU_SLOTS`), with the static row swaps folded into the indices.\n");
+            code.push_str("#[inline(always)]\n");
+            code.push_str("fn sparse_lu_factor(a: &mut [f64; LU_SLOTS], dr: &mut [f64; N], dc: &mut [f64; N]) -> bool {\n");
+        } else {
+            code.push_str("#[inline(always)]\n");
+            code.push_str("fn sparse_lu_factor(a: &mut [[f64; N]; N], dr: &mut [f64; N], dc: &mut [f64; N]) -> bool {\n");
+        }
 
         // Step 1: Asymmetric row/column equilibration. With the structural
         // pattern it is straight-line code (this routine runs on every chord
         // refactor, and the table loop was most of its cost); the dense
         // fallback `lu_factor` and `lu_solve` keep the table loop.
         match pat {
-            Some(p) => emit_equilibration_unrolled(&mut code, p),
+            Some(p) => emit_equilibration_unrolled(&mut code, p, &pre),
             None => emit_equilibration(&mut code, pat, false),
         }
 
-        // Static row swaps (for zero diagonals, determined at codegen time)
-        if !lu.row_swaps.is_empty() {
+        // Static row swaps (for zero diagonals, determined at codegen time).
+        // Packed storage folds them into the slot indices instead.
+        if !lu.row_swaps.is_empty() && pack.is_none() {
             code.push_str("    // Static row swaps for zero diagonals\n");
             for &(r1, r2) in &lu.row_swaps {
                 code.push_str(&format!("    a.swap({r1}, {r2});\n"));
@@ -409,13 +431,21 @@ impl RustEmitter {
             match op {
                 LuOp::DivPivot { row, col } => {
                     code.push_str(&format!(
-                        "    if a[{col}][{col}].abs() < 1e-30 {{ return false; }}\n"
+                        "    if {}.abs() < 1e-30 {{ return false; }}\n",
+                        post(*col, *col)
                     ));
-                    code.push_str(&format!("    a[{row}][{col}] /= a[{col}][{col}];\n"));
+                    code.push_str(&format!(
+                        "    {} /= {};\n",
+                        post(*row, *col),
+                        post(*col, *col)
+                    ));
                 }
                 LuOp::SubMul { row, col, j } => {
                     code.push_str(&format!(
-                        "    a[{row}][{j}] -= a[{row}][{col}] * a[{col}][{j}];\n"
+                        "    {} -= {} * {};\n",
+                        post(*row, *j),
+                        post(*row, *col),
+                        post(*col, *j)
                     ));
                 }
             }
@@ -438,7 +468,7 @@ impl RustEmitter {
             // Straight-line over the pattern (`emit_growth_check_unrolled`).
             Some(p) => {
                 let growth_pat = build_growth_pattern(p, &lu.row_swaps, &lu.ops);
-                emit_growth_check_unrolled(&mut code, &growth_pat);
+                emit_growth_check_unrolled(&mut code, &growth_pat, &post);
             }
             None => {
                 code.push_str("    let mut growth = 0.0f64;\n");
@@ -453,6 +483,12 @@ impl RustEmitter {
 
         code.push_str("\n    true\n");
         code.push_str("}\n\n");
+        if let Some(pk) = &pack {
+            code.push_str(&format!(
+                "/// Slots of the packed sparse chord factor (`sparse_lu_factor`).\nconst LU_SLOTS: usize = {};\n\n",
+                pk.slots.len()
+            ));
+        }
 
         code
     }
@@ -462,12 +498,18 @@ impl RustEmitter {
     /// Forward sub processes L entries in AMD elimination order.
     /// Backward sub processes U entries in reverse AMD order.
     /// No permutation arrays — order is baked into the emitted code.
-    pub(super) fn emit_sparse_lu_back_solve(ir: &CircuitIR) -> String {
+    pub(super) fn emit_sparse_lu_back_solve(ir: &CircuitIR, pat: Option<&EquilPattern>) -> String {
         let lu = match &ir.sparsity.lu {
             Some(lu) => lu,
             None => return String::new(),
         };
         let n = lu.n;
+        // Same storage as `emit_sparse_lu_factor` (`LuPack::for_build`).
+        let pack = LuPack::for_build(ir, pat);
+        let at = |i: usize, j: usize| match &pack {
+            Some(pk) => format!("a_lu[{}]", pk.post(i, j)),
+            None => format!("a_lu[{i}][{j}]"),
+        };
 
         let mut code = String::new();
         code.push_str(
@@ -480,9 +522,15 @@ impl RustEmitter {
             n * n * 2
         ));
         code.push_str("#[inline(always)]\n");
-        code.push_str(
-            "fn sparse_lu_back_solve(a_lu: &[[f64; N]; N], dr: &[f64; N], dc: &[f64; N], b: &mut [f64; N]) {\n",
-        );
+        if pack.is_some() {
+            code.push_str(
+                "fn sparse_lu_back_solve(a_lu: &[f64; LU_SLOTS], dr: &[f64; N], dc: &[f64; N], b: &mut [f64; N]) {\n",
+            );
+        } else {
+            code.push_str(
+                "fn sparse_lu_back_solve(a_lu: &[[f64; N]; N], dr: &[f64; N], dc: &[f64; N], b: &mut [f64; N]) {\n",
+            );
+        }
 
         // Equilibrate RHS (row scaling) + apply static row swaps
         code.push_str("    let mut x = [0.0f64; N];\n");
@@ -499,7 +547,7 @@ impl RustEmitter {
         // L entries are already ordered by elimination step in l_nnz
         code.push_str("    // Sparse forward substitution (L, AMD order)\n");
         for &(row, col) in &lu.l_nnz {
-            code.push_str(&format!("    x[{row}] -= a_lu[{row}][{col}] * x[{col}];\n"));
+            code.push_str(&format!("    x[{row}] -= {} * x[{col}];\n", at(row, col)));
         }
 
         // Sparse backward substitution (U entries in reverse AMD order)
@@ -517,10 +565,10 @@ impl RustEmitter {
             for &pivot in lu.elim_order.iter().rev() {
                 if let Some(cols) = u_by_pivot.get(&pivot) {
                     for &c in cols {
-                        code.push_str(&format!("    x[{pivot}] -= a_lu[{pivot}][{c}] * x[{c}];\n"));
+                        code.push_str(&format!("    x[{pivot}] -= {} * x[{c}];\n", at(pivot, c)));
                     }
                 }
-                code.push_str(&format!("    x[{pivot}] /= a_lu[{pivot}][{pivot}];\n"));
+                code.push_str(&format!("    x[{pivot}] /= {};\n", at(pivot, pivot)));
             }
         }
 
