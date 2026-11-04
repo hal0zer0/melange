@@ -229,6 +229,58 @@ the structural pattern (`radio-fm`, `radio-am`) and with saturating
 inductors (`funkyinduct`, `steve-1073-output`) generate the same code as
 before.
 
+- **The sparse factor multiplies by reciprocal pivots** (this one changes
+  bits). Each pivot's reciprocal is formed once, after the column's 1e-30
+  tiny-pivot test; the L factors and the back-solve multiply by it instead of
+  dividing. The growth-factor sweep still reads the true pivots, the
+  reciprocals go onto the diagonal only after it passes, the back-solve is
+  the factor's one consumer, and the dense fallback is untouched. The extra
+  rounding per multiplier (2u against u) is at the solve's forward-error
+  scale. On identical input matrices the accept/reject decision agrees on all
+  12,633,376 factorizations of the corpus sweep, and the growth factor agrees
+  to growth x u (worst 4.5e-12 relative, `steve-1073-preamp`, growth 2.4e4).
+  Over the 192 golden renders: 125 byte-identical, 67 NEGLIGIBLE, none
+  audibly changed. The largest sample deltas are `warpony` 6.6e-6 V and
+  `basic-bitch` 2.8e-6 V, then `steve-1073-preamp` 2.6e-9 V; every other
+  deck is 1.3e-10 V or less. On `warpony` the solve's forward error is about
+  2e-5 of the Newton step: two runs that differ only in this rounding already
+  differ by 1e-8 V at a node stepping 4.5e-4 V on the first sample, and by
+  9.3e-8 V at the output. Five renders take a different Newton path, each
+  at a certification threshold an iterate sits on:
+  - `warpony` silence and step, sample 440: the node step test at 0.9993
+    against 1.0045 of its threshold, one iteration more.
+  - `warpony` sweep, sample 1764: the node step test at 1.0030 against
+    0.9963, one iteration fewer.
+  - `basic-bitch` sweep, sample 126774: the chord exit gate's residual at
+    1.000091e-9 A against 9.999934e-10 A, one exit step fewer.
+  - `wurli-power-amp` sine1k, sample 15239 (a 17-iteration sample): the
+    device-chord check at 1.62 of its tolerance before, under 0.5 after, one
+    iteration fewer.
+  Corpus totals over the sparse-schedule decks: Newton iterations
+  15,780,015 → 15,780,033, refactors 12,633,376 → 12,633,380, line-search
+  failures 59,408 → 59,413; iteration ceilings (35), sub-steps (35), held
+  samples (0) and sparse-factor rejections (0) unchanged.
+
+  Measured against the packed-factor build on an AMD Ryzen 9 7950X, one core,
+  interleaved, best of three rounds (`bench.sh` driver, 7 × 400k samples),
+  ns per sample:
+
+  | Deck | before | after | |
+  |---|---|---|---|
+  | bus compressor | 1410 | 1311 | 1.08× |
+  | `wurli-power-amp` | 6065 | 5656 | 1.07× |
+  | `steve-1073-output` | 1569 | 1505 | 1.04× |
+  | `funkyinduct --noise shot` | 4530 | 4364 | 1.04× |
+  | `radio-fm --noise full` | 1059 | 1049 | 1.01× |
+  | `radio-am --noise full` | 593 | 591 | 1.00× |
+
+  The N = 84 FET limiter at 2× (µs per host sample, best of six rounds over
+  two runs): with the Ratio 4 button in, the deck this work was aimed at, it
+  gains only about 3 %: 6.04 → 5.84 at −60 dBFS, 6.98 → 6.76 at −40,
+  7.13 → 6.92 at −30, 7.86 → 7.62 at −18. With every button out it gains
+  4–5 %: 8.20 → 7.87 at −40, 14.1 → 13.5 at −30, 14.9 → 14.3 at −24,
+  15.4 → 14.8 at −19.
+
 ## [0.1.21] - 2026-11-02
 
 **Against v0.1.20, over the 192 golden renders:** all 192 are byte-identical,

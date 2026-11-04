@@ -427,20 +427,29 @@ impl RustEmitter {
             "    // Sparse Gaussian elimination: {} ops in AMD order (unrolled)\n",
             lu.ops.len()
         ));
+        // Each pivot's reciprocal is formed once, after its tiny-pivot test,
+        // and the column's L factors multiply by it. The pivot is final by
+        // then: a pivot's own step writes only rows not yet eliminated, and
+        // its diagonal was last written by an earlier pivot's step.
+        let mut have_inv = vec![false; n];
         for op in &lu.ops {
             match op {
                 LuOp::DivPivot { row, col } => {
-                    code.push_str(&format!(
-                        "    if {}.abs() < 1e-30 {{ return false; }}\n",
-                        post(*col, *col)
-                    ));
-                    code.push_str(&format!(
-                        "    {} /= {};\n",
-                        post(*row, *col),
-                        post(*col, *col)
-                    ));
+                    if !have_inv[*col] {
+                        have_inv[*col] = true;
+                        code.push_str(&format!(
+                            "    if {}.abs() < 1e-30 {{ return false; }}\n",
+                            post(*col, *col)
+                        ));
+                        code.push_str(&format!(
+                            "    let inv_{col} = 1.0 / {};\n",
+                            post(*col, *col)
+                        ));
+                    }
+                    code.push_str(&format!("    {} *= inv_{col};\n", post(*row, *col)));
                 }
                 LuOp::SubMul { row, col, j } => {
+                    debug_assert!(row != col, "SubMul writes the pivot row of its own step");
                     code.push_str(&format!(
                         "    {} -= {} * {};\n",
                         post(*row, *j),
@@ -448,6 +457,14 @@ impl RustEmitter {
                         post(*col, *j)
                     ));
                 }
+            }
+        }
+        // Pivots with no L factor below them (the last in AMD order) take
+        // their reciprocal here, untested, as the back-solve divided by them
+        // untested before.
+        for &p in &lu.elim_order {
+            if !have_inv[p] {
+                code.push_str(&format!("    let inv_{p} = 1.0 / {};\n", post(p, p)));
             }
         }
 
@@ -481,6 +498,14 @@ impl RustEmitter {
         }
         code.push_str("    if !growth.is_finite() || growth > 1e8 { return false; }\n");
 
+        // The growth sweep has read the true pivots; the diagonal now holds
+        // their reciprocals, which `sparse_lu_back_solve` (the factor's one
+        // consumer) multiplies by. The dense fallback never reads this
+        // storage: a rejected factor returned above, before this point.
+        code.push_str("\n    // Diagonal := 1/pivot for the back-solve\n");
+        for &p in &lu.elim_order {
+            code.push_str(&format!("    {} = inv_{p};\n", post(p, p)));
+        }
         code.push_str("\n    true\n");
         code.push_str("}\n\n");
         if let Some(pk) = &pack {
@@ -568,7 +593,8 @@ impl RustEmitter {
                         code.push_str(&format!("    x[{pivot}] -= {} * x[{c}];\n", at(pivot, c)));
                     }
                 }
-                code.push_str(&format!("    x[{pivot}] /= {};\n", at(pivot, pivot)));
+                // The factor stored 1/pivot on the diagonal.
+                code.push_str(&format!("    x[{pivot}] *= {};\n", at(pivot, pivot)));
             }
         }
 

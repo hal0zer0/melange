@@ -282,6 +282,24 @@ Three optimizations stack to keep this real-time:
    touch pattern, panics at codegen instead of going where the factor cannot
    see it.
 
+8. **Reciprocal pivots** — `sparse_lu_factor` forms each pivot's
+   reciprocal once, after that column's 1e-30 tiny-pivot test, and the
+   column's L factors multiply by it instead of dividing; pivots with no L
+   factor below them take theirs after the elimination, untested, as the
+   back-solve divided by them untested before. The growth-factor sweep reads
+   the true pivots; only after it passes does the factor write the
+   reciprocals onto the diagonal, where `sparse_lu_back_solve`, the factor's
+   one consumer, multiplies by them. A rejected factor returns before that
+   write, and the dense fallback rebuilds its own matrix, so it never sees a
+   reciprocal. This changes bits: `fl(x * fl(1/p))` carries up to 2u
+   relative error against u for `fl(x / p)`, one extra rounding per L
+   multiplier and per back-solve pivot step. On identical input matrices the
+   accept/reject decision is the same and the growth factor agrees to about
+   growth x u (4.5e-12 relative at growth 2.4e4, the corpus worst case).
+   Rendered output moves at the solve's forward-error scale, and where an
+   iterate sits at a certification threshold the Newton path can take one
+   iteration more or fewer.
+
 Source: `crates/melange-solver/src/lu.rs` and the emit sites in
 `crates/melange-solver/src/codegen/rust_emitter/nodal_emitter/` (`lu.rs` for the
 emitted factor and back-solve, `full_lu_newton.rs` for the chord loop).
