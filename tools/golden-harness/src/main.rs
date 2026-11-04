@@ -221,6 +221,7 @@ fn main() -> ExitCode {
                     failures,
                     held,
                     counter_failures,
+                    removed_counters,
                 }) => {
                     if held != 0 && !allow_nr_hold {
                         eprintln!(
@@ -230,7 +231,7 @@ fn main() -> ExitCode {
                              --allow-nr-hold to proceed anyway."
                         );
                         ExitCode::from(4)
-                    } else if failures == 0 && counter_failures == 0 {
+                    } else if failures == 0 && counter_failures == 0 && removed_counters == 0 {
                         if held != 0 {
                             eprintln!(
                                 "warning: {held} render(s) shipped non-solutions; \
@@ -242,6 +243,14 @@ fn main() -> ExitCode {
                         // Its own failing condition, named: the counter gate has no
                         // bypass flag, because a different Newton path to the same
                         // output is a regression until traced, not a judgement call.
+                        if removed_counters != 0 {
+                            eprintln!(
+                                "FAIL: {removed_counters} solver counter(s) the baseline recorded \
+                                 are gone from every render of the new build (see SOLVER COUNTER \
+                                 GATE above). A removed diagnostic counter is a contract change: \
+                                 clear it with an allowlist entry that cites its clearance."
+                            );
+                        }
                         if counter_failures != 0 {
                             eprintln!(
                                 "FAIL: {counter_failures} render(s) fail the solver counter gate \

@@ -240,8 +240,11 @@ impl CaptureEra {
         self.recorded_a.contains(key) && self.recorded_b.contains(key)
     }
 
-    /// The keys one era recorded and the other never did, each with the side
-    /// that never recorded it (`"A"` or `"B"`).
+    /// The keys not comparable across the two eras, each with the side that
+    /// never recorded it: counters the new build added (`"A"` never recorded
+    /// them) and removals that [`REMOVED_COUNTER_ALLOWLIST`] clears (`"B"`).
+    /// An uncleared removal is not here: it is in [`CaptureEra::removed`] and
+    /// fails the gate.
     pub fn not_comparable(&self) -> Vec<(String, &'static str)> {
         let mut out: Vec<(String, &'static str)> = self
             .recorded_b
@@ -251,10 +254,41 @@ impl CaptureEra {
         out.extend(
             self.recorded_a
                 .difference(&self.recorded_b)
+                .filter(|k| removal_clearance(k).is_some())
                 .map(|k| (k.clone(), "B")),
         );
         out
     }
+
+    /// Counters the baseline's era recorded that the new build lacks on every
+    /// render, with no allowlist entry: a REMOVAL, which fails the gate. The
+    /// rule is asymmetric on purpose: a counter the new build adds is not yet
+    /// comparable, a counter it drops is a contract change (renaming or
+    /// repurposing a diagnostic counter is an API and test break, and
+    /// removing built code needs clearance), so it fails until an entry in
+    /// [`REMOVED_COUNTER_ALLOWLIST`] names it and cites that clearance.
+    pub fn removed(&self) -> Vec<String> {
+        self.recorded_a
+            .difference(&self.recorded_b)
+            .filter(|k| removal_clearance(k).is_none())
+            .cloned()
+            .collect()
+    }
+}
+
+/// Counters whose removal from the generated code is cleared, each with the
+/// clearance it cites (the ruling or the CHANGELOG entry that retired it).
+/// A removal not listed here fails the compare gate; add the entry in the
+/// same change that removes the counter, and keep it until no stored
+/// baseline records the counter any more.
+pub const REMOVED_COUNTER_ALLOWLIST: &[(&str, &str)] = &[];
+
+/// The clearance an allowlist entry cites for removing `key`, if any.
+fn removal_clearance(key: &str) -> Option<&'static str> {
+    REMOVED_COUNTER_ALLOWLIST
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, why)| *why)
 }
 
 /// What a recorded solver counter says about a render, which decides how the
@@ -937,6 +971,10 @@ pub struct Outcome {
     /// path to this output" is a third finding, independent of the audio
     /// classes and of the hold.
     pub counter_failures: usize,
+    /// Counters the baseline recorded that the new build dropped on every
+    /// render without an allowlist entry: each is a failing condition of its
+    /// own (a removed diagnostic is a contract change, cleared or not at all).
+    pub removed_counters: usize,
 }
 
 /// Compare two baselines.
@@ -982,6 +1020,7 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<
     // Which counter keys each whole capture knew (see `CaptureEra`).
     let era = CaptureEra::scan(dir_a, dir_b);
     let not_comparable = era.not_comparable();
+    let removed = era.removed();
 
     let mut results: Vec<PairResult> = Vec::new();
     for plugin in &plugins {
@@ -1220,9 +1259,22 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<
         EFFORT_ABSOLUTE_FLOOR
     );
     for (k, side) in &not_comparable {
+        match removal_clearance(k) {
+            Some(why) if *side == "B" => println!(
+                "  removal cleared: {k} — recorded by the baseline, absent on every render of \
+                 the new build; allowlisted ({why})"
+            ),
+            _ => println!(
+                "  not comparable: {k} — recorded on no render of {side} (that capture's codegen \
+                 did not declare it); skipped on every render, not read as 0"
+            ),
+        }
+    }
+    for k in &removed {
         println!(
-            "  not comparable: {k} — recorded on no render of {side} (that capture's codegen \
-             did not declare it); skipped on every render, not read as 0"
+            "  REMOVED: {k} — recorded by the baseline, absent on every render of the new \
+             build, no allowlist entry. A removed diagnostic counter is a contract change: \
+             it fails until REMOVED_COUNTER_ALLOWLIST names it and cites its clearance."
         );
     }
     if counter_failed.is_empty() {
@@ -1300,6 +1352,7 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<
             "not_comparable": not_comparable.iter().map(|(k, side)| {
                 serde_json::json!({"counter": k, "unrecorded_in": side})
             }).collect::<Vec<_>>(),
+            "removed": removed,
             "failed_render_count": n_counter_failed,
             "failed": counter_failed.iter().map(|r| serde_json::json!({
                 "plugin": r.plugin,
@@ -1347,12 +1400,14 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<
                 + n_diag_differ,
             held,
             counter_failures: n_counter_failed,
+            removed_counters: removed.len(),
         });
     }
     Ok(Outcome {
         failures: n_changed + n_missing + n_input_changed,
         held,
         counter_failures: n_counter_failed,
+        removed_counters: removed.len(),
     })
 }
 
@@ -1578,6 +1633,26 @@ mod counter_gate_tests {
     /// comparable: a counter added to codegen after the reference was
     /// captured is named in the report, not judged as a from-zero move. A key
     /// the era did record is still read as 0 on a render that lacks it.
+    /// A counter the baseline recorded that the new build dropped on every
+    /// render is a removal: it fails unless the allowlist names it.
+    #[test]
+    fn a_counter_the_new_build_dropped_is_a_removal_unless_cleared() {
+        let set = |ks: &[&str]| ks.iter().map(|k| k.to_string()).collect::<BTreeSet<_>>();
+        let era = CaptureEra {
+            recorded_a: set(&["diag_refactor_count", "diag_ls_fail_count"]),
+            recorded_b: set(&["diag_refactor_count"]),
+        };
+        assert_eq!(era.removed(), vec!["diag_ls_fail_count".to_string()]);
+        assert!(
+            era.not_comparable().is_empty(),
+            "an uncleared removal is not 'not comparable'"
+        );
+        // The allowlist is empty, so nothing is cleared today; the lookup is
+        // the mechanism an entry would go through.
+        assert!(removal_clearance("diag_ls_fail_count").is_none());
+        assert!(REMOVED_COUNTER_ALLOWLIST.is_empty());
+    }
+
     #[test]
     fn key_unrecorded_by_one_capture_era_is_not_comparable() {
         let set = |ks: &[&str]| ks.iter().map(|k| k.to_string()).collect::<BTreeSet<_>>();
@@ -1595,6 +1670,7 @@ mod counter_gate_tests {
             era.not_comparable(),
             vec![("diag_nr_iter_total".to_string(), "A")]
         );
+        assert!(era.removed().is_empty());
         // Without an era (or with one that recorded the key on both sides)
         // the same pair is a from-zero effort move.
         assert_eq!(judge_counters(&a, &b).len(), 1);
@@ -1617,15 +1693,14 @@ mod counter_gate_tests {
         );
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].kind, CounterFindingKind::FailurePathIncrease);
-        // The other direction: a key only A's era recorded is named for B.
+        // The other direction is not symmetric: a key only A's era recorded
+        // is a removal, which fails unless the allowlist clears it.
         let removed = CaptureEra {
             recorded_a: set(&["diag_refactor_count", "diag_old_count"]),
             recorded_b: set(&["diag_refactor_count"]),
         };
-        assert_eq!(
-            removed.not_comparable(),
-            vec![("diag_old_count".to_string(), "B")]
-        );
+        assert!(removed.not_comparable().is_empty());
+        assert_eq!(removed.removed(), vec!["diag_old_count".to_string()]);
     }
 
     /// An unclassified key fails the gate even when it did not move: the

@@ -78,6 +78,19 @@ roundoff-class change, nor the `v0.1.18-rc → v0.1.19-rc` or
 `v0.1.19-rc → v0.1.20-rc` release pairs, moved an effort counter from 0. Both
 constants carry this derivation in their doc comments.
 
+**Counters that one side never recorded** (the capture era). A key recorded
+on no render of the *baseline* is a counter the new build added: not yet
+comparable, skipped on every render and named once in the report (reading it
+as 0 would fail every added counter against every older baseline). The other
+direction is not symmetric: a key the baseline's era recorded that the new
+build lacks on every render is a REMOVAL and fails the gate, because renaming
+or repurposing a diagnostic counter is an API and test break for the plugins
+that read it, and removing built code needs clearance. A removal is cleared
+only by an entry in `REMOVED_COUNTER_ALLOWLIST` (`src/compare.rs`) that names
+the counter and cites its clearance, added in the same change and kept until
+no stored baseline records the counter. A key the era did record but a single
+render lacks still reads as 0 on that render.
+
 Where the bound stands on changes that are NOT roundoff-class: the 0.1.20
 cycle changed the certification itself (node-step test on the undamped
 correction, libm device laws) and moved `warpony/step` line-search failures
