@@ -250,6 +250,7 @@ Source: Sowter DWG E-72,658-2 (amp §) + Peerless/Triad winding data.
 - **DK codegen** with augmented MNA (≤1 transformer group, M<10, K well-conditioned)
 - **Nodal Schur** (medium complexity), **Nodal full LU** (K≈0 / positive K / ill-cond K or S / structural)
 - Full-LU optimizations stacked: chord method + cross-timestep Jacobian persistence + compile-time sparse LU (AMD ordering, symbolic factorization); a chord-accepted sample whose node-row residual exceeds 1e-9 A takes one refactored Newton step (the gated exit step)
+- Nodal Schur-vs-full-LU sub-path: structural requirements first, then the conditioning guards, then a **cost trigger** last (`codegen::route_cost`): a circuit every guard left on Schur routes full-LU when Schur's predicted per-sample cost (dense `N×N` `S·rhs` every sample plus a dense `M×M` elimination per iteration) exceeds 1.5× full-LU's (packed sparse back-solve per iteration), from compile-time inputs only (N, M, `solve_flops`); coefficients fitted to forced-both-ways timings (CODEGEN.md, `route_cost.rs`); moves toward full-LU only, inert for sectioned glow, under the linearized bypass and without a packed factor; the one corpus deck it moves is the revised FET limiter (N = 84, M = 28, measured Schur 1.9–2.8× full-LU)
 - Nodal sub-step ladder for a sample whose Newton fails: local refinement (bisects only the failing sub-step, keeps the converged prefix) down to T/2^12 within 64 attempts per sample (`SUBSTEP_MAX_POWER`, `SUBSTEP_BUDGET`); then backward Euler on a trapezoidal build; a sample no path solves is held and counted in `diag_unsolved_sample_count`. DK has no sub-step ladder.
 - Nodal Schur Newton starts at full-LU's point (`v_prev`): the first iterate solves `K·i_nl = N_v·v_prev − p` (rank-revealing LU of `K`; an unreachable start falls back to the predictor and is counted in `diag_warm_start_fallback_count`). DK keeps the first-order predictor (see the (iv) items under Pending Work).
 - Oversampling 2x/4x: self-contained polyphase half-band IIR, no runtime dependencies
@@ -430,6 +431,18 @@ f36e99c.
   rung. Both rungs dying at the same instant points at startup (the first
   edge at t = 0, or t1sx's initial consistency), not at the tolerance: try a
   zero-input lead-in before the first edge on both sides.
+
+- **`S_ILL_COND_MAX` = 1e6 sits inside the component-value population (ruled
+  2026-11-04: leave it).** `max|S|` is in ohms; the IR-level census over the
+  corpus puts 1 MΩ loads at 1.0e6–4.6e6 (el84-single-stage `Rout 1Meg` at
+  1.0056e6, a 0.56 % knife-edge; a transformer-coupled triode's `Rload 1Meg`
+  at 4.6e6), a 10 MΩ DC reference at 1.0e7, and the first GMIN-class node at
+  5.0e8 (two 1 GΩ wafer resistors); true GMIN-only nodes sit at 5e11–1e12.
+  Those three s-ill decks are N ≤ 13 at ~1 µs/sample and their routes agree
+  when both converge, so nothing is gained by moving the threshold now;
+  moving it is its own item, with Schur witnessed on every deck it moves. The
+  revised FET limiter (`S[c2][c2]` = 9.99999e5, a 1 MΩ leak plus GMIN) no
+  longer depends on it: the cost trigger routes it full-LU on either side.
 
 - **Diode breakdown branch: value/derivative mismatch past x = 40.** The
   breakdown current `-IBV·exp(-(v + BV)/n_vt)` clamps its exponent at 40 and

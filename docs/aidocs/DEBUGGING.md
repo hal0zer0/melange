@@ -536,6 +536,15 @@ have G ≈ Gmin (1e-12), so S = A^{-1} has extreme entries (>1e6). This causes:
 reduction — FA changes N_V/N_I/K dimensions but NOT A/S conditioning, since the
 problematic nodes still lack resistive paths.
 
+Note that `max|S|` is in ohms and 1e6 is a 1 MΩ load, so a leak resistor can
+sit a hair under the threshold (the revised FET limiter's `S[c2][c2]` =
+9.99999e5 = 1/(1/1 MΩ + GMIN)). A large-N circuit left on Schur that way is
+caught by the chain's last trigger, **cost** (`codegen::route_cost`,
+CODEGEN.md): Schur's dense N×N `S·rhs` per sample against the packed sparse
+back-solve. `RUST_LOG=info` prints `Nodal: conditioning census` with every
+figure the chain read, the S entry that sets `max|S|` named by its nodes, and
+both cost predictions.
+
 **Example**: 8-BJT transistor ladder filter (moonladder). Bridging caps
 between left/right columns at each stage. Nodes eL2-eR4 have only Gmin + cap.
 S entries ~1e8, K entries ~5e11 at M=16 (pre-FA), ~1e4 at M=8 (post-FA), but

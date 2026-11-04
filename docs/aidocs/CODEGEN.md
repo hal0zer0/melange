@@ -1022,6 +1022,29 @@ Schur reduction cannot express either, so forcing it would emit a solver that
 silently drops the nonlinearity. Where the auto choice was a conditioning
 *heuristic*, forcing is allowed and warns with the predicates that fired.
 
+**The chain's last trigger is cost** (`codegen::route_cost`). After every
+structural requirement (saturating inductors, behavioral sources) and every
+conditioning guard (positive K, extreme K diagonal, degenerate K, `max|K|`,
+`max|S|`, spectral radius, large K under linearization) has left a circuit on
+Schur, the emitter compares the two implementations' predicted per-sample cost
+and routes full-LU when Schur is predicted to cost more than `COST_RATIO_MAX`
+(1.5) times full-LU. The prediction uses compile-time inputs only: `N`, `M` and
+the packed sparse factor's back-solve flop count (`LuSparsity::solve_flops`),
+with the six coefficients and the nominal iteration pair fitted to
+forced-both-ways timings of the corpus (the fit table, protocol and the
+re-fit obligation are in `route_cost.rs`). The rule moves a circuit toward
+full-LU only, never overrides a guard, and is inert where the two sub-paths
+are not the same model (a relaxing-section / delayed-overvoltage / KSUB glow,
+which full-LU refuses), under the linearized bypass (the full-LU Newton is
+documented to degrade on long linearized chains, never measured by the fit)
+and where no packed factor exists (dense full-LU is never the cheaper route).
+What creates the crossover is Schur's dense `N×N` `S·rhs` matvec every sample
+(0.42 ns·N² on one core: 3 µs at N = 84) against a packed back-solve of about
+1 % of N²; the dense `M×M` elimination only matters past M ≈ 30. The trigger is
+named `cost` in the route line and provenance, and the info-level
+`Nodal: conditioning census` line prints every figure the chain read, both
+cost predictions included, from the same variables the decision used.
+
 **First result** (16 paired same-netlist comparisons): 12 decks agree to
 -60..-196 dBc — the two paths are numerically equivalent implementations. Three
 high-gain decks disagree at -12 to -35 dBc, but all are junk-pile circuits, so

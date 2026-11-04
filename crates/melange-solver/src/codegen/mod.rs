@@ -24,6 +24,7 @@ pub mod ir;
 pub mod policy;
 #[cfg(feature = "codegen")]
 pub mod ring;
+pub mod route_cost;
 pub mod routing;
 #[cfg(feature = "codegen")]
 pub mod rust_emitter;

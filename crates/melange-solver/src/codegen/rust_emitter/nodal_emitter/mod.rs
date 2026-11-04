@@ -264,6 +264,39 @@ impl RustEmitter {
                     || schur_unstable
             };
 
+        // A relaxing-section / delayed-overvoltage / subnormal (KSUB) glow is
+        // honoured on Schur only; full-LU runs the static maintaining line and
+        // is refused below. Named once here: the cost rule must not route a
+        // deck that compiles today into that refusal.
+        let is_sectioned_glow = |slot: &crate::codegen::ir::DeviceSlot| {
+            matches!(
+                &slot.params,
+                DeviceParams::Glow(gp)
+                    if gp.has_sections() || gp.has_d() || gp.ksub > 0.0
+            )
+        };
+        let glow_sectioned = ir.device_slots.iter().any(is_sectioned_glow);
+        // The COST rule (`codegen::route_cost`), last in the chain: for a
+        // circuit every structural and conditioning guard has left on Schur,
+        // route full-LU when the two implementations of the same model are
+        // predicted to differ in per-sample cost by more than COST_RATIO_MAX.
+        // Never the other way, never overriding a guard. Inert (a) where
+        // full-LU is not the same model (sectioned glow), (b) under the
+        // linearized bypass (the full-LU Newton is documented to degrade on
+        // long linearized chains, which the fit never measured), and (c)
+        // without a packed sparse factor (dense full-LU is never cheaper).
+        let cost_prediction = crate::codegen::route_cost::predict(
+            n,
+            m,
+            ir.sparsity.lu.as_ref().map(|lu| lu.solve_flops),
+        );
+        let cost_rule = !auto_use_full_nodal
+            && m > 0
+            && !linearized_bypass
+            && !glow_sectioned
+            && cost_prediction.is_some_and(|p| p.prefers_full_lu());
+        let auto_use_full_nodal = auto_use_full_nodal || cost_rule;
+
         // Apply the `--nodal-subpath` override. `Auto` is the shipping path and
         // is byte-identical to the pre-flag emitter. The forcing modes are
         // diagnostic escape hatches in the spirit of `--force-trap`: they let
@@ -304,13 +337,15 @@ impl RustEmitter {
                     log::warn!(
                         "Nodal: --nodal-subpath schur overrides the auto choice (auto \
                          selected full-LU on conditioning grounds: k_degenerate={}, \
-                         k_ill_conditioned={}, s_ill_conditioned={}, schur_unstable={}). \
+                         k_ill_conditioned={}, s_ill_conditioned={}, schur_unstable={}, \
+                         or on cost: cost_rule={}). \
                          The Schur reduction may be inaccurate or diverge on this \
                          circuit. Diagnostic mode — do not ship.",
                         k_degenerate,
                         k_ill_conditioned,
                         s_ill_conditioned,
-                        schur_unstable
+                        schur_unstable,
+                        cost_rule
                     );
                 }
                 false
@@ -346,9 +381,63 @@ impl RustEmitter {
             "schur-unstable"
         } else if k_large_magnitude_with_linearization {
             "k-large-linearized"
+        } else if cost_rule {
+            "cost"
         } else {
             "unknown"
         };
+        // Conditioning census line (info level, `RUST_LOG=info`): the figures
+        // the sub-path decision above read, on the matrices it read them from,
+        // plus the S entry that sets max|S| named by its nodes. A route
+        // threshold is placed from a corpus census of these numbers; without
+        // this line the census has to re-derive the matrices outside the
+        // emitter and can drift from what the decision actually saw.
+        {
+            let s_argmax = (0..n * n).max_by(|&a, &b| {
+                ir.matrices.s[a]
+                    .abs()
+                    .partial_cmp(&ir.matrices.s[b].abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let node_name = |idx: usize| -> String {
+                ir.named_constants
+                    .node_names
+                    .iter()
+                    .find(|(_, i)| *i == idx)
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or_else(|| format!("row{idx}"))
+            };
+            let s_at = s_argmax.map_or_else(
+                || "-".to_string(),
+                |flat| {
+                    let (r, c) = (flat / n, flat % n);
+                    format!("S[{r}][{c}] ({} , {})", node_name(r), node_name(c))
+                },
+            );
+            let (cost_schur, cost_full_lu) =
+                cost_prediction.map_or((f64::NAN, f64::NAN), |p| (p.schur_ns, p.full_lu_ns));
+            log::info!(
+                "Nodal: conditioning census: N={} M={} sub_path={} trigger={} \
+                 max|K|={:.6e} K_diag_min={:.6e} max|S|={:.6e} at {} \
+                 rho={:.6} linearized={} pos_K_with_I={} k_degenerate={} \
+                 cost_schur_ns={:.0} cost_full_lu_ns={:.0} cost_ratio={:.3}",
+                n,
+                m,
+                if use_full_nodal { "full-lu" } else { "schur" },
+                if use_full_nodal { full_lu_trigger } else { "-" },
+                k_max_abs,
+                k_diag_min,
+                s_max_abs,
+                s_at,
+                ir.matrices.spectral_radius_s_aneg,
+                ir.topology.num_linearized_devices,
+                has_positive_k_with_current,
+                k_degenerate,
+                cost_schur,
+                cost_full_lu,
+                cost_schur / cost_full_lu
+            );
+        }
         // Fail-loud refusal (design review): a relaxing-section / delayed-
         // overvoltage / subnormal (KSUB) glow on the full-LU sub-path runs a
         // MIXED, silently-wrong model — the full-LU device eval solves the static
@@ -360,13 +449,12 @@ impl RustEmitter {
         // `allow_static_glow_on_full_lu` (which runs today's static line and marks
         // the sections inert in provenance).
         if use_full_nodal && !ir.solver_config.allow_static_glow_on_full_lu {
-            if let Some((dev_num, _)) = ir.device_slots.iter().enumerate().find(|(_, slot)| {
-                matches!(
-                    &slot.params,
-                    DeviceParams::Glow(gp)
-                        if gp.has_sections() || gp.has_d() || gp.ksub > 0.0
-                )
-            }) {
+            if let Some((dev_num, _)) = ir
+                .device_slots
+                .iter()
+                .enumerate()
+                .find(|(_, slot)| is_sectioned_glow(slot))
+            {
                 return Err(CodegenError::InvalidConfig(format!(
                     "glow device #{dev_num} uses a relaxing-section / delayed-overvoltage \
                      / subnormal (KSUB) lit branch, but this circuit routes the nodal \
@@ -580,6 +668,20 @@ impl RustEmitter {
                 log::warn!(
                     "Nodal: using full N×N LU NR (max|K|={:.2e} with linearized devices — Schur NR in M-space hypersensitive to i_nl steps; v-space NR converges better)",
                     k_max_abs
+                );
+            } else if cost_rule {
+                let p = cost_prediction.expect("cost_rule implies a prediction");
+                log::warn!(
+                    "Nodal: using full N×N LU NR (cost: predicted Schur {:.0} ns vs full-LU \
+                     {:.0} ns per inner sample, ratio {:.2} > {}; N={}, M={}, packed \
+                     back-solve {} flops)",
+                    p.schur_ns,
+                    p.full_lu_ns,
+                    p.ratio(),
+                    crate::codegen::route_cost::COST_RATIO_MAX,
+                    n,
+                    m,
+                    ir.sparsity.lu.as_ref().map_or(0, |lu| lu.solve_flops)
                 );
             } else {
                 // Not reachable while the branches above mirror `full_lu_trigger`;

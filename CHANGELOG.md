@@ -11,6 +11,23 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ### Added
 
+- **Nodal sub-path cost trigger.** After every structural requirement and
+  conditioning guard has left a circuit on the Schur sub-path, the emitter
+  routes it full-LU when Schur's predicted per-sample cost exceeds 1.5×
+  full-LU's, from compile-time inputs only (N, M and the packed sparse
+  factor's back-solve flop count; `codegen::route_cost`, coefficients fitted to
+  forced-both-ways timings of the corpus, provenance in the module). Toward
+  full-LU only, never overriding a guard; inert for a sectioned glow (which
+  full-LU refuses), under the linearized bypass and without a packed factor.
+  Schur applies the dense N×N `S·rhs` every sample, so past N ≈ 60 it costs
+  2–3× the packed back-solve for the same certified result: one corpus deck
+  moves (a 28-dimension FET limiter at N = 84, 1.96–2.09× measured). The
+  route line and provenance name the trigger `cost`.
+- **`RUST_LOG=info` prints a `Nodal: conditioning census` line** on every
+  nodal build: N, M, sub-path, trigger, `max|K|`, `K_diag_min`, `max|S|` with
+  the S entry named by its nodes, spectral radius, linearized count and both
+  cost predictions, from the same variables the sub-path decision read.
+
 - **`simulate --freq <Hz>`** sets the test tone's frequency (default 1000,
   so existing renders are unchanged). Refused unless positive and below
   Nyquist of the run's sample rate; `-v` prints the tone.
