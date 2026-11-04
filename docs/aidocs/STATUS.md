@@ -395,6 +395,70 @@ f36e99c.
 
 ## Pending Work
 
+- **Oversampling made an edge-rich render WORSE on a stiff, hard-knee deck
+  (2026-11-03, ruled).** A FET limiter's output Darlington with its C-E
+  breakdown (`D(BV=60)`), B-E shunts and junction caps, driven by a 31.6 V
+  50 Hz square: against an ngspice reference driven with the validate
+  reconstruction, the 1x build sits at −24.6 dB residual with every octave
+  within ±0.6 dB, the 2x build at −13.6 dB with +7 dB at 16 kHz and −5 dB at
+  4 kHz, 4x at −19 dB. The same 10.4 µs solver step at a 96 kHz host without
+  the half-band path shows no excess (≤ 0.3 dB per octave); backward Euler at
+  2x removes most of it (16 kHz +7.2 → +3.0 dB). Mechanism: the revision's
+  sub-sample port modes (≈0.2 µs and 4 µs) ring at z ≈ −1 under trapezoidal
+  at the internal rate and the breakdown knee rectifies the ring into
+  in-band products; the half-band interpolator's edge feeds it. Both safety
+  nets are blind by design: the ring predicate is linearised at the DC OP and
+  measures the input→output residue (−337 dB here, knee off at rest), and the
+  BE latch watches `OUTPUT_NODES[0]` lag-1 for an fs/2 alternation, which a
+  rectified product is not. Program material (a 1 kHz sine 6 dB into the clip)
+  matches ngspice at −42/−45 dB on the same deck. First step before any
+  design (ruled): a 2×2 factorial at 1x on a 96 kHz host — input raw 96 kHz
+  step vs the half-band-interpolated 48 kHz stimulus, output the half-band
+  decimator vs a long near-ideal decimator applied offline — to separate
+  interpolator-driven ringing from decimator aliasing.
+
+- **Full-LU hits its iteration ceiling on knee samples that Schur certifies
+  at the same tolerances (2026-11-03, ruled).** Same deck, same square: the
+  Schur sub-path converges every sample at 1x/2x/4x with no ceiling hit;
+  full-LU forced on the same build takes 48 / 83 / 31 sub-step/BE retries,
+  and the two routes differ only on those samples (−151 dB on a smooth
+  stimulus, −25 / −25 / −43 dB on the square, tracking the ceiling count).
+  That is a full-LU convergence defect counted on failure-path counters,
+  whichever render is closer to ngspice: trace the first divergence on a
+  knee sample (why the global-ray limiter plus node damping needs a retry
+  where the M-dim Newton does not) and fix full-LU. Expect the fix to move
+  those samples from backward Euler to trapezoidal, which can make the 2x
+  render against ngspice worse until the item above lands; attribute, do
+  not block. No router rule and no deck directive (ruled): the router's
+  conditioning predicates are convergence proxies, and the deck's route is
+  today decided by GMIN — `S[c2][c2] = 1/(1/1 MΩ + GMIN) = 9.99999e5` against
+  the strict `S_ILL_COND_MAX = 1e6`, a threshold written for GMIN-held nodes
+  (~1e12) that sits on one of the most common component values in the domain
+  (1 MΩ leaks). When the router is revisited, place that threshold in the gap
+  from a corpus census of max|S| and the node that sets it.
+
+- **Validate rate ladder: both tolerance rungs die at t = 16 ns on a
+  transformer-coupled deck (2026-11-03, ruled: the refusal stands).** On the
+  committed FET limiter at 0.1 V and on both decks at 0.35 V, the step rung
+  settles (0.0001–0.0006 %) but ngspice aborts reltol = 1e-5 and the
+  trtol = 0.7 substitute alike at t = 1.6e-8 s, "trouble with node t1sx"
+  (T1's 0.9999-coupled secondary node), so `converged_reference` reports not
+  converged and the ladder gives no verdict. The tolerance rung is not
+  redundant with the step rung: ngspice's step at an edge is set by LTE from
+  reltol/trtol, already far below TMAX, so a settled step rung says least
+  about the knee and flyback samples. Do not grade with a caveat; fix the
+  rung. Both rungs dying at the same instant points at startup (the first
+  edge at t = 0, or t1sx's initial consistency), not at the tolerance: try a
+  zero-input lead-in before the first edge on both sides.
+
+- **Diode breakdown branch: value/derivative mismatch past x = 40.** The
+  breakdown current `-IBV·exp(-(v + BV)/n_vt)` clamps its exponent at 40 and
+  goes flat there, while the stamped conductance stays `IBV/n_vt·e^40`: the
+  same mismatch the forward branch removed with a linear extension. With the
+  breakdown-side limiter (`pnjlim_bv`, 2026-11-03) a Newton step reaches that
+  region only through an unlimited path, so it is queued, not urgent; the fix
+  is the forward branch's linear extension mirrored about the knee.
+
 - **Test design: `runtime_input_guard_tests` asserts a 2× timing bound on microsecond windows** (n = 1000 samples per phase, ratio of the non-finite phases' time to the finite baseline's). Under the release gate's 8 test threads it reads 8–24× on the negative-infinity phase in 2 of 8 solo runs and in every gate run on 2026-11-01, on a DK deck whose generated code had not changed. Not a solver regression; the measurement needs a longer window or a median of runs, not a looser bound. First CI occurrence 2026-11-01 on the v0.1.20 release commit (the nodal-Schur 2× variant, finite phase at 3.4× on the shared runner, every functional assertion passing); the re-run of the unchanged job passed. CI's Test job stops at the first failing binary, so one such flake also hides every later test binary's result.
 - **0.1.20: rank-1 pot updates on nonlinear DK builds (M > 0).** 0.1.18 applies a
   pot / `.runtime R` change as an exact rank-1 update of `S` only when the deck
