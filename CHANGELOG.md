@@ -67,6 +67,22 @@ codegen output, CLI flags, and netlist semantics may all change.
   feeds. The vector is installed either way.
 - **`dc_op_i_nl: [f64; M]`** on every `CircuitState`: the device currents at
   the live `dc_operating_point`, written with it.
+- **Two additive diagnostic counters on `CircuitState`.** `diag_nr_iter_total`
+  (every build, both routes) is the cumulative Newton iteration count over
+  every solved sample, one per iteration of every Newton loop on the sample
+  path (trapezoidal solve, sub-step ladder, backward-Euler fallback,
+  sub-sample fire re-solve, active-set rail pin; the DC operating-point solve
+  is not counted); `diag_sparse_reject_count` (nodal full-LU builds with a
+  sparse LU schedule) counts the iterations on which the sparse factor refused
+  its static pivot order at runtime and the dense factor ran instead. Neither
+  changes a computed number; generated renders are byte-identical. `simulate`
+  prints both presence-filtered (the iteration total under `-v`, like the
+  other effort figures), `analyze` reads the sparse rejections per point, and
+  the golden harness gates the total as an effort counter and the rejections
+  as failure-path. The harness compare also learned that a counter key one
+  whole baseline never recorded is not comparable (named in the report, not
+  read as 0), so a counter added to codegen does not fail every compare
+  against an older baseline.
 
 ### Changed
 

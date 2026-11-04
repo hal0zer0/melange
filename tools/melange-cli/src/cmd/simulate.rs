@@ -186,12 +186,13 @@ fn silent_output_warning(
 /// line summarize them. Every other counter prints by default when nonzero
 /// (an unsolved sample, a reset, a clamp, a missed sub-sample fire, and any
 /// counter added later until it is classified here).
-const EXPLANATORY_DIAGS: [&str; 16] = [
+const EXPLANATORY_DIAGS: [&str; 17] = [
     "samples",
     "probes_written",
     "peak",
     "max_abs_v_prev",
     "nr_max_iter_count",
+    "nr_iter_total",
     "substep_count",
     "be_fallback_count",
     "region_exit_count",
@@ -438,6 +439,12 @@ pub(crate) fn simulate_circuit_source(
             "diag_warm_start_fallback_count",
             "diag_reduced_model_exit_count",
             "diag_inject_clamp_count",
+            // Effort and failure-path witnesses the golden harness gates:
+            // every Newton iteration the render ran (every build), and the
+            // sparse factor's runtime pivot refusals (full-LU builds with a
+            // sparse schedule).
+            "diag_nr_iter_total",
+            "diag_sparse_reject_count",
         ])
         .chain(INPUT_DIAG_FIELDS)
         .filter(|f| declares_state_field(&generated.code, f))

@@ -117,7 +117,8 @@ impl RustEmitter {
         let has_nonlinear = !ir.device_slots.is_empty();
 
         code.push_str("    // Newton-Raphson iteration\n");
-        code.push_str("    for iter in 0..MAX_ITER {\n\n");
+        code.push_str("    for iter in 0..MAX_ITER {\n");
+        code.push_str("        state.diag_nr_iter_total += 1;\n\n");
 
         // Compute v_d = p + K * i_nl (K is exact from rebuild_matrices)
         {

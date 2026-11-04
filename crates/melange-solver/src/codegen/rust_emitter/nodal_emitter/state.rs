@@ -304,6 +304,32 @@ impl RustEmitter {
         code.push_str("    /// Diagnostic: number of times NR hit max iterations\n");
         code.push_str("    pub diag_nr_max_iter_count: u64,\n");
         code.push_str(
+            "    /// Diagnostic: cumulative Newton iterations over every sample this\n\
+             \x20   /// instance solved. Every Newton loop of the sample path adds one per\n\
+             \x20   /// iteration it runs: the trapezoidal solve, the sub-step ladder, the\n\
+             \x20   /// backward-Euler fallback, the sub-sample fire re-solve and the\n\
+             \x20   /// active-set rail pin, unconverged iterations included. The DC\n\
+             \x20   /// operating-point solve and the device-internal inner loops do not\n\
+             \x20   /// count. The most sensitive effort signal a render carries: a change\n\
+             \x20   /// in the solver's path moves it where the output does not. Additive\n\
+             \x20   /// (it reads nothing back; no number the solver computes depends on it).\n",
+        );
+        code.push_str("    pub diag_nr_iter_total: u64,\n");
+        if declares_sparse_reject_counter(ir, use_full_nodal) {
+            code.push_str(
+                "    /// Diagnostic: Newton iterations on which the sparse LU factor refused\n\
+                 \x20   /// its static (symbolic) pivot order at runtime (a pivot numerically\n\
+                 \x20   /// near zero, or element growth beyond its check) and the dense\n\
+                 \x20   /// partially-pivoted factor ran in its place on the same stamped\n\
+                 \x20   /// matrix. Present only on a full-LU build with a sparse schedule.\n\
+                 \x20   /// The sample is still solved (the dense factor is the general\n\
+                 \x20   /// path); a nonzero value says the static pivoting was refused, which\n\
+                 \x20   /// is a failure-path signal worth tracing. Additive (no number the\n\
+                 \x20   /// solver computes depends on it).\n",
+            );
+            code.push_str("    pub diag_sparse_reject_count: u64,\n");
+        }
+        code.push_str(
             "    /// Diagnostic: device-samples where a pentode's grid conducts (Vgk > 0)\n\
              \x20   /// or a BJT's base-collector junction is forward biased (saturation) —\n\
              \x20   /// the regions the grid-off / forward-active reductions assume are never\n\
@@ -907,6 +933,10 @@ impl RustEmitter {
         code.push_str("            diag_peak_output: 0.0,\n");
         code.push_str("            diag_clamp_count: 0,\n");
         code.push_str("            diag_nr_max_iter_count: 0,\n");
+        code.push_str("            diag_nr_iter_total: 0,\n");
+        if declares_sparse_reject_counter(ir, use_full_nodal) {
+            code.push_str("            diag_sparse_reject_count: 0,\n");
+        }
         code.push_str("            diag_region_exit_count: 0,\n");
         if super::super::helpers::has_reduced_device(ir) {
             code.push_str("            diag_reduced_model_exit_count: 0,\n");
@@ -1245,6 +1275,10 @@ impl RustEmitter {
         code.push_str("        self.diag_peak_output = 0.0;\n");
         code.push_str("        self.diag_clamp_count = 0;\n");
         code.push_str("        self.diag_nr_max_iter_count = 0;\n");
+        code.push_str("        self.diag_nr_iter_total = 0;\n");
+        if declares_sparse_reject_counter(ir, use_full_nodal) {
+            code.push_str("        self.diag_sparse_reject_count = 0;\n");
+        }
         code.push_str("        self.diag_region_exit_count = 0;\n");
         if super::super::helpers::has_reduced_device(ir) {
             code.push_str("        self.diag_reduced_model_exit_count = 0;\n");
@@ -2388,4 +2422,15 @@ impl RustEmitter {
 
         code
     }
+}
+
+/// True when the build emits the branch `diag_sparse_reject_count` counts:
+/// the full-LU Newton loop (`full_lu_newton.rs`) factoring through a sparse
+/// schedule, whose runtime pivot check can refuse and fall back to the dense
+/// factor. A Schur build plans the same schedule but never factors through
+/// it, and a linear full-LU build has no Newton loop, so neither declares
+/// the counter (a permanent zero for a branch that does not exist would read
+/// as reassurance).
+pub(super) fn declares_sparse_reject_counter(ir: &CircuitIR, use_full_nodal: bool) -> bool {
+    use_full_nodal && emits_hold(ir) && ir.sparsity.lu.is_some()
 }

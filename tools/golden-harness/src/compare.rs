@@ -169,14 +169,22 @@ fn generated_source_differs(dir_a: &Path, dir_b: &Path, plugin: &str) -> Option<
 /// alters how often the BE fallback, NaN reset or line search fires without
 /// altering the output samples is exactly the class of regression the audio
 /// gate cannot see, and exactly what a codegen refactor is most likely to do.
-/// Returns the differing keys as `(name, a, b)`.
-fn diagnostic_deltas(a: &Option<Stats>, b: &Option<Stats>) -> Vec<(String, f64, f64)> {
+/// Returns the differing keys as `(name, a, b)`. A key one capture era never
+/// recorded ([`CaptureEra::comparable`]) is left out.
+fn diagnostic_deltas(
+    a: &Option<Stats>,
+    b: &Option<Stats>,
+    era: Option<&CaptureEra>,
+) -> Vec<(String, f64, f64)> {
     let (Some(a), Some(b)) = (a, b) else {
         return Vec::new();
     };
     let mut out = Vec::new();
     let keys: BTreeSet<&String> = a.diagnostics.keys().chain(b.diagnostics.keys()).collect();
     for k in keys {
+        if era.is_some_and(|e| !e.comparable(k)) {
+            continue;
+        }
         let va = a.diagnostics.get(k).copied().unwrap_or(0.0);
         let vb = b.diagnostics.get(k).copied().unwrap_or(0.0);
         if va != vb {
@@ -184,6 +192,69 @@ fn diagnostic_deltas(a: &Option<Stats>, b: &Option<Stats>) -> Vec<(String, f64, 
         }
     }
     out
+}
+
+/// The counter keys each baseline's capture recorded on at least one render:
+/// the keys that baseline's codegen era declared.
+///
+/// A key recorded in no render of one side was not on that era's generated
+/// `CircuitState` at all (it postdates the capture, or predates the counter's
+/// removal), so its absence says nothing about a mechanism firing. Reading it
+/// as 0 would turn every counter added to codegen into a from-zero move
+/// against every older baseline — `diag_nr_iter_total` is nonzero on every
+/// nonlinear render by construction. Such a key is NOT COMPARABLE: the judge
+/// and the diagnostic deltas skip it on every render, and the report names
+/// it once. A key the era did record but one render lacks is still read as 0
+/// on that render: that build declared no such mechanism, and a build that
+/// gained the mechanism and fired it is exactly a change to trace.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CaptureEra {
+    pub recorded_a: BTreeSet<String>,
+    pub recorded_b: BTreeSet<String>,
+}
+
+impl CaptureEra {
+    /// Every key in any `<plugin>/<program>.stats.json` under each baseline.
+    pub fn scan(dir_a: &Path, dir_b: &Path) -> Self {
+        CaptureEra {
+            recorded_a: Self::recorded_keys(dir_a),
+            recorded_b: Self::recorded_keys(dir_b),
+        }
+    }
+
+    fn recorded_keys(dir: &Path) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for plugin in list_plugins(dir) {
+            for program in list_programs(dir, &plugin) {
+                if let Some(s) = read_stats(dir, &plugin, &program) {
+                    out.extend(s.diagnostics.keys().cloned());
+                }
+            }
+        }
+        out
+    }
+
+    /// Both captures recorded the key somewhere, so a render-level absence
+    /// means "not declared on this build" rather than "not yet invented".
+    pub fn comparable(&self, key: &str) -> bool {
+        self.recorded_a.contains(key) && self.recorded_b.contains(key)
+    }
+
+    /// The keys one era recorded and the other never did, each with the side
+    /// that never recorded it (`"A"` or `"B"`).
+    pub fn not_comparable(&self) -> Vec<(String, &'static str)> {
+        let mut out: Vec<(String, &'static str)> = self
+            .recorded_b
+            .difference(&self.recorded_a)
+            .map(|k| (k.clone(), "A"))
+            .collect();
+        out.extend(
+            self.recorded_a
+                .difference(&self.recorded_b)
+                .map(|k| (k.clone(), "B")),
+        );
+        out
+    }
 }
 
 /// What a recorded solver counter says about a render, which decides how the
@@ -236,6 +307,9 @@ pub const COUNTER_CLASSES: &[(&str, CounterClass)] = &[
     // Newton exhausted its iteration ceiling; the capped iterate went on to
     // the sub-step / BE ladder.
     ("diag_nr_max_iter_count", CounterClass::FailurePath),
+    // The sparse LU factor refused its static pivot order at runtime and the
+    // dense factor ran in its place (full-LU builds with a sparse schedule).
+    ("diag_sparse_reject_count", CounterClass::FailurePath),
     // The adaptive sub-step ladder ran on a sample.
     ("diag_substep_count", CounterClass::FailurePath),
     // The backward-Euler fallback solve ran (also counts every sample after
@@ -295,6 +369,9 @@ pub const COUNTER_CLASSES: &[(&str, CounterClass)] = &[
         CounterClass::FailurePath,
     ),
     // ---- effort: how hard a converged solve was, or a region entered ----
+    // Cumulative Newton iterations over every solved sample, every Newton
+    // loop of the sample path: the most sensitive effort signal.
+    ("diag_nr_iter_total", CounterClass::Effort),
     ("diag_refactor_count", CounterClass::Effort),
     ("diag_ls_fail_count", CounterClass::Effort),
     // Samples on which the active-set rail resolve pinned an op-amp output:
@@ -434,11 +511,28 @@ fn fmt_val(v: Option<f64>) -> String {
 /// the rescue fired), which is exactly a change to trace.
 ///
 /// Returns one finding per failing counter; empty means the render passes.
+/// [`judge_counters_in_era`] is the same judge with the keys one capture era
+/// never recorded left out; the compare always judges in an era, so this
+/// every-key form is the unit tests' entry point.
+#[cfg(test)]
 pub fn judge_counters(a: &BTreeMap<String, f64>, b: &BTreeMap<String, f64>) -> Vec<CounterFinding> {
+    judge_counters_in_era(a, b, None)
+}
+
+/// [`judge_counters`], skipping every key the given [`CaptureEra`] calls not
+/// comparable (recorded on no render of one whole baseline).
+pub fn judge_counters_in_era(
+    a: &BTreeMap<String, f64>,
+    b: &BTreeMap<String, f64>,
+    era: Option<&CaptureEra>,
+) -> Vec<CounterFinding> {
     const TRACE: &str = "a first-divergence trace is required before this change can pass";
     let keys: BTreeSet<&String> = a.keys().chain(b.keys()).collect();
     let mut out = Vec::new();
     for k in keys {
+        if era.is_some_and(|e| !e.comparable(k)) {
+            continue;
+        }
         let va = a.get(k).copied();
         let vb = b.get(k).copied();
         let (x, y) = (va.unwrap_or(0.0), vb.unwrap_or(0.0));
@@ -510,11 +604,15 @@ pub fn judge_counters(a: &BTreeMap<String, f64>, b: &BTreeMap<String, f64>) -> V
 
 /// Counter findings for a render pair from its stats; a side with no stats
 /// contributes an empty map (nothing recorded, nothing declared).
-fn judge_render_counters(a: &Option<Stats>, b: &Option<Stats>) -> Vec<CounterFinding> {
+fn judge_render_counters(
+    a: &Option<Stats>,
+    b: &Option<Stats>,
+    era: &CaptureEra,
+) -> Vec<CounterFinding> {
     let empty = BTreeMap::new();
     let da = a.as_ref().map(|s| &s.diagnostics).unwrap_or(&empty);
     let db = b.as_ref().map(|s| &s.diagnostics).unwrap_or(&empty);
-    judge_counters(da, db)
+    judge_counters_in_era(da, db, Some(era))
 }
 
 fn read_stats(dir: &Path, plugin: &str, program: &str) -> Option<Stats> {
@@ -634,7 +732,13 @@ fn meta_rev(dir: &Path) -> String {
         .unwrap_or_else(|| "unknown-rev".to_string())
 }
 
-fn compare_pair(dir_a: &Path, dir_b: &Path, plugin: &str, program: &str) -> PairResult {
+fn compare_pair(
+    dir_a: &Path,
+    dir_b: &Path,
+    plugin: &str,
+    program: &str,
+    era: &CaptureEra,
+) -> PairResult {
     let mut res = PairResult {
         plugin: plugin.to_string(),
         program: program.to_string(),
@@ -686,8 +790,8 @@ fn compare_pair(dir_a: &Path, dir_b: &Path, plugin: &str, program: &str) -> Pair
                 let sb = read_stats(dir_b, plugin, program);
                 // The counter gate judges byte-identical renders too: this is
                 // precisely the case the audio classes cannot see.
-                res.counter_findings = judge_render_counters(&sa, &sb);
-                let dd = diagnostic_deltas(&sa, &sb);
+                res.counter_findings = judge_render_counters(&sa, &sb, era);
+                let dd = diagnostic_deltas(&sa, &sb, Some(era));
                 if !dd.is_empty() {
                     res.diagnostics_differ = true;
                     res.notes.push(format!(
@@ -737,8 +841,8 @@ fn compare_pair(dir_a: &Path, dir_b: &Path, plugin: &str, program: &str) -> Pair
         ));
     }
 
-    res.counter_findings = judge_render_counters(&sa, &sb);
-    let dd = diagnostic_deltas(&sa, &sb);
+    res.counter_findings = judge_render_counters(&sa, &sb, era);
+    let dd = diagnostic_deltas(&sa, &sb, Some(era));
     if !dd.is_empty() {
         res.diagnostics_differ = true;
         res.notes.push(format!(
@@ -875,6 +979,10 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<
         }
     }
 
+    // Which counter keys each whole capture knew (see `CaptureEra`).
+    let era = CaptureEra::scan(dir_a, dir_b);
+    let not_comparable = era.not_comparable();
+
     let mut results: Vec<PairResult> = Vec::new();
     for plugin in &plugins {
         let progs: BTreeSet<String> = list_programs(dir_a, plugin)
@@ -901,7 +1009,7 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<
             continue;
         }
         for program in &progs {
-            let mut r = compare_pair(dir_a, dir_b, plugin, program);
+            let mut r = compare_pair(dir_a, dir_b, plugin, program, &era);
             if let Some((ha, hb)) = netlist_changed.get(plugin) {
                 r.notes.push(format!(
                     "netlist content differs between baselines ({}.. -> {}..)",
@@ -1111,6 +1219,12 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<
         EFFORT_RELATIVE_BOUND * 100.0,
         EFFORT_ABSOLUTE_FLOOR
     );
+    for (k, side) in &not_comparable {
+        println!(
+            "  not comparable: {k} — recorded on no render of {side} (that capture's codegen \
+             did not declare it); skipped on every render, not read as 0"
+        );
+    }
     if counter_failed.is_empty() {
         println!("  No render's solver counters left their class's bound.");
     } else {
@@ -1183,6 +1297,9 @@ pub fn run(dir_a: &Path, dir_b: &Path, json_out: &Path, strict: bool) -> Result<
             "effort_relative_bound": EFFORT_RELATIVE_BOUND,
             "effort_absolute_floor": EFFORT_ABSOLUTE_FLOOR,
             "gates_exit_code": true,
+            "not_comparable": not_comparable.iter().map(|(k, side)| {
+                serde_json::json!({"counter": k, "unrecorded_in": side})
+            }).collect::<Vec<_>>(),
             "failed_render_count": n_counter_failed,
             "failed": counter_failed.iter().map(|r| serde_json::json!({
                 "plugin": r.plugin,
@@ -1454,6 +1571,60 @@ mod counter_gate_tests {
         assert_eq!(
             judge_counters(&a, &diags(&[("diag_refactor_count", 331.0)])).len(),
             1
+        );
+    }
+
+    /// A key one baseline's capture never recorded on ANY render is not
+    /// comparable: a counter added to codegen after the reference was
+    /// captured is named in the report, not judged as a from-zero move. A key
+    /// the era did record is still read as 0 on a render that lacks it.
+    #[test]
+    fn key_unrecorded_by_one_capture_era_is_not_comparable() {
+        let set = |ks: &[&str]| ks.iter().map(|k| k.to_string()).collect::<BTreeSet<_>>();
+        let era = CaptureEra {
+            recorded_a: set(&["diag_refactor_count"]),
+            recorded_b: set(&["diag_refactor_count", "diag_nr_iter_total"]),
+        };
+        let a = diags(&[("diag_refactor_count", 1000.0)]);
+        let b = diags(&[
+            ("diag_refactor_count", 1000.0),
+            ("diag_nr_iter_total", 500_000.0),
+        ]);
+        assert!(judge_counters_in_era(&a, &b, Some(&era)).is_empty());
+        assert_eq!(
+            era.not_comparable(),
+            vec![("diag_nr_iter_total".to_string(), "A")]
+        );
+        // Without an era (or with one that recorded the key on both sides)
+        // the same pair is a from-zero effort move.
+        assert_eq!(judge_counters(&a, &b).len(), 1);
+        let both = CaptureEra {
+            recorded_a: era.recorded_b.clone(),
+            recorded_b: era.recorded_b.clone(),
+        };
+        assert!(both.not_comparable().is_empty());
+        assert_eq!(judge_counters_in_era(&a, &b, Some(&both)).len(), 1);
+        // A render-level absence of a key the era recorded still reads as 0:
+        // a build that gained the hold and fired it is an increase.
+        let hold = CaptureEra {
+            recorded_a: set(&["diag_nr_hold_count"]),
+            recorded_b: set(&["diag_nr_hold_count"]),
+        };
+        let f = judge_counters_in_era(
+            &diags(&[]),
+            &diags(&[("diag_nr_hold_count", 1.0)]),
+            Some(&hold),
+        );
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].kind, CounterFindingKind::FailurePathIncrease);
+        // The other direction: a key only A's era recorded is named for B.
+        let removed = CaptureEra {
+            recorded_a: set(&["diag_refactor_count", "diag_old_count"]),
+            recorded_b: set(&["diag_refactor_count"]),
+        };
+        assert_eq!(
+            removed.not_comparable(),
+            vec![("diag_old_count".to_string(), "B")]
         );
     }
 

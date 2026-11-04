@@ -334,7 +334,8 @@ impl RustEmitter {
             "{indent}        let mut pin_converged = false;\n\
              {indent}        let mut pin_iters = MAX_ITER as u32;\n\
              {indent}        let mut pin_lu_ok = true;\n\
-             {indent}        for _pit in 0..MAX_ITER {{\n"
+             {indent}        for _pit in 0..MAX_ITER {{\n\
+             {indent}            state.diag_nr_iter_total += 1;\n"
         ));
         if m > 0 {
             code.push_str(&format!("{it}let mut v_nl = [0.0f64; M];\n"));

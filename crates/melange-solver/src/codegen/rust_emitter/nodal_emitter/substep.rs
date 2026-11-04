@@ -230,6 +230,7 @@ impl RustEmitter {
             // Sub-step NR loop
             code.push_str("                let mut sub_converged = false;\n");
             code.push_str("                for _iter in 0..MAX_ITER {\n");
+            code.push_str("                    state.diag_nr_iter_total += 1;\n");
             code.push_str("                    let mut v_nl = [0.0f64; M];\n");
             code.push_str(&emit_sparse_nv_matvec(
                 ir,

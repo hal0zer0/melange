@@ -401,7 +401,8 @@ fn emit_substep_solve(
          {i1}// Zero-order warm start from the segment's own history (glow deck).\n\
          {i1}let mut i_nl = {i_from};\n\
          {i1}state.last_nr_iterations = {budget} as u32;\n\
-         {i1}for iter in 0..{budget} {{\n"
+         {i1}for iter in 0..{budget} {{\n\
+         {i2}state.diag_nr_iter_total += 1;\n"
     ));
     // v_d = p + K * i_nl (dense: the scratch K has no sparsity record)
     for i in 0..m {

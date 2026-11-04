@@ -311,6 +311,15 @@ Newton solves that could not start from the previous sample's voltages (the
 point that keeps a switching circuit on its branch) and used an extrapolated
 start instead. It is not an unsolved sample; a nonzero value is worth a look.
 
+Two counters say how the solve went rather than whether it succeeded. They are
+additive: reading them changes nothing, and no number the solver computes
+depends on them.
+
+| Field | Present on | What it counts |
+|-------|-----------|----------------|
+| `diag_nr_iter_total` | every build, both routes | Cumulative Newton iterations over every sample the instance solved: one per iteration of every Newton loop on the sample path (the trapezoidal solve, the sub-step ladder, the backward-Euler fallback, the sub-sample fire re-solve, the active-set rail pin), unconverged iterations included. The DC operating-point solve and the device-internal inner loops are not counted. Zero on a linear build with no Newton loop. The most sensitive effort signal a render carries: a change in the solver's path moves it where the output does not, which is why the golden harness gates it as an effort counter. |
+| `diag_sparse_reject_count` | nodal full-LU builds with a sparse LU schedule | Newton iterations on which the sparse factor refused its static (symbolic) pivot order at runtime (a pivot numerically near zero, or element growth beyond its check) and the dense partially-pivoted factor ran in its place on the same stamped matrix. The sample is still solved; a nonzero value says the static pivoting was refused, which the golden harness treats as a failure-path signal to trace. |
+
 Two more counters say whether the circuit was driven with the input you
 passed. They exist on every route:
 

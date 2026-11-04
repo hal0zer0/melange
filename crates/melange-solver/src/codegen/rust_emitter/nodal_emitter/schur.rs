@@ -891,6 +891,7 @@ impl RustEmitter {
 
         // Trapezoidal NR loop
         code.push_str(&format!("    for iter in 0..{} {{\n", site.iter_budget));
+        code.push_str("        state.diag_nr_iter_total += 1;\n");
 
         // 4a. Compute v_d = p + K * i_nl
         code.push_str("        // 4a. Compute controlling voltages: v_d = p + K * i_nl\n");

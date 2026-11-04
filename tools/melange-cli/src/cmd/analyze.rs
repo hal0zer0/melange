@@ -282,7 +282,7 @@ pub(crate) fn analyze_freq_response(
             .filter(|f| declares_state_field(&generated.code, f))
             .collect()
     };
-    let diag_counters = declared(&INPUT_DIAG_FIELDS);
+    let diag_counters = declared(&END_DIAG_FIELDS);
     let point_counters = declared(&POINT_DIAG_FIELDS);
     let analyze_main = codegen_runner::generate_analyze_main(codegen_runner::AnalyzeMain {
         frequencies: &frequencies,
@@ -394,14 +394,25 @@ fn generate_log_frequencies(start: f64, end: f64, points_per_decade: usize) -> V
 
 /// `CircuitState` counters whose per-point increments `analyze` reads
 /// (presence-filtered per build): the unsolved-sample family `simulate`
-/// refuses on, plus the NaN/magnitude resets it calls suspect.
-const POINT_DIAG_FIELDS: [&str; 6] = [
+/// refuses on, the NaN/magnitude resets it calls suspect, and the sparse
+/// factor's runtime pivot refusals (a failure-path witness).
+const POINT_DIAG_FIELDS: [&str; 7] = [
     "diag_unsolved_sample_count",
     "diag_nr_hold_count",
     "diag_nr_unconverged_commit_count",
     "diag_reduced_model_exit_count",
     "diag_nan_reset_count",
     "diag_magnitude_reset_count",
+    "diag_sparse_reject_count",
+];
+
+/// `CircuitState` counters printed once at the end of the run as
+/// `DIAG:<name>=<v>` (presence-filtered per build): the input guards, and
+/// the cumulative Newton iteration count (an effort figure, not a verdict).
+const END_DIAG_FIELDS: [&str; 3] = [
+    INPUT_DIAG_FIELDS[0],
+    INPUT_DIAG_FIELDS[1],
+    "diag_nr_iter_total",
 ];
 
 /// One `SETTLEPT:` line: a point's drive-level time and settle verdict.

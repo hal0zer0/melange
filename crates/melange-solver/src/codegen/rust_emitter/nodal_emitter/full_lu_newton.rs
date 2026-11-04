@@ -76,6 +76,7 @@ impl RustEmitter {
         code.push_str("    let mut j_dev = [0.0f64; M * M];\n");
         // Trapezoidal NR loop
         code.push_str(&format!("    for iter in 0..{} {{\n", site.iter_budget));
+        code.push_str("        state.diag_nr_iter_total += 1;\n");
 
         // 2a. Extract nonlinear voltages: v_nl = N_v * v (sparse)
         code.push_str("        // 2a. Extract nonlinear voltages: v_nl = N_v * v (sparse)\n");
@@ -289,6 +290,7 @@ impl RustEmitter {
             ));
             code.push_str("                chord_dense = false;\n");
             code.push_str("            } else {\n");
+            code.push_str("                state.diag_sparse_reject_count += 1;\n");
             code.push_str(
                 "                // Sparse factor rejected (tiny pivot or growth-factor check):\n",
             );

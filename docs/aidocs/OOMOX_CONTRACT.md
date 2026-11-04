@@ -203,6 +203,19 @@ file:line, oomox-relative):
   check. After a NaN or magnitude reset in one inner sub-sample, the later
   sub-samples of that host sample take the zeroed up-filters' response to the
   host value (bit-identical for every render without a reset).
+- **`diag_nr_iter_total`, `diag_sparse_reject_count` (additive, 2026-11-03)**:
+  two NEW `u64` fields, zeroed by `reset()`; nothing existing changes, and no
+  number the solver computes depends on them. `diag_nr_iter_total` is on every
+  build, both routes: cumulative Newton iterations over every solved sample,
+  one per iteration of every Newton loop on the sample path (trapezoidal
+  solve, sub-step ladder, backward-Euler fallback, sub-sample fire re-solve,
+  active-set rail pin; the DC operating-point solve is not counted). It is an
+  effort figure (the golden harness gates it as one), never a correctness
+  verdict: do not assert a bound on it in plugin tests. `diag_sparse_reject_count`
+  exists only on a nodal full-LU build with a sparse LU schedule: iterations on
+  which the sparse factor refused its static pivot order at runtime and the
+  dense factor ran instead. The sample is still solved; the harness gates it as
+  failure-path. `diag_unsolved_sample_count == 0` remains the whole check.
 - **`diag_unsolved_sample_count` (2026-09-29)**: ONE always-present field on
   every generated build (DK and both nodal sub-paths, any integrator, M = 0
   included, where it is a constant 0): every sample that was never solved,

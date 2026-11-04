@@ -92,6 +92,15 @@ pub struct CircuitState {
     pub diag_clamp_count: u64,
     /// Diagnostic: number of times NR hit max iterations
     pub diag_nr_max_iter_count: u64,
+    /// Diagnostic: cumulative Newton iterations over every sample this instance
+    /// solved: `solve_nonlinear` adds one per iteration it runs, for the
+    /// trapezoidal solve and for the backward-Euler fallback when it runs,
+    /// unconverged iterations included. The DC operating-point solve and the
+    /// device-internal inner loops do not count. The most sensitive effort
+    /// signal a render carries: a change in the solver's path moves it where
+    /// the output does not. Additive (it reads nothing back; no number the
+    /// solver computes depends on it).
+    pub diag_nr_iter_total: u64,
     /// Diagnostic: number of times NaN triggered state reset
     pub diag_nan_reset_count: u64,
     /// Diagnostic: input samples clamped to +/-INPUT_LIMIT_V (the circuit
@@ -317,6 +326,7 @@ impl Default for CircuitState {
 {% endif %}            diag_peak_output: 0.0,
             diag_clamp_count: 0,
             diag_nr_max_iter_count: 0,
+            diag_nr_iter_total: 0,
             diag_nan_reset_count: 0,
             diag_input_clamp_count: 0,
             diag_input_nan_count: 0,
@@ -435,6 +445,7 @@ impl CircuitState {
 {% endif %}        self.diag_peak_output = 0.0;
         self.diag_clamp_count = 0;
         self.diag_nr_max_iter_count = 0;
+        self.diag_nr_iter_total = 0;
         self.diag_nan_reset_count = 0;
         self.diag_input_clamp_count = 0;
         self.diag_input_nan_count = 0;
