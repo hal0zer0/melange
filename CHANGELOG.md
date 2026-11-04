@@ -9,25 +9,125 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+## [0.1.22] - 2026-11-04
+
+**Against v0.1.21, over the golden renders:** of the 192 renders both
+versions record, 125 are byte-identical, 67 are NEGLIGIBLE and none changed
+audibly; no render is held and none engages the output clamp. The NEGLIGIBLE
+renders are on 16 decks, all nodal full-LU builds. The largest sample delta
+is 0.019 V on `wurli-power-amp`'s sweep, on the four samples that used to hit
+the Newton ceiling and be rescued by a sub-step and now converge directly;
+every other render is within 1e-4 V, most within 1e-8 V. Over the 192
+renders: iteration ceilings 4 → 0, sub-steps 4 → 0, line-search failures
+60,466 → 1,013, refactorizations 13,623,461 → 13,259,947 (−2.7 %); no
+failure-path counter rose on any render. `zener-feedback-limiter` (4 renders)
+is new to the corpus. Generated source differs on every deck (the written-out
+`Clone`, the named thresholds).
+
+**Solver counters against v0.1.21:** ten renders on four decks move an effort counter
+past the golden compare's bound (max(10 %, 20 counts)), all at the full-LU line-search
+change (see Fixed); the rest of the cycle stays inside the bound. Line-search failures
+fall on `warpony` (five renders, the sweep 11,271 → 365), `wurli-power-amp` (sine
+24,173 → 0, sweep 17,962 → 0) and `gravity`'s sweep (1,438 → 133), and rise on
+`basic-bitch` (sweep 0 → 459, pot sweep 4 → 37); refactorizations move −14.4 % on
+`gravity`'s sweep and +11.2 % on `warpony`'s. The counter counts a different rule in each
+version, and the traces show the two rules disagreeing in both directions on chord
+iterations (factorization kept from an earlier iterate). Every one of the six traced
+renders first parts on such an iteration: the old test accepted the full step on a
+falling residual norm (6-fold to 10,000-fold) and the new test refused it because the
+simplified correction back-solved in the stale factorization grew (0.7 % to 1.9-fold),
+taking half instead — `basic-bitch`'s sweep at sample 138582 and pot sweep at sample 1,
+`warpony`'s sweep at sample 11701 and sine at sample 24, `gravity`'s sweep at sample
+23079 (inner sample 2). The failures `basic-bitch` now counts (first at sample 150650) are
+chord iterations where every fraction is refused on that expansion while the residual
+falls, after which the loop takes the full limited step the old build took, with the
+same iteration and refactorization count on the sample. The failures the old build
+counted on `warpony`, `wurli-power-amp` and `gravity` (first at samples 60283 / 45, 1,
+129099) were iterations where the residual norm in raw amps rose at every fraction
+while the simplified correction contracted 2.5- to 10-fold; the new test accepts those
+(`diag_ls_merit_up_count`) and the samples converge sooner (`wurli-power-amp`'s sample 1
+in 15 iterations instead of 21). `gravity`'s refactorizations fall with the shorter
+paths (the tenth-iteration rule −73 %, the device-chord trigger −10 %); `warpony`'s rise
+because its accepted paths got longer (iterations +3.9 %; the tenth-iteration rule
++18 %, 62 % of the rise). No sample on any of the ten renders reaches a ceiling, sub-step,
+backward-Euler fallback or hold in either version, and every sample exits through the
+unchanged certification (undamped node-step test at RELTOL 1e-3 / VNTOL 1e-6, device
+chord check, per-row KCL gate); on the two junction-device decks the reused back-solved
+correction also moves the iterate at the last bit with the path unchanged.
+
+**What can change rendered output** (each has its entry below):
+
+1. **Nodal full-LU builds.** The Newton line search accepts a trial by
+   natural monotonicity instead of the residual norm, and the sparse factor
+   multiplies by reciprocal pivots. A render can take a different accepted
+   Newton path inside the same certification tolerance (RELTOL 1e-3);
+   renders that crawled at a stiff knee converge in fewer iterations.
+2. **Diodes with a finite `BV`.** Newton limiting now also applies on the
+   breakdown side. The path near the knee changes; the DC operating points of
+   the eight breakdown decks in the circuits library do not.
+3. **Large nodal circuits.** A new cost trigger routes a circuit from the
+   Schur sub-path to full-LU when Schur's predicted per-sample cost exceeds
+   1.5× full-LU's. Same certification, not the same bits. No golden deck
+   moves.
+4. **`simulate --switch` / `analyze --switch`** renders start at the chosen
+   position's own DC operating point instead of drifting there from position
+   0's.
+5. **A `2N5457` card that does not state `VTO`** gets the catalogue's
+   −3.06 V pinch-off (was −2.5 V).
+6. **Generated plugins** apply smoothed pot values every 32 samples instead
+   of every sample.
+7. **Builds with `--emit-dc-op-recompute`:** `recompute_dc_op()` on the nodal
+   route solves the operating point instead of running the warmup fallback;
+   the DK recompute certifies on the undamped correction and the KCL residual.
+
+**Removed flag:** `--tolerance` (and `CodegenConfig::tolerance`) is gone. A
+command line that passes it now fails as an unknown argument, and generated
+code no longer declares `pub const TOL`. Delete the flag from scripts: no
+certification test ever read it (see Removed).
+
+**New refusals:** `simulate --freq` outside (0, Nyquist). On a nodal build
+with a behavioral B-source, a rail mode that clamps a finite op-amp rail, or
+a glow device, `recompute_dc_op()` keeps the warmup fallback and its doc
+comment says `This build: REFUSED (…)`.
+
+**Measurement changes:** `melange validate` on a deck with no source at its
+input node, whose ngspice twin carries a subcircuit (level-3 JFET, triode,
+pentode and op-amp twins), placed the ngspice drive inside the subcircuit, so
+the reference it compared against was undriven (about 1e-9 V at the output,
+no ngspice error). The drive is now at the top level. New counters
+`diag_nr_iter_total`, `diag_sparse_reject_count` and `diag_ls_merit_up_count`;
+`simulate --freq` sets the test tone.
+
+**Generated API:** `set_dc_operating_point(v)` now returns `(f64, usize)`,
+the KCL residual of `v` and its worst row (existing calls still compile), and
+writes the device currents, `q_dot`, input history, DC blocker and
+oversampler taps with `v`. New field `dc_op_i_nl`. `pub const TOL` is gone;
+`RELTOL`, `VNTOL`, `KCL_ABSTOL`, `ABSTOL`, `ABSTOL_SCALE_FLOOR` and
+`SUBSTEP_ACCEPT_VOLTS` are emitted by name. `CircuitState`'s `Clone` is
+written out field by field. Full-LU builds with the structural sparse pattern
+store the chord factor packed (`LU_SLOTS`, `chord_lu_pk`, `chord_be_lu_pk`).
+
 ### Added
 
 - **Nodal sub-path cost trigger.** After every structural requirement and
   conditioning guard has left a circuit on the Schur sub-path, the emitter
   routes it full-LU when Schur's predicted per-sample cost exceeds 1.5×
   full-LU's, from compile-time inputs only (N, M and the packed sparse
-  factor's back-solve flop count; `codegen::route_cost`, coefficients fitted to
-  forced-both-ways timings of the corpus, provenance in the module). Toward
-  full-LU only, never overriding a guard; inert for a sectioned glow (which
-  full-LU refuses), under the linearized bypass and without a packed factor.
-  Schur applies the dense N×N `S·rhs` every sample, so past N ≈ 60 it costs
-  2–3× the packed back-solve for the same certified result: one corpus deck
-  moves (a 28-dimension FET limiter at N = 84, 1.96–2.09× measured). The
-  route line and provenance name the trigger `cost`.
+  factor's back-solve flop count; `codegen::route_cost`, coefficients fitted
+  to forced-both-ways `bench.sh` timings of the corpus, provenance in the
+  module). Toward full-LU only, never overriding a guard; inert for a
+  sectioned glow (which full-LU refuses), under the linearized bypass and
+  without a packed factor. Schur applies the dense N×N `S·rhs` every sample,
+  so past N ≈ 60 it can cost 2–3× the packed back-solve for the same
+  certified result. In the circuits library the rule moves one unpublished
+  revision of an N = 84, 28-dimension FET limiter; measured with `bench.sh`
+  at its deck's 2× oversampling it runs at 17.7 µs per host sample on the
+  Schur sub-path and 7.6 µs on full-LU (2.3×). The route line and
+  provenance name the trigger `cost`.
 - **`RUST_LOG=info` prints a `Nodal: conditioning census` line** on every
   nodal build: N, M, sub-path, trigger, `max|K|`, `K_diag_min`, `max|S|` with
   the S entry named by its nodes, spectral radius, linearized count and both
   cost predictions, from the same variables the sub-path decision read.
-
 - **`simulate --freq <Hz>`** sets the test tone's frequency (default 1000,
   so existing renders are unchanged). Refused unless positive and below
   Nyquist of the run's sample rate; `-v` prints the tone.
@@ -40,6 +140,15 @@ codegen output, CLI flags, and netlist semantics may all change.
   ready without blocking, re-reports that factor's latency, and the replaced
   states are dropped off-thread; `initialize()` builds at the parameter's
   factor directly. Fixed-factor builds are unchanged.
+- **`compile --switch` and `dc-op --switch`.** The override `simulate` and
+  `analyze` take is on the build verbs too: the matrices are stamped and the
+  DC operating point is solved at the chosen position, the generated state
+  starts and resets there with nothing to settle, and a `--format plugin`
+  build's switch parameter defaults to that position (it defaulted to 0,
+  which would have flipped a state baked elsewhere on the first block).
+  `dc-op --switch` reports the operating point such a build embeds. A plugin
+  that must start in a non-default switch state no longer needs a silence
+  warmup for the bias network to arrive there.
 - **The provenance line records baked switch overrides.** A `compile --switch`
   (or `simulate`/`analyze`/`dc-op --switch`) build carries
   `"switch_overrides":{"<label>":<position>}` in its `// provenance:` JSON,
@@ -53,27 +162,25 @@ codegen output, CLI flags, and netlist semantics may all change.
   the audio thread without allocating (the derived `clone_from` re-boxed the
   cold block). Proven on both routes with a counting allocator and a full
   `Debug` comparison after the copy.
-
 - **The runtime DC operating-point solve on the nodal route.** With
   `--emit-dc-op-recompute`, `recompute_dc_op()` on a nodal build (Schur and
   full-LU) now solves `G·v = b_dc + N_i·i_nl(N_v·v)` on the live working
   matrix from `v_prev`, with the per-sample loop's own device evaluator and
   limiter, every augmented row an unknown (winding currents included), and
   installs the point; it used to be a stub that always fell back to the
-  `WARMUP_SAMPLES_RECOMMENDED` silence loop (0.45 M samples, seconds of CPU
-  on a large limiter at every init and reset). Three classes of nodal build
-  refuse and keep the fallback: behavioral B-source decks, decks whose rail
-  mode clamps a finite op-amp rail, and glow decks; the generated method's
-  doc comment says `This build: solved.` or `This build: REFUSED (…)`.
-  Measured on a BJT stage, a transformer with a DC-carrying primary, a JFET
-  stage, a switched and a pot bias network: from `v_prev` perturbed by ×1.1
-  and +1 V the recompute lands on the baked `DC_OP` within 1e-9 V in 2–23
-  iterations, and after a `set_switch` / `set_pot` it equals the `DC_OP` of
-  the deck built at that value. The result is the infinite-time equilibrium
-  at the current controls and junction temperatures; it is for
-  instantiation, `reset()`, preset recall and per-instance jitter, not for a
-  live control change during playback (the circuit's own transition is the
-  behaviour to keep).
+  `WARMUP_SAMPLES_RECOMMENDED` silence loop (0.45 M samples at every init and
+  reset). Three classes of nodal build refuse and keep the fallback:
+  behavioral B-source decks, decks whose rail mode clamps a finite op-amp
+  rail, and glow decks; the generated method's doc comment says
+  `This build: solved.` or `This build: REFUSED (…)`. Measured on a BJT
+  stage, a transformer with a DC-carrying primary, a JFET stage, a switched
+  and a pot bias network: from `v_prev` perturbed by ×1.1 and +1 V the
+  recompute lands on the baked `DC_OP` within 1e-9 V in 2–23 iterations, and
+  after a `set_switch` / `set_pot` it equals the `DC_OP` of the deck built at
+  that value. The result is the infinite-time equilibrium at the current
+  controls and junction temperatures; it is for instantiation, `reset()`,
+  preset recall and per-instance jitter, not for a live control change during
+  playback (the circuit's own transition is the behaviour to keep).
 - **`set_dc_operating_point(v)` returns the KCL residual of `v`.** On every
   build, both routes, it is now the full writeback the recompute does (the
   device currents evaluated at `v`, `q_dot` at rest, input history, DC
@@ -84,43 +191,29 @@ codegen output, CLI flags, and netlist semantics may all change.
   feeds. The vector is installed either way.
 - **`dc_op_i_nl: [f64; M]`** on every `CircuitState`: the device currents at
   the live `dc_operating_point`, written with it.
-- **Two additive diagnostic counters on `CircuitState`.** `diag_nr_iter_total`
+- **Three diagnostic counters on `CircuitState`.** `diag_nr_iter_total`
   (every build, both routes) is the cumulative Newton iteration count over
   every solved sample, one per iteration of every Newton loop on the sample
   path (trapezoidal solve, sub-step ladder, backward-Euler fallback,
   sub-sample fire re-solve, active-set rail pin; the DC operating-point solve
   is not counted); `diag_sparse_reject_count` (nodal full-LU builds with a
-  sparse LU schedule) counts the iterations on which the sparse factor refused
-  its static pivot order at runtime and the dense factor ran instead. Neither
-  changes a computed number; generated renders are byte-identical. `simulate`
-  prints both presence-filtered (the iteration total under `-v`, like the
-  other effort figures), `analyze` reads the sparse rejections per point, and
-  the golden harness gates the total as an effort counter and the rejections
-  as failure-path. The harness compare also learned that a counter key one
-  whole baseline never recorded is not comparable (named in the report, not
-  read as 0), so a counter added to codegen does not fail every compare
-  against an older baseline.
+  sparse LU schedule) counts the iterations on which the sparse factor
+  refused its static pivot order at runtime and the dense factor ran instead;
+  `diag_ls_merit_up_count` (nodal full-LU) counts accepted line-search trials
+  whose raw residual norm rose (see Fixed). `simulate` prints them
+  presence-filtered (the iteration total under `-v`, like the other effort
+  figures) and `analyze` reads the sparse rejections per point.
+- **The golden harness's compare gates solver counters** (contributor
+  tooling, `tools/golden-harness`). Every recorded counter is judged per
+  render by class: a failure-path counter (ceiling, sub-step, fallback, hold,
+  reset, clamp, …) may not increase, an effort counter (refactors,
+  line-search failures, pins, …) may move by at most max(10 %, 20 counts),
+  an unclassified counter fails, and a counter the new build no longer
+  records fails as a removal unless an allowlist entry clears it. A counter
+  one whole baseline never recorded is named and skipped, not read as 0.
 
 ### Changed
 
-- **Breaking: `--tolerance` and `CodegenConfig::tolerance` are removed.** The
-  flag was a dead constant on DK builds and inert at its default on nodal
-  builds, where its only reader was the sub-step ladder's accept test with a
-  1 mV absolute term (`max_step < TOL + 1e-3`; the test now reads
-  `SUBSTEP_ACCEPT_VOLTS` = 1e-3, which differs only for a largest correction
-  in [1e-3, 1e-3 + 1e-9) V; the golden corpus renders identically). The
-  Newton certification thresholds were never configurable: the step test
-  (SPICE RELTOL 1e-3, VNTOL 1e-6 V), the per-row KCL gate (1e-3·den + 1e-9 A),
-  the device-current consistency check (1e-3, ABSTOL 1e-12 A, 1e-9 A scale
-  floor), the ladder's 1 mV and the DC solve's pair (1e-6 relative, 1e-9 V,
-  1e-9 A KCL floor) are now each ONE named constant
-  (`melange_solver::codegen::rust_emitter::thresholds`), emitted by the same
-  name into the generated code (`RELTOL`, `VNTOL`, `KCL_ABSTOL`, `ABSTOL`,
-  `ABSTOL_SCALE_FLOOR`, `SUBSTEP_ACCEPT_VOLTS`; `DC_OP_RELTOL` / `DC_OP_TOL` /
-  `DC_OP_KCL_ABSTOL` in `recompute_dc_op` on both routes), with the same
-  values. A script that passes `--tolerance` now fails on an unknown
-  argument. IR JSON that carries `solver_config.tolerance` still loads; the
-  field is ignored.
 - **The runtime recompute certifies like the compile-time solver.** Both
   routes accept an iterate only when the UNDAMPED Newton correction is under
   `1e-6·|v| + 1e-9 V` on every row AND the per-row KCL residual is under
@@ -138,23 +231,44 @@ codegen output, CLI flags, and netlist semantics may all change.
   says it returns the live point.
 - A failed DK recompute on a deck with a body-effect MOSFET restores the
   pre-solve `device_N_vt` (the loop refreshes it through the field).
+- **Catalogue 2N5457 pinch-off is −3.06 V (was −2.5 V).** Neither datasheet
+  prints a typical VGS(off); −2.5 V is the typical VGS at ID = 100 µA. −3.06 V
+  is the pinch-off that reproduces both printed typicals (IDSS 3 mA; 100 µA
+  at −2.5 V) under the catalogue's Shichman–Hodges law, with gm0 inside the
+  sheet's |Yfs| band. Catalogue values also fill the parameters a `.model`
+  card leaves out when its name is a catalogue part, so a `2N5457` card
+  without `VTO` moves with it (`VP` is not a key melange reads; it draws the
+  unrecognised-parameter warning with the `VTO` hint); a card that states its
+  own `VTO` does not. The 2N3819 entry's comment now says its 2 mA is the
+  printed minimum (no typical exists); its values are unchanged.
+- **The Newton certification thresholds are named constants**, one each
+  (`melange_solver::codegen::rust_emitter::thresholds`), emitted by the same
+  name into the generated code with the same values: the step test (SPICE
+  `RELTOL` 1e-3, `VNTOL` 1e-6 V), the per-row KCL gate (`KCL_ABSTOL`,
+  1e-3·den + 1e-9 A), the device-current consistency check (`ABSTOL`
+  1e-12 A, `ABSTOL_SCALE_FLOOR` 1e-9 A), the sub-step ladder's
+  `SUBSTEP_ACCEPT_VOLTS` (1 mV), and the DC solve's pair (`DC_OP_RELTOL` /
+  `DC_OP_TOL` / `DC_OP_KCL_ABSTOL` in `recompute_dc_op`, both routes). None
+  of them was ever configurable.
 
-- **`compile --switch` and `dc-op --switch`.** The override `simulate` and
-  `analyze` take is on the build verbs too: the matrices are stamped and the
-  DC operating point is solved at the chosen position, the generated state
-  starts and resets there with nothing to settle, and a `--format plugin`
-  build's switch parameter defaults to that position (it defaulted to 0,
-  which would have flipped a state baked elsewhere on the first block).
-  `dc-op --switch` reports the operating point such a build embeds. A plugin
-  that must start in a non-default switch state no longer needs a silence
-  warmup for the bias network to arrive there.
+### Removed
+
+- **Breaking: the `--tolerance` flag and `CodegenConfig::tolerance`.** The
+  flag was a dead constant on DK builds and inert at its default on nodal
+  builds, where its only reader was the sub-step ladder's accept test with a
+  1 mV absolute term (`max_step < TOL + 1e-3`; the test now reads
+  `SUBSTEP_ACCEPT_VOLTS` = 1e-3, which differs only for a largest correction
+  in [1e-3, 1e-3 + 1e-9) V; the golden corpus renders identically). Generated
+  code no longer declares `pub const TOL`. A script that passes `--tolerance`
+  now fails on an unknown argument: delete the flag. IR JSON that carries
+  `solver_config.tolerance` still loads; the field is ignored.
 
 ### Fixed
 
-- **The full-LU Newton no longer crawls at a breakdown knee.** On a Darlington
-  output stage with its collector-emitter breakdown modelled (`D(BV=60)`),
-  driven by a 31.6 V square, the forced full-LU sub-path hit its Newton
-  ceiling on 48 / 83 / 31 samples per 0.4 s at 1x / 2x / 4x (every one
+- **The full-LU Newton no longer crawls at a breakdown knee.** On a
+  Darlington output stage with its collector-emitter breakdown modelled
+  (`D(BV=60)`), driven by a 31.6 V square, the forced full-LU sub-path hit its
+  Newton ceiling on 48 / 83 / 31 samples per 0.4 s at 1x / 2x / 4x (every one
   rescued by the sub-step ladder) where the Schur sub-path converged every
   sample: once the knee engaged, the line search's residual-norm test refused
   the junction limiter's step on every iteration, because on the collector
@@ -170,32 +284,50 @@ codegen output, CLI flags, and netlist semantics may all change.
   residual as its correction instead of the companion solve (a debug build
   checks the two agree to `NATURAL_REUSE_DEBUG_RELTOL`). Certification is
   unchanged. Witness: 0 / 0 / 0 ceilings, the render −46.6 dB from the Schur
-  render (was −25.7 dB). Golden corpus against the pre-change tree: 166
-  identical, 30 NEGLIGIBLE (the largest a power amp's sweep at 0.019 V on
-  the four samples that no longer need a sub-step, −95 dB residual by Sensor;
-  the rest ≤ 1e-4 V, most ≤ 2e-9 V), 0 changed; ceilings and sub-steps
-  4 → 0, no holds, backward-Euler fallbacks unchanged, line-search failures
-  60471 → 1013, Newton iterations −0.65 %. Hard-drive sweep (132 renders at
-  0.3 / 3 / 10 V): ceilings 3438 → 2508 (a preamp's 38 / 68 / 824 → 0 / 0 /
-  0), no failure-path rise. Cost per sample, one core, interleaved before /
-  after: a FET limiter 6.71 → 7.01 µs (+4.4 %), its revision forced full-LU
-  +3.2 %, a bus compressor 271 → 205 ns (−24 %: its searches are skipped),
-  a power amp +7.7 %, a seven-triode cascade +4.6 %, a Schur deck unchanged.
-  Back-solves per iteration are unchanged (measured); the extra is the
-  search's per-iteration bookkeeping inside the Newton loop (profile). The
-  sub-step ladder keeps its Armijo test (own item). New counter
-  `diag_ls_merit_up_count` (trials accepted while the raw residual norm
-  rose); `simulate -v` prints it and `diag_ls_fail_count` on full-LU builds.
-
+  render (was −25.7 dB). On a hard-drive sweep of the corpus (132 renders at
+  0.3 / 3 / 10 V), against the tree just before this change, iteration
+  ceilings fell 3438 → 2508 (one preamp's 38 / 68 / 824 → 0 / 0 / 0) with no
+  failure-path counter rising. The sub-step ladder keeps its Armijo test.
+  On full-LU builds `diag_ls_fail_count` now counts the Newton line searches
+  in which no trial passed the natural test (plus, as before, the sub-step
+  ladder's Armijo failures), a different rule from the residual-norm test it
+  counted, so its values do not compare across this release;
+  `simulate -v` prints it and the new `diag_ls_merit_up_count` there.
+- **A diode with a finite `BV` gets breakdown-side Newton limiting.**
+  Limiting was forward-side only, so a step toward the breakdown knee could
+  overshoot by any amount; on a Darlington output stage with a C-E breakdown
+  diode driven by a 31.6 V square the Schur sub-path hit its iteration
+  ceiling on every knee sample. When the proposed voltage is below
+  `min(0, −XBV + 10·n·Vt)` the step is now limited by `pnjlim` reflected
+  about the IS-referenced breakdown origin `XBV = BV − n·Vt·ln(IBV/IS)`
+  (ngspice `dioload.c` / `diotemp.c`); otherwise the forward limiter applies.
+  Applied in the generated nodal limiter (and the runtime DC re-solve that
+  reuses it), the DK and Schur limiter sites and the compile-time DC
+  operating point; codegen emits `DEVICE_n_XBV` beside `VCRIT`. Witness:
+  ceiling hits / unsolved samples 1267 / 982 → 0 / 0 at 1x and
+  39547 / 39371 → 0 / 0 at 2x. DC operating points are identical on the eight
+  breakdown decks in the circuits library.
+- **`melange validate` drives the ngspice reference at the top level.** The
+  Thevenin pair it inserts for a deck with no source at its input node went
+  before the first line starting with `.END`, which on a deck whose twin
+  carries a generated subcircuit (level-3 JFET, triode, pentode, op-amp) is
+  that subcircuit's `.ends`: the input node became subcircuit-local and
+  ngspice rendered the output at about 1e-9 V without an error. It now
+  matches `.END` exactly. A `validate` failure on such a deck under an
+  earlier release may be this defect rather than the model.
 - **A generated plugin applies its smoothed pots every 32 samples, not every
   sample.** The template read each pot's smoother and called the circuit's
   setter on every sample; on a nodal build every changed value rebuilds the
   matrices (O(N³)) and drops the chord factorisation, so dragging a knob on a
-  27-device limiter took it from 1.4× to 0.83× realtime (one core, 48 kHz,
-  2x) and the audio stuttered. The smoothers still advance per sample, so a
-  ramp is as long as before; the values reach the circuit on every 32nd frame
-  (0.67 ms at 48 kHz), which costs what static pots cost. Builds without
-  controls are unchanged.
+  large nodal limiter stuttered the audio. The smoothers still advance per
+  sample, so a ramp is as long as before; the values reach the circuit on
+  every 32nd frame (0.67 ms at 48 kHz). Builds without controls are
+  unchanged.
+- **A generated plugin sets flush-to-zero and denormals-are-zero on the
+  audio thread.** The MXCSR write ran in `initialize()`, which the host calls
+  from another thread, and MXCSR is per thread; it now runs at the top of
+  `process()` on every call (an idempotent OR). The circuit code's own
+  denormal flush had kept this harmless.
 - **`simulate --switch` and `analyze --switch` start from the chosen
   position's own DC operating point.** A `--switch NAME=POS` override is now
   baked into the build like `--pot`: the selected position is the static
@@ -208,79 +340,12 @@ codegen output, CLI flags, and netlist semantics may all change.
   took over 5 s to arrive). The generated state's `switch_N_position` starts
   at the baked position and `reset()` returns there; a build without an
   override is unchanged. `NAME` also matches a controlled component's name.
-
-### Changed
-
-- **Catalogue 2N5457 pinch-off is −3.06 V (was −2.5 V).** Neither datasheet
-  prints a typical VGS(off); −2.5 V is the typical VGS at ID = 100 µA. −3.06 V
-  is the pinch-off that reproduces both printed typicals (IDSS 3 mA; 100 µA at
-  −2.5 V) under the catalogue's Shichman–Hodges law, with gm0 inside the
-  sheet's |Yfs| band. Catalogue values also fill the parameters a `.model`
-  card leaves out when its name is a catalogue part, so a `2N5457` card
-  without `VTO` moves with it (`VP` is not a key melange reads; it draws the
-  unrecognised-parameter warning with the `VTO` hint); a card that states its
-  own `VTO` does not. The 2N3819 entry's comment now says its 2 mA is the printed minimum
-  (no typical exists); its values are unchanged.
+- **The op-amp parse hint names a missing model as missing.** A card with the
+  model name left out (`U1 np fb out VCC=9 VEE=0`) got a hint quoting the
+  next token as the model name (`.model VEE=0 OA(...)`); it now says the
+  name is missing and shows the card with a placeholder.
 
 ### Performance
-
-- Nodal full-LU builds whose sparse LU schedule has the structural
-  equilibration pattern build the factored matrix only at the positions the
-  sparse factor and back-solve read or write, instead of copying all N²
-  entries of `A` into the chord storage and then saving a second N² copy for
-  the dense fallback. A rejected sparse factor rebuilds the full matrix with
-  the same operations before the dense factorization. On an N = 84 FET
-  limiter that refactors on most samples the two copies were 17 % of the
-  cycles.
-- The sparse factor's row/column equilibration and growth-factor check are
-  straight-line code with constant indices instead of loops over an index
-  table (whose running maxima went through memory with two bounds checks per
-  access). Bit-identical: a running maximum does not depend on the order of
-  its inputs, and every entry keeps its two scalings in order.
-- The full-LU Newton loop keeps the accepted Armijo line-search trial: its
-  point is the iterate the step commits, bit for bit, so its device currents
-  and residual stand in for the device-chord check's evaluation and the KCL
-  gate's residual, and, where every device's Newton-body and final current
-  laws are the same (junction devices, JFETs, MOSFETs, VCAs; not tubes), for
-  the next iteration's line-search start; without a body-effect MOSFET the
-  trial also writes the device Jacobian and the next iteration does not
-  evaluate the devices again. `Hard` op-amp rails with an op-amp, behavioral
-  sources and saturating inductors keep every evaluation.
-- The device Jacobian array is no longer zeroed or copied in full each Newton
-  iteration and sample, only its block-diagonal entries (the only ones that
-  are ever nonzero).
-- With the structural equilibration pattern, the sparse chord factor is
-  stored packed: one slot per position the factor and back-solve touch
-  (`LU_SLOTS`, the new `chord_lu_pk` / `chord_be_lu_pk` state fields) instead
-  of an N x N array, with the static row swaps folded into the indices at
-  codegen time. Same operations in the same order: bit-identical. On an
-  N = 84 build the factor's working set drops from a 56 KB array to 3.9 KB.
-  The N x N `chord_lu` remains the dense fallback's storage. Builds with
-  saturating inductors keep the N x N layout (measured slower packed).
-
-None of these changes a rendered sample: the golden corpus is 192/192
-byte-identical to v0.1.21, every diagnostic counter included. Generated code
-changes on nodal full-LU builds only; DK and nodal-Schur builds are
-byte-identical.
-
-Measured 2026-11-03 on an AMD Ryzen 9 7950X, one core, the
-`bench.sh` driver at best of 7 × 500k samples, interleaved with a build of the
-parent commit (two rounds, best of both): bus compressor 1758 → 1527
-ns/sample (1.15×), `wurli-power-amp` 10169 → 6159 (1.65×),
-`steve-1073-output` 2126 → 1555 (1.37×), `radio-fm --noise full` 1097 → 1068
-(1.03×), `radio-am --noise full` 629 → 594 (1.06×), `funkyinduct --noise
-shot` 7292 → 4518 (1.61×). An N = 84 FET limiter at 2× oversampling (one
-JFET, eleven BJTs, three diodes; 1 kHz sine): 10.0 → 6.4 µs per host sample
-at −60 dBFS, 13.4 → 7.7 at −30, 14.9 → 8.5 at −18 (1.57–1.75×).
-The packed sparse factor, measured the same way against its parent (best of
-two rounds of 7 × 400k samples): bus compressor 1540 → 1413 ns/sample
-(1.09×), `wurli-power-amp` 6212 → 6070 (1.02×); the FET limiter (best of
-three rounds) 6.40 → 6.11 µs per host sample at −60 dBFS, 7.73 → 7.20 at
-−30 and 8.52 → 7.95 at −18 with the Ratio 4 button in, 15.8 → 14.3 at −30
-and 17.4 → 15.6 at −19 with every button out (1.05–1.12×). Builds without
-the structural pattern (`radio-fm`, `radio-am`) and with saturating
-inductors (`funkyinduct`, `steve-1073-output`) generate the same code as
-before.
 
 - **The sparse factor multiplies by reciprocal pivots** (this one changes
   bits). Each pivot's reciprocal is formed once, after the column's 1e-30
@@ -291,48 +356,63 @@ before.
   rounding per multiplier (2u against u) is at the solve's forward-error
   scale. On identical input matrices the accept/reject decision agrees on all
   12,633,376 factorizations of the corpus sweep, and the growth factor agrees
-  to growth x u (worst 4.5e-12 relative, `steve-1073-preamp`, growth 2.4e4).
-  Over the 192 golden renders: 125 byte-identical, 67 NEGLIGIBLE, none
-  audibly changed. The largest sample deltas are `warpony` 6.6e-6 V and
-  `basic-bitch` 2.8e-6 V, then `steve-1073-preamp` 2.6e-9 V; every other
-  deck is 1.3e-10 V or less. On `warpony` the solve's forward error is about
-  2e-5 of the Newton step: two runs that differ only in this rounding already
-  differ by 1e-8 V at a node stepping 4.5e-4 V on the first sample, and by
-  9.3e-8 V at the output. Five renders take a different Newton path, each
-  at a certification threshold an iterate sits on:
-  - `warpony` silence and step, sample 440: the node step test at 0.9993
-    against 1.0045 of its threshold, one iteration more.
-  - `warpony` sweep, sample 1764: the node step test at 1.0030 against
-    0.9963, one iteration fewer.
-  - `basic-bitch` sweep, sample 126774: the chord exit gate's residual at
-    1.000091e-9 A against 9.999934e-10 A, one exit step fewer.
-  - `wurli-power-amp` sine1k, sample 15239 (a 17-iteration sample): the
-    device-chord check at 1.62 of its tolerance before, under 0.5 after, one
-    iteration fewer.
-  Corpus totals over the sparse-schedule decks: Newton iterations
-  15,780,015 → 15,780,033, refactors 12,633,376 → 12,633,380, line-search
-  failures 59,408 → 59,413; iteration ceilings (35), sub-steps (35), held
-  samples (0) and sparse-factor rejections (0) unchanged.
+  to growth × u (worst 4.5e-12 relative, growth 2.4e4).
+- Nodal full-LU builds whose sparse LU schedule has the structural
+  equilibration pattern build the factored matrix only at the positions the
+  sparse factor and back-solve read or write, instead of copying all N²
+  entries of `A` into the chord storage and then saving a second N² copy for
+  the dense fallback; a rejected sparse factor rebuilds the full matrix with
+  the same operations before the dense factorization. The factor is stored
+  packed, one slot per position it touches (`LU_SLOTS`, `chord_lu_pk` /
+  `chord_be_lu_pk`), with the static row swaps folded into the indices at
+  codegen time (on an N = 84 build the working set drops from a 56 KB array to
+  3.9 KB); the N × N `chord_lu` remains the dense fallback's storage. Builds
+  with saturating inductors keep the N × N layout (measured slower packed).
+  Its row/column equilibration and growth-factor check are straight-line code
+  with constant indices. Bit-identical.
+- The full-LU Newton loop keeps the accepted line-search trial: its point is
+  the iterate the step commits, bit for bit, so its device currents and
+  residual stand in for the device-chord check's evaluation and the KCL
+  gate's residual, and, where every device's Newton-body and final current
+  laws are the same (junction devices, JFETs, MOSFETs, VCAs; not tubes), for
+  the next iteration's line-search start; without a body-effect MOSFET the
+  trial also writes the device Jacobian. `Hard` op-amp rails with an op-amp,
+  behavioral sources and saturating inductors keep every evaluation. The
+  device Jacobian array is no longer zeroed or copied in full each Newton
+  iteration, only its block-diagonal entries. Bit-identical.
 
-  Measured against the packed-factor build on an AMD Ryzen 9 7950X, one core,
-  interleaved, best of three rounds (`bench.sh` driver, 7 × 400k samples),
-  ns per sample:
+Measured 2026-11-04 against the v0.1.21 release binary on an AMD Ryzen 9
+7950X, one core (`taskset -c 3`), `tools/perf-harness/bench.sh` (0.3 V 220 Hz
+input, `-C target-cpu=x86-64-v3`, generated code built with rustc 1.99.0),
+interleaved, best of two rounds of 7 × 2M samples, ns per sample:
 
-  | Deck | before | after | |
-  |---|---|---|---|
-  | bus compressor | 1410 | 1311 | 1.08× |
-  | `wurli-power-amp` | 6065 | 5656 | 1.07× |
-  | `steve-1073-output` | 1569 | 1505 | 1.04× |
-  | `funkyinduct --noise shot` | 4530 | 4364 | 1.04× |
-  | `radio-fm --noise full` | 1059 | 1049 | 1.01× |
-  | `radio-am --noise full` | 593 | 591 | 1.00× |
+| Deck | v0.1.21 | v0.1.22 | |
+|---|---|---|---|
+| bus compressor (`4kbuscomp`, full-LU) | 1748 | 1000 | 1.75× |
+| `wurli-power-amp` | 10318 | 6194 | 1.67× |
+| `steve-1073-output` | 2093 | 1325 | 1.58× |
+| `funkyinduct`, compiled `--noise shot` | 7307 | 3953 | 1.85× |
+| `radio-fm`, compiled `--noise full` | 1123 | 1060 | 1.06× |
+| `radio-am`, compiled `--noise full` | 630 | 597 | 1.06× |
+| N = 84 FET limiter, 2×, per host sample | 12939 | 7108 | 1.82× |
+| an unpublished revision of it (Schur in v0.1.21, full-LU by the cost trigger) | 17748 | 7601 | 2.33× |
 
-  The N = 84 FET limiter at 2× (µs per host sample, best of six rounds over
-  two runs): with the Ratio 4 button in, the deck this work was aimed at, it
-  gains only about 3 %: 6.04 → 5.84 at −60 dBFS, 6.98 → 6.76 at −40,
-  7.13 → 6.92 at −30, 7.86 → 7.62 at −18. With every button out it gains
-  4–5 %: 8.20 → 7.87 at −40, 14.1 → 13.5 at −30, 14.9 → 14.3 at −24,
-  15.4 → 14.8 at −19.
+The three `--noise` builds are timed with their generators off (the bench
+driver does not enable noise). The DK and nodal-Schur rows of the README
+measure within 2 % of v0.1.21 on the same bed (passive EQ 985 → 992, single-
+ended amp 801 → 815, germanium network 761 → 765, 12AX7 stage 118 → 119, RC
+low-pass 10.7 → 10.8), except the Wurlitzer preamp at 444 → 456 (+2.8 %, in
+both rounds; not attributed). The same revision forced onto the Schur
+sub-path reads 17.9 µs on v0.1.21 and 17.7 µs on v0.1.22: the gain is the
+route and the full-LU work above, not the Schur path.
+
+### Documentation
+
+- The README's first screen says what melange is, who it is for and where
+  to hear its output before anything else; public pages stand on their own.
+  `CLAUDE.md` says it is committed on purpose, as the brief for any coding
+  agent working on a clone. The catalogue's 2N5460, J201, 2N5457 and 2N3819
+  entries say what their datasheets print.
 
 ## [0.1.21] - 2026-11-02
 
@@ -4156,7 +4236,8 @@ measured real hardware. Everything else is unproven against hardware. See
   KiCad file; no effect on netlist compilation, generated code, or shipped plugins. The
   fix (`quick-xml >= 0.41`) is tracked for 0.1.1.
 
-[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.21...HEAD
+[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.22...HEAD
+[0.1.22]: https://github.com/hal0zer0/melange/compare/v0.1.21...v0.1.22
 [0.1.21]: https://github.com/hal0zer0/melange/compare/v0.1.20...v0.1.21
 [0.1.20]: https://github.com/hal0zer0/melange/compare/v0.1.19...v0.1.20
 [0.1.19]: https://github.com/hal0zer0/melange/compare/v0.1.18...v0.1.19
