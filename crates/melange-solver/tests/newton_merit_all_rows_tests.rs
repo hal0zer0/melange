@@ -197,11 +197,12 @@ fn a_rectifier_loop_into_triodes_converges_every_sample_within_the_shipped_budge
         code.contains("pub const MAX_ITER: usize = 100;"),
         "the witness deck ships at the nodal floor budget"
     );
-    // Behavioral V={} row: its true residual is in both helpers.
+    // Behavioral V={} row: its true residual is in every helper (the two
+    // scalar helpers and the residual-vector helper of the line search).
     assert_eq!(
         code.matches("// behavioral V={} source 0: true row residual (V)")
             .count(),
-        2
+        3
     );
     let out = support::compile_and_run(&code, &silent_render_main(1.0), "merit_rect_loop");
     let (held, ceiling, _) = counts(&out);

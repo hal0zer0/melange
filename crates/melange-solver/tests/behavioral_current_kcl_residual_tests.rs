@@ -49,13 +49,19 @@ fn both_kcl_residual_helpers_evaluate_the_behavioral_current() {
         "residual helpers are emitted for an M > 0 build"
     );
     // The term appears once per helper, folded into `q` at the source's
-    // terminal rows (n− is ground here, so only n+ is stamped).
+    // terminal rows (n− is ground here, so only n+ is stamped): the two
+    // scalar helpers and the vector helper the line search's natural
+    // monotonicity test reads (`kcl_residual_inl_vec`).
+    assert!(
+        code.contains("fn kcl_residual_inl_vec("),
+        "the residual-vector helper is emitted for a full-LU M > 0 build"
+    );
     assert_eq!(
         code.matches("let bsrc_0_f_resid = ").count(),
-        2,
-        "the I={{}} current is evaluated in both residual helpers"
+        3,
+        "the I={{}} current is evaluated in every residual helper"
     );
-    assert_eq!(code.matches("-= bsrc_0_f_resid;").count(), 2);
+    assert_eq!(code.matches("-= bsrc_0_f_resid;").count(), 3);
     // The reuse helper reads `state` for the expression, so it takes it.
     assert!(
         code.contains("i_nl: &[f64; M], state: &CircuitState) -> (f64, bool, f64)"),

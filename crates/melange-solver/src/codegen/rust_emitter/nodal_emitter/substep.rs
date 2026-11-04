@@ -341,6 +341,10 @@ impl RustEmitter {
                     "i_nl",
                     "alpha_sub",
                     false,
+                    // The ladder solves in place (`lu_solve`) and keeps no
+                    // factorization to back-solve a trial with, so its search
+                    // keeps the residual-norm Armijo test (its own item).
+                    None,
                 );
                 // Fall-through on Armijo failure (see trap site): take the
                 // un-line-searched limited step and continue; the residual gate

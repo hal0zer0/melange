@@ -60,11 +60,20 @@ impl RustEmitter {
         // the accepted trial's device currents and residual, which are those
         // of the iterate the step commits.
         let reuse = use_line_search && armijo_trial_reuse(ir);
+        // On a build whose accepted trial supplies the next iteration's
+        // device currents and Jacobian (`armijo_jac_reuse`), it also supplies
+        // its correction: see 2d/2e below.
+        let jac_reuse_corr = reuse && armijo_jac_reuse(ir);
         if reuse {
             code.push_str("    let mut ls_i_nl = [0.0f64; M];\n");
             code.push_str("    let mut ls_res = (0.0f64, false, 0.0f64);\n");
             if armijo_r0_reuse(ir) {
                 code.push_str("    let mut ls_prev_hit = false;\n");
+            }
+            if jac_reuse_corr {
+                // The accepted trial's back-solved residual: the next
+                // iteration's correction when the factorization is reused.
+                code.push_str("    let mut ls_fv = [0.0f64; N];\n");
             }
         }
         // The device Jacobian array lives across iterations: the evaluation
@@ -329,6 +338,26 @@ impl RustEmitter {
         // 2d. Build companion RHS: rhs_base + N_i * (i_nl - J_dev_0 * v_nl) (sparse)
         // Uses chord_j_dev (from iter 0) to match the LU factorization.
         // Using current j_dev here would create an inconsistent fixed point.
+        if jac_reuse_corr {
+            // The iteration after an accepted trial, with the factorization
+            // kept: the trial back-solved `fv = G_aug^-1 F(v)` at this exact
+            // `v` with this exact `G_aug` and `chord_j_dev`, and the companion
+            // solve below computes `G_aug v_new = rhs + N_i (i_nl - J_c v_nl)`,
+            // which is `G_aug (v_new - v) = -F(v)`: the same vector. Use it.
+            // (Rounding differs: the correction form vs the companion form;
+            // measured below `NATURAL_REUSE_*` in the tests.)
+            code.push_str("        let mut v_new = [0.0f64; N];\n");
+            code.push_str("        if ls_prev_hit && !need_refactor {\n");
+            code.push_str(
+                "            // The accepted trial's back-solved residual IS this correction.\n",
+            );
+            code.push_str("            for i in 0..N { v_new[i] = v[i] - ls_fv[i]; }\n");
+            code.push_str("        } else {\n");
+        }
+        // The companion build and solve are emitted into the code from here
+        // so a debug build can run them a second time beside the reused
+        // correction and check the invariant (`NATURAL_REUSE_DEBUG_RELTOL`).
+        let companion_start = code.len();
         code.push_str(
                 "        // 2d. Build companion RHS: rhs + N_i * (i_nl - chord_J_dev * v_nl) (sparse)\n",
             );
@@ -354,7 +383,11 @@ impl RustEmitter {
             code.push_str(
                 "        // runtime fallback when the sparse factorization was rejected)\n",
             );
-            code.push_str("        let mut v_new = rhs_work;\n");
+            code.push_str(if jac_reuse_corr {
+                "        v_new = rhs_work;\n"
+            } else {
+                "        let mut v_new = rhs_work;\n"
+            });
             code.push_str("        if chord_dense {\n");
             code.push_str(&format!(
                 "            lu_back_solve(&{lu}, &{dr}, &{dc}, &{perm}, &mut v_new);\n"
@@ -369,10 +402,30 @@ impl RustEmitter {
             code.push_str(
                 "        // 2e. Solve with stored LU factors (chord: O(N²) back-solve)\n",
             );
-            code.push_str("        let mut v_new = rhs_work;\n");
+            code.push_str(if jac_reuse_corr {
+                "        v_new = rhs_work;\n"
+            } else {
+                "        let mut v_new = rhs_work;\n"
+            });
             code.push_str(&format!(
                 "        lu_back_solve(&{lu}, &{dr}, &{dc}, &{perm}, &mut v_new);\n\n"
             ));
+        }
+        if jac_reuse_corr {
+            let companion = code[companion_start..].to_string();
+            code.push_str("        }\n");
+            // Debug invariant: the companion form, recomputed at the reused
+            // iterate, must agree with the correction form to the stated
+            // bound (`thresholds.rs`). Compiled out of release builds.
+            code.push_str("        if cfg!(debug_assertions) && ls_prev_hit && !need_refactor {\n");
+            code.push_str("            let v_reused = v_new;\n");
+            code.push_str(&companion.replace("\n        ", "\n            "));
+            code.push_str("            let mut diff = 0.0f64;\n");
+            code.push_str("            let mut scale = 1.0f64;\n");
+            code.push_str("            for i in 0..N { let d = (v_reused[i] - v_new[i]).abs(); if d > diff { diff = d; } let a = v_reused[i].abs(); if a > scale { scale = a; } }\n");
+            code.push_str("            debug_assert!(diff <= NATURAL_REUSE_DEBUG_RELTOL * scale, \"reused Newton correction differs from the companion solve by {diff:e} V on a {scale:e} V scale\");\n");
+            code.push_str("            v_new = v_reused;\n");
+            code.push_str("        }\n\n");
         }
 
         // Op-amp output clamping inside NR loop — prevents physically impossible
@@ -490,23 +543,6 @@ impl RustEmitter {
         // having it (design review). Whatever `alpha` ends up as, the step
         // test below reads the UNDAMPED correction, so damping steers the
         // path and never changes what gets certified.
-        if use_line_search {
-            emit_armijo_line_search(
-                ir,
-                code,
-                "        ",
-                "v",
-                "v_new",
-                "alpha",
-                site.a,
-                "rhs",
-                "ls_ok",
-                "i_nl",
-                &site.sat_alpha,
-                reuse,
-            );
-            code.push_str("        if !ls_ok { state.diag_ls_fail_count += 1; }\n");
-        }
 
         // Step test, then apply the damped step.
         //
@@ -571,6 +607,51 @@ impl RustEmitter {
                         "        {{ let step = v_new[{node}] - v[{node}]; let threshold = RELTOL * v[{node}].abs().max(v_new[{node}].abs()) + VNTOL; if !(step.abs() < threshold) {{ max_step_exceeded = true; }} }}\n"
                     ));
             }
+        }
+        // The search runs only on an iteration whose node-step test fails: a
+        // correction inside the certification tolerance on every device node
+        // is not searched (Newton is at its root by its own measure; damping
+        // could move the certified point off Newton's target by less than
+        // that tolerance, and the trial norms would compare rounding noise).
+        // Measured: on a bus compressor every search ran on such an
+        // iteration (470k of 470k per 10 s); on a preamp's chord-exit
+        // iterations (correction 1e-11 V) the search refused all ten fractions
+        // of a step it then took anyway.
+        if use_line_search {
+            code.push_str("        let mut ls_ok = true;\n");
+            if reuse {
+                code.push_str("        let mut ls_hit = false;\n");
+            }
+            code.push_str("        if max_step_exceeded {\n");
+            // The natural monotonicity test back-solves each trial's residual
+            // vector `fv` in the factorization the step itself used (the
+            // site's chord LU, sparse or the dense fallback it dispatched to
+            // at 2e). The LU is valid here: a failed factor broke out above.
+            let back_solve = if ir.sparsity.lu.is_some() {
+                let sparse_lu = if pack.is_some() { &lu_pk } else { &lu };
+                format!(
+                    "if chord_dense {{ lu_back_solve(&{lu}, &{dr}, &{dc}, &{perm}, &mut fv); }} else {{ sparse_lu_back_solve(&{sparse_lu}, &{dr}, &{dc}, &mut fv); }}"
+                )
+            } else {
+                format!("lu_back_solve(&{lu}, &{dr}, &{dc}, &{perm}, &mut fv);")
+            };
+            emit_armijo_line_search(
+                ir,
+                code,
+                "        ",
+                "v",
+                "v_new",
+                "alpha",
+                site.a,
+                "rhs",
+                "ls_ok",
+                "i_nl",
+                &site.sat_alpha,
+                reuse,
+                Some(&back_solve),
+            );
+            code.push_str("        if !ls_ok { state.diag_ls_fail_count += 1; }\n");
+            code.push_str("        }\n");
         }
         code.push_str("        for i in 0..N { v[i] += alpha * (v_new[i] - v[i]); }\n");
         if reuse && armijo_r0_reuse(ir) {

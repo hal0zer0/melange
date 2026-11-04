@@ -96,11 +96,13 @@ pnjlim_bv(vnew, vold, vt, vcrit, xbv) -> f64:
 ```
 
 Witness (2026-11-03, a FET limiter's output Darlington with its C-E sustaining
-breakdown modelled as `D(BV=60 IBV=0.1)`, 31.6 V pk 50 Hz square, 2x): without
-the mirrored limit the Schur sub-path held 982 of 144 000 samples (1267
-iteration ceilings) and the full-LU sub-path survived only through 335
-sub-step/BE retries; with it the Schur sub-path converged every sample with no
-ceiling hit and the full-LU retries fell to 248.
+breakdown modelled as `D(BV=60 IBV=0.1)`, 31.6 V pk 50 Hz square, 3 s at 2x):
+without the mirrored limit the Schur sub-path held 982 of 144 000 host samples
+(1267 iteration ceilings; 39 371 held with the stage's junction caps added)
+and the same deck forced to full-LU survived only through 335 sub-step/BE
+retries; with it the Schur sub-path converged every sample with no ceiling hit
+and the forced full-LU retries fell to 272 (the remaining retries are the
+line-search crawl fixed by the natural monotonicity test, CODEGEN.md).
 
 ## FET Voltage Limiting (fetlim)
 

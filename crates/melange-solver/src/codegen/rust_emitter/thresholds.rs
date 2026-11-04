@@ -91,10 +91,67 @@ pub const FLUX_ROW_RELTOL: f64 = 1e-5;
 /// written.
 pub const FLUX_ROW_ULP_FLOOR: f64 = 64.0;
 
+/// Slope of the full-LU Newton line search's natural monotonicity test: a
+/// trial at fraction `λ` of the Newton correction `d` is accepted when the
+/// simplified correction at the trial, `d̄ = G_aug⁻¹·F(v + λ·d)` in the same
+/// factorization as the step, satisfies `‖d̄‖_w <= (1 − NATURAL_TEST_SLOPE·λ)·‖d‖_w`.
+/// A linear problem gives `‖d̄‖ = (1 − λ)‖d‖` exactly, so the slope is the
+/// share of that contraction a trial must keep. 1/4 is recalled as the
+/// restricted form of Deuflhard's natural monotonicity test (his NLEQ-ERR
+/// codes) and 1/2 as the unrestricted test of his Newton Methods for
+/// Nonlinear Problems; both from general knowledge, unread here (2026-11-04),
+/// so the witness below, not the citation, carries the constant.
+/// Measured on the golden corpus: at 1/2 a fresh-factorization step that
+/// contracted the Newton distance to 63 % and the residual sixty-fold was
+/// refused on a choke-loaded stage far from its root and then taken anyway
+/// (796 such refusals on one render); at 1/4 it is accepted. Applied on
+/// iterations whose factorization is the iterate's own; a chord iteration
+/// requires non-expansion only (slope 0), since its simplified correction
+/// contracts by `1 − λ·k` with the chord's `k` unknown. Not a certification
+/// threshold: the test steers the path and certification is the separate
+/// three-part test. Ruled 2026-11-04.
+pub const NATURAL_TEST_SLOPE: f64 = 0.25;
+
+/// Absolute floor, in amps, of the natural monotonicity test's weight on a
+/// branch-current unknown (a source, VCVS, transformer, op-amp or inductor
+/// row): `w_i = 1 / (RELTOL·max(|x_i|, |x_new_i|) + NATURAL_TEST_CURRENT_FLOOR)`,
+/// the current analogue of the node rows' `VNTOL`. The value is
+/// [`KCL_ABSTOL`]'s, the floor the residual gate already applies to currents,
+/// stated as its own constant so the branch rows do not inherit a volt floor
+/// silently (the node-step test applies `VNTOL` to a saturating inductor's
+/// branch row, volts as amps; this test does not). Ruled 2026-11-04.
+pub const NATURAL_TEST_CURRENT_FLOOR: f64 = 1e-9;
+
+/// Debug-build invariant of the reused Newton correction, relative: on the
+/// iteration after an accepted line-search trial whose factorization is kept,
+/// the trial's back-solved residual `G_aug⁻¹·F(v)` is the correction the
+/// companion solve `G_aug·v_new = rhs_work` would give, `v_new = v − fv`, and
+/// a debug build computes both and requires
+/// `max_i |v_new_i − v_cmp_i| <= NATURAL_REUSE_DEBUG_RELTOL · max(1, max_i |v_new_i|)`.
+/// The two forms round differently: the companion form solves for the
+/// 60 V-scale node voltages from a right-hand side of 10 mA-scale currents
+/// that cancel to the nanoamp residual, so its error is the conditioning times
+/// `u` on the full voltage, while the correction form solves for the small
+/// correction from the residual itself. Measured 2026-11-04 over 10 s of the
+/// bench stimulus: 2.4e-9 V on a 60 V FET limiter (4e-11 relative), 3.4e-11 V
+/// on a power amp, 9.3e-14 V on a compressor's control path (gravity); a
+/// bus compressor had no reused iteration at all (its searches are skipped
+/// by the step test). The bound is 250× the largest. Relative to the largest
+/// node voltage, it catches a wrong vector, not a near-root rounding
+/// difference; the test that drives it holds reused corrections well above
+/// the bound. Release builds compile it out (`cfg!(debug_assertions)`).
+pub const NATURAL_REUSE_DEBUG_RELTOL: f64 = 1e-8;
+
 /// Emit the transient certification thresholds into the generated code as
 /// named module-level constants (both routes). `substep` adds the sub-step
-/// ladder's acceptance, which only the nodal route has.
-pub(super) fn emit_transient_thresholds(code: &mut String, substep: bool, flux: bool) {
+/// ladder's acceptance, which only the nodal route has; `natural` adds the
+/// full-LU line search's natural monotonicity constants.
+pub(super) fn emit_transient_thresholds(
+    code: &mut String,
+    substep: bool,
+    flux: bool,
+    natural: bool,
+) {
     if flux {
         code.push_str(
             "/// Relative tolerance of a saturating inductor's flux row,\n\
@@ -150,6 +207,34 @@ pub(super) fn emit_transient_thresholds(code: &mut String, substep: bool, flux: 
             "pub const SUBSTEP_ACCEPT_VOLTS: f64 = {SUBSTEP_ACCEPT_VOLTS:e};\n\n"
         ));
     }
+    if natural {
+        code.push_str(
+            "/// Slope of the Newton line search's natural monotonicity test: a trial at\n\
+             /// fraction lambda of the correction d is accepted when the simplified\n\
+             /// correction there, G_aug^-1 F(v + lambda d) in the step's own factorization,\n\
+             /// has weighted norm <= (1 - NATURAL_TEST_SLOPE * lambda) * ||d||_w (Deuflhard).\n\
+             /// Steers the path only; certification is the separate three-part test.\n",
+        );
+        code.push_str(&format!(
+            "pub const NATURAL_TEST_SLOPE: f64 = {NATURAL_TEST_SLOPE:?};\n\n"
+        ));
+        code.push_str(
+            "/// Floor (A) of that test's weight on a branch-current unknown,\n\
+             /// `1 / (RELTOL * max(|x|, |x_new|) + NATURAL_TEST_CURRENT_FLOOR)`; node rows\n\
+             /// take VNTOL. The value is KCL_ABSTOL's, stated on its own.\n",
+        );
+        code.push_str(&format!(
+            "pub const NATURAL_TEST_CURRENT_FLOOR: f64 = {NATURAL_TEST_CURRENT_FLOOR:e};\n\n"
+        ));
+        code.push_str(
+            "/// Debug-build invariant of the reused Newton correction: the accepted trial's\n\
+             /// back-solved residual must match the companion solve to this relative bound\n\
+             /// (the two forms round differently; measured 4e-11, bound 250x that).\n",
+        );
+        code.push_str(&format!(
+            "pub const NATURAL_REUSE_DEBUG_RELTOL: f64 = {NATURAL_REUSE_DEBUG_RELTOL:e};\n\n"
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -161,7 +246,7 @@ mod tests {
     #[test]
     fn emitted_literals_are_the_named_values() {
         let mut code = String::new();
-        emit_transient_thresholds(&mut code, true, true);
+        emit_transient_thresholds(&mut code, true, true, true);
         for line in [
             "pub const RELTOL: f64 = 1e-3;",
             "pub const VNTOL: f64 = 1e-6;",
@@ -169,12 +254,16 @@ mod tests {
             "pub const ABSTOL: f64 = 1e-12;",
             "pub const ABSTOL_SCALE_FLOOR: f64 = 1e-9;",
             "pub const SUBSTEP_ACCEPT_VOLTS: f64 = 1e-3;",
+            "pub const NATURAL_TEST_SLOPE: f64 = 0.25;",
+            "pub const NATURAL_TEST_CURRENT_FLOOR: f64 = 1e-9;",
+            "pub const NATURAL_REUSE_DEBUG_RELTOL: f64 = 1e-8;",
         ] {
             assert!(code.contains(line), "missing `{line}` in:\n{code}");
         }
         let mut dk = String::new();
-        emit_transient_thresholds(&mut dk, false, false);
+        emit_transient_thresholds(&mut dk, false, false, false);
         assert!(!dk.contains("SUBSTEP_ACCEPT_VOLTS"));
+        assert!(!dk.contains("NATURAL_TEST"));
         assert_eq!(format!("{DC_OP_RELTOL:e}"), "1e-6");
         assert_eq!(format!("{DC_OP_STEP_ABSTOL_VOLTS:e}"), "1e-9");
         assert_eq!(format!("{DC_OP_KCL_ABSTOL_AMPS:e}"), "1e-9");

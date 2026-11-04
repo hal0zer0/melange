@@ -445,6 +445,12 @@ pub(crate) fn simulate_circuit_source(
             // sparse schedule).
             "diag_nr_iter_total",
             "diag_sparse_reject_count",
+            // The full-LU Newton sites' line search: searches that accepted no
+            // fraction (the loop then took the limited step), and trials the
+            // natural monotonicity test accepted while the raw residual norm
+            // had risen (its intended behaviour where device currents cancel).
+            "diag_ls_fail_count",
+            "diag_ls_merit_up_count",
         ])
         .chain(INPUT_DIAG_FIELDS)
         .filter(|f| declares_state_field(&generated.code, f))

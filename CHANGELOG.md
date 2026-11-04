@@ -134,6 +134,42 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ### Fixed
 
+- **The full-LU Newton no longer crawls at a breakdown knee.** On a Darlington
+  output stage with its collector-emitter breakdown modelled (`D(BV=60)`),
+  driven by a 31.6 V square, the forced full-LU sub-path hit its Newton
+  ceiling on 48 / 83 / 31 samples per 0.4 s at 1x / 2x / 4x (every one
+  rescued by the sub-step ladder) where the Schur sub-path converged every
+  sample: once the knee engaged, the line search's residual-norm test refused
+  the junction limiter's step on every iteration, because on the collector
+  node two ~7 mA exponentials cancel to a 0.3 mA residual and either one's
+  second-order term outweighs the residual's linear decrease. The full-LU
+  Newton sites now accept a trial by Deuflhard's natural monotonicity test:
+  the simplified correction at the trial, back-solved in the step's own
+  factorization, must contract the Newton distance in the node-step test's
+  own weights (slope 1/4 on a fresh factorization, non-expansion on a chord
+  iteration; `NATURAL_TEST_SLOPE`, `NATURAL_TEST_CURRENT_FLOOR` in
+  `thresholds.rs`). The node-step test runs before the search and gates it,
+  and the iteration after an accepted trial takes the trial's back-solved
+  residual as its correction instead of the companion solve (a debug build
+  checks the two agree to `NATURAL_REUSE_DEBUG_RELTOL`). Certification is
+  unchanged. Witness: 0 / 0 / 0 ceilings, the render −46.6 dB from the Schur
+  render (was −25.7 dB). Golden corpus against the pre-change tree: 166
+  identical, 30 NEGLIGIBLE (the largest a power amp's sweep at 0.019 V on
+  the four samples that no longer need a sub-step, −95 dB residual by Sensor;
+  the rest ≤ 1e-4 V, most ≤ 2e-9 V), 0 changed; ceilings and sub-steps
+  4 → 0, no holds, backward-Euler fallbacks unchanged, line-search failures
+  60471 → 1013, Newton iterations −0.65 %. Hard-drive sweep (132 renders at
+  0.3 / 3 / 10 V): ceilings 3438 → 2508 (a preamp's 38 / 68 / 824 → 0 / 0 /
+  0), no failure-path rise. Cost per sample, one core, interleaved before /
+  after: a FET limiter 6.71 → 7.01 µs (+4.4 %), its revision forced full-LU
+  +3.2 %, a bus compressor 271 → 205 ns (−24 %: its searches are skipped),
+  a power amp +7.7 %, a seven-triode cascade +4.6 %, a Schur deck unchanged.
+  Back-solves per iteration are unchanged (measured); the extra is the
+  search's per-iteration bookkeeping inside the Newton loop (profile). The
+  sub-step ladder keeps its Armijo test (own item). New counter
+  `diag_ls_merit_up_count` (trials accepted while the raw residual norm
+  rose); `simulate -v` prints it and `diag_ls_fail_count` on full-LU builds.
+
 - **A generated plugin applies its smoothed pots every 32 samples, not every
   sample.** The template read each pot's smoother and called the circuit's
   setter on every sample; on a nodal build every changed value rebuilds the

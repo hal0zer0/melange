@@ -314,6 +314,7 @@ pub(super) fn emit_sat_ind_merit_rows(
     v: &str,
     mat: &str,
     indent: &str,
+    store: Option<&str>,
 ) {
     if ir.saturating_inductors.is_empty() {
         return;
@@ -328,9 +329,13 @@ pub(super) fn emit_sat_ind_merit_rows(
         if !emit_sat_ind_row_terms(code, ir, setter_stamps, idx, si, rhs, i_nl, v, mat, indent) {
             continue;
         }
+        code.push_str(&format!("{indent}    norm_sq += acc * acc;\n"));
+        // The residual vector (`store`), by the row's index `k`.
+        if let Some(vec) = store {
+            code.push_str(&format!("{indent}    {vec}[k] = acc;\n"));
+        }
         code.push_str(&format!(
-            "{indent}    norm_sq += acc * acc;\n\
-             {indent}    if !(acc.abs() <= (FLUX_ROW_RELTOL * den).max(FLUX_ROW_ULP_FLOOR * f64::EPSILON * stiff)) {{ ok = false; }}\n\
+            "{indent}    if !(acc.abs() <= (FLUX_ROW_RELTOL * den).max(FLUX_ROW_ULP_FLOOR * f64::EPSILON * stiff)) {{ ok = false; }}\n\
              {indent}}}\n"
         ));
     }

@@ -308,6 +308,7 @@ pub(super) fn emit_behavioral_voltage_row_residual(
     code: &mut String,
     ir: &CircuitIR,
     indent: &str,
+    store: Option<&str>,
 ) {
     for (si, is_voltage, f, np, nm) in bsrc_residual_exprs(ir) {
         if !is_voltage {
@@ -323,13 +324,24 @@ pub(super) fn emit_behavioral_voltage_row_residual(
         } else {
             "0.0_f64".to_string()
         };
+        // The residual vector (`store`) is indexed by the row the Newton step
+        // solves this source on: its augmented row.
+        let stored = match store {
+            Some(vec) => {
+                let row = ir.behavioral_sources[si]
+                    .aug_row
+                    .expect("a behavioral V={} source has an augmented row");
+                format!("{indent}    {vec}[{row}] = acc;\n")
+            }
+            None => String::new(),
+        };
         code.push_str(&format!(
             "{indent}{{ // behavioral V={{}} source {si}: true row residual (V)
              {indent}    let f = {f};
              {indent}    let acc = ({vp} - {vm}) - f;
              {indent}    let den = {vp}.abs().max({vm}.abs()).max(f.abs());
              {indent}    norm_sq += acc * acc;
-             {indent}    if !(acc.abs() <= RELTOL * den + VNTOL) {{ ok = false; }}
+{stored}{indent}    if !(acc.abs() <= RELTOL * den + VNTOL) {{ ok = false; }}
              {indent}}}
 "
         ));

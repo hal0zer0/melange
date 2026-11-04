@@ -266,10 +266,22 @@ fn without_reuse(code: &str) -> String {
     out
 }
 
+/// The correction reuse (`v_new = v − ls_fv` on the iteration after an
+/// accepted trial) is NOT bit-identical to the companion solve by design: it
+/// rounds as the correction form, the companion as the voltage form
+/// (`NATURAL_REUSE_DEBUG_RELTOL`). Disabled here so the evaluation reuse alone
+/// is compared, bit for bit.
+fn without_correction_reuse(code: &str) -> String {
+    code.replace(
+        "if ls_prev_hit && !need_refactor {",
+        "if false && ls_prev_hit && !need_refactor {",
+    )
+}
+
 #[test]
 fn accepted_trial_reuse_is_bit_identical() {
     for (spice, amp, tag) in [(BJT_LADDER, 2.0, "bjt"), (TWO_TUBE_STAGE, 3.0, "tube")] {
-        let code = full_lu_code(spice, None);
+        let code = without_correction_reuse(&full_lu_code(spice, None));
         let n = 6000;
         let a = render_bits(&code, amp, n, &format!("reuse_{tag}"));
         let b = render_bits(&without_reuse(&code), amp, n, &format!("reuse_off_{tag}"));

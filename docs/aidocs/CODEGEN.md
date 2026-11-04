@@ -638,10 +638,11 @@ convergence check accepts. **Mitigations** (BoyleDiodes-gated):
 
 ### Rows the nodal convergence checks cover
 
-The residual helpers (`kcl_residual` / `kcl_residual_inl`: the full-LU
-Newton's and the sub-step ladder's acceptance gate and the Armijo line search's
-merit) run over every row the Newton step solves, each with its true residual
-in its own unit (`nodal_emitter/residual.rs`):
+The residual helpers (`kcl_residual` / `kcl_residual_inl`, and
+`kcl_residual_inl_vec`, the same tail also returning the residual vector: the
+full-LU Newton's and the sub-step ladder's acceptance gate and the line
+search's residual) run over every row the Newton step solves, each with its
+true residual in its own unit (`nodal_emitter/residual.rs`):
 
 - KCL rows (`helpers::kcl_rows`: the circuit nodes `0..N_NODES` and the
   parasitic-BJT internal nodes `expand_bjt_internal_nodes` appends among the
@@ -903,13 +904,77 @@ generated code has no path to `crate::codegen::policy`. Use
 the decimal point (`5.0`, not `5`).
 
 `NODAL_MAX_ITER_FLOOR = 100` is the least Newton budget a nodal build ships.
-The nodal Newton (Schur and full-LU) is globalized by an Armijo line search
-whose merit is the residual of every row the Newton step solves (KCL rows in
-amps; source, constraint and inductor branch rows in their own unit;
-behavioral `V={}` rows as `(v+ − v−) − f(v)`; saturating-inductor rows with
-the flux residual; `nodal_emitter/residual.rs`). The same residual is the
-convergence gate, so after a damped step every row is certified, not only the
-KCL rows. The search crosses a device's saturation knee in many short steps
+The full-LU Newton and the sub-step ladder on both nodal routes are
+globalized by a line search along the limited Newton ray
+`v → v + alpha·(v_new − v)` (`nodal_emitter/residual.rs::emit_armijo_line_search`),
+over the residual of every row the Newton step solves (KCL rows in amps;
+source, constraint and inductor branch rows in their own unit; behavioral
+`V={}` rows as `(v+ − v−) − f(v)`; saturating-inductor rows with the flux
+residual). The same residual is the convergence gate, so after a damped step
+every row is certified, not only the KCL rows. The search steers the path
+only; certification is the three-part test above, whatever the damping.
+
+At the full-LU Newton sites (trapezoidal and backward-Euler) the acceptance
+rule is Deuflhard's **natural monotonicity test**: with `d = v_new − v` the
+undamped correction and `λ = alpha·s` the fraction a trial applies, the trial
+is accepted when the simplified correction at the trial,
+`d̄ = G_aug⁻¹·F(v + λ·d)` back-solved in the step's own factorization (the
+site's chord LU, one extra back-solve per trial), satisfies
+`‖d̄‖_w ≤ (1 − slope·λ)·‖d‖_w`. The slope is `NATURAL_TEST_SLOPE = 1/4`
+(`thresholds.rs`; recalled as the restricted form of the test in Deuflhard's
+NLEQ-ERR codes, from general knowledge, unread: the measured witness carries
+the constant) on an iteration whose factorization is the iterate's own, and 0 (non-
+expansion only) on a chord iteration, whose simplified correction contracts
+by `1 − λ·k` with the chord's `k` unknown: a frozen Jacobian larger than the
+true one contracts less than `1 − λ` and, measured, had the fresh-Jacobian
+bound refuse a step that cut the residual nine-fold. The weights
+`w_i = 1 / (RELTOL·max(|x_i|, |x_new_i|) + floor_i)` are the node-step test's
+own tolerance per unknown (`VNTOL` on the KCL rows, whose unknowns are volts;
+`NATURAL_TEST_CURRENT_FLOOR` = 1e-9 A on the branch-current rows), computed
+once per iteration from `v` and the undamped `v_new` and used for `‖d‖` and
+every trial. The node-step test runs before the search and gates it: an
+iteration whose undamped correction is inside the certification tolerance
+on every device node is not searched (Newton is at its root by its own
+measure; damping could move the certified point off Newton's target by less
+than that tolerance, and on a chord-exit iteration, correction 1e-11 V
+against `‖F‖` 1.6e-9 A, the trial norms were rounding noise against rounding
+noise). Measured over 10 s of the bench stimulus, every one of a bus
+compressor's 470k searches ran on such an iteration. On the iteration after
+an accepted trial whose factorization is kept (`ls_prev_hit && !need_refactor`,
+builds with `armijo_jac_reuse`), the trial's back-solved residual is the
+correction the companion solve would compute (`G_aug·(v_new − v) = −F(v)`),
+so `v_new = v − ls_fv` replaces the companion build and back-solve: on Deck
+76 that is 99 % of the search's back-solves, on a power amp 72 %. The two
+forms round differently (the companion solves for the 60 V node voltages
+from a right-hand side of 10 mA-scale currents cancelling to the nanoamp
+residual; the correction form solves for the small correction from the
+residual itself): measured 2.4e-9 V on a 60 V FET limiter, 3.4e-11 V on a
+power amp, 9e-14 V on a bus compressor's sidechain, and a debug build
+recomputes the companion form and asserts agreement to
+`NATURAL_REUSE_DEBUG_RELTOL` = 1e-8 relative (`thresholds.rs`;
+`nodal_natural_monotonicity_tests.rs` runs one). A linear problem
+gives `‖d̄‖ = (1 − λ)‖d‖` exactly; the slope is the share of that contraction
+a trial must keep. The test is affine-invariant where a residual-norm test is
+not: on a node carrying two large exponential currents whose net residual is
+small (a Darlington collector at its breakdown knee: ~7 mA each through the
+collector junction and the breakdown branch, 0.3 mA net) the second-order
+term of either exponential outweighs the residual's linear decrease at any
+useful fraction, and an Armijo test on `‖F‖` in raw amps backtracked a
+junction limiter's 2.5·vt step to 1/4..1/64 on every iteration: 92
+iterations climbed 0.2 V of base-emitter voltage and the sample hit the
+ceiling (48 / 83 / 31 samples per 0.4 s of a 31.6 V square at 1x / 2x / 4x,
+every one rescued by the sub-step ladder), where the Schur sub-path, which has
+no search, converged in 16. Under the natural test the same sample converges
+in 17 iterations and the ceilings are 0 / 0 / 0. Accepting a trial whose raw
+`‖F‖` rose is therefore by design; `diag_ls_merit_up_count` counts those
+acceptances. The sub-step ladder solves in place (`lu_solve`) and keeps no
+factorization to back-solve a trial with, so its search keeps the Armijo
+condition on the residual norm, `‖F(trial)‖ ≤ (1 − 1e-4·s)·‖F(v)‖` (its own
+later item). Either search is skipped at `‖F(v)‖ ≤ 1e-9`, and one that
+accepts no fraction down to 1/1024 reports `ls_ok = false`
+(`diag_ls_fail_count`) and the loop takes the limited step: a line search
+may only help, so its failure is no worse than not having it. The search
+crosses a device's saturation knee in many short steps
 inside one sample, so a smaller budget can end a full-scale transient sample
 unsolved. It is a
 ceiling, not a target: a converging sample exits early and pays nothing. An
@@ -939,7 +1004,7 @@ every time. The predicates and the argument are in
 `nodal_emitter/residual.rs`; `full_lu_lossless_kernel_tests.rs` renders each
 build with the reuse disabled and compares the bits.
 
-Still to enumerate: Armijo `c=1e-4`, `CHORD_REFACTOR=5`, the BE-latch thresholds,
+Still to enumerate: the ladder's Armijo `c=1e-4`, `CHORD_REFACTOR=5`, the BE-latch thresholds,
 xoshiro salts, `STATE_MAX_PLAUSIBLE_MAGNITUDE=1e6`, and ~35 others.
 
 # `--nodal-subpath {auto|schur|full-lu}`

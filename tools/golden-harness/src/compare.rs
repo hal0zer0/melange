@@ -408,6 +408,10 @@ pub const COUNTER_CLASSES: &[(&str, CounterClass)] = &[
     ("diag_nr_iter_total", CounterClass::Effort),
     ("diag_refactor_count", CounterClass::Effort),
     ("diag_ls_fail_count", CounterClass::Effort),
+    // Line-search trials the natural monotonicity test accepted while the raw
+    // residual norm had risen: the test's intended behaviour on a node where
+    // large device currents cancel, surfaced for its share.
+    ("diag_ls_merit_up_count", CounterClass::Effort),
     // Samples on which the active-set rail resolve pinned an op-amp output:
     // the op-amp railing, which is physics, not a rescue.
     ("diag_active_set_pin_count", CounterClass::Effort),

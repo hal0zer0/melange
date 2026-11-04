@@ -150,6 +150,9 @@ impl RustEmitter {
             &mut code,
             true,
             !ir.saturating_inductors.is_empty(),
+            // The natural monotonicity constants belong to the full-LU Newton
+            // sites' line search, emitted when the build has one (M > 0).
+            use_full_nodal && ir.topology.m > 0,
         );
 
         // Runtime BE-latch detector constants (trapezoidal builds only).

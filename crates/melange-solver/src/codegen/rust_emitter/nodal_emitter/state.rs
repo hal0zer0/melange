@@ -451,6 +451,21 @@ impl RustEmitter {
              \x20   /// does NOT count here (ls_ok stays true).\n",
         );
         code.push_str("    pub diag_ls_fail_count: u64,\n");
+        // The natural monotonicity test lives at the full-LU Newton sites
+        // (M > 0); a Schur build has no such counter rather than a zero.
+        if use_full_nodal && ir.topology.m > 0 {
+            code.push_str(
+                "    /// Diagnostic: number of line-search trials the natural monotonicity\n\
+                 \x20   /// test accepted while the raw residual norm ||F|| had risen against the\n\
+                 \x20   /// iterate's (`rc > r0`). Accepting such a trial is the test's point: it\n\
+                 \x20   /// measures contraction in Newton-scaled distance, which a residual norm\n\
+                 \x20   /// in mixed amps and volts misreads where two large device currents\n\
+                 \x20   /// nearly cancel on one node. Surfaced so the share of accepted steps\n\
+                 \x20   /// that a residual-norm Armijo test would have refused is observable;\n\
+                 \x20   /// certification is separate and unchanged.\n",
+            );
+            code.push_str("    pub diag_ls_merit_up_count: u64,\n");
+        }
         code.push_str("    /// Diagnostic: number of samples hit by the global voltage-damping\n");
         code.push_str("    /// safety net. This is a legacy safeguard that scales v_new toward\n");
         code.push_str("    /// v_prev when any node moves more than ~2V (or 5% of max DC OP) in\n");
@@ -961,6 +976,9 @@ impl RustEmitter {
         code.push_str(&super::super::subsample_fire::emit_subsample_fire_default_fields(ir));
         code.push_str("            diag_refactor_count: 0,\n");
         code.push_str("            diag_ls_fail_count: 0,\n");
+        if use_full_nodal && ir.topology.m > 0 {
+            code.push_str("            diag_ls_merit_up_count: 0,\n");
+        }
         code.push_str("            diag_voltage_damp_count: 0,\n");
         if ir.solver_config.runtime_be_latch {
             for f in [
@@ -1304,6 +1322,9 @@ impl RustEmitter {
         code.push_str(&super::super::subsample_fire::emit_subsample_fire_reset(ir));
         code.push_str("        self.diag_refactor_count = 0;\n");
         code.push_str("        self.diag_ls_fail_count = 0;\n");
+        if use_full_nodal && ir.topology.m > 0 {
+            code.push_str("        self.diag_ls_merit_up_count = 0;\n");
+        }
         if ir.solver_config.runtime_be_latch {
             for f in [
                 "be_x_mean",

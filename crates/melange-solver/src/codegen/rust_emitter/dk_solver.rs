@@ -44,7 +44,7 @@ impl RustEmitter {
             ));
             // The certification thresholds `solve_nonlinear` reads, by name
             // (`thresholds.rs`: one constant each, not configurable).
-            super::thresholds::emit_transient_thresholds(code, false, false);
+            super::thresholds::emit_transient_thresholds(code, false, false, false);
         }
         code.push_str("/// Solve M×M nonlinear system via Newton-Raphson\n");
         code.push_str("/// \n");

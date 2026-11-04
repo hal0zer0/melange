@@ -116,51 +116,63 @@ pub(super) fn emit_kcl_residual_fns(
     // structural nonzeros of the raw forward A — a byte-identical transform
     // (skipped columns are structural zeros). Fall back to the dense sweep
     // only when the forward matrices are unavailable.
-    let mut tail = String::new();
-    tail.push_str("    let mut q = [0.0f64; N];\n");
-    tail.push_str(&emit_sparse_ni_matvec_add(ir, "q", "i_nl", "    "));
-    super::behavioral::emit_behavioral_current_residual(&mut tail, ir, "    ");
-    tail.push_str("    let mut norm_sq = 0.0f64;\n");
-    tail.push_str("    let mut max_abs = 0.0f64;\n");
-    tail.push_str("    let mut ok = true;\n");
-    // KCL rows: amps, KCL_ABSTOL floor, the only rows in the infinity norm.
-    tail.push_str("    // KCL rows (A)\n");
-    emit_a_residual_rows(
-        ir,
-        setter_stamps,
-        &rows,
-        "KCL_ABSTOL",
-        true,
-        &mut tail,
-        "    ",
-    );
-    // Source, constraint and inductor branch rows: VNTOL floor (the node-step
-    // test's), never in the infinity norm.
-    if !aug_rows.is_empty() {
-        tail.push_str("    // source / constraint / inductor branch rows (V)\n");
+    //
+    // `store`: `Some(vec)` also writes every row's residual into `vec[row]`
+    // (the residual VECTOR the line search's natural monotonicity test
+    // back-solves, `kcl_residual_inl_vec`); `None` is the scalar tail the
+    // gate reads. Same rows, same arithmetic, one assignment more per row.
+    let tail = |store: Option<&str>| -> String {
+        let mut tail = String::new();
+        tail.push_str("    let mut q = [0.0f64; N];\n");
+        tail.push_str(&emit_sparse_ni_matvec_add(ir, "q", "i_nl", "    "));
+        super::behavioral::emit_behavioral_current_residual(&mut tail, ir, "    ");
+        tail.push_str("    let mut norm_sq = 0.0f64;\n");
+        tail.push_str("    let mut max_abs = 0.0f64;\n");
+        tail.push_str("    let mut ok = true;\n");
+        // KCL rows: amps, KCL_ABSTOL floor, the only rows in the infinity norm.
+        tail.push_str("    // KCL rows (A)\n");
         emit_a_residual_rows(
             ir,
             setter_stamps,
-            &aug_rows,
-            "VNTOL",
-            false,
+            &rows,
+            "KCL_ABSTOL",
+            true,
+            store,
             &mut tail,
             "    ",
         );
-    }
-    super::behavioral::emit_behavioral_voltage_row_residual(&mut tail, ir, "    ");
-    super::sat_ind::emit_sat_ind_merit_rows(
-        &mut tail,
-        ir,
-        setter_stamps,
-        "rhs",
-        Some("i_nl"),
-        "v",
-        "amat",
-        "    ",
-    );
-    tail.push_str("    (norm_sq.sqrt(), ok, max_abs)\n");
-    tail.push_str("}\n\n");
+        // Source, constraint and inductor branch rows: VNTOL floor (the
+        // node-step test's), never in the infinity norm.
+        if !aug_rows.is_empty() {
+            tail.push_str("    // source / constraint / inductor branch rows (V)\n");
+            emit_a_residual_rows(
+                ir,
+                setter_stamps,
+                &aug_rows,
+                "VNTOL",
+                false,
+                store,
+                &mut tail,
+                "    ",
+            );
+        }
+        super::behavioral::emit_behavioral_voltage_row_residual(&mut tail, ir, "    ", store);
+        super::sat_ind::emit_sat_ind_merit_rows(
+            &mut tail,
+            ir,
+            setter_stamps,
+            "rhs",
+            Some("i_nl"),
+            "v",
+            "amat",
+            "    ",
+            store,
+        );
+        tail.push_str("    (norm_sq.sqrt(), ok, max_abs)\n");
+        tail.push_str("}\n\n");
+        tail
+    };
+    let tail_plain = tail(None);
 
     // (1) Device-evaluating residual — used by the always-checked
     // convergence gate (at v_new) and the Armijo backtrack trials (at
@@ -169,7 +181,7 @@ pub(super) fn emit_kcl_residual_fns(
     code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_final", "v", "    "));
     code.push_str("    let mut i_nl = [0.0f64; M];\n");
     RustEmitter::emit_nodal_device_evaluation_final(&mut code, ir, "    ", "v");
-    code.push_str(&tail);
+    code.push_str(&tail_plain);
 
     // (2) i_nl-reusing residual: the residual tail on device currents
     // already evaluated at this exact v (no pnjlim on the eval voltage,
@@ -185,7 +197,32 @@ pub(super) fn emit_kcl_residual_fns(
         "fn kcl_residual_inl(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], i_nl: &[f64; M]{}{sat_param}) -> (f64, bool, f64) {{\n",
         if super::behavioral::residual_needs_state(ir) { ", state: &CircuitState" } else { "" }
     ));
-    code.push_str(&tail);
+    code.push_str(&tail_plain);
+
+    // (2v) The same tail returning the residual VECTOR as well: what the
+    // full-LU Newton sites' line search back-solves for its natural
+    // monotonicity test (`emit_armijo_line_search`, `natural`). Only those
+    // sites read it (`full_lu`, M > 0); the trial helpers (3)/(4)/(5) below
+    // end in it.
+    let state_param = if super::behavioral::residual_needs_state(ir) {
+        ", state: &CircuitState"
+    } else {
+        ""
+    };
+    let state_arg = super::behavioral::kcl_residual_inl_state_arg(ir);
+    let sat_arg = if has_sat { ", sat_alpha" } else { "" };
+    let vec_helpers = full_lu && ir.topology.m > 0;
+    if vec_helpers {
+        code.push_str(
+            "/// `kcl_residual_inl`, also writing every row's residual into `fres` (the\n\
+             /// vector the line search's natural monotonicity test back-solves).\n",
+        );
+        code.push_str("#[inline]\n");
+        code.push_str(&format!(
+            "fn kcl_residual_inl_vec(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], i_nl: &[f64; M]{state_param}{sat_param}, fres: &mut [f64; N]) -> (f64, bool, f64) {{\n",
+        ));
+        code.push_str(&tail(Some("fres")));
+    }
 
     // (3) Device-evaluating residual that also hands back the device currents
     // it evaluated, for the Newton sites' accepted-trial reuse
@@ -200,14 +237,14 @@ pub(super) fn emit_kcl_residual_fns(
         );
         code.push_str("#[inline]\n");
         code.push_str(
-            "fn kcl_residual_eval(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], state: &CircuitState, i_nl_out: &mut [f64; M]) -> (f64, bool, f64) {\n",
+            "fn kcl_residual_eval(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], state: &CircuitState, i_nl_out: &mut [f64; M], fres: &mut [f64; N]) -> (f64, bool, f64) {\n",
         );
         code.push_str("    let mut v_nl_final = [0.0f64; M];\n");
         code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_final", "v", "    "));
         code.push_str("    let mut i_nl = [0.0f64; M];\n");
         RustEmitter::emit_nodal_device_evaluation_final(&mut code, ir, "    ", "v");
         code.push_str("    *i_nl_out = i_nl;\n");
-        code.push_str("    kcl_residual_inl(v, rhs, amat, &i_nl)\n");
+        code.push_str("    kcl_residual_inl_vec(v, rhs, amat, &i_nl, fres)\n");
         code.push_str("}\n\n");
     }
     // (4) The same, evaluating the devices with the Newton body's code, which
@@ -219,7 +256,7 @@ pub(super) fn emit_kcl_residual_fns(
         );
         code.push_str("#[inline]\n");
         code.push_str(
-            "fn kcl_residual_eval_jac(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], state: &CircuitState, i_nl_out: &mut [f64; M], j_dev: &mut [f64; M * M]) -> (f64, bool, f64) {\n",
+            "fn kcl_residual_eval_jac(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], state: &CircuitState, i_nl_out: &mut [f64; M], j_dev: &mut [f64; M * M], fres: &mut [f64; N]) -> (f64, bool, f64) {\n",
         );
         code.push_str("    let mut v_nl = [0.0f64; M];\n");
         code.push_str(&emit_sparse_nv_matvec(ir, "v_nl", "v", "    "));
@@ -229,7 +266,29 @@ pub(super) fn emit_kcl_residual_fns(
         }
         RustEmitter::emit_nodal_device_evaluation_body(&mut code, ir, "    ", "v");
         code.push_str("    *i_nl_out = i_nl;\n");
-        code.push_str("    kcl_residual_inl(v, rhs, amat, &i_nl)\n");
+        code.push_str("    kcl_residual_inl_vec(v, rhs, amat, &i_nl, fres)\n");
+        code.push_str("}\n\n");
+    }
+    // (5) The device-evaluating residual with the vector, for the Newton
+    // sites whose trials cannot reuse their evaluation (`Hard` rails with
+    // op-amps, behavioral sources, saturating inductors): literally (1) ending
+    // in (2v).
+    if vec_helpers && !armijo_trial_reuse(ir) {
+        code.push_str(
+            "/// `kcl_residual`, also writing every row's residual into `fres` (the line\n\
+             /// search's natural monotonicity test).\n",
+        );
+        code.push_str("#[inline]\n");
+        code.push_str(&format!(
+            "fn kcl_residual_vec(v: &[f64; N], rhs: &[f64; N], amat: &[[f64; N]; N], state: &CircuitState{sat_param}, fres: &mut [f64; N]) -> (f64, bool, f64) {{\n",
+        ));
+        code.push_str("    let mut v_nl_final = [0.0f64; M];\n");
+        code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_final", "v", "    "));
+        code.push_str("    let mut i_nl = [0.0f64; M];\n");
+        RustEmitter::emit_nodal_device_evaluation_final(&mut code, ir, "    ", "v");
+        code.push_str(&format!(
+            "    kcl_residual_inl_vec(v, rhs, amat, &i_nl{state_arg}{sat_arg}, fres)\n"
+        ));
         code.push_str("}\n\n");
     }
     code
@@ -399,10 +458,19 @@ fn emit_a_residual_rows(
     rows: &[usize],
     abs_floor: &str,
     track_inf: bool,
+    store: Option<&str>,
     code: &mut String,
     indent: &str,
 ) {
-    match emit_sparse_a_residual_matvec(ir, setter_stamps, rows, abs_floor, track_inf, indent) {
+    match emit_sparse_a_residual_matvec(
+        ir,
+        setter_stamps,
+        rows,
+        abs_floor,
+        track_inf,
+        store,
+        indent,
+    ) {
         Some(sparse) => code.push_str(&sparse),
         None => {
             code.push_str(&format!(
@@ -421,6 +489,9 @@ fn emit_a_residual_rows(
             ));
             code.push_str(&format!("{indent}    }}\n"));
             code.push_str(&format!("{indent}    norm_sq += acc * acc;\n"));
+            if let Some(vec) = store {
+                code.push_str(&format!("{indent}    {vec}[i] = acc;\n"));
+            }
             if track_inf {
                 // NaN-free max (see emit_sparse_a_residual_matvec).
                 code.push_str(&format!(
@@ -472,6 +543,7 @@ fn emit_sparse_a_residual_matvec(
     rows: &[usize],
     abs_floor: &str,
     track_inf: bool,
+    store: Option<&str>,
     indent: &str,
 ) -> Option<String> {
     use std::collections::BTreeSet;
@@ -503,6 +575,11 @@ fn emit_sparse_a_residual_matvec(
             ));
         }
         code.push_str(&format!("{indent}    norm_sq += acc * acc;\n"));
+        // The residual vector, for the line search's natural monotonicity
+        // test (`kcl_residual_inl_vec`); absent from the scalar helpers.
+        if let Some(vec) = store {
+            code.push_str(&format!("{indent}    {vec}[{i}] = acc;\n"));
+        }
         // Running max of |acc| as a compare, not `f64::max`: `max` must handle a
         // NaN in either operand and lowers to several instructions per row
         // (+8 % instructions per sample on a 70-row full-LU deck). `max_abs`
@@ -587,6 +664,44 @@ pub(super) fn residual_sat_arg(ir: &CircuitIR, sat_alpha: &str) -> String {
 /// decided by the true equation residual, never by the (now arbitrarily small)
 /// damped step alone.
 #[allow(clippy::too_many_arguments)]
+/// Emit the line search along the limited Newton ray `v -> v + alpha·(new − v)`.
+///
+/// With `natural = Some(back_solve)` (the full-LU Newton sites) the test is
+/// Deuflhard's natural monotonicity test: `d = new − v` is the undamped Newton
+/// correction and a trial at fraction `s` applies `λ = alpha·s` of it; the
+/// trial is accepted when the simplified correction at the trial,
+/// `d̄ = G_aug⁻¹·F(trial)` in the step's own factorization (`back_solve`: a
+/// statement that back-solves the local `fv` in place), satisfies
+/// `‖d̄‖_w <= (1 − NATURAL_TEST_SLOPE·λ)·‖d‖_w`. The weights
+/// `w_i = 1 / (RELTOL·max(|x_i|, |new_i|) + floor_i)` are the node-step test's
+/// (`VNTOL` on the KCL rows, whose unknowns are volts;
+/// `NATURAL_TEST_CURRENT_FLOOR` on the branch rows), computed once per
+/// iteration from `v` and the undamped `new` and used for `‖d‖` and every
+/// trial. `F` is the residual helpers' own true per-row residual, so the test
+/// measures contraction toward the root the gate certifies.
+///
+/// The test is affine-invariant where a residual-norm test is not: on a node
+/// carrying two large exponential currents whose net residual is small (a
+/// Darlington collector at a breakdown knee: 7 mA each way, 0.3 mA net) the
+/// second-order term of either exponential outweighs the residual's linear
+/// decrease at any useful fraction, and an Armijo test on `‖F‖` backtracked a
+/// junction limiter's 2.5 vt step to 1/4..1/64 on every iteration (92
+/// iterations climbed 0.2 V of base-emitter voltage; 100 reached the
+/// ceiling, 83 samples per 0.4 s of a 31.6 V square at 2x). Measured in
+/// Newton-scaled distance the same trials contract, and the sample converges
+/// in 17 iterations (the Schur sub-path, which has no search, takes 16).
+/// Accepting a raw-merit increase is therefore by design; the certification
+/// (undamped step test, device-chord check, row gate) is separate and
+/// unchanged, so the search only steers the path.
+///
+/// With `natural = None` (the sub-step ladder, which solves in place and keeps
+/// no factorization) the test is the Armijo condition on the residual norm,
+/// `‖F(trial)‖ <= (1 − 1e-4·s)·‖F(v)‖`.
+///
+/// Either way the search is skipped at `‖F(v)‖ <= 1e-9` (nothing to
+/// contract), and a search that accepts no fraction down to 1/1024 reports
+/// `ls_ok = false` and the loop takes the limited step: a line search may
+/// only help, so its failure is no worse than not having it.
 pub(super) fn emit_armijo_line_search(
     ir: &CircuitIR,
     code: &mut String,
@@ -600,6 +715,7 @@ pub(super) fn emit_armijo_line_search(
     inl: &str,
     sat_alpha: &str,
     reuse: bool,
+    natural: Option<&str>,
 ) {
     let state_arg = super::behavioral::kcl_residual_inl_state_arg(ir);
     let sat_arg = residual_sat_arg(ir, sat_alpha);
@@ -613,17 +729,55 @@ pub(super) fn emit_armijo_line_search(
             state_arg.is_empty() && sat_arg.is_empty(),
             "trial reuse is only emitted for builds whose residual reads v, rhs, A and i_nl"
         );
-        let trial = if armijo_jac_reuse(ir) {
-            format!("kcl_residual_eval_jac(&vc, &{rhs}, &{amat}, state, &mut ls_i_nl, &mut j_dev)")
-        } else {
-            format!("kcl_residual_eval(&vc, &{rhs}, &{amat}, state, &mut ls_i_nl)")
-        };
         let r0 = if armijo_r0_reuse(ir) {
             format!(
                 "if ls_prev_hit {{ ls_res }} else {{ kcl_residual_inl(&{v}, &{rhs}, &{amat}, &{inl}) }}"
             )
         } else {
             format!("kcl_residual_inl(&{v}, &{rhs}, &{amat}, &{inl})")
+        };
+        if let Some(back_solve) = natural {
+            let trial = if armijo_jac_reuse(ir) {
+                format!("kcl_residual_eval_jac(&vc, &{rhs}, &{amat}, state, &mut ls_i_nl, &mut j_dev, &mut fv)")
+            } else {
+                format!("kcl_residual_eval(&vc, &{rhs}, &{amat}, state, &mut ls_i_nl, &mut fv)")
+            };
+            code.push_str(&format!(
+                "{indent}// Natural monotonicity test along the limited Newton ray (Deuflhard):\n\
+                 {indent}// a trial at fraction s of the limited step applies lambda = alpha*s of the\n\
+                 {indent}// correction d = v_new - v, and is accepted when the simplified correction\n\
+                 {indent}// at the trial, G_aug^-1 F(trial) in the step's own factorization, has\n\
+                 {indent}// weighted norm <= (1 - nm_slope*lambda) * ||d||_w. `{ls_ok}` and `ls_hit`\n\
+                 {indent}// are the site's (declared before the step-test gate).\n\
+                 {indent}{{\n\
+                 {indent}    // r0 = ||F({v})||: from the device currents `{inl}` the NR body\n\
+                 {indent}    // evaluated at this exact {v}, or the previous iteration's accepted\n\
+                 {indent}    // trial, which was this {v} (bit-identical to a fresh kcl_residual).\n\
+                 {indent}    let (r0, _, _) = {r0};\n\
+                 {indent}    if r0.is_finite() && r0 > 1e-9 {{\n"
+            ));
+            emit_natural_test_body(
+                ir,
+                code,
+                indent,
+                v,
+                new,
+                alpha,
+                &trial,
+                back_solve,
+                true,
+                armijo_jac_reuse(ir),
+                &format!(
+                    "if accepted {{ {alpha} *= s; ls_hit = true; }} else {{ {ls_ok} = false; }}"
+                ),
+            );
+            code.push_str(&format!("{indent}    }}\n{indent}}}\n"));
+            return;
+        }
+        let trial = if armijo_jac_reuse(ir) {
+            format!("kcl_residual_eval_jac(&vc, &{rhs}, &{amat}, state, &mut ls_i_nl, &mut j_dev, &mut fv)")
+        } else {
+            format!("kcl_residual_eval(&vc, &{rhs}, &{amat}, state, &mut ls_i_nl, &mut fv)")
         };
         code.push_str(&format!(
             "{indent}// Armijo backtracking line search on ||F|| along the limited Newton ray.\n\
@@ -640,6 +794,7 @@ pub(super) fn emit_armijo_line_search(
              {indent}        while s >= (1.0 / 1024.0) {{\n\
              {indent}            let mut vc = {v};\n\
              {indent}            for i in 0..N {{ vc[i] += ({alpha} * s) * ({new}[i] - {v}[i]); }}\n\
+             {indent}            let mut fv = [0.0f64; N];\n\
              {indent}            let rc = {trial};\n\
              {indent}            if rc.0 <= (1.0 - 1e-4 * s) * r0 {{ accepted = true; ls_res = rc; break; }}\n\
              {indent}            s *= 0.5;\n\
@@ -648,6 +803,33 @@ pub(super) fn emit_armijo_line_search(
              {indent}    }}\n\
              {indent}}}\n"
         ));
+        return;
+    }
+    if let Some(back_solve) = natural {
+        // A Newton site without trial reuse: the devices are evaluated again
+        // after the step, so the trial only needs the residual and its vector.
+        let trial = format!("kcl_residual_vec(&vc, &{rhs}, &{amat}, state{sat_arg}, &mut fv).0");
+        code.push_str(&format!(
+            "{indent}// Natural monotonicity test along the limited Newton ray (Deuflhard);\n\
+             {indent}// see the Newton-site form above. `{ls_ok}` is the site's.\n\
+             {indent}{{\n\
+             {indent}    let (r0, _, _) = kcl_residual_inl(&{v}, &{rhs}, &{amat}, &{inl}{state_arg}{sat_arg});\n\
+             {indent}    if r0.is_finite() && r0 > 1e-9 {{\n"
+        ));
+        emit_natural_test_body(
+            ir,
+            code,
+            indent,
+            v,
+            new,
+            alpha,
+            &trial,
+            back_solve,
+            false,
+            false,
+            &format!("if accepted {{ {alpha} *= s; }} else {{ {ls_ok} = false; }}"),
+        );
+        code.push_str(&format!("{indent}    }}\n{indent}}}\n"));
         return;
     }
     code.push_str(&format!(
@@ -671,5 +853,92 @@ pub(super) fn emit_armijo_line_search(
          {indent}        if accepted {{ {alpha} *= s; }} else {{ {ls_ok} = false; }}\n\
          {indent}    }}\n\
          {indent}}}\n"
+    ));
+}
+
+/// The body of the natural monotonicity test (inside the `r0` guard): the
+/// frozen weights, `‖d‖_w`, the backtracking loop over `s` and
+/// `accept_line`. `trial` is the expression that evaluates the residual at
+/// `vc` and writes its vector into `fv` (returning the `(‖F‖, ok, inf)` tuple
+/// when `keep_res`, which stores it in `ls_res`, or the norm alone); with
+/// `keep_fv` the accepted trial's back-solved vector is kept in `ls_fv`, the
+/// next iteration's correction when the factorization is reused.
+///
+/// The site runs this only on an iteration whose node-step test fails
+/// (`full_lu_newton.rs`): a correction inside the certification tolerance is
+/// not searched, since Newton is at its root by its own measure and the
+/// trial norms would be rounding noise against rounding noise. Measured on
+/// a preamp's chord-exit iterations (correction 1e-11 V, `‖F‖` 1.6e-9 A):
+/// the search refused all ten fractions of a step it then took anyway.
+#[allow(clippy::too_many_arguments)]
+fn emit_natural_test_body(
+    ir: &CircuitIR,
+    code: &mut String,
+    indent: &str,
+    v: &str,
+    new: &str,
+    alpha: &str,
+    trial: &str,
+    back_solve: &str,
+    keep_res: bool,
+    keep_fv: bool,
+    accept_line: &str,
+) {
+    // Node rows (volt unknowns) take VNTOL; every other row is a
+    // branch-current unknown and takes NATURAL_TEST_CURRENT_FLOOR.
+    let node_rows = kcl_rows(ir);
+    let n = ir.topology.n;
+    let branch_rows: Vec<usize> = (0..n).filter(|r| !node_rows.contains(r)).collect();
+    // The node-step test's tolerance per row (measured against a plain
+    // volts-and-amps norm on the golden corpus: 89 Newton ceilings and one
+    // changed render where this norm has none; DEBUGGING_HISTORY.md).
+    let weight =
+        |floor: &str| format!("1.0 / (RELTOL * {v}[i].abs().max({new}[i].abs()) + {floor})");
+    code.push_str(&format!(
+        "{indent}        // Weights: the step test's tolerance per row, frozen for this iteration.\n\
+         {indent}        let mut w = [0.0f64; N];\n\
+         {indent}        let mut nd = 0.0f64;\n\
+         {indent}        for i in {} {{ w[i] = {}; let d = ({new}[i] - {v}[i]) * w[i]; nd += d * d; }}\n",
+        row_iter(&node_rows, "0..N_NODES"),
+        weight("VNTOL"),
+    ));
+    if !branch_rows.is_empty() {
+        code.push_str(&format!(
+            "{indent}        for i in {} {{ w[i] = {}; let d = ({new}[i] - {v}[i]) * w[i]; nd += d * d; }}\n",
+            row_iter(&branch_rows, "0..N"),
+            weight("NATURAL_TEST_CURRENT_FLOOR"),
+        ));
+    }
+    // On acceptance, count a trial whose raw residual norm rose (`rc > r0`):
+    // the share of accepted steps a residual-norm test would have refused.
+    let accept = match (keep_res, keep_fv) {
+        (true, true) => "accepted = true; if rc.0 > r0 { state.diag_ls_merit_up_count += 1; } ls_res = rc; ls_fv = fv; break;",
+        (true, false) => "accepted = true; if rc.0 > r0 { state.diag_ls_merit_up_count += 1; } ls_res = rc; break;",
+        (false, _) => "accepted = true; if rc > r0 { state.diag_ls_merit_up_count += 1; } break;",
+    };
+    // Both forms bind `rc`: the tuple on the reuse path, the norm otherwise.
+    let bind = "let rc = ";
+    code.push_str(&format!(
+        "{indent}        // The contraction a trial must keep: NATURAL_TEST_SLOPE of the linear\n\
+         {indent}        // model's 1 - lambda when the factorization is this iterate's; on a chord\n\
+         {indent}        // iteration the simplified correction contracts by 1 - lambda*k with the\n\
+         {indent}        // chord's k unknown, so only non-expansion is required.\n\
+         {indent}        let nm_slope = if need_refactor {{ NATURAL_TEST_SLOPE }} else {{ 0.0 }};\n\
+         {indent}        let nd = nd.sqrt();\n\
+         {indent}        let mut s = 1.0_f64;\n\
+         {indent}        let mut accepted = false;\n\
+         {indent}        while s >= (1.0 / 1024.0) {{\n\
+         {indent}            let mut vc = {v};\n\
+         {indent}            for i in 0..N {{ vc[i] += ({alpha} * s) * ({new}[i] - {v}[i]); }}\n\
+         {indent}            let mut fv = [0.0f64; N];\n\
+         {indent}            {bind}{trial};\n\
+         {indent}            // The simplified Newton correction at the trial, in the step's factorization.\n\
+         {indent}            {back_solve}\n\
+         {indent}            let mut nb = 0.0f64;\n\
+         {indent}            for i in 0..N {{ let d = fv[i] * w[i]; nb += d * d; }}\n\
+         {indent}            if nb.sqrt() <= (1.0 - nm_slope * ({alpha} * s)) * nd {{ {accept} }}\n\
+         {indent}            s *= 0.5;\n\
+         {indent}        }}\n\
+         {indent}        {accept_line}\n"
     ));
 }
