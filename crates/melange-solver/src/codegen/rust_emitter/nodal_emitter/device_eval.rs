@@ -732,9 +732,16 @@ impl RustEmitter {
                 // Apply per-device limiter
                 match (&slot.device_type, d) {
                     (DeviceType::Diode, _) => {
-                        code.push_str(&format!(
-                            "{indent}        let v_lim = pnjlim(v_nl_proposed, v_nl_current, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_VCRIT);\n"
-                        ));
+                        let has_bv = matches!(&slot.params, DeviceParams::Diode(dp) if dp.has_bv());
+                        if has_bv {
+                            code.push_str(&format!(
+                                "{indent}        let v_lim = pnjlim_bv(v_nl_proposed, v_nl_current, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_VCRIT, DEVICE_{dev_num}_XBV);\n"
+                            ));
+                        } else {
+                            code.push_str(&format!(
+                                "{indent}        let v_lim = pnjlim(v_nl_proposed, v_nl_current, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_VCRIT);\n"
+                            ));
+                        }
                     }
                     (DeviceType::Bjt, _) | (DeviceType::BjtForwardActive, _) => {
                         code.push_str(&format!(

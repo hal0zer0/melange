@@ -14,7 +14,7 @@ use crate::mna::{inject_rhs_current, MnaSystem};
 use melange_devices::bjt::{BjtEbersMoll, BjtGummelPoon};
 use melange_devices::diode::{DiodeShockley, DiodeWithRs};
 use melange_devices::tube::{KorenPentode, KorenTriode};
-use melange_primitives::nr::{fetlim, pn_vcrit, pnjlim};
+use melange_primitives::nr::{breakdown_origin, fetlim, pn_vcrit, pnjlim, pnjlim_bv};
 
 /// Configuration for the DC operating point solver.
 #[derive(Debug, Clone)]
@@ -2541,7 +2541,14 @@ fn nr_dc_solve_pinned(
                     let vcrit = pn_vcrit(vt, dp.is);
                     let v_old = v_nl[idx];
                     let v_raw = v_nl_new[idx];
-                    let v_lim = pnjlim(v_raw, v_old, vt, vcrit);
+                    // A BV diode is limited on the breakdown side too (mirrored
+                    // about the IS-referenced origin), as the runtime sites are.
+                    let v_lim = if dp.has_bv() {
+                        let xbv = breakdown_origin(dp.bv, dp.ibv, dp.is, vt);
+                        pnjlim_bv(v_raw, v_old, vt, vcrit, xbv)
+                    } else {
+                        pnjlim(v_raw, v_old, vt, vcrit)
+                    };
                     if (v_lim - v_raw).abs() > 1e-15 {
                         limited_junctions.push((idx, v_lim - v_raw));
                     }

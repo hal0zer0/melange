@@ -48,6 +48,16 @@ impl RustEmitter {
                     if dp.has_bv() {
                         emit_device_const(&mut code, dev_num, "BV", dp.bv);
                         emit_device_const(&mut code, dev_num, "IBV", dp.ibv);
+                        // Breakdown-side limiter origin: the reverse voltage at
+                        // which the breakdown branch carries IS, so the mirrored
+                        // pnjlim and VCRIT reference the same current (ngspice
+                        // diotemp.c DIOtBrkdwnV). Nominal n_vt/IS, like VCRIT.
+                        emit_device_const(
+                            &mut code,
+                            dev_num,
+                            "XBV",
+                            melange_primitives::nr::breakdown_origin(dp.bv, dp.ibv, dp.is, dp.n_vt),
+                        );
                     }
                     if dp.has_self_heating() {
                         emit_device_const(&mut code, dev_num, "RTH", dp.rth);

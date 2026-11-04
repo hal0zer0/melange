@@ -126,6 +126,27 @@ fn diode_breakdown_current(v_d: f64, n_vt: f64, bv: f64, ibv: f64) -> f64 {
     -ibv * safe_exp(x)
 }
 
+/// PN-junction limiting for a diode with reverse breakdown (ngspice
+/// `dioload.c:179-191`): past the breakdown knee the I-V curve is the forward
+/// exponential mirrored about `-xbv`, so the step is log-compressed in the
+/// mirrored coordinate `-(v_d + xbv)` exactly as pnjlim compresses a forward
+/// step. `xbv` is the reverse voltage at which the breakdown branch carries IS
+/// (`diotemp.c:205-244`, `DIOtBrkdwnV`), so the mirror origin and `vcrit` refer
+/// to the same current; mirroring about the raw BV would leave the first
+/// ~n_vt·ln(IBV/IS) volts past the knee (nine decades of current for IBV 0.1,
+/// IS 1e-12) unlimited. ngspice switches to the mirrored limit once the
+/// proposal is below `min(0, -xbv + 10·Vt)`; above that the forward pnjlim
+/// applies unchanged.
+#[inline(always)]
+fn pnjlim_bv(vnew: f64, vold: f64, vt: f64, vcrit: f64, xbv: f64) -> f64 {
+    if vnew < (-xbv + 10.0 * vt).min(0.0) {
+        let vtemp = pnjlim(-(vnew + xbv), -(vold + xbv), vt, vcrit);
+        -(vtemp + xbv)
+    } else {
+        pnjlim(vnew, vold, vt, vcrit)
+    }
+}
+
 /// Reverse breakdown conductance: dI_bv/dv = IBV/n_vt * exp(-(v_d + BV) / n_vt)
 #[inline(always)]
 fn diode_breakdown_conductance(v_d: f64, n_vt: f64, bv: f64, ibv: f64) -> f64 {

@@ -68,6 +68,40 @@ pnjlim(vnew, vold, vt, vcrit) -> f64:
 (< 2*Vt ~52mV) pass unchanged. Large steps compressed logarithmically — a proposed
 300V jump becomes ~0.3V.
 
+### Breakdown side (pnjlim_bv)
+
+A diode with a finite `BV` has a second exponential: the breakdown branch
+`-IBV·exp(-(v_d + BV)/n_vt)`, the forward curve mirrored about the reverse
+axis. `pnjlim` acts only for `vnew > vcrit`, so a Newton proposal that crosses
+the breakdown knee would otherwise be taken raw (a 10 V overshoot past the knee
+is `e^386` in the exponent, clamped at `e^40` by `safe_exp`, with a conductance
+that no longer matches the plateau). ngspice limits the mirrored coordinate
+instead (`dioload.c:179-191`), about `DIOtBrkdwnV` — the reverse voltage at
+which the breakdown branch carries IS (`diotemp.c:205-244`), NOT the raw BV.
+For melange's branch that point is `xbv = BV - n_vt·ln(IBV/IS)`
+(`melange_primitives::nr::breakdown_origin`, emitted as `DEVICE_n_XBV` from the
+same nominal `n_vt`/IS as `VCRIT`). Mirroring about the raw BV with the
+IS-referenced `vcrit` leaves the first `n_vt·ln(IBV/IS)` volts past the knee
+unlimited: for `IS=1e-12 IBV=0.1` that is 0.655 V and nine decades of current.
+Every limiter site applies it for a BV diode — nodal transient and the runtime
+DC re-solve (`device_eval.rs`), DK (`nr_helpers.rs` alpha), Schur trial
+(`nr_helpers.rs`), and the compile-time DC operating point (`dc_op.rs`):
+
+```
+pnjlim_bv(vnew, vold, vt, vcrit, xbv) -> f64:
+  if vnew < min(0, -xbv + 10*vt):
+    return -(pnjlim(-(vnew + xbv), -(vold + xbv), vt, vcrit) + xbv)
+  else:
+    return pnjlim(vnew, vold, vt, vcrit)
+```
+
+Witness (2026-11-03, a FET limiter's output Darlington with its C-E sustaining
+breakdown modelled as `D(BV=60 IBV=0.1)`, 31.6 V pk 50 Hz square, 2x): without
+the mirrored limit the Schur sub-path held 982 of 144 000 samples (1267
+iteration ceilings) and the full-LU sub-path survived only through 335
+sub-step/BE retries; with it the Schur sub-path converged every sample with no
+ceiling hit and the full-LU retries fell to 248.
+
 ## FET Voltage Limiting (fetlim)
 
 Used for: JFETs (Vgs around pinch-off), MOSFETs (Vgs around threshold),
@@ -111,7 +145,7 @@ in a single NR step. Adaptive step limits scale with distance from threshold.
 
 | Device | Dim 0 | Dim 1 |
 |--------|-------|-------|
-| Diode | pnjlim(v, vold, n_vt, vcrit) | — |
+| Diode | pnjlim(v, vold, n_vt, vcrit); finite BV: pnjlim_bv(v, vold, n_vt, vcrit, xbv) | — |
 | BJT | pnjlim(Vbe, vold, vt, vcrit) | pnjlim(Vbc, vold, vt, vcrit) |
 | JFET | fetlim(Vds, vold, 0.0) | fetlim(Vgs, vold, Vp) |
 | MOSFET | fetlim(Vds, vold, 0.0) | fetlim(Vgs, vold, Vt) |
@@ -243,5 +277,6 @@ path applies the same rule to its node-step test.
 | NR oscillation (period-2) | No voltage limiting | Add pnjlim/fetlim |
 | NR path bloats after a junction overshoot | A floor on the per-device damping ratio re-admits ≥1 % of an arbitrarily large raw step | No floor: `clamp(0.0, 1.0)` on every path (fixed 2026-11-01) |
 | Internal nodes diverge to kV, then false-converge | Node-step damping floored (`.max(0.01)`) | Bound the step, not the ratio — divide uncapped (fixed 2026-08-03) |
+| Newton ceiling or hold the moment a `BV` diode crosses its knee under drive (Schur dies; full-LU limps on sub-step/BE retries) | No limiter on the breakdown side: pnjlim is forward-only | `pnjlim_bv` mirrors the limit about −xbv, the IS-referenced breakdown voltage (ngspice `dioload.c:179-191`, `diotemp.c:205-244`), at every limiter site |
 | Slow convergence (>50 iters) | Limiting too aggressive | Check vcrit computation |
 | Explosion after removing a device | Missing limiter dispatch | Add case to `limit_voltage()` |

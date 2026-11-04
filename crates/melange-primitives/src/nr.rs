@@ -429,6 +429,30 @@ pub fn pnjlim(vnew: f64, vold: f64, vt: f64, vcrit: f64) -> f64 {
     }
 }
 
+/// Reverse voltage at which a diode's breakdown branch
+/// `-IBV·exp(-(v + BV)/n_vt)` carries the saturation current IS:
+/// `xbv = BV - n_vt·ln(IBV/IS)`. ngspice's `DIOtBrkdwnV` (`diotemp.c:205-244`)
+/// is the same point for its own branch shape. It is the mirror origin of
+/// [`pnjlim_bv`], chosen so that origin and `vcrit` (also IS-referenced)
+/// describe the same current; the raw BV sits `n_vt·ln(IBV/IS)` deeper.
+#[inline]
+pub fn breakdown_origin(bv: f64, ibv: f64, is: f64, n_vt: f64) -> f64 {
+    bv - n_vt * (ibv / is).ln()
+}
+
+/// SPICE PN junction limiting for a diode with reverse breakdown (ngspice
+/// `dioload.c:179-191`): below `min(0, -xbv + 10·vt)` the step is limited in
+/// the mirrored coordinate `-(v + xbv)` with the ordinary [`pnjlim`]; above it
+/// the forward [`pnjlim`] applies unchanged.
+#[inline]
+pub fn pnjlim_bv(vnew: f64, vold: f64, vt: f64, vcrit: f64, xbv: f64) -> f64 {
+    if vnew < (-xbv + 10.0 * vt).min(0.0) {
+        -(pnjlim(-(vnew + xbv), -(vold + xbv), vt, vcrit) + xbv)
+    } else {
+        pnjlim(vnew, vold, vt, vcrit)
+    }
+}
+
 /// SPICE FET voltage limiting (from SPICE3f5 `DEVfetlim`).
 ///
 /// Limits the change in gate-source voltage to prevent the NR solver

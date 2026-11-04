@@ -1124,8 +1124,37 @@
       "noise_mode": "off",
       "emit_dc_op_recompute": false,
       "notes": "OpenWurli's tremolo oscillator, the only melange-generated circuit in OpenWurli's DEFAULT build; added 2026-09-30 at openwurli's request. In-repo copy, byte-identical to openwurli origin/main spice/melange/wurli-tremolo.cir (74ad9b6); resync from there when it changes. The circuit has no audio input: input and output are both node `out` through the deck's 10 MOhm .input_impedance, exactly as OpenWurli generates it, so `silence` is the free-run render and the other programs only nudge it. Invariants measured with Sensor Array (zero-input 10 s, intervals mode): 5.56 Hz free-run rate, `out` swing about 0.69..11.0 V (0.1.11: 5.561 Hz; 0.1.12: 5.563 Hz). Golden detects change and validates nothing."
+    },
+    {
+      "plugin": "zener-feedback-limiter",
+      "cir": "unstable/examples/zener-feedback-limiter.cir",
+      "compile_cmd": "melange compile ../melange-circuits/unstable/examples/zener-feedback-limiter.cir --format code -o /dev/null",
+      "verify_status": "COVERAGE-ONLY",
+      "anchors": {
+        "n": 9,
+        "m": 3,
+        "oversampling": 1,
+        "solver": "nodal",
+        "nodal_subpath": "schur",
+        "sample_rate": 48000
+      },
+      "has_pots": false,
+      "num_pots": 0,
+      "has_switches": false,
+      "num_switches": 0,
+      "has_runtime_r": false,
+      "runtime_r_setters": [],
+      "has_noise": false,
+      "noise_mode": "off",
+      "emit_dc_op_recompute": false,
+      "level": 1.0,
+      "notes": "Breakdown-knee coverage, added 2026-11-03 at a 1 V manifest level. Back-to-back 4.7 V zeners (BV=4.7 IBV=1m) clamp a 100x op-amp stage and a third zener holds a DC reference, so every program past ~50 mV drives a diode's breakdown branch and the Newton path crosses the knee each half cycle; no other golden deck crossed a diode's BV under its program, so the breakdown-side limiter (pnjlim_bv) was attributed to nothing. Change detector only; correctness of the limiter is argued against ngspice dioload.c/diotemp.c in VOLTAGE_LIMITING.md. Its first capture is a new baseline, not a restored one."
     }
   ],
+  "added_2026_11_03_breakdown_knee_coverage": {
+    "why": "No golden program drove a diode past its BV: the corpus has BV cards (gold-press, 4kbuscomp, philicorda boards, noyce-zener-junction) but a limiter change on the breakdown side rendered 192/192 byte-identical. zener-feedback-limiter at 1 V crosses the knee every half cycle; the same change moves its sine1k/step/sweep by NEGLIGIBLE with the Newton total -0.05..-3.4 %, which the counter gate now sees.",
+    "baseline": "Its first capture is a new baseline, not a restored one; a compare against an older baseline reports it MISSING on that side."
+  },
   "corpus_role": "WHAT THIS CORPUS IS, AND IS NOT (recorded 2026-09-02 after getting it wrong twice in one day). It is a CHANGE DETECTOR: it compares melange against melange, so a deck's circuit quality is irrelevant to catching a refactor that moves output. It is NOT an ACCURACY ORACLE. 44 of the pre-prune 46 decks were unstable/ tier and stable/ is empty, so almost every deck is an in-progress or abandoned circuit. NEVER cite a render from these decks as evidence about a circuit, about which solver path is more correct, or about audible behaviour \u2014 'rigour applied to a broken ruler produces confident wrong conclusions, not safe ones' (oomox user, 2026-08-16). Note the asymmetry that makes the corpus still useful: AGREEMENT is robust to deck quality (a bad circuit cannot manufacture agreement between two implementations), DISAGREEMENT is not (it cannot separate 'the code differs' from 'this circuit is pathological'). A broken deck may DETECT a defect; it can never BE the evidence for one. Adjudicating accuracy requires ngspice, on a completed deck.",
   "prune_2026_09_02": {
     "what": "Dropped 11 decks whose netlists were removed by melange-circuits cf8a04c (branch publish-prep, archive tag archive/pre-prune-2026-09-02). Maintainer confirms every one is an in-progress or presumably abandoned circuit.",

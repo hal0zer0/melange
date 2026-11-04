@@ -459,9 +459,16 @@ pub(super) fn emit_nr_limit_and_converge(
             // Emit per-device limiter call based on device type and dimension
             match (&slot.device_type, d) {
                 (DeviceType::Diode, _) => {
-                    code.push_str(&format!(
-                        "{indent}    let v_lim = pnjlim(v_prop{i}, v_d{i}, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_VCRIT);\n"
-                    ));
+                    let has_bv = matches!(&slot.params, crate::codegen::ir::DeviceParams::Diode(dp) if dp.has_bv());
+                    if has_bv {
+                        code.push_str(&format!(
+                            "{indent}    let v_lim = pnjlim_bv(v_prop{i}, v_d{i}, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_VCRIT, DEVICE_{dev_num}_XBV);\n"
+                        ));
+                    } else {
+                        code.push_str(&format!(
+                            "{indent}    let v_lim = pnjlim(v_prop{i}, v_d{i}, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_VCRIT);\n"
+                        ));
+                    }
                 }
                 (DeviceType::Bjt, _) | (DeviceType::BjtForwardActive, _) => {
                     // PN junction limiting (Vbe for forward-active, both Vbe/Vbc for full)
@@ -677,6 +684,13 @@ pub(super) fn emit_schur_nr_limit_and_converge(
         for d in 0..slot.dimension {
             let i = slot.start_idx + d;
             let lim_expr = match (&slot.device_type, d) {
+                (DeviceType::Diode, _)
+                    if matches!(&slot.params, crate::codegen::ir::DeviceParams::Diode(dp) if dp.has_bv()) =>
+                {
+                    format!(
+                        "pnjlim_bv(v_trial{i}, v_d{i}, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_VCRIT, DEVICE_{dev_num}_XBV)"
+                    )
+                }
                 (DeviceType::Diode, _) => format!(
                     "pnjlim(v_trial{i}, v_d{i}, state.device_{dev_num}_n_vt, DEVICE_{dev_num}_VCRIT)"
                 ),
