@@ -1012,9 +1012,14 @@ pub(crate) fn inject_thevenin_source(
         let thevenin_v = format!("{name} in_mlg_src 0 {}", source);
         let thevenin_r = format!("R_mlg_src in_mlg_src {} {}", input_node, series_resistance);
 
+        // Exact `.END` match, NOT starts_with(".END"): a generated subckt's
+        // `.ends` terminator (JFET LEVEL=3, triode, pentode, op-amp twins) also
+        // starts with ".END". Inserting there put the pair INSIDE the subckt,
+        // made the input node subckt-local, and ngspice rendered the output at
+        // ~1e-9 V with no error (same guard as `run_transient_deck`).
         let mut insert_idx = modified_lines.len();
         for (i, line) in modified_lines.iter().enumerate() {
-            if line.trim().to_uppercase().starts_with(".END") {
+            if line.trim().eq_ignore_ascii_case(".END") {
                 insert_idx = i;
                 break;
             }
@@ -1377,6 +1382,37 @@ pub fn get_ngspice_version() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A deck with no source at the input node and a generated subckt: the
+    /// Thevenin pair must land before the deck's `.END`, not before the
+    /// subckt's `.ends` (which also starts with ".END").
+    #[test]
+    fn thevenin_pair_skips_subckt_ends() {
+        let deck = "title
+                    .subckt MELANGE_JFET3_X d g s
+                    B1 d s I=1e-3
+                    .ends
+                    X1 out in 0 MELANGE_JFET3_X
+                    R1 in 0 1k
+                    .END
+";
+        let out = inject_thevenin_source(deck, "in", "PWL(0 0 1 1)", 600.0).unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        let ends = lines.iter().position(|l| l.trim() == ".ends").unwrap();
+        let v = lines
+            .iter()
+            .position(|l| l.starts_with("V_mlg_in "))
+            .unwrap();
+        let r = lines
+            .iter()
+            .position(|l| l.starts_with("R_mlg_src "))
+            .unwrap();
+        let end = lines.iter().position(|l| l.trim() == ".END").unwrap();
+        assert!(ends < v, "pair inserted inside the subckt: {out}");
+        assert_eq!(r, v + 1);
+        assert!(r < end, "pair must precede the deck's .END: {out}");
+        assert_eq!(lines[r], "R_mlg_src in_mlg_src in 600");
+    }
 
     /// Verbatim ngspice-42 batch output for a `.PRINT TRAN` naming 8 vectors.
     /// ngspice prints at most three data columns per table, so this is three
