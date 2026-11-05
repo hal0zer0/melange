@@ -9,12 +9,18 @@
 //! Below that floor the step would change nothing, so on quiet signal the
 //! chord keeps its reuse across samples.
 //!
+//! A chord iteration that fails the device current-change check has shown
+//! its chord is stale where the solve now is (after the sample's first
+//! step, which moves the currents with the input whatever the chord), so
+//! the next iteration is exact too and counts as the exit step.
+//!
 //! Witness: the diode node of a single-supply overdrive, 384 kHz, 0.1 V drive.
 //! The op-amp swings rail to rail between plateaus, and the full-LU loop
 //! accepted chord steps through the swing. Measured under the charge form:
-//! 1.09 µA residual on the accepted samples with chord acceptance, 0.390 µA
-//! with the exit step, the same as the Schur sub-path, whose M-dimensional
-//! Newton refactors every iteration.
+//! 1.00 µA residual on the accepted samples with chord acceptance (both
+//! exact-step paths removed), 0.240 µA with them, the same as the Schur
+//! sub-path, whose M-dimensional Newton refactors every iteration (with its
+//! current-residual check; 0.390 µA before Schur had one).
 
 mod support;
 
@@ -30,6 +36,9 @@ D_2 0 n2 DSIG\nR_t n2 n3 10k\nC_t n3 0 22n\nC_o n3 out 1u\nR_v out 0 100k\n\
 const FS: f64 = 384000.0;
 
 const EXIT: &str = "if converged_check && !need_refactor && !exit_step";
+// A failed current-change check on a chord iteration after the first makes
+// the next iteration exact (and the exit step).
+const STALE: &str = "if !need_refactor && iter > 0 { exit_step = true; }";
 // The KCL infinity norm against the row test's own floor, by name
 // (`thresholds::KCL_ABSTOL`, 1e-9 A).
 const GATE: &str = "kcl_inf > KCL_ABSTOL &&";
@@ -80,6 +89,7 @@ fn full_lu_exits_on_an_exact_jacobian_step() {
     // The trapezoidal loop and the backward-Euler instance both carry it.
     assert_eq!(full_lu.matches(EXIT).count(), 2);
     assert_eq!(full_lu.matches(GATE).count(), 2);
+    assert_eq!(full_lu.matches(STALE).count(), 2);
     let schur = code_for(NodalSubPathOverride::Schur);
     assert!(
         !schur.contains("exit_step"),
@@ -89,7 +99,9 @@ fn full_lu_exits_on_an_exact_jacobian_step() {
     let r_full_lu = residual(&full_lu, "exit_full_lu");
     let r_schur = residual(&schur, "exit_schur");
     let r_mutant = residual(
-        &full_lu.replace(EXIT, "if false && converged_check"),
+        &full_lu
+            .replace(EXIT, "if false && converged_check")
+            .replace(STALE, "if false { exit_step = true; }"),
         "exit_mutant",
     );
     eprintln!(
@@ -136,5 +148,62 @@ fn the_exit_gate_keeps_the_chord_at_silence() {
     assert!(
         open > 0.9,
         "the mutant no longer shows the gate ({open} per sample)"
+    );
+}
+
+/// An emitter follower at a 10 V bias whose emitter a large capacitor holds:
+/// over a sample the base-emitter voltage follows the input, so the sample's
+/// first step moves the collector current past the current-change check's
+/// RELTOL while every node steps inside its own RELTOL·|v|, and the chord
+/// stays good at this drive (measured, 10 mV at 220 Hz: the rule applied
+/// from the first iteration refactors 0.94 times per sample, from the
+/// second 0.044).
+const FOLLOWER: &str = "capacitor-held emitter follower at 10 V\n\
+Vcc vcc 0 DC 20\nRb1 vcc b 1k\nRb2 b 0 1k\nCin in b 100u\nQ1 vcc b e QN\n\
+Re e 0 10k\nCe e 0 100u\nRo e out 1k\nRl out 0 100k\n\
+.model QN NPN(IS=1e-14 BF=200)\n";
+
+/// Refactors per sample over 0.25 s of a quiet 220 Hz sine at 48 kHz.
+fn quiet_sine_refactors(code: &str, tag: &str) -> f64 {
+    let main = "fn main() {
+    let mut s = CircuitState::default();
+    s.set_sample_rate(48000.0);
+    for i in 0..12000usize {
+        let x = 0.01 * (2.0 * std::f64::consts::PI * 220.0 * i as f64 / 48000.0).sin();
+        let _ = process_sample(x, &mut s);
+    }
+    println!(\"refactors={}\", s.diag_refactor_count as f64 / 12000.0);
+}";
+    support::compile_and_run(code, main, tag)
+        .parse_kv("refactors")
+        .unwrap()
+}
+
+/// The first step of a sample moves the device currents with the input
+/// whatever the chord, so a failed current-change check THERE is no evidence
+/// of a stale chord: the stale-chord rule starts at the second iteration. On
+/// a quietly driven deck the sample's first check fails on most samples and
+/// the chord's second iteration certifies; applying the rule from the first
+/// iteration refactored every sample for nothing (a bus compressor +51 % per
+/// sample at 0.3 V, the same iterations).
+#[test]
+fn the_stale_chord_rule_skips_the_samples_first_step() {
+    let mut config = support::config_for_spice(FOLLOWER, 48000.0);
+    config.nodal_sub_path_override = NodalSubPathOverride::FullLu;
+    let code = support::generate_circuit_code_nodal(FOLLOWER, &config).0;
+    assert_eq!(code.matches(STALE).count(), 2);
+    let gated = quiet_sine_refactors(&code, "stale_quiet");
+    let first = quiet_sine_refactors(
+        &code.replace(STALE, "if !need_refactor { exit_step = true; }"),
+        "stale_quiet_first_step",
+    );
+    eprintln!("refactors per sample, quiet sine: rule from the second iteration {gated:.4}, from the first {first:.4}");
+    assert!(
+        gated < 0.05,
+        "the rule refactors {gated} per sample on a quiet sine"
+    );
+    assert!(
+        first > 0.5,
+        "the witness no longer fails the first check on quiet signal ({first} per sample)"
     );
 }

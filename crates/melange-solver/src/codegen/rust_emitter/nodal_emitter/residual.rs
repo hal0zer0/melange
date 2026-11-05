@@ -186,7 +186,7 @@ pub(super) fn emit_kcl_residual_fns(
     // (2) i_nl-reusing residual: the residual tail on device currents
     // already evaluated at this exact v (no pnjlim on the eval voltage,
     // limiting is applied to the *step*). Used for the Armijo r0 (the NR
-    // body's currents), the convergence gate (the device-chord check's
+    // body's currents), the convergence gate (the device current-change check's
     // currents) and, through (3)/(4), the line-search trials.
     code.push_str(
         "/// KCL residual reusing an already-computed `i_nl` (Armijo r0 CSE);\n\
@@ -303,7 +303,7 @@ pub(super) fn emit_kcl_residual_fns(
 /// only, except for a body-effect MOSFET, which writes its effective
 /// threshold into `state` and a `body_gmb` local; builds with one keep the
 /// separate evaluations. For the classes [`armijo_r0_reuse`] admits, the body
-/// code's currents are the `_final` code's, so the device-chord check and the
+/// code's currents are the `_final` code's, so the device current-change check and the
 /// gate read the same values either way.
 pub(super) fn armijo_jac_reuse(ir: &CircuitIR) -> bool {
     armijo_r0_reuse(ir) && crate::codegen::rust_emitter::helpers::body_effect_mosfets(ir).is_empty()
@@ -315,7 +315,7 @@ pub(super) fn armijo_jac_reuse(ir: &CircuitIR) -> bool {
 /// On acceptance at fraction `s` the trial point is `v + (alpha·s)·d`, and the
 /// step then applied is `v + alpha'·d` with `alpha' = alpha·s`: the same two
 /// roundings, so the committed iterate IS the trial point, bit for bit. The
-/// device-chord check and the KCL gate that follow evaluate `i_nl` and the
+/// device current-change check and the KCL gate that follow evaluate `i_nl` and the
 /// residual at that iterate with the same `_final` device code and the same
 /// residual tail the trial ran (`kcl_residual` is `N_v·v`, `_final`, then the
 /// `kcl_residual_inl` tail), so the trial's `i_nl` and `(||F||, ok, inf)` are
@@ -691,7 +691,7 @@ pub(super) fn residual_sat_arg(ir: &CircuitIR, sat_alpha: &str) -> String {
 /// Newton-scaled distance the same trials contract, and the sample converges
 /// in 17 iterations (the Schur sub-path, which has no search, takes 16).
 /// Accepting a raw-merit increase is therefore by design; the certification
-/// (undamped step test, device-chord check, row gate) is separate and
+/// (undamped step test, device current-change check, row gate) is separate and
 /// unchanged, so the search only steers the path.
 ///
 /// With `natural = None` (the sub-step ladder, which solves in place and keeps

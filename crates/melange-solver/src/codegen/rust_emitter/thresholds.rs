@@ -44,11 +44,13 @@ pub const VNTOL: f64 = 1e-6;
 /// [`DC_OP_KCL_ABSTOL_AMPS`].
 pub const KCL_ABSTOL: f64 = 1e-9;
 
-/// Absolute floor, in amps, of the device-current consistency check: on the
-/// accepting iteration, `|i_nl − i_dev(v)| <= RELTOL·max(|i_nl|, |i_dev|,
-/// ABSTOL_SCALE_FLOOR) + ABSTOL` per device dimension (SPICE's ABSTOL). The
-/// DK Newton's current-residual test and the nodal full-LU chord consistency
-/// check are the same test. Ruled 2026-11-03 to be named; value is SPICE's
+/// Absolute floor, in amps, of the device-current checks' tolerance
+/// `RELTOL·max(|a|, |b|, ABSTOL_SCALE_FLOOR) + ABSTOL` per device dimension
+/// (SPICE's ABSTOL). Two checks share the tolerance but test different
+/// quantities: the DK Newton's current-residual test compares `i_nl` with
+/// `i_dev(v_d)` (the Newton residual), the nodal full-LU device
+/// current-change check compares the currents after a step with those before
+/// it (first order in the step, no Jacobian term). Ruled 2026-11-03 to be named; value is SPICE's
 /// default, unchanged since the DK current-residual check was written (the
 /// full-LU check copied it).
 pub const ABSTOL: f64 = 1e-12;

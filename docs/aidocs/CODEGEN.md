@@ -669,10 +669,23 @@ converged when three tests pass on the same iteration, whatever the damping:
   Newton's own estimate of the distance to the root, and the limiters
   (pnjlim, node damping, the Armijo search) scale what is applied, never that
   estimate;
-- the **device-chord consistency check** (`i_nl(v)` against the chord's
-  prediction, `RELTOL·max(|i_nl|, |i_chord|, ABSTOL_SCALE_FLOOR) + ABSTOL`:
-  1e-3 relative, 1e-9 A scale floor, 1e-12 A ABSTOL — the DK Newton's
-  current-residual test is the same test);
+- the **device current-change check** (`i_nl` re-evaluated at the post-step
+  `v` against `i_nl` at the pre-step iterate — the currents the RHS was built
+  from, held as `i_nl_chord`; there is NO Jacobian term, so the test is first
+  order in the step and on a junction admits only tens of µV of movement —
+  with tolerance `RELTOL·max(|i_post|, |i_pre|, ABSTOL_SCALE_FLOOR) + ABSTOL`:
+  1e-3 relative, 1e-9 A scale floor, 1e-12 A ABSTOL, the DK Newton's
+  current-residual tolerance. The nodal Schur Newton has a different second
+  test: the dense DK current-residual check verbatim (`|f_i| ≤
+  RELTOL·max(|i_nl|, |i_dev|, ABSTOL_SCALE_FLOOR) + ABSTOL`, on every
+  iteration, limited or not; `nr_helpers.rs`), which costs no extra device
+  evaluation because the Schur body already forms `f`. Until it gained that
+  test Schur certified on the device-voltage step alone and sat −66 dB from a
+  converged solve on a hard-driven compressor (one sample 13.2 V against
+  4.35 V); with it the same render is −153 dB, and the Schur corpus runs
+  +6…+34 % slower per sample (the price of certification that certifies).
+  Full-LU's current-change check added on top of it changed nothing on that
+  witness, so Schur carries the residual test only);
 - the **row-residual gate** (`kcl_residual_inl`, every row, see above).
 
 Every threshold above is ONE constant in
@@ -715,7 +728,9 @@ a 6.6 V sweep, residual −82.5 dB relative); Newton iterations +0.14 % over the
 DK sweep set and +53 % on the idling amp's silence (one more iteration on the
 samples it used to certify early); throughput within the bench's round-to-round
 spread. The Schur variant (`emit_schur_nr_limit_and_converge`) never certified
-a limited iterate and is unchanged.
+a limited iterate and still does not; it separately gained the dense DK
+current-residual test on every iteration (see the current-change bullet
+above).
 
 The ladder's step test and the node-step test keep their device-node set. Two
 receipts: with the BJT internal rows left out, the wurli power amp with its
@@ -1039,7 +1054,7 @@ which full-LU refuses), under the linearized bypass (the full-LU Newton is
 documented to degrade on long linearized chains, never measured by the fit)
 and where no packed factor exists (dense full-LU is never the cheaper route).
 What creates the crossover is Schur's dense `N×N` `S·rhs` matvec every sample
-(0.42 ns·N² on one core: 3 µs at N = 84) against a packed back-solve of about
+(0.442 ns·N² on one core, re-fitted after Schur gained its residual test: 3.1 µs at N = 84) against a packed back-solve of about
 1 % of N²; the dense `M×M` elimination only matters past M ≈ 30. The trigger is
 named `cost` in the route line and provenance, and the info-level
 `Nodal: conditioning census` line prints every figure the chain read, both

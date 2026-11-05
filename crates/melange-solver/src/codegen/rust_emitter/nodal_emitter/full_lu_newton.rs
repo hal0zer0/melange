@@ -558,7 +558,8 @@ impl RustEmitter {
         // residuals in amps and volts, not the distance to the root: on a flat
         // or ill-conditioned mode a point inside the gate can sit volts away.
         // With the test skipped nothing else measured that distance, and the
-        // device-chord check passed because the applied steps were tiny.
+        // device current-change check passed because the applied steps were
+        // tiny.
         // Measured on the code before this test (counter: converged with
         // `alpha < 1` while the undamped correction on a device node exceeded
         // the threshold): 2 samples over the 192 golden renders and 25 over
@@ -567,8 +568,8 @@ impl RustEmitter {
         // node 0.12 V off at a 0.15 mV threshold, a transformer-coupled triode
         // 12.5 V off on 22 samples with `alpha = 0.99`, a choke-loaded MOSFET
         // stage 16 V off at its drain. Certification is now the same three
-        // tests whatever the damping: this step test, the device-chord
-        // consistency check and the row-residual gate.
+        // tests whatever the damping: this step test, the device current-change
+        // check and the row-residual gate.
         //
         // Runs every iteration, including iter 0 (a zero correction on the
         // first iteration is a legitimate converged warm start). Nonlinear
@@ -718,39 +719,57 @@ impl RustEmitter {
             }
         }
 
-        // Residual-based convergence safety net (unconditional whenever a
-        // chord is in use — i.e. always on this path when M > 0).
+        // Device current-change check (unconditional when M > 0).
         //
-        // The voltage-step check above (`max_step_exceeded`) declares
-        // convergence whenever the damped Newton step is small. That
-        // criterion is necessary but NOT sufficient when the chord
-        // persistence holds a stale Jacobian: the LU back-solve uses
-        // `chord_j_dev` while the actual device current at the new
-        // operating point is `i_dev(v_nl_new)`. If `chord_j_dev` is
-        // grossly out of date, the LU's "fixed point" is a non-physical
-        // state where KCL is satisfied for the LINEARISED network but
-        // not for the actual nonlinear devices — NR happily reports
-        // converged on a wildly wrong v. A stale chord across an
-        // exponential knee is device-generic (any diode/junction
-        // crossing reverse→forward moves j_dev by many OOM between
-        // refactors); the historical extreme is the Boyle catch diode
-        // (≈1e-31 S reverse-biased vs ≈1e+1 S at the rail, 32 OOM),
-        // and 4kbuscomp's ActiveSetBe precision rectifiers hit the
-        // same class — which is why this used to be rail-mode-gated
-        // (BoyleDiodes, later + ActiveSet/ActiveSetBe) and is now
-        // emitted unconditionally, matching the DK path, whose
-        // residual check has always been ungated (see
-        // `nr_helpers.rs::emit_nr_limit_and_converge`, "Current
-        // residual check: always").
+        // What it computes: the device currents re-evaluated at the
+        // post-step `v` (`i_nl_resid`) against the currents at the
+        // pre-step iterate (`i_nl_pre`, the currents this iteration's
+        // companion RHS was built from), per device dimension:
         //
-        // Cost: the block only runs on the ACCEPTING iteration (inside
-        // `if !max_step_exceeded`), so it adds M device evaluations
-        // once per sample, not per NR iteration.
+        //     |i(v_post) - i(v_pre)| <= RELTOL·max(|i_post|, |i_pre|, ABSTOL_SCALE_FLOOR) + ABSTOL
         //
-        // Mismatch ⇒ NR keeps iterating, triggering the adaptive
-        // >50 %-j_dev refactor above, the periodic chord refactor, the
-        // sub-step retry, or the BE fallback — any of which can break
-        // out of the stale-chord trap.
+        // There is NO Jacobian term. It is not a linearisation residual
+        // (`i(v_post)` against `i(v_pre) + J·Δv`, which is second order in
+        // the step); it is a step test in the current domain, first order
+        // in the step: on a junction it admits only about RELTOL·n·Vt
+        // (tens of µV) of movement where the node-step test admits
+        // RELTOL·|v|. Only its TOLERANCE is the dense DK current-residual
+        // check's (`nr_helpers.rs::emit_nr_limit_and_converge`); the DK
+        // quantity is the Newton residual `i_nl - i_dev(v_d)`, a different
+        // one. In practice it makes the loop take one more Newton step
+        // after the node-step test passes, and that step is what keeps a
+        // full-LU solve tens of dB closer to a converged solve than a
+        // node-step test alone under hard drive (measured on a FET
+        // limiter's driven line amp: about -140 dB against -94 dB with
+        // this check and the exit step below removed).
+        //
+        // It also catches the stale-chord case it was first written for:
+        // across an exponential knee (a Boyle catch diode, a precision
+        // rectifier) `chord_j_dev` can be many orders of magnitude out of
+        // date, the back-solve steps toward the linearised network's root,
+        // and a small node step there can sit on a large current change.
+        //
+        // Cost: it runs on every iteration whose node-step test passes,
+        // with one device evaluation (`_final`), or none when the accepted
+        // line-search trial already evaluated the devices at this `v`.
+        //
+        // On a chord iteration (`!need_refactor`) after the sample's first,
+        // a failure says the chord is stale where the solve now is, so the
+        // next iteration is exact (refactored) and counts as the exit step
+        // below: `exit_step` stays set for the rest of the sample, so every
+        // later iteration of the sample is refactored too and none can
+        // certify on a chord. The sample's first iteration is excluded. There
+        // `i_nl_pre` is the PREVIOUS sample's current (the iterate starts at
+        // `v_prev`), so a failure measures how far the input moved the
+        // sample, not whether the chord is stale, and on a quietly driven
+        // deck it fires on nearly every sample. From the second iteration on
+        // `i_nl_pre` is this sample's own earlier iterate, and a failure means
+        // the chord did not converge: the staleness evidence the rule acts
+        // on. Measured on a bus compressor (bench stimulus, 0.3 V 220 Hz, one
+        // core): iterations identical (1.9775 per sample) either way;
+        // refactors 0 per sample without the rule, 0.98 with it applied from
+        // the first iteration (+51 % per sample), 0 with it from the second.
+        // `chord_exit_step_tests.rs` pins both.
         //
         // Implementation note: the device-evaluation helper writes
         // into local `v_nl`, `i_nl`, `j_dev` arrays of fixed names.
@@ -759,23 +778,21 @@ impl RustEmitter {
         // the chord-stamped `j_dev` in the outer scope.
         if m > 0 {
             code.push_str(
-                "        // Residual check: re-evaluate i_nl at the post-step v and force\n",
+                "        // Device current-change check: the currents at the post-step v\n",
             );
             code.push_str(
-                "        // NR to keep iterating if the chord linearisation produced an\n",
+                "        // against the currents at the pre-step iterate (no Jacobian term:\n",
             );
             code.push_str(
-                "        // inconsistent fixed point. Required for any topology where the\n",
+                "        // a first-order step test in the current domain). A failure keeps\n",
             );
-            code.push_str("        // per-iteration op-amp rail clamp + stale chord_j_dev can\n");
-            code.push_str("        // combine to produce false convergence (voltage step small,\n");
-            code.push_str("        // but device KCL residual huge).\n");
+            code.push_str("        // the loop iterating.\n");
             // #2: hold the residual-check device currents so the converged
             // branch can reuse them (same v ⇒ identical i_nl) instead of a
             // second device evaluation.
             code.push_str("        let mut i_nl_resid = [0.0f64; M];\n");
             code.push_str("        if !max_step_exceeded {\n");
-            code.push_str("            let i_nl_chord = i_nl;\n");
+            code.push_str("            let i_nl_pre = i_nl;\n");
             if reuse {
                 // The accepted trial evaluated the devices at this exact `v`.
                 code.push_str("            if ls_hit {\n");
@@ -783,8 +800,8 @@ impl RustEmitter {
                 code.push_str("            } else {\n");
             }
             // `_final` (i_nl-only, no `j_dev`) rather than the full
-            // per-iteration evaluation body: this residual check only
-            // ever consumes `i_nl_resid` below, never a Jacobian. The
+            // per-iteration evaluation body: this check only ever
+            // consumes `i_nl_resid` below, never a Jacobian. The
             // full body unconditionally emits `j_dev[...] = jac[...]`
             // writes for every device; declaring `j_dev` here just to
             // discard it produced a genuine dead store (rustc's
@@ -805,20 +822,29 @@ impl RustEmitter {
                 code.push_str("            }\n");
             }
             code.push_str(
-                "            // Tolerance matches the DK current-residual check: RELTOL with the\n",
+                "            // The DK current-residual check's tolerance: RELTOL with the ABSTOL\n",
             );
             code.push_str(
-                "            // ABSTOL floor, and ABSTOL_SCALE_FLOOR on the magnitude so devices\n",
+                "            // floor, and ABSTOL_SCALE_FLOOR on the magnitude so devices with\n",
             );
-            code.push_str(
-                "            // with i_nl ≈ 0 don't have an unreachably tight tolerance.\n",
-            );
+            code.push_str("            // i_nl ≈ 0 don't have an unreachably tight tolerance.\n");
             code.push_str("            for i in 0..M {\n");
-            code.push_str("                let r = (i_nl_resid[i] - i_nl_chord[i]).abs();\n");
-            code.push_str("                let tol = RELTOL * i_nl_resid[i].abs().max(i_nl_chord[i].abs()).max(ABSTOL_SCALE_FLOOR) + ABSTOL;\n");
+            code.push_str("                let r = (i_nl_resid[i] - i_nl_pre[i]).abs();\n");
+            code.push_str("                let tol = RELTOL * i_nl_resid[i].abs().max(i_nl_pre[i].abs()).max(ABSTOL_SCALE_FLOOR) + ABSTOL;\n");
             // Negated form: a NaN residual must read as NOT converged.
             code.push_str("                if !(r <= tol) {\n");
             code.push_str("                    max_step_exceeded = true;\n");
+            if chord {
+                // A stale chord (a chord iteration after the sample's
+                // first): the next iteration is exact and is the exit step
+                // (see above).
+                code.push_str(
+                    "                    // A chord step after the first failed it: the next iteration is exact (the exit step).\n",
+                );
+                code.push_str(
+                    "                    if !need_refactor && iter > 0 { exit_step = true; }\n",
+                );
+            }
             code.push_str("                    break;\n");
             code.push_str("                }\n");
             code.push_str("            }\n");
@@ -845,12 +871,12 @@ impl RustEmitter {
         // a backtracking search can shrink the damped step toward zero at a
         // stagnation point, so convergence must require the true equation
         // residual ||F|| = ||A·v - rhs - N_i·i_nl|| within tolerance — never
-        // the (possibly line-search-damped) step size alone. The device-chord
-        // consistency check above is a linearization test, not an equation
-        // residual, so it cannot substitute for this.
+        // the (possibly line-search-damped) step size alone. The device
+        // current-change check above is a step test on the device currents,
+        // not an equation residual, so it cannot substitute for this.
         if use_line_search {
             // Saving 1: the gate residual is at the committed `v`, where the
-            // device-chord check (guarded by the same `!max_step_exceeded`)
+            // current-change check (guarded by the same `!max_step_exceeded`)
             // already evaluated `i_nl_resid = i_nl(N_v·v)`. The mid-NR op-amp
             // clamp (Hard) mutates `v` BEFORE that check, so `i_nl_resid` and
             // this gate see the SAME post-clamp `v` — no eval between them.
@@ -903,6 +929,12 @@ impl RustEmitter {
         // own residual check. A stopping test on the chord's contraction rate
         // was measured and changes nothing: the accepted chord step is already
         // far inside the node tolerance.
+        //
+        // `exit_step` is also set by a failed device current-change check on
+        // a chord iteration (above). Either way it stays set for the rest of
+        // the sample, so every later iteration refactors (`need_refactor`
+        // reads it) and this gate, which needs `!need_refactor`, cannot fire
+        // again: no iterate of the sample certifies on a chord after it.
         if chord {
             assert!(
                 use_line_search,

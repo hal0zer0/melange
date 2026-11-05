@@ -174,9 +174,9 @@ fn strip_outer_parens(expr: &str) -> &str {
 /// ## Why the obvious cheaper check (Φ-vs-Φ) does NOT work
 ///
 /// The tempting analogue is to hold the `Φ(i0)` that fed the companion and
-/// compare it against `Φ(v_post[k])` after the step — mirroring
-/// `i_nl` vs `i_nl_chord`. **That test can never fire, and it is worth
-/// recording why so it is not re-proposed.**
+/// compare it against `Φ(v_post[k])` after the step — mirroring the device
+/// current-change check (`i_nl_resid` vs `i_nl_pre`). **That test can never
+/// fire, and it is worth recording why so it is not re-proposed.**
 ///
 /// 1. The augmented row `k` is ALREADY in the emitted voltage-step convergence
 ///    list, so on the accepting iteration `|Δi_k| ≤ RELTOL·max|i_k| + 1e-6`
