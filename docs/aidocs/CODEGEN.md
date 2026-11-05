@@ -1012,12 +1012,29 @@ the `_final` law (junction devices, JFET, MOSFET, VCA, LDR, glow; not tubes:
 body-effect MOSFET (which writes its threshold into the state) the trials run
 the Newton body's own device code, Jacobian included, and the next iteration
 starts from the trial's `i_nl` and `j_dev` instead of evaluating the devices
-again (`armijo_jac_reuse`). A `Hard`-rail build with op-amps (its clamp moves
-`v` after the step) and behavioral or saturating-inductor builds (their
-residual reads more than `v`, `rhs`, `A` and the device currents) evaluate
-every time. The predicates and the argument are in
-`nodal_emitter/residual.rs`; `full_lu_lossless_kernel_tests.rs` renders each
+again (`armijo_jac_reuse`). On those builds the device current-change check
+runs the Newton body's device code as well and keeps what it evaluated: the
+step was applied before the check, so when the iterate does not certify, the
+next iteration's evaluation is at the same `v` and starts from the check's
+`i_nl` and `j_dev` (`chk_prev_hit`). The check and the search are exclusive
+(one runs on an iteration whose node-step test passed, the other on one whose
+test failed), so at most one of the two is carried. A `Hard`-rail build with
+op-amps (its clamp moves `v` after the step) and behavioral or
+saturating-inductor builds (their residual reads more than `v`, `rhs`, `A` and
+the device currents) evaluate every time. The predicates and the argument are
+in `nodal_emitter/residual.rs`; `full_lu_lossless_kernel_tests.rs` renders each
 build with the reuse disabled and compares the bits.
+
+A sparse back-solve of `SPARSE_BACK_SOLVE_OUTLINE_FLOPS` (500) flops or more
+is emitted as one called function rather than inlined at its call sites (the
+Newton step and the trial each back-solve once per iteration). The unrolled
+body runs once per call, and on a large system the iteration's straight-line
+code no longer fits the instruction cache, so each inlined copy is its own
+stream of instruction misses: measured on an N=84, M=28 build, a quarter of
+the dispatch slots went unfilled for want of instructions, 17 % of those in the
+inlined back-solves. A smaller one stays inlined, where the call costs more
+than it saves (`nodal_emitter/lu.rs` has the measurements). The arithmetic and
+its order are the same either way.
 
 Still to enumerate: the ladder's Armijo `c=1e-4`, `CHORD_REFACTOR=5`, the BE-latch thresholds,
 xoshiro salts, `STATE_MAX_PLAUSIBLE_MAGNITUDE=1e6`, and ~35 others.

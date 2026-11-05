@@ -8,6 +8,18 @@ use crate::codegen::ir::{CircuitIR, LuOp};
 use crate::codegen::rust_emitter::helpers::section_banner;
 use crate::codegen::rust_emitter::RustEmitter;
 
+/// Back-solve size (`SparseLuInfo::solve_flops`) from which the emitted
+/// `sparse_lu_back_solve` is one called function (`#[inline(never)]`) instead
+/// of a body inlined at each call site. A code-layout choice: the arithmetic
+/// and its order are the same either way, so every build's output bits are.
+/// Source: `bench.sh` A/B on the full-LU perf set (one core, min of 2 rounds x
+/// 3 reps, 2026-11-05). Outlining took 2-4 % off the decks whose back-solve is
+/// 622-972 flops (a FET limiter at N=84, a transformer preamp at N=72, a bus
+/// compressor at N=76) and cost 1-3 % on those at 116-290 flops (an FM radio,
+/// a compressor at N=38), where the call outweighs the instruction-cache
+/// saving; a 482-flop power amp moved within the bench's spread.
+const SPARSE_BACK_SOLVE_OUTLINE_FLOPS: usize = 500;
+
 impl RustEmitter {
     /// Emit `invert_n` function: runtime N×N matrix inversion via Gauss-Jordan.
     ///
@@ -546,7 +558,20 @@ impl RustEmitter {
             lu.solve_flops,
             n * n * 2
         ));
-        code.push_str("#[inline(always)]\n");
+        // A large back-solve is one copy, called, not inlined at each call
+        // site: the Newton step and the line-search trial each back-solve
+        // once per iteration. The unrolled body runs once per call, and on a
+        // large system the iteration's straight-line code no longer fits the
+        // instruction cache, so every inlined copy is a separate stream of
+        // instruction misses (measured on an N=84, M=28 full-LU build: 25 %
+        // of dispatch slots starved by the front end, 17 % of those in the
+        // inlined back-solves). A small one stays inlined, where the call
+        // costs more than the misses it saves (`SPARSE_BACK_SOLVE_OUTLINE_FLOPS`).
+        if lu.solve_flops >= SPARSE_BACK_SOLVE_OUTLINE_FLOPS {
+            code.push_str("#[inline(never)]\n");
+        } else {
+            code.push_str("#[inline(always)]\n");
+        }
         if pack.is_some() {
             code.push_str(
                 "fn sparse_lu_back_solve(a_lu: &[f64; LU_SLOTS], dr: &[f64; N], dc: &[f64; N], b: &mut [f64; N]) {\n",

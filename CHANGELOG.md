@@ -27,6 +27,17 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ### Changed
 
+- **Full-LU per-iteration cost, no output change.** The device current-change
+  check now keeps the device evaluation it makes, so the iteration after an
+  uncertified check starts from it instead of evaluating the devices again at
+  the same point; and a sparse back-solve of 500 flops or more is emitted as
+  one called function instead of being inlined at both call sites, which stops
+  the per-sample code of a large circuit overflowing the instruction cache (a
+  smaller one stays inlined, where the call costs more than it saves). Both are
+  bit-for-bit: the golden corpus is 196/196 identical including every solver
+  counter, pinned in `full_lu_lossless_kernel_tests.rs`. A large FET limiter
+  at 2× runs 3.3 % faster per sample on x86-64-v3 and 1.2 % on plain x86-64;
+  decks under 500 back-solve flops are unchanged.
 - **Nodal Schur certification.** The Schur Newton certifies an iterate only
   when the device-voltage step test AND the dense DK current-residual test
   (`|f_i| ≤ RELTOL·max(|i_nl|, |i_dev|, ABSTOL_SCALE_FLOOR) + ABSTOL`, every

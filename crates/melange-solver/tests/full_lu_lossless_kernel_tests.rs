@@ -291,6 +291,54 @@ fn accepted_trial_reuse_is_bit_identical() {
     }
 }
 
+/// `chk_prev_hit` never set: the iteration after a device current-change
+/// check that did not certify evaluates the devices again at the same `v`.
+fn without_check_reuse(code: &str) -> String {
+    let out = code.replace("chk_prev_hit = true;", "chk_prev_hit = false;");
+    assert_ne!(out, code, "check-reuse disabling did not apply");
+    out
+}
+
+/// The device current-change check evaluates the devices with the Newton
+/// body's code and the next iteration starts from that evaluation (same `v`,
+/// same code), instead of evaluating again: the render is the same bits.
+/// Run with the correction reuse off so this reuse alone is compared.
+#[test]
+fn check_evaluation_reuse_is_bit_identical() {
+    let code = without_correction_reuse(&full_lu_code(BJT_LADDER, None));
+    let n = 6000;
+    let a = render_bits(&code, 2.0, n, "chk_reuse_bjt");
+    let b = render_bits(&without_check_reuse(&code), 2.0, n, "chk_reuse_off_bjt");
+    assert_eq!(a.len(), n + 2);
+    assert!(a[n + 1] > n as u64 / 2, "witness must iterate");
+    assert_eq!(a, b, "check-evaluation reuse changed the render");
+    // Both reuses off at once against both on (the correction reuse still
+    // off): the shipped evaluation reuse as a whole changes no bit.
+    let c = render_bits(
+        &without_reuse(&without_check_reuse(&code)),
+        2.0,
+        n,
+        "all_reuse_off_bjt",
+    );
+    assert_eq!(a, c, "evaluation reuse changed the render");
+}
+
+#[test]
+fn check_evaluation_reuse_gating() {
+    // Junction devices: the check evaluates with the body code and keeps it.
+    let bjt = full_lu_code(BJT_LADDER, None);
+    assert!(bjt.contains("} else if chk_prev_hit {"));
+    assert!(bjt.contains("chk_prev_hit = true;"));
+    assert!(bjt.contains("chk_i_nl = i_nl;"));
+    // Triodes: the `_final` helpers differ from the body helper at cutoff, so
+    // the check keeps its own evaluation and nothing is carried over.
+    let tube = full_lu_code(TWO_TUBE_STAGE, None);
+    assert!(!tube.contains("chk_prev_hit"));
+    // Hard op-amp rails: no reuse of any kind.
+    let hard = full_lu_code(OPAMP_CLIPPER, Some(OpampRailMode::Hard));
+    assert!(!hard.contains("chk_prev_hit"));
+}
+
 #[test]
 fn accepted_trial_reuse_gating() {
     // Junction devices: the trial carries the Jacobian, the next iteration

@@ -83,6 +83,18 @@ impl RustEmitter {
         // is the cost this avoids.
         let jdev_blk = j_dev_block_entries(ir);
         code.push_str("    let mut j_dev = [0.0f64; M * M];\n");
+        // On a build whose trial evaluates the devices with the Newton body's
+        // code (`armijo_jac_reuse`), so does the device current-change check
+        // below, and it keeps what it evaluated: currents in `chk_i_nl`,
+        // Jacobian block in `j_dev`, `chk_prev_hit` set. Nothing moves `v`
+        // between that check and the next iteration's evaluation (the step is
+        // applied before the check), so when the loop goes on, that
+        // evaluation is the check's, at the same `v` with the same code.
+        let jac_reuse = use_line_search && armijo_jac_reuse(ir);
+        if jac_reuse {
+            code.push_str("    let mut chk_prev_hit = false;\n");
+            code.push_str("    let mut chk_i_nl = [0.0f64; M];\n");
+        }
         // Trapezoidal NR loop
         code.push_str(&format!("    for iter in 0..{} {{\n", site.iter_budget));
         code.push_str("        state.diag_nr_iter_total += 1;\n");
@@ -106,13 +118,17 @@ impl RustEmitter {
         // 2b. Evaluate device currents and Jacobian
         code.push_str("        // 2b. Evaluate device currents and Jacobian (block-diagonal)\n");
         // i_nl and j_dev are declared in the outer scope (above the NR loop)
-        let jac_reuse = use_line_search && armijo_jac_reuse(ir);
         let dev_ind = if jac_reuse {
-            // The previous iteration's accepted trial evaluated the devices,
-            // with this code, at this exact `v`: its currents are in
-            // `ls_i_nl` and its Jacobian block is in `j_dev`.
+            // The previous iteration's accepted trial, or its device
+            // current-change check, evaluated the devices with this code at
+            // this exact `v`: its currents are in `ls_i_nl` / `chk_i_nl` and
+            // its Jacobian block is in `j_dev`. (The two are exclusive: the
+            // check runs only when the node-step test passed, the search only
+            // when it failed.)
             code.push_str("        if ls_prev_hit {\n");
             code.push_str("            i_nl = ls_i_nl;\n");
+            code.push_str("        } else if chk_prev_hit {\n");
+            code.push_str("            i_nl = chk_i_nl;\n");
             code.push_str("        } else {\n");
             "            "
         } else {
@@ -124,6 +140,7 @@ impl RustEmitter {
         Self::emit_nodal_device_evaluation_body(code, ir, dev_ind, "v");
         if jac_reuse {
             code.push_str("        }\n");
+            code.push_str("        chk_prev_hit = false;\n");
         }
         code.push('\n');
 
@@ -750,8 +767,10 @@ impl RustEmitter {
         // and a small node step there can sit on a large current change.
         //
         // Cost: it runs on every iteration whose node-step test passes,
-        // with one device evaluation (`_final`), or none when the accepted
-        // line-search trial already evaluated the devices at this `v`.
+        // with one device evaluation (`_final`, or on an `armijo_jac_reuse`
+        // build the Newton body's, kept for the next iteration), or none when
+        // the accepted line-search trial already evaluated the devices at
+        // this `v`.
         //
         // On a chord iteration (`!need_refactor`) after the sample's first,
         // a failure says the chord is stale where the solve now is, so the
@@ -771,11 +790,14 @@ impl RustEmitter {
         // the first iteration (+51 % per sample), 0 with it from the second.
         // `chord_exit_step_tests.rs` pins both.
         //
-        // Implementation note: the device-evaluation helper writes
-        // into local `v_nl`, `i_nl`, `j_dev` arrays of fixed names.
-        // We use a nested `{ }` block so Rust shadows those bindings
-        // — the throwaway `j_dev` inside the block doesn't disturb
-        // the chord-stamped `j_dev` in the outer scope.
+        // Implementation note: the device-evaluation helpers write
+        // into local `v_nl`/`v_nl_final`, `i_nl` (and the body helper
+        // `j_dev`) arrays of fixed names. The nested `{ }` block shadows
+        // `v_nl` and `i_nl`. `j_dev` is not shadowed: the body helper
+        // writes the outer one, which holds nothing live at this point
+        // (the chord is `chord_j_dev`; the outer `j_dev` is next read by
+        // the following iteration's refactor decision, which on that path
+        // reads exactly what its own evaluation would have written).
         if m > 0 {
             code.push_str(
                 "        // Device current-change check: the currents at the post-step v\n",
@@ -813,11 +835,33 @@ impl RustEmitter {
             } else {
                 "            "
             };
-            code.push_str(&format!("{ind}let mut v_nl_final = [0.0f64; M];\n"));
-            code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_final", "v", ind));
-            code.push_str(&format!("{ind}let mut i_nl = [0.0f64; M];\n"));
-            Self::emit_nodal_device_evaluation_final(code, ir, ind, "v");
-            code.push_str(&format!("{ind}i_nl_resid = i_nl;\n"));
+            if jac_reuse {
+                // The Newton body's evaluation (currents and Jacobian) at the
+                // post-step `v`, kept for the next iteration (`chk_prev_hit`,
+                // declared above the loop). Its currents are the `_final`
+                // code's for every class `armijo_jac_reuse` admits
+                // (`armijo_r0_reuse`), so the check reads the same values. It
+                // writes the outer `j_dev`, which nothing reads between here
+                // and the next iteration's refactor decision. Cost: the
+                // Jacobian arithmetic on an iteration that certifies; saving:
+                // a whole device evaluation on one that does not.
+                code.push_str(&format!("{ind}let mut v_nl = [0.0f64; M];\n"));
+                code.push_str(&emit_sparse_nv_matvec(ir, "v_nl", "v", ind));
+                code.push_str(&format!("{ind}let mut i_nl = [0.0f64; M];\n"));
+                for k in &jdev_blk {
+                    code.push_str(&format!("{ind}j_dev[{k}] = 0.0;\n"));
+                }
+                Self::emit_nodal_device_evaluation_body(code, ir, ind, "v");
+                code.push_str(&format!("{ind}i_nl_resid = i_nl;\n"));
+                code.push_str(&format!("{ind}chk_i_nl = i_nl;\n"));
+                code.push_str(&format!("{ind}chk_prev_hit = true;\n"));
+            } else {
+                code.push_str(&format!("{ind}let mut v_nl_final = [0.0f64; M];\n"));
+                code.push_str(&emit_sparse_nv_matvec(ir, "v_nl_final", "v", ind));
+                code.push_str(&format!("{ind}let mut i_nl = [0.0f64; M];\n"));
+                Self::emit_nodal_device_evaluation_final(code, ir, ind, "v");
+                code.push_str(&format!("{ind}i_nl_resid = i_nl;\n"));
+            }
             if reuse {
                 code.push_str("            }\n");
             }
