@@ -2,6 +2,22 @@
 
 use super::*;
 
+/// The refusal of an `X` element whose `.subckt` the deck never defines.
+///
+/// Always says how an op-amp is written, whatever the subcircuit is called:
+/// the common way to reach this error is a SPICE habit (`XU1 … TL072` with a
+/// vendor model in mind), and a name heuristic would miss every op-amp not
+/// named like one.
+pub(super) fn undefined_subckt_message(inst_name: &str, subckt: &str) -> String {
+    format!(
+        "Subcircuit instance '{inst_name}' references undefined subcircuit '{subckt}': no \
+         `.subckt {subckt}` is in the deck. If '{subckt}' is an op-amp: melange op-amps are \
+         'U' elements with an OA .model card (`U1 in+ in- out {subckt}` and `.model {subckt} \
+         OA(AOL=… VCC=… VEE=…)`; docs/NETLIST_GUIDE.md, Active Devices), and a vendor SPICE \
+         subcircuit cannot be used."
+    )
+}
+
 impl Netlist {
     /// Expand all subcircuit instances (`X` elements) into their constituent elements.
     ///
@@ -81,10 +97,7 @@ impl Netlist {
                     let key = subckt.to_ascii_lowercase();
                     let sc_idx = lookup.get(&key).ok_or_else(|| ParseError {
                         line: 0,
-                        message: format!(
-                            "Subcircuit instance '{}' references undefined subcircuit '{}'",
-                            inst_name, subckt
-                        ),
+                        message: undefined_subckt_message(inst_name, subckt),
                     })?;
                     let sc = &self.subcircuits[*sc_idx];
 

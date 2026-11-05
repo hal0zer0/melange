@@ -3130,3 +3130,264 @@ fn test_compile_plugin_switch_override_sets_the_parameter_default() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ============================================================================
+// Messages a first deck runs into (pinned wording)
+// ============================================================================
+
+/// A diode card pasted from an LTspice library, annotations and all.
+const TEST_LTSPICE_DIODE_CARD: &str = "\
+LTspice Card Fixture
+R1 in out 1k
+D1 out 0 DX
+C1 out 0 1n
+";
+
+#[test]
+fn test_model_card_non_numeric_value_names_the_key_and_the_fix() {
+    let cir = write_test_circuit(
+        &format!(
+            "{TEST_LTSPICE_DIODE_CARD}.model DX D(IS=2.52e-9 N=1.752 mfg=OnSemi type=silicon)\n"
+        ),
+        "ltspice_mfg",
+    );
+    let stderr = run_melange_fail(&["nodes", cir.to_str().unwrap()]);
+    assert!(
+        stderr.contains("parameter 'mfg' has a non-numeric value 'OnSemi'"),
+        "names the key and the value: {stderr}"
+    );
+    assert!(
+        stderr.contains("'mfg' is an LTspice library annotation (the manufacturer's name)"),
+        "says what the key is: {stderr}"
+    );
+    assert!(
+        stderr.contains("delete it from the card"),
+        "says the fix: {stderr}"
+    );
+    assert!(stderr.contains("line 5"), "names the card's line: {stderr}");
+    let _ = std::fs::remove_file(&cir);
+}
+
+#[test]
+fn test_model_card_ltspice_rating_is_refused_as_an_annotation() {
+    let cir = write_test_circuit(
+        &format!("{TEST_LTSPICE_DIODE_CARD}.model DX D(IS=2.52e-9 N=1.752 Iave=200m Vpk=75)\n"),
+        "ltspice_iave",
+    );
+    let out = std::env::temp_dir().join("melange_cli_test_ltspice_iave.rs");
+    let stderr = run_melange_fail(&[
+        "compile",
+        cir.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(
+        stderr.contains("'IAVE' is an LTspice library annotation (the average-current rating)"),
+        "names the key as an annotation: {stderr}"
+    );
+    assert!(
+        stderr.contains("delete it from the card"),
+        "says the fix: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Accepted for this device"),
+        "an annotation is not a misspelling; the accepted-key list is noise here: {stderr}"
+    );
+    assert!(stderr.contains("line 5"), "names the card's line: {stderr}");
+    let _ = std::fs::remove_file(&cir);
+}
+
+#[test]
+fn test_model_card_unknown_key_still_lists_the_accepted_keys() {
+    let cir = write_test_circuit(
+        &format!("{TEST_LTSPICE_DIODE_CARD}.model DX D(IS=2.52e-9 N=1.752 RSS=1)\n"),
+        "unknown_key",
+    );
+    let out = std::env::temp_dir().join("melange_cli_test_unknown_key.rs");
+    let stderr = run_melange_fail(&[
+        "compile",
+        cir.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(
+        stderr.contains("unknown parameter 'RSS'"),
+        "names the key: {stderr}"
+    );
+    assert!(
+        stderr.contains("Accepted for this device: IS, N"),
+        "a genuinely unknown key still gets the list: {stderr}"
+    );
+    let _ = std::fs::remove_file(&cir);
+}
+
+#[test]
+fn test_undefined_subcircuit_says_how_an_opamp_is_written() {
+    let cir = write_test_circuit(
+        "SPICE Habit Fixture
+R1 in np 1k
+XU1 np nm vcc 0 out TL072
+R2 out nm 10k
+R3 nm 0 1k
+C1 out 0 1n
+Vcc vcc 0 15
+",
+        "x_opamp",
+    );
+    let stderr = run_melange_fail(&["nodes", cir.to_str().unwrap()]);
+    assert!(
+        stderr.contains("references undefined subcircuit 'TL072'"),
+        "names the subcircuit: {stderr}"
+    );
+    assert!(
+        stderr.contains("melange op-amps are 'U' elements with an OA .model card"),
+        "says how an op-amp is written: {stderr}"
+    );
+    assert!(
+        stderr.contains("a vendor SPICE subcircuit cannot be used"),
+        "says the vendor model will not work: {stderr}"
+    );
+    assert!(
+        stderr.contains("line 3"),
+        "names the element's line: {stderr}"
+    );
+    let _ = std::fs::remove_file(&cir);
+}
+
+#[test]
+fn test_missing_output_node_names_the_flag_that_sets_it() {
+    let cir = write_test_circuit(
+        "Output Node Fixture
+R1 in opout 1k
+R2 in 0 1Meg
+C1 opout 0 1n
+",
+        "no_out_node",
+    );
+    let out = std::env::temp_dir().join("melange_cli_test_no_out_node.rs");
+    let stderr = run_melange_fail(&[
+        "compile",
+        cir.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(
+        stderr.contains("Output node 'out' not found in circuit. Did you mean: opout?"),
+        "suggests the node: {stderr}"
+    );
+    assert!(
+        stderr.contains("-n <node> (--output-node)"),
+        "names the flag: {stderr}"
+    );
+    let stderr = run_melange_fail(&[
+        "compile",
+        cir.to_str().unwrap(),
+        "-i",
+        "inn",
+        "-n",
+        "opout",
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(
+        stderr.contains("-i <node> (--input-node)"),
+        "the input side names its flag too: {stderr}"
+    );
+    let _ = std::fs::remove_file(&cir);
+}
+
+#[test]
+fn test_wiper_leg_mismatch_names_the_wiper_line() {
+    let cir = write_test_circuit(
+        "Wiper Fixture
+R1 in vtop 1k
+R_cw vtop out 5k
+R_ccw out 0 6k
+C1 out 0 1n
+.wiper R_cw R_ccw 10k \"Volume\"
+",
+        "wiper_mismatch",
+    );
+    let stderr = run_melange_fail(&["nodes", cir.to_str().unwrap()]);
+    assert!(
+        stderr.contains("the legs are 5000 + 6000 = 11000 ohm"),
+        "still the same refusal: {stderr}"
+    );
+    assert!(
+        stderr.contains("Parse error at line 6:"),
+        "names the .wiper line: {stderr}"
+    );
+    let _ = std::fs::remove_file(&cir);
+}
+
+#[test]
+fn test_switch_echo_is_zero_based_and_values_read_as_written() {
+    let cir = write_test_circuit(
+        "Switch Echo Fixture
+R1 in out 10k
+Rsw out 0 10k
+C1 out 0 1n
+.switch Rsw 10k 100k 1.15Meg \"Load\"
+",
+        "switch_echo",
+    );
+    let out = std::env::temp_dir().join("melange_cli_test_switch_echo.rs");
+    let output = Command::new(melange_bin())
+        .args([
+            "compile",
+            cir.to_str().unwrap(),
+            "--switch",
+            "Load=1",
+            "-v",
+            "-o",
+            out.to_str().unwrap(),
+        ])
+        .current_dir(project_root())
+        .output()
+        .expect("failed to run melange binary");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "compile failed: {text}");
+    assert!(
+        text.contains("--switch: Load -> position 1 of 0..2, baked into the build"),
+        "the echo prints the 0-based range: {text}"
+    );
+    assert!(
+        text.contains("position 1 of 0..2 baked as the static configuration (Rsw=100k)"),
+        "the baked value reads as the deck wrote it: {text}"
+    );
+    let _ = std::fs::remove_file(&cir);
+    let _ = std::fs::remove_file(&out);
+}
+
+#[test]
+fn test_plugin_output_with_a_rust_file_name_is_refused() {
+    let cir = write_test_circuit(TEST_RC_LOWPASS, "plugin_rs_name");
+    let dir = std::env::temp_dir().join("melange_cli_test_plugin_rs_name_project");
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = dir.with_extension("rs");
+    let stderr = run_melange_fail(&[
+        "compile",
+        cir.to_str().unwrap(),
+        "--format",
+        "plugin",
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(
+        stderr.contains("with --format plugin, --output is the project DIRECTORY"),
+        "says what --output means here: {stderr}"
+    );
+    assert!(
+        stderr.contains("is a Rust file name (the --format code spelling)"),
+        "says why the name is refused: {stderr}"
+    );
+    assert!(
+        !dir.exists() && !out.exists(),
+        "a refused project must not leave a directory behind"
+    );
+    let _ = std::fs::remove_file(&cir);
+}

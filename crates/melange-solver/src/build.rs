@@ -435,7 +435,12 @@ pub fn assemble(
         } else {
             format!("Did you mean: {}?", suggestions.join(", "))
         };
-        err!("Input node '{}' not found in circuit. {}", input_node, hint)
+        err!(
+            "Input node '{}' not found in circuit. {} Pass the node to drive with \
+             -i <node> (--input-node); `melange nodes <circuit>` lists them.",
+            input_node,
+            hint
+        )
     })?;
     if input_node_raw == 0 {
         bail!("Input node cannot be ground (0). Please specify a non-ground node.");
@@ -481,7 +486,12 @@ pub fn assemble(
             } else {
                 format!("Did you mean: {}?", suggestions.join(", "))
             };
-            err!("Input node '{}' not found in circuit. {}", name, hint)
+            err!(
+                "Input node '{}' not found in circuit. {} Pass the nodes to drive with \
+                 -i <node>,<node> (--input-node); `melange nodes <circuit>` lists them.",
+                name,
+                hint
+            )
         })?;
         if raw == 0 {
             bail!("Input node cannot be ground (0). Please specify a non-ground node.");
@@ -1006,7 +1016,12 @@ pub fn assemble(
             } else {
                 format!("Did you mean: {}?", suggestions.join(", "))
             };
-            err!("Output node '{}' not found in circuit. {}", name, hint)
+            err!(
+                "Output node '{}' not found in circuit. {} Pass the node to read with \
+                 -n <node> (--output-node); `melange nodes <circuit>` lists them.",
+                name,
+                hint
+            )
         })?;
         if raw == 0 {
             bail!(
@@ -2067,10 +2082,12 @@ pub fn apply_switch_overrides(
             .component_names
             .iter()
             .zip(&sw.positions[position])
-            .map(|(c, v)| format!("{c}={v:e}"))
+            .map(|(c, v)| format!("{c}={}", crate::parser::format_engineering(*v)))
             .collect();
         log(&format!(
-            "  --switch {name} -> position {position} baked as the static configuration ({})",
+            "  --switch {name} -> position {position} of 0..{} baked as the static \
+             configuration ({})",
+            sw.positions.len() - 1,
             values.join(", ")
         ));
     }

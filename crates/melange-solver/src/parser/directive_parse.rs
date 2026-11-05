@@ -458,8 +458,13 @@ impl Parser {
             // Model parameters are dimensionless context: a single trailing
             // 'f'/'F' after a digit is femto (IS=6.734f → 6.734e-15), matching
             // ngspice. Element positions keep the Farad reading for bare 'F'.
-            let value = parse_value_model_param(value_str)
-                .map_err(|_| self.error(format!("Invalid model parameter value: {}", value_str)))?;
+            let value = parse_value_model_param(value_str).map_err(|_| {
+                self.error(crate::model_params::non_numeric_model_value_message(
+                    &name,
+                    &token[..eq_pos],
+                    value_str,
+                ))
+            })?;
             params.push((key, value));
         }
 
@@ -748,7 +753,7 @@ impl Parser {
     ///
     /// Called after parsing but before validation. Each wiper creates two pots
     /// with complementary default values and a min of 1Ω (wiper contact resistance).
-    pub(super) fn expand_wipers(netlist: &mut Netlist) -> Result<(), ParseError> {
+    pub(super) fn expand_wipers(&self, netlist: &mut Netlist) -> Result<(), ParseError> {
         /// Minimum resistance per wiper leg (models wiper contact resistance).
         /// Must be ≥10Ω for Sherman-Morrison numerical stability at extreme positions.
         /// Real pots have 1–50Ω contact resistance; 10Ω is conservative.
@@ -780,7 +785,7 @@ impl Parser {
             let r_total = wiper.total_resistance;
             if ((r_cw + r_ccw) - r_total).abs() > 0.01 * r_total {
                 return Err(ParseError {
-                    line: 0,
+                    line: self.line_of_directive(&[".wiper"], &wiper.resistor_cw),
                     message: format!(
                         ".wiper {} {}: the legs are {} + {} = {} ohm, but the wiper's total is {} \
                          ohm, so they give no single default position. Make the legs add up \

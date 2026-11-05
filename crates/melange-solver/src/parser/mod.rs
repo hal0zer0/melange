@@ -270,7 +270,7 @@ impl Parser {
             }
         }
 
-        Self::expand_wipers(&mut netlist)?;
+        self.expand_wipers(&mut netlist)?;
         self.validate_netlist(&netlist)?;
         Self::warn_if_no_ground(&netlist);
         // `.tolerance` jitter runs *after* validation so a bad netlist

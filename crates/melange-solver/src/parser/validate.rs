@@ -584,10 +584,7 @@ impl Parser {
                     None => {
                         return Err(ParseError {
                             line: self.line_of_element(name),
-                            message: format!(
-                                "Subcircuit instance '{}' references undefined subcircuit '{}'",
-                                name, subckt
-                            ),
+                            message: super::subckt::undefined_subckt_message(name, subckt),
                         });
                     }
                     Some(s) if nodes.len() != s.nodes.len() => {

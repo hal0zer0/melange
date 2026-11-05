@@ -65,6 +65,16 @@ impl CircuitIR {
                     honored.join(", ")
                 )));
             }
+            // An LTspice library annotation (mfg, Iave, Vpk, …) is refused like
+            // any unknown key, but the message says what it is and that the
+            // fix is to delete it; listing the accepted keys would send the
+            // author looking for a spelling that does not exist.
+            if let Some(what) = crate::model_params::ltspice_annotation(&upper) {
+                return Err(CodegenError::InvalidConfig(format!(
+                    "{card}: {}",
+                    crate::model_params::ltspice_annotation_sentence(key, what)
+                )));
+            }
             let hint = crate::model_params::alias_hint(class, &upper);
             return Err(CodegenError::InvalidConfig(format!(
                 "{card}: unknown parameter '{key}'.{hint} Accepted for this device: {}",

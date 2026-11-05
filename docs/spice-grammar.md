@@ -857,7 +857,7 @@ falls outside the tube type's published manufacturer limit.
 
 Linear device — does not add nonlinear dimensions to the solver. Modeled as a linear VCCS with output resistance, rails and a slew clamp; no bandwidth pole. Input impedance is infinite unless you set `RIN`.
 
-An unrecognized parameter on an `OA` card is a **hard error** raised during code generation, as for every other device class. The error names the card, its device class and its netlist line — `Invalid .model card 'TL072' at line 8 of the netlist`, caused by `.model TL072 (op-amp card): unknown parameter 'VOHDROP'. Accepted for this device: AOL, ROUT, …` — so `compile`, `simulate` and `analyze` all refuse the deck. `melange nodes` stops short of code generation and warns instead (`.model TL072: unrecognized parameter 'VOHDROP' (ignored)`).
+An unrecognized parameter on an `OA` card is a **hard error** raised during code generation, as for every other device class. The error names the card, its device class and its netlist line — `Invalid .model card 'TL072' at line 8 of the netlist`, caused by `.model TL072 (op-amp card): unknown parameter 'VOHDROP'. Accepted for this device: AOL, ROUT, …` — so `compile`, `simulate` and `analyze` all refuse the deck. `melange nodes` stops short of code generation and warns instead (`.model TL072: unrecognized parameter 'VOHDROP' (ignored)`). An LTspice library annotation (`mfg`, `type`, `Iave`, `Ipk`, `Vpk`, `Vceo`, `Icrating`, `Vds`, `Ron`, `Qg`) is refused the same way on any class, with a message that names it as an annotation and says to delete it; a non-numeric value such as `mfg=OnSemi` is refused by the parser, naming the key.
 
 #### Swing limits, and the op-amp that cannot clip
 

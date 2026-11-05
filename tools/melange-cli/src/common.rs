@@ -306,13 +306,16 @@ pub(crate) fn resolve_switch_overrides(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     for (switch_idx, position) in &resolved {
         let sw = &netlist.switches[*switch_idx];
+        // Positions are 0-based everywhere (`--help`, `.switch` order, the
+        // generated `switch_N_position`), so the echo prints the range, not a
+        // count: "position 1 of 0..3" cannot be read as the second of four.
         eprintln!(
-            "  --switch: {} -> position {} (of {}), baked into the build",
+            "  --switch: {} -> position {} of 0..{}, baked into the build",
             sw.label
                 .clone()
                 .unwrap_or_else(|| sw.component_names.join("+")),
             position,
-            sw.positions.len()
+            sw.positions.len() - 1
         );
     }
     Ok(resolved)

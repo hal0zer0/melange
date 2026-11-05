@@ -706,6 +706,16 @@ D1 in out MyDiode
 .model MyDiode D(IS=1e-14 N=1.0)    ; add this
 ```
 
+A card pasted from an LTspice library (`standard.dio`, `standard.bjt`,
+`standard.mos`) carries part metadata and datasheet ratings next to the
+parameters: `mfg=OnSemi type=silicon Iave=200m Vpk=100`, or `Vceo=40
+Icrating=200m` on a BJT. Those are not model parameters and melange refuses
+the card until they are deleted; the error names the key and says so. Strip
+every such key and keep the parameters of the device law (`IS`, `N`, `BV`,
+`BF`, …). The keys melange knows but does not model yet (a diode's `M`, `TT`,
+`VJ`, `FC`) are different: they compile, with a notice saying what their
+omission costs.
+
 ### 4. Forgetting ground connections
 
 Power supplies and bias networks need a ground reference:

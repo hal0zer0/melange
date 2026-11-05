@@ -41,8 +41,7 @@ pub(crate) enum Commands {
         /// Where to write the result. For `--format code` (the default) this is
         /// a FILE, e.g. `src/circuit.rs`. For `--format plugin` it is the
         /// DIRECTORY the generated Cargo project is created in, e.g.
-        /// `my-pedal-plugin` — passing a file path there builds a project named
-        /// after the file, nested wherever that file lives.
+        /// `my-pedal-plugin`; a `.rs` name or an existing file is refused there.
         #[arg(short, long)]
         output: PathBuf,
 
@@ -1041,7 +1040,7 @@ pub(crate) enum Commands {
     /// List available builtin circuits
     Builtins,
 
-    /// Manage the circuit cache
+    /// Manage the circuit and compiled-binary cache
     Cache {
         #[command(subcommand)]
         action: CacheAction,

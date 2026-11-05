@@ -76,6 +76,12 @@ cd shouter && bash build.sh
 The listing also shows each circuit's tier — `stable`, `testing` or `unstable`
 (see the README's [Circuits](../README.md#circuits) section for what that means).
 
+Sources are kept in `sources.toml` under the platform config directory:
+`~/.config/melange/sources.toml` on Linux (`$XDG_CONFIG_HOME/melange/sources.toml`
+if that is set), `~/Library/Application Support/melange/sources.toml` on macOS.
+`melange sources list` prints what is configured; the file is plain TOML and
+safe to edit or copy to another machine.
+
 A folder of your own works the same way. Index it once and add it by path:
 
 ```bash

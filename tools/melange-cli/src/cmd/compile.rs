@@ -248,7 +248,8 @@ pub(crate) fn compile_circuit_source(
         verbose,
     } = opts;
     if format == OutputFormat::Plugin {
-        refuse_existing_plugin_project(&plugin_project_dir(output), &circuit_source.name())?;
+        let project_dir = plugin_project_dir(output, &circuit_source.name())?;
+        refuse_existing_plugin_project(&project_dir, &circuit_source.name())?;
     }
     // Netlist node names are normalized (lowercase, gnd→0) at parse time;
     // fold the CLI-provided names the same way so lookups match.
@@ -665,7 +666,7 @@ pub(crate) fn compile_circuit_source(
         }
         OutputFormat::Plugin => {
             // Generate complete plugin project
-            let project_dir = plugin_project_dir(output);
+            let project_dir = plugin_project_dir(output, &circuit_source.name())?;
 
             // Get a sanitized circuit name
             let circuit_name: String = project_dir
@@ -956,14 +957,37 @@ fn plugin_output_count_refusal(output_node_names: &[&str], circuit: &str) -> Str
     )
 }
 
-/// The project root `--format plugin` writes for `--output`: the path with
-/// any extension dropped.
-fn plugin_project_dir(output: &Path) -> PathBuf {
-    if output.extension().is_some() {
-        output.with_extension("")
-    } else {
-        output.to_path_buf()
+/// The project root `--format plugin` writes for `--output`: the path as
+/// given. A `.rs` name is refused, because it is the `--format code` spelling
+/// (a file) and silently creating a directory next to it, named after it, is
+/// how `-o x.rs` used to leave the author with an `x/` they never asked for.
+/// An existing file is refused for the same reason. Any other name is a
+/// directory, dots included: `-o v0.1` is `v0.1/`, not `v0/`.
+fn plugin_project_dir(output: &Path, circuit: &str) -> Result<PathBuf> {
+    if output
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("rs"))
+    {
+        anyhow::bail!(
+            "with --format plugin, --output is the project DIRECTORY, and '{out}' is a Rust \
+             file name (the --format code spelling). Give the directory to create the project in:\n  \
+             melange compile {circuit} --format plugin -o {dir}\n\
+             or drop --format plugin to write the bare DSP file:\n  \
+             melange compile {circuit} --format code -o {out}",
+            out = output.display(),
+            dir = suggest_plugin_project_dir(circuit),
+        );
     }
+    if output.is_file() {
+        anyhow::bail!(
+            "with --format plugin, --output is the project DIRECTORY, and '{out}' is an \
+             existing file. Give the directory to create the project in:\n  \
+             melange compile {circuit} --format plugin -o {dir}",
+            out = output.display(),
+            dir = suggest_plugin_project_dir(circuit),
+        );
+    }
+    Ok(output.to_path_buf())
 }
 
 /// Refuse to generate a plugin project over an existing one. `src/lib.rs` is

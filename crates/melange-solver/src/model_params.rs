@@ -218,6 +218,64 @@ impl ModelClass {
     }
 }
 
+/// Keys an LTspice library model card carries that are not parameters of any
+/// device law: part metadata and datasheet ratings, kept on the card for the
+/// part chooser. `(KEY, what it is)`. A deck pasted from `standard.dio`,
+/// `standard.bjt` or `standard.mos` brings them along, and the fix is always
+/// the same: delete the key. Consulted after a class's honored, refused,
+/// unimplemented and retired tables, so a key a class reads can never be
+/// mislabelled by this list.
+pub const LTSPICE_ANNOTATION_KEYS: &[(&str, &str)] = &[
+    ("MFG", "the manufacturer's name"),
+    ("TYPE", "the part type (silicon, Schottky, Zener, LED, …)"),
+    ("IAVE", "the average-current rating"),
+    ("IPK", "the peak-current rating"),
+    ("VPK", "the peak-voltage rating"),
+    ("VCEO", "the collector-emitter voltage rating"),
+    ("ICRATING", "the collector-current rating"),
+    ("VDS", "the drain-source voltage rating"),
+    ("RON", "the on-resistance rating"),
+    ("QG", "the gate-charge rating"),
+];
+
+/// What `key` (any case) is, when it is an LTspice library annotation
+/// ([`LTSPICE_ANNOTATION_KEYS`]); `None` otherwise.
+pub fn ltspice_annotation(key: &str) -> Option<&'static str> {
+    LTSPICE_ANNOTATION_KEYS
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(key))
+        .map(|(_, what)| *what)
+}
+
+/// The one sentence every diagnostic about an LTspice annotation key ends
+/// with: what the key is and that the fix is to delete it. `key` keeps the
+/// author's spelling so the sentence matches what is on the card.
+pub fn ltspice_annotation_sentence(key: &str, what: &str) -> String {
+    format!(
+        "'{key}' is an LTspice library annotation ({what}), not a model parameter: \
+         delete it from the card. melange reads only the parameters of the device \
+         law; the part metadata and datasheet ratings LTspice keeps on its cards \
+         (mfg, type, Iave, Vpk, Vceo, …) are not among them."
+    )
+}
+
+/// The parser's refusal of a `.model` value that is not a number, such as
+/// `mfg=OnSemi` or `type=silicon`. Names the card, the key and the value;
+/// when the key is an LTspice annotation it says so and says to delete it,
+/// which is the fix for every such card pasted from an LTspice library.
+pub fn non_numeric_model_value_message(model_name: &str, key: &str, value: &str) -> String {
+    let mut msg = format!(
+        ".model {model_name}: parameter '{key}' has a non-numeric value '{value}'. \
+         melange reads numeric model parameters only (unit suffixes such as 2.52n \
+         are fine)."
+    );
+    if let Some(what) = ltspice_annotation(key) {
+        msg.push(' ');
+        msg.push_str(&ltspice_annotation_sentence(key, what));
+    }
+    msg
+}
+
 /// Emit the compile notice for a recognised-but-unimplemented `key`, naming
 /// what its omission costs. Returns `false` (and emits nothing) when `key` is
 /// not on the class's `unimplemented` list.
@@ -261,6 +319,19 @@ pub fn warn_if_unknown(model_name: &str, class: ModelClass, key: &str) {
             model_name,
             key,
             note
+        );
+        return;
+    }
+    // An LTspice annotation is not a typo either: it is a key the author
+    // should delete, and the compile commands refuse it with the same sentence
+    // (`check_model_params`).
+    if let Some(what) = ltspice_annotation(key) {
+        crate::diag_warn!(
+            ".model {}: unrecognized parameter '{}' (ignored here; a hard error on \
+             compile). {}",
+            model_name,
+            key,
+            ltspice_annotation_sentence(key, what)
         );
         return;
     }

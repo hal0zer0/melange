@@ -511,3 +511,67 @@ impl std::fmt::Display for ParseFloatError {
 }
 
 impl std::error::Error for ParseFloatError {}
+
+/// Format a component value the way a netlist spells it: a mantissa with up to
+/// six significant digits and an engineering suffix (`1.15u`, `4.7k`, `10Meg`).
+///
+/// For diagnostics that echo a value back to the author (`--switch` baking,
+/// for one): a value read from `1.15u` was echoed as `1.1499999999999998e-6`,
+/// which is the same number and the wrong thing to show someone checking that
+/// the right position was picked. Six significant digits cover every value a
+/// deck writes; the rounding is only in the text, never in the value used.
+pub fn format_engineering(value: f64) -> String {
+    if value == 0.0 || !value.is_finite() {
+        return format!("{value}");
+    }
+    // One suffix per decade triple, SPICE spelling (`Meg`, not `M`, which
+    // SPICE reads as milli). Outside the table the plain `{:e}` form is exact
+    // and still readable.
+    const SUFFIXES: [(i32, &str); 10] = [
+        (-15, "f"),
+        (-12, "p"),
+        (-9, "n"),
+        (-6, "u"),
+        (-3, "m"),
+        (0, ""),
+        (3, "k"),
+        (6, "Meg"),
+        (9, "G"),
+        (12, "T"),
+    ];
+    let exp3 = (value.abs().log10().floor() as i32).div_euclid(3) * 3;
+    let Some((exp, suffix)) = SUFFIXES.iter().find(|(e, _)| *e == exp3) else {
+        return format!("{value:e}");
+    };
+    let mantissa = value / 10f64.powi(*exp);
+    // Six significant digits, then the trailing zeros (and a bare point) off.
+    let text = format!("{mantissa:.6}");
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    format!("{text}{suffix}")
+}
+
+#[cfg(test)]
+mod format_engineering_tests {
+    use super::format_engineering;
+
+    #[test]
+    fn echoes_values_as_a_netlist_spells_them() {
+        assert_eq!(format_engineering(1.1499999999999998e-6), "1.15u");
+        assert_eq!(format_engineering(4.7e3), "4.7k");
+        assert_eq!(format_engineering(10_000.0), "10k");
+        assert_eq!(format_engineering(1e6), "1Meg");
+        assert_eq!(format_engineering(2.2e-9), "2.2n");
+        assert_eq!(format_engineering(100e-12), "100p");
+        assert_eq!(format_engineering(0.5), "500m");
+        assert_eq!(format_engineering(1.0), "1");
+        assert_eq!(format_engineering(-470.0), "-470");
+        assert_eq!(format_engineering(0.0), "0");
+        assert_eq!(format_engineering(999.9999999), "1000");
+    }
+
+    #[test]
+    fn values_outside_the_suffix_table_keep_the_exact_form() {
+        assert_eq!(format_engineering(1e-18), "1e-18");
+        assert_eq!(format_engineering(1e15), "1e15");
+    }
+}
