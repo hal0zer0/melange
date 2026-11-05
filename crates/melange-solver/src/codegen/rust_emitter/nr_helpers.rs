@@ -792,11 +792,34 @@ pub(super) fn emit_schur_nr_limit_and_converge(
         code.push_str(&format!("{indent}i_nl[{i}] -= global_alpha * delta{i};\n"));
     }
 
+    // Current-residual check: the dense DK Newton's
+    // (`emit_nr_limit_and_converge`), verbatim — same formula, same
+    // constants — on every iteration, limited or not. `f{i} = i_nl − i_dev`
+    // is the residual the iteration solved (4c, before the step), from the
+    // device evaluation the iteration already made (4b): no extra device
+    // evaluation. The linear rows are exact by construction
+    // (`v = v_pred + S_NI·i_nl`), so this M-dimensional residual is the
+    // Schur analogue of full-LU's KCL row gate. Without it the Schur Newton
+    // certified on the device-voltage step alone, a window of
+    // `RELTOL·|v_d|` that is wide where a junction law is steep at a large
+    // voltage; on a FET limiter's driven line amp that left the render
+    // −66 dB from a converged solve (full-LU −140 dB), with flyback edges
+    // landing volts off.
+    code.push_str(&format!(
+        "{indent}// Current residual (the DK check, every iteration): f = i_nl − i_dev before the step\n"
+    ));
+    code.push_str(&format!("{indent}let mut residual_ok = true;\n"));
+    for i in 0..dim {
+        code.push_str(&format!(
+            "{indent}{{ let i_thr = RELTOL * i_nl[{i}].abs().max(i_dev{i}.abs()).max(ABSTOL_SCALE_FLOOR) + ABSTOL; if !(f{i}.abs() <= i_thr) {{ residual_ok = false; }} }}\n"
+        ));
+    }
+
     // RELTOL convergence check — break from loop (not return)
     code.push_str(&format!(
         "\n{indent}// Convergence check (SPICE RELTOL / VNTOL, the named constants)\n"
     ));
-    code.push_str(&format!("{indent}if !any_limited {{\n"));
+    code.push_str(&format!("{indent}if !any_limited && residual_ok {{\n"));
     code.push_str(&format!("{indent}    let mut nr_converged = true;\n"));
     // NaN-honest predicate: `!(dv.abs() <= threshold)` reads a non-finite
     // step as NOT converged (mirrors the nodal emitter). Do not simplify.
