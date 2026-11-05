@@ -308,6 +308,15 @@ pub struct ComparisonReport {
     /// Per-sample relative errors
     pub relative_errors: Option<Vec<f64>>,
 
+    /// When the graded comparison FAILED: whether [`ComparisonConfig::relaxed`]
+    /// (with this comparison's settle window and THD setting) passes the same
+    /// two signals. A strict FAIL whose relaxed verdict is PASS is the
+    /// shapes-match case — the gate the deck missed is the regression gate,
+    /// not evidence of a different circuit — and the front end says so under
+    /// the verdict. `None` when the graded comparison passed, or when nothing
+    /// re-graded it ([`regrade_relaxed`]).
+    pub relaxed_would_pass: Option<bool>,
+
     /// Qualifier for the PASSED/FAILED line when the deck carried live
     /// `.tolerance` / `.mismatch` jitter that this comparison ran WITHOUT.
     ///
@@ -651,6 +660,7 @@ pub fn compare_signals(
         passed: false,
         failures: vec![failure],
         config: *config,
+        relaxed_would_pass: None,
         oversampling_note: None,
         alignment_note: None,
         parasitic_note: None,
@@ -931,6 +941,7 @@ pub fn compare_signals(
         passed,
         failures,
         config: *config,
+        relaxed_would_pass: None,
         absolute_errors: Some(errors.iter().map(|&e| e.abs()).collect()),
         relative_errors: Some(
             ref_slice
@@ -1182,6 +1193,30 @@ pub fn batch_compare(
     reports
 }
 
+/// Re-grade a FAILED comparison against [`ComparisonConfig::relaxed`] and
+/// record the verdict in `report.relaxed_would_pass`. The relaxed profile keeps
+/// the graded one's settle window and THD setting, so the two verdicts are
+/// about the same window of the same signals and differ only in the bounds.
+/// A comparison that passed is left alone (`None`): the question only arises
+/// under a FAIL.
+pub fn regrade_relaxed(
+    report: &mut ComparisonReport,
+    reference: &Signal,
+    actual: &Signal,
+    graded: &ComparisonConfig,
+) {
+    if report.passed {
+        report.relaxed_would_pass = None;
+        return;
+    }
+    let relaxed = ComparisonConfig {
+        settle_time_s: graded.settle_time_s,
+        skip_thd: graded.skip_thd,
+        ..ComparisonConfig::relaxed()
+    };
+    report.relaxed_would_pass = Some(compare_signals(reference, actual, &relaxed).passed);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1396,6 +1431,77 @@ mod tests {
         for f in both.iter().chain(&ref_silent).chain(&melange_silent) {
             assert!(!f.contains("NaN"), "no NaN in the failure text: {f}");
         }
+    }
+
+    /// The first-pedal case: shapes match, one sample's error sits just past
+    /// the strict relative peak bound. Strict fails on the peak gate alone;
+    /// relaxed passes the same signals, and the report says so.
+    #[test]
+    fn strict_fail_on_the_peak_gate_alone_is_regraded_as_a_relaxed_pass() {
+        // A clipped sine on both sides (so THD is graded, as on a real pedal,
+        // and equal), plus a 1.5 mV smooth bump ten samples wide at a trough:
+        // past the 1 % × 0.1 V = 1 mV peak bound, far inside the RMS, max-rel
+        // and THD bounds.
+        let ref_samples: Vec<f64> = (0..4000)
+            .map(|i| 0.1 * (3.0 * (2.0 * PI * 1000.0 * i as f64 / 48000.0).sin()).tanh())
+            .collect();
+        let mut act_samples = ref_samples.clone();
+        for k in 0..10 {
+            let w = 0.5 - 0.5 * (2.0 * PI * k as f64 / 10.0).cos();
+            act_samples[2000 + k] += 1.5e-3 * w;
+        }
+        let reference = Signal::new(ref_samples, 48000.0, "reference");
+        let actual = Signal::new(act_samples, 48000.0, "actual");
+        let graded = ComparisonConfig {
+            peak_error_relative: Some(0.01),
+            ..ComparisonConfig::default()
+        };
+        let mut report = compare_signals(&reference, &actual, &graded);
+        assert!(
+            !report.passed,
+            "the strict peak gate must fail: {:?}",
+            report.failures
+        );
+        assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+        assert_eq!(report.relaxed_would_pass, None, "nothing re-graded it yet");
+        regrade_relaxed(&mut report, &reference, &actual, &graded);
+        assert_eq!(report.relaxed_would_pass, Some(true));
+        assert!(
+            !report.passed,
+            "re-grading must not change the graded verdict"
+        );
+    }
+
+    /// A different circuit fails both: the relaxed re-grade says FAIL, so the
+    /// front end does not call a half-amplitude output a shape match.
+    #[test]
+    fn strict_fail_on_a_different_signal_is_regraded_as_a_relaxed_fail() {
+        let ref_samples: Vec<f64> = (0..4000)
+            .map(|i| 0.1 * (2.0 * PI * 1000.0 * i as f64 / 48000.0).sin())
+            .collect();
+        let act_samples: Vec<f64> = ref_samples.iter().map(|v| 0.5 * v).collect();
+        let reference = Signal::new(ref_samples, 48000.0, "reference");
+        let actual = Signal::new(act_samples, 48000.0, "actual");
+        let graded = ComparisonConfig::default();
+        let mut report = compare_signals(&reference, &actual, &graded);
+        assert!(!report.passed);
+        regrade_relaxed(&mut report, &reference, &actual, &graded);
+        assert_eq!(report.relaxed_would_pass, Some(false));
+    }
+
+    /// A pass is not re-graded: the field stays `None`.
+    #[test]
+    fn a_passing_comparison_is_not_regraded() {
+        let samples: Vec<f64> = (0..4000)
+            .map(|i| 0.1 * (2.0 * PI * 1000.0 * i as f64 / 48000.0).sin())
+            .collect();
+        let reference = Signal::new(samples.clone(), 48000.0, "reference");
+        let actual = Signal::new(samples, 48000.0, "actual");
+        let graded = ComparisonConfig::default();
+        let mut report = compare_signals(&reference, &actual, &graded);
+        assert!(report.passed);
+        regrade_relaxed(&mut report, &reference, &actual, &graded);
+        assert_eq!(report.relaxed_would_pass, None);
     }
 
     #[test]

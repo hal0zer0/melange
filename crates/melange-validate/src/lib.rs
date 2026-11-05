@@ -717,6 +717,9 @@ pub fn validate_circuit_with_options(
         )
         .normalized_rms_error,
     );
+    // Under a FAIL, the relaxed verdict on the same signals, for the front
+    // end's "shapes match" line (`relaxed_would_pass`).
+    crate::comparison::regrade_relaxed(&mut report, &spice_signal, &melange_signal, config);
     report.circuit_name = options.circuit_name.clone().unwrap_or_else(|| {
         netlist_path
             .file_stem()

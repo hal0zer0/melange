@@ -774,7 +774,10 @@ melange simulate my-circuit.cir --amplitude 0.1 -o test.wav
 # 3. Check frequency response
 melange analyze my-circuit.cir
 
-# 4. Compare against ngspice (if installed)
+# 4. Compare against ngspice (if installed). The default gate is strict, a
+#    regression gate for a validated deck: on a first circuit read the
+#    correlation, RMS and THD lines; a FAIL whose shapes match says so and
+#    names --relaxed.
 melange validate my-circuit.cir
 
 # 5. Compile to plugin

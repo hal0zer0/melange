@@ -359,6 +359,21 @@ pub(crate) fn validate_circuit_source(
         println!("Validation PASSED{}", qualifier);
         Ok(())
     } else {
+        // The strict gate is the regression gate for a deck that is already
+        // validated. A first deck that misses it by a hair (a peak error a
+        // few hundred µV past a 1 % bound, with the correlation at five
+        // nines) read FAILED as "melange thinks my circuit is wrong" and was
+        // the closest give-up moment in a cold run. Under a strict FAIL that
+        // the relaxed profile passes, say so, before the error: the verdict
+        // and the exit code stay strict.
+        if !relaxed && result.report.relaxed_would_pass == Some(true) {
+            println!(
+                "Shape matches (relaxed gate: PASS). Strict is the regression gate for a deck \
+                 that is already validated; for a first comparison read the correlation, RMS \
+                 and THD lines above, or run with --relaxed."
+            );
+            println!();
+        }
         // A near-perfect correlation next to a failed error gate is the
         // confusing case: the shapes agree, so the difference is in level,
         // offset or timing. Say which question to ask next.

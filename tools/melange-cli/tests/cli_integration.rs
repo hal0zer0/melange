@@ -3539,3 +3539,77 @@ fn test_simulate_summary_repeats_the_netlist_warnings_and_a_clean_deck_has_none(
     let _ = std::fs::remove_file(&cir);
     let _ = std::fs::remove_file(&wav);
 }
+
+// ============================================================================
+// validate: a strict FAIL that the relaxed gate passes says so
+// ============================================================================
+
+/// An op-amp overdrive with the drive pot at the top of its range: against
+/// ngspice it correlates at five nines and misses the strict 1 % peak bound by
+/// a few hundred microvolts, which is exactly the first-pedal case.
+const TEST_FIRST_PEDAL: &str = "\
+First Pedal Fixture
+Vcc vcc 0 DC 9
+R_b1 vcc vbias 10k
+R_b2 vbias 0 10k
+C_b vbias 0 47u
+C_in in np 47n
+R_in np vbias 1meg
+U1 np nm opout TL072
+R_g nm ng 4.7k
+C_g ng 0 47n
+R_f1 opout fb 51k
+R_drive fb nm 500k
+C_f opout nm 51p
+D1 opout nm 1N4148
+D2 nm opout 1N4148
+R_tone opout tone 10k
+C_tone tone vbias 22n
+C_out tone vtop 1u
+R_vol_cw vtop out 5k
+R_vol_ccw out 0 5k
+.pot R_drive 1k 500k \"Drive\"
+.pot R_tone 1k 20k \"Tone\"
+.wiper R_vol_cw R_vol_ccw 10k \"Volume\"
+.model TL072 OA(AOL=200000 ROUT=50 VCC=9 VEE=0 VOH_DROP=1.5 VOL_DROP=1.5)
+.model 1N4148 D(IS=2.52e-9 N=1.752)
+";
+
+/// Needs ngspice on PATH, so it is ignored like the SPICE suite; run it with
+/// `--include-ignored`. Pins the line, and that the exit code stays strict.
+#[test]
+#[ignore]
+fn test_validate_strict_fail_that_relaxed_passes_says_shape_matches() {
+    assert!(
+        std::process::Command::new("ngspice")
+            .arg("--version")
+            .output()
+            .is_ok(),
+        "ngspice not found: this test needs it (run without --include-ignored to skip)"
+    );
+    let cir = write_test_circuit(TEST_FIRST_PEDAL, "first_pedal_validate");
+    let output = Command::new(melange_bin())
+        .args(["validate", cir.to_str().unwrap()])
+        .current_dir(project_root())
+        .output()
+        .expect("failed to run melange binary");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "the strict verdict stays the exit code:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("Status: FAILED"),
+        "the strict verdict stays on the status line: {stdout}"
+    );
+    assert!(
+        stdout.contains("Shape matches (relaxed gate: PASS)."),
+        "says the relaxed gate passes: {stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("or run with --relaxed"),
+        "names the flag: {stdout}"
+    );
+    let _ = std::fs::remove_file(&cir);
+}

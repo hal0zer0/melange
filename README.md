@@ -429,6 +429,8 @@ ngspice is a strong peer. It is not physical ground truth, and treating it as su
 melange validate my-circuit.cir --output-node out
 ```
 
+Its default gate is strict: a 1 % peak-error bound on the reference's own scale, built to catch a regression on a deck that is already validated, not to grade a first circuit. A first circuit is judged by the correlation, RMS and THD lines, which print either way; a strict FAIL whose shapes match (a peak error a few hundred microvolts past the bound at five nines of correlation) says so under the report and names `--relaxed`.
+
 The complete ledger, including every honest limit on hardware fidelity: **[Validation & Verification](docs/VALIDATION.md)**.
 
 ## CLI Reference
