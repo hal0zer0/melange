@@ -1,8 +1,8 @@
 use crate::args::parse_bjt_fa_mode;
 use crate::cli::OutputFormat;
 use crate::common::{
-    build_error_in, diag_lit_factor, is_build_detail, load_circuit_text, resolve_switch_overrides,
-    route_summary,
+    build_error_in, diag_lit_factor, is_build_detail, load_circuit_text,
+    print_netlist_warning_summary, resolve_switch_overrides, route_summary,
 };
 use crate::{circuits, plugin_template};
 use anyhow::{Context, Result};
@@ -491,6 +491,7 @@ pub(crate) fn compile_circuit_source(
             )
         );
     }
+    print_netlist_warning_summary("    ", &|l| println!("{l}"));
     match &runtime_set {
         Some(set) => println!(
             "    Oversampling: {}× default, runtime-selectable {}",

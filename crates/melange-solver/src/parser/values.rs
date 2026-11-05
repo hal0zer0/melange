@@ -76,7 +76,7 @@ fn try_parse_infix(s: &str) -> Option<f64> {
         // Nobody writes 4.7 mΩ as "4M7"; parsing it as milli silently built a
         // wrong circuit.
         'M' => {
-            log::warn!(
+            crate::diag_netlist_warn!(
                 "value '{}'{}: infix 'M' interpreted as MEGA per BS-1852 ({} = {:.3e}); \
                  suffix-position 'm' remains milli (e.g. '10m' = 10e-3)",
                 s,
@@ -410,7 +410,7 @@ fn parse_value_ctx(s: &str, model_param_ctx: bool) -> Result<f64, ParseFloatErro
                 }
                 return Ok(result);
             }
-            log::warn!(
+            crate::diag_netlist_warn!(
                 "value '{}'{} parsed as {} (trailing 'F' treated as a Farad unit, NOT femto); \
                  write '{}e-15' or '{}fF' if femto was intended",
                 s,
@@ -462,7 +462,7 @@ fn parse_value_ctx(s: &str, model_param_ctx: bool) -> Result<f64, ParseFloatErro
                 if num_part.as_bytes()[num_part.len() - 1] == b'M' {
                     let mantissa = &num_part[..num_part.len() - 1];
                     if let Ok(m) = mantissa.parse::<f64>() {
-                        log::warn!(
+                        crate::diag_netlist_warn!(
                             "value '{}'{}: a suffix 'M' is MILLI in SPICE, so this is {:.3e}, \
                              not mega — a factor of 10^9 apart. Write '{}meg' (or '{}M0') \
                              for mega; write '{}m' for milli and this warning goes away.",

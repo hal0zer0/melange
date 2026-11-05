@@ -282,6 +282,73 @@ fn model_card_line(netlist: &str, name: &str) -> Option<usize> {
         .map(|i| i + 1)
 }
 
+/// The logger: forwards every record to `env_logger` and keeps the warnings
+/// the solver raised on [`melange_solver::diag::NETLIST_TARGET`] — the ones
+/// that may mean the netlist is wrong — so that a command can print them
+/// again under its summary ([`print_netlist_warning_summary`]).
+pub(crate) struct NetlistWarnings {
+    inner: env_logger::Logger,
+}
+
+static NETLIST_WARNINGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+impl NetlistWarnings {
+    pub(crate) fn wrapping(inner: env_logger::Logger) -> Self {
+        Self { inner }
+    }
+
+    /// The netlist warnings logged so far, in order, each once.
+    pub(crate) fn collected() -> Vec<String> {
+        NETLIST_WARNINGS
+            .lock()
+            .map(|w| w.clone())
+            .unwrap_or_default()
+    }
+}
+
+impl log::Log for NetlistWarnings {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        self.inner.enabled(metadata)
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if record.level() == log::Level::Warn
+            && record.target() == melange_solver::diag::NETLIST_TARGET
+        {
+            let message = record.args().to_string();
+            if let Ok(mut seen) = NETLIST_WARNINGS.lock() {
+                if !seen.contains(&message) {
+                    seen.push(message);
+                }
+            }
+        }
+        self.inner.log(record);
+    }
+
+    fn flush(&self) {
+        self.inner.flush()
+    }
+}
+
+/// Print, under a command's summary, the warnings that may mean the netlist
+/// is wrong (every warning the solver raised on
+/// [`melange_solver::diag::NETLIST_TARGET`]), each once, after the summary's
+/// route line. Nothing when there were none. `indent` is the summary's own
+/// indent; `emit` is the summary's stream.
+pub(crate) fn print_netlist_warning_summary(indent: &str, emit: &dyn Fn(&str)) {
+    let warnings = NetlistWarnings::collected();
+    if warnings.is_empty() {
+        return;
+    }
+    emit(&format!(
+        "{indent}Warnings that may mean the netlist is wrong (read these before trusting the \
+         output):"
+    ));
+    for w in &warnings {
+        emit(&format!("{indent}  - {w}"));
+    }
+}
+
 /// Whether generated code DECLARES `field` on its state struct.
 ///
 /// Matches the declaration, not the name: generated code can mention a counter

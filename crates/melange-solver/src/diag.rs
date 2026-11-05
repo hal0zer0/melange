@@ -39,6 +39,25 @@ macro_rules! diag_warn {
     };
 }
 
+/// The log target of a warning that may mean the NETLIST is wrong: a value
+/// read in a magnitude the author probably did not mean (`1M` is milli), a
+/// `.model` card compiled as the default device, a key ignored, a directive
+/// not honoured, lines after `.end`. A front end can collect warnings on this
+/// target and repeat them where they will be read (the `melange` CLI prints
+/// them again under the summary of `compile`, `simulate` and `analyze`), which
+/// the solver's other warnings — about what the build did with a correct
+/// netlist — do not need.
+pub const NETLIST_TARGET: &str = "melange_solver::netlist";
+
+/// [`diag_warn!`](crate::diag_warn) on [`NETLIST_TARGET`](crate::diag::NETLIST_TARGET):
+/// for a warning that may mean the netlist is wrong.
+#[macro_export]
+macro_rules! diag_netlist_warn {
+    ($($arg:tt)*) => {
+        $crate::diag::warn($crate::diag::NETLIST_TARGET, format!($($arg)*))
+    };
+}
+
 /// Collects [`warn`]ings on this thread until dropped, then logs each once.
 /// A scope opened inside another adds to the outer one.
 pub struct BuildScope {

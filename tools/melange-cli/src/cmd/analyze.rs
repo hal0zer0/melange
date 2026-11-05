@@ -1,8 +1,8 @@
 use crate::common::{
     build_error_in, declares_state_field, diag_lit_factor, dk_unsolved_remedy, has_opamps,
-    is_build_detail, load_circuit_text, print_run_route_detail, refuse_on_input_diag,
-    report_build_line, resolve_switch_overrides, route_summary, unconverged_commit_source,
-    INPUT_DIAG_FIELDS,
+    is_build_detail, load_circuit_text, print_netlist_warning_summary, print_run_route_detail,
+    refuse_on_input_diag, report_build_line, resolve_switch_overrides, route_summary,
+    unconverged_commit_source, INPUT_DIAG_FIELDS,
 };
 use crate::{circuits, codegen_runner};
 use anyhow::{Context, Result};
@@ -177,6 +177,7 @@ pub(crate) fn analyze_freq_response(
     } else {
         eprintln!("  {summary}");
     }
+    print_netlist_warning_summary("  ", &|l| eprintln!("{l}"));
     let has_inductors = !built.mna.inductors.is_empty()
         || !built.mna.coupled_inductors.is_empty()
         || !built.mna.transformer_groups.is_empty();

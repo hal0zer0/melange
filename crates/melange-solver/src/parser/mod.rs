@@ -226,7 +226,7 @@ impl Parser {
                     }
                 }
                 if trailing > 0 {
-                    log::warn!(
+                    crate::diag_netlist_warn!(
                         "{} non-blank line(s) after '.end' were ignored (parsing stops at .end, \
                          ngspice semantics); first ignored line: '{}'",
                         trailing,

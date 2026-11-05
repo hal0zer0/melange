@@ -126,7 +126,7 @@ impl CircuitIR {
             defining_keys.iter().any(|k| k.eq_ignore_ascii_case(&upper))
         });
         if !supplied_defining {
-            crate::diag_warn!(
+            crate::diag_netlist_warn!(
                 ".model {}: name matches no built-in catalog part and no \
                  device-defining parameter was supplied — compiling as {}. A \
                  typo'd model name silently becomes the default device; use an \

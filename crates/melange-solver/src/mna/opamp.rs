@@ -167,6 +167,9 @@ pub struct OpampSwingCard {
 pub struct OpampSwing {
     pub high: f64,
     pub low: f64,
+    /// Each notice without the `Op-amp NAME: ` prefix, so that the builder
+    /// can print one line per card naming every op-amp on it (`Op-amp U1,
+    /// U2: …`) instead of the same sentence once per instance.
     pub notices: Vec<String>,
 }
 
@@ -221,7 +224,7 @@ pub fn resolve_opamp_swing(
                 let limit = r - sign * d;
                 if drop.is_none() {
                     notices.push(format!(
-                        "Op-amp {name}: zero-load swing limit assumed {rail_key} {} \
+                        "zero-load swing limit assumed {rail_key} {} \
                      {OPAMP_DEFAULT_RAIL_DROP_V} V = {limit} V (a railed output sags R_SAG·I_load \
                      below it); set {drop_key} (0 for rail-to-rail parts).",
                         if sign > 0.0 { "−" } else { "+" }

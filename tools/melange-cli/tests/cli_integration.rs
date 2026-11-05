@@ -3391,3 +3391,151 @@ fn test_plugin_output_with_a_rust_file_name_is_refused() {
     );
     let _ = std::fs::remove_file(&cir);
 }
+
+// ============================================================================
+// Warning fatigue: one op-amp notice per card, netlist warnings repeated
+// ============================================================================
+
+/// Two op-amps on one card that sets rails but no drops: the swing-limit
+/// notices apply to the card, and printing them per instance doubled them.
+const TEST_TWO_OPAMPS_ONE_CARD: &str = "\
+Two Op-amps One Card Fixture
+R1 in a 1k
+U1 a b o1 TL
+R2 o1 b 10k
+R3 b 0 1k
+R4 o1 c 1k
+U2 c d out TL
+R5 out d 10k
+R6 d 0 1k
+C1 out 0 1n
+.model TL OA(AOL=1e5 ROUT=50 VCC=9 VEE=0)
+";
+
+/// `R_in 1M`: SPICE reads a suffix `M` as milli, so this is a 1 mΩ input
+/// resistor where 1 MΩ was meant — the warning a first deck must not miss.
+const TEST_MILLI_TYPO: &str = "\
+Milli Typo Fixture
+R_in in mid 1M
+D1 mid 0 DX
+D2 0 mid DX
+R2 mid out 1k
+C1 out 0 100n
+.model DX D(IS=2.52e-9 N=1.752)
+";
+
+fn run_melange_capture(args: &[&str]) -> (String, String) {
+    let output = Command::new(melange_bin())
+        .args(args)
+        .current_dir(project_root())
+        .output()
+        .expect("failed to run melange binary");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        output.status.success(),
+        "melange {} failed:\nstdout: {stdout}\nstderr: {stderr}",
+        args.join(" ")
+    );
+    (stdout, stderr)
+}
+
+#[test]
+fn test_opamp_swing_notice_prints_once_per_card_naming_every_opamp() {
+    let cir = write_test_circuit(TEST_TWO_OPAMPS_ONE_CARD, "two_opamps_one_card");
+    let out = std::env::temp_dir().join("melange_cli_test_two_opamps_one_card.rs");
+    let (_, stderr) = run_melange_capture(&[
+        "compile",
+        cir.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    let swing_lines: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.contains("zero-load swing limit assumed"))
+        .collect();
+    assert_eq!(
+        swing_lines.len(),
+        2,
+        "one VOH_DROP and one VOL_DROP notice for the card, not one per op-amp:\n{stderr}"
+    );
+    for line in &swing_lines {
+        assert!(
+            line.contains("Op-amp U1, U2:"),
+            "the notice names every op-amp on the card: {line}"
+        );
+    }
+    let _ = std::fs::remove_file(&cir);
+    let _ = std::fs::remove_file(&out);
+}
+
+#[test]
+fn test_compile_summary_repeats_the_warnings_that_may_mean_the_netlist_is_wrong() {
+    let cir = write_test_circuit(TEST_MILLI_TYPO, "milli_typo_compile");
+    let out = std::env::temp_dir().join("melange_cli_test_milli_typo_compile.rs");
+    let (stdout, stderr) = run_melange_capture(&[
+        "compile",
+        cir.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(
+        stderr.contains("a suffix 'M' is MILLI in SPICE"),
+        "the parser still warns where it always did: {stderr}"
+    );
+    let summary = stdout
+        .split("Summary:")
+        .nth(1)
+        .expect("compile prints a Summary block");
+    assert!(
+        summary.contains("Warnings that may mean the netlist is wrong"),
+        "the summary repeats them under their own heading: {stdout}"
+    );
+    assert!(
+        summary.contains("value '1M' (line 2, R_in): a suffix 'M' is MILLI in SPICE"),
+        "the summary carries the warning's full text: {stdout}"
+    );
+    let _ = std::fs::remove_file(&cir);
+    let _ = std::fs::remove_file(&out);
+}
+
+#[test]
+fn test_simulate_summary_repeats_the_netlist_warnings_and_a_clean_deck_has_none() {
+    let cir = write_test_circuit(TEST_MILLI_TYPO, "milli_typo_simulate");
+    let wav = std::env::temp_dir().join("melange_cli_test_milli_typo_simulate.wav");
+    let (stdout, _) = run_melange_capture(&[
+        "simulate",
+        cir.to_str().unwrap(),
+        "-d",
+        "0.05",
+        "-o",
+        wav.to_str().unwrap(),
+    ]);
+    assert!(
+        stdout.contains("Warnings that may mean the netlist is wrong"),
+        "simulate repeats the netlist warnings after its route line: {stdout}"
+    );
+    assert!(
+        stdout.contains("- value '1M' (line 2, R_in): a suffix 'M' is MILLI"),
+        "with the warning's text: {stdout}"
+    );
+    let _ = std::fs::remove_file(&cir);
+    let _ = std::fs::remove_file(&wav);
+
+    let cir = write_test_circuit(TEST_DIODE_CLIPPER, "clean_deck_simulate");
+    let wav = std::env::temp_dir().join("melange_cli_test_clean_deck_simulate.wav");
+    let (stdout, _) = run_melange_capture(&[
+        "simulate",
+        cir.to_str().unwrap(),
+        "-d",
+        "0.05",
+        "-o",
+        wav.to_str().unwrap(),
+    ]);
+    assert!(
+        !stdout.contains("Warnings that may mean"),
+        "a clean deck gets no heading: {stdout}"
+    );
+    let _ = std::fs::remove_file(&cir);
+    let _ = std::fs::remove_file(&wav);
+}

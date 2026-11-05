@@ -67,7 +67,7 @@ impl Parser {
                             let model = self.parse_model(&sub_parts)?;
                             netlist.models.push(model);
                         } else {
-                            log::warn!(
+                            crate::diag_netlist_warn!(
                                 "directive '{}' inside .subckt '{}' is ignored — only .model is \
                                  honored inside subcircuit bodies; move it to the top level",
                                 sub_parts[0],
@@ -273,7 +273,7 @@ impl Parser {
                 // End of netlist or subcircuit
             }
             other => {
-                log::warn!("Unknown directive: {}", other);
+                crate::diag_netlist_warn!("Unknown directive: {}", other);
             }
         }
 

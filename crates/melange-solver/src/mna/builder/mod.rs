@@ -173,7 +173,11 @@ impl MnaBuilder {
             self.categorize_element(element)?;
         }
 
-        // Resolve op-amp model parameters from netlist .model directives
+        // Resolve op-amp model parameters from netlist .model directives.
+        // A swing-limit notice is about the card, and every op-amp on the card
+        // gets the same one: collect them by text and print each once, naming
+        // the op-amps (`Op-amp U1, U2: …`), as the GBW notice below does.
+        let mut swing_notices: Vec<(String, Vec<String>)> = Vec::new();
         for (oa, elem) in self.opamps.iter_mut().zip(
             netlist
                 .elements
@@ -239,13 +243,19 @@ impl MnaBuilder {
                     }
                     let resolved = resolve_opamp_swing(&oa.name, &swing, oa.gbw.is_finite())
                         .map_err(MnaError::InvalidParameter)?;
-                    for notice in &resolved.notices {
-                        crate::diag_warn!("{notice}");
+                    for notice in resolved.notices {
+                        match swing_notices.iter_mut().find(|(text, _)| *text == notice) {
+                            Some((_, names)) => names.push(oa.name.clone()),
+                            None => swing_notices.push((notice, vec![oa.name.clone()])),
+                        }
                     }
                     oa.vcc = resolved.high;
                     oa.vee = resolved.low;
                 }
             }
+        }
+        for (notice, names) in &swing_notices {
+            crate::diag_warn!("Op-amp {}: {notice}", names.join(", "));
         }
 
         // GBW is parsed but no bandwidth pole reaches any solver path (the IIR

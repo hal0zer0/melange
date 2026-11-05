@@ -13,7 +13,7 @@ impl Parser {
             return;
         }
         if t.starts_with('.') {
-            log::warn!(
+            crate::diag_netlist_warn!(
                 "first line '{}' was consumed as the netlist title (SPICE semantics) but looks \
                  like a directive — add a title line above it if this was unintended",
                 t
@@ -50,7 +50,7 @@ impl Parser {
             && first.chars().skip(1).any(|c| c.is_ascii_digit())
             && first.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
         if looks_like_element_name && toks.len() >= 3 {
-            log::warn!(
+            crate::diag_netlist_warn!(
                 "first line '{}' was consumed as the netlist title (SPICE semantics) but looks \
                  like a circuit element — add a title line above it if this was unintended",
                 t
@@ -90,7 +90,7 @@ impl Parser {
         {
             return;
         }
-        log::warn!(
+        crate::diag_netlist_warn!(
             "no element references the ground node '0' — MNA is solving relative to a \
              reference melange picked on its own, so node voltages are defined only up to \
              an arbitrary offset and a DC operating point will report convergence on a \

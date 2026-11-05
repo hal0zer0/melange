@@ -63,10 +63,18 @@ fn main() -> Result<()> {
 
     // Initialize logger so log::info!/warn! from melange-solver are visible.
     // Default: only warnings. RUST_LOG=info or RUST_LOG=melange_solver=debug for more.
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
-        .format_timestamp(None)
-        .format_target(false)
-        .init();
+    // Wrapped so the warnings that may mean the netlist is wrong are kept and
+    // printed again under the command's summary (`common::NetlistWarnings`):
+    // on a deck with an op-amp card and a typo'd `1M`, the one warning that
+    // matters sat among five and the run still ended "Done".
+    let logger =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+            .format_timestamp(None)
+            .format_target(false)
+            .build();
+    log::set_max_level(logger.filter());
+    log::set_boxed_logger(Box::new(common::NetlistWarnings::wrapping(logger)))
+        .context("installing the logger")?;
 
     // Handle a top-level `--version`/`-V` ourselves so we can append the EXACT
     // build identity — a runtime hash of THIS executable — which clap's
