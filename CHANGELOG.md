@@ -11,6 +11,32 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [0.1.22] - 2026-11-04
 
+**If you use melange, this changes for you**
+
+- **Install / upgrade:** the Linux x86_64 binary is attached to this release
+  (`melange --version` starts `melange 0.1.22 (3d4c82a)`); anywhere else,
+  `cargo install --path tools/melange-cli` from the tag. `simulate` and
+  `analyze` need `rustc` on PATH, `validate` needs `ngspice`.
+- **Removed flag:** `--tolerance` is gone and now fails as an unknown argument;
+  generated code no longer declares `pub const TOL`. Delete it from scripts.
+- **Generated API:** `set_dc_operating_point(v)` returns `(f64, usize)`
+  (existing calls still compile); generated plugins apply smoothed pot values
+  every 32 samples; full-LU builds store the chord factor packed. Details
+  under *Generated API* below.
+- **Renders can change** on nodal full-LU builds, diodes with a finite `BV`,
+  large nodal circuits, `--switch` renders, `2N5457` cards without `VTO`, and
+  `--emit-dc-op-recompute` builds; the numbered list below says how and by
+  how much. Nothing changed audibly in the golden corpus.
+- **New refusals:** `simulate --freq` outside (0, Nyquist); `recompute_dc_op()`
+  on three kinds of nodal build (the doc comment says which).
+- **New:** `--switch` is baked into the build (a plugin starts at that
+  position), `simulate --freq <Hz>` sets the test tone, a runtime oversampling
+  set is a plugin parameter, three new solver counters.
+- **Measurement change:** `validate` on a deck whose ngspice twin carries a
+  subcircuit compared against an undriven reference before; it is driven now.
+
+**For the record** — golden renders and solver counters against v0.1.21:
+
 **Against v0.1.21, over the golden renders:** of the 192 renders both
 versions record, 125 are byte-identical, 67 are NEGLIGIBLE and none changed
 audibly; no render is held and none engages the output clamp. The NEGLIGIBLE
