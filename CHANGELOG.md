@@ -9,6 +9,20 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Codegen panicked on a linear circuit routed to the nodal full-LU
+  sub-path** when the circuit was large enough to carry the structural
+  sparse-LU pattern (`packed sparse LU: expected one `pub chord_lu: …` in the
+  emitted state, found 0`; first seen on a 64-node voicing network, every
+  verb). An M = 0 build with no behavioral source and no saturating inductor
+  solves one direct dense LU per sample and has no chord state; the packed
+  factor was enabled from the pattern alone and asked for fields that build
+  never emits. The packed layout now requires chord state (one predicate,
+  `has_chord_state`, shared with the state emitter). Such a build compiles
+  again and renders byte-identically to v0.1.21; no golden render or
+  generated source changes (196/196 identical, strict).
+
 ## [0.1.22] - 2026-11-04
 
 **If you use melange, this changes for you**

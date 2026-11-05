@@ -79,3 +79,51 @@ fn full_lu_m0_direct_solve_settles_on_the_analytic_dc() {
         "settled v(out) {settled:.12} V vs analytic {analytic:.12} V ({rel:.3e} relative)"
     );
 }
+
+/// A 20-stage RC ladder: linear (M = 0), and large enough for the structural
+/// sparse-LU pattern to exist. v0.1.22 panicked at codegen on such a build
+/// ("packed sparse LU: expected one `pub chord_lu: …`, found 0"): the packed
+/// factor was enabled from the pattern alone, and the M = 0 direct-solve build
+/// has no chord state for the packed fields to sit beside. The deck is the
+/// shape of the first field report (a 64-node linear voicing network).
+fn rc_ladder(stages: usize) -> String {
+    let mut deck = String::from("RC ladder\n");
+    let mut prev = "in".to_string();
+    for i in 1..=stages {
+        deck.push_str(&format!("R{i} {prev} n{i} 10k\nC{i} n{i} 0 10n\n"));
+        prev = format!("n{i}");
+    }
+    deck.push_str(&format!("Rout {prev} out 1k\nCout out 0 1n\n"));
+    deck
+}
+
+#[test]
+fn full_lu_m0_build_with_a_sparse_pattern_emits_no_packed_factor_and_compiles() {
+    let deck = rc_ladder(20);
+    let mut config = support::config_for_spice(&deck, SR);
+    config.nodal_sub_path_override = NodalSubPathOverride::FullLu;
+    let built = support::build_shipped(&deck, &config, "nodal");
+    assert_eq!(built.generated.m, 0, "the deck must be linear (M=0)");
+    assert_eq!(
+        built.generated.meta.nodal_sub_path,
+        Some(NodalSubPath::FullLu)
+    );
+    let code = &built.generated.code;
+    assert!(
+        code.contains("// Linear circuit: direct LU solve"),
+        "the build must take the M=0 direct-solve branch"
+    );
+    assert!(
+        code.contains("fn sparse_lu_factor(a: &mut [[f64; N]; N]"),
+        "the deck is meant to be large enough for the sparse pattern; if the \
+         emitter stopped emitting it the test no longer covers the packed path"
+    );
+    assert!(
+        !code.contains("chord_lu_pk") && !code.contains("pub chord_lu:"),
+        "an M=0 direct-solve build has no chord state and nothing packed"
+    );
+    // The emitted code must build: the sparse factor functions are emitted
+    // in their N x N layout with no state field to reference.
+    let circuit = support::build_circuit_nodal(&deck, &config, "m0_rc_ladder_sparse");
+    assert_eq!(circuit.code, built.generated.code);
+}

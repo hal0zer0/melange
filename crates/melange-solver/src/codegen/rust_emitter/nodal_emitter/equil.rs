@@ -517,8 +517,11 @@ pub(super) struct LuPack {
 
 impl LuPack {
     /// The packing a build takes, or `None` for the N x N layout: packed
-    /// whenever the structural pattern exists, except on builds that stamp
-    /// saturating inductors. There the packed layout measured slower (one
+    /// whenever the structural pattern exists and the build has chord state
+    /// to pack (`sites::has_chord_state`: an M = 0 linear build solves a
+    /// direct dense LU per sample and stores no factor, so there is nothing
+    /// to pack and no `chord_lu` to put the packed fields beside), except on
+    /// builds that stamp saturating inductors. There the packed layout measured slower (one
     /// corpus deck, N = 73 with 16 saturating inductors, +3 % per sample with
     /// 62 % fewer L1 misses and twice the FP-scheduler stalls; the cause is
     /// not identified), so those builds keep the N x N array. The exclusion
@@ -526,7 +529,11 @@ impl LuPack {
     /// carrying it into any change to the flux rows or the pack.
     pub(super) fn for_build(ir: &CircuitIR, pat: Option<&EquilPattern>) -> Option<Self> {
         match (&ir.sparsity.lu, pat) {
-            (Some(lu), Some(p)) if ir.saturating_inductors.is_empty() => Some(Self::new(p, lu)),
+            (Some(lu), Some(p))
+                if ir.saturating_inductors.is_empty() && super::sites::has_chord_state(ir) =>
+            {
+                Some(Self::new(p, lu))
+            }
             _ => None,
         }
     }

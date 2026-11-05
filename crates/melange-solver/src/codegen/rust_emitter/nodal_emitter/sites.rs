@@ -456,6 +456,18 @@ pub(super) fn emits_hold(ir: &CircuitIR) -> bool {
     ir.topology.m > 0 || !ir.behavioral_sources.is_empty() || !ir.saturating_inductors.is_empty()
 }
 
+/// True when the state carries the cross-timestep chord factor (`chord_lu`
+/// and its companions): every build with a Newton loop, which is the same
+/// set as [`emits_hold`]. An M = 0 build with no behavioral source and no
+/// saturating inductor solves one direct dense LU per sample and has no
+/// chord state at all — so nothing may be stored packed beside it. The
+/// state emitter and the packed-factor decision (`LuPack::for_build`) read
+/// this one predicate; a build that emitted the packed fields without the
+/// chord fields panicked at codegen on a 64-node linear deck.
+pub(super) fn has_chord_state(ir: &CircuitIR) -> bool {
+    emits_hold(ir)
+}
+
 /// True when the sample's solve is the linear direct one (M = 0 with no
 /// behavioral source and no saturating inductor): no Newton loop, so no
 /// `converged` for a failed op-amp pin to hand its outcome to. The same

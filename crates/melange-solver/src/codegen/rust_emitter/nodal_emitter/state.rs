@@ -550,7 +550,7 @@ impl RustEmitter {
 
         // Cross-timestep chord state (persisted LU for full LU path). Behavioral
         // B-sources force the full-LU path even at M=0, so they need it too.
-        if m > 0 || !ir.behavioral_sources.is_empty() || !ir.saturating_inductors.is_empty() {
+        if super::sites::has_chord_state(ir) {
             code.push_str(
                 "    // --- Cross-timestep chord method state (persisted LU factors) ---\n",
             );
@@ -1006,7 +1006,7 @@ impl RustEmitter {
         if ir.solver_config.breakpoint_be {
             code.push_str("            breakpoint_be: 0,\n");
         }
-        if m > 0 || !ir.behavioral_sources.is_empty() || !ir.saturating_inductors.is_empty() {
+        if super::sites::has_chord_state(ir) {
             code.push_str("            chord_lu: [[0.0; N]; N],\n");
             code.push_str("            chord_dr: [1.0; N],\n");
             code.push_str("            chord_dc: [1.0; N],\n");
