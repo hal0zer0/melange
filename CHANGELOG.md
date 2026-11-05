@@ -9,6 +9,70 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+**What can change rendered output** (each has its entry below):
+
+1. **Nodal Schur builds.** Every Schur Newton iteration now also has to pass
+   the dense DK current-residual test. Renders that certified on the warm
+   start's first step take a second iteration; a hard-driven Schur render
+   that sat 66 dB from the converged solution now sits at −153 dB. In the
+   golden corpus one render changes audibly-classified (`wurli-tremolo`
+   silence, max 0.5 mV: the old render was 83 dB off the converged answer,
+   the new one matches it), the rest are identical or negligible.
+2. **Nodal full-LU builds.** A chord iteration after the first that fails the
+   device current-change check refactors at once instead of waiting for the
+   periodic refactor. Same certification; fewer iterations, more
+   factorizations, a different accepted path on some samples.
+3. **Large nodal circuits.** The route-cost coefficients are re-fitted to the
+   certified Schur; no corpus deck changes route.
+
+### Changed
+
+- **Nodal Schur certification.** The Schur Newton certifies an iterate only
+  when the device-voltage step test AND the dense DK current-residual test
+  (`|f_i| ≤ RELTOL·max(|i_nl|, |i_dev|, ABSTOL_SCALE_FLOOR) + ABSTOL`, every
+  iteration, limited or not) both pass; it had certified on the step test
+  alone, weaker than both dense DK and nodal full-LU. The check reuses the
+  residual the body already forms (no extra device evaluation; pinned in
+  `nodal_schur_certification_tests.rs`). Against a converged reference the
+  compressor witness forced to Schur goes from −66 dB (one sample 13.2 V
+  against 4.35 V) to −153 dB at +24 dB drive, and all 14 Schur golden decks
+  move toward their converged references by up to 200 dB with none worse
+  beyond 0.3 dB. Cost: Schur decks run 6–34 % slower per sample (`wurli-tremolo`
+  247 → 330 ns); corpus Schur iterations +16 %; the hard-drive sweep gains two
+  ceiling hits on `opamp-pin-control` at 10 V, both refused false
+  certifications the old test had accepted at |f|/tol of 3e7 and 8e6.
+- **Full-LU stale-chord exact step.** When the device current-change check
+  fails on a chord iteration after the sample's first, the next iteration
+  factors fresh and counts as the exit step (at iteration 0 the pre-step
+  currents are the previous sample's, so a failure there measures the input's
+  movement, not a stale chord; applying the rule there cost one bus
+  compressor +51 % for nothing). Witness accuracy −134/−150/−140 →
+  −153/−151/−145 dB; two triode preamps −5 to −8 % per sample; golden full-LU
+  renders 0 changed, iterations −3.1 %, refactorizations +5.7 %; 21 effort
+  counters on 16 renders move past the compare bound, all refactorizations up
+  or iterations down except `gravity`/potsweep `diag_ls_merit_up_count`
+  22 → 159, traced to this rule (NEGLIGIBLE audio, no failure-path counter
+  rises, line-search failures 3 → 0): on sample 26307 the rule makes the
+  first inner sample's last iteration exact, so the second inner sample starts
+  from a fresh factor; the sidechain's log and threshold diodes then drift
+  0.46–0.48 against it, under the 50 % refactor trigger, and a chord
+  iteration's full-step trial contracts 4.8× in the natural monotonicity test
+  while the raw KCL norm rises 22 %, which the counter counts. The pattern
+  recurs once per 1 kHz cycle just after the zero crossing over two pot
+  ranges (88 of the 137 added acceptances); with the rule disabled the render
+  is bit-identical to v0.1.22. The emitter comments that called this check a
+  comparison "against the chord's prediction" are corrected: it compares the
+  currents before and after the step, first order, with no Jacobian term;
+  only its tolerance is DK's.
+- **Route-cost coefficients re-fitted** to the certified Schur (forced
+  both-ways bench on the nodal corpus, same protocol): `SCHUR_NS_PER_N2`
+  0.424 → 0.442, `NOMINAL_ITERATIONS_SCHUR` 2.25 → 2.7, the others within a
+  few percent; worst over-prediction of Schur's relative cost 1.13× at
+  measured iterations, 1.21× at the nominal pair, under the 1.5× threshold,
+  which stays. The corpus sweep still moves exactly one deck. With Schur
+  certifying properly the mid-size decks sit at a Schur/full-LU ratio of
+  about 1.0, so part of Schur's old speed advantage there was its looser test.
+
 ### Fixed
 
 - **Codegen panicked on a linear circuit routed to the nodal full-LU

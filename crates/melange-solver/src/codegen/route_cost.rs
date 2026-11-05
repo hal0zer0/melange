@@ -7,8 +7,24 @@
 //!
 //! # Why a cost rule exists
 //!
-//! On the nodal path both sub-paths solve the same circuit to the same
-//! certification. What differs is the per-sample work: the Schur sub-path
+//! On the nodal path both sub-paths solve the same circuit, each to its own
+//! certification. Full-LU certifies an iterate on the undamped node step, the
+//! device current-change check (the device currents after the step against
+//! those before it) and the row-residual gate, and takes an exact-Jacobian
+//! exit step after a chord-accepted iterate (or after a chord iteration past
+//! the sample's first fails the current-change check). Schur certifies on
+//! the undamped device-voltage step and the dense DK Newton's current-residual
+//! check (`|i_nl − i_dev|`; its linear rows are exact by construction). Until the
+//! residual check was added Schur certified on the step alone, and part of
+//! its measured speed was that looser test: with it, the mid-size decks of
+//! the fit sit at a measured Schur/full-LU ratio of about 1.0 (gravity 1.02,
+//! rexi-mockup 1.01, seven-triode-cascade 0.99, against 0.93 / 0.91 / 0.78
+//! before). The rule only ever moves a circuit from Schur to full-LU, and
+//! [`COST_RATIO_MAX`] stays 1.5. The constants below are fitted to the
+//! sub-paths as they certify now; a change to either certification is a
+//! per-sample performance change (see the end of this doc).
+//!
+//! What differs otherwise is the per-sample work: the Schur sub-path
 //! applies the dense N×N `S = A⁻¹` to the right-hand side every sample and
 //! eliminates a dense M×M Jacobian every Newton iteration, while the full-LU
 //! sub-path back-solves a packed sparse factor of `G_aug` whose length is the
@@ -39,48 +55,59 @@
 //! Least-squares fit of the two forms above to forced-both-ways timings
 //! (`--nodal-subpath schur` and `full-lu` on the same netlist, same flags)
 //! measured 2026-11-04 with `tools/perf-harness/bench.sh` (0.3 V 220 Hz
-//! sine, 2 M samples × 3 reps, best rep, one core of this development
+//! sine, 600 k samples × 3 reps, best rep, one core of this development
 //! machine, `-C target-cpu=x86-64-v3`) on the nodal corpus decks with M ≥ 10
 //! plus one M = 9 boundary deck, at their golden-manifest flags; iteration
-//! counts from a 1 s `simulate -v` of the same stimulus. Rows where either
-//! route failed to certify (ceilings, holds, unsolved samples) are excluded,
-//! as is a deck declared unrepresentative (moonladder: K ill-conditioned at
-//! 5e11, the fit's largest miss when included; dropping it moved the Schur
-//! coefficients by < 15 % and halved `FULL_LU_NS_PER_SOLVE_FLOP` against a
-//! rise in `FULL_LU_NS_PER_M` — the two are collinear on this corpus — with
-//! no deck's predicted ratio moving by more than 0.1). The 15 fitted rows,
-//! ns per inner sample, Schur then full-LU, measured (iterations per sample):
+//! counts from a 1 s `simulate -v` of the same stimulus. Re-fitted the same
+//! day after Schur gained the current-residual check, on the same deck set
+//! (the first fit's data through the same procedure reproduces the first
+//! constants exactly). Rows where either route failed to certify (ceilings,
+//! holds, unsolved samples) are excluded, as is a deck declared
+//! unrepresentative (moonladder: K ill-conditioned at 5e11, the first fit's
+//! largest miss when included). On this corpus `FULL_LU_NS_PER_SOLVE_FLOP`
+//! is collinear with `FULL_LU_NS_PER_ITERATION` (the re-fit doubled the first
+//! and moved the second by 3 % against the first fit, with the per-iteration
+//! total on every row within a few %; the first fit's collinear pair was the
+//! flop term with `FULL_LU_NS_PER_M`): the full-LU triple, not any one term,
+//! is the measurement. The 15 fitted rows, ns per inner sample, Schur then
+//! full-LU, measured (iterations per sample):
 //!
 //! ```text
 //! deck                      N   M  solve_flops   Schur ns (it)   full-LU ns (it)   measured S/F
-//! gravity (2×)             38   9     290        1162 (2.71)     1243 (3.01)        0.93
-//! kt88-pp-stage            23  10     236        1432 (2.39)     2231 (3.45)        0.64
-//! split-band-triode-drive  33  10     288        1500 (2.11)     2175 (3.09)        0.69
-//! twill-deluxe             23  10     236        1439 (2.38)     2313 (3.28)        0.62
-//! 4kbuscomp                76  10     622        2799 (1.00)     1040 (1.98)        2.69
-//! farfisa-se15-preamp      48  11     412        1856 (2.16)     2375 (3.15)        0.78
-//! split-band-ge-clamp      39  12     336        2393 (2.28)     3324 (3.30)        0.72
-//! steve-1073-preamp        72  12     806        3888 (2.63)     3509 (3.89)        1.11
-//! seven-triode-cascade     30  14     236        2796 (2.63)     3598 (4.03)        0.78
-//! gravity-stereo (2×)      64  15     544        3729 (2.74)     1932 (3.03)        1.93
-//! rexi-mockup              28  18     318        3713 (2.77)     4101 (4.20)        0.91
-//! fet limiter, 1e12-K form 84  27     972       21579 (6.68)     4001 (2.83)        5.39   (forced Schur on a K-diag-negative deck)
-//! same deck (2×)           84  27     972        5987 (1.00)     3528 (2.64)        1.70
-//! fet limiter, revised     84  28     972       10289 (2.40)     5259 (3.75)        1.96
-//! same deck (2×)           84  28     972        9648 (2.21)     4624 (3.35)        2.09
+//! gravity (2×)             38   9     290        1253 (3.09)     1226 (2.77)        1.02
+//! kt88-pp-stage            23  10     236        1495 (2.60)     2173 (3.35)        0.69
+//! split-band-triode-drive  33  10     288        1702 (2.59)     2044 (2.90)        0.83
+//! twill-deluxe             23  10     236        1568 (2.76)     2255 (3.13)        0.70
+//! 4kbuscomp                76  10     622        2853 (1.09)     1044 (1.98)        2.73
+//! farfisa-se15-preamp      48  11     412        2172 (2.71)     2229 (2.84)        0.97
+//! split-band-ge-clamp      39  12     336        2638 (2.69)     3103 (3.08)        0.85
+//! steve-1073-preamp        72  12     806        4349 (3.33)     3309 (3.30)        1.31
+//! seven-triode-cascade     30  14     236        3199 (3.17)     3241 (3.58)        0.99
+//! gravity-stereo (2×)      64  15     544        3995 (3.12)     1958 (2.79)        2.04
+//! rexi-mockup              28  18     318        4072 (3.07)     4020 (4.11)        1.01
+//! fet limiter, 1e12-K form 84  27     972       23301 (7.48)     3996 (2.83)        5.83   (forced Schur on a K-diag-negative deck)
+//! same deck (2×)           84  27     972        8662 (1.99)     3567 (2.64)        2.43
+//! fet limiter, revised     84  28     972       11403 (2.76)     5004 (3.38)        2.28
+//! same deck (2×)           84  28     972       10519 (2.47)     4471 (3.10)        2.35
 //! ```
 //!
-//! The fit predicts the measured per-sample cost within 15 % on 12 of the 15
-//! rows at the measured iteration counts; its misses are all in the direction
-//! of Schur being dearer than modelled (4kbuscomp 2.05 predicted vs 2.69,
-//! gravity-stereo 1.54 vs 1.93) except farfisa-se15-preamp (0.90 vs 0.78).
-//! With the nominal iteration pair in place of the measured counts the worst
-//! over-prediction of Schur's relative cost on the corpus is about 1.33×,
-//! under the 1.5× margin: no corpus deck that measured Schur-faster is moved.
-//! Evaluated over every nodal M > 0 deck of the corpus the rule moves exactly
-//! one (the revised FET limiter, 2.3), and that one is also the direct
-//! measurement above and the adopting repo's drum-loop timings (Schur 1.9–2.8×
-//! full-LU across 0 to +24 dB of drive, both rates).
+//! The fit predicts both sub-paths' measured per-sample cost within 15 % on
+//! 11 of the 15 rows at the measured iteration counts (misses: gravity, both
+//! sub-paths over by 41 % / 50 % with the ratio within 6 %; 4kbuscomp and
+//! gravity-stereo full-LU over by 44 % / 31 %; split-band-ge-clamp full-LU
+//! under by 23 %). On the predicted Schur/full-LU RATIO, which is what the
+//! rule reads, the worst over-prediction of Schur's relative cost at the
+//! measured iteration counts is 1.13× (farfisa-se15-preamp 1.10 predicted vs
+//! 0.97, steve-1073-preamp 1.48 vs 1.31), and the large misses are all in the
+//! direction of Schur being dearer than modelled (4kbuscomp 2.01 vs 2.73,
+//! gravity-stereo 1.75 vs 2.04). With the nominal iteration pair in place of
+//! the measured counts the worst over-prediction is 1.21× (rexi-mockup 1.22
+//! vs 1.01), under the 1.5× margin: no corpus deck that measured
+//! Schur-faster is moved (their largest nominal ratio is 1.04). Evaluated
+//! over every nodal M > 0 deck of the corpus the rule moves exactly one (the
+//! revised FET limiter, 2.54), and that one is also the direct measurement
+//! above and the adopting repo's drum-loop timings (Schur 1.9–2.8× full-LU
+//! across 0 to +24 dB of drive, both rates).
 //!
 //! **A per-sample performance change to EITHER sub-path invalidates these
 //! constants.** The crossover is what the rule places; a sparser Schur
@@ -90,36 +117,41 @@
 
 /// Schur sub-path: ns per inner sample per N², the dense `S·rhs` matvec and
 /// its N-sized neighbours (one core, 2026-11-04 fit; see module doc).
-pub const SCHUR_NS_PER_N2: f64 = 0.424;
+pub const SCHUR_NS_PER_N2: f64 = 0.442;
 /// Schur sub-path: ns per Newton iteration per M³, the dense M×M elimination.
-pub const SCHUR_NS_PER_M3: f64 = 0.019;
+pub const SCHUR_NS_PER_M3: f64 = 0.018;
 /// Schur sub-path: ns per Newton iteration per M², the Jacobian assembly
 /// `I − J_dev·K` and the M×M products around it.
-pub const SCHUR_NS_PER_M2: f64 = 3.2;
+pub const SCHUR_NS_PER_M2: f64 = 3.1;
 /// Schur sub-path: ns per Newton iteration independent of size (device
 /// evaluation overhead, loop bookkeeping).
-pub const SCHUR_NS_PER_ITERATION: f64 = 105.0;
+pub const SCHUR_NS_PER_ITERATION: f64 = 100.0;
 /// Full-LU sub-path: ns per Newton iteration per packed back-solve flop
-/// (`LuSparsity::solve_flops`). Collinear with the M term on the fitted
-/// corpus; the pair, not either alone, is the measurement.
-pub const FULL_LU_NS_PER_SOLVE_FLOP: f64 = 0.077;
+/// (`LuSparsity::solve_flops`). Collinear with the per-iteration constant on
+/// the fitted corpus; the full-LU triple, not any one term, is the
+/// measurement.
+pub const FULL_LU_NS_PER_SOLVE_FLOP: f64 = 0.171;
 /// Full-LU sub-path: ns per Newton iteration per nonlinear dimension (device
 /// evaluation and the Jacobian stamp into `G_aug`).
-pub const FULL_LU_NS_PER_M: f64 = 37.0;
+pub const FULL_LU_NS_PER_M: f64 = 35.0;
 /// Full-LU sub-path: ns per Newton iteration independent of size (residual
 /// assembly, the step and residual tests, refactor bookkeeping).
-pub const FULL_LU_NS_PER_ITERATION: f64 = 293.0;
+pub const FULL_LU_NS_PER_ITERATION: f64 = 301.0;
 /// Nominal Newton iterations per inner sample on the Schur sub-path at which
-/// the rule is evaluated: the corpus median at 0.3 V (2.1–2.9 measured).
-pub const NOMINAL_ITERATIONS_SCHUR: f64 = 2.25;
+/// the rule is evaluated: the corpus median at 0.3 V, 2.76 with the
+/// current-residual check (2.25 before it; 1.09–3.33 measured, 7.48 on the
+/// forced-Schur 1e12-K deck).
+pub const NOMINAL_ITERATIONS_SCHUR: f64 = 2.7;
 /// Nominal Newton iterations per inner sample on the full-LU sub-path: the
-/// corpus median at 0.3 V (3.0–4.2 measured). The pair's ratio (0.75) is
-/// the corpus relation; per-deck ratios ran 0.64–0.93.
+/// corpus median at 0.3 V (3.08; 1.98–4.11 measured). The pair's ratio (0.9)
+/// is the corpus relation (median 0.89; 0.55–1.18 per deck apart from the
+/// 1e12-K deck's 2.6).
 pub const NOMINAL_ITERATIONS_FULL_LU: f64 = 3.0;
 /// Predicted Schur / full-LU cost ratio above which the rule routes full-LU.
-/// 1.5 leaves the corpus's worst over-prediction (about 1.33×) under it and
-/// the one deck it moves (2.3) above it by 1.55×; any value in [1.2, 2.2]
-/// moves the same one deck.
+/// 1.5 leaves the corpus's worst over-prediction (1.21× at the nominal pair)
+/// under it and the one deck it moves (2.54) above it by 1.69×; any value in
+/// [1.25, 2.5] moves the same one deck (the nearest auto-Schur deck,
+/// rexi-mockup, predicts 1.22).
 pub const COST_RATIO_MAX: f64 = 1.5;
 
 /// The two per-inner-sample cost predictions the rule compares, in ns.
@@ -175,17 +207,17 @@ mod tests {
         // The revised FET limiter: the one corpus deck the rule moves.
         let rev = predict(84, 28, Some(972)).unwrap();
         assert!(rev.prefers_full_lu(), "{rev:?}");
-        assert!((2.2..2.5).contains(&rev.ratio()), "{}", rev.ratio());
-        // The nearest auto-Schur decks stay: rexi-mockup (measured 0.91) and
-        // kt88-pp-stage (measured 0.64).
+        assert!((2.4..2.7).contains(&rev.ratio()), "{}", rev.ratio());
+        // The nearest auto-Schur decks stay: rexi-mockup (measured 1.01) and
+        // kt88-pp-stage (measured 0.69).
         let rexi = predict(28, 18, Some(318)).unwrap();
         assert!(!rexi.prefers_full_lu(), "{rexi:?}");
-        assert!((0.95..1.2).contains(&rexi.ratio()), "{}", rexi.ratio());
+        assert!((1.1..1.35).contains(&rexi.ratio()), "{}", rexi.ratio());
         let kt88 = predict(23, 10, Some(236)).unwrap();
         assert!(!kt88.prefers_full_lu(), "{kt88:?}");
         assert!(kt88.ratio() < 0.7, "{}", kt88.ratio());
         // A deck already on full-LU by conditioning, for scale: the rule
-        // agrees (4kbuscomp, measured 2.69).
+        // agrees (4kbuscomp, measured 2.73).
         let bus = predict(76, 10, Some(622)).unwrap();
         assert!(bus.prefers_full_lu(), "{bus:?}");
     }
@@ -205,11 +237,11 @@ mod tests {
         };
         // (N, M, solve_flops, Schur ns, it_S, full-LU ns, it_F)
         let rows: [(f64, f64, f64, f64, f64, f64, f64); 5] = [
-            (84.0, 28.0, 972.0, 10289.0, 2.40, 5259.0, 3.75), // revised FET limiter 1×
-            (84.0, 28.0, 972.0, 9648.0, 2.21, 4624.0, 3.35),  // same, 2×
-            (72.0, 12.0, 806.0, 3888.0, 2.63, 3509.0, 3.89),  // steve-1073-preamp
-            (28.0, 18.0, 318.0, 3713.0, 2.77, 4101.0, 4.20),  // rexi-mockup
-            (23.0, 10.0, 236.0, 1432.0, 2.39, 2231.0, 3.45),  // kt88-pp-stage
+            (84.0, 28.0, 972.0, 11403.0, 2.76, 5004.0, 3.38), // revised FET limiter 1×
+            (84.0, 28.0, 972.0, 10519.0, 2.47, 4471.0, 3.10), // same, 2×
+            (72.0, 12.0, 806.0, 4349.0, 3.33, 3309.0, 3.30),  // steve-1073-preamp
+            (28.0, 18.0, 318.0, 4072.0, 3.07, 4020.0, 4.11),  // rexi-mockup
+            (23.0, 10.0, 236.0, 1495.0, 2.60, 2173.0, 3.35),  // kt88-pp-stage
         ];
         for (n, m, sf, ms, its, mf, itf) in rows {
             let ps = schur(n, m, its);

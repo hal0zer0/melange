@@ -10,12 +10,13 @@
 //!    a tridiagonal packed factor. This deck sits off the corpus's (M,
 //!    solve_flops) trend, where the fit's two full-LU terms are collinear, so
 //!    its outcome was MEASURED, not only predicted: `bench.sh` 2026-11-04, one
-//!    core, 0.3 V 220 Hz, Schur 6692 ns vs full-LU 1649 ns per sample (ratio
-//!    4.06; 1.98 Newton iterations per sample on both routes, no ceiling,
-//!    sub-step or unsolved sample on either) against the emitter's predicted
-//!    8278 vs 4251 ns (1.95): the fit over-prices full-LU's M term off-trend
-//!    (3·37·30 ≈ 3330 of the 4251 ns; Schur itself is over-predicted 1.24×,
-//!    full-LU 2.58×), so it under-predicts the RATIO. That direction cannot
+//!    core, 0.3 V 220 Hz, after the Schur current-residual check and the
+//!    re-fit, Schur 6624 ns vs full-LU 1601 ns per sample (ratio 4.14; 2.00
+//!    and 1.98 Newton iterations per sample, no ceiling, sub-step or unsolved
+//!    sample on either) against the emitter's predicted 9540 vs 4146 ns
+//!    (2.30): the fit over-prices full-LU's M term off-trend (3·35·30 = 3150
+//!    of the 4146 ns; Schur itself is over-predicted 1.44×, full-LU 2.59×),
+//!    so it under-predicts the RATIO. That direction cannot
 //!    cause a false Schur→full-LU flip, only a missed one (a high-M deck left
 //!    on Schur when full-LU is cheaper: a speed loss, not a model change); if
 //!    that ever matters, a ladder family in the fit separates the M and
@@ -85,7 +86,7 @@ fn thirty_stage_ladder_routes_full_lu_on_cost() {
     // The prediction, re-evaluated here with 4·N as an ESTIMATE of the
     // tridiagonal factor's back-solve flops (the emitter read 182 from the
     // IR): well above the threshold, not a knife-edge, and under the measured
-    // ratio of 4.06 (module doc).
+    // ratio of 4.14 (module doc).
     let p = predict(built.generated.n, 30, Some(4 * built.generated.n)).unwrap();
     assert!(p.ratio() > 1.25 * COST_RATIO_MAX, "{p:?}");
 }
@@ -158,11 +159,12 @@ fn cost_rule_is_inert_under_the_linearized_bypass() {
 /// cargo test -p melange-solver --test route_cost_rule_tests -- --include-ignored --nocapture
 /// ```
 ///
-/// RESULT (2026-11-04, every deck at its default flags): one deck, the FET
-/// limiter whose working copy is the Q6 revision (N = 84, M = 28, ratio 2.33);
-/// the committed form of that deck routes full-LU on `k-diag-negative` before
-/// the rule is consulted. Next-highest auto-Schur ratios: rexi-mockup 1.07,
-/// passive-eq1a 0.99.
+/// RESULT (2026-11-04, every deck at its default flags, re-run after the
+/// re-fit that followed the Schur current-residual check): 88 decks built,
+/// one moved, the FET limiter now committed as the Q6 revision (N = 84,
+/// M = 28, ratio 2.54; 2.33 under the first fit); its earlier form routed
+/// full-LU on `k-diag-negative` before the rule was consulted. Next-highest
+/// auto-Schur ratios: rexi-mockup 1.22, passive-eq1a 1.00.
 #[test]
 #[ignore = "sweeps the melange-circuits sibling checkout; absent in CI"]
 fn corpus_sweep_moves_only_the_revised_fet_limiter() {
