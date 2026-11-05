@@ -35,7 +35,7 @@ jobs:
           mkdir -p dist "stage/$pkg"
           cp target/release/melange "stage/$pkg/melange"
           cp LICENSE "stage/$pkg/LICENSE"
-          cp README.md "stage/$pkg/README.md"
+          cp tools/release/README-tarball.md "stage/$pkg/README.md"
           tar -czf "dist/$pkg.tar.gz" -C stage "$pkg"
           cp Cargo.lock dist/Cargo.lock
           ( cd dist && sha256sum "$pkg.tar.gz" Cargo.lock > SHA256SUMS )

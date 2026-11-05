@@ -24,22 +24,27 @@ somewhere to go, then filters them off before decimating back down.
 
 Do not guess, and do not take a number from this page. melange has no aliasing
 meter of its own yet: render a test tone at 1× and at the factor you are
-considering, and compare the two in a spectrum analyser.
+considering, and compare the two in a spectrum analyser. Audacity's Analyze →
+Plot Spectrum is free and enough; so is `sox os1.wav -n spectrogram` from a
+terminal.
 
 ```bash
-melange simulate mycircuit.cir --input-audio tone.wav -o os1.wav
-melange simulate mycircuit.cir --input-audio tone.wav -o os2.wav --oversampling 2
-melange simulate mycircuit.cir --input-audio tone.wav -o os4.wav --oversampling 4
+melange simulate mycircuit.cir --freq 4186 --amplitude 1 -o os1.wav
+melange simulate mycircuit.cir --freq 4186 --amplitude 1 -o os2.wav --oversampling 2
+melange simulate mycircuit.cir --freq 4186 --amplitude 1 -o os4.wav --oversampling 4
 ```
 
-`tone.wav` is a single sine at the plugin's sample rate (`simulate` builds the
-circuit at the WAV's own rate, so the file's rate is the rate you measure), at
-a pitch that does not divide that rate. A musical pitch such as 4186 Hz works; 1 kHz or 4 kHz at
-48 kHz does not, because every alias of such a tone lands exactly on one of its
-own harmonics and cannot be told apart. The file's level is the drive in volts
-(full scale = 1 V; a 32-bit float WAV can carry more). In the spectrum, the
-harmonics are the multiples of the tone and should not change with the factor.
-Everything else is aliasing, and it falls as the factor goes up.
+The tone is a single sine at the plugin's sample rate (`-s`, default 48 kHz),
+at a pitch that does not divide that rate. A musical pitch such as 4186 Hz
+works; the default 1 kHz, or 4 kHz, at 48 kHz does not, because every alias of
+such a tone lands exactly on one of its own harmonics and cannot be told apart.
+`--amplitude` is the drive in volts. A tone file of your own goes in with
+`--input-audio tone.wav` instead: `simulate` then builds the circuit at the
+WAV's own rate, so the file's rate is the rate you measure, and the file's
+level is the drive in volts (full scale = 1 V; a 32-bit float WAV can carry
+more). In the spectrum, the harmonics are the multiples of the tone and should
+not change with the factor. Everything else is aliasing, and it falls as the
+factor goes up.
 
 `analyze`'s `nyquist_dbc` column is a different measurement: the output's
 component at exactly half the sample rate, which is how a numerical limit cycle

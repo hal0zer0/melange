@@ -24,6 +24,8 @@ Melange compiles an analog circuit into the real-time DSP engine inside an audio
 
 You need Rust 1.85 or newer and a terminal. Everything else is optional until you need it: ngspice for `validate`, KiCad 8+ for the schematic path, network access the first time you build a `--format plugin` project ([Requirements](#requirements)).
 
+On Linux x86_64 you can skip the build: every release on the [Releases page](https://github.com/hal0zer0/melange/releases) attaches a prebuilt `melange` binary, and `melange --version` prints the tag's commit. `simulate` and `analyze` still need `rustc` on your PATH, because they compile the circuit they run.
+
 ```bash
 # Build the CLI. Use --release: a debug build of the solver is slow, and this
 # repo's debug `target/` runs to well over a gigabyte.
@@ -43,7 +45,7 @@ the `cargo install` (or put `target/release` on your `PATH`).
 
 Then read, in this order:
 
-- **[Getting Started](docs/GETTING_STARTED.md)** — zero to a loadable plugin, following one circuit the whole way.
+- **[Getting Started](docs/GETTING_STARTED.md)** — zero to a loadable plugin: three quick starts (the built-in demo, a library circuit, a netlist of your own) and the tables of `compile` flags and everyday commands.
 - **[Writing SPICE Netlists for Melange](docs/NETLIST_GUIDE.md)** — the netlist dialect: component syntax, `.model` cards, `.pot`/`.switch` controls, unit suffixes, and the seven mistakes that bite first. This is the guide for Way In #1 below, and for the netlist any other path produces.
 - **[SPICE Grammar Reference](docs/spice-grammar.md)** — the complete syntax and per-device `.model` parameter tables, for when you need the exact default of something.
 - **[Using the Generated DSP Directly](docs/CODE_API.md)** — the `--format code` API: `CircuitState::default()`, `set_sample_rate()`, `process_sample()`, the constants, and what the output volts mean. Read this if you are wiring the generated file into your own code rather than taking the plugin project.
@@ -51,6 +53,8 @@ Then read, in this order:
 > **Ear safety.** A plugin built from a generated project has a default-on soft limiter. Start with your monitors at zero and come up slowly. You can turn the limiter off with `--no-ear-protection` when you need to measure something, and the flag is deliberately that long and that annoying to type. Bypass it before judging the sound: it is a safety in the plugin wrapper, not part of the circuit.
 
 ## How it works
+
+You do not need any of this to use melange: the four documents above are the instructions. This section and the next are the argument for why the output is right; the practical sections resume at [Three Ways In](#three-ways-in).
 
 ```
 SPICE Netlist ─┐
@@ -63,8 +67,6 @@ KiCad XML ─────┘
 - The output is one self-contained Rust file with no dependencies; `--format plugin` wraps it in a nih-plug project.
 
 The routing thresholds are in [Known Limitations](docs/limitations.md#solver-routing); the reasoning is in [Design Decisions](docs/DESIGN_DECISIONS.md).
-
-Everything below this line is the argument for the tool rather than instructions for using it.
 
 ## The Problem
 
@@ -92,21 +94,21 @@ into DSP. They differ only in how you get the netlist.
 Write one by hand, or take one from a circuit repository and stop pretending you were going to write it by hand. This is the path with no external tooling: a text file and melange. A complete worked example ships in [`examples/`](examples/) — a passive tube EQ — one of the hardest topologies melange solves: coupled transformers with global feedback wrapped around four nonlinear tubes (see [Spotlight](#spotlight-passive-tube-eq)):
 
 ```bash
-# Compile the bundled passive tube EQ example (4 tubes, 3 transformers, global NFB)
-melange compile examples/passive-eq1a.cir --format plugin -o passive-eq
-cd passive-eq && cargo build --release   # builds the DSP library (target/release/)
+# Compile the bundled passive tube EQ example (4 tubes, 3 transformers, global NFB).
+# Generate the project OUTSIDE this repo (any directory not inside a Cargo workspace).
+melange compile examples/passive-eq1a.cir --format plugin -o ~/passive-eq
+cd ~/passive-eq && bash build.sh         # CLAP + VST3 land in target/bundled/
 
 # ...or point it at your own netlist
-melange compile my-circuit.cir --format plugin -o my-plugin
+melange compile my-circuit.cir --format plugin -o ~/my-plugin
 ```
 
-`cargo build --release` produces the raw plugin library. `bash build.sh` in the
-generated project turns it into a DAW-loadable VST3/CLAP in `target/bundled/`;
-it bundles through the project's own `xtask/` member crate, so no separate
-nih-plug checkout is needed. Bundling must run from **outside** any enclosing
-Cargo workspace — the bundler walks up to the outermost `Cargo.toml` — so a
-project generated inside this repo (as `-o passive-eq` does) will `cargo build`
-in place but will not bundle until you move it out.
+`bash build.sh` bundles the DAW-loadable VST3/CLAP through the project's own
+`xtask/` member crate, so no separate nih-plug checkout is needed. The bundler
+walks up to the outermost `Cargo.toml`, which is why the project goes outside
+this repo: generated inside it, the project still builds its raw library with
+`cargo build --release`, but `build.sh` cannot find the package until you move
+the directory out.
 
 The netlist dialect is documented in **[Writing SPICE Netlists for Melange](docs/NETLIST_GUIDE.md)**.
 
@@ -115,8 +117,8 @@ The netlist dialect is documented in **[Writing SPICE Netlists for Melange](docs
 The passive tube EQ ships **built in**, so melange can compile and demo itself with no downloads and no external repo — just name it:
 
 ```bash
-melange compile passive-eq1a --format plugin -o my-eq   # built-in demo circuit
-cd my-eq && cargo build --release
+melange compile passive-eq1a --format plugin -o ~/my-eq   # built-in demo circuit
+cd ~/my-eq && bash build.sh
 ```
 
 The circuit library lives in its own repository, and you do not have to clone
@@ -174,8 +176,9 @@ Not ready to commit to a whole plugin? Reasonable. Shove some audio through the 
 # Quick test tone through the built-in demo circuit (no files needed)
 melange simulate passive-eq1a --amplitude 0.1 -o drive.wav
 
-# Process a WAV file through your own circuit
-melange simulate my-circuit.cir --input-audio guitar.wav -o output.wav
+# Process a WAV file of your own through your own circuit (no test audio ships
+# with melange; any 16/24-bit PCM or 32-bit float WAV works, first channel used)
+melange simulate my-circuit.cir --input-audio my-recording.wav -o output.wav
 
 # Frequency response sweep. Control names are per-circuit — "Drive"/"Mode" here
 # are placeholders; run `melange nodes <circuit>` to list a circuit's actual pots/switches.
@@ -366,17 +369,19 @@ melange compile mydist.cir --format plugin --oversampling 4 -o mydist
 
 Measure before choosing. melange has no aliasing meter of its own yet, so
 render a test tone at 1× and at your candidate factor and compare the two in
-a spectrum analyser:
+a spectrum analyser (Audacity's Analyze → Plot Spectrum is free and enough;
+so is `sox os1.wav -n spectrogram`):
 
 ```bash
-melange simulate mydist.cir --input-audio tone.wav -o os1.wav
-melange simulate mydist.cir --input-audio tone.wav -o os4.wav --oversampling 4
+melange simulate mydist.cir --freq 4186 --amplitude 1 -o os1.wav
+melange simulate mydist.cir --freq 4186 --amplitude 1 -o os4.wav --oversampling 4
 ```
 
-`tone.wav` is one sine at a pitch that does not divide the sample rate (a
-musical pitch such as 4186 Hz, not 1 kHz, whose aliases land exactly on its
-own harmonics and hide). Its level is the drive in volts (full scale = 1 V; a
-32-bit float WAV can go above). Aliases are the components that are not
+The tone is one sine at a pitch that does not divide the sample rate (a
+musical pitch such as 4186 Hz, not the default 1 kHz, whose aliases land
+exactly on its own harmonics and hide); `--amplitude` is the drive in volts.
+(A tone of your own goes in with `--input-audio` instead; full scale = 1 V,
+and a 32-bit float WAV can go above.) Aliases are the components that are not
 multiples of the tone. They drop when the factor goes up, and the harmonics do
 not. (`analyze`'s `nyquist_dbc` column is not this: it detects a component at
 exactly half the sample rate, the signature of a numerical limit cycle.)

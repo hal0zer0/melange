@@ -105,7 +105,10 @@ Cout out 0 100n
 .end
 ```
 
-Save it as `clipper.cir`, then:
+Melange drives the node named `in` and takes the output at the node named
+`out` unless you say otherwise: `-i`/`--input-node` and `-n`/`--output-node`
+pick other nodes, and `melange nodes` lists the names a circuit has. Save it as
+`clipper.cir`, then:
 
 ```bash
 # Inspect the circuit
@@ -117,7 +120,9 @@ melange simulate clipper.cir --amplitude 3 -o test.wav
 # Compile to a plugin
 melange compile clipper.cir --format plugin -o my-clipper
 cd my-clipper
-bash build.sh   # bundles CLAP+VST3; see generated README.md for nih-plug setup
+bash build.sh   # bundles CLAP+VST3 into target/bundled/ (no separate nih-plug
+                # clone); the project's README.md says what to change before
+                # you distribute it (plugin name, vendor, VST3 class id)
 ```
 
 The drive level decides whether you hear a clipper at all. The diodes sit at

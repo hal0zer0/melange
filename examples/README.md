@@ -12,12 +12,13 @@ S-217-D output transformer, with global negative feedback from the output
 transformer's tertiary winding back to the 12AX7 cathodes.
 
 It is the example precisely because it is *hard*: **4 tubes, 3 transformers,
-7 pots, 3 switches, and a global NFB loop** (N=52, M=8). Multiple coupled
-transformers force the nodal Schur solver and backward-Euler; the feedback loop
-makes it a genuine stability test rather than a toy RC filter. Coupled
-transformers with global feedback wrapped around four nonlinear tubes is one of
-the hardest configurations melange solves — a real workout for the solver, not a
-claim that nothing else is harder.
+7 pots, 3 switches, and a global NFB loop** (N=52, M=8). Three coupled
+transformer groups route it to the nodal solver (Schur sub-path), with
+trapezoidal integration, as `melange compile examples/passive-eq1a.cir -v`
+reports; the feedback loop makes it a genuine stability test rather than a toy
+RC filter. Coupled transformers with global feedback wrapped around four
+nonlinear tubes is one of the hardest configurations melange solves — a real
+workout for the solver, not a claim that nothing else is harder.
 
 ```bash
 # Frequency response at the default (flat) knob settings
@@ -28,14 +29,16 @@ melange analyze examples/passive-eq1a.cir
 # outside it is refused.
 melange analyze examples/passive-eq1a.cir --pot "LF Boost=10k" --switch "LF Freq=1"
 
-# Run audio through it
-melange simulate examples/passive-eq1a.cir --input-audio guitar.wav -o out.wav
+# Run a WAV of your own through it (no test audio ships with melange; any
+# 16/24-bit PCM or 32-bit float WAV works, first channel used). Without
+# --input-audio, simulate renders its own 1 kHz test tone.
+melange simulate examples/passive-eq1a.cir --input-audio my-recording.wav -o out.wav
 
 # Compile to a plugin project. Generate it OUTSIDE this repo if you intend to
 # bundle a CLAP/VST3 — the bundler walks up to the outermost Cargo.toml, so a
 # project nested in the melange checkout builds but will not bundle.
 melange compile examples/passive-eq1a.cir --format plugin -o ~/passive-eq
-cd ~/passive-eq && cargo build --release
+cd ~/passive-eq && bash build.sh         # CLAP + VST3 land in target/bundled/
 ```
 
 **Provenance, honestly.** This proves melange *solves* a genuinely hard
