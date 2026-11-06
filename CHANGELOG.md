@@ -9,6 +9,135 @@ codegen output, CLI flags, and netlist semantics may all change.
 
 ## [Unreleased]
 
+## [0.1.23] - 2026-11-05
+
+**If you use melange, this changes for you**
+
+- **Install / upgrade:** the Linux x86_64 binary is attached to this release
+  (`melange --version` starts `melange 0.1.23`); anywhere else,
+  `cargo install --path tools/melange-cli` from the tag. `simulate` and
+  `analyze` need `rustc` on PATH, `validate` needs `ngspice`.
+- **Renders can change** on nodal Schur builds (every iteration now takes the
+  current-residual test that DK and full-LU already took; one golden render,
+  a silence that sat 83 dB off its converged answer, changes
+  audibly-classified), on nodal full-LU builds (a stale chord refactors at
+  once) and on large nodal circuits (route-cost refit; no corpus deck changes
+  route). The numbered list below says how and by how much.
+- **Speed:** nodal Schur builds pay for the stronger test: on this cycle's
+  bench the fourteen Schur corpus decks run up to 43 % slower per sample
+  (three within noise, most +10 to +35 %); full-LU and DK builds are within a
+  few percent either way.
+- **New refusal:** `compile --format plugin -o <name>.rs`, or any existing
+  file, is refused with the project-directory form; any other name is the
+  project directory exactly as given (`-o v0.1` no longer becomes `v0/`).
+- **New messages:** a `.model` value that is not a number names the card, the
+  key and the value; an LTspice library annotation key (`mfg`, `type`,
+  `Iave`, …) is named as one, with "delete it"; an undefined subcircuit says
+  how an op-amp is written; the op-amp zero-load swing notice prints once per
+  card; warnings that may mean the netlist is wrong are printed again after
+  the route line; a strict `validate` FAIL says whether the relaxed gate
+  would pass.
+- **New built-in demo circuit:** `compressor76`, the FET feedback limiter in
+  the demo video, ships inside the binary next to `passive-eq1a`
+  (`melange builtins`, `melange compile compressor76 --format plugin …`); it
+  is the circuits repository's reference deck, byte-identical.
+- **Fixed:** codegen no longer panics on a linear circuit routed to the nodal
+  full-LU sub-path with a sparse pattern.
+
+**For the record** — golden renders and solver counters against v0.1.22:
+
+**Against v0.1.22, over the golden renders:** of the 196 renders both
+versions record, 118 are byte-identical, 77 are NEGLIGIBLE and one changes
+audibly-classified: `wurli-tremolo`'s silence (max sample delta 5.1e-4 V,
+correlation 0.99968), where the v0.1.22 render sat 83 dB off its converged
+answer and the new one matches it. No render is held, none engages the output
+clamp, and no deck changes route (17 nodal full-LU, 14 nodal Schur, 14 DK in
+both). The NEGLIGIBLE renders are on 21 decks, 13 Schur and 8 full-LU.
+Over the 196 renders: Newton iterations 61,810,888 → 64,675,505 (+4.6 %),
+refactorizations 13,259,947 → 14,011,438 (+5.7 %), line-search failures
+1,013 → 1,010; iteration ceilings, sub-steps, holds and unconverged commits
+stay at 0 and backward-Euler fallbacks are unchanged; no failure-path counter
+rose on any render. Generated source differs on 25 decks, all nodal (13
+Schur, 12 full-LU); no DK deck's source changes.
+
+**Solver counters against v0.1.22:** 53 renders on 18 decks move an effort counter
+past the golden compare's bound (max(10 %, 20 counts)); no failure-path counter rises
+on any render, and every render is IDENTICAL or NEGLIGIBLE on audio except
+`wurli-tremolo`/silence (CHANGED; see the Schur certification entry). Two rules account
+for all of them, and each render parts from v0.1.22 on exactly one of the two commits:
+the renders listed under one rule are bit-identical (every counter, every output
+sample) across the other rule's commit, and the route-cost refit moves no deck's
+sub-path. `gravity`/potsweep `diag_ls_merit_up_count` 22 -> 159 is traced under
+*Full-LU stale-chord exact step* below (sample 26307).
+
+*Nodal Schur certification (iterations up on 37 renders, 12 decks, +10 % to +100 %).*
+Every render's first divergence is the first sample on which the old build certified an
+iterate that passes the device-voltage step test but fails the DK current-residual test
+`|f| <= RELTOL*max(|i_nl|, |i_dev|, ABSTOL_SCALE_FLOOR) + ABSTOL`; the new build takes
+exactly one more Newton iteration on that sample and certifies with the residual one to
+ten orders below its tolerance, and the two builds' streams are identical up to that
+sample. On 23 renders it is sample 0 (iteration 0 on 22 of them, the warm start's first iterate,
+whose device-voltage step is far inside RELTOL*|v_d| while a junction's current residual
+is not; `tungsten-glow`/potsweep at iteration 1): `wurli-tremolo` silence/sine1k/step/sweep (residual 1.0e3x its tolerance on
+Q4's base-collector dimension, f = -9.8 uA against a 3 mV step window at v_d = -3.13 V;
+iterations double because every later sample does the same), `tungsten-glow`
+silence/sine1k/step/sweep (5.2x on T3's plate dimension) and its potsweep (sample 0,
+iteration 1, 9.6x), `qapla-1a` silence/sine1k/step/sweep/potsweep (2.1e2x / 1.9e2x on
+T2a's plate dimension, where i_nl is 0 (1e-25 on the pot sweep) and i_dev is 1.6e-56 A: a cut-off triode's
+residual is pure ABSTOL), `noyce-tape-head` silence/sine1k/step/sweep (3.5e2x on T1's
+plate dimension at 168.9 V), `gold-press-mastering` sine1k/step/sweep (sample 0, inner
+sample 1 of 4, 56x on D_pos with i_nl = -1.8e-13 A; the sample goes 6 -> 8 iterations
+because inner sample 3 repeats it at 33x) and `five-watt-freddie` silence/step (24x on
+the pentode's screen-voltage dimension, both currents 0). The rest part on the first sample whose
+Newton path has a second iterate: `vurli` sine1k and potsweep at sample 1 (iteration 1,
+6.4x on T1's plate dimension), its sweep at sample 1 (iteration 0, 7.9e2x) and its step at
+sample 4800 (the step edge; iteration 1, 2.3e2x); `velvet-elvis` sine1k and sweep at
+sample 1 (iteration 1, 6.3e2x and 2.6x on the detector diode D1) and potsweep at sample 4
+(iteration 1, 42x on T1's plate dimension); `pipe-shouter` sweep at sample 1, sine1k
+at sample 3 and potsweep at sample 7 (iteration 1, 19x / 1.09x / 5.3x on D1);
+`zener-feedback-limiter` sine1k at sample 1 (iteration 9 of a 10-iteration knee solve,
+1.08x on D_z1) and sweep at sample 2 (iteration 1, 6.8x); `opamp-pin-control`/step and
+`opamp-pin-audio`/step at sample 4800, the step edge (iteration 4 at 12x on D_1 after
+three pnjlim-limited iterations, and iteration 3 at 3.6e3x on D_2; 14 -> 15 and 13 -> 14
+iterations). The smallest refused certification is 1.08x its tolerance
+(`pipe-shouter`/sine1k, `zener-feedback-limiter`/sine1k), the largest 3.6e3x
+(`opamp-pin-audio`/step). On no traced sample does the new build need a limited
+iteration, a ceiling, a sub-step or a backward-Euler fallback that the old build did not.
+
+*Full-LU stale-chord exact step (refactorizations up on 16 renders on 6 decks, iterations
+down on 4 of them).* Every render's first divergence is the first sample on which a chord
+iteration after the sample's first passes the node-step test and fails the device
+current-change check, where the old build chord-stepped on and the new build factors
+fresh for the rest of the sample; the streams are identical up to that sample and
+bit-identical across the Schur commit. In eight renders the old build's next chord
+iteration had certified anyway, so the new build certifies on the same iteration from a
+fresh factor (same iteration count, one refactorization more, the certified residual 3- to
+6000-fold smaller): `gravity` step at sample 4800 (inner sample 2, iteration 3, 3.3x on Dhw2,
+kcl_inf 1.0e-11 -> 2.5e-14) and sweep at sample 2 (inner sample 2, iteration 3, 1.4x on
+Dhw2), `moonladder` sweep at sample 56060 (iteration 1, 1.00x on Q2's base-emitter
+dimension, 1.1e-10 -> 1.9e-14), `basic-bitch` sweep at sample 1073 (iteration 1, 1.05x on a
+triode grid dimension), `sad-bastard` sine1k and potsweep at sample 1 (iterations 1 and 3,
+1.2x and 1.5x on D_ge1) and sweep at sample 16 (iteration 1, 1.1x on D_ge1), and
+`noyce-transformer-triode` sweep at sample 158438 (iteration 1, 1.02x on T1's grid
+dimension). In four the old build's next chord iteration was itself an exit step
+followed by an exact iteration, which the rule collapses into one exact iteration (one
+iteration fewer, refactorizations equal): `gravity` potsweep at sample 0 (inner sample 1,
+iteration 1, 6.6x on Dthrc; 5 -> 4), `moonladder` sine1k at sample 1 (iteration 1, 13x on
+Q1's base-emitter dimension; 4 -> 3), `basic-bitch` sine1k at sample 1 (iteration 1, 7.9x
+on a triode grid dimension; 4 -> 3) and `warpony` sine1k at sample 1 (iteration 8, 2.0x on
+T7's plate dimension; 11 -> 10). In the remaining four the sample continued in both builds
+and every later iteration of the new build is exact: `gravity` sine1k at sample 3 (inner
+sample 1, iteration 3, 4.8x on Dhw2; 11 iterations either way, 4 -> 6 refactorizations,
+first output bit at sample 6), `basic-bitch` potsweep at sample 1 (iteration 4, 8.2x; 7
+iterations, 2 -> 3), `warpony` potsweep at sample 66 (iteration 6, 18x on T6's plate
+dimension; 9 iterations, 2 -> 4, first output bit at sample 87) and `moonladder` potsweep
+at sample 0 (iteration 3, 247x on Q6's base-emitter dimension as the pots jump from the
+DC position; 9 -> 7 iterations, 5 -> 6). Line-search failures on `basic-bitch`'s sweep
+(459 -> 487) and `warpony`'s potsweep (15 -> 12) and merit-up acceptances
+(`basic-bitch`/potsweep 23 -> 24, `warpony` 2007 -> 2006 / 3156 -> 3154) stay inside the
+bound and move with the paths re-posed from fresh factors; no sample on any of the 16
+renders reaches a ceiling, sub-step, backward-Euler fallback or hold in either version.
+
 **What can change rendered output** (each has its entry below):
 
 1. **Nodal Schur builds.** Every Schur Newton iteration now also has to pass
@@ -25,8 +154,57 @@ codegen output, CLI flags, and netlist semantics may all change.
 3. **Large nodal circuits.** The route-cost coefficients are re-fitted to the
    certified Schur; no corpus deck changes route.
 
+### Added
+
+- **`compressor76` is a built-in demo circuit.** The FET feedback limiter
+  from the demo video (1 JFET, 11 BJTs, 4 diodes, 2 transformers; N = 84,
+  M = 28; nodal full-LU by the cost trigger) is embedded in the binary from
+  `examples/compressor76.cir`, which is byte-identical to
+  `unstable/dynamics/compressor76.cir` in the circuits repository. `melange
+  builtins` lists it first; `melange compile compressor76`, `simulate`,
+  `analyze` and `nodes` take the bare name. `passive-eq1a` stays built in.
+  The README, Getting Started, the examples README and the release tarball's
+  README make it the demo circuit; the plugin in the video is the circuits
+  repository's two-deck build of the same netlist
+  (`tools/compressor76-split/regen.sh` there), and the docs say so.
+- **`validate` says when a strict FAIL would pass the relaxed gate.** Under a
+  FAIL the comparison is re-graded against the relaxed profile (same settle
+  window and THD setting) and the CLI prints "Shape matches (relaxed gate:
+  PASS). Strict is the regression gate for a deck that is already validated;
+  …" under the report (`ComparisonReport::relaxed_would_pass` in the JSON).
+  The status line, the gates and the exit code are unchanged; the README and
+  the netlist guide say what strict is for.
+- **One op-amp swing notice per card; netlist warnings repeated under the
+  summary.** The zero-load swing-limit notice is about the card, so it prints
+  once per card naming every op-amp on it (`Op-amp U1, U2: …`), as the GBW
+  notice already did. Warnings that may mean the netlist is wrong (a suffix
+  `M` read as milli, an infix `M` as mega, a Farad `F`, a title line that
+  looks like a directive, no ground, lines after `.end`, unknown or
+  subcircuit-level directives, an underspecified card compiled as the default
+  device, ignored or annotation keys) are kept by the CLI logger and
+  `compile`, `simulate` and `analyze` print them again after the route line
+  under "Warnings that may mean the netlist is wrong". Nothing is demoted and
+  no render changes.
+- **First-deck messages name the key, the flag, the line and the fix.** A
+  `.model` value that is not a number names the card, the key and the value;
+  an LTspice library annotation (`mfg`, `type`, `Iave`, `Ipk`, `Vpk`, `Vceo`,
+  `Icrating`, `Vds`, `Ron`, `Qg`) is named as one on parse and on compile,
+  with "delete it" instead of the accepted-key list; an undefined subcircuit
+  says how an op-amp is written (a `U` element with an `OA` card), with no
+  name heuristic; input/output node not found names `-i` / `-n`; the `.wiper`
+  leg-mismatch error carries its line; the `--switch` echo prints the 0-based
+  range and the baked values as a netlist spells them; `cache --help` names
+  the compiled-binary cache. Every message is pinned by a CLI integration
+  test.
+
 ### Changed
 
+- **`compile --format plugin -o` takes the name as given.** `-o <name>.rs`,
+  or any existing file, is refused with the project-directory form (the
+  plugin output is a Cargo project directory, not a source file); any other
+  name is the project directory exactly as given, so `-o v0.1` no longer
+  becomes `v0/`. An existing plugin project is still refused with the
+  `--format code -o <dir>/src/circuit.rs` form.
 - **Full-LU per-iteration cost, no output change.** The device current-change
   check now keeps the device evaluation it makes, so the iteration after an
   uncertified check starts from it instead of evaluating the devices again at
@@ -34,10 +212,13 @@ codegen output, CLI flags, and netlist semantics may all change.
   one called function instead of being inlined at both call sites, which stops
   the per-sample code of a large circuit overflowing the instruction cache (a
   smaller one stays inlined, where the call costs more than it saves). Both are
-  bit-for-bit: the golden corpus is 196/196 identical including every solver
-  counter, pinned in `full_lu_lossless_kernel_tests.rs`. A large FET limiter
-  at 2× runs 3.3 % faster per sample on x86-64-v3 and 1.2 % on plain x86-64;
-  decks under 500 back-solve flops are unchanged.
+  bit-for-bit: against the commit before, the golden corpus is 196/196
+  identical including every solver counter, pinned in
+  `full_lu_lossless_kernel_tests.rs`. On this cycle's bench the FET feedback
+  limiter at 2× (the largest full-LU deck in the corpus) is within noise of
+  the commit before: −0.7 % and −3.0 % per sample on x86-64-v3 over two
+  rounds, +0.4 % on plain x86-64; decks under 500 back-solve flops are
+  unchanged.
 - **Nodal Schur certification.** The Schur Newton certifies an iterate only
   when the device-voltage step test AND the dense DK current-residual test
   (`|f_i| ≤ RELTOL·max(|i_nl|, |i_dev|, ABSTOL_SCALE_FLOOR) + ABSTOL`, every
@@ -48,18 +229,20 @@ codegen output, CLI flags, and netlist semantics may all change.
   compressor witness forced to Schur goes from −66 dB (one sample 13.2 V
   against 4.35 V) to −153 dB at +24 dB drive, and all 14 Schur golden decks
   move toward their converged references by up to 200 dB with none worse
-  beyond 0.3 dB. Cost: Schur decks run 6–34 % slower per sample (`wurli-tremolo`
-  247 → 330 ns); corpus Schur iterations +16 %; the hard-drive sweep gains two
+  beyond 0.3 dB. Cost, on this cycle's bench against v0.1.22 (one core, same host): the
+  fourteen Schur corpus decks move −4 to +43 % per sample, three within noise
+  (the two op-amp-pin decks and `noyce-zener-junction`), the rest +6 to +43 %
+  (`wurli-tremolo` 264 → 338 ns, `passive-eq1a` 980 → 1330–1430 ns over five rounds); corpus
+  Schur iterations +16 %; the hard-drive sweep gains two
   ceiling hits on `opamp-pin-control` at 10 V, both refused false
   certifications the old test had accepted at |f|/tol of 3e7 and 8e6.
 - **Full-LU stale-chord exact step.** When the device current-change check
   fails on a chord iteration after the sample's first, the next iteration
   factors fresh and counts as the exit step (at iteration 0 the pre-step
   currents are the previous sample's, so a failure there measures the input's
-  movement, not a stale chord; applying the rule there cost one bus
-  compressor +51 % for nothing). Witness accuracy −134/−150/−140 →
-  −153/−151/−145 dB; two triode preamps −5 to −8 % per sample; golden full-LU
-  renders 0 changed, iterations −3.1 %, refactorizations +5.7 %; 21 effort
+  movement, not a stale chord; applying the rule there made one bus
+  compressor markedly slower with no accuracy gain). Witness accuracy
+  −134/−150/−140 → −153/−151/−145 dB; golden full-LU renders 0 changed, iterations −3.1 %, refactorizations +5.7 %; 21 effort
   counters on 16 renders move past the compare bound, all refactorizations up
   or iterations down except `gravity`/potsweep `diag_ls_merit_up_count`
   22 → 159, traced to this rule (NEGLIGIBLE audio, no failure-path counter
@@ -97,6 +280,21 @@ codegen output, CLI flags, and netlist semantics may all change.
   `has_chord_state`, shared with the state emitter). Such a build compiles
   again and renders byte-identically to v0.1.21; no golden render or
   generated source changes (196/196 identical, strict).
+
+### Documentation
+
+- The README's device table names the JFET `LEVEL=3` symmetric subthreshold
+  law (it listed only Shichman-Hodges and `LEVEL=2`).
+- The README's *Three Ways In* and the examples README generate the plugin
+  project outside the repo and bundle with `build.sh`; *Start here* names the
+  prebuilt Linux binary; Getting Started says what it is (three quick starts),
+  names the in/out defaults and `-i`/`-n`, and documents where `sources.toml`
+  lives; the netlist guide and the grammar reference cover LTspice annotation
+  keys; the simulate examples stop naming a `guitar.wav` that does not ship;
+  the oversampling examples use `simulate --freq 4186` and name a free
+  spectrum analyser. The release tarball carries its own README
+  (`tools/release/README-tarball.md`) instead of the repo README, whose links
+  into `examples/` and `docs/` were dead inside the archive.
 
 ## [0.1.22] - 2026-11-04
 
@@ -4351,7 +4549,8 @@ measured real hardware. Everything else is unproven against hardware. See
   KiCad file; no effect on netlist compilation, generated code, or shipped plugins. The
   fix (`quick-xml >= 0.41`) is tracked for 0.1.1.
 
-[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.22...HEAD
+[Unreleased]: https://github.com/hal0zer0/melange/compare/v0.1.23...HEAD
+[0.1.23]: https://github.com/hal0zer0/melange/compare/v0.1.22...v0.1.23
 [0.1.22]: https://github.com/hal0zer0/melange/compare/v0.1.21...v0.1.22
 [0.1.21]: https://github.com/hal0zer0/melange/compare/v0.1.20...v0.1.21
 [0.1.20]: https://github.com/hal0zer0/melange/compare/v0.1.19...v0.1.20

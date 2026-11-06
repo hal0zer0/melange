@@ -3,14 +3,15 @@
 Quick-reference for AI agents. For math details see other aidocs. For architecture see CLAUDE.md.
 Release history lives in `CHANGELOG.md`; this file states what is true now and what is open.
 
-> **Latest release: v0.1.22 (2026-11-04).**
+> **Latest release: v0.1.23 (2026-11-05).**
 >
-> Full-LU Newton line search by natural monotonicity; breakdown-side `pnjlim` for diodes with a
-> finite `BV`; a nodal sub-path cost trigger (Schur → full-LU past the predicted 1.5× cost);
-> the runtime DC operating-point solve on the nodal route; `--switch` baked into `compile`,
-> `dc-op`, `simulate` and `analyze`; `--tolerance` removed (thresholds are named constants).
-> Against v0.1.21: 125 golden renders byte-identical, 67 NEGLIGIBLE (largest 0.019 V), none
-> changed; ceilings and sub-steps 4 → 0.
+> Nodal Schur certifies on the DK current-residual test as well as the step test; full-LU
+> refactors at once when a chord iteration fails the current-change check; route-cost
+> coefficients re-fitted to the certified Schur; full-LU keeps the check's device evaluation
+> and outlines large back-solves (bit-identical); `compressor76` (FET feedback limiter) is a
+> built-in demo circuit beside `passive-eq1a`. Against v0.1.22: 118 golden renders
+> byte-identical, 77 NEGLIGIBLE, one CHANGED (`wurli-tremolo`/silence, 5.1e-4 V, toward its
+> converged answer); no route moves; ceilings, sub-steps, holds and unconverged commits 0 → 0.
 
 ## SPICE Validation Results
 
