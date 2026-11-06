@@ -342,7 +342,7 @@ The circuits repository holds the full catalog with per-circuit status:
 
 **https://gitlab.com/oomox-group/melange-circuits**
 
-It is a filtered set — 51 circuits, not everything that exists locally — and all seven rows above are in it, so none of those numbers is one you have to take on my word.
+It is a filtered set — 53 circuits (plus the two halves of the split limiter), not everything that exists locally — and all seven rows above are in it, so none of those numbers is one you have to take on my word.
 
 ## Spotlight: FET Feedback Limiter
 
