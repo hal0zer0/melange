@@ -121,14 +121,18 @@ fn run_melange_fail(args: &[&str]) -> String {
 #[test]
 fn test_builtins_lists_circuits() {
     let stdout = run_melange(&["builtins"]);
-    // The passive-eq demo ships as the one builtin so melange can demo itself.
+    // The two demo circuits ship as builtins so melange can demo itself.
     assert!(
         stdout.contains("Available builtin circuits"),
         "Should print the builtins header, got: {stdout}"
     );
     assert!(
+        stdout.contains("compressor76"),
+        "Should list the compressor76 builtin demo, got: {stdout}"
+    );
+    assert!(
         stdout.contains("passive-eq1a"),
-        "Should list the passive-eq1a builtin demo, got: {stdout}"
+        "Should list the passive-eq1a builtin, got: {stdout}"
     );
 }
 

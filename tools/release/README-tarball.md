@@ -10,14 +10,15 @@ current ones are at <https://github.com/hal0zer0/melange>.
 ```bash
 ./melange --version            # prints the version and the release commit
 ./melange builtins             # circuits that ship inside the binary
-./melange analyze passive-eq1a # frequency response of the built-in demo circuit
-./melange compile passive-eq1a --format plugin -o ~/my-eq   # a plugin project
-cd ~/my-eq && bash build.sh    # CLAP + VST3 land in target/bundled/
+./melange nodes compressor76   # the built-in demo circuit's pots and buttons
+./melange compile compressor76 --format plugin -o ~/my-limiter --switch "Ratio 4=1"   # a plugin project
+cd ~/my-limiter && bash build.sh    # CLAP + VST3 land in target/bundled/
 ```
 
-`passive-eq1a` is the demo circuit built into the binary: a passive program
-equaliser in the classic 1950s tube topology. Point `melange compile` at any
-`.cir` file of your own the same way.
+`compressor76` is the demo circuit built into the binary: a FET feedback
+limiter in the classic studio topology, with four ratio buttons. A passive
+tube program equaliser is built in too, as `passive-eq1a`. Point
+`melange compile` at any `.cir` file of your own the same way.
 
 ## What it needs on your machine
 

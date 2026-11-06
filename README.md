@@ -8,7 +8,7 @@
 
 Melange compiles an analog circuit into the real-time DSP engine inside an audio plugin. It is kind of a compiler and kind of an emulator without really being either: what it builds is the code for a custom emulator of one particular circuit, as drawn. It reads a SPICE netlist (SPICE is the circuit simulator electronics engineers have used for fifty years; a netlist is the text file that lists a circuit's parts and how they connect) and writes Rust source: the DSP engine, and with `--format plugin` a plugin project around it. That project is not a finished plugin to download: `cargo build` and the project's `build.sh` make the VST3/CLAP.
 
-> **Is this for you?** There is no plugin here to download. To hear and play an instrument that ships melange-generated code, go to [OpenWurli](https://github.com/hal0zer0/openwurli), a Wurlitzer 200A virtual instrument: watch its [demo video](https://youtu.be/2ELaBTO087I), and get CLAP and VST3 builds for Linux, macOS and Windows from its [releases page](https://github.com/hal0zer0/openwurli/releases). Its shipping plugin runs a melange-generated tremolo oscillator; melange-generated preamp and power-amp solvers are opt-in builds. Turning a schematic into a plugin of your own takes Rust and a terminal; if that is you, [start here](#start-here).
+> **Is this for you?** There is no plugin here to download. To hear and play an instrument that ships melange-generated code, go to [OpenWurli](https://github.com/hal0zer0/openwurli), a Wurlitzer 200A virtual instrument: watch its [demo video](https://youtu.be/2ELaBTO087I), and get CLAP and VST3 builds for Linux, macOS and Windows from its [releases page](https://github.com/hal0zer0/openwurli/releases). Its shipping plugin runs a melange-generated tremolo oscillator; melange-generated preamp and power-amp solvers are opt-in builds. To see melange's own output at work, watch the [melange demo](https://youtu.be/8WRu_ngPL6E): a FET feedback limiter compiled from its netlist, running live in a DAW at 2× oversampling, every knob and button a node in the circuit. Turning a schematic into a plugin of your own takes Rust and a terminal; if that is you, [start here](#start-here).
 
 > **Status: early alpha.** "Netlist goes in, plugin project comes out" is exactly the kind of claim that should make you narrow your eyes, so here is precisely how far it actually goes today:
 >
@@ -35,10 +35,11 @@ cargo build --release -p melange-cli        # -> target/release/melange
 #   cargo install --path tools/melange-cli
 
 ./target/release/melange builtins                   # circuits that ship in-tree
-./target/release/melange analyze passive-eq1a       # frequency response of the demo circuit
+./target/release/melange nodes compressor76         # the demo circuit's pots and buttons
+./target/release/melange analyze compressor76       # its frequency response
 ```
 
-`passive-eq1a` is the demo circuit built into the binary: a passive program equaliser in the classic 1950s tube topology, with a low band you can boost and cut at the same time, a high boost with a bandwidth knob and a high cut, between transformers and a tube make-up amplifier.
+`compressor76` is the demo circuit built into the binary, and the circuit in the demo video: a FET feedback limiter in the classic studio topology, with a JFET as the gain element, a diode-bridge detector, four push buttons that set the ratio by rewiring the sidechain, Attack and Release pots, and a transformer-coupled line amplifier. Every control the plugin shows is a node in the netlist. The passive tube program equaliser that was the demo before is still built in as `passive-eq1a`.
 
 Every other example on this page writes bare `melange`, which assumes you did
 the `cargo install` (or put `target/release` on your `PATH`).
@@ -91,13 +92,13 @@ into DSP. They differ only in how you get the netlist.
 
 ### 1. From a SPICE netlist
 
-Write one by hand, or take one from a circuit repository and stop pretending you were going to write it by hand. This is the path with no external tooling: a text file and melange. A complete worked example ships in [`examples/`](examples/) — a passive tube EQ — one of the hardest topologies melange solves: coupled transformers with global feedback wrapped around four nonlinear tubes (see [Spotlight](#spotlight-passive-tube-eq)):
+Write one by hand, or take one from a circuit repository and stop pretending you were going to write it by hand. This is the path with no external tooling: a text file and melange. Two complete worked examples ship in [`examples/`](examples/): the FET feedback limiter from the demo video (see [Spotlight](#spotlight-fet-feedback-limiter)) and a passive tube EQ, one of the hardest topologies melange solves — coupled transformers with global feedback wrapped around four nonlinear tubes:
 
 ```bash
-# Compile the bundled passive tube EQ example (4 tubes, 3 transformers, global NFB).
+# Compile the bundled FET limiter (1 JFET, 11 BJTs, 4 diodes, 2 transformers), 4:1 button in.
 # Generate the project OUTSIDE this repo (any directory not inside a Cargo workspace).
-melange compile examples/passive-eq1a.cir --format plugin -o ~/passive-eq
-cd ~/passive-eq && bash build.sh         # CLAP + VST3 land in target/bundled/
+melange compile examples/compressor76.cir --format plugin -o ~/compressor76 --switch "Ratio 4=1"
+cd ~/compressor76 && bash build.sh       # CLAP + VST3 land in target/bundled/
 
 # ...or point it at your own netlist
 melange compile my-circuit.cir --format plugin -o ~/my-plugin
@@ -114,11 +115,11 @@ The netlist dialect is documented in **[Writing SPICE Netlists for Melange](docs
 
 ### 2. From the built-in demo, or a circuit library
 
-The passive tube EQ ships **built in**, so melange can compile and demo itself with no downloads and no external repo — just name it:
+The FET limiter and the passive tube EQ ship **built in**, so melange can compile and demo itself with no downloads and no external repo — just name one:
 
 ```bash
-melange compile passive-eq1a --format plugin -o ~/my-eq   # built-in demo circuit
-cd ~/my-eq && bash build.sh
+melange compile compressor76 --format plugin -o ~/my-limiter --switch "Ratio 4=1"   # the demo circuit
+cd ~/my-limiter && bash build.sh
 ```
 
 The circuit library lives in its own repository, and you do not have to clone
@@ -174,7 +175,7 @@ Not ready to commit to a whole plugin? Reasonable. Shove some audio through the 
 
 ```bash
 # Quick test tone through the built-in demo circuit (no files needed)
-melange simulate passive-eq1a --amplitude 0.1 -o drive.wav
+melange simulate compressor76 --amplitude 0.1 -o drive.wav
 
 # Process a WAV file of your own through your own circuit (no test audio ships
 # with melange; any 16/24-bit PCM or 32-bit float WAV works, first channel used)
@@ -259,7 +260,7 @@ Every one of these is a real published model with real published equations, impl
 | R / C / L | Trapezoidal companion; inductors via augmented MNA | Coupled inductors and transformers supported |
 | Diode | Shockley + series resistance + Zener breakdown | LED variant included |
 | BJT | Ebers-Moll or Gummel-Poon | Junction caps, parasitic R, Early effect, high-injection knee. Follows ngspice's `bjtload.c` formulation (the `qb()` base-charge discriminant, high-injection knee) |
-| JFET | Shichman-Hodges (triode + saturation); Parker–Skellern with `LEVEL=2` (conducts below pinch-off, ngspice JFET2's law) | N-channel and P-channel |
+| JFET | Shichman-Hodges (triode + saturation); Parker–Skellern with `LEVEL=2` (conducts below pinch-off, ngspice JFET2's law); the symmetric subthreshold law with `LEVEL=3` (melange's own, for a JFET run as a voltage-variable resistor; the demo limiter's gain element) | N-channel and P-channel |
 | MOSFET | SPICE Level 1 | Body effect, channel-length modulation |
 | Vacuum Triode | Norman Koren plate + Dempwolf & Zölzer grid current with a retarding-field sub-µA tail ([level is a per-tube population parameter](docs/limitations.md#triode)) | 12AX7, 12AU7, 12AT7, 6SN7, 6SL7, and more |
 | Vacuum Pentode | 5 equation families, 29 models | EL84, EL34, EF86, 6L6, 6V6, KT88, 6550, and 22 more. Opt-in grid-off reduction (`--tube-grid-fa on`) |
@@ -275,7 +276,7 @@ Base device models run at a fixed nominal 27 °C, with opt-in self-heating (`RTH
 
 ## Circuits
 
-Netlists live in a separate repository, sorted into `stable/`, `testing/`, and `unstable/` tiers. Promotion between tiers requires a listening test in a DAW — an actual human, actual monitors, actual ears. Correlation numbers are necessary and they are not sufficient. A circuit can hit eight nines against ngspice and still sound wrong, and if it does, it does not get promoted. Of the six circuits measured below, two are `testing/` decks and four are `unstable/`, none `stable/`; the library's own README states how many circuits each tier holds today.
+Netlists live in a separate repository, sorted into `stable/`, `testing/`, and `unstable/` tiers. Promotion between tiers requires a listening test in a DAW — an actual human, actual monitors, actual ears. Correlation numbers are necessary and they are not sufficient. A circuit can hit eight nines against ngspice and still sound wrong, and if it does, it does not get promoted. Of the seven circuits measured below, two are `testing/` decks and five are `unstable/`, none `stable/`; the library's own README states how many circuits each tier holds today.
 
 ### Compiling one without cloning anything
 
@@ -307,18 +308,21 @@ A sample of what it handles, with **measured** single-core throughput:
 
 | Circuit | What it is | Devices | Throughput\* | ns/sample |
 |---------|-----------|---------|--------------|-----------|
-| Bus compressor | VCA + op-amp sidechain | 12 op-amps + 2 VCAs | 20.8× | 1000 |
-| Passive tube program EQ | 7 pots, 3 switches, global NFB (N=52, M=8) | 4 tubes, 3 transformers | 21.0× | 992 |
-| Single-ended tube amp | preamp + power stage + output transformer into 8 Ω | 12AX7 (2 triodes) + 6V6 pentode | 25.6× | 815 |
-| Germanium diode network | three-stage diode clipper: 3 RC sections, an antiparallel Ge pair at each | 6 Ge diodes | 27.2× | 765 |
-| Wurlitzer 200A preamp | 2-stage BJT preamp (full Gummel-Poon) | 2 BJTs + 1 diode | 45.7× | 456 |
+| Bus compressor | VCA + op-amp sidechain | 12 op-amps + 2 VCAs | 21.3× | 976 |
+| Passive tube program EQ | 7 pots, 3 switches, global NFB (N=52, M=8) | 4 tubes, 3 transformers | 15.1× | 1380 |
+| Single-ended tube amp | preamp + power stage + output transformer into 8 Ω | 12AX7 (2 triodes) + 6V6 pentode | 25.4× | 820 |
+| Germanium diode network | three-stage diode clipper: 3 RC sections, an antiparallel Ge pair at each | 6 Ge diodes | 27.1× | 769 |
+| Wurlitzer 200A preamp | 2-stage BJT preamp (full Gummel-Poon) | 2 BJTs + 1 diode | 44.3× | 470 |
 | 12AX7 gain stage | single triode stage | 1 triode | 174.8× | 119 |
+| FET feedback limiter† | JFET gain cell, diode detector, 4 ratio buttons, transformer line amp (N=84, M=28) | 1 JFET + 11 BJTs + 4 diodes, 2 transformers | 2.8× | 7450 |
 
-\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), best of 7 × 2M samples. `20×` means one core runs about twenty instances of that circuit in real time on that host. Measured 2026-11-04 (v0.1.22) on an AMD Ryzen 9 7950X pinned to one core, with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh); the CHANGELOG has the comparison with the release before. Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass (`unstable/examples/rc-lowpass.cir` in the circuits repository) runs at about 1930× (10.8 ns/sample, measured 2026-11-04).
+\* Single-core `process_sample` throughput vs. realtime at 48 kHz, noiseless (the shipping default), best of 7 × 2M samples. `20×` means one core runs about twenty instances of that circuit in real time on that host. Measured 2026-11-05 (v0.1.23) on an AMD Ryzen 9 7950X pinned to one core, with `-C target-cpu=x86-64-v3`, via [`tools/perf-harness/bench.sh`](tools/perf-harness/bench.sh); the CHANGELOG has the comparison with the release before. Regenerate on your own hardware — these numbers are host-dependent and I have no idea what you're running. For scale: a trivial RC low-pass (`unstable/examples/rc-lowpass.cir` in the circuits repository) runs at about 1960× (10.6 ns/sample, measured 2026-11-05). The passive EQ row is the middle of five rounds that spread 1334–1428 ns; the other rows repeated within 1 %.
+
+† Per host sample. The limiter's deck declares 2× oversampling, so each host sample solves two inner samples; the bench drives it with a 0.3 V tone, far below the drum bus in the demo video, and its cost rises under gain reduction as the detector diodes work harder. The demo plugin is the two-deck build of this circuit (see the [Spotlight](#spotlight-fet-feedback-limiter)).
 
 **The triode rows pay for grid current.** The Dempwolf & Zölzer grid-current law evaluates a softplus on the grid dimension at every Newton iteration, where a hard-zero law would skip it (below the join of its retarding-field tail the cost is one `exp`); that is what modelling the negative-grid region costs. The CHANGELOG has the before/after figures.
 
-Each row names the deck it was measured on, so the numbers have an address, and **every one of the six can be re-measured from a public clone** — the passive tube EQ also ships in-tree as `examples/passive-eq1a.cir`.
+Each row names the deck it was measured on, so the numbers have an address, and **every one of the seven can be re-measured from a public clone** — the FET feedback limiter and the passive tube EQ also ship in-tree as `examples/compressor76.cir` and `examples/passive-eq1a.cir`.
 
 | Row | Deck |
 |---|---|
@@ -328,30 +332,30 @@ Each row names the deck it was measured on, so the numbers have an address, and 
 | Germanium diode network | `unstable/examples/germanium-clipper-ladder.cir` |
 | Wurlitzer 200A preamp | `testing/preamp/wurli-preamp.cir` |
 | 12AX7 gain stage | `unstable/examples/triode-gain-stage.cir` |
+| FET feedback limiter | `unstable/dynamics/compressor76.cir` |
 
 The circuits repository holds the full catalog with per-circuit status:
 
 **https://gitlab.com/oomox-group/melange-circuits**
 
-It is a filtered set — 51 circuits, not everything that exists locally — and all six rows above are in it, so none of those numbers is one you have to take on my word.
+It is a filtered set — 51 circuits, not everything that exists locally — and all seven rows above are in it, so none of those numbers is one you have to take on my word.
 
-## Spotlight: Passive Tube EQ
+## Spotlight: FET Feedback Limiter
 
-A **passive tube program EQ**, and one of the hardest topologies melange solves end to end — coupled transformers with global feedback wrapped around four nonlinear tubes. Read this as a demonstration of the *solver*, not as a fidelity claim — the distinction matters and I'll get to it in a second:
+The demo circuit, and the one in the [demo video](https://youtu.be/8WRu_ngPL6E): a **FET feedback limiter** in the style of the 1176LN, transcribed from the production drawings. It is the kind of circuit a schematic-to-DSP tool exists for, because nothing in it is a block. The gain element is a JFET run as a voltage-variable resistor, on melange's symmetric subthreshold law; the four ratio buttons rewire a resistor network in the sidechain, and any combination of them is whatever that network does; the detector is a diode bridge driving a control amplifier; the Attack and Release pots are time constants in that network; and the output stage is a Darlington line amplifier into a transformer. Every control the plugin shows is a node in the netlist.
 
-- **4 vacuum tubes** (2× 12AX7, 2× 12AU7), **3 transformers** (HS-56 input, HS-29 coupling/phase-splitter, S-217-D output with a tertiary feedback winding)
-- **21 dB of global negative feedback** via differential cathode injection
-- **40 circuit nodes (N=52 MNA unknowns), 8 nonlinear dimensions**
-- **All 7 EQ bands function**, including the simultaneous boost + cut trick, with **zero NR failures** at 1V input, at the throughput in the table above
+- **16 nonlinear devices** (1 JFET, 11 BJTs, 4 diodes) and **2 transformers**; **N = 84 MNA unknowns, M = 28 nonlinear dimensions**, routed to nodal full LU by the cost trigger (`melange compile compressor76 -v` says so)
+- **Calibrated by the factory test procedure**, not by ear: the Q-bias trim, the 20:1 production-test chord and the 20:1 threshold. Out of sample, the 12/8/4:1 production chords at 2 and 20 kHz pass 6 of 6, the settled thresholds for all four ratios sit inside the manual's ±2 dBm, and THD at +24 dBm reads 0.095 % against a 0.5 % spec
+- **What is not matched:** the release timing (the slow end reads 1.96 s where the manual says up to 1.1 s), and everything past the line amp's clip, where the output transistor's breakdown is modelled from a datasheet minimum. It is an `unstable/`-tier circuit: calibrated by numbers and played in a DAW, never measured against a hardware unit
 
-Global feedback wrapped around four tubes and three transformers is the configuration where naive solvers give up, oscillate, or quietly return garbage. This one converges every sample.
-
-> **Now the part that isn't a fidelity claim.** This proves melange *solves* a genuinely hard topology. It does **not** prove fidelity to the original hardware. The amp section follows the verified Sowter E-72,658-2 drawing; the **EQ network is a reconstruction** — the original drawing has no EQ section at all. It is a `testing/`-tier circuit: its frequency response is **measured-verified against the factory curve charts**, but it has been **auditioned: never** — validated by numbers, not yet by ears. Its distortion character now comes from **sourced push-pull tube mismatch** (published 12AX7/12AU7 acceptance limits, deterministic seed), giving the **H2-dominant, level-progressive** coloration the real unit shows — but the transformer **iron is still linear** (no core saturation), the effect stays short of the hardware's full distortion magnitude, and none of it is **ear-auditioned** yet. [Validation & Verification](docs/VALIDATION.md) has the full accounting.
+> **Why the plugin in the video is two decks.** The exact one-deck build is the reference, and at 48 kHz with 2× oversampling it runs close to the line on one core when the input is cranked on a drum bus. The circuits repository builds the default plugin from the same netlist cut at the Output pot's wiper into a front-end deck and a line-amp deck, chained per inner sample with the line amp's input current fed back one host sample late (`tools/compressor76-split/` there, with a check that the two halves are an exact cut of the reference). Against the one-deck it sits 46 to 62 dB down at every control extreme at 48 kHz and 2×, below the one-deck's own 2×-versus-4× oversampling error. Both are melange builds of the same circuit; the cut is plugin wiring, not a different model, and solving the whole circuit in one deck at that speed is scheduled solver work, not a plugin trick.
 
 ```bash
-melange compile passive-eq1a --format plugin -o my-eq
-melange analyze passive-eq1a --pot "LF Boost=10k" --switch "LF Freq=1"   # ~+10 dB shelf at 20 Hz
+melange compile compressor76 --format plugin -o my-limiter --switch "Ratio 4=1"
+melange analyze compressor76 --switch "Ratio 20=1"      # gain vs frequency with the 20:1 button in
 ```
+
+The **passive tube program EQ** that was the demo before is still built in as `passive-eq1a` and still one of the hardest topologies melange solves end to end: 4 tubes (2× 12AX7, 2× 12AU7), 3 transformers with a tertiary feedback winding, 21 dB of global negative feedback, N = 52, M = 8, all seven EQ bands working including the simultaneous boost + cut trick, with zero Newton failures at 1 V in. It proves the solver, not fidelity: the amp section follows the verified Sowter E-72,658-2 drawing, the EQ network is a reconstruction (the original drawing has no EQ section), its response is measured against the factory curve charts, its distortion comes from sourced push-pull tube mismatch with the transformer iron still linear, and it has never been auditioned against the hardware. [Validation & Verification](docs/VALIDATION.md) has the full accounting; `examples/README.md` has the commands.
 
 ## Oversampling
 
@@ -444,7 +448,7 @@ melange nodes <circuit>                   List nodes, devices, op-amps and contr
 melange dc-op <circuit>                   DC operating point: node voltages + KCL residual
 melange cache list|clear|stats            Circuit cache and compiled-binary cache
 melange import <file.xml> -o <file.cir>   Import KiCad XML to Melange format
-melange builtins                          List embedded demo circuits (ships with passive-eq1a)
+melange builtins                          List embedded demo circuits (compressor76, passive-eq1a)
 melange sources list|add|remove|show      Manage circuit sources (`show` lists a source's circuits)
 melange index <dir> [--check]             Write/verify a circuits-index.json for a folder
 ```

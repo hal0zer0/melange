@@ -32,10 +32,16 @@ Compile the built-in demo circuit (ships with melange, no downloads), or use a l
 
 ```bash
 mkdir -p ~/melange-plugins && cd ~/melange-plugins   # any dir outside the melange repo
-melange compile passive-eq1a --format plugin -o my-eq
+melange compile compressor76 --format plugin -o my-limiter --switch "Ratio 4=1"   # the demo circuit, 4:1 button in
+melange compile passive-eq1a --format plugin -o my-eq                             # the other built-in
 # or from a local file:
 melange compile my-circuit.cir --format plugin -o my-fuzz
 ```
+
+The plugin in the demo video is the circuits repository's two-deck build of
+`compressor76` (`tools/compressor76-split/regen.sh` there), which splits the
+same netlist at the Output pot so it runs with headroom at 48 kHz and 2×; the
+one-deck build above is the exact reference and is slower.
 
 This generates a complete nih-plug project in `my-eq/` with:
 - `src/circuit.rs` — generated DSP code (do not edit)

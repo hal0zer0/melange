@@ -1,0 +1,281 @@
+1176LN-style FET limiter (compressor76), suffix D: four independent ratio buttons and Attack Off
+* author: melange-circuits
+* description: FET-VVR peak limiter after the suffix-D production drawings (1176LN-style): JFET gain element on
+* melange's LEVEL=3 symmetric subthreshold law, calibrated by the factory test procedure. Needs melange v0.1.21+,
+* and v0.1.22+ to drive it past the line amp's clip: v0.1.21 has no Newton limiter on a diode's breakdown branch
+* and leaves samples at Q6's breakdown knee unsolved.
+* status: active
+* ROLE: the 1:1 REFERENCE netlist. The DEFAULT build is its two-deck split, compressor76-front.cir +
+* compressor76-lineamp.cir: this netlist cut at the Output pot's wiper, chained by tools/compressor76-split/ and
+* validated against this deck (evidence in compressor76-front.cir). After any edit here, run
+* tools/compressor76-split/sync_check.py and re-validate the split.
+* evidence: calibrated to the factory manual's Q-bias trim, 20:1 production-test chord and 20:1 threshold. Out of
+* sample at 4x and at 2x oversampling: 12/8/4:1 production chords at 2 and 20 kHz pass 6/6; THD at +24 dBm 0.095 % (spec
+* < 0.5 %). Settled 1-dB thresholds 20/12/8/4:1 -18.99 / -20.52 / -21.40 / -23.52 dBm (attack fast, release fully CW,
+* 2 kHz, minimum attenuation; manual -19 / -20 / -21 / -22 +-2 dBm). NOT matched: release timing (manual 50 ms-1.1 s);
+* the slow end reads 1.96 s t63 (20:1, 10 dB GR, 2 kHz).
+* VALID up to the line amp's clip (THD 0.5 % near +24.3 dBm, ~18.6 V pk at out into 600 ohm). Past it, Q6's C-E
+* breakdown (modelled at the 2N6055's 60 V VCEO(sus) minimum) bounds the primary's flyback: out reaches ~30 V pk at
+* 1 V pk EMF in (Output 1.0, no button) and 32-36 V pk on drums peaking at 17 V EMF (Output 0.5, no button). Past-clip
+* waveforms are [I]: Q6's transit time is omitted (TF = 0, a choice) and T2's core is linear.
+* WARMUP: the bake has no button in. After a host selects a button, the rest gain (below threshold) is within 0.01 dB
+* after 10 s at Release 0.5, 15 s at Release 0.0 (tau 2-3 s: C21 and the release network). Under GR the offset is
+* suppressed: within 0.003 dB once a tone has driven the detector for 4 s.
+*
+* CONTROLS. Pots (.wiper, 0..1): Output (1.0 = loudest), Attack (0.0 = FAST end: R55b -> 10 ohm; 1.0 = slow),
+* Release (1.0 = fast end: R56a -> 10 ohm). The two time pots run opposite ways. Switches: 'Ratio 4',
+* 'Ratio 8', 'Ratio 12', 'Ratio 20' (0 = button out, 1 = in; any combination comes from the network: all four in =
+* all-buttons, and 4+20 alone equals all four) and 'Attack Off' (0 = GR on, 1 = GR off; S9 on the Attack pot, fully
+* CCW). The baked state (every switch at 0) has NO ratio button in: a host selects its default button after construction.
+* INPUT is not in the netlist: the bridged-T attenuator is fixed at its 6 dB constant-impedance stand-in and a host
+* applies INPUT as pre-gain on the source EMF. Minimum attenuation (bridge arm shorted, shunt open: the threshold
+* table's condition) is +6.01 dB of pre-gain, EMF-referred (within 0.01 dB from 43 Hz to 9 kHz). Terminal-referred
+* the pad loses 5.41 dB into T1's 756.7 ohm; the other 0.60 dB is the source's 600 ohm into the pad's 651.6 ohm.
+* CALIBRATION [CAL]: BETA (Q1), R83*/R59a/R59b (Q-bias), R45* (threshold), R86 (distortion trim), each set by the
+* factory procedure named at the part.
+*
+* Transcribed from a schematic trace of the factory drawings.
+* Factory-selected parts: R30*, UM706* omitted (DIY nominal / configuration choice). R83* is selected per FET so the
+* factory 1.0 dB Q-bias point lies inside the trimmer's travel. R45*: see the sidechain. T1/T2 L ASSUMED.
+* OMITTED: the GR meter (meter FET Q11 takes gcv through R65 3.9M; its far end is not traced, so its load on gcv is
+* unchecked) and the stereo-link jack J1 (ties gcv between units).
+
+.input_impedance 600
+* 2x: every calibration and out-of-sample reading (thresholds, chords at 2 and 20 kHz, THD at +24 dBm, staircase
+* rises, settle taus) matches 4x within 0.007 dB. The calibration was fitted at 4x. At 1x the 2 kHz readings hold
+* (within 0.012 dB) but at 20 kHz the input for 1 dB GR lands 1.4-1.5 dB higher: treble compresses late.
+.oversampling 2
+
+* Q1 "13-0027" (the manufacturer's house part, "VVR", selected; no generic part named in any original document).
+* BETA [CAL] is the one fitted value (to the factory production test's 20:1 chord); its IDSS, 6.19 mA, sits above
+* the 2N5457 datasheet band (1-5 mA). Frozen: VTO -2.5, LAMBDA 0.004 (melange's 2N5457 catalogue entry), NSLOPE
+* absent = 1.00, VT 25.865 mV (300.15 K, fixed in melange). LEVEL=3 rather than LEVEL=1: THD at +24 dBm 0.095 % vs
+* 0.78 % (spec < 0.5 %), both calibrated the same way.
+.model J13_0027 NJF(LEVEL=3 VTO=-2.5 BETA=0.000991094 LAMBDA=0.004)
+.model Q2N3391A NPN(IS=1e-14 BF=400 VAF=100)
+.model Q2N3707 NPN(IS=1e-14 BF=300 VAF=100)
+* Q6: drawn "2N?055" read as 2N6055 NPN Darlington (MEDIUM), modelled as the datasheet's equivalent circuit
+* (Motorola 2N6055/D Rev 1): TWO NF=1 BJTs (Q6a driver, Q6b output) with the part's B-E shunts and C-E diode (see
+* the line amp). IS/BF fitted jointly to the sheet's typical VBE (Fig. 10) and hFE at VCE 3 V (Fig. 8), 0.1-1 A:
+* hFE within 9.5 % to 2 A, VBE within 25 mV [I: output IS = 10x driver IS (the split is not identifiable from
+* the composite curves); no IKF, so hFE reads 78 % high at 4 A, beyond this deck's currents]. Junction caps fitted
+* to the sheet's Cob/Cib (Fig. 7): Cob within 3 % from 5 to 58 V, Cib within 2 %. TF omitted, a choice (TF = 0 =
+* infinite fT): the sheet's only fT data (|hfe| at 3 A) identifies it poorly. DC OP: Vbe 0.655 + 0.617 = 1.27 V,
+* Iq 40.8 mA (via the ASSUMED 2-ohm B-winding DCR).
+.model Q6DRV NPN(IS=9.877e-14 BF=127.6 VAF=100 CJC=30.82p VJC=0.382 MJC=0.323 CJE=112.0p VJE=0.802 MJE=0.477)
+.model Q6OUT NPN(IS=9.877e-13 BF=70.14 VAF=100 CJC=308.2p VJC=0.382 MJC=0.323 CJE=1120.2p VJE=0.802 MJE=0.477)
+.model DQ6CE D(IS=1e-12 N=1 BV=60 IBV=0.1)
+.model D1N914 D(IS=2.5n N=1.75)
+* D2/D3 (drawn FD333): forward law from the Fairchild MMBD1501 datasheet typical (381/464/549 mV at 1/10/100 uA ->
+* N 1.42, IS 29 pA; process 1L, which the FDH333 sheet's 'see MMBD1501' points to; FD333 = FDH333 is plausible,
+* unproven). Reverse current is NOT sourced (a by-product of the forward fit).
+.model DFD333 D(IS=29p N=1.42)
+
+VMAIN vmain 0 DC 30
+VNEG  vneg  0 DC -10
+
+* ---- input attenuator (bridged-T, 600 ohm; fixed 6 dB stand-in) ----
+R1A in atto 620
+R2  in attm 620
+R3  attm atto 620
+R1B attm 0 620
+
+* ---- T1 input transformer: UTC O-12 as a STEP-DOWN, 500/600 winding (pins 1-5) in, 200/250 winding (6-8) out,
+* turns ~0.645 (sqrt(250/600)); R4 270 reflects to ~650 ohm = the manual's 600-ohm bridged-T load. L ASSUMED. ----
+R_t1p atto t1p 12
+L_t1p t1p 0 10
+L_t1s t1sx 0 4.16
+K_t1 L_t1p L_t1s 0.9999
+R_t1s t1sx t1s 40
+
+* ---- FET gain-reduction element + gate network ----
+R4  t1s 0 270
+R5  t1s fd 27k
+J1  fd fg fs J13_0027
+R10 fs 0 10k
+C28 e2b fs 50u
+C1  fd c1 1u
+R8  c1 b2 1k
+C2  b2 0 27p
+R6  fg gfb 2.2Meg
+C3  fg gfb 200p
+C9  gfb fb 0.22u
+R7  fg gcv 2.2Meg
+C6  fg gcv 200p
+C22 gcv 0 0.22u
+
+* ---- signal preamp ----
+R17 vmain vpre 6.8k
+C4  vpre 0 80u
+R13 vpre c2 1Meg
+Q2  c2 b2 e2 Q2N3391A
+R18 e2 e2b 180
+R84 e2b 0 180
+R85 e2 r85 150
+* R86 = the P.C.B. "distortion" trim (0-100 ohm) [CAL]: set to the THD null of the factory procedure, 28 ohm.
+* (29 ohm would put the gate at the drain/source midpoint: k = 0.4203 + 0.002748/ohm.)
+R86 r85 fb 28
+R15 out1 fb 6.8k
+R9  b2 e3t 560k
+Q3  c3 c2 e3 Q2N3391A
+R14 vpre c3 22k
+R11 e3 e3t 82
+R12 e3t 0 1.8k
+C5  e3t 0 80u
+Q14 vmain c3 out1 Q2N3391A
+* Q14 is a clean emitter-follower buffer (1.5 mA, ~10 V headroom), a full device: the deck is M = 28 (incl. the
+* two-BJT Q6 and its C-E diode). Linearizing it changed no chord or audio-path figure.
+C7  out1 og 1u
+
+* ---- OUTPUT pot + ratio deck A ladder (loads og) ----
+R23a og ogw 125k
+R23b ogw 0 125k
+.wiper R23a R23b 250k 0.5 "Output"
+R78 og nA20 56k
+R19 nA20 nA12 68k
+R20 nA12 nA8 56k
+R21 nA8 nA4 56k
+R22 nA4 0 47k
+
+* ---- line amp ----
+C8  ogw b4 0.15u
+R34 vmain vline 8.2k
+C12 vline 0 80u
+R26 vline c4 68k
+R24 c4 b4 2.7Meg
+R25 b4 0 2.7Meg
+Q4  c4 b4 e4 Q2N3391A
+R27 e4 0 1.5k
+C10 c4 b5 1u
+R29 b5 c6 1.2Meg
+C11 b5 c6 10p
+R30 b5 k1 150k
+D1  k1 0 D1N914
+Q5  vline b5 b6 Q2N3707
+Q6a c6 b6 e6a Q6DRV
+Q6b c6 e6a e6 Q6OUT
+* Q6 internals per the 2N6055 sheet (Motorola 2N6055/D Rev 1): B-E shunt resistors ~8.0k (driver) and ~50 ohm
+* (output) from the device box in Fig. 2; the built-in C-E diode drawn there (unrated: IS/N [I]); C-E sustaining
+* breakdown VCEO(sus) >= 60 V at 100 mA (p2), modelled at that minimum.
+R_q6r1 b6 e6a 8k
+R_q6r2 e6a e6 50
+D_q6ce e6 c6 DQ6CE
+C14 e6 0 0.033u
+
+* ---- T2 output transformer (UA-5002; L/DCR ASSUMED, 600:600, tertiary 25:1) ----
+* Dots (first node of each L) per the CineMag CM-96731 UA-5002 pinout (SECONDARY source; the
+* factory sheet prints none): c6 (BRN/GRN), t2wr (WHI/RED), out (BLU), t2slt (SLT).
+* Turns A:B:S:T = 1 : 0.10 : 1 : 0.5 [I: from the manual's +24 dBm/600 ohm <0.5 % spec and the verified DC points.
+* Q6's base must swing (B/S)*Vout + i_pk*R32, supplied by Q4's collector through the Q5 follower. Measured:
+* at B/S 0.10 the 0.5 % onset is +24.3 dBm, 0.3 dB above spec; swept over B/S 0.09-0.12 the onset falls ~0.4 dB per
+* 0.01, so B/S >~ 0.11 fails the spec at +24 dBm and the spec bounds B/S <~ 0.11.] L scales as turns^2 on one core; B DCR
+* scaled with turns (ASSUMED, and load-bearing for Iq).
+* T/S = 0.5 [I: tertiary ratio from design intent (a dedicated NFB winding must do meaningful feedback; the
+* forum "25:1" gave 0.6 dB); band 0.2-0.7]. At T/S 0.5 the maximum gain is 48.8 dB terminal-referred (1 kHz,
+* minimum attenuation, Output 1.0, Attack Off), 1.8 dB above the cross-era ~45-47 dB; the D-era figure is unknown,
+* so T/S is not fitted to it. DCR ASSUMED.
+* Replace with the UA-5002 winding sheet if acquired.
+R_t2a vmain t2ax 20
+L_t2a c6 t2ax 12
+L_t2b t2bx e6 0.12
+R_t2b t2bx t2wr 2
+L_t2s out t2sx 12
+R_t2s t2sx 0 30
+L_t2t t2slt t2tx 3
+R_t2t t2tx 0 15
+K_ab L_t2a L_t2b 0.9999
+K_as L_t2a L_t2s 0.9999
+K_at L_t2a L_t2t 0.9999
+K_bs L_t2b L_t2s 0.9999
+K_bt L_t2b L_t2t 0.9999
+K_st L_t2s L_t2t 0.9999
+R32 t2wr 0 39
+R31 e4 r31c 10k
+C13 r31c t2wr 270p
+R33 c6 r33c 560
+C15 r33c t2slt 0.0047u
+R28 e4 t2slt 27k
+Rload out 0 600
+
+* ---- ratio deck A tap (4:1 fixed) -> GR on (S9) -> GR control amp ----
+* S9 GR DISABLE (on R55, fully CCW): pole -> C17; throws comA (GR on) / ground (GR off), per the factory drawing.
+R_s9a comA scin 0.01
+R_s9b scin 0 1e9
+.switch R_s9a,R_s9b 0.01/1e9 1e9/0.01 "Attack Off"
+C17 scin b7 1u
+R36 b7 c7 1Meg
+R37 b7 0 470k
+R51 vmain vsc 4.7k
+C18 vsc 0 50u
+R38 vsc c7 47k
+Q7  c7 b7 e7 Q2N3707
+R39 e7 n41 4.7k
+Q8  vmain c7 e8 Q2N3707
+R40 e8 n41 2.4k
+R41 n41 0 270
+R42 e8 b9 180k
+R43 b9 fF 47k
+R45 b9 fF 390k
+* R45* (T+C, parallel) [CAL]: selected (E12) to the manual table's 20:1 threshold (-19 dBm at minimum INPUT
+* attenuation, 1 dB GR point, 2 kHz): 150k gives -18.99 dBm settled.
+R45s b9 fF 150000
+Q9  c9 b9 e9 Q2N3707
+R47 vsc c9 47k
+R48 e9 fF 8.2k
+Q10 vmain c9 e10 Q2N3707
+R49 e10 fF 2.4k
+R50 fF 0 180
+R46 e7 e10 47k
+
+* ---- detector, attack, release ----
+C19 e10 d1 6.8u
+C20 e8 d3 6.8u
+R52 d1 vth 47k
+R53 d3 vth 47k
+C21 vth 0 80u
+D2  d1 det DFD333
+D3  d3 det DFD333
+* ATTACK pot R55 25K with R54 470 || C27 .022 from its input end (det) to its wiper.
+R55a det w55 12.5k
+R55b w55 gcv 12.5k
+.wiper R55a R55b 25k 0.5 "Attack"
+R54 det w55 470
+C27 det w55 0.022u
+R56a gcv w56 2.5Meg
+R56b w56 relb 2.5Meg
+.wiper R56a R56b 5Meg 0.5 "Release"
+R57 w56 relb 270k
+
+* ---- ratio deck B (threshold), 4:1 tap -> vth ----
+R64 vneg nB20 1.5k
+R63 nB20 nB12 1.5k
+R62 nB12 nB8 560
+R61 nB8 nB4 470
+R58 nB4 relb 150
+
+* ---- Q-bias (TP18 = relb); R59 trimmer [CAL], R83* [CAL] ----
+R35 nQ vneg 10k
+R60 nQ 0 3.9k
+* Q bias [CAL] per the factory procedure (12/10/90 s10: 20:1, attack off, release fully CW, 1.0 dB output decrease at
+* rest, 1 kHz 1 mV): R59a/R59b give a 0.9996 dB drop.
+R59a r83b relb 1047.7
+R59b relb nQ 952.302
+* Q-bias trimmer FROZEN at the calibrated wiper (factory trim, not a front-panel control)
+R83 0 r83b 330
+
+* ---- RATIO buttons S1..S4, independent: each closes one tap of deck A (-> comA) and deck B (-> vth).
+* 0 = out, 1 = in. Any combination comes from the network (all four in = all-buttons; 4+20 alone equals all four).
+R_a4  nA4  comA 1e9
+R_a8  nA8  comA 1e9
+R_a12 nA12 comA 1e9
+R_a20 nA20 comA 1e9
+R_b4  nB4  vth 1e9
+R_b8  nB8  vth 1e9
+R_b12 nB12 vth 1e9
+R_b20 nB20 vth 1e9
+.switch R_a4,R_b4 1e9/1e9 0.01/0.01 "Ratio 4"
+.switch R_a8,R_b8 1e9/1e9 0.01/0.01 "Ratio 8"
+.switch R_a12,R_b12 1e9/1e9 0.01/0.01 "Ratio 12"
+.switch R_a20,R_b20 1e9/1e9 0.01/0.01 "Ratio 20"
+
+.END

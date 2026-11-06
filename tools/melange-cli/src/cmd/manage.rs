@@ -142,9 +142,11 @@ pub(crate) fn list_builtins() -> Result<()> {
 
     println!();
     println!("Usage examples:");
-    println!("  melange compile passive-eq1a --format plugin -o passive-eq");
-    println!("  melange simulate passive-eq1a --amplitude 0.1 -o drive.wav");
-    println!("  melange nodes passive-eq1a");
+    println!(
+        "  melange compile compressor76 --format plugin -o compressor76 --switch \"Ratio 4=1\""
+    );
+    println!("  melange simulate compressor76 --amplitude 0.1 -o drive.wav");
+    println!("  melange nodes compressor76");
     println!();
     println!("The full circuit library lives in a separate repo. Add it, list it, use it:");
     println!(

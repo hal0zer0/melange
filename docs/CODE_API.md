@@ -5,7 +5,7 @@ self-contained Rust file — no crate, no wrapper, no `Cargo.toml`:
 
 ```bash
 melange compile my-circuit.cir -o src/circuit.rs                 # --format code is the default
-melange compile passive-eq1a --format code -o src/circuit.rs     # explicit, built-in demo circuit
+melange compile compressor76 --format code -o src/circuit.rs     # explicit, built-in demo circuit
 ```
 
 That file has **no dependencies**. Drop it into any crate as a module — the

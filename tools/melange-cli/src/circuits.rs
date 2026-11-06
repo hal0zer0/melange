@@ -160,20 +160,25 @@ pub fn resolve(circuit_ref: &str) -> Result<CircuitSource> {
     )
 }
 
-/// The one builtin demo circuit: a passive tube EQ. Embedded at
-/// compile time (`include_str!` from `examples/`, so the builtin and the
-/// bundled example are the same bytes — one source of truth). This gives
-/// melange a way to compile/simulate/demo itself with zero network and no
-/// external circuit repo. The full circuit library lives in a separate repo
-/// (being published); once it is reachable, add it with `melange sources add`
-/// and browse with `melange sources list`.
+/// The builtin demo circuits, embedded at compile time (`include_str!` from
+/// `examples/`, so a builtin and its bundled example are the same bytes — one
+/// source of truth). They give melange a way to compile/simulate/demo itself
+/// with zero network and no external circuit repo. The full circuit library
+/// lives in a separate repo; add it with `melange sources add` and browse with
+/// `melange sources list`.
+///
+/// `compressor76` is the demo circuit: the FET feedback limiter in the demo
+/// video. Its canonical copy is `unstable/dynamics/compressor76.cir` in the
+/// circuits repository; `examples/compressor76.cir` is kept byte-identical to
+/// it. `passive-eq1a` is the earlier demo and stays built in.
+const BUILTIN_COMPRESSOR76: &str = include_str!("../../../examples/compressor76.cir");
 const BUILTIN_PASSIVE_EQ: &str = include_str!("../../../examples/passive-eq1a.cir");
 
 /// Get builtin circuit content.
 ///
-/// Only the passive-eq demo is embedded (see [`BUILTIN_PASSIVE_EQ`]); every
-/// other circuit resolves through configured sources. `passive-eq` is accepted
-/// as a friendly alias for `passive-eq1a`.
+/// Only the two demo circuits are embedded (see [`BUILTIN_COMPRESSOR76`] and
+/// [`BUILTIN_PASSIVE_EQ`]); every other circuit resolves through configured
+/// sources. `passive-eq` is accepted as a friendly alias for `passive-eq1a`.
 /// Returns `(canonical name, content)`.
 ///
 /// The canonical name, not the alias the user typed: echoing the alias back
@@ -182,6 +187,7 @@ const BUILTIN_PASSIVE_EQ: &str = include_str!("../../../examples/passive-eq1a.ci
 /// told them.
 fn get_builtin(name: &str) -> Option<(&'static str, String)> {
     match name {
+        "compressor76" => Some(("compressor76", BUILTIN_COMPRESSOR76.to_string())),
         "passive-eq1a" | "passive-eq" => Some(("passive-eq1a", BUILTIN_PASSIVE_EQ.to_string())),
         _ => None,
     }
@@ -224,13 +230,19 @@ fn parse_friendly_ref(circuit_ref: &str) -> Option<(String, String)> {
 
 /// List all available builtin circuits.
 ///
-/// Just the one demo circuit for now — the full catalog lives in the separate
+/// The two demo circuits — the full catalog lives in the separate
 /// circuit-library repo (browse with `melange sources list` once it is added).
 pub fn list_builtins() -> Vec<(&'static str, &'static str)> {
-    vec![(
-        "passive-eq1a",
-        "Passive tube EQ — 4 tubes, 3 transformers, global NFB (demo)",
-    )]
+    vec![
+        (
+            "compressor76",
+            "FET feedback limiter — JFET gain cell, 4 ratio buttons, transformer line amp (demo)",
+        ),
+        (
+            "passive-eq1a",
+            "Passive tube EQ — 4 tubes, 3 transformers, global NFB",
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -322,8 +334,9 @@ mod tests {
 
     #[test]
     fn test_get_builtin() {
-        // The passive-eq demo is the one embedded builtin (+ its alias);
+        // The two demo circuits are the embedded builtins (+ the EQ's alias);
         // everything else resolves through configured sources.
+        assert!(get_builtin("compressor76").is_some());
         assert!(get_builtin("passive-eq1a").is_some());
         assert!(get_builtin("passive-eq").is_some());
         assert!(get_builtin("overdrive").is_none());
@@ -344,9 +357,24 @@ mod tests {
     }
 
     #[test]
+    fn test_builtin_content_is_the_compressor76_deck() {
+        // The embedded content is the circuits repository's reference deck
+        // (same bytes as examples/compressor76.cir), resolved as a Builtin.
+        let (canonical, content) = get_builtin("compressor76").unwrap();
+        assert_eq!(canonical, "compressor76");
+        assert!(content.contains("compressor76"));
+        assert!(content.contains(".switch R_a4,R_b4"));
+        match resolve("compressor76").unwrap() {
+            CircuitSource::Builtin { name, .. } => assert_eq!(name, "compressor76"),
+            other => panic!("expected Builtin, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_list_builtins() {
         let builtins = list_builtins();
-        assert_eq!(builtins.len(), 1);
-        assert_eq!(builtins[0].0, "passive-eq1a");
+        assert_eq!(builtins.len(), 2);
+        assert_eq!(builtins[0].0, "compressor76");
+        assert_eq!(builtins[1].0, "passive-eq1a");
     }
 }
